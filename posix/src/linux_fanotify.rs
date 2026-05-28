@@ -105,6 +105,26 @@ const FAN_FID_MODE_BITS: u32 = FAN_REPORT_FID
     | FAN_REPORT_NAME
     | FAN_REPORT_TARGET_FID;
 
+/// Flags that require `CAP_SYS_ADMIN` to request — the union Linux
+/// calls `FANOTIFY_ADMIN_INIT_FLAGS` in
+/// `fs/notify/fanotify/fanotify_user.c`.
+///
+/// `FAN_CLASS_CONTENT` / `FAN_CLASS_PRE_CONTENT` deliver blocking
+/// permission events (allow/deny), which let a userspace listener
+/// stall any I/O on the system — an obvious privilege requirement.
+/// `FAN_UNLIMITED_QUEUE` / `FAN_UNLIMITED_MARKS` lift the per-group
+/// resource bounds (a DoS vector if unprivileged code could request
+/// them).  `FAN_ENABLE_AUDIT` routes events into the audit subsystem,
+/// which is admin-only by design.
+///
+/// Linux 5.13 introduced an unprivileged-group path that rejects all
+/// of these flags with `EPERM` if the caller lacks `CAP_SYS_ADMIN`.
+const FANOTIFY_ADMIN_INIT_FLAGS: u32 = FAN_CLASS_CONTENT
+    | FAN_CLASS_PRE_CONTENT
+    | FAN_UNLIMITED_QUEUE
+    | FAN_UNLIMITED_MARKS
+    | FAN_ENABLE_AUDIT;
+
 // ---------------------------------------------------------------------------
 // fanotify event mask bits
 // ---------------------------------------------------------------------------
@@ -310,6 +330,18 @@ fn validate_event_f_flags(event_f_flags: u32) -> Result<(), i32> {
 /// Validates `flags` and `event_f_flags` against Linux's
 /// `fanotify_init(2)` contract. Returns `-1` with errno set to:
 ///
+/// * `EPERM` — Phase 184: caller lacks `CAP_SYS_ADMIN` *and* either
+///   requested an admin-only flag (`FAN_CLASS_CONTENT`,
+///   `FAN_CLASS_PRE_CONTENT`, `FAN_UNLIMITED_QUEUE`,
+///   `FAN_UNLIMITED_MARKS`, `FAN_ENABLE_AUDIT`) or asked for no FID
+///   report (`fid_mode == 0`).  Mirrors Linux 5.13+'s unprivileged-
+///   group rules in `do_fanotify_init`: a non-admin caller may set
+///   up *only* a notification group whose events carry file handles
+///   (so the kernel never hands the listener a real fd, and the
+///   listener cannot stall I/O).  The gate fires *before* the
+///   `EINVAL` flag-mask check, so an unprivileged caller passing
+///   garbage flags sees `EPERM`, not `EINVAL` — same precedence as
+///   Linux.
 /// * `EINVAL` — invalid class encoding (`0xC`), unknown flag bits,
 ///   any FID-report bit requested alongside `FAN_CLASS_CONTENT` or
 ///   `FAN_CLASS_PRE_CONTENT` (FID reporting only works under
@@ -326,9 +358,36 @@ fn validate_event_f_flags(event_f_flags: u32) -> Result<(), i32> {
 /// back to inotify-only paths.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fanotify_init(flags: u32, event_f_flags: u32) -> i32 {
+    // Phase 184: compute the class and FID-mode early — Linux's
+    // privilege gate depends on both, and the gate runs *before* any
+    // EINVAL flag-mask check (so EPERM takes precedence over EINVAL
+    // for unprivileged callers passing garbage flags).
+    let class = flags & FAN_ALL_CLASS_BITS;
+    let fid_mode = flags & FAN_FID_MODE_BITS;
+
+    // Phase 184: CAP_SYS_ADMIN gate per
+    // `fs/notify/fanotify/fanotify_user.c::SYSCALL_DEFINE2(fanotify_init)`.
+    // Without CAP_SYS_ADMIN the caller is restricted to "unprivileged
+    // groups" introduced in Linux 5.13: they must NOT request any
+    // admin-only flag (CONTENT / PRE_CONTENT class, UNLIMITED queue /
+    // marks, audit) and they MUST request a FID-style report
+    // (`fid_mode != 0`).  Otherwise the syscall is denied with EPERM
+    // — errno EPERM (not EACCES), matching `capable()`'s convention.
+    //
+    // Placement note: this gate runs *before* the EINVAL checks
+    // below, so an unprivileged caller passing class==0xC or an
+    // unknown flag bit will see EPERM (the cap denial), not EINVAL.
+    // A privileged caller still hits the EINVAL paths as before.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_ADMIN,
+    ) && ((flags & FANOTIFY_ADMIN_INIT_FLAGS) != 0 || fid_mode == 0)
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+
     // Class bits must encode exactly one of NOTIF/CONTENT/PRE_CONTENT.
     // Linux rejects 0xC (both CONTENT and PRE_CONTENT set) with EINVAL.
-    let class = flags & FAN_ALL_CLASS_BITS;
     if class != FAN_CLASS_NOTIF
         && class != FAN_CLASS_CONTENT
         && class != FAN_CLASS_PRE_CONTENT
@@ -352,7 +411,6 @@ pub extern "C" fn fanotify_init(flags: u32, event_f_flags: u32) -> i32 {
     // events that *must* carry a real file descriptor for the
     // userspace handler to allow / deny the operation; a FID handle
     // can't be acted upon synchronously.
-    let fid_mode = flags & FAN_FID_MODE_BITS;
     if fid_mode != 0 && class != FAN_CLASS_NOTIF {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -392,9 +450,9 @@ pub extern "C" fn fanotify_init(flags: u32, event_f_flags: u32) -> i32 {
         return -1;
     }
 
-    // Privilege check would normally require CAP_SYS_ADMIN here; we
-    // have no security model yet, so anyone passes (matches every
-    // other syscall in this layer).
+    // Phase 184: the CAP_SYS_ADMIN gate now runs at the top of this
+    // function — privileged callers and unprivileged callers within
+    // the unprivileged-group rules reach this point.
     //
     // All inputs valid — but we have no kernel-side fanotify group
     // table to allocate from. Real callers treat this exactly like a
@@ -1528,5 +1586,421 @@ mod tests {
         );
         assert_eq!(mark_ret, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 184 — CAP_SYS_ADMIN gate on `fanotify_init`.
+    //
+    // Linux `fs/notify/fanotify/fanotify_user.c::SYSCALL_DEFINE2(fanotify_init)`:
+    //
+    //   if (!capable(CAP_SYS_ADMIN)) {
+    //       if ((flags & FANOTIFY_ADMIN_INIT_FLAGS) || !fid_mode)
+    //           return -EPERM;
+    //       internal_flags |= FANOTIFY_UNPRIV;
+    //   }
+    //   if (flags & ~FANOTIFY_INIT_FLAGS) return -EINVAL;
+    //
+    // I.e. the cap gate runs *before* the EINVAL flag-mask check, so
+    // EPERM wins over EINVAL for unprivileged callers.  Privileged
+    // callers (the default in our host test build, since
+    // DEFAULT_CAPS_LOW = u32::MAX) skip the gate entirely and hit
+    // the existing EINVAL/ENOSYS paths unchanged.
+    //
+    // FANOTIFY_ADMIN_INIT_FLAGS = CONTENT | PRE_CONTENT |
+    //     UNLIMITED_QUEUE | UNLIMITED_MARKS | ENABLE_AUDIT
+    // ----------------------------------------------------------------------
+
+    mod fanotify_init_cap_phase184 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap(cap: u32) {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if cap < 32 {
+                (lo & !(1u32 << cap), hi)
+            } else {
+                (lo, hi & !(1u32 << (cap - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+
+        fn drop_sys_admin() {
+            drop_cap(crate::sys_capability::CAP_SYS_ADMIN);
+        }
+
+        // -- Per-error-class --------------------------------------------
+
+        /// Zero flags → no class, no fid_mode → unprivileged
+        /// `!fid_mode` branch → EPERM.
+        #[test]
+        fn test_fan_phase184_zero_flags_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(0, fcntl::O_RDONLY as u32);
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// FAN_CLASS_NOTIF + FAN_REPORT_FID → no admin flag, fid_mode
+        /// set → unprivileged path is allowed → reaches ENOSYS.
+        #[test]
+        fn test_fan_phase184_notif_with_fid_no_cap_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_NOTIF | FAN_REPORT_FID,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// FAN_CLASS_NOTIF alone (no fid_mode) → EPERM.
+        #[test]
+        fn test_fan_phase184_notif_without_fid_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_NOTIF,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// FAN_CLASS_CONTENT is an admin-only flag → EPERM even with
+        /// fid_mode present.
+        #[test]
+        fn test_fan_phase184_content_class_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_CONTENT | FAN_REPORT_FID,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// FAN_CLASS_PRE_CONTENT is an admin-only flag → EPERM.
+        #[test]
+        fn test_fan_phase184_pre_content_class_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_PRE_CONTENT | FAN_REPORT_FID,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// FAN_UNLIMITED_QUEUE alone → admin flag set → EPERM.
+        #[test]
+        fn test_fan_phase184_unlimited_queue_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_NOTIF
+                    | FAN_REPORT_FID
+                    | FAN_UNLIMITED_QUEUE,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// FAN_UNLIMITED_MARKS → admin flag set → EPERM.
+        #[test]
+        fn test_fan_phase184_unlimited_marks_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_NOTIF
+                    | FAN_REPORT_FID
+                    | FAN_UNLIMITED_MARKS,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// FAN_ENABLE_AUDIT → admin flag set → EPERM.
+        #[test]
+        fn test_fan_phase184_enable_audit_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_NOTIF
+                    | FAN_REPORT_FID
+                    | FAN_ENABLE_AUDIT,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix --------------------------------------------
+
+        /// class=0xC (CONTENT|PRE_CONTENT) is invalid AND contains
+        /// admin-only bits → for an unprivileged caller, EPERM beats
+        /// the EINVAL "invalid class encoding" path, just like Linux.
+        #[test]
+        fn test_fan_phase184_eperm_beats_einval_class_0xc_unprivileged() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            // EPERM, NOT EINVAL — cap check runs first.
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// An unknown flag bit AND missing fid_mode for an
+        /// unprivileged caller → EPERM beats EINVAL.
+        #[test]
+        fn test_fan_phase184_eperm_beats_einval_unknown_bit_unprivileged() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_NOTIF | 0x8000_0000,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Errno must be exactly EPERM (the `capable()` convention),
+        /// never EACCES — same distinction Linux preserves between
+        /// `capable()` failure and LSM/policy denial.
+        #[test]
+        fn test_fan_phase184_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(0, fcntl::O_RDONLY as u32);
+            assert_eq!(ret, -1);
+            assert_ne!(errno::get_errno(), errno::EACCES);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- No-side-effect ---------------------------------------------
+
+        /// Denial must not mutate the caller's capability set —
+        /// observable proof that the gate is a read-only check.
+        #[test]
+        fn test_fan_phase184_eperm_preserves_other_caps() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            let (lo_before, hi_before) =
+                crate::sys_capability::current_caps_effective();
+            errno::set_errno(0);
+            let _ = fanotify_init(0, fcntl::O_RDONLY as u32);
+            let (lo_after, hi_after) =
+                crate::sys_capability::current_caps_effective();
+            assert_eq!(lo_before, lo_after);
+            assert_eq!(hi_before, hi_after);
+        }
+
+        // -- Recovery ----------------------------------------------------
+
+        /// Drop CAP_SYS_ADMIN → denied; restore via Drop → allowed
+        /// path is reachable again (reaches ENOSYS) on next call.
+        #[test]
+        fn test_fan_phase184_recovery_restore_cap_reaches_enosys() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_sys_admin();
+                errno::set_errno(0);
+                let ret = fanotify_init(0, fcntl::O_RDONLY as u32);
+                assert_eq!(ret, -1);
+                assert_eq!(errno::get_errno(), errno::EPERM);
+            }
+            // CapGuard restored CAP_SYS_ADMIN on Drop.
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_CONTENT,
+                fcntl::O_RDONLY as u32,
+            );
+            // With CAP_SYS_ADMIN we bypass the gate and hit ENOSYS.
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Workflow ---------------------------------------------------
+
+        /// Container sandbox drops CAP_SYS_ADMIN before launching an
+        /// inner process; that process tries to register a permission
+        /// event handler and is correctly refused with EPERM.
+        #[test]
+        fn test_fan_phase184_workflow_container_sandbox_drops_then_denied() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            // Inner process attempt — clamav-style permission handler.
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_CONTENT,
+                (fcntl::O_RDONLY | fcntl::O_CLOEXEC) as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// systemd-style unprivileged notification listener: drops
+        /// admin, then opens a NOTIF/FID group — reaches ENOSYS
+        /// (would succeed on a real CONFIG_FANOTIFY kernel).
+        #[test]
+        fn test_fan_phase184_workflow_unprivileged_notif_listener() {
+            let _g = CapGuard::snapshot();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_NOTIF | FAN_REPORT_DFID_NAME,
+                (fcntl::O_RDONLY | fcntl::O_CLOEXEC) as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Sentinel ----------------------------------------------------
+
+        /// The FANOTIFY_ADMIN_INIT_FLAGS union must match Linux's
+        /// definition exactly: CONTENT | PRE_CONTENT | UNLIMITED_QUEUE
+        /// | UNLIMITED_MARKS | ENABLE_AUDIT.  A regression here would
+        /// silently let unprivileged callers request admin-only
+        /// features.
+        #[test]
+        fn test_fan_phase184_sentinel_admin_init_flags_value() {
+            // Computed via the same expression the gate uses.
+            let expected = FAN_CLASS_CONTENT
+                | FAN_CLASS_PRE_CONTENT
+                | FAN_UNLIMITED_QUEUE
+                | FAN_UNLIMITED_MARKS
+                | FAN_ENABLE_AUDIT;
+            assert_eq!(FANOTIFY_ADMIN_INIT_FLAGS, expected);
+            // And FAN_REPORT_FID / FAN_REPORT_DIR_FID / NAME / TARGET_FID
+            // must NOT be in the admin set — they're the unprivileged
+            // entry path.
+            assert_eq!(
+                FANOTIFY_ADMIN_INIT_FLAGS & FAN_FID_MODE_BITS,
+                0
+            );
+            // FAN_CLOEXEC / FAN_NONBLOCK are also unprivileged.
+            assert_eq!(
+                FANOTIFY_ADMIN_INIT_FLAGS & FAN_CLOEXEC,
+                0
+            );
+            assert_eq!(
+                FANOTIFY_ADMIN_INIT_FLAGS & FAN_NONBLOCK,
+                0
+            );
+        }
+
+        // -- Cross-checks ------------------------------------------------
+
+        /// With CAP_SYS_ADMIN held, an unprivileged-style call
+        /// (NOTIF+FID) also reaches ENOSYS — verifies the gate is the
+        /// *only* effect of the cap on this path.
+        #[test]
+        fn test_fan_phase184_admin_caller_same_path_as_unpriv_for_notif_fid() {
+            // CAP_SYS_ADMIN held by default — no CapGuard needed.
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_NOTIF | FAN_REPORT_FID,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// With CAP_SYS_ADMIN held, class==0xC still triggers EINVAL
+        /// (cap gate doesn't fire, falls through to existing class
+        /// check) — confirms privileged callers retain the EINVAL
+        /// precedence over class-encoding errors.
+        #[test]
+        fn test_fan_phase184_admin_caller_class_0xc_einval_unchanged() {
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            let ret = fanotify_init(
+                FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT,
+                fcntl::O_RDONLY as u32,
+            );
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
     }
 }

@@ -1265,9 +1265,14 @@ pub const SFD_FLAGS_VALID: i32 = SFD_CLOEXEC | SFD_NONBLOCK;
 /// errno values so glibc's `signalfd(3)` wrapper and direct
 /// `signalfd4(2)` callers see correct error reporting.
 ///
-/// Validation order matches `fs/signalfd.c::do_signalfd4` in Linux:
-/// 1. Unknown flag bits → `EINVAL`.
-/// 2. `mask` NULL → `EFAULT`.
+/// Validation order matches `fs/signalfd.c::sys_signalfd4` →
+/// `do_signalfd4` in Linux:
+/// 1. `mask` NULL → `EFAULT`.  Linux's `sys_signalfd4` runs
+///    `copy_from_user(&mask, user_mask, sizeof(mask))` BEFORE calling
+///    `do_signalfd4`, so a faulting `user_mask` pointer returns
+///    `EFAULT` regardless of whether `flags` would also be invalid.
+/// 2. Unknown flag bits → `EINVAL`.  This is the first check inside
+///    `do_signalfd4` itself.
 /// 3. `fd != -1`: must be a valid open fd → `EBADF`.  Linux additionally
 ///    requires the fd to already be a signalfd → `EINVAL` if not, but
 ///    since we have no signalfds in the fdtable yet we cannot tell
@@ -1277,12 +1282,16 @@ pub const SFD_FLAGS_VALID: i32 = SFD_CLOEXEC | SFD_NONBLOCK;
 /// 4. All validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn signalfd(fd: i32, mask: *const u64, flags: i32) -> i32 {
-    if flags & !SFD_FLAGS_VALID != 0 {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
+    // Step 1: copy_from_user(mask) in sys_signalfd4 — must precede
+    // do_signalfd4's flag check.  A buggy caller passing both NULL
+    // mask AND unknown flag bits sees EFAULT on Linux, not EINVAL.
     if mask.is_null() {
         errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // Step 2: do_signalfd4's flag check.
+    if flags & !SFD_FLAGS_VALID != 0 {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     if fd != -1 {
@@ -3568,12 +3577,17 @@ mod tests {
     // --- ordering -----------------------------------------------------------
 
     #[test]
-    fn test_signalfd_flag_check_before_mask_check() {
-        // Bad flag AND NULL mask — flag wins (EINVAL beats EFAULT).
+    fn test_signalfd_null_mask_beats_bad_flag_efault() {
+        // Phase 137: bad flag AND NULL mask — EFAULT wins (NULL mask
+        // beats EINVAL).  Linux's sys_signalfd4 runs copy_from_user
+        // BEFORE do_signalfd4's flag check, so NULL user_mask faults
+        // first.  Pre-Phase 137 we had the wrong order and returned
+        // EINVAL here.  See `test_phase137_*` below for the full
+        // ordering matrix.
         errno::set_errno(0);
         let ret = signalfd(-1, core::ptr::null(), 0x1);
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -3646,6 +3660,219 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(signalfd(7, &raw const m2, 0), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 137 — signalfd: copy_from_user(mask) precedes do_signalfd4
+    //
+    // Linux's `fs/signalfd.c::sys_signalfd4` runs
+    //     copy_from_user(&mask, user_mask, sizeof(mask))
+    // BEFORE calling `do_signalfd4`, and `do_signalfd4`'s very first
+    // check is `flags & ~(SFD_CLOEXEC | SFD_NONBLOCK)`.  So when a
+    // caller passes BOTH a NULL/faulting `mask` AND unknown flag bits,
+    // the kernel returns EFAULT, not EINVAL.  Pre-Phase 137 we did
+    // these checks in the opposite order and reported EINVAL.
+    //
+    // The tests below pin the new ordering (NULL-mask wins over bad
+    // flags, valid-mask + bad-flags still EINVAL, NULL-mask + good
+    // flags still EFAULT) and cross-check that `signalfd4` — which
+    // is just an alias — picks up the same ordering automatically.
+    // ------------------------------------------------------------------
+
+    // --- per-error-class smoke tests under the new ordering -----------
+
+    #[test]
+    fn test_phase137_null_mask_good_flags_efault() {
+        // NULL mask alone — still EFAULT.  Sanity check that the
+        // reorder didn't somehow hide the NULL-mask error path.
+        errno::set_errno(0);
+        let ret = signalfd(-1, core::ptr::null(), SFD_CLOEXEC);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase137_valid_mask_bad_flags_einval() {
+        // Valid mask + bad flags — still EINVAL.  This is the case
+        // where the reorder must NOT change behaviour: copy_from_user
+        // succeeds, then do_signalfd4 rejects the flag.
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd(-1, &raw const mask, 0x1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase137_valid_mask_good_flags_reaches_enosys() {
+        // Both inputs valid — control flow reaches the post-validation
+        // ENOSYS terminator.  Proves the new ordering doesn't swallow
+        // legitimate calls.
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd(-1, &raw const mask, SFD_NONBLOCK);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // --- ordering matrix: NULL mask vs every other error class -------
+
+    #[test]
+    fn test_phase137_null_mask_beats_unknown_flag() {
+        // Bit 0x1 is outside SFD_FLAGS_VALID.  EFAULT > EINVAL.
+        errno::set_errno(0);
+        let ret = signalfd(-1, core::ptr::null(), 0x1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase137_null_mask_beats_garbage_flag() {
+        // i32::MIN — sign bit plus most of the rest of the word.
+        // EFAULT must still win.
+        errno::set_errno(0);
+        let ret = signalfd(-1, core::ptr::null(), i32::MIN);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase137_null_mask_beats_eventfd_flag_collision() {
+        // EFD_SEMAPHORE = 1 is an eventfd-only flag bit that a
+        // confused caller might pass to signalfd.  Pre-Phase 137 a
+        // caller passing both EFD_SEMAPHORE AND NULL mask saw EINVAL.
+        // Now they see EFAULT — the more useful diagnostic, because
+        // the NULL pointer is the bug they really need to fix first.
+        errno::set_errno(0);
+        let ret = signalfd(-1, core::ptr::null(), EFD_SEMAPHORE as i32);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase137_null_mask_beats_bad_fd_too() {
+        // Already pinned by test_signalfd_mask_check_before_fd_check
+        // pre-Phase 137 (fd check came after mask check), but the
+        // Phase 137 reorder moved EFAULT even earlier.  Re-pin under
+        // the new ordering to guard against any future regression.
+        errno::set_errno(0);
+        let ret = signalfd(100_000, core::ptr::null(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase137_null_mask_with_bad_flags_and_bad_fd_efault() {
+        // All three error conditions at once: NULL mask + unknown
+        // flag bits + non-existent fd.  EFAULT must win over both
+        // EINVAL and EBADF.
+        errno::set_errno(0);
+        let ret = signalfd(100_000, core::ptr::null(), 0x1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // --- ordering matrix: valid-mask paths preserve old ordering ------
+
+    #[test]
+    fn test_phase137_flag_check_still_beats_fd_check() {
+        // With a valid mask, the do_signalfd4 flag check still runs
+        // before the fd lookup.  Bad flags + bad fd → EINVAL.
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd(100_000, &raw const mask, 0x1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // --- signalfd4 alias picks up the same ordering -------------------
+
+    #[test]
+    fn test_phase137_signalfd4_null_mask_beats_bad_flag() {
+        // signalfd4 is just `signalfd(fd, mask, flags)`.  The Phase
+        // 137 reorder must flow through the alias automatically.
+        errno::set_errno(0);
+        let ret = signalfd4(-1, core::ptr::null(), 0x1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase137_signalfd4_valid_mask_bad_flag_still_einval() {
+        // signalfd4 valid-mask path: still EINVAL for unknown flags.
+        let mask: u64 = 0;
+        errno::set_errno(0);
+        let ret = signalfd4(-1, &raw const mask, 0x40);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // --- buggy callers ------------------------------------------------
+
+    #[test]
+    fn test_phase137_buggy_caller_zeroed_sigset_struct() {
+        // Common bug: caller writes
+        //     sigset_t *m = malloc(sizeof(*m));  // forgot to check NULL
+        //     signalfd(-1, m, flags);
+        // and `m` is NULL.  If `flags` is ALSO wrong (e.g. a stale
+        // value from a previous syscall), the caller now gets EFAULT
+        // pointing at the real bug (NULL pointer), not EINVAL
+        // misdirecting them at the flag word.
+        errno::set_errno(0);
+        let bad_flags = 0xDEAD_BEEFu32 as i32;
+        let ret = signalfd(-1, core::ptr::null(), bad_flags);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_phase137_buggy_caller_uninitialised_flags_with_null_mask() {
+        // Caller passed signalfd(-1, NULL, junk).  Whatever the
+        // garbage `flags` value happens to be, EFAULT wins because
+        // copy_from_user runs first.  Exercises a few representative
+        // garbage values to make sure no specific bit pattern slips
+        // through.
+        for bad in [0x1i32, 0xFFi32, 0x7FFF_FFFFi32, -1i32, i32::MIN] {
+            errno::set_errno(0);
+            let ret = signalfd(-1, core::ptr::null(), bad);
+            assert_eq!(ret, -1, "flags={bad:#x}");
+            assert_eq!(errno::get_errno(), errno::EFAULT, "flags={bad:#x}");
+        }
+    }
+
+    // --- workflow + recovery -----------------------------------------
+
+    #[test]
+    fn test_phase137_workflow_fix_null_mask_then_retry() {
+        // Real recovery flow: first call passes NULL mask + bad
+        // flags → EFAULT (the diagnostic the caller really needs).
+        // Caller fixes the NULL pointer but forgets the flags →
+        // EINVAL (now they see the second bug).  Caller fixes flags
+        // → ENOSYS (validation complete, no signalfd backend yet).
+        let mask: u64 = 1u64 << 14; // SIGTERM
+        errno::set_errno(0);
+        assert_eq!(signalfd(-1, core::ptr::null(), 0x1), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        errno::set_errno(0);
+        assert_eq!(signalfd(-1, &raw const mask, 0x1), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        assert_eq!(signalfd(-1, &raw const mask, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_phase137_workflow_fix_flags_does_not_unmask_null() {
+        // Counter-flow: caller first sees EFAULT, "fixes" by setting
+        // SFD_CLOEXEC instead of fixing the NULL pointer.  Must still
+        // see EFAULT — flags being good doesn't paper over the NULL
+        // mask.
+        errno::set_errno(0);
+        assert_eq!(signalfd(-1, core::ptr::null(), 0x1), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        errno::set_errno(0);
+        assert_eq!(signalfd(-1, core::ptr::null(), SFD_CLOEXEC), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     // ------------------------------------------------------------------

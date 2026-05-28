@@ -45,26 +45,39 @@ pub const IOPL_LEVEL_MAX: i32 = 3;
 ///
 /// Enables or disables access to the I/O port range `[from, from + num)`.
 ///
-/// Linux semantics (`arch/x86/kernel/ioport.c::sys_ioperm`):
-/// - `num == 0` → success (no-op). We return 0 to match — this is the
-///   one well-formed call that succeeds without needing kernel support
-///   because there's nothing to actually do.
-/// - `from + num` overflows or `from + num > IO_BITMAP_BITS` → EINVAL.
-/// - `turn_on != 0` requires `CAP_SYS_RAWIO` on Linux → EPERM if
-///   missing. In our design (no ambient root, capabilities everywhere),
-///   we treat any caller as lacking the capability and return EPERM
-///   for the "turn on" case. The "turn off" case (`turn_on == 0`) on a
-///   well-formed range is harmless (you're clearing bits in a bitmap
-///   that doesn't exist) — we return 0.
+/// Linux semantics (`arch/x86/kernel/ioport.c::ksys_ioperm`):
+///
+/// ```c
+/// if ((from + num <= from) || (from + num > IO_BITMAP_BITS))
+///     return -EINVAL;
+/// if (turn_on && !capable(CAP_SYS_RAWIO))
+///     return -EPERM;
+/// ```
+///
+/// Note the **`<=`** in the first clause: it rejects both
+///   * `num == 0` (because `from + 0 == from`, so `from <= from` is
+///     true — Linux treats a zero-length range as a malformed argument,
+///     *not* a no-op success), and
+///   * `from + num` overflows below `from` (wrap-around).
+///
+/// Errors (Linux-matching priority order):
+/// - `EINVAL` — `num == 0`, or `from + num` overflows, or `from + num
+///   > IO_BITMAP_BITS` (the 64 KiB port space limit).
+/// - `EPERM` — `turn_on != 0` (Linux requires `CAP_SYS_RAWIO`; in our
+///   design no caller has it ambiently).
+///
+/// `turn_on == 0` on a well-formed range is a successful no-op (we
+/// "clear" access we never granted).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn ioperm(from: u64, num: u64, turn_on: i32) -> i32 {
-    // num == 0 is a no-op success on Linux (the loop body never runs).
-    if num == 0 {
-        return 0;
-    }
-
-    // Range overflow check: from + num must not wrap and must fit in the
-    // 64 KiB I/O port space.
+    // Range check matches Linux's `(from + num <= from) || (from + num
+    // > IO_BITMAP_BITS)` exactly.  We split the overflow detection out
+    // from the upper-bound check for readability, but the observable
+    // behaviour is identical:
+    //
+    //   * num == 0 → from + 0 == from → first clause true → EINVAL.
+    //   * from + num overflows u64 → first clause true → EINVAL.
+    //   * from + num > IO_BITMAP_BITS → second clause true → EINVAL.
     let end = match from.checked_add(num) {
         Some(e) => e,
         None => {
@@ -72,7 +85,7 @@ pub extern "C" fn ioperm(from: u64, num: u64, turn_on: i32) -> i32 {
             return -1;
         }
     };
-    if end > IO_BITMAP_BITS {
+    if end <= from || end > IO_BITMAP_BITS {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -173,21 +186,24 @@ mod tests {
     // ---- ioperm validation ----
 
     #[test]
-    fn test_ioperm_zero_num_is_noop_success() {
-        // num == 0 is a well-defined no-op on Linux.
-        errno::set_errno(errno::EBADF);
+    fn test_ioperm_zero_num_einval() {
+        // Linux's `(from + num <= from)` check rejects num == 0 with
+        // EINVAL — the `<=` (not `<`) is the operative bit.  A zero-
+        // length range is treated as a malformed argument, *not* a
+        // no-op success.
+        errno::set_errno(0);
         let r = ioperm(0x3F8, 0, 1);
-        assert_eq!(r, 0);
-        // Linux doesn't touch errno on success, but we shouldn't change
-        // it either — the prior value (EBADF) must remain.
-        assert_eq!(errno::get_errno(), errno::EBADF);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_ioperm_zero_num_zero_from_success() {
-        errno::set_errno(errno::EBADF);
+    fn test_ioperm_zero_num_zero_from_einval() {
+        // from == 0 + num == 0: still `from + num == from`, still EINVAL.
+        errno::set_errno(0);
         let r = ioperm(0, 0, 0);
-        assert_eq!(r, 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -381,5 +397,161 @@ mod tests {
     #[test]
     fn test_iopl_level_max_is_three() {
         assert_eq!(IOPL_LEVEL_MAX, 3);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 127: ioperm zero-num parity with Linux's `<=` clause
+    // ------------------------------------------------------------------
+    //
+    // Linux's arch/x86/kernel/ioport.c::ksys_ioperm uses:
+    //     if ((from + num <= from) || (from + num > IO_BITMAP_BITS))
+    //         return -EINVAL;
+    // The `<=` (not `<`) folds the num==0 case in with overflow
+    // detection, so a zero-length range is malformed.  Earlier phases
+    // had a `num == 0 → return 0` short-circuit that diverged from
+    // this; these tests pin down the corrected behaviour.
+
+    #[test]
+    fn test_ioperm_phase127_zero_num_turn_on_zero_einval() {
+        // num=0 with turn_on=0 — pre-fix this was a "harmless no-op
+        // success", but Linux rejects it.
+        errno::set_errno(0);
+        let r = ioperm(0x3F8, 0, 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_zero_num_turn_on_one_einval() {
+        // num=0 with turn_on=1 — EINVAL fires first (range check
+        // precedes capability check in Linux's order).
+        errno::set_errno(0);
+        let r = ioperm(0x3F8, 0, 1);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_zero_num_high_from_einval() {
+        // num=0 with from at the upper edge of the port space.  Still
+        // EINVAL — the range-degenerate clause fires before the
+        // upper-bound clause.
+        errno::set_errno(0);
+        let r = ioperm(IO_BITMAP_BITS - 1, 0, 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_zero_num_from_above_64k_einval() {
+        // num=0 with from > IO_BITMAP_BITS — *both* clauses of Linux's
+        // OR would be true; we only ever surface one EINVAL.
+        errno::set_errno(0);
+        let r = ioperm(IO_BITMAP_BITS + 100, 0, 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_zero_num_from_u64_max_einval() {
+        // num=0 with from = u64::MAX — `from + 0` doesn't overflow but
+        // the `<= from` clause still fires.
+        errno::set_errno(0);
+        let r = ioperm(u64::MAX, 0, 1);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_num_one_still_succeeds_with_turn_off() {
+        // num=1 (minimal valid length) with turn_on=0 still succeeds —
+        // confirms we only rejected the degenerate num==0 case.
+        errno::set_errno(0);
+        let r = ioperm(0x3F8, 1, 0);
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_einval_beats_eperm_for_zero_num() {
+        // Validation-order parity: range check (EINVAL) fires before
+        // capability check (EPERM) — same as Linux.
+        errno::set_errno(0);
+        let r = ioperm(0x3F8, 0, 1);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // (Not EPERM, even though turn_on=1 would also fail later.)
+    }
+
+    #[test]
+    fn test_ioperm_phase127_overflow_still_einval() {
+        // Pre-existing overflow-detection branch must still work — the
+        // refactor folded both cases into a single `end <= from` check.
+        errno::set_errno(0);
+        let r = ioperm(u64::MAX - 4, 16, 1);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_workflow_buggy_caller_uninit_num() {
+        // C code: `unsigned long n; ioperm(port, n, 1);` where n is
+        // uninitialised and happens to be zero.  Pre-fix: silently
+        // succeeded, masking the bug.  Post-fix: EINVAL exposes the
+        // bug clearly.
+        errno::set_errno(0);
+        let r = ioperm(0x3F8, 0, 1);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_workflow_loop_no_iterations() {
+        // A common pattern: `for (i = 0; i < count; ++i) ioperm(base
+        // + i*step, step, 1);`.  If count is computed as 0 from an
+        // empty config, no iterations run — but if someone writes
+        // `ioperm(base, count*step, 1)` instead, count==0 silently
+        // succeeded pre-fix.  Now EINVAL surfaces the empty-config bug.
+        errno::set_errno(0);
+        let r = ioperm(0x3F8, 0u64, 1);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_recovery_after_zero_num_einval() {
+        // Per-call errno: an EINVAL from zero-num doesn't poison the
+        // next well-formed call.
+        errno::set_errno(0);
+        assert_eq!(ioperm(0x3F8, 0, 1), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        let r = ioperm(0x3F8, 8, 0);
+        assert_eq!(r, 0);
+        // errno not cleared by successful call (POSIX behaviour) — we
+        // just confirm it isn't EINVAL anymore.
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_boundary_num_one_from_max_einval() {
+        // from = IO_BITMAP_BITS, num = 1 → end = IO_BITMAP_BITS + 1
+        // → exceeds upper bound → EINVAL.  Boundary check still works.
+        errno::set_errno(0);
+        let r = ioperm(IO_BITMAP_BITS, 1, 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ioperm_phase127_boundary_exactly_64k_still_ok() {
+        // from = 0, num = IO_BITMAP_BITS → end = IO_BITMAP_BITS → not
+        // greater than IO_BITMAP_BITS, and end > from → both clauses
+        // false → not EINVAL.  turn_on=0 → success.  Confirms the
+        // refactored `end <= from || end > IO_BITMAP_BITS` is correct
+        // at the upper boundary.
+        errno::set_errno(0);
+        let r = ioperm(0, IO_BITMAP_BITS, 0);
+        assert_eq!(r, 0);
     }
 }

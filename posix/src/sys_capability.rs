@@ -417,8 +417,12 @@ pub extern "C" fn capget(
 /// Errors (Linux-matching priority order):
 /// * `EFAULT` — `hdrp` is NULL.
 /// * `EINVAL` — unknown header version (preferred version written back).
-/// * `EFAULT` — `datap` is NULL.
-/// * `EPERM`  — `pid != 0` (Linux: pid must be 0 or self).
+/// * `EPERM`  — `pid != 0` (Linux: pid must be 0 or self).  Phase 158:
+///   this is checked **before** `datap` validation because Linux's
+///   `SYSCALL_DEFINE2(capset)` runs `get_user(pid, &header->pid)` and
+///   the pid != 0 check *before* `copy_from_user(&kdata, data, ...)`.
+///   A bad pid wins over a NULL data pointer.
+/// * `EFAULT` — `datap` is NULL (Linux: `copy_from_user` failure).
 /// * `EPERM`  — effective ⊄ permitted (POSIX/Linux invariant).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn capset(
@@ -432,14 +436,21 @@ pub extern "C" fn capset(
             return -1;
         }
     };
-    if datap.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    // Phase 158: pid check runs before datap validation to match Linux's
+    // `kernel/capability.c::SYSCALL_DEFINE2(capset)` ordering — the kernel
+    // does `get_user(pid, ...)` and the pid-vs-self comparison *before*
+    // `copy_from_user(&kdata, data, copybytes)`.  Pre-Phase-158 we EFAULTed
+    // first on a NULL `datap`, which made buggy callers that passed both
+    // bad pid and bad data see EFAULT instead of EPERM.
+    //
     // SAFETY: hdrp non-null (validate_cap_header succeeded).
     let pid = unsafe { (*hdrp).pid };
     if pid != 0 {
         errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    if datap.is_null() {
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
     // SAFETY: caller contract — datap points to `tocopy` readable
@@ -1048,5 +1059,251 @@ mod tests {
         assert_eq!(r2, 0);
         assert_eq!(data[0].effective, DEFAULT_CAPS_LOW);
         reset_caps();
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 158 — capset validation-order fix: pid (EPERM) wins over
+    // datap NULL (EFAULT)
+    //
+    // Linux's `kernel/capability.c::SYSCALL_DEFINE2(capset)`:
+    //
+    //     ret = cap_validate_magic(header, &tocopy);
+    //     if ((ret < 0) && (ret != -EINVAL)) return ret;
+    //     if (get_user(pid, &header->pid)) return -EFAULT;
+    //     if (pid != 0 && pid != task_pid_vnr(current)) return -EPERM;
+    //     copybytes = tocopy * sizeof(struct __user_cap_data_struct);
+    //     if (copybytes > sizeof(kdata)) return -EINVAL;
+    //     if (copy_from_user(&kdata, data, copybytes)) return -EFAULT;
+    //
+    // The pid check runs *before* the copy_from_user(data) check.  A bad
+    // pid therefore beats a NULL data pointer.  Pre-Phase-158 we EFAULTed
+    // first because we tested datap for NULL before reading the pid.
+    //
+    // Precedence (post-fix), highest to lowest:
+    //   1. EFAULT — hdrp is NULL                 (validate_cap_header)
+    //   2. EINVAL — unknown header version       (validate_cap_header)
+    //   3. EPERM  — pid != 0                     (pid check)
+    //   4. EFAULT — datap is NULL                (data NULL check)
+    //   5. EPERM  — effective ⊄ permitted        (POSIX invariant)
+    // ------------------------------------------------------------------
+
+    // -- Per-error-class --------------------------------------------------
+
+    /// Sanity: bad pid alone (non-NULL data) still yields EPERM.  This
+    /// arm of the precedence ladder was already covered by the original
+    /// `test_capset_nonzero_pid_eperm`; we include the Phase-158 copy as
+    /// a fixed anchor so any future re-ordering shows up here too.
+    #[test]
+    fn test_phase158_capset_bad_pid_alone_eperm() {
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 1 };
+        let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        errno::set_errno(0);
+        let ret = capset(&mut hdr, data.as_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    /// Sanity: NULL data alone (good pid) yields EFAULT.  Mirrors the
+    /// pre-existing `test_capset_null_data_efault` so the Phase-158 grid
+    /// is self-contained.
+    #[test]
+    fn test_phase158_capset_null_data_alone_efault() {
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+        errno::set_errno(0);
+        let ret = capset(&mut hdr, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- Ordering matrix --------------------------------------------------
+
+    /// Core Phase-158 fix: pid != 0 with NULL data → EPERM (not EFAULT).
+    /// Pre-fix this returned EFAULT because the datap NULL check ran
+    /// first.  Post-fix matches Linux's `SYSCALL_DEFINE2(capset)` order.
+    #[test]
+    fn test_phase158_capset_bad_pid_null_data_yields_eperm() {
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 99 };
+        errno::set_errno(0);
+        let ret = capset(&mut hdr, core::ptr::null());
+        assert_eq!(ret, -1);
+        // Phase 158: EPERM (pid) wins over EFAULT (NULL data) because
+        // Linux runs the pid check before copy_from_user.
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    /// Symmetric: negative pid with NULL data still yields EPERM (our
+    /// stub treats every non-zero pid the same — Linux would split
+    /// pid<0 into EINVAL later, but only after the data check).
+    #[test]
+    fn test_phase158_capset_negative_pid_null_data_yields_eperm() {
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: -7 };
+        errno::set_errno(0);
+        let ret = capset(&mut hdr, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    /// Header EFAULT still wins over everything (NULL header, NULL data,
+    /// bad pid implied by garbage header).
+    #[test]
+    fn test_phase158_capset_null_header_beats_null_data() {
+        errno::set_errno(0);
+        let ret = capset(core::ptr::null_mut(), core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    /// EINVAL (unknown version) wins over both NULL data and bad pid —
+    /// `validate_cap_header` runs first.
+    #[test]
+    fn test_phase158_capset_einval_beats_eperm_and_efault() {
+        let mut hdr = CapUserHeader { version: 0xDEAD_BEEF, pid: 13 };
+        errno::set_errno(0);
+        let ret = capset(&mut hdr, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Preferred version written even on this combined-error path.
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_3);
+    }
+
+    // -- Workflow: glibc-style cap_set_proc with stale pid ----------------
+
+    /// Workflow regression: a misconfigured caller that copy-pasted a
+    /// child's pid into the header and forgot to allocate a data buffer
+    /// (or zero-initialised the pointer) now sees EPERM rather than
+    /// EFAULT.  That matches Linux and signals "you can't touch another
+    /// task," which is the actionable diagnostic.
+    #[test]
+    fn test_phase158_workflow_stale_pid_null_data() {
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 1234,
+        };
+        let ret = capset(&mut hdr, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+        // Header version is NOT rewritten when validation succeeded —
+        // only unknown-version branches touch the version field.
+        assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_3);
+    }
+
+    // -- Buggy-caller cases -----------------------------------------------
+
+    /// V1 caller with bad pid and NULL data: pid check still beats data
+    /// check.  Demonstrates the ordering holds for the legacy ABI too.
+    #[test]
+    fn test_phase158_capset_v1_bad_pid_null_data_eperm() {
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_1, pid: 5 };
+        let ret = capset(&mut hdr, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    /// V2 caller likewise.
+    #[test]
+    fn test_phase158_capset_v2_bad_pid_null_data_eperm() {
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_2, pid: 5 };
+        let ret = capset(&mut hdr, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    // -- Recovery: state isn't mutated on the failed paths ----------------
+
+    /// State invariant: the EPERM-from-bad-pid path must not touch the
+    /// stored capability sets.  Two passes around a `capset(bad)` call
+    /// should leave `current_caps_effective()` unchanged.
+    #[test]
+    fn test_phase158_capset_failed_call_does_not_mutate_state() {
+        reset_caps();
+        let (before_lo, before_hi) = current_caps_effective();
+
+        // Phase-158 failure path: bad pid + NULL data.
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 7 };
+        let _ = capset(&mut hdr, core::ptr::null());
+
+        let (after_lo, after_hi) = current_caps_effective();
+        assert_eq!(before_lo, after_lo, "EPERM path must not mutate caps");
+        assert_eq!(before_hi, after_hi, "EPERM path must not mutate caps");
+        reset_caps();
+    }
+
+    /// State invariant: NULL-data with good pid (EFAULT) likewise leaves
+    /// state untouched.  Sanity check that pre-existing EFAULT path
+    /// hasn't acquired an unintended side-effect.
+    #[test]
+    fn test_phase158_capset_efault_path_does_not_mutate_state() {
+        reset_caps();
+        let (before_lo, before_hi) = current_caps_effective();
+
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+        let _ = capset(&mut hdr, core::ptr::null());
+
+        let (after_lo, after_hi) = current_caps_effective();
+        assert_eq!(before_lo, after_lo);
+        assert_eq!(before_hi, after_hi);
+        reset_caps();
+    }
+
+    // -- No-side-effect loop ---------------------------------------------
+
+    /// Loop the Phase-158 failure path 200 times.  No state mutation, no
+    /// errno desynchronisation: every iteration must return -1 / EPERM.
+    #[test]
+    fn test_phase158_capset_eperm_loop_is_idempotent() {
+        reset_caps();
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 42 };
+        for _ in 0..200 {
+            errno::set_errno(0);
+            let r = capset(&mut hdr, core::ptr::null());
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+        let (lo, hi) = current_caps_effective();
+        assert_eq!(lo, DEFAULT_CAPS_LOW);
+        assert_eq!(hi, DEFAULT_CAPS_HIGH);
+        reset_caps();
+    }
+
+    // -- Sentinel: pre-Phase-158 behaviour no longer holds ----------------
+
+    /// Sentinel: the pre-Phase-158 contract was "NULL data EFAULT beats
+    /// pid EPERM."  Asserting the *opposite* here pins the new contract
+    /// in place — if anyone restores the old order this test trips.
+    #[test]
+    fn test_capset_bad_pid_null_data_no_longer_returns_efault_phase158() {
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 1 };
+        let ret = capset(&mut hdr, core::ptr::null());
+        assert_eq!(ret, -1);
+        // Phase 158 reversed this: it used to be EFAULT, now EPERM.
+        assert_ne!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    // -- Cross-checks: capget ordering is independent --------------------
+
+    /// Cross-check: capget's NULL-datap-as-probe shortcut is *not*
+    /// affected by Phase 158.  Bad pid with NULL data on capget is the
+    /// probe path → returns 0 (the probe succeeded; the pid field isn't
+    /// read until after the probe shortcut).
+    #[test]
+    fn test_phase158_capget_null_datap_still_probe_even_with_bad_pid() {
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 77 };
+        errno::set_errno(0);
+        let ret = capget(&mut hdr, core::ptr::null_mut());
+        // capget's probe short-circuit (datap NULL) returns 0 without
+        // ever reaching the pid check.  Phase 158 only adjusted capset.
+        assert_eq!(ret, 0);
+    }
+
+    /// Cross-check: capget with non-NULL data and bad pid still EPERM
+    /// (unchanged by Phase 158).
+    #[test]
+    fn test_phase158_capget_bad_pid_nonnull_data_still_eperm() {
+        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 5 };
+        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let ret = capget(&mut hdr, data.as_mut_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
     }
 }

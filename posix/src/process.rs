@@ -1195,6 +1195,13 @@ pub extern "C" fn umount2(target: *const u8, flags: i32) -> i32 {
 /// Linux reboot magic values.
 pub const LINUX_REBOOT_MAGIC1: u32 = 0xfee1_dead;
 pub const LINUX_REBOOT_MAGIC2: u32 = 672274793;
+/// Alternate `magic2` accepted by the kernel — `05121996` decimal
+/// (Linus's daughter's birthday, kept for ABI history).
+pub const LINUX_REBOOT_MAGIC2A: u32 = 85072278;
+/// Alternate `magic2` accepted by the kernel — `16041998` decimal.
+pub const LINUX_REBOOT_MAGIC2B: u32 = 369367448;
+/// Alternate `magic2` accepted by the kernel — `20112000` decimal.
+pub const LINUX_REBOOT_MAGIC2C: u32 = 537993216;
 
 /// Reboot commands.
 pub const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
@@ -1202,16 +1209,83 @@ pub const LINUX_REBOOT_CMD_HALT: u32 = 0xCDEF0123;
 pub const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321FEDC;
 pub const LINUX_REBOOT_CMD_CAD_ON: u32 = 0x89ABCDEF;
 pub const LINUX_REBOOT_CMD_CAD_OFF: u32 = 0;
+/// Restart with a user-supplied boot command string (`reboot(2)` arg).
+pub const LINUX_REBOOT_CMD_RESTART2: u32 = 0xA1B2C3D4;
+/// Suspend system to disk (hibernate).
+pub const LINUX_REBOOT_CMD_SW_SUSPEND: u32 = 0xD000FCE2;
+/// Hand off to a previously loaded kexec image.
+pub const LINUX_REBOOT_CMD_KEXEC: u32 = 0x45584543;
+
+/// Return `true` for known `LINUX_REBOOT_CMD_*` values per Linux
+/// `kernel/reboot.c::SYSCALL_DEFINE4(reboot, ...)` switch arms.  Any
+/// other `cmd` is rejected with `EINVAL` before the capability check.
+///
+/// Exposed for test-side reuse and for callers that want to pre-check
+/// the value (e.g. logging shutdown intent before invoking `reboot`).
+#[must_use]
+pub fn reboot_cmd_known(cmd: u32) -> bool {
+    matches!(
+        cmd,
+        LINUX_REBOOT_CMD_RESTART
+            | LINUX_REBOOT_CMD_HALT
+            | LINUX_REBOOT_CMD_POWER_OFF
+            | LINUX_REBOOT_CMD_CAD_ON
+            | LINUX_REBOOT_CMD_CAD_OFF
+            | LINUX_REBOOT_CMD_RESTART2
+            | LINUX_REBOOT_CMD_SW_SUSPEND
+            | LINUX_REBOOT_CMD_KEXEC
+    )
+}
 
 /// Reboot the system.
 ///
-/// Stub: returns -1 with EPERM.  A real implementation would validate
-/// the magic values and send a shutdown/reboot command to the kernel.
-/// We stub this as EPERM because unprivileged processes should not
-/// be able to reboot.
+/// Stub: validates `cmd` against the Linux-recognised reboot commands,
+/// then checks `CAP_SYS_BOOT`, then surfaces `ENOSYS` because our
+/// microkernel does not export a reboot path yet.  Real implementation
+/// will hand off to the platform power-management driver once it lands.
+///
+/// # glibc / Linux model
+///
+/// The glibc wrapper `reboot(int howto)` hard-codes both magic values
+/// and the optional `arg` pointer, leaving only `cmd` as a user-visible
+/// argument.  The kernel's argument validation therefore reduces to:
+///
+/// 1. `magic1 != LINUX_REBOOT_MAGIC1`               → `EINVAL`
+/// 2. `magic2` not in the accepted set              → `EINVAL`
+/// 3. `cmd` not in the known set                    → `EINVAL`
+/// 4. Caller lacks `CAP_SYS_BOOT`                   → `EPERM`
+/// 5. Otherwise: dispatch to the platform handler.
+///
+/// Since the wrapper supplies (1) and (2) itself, our visible checks
+/// are (3) and (4); step (5) becomes `ENOSYS` here.  This matches the
+/// pattern used by `swapon`/`swapoff` and `ptrace`: validate the same
+/// errno classes a real kernel would, then return `ENOSYS` once
+/// nothing is left to reject.
+///
+/// # Validation order
+///
+/// `EINVAL` precedes `EPERM` here because the glibc wrapper's magic
+/// values are always correct, so the only `EINVAL` path the user can
+/// trigger is "unknown cmd".  Linux's kernel does the capability check
+/// before the cmd-switch, but in glibc-mediated calls the cmd value
+/// determines whether the syscall is even worth issuing — pre-syscall
+/// validation surfacing `EINVAL` first matches what portable userspace
+/// observes when the kernel rejects a bad cmd.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn reboot(_cmd: i32) -> i32 {
-    errno::set_errno(errno::EPERM);
+pub extern "C" fn reboot(cmd: i32) -> i32 {
+    // Reinterpret the signed C `int` as u32 so the magic constants
+    // (some of which have the high bit set, e.g. CMD_HALT 0xCDEF0123)
+    // compare equal regardless of sign-extension on the caller side.
+    let cmd_u = cmd as u32;
+    if !reboot_cmd_known(cmd_u) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_BOOT) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    errno::set_errno(errno::ENOSYS);
     -1
 }
 
@@ -2905,10 +2979,14 @@ mod tests {
     // -- reboot stub --
 
     #[test]
-    fn test_reboot_returns_eperm() {
+    fn test_reboot_returns_enosys_when_capable() {
+        // The default process holds CAP_SYS_BOOT, so a well-formed
+        // reboot call surfaces ENOSYS (no reboot subsystem yet) rather
+        // than EPERM.  EPERM is exercised by Phase 77 tests in
+        // sys_reboot::tests with CAP_SYS_BOOT explicitly dropped.
         crate::errno::set_errno(0);
         assert_eq!(reboot(LINUX_REBOOT_CMD_RESTART as i32), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]

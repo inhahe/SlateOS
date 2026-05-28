@@ -782,6 +782,36 @@ OBSOLETE NOTE BELOW (pre-relaxation):
   unrelated changes.  Trigger to fix: next time anyone touches
   perf-event flag handling.
 
+- BUG (observed Phase 196): clone3 incorrectly rejects CLONE_NEWTIME
+  with EINVAL via its step (5) CSIGNAL check.  CLONE_NEWTIME = 0x80
+  is in the CSIGNAL = 0xff low-byte range, so the current "no signal
+  byte in clone3 flags" guard at posix/src/process.rs:2418-2421
+  catches CLONE_NEWTIME before the rest of the syscall runs.
+
+  Linux's clone3 does NOT reject CSIGNAL bits in flags — in clone3
+  the signal arrives via `CloneArgs::exit_signal` and the low-byte
+  bits of flags are simply repurposed as regular flag bits (which is
+  exactly how CLONE_NEWTIME was added at bit 0x80).  Reference:
+  `clone3_args_valid` in Linux's kernel/fork.c — it allows the full
+  CLONE_LEGACY_FLAGS = 0xffffffff mask.
+
+  Fix: remove the CSIGNAL rejection from clone3 (step (5) in the
+  current implementation).  Update `test_clone3_csignal_in_flags_einval`
+  (~line 8483) — its flag value (17 = 0x11) maps to no defined CLONE_*
+  flag, so the call should fall through to step (6) "reserved flag
+  bit" rejection (still EINVAL but for a different reason), OR the
+  test should be rewritten to use a properly-undefined bit.  Also
+  update `test_clone3_phase196_newtime_blocked_by_preexisting_csignal_bug`
+  in posix/src/process.rs — flip its assert from EINVAL to EPERM
+  once the CSIGNAL check is removed, since CLONE_NEWTIME would then
+  reach the Phase 196 cap gate.
+
+  Why deferred: Phase 196's scope was the cap gate (mirroring Phase
+  176 unshare/setns).  Fixing the CSIGNAL check would mix argument-
+  validation refactoring with the cap gate work, hurting commit
+  clarity.  Trigger to fix: next time anyone touches clone3
+  argument validation, or as its own dedicated phase.
+
 - BUG (observed Phase 192): `aio::tests::test_aio_fsync_recovery_after_einval`
   fails when run as part of the full `cargo test -p posix
   --target x86_64-pc-windows-gnu --tests -- --test-threads=1`

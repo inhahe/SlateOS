@@ -2360,6 +2360,12 @@ pub const CLONE3_SIZE_MAX: usize = 4096;
 /// 19. `set_tid_size > 0` with `set_tid == 0`    → `EINVAL`
 /// 20. `set_tid_size == 0` with `set_tid != 0`   → `EINVAL`
 ///    (the array pointer and length must agree)
+/// 21. `flags` includes any of `CLONE_NEWNS | CLONE_NEWUTS |
+///    CLONE_NEWIPC | CLONE_NEWPID | CLONE_NEWNET | CLONE_NEWCGROUP |
+///    CLONE_NEWTIME` and the caller lacks `CAP_SYS_ADMIN` → `EPERM`
+///    (Phase 196).  `CLONE_NEWUSER` is intentionally excluded —
+///    rootless container runtimes (Podman, Bubblewrap, ...) depend
+///    on creating a user namespace without privilege.
 ///
 /// After all checks pass we return `ENOSYS`: the microkernel uses
 /// `SYS_PROCESS_SPAWN_EX` for process creation; clone3 is a
@@ -2521,7 +2527,37 @@ pub extern "C" fn clone3(args: *const CloneArgs, size: usize) -> i64 {
         return -1;
     }
 
-    // All arguments validated; process-spawn primitive not wired up.
+    // (21) Phase 196: namespace-creating bits require CAP_SYS_ADMIN.
+    //
+    // Linux's `kernel/fork.c::kernel_clone` calls `copy_namespaces`
+    // after all argument validation; each per-namespace copy_* helper
+    // (copy_pid_ns / copy_mnt_ns / copy_ipcs / copy_utsname /
+    // copy_net_ns / copy_cgroup_ns / copy_time_ns) invokes
+    // `ns_capable(current_user_ns(), CAP_SYS_ADMIN)`.  A confused
+    // sandbox calling `clone3(..., CLONE_NEWNET)` without the cap
+    // used to silently succeed and reach the ENOSYS path — looking
+    // identical to a successful clone request.  The gate now mirrors
+    // the Phase 176 unshare gate exactly (same flag set, same cap,
+    // same CLONE_NEWUSER exclusion for rootless containers).
+    const NS_BITS_REQUIRING_CAP: u64 =
+        crate::linux_clone_args::CLONE_NEWNS
+            | crate::linux_clone_args::CLONE_NEWUTS
+            | crate::linux_clone_args::CLONE_NEWIPC
+            | crate::linux_clone_args::CLONE_NEWPID
+            | crate::linux_clone_args::CLONE_NEWNET
+            | crate::linux_clone_args::CLONE_NEWCGROUP
+            | crate::linux_clone_args::CLONE_NEWTIME;
+    if (a.flags & NS_BITS_REQUIRING_CAP) != 0
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_ADMIN,
+        )
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+
+    // All arguments validated and (if relevant) caller is privileged;
+    // process-spawn primitive not wired up.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -10875,6 +10911,471 @@ mod tests {
             crate::errno::set_errno(0);
             assert_eq!(setns(3, CLONE_NEWUSER_I32), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+    }
+
+    // ======================================================================
+    // Phase 196: clone3 namespace-creating bits gate on CAP_SYS_ADMIN
+    // ======================================================================
+    //
+    // Mirrors the Phase 176 gate already on unshare/setns.  Linux's
+    // `kernel/fork.c::kernel_clone` calls `copy_namespaces`, whose
+    // per-namespace helpers each invoke `ns_capable(.., CAP_SYS_ADMIN)`.
+    // The same flag set is gated (CLONE_NEW{NS,UTS,IPC,PID,NET,CGROUP,
+    // TIME}); CLONE_NEWUSER is excluded for rootless containers.
+    //
+    // The gate fires AFTER all argument validation (matches Linux's
+    // order — `copy_namespaces` runs late in `kernel_clone`).
+    mod clone3_cap_phase196 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_admin() {
+            use crate::sys_capability::CAP_SYS_ADMIN;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_ADMIN < 32 {
+                (lo & !(1u32 << CAP_SYS_ADMIN), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(
+                rc, 0,
+                "capset must succeed when dropping CAP_SYS_ADMIN"
+            );
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
+        }
+
+        const V2_SIZE: usize =
+            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize;
+
+        fn args_with(flags: u64) -> CloneArgs {
+            let mut a = super::clone3_v2_empty();
+            a.flags = flags;
+            a
+        }
+
+        fn call(a: &CloneArgs) -> i64 {
+            clone3(a as *const _, V2_SIZE)
+        }
+
+        // -- Per-error-class: each NS bit fails without cap ----------------
+
+        #[test]
+        fn test_clone3_phase196_newns_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWNS);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        #[test]
+        fn test_clone3_phase196_newuts_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWUTS);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        #[test]
+        fn test_clone3_phase196_newipc_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWIPC);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        #[test]
+        fn test_clone3_phase196_newpid_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWPID);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        #[test]
+        fn test_clone3_phase196_newnet_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWNET);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        #[test]
+        fn test_clone3_phase196_newcgroup_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWCGROUP);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// CLONE_NEWTIME would ideally EPERM at the Phase 196 gate
+        /// without CAP_SYS_ADMIN, but a PRE-EXISTING bug in clone3
+        /// rejects it earlier at step (5) (CSIGNAL low-byte check):
+        /// CLONE_NEWTIME = 0x80 is inside the CSIGNAL = 0xff range,
+        /// so the "no signal byte in clone3 flags" guard catches it
+        /// before the cap gate runs.  Linux's clone3 does NOT reject
+        /// CSIGNAL bits in flags (those bits are simply reused as
+        /// regular flag bits in clone3 — the signal arrives via
+        /// `CloneArgs::exit_signal`).  This test pins down the
+        /// current (buggy) behaviour so a future fix that drops the
+        /// CSIGNAL check has a failing test to flip.  See todo.txt
+        /// — "clone3 CSIGNAL check incorrectly rejects CLONE_NEWTIME".
+        #[test]
+        fn test_clone3_phase196_newtime_blocked_by_preexisting_csignal_bug() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWTIME);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            // Should be EPERM (cap gate); is EINVAL (CSIGNAL bug).
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "Pre-existing CSIGNAL bug rejects CLONE_NEWTIME at step (5) \
+                 before the Phase 196 cap gate at step (21).  When the \
+                 bug is fixed, this assert should flip to EPERM."
+            );
+        }
+
+        // -- Exclusion: CLONE_NEWUSER does NOT require cap -----------------
+
+        /// CLONE_NEWUSER is intentionally excluded from the gate —
+        /// rootless container runtimes (Podman, Bubblewrap) depend on
+        /// creating a user namespace without privilege.  Without cap,
+        /// the cap arm passes and we fall through to the ENOSYS
+        /// "process-spawn not wired up" return.
+        #[test]
+        fn test_clone3_phase196_newuser_no_cap_bypasses_to_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWUSER);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Process-resource bits do NOT require cap ----------------------
+
+        /// CLONE_THREAD | CLONE_SIGHAND | CLONE_VM (the modern
+        /// pthread_create combo) touches only the caller's own task —
+        /// no namespace cap required.  Without cap, the gate skips
+        /// and we fall to ENOSYS.
+        #[test]
+        fn test_clone3_phase196_pthread_combo_no_cap_bypasses_to_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(
+                crate::linux_clone_args::CLONE_VM
+                    | crate::linux_clone_args::CLONE_FS
+                    | crate::linux_clone_args::CLONE_FILES
+                    | crate::linux_clone_args::CLONE_SIGHAND
+                    | crate::linux_clone_args::CLONE_THREAD
+                    | crate::linux_clone_args::CLONE_SYSVSEM,
+            );
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Ordering: argument errors fire BEFORE cap check ---------------
+
+        /// CLONE_NEWNS + CLONE_FS is rejected by the (14) arg check
+        /// (NEWNS cannot share FS), which fires at step 14 — BEFORE
+        /// the Phase 196 cap gate at step 21.  Without cap, the call
+        /// still EINVALs (arg ordering preserved).
+        #[test]
+        fn test_clone3_phase196_arg_einval_beats_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(
+                crate::linux_clone_args::CLONE_NEWNS
+                    | crate::linux_clone_args::CLONE_FS,
+            );
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "arg-validation EINVAL must beat cap EPERM"
+            );
+        }
+
+        /// Unknown bit in flags → EINVAL at step (6), no cap probe
+        /// reached.
+        #[test]
+        fn test_clone3_phase196_reserved_bit_einval_beats_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(
+                crate::linux_clone_args::CLONE_NEWNS | (1u64 << 50),
+            );
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+
+        /// NULL args → EFAULT at step (1) regardless of cap state.
+        #[test]
+        fn test_clone3_phase196_null_args_efault_beats_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(0);
+            assert_eq!(clone3(core::ptr::null(), V2_SIZE), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
+
+        // -- Combined NS bits ---------------------------------------------
+
+        /// A multi-namespace request (NEWNET | NEWUTS) with no cap
+        /// EPERMs (any matching bit triggers the gate).
+        #[test]
+        fn test_clone3_phase196_multiple_ns_bits_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(
+                crate::linux_clone_args::CLONE_NEWNET
+                    | crate::linux_clone_args::CLONE_NEWUTS,
+            );
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// NS bit + CLONE_NEWUSER without cap: NS bit drives the
+        /// gate, NEWUSER does not save it.
+        #[test]
+        fn test_clone3_phase196_ns_plus_newuser_still_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            // CLONE_NEWNS + CLONE_NEWUSER is rejected by arg-check (14)
+            // because NEWNS still requires no-shared-FS.  Use NEWNET +
+            // NEWUSER which has no arg conflict.
+            let a = args_with(
+                crate::linux_clone_args::CLONE_NEWNET
+                    | crate::linux_clone_args::CLONE_NEWUSER,
+            );
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EPERM,
+                "NS bit drives gate; NEWUSER alongside does not save it"
+            );
+        }
+
+        // -- With-cap success path ----------------------------------------
+
+        /// With cap held, NS-bit calls fall through to ENOSYS.
+        #[test]
+        fn test_clone3_phase196_with_cap_newns_falls_to_enosys() {
+            let _g = CapGuard::snapshot();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWNS);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        /// All gated NS bits EXCEPT CLONE_NEWTIME (held back by the
+        /// pre-existing CSIGNAL bug — see the dedicated test above)
+        /// fall through to ENOSYS with the cap held.
+        #[test]
+        fn test_clone3_phase196_with_cap_all_ns_falls_to_enosys() {
+            let _g = CapGuard::snapshot();
+            let a = args_with(
+                crate::linux_clone_args::CLONE_NEWUTS
+                    | crate::linux_clone_args::CLONE_NEWIPC
+                    | crate::linux_clone_args::CLONE_NEWPID
+                    | crate::linux_clone_args::CLONE_NEWNET
+                    | crate::linux_clone_args::CLONE_NEWCGROUP,
+            );
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Buggy-caller / no-side-effect --------------------------------
+
+        /// Stale errno cleanly replaced.
+        #[test]
+        fn test_clone3_phase196_buggy_caller_stale_errno_replaced() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            crate::errno::set_errno(crate::errno::ENOENT);
+            let a = args_with(crate::linux_clone_args::CLONE_NEWPID);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+        }
+
+        /// Repeated failed calls remain stable.
+        #[test]
+        fn test_clone3_phase196_repeated_failed_calls_stable() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWNET);
+            for _ in 0..8 {
+                crate::errno::set_errno(0);
+                assert_eq!(call(&a), -1);
+                assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            }
+        }
+
+        // -- Recovery -----------------------------------------------------
+
+        #[test]
+        fn test_clone3_phase196_capguard_restore_clears_state() {
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap_sys_admin();
+                let a = args_with(crate::linux_clone_args::CLONE_NEWNS);
+                crate::errno::set_errno(0);
+                assert_eq!(call(&a), -1);
+                assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
+            }
+            let a = args_with(crate::linux_clone_args::CLONE_NEWNS);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        // -- Cross-check --------------------------------------------------
+
+        /// clone3 and unshare must use the same NS flag set for the
+        /// cap gate.  This test pins down the parity: any of the 7
+        /// gated bits applied to BOTH clone3 and unshare must yield
+        /// the same EPERM under no-cap.
+        #[test]
+        fn test_clone3_phase196_parity_with_unshare_gate() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            // CLONE_NEWTIME excluded because the pre-existing
+            // CSIGNAL bug rejects it before the cap gate.  All other
+            // 6 NS bits must agree between clone3 and unshare.
+            let ns_bits = [
+                crate::linux_clone_args::CLONE_NEWNS,
+                crate::linux_clone_args::CLONE_NEWUTS,
+                crate::linux_clone_args::CLONE_NEWIPC,
+                crate::linux_clone_args::CLONE_NEWPID,
+                crate::linux_clone_args::CLONE_NEWNET,
+                crate::linux_clone_args::CLONE_NEWCGROUP,
+            ];
+            for &bit in &ns_bits {
+                // clone3 → EPERM
+                let a = args_with(bit);
+                crate::errno::set_errno(0);
+                assert_eq!(call(&a), -1);
+                assert_eq!(
+                    crate::errno::get_errno(),
+                    crate::errno::EPERM,
+                    "clone3 must EPERM for ns bit {bit:#x}"
+                );
+                // unshare(same bit) → EPERM
+                crate::errno::set_errno(0);
+                assert_eq!(unshare(bit as i32), -1);
+                assert_eq!(
+                    crate::errno::get_errno(),
+                    crate::errno::EPERM,
+                    "unshare must EPERM for ns bit {bit:#x}"
+                );
+            }
+        }
+
+        /// clone3 and unshare agree on the CLONE_NEWUSER bypass:
+        /// both fall through to ENOSYS (no NS subsystem) without
+        /// requiring CAP_SYS_ADMIN.
+        #[test]
+        fn test_clone3_phase196_newuser_bypass_matches_unshare() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWUSER);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+            crate::errno::set_errno(0);
+            assert_eq!(
+                unshare(
+                    crate::linux_clone_args::CLONE_NEWUSER as i32
+                ),
+                -1
+            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        }
+
+        /// Errno is EPERM (capable convention), not EACCES.
+        #[test]
+        fn test_clone3_phase196_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            let a = args_with(crate::linux_clone_args::CLONE_NEWPID);
+            crate::errno::set_errno(0);
+            assert_eq!(call(&a), -1);
+            let e = crate::errno::get_errno();
+            assert_eq!(e, crate::errno::EPERM);
+            assert_ne!(e, crate::errno::EACCES);
         }
     }
 }

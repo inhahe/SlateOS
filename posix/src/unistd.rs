@@ -2477,11 +2477,27 @@ pub const SYSLOG_LOG_LEVEL_MAX: i32 = 8;
 /// then returns `-1` with `ENOSYS`.  Our OS uses structured text logging
 /// (JSON-lines per `design.txt`), not the legacy klog ring buffer.
 ///
+/// # Linux semantics
+///
+/// `do_syslog` performs its argument checks in this order (after the
+/// permission check, which we don't model here):
+///
+/// 1. The cmd selector enters a `switch (type)`.  An unrecognised cmd
+///    hits the `default:` arm and returns `-EINVAL`.
+/// 2. For `SYSLOG_ACTION_READ`, `_READ_ALL`, `_READ_CLEAR`, Linux folds
+///    the buf and len checks into a single test:
+///       `error = -EINVAL; if (!buf || len < 0) goto out;`
+///    so a NULL `buf` returns **EINVAL**, *not* EFAULT.  EFAULT only
+///    appears later from `!access_ok(buf, len)`, which we cannot model
+///    in a stub.
+/// 3. For `SYSLOG_ACTION_CONSOLE_LEVEL`, Linux rejects `len < 1 || len > 8`
+///    with EINVAL.
+///
 /// Errors (Linux-matching priority order):
 /// * `EINVAL` — `cmd` is negative or above `SYSLOG_ACTION_MAX` (10).
-/// * `EFAULT` — read commands (READ, READ_ALL, READ_CLEAR) with NULL
-///   `buf`.
-/// * `EINVAL` — read commands with `len < 0`.
+/// * `EINVAL` — read commands (READ, READ_ALL, READ_CLEAR) with NULL
+///   `buf` **or** `len < 0`.  Linux returns EINVAL (not EFAULT) for
+///   NULL buf in the read family.
 /// * `EINVAL` — `SYSLOG_ACTION_CONSOLE_LEVEL` with `len` outside
 ///   `[1, 8]`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -2492,11 +2508,12 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
     }
     match cmd {
         SYSLOG_ACTION_READ | SYSLOG_ACTION_READ_ALL | SYSLOG_ACTION_READ_CLEAR => {
-            if buf.is_null() {
-                errno::set_errno(errno::EFAULT);
-                return -1;
-            }
-            if len < 0 {
+            // Linux folds these two checks into a single EINVAL:
+            //     error = -EINVAL;
+            //     if (!buf || len < 0) goto out;
+            // NULL buf is *not* EFAULT here; EFAULT only fires from
+            // access_ok() further down, which we don't model.
+            if buf.is_null() || len < 0 {
                 errno::set_errno(errno::EINVAL);
                 return -1;
             }
@@ -4979,24 +4996,26 @@ mod tests {
     }
 
     #[test]
-    fn test_klogctl_read_null_buf_efault() {
+    fn test_klogctl_read_null_buf_einval() {
+        // Linux do_syslog: `if (!buf || len < 0) error = -EINVAL`.
+        // NULL buf is EINVAL, *not* EFAULT.
         errno::set_errno(0);
         assert_eq!(klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), 16), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_klogctl_read_all_null_buf_efault() {
+    fn test_klogctl_read_all_null_buf_einval() {
         errno::set_errno(0);
         assert_eq!(klogctl(SYSLOG_ACTION_READ_ALL, core::ptr::null_mut(), 16), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_klogctl_read_clear_null_buf_efault() {
+    fn test_klogctl_read_clear_null_buf_einval() {
         errno::set_errno(0);
         assert_eq!(klogctl(SYSLOG_ACTION_READ_CLEAR, core::ptr::null_mut(), 16), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
@@ -5089,11 +5108,12 @@ mod tests {
     }
 
     #[test]
-    fn test_klogctl_read_buf_checked_before_len() {
-        // READ + NULL buf + negative len → EFAULT (buf check first).
+    fn test_klogctl_read_null_buf_or_negative_len_both_einval() {
+        // Linux folds `!buf || len < 0` into one EINVAL test, so either
+        // condition (or both together) surfaces the same errno.
         errno::set_errno(0);
         assert_eq!(klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), -1), -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // ---- Real-world workflows ----
@@ -5160,6 +5180,156 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(chroot(b"\0".as_ptr()), -1);
         assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 126: klogctl Linux-EINVAL parity for NULL buf in READ family
+    // ------------------------------------------------------------------
+    //
+    // Linux's kernel/printk/printk.c::do_syslog folds `!buf || len < 0`
+    // into a single `error = -EINVAL` test for SYSLOG_ACTION_READ,
+    // READ_ALL, and READ_CLEAR.  Earlier phases mis-modelled NULL buf
+    // as EFAULT; these tests pin down the corrected (Linux-matching)
+    // behaviour.
+
+    #[test]
+    fn test_klogctl_phase126_read_null_buf_positive_len_einval() {
+        // NULL buf + valid positive len — Linux returns EINVAL from the
+        // combined `!buf || len < 0` test, before any access_ok check.
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), 4096), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_read_all_null_buf_positive_len_einval() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ_ALL, core::ptr::null_mut(), 4096), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_read_clear_null_buf_positive_len_einval() {
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ_CLEAR, core::ptr::null_mut(), 4096), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_read_null_buf_zero_len_einval() {
+        // Linux's `if (!buf || len < 0)` fires before the `if (!len)`
+        // shortcut, so NULL buf + len == 0 is still EINVAL — *not* the
+        // zero-len success path.
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_read_negative_len_with_valid_buf_einval() {
+        // Non-NULL buf, but negative len — the `len < 0` half of the
+        // combined check fires.  Same errno as NULL buf.
+        let mut buf = [0u8; 32];
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), -1), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_read_all_negative_len_with_valid_buf_einval() {
+        let mut buf = [0u8; 32];
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), i32::MIN), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_read_null_and_negative_einval() {
+        // Both halves of the combined check would fire; we only ever
+        // surface one EINVAL regardless.
+        errno::set_errno(0);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_READ_CLEAR, core::ptr::null_mut(), -100),
+            -1,
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_cmd_beats_null_buf() {
+        // Validation order: out-of-range cmd fires before any buf/len
+        // check (Linux's `default:` arm in the switch is reached after
+        // the unknown cmd falls through; no buf inspection occurs).
+        errno::set_errno(0);
+        assert_eq!(klogctl(-1, core::ptr::null_mut(), 16), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_valid_read_with_zero_len_reaches_enosys() {
+        // Non-NULL buf + len == 0 passes the EINVAL test.  Linux would
+        // shortcut this to a 0-byte success; we surface ENOSYS because
+        // the klog ring buffer isn't implemented.  Either way the EINVAL
+        // path must *not* fire here.
+        let mut buf = [0u8; 16];
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_console_level_with_null_buf_still_valid() {
+        // CONSOLE_LEVEL never reads from buf — NULL is fine, only the
+        // level (in `len`) is validated.  Confirms the buf NULL-check
+        // only applies to the read family.
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 4), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_workflow_systemd_journal_probe() {
+        // systemd-journald probes the kernel log via
+        // klogctl(SYSLOG_ACTION_READ_ALL, NULL, 0) to detect whether a
+        // klog exists.  Pre-fix this returned EFAULT (misleading);
+        // post-fix it returns EINVAL, matching what journald sees on
+        // Linux when it inadvertently passes NULL.
+        errno::set_errno(0);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_READ_ALL, core::ptr::null_mut(), 0),
+            -1,
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_workflow_buggy_dmesg_uninit_buf_ptr() {
+        // A C program reuses `char *p` from an earlier branch where it
+        // was set to NULL but forgets to allocate before passing to
+        // klogctl(READ_ALL, p, 8192).  Post-fix the caller sees EINVAL
+        // ("bad argument") which is much more diagnostic than EFAULT
+        // ("bad address") — the bug is in their argument, not their
+        // memory map.
+        errno::set_errno(0);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_READ_ALL, core::ptr::null_mut(), 8192),
+            -1,
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_klogctl_phase126_recovery_after_null_buf_einval() {
+        // Per-call errno: an EINVAL from a NULL buf doesn't poison a
+        // subsequent well-formed call.
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), 16), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let mut buf = [0u8; 64];
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), buf.len() as i32), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
     // ------------------------------------------------------------------

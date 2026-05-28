@@ -301,23 +301,44 @@ pub extern "C" fn epoll_ctl(
     fd: i32,
     event: *mut EpollEvent,
 ) -> i32 {
+    // Linux validation order (fs/eventpoll.c::do_epoll_ctl, paraphrased):
+    //   1. EFAULT: `ep_op_has_event(op) && copy_from_user(event)` fails.
+    //   2. EBADF:  `fdget(epfd)`  — epfd must be open.
+    //   3. EBADF:  `fdget(fd)`    — target fd must be open.
+    //   4. EINVAL: `!is_file_epoll(epfd)` — epfd must be an epoll fd.
+    //   5. EINVAL: `epfd == fd`   — can't epoll oneself (checked after
+    //                               the kind check).
+    //   6. EINVAL: unknown `op`   — switch-statement default.
+    //
+    // Deviations from Linux that we keep:
+    //   * `EPOLL_CTL_DEL` tolerates a closed target fd, so applications
+    //     can clean up after a race where the fd was closed out from
+    //     under them.  Linux returns EBADF in that case.
+
+    // 1. EFAULT — null event for ADD/MOD, BEFORE any fd lookup.
+    let needs_event = op == EPOLL_CTL_ADD || op == EPOLL_CTL_MOD;
+    if needs_event && event.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // 2. epfd must be a valid open fd.
     let Some(ep_entry) = fdtable::get_fd(epfd) else {
         errno::set_errno(errno::EBADF);
         return -1;
     };
+    // 3. target fd must be a valid open fd (DEL deviation aside).
+    if op != EPOLL_CTL_DEL && fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    // 4. epfd must be an epoll fd, not (e.g.) a regular file.
     if ep_entry.kind != HandleKind::Epoll {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Linux: cannot epoll yourself.
+    // 5. Can't epoll yourself.  Linux checks this AFTER the kind check.
     if fd == epfd {
         errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // The watched fd must be a valid open fd.  (Closed fds are allowed
-    // for DEL since the caller may be cleaning up state.)
-    if op != EPOLL_CTL_DEL && fdtable::get_fd(fd).is_none() {
-        errno::set_errno(errno::EBADF);
         return -1;
     }
 
@@ -325,11 +346,8 @@ pub extern "C" fn epoll_ctl(
 
     match op {
         EPOLL_CTL_ADD => {
-            if event.is_null() {
-                errno::set_errno(errno::EFAULT);
-                return -1;
-            }
             // SAFETY: caller asserts validity of `event` for ADD/MOD.
+            // Null was rejected upfront with EFAULT.
             let ev = unsafe { core::ptr::read_unaligned(event) };
             // Unaligned read because of #[repr(packed)] — copy fields
             // through stack locals to avoid taking references to packed
@@ -376,11 +394,8 @@ pub extern "C" fn epoll_ctl(
             }
         }
         EPOLL_CTL_MOD => {
-            if event.is_null() {
-                errno::set_errno(errno::EFAULT);
-                return -1;
-            }
-            // SAFETY: caller asserts validity of `event`.
+            // SAFETY: caller asserts validity of `event`.  Null was
+            // rejected upfront with EFAULT.
             let ev = unsafe { core::ptr::read_unaligned(event) };
             let events_val = ev.events;
             let data_val = ev.data;
@@ -2248,7 +2263,10 @@ mod tests {
     fn test_epoll_ctl_bad_epfd_returns_ebadf() {
         errno::set_errno(0);
         // FD 250 is unlikely to be allocated in the default test table.
-        assert_eq!(epoll_ctl(250, EPOLL_CTL_ADD, 4, core::ptr::null_mut()), -1);
+        // Pass a non-null `event` so we test the EBADF path on the epfd
+        // and don't trip the upfront EFAULT check (Phase 106 ordering).
+        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        assert_eq!(epoll_ctl(250, EPOLL_CTL_ADD, 4, &raw mut ev), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
@@ -3812,5 +3830,191 @@ mod tests {
             );
         }
         crate::file::close(fd);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 106 — epoll_ctl validation ordering parity with Linux.
+    //
+    // Linux's `do_epoll_ctl` (fs/eventpoll.c) validates inputs in this
+    // order: EFAULT (null event for ADD/MOD) → EBADF (epfd) → EBADF
+    // (target fd) → EINVAL (epfd kind) → EINVAL (epfd == fd) →
+    // EINVAL (unknown op).  Previously we put the EFAULT check INSIDE
+    // the ADD/MOD branches and the kind/self-loop checks BEFORE the fd
+    // lookup, so several errno combinations diverged from Linux:
+    //   * ADD/MOD with null event + bad epfd: was EBADF, now EFAULT.
+    //   * Non-epoll epfd with closed fd: was EINVAL, now EBADF.
+    //   * Non-epoll epfd with fd == epfd: was EINVAL (kind) — unchanged
+    //     in result but the path is now explicit.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_epoll_ctl_phase106_add_null_event_is_efault_even_with_bad_epfd() {
+        // ADD with null event AND a bad epfd: Linux's copy_from_user
+        // fires first → EFAULT.
+        errno::set_errno(0);
+        let ret = epoll_ctl(99999, EPOLL_CTL_ADD, 4, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_mod_null_event_is_efault_even_with_bad_epfd() {
+        errno::set_errno(0);
+        let ret = epoll_ctl(99999, EPOLL_CTL_MOD, 4, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_del_tolerates_null_event() {
+        // DEL doesn't read `event`; null is fine.  With a bad epfd we
+        // still get EBADF.
+        errno::set_errno(0);
+        let ret = epoll_ctl(99999, EPOLL_CTL_DEL, 4, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_bad_epfd_then_good_event_is_ebadf() {
+        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        errno::set_errno(0);
+        let ret = epoll_ctl(99999, EPOLL_CTL_ADD, 4, &raw mut ev);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_ebadf_for_bad_target_fd() {
+        // Real epoll fd, target fd is not allocated → EBADF.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        errno::set_errno(0);
+        let ret = epoll_ctl(epfd, EPOLL_CTL_ADD, 99999, &raw mut ev);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_ebadf_target_wins_over_einval_kind() {
+        // epfd is a non-epoll fd (we open an eventfd as a stand-in for
+        // any "not an epoll" fd) AND target fd is closed.
+        // Linux: EBADF (target fd lookup before kind check).
+        let not_epoll = eventfd(0, 0);
+        assert!(not_epoll >= 0);
+        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        errno::set_errno(0);
+        let ret = epoll_ctl(not_epoll, EPOLL_CTL_ADD, 99999, &raw mut ev);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+        crate::file::close(not_epoll);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_einval_for_non_epoll_epfd() {
+        // Non-epoll epfd with a valid different target fd → EINVAL
+        // from the kind check (target lookup succeeds, kind check
+        // then fails).
+        let not_epoll = eventfd(0, 0);
+        assert!(not_epoll >= 0);
+        let target = eventfd(0, 0);
+        assert!(target >= 0);
+        assert_ne!(not_epoll, target);
+        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        errno::set_errno(0);
+        let ret = epoll_ctl(not_epoll, EPOLL_CTL_ADD, target, &raw mut ev);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(target);
+        crate::file::close(not_epoll);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_self_loop_einval() {
+        // Real epoll fd with epfd == fd: EINVAL (after the kind check
+        // passes).
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        errno::set_errno(0);
+        let ret = epoll_ctl(epfd, EPOLL_CTL_ADD, epfd, &raw mut ev);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_unknown_op_einval() {
+        // Valid epfd, valid different target fd, but unknown op.
+        // Linux: switch default → EINVAL.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let target = eventfd(0, 0);
+        assert!(target >= 0);
+        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        errno::set_errno(0);
+        let ret = epoll_ctl(epfd, 99, target, &raw mut ev);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(target);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_unknown_op_with_bad_epfd_is_ebadf() {
+        // Unknown op + bad epfd: Linux looks up epfd before
+        // dispatching on op, so EBADF wins over EINVAL.
+        // Note: with op=99 (not ADD/MOD/DEL), the event-null check is
+        // skipped, so we don't trip the EFAULT branch first.
+        errno::set_errno(0);
+        let ret = epoll_ctl(99999, 99, 4, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_mod_null_event_with_good_epfd_is_efault() {
+        // Null event for MOD with a real epfd: EFAULT (caught upfront
+        // before fd lookup).
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        errno::set_errno(0);
+        let ret = epoll_ctl(epfd, EPOLL_CTL_MOD, 99999, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_ops_distinct() {
+        // Pin the on-the-wire op codes — distinct values prevent
+        // ambiguity in the dispatch / event-needed check.
+        assert_ne!(EPOLL_CTL_ADD, EPOLL_CTL_MOD);
+        assert_ne!(EPOLL_CTL_ADD, EPOLL_CTL_DEL);
+        assert_ne!(EPOLL_CTL_MOD, EPOLL_CTL_DEL);
+    }
+
+    #[test]
+    fn test_epoll_ctl_phase106_recovery_after_efault() {
+        // After an EFAULT-rejected call, a subsequent valid call on the
+        // same epoll fd still works.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        // Reject with EFAULT.
+        errno::set_errno(0);
+        let bad = epoll_ctl(epfd, EPOLL_CTL_ADD, 99999, core::ptr::null_mut());
+        assert_eq!(bad, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        // Now a valid ADD with a real target fd.
+        let target = eventfd(0, 0);
+        assert!(target >= 0);
+        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        errno::set_errno(0);
+        let good = epoll_ctl(epfd, EPOLL_CTL_ADD, target, &raw mut ev);
+        assert_eq!(good, 0, "recovery ADD must succeed, errno={}", errno::get_errno());
+        crate::file::close(target);
+        crate::file::close(epfd);
     }
 }

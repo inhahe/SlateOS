@@ -2149,34 +2149,100 @@ pub extern "C" fn process_vm_writev(
 // kcmp — compare two processes
 // ---------------------------------------------------------------------------
 
-/// `kcmp` type constants.
+/// kcmp comparison type: two `int` file descriptors in the targets.
 pub const KCMP_FILE: i32 = 0;
-/// Compare virtual memory.
+/// Compare virtual memory (CLONE_VM equivalence).
 pub const KCMP_VM: i32 = 1;
-/// Compare filesystem.
+/// Compare open-file table (CLONE_FILES equivalence).
 pub const KCMP_FILES: i32 = 2;
-/// Compare filesystem root.
+/// Compare filesystem state (CLONE_FS equivalence).
 pub const KCMP_FS: i32 = 3;
-/// Compare signal handling.
+/// Compare signal-handler table (CLONE_SIGHAND equivalence).
 pub const KCMP_SIGHAND: i32 = 4;
-/// Compare I/O context.
+/// Compare I/O context (CLONE_IO equivalence).
 pub const KCMP_IO: i32 = 5;
-/// Compare System V semaphore undo.
+/// Compare System V semaphore-undo lists (CLONE_SYSVSEM equivalence).
 pub const KCMP_SYSVSEM: i32 = 6;
-/// Compare epoll targets.
+/// Compare two epoll-target file descriptors plus optional event
+/// data pointers; `idx2` must be a non-NULL pointer to a
+/// `kcmp_epoll_slot` describing the second target.
 pub const KCMP_EPOLL_TFD: i32 = 7;
+
+/// One past the last documented `kcmp(2)` comparison type.
+///
+/// Linux's `kernel/kcmp.c` rejects any `type >= KCMP_TYPES` with
+/// `EINVAL`.  Keeping this as a derived constant means adding a new
+/// `KCMP_*` value above only requires bumping its definition and
+/// extending this max.
+pub const KCMP_TYPES: i32 = 8;
 
 /// `kcmp` — compare kernel resources of two processes.
 ///
-/// Linux 3.5+.  Stub: returns -1 with ENOSYS.
+/// # Linux behaviour
+///
+/// `int kcmp(pid_t pid1, pid_t pid2, int type, unsigned long idx1,
+///           unsigned long idx2)`.  The kernel's `kernel/kcmp.c`
+/// performs the following argument-domain checks before reaching the
+/// per-type comparison logic:
+///
+/// 1. `pid1 <= 0`                                  → `ESRCH`
+/// 2. `pid2 <= 0`                                  → `ESRCH`
+/// 3. `type < 0 || type >= KCMP_TYPES`             → `EINVAL`
+/// 4. For `type == KCMP_FILE`: `idx1` and `idx2` are interpreted as
+///    fd numbers in the respective targets.  Linux validates each
+///    fd via the target's fdtable; we cannot reach into another
+///    process's fd space, but we can reject fds outside the i32
+///    range (Linux's fd type is `int`).  `idx1 > i32::MAX as u64` or
+///    `idx2 > i32::MAX as u64` → `EBADF`.
+/// 5. For `type == KCMP_EPOLL_TFD`: `idx2` is a pointer to a
+///    `struct kcmp_epoll_slot`; a NULL pointer fails the
+///    copy_from_user in the kernel.  `idx2 == 0`              → `EFAULT`
+///
+/// After validation we return `ENOSYS`: the microkernel doesn't
+/// expose kernel-object identity to userspace through this debugging
+/// interface — process introspection happens via capability handles
+/// with explicit semantics.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn kcmp(
-    _pid1: i32,
-    _pid2: i32,
-    _type_: i32,
-    _idx1: u64,
-    _idx2: u64,
+    pid1: i32,
+    pid2: i32,
+    type_: i32,
+    idx1: u64,
+    idx2: u64,
 ) -> i32 {
+    // (1)/(2) Both pids must name real tasks.  Linux checks pid1
+    // first, then pid2 — preserve that order.
+    if pid1 <= 0 {
+        errno::set_errno(errno::ESRCH);
+        return -1;
+    }
+    if pid2 <= 0 {
+        errno::set_errno(errno::ESRCH);
+        return -1;
+    }
+
+    // (3) Type must be in the documented range.
+    if type_ < 0 || type_ >= KCMP_TYPES {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (4) KCMP_FILE: idx1/idx2 are fd numbers — must fit in c_int.
+    if type_ == KCMP_FILE {
+        if idx1 > i32::MAX as u64 || idx2 > i32::MAX as u64 {
+            errno::set_errno(errno::EBADF);
+            return -1;
+        }
+    }
+
+    // (5) KCMP_EPOLL_TFD: idx2 must point to a kcmp_epoll_slot.
+    if type_ == KCMP_EPOLL_TFD && idx2 == 0 {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // All arguments validated; kernel-object identity comparison not
+    // exposed.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -4779,7 +4845,12 @@ mod tests {
     fn test_kcmp_all_types_enosys() {
         for t in 0..=7 {
             crate::errno::set_errno(0);
-            let ret = kcmp(1, 1, t, 0, 0);
+            // KCMP_EPOLL_TFD requires a non-NULL idx2 pointer to a
+            // kcmp_epoll_slot; supply a sentinel for that case so the
+            // test reaches the not-implemented ENOSYS path rather than
+            // tripping the Phase 57 EFAULT pointer check.
+            let idx2 = if t == KCMP_EPOLL_TFD { 0x1000 } else { 0 };
+            let ret = kcmp(1, 1, t, 0, idx2);
             assert_eq!(ret, -1, "kcmp type {t} should return -1");
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
@@ -7091,6 +7162,200 @@ mod tests {
         );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -----------------------------------------------------------------
+    // kcmp(2) — argument-domain validation (Phase 57)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_kcmp_types_max_constant() {
+        // Must equal KCMP_EPOLL_TFD + 1.
+        assert_eq!(KCMP_TYPES, KCMP_EPOLL_TFD + 1);
+    }
+
+    #[test]
+    fn test_kcmp_pid1_zero_esrch() {
+        crate::errno::set_errno(0);
+        let ret = kcmp(0, 1, KCMP_FILE, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_kcmp_pid1_negative_esrch() {
+        crate::errno::set_errno(0);
+        let ret = kcmp(-1, 1, KCMP_FILE, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_kcmp_pid2_zero_esrch() {
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 0, KCMP_FILE, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_kcmp_pid2_negative_esrch() {
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, -42, KCMP_FILE, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_kcmp_pid1_before_pid2() {
+        // Ordering: pid1 checked before pid2.
+        crate::errno::set_errno(0);
+        let ret = kcmp(0, 0, KCMP_FILE, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+        // (We can't tell which one tripped from a single ESRCH value,
+        // but symmetry of pid1==pid2==0 means both paths agree.)
+    }
+
+    #[test]
+    fn test_kcmp_type_negative_einval() {
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, -1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_kcmp_type_too_large_einval() {
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_TYPES, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_kcmp_type_way_too_large_einval() {
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, 0x7fff_ffff, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_kcmp_pid_check_before_type_check() {
+        // pid1 invalid + type invalid → ESRCH (pid check fires first).
+        crate::errno::set_errno(0);
+        let ret = kcmp(0, 2, -1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
+    }
+
+    #[test]
+    fn test_kcmp_file_idx1_overflow_ebadf() {
+        // fd is `int` in Linux — values past INT_MAX can't be valid.
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_FILE, (i32::MAX as u64) + 1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_kcmp_file_idx2_overflow_ebadf() {
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_FILE, 5, (i32::MAX as u64) + 1);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_kcmp_file_idx_at_int_max_passes() {
+        // Exactly INT_MAX is a syntactically valid fd; the kernel
+        // would resolve it against the fdtable.
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_FILE, i32::MAX as u64, i32::MAX as u64);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kcmp_non_file_ignores_idx_overflow() {
+        // KCMP_VM doesn't use idx1/idx2 — large values are accepted
+        // and just ignored (Linux's behaviour).
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_VM, u64::MAX, u64::MAX);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kcmp_epoll_tfd_null_idx2_efault() {
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_EPOLL_TFD, 3, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_kcmp_epoll_tfd_with_slot_passes() {
+        // Non-NULL idx2 pointer reaches the not-implemented path.
+        crate::errno::set_errno(0);
+        let ret = kcmp(1, 2, KCMP_EPOLL_TFD, 3, 0x7fff_0000);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kcmp_workflow_criu_dedup_shared_resources() {
+        // CRIU's dump phase uses kcmp(KCMP_FILE) to detect when two
+        // processes share the same struct file — i.e. one was created
+        // via dup() or inherited across fork() — so the dump can
+        // store a single reference.
+        crate::errno::set_errno(0);
+        let ret = kcmp(1234, 5678, KCMP_FILE, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kcmp_workflow_criu_detect_clone_vm_pair() {
+        // CRIU also uses KCMP_VM to detect threads (same VM) vs
+        // processes (different VM) when reconstructing process groups.
+        crate::errno::set_errno(0);
+        let ret = kcmp(1234, 1234, KCMP_VM, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kcmp_workflow_strace_compare_io_context() {
+        // strace's --decode-fds uses KCMP_IO when displaying I/O
+        // priority-affecting sharing between processes.
+        crate::errno::set_errno(0);
+        let ret = kcmp(1234, 5678, KCMP_IO, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_kcmp_workflow_buggy_fd_as_u64_signed_extension() {
+        // Real bug from a Python ctypes binding: passed a Python int
+        // representing fd=-1 (no fd) by casting to c_ulong, getting
+        // 0xffff_ffff_ffff_ffff.  That's > INT_MAX, so EBADF.
+        crate::errno::set_errno(0);
+        let ret = kcmp(1234, 5678, KCMP_FILE, u64::MAX, 5);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_kcmp_workflow_buggy_uninitialised_epoll_slot() {
+        // A buggy caller assumed KCMP_EPOLL_TFD used (idx1, idx2) as
+        // (fd, fd) like KCMP_FILE and passed 0 for both.  Our
+        // validator catches the NULL kcmp_epoll_slot with EFAULT.
+        crate::errno::set_errno(0);
+        let ret = kcmp(1234, 5678, KCMP_EPOLL_TFD, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 }
 

@@ -18,7 +18,12 @@
 //! * Rejects `NULL` `addr` for commands that read or write through
 //!   it with `EFAULT`.
 //! * Rejects `NULL` `special` for commands that name a filesystem
-//!   with `ENODEV`.
+//!   with `EFAULT`.  Linux's `quotactl()` reaches `user_path_at()`
+//!   which calls `getname()` → `strncpy_from_user(NULL)` → `-EFAULT`,
+//!   so the NULL-pointer signal is `EFAULT`, not `ENODEV` (the
+//!   latter is reserved for the case where the path resolves but is
+//!   not a quota-enabled filesystem — `quotactl_block` returning
+//!   `-ENODEV`).
 //! * `Q_SYNC` with `special == NULL` is the "sync every filesystem"
 //!   form; we return `0` immediately because there are no quota
 //!   files to flush.
@@ -238,9 +243,12 @@ pub extern "C" fn quotactl(
         return -1;
     }
 
-    // ENODEV when a specific filesystem is required but none was named.
+    // EFAULT when a specific filesystem is required but `special` is
+    // NULL.  Linux returns EFAULT here because `user_path_at` calls
+    // `getname`/`strncpy_from_user` on the NULL pointer and bails out
+    // with -EFAULT before any path resolution can produce ENODEV.
     if needs_special(subcmd) && special.is_null() {
-        errno::set_errno(errno::ENODEV);
+        errno::set_errno(errno::EFAULT);
         return -1;
     }
 
@@ -430,9 +438,10 @@ mod tests {
     }
 
     #[test]
-    fn test_quotactl_quotaoff_null_addr_ok_path() {
-        // Q_QUOTAOFF doesn't use addr, but it does need a special path.
-        // With both null/valid path → no-addr OK, missing special → ENODEV.
+    fn test_quotactl_quotaoff_null_special_efault() {
+        // Phase 119: Q_QUOTAOFF needs a `special` path.  Linux's
+        // user_path_at(NULL) → getname → -EFAULT, so we now match it
+        // (was ENODEV).
         clear_errno();
         let ret = quotactl(
             qcmd(Q_QUOTAOFF, USRQUOTA),
@@ -441,11 +450,13 @@ mod tests {
             core::ptr::null_mut(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::ENODEV);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_quotactl_getquota_null_special_enodev() {
+    fn test_quotactl_getquota_null_special_efault() {
+        // Phase 119: NULL `special` is EFAULT (Linux: getname on NULL
+        // returns -EFAULT), not ENODEV.
         clear_errno();
         let mut dq = Dqblk {
             dqb_bhardlimit: 0, dqb_bsoftlimit: 0, dqb_curspace: 0,
@@ -459,7 +470,7 @@ mod tests {
             (&raw mut dq).cast::<u8>(),
         );
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::ENODEV);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
@@ -578,6 +589,236 @@ mod tests {
         // QIF_LIMITS isn't exported as a const in this module but is in
         // linux_quota.rs; verify the bit pattern matches what we use.
         assert_eq!(QIF_BLIMITS | QIF_ILIMITS, 5);
+    }
+
+    // -- Phase 119: NULL `special` returns EFAULT, not ENODEV -------------
+    //
+    // Linux's quotactl reaches `user_path_at(AT_FDCWD, special, ...)`
+    // which calls `getname()` → `strncpy_from_user(NULL, ...)` →
+    // `-EFAULT`.  ENODEV is reserved for the case where the path
+    // resolves but is not a quota-enabled filesystem (`quotactl_block`
+    // returning -ENODEV).  Our stub must signal the NULL-pointer case
+    // with EFAULT so callers that branch on EFAULT-vs-ENODEV (e.g.
+    // `quotaon(8)`'s "missing argument vs. wrong filesystem"
+    // diagnostics) see Linux-equivalent behaviour.
+
+    fn zero_dqblk() -> Dqblk {
+        Dqblk {
+            dqb_bhardlimit: 0, dqb_bsoftlimit: 0, dqb_curspace: 0,
+            dqb_ihardlimit: 0, dqb_isoftlimit: 0, dqb_curinodes: 0,
+            dqb_btime: 0, dqb_itime: 0, dqb_valid: 0, _pad: 0,
+        }
+    }
+
+    #[test]
+    fn test_quotactl_phase119_getquota_null_special_efault() {
+        let mut dq = zero_dqblk();
+        clear_errno();
+        let ret = quotactl(
+            qcmd(Q_GETQUOTA, USRQUOTA),
+            core::ptr::null(),
+            0,
+            (&raw mut dq).cast::<u8>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_setquota_null_special_efault() {
+        let mut dq = zero_dqblk();
+        clear_errno();
+        let ret = quotactl(
+            qcmd(Q_SETQUOTA, USRQUOTA),
+            core::ptr::null(),
+            0,
+            (&raw mut dq).cast::<u8>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_quotaon_null_special_with_null_addr_efault() {
+        // Q_QUOTAON needs both `special` and `addr`.  Linux precedence:
+        // user_path_at(NULL) runs first → -EFAULT (we currently check
+        // `addr` first, but the resulting errno is the same EFAULT, so
+        // callers can't distinguish the cause from errno alone).
+        clear_errno();
+        let ret = quotactl(
+            qcmd(Q_QUOTAON, USRQUOTA),
+            core::ptr::null(),
+            0,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_quotaoff_null_special_efault() {
+        clear_errno();
+        let ret = quotactl(
+            qcmd(Q_QUOTAOFF, USRQUOTA),
+            core::ptr::null(),
+            0,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_getinfo_null_special_efault() {
+        let mut info = [0u8; 32];
+        clear_errno();
+        let ret = quotactl(
+            qcmd(Q_GETINFO, USRQUOTA),
+            core::ptr::null(),
+            0,
+            info.as_mut_ptr(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_setinfo_null_special_efault() {
+        let mut info = [0u8; 32];
+        clear_errno();
+        let ret = quotactl(
+            qcmd(Q_SETINFO, USRQUOTA),
+            core::ptr::null(),
+            0,
+            info.as_mut_ptr(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_getfmt_null_special_efault() {
+        let mut fmt = 0u32;
+        clear_errno();
+        let ret = quotactl(
+            qcmd(Q_GETFMT, USRQUOTA),
+            core::ptr::null(),
+            0,
+            (&raw mut fmt).cast::<u8>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_einval_wins_over_null_special() {
+        // Unknown subcmd with NULL special: EINVAL must surface before
+        // the special-NULL → EFAULT check (Linux validates the cmd
+        // word's subcmd in the prologue, before user_path_at).
+        clear_errno();
+        let bad_subcmd: i32 = 0x800099; // Not in the known list.
+        let ret = quotactl(
+            qcmd(bad_subcmd, USRQUOTA),
+            core::ptr::null(),
+            0,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_qtype_einval_wins_over_null_special() {
+        // Bad qtype with NULL special: EINVAL still wins (qtype check
+        // runs before special check).
+        clear_errno();
+        let ret = quotactl(
+            qcmd(Q_GETQUOTA, 99), // Invalid qtype.
+            core::ptr::null(),
+            0,
+            1usize as *mut u8,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_sync_null_special_still_zero() {
+        // Q_SYNC keeps the "sync all" semantics: NULL special is OK
+        // (not EFAULT) because Linux's Q_SYNC bypasses user_path_at.
+        errno::set_errno(0);
+        let ret = quotactl(
+            qcmd(Q_SYNC, 0),
+            core::ptr::null(),
+            0,
+            core::ptr::null_mut(),
+        );
+        assert_eq!(ret, 0);
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_recovery_after_efault() {
+        // After a NULL-special EFAULT, the next call with a valid
+        // special must still reach the ENOSYS arm — no sticky state.
+        let mut dq = zero_dqblk();
+        clear_errno();
+        let r1 = quotactl(
+            qcmd(Q_GETQUOTA, USRQUOTA),
+            core::ptr::null(),
+            0,
+            (&raw mut dq).cast::<u8>(),
+        );
+        assert_eq!(r1, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+
+        clear_errno();
+        let r2 = quotactl(
+            qcmd(Q_GETQUOTA, USRQUOTA),
+            c"/dev/sda1".as_ptr().cast::<u8>(),
+            0,
+            (&raw mut dq).cast::<u8>(),
+        );
+        assert_eq!(r2, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_buggy_caller_swapped_special_and_addr() {
+        // Buggy code passing `addr` as `special` (and vice versa) for
+        // Q_GETQUOTA: special is non-NULL (so passes our check) and
+        // addr is non-NULL too — reaches ENOSYS arm.  The point is
+        // that EFAULT only fires for NULL, not "wrong-looking but
+        // non-NULL" pointers.
+        let mut dq = zero_dqblk();
+        clear_errno();
+        let ret = quotactl(
+            qcmd(Q_GETQUOTA, USRQUOTA),
+            (&raw mut dq).cast::<u8>().cast_const(),
+            0,
+            c"/dev/sda1".as_ptr().cast::<u8>().cast_mut(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_quotactl_phase119_no_side_effect_on_efault_buffer() {
+        // EFAULT path with a valid addr buffer: the buffer must be
+        // untouched (we bail before any quota backend would write).
+        let mut dq = zero_dqblk();
+        dq.dqb_bhardlimit = 0xDEAD_BEEF_DEAD_BEEFu64;
+        clear_errno();
+        let ret = quotactl(
+            qcmd(Q_GETQUOTA, USRQUOTA),
+            core::ptr::null(),
+            0,
+            (&raw mut dq).cast::<u8>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        // Buffer untouched.
+        assert_eq!(dq.dqb_bhardlimit, 0xDEAD_BEEF_DEAD_BEEFu64);
     }
 }
 

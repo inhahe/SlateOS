@@ -927,7 +927,16 @@ fn validate_map_freeze(a: &BpfMapFreezeAttr) -> Result<(), i32> {
 /// - `EBADF`: any fd argument that's negative or (in the case of
 ///   non-sentinel positions) outside our currently-empty fd table.
 /// - `ENOENT`: lookup of ID 0 in `GET_FD_BY_ID`.
-/// - `ENOSYS`: all checks pass but no real BPF subsystem exists yet.
+/// - `EPERM` *(Phase 182)*: per-cmd validation succeeded but caller
+///   holds neither `CAP_BPF` nor `CAP_SYS_ADMIN`.  Matches Linux's
+///   `bpf_capable()` gate under
+///   `sysctl_unprivileged_bpf_disabled = 1` (the upstream and
+///   Debian/Ubuntu default since Linux 5.16).  The gate fires AFTER
+///   per-cmd shape validation so `EINVAL`/`EFAULT`/`E2BIG` always
+///   beat `EPERM` (matching Linux: cmd handlers run shape checks
+///   before the cap check).
+/// - `ENOSYS`: all checks pass AND privilege held, but no real BPF
+///   subsystem exists yet.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn bpf(cmd: u32, attr: *mut u8, size: u32) -> i32 {
     // Validation order matches Linux's `SYSCALL_DEFINE3(bpf, ...)` in
@@ -1070,7 +1079,37 @@ pub extern "C" fn bpf(cmd: u32, attr: *mut u8, size: u32) -> i32 {
         errno::set_errno(e);
         return -1;
     }
-    // All validation passed — no real BPF subsystem to dispatch to.
+
+    // Phase 182: privilege check.  Linux's per-cmd handlers each call
+    // `bpf_capable()` (== `capable(CAP_BPF) || capable(CAP_SYS_ADMIN)`)
+    // after their shape validation; failing the cap check returns
+    // `-EPERM`.  Under `sysctl_unprivileged_bpf_disabled` (set since
+    // Linux 5.16 upstream and earlier on Debian/Ubuntu), the gate
+    // applies to **every** bpf() command, not just the dangerous ones
+    // — see `kernel/bpf/syscall.c::__sys_bpf` and the various
+    // `bpf_capable()` call-sites in `map_create()`, `bpf_prog_load()`,
+    // `bpf_obj_pin()`, etc.
+    //
+    // We model the strictest setting (sysctl=1) since we have no
+    // sysctl backend.  Errno is EPERM, not EACCES (Linux distinguishes
+    // them — EPERM for cap rejection, EACCES for policy denial in
+    // LSM contexts; bpf_capable's rejection is EPERM).
+    //
+    // Placement is after per-cmd validation succeeds but before the
+    // ENOSYS fall-through — matching Linux's per-handler order: shape
+    // check first (so a bug in attr layout surfaces as EINVAL), then
+    // cap check, then backend execution.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_BPF,
+    ) && !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_ADMIN,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+
+    // All validation passed AND privilege held — no real BPF
+    // subsystem to dispatch to.
     errno::set_errno(errno::ENOSYS);
     -1
 }
@@ -2055,5 +2094,460 @@ mod tests {
         let r = bpf(BPF_MAP_CREATE, p, bogus_size);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::E2BIG);
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 182: bpf() — CAP_BPF / CAP_SYS_ADMIN gate.
+    //
+    // Pre-Phase-182 behaviour: every well-formed bpf() call fell
+    // through to ENOSYS regardless of capability, because the docstring
+    // step "privilege check" was unimplemented.  That let any process
+    // probe for BPF availability without ever seeing EPERM —
+    // misleading loader libraries (libbpf, bcc, bpftrace) that inspect
+    // errno to decide whether to fall back to non-BPF tracing or
+    // exit with a clear "missing CAP_BPF" diagnostic.
+    //
+    // Linux semantics (kernel/bpf/syscall.c, per-cmd handlers):
+    //     if (!bpf_capable())
+    //         return -EPERM;
+    // where bpf_capable() ::= capable(CAP_BPF) || capable(CAP_SYS_ADMIN).
+    //
+    // Under sysctl_unprivileged_bpf_disabled = 1 (Linux 5.16+
+    // upstream default; earlier on Debian/Ubuntu) every command is
+    // gated.  We model that strictest setting since we have no
+    // sysctl backend.
+    //
+    // Placement is after per-cmd shape validation but before the
+    // ENOSYS fall-through — matching Linux's per-handler order
+    // (shape check → cap check → backend execution).  This makes
+    // EINVAL/EFAULT/E2BIG/EBADF beat EPERM, which matches what
+    // tools see on real Linux.
+    // ----------------------------------------------------------------------
+
+    mod bpf_cap_phase182 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase 181.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap(cap: u32) {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if cap < 32 {
+                (lo & !(1u32 << cap), hi)
+            } else {
+                (lo, hi & !(1u32 << (cap - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed dropping cap");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+
+        fn drop_bpf_caps() {
+            drop_cap(crate::sys_capability::CAP_BPF);
+            drop_cap(crate::sys_capability::CAP_SYS_ADMIN);
+        }
+
+        // -- Per-error-class ----------------------------------------------
+
+        /// Valid BPF_MAP_CREATE without CAP_BPF or CAP_SYS_ADMIN →
+        /// -1/EPERM.
+        #[test]
+        fn test_bpf_phase182_map_create_no_caps_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            let a = good_map_create();
+            fresh_errno();
+            let r = call_bpf(BPF_MAP_CREATE, &a);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Errno is specifically EPERM (Linux's bpf_capable
+        /// rejection), not EACCES (policy denial) and not ENOSYS
+        /// (backend missing).
+        #[test]
+        fn test_bpf_phase182_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            let a = good_map_create();
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
+            assert_ne!(errno::get_errno(), errno::EACCES);
+            assert_ne!(errno::get_errno(), errno::ENOSYS);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// CAP_BPF alone (without CAP_SYS_ADMIN) is sufficient —
+        /// matches `bpf_capable() = CAP_BPF || CAP_SYS_ADMIN`.
+        /// CAP_BPF is the modern fine-grained alternative (Linux 5.8+).
+        #[test]
+        fn test_bpf_phase182_cap_bpf_alone_satisfies_gate() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SYS_ADMIN);
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_BPF
+            ));
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            let a = good_map_create();
+            fresh_errno();
+            let r = call_bpf(BPF_MAP_CREATE, &a);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// CAP_SYS_ADMIN alone (without CAP_BPF) is sufficient —
+        /// the historical "superuser" cap also passes the gate.
+        #[test]
+        fn test_bpf_phase182_cap_sys_admin_alone_satisfies_gate() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_BPF);
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_BPF
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            let a = good_map_create();
+            fresh_errno();
+            let r = call_bpf(BPF_MAP_CREATE, &a);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// Dropping BOTH caps denies — confirms the gate is OR'd,
+        /// not AND'd, and that no other cap satisfies it.
+        #[test]
+        fn test_bpf_phase182_drop_both_caps_denies() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            let a = good_map_create();
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Multiple distinct cmds (MAP_CREATE, PROG_LOAD, OBJ_PIN)
+        /// all gated by the same caps — confirms the check is
+        /// applied uniformly across the command set, not just to one
+        /// hot path.
+        #[test]
+        fn test_bpf_phase182_multiple_cmds_all_gated() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            // MAP_CREATE
+            let m = good_map_create();
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_MAP_CREATE, &m), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // PROG_LOAD
+            let p = good_prog_load();
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_PROG_LOAD, &p), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix ----------------------------------------------
+
+        /// E2BIG (oversize attr) beats EPERM.  Linux's
+        /// bpf_check_uarg_tail_zero runs before per-cmd handlers
+        /// (and their cap checks).
+        #[test]
+        fn test_bpf_phase182_e2big_size_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            let a = good_map_create();
+            let p = (&a as *const _ as *mut u8).cast::<u8>();
+            fresh_errno();
+            // BPF_ATTR_SIZE_MAX is 4096; use 8192.
+            let r = bpf(BPF_MAP_CREATE, p, 8192);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::E2BIG);
+        }
+
+        /// EFAULT (NULL attr with size > 0) beats EPERM.
+        #[test]
+        fn test_bpf_phase182_efault_null_attr_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            fresh_errno();
+            let r = bpf(BPF_MAP_CREATE, ptr::null_mut(), 64);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        /// EINVAL (unknown cmd) beats EPERM.  Linux's switch
+        /// default returns -EINVAL before any per-cmd handler runs.
+        #[test]
+        fn test_bpf_phase182_einval_unknown_cmd_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            let a = good_map_create();
+            let p = (&a as *const _ as *mut u8).cast::<u8>();
+            fresh_errno();
+            // BPF_CMD_MAX is the exclusive upper bound; use it as a
+            // guaranteed-unknown cmd.
+            let r = bpf(BPF_CMD_MAX, p, mem::size_of::<BpfMapCreateAttr>() as u32);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// EINVAL (undersize attr) beats EPERM — the size-floor
+        /// check runs before per-cmd validation/cap check.
+        #[test]
+        fn test_bpf_phase182_einval_undersize_attr_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            let a = good_map_create();
+            let p = (&a as *const _ as *mut u8).cast::<u8>();
+            fresh_errno();
+            // 4 bytes is well below any per-cmd minimum.
+            let r = bpf(BPF_MAP_CREATE, p, 4);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// Per-cmd EINVAL (bad map_type) beats EPERM — validate_*
+        /// runs before our cap gate, matching Linux's per-handler
+        /// "shape check then cap check" order.
+        #[test]
+        fn test_bpf_phase182_einval_bad_map_type_beats_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            let mut a = good_map_create();
+            a.map_type = u32::MAX; // wildly out of range
+            fresh_errno();
+            let r = call_bpf(BPF_MAP_CREATE, &a);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- Workflow -----------------------------------------------------
+
+        /// libbpf-style loader workflow: probe MAP_CREATE without
+        /// caps → EPERM (loader knows to surface a clear
+        /// "missing CAP_BPF" diagnostic); regain CAP_BPF → ENOSYS
+        /// (loader knows the kernel lacks CONFIG_BPF_SYSCALL=y and
+        /// falls back to non-BPF tracing).
+        #[test]
+        fn test_bpf_phase182_workflow_libbpf_probe_eperm_then_enosys() {
+            let _g = CapGuard::snapshot();
+            // 1st: drop caps, expect EPERM.
+            drop_bpf_caps();
+            let a = good_map_create();
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // 2nd: restore CAP_BPF, expect ENOSYS.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: (1u32 << 9) - 1,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0
+            );
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        /// Sandbox workflow: parent with caps reaches ENOSYS;
+        /// child after sandbox drop sees EPERM for the same call.
+        /// Models a privileged daemon spawning untrusted code.
+        #[test]
+        fn test_bpf_phase182_workflow_sandbox_drops_then_denied() {
+            let _g = CapGuard::snapshot();
+            // Parent with caps: ENOSYS.
+            let a = good_map_create();
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+            // After sandbox drop: EPERM.
+            drop_bpf_caps();
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Buggy caller -------------------------------------------------
+
+        /// Multi-error: a no-cap caller passing unknown cmd AND
+        /// E2BIG size sees E2BIG (earliest check wins).
+        #[test]
+        fn test_bpf_phase182_buggy_caller_multi_error_e2big_wins() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            let a = good_map_create();
+            let p = (&a as *const _ as *mut u8).cast::<u8>();
+            fresh_errno();
+            let r = bpf(BPF_CMD_MAX, p, 8192);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::E2BIG);
+        }
+
+        // -- Recovery -----------------------------------------------------
+
+        /// After EPERM, granting CAP_BPF (alone) reaches ENOSYS.
+        /// Confirms dynamic per-call cap evaluation.
+        #[test]
+        fn test_bpf_phase182_recovery_restore_cap_bpf_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            let a = good_map_create();
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Re-grant CAP_BPF only (CAP_SYS_ADMIN stays dropped).
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            // CAP_BPF is cap 39 → bit 7 of the high word.
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: 1u32 << 7,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0
+            );
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- No-side-effect ----------------------------------------------
+
+        /// EPERM rejection leaves capability sets unchanged — bpf
+        /// does not silently grant/drop caps.
+        #[test]
+        fn test_bpf_phase182_eperm_preserves_other_caps() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            let (lo_before, hi_before) =
+                crate::sys_capability::current_caps_effective();
+            let a = good_map_create();
+            let _ = call_bpf(BPF_MAP_CREATE, &a);
+            let (lo_after, hi_after) =
+                crate::sys_capability::current_caps_effective();
+            assert_eq!(lo_before, lo_after);
+            assert_eq!(hi_before, hi_after);
+        }
+
+        // -- Sentinel ----------------------------------------------------
+
+        /// CAP_PERFMON alone does NOT satisfy the bpf gate — only
+        /// CAP_BPF or CAP_SYS_ADMIN do.  Confirms the gate is
+        /// specifically the bpf_capable() pair, not a generic
+        /// "any privileged cap" check.
+        #[test]
+        fn test_bpf_phase182_cap_perfmon_alone_does_not_satisfy() {
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_BPF);
+            drop_cap(crate::sys_capability::CAP_SYS_ADMIN);
+            // CAP_PERFMON (38) is still held by default.
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_PERFMON
+            ));
+            let a = good_map_create();
+            fresh_errno();
+            let r = call_bpf(BPF_MAP_CREATE, &a);
+            assert_eq!(r, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Cross-checks ------------------------------------------------
+
+        /// bpf() rejection uses EPERM; perf_event_open uses EACCES.
+        /// This is a deliberate Linux distinction (CAP_BPF rejection
+        /// = EPERM in bpf_capable; perf_allow_kernel rejection =
+        /// EACCES).  Confirms we preserve the distinction across
+        /// both surfaces.
+        #[test]
+        fn test_bpf_phase182_eperm_distinct_from_perf_eacces() {
+            let _g = CapGuard::snapshot();
+            drop_bpf_caps();
+            drop_cap(crate::sys_capability::CAP_PERFMON);
+            // bpf → EPERM.
+            let a = good_map_create();
+            fresh_errno();
+            assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
     }
 }

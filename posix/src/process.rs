@@ -38,13 +38,50 @@ pub(crate) fn record_child_pid(pid: PidT) {
 }
 
 // ---------------------------------------------------------------------------
-// waitpid flags
+// waitpid / waitid flags
+//
+// Values match glibc <bits/waitflags.h> and Linux <linux/wait.h>.
 // ---------------------------------------------------------------------------
 
 /// Return immediately if no child has exited.
 pub const WNOHANG: i32 = 1;
 /// Also report stopped (not traced) children.
 pub const WUNTRACED: i32 = 2;
+/// Wait for stopped children — synonym of `WUNTRACED` for `waitid`.
+pub const WSTOPPED: i32 = WUNTRACED;
+/// `waitid` only: report exited children.  Required for `waitid` since
+/// at least one of `WEXITED`, `WSTOPPED`, or `WCONTINUED` must be set.
+pub const WEXITED: i32 = 4;
+/// Also report continued children (those that received `SIGCONT`).
+pub const WCONTINUED: i32 = 8;
+/// `waitid` only: leave the child waitable (don't reap it).
+pub const WNOWAIT: i32 = 0x0100_0000;
+/// Linux extension: only consider non-thread children.
+pub const __WNOTHREAD: i32 = 0x2000_0000;
+/// Linux extension: consider all children, regardless of clone vs fork.
+pub const __WALL: i32 = 0x4000_0000;
+/// Linux extension: only consider clone children (SIGCHLD reporter).
+/// Bit 31 is the sign bit on i32, so this is i32::MIN.
+pub const __WCLONE: i32 = i32::MIN; // 1 << 31, as a signed integer (0x8000_0000)
+
+/// Mask of flag bits accepted by `waitpid` / `wait4` / `wait3`.  This
+/// is exactly the mask Linux's `kernel/exit.c::kernel_wait4` validates
+/// against in its prologue:
+///
+/// ```c
+/// if (options & ~(WNOHANG | WUNTRACED | WCONTINUED |
+///                 __WNOTHREAD | __WCLONE | __WALL))
+///         return -EINVAL;
+/// ```
+pub const WAITPID_VALID_OPTIONS: i32 =
+    WNOHANG | WUNTRACED | WCONTINUED | __WNOTHREAD | __WALL | __WCLONE;
+
+/// Mask of flag bits accepted by `waitid`.  Strict superset of
+/// `WAITPID_VALID_OPTIONS` (adds `WEXITED`, `WSTOPPED` — which equals
+/// `WUNTRACED` so it's already in the mask — and `WNOWAIT`).
+pub const WAITID_VALID_OPTIONS: i32 =
+    WNOHANG | WUNTRACED | WEXITED | WCONTINUED | WNOWAIT
+        | __WNOTHREAD | __WALL | __WCLONE;
 
 // ---------------------------------------------------------------------------
 // Wait status macros
@@ -160,6 +197,17 @@ pub extern "C" fn getppid() -> PidT {
 /// state, or -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
+    // Linux semantics (kernel/exit.c::kernel_wait4):
+    //   if (options & ~(WNOHANG | WUNTRACED | WCONTINUED |
+    //                   __WNOTHREAD | __WCLONE | __WALL))
+    //           return -EINVAL;
+    // The mask check is the first thing the syscall does, before
+    // pid is interpreted and before the wait queue is consulted.
+    // Our previous code silently dropped unknown bits.
+    if options & !WAITPID_VALID_OPTIONS != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     // Use non-blocking or blocking wait based on options.
     let sys_nr = if options & WNOHANG != 0 {
         SYS_PROCESS_TRY_WAIT
@@ -219,6 +267,13 @@ pub extern "C" fn wait3(
     options: i32,
     rusage: *mut crate::resource::Rusage,
 ) -> PidT {
+    // Linux validates options BEFORE touching rusage (see sys_wait4
+    // in kernel/exit.c).  Match that ordering: a buggy caller passing
+    // garbage options sees EINVAL with rusage untouched.
+    if options & !WAITPID_VALID_OPTIONS != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     // Zero the rusage if provided.
     if !rusage.is_null() {
         // SAFETY: Caller guarantees rusage is valid.
@@ -237,6 +292,12 @@ pub extern "C" fn wait4(
     options: i32,
     rusage: *mut crate::resource::Rusage,
 ) -> PidT {
+    // Linux validates options BEFORE touching rusage (sys_wait4 in
+    // kernel/exit.c).  Match that ordering.
+    if options & !WAITPID_VALID_OPTIONS != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if !rusage.is_null() {
         // SAFETY: Caller guarantees rusage is valid.
         unsafe { core::ptr::write_bytes(rusage, 0, 1); }
@@ -266,6 +327,26 @@ pub extern "C" fn waitid(
     _infop: *mut core::ffi::c_void,
     options: i32,
 ) -> i32 {
+    // Linux semantics (kernel/exit.c::sys_waitid):
+    //   if (options & ~(WNOHANG | WNOWAIT | WEXITED | WSTOPPED |
+    //                   WCONTINUED | __WNOTHREAD | __WCLONE | __WALL))
+    //           return -EINVAL;
+    //   if (!(options & (WEXITED | WSTOPPED | WCONTINUED)))
+    //           return -EINVAL;
+    // Both checks precede the idtype/id dispatch.  Our previous code
+    // didn't validate options at all, and delegated to waitpid with
+    // the raw value.  Now that waitpid also rejects WEXITED/WNOWAIT/
+    // etc (which are waitid-only bits), we must validate up-front
+    // and then strip waitid-only bits before delegating.
+    if options & !WAITID_VALID_OPTIONS != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if options & (WEXITED | WSTOPPED | WCONTINUED) == 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     let pid = match idtype {
         P_PID => id,
         P_ALL => -1,
@@ -280,7 +361,14 @@ pub extern "C" fn waitid(
         }
     };
 
-    let ret = waitpid(pid, core::ptr::null_mut(), options);
+    // Strip waitid-only bits before delegating to waitpid (which only
+    // accepts WAITPID_VALID_OPTIONS).  WSTOPPED == WUNTRACED is
+    // already shared; WEXITED/WNOWAIT are not.  We don't actually
+    // implement the semantic difference (stop/continue tracking),
+    // so dropping them only loses the no-op equivalence — the wait
+    // behaviour for our exited-children-only model is unchanged.
+    let pid_options = options & WAITPID_VALID_OPTIONS;
+    let ret = waitpid(pid, core::ptr::null_mut(), pid_options);
     if ret < 0 { -1 } else { 0 }
 }
 
@@ -2793,15 +2881,22 @@ mod tests {
 
     #[test]
     fn test_waitid_invalid_idtype() {
+        // Use WEXITED in options so the prologue options check
+        // doesn't preempt the idtype check — the intent of this
+        // test is to exercise the idtype-invalid branch.
         errno::set_errno(0);
-        assert_eq!(waitid(99, 0, core::ptr::null_mut(), 0), -1);
+        assert_eq!(waitid(99, 0, core::ptr::null_mut(), WEXITED), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
     fn test_waitid_pgid_returns_enosys() {
+        // Use WEXITED in options to satisfy Linux's prologue
+        // requirement that at least one of WEXITED/WSTOPPED/WCONTINUED
+        // be set; otherwise we'd hit the options-validation EINVAL
+        // before ever reaching the idtype dispatch.
         errno::set_errno(0);
-        assert_eq!(waitid(P_PGID, 0, core::ptr::null_mut(), 0), -1);
+        assert_eq!(waitid(P_PGID, 0, core::ptr::null_mut(), WEXITED), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
@@ -3126,6 +3221,212 @@ mod tests {
     fn test_wait4_specific_pid_wnohang() {
         let ret = wait4(99999, core::ptr::null_mut(), WNOHANG, core::ptr::null_mut());
         let _ = ret;
+    }
+
+    // -- Phase 103: waitpid / wait4 / waitid options validation --
+    //
+    // Linux semantics (kernel/exit.c::kernel_wait4, sys_waitid):
+    //   waitpid/wait4:
+    //     if (options & ~(WNOHANG | WUNTRACED | WCONTINUED |
+    //                     __WNOTHREAD | __WCLONE | __WALL))
+    //             return -EINVAL;
+    //   waitid:
+    //     if (options & ~(WNOHANG | WNOWAIT | WEXITED | WSTOPPED |
+    //                     WCONTINUED | __WNOTHREAD | __WCLONE | __WALL))
+    //             return -EINVAL;
+    //     if (!(options & (WEXITED | WSTOPPED | WCONTINUED)))
+    //             return -EINVAL;
+    // Both checks precede the pid/idtype dispatch and (for wait3/4)
+    // any rusage write.
+
+    #[test]
+    fn test_wait_flag_constants_match_linux() {
+        // Defensive invariants on the constants — match glibc /
+        // <linux/wait.h>.  If any of these drift, the mask check would
+        // accept the wrong bits.
+        assert_eq!(WNOHANG,    0x0000_0001);
+        assert_eq!(WUNTRACED,  0x0000_0002);
+        assert_eq!(WSTOPPED,   WUNTRACED);
+        assert_eq!(WEXITED,    0x0000_0004);
+        assert_eq!(WCONTINUED, 0x0000_0008);
+        assert_eq!(WNOWAIT,    0x0100_0000);
+        assert_eq!(__WNOTHREAD, 0x2000_0000);
+        assert_eq!(__WALL,      0x4000_0000);
+        // __WCLONE is bit 31 (the sign bit on i32).
+        assert_eq!(__WCLONE,    i32::MIN);
+    }
+
+    #[test]
+    fn test_waitpid_valid_options_mask() {
+        // The mask is exactly the union of accepted flags.
+        let expected =
+            WNOHANG | WUNTRACED | WCONTINUED | __WNOTHREAD | __WALL | __WCLONE;
+        assert_eq!(WAITPID_VALID_OPTIONS, expected);
+    }
+
+    #[test]
+    fn test_waitid_valid_options_mask() {
+        // The waitid mask is a superset of the waitpid mask plus
+        // WEXITED and WNOWAIT.  WSTOPPED == WUNTRACED is already in.
+        let expected = WAITPID_VALID_OPTIONS | WEXITED | WNOWAIT;
+        assert_eq!(WAITID_VALID_OPTIONS, expected);
+    }
+
+    #[test]
+    fn test_waitpid_unknown_option_einval() {
+        // Bit 4 is just above WCONTINUED (bit 3) and is not in the
+        // valid mask.  Must EINVAL.
+        errno::set_errno(0);
+        let ret = waitpid(-1, core::ptr::null_mut(), 1 << 4);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_waitpid_wexited_rejected() {
+        // WEXITED is a waitid-only flag.  waitpid must reject it.
+        errno::set_errno(0);
+        let ret = waitpid(-1, core::ptr::null_mut(), WEXITED);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_waitpid_wnowait_rejected() {
+        // WNOWAIT is a waitid-only flag.  waitpid must reject it.
+        errno::set_errno(0);
+        let ret = waitpid(-1, core::ptr::null_mut(), WNOWAIT);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_waitpid_valid_options_pass_mask() {
+        // Each individually-valid bit should NOT be rejected by the
+        // mask.  We can't easily assert success (no children to wait
+        // on), but we can assert that the returned errno is not
+        // EINVAL when an error occurs.
+        for &opt in &[WNOHANG, WUNTRACED, WCONTINUED, __WNOTHREAD, __WALL, __WCLONE] {
+            errno::set_errno(0);
+            let _ = waitpid(99_999, core::ptr::null_mut(), opt);
+            assert_ne!(errno::get_errno(), errno::EINVAL,
+                "valid option {:#x} should not be rejected by waitpid mask", opt);
+        }
+    }
+
+    #[test]
+    fn test_waitpid_combined_valid_options_pass() {
+        // The full valid mask combined should pass.
+        errno::set_errno(0);
+        let _ = waitpid(99_999, core::ptr::null_mut(), WAITPID_VALID_OPTIONS);
+        assert_ne!(errno::get_errno(), errno::EINVAL,
+            "the canonical valid combo must not be rejected");
+    }
+
+    #[test]
+    fn test_wait3_rejects_bad_options_without_touching_rusage() {
+        // Regression guard: wait3 used to zero rusage unconditionally,
+        // even when the call was malformed.  Linux validates options
+        // first.
+        let mut rusage = crate::resource::Rusage {
+            ru_utime: crate::time::Timeval { tv_sec: 1234, tv_usec: 5678 },
+            ru_stime: crate::time::Timeval { tv_sec: 9, tv_usec: 9 },
+            ru_maxrss: 4321,
+            ru_ixrss: 0, ru_idrss: 0, ru_isrss: 0,
+            ru_minflt: 0, ru_majflt: 0, ru_nswap: 0,
+            ru_inblock: 0, ru_oublock: 0, ru_msgsnd: 0,
+            ru_msgrcv: 0, ru_nsignals: 0, ru_nvcsw: 0,
+            ru_nivcsw: 0,
+        };
+        errno::set_errno(0);
+        let ret = wait3(core::ptr::null_mut(), 1 << 5, &raw mut rusage);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // rusage must NOT have been zeroed.
+        assert_eq!(rusage.ru_utime.tv_sec, 1234,
+            "rusage must be untouched when options are invalid");
+        assert_eq!(rusage.ru_maxrss, 4321);
+    }
+
+    #[test]
+    fn test_wait4_rejects_bad_options_without_touching_rusage() {
+        let mut rusage = crate::resource::Rusage {
+            ru_utime: crate::time::Timeval { tv_sec: 7777, tv_usec: 8888 },
+            ru_stime: crate::time::Timeval { tv_sec: 1, tv_usec: 1 },
+            ru_maxrss: 6543,
+            ru_ixrss: 0, ru_idrss: 0, ru_isrss: 0,
+            ru_minflt: 0, ru_majflt: 0, ru_nswap: 0,
+            ru_inblock: 0, ru_oublock: 0, ru_msgsnd: 0,
+            ru_msgrcv: 0, ru_nsignals: 0, ru_nvcsw: 0,
+            ru_nivcsw: 0,
+        };
+        errno::set_errno(0);
+        // WEXITED is a waitid-only bit that is NOT in
+        // WAITPID_VALID_OPTIONS.  Must EINVAL via the mask path.
+        // (Avoid using i32::MIN >> 1 here — sign-extending right
+        // shift produces __WALL|__WCLONE, both of which are VALID
+        // waitpid options, so it would pass the mask.)
+        let ret = wait4(-1, core::ptr::null_mut(), WEXITED,
+                        &raw mut rusage);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        assert_eq!(rusage.ru_utime.tv_sec, 7777);
+        assert_eq!(rusage.ru_maxrss, 6543);
+    }
+
+    #[test]
+    fn test_waitid_missing_state_flag_einval() {
+        // At least one of WEXITED, WSTOPPED, WCONTINUED is required.
+        // With options=WNOHANG (no state bit), waitid must EINVAL.
+        errno::set_errno(0);
+        let ret = waitid(P_ALL, 0, core::ptr::null_mut(), WNOHANG);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_waitid_zero_options_einval() {
+        // options=0 fails: no state bit set, mask still passes.
+        errno::set_errno(0);
+        let ret = waitid(P_ALL, 0, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_waitid_unknown_option_einval() {
+        // A bit not in WAITID_VALID_OPTIONS — bit 4 is just above
+        // WCONTINUED (bit 3) and not in the mask.
+        errno::set_errno(0);
+        let ret = waitid(P_ALL, 0, core::ptr::null_mut(),
+                         WEXITED | (1 << 4));
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_waitid_wexited_alone_passes_prologue() {
+        // WEXITED alone satisfies both the mask and the state
+        // requirement.  Should NOT EINVAL from the prologue; it may
+        // fail later for other reasons (e.g. ECHILD).
+        errno::set_errno(0);
+        let _ = waitid(P_ALL, 0, core::ptr::null_mut(), WEXITED);
+        assert_ne!(errno::get_errno(), errno::EINVAL,
+            "WEXITED alone must pass waitid's prologue");
+    }
+
+    #[test]
+    fn test_waitid_wstopped_alone_passes_prologue() {
+        errno::set_errno(0);
+        let _ = waitid(P_ALL, 0, core::ptr::null_mut(), WSTOPPED);
+        assert_ne!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_waitid_wcontinued_alone_passes_prologue() {
+        errno::set_errno(0);
+        let _ = waitid(P_ALL, 0, core::ptr::null_mut(), WCONTINUED);
+        assert_ne!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- reboot CAD constants --

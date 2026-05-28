@@ -930,31 +930,46 @@ fn validate_map_freeze(a: &BpfMapFreezeAttr) -> Result<(), i32> {
 /// - `ENOSYS`: all checks pass but no real BPF subsystem exists yet.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn bpf(cmd: u32, attr: *mut u8, size: u32) -> i32 {
-    // Unknown command — Linux returns EINVAL.
-    if cmd >= BPF_CMD_MAX {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    }
-    // Size bound check: too big → E2BIG (defends against an attacker
-    // passing UINT_MAX hoping we'll copy a huge chunk of user memory).
+    // Validation order matches Linux's `SYSCALL_DEFINE3(bpf, ...)` in
+    // `kernel/bpf/syscall.c`:
+    //   1. `bpf_check_uarg_tail_zero` → returns `-E2BIG` if
+    //      `actual_size > PAGE_SIZE`.
+    //   2. `copy_from_user(&attr, uattr, size)` → `-EFAULT` if the
+    //      user pointer is bad (and `size > 0` is the trigger; a
+    //      zero-byte copy is a no-op).
+    //   3. switch on `cmd`; default arm returns `-EINVAL` for
+    //      unknown commands.
+    //   4. per-cmd handlers do their own shape/argument validation.
+
+    // 1. Size bound check (Linux: bpf_check_uarg_tail_zero E2BIG).
     if size > BPF_ATTR_SIZE_MAX {
         errno::set_errno(errno::E2BIG);
         return -1;
     }
-    // size==0 with a non-NULL attr is technically allowed by Linux on
-    // some commands, but we require enough bytes for the per-cmd
-    // shape so callers can't construct a degenerate "zero-byte attr"
-    // that bypasses validation.
+    // 2. attr must be non-NULL when we'd actually read bytes from it
+    //    (Linux: copy_from_user with bad user pointer → -EFAULT).
+    //    A zero-length copy is a no-op in Linux, so we only fault on
+    //    NULL when size > 0.
+    if size > 0 && attr.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // 3. Unknown command — Linux's switch default → -EINVAL.
+    if cmd >= BPF_CMD_MAX {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // 4. Per-cmd shape minimum.  We require enough bytes for the
+    //    per-cmd struct so callers can't construct a degenerate
+    //    "zero-byte attr" that bypasses validation.  In Linux, the
+    //    equivalent rejection happens inside each per-cmd handler.
     let needed = min_attr_size(cmd);
     if size < needed {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // attr must be non-NULL when we're going to read bytes from it.
-    if attr.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    // After the size>=needed check, size > 0 always holds, so any
+    // NULL attr would already have failed step 2.
 
     // Per-command shape validation. Read the relevant attr struct
     // (unaligned, since the caller's pointer may not be aligned).
@@ -1868,5 +1883,177 @@ mod tests {
         };
         assert_eq!(call_bpf(BPF_LINK_CREATE, &a), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- Phase 120: bpf() prologue precedence vs. Linux ---------------------
+    //
+    // Linux's bpf syscall runs `bpf_check_uarg_tail_zero` (E2BIG for
+    // size > PAGE_SIZE), then `copy_from_user` (EFAULT for bad user
+    // pointer with non-zero size), then the cmd switch (EINVAL for
+    // unknown cmd in the default arm).  Our previous order checked
+    // `cmd` first, which made unknown-cmd EINVAL beat both E2BIG and
+    // EFAULT — observable on buggy-caller calls where multiple
+    // arguments were broken at once.
+
+    fn fresh_errno() {
+        errno::set_errno(0);
+    }
+
+    #[test]
+    fn test_bpf_phase120_size_e2big_wins_over_unknown_cmd() {
+        // (cmd=invalid, size=huge): Linux returns E2BIG before the cmd
+        // switch fires.  Was EINVAL.
+        fresh_errno();
+        let a = good_map_create();
+        let p = (&a as *const _ as *mut u8).cast::<u8>();
+        let r = bpf(BPF_CMD_MAX + 100, p, 8193);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::E2BIG);
+    }
+
+    #[test]
+    fn test_bpf_phase120_efault_wins_over_unknown_cmd() {
+        // (cmd=invalid, attr=NULL, size>0): Linux returns EFAULT from
+        // copy_from_user before reaching the cmd switch.  Was EINVAL.
+        fresh_errno();
+        let r = bpf(
+            BPF_CMD_MAX + 5,
+            ptr::null_mut(),
+            mem::size_of::<BpfMapCreateAttr>() as u32,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_bpf_phase120_size_e2big_wins_over_null_attr() {
+        // (cmd=valid, attr=NULL, size=huge): Linux checks size first
+        // (E2BIG) before copy_from_user could fail with EFAULT.
+        fresh_errno();
+        let r = bpf(BPF_MAP_CREATE, ptr::null_mut(), 8193);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::E2BIG);
+    }
+
+    #[test]
+    fn test_bpf_phase120_size_e2big_wins_over_undersized() {
+        // (cmd=valid, size=huge): E2BIG fires before per-cmd min size
+        // check could complain.  Same as before, but pinned.
+        fresh_errno();
+        let a = good_map_create();
+        let p = (&a as *const _ as *mut u8).cast::<u8>();
+        let r = bpf(BPF_MAP_CREATE, p, BPF_ATTR_SIZE_MAX + 1);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::E2BIG);
+    }
+
+    #[test]
+    fn test_bpf_phase120_efault_wins_over_undersized() {
+        // (cmd=valid, attr=NULL, size=valid-but-undersized for the cmd
+        // shape, yet > 0): EFAULT (copy fails) before per-cmd EINVAL.
+        fresh_errno();
+        let r = bpf(BPF_MAP_CREATE, ptr::null_mut(), 4); // size > 0 but tiny
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_bpf_phase120_unknown_cmd_after_size_and_null_pass() {
+        // (cmd=invalid, attr=valid, size=valid for some struct): with
+        // size/attr both fine, we reach the cmd switch → EINVAL.
+        fresh_errno();
+        let a = good_map_create();
+        let p = (&a as *const _ as *mut u8).cast::<u8>();
+        let r = bpf(BPF_CMD_MAX, p, mem::size_of::<BpfMapCreateAttr>() as u32);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_bpf_phase120_size_zero_with_null_attr_invokes_cmd() {
+        // (cmd=invalid, attr=NULL, size=0): Linux's copy_from_user
+        // with size=0 is a no-op; we now match that and proceed to
+        // the cmd check, which yields EINVAL for the unknown cmd.
+        // Previously this was also EINVAL but via the cmd-first path;
+        // post-Phase 120 it goes through the size>0&&null branch
+        // (which doesn't fire because size==0) into the cmd check.
+        fresh_errno();
+        let r = bpf(BPF_CMD_MAX + 7, ptr::null_mut(), 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_bpf_phase120_size_zero_with_valid_cmd_reaches_undersized_einval() {
+        // (cmd=valid, attr=valid-but-unused, size=0): now passes
+        // null/E2BIG checks and falls into per-cmd min-size → EINVAL.
+        fresh_errno();
+        let a = good_map_create();
+        let p = (&a as *const _ as *mut u8).cast::<u8>();
+        let r = bpf(BPF_MAP_CREATE, p, 0);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_bpf_phase120_clean_args_still_reach_enosys() {
+        // Happy path must still pass all four prologue checks.
+        fresh_errno();
+        let a = good_map_create();
+        let p = (&a as *const _ as *mut u8).cast::<u8>();
+        let r = bpf(BPF_MAP_CREATE, p, mem::size_of::<BpfMapCreateAttr>() as u32);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_bpf_phase120_max_u32_size_e2big_not_overflow() {
+        // u32::MAX size must report E2BIG without arithmetic overflow.
+        fresh_errno();
+        let a = good_map_create();
+        let p = (&a as *const _ as *mut u8).cast::<u8>();
+        let r = bpf(BPF_MAP_CREATE, p, u32::MAX);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::E2BIG);
+    }
+
+    #[test]
+    fn test_bpf_phase120_max_u32_size_e2big_wins_over_unknown_cmd() {
+        // (cmd=invalid, size=u32::MAX, attr=NULL): size E2BIG fires
+        // before any other check (cmd unknown or NULL EFAULT).
+        fresh_errno();
+        let r = bpf(BPF_CMD_MAX + 99, ptr::null_mut(), u32::MAX);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::E2BIG);
+    }
+
+    #[test]
+    fn test_bpf_phase120_recovery_after_e2big() {
+        // After an E2BIG, the next clean call must still reach ENOSYS
+        // (no sticky state from the prologue rejection).
+        fresh_errno();
+        let a = good_map_create();
+        let p = (&a as *const _ as *mut u8).cast::<u8>();
+        let r1 = bpf(BPF_MAP_CREATE, p, 8193);
+        assert_eq!(r1, -1);
+        assert_eq!(errno::get_errno(), errno::E2BIG);
+
+        fresh_errno();
+        let r2 = bpf(BPF_MAP_CREATE, p, mem::size_of::<BpfMapCreateAttr>() as u32);
+        assert_eq!(r2, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_bpf_phase120_buggy_caller_passes_negative_int_as_u32_size() {
+        // C code casting `-1` (int) to `unsigned int` size yields
+        // u32::MAX.  Linux returns E2BIG for that; we match.
+        fresh_errno();
+        let a = good_map_create();
+        let p = (&a as *const _ as *mut u8).cast::<u8>();
+        let bogus_size: u32 = (-1i32) as u32;
+        let r = bpf(BPF_MAP_CREATE, p, bogus_size);
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::E2BIG);
     }
 }

@@ -377,11 +377,28 @@ pub extern "C" fn aio_suspend(
 ///
 /// Performs `fsync(aiocbp->aio_fildes)` immediately and stores the
 /// result like `aio_read`/`aio_write`.  Returns 0 on submission, -1
-/// with errno on validation failure.  The `op` argument selects
-/// `O_SYNC` vs `O_DSYNC` semantics on Linux; our `fsync` does a full
-/// sync regardless.
+/// with errno on validation failure.
+///
+/// # `op` semantics
+///
+/// POSIX requires `op` to be either `O_SYNC` (full file sync, matching
+/// `fsync(2)`) or `O_DSYNC` (data-only sync, matching `fdatasync(2)`).
+/// Any other value yields `EINVAL`.  Our implementation does not
+/// separately expose `fdatasync` semantics — both accepted values
+/// dispatch to `fsync` — but we still validate the input so callers
+/// passing nonsense values (uninitialised stack, wrong constant,
+/// arithmetic typo) get a deterministic error instead of silent
+/// success.
+///
+/// Validation order (matches Linux's `libaio`/glibc convention of
+/// checking the obvious pointer/descriptor errors before the
+/// flag-domain check):
+///
+/// 1. `aiocbp` NULL → `EINVAL`.
+/// 2. `aiocbp->aio_fildes < 0` → `EBADF`.
+/// 3. `op` not `O_SYNC` and not `O_DSYNC` → `EINVAL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn aio_fsync(_op: i32, aiocbp: *mut Aiocb) -> i32 {
+pub extern "C" fn aio_fsync(op: i32, aiocbp: *mut Aiocb) -> i32 {
     if aiocbp.is_null() {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -390,6 +407,10 @@ pub extern "C" fn aio_fsync(_op: i32, aiocbp: *mut Aiocb) -> i32 {
     let fd = unsafe { (*aiocbp).aio_fildes };
     if fd < 0 {
         errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if op != crate::fcntl::O_SYNC && op != crate::fcntl::O_DSYNC {
+        errno::set_errno(errno::EINVAL);
         return -1;
     }
     let ret = crate::file::fsync(fd);
@@ -656,6 +677,149 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(aio_fsync(0, &raw mut cb), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // -- Phase 98: aio_fsync `op` argument validation --
+
+    /// `op` not in `{O_SYNC, O_DSYNC}` yields `EINVAL` once the pointer
+    /// and descriptor pass.
+    #[test]
+    fn test_aio_fsync_invalid_op_einval() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = 0;
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(99, &raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Negative `op` (typical "uninitialised stack" symptom) is rejected.
+    #[test]
+    fn test_aio_fsync_negative_op_einval() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = 0;
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(-1, &raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `i32::MAX` is rejected — exercises the upper boundary.
+    #[test]
+    fn test_aio_fsync_max_op_einval() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = 0;
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(i32::MAX, &raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `i32::MIN` is rejected — exercises the lower boundary.
+    #[test]
+    fn test_aio_fsync_min_op_einval() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = 0;
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(i32::MIN, &raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// `O_SYNC` is accepted; aio_fsync returns 0 (submission OK).
+    #[test]
+    fn test_aio_fsync_o_sync_accepted() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = 0;
+        assert_eq!(aio_fsync(crate::fcntl::O_SYNC, &raw mut cb), 0);
+    }
+
+    /// `O_DSYNC` is accepted; aio_fsync returns 0 (submission OK).
+    #[test]
+    fn test_aio_fsync_o_dsync_accepted() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = 0;
+        assert_eq!(aio_fsync(crate::fcntl::O_DSYNC, &raw mut cb), 0);
+    }
+
+    /// `O_SYNC` and `O_DSYNC` are distinct values — sanity check for
+    /// the validator's accept-list.
+    #[test]
+    fn test_aio_fsync_o_sync_dsync_distinct() {
+        assert_ne!(crate::fcntl::O_SYNC, crate::fcntl::O_DSYNC);
+    }
+
+    /// Validation order: NULL aiocbp wins over an invalid `op` — the
+    /// errno is still EINVAL but the path is reachable without
+    /// dereferencing the (null) aiocbp.
+    #[test]
+    fn test_aio_fsync_null_aiocbp_short_circuits_op_check() {
+        // If we mistakenly checked op before aiocbp, a null pointer
+        // dereference would crash; reaching this test running at all
+        // proves the null check is first.
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(i32::MIN, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Validation order: a negative fd wins over an invalid `op`,
+    /// reporting `EBADF` (not `EINVAL`).
+    #[test]
+    fn test_aio_fsync_bad_fd_wins_over_invalid_op() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = -42;
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(99, &raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    /// Buggy caller passes an invalid op, observes EINVAL, retries
+    /// with O_SYNC — the second call must succeed and the completion
+    /// record must reflect that retry.
+    #[test]
+    fn test_aio_fsync_recovery_after_einval() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = 0;
+
+        // Bad call.
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(0xDEAD, &raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // The completion table must NOT have a record for cb yet —
+        // an EINVAL early-return must not have stored anything.
+        assert_eq!(aio_error(&cb), errno::EINVAL);
+
+        // Retry with a valid op.
+        assert_eq!(aio_fsync(crate::fcntl::O_SYNC, &raw mut cb), 0);
+        // Now aio_error must return 0 (operation completed).
+        assert_eq!(aio_error(&cb), 0);
+    }
+
+    /// Submitting via O_DSYNC then calling aio_return reports the
+    /// stored byte count (0 for a sync op).
+    #[test]
+    fn test_aio_fsync_o_dsync_aio_return_zero() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = 0;
+        assert_eq!(aio_fsync(crate::fcntl::O_DSYNC, &raw mut cb), 0);
+        // aio_return reports 0 bytes for an fsync completion.
+        assert_eq!(aio_return(&raw mut cb), 0);
+    }
+
+    /// EINVAL on a bogus op does not consume a slot in the completion
+    /// table even if the same aiocbp is reused later for a real
+    /// operation.  (A previous submission's record may persist across
+    /// the failed call — that's fine — but the failed call itself
+    /// must not invent a record.)
+    #[test]
+    fn test_aio_fsync_einval_leaves_no_phantom_record() {
+        let mut cb: Aiocb = unsafe { core::mem::zeroed() };
+        cb.aio_fildes = 0;
+
+        // No prior submission for this cb.
+        errno::set_errno(0);
+        assert_eq!(aio_fsync(0x100, &raw mut cb), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        // The completion table must not pretend the operation
+        // completed — aio_error must report EINVAL ("no record").
+        assert_eq!(aio_error(&cb), errno::EINVAL);
     }
 
     // -- lio_listio --

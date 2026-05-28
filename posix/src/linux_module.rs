@@ -175,6 +175,11 @@ unsafe fn validate_name(name: *const u8) -> Result<(), i32> {
 ///
 /// # Errors
 ///
+/// - **Phase 174:** `EPERM`: caller lacks `CAP_SYS_MODULE`.  Linux's
+///   `may_init_module` runs *first* — before `copy_module_from_user`
+///   — so an unprivileged caller passing `len = 0` sees `EPERM`, not
+///   `ENOEXEC`.  This matches `kernel/module/main.c::may_init_module`
+///   exactly: cap probe gates everything else.
 /// - `ENOEXEC`: `len < 64` (the ELF64 header size). Returned before any
 ///   pointer check, matching Linux's `copy_module_from_user` prologue.
 /// - `E2BIG`: `len > MODULE_IMAGE_MAX (256 MiB)` — guards against
@@ -185,6 +190,17 @@ unsafe fn validate_name(name: *const u8) -> Result<(), i32> {
 /// - `ENOSYS`: all checks pass — real module loading is not supported.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn init_module(module_image: *const u8, len: usize, params: *const u8) -> i32 {
+    // Phase 174: Linux's `may_init_module` runs at the top of
+    // SYSCALL_DEFINE3(init_module) — before `copy_module_from_user`
+    // touches the user pointer or even reads `len`.  Mirror that order
+    // so unprivileged callers always observe EPERM regardless of the
+    // other arguments.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_MODULE,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
     // Linux's `copy_module_from_user` checks `info->len <
     // sizeof(*(info->hdr))` before touching the userspace pointer, so
     // a buggy caller passing both `len = 0` and a NULL image observes
@@ -222,12 +238,26 @@ pub extern "C" fn init_module(module_image: *const u8, len: usize, params: *cons
 ///
 /// # Errors
 ///
-/// - `EINVAL`: unknown flag bit (checked first).
+/// - **Phase 174:** `EPERM`: caller lacks `CAP_SYS_MODULE`.  Linux's
+///   `may_init_module` runs first — before the flag check or
+///   `fdget(fd)` — so an unprivileged caller probing module support
+///   sees `EPERM` regardless of `flags` / `fd` / `params`.
+/// - `EINVAL`: unknown flag bit (checked first among the argument
+///   guards).
 /// - `EBADF`: `fd < 0` (checked second).
 /// - `EFAULT`: NULL `params` (checked last; Linux requires "" not NULL).
 /// - `ENOSYS`: all checks pass — no module subsystem to dispatch to.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn finit_module(fd: i32, params: *const u8, flags: u32) -> i32 {
+    // Phase 174: Linux's `may_init_module` runs at the top of
+    // SYSCALL_DEFINE3(finit_module), before the flag check or the
+    // fdget.  Unprivileged callers see EPERM regardless of other args.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_MODULE,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
     // Linux's `SYSCALL_DEFINE3(finit_module)` rejects unknown flag
     // bits before calling `fdget(fd)`, so a buggy caller that passes
     // both a bad fd and a bad flag observes EINVAL, not EBADF. Match
@@ -258,6 +288,11 @@ pub extern "C" fn finit_module(fd: i32, params: *const u8, flags: u32) -> i32 {
 ///
 /// # Errors
 ///
+/// - **Phase 174:** `EPERM`: caller lacks `CAP_SYS_MODULE`.  Linux's
+///   `SYSCALL_DEFINE2(delete_module)` performs
+///   `if (!capable(CAP_SYS_MODULE) || modules_disabled) return -EPERM;`
+///   *before* `strncpy_from_user(name, name_user, ...)`, so EPERM
+///   beats EFAULT and EINVAL.
 /// - `EFAULT`: NULL `name`.
 /// - `EINVAL`: empty name, name too long (> 60 bytes), name contains
 ///   `/`, or unknown flag bit (accepts both our legacy constants and
@@ -266,6 +301,14 @@ pub extern "C" fn finit_module(fd: i32, params: *const u8, flags: u32) -> i32 {
 /// - `ENOSYS`: all checks pass.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn delete_module(name: *const u8, flags: u32) -> i32 {
+    // Phase 174: cap check is the very first thing Linux's
+    // SYSCALL_DEFINE2(delete_module) does, before reading `name`.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_MODULE,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
     if name.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -887,5 +930,326 @@ mod tests {
         let r = init_module(buf.as_ptr(), 128, b"\0".as_ptr());
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // ======================================================================
+    // Phase 174 — module syscalls CAP_SYS_MODULE gate
+    //
+    // Linux performs the CAP_SYS_MODULE check at the very top of all
+    // three module syscalls (`may_init_module` for init_module /
+    // finit_module, an explicit `capable()` for delete_module).  EPERM
+    // therefore beats every other errno path — even bad-fd, NULL
+    // pointers, and unknown flag bits.
+    //
+    // These tests use the established CapGuard snapshot/restore pattern
+    // from Phases 168 – 173 and must run with `--test-threads=1`.
+    // ======================================================================
+
+    mod module_cap_phase174 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_module() {
+            use crate::sys_capability::CAP_SYS_MODULE;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_MODULE < 32 {
+                (lo & !(1u32 << CAP_SYS_MODULE), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_MODULE - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_MODULE");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_MODULE));
+        }
+
+        // -- init_module --------------------------------------------------
+
+        /// init_module with valid args but no cap → EPERM.
+        #[test]
+        fn test_init_module_phase174_valid_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            let buf = [0u8; 128];
+            errno::set_errno(0);
+            assert_eq!(init_module(buf.as_ptr(), 128, b"\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// init_module(NULL, 0, NULL) without cap → EPERM (NOT ENOEXEC).
+        /// On Linux may_init_module runs before copy_module_from_user,
+        /// so even a totally bogus call observes EPERM first.
+        #[test]
+        fn test_init_module_phase174_eperm_beats_enoexec() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(
+                init_module(ptr::null(), 0, ptr::null()),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// init_module with len > MODULE_IMAGE_MAX without cap → EPERM
+        /// (NOT E2BIG).
+        #[test]
+        fn test_init_module_phase174_eperm_beats_e2big() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(
+                init_module(ptr::null(), MODULE_IMAGE_MAX + 1, ptr::null()),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// init_module(NULL, valid_len, valid_params) without cap →
+        /// EPERM (NOT EFAULT).
+        #[test]
+        fn test_init_module_phase174_eperm_beats_efault() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(
+                init_module(ptr::null(), 128, b"\0".as_ptr()),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- finit_module -----------------------------------------------
+
+        /// finit_module with valid args but no cap → EPERM.
+        #[test]
+        fn test_finit_module_phase174_valid_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(finit_module(3, b"\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// finit_module with unknown flag bit → EPERM (NOT EINVAL).
+        /// may_init_module runs before the flag check.
+        #[test]
+        fn test_finit_module_phase174_eperm_beats_einval() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(finit_module(3, b"\0".as_ptr(), 0xFFFF_0000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// finit_module with negative fd → EPERM (NOT EBADF).
+        #[test]
+        fn test_finit_module_phase174_eperm_beats_ebadf() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(finit_module(-1, b"\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// finit_module with NULL params → EPERM (NOT EFAULT).
+        #[test]
+        fn test_finit_module_phase174_eperm_beats_efault() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(finit_module(3, ptr::null(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- delete_module ----------------------------------------------
+
+        /// delete_module with valid name but no cap → EPERM.
+        #[test]
+        fn test_delete_module_phase174_valid_no_cap_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(delete_module(b"foo\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// delete_module with NULL name → EPERM (NOT EFAULT).
+        #[test]
+        fn test_delete_module_phase174_eperm_beats_efault() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(delete_module(ptr::null(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// delete_module with bad flags → EPERM (NOT EINVAL).
+        #[test]
+        fn test_delete_module_phase174_eperm_beats_einval_flags() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(
+                delete_module(b"foo\0".as_ptr(), 0xFFFF_0000),
+                -1,
+            );
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// delete_module with empty name → EPERM (NOT EINVAL).
+        #[test]
+        fn test_delete_module_phase174_eperm_beats_einval_empty_name() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(delete_module(b"\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Workflow / recovery -----------------------------------------
+
+        /// rmmod-like probe: drop cap → delete_module EPERM → restore
+        /// cap → delete_module reaches ENOSYS.
+        #[test]
+        fn test_delete_module_phase174_workflow_drop_restore() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            errno::set_errno(0);
+            assert_eq!(delete_module(b"snd_hda\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+
+            // Restore CAP_SYS_MODULE and re-try.
+            use crate::sys_capability::CAP_SYS_MODULE;
+            let (lo, hi) =
+                crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_MODULE < 32 {
+                (lo | (1u32 << CAP_SYS_MODULE), hi)
+            } else {
+                (lo, hi | (1u32 << (CAP_SYS_MODULE - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            assert_eq!(
+                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
+                0,
+            );
+            errno::set_errno(0);
+            assert_eq!(delete_module(b"snd_hda\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Sentinel: cap-held privileged path still works -------------
+
+        /// With CAP_SYS_MODULE held (default), every module syscall
+        /// reaches ENOSYS — verifies the gate doesn't fire spuriously.
+        #[test]
+        fn test_module_phase174_sentinel_cap_held_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_MODULE,
+            ));
+            let buf = [0u8; 128];
+            errno::set_errno(0);
+            assert_eq!(init_module(buf.as_ptr(), 128, b"\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+            errno::set_errno(0);
+            assert_eq!(finit_module(3, b"\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+            errno::set_errno(0);
+            assert_eq!(delete_module(b"foo\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Cross-check: dropping CAP_SYS_MODULE isolates other caps ---
+
+        /// Dropping CAP_SYS_MODULE must not disturb other caps.
+        #[test]
+        fn test_module_phase174_drop_isolates_other_caps() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_module();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_TIME,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYSLOG,
+            ));
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_MODULE,
+            ));
+        }
     }
 }

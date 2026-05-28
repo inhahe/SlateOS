@@ -72,15 +72,16 @@ pub const INVALID_GID: GidT = GidT::MAX;
 /// SYSCALL_DEFINE1(setfsuid, uid_t, uid) {
 ///     old_fsuid = current->fsuid;
 ///     kuid = make_kuid(ns, uid);
-///     if (uid_valid(kuid) && (caller is privileged or kuid matches
-///                              current ruid/euid/suid/fsuid)) {
+///     if (uid_valid(kuid) && (uid == ruid || uid == euid ||
+///                              uid == suid || uid == fsuid ||
+///                              ns_capable_setid(CAP_SETUID))) {
 ///         current->fsuid = kuid;
 ///     }
 ///     return old_fsuid;          // always, even when the assignment was skipped
 /// }
 /// ```
 ///
-/// Three observable behaviours follow:
+/// Four observable behaviours follow:
 ///
 /// 1. `setfsuid((uid_t)-1)` (i.e. `u32::MAX`) is the conventional
 ///    "invalid UID" sentinel — `uid_valid(kuid)` is false, so the
@@ -92,9 +93,17 @@ pub const INVALID_GID: GidT = GidT::MAX;
 ///    quirky interface because NFS daemons need to discover the
 ///    previous value to put it back.
 /// 3. The return value is the *previous* fsuid, not the new one.
+/// 4. **Phase 198**: when the caller does not hold CAP_SETUID and
+///    the requested uid does not match one of {ruid, euid, suid,
+///    fsuid}, the assignment is silently skipped.  No errno set;
+///    the old fsuid is still returned.  Probing with `(uid_t)-1`
+///    remains the canonical "read without changing" idiom.
 ///
-/// We currently skip the privilege check (no real credential model
-/// yet) but enforce (1) and (3) for ABI parity.
+/// Since our credential model exposes only `getuid()`/`geteuid()`
+/// (both 0) and the tracked fsuid, the cred-match set we compare
+/// against is `{getuid(), geteuid(), prev_fsuid}` — the saved uid
+/// (suid) is folded into the real uid (Linux at process start sets
+/// suid == euid == ruid).
 ///
 /// # Safety
 ///
@@ -104,7 +113,20 @@ pub const INVALID_GID: GidT = GidT::MAX;
 pub extern "C" fn setfsuid(fsuid: UidT) -> i32 {
     let prev = FSUID.load(Ordering::Relaxed);
     if fsuid != INVALID_UID {
-        FSUID.store(fsuid, Ordering::Relaxed);
+        // Phase 198: Linux requires the requested uid to match one
+        // of {ruid, euid, suid, fsuid} OR the caller to hold
+        // CAP_SETUID.  Otherwise the assignment is silently skipped
+        // (no errno).
+        let ruid = crate::unistd::getuid();
+        let euid = crate::unistd::geteuid();
+        let matches_cred = fsuid == ruid || fsuid == euid || fsuid == prev;
+        if matches_cred
+            || crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SETUID,
+            )
+        {
+            FSUID.store(fsuid, Ordering::Relaxed);
+        }
     }
     // Linux returns the previous fsuid as an int.  Personality / UID
     // values fit in the low 31 bits; `as i32` is safe.
@@ -115,12 +137,23 @@ pub extern "C" fn setfsuid(fsuid: UidT) -> i32 {
 ///
 /// Atomically replaces the current filesystem GID with `fsgid` and
 /// returns the previous value.  Same `(gid_t)-1` sentinel and
-/// errno-untouched contract as [`setfsuid`].
+/// errno-untouched contract as [`setfsuid`].  **Phase 198**: also
+/// gated on CAP_SETGID via the matching `{rgid, egid, sgid, fsgid}`
+/// cred-set or capability.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setfsgid(fsgid: GidT) -> i32 {
     let prev = FSGID.load(Ordering::Relaxed);
     if fsgid != INVALID_GID {
-        FSGID.store(fsgid, Ordering::Relaxed);
+        let rgid = crate::unistd::getgid();
+        let egid = crate::unistd::getegid();
+        let matches_cred = fsgid == rgid || fsgid == egid || fsgid == prev;
+        if matches_cred
+            || crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SETGID,
+            )
+        {
+            FSGID.store(fsgid, Ordering::Relaxed);
+        }
     }
     prev as i32
 }
@@ -397,5 +430,403 @@ mod tests {
         assert_eq!(current_fsuid(), 7);
         assert_eq!(current_fsgid(), 11);
         reset();
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 198 — CAP_SETUID/CAP_SETGID gate on arbitrary fsuid/fsgid changes
+    //
+    // Linux's `setfsuid` (kernel/sys.c) silently skips the assignment when
+    //   * the requested uid is INVALID (covered by Phase 79), OR
+    //   * it does not match {ruid, euid, suid, fsuid} AND the caller does
+    //     not hold CAP_SETUID.
+    //
+    // The previous stub skipped only the INVALID check, so any process
+    // could change fsuid to an arbitrary value — divergent from Linux,
+    // and a credential-escalation hazard once a real file permission
+    // layer consults current_fsuid().  This phase closes the gap.
+    //
+    // Observable contract: the denied path is silent — no errno, return
+    // value is still the previous fsuid.  Discoverable only by reading
+    // back current_fsuid() and seeing it unchanged.
+    // -----------------------------------------------------------------------
+    mod fsuid_cap_phase198 {
+        use super::*;
+        use core::sync::atomic::Ordering;
+
+        /// RAII guard: snapshot effective caps on construction,
+        /// restore them on Drop.  Mirrors the pattern used by the
+        /// process.rs Phase 196/197 modules.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap(cap: u32) {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if cap < 32 {
+                (lo & !(1u32 << cap), hi)
+            } else {
+                (lo, hi & !(1u32 << (cap - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+
+        fn reset_creds() {
+            FSUID.store(0, Ordering::Relaxed);
+            FSGID.store(0, Ordering::Relaxed);
+        }
+
+        // -- Per-error-class: denial path leaves state unchanged ---------
+
+        /// Without CAP_SETUID and from fsuid=0, requesting an
+        /// arbitrary uid (1234) that does NOT match {ruid=0, euid=0,
+        /// fsuid=0} is silently denied.  No errno, return = prev = 0,
+        /// state remains 0.
+        #[test]
+        fn test_phase198_setfsuid_no_cap_arbitrary_denied_silently() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            crate::errno::set_errno(0);
+            let prev = setfsuid(1234);
+            assert_eq!(prev, 0, "always returns previous fsuid");
+            assert_eq!(current_fsuid(), 0, "denied: state unchanged");
+            assert_eq!(
+                crate::errno::get_errno(),
+                0,
+                "setfsuid never touches errno"
+            );
+            reset_creds();
+        }
+
+        /// Same for setfsgid + CAP_SETGID.
+        #[test]
+        fn test_phase198_setfsgid_no_cap_arbitrary_denied_silently() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            crate::errno::set_errno(0);
+            let prev = setfsgid(5678);
+            assert_eq!(prev, 0);
+            assert_eq!(current_fsgid(), 0);
+            assert_eq!(crate::errno::get_errno(), 0);
+            reset_creds();
+        }
+
+        // -- Cred-match path: allowed even without cap --------------------
+
+        /// Without CAP_SETUID, setting fsuid to current ruid (=0)
+        /// matches the cred set and proceeds.  No-op observable, but
+        /// the "no-cap, matches cred" branch is exercised.
+        #[test]
+        fn test_phase198_setfsuid_no_cap_matches_ruid_allowed() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            let prev = setfsuid(0); // ruid = 0
+            assert_eq!(prev, 0);
+            assert_eq!(current_fsuid(), 0);
+            reset_creds();
+        }
+
+        /// Without CAP_SETUID, setting fsuid to the *current* fsuid
+        /// (after a prior cap'd set) is allowed via the
+        /// "matches fsuid" arm of the cred set.
+        #[test]
+        fn test_phase198_setfsuid_no_cap_matches_current_fsuid_allowed() {
+            reset_creds();
+            // With cap held, push fsuid to 7777.
+            let _ = setfsuid(7777);
+            assert_eq!(current_fsuid(), 7777);
+            // Drop cap, "set" to the same value — must succeed
+            // (matches current fsuid).
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            let prev = setfsuid(7777);
+            assert_eq!(prev, 7777);
+            assert_eq!(current_fsuid(), 7777);
+            reset_creds();
+        }
+
+        // -- With cap: arbitrary set succeeds ----------------------------
+
+        /// With CAP_SETUID held, an arbitrary new fsuid is stored.
+        #[test]
+        fn test_phase198_setfsuid_with_cap_arbitrary_succeeds() {
+            reset_creds();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SETUID,
+            ));
+            let prev = setfsuid(9999);
+            assert_eq!(prev, 0);
+            assert_eq!(current_fsuid(), 9999);
+            reset_creds();
+        }
+
+        /// With CAP_SETGID held, arbitrary new fsgid stored.
+        #[test]
+        fn test_phase198_setfsgid_with_cap_arbitrary_succeeds() {
+            reset_creds();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SETGID,
+            ));
+            let prev = setfsgid(8888);
+            assert_eq!(prev, 0);
+            assert_eq!(current_fsgid(), 8888);
+            reset_creds();
+        }
+
+        // -- Sentinel preserved -------------------------------------------
+
+        /// Phase 79's INVALID_UID sentinel must still be honored
+        /// regardless of cap state: with cap held, sentinel is a
+        /// no-op probe (state unchanged, returns prev).
+        #[test]
+        fn test_phase198_invalid_uid_still_noop_with_cap() {
+            reset_creds();
+            let _ = setfsuid(50);
+            let prev = setfsuid(INVALID_UID);
+            assert_eq!(prev, 50);
+            assert_eq!(current_fsuid(), 50);
+            reset_creds();
+        }
+
+        /// And without cap: sentinel still skips silently.
+        #[test]
+        fn test_phase198_invalid_uid_still_noop_without_cap() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            let prev = setfsuid(INVALID_UID);
+            assert_eq!(prev, 0);
+            assert_eq!(current_fsuid(), 0);
+            reset_creds();
+        }
+
+        // -- Errno discipline on the denied path --------------------------
+
+        /// On the silent-deny path, stale errno is preserved (the
+        /// syscall never writes errno).  Linux contract: setfsuid
+        /// returns the previous value, period.
+        #[test]
+        fn test_phase198_denied_setfsuid_preserves_stale_errno() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            crate::errno::set_errno(crate::errno::EBADF);
+            let _ = setfsuid(4242);
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EBADF,
+                "setfsuid must not write errno even on denial"
+            );
+            crate::errno::set_errno(0);
+            reset_creds();
+        }
+
+        #[test]
+        fn test_phase198_denied_setfsgid_preserves_stale_errno() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            crate::errno::set_errno(crate::errno::EBADF);
+            let _ = setfsgid(4242);
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EBADF
+            );
+            crate::errno::set_errno(0);
+            reset_creds();
+        }
+
+        // -- Recovery: cap restoration re-enables arbitrary set -----------
+
+        /// Drop cap, fail to change; restore cap (CapGuard goes out
+        /// of scope), now arbitrary set succeeds.
+        #[test]
+        fn test_phase198_capguard_restore_re_enables_set() {
+            reset_creds();
+            {
+                let _g = CapGuard::snapshot();
+                drop_cap(crate::sys_capability::CAP_SETUID);
+                let _ = setfsuid(1234);
+                assert_eq!(current_fsuid(), 0, "denied without cap");
+            }
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SETUID,
+            ));
+            let _ = setfsuid(1234);
+            assert_eq!(current_fsuid(), 1234, "succeeds after restore");
+            reset_creds();
+        }
+
+        // -- Independence: uid path uses CAP_SETUID, gid uses CAP_SETGID --
+
+        /// Dropping only CAP_SETUID leaves setfsgid arbitrary-set
+        /// working (different cap gates).
+        #[test]
+        fn test_phase198_drop_setuid_does_not_affect_setfsgid() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SETGID,
+            ));
+            let prev = setfsgid(3333);
+            assert_eq!(prev, 0);
+            assert_eq!(current_fsgid(), 3333);
+            reset_creds();
+        }
+
+        /// And vice-versa.
+        #[test]
+        fn test_phase198_drop_setgid_does_not_affect_setfsuid() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SETUID,
+            ));
+            let prev = setfsuid(4444);
+            assert_eq!(prev, 0);
+            assert_eq!(current_fsuid(), 4444);
+            reset_creds();
+        }
+
+        // -- Workflow: NFS-style probe / set / restore under cap drop -----
+
+        /// NFS-style probe-and-restore: from fsuid=1000 (cap'd set),
+        /// drop cap, probe via INVALID_UID (returns 1000, no change),
+        /// any non-matching set is denied silently, restore back to
+        /// 1000 via the matches-fsuid arm.
+        #[test]
+        fn test_phase198_workflow_probe_and_restore_under_no_cap() {
+            reset_creds();
+            // Cap'd setup: become fsuid 1000.
+            let _ = setfsuid(1000);
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+
+            // Probe: returns 1000, no change.
+            let probe = setfsuid(INVALID_UID);
+            assert_eq!(probe, 1000);
+            assert_eq!(current_fsuid(), 1000);
+
+            // Try to escalate to 65534 ("nobody") without cap →
+            // silently denied.
+            let denied = setfsuid(65534);
+            assert_eq!(denied, 1000);
+            assert_eq!(current_fsuid(), 1000, "no escalation allowed");
+
+            // "Restore" to current fsuid (matches cred arm) → no-op
+            // but allowed.
+            let restored = setfsuid(1000);
+            assert_eq!(restored, 1000);
+            assert_eq!(current_fsuid(), 1000);
+
+            reset_creds();
+        }
+
+        // -- Buggy-caller --------------------------------------------------
+
+        /// Repeated denied calls keep state stable.
+        #[test]
+        fn test_phase198_repeated_denied_calls_stable() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            for _ in 0..8 {
+                let prev = setfsuid(7777);
+                assert_eq!(prev, 0);
+                assert_eq!(current_fsuid(), 0);
+            }
+            reset_creds();
+        }
+
+        // -- Cross-checks --------------------------------------------------
+
+        /// setfsuid never returns -1 — even on the denied path the
+        /// return is the previous fsuid (which is a valid uid).
+        #[test]
+        fn test_phase198_setfsuid_never_returns_minus_one() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETUID);
+            let prev = setfsuid(9999);
+            assert_ne!(prev, -1, "setfsuid never returns -1 on any path");
+            reset_creds();
+        }
+
+        /// Symmetry: setfsgid never returns -1.
+        #[test]
+        fn test_phase198_setfsgid_never_returns_minus_one() {
+            reset_creds();
+            let _g = CapGuard::snapshot();
+            drop_cap(crate::sys_capability::CAP_SETGID);
+            let prev = setfsgid(9999);
+            assert_ne!(prev, -1);
+            reset_creds();
+        }
+
+        /// Parity: setfsuid/setfsgid use distinct caps that mirror
+        /// the setuid/setgid Phase 192/193 gates.
+        #[test]
+        fn test_phase198_parity_with_setuid_setgid_cap_choices() {
+            // Pin the cap numbers used by Phase 198 match the ones
+            // Phase 192 (setuid) and Phase 193 (setgid) used.  If
+            // either changes, this test forces a re-audit.
+            assert_eq!(crate::sys_capability::CAP_SETUID, 7);
+            assert_eq!(crate::sys_capability::CAP_SETGID, 6);
+        }
     }
 }

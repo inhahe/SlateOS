@@ -760,7 +760,8 @@ mod tests {
 
     #[test]
     fn test_mremap_with_maymove() {
-        let ret = mremap(0x1000 as *mut core::ffi::c_void, 4096, 8192, MREMAP_MAYMOVE);
+        // Use a 16K-page-aligned address (our page size, not Linux's 4K).
+        let ret = mremap(0x4000 as *mut core::ffi::c_void, 16384, 32768, MREMAP_MAYMOVE);
         assert_eq!(ret, MAP_FAILED);
     }
 
@@ -976,16 +977,357 @@ mod tests {
 
     #[test]
     fn test_mincore_returns_enosys() {
+        // Now requires a non-NULL vec pointer to reach ENOSYS — NULL
+        // vec produces EFAULT under the Linux-matching validator.
         crate::errno::set_errno(0);
-        let ret = mincore(core::ptr::null_mut(), 4096, core::ptr::null_mut());
+        let mut vec = [0u8; 16];
+        let ret = mincore(core::ptr::null_mut(), 16384, vec.as_mut_ptr());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_mincore_with_addr() {
+        // 0x1000 is not aligned to our 16 KiB page size → EINVAL.
         let ret = mincore(0x1000 as *mut core::ffi::c_void, 4096, core::ptr::null_mut());
         assert_eq!(ret, -1);
+    }
+
+    // -----------------------------------------------------------------
+    // mremap / mincore — argument-domain validation (Phase 60)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_mremap_dontunmap_constant() {
+        assert_eq!(MREMAP_DONTUNMAP, 4);
+        assert_eq!(MREMAP_FLAGS_VALID, MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP);
+    }
+
+    // ---- mremap error paths ----
+
+    #[test]
+    fn test_mremap_misaligned_addr_einval() {
+        // 0x1000 (4 KiB) is not aligned to our 16 KiB page.
+        crate::errno::set_errno(0);
+        let ret = mremap(0x1000 as *mut core::ffi::c_void, 16384, 32768, 0);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mremap_one_byte_misaligned_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(0x4001 as *mut core::ffi::c_void, 16384, 32768, 0);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mremap_unknown_flag_einval() {
+        crate::errno::set_errno(0);
+        // Bit 3 (= 8) is not a defined mremap flag.
+        let ret = mremap(0x4000 as *mut core::ffi::c_void, 16384, 32768, 0x8);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mremap_negative_flag_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(0x4000 as *mut core::ffi::c_void, 16384, 32768, i32::MIN);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mremap_fixed_without_maymove_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(0x4000 as *mut core::ffi::c_void, 16384, 32768, MREMAP_FIXED);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mremap_dontunmap_without_maymove_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mremap_new_size_zero_einval() {
+        crate::errno::set_errno(0);
+        let ret = mremap(0x4000 as *mut core::ffi::c_void, 16384, 0, MREMAP_MAYMOVE);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mremap_old_size_overflow_einval() {
+        // addr + old_size overflows u64.
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            (u64::MAX - 4096) as *mut core::ffi::c_void, // not aligned but check order
+            usize::MAX,
+            16384,
+            0,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        // Misalignment is caught first (Linux-matching ordering).
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mremap_aligned_top_addr_overflow_einval() {
+        // Aligned address near top of u64; old_size large → overflow.
+        let addr = (u64::MAX & !(16384 - 1)) as *mut core::ffi::c_void;
+        crate::errno::set_errno(0);
+        let ret = mremap(addr, usize::MAX, 16384, 0);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mremap_align_checked_before_flags() {
+        // Misaligned + bad flags → EINVAL from alignment check.  Both
+        // would set EINVAL, but verify ordering by using a flag that
+        // would *not* otherwise trigger:  MREMAP_MAYMOVE is valid, so
+        // a misaligned addr with MREMAP_MAYMOVE must still EINVAL.
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x1000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_MAYMOVE,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // ---- mremap success/fall-through paths ----
+
+    #[test]
+    fn test_mremap_maymove_only_reaches_enosys() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_MAYMOVE,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mremap_fixed_and_maymove_reaches_enosys() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_MAYMOVE | MREMAP_FIXED,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mremap_dontunmap_with_maymove_reaches_enosys() {
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mremap_old_size_zero_reaches_enosys() {
+        // Linux allows old_size == 0 with MREMAP_MAYMOVE on shared
+        // mappings (creates a new private copy).  Validation passes;
+        // ENOSYS reports the implementation gap.
+        crate::errno::set_errno(0);
+        let ret = mremap(0x4000 as *mut core::ffi::c_void, 0, 16384, MREMAP_MAYMOVE);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // ---- mincore error paths ----
+
+    #[test]
+    fn test_mincore_misaligned_addr_einval() {
+        let mut vec = [0u8; 16];
+        crate::errno::set_errno(0);
+        let ret = mincore(0x1000 as *mut core::ffi::c_void, 16384, vec.as_mut_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mincore_range_overflow_enomem() {
+        // Aligned addr near top + huge length → overflow → ENOMEM.
+        let addr = (u64::MAX & !(16384 - 1)) as *mut core::ffi::c_void;
+        let mut vec = [0u8; 16];
+        crate::errno::set_errno(0);
+        let ret = mincore(addr, usize::MAX, vec.as_mut_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOMEM);
+    }
+
+    #[test]
+    fn test_mincore_null_vec_efault() {
+        crate::errno::set_errno(0);
+        let ret = mincore(0x4000 as *mut core::ffi::c_void, 16384, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_mincore_align_checked_before_overflow() {
+        // Misaligned + would-overflow → EINVAL (alignment check first).
+        let mut vec = [0u8; 16];
+        crate::errno::set_errno(0);
+        let ret = mincore(
+            (u64::MAX - 1) as *mut core::ffi::c_void,
+            usize::MAX,
+            vec.as_mut_ptr(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_mincore_overflow_checked_before_vec() {
+        // Aligned + overflow + NULL vec → ENOMEM (overflow check
+        // before vec NULL check).
+        let addr = (u64::MAX & !(16384 - 1)) as *mut core::ffi::c_void;
+        crate::errno::set_errno(0);
+        let ret = mincore(addr, usize::MAX, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOMEM);
+    }
+
+    // ---- mincore success/fall-through paths ----
+
+    #[test]
+    fn test_mincore_valid_reaches_enosys() {
+        let mut vec = [0u8; 16];
+        crate::errno::set_errno(0);
+        let ret = mincore(0x4000 as *mut core::ffi::c_void, 16384, vec.as_mut_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_mincore_zero_length_reaches_enosys() {
+        // Linux: length==0 is allowed and returns 0 (no work).  Our
+        // stub doesn't yet implement the read-page-table path, so it
+        // still reports ENOSYS — but validation passes.
+        let mut vec = [0u8; 16];
+        crate::errno::set_errno(0);
+        let ret = mincore(0x4000 as *mut core::ffi::c_void, 0, vec.as_mut_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // ---- Real-world workflows ----
+
+    #[test]
+    fn test_workflow_mremap_realloc_grow() {
+        // libc's `realloc` on a large block uses mremap(MAYMOVE) to
+        // grow without copying.  Validation passes; ENOSYS lets the
+        // libc fallback (allocate + memcpy + free) kick in.
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            65536,
+            131072,
+            MREMAP_MAYMOVE,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_criu_remap_dontunmap() {
+        // CRIU uses MREMAP_DONTUNMAP when migrating live pages: keep
+        // the source mapping for userfaultfd to handle, while a copy
+        // is moved to the destination address.
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            16384,
+            MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_mincore_gc_page_residency() {
+        // A garbage collector calls mincore() to skip pages that
+        // aren't currently resident (avoids forcing them in for a
+        // sweep).  Validates; ENOSYS makes the GC fall back to its
+        // touch-every-page path.
+        let mut vec = [0u8; 1024];
+        crate::errno::set_errno(0);
+        let ret = mincore(
+            0x10_0000 as *mut core::ffi::c_void,
+            1024 * 16384,
+            vec.as_mut_ptr(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    }
+
+    // ---- Real-world buggy callers ----
+
+    #[test]
+    fn test_workflow_buggy_mremap_realloc_to_zero() {
+        // Buggy `realloc(p, 0)` impl passes new_size=0 to mremap
+        // instead of calling free + alloc(0).  Caught by EINVAL.
+        crate::errno::set_errno(0);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            65536,
+            0,
+            MREMAP_MAYMOVE,
+        );
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_workflow_buggy_mremap_fixed_no_maymove() {
+        // Old code paths sometimes set MREMAP_FIXED without
+        // MREMAP_MAYMOVE (forgetting that FIXED implies MAYMOVE).
+        // Linux rejects this with EINVAL; we match.
+        crate::errno::set_errno(0);
+        let ret = mremap(0x4000 as *mut core::ffi::c_void, 16384, 32768, MREMAP_FIXED);
+        assert_eq!(ret, MAP_FAILED);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_workflow_buggy_mincore_unaligned_from_malloc() {
+        // Caller passes a malloc'd pointer (not page-aligned) to
+        // mincore.  Caught by EINVAL.
+        let mut vec = [0u8; 16];
+        crate::errno::set_errno(0);
+        let ret = mincore(0x4123 as *mut core::ffi::c_void, 16384, vec.as_mut_ptr());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 }
 
@@ -1381,6 +1723,14 @@ fn format_u64(mut n: u64, buf: &mut [u8; 20]) -> usize {
 pub const MREMAP_MAYMOVE: i32 = 1;
 /// Flag indicating a fixed new address was provided.
 pub const MREMAP_FIXED: i32 = 2;
+/// Flag (Linux 5.7+): don't unmap the old region.  Requires
+/// `MREMAP_MAYMOVE` and is only valid on private anonymous mappings;
+/// used by checkpoint/restore (CRIU) and userfaultfd-based GCs.
+pub const MREMAP_DONTUNMAP: i32 = 4;
+
+/// Bitmask of every defined `mremap` flag.  Anything outside this set
+/// is rejected with `EINVAL`.
+pub const MREMAP_FLAGS_VALID: i32 = MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP;
 
 /// `mmap64` — alias for `mmap` on LP64 (off_t is already 64-bit).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -1397,16 +1747,51 @@ pub extern "C" fn mmap64(
 
 /// Remap a virtual memory region.
 ///
-/// Stub: returns MAP_FAILED with ENOSYS.  A real implementation would
-/// grow/shrink/relocate an existing mmap region.  We don't support this
-/// because our simple allocator doesn't track mmap regions globally.
+/// Stub: validates arguments per Linux `mm/mremap.c`, then returns
+/// `MAP_FAILED` with `ENOSYS`.  A real implementation would
+/// grow/shrink/relocate an existing mmap region; we don't yet track
+/// mmap regions globally.
+///
+/// Errors (Linux-matching priority order):
+/// * `EINVAL` — `old_address` is not page-aligned.
+/// * `EINVAL` — `flags` contains bits outside `MREMAP_FLAGS_VALID`.
+/// * `EINVAL` — `MREMAP_FIXED` set without `MREMAP_MAYMOVE`.
+/// * `EINVAL` — `MREMAP_DONTUNMAP` set without `MREMAP_MAYMOVE`
+///   (Linux 5.7+ requirement).
+/// * `EINVAL` — `new_size == 0` (cannot shrink to zero in-place; the
+///   correct way to free a mapping is `munmap`).
+/// * `EINVAL` — `old_address + old_size` overflows the address space.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mremap(
-    _old_address: *mut core::ffi::c_void,
-    _old_size: SizeT,
-    _new_size: SizeT,
-    _flags: i32,
+    old_address: *mut core::ffi::c_void,
+    old_size: SizeT,
+    new_size: SizeT,
+    flags: i32,
 ) -> *mut core::ffi::c_void {
+    if !is_page_aligned(old_address) {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
+    if flags & !MREMAP_FLAGS_VALID != 0 {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
+    if (flags & MREMAP_FIXED) != 0 && (flags & MREMAP_MAYMOVE) == 0 {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
+    if (flags & MREMAP_DONTUNMAP) != 0 && (flags & MREMAP_MAYMOVE) == 0 {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
+    if new_size == 0 {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
+    if range_overflows(old_address, old_size) {
+        errno::set_errno(errno::EINVAL);
+        return MAP_FAILED;
+    }
     errno::set_errno(errno::ENOSYS);
     MAP_FAILED
 }
@@ -1452,15 +1837,35 @@ pub extern "C" fn mlock2(
 
 /// Determine whether pages are resident in memory.
 ///
-/// Stub: returns -1 with ENOSYS.  A real implementation would query
-/// the page table to determine which pages in the range are physically
+/// Stub: validates arguments per Linux `mm/mincore.c::do_mincore`, then
+/// returns `-1` with `ENOSYS`.  A real implementation would query the
+/// page table to determine which pages in the range are physically
 /// resident.
+///
+/// Errors (Linux-matching priority order):
+/// * `EINVAL` — `addr` is not page-aligned.
+/// * `ENOMEM` — `addr + length` overflows the address space (Linux's
+///   `access_ok` rejects this as "address range past end of memory").
+/// * `EFAULT` — `vec` is NULL.  The kernel writes one byte per page
+///   into `vec`; a NULL pointer faults on the first store.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn mincore(
-    _addr: *mut core::ffi::c_void,
-    _length: SizeT,
-    _vec: *mut u8,
+    addr: *mut core::ffi::c_void,
+    length: SizeT,
+    vec: *mut u8,
 ) -> i32 {
+    if !is_page_aligned(addr) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    if range_overflows(addr, length) {
+        errno::set_errno(errno::ENOMEM);
+        return -1;
+    }
+    if vec.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
     errno::set_errno(errno::ENOSYS);
     -1
 }

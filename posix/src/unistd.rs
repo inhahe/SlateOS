@@ -1061,9 +1061,23 @@ pub extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
 
 /// Get configurable pathname variables for an open file.
 ///
-/// Same as pathconf but takes a file descriptor.
+/// Same as pathconf but takes a file descriptor.  Validates `fd` —
+/// Linux returns -1/EBADF for a closed fd before any name lookup —
+/// then delegates to `pathconf` for the actual value table.
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
+///   * `EINVAL` — `name` is not a recognised `_PC_*` constant.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fpathconf(_fd: i32, name: i32) -> i64 {
+pub extern "C" fn fpathconf(fd: i32, name: i32) -> i64 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
     pathconf(core::ptr::null(), name)
 }
 
@@ -2805,9 +2819,14 @@ mod tests {
 
     #[test]
     fn test_fpathconf_delegates_to_pathconf() {
-        // fpathconf should return the same values as pathconf.
-        assert_eq!(fpathconf(0, _PC_PATH_MAX), pathconf(core::ptr::null(), _PC_PATH_MAX));
-        assert_eq!(fpathconf(0, _PC_NAME_MAX), pathconf(core::ptr::null(), _PC_NAME_MAX));
+        // fpathconf should return the same values as pathconf — once
+        // the fd validator passes.  Allocate a real fd so we don't
+        // depend on fd 0 being open.
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(fpathconf(fd, _PC_PATH_MAX), pathconf(core::ptr::null(), _PC_PATH_MAX));
+        assert_eq!(fpathconf(fd, _PC_NAME_MAX), pathconf(core::ptr::null(), _PC_NAME_MAX));
+        let _ = crate::fdtable::close_fd(fd);
     }
 
     #[test]
@@ -4622,5 +4641,106 @@ mod tests {
         let ret = ptrace(PTRACE_KILL, 0, 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    // =====================================================================
+    // Phase 73 — fpathconf fd validation
+    //
+    // POSIX fpathconf operates on an open fd.  Linux's prologue rejects
+    // negative or unopen fds with -1/EBADF before doing any work.  Our
+    // pathconf table-driven body is shared between fpathconf and pathconf,
+    // so we only need to verify the fd-validation gate here.
+    // =====================================================================
+
+    // ---- Per-error class: bad fd ----
+
+    #[test]
+    fn test_fpathconf_negative_fd_returns_ebadf() {
+        errno::set_errno(0);
+        assert_eq!(fpathconf(-1, _PC_NAME_MAX), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_fpathconf_large_negative_fd_returns_ebadf() {
+        errno::set_errno(0);
+        assert_eq!(fpathconf(i32::MIN, _PC_NAME_MAX), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_fpathconf_unopen_fd_returns_ebadf() {
+        let probe: i32 = 0x4000_0050;
+        let _ = crate::fdtable::close_fd(probe);
+        errno::set_errno(0);
+        assert_eq!(fpathconf(probe, _PC_NAME_MAX), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // ---- Open fd: delegates to pathconf table ----
+
+    #[test]
+    fn test_fpathconf_open_fd_path_max() {
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        // _PC_PATH_MAX must match what pathconf returns for the same name.
+        let via_path = pathconf(core::ptr::null(), _PC_PATH_MAX);
+        let via_fd = fpathconf(fd, _PC_PATH_MAX);
+        assert_eq!(via_fd, via_path);
+        let _ = crate::fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_fpathconf_open_fd_name_max() {
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let via_path = pathconf(core::ptr::null(), _PC_NAME_MAX);
+        let via_fd = fpathconf(fd, _PC_NAME_MAX);
+        assert_eq!(via_fd, via_path);
+        let _ = crate::fdtable::close_fd(fd);
+    }
+
+    // ---- Validation ordering: bad fd beats bad name ----
+
+    #[test]
+    fn test_fpathconf_bad_fd_beats_bad_name() {
+        // Even though `name` is unknown (would yield -1 with EINVAL via
+        // pathconf), the fd check fires first → EBADF, not EINVAL.
+        errno::set_errno(0);
+        assert_eq!(fpathconf(-1, 99999), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_fpathconf_unopen_fd_beats_bad_name() {
+        let probe: i32 = 0x4000_0051;
+        let _ = crate::fdtable::close_fd(probe);
+        errno::set_errno(0);
+        assert_eq!(fpathconf(probe, 99999), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // ---- Buggy-caller patterns ----
+
+    #[test]
+    fn test_fpathconf_buggy_uninit_fd_returns_ebadf() {
+        // Caller leaves fd uninitialised — happens to be -1.
+        let mut fd: i32 = -1;
+        fd = fd.wrapping_add(0);
+        errno::set_errno(0);
+        assert_eq!(fpathconf(fd, _PC_NAME_MAX), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_fpathconf_buggy_closed_fd_after_close() {
+        // Caller closes the fd, then queries fpathconf on the stale
+        // handle.  Must fail with EBADF.
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let _ = crate::fdtable::close_fd(fd);
+        errno::set_errno(0);
+        assert_eq!(fpathconf(fd, _PC_NAME_MAX), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
     }
 }

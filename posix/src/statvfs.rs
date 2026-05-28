@@ -100,9 +100,23 @@ pub extern "C" fn statvfs(path: *const u8, buf: *mut Statvfs) -> i32 {
 
 /// Get filesystem statistics for an open file descriptor.
 ///
-/// Returns 0 on success, -1 on error.
+/// Validates `fd` (must be non-negative and open) and `buf` (must be
+/// non-NULL).  Since we don't yet have multiple mounted filesystems,
+/// the same default values are returned for any open fd.
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
+///   * `EFAULT` — `buf` is NULL.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fstatvfs(_fd: i32, buf: *mut Statvfs) -> i32 {
+pub extern "C" fn fstatvfs(fd: i32, buf: *mut Statvfs) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
     if buf.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -211,9 +225,22 @@ pub extern "C" fn statfs(path: *const u8, buf: *mut Statfs) -> i32 {
 
 /// Get filesystem statistics for an fd (Linux).
 ///
-/// Returns 0 on success, -1 on error.
+/// Validates `fd` (must be non-negative and open) and `buf` (must be
+/// non-NULL).
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
+///   * `EFAULT` — `buf` is NULL.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fstatfs(_fd: i32, buf: *mut Statfs) -> i32 {
+pub extern "C" fn fstatfs(fd: i32, buf: *mut Statfs) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
     if buf.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -238,6 +265,25 @@ pub extern "C" fn fstatfs64(fd: i32, buf: *mut Statfs) -> i32 {
 mod tests {
     use super::*;
     use core::mem;
+
+    // -----------------------------------------------------------------------
+    // Test helpers
+    // -----------------------------------------------------------------------
+
+    /// Allocate a real, open fd for tests that need a valid file descriptor.
+    ///
+    /// `fstatvfs`/`fstatfs` (and their 64-bit aliases) now validate that the
+    /// fd is open before doing any work, so tests can no longer pick a fixed
+    /// number and hope.  Allocate via `fdtable::alloc_fd` to guarantee the
+    /// kernel sees an open File handle, then `close_test_fd` to release it.
+    fn alloc_test_fd() -> i32 {
+        crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0)
+            .expect("alloc_fd File failed")
+    }
+
+    fn close_test_fd(fd: i32) {
+        let _ = crate::fdtable::close_fd(fd);
+    }
 
     // -----------------------------------------------------------------------
     // Constants
@@ -360,18 +406,21 @@ mod tests {
 
     #[test]
     fn fstatvfs_returns_zero_for_valid_fd() {
+        let fd = alloc_test_fd();
         let mut buf = unsafe { mem::zeroed::<Statvfs>() };
-        let ret = fstatvfs(3, &mut buf as *mut Statvfs);
+        let ret = fstatvfs(fd, &mut buf as *mut Statvfs);
         assert_eq!(ret, 0);
+        close_test_fd(fd);
     }
 
     #[test]
     fn fstatvfs_fills_same_defaults_as_statvfs() {
+        let fd = alloc_test_fd();
         let mut buf1 = unsafe { mem::zeroed::<Statvfs>() };
         let mut buf2 = unsafe { mem::zeroed::<Statvfs>() };
         let path = b"/\0";
         statvfs(path.as_ptr(), &mut buf1 as *mut Statvfs);
-        fstatvfs(3, &mut buf2 as *mut Statvfs);
+        fstatvfs(fd, &mut buf2 as *mut Statvfs);
 
         assert_eq!(buf1.f_bsize, buf2.f_bsize);
         assert_eq!(buf1.f_frsize, buf2.f_frsize);
@@ -382,6 +431,7 @@ mod tests {
         assert_eq!(buf1.f_ffree, buf2.f_ffree);
         assert_eq!(buf1.f_favail, buf2.f_favail);
         assert_eq!(buf1.f_namemax, buf2.f_namemax);
+        close_test_fd(fd);
     }
 
     // -----------------------------------------------------------------------
@@ -390,8 +440,10 @@ mod tests {
 
     #[test]
     fn fstatvfs_null_buf_returns_negative_one() {
-        let ret = fstatvfs(3, core::ptr::null_mut());
+        let fd = alloc_test_fd();
+        let ret = fstatvfs(fd, core::ptr::null_mut());
         assert_eq!(ret, -1);
+        close_test_fd(fd);
     }
 
     // -----------------------------------------------------------------------
@@ -478,18 +530,21 @@ mod tests {
 
     #[test]
     fn fstatfs_returns_zero_for_valid_fd() {
+        let fd = alloc_test_fd();
         let mut buf = unsafe { mem::zeroed::<Statfs>() };
-        let ret = fstatfs(3, &mut buf as *mut Statfs);
+        let ret = fstatfs(fd, &mut buf as *mut Statfs);
         assert_eq!(ret, 0);
+        close_test_fd(fd);
     }
 
     #[test]
     fn fstatfs_fills_same_defaults_as_statfs() {
+        let fd = alloc_test_fd();
         let mut buf1 = unsafe { mem::zeroed::<Statfs>() };
         let mut buf2 = unsafe { mem::zeroed::<Statfs>() };
         let path = b"/\0";
         statfs(path.as_ptr(), &mut buf1 as *mut Statfs);
-        fstatfs(3, &mut buf2 as *mut Statfs);
+        fstatfs(fd, &mut buf2 as *mut Statfs);
 
         assert_eq!(buf1.f_type, buf2.f_type);
         assert_eq!(buf1.f_bsize, buf2.f_bsize);
@@ -500,6 +555,7 @@ mod tests {
         assert_eq!(buf1.f_ffree, buf2.f_ffree);
         assert_eq!(buf1.f_namelen, buf2.f_namelen);
         assert_eq!(buf1.f_frsize, buf2.f_frsize);
+        close_test_fd(fd);
     }
 
     // -----------------------------------------------------------------------
@@ -508,8 +564,10 @@ mod tests {
 
     #[test]
     fn fstatfs_null_buf_returns_negative_one() {
-        let ret = fstatfs(3, core::ptr::null_mut());
+        let fd = alloc_test_fd();
+        let ret = fstatfs(fd, core::ptr::null_mut());
         assert_eq!(ret, -1);
+        close_test_fd(fd);
     }
 
     // -----------------------------------------------------------------------
@@ -518,26 +576,32 @@ mod tests {
 
     #[test]
     fn default_block_size_is_16kib() {
+        let fd = alloc_test_fd();
         let mut buf = unsafe { mem::zeroed::<Statvfs>() };
-        fstatvfs(0, &mut buf as *mut Statvfs);
+        fstatvfs(fd, &mut buf as *mut Statvfs);
         assert_eq!(buf.f_bsize, 16384);
         assert_eq!(buf.f_bsize, 16 * 1024);
+        close_test_fd(fd);
     }
 
     #[test]
     fn default_total_is_10gib() {
+        let fd = alloc_test_fd();
         let mut buf = unsafe { mem::zeroed::<Statvfs>() };
-        fstatvfs(0, &mut buf as *mut Statvfs);
+        fstatvfs(fd, &mut buf as *mut Statvfs);
         let total_bytes = buf.f_blocks * buf.f_bsize;
         assert_eq!(total_bytes, 10 * 1024 * 1024 * 1024);
+        close_test_fd(fd);
     }
 
     #[test]
     fn default_free_is_1gib() {
+        let fd = alloc_test_fd();
         let mut buf = unsafe { mem::zeroed::<Statvfs>() };
-        fstatvfs(0, &mut buf as *mut Statvfs);
+        fstatvfs(fd, &mut buf as *mut Statvfs);
         let free_bytes = buf.f_bfree * buf.f_bsize;
         assert_eq!(free_bytes, 1024 * 1024 * 1024);
+        close_test_fd(fd);
     }
 
     #[test]
@@ -554,13 +618,15 @@ mod tests {
 
     #[test]
     fn fstatfs64_aliases_fstatfs() {
+        let fd = alloc_test_fd();
         let mut buf1 = unsafe { mem::zeroed::<Statfs>() };
         let mut buf2 = unsafe { mem::zeroed::<Statfs>() };
-        let ret1 = fstatfs(3, &mut buf1 as *mut Statfs);
-        let ret2 = fstatfs64(3, &mut buf2 as *mut Statfs);
+        let ret1 = fstatfs(fd, &mut buf1 as *mut Statfs);
+        let ret2 = fstatfs64(fd, &mut buf2 as *mut Statfs);
         assert_eq!(ret1, ret2);
         assert_eq!(buf1.f_type, buf2.f_type);
         assert_eq!(buf1.f_bsize, buf2.f_bsize);
+        close_test_fd(fd);
     }
 
     // -----------------------------------------------------------------------
@@ -624,5 +690,193 @@ mod tests {
     fn free_does_not_exceed_total() {
         assert!(DEFAULT_FS_FREE_BYTES <= DEFAULT_FS_TOTAL_BYTES);
         assert!(DEFAULT_INODE_FREE <= DEFAULT_INODE_TOTAL);
+    }
+
+    // =====================================================================
+    // Phase 73 — fstatvfs / fstatfs / fstatfs64 fd validation
+    //
+    // Linux's fstatvfs/fstatfs prologues validate the fd before touching
+    // the user buffer: a negative or unopen fd yields -1/EBADF.  After
+    // the fd passes, a NULL buf yields -1/EFAULT.  This matches our
+    // implementation order: fd<0 → get_fd None → buf.is_null().
+    // =====================================================================
+
+    // ---- Per-error class: bad fd ----
+
+    #[test]
+    fn fstatvfs_negative_fd_returns_ebadf() {
+        let mut buf = unsafe { mem::zeroed::<Statvfs>() };
+        errno::set_errno(0);
+        assert_eq!(fstatvfs(-1, &mut buf as *mut Statvfs), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatvfs_large_negative_fd_returns_ebadf() {
+        let mut buf = unsafe { mem::zeroed::<Statvfs>() };
+        errno::set_errno(0);
+        assert_eq!(fstatvfs(i32::MIN, &mut buf as *mut Statvfs), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatvfs_unopen_fd_returns_ebadf() {
+        let probe: i32 = 0x4000_0060;
+        let _ = crate::fdtable::close_fd(probe);
+        let mut buf = unsafe { mem::zeroed::<Statvfs>() };
+        errno::set_errno(0);
+        assert_eq!(fstatvfs(probe, &mut buf as *mut Statvfs), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatfs_negative_fd_returns_ebadf() {
+        let mut buf = unsafe { mem::zeroed::<Statfs>() };
+        errno::set_errno(0);
+        assert_eq!(fstatfs(-1, &mut buf as *mut Statfs), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatfs_unopen_fd_returns_ebadf() {
+        let probe: i32 = 0x4000_0061;
+        let _ = crate::fdtable::close_fd(probe);
+        let mut buf = unsafe { mem::zeroed::<Statfs>() };
+        errno::set_errno(0);
+        assert_eq!(fstatfs(probe, &mut buf as *mut Statfs), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatfs64_negative_fd_returns_ebadf() {
+        // fstatfs64 is the LP64 alias — must inherit fd validation.
+        let mut buf = unsafe { mem::zeroed::<Statfs>() };
+        errno::set_errno(0);
+        assert_eq!(fstatfs64(-1, &mut buf as *mut Statfs), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatfs64_unopen_fd_returns_ebadf() {
+        let probe: i32 = 0x4000_0062;
+        let _ = crate::fdtable::close_fd(probe);
+        let mut buf = unsafe { mem::zeroed::<Statfs>() };
+        errno::set_errno(0);
+        assert_eq!(fstatfs64(probe, &mut buf as *mut Statfs), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // ---- Per-error class: NULL buf with open fd ----
+
+    #[test]
+    fn fstatvfs_open_fd_null_buf_returns_efault() {
+        let fd = alloc_test_fd();
+        errno::set_errno(0);
+        assert_eq!(fstatvfs(fd, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        close_test_fd(fd);
+    }
+
+    #[test]
+    fn fstatfs_open_fd_null_buf_returns_efault() {
+        let fd = alloc_test_fd();
+        errno::set_errno(0);
+        assert_eq!(fstatfs(fd, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        close_test_fd(fd);
+    }
+
+    // ---- Validation ordering: bad fd beats NULL buf ----
+
+    #[test]
+    fn fstatvfs_bad_fd_beats_null_buf() {
+        // Both fd<0 and buf=NULL.  Linux validates fd first → EBADF, not
+        // EFAULT.
+        errno::set_errno(0);
+        assert_eq!(fstatvfs(-1, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatvfs_unopen_fd_beats_null_buf() {
+        let probe: i32 = 0x4000_0063;
+        let _ = crate::fdtable::close_fd(probe);
+        errno::set_errno(0);
+        assert_eq!(fstatvfs(probe, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatfs_bad_fd_beats_null_buf() {
+        errno::set_errno(0);
+        assert_eq!(fstatfs(-1, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatfs_unopen_fd_beats_null_buf() {
+        let probe: i32 = 0x4000_0064;
+        let _ = crate::fdtable::close_fd(probe);
+        errno::set_errno(0);
+        assert_eq!(fstatfs(probe, core::ptr::null_mut()), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // ---- Buggy-caller patterns ----
+
+    #[test]
+    fn fstatvfs_buggy_uninit_fd_returns_ebadf() {
+        // Stack-uninitialised fd happens to be -1.
+        let mut fd: i32 = -1;
+        fd = fd.wrapping_add(0);
+        let mut buf = unsafe { mem::zeroed::<Statvfs>() };
+        errno::set_errno(0);
+        assert_eq!(fstatvfs(fd, &mut buf as *mut Statvfs), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatvfs_buggy_double_use_after_close() {
+        // Caller closes the fd, then queries fstatvfs on the stale handle.
+        let fd = alloc_test_fd();
+        close_test_fd(fd);
+        let mut buf = unsafe { mem::zeroed::<Statvfs>() };
+        errno::set_errno(0);
+        assert_eq!(fstatvfs(fd, &mut buf as *mut Statvfs), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn fstatfs_buggy_double_use_after_close() {
+        let fd = alloc_test_fd();
+        close_test_fd(fd);
+        let mut buf = unsafe { mem::zeroed::<Statfs>() };
+        errno::set_errno(0);
+        assert_eq!(fstatfs(fd, &mut buf as *mut Statfs), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // ---- Workflow: validated success path fills buffer ----
+
+    #[test]
+    fn fstatvfs_workflow_validated_fd_fills_buffer() {
+        // After fd validation passes, the buffer is filled with the
+        // standard defaults.
+        let fd = alloc_test_fd();
+        let mut buf = unsafe { mem::zeroed::<Statvfs>() };
+        assert_eq!(fstatvfs(fd, &mut buf as *mut Statvfs), 0);
+        assert_eq!(buf.f_bsize, DEFAULT_BLOCK_SIZE);
+        assert_eq!(buf.f_namemax, DEFAULT_NAMEMAX);
+        close_test_fd(fd);
+    }
+
+    #[test]
+    fn fstatfs_workflow_validated_fd_fills_buffer() {
+        let fd = alloc_test_fd();
+        let mut buf = unsafe { mem::zeroed::<Statfs>() };
+        assert_eq!(fstatfs(fd, &mut buf as *mut Statfs), 0);
+        assert_eq!(buf.f_type, EXT4_SUPER_MAGIC);
+        assert_eq!(buf.f_bsize, DEFAULT_BLOCK_SIZE as i64);
+        close_test_fd(fd);
     }
 }

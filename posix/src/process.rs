@@ -473,10 +473,24 @@ pub extern "C" fn setsid() -> PidT {
 
 /// Get the foreground process group ID of a terminal.
 ///
-/// Returns the PGID last set by `tcsetpgrp()`, defaulting to our
-/// own PID.
+/// Returns the PGID last set by `tcsetpgrp()`, defaulting to our own
+/// PID.  Validates `fd`: Linux's `tcgetpgrp` returns -1/EBADF for a
+/// closed fd before consulting the controlling terminal.  Since we
+/// don't track which fds are terminals, an open non-tty fd accepts the
+/// call (matches Linux ENOTTY-equivalent leniency for our stub).
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tcgetpgrp(_fd: crate::types::Fd) -> PidT {
+pub extern "C" fn tcgetpgrp(fd: crate::types::Fd) -> PidT {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
     ensure_pg_init();
     // SAFETY: initialized.
     unsafe { core::ptr::addr_of!(FG_PGRP).read() }
@@ -484,9 +498,23 @@ pub extern "C" fn tcgetpgrp(_fd: crate::types::Fd) -> PidT {
 
 /// Set the foreground process group ID of a terminal.
 ///
-/// Stores the value for later retrieval by `tcgetpgrp()`.
+/// Stores the value for later retrieval by `tcgetpgrp()`.  Validates
+/// `fd` before checking `pgrp` — Linux's prologue order is to check the
+/// fd first.
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
+///   * `EINVAL` — `pgrp` is zero or negative.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tcsetpgrp(_fd: crate::types::Fd, pgrp: PidT) -> i32 {
+pub extern "C" fn tcsetpgrp(fd: crate::types::Fd, pgrp: PidT) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
     ensure_pg_init();
     if pgrp <= 0 {
         errno::set_errno(errno::EINVAL);
@@ -2572,6 +2600,16 @@ mod tests {
         }
     }
 
+    /// Ensure fds 0/1/2 are open so `tcgetpgrp`/`tcsetpgrp` tests
+    /// can use them.  Other tests may have closed them.
+    fn ensure_pg_test_fds() {
+        for fd in 0..=2 {
+            let _ = crate::fdtable::install_fd(
+                fd, crate::fdtable::HandleKind::Console, fd as u64,
+            );
+        }
+    }
+
     #[test]
     fn test_getpgrp_returns_initialized_value() {
         reset_pg();
@@ -2609,12 +2647,14 @@ mod tests {
     #[test]
     fn test_tcgetpgrp_returns_fg_pgrp() {
         reset_pg();
+        ensure_pg_test_fds();
         assert_eq!(tcgetpgrp(0), 42);
     }
 
     #[test]
     fn test_tcsetpgrp_round_trip() {
         reset_pg();
+        ensure_pg_test_fds();
         assert_eq!(tcsetpgrp(0, 77), 0);
         assert_eq!(tcgetpgrp(0), 77);
     }
@@ -2622,6 +2662,7 @@ mod tests {
     #[test]
     fn test_tcsetpgrp_different_values() {
         reset_pg();
+        ensure_pg_test_fds();
         assert_eq!(tcsetpgrp(1, 100), 0);
         assert_eq!(tcgetpgrp(1), 100);
         assert_eq!(tcsetpgrp(2, 200), 0);
@@ -2631,6 +2672,7 @@ mod tests {
     #[test]
     fn test_tcsetpgrp_rejects_zero() {
         reset_pg();
+        ensure_pg_test_fds();
         assert_eq!(tcsetpgrp(0, 0), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         // Original value should be unchanged.
@@ -2640,6 +2682,7 @@ mod tests {
     #[test]
     fn test_tcsetpgrp_rejects_negative() {
         reset_pg();
+        ensure_pg_test_fds();
         assert_eq!(tcsetpgrp(0, -1), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         assert_eq!(tcgetpgrp(0), 42);
@@ -2648,6 +2691,7 @@ mod tests {
     #[test]
     fn test_tcsetpgrp_rejects_negative_large() {
         reset_pg();
+        ensure_pg_test_fds();
         assert_eq!(tcsetpgrp(0, i32::MIN), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -2655,6 +2699,7 @@ mod tests {
     #[test]
     fn test_tcsetpgrp_accepts_one() {
         reset_pg();
+        ensure_pg_test_fds();
         assert_eq!(tcsetpgrp(0, 1), 0);
         assert_eq!(tcgetpgrp(0), 1);
     }
@@ -2836,6 +2881,7 @@ mod tests {
     #[test]
     fn test_tcsetpgrp_max_pgrp() {
         reset_pg();
+        ensure_pg_test_fds();
         assert_eq!(tcsetpgrp(0, i32::MAX), 0);
         assert_eq!(tcgetpgrp(0), i32::MAX);
     }
@@ -7686,6 +7732,172 @@ mod tests {
         // valid class → EINVAL via the catch-all arm.
         assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, -1), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // =====================================================================
+    // Phase 73 — tcgetpgrp/tcsetpgrp fd validation
+    //
+    // Linux's tcgetpgrp/tcsetpgrp prologues validate the fd before any
+    // terminal-related work: a closed or negative fd returns -1/EBADF.
+    // tcsetpgrp also validates pgrp (>0).  Validation order is fd first,
+    // then pgrp — i.e. a bad fd with a bad pgrp reports EBADF, not EINVAL.
+    // =====================================================================
+
+    // ---- Per-error class: bad fd ----
+
+    #[test]
+    fn test_tcgetpgrp_negative_fd_returns_ebadf() {
+        reset_pg();
+        crate::errno::set_errno(0);
+        assert_eq!(tcgetpgrp(-1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tcgetpgrp_large_negative_fd_returns_ebadf() {
+        reset_pg();
+        crate::errno::set_errno(0);
+        assert_eq!(tcgetpgrp(i32::MIN), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tcgetpgrp_unopen_fd_returns_ebadf() {
+        reset_pg();
+        // Pick a high fd that is almost certainly not in the table.
+        let probe: i32 = 0x4000_0040;
+        // Defensively close, in case some other test left it open.
+        let _ = crate::fdtable::close_fd(probe);
+        crate::errno::set_errno(0);
+        assert_eq!(tcgetpgrp(probe), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_negative_fd_returns_ebadf() {
+        reset_pg();
+        crate::errno::set_errno(0);
+        assert_eq!(tcsetpgrp(-1, 100), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_unopen_fd_returns_ebadf() {
+        reset_pg();
+        let probe: i32 = 0x4000_0041;
+        let _ = crate::fdtable::close_fd(probe);
+        crate::errno::set_errno(0);
+        assert_eq!(tcsetpgrp(probe, 100), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // ---- Per-error class: bad pgrp (fd valid) ----
+
+    #[test]
+    fn test_tcsetpgrp_zero_pgrp_open_fd_returns_einval() {
+        reset_pg();
+        ensure_pg_test_fds();
+        crate::errno::set_errno(0);
+        assert_eq!(tcsetpgrp(0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_negative_pgrp_open_fd_returns_einval() {
+        reset_pg();
+        ensure_pg_test_fds();
+        crate::errno::set_errno(0);
+        assert_eq!(tcsetpgrp(0, -1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // ---- Validation ordering: fd checked before pgrp ----
+
+    #[test]
+    fn test_tcsetpgrp_bad_fd_beats_bad_pgrp() {
+        // Both fd and pgrp are invalid.  Linux validates fd first → EBADF.
+        reset_pg();
+        crate::errno::set_errno(0);
+        assert_eq!(tcsetpgrp(-1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_bad_fd_beats_negative_pgrp() {
+        reset_pg();
+        crate::errno::set_errno(0);
+        assert_eq!(tcsetpgrp(-1, -42), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_unopen_fd_beats_bad_pgrp() {
+        reset_pg();
+        let probe: i32 = 0x4000_0042;
+        let _ = crate::fdtable::close_fd(probe);
+        crate::errno::set_errno(0);
+        assert_eq!(tcsetpgrp(probe, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // ---- Buggy-caller patterns ----
+
+    #[test]
+    fn test_tcgetpgrp_buggy_uninit_fd_returns_ebadf() {
+        // A caller passes a stack-uninitialized fd that happens to be -1.
+        reset_pg();
+        let mut uninit_fd: i32 = -1;
+        // Touch it so the compiler doesn't elide.
+        uninit_fd = uninit_fd.wrapping_add(0);
+        crate::errno::set_errno(0);
+        assert_eq!(tcgetpgrp(uninit_fd), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_buggy_swapped_args() {
+        // A caller swaps fd and pgrp: tcsetpgrp(pgrp, fd).  If pgrp=100
+        // is mistakenly used as fd, and fd=0 (the terminal) is used as
+        // pgrp, the fd-validation step rejects 100 with EBADF on systems
+        // where 100 isn't open.  Make this deterministic by ensuring 100
+        // is closed first.
+        reset_pg();
+        ensure_pg_test_fds();
+        let bad_fd: i32 = 100;
+        let _ = crate::fdtable::close_fd(bad_fd);
+        crate::errno::set_errno(0);
+        assert_eq!(tcsetpgrp(bad_fd, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // ---- Workflow: validation does not corrupt state ----
+
+    #[test]
+    fn test_tcsetpgrp_bad_fd_does_not_change_fg_pgrp() {
+        reset_pg();
+        ensure_pg_test_fds();
+        // Initial value is whatever reset_pg sets up (42).
+        let before = tcgetpgrp(0);
+        crate::errno::set_errno(0);
+        // Try to set with bad fd — must fail.
+        assert_eq!(tcsetpgrp(-1, 777), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+        // FG_PGRP unchanged.
+        assert_eq!(tcgetpgrp(0), before);
+    }
+
+    #[test]
+    fn test_tcsetpgrp_bad_pgrp_does_not_change_fg_pgrp() {
+        reset_pg();
+        ensure_pg_test_fds();
+        // First set it to a known value.
+        assert_eq!(tcsetpgrp(0, 555), 0);
+        // Then try a bad pgrp.
+        crate::errno::set_errno(0);
+        assert_eq!(tcsetpgrp(0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // Value unchanged.
+        assert_eq!(tcgetpgrp(0), 555);
     }
 }
 

@@ -786,6 +786,18 @@ pub const TFD_NONBLOCK: i32 = 0o4000;
 /// `timerfd_settime` flag: interpret `it_value` as an absolute time.
 pub const TFD_TIMER_ABSTIME: i32 = 1;
 
+/// `timerfd_settime` flag: cancel the timer if the realtime clock is set
+/// while it's armed.  Linux only honours this for `CLOCK_REALTIME` /
+/// `CLOCK_REALTIME_ALARM` timers; for other clocks it is accepted but a
+/// no-op.  We accept it for any clock and treat it as a no-op (we don't
+/// track realtime clock jumps), which matches Linux's behaviour for the
+/// non-realtime clocks and is a benign extension for the realtime ones.
+pub const TFD_TIMER_CANCEL_ON_SET: i32 = 1 << 1;
+
+/// Mask of valid `timerfd_settime` flags.  Matches `TFD_SETTIME_FLAGS` in
+/// Linux's `include/uapi/linux/timerfd.h`.
+pub const TFD_SETTIME_FLAGS_VALID: i32 = TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET;
+
 /// Timer specification used by timerfd.
 #[repr(C)]
 pub struct Itimerspec {
@@ -1059,14 +1071,40 @@ pub unsafe extern "C" fn timerfd_settime(
     new_value: *const Itimerspec,
     old_value: *mut Itimerspec,
 ) -> i32 {
+    // Validation order matches Linux's `timerfd_settime` /
+    // `do_timerfd_settime` (fs/timerfd.c):
+    //   1. `copy_from_user(&new, utmr)`  -> EFAULT on null/bad pointer.
+    //   2. `flags & ~TFD_SETTIME_FLAGS`  -> EINVAL.
+    //   3. `!itimerspec64_valid(&new)`   -> EINVAL.
+    //   4. `timerfd_fget(ufd, &f)`       -> EBADF (fd missing),
+    //                                       EINVAL (wrong kind of fd).
+    //
+    // In particular, flag-mask and itimerspec validity are checked
+    // BEFORE the fd lookup, so a bad fd combined with bad flags or a
+    // bad timespec returns EINVAL, not EBADF.
     if new_value.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    if flags & !TFD_TIMER_ABSTIME != 0 {
+    // SAFETY: caller asserts `new_value` points to a readable
+    // `Itimerspec`.  We've ruled out null; the only remaining
+    // constraint is that the pointer be properly aligned and within
+    // the caller's address space, which is the caller's responsibility.
+    let nv = unsafe { core::ptr::read(new_value) };
+
+    if flags & !TFD_SETTIME_FLAGS_VALID != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
+    let Some(value_ns) = timespec_to_ns(&nv.it_value) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+    let Some(interval_ns) = timespec_to_ns(&nv.it_interval) else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    };
+
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -1076,17 +1114,6 @@ pub unsafe extern "C" fn timerfd_settime(
         return -1;
     }
     let idx = entry.handle;
-
-    // SAFETY: caller asserts validity of `new_value`.
-    let nv = unsafe { core::ptr::read(new_value) };
-    let Some(value_ns) = timespec_to_ns(&nv.it_value) else {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    };
-    let Some(interval_ns) = timespec_to_ns(&nv.it_interval) else {
-        errno::set_errno(errno::EINVAL);
-        return -1;
-    };
 
     let now = now_ns();
 
@@ -3553,5 +3580,237 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(signalfd(7, &raw const m2, 0), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 105 — timerfd_settime flag mask + ordering parity with Linux.
+    //
+    // Linux accepts `TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET` in the
+    // `flags` argument and validates both the flag mask AND the
+    // itimerspec validity BEFORE looking up the fd.  Previously we only
+    // accepted `TFD_TIMER_ABSTIME`, and we validated the itimerspec
+    // AFTER the fd lookup.  The tests below pin both invariants.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_timerfd_settime_phase105_mask_constants() {
+        // Pin the on-the-wire values to Linux's
+        // include/uapi/linux/timerfd.h.
+        assert_eq!(TFD_TIMER_ABSTIME, 1);
+        assert_eq!(TFD_TIMER_CANCEL_ON_SET, 2);
+        assert_eq!(TFD_SETTIME_FLAGS_VALID, 3);
+        assert_eq!(TFD_TIMER_ABSTIME & TFD_TIMER_CANCEL_ON_SET, 0);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_cancel_on_set_accepted() {
+        // CANCEL_ON_SET is a no-op for us but must NOT be rejected.
+        let fd = timerfd_create(1, 0);
+        assert!(fd >= 0);
+        let new = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        let r = unsafe {
+            timerfd_settime(fd, TFD_TIMER_CANCEL_ON_SET, &new, core::ptr::null_mut())
+        };
+        assert_eq!(r, 0, "CANCEL_ON_SET must be accepted, errno={}", errno::get_errno());
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_abstime_plus_cancel_on_set_accepted() {
+        let fd = timerfd_create(1, 0);
+        assert!(fd >= 0);
+        // Use a moderately-far-future absolute time so the timer arms.
+        // Don't use i64::MAX-ish values — `timespec_to_ns` multiplies
+        // tv_sec by 1e9 and will overflow, producing a spurious EINVAL
+        // that has nothing to do with the flag mask under test.
+        let new = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: crate::stat::Timespec { tv_sec: 1_000_000, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        let r = unsafe {
+            timerfd_settime(
+                fd,
+                TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET,
+                &new,
+                core::ptr::null_mut(),
+            )
+        };
+        assert_eq!(r, 0, "ABSTIME|CANCEL_ON_SET must be accepted, errno={}", errno::get_errno());
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_unknown_bit_rejected() {
+        let fd = timerfd_create(1, 0);
+        assert!(fd >= 0);
+        let new = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        // bit 2 is not in the valid mask.
+        let r = unsafe { timerfd_settime(fd, 1 << 2, &new, core::ptr::null_mut()) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_high_bit_rejected() {
+        let fd = timerfd_create(1, 0);
+        assert!(fd >= 0);
+        let new = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        let r = unsafe {
+            timerfd_settime(fd, i32::MIN, &new, core::ptr::null_mut())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_valid_plus_unknown_rejected() {
+        // Mixing a valid flag with a stray bit must still EINVAL.
+        let fd = timerfd_create(1, 0);
+        assert!(fd >= 0);
+        let new = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        let r = unsafe {
+            timerfd_settime(fd, TFD_TIMER_ABSTIME | (1 << 5), &new, core::ptr::null_mut())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_efault_wins_over_einval() {
+        // Null new_value with bad flags: Linux's copy_from_user fires
+        // FIRST, so EFAULT wins over EINVAL.
+        errno::set_errno(0);
+        let r = unsafe {
+            timerfd_settime(0, 1 << 7, core::ptr::null(), core::ptr::null_mut())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_einval_wins_over_ebadf_for_flags() {
+        // Bad flags + missing fd: Linux checks flags BEFORE the fd
+        // lookup, so EINVAL wins over EBADF.
+        let new = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        // fd 99999 almost certainly isn't allocated.
+        let r = unsafe { timerfd_settime(99999, 1 << 7, &new, core::ptr::null_mut()) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_einval_wins_over_ebadf_for_timespec() {
+        // Bad timespec + missing fd: Linux validates the itimerspec
+        // BEFORE the fd lookup (both in `do_timerfd_settime` prior to
+        // `timerfd_fget`), so EINVAL wins over EBADF.
+        let bad = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: crate::stat::Timespec { tv_sec: -1, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        let r = unsafe { timerfd_settime(99999, 0, &bad, core::ptr::null_mut()) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_einval_wins_over_ebadf_for_interval() {
+        // Bad it_interval + missing fd: same ordering invariant.
+        let bad = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 },
+            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        let r = unsafe { timerfd_settime(99999, 0, &bad, core::ptr::null_mut()) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_efault_wins_over_ebadf() {
+        // Null new_value + missing fd: EFAULT wins over EBADF
+        // (copy_from_user fires before timerfd_fget).
+        errno::set_errno(0);
+        let r = unsafe {
+            timerfd_settime(99999, 0, core::ptr::null(), core::ptr::null_mut())
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_recovery_after_einval() {
+        // After a rejected call with bad flags, a subsequent valid call
+        // on the same fd still works.
+        let fd = timerfd_create(1, 0);
+        assert!(fd >= 0);
+        let new = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        errno::set_errno(0);
+        let bad = unsafe {
+            timerfd_settime(fd, 1 << 9, &new, core::ptr::null_mut())
+        };
+        assert_eq!(bad, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        errno::set_errno(0);
+        let good = unsafe {
+            timerfd_settime(fd, TFD_TIMER_CANCEL_ON_SET, &new, core::ptr::null_mut())
+        };
+        assert_eq!(good, 0, "recovery call must succeed, errno={}", errno::get_errno());
+        crate::file::close(fd);
+    }
+
+    #[test]
+    fn test_timerfd_settime_phase105_exhaustive_stray_bits_rejected() {
+        // Every single bit outside the valid mask must produce EINVAL
+        // when combined with no other flag.  Sign bit is bit 31.
+        let fd = timerfd_create(1, 0);
+        assert!(fd >= 0);
+        let new = Itimerspec {
+            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+        };
+        for shift in 0..32 {
+            #[allow(clippy::cast_possible_wrap)]
+            let bit = (1u32 << shift) as i32;
+            if bit & TFD_SETTIME_FLAGS_VALID != 0 {
+                continue;
+            }
+            errno::set_errno(0);
+            let r = unsafe { timerfd_settime(fd, bit, &new, core::ptr::null_mut()) };
+            assert_eq!(r, -1, "bit {shift} should be rejected");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EINVAL,
+                "bit {shift} should produce EINVAL"
+            );
+        }
+        crate::file::close(fd);
     }
 }

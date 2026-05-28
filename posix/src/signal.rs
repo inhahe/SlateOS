@@ -1,17 +1,24 @@
-//! POSIX signal stubs.
+//! POSIX signal handling layer.
 //!
-//! Our OS uses IPC messages instead of Unix signals.  This module
-//! provides the POSIX signal constants, handler registration, signal
-//! sets, and `sigaction` so that C programs can link and run.
+//! Our OS uses IPC messages instead of Unix signals for process
+//! control.  This module provides the POSIX signal constants, handler
+//! registration, signal sets, and `sigaction` so that C programs can
+//! link and run.
 //!
 //! ## Design
 //!
-//! `signal()` and `sigaction()` store handlers in a static table but
-//! signals are never actually delivered (our OS uses IPC messages for
-//! process control).  This means `signal(SIGPIPE, SIG_IGN)` succeeds
-//! (many programs do this at startup), but no handler ever fires.
-//! `sigprocmask()` stores the blocked mask so get/set round-trips work.
-//! `kill()` remains a stub returning ENOSYS.
+//! `signal()` and `sigaction()` store handlers in a static table.
+//! `raise()` and `kill(self, sig)` dispatch through these handlers
+//! via `dispatch_self_signal()`: SIG_IGN discards the signal, a
+//! registered handler is invoked, and SIG_DFL applies the Linux
+//! default action (terminate, ignore, stop, continue).
+//!
+//! Cross-process `kill()` translates terminating signals into
+//! `SYS_PROCESS_KILL`, ignore signals are silently discarded, and
+//! stop/continue signals return `ENOSYS` (no kernel suspend yet).
+//!
+//! `sigprocmask()` stores the blocked mask so get/set round-trips
+//! work.  The blocked mask does not yet affect actual delivery.
 
 use crate::errno;
 

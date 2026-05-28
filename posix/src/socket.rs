@@ -222,6 +222,12 @@ pub const SOCK_NONBLOCK: i32 = 0o4000;
 /// Socket type flag: set close-on-exec on the new socket (Linux extension).
 pub const SOCK_CLOEXEC: i32 = 0o2_000_000;
 
+/// Mask of bits used for the socket type identifier itself (the low 4
+/// bits).  Linux `include/linux/net.h` defines `SOCK_TYPE_MASK` as 0xf;
+/// any bit above 0xf in `sock_type` must be a recognised type-flag
+/// (`SOCK_NONBLOCK` or `SOCK_CLOEXEC`) or `socket()` returns EINVAL.
+pub const SOCK_TYPE_MASK: i32 = 0xf;
+
 // ---------------------------------------------------------------------------
 // Multicast group request
 // ---------------------------------------------------------------------------
@@ -1124,16 +1130,38 @@ pub unsafe extern "C" fn inet_aton(cp: *const u8, inp: *mut u32) -> i32 {
 /// Returns a file descriptor on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
+    // Linux semantics (net/socket.c::__sys_socket):
+    //   flags = type & ~SOCK_TYPE_MASK;
+    //   if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
+    //           return -EINVAL;
+    //   type &= SOCK_TYPE_MASK;
+    // The flag check is the very first thing the syscall does,
+    // before family/protocol/type bounds checks.  A buggy caller
+    // passing stray flag bits is told about it regardless of
+    // whether the rest of the call is well-formed.
+    //
+    // Additionally, `type < 0` is rejected with EINVAL — the upper
+    // sign bit cannot be a valid flag (SOCK_CLOEXEC is bit 19,
+    // SOCK_NONBLOCK is bit 11, both well below bit 31).
+    if sock_type < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let flags = sock_type & !SOCK_TYPE_MASK;
+    if flags & !(SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
     // Validate domain.
     if domain != AF_INET {
         errno::set_errno(errno::EAFNOSUPPORT);
         return -1;
     }
 
-    // Strip SOCK_NONBLOCK and SOCK_CLOEXEC flags from the type argument
-    // (Linux extension: flags can be OR'd into the type parameter).
-    let flags = sock_type & (SOCK_NONBLOCK | SOCK_CLOEXEC);
-    let base_type = sock_type & !(SOCK_NONBLOCK | SOCK_CLOEXEC);
+    // After flag validation, the bits we keep are the type identifier
+    // (low SOCK_TYPE_MASK bits) plus the two known type-flags.
+    let base_type = sock_type & SOCK_TYPE_MASK;
 
     // Validate type + protocol combination.
     match base_type {
@@ -7208,6 +7236,185 @@ mod tests {
         };
         assert_eq!(r2, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 104: socket() type-flag mask validation
+    //
+    // Linux semantics (net/socket.c::__sys_socket):
+    //   flags = type & ~SOCK_TYPE_MASK;
+    //   if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)) return -EINVAL;
+    //   type &= SOCK_TYPE_MASK;
+    //   ... then family/type/protocol checks ...
+    // Previously the check was missing; stray flag bits silently
+    // passed through and the type was masked via the SOCK_NONBLOCK |
+    // SOCK_CLOEXEC carve-out only, so e.g. socket(AF_INET, SOCK_STREAM
+    // | (1<<15), 0) would proceed with base_type = SOCK_STREAM|0x8000
+    // and fail with EPROTONOSUPPORT instead of EINVAL.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_socket_type_mask_invariants() {
+        // Sanity: SOCK_TYPE_MASK is the low 4 bits, SOCK_NONBLOCK and
+        // SOCK_CLOEXEC live above it, and they don't overlap each
+        // other or the type field.
+        assert_eq!(SOCK_TYPE_MASK, 0xf);
+        assert_eq!(SOCK_TYPE_MASK & SOCK_NONBLOCK, 0);
+        assert_eq!(SOCK_TYPE_MASK & SOCK_CLOEXEC, 0);
+        // The known type IDs all fit in the low nibble.
+        assert!(SOCK_STREAM <= SOCK_TYPE_MASK);
+        assert!(SOCK_DGRAM  <= SOCK_TYPE_MASK);
+        assert!(SOCK_RAW    <= SOCK_TYPE_MASK);
+        assert!(SOCK_SEQPACKET <= SOCK_TYPE_MASK);
+    }
+
+    #[test]
+    fn test_socket_negative_type_einval() {
+        // Negative sock_type can't be a valid flag combo (the sign bit
+        // is far above SOCK_CLOEXEC).  Must EINVAL.
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, -1, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_socket_high_bit_in_type_einval() {
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, i32::MIN | SOCK_STREAM, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_socket_unknown_flag_bit_in_type_einval() {
+        // (1 << 15) is above SOCK_TYPE_MASK (0xf) and is neither
+        // SOCK_NONBLOCK (1<<11) nor SOCK_CLOEXEC (1<<19).  Must EINVAL.
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, SOCK_STREAM | (1 << 15), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_socket_einval_wins_over_eafnosupport() {
+        // Both stray flag bit AND bad family: Linux validates flags
+        // first.  Regression guard: previously we'd hit
+        // EAFNOSUPPORT first because the domain check ran first.
+        crate::errno::set_errno(0);
+        let ret = socket(99_999, SOCK_STREAM | (1 << 16), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_socket_einval_wins_over_eprotonosupport() {
+        // Even with a bad type ID, a stray flag bit must yield EINVAL
+        // first.  (The bad type would otherwise produce
+        // EPROTONOSUPPORT through the match-default branch.)
+        crate::errno::set_errno(0);
+        // base_type=7 is reserved/unimplemented; combined with bit 14.
+        let ret = socket(AF_INET, 7 | (1 << 14), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_socket_zero_flags_does_not_einval() {
+        // Plain SOCK_STREAM (no flags) must not be rejected by the
+        // mask path.  It should reach the domain/type check and
+        // succeed (or fail with a NON-EINVAL error if fd table is
+        // full / kernel rejects).
+        crate::errno::set_errno(0);
+        let fd = socket(AF_INET, SOCK_STREAM, 0);
+        if fd < 0 {
+            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL,
+                "valid SOCK_STREAM must not be rejected by the mask");
+        } else {
+            // Clean up to avoid leaking fds across tests.
+            let _ = fdtable::close_fd(fd);
+        }
+    }
+
+    #[test]
+    fn test_socket_nonblock_alone_passes_mask() {
+        crate::errno::set_errno(0);
+        let fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+        if fd < 0 {
+            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+        } else {
+            let _ = fdtable::close_fd(fd);
+        }
+    }
+
+    #[test]
+    fn test_socket_cloexec_alone_passes_mask() {
+        crate::errno::set_errno(0);
+        let fd = socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if fd < 0 {
+            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+        } else {
+            let _ = fdtable::close_fd(fd);
+        }
+    }
+
+    #[test]
+    fn test_socket_both_type_flags_pass_mask() {
+        crate::errno::set_errno(0);
+        let fd = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+        if fd < 0 {
+            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+        } else {
+            let _ = fdtable::close_fd(fd);
+        }
+    }
+
+    #[test]
+    fn test_socket_valid_flag_plus_unknown_rejected() {
+        // Mixing a valid type-flag with an unknown bit must still
+        // EINVAL — no partial acceptance.
+        crate::errno::set_errno(0);
+        let ret = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK | (1 << 17), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_socket_recovery_after_einval() {
+        // A rejected call must not corrupt the syscall surface — a
+        // subsequent valid call still works.
+        crate::errno::set_errno(0);
+        let r1 = socket(AF_INET, SOCK_STREAM | (1 << 13), 0);
+        assert_eq!(r1, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        let r2 = socket(AF_INET, SOCK_STREAM, 0);
+        if r2 < 0 {
+            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+        } else {
+            let _ = fdtable::close_fd(r2);
+        }
+    }
+
+    #[test]
+    fn test_socket_single_high_bits_outside_mask_all_rejected() {
+        // Defensive: every single bit above SOCK_TYPE_MASK (i.e.
+        // bits 4..30) that is NEITHER SOCK_NONBLOCK (bit 11) NOR
+        // SOCK_CLOEXEC (bit 19) must be rejected with EINVAL when
+        // OR'd with SOCK_STREAM.  Skip bit 31 — that's the sign bit
+        // and is covered by test_socket_high_bit_in_type_einval.
+        for shift in 4..31 {
+            let bit = 1i32 << shift;
+            if bit == SOCK_NONBLOCK || bit == SOCK_CLOEXEC {
+                continue;
+            }
+            crate::errno::set_errno(0);
+            let ret = socket(AF_INET, SOCK_STREAM | bit, 0);
+            assert_eq!(ret, -1,
+                "bit {:#x} should be rejected by socket type mask", bit);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
+                "bit {:#x} should set EINVAL", bit);
+        }
     }
 
     #[test]

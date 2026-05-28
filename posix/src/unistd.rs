@@ -1784,6 +1784,15 @@ pub const PR_SET_SECCOMP: i32 = 22;
 /// Get seccomp mode.
 pub const PR_GET_SECCOMP: i32 = 21;
 
+/// Size of the buffer written by `PR_GET_NAME` and read by `PR_SET_NAME`.
+///
+/// Matches Linux's `TASK_COMM_LEN` (16 bytes including the NUL
+/// terminator).  Both `PR_SET_NAME` and `PR_GET_NAME` are defined in
+/// terms of this size — `PR_SET_NAME` reads up to `TASK_COMM_LEN - 1`
+/// bytes (15) and NUL-terminates; `PR_GET_NAME` writes exactly
+/// `TASK_COMM_LEN` bytes via `copy_to_user(arg2, comm, sizeof(comm))`.
+pub const TASK_COMM_LEN: usize = 16;
+
 /// Process control operations (Linux).
 ///
 /// Stub: implements `PR_SET_NAME` / `PR_GET_NAME` as a name buffer
@@ -1800,6 +1809,14 @@ pub const PR_GET_SECCOMP: i32 = 21;
 ///   - `arg3`, `arg4`, `arg5` are *not* checked here.  Linux ignores
 ///     extra args for these two opcodes (the names predate the strict
 ///     "all extra args must be 0" convention introduced in 2.6.x).
+///   - **Phase 159:** `PR_GET_NAME` writes **all 16 bytes**
+///     (`TASK_COMM_LEN`) via `copy_to_user(arg2, comm, sizeof(comm))`.
+///     Pre-Phase-159 we only wrote a single NUL byte at `arg2[0]`,
+///     which left `arg2[1..16]` containing whatever uninitialised stack
+///     contents the caller passed in.  Linux callers (notably libc's
+///     `pthread_getname_np`) expect a NUL-padded 16-byte buffer and
+///     copy the whole region into their own storage; the partial write
+///     leaked caller stack into the visible name.
 ///
 /// * `PR_SET_NO_NEW_PRIVS` (38):
 ///   - `arg2 != 1` → `EINVAL`.  The flag is one-way; only the value
@@ -1828,9 +1845,16 @@ pub extern "C" fn prctl(option: i32, arg2: u64, arg3: u64, arg4: u64, arg5: u64)
                 crate::errno::set_errno(crate::errno::EFAULT);
                 return -1;
             }
-            // SAFETY: caller's prctl contract guarantees a 16-byte
-            // buffer at arg2 for PR_GET_NAME.
-            unsafe { *(arg2 as *mut u8) = 0; }
+            // Phase 159: write the full TASK_COMM_LEN-byte buffer to
+            // match Linux's `copy_to_user(arg2, comm, sizeof(comm))`.
+            // We don't track a per-process name, so the whole buffer is
+            // zeroed.  Callers can rely on every byte being initialised.
+            //
+            // SAFETY: caller's prctl contract guarantees a writable
+            // `TASK_COMM_LEN`-byte buffer at `arg2` for `PR_GET_NAME`.
+            unsafe {
+                core::ptr::write_bytes(arg2 as *mut u8, 0, TASK_COMM_LEN);
+            }
             0
         }
         PR_SET_NO_NEW_PRIVS => {
@@ -3255,13 +3279,22 @@ mod tests {
 
     #[test]
     fn test_phase76_prctl_get_name_valid_buf_zeroes_first_byte() {
+        // Phase 159 update: PR_GET_NAME now writes the full
+        // TASK_COMM_LEN (16) bytes — matches Linux's
+        // `copy_to_user(arg2, comm, sizeof(comm))`.  Pre-Phase-159 we
+        // only wrote `buf[0]`, leaving `buf[1..16]` containing caller
+        // stack.  The old assertion `buf[1] == 'X'` is now wrong and
+        // has been replaced with a full-buffer zero check.  Sentinel
+        // assertion `buf[1] != 'X'` is in
+        // `test_prctl_get_name_no_longer_leaves_tail_uninitialised_phase159`.
         let mut buf = [b'X'; 16];
         let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
         assert_eq!(ret, 0);
         assert_eq!(buf[0], 0);
-        // Rest of buffer untouched (we only NUL-terminate; we don't
-        // zero the whole thing).  Verify byte 1 still has the sentinel.
-        assert_eq!(buf[1], b'X');
+        // Phase 159: rest of buffer also zeroed.
+        for (i, &b) in buf.iter().enumerate() {
+            assert_eq!(b, 0, "PR_GET_NAME must zero byte {i} (Phase 159)");
+        }
     }
 
     #[test]
@@ -3421,6 +3454,222 @@ mod tests {
         assert_eq!(prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
         assert_eq!(prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0), 0);
         assert_eq!(crate::errno::get_errno(), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 159 — PR_GET_NAME writes the full TASK_COMM_LEN buffer
+    //
+    // Linux `kernel/sys.c::sys_prctl` for `PR_GET_NAME` does:
+    //
+    //     get_task_comm(comm, me);
+    //     if (copy_to_user((char __user *)arg2, comm, sizeof(comm)))
+    //         return -EFAULT;
+    //
+    // where `sizeof(comm) == TASK_COMM_LEN == 16`.  Every byte in the
+    // user buffer is written (the name is NUL-padded to 16 bytes inside
+    // `task_struct->comm`).
+    //
+    // Pre-Phase-159 our stub only wrote `arg2[0] = 0`, leaving
+    // `arg2[1..16]` containing whatever uninitialised stack the caller
+    // passed in.  Callers like glibc's `pthread_getname_np` copy the
+    // full 16-byte region into their own storage and would observe
+    // leaked caller stack.
+    // ------------------------------------------------------------------
+
+    // -- Per-error-class (precedence vs Phase 76) -----------------------
+
+    /// EFAULT-on-NULL still wins over the 16-byte write — verify the
+    /// fault path didn't accidentally start writing to NULL.
+    #[test]
+    fn test_phase159_get_name_null_buf_still_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_GET_NAME, 0, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // -- Full-buffer-write checks --------------------------------------
+
+    /// Core Phase-159 contract: every one of the 16 bytes is zeroed.
+    /// Pre-fix only `buf[0]` would be 0, the rest would stay 'X'.
+    #[test]
+    fn test_phase159_get_name_writes_all_16_bytes() {
+        let mut buf = [b'X'; TASK_COMM_LEN];
+        let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(ret, 0);
+        assert_eq!(buf, [0u8; TASK_COMM_LEN]);
+    }
+
+    /// Sentinel-after-buffer check: the byte *immediately past* the
+    /// 16-byte buffer must NOT be written.  Confirms we copy exactly
+    /// TASK_COMM_LEN bytes — no overrun.
+    #[test]
+    fn test_phase159_get_name_does_not_overrun_past_16_bytes() {
+        // Layout: [name buf | sentinel].
+        let mut storage: [u8; TASK_COMM_LEN + 1] = [b'S'; TASK_COMM_LEN + 1];
+        let ret = prctl(PR_GET_NAME, storage.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(ret, 0);
+        // First 16 bytes zeroed.
+        for i in 0..TASK_COMM_LEN {
+            assert_eq!(storage[i], 0, "byte {i} should be zeroed");
+        }
+        // Sentinel byte at index 16 must remain.
+        assert_eq!(storage[TASK_COMM_LEN], b'S', "no overrun past TASK_COMM_LEN");
+    }
+
+    /// Buffer pre-populated with the *previous* name (caller is reusing
+    /// the buffer) must be fully overwritten, not partially leaked.
+    #[test]
+    fn test_phase159_get_name_overwrites_stale_name() {
+        let mut buf = *b"OLDNAMEHERELEAK\0"; // 16 bytes
+        let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(ret, 0);
+        assert_eq!(buf, [0u8; TASK_COMM_LEN], "stale name must be fully wiped");
+    }
+
+    /// Buffer pre-populated with high-entropy junk (closest analogue to
+    /// uninitialised stack) — the post-Phase-159 contract is that no
+    /// byte of the junk survives.
+    #[test]
+    fn test_phase159_get_name_clears_high_entropy_junk() {
+        let pattern: [u8; TASK_COMM_LEN] = [
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
+            0xFE, 0xED, 0xFA, 0xCE, 0xA5, 0x5A, 0x12, 0x34,
+        ];
+        let mut buf = pattern;
+        let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(ret, 0);
+        for (i, &b) in buf.iter().enumerate() {
+            assert_eq!(b, 0, "byte {i} stayed 0x{:02X} from {:02X?}", pattern[i], pattern);
+        }
+    }
+
+    // -- Workflow: pthread_getname_np-style readback --------------------
+
+    /// glibc's `pthread_getname_np` does:
+    ///   prctl(PR_GET_NAME, buf, 0, 0, 0);
+    ///   strlen(buf); /* expects NUL terminator within 16 bytes */
+    /// The post-Phase-159 contract guarantees a NUL within the first
+    /// 16 bytes (in fact at index 0 — we don't track a name).
+    #[test]
+    fn test_phase159_workflow_pthread_getname_style() {
+        let mut buf = [0xAAu8; TASK_COMM_LEN];
+        let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(ret, 0);
+        // strlen-style scan: a NUL must appear within TASK_COMM_LEN.
+        let nul_pos = buf.iter().position(|&b| b == 0);
+        assert!(nul_pos.is_some(), "no NUL terminator within 16 bytes");
+        // No junk between buffer start and the (first) NUL.
+        assert_eq!(nul_pos, Some(0));
+    }
+
+    // -- Extra-arg liberties (Linux ignores arg3..5 for these opcodes) --
+
+    /// Linux's `PR_GET_NAME` ignores arg3..5; Phase 159 keeps that
+    /// lenient behaviour even though we now write 16 bytes.
+    #[test]
+    fn test_phase159_get_name_extra_args_ignored() {
+        let mut buf = [b'X'; TASK_COMM_LEN];
+        let ret = prctl(
+            PR_GET_NAME,
+            buf.as_mut_ptr() as u64,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+        );
+        assert_eq!(ret, 0);
+        assert_eq!(buf, [0u8; TASK_COMM_LEN]);
+    }
+
+    // -- Buggy-caller patterns -----------------------------------------
+
+    /// Caller passes a buffer that is partially overlapping with their
+    /// own stack frame.  As long as the 16-byte region is writable, the
+    /// write succeeds — and only those 16 bytes are touched.
+    #[test]
+    fn test_phase159_get_name_buggy_caller_short_storage_ok() {
+        // Slightly oversized storage; we slice the buffer down to 16.
+        let mut storage = [b'Z'; 24];
+        let ret = prctl(PR_GET_NAME, storage.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(ret, 0);
+        // First 16 zeroed.
+        for i in 0..TASK_COMM_LEN {
+            assert_eq!(storage[i], 0);
+        }
+        // Bytes 16..24 untouched.
+        for i in TASK_COMM_LEN..24 {
+            assert_eq!(storage[i], b'Z', "byte {i} should be untouched");
+        }
+    }
+
+    // -- Recovery / no-side-effect loop --------------------------------
+
+    /// 200 iterations of PR_GET_NAME on a fresh buffer must all succeed
+    /// without errno desync or partial writes.
+    #[test]
+    fn test_phase159_get_name_repeated_calls_idempotent() {
+        for i in 0..200 {
+            let mut buf = [(i as u8).wrapping_add(1); TASK_COMM_LEN];
+            crate::errno::set_errno(0);
+            let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
+            assert_eq!(ret, 0, "iter {i}");
+            assert_eq!(buf, [0u8; TASK_COMM_LEN], "iter {i} buf mismatch");
+            assert_eq!(crate::errno::get_errno(), 0, "iter {i} errno");
+        }
+    }
+
+    /// Failed call (NULL) must not write anything — and the next
+    /// successful call must still produce a fully-zeroed buffer.
+    #[test]
+    fn test_phase159_get_name_recovery_after_efault() {
+        // 1. NULL → EFAULT, no writes.
+        assert_eq!(prctl(PR_GET_NAME, 0, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+
+        // 2. Valid call immediately after still works.
+        let mut buf = [b'Y'; TASK_COMM_LEN];
+        let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
+        assert_eq!(ret, 0);
+        assert_eq!(buf, [0u8; TASK_COMM_LEN]);
+    }
+
+    // -- Sentinel: pre-Phase-159 behaviour no longer holds -------------
+
+    /// Sentinel: the pre-Phase-159 contract was "PR_GET_NAME only writes
+    /// `buf[0]`."  This test pins the post-fix contract — `buf[1]` is
+    /// also written (and equals 0).  If anyone reverts to the partial
+    /// write this fails immediately.
+    #[test]
+    fn test_prctl_get_name_no_longer_leaves_tail_uninitialised_phase159() {
+        let mut buf = [b'X'; TASK_COMM_LEN];
+        let _ = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
+        // Pre-Phase-159 buf[15] stayed 'X'.  Post-fix it's 0.
+        assert_ne!(buf[15], b'X');
+        assert_eq!(buf[15], 0);
+    }
+
+    // -- Cross-checks: TASK_COMM_LEN constant and PR_SET_NAME unchanged --
+
+    /// TASK_COMM_LEN must remain 16 — this is a Linux ABI constant and
+    /// changing it would silently break every caller.
+    #[test]
+    fn test_phase159_task_comm_len_is_16() {
+        assert_eq!(TASK_COMM_LEN, 16);
+    }
+
+    /// Cross-check: `PR_SET_NAME` semantics unchanged by Phase 159.
+    /// Phase 159 only touches the GET path.
+    #[test]
+    fn test_phase159_set_name_unaffected() {
+        let name = b"hello\0world\0xxxx";
+        assert_eq!(prctl(PR_SET_NAME, name.as_ptr() as u64, 0, 0, 0), 0);
+    }
+
+    /// Cross-check: NULL-PR_SET_NAME still EFAULT.
+    #[test]
+    fn test_phase159_set_name_null_still_efault() {
+        crate::errno::set_errno(0);
+        assert_eq!(prctl(PR_SET_NAME, 0, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     // ------------------------------------------------------------------

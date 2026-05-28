@@ -393,13 +393,50 @@ pub extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut core::ffi::c_void) ->
 
 /// Set the system clock.
 ///
-/// Stub: returns -1 with `EPERM`.  The kernel clock cannot be adjusted
-/// from userspace yet.
+/// Linux-matching argument-domain validation:
+///   - If both `tv` and `tz` are NULL: returns 0 (no-op success).
+///     Linux's `SYSCALL_DEFINE2(settimeofday, ...)` treats both pointers as
+///     optional; a call with no arguments is well-formed and trivially
+///     succeeds without touching the clock.
+///   - If `tv` is non-NULL: validate `tv_sec >= 0`, `tv_usec` in
+///     `[0, 999_999]`; on failure return `-1` with `EINVAL`.
+///   - On a structurally valid call that would actually set the clock:
+///     return `-1` with `EPERM` because the kernel clock cannot be
+///     adjusted from userspace yet (no `CAP_SYS_TIME` infrastructure).
+///   - The `tz` argument is accepted but otherwise ignored (Linux has
+///     deprecated `settimeofday` timezone setting since 2.6.x; passing a
+///     non-NULL `tz` along with a NULL `tv` is treated as a no-op success
+///     here to match the "set timezone only" path Linux still tolerates).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn settimeofday(
-    _tv: *const Timeval,
-    _tz: *const core::ffi::c_void,
+    tv: *const Timeval,
+    tz: *const core::ffi::c_void,
 ) -> i32 {
+    // Both NULL: well-formed no-op.
+    if tv.is_null() && tz.is_null() {
+        return 0;
+    }
+
+    // If tv is provided, validate its fields before considering EPERM.
+    if !tv.is_null() {
+        // SAFETY: caller-provided pointer is non-NULL; read unaligned to
+        // avoid undefined behaviour on misaligned user buffers.  Reading
+        // a Timeval (two scalar fields) has no further preconditions.
+        let val = unsafe { core::ptr::read_unaligned(tv) };
+        if val.tv_sec < 0 || val.tv_usec < 0 || val.tv_usec >= 1_000_000 {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
+    }
+
+    // If only tz is provided (tv is NULL but tz isn't), Linux treats this
+    // as a (deprecated) timezone-only update.  We accept it as a no-op.
+    if tv.is_null() {
+        return 0;
+    }
+
+    // Structurally valid request to actually adjust the clock — we lack
+    // CAP_SYS_TIME plumbing, so refuse with EPERM.
     errno::set_errno(errno::EPERM);
     -1
 }
@@ -3866,8 +3903,10 @@ mod tests {
     #[test]
     fn test_settimeofday_returns_eperm() {
         let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
     }
 
     #[test]
@@ -4646,9 +4685,194 @@ mod tests {
     }
 
     #[test]
-    fn test_settimeofday_null_tv() {
-        // Null timeval.
-        let _ret = settimeofday(core::ptr::null(), core::ptr::null());
+    fn test_settimeofday_null_tv_and_tz_is_success() {
+        // Both NULL → well-formed no-op success.
+        errno::set_errno(0);
+        let ret = settimeofday(core::ptr::null(), core::ptr::null());
+        assert_eq!(ret, 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // Phase 84 — settimeofday argument-domain validation
+    //
+    // Linux semantics being validated:
+    //   - tv NULL && tz NULL → 0
+    //   - tv non-NULL with out-of-range tv_sec/tv_usec → -1, EINVAL
+    //   - structurally valid tv → -1, EPERM (no CAP_SYS_TIME)
+    //   - tv NULL && tz non-NULL → 0 (deprecated tz-only no-op)
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_settimeofday_phase84_both_null_returns_zero() {
+        errno::set_errno(0xBAD);
+        let ret = settimeofday(core::ptr::null(), core::ptr::null());
+        assert_eq!(ret, 0);
+        // Success path must not clobber errno to anything we set.
+        // (We don't require it to be 0 — Linux preserves errno on success.)
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_null_tv_with_tz_is_success() {
+        // tv NULL but tz non-NULL: tz-only update is accepted as a no-op.
+        let sentinel: u8 = 0;
+        let tz = &raw const sentinel as *const core::ffi::c_void;
+        errno::set_errno(0);
+        let ret = settimeofday(core::ptr::null(), tz);
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_negative_tv_sec_is_einval() {
+        let tv = Timeval { tv_sec: -1, tv_usec: 0 };
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_negative_tv_usec_is_einval() {
+        let tv = Timeval { tv_sec: 0, tv_usec: -1 };
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_tv_usec_equal_to_million_is_einval() {
+        // The valid range is [0, 999_999]; exactly 1_000_000 must be rejected.
+        let tv = Timeval { tv_sec: 0, tv_usec: 1_000_000 };
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_tv_usec_above_million_is_einval() {
+        let tv = Timeval { tv_sec: 0, tv_usec: 9_999_999 };
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_max_valid_tv_usec_is_eperm() {
+        // 999_999 is the maximum valid microsecond value — must reach EPERM,
+        // not EINVAL.
+        let tv = Timeval { tv_sec: 0, tv_usec: 999_999 };
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_zero_tv_is_eperm() {
+        let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_large_valid_tv_is_eperm() {
+        // Reasonably distant future timestamp — still valid argument-wise.
+        let tv = Timeval { tv_sec: 2_000_000_000, tv_usec: 500_000 };
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_valid_tv_with_nonnull_tz_is_eperm() {
+        // tv valid + tz non-NULL: EPERM (we still can't set the clock).
+        let tv = Timeval { tv_sec: 1, tv_usec: 1 };
+        let sentinel: u8 = 0;
+        let tz = &raw const sentinel as *const core::ffi::c_void;
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, tz);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_einval_ordering_precedes_eperm() {
+        // A bad tv_usec must be detected as EINVAL even when tz is
+        // also non-NULL — validation order is "tv-field-shape" first,
+        // EPERM last.
+        let tv = Timeval { tv_sec: 0, tv_usec: -42 };
+        let sentinel: u8 = 0;
+        let tz = &raw const sentinel as *const core::ffi::c_void;
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, tz);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_negative_sec_takes_precedence_over_bad_usec() {
+        // When both fields are out of range, we still report EINVAL.
+        let tv = Timeval { tv_sec: -5, tv_usec: 9_999_999 };
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_does_not_overflow_on_intmax_sec() {
+        // Pathological but well-formed input: i64::MAX seconds, 0 us.
+        // Must not panic; must return EPERM.
+        let tv = Timeval { tv_sec: i64::MAX, tv_usec: 0 };
+        errno::set_errno(0);
+        let ret = settimeofday(&raw const tv, core::ptr::null());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_repeated_calls_are_stable() {
+        // Calling settimeofday repeatedly with the same valid args should
+        // produce identical results — no hidden global state.
+        let tv = Timeval { tv_sec: 1000, tv_usec: 1000 };
+        for _ in 0..5 {
+            errno::set_errno(0);
+            let ret = settimeofday(&raw const tv, core::ptr::null());
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_einval_does_not_alter_subsequent_call() {
+        // An EINVAL failure must not leave residual state that taints a
+        // subsequent valid call's errno.
+        let bad = Timeval { tv_sec: 0, tv_usec: -1 };
+        errno::set_errno(0);
+        assert_eq!(settimeofday(&raw const bad, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        let good = Timeval { tv_sec: 0, tv_usec: 0 };
+        errno::set_errno(0);
+        assert_eq!(settimeofday(&raw const good, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
+    }
+
+    #[test]
+    fn test_settimeofday_phase84_null_tv_then_valid_tv_progression() {
+        // Both-NULL success path followed by valid-tv EPERM path.
+        errno::set_errno(0);
+        assert_eq!(settimeofday(core::ptr::null(), core::ptr::null()), 0);
+
+        let tv = Timeval { tv_sec: 1, tv_usec: 1 };
+        errno::set_errno(0);
+        assert_eq!(settimeofday(&raw const tv, core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EPERM);
     }
 
     #[test]

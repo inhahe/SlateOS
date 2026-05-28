@@ -102,6 +102,15 @@ pub const MAX_EPOLL_INSTANCES: usize = 16;
 /// Maximum number of fds in an epoll instance's interest list.
 pub const MAX_EPOLL_ENTRIES: usize = 128;
 
+/// Upper bound on `epoll_wait`'s `maxevents` argument.  Matches Linux's
+/// `EP_MAX_EVENTS` in `fs/eventpoll.c`, which is
+/// `INT_MAX / sizeof(struct epoll_event)`.  Linux uses this to prevent
+/// integer-overflow / DoS-via-huge-array-sizing attacks in
+/// `ep_check_params`; we mirror the bound exactly so any caller that
+/// happens to probe the edge sees the same EINVAL behaviour.
+pub const EP_MAX_EVENTS: i32 =
+    i32::MAX / (core::mem::size_of::<EpollEvent>() as i32);
+
 /// One entry in an epoll instance's interest list.
 #[derive(Clone, Copy)]
 struct EpollEntry {
@@ -482,7 +491,21 @@ pub unsafe extern "C" fn epoll_wait(
     // Sleep interval for the poll loop: 10ms.  Matches poll()/select().
     const POLL_INTERVAL_NS: u64 = 10_000_000;
 
-    if maxevents <= 0 {
+    // Validation order matches Linux's do_epoll_wait + ep_check_params
+    // (fs/eventpoll.c):
+    //   1. EBADF:  fdget(epfd) — epfd must be open.
+    //   2. EINVAL: maxevents <= 0 || maxevents > EP_MAX_EVENTS.
+    //   3. EFAULT: !access_ok(events, maxevents * sizeof(epoll_event)).
+    //   4. EINVAL: !is_file_epoll(epfd) — epfd must be an epoll fd.
+    //
+    // Previously we checked maxevents and events before the fdget, so
+    // a bad epfd combined with bad maxevents returned EINVAL instead
+    // of EBADF.
+    let Some(ep_entry) = fdtable::get_fd(epfd) else {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    };
+    if maxevents <= 0 || maxevents > EP_MAX_EVENTS {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -490,10 +513,6 @@ pub unsafe extern "C" fn epoll_wait(
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    let Some(ep_entry) = fdtable::get_fd(epfd) else {
-        errno::set_errno(errno::EBADF);
-        return -1;
-    };
     if ep_entry.kind != HandleKind::Epoll {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -2272,11 +2291,17 @@ mod tests {
 
     #[test]
     fn test_epoll_wait_invalid_maxevents_returns_einval() {
+        // Use a real epoll fd so the maxevents EINVAL fires instead of
+        // the EBADF from the epfd lookup that Phase 107 promoted to
+        // first place.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
         errno::set_errno(0);
         // SAFETY: maxevents check happens before any pointer dereference.
-        let ret = unsafe { epoll_wait(3, core::ptr::null_mut(), 0, -1) };
+        let ret = unsafe { epoll_wait(epfd, core::ptr::null_mut(), 0, -1) };
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
     }
 
     #[test]
@@ -4015,6 +4040,197 @@ mod tests {
         let good = epoll_ctl(epfd, EPOLL_CTL_ADD, target, &raw mut ev);
         assert_eq!(good, 0, "recovery ADD must succeed, errno={}", errno::get_errno());
         crate::file::close(target);
+        crate::file::close(epfd);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 107 — epoll_wait validation ordering parity with Linux.
+    //
+    // Linux's `do_epoll_wait` performs `fdget(epfd)` FIRST, then enters
+    // `ep_check_params` (maxevents, events access_ok, is_file_epoll).
+    // Previously we checked maxevents and the events pointer BEFORE the
+    // fd lookup, so a bad epfd combined with bad maxevents returned
+    // EINVAL instead of Linux's EBADF.  We also lacked the upper bound
+    // on maxevents that Linux enforces (EP_MAX_EVENTS = INT_MAX /
+    // sizeof(struct epoll_event)).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_epoll_wait_phase107_ep_max_events_value() {
+        // sizeof(EpollEvent) is 12 bytes (u32 events + u64 data, packed),
+        // so EP_MAX_EVENTS = INT_MAX / 12 = 178,956,970.  Pin to detect
+        // accidental layout changes that would slide the bound.
+        assert_eq!(core::mem::size_of::<EpollEvent>(), 12);
+        assert_eq!(EP_MAX_EVENTS, i32::MAX / 12);
+        assert!(EP_MAX_EVENTS > 0);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_maxevents_at_bound_passes_check() {
+        // maxevents == EP_MAX_EVENTS is the largest accepted value.
+        // We won't actually allocate that buffer; we just verify the
+        // bound check itself doesn't reject it.  Use a real epoll fd
+        // and a non-null events pointer to isolate the bound check.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        // Poll with timeout=0 so we don't actually wait.  With
+        // maxevents=EP_MAX_EVENTS we'll write at most 1 event because
+        // we only have 1 entry, but the bound check must not reject.
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_wait(epfd, ev.as_mut_ptr(), EP_MAX_EVENTS, 0)
+        };
+        // Either 0 (nothing ready) or an error other than EINVAL is OK;
+        // we just need to confirm the bound itself didn't reject.
+        if r < 0 {
+            assert_ne!(errno::get_errno(), errno::EINVAL,
+                "EP_MAX_EVENTS at the bound must not trip the bound check");
+        }
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_maxevents_over_bound_einval() {
+        // EP_MAX_EVENTS + 1 must trip the new upper bound.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        errno::set_errno(0);
+        let r = unsafe {
+            epoll_wait(epfd, ev.as_mut_ptr(), EP_MAX_EVENTS.wrapping_add(1), 0)
+        };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_maxevents_i32_max_einval() {
+        // i32::MAX is well past EP_MAX_EVENTS and must be rejected.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(epfd, ev.as_mut_ptr(), i32::MAX, 0) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_ebadf_wins_over_einval_maxevents() {
+        // Bad epfd + maxevents=0: Linux looks up epfd FIRST, so we get
+        // EBADF, not EINVAL.
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(99999, ev.as_mut_ptr(), 0, 0) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_ebadf_wins_over_einval_negative_maxevents() {
+        // Same, with negative maxevents.
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(99999, ev.as_mut_ptr(), -1, 0) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_ebadf_wins_over_einval_overbound_maxevents() {
+        // Bad epfd + maxevents past EP_MAX_EVENTS: still EBADF.
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(99999, ev.as_mut_ptr(), i32::MAX, 0) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_ebadf_wins_over_efault_null_events() {
+        // Bad epfd + null events: Linux returns EBADF (epfd lookup
+        // before access_ok).
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(99999, core::ptr::null_mut(), 1, 0) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_einval_maxevents_wins_over_efault_events() {
+        // Real epfd + maxevents=0 + null events: Linux's
+        // ep_check_params checks maxevents BEFORE access_ok, so EINVAL
+        // wins over EFAULT.
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(epfd, core::ptr::null_mut(), 0, 0) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(epfd);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_efault_null_events_wins_over_einval_kind() {
+        // Non-epoll epfd + valid maxevents + null events: Linux's
+        // access_ok runs BEFORE is_file_epoll, so EFAULT wins.
+        let not_epoll = eventfd(0, 0);
+        assert!(not_epoll >= 0);
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(not_epoll, core::ptr::null_mut(), 1, 0) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        crate::file::close(not_epoll);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_einval_kind_for_non_epoll_fd() {
+        // Non-epoll epfd + valid args → EINVAL from is_file_epoll.
+        let not_epoll = eventfd(0, 0);
+        assert!(not_epoll >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(not_epoll, ev.as_mut_ptr(), 1, 0) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(not_epoll);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_einval_maxevents_for_non_epoll_fd() {
+        // Non-epoll epfd + maxevents=-5 + valid events ptr: Linux
+        // checks maxevents BEFORE is_file_epoll, so EINVAL wins
+        // (but the errno is EINVAL either way; this test pins the
+        // ordering through the maxevents check, not the kind check).
+        let not_epoll = eventfd(0, 0);
+        assert!(not_epoll >= 0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        errno::set_errno(0);
+        let r = unsafe { epoll_wait(not_epoll, ev.as_mut_ptr(), -5, 0) };
+        assert_eq!(r, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        crate::file::close(not_epoll);
+    }
+
+    #[test]
+    fn test_epoll_wait_phase107_recovery_after_ebadf() {
+        // After a rejected call with a bad epfd, a subsequent valid
+        // call still works.
+        errno::set_errno(0);
+        let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
+        let bad = unsafe { epoll_wait(99999, ev.as_mut_ptr(), 1, 0) };
+        assert_eq!(bad, -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+
+        let epfd = epoll_create1(0);
+        assert!(epfd >= 0);
+        errno::set_errno(0);
+        let good = unsafe { epoll_wait(epfd, ev.as_mut_ptr(), 1, 0) };
+        // No events armed → returns 0.  Must not be an error.
+        assert_eq!(good, 0, "recovery wait must succeed, errno={}", errno::get_errno());
         crate::file::close(epfd);
     }
 }

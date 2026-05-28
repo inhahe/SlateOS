@@ -1044,13 +1044,44 @@ pub extern "C" fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
 
 /// Read directory entries via the legacy Linux `getdents` syscall.
 ///
-/// Always returns -1 with `ENOSYS`: the legacy struct has a 32-bit
-/// inode field which doesn't fit our 64-bit inodes, and modern programs
-/// universally use `getdents64`.  Callers should use `readdir()` or
-/// `getdents64` instead.  glibc/musl do not ship a wrapper for either
-/// raw syscall, so this stub is the documented stand-in.
+/// The legacy `struct linux_dirent` has a 32-bit inode field which
+/// cannot represent our 64-bit inodes safely, so we never actually
+/// produce records here — the function returns `ENOSYS` on valid
+/// calls and callers should switch to `getdents64` or libc's
+/// `readdir()`.  glibc and musl do not export a wrapper for either
+/// raw syscall, so portable code already uses one of those.
+///
+/// However, an unimplemented sentinel is not a license to skip
+/// argument-domain validation.  A buggy caller — for example a
+/// language runtime that bypasses libc — passing a closed fd or a
+/// NULL buffer must see the same errno values Linux would produce,
+/// so the failure is diagnosed correctly even though the underlying
+/// directory walk is not performed.  Validation order matches
+/// `getdents64` above and Linux's `fs/readdir.c::sys_getdents`:
+///
+/// 1. `fd < 0`                   -> `EBADF`
+/// 2. `count == 0`               -> `EINVAL`
+/// 3. `dirp.is_null()`           -> `EFAULT`
+/// 4. `fd` not in fdtable        -> `EBADF`
+/// 5. all valid                  -> `ENOSYS`
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getdents(_fd: i32, _dirp: *mut u8, _count: usize) -> i64 {
+pub extern "C" fn getdents(fd: i32, dirp: *mut u8, count: usize) -> i64 {
+    if fd < 0 {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return -1;
+    }
+    if count == 0 {
+        crate::errno::set_errno(crate::errno::EINVAL);
+        return -1;
+    }
+    if dirp.is_null() {
+        crate::errno::set_errno(crate::errno::EFAULT);
+        return -1;
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        crate::errno::set_errno(crate::errno::EBADF);
+        return -1;
+    }
     crate::errno::set_errno(crate::errno::ENOSYS);
     -1
 }
@@ -1567,10 +1598,19 @@ mod tests {
 
     #[test]
     fn test_getdents_still_enosys() {
-        // getdents (legacy 32-bit-ino variant) remains unimplemented.
+        // Phase 67: getdents (legacy 32-bit-ino variant) is still
+        // unimplemented, but now validates arguments first.  NULL dirp
+        // with non-zero count now produces EFAULT (matching Linux),
+        // not ENOSYS — this test was previously checking the pre-
+        // validator behaviour.  Updated to call with valid args that
+        // reach the ENOSYS sentinel (negative fd would short-circuit
+        // with EBADF; use AT_FDCWD-style sentinel value of -100 is
+        // also negative, so we have to use a real open fd).  Since
+        // we cannot easily open a fd in this test, we assert the new
+        // EFAULT semantics directly to keep regression coverage.
         crate::errno::set_errno(0);
         assert_eq!(getdents(3, core::ptr::null_mut(), 4096), -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
@@ -1636,11 +1676,17 @@ mod tests {
 
     #[test]
     fn test_getdents_returns_enosys() {
+        // Phase 67: fd 3 is not an open fd in the test environment, so
+        // the new validator now reports EBADF before reaching the
+        // ENOSYS sentinel.  Test updated to verify EBADF for this
+        // closed-fd case.  A separate test below
+        // (`test_getdents_valid_args_reach_enosys`) covers the actual
+        // ENOSYS path with a real open fd.
         crate::errno::set_errno(0);
         let mut buf = [0u8; 256];
         let ret = getdents(3, buf.as_mut_ptr(), buf.len());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]
@@ -1761,5 +1807,198 @@ mod tests {
     fn test_linux_dirent64_header_size() {
         // 8 (ino) + 8 (off) + 2 (reclen) + 1 (type) = 19.
         assert_eq!(LINUX_DIRENT64_HEADER, 19);
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 67 — getdents argument-domain validators
+    // -----------------------------------------------------------------
+    //
+    // The legacy `getdents` stub remains policy-driven (returns ENOSYS
+    // on valid calls because the 32-bit-ino record format can't
+    // represent our 64-bit inodes safely).  But invalid calls must
+    // produce the same errno values Linux would, so a buggy caller is
+    // not misled by ENOSYS into thinking the function never exists.
+
+    // --- per-error-class ---
+
+    #[test]
+    fn test_getdents_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents(-1, buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_getdents_very_negative_fd_ebadf() {
+        // Even an "AT_FDCWD-like" -100 fd is rejected with EBADF here.
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents(-100, buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_getdents_zero_count_einval() {
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents(3, buf.as_mut_ptr(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getdents_null_buf_efault() {
+        crate::errno::set_errno(0);
+        let ret = getdents(3, core::ptr::null_mut(), 256);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_getdents_closed_fd_ebadf() {
+        // fd 9999 is far beyond any allocated fd in tests, so fdtable
+        // returns None and we report EBADF.
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents(9999, buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_getdents_valid_args_reach_enosys() {
+        // Open a real fd via pipe() and pass it to getdents.  The fd
+        // is not a directory, but getdents's stub does not check kind
+        // — it only verifies the fd is open, then returns ENOSYS.
+        // A future refinement (when kind tracking lands for directories)
+        // would refine non-directory fds to ENOTDIR.
+        let mut pf = [-1i32; 2];
+        let r = crate::pipe::pipe(pf.as_mut_ptr());
+        assert_eq!(r, 0, "pipe() must succeed to set up test");
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents(pf[0], buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        // Clean up pipe fds.
+        let _ = crate::fdtable::close_fd(pf[0]);
+        let _ = crate::fdtable::close_fd(pf[1]);
+    }
+
+    // --- ordering ---
+
+    #[test]
+    fn test_getdents_negative_fd_beats_zero_count() {
+        // fd<0 check fires before count==0 check.
+        crate::errno::set_errno(0);
+        let ret = getdents(-1, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_getdents_negative_fd_beats_null_buf() {
+        crate::errno::set_errno(0);
+        let ret = getdents(-1, core::ptr::null_mut(), 256);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_getdents_zero_count_beats_null_buf() {
+        // count==0 check fires before NULL-buf check.
+        crate::errno::set_errno(0);
+        let ret = getdents(3, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_getdents_null_buf_beats_closed_fd() {
+        // NULL-buf check (with non-zero count) fires before the
+        // fdtable lookup, so a closed fd plus NULL buf produces EFAULT,
+        // not EBADF.
+        crate::errno::set_errno(0);
+        let ret = getdents(9999, core::ptr::null_mut(), 256);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    // --- ordering parity with getdents64 ---
+
+    #[test]
+    fn test_getdents_and_getdents64_share_validation_order() {
+        // Both validators check fd<0 first, then count==0, then NULL
+        // buf, then fdtable.  This test pins that parity so a future
+        // refactor doesn't diverge them silently.
+        crate::errno::set_errno(0);
+        let r1 = getdents(-1, core::ptr::null_mut(), 0);
+        let e1 = crate::errno::get_errno();
+        crate::errno::set_errno(0);
+        let r2 = getdents64(-1, core::ptr::null_mut(), 0);
+        let e2 = crate::errno::get_errno();
+        assert_eq!(r1, -1);
+        assert_eq!(r2, -1);
+        assert_eq!(e1, e2);
+        assert_eq!(e1, crate::errno::EBADF);
+    }
+
+    // --- real-world workflows ---
+
+    #[test]
+    fn test_workflow_legacy_program_calling_raw_getdents() {
+        // A 32-bit-era program (or test harness emulating one) calls
+        // the raw getdents syscall directly with a valid open fd.
+        // Modern kernels would happily return records; we return
+        // ENOSYS because we don't support the 32-bit-ino layout, but
+        // the call must not be confused with "fd was bad".
+        let mut pf = [-1i32; 2];
+        assert_eq!(crate::pipe::pipe(pf.as_mut_ptr()), 0);
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 1024];
+        let ret = getdents(pf[0], buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        let _ = crate::fdtable::close_fd(pf[0]);
+        let _ = crate::fdtable::close_fd(pf[1]);
+    }
+
+    // --- buggy callers ---
+
+    #[test]
+    fn test_buggy_caller_passes_closed_fd() {
+        // A caller forgot to check the return value of open() and
+        // passes the -1 sentinel through.  Linux returns EBADF; we
+        // must too — not ENOSYS, which would suggest the function
+        // doesn't exist at all.
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents(-1, buf.as_mut_ptr(), buf.len());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_buggy_caller_zero_size_buffer() {
+        // A caller miscomputes the buffer size as 0.  Linux returns
+        // EINVAL; we must too.
+        crate::errno::set_errno(0);
+        let mut buf = [0u8; 256];
+        let ret = getdents(3, buf.as_mut_ptr(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_buggy_caller_uninitialised_buffer_pointer() {
+        // A caller forgets to allocate the buffer and passes NULL.
+        // Linux returns EFAULT; we must too.
+        crate::errno::set_errno(0);
+        let ret = getdents(3, core::ptr::null_mut(), 4096);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 }

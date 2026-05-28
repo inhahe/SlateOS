@@ -365,9 +365,29 @@ static mut NICE_VALUE: i32 = 0;
 ///
 /// Returns the new nice value on success.  Since our scheduler doesn't
 /// use nice values, this just stores the value locally.
+///
+/// Phase 168: Linux's `kernel/sys.c::sys_nice` gates negative
+/// increments on `CAP_SYS_NICE` (via `can_nice` /
+/// `task_rlimit(RLIMIT_NICE)`).  Positive increments (lowering
+/// priority) are always allowed; negative increments (raising
+/// priority) require CAP_SYS_NICE under the default RLIMIT_NICE = 0.
+/// On EPERM we return `-1` and set errno — callers must clear
+/// errno before calling and re-check it after, since `-1` is also
+/// a legitimate nice value.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn nice(inc: i32) -> i32 {
+    // Phase 168: any negative increment is a priority-raise, which
+    // requires CAP_SYS_NICE.  Linux performs this check after
+    // computing the clamped target nice and consulting can_nice;
+    // with our flat (no per-task rlimit) model the test collapses
+    // to a pure cap probe.
+    if inc < 0 && !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_NICE,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
     // SAFETY: Single-threaded access.
     let current = unsafe { core::ptr::addr_of!(NICE_VALUE).read() };
     // Clamp to [-20, 19] per POSIX.
@@ -1646,5 +1666,317 @@ mod tests {
         let ret = getrlimit(bogus_resource, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 168: nice() — CAP_SYS_NICE gate on negative increments.
+    //
+    // Pre-Phase-168 behaviour: any caller could raise its own priority
+    // by passing a negative `inc`; the stub merely clamped to -20.  This
+    // ignores Linux's `sys_nice` guard
+    //   if (increment < 0 && !can_nice(current, nice)) return -EPERM;
+    // which (under the default `RLIMIT_NICE = 0`) requires
+    // `CAP_SYS_NICE` for any negative increment.
+    //
+    // Implementation: cap-probe at the top of `nice()` for negative
+    // inputs; positive increments are unaffected.  These tests exercise
+    // the guard via the CapGuard / drop-cap pattern shared with the
+    // unistd / process Phase-16x suites.
+    // ----------------------------------------------------------------------
+
+    mod nice_cap_phase168 {
+        use super::*;
+
+        /// Snapshot/restore-on-drop guard — same pattern as Phase 77 /
+        /// 164 / 165 / 166 / 167.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_nice() {
+            use crate::sys_capability::CAP_SYS_NICE;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_NICE < 32 {
+                (lo & !(1u32 << CAP_SYS_NICE), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_NICE - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_NICE");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
+        }
+
+        // -- Per-error-class ----------------------------------------------
+
+        /// `nice(-1)` without CAP_SYS_NICE returns -1 and sets EPERM,
+        /// matching Linux's `if (increment < 0 && !can_nice(...))`
+        /// branch.
+        #[test]
+        fn test_nice_phase168_negative_one_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(-1), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// `nice(-20)` (the most aggressive raise) without
+        /// CAP_SYS_NICE is also EPERM.
+        #[test]
+        fn test_nice_phase168_negative_twenty_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(-20), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix ----------------------------------------------
+
+        /// Positive increments (lower priority) are *always* allowed,
+        /// even without CAP_SYS_NICE.
+        #[test]
+        fn test_nice_phase168_positive_no_cap_still_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(5), 5);
+            assert_eq!(errno::get_errno(), 0,
+                "positive nice must not set errno");
+        }
+
+        /// `nice(0)` is a query and must succeed without cap (the
+        /// guard is gated on `inc < 0`, not `inc <= 0`).
+        #[test]
+        fn test_nice_phase168_zero_no_cap_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(0), 0);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        /// EPERM must beat the clamp: a no-cap caller that asks for
+        /// `nice(-100)` (would clamp to -20) gets EPERM, not -20.
+        #[test]
+        fn test_nice_phase168_eperm_beats_clamp() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(-100), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Workflow -----------------------------------------------------
+
+        /// Realtime-audio-daemon-style workflow: start with all caps,
+        /// raise priority to -10 (succeeds), then drop CAP_SYS_NICE
+        /// and try to raise further (EPERM).  Models a daemon that
+        /// drops capabilities after initialisation.
+        #[test]
+        fn test_nice_phase168_workflow_raise_then_drop_cap_then_raise() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            errno::set_errno(0);
+            assert_eq!(nice(-10), -10);
+            assert_eq!(errno::get_errno(), 0);
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(-5), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Buggy caller -------------------------------------------------
+
+        /// A buggy unprivileged caller passing `i32::MIN` must hit
+        /// EPERM, not crash / wrap / clamp.  Confirms the cap check
+        /// fires before any arithmetic on the increment.
+        #[test]
+        fn test_nice_phase168_buggy_caller_i32_min_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(i32::MIN), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// A no-cap caller asking for `nice(-100)` (the same value
+        /// that the pre-Phase-168 stub silently clamped to -20) must
+        /// now fail.  Sentinel for the old clamp-first behaviour.
+        #[test]
+        fn test_nice_phase168_buggy_caller_minus_100_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(-100), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Recovery -----------------------------------------------------
+
+        /// After an EPERM rejection, restoring CAP_SYS_NICE lets the
+        /// same call succeed.  Confirms the guard is dynamic (cap
+        /// state checked per-call, not cached).
+        #[test]
+        fn test_nice_phase168_recovery_restore_cap_lets_raise_succeed() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(-5), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Restore via the guard's restore path (handled on drop)
+            // would happen at scope end — for explicit recovery we
+            // reset caps to the default holding-all state via capset.
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: u32::MAX,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0);
+            errno::set_errno(0);
+            assert_eq!(nice(-5), -5);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        // -- No-side-effect ----------------------------------------------
+
+        /// An EPERM rejection must leave the stored NICE_VALUE
+        /// unchanged.  Linux returns from `sys_nice` before writing
+        /// the new nice; we mirror that.
+        #[test]
+        fn test_nice_phase168_eperm_does_not_modify_stored_value() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            // Seed a known value first (under default caps).
+            assert_eq!(nice(7), 7);
+            drop_cap_sys_nice();
+            errno::set_errno(0);
+            assert_eq!(nice(-5), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Read back via getpriority — must still be 7.
+            errno::set_errno(0);
+            assert_eq!(getpriority(PRIO_PROCESS, 0), 7);
+        }
+
+        // -- Sentinel -----------------------------------------------------
+
+        /// With CAP_SYS_NICE *held* (the default) the negative-inc
+        /// path still works — confirms the guard didn't break the
+        /// privileged case.  Mirrors the old
+        /// `nice_clamps_to_lower_bound` test but explicit about caps.
+        #[test]
+        fn test_nice_phase168_sentinel_with_cap_negative_succeeds() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            errno::set_errno(0);
+            assert_eq!(nice(-3), -3);
+            assert_eq!(errno::get_errno(), 0);
+        }
+
+        // -- Cross-checks -------------------------------------------------
+
+        /// Default-cap `nice(-100)` still clamps to -20 — the
+        /// pre-existing clamp behaviour is preserved for the
+        /// privileged path.
+        #[test]
+        fn test_nice_phase168_default_cap_minus_100_still_clamps() {
+            let _g = CapGuard::snapshot();
+            reset_global_state();
+            assert_eq!(nice(-100), -20);
+        }
+
+        /// Dropping CAP_SYS_NICE must not affect other caps —
+        /// CAP_SYS_ADMIN remains held, so other syscalls that gate
+        /// on it are unaffected.  Defends against a stray bit-clear
+        /// regression in `drop_cap_sys_nice`.
+        #[test]
+        fn test_nice_phase168_drop_sys_nice_leaves_other_caps() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_nice();
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_NICE,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN,
+            ));
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_BOOT,
+            ));
+        }
     }
 }

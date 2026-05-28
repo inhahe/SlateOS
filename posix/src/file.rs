@@ -2544,6 +2544,9 @@ pub extern "C" fn posix_fallocate(fd: Fd, offset: OffT, len: OffT) -> i32 {
 pub const FALLOC_FL_KEEP_SIZE: i32 = 0x01;
 /// Deallocate (punch a hole) in the file.
 pub const FALLOC_FL_PUNCH_HOLE: i32 = 0x02;
+/// Don't hide stale data — expose unwritten extents.  Reserved by
+/// Linux for filesystems with `CAP_SYS_RAWIO`; we don't support it.
+pub const FALLOC_FL_NO_HIDE_STALE: i32 = 0x04;
 /// Remove a range of a file without leaving a hole (collapse range).
 pub const FALLOC_FL_COLLAPSE_RANGE: i32 = 0x08;
 /// Zero a range of the file.
@@ -2552,6 +2555,15 @@ pub const FALLOC_FL_ZERO_RANGE: i32 = 0x10;
 pub const FALLOC_FL_INSERT_RANGE: i32 = 0x20;
 /// Unshare shared extents (copy-on-write breakage).
 pub const FALLOC_FL_UNSHARE_RANGE: i32 = 0x40;
+
+/// Mask of all defined fallocate mode bits — mirrors Linux's
+/// `FALLOC_FL_SUPPORTED_MASK` in `include/uapi/linux/falloc.h`.  Mode
+/// bits outside this mask are rejected with `EOPNOTSUPP` to match
+/// `fs/open.c::vfs_fallocate`.
+pub const FALLOC_FL_VALID_MASK: i32 =
+    FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE | FALLOC_FL_NO_HIDE_STALE
+    | FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_ZERO_RANGE
+    | FALLOC_FL_INSERT_RANGE | FALLOC_FL_UNSHARE_RANGE;
 
 /// Manipulate file space.
 ///
@@ -2567,9 +2579,97 @@ pub const FALLOC_FL_UNSHARE_RANGE: i32 = 0x40;
 ///
 /// Our implementation delegates to `posix_fallocate` for the basic
 /// allocation case and stubs the advanced modes with EOPNOTSUPP.
+///
+/// # Validation order (Linux parity, Phase 109)
+///
+/// Mirrors Linux's `fs/open.c::ksys_fallocate` + `vfs_fallocate`:
+///
+/// 1. `EBADF` — `fd` is not an open descriptor.  `ksys_fallocate`
+///    does `fdget()` before doing anything else, so an invalid fd
+///    wins over any other input error.
+/// 2. `EINVAL` — `offset < 0` or `len <= 0` (POSIX-defined values
+///    that cannot describe a valid byte range).
+/// 3. `EOPNOTSUPP` — unknown mode bits (`mode & !FALLOC_FL_VALID_MASK`).
+/// 4. `EOPNOTSUPP` — `FALLOC_FL_PUNCH_HOLE` set without
+///    `FALLOC_FL_KEEP_SIZE` (Linux requires the combination).
+/// 5. `EINVAL` — `FALLOC_FL_KEEP_SIZE` combined with
+///    `FALLOC_FL_COLLAPSE_RANGE` or `FALLOC_FL_INSERT_RANGE`
+///    (the range-shifting modes can never preserve file size).
+/// 6. `EINVAL` — `FALLOC_FL_COLLAPSE_RANGE` combined with any other
+///    bit (collapse must be the sole mode).
+/// 7. `EINVAL` — `FALLOC_FL_INSERT_RANGE` combined with any other
+///    bit (insert must be the sole mode).
+/// 8. `EINVAL` — `FALLOC_FL_UNSHARE_RANGE` combined with
+///    `FALLOC_FL_COLLAPSE_RANGE` or `FALLOC_FL_INSERT_RANGE`.
+///
+/// After these argument-domain checks pass, the operation is either
+/// performed (mode 0) or accepted but stubbed (`KEEP_SIZE` alone,
+/// silently a no-op) or reported as unimplemented (`EOPNOTSUPP` —
+/// the filesystem doesn't support that operation yet).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fallocate(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
+    // (1) Linux's ksys_fallocate looks up the fd before vfs_fallocate
+    // touches any of the other arguments — an invalid fd wins over
+    // bad offset/len or bad mode bits.
+    if fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+
+    // (2) vfs_fallocate's first check: POSIX-required range validation.
     if offset < 0 || len <= 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (3) Unknown mode bits are EOPNOTSUPP, not EINVAL — Linux uses
+    // EOPNOTSUPP for "this kernel/filesystem doesn't know what you
+    // mean" and reserves EINVAL for "the combination of known bits
+    // is logically invalid".
+    if mode & !FALLOC_FL_VALID_MASK != 0 {
+        errno::set_errno(errno::EOPNOTSUPP);
+        return -1;
+    }
+
+    // (4) PUNCH_HOLE requires KEEP_SIZE: a hole-punch cannot extend
+    // the file, so omitting KEEP_SIZE has no coherent meaning.
+    if (mode & FALLOC_FL_PUNCH_HOLE) != 0
+        && (mode & FALLOC_FL_KEEP_SIZE) == 0
+    {
+        errno::set_errno(errno::EOPNOTSUPP);
+        return -1;
+    }
+
+    // (5) KEEP_SIZE is incompatible with the range-shifting modes,
+    // because COLLAPSE and INSERT *must* change the file size.
+    if (mode & FALLOC_FL_KEEP_SIZE) != 0
+        && (mode & (FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE)) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (6) COLLAPSE_RANGE must appear alone — no other mode bits.
+    if (mode & FALLOC_FL_COLLAPSE_RANGE) != 0
+        && (mode & !FALLOC_FL_COLLAPSE_RANGE) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (7) INSERT_RANGE must appear alone — no other mode bits.
+    if (mode & FALLOC_FL_INSERT_RANGE) != 0
+        && (mode & !FALLOC_FL_INSERT_RANGE) != 0
+    {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // (8) UNSHARE_RANGE conflicts with range-shifting modes — those
+    // would need to recopy the shifted data, which is incoherent.
+    if (mode & FALLOC_FL_UNSHARE_RANGE) != 0
+        && (mode & (FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_INSERT_RANGE)) != 0
+    {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -2591,8 +2691,10 @@ pub extern "C" fn fallocate(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
         return 0;
     }
 
-    // Advanced modes (punch hole, collapse range, zero range, etc.)
-    // are not yet supported by our filesystem.
+    // All remaining mode combinations are valid per Linux semantics
+    // (punch-hole, zero-range, collapse-range, insert-range,
+    // unshare-range, plus accepted compound bits) but our filesystem
+    // doesn't implement them yet.
     errno::set_errno(errno::EOPNOTSUPP);
     -1
 }
@@ -4336,74 +4438,271 @@ mod tests {
     }
 
     // -- fallocate (Linux) --
+    //
+    // Each test allocates its own Console fd rather than relying on
+    // fd 0/1/2 being open: when --test-threads=1, the global fdtable
+    // is shared, and an earlier test may have closed the standard fds.
+    // Now that fallocate validates fd first (Phase 109), tests that
+    // hard-code fd=0 would otherwise become order-dependent.
+
+    fn fallocate_test_fd() -> Fd {
+        fdtable::alloc_fd(fdtable::HandleKind::Console, 0)
+            .expect("a free fd slot must be available")
+    }
 
     #[test]
     fn test_fallocate_negative_offset() {
+        let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
-        assert_eq!(fallocate(0, 0, -1, 4096), -1);
+        assert_eq!(fallocate(fd, 0, -1, 4096), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_fallocate_zero_len() {
+        let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
-        assert_eq!(fallocate(0, 0, 0, 0), -1);
+        assert_eq!(fallocate(fd, 0, 0, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_fallocate_negative_len() {
+        let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
-        assert_eq!(fallocate(0, 0, 0, -1), -1);
+        assert_eq!(fallocate(fd, 0, 0, -1), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_fallocate_keep_size_succeeds() {
         // KEEP_SIZE mode is a no-op stub — should succeed.
-        assert_eq!(fallocate(0, FALLOC_FL_KEEP_SIZE, 0, 4096), 0);
+        let fd = fallocate_test_fd();
+        assert_eq!(fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, 4096), 0);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_fallocate_keep_size_negative_offset() {
+        let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
-        assert_eq!(fallocate(0, FALLOC_FL_KEEP_SIZE, -1, 4096), -1);
+        assert_eq!(fallocate(fd, FALLOC_FL_KEEP_SIZE, -1, 4096), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_fallocate_punch_hole_eopnotsupp() {
+        let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
-        assert_eq!(fallocate(0, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096), -1);
+        assert_eq!(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_fallocate_collapse_range_eopnotsupp() {
+        let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
-        assert_eq!(fallocate(0, FALLOC_FL_COLLAPSE_RANGE, 0, 4096), -1);
+        assert_eq!(fallocate(fd, FALLOC_FL_COLLAPSE_RANGE, 0, 4096), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_fallocate_zero_range_eopnotsupp() {
+        let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
-        assert_eq!(fallocate(0, FALLOC_FL_ZERO_RANGE, 0, 4096), -1);
+        assert_eq!(fallocate(fd, FALLOC_FL_ZERO_RANGE, 0, 4096), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_fallocate_insert_range_eopnotsupp() {
+        let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
-        assert_eq!(fallocate(0, FALLOC_FL_INSERT_RANGE, 0, 4096), -1);
+        assert_eq!(fallocate(fd, FALLOC_FL_INSERT_RANGE, 0, 4096), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+        let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_fallocate_unshare_range_eopnotsupp() {
+        let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
-        assert_eq!(fallocate(0, FALLOC_FL_UNSHARE_RANGE, 0, 4096), -1);
+        assert_eq!(fallocate(fd, FALLOC_FL_UNSHARE_RANGE, 0, 4096), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // -- Phase 109: Linux-parity validation order + mode-combination checks --
+    //
+    // Linux's ksys_fallocate (fs/open.c) does fdget() before
+    // vfs_fallocate(), so an invalid fd always wins.  Inside
+    // vfs_fallocate, the order is offset/len → unknown-bits →
+    // PUNCH_HOLE-requires-KEEP_SIZE → KEEP_SIZE-vs-range-shift
+    // → COLLAPSE-alone → INSERT-alone → UNSHARE-vs-range-shift.
+    // Unknown mode bits map to EOPNOTSUPP; combination conflicts
+    // map to EINVAL.
+
+    #[test]
+    fn test_fallocate_phase109_ebadf_wins_over_einval_offset() {
+        // Bad fd + negative offset: EBADF wins because fdget runs
+        // before offset validation in Linux's ksys_fallocate.
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(99999, 0, -1, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_ebadf_wins_over_einval_len() {
+        // Bad fd + len <= 0: EBADF wins.
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(99999, 0, 0, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_ebadf_wins_over_eopnotsupp_mode() {
+        // Bad fd + advanced/unknown mode bits: EBADF still wins.
+        crate::errno::set_errno(0);
+        assert_eq!(
+            fallocate(99999, FALLOC_FL_COLLAPSE_RANGE, 0, 4096),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_negative_fd_ebadf() {
+        // Negative fd is the canonical EBADF case.
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(-1, 0, 0, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_unknown_mode_bits_eopnotsupp() {
+        // Mode bit 0x1000 is outside FALLOC_FL_VALID_MASK → EOPNOTSUPP
+        // (not EINVAL — Linux distinguishes "unknown" from "invalid
+        // combination of known bits").
+        let fd = fallocate_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(fd, 0x1000, 0, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_punch_hole_without_keep_size_eopnotsupp() {
+        // PUNCH_HOLE alone (no KEEP_SIZE) → EOPNOTSUPP, per Linux's
+        // explicit check in vfs_fallocate.
+        let fd = fallocate_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(fallocate(fd, FALLOC_FL_PUNCH_HOLE, 0, 4096), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_keep_size_plus_collapse_einval() {
+        // KEEP_SIZE | COLLAPSE_RANGE: range-shift modes can never
+        // preserve file size → EINVAL.
+        let fd = fallocate_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(
+            fallocate(fd, FALLOC_FL_KEEP_SIZE | FALLOC_FL_COLLAPSE_RANGE, 0, 4096),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_keep_size_plus_insert_einval() {
+        // KEEP_SIZE | INSERT_RANGE → EINVAL for the same reason.
+        let fd = fallocate_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(
+            fallocate(fd, FALLOC_FL_KEEP_SIZE | FALLOC_FL_INSERT_RANGE, 0, 4096),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_collapse_with_zero_range_einval() {
+        // COLLAPSE_RANGE must appear alone — combining it with
+        // any other known bit (here ZERO_RANGE) → EINVAL.
+        let fd = fallocate_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(
+            fallocate(fd, FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_ZERO_RANGE, 0, 4096),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_insert_with_zero_range_einval() {
+        // INSERT_RANGE must appear alone — combining with ZERO_RANGE → EINVAL.
+        let fd = fallocate_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(
+            fallocate(fd, FALLOC_FL_INSERT_RANGE | FALLOC_FL_ZERO_RANGE, 0, 4096),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_unshare_with_collapse_einval() {
+        // UNSHARE_RANGE | COLLAPSE_RANGE → EINVAL (range-shift conflict).
+        let fd = fallocate_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(
+            fallocate(fd, FALLOC_FL_UNSHARE_RANGE | FALLOC_FL_COLLAPSE_RANGE, 0, 4096),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_unshare_with_insert_einval() {
+        // UNSHARE_RANGE | INSERT_RANGE → EINVAL.
+        let fd = fallocate_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(
+            fallocate(fd, FALLOC_FL_UNSHARE_RANGE | FALLOC_FL_INSERT_RANGE, 0, 4096),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_fallocate_phase109_recovery_after_einval() {
+        // After an EINVAL-rejected call, a subsequent well-formed
+        // call must still succeed — the validation surface is purely
+        // stateless.  KEEP_SIZE alone with a valid fd is a no-op
+        // success.
+        let fd = fallocate_test_fd();
+        crate::errno::set_errno(0);
+        assert_eq!(
+            fallocate(fd, FALLOC_FL_KEEP_SIZE | FALLOC_FL_COLLAPSE_RANGE, 0, 4096),
+            -1,
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        assert_eq!(fallocate(fd, FALLOC_FL_KEEP_SIZE, 0, 4096), 0);
+        let _ = fdtable::close_fd(fd);
     }
 
     // -- FALLOC_FL_* constants --

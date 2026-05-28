@@ -1479,6 +1479,15 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 ///
 /// For UDP: calls `SYS_UDP_BIND(port)` immediately.
 ///
+/// # Capability gate (Phase 201)
+///
+/// Ports below 1024 ("privileged ports") require `CAP_NET_BIND_SERVICE`.
+/// Linux enforces this inside `inet_bind()` → `inet_csk_get_port()` /
+/// `udp_lib_get_port()` via `inet_port_requires_bind_service(port)`.
+/// The check runs after all argument validation (EFAULT, EBADF, EINVAL,
+/// EAFNOSUPPORT) so callers with bad arguments see the argument error,
+/// not EACCES.  Port 0 (ephemeral) and ports ≥ 1024 bypass the gate.
+///
 /// Returns 0 on success, -1 on error.
 ///
 /// # Safety
@@ -1516,6 +1525,20 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
     }
 
     let port = u16::from_be(sin.sin_port);
+
+    // Phase 201: privileged port gate.  Ports 1..1023 require
+    // CAP_NET_BIND_SERVICE.  Port 0 (let the kernel pick an
+    // ephemeral port) and ports >= 1024 are unrestricted.
+    // Linux returns EACCES (not EPERM) for this — it's a
+    // resource-access denial, not a missing-capability signal.
+    if port != 0 && port < 1024
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_NET_BIND_SERVICE,
+        )
+    {
+        errno::set_errno(errno::EACCES);
+        return -1;
+    }
 
     match meta.sock_type {
         SOCK_STREAM => {
@@ -7437,5 +7460,338 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
                 "bit {:#x} should set EINVAL", bit);
         }
+    }
+
+    // ===================================================================
+    // Phase 201 — CAP_NET_BIND_SERVICE gate on bind() for privileged ports
+    //
+    // Linux requires CAP_NET_BIND_SERVICE to bind to ports 1..1023.
+    // The gate runs after all argument validation (EFAULT, EBADF,
+    // ENOTSOCK, EINVAL, EAFNOSUPPORT), so bad-argument callers see
+    // their original errors regardless of cap state.
+    // ===================================================================
+
+    mod phase201_cap {
+        pub(super) struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            pub(super) fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        pub(super) fn drop_cap_net_bind_service() {
+            let cap = crate::sys_capability::CAP_NET_BIND_SERVICE;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let new_lo = lo & !(1u32 << cap);
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed dropping cap");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+    }
+
+    /// Helper: create a TCP socket fd for bind tests.
+    fn make_tcp_socket() -> i32 {
+        let fd = socket(AF_INET, SOCK_STREAM, 0);
+        assert!(fd >= 0, "socket() must succeed");
+        fd
+    }
+
+    /// Helper: build a SockaddrIn for a given port (host byte order).
+    fn make_sockaddr_in(port: u16) -> SockaddrIn {
+        SockaddrIn {
+            sin_family: AF_INET as u16,
+            sin_port: port.to_be(), // network byte order
+            sin_addr: InAddr { s_addr: htonl(0x7F000001) }, // 127.0.0.1
+            sin_zero: [0; 8],
+        }
+    }
+
+    // -- cap held: privileged bind succeeds --------------------------------
+
+    /// With CAP_NET_BIND_SERVICE (default), binding port 80 succeeds
+    /// (TCP defers to listen, just stores metadata).
+    #[test]
+    fn test_phase201_bind_privileged_port_with_cap_ok() {
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_NET_BIND_SERVICE,
+        ));
+        let fd = make_tcp_socket();
+        let addr = make_sockaddr_in(80);
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                fd,
+                &raw const addr as *const Sockaddr,
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, 0, "privileged bind with cap should succeed");
+        crate::file::close(fd);
+    }
+
+    // -- cap dropped: privileged bind → EACCES ----------------------------
+
+    /// Without CAP_NET_BIND_SERVICE, port 80 → EACCES.
+    #[test]
+    fn test_phase201_bind_port80_no_cap_eacces() {
+        let _g = phase201_cap::CapGuard::snapshot();
+        phase201_cap::drop_cap_net_bind_service();
+        let fd = make_tcp_socket();
+        let addr = make_sockaddr_in(80);
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                fd,
+                &raw const addr as *const Sockaddr,
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EACCES);
+        crate::file::close(fd);
+    }
+
+    /// Without cap, port 443 → EACCES.
+    #[test]
+    fn test_phase201_bind_port443_no_cap_eacces() {
+        let _g = phase201_cap::CapGuard::snapshot();
+        phase201_cap::drop_cap_net_bind_service();
+        let fd = make_tcp_socket();
+        let addr = make_sockaddr_in(443);
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                fd,
+                &raw const addr as *const Sockaddr,
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EACCES);
+        crate::file::close(fd);
+    }
+
+    /// Without cap, port 1 (lowest valid privileged port) → EACCES.
+    #[test]
+    fn test_phase201_bind_port1_no_cap_eacces() {
+        let _g = phase201_cap::CapGuard::snapshot();
+        phase201_cap::drop_cap_net_bind_service();
+        let fd = make_tcp_socket();
+        let addr = make_sockaddr_in(1);
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                fd,
+                &raw const addr as *const Sockaddr,
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EACCES);
+        crate::file::close(fd);
+    }
+
+    /// Without cap, port 1023 (highest privileged port) → EACCES.
+    #[test]
+    fn test_phase201_bind_port1023_no_cap_eacces() {
+        let _g = phase201_cap::CapGuard::snapshot();
+        phase201_cap::drop_cap_net_bind_service();
+        let fd = make_tcp_socket();
+        let addr = make_sockaddr_in(1023);
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                fd,
+                &raw const addr as *const Sockaddr,
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EACCES);
+        crate::file::close(fd);
+    }
+
+    // -- cap dropped: non-privileged ports bypass the gate ----------------
+
+    /// Without cap, port 1024 (first non-privileged) succeeds.
+    #[test]
+    fn test_phase201_bind_port1024_no_cap_ok() {
+        let _g = phase201_cap::CapGuard::snapshot();
+        phase201_cap::drop_cap_net_bind_service();
+        let fd = make_tcp_socket();
+        let addr = make_sockaddr_in(1024);
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                fd,
+                &raw const addr as *const Sockaddr,
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, 0, "port 1024 must bypass privileged port gate");
+        crate::file::close(fd);
+    }
+
+    /// Without cap, port 8080 (common unprivileged) succeeds.
+    #[test]
+    fn test_phase201_bind_port8080_no_cap_ok() {
+        let _g = phase201_cap::CapGuard::snapshot();
+        phase201_cap::drop_cap_net_bind_service();
+        let fd = make_tcp_socket();
+        let addr = make_sockaddr_in(8080);
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                fd,
+                &raw const addr as *const Sockaddr,
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, 0, "port 8080 must bypass privileged port gate");
+        crate::file::close(fd);
+    }
+
+    /// Without cap, port 0 (ephemeral) succeeds.
+    #[test]
+    fn test_phase201_bind_port0_no_cap_ok() {
+        let _g = phase201_cap::CapGuard::snapshot();
+        phase201_cap::drop_cap_net_bind_service();
+        let fd = make_tcp_socket();
+        let addr = make_sockaddr_in(0);
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                fd,
+                &raw const addr as *const Sockaddr,
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, 0, "port 0 must bypass privileged port gate");
+        crate::file::close(fd);
+    }
+
+    // -- ordering: argument errors beat EACCES ----------------------------
+
+    /// NULL addr + no cap → EFAULT (argument check before cap).
+    #[test]
+    fn test_phase201_bind_null_addr_efault_before_eacces() {
+        let _g = phase201_cap::CapGuard::snapshot();
+        phase201_cap::drop_cap_net_bind_service();
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(-1, core::ptr::null(), core::mem::size_of::<SockaddrIn>() as SocklenT)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EFAULT,
+            "EFAULT for NULL addr must precede EACCES"
+        );
+    }
+
+    /// Bad fd + no cap → EBADF (fd check before cap).
+    #[test]
+    fn test_phase201_bind_bad_fd_ebadf_before_eacces() {
+        let _g = phase201_cap::CapGuard::snapshot();
+        phase201_cap::drop_cap_net_bind_service();
+        let addr = make_sockaddr_in(80);
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                -1,
+                &raw const addr as *const Sockaddr,
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EBADF,
+            "EBADF for bad fd must precede EACCES"
+        );
+    }
+
+    // -- restoration: CapGuard drop re-enables privileged bind ------------
+
+    /// After restoring CAP_NET_BIND_SERVICE, privileged bind works again.
+    #[test]
+    fn test_phase201_bind_cap_restore_re_enables() {
+        {
+            let _g = phase201_cap::CapGuard::snapshot();
+            phase201_cap::drop_cap_net_bind_service();
+            let fd = make_tcp_socket();
+            let addr = make_sockaddr_in(80);
+            crate::errno::set_errno(0);
+            let ret = unsafe {
+                bind(
+                    fd,
+                    &raw const addr as *const Sockaddr,
+                    core::mem::size_of::<SockaddrIn>() as SocklenT,
+                )
+            };
+            assert_eq!(ret, -1, "must fail without cap");
+            crate::file::close(fd);
+        }
+        assert!(crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_NET_BIND_SERVICE,
+        ));
+        let fd = make_tcp_socket();
+        let addr = make_sockaddr_in(80);
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            bind(
+                fd,
+                &raw const addr as *const Sockaddr,
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
+        };
+        assert_eq!(ret, 0, "must succeed after cap restored");
+        crate::file::close(fd);
     }
 }

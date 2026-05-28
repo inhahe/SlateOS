@@ -2059,18 +2059,74 @@ pub extern "C" fn hasmntopt(_mnt: *const Mntent, _opt: *const u8) -> *mut u8 {
 // personality — process execution domain
 // ---------------------------------------------------------------------------
 
+/// Sentinel value passed as `persona` to *query* the current personality
+/// without modifying it.  Matches Linux's `kernel/exec_domain.c::sys_personality`
+/// special case: when the argument equals `0xFFFFFFFF` the kernel skips
+/// the set_personality() call and returns the existing value unchanged.
+pub const PERSONALITY_QUERY: u32 = 0xFFFF_FFFF;
+
+/// Backing storage for the current process personality.  Linux models
+/// this per-task in `task_struct.personality`; we approximate with a
+/// process-wide atomic until our process subsystem exposes per-task
+/// credentials.  Initial value `0` is `PER_LINUX` — the standard
+/// Linux execution domain.
+static PERSONALITY_STATE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// Read the current personality without altering it.
+///
+/// Internal helper used by `posix::sys_personality` tests and by the
+/// process subsystem when it needs to consult the personality bits
+/// (e.g. to honour `ADDR_NO_RANDOMIZE` for an `execve`).
+#[must_use]
+pub fn current_personality() -> u32 {
+    PERSONALITY_STATE.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 /// Set the process execution domain.
 ///
-/// Stub: if `persona` is 0xFFFFFFFF, return current personality (0).
-/// Otherwise accept and return 0 (previous personality).
+/// # Linux semantics (`kernel/exec_domain.c::sys_personality`)
+///
+/// ```text
+/// SYSCALL_DEFINE1(personality, unsigned int, persona) {
+///     unsigned int old = current->personality;
+///     if (persona != 0xffffffff)
+///         set_personality(persona);
+///     return old;
+/// }
+/// ```
+///
+/// Three observable behaviours follow:
+///
+/// 1. The argument is a 32-bit `unsigned int`, so any high bits set by
+///    glibc's `long`/`unsigned long` wrapper are truncated by the
+///    kernel.  We model that explicitly via `as u32` to keep
+///    `personality(0xFFFF_FFFF_FFFF_FFFF)` indistinguishable from
+///    `personality(0xFFFF_FFFF)` — both must hit the *query* arm.
+/// 2. `0xFFFFFFFF` is the query sentinel: state is unchanged and the
+///    current personality is returned.
+/// 3. Any other value is stored verbatim (Linux does not validate the
+///    individual bits — unknown personality bits are simply remembered
+///    and surface to processes that look at `/proc/self/personality`).
+///    The function returns the *previous* value, never the new one.
+///
+/// # Return value width
+///
+/// glibc declares this as `int personality(unsigned long)` and casts
+/// the kernel's `unsigned int` result via signed extension.  Personality
+/// values fit comfortably in the low 31 bits (the highest defined bit
+/// is `ADDR_LIMIT_3GB = 0x08000000`), so the `as i32` cast is safe.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn personality(persona: u64) -> i32 {
-    if persona == 0xFFFF_FFFF {
-        // Query current personality.
-        return 0; // PER_LINUX
+    // Truncate to 32 bits the same way the Linux syscall does — its
+    // C signature is `unsigned int`, so anything in the high half is
+    // silently dropped.
+    let persona = persona as u32;
+    let old = PERSONALITY_STATE.load(core::sync::atomic::Ordering::Relaxed);
+    if persona != PERSONALITY_QUERY {
+        PERSONALITY_STATE.store(persona, core::sync::atomic::Ordering::Relaxed);
     }
-    // Accept any personality (no-op).
-    0
+    old as i32
 }
 
 // ---------------------------------------------------------------------------

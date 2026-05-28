@@ -2613,7 +2613,14 @@ pub extern "C" fn splice(
     len: usize,
     flags: u32,
 ) -> isize {
-    let _ = flags;
+    // Linux's `SYSCALL_DEFINE6(splice, ...)` validates `flags` before
+    // any other check — `flags & ~SPLICE_F_ALL → -EINVAL`.  We match
+    // that ordering so a caller passing garbage flag bits learns about
+    // it regardless of fd state, length, or pipe direction.
+    if flags & !SPLICE_F_VALID != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
 
     if len == 0 {
         return 0;
@@ -2835,7 +2842,13 @@ pub extern "C" fn vmsplice(
     nr_segs: u64,
     flags: u32,
 ) -> isize {
-    let _ = flags;
+    // Linux's `do_vmsplice` rejects unknown flag bits with EINVAL
+    // before any other validation.  Match that — a caller with bad
+    // flag bits learns immediately, regardless of fd / iov state.
+    if flags & !SPLICE_F_VALID != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
 
     if iov.is_null() && nr_segs > 0 {
         errno::set_errno(errno::EFAULT);
@@ -5742,6 +5755,181 @@ mod tests {
         let result = vmsplice(1, &raw const dummy, 1, 0);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // ----------------------------------------------------------------
+    // Phase 88 — splice / vmsplice flag-mask validation
+    //
+    // Linux semantics being validated:
+    //   - splice:   flags & ~SPLICE_F_ALL → -1, EINVAL (before every
+    //               other check, including len==0 and fd lookups).
+    //   - vmsplice: flags & ~SPLICE_F_ALL → -1, EINVAL (before iov/
+    //               nr_segs validation).
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn test_splice_phase88_unknown_flag_bit_einval() {
+        // Any single bit outside SPLICE_F_VALID (1|2|4|8 = 0xF) is bogus.
+        crate::errno::set_errno(0);
+        let r = splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 4, 0x10);
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_splice_phase88_high_garbage_flag_einval() {
+        crate::errno::set_errno(0);
+        let r = splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 8, 0x8000_0000);
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_splice_phase88_all_unknown_bits_einval() {
+        crate::errno::set_errno(0);
+        let r = splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 8, !SPLICE_F_VALID);
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_splice_phase88_flag_check_before_zero_len() {
+        // Bug being fixed: bad flags + len==0 used to return 0 silently.
+        crate::errno::set_errno(0);
+        let r = splice(
+            0,
+            core::ptr::null_mut(),
+            1,
+            core::ptr::null_mut(),
+            0,
+            0xFFFF_FFF0,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_splice_phase88_flag_check_before_fd_lookup() {
+        // Bad flags + bogus fd → EINVAL, not EBADF.  The flag check is
+        // first per Linux's syscall prologue.
+        crate::errno::set_errno(0);
+        let r = splice(
+            9999,
+            core::ptr::null_mut(),
+            9998,
+            core::ptr::null_mut(),
+            8,
+            0x100,
+        );
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_splice_phase88_zero_flags_still_accepted() {
+        // The classic call form with flags=0 must still pass validation
+        // and reach the len==0 short-circuit.
+        let r = splice(
+            0,
+            core::ptr::null_mut(),
+            1,
+            core::ptr::null_mut(),
+            0,
+            0,
+        );
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn test_splice_phase88_all_known_flags_pass() {
+        // Setting every defined flag bit together must not trip EINVAL.
+        // The call then proceeds to len==0 and returns 0.
+        let r = splice(
+            0,
+            core::ptr::null_mut(),
+            1,
+            core::ptr::null_mut(),
+            0,
+            SPLICE_F_VALID,
+        );
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn test_vmsplice_phase88_unknown_flag_bit_einval() {
+        crate::errno::set_errno(0);
+        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let r = vmsplice(0, &raw const dummy, 1, 0x10);
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_vmsplice_phase88_high_garbage_flag_einval() {
+        crate::errno::set_errno(0);
+        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let r = vmsplice(0, &raw const dummy, 1, 0x8000_0000);
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_vmsplice_phase88_flag_check_before_iov_null() {
+        // Bad flags + NULL iov + nr_segs > 0 → EINVAL, not EFAULT.
+        crate::errno::set_errno(0);
+        let r = vmsplice(0, core::ptr::null(), 1, 0x100);
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_vmsplice_phase88_flag_check_before_nr_segs_cap() {
+        // Bad flags + too-many segs → EINVAL from flag check, not from
+        // the segs validation (both would set EINVAL, but the order
+        // matters for ordering parity).
+        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        crate::errno::set_errno(0);
+        let r = vmsplice(0, &raw const dummy, (i32::MAX as u64) + 1, 0x10);
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_vmsplice_phase88_zero_segs_with_bad_flag_einval() {
+        // Bug being fixed: bad flags + nr_segs==0 used to return 0
+        // silently.
+        crate::errno::set_errno(0);
+        let r = vmsplice(0, core::ptr::null(), 0, 0x10);
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_vmsplice_phase88_zero_flags_still_accepted() {
+        // Valid (zero) flags + nr_segs==0 → 0.
+        let r = vmsplice(0, core::ptr::null(), 0, 0);
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn test_vmsplice_phase88_all_known_flags_pass() {
+        // Every defined flag bit set together passes the mask check.
+        let r = vmsplice(0, core::ptr::null(), 0, SPLICE_F_VALID);
+        assert_eq!(r, 0);
+    }
+
+    #[test]
+    fn test_vmsplice_phase88_einval_does_not_alter_next_call() {
+        // An EINVAL from a bad-flag call must not taint a subsequent
+        // valid call.
+        crate::errno::set_errno(0);
+        let r = vmsplice(0, core::ptr::null(), 0, 0x40);
+        assert_eq!(r, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        crate::errno::set_errno(0);
+        let r = vmsplice(0, core::ptr::null(), 0, 0);
+        assert_eq!(r, 0);
     }
 
     // -- SPLICE_F_* constants --

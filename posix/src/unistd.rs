@@ -1880,6 +1880,22 @@ pub fn no_new_privs_set() -> bool {
     NO_NEW_PRIVS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
+/// Test-only reset of the `no_new_privs` bit.
+///
+/// `PR_SET_NO_NEW_PRIVS` is irreversible in Linux (and in our prctl
+/// implementation, by design) — once set, it stays set for the life
+/// of the task.  But tests in other modules (e.g. landlock,
+/// seccomp) need to observe both the cleared and set states of the
+/// bit to exercise the `task_no_new_privs() || CAP_SYS_ADMIN`
+/// branches in their syscall stubs.  Direct atomic access stays
+/// inside this module; cross-module test code goes through this
+/// accessor, which is gated on `cfg(test)` so it cannot leak into
+/// production builds.
+#[cfg(test)]
+pub(crate) fn _test_reset_no_new_privs(value: bool) {
+    NO_NEW_PRIVS.store(value, core::sync::atomic::Ordering::Relaxed);
+}
+
 /// Process control operations (Linux).
 ///
 /// Stub: implements `PR_SET_NAME` / `PR_GET_NAME` as a name buffer

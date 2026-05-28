@@ -433,9 +433,50 @@ pub extern "C" fn landlock_add_rule(
 /// Restrict the calling thread with a Landlock ruleset.
 ///
 /// As with [`landlock_add_rule`], we never have a real ruleset fd,
-/// so this always fails with `EBADFD` after validating `flags`.
+/// so the syscall always fails after the privilege and flag-shape
+/// checks succeed.
+///
+/// Errors (Linux-matching priority order — see
+/// `security/landlock/syscalls.c::SYSCALL_DEFINE2(landlock_restrict_self)`):
+///
+/// 1. **Phase 185:** `EPERM` — caller has neither `no_new_privs`
+///    set nor `CAP_SYS_ADMIN`.  Landlock is a stackable-sandbox
+///    primitive: it tightens the effective security policy, never
+///    loosens it.  Linux therefore requires either that the task
+///    has already opted out of privilege-raising (`no_new_privs`)
+///    or that it is administratively trusted (`CAP_SYS_ADMIN`),
+///    matching the same gate seccomp enforces.  The check uses
+///    `ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN)` in the
+///    kernel; we map to `has_capability(CAP_SYS_ADMIN)` per our
+///    single-userns model.  The gate runs **before** the
+///    `flags != 0` EINVAL check, so an unprivileged caller passing
+///    garbage flags sees EPERM, not EINVAL.
+/// 2. `EINVAL` — any bit set in `flags` (no flags are defined yet
+///    by upstream Landlock).
+/// 3. `EBADF` — `ruleset_fd` is negative.
+/// 4. `EBADFD` — `ruleset_fd` is open but not a Landlock ruleset
+///    (the only path we can reach in this stub — we have no
+///    real Landlock backend).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn landlock_restrict_self(ruleset_fd: i32, flags: u32) -> i32 {
+    // Phase 185: Linux's landlock_restrict_self gate.  An
+    // unprivileged caller can only install a Landlock ruleset on
+    // itself if it has already opted out of privilege-raising via
+    // `prctl(PR_SET_NO_NEW_PRIVS, 1, ...)`.  An administrator
+    // (CAP_SYS_ADMIN) is exempt because they could already restrict
+    // the process by other means.
+    //
+    // Placement note: this check fires *before* the EINVAL flag-mask
+    // check, matching the kernel's source order — so EPERM takes
+    // precedence over EINVAL for unprivileged callers.
+    if !crate::unistd::no_new_privs_set()
+        && !crate::sys_capability::has_capability(
+            crate::sys_capability::CAP_SYS_ADMIN,
+        )
+    {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
     if flags != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -1162,5 +1203,353 @@ mod tests {
             LANDLOCK_CREATE_RULESET_ERRATA,
         );
         assert_eq!(good, LANDLOCK_ERRATA);
+    }
+
+    // ----------------------------------------------------------------------
+    // Phase 185 — landlock_restrict_self privilege gate (NNP || CAP_SYS_ADMIN)
+    //
+    // Linux source (security/landlock/syscalls.c::SYSCALL_DEFINE2(
+    //              landlock_restrict_self)):
+    //
+    //   if (!landlock_initialized) return -EOPNOTSUPP;
+    //   if (!task_no_new_privs(current) &&
+    //       !ns_capable_noaudit(current_user_ns(), CAP_SYS_ADMIN))
+    //       return -EPERM;
+    //   if (flags) return -EINVAL;
+    //   ...
+    //
+    // So the gate runs *before* the flag-mask EINVAL check.  In our
+    // model `task_no_new_privs(current)` maps to
+    // `crate::unistd::no_new_privs_set()` (Phase 160 added the
+    // atomic) and `ns_capable_noaudit(..., CAP_SYS_ADMIN)` to
+    // `crate::sys_capability::has_capability(CAP_SYS_ADMIN)` (we
+    // have a single user namespace).
+    //
+    // Host test build holds CAP_SYS_ADMIN by default, so all 49
+    // pre-existing landlock tests reach the existing EBADF / EBADFD
+    // / EINVAL paths unchanged.
+    // ----------------------------------------------------------------------
+
+    mod restrict_self_cap_phase185 {
+        use super::*;
+
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ =
+                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        /// RAII guard that resets `no_new_privs` to `false` on Drop.
+        /// `PR_SET_NO_NEW_PRIVS` is irreversible by user API but we
+        /// expose `_test_reset_no_new_privs` for cross-module tests.
+        struct NnpGuard;
+        impl NnpGuard {
+            fn snapshot_and_clear() -> Self {
+                crate::unistd::_test_reset_no_new_privs(false);
+                Self
+            }
+        }
+        impl Drop for NnpGuard {
+            fn drop(&mut self) {
+                crate::unistd::_test_reset_no_new_privs(false);
+            }
+        }
+
+        fn drop_cap(cap: u32) {
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if cap < 32 {
+                (lo & !(1u32 << cap), hi)
+            } else {
+                (lo, hi & !(1u32 << (cap - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed");
+            assert!(!crate::sys_capability::has_capability(cap));
+        }
+
+        fn drop_sys_admin() {
+            drop_cap(crate::sys_capability::CAP_SYS_ADMIN);
+        }
+
+        // -- Per-error-class ----------------------------------------------
+
+        /// No CAP_SYS_ADMIN and NNP cleared → EPERM (the unprivileged
+        /// caller path with no opt-out).
+        #[test]
+        fn test_landlock_phase185_no_cap_no_nnp_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = landlock_restrict_self(0, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// CAP_SYS_ADMIN held → bypass NNP requirement → reach
+        /// existing EBADFD path (no real ruleset).
+        #[test]
+        fn test_landlock_phase185_with_cap_no_nnp_reaches_ebadfd() {
+            let _n = NnpGuard::snapshot_and_clear();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            let ret = landlock_restrict_self(0, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EBADFD);
+        }
+
+        /// No CAP_SYS_ADMIN but NNP set → bypass cap requirement →
+        /// reach existing EBADFD path.
+        #[test]
+        fn test_landlock_phase185_with_nnp_no_cap_reaches_ebadfd() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            crate::unistd::_test_reset_no_new_privs(true);
+            assert!(crate::unistd::no_new_privs_set());
+            errno::set_errno(0);
+            let ret = landlock_restrict_self(0, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EBADFD);
+        }
+
+        /// Errno must be EPERM (capable() convention), not EACCES —
+        /// Linux's deliberate distinction.
+        #[test]
+        fn test_landlock_phase185_errno_is_eperm_not_eacces() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = landlock_restrict_self(0, 0);
+            assert_eq!(ret, -1);
+            assert_ne!(errno::get_errno(), errno::EACCES);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix ---------------------------------------------
+
+        /// Unprivileged caller + invalid flag bit → EPERM beats
+        /// EINVAL (cap gate runs first).
+        #[test]
+        fn test_landlock_phase185_eperm_beats_einval_invalid_flag() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = landlock_restrict_self(0, 0x1);
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Unprivileged caller + negative ruleset_fd → EPERM beats
+        /// EBADF (cap gate runs first).
+        #[test]
+        fn test_landlock_phase185_eperm_beats_ebadf_negative_fd() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let ret = landlock_restrict_self(-1, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Privileged caller + invalid flag bit → falls through to
+        /// EINVAL (cap gate doesn't fire — confirms privileged path
+        /// retains the EINVAL precedence over EBADF).
+        #[test]
+        fn test_landlock_phase185_admin_caller_invalid_flag_still_einval() {
+            let _n = NnpGuard::snapshot_and_clear();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            let ret = landlock_restrict_self(-1, 0x1);
+            assert_eq!(ret, -1);
+            // Even with a bad fd, flag check runs first → EINVAL.
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        // -- No-side-effect ----------------------------------------------
+
+        /// Denial must not mutate the cap set or NNP bit — proof
+        /// the gate is a read-only check.
+        #[test]
+        fn test_landlock_phase185_eperm_preserves_caps_and_nnp() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            let (lo_before, hi_before) =
+                crate::sys_capability::current_caps_effective();
+            let nnp_before = crate::unistd::no_new_privs_set();
+            errno::set_errno(0);
+            let _ = landlock_restrict_self(0, 0);
+            let (lo_after, hi_after) =
+                crate::sys_capability::current_caps_effective();
+            let nnp_after = crate::unistd::no_new_privs_set();
+            assert_eq!(lo_before, lo_after);
+            assert_eq!(hi_before, hi_after);
+            assert_eq!(nnp_before, nnp_after);
+        }
+
+        // -- Recovery ----------------------------------------------------
+
+        /// Drop cap + clear NNP → EPERM.  Then set NNP → success
+        /// path is reachable (reaches EBADFD).
+        #[test]
+        fn test_landlock_phase185_recovery_set_nnp_reaches_ebadfd() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            errno::set_errno(0);
+            let denied = landlock_restrict_self(0, 0);
+            assert_eq!(denied, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            crate::unistd::_test_reset_no_new_privs(true);
+            errno::set_errno(0);
+            let reached = landlock_restrict_self(0, 0);
+            assert_eq!(reached, -1);
+            assert_eq!(errno::get_errno(), errno::EBADFD);
+        }
+
+        // -- Workflow ----------------------------------------------------
+
+        /// Typical unprivileged sandbox: a process drops CAP_SYS_ADMIN,
+        /// sets PR_SET_NO_NEW_PRIVS, then calls landlock_restrict_self
+        /// — matches the openssh, systemd, browser-sandbox pattern.
+        /// Reaches EBADFD because we have no real ruleset backend
+        /// (the equivalent of "Landlock not built into kernel").
+        #[test]
+        fn test_landlock_phase185_workflow_unprivileged_sandbox_with_nnp() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            crate::unistd::_test_reset_no_new_privs(true);
+            // Probe + restrict in one shot.
+            errno::set_errno(0);
+            let ret = landlock_restrict_self(/* ruleset_fd */ 0, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EBADFD);
+        }
+
+        /// Buggy sandboxing pattern: process drops admin but forgets
+        /// to call prctl(PR_SET_NO_NEW_PRIVS) before
+        /// landlock_restrict_self.  Linux refuses with EPERM —
+        /// catching this misconfiguration before any real
+        /// restriction is in place.
+        #[test]
+        fn test_landlock_phase185_buggy_caller_forgets_nnp_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            // (forgot: crate::unistd::_test_reset_no_new_privs(true);)
+            errno::set_errno(0);
+            let ret = landlock_restrict_self(0, 0);
+            assert_eq!(ret, -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Sentinel ----------------------------------------------------
+
+        /// CAP_SYS_PTRACE alone (without CAP_SYS_ADMIN) does NOT
+        /// satisfy the gate — only CAP_SYS_ADMIN is honoured here,
+        /// matching Linux's specific cap requirement.
+        #[test]
+        fn test_landlock_phase185_sentinel_ptrace_cap_does_not_satisfy() {
+            let _g = CapGuard::snapshot();
+            let _n = NnpGuard::snapshot_and_clear();
+            drop_sys_admin();
+            // CAP_SYS_PTRACE remains held by default (cap 19 in
+            // DEFAULT_CAPS_LOW = u32::MAX).
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_PTRACE
+            ));
+            assert!(!crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            let ret = landlock_restrict_self(0, 0);
+            assert_eq!(ret, -1);
+            // Still EPERM — PTRACE doesn't open the gate.
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Cross-checks ------------------------------------------------
+
+        /// With NNP set the gate accepts any caller — symmetric
+        /// for both held and dropped CAP_SYS_ADMIN.
+        #[test]
+        fn test_landlock_phase185_nnp_path_symmetric_across_caps() {
+            // Held cap + NNP set.
+            {
+                let _n = NnpGuard::snapshot_and_clear();
+                crate::unistd::_test_reset_no_new_privs(true);
+                errno::set_errno(0);
+                let ret = landlock_restrict_self(0, 0);
+                assert_eq!(ret, -1);
+                assert_eq!(errno::get_errno(), errno::EBADFD);
+            }
+            // Dropped cap + NNP set.
+            {
+                let _g = CapGuard::snapshot();
+                let _n = NnpGuard::snapshot_and_clear();
+                drop_sys_admin();
+                crate::unistd::_test_reset_no_new_privs(true);
+                errno::set_errno(0);
+                let ret = landlock_restrict_self(0, 0);
+                assert_eq!(ret, -1);
+                assert_eq!(errno::get_errno(), errno::EBADFD);
+            }
+        }
     }
 }

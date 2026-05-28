@@ -4000,6 +4000,23 @@ const VALID_RESOLVE_FLAGS: u64 = RESOLVE_NO_XDEV
 /// our 16 KiB-page kernel.
 const OPENAT2_MAX_USIZE: usize = 4096;
 
+/// The raw `__O_TMPFILE` bit (the high one in Linux's `O_TMPFILE`).
+///
+/// Linux defines `O_TMPFILE = __O_TMPFILE | O_DIRECTORY` so the
+/// user-facing `O_TMPFILE` symbol always implies the directory flag.
+/// But the kernel's mode-vs-flags check in `build_open_how` only
+/// looks at the raw `__O_TMPFILE` bit (it doesn't care about
+/// `O_DIRECTORY`), and our [`fcntl::O_TMPFILE`] constant is the
+/// combined value.  Expose the raw bit here so the openat2
+/// validation can match Linux exactly.
+const RAW_O_TMPFILE: u64 = 0o20_000_000;
+
+/// Mask of the 12 file-mode permission bits valid in `how.mode`
+/// (rwx for user/group/other, plus the three setuid/setgid/sticky
+/// bits).  Any bit outside this mask is rejected — matches Linux's
+/// `S_IALLUGO` check in `build_open_how`.
+const VALID_MODE_BITS: u64 = 0o7777;
+
 /// `openat2` — open a file relative to a directory fd with extended
 /// resolution control.
 ///
@@ -4052,6 +4069,37 @@ pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size
     // we don't know about would silently get an unrestricted open,
     // defeating the whole point of openat2's forward-compat design.
     if h.resolve & !VALID_RESOLVE_FLAGS != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Step 5: build_open_how — mode bit-range check.
+    //
+    // Linux: `if (how->mode & ~S_IALLUGO) return -EINVAL;`.  The 12
+    // valid mode bits cover rwx-for-ugo plus setuid/setgid/sticky;
+    // anything above those is a buggy caller (probably a sign-extended
+    // negative or a stomped-on field) and must be EINVAL so the bug is
+    // visible rather than silently masked.
+    if h.mode & !VALID_MODE_BITS != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+
+    // Step 6: build_open_how — mode meaningful only with O_CREAT or
+    // O_TMPFILE.
+    //
+    // Linux: `if (how->mode && !(how->flags & (O_CREAT | __O_TMPFILE)))
+    //              return -EINVAL;`
+    //
+    // A non-zero `mode` is only meaningful when the kernel is going to
+    // *create* a file (O_CREAT) or a temporary file (the raw
+    // __O_TMPFILE bit; O_DIRECTORY isn't relevant here).  A caller
+    // passing mode without one of those flags is asking for an
+    // inconsistent open; we reject so they notice the bug.
+    let creates_a_file =
+        (h.flags & crate::fcntl::O_CREAT as u64) != 0
+            || (h.flags & RAW_O_TMPFILE) != 0;
+    if h.mode != 0 && !creates_a_file {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -7827,6 +7875,315 @@ mod tests {
             core::mem::size_of::<OpenHow>(),
         );
         assert_ne!(crate::errno::get_errno(), crate::errno::E2BIG);
+    }
+
+    // ===================================================================
+    // Phase 136 — openat2 mode validation matches build_open_how:
+    // mode bits outside 0o7777 → EINVAL; mode != 0 without O_CREAT or
+    // raw __O_TMPFILE → EINVAL.  Closes the deferred item flagged in
+    // Phase 135.
+    // ===================================================================
+
+    // -- Mode bit-range check ----------------------------------------------
+
+    #[test]
+    fn test_phase136_mode_extra_bit_einval() {
+        // BEFORE Phase 136: mode = 0o10000 (bit above the S_IALLUGO
+        // mask) was silently accepted and passed through to openat,
+        // where it'd be truncated to ModeT in unspecified ways.
+        // AFTER: matches Linux's `if (how->mode & ~S_IALLUGO) -EINVAL`.
+        let how = OpenHow {
+            flags: crate::fcntl::O_CREAT as u64,
+            mode: 0o10_000, // one bit above the 12-bit mask
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase136_mode_high_bit_einval() {
+        // The top bit (bit 63) in mode should fail just as clearly.
+        let how = OpenHow {
+            flags: crate::fcntl::O_CREAT as u64,
+            mode: 1u64 << 63,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase136_all_12_mode_bits_accepted() {
+        // 0o7777 = every defined mode bit.  Must not be rejected by
+        // the bit-range check (whether the actual open succeeds is
+        // irrelevant — we just need not-EINVAL from our validation).
+        let how = OpenHow {
+            flags: crate::fcntl::O_CREAT as u64,
+            mode: 0o7777,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let _ret = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase136_full_mode\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- mode-without-creation-flag check ----------------------------------
+
+    #[test]
+    fn test_phase136_mode_without_o_creat_or_tmpfile_einval() {
+        // BEFORE Phase 136: a non-zero mode with O_RDONLY was silently
+        // passed through, even though Linux returns EINVAL — the mode
+        // can never take effect because no file is being created.
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0o644,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase136_mode_with_o_creat_passes_validation() {
+        // O_CREAT + valid mode → no EINVAL from our validation.
+        let how = OpenHow {
+            flags: crate::fcntl::O_CREAT as u64 | crate::fcntl::O_RDWR as u64,
+            mode: 0o644,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let _ret = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase136_creat\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase136_mode_with_o_tmpfile_passes_validation() {
+        // O_TMPFILE (= __O_TMPFILE | O_DIRECTORY) covers the raw
+        // __O_TMPFILE bit, so the mode check passes.
+        let how = OpenHow {
+            flags: crate::fcntl::O_TMPFILE as u64 | crate::fcntl::O_RDWR as u64,
+            mode: 0o600,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let _ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase136_zero_mode_without_o_creat_passes() {
+        // mode = 0 is the common case for read-only opens — must
+        // never trigger the mode-vs-flags check.
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let _ret = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase136_zero_mode\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase136_mode_with_o_directory_alone_einval() {
+        // O_DIRECTORY by itself is NOT __O_TMPFILE — the raw tmpfile
+        // bit is the high one (0o20_000_000).  A caller passing
+        // O_DIRECTORY + mode must still get EINVAL because no file
+        // creation is happening.
+        let how = OpenHow {
+            flags: crate::fcntl::O_DIRECTORY as u64,
+            mode: 0o755,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- Ordering interactions --------------------------------------------
+
+    #[test]
+    fn test_phase136_resolve_check_beats_mode_check() {
+        // Garbage resolve bit takes priority — Linux's order is
+        // resolve → mode-bits → mode-vs-flags.
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0o644, // also bad (no O_CREAT)
+            resolve: 1u64 << 40, // bad resolve bit
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        // Both produce EINVAL; we can't differentiate by errno but the
+        // resolve check runs first.
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase136_mode_bits_check_beats_mode_vs_flags() {
+        // Mode has a bad bit (0o10000) AND lacks O_CREAT — Linux
+        // checks the bit range first, so the EINVAL comes from the
+        // bit-range arm.  Both produce EINVAL but the order matters
+        // for the diagnostic.
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0o10_000,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- Workflow & recovery ----------------------------------------------
+
+    #[test]
+    fn test_phase136_recoverable_after_bad_mode_bits() {
+        // First call: mode has out-of-range bit → EINVAL.
+        let bad = OpenHow {
+            flags: crate::fcntl::O_CREAT as u64,
+            mode: 0o10_644,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let r1 = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &bad,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(r1, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // Second call: mode trimmed to legal bits — validation passes.
+        let good = OpenHow {
+            flags: crate::fcntl::O_CREAT as u64,
+            mode: 0o644,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let _r2 = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase136_recovery\0".as_ptr(),
+            &good,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_phase136_typical_create_workflow() {
+        // 1. Open existing (no mode, no O_CREAT).
+        let read = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let _ = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase136_step1\0".as_ptr(),
+            &read,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        // 2. Create with O_CREAT + mode — must pass validation.
+        let create = OpenHow {
+            flags: crate::fcntl::O_CREAT as u64 | crate::fcntl::O_WRONLY as u64,
+            mode: 0o600,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let _ = openat2(
+            AT_FDCWD,
+            b"/nonexistent_phase136_step2\0".as_ptr(),
+            &create,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- Buggy caller -----------------------------------------------------
+
+    #[test]
+    fn test_phase136_buggy_caller_uninitialised_mode_field() {
+        // A common bug: caller zeroes flags/resolve but forgets mode,
+        // leaving garbage from the stack.  Without O_CREAT this is
+        // EINVAL (caught), not a silent mode-bits-ignored open.
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0xDEAD_BEEF_DEAD_BEEF,
+            resolve: 0,
+        };
+        crate::errno::set_errno(0);
+        let ret = openat2(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            &how,
+            core::mem::size_of::<OpenHow>(),
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]

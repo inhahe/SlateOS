@@ -2000,27 +2000,20 @@ pub extern "C" fn personality(persona: u64) -> i32 {
 // ptrace — process trace
 // ---------------------------------------------------------------------------
 
-/// Process trace (debugging interface).
-///
-/// Stub: returns -1 with ENOSYS.  A real ptrace implementation
-/// requires kernel-level support for breakpoints, single-step, and
-/// memory/register access.
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ptrace(_request: i32, _pid: i32, _addr: u64, _data: u64) -> i64 {
-    errno::set_errno(errno::ENOSYS);
-    -1
-}
-
 /// ptrace request codes.
 pub const PTRACE_TRACEME: i32 = 0;
 /// Peek at a word in the child's text area.
 pub const PTRACE_PEEKTEXT: i32 = 1;
 /// Peek at a word in the child's data area.
 pub const PTRACE_PEEKDATA: i32 = 2;
+/// Peek at a word in the child's USER area.
+pub const PTRACE_PEEKUSER: i32 = 3;
 /// Write a word to the child's text area.
 pub const PTRACE_POKETEXT: i32 = 4;
 /// Write a word to the child's data area.
 pub const PTRACE_POKEDATA: i32 = 5;
+/// Write a word to the child's USER area.
+pub const PTRACE_POKEUSER: i32 = 6;
 /// Continue the stopped child.
 pub const PTRACE_CONT: i32 = 7;
 /// Kill the child.
@@ -2031,6 +2024,111 @@ pub const PTRACE_SINGLESTEP: i32 = 9;
 pub const PTRACE_ATTACH: i32 = 16;
 /// Detach from a process.
 pub const PTRACE_DETACH: i32 = 17;
+/// Continue and signal the child.
+pub const PTRACE_SYSCALL: i32 = 24;
+/// Set ptrace options.
+pub const PTRACE_SETOPTIONS: i32 = 0x4200;
+/// Retrieve message from the latest ptrace stop.
+pub const PTRACE_GETEVENTMSG: i32 = 0x4201;
+/// Retrieve signal information.
+pub const PTRACE_GETSIGINFO: i32 = 0x4202;
+/// Set signal information.
+pub const PTRACE_SETSIGINFO: i32 = 0x4203;
+/// Same as PTRACE_ATTACH but does not stop the tracee.
+pub const PTRACE_SEIZE: i32 = 0x4206;
+/// Stop a SEIZEd tracee.
+pub const PTRACE_INTERRUPT: i32 = 0x4207;
+/// Listen for a stopped tracee.
+pub const PTRACE_LISTEN: i32 = 0x4208;
+
+/// Return `true` for known `PTRACE_*` request codes that our validator
+/// recognises.  Codes outside this set are rejected with `EIO` —
+/// matching Linux's `kernel/ptrace.c::ptrace_request` default case,
+/// which historically returns `-EIO` rather than `-EINVAL` for
+/// unknown request numbers.
+#[must_use]
+pub fn ptrace_request_known(request: i32) -> bool {
+    matches!(
+        request,
+        PTRACE_TRACEME
+            | PTRACE_PEEKTEXT
+            | PTRACE_PEEKDATA
+            | PTRACE_PEEKUSER
+            | PTRACE_POKETEXT
+            | PTRACE_POKEDATA
+            | PTRACE_POKEUSER
+            | PTRACE_CONT
+            | PTRACE_KILL
+            | PTRACE_SINGLESTEP
+            | PTRACE_ATTACH
+            | PTRACE_DETACH
+            | PTRACE_SYSCALL
+            | PTRACE_SETOPTIONS
+            | PTRACE_GETEVENTMSG
+            | PTRACE_GETSIGINFO
+            | PTRACE_SETSIGINFO
+            | PTRACE_SEIZE
+            | PTRACE_INTERRUPT
+            | PTRACE_LISTEN
+    )
+}
+
+/// Process trace (debugging interface).
+///
+/// Returns -1 with `ENOSYS` after argument-domain validation.  A real
+/// ptrace implementation requires kernel-level support for
+/// breakpoints, single-step, and memory/register access that our
+/// microkernel does not export yet — but invalid callers (debuggers
+/// targeting nonexistent pids, callers passing garbage request codes,
+/// PTRACE_TRACEME called twice) must still see Linux-matching errno
+/// values so portable debuggers (gdb, strace, lldb) and crash-handler
+/// libraries report failures correctly.
+///
+/// Validation order matches `kernel/ptrace.c::sys_ptrace` in Linux:
+/// 1. Unknown request code → `EIO`.  Linux's default case in
+///    `ptrace_request` returns `-EIO`, not `-EINVAL`; this is a
+///    historical quirk of the interface that portable callers
+///    rely on.
+/// 2. `PTRACE_TRACEME`: `pid`/`addr`/`data` are ignored.  Linux
+///    rejects with `EPERM` if the caller is already traced, which
+///    we can't check; pass through to `ENOSYS`.
+/// 3. All other requests: `pid <= 0` → `ESRCH` (no such process).
+///    Linux performs this via `find_get_task_by_vpid(pid)` which
+///    returns `-ESRCH` for non-positive pids.
+/// 4. All validated → `ENOSYS`.
+///
+/// Things we cannot validate yet (will become real checks once the
+/// process subsystem exposes traced-state):
+/// - `EPERM`: caller lacks `CAP_SYS_PTRACE` or target is not a
+///   descendant.
+/// - `ESRCH`: target pid is not in this user's session.
+/// - `EFAULT`: `addr`/`data` does not refer to a readable/writable
+///   address in the tracee.
+/// These are deferred with TODO comments; the function will continue
+/// to surface `ENOSYS` for them until the process model is wired up.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn ptrace(request: i32, pid: i32, _addr: u64, _data: u64) -> i64 {
+    if !ptrace_request_known(request) {
+        errno::set_errno(errno::EIO);
+        return -1;
+    }
+    if request == PTRACE_TRACEME {
+        // No further argument checks — caller traces itself.
+        // TODO(ptrace): EPERM if already traced once the process
+        // subsystem tracks tracer state.
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+    if pid <= 0 {
+        errno::set_errno(errno::ESRCH);
+        return -1;
+    }
+    // TODO(ptrace): ESRCH for non-existent pid, EPERM for unauthorized
+    // attach, EFAULT for bad addr/data — all require process-model
+    // hooks we don't have yet.
+    errno::set_errno(errno::ENOSYS);
+    -1
+}
 
 // ---------------------------------------------------------------------------
 // swapon / swapoff
@@ -4225,5 +4323,241 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(chroot(b"\0".as_ptr()), -1);
         assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 64: ptrace argument-domain validation
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_ptrace_extended_constants() {
+        // New constants added in Phase 64.
+        assert_eq!(PTRACE_PEEKUSER, 3);
+        assert_eq!(PTRACE_POKEUSER, 6);
+        assert_eq!(PTRACE_SYSCALL, 24);
+        assert_eq!(PTRACE_SETOPTIONS, 0x4200);
+        assert_eq!(PTRACE_GETEVENTMSG, 0x4201);
+        assert_eq!(PTRACE_GETSIGINFO, 0x4202);
+        assert_eq!(PTRACE_SETSIGINFO, 0x4203);
+        assert_eq!(PTRACE_SEIZE, 0x4206);
+        assert_eq!(PTRACE_INTERRUPT, 0x4207);
+        assert_eq!(PTRACE_LISTEN, 0x4208);
+    }
+
+    #[test]
+    fn test_ptrace_request_known_recognizes_all_constants() {
+        for r in &[
+            PTRACE_TRACEME, PTRACE_PEEKTEXT, PTRACE_PEEKDATA, PTRACE_PEEKUSER,
+            PTRACE_POKETEXT, PTRACE_POKEDATA, PTRACE_POKEUSER,
+            PTRACE_CONT, PTRACE_KILL, PTRACE_SINGLESTEP,
+            PTRACE_ATTACH, PTRACE_DETACH, PTRACE_SYSCALL,
+            PTRACE_SETOPTIONS, PTRACE_GETEVENTMSG,
+            PTRACE_GETSIGINFO, PTRACE_SETSIGINFO,
+            PTRACE_SEIZE, PTRACE_INTERRUPT, PTRACE_LISTEN,
+        ] {
+            assert!(ptrace_request_known(*r), "unknown known request {r}");
+        }
+    }
+
+    #[test]
+    fn test_ptrace_request_known_rejects_garbage() {
+        // Values not in our recognised set.
+        assert!(!ptrace_request_known(100));
+        assert!(!ptrace_request_known(1_000_000));
+        assert!(!ptrace_request_known(-1));
+        assert!(!ptrace_request_known(i32::MAX));
+        assert!(!ptrace_request_known(i32::MIN));
+        // 10..15 — gap between SINGLESTEP(9) and ATTACH(16).
+        assert!(!ptrace_request_known(10));
+        assert!(!ptrace_request_known(15));
+    }
+
+    // --- unknown request → EIO ----------------------------------------
+
+    #[test]
+    fn test_ptrace_unknown_request_eio() {
+        errno::set_errno(0);
+        let ret = ptrace(100, 1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EIO);
+    }
+
+    #[test]
+    fn test_ptrace_negative_request_eio() {
+        errno::set_errno(0);
+        let ret = ptrace(-5, 1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EIO);
+    }
+
+    #[test]
+    fn test_ptrace_gap_request_eio() {
+        // Codes 10..15 are gaps in the standard ptrace numbering.
+        errno::set_errno(0);
+        assert_eq!(ptrace(11, 1, 0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EIO);
+    }
+
+    // --- PTRACE_TRACEME ignores pid/addr/data --------------------------
+
+    #[test]
+    fn test_ptrace_traceme_ignores_pid() {
+        // Even pid <= 0 must not turn into ESRCH for TRACEME.
+        errno::set_errno(0);
+        assert_eq!(ptrace(PTRACE_TRACEME, -42, 0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_ptrace_traceme_ignores_addr_data() {
+        errno::set_errno(0);
+        assert_eq!(
+            ptrace(PTRACE_TRACEME, 0, 0xDEAD_BEEF, 0xCAFE_BABE),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // --- other requests: pid validation -------------------------------
+
+    #[test]
+    fn test_ptrace_attach_zero_pid_esrch() {
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_ATTACH, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_ptrace_attach_negative_pid_esrch() {
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_ATTACH, -1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_ptrace_detach_zero_pid_esrch() {
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_DETACH, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_ptrace_peektext_negative_pid_esrch() {
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_PEEKTEXT, -100, 0x1000, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    #[test]
+    fn test_ptrace_cont_min_pid_esrch() {
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_CONT, i32::MIN, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
+    }
+
+    // --- other requests with positive pid: reach ENOSYS ----------------
+
+    #[test]
+    fn test_ptrace_attach_positive_pid_enosys() {
+        // Valid request, positive pid — reaches the ENOSYS sentinel.
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_ATTACH, 1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_ptrace_peekdata_positive_pid_enosys() {
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_PEEKDATA, 42, 0x1000, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_ptrace_seize_positive_pid_enosys() {
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_SEIZE, 1234, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // --- ordering -----------------------------------------------------
+
+    #[test]
+    fn test_ptrace_request_check_before_pid_check() {
+        // Unknown request AND bad pid — EIO wins.
+        errno::set_errno(0);
+        let ret = ptrace(999_999, -1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EIO);
+    }
+
+    #[test]
+    fn test_ptrace_traceme_takes_precedence_over_pid_check() {
+        // PTRACE_TRACEME is a known request and skips the pid check
+        // entirely — even pid == 0 / negative must not produce ESRCH.
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_TRACEME, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // --- workflows + buggy callers ------------------------------------
+
+    #[test]
+    fn test_workflow_strace_style_attach_then_detach() {
+        // strace-like flow: ATTACH to pid, then DETACH.  Both must
+        // reach the ENOSYS sentinel on a valid pid (we don't actually
+        // attach, but the syscall shape must be correct).
+        errno::set_errno(0);
+        assert_eq!(ptrace(PTRACE_ATTACH, 100, 0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        errno::set_errno(0);
+        assert_eq!(ptrace(PTRACE_DETACH, 100, 0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_workflow_gdb_step_loop() {
+        // gdb step loop: SETOPTIONS once, then alternate SYSCALL +
+        // GETSIGINFO.  All known requests must reach ENOSYS.
+        errno::set_errno(0);
+        assert_eq!(ptrace(PTRACE_SETOPTIONS, 50, 0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        errno::set_errno(0);
+        assert_eq!(ptrace(PTRACE_SYSCALL, 50, 0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        errno::set_errno(0);
+        assert_eq!(ptrace(PTRACE_GETSIGINFO, 50, 0, 0), -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    #[test]
+    fn test_buggy_caller_ptrace_signed_unsigned_confusion() {
+        // Some debuggers cast a u32 PTRACE_* macro to i32 and pass
+        // it through; the historical PTRACE_GETREGS (12) and similar
+        // codes are NOT in our recognised set (we only have the
+        // generic POSIX subset).  EIO is the right diagnostic.
+        errno::set_errno(0);
+        let ret = ptrace(12, 1, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EIO);
+    }
+
+    #[test]
+    fn test_buggy_caller_ptrace_kill_self_with_zero_pid() {
+        // Caller passes pid=0 to PTRACE_KILL meaning "current
+        // process" — that's wait(2) semantics, not ptrace(2)
+        // semantics.  ptrace rejects with ESRCH.
+        errno::set_errno(0);
+        let ret = ptrace(PTRACE_KILL, 0, 0, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ESRCH);
     }
 }

@@ -157,16 +157,40 @@ pub extern "C" fn usleep(usec: u32) -> i32 {
 /// Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
-    if tp.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
+    // Linux validation order (kernel/time/posix-timers.c
+    // SYSCALL_DEFINE2(clock_gettime, ...)):
+    //
+    //   1. clockid_to_kclock(which_clock)         → EINVAL on miss
+    //   2. kc->clock_get_timespec(&kernel_tp)     (populates local)
+    //   3. put_timespec64(&kernel_tp, tp)         → EFAULT on NULL/bad
+    //
+    // Phase 150: pre-Phase-150 we ran the NULL pointer check FIRST
+    // and the clock check second.  Linux validates the clock first
+    // (in `clockid_to_kclock`) before touching the user pointer.
+    // Observable divergence: `clock_gettime(BAD_CLOCK, NULL)` used
+    // to return EFAULT; Linux returns EINVAL.
+    //
+    // We swap steps 2 and 3 in our implementation: the NULL check
+    // runs before the syscall.  This is observably equivalent to
+    // Linux's contract because `CLOCK_MONOTONIC` is a never-fail
+    // clock — `clock_get_timespec` always succeeds, so reordering
+    // the two post-clock-validation steps does not change any
+    // externally visible behaviour.  Doing the NULL check first
+    // avoids a wasted syscall on the EFAULT path.
 
+    // Step 1: clock validation → EINVAL.
     if !is_valid_clock(clk_id) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
 
+    // Step 3 (hoisted): put_timespec64(tp) → EFAULT on NULL/bad.
+    if tp.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    // Step 2: read the clock value.
     let ns = syscall0(SYS_CLOCK_MONOTONIC);
     if ns < 0 {
         return errno::translate(ns) as i32;
@@ -4218,6 +4242,179 @@ mod tests {
         let ret = clock_gettime(999, &raw mut ts);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // ---------------------------------------------------------------
+    // Phase 150: clock_gettime — Linux validates the clock_id before
+    // touching the user pointer.
+    //
+    //   1. clockid_to_kclock(which_clock) → EINVAL on miss
+    //   2. kc->clock_get_timespec(...)
+    //   3. put_timespec64(tp)             → EFAULT on NULL/bad
+    //
+    // Pre-Phase-150 we ran step 3 BEFORE step 1, so
+    // `clock_gettime(BAD_CLOCK, NULL)` returned EFAULT; Linux
+    // returns EINVAL.
+    // ---------------------------------------------------------------
+
+    // -- per-error-class --
+
+    /// Per-error-class: bad clock with valid tp → EINVAL.
+    #[test]
+    fn test_clock_gettime_bad_clock_einval_phase150() {
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        crate::errno::set_errno(0);
+        let ret = clock_gettime(0x4242, &raw mut ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Per-error-class: NULL tp with valid clock → EFAULT.
+    #[test]
+    fn test_clock_gettime_null_tp_valid_clock_efault_phase150() {
+        crate::errno::set_errno(0);
+        let ret = clock_gettime(CLOCK_MONOTONIC, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    /// Per-error-class: negative clock_id → EINVAL.
+    #[test]
+    fn test_clock_gettime_negative_clock_einval_phase150() {
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        crate::errno::set_errno(0);
+        let ret = clock_gettime(-7, &raw mut ts);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- ordering matrix --
+
+    /// Ordering: bad clock BEATS NULL tp.  Linux returns EINVAL
+    /// (from `clockid_to_kclock`) before reaching `put_timespec64`.
+    /// Pre-Phase-150 we returned EFAULT here.
+    #[test]
+    fn test_clock_gettime_bad_clock_beats_null_tp_phase150() {
+        crate::errno::set_errno(0);
+        let ret = clock_gettime(999, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
+            "bad clock (EINVAL) must beat NULL tp (EFAULT)");
+    }
+
+    /// Ordering: negative clock BEATS NULL tp.
+    #[test]
+    fn test_clock_gettime_negative_clock_beats_null_tp_phase150() {
+        crate::errno::set_errno(0);
+        let ret = clock_gettime(-1, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Ordering: i32::MAX clock BEATS NULL tp.
+    #[test]
+    fn test_clock_gettime_max_clock_beats_null_tp_phase150() {
+        crate::errno::set_errno(0);
+        let ret = clock_gettime(i32::MAX, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- workflow --
+
+    /// Workflow: each valid clock id passes validation (advances
+    /// past the EINVAL check).  We can't assert success because the
+    /// underlying `syscall0(SYS_CLOCK_MONOTONIC)` is a no-op in the
+    /// test environment — but we CAN assert that the early EFAULT
+    /// path doesn't fire (i.e. the clock check passes), by passing
+    /// a non-null tp and observing that errno is NOT EINVAL.
+    #[test]
+    fn test_clock_gettime_all_valid_clocks_pass_validation_phase150() {
+        for clk in [
+            CLOCK_REALTIME,
+            CLOCK_MONOTONIC,
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+            CLOCK_BOOTTIME,
+        ] {
+            crate::errno::set_errno(0);
+            let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            // We don't assert ret == 0 because the test environment
+            // has no working SYS_CLOCK_MONOTONIC; we DO assert that
+            // errno wasn't set to EINVAL (the clock-validation
+            // failure errno).
+            let _ = clock_gettime(clk, &raw mut ts);
+            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL,
+                "clock {clk} must pass the EINVAL check");
+        }
+    }
+
+    // -- buggy caller --
+
+    /// Buggy caller: passes a deliberately-suspicious clock id (one
+    /// that looks like an ASCII byte, e.g. `b'A' as ClockidT = 65`)
+    /// expecting EINVAL.  Pre-Phase-150 they'd get EFAULT if their
+    /// tp was also null — confusing for diagnostics.
+    #[test]
+    fn test_clock_gettime_buggy_caller_phase150() {
+        crate::errno::set_errno(0);
+        let ret = clock_gettime(65, core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
+            "caller probing for clock support must see EINVAL, not EFAULT");
+    }
+
+    // -- recovery --
+
+    /// Recovery: after EINVAL from bad clock, retrying with a valid
+    /// clock id ADVANCES past the EINVAL check (no longer EINVAL).
+    /// Test-environment limitation: can't assert ret == 0.
+    #[test]
+    fn test_clock_gettime_recovery_after_einval_phase150() {
+        crate::errno::set_errno(0);
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        assert_eq!(clock_gettime(999, &raw mut ts), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+        crate::errno::set_errno(0);
+        let _ = clock_gettime(CLOCK_MONOTONIC, &raw mut ts);
+        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL,
+            "valid clock must clear the EINVAL state");
+    }
+
+    /// Recovery: after EFAULT from NULL tp, providing a buffer
+    /// clears the EFAULT state (no longer EFAULT).
+    #[test]
+    fn test_clock_gettime_recovery_after_efault_phase150() {
+        crate::errno::set_errno(0);
+        assert_eq!(clock_gettime(CLOCK_MONOTONIC, core::ptr::null_mut()), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+
+        crate::errno::set_errno(0);
+        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let _ = clock_gettime(CLOCK_MONOTONIC, &raw mut ts);
+        assert_ne!(crate::errno::get_errno(), crate::errno::EFAULT,
+            "valid tp must clear the EFAULT state");
+    }
+
+    // -- no-side-effect loop --
+
+    /// No-side-effect loop: repeated EINVAL/EFAULT calls don't leak
+    /// — each iteration sets the correct errno cleanly.
+    #[test]
+    fn test_clock_gettime_einval_efault_loop_phase150() {
+        for _ in 0..32 {
+            crate::errno::set_errno(0);
+            assert_eq!(clock_gettime(0xBAD, core::ptr::null_mut()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+
+            crate::errno::set_errno(0);
+            assert_eq!(clock_gettime(CLOCK_MONOTONIC, core::ptr::null_mut()), -1);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+        }
     }
 
     // -- timer_create / timer_settime / timer_gettime / timer_delete --

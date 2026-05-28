@@ -48,11 +48,22 @@ mod tests {
     }
 
     #[test]
-    fn test_flock_stub_returns_success() {
-        // flock is a stub that always returns 0 (success) so
-        // programs that create lock files don't fail.
+    fn test_flock_rejects_negative_fd() {
+        // flock now validates: fd < 0 → EBADF (matches Linux).
+        crate::errno::set_errno(0);
         let ret = flock(-1, LOCK_SH);
-        assert_eq!(ret, 0);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_flock_accepts_open_fd() {
+        // Allocate a real fd so the validator passes, then verify the
+        // body still no-ops to 0 (advisory locking not yet enforced).
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(flock(fd, LOCK_SH), 0);
+        let _ = crate::fdtable::close_fd(fd);
     }
 
     #[test]

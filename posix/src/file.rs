@@ -2877,16 +2877,43 @@ pub const LOCK_UN: i32 = 8;
 /// Lock operation modifier: non-blocking.
 pub const LOCK_NB: i32 = 4;
 
+/// Mask of bits that can appear in the `operation` argument of `flock`:
+/// exactly one of LOCK_SH / LOCK_EX / LOCK_UN, optionally OR'd with
+/// LOCK_NB.  Linux rejects anything outside this mask with EINVAL.
+const FLOCK_OP_MASK: i32 = LOCK_SH | LOCK_EX | LOCK_UN | LOCK_NB;
+
 /// Apply or remove an advisory lock on an open file.
 ///
-/// Stub: always succeeds.  Our OS does not yet implement file locking
-/// at the kernel level.  Programs that call `flock` at startup for
-/// lock files will proceed normally (the lock is advisory and not
-/// enforced).
+/// Validates `fd` and `operation`.  The body is a no-op success — our
+/// kernel does not yet enforce advisory locks, so programs that take a
+/// lock-file lock at startup still proceed — but a buggy caller now
+/// gets EBADF on a closed fd and EINVAL on a garbage operation, like
+/// Linux's `sys_flock` does before reaching `flock_lock_file`.
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
+///   * `EINVAL` — `operation` has unknown bits, lacks one of
+///     LOCK_SH/LOCK_EX/LOCK_UN, or names more than one of them.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn flock(_fd: Fd, _operation: i32) -> i32 {
-    // Advisory locking not yet implemented in the kernel.
-    // Return success so programs that create lock files don't fail.
+pub extern "C" fn flock(fd: Fd, operation: i32) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if operation & !FLOCK_OP_MASK != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Linux requires exactly one of LOCK_SH | LOCK_EX | LOCK_UN.
+    let mode = operation & (LOCK_SH | LOCK_EX | LOCK_UN);
+    if mode != LOCK_SH && mode != LOCK_EX && mode != LOCK_UN {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 
@@ -2905,12 +2932,27 @@ pub const F_TEST: i32 = 3;
 
 /// Lock a section of a file (POSIX `lockf`).
 ///
-/// Stub: always succeeds.  Like `flock`, advisory file locking is not
-/// yet enforced by the kernel.  Programs that use `lockf` for lock
-/// files or serialization will proceed normally.
+/// Validates `fd` and `cmd`.  Body is a no-op success — like `flock`,
+/// advisory locking is not yet enforced — but bad fds and unknown
+/// commands now surface as Linux-shaped errors.
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
+///   * `EINVAL` — `cmd` is not one of F_LOCK, F_TLOCK, F_ULOCK, F_TEST.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lockf(_fd: Fd, _cmd: i32, _len: OffT) -> i32 {
-    // Advisory locking not yet implemented.
+pub extern "C" fn lockf(fd: Fd, cmd: i32, _len: OffT) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if !matches!(cmd, F_LOCK | F_TLOCK | F_ULOCK | F_TEST) {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     0
 }
 
@@ -4274,10 +4316,13 @@ mod tests {
 
     #[test]
     fn test_flock_succeeds() {
-        assert_eq!(flock(0, LOCK_SH), 0);
-        assert_eq!(flock(0, LOCK_EX), 0);
-        assert_eq!(flock(0, LOCK_UN), 0);
-        assert_eq!(flock(0, LOCK_EX | LOCK_NB), 0);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(flock(fd, LOCK_SH), 0);
+        assert_eq!(flock(fd, LOCK_EX), 0);
+        assert_eq!(flock(fd, LOCK_UN), 0);
+        assert_eq!(flock(fd, LOCK_EX | LOCK_NB), 0);
+        let _ = fdtable::close_fd(fd);
     }
 
     // -- File locking constants match Linux --
@@ -4554,10 +4599,13 @@ mod tests {
 
     #[test]
     fn test_lockf_stub_succeeds() {
-        assert_eq!(lockf(0, F_LOCK, 0), 0);
-        assert_eq!(lockf(0, F_TLOCK, 0), 0);
-        assert_eq!(lockf(0, F_ULOCK, 0), 0);
-        assert_eq!(lockf(0, F_TEST, 0), 0);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(lockf(fd, F_LOCK, 0), 0);
+        assert_eq!(lockf(fd, F_TLOCK, 0), 0);
+        assert_eq!(lockf(fd, F_ULOCK, 0), 0);
+        assert_eq!(lockf(fd, F_TEST, 0), 0);
+        let _ = fdtable::close_fd(fd);
     }
 
     // -- UTIME constants --
@@ -7230,5 +7278,188 @@ mod tests {
             utimensat(AT_FDCWD, b"/tmp/x\0".as_ptr(), ts.as_ptr(), 0),
             0
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 72 — flock / lockf validators
+    //
+    // Bodies are still no-op success (kernel-level advisory locking
+    // isn't implemented yet), but the prologue catches bad fds and
+    // unknown operation/command values the way Linux's syscall entry
+    // path does.  See also `syncfs` in unistd.rs.
+    // -----------------------------------------------------------------
+
+    // ---- flock ----
+
+    #[test]
+    fn test_flock_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(flock(-1, LOCK_SH), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_flock_unopen_fd_ebadf() {
+        let probe: i32 = 0x4000_0041;
+        if fdtable::get_fd(probe).is_some() {
+            let _ = fdtable::close_fd(probe);
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(flock(probe, LOCK_SH), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_flock_zero_op_einval() {
+        // Must specify one of LOCK_SH / LOCK_EX / LOCK_UN.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        crate::errno::set_errno(0);
+        assert_eq!(flock(fd, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_flock_unknown_bit_einval() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        crate::errno::set_errno(0);
+        // 0x40 isn't in FLOCK_OP_MASK.
+        assert_eq!(flock(fd, LOCK_SH | 0x40), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_flock_two_modes_einval() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        crate::errno::set_errno(0);
+        assert_eq!(flock(fd, LOCK_SH | LOCK_EX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_flock_bad_fd_beats_bad_op() {
+        crate::errno::set_errno(0);
+        // -1 → EBADF; the bad operation never gets checked.
+        assert_eq!(flock(-1, 0xFFFF), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_flock_nb_only_einval() {
+        // LOCK_NB alone (without LOCK_SH/EX/UN) isn't a valid op.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        crate::errno::set_errno(0);
+        assert_eq!(flock(fd, LOCK_NB), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_flock_all_modes_with_nb_accepted() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        for &mode in &[LOCK_SH, LOCK_EX, LOCK_UN] {
+            assert_eq!(flock(fd, mode), 0);
+            assert_eq!(flock(fd, mode | LOCK_NB), 0);
+        }
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // ---- lockf ----
+
+    #[test]
+    fn test_lockf_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(lockf(-1, F_LOCK, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_lockf_unopen_fd_ebadf() {
+        let probe: i32 = 0x4000_0042;
+        if fdtable::get_fd(probe).is_some() {
+            let _ = fdtable::close_fd(probe);
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(lockf(probe, F_LOCK, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_lockf_unknown_cmd_einval() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        crate::errno::set_errno(0);
+        assert_eq!(lockf(fd, 99, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_lockf_negative_cmd_einval() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        crate::errno::set_errno(0);
+        assert_eq!(lockf(fd, -1, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_lockf_bad_fd_beats_bad_cmd() {
+        crate::errno::set_errno(0);
+        assert_eq!(lockf(-1, 99, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_lockf_negative_len_accepted() {
+        // POSIX lockf accepts negative len (means "lock backwards from
+        // current offset").  Our stub passes a non-zero len through.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(lockf(fd, F_LOCK, -100), 0);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // ---- buggy callers ----
+
+    #[test]
+    fn test_buggy_caller_flock_stale_fd() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let _ = fdtable::close_fd(fd);
+        crate::errno::set_errno(0);
+        assert_eq!(flock(fd, LOCK_EX), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_buggy_caller_lockf_with_garbage_cmd() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        crate::errno::set_errno(0);
+        assert_eq!(lockf(fd, 0x7FFF_FFFF, 0), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // ---- workflow: lock-file-style acquire/release ----
+
+    #[test]
+    fn test_workflow_lockfile_acquire_release() {
+        // What e.g. `mkdir`'s -p flag does when racing with another
+        // process: take an exclusive non-blocking lock, do work, release.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(flock(fd, LOCK_EX | LOCK_NB), 0);
+        assert_eq!(flock(fd, LOCK_UN), 0);
+        let _ = fdtable::close_fd(fd);
     }
 }

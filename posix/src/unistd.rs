@@ -1638,9 +1638,22 @@ pub(crate) fn fill_random(buf: *mut u8, len: usize) {
 
 /// Synchronize all data for the filesystem containing `fd`.
 ///
-/// Stub: no-op (same as `sync` — our writes are synchronous).
+/// Validates `fd`: must be non-negative and open in the fd table.  Body
+/// is a no-op success because our writes are already synchronous, but
+/// the prologue catches buggy callers passing -1 or a closed fd.
+///
+/// Errors:
+///   * `EBADF` — `fd` is negative or not open.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn syncfs(_fd: Fd) -> i32 {
+pub extern "C" fn syncfs(fd: Fd) -> i32 {
+    if fd < 0 {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
     0
 }
 
@@ -2997,7 +3010,57 @@ mod tests {
 
     #[test]
     fn test_syncfs_succeeds() {
-        assert_eq!(syncfs(0), 0);
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(syncfs(fd), 0);
+        let _ = crate::fdtable::close_fd(fd);
+    }
+
+    // -- Phase 72: syncfs validator --
+
+    #[test]
+    fn test_syncfs_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(syncfs(-1), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_syncfs_unopen_fd_ebadf() {
+        let probe: i32 = 0x4000_0051;
+        if crate::fdtable::get_fd(probe).is_some() {
+            let _ = crate::fdtable::close_fd(probe);
+        }
+        crate::errno::set_errno(0);
+        assert_eq!(syncfs(probe), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_syncfs_min_negative_fd_ebadf() {
+        crate::errno::set_errno(0);
+        assert_eq!(syncfs(i32::MIN), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_syncfs_pipe_fd_returns_zero() {
+        // syncfs on a pipe is permitted on Linux (it walks to the
+        // pipe's superblock); we accept any open fd.
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::Pipe, 1)
+            .expect("alloc_fd Pipe failed");
+        assert_eq!(syncfs(fd), 0);
+        let _ = crate::fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_buggy_caller_syncfs_stale_fd() {
+        let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let _ = crate::fdtable::close_fd(fd);
+        crate::errno::set_errno(0);
+        assert_eq!(syncfs(fd), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     // ------------------------------------------------------------------

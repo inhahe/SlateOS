@@ -1796,7 +1796,17 @@ unsafe fn finish_accept(
 ///
 /// Like `accept`, but `flags` may include `SOCK_NONBLOCK` and/or
 /// `SOCK_CLOEXEC` to set those properties on the returned fd
-/// atomically.
+/// atomically.  Any other bits in `flags` are rejected with EINVAL,
+/// matching Linux's `net/socket.c::__sys_accept4_file` prologue:
+///
+/// ```c
+/// if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK))
+///         return -EINVAL;
+/// ```
+///
+/// The flag-mask check precedes the underlying accept call, so a
+/// buggy caller passing garbage in `flags` sees EINVAL even when the
+/// listening fd would otherwise produce EBADF / EINVAL itself.
 ///
 /// # Safety
 ///
@@ -1808,6 +1818,12 @@ pub unsafe extern "C" fn accept4(
     addrlen: *mut SocklenT,
     flags: i32,
 ) -> i32 {
+    // Linux validates flags FIRST, before any fd or pointer
+    // inspection.  Only SOCK_NONBLOCK and SOCK_CLOEXEC are valid.
+    if flags & !(SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     let new_fd = unsafe { accept(fd, addr, addrlen) };
     if new_fd < 0 {
         return new_fd;
@@ -7026,5 +7042,193 @@ mod tests {
         let ret = setsockopt(-1, SOL_SOCKET, SO_REUSEADDR, &raw const val as *const u8, 4);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 101: accept4 flag-mask validation
+    //
+    // Linux semantics (net/socket.c::__sys_accept4_file):
+    //   if (flags & ~(SOCK_CLOEXEC | SOCK_NONBLOCK)) return -EINVAL;
+    // The check precedes any fd / addr / addrlen inspection.  Our
+    // previous implementation just called accept() and then silently
+    // ignored unknown bits, so e.g. accept4(-1, .., .., i32::MIN) would
+    // return -1 with EBADF (from accept) instead of EINVAL (from the
+    // flag mask).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_accept4_valid_mask_constants() {
+        // Sanity: the two valid flags must be distinct, single-bit, and
+        // non-zero — any aliasing would silently let a third bit slip
+        // through the mask check.
+        assert_ne!(SOCK_NONBLOCK, 0);
+        assert_ne!(SOCK_CLOEXEC, 0);
+        assert_ne!(SOCK_NONBLOCK, SOCK_CLOEXEC);
+        assert_eq!(SOCK_NONBLOCK & (SOCK_NONBLOCK - 1), 0,
+            "SOCK_NONBLOCK must be a single bit, got {:#x}", SOCK_NONBLOCK);
+        assert_eq!(SOCK_CLOEXEC & (SOCK_CLOEXEC - 1), 0,
+            "SOCK_CLOEXEC must be a single bit, got {:#x}", SOCK_CLOEXEC);
+        assert_eq!(SOCK_NONBLOCK & SOCK_CLOEXEC, 0,
+            "SOCK_NONBLOCK and SOCK_CLOEXEC must not overlap");
+    }
+
+    #[test]
+    fn test_accept4_unknown_flag_einval() {
+        // An arbitrary bit not in the valid mask must yield EINVAL,
+        // BEFORE the fd is inspected.  We pass an obviously-bad fd
+        // (-1) to ensure that if the mask check were missing, we'd
+        // see EBADF instead.
+        crate::errno::set_errno(0);
+        let bad = 1 << 16; // not SOCK_NONBLOCK and not SOCK_CLOEXEC
+        let ret = unsafe {
+            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), bad)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_accept4_high_bit_einval() {
+        // i32::MIN sets the sign bit — definitely outside the mask.
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), i32::MIN)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_accept4_einval_wins_over_ebadf() {
+        // Both garbage flags AND a bad fd would normally trigger
+        // separate error paths.  Linux's order is: flags first, so
+        // EINVAL wins over EBADF.  Regression guard: previously
+        // accept() ran first and we'd see EBADF.
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            accept4(-12345, core::ptr::null_mut(), core::ptr::null_mut(), 1 << 18)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_accept4_o_append_rejected() {
+        // O_APPEND is an open-mode bit, not a socket flag.  In our
+        // numbering it's 0o2000 which differs from SOCK_NONBLOCK
+        // (0o4000) and SOCK_CLOEXEC (0o2_000_000), so it must hit
+        // the mask and EINVAL.
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(),
+                    crate::fcntl::O_APPEND)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_accept4_zero_flags_passes_mask() {
+        // Zero flags is valid; the call should fall through to
+        // accept() and fail there with EBADF (fd=-1), NOT with
+        // EINVAL (which would mean the mask wrongly rejected zero).
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), 0)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF,
+            "zero flags must pass the mask; expected EBADF from accept");
+    }
+
+    #[test]
+    fn test_accept4_sock_nonblock_alone_passes_mask() {
+        // SOCK_NONBLOCK alone is valid.  Should fall through and
+        // fail in accept with EBADF, not in the mask with EINVAL.
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), SOCK_NONBLOCK)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_accept4_sock_cloexec_alone_passes_mask() {
+        // SOCK_CLOEXEC alone is valid.
+        crate::errno::set_errno(0);
+        let ret = unsafe {
+            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), SOCK_CLOEXEC)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_accept4_both_valid_bits_pass_mask() {
+        // SOCK_NONBLOCK | SOCK_CLOEXEC is the canonical valid combination.
+        crate::errno::set_errno(0);
+        let combined = SOCK_NONBLOCK | SOCK_CLOEXEC;
+        let ret = unsafe {
+            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), combined)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_accept4_valid_plus_unknown_einval() {
+        // Mixing a valid bit with an unknown bit must still EINVAL —
+        // no partial acceptance.
+        crate::errno::set_errno(0);
+        // NOTE: SOCK_CLOEXEC is 0o2_000_000 == (1 << 19), so we must
+        // pick a stray bit that is NOT 1<<11 (SOCK_NONBLOCK) and NOT
+        // 1<<19 (SOCK_CLOEXEC).  1<<22 is safely outside both.
+        let mixed = SOCK_CLOEXEC | (1 << 22);
+        let ret = unsafe {
+            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), mixed)
+        };
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_accept4_recovery_after_einval() {
+        // A rejected call must not corrupt the syscall surface — a
+        // subsequent valid-flags call still hits the regular EBADF.
+        crate::errno::set_errno(0);
+        let r1 = unsafe {
+            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), 1 << 17)
+        };
+        assert_eq!(r1, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        crate::errno::set_errno(0);
+        let r2 = unsafe {
+            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), 0)
+        };
+        assert_eq!(r2, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    #[test]
+    fn test_accept4_single_bits_outside_mask_all_rejected() {
+        // Defensive: every single-bit value in [0, 31) that is NOT
+        // SOCK_NONBLOCK or SOCK_CLOEXEC must be rejected.  Guards
+        // against a future constant change silently widening the
+        // accepted mask.
+        for shift in 0..31 {
+            let bit = 1i32 << shift;
+            if bit == SOCK_NONBLOCK || bit == SOCK_CLOEXEC {
+                continue;
+            }
+            crate::errno::set_errno(0);
+            let ret = unsafe {
+                accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), bit)
+            };
+            assert_eq!(ret, -1,
+                "bit {:#x} should be rejected by accept4 mask", bit);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
+                "bit {:#x} should set EINVAL", bit);
+        }
     }
 }

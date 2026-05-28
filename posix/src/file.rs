@@ -1232,6 +1232,14 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
 /// Returns `newfd` on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dup3(oldfd: Fd, newfd: Fd, flags: i32) -> Fd {
+    // Linux semantics (fs/file.c::ksys_dup3): the flag-mask check
+    // precedes the oldfd==newfd check, so a buggy caller passing
+    // garbage flags AND the same fd twice sees EINVAL via the flag
+    // path. The only flag dup3 accepts is O_CLOEXEC.
+    if flags & !fcntl::O_CLOEXEC != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
     if oldfd == newfd {
         // POSIX / Linux: dup3 returns EINVAL when oldfd == newfd
         // (unlike dup2 which succeeds).
@@ -4681,6 +4689,183 @@ mod tests {
         let result = dup3(42, 42, 0);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    // -- Phase 100: dup3 flag-mask validation --
+    //
+    // Linux's dup3() accepts only one flag: O_CLOEXEC.  Any other bit
+    // set in `flags` must return -1 with EINVAL, and the flag check
+    // precedes the oldfd==newfd check (so flag errors win when both
+    // would apply).  We previously accepted any value silently,
+    // ignoring all bits except O_CLOEXEC — a buggy caller passing
+    // i32::MIN or stray O_APPEND would still get a duplicated fd.
+
+    #[test]
+    fn test_dup3_flag_mask_only_o_cloexec() {
+        // Sanity: the only known/valid flag bit is O_CLOEXEC.
+        // O_CLOEXEC must be non-zero and a single bit.
+        assert_ne!(fcntl::O_CLOEXEC, 0);
+        assert_eq!(fcntl::O_CLOEXEC & (fcntl::O_CLOEXEC - 1), 0,
+            "O_CLOEXEC must be a single bit, got {:#x}", fcntl::O_CLOEXEC);
+    }
+
+    #[test]
+    fn test_dup3_unknown_flag_bit_rejected() {
+        // An arbitrary high bit not in the valid mask must yield EINVAL.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let bad_flag = 1 << 20; // far above any real open flag
+        let result = dup3(fd, fd + 1, bad_flag);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_dup3_high_bit_rejected() {
+        // i32::MIN has the sign bit set, which is not in the mask.
+        // Per Linux this must EINVAL even when oldfd/newfd are sane.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let result = dup3(fd, fd + 1, i32::MIN);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_dup3_o_rdwr_rejected() {
+        // O_RDWR is an open-mode bit, not a dup3 flag.  Must EINVAL.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let result = dup3(fd, fd + 1, fcntl::O_RDWR);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_dup3_o_append_rejected() {
+        // O_APPEND is also not a dup3 flag.  Must EINVAL.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let result = dup3(fd, fd + 1, fcntl::O_APPEND);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_dup3_einval_wins_over_same_fd() {
+        // Both flags-invalid AND oldfd==newfd would set EINVAL, but
+        // Linux's order is: flag check first.  We can't observe the
+        // ordering via errno alone (both are EINVAL), but we can
+        // confirm flags=garbage still EINVALs even when oldfd==newfd
+        // (i.e. the early-return path doesn't skip the flag check).
+        // This is also a regression guard: previously, oldfd==newfd
+        // returned before any flag check happened at all.
+        let result = dup3(42, 42, 1 << 25);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_dup3_zero_flags_accepted_for_real_fd() {
+        // Zero flags is valid; dup3 should behave like dup2 (without
+        // CLOEXEC) on a real fd pair.  Must not return EINVAL.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        // Pick a newfd well outside any plausible existing range.
+        let newfd = 200;
+        let _ = fdtable::close_fd(newfd); // ensure it's free
+        let result = dup3(fd, newfd, 0);
+        // We don't assert success unconditionally (dup2 may fail for
+        // table-allocator reasons unrelated to dup3 flags), but we
+        // require that if it failed, it wasn't with EINVAL — i.e. the
+        // flag-mask path didn't reject a valid zero-flags call.
+        if result < 0 {
+            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL,
+                "zero flags must not be rejected by the dup3 mask");
+        }
+        let _ = fdtable::close_fd(fd);
+        let _ = fdtable::close_fd(newfd);
+    }
+
+    #[test]
+    fn test_dup3_cloexec_alone_accepted() {
+        // O_CLOEXEC alone is the canonical use case; must not EINVAL.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let newfd = 201;
+        let _ = fdtable::close_fd(newfd);
+        let result = dup3(fd, newfd, fcntl::O_CLOEXEC);
+        if result < 0 {
+            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL,
+                "O_CLOEXEC must not be rejected by the dup3 mask");
+        }
+        let _ = fdtable::close_fd(fd);
+        let _ = fdtable::close_fd(newfd);
+    }
+
+    #[test]
+    fn test_dup3_cloexec_plus_unknown_rejected() {
+        // Mixing O_CLOEXEC with an unknown bit must still EINVAL —
+        // no partial acceptance.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let bad = fcntl::O_CLOEXEC | (1 << 22);
+        let result = dup3(fd, fd + 1, bad);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    #[test]
+    fn test_dup3_recovery_after_einval() {
+        // A rejected call must not corrupt state — a subsequent
+        // valid call should still work.
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        let bad = 1 << 21;
+        let r1 = dup3(fd, fd + 1, bad);
+        assert_eq!(r1, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        let newfd = 202;
+        let _ = fdtable::close_fd(newfd);
+        let r2 = dup3(fd, newfd, 0);
+        if r2 < 0 {
+            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+        }
+        let _ = fdtable::close_fd(fd);
+        let _ = fdtable::close_fd(newfd);
+    }
+
+    #[test]
+    fn test_dup3_negative_oldfd_with_bad_flags_einval() {
+        // Even with an obviously-invalid oldfd (negative), the flag
+        // check fires first and we get EINVAL (not EBADF).
+        let result = dup3(-1, 5, 1 << 24);
+        assert_eq!(result, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_dup3_only_o_cloexec_bit_in_valid_mask() {
+        // Defensive: confirm no other fcntl O_* bit happens to overlap
+        // O_CLOEXEC.  Any such overlap would silently let that bit
+        // pass the mask.
+        for shift in 0..31 {
+            let bit = 1i32 << shift;
+            if bit == fcntl::O_CLOEXEC {
+                continue;
+            }
+            // Each non-CLOEXEC single-bit value must be rejected.
+            let result = dup3(10, 11, bit);
+            assert_eq!(result, -1,
+                "bit {:#x} should be rejected by dup3 mask", bit);
+            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
+                "bit {:#x} should set EINVAL", bit);
+        }
     }
 
     // -- closefrom --

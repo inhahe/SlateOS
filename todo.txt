@@ -678,6 +678,20 @@ Tackle as a focused effort in a dedicated session — pick one lint
 category, fix all instances across a subsystem, commit, repeat.
 Do NOT gate other roadmap work on this.
 
+(2026-05-27) Flaky test: `posix::aio::tests::test_aio_return_unsubmitted_einval`
+  fails intermittently on the full single-threaded posix test run but
+  passes in isolation.  Root cause is inter-test pollution of the
+  global aio bookkeeping state (other aio tests leave the slot table
+  in a state where the "unsubmitted" probe id is now considered
+  occupied / returned).  Reproduce:
+    cargo test -p posix --target x86_64-pc-windows-gnu --lib -- \
+        --test-threads=1
+  May pass on re-run.  Fix: aio tests should each reset / use a
+  fresh slot range, or `aio_return` should distinguish "never
+  submitted" from "already reaped" via a stable invariant rather
+  than a transient slot-table state.  Observed during Phase 100
+  (dup3 validation) work — unrelated to dup3.
+
 OBSOLETE NOTE BELOW (pre-relaxation):
 - (2026-05-26) `cargo clippy -p kernel` reports 16895 warnings and ~63
   errors triggered by `#![deny(clippy::all, clippy::pedantic)]` from

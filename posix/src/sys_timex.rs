@@ -89,6 +89,34 @@ pub const TIME_WAIT: i32 = 4;
 pub const TIME_ERROR: i32 = 5;
 
 // ---------------------------------------------------------------------------
+// ADJ_TICK validation bounds
+// ---------------------------------------------------------------------------
+//
+// Linux's `kernel/time/ntp.c::ntp_validate_timex` rejects any `ADJ_TICK`
+// update whose `tick` value is more than ±10% off the default jiffy
+// length:
+//
+//     if (txc->modes & ADJ_TICK &&
+//         (txc->tick <  900000/USER_HZ ||
+//          txc->tick > 1100000/USER_HZ))
+//         return -EINVAL;
+//
+// USER_HZ is 100 on x86_64 glibc, so the inclusive range is [9000,
+// 11000] microseconds.  Values like 0, 1, or `i64::MAX` would derail
+// NTP discipline if applied silently — chrony, ntpd, and Java's clock
+// probes all rely on this check fronting the kernel.
+
+/// Linux's `USER_HZ` — the userspace-visible clock-tick rate, fixed at
+/// 100 on x86_64 glibc regardless of the kernel's internal `HZ`.
+pub const USER_HZ: i64 = 100;
+
+/// Minimum accepted `ADJ_TICK` value (microseconds per jiffy, –10%).
+pub const MIN_TICK: i64 = 900_000 / USER_HZ;
+
+/// Maximum accepted `ADJ_TICK` value (microseconds per jiffy, +10%).
+pub const MAX_TICK: i64 = 1_100_000 / USER_HZ;
+
+// ---------------------------------------------------------------------------
 // Timex struct
 // ---------------------------------------------------------------------------
 
@@ -272,6 +300,22 @@ pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
     if (modes & !KNOWN_MODES) != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
+    }
+
+    // Phase 161: Linux's `ntp_validate_timex` rejects ADJ_TICK with a
+    // tick value outside [MIN_TICK, MAX_TICK] (±10% of the default
+    // jiffy length).  Pre-fix we silently applied any tick value the
+    // caller passed, including 0 and `i64::MAX` — a divergence that
+    // would let buggy or malicious callers derail the NTP discipline
+    // state.  We validate before taking the lock so the state stays
+    // untouched on rejection.
+    if (modes & ADJ_TICK) != 0 {
+        // SAFETY: caller contract — `tx` points to a readable Timex.
+        let tick = unsafe { (*tx).tick };
+        if tick < MIN_TICK || tick > MAX_TICK {
+            errno::set_errno(errno::EINVAL);
+            return -1;
+        }
     }
 
     let _guard = lock_timex();
@@ -622,5 +666,339 @@ mod tests {
         let ret = clock_adjtime(0, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 161 — ADJ_TICK out-of-range rejection (Linux ABI parity)
+    // ------------------------------------------------------------------
+    //
+    // Linux's `kernel/time/ntp.c::ntp_validate_timex` rejects an
+    // ADJ_TICK update whose `tick` value lies outside ±10% of the
+    // default jiffy length:
+    //
+    //     if (txc->modes & ADJ_TICK &&
+    //         (txc->tick <  900000/USER_HZ ||
+    //          txc->tick > 1100000/USER_HZ))
+    //         return -EINVAL;
+    //
+    // With USER_HZ=100 the inclusive range is [9000, 11000].  Pre-fix
+    // we silently applied any tick value the caller passed (0, 1,
+    // i64::MAX, negatives), which would derail the NTP discipline
+    // state.  Post-fix we reject the bad values with EINVAL while
+    // still accepting the two endpoints and any in-range value.
+
+    // ---- Per-error-class ----
+
+    #[test]
+    fn test_adjtimex_phase161_tick_zero_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = 0;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase161_tick_negative_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = -1;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase161_tick_i64_min_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = i64::MIN;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase161_tick_i64_max_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = i64::MAX;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase161_tick_just_below_min_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = MIN_TICK - 1; // 8999
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase161_tick_just_above_max_einval() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = MAX_TICK + 1; // 11001
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // ---- Boundary acceptance ----
+
+    #[test]
+    fn test_adjtimex_phase161_tick_at_min_accepted() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = MIN_TICK; // 9000
+        let ret = adjtimex(&mut tx);
+        // Boot default has STA_UNSYNC → TIME_ERROR, but no errno.
+        assert_eq!(ret, TIME_ERROR);
+        // Read back: tick was applied.
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_eq!(tx2.tick, MIN_TICK);
+    }
+
+    #[test]
+    fn test_adjtimex_phase161_tick_at_max_accepted() {
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = MAX_TICK; // 11000
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, TIME_ERROR);
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_eq!(tx2.tick, MAX_TICK);
+    }
+
+    #[test]
+    fn test_adjtimex_phase161_tick_default_accepted() {
+        // Default ntp tick = USEC_PER_SEC / USER_HZ = 10_000.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = 10_000;
+        let _ = adjtimex(&mut tx);
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_eq!(tx2.tick, 10_000);
+    }
+
+    // ---- Ordering matrix ----
+
+    #[test]
+    fn test_adjtimex_phase161_null_ptr_beats_tick_einval() {
+        // EFAULT (null ptr) fires before mode/tick validation —
+        // the EFAULT check happens before the deref that reads tick.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let ret = adjtimex(core::ptr::null_mut());
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_adjtimex_phase161_unknown_mode_beats_tick_einval() {
+        // Unknown mode-bit check fires before tick range check.
+        // Both would yield EINVAL, but the unknown-mode branch returns
+        // first; we confirm by setting a clearly-bad mode + bad tick
+        // and asserting EINVAL (and that the state is untouched).
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK | 0x8000_0000; // unknown bit + tick
+        tx.tick = 0; // would also be invalid
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // State must not have been mutated.
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_eq!(tx2.tick, 10_000);
+    }
+
+    // ---- No-side-effect (state untouched on rejection) ----
+
+    #[test]
+    fn test_adjtimex_phase161_bad_tick_leaves_state_untouched() {
+        // Even when ADJ_TICK is combined with other in-band updates
+        // (ADJ_OFFSET), a bad tick value must abort the whole call
+        // before any state mutation — matching Linux's
+        // validate-then-apply ordering.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_OFFSET | ADJ_TICK;
+        tx.offset = 999_999;
+        tx.tick = 0; // bad
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+        // Read back: neither offset nor tick was applied.
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_eq!(tx2.offset, 0, "offset must NOT be applied when tick is invalid");
+        assert_eq!(tx2.tick, 10_000, "tick must remain at default");
+    }
+
+    // ---- Real-world workflow ----
+
+    #[test]
+    fn test_adjtimex_phase161_ntpd_tick_adjustment_workflow() {
+        // ntpd periodically adjusts tick to compensate for crystal
+        // drift, staying within a few hundred microseconds of 10000.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        // Drift up by 0.1%.
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = 10_010;
+        let _ = adjtimex(&mut tx);
+        let mut tx2 = Timex::zeroed();
+        let _ = adjtimex(&mut tx2);
+        assert_eq!(tx2.tick, 10_010);
+        // Drift down.
+        let mut tx3 = Timex::zeroed();
+        tx3.modes = ADJ_TICK;
+        tx3.tick = 9_990;
+        let _ = adjtimex(&mut tx3);
+        let mut tx4 = Timex::zeroed();
+        let _ = adjtimex(&mut tx4);
+        assert_eq!(tx4.tick, 9_990);
+    }
+
+    #[test]
+    fn test_adjtimex_phase161_buggy_caller_uninit_tick() {
+        // C code: `struct timex tx = { .modes = ADJ_TICK };` where
+        // `tx.tick` is left at its zero-initialised value.  Pre-fix:
+        // silently set tick to 0 and broke the NTP state.  Post-fix:
+        // EINVAL surfaces the bug.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK; // tx.tick stays at the zeroed default (0)
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // ---- Recovery ----
+
+    #[test]
+    fn test_adjtimex_phase161_recovery_after_bad_tick() {
+        // An EINVAL from a bad tick must not poison a follow-up call
+        // with a valid tick.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = 0;
+        assert_eq!(adjtimex(&mut tx), -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+
+        errno::set_errno(0);
+        let mut tx2 = Timex::zeroed();
+        tx2.modes = ADJ_TICK;
+        tx2.tick = 10_000;
+        let ret = adjtimex(&mut tx2);
+        assert_ne!(ret, -1);
+        // errno preserved on success (POSIX).
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    // ---- Sentinel ----
+
+    #[test]
+    fn test_adjtimex_tick_out_of_range_no_longer_silently_accepted_phase161() {
+        // Sentinel: pre-Phase-161, `adjtimex` with `ADJ_TICK` and
+        // `tick = 0` returned a TIME_* code (success) and silently
+        // mutated the discipline state.  Post-fix it must return -1
+        // with EINVAL.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = 0;
+        let ret = adjtimex(&mut tx);
+        assert_eq!(ret, -1, "post-Phase-161: bad tick must fail");
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "post-Phase-161: bad tick yields EINVAL"
+        );
+    }
+
+    // ---- Cross-checks ----
+
+    #[test]
+    fn test_clock_adjtime_phase161_bad_tick_forwards_einval() {
+        // clock_adjtime is a thin wrapper around adjtimex; the tick
+        // validation must apply equally.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = 1; // way out of range
+        let ret = clock_adjtime(0, &mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_ntp_adjtime_phase161_bad_tick_forwards_einval() {
+        // ntp_adjtime is an alias for adjtimex — same check applies.
+        let _g = TIMEX_TEST_LOCK.lock().unwrap();
+        reset_timex_state();
+        errno::set_errno(0);
+        let mut tx = Timex::zeroed();
+        tx.modes = ADJ_TICK;
+        tx.tick = MAX_TICK + 1;
+        let ret = ntp_adjtime(&mut tx);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_adjtimex_phase161_constants_match_linux() {
+        // USER_HZ=100 on x86_64 glibc; bounds are derived.
+        assert_eq!(USER_HZ, 100);
+        assert_eq!(MIN_TICK, 9_000);
+        assert_eq!(MAX_TICK, 11_000);
     }
 }

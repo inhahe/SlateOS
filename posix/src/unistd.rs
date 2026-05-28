@@ -2439,30 +2439,43 @@ pub const SWAP_FLAGS_VALID: i32 = SWAP_FLAG_PREFER
 /// overcommit).
 ///
 /// Errors (Linux-matching priority order — `sys_swapon` performs the
-/// flag-mask check *before* `getname`):
+/// `CAP_SYS_ADMIN` check first, then the flag-mask check *before*
+/// `getname`):
 ///
-/// 1. `swapflags & ~SWAP_FLAGS_VALID`  → `EINVAL`
-/// 2. (`CAP_SYS_ADMIN` check → `EPERM` — skipped; no cred model yet.)
+/// 1. `!capable(CAP_SYS_ADMIN)`        → `EPERM`   (Phase 164)
+/// 2. `swapflags & ~SWAP_FLAGS_VALID`  → `EINVAL`
 /// 3. `path == NULL`                   → `EFAULT`  (Linux: `getname` →
 ///                                        `strncpy_from_user`)
 /// 4. `*path == 0`                     → `ENOENT`  (Linux: getname's
 ///                                        empty-name path → -ENOENT)
 ///
 /// That means `swapon(NULL, BAD_FLAG)` returns `EINVAL`, not `EFAULT`
-/// — the flag check happens before the user pointer is dereferenced.
+/// — the flag check happens before the user pointer is dereferenced —
+/// and an unprivileged caller always gets `EPERM` regardless of the
+/// other argument values.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn swapon(path: *const u8, swapflags: i32) -> i32 {
-    // 1. Flag-mask check first — Linux's sys_swapon prologue.
+    // 1. CAP_SYS_ADMIN check first — Linux's sys_swapon prologue
+    //    (Phase 164).  This must beat the flag-mask check so an
+    //    unprivileged caller never learns whether their arguments are
+    //    syntactically valid.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_ADMIN,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
+    // 2. Flag-mask check — Linux's sys_swapon prologue.
     if swapflags & !SWAP_FLAGS_VALID != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // 2. NULL path → EFAULT (getname / strncpy_from_user).
+    // 3. NULL path → EFAULT (getname / strncpy_from_user).
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // 3. Empty path → ENOENT.  SAFETY: path is non-NULL; we read one byte.
+    // 4. Empty path → ENOENT.  SAFETY: path is non-NULL; we read one byte.
     if unsafe { *path } == 0 {
         errno::set_errno(errno::ENOENT);
         return -1;
@@ -2476,11 +2489,26 @@ pub extern "C" fn swapon(path: *const u8, swapflags: i32) -> i32 {
 /// Stub: validates arguments per Linux `mm/swapfile.c::sys_swapoff`,
 /// then returns `-1` with `ENOSYS`.
 ///
-/// Errors (Linux-matching priority order):
-/// * `EFAULT` — `path` is NULL.
-/// * `ENOENT` — `path` is the empty string.
+/// Errors (Linux-matching priority order — `sys_swapoff` performs the
+/// `CAP_SYS_ADMIN` check first, then `getname`):
+///
+/// 1. `!capable(CAP_SYS_ADMIN)` → `EPERM`  (Phase 164)
+/// 2. `path == NULL`            → `EFAULT`
+/// 3. `*path == 0`              → `ENOENT`
+///
+/// An unprivileged caller always gets `EPERM`; the user pointer is not
+/// inspected.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn swapoff(path: *const u8) -> i32 {
+    // 1. CAP_SYS_ADMIN check first — Linux's sys_swapoff prologue
+    //    (Phase 164).  Must beat the user-pointer fault so an
+    //    unprivileged caller never learns whether `path` is mapped.
+    if !crate::sys_capability::has_capability(
+        crate::sys_capability::CAP_SYS_ADMIN,
+    ) {
+        errno::set_errno(errno::EPERM);
+        return -1;
+    }
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -5488,6 +5516,346 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(swapoff(b"\0".as_ptr()), -1);
         assert_eq!(errno::get_errno(), errno::ENOENT);
+    }
+
+    // ------------------------------------------------------------------
+    // Phase 164: swapon / swapoff — CAP_SYS_ADMIN gate
+    //
+    // Linux `mm/swapfile.c::sys_swapon` and `sys_swapoff` perform a
+    // `capable(CAP_SYS_ADMIN)` check at the very top of their syscall
+    // prologue.  An unprivileged caller therefore gets EPERM *before*
+    // the kernel inspects `swap_flags`, `getname()`, or any other
+    // argument — that's how Linux avoids leaking whether the path or
+    // flags would otherwise have been valid.  The pre-Phase-164 stubs
+    // skipped this check, so a stripped-cap process could still drive
+    // EINVAL/EFAULT/ENOENT, exposing the argument-validation lattice
+    // it shouldn't be allowed to probe.
+    // ------------------------------------------------------------------
+
+    mod swap_cap_phase164 {
+        use super::*;
+
+        /// Snapshot the effective-cap bitset on construction; restore
+        /// it on drop so EPERM tests don't bleed into the cooperating
+        /// default tests that follow.
+        struct CapGuard {
+            lo: u32,
+            hi: u32,
+        }
+        impl CapGuard {
+            fn snapshot() -> Self {
+                let (lo, hi) =
+                    crate::sys_capability::current_caps_effective();
+                Self { lo, hi }
+            }
+        }
+        impl Drop for CapGuard {
+            fn drop(&mut self) {
+                let mut hdr = crate::sys_capability::CapUserHeader {
+                    version:
+                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    pid: 0,
+                };
+                let data = [
+                    crate::sys_capability::CapUserData {
+                        effective: self.lo,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                    crate::sys_capability::CapUserData {
+                        effective: self.hi,
+                        permitted: u32::MAX,
+                        inheritable: 0,
+                    },
+                ];
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            }
+        }
+
+        fn drop_cap_sys_admin() {
+            use crate::sys_capability::CAP_SYS_ADMIN;
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
+            let (new_lo, new_hi) = if CAP_SYS_ADMIN < 32 {
+                (lo & !(1u32 << CAP_SYS_ADMIN), hi)
+            } else {
+                (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
+            };
+            let mut hdr = crate::sys_capability::CapUserHeader {
+                version:
+                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                pid: 0,
+            };
+            let data = [
+                crate::sys_capability::CapUserData {
+                    effective: new_lo,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+                crate::sys_capability::CapUserData {
+                    effective: new_hi,
+                    permitted: u32::MAX,
+                    inheritable: 0,
+                },
+            ];
+            let rc =
+                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0,
+                "capset must succeed when dropping CAP_SYS_ADMIN");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
+        }
+
+        // -- Per-error-class --------------------------------------------------
+
+        /// Bare swapon under a stripped-cap caller must fail with
+        /// EPERM, not ENOSYS.
+        #[test]
+        fn test_swapon_phase164_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapon(b"/dev/sda2\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Same for swapoff.
+        #[test]
+        fn test_swapoff_phase164_no_cap_returns_eperm() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapoff(b"/dev/sda2\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Ordering matrix: EPERM beats every later error -------------------
+
+        /// EPERM must precede the bad-flag EINVAL — an unprivileged
+        /// caller must not learn that they passed a bogus flag bit.
+        #[test]
+        fn test_swapon_phase164_eperm_beats_einval_bad_flag() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapon(b"/swap\0".as_ptr(), 0x80_0000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// EPERM must precede the NULL-pointer EFAULT.
+        #[test]
+        fn test_swapon_phase164_eperm_beats_efault_null_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapon(core::ptr::null(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// EPERM must precede the empty-path ENOENT.
+        #[test]
+        fn test_swapon_phase164_eperm_beats_enoent_empty_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapon(b"\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// EPERM must precede the combined bad-flag + NULL case.
+        /// Without the cap check, this would have surfaced EINVAL
+        /// (flag check happens before path).
+        #[test]
+        fn test_swapon_phase164_eperm_beats_einval_and_efault_combo() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapon(core::ptr::null(), i32::MIN), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// swapoff: EPERM beats EFAULT.
+        #[test]
+        fn test_swapoff_phase164_eperm_beats_efault_null_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapoff(core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// swapoff: EPERM beats ENOENT.
+        #[test]
+        fn test_swapoff_phase164_eperm_beats_enoent_empty_path() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapoff(b"\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Workflow ---------------------------------------------------------
+
+        /// Workflow: a regular user (think `swapon -a` mis-invoked
+        /// without sudo) should see EPERM no matter how realistic the
+        /// path looks.
+        #[test]
+        fn test_swapon_phase164_workflow_unprivileged_user_attempts() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            let path = b"/dev/disk/by-uuid/12345\0";
+            let flags = SWAP_FLAG_PREFER | 5;
+            assert_eq!(swapon(path.as_ptr(), flags), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Workflow: systemd-shutdown drops CAP_SYS_ADMIN as part of
+        /// the late-boot lockdown, then a stale unit tries to
+        /// swapoff — Linux returns EPERM; we now do too.
+        #[test]
+        fn test_swapoff_phase164_workflow_systemd_drops_caps_then_swapoff() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapoff(b"/dev/sda3\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Buggy-caller -----------------------------------------------------
+
+        /// An unprivileged caller passing flag-bit garbage on the
+        /// stack must still see EPERM, not the EINVAL the kernel would
+        /// have surfaced for a privileged caller.
+        #[test]
+        fn test_swapon_phase164_buggy_caller_unprivileged_garbage_flags() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapon(b"/dev/sda2\0".as_ptr(), 0x0AC0_0000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Recovery ---------------------------------------------------------
+
+        /// After an EPERM, restoring CAP_SYS_ADMIN must let the next
+        /// swapon proceed to the normal EINVAL path for a bad flag.
+        #[test]
+        fn test_swapon_phase164_recovery_after_eperm_reaches_einval() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapon(b"/swap\0".as_ptr(), 0x80_0000), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            // Drop the guard explicitly to restore caps mid-test.
+            drop(_g);
+            errno::set_errno(0);
+            assert_eq!(swapon(b"/swap\0".as_ptr(), 0x80_0000), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// After an EPERM, restoring CAP_SYS_ADMIN must let the next
+        /// swapoff proceed to the normal ENOSYS path.
+        #[test]
+        fn test_swapoff_phase164_recovery_after_eperm_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapoff(b"/dev/sda3\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            drop(_g);
+            errno::set_errno(0);
+            assert_eq!(swapoff(b"/dev/sda3\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
+
+        // -- Sentinels (would fail under pre-Phase-164 behaviour) -------------
+
+        /// Pre-Phase-164 swapon silently skipped the cap check; an
+        /// unprivileged caller saw EINVAL for the bad flag instead of
+        /// EPERM.  This sentinel locks the new contract.
+        #[test]
+        fn test_swapon_phase164_no_longer_silently_skips_cap_check() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapon(b"/swap\0".as_ptr(), 0x80_0000), -1);
+            assert_ne!(errno::get_errno(), errno::EINVAL,
+                "Pre-Phase-164: unprivileged caller saw EINVAL — \
+                 capability check missing.");
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Sentinel for swapoff: pre-Phase-164 returned EFAULT for a
+        /// null path even without CAP_SYS_ADMIN; now it returns EPERM.
+        #[test]
+        fn test_swapoff_phase164_no_longer_silently_skips_cap_check() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapoff(core::ptr::null()), -1);
+            assert_ne!(errno::get_errno(), errno::EFAULT,
+                "Pre-Phase-164: unprivileged caller saw EFAULT — \
+                 capability check missing.");
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        // -- Cross-checks -----------------------------------------------------
+
+        /// Both swapon and swapoff must share the same EPERM
+        /// precedence: drop CAP_SYS_ADMIN once, both calls return
+        /// EPERM in the same invocation.
+        #[test]
+        fn test_swapon_and_swapoff_phase164_share_eperm_precedence() {
+            let _g = CapGuard::snapshot();
+            drop_cap_sys_admin();
+            errno::set_errno(0);
+            assert_eq!(swapon(b"/swap\0".as_ptr(), 0), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+            errno::set_errno(0);
+            assert_eq!(swapoff(b"/swap\0".as_ptr()), -1);
+            assert_eq!(errno::get_errno(), errno::EPERM);
+        }
+
+        /// Regression: the default-cap path still surfaces EINVAL for
+        /// a bad flag — Phase 164 must not over-gate the cap check.
+        #[test]
+        fn test_swapon_phase164_capable_default_still_reaches_einval() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            assert_eq!(swapon(b"/swap\0".as_ptr(), 0x80_0000), -1);
+            assert_eq!(errno::get_errno(), errno::EINVAL);
+        }
+
+        /// Regression: the default-cap swapoff path still surfaces
+        /// EFAULT for a null path.
+        #[test]
+        fn test_swapoff_phase164_capable_default_still_reaches_efault() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            assert_eq!(swapoff(core::ptr::null()), -1);
+            assert_eq!(errno::get_errno(), errno::EFAULT);
+        }
+
+        /// Regression: default-cap swapon with all valid flags + good
+        /// path still reaches ENOSYS.
+        #[test]
+        fn test_swapon_phase164_capable_default_valid_flags_reaches_enosys() {
+            let _g = CapGuard::snapshot();
+            assert!(crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_SYS_ADMIN
+            ));
+            errno::set_errno(0);
+            assert_eq!(
+                swapon(b"/dev/sda2\0".as_ptr(), SWAP_FLAGS_VALID),
+                -1
+            );
+            assert_eq!(errno::get_errno(), errno::ENOSYS);
+        }
     }
 
     // ---- klogctl ----

@@ -2490,7 +2490,11 @@ pub const SYSLOG_LOG_LEVEL_MAX: i32 = 8;
 ///    so a NULL `buf` returns **EINVAL**, *not* EFAULT.  EFAULT only
 ///    appears later from `!access_ok(buf, len)`, which we cannot model
 ///    in a stub.
-/// 3. For `SYSLOG_ACTION_CONSOLE_LEVEL`, Linux rejects `len < 1 || len > 8`
+/// 3. **Phase 157:** Linux follows the EINVAL check with
+///    `if (!len) return 0;` — a zero-byte read is a no-op success that
+///    is reported **before** any backend or access_ok dispatch.  We
+///    mirror this so callers asking for zero bytes get `0`, not ENOSYS.
+/// 4. For `SYSLOG_ACTION_CONSOLE_LEVEL`, Linux rejects `len < 1 || len > 8`
 ///    with EINVAL.
 ///
 /// Errors (Linux-matching priority order):
@@ -2498,6 +2502,7 @@ pub const SYSLOG_LOG_LEVEL_MAX: i32 = 8;
 /// * `EINVAL` — read commands (READ, READ_ALL, READ_CLEAR) with NULL
 ///   `buf` **or** `len < 0`.  Linux returns EINVAL (not EFAULT) for
 ///   NULL buf in the read family.
+/// * `0`     — read commands with valid `buf` and `len == 0` (Phase 157).
 /// * `EINVAL` — `SYSLOG_ACTION_CONSOLE_LEVEL` with `len` outside
 ///   `[1, 8]`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
@@ -2516,6 +2521,14 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
             if buf.is_null() || len < 0 {
                 errno::set_errno(errno::EINVAL);
                 return -1;
+            }
+            // Phase 157: Linux do_syslog has `if (!len) return 0;` right
+            // after the EINVAL guard.  A zero-byte read is a guaranteed
+            // no-op success regardless of backend state.  Without this
+            // we'd return ENOSYS for `klogctl(READ, valid_buf, 0)`,
+            // diverging from glibc/musl-tested expectations.
+            if len == 0 {
+                return 0;
             }
         }
         SYSLOG_ACTION_CONSOLE_LEVEL => {
@@ -5132,6 +5145,223 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
+    // -----------------------------------------------------------------
+    // Phase 157 — `klogctl(READ*, valid_buf, 0)` returns 0, not ENOSYS.
+    //
+    // Linux's `do_syslog` (kernel/printk/printk.c):
+    //
+    //     if (!buf || len < 0)
+    //         return -EINVAL;
+    //     if (!len)
+    //         return 0;
+    //     if (!access_ok(buf, len))
+    //         return -EFAULT;
+    //
+    // The `if (!len) return 0;` short-circuit fires **after** the EINVAL
+    // guard but **before** access_ok and any backend dispatch.  A
+    // zero-byte read is a no-op success regardless of whether the
+    // kernel-log backend is implemented.  Our pre-Phase-157 stub fell
+    // through to ENOSYS, diverging from glibc/musl-tested behaviour.
+    // -----------------------------------------------------------------
+
+    // -- Per-error-class --------------------------------------------------
+
+    #[test]
+    fn test_klogctl_read_zero_len_valid_buf_returns_zero_phase157() {
+        let mut buf = [0u8; 64];
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0);
+        assert_eq!(ret, 0, "zero-byte read must be a no-op success");
+        // errno preserved (POSIX: success does not clear errno).
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_klogctl_read_all_zero_len_returns_zero_phase157() {
+        let mut buf = [0u8; 64];
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 0);
+        assert_eq!(ret, 0);
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    #[test]
+    fn test_klogctl_read_clear_zero_len_returns_zero_phase157() {
+        let mut buf = [0u8; 64];
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_READ_CLEAR, buf.as_mut_ptr(), 0);
+        assert_eq!(ret, 0);
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    // -- Ordering matrix --------------------------------------------------
+
+    /// EINVAL must still win when both `buf == NULL` and `len == 0` —
+    /// the EINVAL guard precedes the `len == 0` shortcut in Linux's order.
+    #[test]
+    fn test_klogctl_read_null_buf_zero_len_still_einval_phase157() {
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// EINVAL also wins for NULL buf + len < 0.
+    #[test]
+    fn test_klogctl_read_null_buf_negative_len_still_einval_phase157() {
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), -1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Valid buf + len < 0 → EINVAL (negative len short-circuits the
+    /// len == 0 shortcut).
+    #[test]
+    fn test_klogctl_read_valid_buf_negative_len_still_einval_phase157() {
+        let mut buf = [0u8; 64];
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), -1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// Bad cmd + zero len still hits the top-level cmd-EINVAL guard.
+    #[test]
+    fn test_klogctl_bad_cmd_zero_len_still_einval_phase157() {
+        errno::set_errno(0);
+        let mut buf = [0u8; 64];
+        let ret = klogctl(-1, buf.as_mut_ptr(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- Workflow ---------------------------------------------------------
+
+    /// `len > 0` still hits the ENOSYS backend path — Phase 157 only
+    /// affects len == 0.
+    #[test]
+    fn test_klogctl_read_nonzero_len_still_enosys_phase157() {
+        let mut buf = [0u8; 64];
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 1);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    /// A program polling the log for "anything new" with a zero-byte
+    /// probe (a real glibc idiom: `klogctl(2, NULL, 0)`-style probes
+    /// don't compile because of EINVAL, but `klogctl(2, buf, 0)` does
+    /// and is the recommended way to test for log-read capability).
+    #[test]
+    fn test_klogctl_zero_probe_workflow_phase157() {
+        let mut buf = [0u8; 1];
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0), 0);
+        // The zero-byte probe must not leave errno latched at ENOSYS.
+        assert_eq!(errno::get_errno(), 0);
+    }
+
+    // -- Buggy-caller -----------------------------------------------------
+
+    /// Caller passes a `buf` they later check for "any data written" —
+    /// Phase 157 must not touch the buffer on the zero-len path.
+    #[test]
+    fn test_klogctl_read_zero_len_does_not_touch_buf_phase157() {
+        let mut buf = [0xAAu8; 32];
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0);
+        assert_eq!(ret, 0);
+        // Buffer untouched — every byte still 0xAA.
+        for (i, &b) in buf.iter().enumerate() {
+            assert_eq!(b, 0xAA, "buf[{i}] was modified");
+        }
+    }
+
+    // -- Recovery / no-side-effect loop -----------------------------------
+
+    /// Pre-seeded errno survives a zero-len success.
+    #[test]
+    fn test_klogctl_read_zero_len_does_not_set_errno_phase157() {
+        let mut buf = [0u8; 8];
+        errno::set_errno(errno::EIO);
+        let ret = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0);
+        assert_eq!(ret, 0);
+        // POSIX: errno is preserved across a successful call.
+        assert_eq!(errno::get_errno(), errno::EIO);
+    }
+
+    /// After the zero-len success, a follow-up nonzero call still goes
+    /// to ENOSYS — no sticky state from the short-circuit.
+    #[test]
+    fn test_klogctl_recover_after_zero_len_success_phase157() {
+        let mut buf = [0u8; 8];
+        errno::set_errno(0);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0), 0);
+        // Now request 4 bytes — backend missing → ENOSYS.
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 4);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::ENOSYS);
+    }
+
+    // -- Sentinel ---------------------------------------------------------
+
+    /// Explicit sentinel: pre-Phase-157 the zero-len read returned
+    /// ENOSYS.  If a future regression reintroduces that, this fails.
+    #[test]
+    fn test_klogctl_read_zero_len_no_longer_enosys_phase157() {
+        let mut buf = [0u8; 8];
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0);
+        assert_ne!(
+            ret, -1,
+            "zero-len read must no longer return -1"
+        );
+        assert_ne!(
+            errno::get_errno(),
+            errno::ENOSYS,
+            "zero-len read must no longer set ENOSYS"
+        );
+    }
+
+    // -- Cross-checks -----------------------------------------------------
+
+    /// CONSOLE_LEVEL with len == 0 must still be EINVAL (level 0 is
+    /// outside [1, 8]).  Phase 157 doesn't touch this path.
+    #[test]
+    fn test_klogctl_console_level_zero_len_still_einval_phase157() {
+        errno::set_errno(0);
+        let ret = klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 0);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    /// CLOSE/OPEN/CLEAR/CONSOLE_OFF/CONSOLE_ON with len == 0 are still
+    /// the ENOSYS-backend path — Phase 157 only short-circuits the
+    /// READ family.
+    #[test]
+    fn test_klogctl_non_read_zero_len_still_enosys_phase157() {
+        for cmd in [
+            SYSLOG_ACTION_CLOSE,
+            SYSLOG_ACTION_OPEN,
+            SYSLOG_ACTION_CLEAR,
+            SYSLOG_ACTION_CONSOLE_OFF,
+            SYSLOG_ACTION_CONSOLE_ON,
+            SYSLOG_ACTION_SIZE_UNREAD,
+            SYSLOG_ACTION_SIZE_BUFFER,
+        ] {
+            errno::set_errno(0);
+            let ret = klogctl(cmd, core::ptr::null_mut(), 0);
+            assert_eq!(ret, -1, "cmd={cmd} must reach ENOSYS");
+            assert_eq!(
+                errno::get_errno(),
+                errno::ENOSYS,
+                "cmd={cmd} must set ENOSYS"
+            );
+        }
+    }
+
     #[test]
     fn test_workflow_systemd_set_console_level() {
         // systemd lowers the console log level during early boot via
@@ -5267,14 +5497,20 @@ mod tests {
 
     #[test]
     fn test_klogctl_phase126_valid_read_with_zero_len_reaches_enosys() {
-        // Non-NULL buf + len == 0 passes the EINVAL test.  Linux would
-        // shortcut this to a 0-byte success; we surface ENOSYS because
-        // the klog ring buffer isn't implemented.  Either way the EINVAL
-        // path must *not* fire here.
+        // Phase 126 originally chose to surface ENOSYS here, even though
+        // Linux's `do_syslog` shortcuts `len == 0` to a 0-byte success
+        // before touching the backend.  Phase 157 reversed that choice
+        // and now matches Linux exactly — see
+        // `test_klogctl_read_zero_len_valid_buf_returns_zero_phase157`.
+        //
+        // This test is retasked to assert the **post-Phase-157**
+        // contract: non-NULL buf + len == 0 returns 0 (no errno set),
+        // proving the EINVAL guard didn't catch the request and that
+        // we no longer fall through to ENOSYS.
         let mut buf = [0u8; 16];
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0), 0);
+        assert_eq!(errno::get_errno(), 0);
     }
 
     #[test]

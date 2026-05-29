@@ -243,6 +243,8 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     // Wait for codec ready (poll global status for codec ready bits).
     busy_wait_us(100_000); // 100ms for codec to initialize.
 
+    // SAFETY: nabm_base is the AC97 NABM I/O base from PCI BAR; all port
+    // reads/writes in this function target valid AC97 register offsets.
     let glob_stat = unsafe { port::inl(nabm_base.wrapping_add(NABM_GLOB_STAT)) };
     serial_println!("[ac97] Global status after reset: {:#010x}", glob_stat);
 
@@ -255,6 +257,8 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     // --- Codec Configuration ---
 
     // Reset the codec.
+    // SAFETY: nam_base is the AC97 NAM I/O base from PCI BAR.  All port
+    // reads/writes below target valid AC97 mixer register offsets.
     unsafe { port::outw(nam_base.wrapping_add(NAM_RESET), 0); }
     busy_wait_us(10_000);
 
@@ -267,6 +271,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     // Set master volume: unmute, moderate volume.
     // Register format: bit 15 = mute, bits [12:8] = left atten, [4:0] = right atten.
     // 0 = max volume, 63 = minimum. Set to ~50% = 0x0808.
+    // SAFETY: nam_base is validated AC97 NAM I/O base.
     unsafe {
         port::outw(nam_base.wrapping_add(NAM_MASTER_VOL), 0x0808);
         port::outw(nam_base.wrapping_add(NAM_PCM_VOL), 0x0808);
@@ -277,10 +282,12 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
 
     // Set sample rate to 48000 Hz.
     // First, check if variable rate audio is supported and enable it.
+    // SAFETY: nam_base is validated AC97 NAM I/O base.
     let powerdown = unsafe { port::inw(nam_base.wrapping_add(NAM_POWERDOWN)) };
     serial_println!("[ac97] Power status: {:#06x}", powerdown);
 
     // Try to set sample rate (may not be supported on all codecs).
+    // SAFETY: nam_base is validated AC97 NAM I/O base.
     unsafe {
         port::outw(nam_base.wrapping_add(NAM_PCM_FRONT_DAC_RATE), 48000);
     }
@@ -299,6 +306,7 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     let pcm_frame = frame::alloc_frame()?;
 
     // Zero both frames.
+    // SAFETY: Both frames were just allocated; HHDM maps them.
     unsafe {
         let bdl_virt = (bdl_frame.addr() + hhdm_offset) as *mut u8;
         core::ptr::write_bytes(bdl_virt, 0, FRAME_SIZE);
@@ -309,6 +317,8 @@ pub fn init(hhdm_offset: u64) -> KernelResult<()> {
     // --- Set up PCM Out BDL ---
     // Point the PCM Out BDBAR to our BDL frame's physical address.
     let bdl_phys = bdl_frame.addr() as u32; // AC97 is 32-bit DMA.
+    // SAFETY: nabm_base is validated AC97 NABM I/O base.  The following
+    // writes programme the DMA engine: set BDL address, reset, and clear.
     unsafe {
         port::outl(nabm_base.wrapping_add(NABM_PCMO_BDBAR), bdl_phys);
     }
@@ -408,6 +418,7 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
 
     // Set up BDL entries — each points to its chunk in the PCM frame.
     for i in 0..BDL_SIZE {
+        // SAFETY: bdl_virt points to the BDL frame; i < BDL_SIZE entries fit.
         let entry = unsafe { &mut *bdl_virt.add(i) };
         let offset = (i * chunk_size) as u32;
         entry.addr = (pcm_phys as u32).wrapping_add(offset);
@@ -420,6 +431,8 @@ pub fn play_test_tone(duration_ms: u32) -> KernelResult<()> {
     let total_chunks_needed = total_bytes.saturating_div(chunk_size).min(BDL_SIZE);
     let lvi = if total_chunks_needed == 0 { 0 } else { (total_chunks_needed - 1) as u8 };
 
+    // SAFETY: dev.nabm_base is validated AC97 NABM I/O base.  The following
+    // writes set the last valid index, clear status, and start DMA playback.
     // Set Last Valid Index.
     unsafe {
         port::outb(dev.nabm_base.wrapping_add(NABM_PCMO_LVI), lvi);
@@ -462,6 +475,7 @@ pub fn stop() -> KernelResult<()> {
 
 /// Internal: stop DMA playback.
 fn stop_playback_inner(dev: &mut Ac97Device) {
+    // SAFETY: dev.nabm_base is validated AC97 NABM I/O base.
     // Clear RPBM bit to stop DMA.
     unsafe {
         port::outb(dev.nabm_base.wrapping_add(NABM_PCMO_CR), 0);
@@ -548,6 +562,7 @@ fn generate_tone_buffer(buf: *mut u8, buf_size: usize, sample_rate: u32) {
 /// Busy-wait for approximately `us` microseconds using TSC.
 fn busy_wait_us(us: u64) {
     // Assume ~2 GHz = 2000 cycles per microsecond.
+    // SAFETY: _rdtsc is always available on x86_64; no side-effects.
     let start = unsafe { core::arch::x86_64::_rdtsc() };
     let target = us.saturating_mul(2000);
     loop {
@@ -584,6 +599,7 @@ pub fn self_test() {
     // Verify we can read the master volume register.
     let guard = DEVICE.lock();
     if let Some(dev) = guard.as_ref() {
+        // SAFETY: dev.nam_base/nabm_base are validated AC97 I/O port bases.
         let master_vol = unsafe { port::inw(dev.nam_base.wrapping_add(NAM_MASTER_VOL)) };
         serial_println!("[ac97]   Master volume register: {:#06x}", master_vol);
 

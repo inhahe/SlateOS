@@ -136,6 +136,8 @@ pub fn shutdown() -> ! {
     // (Future: call VFS sync here.)
 
     // Disable interrupts — we don't want anything interfering.
+    // SAFETY: We're shutting down — disabling interrupts prevents any ISR
+    // from interfering with the power transition sequence.
     unsafe { crate::cpu::cli(); }
 
     // Method 1: ACPI S5 via PM1a/PM1b control registers.
@@ -144,6 +146,8 @@ pub fn shutdown() -> ! {
             serial_println!("[power] Trying ACPI S5 (PM1a={:#x}, SLP_TYP={})",
                 state.pm1a_cnt, state.slp_typ_s5);
             let val = (u16::from(state.slp_typ_s5) << SLP_TYP_SHIFT) | SLP_EN;
+            // SAFETY: pm1a_cnt/pm1b_cnt are ACPI PM1 control register
+            // ports parsed from the FADT.  Writing SLP_TYP+SLP_EN triggers S5.
             unsafe { outw(state.pm1a_cnt, val); }
 
             // If PM1b is present, write there too.
@@ -158,10 +162,12 @@ pub fn shutdown() -> ! {
 
     // Method 2: QEMU exit port.
     serial_println!("[power] ACPI S5 failed, trying QEMU exit port...");
+    // SAFETY: QEMU_EXIT_PORT is the well-known QEMU debug exit port (0x604).
     unsafe { outw(QEMU_EXIT_PORT, 0x2000); }
     io_delay();
 
     // Method 3: Bochs/older QEMU shutdown port.
+    // SAFETY: BOCHS_SHUTDOWN_PORT is the Bochs/old-QEMU shutdown port (0xB004).
     unsafe { outw(BOCHS_SHUTDOWN_PORT, 0x2000); }
     io_delay();
 
@@ -178,6 +184,7 @@ pub fn reboot() -> ! {
     serial_println!("[power] Initiating system reboot...");
 
     // Disable interrupts.
+    // SAFETY: We're rebooting — no ISRs should fire during reset.
     unsafe { crate::cpu::cli(); }
 
     // Method 1: ACPI reset register (ACPI 2.0+).
@@ -190,6 +197,7 @@ pub fn reboot() -> ! {
                 1 => {
                     // System I/O space.
                     let port = state.reset_address as u16;
+                    // SAFETY: Port from FADT reset register in I/O space.
                     unsafe { outb(port, state.reset_value); }
                 }
                 0 => {
@@ -212,6 +220,9 @@ pub fn reboot() -> ! {
     // Method 2: Keyboard controller reset (pulse reset line).
     serial_println!("[power] Trying keyboard controller reset...");
     // Wait for controller input buffer to be empty.
+    // SAFETY: KBD_CTRL_PORT (0x64) is the standard x86 keyboard controller
+    // port.  Reading its status and sending the reset command (0xFE) pulses
+    // the CPU reset line — standard x86 reboot mechanism.
     for _ in 0..100_000 {
         let status = unsafe { inb(KBD_CTRL_PORT) };
         if status & 0x02 == 0 {
@@ -230,6 +241,8 @@ pub fn reboot() -> ! {
 ///
 /// Goes straight to keyboard controller reset, then triple fault.
 pub fn emergency_reboot() -> ! {
+    // SAFETY: Emergency path — disable interrupts and send keyboard
+    // controller reset command.  Minimal code path for panic handlers.
     unsafe {
         crate::cpu::cli();
         // Keyboard controller reset.
@@ -294,6 +307,7 @@ pub struct PowerCapabilities {
 /// Port must be a valid I/O port for the intended operation.
 #[inline]
 unsafe fn outb(port: u16, val: u8) {
+    // SAFETY: Caller guarantees port is valid for the intended operation.
     unsafe {
         core::arch::asm!(
             "out dx, al",
@@ -312,6 +326,7 @@ unsafe fn outb(port: u16, val: u8) {
 #[inline]
 unsafe fn inb(port: u16) -> u8 {
     let val: u8;
+    // SAFETY: Caller guarantees port is valid.
     unsafe {
         core::arch::asm!(
             "in al, dx",
@@ -330,6 +345,7 @@ unsafe fn inb(port: u16) -> u8 {
 /// Port must be a valid I/O port for 16-bit access.
 #[inline]
 unsafe fn outw(port: u16, val: u16) {
+    // SAFETY: Caller guarantees port is valid for 16-bit I/O.
     unsafe {
         core::arch::asm!(
             "out dx, ax",
@@ -363,6 +379,8 @@ fn triple_fault() -> ! {
 
     let null_idt = NullIdtDescriptor { limit: 0, base: 0 };
 
+    // SAFETY: Loading a null IDT then triggering int3 causes a guaranteed
+    // triple fault → hardware reset.  This is the reset mechanism of last resort.
     unsafe {
         // Load the null IDT.
         core::arch::asm!(
@@ -376,6 +394,8 @@ fn triple_fault() -> ! {
 
     // Should never reach here, but just in case...
     loop {
+        // SAFETY: hlt stops the CPU until the next interrupt (none will
+        // come since interrupts are disabled — this is an infinite halt).
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
     }
 }
@@ -383,6 +403,8 @@ fn triple_fault() -> ! {
 /// Infinite halt loop — CPU stops executing (interrupts disabled).
 fn halt_loop() -> ! {
     loop {
+        // SAFETY: hlt stops the CPU; with interrupts disabled this is
+        // the intended "system frozen" terminal state.
         unsafe { core::arch::asm!("hlt", options(nomem, nostack)); }
     }
 }

@@ -286,6 +286,7 @@ pub fn reset() {
     DROPPED_EVENTS.store(0, Ordering::Relaxed);
 
     // Zero out all entries.
+    // SAFETY: i < RING_SIZE; RING uses UnsafeCell with atomic position guard.
     for i in 0..RING_SIZE {
         unsafe {
             let ptr = RING.0.get() as *mut TraceEntry;
@@ -325,6 +326,8 @@ pub fn snapshot() -> TraceSnapshot {
     let mut entries = [TraceEntry::empty(); RING_SIZE];
     let count;
 
+    // SAFETY (group — covers all RING reads below): all indices are either
+    // < write_pos (which is ≤ RING_SIZE) or masked with RING_MASK.
     if write_pos <= RING_SIZE {
         // Haven't wrapped yet — entries 0..write_pos are valid.
         count = write_pos;
@@ -400,6 +403,7 @@ pub fn recent(buf: &mut [TraceEntry]) -> usize {
     let available = write_pos.min(RING_SIZE);
     let to_copy = buf.len().min(available);
 
+    // SAFETY: idx is masked to RING_MASK (< RING_SIZE).
     for i in 0..to_copy {
         // Walk backwards from write_pos.
         let idx = (write_pos.wrapping_sub(1).wrapping_sub(i)) & RING_MASK;
@@ -428,6 +432,7 @@ pub fn alloc_free_balance() -> (u64, u64) {
     let mut allocs: u64 = 0;
     let mut frees: u64 = 0;
 
+    // SAFETY: idx is masked to RING_MASK (< RING_SIZE).
     for i in 0..count {
         let idx = (start + i) & RING_MASK;
         let entry = unsafe {
@@ -456,6 +461,7 @@ pub fn alloc_free_balance() -> (u64, u64) {
 fn rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;
+    // SAFETY: rdtsc is always available on x86_64, has no side effects.
     unsafe {
         core::arch::asm!(
             "rdtsc",

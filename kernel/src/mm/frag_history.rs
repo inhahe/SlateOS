@@ -144,6 +144,8 @@ pub fn sample() {
     };
 
     // Write to ring buffer.
+    // SAFETY: slot is masked to HISTORY_MASK (< HISTORY_SIZE); RING is
+    // only written from this function, which runs in serialized context.
     let pos = WRITE_POS.fetch_add(1, Ordering::Relaxed);
     let slot = (pos as usize) & HISTORY_MASK;
     unsafe {
@@ -164,6 +166,8 @@ pub fn recent(buf: &mut [FragSnapshot]) -> usize {
     let available = write_pos.min(HISTORY_SIZE);
     let to_copy = buf.len().min(available);
 
+    // SAFETY (group — covers all RING reads below): idx is masked to
+    // HISTORY_MASK, so it's always < HISTORY_SIZE.
     for i in 0..to_copy {
         let idx = (write_pos.wrapping_sub(1).wrapping_sub(i)) & HISTORY_MASK;
         unsafe {
@@ -183,6 +187,7 @@ pub fn latest() -> Option<FragSnapshot> {
         return None;
     }
     let idx = (write_pos - 1) & HISTORY_MASK;
+    // SAFETY: idx is masked to HISTORY_MASK (< HISTORY_SIZE).
     let snap = unsafe {
         let ptr = RING.0.get() as *const FragSnapshot;
         ptr.add(idx).read()
@@ -231,6 +236,9 @@ pub fn trend() -> FragTrend {
     // Compute average of oldest quarter and newest quarter.
     let quarter = available / 4;
 
+    // SAFETY (group — covers all RING reads in both quarter loops):
+    // idx is always masked to HISTORY_MASK (< HISTORY_SIZE).
+
     // Newest quarter (most recent `quarter` samples).
     let mut newest_sum: u32 = 0;
     for i in 0..quarter {
@@ -268,6 +276,7 @@ pub fn trend() -> FragTrend {
 
 /// Clear all history.
 pub fn clear() {
+    // SAFETY: i < HISTORY_SIZE; RING is only modified from serialized context.
     for i in 0..HISTORY_SIZE {
         unsafe {
             let ptr = RING.0.get() as *mut FragSnapshot;

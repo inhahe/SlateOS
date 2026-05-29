@@ -623,9 +623,11 @@ pub fn run_all() {
         let layout = core::alloc::Layout::from_size_align(512, 8)
             .expect("valid layout");
         run("heap_raw_alloc_free_512", 2000, || {
+            // SAFETY: layout is valid, allocator is initialized.
             let ptr = unsafe { alloc::alloc::alloc(layout) };
             debug_assert!(!ptr.is_null(), "bench: alloc returned null");
             core::hint::black_box(ptr);
+            // SAFETY: ptr was just allocated with this layout and is non-null.
             unsafe { alloc::alloc::dealloc(ptr, layout); }
         });
     }
@@ -635,9 +637,11 @@ pub fn run_all() {
         let layout = core::alloc::Layout::from_size_align(4096, 8)
             .expect("valid layout");
         run("heap_raw_alloc_free_4096", 500, || {
+            // SAFETY: layout is valid, allocator is initialized.
             let ptr = unsafe { alloc::alloc::alloc(layout) };
             debug_assert!(!ptr.is_null(), "bench: alloc returned null");
             core::hint::black_box(ptr);
+            // SAFETY: ptr was just allocated with this layout and is non-null.
             unsafe { alloc::alloc::dealloc(ptr, layout); }
         });
     }
@@ -1800,6 +1804,8 @@ fn bench_io_ring_nop() {
         }
     };
 
+    // SAFETY: base_virt was returned by io_ring::setup, pointing to a
+    // valid IoRingHeader at the start of the mapped shared memory region.
     let header = unsafe { &mut *(base_virt as *mut IoRingHeader) };
     #[allow(clippy::arithmetic_side_effects)]
     let sq_base = (base_virt + core::mem::size_of::<IoRingHeader>() as u64) as *mut SqEntry;

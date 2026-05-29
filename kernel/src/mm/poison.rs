@@ -289,6 +289,11 @@ pub fn stats() -> PoisonStats {
 pub fn self_test() {
     serial_println!("[poison] Running self-test...");
 
+    // SAFETY (group — covers all unsafe calls in self_test): every
+    // poison_free, poison_alloc, poison_redzone, verify_freed, and
+    // verify_redzone call operates on stack-local arrays (buf, rz, buf2)
+    // with correct lengths, satisfying each function's safety requirement.
+
     // Test 1: Poison free fills correctly.
     let mut buf = [0u8; 64];
     unsafe { poison_free(buf.as_mut_ptr(), buf.len()); }

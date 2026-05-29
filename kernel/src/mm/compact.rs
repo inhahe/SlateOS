@@ -339,6 +339,12 @@ unsafe fn migrate_page(old_phys: u64, new_phys: u64) -> bool {
         None => return false, // PTE not found (race? stale rmap?)
     };
 
+    // SAFETY (group — covers all page_table::{unmap_frame, map_frame} and
+    // frame::free_frame calls in Steps 3–6): pml4_phys and virt_addr come
+    // from the rmap table (validated on add); old_frame/new_frame are valid
+    // allocated frames; map/unmap/free operate on the same address space.
+    // Rollback branches restore the original mapping on failure.
+
     // Unmap old frame from page table.
     let old_frame = match unsafe { page_table::unmap_frame(pml4_phys, virt) } {
         Ok(f) => f,
@@ -517,14 +523,17 @@ pub unsafe fn try_migrate_one(old_phys: u64) -> bool {
 
     // Only worth migrating if new frame is at a lower address (reduces fragmentation).
     if new_phys >= old_phys {
+        // SAFETY: new_frame was just allocated and is not mapped anywhere.
         let _ = unsafe { frame::free_frame(new_frame) };
         return false;
     }
 
-    // Attempt the migration.
+    // SAFETY: old_phys is validated via rmap::is_private above;
+    // new_phys is freshly allocated and not mapped anywhere.
     let ok = unsafe { migrate_page(old_phys, new_phys) };
     if !ok {
         // Migration failed — free the new frame we allocated.
+        // SAFETY: new_frame was not consumed by migrate_page on failure.
         let _ = unsafe { frame::free_frame(new_frame) };
         MIGRATION_FAILURES.fetch_add(1, Ordering::Relaxed);
     }

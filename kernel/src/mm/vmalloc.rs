@@ -242,6 +242,9 @@ pub fn vmalloc(size: usize) -> KernelResult<*mut u8> {
             Ok(f) => f,
             Err(e) => {
                 // Rollback: unmap and free any frames we already allocated.
+                // SAFETY: pml4 is valid (from active_pml4_phys); each page_virt
+                // was successfully mapped in a prior iteration of this loop;
+                // each frame f returned by unmap_frame is valid for freeing.
                 for j in 0..i {
                     let page_virt = VirtAddr::new(vaddr + (j as u64) * (FRAME_SIZE as u64));
                     if let Ok(f) = unsafe { page_table::unmap_frame(pml4, page_virt) } {
@@ -269,6 +272,9 @@ pub fn vmalloc(size: usize) -> KernelResult<*mut u8> {
         // SAFETY: pml4 is valid, page_virt is in our reserved vmalloc region.
         if let Err(e) = unsafe { page_table::map_frame(pml4, page_virt, frame, flags) } {
             // Mapping failed — free this frame and rollback prior mappings.
+            // SAFETY: frame was just allocated by alloc_frame and is valid
+            // for freeing.  Prior pages were successfully mapped, so
+            // unmap_frame and free_frame are valid for those addresses.
             let _ = unsafe { frame::free_frame(frame) };
             for j in 0..i {
                 let prior_virt = VirtAddr::new(vaddr + (j as u64) * (FRAME_SIZE as u64));
@@ -334,6 +340,9 @@ pub unsafe fn vfree(ptr: *mut u8) -> KernelResult<()> {
     }
 
     // Unmap and free each frame (outside the lock).
+    // SAFETY: pml4 is valid (from active_pml4_phys); each page_virt is in
+    // our vmalloc region and was mapped during allocation; each frame f
+    // returned by unmap_frame was allocated by alloc_frame.
     let pml4 = page_table::active_pml4_phys();
     for i in 0..page_count {
         let page_virt = VirtAddr::new(vaddr + (i as u64) * (FRAME_SIZE as u64));
@@ -414,6 +423,8 @@ pub fn self_test() {
     serial_println!("[vmalloc]   Alloc 16 KiB: OK (addr={:#x})", addr);
 
     // Test 2: Write and read.
+    // SAFETY: ptr was returned by vmalloc (valid, mapped, FRAME_SIZE bytes);
+    // ptr.add(FRAME_SIZE - 1) is the last byte of the allocation.
     unsafe {
         core::ptr::write_volatile(ptr, 0xAB);
         let val = core::ptr::read_volatile(ptr);
@@ -437,6 +448,8 @@ pub fn self_test() {
     let ptr2 = vmalloc(big_size).expect("multi-page vmalloc should succeed");
     assert!(!ptr2.is_null());
     // Write to each page to verify mappings.
+    // SAFETY: ptr2 was returned by vmalloc(4 * FRAME_SIZE); offsets
+    // i * FRAME_SIZE for i in 0..4 are within the allocation bounds.
     unsafe {
         for i in 0..4usize {
             let p = ptr2.add(i * FRAME_SIZE);
@@ -451,6 +464,8 @@ pub fn self_test() {
     serial_println!("[vmalloc]   Multi-page (4 × 16 KiB): OK (addr={:#x})", ptr2 as u64);
 
     // Test 5: Free.
+    // SAFETY: ptr and ptr2 were returned by successful vmalloc calls
+    // and have not been freed yet.
     unsafe {
         vfree(ptr).expect("vfree should succeed");
         vfree(ptr2).expect("vfree should succeed");
@@ -460,6 +475,7 @@ pub fn self_test() {
     // Test 6: Re-allocation after free.
     let ptr3 = vmalloc(FRAME_SIZE).expect("re-alloc should succeed");
     assert!(!ptr3.is_null());
+    // SAFETY: ptr3 was returned by vmalloc and has not been freed.
     unsafe { vfree(ptr3).expect("vfree should succeed"); }
     serial_println!("[vmalloc]   Re-alloc after free: OK");
 

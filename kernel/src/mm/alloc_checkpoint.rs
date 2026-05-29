@@ -141,6 +141,8 @@ pub fn save(label: u8) -> usize {
     // Find existing slot with this label, or an empty slot.
     let slot = find_slot(label);
 
+    // SAFETY: slot < MAX_CHECKPOINTS (find_slot guarantees this);
+    // STORE is only accessed from kshell commands (serialized, single core).
     unsafe {
         let ptr = STORE.0.get() as *mut Checkpoint;
         ptr.add(slot).write(cp);
@@ -216,6 +218,7 @@ pub fn diff(from_label: u8, to_label: u8) -> Option<CheckpointDiff> {
 
 /// Get a stored checkpoint by label.
 pub fn get(label: u8) -> Option<Checkpoint> {
+    // SAFETY: i < MAX_CHECKPOINTS; STORE is accessed from serialized kshell context.
     for i in 0..MAX_CHECKPOINTS {
         let cp = unsafe {
             let ptr = STORE.0.get() as *const Checkpoint;
@@ -230,6 +233,7 @@ pub fn get(label: u8) -> Option<Checkpoint> {
 
 /// Clear all stored checkpoints.
 pub fn clear() {
+    // SAFETY: i < MAX_CHECKPOINTS; STORE is accessed from serialized kshell context.
     for i in 0..MAX_CHECKPOINTS {
         unsafe {
             let ptr = STORE.0.get() as *mut Checkpoint;
@@ -242,6 +246,7 @@ pub fn clear() {
 /// List all stored checkpoints.
 pub fn list() -> [(u8, bool); MAX_CHECKPOINTS] {
     let mut result = [(0u8, false); MAX_CHECKPOINTS];
+    // SAFETY: i < MAX_CHECKPOINTS; STORE is accessed from serialized kshell context.
     for i in 0..MAX_CHECKPOINTS {
         let cp = unsafe {
             let ptr = STORE.0.get() as *const Checkpoint;
@@ -258,6 +263,9 @@ pub fn list() -> [(u8, bool); MAX_CHECKPOINTS] {
 
 /// Find a slot for the given label (existing or first empty).
 fn find_slot(label: u8) -> usize {
+    // SAFETY (group — covers all STORE reads below): i < MAX_CHECKPOINTS
+    // in both loops; STORE is accessed from serialized kshell context.
+
     // First, look for existing entry with this label.
     for i in 0..MAX_CHECKPOINTS {
         let cp = unsafe {
@@ -322,6 +330,7 @@ pub fn self_test() {
 
     // Free the test frame.
     if let Ok(f) = test_frame {
+        // SAFETY: f was returned by alloc_frame_zeroed and has not been freed.
         unsafe { let _ = frame::free_frame(f); }
     }
 

@@ -162,17 +162,20 @@ static DEVICE_COUNT: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
 unsafe fn mmio_read32(addr: usize) -> u32 {
+    // SAFETY: Caller guarantees addr is a valid MMIO register address.
     unsafe { core::ptr::read_volatile(addr as *const u32) }
 }
 
 #[inline]
 unsafe fn mmio_write32(addr: usize, value: u32) {
+    // SAFETY: Caller guarantees addr is a valid MMIO register address.
     unsafe { core::ptr::write_volatile(addr as *mut u32, value); }
 }
 
 #[inline]
 unsafe fn mmio_read64(addr: usize) -> u64 {
     // Read as two 32-bit halves (some hardware doesn't support 64-bit MMIO).
+    // SAFETY: Caller guarantees addr and addr+4 are valid MMIO register addresses.
     unsafe {
         let lo = core::ptr::read_volatile(addr as *const u32) as u64;
         let hi = core::ptr::read_volatile((addr + 4) as *const u32) as u64;
@@ -182,6 +185,7 @@ unsafe fn mmio_read64(addr: usize) -> u64 {
 
 #[inline]
 unsafe fn mmio_write64(addr: usize, value: u64) {
+    // SAFETY: Caller guarantees addr and addr+4 are valid MMIO register addresses.
     unsafe {
         core::ptr::write_volatile(addr as *mut u32, value as u32);
         core::ptr::write_volatile((addr + 4) as *mut u32, (value >> 32) as u32);
@@ -409,6 +413,7 @@ impl NvmeController {
         unsafe { mmio_write32(regs_virt + REG_CC, 0); }
 
         // Wait for CSTS.RDY to clear.
+        // SAFETY: regs_virt + REG_CSTS is a valid MMIO status register.
         for _ in 0..READY_TIMEOUT {
             let csts = unsafe { mmio_read32(regs_virt + REG_CSTS) };
             if csts & CSTS_RDY == 0 {
@@ -450,6 +455,8 @@ impl NvmeController {
         unsafe { mmio_write32(regs_virt + REG_CC, cc); }
 
         // Wait for CSTS.RDY.
+        // SAFETY: regs_virt + REG_CSTS is a valid MMIO status register
+        // (same register read in a polling loop and final check).
         for _ in 0..READY_TIMEOUT {
             let csts = unsafe { mmio_read32(regs_virt + REG_CSTS) };
             if csts & CSTS_RDY != 0 {

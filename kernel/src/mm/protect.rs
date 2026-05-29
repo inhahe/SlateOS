@@ -293,8 +293,11 @@ pub fn audit_kernel_wx(pml4_phys: u64) -> WxAuditResult {
     // bit set, the page is effectively non-executable — the hardware ORs
     // the NX bit across all levels.  We track inherited NX through the walk
     // so the audit reflects the true effective permissions.
+    // SAFETY (group — covers all read_entry calls in this 4-level walk):
+    // pml4_phys is the active page table; each index is 0..512; hhdm is
+    // valid.  At each level, we only descend if is_present() is true, so
+    // phys_addr() yields a valid table address for the next level.
     for pml4_idx in 256..512 {
-        // SAFETY: pml4_phys is the active page table, indices are valid.
         let pml4e = unsafe { page_table::read_entry(pml4_phys, pml4_idx, hhdm) };
         if !pml4e.is_present() {
             continue;
@@ -534,6 +537,9 @@ pub fn harden_kernel_sections(pml4_phys: u64) -> (usize, usize) {
     // Walk the kernel image region (PML4 index 511, which covers
     // 0xFFFF_FF80_0000_0000 to 0xFFFF_FFFF_FFFF_FFFF, containing
     // the kernel at 0xFFFF_FFFF_8000_0000).
+    // SAFETY (group — covers all read_entry/write_entry calls in this walk):
+    // pml4_phys is the active page table; all indices are 0..512; hhdm is
+    // valid.  We only descend into sub-tables whose entries are present.
     let kernel_pml4_idx: usize = 511;
     let pml4e = unsafe { page_table::read_entry(pml4_phys, kernel_pml4_idx, hhdm) };
     if !pml4e.is_present() {

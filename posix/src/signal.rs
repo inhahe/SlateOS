@@ -366,6 +366,30 @@ fn apply_blocked_low(low: u64) {
     sync_kernel_blocked_mask(low);
 }
 
+/// Capture the current process-wide blocked mask for `sigsetjmp`.
+///
+/// Called from the `sigsetjmp` assembly when its `savemask` argument is
+/// non-zero.  Returns the low 64 signals of the blocked mask so it can be
+/// stored in the `sigjmp_buf` and restored by a later `siglongjmp`.  This
+/// is what lets a handler escape via `siglongjmp` and still have the mask
+/// that signal dispatch installed unwound correctly.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn __posix_sigjmp_save_mask() -> u64 {
+    current_blocked_low()
+}
+
+/// Restore a previously-saved blocked mask for `siglongjmp`.
+///
+/// Called from the `siglongjmp` assembly when the `sigjmp_buf` recorded a
+/// saved mask.  Mirrors the change to the kernel so asynchronous delivery
+/// honours it immediately.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn __posix_sigjmp_restore_mask(low: u64) {
+    apply_blocked_low(low);
+}
+
 /// Mark `sig` pending on the calling process.
 ///
 /// Used when a signal is raised synchronously but is currently blocked:

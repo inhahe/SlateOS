@@ -2355,6 +2355,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
 
     // Read the name.
     let name = if name_len > 0 && name_ptr != 0 {
+        // SAFETY: name_ptr/name_len validated by validate_user_read above.
         let name_bytes = unsafe {
             core::slice::from_raw_parts(name_ptr as *const u8, name_len)
         };
@@ -2365,6 +2366,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
 
     // Read the fd map entries.
     let fd_pairs: alloc::vec::Vec<(i32, u8, u64)> = if fd_map_count > 0 && fd_map_ptr != 0 {
+        // SAFETY: fd_map_ptr/fd_map_count validated by validate_user_read above.
         let entries = unsafe {
             core::slice::from_raw_parts(fd_map_ptr as *const FdMapEntry, fd_map_count)
         };
@@ -2375,6 +2377,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
 
     // Parse packed argv strings (null-terminated, concatenated).
     let argv_slices: alloc::vec::Vec<&[u8]> = if argc > 0 && argv_len > 0 && argv_ptr != 0 {
+        // SAFETY: argv_ptr/argv_len validated by validate_user_read above.
         let data = unsafe {
             core::slice::from_raw_parts(argv_ptr as *const u8, argv_len)
         };
@@ -2385,6 +2388,7 @@ pub fn sys_process_spawn_ex(args: &SyscallArgs) -> SyscallResult {
 
     // Parse packed envp strings.
     let envp_slices: alloc::vec::Vec<&[u8]> = if envc > 0 && envp_len > 0 && envp_ptr != 0 {
+        // SAFETY: envp_ptr/envp_len validated by validate_user_read above.
         let data = unsafe {
             core::slice::from_raw_parts(envp_ptr as *const u8, envp_len)
         };
@@ -5476,6 +5480,7 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
+    // SAFETY: path_bytes validated by validate_user_read above.
     let path_bytes = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
@@ -5508,6 +5513,7 @@ pub fn sys_fs_readdir_at(args: &SyscallArgs) -> SyscallResult {
 
     // Serialize entries into the output buffer.
     // Format: [u8 type][u32 name_len][name bytes][u64 size] per entry.
+    // SAFETY: out_ptr/out_cap validated by validate_user_write above.
     let out_slice = unsafe { core::slice::from_raw_parts_mut(out_ptr, out_cap) };
     let mut pos = 0usize;
     let mut written = 0u32;
@@ -5574,6 +5580,7 @@ pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
+    // SAFETY: path_bytes validated by validate_user_read above.
     let path_bytes = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, path_len) };
     let dir_path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
@@ -5581,6 +5588,7 @@ pub fn sys_fs_tmpfile(args: &SyscallArgs) -> SyscallResult {
     };
 
     // Generate a unique temporary filename using the TSC for entropy.
+    // SAFETY: _rdtsc is always available on x86_64; no side-effects.
     let tsc = unsafe { core::arch::x86_64::_rdtsc() };
     let tmp_name = alloc::format!("{}/.tmp_{:016x}", dir_path, tsc);
 
@@ -5618,6 +5626,7 @@ pub fn sys_fs_fallocate(args: &SyscallArgs) -> SyscallResult {
         return SyscallResult::err(e);
     }
 
+    // SAFETY: path_bytes validated by validate_user_read above.
     let path_bytes = unsafe { core::slice::from_raw_parts(args.arg0 as *const u8, path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
@@ -7529,7 +7538,8 @@ pub fn sys_tcp_list(args: &SyscallArgs) -> SyscallResult {
         if conn.sack_ok { flags |= 8; }
         record[19] = flags;
 
-        // SAFETY: buf_ptr is a userspace pointer validated by the caller.
+        // SAFETY: buf_ptr is a userspace pointer validated by the caller;
+        // written < max_records ensures dst stays within the buffer.
         let dst = (buf_ptr + written * RECORD_SIZE) as *mut u8;
         unsafe {
             core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
@@ -7580,6 +7590,7 @@ pub fn sys_tcp_listener_list(args: &SyscallArgs) -> SyscallResult {
             // [3] backlog max.
             record[3] = listener.backlog_max as u8;
 
+            // SAFETY: buf_ptr is validated; written < max_records.
             let dst = (buf_ptr + written * RECORD_SIZE) as *mut u8;
             unsafe {
                 core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
@@ -7710,6 +7721,7 @@ pub fn sys_arp_table(args: &SyscallArgs) -> SyscallResult {
             record[10] = ttl as u8;
             record[11] = (ttl >> 8) as u8;
 
+            // SAFETY: buf_ptr is validated; written < max_records.
             let dst = (buf_ptr + written * RECORD_SIZE) as *mut u8;
             unsafe {
                 core::ptr::copy_nonoverlapping(record.as_ptr(), dst, RECORD_SIZE);
@@ -7751,6 +7763,7 @@ pub fn sys_dns_cache_stats(args: &SyscallArgs) -> SyscallResult {
     buf[28..32].copy_from_slice(&(stats.capacity as u32).to_le_bytes());
     // [32..40] reserved.
 
+    // SAFETY: out_ptr is validated non-null and buf_len ≥ STATS_SIZE above.
     let dst = out_ptr as *mut u8;
     unsafe {
         core::ptr::copy_nonoverlapping(buf.as_ptr(), dst, STATS_SIZE);

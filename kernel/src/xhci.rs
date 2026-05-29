@@ -667,7 +667,9 @@ impl XhciController {
         pci::enable_bus_master(pci_dev.address);
 
         // Read capability registers.
-        // SAFETY: mmio_base is now mapped and valid.
+        // SAFETY: mmio_base is now mapped and valid for the entire xHCI register
+        // space.  All reads below target offsets within the capability register
+        // block whose layout is defined by the xHCI specification.
         let cap_length = unsafe { mmio_read32(mmio_base, CAP_CAPLENGTH) } as u8;
         let hci_version = unsafe { mmio_read32(mmio_base, CAP_CAPLENGTH) >> 16 } as u16;
         let hcsparams1 = unsafe { mmio_read32(mmio_base, CAP_HCSPARAMS1) };
@@ -696,6 +698,9 @@ impl XhciController {
         }
 
         // Calculate register base addresses.
+        // SAFETY: cap_length, rts_off, db_off come from the controller's own
+        // capability registers.  The resulting pointers stay within the MMIO
+        // region we mapped above (BAR0 always covers the full register space).
         let op_base = unsafe { mmio_base.add(cap_length as usize) };
         let rt_base = unsafe { mmio_base.add(rts_off as usize) };
         let db_base = unsafe { mmio_base.add(db_off as usize) };
@@ -712,6 +717,7 @@ impl XhciController {
         // Wait for halt (HCH = 1).
         let mut timeout = 100_000u32;
         loop {
+            // SAFETY: op_base is valid MMIO (verified above).
             let sts = unsafe { mmio_read32(op_base, OP_USBSTS) };
             if sts & USBSTS_HCH != 0 {
                 break;
@@ -725,6 +731,7 @@ impl XhciController {
         }
 
         // Issue reset (set HCRST).
+        // SAFETY: op_base is valid MMIO.
         unsafe {
             mmio_write32(op_base, OP_USBCMD, USBCMD_HCRST);
         }
@@ -732,6 +739,7 @@ impl XhciController {
         // Wait for reset complete (HCRST clears and CNR clears).
         timeout = 1_000_000;
         loop {
+            // SAFETY: op_base is valid MMIO.
             let cmd = unsafe { mmio_read32(op_base, OP_USBCMD) };
             let sts = unsafe { mmio_read32(op_base, OP_USBSTS) };
             if cmd & USBCMD_HCRST == 0 && sts & USBSTS_CNR == 0 {
@@ -750,6 +758,7 @@ impl XhciController {
         // ---- Configure Max Device Slots ----
 
         let slots_en = max_slots.min(MAX_SLOTS as u8);
+        // SAFETY: op_base is valid MMIO.
         unsafe {
             mmio_write32(op_base, OP_CONFIG, u32::from(slots_en));
         }
@@ -767,6 +776,8 @@ impl XhciController {
         }
 
         // Write DCBAAP.
+        // SAFETY: op_base is valid MMIO; dcbaa_phys is the physical address
+        // of a freshly allocated and zeroed frame.
         unsafe {
             mmio_write64(op_base, OP_DCBAAP, dcbaa_phys);
         }
@@ -777,6 +788,8 @@ impl XhciController {
         let cmd_ring_phys = cmd_ring.phys_addr();
 
         // Write CRCR (command ring pointer with cycle bit = 1).
+        // SAFETY: op_base is valid MMIO; cmd_ring_phys is the physical base
+        // of a properly initialised TRB ring.
         unsafe {
             mmio_write64(op_base, OP_CRCR, cmd_ring_phys | 1); // RCS = 1
         }
@@ -789,6 +802,8 @@ impl XhciController {
         let event_ring_virt = event_ring_phys.wrapping_add(hhdm_offset) as *mut Trb;
 
         // Zero the event ring.
+        // SAFETY: event_ring_frame was just allocated; HHDM maps it at
+        // event_ring_virt for the full FRAME_SIZE.
         unsafe {
             core::ptr::write_bytes(event_ring_virt as *mut u8, 0, frame::FRAME_SIZE);
         }
@@ -799,6 +814,8 @@ impl XhciController {
         let erst_virt = erst_phys.wrapping_add(hhdm_offset) as *mut ErstEntry;
 
         // Zero and fill the ERST.
+        // SAFETY: erst_frame was just allocated and HHDM-mapped.  erst_virt
+        // points to the start, and we write only the first ErstEntry.
         unsafe {
             core::ptr::write_bytes(erst_virt as *mut u8, 0, frame::FRAME_SIZE);
             let entry = &mut *erst_virt;
@@ -808,8 +825,13 @@ impl XhciController {
 
         // Configure Interrupter 0.
         // Interrupter registers are at runtime_base + 0x20 + (interrupter * 32).
+        // SAFETY: rt_base is valid MMIO; 0x20 is the start of the interrupter
+        // register set per the xHCI spec.
         let ir0_base = unsafe { rt_base.add(0x20) };
 
+        // SAFETY: ir0_base points to Interrupter 0's register set in valid
+        // MMIO space.  The following writes configure the event ring segment
+        // table size, dequeue pointer, base address, and interrupt enable.
         // ERSTSZ = 1 (one segment).
         unsafe {
             mmio_write32(ir0_base, IR_ERSTSZ, 1);
@@ -834,6 +856,7 @@ impl XhciController {
         // ---- Start the Controller ----
 
         // Enable interrupts and run.
+        // SAFETY: op_base is valid MMIO.
         unsafe {
             let cmd = mmio_read32(op_base, OP_USBCMD);
             mmio_write32(op_base, OP_USBCMD, cmd | USBCMD_RUN | USBCMD_INTE);
@@ -842,6 +865,7 @@ impl XhciController {
         // Wait for controller to start (HCH clears).
         timeout = 100_000;
         loop {
+            // SAFETY: op_base is valid MMIO.
             let sts = unsafe { mmio_read32(op_base, OP_USBSTS) };
             if sts & USBSTS_HCH == 0 {
                 break;
@@ -936,6 +960,7 @@ impl XhciController {
         // SAFETY: op_base is valid MMIO.
         let portsc = unsafe { mmio_read32(self.op_base, offset + PORT_PORTSC) };
         let write_val = (portsc & !PORTSC_W1C_MASK) | PORTSC_PR;
+        // SAFETY: op_base is valid MMIO (from init); offset targets this port's register set.
         unsafe {
             mmio_write32(self.op_base, offset + PORT_PORTSC, write_val);
         }
@@ -943,6 +968,7 @@ impl XhciController {
         // Wait for reset to complete (PRC = 1 means reset complete).
         let mut timeout = 500_000u32;
         loop {
+            // SAFETY: op_base is valid MMIO; offset targets this port's PORTSC.
             let portsc = unsafe { mmio_read32(self.op_base, offset + PORT_PORTSC) };
             if portsc & PORTSC_PRC != 0 {
                 // Clear PRC by writing 1 to it.
@@ -960,6 +986,7 @@ impl XhciController {
         }
 
         // Read the port speed after reset.
+        // SAFETY: op_base is valid MMIO; offset targets this port's PORTSC.
         let portsc = unsafe { mmio_read32(self.op_base, offset + PORT_PORTSC) };
         let speed = ((portsc & PORTSC_SPEED_MASK) >> 10) as u8;
 
@@ -1049,8 +1076,10 @@ impl XhciController {
         // Update ERDP to tell the controller we've consumed this event.
         let erdp_phys = self.event_ring_frame.addr()
             .wrapping_add((self.event_dequeue_idx * 16) as u64);
+        // SAFETY: rt_base is valid MMIO; 0x20 is the Interrupter 0 register offset.
         let ir0_base = unsafe { self.rt_base.add(0x20) };
         // Set EHB (Event Handler Busy) clear bit (bit 3).
+        // SAFETY: ir0_base points to Interrupter 0's registers.
         unsafe {
             mmio_write64(ir0_base, IR_ERDP, erdp_phys | (1 << 3));
         }
@@ -1161,6 +1190,8 @@ impl XhciController {
         }
 
         // Fill Slot Context (second context entry, at offset ctx_size).
+        // SAFETY: in_ctx_virt points to a freshly allocated 16 KiB frame;
+        // ctx_size (32 or 64 bytes) puts slot_ctx well within bounds.
         let slot_ctx = unsafe { in_ctx_virt.add(ctx_size) };
         // SAFETY: slot_ctx within allocated frame.
         unsafe {
@@ -1175,6 +1206,7 @@ impl XhciController {
         }
 
         // Fill Endpoint 0 Context (third entry, at offset 2 * ctx_size).
+        // SAFETY: 2 * ctx_size is at most 128 bytes, well within the 16 KiB frame.
         let ep0_ctx = unsafe { in_ctx_virt.add(2 * ctx_size) };
         // Max packet size based on speed.
         let max_packet = match speed {
@@ -1563,11 +1595,14 @@ impl XhciController {
         )?;
 
         if transferred < 9 {
+            // SAFETY: We own buf_frame exclusively.
             let _ = unsafe { frame::free_frame(buf_frame) };
             return Err(KernelError::IoError);
         }
 
         // Parse config descriptor header.
+        // SAFETY: buf_virt is valid for at least `transferred` (≥9) bytes; the
+        // config descriptor header is 9 bytes and may be unaligned in the buffer.
         let config_desc = unsafe {
             core::ptr::read_unaligned(buf_virt as *const UsbConfigDescriptor)
         };
@@ -1581,6 +1616,8 @@ impl XhciController {
         let mut current_iface: Option<(u8, u8, u8)> = None; // (iface_num, subclass, protocol)
 
         while offset.wrapping_add(2) <= actual_len {
+            // SAFETY: offset+1 < actual_len ≤ 255 ≤ FRAME_SIZE, so both reads
+            // are within the buf_frame we allocated and the controller wrote into.
             let desc_len = unsafe { *buf_virt.add(offset) } as usize;
             let desc_type = unsafe { *buf_virt.add(offset.wrapping_add(1)) };
 
@@ -1591,6 +1628,8 @@ impl XhciController {
             match desc_type {
                 USB_DESC_INTERFACE => {
                     if desc_len >= 9 {
+                        // SAFETY: desc_len ≥ 9 = sizeof(UsbInterfaceDescriptor)
+                        // and offset + desc_len ≤ actual_len, all within buf_frame.
                         let iface = unsafe {
                             core::ptr::read_unaligned(buf_virt.add(offset) as *const UsbInterfaceDescriptor)
                         };
@@ -1608,6 +1647,8 @@ impl XhciController {
                 USB_DESC_ENDPOINT => {
                     if desc_len >= 7 {
                         if let Some((iface_num, subclass, protocol)) = current_iface {
+                            // SAFETY: desc_len ≥ 7 = sizeof(UsbEndpointDescriptor)
+                            // and offset + desc_len ≤ actual_len, all within buf_frame.
                             let ep = unsafe {
                                 core::ptr::read_unaligned(buf_virt.add(offset) as *const UsbEndpointDescriptor)
                             };
@@ -1642,6 +1683,7 @@ impl XhciController {
         }
 
         // Free buffer.
+        // SAFETY: We own buf_frame exclusively and have finished reading it.
         let _ = unsafe { frame::free_frame(buf_frame) };
 
         Ok((config_value, hid_interfaces))
@@ -1829,6 +1871,8 @@ impl XhciController {
 
         // Update Slot Context (at offset ctx_size) — set Context Entries
         // to include this endpoint.
+        // SAFETY: in_ctx_virt is a freshly allocated 16 KiB frame; ctx_size
+        // (32 or 64 bytes) is well within bounds.
         let slot_ctx = unsafe { in_ctx_virt.add(ctx_size) };
         unsafe {
             let dword0 = ((dci as u32) << 27) // Context Entries = max DCI
@@ -1837,6 +1881,8 @@ impl XhciController {
         }
 
         // Fill the Endpoint Context (at offset (dci + 1) * ctx_size).
+        // SAFETY: dci ≤ 31, ctx_size ≤ 64, so (dci+1)*ctx_size ≤ 2048,
+        // well within the 16 KiB input context frame.
         let ep_ctx = unsafe { in_ctx_virt.add((dci + 1) * ctx_size) };
 
         // Convert interval to xHCI format (power-of-2 exponent).
@@ -1890,6 +1936,8 @@ impl XhciController {
         let cc = completion.completion_code();
 
         // Free input context.
+        // SAFETY: We own in_ctx_frame exclusively; the Configure Endpoint
+        // command has completed and the controller no longer references it.
         let _ = unsafe { frame::free_frame(in_ctx_frame) };
 
         if cc != TRB_CC_SUCCESS {

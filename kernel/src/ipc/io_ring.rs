@@ -587,6 +587,8 @@ pub fn pending_completions(ring_handle: u64) -> KernelResult<u32> {
     let ring = table.get(&ring_handle)
         .ok_or(KernelError::InvalidArgument)?;
 
+    // SAFETY: header_ptr was set during io_ring_create and points to the
+    // IoRingHeader at the start of the shared ring buffer frame.
     let header = unsafe { &*ring.header_ptr };
     let cq_head = header.cq_head.load(Ordering::Acquire);
     let cq_tail = header.cq_tail.load(Ordering::Acquire);
@@ -687,6 +689,8 @@ fn exec_channel_recv(sqe: &SqEntry) -> i64 {
         Ok(Some(msg)) => {
             let copy_len = msg.data().len().min(buf_cap);
             if copy_len > 0 {
+                // SAFETY: buf_ptr is non-null (checked above) and we copy
+                // at most buf_cap bytes, which the caller guarantees is valid.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         msg.data().as_ptr(),
@@ -713,6 +717,8 @@ fn exec_pipe_write(sqe: &SqEntry) -> i64 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
+    // SAFETY: ptr is non-null (checked above) and the SQE contract requires
+    // addr/len to describe a valid buffer.
     let data = unsafe { core::slice::from_raw_parts(ptr, len) };
 
     match pipe::try_write(handle, data) {
@@ -732,6 +738,8 @@ fn exec_pipe_read(sqe: &SqEntry) -> i64 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
+    // SAFETY: ptr is non-null (checked above); SQE contract guarantees
+    // addr/len describe a valid writable buffer.
     let buf = unsafe { core::slice::from_raw_parts_mut(ptr, cap) };
 
     match pipe::try_read(handle, buf) {
@@ -750,6 +758,8 @@ fn exec_fs_read(sqe: &SqEntry) -> i64 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
+    // SAFETY: path_ptr is non-null and path_len > 0 (checked above);
+    // SQE contract guarantees addr/len describe valid readable memory.
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
@@ -760,6 +770,7 @@ fn exec_fs_read(sqe: &SqEntry) -> i64 {
         Ok(data) => {
             let copy_len = data.len().min(buf_cap);
             if copy_len > 0 {
+                // SAFETY: buf_ptr is non-null (checked above); copy_len ≤ buf_cap.
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         data.as_ptr(),
@@ -784,12 +795,15 @@ fn exec_fs_write(sqe: &SqEntry) -> i64 {
         return KernelError::InvalidArgument.code() as i64;
     }
 
+    // SAFETY: path_ptr is non-null and path_len > 0 (checked above);
+    // SQE contract guarantees addr/len describe valid readable memory.
     let path_bytes = unsafe { core::slice::from_raw_parts(path_ptr, path_len) };
     let path = match core::str::from_utf8(path_bytes) {
         Ok(s) => s,
         Err(_) => return KernelError::InvalidArgument.code() as i64,
     };
 
+    // SAFETY: data_ptr is non-null (checked above); data_len from the SQE.
     let data = unsafe { core::slice::from_raw_parts(data_ptr, data_len) };
 
     match crate::fs::Vfs::write_file(path, data) {
@@ -1057,6 +1071,8 @@ fn test_ring_create_destroy() -> KernelResult<()> {
     let (handle, base_virt, frames) = setup(8, 16)?;
 
     // Verify the header is readable.
+    // SAFETY: base_virt returned by setup() points to a freshly allocated
+    // io_ring buffer; the first bytes are the IoRingHeader.
     let header = unsafe { &*(base_virt as *const IoRingHeader) };
     if header.sq_entries != 8 {
         serial_println!(
@@ -1095,6 +1111,7 @@ fn test_ring_create_destroy() -> KernelResult<()> {
 fn test_nop_submission() -> KernelResult<()> {
     let (handle, base_virt, _frames) = setup(8, 16)?;
 
+    // SAFETY: base_virt from setup() points to a valid io_ring buffer.
     let header = unsafe { &mut *(base_virt as *mut IoRingHeader) };
     #[allow(clippy::arithmetic_side_effects)]
     let sq_base = (base_virt + core::mem::size_of::<IoRingHeader>() as u64) as *mut SqEntry;
@@ -1150,6 +1167,7 @@ fn test_nop_submission() -> KernelResult<()> {
     }
 
     for i in 0..3u32 {
+        // SAFETY: cq_base points to the CQ array and i < cq_entries.
         let cqe = unsafe { &*cq_base.add(i as usize) };
         let expected_ud = (i as u64).wrapping_add(100);
         if cqe.user_data != expected_ud {
@@ -1179,6 +1197,7 @@ fn test_nop_submission() -> KernelResult<()> {
 fn test_console_write_batch() -> KernelResult<()> {
     let (handle, base_virt, _frames) = setup(8, 16)?;
 
+    // SAFETY: base_virt from setup() points to a valid io_ring buffer.
     let header = unsafe { &mut *(base_virt as *mut IoRingHeader) };
     #[allow(clippy::arithmetic_side_effects)]
     let sq_base = (base_virt + core::mem::size_of::<IoRingHeader>() as u64) as *mut SqEntry;
@@ -1218,6 +1237,7 @@ fn test_console_write_batch() -> KernelResult<()> {
         arg2: 0,
     };
 
+    // SAFETY: sq_base points to the SQ array; indices 0 and 1 < sq_entries (8).
     unsafe {
         *sq_base.add(0) = sqe1;
         *sq_base.add(1) = sqe2;
@@ -1236,6 +1256,7 @@ fn test_console_write_batch() -> KernelResult<()> {
 
     // Verify both CQEs report success.
     for i in 0..2u32 {
+        // SAFETY: cq_base points to the CQ array; i < cq_entries.
         let cqe = unsafe { &*cq_base.add(i as usize) };
         if cqe.result < 0 {
             serial_println!(
@@ -1277,6 +1298,7 @@ fn test_fh_read_write() -> KernelResult<()> {
 
     // Create io_ring.
     let (ring_handle, base_virt, _frames) = setup(8, 16)?;
+    // SAFETY: base_virt from setup() points to a valid io_ring buffer.
     let header = unsafe { &mut *(base_virt as *mut IoRingHeader) };
     #[allow(clippy::arithmetic_side_effects)]
     let sq_base = (base_virt + core::mem::size_of::<IoRingHeader>() as u64) as *mut SqEntry;
@@ -1302,6 +1324,7 @@ fn test_fh_read_write() -> KernelResult<()> {
         arg1: 0,
         arg2: 0,
     };
+    // SAFETY: sq_base points to the SQ array; index 0 < sq_entries (8).
     unsafe { *sq_base.add(0) = sqe; }
     header.sq_tail.store(1, Ordering::Release);
 
@@ -1317,6 +1340,7 @@ fn test_fh_read_write() -> KernelResult<()> {
     }
 
     // Verify CQE.
+    // SAFETY: cq_base points to the CQ array; index 0 is valid.
     let cqe = unsafe { &*cq_base.add(0) };
     if cqe.result != test_data.len() as i64 {
         serial_println!(
@@ -1365,6 +1389,7 @@ fn test_timeout_and_service() -> KernelResult<()> {
 
     let (ring_handle, base_virt, _frames) = setup(8, 16)?;
 
+    // SAFETY: base_virt from setup() points to a valid io_ring buffer.
     let header = unsafe { &mut *(base_virt as *mut IoRingHeader) };
     #[allow(clippy::arithmetic_side_effects)]
     let sq_base = (base_virt + core::mem::size_of::<IoRingHeader>() as u64) as *mut SqEntry;
@@ -1387,6 +1412,7 @@ fn test_timeout_and_service() -> KernelResult<()> {
         arg1: 0, // 0 ns = immediate
         arg2: 0,
     };
+    // SAFETY: sq_base points to the SQ array; index 0 < sq_entries (8).
     unsafe { *sq_base.add(0) = sqe_timeout_zero; }
     header.sq_tail.store(1, Ordering::Release);
 
@@ -1397,6 +1423,7 @@ fn test_timeout_and_service() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // SAFETY: cq_base points to the CQ array; index 0 is valid.
     let cqe = unsafe { &*cq_base.add(0) };
     if cqe.user_data != 1000 || cqe.result != 0 {
         serial_println!(
@@ -1427,6 +1454,7 @@ fn test_timeout_and_service() -> KernelResult<()> {
         arg1: 1000, // try to cancel the previous timeout's user_data
         arg2: 0,
     };
+    // SAFETY: sq_base points to the SQ array; index 0 < sq_entries.
     unsafe { *sq_base.add(0) = sqe_cancel; }
     header.sq_tail.store(1, Ordering::Release);
 
@@ -1437,6 +1465,7 @@ fn test_timeout_and_service() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // SAFETY: cq_base points to the CQ array; index 0 is valid.
     let cqe = unsafe { &*cq_base.add(0) };
     let expected_cancel_result = KernelError::NotFound.code() as i64;
     if cqe.result != expected_cancel_result {
@@ -1472,6 +1501,7 @@ fn test_timeout_and_service() -> KernelResult<()> {
         arg1: 0,
         arg2: 0,
     };
+    // SAFETY: sq_base points to the SQ array; index 0 < sq_entries.
     unsafe { *sq_base.add(0) = sqe_connect; }
     header.sq_tail.store(1, Ordering::Release);
 
@@ -1483,6 +1513,7 @@ fn test_timeout_and_service() -> KernelResult<()> {
         return Err(KernelError::InternalError);
     }
 
+    // SAFETY: cq_base points to the CQ array; index 0 is valid.
     let cqe = unsafe { &*cq_base.add(0) };
     if cqe.result < 0 {
         serial_println!(

@@ -118,6 +118,27 @@ static mut AIO_TABLE: [AioRecord; MAX_AIO_OPS] =
 /// which is impossible in practice; treated as monotonic forever.
 static mut AIO_AGE: u64 = 0;
 
+/// Reset the AIO completion table.
+///
+/// Clears all records and resets the age counter.  Used by tests to
+/// ensure a clean slate — without this, sequential test execution can
+/// reuse stack addresses for `Aiocb`, causing a later test to see a
+/// stale record from an earlier test that happened to allocate its
+/// `Aiocb` at the same address.
+#[cfg(test)]
+fn reset_aio_table() {
+    // SAFETY: single-threaded test context.
+    unsafe {
+        let base = core::ptr::addr_of_mut!(AIO_TABLE).cast::<AioRecord>();
+        let mut i: usize = 0;
+        while i < MAX_AIO_OPS {
+            core::ptr::write(base.add(i), AioRecord::EMPTY);
+            i = i.wrapping_add(1);
+        }
+        AIO_AGE = 0;
+    }
+}
+
 /// Bump and return the next age value.
 fn next_age() -> u64 {
     // SAFETY: single-threaded (consistent with the rest of posix).
@@ -601,6 +622,7 @@ mod tests {
 
     #[test]
     fn test_aio_error_unsubmitted_returns_einval() {
+        reset_aio_table();
         let cb: Aiocb = unsafe { core::mem::zeroed() };
         // Never submitted — table has no record.
         assert_eq!(aio_error(&cb), errno::EINVAL);
@@ -615,6 +637,7 @@ mod tests {
 
     #[test]
     fn test_aio_return_unsubmitted_einval() {
+        reset_aio_table();
         let mut cb: Aiocb = unsafe { core::mem::zeroed() };
         errno::set_errno(0);
         assert_eq!(aio_return(&raw mut cb), -1);
@@ -781,6 +804,7 @@ mod tests {
     /// record must reflect that retry.
     #[test]
     fn test_aio_fsync_recovery_after_einval() {
+        reset_aio_table();
         let mut cb: Aiocb = unsafe { core::mem::zeroed() };
         cb.aio_fildes = 0;
 
@@ -816,6 +840,7 @@ mod tests {
     /// must not invent a record.)
     #[test]
     fn test_aio_fsync_einval_leaves_no_phantom_record() {
+        reset_aio_table();
         let mut cb: Aiocb = unsafe { core::mem::zeroed() };
         cb.aio_fildes = 0;
 

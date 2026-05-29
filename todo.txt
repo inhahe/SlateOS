@@ -693,19 +693,15 @@ Tackle as a focused effort in a dedicated session — pick one lint
 category, fix all instances across a subsystem, commit, repeat.
 Do NOT gate other roadmap work on this.
 
-(2026-05-27) Flaky test: `posix::aio::tests::test_aio_return_unsubmitted_einval`
-  fails intermittently on the full single-threaded posix test run but
-  passes in isolation.  Root cause is inter-test pollution of the
-  global aio bookkeeping state (other aio tests leave the slot table
-  in a state where the "unsubmitted" probe id is now considered
-  occupied / returned).  Reproduce:
-    cargo test -p posix --target x86_64-pc-windows-gnu --lib -- \
-        --test-threads=1
-  May pass on re-run.  Fix: aio tests should each reset / use a
-  fresh slot range, or `aio_return` should distinguish "never
-  submitted" from "already reaped" via a stable invariant rather
-  than a transient slot-table state.  Observed during Phase 100
-  (dup3 validation) work — unrelated to dup3.
+(FIXED 2026-05-28, Phase 218) Flaky test: `posix::aio::tests::test_aio_return_unsubmitted_einval`
+  Root cause: AIO_TABLE is keyed by `cb_ptr` (stack address of Aiocb).
+  When tests run sequentially, stack addresses are reused — a later
+  test's Aiocb lands at the same address as an earlier test's, finding
+  a stale completion record.  Fix: added `reset_aio_table()` (#[cfg(test)]
+  only) that clears all records and the age counter.  Called at the
+  start of every test that relies on "no record exists" semantics:
+  test_aio_error_unsubmitted_returns_einval, test_aio_return_unsubmitted_einval,
+  test_aio_fsync_recovery_after_einval, test_aio_fsync_einval_leaves_no_phantom_record.
 
 OBSOLETE NOTE BELOW (pre-relaxation):
 - (2026-05-26) `cargo clippy -p kernel` reports 16895 warnings and ~63
@@ -740,21 +736,8 @@ OBSOLETE NOTE BELOW (pre-relaxation):
     reintroduced inside the inner pidfd_getfd(pid, fd) once real
     pidfd state exists.
 
-(2026-05-28) Flaky test — aio::tests::test_aio_return_unsubmitted_einval:
-  Observed during Phase 178 (ioperm CAP_SYS_RAWIO) full posix
-  regression run.  The test passes in isolation and on a re-run
-  of the full suite, but failed once under `cargo test -p posix
-  --target x86_64-pc-windows-gnu --lib -- --test-threads=1`.
-  The test asserts that `aio_return` on a zero-initialised Aiocb
-  returns -1 with EINVAL.  Likely a state leak from an earlier
-  aio test polluting the shared aio control-block table, or
-  errno state from a preceding cap-manipulation test (Phase 178
-  added CapGuard tests that mutate effective caps; aio shouldn't
-  depend on caps, but errno might be inspected after an
-  unrelated test set EBADF).  Investigate when next touching aio.
-  Reproduce: run the full suite repeatedly; the failure rate
-  appears to be < 50%.  Symptom: test reports failure but the
-  next run of the same command passes.
+(FIXED 2026-05-28, Phase 218) Flaky test — aio::tests::test_aio_return_unsubmitted_einval:
+  Same root cause as the other aio flake above.  Fixed by reset_aio_table().
 
 ## PERF_ATTR_FLAG_EXCLUDE_KERNEL — conflicting in-tree definitions
 
@@ -788,20 +771,6 @@ OBSOLETE NOTE BELOW (pre-relaxation):
     - 20 new tests in `clone3_csignal_newtime_phase197` module
       (carve-out narrow-scope, sentinel, parity, ordering, recovery).
 
-- BUG (observed Phase 192): `aio::tests::test_aio_fsync_recovery_after_einval`
-  fails when run as part of the full `cargo test -p posix
-  --target x86_64-pc-windows-gnu --tests -- --test-threads=1`
-  regression (left=0, right=22 at aio.rs:786 — `aio_error(&cb)`
-  returns 0 instead of EINVAL after the bad aio_fsync call).
-  Passes in isolation.  Diagnosis: the aio completion table is
-  global state keyed by something derived from `&Aiocb` (likely
-  the pointer address).  A prior test in the same run has left a
-  completion record at the address the stack reuses for `cb`, so
-  the EINVAL early-return path appears to "find" a stale success
-  record instead of nothing.  This is a test-isolation bug in the
-  aio module's completion-table design: either the test must
-  scrub the table between calls, or the table must use a stable
-  per-Aiocb identifier rather than its current address.  Not
-  caused by Phase 192 (setuid cap gate is entirely unrelated to
-  aio).  Trigger to fix: next aio touch, or when this test
-  starts failing in CI gating.
+- (FIXED Phase 218) BUG: `aio::tests::test_aio_fsync_recovery_after_einval`
+  Same root cause as the other aio flakes — stale completion records
+  at reused stack addresses.  Fixed by reset_aio_table().

@@ -476,6 +476,7 @@ pub fn self_test() -> KernelResult<()> {
 
     // Test 2: Write to the stack (should not fault).
     // Write at the bottom and top of the stack.
+    // SAFETY: stack_bottom..stack_top is a freshly allocated, mapped kernel stack.
     unsafe {
         core::ptr::write_volatile(info.stack_bottom as *mut u64, 0xDEAD_BEEF);
         #[allow(clippy::arithmetic_side_effects)]

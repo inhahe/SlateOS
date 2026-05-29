@@ -337,6 +337,7 @@ fn finalize(num_cpus: usize) {
 
     // Log per-CPU details at debug level.
     for cpu in 0..num_cpus {
+        // SAFETY: cpu < num_cpus ≤ MAX_CPUS; init runs single-threaded.
         let t = unsafe { &CPU_TOPO[cpu] };
         serial_println!(
             "[topo]   CPU {}: pkg={} core={} smt={} (APIC ID={})",
@@ -445,6 +446,7 @@ pub fn smt_active() -> bool {
 fn count_packages(num_cpus: usize) -> usize {
     let mut seen: u16 = 0;
     for cpu in 0..num_cpus {
+        // SAFETY: cpu < num_cpus ≤ MAX_CPUS; topology is initialized.
         let pkg = unsafe { CPU_TOPO[cpu].package_id };
         seen |= 1u16 << pkg;
     }
@@ -456,6 +458,8 @@ fn count_physical_cores(num_cpus: usize) -> usize {
     // With MAX_CPUS=16 this is trivially small.
     let mut count = 0usize;
     for i in 0..num_cpus {
+        // SAFETY (group — covers both CPU_TOPO accesses below):
+        // i, j < num_cpus ≤ MAX_CPUS; topology is initialized.
         let ti = unsafe { &CPU_TOPO[i] };
         // Count this CPU only if it's the first with this (pkg, core) pair.
         let first = (0..i).all(|j| {

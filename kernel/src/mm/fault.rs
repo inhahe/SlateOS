@@ -376,6 +376,7 @@ fn test_demand_page() -> KernelResult<()> {
     serial_println!("[fault]   Demand page fault resolved: OK");
 
     // Read back the value we wrote.
+    // SAFETY: DEMAND_PAGE_TEST_BASE was just demand-faulted and is mapped.
     let readback = unsafe {
         let ptr = DEMAND_PAGE_TEST_BASE as *const u8;
         ptr.read_volatile()
@@ -392,6 +393,7 @@ fn test_demand_page() -> KernelResult<()> {
 
     // Write across the full 16 KiB frame to verify all 4 hardware
     // pages are accessible.
+    // SAFETY: DEMAND_PAGE_TEST_BASE is mapped to a full 16 KiB frame.
     unsafe {
         let ptr = DEMAND_PAGE_TEST_BASE as *mut u8;
         for offset in (0..FRAME_SIZE).step_by(4096) {

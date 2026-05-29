@@ -2223,6 +2223,7 @@ unsafe fn free_order_inner(frame: PhysFrame, order: usize) -> KernelResult<()> {
                 #[allow(clippy::arithmetic_side_effects)]
                 let idx = (frame.addr() / FRAME_SIZE as u64) as usize;
                 if (idx as u64) < rc_len {
+                    // SAFETY: idx < rc_len; rc_ptr is a valid refcount array base.
                     let rc = unsafe {
                         (rc_ptr as *const u16).add(idx).read_volatile()
                     };

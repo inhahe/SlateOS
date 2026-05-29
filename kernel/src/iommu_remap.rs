@@ -1167,6 +1167,7 @@ pub fn self_test() -> KernelResult<()> {
         let pt_idx = ((bus_addr >> 12) & 0x1FF) as usize;
 
         // Read the leaf entry.
+        // SAFETY: pt_phys + hhdm maps to the IOMMU page table; pt_idx < 512.
         let leaf = unsafe {
             let pt_virt = (pt_phys + hhdm) as *const u64;
             core::ptr::read(pt_virt.add(pt_idx))
@@ -1206,6 +1207,7 @@ pub fn self_test() -> KernelResult<()> {
         let pd_idx = ((bus_addr >> 21) & 0x1FF) as usize;
         let pt_phys = walk_existing(pd_phys, pd_idx, hhdm).unwrap();
         let pt_idx = ((bus_addr >> 12) & 0x1FF) as usize;
+        // SAFETY: pt_phys + hhdm maps to the IOMMU page table; pt_idx < 512.
         let leaf = unsafe {
             let pt_virt = (pt_phys + hhdm) as *const u64;
             core::ptr::read(pt_virt.add(pt_idx))

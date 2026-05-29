@@ -405,6 +405,7 @@ pub fn self_test() {
 
         // Test 4: Allocate a PCID.
         let cpu = crate::smp::current_cpu_index();
+        // SAFETY: cpu is current CPU index; alloc_pcid accesses per-CPU PCID state.
         let (pcid, generation, _flush) = unsafe { alloc_pcid(cpu) };
         assert!(pcid >= 1);
         assert!(pcid <= MAX_PCID);

@@ -441,6 +441,7 @@ fn cpuid_leaf6_eax() -> u32 {
 unsafe fn rdmsr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
+    // SAFETY: Caller guarantees MSR address is valid; rdmsr reads ECX-selected MSR.
     unsafe {
         core::arch::asm!(
             "rdmsr",

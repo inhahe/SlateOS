@@ -306,6 +306,7 @@ impl LimineBackend {
 
             if let Some(pf) = gem.phys_frames.get(frame_idx) {
                 let src_virt = pf.addr() + hhdm + (frame_offset as u64);
+                // SAFETY: dst_base points to the framebuffer; offset is within pitch × height.
                 let dst_row = unsafe {
                     dst_base.add(row * (self.pitch as usize) + x_start * bpp)
                 };

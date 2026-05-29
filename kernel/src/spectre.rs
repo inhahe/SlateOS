@@ -134,6 +134,7 @@ pub fn init() {
 
     // Read IA32_ARCH_CAPABILITIES if available.
     if features.arch_capabilities {
+        // SAFETY: IA32_ARCH_CAPABILITIES is read-only; available when CPUID reports it.
         let caps = unsafe { crate::cpu::rdmsr(IA32_ARCH_CAPABILITIES) };
         ARCH_CAPS.store(caps, Ordering::Release);
 
@@ -348,6 +349,7 @@ pub fn self_test() {
 
     // Test 2: If IBRS is active, verify IA32_SPEC_CTRL has IBRS bit set.
     if s.ibrs_active {
+        // SAFETY: IA32_SPEC_CTRL is readable when IBRS is supported.
         let val = unsafe { crate::cpu::rdmsr(IA32_SPEC_CTRL) };
         assert!(
             val & SPEC_CTRL_IBRS != 0,
@@ -358,6 +360,7 @@ pub fn self_test() {
 
     // Test 3: If STIBP is active, verify it's set.
     if s.stibp_active {
+        // SAFETY: IA32_SPEC_CTRL is readable when STIBP is supported.
         let val = unsafe { crate::cpu::rdmsr(IA32_SPEC_CTRL) };
         assert!(
             val & SPEC_CTRL_STIBP != 0,

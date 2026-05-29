@@ -315,6 +315,7 @@ fn mouse_reset() -> bool {
 pub fn handle_irq() {
     if !INITIALIZED.load(Ordering::Acquire) {
         // Drain the byte even if not initialized (prevent controller hang).
+        // SAFETY: Port 0x60 is the PS/2 data port; reading it is always valid.
         let _ = unsafe { port::inb(DATA_PORT) };
         return;
     }

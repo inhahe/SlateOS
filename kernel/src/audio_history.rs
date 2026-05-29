@@ -118,6 +118,7 @@ impl HistoryBuffer {
 
 /// Record that a stream was opened.
 pub fn record_open(name: &str, volume: u8) {
+    // SAFETY: _rdtsc is always available on x86_64 and has no side effects.
     let tsc = unsafe { core::arch::x86_64::_rdtsc() };
 
     let mut hist = HISTORY.lock();
@@ -141,6 +142,7 @@ pub fn record_open(name: &str, volume: u8) {
 
 /// Record that a stream was closed, with total bytes played.
 pub fn record_close(name: &str, bytes_played: u64) {
+    // SAFETY: _rdtsc is always available on x86_64 and has no side effects.
     let tsc = unsafe { core::arch::x86_64::_rdtsc() };
 
     let mut hist = HISTORY.lock();

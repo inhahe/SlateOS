@@ -320,6 +320,7 @@ pub unsafe fn init() {
     // The bootloader sets LME (bit 8) and LMA (bit 10) for long mode,
     // but SCE is not set by default.  Without it, SYSCALL from ring 3
     // causes #UD.
+    // SAFETY: IA32_EFER is valid on all x86_64 CPUs; setting SCE is required for SYSCALL.
     unsafe {
         let efer = cpu::rdmsr(IA32_EFER);
         cpu::wrmsr(IA32_EFER, efer | 1); // Set SCE (bit 0).
@@ -337,12 +338,14 @@ pub unsafe fn init() {
     // Bit 9 = IF (interrupts) — disable until we're on kernel stack.
     // Bit 10 = DF (direction) — ensure forward string ops in kernel.
     let fmask: u64 = (1 << 8) | (1 << 9) | (1 << 10);
+    // SAFETY: IA32_FMASK is a valid MSR; the value masks TF/IF/DF as documented above.
     unsafe {
         cpu::wrmsr(IA32_FMASK, fmask);
     }
 
     // Set up per-CPU data for SWAPGS.
     let per_cpu_addr = core::ptr::addr_of!(PER_CPU) as u64;
+    // SAFETY: IA32_KERNEL_GS_BASE sets the base for SWAPGS; per_cpu_addr is a valid static.
     unsafe {
         cpu::wrmsr(IA32_KERNEL_GS_BASE, per_cpu_addr);
     }

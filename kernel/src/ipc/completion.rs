@@ -903,6 +903,7 @@ fn test_io_completion() -> KernelResult<()> {
     }
 
     // Advance SQ tail.
+    // SAFETY: base_virt is a valid mapped page from setup_ring; header is at offset 0.
     let header = unsafe { &mut *(base_virt as *mut io_ring::IoRingHeader) };
     header.sq_tail.store(2, core::sync::atomic::Ordering::Release);
 

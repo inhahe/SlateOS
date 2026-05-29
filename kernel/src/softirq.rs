@@ -468,6 +468,7 @@ pub fn self_test() -> crate::error::KernelResult<()> {
     // Disable interrupts so a timer ISR can't process the bits between
     // raise() and the check (the timer ISR calls process_pending which
     // would clear the bits, causing a false failure).
+    // SAFETY: cli/sti are valid in ring 0; we restore interrupts immediately after the check.
     unsafe { core::arch::asm!("cli", options(nomem, nostack, preserves_flags)); }
     raise(TIMER_SOFTIRQ | IRQ_POLL_SOFTIRQ);
     let bits = PENDING.get(cpu).map_or(0, |p| p.load(Ordering::Acquire));

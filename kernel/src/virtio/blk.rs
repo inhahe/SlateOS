@@ -417,6 +417,8 @@ impl VirtioBlkDevice {
         }
 
         // Copy caller's data into the DMA buffer for the device to read.
+        // SAFETY: dma_virt + DMA_DATA_OFFSET is within our allocated DMA frame;
+        // buf.len() >= SECTOR_SIZE (checked at call site).
         unsafe {
             core::ptr::copy_nonoverlapping(
                 buf.as_ptr(),
@@ -426,6 +428,7 @@ impl VirtioBlkDevice {
         }
 
         // Sentinel status byte (device will overwrite with 0 on success).
+        // SAFETY: dma_virt + DMA_STATUS_OFFSET is within our allocated DMA frame.
         unsafe {
             core::ptr::write_volatile(self.dma_virt.add(DMA_STATUS_OFFSET), 0xFF);
         }

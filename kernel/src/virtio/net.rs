@@ -259,6 +259,7 @@ impl VirtioNetDevice {
 
         let rx_frame = frame::alloc_frame()?;
         let rx_virt = (rx_frame.addr() + hhdm_offset) as *mut u8;
+        // SAFETY: We own this frame; HHDM maps it writable.
         unsafe { core::ptr::write_bytes(rx_virt, 0, frame::FRAME_SIZE); }
 
         let mut dev = Self {

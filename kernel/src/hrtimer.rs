@@ -410,6 +410,7 @@ fn schedule_absolute(
 /// TSC-based nanosecond fallback when HPET is unavailable.
 fn tsc_ns_fallback() -> u64 {
     let tsc: u64;
+    // SAFETY: rdtsc is always available on x86_64 and has no side effects.
     unsafe {
         core::arch::asm!(
             "rdtsc",

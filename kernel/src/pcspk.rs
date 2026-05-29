@@ -171,6 +171,7 @@ pub fn play_notes(notes: &[(u32, u32)]) {
 /// Busy-wait delay in milliseconds (approximate).
 fn delay_ms(ms: u32) {
     // Use TSC-based busy loop.  Assume ≥ 2 GHz = 2_000_000 cycles per ms.
+    // SAFETY: _rdtsc is always available on x86_64 and has no side effects.
     let start = unsafe { core::arch::x86_64::_rdtsc() };
     let target_cycles = (ms as u64).saturating_mul(2_000_000);
     loop {

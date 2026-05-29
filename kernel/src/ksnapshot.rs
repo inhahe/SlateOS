@@ -241,6 +241,7 @@ pub fn save(label: u8) {
     let snap = capture(label);
     let slot = if label == b'A' { 0 } else { 1 };
 
+    // SAFETY: slot is 0 or 1, always < STORE_SIZE (2); STORE uses UnsafeCell.
     unsafe {
         let ptr = STORE.0.get() as *mut Snapshot;
         ptr.add(slot).write(snap);

@@ -354,6 +354,7 @@ pub fn syscall_name(nr: u64) -> &'static str {
 fn rdtsc() -> u64 {
     let lo: u32;
     let hi: u32;
+    // SAFETY: rdtsc is always available on x86_64 and has no side effects.
     unsafe {
         core::arch::asm!(
             "rdtsc",

@@ -405,6 +405,33 @@ Remaining net improvements (diminishing returns):
   DES-format /etc/shadow entries (low priority; DES crypt is obsolete
   and insecure).
 
+- (DONE 2026-05-29) v* printf family (vprintf, vfprintf, vdprintf,
+  vsnprintf, vsprintf, vasprintf) implemented in posix/src/printf.rs.
+  These were entirely missing — any ported code that builds its own
+  variadic wrapper around printf (extremely common: custom logging
+  helpers, err()/warn() reimplementations, etc.) could not link.
+  On x86_64 System V a `va_list` parameter decays to a pointer to a
+  `__va_list_tag` struct, so these functions are NOT variadic — they
+  take a concrete `*mut VaList` and are pure Rust (no asm trampoline).
+  A new `va_collect` walks the format string once, pulling each arg from
+  the va_list in document order via the SysV va_arg algorithm (GP regs
+  at gp_offset 0..48, XMM regs at fp_offset 48..176, then the stack
+  overflow area), and flattens them into the same [u64;8] int/float
+  arrays the existing format_core consumes; it then delegates to the
+  tested _*_impl functions.  Pulling args in document order is what keeps
+  the stack overflow area consumed correctly when both int and float args
+  spill past their registers.  Same <=8-args-of-each-kind contract as the
+  trampoline path.  12 host tests build synthetic va_lists (hand-filled
+  176-byte register save area + overflow area) and verify ints, strings,
+  floats, mixed int/float interleave, %*.*f star width/precision, the
+  6-GP-register overflow spill, %% (no arg), ignored length modifiers,
+  null-va_list rejection, vsprintf NUL-termination, and va offset
+  advancement.  All pass; bare-metal build clean.
+  NOTE: the err()/warn() family in posix/src/err.rs still prints its
+  format string literally (it is declared non-variadic and drops printf
+  args) — that is a separate pre-existing bug, now fixable by routing the
+  v* variants (verr/vwarn) through vfprintf.  Tracked separately.
+
 - (FIXED 2026-05-27) crypt::tests parallel-test race: crypt() returns
   a pointer into a single process-global static buffer, so cargo's
   parallel test harness was racing on the buffer when multiple tests

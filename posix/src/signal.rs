@@ -320,63 +320,170 @@ fn default_action(sig: i32) -> Option<DefaultAction> {
     }
 }
 
-/// Dispatch a signal to the calling process.
-///
-/// Checks the registered `sigaction` table:
-/// * `SIG_IGN` → signal discarded, returns 0.
-/// * Registered handler → invokes it, returns 0.
-/// * `SIG_DFL` → applies the default action (terminate, ignore, etc.).
-///
-/// For `SIGKILL` and `SIGSTOP`, handlers are ignored (Linux semantics:
-/// they cannot be caught, blocked, or ignored).
-///
-/// **Returns** 0 on success, -1 on unimplemented action (errno = ENOSYS).
-fn dispatch_self_signal(sig: i32) -> i32 {
-    // SIGKILL / SIGSTOP: always apply default, regardless of handler.
-    if sig == SIGKILL {
-        // 128 + 9 = 137
-        crate::process::_exit(128i32.wrapping_add(sig));
-    }
-    if sig == SIGSTOP {
-        // We have no kernel suspend mechanism; report ENOSYS.
-        errno::set_errno(errno::ENOSYS);
-        return -1;
-    }
-
-    // Look up the registered action.
-    let handler = if (1..NSIG).contains(&sig) {
-        let idx = sig as usize;
-        // SAFETY: single-threaded access, idx in [1, NSIG).
-        unsafe {
-            let actions = core::ptr::addr_of!(ACTIONS);
-            (*actions)
-                .get(idx)
-                .map(|a| a.sa_handler)
-                .unwrap_or(SIG_DFL)
-        }
+/// Bit position for signal `sig` within the low 64-signal word
+/// (signal N → bit N-1).  Returns 0 for signals outside `[1, 64]`,
+/// which the low word cannot represent.
+fn sigmask_bit(sig: i32) -> u64 {
+    if (1..=64).contains(&sig) {
+        // sig-1 is in [0, 63]; the mask keeps the shift in range and
+        // silences arithmetic-side-effects lints.
+        1u64 << ((sig as u32).wrapping_sub(1) & 63)
     } else {
-        SIG_DFL
-    };
+        0
+    }
+}
 
+/// Compute the blocked mask to install for the duration of a handler.
+///
+/// Starts from `saved` (the mask active when the signal was taken),
+/// unions the handler's `sa_mask` (low word), and — unless `SA_NODEFER`
+/// is set — adds the delivered signal itself.  Per POSIX this is the set
+/// of signals blocked while the handler runs, which prevents the handler
+/// from being re-entered by its own signal.
+fn handler_block_mask(saved: u64, sa_mask_low: u64, sa_flags: u64, sig: i32) -> u64 {
+    let mut m = saved | sa_mask_low;
+    if sa_flags & SA_NODEFER == 0 {
+        m |= sigmask_bit(sig);
+    }
+    m
+}
+
+/// Read the current process-wide blocked mask (low 64 signals).
+fn current_blocked_low() -> u64 {
+    // SAFETY: single-threaded access to BLOCKED_MASK.
+    unsafe { core::ptr::addr_of!(BLOCKED_MASK).read().bits[0] }
+}
+
+/// Replace the low 64 signals of the process-wide blocked mask and mirror
+/// the change to the kernel so asynchronous delivery honours it.
+fn apply_blocked_low(low: u64) {
+    // SAFETY: single-threaded access to BLOCKED_MASK.
+    unsafe {
+        let mut m = core::ptr::addr_of!(BLOCKED_MASK).read();
+        m.bits[0] = low;
+        core::ptr::addr_of_mut!(BLOCKED_MASK).write(m);
+    }
+    sync_kernel_blocked_mask(low);
+}
+
+/// Mark `sig` pending on the calling process.
+///
+/// Used when a signal is raised synchronously but is currently blocked:
+/// it must be remembered and delivered once unblocked.  We route through
+/// the kernel shim (`SYS_SIGNAL_SEND` to self), so that restoring the
+/// blocked mask (`SYS_SIGNAL_MASK`) triggers delivery at the next
+/// syscall-return boundary.  No-op on the host (no kernel to track it).
+#[cfg(target_os = "none")]
+fn set_pending_self(sig: i32) {
+    let self_pid = crate::syscall::syscall0(crate::syscall::SYS_PROCESS_ID) as u64;
+    let _ = crate::syscall::syscall2(
+        crate::syscall::SYS_SIGNAL_SEND,
+        self_pid,
+        sig as u64,
+    );
+}
+
+#[cfg(not(target_os = "none"))]
+fn set_pending_self(_sig: i32) {}
+
+/// Reset a signal's disposition to the default (`SIG_DFL`) with empty
+/// flags/mask.  Invoked for `SA_RESETHAND` before the handler runs, so
+/// the one-shot handler is not re-installed.
+fn reset_disposition(sig: i32) {
+    if !(1..NSIG).contains(&sig) {
+        return;
+    }
+    let idx = sig as usize;
+    // SAFETY: single-threaded access; idx in [1, NSIG).
+    let actions = unsafe { core::ptr::addr_of_mut!(ACTIONS).as_mut() };
+    if let Some(actions) = actions
+        && let Some(slot) = actions.get_mut(idx)
+    {
+        *slot = DEFAULT_SIGACTION;
+    }
+}
+
+/// Planned outcome of dispatching a signal to the calling process.
+///
+/// Computed by [`plan_self_dispatch`] from the current blocked mask and
+/// the registered action.  Keeping the *policy* separate from the
+/// *effects* (global reads/writes and the actual handler call) makes the
+/// decision logic pure and unit-testable without touching global state.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelfDispatch {
+    /// Signal is blocked → leave it pending, deliver nothing now.
+    Pending,
+    /// Disposition is `SIG_IGN` → discard the signal.
+    Ignore,
+    /// Run the registered handler.
+    Handler {
+        /// The handler function pointer (already known `!= SIG_DFL/IGN`).
+        handler: usize,
+        /// Blocked mask (low 64 signals) to install for the handler's
+        /// duration: the saved mask plus `sa_mask`, plus the delivered
+        /// signal itself unless `SA_NODEFER`.
+        mask_during: u64,
+        /// `SA_RESETHAND`: reset the disposition to `SIG_DFL` first.
+        reset: bool,
+    },
+    /// Disposition is `SIG_DFL` → apply the Linux default action.
+    Default,
+}
+
+/// Decide how a self-directed signal should be handled.
+///
+/// Pure: depends only on its arguments.  Preconditions: `sig` is not
+/// `SIGKILL`/`SIGSTOP` (the caller handles those — they cannot be caught,
+/// blocked, or ignored).
+fn plan_self_dispatch(
+    sig: i32,
+    blocked_low: u64,
+    handler: usize,
+    sa_flags: u64,
+    sa_mask_low: u64,
+) -> SelfDispatch {
+    // Blocked signals are not delivered now — they become pending and
+    // are delivered once unblocked.
+    let bit = sigmask_bit(sig);
+    if bit != 0 && (blocked_low & bit) != 0 {
+        return SelfDispatch::Pending;
+    }
     if handler == SIG_IGN {
-        return 0;
+        return SelfDispatch::Ignore;
     }
-
     if handler != SIG_DFL {
-        // Invoke the registered handler.  POSIX: the handler receives
-        // the signal number.  We cast the stored usize back to a
-        // function pointer.  The handler may call longjmp or modify
-        // global state — that's fine.
-        //
-        // SAFETY: the caller registered this via signal()/sigaction()
-        // as a valid fn(i32).  We trust they provided a valid pointer.
-        let func: extern "C" fn(i32) =
-            unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
-        func(sig);
-        return 0;
+        return SelfDispatch::Handler {
+            handler,
+            mask_during: handler_block_mask(blocked_low, sa_mask_low, sa_flags, sig),
+            reset: sa_flags & SA_RESETHAND != 0,
+        };
     }
+    SelfDispatch::Default
+}
 
-    // SIG_DFL: apply default action.
+/// Read the registered `(handler, sa_flags, sa_mask_low)` for `sig`.
+///
+/// Out-of-range signals report the default disposition.
+fn lookup_action(sig: i32) -> (usize, u64, u64) {
+    if !(1..NSIG).contains(&sig) {
+        return (SIG_DFL, 0, 0);
+    }
+    let idx = sig as usize;
+    // SAFETY: single-threaded access, idx in [1, NSIG).
+    unsafe {
+        let actions = core::ptr::addr_of!(ACTIONS);
+        (*actions).get(idx).map_or((SIG_DFL, 0, 0), |a| {
+            (a.sa_handler, a.sa_flags, a.sa_mask.bits[0])
+        })
+    }
+}
+
+/// Apply the Linux default action (`SIG_DFL`) for `sig`.
+///
+/// Returns 0 for actions that complete in-process (Ignore), terminates
+/// the process for Terminate/Core, and reports `ENOSYS`/`EINVAL` for
+/// actions we cannot perform (Stop/Continue) or unknown signals.
+fn apply_default_action(sig: i32) -> i32 {
     match default_action(sig) {
         Some(DefaultAction::Terminate | DefaultAction::Core) => {
             if sig == SIGABRT {
@@ -395,6 +502,94 @@ fn dispatch_self_signal(sig: i32) -> i32 {
             errno::set_errno(errno::EINVAL);
             -1
         }
+    }
+}
+
+/// Dispatch a signal to the calling process.
+///
+/// Checks the registered `sigaction` table:
+/// * `SIG_IGN` → signal discarded, returns 0.
+/// * Registered handler → invokes it, returns 0.
+/// * `SIG_DFL` → applies the default action (terminate, ignore, etc.).
+///
+/// For `SIGKILL` and `SIGSTOP`, handlers are ignored (Linux semantics:
+/// they cannot be caught, blocked, or ignored).
+///
+/// ## Blocking semantics
+///
+/// If `sig` is currently blocked (per the process-wide mask), it is not
+/// delivered now: it is marked pending and returns 0 (Linux: a blocked
+/// signal stays pending until unblocked).  `SIGKILL`/`SIGSTOP` cannot be
+/// blocked, so they bypass this check.
+///
+/// While a registered handler runs, the delivered signal is automatically
+/// added to the blocked mask (unless `SA_NODEFER`), along with the
+/// handler's `sa_mask`.  This mirrors POSIX/Linux semantics and prevents a
+/// handler that re-raises its own signal from re-entering.  The previous
+/// mask is restored after the handler returns.  `SA_RESETHAND` resets the
+/// disposition to `SIG_DFL` before the handler is invoked.
+///
+/// **Returns** 0 on success, -1 on unimplemented action (errno = ENOSYS).
+fn dispatch_self_signal(sig: i32) -> i32 {
+    // SIGKILL / SIGSTOP: always apply default, regardless of handler.
+    // They cannot be caught, blocked, or ignored.
+    if sig == SIGKILL {
+        // 128 + 9 = 137
+        crate::process::_exit(128i32.wrapping_add(sig));
+    }
+    if sig == SIGSTOP {
+        // We have no kernel suspend mechanism; report ENOSYS.
+        errno::set_errno(errno::ENOSYS);
+        return -1;
+    }
+
+    let (handler, sa_flags, sa_mask_low) = lookup_action(sig);
+    let blocked = current_blocked_low();
+
+    match plan_self_dispatch(sig, blocked, handler, sa_flags, sa_mask_low) {
+        SelfDispatch::Pending => {
+            set_pending_self(sig);
+            0
+        }
+        SelfDispatch::Ignore => 0,
+        SelfDispatch::Handler {
+            handler,
+            mask_during,
+            reset,
+        } => {
+            // SA_RESETHAND: reset to default before running the one-shot
+            // handler, so it is not re-installed for the next occurrence.
+            if reset {
+                reset_disposition(sig);
+            }
+
+            // Auto-mask for the handler's duration, then restore.  This
+            // prevents a handler that re-raises its own signal from
+            // re-entering (the nested raise finds it blocked → pending).
+            let changed = mask_during != blocked;
+            if changed {
+                apply_blocked_low(mask_during);
+            }
+
+            // Invoke the registered handler.  POSIX: the handler receives
+            // the signal number.  We cast the stored usize back to a
+            // function pointer.
+            //
+            // SAFETY: the caller registered this via signal()/sigaction()
+            // as a valid fn(i32).  We trust they provided a valid pointer.
+            let func: extern "C" fn(i32) =
+                unsafe { core::mem::transmute::<usize, extern "C" fn(i32)>(handler) };
+            func(sig);
+
+            // Restore the mask the handler ran under.  This may unblock a
+            // signal raised during the handler, which the kernel then
+            // delivers at the next syscall-return boundary.
+            if changed {
+                apply_blocked_low(blocked);
+            }
+            0
+        }
+        SelfDispatch::Default => apply_default_action(sig),
     }
 }
 
@@ -2228,6 +2423,131 @@ mod tests {
         assert_eq!(core::mem::size_of::<SignalContext>(), 17 * 8);
     }
 
+    // -- auto-masking helpers --
+
+    /// `sigmask_bit` maps signal N to bit N-1 within the low word, and
+    /// rejects signals outside the representable `[1, 64]` range.
+    #[test]
+    fn test_sigmask_bit() {
+        assert_eq!(sigmask_bit(1), 1u64 << 0);
+        assert_eq!(sigmask_bit(2), 1u64 << 1);
+        assert_eq!(sigmask_bit(SIGUSR1), 1u64 << (SIGUSR1 - 1));
+        assert_eq!(sigmask_bit(64), 1u64 << 63);
+        // Out of range → 0 (not representable in the low 64-signal word).
+        assert_eq!(sigmask_bit(0), 0);
+        assert_eq!(sigmask_bit(65), 0);
+        assert_eq!(sigmask_bit(-1), 0);
+    }
+
+    /// `handler_block_mask` blocks the delivered signal plus the handler's
+    /// `sa_mask` on top of the saved mask.
+    #[test]
+    fn test_handler_block_mask_default() {
+        let saved = sigmask_bit(SIGINT); // SIGINT already blocked.
+        let sa_mask = sigmask_bit(SIGTERM); // handler also blocks SIGTERM.
+        let m = handler_block_mask(saved, sa_mask, 0, SIGUSR1);
+        // Saved + sa_mask + the delivered signal itself.
+        assert_eq!(
+            m,
+            sigmask_bit(SIGINT) | sigmask_bit(SIGTERM) | sigmask_bit(SIGUSR1)
+        );
+    }
+
+    /// `SA_NODEFER` suppresses auto-blocking of the delivered signal, but
+    /// the handler's `sa_mask` is still applied.
+    #[test]
+    fn test_handler_block_mask_nodefer() {
+        let saved = 0;
+        let sa_mask = sigmask_bit(SIGTERM);
+        let m = handler_block_mask(saved, sa_mask, SA_NODEFER, SIGUSR1);
+        // The delivered signal is NOT added; only sa_mask.
+        assert_eq!(m, sigmask_bit(SIGTERM));
+        assert_eq!(m & sigmask_bit(SIGUSR1), 0);
+    }
+
+    // -- self-dispatch policy (pure; no global state, no races) --
+    //
+    // `plan_self_dispatch` is the decision core of `dispatch_self_signal`.
+    // Testing it directly exercises the blocked-pending, ignore,
+    // handler-auto-mask, SA_NODEFER, SA_RESETHAND and default-action
+    // policy without touching the process-global ACTIONS/BLOCKED_MASK
+    // (which would race with other tests under parallel execution).
+
+    /// A blocked signal is left pending, not delivered.
+    #[test]
+    fn test_plan_blocked_is_pending() {
+        let blocked = sigmask_bit(SIGUSR1);
+        // Even with a registered handler, a blocked signal stays pending.
+        let plan = plan_self_dispatch(SIGUSR1, blocked, 0x1234, 0, 0);
+        assert_eq!(plan, SelfDispatch::Pending);
+    }
+
+    /// `SIG_IGN` discards the signal.
+    #[test]
+    fn test_plan_ignore() {
+        let plan = plan_self_dispatch(SIGUSR1, 0, SIG_IGN, 0, 0);
+        assert_eq!(plan, SelfDispatch::Ignore);
+    }
+
+    /// `SIG_DFL` selects the default action.
+    #[test]
+    fn test_plan_default() {
+        let plan = plan_self_dispatch(SIGUSR1, 0, SIG_DFL, 0, 0);
+        assert_eq!(plan, SelfDispatch::Default);
+    }
+
+    /// A registered handler runs with the delivered signal auto-masked
+    /// (plus the handler's `sa_mask`), and `reset` reflects SA_RESETHAND.
+    #[test]
+    fn test_plan_handler_auto_masks_self() {
+        let saved = sigmask_bit(SIGINT);
+        let sa_mask = sigmask_bit(SIGTERM);
+        let plan = plan_self_dispatch(SIGUSR1, saved, 0xABCD, 0, sa_mask);
+        match plan {
+            SelfDispatch::Handler {
+                handler,
+                mask_during,
+                reset,
+            } => {
+                assert_eq!(handler, 0xABCD);
+                assert!(!reset);
+                // Saved + sa_mask + the delivered signal itself.
+                assert_eq!(
+                    mask_during,
+                    sigmask_bit(SIGINT)
+                        | sigmask_bit(SIGTERM)
+                        | sigmask_bit(SIGUSR1)
+                );
+            }
+            other => panic!("expected Handler, got {other:?}"),
+        }
+    }
+
+    /// `SA_NODEFER` keeps the delivered signal unblocked while the handler
+    /// runs (so a handler that re-raises its own signal WILL re-enter —
+    /// which is exactly what the flag requests).
+    #[test]
+    fn test_plan_handler_nodefer() {
+        let plan = plan_self_dispatch(SIGUSR1, 0, 0xABCD, SA_NODEFER, 0);
+        match plan {
+            SelfDispatch::Handler { mask_during, .. } => {
+                assert_eq!(mask_during & sigmask_bit(SIGUSR1), 0);
+            }
+            other => panic!("expected Handler, got {other:?}"),
+        }
+    }
+
+    /// `SA_RESETHAND` is reported so the executor resets the disposition
+    /// before running the one-shot handler.
+    #[test]
+    fn test_plan_handler_resethand() {
+        let plan = plan_self_dispatch(SIGUSR1, 0, 0xABCD, SA_RESETHAND, 0);
+        match plan {
+            SelfDispatch::Handler { reset, .. } => assert!(reset),
+            other => panic!("expected Handler, got {other:?}"),
+        }
+    }
+
     #[test]
     fn test_kill_sig0_pid_zero_enosys() {
         // pid == 0 means "every process in the caller's process group"
@@ -2368,29 +2688,29 @@ mod tests {
         }
     }
 
-    // -- cap held: ignore signals succeed, stop returns ENOSYS ----------
+    // -- cap held: the cap gate does not reject cross-process kill --------
+    //
+    // Under the Phase-211 model the sender no longer classifies by
+    // disposition — every cross-process `kill(pid>0, sig)` with CAP_KILL
+    // held proceeds to `SYS_SIGNAL_SEND`, and the kernel/target decide
+    // what to do.  The *outcome* of that syscall is not host-testable
+    // (the host has no kernel shim and `syscall` returns garbage), so we
+    // only assert the deterministic, in-process invariant: with CAP_KILL
+    // held the cap gate is satisfied (it is the no-cap path, tested
+    // below, that short-circuits to EPERM).  The send-failure → errno
+    // mapping is covered by `test_signal_send_errno_mapping`, and the
+    // routing decision by the `test_kill_target_*` tests.
 
-    /// With CAP_KILL (default), cross-process ignore signals succeed.
+    /// With CAP_KILL (default), the capability gate is satisfied, so a
+    /// cross-process `kill` is *not* rejected with EPERM.
     #[test]
-    fn test_phase203_kill_with_cap_ignore_ok() {
+    fn test_phase203_kill_with_cap_passes_gate() {
         assert!(crate::sys_capability::has_capability(
             crate::sys_capability::CAP_KILL,
         ));
-        crate::errno::set_errno(0);
-        let ret = kill(1, SIGCHLD);
-        assert_eq!(ret, 0);
-    }
-
-    /// With CAP_KILL (default), stop signals return ENOSYS.
-    #[test]
-    fn test_phase203_kill_with_cap_stop_enosys() {
-        assert!(crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_KILL,
-        ));
-        crate::errno::set_errno(0);
-        let ret = kill(1, SIGSTOP);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+        // The gate check is pure (reads capability atomics, issues no
+        // syscall): with the cap held it must not select the EPERM arm.
+        assert_eq!(kill_target(1, 4242), KillTarget::Other);
     }
 
     // -- cap dropped: cross-process kill → EPERM --------------------------

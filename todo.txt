@@ -548,14 +548,22 @@ Remaining net improvements (diminishing returns):
     Higher bits round-trip in userspace but never reach the kernel.
     Fix when >64 signals are actually needed: widen kernel masks to a
     bitset and the MASK/PENDING syscalls to pointer-based multi-word.
-  * No auto-masking of the delivered signal during its handler.  Linux
-    blocks the signal being handled (plus sa_mask) for the duration of
-    the handler unless SA_NODEFER.  We don't — a handler that re-raises
-    its own signal could re-enter.  The kernel take_deliverable picks
-    the lowest pending&!blocked each syscall-return; to add masking the
-    trampoline/kernel would need to save+restore the blocked mask around
-    handler execution.  Deferred: needs the SignalContext to also carry
-    the saved blocked mask, and SYS_SIGNAL_RETURN to restore it.
+  * Auto-masking of the delivered signal during its handler: IMPLEMENTED
+    (2026-05-29) entirely in userspace, no kernel/ABI change required.
+    dispatch_self_signal() now (a) leaves a blocked signal pending
+    instead of delivering it, and (b) before invoking a handler, unions
+    the delivered signal (unless SA_NODEFER) + the handler's sa_mask into
+    BLOCKED_MASK and mirrors it to the kernel via SYS_SIGNAL_MASK, then
+    restores the previous mask after the handler returns.  This prevents
+    re-entrancy on both paths: a synchronous re-raise finds the signal
+    blocked → pending, and an async redelivery is suppressed by the
+    kernel honouring the pushed mask for the handler's duration.
+    SA_RESETHAND resets the disposition to SIG_DFL before the handler
+    runs.  The decision logic is factored into the pure plan_self_dispatch()
+    (unit-tested) so dispatch_self_signal() is a thin executor.
+    Known gap: if a handler escapes via longjmp (not siglongjmp) the
+    post-handler mask restore is skipped — siglongjmp would be needed to
+    restore the mask.  Acceptable; documented for when sigsetjmp lands.
   * sigaltstack is accepted but ignored — handlers run on the normal
     stack.  The kernel builds the SignalContext at (user_rsp - ctxsize)
     & !0xF.  Honoring SS_ONSTACK would require the kernel to know the

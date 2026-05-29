@@ -145,6 +145,9 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
     // Write the magic signature at bytes 8..12 using volatile stores.
     // Volatile prevents the optimizer from dead-store-eliminating these
     // writes even with full LTO visibility.
+    // SAFETY: ptr is valid for class_size bytes (>= 16), so offsets
+    // 8..12 are in-bounds.  We have exclusive access to this slot
+    // (it's being freed — the caller no longer uses it).
     unsafe {
         core::ptr::write_volatile(ptr.add(8), POISON_MAGIC[0]);
         core::ptr::write_volatile(ptr.add(9), POISON_MAGIC[1]);
@@ -153,6 +156,8 @@ unsafe fn poison_free(ptr: *mut u8, class_size: usize) -> bool {
     }
     // Fill bytes 12..class_size with FREE_POISON.
     for i in 12..class_size {
+        // SAFETY: ptr is valid for class_size bytes and i < class_size,
+        // so ptr.add(i) is in-bounds.  Volatile prevents DSE.
         unsafe {
             core::ptr::write_volatile(ptr.add(i), FREE_POISON);
         }
@@ -200,6 +205,8 @@ unsafe fn check_redzone(ptr: *mut u8, alloc_size: usize, class_size: usize) {
     // Scan bytes from alloc_size to class_size for corruption.
     // Use volatile reads to prevent optimizer from constant-propagating.
     for i in alloc_size..class_size {
+        // SAFETY: ptr is valid for class_size bytes (precondition) and
+        // i < class_size, so ptr.add(i) is in-bounds.
         let byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
         if byte != ALLOC_POISON {
             REDZONE_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
@@ -241,6 +248,8 @@ unsafe fn check_poison(ptr: *mut u8, class_size: usize) {
     // the optimizer from constant-propagating through dealloc→alloc
     // boundaries (it can't assume it knows what's at ptr+8 even with
     // full LTO visibility into poison_free).
+    // SAFETY: ptr is valid for class_size bytes (>= 16, checked above),
+    // so offsets 8..12 are in-bounds.  Read-only access, no aliasing.
     let m0 = unsafe { core::ptr::read_volatile(ptr.add(8)) };
     let m1 = unsafe { core::ptr::read_volatile(ptr.add(9)) };
     let m2 = unsafe { core::ptr::read_volatile(ptr.add(10)) };
@@ -256,6 +265,8 @@ unsafe fn check_poison(ptr: *mut u8, class_size: usize) {
         return;
     }
     for i in 12..class_size {
+        // SAFETY: ptr is valid for class_size bytes (precondition) and
+        // i < class_size, so ptr.add(i) is in-bounds.
         let byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
         if byte != FREE_POISON {
             POISON_VIOLATIONS.fetch_add(1, Ordering::Relaxed);
@@ -489,8 +500,10 @@ impl HeapInner {
         // Slab poisoning: check free-poison integrity, then alloc-poison.
         if POISON_ENABLED.load(Ordering::Relaxed) {
             let class_size = SIZE_CLASSES[class_idx];
-            // SAFETY: ptr is a valid slab slot of class_size bytes.
+            // SAFETY: ptr is a valid slab slot of class_size bytes
+            // (just popped from the free list which holds HHDM-mapped slots).
             unsafe { check_poison(ptr, class_size); }
+            // SAFETY: same ptr, same class_size — still valid.
             unsafe { poison_alloc(ptr, class_size); }
         }
         ptr
@@ -732,7 +745,11 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         // then fill with alloc-poison (uninitialized-read detection).
         if POISON_ENABLED.load(Ordering::Relaxed) {
             let class_size = SIZE_CLASSES[class_idx];
+            // SAFETY: ptr (cast from slot_ptr) is a valid slab slot of
+            // class_size bytes — it was on the per-CPU free list, which
+            // only contains HHDM-mapped allocator-owned memory.
             unsafe { check_poison(ptr, class_size); }
+            // SAFETY: same ptr, same class_size — still valid.
             unsafe { poison_alloc(ptr, class_size); }
         }
         return ptr;
@@ -754,6 +771,8 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         // Pop from global, push to local.
         // SAFETY: head is non-null, points to valid HHDM memory.
         inner.free_lists[class_idx] = unsafe { (*head).next };
+        // SAFETY: head is a valid FreeSlot (just read from global list).
+        // Writing .next to re-link it into the per-CPU list is safe.
         unsafe { (*head).next = cache.heads[class_idx] as *mut FreeSlot; }
         cache.heads[class_idx] = head as usize;
         transferred += 1;
@@ -775,7 +794,12 @@ unsafe fn pcpu_slab_alloc(class_idx: usize) -> *mut u8 {
         let ptr = slot_ptr.cast::<u8>();
         if POISON_ENABLED.load(Ordering::Relaxed) {
             let class_size = SIZE_CLASSES[class_idx];
+            // SAFETY: ptr (cast from slot_ptr) is a valid slab slot —
+            // just transferred from the global free list to the per-CPU
+            // cache.  All free-list entries are HHDM-mapped and owned
+            // by the allocator.
             unsafe { check_poison(ptr, class_size); }
+            // SAFETY: same ptr, same class_size — still valid.
             unsafe { poison_alloc(ptr, class_size); }
         }
         ptr
@@ -816,6 +840,8 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
     // on a free list and re-adding would create a cycle.
     if POISON_ENABLED.load(Ordering::Relaxed) {
         let class_size = SIZE_CLASSES[class_idx];
+        // SAFETY: ptr was allocated from the slab for class_idx (caller
+        // guarantee), so it points to a valid slot of class_size bytes.
         let is_double_free = unsafe { poison_free(ptr, class_size) };
         if is_double_free {
             cache.active = false;
@@ -847,6 +873,8 @@ unsafe fn pcpu_slab_dealloc(ptr: *mut u8, class_idx: usize) -> bool {
         cache.heads[class_idx] = unsafe { (*slot_ptr).next } as usize;
         cache.counts[class_idx] -= 1;
         // Push to global free list.
+        // SAFETY: slot_ptr is valid (popped from per-CPU cache above).
+        // Writing .next to re-link it into the global free list is safe.
         unsafe { (*slot_ptr).next = inner.free_lists[class_idx]; }
         inner.free_lists[class_idx] = slot_ptr;
     }
@@ -1412,6 +1440,8 @@ pub fn audit_free_lists() -> HeapAuditResult {
             if fast_addr < hhdm_base as usize || fast.is_null() {
                 break;
             }
+            // SAFETY: fast is non-null and above hhdm_base (checked above),
+            // so it points to a valid HHDM-mapped FreeSlot.
             fast = unsafe { (*fast).next };
             if fast.is_null() {
                 break;
@@ -1421,6 +1451,7 @@ pub fn audit_free_lists() -> HeapAuditResult {
                 bad_ptrs += 1;
                 break;
             }
+            // SAFETY: fast is non-null and above hhdm_base (checked above).
             fast = unsafe { (*fast).next };
             if fast.is_null() {
                 break;
@@ -1571,6 +1602,9 @@ pub fn self_test() -> KernelResult<()> {
 /// it itself wrote — eliminating the double-free detection branch.
 #[inline(never)]
 fn double_free_slot(ptr: *mut u8, layout: Layout) {
+    // SAFETY: ptr was previously allocated with this layout.  This is
+    // an intentional double-free to test detection — UB in normal code,
+    // but the slab poison system is designed to catch and handle it.
     unsafe { alloc::alloc::dealloc(ptr, layout); }
 }
 
@@ -1587,6 +1621,8 @@ fn corrupt_and_realloc(slot_addr: usize, layout: Layout) -> *mut u8 {
         );
     }
     // Allocate — LIFO guarantees we get the same slot back.
+    // SAFETY: layout is valid (constructed with from_size_align).
+    // The global allocator is initialized.
     unsafe { alloc::alloc::alloc(layout) }
 }
 
@@ -1601,6 +1637,9 @@ pub fn poison_self_test() {
     // The per-CPU cache returns the most-recently-freed slot on the next
     // alloc of the same size class — but only if no ISR steals it first.
     let layout = Layout::from_size_align(64, 8).unwrap();
+    // SAFETY: disabling interrupts is required to ensure LIFO slot reuse
+    // in the per-CPU slab cache (no ISR can steal the slot between free
+    // and re-alloc).  Restored at the end of the test.
     unsafe { crate::cpu::cli(); }
 
     // --- Test 1: Normal cycle (no false positives) ---
@@ -1608,17 +1647,23 @@ pub fn poison_self_test() {
     // "Warmup" cycle: prime a slot with the poison magic.  The first
     // alloc from the per-CPU cache may grab a virgin slot (from batch
     // refill) that was never freed through the poison path.
+    // SAFETY: layout is valid (64 bytes, align 8).  Allocator is initialized.
     let warmup = unsafe { alloc::alloc::alloc(layout) };
     assert!(!warmup.is_null(), "poison test: warmup alloc failed");
+    // SAFETY: warmup was just allocated with this layout and is non-null.
     unsafe { alloc::alloc::dealloc(warmup, layout); }
     let violations_after_warmup = POISON_VIOLATIONS.load(Ordering::Relaxed);
 
     // Now alloc → write → dealloc → realloc.  The realloc should NOT
     // trigger a violation (poison was written on free and not disturbed).
+    // SAFETY: layout is valid, allocator initialized.
     let p1 = unsafe { alloc::alloc::alloc(layout) };
     assert!(!p1.is_null(), "poison test: alloc failed");
+    // SAFETY: p1 is non-null and points to 64 allocated bytes.
     unsafe { p1.write_bytes(0x42, 64); }
+    // SAFETY: p1 was allocated with this layout.
     unsafe { alloc::alloc::dealloc(p1, layout); }
+    // SAFETY: layout is valid, allocator initialized.
     let p2 = unsafe { alloc::alloc::alloc(layout) };
     assert!(!p2.is_null(), "poison test: realloc failed");
     let violations_after_normal = POISON_VIOLATIONS.load(Ordering::Relaxed);
@@ -1639,6 +1684,7 @@ pub fn poison_self_test() {
     // through it even with write_volatile.  The usize round-trip
     // breaks provenance tracking so the store is guaranteed.
     let p2_addr = p2 as usize;
+    // SAFETY: p2 was allocated with this layout and is non-null.
     unsafe { alloc::alloc::dealloc(p2, layout); }
     let violations_pre_uaf = POISON_VIOLATIONS.load(Ordering::Relaxed);
     // BAD: simulate use-after-free by writing to the freed slot.
@@ -1657,6 +1703,7 @@ pub fn poison_self_test() {
         violations_pre_uaf + 1,
         "poison test: UAF not detected (violations didn't increment)"
     );
+    // SAFETY: p4 was allocated by corrupt_and_realloc with this layout.
     unsafe { alloc::alloc::dealloc(p4, layout); }
     serial_println!("[heap]   Use-after-free detection: OK (violation caught)");
 
@@ -1664,8 +1711,10 @@ pub fn poison_self_test() {
     //
     // Allocate, free, then free again.  The second free should detect
     // that the slot already has the poison magic (from the first free).
+    // SAFETY: layout is valid, allocator initialized.
     let p5 = unsafe { alloc::alloc::alloc(layout) };
     assert!(!p5.is_null(), "poison test: alloc for double-free test failed");
+    // SAFETY: p5 was allocated with this layout and is non-null.
     unsafe { alloc::alloc::dealloc(p5, layout); }
     let df_pre = DOUBLE_FREE_VIOLATIONS.load(Ordering::Relaxed);
     // Second free via isolated #[inline(never)] helper — prevents LTO
@@ -1688,13 +1737,18 @@ pub fn poison_self_test() {
     // the red zone (bytes 40..64), then free.  The free should detect
     // that the red zone was corrupted.
     let layout40 = Layout::from_size_align(40, 8).unwrap();
+    // SAFETY: layout40 is valid, allocator initialized.
     let p6 = unsafe { alloc::alloc::alloc(layout40) };
     assert!(!p6.is_null(), "poison test: alloc for redzone test failed");
     let rz_pre = REDZONE_VIOLATIONS.load(Ordering::Relaxed);
     // Simulate buffer overflow: write past the 40-byte allocation
     // into the red zone (byte 44 is in the gap between 40 and 64).
+    // SAFETY: p6 points to a 64-byte slab slot (class size for 40-byte
+    // alloc).  Offset 44 is within the slot but past the allocation —
+    // intentional corruption for testing the red zone detector.
     unsafe { core::ptr::write_volatile(p6.add(44), 0x42); }
     // Free triggers red zone check — should detect corruption at byte 44.
+    // SAFETY: p6 was allocated with layout40.
     unsafe { alloc::alloc::dealloc(p6, layout40); }
     let rz_post = REDZONE_VIOLATIONS.load(Ordering::Relaxed);
     assert_eq!(
@@ -1704,6 +1758,8 @@ pub fn poison_self_test() {
     );
     serial_println!("[heap]   Buffer overflow (red zone) detection: OK");
 
+    // SAFETY: restoring the interrupt state disabled at the start of
+    // this test.  All allocations have been freed.
     unsafe { crate::cpu::sti(); }
 
     // Restore previous state.

@@ -738,7 +738,10 @@ pub fn translate_flags(pml4_phys: u64, virt: VirtAddr) -> Option<PageFlags> {
         return None;
     }
 
-    // SAFETY: pml4_phys from CR3 or our allocation.
+    // SAFETY for all read_entry calls below: each table physical address
+    // is either pml4_phys (from CR3 or our allocation) or extracted from
+    // a present parent entry via phys_addr().  The index is computed from
+    // the canonical virtual address.  hhdm converts phys→virt correctly.
     let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
     if !pml4e.is_present() {
         return None;
@@ -1118,6 +1121,9 @@ pub unsafe fn change_flags(
     }
 
     // Walk to the PT (no creation).
+    // SAFETY for all read_entry calls: each table address is either
+    // pml4_phys (caller-provided, valid per fn safety contract) or from
+    // a present parent entry.  Indices from canonical virt address.
     let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
     if !pml4e.is_present() {
         return Err(KernelError::InvalidAddress);
@@ -1138,6 +1144,7 @@ pub unsafe fn change_flags(
 
     // Update all 4 PTEs: keep the physical address, replace the flags.
     for i in 0..HW_PAGES_PER_FRAME {
+        // SAFETY: pt valid from present pde, index < 512.
         let pte = unsafe { read_entry(pt, base_pt_index + i, hhdm) };
         if !pte.is_present() {
             return Err(KernelError::InvalidAddress);
@@ -1183,8 +1190,10 @@ pub fn read_leaf_pte(pml4_phys: u64, virt: VirtAddr) -> Option<PageTableEntry> {
         return None;
     }
 
-    // SAFETY: pml4_phys is valid (caller guarantee), indices from VirtAddr
-    // are always 0..511, and hhdm is valid (checked above).
+    // SAFETY for all read_entry calls: pml4_phys is valid (caller
+    // guarantee), each subsequent table address is from a present parent
+    // entry via phys_addr().  Indices from VirtAddr are always 0..511.
+    // hhdm is valid (checked above).
     let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
     if !pml4e.is_present() {
         return None;
@@ -1242,6 +1251,9 @@ pub unsafe fn write_swap_entries(
     }
 
     // Walk to PT (no creation — must already exist).
+    // SAFETY for all read_entry calls: pml4_phys valid per fn safety
+    // contract; each subsequent table address is from a present parent
+    // entry.  Indices from canonical VirtAddr are always 0..511.
     let pml4e = unsafe { read_entry(pml4_phys, virt.pml4_index(), hhdm) };
     if !pml4e.is_present() {
         return Err(KernelError::InvalidAddress);
@@ -1493,6 +1505,8 @@ pub unsafe fn destroy_user_address_space(pml4_phys: u64) {
     unsafe { clear_user_address_space(pml4_phys); }
 
     // Free the PML4 page itself.
+    // SAFETY: pml4_phys was allocated by alloc_pml4 (caller contract)
+    // and clear_user_address_space just released all child pages.
     unsafe { free_pml4(pml4_phys); }
 }
 
@@ -1540,6 +1554,7 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
         let pdpt_phys = pml4e.phys_addr();
 
         for pdpt_idx in 0..ENTRIES_PER_TABLE {
+            // SAFETY: pdpt_phys is from present pml4e, index < 512.
             let pdpte = unsafe { read_entry(pdpt_phys, pdpt_idx, hhdm) };
             if !pdpte.is_present() {
                 continue;
@@ -1553,6 +1568,7 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
             let pd_phys = pdpte.phys_addr();
 
             for pd_idx in 0..ENTRIES_PER_TABLE {
+                // SAFETY: pd_phys is from present pdpte, index < 512.
                 let pde = unsafe { read_entry(pd_phys, pd_idx, hhdm) };
                 if !pde.is_present() {
                     continue;
@@ -1568,6 +1584,7 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
                 // Our 16 KiB frames are always mapped as 4 consecutive
                 // 4 KiB PTEs with the first aligned to a multiple of 4.
                 for base_pt_idx in (0..ENTRIES_PER_TABLE).step_by(HW_PAGES_PER_FRAME) {
+                    // SAFETY: pt_phys is from present pde, index < 512.
                     let pte = unsafe { read_entry(pt_phys, base_pt_idx, hhdm) };
                     if !pte.is_present() {
                         continue;
@@ -1594,14 +1611,19 @@ pub unsafe fn clear_user_address_space(pml4_phys: u64) {
 
             // Free the PD page.
             let mut pool = PT_PAGE_POOL.lock();
+            // SAFETY: pd_phys was allocated for this process's page
+            // tables and all child PT pages have been freed above.
             unsafe { pool._free(pd_phys); }
         }
 
         // Free the PDPT page.
         let mut pool = PT_PAGE_POOL.lock();
+        // SAFETY: pdpt_phys was allocated for this process and all
+        // child PD pages have been freed above.
         unsafe { pool._free(pdpt_phys); }
 
         // Zero the PML4 entry so the user half is clean.
+        // SAFETY: pml4_phys valid, pml4_idx < 256 (loop bound), hhdm valid.
         unsafe { write_entry(pml4_phys, pml4_idx, PageTableEntry::EMPTY, hhdm); }
     }
 }
@@ -1772,11 +1794,14 @@ pub fn self_test() -> KernelResult<()> {
                 test_frame.addr(),
                 phys
             );
+            // SAFETY: test_frame was just allocated and is being freed
+            // on the error path before returning.
             unsafe { frame::free_frame(test_frame)?; }
             return Err(KernelError::InternalError);
         }
         None => {
             serial_println!("[pt]   FAIL: HHDM address {} not mapped", hhdm_virt);
+            // SAFETY: test_frame was just allocated; freed on error.
             unsafe { frame::free_frame(test_frame)?; }
             return Err(KernelError::InternalError);
         }
@@ -1823,6 +1848,8 @@ fn test_map_unmap(pml4_phys: u64, test_frame: PhysFrame, hhdm: u64) -> KernelRes
             "[pt]   SKIP: test address {:#x} already mapped",
             TEST_MAP_BASE
         );
+        // SAFETY: test_frame was just allocated; freed because the
+        // test address is already in use.
         unsafe { frame::free_frame(test_frame)?; }
         return Ok(());
     }
@@ -1878,11 +1905,15 @@ fn test_map_unmap(pml4_phys: u64, test_frame: PhysFrame, hhdm: u64) -> KernelRes
     // -- Change flags: remove WRITABLE, verify in PTE --------------------------
     let ro_flags = PageFlags::PRESENT | PageFlags::GLOBAL | PageFlags::NO_EXECUTE;
 
+    // SAFETY: pml4_phys is the active PML4, test_virt is mapped (we just
+    // mapped it above).  change_flags only modifies leaf PTE flags.
     unsafe {
         change_flags(pml4_phys, test_virt, ro_flags)?;
         flush_frame(test_virt);
     }
 
+    // SAFETY for read_entry calls: pml4_phys is the active PML4; each
+    // subsequent table address is from a present parent entry.
     let pml4e = unsafe { read_entry(pml4_phys, test_virt.pml4_index(), hhdm) };
     let pdpte = unsafe {
         read_entry(pml4e.phys_addr(), test_virt.pdpt_index(), hhdm)
@@ -1905,7 +1936,9 @@ fn test_map_unmap(pml4_phys: u64, test_frame: PhysFrame, hhdm: u64) -> KernelRes
     serial_println!("[pt]   Change flags (remove WRITABLE): OK");
 
     // -- Unmap and verify ------------------------------------------------------
+    // SAFETY: pml4_phys is the active PML4, test_virt was mapped above.
     let unmapped = unsafe { unmap_frame(pml4_phys, test_virt)? };
+    // SAFETY: TLB flush after unmap to ensure stale translations are gone.
     unsafe { flush_frame(test_virt); }
 
     if unmapped != test_frame {
@@ -1957,6 +1990,7 @@ fn test_double_map_rollback(pml4_phys: u64) -> KernelResult<()> {
     );
 
     // Try to map frame2 at the same address (base1) — should fail.
+    // SAFETY: testing double-map error path; frames and PML4 are valid.
     let result = unsafe {
         map_frame(pml4_phys, VirtAddr::new(base1), frame2, flags)
     };
@@ -1973,6 +2007,7 @@ fn test_double_map_rollback(pml4_phys: u64) -> KernelResult<()> {
     );
 
     // Map frame2 at base2 (different address) — should succeed.
+    // SAFETY: base2 is unmapped, frame2 and PML4 are valid.
     unsafe {
         map_frame(pml4_phys, VirtAddr::new(base2), frame2, flags)?;
         flush_frame(VirtAddr::new(base2));
@@ -1983,14 +2018,17 @@ fn test_double_map_rollback(pml4_phys: u64) -> KernelResult<()> {
     );
 
     // Cleanup: unmap both and free.
+    // SAFETY: both addresses were mapped above.
     let r1 = unsafe { unmap_frame(pml4_phys, VirtAddr::new(base1))? };
     let r2 = unsafe { unmap_frame(pml4_phys, VirtAddr::new(base2))? };
+    // SAFETY: TLB flush after unmap.
     unsafe {
         flush_frame(VirtAddr::new(base1));
         flush_frame(VirtAddr::new(base2));
     }
     assert!(r1 == frame1, "unmap base1 should return frame1");
     assert!(r2 == frame2, "unmap base2 should return frame2");
+    // SAFETY: frames were just unmapped and no longer referenced.
     unsafe {
         frame::free_frame(frame1)?;
         frame::free_frame(frame2)?;

@@ -2,22 +2,30 @@
 //!
 //! Implements the SHA-256 (`$5$`) and SHA-512 (`$6$`) crypt methods —
 //! the modern shadow-suite defaults — following Ulrich Drepper's
-//! specification ("Unix crypt using SHA-256 and SHA-512").  The hash
-//! cores live in [`crate::sha2`]; this module implements the salt/rounds
-//! parsing, the key-derivation rounds, and the crypt base-64 encoding.
+//! specification ("Unix crypt using SHA-256 and SHA-512"), plus legacy
+//! MD5 crypt (`$1$`, Poul-Henning Kamp's algorithm).  The hash cores
+//! live in [`crate::sha2`] and [`crate::md5`]; this module implements the
+//! salt/rounds parsing, the key-derivation rounds, and the crypt base-64
+//! encoding.
 //!
 //! Previously `crypt()` returned `"$0$<key>"` — i.e. the password in
 //! cleartext with a marker prefix.  Any program that hashed a password
 //! and stored the result was effectively storing the plaintext.  That
 //! was a security hole, now closed.
 //!
+//! ## Method strength
+//!
+//! `$6$` (SHA-512) is the recommended default.  `$1$` (MD5) is
+//! cryptographically broken and is supported only so the OS can verify
+//! existing `$1$` entries in legacy `/etc/shadow` files — never use it
+//! for new passwords.
+//!
 //! ## Unsupported methods
 //!
-//! Legacy DES (two-character salt) and MD5 (`$1$`) crypt are **not**
-//! implemented.  Rather than fabricate an insecure result, `crypt()`
-//! fails with `EINVAL` for any setting it does not recognise — matching
-//! modern glibc/libxcrypt behaviour.  (See `todo.txt` for the MD5/DES
-//! follow-up.)
+//! Legacy DES (two-character salt) crypt is **not** implemented.  Rather
+//! than fabricate an insecure result, `crypt()` fails with `EINVAL` for
+//! any setting it does not recognise — matching modern glibc/libxcrypt
+//! behaviour.  (See `todo.txt` for the DES follow-up.)
 //!
 //! `encrypt`/`setkey` (raw DES block cipher) remain unimplemented and
 //! return `ENOSYS` after argument validation.
@@ -26,6 +34,7 @@
 #![allow(clippy::indexing_slicing)] // Fixed-size digest arrays indexed by compile-time constants.
 
 use crate::errno;
+use crate::md5::Md5;
 use crate::sha2::{Digest, Sha256, Sha512};
 
 /// Maximum length of a crypt result string (including the NUL terminator).
@@ -49,8 +58,10 @@ const ROUNDS_DEFAULT: u32 = 5000;
 const ROUNDS_MIN: u32 = 1000;
 /// Maximum permitted rounds (values above are clamped down).
 const ROUNDS_MAX: u32 = 999_999_999;
-/// Maximum salt length in bytes (longer salts are truncated).
+/// Maximum salt length in bytes for SHA-crypt (longer salts truncated).
 const SALT_MAX: usize = 16;
+/// Maximum salt length in bytes for MD5 crypt (`$1$`).
+const MD5_SALT_MAX: usize = 8;
 
 // ---------------------------------------------------------------------------
 // Fixed-capacity output builder
@@ -328,6 +339,107 @@ fn sha_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
     true
 }
 
+/// Parse an MD5-crypt (`$1$`) `setting` and, if recognised, compute the
+/// full result (`"$1$salt$hash"`) into `out`.
+///
+/// Returns `true` if `setting` selected MD5 crypt and the result was
+/// written; `false` otherwise (caller tries the next method).
+///
+/// Implements Poul-Henning Kamp's md5crypt exactly (including the
+/// deliberately-obscure key-length bit loop, in which the running
+/// digest has been zeroed before being mixed in).
+fn md5_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
+    let Some(rest) = setting.strip_prefix(b"$1$") else {
+        return false;
+    };
+
+    // Salt = bytes up to the first '$', capped at MD5_SALT_MAX.
+    let mut salt_end = 0;
+    while salt_end < rest.len() && rest[salt_end] != b'$' {
+        salt_end += 1;
+    }
+    let salt = &rest[..core::cmp::min(salt_end, MD5_SALT_MAX)];
+
+    // Primary context: H(key || "$1$" || salt).
+    let mut ctx = Md5::new();
+    ctx.update(key);
+    ctx.update(b"$1$");
+    ctx.update(salt);
+
+    // alt = H(key || salt || key).
+    let alt = {
+        let mut h = Md5::new();
+        h.update(key);
+        h.update(salt);
+        h.update(key);
+        h.finalize()
+    };
+
+    // Mix in key.len() bytes of `alt`, 16 at a time.
+    let mut pl = key.len();
+    while pl > 0 {
+        let n = core::cmp::min(pl, Md5::OUTPUT_LEN);
+        ctx.update(&alt[..n]);
+        pl -= n;
+    }
+
+    // For each bit of key.len() (low -> high): set bit adds a zero byte,
+    // clear bit adds key[0].  (key[0] is only reached when key is
+    // non-empty, since the loop runs only while bits != 0.)
+    let mut bits = key.len();
+    while bits != 0 {
+        if bits & 1 != 0 {
+            ctx.update(&[0u8]);
+        } else {
+            ctx.update(&key[..1]);
+        }
+        bits >>= 1;
+    }
+    let mut digest = ctx.finalize();
+
+    // 1000 rounds of recombination to slow brute force.
+    for i in 0usize..1000 {
+        let mut c = Md5::new();
+        if i & 1 != 0 {
+            c.update(key);
+        } else {
+            c.update(&digest);
+        }
+        if i % 3 != 0 {
+            c.update(salt);
+        }
+        if i % 7 != 0 {
+            c.update(key);
+        }
+        if i & 1 != 0 {
+            c.update(&digest);
+        } else {
+            c.update(key);
+        }
+        digest = c.finalize();
+    }
+
+    // "$1$salt$" + 22-character md5crypt base64.
+    out.push_slice(b"$1$");
+    out.push_slice(salt);
+    out.push(b'$');
+    let f = &digest;
+    b64_from_24bit(out, f[0], f[6], f[12], 4);
+    b64_from_24bit(out, f[1], f[7], f[13], 4);
+    b64_from_24bit(out, f[2], f[8], f[14], 4);
+    b64_from_24bit(out, f[3], f[9], f[15], 4);
+    b64_from_24bit(out, f[4], f[10], f[5], 4);
+    b64_from_24bit(out, 0, 0, f[11], 2);
+    out.push(0); // NUL terminator
+    true
+}
+
+/// Dispatch a crypt `setting` to the matching method, writing the result
+/// into `out`.  Returns `false` if no supported method recognises it.
+fn compute_crypt(key: &[u8], setting: &[u8], out: &mut OutBuf) -> bool {
+    md5_crypt(key, setting, out) || sha_crypt(key, setting, out)
+}
+
 /// View a NUL-terminated C string as a byte slice (excluding the NUL).
 ///
 /// # Safety
@@ -346,9 +458,9 @@ unsafe fn cstr_slice<'a>(p: *const u8) -> &'a [u8] {
 
 /// `crypt` — one-way password hashing.
 ///
-/// Supports `$5$` (SHA-256) and `$6$` (SHA-512) settings, with optional
-/// `rounds=N$`.  Returns a pointer to a static buffer (overwritten by
-/// each call), or null on error:
+/// Supports `$1$` (MD5), `$5$` (SHA-256), and `$6$` (SHA-512) settings;
+/// the SHA methods accept an optional `rounds=N$`.  Returns a pointer to
+/// a static buffer (overwritten by each call), or null on error:
 ///
 /// * `EFAULT` — `key` or `salt` is null.
 /// * `EINVAL` — `salt` does not select a supported method.
@@ -366,7 +478,7 @@ pub extern "C" fn crypt(key: *const u8, salt: *const u8) -> *mut u8 {
     let salt_s = unsafe { cstr_slice(salt) };
 
     let mut out = OutBuf::new();
-    if !sha_crypt(key_s, salt_s, &mut out) {
+    if !compute_crypt(key_s, salt_s, &mut out) {
         errno::set_errno(errno::EINVAL);
         return core::ptr::null_mut();
     }
@@ -401,7 +513,7 @@ pub extern "C" fn crypt_r(key: *const u8, salt: *const u8, data: *mut u8) -> *mu
     let salt_s = unsafe { cstr_slice(salt) };
 
     let mut out = OutBuf::new();
-    if !sha_crypt(key_s, salt_s, &mut out) {
+    if !compute_crypt(key_s, salt_s, &mut out) {
         errno::set_errno(errno::EINVAL);
         return core::ptr::null_mut();
     }
@@ -592,14 +704,47 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
+    // -----------------------------------------------------------------------
+    // MD5 ($1$) — vectors verified against OpenSSL 3.5 `passwd -1`
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn md5_method_einval() {
-        // MD5 ($1$) is not implemented yet — must fail, not fabricate.
+    fn md5_known_vector() {
         let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        crate::errno::set_errno(0);
-        let r = crypt(b"password\0".as_ptr(), b"$1$salt\0".as_ptr());
-        assert!(r.is_null());
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+        // salt "saltstri" (8 chars, the MD5 max).
+        let r = crypt_str(b"Hello world!\0", b"$1$saltstri\0").unwrap();
+        assert_eq!(r, "$1$saltstri$YMyguxXMBpd2TEZ.vS/3q1");
+    }
+
+    #[test]
+    fn md5_known_vector_password() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let r = crypt_str(b"password\0", b"$1$abcdefgh\0").unwrap();
+        assert_eq!(r, "$1$abcdefgh$G//4keteveJp0qb8z2DxG/");
+    }
+
+    #[test]
+    fn md5_empty_salt() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let r = crypt_str(b"test\0", b"$1$\0").unwrap();
+        assert_eq!(r, "$1$$whuMjZj.HMFoaTaZRRtkO0");
+    }
+
+    #[test]
+    fn md5_salt_truncated_to_eight() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Passing a >8-char salt must behave as if truncated to 8 chars.
+        let full = crypt_str(b"pw\0", b"$1$abcdefghIGNORED\0").unwrap();
+        let trunc = crypt_str(b"pw\0", b"$1$abcdefgh\0").unwrap();
+        assert_eq!(full, trunc);
+        assert!(full.starts_with("$1$abcdefgh$"));
+    }
+
+    #[test]
+    fn md5_not_plaintext() {
+        let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let r = crypt_str(b"plaintextpassword\0", b"$1$somesalt\0").unwrap();
+        assert!(!r.contains("plaintextpassword"));
     }
 
     #[test]

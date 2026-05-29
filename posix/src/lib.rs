@@ -252,6 +252,7 @@ pub mod linux_limits;
 pub mod ioctl;
 pub mod malloc;
 pub mod math;
+pub mod md5;
 pub mod fdtable;
 pub mod file;
 pub mod langinfo;

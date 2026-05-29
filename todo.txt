@@ -396,12 +396,14 @@ Remaining net improvements (diminishing returns):
   encoding.  Verified against the canonical Drepper $5$/$6$ test vectors.
   Sequences P and S are fed incrementally (add_repeated) so no unbounded
   stack/heap buffer is needed regardless of password length.
-  FOLLOW-UP: MD5 crypt ($1$) and legacy DES (2-char salt) are still
-  unimplemented.  Rather than fabricate an insecure result, crypt() now
-  returns NULL + EINVAL for any unrecognised setting (matches modern
-  glibc/libxcrypt).  Implement $1$ (md5-crypt) and DES if a ported
-  program needs to verify legacy /etc/shadow entries; both are
-  well-specified and host-testable like the SHA variants.
+  FOLLOW-UP (DONE 2026-05-29): MD5 crypt ($1$) now implemented too —
+  Poul-Henning Kamp's md5crypt, new MD5 core in posix/src/md5.rs (RFC
+  1321 vectors), verified against OpenSSL 3.5 `passwd -1`.  crypt() now
+  dispatches $1$/$5$/$6$.  Only legacy DES (2-char salt) remains
+  unimplemented; it returns NULL + EINVAL rather than a fake result.
+  Implement DES crypt only if a ported program must verify ancient
+  DES-format /etc/shadow entries (low priority; DES crypt is obsolete
+  and insecure).
 
 - (FIXED 2026-05-27) crypt::tests parallel-test race: crypt() returns
   a pointer into a single process-global static buffer, so cargo's

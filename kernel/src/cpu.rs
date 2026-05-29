@@ -330,6 +330,7 @@ fn detect_cache_amd() {
             .saturating_mul(sets);
 
         if idx < MAX_CACHE_LEVELS {
+            // SAFETY: idx < MAX_CACHE_LEVELS; init runs single-threaded at boot.
             unsafe {
                 CACHE_TOPOLOGY[idx] = CacheInfo {
                     level,

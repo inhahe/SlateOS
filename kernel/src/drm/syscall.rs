@@ -261,6 +261,7 @@ pub fn sys_drm_gem_mmap(args: &SyscallArgs) -> SyscallResult {
             // Rollback: unmap frames 0..i.
             for j in 0..i {
                 let rv = base_vaddr + (j as u64) * frame_size_u64;
+                // SAFETY: rv was successfully mapped in a prior iteration; pml4 is valid.
                 let _ = unsafe {
                     page_table::unmap_frame(pml4_phys, VirtAddr::new(rv))
                 };

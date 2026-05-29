@@ -267,6 +267,7 @@ pub fn get(label: u8) -> Option<Snapshot> {
         return None;
     }
 
+    // SAFETY: slot is 0 or 1, always < STORE_SIZE (2); STORE uses UnsafeCell.
     let snap = unsafe {
         let ptr = STORE.0.get() as *const Snapshot;
         ptr.add(slot).read()
@@ -306,6 +307,7 @@ pub fn diff(from_label: u8, to_label: u8) -> Option<SnapshotDiff> {
 
 /// Clear both snapshot slots.
 pub fn clear() {
+    // SAFETY: Slots 0 and 1 are within STORE_SIZE (2); UnsafeCell write.
     unsafe {
         let ptr = STORE.0.get() as *mut Snapshot;
         ptr.add(0).write(Snapshot::empty());

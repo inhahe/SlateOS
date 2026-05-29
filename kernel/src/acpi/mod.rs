@@ -370,10 +370,12 @@ pub unsafe fn init(
         if !use_xsdt {
             // XSDT address is zero — fall back to RSDT.
             let rsdp = rsdp_virt as *const tables::Rsdp;
+            // SAFETY: RSDP validation passed; rsdt_address is always valid.
             root_table_phys = u64::from(unsafe { (*rsdp).rsdt_address });
         }
     } else {
         let rsdp = rsdp_virt as *const tables::Rsdp;
+        // SAFETY: RSDP validation passed; rsdt_address is always present.
         root_table_phys = u64::from(unsafe { (*rsdp).rsdt_address });
         use_xsdt = false;
     }

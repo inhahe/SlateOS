@@ -306,6 +306,7 @@ pub fn force_unmask(irq: usize) {
         state.cooldown_secs.store(COOLDOWN_SECONDS, Ordering::Relaxed);
 
         #[allow(clippy::cast_possible_truncation)]
+        // SAFETY: irq is a valid IRQ line; unmasking re-enables it after cooldown.
         unsafe {
             crate::ioapic::unmask_irq(irq as u8);
         }

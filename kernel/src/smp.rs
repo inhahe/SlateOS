@@ -720,6 +720,7 @@ unsafe fn remove_identity_mapping(pml4_phys: u64) {
 extern "C" fn ap_entry() -> ! {
     // Read our CPU index from the trampoline data area.
     // This is still identity-mapped, so we can access it directly.
+    // SAFETY: Trampoline area at TRAMPOLINE_PHYS is identity-mapped; data is set by BSP.
     let cpu_index = unsafe {
         let addr = (TRAMPOLINE_PHYS + DATA_CPU_IDX as u64) as *const u32;
         core::ptr::read_volatile(addr) as usize

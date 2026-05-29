@@ -131,6 +131,7 @@ pub fn print_from(start_rbp: u64) {
 #[allow(dead_code)]
 pub fn print_current() {
     let rbp: u64;
+    // SAFETY: reading RBP is always valid in ring 0; gives us the frame pointer.
     unsafe {
         core::arch::asm!("mov {}, rbp", out(reg) rbp, options(nomem, nostack));
     }

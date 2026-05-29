@@ -2122,6 +2122,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
     let nesting = PANIC_NESTING.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
     if nesting >= 2 {
         // Triple+ panic: absolutely nothing is safe. Halt immediately.
+        // SAFETY: cli is valid in ring 0; we're about to halt forever.
         unsafe { cpu::cli(); }
         cpu::halt_loop();
     }
@@ -2129,6 +2130,7 @@ fn panic(info: &core::panic::PanicInfo) -> ! {
         // Double panic: we're panicking inside the panic handler.
         // Print a minimal message and halt — don't attempt full diagnostics
         // since they may trigger yet another panic.
+        // SAFETY: cli is valid in ring 0; we're about to halt forever.
         unsafe { cpu::cli(); }
         serial_println!("!!! DOUBLE PANIC (panic inside panic handler) !!!");
         serial_println!("{}", info);

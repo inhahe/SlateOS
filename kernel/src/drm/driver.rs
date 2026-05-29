@@ -262,6 +262,7 @@ impl LimineBackend {
                     if let Some(pf2) = gem.phys_frames.get(frame_idx + 1) {
                         let src2 = pf2.addr() + hhdm;
                         let remaining = copy_w_bytes - to_copy;
+                        // SAFETY: src2 is HHDM-mapped; dst_row + to_copy is within framebuffer.
                         unsafe {
                             core::ptr::copy_nonoverlapping(
                                 src2 as *const u8,
@@ -531,6 +532,7 @@ impl VirtioGpuBackend {
                     if let Some(pf2) = gem.phys_frames.get(frame_idx + 1) {
                         let src2 = pf2.addr() + hhdm;
                         let remaining = copy_w_bytes - to_copy;
+                        // SAFETY: src2 is HHDM-mapped; dst_row + offset is within the fb.
                         unsafe {
                             core::ptr::copy_nonoverlapping(
                                 src2 as *const u8,

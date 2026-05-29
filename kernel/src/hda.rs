@@ -397,6 +397,7 @@ fn mmio_write8(base: u64, offset: usize, val: u8) {
 /// Busy-wait delay in microseconds (approximate, using TSC if available).
 fn delay_us(us: u64) {
     // Use a simple TSC-based busy loop.
+    // SAFETY: _rdtsc is always available on x86_64 and has no side effects.
     let start = unsafe { core::arch::x86_64::_rdtsc() };
     // Assume ~2 GHz clock minimum — 2000 cycles per µs.
     let target_cycles = us.saturating_mul(2000);

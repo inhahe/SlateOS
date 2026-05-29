@@ -1413,6 +1413,98 @@ pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 
 // ---------------------------------------------------------------------------
+// POSIX signal-shim syscalls (522–526)
+// ---------------------------------------------------------------------------
+//
+// Our OS does not use Unix signals for process control (design.txt: "No
+// Unix signals for process control. Use IPC messages.").  These syscalls
+// exist *only* to back the POSIX compatibility layer's `signal()`/
+// `sigaction()`/`kill()` shim so that ported programs (bash, coreutils,
+// Python) that rely on asynchronous signal delivery work.
+//
+// Delivery model (mirrors the SEH-style exception delivery in
+// `proc/exception.rs`):
+//   1. A process registers a single userspace *trampoline* via
+//      `SYS_SIGNAL_REGISTER`.  The POSIX runtime registers this at
+//      startup; it dispatches to the per-signal handler table that lives
+//      entirely in userspace.
+//   2. A signal is posted to a target process's pending set via
+//      `SYS_SIGNAL_SEND` (kill/raise).
+//   3. On return to userspace from a syscall, the kernel checks the
+//      current process's pending&~blocked set.  If a deliverable signal
+//      exists and a trampoline is registered, the kernel builds a
+//      `SignalContext` on the user stack, sets up arguments, and
+//      redirects RIP to the trampoline.
+//   4. The trampoline invokes the userspace handler, then calls
+//      `SYS_SIGNAL_RETURN` to restore the interrupted context.
+//
+// The kernel deliberately knows nothing about per-signal handler
+// disposition — userspace owns that table and decides terminate/ignore/
+// invoke.  The kernel only tracks the pending set, the blocked mask, and
+// the trampoline address.
+
+/// Register the process-wide signal trampoline.
+///
+/// `arg0`: virtual address of the userspace trampoline function, or 0 to
+/// unregister (revert to "no asynchronous delivery").  The trampoline is
+/// invoked as `trampoline(signum: u64 /* rdi */, ctx: *mut SignalContext
+/// /* rsi */)`.
+///
+/// Returns: 0 on success, negative `KernelError` code on failure (e.g.
+/// the caller is not associated with a process).
+pub const SYS_SIGNAL_REGISTER: u64 = 522;
+
+/// Post a signal to a target process's pending set.
+///
+/// `arg0`: target process ID.
+/// `arg1`: signal number (1..=64).
+///
+/// Sets the corresponding bit in the target's pending set.  Delivery
+/// happens lazily the next time the target returns to userspace.  If the
+/// target has no trampoline registered, the kernel applies the default
+/// action (terminating signals kill the process; others are dropped).
+///
+/// Returns: 0 on success, negative `KernelError` code on failure
+/// (`NoSuchProcess` if the PID is unknown, `InvalidArgument` for an
+/// out-of-range signal number).
+pub const SYS_SIGNAL_SEND: u64 = 523;
+
+/// Return from a signal handler (sigreturn).
+///
+/// `arg0`: pointer to the `SignalContext` the kernel placed on the user
+/// stack when it delivered the signal (the handler may have modified it).
+///
+/// Restores the saved CPU state and resumes the interrupted code.  Like
+/// `SYS_EXCEPTION_RETURN`, this modifies the syscall frame directly and
+/// is handled as a special case in `syscall_handler_inner`.  It does not
+/// return to the caller.
+pub const SYS_SIGNAL_RETURN: u64 = 524;
+
+/// Set the calling process's blocked-signal mask.
+///
+/// `arg0`: new 64-bit blocked mask (bit `n-1` blocks signal `n`).
+/// `arg1`: pointer to a `u64` that receives the previous mask, or 0 if
+///         the previous mask is not wanted.
+///
+/// Blocked signals remain pending but are not delivered until unblocked.
+/// `SIGKILL` and `SIGSTOP` cannot be blocked (their bits are ignored).
+/// The previous mask is returned via the out-pointer rather than the
+/// return value to avoid sign ambiguity (a blocked signal 64 sets bit
+/// 63, which would look like a negative error code).
+///
+/// Returns: 0 on success, negative `KernelError` code on failure.
+pub const SYS_SIGNAL_MASK: u64 = 525;
+
+/// Query the calling process's pending-signal set.
+///
+/// `arg0`: pointer to a `u64` that receives the pending set (bit `n-1`
+///         set means signal `n` is pending), observed without clearing
+///         anything.  Used to back POSIX `sigpending()`.
+///
+/// Returns: 0 on success, negative `KernelError` code on failure.
+pub const SYS_SIGNAL_PENDING: u64 = 526;
+
+// ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------
 

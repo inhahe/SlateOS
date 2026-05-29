@@ -495,6 +495,11 @@ pub unsafe extern "C" fn __libc_start_main(
     // include those entries.
     crate::environ::init_environ();
 
+    // Register the signal trampoline so the kernel can deliver
+    // catchable signals to handlers installed via signal()/sigaction().
+    // Until this runs the kernel applies signal default actions itself.
+    crate::signal::init_signals();
+
     // Call main.
     let ret = main(actual_argc, actual_argv, unsafe { crate::environ::environ.cast() });
 

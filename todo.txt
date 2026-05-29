@@ -537,6 +537,53 @@ Remaining net improvements (diminishing returns):
 
 ## Judgment Calls
 
+- (2026-05-29) POSIX signal delivery via kernel signal shim (roadmap
+  "Full signal delivery via IPC", posix/src/signal.rs + kernel/src/proc/signal.rs).
+  Decisions made, all easy to revisit:
+  * 64 signals only.  The kernel SignalState pending/blocked masks are
+    single u64s, so only signals 1..=64 are deliverable asynchronously.
+    Realtime signals (SIGRTMIN=32..SIGRTMAX=64) fit, but the userspace
+    SigsetT is 1024 bits; sigprocmask only mirrors bits[0] (signals
+    1..64) to the kernel and sigpending only reads back the low word.
+    Higher bits round-trip in userspace but never reach the kernel.
+    Fix when >64 signals are actually needed: widen kernel masks to a
+    bitset and the MASK/PENDING syscalls to pointer-based multi-word.
+  * No auto-masking of the delivered signal during its handler.  Linux
+    blocks the signal being handled (plus sa_mask) for the duration of
+    the handler unless SA_NODEFER.  We don't — a handler that re-raises
+    its own signal could re-enter.  The kernel take_deliverable picks
+    the lowest pending&!blocked each syscall-return; to add masking the
+    trampoline/kernel would need to save+restore the blocked mask around
+    handler execution.  Deferred: needs the SignalContext to also carry
+    the saved blocked mask, and SYS_SIGNAL_RETURN to restore it.
+  * sigaltstack is accepted but ignored — handlers run on the normal
+    stack.  The kernel builds the SignalContext at (user_rsp - ctxsize)
+    & !0xF.  Honoring SS_ONSTACK would require the kernel to know the
+    alt-stack base/size (another register call) and switch to it.
+  * Self-directed kill()/raise() stay synchronous (dispatch_self_signal
+    in-process) rather than round-tripping through SYS_SIGNAL_SEND.
+    Matches existing behavior and avoids a needless kernel round-trip;
+    the observable result is identical.
+  * Cross-process kill() now sends ALL valid signals via SYS_SIGNAL_SEND
+    and no longer classifies by default disposition on the sender side
+    (the previous shim shortcut: ignore→0, stop/continue→ENOSYS).  This
+    is the correct POSIX model — the kernel/target decides the action.
+    The old sender-side cross-process tests were rewritten to test the
+    pure kill_target() router + signal_send_errno() mapper instead.
+
+- (2026-05-29) Testing limitation (not a bug): posix host tests
+  (cargo test -p posix --target x86_64-pc-windows-gnu) cannot exercise
+  any kill()/sigprocmask()/sigpending() path that issues a native
+  syscall — syscall0/1/2 emit a real `syscall` instruction, which on the
+  Windows host is meaningless/crashes.  Cross-process signal *routing*
+  is therefore covered only by the pure kill_target/signal_send_errno
+  unit tests and the SignalContext ABI-size assert.  Full end-to-end
+  delivery (trampoline invocation, frame rewrite, SYS_SIGNAL_RETURN
+  resume) is only verifiable by booting a posix program under QEMU.
+  TODO when a QEMU userspace harness exists: add an integration test
+  that installs a SIGUSR1 handler, has another process kill() it, and
+  asserts the handler ran and execution resumed.
+
 - Cross-zone edit: handlers.rs (kernel-ipc zone) was minimally edited as
   part of the initial_fds handle_type fix.  The PCB type changed from
   Vec<(i32, u64)> to Vec<(i32, u8, u64)>, which required updating the

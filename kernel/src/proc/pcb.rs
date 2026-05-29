@@ -1019,6 +1019,9 @@ fn destroy_process_resources(
     // Remove exception handler registration (if any).
     crate::proc::exception::remove_handler(pid);
 
+    // Drop any signal state (pending set, blocked mask, trampoline).
+    crate::proc::signal::remove(pid);
+
     // Close all IPC handles owned by this process.
     crate::ipc::cleanup_handles(ipc_handles);
 

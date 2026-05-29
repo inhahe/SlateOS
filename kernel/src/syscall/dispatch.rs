@@ -77,6 +77,10 @@ use super::number::{
     SYS_PROCESS_GET_ARGS, SYS_PROCESS_GET_INITIAL_FDS,
     SYS_PROCESS_PARENT_ID,
     SYS_PROCESS_COUNT,
+    SYS_SIGNAL_REGISTER,
+    SYS_SIGNAL_SEND,
+    SYS_SIGNAL_MASK,
+    SYS_SIGNAL_PENDING,
     SYS_PROCESS_KILL, SYS_PROCESS_SPAWN, SYS_PROCESS_SPAWN_EX,
     SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
@@ -377,6 +381,14 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_PROCESS_GET_ARGS as usize] = Some(handlers::sys_process_get_args);
     handlers[SYS_PROCESS_PARENT_ID as usize] = Some(handlers::sys_process_parent_id);
     handlers[SYS_PROCESS_COUNT as usize] = Some(handlers::sys_process_count);
+
+    // POSIX signal shim (522–526). SYS_SIGNAL_RETURN (524) is a
+    // frame-modifying syscall handled specially in syscall_handler_inner,
+    // so it has no flat-table entry.
+    handlers[SYS_SIGNAL_REGISTER as usize] = Some(handlers::sys_signal_register);
+    handlers[SYS_SIGNAL_SEND as usize] = Some(handlers::sys_signal_send);
+    handlers[SYS_SIGNAL_MASK as usize] = Some(handlers::sys_signal_mask);
+    handlers[SYS_SIGNAL_PENDING as usize] = Some(handlers::sys_signal_pending);
 
     // Thread management (510–519).
     handlers[SYS_THREAD_CREATE as usize] = Some(handlers::sys_thread_create);

@@ -283,6 +283,18 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     if f.syscall_nr == super::number::SYS_EXCEPTION_RETURN {
         return super::handlers::sys_exception_return_with_frame(f);
     }
+    if f.syscall_nr == super::number::SYS_SIGNAL_RETURN {
+        // sigreturn restores the interrupted frame. After restoring, a
+        // *different* pending signal may still need delivery, so fall
+        // through to the delivery check below using the restored frame.
+        let restored_rax = super::handlers::sys_signal_return_with_frame(f);
+        if super::handlers::deliver_pending_signal(f, restored_rax) {
+            // Frame now points at the trampoline; the return value is
+            // unused (trampoline gets args via the frame's registers).
+            return 0;
+        }
+        return restored_rax;
+    }
 
     // Build SyscallArgs from the frame and dispatch.
     let args = super::dispatch::SyscallArgs {
@@ -295,6 +307,16 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     };
 
     let result = super::dispatch::dispatch(f.syscall_nr, &args);
+
+    // On the way back to userspace, deliver a pending signal if one is
+    // ready and the process registered a trampoline. This rewrites the
+    // frame to jump to the handler; the interrupted syscall's return
+    // value (result.value) is preserved in the SignalContext for
+    // SYS_SIGNAL_RETURN to restore.
+    if super::handlers::deliver_pending_signal(f, result.value) {
+        return 0;
+    }
+
     result.value
 }
 

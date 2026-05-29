@@ -56,6 +56,13 @@ pub const SYS_PROCESS_GET_ARGS: u64 = 519;
 pub const SYS_PROCESS_PARENT_ID: u64 = 520;
 pub const SYS_PROCESS_COUNT: u64 = 521;
 
+// POSIX signal shim (522–526)
+pub const SYS_SIGNAL_REGISTER: u64 = 522;
+pub const SYS_SIGNAL_SEND: u64 = 523;
+pub const SYS_SIGNAL_RETURN: u64 = 524;
+pub const SYS_SIGNAL_MASK: u64 = 525;
+pub const SYS_SIGNAL_PENDING: u64 = 526;
+
 // Filesystem
 pub const SYS_FS_READ_FILE: u64 = 600;
 pub const SYS_FS_WRITE_FILE: u64 = 601;

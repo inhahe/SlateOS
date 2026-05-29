@@ -13,12 +13,26 @@
 //! registered handler is invoked, and SIG_DFL applies the Linux
 //! default action (terminate, ignore, stop, continue).
 //!
-//! Cross-process `kill()` translates terminating signals into
-//! `SYS_PROCESS_KILL`, ignore signals are silently discarded, and
-//! stop/continue signals return `ENOSYS` (no kernel suspend yet).
+//! Cross-process `kill()` delivers via the kernel signal shim
+//! (`SYS_SIGNAL_SEND`): the kernel sets the signal pending on the
+//! target and delivers it asynchronously to the target's registered
+//! trampoline, or applies the default action if no trampoline is
+//! registered.  The sender does not classify by disposition.
 //!
-//! `sigprocmask()` stores the blocked mask so get/set round-trips
-//! work.  The blocked mask does not yet affect actual delivery.
+//! ## Asynchronous delivery
+//!
+//! At startup `init_signals()` registers `__signal_trampoline` with the
+//! kernel (`SYS_SIGNAL_REGISTER`).  When a pending, unblocked signal is
+//! delivered, the kernel redirects the interrupted thread to the
+//! trampoline with a saved [`SignalContext`]; the trampoline runs
+//! `dispatch_self_signal()` and then issues `SYS_SIGNAL_RETURN` to
+//! resume the interrupted code.  This mirrors SEH-style exception
+//! delivery and is *not* a process-control mechanism.
+//!
+//! `sigprocmask()` stores the blocked mask for get/set round-trips and
+//! mirrors the low 64 signals to the kernel (`SYS_SIGNAL_MASK`) so the
+//! blocked set actually suppresses delivery.  `sigpending()` queries the
+//! kernel (`SYS_SIGNAL_PENDING`) for the pending set.
 
 use crate::errno;
 
@@ -384,6 +398,197 @@ fn dispatch_self_signal(sig: i32) -> i32 {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Asynchronous signal delivery (Phase 211 — kernel signal shim)
+// ---------------------------------------------------------------------------
+//
+// The kernel delivers a pending signal by rewriting the interrupted
+// thread's saved frame so it resumes at a registered *trampoline*
+// instead of where it was.  The kernel builds a `SignalContext` on the
+// user stack capturing the interrupted register state, passes the
+// signal number in RDI and a pointer to the context in RSI, then
+// transfers control to the trampoline.  The trampoline runs our
+// per-signal disposition (via `dispatch_self_signal`) and then issues
+// `SYS_SIGNAL_RETURN` to restore the saved context, resuming the
+// interrupted code exactly where it left off.
+//
+// This mirrors the SEH-style hardware-exception delivery already used
+// for faults; it is *not* a process-control mechanism (the OS uses IPC
+// for that) — it exists purely so ported POSIX programs that install
+// signal handlers behave correctly.
+
+/// Saved register context handed to the signal trampoline.
+///
+/// **ABI-critical**: the field order, size, and `#[repr(C)]` layout
+/// must match `kernel/src/proc/signal.rs::SignalContext` exactly.  The
+/// kernel writes this struct onto the user stack and passes a pointer
+/// to it in RSI; `SYS_SIGNAL_RETURN` reads it back to restore state.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct SignalContext {
+    /// Signal number being delivered (1..=NSIG).
+    pub signum: u64,
+    /// Interrupted syscall's return value (restored into RAX).
+    pub rax: u64,
+    pub rdi: u64,
+    pub rsi: u64,
+    pub rdx: u64,
+    pub r10: u64,
+    pub r8: u64,
+    pub r9: u64,
+    pub rbx: u64,
+    pub rbp: u64,
+    pub r12: u64,
+    pub r13: u64,
+    pub r14: u64,
+    pub r15: u64,
+    /// Interrupted instruction pointer.
+    pub rip: u64,
+    /// Interrupted stack pointer.
+    pub rsp: u64,
+    /// Interrupted RFLAGS.
+    pub rflags: u64,
+}
+
+/// Size of [`SignalContext`] — must equal the kernel's
+/// `SIGNAL_CONTEXT_SIZE` (17 × 8 = 136 bytes).
+pub const SIGNAL_CONTEXT_SIZE: usize = core::mem::size_of::<SignalContext>();
+
+/// C entry point invoked by the assembly trampoline.
+///
+/// Runs the registered disposition for `signum` on the current process
+/// (`dispatch_self_signal` handles SIG_IGN / handler invocation /
+/// default action).  If the disposition terminates the process this
+/// never returns; otherwise control returns to the trampoline, which
+/// issues `SYS_SIGNAL_RETURN`.
+#[cfg(target_os = "none")]
+#[unsafe(no_mangle)]
+pub extern "C" fn __signal_dispatch(signum: i32) {
+    // Ignore the return value: dispatch_self_signal either terminates
+    // the process (no return) or completes the handler/ignore action.
+    // Any errno it sets belongs to the interrupted code's context and
+    // will be clobbered when SYS_SIGNAL_RETURN restores RAX anyway.
+    let _ = dispatch_self_signal(signum);
+}
+
+// The trampoline the kernel jumps to when delivering a signal.
+//
+// On entry (set up by the kernel's `deliver_pending_signal`):
+//   RDI = signum, RSI = &SignalContext
+//   RSP points at a fake (null) return slot, with RSP % 16 == 8
+//   (the kernel placed the 16-aligned context just above it), so the
+//   SysV ABI alignment contract for a `call` target is satisfied.
+//
+// We preserve the context pointer across the dispatch call, then hand
+// it to SYS_SIGNAL_RETURN (arg0 = RDI) so the kernel can restore the
+// interrupted state.  `push rsi` keeps RSP 16-aligned for the call.
+#[cfg(target_os = "none")]
+core::arch::global_asm!(
+    ".globl __signal_trampoline",
+    "__signal_trampoline:",
+    "push rsi",               // save &SignalContext (RSP now 16-aligned)
+    "call __signal_dispatch",  // dispatch_self_signal(signum); RDI = signum
+    "pop rdi",                 // restore &SignalContext into arg0
+    "mov rax, {sysret}",       // SYS_SIGNAL_RETURN
+    "syscall",                 // kernel restores frame; does not return
+    "ud2",                     // trap if the kernel ever returns here
+    sysret = const crate::syscall::SYS_SIGNAL_RETURN,
+);
+
+#[cfg(target_os = "none")]
+unsafe extern "C" {
+    /// Assembly signal-return trampoline (see the `global_asm!` above).
+    fn __signal_trampoline();
+}
+
+/// Register the signal trampoline with the kernel.
+///
+/// Called once during process startup (from `__libc_start_main`).  After
+/// this, the kernel delivers pending catchable signals by redirecting to
+/// `__signal_trampoline`.  Until a trampoline is registered the kernel
+/// applies signal default actions itself (terminating signals kill the
+/// process; others are dropped).
+#[cfg(target_os = "none")]
+pub fn init_signals() {
+    let addr = __signal_trampoline as *const () as usize as u64;
+    // A failure here just means async delivery stays in the kernel's
+    // default-action mode; nothing else in startup depends on it.
+    let _ = crate::syscall::syscall1(crate::syscall::SYS_SIGNAL_REGISTER, addr);
+}
+
+/// Host-build no-op: there is no kernel to register with, and issuing a
+/// raw syscall on the host would hit the host OS's syscall table.
+#[cfg(not(target_os = "none"))]
+pub fn init_signals() {}
+
+/// Push the low 64 bits of the blocked mask to the kernel so that
+/// asynchronous delivery actually honours `sigprocmask`.
+///
+/// Our kernel signal shim supports 64 signals, stored in one word; that
+/// maps exactly to `SigsetT::bits[0]` (signal N → bit N-1).  Higher
+/// realtime signals are not deliverable asynchronously yet, so only the
+/// low word is synchronised.  No-op on the host.
+#[cfg(target_os = "none")]
+fn sync_kernel_blocked_mask(low: u64) {
+    let mut old: u64 = 0;
+    let _ = crate::syscall::syscall2(
+        crate::syscall::SYS_SIGNAL_MASK,
+        low,
+        core::ptr::addr_of_mut!(old) as u64,
+    );
+}
+
+#[cfg(not(target_os = "none"))]
+fn sync_kernel_blocked_mask(_low: u64) {}
+
+/// Classification of a *validated* `kill(pid, sig)` request with
+/// `sig != 0` (so `sig` is already known to be in `[1, NSIG)`).
+///
+/// Extracted as a pure function so the routing logic can be unit-tested
+/// on the host without issuing real syscalls (which would otherwise hit
+/// the host OS's syscall table).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum KillTarget {
+    /// `pid == self_pid` — dispatch the signal locally/synchronously.
+    Self_,
+    /// `pid <= 0` — process-group / broadcast form, not supported.
+    ProcessGroup,
+    /// `pid > 0 && pid != self_pid` — deliver via `SYS_SIGNAL_SEND`.
+    Other,
+}
+
+/// Route a validated `kill()` to the appropriate delivery mechanism.
+///
+/// Precondition: `sig` is in `[1, NSIG)` and `sig != 0`.
+fn kill_target(pid: i32, self_pid: i32) -> KillTarget {
+    if pid == self_pid {
+        KillTarget::Self_
+    } else if pid <= 0 {
+        KillTarget::ProcessGroup
+    } else {
+        KillTarget::Other
+    }
+}
+
+/// Map a `SYS_SIGNAL_SEND` failure to the POSIX errno expected by
+/// `kill(2)`.
+///
+/// `kill` uses `EPERM` (not `EACCES`) for permission failures, so we
+/// can't simply funnel through `errno::translate`.  Unknown failures
+/// collapse to `ESRCH`, matching the historical conservative behaviour.
+fn signal_send_errno(ret: i64) -> i32 {
+    use crate::errno;
+    // The explicit NO_SUCH_PROCESS arm documents its semantic mapping
+    // even though the conservative fallback also yields ESRCH.
+    #[allow(clippy::match_same_arms)]
+    match ret {
+        errno::native::NO_SUCH_PROCESS => errno::ESRCH,
+        errno::native::PERMISSION_DENIED => errno::EPERM,
+        errno::native::INVALID_ARGUMENT => errno::EINVAL,
+        _ => errno::ESRCH,
+    }
+}
+
 /// Send a signal to a process.
 ///
 /// ## Signal delivery model (Phase 211)
@@ -395,12 +600,15 @@ fn dispatch_self_signal(sig: i32) -> i32 {
 /// * **Self-signals** (`pid == self`): dispatched locally via
 ///   `dispatch_self_signal()`, which invokes registered handlers
 ///   or applies the Linux default action (terminate, ignore, etc.).
-/// * **Cross-process terminating signals** (`pid > 0`, default action
-///   is Terminate or Core): translated to `SYS_PROCESS_KILL(pid,
-///   128 + sig)`.  The target process is forcefully terminated with
-///   the conventional Unix exit code.
-/// * **Cross-process ignore signals**: silently discarded (return 0).
-/// * **Stop/Continue signals**: not yet supported (`ENOSYS`).
+/// * **Cross-process signals** (`pid > 0`, `pid != self`): delivered via
+///   `SYS_SIGNAL_SEND(pid, sig)`.  The kernel sets the signal pending on
+///   the target and delivers it asynchronously to the target's
+///   registered trampoline (which runs the target's own disposition).
+///   If the target has no trampoline, the kernel applies the default
+///   action itself (terminating signals kill it, others are dropped).
+///   The *sender* no longer classifies by default action — that is the
+///   kernel's and the target's responsibility, which is the correct
+///   POSIX semantics.
 /// * `pid <= 0` (process groups): not supported (`ENOSYS`).
 ///
 /// ## Capability gate (Phase 203)
@@ -443,62 +651,36 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
         crate::syscall::SYS_PROCESS_ID,
     ) as i32;
 
-    if pid == self_pid {
-        return dispatch_self_signal(sig);
-    }
-
-    // --- Cross-process signal delivery ---
-
-    if pid <= 0 {
-        // Process group signaling — not supported.
-        errno::set_errno(errno::ENOSYS);
-        return -1;
-    }
-
-    // Phase 203: CAP_KILL gate for cross-process signals.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_KILL,
-    ) {
-        errno::set_errno(errno::EPERM);
-        return -1;
-    }
-
-    // Look up the default action for this signal.
-    let action = match default_action(sig) {
-        Some(a) => a,
-        None => {
-            errno::set_errno(errno::EINVAL);
-            return -1;
+    match kill_target(pid, self_pid) {
+        KillTarget::Self_ => dispatch_self_signal(sig),
+        KillTarget::ProcessGroup => {
+            // Process group signaling — not supported.
+            errno::set_errno(errno::ENOSYS);
+            -1
         }
-    };
+        KillTarget::Other => {
+            // Phase 203: CAP_KILL gate for cross-process signals.
+            if !crate::sys_capability::has_capability(
+                crate::sys_capability::CAP_KILL,
+            ) {
+                errno::set_errno(errno::EPERM);
+                return -1;
+            }
 
-    match action {
-        DefaultAction::Terminate | DefaultAction::Core => {
-            // Translate to native process termination.
-            // Exit code = 128 + signal number (Unix convention).
-            let exit_code = 128i32.wrapping_add(sig);
+            // Deliver via the kernel signal shim.  The kernel sets the
+            // signal pending and either delivers it to the target's
+            // trampoline or applies the default action.  We don't
+            // classify by disposition here — that is the target's job.
             let ret = crate::syscall::syscall2(
-                crate::syscall::SYS_PROCESS_KILL,
+                crate::syscall::SYS_SIGNAL_SEND,
                 pid as u64,
-                exit_code as u64,
+                sig as u64,
             );
             if ret < 0 {
-                // Map kernel errors to POSIX errno.
-                // NoSuchProcess → ESRCH, PermissionDenied → EPERM,
-                // anything else → ESRCH (conservative).
-                errno::set_errno(errno::ESRCH);
+                errno::set_errno(signal_send_errno(ret));
                 return -1;
             }
             0
-        }
-        DefaultAction::Ignore => {
-            // Cross-process ignore: silently discard (POSIX: success).
-            0
-        }
-        DefaultAction::Stop | DefaultAction::Continue => {
-            // No kernel suspend/resume support yet.
-            errno::set_errno(errno::ENOSYS);
-            -1
         }
     }
 }
@@ -580,6 +762,12 @@ pub extern "C" fn sigprocmask(
         };
         // SAFETY: single-threaded access.
         unsafe { core::ptr::addr_of_mut!(BLOCKED_MASK).write(new_mask); }
+
+        // Mirror the low 64 signals to the kernel so asynchronous
+        // delivery honours the blocked set.  (Realtime signals 65+
+        // aren't deliverable asynchronously yet, so only bits[0] is
+        // synchronised.)
+        sync_kernel_blocked_mask(new_mask.bits[0]);
     }
 
     0
@@ -633,14 +821,39 @@ pub extern "C" fn sigsuspend(mask: *const SigsetT) -> i32 {
 
 /// Examine pending signals.
 ///
-/// Stub: returns empty set (no signals pending).
+/// Queries the kernel for the set of signals pending on the calling
+/// process (signals raised but not yet delivered, e.g. because they are
+/// blocked).  Only the low 64 signals are tracked by the kernel shim;
+/// they populate `bits[0]` (signal N → bit N-1).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn sigpending(set: *mut SigsetT) -> i32 {
     if set.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    unsafe { *set = SigsetT::EMPTY; }
+    let mut out = SigsetT::EMPTY;
+    out.bits[0] = pending_signals_low();
+    // SAFETY: set verified non-null above.
+    unsafe { *set = out; }
+    0
+}
+
+/// Read the kernel's pending-signal bitmap for the calling process.
+///
+/// Returns the low 64-bit word (signal N → bit N-1).  No-op on the host
+/// (returns 0) since there is no kernel shim to query.
+#[cfg(target_os = "none")]
+fn pending_signals_low() -> u64 {
+    let mut out: u64 = 0;
+    let ret = crate::syscall::syscall1(
+        crate::syscall::SYS_SIGNAL_PENDING,
+        core::ptr::addr_of_mut!(out) as u64,
+    );
+    if ret < 0 { 0 } else { out }
+}
+
+#[cfg(not(target_os = "none"))]
+fn pending_signals_low() -> u64 {
     0
 }
 
@@ -1953,39 +2166,66 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), 0);
     }
 
-    // -- kill / raise stubs --
+    // -- kill / raise --
     //
-    // Note on coverage: the `kill(pid > 0, 0)` and SIGABRT-to-self paths
-    // dispatch into native syscalls (SYS_PROCESS_IS_READY / SYS_PROCESS_ID)
-    // that aren't available in host-target test builds, so we don't
-    // exercise those here.  We do test the validation paths that resolve
-    // entirely in our code: pid<=0 with sig==0, out-of-range signals,
-    // and the unchanged ENOSYS behaviour for arbitrary (pid, sig).
+    // Note on coverage: paths that issue native syscalls
+    // (SYS_PROCESS_ID, SYS_PROCESS_IS_READY, SYS_SIGNAL_SEND) aren't
+    // exercisable in host-target test builds, so cross-process *routing*
+    // is tested via the pure `kill_target` classifier and the
+    // `signal_send_errno` mapper.  The validation paths that resolve
+    // entirely in our code (pid<=0 with sig==0, out-of-range signals)
+    // are tested directly through `kill()`.
 
-    /// Cross-process ignore signal → success (discarded).
+    /// `kill_target` routes a self-directed pid to local dispatch.
     #[test]
-    fn test_kill_ignore_signal_discarded() {
-        crate::errno::set_errno(0);
-        let ret = kill(1, SIGCHLD);
-        assert_eq!(ret, 0, "ignore-default signal should be silently discarded");
+    fn test_kill_target_self() {
+        assert_eq!(kill_target(4242, 4242), KillTarget::Self_);
     }
 
-    /// Cross-process stop signal → ENOSYS (not supported).
+    /// `kill_target` routes a distinct positive pid to cross-process
+    /// delivery (regardless of the signal's default disposition — the
+    /// sender no longer classifies by action).
     #[test]
-    fn test_kill_stop_signal_enosys() {
-        crate::errno::set_errno(0);
-        let ret = kill(1, SIGSTOP);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    fn test_kill_target_other() {
+        assert_eq!(kill_target(1, 4242), KillTarget::Other);
+        assert_eq!(kill_target(99, 4242), KillTarget::Other);
     }
 
-    /// Cross-process continue signal → ENOSYS (not supported).
+    /// `kill_target` routes non-positive pids to the (unsupported)
+    /// process-group form.
     #[test]
-    fn test_kill_continue_signal_enosys() {
-        crate::errno::set_errno(0);
-        let ret = kill(1, SIGCONT);
-        assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
+    fn test_kill_target_process_group() {
+        assert_eq!(kill_target(0, 4242), KillTarget::ProcessGroup);
+        assert_eq!(kill_target(-1, 4242), KillTarget::ProcessGroup);
+        assert_eq!(kill_target(-5, 4242), KillTarget::ProcessGroup);
+    }
+
+    /// `signal_send_errno` maps kernel error codes to the errno values
+    /// `kill(2)` is expected to surface.
+    #[test]
+    fn test_signal_send_errno_mapping() {
+        use crate::errno;
+        assert_eq!(
+            signal_send_errno(errno::native::NO_SUCH_PROCESS),
+            errno::ESRCH
+        );
+        assert_eq!(
+            signal_send_errno(errno::native::PERMISSION_DENIED),
+            errno::EPERM
+        );
+        assert_eq!(
+            signal_send_errno(errno::native::INVALID_ARGUMENT),
+            errno::EINVAL
+        );
+        // Unknown failures collapse to ESRCH (conservative).
+        assert_eq!(signal_send_errno(-9999), errno::ESRCH);
+    }
+
+    /// [`SignalContext`] must match the kernel ABI: 17 × 8 = 136 bytes.
+    #[test]
+    fn test_signal_context_abi() {
+        assert_eq!(SIGNAL_CONTEXT_SIZE, 136);
+        assert_eq!(core::mem::size_of::<SignalContext>(), 17 * 8);
     }
 
     #[test]
@@ -2037,29 +2277,21 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
-    /// Cross-process ignore signals (SIGCHLD, SIGURG, SIGWINCH) are
-    /// silently discarded — returns 0, no syscall issued.
+    /// Every catchable signal — regardless of its default disposition
+    /// (ignore, stop, continue, terminate) — routes cross-process to the
+    /// same `Other` delivery path.  The kernel and the target process
+    /// decide the disposition, not the sender.
     #[test]
-    fn test_kill_cross_process_ignore_signals() {
-        for sig in [SIGCHLD, SIGURG, SIGWINCH] {
-            crate::errno::set_errno(0);
-            let ret = kill(1, sig);
-            assert_eq!(ret, 0, "kill(1, {sig}) should succeed (ignore)");
-        }
-    }
-
-    /// Cross-process stop/continue signals return ENOSYS.
-    #[test]
-    fn test_kill_cross_process_stop_continue_enosys() {
-        for sig in [SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGCONT] {
-            crate::errno::set_errno(0);
-            let ret = kill(1, sig);
-            assert_eq!(ret, -1, "kill(1, {sig}) should fail");
-            assert_eq!(
-                crate::errno::get_errno(),
-                crate::errno::ENOSYS,
-                "kill(1, {sig}) should set ENOSYS (not supported)"
-            );
+    fn test_kill_cross_process_routes_all_signals_to_other() {
+        for sig in [
+            SIGCHLD, SIGURG, SIGWINCH, // default: ignore
+            SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, // default: stop
+            SIGCONT, // default: continue
+            SIGTERM, SIGINT, SIGKILL, // default: terminate
+        ] {
+            // sig is irrelevant to routing; pid != self_pid → Other.
+            let _ = sig;
+            assert_eq!(kill_target(1, 4242), KillTarget::Other);
         }
     }
 
@@ -3580,17 +3812,18 @@ mod tests {
     // =================================================================
     // Phase 211 — kill()/raise() signal delivery
     //
-    // kill() now translates signals to native operations:
-    //   - Terminate/Core signals → SYS_PROCESS_KILL (cross-process)
-    //     or _exit(128+sig) (self, SIG_DFL)
-    //   - Ignore signals → silently discarded (return 0)
-    //   - Stop/Continue → ENOSYS (no kernel suspend)
-    //   - Self-signals → dispatch via handler table
-    //
-    // raise() dispatches via dispatch_self_signal():
+    // Self-directed signals (kill(self,..) and raise()) are dispatched
+    // synchronously via dispatch_self_signal():
     //   - SIG_IGN → return 0
     //   - handler → invoke fn(sig), return 0
-    //   - SIG_DFL → default action
+    //   - SIG_DFL → default action (terminate/_exit, ignore, or ENOSYS
+    //     for stop/continue which we can't apply to ourselves)
+    //
+    // Cross-process signals (kill(pid>0,..), pid != self) are delivered
+    // via SYS_SIGNAL_SEND; the kernel sets the signal pending on the
+    // target and either delivers it to the target's trampoline or
+    // applies the default action.  The sender does not classify by
+    // disposition — see `kill_target`.
     // =================================================================
 
     /// default_action classifies all standard signals correctly.
@@ -3775,9 +4008,9 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
-    /// Cross-process SIGCHLD (ignore-default) is discarded even
-    /// without CAP_KILL — wait, no: CAP_KILL is checked before the
-    /// default-action dispatch for pid > 0.  Without the cap, EPERM.
+    /// Cross-process kill() for any signal requires CAP_KILL: the gate
+    /// runs before SYS_SIGNAL_SEND, so without the cap we get EPERM
+    /// regardless of the signal's default disposition.
     #[test]
     fn test_phase211_kill_cross_ignore_no_cap_eperm() {
         let _g = phase203_cap::CapGuard::snapshot();

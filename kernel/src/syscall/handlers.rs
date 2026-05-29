@@ -3053,6 +3053,326 @@ pub fn sys_exception_return_with_frame(
     ctx.rax as i64
 }
 
+// ---------------------------------------------------------------------------
+// POSIX signal-shim handlers
+// ---------------------------------------------------------------------------
+
+/// Resolve the calling task's owning process, or return `NoSuchProcess`.
+///
+/// Kernel threads (pid 0) are not valid signal targets/callers.
+fn caller_process_or_err() -> Result<crate::proc::pcb::ProcessId, KernelError> {
+    let task_id = sched::current_task_id();
+    match crate::proc::thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => Ok(pid),
+        _ => Err(KernelError::NoSuchProcess),
+    }
+}
+
+/// `SYS_SIGNAL_REGISTER` — register the process-wide signal trampoline.
+///
+/// `arg0`: trampoline address (0 to unregister).
+pub fn sys_signal_register(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    crate::proc::signal::register_trampoline(pid, args.arg0);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_SIGNAL_SEND` — post a signal to a target process.
+///
+/// `arg0`: target PID. `arg1`: signal number (1..=NSIG).
+///
+/// Authority matches `SYS_PROCESS_KILL`: the caller must be the target's
+/// parent, PID 0, the target itself (self-signal), or hold a Process
+/// capability with DELETE rights for the target.
+pub fn sys_signal_send(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use crate::proc::{pcb, signal, thread};
+    use super::dispatch::SyscallResult;
+
+    let target = args.arg0;
+    #[allow(clippy::cast_possible_truncation)]
+    let sig = args.arg1 as u32;
+
+    if target == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if !signal::is_valid_signal(sig) {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let task_id = sched::current_task_id();
+    let caller = thread::owner_process(task_id).unwrap_or(0);
+
+    // Existence + authority. A self-signal is always permitted.
+    if target != caller {
+        let target_parent = match pcb::parent(target) {
+            Some(p) => p,
+            None => return SyscallResult::err(KernelError::NoSuchProcess),
+        };
+        let has_parent_auth = caller == 0 || caller == target_parent;
+        let has_cap_auth = pcb::has_capability_for(
+            caller,
+            crate::cap::ResourceType::Process,
+            target,
+            crate::cap::Rights::DELETE,
+        );
+        if !has_parent_auth && !has_cap_auth {
+            return SyscallResult::err(KernelError::PermissionDenied);
+        }
+    }
+
+    // Reject signals to a dead/unknown process.
+    match pcb::state(target) {
+        Some(pcb::ProcessState::Zombie) => {
+            return SyscallResult::err(KernelError::ProcessExited);
+        }
+        None => return SyscallResult::err(KernelError::NoSuchProcess),
+        _ => {}
+    }
+
+    match signal::classify_post(target, sig) {
+        signal::PostDecision::Deliver | signal::PostDecision::Drop => {
+            SyscallResult::ok(0)
+        }
+        signal::PostDecision::Terminate(code) => {
+            // No userspace handler (or SIGKILL): terminate like kill().
+            if let Err(e) = pcb::set_exit_code(target, code) {
+                return SyscallResult::err(e);
+            }
+            thread::kill_process_threads(target);
+            serial_println!(
+                "[signal] Process {} terminated by signal {} (from {})",
+                target, sig, caller
+            );
+            SyscallResult::ok(0)
+        }
+    }
+}
+
+/// `SYS_SIGNAL_MASK` — set the calling process's blocked-signal mask.
+///
+/// `arg0`: new blocked mask. `arg1`: out-pointer for the old mask (0 to
+/// discard).
+pub fn sys_signal_mask(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    let old = crate::proc::signal::set_blocked(pid, args.arg0);
+    if args.arg1 != 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(
+            args.arg1,
+            core::mem::size_of::<u64>(),
+        ) {
+            return SyscallResult::err(e);
+        }
+        // SAFETY: validated as a writable user pointer of u64 size above.
+        unsafe {
+            core::ptr::write(args.arg1 as *mut u64, old);
+        }
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_SIGNAL_PENDING` — query the calling process's pending set.
+///
+/// `arg0`: out-pointer for the pending mask.
+pub fn sys_signal_pending(
+    args: &super::dispatch::SyscallArgs,
+) -> super::dispatch::SyscallResult {
+    use super::dispatch::SyscallResult;
+    let pid = match caller_process_or_err() {
+        Ok(p) => p,
+        Err(e) => return SyscallResult::err(e),
+    };
+    if args.arg0 == 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if let Err(e) = crate::mm::user::validate_user_write(
+        args.arg0,
+        core::mem::size_of::<u64>(),
+    ) {
+        return SyscallResult::err(e);
+    }
+    let pending = crate::proc::signal::pending(pid);
+    // SAFETY: validated as a writable user pointer of u64 size above.
+    unsafe {
+        core::ptr::write(args.arg0 as *mut u64, pending);
+    }
+    SyscallResult::ok(0)
+}
+
+/// `SYS_SIGNAL_RETURN` — resume from a signal handler (sigreturn).
+///
+/// `arg0`: pointer to the `SignalContext` on the user stack.
+///
+/// Restores the interrupted CPU state by rewriting the syscall frame
+/// (like `SYS_EXCEPTION_RETURN`). Handled as a special case in
+/// `syscall_handler_inner`. Does not return to the caller.
+pub fn sys_signal_return_with_frame(
+    frame: &mut super::entry::SyscallFrame,
+) -> i64 {
+    use crate::proc::signal::SignalContext;
+
+    if let Err(e) = crate::mm::user::validate_user_read(
+        frame.arg0,
+        core::mem::size_of::<SignalContext>(),
+    ) {
+        return e.code() as i64;
+    }
+
+    let ctx_ptr = frame.arg0 as *const SignalContext;
+    // SAFETY: validated above — ctx_ptr is a mapped, readable user pointer
+    // sized for SignalContext. The kernel wrote it during delivery; the
+    // handler may have adjusted fields.
+    let ctx = unsafe { &*ctx_ptr };
+
+    // Restore the interrupted SYSRET frame.
+    frame.user_rip = ctx.rip;
+    frame.user_rsp = ctx.rsp;
+    frame.user_rflags = ctx.rflags;
+    frame.arg0 = ctx.rdi;
+    frame.arg1 = ctx.rsi;
+    frame.arg2 = ctx.rdx;
+    frame.arg3 = ctx.r10;
+    frame.arg4 = ctx.r8;
+    frame.arg5 = ctx.r9;
+    frame.rbx = ctx.rbx;
+    frame.rbp = ctx.rbp;
+    frame.r12 = ctx.r12;
+    frame.r13 = ctx.r13;
+    frame.r14 = ctx.r14;
+    frame.r15 = ctx.r15;
+
+    // Restore the interrupted syscall's return value into RAX.
+    #[allow(clippy::cast_possible_wrap)]
+    {
+        ctx.rax as i64
+    }
+}
+
+/// Deliver a pending signal to the current process on the way back to
+/// userspace, if one is deliverable and a trampoline is registered.
+///
+/// Mirrors the SEH-style exception delivery (`idt::try_dispatch_user_
+/// exception`): build a [`SignalContext`](crate::proc::signal::SignalContext)
+/// on the user stack capturing the interrupted state (including the
+/// syscall's return value in RAX), then rewrite the syscall frame so the
+/// SYSRET path jumps to the trampoline with `rdi = signum` and
+/// `rsi = &ctx`.
+///
+/// `ret_val` is the value the interrupted syscall was about to return in
+/// RAX; it is saved into the context and restored on `SYS_SIGNAL_RETURN`.
+///
+/// Returns `true` if a signal was delivered (the frame was rewritten),
+/// `false` otherwise (the normal return value should be used).
+///
+/// If the user stack cannot hold the context (e.g. it would cross into an
+/// unmapped guard page), delivery is skipped and the signal stays pending
+/// — it will be retried on the next return to userspace. This avoids
+/// corrupting memory; a proper alternate signal stack (`sigaltstack`) is
+/// a documented future enhancement.
+pub fn deliver_pending_signal(
+    frame: &mut super::entry::SyscallFrame,
+    ret_val: i64,
+) -> bool {
+    use crate::proc::signal::{self, SignalContext, SIGNAL_CONTEXT_SIZE};
+
+    // Fast path: nothing pending anywhere.
+    if !signal::any_pending() {
+        return false;
+    }
+
+    let task_id = sched::current_task_id();
+    let pid = match crate::proc::thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => return false,
+    };
+
+    let trampoline = match signal::trampoline(pid) {
+        Some(addr) => addr,
+        None => return false,
+    };
+
+    let sig = match signal::take_deliverable(pid) {
+        Some(s) => s,
+        None => return false,
+    };
+
+    // Compute the placement of the SignalContext on the user stack.
+    //
+    //   sp = user_rsp
+    //   sp -= ctx_size; sp &= !0xF;   (16-byte aligned context)
+    //   ctx_addr = sp
+    //   sp -= 8;                       (fake return slot — null)
+    //   new_rsp = sp                   (RSP%16 == 8 at handler entry,
+    //                                   matching the SysV call convention)
+    let ctx_size = SIGNAL_CONTEXT_SIZE as u64;
+    let ctx_addr = (frame.user_rsp.wrapping_sub(ctx_size)) & !0xFu64;
+    let new_rsp = ctx_addr.wrapping_sub(8);
+
+    // Validate the whole region [new_rsp, ctx_addr + ctx_size) is a
+    // writable user mapping before touching it.
+    let region_len = (ctx_addr.wrapping_add(ctx_size)).wrapping_sub(new_rsp);
+    if crate::mm::user::validate_user_write(new_rsp, region_len as usize).is_err()
+    {
+        // Cannot place the frame; re-arm the signal and skip delivery.
+        signal::set_pending(pid, sig);
+        return false;
+    }
+
+    let ctx = SignalContext {
+        signum: u64::from(sig),
+        rax: ret_val as u64,
+        rdi: frame.arg0,
+        rsi: frame.arg1,
+        rdx: frame.arg2,
+        r10: frame.arg3,
+        r8: frame.arg4,
+        r9: frame.arg5,
+        rbx: frame.rbx,
+        rbp: frame.rbp,
+        r12: frame.r12,
+        r13: frame.r13,
+        r14: frame.r14,
+        r15: frame.r15,
+        rip: frame.user_rip,
+        rsp: frame.user_rsp,
+        rflags: frame.user_rflags,
+    };
+
+    // SAFETY: the region was validated as writable user memory above, and
+    // CR3 still points at this process's address space (we are returning
+    // to it). ctx_addr is 16-byte aligned and within the region.
+    unsafe {
+        core::ptr::write(ctx_addr as *mut SignalContext, ctx);
+        core::ptr::write(new_rsp as *mut u64, 0u64); // null return address
+    }
+
+    // Rewrite the frame so SYSRET jumps to the trampoline.
+    frame.user_rip = trampoline;
+    frame.user_rsp = new_rsp;
+    frame.arg0 = u64::from(sig); // rdi = signum
+    frame.arg1 = ctx_addr; // rsi = &SignalContext
+    // Clear other argument registers for cleanliness.
+    frame.arg2 = 0;
+    frame.arg3 = 0;
+    frame.arg4 = 0;
+    frame.arg5 = 0;
+
+    true
+}
+
 /// `SYS_PROCESS_KILL` — force-terminate a process.
 ///
 /// `arg0`: target process ID.
@@ -3260,6 +3580,11 @@ pub fn sys_process_exec_with_frame(
     // store argv/envp.
     match exec_process(pid, &elf_copy, &argv_slices, &envp_slices) {
         Ok(result) => {
+            // POSIX: exec resets caught signals to default and drops the
+            // (now-stale) signal trampoline — the new image's libc init
+            // re-registers it. Pending signals are preserved.
+            crate::proc::signal::on_exec(pid);
+
             // Success: rewrite the saved frame so SYSRET returns to the
             // new entry point with a fresh stack and clean registers.
             frame.user_rip = result.entry_rip;

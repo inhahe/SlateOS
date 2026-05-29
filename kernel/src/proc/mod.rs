@@ -37,6 +37,7 @@
 pub mod elf;
 pub mod exception;
 pub mod pcb;
+pub mod signal;
 pub mod spawn;
 pub mod thread;
 
@@ -60,6 +61,8 @@ pub fn self_test() -> KernelResult<()> {
     spawn::self_test()?;
     serial_println!("[proc] Running exception handling self-test...");
     exception::self_test()?;
+    serial_println!("[proc] Running signal-shim self-test...");
+    signal::self_test()?;
 
     serial_println!("[proc] Process management self-test PASSED");
     Ok(())

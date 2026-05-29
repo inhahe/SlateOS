@@ -66,6 +66,12 @@ fn test_alloc_map_access_unmap() {
     let phys = frame.addr();
     let virt = VirtAddr::new(TEST_BASE);
 
+    // SAFETY (group — covers all unsafe blocks in this test): CR3 read
+    // uses `mov cr3` which is always valid in ring 0.  map_frame/unmap_frame
+    // use the active PML4 and a dedicated test VA (TEST_BASE).  write/read
+    // volatile target the just-mapped VA and the HHDM-mapped physical frame.
+    // free_frame operates on a frame we allocated and just unmapped.
+
     // Get current PML4.
     let cr3: u64;
     unsafe {
@@ -116,6 +122,9 @@ fn test_alloc_map_access_unmap() {
 
 /// Test 2: TLB gather — batch unmap multiple pages.
 fn test_tlb_gather_integration() {
+    // SAFETY (group — covers all unsafe blocks in this test): same
+    // invariants as test 1 — CR3 read, map_frame/unmap_frame on
+    // dedicated test VAs, write_volatile to just-mapped pages.
     let cr3: u64;
     unsafe {
         core::arch::asm!(
@@ -163,6 +172,9 @@ fn test_tlb_gather_integration() {
 
 /// Test 3: Page table walk finds our mappings.
 fn test_pt_walk_finds_mappings() {
+    // SAFETY (group — covers all unsafe blocks in this test): CR3 read,
+    // map_frame on test VA, walk_range on the active PML4 within the
+    // mapped range, unmap_frame + free_frame on the frame we allocated.
     let cr3: u64;
     unsafe {
         core::arch::asm!(

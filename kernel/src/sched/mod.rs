@@ -4058,6 +4058,7 @@ fn test_suspend_resume() -> KernelResult<()> {
             && task.state == TaskState::Dead
             && task.stack_phys != 0
         {
+            // SAFETY: Task is Dead, removed from table, stack_phys is valid.
             unsafe { let _ = task.free_stack(); }
             task.stack_phys = 0;
         }
@@ -4117,6 +4118,7 @@ fn test_set_priority() -> KernelResult<()> {
             && task.state == TaskState::Dead
             && task.stack_phys != 0
         {
+            // SAFETY: Task is Dead, removed from table, stack_phys is valid.
             unsafe { let _ = task.free_stack(); }
             task.stack_phys = 0;
         }
@@ -4204,6 +4206,7 @@ fn test_interactive_detection() -> KernelResult<()> {
             && task.state == TaskState::Dead
             && task.stack_phys != 0
         {
+            // SAFETY: Task is Dead, removed from table, stack_phys is valid.
             unsafe { let _ = task.free_stack(); }
             task.stack_phys = 0;
         }
@@ -5211,6 +5214,7 @@ fn test_stack_watermark() -> KernelResult<()> {
             *b = (i & 0xFF) as u8;
         }
         // Prevent optimization — read the volatile value.
+        // SAFETY: buf is a stack-local [u8; 256]; index 128 is within bounds.
         unsafe {
             core::ptr::read_volatile(&buf[128]);
         }

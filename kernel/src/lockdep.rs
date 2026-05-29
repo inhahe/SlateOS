@@ -259,6 +259,7 @@ pub fn lock_release(lock_addr: usize) {
 
     let class_idx = find_class(lock_addr);
     let Some(class_idx) = class_idx else {
+        // SAFETY: Only this CPU accesses its IN_LOCKDEP slot (interrupts disabled).
         unsafe { IN_LOCKDEP[cpu] = false; }
         return; // Unknown lock — nothing to do.
     };
@@ -449,6 +450,7 @@ fn find_or_register_class(lock_addr: usize, name: &[u8]) -> Option<u16> {
 fn find_class(lock_addr: usize) -> Option<u16> {
     let count = CLASS_COUNT.load(Ordering::Relaxed) as usize;
     for i in 0..count.min(MAX_CLASSES) {
+        // SAFETY: i < count ≤ MAX_CLASSES, so CLASSES[i] is within bounds.
         if unsafe { CLASSES[i].id } == lock_addr {
             return Some(i as u16);
         }
@@ -511,6 +513,7 @@ fn has_cycle(start: u16, target: u16) -> bool {
 
         // Find all edges FROM current.
         for i in 0..edge_count.min(MAX_EDGES) {
+            // SAFETY: i < edge_count ≤ MAX_EDGES, so EDGES[i] is within bounds.
             let e = unsafe { EDGES[i] };
             if e.from == current {
                 if e.to == target {
@@ -646,6 +649,7 @@ pub fn self_test() {
 
     // Test 5: Release removes from held stack (verify no leak).
     let cpu = smp::current_cpu_index();
+    // SAFETY: cpu is the current CPU index (< MAX_CPUS); only this CPU reads its slot.
     let depth = unsafe { HELD[cpu].depth };
     assert_eq!(depth, 0, "held stack should be empty after all releases");
     serial_println!("[lockdep]   Release cleanup: OK");

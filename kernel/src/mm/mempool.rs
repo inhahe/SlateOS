@@ -412,6 +412,7 @@ pub fn self_test() {
         assert!(allocated.is_some(), "alloc {} should succeed", i);
         *p = allocated.unwrap();
         // Verify it's zeroed.
+        // SAFETY: *p is a freshly allocated slot of size ≥ 64; valid for reads.
         let slice = unsafe { core::slice::from_raw_parts(*p, 64) };
         assert!(slice.iter().all(|&b| b == 0), "slot should be zeroed");
     }
@@ -423,6 +424,7 @@ pub fn self_test() {
     serial_println!("[mempool]   Pool exhaustion: OK");
 
     // Test 4: Free and re-alloc.
+    // SAFETY: ptrs[0] was returned by TEST_POOL.alloc() and has not been freed.
     assert!(unsafe { TEST_POOL.free(ptrs[0]) });
     let re = TEST_POOL.alloc();
     assert!(re.is_some(), "re-alloc after free should succeed");
@@ -431,6 +433,7 @@ pub fn self_test() {
 
     // Test 5: Free all.
     for p in &ptrs {
+        // SAFETY: each *p was returned by TEST_POOL.alloc() and has not been freed.
         assert!(unsafe { TEST_POOL.free(*p) }, "free should succeed");
     }
     serial_println!("[mempool]   Free all: OK");
@@ -448,6 +451,7 @@ pub fn self_test() {
         st.total_allocs, st.total_frees, st.alloc_failures, st.high_watermark);
 
     // Test 7: Null/invalid free rejected.
+    // SAFETY: null is intentionally invalid — free() should reject it gracefully.
     assert!(!unsafe { TEST_POOL.free(core::ptr::null_mut()) });
     serial_println!("[mempool]   Null free rejected: OK");
 

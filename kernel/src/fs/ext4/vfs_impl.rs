@@ -1736,6 +1736,7 @@ fn test_inode_file_size() -> KernelResult<()> {
     }
 
     // Zeroed inode.
+    // SAFETY: Ext4Inode is all integer fields; zeroed is a valid representation.
     let zero: super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
     if inode_file_size(&zero) != 0 {
         crate::serial_println!("[ext4-vfs]   FAIL: zero inode size != 0");
@@ -1748,6 +1749,7 @@ fn test_inode_file_size() -> KernelResult<()> {
 
 /// Test 32-bit UID/GID read/write (split across i_uid/i_gid and i_osd2).
 fn test_inode_uid_gid_32() -> KernelResult<()> {
+    // SAFETY: Ext4Inode is all integer fields; zeroed is a valid representation.
     let mut inode: super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
 
     // Set UID = 70000 (0x0001_1170) — exceeds 16-bit range.
@@ -1953,6 +1955,7 @@ mod tests {
 
     #[test]
     fn test_inode_file_size_regular_file() {
+        // SAFETY: Ext4Inode is all integer fields; zeroed is valid.
         let mut inode: super::super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
         inode.i_mode = file_type::S_IFREG | 0o644;
         inode.i_size_lo = 0x1234_5678;
@@ -1964,6 +1967,7 @@ mod tests {
 
     #[test]
     fn test_inode_file_size_directory() {
+        // SAFETY: Ext4Inode is all integer fields; zeroed is valid.
         let mut inode: super::super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
         inode.i_mode = file_type::S_IFDIR | 0o755;
         inode.i_size_lo = 4096;
@@ -1974,6 +1978,7 @@ mod tests {
 
     #[test]
     fn test_inode_file_size_zero() {
+        // SAFETY: Ext4Inode is all integer fields; zeroed is valid.
         let inode: super::super::ondisk::Ext4Inode = unsafe { core::mem::zeroed() };
         assert_eq!(inode_file_size(&inode), 0);
     }

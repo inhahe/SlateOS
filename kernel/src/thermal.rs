@@ -251,11 +251,13 @@ pub fn periodic_check() {
 /// Returns None if the reading is invalid.
 fn read_package_temp() -> Option<u8> {
     // Try package-level MSR first (gives overall chip temp).
+    // SAFETY: MSR_PKG_THERM_STATUS is read-only; available when DTS is supported.
     let status = unsafe { rdmsr(MSR_PKG_THERM_STATUS) };
 
     // Check if reading is valid (bit 31).
     if status & (1 << 31) == 0 {
         // Fall back to per-core thermal status.
+        // SAFETY: MSR_THERM_STATUS is read-only; available when DTS is supported.
         let core_status = unsafe { rdmsr(MSR_THERM_STATUS) };
         if core_status & (1 << 31) == 0 {
             return None;
@@ -286,6 +288,7 @@ fn read_tj_max() -> u8 {
 
 /// Check if PROCHOT is currently asserted (hardware thermal throttle).
 fn is_prochot_active() -> bool {
+    // SAFETY: MSR_THERM_STATUS is read-only; available when DTS is supported.
     let status = unsafe { rdmsr(MSR_THERM_STATUS) };
     // Bit 0: Thermal status (PROCHOT active).
     status & 1 != 0

@@ -406,6 +406,9 @@ fn parse_srat(phys: u64) -> bool {
             break; // Corrupt entry — stop parsing.
         }
 
+        // SAFETY (group — covers all SRAT entry casts below): each cast is
+        // guarded by a sub_len >= size_of::<T>() check, and offset + sub_len
+        // is within the SRAT table.  The SRAT is mapped via HHDM and read-only.
         match sub_type {
             0 => {
                 // Processor Local APIC Affinity.
@@ -579,6 +582,8 @@ fn init_uma() {
     // The exact regions don't matter for UMA — all accesses are local.
     NODES[0].region_count.store(1, Ordering::Relaxed);
     let region_ptr = &NODES[0].regions[0] as *const NumaMemRegion as *mut NumaMemRegion;
+    // SAFETY: NODES[0] is a static; region_ptr points to its first region slot.
+    // init_uma runs once at boot before any concurrent access.
     unsafe {
         (*region_ptr).base = 0;
         (*region_ptr).length = NODES[0].total_memory.load(Ordering::Relaxed);

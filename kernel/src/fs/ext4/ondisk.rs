@@ -1224,6 +1224,8 @@ fn test_extent_structures() -> crate::error::KernelResult<()> {
         0x80, 0x00, 0x00, 0x00, // ee_start_lo = 128
     ];
 
+    // SAFETY: ext_bytes is a stack array of exactly size_of::<Ext4Extent>() bytes;
+    // Ext4Extent is repr(C) with all-integer fields (no alignment requirement > 1).
     let ext = unsafe { &*(ext_bytes.as_ptr() as *const Ext4Extent) };
     if ext.ee_block != 0 || ext.ee_len != 16 || ext.ee_start_hi != 0 || ext.ee_start_lo != 128 {
         crate::serial_println!("[ext4-ondisk]   FAIL: extent leaf fields");
@@ -1256,6 +1258,8 @@ fn test_dir_entry_layout() -> crate::error::KernelResult<()> {
         0x02,                   // file_type = DIR
     ];
 
+    // SAFETY: bytes is a stack array ≥ size_of::<Ext4DirEntry2>();
+    // Ext4DirEntry2 is repr(C) with all-integer fields.
     let entry = unsafe { &*(bytes.as_ptr() as *const Ext4DirEntry2) };
     if entry.inode != EXT4_ROOT_INO {
         crate::serial_println!("[ext4-ondisk]   FAIL: dir entry inode = {}", entry.inode);
@@ -1275,6 +1279,8 @@ fn test_dir_entry_layout() -> crate::error::KernelResult<()> {
         0xAA, 0xBB, 0xCC, 0xDD, // det_checksum = 0xDDCCBBAA
     ];
 
+    // SAFETY: tail_bytes is a stack array of exactly size_of::<Ext4DirEntryTail>();
+    // Ext4DirEntryTail is repr(C) with all-integer fields.
     let tail = unsafe { &*(tail_bytes.as_ptr() as *const Ext4DirEntryTail) };
     if tail.det_reserved_ft != EXT4_DIRENT_TAIL_MARKER {
         crate::serial_println!(
@@ -1379,6 +1385,8 @@ fn test_xattr_structures() -> crate::error::KernelResult<()> {
     // h_blocks at offset 8: 1 in LE.
     hdr_bytes[8] = 0x01;
 
+    // SAFETY: hdr_bytes is a stack array ≥ size_of::<Ext4XattrHeader>();
+    // Ext4XattrHeader is repr(C) with all-integer fields.
     let hdr = unsafe { &*(hdr_bytes.as_ptr() as *const Ext4XattrHeader) };
     if hdr.h_magic != EXT4_XATTR_MAGIC {
         crate::serial_println!(

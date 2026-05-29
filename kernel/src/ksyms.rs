@@ -289,6 +289,10 @@ pub fn nearest(_addr: u64) -> Option<(&'static str, u64, u64)> {
 
 /// Parse function symbols from the kernel ELF.
 fn parse_elf_symbols(elf: &[u8]) -> Option<usize> {
+    // SAFETY (group — covers all ELF pointer casts below): each cast is
+    // preceded by a bounds check ensuring offset + struct_size <= elf.len(),
+    // so the pointer is within the valid slice.  ELF structs are repr(C)
+    // with no alignment requirements beyond u8, and the data is read-only.
     let header = unsafe { &*(elf.as_ptr() as *const Elf64Header) };
 
     // Validate basic ELF fields.

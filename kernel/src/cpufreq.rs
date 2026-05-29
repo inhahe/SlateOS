@@ -202,6 +202,7 @@ fn init_hwp() {
     }
 
     // Read capabilities.
+    // SAFETY: HWP was just enabled above; MSR_HWP_CAPABILITIES is valid.
     let caps = unsafe { rdmsr(MSR_HWP_CAPABILITIES) };
     let perf_highest = (caps & 0xFF) as u8;
     let perf_guaranteed = ((caps >> 8) & 0xFF) as u8;
@@ -228,6 +229,7 @@ fn init_hwp() {
 /// Initialize legacy EIST (Enhanced Intel SpeedStep).
 fn init_eist() {
     // Read current P-state from IA32_PERF_STATUS.
+    // SAFETY: MSR_PERF_STATUS is read-only and always valid on EIST-capable CPUs.
     let status = unsafe { rdmsr(MSR_PERF_STATUS) };
     let current_ratio = ((status >> 8) & 0xFF) as u8;
 
@@ -526,6 +528,7 @@ fn cpuid_max_leaf() -> u32 {
 unsafe fn rdmsr(msr: u32) -> u64 {
     let low: u32;
     let high: u32;
+    // SAFETY: Caller guarantees MSR address is valid; rdmsr reads ECX-selected MSR.
     unsafe {
         core::arch::asm!(
             "rdmsr",
@@ -549,6 +552,7 @@ unsafe fn rdmsr(msr: u32) -> u64 {
 unsafe fn wrmsr(msr: u32, value: u64) {
     let low = value as u32;
     let high = (value >> 32) as u32;
+    // SAFETY: Caller guarantees MSR address and value are valid; wrmsr writes ECX-selected MSR.
     unsafe {
         core::arch::asm!(
             "wrmsr",

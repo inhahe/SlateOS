@@ -71529,6 +71529,7 @@ fn cmd_memtest(args: &str) {
     for (i, &phys) in frames.iter().enumerate() {
         let ptr = (phys + hhdm) as *mut u8;
         let pattern = !(1u8 << (i & 7));
+        // SAFETY: phys is an allocated frame; HHDM maps it to a valid VA.
         unsafe {
             core::ptr::write_bytes(ptr, pattern, frame_size);
         }
@@ -71536,6 +71537,7 @@ fn cmd_memtest(args: &str) {
     for (i, &phys) in frames.iter().enumerate() {
         let ptr = (phys + hhdm) as *const u8;
         let pattern = !(1u8 << (i & 7));
+        // SAFETY: phys is an allocated frame; HHDM maps it to a valid VA.
         let slice = unsafe { core::slice::from_raw_parts(ptr, frame_size) };
         for (offset, &byte) in slice.iter().enumerate() {
             if byte != pattern {
@@ -74564,6 +74566,7 @@ fn cmd_pt_walk() {
 
     // Read CR3 for current PML4.
     let cr3: u64;
+    // SAFETY: `mov cr3` is always valid in ring 0 and has no side effects.
     unsafe {
         core::arch::asm!(
             "mov {}, cr3",
@@ -74575,6 +74578,7 @@ fn cmd_pt_walk() {
     shell_println!("  PML4 physical: {:#x}", pml4_phys);
 
     // Walk the full address space.
+    // SAFETY: pml4_phys is the active PML4 from CR3; count_mapped reads PT entries.
     let (p4k, p2m, p1g, total) = unsafe {
         crate::mm::pt_walk::count_mapped(pml4_phys)
     };

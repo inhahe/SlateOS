@@ -271,6 +271,8 @@ unsafe fn write_pte(
     hhdm: u64,
 ) -> KernelResult<()> {
     // Walk PML4 → PDPT → PD → PT.
+    // SAFETY: pml4_phys is valid (caller guarantee); each subsequent read
+    // uses the phys_addr from the prior level, which was checked present.
     let pml4e = unsafe { page_table::read_entry(pml4_phys, virt.pml4_index(), hhdm) };
     if !pml4e.is_present() {
         return Err(KernelError::InvalidAddress);
@@ -314,6 +316,7 @@ unsafe fn write_pte(
 pub unsafe fn mark_cow(pml4_phys: u64, virt: VirtAddr) -> KernelResult<()> {
     let hhdm = page_table::hhdm().ok_or(KernelError::NotSupported)?;
 
+    // SAFETY: pml4_phys is valid (caller guarantee); virt is aligned.
     let pte = unsafe { read_pte(pml4_phys, virt, hhdm)? };
     if !pte.is_present() {
         return Err(KernelError::InvalidAddress);
@@ -456,6 +459,7 @@ fn test_cow_resolve_sole_owner() {
     }
 
     // Verify PTEs are now CoW (not writable).
+    // SAFETY: pml4 and virt reference our test mapping.
     let pte = unsafe { read_pte(pml4, virt, hhdm).expect("read pte") };
     assert!(pte.is_cow(), "PTE should be CoW after mark_cow");
     assert!(
@@ -477,6 +481,7 @@ fn test_cow_resolve_sole_owner() {
         .expect("sole-owner cow resolve should succeed");
 
     // Verify: PTE should now be WRITABLE and not COW.
+    // SAFETY: pml4 and virt reference our test mapping.
     let pte_after = unsafe { read_pte(pml4, virt, hhdm).expect("read pte after") };
     assert!(
         !pte_after.is_cow(),
@@ -496,6 +501,7 @@ fn test_cow_resolve_sole_owner() {
     // Batch resolution: all 4 sibling PTEs should be resolved too.
     for i in 1..HW_PAGES_PER_FRAME {
         let sib_virt = VirtAddr::new(test_virt_base + (i as u64 * HW_PAGE_SIZE as u64));
+        // SAFETY: pml4 and sib_virt reference our test mapping.
         let sib_pte = unsafe { read_pte(pml4, sib_virt, hhdm).expect("read sibling") };
         assert!(
             !sib_pte.is_cow(),
@@ -596,6 +602,7 @@ fn test_cow_resolve_shared() {
         .expect("shared cow resolve should succeed");
 
     // Verify: PTE should point to a DIFFERENT physical address.
+    // SAFETY: pml4 and virt reference our test mapping.
     let pte_after = unsafe { read_pte(pml4, virt, hhdm).expect("read pte after") };
     let new_phys = pte_after.phys_addr();
     // The new PTE points to the first 4 KiB page of a new 16 KiB frame.
@@ -635,6 +642,8 @@ fn test_cow_resolve_shared() {
     // Verify data integrity in the NEW frame.
     let new_phys_base = new_frame_base;
     let new_ptr = (new_phys_base + hhdm) as *const u8;
+    // SAFETY: new_phys_base is a valid physical frame (just copied into
+    // by resolve_cow_fault); HHDM maps it.
     unsafe {
         for page in 0..HW_PAGES_PER_FRAME {
             let page_ptr = new_ptr.add(page * HW_PAGE_SIZE);
@@ -654,6 +663,7 @@ fn test_cow_resolve_shared() {
     }
 
     // Cleanup: unmap the new frame and free it.
+    // SAFETY: pml4/virt reference our test mapping; we are sole owner.
     let returned = unsafe {
         page_table::unmap_frame(pml4, virt).expect("cow test unmap")
     };

@@ -167,6 +167,9 @@ pub unsafe fn walk_all(
 
     let mut visited: u64 = 0;
 
+    // SAFETY: pml4_phys is valid (caller guarantee).  Each subsequent
+    // read_entry uses the phys_addr from the prior level, which was checked
+    // present.  All indices are in [0, 512).
     'pml4: for pml4_idx in 0..ENTRIES_PER_TABLE {
         let pml4e = unsafe { page_table::read_entry(pml4_phys, pml4_idx, hhdm) };
         if !pml4e.is_present() {
@@ -313,6 +316,8 @@ pub unsafe fn walk_range(
     let start_pml4 = ((start_vaddr >> 39) & 0x1FF) as usize;
     let end_pml4 = ((end_vaddr.saturating_sub(1) >> 39) & 0x1FF) as usize;
 
+    // SAFETY: pml4_phys is valid (caller guarantee).  Each subsequent
+    // read_entry uses phys_addr from a present parent entry.
     'pml4: for pml4_idx in start_pml4..=end_pml4.min(511) {
         let pml4e = unsafe { page_table::read_entry(pml4_phys, pml4_idx, hhdm) };
         if !pml4e.is_present() {
@@ -434,6 +439,7 @@ pub unsafe fn walk_range(
 /// `pml4_phys` must be a valid PML4 physical address.
 #[must_use]
 pub unsafe fn count_mapped(pml4_phys: u64) -> (u64, u64, u64, u64) {
+    // SAFETY: Caller guarantees pml4_phys is valid; forwarded to walk_all.
     let summary = unsafe {
         walk_all(pml4_phys, |_| WalkAction::Continue)
     };
@@ -451,6 +457,7 @@ pub unsafe fn count_mapped_range(
     start: u64,
     end: u64,
 ) -> (u64, u64, u64, u64) {
+    // SAFETY: Caller guarantees pml4_phys is valid; forwarded to walk_range.
     let summary = unsafe {
         walk_range(pml4_phys, start, end, |_| WalkAction::Continue)
     };
@@ -516,6 +523,7 @@ pub fn self_test() {
     // Test 2: Walk the current kernel page tables.
     // Read CR3 to get the current PML4.
     let cr3: u64;
+    // SAFETY: Reading CR3 to obtain the current PML4 physical address.
     unsafe {
         core::arch::asm!(
             "mov {}, cr3",
@@ -529,6 +537,7 @@ pub fn self_test() {
     // Use walk_all with an early stop after finding a few entries.
     // We know the kernel has mappings — we're executing from them.
     let mut found_entries = 0u32;
+    // SAFETY: pml4_phys came from CR3, which is always a valid PML4.
     let summary = unsafe {
         walk_all(pml4_phys, |_entry| {
             found_entries += 1;
@@ -546,6 +555,7 @@ pub fn self_test() {
 
     // Test 3: Walk with Stop action (stop after 3 entries).
     let mut count = 0u32;
+    // SAFETY: pml4_phys from CR3 is valid.
     let summary = unsafe {
         walk_all(pml4_phys, |_entry| {
             count += 1;
@@ -561,6 +571,7 @@ pub fn self_test() {
     serial_println!("[pt_walk]   Walk with Stop: OK (stopped after {} entries)", count);
 
     // Test 4: Walk empty range returns nothing.
+    // SAFETY: pml4_phys from CR3 is valid.
     let summary = unsafe {
         walk_range(pml4_phys, 0x1000_0000, 0x1000_0000, |_| WalkAction::Continue)
     };
@@ -568,6 +579,7 @@ pub fn self_test() {
     serial_println!("[pt_walk]   Empty range: OK");
 
     // Test 5: Walk user space (should be empty in kernel-only context).
+    // SAFETY: pml4_phys from CR3 is valid.
     let summary = unsafe {
         walk_range(pml4_phys, 0x0000_0000_0040_0000, 0x0000_0000_0100_0000, |_| {
             WalkAction::Continue

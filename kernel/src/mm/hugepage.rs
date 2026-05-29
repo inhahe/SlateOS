@@ -157,6 +157,8 @@ pub unsafe fn map_huge_2m(
 
     // Walk to the PD level (PML4 → PDPT → PD), creating intermediate
     // tables as needed.
+    // SAFETY: pml4_phys is valid (caller guarantee).  walk_or_create
+    // and read_entry target valid page table levels at valid indices.
     let pml4_idx = virt.pml4_index();
     let pdpt_phys = unsafe {
         page_table::walk_or_create(pml4_phys, pml4_idx, true, user, hhdm)?
@@ -206,6 +208,8 @@ pub unsafe fn unmap_huge_2m(
     let hhdm = page_table::hhdm().ok_or(KernelError::InternalError)?;
 
     // Walk to the PD level.
+    // SAFETY: pml4_phys is valid (caller guarantee).  walk_or_create
+    // and read_entry target valid page table levels.
     let pml4_idx = virt.pml4_index();
     let pdpt_phys = unsafe {
         page_table::walk_or_create(pml4_phys, pml4_idx, false, false, hhdm)?
@@ -231,6 +235,7 @@ pub unsafe fn unmap_huge_2m(
 
     // Clear the PDE.
     let empty = PageTableEntry::new(0, PageFlags::empty());
+    // SAFETY: pd_phys is valid from walk_or_create; pd_idx < 512.
     unsafe { page_table::write_entry(pd_phys, pd_idx, empty, hhdm); }
 
     // Flush the TLB for this 2 MiB region.
@@ -248,6 +253,8 @@ pub unsafe fn unmap_huge_2m(
 unsafe fn flush_tlb_range(vaddr: u64, size: usize) {
     // For a 2 MiB huge page, one INVLPG suffices.
     // For safety, issue INVLPG at the base address.
+    // SAFETY: INVLPG invalidates the TLB entry for the given address.
+    // The caller guarantees vaddr was a valid mapping that was just removed.
     unsafe {
         core::arch::asm!(
             "invlpg [{}]",
@@ -259,6 +266,7 @@ unsafe fn flush_tlb_range(vaddr: u64, size: usize) {
     let mut offset = HUGE_PAGE_SIZE_2M;
     while offset < size {
         let addr = vaddr.wrapping_add(offset as u64);
+        // SAFETY: Continuation of TLB invalidation for the same range.
         unsafe {
             core::arch::asm!(
                 "invlpg [{}]",
@@ -375,6 +383,7 @@ pub fn self_test() {
 
     // Test 4: Write and read through the huge page mapping.
     let ptr = test_virt.as_u64() as *mut u64;
+    // SAFETY: test_virt was just mapped to a 2 MiB page; reads/writes within it are valid.
     unsafe {
         // Write at the start of the huge page.
         core::ptr::write_volatile(ptr, 0xDEAD_BEEF_CAFE_F00D);
@@ -390,17 +399,20 @@ pub fn self_test() {
     serial_println!("[hugepage]   Read/write: OK (start + end of 2 MiB region)");
 
     // Test 5: Double-map prevention.
+    // SAFETY: pml4 is valid; testing that double-map is rejected.
     let double_result = unsafe { map_huge_2m(pml4, test_virt, frame, map_flags) };
     assert!(double_result.is_err(), "double-map should fail");
     serial_println!("[hugepage]   Double-map rejected: OK");
 
     // Test 6: Alignment rejection.
     let unaligned = VirtAddr::new(test_virt.as_u64() + 4096);
+    // SAFETY: pml4 is valid; testing that unaligned virt is rejected.
     let align_result = unsafe { map_huge_2m(pml4, unaligned, frame, map_flags) };
     assert!(align_result.is_err(), "unaligned virt should fail");
     serial_println!("[hugepage]   Alignment check: OK");
 
     // Test 7: Unmap the huge page.
+    // SAFETY: pml4 is valid; test_virt has a huge mapping from test 2.
     let unmap_result = unsafe { unmap_huge_2m(pml4, test_virt) };
     assert!(unmap_result.is_ok());
     let returned_phys = unmap_result.unwrap();
@@ -413,6 +425,7 @@ pub fn self_test() {
     serial_println!("[hugepage]   Post-unmap check: OK");
 
     // Test 9: Free the physical memory.
+    // SAFETY: returned_phys is the frame we allocated and just unmapped.
     unsafe { free_huge_2m(returned_phys); }
     serial_println!("[hugepage]   Free 2 MiB: OK");
 

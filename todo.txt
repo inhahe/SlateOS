@@ -427,10 +427,22 @@ Remaining net improvements (diminishing returns):
   6-GP-register overflow spill, %% (no arg), ignored length modifiers,
   null-va_list rejection, vsprintf NUL-termination, and va offset
   advancement.  All pass; bare-metal build clean.
-  NOTE: the err()/warn() family in posix/src/err.rs still prints its
-  format string literally (it is declared non-variadic and drops printf
-  args) — that is a separate pre-existing bug, now fixable by routing the
-  v* variants (verr/vwarn) through vfprintf.  Tracked separately.
+  FOLLOW-UP (DONE 2026-05-29): the err()/warn() family in
+  posix/src/err.rs no longer prints its format string literally.  It was
+  declared non-variadic and dropped all printf args, so e.g.
+  err(1, "open %s", path) printed "open %s: ..." instead of expanding %s.
+  Rewrote err.rs to mirror printf's architecture: asm trampolines for the
+  variadic entry points (warn/warnx 1 fixed arg like printf; err/errx 2
+  fixed args like fprintf) flatten varargs into [u64;8] int/float arrays
+  and call _warn_impl/_warnx_impl/_err_impl/_errx_impl; the v* variants
+  (vwarn/vwarnx/verr/verrx) now take a real va_list (matching the C ABI —
+  previously they wrongly treated arg 2 as a pre-formatted message) and
+  flatten via printf::va_collect.  Both paths funnel through a single
+  emit() that expands the format with the tested _snprintf_impl engine,
+  then adds the "progname: " prefix and optional ": strerror(errno)"
+  suffix.  13 host tests cover the flat-array path, the va_list path
+  (synthetic va_lists), %s/%d expansion, null fmt, and null va_list;
+  err/errx/verr/verrx aren't called directly in tests since they exit().
 
 - (FIXED 2026-05-27) crypt::tests parallel-test race: crypt() returns
   a pointer into a single process-global static buffer, so cargo's

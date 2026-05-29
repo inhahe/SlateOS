@@ -519,7 +519,7 @@ unsafe fn va_arg_double(va: &mut VaList) -> u64 {
 ///
 /// # Safety
 /// `va` must be a valid `va_list` with enough arguments to satisfy `fmt`.
-unsafe fn va_collect(fmt: *const u8, va: &mut VaList) -> ([u64; 8], [u64; 8]) {
+pub unsafe fn va_collect(fmt: *const u8, va: &mut VaList) -> ([u64; 8], [u64; 8]) {
     let mut int_args = [0u64; 8];
     let mut float_args = [0u64; 8];
     let mut iidx: usize = 0;

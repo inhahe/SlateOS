@@ -147,6 +147,9 @@ pub fn add(address: u64, label: &[u8]) -> Option<usize> {
     }
 
     // Find a free slot.
+    // SAFETY: STORE is accessed from a single core with interrupts disabled
+    // (watchpoints are polled by the timer ISR).  All accesses go through
+    // UnsafeCell and use raw pointer read/write on valid slots (i < MAX).
     for i in 0..MAX_WATCHPOINTS {
         let wp = unsafe {
             let ptr = STORE.0.get() as *const Watchpoint;
@@ -189,6 +192,7 @@ pub fn remove(slot: usize) -> bool {
     if slot >= MAX_WATCHPOINTS {
         return false;
     }
+    // SAFETY: slot < MAX_WATCHPOINTS; STORE access is serialised (see add()).
     let wp = unsafe {
         let ptr = STORE.0.get() as *const Watchpoint;
         ptr.add(slot).read()
@@ -197,6 +201,7 @@ pub fn remove(slot: usize) -> bool {
         return false;
     }
 
+    // SAFETY: slot < MAX_WATCHPOINTS and the slot was active.
     unsafe {
         let ptr = STORE.0.get() as *mut Watchpoint;
         ptr.add(slot).write(Watchpoint::empty());
@@ -208,6 +213,7 @@ pub fn remove(slot: usize) -> bool {
 /// Clear all watchpoints.
 pub fn clear() {
     for i in 0..MAX_WATCHPOINTS {
+        // SAFETY: i < MAX_WATCHPOINTS; STORE access serialised.
         unsafe {
             let ptr = STORE.0.get() as *mut Watchpoint;
             ptr.add(i).write(Watchpoint::empty());
@@ -223,6 +229,7 @@ pub fn poll() -> usize {
     let mut changes = 0;
     let tick = crate::apic::tick_count();
 
+    // SAFETY: STORE/EVENTS access is serialised; all slot indices < MAX.
     for i in 0..MAX_WATCHPOINTS {
         let wp = unsafe {
             let ptr = STORE.0.get() as *const Watchpoint;
@@ -279,6 +286,7 @@ pub fn poll() -> usize {
 /// Get all active watchpoints.
 pub fn list() -> [(usize, Watchpoint); MAX_WATCHPOINTS] {
     let mut result = [(0usize, Watchpoint::empty()); MAX_WATCHPOINTS];
+    // SAFETY: i < MAX_WATCHPOINTS; STORE access serialised.
     for i in 0..MAX_WATCHPOINTS {
         let wp = unsafe {
             let ptr = STORE.0.get() as *const Watchpoint;
@@ -294,6 +302,7 @@ pub fn get(slot: usize) -> Option<Watchpoint> {
     if slot >= MAX_WATCHPOINTS {
         return None;
     }
+    // SAFETY: slot < MAX_WATCHPOINTS; STORE access serialised.
     let wp = unsafe {
         let ptr = STORE.0.get() as *const Watchpoint;
         ptr.add(slot).read()
@@ -315,6 +324,7 @@ pub fn recent_events(buf: &mut [WatchEvent]) -> usize {
 
     for i in 0..to_copy {
         let idx = (pos.wrapping_sub(1).wrapping_sub(i)) & EVENT_LOG_MASK;
+        // SAFETY: idx is masked to EVENT_LOG_MASK, ensuring it's in bounds.
         unsafe {
             let ptr = EVENTS.0.get() as *const WatchEvent;
             buf[i] = ptr.add(idx).read();

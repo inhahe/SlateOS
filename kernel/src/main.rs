@@ -590,6 +590,8 @@ extern "C" fn kmain() -> ! {
     } else {
         // No RSDP from Limine — try scanning memory directly.
         serial_println!("[acpi] No RSDP from bootloader — scanning memory...");
+        // SAFETY: rsdp=0 triggers memory scanning; HHDM maps all physical
+        // memory.  Heap is initialized for Vec allocation.
         unsafe {
             acpi::init(0, boot_info.hhdm_offset, boot_info.memory_map);
         }

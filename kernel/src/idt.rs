@@ -1628,6 +1628,7 @@ extern "C" fn handle_machine_check(frame: &InterruptStackFrame, _error: u64) {
     }
 
     // IA32_MCG_CAP (MSR 0x179): number of error-reporting banks.
+    // SAFETY: MSR 0x179 is the MCG_CAP register, valid on x86_64 with MCE.
     let mcg_cap = unsafe { cpu::rdmsr(0x179) };
     let bank_count = (mcg_cap & 0xFF) as u32;
     let count = bank_count.min(8); // Limit to 8 banks to avoid huge output.
@@ -1805,6 +1806,8 @@ pub unsafe fn load() {
         base: core::ptr::addr_of!(IDT) as u64,
     };
 
+    // SAFETY: idt_ptr references our static IDT which was initialized by
+    // the BSP.  LIDT loads the IDT register from the pointer.
     unsafe {
         core::arch::asm!(
             "lidt [{}]",

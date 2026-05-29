@@ -281,6 +281,7 @@ pub mod semaphore;
 pub mod process;
 pub mod pwd;
 pub mod setjmp;
+pub mod sha2;
 pub mod signal;
 pub mod socket;
 pub mod spawn;

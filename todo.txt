@@ -385,6 +385,24 @@ Remaining net improvements (diminishing returns):
   test runner or a separate host-testable crate that extracts pure
   logic functions.
 
+- (DONE 2026-05-29) crypt() real SHA-256/SHA-512 hashing: replaced the
+  insecure "$0$<key>" stub (which stored passwords in cleartext with a
+  marker prefix — any program hashing a password was effectively storing
+  the plaintext) with proper SHA-crypt ($5$ / $6$) per Ulrich Drepper's
+  spec.  New self-contained SHA-2 cores in posix/src/sha2.rs (no heap, no
+  external crate; works on target_os="none"), verified against NIST FIPS
+  180-4 vectors.  crypt.rs now parses "rounds=N$", clamps to [1000,
+  999999999], truncates salt to 16 bytes, and emits the crypt-base64
+  encoding.  Verified against the canonical Drepper $5$/$6$ test vectors.
+  Sequences P and S are fed incrementally (add_repeated) so no unbounded
+  stack/heap buffer is needed regardless of password length.
+  FOLLOW-UP: MD5 crypt ($1$) and legacy DES (2-char salt) are still
+  unimplemented.  Rather than fabricate an insecure result, crypt() now
+  returns NULL + EINVAL for any unrecognised setting (matches modern
+  glibc/libxcrypt).  Implement $1$ (md5-crypt) and DES if a ported
+  program needs to verify legacy /etc/shadow entries; both are
+  well-specified and host-testable like the SHA variants.
+
 - (FIXED 2026-05-27) crypt::tests parallel-test race: crypt() returns
   a pointer into a single process-global static buffer, so cargo's
   parallel test harness was racing on the buffer when multiple tests

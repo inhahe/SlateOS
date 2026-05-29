@@ -204,6 +204,9 @@ pub fn record(op: AuditOp, pid: u32, handle: u32, rights: u8, target_pid: u16, r
     // Write to ring buffer.
     let pos = WRITE_POS.fetch_add(1, Ordering::Relaxed);
     let slot = (pos as usize) & RING_MASK;
+    // SAFETY: slot is masked to RING_MASK (< RING_SIZE), so ptr.add(slot) is
+    // within the RING array.  The atomic fetch_add gives each caller a unique
+    // slot, so concurrent writers never alias the same element.
     unsafe {
         let ptr = RING.0.get() as *mut AuditEntry;
         ptr.add(slot).write(entry);
@@ -286,6 +289,9 @@ pub fn reset() {
     TOTAL_GRANTS.store(0, Ordering::Relaxed);
     TOTAL_REVOKES.store(0, Ordering::Relaxed);
     for i in 0..RING_SIZE {
+        // SAFETY: i < RING_SIZE, so ptr.add(i) is within the RING array.
+        // reset() is called single-threaded (auditing is disabled or the
+        // caller serialises access before resetting).
         unsafe {
             let ptr = RING.0.get() as *mut AuditEntry;
             ptr.add(i).write(AuditEntry::empty());
@@ -332,6 +338,9 @@ pub fn recent(buf: &mut [AuditEntry]) -> usize {
 
     for i in 0..to_copy {
         let idx = (write_pos.wrapping_sub(1).wrapping_sub(i)) & RING_MASK;
+        // SAFETY: idx is masked to RING_MASK (< RING_SIZE), so ptr.add(idx) is
+        // within the RING array.  We read a snapshot; concurrent record() writes
+        // may produce a torn read but the result is structurally valid.
         unsafe {
             let ptr = RING.0.get() as *const AuditEntry;
             buf[i] = ptr.add(idx).read();
@@ -350,6 +359,9 @@ pub fn denials_for_pid(pid: u32) -> u32 {
     let mut denials: u32 = 0;
     for i in 0..count {
         let idx = (start + i) & RING_MASK;
+        // SAFETY: idx is masked to RING_MASK (< RING_SIZE), so ptr.add(idx) is
+        // within the RING array.  Concurrent record() writes may produce a torn
+        // read but the AuditEntry is always structurally valid (plain integers).
         let entry = unsafe {
             let ptr = RING.0.get() as *const AuditEntry;
             ptr.add(idx).read()

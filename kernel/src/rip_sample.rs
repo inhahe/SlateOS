@@ -197,6 +197,8 @@ pub fn record(rip: u64, cpu: u8) {
     // Write to ring.
     let pos = WRITE_POS.fetch_add(1, Ordering::Relaxed);
     let slot = (pos as usize) & RING_MASK;
+    // SAFETY: slot is masked to RING_MASK (< RING_SIZE), so ptr.add(slot) is
+    // within the RING array.  Single-writer (atomic counter) ensures no aliasing.
     unsafe {
         let ptr = RING.0.get() as *mut RipSample;
         ptr.add(slot).write(sample);
@@ -238,6 +240,8 @@ pub fn reset() {
         counter.store(0, Ordering::Relaxed);
     }
     for i in 0..RING_SIZE {
+        // SAFETY: i < RING_SIZE, so ptr.add(i) is within the RING array.
+        // reset() is called single-threaded (sampling is stopped before reset).
         unsafe {
             let ptr = RING.0.get() as *mut RipSample;
             ptr.add(i).write(RipSample::empty());
@@ -279,6 +283,9 @@ pub fn recent(buf: &mut [RipSample]) -> usize {
 
     for i in 0..to_copy {
         let idx = (write_pos.wrapping_sub(1).wrapping_sub(i)) & RING_MASK;
+        // SAFETY: idx is masked to RING_MASK (< RING_SIZE), so ptr.add(idx) is
+        // within the RING array.  We read a snapshot; torn reads produce a
+        // potentially stale but structurally valid RipSample.
         unsafe {
             let ptr = RING.0.get() as *const RipSample;
             buf[i] = ptr.add(idx).read();
@@ -304,6 +311,10 @@ pub fn hottest_rip() -> Option<(u64, u32)> {
     let mut best_rip: u64 = 0;
     let mut best_count: u32 = 0;
 
+    // SAFETY (group — covers all unsafe blocks below): idx/jdx are masked to
+    // RING_MASK (< RING_SIZE), so every ptr.add() stays within the RING array.
+    // We hold no mutable reference; reads may race with concurrent record()
+    // writes but produce structurally valid (possibly stale) RipSamples.
     for i in 0..count {
         let idx = i & RING_MASK;
         let sample = unsafe {

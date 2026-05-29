@@ -155,6 +155,7 @@ pub fn record(
     };
 
     // Write to ring buffer.
+    // SAFETY: slot is masked to RING_MASK (< RING_SIZE).
     let pos = WRITE_POS.fetch_add(1, Ordering::Relaxed);
     let slot = (pos as usize) & RING_MASK;
     unsafe {
@@ -190,6 +191,7 @@ pub fn record_entry(pid: u32, syscall_nr: u32, args: &[u64; 6]) {
         complete: false,
     };
 
+    // SAFETY: slot is masked to RING_MASK (< RING_SIZE).
     let pos = WRITE_POS.fetch_add(1, Ordering::Relaxed);
     let slot = (pos as usize) & RING_MASK;
     unsafe {
@@ -236,6 +238,7 @@ pub fn reset() {
     WRITE_POS.store(0, Ordering::Release);
     TOTAL_EVENTS.store(0, Ordering::Relaxed);
     DROPPED_EVENTS.store(0, Ordering::Relaxed);
+    // SAFETY: i < RING_SIZE; RING uses UnsafeCell with atomic position guard.
     for i in 0..RING_SIZE {
         unsafe {
             let ptr = RING.0.get() as *mut TraceEvent;
@@ -279,6 +282,7 @@ pub fn recent(buf: &mut [TraceEvent]) -> usize {
     let available = write_pos.min(RING_SIZE);
     let to_copy = buf.len().min(available);
 
+    // SAFETY: idx is masked to RING_MASK (< RING_SIZE).
     for i in 0..to_copy {
         let idx = (write_pos.wrapping_sub(1).wrapping_sub(i)) & RING_MASK;
         unsafe {
@@ -302,6 +306,7 @@ pub fn events_for_pid(pid: u32, buf: &mut [TraceEvent]) -> usize {
             break;
         }
         // Read newest first.
+        // SAFETY: idx is masked to RING_MASK (< RING_SIZE).
         let idx = (write_pos.wrapping_sub(1).wrapping_sub(i)) & RING_MASK;
         let event = unsafe {
             let ptr = RING.0.get() as *const TraceEvent;
@@ -323,6 +328,7 @@ pub fn events_for_pid(pid: u32, buf: &mut [TraceEvent]) -> usize {
 /// Read TSC (Time Stamp Counter).
 #[inline]
 fn rdtsc() -> u64 {
+    // SAFETY: _rdtsc is always available on x86_64.
     unsafe {
         core::arch::x86_64::_rdtsc() as u64
     }

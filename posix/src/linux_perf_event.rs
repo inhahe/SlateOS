@@ -20,6 +20,7 @@
 //! `CONFIG_PERF_EVENTS=y`.
 
 use crate::errno;
+use crate::linux_perf_attr_types::PERF_ATTR_FLAG_EXCLUDE_KERNEL;
 
 // ---------------------------------------------------------------------------
 // perf_type_id — what is being measured
@@ -238,15 +239,6 @@ const PERF_GROUP_FD_NONE: i32 = -1;
 /// six 1-bit slots are: `disabled`, `inherit`, `pinned`, `exclusive`,
 /// `exclude_user`, `exclude_kernel`.  Bit 5 is therefore
 /// `exclude_kernel`.
-///
-/// Phase 181: there are two conflicting in-tree definitions of this
-/// constant — `linux_perf_attr_types::PERF_ATTR_FLAG_EXCLUDE_KERNEL`
-/// (correctly `1 << 5`) and `linux_perf_types::PERF_ATTR_FLAG_EXCLUDE_KERNEL`
-/// (incorrectly `1 << 3`, which collides with `PERF_ATTR_FLAG_EXCLUSIVE`
-/// in the canonical layout).  We define a local copy with the correct
-/// value here to avoid coupling to either module's public surface
-/// while the conflict is resolved.  See todo.txt for the bug entry.
-const PERF_ATTR_FLAG_EXCLUDE_KERNEL: u64 = 1 << 5;
 
 // ---------------------------------------------------------------------------
 // Validators

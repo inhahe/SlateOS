@@ -75,18 +75,22 @@ pub const PERF_COUNT_SW_CPU_CLOCK: u64 = 0;
 // perf_event_attr flags
 // ---------------------------------------------------------------------------
 
-/// Count events only when process is on-CPU.
+/// Count events only when disabled=0.
 pub const PERF_ATTR_FLAG_DISABLED: u64 = 1 << 0;
-/// Enable event automatically on exec.
+/// Children inherit this event.
 pub const PERF_ATTR_FLAG_INHERIT: u64 = 1 << 1;
+/// Event is pinned to a counter.
+pub const PERF_ATTR_FLAG_PINNED: u64 = 1 << 2;
+/// Event must always be on CPU.
+pub const PERF_ATTR_FLAG_EXCLUSIVE: u64 = 1 << 3;
 /// Exclude events from user mode.
-pub const PERF_ATTR_FLAG_EXCLUDE_USER: u64 = 1 << 2;
+pub const PERF_ATTR_FLAG_EXCLUDE_USER: u64 = 1 << 4;
 /// Exclude events from kernel mode.
-pub const PERF_ATTR_FLAG_EXCLUDE_KERNEL: u64 = 1 << 3;
+pub const PERF_ATTR_FLAG_EXCLUDE_KERNEL: u64 = 1 << 5;
 /// Exclude events from hypervisor.
-pub const PERF_ATTR_FLAG_EXCLUDE_HV: u64 = 1 << 4;
+pub const PERF_ATTR_FLAG_EXCLUDE_HV: u64 = 1 << 6;
 /// Exclude events from idle task.
-pub const PERF_ATTR_FLAG_EXCLUDE_IDLE: u64 = 1 << 5;
+pub const PERF_ATTR_FLAG_EXCLUDE_IDLE: u64 = 1 << 7;
 
 // ---------------------------------------------------------------------------
 // perf_event_ioc — ioctl commands
@@ -156,6 +160,7 @@ mod tests {
     fn test_attr_flags_no_overlap() {
         let flags = [
             PERF_ATTR_FLAG_DISABLED, PERF_ATTR_FLAG_INHERIT,
+            PERF_ATTR_FLAG_PINNED, PERF_ATTR_FLAG_EXCLUSIVE,
             PERF_ATTR_FLAG_EXCLUDE_USER, PERF_ATTR_FLAG_EXCLUDE_KERNEL,
             PERF_ATTR_FLAG_EXCLUDE_HV, PERF_ATTR_FLAG_EXCLUDE_IDLE,
         ];
@@ -165,6 +170,30 @@ mod tests {
                 assert_eq!(flags[i] & flags[j], 0);
             }
         }
+    }
+
+    /// Verify bit positions match the Linux uapi perf_event_attr bitfield
+    /// layout.  This prevents future regressions of the shifted-constant
+    /// bug fixed in Phase 218.
+    #[test]
+    fn test_attr_flags_match_linux_bit_positions() {
+        assert_eq!(PERF_ATTR_FLAG_DISABLED, 1 << 0);
+        assert_eq!(PERF_ATTR_FLAG_INHERIT, 1 << 1);
+        assert_eq!(PERF_ATTR_FLAG_PINNED, 1 << 2);
+        assert_eq!(PERF_ATTR_FLAG_EXCLUSIVE, 1 << 3);
+        assert_eq!(PERF_ATTR_FLAG_EXCLUDE_USER, 1 << 4);
+        assert_eq!(PERF_ATTR_FLAG_EXCLUDE_KERNEL, 1 << 5);
+        assert_eq!(PERF_ATTR_FLAG_EXCLUDE_HV, 1 << 6);
+        assert_eq!(PERF_ATTR_FLAG_EXCLUDE_IDLE, 1 << 7);
+    }
+
+    /// Verify both perf modules now agree on EXCLUDE_KERNEL's bit position.
+    #[test]
+    fn test_exclude_kernel_matches_attr_types_module() {
+        assert_eq!(
+            PERF_ATTR_FLAG_EXCLUDE_KERNEL,
+            crate::linux_perf_attr_types::PERF_ATTR_FLAG_EXCLUDE_KERNEL,
+        );
     }
 
     #[test]

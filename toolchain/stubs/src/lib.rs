@@ -158,62 +158,15 @@ pub unsafe extern "C" fn syscall(num: i64, arg0: u64, arg1: u64, arg2: u64) -> i
 }
 
 // -----------------------------------------------------------------------
-// pthread stubs
+// pthread stack-introspection functions
 //
-// These are Linux/GNU-specific pthread functions that std uses for
-// stack overflow detection.  Our OS doesn't yet implement them.
-// Returning errors causes std to skip stack guard setup, which is
-// acceptable for now.
+// `pthread_getattr_np`, `pthread_attr_getstack`, and
+// `pthread_attr_getguardsize` are now implemented for real in the posix
+// crate (posix/src/pthread.rs), backed by the actual per-thread stack
+// bounds and the kernel main-stack geometry.  They are no longer stubbed
+// here — providing them in both crates would cause duplicate-symbol link
+// errors.
 // -----------------------------------------------------------------------
-
-/// Opaque pthread attribute type (matches musl's size).
-#[repr(C)]
-pub struct pthread_attr_t {
-    _data: [u8; 56],
-}
-
-/// Get thread attributes for the current thread (Linux-specific _np).
-/// Stub: returns -1 (ENOSYS — not available).
-#[unsafe(no_mangle)]
-pub extern "C" fn pthread_getattr_np(
-    _thread: u64,
-    _attr: *mut pthread_attr_t,
-) -> i32 {
-    -1 // ENOSYS
-}
-
-/// Get the guard size from thread attributes.
-/// Stub: writes 0 (no guard) and returns 0 (success).
-#[unsafe(no_mangle)]
-pub extern "C" fn pthread_attr_getguardsize(
-    _attr: *const pthread_attr_t,
-    guardsize: *mut usize,
-) -> i32 {
-    if !guardsize.is_null() {
-        // SAFETY: caller guarantees guardsize is valid.
-        unsafe { *guardsize = 0; }
-    }
-    0
-}
-
-/// Get the stack address and size from thread attributes.
-/// Stub: writes zeroes and returns 0.
-#[unsafe(no_mangle)]
-pub extern "C" fn pthread_attr_getstack(
-    _attr: *const pthread_attr_t,
-    stackaddr: *mut *mut c_void,
-    stacksize: *mut usize,
-) -> i32 {
-    if !stackaddr.is_null() {
-        // SAFETY: caller guarantees stackaddr is valid.
-        unsafe { *stackaddr = core::ptr::null_mut(); }
-    }
-    if !stacksize.is_null() {
-        // SAFETY: caller guarantees stacksize is valid.
-        unsafe { *stacksize = 0; }
-    }
-    0
-}
 
 // -----------------------------------------------------------------------
 // POSIX function stubs

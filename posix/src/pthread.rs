@@ -195,6 +195,25 @@ fn store_thread_info(info: ThreadInfo) -> bool {
     false
 }
 
+/// Look up thread info by kernel task ID without removing it.
+///
+/// Used by `pthread_getattr_np` to report a live thread's stack bounds.
+#[cfg(target_os = "none")]
+fn find_thread_info(task_id: u64) -> Option<ThreadInfo> {
+    // SAFETY: Same single-creator convention as store_thread_info.
+    unsafe {
+        let table = &*thread_table_ptr();
+        for slot in table.iter() {
+            if let Some(info) = slot.as_ref() {
+                if info.task_id == task_id {
+                    return Some(*info);
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Find and remove thread info by kernel task ID.
 fn take_thread_info(task_id: u64) -> Option<ThreadInfo> {
     // SAFETY: Same single-creator convention as store_thread_info.
@@ -1021,6 +1040,132 @@ pub extern "C" fn sched_yield() -> i32 {
 // Thread attributes
 // ---------------------------------------------------------------------------
 
+// `PthreadAttrT` is an opaque `[u8; 56]` byte buffer.  We carve it into
+// fixed fields written/read with unaligned accessors (the buffer has
+// align(1)):
+//
+//   [ 0.. 8)  stack size   (usize)
+//   [ 8..12)  detach state (i32: 0 = joinable, 1 = detached)
+//   [16..24)  stack address — lowest address of the stack region (usize)
+//   [24..32)  guard size    (usize)
+//
+// Offsets 12..16 and 32..56 are reserved/unused.  These offsets are an
+// internal contract only — C callers treat the type as opaque.
+const ATTR_OFF_STACKSIZE: usize = 0;
+// Only `encode_attr` (main/created-thread fill path) writes the detach
+// field via this constant; the get/set detachstate accessors use a
+// literal offset, so on host-without-test builds this would be unused.
+#[cfg(any(target_os = "none", test))]
+const ATTR_OFF_DETACH: usize = 8;
+const ATTR_OFF_STACKADDR: usize = 16;
+const ATTR_OFF_GUARDSIZE: usize = 24;
+
+/// Default thread guard size: one 16 KiB page.
+///
+/// Must match the kernel page/guard granularity (`FRAME_SIZE` in
+/// `kernel/src/mm`).  Only referenced when filling main-thread attributes.
+#[cfg(any(target_os = "none", test))]
+const DEFAULT_GUARD_SIZE: usize = 16 * 1024;
+
+// Main-thread stack geometry.  These MUST stay in sync with the kernel's
+// user-stack layout in `kernel/src/proc/spawn.rs`:
+//   USER_STACK_TOP   = 0x0000_7FFF_FFFF_0000  (exclusive top)
+//   MAX_STACK_FRAMES = 256 × 16 KiB = 4 MiB   (max on-demand growth)
+//   USER_STACK_GUARD = USER_STACK_TOP - MAX_STACK_SIZE  (lowest usable)
+//
+// The main thread's stack grows on demand from 64 KiB up to 4 MiB; the
+// kernel installs a hardware guard just below `MAIN_STACK_LOW`.  We report
+// the full growable region so std places its overflow guard correctly.
+#[cfg(any(target_os = "none", test))]
+const MAIN_STACK_TOP: usize = 0x0000_7FFF_FFFF_0000;
+#[cfg(any(target_os = "none", test))]
+const MAIN_STACK_SIZE: usize = 256 * 16 * 1024; // 4 MiB
+// Compile-time constant subtraction; cannot overflow (TOP > SIZE).
+#[cfg(any(target_os = "none", test))]
+#[allow(clippy::arithmetic_side_effects)]
+const MAIN_STACK_LOW: usize = MAIN_STACK_TOP - MAIN_STACK_SIZE;
+
+/// Resolved stack attributes for a thread.
+#[cfg(any(target_os = "none", test))]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct StackAttr {
+    /// Lowest address of the stack region.
+    addr: usize,
+    /// Size of the stack region in bytes.
+    size: usize,
+    /// Guard size in bytes (0 if no guard page).
+    guard: usize,
+    /// Whether the thread is detached.
+    detached: bool,
+}
+
+/// Compute the stack attributes for the main thread.
+///
+/// Pure function — depends only on the compile-time kernel layout
+/// constants, so it is deterministic and host-testable.
+#[cfg(any(target_os = "none", test))]
+fn main_thread_stack_attr() -> StackAttr {
+    StackAttr {
+        addr: MAIN_STACK_LOW,
+        size: MAIN_STACK_SIZE,
+        guard: DEFAULT_GUARD_SIZE,
+        detached: false,
+    }
+}
+
+/// Encode resolved stack attributes into an opaque attribute buffer.
+///
+/// Pure with respect to its `&mut [u8; 56]` argument — no globals touched,
+/// so it is fully host-testable.  Zeroes the buffer first so all reserved
+/// fields are well-defined.  Uses unaligned writes because `PthreadAttrT`
+/// is `[u8; 56]` (align(1)).
+#[cfg(any(target_os = "none", test))]
+fn encode_attr(buf: &mut PthreadAttrT, attr: StackAttr) {
+    *buf = [0u8; 56];
+    let p = buf.as_mut_ptr();
+    // SAFETY: every field write of 8 bytes lands at an offset ≤ 24, so the
+    // last byte touched is at index ≤ 31 — well within the 56-byte buffer.
+    unsafe {
+        core::ptr::write_unaligned(p.add(ATTR_OFF_STACKSIZE).cast::<usize>(), attr.size);
+        core::ptr::write_unaligned(p.add(ATTR_OFF_DETACH).cast::<i32>(), i32::from(attr.detached));
+        core::ptr::write_unaligned(p.add(ATTR_OFF_STACKADDR).cast::<usize>(), attr.addr);
+        core::ptr::write_unaligned(p.add(ATTR_OFF_GUARDSIZE).cast::<usize>(), attr.guard);
+    }
+}
+
+/// Read the stored stack address from an attribute buffer.
+fn attr_read_stackaddr(buf: &PthreadAttrT) -> usize {
+    // SAFETY: reading 8 bytes at offset 16 ends at index 23 < 56.
+    unsafe { core::ptr::read_unaligned(buf.as_ptr().add(ATTR_OFF_STACKADDR).cast::<usize>()) }
+}
+
+/// Read the stored guard size from an attribute buffer.
+fn attr_read_guardsize(buf: &PthreadAttrT) -> usize {
+    // SAFETY: reading 8 bytes at offset 24 ends at index 31 < 56.
+    unsafe { core::ptr::read_unaligned(buf.as_ptr().add(ATTR_OFF_GUARDSIZE).cast::<usize>()) }
+}
+
+/// Resolve a thread's stack attributes by kernel task ID.
+///
+/// If the thread was created via `pthread_create` it is found in the
+/// thread table and its mmap'd stack bounds are returned (no guard page is
+/// installed for created threads, so `guard` is 0).  Otherwise the thread
+/// is assumed to be the main thread and the kernel main-stack geometry is
+/// reported.
+#[cfg(target_os = "none")]
+fn resolve_thread_stack_attr(task_id: u64) -> StackAttr {
+    if let Some(info) = find_thread_info(task_id) {
+        StackAttr {
+            addr: info.stack_base,
+            size: info.stack_size,
+            guard: 0,
+            detached: info.detached,
+        }
+    } else {
+        main_thread_stack_attr()
+    }
+}
+
 /// Initialize a thread attribute object to default values.
 ///
 /// Defaults: joinable (not detached), stack size = `DEFAULT_THREAD_STACK_SIZE`.
@@ -1118,6 +1263,123 @@ pub extern "C" fn pthread_attr_getdetachstate(attr: *const PthreadAttrT, detachs
     unsafe {
         *detachstate = core::ptr::read_unaligned(attr.cast::<u8>().add(8).cast::<i32>());
     }
+    0
+}
+
+/// Get the stack address and size from a thread attribute object.
+///
+/// `*stackaddr` receives the lowest address of the stack region and
+/// `*stacksize` its size in bytes.  Rust's std and glibc use this (after
+/// `pthread_getattr_np`) to locate the stack for overflow-guard setup.
+///
+/// If the attribute has no recorded stack address (e.g. a default-init
+/// attr), `*stackaddr` is set to null and `*stacksize` to the stored
+/// (or default) stack size.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getstack(
+    attr: *const PthreadAttrT,
+    stackaddr: *mut *mut core::ffi::c_void,
+    stacksize: *mut usize,
+) -> i32 {
+    if attr.is_null() || stackaddr.is_null() || stacksize.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: attr verified non-null; PthreadAttrT is [u8; 56].
+    let buf = unsafe { &*attr };
+    let addr = attr_read_stackaddr(buf);
+    // Same semantics as pthread_attr_getstacksize: a stored 0 means the
+    // size was never set, so report the default.
+    // SAFETY: attr non-null; reading 8 bytes at offset 0 is in-bounds.
+    let stored = unsafe { core::ptr::read_unaligned(attr.cast::<usize>()) };
+    let size = if stored == 0 { DEFAULT_THREAD_STACK_SIZE } else { stored };
+    // SAFETY: both out-pointers verified non-null above.
+    unsafe {
+        *stackaddr = addr as *mut core::ffi::c_void;
+        *stacksize = size;
+    }
+    0
+}
+
+/// Set both the stack address and size in a thread attribute object.
+///
+/// `stackaddr` is the lowest address of the caller-provided stack region.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setstack(
+    attr: *mut PthreadAttrT,
+    stackaddr: *mut core::ffi::c_void,
+    stacksize: usize,
+) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    if stacksize < 4096 {
+        return errno::EINVAL;
+    }
+    let p = attr.cast::<u8>();
+    // SAFETY: attr is non-null; writing 8 bytes at offsets 0 and 16 ends at
+    // index ≤ 23 < 56.  Unaligned because PthreadAttrT has align(1).
+    unsafe {
+        core::ptr::write_unaligned(p.add(ATTR_OFF_STACKSIZE).cast::<usize>(), stacksize);
+        core::ptr::write_unaligned(p.add(ATTR_OFF_STACKADDR).cast::<usize>(), stackaddr as usize);
+    }
+    0
+}
+
+/// Get the guard size from a thread attribute object.
+///
+/// Returns the recorded guard size (0 if none was set).
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_getguardsize(
+    attr: *const PthreadAttrT,
+    guardsize: *mut usize,
+) -> i32 {
+    if attr.is_null() || guardsize.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: both pointers verified non-null; PthreadAttrT is [u8; 56].
+    let buf = unsafe { &*attr };
+    let g = attr_read_guardsize(buf);
+    // SAFETY: guardsize verified non-null.
+    unsafe {
+        *guardsize = g;
+    }
+    0
+}
+
+/// Set the guard size in a thread attribute object.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_attr_setguardsize(attr: *mut PthreadAttrT, guardsize: usize) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    // SAFETY: attr is non-null; writing 8 bytes at offset 24 ends at index
+    // 31 < 56.  Unaligned because PthreadAttrT has align(1).
+    unsafe {
+        core::ptr::write_unaligned(attr.cast::<u8>().add(ATTR_OFF_GUARDSIZE).cast::<usize>(), guardsize);
+    }
+    0
+}
+
+/// Fill a thread attribute object with the actual attributes of a running
+/// thread (Linux-specific `_np` extension).
+///
+/// Rust's std and glibc call this to discover a thread's real stack bounds
+/// for stack-overflow guard installation.  For threads created via
+/// `pthread_create` the recorded stack region is reported; otherwise the
+/// thread is treated as the main thread and the kernel main-stack geometry
+/// (matching `kernel/src/proc/spawn.rs`) is reported.
+///
+/// Returns 0 on success, `EFAULT` if `attr` is null.
+#[cfg(target_os = "none")]
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn pthread_getattr_np(thread: PthreadT, attr: *mut PthreadAttrT) -> i32 {
+    if attr.is_null() {
+        return errno::EFAULT;
+    }
+    let resolved = resolve_thread_stack_attr(thread);
+    // SAFETY: attr verified non-null; PthreadAttrT is [u8; 56].
+    let buf = unsafe { &mut *attr };
+    encode_attr(buf, resolved);
     0
 }
 
@@ -2364,6 +2626,180 @@ mod tests {
     fn attr_getdetachstate_null_state_returns_efault() {
         let attr: PthreadAttrT = [0; 56];
         assert_eq!(pthread_attr_getdetachstate(&attr, core::ptr::null_mut()), errno::EFAULT);
+    }
+
+    // =======================================================================
+    // Stack/guard attributes (getattr_np support) — pure, race-free tests
+    // =======================================================================
+
+    #[test]
+    fn main_thread_stack_attr_matches_kernel_layout() {
+        let a = main_thread_stack_attr();
+        // Low address + size must reach exactly the kernel stack top.
+        assert_eq!(a.addr, MAIN_STACK_LOW);
+        assert_eq!(a.addr.wrapping_add(a.size), MAIN_STACK_TOP);
+        assert_eq!(a.size, 4 * 1024 * 1024);
+        assert_eq!(a.guard, DEFAULT_GUARD_SIZE);
+        assert!(!a.detached);
+    }
+
+    #[test]
+    fn encode_attr_roundtrips_through_getstack_getguardsize() {
+        let resolved = StackAttr {
+            addr: 0x1234_5000,
+            size: 128 * 1024,
+            guard: 16 * 1024,
+            detached: true,
+        };
+        let mut buf: PthreadAttrT = [0xAB; 56];
+        encode_attr(&mut buf, resolved);
+
+        // getstack reports the encoded address and size.
+        let mut addr: *mut core::ffi::c_void = core::ptr::null_mut();
+        let mut size: usize = 0;
+        assert_eq!(pthread_attr_getstack(&buf, &mut addr, &mut size), 0);
+        assert_eq!(addr as usize, 0x1234_5000);
+        assert_eq!(size, 128 * 1024);
+
+        // getguardsize reports the encoded guard.
+        let mut guard: usize = 0;
+        assert_eq!(pthread_attr_getguardsize(&buf, &mut guard), 0);
+        assert_eq!(guard, 16 * 1024);
+
+        // detach state round-trips too.
+        let mut detach: i32 = -1;
+        assert_eq!(pthread_attr_getdetachstate(&buf, &mut detach), 0);
+        assert_eq!(detach, PTHREAD_CREATE_DETACHED);
+    }
+
+    #[test]
+    fn encode_attr_zeroes_reserved_bytes() {
+        let mut buf: PthreadAttrT = [0xFF; 56];
+        encode_attr(
+            &mut buf,
+            StackAttr { addr: 0, size: 0, guard: 0, detached: false },
+        );
+        // All bytes must be cleared when every field is zero.
+        assert!(buf.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn getstack_main_attr_reports_growable_region() {
+        // Emulate pthread_getattr_np filling the buffer for the main thread.
+        let mut buf: PthreadAttrT = [0; 56];
+        encode_attr(&mut buf, main_thread_stack_attr());
+
+        let mut addr: *mut core::ffi::c_void = core::ptr::null_mut();
+        let mut size: usize = 0;
+        assert_eq!(pthread_attr_getstack(&buf, &mut addr, &mut size), 0);
+        assert_eq!(addr as usize, MAIN_STACK_LOW);
+        assert_eq!((addr as usize).wrapping_add(size), MAIN_STACK_TOP);
+    }
+
+    #[test]
+    fn getstack_default_attr_reports_null_addr_default_size() {
+        // A default-initialized attr has no stack address; getstack should
+        // report null and the default stack size.
+        let mut buf: PthreadAttrT = [0; 56];
+        pthread_attr_init(&mut buf);
+        let mut addr: *mut core::ffi::c_void = 0xDEAD_0000usize as *mut core::ffi::c_void;
+        let mut size: usize = 0;
+        assert_eq!(pthread_attr_getstack(&buf, &mut addr, &mut size), 0);
+        assert!(addr.is_null());
+        assert_eq!(size, DEFAULT_THREAD_STACK_SIZE);
+    }
+
+    #[test]
+    fn setstack_then_getstack_roundtrips() {
+        let mut buf: PthreadAttrT = [0; 56];
+        pthread_attr_init(&mut buf);
+        let provided = 0x4000_0000usize as *mut core::ffi::c_void;
+        assert_eq!(pthread_attr_setstack(&mut buf, provided, 256 * 1024), 0);
+
+        let mut addr: *mut core::ffi::c_void = core::ptr::null_mut();
+        let mut size: usize = 0;
+        assert_eq!(pthread_attr_getstack(&buf, &mut addr, &mut size), 0);
+        assert_eq!(addr as usize, 0x4000_0000);
+        assert_eq!(size, 256 * 1024);
+    }
+
+    #[test]
+    fn setstack_rejects_too_small() {
+        let mut buf: PthreadAttrT = [0; 56];
+        pthread_attr_init(&mut buf);
+        assert_eq!(
+            pthread_attr_setstack(&mut buf, core::ptr::null_mut(), 100),
+            errno::EINVAL
+        );
+    }
+
+    #[test]
+    fn setstack_null_attr_returns_efault() {
+        assert_eq!(
+            pthread_attr_setstack(core::ptr::null_mut(), core::ptr::null_mut(), 8192),
+            errno::EFAULT
+        );
+    }
+
+    #[test]
+    fn setguardsize_then_getguardsize_roundtrips() {
+        let mut buf: PthreadAttrT = [0; 56];
+        pthread_attr_init(&mut buf);
+        assert_eq!(pthread_attr_setguardsize(&mut buf, 32 * 1024), 0);
+        let mut guard: usize = 0;
+        assert_eq!(pthread_attr_getguardsize(&buf, &mut guard), 0);
+        assert_eq!(guard, 32 * 1024);
+    }
+
+    #[test]
+    fn getguardsize_default_attr_is_zero() {
+        // A default-init attr records no guard; getguardsize returns 0.
+        let mut buf: PthreadAttrT = [0; 56];
+        pthread_attr_init(&mut buf);
+        let mut guard: usize = 12345;
+        assert_eq!(pthread_attr_getguardsize(&buf, &mut guard), 0);
+        assert_eq!(guard, 0);
+    }
+
+    #[test]
+    fn getstack_null_args_return_efault() {
+        let buf: PthreadAttrT = [0; 56];
+        let mut addr: *mut core::ffi::c_void = core::ptr::null_mut();
+        let mut size: usize = 0;
+        assert_eq!(
+            pthread_attr_getstack(core::ptr::null(), &mut addr, &mut size),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_attr_getstack(&buf, core::ptr::null_mut(), &mut size),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_attr_getstack(&buf, &mut addr, core::ptr::null_mut()),
+            errno::EFAULT
+        );
+    }
+
+    #[test]
+    fn getguardsize_null_args_return_efault() {
+        let buf: PthreadAttrT = [0; 56];
+        let mut guard: usize = 0;
+        assert_eq!(
+            pthread_attr_getguardsize(core::ptr::null(), &mut guard),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_attr_getguardsize(&buf, core::ptr::null_mut()),
+            errno::EFAULT
+        );
+    }
+
+    #[test]
+    fn setguardsize_null_attr_returns_efault() {
+        assert_eq!(
+            pthread_attr_setguardsize(core::ptr::null_mut(), 4096),
+            errno::EFAULT
+        );
     }
 
     // =======================================================================

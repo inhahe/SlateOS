@@ -495,9 +495,48 @@ Remaining net improvements (diminishing returns):
   our OS equivalents.  Other Linux syscall numbers return ENOSYS.  As std
   evolves, more mappings may be needed.
 
-- TODO: The pthread stubs (getattr_np, attr_getguardsize, attr_getstack) return
-  failure/zero.  This disables std's stack overflow detection.  Real
-  implementations in the posix crate would fix this.
+- DONE (2026-05-29): The pthread stack-introspection functions are now
+  implemented for real in the posix crate (posix/src/pthread.rs), replacing
+  the failure/zero stubs that were in toolchain/stubs/src/lib.rs (those stubs
+  are removed to avoid duplicate-symbol link errors):
+    * pthread_getattr_np(thread, attr): fills attr with the thread's real
+      stack bounds.  Threads created via pthread_create are looked up in
+      THREAD_TABLE and report their mmap'd stack region (guard = 0, since
+      pthread_create installs no guard page).  Any other thread (i.e. the
+      main thread) reports the kernel main-stack geometry.
+    * pthread_attr_getstack / pthread_attr_setstack: read/write the stack
+      address ([16..24)) and size ([0..8)) in the opaque attr buffer.
+    * pthread_attr_getguardsize / pthread_attr_setguardsize: read/write the
+      guard size ([24..32)).
+  Attr buffer layout (internal contract; C treats PthreadAttrT as opaque):
+    [0..8) stacksize, [8..12) detachstate, [16..24) stackaddr, [24..32) guard.
+  Policy is factored into pure, host-testable helpers (encode_attr,
+  attr_read_*, main_thread_stack_attr) with 21 deterministic unit tests
+  (no global-state mutation, no races).  Verified: 17031 posix host tests
+  pass; posix builds clean for the none target; ouros-stubs builds clean.
+  JUDGMENT CALL: main-stack geometry constants (MAIN_STACK_TOP = 0x7FFF_FFFF_0000,
+  MAIN_STACK_SIZE = 4 MiB, DEFAULT_GUARD_SIZE = 16 KiB) are duplicated from
+  kernel/src/proc/spawn.rs (USER_STACK_TOP / MAX_STACK_SIZE).  There is no
+  shared kernel<->userspace ABI crate exporting them, and libc layers
+  conventionally hardcode such geometry.  If these kernel constants change,
+  update posix/src/pthread.rs to match (a doc comment flags the linkage).
+  The cleaner long-term fix would be to surface the real stack bounds via a
+  syscall (e.g. a VM-region query for the address containing the current RSP)
+  so userspace need not hardcode kernel layout.
+
+- KNOWN ISSUE (pre-existing, noticed 2026-05-29): `cargo clippy -p posix`
+  is NOT clean — it emits ~3000 errors crate-wide (mostly
+  clippy::must_use_candidate on the thousands of extern "C" POSIX functions,
+  plus indexing_slicing / borrow_as_ptr / unreadable_literal).  Cause: posix
+  carries a crate-level `#![deny(clippy::all, clippy::pedantic)]` (lib.rs:198)
+  that overrides the workspace `pedantic = "warn"`, but the crate has never
+  been brought to a clippy-clean state — its validation gate is `cargo test`
+  (rustc, which does not run clippy), not `cargo clippy`.  This is a large
+  pre-existing debt, not introduced by the pthread work above.  Proper fix:
+  either reconcile the crate-level deny with the workspace warn policy
+  (drop the crate `#![deny(clippy::pedantic)]` so the workspace `warn` wins),
+  or do a dedicated cleanup pass.  Until then, validate posix with
+  `cargo test --target x86_64-pc-windows-gnu -- --test-threads=1`.
 
 - DONE: Validated toolchain — built 71 coreutils as real ELF binaries,
   650 KiB to 1.3 MiB each. Full list: echo, cat, ls, head, wc, mkdir,

@@ -90,14 +90,17 @@ mod tests {
 
     #[test]
     fn test_utime_null_times_succeeds() {
-        // utime(path, NULL) delegates to utimensat which is a no-op
-        // stub returning 0 in our current filesystem.
+        // utime(path, NULL) delegates to utimensat.  On the host build the
+        // kernel syscall path is not compiled, so utimensat returns 0 after
+        // argument validation (NULL times is valid).
         let ret = utime(b"/nonexistent\0".as_ptr(), core::ptr::null());
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_utime_with_times_succeeds() {
+        // On the host build utimensat validates and returns 0 without
+        // issuing the kernel SYS_FS_SET_TIMES syscall (not host-executable).
         let buf = Utimbuf {
             actime: 100,
             modtime: 200,

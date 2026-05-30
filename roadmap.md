@@ -1339,7 +1339,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] C++ ABI: __cxa_atexit/__cxa_finalize (static destructors), __stack_chk_guard/__stack_chk_fail (stack canary), __dso_handle
   - [x] extended locale: newlocale/duplocale/freelocale/uselocale (POSIX 2008 xlocale, C locale only), LC_*_MASK constants
   - [x] sched: POSIX scheduling stubs — sched_getscheduler/setscheduler/getparam/setparam/get_priority_min/get_priority_max/rr_get_interval
-  - [x] socketpair stub, sendmsg/recvmsg (scatter/gather: single iov direct, ≤4KiB coalesce, large per-iov; MSG_TRUNC on recvmsg)
+  - [x] socketpair (AF_UNIX/SOCK_STREAM, real — backed by kernel bonded stream-socket object SYS_SOCKETPAIR_*; SOCK_DGRAM/SEQPACKET → EOPNOTSUPP, see todo.txt), sendmsg/recvmsg (scatter/gather: single iov direct, ≤4KiB coalesce, large per-iov; MSG_TRUNC on recvmsg)
   - [x] posix_fadvise/posix_fallocate stubs (advisory, always succeed)
   - [x] sigsetjmp/siglongjmp/_setjmp/_longjmp: assembly aliases (jmp to setjmp/longjmp), SigjmpBuf type alias
   - [x] daemon: best-effort daemonize (chdir /, close fds, setsid — no fork), getloadavg stub (returns 0.0)

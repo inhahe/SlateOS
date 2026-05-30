@@ -384,6 +384,20 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             errno::set_errno(errno::ENOTTY);
             -1
         }
+        HandleKind::UnixStream => {
+            // Query actual buffered byte count from the kernel.
+            let bytes = if handle == 0 {
+                0
+            } else {
+                use crate::syscall::{syscall1, SYS_SOCKETPAIR_READABLE_BYTES};
+                syscall1(SYS_SOCKETPAIR_READABLE_BYTES, handle) as i32
+            };
+            // SAFETY: arg must be at least sizeof(i32).
+            unsafe {
+                core::ptr::write_unaligned(arg.cast::<i32>(), bytes);
+            }
+            0
+        }
         HandleKind::TcpStream => {
             if handle == 0 {
                 // SAFETY: arg must be at least sizeof(i32).

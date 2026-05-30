@@ -426,7 +426,8 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         | fdtable::HandleKind::TcpStream
         | fdtable::HandleKind::TcpListener
         | fdtable::HandleKind::UdpSocket
-        | fdtable::HandleKind::Eventfd => entry.handle,
+        | fdtable::HandleKind::Eventfd
+        | fdtable::HandleKind::UnixStream => entry.handle,
         fdtable::HandleKind::Epoll | fdtable::HandleKind::Timerfd
         | fdtable::HandleKind::Inotify => {
             // F_DUPFD on an epoll/timerfd/inotify fd shares the

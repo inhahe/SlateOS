@@ -134,6 +134,10 @@ pub mod fd_handle_type {
     /// Eventfd counter handle (raw pass-through — no kernel-level dup
     /// yet; closing from either side closes for both).
     pub const EVENTFD: u8 = 5;
+    /// Unix-domain stream socket endpoint (`socketpair`).  The kernel
+    /// dups the endpoint into the child via `stream_socket::dup()`,
+    /// which bumps the endpoint refcount.
+    pub const STREAM_SOCKET: u8 = 6;
 }
 
 /// A file descriptor mapping entry for `SYS_PROCESS_SPAWN_EX`.
@@ -648,6 +652,7 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         HandleKind::TcpStream | HandleKind::TcpListener => fd_handle_type::TCP_SOCKET,
         HandleKind::UdpSocket => fd_handle_type::UDP_SOCKET,
         HandleKind::Eventfd => fd_handle_type::EVENTFD,
+        HandleKind::UnixStream => fd_handle_type::STREAM_SOCKET,
         // Epoll, Timerfd, and Inotify fds are per-process userspace
         // state and cannot be meaningfully transferred to a child.  Map
         // to FILE so the function is total; build_fd_map filters these

@@ -28,6 +28,26 @@
   needed; LLVM dlltool fully resolves the issue.  Human operator
   should update CLAUDE.md when convenient.
 
+## BUG (noticed 2026-05-30): clippy fails crate-wide after toolchain bump
+  `cargo clippy -p posix` now reports ~2400 errors + ~262 warnings, none
+  related to current feature work.  The dominant error is the NEW lint
+  `clippy::decimal_bitwise_operands` (stabilised ~rust 1.95.0), e.g.
+  posix/src/linux_audit_arch_types.rs:43
+    pub const AUDIT_ARCH_RISCV64: u32 = 243 | AUDIT_ARCH_64BIT | AUDIT_ARCH_LE;
+  flagged because the literal in a bitwise expression is decimal.  The
+  lint wants binary/hex/octal literals for bitwise operands.  Because
+  CLAUDE.md mandates `#![deny(clippy::all, clippy::pedantic)]`, every such
+  decimal-literal bitwise const is now a hard error.  This is purely a
+  toolchain-version regression — `cargo build -p posix` is clean and all
+  17138 host tests pass.  PROPER FIX: sweep the affected constant tables
+  (linux_audit_arch_types.rs and any other syscall/flag-constant modules)
+  converting decimal literals used in `|`/`&`/`^`/`<<` expressions to hex,
+  OR (if the churn is undesirable) add a scoped
+  `#![allow(clippy::decimal_bitwise_operands)]` to the constant-table
+  modules with a comment.  Likely affects other crates too (same toolchain).
+  TRIGGER: do this as a dedicated lint-cleanup pass; not blocking feature
+  work since the bare-metal build and tests are green.
+
 the os directory is 65 gb, why so high? and how many gb will actually go into the distribution? and why are some simple tools/games almost 1gb each in the target/ subdirectories?
 
   ANSWER (2026-05-27, ADDRESSED):
@@ -1454,6 +1474,33 @@ Remaining net improvements (diminishing returns):
   session.  The files are correct, just committed under the wrong message.
 
 ## Judgment Calls
+
+- (2026-05-30) socketpair() supports only AF_UNIX + SOCK_STREAM.
+  posix/src/socket.rs socketpair() is backed by the kernel stream-socket
+  object (kernel/src/ipc/stream_socket.rs, SYS_SOCKETPAIR_* 300-310), a
+  pair of bonded byte-stream ring buffers.  This covers the overwhelmingly
+  common use of socketpair() (parent/child byte pipes, CLOEXEC fd passing
+  scaffolding, libraries that want a bidirectional pipe).  Not implemented:
+  * SOCK_DGRAM  → EOPNOTSUPP.  A datagram socketpair needs a message-framed
+    kernel object (preserve record boundaries, each send() = one recv()),
+    which the stream ring does not provide.  Proper fix when needed: add a
+    datagram variant to stream_socket.rs (or a sibling dgram_socket.rs)
+    that stores length-prefixed records in the ring and have socketpair()
+    dispatch to it for base_type==SOCK_DGRAM; add a HandleKind::UnixDgram
+    in posix with framed send/recv arms.  Trigger: a ported program that
+    actually calls socketpair(AF_UNIX, SOCK_DGRAM, ...).
+  * SOCK_SEQPACKET → EOPNOTSUPP.  Same framing requirement as SOCK_DGRAM
+    plus reliable/ordered/connection semantics (which the bonded pair
+    already gives); so SEQPACKET is "framed DGRAM over the bonded pair."
+    Implement together with the DGRAM variant.
+  * SCM_RIGHTS / ancillary fd passing over the pair is NOT supported — the
+    stream object moves bytes only, not capability handles.  Fix when an
+    fd-passing program is ported: extend the kernel object to carry an
+    out-of-band handle queue alongside the byte ring and wire sendmsg/
+    recvmsg's cmsg path to it.
+  All three are easy to add incrementally without disturbing the existing
+  stream path; socketpair() already validates base_type up front so adding
+  a new arm is localised.
 
 - (2026-05-29) POSIX signal delivery via kernel signal shim (roadmap
   "Full signal delivery via IPC", posix/src/signal.rs + kernel/src/proc/signal.rs).

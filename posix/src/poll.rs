@@ -406,6 +406,24 @@ pub(crate) fn check_readiness(kind: fdtable::HandleKind, handle: u64) -> (bool, 
             (readable, writable, hangup, error)
         }
 
+        // Unix stream socket: query kernel for actual rx/tx readiness.
+        // The SYS_SOCKETPAIR_POLL bitmask matches the pipe layout:
+        //   bit 0 (0x01) = readable (data available or read-side EOF)
+        //   bit 2 (0x04) = writable (buffer space, or write would error)
+        //   bit 3 (0x08) = POLLERR (broken — peer read side gone)
+        //   bit 4 (0x10) = POLLHUP (peer write side gone)
+        HandleKind::UnixStream => {
+            if handle == 0 {
+                return (false, false, true, true);
+            }
+            let status = syscall1(SYS_SOCKETPAIR_POLL, handle) as u16;
+            let readable = (status & 0x0001) != 0;
+            let writable = (status & 0x0004) != 0;
+            let error = (status & 0x0008) != 0;
+            let hangup = (status & 0x0010) != 0;
+            (readable, writable, hangup, error)
+        }
+
         // TCP stream: query kernel for actual rx/tx readiness.
         HandleKind::TcpStream => {
             if handle == 0 {

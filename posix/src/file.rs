@@ -136,6 +136,7 @@ pub extern "C" fn close(fd: Fd) -> i32 {
     let ret = match entry.kind {
         HandleKind::File => syscall1(SYS_FS_CLOSE, entry.handle),
         HandleKind::Pipe => syscall1(SYS_PIPE_CLOSE, entry.handle),
+        HandleKind::UnixStream => syscall1(SYS_SOCKETPAIR_CLOSE, entry.handle),
         HandleKind::Console => return 0, // Console fds don't need kernel close.
         HandleKind::TcpStream => {
             if entry.handle == 0 { return 0; } // Unconnected socket, nothing to close.
@@ -245,6 +246,18 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                 syscall3(SYS_PIPE_TRY_READ, entry.handle, buf as u64, count as u64)
             } else {
                 syscall3(SYS_PIPE_READ, entry.handle, buf as u64, count as u64)
+            }
+        }
+        HandleKind::UnixStream => {
+            // Stream socket: blocking recv unless O_NONBLOCK is set.
+            // A return of 0 is EOF (peer's write side closed), which
+            // read() reports as 0 — matching pipe/socket semantics.
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0;
+            if is_nb {
+                syscall3(SYS_SOCKETPAIR_TRY_RECV, entry.handle, buf as u64, count as u64)
+            } else {
+                syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, count as u64)
             }
         }
         HandleKind::Console => {
@@ -456,6 +469,24 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             }
             ret
         }
+        HandleKind::UnixStream => {
+            // Stream socket: blocking send unless O_NONBLOCK is set.
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
+                & crate::fcntl::O_NONBLOCK != 0;
+            let ret = if is_nb {
+                syscall3(SYS_SOCKETPAIR_TRY_SEND, entry.handle, buf as u64, count as u64)
+            } else {
+                syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, count as u64)
+            };
+            if ret == errno::native::CHANNEL_CLOSED {
+                // Peer's read side is gone — POSIX mandates EPIPE.  The
+                // kernel does not raise SIGPIPE (we have no signals), so a
+                // write to a broken stream socket simply fails with EPIPE.
+                errno::set_errno(errno::EPIPE);
+                return -1;
+            }
+            ret
+        }
         HandleKind::Console => {
             syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64)
         }
@@ -609,7 +640,7 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
         HandleKind::Pipe | HandleKind::Console
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
         | HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd
-        | HandleKind::Inotify => {
+        | HandleKind::Inotify | HandleKind::UnixStream => {
             errno::set_errno(errno::ESPIPE);
             -1
         }
@@ -1082,6 +1113,21 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
                 -1
             }
         }
+        HandleKind::UnixStream => {
+            // No userspace dup syscall for stream sockets.  Share the
+            // endpoint handle; close() uses is_handle_referenced() so the
+            // kernel SYS_SOCKETPAIR_CLOSE (which drops the endpoint
+            // refcount) fires exactly once, when the last fd is closed.
+            if let Some(fd) = fdtable::alloc_fd_with_flags(
+                HandleKind::UnixStream, entry.handle, src_status,
+            ) {
+                fdtable::copy_fd_path(oldfd, fd);
+                fd
+            } else {
+                errno::set_errno(errno::EMFILE);
+                -1
+            }
+        }
         HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
             // Share the handle (same refcounting as pipes).
             if let Some(new_fd) = fdtable::alloc_fd_with_flags(
@@ -1190,7 +1236,7 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd => {
+        | HandleKind::Eventfd | HandleKind::UnixStream => {
             entry.handle
         }
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
@@ -1489,7 +1535,8 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             }
             0
         }
-        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
+        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
+        | HandleKind::UnixStream => {
             // Return minimal stat for a socket.
             unsafe {
                 core::ptr::write_bytes(buf, 0, 1);
@@ -1756,7 +1803,7 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
         HandleKind::Pipe | HandleKind::Console
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
         | HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd
-        | HandleKind::Inotify => {
+        | HandleKind::Inotify | HandleKind::UnixStream => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -1783,7 +1830,7 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
         HandleKind::Pipe | HandleKind::Console
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
         | HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd
-        | HandleKind::Inotify => 0,
+        | HandleKind::Inotify | HandleKind::UnixStream => 0,
     }
 }
 
@@ -1849,6 +1896,7 @@ fn close_kernel_handle(kind: HandleKind, handle: u64) -> i64 {
     match kind {
         HandleKind::File => syscall1(SYS_FS_CLOSE, handle),
         HandleKind::Pipe => syscall1(SYS_PIPE_CLOSE, handle),
+        HandleKind::UnixStream => syscall1(SYS_SOCKETPAIR_CLOSE, handle),
         HandleKind::Console => 0, // Console handles are not closeable.
         HandleKind::TcpStream => syscall1(SYS_TCP_CLOSE, handle),
         HandleKind::TcpListener => syscall1(SYS_TCP_CLOSE_LISTENER, handle),

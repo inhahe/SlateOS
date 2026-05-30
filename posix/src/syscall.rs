@@ -167,6 +167,20 @@ pub const SYS_PIPE_CLOSE: u64 = 225;
 pub const SYS_PIPE_POLL: u64 = 228;
 pub const SYS_PIPE_READABLE_BYTES: u64 = 229;
 
+// Stream sockets (IPC range 300-310) — bidirectional byte streams backing
+// socketpair(AF_UNIX, SOCK_STREAM, ...).  Mirrors kernel/src/syscall/number.rs.
+pub const SYS_SOCKETPAIR_CREATE: u64 = 300;
+pub const SYS_SOCKETPAIR_SEND: u64 = 301;
+pub const SYS_SOCKETPAIR_RECV: u64 = 302;
+pub const SYS_SOCKETPAIR_TRY_SEND: u64 = 303;
+pub const SYS_SOCKETPAIR_TRY_RECV: u64 = 304;
+pub const SYS_SOCKETPAIR_CLOSE: u64 = 305;
+pub const SYS_SOCKETPAIR_SEND_TIMEOUT: u64 = 306;
+pub const SYS_SOCKETPAIR_RECV_TIMEOUT: u64 = 307;
+pub const SYS_SOCKETPAIR_POLL: u64 = 308;
+pub const SYS_SOCKETPAIR_READABLE_BYTES: u64 = 309;
+pub const SYS_SOCKETPAIR_SHUTDOWN: u64 = 310;
+
 // Futexes (IPC range 210-214)
 pub const SYS_FUTEX_WAIT: u64 = 210;
 pub const SYS_FUTEX_WAKE: u64 = 211;

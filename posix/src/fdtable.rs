@@ -130,6 +130,19 @@ pub enum HandleKind {
     /// inotify instances are not shared between processes — posix_spawn
     /// does not propagate them to the child.
     Inotify,
+
+    /// A connected Unix-domain stream socket endpoint, created by
+    /// `socketpair(AF_UNIX, SOCK_STREAM, ...)` (uses `SYS_SOCKETPAIR_*`).
+    ///
+    /// The `handle` is a kernel stream-socket endpoint handle
+    /// (`(pair_id << 1) | endpoint_bit`).  Bytes written on one endpoint
+    /// are read on its peer.  `read`/`write` map to `SYS_SOCKETPAIR_RECV`/
+    /// `SYS_SOCKETPAIR_SEND` (or the `TRY_` variants when `O_NONBLOCK` is
+    /// set); `poll` maps to `SYS_SOCKETPAIR_POLL`.  Unlike epoll/timerfd/
+    /// inotify, the endpoint handle is a real kernel resource and IS
+    /// inherited across `posix_spawn`/`exec` (the kernel bumps the
+    /// endpoint refcount when it dups the handle into the child).
+    UnixStream,
 }
 
 /// An entry in the file descriptor table.

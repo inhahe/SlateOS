@@ -1935,6 +1935,7 @@ pub unsafe extern "C" fn accept4(
 ///
 /// `buf` must be valid for `len` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UnixStream / error cases); splitting would scatter related per-kind send handling.
 pub unsafe extern "C" fn send(
     fd: i32,
     buf: *const u8,
@@ -2057,6 +2058,26 @@ pub unsafe extern "C" fn send(
             }
             len as isize
         }
+        HandleKind::UnixStream => {
+            // Stream socket endpoint: blocking unless MSG_DONTWAIT or
+            // O_NONBLOCK.  Returns partial writes like a pipe/TCP stream.
+            let is_nb = (flags & MSG_DONTWAIT) != 0
+                || fdtable::get_status_flags(fd).unwrap_or(0)
+                    & crate::fcntl::O_NONBLOCK != 0;
+            let ret = if is_nb {
+                syscall3(SYS_SOCKETPAIR_TRY_SEND, entry.handle, buf as u64, len as u64)
+            } else {
+                syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, len as u64)
+            };
+            if ret == errno::native::CHANNEL_CLOSED {
+                // Peer's read side gone — POSIX EPIPE (no SIGPIPE here).
+                errno::set_errno(errno::EPIPE);
+                return -1;
+            }
+            // translate() sets errno and returns -1 for negative codes,
+            // or passes through the byte count for ret >= 0.
+            errno::translate(ret) as isize
+        }
         _ => {
             errno::set_errno(errno::ENOTSOCK);
             -1
@@ -2074,6 +2095,7 @@ pub unsafe extern "C" fn send(
 ///
 /// `buf` must be valid for `len` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
+#[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UnixStream / error cases); splitting would scatter related per-kind recv handling.
 pub unsafe extern "C" fn recv(
     fd: i32,
     buf: *mut u8,
@@ -2197,6 +2219,21 @@ pub unsafe extern "C" fn recv(
             }
             errno::set_errno(err);
             -1
+        }
+        HandleKind::UnixStream => {
+            // Stream socket endpoint: blocking recv unless MSG_DONTWAIT
+            // or O_NONBLOCK.  A return of 0 is EOF (peer write side gone).
+            // MSG_PEEK/MSG_WAITALL are not supported by the kernel
+            // stream-socket recv path; they are ignored.
+            let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
+            let ret = if is_nb {
+                syscall3(SYS_SOCKETPAIR_TRY_RECV, entry.handle, buf as u64, len as u64)
+            } else {
+                syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, len as u64)
+            };
+            // translate() sets errno and returns -1 for negative codes,
+            // or passes through the byte count (0 = EOF) for ret >= 0.
+            errno::translate(ret) as isize
         }
         _ => {
             errno::set_errno(errno::ENOTSOCK);
@@ -2902,6 +2939,31 @@ pub extern "C" fn shutdown(fd: i32, how: i32) -> i32 {
                 }
                 set_meta(fd, meta);
             }
+            0
+        }
+        HandleKind::UnixStream => {
+            if entry.handle == 0 {
+                errno::set_errno(errno::ENOTCONN);
+                return -1;
+            }
+
+            // Delegate to the kernel for proper half-close semantics.
+            // The kernel's stream-socket `how` values match POSIX exactly
+            // (SHUT_RD=0, SHUT_WR=1, SHUT_RDWR=2):
+            // - SHUT_RD: further recv on this endpoint returns EOF.
+            // - SHUT_WR: further send fails (EPIPE); the peer reading our
+            //   ring drains remaining bytes then sees EOF.
+            // - SHUT_RDWR: both of the above.
+            let ret = syscall2(SYS_SOCKETPAIR_SHUTDOWN, entry.handle, how as u64);
+            if ret < 0 {
+                // Negative kernel codes (e.g. CHANNEL_CLOSED, INVALID_HANDLE)
+                // map to errno and -1 via the generic translation table.
+                return errno::translate(ret) as i32;
+            }
+
+            // Do NOT zero the handle here: close() still needs to release the
+            // kernel endpoint refcount.  The kernel enforces post-shutdown
+            // semantics on subsequent send/recv against the same handle.
             0
         }
         _ => {
@@ -4384,18 +4446,116 @@ fn write_u16_decimal(buf: &mut [u8; 6], pos: &mut usize, val: u16) {
 
 /// Create a pair of connected sockets.
 ///
-/// Stub: returns -1/ENOSYS.  Our kernel doesn't yet support
-/// connected socket pairs (used for Unix domain IPC).
+/// Backed by the kernel stream-socket object (`SYS_SOCKETPAIR_CREATE`),
+/// which returns two bonded endpoint handles.  Bytes written on one fd
+/// are read on the other and vice-versa.
+///
+/// Supported arguments:
+/// - `domain`: `AF_UNIX` / `AF_LOCAL` only (other families →
+///   `EAFNOSUPPORT`).
+/// - `sock_type`: `SOCK_STREAM`, optionally OR-ed with `SOCK_NONBLOCK`
+///   and/or `SOCK_CLOEXEC`.  `SOCK_DGRAM` / `SOCK_SEQPACKET` are not
+///   implemented (→ `EOPNOTSUPP`); see the limitation note in todo.txt.
+/// - `protocol`: must be 0 (`EPROTONOSUPPORT` otherwise).
+///
+/// On success writes the two fds into `sv[0]`/`sv[1]` and returns 0.
+/// On failure returns -1 with `errno` set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn socketpair(
-    _domain: i32,
-    _sock_type: i32,
-    _protocol: i32,
+    domain: i32,
+    sock_type: i32,
+    protocol: i32,
     sv: *mut [i32; 2],
 ) -> i32 {
-    let _ = sv;
-    errno::set_errno(errno::ENOSYS);
-    -1
+    // ---- Argument validation (all paths here return before any
+    // syscall, so they are exercisable by host unit tests) ----
+    if sv.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    // A negative type cannot carry valid flag bits (SOCK_NONBLOCK and
+    // SOCK_CLOEXEC are both well below the sign bit).
+    if sock_type < 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let type_flags = sock_type & !SOCK_TYPE_MASK;
+    if type_flags & !(SOCK_NONBLOCK | SOCK_CLOEXEC) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    let base_type = sock_type & SOCK_TYPE_MASK;
+
+    // Only Unix-domain pairs are supported.
+    if domain != AF_UNIX {
+        errno::set_errno(errno::EAFNOSUPPORT);
+        return -1;
+    }
+    // Only stream sockets are implemented.  SOCK_DGRAM / SOCK_SEQPACKET
+    // would need datagram-framed kernel objects (not yet built).
+    if base_type != SOCK_STREAM {
+        errno::set_errno(errno::EOPNOTSUPP);
+        return -1;
+    }
+    // PF_UNIX defines no protocols; only 0 is valid.
+    if protocol != 0 {
+        errno::set_errno(errno::EPROTONOSUPPORT);
+        return -1;
+    }
+
+    // ---- Create the kernel endpoint pair ----
+    let (raw0, raw1) = syscall3_2ret(SYS_SOCKETPAIR_CREATE, 0, 0, 0);
+    if raw0 < 0 {
+        // The kernel create path does not currently fail, but guard
+        // defensively so a future failure surfaces a real errno.
+        return errno::translate(raw0) as i32;
+    }
+    let h0 = raw0 as u64;
+    let h1 = raw1 as u64;
+
+    let initial_flags = crate::fcntl::O_RDWR
+        | if (type_flags & SOCK_NONBLOCK) != 0 { crate::fcntl::O_NONBLOCK } else { 0 };
+
+    // Allocate the first fd.
+    let Some(fd0) = fdtable::alloc_fd_with_flags(
+        HandleKind::UnixStream, h0, initial_flags,
+    ) else {
+        // Could not install fd0 — release both kernel endpoints.
+        let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h0);
+        let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h1);
+        errno::set_errno(errno::EMFILE);
+        return -1;
+    };
+
+    // Allocate the second fd.
+    let Some(fd1) = fdtable::alloc_fd_with_flags(
+        HandleKind::UnixStream, h1, initial_flags,
+    ) else {
+        // Roll back fd0 (frees its table slot) and close both endpoints.
+        let _ = fdtable::close_fd(fd0);
+        let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h0);
+        let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h1);
+        errno::set_errno(errno::EMFILE);
+        return -1;
+    };
+
+    // Apply FD_CLOEXEC to both fds if requested.
+    if (type_flags & SOCK_CLOEXEC) != 0 {
+        let _ = fdtable::set_fd_flags(fd0, fdtable::FD_CLOEXEC);
+        let _ = fdtable::set_fd_flags(fd1, fdtable::FD_CLOEXEC);
+    }
+
+    // Write the fd pair into the caller's array.  Use raw writes (rather
+    // than indexing) to satisfy the indexing_slicing lint and to avoid
+    // assuming alignment of the user pointer.
+    // SAFETY: `sv` was null-checked above; the caller guarantees it
+    // points to a writable `[i32; 2]`.
+    unsafe {
+        let out = sv.cast::<i32>();
+        core::ptr::write(out, fd0);
+        core::ptr::write(out.add(1), fd1);
+    }
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -6708,13 +6868,61 @@ mod tests {
         assert_eq!(ret, EAI_NONAME);
     }
 
-    // -- socketpair stub --
+    // -- socketpair argument validation --
+    //
+    // These tests exercise only the pre-syscall validation branches.
+    // The happy path issues SYS_SOCKETPAIR_CREATE via a raw `syscall`
+    // instruction, which cannot run under the host test harness, so it
+    // is covered by the in-kernel boot/integration path instead.
 
     #[test]
-    fn test_socketpair_returns_enosys() {
-        let mut sv = [0i32; 2];
-        let ret = socketpair(AF_UNIX, SOCK_STREAM, 0, &mut sv);
+    fn test_socketpair_null_sv_efault() {
+        let ret = socketpair(AF_UNIX, SOCK_STREAM, 0, core::ptr::null_mut());
         assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_socketpair_bad_domain_eafnosupport() {
+        let mut sv = [0i32; 2];
+        // AF_INET is not supported by socketpair (only AF_UNIX/AF_LOCAL).
+        let ret = socketpair(AF_INET, SOCK_STREAM, 0, &mut sv);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EAFNOSUPPORT);
+    }
+
+    #[test]
+    fn test_socketpair_dgram_eopnotsupp() {
+        let mut sv = [0i32; 2];
+        // SOCK_DGRAM pairs are not implemented yet.
+        let ret = socketpair(AF_UNIX, SOCK_DGRAM, 0, &mut sv);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EOPNOTSUPP);
+    }
+
+    #[test]
+    fn test_socketpair_bad_protocol_eprotonosupport() {
+        let mut sv = [0i32; 2];
+        let ret = socketpair(AF_UNIX, SOCK_STREAM, 99, &mut sv);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EPROTONOSUPPORT);
+    }
+
+    #[test]
+    fn test_socketpair_negative_type_einval() {
+        let mut sv = [0i32; 2];
+        let ret = socketpair(AF_UNIX, -1, 0, &mut sv);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    #[test]
+    fn test_socketpair_stray_flag_bits_einval() {
+        let mut sv = [0i32; 2];
+        // A high flag bit that is neither SOCK_NONBLOCK nor SOCK_CLOEXEC.
+        let ret = socketpair(AF_UNIX, SOCK_STREAM | 0x0080_0000, 0, &mut sv);
+        assert_eq!(ret, -1);
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     // -- freeaddrinfo is no-op (should not crash) --

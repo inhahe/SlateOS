@@ -405,6 +405,27 @@ Remaining net improvements (diminishing returns):
   DES-format /etc/shadow entries (low priority; DES crypt is obsolete
   and insecure).
 
+- (DONE 2026-05-30) syslog()/vsyslog() printf-format bug fixed in
+  posix/src/syslog.rs.  Same class of bug as err/warn (below): syslog was
+  declared `fn syslog(priority, msg)` — non-variadic — so it printed the
+  format string literally and silently dropped every printf argument, and
+  there was no vsyslog at all.  The real C signature is
+  `void syslog(int priority, const char *fmt, ...)`.  Now `syslog` is an
+  assembly trampoline (fprintf-style 2-fixed-arg layout, captures 8 int +
+  8 float varargs) that calls `_syslog_impl`; both `_syslog_impl` and the
+  new `vsyslog` (real va_list, decays to *mut VaList, pure Rust via
+  printf::va_collect) route through a shared `do_syslog` helper that
+  mask-filters first, then printf-expands the format into a [u8;1024] stack
+  buffer via the tested _snprintf_impl engine, then writes the existing
+  priority-prefix/ident/PID/body/newline framing to stderr.  sys_syslog.rs
+  re-export updated (the `syslog` symbol is now the asm trampoline, only on
+  the bare-metal target; host code uses vsyslog/_syslog_impl).  Limitation
+  documented in the module doc: a literal `%` in a message must now be
+  written `%%` (matches every real libc).  Three existing no-crash tests
+  redirected to _syslog_impl; two new tests added (vsyslog with a synthetic
+  va_list expanding %d, and null-va_list rejection).  All host tests pass
+  (17053); bare-metal `cargo build -p posix` clean.
+
 - (DONE 2026-05-30) v* scanf family (vsscanf, vscanf, vfscanf, plus the
   glibc __isoc99_v*scanf aliases) implemented in posix/src/scanf.rs.
   Same motivation as the v* printf work below: ported code that wraps

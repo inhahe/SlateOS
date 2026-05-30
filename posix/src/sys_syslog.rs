@@ -24,7 +24,9 @@ pub use crate::syslog::LOG_NDELAY;
 pub use crate::syslog::LOG_PERROR;
 
 pub use crate::syslog::openlog;
-pub use crate::syslog::syslog;
+// `syslog` itself is an assembly trampoline (variadic) defined only on the
+// bare-metal target; the Rust-callable forms are `_syslog_impl` and `vsyslog`.
+pub use crate::syslog::vsyslog;
 pub use crate::syslog::closelog;
 pub use crate::syslog::setlogmask;
 

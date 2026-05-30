@@ -7,14 +7,70 @@
 //! Our OS doesn't have a syslog daemon.  Messages are written to stderr
 //! (fd 2) with a priority prefix so they're visible on the console.
 //!
+//! `syslog` is variadic in C (`void syslog(int, const char *fmt, ...)`), so —
+//! like [`crate::printf`] — its entry point is an assembly trampoline that
+//! captures register/stack varargs into flat arrays and calls `_syslog_impl`,
+//! which expands the printf-style format with the tested snprintf engine
+//! before adding the priority/ident/PID framing.  `vsyslog` takes a real
+//! `va_list` (a pointer on the x86_64 System V ABI) and is plain Rust.
+//!
 //! ## Limitations
 //!
 //! - No actual syslog daemon or log rotation.
 //! - `openlog` ident string is stored but the facility is ignored.
 //! - `setlogmask` filtering works correctly.
+//! - The format string is now printf-expanded: a literal `%` in a message
+//!   must be written `%%` (matching every real libc).
 
 use crate::file;
+use crate::printf::{self, VaList};
 use crate::string;
+
+// ---------------------------------------------------------------------------
+// Assembly trampoline — capture varargs, then call `_syslog_impl`.
+// Layout matches `fprintf`: 2 fixed args (priority, fmt), rest varargs.
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "none")]
+core::arch::global_asm!(
+    // syslog(priority, fmt, ...) → _syslog_impl(priority, fmt, int_args, float_args)
+    ".global syslog",
+    ".type syslog, @function",
+    "syslog:",
+    "push rbp",
+    "mov rbp, rsp",
+    "sub rsp, 128",
+    "mov [rsp], rdx",        // int vararg 0
+    "mov [rsp+8], rcx",      // int vararg 1
+    "mov [rsp+16], r8",      // int vararg 2
+    "mov [rsp+24], r9",      // int vararg 3
+    "mov rax, [rbp+16]",     // int vararg 4 (stack)
+    "mov [rsp+32], rax",
+    "mov rax, [rbp+24]",     // int vararg 5
+    "mov [rsp+40], rax",
+    "mov rax, [rbp+32]",     // int vararg 6
+    "mov [rsp+48], rax",
+    "mov rax, [rbp+40]",     // int vararg 7
+    "mov [rsp+56], rax",
+    "movsd [rsp+64], xmm0",
+    "movsd [rsp+72], xmm1",
+    "movsd [rsp+80], xmm2",
+    "movsd [rsp+88], xmm3",
+    "movsd [rsp+96], xmm4",
+    "movsd [rsp+104], xmm5",
+    "movsd [rsp+112], xmm6",
+    "movsd [rsp+120], xmm7",
+    // rdi = priority, rsi = fmt (already set)
+    "mov rdx, rsp",          // int_args
+    "lea rcx, [rsp+64]",    // float_args
+    "call _syslog_impl",
+    "add rsp, 128",
+    "pop rbp",
+    "ret",
+);
+
+/// Stack buffer for the expanded format-string body.
+const SYSLOG_MSG_BUF: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Priority levels
@@ -134,29 +190,78 @@ pub extern "C" fn openlog(ident: *const u8, option: i32, _facility: i32) {
     }
 }
 
-/// Write a message to the system log.
+/// Implementation behind the `syslog` assembly trampoline.
 ///
-/// This simplified version writes the message directly to stderr (fd 2).
-/// The `priority` parameter combines facility and level.
+/// Expands the printf-style `fmt`/varargs into a stack buffer, then frames
+/// the result with the priority prefix, ident, and (optionally) PID before
+/// writing to stderr.  `iargs`/`fargs` are the captured integer/float
+/// vararg arrays (each up to 8 entries) produced by the trampoline.
 ///
-/// Note: This does NOT support printf-style format strings in `msg`.
-/// The caller should format the message before calling syslog, or use
-/// our printf to format into a buffer first.
+/// # Safety
+///
+/// `fmt` must be a valid NUL-terminated C string (or null), and
+/// `iargs`/`fargs` must each point to at least 8 `u64` slots when `fmt`
+/// references that many conversions (the trampoline always provides 8).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn syslog(priority: i32, msg: *const u8) {
+pub unsafe extern "C" fn _syslog_impl(
+    priority: i32,
+    fmt: *const u8,
+    iargs: *const u64,
+    fargs: *const u64,
+) {
+    do_syslog(priority, fmt, iargs, fargs);
+}
+
+/// `vsyslog(int priority, const char *fmt, va_list ap)` — the va_list form.
+///
+/// On the x86_64 System V ABI a `va_list` is `__va_list_tag[1]`, so the
+/// `va_list` parameter decays to a pointer and this function is plain Rust.
+///
+/// # Safety
+///
+/// `fmt` must be a valid NUL-terminated C string (or null) and `ap` must
+/// point to a valid, initialised `va_list` matching `fmt`'s conversions.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vsyslog(priority: i32, fmt: *const u8, ap: *mut VaList) {
+    if ap.is_null() {
+        return;
+    }
+    // SAFETY: caller guarantees `ap` is a valid va_list and `fmt` matches it.
+    let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
+    do_syslog(priority, fmt, iargs.as_ptr(), fargs.as_ptr());
+}
+
+/// Shared body for `_syslog_impl` and `vsyslog`: mask-filter, printf-expand
+/// the format into a stack buffer, then write the framed line to stderr.
+fn do_syslog(priority: i32, fmt: *const u8, iargs: *const u64, fargs: *const u64) {
     let pri = log_pri(priority);
 
-    // Check log mask.
+    // Check log mask before doing any work.
     let mask = unsafe { *core::ptr::addr_of!(SYSLOG_MASK) };
     if mask & (1 << pri) == 0 {
         return; // Filtered out.
     }
 
-    if msg.is_null() {
+    if fmt.is_null() {
         return;
     }
 
-    // Write priority prefix.
+    // Expand the printf-style format into a stack buffer.  `_snprintf_impl`
+    // is a safe wrapper that bounds all writes to the buffer and always
+    // NUL-terminates; it tolerates null `iargs`/`fargs` when `fmt` has no
+    // matching conversions.
+    let mut body = [0u8; SYSLOG_MSG_BUF];
+    let written =
+        printf::_snprintf_impl(body.as_mut_ptr(), SYSLOG_MSG_BUF, fmt, iargs, fargs);
+    // Clamp to the buffer (snprintf returns the would-be length, which may
+    // exceed the buffer when truncated).
+    let body_len = if written < 0 {
+        0
+    } else {
+        (written as usize).min(SYSLOG_MSG_BUF.wrapping_sub(1))
+    };
+
+    // Priority prefix.
     let prefix = match pri {
         LOG_EMERG => b"<EMERG> " as &[u8],
         LOG_ALERT => b"<ALERT> ",
@@ -196,9 +301,10 @@ pub extern "C" fn syslog(priority: i32, msg: *const u8) {
         file::write(fd, b"] ".as_ptr(), 2);
     }
 
-    // Write the message.
-    let msg_len = unsafe { string::strlen(msg) };
-    file::write(fd, msg, msg_len);
+    // Write the expanded message body.
+    if let Some(slice) = body.get(..body_len) {
+        file::write(fd, slice.as_ptr(), body_len);
+    }
     file::write(fd, b"\n".as_ptr(), 1);
 }
 
@@ -521,17 +627,36 @@ mod tests {
     #[test]
     fn test_syslog_no_crash() {
         unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
-        syslog(LOG_INFO, b"test syslog message\0".as_ptr());
+        unsafe {
+            _syslog_impl(
+                LOG_INFO,
+                b"test syslog message\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+            );
+        }
     }
 
     #[test]
     fn test_syslog_filtered_by_mask() {
         // Set mask to only allow ERR and below.
         unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(log_upto(LOG_ERR) as i32); }
-        // This should be filtered out (LOG_INFO > LOG_ERR).
-        syslog(LOG_INFO, b"this should be filtered\0".as_ptr());
-        // This should get through.
-        syslog(LOG_ERR, b"this should print\0".as_ptr());
+        unsafe {
+            // This should be filtered out (LOG_INFO > LOG_ERR).
+            _syslog_impl(
+                LOG_INFO,
+                b"this should be filtered\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+            );
+            // This should get through.
+            _syslog_impl(
+                LOG_ERR,
+                b"this should print\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+            );
+        }
         // Restore.
         unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
     }
@@ -539,7 +664,36 @@ mod tests {
     #[test]
     fn test_syslog_null_message_no_crash() {
         unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
-        syslog(LOG_ERR, core::ptr::null());
+        unsafe {
+            _syslog_impl(LOG_ERR, core::ptr::null(), core::ptr::null(), core::ptr::null());
+        }
+    }
+
+    #[test]
+    fn test_syslog_expands_format() {
+        // Build a synthetic va_list and verify vsyslog formats without crashing.
+        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        let mut reg = [0u8; 176];
+        // First GP arg = 42 (used by %d).
+        reg[0..8].copy_from_slice(&42u64.to_le_bytes());
+        let mut overflow = [0u8; 128];
+        let mut va = VaList {
+            gp_offset: 0,
+            fp_offset: 48,
+            overflow_arg_area: overflow.as_mut_ptr(),
+            reg_save_area: reg.as_mut_ptr(),
+        };
+        unsafe {
+            vsyslog(LOG_INFO, b"value=%d\0".as_ptr(), &mut va);
+        }
+    }
+
+    #[test]
+    fn test_vsyslog_null_va_no_crash() {
+        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        unsafe {
+            vsyslog(LOG_INFO, b"hi\0".as_ptr(), core::ptr::null_mut());
+        }
     }
 
     // -- setlogmask with specific masks --

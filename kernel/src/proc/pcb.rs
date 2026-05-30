@@ -1069,6 +1069,15 @@ fn destroy_process_resources(
                     crate::ipc::eventfd::EventFdHandle::from_raw(handle),
                 );
             }
+            crate::proc::spawn::fd_handle_type::STREAM_SOCKET => {
+                // Spawn dup'd the parent's stream-socket endpoint ref
+                // (per-endpoint refcount); closing here drops just that
+                // ref.  Unreached if userspace already claimed the handle
+                // into its fd-table (initial_fds is emptied at claim).
+                crate::ipc::stream_socket::close(
+                    crate::ipc::stream_socket::StreamSocketHandle::from_raw(handle),
+                );
+            }
             _ => {
                 // FILE, TCP_SOCKET, UDP_SOCKET, and any unknown types —
                 // close via the file handle table.

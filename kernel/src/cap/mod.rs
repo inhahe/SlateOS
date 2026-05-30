@@ -138,6 +138,13 @@ pub enum ResourceType {
     ///
     /// Rights: WRITE = create/modify/attach namespaces.
     Namespace = 15,
+    /// A stream socket endpoint (one end of a `socketpair`).
+    ///
+    /// A bidirectional, byte-stream IPC object.  Like `Pipe`, no
+    /// capability is required to create one — the handle itself is the
+    /// authority.  Tracked per-process so the endpoint is closed when an
+    /// owning process dies.
+    StreamSocket = 16,
 }
 
 // ---------------------------------------------------------------------------

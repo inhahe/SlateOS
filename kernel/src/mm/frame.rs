@@ -2329,6 +2329,69 @@ pub fn try_stats() -> Option<FrameAllocStats> {
     })
 }
 
+/// DIAGNOSTIC: walk every free list and verify integrity.
+///
+/// Detects (a) cycles / over-long lists (capped traversal), (b) a node
+/// count that disagrees with `FreeList::count`, (c) a node whose
+/// `page_info` order does not match the list it sits on, and (d) broken
+/// `prev`/`next` back-links.  Returns `Ok(())` if all lists are sound,
+/// or `Err((order, reason))` for the first problem found.
+///
+/// Walking dereferences `FreeNode`s through the HHDM under the allocator
+/// lock; safe because the lock grants exclusive access.
+///
+/// Retained as debugging infrastructure for the open MM boot-hang (see
+/// todo.txt "ADVANCED DIAGNOSIS").  Currently has no callers in the boot
+/// path; `#[allow(dead_code)]` keeps the binary build warning-free.
+#[allow(dead_code)]
+#[allow(clippy::indexing_slicing)]
+pub fn validate_free_lists() -> Result<(), (usize, &'static str)> {
+    let Some(allocator) = ALLOCATOR.get() else {
+        return Ok(());
+    };
+    let guard = allocator.lock();
+
+    for order in 0..=MAX_ORDER {
+        let expected = guard.free_lists[order].count;
+        // Cap traversal at expected + 1 so a cycle is caught instead of
+        // looping forever.
+        let cap = expected.saturating_add(1);
+        let mut addr = guard.free_lists[order].head;
+        let mut prev = 0u64;
+        let mut seen = 0usize;
+
+        while addr != 0 {
+            if seen > cap {
+                return Err((order, "cycle or count underflow (traversed past count)"));
+            }
+            let idx = guard.frame_index(addr);
+            if idx >= guard.total_frames {
+                return Err((order, "node address out of managed range"));
+            }
+            #[allow(clippy::cast_possible_truncation)]
+            if guard.get_info(idx) != order as u8 {
+                return Err((order, "node page_info order mismatch"));
+            }
+            let node_ptr = guard.phys_to_virt(addr).cast::<FreeNode>();
+            // SAFETY: addr is a free block on this order's list; the HHDM
+            // mapping covers it and the lock grants exclusive access.
+            let node = unsafe { &*node_ptr };
+            if node.prev != prev {
+                return Err((order, "broken prev back-link"));
+            }
+            prev = addr;
+            addr = node.next;
+            seen = seen.saturating_add(1);
+        }
+
+        if seen != expected {
+            return Err((order, "node count disagrees with FreeList::count"));
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Copy-on-Write reference counting API
 // ---------------------------------------------------------------------------

@@ -455,6 +455,19 @@ extern "C" fn kmain() -> ! {
         cpu::halt_loop();
     }
 
+    // Step 13b: Initialize stream socket subsystem.
+    // Stream sockets are bidirectional kernel-buffered byte streams — the
+    // primitive backing POSIX socketpair(AF_UNIX, SOCK_STREAM, ...).
+    //
+    // NOTE: The stream_socket::self_test() is intentionally NOT invoked at
+    // boot.  The self_test is verified to pass (all 7 subtests printed OK in
+    // an earlier boot), but its heap allocation churn triggers a pre-existing,
+    // state/timing-sensitive boot hang during later ring-3 process spawns
+    // (reproducible with socket-free 64 KiB heap churn alone).  See the
+    // "ADVANCED DIAGNOSIS" entry in todo.txt under "Cross-Zone Bug Reports".
+    // The function is retained and can be run on demand once that MM/fault
+    // bug is fixed.
+
     // Step 14: Initialize shared memory subsystem.
     // Shared memory regions let tasks (and future processes) map the
     // same physical pages into their address spaces for zero-copy IPC.

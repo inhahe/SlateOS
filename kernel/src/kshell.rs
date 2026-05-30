@@ -74402,6 +74402,19 @@ fn cmd_ipc_stat(args: &str) {
             shell_println!("  Read blocks:      {}", s.pipe_read_blocks);
             shell_println!("  Pipes created:    {}", s.pipes_created);
         }
+        "sock" | "socket" | "socketpair" => {
+            let s = stats::snapshot();
+            shell_println!("=== Stream Socket IPC (socketpair) ===");
+            shell_println!("");
+            shell_println!("  Sends:            {}", s.stream_socket_sends);
+            shell_println!("  Recvs:            {}", s.stream_socket_recvs);
+            shell_println!("  Bytes sent:       {}", s.stream_socket_bytes_sent);
+            shell_println!("  Bytes recvd:      {}", s.stream_socket_bytes_recvd);
+            shell_println!("  Send blocks:      {}", s.stream_socket_send_blocks);
+            shell_println!("  Recv blocks:      {}", s.stream_socket_recv_blocks);
+            shell_println!("  Pairs created:    {}", s.stream_socket_pairs_created);
+            shell_println!("  Pairs destroyed:  {}", s.stream_socket_pairs_destroyed);
+        }
         "futex" => {
             let s = stats::snapshot();
             shell_println!("=== Futex ===");
@@ -74428,6 +74441,14 @@ fn cmd_ipc_stat(args: &str) {
             shell_println!("    writes={} reads={} bytes_w={} bytes_r={}",
                 s.pipe_writes, s.pipe_reads, s.pipe_bytes_written, s.pipe_bytes_read);
             shell_println!("    blocks={}+{} created={}", s.pipe_write_blocks, s.pipe_read_blocks, s.pipes_created);
+            shell_println!("");
+            shell_println!("  Stream Sockets:");
+            shell_println!("    sends={} recvs={} bytes_s={} bytes_r={}",
+                s.stream_socket_sends, s.stream_socket_recvs,
+                s.stream_socket_bytes_sent, s.stream_socket_bytes_recvd);
+            shell_println!("    blocks={}+{} created={} destroyed={}",
+                s.stream_socket_send_blocks, s.stream_socket_recv_blocks,
+                s.stream_socket_pairs_created, s.stream_socket_pairs_destroyed);
             shell_println!("");
             shell_println!("  Shared Memory:");
             shell_println!("    created={} destroyed={} mapped={}",

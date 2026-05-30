@@ -31,6 +31,7 @@ pub mod service;
 pub mod service_limits;
 pub mod shm;
 pub mod stats;
+pub mod stream_socket;
 pub mod timer;
 
 // TODO: Splice/vmsplice for pipes.
@@ -66,6 +67,9 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             }
             ResourceType::Timer => {
                 timer::cancel(handle_raw);
+            }
+            ResourceType::StreamSocket => {
+                stream_socket::close(stream_socket::StreamSocketHandle::from_raw(handle_raw));
             }
             // No cleanup needed for these types — they're either
             // permission tokens (PortIo, DeviceIrq, IoScheduler) or

@@ -87,6 +87,10 @@ use super::number::{
     SYS_PROCESS_TRY_WAIT, SYS_PROCESS_WAIT,
     SYS_SET_EXCEPTION_HANDLER,
     SYS_SHM_CLOSE, SYS_SHM_CREATE, SYS_SHM_SIZE, SYS_SLEEP, SYS_TASK_ID,
+    SYS_SOCKETPAIR_CREATE, SYS_SOCKETPAIR_SEND, SYS_SOCKETPAIR_RECV,
+    SYS_SOCKETPAIR_TRY_SEND, SYS_SOCKETPAIR_TRY_RECV, SYS_SOCKETPAIR_CLOSE,
+    SYS_SOCKETPAIR_SEND_TIMEOUT, SYS_SOCKETPAIR_RECV_TIMEOUT,
+    SYS_SOCKETPAIR_POLL, SYS_SOCKETPAIR_READABLE_BYTES, SYS_SOCKETPAIR_SHUTDOWN,
     SYS_TCP_ACCEPT, SYS_TCP_ABORT, SYS_TCP_BIND, SYS_TCP_CLOSE, SYS_TCP_CLOSE_LISTENER,
     SYS_TCP_PEER_ADDR,
     SYS_TCP_CONNECT, SYS_TCP_RECV, SYS_TCP_SEND,
@@ -308,6 +312,20 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_SHM_CREATE as usize] = Some(handlers::sys_shm_create);
     handlers[SYS_SHM_SIZE as usize] = Some(handlers::sys_shm_size);
     handlers[SYS_SHM_CLOSE as usize] = Some(handlers::sys_shm_close);
+    handlers[SYS_SOCKETPAIR_CREATE as usize] = Some(handlers::sys_socketpair_create);
+    handlers[SYS_SOCKETPAIR_SEND as usize] = Some(handlers::sys_socketpair_send);
+    handlers[SYS_SOCKETPAIR_RECV as usize] = Some(handlers::sys_socketpair_recv);
+    handlers[SYS_SOCKETPAIR_TRY_SEND as usize] = Some(handlers::sys_socketpair_try_send);
+    handlers[SYS_SOCKETPAIR_TRY_RECV as usize] = Some(handlers::sys_socketpair_try_recv);
+    handlers[SYS_SOCKETPAIR_CLOSE as usize] = Some(handlers::sys_socketpair_close);
+    handlers[SYS_SOCKETPAIR_SEND_TIMEOUT as usize] =
+        Some(handlers::sys_socketpair_send_timeout);
+    handlers[SYS_SOCKETPAIR_RECV_TIMEOUT as usize] =
+        Some(handlers::sys_socketpair_recv_timeout);
+    handlers[SYS_SOCKETPAIR_POLL as usize] = Some(handlers::sys_socketpair_poll);
+    handlers[SYS_SOCKETPAIR_READABLE_BYTES as usize] =
+        Some(handlers::sys_socketpair_readable_bytes);
+    handlers[SYS_SOCKETPAIR_SHUTDOWN as usize] = Some(handlers::sys_socketpair_shutdown);
     handlers[SYS_EVENTFD_CREATE as usize] = Some(handlers::sys_eventfd_create);
     handlers[SYS_EVENTFD_WRITE as usize] = Some(handlers::sys_eventfd_write);
     handlers[SYS_EVENTFD_READ as usize] = Some(handlers::sys_eventfd_read);

@@ -118,6 +118,12 @@ pub mod fd_handle_type {
     /// multiple PCBs can hold the same handle safely.
     #[allow(dead_code)] // Used only via fd inheritance; readable in matches.
     pub const EVENTFD: u8 = 5;
+    /// Stream socket endpoint handle (from `ipc::stream_socket`).  Spawn
+    /// dups via `stream_socket::dup()`, which refcounts each endpoint so
+    /// parent and child can share an endpoint safely (matching Linux
+    /// fork() socket inheritance).
+    #[allow(dead_code)] // Used only via fd inheritance; readable in matches.
+    pub const STREAM_SOCKET: u8 = 6;
 }
 
 /// A file descriptor mapping entry passed from userspace.
@@ -500,6 +506,17 @@ pub fn spawn_process(
                     )
                     .map(|h| h.raw())
                 }
+                fd_handle_type::STREAM_SOCKET => {
+                    // Stream socket endpoints are ref-counted per
+                    // endpoint: `dup()` bumps the endpoint refcount and
+                    // returns the same handle.  The child closes its
+                    // reference independently when it dies or hands the
+                    // handle to its fd-table.
+                    crate::ipc::stream_socket::dup(
+                        crate::ipc::stream_socket::StreamSocketHandle::from_raw(parent_handle),
+                    )
+                    .map(|h| h.raw())
+                }
                 fd_handle_type::CONSOLE => {
                     // Console is a virtual handle — just pass the value.
                     Ok(parent_handle)
@@ -551,6 +568,11 @@ pub fn spawn_process(
                             fd_handle_type::PIPE => {
                                 crate::ipc::pipe::close(
                                     crate::ipc::pipe::PipeHandle::from_raw(h),
+                                );
+                            }
+                            fd_handle_type::STREAM_SOCKET => {
+                                crate::ipc::stream_socket::close(
+                                    crate::ipc::stream_socket::StreamSocketHandle::from_raw(h),
                                 );
                             }
                             _ => {} // CONSOLE/etc.: nothing to close yet.

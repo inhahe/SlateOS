@@ -75,6 +75,26 @@ struct PipeCounters {
     pipes_created: AtomicU64,
 }
 
+/// Stream socket (socketpair) statistics.
+struct StreamSocketCounters {
+    /// Send operations.
+    sends: AtomicU64,
+    /// Receive operations.
+    recvs: AtomicU64,
+    /// Bytes sent.
+    bytes_sent: AtomicU64,
+    /// Bytes received.
+    bytes_recvd: AtomicU64,
+    /// Send operations that blocked (outgoing buffer full).
+    send_blocks: AtomicU64,
+    /// Receive operations that blocked (incoming buffer empty).
+    recv_blocks: AtomicU64,
+    /// Pairs created.
+    pairs_created: AtomicU64,
+    /// Pairs destroyed (both endpoints closed).
+    pairs_destroyed: AtomicU64,
+}
+
 /// Shared memory statistics.
 struct ShmCounters {
     /// Regions created.
@@ -143,6 +163,17 @@ static PIPE: PipeCounters = PipeCounters {
     write_blocks: AtomicU64::new(0),
     read_blocks: AtomicU64::new(0),
     pipes_created: AtomicU64::new(0),
+};
+
+static STREAM_SOCKET: StreamSocketCounters = StreamSocketCounters {
+    sends: AtomicU64::new(0),
+    recvs: AtomicU64::new(0),
+    bytes_sent: AtomicU64::new(0),
+    bytes_recvd: AtomicU64::new(0),
+    send_blocks: AtomicU64::new(0),
+    recv_blocks: AtomicU64::new(0),
+    pairs_created: AtomicU64::new(0),
+    pairs_destroyed: AtomicU64::new(0),
 };
 
 static SHM: ShmCounters = ShmCounters {
@@ -247,6 +278,46 @@ pub fn pipe_read_block() {
 #[inline]
 pub fn pipe_created() {
     PIPE.pipes_created.fetch_add(1, Ordering::Relaxed);
+}
+
+// --- Stream socket (socketpair) ---
+
+/// Record a stream socket send.
+#[inline]
+pub fn stream_socket_write(bytes: u64) {
+    STREAM_SOCKET.sends.fetch_add(1, Ordering::Relaxed);
+    STREAM_SOCKET.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// Record a stream socket receive.
+#[inline]
+pub fn stream_socket_read(bytes: u64) {
+    STREAM_SOCKET.recvs.fetch_add(1, Ordering::Relaxed);
+    STREAM_SOCKET.bytes_recvd.fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// Record a stream socket send that blocked.
+#[inline]
+pub fn stream_socket_write_block() {
+    STREAM_SOCKET.send_blocks.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record a stream socket receive that blocked.
+#[inline]
+pub fn stream_socket_read_block() {
+    STREAM_SOCKET.recv_blocks.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record stream socket pair creation.
+#[inline]
+pub fn stream_socket_created() {
+    STREAM_SOCKET.pairs_created.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Record stream socket pair destruction.
+#[inline]
+pub fn stream_socket_destroyed() {
+    STREAM_SOCKET.pairs_destroyed.fetch_add(1, Ordering::Relaxed);
 }
 
 // --- Shared memory ---
@@ -361,6 +432,15 @@ pub struct IpcStats {
     pub pipe_write_blocks: u64,
     pub pipe_read_blocks: u64,
     pub pipes_created: u64,
+    // Stream sockets (socketpair)
+    pub stream_socket_sends: u64,
+    pub stream_socket_recvs: u64,
+    pub stream_socket_bytes_sent: u64,
+    pub stream_socket_bytes_recvd: u64,
+    pub stream_socket_send_blocks: u64,
+    pub stream_socket_recv_blocks: u64,
+    pub stream_socket_pairs_created: u64,
+    pub stream_socket_pairs_destroyed: u64,
     // Shared memory
     pub shm_regions_created: u64,
     pub shm_regions_destroyed: u64,
@@ -400,6 +480,14 @@ pub fn snapshot() -> IpcStats {
         pipe_write_blocks: PIPE.write_blocks.load(Ordering::Relaxed),
         pipe_read_blocks: PIPE.read_blocks.load(Ordering::Relaxed),
         pipes_created: PIPE.pipes_created.load(Ordering::Relaxed),
+        stream_socket_sends: STREAM_SOCKET.sends.load(Ordering::Relaxed),
+        stream_socket_recvs: STREAM_SOCKET.recvs.load(Ordering::Relaxed),
+        stream_socket_bytes_sent: STREAM_SOCKET.bytes_sent.load(Ordering::Relaxed),
+        stream_socket_bytes_recvd: STREAM_SOCKET.bytes_recvd.load(Ordering::Relaxed),
+        stream_socket_send_blocks: STREAM_SOCKET.send_blocks.load(Ordering::Relaxed),
+        stream_socket_recv_blocks: STREAM_SOCKET.recv_blocks.load(Ordering::Relaxed),
+        stream_socket_pairs_created: STREAM_SOCKET.pairs_created.load(Ordering::Relaxed),
+        stream_socket_pairs_destroyed: STREAM_SOCKET.pairs_destroyed.load(Ordering::Relaxed),
         shm_regions_created: SHM.regions_created.load(Ordering::Relaxed),
         shm_regions_destroyed: SHM.regions_destroyed.load(Ordering::Relaxed),
         shm_bytes_mapped: SHM.total_bytes_mapped.load(Ordering::Relaxed),
@@ -436,6 +524,15 @@ pub fn reset() {
     PIPE.write_blocks.store(0, Ordering::Relaxed);
     PIPE.read_blocks.store(0, Ordering::Relaxed);
     PIPE.pipes_created.store(0, Ordering::Relaxed);
+    // Stream sockets
+    STREAM_SOCKET.sends.store(0, Ordering::Relaxed);
+    STREAM_SOCKET.recvs.store(0, Ordering::Relaxed);
+    STREAM_SOCKET.bytes_sent.store(0, Ordering::Relaxed);
+    STREAM_SOCKET.bytes_recvd.store(0, Ordering::Relaxed);
+    STREAM_SOCKET.send_blocks.store(0, Ordering::Relaxed);
+    STREAM_SOCKET.recv_blocks.store(0, Ordering::Relaxed);
+    STREAM_SOCKET.pairs_created.store(0, Ordering::Relaxed);
+    STREAM_SOCKET.pairs_destroyed.store(0, Ordering::Relaxed);
     // SHM
     SHM.regions_created.store(0, Ordering::Relaxed);
     SHM.regions_destroyed.store(0, Ordering::Relaxed);
@@ -526,6 +623,25 @@ pub fn self_test() {
     assert_eq!(s.pipe_write_blocks, 1);
     assert_eq!(s.pipes_created, 1);
     serial_println!("[ipc_stats]   Pipe: OK (writes=1, reads=1)");
+
+    // Test 3b: Stream socket counters.
+    stream_socket_write(2048);
+    stream_socket_read(1024);
+    stream_socket_write_block();
+    stream_socket_read_block();
+    stream_socket_created();
+    stream_socket_destroyed();
+
+    let s = snapshot();
+    assert_eq!(s.stream_socket_sends, 1);
+    assert_eq!(s.stream_socket_bytes_sent, 2048);
+    assert_eq!(s.stream_socket_recvs, 1);
+    assert_eq!(s.stream_socket_bytes_recvd, 1024);
+    assert_eq!(s.stream_socket_send_blocks, 1);
+    assert_eq!(s.stream_socket_recv_blocks, 1);
+    assert_eq!(s.stream_socket_pairs_created, 1);
+    assert_eq!(s.stream_socket_pairs_destroyed, 1);
+    serial_println!("[ipc_stats]   Stream socket: OK (sends=1, recvs=1)");
 
     // Test 4: Shared memory counters.
     shm_created(4096);

@@ -27,6 +27,7 @@ use crate::ipc::futex;
 use crate::ipc::pipe::{self, PipeHandle};
 use crate::ipc::service::{self, ServiceListenerHandle};
 use crate::ipc::shm::{self, ShmHandle};
+use crate::ipc::stream_socket::{self, StreamSocketHandle};
 use crate::proc::pcb;
 use crate::sched;
 use crate::serial_println;
@@ -1756,6 +1757,259 @@ pub fn sys_pipe_write_timeout(args: &SyscallArgs) -> SyscallResult {
             let written = n as i64;
             SyscallResult::ok(written)
         }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Stream socket handlers (300–310) — socketpair backing
+// ---------------------------------------------------------------------------
+
+/// `SYS_SOCKETPAIR_CREATE` — create a bidirectional stream socket pair.
+///
+/// Returns the two endpoint handles in `rax` and `rdx`.
+pub fn sys_socketpair_create(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+    let (ep0, ep1) = stream_socket::create();
+
+    if let Some(pid) = caller_pid() {
+        pcb::register_ipc_handle(pid, ResourceType::StreamSocket, ep0.raw());
+        pcb::register_ipc_handle(pid, ResourceType::StreamSocket, ep1.raw());
+    }
+
+    #[allow(clippy::cast_possible_wrap)]
+    let r0 = ep0.raw() as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let r1 = ep1.raw() as i64;
+    SyscallResult::ok2(r0, r1)
+}
+
+/// `SYS_SOCKETPAIR_SEND` — send bytes on an endpoint (blocking).
+pub fn sys_socketpair_send(args: &SyscallArgs) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    let ptr = args.arg1 as *const u8;
+    let len = args.arg2 as usize;
+
+    if ptr.is_null() && len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let data = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: Buffer validated above — in user space and mapped.
+        unsafe { core::slice::from_raw_parts(ptr, len) }
+    };
+
+    match stream_socket::send(handle, data) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let sent = n as i64;
+            SyscallResult::ok(sent)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SOCKETPAIR_RECV` — receive bytes from an endpoint (blocking).
+pub fn sys_socketpair_recv(args: &SyscallArgs) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    let buf_ptr = args.arg1 as *mut u8;
+    let buf_cap = args.arg2 as usize;
+
+    if buf_ptr.is_null() && buf_cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let buf = if buf_cap == 0 {
+        &mut []
+    } else {
+        // SAFETY: Buffer validated above — in user space, mapped, writable.
+        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
+    };
+
+    match stream_socket::recv(handle, buf) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let recvd = n as i64;
+            SyscallResult::ok(recvd)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SOCKETPAIR_TRY_SEND` — non-blocking send.
+pub fn sys_socketpair_try_send(args: &SyscallArgs) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    let ptr = args.arg1 as *const u8;
+    let len = args.arg2 as usize;
+
+    if ptr.is_null() && len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let data = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: Validated above — ptr is in user space and mapped.
+        unsafe { core::slice::from_raw_parts(ptr, len) }
+    };
+
+    match stream_socket::try_send(handle, data) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let sent = n as i64;
+            SyscallResult::ok(sent)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SOCKETPAIR_TRY_RECV` — non-blocking receive.
+pub fn sys_socketpair_try_recv(args: &SyscallArgs) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    let buf_ptr = args.arg1 as *mut u8;
+    let buf_cap = args.arg2 as usize;
+
+    if buf_ptr.is_null() && buf_cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let buf = if buf_cap == 0 {
+        &mut []
+    } else {
+        // SAFETY: Validated above — buf_ptr is in user space, mapped, writable.
+        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
+    };
+
+    match stream_socket::try_recv(handle, buf) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let recvd = n as i64;
+            SyscallResult::ok(recvd)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SOCKETPAIR_CLOSE` — close an endpoint handle.
+pub fn sys_socketpair_close(args: &SyscallArgs) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    if let Some(pid) = caller_pid() {
+        pcb::deregister_ipc_handle(pid, ResourceType::StreamSocket, handle.raw());
+    }
+    stream_socket::close(handle);
+    SyscallResult::ok(0)
+}
+
+/// `SYS_SOCKETPAIR_SEND_TIMEOUT` — send with a deadline.
+pub fn sys_socketpair_send_timeout(args: &SyscallArgs) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    let ptr = args.arg1 as *const u8;
+    let len = args.arg2 as usize;
+    let timeout_ns = args.arg3;
+
+    if ptr.is_null() && len > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if len > 0 {
+        if let Err(e) = crate::mm::user::validate_user_read(args.arg1, len) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let data = if len == 0 {
+        &[]
+    } else {
+        // SAFETY: Validated above — ptr is in user space and mapped.
+        unsafe { core::slice::from_raw_parts(ptr, len) }
+    };
+
+    match stream_socket::send_timeout(handle, data, timeout_ns) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let sent = n as i64;
+            SyscallResult::ok(sent)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SOCKETPAIR_RECV_TIMEOUT` — receive with a deadline.
+pub fn sys_socketpair_recv_timeout(args: &SyscallArgs) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    let buf_ptr = args.arg1 as *mut u8;
+    let buf_cap = args.arg2 as usize;
+    let timeout_ns = args.arg3;
+
+    if buf_ptr.is_null() && buf_cap > 0 {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+    if buf_cap > 0 {
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg1, buf_cap) {
+            return SyscallResult::err(e);
+        }
+    }
+
+    let buf = if buf_cap == 0 {
+        &mut []
+    } else {
+        // SAFETY: Validated above — buf_ptr is in user space, mapped, writable.
+        unsafe { core::slice::from_raw_parts_mut(buf_ptr, buf_cap) }
+    };
+
+    match stream_socket::recv_timeout(handle, buf, timeout_ns) {
+        Ok(n) => {
+            #[allow(clippy::cast_possible_wrap)]
+            let recvd = n as i64;
+            SyscallResult::ok(recvd)
+        }
+        Err(e) => SyscallResult::err(e),
+    }
+}
+
+/// `SYS_SOCKETPAIR_POLL` — query endpoint readiness.
+pub fn sys_socketpair_poll(args: &SyscallArgs) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    let flags = stream_socket::poll_status(handle);
+    SyscallResult::ok(i64::from(flags))
+}
+
+/// `SYS_SOCKETPAIR_READABLE_BYTES` — bytes available to receive.
+pub fn sys_socketpair_readable_bytes(args: &SyscallArgs) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    let bytes = stream_socket::readable_bytes(handle);
+    #[allow(clippy::cast_possible_wrap)]
+    let b = bytes as i64;
+    SyscallResult::ok(b)
+}
+
+/// `SYS_SOCKETPAIR_SHUTDOWN` — shut down one or both directions.
+pub fn sys_socketpair_shutdown(args: &SyscallArgs) -> SyscallResult {
+    let handle = StreamSocketHandle::from_raw(args.arg0);
+    let how = args.arg1 as u32;
+    match stream_socket::shutdown(handle, how) {
+        Ok(()) => SyscallResult::ok(0),
         Err(e) => SyscallResult::err(e),
     }
 }

@@ -1120,6 +1120,99 @@ pub const SYS_NS_ATTACH: u64 = 294;
 pub const SYS_NS_QUERY: u64 = 295;
 
 // ---------------------------------------------------------------------------
+// Stream socket syscalls (300–310) — bidirectional byte-stream IPC
+// (backs POSIX `socketpair(AF_UNIX, SOCK_STREAM, ...)`)
+// ---------------------------------------------------------------------------
+
+/// Create a stream socket pair.
+///
+/// Takes no arguments.  Returns two endpoint handles: the first in the
+/// primary result register (`rax`), the second in the secondary register
+/// (`rdx`).  Bytes sent on one endpoint are received on the other.
+pub const SYS_SOCKETPAIR_CREATE: u64 = 300;
+
+/// Send bytes on a stream socket endpoint (blocking).
+///
+/// `arg0`: endpoint handle.
+/// `arg1`: pointer to data buffer.
+/// `arg2`: number of bytes to send.
+///
+/// Returns: bytes sent (> 0), or a negative error code (`ChannelClosed`
+/// if the peer's read side is gone).
+pub const SYS_SOCKETPAIR_SEND: u64 = 301;
+
+/// Receive bytes from a stream socket endpoint (blocking).
+///
+/// `arg0`: endpoint handle.
+/// `arg1`: pointer to receive buffer.
+/// `arg2`: buffer capacity.
+///
+/// Returns: bytes received (0 = EOF), or a negative error code.
+pub const SYS_SOCKETPAIR_RECV: u64 = 302;
+
+/// Non-blocking send (see [`SYS_SOCKETPAIR_SEND`]).
+///
+/// Returns `WouldBlock` if the outgoing buffer is full.
+pub const SYS_SOCKETPAIR_TRY_SEND: u64 = 303;
+
+/// Non-blocking receive (see [`SYS_SOCKETPAIR_RECV`]).
+///
+/// Returns `WouldBlock` if the incoming buffer is empty (and not EOF).
+pub const SYS_SOCKETPAIR_TRY_RECV: u64 = 304;
+
+/// Close a stream socket endpoint handle.
+///
+/// `arg0`: endpoint handle.
+pub const SYS_SOCKETPAIR_CLOSE: u64 = 305;
+
+/// Send bytes with a timeout (nanoseconds).
+///
+/// `arg0`: endpoint handle.
+/// `arg1`: pointer to data buffer.
+/// `arg2`: data length.
+/// `arg3`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: bytes sent, `TimedOut` if the deadline expires.
+pub const SYS_SOCKETPAIR_SEND_TIMEOUT: u64 = 306;
+
+/// Receive bytes with a timeout (nanoseconds).
+///
+/// `arg0`: endpoint handle.
+/// `arg1`: pointer to receive buffer.
+/// `arg2`: buffer capacity.
+/// `arg3`: timeout in nanoseconds (0 = non-blocking try).
+///
+/// Returns: bytes received, 0 if EOF, `TimedOut` if the deadline expires.
+pub const SYS_SOCKETPAIR_RECV_TIMEOUT: u64 = 307;
+
+/// Poll a stream socket endpoint for readiness (for poll/select).
+///
+/// `arg0`: endpoint handle.
+///
+/// Returns a bitmask:
+/// - bit 0 (0x01): readable (data available, or read-side EOF)
+/// - bit 2 (0x04): writable (buffer space, or write would error)
+/// - bit 3 (0x08): error (broken pipe — peer read side gone)
+/// - bit 4 (0x10): hangup (peer write side gone)
+pub const SYS_SOCKETPAIR_POLL: u64 = 308;
+
+/// Return the number of bytes available to receive on an endpoint.
+///
+/// `arg0`: endpoint handle.
+///
+/// Returns 0 if the handle is invalid.
+pub const SYS_SOCKETPAIR_READABLE_BYTES: u64 = 309;
+
+/// Shut down one or both directions of a stream socket endpoint
+/// (`shutdown(2)`).
+///
+/// `arg0`: endpoint handle.
+/// `arg1`: how (0 = `SHUT_RD`, 1 = `SHUT_WR`, 2 = `SHUT_RDWR`).
+///
+/// Returns: 0 on success, `InvalidArgument` if `how` is out of range.
+pub const SYS_SOCKETPAIR_SHUTDOWN: u64 = 310;
+
+// ---------------------------------------------------------------------------
 // Security syscalls (400–499)
 // ---------------------------------------------------------------------------
 

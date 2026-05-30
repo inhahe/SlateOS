@@ -1276,6 +1276,54 @@ Remaining net improvements (diminishing returns):
   cgroup operations under TCG.  Zone: kernel-core.  Boot gets to 2444 lines
   of serial output (~968 OK marks) before hanging.
 
+- (ADVANCED DIAGNOSIS, STILL OPEN) State/timing-sensitive boot hang during
+  ring-3 process spawn cycles, triggered by large-block heap churn.
+  Zone: kernel-core (MM / page-fault / TLB).  Discovered while adding the
+  stream-socket self_test (which allocates), but PROVEN to be unrelated to
+  the socket code.
+  REPRODUCTION (socket-free): replacing the stream-socket self_test call at
+  boot (main.rs Step 13b) with a pure heap-churn loop —
+    for _ in 0..9 { let v = vec![0u8; 64*1024]; let w = vec![0u8; 64*1024];
+                    v[0]=1; w[0]=2; black_box(&v); black_box(&w); }
+  — reproduces the SAME hang.  Removing the self_test call entirely (code
+  still compiled in) lets boot pass the spawn tests (reaches proc 23).
+  So: heap alloc/free churn of large (64 KiB) blocks at boot, followed by the
+  spawn-test sequence's several spawn/destroy cycles, causes a hang during a
+  later ring-3 process spawn.
+  LOCALIZATION: single-CPU, interrupts-off region.  The buddy free lists are
+  VERIFIED intact at the hang (added frame::validate_free_lists() walks every
+  order's free list checking for cycles, correct count, page_info order on the
+  base frame, and prev back-links — it reports OK right before the hang).  The
+  hang is inside thread::spawn -> sched::spawn_with_affinity -> Task::new_kernel
+  -> kstack::alloc.  With instrumentation, the EXACT fault site MOVES between
+  runs and between pids (19 vs 23): in one build it hung mid-way through the
+  kstack zeroing (core::ptr::write_bytes of the freshly-mapped 64 KiB stack);
+  after adding one more serial print, the very same zeroing COMPLETED
+  ("[diag-ks] zeroed OK" printed for slot 15 / pid 19) and the hang moved to
+  the thread/sched continuation after kstack::alloc returned.  All kstack
+  pre-steps complete normally (bitmap slot claimed, guard VMA added, 4 frames
+  order-2 allocated, mapped).  No crash, no #PF/#DF serial, no scheduler
+  progress — consistent with an infinite page-fault loop on a stale/incorrect
+  mapping (page faults fire even under without_interrupts since they are
+  exceptions, not interrupts), i.e. a TLB/mapping coherence bug on kstack slot
+  reuse, OR heap/page-table metadata corruption from the large-block churn.
+  The fault site shifting with instrumentation is the signature of
+  state-sensitive corruption / a mapping race, not a single deterministic bug
+  site.
+  PROPER FIX (deferred — requires deep MM/fault-handler work, separate from the
+  socketpair task that surfaced it): audit kstack::free TLB invalidation
+  (flush_frame ordering vs. VMA removal and slot release) and the buddy
+  allocator's handling of order-2 (64 KiB) blocks under repeated alloc/free,
+  and add a #PF handler breadcrumb (log faulting addr to serial on the first N
+  faults) so the next investigator sees the faulting address instead of a
+  silent hang.  TRIGGER TO FIX PROPERLY: when doing the next MM correctness
+  pass, or if any other subsystem's boot self_test that allocates >16 KiB
+  blocks starts hanging.
+  WORKAROUND (shipped): the stream-socket self_test is NOT invoked at boot (it
+  is verified to pass — it printed all 7 subtests OK at boot before this hang
+  was hit, serial lines 452-460 in an earlier run).  The self_test function is
+  retained and runnable on demand; see kernel/src/main.rs Step 13b comment.
+
 - (FIXED) rip_sample.rs:373 assertion failure (`left: 6, right: 5`) — panics
   during rip_sample self-test on SMP.  APs contribute timer samples between
   baseline and final check.  Fixed: changed exact assert_eq to >= checks.

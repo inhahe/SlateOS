@@ -422,19 +422,47 @@ Remaining net improvements (diminishing returns):
   stat_self(), spawn.rs load_elf().  fts/ftw/statx/posix_fallocate use the
   public stat()/fstat() so they are fixed transitively.  7 host tests for the
   translator; full suite 17089 pass; bare-metal build clean.
-  LIMITATION / DEFERRED ENHANCEMENT: the 16-byte kernel ABI conveys only
-  size+type+nlinks, so the translated struct stat has zeroed timestamps,
-  st_ino, st_uid/st_gid, and synthesized (not real) permission bits.  The
-  kernel already tracks all of this in fs::FileMeta (timestamps, uid/gid,
-  permissions, blocks).  To expose it, widen the stat syscall output to a
-  richer fixed-layout struct and translate the extra fields here.  Deferred
-  because it requires updating EVERY FsStatResult consumer's buffer size in
-  lockstep (kernel handlers sys_fs_stat/lstat/fstat in
-  kernel/src/syscall/handlers.rs, plus the independent SYS_FS_STAT=606
-  definitions in userspace/sshd and services/init that parse the 16-byte
-  format), and there is no length argument in the stat syscall ABI to make it
-  backward compatible.  Do it when ls -l / make timestamp accuracy or real
-  permission reporting is needed by a ported program.
+  (The above limitation has now been RESOLVED — see the next entry.)
+
+- (DONE 2026-05-30) stat ABI WIDENED to expose timestamps, ownership, real
+  permission bits, and block count.  The deferred enhancement noted directly
+  above is now done.  FsStatResult grew from 16 -> 72 bytes
+  (FS_STAT_RESULT_LEN in kernel/src/syscall/handlers.rs); the LOW 16 BYTES ARE
+  UNCHANGED (size u64 @0, type u8 @8, nlinks u32 @12) so every old consumer
+  that only reads those offsets keeps working.  New fields: permissions u32
+  @16 (0=unknown), uid u32 @20, gid u32 @24, attributes u32 @28, blocks u64
+  @32 (512-byte sectors), modified_ns u64 @40, accessed_ns u64 @48,
+  changed_ns u64 @56, created_ns u64 @64 (all wall-clock ns since epoch).
+  Lockstep changes (one commit):
+    * kernel handlers.rs: added write_fs_stat_result() serializer + the
+      FS_STAT_RESULT_LEN const; sys_fs_stat -> Vfs::metadata, sys_fs_fstat ->
+      handle::fstat (now returns FileMeta), sys_fs_lstat -> Vfs::lmetadata.
+    * kernel fs/handle.rs: fstat() now returns KernelResult<FileMeta>
+      (removed the old FstatResult struct).
+    * kernel fs/vfs.rs: FileMeta timestamp doc corrected (wall-clock ns since
+      epoch, NOT boot-relative); added FileSystem::lmetadata trait method
+      (default = minimal from lstat) + Vfs::lmetadata() (resolve_no_follow).
+    * memfs + ext4 vfs_impl: override lmetadata for rich no-follow metadata
+      (ext4 refactored meta-building into an inherent meta_from_ino() shared
+      by metadata/lmetadata).
+    * dispatch.rs self-test buffer 16 -> FS_STAT_RESULT_LEN.
+    * posix/src/stat.rs: KERNEL_STAT_LEN 16 -> 72; fill_from_fsstat rewritten
+      to populate st_uid/st_gid, real st_mode perms (synthesize defaults only
+      when permissions==0), st_blocks from the block field (fall back to
+      ceil(size/512)), and st_atim/st_mtim/st_ctim from the ns fields.  6 new
+      host tests (real perms, setuid bits, ownership, explicit block count,
+      timestamp split, zero-ns-is-epoch).  17101 posix host tests pass.
+    * services/init/src/main.rs: fs_stat buffer 16 -> 72 at all three call
+      sites (a 16-byte buffer would now be a 56-byte stack overflow since the
+      kernel writes 72 bytes).  userspace/sshd's SYS_FS_STAT const is dead
+      (never called) so no buffer there to fix.
+  REMAINING GAPS (documented, not blocking):
+    * st_ino is still 0 — fs::FileMeta has no ino field.  To populate it,
+      add FileMeta.ino and have ext4 (inode number) and memfs (synthetic id)
+      fill it, then write it at a new offset and read it in fill_from_fsstat.
+    * created_ns (birth time) is carried in the buffer @64 but struct stat
+      has no btime field; surface it via statx STATX_BTIME once that path is
+      wired (statx currently reads from struct stat, which drops it).
 
 - (DONE 2026-05-30) statvfs/statfs family wired to the kernel (same ABI-
   mistranslation bug class as the stat fix above).  statvfs.rs had NEVER

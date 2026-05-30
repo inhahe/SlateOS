@@ -177,7 +177,10 @@ pub struct FileMeta {
     /// Entry type (file, directory, symlink, etc.).
     pub entry_type: EntryType,
 
-    // --- Timestamps (nanoseconds since boot, 0 = not available) ---
+    // --- Timestamps (nanoseconds since the Unix epoch, wall-clock;
+    //     0 = not available). These are absolute wall-clock times, not
+    //     boot-relative monotonic times, so they are stable across
+    //     reboots and can be returned directly to userspace stat(). ---
     /// Time the file was created.
     pub created_ns: Timestamp,
     /// Time the file was last modified (content change).
@@ -536,6 +539,21 @@ pub trait FileSystem: Send {
     /// override this.
     fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
         let entry = self.stat(path)?;
+        Ok(FileMeta::minimal(entry.entry_type, entry.size))
+    }
+
+    /// Return rich metadata for a path WITHOUT following a trailing symlink.
+    ///
+    /// This is the no-follow analogue of [`metadata`](Self::metadata):
+    /// if `path` ends at a symlink, the symlink's own metadata is
+    /// returned (with `entry_type == Symlink`) rather than the target's.
+    ///
+    /// Default implementation builds a minimal [`FileMeta`] from
+    /// `lstat()`.  Filesystems that track timestamps, ownership, or
+    /// xattrs should override this (typically mirroring their
+    /// `metadata()` override but without symlink resolution).
+    fn lmetadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        let entry = self.lstat(path)?;
         Ok(FileMeta::minimal(entry.entry_type, entry.size))
     }
 
@@ -2403,6 +2421,18 @@ impl Vfs {
         let mut vfs = VFS.lock();
         let (mp, relative) = find_mount(&mut vfs, &path)?;
         mp.fs.lstat(relative)
+    }
+
+    /// Get rich metadata for a path WITHOUT following a trailing symlink.
+    ///
+    /// No-follow analogue of [`metadata`](Self::metadata), backing the
+    /// `lstat`/`lfstatat` syscalls.  Intermediate symlinks are still
+    /// resolved; only the final component is left unfollowed.
+    pub fn lmetadata(path: &str) -> KernelResult<FileMeta> {
+        let path = Self::resolve_no_follow(path)?;
+        let mut vfs = VFS.lock();
+        let (mp, relative) = find_mount(&mut vfs, &path)?;
+        mp.fs.lmetadata(relative)
     }
 
     /// Return debug statistics for the filesystem mounted at `path`.

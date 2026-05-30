@@ -4203,12 +4203,76 @@ pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
     }
 }
 
+/// Byte length of the kernel `FsStatResult` written by stat/fstat/lstat.
+///
+/// Layout (all multi-byte fields little-endian).  The low 16 bytes are
+/// ABI-stable with the historical 16-byte result, so a reader that only
+/// parses size/type/nlinks keeps working after the widening:
+/// ```text
+///   [0..8]   size         (u64)
+///   [8]      entry_type   (u8: 0=file 1=dir 2=volume-label 3=symlink)
+///   [9..12]  reserved     (zero)
+///   [12..16] nlinks       (u32)
+///   [16..20] permissions  (u32, Unix mode bits; 0 = unknown, synthesize)
+///   [20..24] uid          (u32)
+///   [24..28] gid          (u32)
+///   [28..32] attributes   (u32, FileAttr bits)
+///   [32..40] blocks       (u64, 512-byte sectors)
+///   [40..48] modified_ns  (u64, wall-clock ns since the Unix epoch)
+///   [48..56] accessed_ns  (u64)
+///   [56..64] changed_ns   (u64)
+///   [64..72] created_ns   (u64)
+/// ```
+pub const FS_STAT_RESULT_LEN: usize = 72;
+
+/// Serialize file metadata into a user `FsStatResult` buffer.
+///
+/// Writes exactly [`FS_STAT_RESULT_LEN`] bytes in the layout documented on
+/// that constant.  Uses unaligned stores because the user buffer is not
+/// guaranteed to be aligned (e.g. a `[u8; N]` on a userspace stack).
+///
+/// # Safety
+///
+/// `out_ptr` must point to at least [`FS_STAT_RESULT_LEN`] writable, mapped
+/// user bytes — the caller must have validated this via
+/// [`crate::mm::user::validate_user_write`].
+unsafe fn write_fs_stat_result(out_ptr: *mut u8, meta: &crate::fs::FileMeta) {
+    let type_byte = match meta.entry_type {
+        crate::fs::EntryType::File => 0u8,
+        crate::fs::EntryType::Directory => 1u8,
+        crate::fs::EntryType::VolumeLabel => 2u8,
+        crate::fs::EntryType::Symlink => 3u8,
+    };
+    // SAFETY: out_ptr is valid for FS_STAT_RESULT_LEN bytes (caller
+    // contract).  Every store is unaligned, so no alignment precondition is
+    // imposed on the user buffer; offsets stay within the validated length.
+    unsafe {
+        core::ptr::write_bytes(out_ptr, 0, FS_STAT_RESULT_LEN);
+        core::ptr::write_unaligned(out_ptr.cast::<u64>(), meta.size);
+        out_ptr.add(8).write(type_byte);
+        core::ptr::write_unaligned(out_ptr.add(12).cast::<u32>(), meta.nlinks);
+        core::ptr::write_unaligned(
+            out_ptr.add(16).cast::<u32>(),
+            u32::from(meta.permissions),
+        );
+        core::ptr::write_unaligned(out_ptr.add(20).cast::<u32>(), meta.uid);
+        core::ptr::write_unaligned(out_ptr.add(24).cast::<u32>(), meta.gid);
+        core::ptr::write_unaligned(
+            out_ptr.add(28).cast::<u32>(),
+            meta.attributes.bits(),
+        );
+        core::ptr::write_unaligned(out_ptr.add(32).cast::<u64>(), meta.blocks);
+        core::ptr::write_unaligned(out_ptr.add(40).cast::<u64>(), meta.modified_ns);
+        core::ptr::write_unaligned(out_ptr.add(48).cast::<u64>(), meta.accessed_ns);
+        core::ptr::write_unaligned(out_ptr.add(56).cast::<u64>(), meta.changed_ns);
+        core::ptr::write_unaligned(out_ptr.add(64).cast::<u64>(), meta.created_ns);
+    }
+}
+
 /// `SYS_FS_STAT` — stat a file or directory.
 ///
-/// Returns metadata in a 16-byte `FsStatResult` buffer:
-/// - bytes 0–7: file size (u64, little-endian)
-/// - byte 8: entry type (0=file, 1=directory)
-/// - bytes 9–15: reserved (zeros)
+/// Returns metadata in a [`FS_STAT_RESULT_LEN`]-byte `FsStatResult` buffer
+/// (layout documented on that constant).  Follows symlinks.
 pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
     // Capability check: requires File capability with METADATA rights.
     if let Err(e) = require_cap_type(
@@ -4230,8 +4294,9 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = crate::mm::user::validate_user_read(args.arg0, safe_path_len) {
         return SyscallResult::err(e);
     }
-    // FsStatResult is 16 bytes.
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 16) {
+    if let Err(e) =
+        crate::mm::user::validate_user_write(args.arg2, FS_STAT_RESULT_LEN)
+    {
         return SyscallResult::err(e);
     }
 
@@ -4242,30 +4307,15 @@ pub fn sys_fs_stat(args: &SyscallArgs) -> SyscallResult {
         Err(_) => return SyscallResult::err(KernelError::InvalidArgument),
     };
 
-    let entry = match crate::fs::Vfs::stat(path) {
-        Ok(e) => e,
+    // Use metadata() (follows symlinks) so the caller gets the rich fields
+    // — timestamps, ownership, mode, blocks — not just size and type.
+    let meta = match crate::fs::Vfs::metadata(path) {
+        Ok(m) => m,
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Write the 16-byte FsStatResult.
-    // SAFETY: Validated above — out_ptr is in user space, mapped, and writable.
-    unsafe {
-        // Zero the buffer first.
-        core::ptr::write_bytes(out_ptr, 0, 16);
-
-        // File size (u64 LE) at offset 0.
-        let size_ptr = out_ptr as *mut u64;
-        core::ptr::write(size_ptr, entry.size);
-
-        // Entry type at offset 8: 0=file, 1=directory, 2=volume label.
-        let type_byte = match entry.entry_type {
-            crate::fs::EntryType::File => 0u8,
-            crate::fs::EntryType::Directory => 1u8,
-            crate::fs::EntryType::VolumeLabel => 2u8,
-            crate::fs::EntryType::Symlink => 3u8,
-        };
-        core::ptr::write(out_ptr.add(8), type_byte);
-    }
+    // SAFETY: out_ptr was validated for FS_STAT_RESULT_LEN bytes above.
+    unsafe { write_fs_stat_result(out_ptr, &meta) };
 
     SyscallResult::ok(0)
 }
@@ -4509,24 +4559,16 @@ pub fn sys_fs_fstat(args: &SyscallArgs) -> SyscallResult {
     if out_ptr.is_null() {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg1, 16) {
+    if let Err(e) =
+        crate::mm::user::validate_user_write(args.arg1, FS_STAT_RESULT_LEN)
+    {
         return SyscallResult::err(e);
     }
 
     match crate::fs::handle::fstat(handle) {
-        Ok(result) => {
-            // Write 16-byte FsStatResult:
-            //   [0..8]:   size (u64, LE)
-            //   [8]:      entry_type (u8)
-            //   [9..12]:  padding
-            //   [12..16]: nlinks (u32, LE)
-            // SAFETY: Validated above.
-            unsafe {
-                core::ptr::write_bytes(out_ptr, 0, 16);
-                core::ptr::write(out_ptr as *mut u64, result.size);
-                core::ptr::write(out_ptr.add(8), result.entry_type);
-                core::ptr::write(out_ptr.add(12) as *mut u32, result.nlinks);
-            }
+        Ok(meta) => {
+            // SAFETY: out_ptr was validated for FS_STAT_RESULT_LEN bytes above.
+            unsafe { write_fs_stat_result(out_ptr, &meta) };
             SyscallResult::ok(0)
         }
         Err(e) => SyscallResult::err(e),
@@ -5444,13 +5486,11 @@ pub fn sys_fs_readlink(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: pointer to path string.
 /// `arg1`: path length.
-/// `arg2`: pointer to output buffer (16-byte `FsStatResult`).
+/// `arg2`: pointer to output buffer ([`FS_STAT_RESULT_LEN`]-byte `FsStatResult`).
 ///
-/// Same output format as `SYS_FS_STAT`:
-/// - bytes 0–7: file size (u64, little-endian).  For symlinks, this is the
-///   length of the target path string (matching Linux lstat behavior).
-/// - byte 8: entry type (0=file, 1=directory, 2=volume label, 3=symlink).
-/// - bytes 9–15: reserved (zeros).
+/// Same output format as `SYS_FS_STAT` (see [`FS_STAT_RESULT_LEN`]).  For a
+/// symlink, the size is the length of the target path string and the entry
+/// type is `3` (symlink), matching Linux `lstat` behavior.
 pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(
         crate::cap::ResourceType::File,
@@ -5469,30 +5509,20 @@ pub fn sys_fs_lstat(args: &SyscallArgs) -> SyscallResult {
     if out_ptr.is_null() {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
-    // FsStatResult is 16 bytes.
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, 16) {
+    if let Err(e) =
+        crate::mm::user::validate_user_write(args.arg2, FS_STAT_RESULT_LEN)
+    {
         return SyscallResult::err(e);
     }
 
-    let entry = match crate::fs::Vfs::lstat(path) {
-        Ok(e) => e,
+    // lmetadata() does not follow the final symlink (rich no-follow stat).
+    let meta = match crate::fs::Vfs::lmetadata(path) {
+        Ok(m) => m,
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Write the 16-byte FsStatResult.
-    // SAFETY: Validated above — out_ptr is in user space, mapped, and writable.
-    unsafe {
-        core::ptr::write_bytes(out_ptr, 0, 16);
-        let size_ptr = out_ptr as *mut u64;
-        core::ptr::write(size_ptr, entry.size);
-        let type_byte = match entry.entry_type {
-            crate::fs::EntryType::File => 0u8,
-            crate::fs::EntryType::Directory => 1u8,
-            crate::fs::EntryType::VolumeLabel => 2u8,
-            crate::fs::EntryType::Symlink => 3u8,
-        };
-        core::ptr::write(out_ptr.add(8), type_byte);
-    }
+    // SAFETY: out_ptr was validated for FS_STAT_RESULT_LEN bytes above.
+    unsafe { write_fs_stat_result(out_ptr, &meta) };
 
     SyscallResult::ok(0)
 }

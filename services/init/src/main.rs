@@ -392,11 +392,14 @@ fn process_is_ready(pid: u64) -> i64 {
 const ERR_WOULD_BLOCK: i64 = -4;
 
 /// Stat a file.  Returns 0 or negative error.
-/// On success, fills `out` with 16-byte FsStatResult:
+/// On success, fills `out` with the 72-byte FsStatResult.  Only the
+/// low 16 bytes (size + type + link count) are consumed here:
 ///   bytes 0-7: file size (u64 LE)
-///   byte 8: type (0=file, 1=directory, 2=volume label)
+///   byte 8: type (0=file, 1=directory, 2=volume label, 3=symlink)
 ///   bytes 9-15: reserved
-fn fs_stat(path: &[u8], out: &mut [u8; 16]) -> i64 {
+/// The remaining bytes carry permissions/ownership/timestamps that init
+/// does not use, but the buffer must be the full size the kernel writes.
+fn fs_stat(path: &[u8], out: &mut [u8; 72]) -> i64 {
     // syscall3 — we need 3 args: path_ptr, path_len, out_ptr
     let ret: i64;
     unsafe {
@@ -983,7 +986,7 @@ impl ServiceRegistry {
         let name = &name_buf[..name_len];
 
         // Stat the ELF binary to get its size.
-        let mut stat_out = [0u8; 16];
+        let mut stat_out = [0u8; 72];
         let stat_ret = fs_stat(path, &mut stat_out);
         if stat_ret < 0 {
             print("[svc] Failed to stat ");
@@ -1435,7 +1438,7 @@ fn cmd_stat(args: &[u8]) {
         return;
     }
 
-    let mut out = [0u8; 16];
+    let mut out = [0u8; 72];
     let result = fs_stat(args, &mut out);
     if result < 0 {
         print("stat: error ");
@@ -1520,7 +1523,7 @@ fn cmd_spawn(args: &[u8]) {
     let (path, remaining_args) = split_first_word(args);
 
     // Stat the file to get its size.
-    let mut stat_out = [0u8; 16];
+    let mut stat_out = [0u8; 72];
     let stat_ret = fs_stat(path, &mut stat_out);
     if stat_ret < 0 {
         print("spawn: failed to stat ");

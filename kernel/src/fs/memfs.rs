@@ -846,6 +846,14 @@ impl FileSystem for MemFs {
         Ok(node.to_file_meta())
     }
 
+    fn lmetadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        // No-follow: return the trailing symlink's own metadata rather
+        // than its target's.  Mirrors `metadata` but uses the
+        // non-following resolver.
+        let node = self.resolve_no_follow(path)?;
+        Ok(node.to_file_meta())
+    }
+
     fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
         let node = self.resolve_mut(path)?;
         node.attributes = attrs;

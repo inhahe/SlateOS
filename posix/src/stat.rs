@@ -116,13 +116,25 @@ impl Stat {
 // ---------------------------------------------------------------------------
 //
 // `SYS_FS_STAT`, `SYS_FS_LSTAT`, and `SYS_FS_FSTAT` do NOT write a POSIX
-// `struct stat`.  They write a compact, kernel-defined 16-byte
-// `FsStatResult` whose layout bears no resemblance to `struct stat`:
+// `struct stat`.  They write a compact, kernel-defined 72-byte
+// `FsStatResult` whose layout bears no resemblance to `struct stat`.
+// The low 16 bytes are ABI-stable (unchanged from the original 16-byte
+// form); the kernel widened the buffer to carry the rest of the metadata
+// it already tracks:
 //
-//   bytes [0..8]   file size            (u64, little-endian)
-//   byte  [8]      entry type           (0=file, 1=dir, 2=volume label, 3=symlink)
-//   bytes [9..12]  reserved (zero)
-//   bytes [12..16] hard link count      (u32, little-endian; 0 if not provided)
+//   bytes [0..8]    file size                  (u64, little-endian)
+//   byte  [8]       entry type                 (0=file, 1=dir, 2=volume label, 3=symlink)
+//   bytes [9..12]   reserved (zero)
+//   bytes [12..16]  hard link count            (u32, little-endian; 0 if not provided)
+//   bytes [16..20]  permission bits            (u32; 0 = unknown, synthesize by type)
+//   bytes [20..24]  uid                        (u32)
+//   bytes [24..28]  gid                        (u32)
+//   bytes [28..32]  file attribute flags       (u32, kernel FileAttr bits; unused here)
+//   bytes [32..40]  512-byte block count        (u64; 0 = derive from size)
+//   bytes [40..48]  modified time (ns since epoch, u64; 0 = unknown)
+//   bytes [48..56]  accessed time (ns since epoch, u64; 0 = unknown)
+//   bytes [56..64]  changed  time (ns since epoch, u64; 0 = unknown)
+//   bytes [64..72]  created  time (ns since epoch, u64; 0 = unknown)
 //
 // Passing a `struct stat` pointer straight to those syscalls leaves
 // `st_size` (offset 48) and `st_mode` (offset 24) untouched — i.e. zero —
@@ -131,43 +143,92 @@ impl Stat {
 // correctly populated `struct stat`.
 
 /// Number of bytes the kernel writes for an `FsStatResult`.
-pub(crate) const KERNEL_STAT_LEN: usize = 16;
+pub(crate) const KERNEL_STAT_LEN: usize = 72;
 
-/// Translate the kernel's 16-byte `FsStatResult` into a POSIX `struct stat`.
+/// Split a nanoseconds-since-epoch value into a POSIX [`Timespec`].
 ///
-/// The kernel ABI conveys only size, entry type, and link count.  Fields the
-/// kernel does not expose (timestamps, ownership, inode number, real
-/// permission bits) are synthesized: permission bits default by type the way
-/// Linux does for filesystems without Unix metadata (files `0644`, directories
-/// `0755`, symlinks `0777`), and `st_ino`/`st_uid`/`st_gid`/timestamps are
-/// left zero.  Exposing the richer [`crate::fs`] metadata the kernel already
-/// tracks would require widening the stat syscall ABI; see `todo.txt`.
+/// A value of 0 means "not available"; we still produce a zeroed
+/// `Timespec` (epoch), which is the conventional Linux behaviour for
+/// filesystems that do not record the timestamp.
+fn ns_to_timespec(ns: u64) -> Timespec {
+    Timespec {
+        tv_sec: i64::try_from(ns / 1_000_000_000).unwrap_or(i64::MAX),
+        tv_nsec: i64::try_from(ns % 1_000_000_000).unwrap_or(0),
+    }
+}
+
+/// Read a little-endian `u64` from `raw` at `off`, defaulting to 0 if the
+/// slice is too short (defensive — the buffer is fixed-size in practice).
+fn le_u64(raw: &[u8; KERNEL_STAT_LEN], off: usize) -> u64 {
+    raw.get(off..off.wrapping_add(8))
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .map_or(0, u64::from_le_bytes)
+}
+
+/// Read a little-endian `u32` from `raw` at `off`, defaulting to 0.
+fn le_u32(raw: &[u8; KERNEL_STAT_LEN], off: usize) -> u32 {
+    raw.get(off..off.wrapping_add(4))
+        .and_then(|s| <[u8; 4]>::try_from(s).ok())
+        .map_or(0, u32::from_le_bytes)
+}
+
+/// Translate the kernel's 72-byte `FsStatResult` into a POSIX `struct stat`.
+///
+/// The kernel now conveys size, entry type, link count, permission bits,
+/// ownership, block count, and the access/modify/change timestamps.  When
+/// the filesystem does not record real permission bits (`0`), they are
+/// synthesized by type the way Linux does for metadata-less filesystems
+/// (files `0644`, directories `0755`, symlinks `0777`).  `st_ino` is left
+/// zero — [`crate::fs::FileMeta`] carries no inode number yet (see
+/// `todo.txt`).  The creation time is carried in the buffer but `struct
+/// stat` has no birth-time field; it is surfaced via `statx`'s
+/// `STATX_BTIME` once that path is wired (see `todo.txt`).
 pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
     *buf = Stat::zeroed();
 
-    let mut size_bytes = [0u8; 8];
-    size_bytes.copy_from_slice(&raw[0..8]);
-    let size = u64::from_le_bytes(size_bytes);
-
+    let size = le_u64(raw, 0);
     let entry_type = raw[8];
+    let nlinks = le_u32(raw, 12);
+    let permissions = le_u32(raw, 16);
+    let uid = le_u32(raw, 20);
+    let gid = le_u32(raw, 24);
+    let blocks = le_u64(raw, 32);
+    let modified_ns = le_u64(raw, 40);
+    let accessed_ns = le_u64(raw, 48);
+    let changed_ns = le_u64(raw, 56);
 
-    let mut nlink_bytes = [0u8; 4];
-    nlink_bytes.copy_from_slice(&raw[12..16]);
-    let nlinks = u32::from_le_bytes(nlink_bytes);
-
-    // Map the kernel entry type to a POSIX file type plus default
-    // permission bits.  Volume labels (2) and any unknown value fall back
-    // to a regular file so callers branching on type get a sane answer.
-    buf.st_mode = match entry_type {
-        1 => crate::fcntl::S_IFDIR | 0o755,
-        3 => crate::fcntl::S_IFLNK | 0o777,
-        _ => crate::fcntl::S_IFREG | 0o644,
+    // Map the kernel entry type to a POSIX file-type bit.  Volume labels (2)
+    // and any unknown value fall back to a regular file so callers branching
+    // on type get a sane answer.
+    let type_bits = match entry_type {
+        1 => crate::fcntl::S_IFDIR,
+        3 => crate::fcntl::S_IFLNK,
+        _ => crate::fcntl::S_IFREG,
     };
+    // Use the filesystem's real permission bits when present; otherwise
+    // synthesize the conventional defaults for the file type.
+    let perm_bits = if permissions != 0 {
+        permissions & 0o7777
+    } else {
+        match entry_type {
+            1 => 0o755,
+            3 => 0o777,
+            _ => 0o644,
+        }
+    };
+    buf.st_mode = type_bits | perm_bits;
     buf.st_size = i64::try_from(size).unwrap_or(i64::MAX);
     buf.st_nlink = if nlinks == 0 { 1 } else { u64::from(nlinks) };
+    buf.st_uid = uid;
+    buf.st_gid = gid;
     buf.st_blksize = 4096;
-    // 512-byte block count, rounded up — matches `stat`/`du` conventions.
-    buf.st_blocks = i64::try_from(size.div_ceil(512)).unwrap_or(i64::MAX);
+    // Prefer the filesystem's reported 512-byte block count; fall back to a
+    // size-derived estimate (rounded up) — matches `stat`/`du` conventions.
+    let block_count = if blocks != 0 { blocks } else { size.div_ceil(512) };
+    buf.st_blocks = i64::try_from(block_count).unwrap_or(i64::MAX);
+    buf.st_atim = ns_to_timespec(accessed_ns);
+    buf.st_mtim = ns_to_timespec(modified_ns);
+    buf.st_ctim = ns_to_timespec(changed_ns);
 }
 
 // ---------------------------------------------------------------------------
@@ -429,12 +490,44 @@ mod tests {
 
     // -- FsStatResult translation --
 
-    /// Build a raw 16-byte `FsStatResult` for tests.
+    /// Build a raw `FsStatResult` populating only the low-16-byte
+    /// ABI-stable fields (size, type, link count); the rest are zero.
     fn raw_fsstat(size: u64, entry_type: u8, nlinks: u32) -> [u8; KERNEL_STAT_LEN] {
         let mut raw = [0u8; KERNEL_STAT_LEN];
         raw[0..8].copy_from_slice(&size.to_le_bytes());
         raw[8] = entry_type;
         raw[12..16].copy_from_slice(&nlinks.to_le_bytes());
+        raw
+    }
+
+    /// Build a fully-populated raw `FsStatResult` exercising every field
+    /// of the widened 72-byte layout.
+    #[allow(clippy::too_many_arguments)]
+    fn raw_fsstat_full(
+        size: u64,
+        entry_type: u8,
+        nlinks: u32,
+        perms: u32,
+        uid: u32,
+        gid: u32,
+        blocks: u64,
+        modified_ns: u64,
+        accessed_ns: u64,
+        changed_ns: u64,
+        created_ns: u64,
+    ) -> [u8; KERNEL_STAT_LEN] {
+        let mut raw = [0u8; KERNEL_STAT_LEN];
+        raw[0..8].copy_from_slice(&size.to_le_bytes());
+        raw[8] = entry_type;
+        raw[12..16].copy_from_slice(&nlinks.to_le_bytes());
+        raw[16..20].copy_from_slice(&perms.to_le_bytes());
+        raw[20..24].copy_from_slice(&uid.to_le_bytes());
+        raw[24..28].copy_from_slice(&gid.to_le_bytes());
+        raw[32..40].copy_from_slice(&blocks.to_le_bytes());
+        raw[40..48].copy_from_slice(&modified_ns.to_le_bytes());
+        raw[48..56].copy_from_slice(&accessed_ns.to_le_bytes());
+        raw[56..64].copy_from_slice(&changed_ns.to_le_bytes());
+        raw[64..72].copy_from_slice(&created_ns.to_le_bytes());
         raw
     }
 
@@ -514,6 +607,83 @@ mod tests {
         fill_from_fsstat(&mut st, &raw);
         assert_eq!(st.st_size, 8);
         assert!(st.is_file());
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_real_permissions_used() {
+        // When the filesystem reports real permission bits, they take
+        // precedence over the synthesized type defaults.
+        let raw = raw_fsstat_full(
+            100, 0, 1, 0o600, 0, 0, 0, 0, 0, 0, 0,
+        );
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_mode, S_IFREG | 0o600);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_setuid_bits_preserved() {
+        // Permission field carries the full 12 low bits (setuid/setgid/sticky).
+        let raw = raw_fsstat_full(
+            0, 0, 1, 0o4755, 0, 0, 0, 0, 0, 0, 0,
+        );
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_mode, S_IFREG | 0o4755);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_ownership() {
+        let raw = raw_fsstat_full(
+            0, 0, 1, 0, 1000, 1001, 0, 0, 0, 0, 0,
+        );
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_uid, 1000);
+        assert_eq!(st.st_gid, 1001);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_explicit_block_count() {
+        // A non-zero block count from the filesystem is used verbatim,
+        // not re-derived from size.
+        let raw = raw_fsstat_full(
+            100, 0, 1, 0, 0, 0, 16, 0, 0, 0, 0,
+        );
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_blocks, 16);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_timestamps() {
+        // ns since epoch split into sec/nsec across a/m/c times.
+        let modified = 1_500_000_000_123_456_789u64;
+        let accessed = 1_400_000_000_000_000_001u64;
+        let changed = 1_600_000_000_999_999_999u64;
+        let raw = raw_fsstat_full(
+            0, 0, 1, 0, 0, 0, 0, modified, accessed, changed, 42,
+        );
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_mtim.tv_sec, 1_500_000_000);
+        assert_eq!(st.st_mtim.tv_nsec, 123_456_789);
+        assert_eq!(st.st_atim.tv_sec, 1_400_000_000);
+        assert_eq!(st.st_atim.tv_nsec, 1);
+        assert_eq!(st.st_ctim.tv_sec, 1_600_000_000);
+        assert_eq!(st.st_ctim.tv_nsec, 999_999_999);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_zero_timestamps_are_epoch() {
+        // 0 ns ("not available") yields a zeroed Timespec (epoch).
+        let raw = raw_fsstat(0, 0, 1);
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_mtim.tv_sec, 0);
+        assert_eq!(st.st_mtim.tv_nsec, 0);
+        assert_eq!(st.st_atim.tv_sec, 0);
+        assert_eq!(st.st_ctim.tv_sec, 0);
     }
 
     // -- S_IS* C-callable functions --

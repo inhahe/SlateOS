@@ -418,37 +418,19 @@ pub fn seek(handle: u64, from: SeekFrom) -> KernelResult<u64> {
     Ok(new_offset)
 }
 
-/// Stat a file by handle (avoids redundant path lookup).
+/// Stat an open file handle, returning the full file metadata.
 ///
-/// Returns `(size, entry_type_byte)` where entry_type_byte is 0=file.
-/// Result of fstat on a file handle.
-pub struct FstatResult {
-    /// File size in bytes.
-    pub size: u64,
-    /// Entry type (0=file, 1=directory, 2=volume_label, 3=symlink).
-    pub entry_type: u8,
-    /// Number of hard links pointing to this file.
-    pub nlinks: u32,
-}
-
-/// Stat an open file handle, returning size, type, and link count.
-pub fn fstat(handle: u64) -> KernelResult<FstatResult> {
+/// Resolves the handle to its backing path and queries the VFS for
+/// rich metadata (size, type, timestamps, ownership, permissions,
+/// link count, block count).  Avoids a redundant user-side path
+/// lookup; the kernel already holds the resolved path for the handle.
+pub fn fstat(handle: u64) -> KernelResult<crate::fs::FileMeta> {
     let table = OPEN_FILES.lock();
     let file = table.get(&handle).ok_or(KernelError::InvalidHandle)?;
 
-    // Use metadata() for richer info including nlinks.
-    let meta = crate::fs::Vfs::metadata(&file.path)?;
-    let entry_type = match meta.entry_type {
-        crate::fs::EntryType::File => 0,
-        crate::fs::EntryType::Directory => 1,
-        crate::fs::EntryType::VolumeLabel => 2,
-        crate::fs::EntryType::Symlink => 3,
-    };
-    Ok(FstatResult {
-        size: meta.size,
-        entry_type,
-        nlinks: meta.nlinks,
-    })
+    // metadata() follows symlinks, but an open handle already refers to
+    // the resolved target, so this returns the correct underlying object.
+    crate::fs::Vfs::metadata(&file.path)
 }
 
 /// Truncate a file to a given size by handle.
@@ -688,9 +670,11 @@ pub fn self_test() -> KernelResult<()> {
 
     // 10. fstat.
     let stat_result = fstat(hw)?;
-    if stat_result.size != write_data.len() as u64 || stat_result.entry_type != 0 {
+    if stat_result.size != write_data.len() as u64
+        || stat_result.entry_type != crate::fs::EntryType::File
+    {
         crate::serial_println!(
-            "[fs::handle]   FAIL: fstat size={} type={}, expected size={} type=0",
+            "[fs::handle]   FAIL: fstat size={} type={:?}, expected size={} type=File",
             stat_result.size,
             stat_result.entry_type,
             write_data.len()

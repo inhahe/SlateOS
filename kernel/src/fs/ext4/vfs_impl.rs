@@ -40,6 +40,107 @@ impl Ext4Fs {
         let driver = Ext4Driver::open(device)?;
         Ok(Self::new(driver))
     }
+
+    /// Build rich [`FileMeta`] from an already-resolved inode number.
+    ///
+    /// Shared by [`metadata`](Self::metadata) (follow) and
+    /// [`lmetadata`](Self::lmetadata) (no-follow); the only difference
+    /// between them is which resolver produced `ino`.
+    fn meta_from_ino(&mut self, ino: u32) -> KernelResult<FileMeta> {
+        let inode = self.driver.read_inode(ino)?;
+
+        let mode_type = inode.i_mode & file_type::S_IFMT;
+        let entry_type = mode_to_entry_type(mode_type);
+        let size = inode_file_size(&inode);
+        let permissions = inode.i_mode & 0o7777; // lower 12 bits
+
+        // Map inode flags to our FileAttr.
+        let mut attrs = FileAttr::NONE;
+        if inode.i_flags & inode_flags::IMMUTABLE != 0 {
+            attrs = attrs.union(FileAttr::IMMUTABLE);
+        }
+        if inode.i_flags & inode_flags::APPEND != 0 {
+            attrs = attrs.union(FileAttr::APPEND_ONLY);
+        }
+
+        // ext4 extra inode fields provide nanosecond precision and epoch
+        // extension bits.  Layout of each *_extra field (u32, LE):
+        //   bits [31:2] = nanoseconds (0..999_999_999)
+        //   bits [1:0]  = epoch extension (adds 0..3 × 2^32 seconds)
+        //
+        // Full timestamp = base_seconds + epoch_ext * 2^32, nanoseconds from upper 30 bits.
+        //
+        // Offsets in raw inode bytes:
+        //   0x84 = i_ctime_extra    0x88 = i_mtime_extra
+        //   0x8C = i_atime_extra    0x90 = i_crtime (base secs)
+        //   0x94 = i_crtime_extra
+        let raw_inode = if self.driver.ondisk_inode_size() > 128 {
+            self.driver.read_inode_raw(ino).ok()
+        } else {
+            None
+        };
+
+        // Combine base seconds + extra field → nanoseconds since epoch.
+        let combine_ts = |base_secs: u32, extra_offset: usize| -> u64 {
+            let extra = raw_inode.as_ref()
+                .and_then(|raw| raw.get(extra_offset..extra_offset.wrapping_add(4)))
+                .and_then(|s| <[u8; 4]>::try_from(s).ok())
+                .map_or(0u32, u32::from_le_bytes);
+            // Epoch extension: lower 2 bits extend the 32-bit seconds.
+            let epoch_ext = u64::from(extra & 3);
+            let total_secs = u64::from(base_secs).saturating_add(epoch_ext.wrapping_shl(32));
+            let ns = u64::from(extra >> 2);
+            total_secs.saturating_mul(1_000_000_000).saturating_add(ns)
+        };
+
+        // Simple second→nanosecond fallback for when no extra fields exist.
+        let sec_to_ns = |s: u32| u64::from(s).saturating_mul(1_000_000_000);
+
+        // Creation time: base at 0x90, extra at 0x94.
+        let created_ns = raw_inode.as_ref()
+            .and_then(|raw| raw.get(0x90..0x94))
+            .and_then(|s| <[u8; 4]>::try_from(s).ok())
+            .map_or(0u32, u32::from_le_bytes);
+        let created_ns = if created_ns > 0 {
+            combine_ts(created_ns, 0x94)
+        } else {
+            0
+        };
+
+        // For mtime/atime/ctime, use extra fields if raw bytes available.
+        let modified_ns = if raw_inode.is_some() {
+            combine_ts(inode.i_mtime, 0x88)
+        } else {
+            sec_to_ns(inode.i_mtime)
+        };
+        let accessed_ns = if raw_inode.is_some() {
+            combine_ts(inode.i_atime, 0x8C)
+        } else {
+            sec_to_ns(inode.i_atime)
+        };
+        let changed_ns = if raw_inode.is_some() {
+            combine_ts(inode.i_ctime, 0x84)
+        } else {
+            sec_to_ns(inode.i_ctime)
+        };
+
+        Ok(FileMeta {
+            size,
+            entry_type,
+            created_ns,
+            modified_ns,
+            accessed_ns,
+            changed_ns,
+            uid: inode_uid_32(&inode),
+            gid: inode_gid_32(&inode),
+            permissions,
+            attributes: attrs,
+            nlinks: u32::from(inode.i_links_count),
+            blocks: inode_block_sectors(&inode, self.driver.superblock().block_size),
+            xattrs: self.driver.read_all_xattrs(ino, &inode).unwrap_or_default(),
+            hash: Vec::new(),
+        })
+    }
 }
 
 impl FileSystem for Ext4Fs {
@@ -835,100 +936,17 @@ impl FileSystem for Ext4Fs {
     }
 
     fn metadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        // Follows the trailing symlink (resolve_path).
         let ino = self.driver.resolve_path(path)?;
-        let inode = self.driver.read_inode(ino)?;
+        self.meta_from_ino(ino)
+    }
 
-        let mode_type = inode.i_mode & file_type::S_IFMT;
-        let entry_type = mode_to_entry_type(mode_type);
-        let size = inode_file_size(&inode);
-        let permissions = inode.i_mode & 0o7777; // lower 12 bits
-
-        // Map inode flags to our FileAttr.
-        let mut attrs = FileAttr::NONE;
-        if inode.i_flags & inode_flags::IMMUTABLE != 0 {
-            attrs = attrs.union(FileAttr::IMMUTABLE);
-        }
-        if inode.i_flags & inode_flags::APPEND != 0 {
-            attrs = attrs.union(FileAttr::APPEND_ONLY);
-        }
-
-        // ext4 extra inode fields provide nanosecond precision and epoch
-        // extension bits.  Layout of each *_extra field (u32, LE):
-        //   bits [31:2] = nanoseconds (0..999_999_999)
-        //   bits [1:0]  = epoch extension (adds 0..3 × 2^32 seconds)
-        //
-        // Full timestamp = base_seconds + epoch_ext * 2^32, nanoseconds from upper 30 bits.
-        //
-        // Offsets in raw inode bytes:
-        //   0x84 = i_ctime_extra    0x88 = i_mtime_extra
-        //   0x8C = i_atime_extra    0x90 = i_crtime (base secs)
-        //   0x94 = i_crtime_extra
-        let raw_inode = if self.driver.ondisk_inode_size() > 128 {
-            self.driver.read_inode_raw(ino).ok()
-        } else {
-            None
-        };
-
-        // Combine base seconds + extra field → nanoseconds since epoch.
-        let combine_ts = |base_secs: u32, extra_offset: usize| -> u64 {
-            let extra = raw_inode.as_ref()
-                .and_then(|raw| raw.get(extra_offset..extra_offset.wrapping_add(4)))
-                .and_then(|s| <[u8; 4]>::try_from(s).ok())
-                .map_or(0u32, u32::from_le_bytes);
-            // Epoch extension: lower 2 bits extend the 32-bit seconds.
-            let epoch_ext = u64::from(extra & 3);
-            let total_secs = u64::from(base_secs).saturating_add(epoch_ext.wrapping_shl(32));
-            let ns = u64::from(extra >> 2);
-            total_secs.saturating_mul(1_000_000_000).saturating_add(ns)
-        };
-
-        // Simple second→nanosecond fallback for when no extra fields exist.
-        let sec_to_ns = |s: u32| u64::from(s).saturating_mul(1_000_000_000);
-
-        // Creation time: base at 0x90, extra at 0x94.
-        let created_ns = raw_inode.as_ref()
-            .and_then(|raw| raw.get(0x90..0x94))
-            .and_then(|s| <[u8; 4]>::try_from(s).ok())
-            .map_or(0u32, u32::from_le_bytes);
-        let created_ns = if created_ns > 0 {
-            combine_ts(created_ns, 0x94)
-        } else {
-            0
-        };
-
-        // For mtime/atime/ctime, use extra fields if raw bytes available.
-        let modified_ns = if raw_inode.is_some() {
-            combine_ts(inode.i_mtime, 0x88)
-        } else {
-            sec_to_ns(inode.i_mtime)
-        };
-        let accessed_ns = if raw_inode.is_some() {
-            combine_ts(inode.i_atime, 0x8C)
-        } else {
-            sec_to_ns(inode.i_atime)
-        };
-        let changed_ns = if raw_inode.is_some() {
-            combine_ts(inode.i_ctime, 0x84)
-        } else {
-            sec_to_ns(inode.i_ctime)
-        };
-
-        Ok(FileMeta {
-            size,
-            entry_type,
-            created_ns,
-            modified_ns,
-            accessed_ns,
-            changed_ns,
-            uid: inode_uid_32(&inode),
-            gid: inode_gid_32(&inode),
-            permissions,
-            attributes: attrs,
-            nlinks: u32::from(inode.i_links_count),
-            blocks: inode_block_sectors(&inode, self.driver.superblock().block_size),
-            xattrs: self.driver.read_all_xattrs(ino, &inode).unwrap_or_default(),
-            hash: Vec::new(),
-        })
+    fn lmetadata(&mut self, path: &str) -> KernelResult<FileMeta> {
+        // No-follow: resolve_path_no_follow follows intermediate
+        // symlinks but stops at the final component, so a trailing
+        // symlink reports its own inode rather than the target's.
+        let ino = self.driver.resolve_path_no_follow(path)?;
+        self.meta_from_ino(ino)
     }
 
     fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {

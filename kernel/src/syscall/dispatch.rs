@@ -958,7 +958,7 @@ fn test_dispatch_fs_roundtrip() -> KernelResult<()> {
     }
 
     // 3. Stat the file.
-    let mut stat_buf = [0u8; 16];
+    let mut stat_buf = [0u8; handlers::FS_STAT_RESULT_LEN];
     let stat_args = SyscallArgs {
         arg0: test_path.as_ptr() as u64,
         arg1: test_path.len() as u64,

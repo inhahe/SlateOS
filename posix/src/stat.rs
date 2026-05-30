@@ -116,7 +116,7 @@ impl Stat {
 // ---------------------------------------------------------------------------
 //
 // `SYS_FS_STAT`, `SYS_FS_LSTAT`, and `SYS_FS_FSTAT` do NOT write a POSIX
-// `struct stat`.  They write a compact, kernel-defined 72-byte
+// `struct stat`.  They write a compact, kernel-defined 80-byte
 // `FsStatResult` whose layout bears no resemblance to `struct stat`.
 // The low 16 bytes are ABI-stable (unchanged from the original 16-byte
 // form); the kernel widened the buffer to carry the rest of the metadata
@@ -173,7 +173,7 @@ fn le_u32(raw: &[u8; KERNEL_STAT_LEN], off: usize) -> u32 {
         .map_or(0, u32::from_le_bytes)
 }
 
-/// Translate the kernel's 72-byte `FsStatResult` into a POSIX `struct stat`.
+/// Translate the kernel's 80-byte `FsStatResult` into a POSIX `struct stat`.
 ///
 /// The kernel now conveys size, entry type, link count, permission bits,
 /// ownership, block count, and the access/modify/change timestamps.  When
@@ -183,8 +183,7 @@ fn le_u32(raw: &[u8; KERNEL_STAT_LEN], off: usize) -> u32 {
 /// kernel-reported inode number (ext4 real inode, memfs synthetic id);
 /// filesystems without a stable identity report 0.  The creation time is
 /// carried in the buffer but `struct stat` has no birth-time field; it is
-/// surfaced via `statx`'s `STATX_BTIME` once that path is wired (see
-/// `todo.txt`).
+/// surfaced via `statx`'s `STATX_BTIME` (see [`btime_from_fsstat`]).
 pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
     *buf = Stat::zeroed();
 
@@ -233,6 +232,23 @@ pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
     buf.st_atim = ns_to_timespec(accessed_ns);
     buf.st_mtim = ns_to_timespec(modified_ns);
     buf.st_ctim = ns_to_timespec(changed_ns);
+}
+
+/// Extract the creation (birth) time from the kernel `FsStatResult`.
+///
+/// `struct stat` has no birth-time field, so this value is only surfaced
+/// through `statx`'s `stx_btime`/`STATX_BTIME`.  Returns `None` when the
+/// filesystem does not record a creation time (the buffer field is 0); in
+/// that case `statx` must leave the `STATX_BTIME` mask bit clear so callers
+/// know the value is unavailable rather than treating the epoch as a real
+/// birth time.
+pub(crate) fn btime_from_fsstat(raw: &[u8; KERNEL_STAT_LEN]) -> Option<Timespec> {
+    let created_ns = le_u64(raw, 64);
+    if created_ns == 0 {
+        None
+    } else {
+        Some(ns_to_timespec(created_ns))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +521,7 @@ mod tests {
     }
 
     /// Build a fully-populated raw `FsStatResult` exercising every field
-    /// of the widened 72-byte layout.
+    /// of the widened 80-byte layout.
     #[allow(clippy::too_many_arguments)]
     fn raw_fsstat_full(
         size: u64,
@@ -699,6 +715,32 @@ mod tests {
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
         assert_eq!(st.st_ino, 0);
+    }
+
+    #[test]
+    fn test_btime_from_fsstat_present() {
+        // A recorded creation time is split into sec/nsec.  This is the
+        // value statx surfaces via stx_btime/STATX_BTIME.
+        let created = 1_700_000_000_424_242_424u64;
+        let raw = raw_fsstat_full(
+            0, 0, 1, 0, 0, 0, 0, 0, 0, 0, created, 0,
+        );
+        let bt = btime_from_fsstat(&raw).expect("creation time present");
+        assert_eq!(bt.tv_sec, 1_700_000_000);
+        assert_eq!(bt.tv_nsec, 424_242_424);
+    }
+
+    #[test]
+    fn test_btime_from_fsstat_absent_is_none() {
+        // A zero creation time means the filesystem doesn't record one;
+        // statx must leave the STATX_BTIME mask bit clear in that case.
+        let raw = raw_fsstat(100, 0, 1);
+        assert!(btime_from_fsstat(&raw).is_none());
+        // Even a fully-populated buffer with created_ns == 0 yields None.
+        let raw = raw_fsstat_full(
+            512, 0, 1, 0o644, 1000, 1000, 1, 5, 5, 5, 0, 99,
+        );
+        assert!(btime_from_fsstat(&raw).is_none());
     }
 
     #[test]

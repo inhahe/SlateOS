@@ -457,9 +457,8 @@ Remaining net improvements (diminishing returns):
       kernel writes 72 bytes).  userspace/sshd's SYS_FS_STAT const is dead
       (never called) so no buffer there to fix.
   REMAINING GAPS (documented, not blocking):
-    * created_ns (birth time) is carried in the buffer @64 but struct stat
-      has no btime field; surface it via statx STATX_BTIME once that path is
-      wired (statx currently reads from struct stat, which drops it).
+    * (RESOLVED 2026-05-30) created_ns (birth time) is now surfaced via statx
+      STATX_BTIME — see the dedicated DONE entry below.
 
 - (DONE 2026-05-30) st_ino now populated (the remaining-gap note above is
   RESOLVED).  Added fs::FileMeta.ino (u64; 0 = not available) and surfaced it
@@ -479,6 +478,28 @@ Remaining net improvements (diminishing returns):
   st_ino -> stx_ino so it benefits transitively.  services/init buffers
   bumped 72 -> 80.  2 new host tests (inode passthrough, zero=unavailable);
   17103 posix host tests pass; kernel + posix + init build clean.
+
+- (DONE 2026-05-30) statx STATX_BTIME wired (the last "remaining gap" from the
+  stat-ABI widening above).  created_ns has been flowing to userspace in the
+  80-byte FsStatResult buffer @64 since the widening, but statx dropped it
+  because it routed through `struct stat` (which has no birth-time field).
+  Proper fix (no duplication): factored a shared helper
+  file.rs::stat_path_raw(path, follow, &mut raw) -> i32 that does the
+  resolve+SYS_FS_STAT/SYS_FS_LSTAT step; stat() and lstat() now call it.  statx
+  no longer delegates to fstatat — it resolves dirfd/path itself (mirroring
+  fstatat's AT_FDCWD/absolute fast path + resolve_dirfd_path, honouring
+  AT_SYMLINK_NOFOLLOW) into a raw buffer, fills `struct stat` via
+  fill_from_fsstat for the basic fields, then reads the birth time directly
+  from the raw bytes via new stat.rs::btime_from_fsstat(raw) -> Option<Timespec>
+  (returns None when created_ns == 0).  statx only sets stx_btime and the
+  STATX_BTIME mask bit when the fs actually recorded a creation time, so apps
+  can distinguish "unknown" from "epoch".  Also fixed stale "16-byte"/"72-byte"
+  doc comments in stat()/lstat()/stat.rs.  2 new host tests (btime present
+  splits sec/nsec; btime absent => None even with a full buffer).  17105 posix
+  host tests pass; kernel + posix build clean.
+  NOTE: ext4 still leaves i_crtime 0 on create (see the ext4 i_crtime
+  LIMITATION entry below), so ext4-created files report no btime until that
+  checksum-aware write lands; statx correctly reports it as unavailable.
 
 - (DONE 2026-05-30) statvfs/statfs family wired to the kernel (same ABI-
   mistranslation bug class as the stat fix above).  statvfs.rs had NEVER

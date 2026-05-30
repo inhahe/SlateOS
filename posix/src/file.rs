@@ -1352,26 +1352,31 @@ pub extern "C" fn closefrom(lowfd: i32) {
 // stat / fstat / lstat
 // ---------------------------------------------------------------------------
 
-/// Get file status by path.
+/// Resolve `path` and fill `raw` with the kernel's `FsStatResult`.
 ///
-/// `SYS_FS_STAT` writes a compact 16-byte `FsStatResult`, not a POSIX
-/// `struct stat`.  We read it into a local buffer and translate via
-/// [`crate::stat::fill_from_fsstat`].
-#[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
-    if path.is_null() || buf.is_null() {
-        errno::set_errno(errno::EFAULT);
-        return -1;
-    }
-
+/// `SYS_FS_STAT`/`SYS_FS_LSTAT` write a compact, kernel-defined 80-byte
+/// `FsStatResult` (see [`crate::stat`]), not a POSIX `struct stat`.  This
+/// helper centralises the resolve+syscall step so `stat`, `lstat`, and
+/// `statx` can share it without duplicating logic; callers translate the
+/// raw bytes via [`crate::stat::fill_from_fsstat`] (and, for `statx`,
+/// read the birth time via [`crate::stat::btime_from_fsstat`]).
+///
+/// `follow` selects `SYS_FS_STAT` (follow the final symlink) versus
+/// `SYS_FS_LSTAT` (do not follow).  Returns 0 on success, or -1 with
+/// `errno` set on failure.
+fn stat_path_raw(
+    path: *const u8,
+    follow: bool,
+    raw: &mut [u8; crate::stat::KERNEL_STAT_LEN],
+) -> i32 {
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
         return -1;
     };
 
-    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
+    let sysno = if follow { SYS_FS_STAT } else { SYS_FS_LSTAT };
     let ret = syscall3(
-        SYS_FS_STAT,
+        sysno,
         resolved.as_ptr() as u64,
         resolved_len as u64,
         raw.as_mut_ptr() as u64,
@@ -1379,6 +1384,26 @@ pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
 
     if ret < 0 {
         return errno::translate(ret) as i32;
+    }
+    0
+}
+
+/// Get file status by path.
+///
+/// `SYS_FS_STAT` writes a compact, kernel-defined 80-byte `FsStatResult`,
+/// not a POSIX `struct stat`.  We read it into a local buffer and
+/// translate via [`crate::stat::fill_from_fsstat`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
+    if path.is_null() || buf.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+
+    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
+    let ret = stat_path_raw(path, true, &mut raw);
+    if ret != 0 {
+        return ret;
     }
 
     // SAFETY: `buf` was checked non-null above; the caller guarantees it
@@ -1452,6 +1477,9 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
 }
 
 /// Get symbolic link status (don't follow final symlink).
+///
+/// `SYS_FS_LSTAT` writes the same compact 80-byte `FsStatResult` as
+/// `stat`; we translate via [`crate::stat::fill_from_fsstat`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
     if path.is_null() || buf.is_null() {
@@ -1459,21 +1487,10 @@ pub extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
         return -1;
     }
 
-    let mut resolved = [0u8; crate::unistd::PATH_MAX];
-    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
-        return -1;
-    };
-
     let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
-    let ret = syscall3(
-        SYS_FS_LSTAT,
-        resolved.as_ptr() as u64,
-        resolved_len as u64,
-        raw.as_mut_ptr() as u64,
-    );
-
-    if ret < 0 {
-        return errno::translate(ret) as i32;
+    let ret = stat_path_raw(path, false, &mut raw);
+    if ret != 0 {
+        return ret;
     }
 
     // SAFETY: `buf` was checked non-null above.
@@ -4312,8 +4329,10 @@ fn timespec_to_statx_ts(ts: &crate::stat::Timespec) -> StatxTimestamp {
 
 /// `statx` — extended file status (Linux 4.11+).
 ///
-/// Gets extended file status relative to a directory fd.  Falls back
-/// to `fstatat` internally and converts the result into a `Statx`.
+/// Gets extended file status relative to a directory fd.  Resolves the
+/// `dirfd`/`path` pair the same way `fstatat` does, then reads the raw
+/// kernel `FsStatResult` directly so it can surface the birth time
+/// (`stx_btime`/`STATX_BTIME`) that `struct stat` cannot represent.
 /// The `mask` argument selects which fields to populate.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn statx(
@@ -4328,12 +4347,27 @@ pub extern "C" fn statx(
         return -1;
     }
 
-    // Get the underlying stat info via fstatat.
-    let mut st = Stat::default();
-    let ret = fstatat(dirfd, path, &raw mut st, flags);
+    // Resolve dirfd/path and pull the raw kernel buffer.  Mirror
+    // `fstatat`: an absolute path or `AT_FDCWD` skips dirfd resolution.
+    // `AT_SYMLINK_NOFOLLOW` selects `lstat` semantics.
+    let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
+    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
+    let ret = if dirfd == AT_FDCWD || is_absolute_path(path) {
+        stat_path_raw(path, follow, &mut raw)
+    } else {
+        let mut full = [0u8; crate::unistd::PATH_MAX];
+        let len = resolve_dirfd_path(dirfd, path, &mut full);
+        if len == 0 {
+            return -1;
+        }
+        stat_path_raw(full.as_ptr(), follow, &mut raw)
+    };
     if ret != 0 {
         return ret;
     }
+
+    let mut st = Stat::default();
+    crate::stat::fill_from_fsstat(&mut st, &raw);
 
     // SAFETY: caller guarantees `buf` points to valid memory.
     let sx = unsafe { &mut *buf };
@@ -4383,6 +4417,16 @@ pub extern "C" fn statx(
     if mask & STATX_CTIME != 0 {
         sx.stx_ctime = timespec_to_statx_ts(&st.st_ctim);
         filled |= STATX_CTIME;
+    }
+    // Birth time is carried in the raw kernel buffer (`struct stat` has no
+    // field for it).  Only report it — and set the filled bit — when the
+    // filesystem actually recorded a creation time; otherwise leave the
+    // STATX_BTIME bit clear so callers know it is unavailable.
+    if mask & STATX_BTIME != 0 {
+        if let Some(btime) = crate::stat::btime_from_fsstat(&raw) {
+            sx.stx_btime = timespec_to_statx_ts(&btime);
+            filled |= STATX_BTIME;
+        }
     }
 
     sx.stx_blksize = st.st_blksize as u32;

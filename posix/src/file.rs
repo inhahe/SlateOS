@@ -2332,17 +2332,13 @@ pub extern "C" fn fchownat(
 // chmod / fchmod / chown / fchown / lchown
 // ---------------------------------------------------------------------------
 //
-// Argument-domain validators for the permission-changing family.  Our OS
-// has no permission system yet, so the *body* of each call is still a no-op
-// returning 0 — a well-formed caller should not see ENOSYS, because the
-// semantic "the requested mode/owner is now in effect" is trivially true
-// in a single-permission-class environment.
-//
-// What the validators *do* catch is the buggy-caller case: a NULL path
-// pointer, a negative fd, or an fd that isn't open.  On Linux these are
-// EFAULT and EBADF respectively, regardless of whether the underlying
-// filesystem supports the operation, so reporting them gives our tests
-// and our future implementation a stable, Linux-shaped surface.
+// The permission-changing family.  Each entry point validates its
+// arguments (NULL path → EFAULT, bad/closed fd → EBADF, CAP_CHOWN gate for
+// the chown variants) and then, on bare metal, issues the corresponding
+// kernel syscall: SYS_FS_SET_PERMS for chmod/fchmod and SYS_FS_SET_OWNER
+// for chown/fchown/lchown.  On the host build (no kernel) the syscall is
+// skipped and the call returns 0 after validation, which keeps the
+// argument-domain tests stable.
 
 /// Change file mode bits.
 ///

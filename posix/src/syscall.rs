@@ -105,6 +105,19 @@ pub const SYS_FS_SET_OWNER: u64 = 630;
 // perms is masked to the low 0o7777 bits by the kernel.
 pub const SYS_FS_SET_PERMS: u64 = 631;
 
+// Extended attributes.
+//   GET:    (path_ptr, path_len, key_ptr, val_ptr, val_cap) -> true value
+//           length (val_cap 0 = size query; copies min(len, cap) bytes).
+//   SET:    (path_ptr, path_len, key_ptr, val_ptr, val_len) -> 0.
+//   REMOVE: (path_ptr, path_len, key_ptr) -> 0.
+//   LIST:   (path_ptr, path_len, buf_ptr, buf_cap) -> total bytes of the
+//           null-terminated key list (buf_cap 0 = size query; only fills
+//           when the whole list fits).
+pub const SYS_FS_GET_XATTR: u64 = 633;
+pub const SYS_FS_SET_XATTR: u64 = 634;
+pub const SYS_FS_REMOVE_XATTR: u64 = 635;
+pub const SYS_FS_LIST_XATTRS: u64 = 636;
+
 // Sync
 pub const SYS_FS_SYNC: u64 = 641;
 
@@ -365,6 +378,8 @@ mod tests {
             SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
             SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
             SYS_FS_SET_TIMES, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
+            SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
+            SYS_FS_LIST_XATTRS,
             SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ,
             SYS_PIPE_TRY_WRITE, SYS_PIPE_TRY_READ, SYS_PIPE_CLOSE,
             SYS_PIPE_POLL, SYS_PIPE_READABLE_BYTES,
@@ -418,6 +433,8 @@ mod tests {
             SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
             SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
             SYS_FS_SET_TIMES, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
+            SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
+            SYS_FS_LIST_XATTRS,
             SYS_PIPE_CREATE, SYS_PIPE_WRITE, SYS_PIPE_READ,
             SYS_PIPE_TRY_WRITE, SYS_PIPE_TRY_READ, SYS_PIPE_CLOSE,
             SYS_PIPE_POLL, SYS_PIPE_READABLE_BYTES,
@@ -589,6 +606,8 @@ mod tests {
             SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
             SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
             SYS_FS_SET_TIMES, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
+            SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
+            SYS_FS_LIST_XATTRS,
         ];
         for &nr in &fs_nrs {
             assert!((600..800).contains(&nr),

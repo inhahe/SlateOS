@@ -479,6 +479,49 @@ Remaining net improvements (diminishing returns):
   bumped 72 -> 80.  2 new host tests (inode passthrough, zero=unavailable);
   17103 posix host tests pass; kernel + posix + init build clean.
 
+- (DONE 2026-05-30) xattr family (getxattr/setxattr/listxattr/removexattr +
+  l*/f* variants, 12 functions) wired to the kernel — same no-op-stub bug
+  class.  All twelve were ENOTSUP stubs ("our filesystem does not support
+  extended attributes yet") even though the kernel fully implements
+  SYS_FS_GET_XATTR=633 / SET_XATTR=634 / REMOVE_XATTR=635 / LIST_XATTRS=636
+  and ext4 stores inline + external xattrs (the ext4 self-test exercises
+  set/get/list/remove).  Net effect before the fix: setfattr/getfattr,
+  `tar --xattrs`, file capabilities, ACLs, and SELinux/security contexts all
+  silently reported "not supported".
+    * Added the four SYS_FS_*_XATTR constants to posix syscall.rs (+ the
+      three syscall test lists).
+    * Bare-metal workers do_getxattr/do_setxattr/do_listxattr/do_removexattr
+      in xattr.rs: resolve the path (or fd→path via fdtable::get_fd_path),
+      issue syscall3/4/5, errno::translate on negative return.
+    * getxattr/listxattr honour POSIX size semantics: a size-0 call is a
+      size query, and a non-zero-but-too-small buffer yields ERANGE (the
+      kernel now returns the TRUE length — see the kernel ABI fix below).
+    * setxattr honours XATTR_CREATE/XATTR_REPLACE via a pre-existence probe
+      (the kernel SET_XATTR carries no flags): CREATE→EEXIST if present,
+      REPLACE→ENODATA if absent.  Conflicting/unknown flags → EINVAL.
+    * KERNEL ABI FIX (handlers.rs only — Vfs::get_xattr/list_xattrs callers
+      are just the syscall path + the ext4 self-test which calls Vfs::
+      directly, so safe): sys_fs_get_xattr and sys_fs_list_xattrs now accept
+      capacity==0 (size query) instead of rejecting it as EINVAL, and return
+      the TRUE value/list length rather than the truncated copy length, so
+      callers can size-query and detect truncation.  list_xattrs only packs
+      when the whole list fits (no ambiguous partial fill).
+  17108 posix host tests pass (37 xattr tests rewritten for the new
+  validation surface); bare-metal + host posix and kernel builds clean.
+  JUDGMENT CALLS / DOCUMENTED LIMITATIONS:
+    1. lgetxattr/lsetxattr/llistxattr/lremovexattr do NOT honour no-follow:
+       the kernel xattr syscalls resolve with resolve_follow, so on a symlink
+       they operate on the target.  Same root cause/fix as the lchown and
+       utimensat AT_SYMLINK_NOFOLLOW limitations (needs a no-follow ABI).
+    2. A missing attribute reports ENOENT, not the Linux-conventional
+       ENODATA, because the kernel collapses "file not found" and "attribute
+       not found" into KernelError::NotFound.  Distinguishing them needs a
+       dedicated kernel error variant; deferred (low value — most callers
+       treat any error from getxattr as "absent").
+    3. setxattr's CREATE/REPLACE pre-check is a separate syscall from the
+       set, so there is a benign TOCTOU window.  The only proper fix is to
+       add a flags arg to the kernel SET_XATTR syscall; deferred.
+
 - (DONE 2026-05-30) chmod/fchmod/chown/fchown/lchown wired to the kernel
   (same no-op-stub bug class as the utimes family).  All five were validate-
   then-return-0 stubs ("No permission system yet — accept silently") even

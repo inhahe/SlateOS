@@ -1,12 +1,22 @@
-//! Extended file attribute stubs.
+//! Extended file attributes (`getxattr`/`setxattr`/`listxattr`/`removexattr`
+//! and their `l*` / `f*` variants).
 //!
-//! Implements `getxattr`, `lgetxattr`, `fgetxattr`, `setxattr`,
-//! `lsetxattr`, `fsetxattr`, `listxattr`, `llistxattr`, `flistxattr`,
-//! `removexattr`, `lremovexattr`, `fremovexattr`.
+//! These wrap the kernel xattr syscalls (`SYS_FS_GET_XATTR`,
+//! `SYS_FS_SET_XATTR`, `SYS_FS_REMOVE_XATTR`, `SYS_FS_LIST_XATTRS`), which
+//! ext4 implements via inline + external xattr blocks.  Each entry point
+//! validates its arguments (NULL path/name → EFAULT, bad/closed fd → EBADF,
+//! conflicting setxattr flags → EINVAL) and then, on bare metal, issues the
+//! corresponding syscall.  On the host build (no kernel) the syscall is
+//! skipped and the call returns a validation-only result.
 //!
-//! Our filesystem does not support extended attributes yet.  All
-//! functions return ENOTSUP so programs that probe for xattr support
-//! get a clean response instead of a linker error.
+//! LIMITATIONS (tracked in todo.txt):
+//!   * The `l*` variants are meant not to follow symlinks, but the kernel
+//!     xattr syscalls resolve paths with `resolve_follow`, so for a symlink
+//!     argument they operate on the target.  Correct for the common
+//!     non-symlink case; needs a no-follow kernel ABI to fix.
+//!   * The kernel collapses "file not found" and "attribute not found" into
+//!     one error, so a missing attribute reports ENOENT rather than the
+//!     Linux-conventional ENODATA on `getxattr`/`removexattr`.
 
 use crate::errno;
 use crate::types::SsizeT;
@@ -20,50 +30,236 @@ pub const XATTR_CREATE: i32 = 1;
 /// Replace the attribute; fail if it doesn't exist.
 pub const XATTR_REPLACE: i32 = 2;
 
+/// Validate the `flags` argument to the `set*xattr` family.
+///
+/// Returns `false` (and sets `errno = EINVAL`) when the flags are invalid:
+/// any bit outside `XATTR_CREATE | XATTR_REPLACE`, or both flags set at
+/// once (Linux rejects the contradictory "create and replace" request).
+fn setxattr_flags_valid(flags: i32) -> bool {
+    if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
+        errno::set_errno(errno::EINVAL);
+        return false;
+    }
+    if (flags & XATTR_CREATE != 0) && (flags & XATTR_REPLACE != 0) {
+        errno::set_errno(errno::EINVAL);
+        return false;
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Bare-metal syscall workers
+// ---------------------------------------------------------------------------
+
+/// Issue `SYS_FS_GET_XATTR` for an already-resolved path.
+///
+/// Returns the attribute length on success (after an ERANGE check when the
+/// caller provided a non-zero, too-small buffer) or -1 with `errno` set.
+#[cfg(target_os = "none")]
+fn do_getxattr(
+    path_ptr: *const u8,
+    path_len: usize,
+    name: *const u8,
+    value: *mut u8,
+    size: usize,
+) -> SsizeT {
+    let ret = crate::syscall::syscall5(
+        crate::syscall::SYS_FS_GET_XATTR,
+        path_ptr as u64,
+        path_len as u64,
+        name as u64,
+        value as u64,
+        size as u64,
+    );
+    if ret < 0 {
+        return errno::translate(ret) as SsizeT;
+    }
+    // ret is the TRUE attribute length.  A non-zero buffer that is too small
+    // is ERANGE (the kernel copied only what fit).
+    let true_len = ret as usize;
+    if size != 0 && true_len > size {
+        errno::set_errno(errno::ERANGE);
+        return -1;
+    }
+    ret as SsizeT
+}
+
+/// Issue `SYS_FS_LIST_XATTRS` for an already-resolved path.
+#[cfg(target_os = "none")]
+fn do_listxattr(
+    path_ptr: *const u8,
+    path_len: usize,
+    list: *mut u8,
+    size: usize,
+) -> SsizeT {
+    let ret = crate::syscall::syscall4(
+        crate::syscall::SYS_FS_LIST_XATTRS,
+        path_ptr as u64,
+        path_len as u64,
+        list as u64,
+        size as u64,
+    );
+    if ret < 0 {
+        return errno::translate(ret) as SsizeT;
+    }
+    let total = ret as usize;
+    if size != 0 && total > size {
+        errno::set_errno(errno::ERANGE);
+        return -1;
+    }
+    ret as SsizeT
+}
+
+/// Issue `SYS_FS_SET_XATTR` for an already-resolved path, honouring the
+/// `XATTR_CREATE` / `XATTR_REPLACE` flags via a pre-existence check (the
+/// kernel syscall carries no flags).
+#[cfg(target_os = "none")]
+fn do_setxattr(
+    path_ptr: *const u8,
+    path_len: usize,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: i32,
+) -> i32 {
+    if flags & (XATTR_CREATE | XATTR_REPLACE) != 0 {
+        // Probe for existence with a size query (val_cap = 0).
+        let exists = crate::syscall::syscall5(
+            crate::syscall::SYS_FS_GET_XATTR,
+            path_ptr as u64,
+            path_len as u64,
+            name as u64,
+            0,
+            0,
+        ) >= 0;
+        if (flags & XATTR_CREATE != 0) && exists {
+            errno::set_errno(errno::EEXIST);
+            return -1;
+        }
+        if (flags & XATTR_REPLACE != 0) && !exists {
+            errno::set_errno(errno::ENODATA);
+            return -1;
+        }
+    }
+    let ret = crate::syscall::syscall5(
+        crate::syscall::SYS_FS_SET_XATTR,
+        path_ptr as u64,
+        path_len as u64,
+        name as u64,
+        value as u64,
+        size as u64,
+    );
+    if ret < 0 {
+        return errno::translate(ret) as i32;
+    }
+    0
+}
+
+/// Issue `SYS_FS_REMOVE_XATTR` for an already-resolved path.
+#[cfg(target_os = "none")]
+fn do_removexattr(path_ptr: *const u8, path_len: usize, name: *const u8) -> i32 {
+    let ret = crate::syscall::syscall3(
+        crate::syscall::SYS_FS_REMOVE_XATTR,
+        path_ptr as u64,
+        path_len as u64,
+        name as u64,
+    );
+    if ret < 0 {
+        return errno::translate(ret) as i32;
+    }
+    0
+}
+
+/// Resolve an open fd to its stored path, or set `errno` and return `None`.
+///
+/// A path-less descriptor (pipe, socket, …) has no backing file and thus no
+/// extended attributes, so we report `ENOTSUP` — matching how Linux reports
+/// xattr operations on filesystems/objects without xattr support.
+#[cfg(target_os = "none")]
+fn fd_to_path(
+    fd: i32,
+    buf: &mut [u8; crate::unistd::PATH_MAX],
+) -> Option<usize> {
+    let len = crate::fdtable::get_fd_path(fd, buf);
+    if len == 0 {
+        errno::set_errno(errno::ENOTSUP);
+        return None;
+    }
+    Some(len)
+}
+
 // ---------------------------------------------------------------------------
 // getxattr / lgetxattr / fgetxattr
 // ---------------------------------------------------------------------------
 
 /// Get an extended attribute value.
-///
-/// Stub: returns -1 with ENOTSUP.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn getxattr(
-    _path: *const u8,
-    _name: *const u8,
-    _value: *mut u8,
-    _size: usize,
+    path: *const u8,
+    name: *const u8,
+    value: *mut u8,
+    size: usize,
 ) -> SsizeT {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+    if path.is_null() || name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
+            return -1;
+        };
+        do_getxattr(buf.as_ptr(), len, name, value, size)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (value, size);
+        0
+    }
 }
 
-/// Get an extended attribute value (don't follow symlinks).
-///
-/// Stub: returns -1 with ENOTSUP.
+/// Get an extended attribute value (don't follow symlinks — see LIMITATIONS).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lgetxattr(
-    _path: *const u8,
-    _name: *const u8,
-    _value: *mut u8,
-    _size: usize,
+    path: *const u8,
+    name: *const u8,
+    value: *mut u8,
+    size: usize,
 ) -> SsizeT {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+    // No no-follow kernel xattr syscall yet; behaves like getxattr.
+    getxattr(path, name, value, size)
 }
 
 /// Get an extended attribute value by file descriptor.
-///
-/// Stub: returns -1 with ENOTSUP.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fgetxattr(
-    _fd: i32,
-    _name: *const u8,
-    _value: *mut u8,
-    _size: usize,
+    fd: i32,
+    name: *const u8,
+    value: *mut u8,
+    size: usize,
 ) -> SsizeT {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+    if fd < 0 || crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = fd_to_path(fd, &mut buf) else {
+            return -1;
+        };
+        do_getxattr(buf.as_ptr(), len, name, value, size)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (value, size);
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -71,48 +267,81 @@ pub extern "C" fn fgetxattr(
 // ---------------------------------------------------------------------------
 
 /// Set an extended attribute value.
-///
-/// Stub: returns -1 with ENOTSUP.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setxattr(
-    _path: *const u8,
-    _name: *const u8,
-    _value: *const u8,
-    _size: usize,
-    _flags: i32,
+    path: *const u8,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: i32,
 ) -> i32 {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+    if path.is_null() || name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if !setxattr_flags_valid(flags) {
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
+            return -1;
+        };
+        do_setxattr(buf.as_ptr(), len, name, value, size, flags)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (value, size);
+        0
+    }
 }
 
-/// Set an extended attribute value (don't follow symlinks).
-///
-/// Stub: returns -1 with ENOTSUP.
+/// Set an extended attribute value (don't follow symlinks — see LIMITATIONS).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lsetxattr(
-    _path: *const u8,
-    _name: *const u8,
-    _value: *const u8,
-    _size: usize,
-    _flags: i32,
+    path: *const u8,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: i32,
 ) -> i32 {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+    setxattr(path, name, value, size, flags)
 }
 
 /// Set an extended attribute value by file descriptor.
-///
-/// Stub: returns -1 with ENOTSUP.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fsetxattr(
-    _fd: i32,
-    _name: *const u8,
-    _value: *const u8,
-    _size: usize,
-    _flags: i32,
+    fd: i32,
+    name: *const u8,
+    value: *const u8,
+    size: usize,
+    flags: i32,
 ) -> i32 {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+    if fd < 0 || crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    if !setxattr_flags_valid(flags) {
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = fd_to_path(fd, &mut buf) else {
+            return -1;
+        };
+        do_setxattr(buf.as_ptr(), len, name, value, size, flags)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (value, size);
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -120,42 +349,65 @@ pub extern "C" fn fsetxattr(
 // ---------------------------------------------------------------------------
 
 /// List extended attribute names.
-///
-/// Stub: returns -1 with ENOTSUP.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn listxattr(
-    _path: *const u8,
-    _list: *mut u8,
-    _size: usize,
+    path: *const u8,
+    list: *mut u8,
+    size: usize,
 ) -> SsizeT {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+    if path.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
+            return -1;
+        };
+        do_listxattr(buf.as_ptr(), len, list, size)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (list, size);
+        0
+    }
 }
 
-/// List extended attribute names (don't follow symlinks).
-///
-/// Stub: returns -1 with ENOTSUP.
+/// List extended attribute names (don't follow symlinks — see LIMITATIONS).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn llistxattr(
-    _path: *const u8,
-    _list: *mut u8,
-    _size: usize,
+    path: *const u8,
+    list: *mut u8,
+    size: usize,
 ) -> SsizeT {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+    listxattr(path, list, size)
 }
 
 /// List extended attribute names by file descriptor.
-///
-/// Stub: returns -1 with ENOTSUP.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn flistxattr(
-    _fd: i32,
-    _list: *mut u8,
-    _size: usize,
+    fd: i32,
+    list: *mut u8,
+    size: usize,
 ) -> SsizeT {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+    if fd < 0 || crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = fd_to_path(fd, &mut buf) else {
+            return -1;
+        };
+        do_listxattr(buf.as_ptr(), len, list, size)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = (list, size);
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -163,48 +415,70 @@ pub extern "C" fn flistxattr(
 // ---------------------------------------------------------------------------
 
 /// Remove an extended attribute.
-///
-/// Stub: returns -1 with ENOTSUP.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn removexattr(
-    _path: *const u8,
-    _name: *const u8,
-) -> i32 {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+pub extern "C" fn removexattr(path: *const u8, name: *const u8) -> i32 {
+    if path.is_null() || name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = crate::file::resolve_or_err(path, &mut buf) else {
+            return -1;
+        };
+        do_removexattr(buf.as_ptr(), len, name)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
-/// Remove an extended attribute (don't follow symlinks).
-///
-/// Stub: returns -1 with ENOTSUP.
+/// Remove an extended attribute (don't follow symlinks — see LIMITATIONS).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lremovexattr(
-    _path: *const u8,
-    _name: *const u8,
-) -> i32 {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+pub extern "C" fn lremovexattr(path: *const u8, name: *const u8) -> i32 {
+    removexattr(path, name)
 }
 
 /// Remove an extended attribute by file descriptor.
-///
-/// Stub: returns -1 with ENOTSUP.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fremovexattr(
-    _fd: i32,
-    _name: *const u8,
-) -> i32 {
-    errno::set_errno(errno::ENOTSUP);
-    -1
+pub extern "C" fn fremovexattr(fd: i32, name: *const u8) -> i32 {
+    if fd < 0 || crate::fdtable::get_fd(fd).is_none() {
+        errno::set_errno(errno::EBADF);
+        return -1;
+    }
+    if name.is_null() {
+        errno::set_errno(errno::EFAULT);
+        return -1;
+    }
+    #[cfg(target_os = "none")]
+    {
+        let mut buf = [0u8; crate::unistd::PATH_MAX];
+        let Some(len) = fd_to_path(fd, &mut buf) else {
+            return -1;
+        };
+        do_removexattr(buf.as_ptr(), len, name)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+//
+// These run on the host build, where the kernel syscalls are not issued.
+// They exercise the argument-validation surface (NULL path/name → EFAULT,
+// bad/closed fd → EBADF, conflicting setxattr flags → EINVAL) and confirm
+// that well-formed calls return the validation-only success value.
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fdtable::{self, HandleKind};
 
     // -- Constants --
 
@@ -220,299 +494,243 @@ mod tests {
         assert_eq!(XATTR_CREATE & XATTR_REPLACE, 0);
     }
 
-    // -- getxattr family returns ENOTSUP --
+    #[test]
+    fn test_setxattr_flags_valid() {
+        assert!(setxattr_flags_valid(0));
+        assert!(setxattr_flags_valid(XATTR_CREATE));
+        assert!(setxattr_flags_valid(XATTR_REPLACE));
+        // Both at once is contradictory → EINVAL.
+        assert!(!setxattr_flags_valid(XATTR_CREATE | XATTR_REPLACE));
+        // Unknown bit → EINVAL.
+        assert!(!setxattr_flags_valid(0x100));
+    }
+
+    // -- NULL path/name → EFAULT --
 
     #[test]
-    fn test_getxattr_enotsup() {
+    fn test_getxattr_null_path_efault() {
         errno::set_errno(0);
-        let result = getxattr(
-            b"/tmp/test\0".as_ptr(),
-            b"user.test\0".as_ptr(),
-            core::ptr::null_mut(),
-            0,
+        assert_eq!(
+            getxattr(core::ptr::null(), b"user.test\0".as_ptr(), core::ptr::null_mut(), 0),
+            -1
         );
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_lgetxattr_enotsup() {
+    fn test_getxattr_null_name_efault() {
         errno::set_errno(0);
-        let result = lgetxattr(
-            b"/tmp/test\0".as_ptr(),
-            b"user.test\0".as_ptr(),
-            core::ptr::null_mut(),
-            0,
+        assert_eq!(
+            getxattr(b"/tmp/test\0".as_ptr(), core::ptr::null(), core::ptr::null_mut(), 0),
+            -1
         );
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_fgetxattr_enotsup() {
+    fn test_setxattr_null_path_efault() {
         errno::set_errno(0);
-        let result = fgetxattr(3, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0);
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    // -- setxattr family returns ENOTSUP --
-
-    #[test]
-    fn test_setxattr_enotsup() {
-        errno::set_errno(0);
-        let result = setxattr(
-            b"/tmp/test\0".as_ptr(),
-            b"user.test\0".as_ptr(),
-            b"value\0".as_ptr(),
-            5,
-            0,
+        assert_eq!(
+            setxattr(core::ptr::null(), b"user.test\0".as_ptr(), core::ptr::null(), 0, 0),
+            -1
         );
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_setxattr_create_flag_enotsup() {
+    fn test_listxattr_null_path_efault() {
         errno::set_errno(0);
-        let result = setxattr(
-            b"/tmp/test\0".as_ptr(),
-            b"user.test\0".as_ptr(),
-            b"value\0".as_ptr(),
-            5,
-            XATTR_CREATE,
+        assert_eq!(listxattr(core::ptr::null(), core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_removexattr_null_path_efault() {
+        errno::set_errno(0);
+        assert_eq!(removexattr(core::ptr::null(), b"user.test\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_removexattr_null_name_efault() {
+        errno::set_errno(0);
+        assert_eq!(removexattr(b"/tmp/test\0".as_ptr(), core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    #[test]
+    fn test_lgetxattr_null_name_efault() {
+        errno::set_errno(0);
+        assert_eq!(
+            lgetxattr(b"/tmp\0".as_ptr(), core::ptr::null(), core::ptr::null_mut(), 0),
+            -1
         );
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_lsetxattr_enotsup() {
+    fn test_lsetxattr_null_name_efault() {
         errno::set_errno(0);
-        let result = lsetxattr(
-            b"/tmp/test\0".as_ptr(),
-            b"user.test\0".as_ptr(),
-            b"value\0".as_ptr(),
-            5,
-            0,
+        assert_eq!(
+            lsetxattr(b"/tmp\0".as_ptr(), core::ptr::null(), core::ptr::null(), 0, 0),
+            -1
         );
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
-    fn test_fsetxattr_enotsup() {
+    fn test_lremovexattr_null_name_efault() {
         errno::set_errno(0);
-        let result = fsetxattr(3, b"user.test\0".as_ptr(), b"value\0".as_ptr(), 5, 0);
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    // -- listxattr family returns ENOTSUP --
-
-    #[test]
-    fn test_listxattr_enotsup() {
-        errno::set_errno(0);
-        let result = listxattr(b"/tmp/test\0".as_ptr(), core::ptr::null_mut(), 0);
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    #[test]
-    fn test_llistxattr_enotsup() {
-        errno::set_errno(0);
-        let result = llistxattr(b"/tmp/test\0".as_ptr(), core::ptr::null_mut(), 0);
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    #[test]
-    fn test_flistxattr_enotsup() {
-        errno::set_errno(0);
-        let result = flistxattr(3, core::ptr::null_mut(), 0);
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    // -- removexattr family returns ENOTSUP --
-
-    #[test]
-    fn test_removexattr_enotsup() {
-        errno::set_errno(0);
-        let result = removexattr(b"/tmp/test\0".as_ptr(), b"user.test\0".as_ptr());
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    #[test]
-    fn test_lremovexattr_enotsup() {
-        errno::set_errno(0);
-        let result = lremovexattr(b"/tmp/test\0".as_ptr(), b"user.test\0".as_ptr());
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    #[test]
-    fn test_fremovexattr_enotsup() {
-        errno::set_errno(0);
-        let result = fremovexattr(3, b"user.test\0".as_ptr());
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    // -- Null pointer handling (should still return ENOTSUP, not crash) --
-
-    #[test]
-    fn test_getxattr_null_path() {
-        errno::set_errno(0);
-        let result = getxattr(
-            core::ptr::null(),
-            b"user.test\0".as_ptr(),
-            core::ptr::null_mut(),
-            0,
-        );
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    #[test]
-    fn test_setxattr_null_path() {
-        errno::set_errno(0);
-        let result = setxattr(
-            core::ptr::null(),
-            b"user.test\0".as_ptr(),
-            core::ptr::null(),
-            0,
-            0,
-        );
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    #[test]
-    fn test_listxattr_null_path() {
-        errno::set_errno(0);
-        let result = listxattr(core::ptr::null(), core::ptr::null_mut(), 0);
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    #[test]
-    fn test_removexattr_null_path() {
-        errno::set_errno(0);
-        let result = removexattr(core::ptr::null(), core::ptr::null());
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    // -- getxattr with buffer --
-
-    #[test]
-    fn test_getxattr_with_buffer_enotsup() {
-        errno::set_errno(0);
-        let mut buf = [0u8; 256];
-        let result = getxattr(
-            b"/tmp/test\0".as_ptr(),
-            b"user.test\0".as_ptr(),
-            buf.as_mut_ptr(),
-            buf.len(),
-        );
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    #[test]
-    fn test_listxattr_with_buffer_enotsup() {
-        errno::set_errno(0);
-        let mut buf = [0u8; 256];
-        let result = listxattr(
-            b"/tmp/test\0".as_ptr(),
-            buf.as_mut_ptr(),
-            buf.len(),
-        );
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    // -- setxattr with XATTR_REPLACE flag --
-
-    #[test]
-    fn test_setxattr_replace_flag_enotsup() {
-        errno::set_errno(0);
-        let result = setxattr(
-            b"/tmp/test\0".as_ptr(),
-            b"user.test\0".as_ptr(),
-            b"value\0".as_ptr(),
-            5,
-            XATTR_REPLACE,
-        );
-        assert_eq!(result, -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
-    }
-
-    // -- fd-based variants with negative/zero fds --
-
-    #[test]
-    fn test_fgetxattr_fd_zero() {
-        assert_eq!(fgetxattr(0, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0), -1);
-    }
-
-    #[test]
-    fn test_fsetxattr_fd_zero() {
-        assert_eq!(fsetxattr(0, b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, 0), -1);
-    }
-
-    #[test]
-    fn test_flistxattr_fd_zero() {
-        assert_eq!(flistxattr(0, core::ptr::null_mut(), 0), -1);
-    }
-
-    #[test]
-    fn test_fremovexattr_fd_zero() {
-        assert_eq!(fremovexattr(0, b"user.test\0".as_ptr()), -1);
-    }
-
-    #[test]
-    fn test_fgetxattr_negative_fd() {
-        assert_eq!(fgetxattr(-1, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0), -1);
-    }
-
-    #[test]
-    fn test_fsetxattr_negative_fd() {
-        assert_eq!(fsetxattr(-1, b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, 0), -1);
-    }
-
-    #[test]
-    fn test_flistxattr_negative_fd() {
-        assert_eq!(flistxattr(-1, core::ptr::null_mut(), 0), -1);
-    }
-
-    #[test]
-    fn test_fremovexattr_negative_fd() {
-        assert_eq!(fremovexattr(-1, b"user.test\0".as_ptr()), -1);
-    }
-
-    // -- lgetxattr / lsetxattr / llistxattr / lremovexattr null args --
-
-    #[test]
-    fn test_lgetxattr_null_name() {
-        assert_eq!(lgetxattr(b"/tmp\0".as_ptr(), core::ptr::null(), core::ptr::null_mut(), 0), -1);
-    }
-
-    #[test]
-    fn test_lsetxattr_null_name() {
-        assert_eq!(lsetxattr(b"/tmp\0".as_ptr(), core::ptr::null(), core::ptr::null(), 0, 0), -1);
-    }
-
-    #[test]
-    fn test_lremovexattr_null_name() {
         assert_eq!(lremovexattr(b"/tmp\0".as_ptr(), core::ptr::null()), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+    }
+
+    // -- Conflicting / invalid setxattr flags → EINVAL --
+
+    #[test]
+    fn test_setxattr_both_flags_einval() {
+        errno::set_errno(0);
+        assert_eq!(
+            setxattr(
+                b"/tmp/test\0".as_ptr(),
+                b"user.test\0".as_ptr(),
+                b"value\0".as_ptr(),
+                5,
+                XATTR_CREATE | XATTR_REPLACE,
+            ),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
-    fn test_llistxattr_null_path_enotsup() {
+    fn test_setxattr_unknown_flag_einval() {
         errno::set_errno(0);
-        assert_eq!(llistxattr(core::ptr::null(), core::ptr::null_mut(), 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOTSUP);
+        assert_eq!(
+            setxattr(b"/tmp/test\0".as_ptr(), b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, 0x40),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EINVAL);
+    }
+
+    // -- fd variants: bad fd → EBADF --
+
+    #[test]
+    fn test_fgetxattr_negative_fd_ebadf() {
+        errno::set_errno(0);
+        assert_eq!(fgetxattr(-1, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_fsetxattr_negative_fd_ebadf() {
+        errno::set_errno(0);
+        assert_eq!(fsetxattr(-1, b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, 0), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_flistxattr_negative_fd_ebadf() {
+        errno::set_errno(0);
+        assert_eq!(flistxattr(-1, core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_fremovexattr_negative_fd_ebadf() {
+        errno::set_errno(0);
+        assert_eq!(fremovexattr(-1, b"user.test\0".as_ptr()), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_fgetxattr_unopen_fd_ebadf() {
+        let probe: i32 = 0x4000_0010;
+        if fdtable::get_fd(probe).is_some() {
+            let _ = fdtable::close_fd(probe);
+        }
+        errno::set_errno(0);
+        assert_eq!(fgetxattr(probe, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    #[test]
+    fn test_fsetxattr_bad_fd_beats_flag_check() {
+        // EBADF is reported before the flag validation, matching the order
+        // Linux uses (the fd is checked first).
+        errno::set_errno(0);
+        assert_eq!(
+            fsetxattr(-1, b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, XATTR_CREATE | XATTR_REPLACE),
+            -1
+        );
+        assert_eq!(errno::get_errno(), errno::EBADF);
+    }
+
+    // -- fd variants: NULL name on a valid fd → EFAULT --
+
+    #[test]
+    fn test_fgetxattr_open_fd_null_name_efault() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        errno::set_errno(0);
+        assert_eq!(fgetxattr(fd, core::ptr::null(), core::ptr::null_mut(), 0), -1);
+        assert_eq!(errno::get_errno(), errno::EFAULT);
+        let _ = fdtable::close_fd(fd);
+    }
+
+    // -- Host validation-only success path --
+
+    #[test]
+    fn test_getxattr_valid_returns_zero_on_host() {
+        // On the host build the syscall is skipped; a well-formed call
+        // returns 0 (zero-length result) after validation.
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            getxattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr(), buf.as_mut_ptr(), buf.len()),
+            0
+        );
+    }
+
+    #[test]
+    fn test_setxattr_valid_returns_zero_on_host() {
+        assert_eq!(
+            setxattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr(), b"value\0".as_ptr(), 5, 0),
+            0
+        );
+    }
+
+    #[test]
+    fn test_setxattr_create_flag_valid_on_host() {
+        assert_eq!(
+            setxattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, XATTR_CREATE),
+            0
+        );
+    }
+
+    #[test]
+    fn test_setxattr_replace_flag_valid_on_host() {
+        assert_eq!(
+            setxattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, XATTR_REPLACE),
+            0
+        );
+    }
+
+    #[test]
+    fn test_listxattr_valid_returns_zero_on_host() {
+        let mut buf = [0u8; 64];
+        assert_eq!(listxattr(b"/etc/passwd\0".as_ptr(), buf.as_mut_ptr(), buf.len()), 0);
+    }
+
+    #[test]
+    fn test_removexattr_valid_returns_zero_on_host() {
+        assert_eq!(removexattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr()), 0);
+    }
+
+    #[test]
+    fn test_fgetxattr_open_fd_returns_zero_on_host() {
+        let fd = fdtable::alloc_fd(HandleKind::File, 0)
+            .expect("alloc_fd File failed");
+        assert_eq!(fgetxattr(fd, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0), 0);
+        let _ = fdtable::close_fd(fd);
     }
 }

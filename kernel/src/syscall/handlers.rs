@@ -5215,21 +5215,31 @@ pub fn sys_fs_get_xattr(args: &SyscallArgs) -> SyscallResult {
 
     let out_ptr = args.arg3 as *mut u8;
     let capacity = args.arg4 as usize;
-    if out_ptr.is_null() || capacity == 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg3, capacity) {
-        return SyscallResult::err(e);
+    // capacity == 0 is a valid "size query" (POSIX getxattr): the caller
+    // wants the attribute length without copying, so don't require a buffer.
+    // Only validate the output buffer when one is actually provided.
+    if capacity > 0 {
+        if out_ptr.is_null() {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg3, capacity) {
+            return SyscallResult::err(e);
+        }
     }
 
     match crate::fs::Vfs::get_xattr(path, key) {
         Ok(val) => {
-            let copy_len = val.len().min(capacity);
-            // SAFETY: out_ptr validated for capacity bytes.
-            unsafe {
-                core::ptr::copy_nonoverlapping(val.as_ptr(), out_ptr, copy_len);
+            // Copy as much as fits, but always report the TRUE length so the
+            // caller can perform a size query or detect truncation (ERANGE).
+            if capacity > 0 {
+                let copy_len = val.len().min(capacity);
+                // SAFETY: out_ptr validated for capacity bytes above, and
+                // copy_len <= capacity.
+                unsafe {
+                    core::ptr::copy_nonoverlapping(val.as_ptr(), out_ptr, copy_len);
+                }
             }
-            SyscallResult::ok(copy_len as i64)
+            SyscallResult::ok(val.len() as i64)
         }
         Err(e) => SyscallResult::err(e),
     }
@@ -5363,11 +5373,16 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
     };
     let out_ptr = args.arg2 as *mut u8;
     let capacity = args.arg3 as usize;
-    if out_ptr.is_null() || capacity == 0 {
-        return SyscallResult::err(KernelError::InvalidArgument);
-    }
-    if let Err(e) = crate::mm::user::validate_user_write(args.arg2, capacity) {
-        return SyscallResult::err(e);
+    // capacity == 0 is a valid "size query" (POSIX listxattr): return the
+    // total bytes needed without writing.  Validate the buffer only when one
+    // is provided.
+    if capacity > 0 {
+        if out_ptr.is_null() {
+            return SyscallResult::err(KernelError::InvalidArgument);
+        }
+        if let Err(e) = crate::mm::user::validate_user_write(args.arg2, capacity) {
+            return SyscallResult::err(e);
+        }
     }
 
     let keys = match crate::fs::Vfs::list_xattrs(path) {
@@ -5375,22 +5390,35 @@ pub fn sys_fs_list_xattrs(args: &SyscallArgs) -> SyscallResult {
         Err(e) => return SyscallResult::err(e),
     };
 
-    // Pack keys as null-terminated strings.
-    let mut offset = 0usize;
+    // Total size of the packed null-terminated key list.
+    let mut total = 0usize;
     for key in &keys {
-        let needed = key.len().wrapping_add(1); // +1 for null terminator
-        if offset.wrapping_add(needed) > capacity {
-            break;
-        }
-        // SAFETY: out_ptr validated for capacity bytes.
-        unsafe {
-            core::ptr::copy_nonoverlapping(key.as_ptr(), out_ptr.add(offset), key.len());
-            *out_ptr.add(offset.wrapping_add(key.len())) = 0;
-        }
-        offset = offset.wrapping_add(needed);
+        total = total.wrapping_add(key.len().wrapping_add(1));
     }
 
-    SyscallResult::ok(offset as i64)
+    // Only fill the buffer when the whole list fits; otherwise report the
+    // required size and let the caller retry with a bigger buffer (the posix
+    // layer maps total > capacity to ERANGE).  This avoids handing back a
+    // partially-packed list that the caller cannot distinguish from a
+    // complete one.
+    if capacity > 0 && total <= capacity {
+        let mut offset = 0usize;
+        for key in &keys {
+            // SAFETY: total <= capacity and out_ptr is validated for
+            // capacity bytes, so every write stays in bounds.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    key.as_ptr(),
+                    out_ptr.add(offset),
+                    key.len(),
+                );
+                *out_ptr.add(offset.wrapping_add(key.len())) = 0;
+            }
+            offset = offset.wrapping_add(key.len().wrapping_add(1));
+        }
+    }
+
+    SyscallResult::ok(total as i64)
 }
 
 // ---------------------------------------------------------------------------

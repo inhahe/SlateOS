@@ -1784,7 +1784,7 @@ fn lookup_fd(fd: Fd) -> Option<fdtable::FdEntry> {
 /// returns its byte length.  On failure sets errno to `ENAMETOOLONG`
 /// and returns `None`.
 #[must_use]
-fn resolve_or_err(
+pub(crate) fn resolve_or_err(
     path: *const u8,
     resolved: &mut [u8; crate::unistd::PATH_MAX],
 ) -> Option<usize> {

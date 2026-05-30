@@ -280,6 +280,61 @@ pub fn close_watch(watch_id: u64) -> KernelResult<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Path matching
+// ---------------------------------------------------------------------------
+
+/// Determine whether `candidate` (an absolute path from a VFS
+/// operation) falls under a watch whose normalized directory path is
+/// `watch_path` (always stored with a trailing `/`, see
+/// [`create_watch`]).
+///
+/// Two cases match:
+///
+/// 1. **The watched path itself** — `candidate` equals `watch_path`
+///    with its trailing slash stripped.  This surfaces "self" events
+///    such as the watched directory (or a watched file) being deleted
+///    or renamed.
+/// 2. **A path inside the watched directory** — for a non-recursive
+///    watch only direct children match; for a recursive watch any
+///    descendant matches.
+///
+/// # Why a dedicated helper
+///
+/// The previous inline matcher tested
+/// `candidate.as_bytes().get(watch_path.len()) == Some(&b'/')` to
+/// confirm a separator boundary.  That was a bug: because `watch_path`
+/// already ends in `/`, the byte at `watch_path.len()` is the first
+/// character of the *child name*, never a separator — so no child
+/// event ever matched and the notification system delivered only
+/// self-events.  A `strip_prefix` against the slash-terminated
+/// `watch_path` inherently guarantees the boundary, so no extra check
+/// is needed.
+fn path_matches(watch_path: &str, recursive: bool, candidate: &str) -> bool {
+    // Case 1: the watched path itself (watch_path minus trailing '/').
+    if let Some(bare) = watch_path.strip_suffix('/') {
+        if candidate == bare {
+            return true;
+        }
+    }
+    // Case 2: inside the watched directory.  The trailing '/' on
+    // `watch_path` makes a successful prefix match a guaranteed
+    // separator boundary.
+    if let Some(remainder) = candidate.strip_prefix(watch_path) {
+        if remainder.is_empty() {
+            // candidate == watch_path including its trailing slash;
+            // treat as the directory itself.
+            return true;
+        }
+        if recursive {
+            return true;
+        }
+        // Non-recursive: only direct children (no further separator).
+        return !remainder.contains('/');
+    }
+    false
+}
+
+// ---------------------------------------------------------------------------
 // Event emission — called by VFS
 // ---------------------------------------------------------------------------
 
@@ -305,51 +360,14 @@ pub fn emit(event_type: FsEventType, path: &str, new_path: Option<&str>) {
             continue;
         }
 
-        // Does the path match the watched directory?
-        let matched = if path == watch.path
-            || (path.starts_with(&watch.path)
-                && path.as_bytes().get(watch.path.len()) == Some(&b'/'))
-        {
-            // Path is inside the watched directory.
-            if watch.recursive {
-                true
-            } else {
-                // Non-recursive: only match direct children.
-                // The remaining path after the watch prefix should have
-                // no more '/' characters (it's a direct child).
-                let remainder = &path[watch.path.len()..];
-                !remainder.contains('/')
-            }
-        } else if watch.path.starts_with(path) && watch.path.len() == path.len() + 1 {
-            // The path IS the watched directory itself (without trailing /).
-            true
-        } else {
-            false
-        };
+        // Does the affected path (or, for renames, the destination
+        // path) fall under this watch?
+        let matched = path_matches(&watch.path, watch.recursive, path)
+            || new_path
+                .is_some_and(|np| path_matches(&watch.path, watch.recursive, np));
 
         if !matched {
-            // Also check for rename where new_path matches.
-            if let Some(np) = new_path {
-                let np_matched = if np == watch.path
-                    || (np.starts_with(&watch.path)
-                        && np.as_bytes().get(watch.path.len()) == Some(&b'/'))
-                {
-                    if watch.recursive {
-                        true
-                    } else {
-                        let remainder = &np[watch.path.len()..];
-                        !remainder.contains('/')
-                    }
-                } else {
-                    false
-                };
-
-                if !np_matched {
-                    continue;
-                }
-            } else {
-                continue;
-            }
+            continue;
         }
 
         // Event coalescing: if an identical event (same type + path) is
@@ -425,6 +443,23 @@ pub fn emit_metadata(path: &str) {
 #[allow(clippy::arithmetic_side_effects)]
 pub fn self_test() -> KernelResult<()> {
     crate::serial_println!("[notify] Running self-test...");
+
+    // Regression guard for the slash-boundary matching bug: a watch on
+    // a directory must match its direct children and itself, but not
+    // grandchildren (unless recursive) or unrelated siblings.
+    if !path_matches("/docs/", false, "/docs/file.txt")
+        || !path_matches("/docs/", false, "/docs")
+        || path_matches("/docs/", false, "/docs/sub/file.txt")
+        || !path_matches("/docs/", true, "/docs/sub/file.txt")
+        || path_matches("/docs/", false, "/docsx")
+        || path_matches("/docs/", false, "/other")
+        || !path_matches("/", false, "/file.txt")
+        || path_matches("/", false, "/sub/file.txt")
+    {
+        crate::serial_println!("[notify]   FAIL: path_matches boundary logic wrong");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[notify]   path_matches boundary logic verified ✓");
 
     // Create a watch on the root directory.
     let watch_id = create_watch("/", FsEventMask::ALL_CHANGES, false)?;

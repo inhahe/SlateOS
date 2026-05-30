@@ -538,6 +538,36 @@ Remaining net improvements (diminishing returns):
   registry); deferred.  Within a single multi-threaded process (the
   supported case) the futex-backed semaphore is fully correct.
 
+- (DONE 2026-05-30) KERNEL BUG: fs::notify never delivered child events.
+  Found while investigating whether to rewire posix inotify (currently
+  polling-based) to the native kernel watch API (SYS_FS_WATCH_CREATE/READ/
+  CLOSE = 622/623/624).  The kernel notify module (kernel/src/fs/notify.rs)
+  IS wired into the VFS success paths (mkdir->emit_created, unlink->
+  emit_deleted, write->emit_modified, rename->emit_renamed, chmod/chown/
+  xattr->emit_metadata), so it looked like a working event source.  But the
+  emit() path-matching test was broken:
+      path.starts_with(&watch.path)
+        && path.as_bytes().get(watch.path.len()) == Some(&b'/')
+  create_watch normalizes watch.path to END WITH '/', so the byte at
+  watch.path.len() is the FIRST CHARACTER OF THE CHILD NAME, never a '/'.
+  Result: NO child event ever matched.  Only the `else if` branch (path IS
+  the watched dir itself) fired, so the system delivered self-events but
+  none of the create/delete/modify/rename events inside a watched directory
+  — i.e. the primary inotify use case was dead.  The boot self_test()
+  exercises child events and so was FAILING, but main.rs:885 only logs a
+  WARNING (non-fatal), so it shipped silently unnoticed.
+  Fix: extracted a pure `path_matches(watch_path, recursive, candidate)`
+  helper using strip_suffix('/') (self event) + strip_prefix(watch_path)
+  (inside; the trailing slash guarantees the separator boundary, so no
+  bogus byte check) and rewrote emit()'s matcher to call it for both the
+  affected path and the rename destination.  Added 8 path_matches assertions
+  to self_test as a regression guard (child match, self match, grandchild
+  reject non-recursive, grandchild accept recursive, prefix-sibling "/docsx"
+  reject, unrelated reject, root child match, root grandchild reject).
+  Kernel builds clean for x86_64-ouros; no new clippy findings in notify.rs.
+  This is a prerequisite for rewiring posix inotify off polling onto the
+  kernel watch API (next task) — without it the kernel API would be useless.
+
 - (DONE 2026-05-30) lseek() SEEK_DATA/SEEK_HOLE wired to the kernel — same
   no-op-stub bug class.  lseek rejected whence == SEEK_DATA(3) / SEEK_HOLE(4)
   with EINVAL ("whence is not a valid value") even though the kernel fully

@@ -177,6 +177,16 @@ pub struct FileMeta {
     /// Entry type (file, directory, symlink, etc.).
     pub entry_type: EntryType,
 
+    // --- Identity ---
+    /// Inode number — a filesystem-unique identifier for the underlying
+    /// object.  Two paths with the same `ino` on the same mount are the
+    /// same file (hard links).  `0` means "not available": filesystems
+    /// without a stable per-object identity (pseudo-filesystems, FAT,
+    /// ISO9660) report 0, and callers must treat 0 as "unknown" rather
+    /// than a real inode.  ext4 reports the real inode number; memfs a
+    /// stable synthetic id assigned at node creation.
+    pub ino: u64,
+
     // --- Timestamps (nanoseconds since the Unix epoch, wall-clock;
     //     0 = not available). These are absolute wall-clock times, not
     //     boot-relative monotonic times, so they are stable across
@@ -234,6 +244,7 @@ impl FileMeta {
         Self {
             size,
             entry_type,
+            ino: 0,
             created_ns: 0,
             modified_ns: 0,
             accessed_ns: 0,
@@ -255,6 +266,7 @@ impl FileMeta {
         Self {
             size,
             entry_type,
+            ino: 0,
             created_ns: now,
             modified_ns: now,
             accessed_ns: now,

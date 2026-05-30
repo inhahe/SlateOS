@@ -4222,8 +4222,9 @@ pub fn sys_fs_rmdir(args: &SyscallArgs) -> SyscallResult {
 ///   [48..56] accessed_ns  (u64)
 ///   [56..64] changed_ns   (u64)
 ///   [64..72] created_ns   (u64)
+///   [72..80] ino          (u64, inode number; 0 = not available)
 /// ```
-pub const FS_STAT_RESULT_LEN: usize = 72;
+pub const FS_STAT_RESULT_LEN: usize = 80;
 
 /// Serialize file metadata into a user `FsStatResult` buffer.
 ///
@@ -4266,6 +4267,7 @@ unsafe fn write_fs_stat_result(out_ptr: *mut u8, meta: &crate::fs::FileMeta) {
         core::ptr::write_unaligned(out_ptr.add(48).cast::<u64>(), meta.accessed_ns);
         core::ptr::write_unaligned(out_ptr.add(56).cast::<u64>(), meta.changed_ns);
         core::ptr::write_unaligned(out_ptr.add(64).cast::<u64>(), meta.created_ns);
+        core::ptr::write_unaligned(out_ptr.add(72).cast::<u64>(), meta.ino);
     }
 }
 

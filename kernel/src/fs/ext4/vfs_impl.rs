@@ -127,6 +127,7 @@ impl Ext4Fs {
         Ok(FileMeta {
             size,
             entry_type,
+            ino: u64::from(ino),
             created_ns,
             modified_ns,
             accessed_ns,

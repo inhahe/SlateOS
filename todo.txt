@@ -457,12 +457,28 @@ Remaining net improvements (diminishing returns):
       kernel writes 72 bytes).  userspace/sshd's SYS_FS_STAT const is dead
       (never called) so no buffer there to fix.
   REMAINING GAPS (documented, not blocking):
-    * st_ino is still 0 — fs::FileMeta has no ino field.  To populate it,
-      add FileMeta.ino and have ext4 (inode number) and memfs (synthetic id)
-      fill it, then write it at a new offset and read it in fill_from_fsstat.
     * created_ns (birth time) is carried in the buffer @64 but struct stat
       has no btime field; surface it via statx STATX_BTIME once that path is
       wired (statx currently reads from struct stat, which drops it).
+
+- (DONE 2026-05-30) st_ino now populated (the remaining-gap note above is
+  RESOLVED).  Added fs::FileMeta.ino (u64; 0 = not available) and surfaced it
+  through the stat ABI.  FsStatResult grew 72 -> 80 bytes (ino u64 @72); the
+  first 72 bytes are unchanged so consumers of the earlier layout keep
+  working.  Population by filesystem:
+    * ext4: real inode number (meta_from_ino uses the resolved ino).
+    * memfs: stable synthetic id from a process-global AtomicU64
+      (NEXT_MEMFS_INO, starts at 1) assigned at node creation — gives correct
+      file identity for hard-link dedup / find -inum within tmpfs.
+    * FAT: first cluster (closest stable per-file id; empty files report 0).
+    * devfs/procfs/sysfs/iso9660: 0 (they build FileMeta via
+      ..FileMeta::minimal(), which now zero-fills ino) — pseudo/read-only
+      filesystems with no stable Unix inode identity.  ISO9660 could later
+      use the extent LBA if a program needs it.
+  posix/src/stat.rs reads ino @72 into st_ino; statx already copies
+  st_ino -> stx_ino so it benefits transitively.  services/init buffers
+  bumped 72 -> 80.  2 new host tests (inode passthrough, zero=unavailable);
+  17103 posix host tests pass; kernel + posix + init build clean.
 
 - (DONE 2026-05-30) statvfs/statfs family wired to the kernel (same ABI-
   mistranslation bug class as the stat fix above).  statvfs.rs had NEVER

@@ -3009,6 +3009,10 @@ impl FileSystem for FatFs {
                 Ok(FileMeta {
                     size: u64::from(e.file_size),
                     entry_type,
+                    // FAT has no inode table; the first cluster is the
+                    // closest stable per-file identifier.  Empty files
+                    // (cluster 0) report 0 = "not available".
+                    ino: u64::from(e.first_cluster),
                     created_ns,
                     modified_ns,
                     accessed_ns,

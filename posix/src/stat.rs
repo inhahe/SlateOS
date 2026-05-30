@@ -135,6 +135,7 @@ impl Stat {
 //   bytes [48..56]  accessed time (ns since epoch, u64; 0 = unknown)
 //   bytes [56..64]  changed  time (ns since epoch, u64; 0 = unknown)
 //   bytes [64..72]  created  time (ns since epoch, u64; 0 = unknown)
+//   bytes [72..80]  inode number               (u64; 0 = not available)
 //
 // Passing a `struct stat` pointer straight to those syscalls leaves
 // `st_size` (offset 48) and `st_mode` (offset 24) untouched — i.e. zero —
@@ -143,7 +144,7 @@ impl Stat {
 // correctly populated `struct stat`.
 
 /// Number of bytes the kernel writes for an `FsStatResult`.
-pub(crate) const KERNEL_STAT_LEN: usize = 72;
+pub(crate) const KERNEL_STAT_LEN: usize = 80;
 
 /// Split a nanoseconds-since-epoch value into a POSIX [`Timespec`].
 ///
@@ -178,11 +179,12 @@ fn le_u32(raw: &[u8; KERNEL_STAT_LEN], off: usize) -> u32 {
 /// ownership, block count, and the access/modify/change timestamps.  When
 /// the filesystem does not record real permission bits (`0`), they are
 /// synthesized by type the way Linux does for metadata-less filesystems
-/// (files `0644`, directories `0755`, symlinks `0777`).  `st_ino` is left
-/// zero — [`crate::fs::FileMeta`] carries no inode number yet (see
-/// `todo.txt`).  The creation time is carried in the buffer but `struct
-/// stat` has no birth-time field; it is surfaced via `statx`'s
-/// `STATX_BTIME` once that path is wired (see `todo.txt`).
+/// (files `0644`, directories `0755`, symlinks `0777`).  `st_ino` is the
+/// kernel-reported inode number (ext4 real inode, memfs synthetic id);
+/// filesystems without a stable identity report 0.  The creation time is
+/// carried in the buffer but `struct stat` has no birth-time field; it is
+/// surfaced via `statx`'s `STATX_BTIME` once that path is wired (see
+/// `todo.txt`).
 pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
     *buf = Stat::zeroed();
 
@@ -196,6 +198,7 @@ pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
     let modified_ns = le_u64(raw, 40);
     let accessed_ns = le_u64(raw, 48);
     let changed_ns = le_u64(raw, 56);
+    let ino = le_u64(raw, 72);
 
     // Map the kernel entry type to a POSIX file-type bit.  Volume labels (2)
     // and any unknown value fall back to a regular file so callers branching
@@ -217,6 +220,7 @@ pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
         }
     };
     buf.st_mode = type_bits | perm_bits;
+    buf.st_ino = ino;
     buf.st_size = i64::try_from(size).unwrap_or(i64::MAX);
     buf.st_nlink = if nlinks == 0 { 1 } else { u64::from(nlinks) };
     buf.st_uid = uid;
@@ -515,6 +519,7 @@ mod tests {
         accessed_ns: u64,
         changed_ns: u64,
         created_ns: u64,
+        ino: u64,
     ) -> [u8; KERNEL_STAT_LEN] {
         let mut raw = [0u8; KERNEL_STAT_LEN];
         raw[0..8].copy_from_slice(&size.to_le_bytes());
@@ -528,6 +533,7 @@ mod tests {
         raw[48..56].copy_from_slice(&accessed_ns.to_le_bytes());
         raw[56..64].copy_from_slice(&changed_ns.to_le_bytes());
         raw[64..72].copy_from_slice(&created_ns.to_le_bytes());
+        raw[72..80].copy_from_slice(&ino.to_le_bytes());
         raw
     }
 
@@ -614,7 +620,7 @@ mod tests {
         // When the filesystem reports real permission bits, they take
         // precedence over the synthesized type defaults.
         let raw = raw_fsstat_full(
-            100, 0, 1, 0o600, 0, 0, 0, 0, 0, 0, 0,
+            100, 0, 1, 0o600, 0, 0, 0, 0, 0, 0, 0, 0,
         );
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
@@ -625,7 +631,7 @@ mod tests {
     fn test_fill_from_fsstat_setuid_bits_preserved() {
         // Permission field carries the full 12 low bits (setuid/setgid/sticky).
         let raw = raw_fsstat_full(
-            0, 0, 1, 0o4755, 0, 0, 0, 0, 0, 0, 0,
+            0, 0, 1, 0o4755, 0, 0, 0, 0, 0, 0, 0, 0,
         );
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
@@ -635,7 +641,7 @@ mod tests {
     #[test]
     fn test_fill_from_fsstat_ownership() {
         let raw = raw_fsstat_full(
-            0, 0, 1, 0, 1000, 1001, 0, 0, 0, 0, 0,
+            0, 0, 1, 0, 1000, 1001, 0, 0, 0, 0, 0, 0,
         );
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
@@ -648,7 +654,7 @@ mod tests {
         // A non-zero block count from the filesystem is used verbatim,
         // not re-derived from size.
         let raw = raw_fsstat_full(
-            100, 0, 1, 0, 0, 0, 16, 0, 0, 0, 0,
+            100, 0, 1, 0, 0, 0, 16, 0, 0, 0, 0, 0,
         );
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
@@ -662,7 +668,7 @@ mod tests {
         let accessed = 1_400_000_000_000_000_001u64;
         let changed = 1_600_000_000_999_999_999u64;
         let raw = raw_fsstat_full(
-            0, 0, 1, 0, 0, 0, 0, modified, accessed, changed, 42,
+            0, 0, 1, 0, 0, 0, 0, modified, accessed, changed, 42, 0,
         );
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
@@ -672,6 +678,27 @@ mod tests {
         assert_eq!(st.st_atim.tv_nsec, 1);
         assert_eq!(st.st_ctim.tv_sec, 1_600_000_000);
         assert_eq!(st.st_ctim.tv_nsec, 999_999_999);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_inode_number() {
+        // The kernel-reported inode number flows through to st_ino.
+        let raw = raw_fsstat_full(
+            0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0x0123_4567_89ab_cdef,
+        );
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_ino, 0x0123_4567_89ab_cdef);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_zero_inode_is_unavailable() {
+        // Filesystems without a stable identity report 0; we pass it
+        // through unchanged (callers treat 0 as "unknown").
+        let raw = raw_fsstat(100, 0, 1);
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_ino, 0);
     }
 
     #[test]

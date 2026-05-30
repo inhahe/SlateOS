@@ -38,6 +38,23 @@ use crate::fs::vfs::{
 /// circular symlinks like `a → b → a`.
 const MAX_SYMLINK_DEPTH: usize = 40;
 
+/// Monotonic source of synthetic inode numbers for memfs nodes.
+///
+/// memfs has no on-disk inode table, but `stat()` callers (and programs
+/// that detect file identity, e.g. hard-link dedup in `cp -a`/`tar`)
+/// expect a stable, unique `st_ino` per object.  We assign one at node
+/// creation from this global counter.  Starts at 1 so 0 stays reserved
+/// for "not available" everywhere in the VFS.  The counter is process-
+/// global across all memfs mounts; uniqueness within a single mount (all
+/// that POSIX requires) is therefore guaranteed.  Wraparound after 2^64
+/// allocations is not a practical concern.
+static NEXT_MEMFS_INO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
+
+/// Allocate the next unique synthetic inode number for a memfs node.
+fn alloc_memfs_ino() -> u64 {
+    NEXT_MEMFS_INO.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+}
+
 // ---------------------------------------------------------------------------
 // Node types
 // ---------------------------------------------------------------------------
@@ -59,6 +76,9 @@ enum MemFsNodeKind {
 /// A single node in the memory filesystem tree.
 struct MemFsNode {
     kind: MemFsNodeKind,
+    /// Stable synthetic inode number (assigned at creation, never reused
+    /// for the lifetime of this node).  Surfaced as `st_ino`.
+    ino: u64,
     /// Timestamps (wall-clock: nanoseconds since the Unix epoch).
     created_ns: Timestamp,
     modified_ns: Timestamp,
@@ -80,6 +100,7 @@ impl MemFsNode {
         let now = metadata_now_ns();
         Self {
             kind: MemFsNodeKind::File(data),
+            ino: alloc_memfs_ino(),
             created_ns: now,
             modified_ns: now,
             accessed_ns: now,
@@ -96,6 +117,7 @@ impl MemFsNode {
         let now = metadata_now_ns();
         Self {
             kind: MemFsNodeKind::Dir(BTreeMap::new()),
+            ino: alloc_memfs_ino(),
             created_ns: now,
             modified_ns: now,
             accessed_ns: now,
@@ -112,6 +134,7 @@ impl MemFsNode {
         let now = metadata_now_ns();
         Self {
             kind: MemFsNodeKind::Symlink(target),
+            ino: alloc_memfs_ino(),
             created_ns: now,
             modified_ns: now,
             accessed_ns: now,
@@ -210,6 +233,7 @@ impl MemFsNode {
         FileMeta {
             size: self.size(),
             entry_type: self.entry_type(),
+            ino: self.ino,
             created_ns: self.created_ns,
             modified_ns: self.modified_ns,
             accessed_ns: self.accessed_ns,

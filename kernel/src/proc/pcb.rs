@@ -1022,6 +1022,11 @@ fn destroy_process_resources(
     // Drop any signal state (pending set, blocked mask, trampoline).
     crate::proc::signal::remove(pid);
 
+    // Release any advisory file locks (flock) held by this process.
+    // Locks are owner-keyed by PID; without this a crashed lock holder
+    // would block every other waiter on that path until reboot.
+    crate::fs::Vfs::funlock_all(pid);
+
     // Close all IPC handles owned by this process.
     crate::ipc::cleanup_handles(ipc_handles);
 

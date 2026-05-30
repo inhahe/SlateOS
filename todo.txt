@@ -479,6 +479,46 @@ Remaining net improvements (diminishing returns):
   bumped 72 -> 80.  2 new host tests (inode passthrough, zero=unavailable);
   17103 posix host tests pass; kernel + posix + init build clean.
 
+- (DONE 2026-05-30) flock() wired to the kernel advisory-lock table — same
+  no-op-stub bug class.  flock was a validate-then-return-0 stub ("our kernel
+  does not yet enforce advisory locks") even though the kernel fully
+  implements SYS_FS_FLOCK=609 / SYS_FS_FUNLOCK=640 backed by a per-path,
+  owner-keyed lock table (Vfs::flock/funlock/funlock_all).  A no-op flock
+  provides ZERO mutual exclusion, so every program relying on lock files
+  (package managers, dpkg/apt-style tools, single-instance daemons, mail
+  spools) silently raced.
+    * Added SYS_FS_FLOCK/SYS_FS_FUNLOCK to posix syscall.rs (+ all three
+      syscall test lists).
+    * Bare-metal do_flock worker (file.rs): fd -> path via
+      fdtable::get_fd_path, owner = getpid (SYS_PROCESS_ID); LOCK_UN ->
+      SYS_FS_FUNLOCK; LOCK_SH/LOCK_EX -> SYS_FS_FLOCK (type 0/1).  LOCK_NB
+      maps WouldBlock -> EWOULDBLOCK; blocking mode polls with SYS_SLEEP(0)
+      yields between retries.  Host build stays validation-only (returns 0).
+    * KERNEL FIX (proc/pcb.rs destroy_process_resources): now calls
+      Vfs::funlock_all(pid) on process teardown.  Previously a process that
+      died holding a lock leaked it forever (every other waiter on that path
+      would block until reboot) — funlock_all existed but was only called
+      from tests.  This makes flock safe to actually use.
+  17108 posix host tests pass; bare-metal + host posix and kernel build
+  clean; the one new clippy finding (bool_to_int_with_if) was fixed.
+  JUDGMENT CALLS / DOCUMENTED LIMITATIONS:
+    1. Path-less descriptors (pipes, sockets, anonymous fds) are accepted as
+       a no-op: Linux locks the open file description's inode, but our kernel
+       lock table is keyed by resolved path and cannot represent them.
+    2. Blocking flock (no LOCK_NB) polls with a yield rather than truly
+       blocking, because SYS_FS_FLOCK is non-blocking.  A real blocking wait
+       needs a kernel wait queue / wake-on-release; deferred.
+    3. flock locks are owned by the PID (process scope), not per-OFD as on
+       Linux.  All threads/dup'd fds in a process share one lock per path.
+       Closer per-OFD semantics would need an OFD identifier in the ABI.
+    4. lockf() is STILL a no-op (intentionally NOT wired): it locks byte
+       RANGES, but the kernel lock table is whole-file only.  Mapping lockf
+       onto whole-file locks would turn independent ranges (e.g. a database
+       locking distinct records) into false contention / deadlock — strictly
+       worse than the no-op.  F_TEST also has no non-destructive kernel query
+       syscall.  Proper lockf needs kernel byte-range locks + a query
+       syscall; tracked here as a follow-up.
+
 - (DONE 2026-05-30) sync()/syncfs() wired to the kernel global flush — same
   no-op-stub bug class.  Both were pure no-ops justified by "filesystem
   writes are synchronous", yet fsync(2) already issues SYS_FS_SYNC=641 (a

@@ -3166,16 +3166,21 @@ const FLOCK_OP_MASK: i32 = LOCK_SH | LOCK_EX | LOCK_UN | LOCK_NB;
 
 /// Apply or remove an advisory lock on an open file.
 ///
-/// Validates `fd` and `operation`.  The body is a no-op success — our
-/// kernel does not yet enforce advisory locks, so programs that take a
-/// lock-file lock at startup still proceed — but a buggy caller now
-/// gets EBADF on a closed fd and EINVAL on a garbage operation, like
-/// Linux's `sys_flock` does before reaching `flock_lock_file`.
+/// Wired to the kernel advisory-lock table (`SYS_FS_FLOCK` /
+/// `SYS_FS_FUNLOCK`).  The lock is whole-file and owned by the calling
+/// process: the kernel keys locks by resolved path + owner ID (our PID),
+/// so every thread and descriptor in a process shares one lock per path.
+///
+/// Without `LOCK_NB`, a contended request blocks until the lock can be
+/// acquired; the kernel primitive is non-blocking, so we poll with a
+/// yield between attempts (see the limitation note on `do_flock`).  With
+/// `LOCK_NB`, contention returns `EWOULDBLOCK` immediately.
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
 ///   * `EINVAL` — `operation` has unknown bits, lacks one of
 ///     LOCK_SH/LOCK_EX/LOCK_UN, or names more than one of them.
+///   * `EWOULDBLOCK` — `LOCK_NB` set and the lock is held by another owner.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn flock(fd: Fd, operation: i32) -> i32 {
     if fd < 0 {
@@ -3196,7 +3201,73 @@ pub extern "C" fn flock(fd: Fd, operation: i32) -> i32 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    0
+
+    // Bare metal drives the kernel lock table; the host build has no
+    // kernel, so it stays a validation-only success.
+    #[cfg(target_os = "none")]
+    {
+        do_flock(fd, operation)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
+}
+
+/// Bare-metal worker for [`flock`]: resolve the fd to its path and drive
+/// the kernel advisory-lock syscalls.
+///
+/// A path-less descriptor (pipe, socket, anonymous fd) has no entry in
+/// the kernel's path-keyed lock table, so the request is accepted as a
+/// no-op.  Linux would lock the open file description's inode, which our
+/// path-based lock table cannot represent — documented in todo.txt.
+///
+/// LIMITATION: blocking acquisition (without `LOCK_NB`) polls with a
+/// yield because `SYS_FS_FLOCK` is non-blocking.  A true blocking wait
+/// needs a kernel wait queue; deferred (see todo.txt).
+#[cfg(target_os = "none")]
+fn do_flock(fd: Fd, operation: i32) -> i32 {
+    let mut buf = [0u8; crate::unistd::PATH_MAX];
+    let path_len = fdtable::get_fd_path(fd, &mut buf);
+    if path_len == 0 {
+        // Path-less fd: nothing in the kernel lock table to operate on.
+        return 0;
+    }
+    let owner = syscall0(SYS_PROCESS_ID) as u64;
+    let mode = operation & (LOCK_SH | LOCK_EX | LOCK_UN);
+
+    if mode == LOCK_UN {
+        let ret = syscall3(
+            SYS_FS_FUNLOCK,
+            buf.as_ptr() as u64,
+            path_len as u64,
+            owner,
+        );
+        return errno::translate(ret) as i32;
+    }
+
+    let lock_type: u64 = u64::from(mode == LOCK_EX);
+    let nonblock = operation & LOCK_NB != 0;
+    loop {
+        let ret = syscall4(
+            SYS_FS_FLOCK,
+            buf.as_ptr() as u64,
+            path_len as u64,
+            lock_type,
+            owner,
+        );
+        if ret >= 0 {
+            return 0;
+        }
+        // Negative return: map to errno (sets errno, yields -1).
+        let mapped = errno::translate(ret) as i32;
+        if !nonblock && errno::get_errno() == errno::EAGAIN {
+            // Contended blocking request: yield the CPU and retry.
+            let _ = syscall1(SYS_SLEEP, 0);
+            continue;
+        }
+        return mapped;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3214,9 +3285,17 @@ pub const F_TEST: i32 = 3;
 
 /// Lock a section of a file (POSIX `lockf`).
 ///
-/// Validates `fd` and `cmd`.  Body is a no-op success — like `flock`,
-/// advisory locking is not yet enforced — but bad fds and unknown
-/// commands now surface as Linux-shaped errors.
+/// Validates `fd` and `cmd`, then succeeds as a no-op.
+///
+/// Unlike [`flock`], `lockf` locks a *byte range* of the file.  The
+/// kernel advisory-lock table is whole-file only, so wiring `lockf` to
+/// it would lock the entire file for every range request — turning
+/// independent ranges (e.g. a database locking distinct records) into
+/// false contention and potential deadlock, which is strictly worse than
+/// the no-op.  `F_TEST` additionally has no non-destructive kernel query
+/// syscall.  A faithful `lockf` therefore needs byte-range lock support
+/// plus a lock-query syscall in the kernel; this is tracked in todo.txt.
+/// Until then the body is a validation-only no-op.
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.

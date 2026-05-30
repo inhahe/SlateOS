@@ -75,6 +75,12 @@ pub const SYS_FS_RMDIR: u64 = 605;
 pub const SYS_FS_STAT: u64 = 606;
 pub const SYS_FS_LINK: u64 = 607;
 pub const SYS_FS_STATVFS: u64 = 608;
+// Advisory whole-file locks (flock).  FLOCK args: (path_ptr, path_len,
+// lock_type, owner) where lock_type 0=shared, 1=exclusive and owner is
+// the lock-holder ID (we use the process ID).  Non-blocking: returns
+// WouldBlock on contention.  FUNLOCK args: (path_ptr, path_len, owner).
+pub const SYS_FS_FLOCK: u64 = 609;
+pub const SYS_FS_FUNLOCK: u64 = 640;
 pub const SYS_FS_OPEN: u64 = 610;
 pub const SYS_FS_CLOSE: u64 = 611;
 pub const SYS_FS_READ: u64 = 612;
@@ -377,6 +383,7 @@ mod tests {
             SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
             SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
             SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
+            SYS_FS_FLOCK, SYS_FS_FUNLOCK,
             SYS_FS_SET_TIMES, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
             SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
             SYS_FS_LIST_XATTRS,
@@ -432,6 +439,7 @@ mod tests {
             SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
             SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
             SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
+            SYS_FS_FLOCK, SYS_FS_FUNLOCK,
             SYS_FS_SET_TIMES, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
             SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
             SYS_FS_LIST_XATTRS,
@@ -605,6 +613,7 @@ mod tests {
             SYS_FS_SEEK, SYS_FS_TRUNCATE, SYS_FS_RENAME, SYS_FS_FSTAT,
             SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
             SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
+            SYS_FS_FLOCK, SYS_FS_FUNLOCK,
             SYS_FS_SET_TIMES, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
             SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
             SYS_FS_LIST_XATTRS,

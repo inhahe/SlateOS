@@ -1538,9 +1538,11 @@ pub extern "C" fn canonicalize_file_name(path: *const u8) -> *mut u8 {
 
 /// Commit all filesystem caches to stable storage.
 ///
-/// Stub: no-op.  Our filesystem doesn't have a write-back cache yet,
-/// so there is nothing to flush.  Always succeeds (void return per
-/// POSIX).
+/// Issues the kernel's global filesystem sync (`SYS_FS_SYNC`) — the same
+/// flush `fsync(2)` performs, but for every mounted filesystem rather
+/// than a single fd, which is a valid superset of the POSIX `sync(2)`
+/// guarantee.  Void return per POSIX (cannot fail).  On the host build
+/// (no kernel) this is a no-op.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sync() {
     // Issue the kernel's global filesystem sync (flush page cache and

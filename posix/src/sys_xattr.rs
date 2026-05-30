@@ -14,7 +14,11 @@ pub use crate::xattr::setxattr;
 pub use crate::xattr::lsetxattr;
 pub use crate::xattr::fsetxattr;
 pub use crate::xattr::listxattr;
+pub use crate::xattr::llistxattr;
+pub use crate::xattr::flistxattr;
 pub use crate::xattr::removexattr;
+pub use crate::xattr::lremovexattr;
+pub use crate::xattr::fremovexattr;
 
 // ---------------------------------------------------------------------------
 // Flags
@@ -50,7 +54,9 @@ mod tests {
             core::ptr::null_mut(),
             0,
         );
-        // Returns -1 (ENOTSUP stub).
+        // Host build is validation-only: a well-formed call returns 0.
+        // On bare metal this issues SYS_FS_GET_XATTR and returns the
+        // attribute length or a negative errno.
         assert!(ret <= 0);
     }
 

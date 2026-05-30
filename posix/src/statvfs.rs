@@ -103,6 +103,11 @@ pub const ST_NOSUID: u64 = 2;
 //   [49..64] reserved
 
 /// Number of bytes the kernel writes for a `SYS_FS_STATVFS` result.
+///
+/// Only referenced by the syscall-decoding helpers below, which are
+/// compiled on bare metal (and under `test`); a plain host build does
+/// not use it.
+#[cfg(any(target_os = "none", test))]
 const KERNEL_STATVFS_LEN: usize = 64;
 
 /// Read a little-endian `u64` at `off` from a kernel statvfs block.

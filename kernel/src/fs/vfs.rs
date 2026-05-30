@@ -106,10 +106,28 @@ impl FileAttr {
     }
 }
 
-/// Nanosecond timestamp (monotonic or wall-clock, depending on source).
+/// Nanosecond timestamp (wall-clock: nanoseconds since the Unix epoch).
 ///
 /// 0 means "not set" or "unknown".
 pub type Timestamp = u64;
+
+/// Current wall-clock time for filesystem metadata timestamps.
+///
+/// File timestamps (created/modified/accessed/changed) must be wall-clock
+/// (nanoseconds since the Unix epoch) so that `stat`/`ls -l` report real
+/// dates and on-disk ext4 inode times are correct. We deliberately use
+/// `clock_realtime()` rather than the boot-relative `hpet::elapsed_ns()`:
+/// a file created 5s after boot must not show as 1970-01-01 00:00:05.
+///
+/// Returns 0 before the RTC is initialized (same "unknown" sentinel as an
+/// unset timestamp), and may step backwards if the wall clock is adjusted —
+/// both are acceptable for metadata, and the relatime comparisons below use
+/// `saturating_sub` so a backwards step simply yields no atime update.
+#[inline]
+#[must_use]
+pub fn metadata_now_ns() -> Timestamp {
+    crate::timekeeping::clock_realtime()
+}
 
 /// One day in nanoseconds (for relatime threshold).
 const ONE_DAY_NS: u64 = 86_400_000_000_000;
@@ -230,7 +248,7 @@ impl FileMeta {
 
     /// Create metadata with timestamps set to "now".
     pub fn with_timestamps(entry_type: EntryType, size: u64) -> Self {
-        let now = crate::hpet::elapsed_ns();
+        let now = metadata_now_ns();
         Self {
             size,
             entry_type,
@@ -258,7 +276,7 @@ impl FileMeta {
     /// Returns `true` if `accessed_ns` is older than `modified_ns`
     /// or more than one day old.
     pub fn should_update_atime(&self) -> bool {
-        let now = crate::hpet::elapsed_ns();
+        let now = metadata_now_ns();
         // Update if atime is older than mtime.
         if self.accessed_ns < self.modified_ns {
             return true;

@@ -298,6 +298,60 @@ pub fn self_test() -> KernelResult<()> {
         serial_println!("[ext4]     symlink test files cleaned up OK");
     }
 
+    // --- Create/modify timestamp test ---
+    // Verifies that newly created files get wall-clock (epoch) timestamps
+    // rather than boot-relative ones, and that overwriting bumps mtime.
+    serial_println!("[ext4]   Testing create/modify timestamps...");
+    {
+        let ct_path = if root == "/" {
+            alloc::string::String::from("/_ext4_ctime_test")
+        } else {
+            format!("{}/_ext4_ctime_test", root)
+        };
+
+        // Only run the assertion if the wall clock is actually initialized.
+        // Before RTC init, clock_realtime() returns 0 and every timestamp is
+        // legitimately 0 — there is nothing to distinguish then.
+        let wall_now = crate::timekeeping::clock_realtime();
+        crate::fs::Vfs::write_file(&ct_path, b"first")?;
+        let meta1 = crate::fs::Vfs::metadata(&ct_path)?;
+
+        if wall_now != 0 {
+            // Epoch seconds since 2001-09-09 (1_000_000_000). A boot-relative
+            // timestamp a few seconds after boot would be far below this, so
+            // this cleanly distinguishes wall-clock from boot-relative.
+            let mtime_sec = meta1.modified_ns / 1_000_000_000;
+            if mtime_sec < 1_000_000_000 {
+                serial_println!(
+                    "[ext4]   FAIL: new file mtime_sec={} looks boot-relative, not epoch",
+                    mtime_sec
+                );
+                let _ = crate::fs::Vfs::remove(&ct_path);
+                return Err(crate::error::KernelError::InternalError);
+            }
+            serial_println!(
+                "[ext4]     new file has wall-clock mtime ({}s) OK",
+                mtime_sec
+            );
+        }
+
+        // Overwrite and confirm mtime does not move backwards (it should
+        // advance or stay equal at one-second resolution).
+        crate::fs::Vfs::write_file(&ct_path, b"second longer contents")?;
+        let meta2 = crate::fs::Vfs::metadata(&ct_path)?;
+        if meta2.modified_ns < meta1.modified_ns {
+            serial_println!(
+                "[ext4]   FAIL: overwrite moved mtime backwards ({} -> {})",
+                meta1.modified_ns, meta2.modified_ns
+            );
+            let _ = crate::fs::Vfs::remove(&ct_path);
+            return Err(crate::error::KernelError::InternalError);
+        }
+        serial_println!("[ext4]     overwrite preserves/advances mtime OK");
+
+        crate::fs::Vfs::remove(&ct_path)?;
+    }
+
     // --- Timestamp (set_times) test ---
     serial_println!("[ext4]   Testing set_times...");
     {

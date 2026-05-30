@@ -191,6 +191,8 @@ impl FileSystem for Ext4Fs {
                 // the extent tree — old ranges become stale.
                 self.driver.invalidate_extent_cache(ino);
                 self.driver.write_file_data(&mut new_inode, data)?;
+                // Update mtime/ctime so `stat`/`ls -l` reflect the write.
+                stamp_inode_mtime(&mut new_inode);
                 self.driver.write_inode(ino, &new_inode)?;
 
                 // Now safe to free old blocks — on-disk inode points to new data.
@@ -518,6 +520,13 @@ impl FileSystem for Ext4Fs {
             // Write is within existing file bounds — modify blocks in place.
             // No block allocation needed, no extent tree changes.
             self.driver.write_at_inplace(ino, &inode, offset, data)?;
+            // Block data changed in place but the inode itself was untouched;
+            // still bump mtime/ctime so the modification is observable.
+            if !data.is_empty() {
+                let mut new_inode = inode;
+                stamp_inode_mtime(&mut new_inode);
+                self.driver.write_inode(ino, &new_inode)?;
+            }
             self.driver.flush()?;
             Ok(())
         } else if offset == file_size {
@@ -527,6 +536,7 @@ impl FileSystem for Ext4Fs {
             let mut new_inode = inode;
             match self.driver.extend_file_data(ino, &mut new_inode, data) {
                 Ok(()) => {
+                    stamp_inode_mtime(&mut new_inode);
                     self.driver.write_inode(ino, &new_inode)?;
                     self.driver.invalidate_extent_cache(ino);
                     self.driver.write_superblock()?;
@@ -565,6 +575,7 @@ impl FileSystem for Ext4Fs {
                 let mut new_inode = self.driver.read_inode(ino)?;
                 match self.driver.extend_file_data(ino, &mut new_inode, past_eof) {
                     Ok(()) => {
+                        stamp_inode_mtime(&mut new_inode);
                         self.driver.write_inode(ino, &new_inode)?;
                         self.driver.invalidate_extent_cache(ino);
                         self.driver.write_superblock()?;
@@ -673,6 +684,7 @@ impl FileSystem for Ext4Fs {
                         .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
                     set_inode_blocks_48(&mut new_inode, total_sectors);
 
+                    stamp_inode_mtime(&mut new_inode);
                     self.driver.write_inode(ino, &new_inode)?;
                     self.driver.invalidate_extent_cache(ino);
                     self.driver.write_superblock()?;
@@ -720,6 +732,7 @@ impl FileSystem for Ext4Fs {
             .saturating_mul(u64::from(self.driver.superblock().block_size / 512));
         set_inode_blocks_48(&mut new_inode, sectors);
 
+        stamp_inode_mtime(&mut new_inode);
         self.driver.write_inode(ino, &new_inode)?;
         self.driver.invalidate_extent_cache(ino);
 
@@ -757,6 +770,7 @@ impl FileSystem for Ext4Fs {
             // Initialize an empty extent header.
             self.driver.init_extent_header_pub(&mut new_inode, 0);
 
+            stamp_inode_mtime(&mut new_inode);
             // Write the new inode first (crash-safe: inode points to
             // nothing, so the old blocks are just leaked on crash).
             self.driver.write_inode(ino, &new_inode)?;
@@ -786,6 +800,7 @@ impl FileSystem for Ext4Fs {
             let mut new_inode = inode;
             self.driver.invalidate_extent_cache(ino);
             self.driver.write_file_data(&mut new_inode, &data)?;
+            stamp_inode_mtime(&mut new_inode);
             self.driver.write_inode(ino, &new_inode)?;
 
             // Free old blocks now that inode points to new data.
@@ -807,6 +822,7 @@ impl FileSystem for Ext4Fs {
             let mut new_inode = inode;
             self.driver.invalidate_extent_cache(ino);
             self.driver.write_file_data(&mut new_inode, &data)?;
+            stamp_inode_mtime(&mut new_inode);
             self.driver.write_inode(ino, &new_inode)?;
 
             self.driver.free_inode_data(ino, &old_inode)?;
@@ -923,6 +939,8 @@ impl FileSystem for Ext4Fs {
         let type_bits = inode.i_mode & file_type::S_IFMT;
         inode.i_mode = type_bits | (permissions & 0o7777);
 
+        // chmod advances ctime (metadata change), not mtime.
+        stamp_inode_ctime(&mut inode);
         self.driver.write_inode(ino, &inode)?;
         self.driver.flush()?;
         Ok(())
@@ -936,6 +954,8 @@ impl FileSystem for Ext4Fs {
         set_inode_uid_32(&mut inode, uid);
         set_inode_gid_32(&mut inode, gid);
 
+        // chown advances ctime (metadata change), not mtime.
+        stamp_inode_ctime(&mut inode);
         self.driver.write_inode(ino, &inode)?;
         self.driver.flush()?;
         Ok(())
@@ -989,6 +1009,8 @@ impl FileSystem for Ext4Fs {
         }
         inode.i_flags = flags;
 
+        // Attribute changes advance ctime (metadata change), not mtime.
+        stamp_inode_ctime(&mut inode);
         self.driver.write_inode(ino, &inode)?;
         self.driver.flush()?;
         Ok(())
@@ -1039,6 +1061,8 @@ impl FileSystem for Ext4Fs {
             attrs.push((String::from(key), value.to_vec()));
         }
 
+        // Setting an xattr advances ctime (metadata change).
+        stamp_inode_ctime(&mut inode);
         self.driver.write_xattr_block(&mut inode, ino, &attrs)?;
         self.driver.write_superblock()?;
         self.driver.write_group_descs()?;
@@ -1059,6 +1083,8 @@ impl FileSystem for Ext4Fs {
             return Err(KernelError::NotFound);
         }
 
+        // Removing an xattr advances ctime (metadata change).
+        stamp_inode_ctime(&mut inode);
         self.driver.write_xattr_block(&mut inode, ino, &attrs)?;
         self.driver.write_superblock()?;
         self.driver.write_group_descs()?;
@@ -1570,6 +1596,27 @@ fn set_inode_blocks_48(inode: &mut super::ondisk::Ext4Inode, sectors: u64) {
     if let Some(slot) = inode.i_osd2.get_mut(1) { *slot = hi[1]; }
     // Always clear HUGE_FILE since we store sectors, not fs blocks.
     inode.i_flags &= !super::ondisk::inode_flags::HUGE_FILE;
+}
+
+/// Stamp an inode's modification and change times with the current wall clock.
+///
+/// Call this on any data- or size-mutating operation (write, append,
+/// truncate, fallocate) just before `write_inode`, so that `stat`/`ls -l`
+/// reflect the change. Times are 32-bit Unix epoch seconds in the inode core
+/// and are persisted (with checksum) by `write_inode`.
+fn stamp_inode_mtime(inode: &mut super::ondisk::Ext4Inode) {
+    let now_secs = super::driver::epoch_secs_u32();
+    inode.i_mtime = now_secs;
+    inode.i_ctime = now_secs;
+}
+
+/// Stamp an inode's change time (`i_ctime`) only, leaving mtime alone.
+///
+/// Call this on metadata-only changes — `chmod`, `chown`, attribute and
+/// xattr updates — where POSIX requires the change time to advance but the
+/// modification time (data) must be preserved.
+fn stamp_inode_ctime(inode: &mut super::ondisk::Ext4Inode) {
+    inode.i_ctime = super::driver::epoch_secs_u32();
 }
 
 /// Split a path into parent directory and final name component.

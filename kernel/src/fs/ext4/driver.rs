@@ -2506,6 +2506,18 @@ impl Ext4Driver {
         inode.i_flags = inode_flags::EXTENTS; // Use extent tree.
         inode.i_links_count = if is_dir { 2 } else { 1 }; // . and .. for dirs.
 
+        // Stamp the access/change/modify times with the current wall clock.
+        // Without this, a freshly created inode keeps the zeroed timestamps
+        // from `blank_inode()`, so `stat` would report 1970-01-01 for every
+        // new file. ext4 stores these as 32-bit Unix epoch seconds in the
+        // 128-byte core, which `write_inode` persists (with checksum). The
+        // creation time (i_crtime) lives in the extra area and is left 0 for
+        // now — see todo.txt "ext4 i_crtime (birth time) on create".
+        let now_secs = epoch_secs_u32();
+        inode.i_atime = now_secs;
+        inode.i_ctime = now_secs;
+        inode.i_mtime = now_secs;
+
         // Initialize the extent header (0 entries).
         self.init_extent_header(&mut inode, 0);
 
@@ -5149,6 +5161,21 @@ fn blank_inode() -> Ext4Inode {
     // SAFETY: Ext4Inode is repr(C) with all-integer fields.
     // Zero-initialization is a valid state (empty inode).
     unsafe { core::mem::zeroed() }
+}
+
+/// Current wall-clock time as 32-bit Unix epoch seconds for ext4 inode
+/// timestamp fields (`i_atime`/`i_ctime`/`i_mtime`).
+///
+/// Truncates to 32 bits, matching the classic ext4 on-disk format — this
+/// overflows in 2106, the well-known ext4 limit when the high epoch-extension
+/// bits in the extra area are not used. Returns 0 before the RTC is set.
+pub(crate) fn epoch_secs_u32() -> u32 {
+    let secs = crate::timekeeping::clock_realtime() / 1_000_000_000;
+    // Truncation is the documented ext4 epoch-seconds behavior (year-2106 wrap).
+    #[allow(clippy::cast_possible_truncation)]
+    {
+        secs as u32
+    }
 }
 
 // ---------------------------------------------------------------------------

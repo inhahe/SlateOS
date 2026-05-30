@@ -484,6 +484,47 @@ Remaining net improvements (diminishing returns):
   (e.g. ntpd/hwclock); until then the boot RTC value + NTP daemon adjust path
   is the only way the wall clock moves.
 
+- (DONE 2026-05-30) CRITICAL file-metadata timestamps switched to wall-clock
+  (direct follow-on to SYS_CLOCK_REALTIME above).  The kernel stored file
+  created/modified/accessed/changed times as crate::hpet::elapsed_ns()
+  (BOOT-RELATIVE), so a file created 5s after boot reported 1970-01-01
+  00:00:05 — and since ext4's vfs_impl persists FileMeta ns as epoch seconds,
+  those bogus boot-relative values were written to disk too.  Two parts:
+    * Time SOURCE fix (vfs.rs + memfs.rs): added a single documented helper
+      vfs::metadata_now_ns() -> clock_realtime() and routed every FileMeta /
+      MemFsNode timestamp site through it — FileMeta::with_timestamps,
+      should_update_atime's "now" comparison base, MemFsNode::new_file/new_dir/
+      new_symlink, touch_modified, touch_accessed_relatime, and the changed_ns
+      bumps in memfs set_attributes/set_owner/set_permissions/set_xattr/
+      remove_xattr.  All three time bases (stored mtime/atime + the relatime
+      "now") are now epoch, so relatime comparisons stay consistent; backwards
+      wall-clock steps are harmless (saturating_sub -> no atime update).
+      Deliberately did NOT touch the many monotonic elapsed_ns() uses (cache
+      TTLs, durations, /dev/uptime, atomic_write temp-name entropy, the dozens
+      of /proc-like virtual-fs state trackers) — those are correctly monotonic.
+    * ext4 inode timestamp fix (ext4/driver.rs + ext4/vfs_impl.rs): newly
+      created ext4 inodes came straight from blank_inode() (all-zero), so every
+      new file/dir/symlink had i_atime=i_ctime=i_mtime=0 (1970) AND writes
+      never updated mtime at all.  create_inode now stamps atime/ctime/mtime
+      with epoch_secs_u32() (covers create_file, mkdir, symlink — all route
+      through it).  Added stamp_inode_mtime() (data/size changes: write_file
+      overwrite, write_at in-place/append/past-EOF, truncate zero/shrink/extend,
+      fallocate) and stamp_inode_ctime() (metadata-only: chmod, chown,
+      set_attributes, set/remove xattr — per POSIX these bump ctime, not mtime),
+      applied at every data/size/metadata-mutating write_inode site.  All
+      stamped fields live in the 128-byte inode core so write_inode persists
+      them with a correct checksum.
+  LIMITATION: ext4 i_crtime (birth time) is still left 0 on create — vfs_impl
+  reads created_ns from the extra-area field at 0x90 and falls back to 0, so
+  newly created files report no btime.  Setting it requires a checksum-aware
+  write into the inode extra area (write_extra_isize-style raw writes bypass
+  the inode checksum).  Deferred until statx STATX_BTIME is actually consumed;
+  the visible atime/ctime/mtime are correct now.  Validation: added an ext4
+  runtime self-test (mod.rs) asserting a freshly created file has a wall-clock
+  mtime (mtime_sec >= 1e9, which boot-relative could never reach) and that
+  overwrite never moves mtime backwards; kernel build + clippy clean on all
+  five touched files.
+
 - (DONE 2026-05-30) CRITICAL d_type translation bug fixed (third instance of
   the kernel-ABI-mistranslation class).  SYS_FS_LIST_DIR writes a compact
   kernel type code at byte 260 of each 264-byte entry (0=file, 1=dir,

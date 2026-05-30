@@ -28,7 +28,8 @@ use alloc::vec::Vec;
 
 use crate::error::{KernelError, KernelResult};
 use crate::fs::vfs::{
-    normalize_path, DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo, Timestamp,
+    metadata_now_ns, normalize_path, DirEntry, EntryType, FileAttr, FileMeta, FileSystem, FsInfo,
+    Timestamp,
 };
 
 /// Maximum number of symlinks followed during a single path resolution.
@@ -58,7 +59,7 @@ enum MemFsNodeKind {
 /// A single node in the memory filesystem tree.
 struct MemFsNode {
     kind: MemFsNodeKind,
-    /// Timestamps (nanoseconds since boot).
+    /// Timestamps (wall-clock: nanoseconds since the Unix epoch).
     created_ns: Timestamp,
     modified_ns: Timestamp,
     accessed_ns: Timestamp,
@@ -76,7 +77,7 @@ struct MemFsNode {
 
 impl MemFsNode {
     fn new_file(data: Vec<u8>) -> Self {
-        let now = crate::hpet::elapsed_ns();
+        let now = metadata_now_ns();
         Self {
             kind: MemFsNodeKind::File(data),
             created_ns: now,
@@ -92,7 +93,7 @@ impl MemFsNode {
     }
 
     fn new_dir() -> Self {
-        let now = crate::hpet::elapsed_ns();
+        let now = metadata_now_ns();
         Self {
             kind: MemFsNodeKind::Dir(BTreeMap::new()),
             created_ns: now,
@@ -108,7 +109,7 @@ impl MemFsNode {
     }
 
     fn new_symlink(target: String) -> Self {
-        let now = crate::hpet::elapsed_ns();
+        let now = metadata_now_ns();
         Self {
             kind: MemFsNodeKind::Symlink(target),
             created_ns: now,
@@ -227,7 +228,7 @@ impl MemFsNode {
 
     /// Update modification and change timestamps to now.
     fn touch_modified(&mut self) {
-        let now = crate::hpet::elapsed_ns();
+        let now = metadata_now_ns();
         self.modified_ns = now;
         self.changed_ns = now;
     }
@@ -237,7 +238,7 @@ impl MemFsNode {
     /// Only updates if accessed_ns < modified_ns or if more than
     /// one day has elapsed since last access.
     fn touch_accessed_relatime(&mut self) {
-        let now = crate::hpet::elapsed_ns();
+        let now = metadata_now_ns();
         // Relatime: only update if atime < mtime or older than 1 day.
         if self.accessed_ns < self.modified_ns
             || now.saturating_sub(self.accessed_ns) > 86_400_000_000_000
@@ -848,7 +849,7 @@ impl FileSystem for MemFs {
     fn set_attributes(&mut self, path: &str, attrs: FileAttr) -> KernelResult<()> {
         let node = self.resolve_mut(path)?;
         node.attributes = attrs;
-        node.changed_ns = crate::hpet::elapsed_ns();
+        node.changed_ns = metadata_now_ns();
         Ok(())
     }
 
@@ -856,14 +857,14 @@ impl FileSystem for MemFs {
         let node = self.resolve_mut(path)?;
         node.uid = uid;
         node.gid = gid;
-        node.changed_ns = crate::hpet::elapsed_ns();
+        node.changed_ns = metadata_now_ns();
         Ok(())
     }
 
     fn set_permissions(&mut self, path: &str, permissions: u16) -> KernelResult<()> {
         let node = self.resolve_mut(path)?;
         node.permissions = permissions;
-        node.changed_ns = crate::hpet::elapsed_ns();
+        node.changed_ns = metadata_now_ns();
         Ok(())
     }
 
@@ -915,7 +916,7 @@ impl FileSystem for MemFs {
         if !found {
             node.xattrs.push((String::from(key), value.to_vec()));
         }
-        node.changed_ns = crate::hpet::elapsed_ns();
+        node.changed_ns = metadata_now_ns();
         Ok(())
     }
 
@@ -926,7 +927,7 @@ impl FileSystem for MemFs {
         if node.xattrs.len() == orig_len {
             return Err(KernelError::NotFound);
         }
-        node.changed_ns = crate::hpet::elapsed_ns();
+        node.changed_ns = metadata_now_ns();
         Ok(())
     }
 

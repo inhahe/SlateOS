@@ -5,10 +5,19 @@
 //!
 //! ## Implementation
 //!
-//! Our kernel doesn't have filesystem statistics syscalls yet.
-//! These stubs return reasonable defaults (large free space, 16 KiB
-//! block size matching the OS page size) so programs that check disk
-//! space don't fail.
+//! On bare metal these query the kernel `SYS_FS_STATVFS` syscall (which
+//! returns a 64-byte block: block size, total/free blocks, total/free
+//! inodes, max name length, and a read-only flag) and translate the
+//! result into the POSIX/Linux structures.  The fd-based variants look up
+//! the path stored for the descriptor and delegate to the path-based
+//! query; descriptors with no stored path (pipes, sockets) fall back to
+//! defaults.
+//!
+//! In host unit tests (where no kernel is present) the functions return
+//! reasonable defaults — large free space, 16 KiB block size matching the
+//! OS page size — so the structure-filling logic stays exercisable.  The
+//! kernel-result translation itself is tested directly via
+//! [`fill_statvfs_from_raw`] / [`fill_statfs_from_raw`].
 
 use crate::errno;
 
@@ -80,13 +89,146 @@ pub const ST_RDONLY: u64 = 1;
 pub const ST_NOSUID: u64 = 2;
 
 // ---------------------------------------------------------------------------
+// Kernel `SYS_FS_STATVFS` result translation
+// ---------------------------------------------------------------------------
+//
+// The kernel writes a fixed 64-byte block (little-endian):
+//   [0..8]   block_size    u64
+//   [8..16]  total_blocks  u64
+//   [16..24] free_blocks   u64
+//   [24..32] total_inodes  u64
+//   [32..40] free_inodes   u64
+//   [40..48] max_name_len  u64
+//   [48]     read_only     u8 (0/1)
+//   [49..64] reserved
+
+/// Number of bytes the kernel writes for a `SYS_FS_STATVFS` result.
+const KERNEL_STATVFS_LEN: usize = 64;
+
+/// Read a little-endian `u64` at `off` from a kernel statvfs block.
+#[cfg(any(target_os = "none", test))]
+fn rd_u64(raw: &[u8; KERNEL_STATVFS_LEN], off: usize) -> u64 {
+    let mut b = [0u8; 8];
+    b.copy_from_slice(&raw[off..off + 8]);
+    u64::from_le_bytes(b)
+}
+
+/// Translate a kernel statvfs block into a POSIX `struct statvfs`.
+#[cfg(any(target_os = "none", test))]
+fn fill_statvfs_from_raw(buf: &mut Statvfs, raw: &[u8; KERNEL_STATVFS_LEN]) {
+    let block_size = rd_u64(raw, 0);
+    let read_only = raw[48] != 0;
+    let max_name_len = rd_u64(raw, 40);
+
+    // Guard against a zero block size from virtual filesystems: callers
+    // such as df divide by it.
+    buf.f_bsize = if block_size == 0 { DEFAULT_BLOCK_SIZE } else { block_size };
+    buf.f_frsize = buf.f_bsize;
+    buf.f_blocks = rd_u64(raw, 8);
+    buf.f_bfree = rd_u64(raw, 16);
+    buf.f_bavail = buf.f_bfree;
+    buf.f_files = rd_u64(raw, 24);
+    buf.f_ffree = rd_u64(raw, 32);
+    buf.f_favail = buf.f_ffree;
+    buf.f_fsid = 1;
+    buf.f_flag = if read_only { ST_RDONLY } else { 0 };
+    buf.f_namemax = if max_name_len == 0 { DEFAULT_NAMEMAX } else { max_name_len };
+}
+
+/// Translate a kernel statvfs block into a Linux `struct statfs`.
+#[cfg(any(target_os = "none", test))]
+fn fill_statfs_from_raw(buf: &mut Statfs, raw: &[u8; KERNEL_STATVFS_LEN]) {
+    let block_size = rd_u64(raw, 0);
+    let read_only = raw[48] != 0;
+    let max_name_len = rd_u64(raw, 40);
+    let bsize = if block_size == 0 { DEFAULT_BLOCK_SIZE } else { block_size };
+    let namelen = if max_name_len == 0 { DEFAULT_NAMEMAX } else { max_name_len };
+
+    // The kernel ABI doesn't convey the filesystem type magic; report
+    // ext4 (the primary on-disk filesystem) as before.
+    buf.f_type = EXT4_SUPER_MAGIC;
+    buf.f_bsize = i64::try_from(bsize).unwrap_or(i64::MAX);
+    buf.f_blocks = rd_u64(raw, 8);
+    buf.f_bfree = rd_u64(raw, 16);
+    buf.f_bavail = buf.f_bfree;
+    buf.f_files = rd_u64(raw, 24);
+    buf.f_ffree = rd_u64(raw, 32);
+    buf.f_fsid = [1, 0];
+    buf.f_namelen = i64::try_from(namelen).unwrap_or(i64::MAX);
+    buf.f_frsize = buf.f_bsize;
+    buf.f_flags = if read_only { ST_RDONLY as i64 } else { 0 };
+    buf.f_spare = [0; 4];
+}
+
+/// Resolve a path and query the kernel for `struct statvfs` (bare metal).
+///
+/// `path` must be non-null (checked by the caller).
+#[cfg(target_os = "none")]
+fn query_statvfs(path: *const u8, buf: *mut Statvfs) -> i32 {
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    // SAFETY: caller guarantees `path` is a non-null valid C string.
+    let Some(len) = (unsafe { crate::unistd::resolve_path(path, &mut resolved) }) else {
+        // SAFETY: caller guarantees `path` is a valid C string.
+        if unsafe { *path } == 0 {
+            errno::set_errno(errno::ENOENT);
+        } else {
+            errno::set_errno(errno::ENAMETOOLONG);
+        }
+        return -1;
+    };
+    let mut raw = [0u8; KERNEL_STATVFS_LEN];
+    let ret = crate::syscall::syscall3(
+        crate::syscall::SYS_FS_STATVFS,
+        resolved.as_ptr() as u64,
+        len as u64,
+        raw.as_mut_ptr() as u64,
+    );
+    if ret < 0 {
+        return errno::translate(ret) as i32;
+    }
+    // SAFETY: caller guarantees `buf` is non-null and writable.
+    fill_statvfs_from_raw(unsafe { &mut *buf }, &raw);
+    0
+}
+
+/// Resolve a path and query the kernel for `struct statfs` (bare metal).
+#[cfg(target_os = "none")]
+fn query_statfs(path: *const u8, buf: *mut Statfs) -> i32 {
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    // SAFETY: caller guarantees `path` is a non-null valid C string.
+    let Some(len) = (unsafe { crate::unistd::resolve_path(path, &mut resolved) }) else {
+        // SAFETY: caller guarantees `path` is a valid C string.
+        if unsafe { *path } == 0 {
+            errno::set_errno(errno::ENOENT);
+        } else {
+            errno::set_errno(errno::ENAMETOOLONG);
+        }
+        return -1;
+    };
+    let mut raw = [0u8; KERNEL_STATVFS_LEN];
+    let ret = crate::syscall::syscall3(
+        crate::syscall::SYS_FS_STATVFS,
+        resolved.as_ptr() as u64,
+        len as u64,
+        raw.as_mut_ptr() as u64,
+    );
+    if ret < 0 {
+        return errno::translate(ret) as i32;
+    }
+    // SAFETY: caller guarantees `buf` is non-null and writable.
+    fill_statfs_from_raw(unsafe { &mut *buf }, &raw);
+    0
+}
+
+// ---------------------------------------------------------------------------
 // Functions
 // ---------------------------------------------------------------------------
 
 /// Get filesystem statistics for a path.
 ///
-/// Returns 0 on success, -1 on error.
-/// Reports 1 GiB free space on a 10 GiB filesystem as defaults.
+/// On bare metal this queries the kernel and reports the real filesystem
+/// capacity/usage.  In host tests it reports defaults (1 GiB free on a
+/// 10 GiB filesystem).  Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn statvfs(path: *const u8, buf: *mut Statvfs) -> i32 {
     if path.is_null() || buf.is_null() {
@@ -94,15 +236,23 @@ pub extern "C" fn statvfs(path: *const u8, buf: *mut Statvfs) -> i32 {
         return -1;
     }
 
-    fill_defaults(buf);
-    0
+    #[cfg(target_os = "none")]
+    {
+        query_statvfs(path, buf)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        fill_defaults(buf);
+        0
+    }
 }
 
 /// Get filesystem statistics for an open file descriptor.
 ///
 /// Validates `fd` (must be non-negative and open) and `buf` (must be
-/// non-NULL).  Since we don't yet have multiple mounted filesystems,
-/// the same default values are returned for any open fd.
+/// non-NULL).  On bare metal the path stored for the descriptor is
+/// resolved and queried; descriptors with no stored path (pipes,
+/// sockets) report defaults.
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
@@ -122,8 +272,22 @@ pub extern "C" fn fstatvfs(fd: i32, buf: *mut Statvfs) -> i32 {
         return -1;
     }
 
-    fill_defaults(buf);
-    0
+    #[cfg(target_os = "none")]
+    {
+        let mut path = [0u8; crate::unistd::PATH_MAX];
+        let len = crate::fdtable::get_fd_path(fd, &mut path);
+        if len == 0 {
+            // No stored path (pipe/socket/etc.) — report defaults.
+            fill_defaults(buf);
+            return 0;
+        }
+        query_statvfs(path.as_ptr(), buf)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        fill_defaults(buf);
+        0
+    }
 }
 
 /// Fill a Statvfs with reasonable defaults.
@@ -212,21 +376,31 @@ fn fill_statfs_defaults(buf: *mut Statfs) {
 
 /// Get filesystem statistics (Linux).
 ///
-/// Returns 0 on success, -1 on error.
+/// On bare metal this queries the kernel; in host tests it reports
+/// defaults.  Returns 0 on success, -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn statfs(path: *const u8, buf: *mut Statfs) -> i32 {
     if path.is_null() || buf.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    fill_statfs_defaults(buf);
-    0
+    #[cfg(target_os = "none")]
+    {
+        query_statfs(path, buf)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        fill_statfs_defaults(buf);
+        0
+    }
 }
 
 /// Get filesystem statistics for an fd (Linux).
 ///
 /// Validates `fd` (must be non-negative and open) and `buf` (must be
-/// non-NULL).
+/// non-NULL).  On bare metal the path stored for the descriptor is
+/// resolved and queried; descriptors with no stored path report
+/// defaults.
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
@@ -245,8 +419,21 @@ pub extern "C" fn fstatfs(fd: i32, buf: *mut Statfs) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    fill_statfs_defaults(buf);
-    0
+    #[cfg(target_os = "none")]
+    {
+        let mut path = [0u8; crate::unistd::PATH_MAX];
+        let len = crate::fdtable::get_fd_path(fd, &mut path);
+        if len == 0 {
+            fill_statfs_defaults(buf);
+            return 0;
+        }
+        query_statfs(path.as_ptr(), buf)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        fill_statfs_defaults(buf);
+        0
+    }
 }
 
 /// `statfs64` — LP64 alias (off_t already 64-bit).
@@ -878,5 +1065,97 @@ mod tests {
         assert_eq!(buf.f_type, EXT4_SUPER_MAGIC);
         assert_eq!(buf.f_bsize, DEFAULT_BLOCK_SIZE as i64);
         close_test_fd(fd);
+    }
+
+    // =====================================================================
+    // Kernel SYS_FS_STATVFS result translation
+    //
+    // These exercise fill_statvfs_from_raw / fill_statfs_from_raw directly
+    // — the logic the bare-metal statvfs/statfs paths use to interpret the
+    // kernel's 64-byte block.  (The syscall itself is bare-metal-only and
+    // can't run under the host harness.)
+    // =====================================================================
+
+    /// Build a 64-byte kernel statvfs block for tests.
+    fn raw_statvfs(
+        block_size: u64,
+        total_blocks: u64,
+        free_blocks: u64,
+        total_inodes: u64,
+        free_inodes: u64,
+        max_name_len: u64,
+        read_only: bool,
+    ) -> [u8; KERNEL_STATVFS_LEN] {
+        let mut raw = [0u8; KERNEL_STATVFS_LEN];
+        raw[0..8].copy_from_slice(&block_size.to_le_bytes());
+        raw[8..16].copy_from_slice(&total_blocks.to_le_bytes());
+        raw[16..24].copy_from_slice(&free_blocks.to_le_bytes());
+        raw[24..32].copy_from_slice(&total_inodes.to_le_bytes());
+        raw[32..40].copy_from_slice(&free_inodes.to_le_bytes());
+        raw[40..48].copy_from_slice(&max_name_len.to_le_bytes());
+        raw[48] = u8::from(read_only);
+        raw
+    }
+
+    #[test]
+    fn fill_statvfs_from_raw_translates_all_fields() {
+        let raw = raw_statvfs(4096, 1_000_000, 250_000, 64_000, 40_000, 255, false);
+        let mut buf = unsafe { mem::zeroed::<Statvfs>() };
+        fill_statvfs_from_raw(&mut buf, &raw);
+        assert_eq!(buf.f_bsize, 4096);
+        assert_eq!(buf.f_frsize, 4096);
+        assert_eq!(buf.f_blocks, 1_000_000);
+        assert_eq!(buf.f_bfree, 250_000);
+        assert_eq!(buf.f_bavail, 250_000);
+        assert_eq!(buf.f_files, 64_000);
+        assert_eq!(buf.f_ffree, 40_000);
+        assert_eq!(buf.f_favail, 40_000);
+        assert_eq!(buf.f_namemax, 255);
+        assert_eq!(buf.f_flag, 0);
+    }
+
+    #[test]
+    fn fill_statvfs_from_raw_sets_rdonly_flag() {
+        let raw = raw_statvfs(512, 10, 5, 4, 2, 255, true);
+        let mut buf = unsafe { mem::zeroed::<Statvfs>() };
+        fill_statvfs_from_raw(&mut buf, &raw);
+        assert_eq!(buf.f_flag & ST_RDONLY, ST_RDONLY);
+    }
+
+    #[test]
+    fn fill_statvfs_from_raw_guards_zero_block_size() {
+        // A virtual filesystem reporting a zero block size must not leave a
+        // zero in f_bsize (df divides by it).
+        let raw = raw_statvfs(0, 0, 0, 0, 0, 0, false);
+        let mut buf = unsafe { mem::zeroed::<Statvfs>() };
+        fill_statvfs_from_raw(&mut buf, &raw);
+        assert_eq!(buf.f_bsize, DEFAULT_BLOCK_SIZE);
+        assert_eq!(buf.f_namemax, DEFAULT_NAMEMAX);
+    }
+
+    #[test]
+    fn fill_statfs_from_raw_translates_all_fields() {
+        let raw = raw_statvfs(8192, 500_000, 100_000, 32_000, 16_000, 255, true);
+        let mut buf = unsafe { mem::zeroed::<Statfs>() };
+        fill_statfs_from_raw(&mut buf, &raw);
+        assert_eq!(buf.f_type, EXT4_SUPER_MAGIC);
+        assert_eq!(buf.f_bsize, 8192);
+        assert_eq!(buf.f_frsize, 8192);
+        assert_eq!(buf.f_blocks, 500_000);
+        assert_eq!(buf.f_bfree, 100_000);
+        assert_eq!(buf.f_bavail, 100_000);
+        assert_eq!(buf.f_files, 32_000);
+        assert_eq!(buf.f_ffree, 16_000);
+        assert_eq!(buf.f_namelen, 255);
+        assert_eq!(buf.f_flags & ST_RDONLY as i64, ST_RDONLY as i64);
+    }
+
+    #[test]
+    fn fill_statfs_from_raw_guards_zero_block_size() {
+        let raw = raw_statvfs(0, 0, 0, 0, 0, 0, false);
+        let mut buf = unsafe { mem::zeroed::<Statfs>() };
+        fill_statfs_from_raw(&mut buf, &raw);
+        assert_eq!(buf.f_bsize, DEFAULT_BLOCK_SIZE as i64);
+        assert_eq!(buf.f_namelen, DEFAULT_NAMEMAX as i64);
     }
 }

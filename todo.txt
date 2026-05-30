@@ -628,6 +628,55 @@ Remaining net improvements (diminishing returns):
   handlers and the non-UTF-8-path case is rare; trigger the fix when adding
   any non-UTF-8 path support work in the fs zone.
 
+- (DONE 2026-05-30) klogctl() wired to the kernel log ring — same no-op-stub
+  bug class (roadmap.md:1420).  klogctl validated its arguments fully (Linux
+  cmd-range / NULL-buf / len<0 / CONSOLE_LEVEL-range EINVAL ordering, plus the
+  Phase-172 CAP_SYSLOG gate) and then returned -1/ENOSYS for EVERY data action,
+  never calling the existing kernel SYS_LOG_READ (102) — which already reads
+  the JSON-lines ring buffer and returns (entry_count, newest_seq).
+  Fix:
+    * Added SYS_LOG_READ=102 + a syscall3_2ret wrapper (captures rax+rdx, i.e.
+      value+value2) to posix/src/syscall.rs and to the nonzero/unique/range
+      syscall-number test lists.
+    * unistd.rs klogctl now dispatches: CLOSE/OPEN -> 0 (Linux no-ops; were
+      wrongly ENOSYS); READ -> consuming read via a per-process KLOG_READ_CURSOR
+      (advanced by newest_seq); READ_ALL -> non-consuming read from
+      KLOG_CLEAR_FLOOR; READ_CLEAR -> READ_ALL then advance both cursors past
+      everything currently buffered; CLEAR -> advance both cursors (drain to
+      find true newest); SIZE_UNREAD -> bytes available since the read cursor;
+      SIZE_BUFFER -> bytes currently buffered since the clear floor.  Byte
+      counts are derived by scanning the kernel's JSON-lines output for the
+      count-th '\n' (klog_json_lines_len); aggregate queries drain into a 2 KiB
+      scratch (klog_drain).  cfg-split: host returns an empty log (0).
+    * CONSOLE_OFF/CONSOLE_ON/CONSOLE_LEVEL remain ENOSYS — no kernel syscall
+      sets the serial log level yet (klog::set_serial_level is unexposed).
+    * Rewrote ~20 host tests that pinned the old validate-then-ENOSYS stub
+      (close/open now 0; clear/size/read now succeed with 0 on the empty host
+      log; CONSOLE_* still ENOSYS; cap-gate EPERM tests unchanged).  Full posix
+      suite green (17133 host tests); both targets build clean; no new clippy
+      findings in the changed ranges.
+
+  ## Judgment Calls (klogctl emulation over a non-consuming seq-cursor API):
+    * The READ cursor and clear floor are PER-PROCESS atomics, not the global
+      kernel state Linux's syslog uses.  Each process gets an independent view;
+      a "clear" in one process does not affect another.  This is fine for the
+      dmesg/journald read paths but differs from Linux's shared consuming read.
+    * "Clear" is EMULATED by hiding entries at/below a stored seq floor — the
+      kernel has no log-clear syscall and the ring is non-consuming, so the
+      entries still physically exist (and are still visible to other processes
+      / a fresh process).  PROPER FIX if true clearing is needed: add a kernel
+      SYS_LOG_CLEAR (and/or per-reader consuming cursors) to klog.rs.
+    * A truncated READ_ALL returns the OLDEST entries that fit (the kernel
+      reads oldest->newest and stops when the buffer fills); Linux returns the
+      NEWEST that fit.  Acceptable while the ring (256 entries) is small.
+    * SIZE_BUFFER reports currently-buffered bytes, not the ring's fixed byte
+      capacity (the kernel does not expose capacity).  This is what dmesg
+      actually needs (it sizes its READ_ALL buffer from it); a tiny race exists
+      if entries arrive between SIZE_BUFFER and READ_ALL.  PROPER FIX: expose
+      ring capacity via SYS_LOG_READ (e.g. a query mode) if a caller needs the
+      true capacity.
+  These are easy to reverse (all confined to klogctl + the two cursors).
+
 - (DONE 2026-05-30) lseek() SEEK_DATA/SEEK_HOLE wired to the kernel — same
   no-op-stub bug class.  lseek rejected whence == SEEK_DATA(3) / SEEK_HOLE(4)
   with EINVAL ("whence is not a valid value") even though the kernel fully

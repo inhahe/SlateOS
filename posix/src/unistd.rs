@@ -2969,11 +2969,150 @@ pub const SYSLOG_LOG_LEVEL_MIN: i32 = 1;
 /// Highest console log level accepted (matches Linux `LOGLEVEL_DEBUG + 1`).
 pub const SYSLOG_LOG_LEVEL_MAX: i32 = 8;
 
+// --- klogctl ⇄ SYS_LOG_READ wiring -----------------------------------------
+//
+// The kernel exposes a single read-only log primitive (`SYS_LOG_READ`, 102):
+// a non-consuming, sequence-cursored read of the JSON-lines ring buffer that
+// returns `(entry_count, newest_seq)` and fills the buffer with one JSON
+// object per line (each terminated with `\n`).  Linux `klogctl` instead has a
+// *consuming* READ cursor, an explicit buffer *clear*, and byte-count return
+// values.  We bridge the two with per-process cursors and on-the-fly byte
+// counting:
+//
+//   • READ          → consuming read from `KLOG_READ_CURSOR`, advance it.
+//   • READ_ALL      → non-consuming read from `KLOG_CLEAR_FLOOR`.
+//   • READ_CLEAR    → READ_ALL, then advance both cursors past everything.
+//   • CLEAR         → advance both cursors past everything (no data copied).
+//   • SIZE_UNREAD   → bytes available to the next READ (since READ cursor).
+//   • SIZE_BUFFER   → bytes currently buffered (since clear floor).
+//   • CLOSE / OPEN  → no-ops, return 0 (as on Linux).
+//   • CONSOLE_*     → no kernel syscall sets the serial log level → ENOSYS.
+//
+// JUDGMENT CALLS (see todo.txt): the READ cursor and clear floor are
+// per-process rather than the global kernel state Linux uses; "clear" is
+// emulated by hiding entries below a floor (the kernel has no clear syscall);
+// truncated READ_ALL returns the *oldest* entries that fit rather than the
+// newest; SIZE_BUFFER reports currently-buffered bytes rather than the ring's
+// fixed capacity (the kernel does not expose capacity).  These serve `dmesg`
+// and `journald`'s read paths correctly; CONSOLE_* level control remains
+// unimplemented pending a kernel syscall.
+
+/// Per-process cursor for the consuming `SYSLOG_ACTION_READ`.  Holds the
+/// `after_seq` to pass on the next READ; `u64::MAX` = "from the oldest
+/// available entry" (the kernel's read-from-beginning sentinel).
+static KLOG_READ_CURSOR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Per-process "clear floor": entries with `seq <= floor` are hidden from
+/// READ_ALL / READ_CLEAR / SIZE_BUFFER, emulating a buffer clear without a
+/// kernel clear syscall.  Stored as an `after_seq`; `u64::MAX` = nothing
+/// cleared (show everything from the oldest).
+static KLOG_CLEAR_FLOOR: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(u64::MAX);
+
+/// Issue one `SYS_LOG_READ` batch.  Returns `(entry_count, newest_seq)` as
+/// the kernel reports them (`entry_count` < 0 signals a kernel error).
+#[cfg(target_os = "none")]
+fn klog_read_batch(after_seq: u64, buf: *mut u8, cap: usize) -> (i64, i64) {
+    crate::syscall::syscall3_2ret(
+        crate::syscall::SYS_LOG_READ,
+        after_seq,
+        buf as u64,
+        cap as u64,
+    )
+}
+
+/// Host build: no kernel log ring — report an empty log (zero entries,
+/// cursor unchanged).
+#[cfg(not(target_os = "none"))]
+fn klog_read_batch(_after_seq: u64, _buf: *mut u8, _cap: usize) -> (i64, i64) {
+    (0, 0)
+}
+
+/// Count the bytes of the first `count` JSON-lines the kernel wrote into
+/// `buf`.  Each entry ends with `\n`; JSON escaping guarantees no raw `\n`
+/// inside an entry, so the `count`-th newline marks the end of valid data.
+/// Returns the offset just past that newline (or `buf.len()` if fewer than
+/// `count` newlines are present — which should not happen in practice).
+fn klog_json_lines_len(buf: &[u8], count: usize) -> usize {
+    if count == 0 {
+        return 0;
+    }
+    let mut seen = 0usize;
+    for (i, &b) in buf.iter().enumerate() {
+        if b == b'\n' {
+            seen = seen.saturating_add(1);
+            if seen == count {
+                return i.saturating_add(1);
+            }
+        }
+    }
+    buf.len()
+}
+
+/// Drain every entry after `start_seq` into a scratch buffer (discarding the
+/// text) to total their bytes and find the newest sequence number currently
+/// buffered.  Returns `(total_bytes, newest_seq)`.  Used by CLEAR and the
+/// SIZE_* queries, which need aggregate information rather than the data.
+fn klog_drain(start_seq: u64) -> (usize, u64) {
+    // Worst-case JSON line is ~484 bytes (MAX_MSG_LEN 200 + module 24 +
+    // overhead); 2 KiB guarantees at least one full line per batch so the
+    // loop always makes progress.
+    let mut scratch = [0u8; 2048];
+    let mut after = start_seq;
+    let mut total = 0usize;
+    // The kernel ring holds 256 entries; cap iterations generously so a
+    // misbehaving cursor can never spin forever.
+    for _ in 0..1024 {
+        let (count, newest) =
+            klog_read_batch(after, scratch.as_mut_ptr(), scratch.len());
+        if count <= 0 {
+            break;
+        }
+        let count_usize = usize::try_from(count).unwrap_or(0);
+        total = total.saturating_add(klog_json_lines_len(&scratch, count_usize));
+        #[allow(clippy::cast_sign_loss)]
+        let newest_u = newest as u64;
+        if newest_u == after {
+            // No forward progress — stop (defensive; should not happen).
+            break;
+        }
+        after = newest_u;
+    }
+    (total, after)
+}
+
+/// Shared READ / READ_ALL / READ_CLEAR body: one `SYS_LOG_READ` from
+/// `after` into the caller's `buf`/`len`.  Returns
+/// `(result, entry_count, newest_seq)` where `result` is the byte count to
+/// return to the caller (`>= 0`) or `-1` with `errno` already set on a
+/// kernel error.
+fn klog_read_user(after: u64, buf: *mut u8, len: i32) -> (i32, i64, u64) {
+    let cap = usize::try_from(len).unwrap_or(0);
+    let (count, newest) = klog_read_batch(after, buf, cap);
+    if count < 0 {
+        // Kernel error in `value` (e.g. EFAULT from buffer validation).
+        let _ = errno::translate(count);
+        return (-1, count, after);
+    }
+    // SAFETY: per the klogctl READ contract `buf` points to `len` writable
+    // bytes; the kernel filled the first portion with `count` JSON-lines.
+    // We only scan within `cap` bytes.
+    let view = unsafe { core::slice::from_raw_parts(buf, cap) };
+    let count_usize = usize::try_from(count).unwrap_or(0);
+    let nbytes = klog_json_lines_len(view, count_usize);
+    let nbytes_i32 = i32::try_from(nbytes).unwrap_or(i32::MAX);
+    #[allow(clippy::cast_sign_loss)]
+    (nbytes_i32, count, newest as u64)
+}
+
 /// Control the kernel log.
 ///
-/// Stub: validates arguments per Linux `kernel/printk/printk.c::do_syslog`,
-/// then returns `-1` with `ENOSYS`.  Our OS uses structured text logging
-/// (JSON-lines per `design.txt`), not the legacy klog ring buffer.
+/// Reads the kernel's JSON-lines ring buffer via `SYS_LOG_READ` for the
+/// READ-family and SIZE queries; CLOSE/OPEN are no-ops; CONSOLE level control
+/// is unimplemented (no kernel syscall) and returns `ENOSYS`.  See the
+/// `klogctl ⇄ SYS_LOG_READ wiring` note above for the cursor/clear emulation
+/// and its judgment-call limitations.
 ///
 /// # Linux semantics
 ///
@@ -3073,8 +3212,76 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
         errno::set_errno(errno::EPERM);
         return -1;
     }
-    errno::set_errno(errno::ENOSYS);
-    -1
+
+    use core::sync::atomic::Ordering;
+    match cmd {
+        // CLOSE / OPEN are no-ops on Linux — report success.
+        SYSLOG_ACTION_CLOSE | SYSLOG_ACTION_OPEN => 0,
+
+        // Consuming read: start at the per-process cursor, advance it past
+        // whatever we returned so the next READ continues forward.
+        SYSLOG_ACTION_READ => {
+            let after = KLOG_READ_CURSOR.load(Ordering::Relaxed);
+            let (result, count, newest) = klog_read_user(after, buf, len);
+            if result >= 0 && count > 0 {
+                KLOG_READ_CURSOR.store(newest, Ordering::Relaxed);
+            }
+            result
+        }
+
+        // Non-consuming read of everything still "in the buffer" (i.e. above
+        // the clear floor).  Does not move any cursor.
+        SYSLOG_ACTION_READ_ALL => {
+            let after = KLOG_CLEAR_FLOOR.load(Ordering::Relaxed);
+            let (result, _count, _newest) = klog_read_user(after, buf, len);
+            result
+        }
+
+        // Read everything, then clear: advance both the clear floor and the
+        // read cursor past every currently-buffered entry.
+        SYSLOG_ACTION_READ_CLEAR => {
+            let after = KLOG_CLEAR_FLOOR.load(Ordering::Relaxed);
+            let (result, _count, _newest) = klog_read_user(after, buf, len);
+            if result >= 0 {
+                let (_total, true_newest) = klog_drain(after);
+                KLOG_CLEAR_FLOOR.store(true_newest, Ordering::Relaxed);
+                KLOG_READ_CURSOR.store(true_newest, Ordering::Relaxed);
+            }
+            result
+        }
+
+        // Clear: hide every currently-buffered entry from future reads.
+        SYSLOG_ACTION_CLEAR => {
+            let after = KLOG_CLEAR_FLOOR.load(Ordering::Relaxed);
+            let (_total, true_newest) = klog_drain(after);
+            KLOG_CLEAR_FLOOR.store(true_newest, Ordering::Relaxed);
+            KLOG_READ_CURSOR.store(true_newest, Ordering::Relaxed);
+            0
+        }
+
+        // Bytes available to the next consuming READ.
+        SYSLOG_ACTION_SIZE_UNREAD => {
+            let after = KLOG_READ_CURSOR.load(Ordering::Relaxed);
+            let (total, _newest) = klog_drain(after);
+            i32::try_from(total).unwrap_or(i32::MAX)
+        }
+
+        // Bytes currently buffered (since the clear floor).  The kernel does
+        // not expose the ring's fixed capacity, so report live contents —
+        // which is what dmesg needs to size its READ_ALL buffer.
+        SYSLOG_ACTION_SIZE_BUFFER => {
+            let after = KLOG_CLEAR_FLOOR.load(Ordering::Relaxed);
+            let (total, _newest) = klog_drain(after);
+            i32::try_from(total).unwrap_or(i32::MAX)
+        }
+
+        // CONSOLE_OFF / CONSOLE_ON / CONSOLE_LEVEL: no kernel syscall sets the
+        // serial log level yet.  Honestly report "not implemented".
+        _ => {
+            errno::set_errno(errno::ENOSYS);
+            -1
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -7676,10 +7883,10 @@ mod tests {
     // ------------------------------------------------------------------
 
     #[test]
-    fn test_klogctl_enosys() {
+    fn test_klogctl_close_is_noop_success() {
+        // cmd 0 = SYSLOG_ACTION_CLOSE is a no-op on Linux → returns 0.
         errno::set_errno(0);
-        assert_eq!(klogctl(0, core::ptr::null_mut(), 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(klogctl(SYSLOG_ACTION_CLOSE, core::ptr::null_mut(), 0), 0);
     }
 
     // ------------------------------------------------------------------
@@ -8938,40 +9145,42 @@ mod tests {
     }
 
     #[test]
-    fn test_klogctl_close_reaches_enosys() {
-        // CLOSE takes no buf/len; passes through.
+    fn test_klogctl_close_is_noop() {
+        // CLOSE takes no buf/len and is a no-op on Linux → 0.
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_CLOSE, core::ptr::null_mut(), 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(klogctl(SYSLOG_ACTION_CLOSE, core::ptr::null_mut(), 0), 0);
     }
 
     #[test]
-    fn test_klogctl_clear_reaches_enosys() {
+    fn test_klogctl_clear_succeeds() {
+        // CLEAR advances the per-process cursors; with an empty host log it
+        // is a no-op that returns 0 (was a no-op-stub ENOSYS before wiring).
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0), 0);
     }
 
     #[test]
-    fn test_klogctl_size_unread_reaches_enosys() {
+    fn test_klogctl_size_unread_returns_bytes() {
+        // SIZE_UNREAD reports bytes available to the next READ.  Empty host
+        // log → 0 bytes (no longer the ENOSYS stub).
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_UNREAD, core::ptr::null_mut(), 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_UNREAD, core::ptr::null_mut(), 0), 0);
     }
 
     #[test]
-    fn test_klogctl_size_buffer_reaches_enosys() {
+    fn test_klogctl_size_buffer_returns_bytes() {
+        // SIZE_BUFFER reports currently-buffered bytes.  Empty host log → 0.
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_BUFFER, core::ptr::null_mut(), 0), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_BUFFER, core::ptr::null_mut(), 0), 0);
     }
 
     #[test]
-    fn test_klogctl_read_valid_args_reaches_enosys() {
+    fn test_klogctl_read_valid_args_returns_bytes() {
+        // READ now dispatches to SYS_LOG_READ.  On host (no kernel log) it
+        // returns 0 bytes read instead of the old ENOSYS stub.
         let mut buf = [0u8; 64];
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 64), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 64), 0);
     }
 
     #[test]
@@ -9009,15 +9218,15 @@ mod tests {
     #[test]
     fn test_workflow_dmesg_read_all() {
         // `dmesg` calls klogctl(SYSLOG_ACTION_READ_ALL, buf, sizeof(buf))
-        // to dump the kernel log. Validates → ENOSYS, dmesg prints
-        // "klogctl: Function not implemented" and exits cleanly.
+        // to dump the kernel log.  This now dispatches to SYS_LOG_READ; on
+        // host (no kernel log) it returns 0 bytes (an empty dump) rather than
+        // the old ENOSYS stub.  On bare metal it returns the JSON-lines bytes.
         let mut buf = [0u8; 8192];
         errno::set_errno(0);
-        assert_eq!(
-            klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), buf.len() as i32),
-            -1,
-        );
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        let ret =
+            klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), buf.len() as i32);
+        assert!(ret >= 0, "READ_ALL must not error on a valid buffer");
+        assert_eq!(ret, 0, "host build has no kernel log to dump");
     }
 
     // -----------------------------------------------------------------
@@ -9113,15 +9322,15 @@ mod tests {
 
     // -- Workflow ---------------------------------------------------------
 
-    /// `len > 0` still hits the ENOSYS backend path — Phase 157 only
-    /// affects len == 0.
+    /// `len > 0` now dispatches to SYS_LOG_READ — Phase 157's zero-len
+    /// short-circuit is unaffected, but a nonzero read no longer stubs out
+    /// with ENOSYS.  On host (no kernel log) it returns 0 bytes.
     #[test]
-    fn test_klogctl_read_nonzero_len_still_enosys_phase157() {
+    fn test_klogctl_read_nonzero_len_dispatches_phase157() {
         let mut buf = [0u8; 64];
         errno::set_errno(0);
         let ret = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 1);
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(ret, 0);
     }
 
     /// A program polling the log for "anything new" with a zero-byte
@@ -9166,18 +9375,18 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EIO);
     }
 
-    /// After the zero-len success, a follow-up nonzero call still goes
-    /// to ENOSYS — no sticky state from the short-circuit.
+    /// After the zero-len success, a follow-up nonzero call dispatches to
+    /// SYS_LOG_READ — no sticky state from the short-circuit.  On host the
+    /// nonzero read returns 0 bytes (empty kernel log).
     #[test]
     fn test_klogctl_recover_after_zero_len_success_phase157() {
         let mut buf = [0u8; 8];
         errno::set_errno(0);
         assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0), 0);
-        // Now request 4 bytes — backend missing → ENOSYS.
+        // Now request 4 bytes — empty host log → 0 bytes, no error.
         errno::set_errno(0);
         let ret = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 4);
-        assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(ret, 0);
     }
 
     // -- Sentinel ---------------------------------------------------------
@@ -9212,20 +9421,30 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
-    /// CLOSE/OPEN/CLEAR/CONSOLE_OFF/CONSOLE_ON with len == 0 are still
-    /// the ENOSYS-backend path — Phase 157 only short-circuits the
-    /// READ family.
+    /// Post-wiring: CLOSE/OPEN are no-ops (0); CLEAR and the SIZE queries
+    /// now dispatch to the log backend and succeed (0 on the empty host
+    /// log).  Only the CONSOLE level-control actions remain unimplemented
+    /// (ENOSYS).  Phase 157's zero-len short-circuit is orthogonal.
     #[test]
-    fn test_klogctl_non_read_zero_len_still_enosys_phase157() {
+    fn test_klogctl_non_read_zero_len_succeeds_after_wiring() {
         for cmd in [
             SYSLOG_ACTION_CLOSE,
             SYSLOG_ACTION_OPEN,
             SYSLOG_ACTION_CLEAR,
-            SYSLOG_ACTION_CONSOLE_OFF,
-            SYSLOG_ACTION_CONSOLE_ON,
             SYSLOG_ACTION_SIZE_UNREAD,
             SYSLOG_ACTION_SIZE_BUFFER,
         ] {
+            errno::set_errno(0);
+            let ret = klogctl(cmd, core::ptr::null_mut(), 0);
+            assert_eq!(ret, 0, "cmd={cmd} must succeed");
+        }
+    }
+
+    /// CONSOLE_OFF / CONSOLE_ON still return ENOSYS — there is no kernel
+    /// syscall to change the serial log level.
+    #[test]
+    fn test_klogctl_console_off_on_still_enosys() {
+        for cmd in [SYSLOG_ACTION_CONSOLE_OFF, SYSLOG_ACTION_CONSOLE_ON] {
             errno::set_errno(0);
             let ret = klogctl(cmd, core::ptr::null_mut(), 0);
             assert_eq!(ret, -1, "cmd={cmd} must reach ENOSYS");
@@ -9432,15 +9651,18 @@ mod tests {
     #[test]
     fn test_klogctl_phase126_recovery_after_null_buf_einval() {
         // Per-call errno: an EINVAL from a NULL buf doesn't poison a
-        // subsequent well-formed call.
+        // subsequent well-formed call, which now dispatches to SYS_LOG_READ
+        // (0 bytes on the empty host log) instead of stubbing out.
         errno::set_errno(0);
         assert_eq!(klogctl(SYSLOG_ACTION_READ, core::ptr::null_mut(), 16), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
         let mut buf = [0u8; 64];
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), buf.len() as i32), -1);
-        assert_eq!(errno::get_errno(), errno::ENOSYS);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), buf.len() as i32),
+            0,
+        );
     }
 
     // ------------------------------------------------------------------
@@ -10150,75 +10372,69 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
-        // -- Allowed-without-cap (must still reach ENOSYS, not EPERM) ----
+        // -- Allowed-without-cap (succeed past the cap gate) -------------
 
-        /// CLOSE is a no-op on Linux — no cap required.  Must still
-        /// reach ENOSYS (our stub doesn't model the ring buffer).
+        /// CLOSE is a no-op on Linux — no cap required → returns 0.
         #[test]
-        fn test_klogctl_phase172_close_no_cap_enosys() {
+        fn test_klogctl_phase172_close_no_cap_succeeds() {
             let _g = CapGuard::snapshot();
             drop_cap_syslog();
             errno::set_errno(0);
             assert_eq!(
                 klogctl(SYSLOG_ACTION_CLOSE, core::ptr::null_mut(), 0),
-                -1,
+                0,
             );
-            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
-        /// OPEN is a no-op on Linux — no cap required.
+        /// OPEN is a no-op on Linux — no cap required → returns 0.
         #[test]
-        fn test_klogctl_phase172_open_no_cap_enosys() {
+        fn test_klogctl_phase172_open_no_cap_succeeds() {
             let _g = CapGuard::snapshot();
             drop_cap_syslog();
             errno::set_errno(0);
             assert_eq!(
                 klogctl(SYSLOG_ACTION_OPEN, core::ptr::null_mut(), 0),
-                -1,
+                0,
             );
-            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
-        /// SIZE_BUFFER returns the buffer size on Linux — no cap
-        /// required.  Our stub still reaches ENOSYS.
+        /// SIZE_BUFFER reports buffered bytes — no cap required.  Empty host
+        /// log → 0.
         #[test]
-        fn test_klogctl_phase172_size_buffer_no_cap_enosys() {
+        fn test_klogctl_phase172_size_buffer_no_cap_succeeds() {
             let _g = CapGuard::snapshot();
             drop_cap_syslog();
             errno::set_errno(0);
             assert_eq!(
                 klogctl(SYSLOG_ACTION_SIZE_BUFFER, core::ptr::null_mut(), 0),
-                -1,
+                0,
             );
-            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
         /// READ_ALL is the unprivileged dmesg path under
-        /// `dmesg_restrict=0` — no cap required.
+        /// `dmesg_restrict=0` — no cap required.  Empty host log → 0 bytes.
         #[test]
-        fn test_klogctl_phase172_read_all_no_cap_enosys() {
+        fn test_klogctl_phase172_read_all_no_cap_succeeds() {
             let _g = CapGuard::snapshot();
             drop_cap_syslog();
             let mut buf = [0u8; 64];
             errno::set_errno(0);
             assert_eq!(
                 klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 64),
-                -1,
+                0,
             );
-            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
-        /// SIZE_UNREAD is read-only — no cap required.
+        /// SIZE_UNREAD is read-only — no cap required.  Empty host log → 0.
         #[test]
-        fn test_klogctl_phase172_size_unread_no_cap_enosys() {
+        fn test_klogctl_phase172_size_unread_no_cap_succeeds() {
             let _g = CapGuard::snapshot();
             drop_cap_syslog();
             errno::set_errno(0);
             assert_eq!(
                 klogctl(SYSLOG_ACTION_SIZE_UNREAD, core::ptr::null_mut(), 0),
-                -1,
+                0,
             );
-            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
         // -- Ordering matrix (EINVAL beats EPERM) ------------------------
@@ -10280,7 +10496,7 @@ mod tests {
 
         /// systemd-journal-like probe: tries to call CLEAR (privileged)
         /// after the cap is dropped — gets EPERM, falls back to
-        /// READ_ALL (unprivileged) which reaches ENOSYS.
+        /// READ_ALL (unprivileged) which now succeeds (0 bytes on host).
         #[test]
         fn test_klogctl_phase172_workflow_drop_then_fallback() {
             let _g = CapGuard::snapshot();
@@ -10292,20 +10508,20 @@ mod tests {
                 -1,
             );
             assert_eq!(errno::get_errno(), errno::EPERM);
-            // Then fall back to unprivileged READ_ALL — ENOSYS.
+            // Then fall back to unprivileged READ_ALL — succeeds (empty log).
             let mut buf = [0u8; 32];
             errno::set_errno(0);
             assert_eq!(
                 klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 32),
-                -1,
+                0,
             );
-            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
         // -- Recovery ----------------------------------------------------
 
         /// After EPERM from a cap-required action, restoring the cap
-        /// allows the privileged path to reach ENOSYS.
+        /// allows the privileged path to dispatch and succeed (CLEAR
+        /// returns 0 on the empty host log).
         #[test]
         fn test_klogctl_phase172_recovery_after_eperm() {
             let _outer = CapGuard::snapshot();
@@ -10351,34 +10567,33 @@ mod tests {
                 crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0);
             assert!(crate::sys_capability::has_capability(CAP_SYSLOG));
-            // Now CLEAR reaches ENOSYS.
+            // Now CLEAR passes the cap gate and succeeds (empty host log).
             errno::set_errno(0);
             assert_eq!(
                 klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0),
-                -1,
+                0,
             );
-            assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
         // -- Sentinel: cap-held privileged path still works --------------
 
-        /// With CAP_SYSLOG held (default state), every cap-required
-        /// action reaches ENOSYS — verifies the gate doesn't fire
-        /// when the cap is present.
+        /// With CAP_SYSLOG held (default state), the cap gate does not
+        /// fire: the data actions (READ / READ_CLEAR / CLEAR) dispatch to
+        /// the log backend and succeed (0 on the empty host log), while the
+        /// unimplemented CONSOLE level-control actions reach ENOSYS.
         #[test]
-        fn test_klogctl_phase172_sentinel_cap_held_reaches_enosys() {
+        fn test_klogctl_phase172_sentinel_cap_held_dispatches() {
             let _g = CapGuard::snapshot();
             // Don't drop the cap — default state holds CAP_SYSLOG.
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYSLOG,
             ));
             let mut buf = [0u8; 32];
+            // Data actions: pass the cap gate, dispatch, return 0 on host.
             for cmd in [
                 SYSLOG_ACTION_READ,
                 SYSLOG_ACTION_READ_CLEAR,
                 SYSLOG_ACTION_CLEAR,
-                SYSLOG_ACTION_CONSOLE_OFF,
-                SYSLOG_ACTION_CONSOLE_ON,
             ] {
                 errno::set_errno(0);
                 let (p, l) = if matches!(
@@ -10389,7 +10604,16 @@ mod tests {
                 } else {
                     (core::ptr::null_mut(), 0i32)
                 };
-                assert_eq!(klogctl(cmd, p, l), -1, "cmd={cmd}");
+                assert_eq!(klogctl(cmd, p, l), 0, "cmd={cmd} should succeed");
+            }
+            // CONSOLE level control remains unimplemented.
+            for cmd in [SYSLOG_ACTION_CONSOLE_OFF, SYSLOG_ACTION_CONSOLE_ON] {
+                errno::set_errno(0);
+                assert_eq!(
+                    klogctl(cmd, core::ptr::null_mut(), 0),
+                    -1,
+                    "cmd={cmd}",
+                );
                 assert_eq!(
                     errno::get_errno(),
                     errno::ENOSYS,

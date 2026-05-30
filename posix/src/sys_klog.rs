@@ -62,8 +62,9 @@ mod tests {
     }
 
     #[test]
-    fn test_klogctl_stub() {
-        assert_eq!(klogctl(0, core::ptr::null_mut(), 0), -1);
+    fn test_klogctl_close_is_noop() {
+        // cmd 0 = SYSLOG_ACTION_CLOSE is a no-op on Linux → returns 0.
+        assert_eq!(klogctl(0, core::ptr::null_mut(), 0), 0);
     }
 
     #[test]

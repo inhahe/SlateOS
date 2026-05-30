@@ -29,6 +29,14 @@ pub const SYS_SLEEP: u64 = 11;
 pub const SYS_CONSOLE_WRITE: u64 = 100;
 pub const SYS_CONSOLE_READ_CHAR: u64 = 101;
 
+// Kernel log ring buffer (read-only).
+//   READ: (after_seq, buf_ptr, buf_cap) -> (entry_count in value,
+//         newest_seq in value2).  Pass `u64::MAX` as after_seq to read
+//         from the oldest available entry; otherwise reads entries with
+//         seq > after_seq.  Fills the buffer with JSON-lines text (one
+//         JSON object per line, each terminated with `\n`).  Non-consuming.
+pub const SYS_LOG_READ: u64 = 102;
+
 // Memory management
 pub const SYS_MMAP: u64 = 30;
 pub const SYS_MUNMAP: u64 = 31;
@@ -302,6 +310,36 @@ pub fn syscall3(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> i64 {
     ret
 }
 
+/// Issue a syscall with 3 arguments, capturing both return values.
+///
+/// Returns `(value, value2)` = `(rax, rdx)`.  Used for syscalls that
+/// reply with `SyscallResult::ok2` (two-value returns), e.g.
+/// `SYS_LOG_READ` returns `(entry_count, newest_seq)`.
+#[inline(always)]
+#[must_use]
+pub fn syscall3_2ret(nr: u64, arg0: u64, arg1: u64, arg2: u64) -> (i64, i64) {
+    let ret: i64;
+    let ret2: i64;
+    // SAFETY: SYSCALL is the defined kernel entry point.  RCX and R11 are
+    // clobbered by the instruction (saved RIP/RFLAGS); RAX holds `value`
+    // and RDX holds `value2` on return.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") nr,
+            in("rdi") arg0,
+            in("rsi") arg1,
+            in("rdx") arg2,
+            lateout("rax") ret,
+            lateout("rdx") ret2,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack),
+        );
+    }
+    (ret, ret2)
+}
+
 /// Issue a syscall with 4 arguments.
 #[inline(always)]
 #[must_use]
@@ -390,7 +428,7 @@ mod tests {
         let all_numbers = [
             SYS_EXIT, SYS_TASK_ID, SYS_PROCESS_ID,
             SYS_CLOCK_MONOTONIC, SYS_SLEEP,
-            SYS_CONSOLE_WRITE, SYS_CONSOLE_READ_CHAR,
+            SYS_CONSOLE_WRITE, SYS_CONSOLE_READ_CHAR, SYS_LOG_READ,
             SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
             SYS_SCHED_SET_PROFILE,
             SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT, SYS_PROCESS_EXEC,
@@ -447,7 +485,7 @@ mod tests {
         let all_numbers: &[u64] = &[
             SYS_EXIT, SYS_TASK_ID, SYS_PROCESS_ID,
             SYS_CLOCK_MONOTONIC, SYS_SLEEP,
-            SYS_CONSOLE_WRITE, SYS_CONSOLE_READ_CHAR,
+            SYS_CONSOLE_WRITE, SYS_CONSOLE_READ_CHAR, SYS_LOG_READ,
             SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
             SYS_SCHED_SET_PROFILE,
             SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT, SYS_PROCESS_EXEC,
@@ -515,6 +553,7 @@ mod tests {
         assert!(SYS_SLEEP <= 199);
         assert!(SYS_CONSOLE_WRITE <= 199);
         assert!(SYS_CONSOLE_READ_CHAR <= 199);
+        assert!(SYS_LOG_READ <= 199);
         assert!(SYS_MMAP <= 199);
         assert!(SYS_MUNMAP <= 199);
         assert!(SYS_MPROTECT <= 199);

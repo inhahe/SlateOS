@@ -132,6 +132,23 @@ pub const SYS_FS_LIST_XATTRS: u64 = 636;
 // Sync
 pub const SYS_FS_SYNC: u64 = 641;
 
+// Filesystem change notification (inotify backend).
+//   CREATE: (path_ptr, path_len, event_mask, flags) -> watch id.
+//           event_mask bits: 0=CREATE 1=DELETE 2=MODIFY 3=RENAME
+//           4=METADATA 5=ACCESS; flags bit0 = recursive.
+//   READ:   (watch_id, buf_ptr, max_events) -> event count.  Each event
+//           is FS_WATCH_EVENT_SIZE bytes: [0..256] affected path,
+//           [256..512] new path (rename), [512..520] watch id (u64),
+//           [520..524] event type (u32: 0=created 1=deleted 2=modified
+//           3=renamed 4=metadata 5=accessed 255=overflow), [524..528] pad.
+//   CLOSE:  (watch_id) -> 0.
+pub const SYS_FS_WATCH_CREATE: u64 = 622;
+pub const SYS_FS_WATCH_READ: u64 = 623;
+pub const SYS_FS_WATCH_CLOSE: u64 = 624;
+
+/// Size in bytes of one event record returned by `SYS_FS_WATCH_READ`.
+pub const FS_WATCH_EVENT_SIZE: usize = 528;
+
 // Pipes (IPC range 200-399)
 pub const SYS_PIPE_CREATE: u64 = 220;
 pub const SYS_PIPE_WRITE: u64 = 221;
@@ -389,6 +406,7 @@ mod tests {
             SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
             SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
             SYS_FS_FLOCK, SYS_FS_FUNLOCK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE,
+            SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WATCH_CLOSE,
             SYS_FS_SET_TIMES, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
             SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
             SYS_FS_LIST_XATTRS,
@@ -445,6 +463,7 @@ mod tests {
             SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
             SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
             SYS_FS_FLOCK, SYS_FS_FUNLOCK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE,
+            SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WATCH_CLOSE,
             SYS_FS_SET_TIMES, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
             SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
             SYS_FS_LIST_XATTRS,
@@ -619,6 +638,7 @@ mod tests {
             SYS_FS_DUP, SYS_FS_COPY, SYS_FS_APPEND, SYS_FS_FTRUNCATE,
             SYS_FS_SYMLINK, SYS_FS_READLINK, SYS_FS_LSTAT, SYS_FS_SYNC,
             SYS_FS_FLOCK, SYS_FS_FUNLOCK, SYS_FS_SEEK_DATA, SYS_FS_SEEK_HOLE,
+            SYS_FS_WATCH_CREATE, SYS_FS_WATCH_READ, SYS_FS_WATCH_CLOSE,
             SYS_FS_SET_TIMES, SYS_FS_SET_OWNER, SYS_FS_SET_PERMS,
             SYS_FS_GET_XATTR, SYS_FS_SET_XATTR, SYS_FS_REMOVE_XATTR,
             SYS_FS_LIST_XATTRS,

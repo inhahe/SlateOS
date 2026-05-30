@@ -1404,52 +1404,51 @@ pub extern "C" fn signalfd4(fd: i32, mask: *const u64, flags: i32) -> i32 {
 }
 
 // ===========================================================================
-// inotify — filesystem event monitoring (userspace, polling-based)
+// inotify — filesystem event monitoring (kernel watch API backend)
 // ===========================================================================
 //
 // ## Design
 //
-// Real inotify(7) needs kernel-side filesystem hooks: every VFS
-// operation (create / unlink / write / stat update / rename / open /
-// close / access) checks a watch list and queues events.  Our kernel
-// doesn't expose those hooks via syscalls, so a true notification
-// channel isn't available.
+// Backed by the native kernel filesystem-watch API
+// (`SYS_FS_WATCH_CREATE`/`READ`/`CLOSE`).  The kernel's `fs::notify`
+// module is hooked into every VFS success path (create / unlink /
+// write / rename / metadata change) and queues events at the source, so
+// — unlike a polling design — no transient change is missed between
+// reads and a content modification is detected even when the file size
+// is unchanged.
 //
-// Instead we implement a polling-based inotify on top of `SYS_FS_STAT`
-// and `SYS_FS_LIST_DIR`.  Each watch stores a snapshot of either:
-//   * a directory's child listing (name + size + type for up to
-//     `MAX_INOTIFY_CHILDREN` entries), or
-//   * a file's size (mtime is exposed via stat but watching every
-//     file's stat per call is expensive; size+existence is the cheap
-//     proxy for IN_MODIFY).
+// Each inotify *watch* maps to one kernel watch ID.  `inotify_add_watch`
+// issues `SYS_FS_WATCH_CREATE`, `inotify_rm_watch` issues
+// `SYS_FS_WATCH_CLOSE`, and `read()` / readiness checks pump pending
+// kernel events through `SYS_FS_WATCH_READ`, translating each kernel
+// event into one or more `struct inotify_event` records queued in a
+// small per-instance ring (`pump_instance`).  The translation
+// ([`translate_kernel_event`]) is a pure function and is unit-tested on
+// the host; only the syscall issuance is target-gated.
 //
-// On every `read()` and every `check_readiness` call (driven by
-// `poll`/`select`/`epoll_wait`), we re-scan each watch and diff against
-// its snapshot, queuing events for changes.  Then we update the
-// snapshot.
-//
-// ### Supported events
-//   * `IN_CREATE`  — a new child appeared in a watched directory.
-//   * `IN_DELETE`  — a child disappeared from a watched directory.
-//   * `IN_MODIFY`  — a watched file's size changed (also fires for
-//                    children of watched directories whose size changed).
-//   * `IN_DELETE_SELF` — the watched path itself was removed; the
-//                        watch is auto-disarmed (matching Linux).
-//   * `IN_IGNORED` — emitted after `inotify_rm_watch` or after a
-//                    `IN_DELETE_SELF` causes auto-removal.
+// ### Event mapping (kernel → inotify)
+//   * Created      → `IN_CREATE` (child name).
+//   * Deleted      → `IN_DELETE` (child), or `IN_DELETE_SELF` +
+//                    `IN_IGNORED` and watch auto-removal when the watched
+//                    path itself is deleted.
+//   * Modified     → `IN_MODIFY`.
+//   * Renamed      → `IN_MOVED_FROM` and/or `IN_MOVED_TO` (paired by a
+//                    shared cookie) for entries inside the watched dir,
+//                    or `IN_MOVE_SELF` when the watched path is renamed.
+//   * MetadataChg  → `IN_ATTRIB`.
+//   * Accessed     → `IN_ACCESS`.
+//   * Overflow     → `IN_Q_OVERFLOW` (wd = -1).
 //
 // ### NOT supported
-//   * `IN_OPEN`, `IN_ACCESS`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE`,
-//     `IN_ATTRIB` (precisely), `IN_MOVED_FROM`, `IN_MOVED_TO`,
-//     `IN_MOVE_SELF` — these require kernel-side hooks we don't have.
-//     Adding the corresponding mask bits to a watch is accepted but
-//     events won't fire.  Renames within a watched directory are
-//     surfaced as IN_DELETE + IN_CREATE.
+//   * `IN_OPEN`, `IN_CLOSE_WRITE`, `IN_CLOSE_NOWRITE` — the kernel has
+//     no open/close hooks.  Requesting these bits is accepted (Linux
+//     compatibility) but no event ever fires for them.  A watch whose
+//     mask maps to *no* kernel event bits has no kernel watch at all
+//     (`kernel_id == 0`) and is inert.
 //
 // ### Limits (static allocation)
-//   * 4 instances per process, 8 watches per instance.
-//   * 16 child entries per directory snapshot (children past that limit
-//     are not tracked individually — change events for them are missed).
+//   * 4 instances per process, 8 watches per instance (per-process
+//     userspace bookkeeping; the kernel enforces its own global limit).
 //   * 32 events per instance queue (further events are dropped with
 //     `IN_Q_OVERFLOW` semantics: an overflow flag is set on the
 //     instance, surfaced as a single overflow event on the next read).
@@ -1514,12 +1513,6 @@ pub const MAX_INOTIFY_INSTANCES: usize = 4;
 /// Maximum number of watches per inotify instance.
 pub const MAX_INOTIFY_WATCHES: usize = 8;
 
-/// Maximum number of child entries we snapshot per directory watch.
-/// Directories with more entries are still watched, but only the first
-/// `MAX_INOTIFY_CHILDREN` (in kernel listing order) participate in
-/// change detection.
-pub const MAX_INOTIFY_CHILDREN: usize = 16;
-
 /// Maximum number of queued events per instance.
 pub const MAX_INOTIFY_EVENTS: usize = 32;
 
@@ -1532,53 +1525,32 @@ pub const INOTIFY_NAME_MAX: usize = 64;
 /// Maximum length of a watched path.
 pub const INOTIFY_PATH_MAX: usize = 256;
 
-/// A single child of a watched directory (used for snapshot diffing).
-#[derive(Clone, Copy)]
-struct InotifyChild {
-    in_use: bool,
-    name: [u8; INOTIFY_NAME_MAX],
-    name_len: u8,
-    size: u32,
-    is_dir: bool,
-}
-
-const INOTIFY_CHILD_INIT: InotifyChild = InotifyChild {
-    in_use: false,
-    name: [0u8; INOTIFY_NAME_MAX],
-    name_len: 0,
-    size: 0,
-    is_dir: false,
-};
-
-/// A single inotify watch.
+/// A single inotify watch, backed by one kernel watch.
 #[derive(Clone, Copy)]
 struct InotifyWatch {
     in_use: bool,
+    /// inotify watch descriptor (per-instance, positive, monotonic).
     wd: i32,
+    /// Original inotify event mask (kept for fine-grained filtering —
+    /// the kernel watch coalesces several inotify bits into one event
+    /// type, e.g. all `IN_MOVED_*` map to a single kernel RENAME).
     mask: u32,
+    /// Kernel watch ID from `SYS_FS_WATCH_CREATE`, or 0 if the mask
+    /// mapped to no kernel-deliverable events (the watch is then inert).
+    kernel_id: u64,
+    /// Resolved absolute path being watched (without trailing slash),
+    /// used to compute event basenames relative to the watch.
     path: [u8; INOTIFY_PATH_MAX],
     path_len: u16,
-    /// `true` if the watch was on a directory at add time.  Drives
-    /// whether we diff via list_dir or via single-stat.
-    is_dir: bool,
-    /// Size of the watched path itself (used for file watches).
-    self_size: u64,
-    /// Whether the watched path currently exists.  Used to fire
-    /// `IN_DELETE_SELF` exactly once when it disappears.
-    self_exists: bool,
-    children: [InotifyChild; MAX_INOTIFY_CHILDREN],
 }
 
 const INOTIFY_WATCH_INIT: InotifyWatch = InotifyWatch {
     in_use: false,
     wd: 0,
     mask: 0,
+    kernel_id: 0,
     path: [0u8; INOTIFY_PATH_MAX],
     path_len: 0,
-    is_dir: false,
-    self_size: 0,
-    self_exists: false,
-    children: [INOTIFY_CHILD_INIT; MAX_INOTIFY_CHILDREN],
 };
 
 /// A pending inotify event.  Mirrors Linux's `struct inotify_event`
@@ -1672,30 +1644,156 @@ fn with_inotify_mut<R>(idx: u64, f: impl FnOnce(&mut InotifyInstance) -> R) -> O
 }
 
 /// Free an inotify instance.  Called by `close()` when the last fd
-/// referencing the instance is closed.  Idempotent.
+/// referencing the instance is closed.  Closes every backing kernel
+/// watch so they aren't leaked.  Idempotent.
 pub fn inotify_instance_close(idx: u64) {
+    let mut to_close = [0u64; MAX_INOTIFY_WATCHES];
     let _ = with_inotify_mut(idx, |inst| {
+        for (i, w) in inst.watches.iter().enumerate() {
+            if w.in_use && w.kernel_id != 0 {
+                if let Some(slot) = to_close.get_mut(i) {
+                    *slot = w.kernel_id;
+                }
+            }
+        }
         *inst = INOTIFY_INSTANCE_INIT;
     });
+    for &kid in &to_close {
+        if kid != 0 {
+            kwatch_close(kid);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Filesystem scratch — large buffers reused across polls
+// Kernel watch API glue
 // ---------------------------------------------------------------------------
 
-/// Size of one entry returned by `SYS_FS_LIST_DIR`: name[256] +
-/// size[4] + type[1] + pad[3].  Matches the layout used by
-/// `crate::dirent`.
-const DIR_ENTRY_SIZE: usize = 264;
+// Kernel watch event-type codes — must match the FsEventType
+// discriminants in kernel/src/fs/notify.rs.
+const KEV_CREATED: u32 = 0;
+const KEV_DELETED: u32 = 1;
+const KEV_MODIFIED: u32 = 2;
+const KEV_RENAMED: u32 = 3;
+const KEV_METADATA: u32 = 4;
+const KEV_ACCESSED: u32 = 5;
+const KEV_OVERFLOW: u32 = 255;
 
-/// Scratch buffer for one directory listing.  We size for up to 256
-/// entries (matching `dirent::MAX_DIR_ENTRIES`).  Reused across all
-/// watches — single-threaded posix layer makes this safe.
-static mut INOTIFY_LISTDIR_SCRATCH: [u8; 256 * DIR_ENTRY_SIZE] =
-    [0u8; 256 * DIR_ENTRY_SIZE];
+// Kernel watch event-mask bits — must match FsEventMask in
+// kernel/src/fs/notify.rs.
+const KMASK_CREATE: u32 = 0x01;
+const KMASK_DELETE: u32 = 0x02;
+const KMASK_MODIFY: u32 = 0x04;
+const KMASK_RENAME: u32 = 0x08;
+const KMASK_METADATA: u32 = 0x10;
+const KMASK_ACCESS: u32 = 0x20;
 
-fn listdir_scratch_ptr() -> *mut [u8; 256 * DIR_ENTRY_SIZE] {
-    core::ptr::addr_of_mut!(INOTIFY_LISTDIR_SCRATCH)
+// Field offsets within one `FS_WATCH_EVENT_SIZE`-byte kernel record.
+const KEV_NEWPATH_OFF: usize = 256;
+const KEV_TYPE_OFF: usize = 520;
+const KEV_TYPE_END: usize = 524;
+
+/// Number of kernel events drained per `SYS_FS_WATCH_READ` call.
+const KWATCH_READ_BATCH: usize = 16;
+
+/// Scratch buffer for draining kernel watch events.  Reused across all
+/// watches — the single-threaded posix layer makes this safe.
+static mut INOTIFY_EVENT_SCRATCH:
+    [u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE] =
+    [0u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE];
+
+fn event_scratch_ptr()
+    -> *mut [u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE] {
+    core::ptr::addr_of_mut!(INOTIFY_EVENT_SCRATCH)
+}
+
+/// Monotonic cookie source for pairing `IN_MOVED_FROM`/`IN_MOVED_TO`.
+/// Cookies must be non-zero (zero means "no cookie" in inotify usage).
+static INOTIFY_COOKIE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(1);
+
+fn next_cookie() -> u32 {
+    use core::sync::atomic::Ordering;
+    let c = INOTIFY_COOKIE.fetch_add(1, Ordering::Relaxed);
+    if c == 0 {
+        INOTIFY_COOKIE.fetch_add(1, Ordering::Relaxed)
+    } else {
+        c
+    }
+}
+
+/// Translate an inotify event mask into the kernel watch mask.  Several
+/// inotify bits collapse onto a single kernel event type (all moves →
+/// RENAME, both delete bits → DELETE).  Bits with no kernel equivalent
+/// (`IN_OPEN`, `IN_CLOSE_*`) contribute nothing.
+fn inotify_to_kernel_mask(m: u32) -> u32 {
+    let mut k = 0u32;
+    if m & IN_CREATE != 0 {
+        k |= KMASK_CREATE;
+    }
+    if m & (IN_DELETE | IN_DELETE_SELF) != 0 {
+        k |= KMASK_DELETE;
+    }
+    if m & IN_MODIFY != 0 {
+        k |= KMASK_MODIFY;
+    }
+    if m & (IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF) != 0 {
+        k |= KMASK_RENAME;
+    }
+    if m & IN_ATTRIB != 0 {
+        k |= KMASK_METADATA;
+    }
+    if m & IN_ACCESS != 0 {
+        k |= KMASK_ACCESS;
+    }
+    k
+}
+
+// --- cfg-split syscall wrappers (real on bare metal, inert on host) ---
+
+/// Create a kernel watch for `path` with kernel mask `kmask` (always
+/// non-recursive, matching inotify).  Returns the watch ID (`> 0`) or a
+/// negative kernel error code.
+#[cfg(target_os = "none")]
+fn kwatch_create(path: &[u8], kmask: u32) -> i64 {
+    crate::syscall::syscall4(
+        crate::syscall::SYS_FS_WATCH_CREATE,
+        path.as_ptr() as u64,
+        path.len() as u64,
+        u64::from(kmask),
+        0,
+    )
+}
+
+#[cfg(not(target_os = "none"))]
+fn kwatch_create(_path: &[u8], _kmask: u32) -> i64 {
+    // Host build: no kernel.  Return a dummy positive ID so the watch
+    // table logic stays exercisable by unit tests; `pump_instance`
+    // never issues reads on host.
+    1
+}
+
+#[cfg(target_os = "none")]
+fn kwatch_close(id: u64) {
+    let _ = crate::syscall::syscall1(crate::syscall::SYS_FS_WATCH_CLOSE, id);
+}
+
+#[cfg(not(target_os = "none"))]
+fn kwatch_close(_id: u64) {}
+
+#[cfg(target_os = "none")]
+fn kwatch_read(id: u64, buf: &mut [u8], max_events: usize) -> i64 {
+    crate::syscall::syscall3(
+        crate::syscall::SYS_FS_WATCH_READ,
+        id,
+        buf.as_mut_ptr() as u64,
+        max_events as u64,
+    )
+}
+
+#[cfg(not(target_os = "none"))]
+fn kwatch_read(_id: u64, _buf: &mut [u8], _max_events: usize) -> i64 {
+    0
 }
 
 // ---------------------------------------------------------------------------
@@ -1739,25 +1837,194 @@ fn make_event(wd: i32, mask: u32, name: &[u8]) -> InotifyPending {
 }
 
 // ---------------------------------------------------------------------------
-// Snapshot diff (where polling actually happens)
+// Kernel-event translation (pure, host-tested)
 // ---------------------------------------------------------------------------
 
 /// Strip a trailing NUL byte from a name slice if present.  The kernel
 /// returns fixed-width 256-byte names padded with zeros.
 fn strip_nul(name: &[u8]) -> &[u8] {
-    let mut end = name.len();
-    for (i, &b) in name.iter().enumerate() {
-        if b == 0 {
-            end = i;
-            break;
-        }
-    }
-    &name[..end]
+    let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+    name.get(..end).unwrap_or(name)
 }
 
-fn names_eq(a: &InotifyChild, b_name: &[u8]) -> bool {
-    let a_name = &a.name[..a.name_len as usize];
-    a_name == b_name
+/// Result of relating a kernel-event path to a watched path.
+#[derive(Clone, Copy)]
+enum Rel<'a> {
+    /// The path *is* the watched path itself.
+    SelfPath,
+    /// The path is a direct child of the watched directory; carries the
+    /// child basename.
+    Child(&'a [u8]),
+    /// The path is unrelated (not the watch nor a direct child).  inotify
+    /// watches are non-recursive, so grandchildren do not match.
+    NotMatched,
+}
+
+/// Relate a kernel-event absolute path to the watched absolute path.
+///
+/// inotify semantics: a directory watch reports events for the directory
+/// itself and for its *immediate* children (non-recursive).  A file watch
+/// reports events for the file itself only.  We therefore accept an exact
+/// match (`SelfPath`) or a path that is `watched` + `/` + a single path
+/// component with no further slashes (`Child`).
+fn relative_name<'a>(watched: &[u8], path: &'a [u8]) -> Rel<'a> {
+    if path == watched {
+        return Rel::SelfPath;
+    }
+    let wlen = watched.len();
+    // Root "/" is its own prefix without a separator byte; every other
+    // watched path needs a '/' separator after the prefix.
+    let prefix_len = if watched == b"/" {
+        1
+    } else {
+        let Some(head) = path.get(..wlen) else {
+            return Rel::NotMatched;
+        };
+        if head != watched {
+            return Rel::NotMatched;
+        }
+        if path.get(wlen) != Some(&b'/') {
+            return Rel::NotMatched;
+        }
+        wlen.saturating_add(1)
+    };
+    let Some(remainder) = path.get(prefix_len..) else {
+        return Rel::NotMatched;
+    };
+    if remainder.is_empty() || remainder.contains(&b'/') {
+        return Rel::NotMatched;
+    }
+    Rel::Child(remainder)
+}
+
+/// Up to two inotify events produced from one kernel event, plus whether
+/// the originating watch must be auto-removed (self-delete).
+struct Translation {
+    events: [InotifyPending; 2],
+    count: usize,
+    disarm: bool,
+}
+
+const TRANSLATION_EMPTY: Translation = Translation {
+    events: [INOTIFY_PENDING_INIT; 2],
+    count: 0,
+    disarm: false,
+};
+
+fn push_tr(t: &mut Translation, ev: InotifyPending) {
+    if let Some(slot) = t.events.get_mut(t.count) {
+        *slot = ev;
+        t.count = t.count.saturating_add(1);
+    }
+}
+
+fn pending_with_cookie(wd: i32, mask: u32, cookie: u32, name: &[u8]) -> InotifyPending {
+    let mut ev = make_event(wd, mask, name);
+    ev.cookie = cookie;
+    ev
+}
+
+/// For events that fire for both the watched path itself and its direct
+/// children (modify / metadata / access), map the relation to the name
+/// to report: empty for the watch itself, the basename for a child, and
+/// `None` when the path is unrelated.
+fn rel_self_or_child(r: Rel<'_>) -> Option<&[u8]> {
+    match r {
+        Rel::SelfPath => Some(b""),
+        Rel::Child(name) => Some(name),
+        Rel::NotMatched => None,
+    }
+}
+
+/// Translate one kernel watch event into zero, one, or two
+/// `struct inotify_event` records, gated by the watch's original inotify
+/// mask.  Pure function — unit-tested on the host.
+///
+/// `watched` is the watched absolute path (no trailing slash).
+/// `affected` / `new_path` are the kernel-supplied paths (already
+/// NUL-stripped).  `cookie` is a non-zero pairing cookie for renames
+/// (ignored for other event types).
+fn translate_kernel_event(
+    watched: &[u8],
+    inotify_mask: u32,
+    wd: i32,
+    event_type: u32,
+    affected: &[u8],
+    new_path: &[u8],
+    cookie: u32,
+) -> Translation {
+    let mut t = TRANSLATION_EMPTY;
+    match event_type {
+        KEV_CREATED => {
+            if inotify_mask & IN_CREATE != 0
+                && let Rel::Child(name) = relative_name(watched, affected)
+            {
+                push_tr(&mut t, make_event(wd, IN_CREATE, name));
+            }
+        }
+        KEV_DELETED => match relative_name(watched, affected) {
+            Rel::SelfPath => {
+                if inotify_mask & IN_DELETE_SELF != 0 {
+                    push_tr(&mut t, make_event(wd, IN_DELETE_SELF, &[]));
+                }
+                push_tr(&mut t, make_event(wd, IN_IGNORED, &[]));
+                t.disarm = true;
+            }
+            Rel::Child(name) => {
+                if inotify_mask & IN_DELETE != 0 {
+                    push_tr(&mut t, make_event(wd, IN_DELETE, name));
+                }
+            }
+            Rel::NotMatched => {}
+        },
+        KEV_MODIFIED => {
+            if inotify_mask & IN_MODIFY != 0
+                && let Some(name) = rel_self_or_child(relative_name(watched, affected))
+            {
+                push_tr(&mut t, make_event(wd, IN_MODIFY, name));
+            }
+        }
+        KEV_RENAMED => {
+            // A rename within / out of the watch.  The kernel reports the
+            // old path in `affected` and (when known) the new path in
+            // `new_path`.  Self-rename of the watched path → IN_MOVE_SELF.
+            if matches!(relative_name(watched, affected), Rel::SelfPath) {
+                if inotify_mask & IN_MOVE_SELF != 0 {
+                    push_tr(&mut t, make_event(wd, IN_MOVE_SELF, &[]));
+                }
+            } else {
+                if inotify_mask & IN_MOVED_FROM != 0
+                    && let Rel::Child(name) = relative_name(watched, affected)
+                {
+                    push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_FROM, cookie, name));
+                }
+                if inotify_mask & IN_MOVED_TO != 0
+                    && let Rel::Child(name) = relative_name(watched, new_path)
+                {
+                    push_tr(&mut t, pending_with_cookie(wd, IN_MOVED_TO, cookie, name));
+                }
+            }
+        }
+        KEV_METADATA => {
+            if inotify_mask & IN_ATTRIB != 0
+                && let Some(name) = rel_self_or_child(relative_name(watched, affected))
+            {
+                push_tr(&mut t, make_event(wd, IN_ATTRIB, name));
+            }
+        }
+        KEV_ACCESSED => {
+            if inotify_mask & IN_ACCESS != 0
+                && let Some(name) = rel_self_or_child(relative_name(watched, affected))
+            {
+                push_tr(&mut t, make_event(wd, IN_ACCESS, name));
+            }
+        }
+        KEV_OVERFLOW => {
+            push_tr(&mut t, pending_with_cookie(-1, IN_Q_OVERFLOW, 0, &[]));
+        }
+        _ => {}
+    }
+    t
 }
 
 /// Stat the watched path itself.  Returns (exists, size, is_dir).
@@ -1779,220 +2046,127 @@ fn stat_self(path: &[u8]) -> (bool, u64, bool) {
     (true, size, st.is_dir())
 }
 
-/// Scan one watched directory and diff its children against the
-/// stored snapshot, queuing CREATE / DELETE / MODIFY events for
-/// matching mask bits.  Updates the snapshot in place.
-fn scan_dir_watch(inst_id: usize, w_idx: usize) {
-    // SAFETY: single-threaded; the borrow window is bounded to this
-    // function and doesn't escape.
-    let (path_copy, path_len, mask, wd) = unsafe {
-        let table = &*inotify_table_ptr();
-        let inst = &table[inst_id];
-        let w = &inst.watches[w_idx];
-        (w.path, w.path_len as usize, w.mask, w.wd)
-    };
-    let path = &path_copy[..path_len];
-
-    // Stat first to detect IN_DELETE_SELF.
-    let (exists, _size, _is_dir) = stat_self(path);
-    if !exists {
-        // Watched dir gone — fire IN_DELETE_SELF + IN_IGNORED and
-        // disarm the watch.
-        let _ = with_inotify_mut(inst_id as u64, |inst| {
-            let was_exists = inst.watches[w_idx].self_exists;
-            if was_exists {
-                if mask & IN_DELETE_SELF != 0 {
-                    queue_push(inst, make_event(wd, IN_DELETE_SELF, &[]));
-                }
-                queue_push(inst, make_event(wd, IN_IGNORED, &[]));
-                inst.watches[w_idx] = INOTIFY_WATCH_INIT;
-            }
-        });
-        return;
-    }
-
-    // List the directory.  SAFETY: scratch buffer is reused per scan;
-    // single-threaded posix layer.
-    let ret = unsafe {
-        let scratch = &mut *listdir_scratch_ptr();
-        syscall3(
-            crate::syscall::SYS_FS_LIST_DIR,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            scratch.as_mut_ptr() as u64,
-        )
-    };
-    if ret < 0 {
-        return;
-    }
-    let entry_count = usize::try_from(ret).unwrap_or(0);
-
-    // Build a fresh snapshot from the scratch buffer.
-    let mut fresh = [INOTIFY_CHILD_INIT; MAX_INOTIFY_CHILDREN];
-    let mut fresh_count = 0usize;
-    // SAFETY: single-threaded; we don't hold concurrent &mut to scratch.
-    let scratch_ref = unsafe { &*listdir_scratch_ptr() };
-    for i in 0..entry_count {
-        if fresh_count >= MAX_INOTIFY_CHILDREN {
-            break;
-        }
-        let off = i * DIR_ENTRY_SIZE;
-        let Some(name_slice) = scratch_ref.get(off..off + 256) else { break; };
-        let Some(size_bytes) = scratch_ref.get(off + 256..off + 260) else { break; };
-        let Some(&type_byte) = scratch_ref.get(off + 260) else { break; };
-        let stripped = strip_nul(name_slice);
-        // Skip "." and ".." (some filesystems include them).
-        if stripped == b"." || stripped == b".." {
-            continue;
-        }
-        let mut child = INOTIFY_CHILD_INIT;
-        let n = core::cmp::min(stripped.len(), INOTIFY_NAME_MAX);
-        if n > 0 {
-            // SAFETY: bounds checked above.
-            child.name[..n].copy_from_slice(&stripped[..n]);
-            child.name_len = n as u8;
-        }
-        child.size = u32::from_le_bytes([
-            size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3],
-        ]);
-        // `type_byte` is the raw kernel type code from SYS_FS_LIST_DIR
-        // (0=file, 1=dir, 3=symlink), NOT a DT_* value.
-        child.is_dir = type_byte == crate::dirent::KERNEL_TYPE_DIR;
-        child.in_use = true;
-        fresh[fresh_count] = child;
-        fresh_count += 1;
-    }
-
-    // Diff against stored snapshot.  We snapshot the old children
-    // out by value first so we can call queue_push (which mutably
-    // borrows the whole instance) without conflicting with the watch
-    // borrow.
-    let _ = with_inotify_mut(inst_id as u64, |inst| {
-        let old_children: [InotifyChild; MAX_INOTIFY_CHILDREN] =
-            inst.watches[w_idx].children;
-        // For each new entry: look it up in the old snapshot.  If
-        // absent → CREATE.  If present with different size → MODIFY.
-        let mut matched_old = [false; MAX_INOTIFY_CHILDREN];
-
-        for i in 0..fresh_count {
-            let new = fresh[i];
-            let new_name_len = new.name_len as usize;
-            let new_name = &new.name[..new_name_len];
-            let mut found = false;
-            for (j, old) in old_children.iter().enumerate() {
-                if !old.in_use {
-                    continue;
-                }
-                if names_eq(old, new_name) {
-                    matched_old[j] = true;
-                    found = true;
-                    if old.size != new.size && (mask & IN_MODIFY) != 0 {
-                        queue_push(inst, make_event(wd, IN_MODIFY, new_name));
-                    }
-                    break;
-                }
-            }
-            if !found && (mask & IN_CREATE) != 0 {
-                queue_push(inst, make_event(wd, IN_CREATE, new_name));
-            }
-        }
-
-        // Old entries no longer present → IN_DELETE.
-        for (j, old) in old_children.iter().enumerate() {
-            if old.in_use && !matched_old[j] && (mask & IN_DELETE) != 0 {
-                let old_name_len = old.name_len as usize;
-                let old_name = &old.name[..old_name_len];
-                queue_push(inst, make_event(wd, IN_DELETE, old_name));
-            }
-        }
-
-        // Commit fresh snapshot.
-        let w = &mut inst.watches[w_idx];
-        w.children = fresh;
-        w.self_exists = true;
-    });
-}
-
-/// Scan one watched file (non-directory).  Detects IN_MODIFY (size
-/// change) and IN_DELETE_SELF.
-fn scan_file_watch(inst_id: usize, w_idx: usize) {
-    let (path_copy, path_len, mask, wd) = unsafe {
-        let table = &*inotify_table_ptr();
-        let inst = &table[inst_id];
-        let w = &inst.watches[w_idx];
-        (w.path, w.path_len as usize, w.mask, w.wd)
-    };
-    let path = &path_copy[..path_len];
-
-    let (exists, new_size, _is_dir) = stat_self(path);
-
-    let _ = with_inotify_mut(inst_id as u64, |inst| {
-        let (was_exists, old_size) = {
-            let w = &inst.watches[w_idx];
-            (w.self_exists, w.self_size)
+/// Drain all pending kernel events for one watch and queue the
+/// translated inotify events on its instance.  Auto-removes the watch
+/// (and closes its kernel watch) on a self-delete.
+fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, watched: &[u8]) {
+    loop {
+        // Read a batch of kernel records into the shared scratch buffer.
+        // SAFETY: single-threaded posix layer; the &mut borrow does not
+        // escape the call.
+        let ret = {
+            let scratch = unsafe { &mut *event_scratch_ptr() };
+            kwatch_read(kernel_id, scratch, KWATCH_READ_BATCH)
         };
-        if !exists {
-            if was_exists {
-                if mask & IN_DELETE_SELF != 0 {
-                    queue_push(inst, make_event(wd, IN_DELETE_SELF, &[]));
-                }
-                queue_push(inst, make_event(wd, IN_IGNORED, &[]));
-                inst.watches[w_idx] = INOTIFY_WATCH_INIT;
-            }
+        if ret <= 0 {
             return;
         }
-        if new_size != old_size && mask & IN_MODIFY != 0 {
-            queue_push(inst, make_event(wd, IN_MODIFY, &[]));
+        let count = usize::try_from(ret).unwrap_or(0).min(KWATCH_READ_BATCH);
+        let mut disarmed = false;
+        // SAFETY: single-threaded; no concurrent &mut to scratch while we
+        // read the records back out.
+        let scratch = unsafe { &*event_scratch_ptr() };
+        for rec in scratch
+            .chunks_exact(crate::syscall::FS_WATCH_EVENT_SIZE)
+            .take(count)
+        {
+            let Some(affected_raw) = rec.get(..KEV_NEWPATH_OFF) else {
+                continue;
+            };
+            let Some(new_raw) = rec.get(KEV_NEWPATH_OFF..KEV_TYPE_OFF) else {
+                continue;
+            };
+            let Some(type_raw) = rec.get(KEV_TYPE_OFF..KEV_TYPE_END) else {
+                continue;
+            };
+            let affected = strip_nul(affected_raw);
+            let new_path = strip_nul(new_raw);
+            let etype =
+                u32::from_le_bytes(<[u8; 4]>::try_from(type_raw).unwrap_or([0u8; 4]));
+            let cookie = if etype == KEV_RENAMED { next_cookie() } else { 0 };
+            let tr = translate_kernel_event(
+                watched, mask, wd, etype, affected, new_path, cookie,
+            );
+            let _ = with_inotify_mut(idx, |inst| {
+                for k in 0..tr.count {
+                    if let Some(ev) = tr.events.get(k) {
+                        queue_push(inst, *ev);
+                    }
+                }
+                if tr.disarm {
+                    for w in &mut inst.watches {
+                        if w.in_use && w.wd == wd {
+                            *w = INOTIFY_WATCH_INIT;
+                        }
+                    }
+                }
+            });
+            if tr.disarm {
+                disarmed = true;
+                break;
+            }
         }
-        let w = &mut inst.watches[w_idx];
-        w.self_size = new_size;
-        w.self_exists = true;
-    });
+        if disarmed {
+            kwatch_close(kernel_id);
+            return;
+        }
+        // A short read means the kernel queue is drained.
+        if count < KWATCH_READ_BATCH {
+            return;
+        }
+    }
 }
 
-/// Re-scan every active watch in an instance.  This is the polling
-/// engine — called by `read()` and by `check_readiness`.
-fn poll_all_watches(idx: u64) {
+/// Drain pending kernel events for every active watch in an instance and
+/// queue the translated inotify events.  This is the event-pump engine —
+/// called by `read()` and by readiness checks so `poll`/`select`/
+/// `epoll_wait` observe up-to-date state.
+fn pump_instance(idx: u64) {
     let inst_id = match usize::try_from(idx) {
         Ok(i) if i < MAX_INOTIFY_INSTANCES => i,
         _ => return,
     };
-    // Snapshot which watches are active to avoid holding a borrow
-    // across the (potentially mutating) scan calls.
-    let mut active_dir = [false; MAX_INOTIFY_WATCHES];
-    let mut active_file = [false; MAX_INOTIFY_WATCHES];
+    // Snapshot the active watches by value so we don't hold a borrow on
+    // the instance table across `pump_one_watch` (which re-borrows it).
+    let mut snap: [(bool, i32, u64, u32, [u8; INOTIFY_PATH_MAX], usize);
+        MAX_INOTIFY_WATCHES] =
+        [(false, 0, 0, 0, [0u8; INOTIFY_PATH_MAX], 0); MAX_INOTIFY_WATCHES];
     // SAFETY: single-threaded.
     unsafe {
         let table = &*inotify_table_ptr();
-        let inst = &table[inst_id];
+        let Some(inst) = table.get(inst_id) else {
+            return;
+        };
         if !inst.in_use {
             return;
         }
         for (j, w) in inst.watches.iter().enumerate() {
-            if w.in_use {
-                if w.is_dir {
-                    active_dir[j] = true;
-                } else {
-                    active_file[j] = true;
-                }
+            if w.in_use
+                && w.kernel_id != 0
+                && let Some(slot) = snap.get_mut(j)
+            {
+                *slot = (true, w.wd, w.kernel_id, w.mask, w.path, w.path_len as usize);
             }
         }
     }
-    for j in 0..MAX_INOTIFY_WATCHES {
-        if active_dir[j] {
-            scan_dir_watch(inst_id, j);
-        } else if active_file[j] {
-            scan_file_watch(inst_id, j);
+    for entry in &snap {
+        let (active, wd, kernel_id, mask, path_buf, path_len) = *entry;
+        if !active {
+            continue;
         }
+        let Some(watched) = path_buf.get(..path_len) else {
+            continue;
+        };
+        pump_one_watch(idx, wd, kernel_id, mask, watched);
     }
 }
 
 /// Return `true` if the inotify instance has events available to
-/// read.  Triggers a fresh poll of all watches as a side effect — so
+/// read.  Pumps pending kernel events as a side effect — so
 /// `poll/select/epoll_wait` see up-to-date readiness.
 #[must_use]
 pub fn inotify_is_readable(idx: u64) -> bool {
-    poll_all_watches(idx);
+    pump_instance(idx);
     let mut readable = false;
     let _ = with_inotify_mut(idx, |inst| {
         readable = inst.count > 0 || inst.overflow_pending;
@@ -2020,9 +2194,9 @@ pub fn inotify_is_nonblock(idx: u64) -> bool {
 /// field (NUL-padded to an 8-byte boundary).  We require `buf` to be
 /// large enough for at least one full record.
 pub fn inotify_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
-    // Always re-poll before serving reads, so events generated since
-    // the last call show up.
-    poll_all_watches(idx);
+    // Always pump pending kernel events before serving reads, so events
+    // generated since the last call show up.
+    pump_instance(idx);
 
     let mut written = 0usize;
     let mut err: Option<i32> = None;
@@ -2234,96 +2408,108 @@ pub extern "C" fn inotify_add_watch(
     }
     let path_bytes = &resolved[..resolved_len];
 
-    // Stat to check existence and type.
-    let (exists, self_size, is_dir) = stat_self(path_bytes);
+    // Stat to check existence (Linux: a missing path → ENOENT).  inotify
+    // watches both files and directories; the kernel watch backend does
+    // not distinguish, so we no longer track the type.
+    let (exists, _self_size, _is_dir) = stat_self(path_bytes);
     if !exists {
         errno::set_errno(errno::ENOENT);
         return -1;
     }
 
-    // Find existing watch (by path) or allocate a new slot.
-    let mut wd_out: i32 = -1;
-    let mut full = false;
+    let effective_mask = mask & IN_KNOWN_EVENTS;
+    let kmask = inotify_to_kernel_mask(effective_mask);
+
+    // Phase 1: locate an existing watch for this path (re-arm) or a free
+    // slot (new watch).  We only capture indices/ids here — the kernel
+    // watch is (re)created outside the borrow because it issues a
+    // syscall.
+    let mut existing: Option<(usize, i32, u64)> = None; // (slot, wd, old kernel_id)
+    let mut free_slot: Option<usize> = None;
     let _ = with_inotify_mut(idx, |inst| {
-        // Check for existing.
-        for w in inst.watches.iter_mut() {
+        for (j, w) in inst.watches.iter().enumerate() {
             if w.in_use
                 && w.path_len as usize == resolved_len
-                && &w.path[..resolved_len] == path_bytes
+                && w.path.get(..resolved_len) == Some(path_bytes)
             {
-                w.mask = mask & IN_KNOWN_EVENTS;
-                wd_out = w.wd;
+                existing = Some((j, w.wd, w.kernel_id));
                 return;
             }
         }
-        // Allocate.
-        for w in inst.watches.iter_mut() {
+        for (j, w) in inst.watches.iter().enumerate() {
             if !w.in_use {
+                free_slot = Some(j);
+                return;
+            }
+        }
+    });
+    if existing.is_none() && free_slot.is_none() {
+        errno::set_errno(errno::ENOSPC);
+        return -1;
+    }
+
+    // Create the backing kernel watch unless the mask maps to no kernel
+    // event bits (e.g. only IN_OPEN / IN_CLOSE_* requested), in which
+    // case the watch is inert (`kernel_id == 0`).
+    let new_kid: u64 = if kmask != 0 {
+        let ret = kwatch_create(path_bytes, kmask);
+        if ret <= 0 {
+            // Kernel watch table full or rejected the request → ENOSPC,
+            // the closest inotify errno for "no resources for a watch".
+            errno::set_errno(errno::ENOSPC);
+            return -1;
+        }
+        u64::try_from(ret).unwrap_or(0)
+    } else {
+        0
+    };
+
+    // Phase 2: commit the slot.  `to_close` captures the superseded
+    // kernel watch of a re-armed entry so we can close it after dropping
+    // the borrow.
+    let mut wd_out: i32 = -1;
+    let mut to_close = 0u64;
+    let _ = with_inotify_mut(idx, |inst| {
+        if let Some((j, wd, old_kid)) = existing {
+            if let Some(w) = inst.watches.get_mut(j) {
+                w.mask = effective_mask;
+                w.kernel_id = new_kid;
+                wd_out = wd;
+            }
+            to_close = old_kid;
+        } else if let Some(j) = free_slot {
+            let next = inst.next_wd;
+            inst.next_wd = inst.next_wd.wrapping_add(1);
+            if inst.next_wd <= 0 {
+                inst.next_wd = 1;
+            }
+            if let Some(w) = inst.watches.get_mut(j) {
                 *w = INOTIFY_WATCH_INIT;
                 w.in_use = true;
-                w.wd = inst.next_wd;
-                inst.next_wd = inst.next_wd.wrapping_add(1);
-                if inst.next_wd <= 0 {
-                    inst.next_wd = 1;
-                }
-                w.mask = mask & IN_KNOWN_EVENTS;
-                w.is_dir = is_dir;
-                w.self_size = self_size;
-                w.self_exists = true;
+                w.wd = next;
+                w.mask = effective_mask;
+                w.kernel_id = new_kid;
                 if let Some(dst) = w.path.get_mut(..resolved_len) {
                     dst.copy_from_slice(path_bytes);
                 }
                 w.path_len = resolved_len as u16;
-                wd_out = w.wd;
-                return;
+                wd_out = next;
             }
         }
-        full = true;
     });
-    if full {
-        errno::set_errno(errno::ENOSPC);
-        return -1;
+
+    // Close the watch the re-arm replaced (outside the borrow).
+    if to_close != 0 && to_close != new_kid {
+        kwatch_close(to_close);
     }
+
     if wd_out < 0 {
+        // Commit failed unexpectedly — don't leak the kernel watch.
+        if new_kid != 0 {
+            kwatch_close(new_kid);
+        }
         errno::set_errno(errno::EBADF);
         return -1;
-    }
-    // Seed initial snapshot so future scans diff against the current
-    // state rather than firing IN_CREATE for every existing child.
-    if is_dir {
-        // Find the watch slot index we just used.
-        let wd_local = wd_out;
-        let mut w_idx = None;
-        // SAFETY: single-threaded.
-        unsafe {
-            let table = &*inotify_table_ptr();
-            let inst = &table[idx as usize];
-            for (j, w) in inst.watches.iter().enumerate() {
-                if w.in_use && w.wd == wd_local {
-                    w_idx = Some(j);
-                    break;
-                }
-            }
-        }
-        if let Some(j) = w_idx {
-            // Use the same scan path, then discard generated events
-            // (since this is initial state, not a change).
-            let before_count = with_inotify_mut(idx, |inst| inst.count).unwrap_or(0);
-            scan_dir_watch(idx as usize, j);
-            let _ = with_inotify_mut(idx, |inst| {
-                // Drop any newly-generated events from the seed scan.
-                while inst.count > before_count {
-                    // Roll the tail back; the events we added were the
-                    // most recent so simply discard them.
-                    if inst.tail == 0 {
-                        inst.tail = (MAX_INOTIFY_EVENTS - 1) as u16;
-                    } else {
-                        inst.tail -= 1;
-                    }
-                    inst.count -= 1;
-                }
-            });
-        }
     }
     wd_out
 }
@@ -2344,24 +2530,36 @@ pub extern "C" fn inotify_rm_watch(fd: i32, wd: i32) -> i32 {
     }
     let idx = entry.handle;
     let mut found = false;
+    let mut to_close = 0u64;
     let _ = with_inotify_mut(idx, |inst| {
-        for w in inst.watches.iter_mut() {
+        // Capture the backing kernel watch id, queue the final
+        // IN_IGNORED, then disarm the slot.  The kernel watch is closed
+        // after the borrow is dropped.
+        let mut kid = 0u64;
+        for w in &inst.watches {
             if w.in_use && w.wd == wd {
-                let _ = w; // re-borrow inst below
-                queue_push(inst, make_event(wd, IN_IGNORED, &[]));
-                for w2 in inst.watches.iter_mut() {
-                    if w2.in_use && w2.wd == wd {
-                        *w2 = INOTIFY_WATCH_INIT;
-                    }
-                }
+                kid = w.kernel_id;
                 found = true;
-                return;
+                break;
             }
         }
+        if !found {
+            return;
+        }
+        queue_push(inst, make_event(wd, IN_IGNORED, &[]));
+        for w in &mut inst.watches {
+            if w.in_use && w.wd == wd {
+                *w = INOTIFY_WATCH_INIT;
+            }
+        }
+        to_close = kid;
     });
     if !found {
         errno::set_errno(errno::EINVAL);
         return -1;
+    }
+    if to_close != 0 {
+        kwatch_close(to_close);
     }
     0
 }
@@ -3320,6 +3518,202 @@ mod tests {
         for f in flags {
             assert_eq!(f.count_ones(), 1, "flag 0x{f:x} is not a single bit");
         }
+    }
+
+    // -- relative_name (pure path relation) --
+
+    #[test]
+    fn test_relative_name_self_match() {
+        assert!(matches!(relative_name(b"/a/b", b"/a/b"), Rel::SelfPath));
+    }
+
+    #[test]
+    fn test_relative_name_direct_child() {
+        match relative_name(b"/a/b", b"/a/b/file.txt") {
+            Rel::Child(name) => assert_eq!(name, b"file.txt"),
+            _ => panic!("expected Child"),
+        }
+    }
+
+    #[test]
+    fn test_relative_name_grandchild_not_matched() {
+        // inotify is non-recursive: nested paths must not match.
+        assert!(matches!(
+            relative_name(b"/a/b", b"/a/b/sub/file.txt"),
+            Rel::NotMatched
+        ));
+    }
+
+    #[test]
+    fn test_relative_name_sibling_prefix_not_matched() {
+        // "/a/bc" shares the textual prefix "/a/b" but is not a child of it.
+        assert!(matches!(relative_name(b"/a/b", b"/a/bc"), Rel::NotMatched));
+    }
+
+    #[test]
+    fn test_relative_name_unrelated_not_matched() {
+        assert!(matches!(relative_name(b"/a/b", b"/x/y"), Rel::NotMatched));
+    }
+
+    #[test]
+    fn test_relative_name_root_child() {
+        // Root "/" is its own prefix with no separator byte.
+        match relative_name(b"/", b"/etc") {
+            Rel::Child(name) => assert_eq!(name, b"etc"),
+            _ => panic!("expected Child"),
+        }
+        assert!(matches!(relative_name(b"/", b"/etc/passwd"), Rel::NotMatched));
+    }
+
+    // -- translate_kernel_event (pure kernel→inotify mapping) --
+
+    #[test]
+    fn test_translate_created_child() {
+        let t = translate_kernel_event(
+            b"/w", IN_CREATE, 7, KEV_CREATED, b"/w/new", b"", 0,
+        );
+        assert_eq!(t.count, 1);
+        assert!(!t.disarm);
+        let ev = t.events[0];
+        assert_eq!(ev.wd, 7);
+        assert_eq!(ev.mask, IN_CREATE);
+        assert_eq!(&ev.name[..ev.name_len as usize], b"new");
+    }
+
+    #[test]
+    fn test_translate_created_masked_off() {
+        // Mask doesn't request IN_CREATE → no event.
+        let t = translate_kernel_event(
+            b"/w", IN_DELETE, 7, KEV_CREATED, b"/w/new", b"", 0,
+        );
+        assert_eq!(t.count, 0);
+    }
+
+    #[test]
+    fn test_translate_delete_self_disarms() {
+        let t = translate_kernel_event(
+            b"/w", IN_DELETE_SELF, 3, KEV_DELETED, b"/w", b"", 0,
+        );
+        assert!(t.disarm);
+        // IN_DELETE_SELF then IN_IGNORED.
+        assert_eq!(t.count, 2);
+        assert_eq!(t.events[0].mask, IN_DELETE_SELF);
+        assert_eq!(t.events[1].mask, IN_IGNORED);
+    }
+
+    #[test]
+    fn test_translate_delete_self_ignored_only_when_unmasked() {
+        // Even if IN_DELETE_SELF wasn't requested, IN_IGNORED still fires
+        // and the watch is disarmed.
+        let t = translate_kernel_event(
+            b"/w", IN_CREATE, 3, KEV_DELETED, b"/w", b"", 0,
+        );
+        assert!(t.disarm);
+        assert_eq!(t.count, 1);
+        assert_eq!(t.events[0].mask, IN_IGNORED);
+    }
+
+    #[test]
+    fn test_translate_delete_child() {
+        let t = translate_kernel_event(
+            b"/w", IN_DELETE, 3, KEV_DELETED, b"/w/gone", b"", 0,
+        );
+        assert!(!t.disarm);
+        assert_eq!(t.count, 1);
+        assert_eq!(t.events[0].mask, IN_DELETE);
+        assert_eq!(&t.events[0].name[..t.events[0].name_len as usize], b"gone");
+    }
+
+    #[test]
+    fn test_translate_modify_self_empty_name() {
+        let t = translate_kernel_event(
+            b"/w/f", IN_MODIFY, 5, KEV_MODIFIED, b"/w/f", b"", 0,
+        );
+        assert_eq!(t.count, 1);
+        assert_eq!(t.events[0].mask, IN_MODIFY);
+        assert_eq!(t.events[0].name_len, 0);
+    }
+
+    #[test]
+    fn test_translate_rename_pair_shares_cookie() {
+        let t = translate_kernel_event(
+            b"/w",
+            IN_MOVED_FROM | IN_MOVED_TO,
+            9,
+            KEV_RENAMED,
+            b"/w/old",
+            b"/w/new",
+            0x1234,
+        );
+        assert_eq!(t.count, 2);
+        assert_eq!(t.events[0].mask, IN_MOVED_FROM);
+        assert_eq!(t.events[0].cookie, 0x1234);
+        assert_eq!(&t.events[0].name[..t.events[0].name_len as usize], b"old");
+        assert_eq!(t.events[1].mask, IN_MOVED_TO);
+        assert_eq!(t.events[1].cookie, 0x1234);
+        assert_eq!(&t.events[1].name[..t.events[1].name_len as usize], b"new");
+    }
+
+    #[test]
+    fn test_translate_rename_self_is_move_self() {
+        let t = translate_kernel_event(
+            b"/w", IN_MOVE_SELF, 9, KEV_RENAMED, b"/w", b"/elsewhere", 0x55,
+        );
+        assert_eq!(t.count, 1);
+        assert_eq!(t.events[0].mask, IN_MOVE_SELF);
+    }
+
+    #[test]
+    fn test_translate_metadata_and_access() {
+        let t = translate_kernel_event(
+            b"/w/f", IN_ATTRIB, 2, KEV_METADATA, b"/w/f", b"", 0,
+        );
+        assert_eq!(t.count, 1);
+        assert_eq!(t.events[0].mask, IN_ATTRIB);
+
+        let t = translate_kernel_event(
+            b"/w/f", IN_ACCESS, 2, KEV_ACCESSED, b"/w/f", b"", 0,
+        );
+        assert_eq!(t.count, 1);
+        assert_eq!(t.events[0].mask, IN_ACCESS);
+    }
+
+    #[test]
+    fn test_translate_overflow() {
+        let t = translate_kernel_event(b"/w", 0, 0, KEV_OVERFLOW, b"", b"", 0);
+        assert_eq!(t.count, 1);
+        assert_eq!(t.events[0].wd, -1);
+        assert_eq!(t.events[0].mask, IN_Q_OVERFLOW);
+    }
+
+    #[test]
+    fn test_translate_grandchild_ignored() {
+        // A create deep under the watch must not surface (non-recursive).
+        let t = translate_kernel_event(
+            b"/w", IN_CREATE, 1, KEV_CREATED, b"/w/sub/deep", b"", 0,
+        );
+        assert_eq!(t.count, 0);
+    }
+
+    // -- inotify_to_kernel_mask collapsing --
+
+    #[test]
+    fn test_inotify_to_kernel_mask_collapses() {
+        // All move bits collapse onto a single kernel RENAME bit.
+        assert_eq!(
+            inotify_to_kernel_mask(IN_MOVED_FROM | IN_MOVED_TO | IN_MOVE_SELF),
+            KMASK_RENAME
+        );
+        // Both delete bits collapse onto DELETE.
+        assert_eq!(
+            inotify_to_kernel_mask(IN_DELETE | IN_DELETE_SELF),
+            KMASK_DELETE
+        );
+        // Open/close have no kernel equivalent → empty mask.
+        assert_eq!(
+            inotify_to_kernel_mask(IN_OPEN | IN_CLOSE_WRITE | IN_CLOSE_NOWRITE),
+            0
+        );
     }
 
     // -- signalfd with positive fd (modify existing) --

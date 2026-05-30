@@ -568,6 +568,66 @@ Remaining net improvements (diminishing returns):
   This is a prerequisite for rewiring posix inotify off polling onto the
   kernel watch API (next task) — without it the kernel API would be useless.
 
+- (DONE 2026-05-30) posix inotify rewired from polling to the native kernel
+  watch API.  Follows directly from the kernel notify fix above (now that the
+  kernel is a real event source).  Previously posix::epoll implemented inotify
+  by snapshotting directory listings via SYS_FS_LIST_DIR + stat on every
+  read()/readiness check and diffing children — an O(entries) poll that missed
+  any change reverted between two reads and could not see a content edit that
+  left the file size unchanged (no-op-stub / inferior-reimplementation bug
+  class, roadmap.md:1420).
+  Rewrite (posix/src/epoll.rs):
+    * Added SYS_FS_WATCH_CREATE/READ/CLOSE (622/623/624) + FS_WATCH_EVENT_SIZE
+      (528) to posix/src/syscall.rs and to all three syscall-number test lists
+      (verified against kernel/src/syscall/number.rs and the kernel handler
+      layout in handlers.rs: path[0..256], new_path[256..512], watch_id
+      [512..520], event_type u32 [520..524]).
+    * InotifyWatch now stores {wd, mask (original inotify mask), kernel_id,
+      path} — one inotify watch == one kernel watch.  Dropped the per-watch
+      child-snapshot arrays, self_size/self_exists, is_dir, and
+      MAX_INOTIFY_CHILDREN entirely.
+    * inotify_add_watch issues SYS_FS_WATCH_CREATE with a collapsed kernel
+      mask; inotify_rm_watch and inotify_instance_close issue
+      SYS_FS_WATCH_CLOSE (no more leaks).  read()/is_readable() drain pending
+      kernel events via SYS_FS_WATCH_READ (pump_instance/pump_one_watch).
+    * Pure, host-tested translation (translate_kernel_event + relative_name):
+      kernel Created->IN_CREATE(child); Deleted->IN_DELETE(child) or
+      IN_DELETE_SELF+IN_IGNORED+auto-disarm(self); Modified->IN_MODIFY;
+      Renamed->IN_MOVED_FROM+IN_MOVED_TO(shared cookie) or IN_MOVE_SELF(self);
+      MetadataChanged->IN_ATTRIB; Accessed->IN_ACCESS; Overflow->IN_Q_OVERFLOW.
+      Non-recursive (grandchildren never match), matching inotify semantics.
+    * inotify_to_kernel_mask collapses all IN_MOVED_*/IN_MOVE_SELF -> RENAME
+      and IN_DELETE|IN_DELETE_SELF -> DELETE; IN_OPEN/IN_CLOSE_* map to no
+      kernel bit (watch is created with kernel_id==0 and is inert, accepted
+      for Linux compat).  The original inotify mask is retained per-watch so
+      fine-grained filtering happens on the posix side after the kernel
+      coalesces.
+    * 18 new host unit tests for the pure functions (relative_name self/child/
+      grandchild/sibling-prefix/unrelated/root; translate create/delete-self/
+      delete-child/modify/rename-pair/move-self/metadata/access/overflow/
+      grandchild-ignored; mask collapsing).
+  Both targets build clean (bare-metal x86_64-unknown-none and host
+  x86_64-pc-windows-gnu); 111 inotify/translate/relative_name tests pass; no
+  new clippy findings in the rewritten ranges (used edition-2024 let-chains to
+  avoid collapsible_if/match, &slice loops to avoid explicit_iter_loop, and a
+  Copy Rel enum to avoid needless_pass_by_value).  Pre-existing pedantic
+  findings elsewhere in epoll.rs (and the long-but-pre-existing
+  inotify_add_watch too_many_lines) were left untouched.
+
+  KNOWN LIMITATION (kernel watch API is UTF-8-only): sys_fs_watch_create
+  parses the path with core::str::from_utf8 and create_watch stores a String,
+  so a watched path containing non-UTF-8 bytes is rejected by the kernel even
+  though our paths are byte paths (CLAUDE.md rule 7).  posix already does the
+  existence/ENOENT check on the raw bytes first, so the only affected case is
+  an existing path with non-UTF-8 bytes, which currently surfaces as ENOSPC
+  (the generic "kwatch_create failed" mapping).  PROPER FIX: change the kernel
+  notify watch API (kernel/src/fs/notify.rs Watch.path + FsEvent.path/new_path
+  and the create/read handlers) to store and compare paths as &[u8]/Vec<u8>
+  instead of str/String, then plumb raw bytes through SYS_FS_WATCH_CREATE/READ.
+  Deferred because it is a kernel-side change spanning notify.rs + two syscall
+  handlers and the non-UTF-8-path case is rare; trigger the fix when adding
+  any non-UTF-8 path support work in the fs zone.
+
 - (DONE 2026-05-30) lseek() SEEK_DATA/SEEK_HOLE wired to the kernel — same
   no-op-stub bug class.  lseek rejected whence == SEEK_DATA(3) / SEEK_HOLE(4)
   with EINVAL ("whence is not a valid value") even though the kernel fully
@@ -1439,33 +1499,19 @@ Remaining net improvements (diminishing returns):
   no-op'd).  Self-test `test_dup_refcount` covers dup+partial close+
   final close+post-close dup-failure.
 
-- (2026-05-27) posix inotify is polling-based, not event-driven.
-  posix::epoll provides functional inotify_init/init1/add_watch/rm_watch
-  by snapshotting directory listings (SYS_FS_LIST_DIR) and file stats
-  (SYS_FS_STAT) on every read() call, diffing against the previous
-  snapshot.  This means:
-    * Events derivable from polling work: IN_CREATE, IN_DELETE,
-      IN_MODIFY (file size change), IN_DELETE_SELF, IN_IGNORED.
-    * Events that require kernel hooks are silently dropped from the
-      mask: IN_OPEN, IN_ACCESS, IN_CLOSE_WRITE, IN_CLOSE_NOWRITE,
-      IN_MOVED_FROM, IN_MOVED_TO, IN_MOVE_SELF, and precise IN_ATTRIB
-      (we use size-change as a proxy for MODIFY but cannot detect
-      pure-attribute changes like chmod/chown).
-    * Move events appear as DELETE on the source watch and CREATE on
-      the destination watch, not as MOVED_FROM/MOVED_TO with matching
-      cookies.
-    * Detection latency = read() call frequency × poll_all_watches
-      cost.  No background notification; readers must call read()
-      (or poll/select/epoll on the fd) actively.
-    * No coalescing — burst changes between two reads collapse to
-      the net diff, not the full sequence.
-  Proper fix: add SYS_FS_NOTIFY_* kernel syscalls that hook into the
-  VFS layer's existing fnotify (kernel/src/fs/fnotify.rs already
-  exists per roadmap line 1019).  Until then, polling is acceptable
-  for inotifywait-style use cases and most file watcher daemons.
-  Limits: MAX_INOTIFY_INSTANCES=4, MAX_INOTIFY_WATCHES=8 per instance,
-  MAX_INOTIFY_CHILDREN=16 per directory watch, MAX_INOTIFY_EVENTS=32
-  queued events, INOTIFY_NAME_MAX=64, INOTIFY_PATH_MAX=256.
+- (2026-05-27; SUPERSEDED 2026-05-30) posix inotify WAS polling-based.
+  This note described the old SYS_FS_LIST_DIR/SYS_FS_STAT snapshot-diff
+  implementation and its limitations (no IN_MOVED_*/IN_MOVE_SELF/precise
+  IN_ATTRIB/IN_ACCESS, size-change proxy for MODIFY, missed reverted
+  changes, latency tied to read() frequency).  RESOLVED: posix inotify is
+  now event-driven on top of the native kernel watch API
+  (SYS_FS_WATCH_CREATE/READ/CLOSE) — see the "(DONE 2026-05-30) posix
+  inotify rewired" entry above for the full description and the one
+  remaining kernel-side limitation (UTF-8-only watch paths).  Current
+  limits: MAX_INOTIFY_INSTANCES=4, MAX_INOTIFY_WATCHES=8 per instance,
+  MAX_INOTIFY_EVENTS=32 queued events, INOTIFY_NAME_MAX=64,
+  INOTIFY_PATH_MAX=256 (MAX_INOTIFY_CHILDREN no longer exists — there is
+  no per-watch child snapshot anymore).
 
 - (2026-05-27) posix getdents64 uses a per-fd snapshot cache, NOT
   incremental kernel iteration.  Each fd's first getdents64 call

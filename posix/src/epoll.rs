@@ -1855,7 +1855,9 @@ fn scan_dir_watch(inst_id: usize, w_idx: usize) {
         child.size = u32::from_le_bytes([
             size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3],
         ]);
-        child.is_dir = type_byte == 2; // DT_DIR
+        // `type_byte` is the raw kernel type code from SYS_FS_LIST_DIR
+        // (0=file, 1=dir, 3=symlink), NOT a DT_* value.
+        child.is_dir = type_byte == crate::dirent::KERNEL_TYPE_DIR;
         child.in_use = true;
         fresh[fresh_count] = child;
         fresh_count += 1;

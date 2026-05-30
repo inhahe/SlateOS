@@ -457,6 +457,35 @@ Remaining net improvements (diminishing returns):
   DEFAULT_BLOCK_SIZE / DEFAULT_NAMEMAX).  5 host tests for the translators;
   full suite 17094 pass; bare-metal build clean.
 
+- (DONE 2026-05-30) CRITICAL d_type translation bug fixed (third instance of
+  the kernel-ABI-mistranslation class).  SYS_FS_LIST_DIR writes a compact
+  kernel type code at byte 260 of each 264-byte entry (0=file, 1=dir,
+  2=volume label [filtered out], 3=symlink) — the SAME encoding as the stat
+  entry_type.  But readdir()/getdents64() copied that raw byte straight into
+  Dirent.d_type / linux_dirent64.d_type, and dirent.rs ALSO defined its own
+  bogus DT_* constants (DT_REG=1, DT_DIR=2, DT_LNK=3 ...) that matched
+  neither the kernel codes nor the Linux ABI.  Net effect with the kernel's
+  encoding: a regular file (0) surfaced as DT_UNKNOWN, a directory (1)
+  surfaced as DT_REG/d_type==1, a symlink (3) happened to land on DT_LNK by
+  luck.  Fallout: every d_type-based directory test was wrong — fts.rs
+  (find/rm -rf/du/chmod -R) treated directories as regular files (kernel 1
+  -> old dirent::DT_REG -> FTS_F), glob GLOB_MARK never appended trailing /,
+  userspace/sftp (which hardcodes the real Linux DT_DIR=4/DT_LNK=10) never
+  identified directories or links, and epoll.rs's inotify child snapshot
+  compared the raw byte to 2 so is_dir was never true for directories.
+  Fix: dirent.rs now re-exports the canonical Linux DT_* values from
+  linux_dirent_types (single source of truth: DT_REG=8, DT_DIR=4, DT_LNK=10,
+  ...), defines named KERNEL_TYPE_{FILE,DIR,VOLLABEL,SYMLINK} codes, and a
+  kernel_type_to_dt() translator.  readdir() and parse_kernel_entry()
+  (getdents64) now translate the kernel byte -> DT_* before exposing it;
+  readdir_r/scandir inherit the fix via readdir().  epoll.rs compares the raw
+  byte to KERNEL_TYPE_DIR instead of the magic 2.  fts.rs/glob.rs keep using
+  dirent::DT_* and are correct now that those constants hold the right values
+  and readdir sets d_type to them consistently.  Updated the dirent
+  test_dt_constants to assert the Linux values + added kernel_type_to_dt /
+  parse_kernel_entry translation tests.  Full suite 17096 pass; bare-metal
+  build clean.
+
 - (DONE 2026-05-30) More FORTIFY_SOURCE _chk wrappers added (non-variadic,
   simple delegating wrappers).  __mempcpy_chk in posix/src/string.rs (next
   to the existing memcpy/strcpy chk family); __readlink_chk/__readlinkat_chk

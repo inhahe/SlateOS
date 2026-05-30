@@ -34,15 +34,47 @@ const DIR_ENTRY_SIZE: usize = 264;
 // dirent — POSIX directory entry
 // ---------------------------------------------------------------------------
 
-/// Directory entry type constants (from kernel).
-pub const DT_UNKNOWN: u8 = 0;
-pub const DT_REG: u8 = 1;  // Regular file.
-pub const DT_DIR: u8 = 2;  // Directory.
-pub const DT_LNK: u8 = 3;  // Symbolic link.
-pub const DT_CHR: u8 = 4;  // Character device.
-pub const DT_BLK: u8 = 5;  // Block device.
-pub const DT_FIFO: u8 = 6; // Named pipe (FIFO).
-pub const DT_SOCK: u8 = 7; // Socket.
+/// Directory entry type constants for `Dirent::d_type` / `getdents64`.
+///
+/// These are the Linux `<dirent.h>` ABI values (DT_REG=8, DT_DIR=4,
+/// DT_LNK=10, …), re-exported from `linux_dirent_types` which is the
+/// single source of truth.  Ported programs compiled against Linux/musl
+/// headers compare `d_type` against these exact numbers, so we must
+/// expose them — NOT the compact kernel type codes (see below).
+pub use crate::linux_dirent_types::{
+    DT_BLK, DT_CHR, DT_DIR, DT_FIFO, DT_LNK, DT_REG, DT_SOCK, DT_UNKNOWN,
+};
+
+/// Kernel directory-entry / stat type codes.
+///
+/// `SYS_FS_LIST_DIR` writes one of these at byte offset 260 of each
+/// 264-byte entry, and `SYS_FS_STAT` uses the same encoding in its
+/// `entry_type` field: 0=file, 1=directory, 2=volume label, 3=symlink.
+/// These are an internal kernel ABI and are deliberately NOT the same as
+/// the Linux `DT_*` values above — every consumer that reads the raw
+/// kernel byte must translate via [`kernel_type_to_dt`] before exposing
+/// it as a `d_type`.
+pub(crate) const KERNEL_TYPE_FILE: u8 = 0;
+pub(crate) const KERNEL_TYPE_DIR: u8 = 1;
+pub(crate) const KERNEL_TYPE_VOLLABEL: u8 = 2;
+pub(crate) const KERNEL_TYPE_SYMLINK: u8 = 3;
+
+/// Translate a kernel directory-entry type byte into a POSIX `DT_*` value.
+///
+/// `SYS_FS_LIST_DIR` only ever emits file/dir/symlink (volume labels are
+/// filtered out kernel-side), so any other code maps to `DT_UNKNOWN`.
+pub(crate) fn kernel_type_to_dt(kernel_type: u8) -> u8 {
+    match kernel_type {
+        KERNEL_TYPE_DIR => DT_DIR,
+        KERNEL_TYPE_SYMLINK => DT_LNK,
+        KERNEL_TYPE_FILE => DT_REG,
+        // Volume labels are filtered out by the kernel before they ever
+        // reach a directory listing; treat them (and any unexpected code)
+        // as unknown rather than guessing.
+        KERNEL_TYPE_VOLLABEL => DT_UNKNOWN,
+        _ => DT_UNKNOWN,
+    }
+}
 
 /// POSIX directory entry.
 #[repr(C)]
@@ -171,8 +203,11 @@ pub extern "C" fn readdir(dirp: *mut Dir) -> *mut Dirent {
         dir.current.d_name[..256].copy_from_slice(name_slice);
     }
 
-    // Type byte is at offset 260 within the entry.
-    dir.current.d_type = dir.buf.get(offset.wrapping_add(260)).copied().unwrap_or(0);
+    // Type byte is at offset 260 within the entry.  The kernel writes its
+    // compact type code (0=file, 1=dir, 3=symlink); translate it to the
+    // POSIX DT_* value callers expect.
+    let raw_type = dir.buf.get(offset.wrapping_add(260)).copied().unwrap_or(0);
+    dir.current.d_type = kernel_type_to_dt(raw_type);
 
     // Synthetic inode from position.
     dir.current.d_ino = dir.pos as u64;
@@ -876,6 +911,10 @@ fn emit_linux_dirent64(
 
 /// Parse a single 264-byte kernel directory entry into `(name, dtype)`.
 ///
+/// The returned `dtype` is already translated from the kernel's compact
+/// type code (0=file, 1=dir, 3=symlink) into a POSIX `DT_*` value, so the
+/// caller can emit it directly.
+///
 /// Returns `None` if the entry has no name (empty NUL-terminated string).
 fn parse_kernel_entry(entry: &[u8; DIR_ENTRY_SIZE]) -> Option<(&[u8], u8)> {
     // Name occupies bytes 0..256; find NUL.
@@ -886,7 +925,7 @@ fn parse_kernel_entry(entry: &[u8; DIR_ENTRY_SIZE]) -> Option<(&[u8], u8)> {
     if name_len == 0 {
         return None;
     }
-    let dtype = entry[260];
+    let dtype = kernel_type_to_dt(entry[260]);
     let name = entry.get(..name_len)?;
     Some((name, dtype))
 }
@@ -1136,14 +1175,42 @@ mod tests {
 
     #[test]
     fn test_dt_constants() {
+        // d_type uses the Linux <dirent.h> ABI values (re-exported from
+        // linux_dirent_types) so ported programs interpret them correctly.
         assert_eq!(DT_UNKNOWN, 0);
-        assert_eq!(DT_REG, 1);
-        assert_eq!(DT_DIR, 2);
-        assert_eq!(DT_LNK, 3);
-        assert_eq!(DT_CHR, 4);
-        assert_eq!(DT_BLK, 5);
-        assert_eq!(DT_FIFO, 6);
-        assert_eq!(DT_SOCK, 7);
+        assert_eq!(DT_FIFO, 1);
+        assert_eq!(DT_CHR, 2);
+        assert_eq!(DT_DIR, 4);
+        assert_eq!(DT_BLK, 6);
+        assert_eq!(DT_REG, 8);
+        assert_eq!(DT_LNK, 10);
+        assert_eq!(DT_SOCK, 12);
+    }
+
+    #[test]
+    fn test_kernel_type_to_dt() {
+        // The kernel's compact type code must translate to the matching
+        // POSIX DT_* value, NOT pass through unchanged.
+        assert_eq!(kernel_type_to_dt(KERNEL_TYPE_FILE), DT_REG);
+        assert_eq!(kernel_type_to_dt(KERNEL_TYPE_DIR), DT_DIR);
+        assert_eq!(kernel_type_to_dt(KERNEL_TYPE_SYMLINK), DT_LNK);
+        // Volume labels and any unexpected code → unknown.
+        assert_eq!(kernel_type_to_dt(KERNEL_TYPE_VOLLABEL), DT_UNKNOWN);
+        assert_eq!(kernel_type_to_dt(99), DT_UNKNOWN);
+    }
+
+    #[test]
+    fn test_parse_kernel_entry_translates_type() {
+        // A directory entry from the kernel has type code 1; parse_kernel_entry
+        // must hand back the translated DT_DIR (4), not the raw 1.
+        let mut entry = [0u8; DIR_ENTRY_SIZE];
+        entry[0] = b'd';
+        entry[1] = b'i';
+        entry[2] = b'r';
+        entry[260] = KERNEL_TYPE_DIR;
+        let (name, dtype) = parse_kernel_entry(&entry).expect("entry has a name");
+        assert_eq!(name, b"dir");
+        assert_eq!(dtype, DT_DIR);
     }
 
     #[test]
@@ -1784,7 +1851,9 @@ mod tests {
         entry[1] = b'o';
         entry[2] = b'o';
         // bytes 3.. are NUL — name terminates at NUL.
-        entry[260] = DT_DIR;
+        // Byte 260 is the kernel type code (1=dir), which parse_kernel_entry
+        // translates to the POSIX DT_DIR value.
+        entry[260] = KERNEL_TYPE_DIR;
         let (name, dtype) = parse_kernel_entry(&entry).expect("should parse");
         assert_eq!(name, b"foo");
         assert_eq!(dtype, DT_DIR);

@@ -112,6 +112,65 @@ impl Stat {
 }
 
 // ---------------------------------------------------------------------------
+// Kernel `FsStatResult` translation
+// ---------------------------------------------------------------------------
+//
+// `SYS_FS_STAT`, `SYS_FS_LSTAT`, and `SYS_FS_FSTAT` do NOT write a POSIX
+// `struct stat`.  They write a compact, kernel-defined 16-byte
+// `FsStatResult` whose layout bears no resemblance to `struct stat`:
+//
+//   bytes [0..8]   file size            (u64, little-endian)
+//   byte  [8]      entry type           (0=file, 1=dir, 2=volume label, 3=symlink)
+//   bytes [9..12]  reserved (zero)
+//   bytes [12..16] hard link count      (u32, little-endian; 0 if not provided)
+//
+// Passing a `struct stat` pointer straight to those syscalls leaves
+// `st_size` (offset 48) and `st_mode` (offset 24) untouched — i.e. zero —
+// so every consumer that inspects the struct gets garbage.  All callers
+// MUST funnel the raw bytes through [`fill_from_fsstat`] to obtain a
+// correctly populated `struct stat`.
+
+/// Number of bytes the kernel writes for an `FsStatResult`.
+pub(crate) const KERNEL_STAT_LEN: usize = 16;
+
+/// Translate the kernel's 16-byte `FsStatResult` into a POSIX `struct stat`.
+///
+/// The kernel ABI conveys only size, entry type, and link count.  Fields the
+/// kernel does not expose (timestamps, ownership, inode number, real
+/// permission bits) are synthesized: permission bits default by type the way
+/// Linux does for filesystems without Unix metadata (files `0644`, directories
+/// `0755`, symlinks `0777`), and `st_ino`/`st_uid`/`st_gid`/timestamps are
+/// left zero.  Exposing the richer [`crate::fs`] metadata the kernel already
+/// tracks would require widening the stat syscall ABI; see `todo.txt`.
+pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
+    *buf = Stat::zeroed();
+
+    let mut size_bytes = [0u8; 8];
+    size_bytes.copy_from_slice(&raw[0..8]);
+    let size = u64::from_le_bytes(size_bytes);
+
+    let entry_type = raw[8];
+
+    let mut nlink_bytes = [0u8; 4];
+    nlink_bytes.copy_from_slice(&raw[12..16]);
+    let nlinks = u32::from_le_bytes(nlink_bytes);
+
+    // Map the kernel entry type to a POSIX file type plus default
+    // permission bits.  Volume labels (2) and any unknown value fall back
+    // to a regular file so callers branching on type get a sane answer.
+    buf.st_mode = match entry_type {
+        1 => crate::fcntl::S_IFDIR | 0o755,
+        3 => crate::fcntl::S_IFLNK | 0o777,
+        _ => crate::fcntl::S_IFREG | 0o644,
+    };
+    buf.st_size = i64::try_from(size).unwrap_or(i64::MAX);
+    buf.st_nlink = if nlinks == 0 { 1 } else { u64::from(nlinks) };
+    buf.st_blksize = 4096;
+    // 512-byte block count, rounded up — matches `stat`/`du` conventions.
+    buf.st_blocks = i64::try_from(size.div_ceil(512)).unwrap_or(i64::MAX);
+}
+
+// ---------------------------------------------------------------------------
 // S_IS* macros as C-callable functions
 // ---------------------------------------------------------------------------
 //
@@ -367,6 +426,95 @@ pub extern "C" fn mkfifoat(dirfd: i32, pathname: *const u8, _mode: u32) -> i32 {
 mod tests {
     use super::*;
     use crate::fcntl::*;
+
+    // -- FsStatResult translation --
+
+    /// Build a raw 16-byte `FsStatResult` for tests.
+    fn raw_fsstat(size: u64, entry_type: u8, nlinks: u32) -> [u8; KERNEL_STAT_LEN] {
+        let mut raw = [0u8; KERNEL_STAT_LEN];
+        raw[0..8].copy_from_slice(&size.to_le_bytes());
+        raw[8] = entry_type;
+        raw[12..16].copy_from_slice(&nlinks.to_le_bytes());
+        raw
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_regular_file() {
+        let raw = raw_fsstat(4096, 0, 1);
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_mode, S_IFREG | 0o644);
+        assert!(st.is_file());
+        assert_eq!(st.st_size, 4096);
+        assert_eq!(st.st_nlink, 1);
+        assert_eq!(st.st_blksize, 4096);
+        // 4096 / 512 = 8 blocks.
+        assert_eq!(st.st_blocks, 8);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_directory() {
+        let raw = raw_fsstat(0, 1, 2);
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_mode, S_IFDIR | 0o755);
+        assert!(st.is_dir());
+        assert_eq!(st.st_nlink, 2);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_symlink() {
+        let raw = raw_fsstat(12, 3, 1);
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_mode, S_IFLNK | 0o777);
+        assert!(st.is_link());
+        assert_eq!(st.st_size, 12);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_volume_label_is_regular() {
+        // Entry type 2 (volume label) and unknown types fall back to a
+        // regular file so type-branching callers behave sensibly.
+        let raw = raw_fsstat(0, 2, 0);
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert!(st.is_file());
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_zero_nlinks_defaults_to_one() {
+        // The plain stat path doesn't populate nlinks; treat 0 as 1.
+        let raw = raw_fsstat(100, 0, 0);
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_nlink, 1);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_block_count_rounds_up() {
+        // 100 bytes still occupies one 512-byte block.
+        let raw = raw_fsstat(100, 0, 1);
+        let mut st = Stat::zeroed();
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_blocks, 1);
+        // 513 bytes spills into a second block.
+        let raw = raw_fsstat(513, 0, 1);
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_blocks, 2);
+    }
+
+    #[test]
+    fn test_fill_from_fsstat_resets_stale_fields() {
+        // A buffer reused across calls must be fully overwritten.
+        let mut st = Stat::zeroed();
+        st.st_size = 9999;
+        st.st_mode = S_IFSOCK;
+        let raw = raw_fsstat(8, 0, 1);
+        fill_from_fsstat(&mut st, &raw);
+        assert_eq!(st.st_size, 8);
+        assert!(st.is_file());
+    }
 
     // -- S_IS* C-callable functions --
 

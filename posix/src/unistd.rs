@@ -468,21 +468,22 @@ pub extern "C" fn chdir(path: *const u8) -> i32 {
         return -1;
     };
 
-    // Verify the target exists and is a directory.
-    let mut stat_buf = core::mem::MaybeUninit::<crate::stat::Stat>::zeroed();
+    // Verify the target exists and is a directory.  SYS_FS_STAT writes a
+    // 16-byte FsStatResult, not a struct stat, so translate it.
+    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
     let ret = syscall3(
         SYS_FS_STAT,
         resolved.as_ptr() as u64,
         resolved_len as u64,
-        stat_buf.as_mut_ptr() as u64,
+        raw.as_mut_ptr() as u64,
     );
 
     if ret < 0 {
         return errno::translate(ret) as i32;
     }
 
-    // SAFETY: Kernel wrote a valid Stat into the buffer.
-    let sb = unsafe { stat_buf.assume_init() };
+    let mut sb = crate::stat::Stat::zeroed();
+    crate::stat::fill_from_fsstat(&mut sb, &raw);
     if !sb.is_dir() {
         errno::set_errno(errno::ENOTDIR);
         return -1;

@@ -405,6 +405,37 @@ Remaining net improvements (diminishing returns):
   DES-format /etc/shadow entries (low priority; DES crypt is obsolete
   and insecure).
 
+- (DONE 2026-05-30) CRITICAL stat() ABI translation bug fixed.  The kernel's
+  SYS_FS_STAT/SYS_FS_LSTAT/SYS_FS_FSTAT write a compact 16-byte FsStatResult
+  (size u64 @0, entry_type u8 @8, nlinks u32 @12), NOT a POSIX struct stat.
+  Every caller had been passing a `struct stat` pointer straight to the
+  syscall, so st_size (offset 48) and st_mode (offset 24) were left zero ->
+  all stat results were garbage.  Concrete fallout: chdir() always failed
+  ENOTDIR (is_dir() on a zeroed struct), posix_spawn/load_elf always read
+  st_size==0 -> ENOEXEC for every binary, and epoll/inotify size-diffing read
+  garbage.  Fix: added pub(crate) crate::stat::fill_from_fsstat(&mut Stat,
+  &[u8;16]) + KERNEL_STAT_LEN in posix/src/stat.rs which translates the raw
+  bytes into struct stat (entry_type -> S_IFREG|0644 / S_IFDIR|0755 /
+  S_IFLNK|0777, st_size, st_nlink defaulting 0->1, st_blksize=4096,
+  st_blocks=ceil(size/512)).  Routed all field-reading callers through it:
+  file.rs stat()/lstat()/fstat() (File case), unistd.rs chdir(), epoll.rs
+  stat_self(), spawn.rs load_elf().  fts/ftw/statx/posix_fallocate use the
+  public stat()/fstat() so they are fixed transitively.  7 host tests for the
+  translator; full suite 17089 pass; bare-metal build clean.
+  LIMITATION / DEFERRED ENHANCEMENT: the 16-byte kernel ABI conveys only
+  size+type+nlinks, so the translated struct stat has zeroed timestamps,
+  st_ino, st_uid/st_gid, and synthesized (not real) permission bits.  The
+  kernel already tracks all of this in fs::FileMeta (timestamps, uid/gid,
+  permissions, blocks).  To expose it, widen the stat syscall output to a
+  richer fixed-layout struct and translate the extra fields here.  Deferred
+  because it requires updating EVERY FsStatResult consumer's buffer size in
+  lockstep (kernel handlers sys_fs_stat/lstat/fstat in
+  kernel/src/syscall/handlers.rs, plus the independent SYS_FS_STAT=606
+  definitions in userspace/sshd and services/init that parse the 16-byte
+  format), and there is no length argument in the stat syscall ABI to make it
+  backward compatible.  Do it when ls -l / make timestamp accuracy or real
+  permission reporting is needed by a ported program.
+
 - (DONE 2026-05-30) More FORTIFY_SOURCE _chk wrappers added (non-variadic,
   simple delegating wrappers).  __mempcpy_chk in posix/src/string.rs (next
   to the existing memcpy/strcpy chk family); __readlink_chk/__readlinkat_chk

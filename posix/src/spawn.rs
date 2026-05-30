@@ -1235,19 +1235,22 @@ pub extern "C" fn fexecve(
 /// (must be used for munmap); `data_size` is the number of bytes
 /// actually read (pass to the kernel as the ELF size).
 fn load_elf(path: *const u8, path_len: usize) -> Result<(*mut u8, usize, usize), i32> {
-    // Stat the file to get its size.
-    let mut stat_buf = crate::stat::Stat::zeroed();
+    // Stat the file to get its size.  SYS_FS_STAT writes a 16-byte
+    // FsStatResult, not a struct stat, so translate it.
+    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
     let stat_ret = syscall3(
         SYS_FS_STAT,
         path as u64,
         path_len as u64,
-        (&raw mut stat_buf) as u64,
+        raw.as_mut_ptr() as u64,
     );
 
     if stat_ret < 0 {
         return Err(native_to_posix_err(stat_ret));
     }
 
+    let mut stat_buf = crate::stat::Stat::zeroed();
+    crate::stat::fill_from_fsstat(&mut stat_buf, &raw);
     let file_size = stat_buf.st_size as usize;
     if file_size == 0 {
         return Err(errno::ENOEXEC);

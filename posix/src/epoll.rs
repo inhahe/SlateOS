@@ -1762,16 +1762,19 @@ fn names_eq(a: &InotifyChild, b_name: &[u8]) -> bool {
 
 /// Stat the watched path itself.  Returns (exists, size, is_dir).
 fn stat_self(path: &[u8]) -> (bool, u64, bool) {
-    let mut st = crate::stat::Stat::zeroed();
+    // SYS_FS_STAT writes a 16-byte FsStatResult, not a struct stat.
+    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
     let ret = syscall3(
         crate::syscall::SYS_FS_STAT,
         path.as_ptr() as u64,
         path.len() as u64,
-        core::ptr::addr_of_mut!(st) as u64,
+        raw.as_mut_ptr() as u64,
     );
     if ret < 0 {
         return (false, 0, false);
     }
+    let mut st = crate::stat::Stat::zeroed();
+    crate::stat::fill_from_fsstat(&mut st, &raw);
     let size = u64::try_from(st.st_size).unwrap_or(0);
     (true, size, st.is_dir())
 }

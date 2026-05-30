@@ -1354,8 +1354,9 @@ pub extern "C" fn closefrom(lowfd: i32) {
 
 /// Get file status by path.
 ///
-/// Our kernel's `SYS_FS_STAT` returns metadata in a kernel-defined
-/// format.  We translate it to the POSIX `struct stat`.
+/// `SYS_FS_STAT` writes a compact 16-byte `FsStatResult`, not a POSIX
+/// `struct stat`.  We read it into a local buffer and translate via
+/// [`crate::stat::fill_from_fsstat`].
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
     if path.is_null() || buf.is_null() {
@@ -1368,22 +1369,21 @@ pub extern "C" fn stat(path: *const u8, buf: *mut Stat) -> i32 {
         return -1;
     };
 
+    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
     let ret = syscall3(
         SYS_FS_STAT,
         resolved.as_ptr() as u64,
         resolved_len as u64,
-        buf as u64,
+        raw.as_mut_ptr() as u64,
     );
 
     if ret < 0 {
         return errno::translate(ret) as i32;
     }
 
-    // The kernel wrote metadata into our buffer in its own format.
-    // We need to translate if the formats differ.  For now, assume
-    // the kernel stat buffer is compatible enough.
-    //
-    // TODO: Define a proper kernel stat ABI and translate here.
+    // SAFETY: `buf` was checked non-null above; the caller guarantees it
+    // points to a writable `Stat`.
+    crate::stat::fill_from_fsstat(unsafe { &mut *buf }, &raw);
     0
 }
 
@@ -1402,10 +1402,13 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
 
     match entry.kind {
         HandleKind::File => {
-            let ret = syscall2(SYS_FS_FSTAT, entry.handle, buf as u64);
+            let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
+            let ret = syscall2(SYS_FS_FSTAT, entry.handle, raw.as_mut_ptr() as u64);
             if ret < 0 {
                 return errno::translate(ret) as i32;
             }
+            // SAFETY: `buf` was checked non-null above.
+            crate::stat::fill_from_fsstat(unsafe { &mut *buf }, &raw);
             0
         }
         HandleKind::Pipe => {
@@ -1461,17 +1464,20 @@ pub extern "C" fn lstat(path: *const u8, buf: *mut Stat) -> i32 {
         return -1;
     };
 
+    let mut raw = [0u8; crate::stat::KERNEL_STAT_LEN];
     let ret = syscall3(
         SYS_FS_LSTAT,
         resolved.as_ptr() as u64,
         resolved_len as u64,
-        buf as u64,
+        raw.as_mut_ptr() as u64,
     );
 
     if ret < 0 {
         return errno::translate(ret) as i32;
     }
 
+    // SAFETY: `buf` was checked non-null above.
+    crate::stat::fill_from_fsstat(unsafe { &mut *buf }, &raw);
     0
 }
 

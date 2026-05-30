@@ -235,6 +235,7 @@ pub mod environ;
 pub mod epoll;
 pub mod err;
 pub mod errno;
+pub mod error;
 pub mod execinfo;
 pub mod fcntl;
 pub mod fcntl_ops;

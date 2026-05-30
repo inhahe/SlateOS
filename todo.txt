@@ -405,6 +405,29 @@ Remaining net improvements (diminishing returns):
   DES-format /etc/shadow entries (low priority; DES crypt is obsolete
   and insecure).
 
+- (DONE 2026-05-30) GNU <error.h> implemented in posix/src/error.rs (new
+  module).  error(status, errnum, fmt, ...) and error_at_line(status,
+  errnum, file, line, fmt, ...) plus the va_list forms verror/
+  verror_at_line, and the three GNU globals error_message_count,
+  error_one_per_line, error_print_progname.  These were entirely missing;
+  GNU coreutils and a large fraction of ported CLI tools call error()
+  heavily, so without it they fail to link.  Same trampoline architecture
+  as err.rs/printf.rs: the variadic entries (error, error_at_line) are asm
+  trampolines that flatten register/stack varargs into a single 16-slot
+  [u64] array (8 int slots then 8 float slots) and call _error_impl/
+  _error_at_line_impl; the v* forms take a real va_list (pointer on x86_64
+  SysV) and are pure Rust via printf::va_collect.  Both funnel through
+  do_error, which printf-expands the format with _snprintf_impl into a
+  [u8;1024] buffer and prints "progname: [file:line: ]msg[: strerror
+  (errnum)]\n", increments error_message_count, and exits(status) when
+  status != 0.  error_one_per_line dedup (suppress consecutive identical
+  file/line) and the error_print_progname callback override are both
+  honored, matching glibc.  Limitation: literal % must be %% (every libc).
+  11 host tests (synthetic va_lists + slot arrays): count increments,
+  errnum suffix, format args, null fmt, error_at_line framing, dedup
+  suppression across same/different lines, va_list paths, and the progname
+  callback.  All pass (17064 total); bare-metal build clean.
+
 - (DONE 2026-05-30) syslog()/vsyslog() printf-format bug fixed in
   posix/src/syslog.rs.  Same class of bug as err/warn (below): syslog was
   declared `fn syslog(priority, msg)` — non-variadic — so it printed the

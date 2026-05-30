@@ -14,6 +14,10 @@
 //! before adding the priority/ident/PID framing.  `vsyslog` takes a real
 //! `va_list` (a pointer on the x86_64 System V ABI) and is plain Rust.
 //!
+//! Under `_FORTIFY_SOURCE` the libc headers redirect `syslog`/`vsyslog` to
+//! `__syslog_chk`/`__vsyslog_chk` (an extra leading `flag` argument); both
+//! are provided here and discard the flag, delegating to the same engine.
+//!
 //! ## Limitations
 //!
 //! - No actual syslog daemon or log rotation.
@@ -61,6 +65,46 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi = priority, rsi = fmt (already set)
+    "mov rdx, rsp",          // int_args
+    "lea rcx, [rsp+64]",    // float_args
+    "call _syslog_impl",
+    "add rsp, 128",
+    "pop rbp",
+    "ret",
+
+    // __syslog_chk(priority, flag, fmt, ...) → _syslog_impl(priority, fmt, int_args, float_args)
+    // The _FORTIFY_SOURCE redirect target for syslog().  Fixed args:
+    // rdi=priority, rsi=flag, rdx=fmt; varargs start at rcx (like fprintf).
+    // The fortify `flag` is discarded.
+    ".global __syslog_chk",
+    ".type __syslog_chk, @function",
+    "__syslog_chk:",
+    "push rbp",
+    "mov rbp, rsp",
+    "sub rsp, 128",
+    "mov [rsp], rcx",        // int vararg 0
+    "mov [rsp+8], r8",       // int vararg 1
+    "mov [rsp+16], r9",      // int vararg 2
+    "mov rax, [rbp+16]",     // int vararg 3 (stack)
+    "mov [rsp+24], rax",
+    "mov rax, [rbp+24]",     // int vararg 4
+    "mov [rsp+32], rax",
+    "mov rax, [rbp+32]",     // int vararg 5
+    "mov [rsp+40], rax",
+    "mov rax, [rbp+40]",     // int vararg 6
+    "mov [rsp+48], rax",
+    "mov rax, [rbp+48]",     // int vararg 7
+    "mov [rsp+56], rax",
+    "movsd [rsp+64], xmm0",
+    "movsd [rsp+72], xmm1",
+    "movsd [rsp+80], xmm2",
+    "movsd [rsp+88], xmm3",
+    "movsd [rsp+96], xmm4",
+    "movsd [rsp+104], xmm5",
+    "movsd [rsp+112], xmm6",
+    "movsd [rsp+120], xmm7",
+    // rdi=priority already set; move fmt into rsi.
+    "mov rsi, rdx",          // fmt
     "mov rdx, rsp",          // int_args
     "lea rcx, [rsp+64]",    // float_args
     "call _syslog_impl",
@@ -229,6 +273,24 @@ pub unsafe extern "C" fn vsyslog(priority: i32, fmt: *const u8, ap: *mut VaList)
     // SAFETY: caller guarantees `ap` is a valid va_list and `fmt` matches it.
     let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
     do_syslog(priority, fmt, iargs.as_ptr(), fargs.as_ptr());
+}
+
+/// `__vsyslog_chk(priority, flag, fmt, ap)` — the `_FORTIFY_SOURCE` redirect
+/// target for `vsyslog`.  The fortify `flag` is accepted and ignored.
+///
+/// # Safety
+///
+/// As [`vsyslog`]: `fmt` must be a valid NUL-terminated C string (or null)
+/// and `ap` a valid `va_list` matching `fmt`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __vsyslog_chk(
+    priority: i32,
+    _flag: i32,
+    fmt: *const u8,
+    ap: *mut VaList,
+) {
+    // SAFETY: forwards to vsyslog, which validates `ap`.
+    unsafe { vsyslog(priority, fmt, ap) };
 }
 
 /// Shared body for `_syslog_impl` and `vsyslog`: mask-filter, printf-expand
@@ -693,6 +755,24 @@ mod tests {
         unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
         unsafe {
             vsyslog(LOG_INFO, b"hi\0".as_ptr(), core::ptr::null_mut());
+        }
+    }
+
+    #[test]
+    fn test_vsyslog_chk_expands_format() {
+        // The _FORTIFY_SOURCE form: extra `flag` arg, otherwise like vsyslog.
+        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        let mut reg = [0u8; 176];
+        reg[0..8].copy_from_slice(&7u64.to_le_bytes());
+        let mut overflow = [0u8; 128];
+        let mut va = VaList {
+            gp_offset: 0,
+            fp_offset: 48,
+            overflow_arg_area: overflow.as_mut_ptr(),
+            reg_save_area: reg.as_mut_ptr(),
+        };
+        unsafe {
+            __vsyslog_chk(LOG_INFO, 1, b"step=%d\0".as_ptr(), &mut va);
         }
     }
 

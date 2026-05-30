@@ -405,6 +405,15 @@ Remaining net improvements (diminishing returns):
   DES-format /etc/shadow entries (low priority; DES crypt is obsolete
   and insecure).
 
+- (DONE 2026-05-30) FORTIFY_SOURCE syslog wrappers __syslog_chk/
+  __vsyslog_chk added to posix/src/syslog.rs.  Under _FORTIFY_SOURCE the
+  libc headers redirect syslog()/vsyslog() to these (extra leading `flag`
+  arg), so the syslog printf-expansion fix only reaches fortified objects
+  if these symbols exist.  __syslog_chk is an asm trampoline (priority,
+  flag, fmt layout; discards flag) that flattens varargs and calls
+  _syslog_impl; __vsyslog_chk is pure Rust delegating to vsyslog.  1 host
+  test; full suite 17074 pass; bare-metal clean.
+
 - (DONE 2026-05-30) FORTIFY_SOURCE printf-family wrappers implemented in
   posix/src/fortify_printf.rs (new module).  When a program is compiled
   with _FORTIFY_SOURCE (default at -O1+ on glibc distros), the libc headers

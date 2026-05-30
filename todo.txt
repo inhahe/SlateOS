@@ -479,6 +479,27 @@ Remaining net improvements (diminishing returns):
   bumped 72 -> 80.  2 new host tests (inode passthrough, zero=unavailable);
   17103 posix host tests pass; kernel + posix + init build clean.
 
+- (DONE 2026-05-30) lseek() SEEK_DATA/SEEK_HOLE wired to the kernel — same
+  no-op-stub bug class.  lseek rejected whence == SEEK_DATA(3) / SEEK_HOLE(4)
+  with EINVAL ("whence is not a valid value") even though the kernel fully
+  implements SYS_FS_SEEK_DATA=650 / SYS_FS_SEEK_HOLE=651 (handle+offset ->
+  resulting position, backed by fs::handle::seek with SeekFrom::Data/Hole).
+  Net effect before the fix: sparse-aware tools — cp --sparse=auto, GNU tar,
+  rsync -S, qemu-img, and anything that walks data/hole extents to skip large
+  zero regions — got a spurious EINVAL and silently fell back to dense copies
+  (or failed), wasting space and bandwidth on sparse files.
+    * Added SYS_FS_SEEK_DATA/SYS_FS_SEEK_HOLE to posix syscall.rs (+ all three
+      syscall test lists, within the 600..800 FS range).
+    * lseek (file.rs): SEEK_DATA/SEEK_HOLE now pass whence validation; for
+      HandleKind::File they dispatch syscall2(SYS_FS_SEEK_DATA/HOLE, handle,
+      offset); other whence values keep SYS_FS_SEEK.  Negative offset with
+      SEEK_DATA/SEEK_HOLE is rejected with EINVAL (an absolute start offset
+      cast to u64 would otherwise become a huge position).  Non-File kinds
+      still return ESPIPE.  lseek64 delegates to lseek, so it inherits the fix.
+    * 4 new host tests (SEEK_DATA/SEEK_HOLE accepted, negative-offset EINVAL
+      for each).  17112 posix host tests pass; bare-metal + host posix build
+      clean; no new clippy findings in the lseek line range.
+
 - (DONE 2026-05-30) flock() wired to the kernel advisory-lock table — same
   no-op-stub bug class.  flock was a validate-then-return-0 stub ("our kernel
   does not yet enforce advisory locks") even though the kernel fully

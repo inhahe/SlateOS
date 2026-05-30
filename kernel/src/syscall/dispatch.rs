@@ -28,6 +28,7 @@ use super::number::{
     SYS_CONSOLE_WRITE, SYS_CP_CLOSE, SYS_CP_CREATE, SYS_CP_NOTIFY,
     SYS_CP_REGISTER, SYS_CP_TRY_WAIT, SYS_CP_UNREGISTER, SYS_CP_WAIT,
     SYS_CLOCK_MONOTONIC,
+    SYS_CLOCK_REALTIME,
     SYS_DEBUG_PRINT, SYS_LOG_READ,
     SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_TIMEOUT,
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE,
@@ -351,6 +352,7 @@ const fn build_v1_table() -> SyscallTable {
 
     // Time and timers (10–19).
     handlers[SYS_CLOCK_MONOTONIC as usize] = Some(handlers::sys_clock_monotonic);
+    handlers[SYS_CLOCK_REALTIME as usize] = Some(handlers::sys_clock_realtime);
     handlers[SYS_SLEEP as usize] = Some(handlers::sys_sleep);
     handlers[SYS_TIMER_CREATE as usize] = Some(handlers::sys_timer_create);
     handlers[SYS_TIMER_CANCEL as usize] = Some(handlers::sys_timer_cancel);
@@ -615,6 +617,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_out_of_range()?;
     test_dispatch_channel_roundtrip()?;
     test_dispatch_clock_monotonic()?;
+    test_dispatch_clock_realtime()?;
     test_dispatch_console_write()?;
     test_dispatch_fs_roundtrip()?;
 
@@ -790,6 +793,31 @@ fn test_dispatch_clock_monotonic() -> KernelResult<()> {
     }
     serial_println!(
         "[syscall]   Dispatch SYS_CLOCK_MONOTONIC: OK ({}ns)",
+        result.value
+    );
+    Ok(())
+}
+
+/// Test clock_realtime syscall returns a non-negative nanosecond value.
+///
+/// The value may be 0 if timekeeping was not initialized (no usable RTC),
+/// which is still a valid (non-error) result; we only reject negative
+/// (error) returns.
+fn test_dispatch_clock_realtime() -> KernelResult<()> {
+    let args = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0,
+        arg3: 0, arg4: 0, arg5: 0,
+    };
+    let result = dispatch(SYS_CLOCK_REALTIME, &args);
+    if result.value < 0 {
+        serial_println!(
+            "[syscall]   FAIL: clock_realtime returned {}",
+            result.value
+        );
+        return Err(KernelError::InternalError);
+    }
+    serial_println!(
+        "[syscall]   Dispatch SYS_CLOCK_REALTIME: OK ({}ns since epoch)",
         result.value
     );
     Ok(())

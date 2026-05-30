@@ -3648,6 +3648,28 @@ pub fn sys_clock_monotonic(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(ns as i64)
 }
 
+/// `SYS_CLOCK_REALTIME` — get wall-clock time in nanoseconds since the
+/// Unix epoch (1970-01-01 00:00:00 UTC).
+///
+/// Delegates to [`crate::timekeeping::clock_realtime`], which combines the
+/// boot-time CMOS RTC reading with TSC-based elapsed time (plus any NTP or
+/// manual adjustments).  Unlike `SYS_CLOCK_MONOTONIC` (boot-relative), this
+/// is suitable for POSIX `CLOCK_REALTIME` / `gettimeofday` / `time`.
+///
+/// If timekeeping was never initialized (no usable RTC), `clock_realtime`
+/// returns 0; we propagate that so callers see the epoch rather than a
+/// bogus uptime-based value.
+pub fn sys_clock_realtime(args: &SyscallArgs) -> SyscallResult {
+    let _ = args;
+
+    let ns = crate::timekeeping::clock_realtime();
+
+    // ns is u64 nanoseconds-since-epoch. It will not exceed i64::MAX until
+    // year 2262, so the cast cannot wrap in any realistic scenario.
+    #[allow(clippy::cast_possible_wrap)]
+    SyscallResult::ok(ns as i64)
+}
+
 /// `SYS_SLEEP` — sleep for a specified duration in nanoseconds.
 ///
 /// `arg0`: duration in nanoseconds.

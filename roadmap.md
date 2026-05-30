@@ -1181,6 +1181,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] File I/O: open, close, read, write, lseek, dup, dup2, stat, fstat, lstat, unlink, rename, link, symlink, readlink, mkdir, rmdir, truncate, ftruncate, fsync
   - [x] Process: _exit, getpid, getppid, waitpid, wait, gettid (fork/execve stubs)
   - [x] Time: sleep, nanosleep, clock_gettime, gettimeofday, time
+  - [x] Wall-clock time (CRITICAL bugfix): clock_gettime(CLOCK_REALTIME)/gettimeofday()/time() all read SYS_CLOCK_MONOTONIC (boot-relative ns), so they returned "seconds since boot" instead of "seconds since 1970" — breaking file mtimes, `date`, logs, `make`, TLS cert validity, cron. The kernel already had timekeeping::clock_realtime() (CMOS RTC + TSC) but no syscall exposed it. Added kernel SYS_CLOCK_REALTIME=14 (handler sys_clock_realtime + dispatch self-test); posix clock_gettime now routes CLOCK_REALTIME/CLOCK_REALTIME_COARSE to it via is_realtime_clock(), and gettimeofday()/time() use it. Monotonic/boottime/cputime clocks and all timeout/uptime callers stay on SYS_CLOCK_MONOTONIC. 17097 posix tests pass; kernel + bare-metal posix build clean. (clock_settime/settimeofday still ENOSYS — no SYS_CLOCK_SETTIME yet; wire when ntpd/hwclock needs it.)
   - [x] Memory: mmap, munmap, mprotect
   - [x] Strings: memcpy, memmove, memset, memcmp, memchr, strlen, strnlen, strcmp, strncmp, strcpy, strncpy, strchr, strrchr
   - [x] Directory: opendir, readdir, closedir (static Dir pool, 8 concurrent)

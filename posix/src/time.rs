@@ -190,8 +190,15 @@ pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
         return -1;
     }
 
-    // Step 2: read the clock value.
-    let ns = syscall0(SYS_CLOCK_MONOTONIC);
+    // Step 2: read the clock value.  Wall-clock clocks (CLOCK_REALTIME and
+    // its coarse variant) report nanoseconds since the Unix epoch and must
+    // use the realtime source; monotonic/boottime/cputime clocks use the
+    // boot-relative monotonic counter.
+    let ns = if is_realtime_clock(clk_id) {
+        syscall0(SYS_CLOCK_REALTIME)
+    } else {
+        syscall0(SYS_CLOCK_MONOTONIC)
+    };
     if ns < 0 {
         return errno::translate(ns) as i32;
     }
@@ -205,6 +212,14 @@ pub extern "C" fn clock_gettime(clk_id: ClockidT, tp: *mut Timespec) -> i32 {
         }
     }
     0
+}
+
+/// Check whether a clock ID reports wall-clock (Unix-epoch) time.
+///
+/// Only `CLOCK_REALTIME` and its coarse variant track the wall clock; all
+/// monotonic/boottime/cputime clocks are boot-relative.
+fn is_realtime_clock(clk_id: ClockidT) -> bool {
+    matches!(clk_id, CLOCK_REALTIME | CLOCK_REALTIME_COARSE)
 }
 
 /// Check whether a clock ID is one we recognize.
@@ -542,7 +557,10 @@ pub extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut core::ffi::c_void) ->
         return 0;
     }
 
-    let ns = syscall0(SYS_CLOCK_MONOTONIC);
+    // gettimeofday reports wall-clock time (seconds/microseconds since the
+    // Unix epoch), so it must use the realtime source — not the boot-relative
+    // monotonic counter.
+    let ns = syscall0(SYS_CLOCK_REALTIME);
     if ns < 0 {
         return errno::translate(ns) as i32;
     }
@@ -622,12 +640,12 @@ pub extern "C" fn settimeofday(
     -1
 }
 
-/// Return approximate time in seconds since epoch.
+/// Return the current time in seconds since the Unix epoch.
 ///
-/// Uses monotonic clock (not true wall clock).
+/// Uses the realtime (wall-clock) source via `SYS_CLOCK_REALTIME`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn time(tloc: *mut TimeT) -> TimeT {
-    let ns = syscall0(SYS_CLOCK_MONOTONIC);
+    let ns = syscall0(SYS_CLOCK_REALTIME);
     if ns < 0 {
         errno::set_errno(errno::EIO);
         return -1;
@@ -4351,6 +4369,21 @@ mod tests {
         assert_eq!(ret, 0);
         assert_eq!(ts.tv_sec, 0);
         assert_eq!(ts.tv_nsec, 1); // 1ns resolution
+    }
+
+    #[test]
+    fn test_is_realtime_clock_routing() {
+        // Only the wall-clock clocks must route to SYS_CLOCK_REALTIME;
+        // every monotonic/boottime/cputime clock stays on the monotonic
+        // counter.
+        assert!(is_realtime_clock(CLOCK_REALTIME));
+        assert!(is_realtime_clock(CLOCK_REALTIME_COARSE));
+        assert!(!is_realtime_clock(CLOCK_MONOTONIC));
+        assert!(!is_realtime_clock(CLOCK_MONOTONIC_RAW));
+        assert!(!is_realtime_clock(CLOCK_MONOTONIC_COARSE));
+        assert!(!is_realtime_clock(CLOCK_BOOTTIME));
+        assert!(!is_realtime_clock(CLOCK_PROCESS_CPUTIME_ID));
+        assert!(!is_realtime_clock(CLOCK_THREAD_CPUTIME_ID));
     }
 
     #[test]

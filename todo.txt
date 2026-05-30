@@ -457,6 +457,33 @@ Remaining net improvements (diminishing returns):
   DEFAULT_BLOCK_SIZE / DEFAULT_NAMEMAX).  5 host tests for the translators;
   full suite 17094 pass; bare-metal build clean.
 
+- (DONE 2026-05-30) CRITICAL wall-clock time exposed via new SYS_CLOCK_REALTIME
+  syscall.  clock_gettime(CLOCK_REALTIME), gettimeofday(), and time() all read
+  SYS_CLOCK_MONOTONIC (boot-relative ns from hrtimer::now_ns), so wall-clock
+  queries returned "seconds since boot" instead of "seconds since 1970".
+  Every wall-clock consumer was wrong: file mtimes/ctime, `date`, log
+  timestamps, `make` (sees all files dated ~1970+uptime), TLS/cert validity
+  windows, cron, etc.  The kernel already HAD timekeeping::clock_realtime()
+  (CMOS RTC read once at boot + TSC elapsed, with NTP/manual adjust) — it just
+  wasn't reachable from userspace.  Fix (kernel + posix):
+    * kernel: added SYS_CLOCK_REALTIME=14 (number.rs), handler
+      sys_clock_realtime (handlers.rs) delegating to clock_realtime(),
+      registered in dispatch.rs, plus test_dispatch_clock_realtime self-test.
+    * posix: added SYS_CLOCK_REALTIME=14 (syscall.rs); clock_gettime now
+      routes CLOCK_REALTIME / CLOCK_REALTIME_COARSE to SYS_CLOCK_REALTIME via
+      a new is_realtime_clock() predicate (all monotonic/boottime/cputime
+      clocks stay on SYS_CLOCK_MONOTONIC); gettimeofday() and time() switched
+      to SYS_CLOCK_REALTIME.  Other SYS_CLOCK_MONOTONIC users (poll/epoll/
+      socket timeouts, timerfd, uptime, sys_times CPU accounting) correctly
+      stay monotonic.  Host test test_is_realtime_clock_routing locks in the
+      routing; success paths aren't host-testable (real `syscall` insn).
+  Full posix suite 17097 pass; bare-metal posix + full kernel build clean.
+  NOTE: clock_settime/settimeofday still return ENOSYS — there is no
+  SYS_CLOCK_SETTIME yet (kernel timekeeping::set_realtime exists but is
+  unexposed).  Wire it the same way when a program needs to set the clock
+  (e.g. ntpd/hwclock); until then the boot RTC value + NTP daemon adjust path
+  is the only way the wall clock moves.
+
 - (DONE 2026-05-30) CRITICAL d_type translation bug fixed (third instance of
   the kernel-ABI-mistranslation class).  SYS_FS_LIST_DIR writes a compact
   kernel type code at byte 260 of each 264-byte entry (0=file, 1=dir,

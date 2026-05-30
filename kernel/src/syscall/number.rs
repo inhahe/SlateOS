@@ -47,6 +47,16 @@ pub const SYS_TASK_ID: u64 = 2;
 /// Get the monotonic clock (nanoseconds since boot).
 pub const SYS_CLOCK_MONOTONIC: u64 = 10;
 
+/// Get the realtime (wall-clock) time: nanoseconds since the Unix epoch
+/// (1970-01-01 00:00:00 UTC).
+///
+/// Backed by [`crate::timekeeping::clock_realtime`] (CMOS RTC read once at
+/// boot plus TSC-based elapsed time, with NTP/manual adjustments).  This is
+/// what POSIX `CLOCK_REALTIME`, `gettimeofday`, and `time` must use —
+/// `SYS_CLOCK_MONOTONIC` is boot-relative and unsuitable for wall-clock
+/// timestamps (file mtimes, TLS validity, logs, `make`, …).
+pub const SYS_CLOCK_REALTIME: u64 = 14;
+
 /// Sleep for a specified number of nanoseconds.
 ///
 /// `arg0`: duration in nanoseconds.

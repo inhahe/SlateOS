@@ -3670,6 +3670,31 @@ pub fn sys_clock_realtime(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(ns as i64)
 }
 
+/// `SYS_CLOCK_SETTIME` — set the wall-clock time.
+///
+/// `arg0`: target time in nanoseconds since the Unix epoch.
+///
+/// Delegates to [`crate::timekeeping::set_realtime`], which stores the
+/// adjustment that makes [`crate::timekeeping::clock_realtime`] return the
+/// requested value.  Backs POSIX `clock_settime(CLOCK_REALTIME)` /
+/// `settimeofday`.
+///
+/// Rejects the call with `EINVAL` when timekeeping is uninitialized: with no
+/// RTC base, `clock_realtime` returns 0 and `set_realtime` would compute its
+/// offset against a meaningless base, so the clock would jump the moment the
+/// base later becomes valid.  Better to fail loudly than to silently lock in a
+/// wrong offset.
+pub fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
+    if !crate::timekeeping::is_initialized() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    let target_epoch_ns = args.arg0;
+    crate::timekeeping::set_realtime(target_epoch_ns);
+
+    SyscallResult::ok(0)
+}
+
 /// `SYS_SLEEP` — sleep for a specified duration in nanoseconds.
 ///
 /// `arg0`: duration in nanoseconds.

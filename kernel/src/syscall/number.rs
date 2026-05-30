@@ -57,6 +57,18 @@ pub const SYS_CLOCK_MONOTONIC: u64 = 10;
 /// timestamps (file mtimes, TLS validity, logs, `make`, …).
 pub const SYS_CLOCK_REALTIME: u64 = 14;
 
+/// Set the realtime (wall-clock) time to a specific Unix epoch timestamp.
+///
+/// `arg0`: target time in nanoseconds since the Unix epoch.
+///
+/// Backed by [`crate::timekeeping::set_realtime`], which stores the
+/// adjustment needed to make [`crate::timekeeping::clock_realtime`] return
+/// the requested value.  This is what POSIX `clock_settime(CLOCK_REALTIME)`
+/// and `settimeofday` use.  Returns `EINVAL` for a zero/uninitialized clock
+/// base (the RTC has not been read yet) so callers do not silently lock in a
+/// nonsensical offset.
+pub const SYS_CLOCK_SETTIME: u64 = 15;
+
 /// Sleep for a specified number of nanoseconds.
 ///
 /// `arg0`: duration in nanoseconds.

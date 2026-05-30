@@ -29,6 +29,7 @@ use super::number::{
     SYS_CP_REGISTER, SYS_CP_TRY_WAIT, SYS_CP_UNREGISTER, SYS_CP_WAIT,
     SYS_CLOCK_MONOTONIC,
     SYS_CLOCK_REALTIME,
+    SYS_CLOCK_SETTIME,
     SYS_DEBUG_PRINT, SYS_LOG_READ,
     SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_TIMEOUT,
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE,
@@ -353,6 +354,7 @@ const fn build_v1_table() -> SyscallTable {
     // Time and timers (10–19).
     handlers[SYS_CLOCK_MONOTONIC as usize] = Some(handlers::sys_clock_monotonic);
     handlers[SYS_CLOCK_REALTIME as usize] = Some(handlers::sys_clock_realtime);
+    handlers[SYS_CLOCK_SETTIME as usize] = Some(handlers::sys_clock_settime);
     handlers[SYS_SLEEP as usize] = Some(handlers::sys_sleep);
     handlers[SYS_TIMER_CREATE as usize] = Some(handlers::sys_timer_create);
     handlers[SYS_TIMER_CANCEL as usize] = Some(handlers::sys_timer_cancel);
@@ -618,6 +620,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_channel_roundtrip()?;
     test_dispatch_clock_monotonic()?;
     test_dispatch_clock_realtime()?;
+    test_dispatch_clock_settime()?;
     test_dispatch_console_write()?;
     test_dispatch_fs_roundtrip()?;
 
@@ -820,6 +823,57 @@ fn test_dispatch_clock_realtime() -> KernelResult<()> {
         "[syscall]   Dispatch SYS_CLOCK_REALTIME: OK ({}ns since epoch)",
         result.value
     );
+    Ok(())
+}
+
+/// Test the `SYS_CLOCK_SETTIME` dispatch path.
+///
+/// To avoid corrupting the running system's wall clock, this sets the time to
+/// (approximately) its current value — `set_realtime` then stores a near-zero
+/// adjustment.  We assert the wiring matches the clock's init state: when the
+/// clock is initialized the call must succeed (0) and time must not jump
+/// backwards; when uninitialized it must reject with an error.
+fn test_dispatch_clock_settime() -> KernelResult<()> {
+    let read = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let before = dispatch(SYS_CLOCK_REALTIME, &read).value;
+
+    let set = SyscallArgs {
+        #[allow(clippy::cast_sign_loss)]
+        arg0: before.max(0) as u64,
+        arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let result = dispatch(SYS_CLOCK_SETTIME, &set);
+
+    if crate::timekeeping::is_initialized() {
+        if result.value != 0 {
+            serial_println!(
+                "[syscall]   FAIL: clock_settime returned {} (expected 0)",
+                result.value
+            );
+            return Err(KernelError::InternalError);
+        }
+        // Setting to the current value must not push the clock backwards.
+        let after = dispatch(SYS_CLOCK_REALTIME, &read).value;
+        if after < before {
+            serial_println!(
+                "[syscall]   FAIL: clock_settime moved time backwards ({} -> {})",
+                before, after
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall]   Dispatch SYS_CLOCK_SETTIME: OK (set to now)");
+    } else {
+        if result.value >= 0 {
+            serial_println!(
+                "[syscall]   FAIL: clock_settime succeeded ({}) on uninitialized clock",
+                result.value
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall]   Dispatch SYS_CLOCK_SETTIME: OK (rejected, uninitialized)");
+    }
     Ok(())
 }
 

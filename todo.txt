@@ -478,11 +478,39 @@ Remaining net improvements (diminishing returns):
       stay monotonic.  Host test test_is_realtime_clock_routing locks in the
       routing; success paths aren't host-testable (real `syscall` insn).
   Full posix suite 17097 pass; bare-metal posix + full kernel build clean.
-  NOTE: clock_settime/settimeofday still return ENOSYS — there is no
-  SYS_CLOCK_SETTIME yet (kernel timekeeping::set_realtime exists but is
-  unexposed).  Wire it the same way when a program needs to set the clock
-  (e.g. ntpd/hwclock); until then the boot RTC value + NTP daemon adjust path
-  is the only way the wall clock moves.
+  NOTE: clock_settime/settimeofday set path was wired up immediately after
+  (see SYS_CLOCK_SETTIME DONE entry below).
+
+- (DONE 2026-05-30) wall-clock SET path wired via new SYS_CLOCK_SETTIME=15.
+  Follow-on to SYS_CLOCK_REALTIME (get) above.  POSIX clock_settime(CLOCK_REALTIME)
+  and settimeofday() previously validated arguments + the CAP_SYS_TIME gate and
+  then returned ENOSYS (no kernel backend).  The kernel already had
+  timekeeping::set_realtime(target_epoch_ns) — it just wasn't reachable from
+  userspace.  Fix (kernel + posix):
+    * kernel: added SYS_CLOCK_SETTIME=15 (number.rs); handler sys_clock_settime
+      (handlers.rs) returns EINVAL if timekeeping is uninitialised, else calls
+      set_realtime(arg0) and returns 0; registered in dispatch.rs with a
+      test_dispatch_clock_settime self-test (reads current realtime, sets the
+      clock back to that same value so the wall clock is not disturbed, and
+      checks the uninitialised-clock EINVAL branch).
+    * posix: added SYS_CLOCK_SETTIME=15 (syscall.rs).  clock_settime keeps its
+      Linux-order validation (EINVAL unknown/read-only clock, EFAULT null tp,
+      EINVAL bad timespec, EPERM no CAP_SYS_TIME) then converts the validated
+      timespec to epoch ns (saturating math) and issues syscall1(SYS_CLOCK_SETTIME).
+      settimeofday does the same after its tv/tz validation + cap gate, converting
+      tv_sec/tv_usec to ns.  errno::translate maps a negative kernel return.
+    * Tests: the old "valid args + CAP_SYS_TIME held -> ENOSYS" sentinel tests
+      could not stay — with the cap held the call now reaches a REAL `syscall`
+      instruction, which is not executable in the host test process (it would
+      enter the Windows kernel).  This is the same host-testability boundary as
+      clock_gettime(CLOCK_REALTIME) (its success path is also not host-tested).
+      Reworked ~20 tests to drop CAP_SYS_TIME (via a CapGuard promoted to the
+      parent `tests` module, single source of truth) and assert EPERM at the
+      terminal step — the maximal host-observable boundary that still proves the
+      arguments passed every validation gate.  Pure cap-held sentinels removed;
+      drop/restore workflow tests keep the EPERM half and only confirm the cap is
+      reinstated afterwards.  Full posix suite 17095 pass; bare-metal posix + full
+      kernel build clean.
 
 - (DONE 2026-05-30) CRITICAL file-metadata timestamps switched to wall-clock
   (direct follow-on to SYS_CLOCK_REALTIME above).  The kernel stored file

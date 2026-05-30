@@ -22,6 +22,7 @@ pub const SYS_TASK_ID: u64 = 2;
 pub const SYS_PROCESS_ID: u64 = 3;
 pub const SYS_CLOCK_MONOTONIC: u64 = 10;
 pub const SYS_CLOCK_REALTIME: u64 = 14;
+pub const SYS_CLOCK_SETTIME: u64 = 15;
 pub const SYS_SLEEP: u64 = 11;
 
 // Console I/O

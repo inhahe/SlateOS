@@ -1543,7 +1543,15 @@ pub extern "C" fn canonicalize_file_name(path: *const u8) -> *mut u8 {
 /// POSIX).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sync() {
-    // No-op: filesystem writes are synchronous.
+    // Issue the kernel's global filesystem sync (flush page cache and
+    // journal to storage).  This is the same syscall fsync(2) uses; our
+    // SYS_FS_SYNC is global rather than per-fd, which is a valid superset
+    // of the POSIX guarantee for sync(2) ("schedule writes for all
+    // filesystems").  The host build has no kernel, so this is a no-op.
+    #[cfg(target_os = "none")]
+    {
+        let _ = syscall0(SYS_FS_SYNC);
+    }
 }
 
 /// Set the system hostname.
@@ -2016,9 +2024,11 @@ pub(crate) fn fill_random(buf: *mut u8, len: usize) {
 
 /// Synchronize all data for the filesystem containing `fd`.
 ///
-/// Validates `fd`: must be non-negative and open in the fd table.  Body
-/// is a no-op success because our writes are already synchronous, but
-/// the prologue catches buggy callers passing -1 or a closed fd.
+/// Validates `fd`: must be non-negative and open in the fd table, then
+/// issues the kernel's global filesystem sync.  Our `SYS_FS_SYNC` flushes
+/// every mounted filesystem rather than just the one containing `fd`,
+/// which is a valid superset of the `syncfs(2)` guarantee.  The host
+/// build has no kernel, so the body is a validation-only no-op.
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
@@ -2032,7 +2042,15 @@ pub extern "C" fn syncfs(fd: Fd) -> i32 {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    0
+    #[cfg(target_os = "none")]
+    {
+        let ret = syscall0(SYS_FS_SYNC);
+        errno::translate(ret) as i32
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4413,7 +4431,8 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // syncfs / fdatasync stubs
+    // syncfs — fd validation (host build is validation-only; bare metal
+    // issues the global SYS_FS_SYNC after the fd checks pass)
     // ------------------------------------------------------------------
 
     #[test]

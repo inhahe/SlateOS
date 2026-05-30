@@ -479,6 +479,23 @@ Remaining net improvements (diminishing returns):
   bumped 72 -> 80.  2 new host tests (inode passthrough, zero=unavailable);
   17103 posix host tests pass; kernel + posix + init build clean.
 
+- (DONE 2026-05-30) sync()/syncfs() wired to the kernel global flush — same
+  no-op-stub bug class.  Both were pure no-ops justified by "filesystem
+  writes are synchronous", yet fsync(2) already issues SYS_FS_SYNC=641 (a
+  real journal/page-cache flush), so the "synchronous" claim was false and
+  sync(8)/`sync()`/syncfs(2) never actually flushed anything to storage.
+  Fix (cfg-split, matching statvfs/utimes): bare metal issues syscall0(
+  SYS_FS_SYNC); host build stays a validation-only no-op so the existing
+  host tests (test_sync_no_crash, test_syncfs_succeeds, the EBADF cases)
+  still hold.  syncfs keeps its fd validation (EBADF on negative/closed fd)
+  then issues the same global sync.  NOTE: our SYS_FS_SYNC flushes every
+  mounted filesystem rather than just the one containing the fd — a valid
+  superset of the syncfs(2)/sync(2) guarantee.  17108 posix host tests pass;
+  bare-metal + host posix build clean.  Also: completed the <sys/xattr.h>
+  re-export surface (llistxattr/flistxattr/lremovexattr/fremovexattr were
+  missing) and gated the host-dead KERNEL_STATVFS_LEN const to silence a
+  build warning.
+
 - (DONE 2026-05-30) xattr family (getxattr/setxattr/listxattr/removexattr +
   l*/f* variants, 12 functions) wired to the kernel — same no-op-stub bug
   class.  All twelve were ENOTSUP stubs ("our filesystem does not support

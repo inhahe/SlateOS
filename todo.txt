@@ -405,6 +405,29 @@ Remaining net improvements (diminishing returns):
   DES-format /etc/shadow entries (low priority; DES crypt is obsolete
   and insecure).
 
+- (DONE 2026-05-30) FORTIFY_SOURCE printf-family wrappers implemented in
+  posix/src/fortify_printf.rs (new module).  When a program is compiled
+  with _FORTIFY_SOURCE (default at -O1+ on glibc distros), the libc headers
+  rewrite printf-family calls into __*_chk entry points, so fortified object
+  files reference __printf_chk/__fprintf_chk/__dprintf_chk/__sprintf_chk/
+  __snprintf_chk/__asprintf_chk and the __v*_chk forms — symbols a libc that
+  omits them can't link.  Implemented all 12 with the same trampoline
+  architecture as printf.rs/err.rs/error.rs: variadic entries are asm
+  trampolines flattening register/stack varargs into a combined 16-slot
+  [u64] array (8 int then 8 float), calling _*_chk_impl which split the
+  halves and delegate to the tested crate::printf::_*_impl; the __v*_chk
+  forms take a real va_list (pure Rust via va_collect).  The fortify `flag`
+  is accepted and ignored.  The `slen`/`maxlen` object-size bounds are
+  enforced as hard limits: __sprintf_chk behaves like snprintf(s, slen, …)
+  and __snprintf_chk uses min(maxlen, slen), so the wrappers never write out
+  of bounds.  This is a safe deviation from glibc (which calls __chk_fail/
+  abort on overflow) — we truncate instead, and the return value is still
+  the would-be length so callers detect truncation.  9 host tests verify
+  format expansion, the min-bound clamping, va_list paths, null-va, and the
+  null-strp asprintf error path (host malloc is inert in unit tests, so a
+  successful asprintf allocation is only exercisable on bare metal).  All
+  pass (17073 total); bare-metal build clean.
+
 - (DONE 2026-05-30) GNU <error.h> implemented in posix/src/error.rs (new
   module).  error(status, errnum, fmt, ...) and error_at_line(status,
   errnum, file, line, fmt, ...) plus the va_list forms verror/

@@ -241,6 +241,7 @@ pub mod fcntl;
 pub mod fcntl_ops;
 pub mod fmtmsg;
 pub mod fnmatch;
+pub mod fortify_printf;
 pub mod fts;
 pub mod ftw;
 pub mod getopt;

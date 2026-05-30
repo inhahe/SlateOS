@@ -479,6 +479,34 @@ Remaining net improvements (diminishing returns):
   bumped 72 -> 80.  2 new host tests (inode passthrough, zero=unavailable);
   17103 posix host tests pass; kernel + posix + init build clean.
 
+- (DONE 2026-05-30) open()/openat()/openat2() with O_TMPFILE now fail with
+  EOPNOTSUPP instead of silently mis-opening.  translate_open_flags ignored
+  the O_TMPFILE bits entirely, so open("/tmp", O_TMPFILE|O_RDWR) stripped to
+  a bare O_RDWR open of the *directory* path — the caller believed it had an
+  anonymous temp file but got a directory handle (or a confusing error), and
+  any write went nowhere sensible.  Linux returns EOPNOTSUPP for O_TMPFILE on
+  filesystems without support, so we now do the same: a single guard in
+  open() (which openat/openat2/open64/creat all funnel through) detects the
+  raw __O_TMPFILE bit and returns -1/EOPNOTSUPP before issuing any syscall.
+  1 new host test (open O_TMPFILE -> EOPNOTSUPP); existing openat2 phase136
+  validation tests still pass (they assert errno != EINVAL; EOPNOTSUPP=95).
+  17114 host tests pass; both targets build clean; no new clippy findings.
+  WHY NOT WIRE SYS_FS_TMPFILE (=648)?  It exists but is itself incomplete:
+  its handler creates a *visible* ".tmp_<tsc>" file that is NOT auto-deleted
+  on close (handler comment contradicts the number.rs doc claiming auto-
+  delete).  Wiring to it would leak visible temp files and violate O_TMPFILE
+  semantics (anonymous, unlinked, auto-removed).  The musl-style fallback
+  (create O_EXCL then immediately unlink, keep the fd) ALSO cannot work here:
+  kernel file handles are PATH-BASED — fs::handle::read/write re-resolve
+  file.path through the VFS on every call (kernel/src/fs/handle.rs:314,~333),
+  so unlink severs the handle and the data becomes inaccessible.
+  PROPER FIX (deferred, needs kernel work): give file handles an inode/object
+  reference that survives unlink (orphan-inode support), or fix SYS_FS_TMPFILE
+  to create a real anonymous inode reclaimed on last-close.  Once either
+  exists, replace the EOPNOTSUPP guard in open() with a SYS_FS_TMPFILE call
+  (or create+unlink) keyed on the raw __O_TMPFILE bit.  Trigger condition:
+  kernel handle layer moves from path-based to inode/object-based.
+
 - (DONE 2026-05-30) POSIX semaphores now block on the kernel futex instead
   of busy-spinning.  sem_wait spun on core::hint::spin_loop() with NO yield
   syscall (the doc even claimed "no kernel futex support yet"), so a waiter

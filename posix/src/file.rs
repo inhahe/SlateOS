@@ -39,6 +39,20 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
         return -1;
     }
 
+    // O_TMPFILE (anonymous, auto-unlinked temp file) is not supported.
+    // Our kernel file handles are path-based: read/write re-resolve the
+    // stored path through the VFS on every call, so a nameless/unlinked
+    // inode cannot be represented or kept alive across operations.  Linux
+    // returns EOPNOTSUPP when O_TMPFILE is used on a filesystem that lacks
+    // support, so we return the same here — a clear, spec-compliant
+    // failure rather than silently opening the *directory* path for I/O
+    // (which is what ignoring the flag would do).  Proper O_TMPFILE needs
+    // kernel orphan-inode support; tracked in todo.txt.
+    if flags & RAW_O_TMPFILE_I32 != 0 {
+        errno::set_errno(errno::EOPNOTSUPP);
+        return -1;
+    }
+
     // Resolve relative paths against CWD and normalize.
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
@@ -4511,6 +4525,12 @@ const OPENAT2_MAX_USIZE: usize = 4096;
 /// validation can match Linux exactly.
 const RAW_O_TMPFILE: u64 = 0o20_000_000;
 
+/// The same raw `__O_TMPFILE` bit as an `i32`, for testing the flags
+/// argument of `open`/`openat` (which is `i32`) without a lossy cast.
+/// The bit (0o20_000_000 = 1 << 22) is well within the positive `i32`
+/// range.
+pub(crate) const RAW_O_TMPFILE_I32: i32 = 0o20_000_000;
+
 /// Mask of the 12 file-mode permission bits valid in `how.mode`
 /// (rwx for user/group/other, plus the three setuid/setgid/sticky
 /// bits).  Any bit outside this mask is rejected — matches Linux's
@@ -8586,6 +8606,22 @@ mod tests {
             core::mem::size_of::<OpenHow>(),
         );
         assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    #[test]
+    fn test_open_o_tmpfile_eopnotsupp() {
+        // O_TMPFILE is unsupported: our kernel file handles are path-based
+        // and cannot represent an anonymous unlinked inode.  open() must
+        // fail cleanly with EOPNOTSUPP (as Linux does on unsupported
+        // filesystems) instead of silently opening the directory path.
+        crate::errno::set_errno(0);
+        let ret = open(
+            b"/tmp\0".as_ptr(),
+            crate::fcntl::O_TMPFILE | crate::fcntl::O_RDWR,
+            0o600,
+        );
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
     }
 
     #[test]

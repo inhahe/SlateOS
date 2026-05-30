@@ -3878,6 +3878,17 @@ mod tests {
     }
 
     #[test]
+    fn test_mempcpy_chk_delegates() {
+        let src = [9u8, 8, 7, 6];
+        let mut dest = [0u8; 4];
+        let ret = unsafe { __mempcpy_chk(dest.as_mut_ptr(), src.as_ptr(), 4, 4) };
+        assert_eq!(dest, [9, 8, 7, 6]);
+        // mempcpy returns dest + n (one past the last written byte).
+        let offset = ret as usize - dest.as_ptr() as usize;
+        assert_eq!(offset, 4);
+    }
+
+    #[test]
     fn test_memmove_chk_delegates() {
         let src = [5u8, 6, 7, 8];
         let mut dest = [0u8; 4];
@@ -4215,6 +4226,21 @@ pub unsafe extern "C" fn __stpncpy_chk(
     _destlen: usize,
 ) -> *mut u8 {
     unsafe { stpncpy(dest, src, n) }
+}
+
+/// `__mempcpy_chk` — fortified `mempcpy`.
+///
+/// # Safety
+///
+/// Same as `mempcpy`.  `destlen` is ignored.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __mempcpy_chk(
+    dest: *mut u8,
+    src: *const u8,
+    n: usize,
+    _destlen: usize,
+) -> *mut u8 {
+    unsafe { mempcpy(dest, src, n) }
 }
 
 // ---------------------------------------------------------------------------

@@ -405,6 +405,23 @@ Remaining net improvements (diminishing returns):
   DES-format /etc/shadow entries (low priority; DES crypt is obsolete
   and insecure).
 
+- (DONE 2026-05-30) More FORTIFY_SOURCE _chk wrappers added (non-variadic,
+  simple delegating wrappers).  __mempcpy_chk in posix/src/string.rs (next
+  to the existing memcpy/strcpy chk family); __readlink_chk/__readlinkat_chk
+  in posix/src/file.rs (clamp the read to min(len, buflen) so they can't
+  overrun the destination); __fgets_chk/__fread_chk in posix/src/stdio.rs
+  (fgets clamps the count to min(size, n); fread reduces nmemb to
+  ptrlen/size so size*nmemb never exceeds the object).  These are the
+  _FORTIFY_SOURCE redirect targets for mempcpy/readlink/readlinkat/fgets/
+  fread; like the rest of our _chk family we clamp instead of glibc's
+  __chk_fail abort.  8 host tests (delegation + clamping); full suite 17082
+  pass; bare-metal build clean.  NOTE: the fortify long tail is not
+  exhausted — still-missing low-frequency symbols include __gets_chk,
+  __confstr_chk, __poll_chk/__ppoll_chk, __recv_chk/__recvfrom_chk,
+  __ttyname_r_chk, __getlogin_r_chk, __getgroups_chk, __gethostname_chk,
+  __getdomainname_chk, __longjmp_chk, and the wide-char __wcs*_chk family.
+  Add them on demand when a ported program references one.
+
 - (DONE 2026-05-30) FORTIFY_SOURCE syslog wrappers __syslog_chk/
   __vsyslog_chk added to posix/src/syslog.rs.  Under _FORTIFY_SOURCE the
   libc headers redirect syslog()/vsyslog() to these (extra leading `flag`

@@ -848,6 +848,68 @@ pub extern "C" fn fgets(buf: *mut u8, size: i32, stream: *mut u8) -> *mut u8 {
 }
 
 // ---------------------------------------------------------------------------
+// FORTIFY_SOURCE _chk wrappers for the buffered read functions.
+//
+// Under _FORTIFY_SOURCE the libc headers redirect fgets()/fread() to these
+// when the destination size is known at compile time.  glibc aborts via
+// __chk_fail() when the requested size exceeds the object size; we instead
+// clamp to the object size so the call can never overrun the buffer.
+// ---------------------------------------------------------------------------
+
+/// `__fgets_chk(buf, size, n, stream)` — fortified `fgets`.
+///
+/// `size` is the destination object size; `n` is the requested count.  The
+/// effective limit is `min(size, n)`, so the read never exceeds the buffer.
+///
+/// # Safety
+///
+/// `buf` must be valid for `min(size, n)` bytes and `stream` a valid `FILE*`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __fgets_chk(buf: *mut u8, size: usize, n: i32, stream: *mut u8) -> *mut u8 {
+    if n < 0 {
+        return core::ptr::null_mut();
+    }
+    // Clamp the requested count to the destination object size.
+    let limit = size.min(n as usize);
+    // fgets takes an i32; saturate to i32::MAX if the clamp is somehow larger.
+    let count = if limit > i32::MAX as usize {
+        i32::MAX
+    } else {
+        limit as i32
+    };
+    fgets(buf, count, stream)
+}
+
+/// `__fread_chk(ptr, ptrlen, size, nmemb, stream)` — fortified `fread`.
+///
+/// `ptrlen` is the destination object size.  glibc aborts when
+/// `size * nmemb > ptrlen`; we instead reduce `nmemb` so the total stays
+/// within the buffer, then delegate to `fread`.  Returns the element count
+/// actually read.
+///
+/// # Safety
+///
+/// `ptr` must be valid for `ptrlen` bytes and `stream` a valid `FILE*`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn __fread_chk(
+    ptr: *mut u8,
+    ptrlen: usize,
+    size: usize,
+    nmemb: usize,
+    stream: *mut u8,
+) -> usize {
+    if size == 0 {
+        return 0;
+    }
+    // Clamp nmemb so size*nmemb never exceeds the destination object.
+    let max_nmemb = ptrlen.wrapping_div(size);
+    let safe_nmemb = nmemb.min(max_nmemb);
+    // SAFETY: caller guarantees `ptr`/`stream`; safe_nmemb is bounded so the
+    // total byte count fits in `ptrlen`.
+    unsafe { fread(ptr, size, safe_nmemb, stream) }
+}
+
+// ---------------------------------------------------------------------------
 // File management
 // ---------------------------------------------------------------------------
 
@@ -2836,6 +2898,55 @@ mod tests {
         let ret = fgets(buf.as_mut_ptr(), 1, STDIN_SENTINEL as *mut u8);
         assert_eq!(ret, buf.as_mut_ptr());
         assert_eq!(buf[0], 0, "size=1 must write NUL terminator");
+    }
+
+    // -----------------------------------------------------------------------
+    // FORTIFY _chk wrappers — clamping / delegation
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_fgets_chk_negative_count() {
+        let mut buf = [0u8; 10];
+        let ret = __fgets_chk(buf.as_mut_ptr(), 10, -1, STDIN_SENTINEL as *mut u8);
+        assert!(ret.is_null());
+    }
+
+    #[test]
+    fn test_fgets_chk_clamps_to_object_size() {
+        // size (object) = 1 clamps the effective count to 1, so fgets writes
+        // only the NUL terminator and returns buf — never touching the read.
+        let mut buf = [0xFFu8; 10];
+        let ret = __fgets_chk(buf.as_mut_ptr(), 1, 100, STDIN_SENTINEL as *mut u8);
+        assert_eq!(ret, buf.as_mut_ptr());
+        assert_eq!(buf[0], 0, "clamp to object size 1 must write only NUL");
+    }
+
+    #[test]
+    fn test_fread_chk_zero_size() {
+        let mut buf = [0u8; 10];
+        let ret = unsafe {
+            __fread_chk(buf.as_mut_ptr(), 10, 0, 10, STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_fread_chk_clamps_nmemb_to_object() {
+        // ptrlen too small for size*nmemb: nmemb clamps to ptrlen/size = 0,
+        // so nothing is read regardless of the requested 10 elements.
+        let mut buf = [0u8; 2];
+        let ret = unsafe {
+            __fread_chk(buf.as_mut_ptr(), 2, 4, 10, STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, 0);
+    }
+
+    #[test]
+    fn test_fread_chk_null_ptr() {
+        let ret = unsafe {
+            __fread_chk(core::ptr::null_mut(), 10, 1, 10, STDIN_SENTINEL as *mut u8)
+        };
+        assert_eq!(ret, 0);
     }
 
     // -----------------------------------------------------------------------

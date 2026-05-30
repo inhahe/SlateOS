@@ -3763,6 +3763,35 @@ pub extern "C" fn __realpath_chk(
     crate::unistd::realpath(path, resolved)
 }
 
+/// `__readlink_chk` — fortified `readlink`.
+///
+/// `buflen` is the size of the destination object.  glibc aborts when
+/// `len > buflen`; we instead clamp the read to `min(len, buflen)` so the
+/// call can never write past the buffer.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __readlink_chk(
+    path: *const u8,
+    buf: *mut u8,
+    len: SizeT,
+    buflen: SizeT,
+) -> SsizeT {
+    readlink(path, buf, len.min(buflen))
+}
+
+/// `__readlinkat_chk` — fortified `readlinkat`.
+///
+/// As [`__readlink_chk`]: clamps the read to `min(len, buflen)`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub extern "C" fn __readlinkat_chk(
+    dirfd: i32,
+    path: *const u8,
+    buf: *mut u8,
+    len: SizeT,
+    buflen: SizeT,
+) -> SsizeT {
+    readlinkat(dirfd, path, buf, len.min(buflen))
+}
+
 // ---------------------------------------------------------------------------
 // readahead — Linux read-ahead hint
 // ---------------------------------------------------------------------------
@@ -5700,6 +5729,25 @@ mod tests {
     #[test]
     fn test_readlink_null_buf() {
         assert_eq!(readlink(b"/link\0".as_ptr(), core::ptr::null_mut(), 64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_readlink_chk_delegates_and_clamps() {
+        let mut buf = [0u8; 64];
+        // len > buflen: the wrapper clamps to buflen, then delegates. A null
+        // path still yields the readlink error path (-1), proving delegation.
+        assert_eq!(__readlink_chk(core::ptr::null(), buf.as_mut_ptr(), 1000, 64), -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_readlinkat_chk_delegates_and_clamps() {
+        let mut buf = [0u8; 64];
+        assert_eq!(
+            __readlinkat_chk(AT_FDCWD, core::ptr::null(), buf.as_mut_ptr(), 1000, 64),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 

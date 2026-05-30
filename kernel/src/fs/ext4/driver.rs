@@ -1620,6 +1620,50 @@ impl Ext4Driver {
         self.reader.write_bytes(field_offset, &extra_isize.to_le_bytes())
     }
 
+    /// Write the `i_crtime` (creation/birth time) field at offset 0x90.
+    ///
+    /// `i_crtime` lives in the inode extra area (`Ext4InodeExtra`), so it
+    /// only exists when the on-disk inode is larger than 128 bytes and the
+    /// declared `i_extra_isize` reaches it.  Linux's `EXT4_FITS_IN_INODE`
+    /// requires the field (offset 0x90, 4 bytes) to fit within
+    /// `128 + i_extra_isize`, i.e. `i_extra_isize >= 0x14` (20).  When that
+    /// does not hold we leave the birth time unrecorded rather than scribble
+    /// into bytes the filesystem considers unused.
+    ///
+    /// Like [`Self::write_extra_isize`], this is a raw write that bypasses the
+    /// inode checksum; callers MUST follow it with [`Self::write_inode`],
+    /// which reads the full on-disk inode back (preserving this field),
+    /// overwrites only the 128-byte core, and re-stamps the checksum over the
+    /// whole image — so the persisted checksum covers the crtime we wrote.
+    fn write_crtime(&self, inode_nr: u32, extra_isize: u16, secs: u32) -> KernelResult<()> {
+        // The crtime field spans on-disk bytes 0x90..0x94; for it to be valid
+        // the extra area must extend at least through 0x93, i.e.
+        // 0x80 + extra_isize >= 0x94  =>  extra_isize >= 0x14.
+        if extra_isize < 0x14 {
+            return Ok(());
+        }
+        let group = self.sb.inode_group(inode_nr);
+        let index = self.sb.inode_index_in_group(inode_nr);
+        let gd = self.group_descs.get(group as usize)
+            .ok_or(KernelError::InvalidArgument)?;
+        let inode_table_block = if self.sb.is_64bit {
+            u64::from(gd.bg_inode_table_lo)
+                | (u64::from(gd.bg_inode_table_hi) << 32)
+        } else {
+            u64::from(gd.bg_inode_table_lo)
+        };
+        let inode_offset = inode_table_block
+            .saturating_mul(u64::from(self.sb.block_size))
+            .saturating_add(
+                u64::from(index).saturating_mul(u64::from(self.sb.inode_size))
+            );
+        // i_crtime is at offset 0x90 (u32, little-endian).  i_crtime_extra at
+        // 0x94 stays 0 (no sub-second creation precision) — already zeroed by
+        // zero_ondisk_inode, which Linux treats as "no extra epoch bits".
+        let field_offset = inode_offset.saturating_add(0x90);
+        self.reader.write_bytes(field_offset, &secs.to_le_bytes())
+    }
+
     /// Write the superblock back to disk.
     ///
     /// If metadata checksumming is enabled, computes and embeds the CRC32C
@@ -2511,8 +2555,9 @@ impl Ext4Driver {
         // from `blank_inode()`, so `stat` would report 1970-01-01 for every
         // new file. ext4 stores these as 32-bit Unix epoch seconds in the
         // 128-byte core, which `write_inode` persists (with checksum). The
-        // creation time (i_crtime) lives in the extra area and is left 0 for
-        // now — see todo.txt "ext4 i_crtime (birth time) on create".
+        // creation time (i_crtime) lives in the inode extra area and is
+        // stamped below via write_crtime (when the inode is large enough to
+        // hold it), so statx STATX_BTIME reports a real birth time.
         let now_secs = epoch_secs_u32();
         inode.i_atime = now_secs;
         inode.i_ctime = now_secs;
@@ -2532,6 +2577,12 @@ impl Ext4Driver {
             let extra_isize = self.sb.want_extra_isize;
             if extra_isize > 0 {
                 self.write_extra_isize(inode_nr, extra_isize)?;
+                // Stamp the creation/birth time into the extra area.  This is
+                // a raw write; the subsequent write_inode reads the full
+                // on-disk inode back (preserving i_crtime), overwrites only
+                // the 128-byte core, and re-stamps the checksum over the whole
+                // image — so the persisted checksum covers the crtime.
+                self.write_crtime(inode_nr, extra_isize, now_secs)?;
             }
         }
 

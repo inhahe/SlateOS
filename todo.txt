@@ -497,9 +497,10 @@ Remaining net improvements (diminishing returns):
   doc comments in stat()/lstat()/stat.rs.  2 new host tests (btime present
   splits sec/nsec; btime absent => None even with a full buffer).  17105 posix
   host tests pass; kernel + posix build clean.
-  NOTE: ext4 still leaves i_crtime 0 on create (see the ext4 i_crtime
-  LIMITATION entry below), so ext4-created files report no btime until that
-  checksum-aware write lands; statx correctly reports it as unavailable.
+  FOLLOW-UP (DONE 2026-05-30): ext4 now stamps i_crtime on create too (see
+  the ext4 i_crtime RESOLVED entry below), so ext4-created files report a real
+  btime via statx STATX_BTIME; filesystems that genuinely have no creation
+  time still report it as unavailable (mask bit clear).
 
 - (DONE 2026-05-30) statvfs/statfs family wired to the kernel (same ABI-
   mistranslation bug class as the stat fix above).  statvfs.rs had NEVER
@@ -607,16 +608,26 @@ Remaining net improvements (diminishing returns):
       applied at every data/size/metadata-mutating write_inode site.  All
       stamped fields live in the 128-byte inode core so write_inode persists
       them with a correct checksum.
-  LIMITATION: ext4 i_crtime (birth time) is still left 0 on create — vfs_impl
-  reads created_ns from the extra-area field at 0x90 and falls back to 0, so
-  newly created files report no btime.  Setting it requires a checksum-aware
-  write into the inode extra area (write_extra_isize-style raw writes bypass
-  the inode checksum).  Deferred until statx STATX_BTIME is actually consumed;
-  the visible atime/ctime/mtime are correct now.  Validation: added an ext4
-  runtime self-test (mod.rs) asserting a freshly created file has a wall-clock
-  mtime (mtime_sec >= 1e9, which boot-relative could never reach) and that
-  overwrite never moves mtime backwards; kernel build + clippy clean on all
-  five touched files.
+  (RESOLVED 2026-05-30) ext4 i_crtime (birth time) is now stamped on create.
+  create_inode adds a write_crtime(inode_nr, extra_isize, now_secs) raw write
+  of the 4-byte i_crtime field at on-disk offset 0x90, guarded by
+  extra_isize >= 0x14 (Linux EXT4_FITS_IN_INODE: the field must fit within
+  128 + i_extra_isize).  It runs after write_extra_isize and BEFORE
+  write_inode — write_inode reads the full on-disk inode back (preserving the
+  crtime we wrote), overwrites only the 128-byte core, and re-stamps the inode
+  checksum over the whole image, so the persisted checksum covers the crtime
+  (no checksum bypass).  i_crtime_extra at 0x94 stays 0 (no sub-second
+  creation precision), which the read path treats as "no extra epoch bits".
+  The read side (vfs_impl) already combined 0x90 base + 0x94 extra into
+  created_ns, so the round trip is complete and statx STATX_BTIME now reports
+  a real birth time for ext4-created files.  Validation: extended the ext4
+  runtime create/modify self-test (mod.rs) to also assert the new file has a
+  wall-clock btime (crtime_sec >= 1e9 when created_ns != 0; tolerates the rare
+  128-byte-inode fs that has no crtime field).  This was the deferred item
+  whose trigger ("until statx STATX_BTIME is actually consumed") is now met.
+  Kernel builds clean; the two add_dir_entry arithmetic_side_effects clippy
+  warnings near the change are pre-existing (the code merely shifted down) —
+  the new write_crtime helper is clippy-clean.
 
 - (DONE 2026-05-30) CRITICAL d_type translation bug fixed (third instance of
   the kernel-ABI-mistranslation class).  SYS_FS_LIST_DIR writes a compact

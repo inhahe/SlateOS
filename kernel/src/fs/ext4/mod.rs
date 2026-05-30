@@ -333,6 +333,32 @@ pub fn self_test() -> KernelResult<()> {
                 "[ext4]     new file has wall-clock mtime ({}s) OK",
                 mtime_sec
             );
+
+            // Birth time (i_crtime) must also be stamped on create now, so
+            // statx STATX_BTIME reports a real value.  On a filesystem with
+            // 256-byte inodes (the mkfs default) the extra area holds crtime;
+            // require it to be a wall-clock value like mtime.  On the rare
+            // 128-byte-inode filesystem there is no crtime field, so only
+            // assert when the read-back is non-zero.
+            let crtime_sec = meta1.created_ns / 1_000_000_000;
+            if meta1.created_ns != 0 {
+                if crtime_sec < 1_000_000_000 {
+                    serial_println!(
+                        "[ext4]   FAIL: new file crtime_sec={} looks boot-relative, not epoch",
+                        crtime_sec
+                    );
+                    let _ = crate::fs::Vfs::remove(&ct_path);
+                    return Err(crate::error::KernelError::InternalError);
+                }
+                serial_println!(
+                    "[ext4]     new file has wall-clock btime ({}s) OK",
+                    crtime_sec
+                );
+            } else {
+                serial_println!(
+                    "[ext4]     new file btime unrecorded (128-byte inode) OK"
+                );
+            }
         }
 
         // Overwrite and confirm mtime does not move backwards (it should

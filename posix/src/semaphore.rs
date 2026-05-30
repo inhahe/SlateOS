@@ -1,17 +1,31 @@
 //! POSIX semaphore implementation.
 //!
-//! Implements unnamed semaphores using atomic operations.
-//! Named semaphores (`sem_open`/`sem_unlink`) are stubs returning ENOSYS.
+//! Implements both unnamed semaphores (`sem_init`) and named semaphores
+//! (`sem_open`/`sem_close`/`sem_unlink`, backed by a process-local pool).
 //!
 //! ## Implementation
 //!
-//! Unnamed semaphores use a simple atomic counter with spin-yield
-//! waiting.  This is sufficient for single-process multi-threaded
-//! programs but doesn't support cross-process semaphores.
+//! A semaphore is a single 32-bit atomic counter: positive means the
+//! resource is available, zero means callers must block.  The counter
+//! doubles as a kernel **futex word** — `sem_wait` blocks via
+//! `SYS_FUTEX_WAIT` (no CPU spin) and `sem_post` wakes a waiter via
+//! `SYS_FUTEX_WAKE`.  The uncontended fast path is a pure userspace CAS
+//! with no syscall.  `sem_timedwait` uses `SYS_FUTEX_WAIT_TIMEOUT`.
+//!
+//! On the host build (unit tests) there is no kernel futex, so the
+//! blocking helpers fall back to a cooperative `spin_loop`; the test
+//! suite only exercises the non-blocking paths (CAS success, trywait,
+//! null-pointer validation), so this fallback is never hit in practice.
 //!
 //! Functions: `sem_init`, `sem_destroy`, `sem_wait`, `sem_trywait`,
-//! `sem_timedwait`, `sem_post`, `sem_getvalue`, `sem_open` (stub),
-//! `sem_close` (stub), `sem_unlink` (stub).
+//! `sem_timedwait`, `sem_post`, `sem_getvalue`, `sem_open`,
+//! `sem_close`, `sem_unlink`.
+//!
+//! LIMITATION: named semaphores are stored in a per-process static pool,
+//! so two *different* processes that `sem_open` the same name get
+//! independent counters (no cross-process sharing).  True cross-process
+//! named semaphores need the pool to live in shared memory keyed by name;
+//! tracked in `todo.txt`.
 
 use crate::errno;
 
@@ -73,9 +87,80 @@ pub extern "C" fn sem_destroy(_sem: *mut SemT) -> i32 {
     0
 }
 
+/// Reinterpret the signed counter as the kernel's unsigned 32-bit futex
+/// word (a bit-for-bit reinterpret, not a value conversion — avoids a
+/// sign-loss cast).
+#[cfg(target_os = "none")]
+fn futex_word(expected: i32) -> u64 {
+    u64::from(u32::from_ne_bytes(expected.to_ne_bytes()))
+}
+
+/// Block the calling task until the semaphore value is observed to be
+/// non-zero.  `expected` is the value the caller just read as `<= 0`;
+/// the kernel only blocks if `*word` still equals it, closing the
+/// wait/wake race (a poster that increments and wakes between our load
+/// and this call makes `*word != expected`, so we return immediately and
+/// re-check).
+#[cfg(target_os = "none")]
+fn sem_block(atomic: &core::sync::atomic::AtomicI32, expected: i32) {
+    let addr = atomic.as_ptr() as u64;
+    // SYS_FUTEX_WAIT returns 1 (woken), 0 (value mismatch), or a negative
+    // error.  In every case we simply re-loop and re-evaluate the counter,
+    // so the return value is intentionally ignored.
+    let _ = crate::syscall::syscall2(
+        crate::syscall::SYS_FUTEX_WAIT,
+        addr,
+        futex_word(expected),
+    );
+}
+
+/// Host fallback: no kernel futex in the unit-test environment.  The test
+/// suite never blocks (see module docs), so a cooperative spin is fine.
+#[cfg(not(target_os = "none"))]
+fn sem_block(_atomic: &core::sync::atomic::AtomicI32, _expected: i32) {
+    core::hint::spin_loop();
+}
+
+/// Like [`sem_block`] but bounded: block for at most `timeout_ns`
+/// nanoseconds via `SYS_FUTEX_WAIT_TIMEOUT`.
+#[cfg(target_os = "none")]
+fn sem_block_timeout(atomic: &core::sync::atomic::AtomicI32, expected: i32, timeout_ns: u64) {
+    let addr = atomic.as_ptr() as u64;
+    let _ = crate::syscall::syscall3(
+        crate::syscall::SYS_FUTEX_WAIT_TIMEOUT,
+        addr,
+        futex_word(expected),
+        timeout_ns,
+    );
+}
+
+/// Host fallback for the bounded wait.
+#[cfg(not(target_os = "none"))]
+fn sem_block_timeout(
+    _atomic: &core::sync::atomic::AtomicI32,
+    _expected: i32,
+    _timeout_ns: u64,
+) {
+    core::hint::spin_loop();
+}
+
+/// Wake one task blocked on the semaphore's futex word after a post.
+#[cfg(target_os = "none")]
+fn sem_wake_one(atomic: &core::sync::atomic::AtomicI32) {
+    let addr = atomic.as_ptr() as u64;
+    // Wake at most one waiter; a no-op (returns 0) if none are blocked.
+    let _ = crate::syscall::syscall2(crate::syscall::SYS_FUTEX_WAKE, addr, 1);
+}
+
+/// Host fallback: no futex, nothing to wake.
+#[cfg(not(target_os = "none"))]
+fn sem_wake_one(_atomic: &core::sync::atomic::AtomicI32) {}
+
 /// Lock (decrement) a semaphore, blocking if the value is zero.
 ///
-/// Uses spin-yield waiting (no kernel futex support yet).
+/// The uncontended path is a pure userspace CAS.  When the count is
+/// exhausted the caller blocks in the kernel via `SYS_FUTEX_WAIT` rather
+/// than spinning, so a blocked waiter consumes no CPU.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
     if sem.is_null() {
@@ -87,8 +172,8 @@ pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
 
     loop {
         let current = atomic.load(core::sync::atomic::Ordering::Acquire);
-        if current > 0
-            && atomic
+        if current > 0 {
+            if atomic
                 .compare_exchange_weak(
                     current,
                     current.wrapping_sub(1),
@@ -96,11 +181,14 @@ pub extern "C" fn sem_wait(sem: *mut SemT) -> i32 {
                     core::sync::atomic::Ordering::Relaxed,
                 )
                 .is_ok()
-        {
-            return 0;
+            {
+                return 0;
+            }
+            // CAS lost a race; retry immediately without blocking.
+            continue;
         }
-        // Yield to other threads.
-        core::hint::spin_loop();
+        // Count exhausted: block until a poster wakes us, then re-check.
+        sem_block(atomic, current);
     }
 }
 
@@ -171,6 +259,8 @@ pub extern "C" fn sem_post(sem: *mut SemT) -> i32 {
             )
             .is_ok()
         {
+            // A resource became available; wake one blocked waiter (if any).
+            sem_wake_one(atomic);
             return 0;
         }
     }
@@ -192,8 +282,8 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
     loop {
         // Try to decrement.
         let current = atomic.load(core::sync::atomic::Ordering::Acquire);
-        if current > 0
-            && atomic
+        if current > 0 {
+            if atomic
                 .compare_exchange_weak(
                     current,
                     current.wrapping_sub(1),
@@ -201,11 +291,14 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
                     core::sync::atomic::Ordering::Relaxed,
                 )
                 .is_ok()
-        {
-            return 0;
+            {
+                return 0;
+            }
+            // CAS lost a race; retry immediately.
+            continue;
         }
 
-        // Check timeout.
+        // Count exhausted: compute the time remaining until the deadline.
         let mut now = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
         let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
         let deadline = unsafe { &*abstime };
@@ -216,9 +309,19 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
             return -1;
         }
 
-        // Yield briefly.
-        core::hint::spin_loop();
-        let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 1_000_000);
+        // Remaining nanoseconds = deadline - now.  Use i128 + saturating
+        // arithmetic so a malformed (huge) deadline can't overflow or
+        // panic; we already know now < deadline, so the result is > 0.
+        let secs = deadline.tv_sec.saturating_sub(now.tv_sec);
+        let total_ns = i128::from(secs)
+            .saturating_mul(1_000_000_000)
+            .saturating_add(i128::from(deadline.tv_nsec))
+            .saturating_sub(i128::from(now.tv_nsec));
+        let timeout_ns = u64::try_from(total_ns).unwrap_or(0);
+
+        // Block (bounded) until a poster wakes us or the timeout elapses,
+        // then re-loop to re-check the counter and the deadline.
+        sem_block_timeout(atomic, current, timeout_ns);
     }
 }
 
@@ -1080,6 +1183,21 @@ mod tests {
         let ret = sem_wait(core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
+    }
+
+    #[test]
+    fn test_sem_wait_fast_path_decrements() {
+        // When the count is positive sem_wait takes the userspace CAS fast
+        // path and never reaches the (host-stubbed) blocking helper.  Two
+        // waits on a count-of-2 semaphore should both succeed and drain it.
+        let mut sem = SemT {
+            value: core::sync::atomic::AtomicI32::new(2),
+        };
+        assert_eq!(sem_wait(&raw mut sem), 0);
+        assert_eq!(sem_wait(&raw mut sem), 0);
+        let mut v: i32 = -1;
+        assert_eq!(sem_getvalue(&raw mut sem, &raw mut v), 0);
+        assert_eq!(v, 0);
     }
 
     // -- sem_trywait sets EAGAIN --

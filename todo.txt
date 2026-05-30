@@ -479,6 +479,37 @@ Remaining net improvements (diminishing returns):
   bumped 72 -> 80.  2 new host tests (inode passthrough, zero=unavailable);
   17103 posix host tests pass; kernel + posix + init build clean.
 
+- (DONE 2026-05-30) POSIX semaphores now block on the kernel futex instead
+  of busy-spinning.  sem_wait spun on core::hint::spin_loop() with NO yield
+  syscall (the doc even claimed "no kernel futex support yet"), so a waiter
+  on an exhausted semaphore pinned a CPU core at 100% and, on a single-core
+  system, could livelock the very poster it was waiting for.  The kernel has
+  had SYS_FUTEX_WAIT=210 / WAKE=211 / WAIT_TIMEOUT=214 all along, and the
+  semaphore counter (a 4-byte-aligned AtomicI32) is a perfect futex word.
+  Fix (cfg-split, bare metal uses futex / host spins since tests never block):
+    * sem_wait: fast path is a pure userspace CAS (no syscall); on exhaustion
+      it calls SYS_FUTEX_WAIT(addr, observed_value) and re-loops.  The
+      observed value is passed as the futex "expected" so a post that lands
+      between our load and the syscall makes *word != expected and the
+      kernel returns immediately (no lost wakeup).
+    * sem_post: after incrementing, calls SYS_FUTEX_WAKE(addr, 1).
+    * sem_timedwait: now computes the remaining ns to the deadline (i128 +
+      saturating arithmetic, overflow-safe) and blocks via
+      SYS_FUTEX_WAIT_TIMEOUT instead of a 1ms spin-sleep poll.
+    * Stale module doc rewritten (named semaphores ARE implemented via the
+      static pool — they were never ENOSYS stubs as the old header claimed).
+  1 new host test (sem_wait fast-path drains a count-of-2). 17113 posix host
+  tests pass; bare-metal + host build clean; no new clippy findings in the
+  changed line ranges.
+  DOCUMENTED LIMITATION: named semaphores live in a PER-PROCESS static pool
+  (NAMED_SEMS), so two different processes that sem_open the same name get
+  independent counters — there is no cross-process sharing.  The futex is
+  also a private (per-address-space) futex, so even if the pool were shared
+  the wake would need a shared address.  Proper cross-process named
+  semaphores need the pool in named shared memory (SYS_SHM_* + a name
+  registry); deferred.  Within a single multi-threaded process (the
+  supported case) the futex-backed semaphore is fully correct.
+
 - (DONE 2026-05-30) lseek() SEEK_DATA/SEEK_HOLE wired to the kernel — same
   no-op-stub bug class.  lseek rejected whence == SEEK_DATA(3) / SEEK_HOLE(4)
   with EINVAL ("whence is not a valid value") even though the kernel fully

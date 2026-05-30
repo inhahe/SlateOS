@@ -479,6 +479,55 @@ Remaining net improvements (diminishing returns):
   bumped 72 -> 80.  2 new host tests (inode passthrough, zero=unavailable);
   17103 posix host tests pass; kernel + posix + init build clean.
 
+- (DONE 2026-05-30) utimes/futimes/utimensat/futimens wired to the kernel
+  (same ABI-mistranslation bug class as the stat/statvfs fixes).  ALL FOUR
+  timestamp setters were no-op success stubs: they validated their arguments
+  (path/fd/usec/nsec ranges, dirfd, the UTIME_NOW/UTIME_OMIT sentinels) and
+  then returned 0 WITHOUT EVER CALLING THE KERNEL — despite the kernel fully
+  implementing SYS_FS_SET_TIMES=632 and the ext4/memfs set_times paths (the
+  ext4 self-test even exercises Vfs::set_times).  Net effect: `touch`, `make`
+  / build-system mtime tracking, `cp -p`/`tar -x` timestamp preservation, and
+  anything relying on utime* silently did nothing.  The stale comment even
+  said "our filesystem doesn't track per-file timestamps yet" — long obsolete.
+  Fix mirrors statvfs's cfg-split pattern:
+    * Added SYS_FS_SET_TIMES=632 to posix syscall.rs (+ to the non-zero,
+      uniqueness, and fs-range syscall test lists).
+    * Pure, host-testable converters in file.rs: timespec_to_kernel_ns
+      (UTIME_OMIT->0=unchanged, UTIME_NOW->now_ns, else sec*1e9+nsec),
+      timeval_to_kernel_ns (usec*1000), and utimens_pair_to_kernel /
+      utimes_pair_to_kernel (NULL times => (now,now) per POSIX).  All gated
+      cfg(any(target_os="none", test)) so they don't dead-code-warn on host
+      non-test builds.
+    * Bare-metal helpers wall_clock_ns (syscall0 SYS_CLOCK_REALTIME) and
+      set_times_path (resolve_or_err + syscall4 SYS_FS_SET_TIMES, errno::
+      translate on negative return).
+    * The four entry points keep all existing validation, then on
+      target_os="none" issue the syscall; fd-based futimes/futimens resolve
+      the fd to its stored path via fdtable::get_fd_path (path-less fds like
+      pipes/sockets succeed as a no-op, matching fstatvfs); utimensat resolves
+      dirfd/path like fstatat.  Host builds keep returning 0 after validation.
+  9 new host tests for the converters; 17114 posix host tests pass; bare-metal
+  + host posix build clean; new code clippy-clean.
+  JUDGMENT CALLS / DOCUMENTED LIMITATIONS:
+    1. utimensat AT_SYMLINK_NOFOLLOW is NOT honoured on the final component:
+       the kernel SYS_FS_SET_TIMES (Vfs::set_times) resolves with
+       resolve_follow unconditionally, so setting times on a symlink updates
+       the TARGET, not the link.  Proper fix = a no-follow variant of the
+       kernel syscall (or a flag arg).  Deferred: low value (almost nobody
+       lutimes a symlink), and it needs a kernel ABI addition.  Trigger to do
+       it properly: a program that actually depends on lutimes/AT_SYMLINK_
+       NOFOLLOW semantics on links.
+    2. Setting a timestamp to EXACTLY the Unix epoch (sec==0 && nsec==0)
+       leaves it unchanged, because the kernel ABI overloads 0 as "don't
+       change this field".  Proper fix = change the kernel SET_TIMES ABI to a
+       non-zero sentinel (e.g. u64::MAX) for "unchanged" across handlers.rs +
+       Vfs::set_times + ext4/memfs set_times + the self-test.  Deferred: the
+       exact-epoch case is astronomically rare outside deliberate testing, and
+       wiring the syscall at all (vs the prior 100% no-op) is the high-value
+       change.  Trigger: if real software needs to stamp the literal epoch.
+    3. ext4 stores second resolution, so sub-second nsec/usec is truncated on
+       persist (pre-existing; memfs keeps full ns).
+
 - (DONE 2026-05-30) statx STATX_BTIME wired (the last "remaining gap" from the
   stat-ABI widening above).  created_ns has been flowing to userspace in the
   80-byte FsStatResult buffer @64 since the widening, but statx dropped it

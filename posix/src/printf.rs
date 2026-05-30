@@ -460,7 +460,7 @@ pub struct VaList {
 /// `va` must be a valid, ABI-conformant `va_list`: `reg_save_area` (when the
 /// GP registers are not yet exhausted) and `overflow_arg_area` must point at
 /// readable memory with at least 8 more bytes for this argument.
-unsafe fn va_arg_int(va: &mut VaList) -> u64 {
+pub unsafe fn va_arg_int(va: &mut VaList) -> u64 {
     if (va.gp_offset as usize) < 48 && !va.reg_save_area.is_null() {
         // SAFETY: gp_offset < 48 stays within the 48-byte GP save area.
         let p = unsafe { va.reg_save_area.add(va.gp_offset as usize) };

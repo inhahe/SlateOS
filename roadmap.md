@@ -1252,7 +1252,8 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] stdlib additions: strtod/strtof/atof (float parsing with exponent support), strtoll/strtoull (64-bit integer parsing), llabs, div/ldiv/lldiv (quotient+remainder structs), rand_r (reentrant PRNG)
   - [x] string additions: strtok_r (reentrant tokenizer), memccpy (copy-until-byte), strcoll/strxfrm (locale stubs), strerror_r (thread-safe error strings)
   - [x] time additions: clock (CPU time via CLOCK_MONOTONIC proxy), strptime (parse time strings — %Y/%m/%d/%H/%M/%S/%j/%n/%t/%%), CLOCKS_PER_SEC
-  - [x] scanf: sscanf via assembly trampoline — %d/%i/%u/%x/%o/%s/%c/%f/%lf/%n, width limits, assignment suppression (%*), length modifiers (l/ll/h/hh), literal matching
+  - [x] scanf: sscanf/scanf/fscanf via assembly trampoline (+ glibc __isoc99_* aliases) — %d/%i/%u/%x/%o/%s/%c/%f/%lf/%n, width limits, assignment suppression (%*), length modifiers (l/ll/h/hh), literal matching
+  - [x] v* scanf family (vsscanf/vscanf/vfscanf + __isoc99_v*scanf aliases): take a real va_list; flatten the destination pointers (all integer-class) via the SysV va_arg path into the engine's flat array; pure Rust, host-tested with synthetic va_lists
   - [x] stdio additions: getline/getdelim (dynamic line reading with malloc/realloc buffer growth)
   - [x] wchar: full UTF-8 multibyte↔wchar conversion (1-4 byte decode/encode, overlong/surrogate rejection), btowc/wctob, restartable mbrtowc/wcrtomb with MbstateT partial state tracking, mbrlen, wcwidth/wcswidth (CJK-aware display width), wctype classification (iswalpha..iswxdigit, towlower/towupper), wide string ops (wcscpy/wcsncpy/wcslen/wcscmp/wcsncmp/wcscat/wcsncat/wcschr/wcsrchr/wcsstr, wmemcpy/wmemset/wmemcmp/wmemchr/wmemmove), nl_langinfo; 24 unit tests
   - [x] resource additions: nice/getpriority/setpriority (stored locally, clamped to [-20,19], not kernel-enforced), PRIO_PROCESS/PRIO_PGRP/PRIO_USER constants

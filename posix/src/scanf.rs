@@ -7,6 +7,13 @@
 //! `scanf` and `fscanf` read a line from stdin/stream into a stack
 //! buffer, then scan it with the same engine as `sscanf`.
 //!
+//! The `v*` variants (`vsscanf`, `vscanf`, `vfscanf`) take a `va_list`
+//! instead of `...`.  Since a `va_list` parameter decays to a pointer on the
+//! x86_64 System V ABI, they are ordinary Rust functions: they flatten the
+//! destination pointers out of the `va_list` (every scanf argument is a
+//! pointer, so all come from the integer register/overflow path) and delegate
+//! to the same engine.  The glibc `__isoc99_v*scanf` aliases are provided too.
+//!
 //! ## Supported Format Specifiers
 //!
 //! - `%d` — signed decimal integer → `*mut i32`
@@ -135,6 +142,23 @@ core::arch::global_asm!(
     ".type __isoc99_fscanf, @function",
     "__isoc99_fscanf:",
     "jmp fscanf",
+
+    // v* variants take a va_list (no varargs), so the C99 aliases are plain
+    // tail-jumps to the Rust functions below.
+    ".global __isoc99_vsscanf",
+    ".type __isoc99_vsscanf, @function",
+    "__isoc99_vsscanf:",
+    "jmp vsscanf",
+
+    ".global __isoc99_vscanf",
+    ".type __isoc99_vscanf, @function",
+    "__isoc99_vscanf:",
+    "jmp vscanf",
+
+    ".global __isoc99_vfscanf",
+    ".type __isoc99_vfscanf, @function",
+    "__isoc99_vfscanf:",
+    "jmp vfscanf",
 );
 
 // ---------------------------------------------------------------------------
@@ -245,6 +269,180 @@ pub extern "C" fn _fscanf_impl(
     };
 
     scan_core(&mut ctx)
+}
+
+// ---------------------------------------------------------------------------
+// va_list support — the v* scanf family
+// ---------------------------------------------------------------------------
+//
+// `vsscanf`/`vscanf`/`vfscanf` receive an already-initialised `va_list`
+// (which decays to a pointer on the x86_64 System V ABI) instead of `...`, so
+// they are plain Rust functions — host-testable.  Every scanf argument is an
+// output *pointer* (integer class), so flattening is simpler than printf's:
+// we walk the format string once, mirroring `scan_core`'s specifier parsing,
+// and pull one pointer per non-suppressed conversion via the SysV `va_arg`
+// integer path into the same flat `[u64; 8]` array the engine consumes.
+
+use crate::printf::{self, VaList};
+
+/// Flatten the destination pointers referenced by `fmt` out of `va` into the
+/// array `_sscanf_impl` expects.
+///
+/// Mirrors `scan_core`: `%*` suppresses (no pointer), `%%` and literal text
+/// consume nothing, an unknown conversion stops the scan (so we stop pulling),
+/// and every other conversion (`d i u x X o s c [ f e g a n`) consumes exactly
+/// one pointer.  At most 8 are stored (the engine's fixed-array contract).
+///
+/// # Safety
+/// `va` must be a valid `va_list` holding pointer arguments matching `fmt`.
+#[allow(clippy::arithmetic_side_effects)]
+unsafe fn va_collect_scanf(fmt: *const u8, va: &mut VaList) -> [u64; 8] {
+    let mut args = [0u64; 8];
+    let mut idx: usize = 0;
+
+    if fmt.is_null() {
+        return args;
+    }
+
+    let mut fi: usize = 0;
+    loop {
+        // SAFETY: fmt is NUL-terminated; the loop stops at the NUL.
+        let fc = unsafe { *fmt.add(fi) };
+        if fc == 0 {
+            break;
+        }
+        if fc != b'%' {
+            fi = fi.wrapping_add(1);
+            continue;
+        }
+        fi = fi.wrapping_add(1); // skip '%'
+
+        let spec = unsafe { *fmt.add(fi) };
+        if spec == 0 {
+            break;
+        }
+        if spec == b'%' {
+            // Literal percent — consumes no argument.
+            fi = fi.wrapping_add(1);
+            continue;
+        }
+
+        // Suppression flag.
+        let suppress = spec == b'*';
+        if suppress {
+            fi = fi.wrapping_add(1);
+        }
+
+        // Field width (digits — never an arg in scanf).
+        while unsafe { *fmt.add(fi) }.is_ascii_digit() {
+            fi = fi.wrapping_add(1);
+        }
+
+        // Length modifiers (consume no args).
+        match unsafe { *fmt.add(fi) } {
+            b'l' => {
+                fi = fi.wrapping_add(1);
+                if unsafe { *fmt.add(fi) } == b'l' {
+                    fi = fi.wrapping_add(1);
+                }
+            }
+            b'h' => {
+                fi = fi.wrapping_add(1);
+                if unsafe { *fmt.add(fi) } == b'h' {
+                    fi = fi.wrapping_add(1);
+                }
+            }
+            _ => {}
+        }
+
+        let conv = unsafe { *fmt.add(fi) };
+        if conv == 0 {
+            break;
+        }
+        fi = fi.wrapping_add(1);
+
+        // Skip a scanset body so its contents aren't reparsed as conversions.
+        if conv == b'[' {
+            if unsafe { *fmt.add(fi) } == b'^' {
+                fi = fi.wrapping_add(1);
+            }
+            // A ']' immediately after '[' (or '[^') is a literal set member.
+            if unsafe { *fmt.add(fi) } == b']' {
+                fi = fi.wrapping_add(1);
+            }
+            loop {
+                let c = unsafe { *fmt.add(fi) };
+                if c == 0 || c == b']' {
+                    break;
+                }
+                fi = fi.wrapping_add(1);
+            }
+            if unsafe { *fmt.add(fi) } == b']' {
+                fi = fi.wrapping_add(1);
+            }
+        }
+
+        match conv {
+            b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b's' | b'c' | b'[' | b'f' | b'e'
+            | b'g' | b'a' | b'n' => {
+                if !suppress {
+                    // SAFETY: va contract upheld by the caller.
+                    let v = unsafe { printf::va_arg_int(va) };
+                    if idx < 8 {
+                        args[idx] = v;
+                    }
+                    idx = idx.wrapping_add(1);
+                }
+            }
+            // Unknown conversion: scan_core stops here, so we stop too.
+            _ => break,
+        }
+    }
+
+    args
+}
+
+/// `vsscanf(str, fmt, ap)` — `sscanf` with a `va_list`.
+///
+/// # Safety
+/// `str`/`fmt` must be valid NUL-terminated strings and `ap` a valid
+/// `va_list` whose pointer arguments match the conversions in `fmt`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vsscanf(input: *const u8, fmt: *const u8, ap: *mut VaList) -> i32 {
+    if ap.is_null() {
+        return -1;
+    }
+    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
+    let args = unsafe { va_collect_scanf(fmt, &mut *ap) };
+    _sscanf_impl(input, fmt, args.as_ptr())
+}
+
+/// `vscanf(fmt, ap)` — `scanf` with a `va_list` (reads from stdin).
+///
+/// # Safety
+/// As [`vsscanf`].
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vscanf(fmt: *const u8, ap: *mut VaList) -> i32 {
+    if ap.is_null() {
+        return -1;
+    }
+    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
+    let args = unsafe { va_collect_scanf(fmt, &mut *ap) };
+    _scanf_impl(fmt, args.as_ptr())
+}
+
+/// `vfscanf(stream, fmt, ap)` — `fscanf` with a `va_list`.
+///
+/// # Safety
+/// As [`vsscanf`]; `stream` must be a valid `FILE*`.
+#[cfg_attr(target_os = "none", unsafe(no_mangle))]
+pub unsafe extern "C" fn vfscanf(stream: *mut u8, fmt: *const u8, ap: *mut VaList) -> i32 {
+    if ap.is_null() {
+        return -1;
+    }
+    // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
+    let args = unsafe { va_collect_scanf(fmt, &mut *ap) };
+    _fscanf_impl(stream, fmt, args.as_ptr())
 }
 
 /// Read bytes from a file descriptor until newline or buffer full.
@@ -1696,5 +1894,107 @@ mod tests {
         );
         assert_eq!(n, 1);
         assert_eq!(val, 42);
+    }
+
+    // -----------------------------------------------------------------------
+    // v* scanf family (va_list extraction)
+    //
+    // Builds a synthetic SysV va_list whose GP register save area holds the
+    // destination pointers, then calls `vsscanf`.  This exercises
+    // `va_collect_scanf` and the `va_arg` integer path without relying on the
+    // host's own `va_start` (whose ABI differs on Windows hosts).
+    // -----------------------------------------------------------------------
+
+    /// Run `vsscanf` against a synthetic va_list built from `ptrs` (each an
+    /// output destination address); up to 6 fit in the GP register file.
+    fn run_vsscanf(input: &[u8], fmt: &[u8], ptrs: &[u64]) -> i32 {
+        let mut reg = [0u8; 176];
+        for (i, &p) in ptrs.iter().enumerate().take(6) {
+            let off = i * 8;
+            reg[off..off + 8].copy_from_slice(&p.to_le_bytes());
+        }
+        let mut overflow = [0u8; 64];
+        let mut va = VaList {
+            gp_offset: 0,
+            fp_offset: 48,
+            overflow_arg_area: overflow.as_mut_ptr(),
+            reg_save_area: reg.as_mut_ptr(),
+        };
+        // SAFETY: the va_list points at the buffers above and holds enough
+        // pointer args for `fmt`.
+        unsafe { vsscanf(input.as_ptr(), fmt.as_ptr(), &mut va) }
+    }
+
+    #[test]
+    fn vsscanf_single_int() {
+        let mut val: i32 = 0;
+        let n = run_vsscanf(b"42\0", b"%d\0", &[&raw mut val as u64]);
+        assert_eq!(n, 1);
+        assert_eq!(val, 42);
+    }
+
+    #[test]
+    fn vsscanf_two_ints() {
+        let mut a: i32 = 0;
+        let mut b: i32 = 0;
+        let n = run_vsscanf(b"10 20\0", b"%d %d\0", &[&raw mut a as u64, &raw mut b as u64]);
+        assert_eq!(n, 2);
+        assert_eq!(a, 10);
+        assert_eq!(b, 20);
+    }
+
+    #[test]
+    fn vsscanf_suppression_skips_pointer() {
+        // "%*d %d": the first field is suppressed (consumes no pointer), so
+        // the single pointer must bind to the second field.
+        let mut val: i32 = 0;
+        let n = run_vsscanf(b"100 200\0", b"%*d %d\0", &[&raw mut val as u64]);
+        assert_eq!(n, 1);
+        assert_eq!(val, 200);
+    }
+
+    #[test]
+    fn vsscanf_string_and_int() {
+        let mut word = [0u8; 16];
+        let mut num: i32 = 0;
+        let n = run_vsscanf(
+            b"foo 7\0",
+            b"%s %d\0",
+            &[word.as_mut_ptr() as u64, &raw mut num as u64],
+        );
+        assert_eq!(n, 2);
+        assert_eq!(&word[..3], b"foo");
+        assert_eq!(num, 7);
+    }
+
+    #[test]
+    fn vsscanf_float() {
+        let mut f: f32 = 0.0;
+        let n = run_vsscanf(b"3.5\0", b"%f\0", &[&raw mut f as u64]);
+        assert_eq!(n, 1);
+        assert!((f - 3.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn vsscanf_scanset_then_int() {
+        // The scanset body contains digits/letters that must NOT be reparsed
+        // as conversions when counting pointers.
+        let mut word = [0u8; 16];
+        let mut num: i32 = 0;
+        let n = run_vsscanf(
+            b"abc99\0",
+            b"%[a-z]%d\0",
+            &[word.as_mut_ptr() as u64, &raw mut num as u64],
+        );
+        assert_eq!(n, 2);
+        assert_eq!(&word[..3], b"abc");
+        assert_eq!(num, 99);
+    }
+
+    #[test]
+    fn vsscanf_null_va_returns_eof() {
+        // SAFETY: a null va_list must be rejected, not dereferenced.
+        let n = unsafe { vsscanf(b"42\0".as_ptr(), b"%d\0".as_ptr(), core::ptr::null_mut()) };
+        assert_eq!(n, -1);
     }
 }

@@ -405,6 +405,23 @@ Remaining net improvements (diminishing returns):
   DES-format /etc/shadow entries (low priority; DES crypt is obsolete
   and insecure).
 
+- (DONE 2026-05-30) v* scanf family (vsscanf, vscanf, vfscanf, plus the
+  glibc __isoc99_v*scanf aliases) implemented in posix/src/scanf.rs.
+  Same motivation as the v* printf work below: ported code that wraps
+  scanf with a custom va_list helper could not link.  These take a real
+  va_list (decays to *mut VaList on x86_64 SysV) so they are pure Rust.
+  Every scanf argument is an output pointer (integer class), so a new
+  va_collect_scanf walks the format string mirroring scan_core's
+  specifier parsing — %* suppresses (no pointer), %% and literals consume
+  nothing, an unknown conversion stops the scan, scanset bodies are
+  skipped so their contents aren't reparsed — and pulls one pointer per
+  non-suppressed conversion via printf::va_arg_int (now pub) into the
+  engine's flat [u64;8] array, then delegates to the tested
+  _sscanf_impl/_scanf_impl/_fscanf_impl.  7 host tests build synthetic
+  va_lists and verify single/two ints, %* suppression binding to the
+  right field, %s+%d, %f, %[a-z]+%d scanset skipping, and null-va_list
+  rejection.  All pass; bare-metal build clean.
+
 - (DONE 2026-05-29) v* printf family (vprintf, vfprintf, vdprintf,
   vsnprintf, vsprintf, vasprintf) implemented in posix/src/printf.rs.
   These were entirely missing — any ported code that builds its own

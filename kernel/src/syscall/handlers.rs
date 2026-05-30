@@ -5103,6 +5103,10 @@ pub fn sys_fs_set_attr(args: &SyscallArgs) -> SyscallResult {
 ///
 /// `arg0`: path pointer.  `arg1`: path length.
 /// `arg2`: uid.  `arg3`: gid.
+///
+/// A uid or gid of `u32::MAX` (`(uid_t)-1` / `(gid_t)-1`) means "leave that
+/// field unchanged", per POSIX `chown`.  `Vfs::set_owner` resolves the
+/// sentinel against the file's current owner.
 #[allow(clippy::cast_possible_truncation)]
 pub fn sys_fs_set_owner(args: &SyscallArgs) -> SyscallResult {
     if let Err(e) = require_cap_type(

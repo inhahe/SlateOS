@@ -479,6 +479,47 @@ Remaining net improvements (diminishing returns):
   bumped 72 -> 80.  2 new host tests (inode passthrough, zero=unavailable);
   17103 posix host tests pass; kernel + posix + init build clean.
 
+- (DONE 2026-05-30) chmod/fchmod/chown/fchown/lchown wired to the kernel
+  (same no-op-stub bug class as the utimes family).  All five were validate-
+  then-return-0 stubs ("No permission system yet — accept silently") even
+  though the kernel fully implements SYS_FS_SET_PERMS=631 and
+  SYS_FS_SET_OWNER=630 (ext4/memfs set_permissions/set_owner exist and stamp
+  ctime; FAT correctly returns NotSupported).  Net effect before the fix:
+  `chmod`, `install -m`, `tar -p` mode/owner restore, and any chown/chmod
+  silently did nothing on a real fs.  Fix mirrors the utimes cfg-split:
+    * Added SYS_FS_SET_OWNER=630 / SYS_FS_SET_PERMS=631 to posix syscall.rs
+      (+ to the non-zero, uniqueness, and fs-range syscall test lists).
+    * Bare-metal helpers set_perms_path (resolve_or_err + syscall3
+      SYS_FS_SET_PERMS, mode masked to 0o7777) and set_owner_path
+      (resolve_or_err + syscall4 SYS_FS_SET_OWNER), errno::translate on
+      negative return.
+    * The five entry points keep all existing validation + the CAP_CHOWN
+      gate, then on target_os="none" issue the syscall.  fd-based
+      fchmod/fchown resolve the fd to its stored path via
+      fdtable::get_fd_path (path-less fds like pipes succeed as a no-op).
+      A chown/fchown/lchown that changes neither field (both args u32::MAX)
+      short-circuits to success without a syscall (no spurious ctime bump).
+      Host builds keep returning 0 after validation.
+    * KERNEL FIX: Vfs::set_owner now honours the POSIX (uid_t)-1/(gid_t)-1
+      "leave unchanged" sentinel.  Previously it wrote both uid and gid
+      unconditionally, so chown(path, -1, gid) would have clobbered the uid
+      with 0xFFFFFFFF.  Vfs::set_owner now resolves u32::MAX fields against
+      the file's current owner (via Vfs::metadata) before dispatching, so
+      every backing fs impl still receives concrete values.  Handler doc
+      updated to document the sentinel.
+  17114 posix host tests pass; bare-metal + host posix build clean; kernel
+  build clean.
+  JUDGMENT CALLS / DOCUMENTED LIMITATIONS:
+    1. lchown follows symlinks: the kernel SYS_FS_SET_OWNER (Vfs::set_owner)
+       resolves with resolve_follow, so lchown on a symlink changes the
+       TARGET's owner, not the link's.  Correct for the common non-symlink
+       case.  Same root cause and proper fix as the utimensat
+       AT_SYMLINK_NOFOLLOW limitation below (needs a no-follow kernel ABI).
+       Deferred: low value.
+    2. chmod ignores file-type bits and forwards only mode & 0o7777; the
+       kernel additionally masks to 0o7777.  setuid/setgid/sticky bits ARE
+       forwarded (they live in 0o7000).
+
 - (DONE 2026-05-30) utimes/futimes/utimensat/futimens wired to the kernel
   (same ABI-mistranslation bug class as the stat/statvfs fixes).  ALL FOUR
   timestamp setters were no-op success stubs: they validated their arguments

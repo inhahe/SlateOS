@@ -2198,9 +2198,26 @@ impl Vfs {
     }
 
     /// Set ownership (uid/gid).
+    ///
+    /// Per POSIX `chown`, a uid or gid of `u32::MAX` (i.e. `(uid_t)-1` /
+    /// `(gid_t)-1`) means "leave that field unchanged".  We resolve those
+    /// sentinels here against the file's current owner so every backing
+    /// filesystem `set_owner` impl receives concrete values and need not
+    /// know about the sentinel convention.
     pub fn set_owner(path: &str, uid: u32, gid: u32) -> KernelResult<()> {
         let path = Self::resolve_follow(path)?;
         check_writable(&path)?;
+        // Resolve "leave unchanged" sentinels before taking the VFS lock
+        // (metadata() takes the lock itself).
+        let (uid, gid) = if uid == u32::MAX || gid == u32::MAX {
+            let meta = Self::metadata(&path)?;
+            (
+                if uid == u32::MAX { meta.uid } else { uid },
+                if gid == u32::MAX { meta.gid } else { gid },
+            )
+        } else {
+            (uid, gid)
+        };
         {
             let mut vfs = VFS.lock();
             let (mp, relative) = find_mount(&mut vfs, &path)?;

@@ -2346,31 +2346,43 @@ pub extern "C" fn fchownat(
 
 /// Change file mode bits.
 ///
-/// Validates `path != NULL` (Linux: EFAULT on a bad pointer).  Once our
-/// filesystem supports permissions, the body will do the lookup and
-/// permission check; until then it remains a no-op success after the
-/// pointer validation.
+/// Validates `path != NULL` (Linux: EFAULT on a bad pointer), then issues
+/// `SYS_FS_SET_PERMS` to persist the new permission bits.  The file-type
+/// bits of `mode` are ignored; only the low `0o7777` permission bits apply.
 ///
 /// Errors:
 ///   * `EFAULT` — `path` is NULL.
+///   * any error the kernel returns from `SYS_FS_SET_PERMS`
+///     (e.g. `ENOENT`, `EACCES`, `ENOTSUP` on FAT).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn chmod(path: *const u8, _mode: ModeT) -> i32 {
+pub extern "C" fn chmod(path: *const u8, mode: ModeT) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    // No permission system yet — accept silently for well-formed calls.
-    0
+    #[cfg(target_os = "none")]
+    {
+        set_perms_path(path, mode)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = mode;
+        0
+    }
 }
 
 /// Change file mode bits (by fd).
 ///
-/// Validates `fd >= 0` and that `fd` refers to an open file description.
+/// Validates `fd >= 0` and that `fd` refers to an open file description,
+/// then resolves the fd to its stored path and issues `SYS_FS_SET_PERMS`.
+/// Descriptors with no stored path (pipes, sockets, …) have no persistent
+/// permissions, so the call succeeds as a no-op.
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
+///   * any error the kernel returns from `SYS_FS_SET_PERMS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fchmod(fd: Fd, _mode: ModeT) -> i32 {
+pub extern "C" fn fchmod(fd: Fd, mode: ModeT) -> i32 {
     if fd < 0 {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -2379,15 +2391,34 @@ pub extern "C" fn fchmod(fd: Fd, _mode: ModeT) -> i32 {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    0
+    #[cfg(target_os = "none")]
+    {
+        let mut path = [0u8; crate::unistd::PATH_MAX];
+        let len = fdtable::get_fd_path(fd, &mut path);
+        if len == 0 {
+            // No stored path (pipe/socket/etc.) — nothing to persist.
+            return 0;
+        }
+        set_perms_path(path.as_ptr(), mode)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        let _ = mode;
+        0
+    }
 }
 
 /// Change file owner and group.
 ///
-/// Validates `path != NULL`.
+/// Validates `path != NULL`, enforces the `CAP_CHOWN` gate, then issues
+/// `SYS_FS_SET_OWNER`.  A field of `(uid_t)-1` / `(gid_t)-1` (i.e.
+/// `u32::MAX`) leaves that field unchanged; a call that changes neither
+/// field is a pure no-op and skips the syscall.
 ///
 /// Errors:
 ///   * `EFAULT` — `path` is NULL.
+///   * `EPERM` — changing ownership without `CAP_CHOWN`.
+///   * any error the kernel returns from `SYS_FS_SET_OWNER`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn chown(path: *const u8, owner: UidT, group: GidT) -> i32 {
     if path.is_null() {
@@ -2397,23 +2428,36 @@ pub extern "C" fn chown(path: *const u8, owner: UidT, group: GidT) -> i32 {
     // Phase 206: CAP_CHOWN gate.  Linux requires CAP_CHOWN when the
     // caller actually changes file ownership.  owner/group == (uid_t)-1
     // means "don't change that field", so a double-no-op call bypasses.
-    if (owner != u32::MAX || group != u32::MAX)
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_CHOWN,
-        )
+    if owner == u32::MAX && group == u32::MAX {
+        // Nothing to change — succeed without touching ctime.
+        return 0;
+    }
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN)
     {
         errno::set_errno(errno::EPERM);
         return -1;
     }
-    0
+    #[cfg(target_os = "none")]
+    {
+        set_owner_path(path, owner, group)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Change file owner and group (by fd).
 ///
-/// Validates `fd >= 0` and that `fd` refers to an open file description.
+/// Validates `fd >= 0` and that `fd` refers to an open file description,
+/// enforces the `CAP_CHOWN` gate, then resolves the fd to its stored path
+/// and issues `SYS_FS_SET_OWNER`.  Path-less descriptors (pipes, sockets, …)
+/// succeed as a no-op.
 ///
 /// Errors:
 ///   * `EBADF` — `fd` is negative or not open.
+///   * `EPERM` — changing ownership without `CAP_CHOWN`.
+///   * any error the kernel returns from `SYS_FS_SET_OWNER`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fchown(fd: Fd, owner: UidT, group: GidT) -> i32 {
     if fd < 0 {
@@ -2426,24 +2470,45 @@ pub extern "C" fn fchown(fd: Fd, owner: UidT, group: GidT) -> i32 {
     }
     // Phase 206: CAP_CHOWN gate — same semantics as chown(), after EBADF
     // validation.
-    if (owner != u32::MAX || group != u32::MAX)
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_CHOWN,
-        )
+    if owner == u32::MAX && group == u32::MAX {
+        return 0;
+    }
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN)
     {
         errno::set_errno(errno::EPERM);
         return -1;
     }
-    0
+    #[cfg(target_os = "none")]
+    {
+        let mut path = [0u8; crate::unistd::PATH_MAX];
+        let len = fdtable::get_fd_path(fd, &mut path);
+        if len == 0 {
+            return 0;
+        }
+        set_owner_path(path.as_ptr(), owner, group)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Change file owner and group (don't follow symlinks).
 ///
-/// Like `chown`, but does not follow symbolic links — changes ownership of
-/// the link itself rather than its target.  Validates `path != NULL`.
+/// Like `chown`, but is meant to change ownership of a symlink itself
+/// rather than its target.  Validates `path != NULL` and enforces the
+/// `CAP_CHOWN` gate, then issues `SYS_FS_SET_OWNER`.
+///
+/// LIMITATION: the kernel `SYS_FS_SET_OWNER` resolves paths with
+/// `resolve_follow` (always follows symlinks), so for a symlink argument
+/// this changes the *target's* owner, not the link's.  For the common
+/// non-symlink case the behaviour is correct.  Tracked in `todo.txt`
+/// (no `AT_SYMLINK_NOFOLLOW` ownership syscall yet).
 ///
 /// Errors:
 ///   * `EFAULT` — `path` is NULL.
+///   * `EPERM` — changing ownership without `CAP_CHOWN`.
+///   * any error the kernel returns from `SYS_FS_SET_OWNER`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn lchown(path: *const u8, owner: UidT, group: GidT) -> i32 {
     if path.is_null() {
@@ -2451,15 +2516,22 @@ pub extern "C" fn lchown(path: *const u8, owner: UidT, group: GidT) -> i32 {
         return -1;
     }
     // Phase 206: CAP_CHOWN gate — same semantics as chown().
-    if (owner != u32::MAX || group != u32::MAX)
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_CHOWN,
-        )
+    if owner == u32::MAX && group == u32::MAX {
+        return 0;
+    }
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN)
     {
         errno::set_errno(errno::EPERM);
         return -1;
     }
-    0
+    #[cfg(target_os = "none")]
+    {
+        set_owner_path(path, owner, group)
+    }
+    #[cfg(not(target_os = "none"))]
+    {
+        0
+    }
 }
 
 /// Process-local file mode creation mask.
@@ -3568,6 +3640,51 @@ fn set_times_path(path: *const u8, accessed_ns: u64, modified_ns: u64) -> i32 {
         resolved_len as u64,
         accessed_ns,
         modified_ns,
+    );
+    if ret < 0 {
+        return errno::translate(ret) as i32;
+    }
+    0
+}
+
+/// Resolve `path` and issue `SYS_FS_SET_PERMS` with the masked mode bits.
+/// Returns 0 on success or -1 with `errno` set.  Bare metal only.
+#[cfg(target_os = "none")]
+fn set_perms_path(path: *const u8, mode: ModeT) -> i32 {
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+    // The kernel masks to 0o7777, but mask here too so the ABI value is
+    // unambiguous (mode_t carries file-type bits we must not forward).
+    let perms = u64::from(mode & 0o7777);
+    let ret = syscall3(
+        SYS_FS_SET_PERMS,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
+        perms,
+    );
+    if ret < 0 {
+        return errno::translate(ret) as i32;
+    }
+    0
+}
+
+/// Resolve `path` and issue `SYS_FS_SET_OWNER` with the uid/gid pair.
+/// A field of `u32::MAX` tells the kernel to leave that field unchanged.
+/// Returns 0 on success or -1 with `errno` set.  Bare metal only.
+#[cfg(target_os = "none")]
+fn set_owner_path(path: *const u8, uid: u32, gid: u32) -> i32 {
+    let mut resolved = [0u8; crate::unistd::PATH_MAX];
+    let Some(resolved_len) = resolve_or_err(path, &mut resolved) else {
+        return -1;
+    };
+    let ret = syscall4(
+        SYS_FS_SET_OWNER,
+        resolved.as_ptr() as u64,
+        resolved_len as u64,
+        u64::from(uid),
+        u64::from(gid),
     );
     if ret < 0 {
         return errno::translate(ret) as i32;
@@ -9130,15 +9247,17 @@ mod tests {
 
     #[test]
     fn test_chmod_valid_path_returns_zero() {
-        // Mode bits outside 0o7777 must not be rejected — Linux silently
-        // masks them, and so do we (by ignoring `mode` entirely).
+        // Mode bits outside 0o7777 must not be rejected — the kernel masks
+        // them to the permission bits.  On the host build chmod validates
+        // the pointer and returns 0 without issuing SYS_FS_SET_PERMS.
         assert_eq!(chmod(b"/etc/passwd\0".as_ptr(), 0xFFFFFFFF), 0);
     }
 
     #[test]
     fn test_chmod_empty_path_still_returns_zero() {
-        // An empty C string is a valid non-NULL pointer; we have no
-        // filesystem to check existence against, so accept silently.
+        // An empty C string is a valid non-NULL pointer; on the host build
+        // the syscall is not issued, so the call returns 0 after pointer
+        // validation.
         assert_eq!(chmod(b"\0".as_ptr(), 0o755), 0);
     }
 
@@ -9206,8 +9325,8 @@ mod tests {
 
     #[test]
     fn test_chown_minus_one_owner_returns_zero() {
-        // (uid_t)-1 means "do not change" in POSIX; the no-op stub still
-        // returns 0 for a valid path.
+        // (uid_t)-1 in both fields means "change nothing" in POSIX, so the
+        // call short-circuits to success without issuing SYS_FS_SET_OWNER.
         assert_eq!(
             chown(b"/etc/passwd\0".as_ptr(), UidT::MAX, UidT::MAX),
             0

@@ -43,10 +43,13 @@ use std::time::Instant;
 // Syscall interface
 // ============================================================================
 
+// Native OurOS syscall numbers (kernel/src/syscall/number.rs). These were
+// previously off by one (802/803/804), which collided with TCP_RECV/CLOSE and
+// an unassigned slot — every send/recv/close hit the wrong syscall.
 const SYS_TCP_CONNECT: u64 = 800;
-const SYS_TCP_SEND: u64 = 802;
-const SYS_TCP_RECV: u64 = 803;
-const SYS_TCP_CLOSE: u64 = 804;
+const SYS_TCP_SEND: u64 = 801;
+const SYS_TCP_RECV: u64 = 802;
+const SYS_TCP_CLOSE: u64 = 803;
 const SYS_DNS_RESOLVE: u64 = 820;
 
 /// Perform a 3-argument syscall via the `syscall` instruction.
@@ -97,22 +100,30 @@ unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
 /// Resolve a hostname to an IPv4 address via the kernel DNS resolver.
 /// Returns the IP as a `u32` in network byte order on success.
 fn dns_resolve(hostname: &str) -> Result<u32, CurlError> {
-    let mut result_ip: u32 = 0;
+    // The kernel writes the resolved address as four raw octets in order
+    // [a, b, c, d]. Read them into a byte array and reassemble with
+    // `from_be_bytes` so the resulting u32 matches the MSB-first convention
+    // used by `parse_ipv4`/`ip_to_string` and expected by the kernel's
+    // `Ipv4Addr::from_u32` (which does `to_be_bytes`). Reading the four bytes
+    // directly as a native-endian u32 byte-swaps the address on little-endian
+    // hosts and connects to the wrong IP.
+    let mut octets = [0u8; 4];
     // SAFETY: We pass a valid pointer to the hostname bytes and their length,
-    // plus a valid mutable pointer for the kernel to write the resolved IP into.
-    // The kernel reads exactly `hostname.len()` bytes and writes exactly 4 bytes.
+    // plus a valid mutable pointer to a 4-byte buffer for the kernel to write
+    // the resolved IP octets into. The kernel reads exactly `hostname.len()`
+    // bytes and writes exactly 4 bytes.
     let ret = unsafe {
         syscall3(
             SYS_DNS_RESOLVE,
             hostname.as_ptr() as u64,
             hostname.len() as u64,
-            &mut result_ip as *mut u32 as u64,
+            octets.as_mut_ptr() as u64,
         )
     };
     if ret < 0 {
         return Err(CurlError::DnsFailure(hostname.to_string()));
     }
-    Ok(result_ip)
+    Ok(u32::from_be_bytes(octets))
 }
 
 /// Open a TCP connection to the given IP (network byte order) and port.
@@ -386,15 +397,14 @@ fn url_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (
-                from_hex_digit(bytes[i + 1]),
-                from_hex_digit(bytes[i + 2]),
-            ) {
-                out.push(hi << 4 | lo);
-                i += 3;
-                continue;
-            }
+        if bytes[i] == b'%'
+            && i + 2 < bytes.len()
+            && let (Some(hi), Some(lo)) =
+                (from_hex_digit(bytes[i + 1]), from_hex_digit(bytes[i + 2]))
+        {
+            out.push(hi << 4 | lo);
+            i += 3;
+            continue;
         }
         if bytes[i] == b'+' {
             out.push(b' ');
@@ -434,7 +444,7 @@ const BASE64_CHARS: &[u8; 64] =
 
 /// Encode bytes to base64.
 fn base64_encode(input: &[u8]) -> String {
-    let mut out = String::with_capacity((input.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let mut i = 0;
     while i < input.len() {
         let b0 = input[i];
@@ -923,17 +933,19 @@ fn print_progress(downloaded: u64, total: Option<u64>, start_time: Instant) {
 // Write-out formatting
 // ============================================================================
 
-/// Expand write-out format string with variable substitutions.
-fn expand_write_out(
-    fmt: &str,
+/// Metrics substituted into a curl `-w`/`--write-out` format string.
+struct WriteOutVars<'a> {
     status_code: u16,
     total_bytes: u64,
     speed: f64,
     elapsed: f64,
-    url: &str,
-    content_type: &str,
+    url: &'a str,
+    content_type: &'a str,
     num_redirects: u32,
-) -> String {
+}
+
+/// Expand write-out format string with variable substitutions.
+fn expand_write_out(fmt: &str, vars: &WriteOutVars) -> String {
     let mut result = String::new();
     let chars: Vec<char> = fmt.chars().collect();
     let mut i = 0;
@@ -943,13 +955,13 @@ fn expand_write_out(
             if let Some(close_idx) = chars[i + 2..].iter().position(|&c| c == '}') {
                 let var_name: String = chars[i + 2..i + 2 + close_idx].iter().collect();
                 let replacement = match var_name.as_str() {
-                    "http_code" | "response_code" => format!("{status_code}"),
-                    "size_download" => format!("{total_bytes}"),
-                    "speed_download" => format!("{speed:.3}"),
-                    "time_total" => format!("{elapsed:.6}"),
-                    "url_effective" => url.to_string(),
-                    "content_type" => content_type.to_string(),
-                    "num_redirects" => format!("{num_redirects}"),
+                    "http_code" | "response_code" => format!("{}", vars.status_code),
+                    "size_download" => format!("{}", vars.total_bytes),
+                    "speed_download" => format!("{:.3}", vars.speed),
+                    "time_total" => format!("{:.6}", vars.elapsed),
+                    "url_effective" => vars.url.to_string(),
+                    "content_type" => vars.content_type.to_string(),
+                    "num_redirects" => format!("{}", vars.num_redirects),
                     _ => format!("%{{{var_name}}}"),
                 };
                 result.push_str(&replacement);
@@ -1761,14 +1773,14 @@ fn do_request(
     if opts.method != Method::Head {
         let mut recv_buf = [0u8; 8192];
         loop {
-            if let Some(ref decoder) = chunked_decoder {
-                if decoder.is_finished() {
-                    break;
-                }
-            } else if let Some(cl) = content_length {
-                if downloaded >= cl {
-                    break;
-                }
+            if let Some(ref decoder) = chunked_decoder
+                && decoder.is_finished()
+            {
+                break;
+            } else if let Some(cl) = content_length
+                && downloaded >= cl
+            {
+                break;
             }
 
             let n = tcp_recv(handle, &mut recv_buf)?;
@@ -1893,13 +1905,15 @@ fn transfer_url(url: &str, opts: &Options) -> Result<(), CurlError> {
 
             let output = expand_write_out(
                 fmt,
-                result.status_code,
-                result.body_bytes,
-                speed,
-                elapsed,
-                &current_url,
-                &result.content_type,
-                num_redirects,
+                &WriteOutVars {
+                    status_code: result.status_code,
+                    total_bytes: result.body_bytes,
+                    speed,
+                    elapsed,
+                    url: &current_url,
+                    content_type: &result.content_type,
+                    num_redirects,
+                },
             );
             // Write-out goes to stdout (after response body).
             print!("{output}");
@@ -1925,11 +1939,11 @@ fn run() -> Result<(), CurlError> {
     let mut opts = parse_args()?;
 
     // Handle -O: derive output filename from the first URL.
-    if opts.output_file.as_deref() == Some("") {
-        if let Some(first_url) = opts.urls.first() {
-            let parsed = parse_url(first_url)?;
-            opts.output_file = Some(filename_from_url(&parsed));
-        }
+    if opts.output_file.as_deref() == Some("")
+        && let Some(first_url) = opts.urls.first()
+    {
+        let parsed = parse_url(first_url)?;
+        opts.output_file = Some(filename_from_url(&parsed));
     }
 
     let urls = opts.urls.clone();
@@ -2168,8 +2182,22 @@ mod tests {
 
     #[test]
     fn ip_format_loopback() {
-        let ip = 0x7F000001_u32.to_be();
-        assert_eq!(ip_to_string(ip), "127.0.0.1");
+        // parse_ipv4 and ip_to_string share the MSB-first convention, so a
+        // parse->format round trip must be the identity.
+        assert_eq!(ip_to_string(0x7F00_0001), "127.0.0.1");
+        let parsed = parse_ipv4("127.0.0.1").expect("valid IPv4");
+        assert_eq!(ip_to_string(parsed), "127.0.0.1");
+    }
+
+    #[test]
+    fn dns_octets_reassemble_msb_first() {
+        // The kernel writes DNS results as raw octets [a, b, c, d]; dns_resolve
+        // must reassemble them with from_be_bytes so 127.0.0.1 becomes
+        // 0x7F000001 (matching tcp_connect's expectation), not the byte-swapped
+        // 0x0100007F a native-endian read would produce on little-endian hosts.
+        let octets = [127u8, 0, 0, 1];
+        assert_eq!(u32::from_be_bytes(octets), 0x7F00_0001);
+        assert_eq!(ip_to_string(u32::from_be_bytes(octets)), "127.0.0.1");
     }
 
     #[test]
@@ -2436,57 +2464,52 @@ mod tests {
 
     // --- Write-out format expansion ---
 
+    /// Build a `WriteOutVars` for tests with the rarely-varied fields defaulted.
+    fn wov(status_code: u16, total_bytes: u64, url: &str, num_redirects: u32) -> WriteOutVars<'_> {
+        WriteOutVars {
+            status_code,
+            total_bytes,
+            speed: 0.0,
+            elapsed: 0.0,
+            url,
+            content_type: "",
+            num_redirects,
+        }
+    }
+
     #[test]
     fn write_out_http_code() {
-        let result = expand_write_out("%{http_code}", 200, 0, 0.0, 0.0, "", "", 0);
+        let result = expand_write_out("%{http_code}", &wov(200, 0, "", 0));
         assert_eq!(result, "200");
     }
 
     #[test]
     fn write_out_multiple_vars() {
-        let result = expand_write_out(
-            "%{http_code} %{size_download}",
-            404,
-            1234,
-            0.0,
-            0.0,
-            "",
-            "",
-            0,
-        );
+        let result = expand_write_out("%{http_code} %{size_download}", &wov(404, 1234, "", 0));
         assert_eq!(result, "404 1234");
     }
 
     #[test]
     fn write_out_escape_sequences() {
-        let result = expand_write_out("a\\nb\\tc", 200, 0, 0.0, 0.0, "", "", 0);
+        let result = expand_write_out("a\\nb\\tc", &wov(200, 0, "", 0));
         assert_eq!(result, "a\nb\tc");
     }
 
     #[test]
     fn write_out_unknown_var() {
-        let result = expand_write_out("%{unknown}", 200, 0, 0.0, 0.0, "", "", 0);
+        let result = expand_write_out("%{unknown}", &wov(200, 0, "", 0));
         assert_eq!(result, "%{unknown}");
     }
 
     #[test]
     fn write_out_url_effective() {
-        let result = expand_write_out(
-            "%{url_effective}",
-            200,
-            0,
-            0.0,
-            0.0,
-            "http://example.com/",
-            "",
-            0,
-        );
+        let result = expand_write_out("%{url_effective}", &wov(200, 0, "http://example.com/", 0));
         assert_eq!(result, "http://example.com/");
     }
 
     #[test]
     fn write_out_num_redirects() {
-        let result = expand_write_out("%{num_redirects}", 200, 0, 0.0, 0.0, "", "", 3);
+        let result = expand_write_out("%{num_redirects}", &wov(200, 0, "", 3));
         assert_eq!(result, "3");
     }
 

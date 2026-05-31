@@ -36,13 +36,17 @@ use std::time::Instant;
 // Syscall numbers
 // ============================================================================
 
-const SYS_UDP_BIND: u64 = 820;
-const SYS_UDP_SEND: u64 = 821;
-const SYS_UDP_RECV: u64 = 822;
+// Native OurOS syscall numbers (kernel/src/syscall/number.rs). These were
+// previously wrong: the UDP block used 820/821/822 (820 is DNS_RESOLVE, not
+// UDP_BIND), and the TCP block was off by one (802/803/804 collided with
+// TCP_RECV/CLOSE and an unassigned slot). Corrected to the real ABI.
+const SYS_UDP_BIND: u64 = 810;
+const SYS_UDP_SEND: u64 = 811;
+const SYS_UDP_RECV: u64 = 812;
 const SYS_TCP_CONNECT: u64 = 800;
-const SYS_TCP_SEND: u64 = 802;
-const SYS_TCP_RECV: u64 = 803;
-const SYS_TCP_CLOSE: u64 = 804;
+const SYS_TCP_SEND: u64 = 801;
+const SYS_TCP_RECV: u64 = 802;
+const SYS_TCP_CLOSE: u64 = 803;
 // Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
@@ -162,7 +166,8 @@ fn tcp_connect(ip: u32, port: u16) -> Result<u64, DigError> {
 fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), DigError> {
     let mut offset = 0;
     while offset < data.len() {
-        let remaining = &data[offset..];
+        // offset < data.len() is guaranteed by the loop condition.
+        let remaining = data.get(offset..).unwrap_or(&[]);
         // SAFETY: Valid handle and pointer/length.
         let ret = unsafe {
             syscall3(
@@ -370,10 +375,10 @@ fn default_dns_server() -> String {
     if let Ok(contents) = fs::read_to_string("/etc/resolv.conf") {
         for line in contents.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("nameserver") {
-                if let Some(addr) = trimmed.split_whitespace().nth(1) {
-                    return addr.to_string();
-                }
+            if trimmed.starts_with("nameserver")
+                && let Some(addr) = trimmed.split_whitespace().nth(1)
+            {
+                return addr.to_string();
             }
         }
     }
@@ -431,7 +436,7 @@ fn reverse_name_v4(ip_str: &str) -> Result<String, DigError> {
         parts.get(3).copied().unwrap_or("0"),
         parts.get(2).copied().unwrap_or("0"),
         parts.get(1).copied().unwrap_or("0"),
-        parts.get(0).copied().unwrap_or("0"),
+        parts.first().copied().unwrap_or("0"),
     ))
 }
 
@@ -450,7 +455,8 @@ fn encode_domain_name(name: &str, buf: &mut Vec<u8>) {
     for label in name.split('.') {
         let len = label.len().min(63);
         buf.push(len as u8);
-        buf.extend_from_slice(&label.as_bytes()[..len]);
+        // len <= label.len(), so the slice always exists.
+        buf.extend_from_slice(label.as_bytes().get(..len).unwrap_or(&[]));
     }
     buf.push(0);
 }
@@ -953,7 +959,8 @@ fn query_tcp(server_ip: u32, query_pkt: &[u8]) -> Result<Vec<u8>, DigError> {
     let mut len_buf = [0u8; 2];
     let mut len_read = 0;
     while len_read < 2 {
-        match tcp_recv(handle, &mut len_buf[len_read..]) {
+        // len_read < 2 is guaranteed by the loop condition.
+        match tcp_recv(handle, len_buf.get_mut(len_read..).unwrap_or(&mut [])) {
             Ok(0) => {
                 tcp_close(handle);
                 return Err(DigError::Network(
@@ -973,7 +980,8 @@ fn query_tcp(server_ip: u32, query_pkt: &[u8]) -> Result<Vec<u8>, DigError> {
     let mut total_read = 0;
 
     while total_read < resp_len {
-        match tcp_recv(handle, &mut resp_buf[total_read..]) {
+        // total_read < resp_len is guaranteed by the loop condition.
+        match tcp_recv(handle, resp_buf.get_mut(total_read..).unwrap_or(&mut [])) {
             Ok(0) => break,
             Ok(n) => total_read += n,
             Err(e) => {
@@ -1180,13 +1188,13 @@ fn trace_query(args: &DigArgs) -> Result<(), DigError> {
     };
 
     // Query "." NS at root first.
-    if let Some(&(_, root_ip)) = current_servers.first() {
-        if let Ok((resp, elapsed)) = perform_query(root_ip, ".", TYPE_NS, &trace_opts) {
-            println!();
-            print_rr_section("", &resp.answers);
-            let server_str = format_ipv4(root_ip);
-            print_footer(&server_str, elapsed, resp.raw_size);
-        }
+    if let Some(&(_, root_ip)) = current_servers.first()
+        && let Ok((resp, elapsed)) = perform_query(root_ip, ".", TYPE_NS, &trace_opts)
+    {
+        println!();
+        print_rr_section("", &resp.answers);
+        let server_str = format_ipv4(root_ip);
+        print_footer(&server_str, elapsed, resp.raw_size);
     }
 
     loop {
@@ -1230,11 +1238,12 @@ fn trace_query(args: &DigArgs) -> Result<(), DigError> {
                             // Look in the additional section for an A record for this NS.
                             let mut found_ip = None;
                             for add_rec in &resp.additionals {
-                                if add_rec.rtype == TYPE_A && add_rec.name == ns_name {
-                                    if let Some(ip) = parse_ipv4(&add_rec.rdata) {
-                                        found_ip = Some(ip);
-                                        break;
-                                    }
+                                if add_rec.rtype == TYPE_A
+                                    && add_rec.name == ns_name
+                                    && let Some(ip) = parse_ipv4(&add_rec.rdata)
+                                {
+                                    found_ip = Some(ip);
+                                    break;
                                 }
                             }
                             if let Some(ip) = found_ip {
@@ -1358,9 +1367,8 @@ fn parse_args() -> Result<DigArgs, DigError> {
             }
         } else if let Some(srv) = arg.strip_prefix('@') {
             server = Some(srv.to_string());
-        } else if arg.starts_with('+') {
+        } else if let Some(option) = arg.strip_prefix('+') {
             // Parse +option.
-            let option = &arg[1..];
             if option == "short" {
                 opts.short = true;
             } else if option == "tcp" {
@@ -2103,22 +2111,13 @@ mod tests {
         pkt.extend_from_slice(&[0, 4, 93, 184, 216, 34]);
 
         // Authority: NS record.
-        pkt.extend_from_slice(&[0xC0, q_offset as u8]);
+        pkt.extend_from_slice(&[0xC0, q_offset as u8]); // compressed name pointer
         pkt.extend_from_slice(&[0, TYPE_NS as u8, 0, CLASS_IN as u8]);
-        pkt.extend_from_slice(&[0, 0, 14, 16]); // TTL=3600
-        // NS rdata: wire-format "ns1.example.com"
-        let ns_rdata_offset = pkt.len();
-        let ns_rdata_len_pos = pkt.len() - 1; // will fix rdlen
-        // Actually, need to encode RDLENGTH first. Let's compute it.
+        pkt.extend_from_slice(&[0, 0, 14, 16]); // TTL=3600 (full 4 bytes)
+        // NS rdata: wire-format "ns1.example.com", preceded by a 2-byte RDLENGTH.
         let mut ns_name_buf = Vec::new();
         encode_domain_name("ns1.example.com", &mut ns_name_buf);
-        // Overwrite the last two bytes (RDLENGTH) we haven't written yet.
-        // Actually we need to properly set RDLENGTH. Let me rebuild authority correctly.
-        // Remove the incomplete RDLENGTH.
-        let auth_start = pkt.len() - 2;
-        pkt.truncate(auth_start);
-        pkt.push(0);
-        pkt.push(ns_name_buf.len() as u8);
+        pkt.extend_from_slice(&[0, ns_name_buf.len() as u8]); // RDLENGTH
         pkt.extend_from_slice(&ns_name_buf);
 
         // Additional: A record for ns1.example.com.

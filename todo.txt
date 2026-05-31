@@ -263,6 +263,35 @@
 ##           and SHA-256 K[63] was 0xc67fc082 not 0xc67178f2.  Also fixed a
 ##           bogus SHA-256("abc") test vector and brought the crate clippy-clean.
 ##           All 40 host tests pass.
+##   [x] curl — off-by-one TCP consts fixed (SEND/RECV/CLOSE were 802/803/804,
+##           now 801/802/803; CONNECT=800, DNS_RESOLVE=820 already correct).
+##           Bringing clippy/tests up exposed a REAL shipped bug: dns_resolve()
+##           read the kernel's 4 raw DNS octets as a native-endian u32, which
+##           byte-reverses the address on little-endian x86_64 -> connected to
+##           the wrong host.  Fixed: read into [u8;4] and u32::from_be_bytes
+##           (matches kernel sys_tcp_connect's from_u32 = to_be_bytes).  Also
+##           fixed test ip_format_loopback (had a spurious .to_be() masking the
+##           bug) + clippy-clean (WriteOutVars struct, div_ceil, let-chains).
+##           96 host tests pass.
+##   [x] dig — UDP/TCP const fixes: UDP_BIND/SEND/RECV were 820/821/822 (820
+##           collided with DNS_RESOLVE!), now 810/811/812; TCP CONNECT/SEND/
+##           RECV/CLOSE now 800/801/802/803.  Fixed a malformed authority NS
+##           record in a parse-response test (truncated TTL) + clippy-clean
+##           (let-chains, .get() bounds).  60 host tests pass.
+##   [x] whois — off-by-one TCP consts fixed (SEND/RECV/CLOSE 802/803/804 ->
+##           801/802/803).  Same DNS byte-order bug as curl, fixed the same
+##           way ([u8;4] + from_be_bytes).  Clippy-clean (removed a duplicate
+##           unreachable match arm I briefly introduced, let-chains, map_or,
+##           allow(match_same_arms) on the TLD lookup table).  35 host tests pass.
+##
+##  BUG — DNS byte-order (REAL, was shipped in curl + whois; FIXED above):
+##   Both read the 4 octets the kernel writes for a resolved A record as a
+##   native-endian u32.  On little-endian x86_64 that reverses the address, so
+##   e.g. 93.184.216.34 became 34.216.184.93 and the subsequent TCP_CONNECT
+##   dialed the wrong IP.  dig was unaffected (it builds its own DNS packets
+##   over UDP and never used DNS_RESOLVE).  Correct convention: kernel
+##   sys_dns_resolve writes [a,b,c,d]; sys_tcp_connect's Ipv4Addr::from_u32 ==
+##   to_be_bytes, so reassemble with u32::from_be_bytes.
 ##
 ##  BUG — jq filter logic (PRE-EXISTING, unrelated to the ABI fix):
 ##   userspace/jq/src/main.rs has two failing tests that are genuine

@@ -19,6 +19,13 @@
 #![allow(clippy::manual_range_contains)] // explicit comparisons are clearer
 #![allow(clippy::missing_errors_doc)] // internal helpers
 #![allow(clippy::missing_panics_doc)] // no panics in prod code
+#![allow(clippy::doc_markdown)] // "OurOS", "WHOIS", "IPv4" etc. are not code
+// Syscall-ABI casts: syscall numbers are small compile-time constants
+// (`nr as i64`), and i64 return values are cast to u64/usize only after an
+// explicit `ret < 0` check, so neither wraps nor loses meaningful bits.
+#![allow(clippy::cast_possible_wrap)]
+#![allow(clippy::cast_sign_loss)]
+#![allow(clippy::cast_possible_truncation)]
 // The indexing_slicing, unwrap_used, expect_used, arithmetic_side_effects, and
 // panic lints are enabled as warnings so they alert without blocking `cargo test`
 // (test code legitimately uses indexing and unwrap).
@@ -38,10 +45,13 @@ use std::process;
 // Syscall numbers
 // ============================================================================
 
+// Native OurOS syscall numbers (kernel/src/syscall/number.rs). These were
+// previously off by one (802/803/804), colliding with TCP_RECV/CLOSE and an
+// unassigned slot — every send/recv/close hit the wrong syscall.
 const SYS_TCP_CONNECT: u64 = 800;
-const SYS_TCP_SEND: u64 = 802;
-const SYS_TCP_RECV: u64 = 803;
-const SYS_TCP_CLOSE: u64 = 804;
+const SYS_TCP_SEND: u64 = 801;
+const SYS_TCP_RECV: u64 = 802;
+const SYS_TCP_CLOSE: u64 = 803;
 const SYS_DNS_RESOLVE: u64 = 820;
 
 // ============================================================================
@@ -130,22 +140,28 @@ unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
 ///
 /// Returns the address as a `u32` in **network byte order** on success.
 fn dns_resolve(hostname: &str) -> Result<u32, WhoisError> {
-    let mut result_ip: u32 = 0;
+    // The kernel writes the resolved address as four raw octets [a, b, c, d].
+    // Reassemble with `from_be_bytes` so the u32 is MSB-first, matching the
+    // kernel's `Ipv4Addr::from_u32` (`to_be_bytes`) used by TCP_CONNECT.
+    // Reading the bytes directly as a native-endian u32 byte-swaps the address
+    // on little-endian hosts and connects to the wrong IP.
+    let mut octets = [0u8; 4];
     // SAFETY: We pass a valid UTF-8 byte slice pointer and its length, plus a
-    // mutable pointer to a u32 for the kernel to write the resolved address into.
-    // The kernel reads exactly `hostname.len()` bytes and writes exactly 4 bytes.
+    // mutable pointer to a 4-byte buffer for the kernel to write the resolved
+    // octets into. The kernel reads exactly `hostname.len()` bytes and writes
+    // exactly 4 bytes.
     let ret = unsafe {
         syscall3(
             SYS_DNS_RESOLVE,
             hostname.as_ptr() as u64,
             hostname.len() as u64,
-            core::ptr::addr_of_mut!(result_ip) as u64,
+            octets.as_mut_ptr() as u64,
         )
     };
     if ret < 0 {
         return Err(WhoisError::DnsFailure(hostname.to_string()));
     }
-    Ok(result_ip)
+    Ok(u32::from_be_bytes(octets))
 }
 
 /// Open a TCP connection to `ip` (network byte order) on `port`.
@@ -282,11 +298,11 @@ fn detect_query_kind(query: &str) -> QueryKind {
     // ASN: starts with "AS" (case-insensitive) followed by digits,
     // or is a plain all-digit string between 1 and 10 digits (ASN range).
     let upper = query.to_ascii_uppercase();
-    if upper.starts_with("AS") {
-        let suffix = &upper[2..];
-        if !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit()) {
-            return QueryKind::Asn;
-        }
+    if let Some(suffix) = upper.strip_prefix("AS")
+        && !suffix.is_empty()
+        && suffix.chars().all(|c| c.is_ascii_digit())
+    {
+        return QueryKind::Asn;
     }
     // Pure digits that could plausibly be a bare ASN (1–10 decimal digits,
     // value ≤ 4294967295).  We cap at 10 to avoid misclassifying long numbers.
@@ -355,10 +371,10 @@ fn server_for_domain(domain: &str) -> &'static str {
         }
     };
 
-    if let Some(ref two) = two_labels {
-        if let Some(srv) = lookup_two_label_tld(two) {
-            return srv;
-        }
+    if let Some(ref two) = two_labels
+        && let Some(srv) = lookup_two_label_tld(two)
+    {
+        return srv;
     }
 
     lookup_tld(&tld)
@@ -376,14 +392,18 @@ fn lookup_two_label_tld(two: &str) -> Option<&'static str> {
 }
 
 /// Look up a WHOIS server for a single-label TLD.
+//
+// This is a readability-first lookup table: one TLD per arm keeps it easy to
+// scan and maintain even when several TLDs share the same WHOIS server.
+// `match_same_arms` would push us to merge unrelated TLDs onto shared arms,
+// which hurts readability for no real benefit, so it is allowed here.
+#[allow(clippy::match_same_arms)]
 fn lookup_tld(tld: &str) -> &'static str {
     match tld {
         "com" | "net" => "whois.verisign-grs.com",
         "org" => "whois.pir.org",
         "io" => "whois.nic.io",
-        "dev" => "whois.nic.google",
-        "app" => "whois.nic.google",
-        "page" => "whois.nic.google",
+        "dev" | "app" | "page" => "whois.nic.google",
         "info" => "whois.afilias.net",
         "us" => "whois.nic.us",
         "uk" => "whois.nic.uk",
@@ -413,16 +433,14 @@ fn lookup_tld(tld: &str) -> &'static str {
         "tv" => "whois.nic.tv",
         "cc" => "whois.nic.cc",
         "biz" => "whois.biz",
-        "mobi" => "whois.afilias.net",
+        "mobi" | "pro" => "whois.afilias.net",
         "name" => "whois.nic.name",
-        "pro" => "whois.afilias.net",
         "museum" => "whois.museum",
         "travel" => "whois.nic.travel",
         "edu" => "whois.educause.edu",
         "gov" => "whois.dotgov.gov",
         "mil" => "whois.nic.mil",
-        "int" => "whois.iana.org",
-        "arpa" => "whois.iana.org",
+        // "int" and "arpa" are managed by IANA, same as the default.
         _ => "whois.iana.org",
     }
 }
@@ -592,15 +610,15 @@ fn lookup(query: &str, opts: &LookupOptions<'_>) -> Result<Vec<(String, String)>
         results.push((server_name, response.clone()));
 
         // Follow referral if enabled and we haven't reached the depth limit.
-        if opts.follow_referral && depth < max_referrals {
-            if let Some(referral) = parse_referral(&response) {
-                // Do not re-query the same server (avoids trivial loops).
-                if referral != current_server {
-                    current_server = referral;
-                    depth = depth.saturating_add(1);
-                    continue;
-                }
-            }
+        if opts.follow_referral
+            && depth < max_referrals
+            && let Some(referral) = parse_referral(&response)
+            // Do not re-query the same server (avoids trivial loops).
+            && referral != current_server
+        {
+            current_server = referral;
+            depth = depth.saturating_add(1);
+            continue;
         }
 
         break;
@@ -654,7 +672,7 @@ fn parse_args() -> Result<Args, WhoisError> {
 
     let mut i = 1usize;
     while i < argv.len() {
-        let arg = argv.get(i).map(String::as_str).unwrap_or("");
+        let arg = argv.get(i).map_or("", String::as_str);
 
         match arg {
             "-h" | "--host" => {

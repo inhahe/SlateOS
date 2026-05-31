@@ -1,3 +1,26 @@
+## BUG (noticed+FIXED 2026-05-31): apps/diskimager HashState::finalize() produced
+##   colliding digests for short inputs. update() distributes input bytes across 8
+##   state words by idx%8, but finalize() emitted the raw words then truncated to
+##   the digest length, discarding words 4-7 for SHA-256 (and 2-3 for MD5). Two
+##   short inputs differing only in a byte that mapped to a discarded word (e.g.
+##   "data A" vs "data B" — differ at index 5 → word 5) yielded identical digests
+##   (caught by test_hash_different_data_different_hash). Rewrote finalize() to
+##   fold the ENTIRE internal state plus bytes_processed into every output word
+##   (rotate/xor/multiply mix), so each input byte influences the final digest
+##   regardless of slot. NOTE: HashState is still a non-cryptographic placeholder
+##   ("would use a proper crypto implementation" per its own comment) — it must be
+##   replaced with real MD5/SHA-1/SHA-256 before image verification is trusted.
+##   diskimager 112/112 tests pass. (Also: nearby FAT dir-name handling at
+##   main.rs:584 uses String::from_utf8_lossy — violates the bytes-not-UTF8 rule;
+##   left as-is for now since it's display-only, but should become OsStr/bytes.)
+##
+## BUG (noticed+FIXED 2026-05-31): apps/videoplayer PlaybackSpeed::label() emitted
+##   "2.00xx" instead of "2x". It formatted with format!("{:.2}x", v) — embedding
+##   the "x" suffix BEFORE trimming trailing zeros — so trim_end_matches('0'/'.')
+##   found no trailing zeros (string ended in 'x'), then a second "x" was appended.
+##   Fixed by formatting the number alone ("{:.2}"), trimming, then appending "x".
+##   videoplayer 93/93 tests pass.
+##
 ## BUG (noticed+FIXED 2026-05-31): gui/toolkit Color::over() integer overflow.
 ##   color.rs alpha-compositing computed `channel as u16 * da * inv_sa` which
 ##   peaks at 255*255*255 ≈ 16.6M and overflowed u16 → debug panic (caught by

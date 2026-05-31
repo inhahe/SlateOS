@@ -1954,10 +1954,16 @@ version = "0.1.0"
 [[package]]
 name = "cryptsetup"
 version = "0.1.0"
+dependencies = [
+ "embed-manifest",
+]
 
 [[package]]
 name = "cryptsetup-cli"
 version = "0.1.0"
+dependencies = [
+ "embed-manifest",
+]
 
 [[package]]
 name = "crystal-cli"
@@ -2381,6 +2387,9 @@ version = "0.1.0"
 [[package]]
 name = "dmsetup"
 version = "0.1.0"
+dependencies = [
+ "embed-manifest",
+]
 
 [[package]]
 name = "dns"
@@ -2741,6 +2750,12 @@ version = "0.1.0"
 dependencies = [
  "guitk",
 ]
+
+[[package]]
+name = "embed-manifest"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "94cdc65b1cf9e871453ce2f86f5aaec24ff2eaa36a1fa3e02e441dddc3613b99"
 
 [[package]]
 name = "embree-cli"
@@ -4519,10 +4534,16 @@ version = "0.1.0"
 [[package]]
 name = "install"
 version = "0.1.0"
+dependencies = [
+ "embed-manifest",
+]
 
 [[package]]
 name = "installer"
 version = "0.1.0"
+dependencies = [
+ "embed-manifest",
+]
 
 [[package]]
 name = "instana-cli"
@@ -5576,6 +5597,9 @@ version = "0.1.0"
 [[package]]
 name = "losetup"
 version = "0.1.0"
+dependencies = [
+ "embed-manifest",
+]
 
 [[package]]
 name = "lottie-player"
@@ -10864,10 +10888,16 @@ version = "0.1.0"
 [[package]]
 name = "update-alternatives"
 version = "0.1.0"
+dependencies = [
+ "embed-manifest",
+]
 
 [[package]]
 name = "updatedb"
 version = "0.1.0"
+dependencies = [
+ "embed-manifest",
+]
 
 [[package]]
 name = "upower"

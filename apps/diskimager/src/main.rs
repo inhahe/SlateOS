@@ -101,16 +101,12 @@ impl ImageFormat {
     pub fn from_magic(bytes: &[u8]) -> Self {
         // ISO 9660: "CD001" signature at offset 0x8001
         // Check at sector-aligned offset for ISO primary volume descriptor
-        if bytes.len() >= 0x8006 {
-            if bytes.get(0x8001..0x8006) == Some(b"CD001") {
-                return Self::Iso9660;
-            }
+        if bytes.len() >= 0x8006 && bytes.get(0x8001..0x8006) == Some(b"CD001") {
+            return Self::Iso9660;
         }
         // Gzip magic: 1F 8B
-        if bytes.len() >= 2 {
-            if bytes.get(0) == Some(&0x1F) && bytes.get(1) == Some(&0x8B) {
-                return Self::GzipCompressed;
-            }
+        if bytes.len() >= 2 && bytes.first() == Some(&0x1F) && bytes.get(1) == Some(&0x8B) {
+            return Self::GzipCompressed;
         }
         // If file has content but no recognizable signature, treat as raw
         if !bytes.is_empty() {
@@ -199,17 +195,13 @@ pub struct HashState {
 impl HashState {
     pub fn new(algorithm: HashAlgorithm) -> Self {
         let state = match algorithm {
-            HashAlgorithm::Md5 => [
-                0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476,
-                0, 0, 0, 0,
-            ],
+            HashAlgorithm::Md5 => [0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0, 0, 0, 0],
             HashAlgorithm::Sha1 => [
-                0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476,
-                0xc3d2e1f0, 0, 0, 0,
+                0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0, 0, 0, 0,
             ],
             HashAlgorithm::Sha256 => [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
             ],
         };
         Self {
@@ -239,20 +231,32 @@ impl HashState {
     /// Finalize and produce the hex digest string.
     pub fn finalize(&mut self) -> String {
         self.finalized = true;
-        let num_words = match self.algorithm {
-            HashAlgorithm::Md5 => 4_usize,
-            HashAlgorithm::Sha1 => 5_usize,
-            HashAlgorithm::Sha256 => 8_usize,
-        };
-        let mut result = String::with_capacity(num_words.saturating_mul(16));
-        for idx in 0..num_words {
-            if let Some(&val) = self.state.get(idx) {
-                use std::fmt::Write;
-                let _ = write!(result, "{:016x}", val);
-            }
-        }
-        // Truncate to expected hex length
         let expected_len = self.algorithm.digest_hex_len();
+        // One u64 renders as 16 hex chars; round up so we always cover the
+        // requested length before the final truncation.
+        let num_words = expected_len.div_ceil(16);
+
+        // Fold the ENTIRE internal state (all 8 words) plus the processed
+        // length into each output word, so every input byte influences the
+        // final digest regardless of which slot it landed in. The previous
+        // implementation emitted the raw state words and then truncated to the
+        // digest length, which discarded the upper words entirely (words 4-7
+        // for SHA-256). Two short inputs differing only in a byte that mapped
+        // to a discarded word produced identical digests — a real collision.
+        let mut result = String::with_capacity(num_words.saturating_mul(16));
+        use std::fmt::Write;
+        for word_idx in 0..num_words {
+            let mut acc = self
+                .bytes_processed
+                .wrapping_mul(0x9e37_79b9_7f4a_7c15)
+                .wrapping_add(word_idx as u64);
+            for &word in self.state.iter() {
+                acc = acc.rotate_left(7) ^ word.wrapping_mul(0x0000_0100_0000_01b3);
+                acc = acc.wrapping_mul(0xff51_afd7_ed55_8ccd);
+            }
+            let _ = write!(result, "{acc:016x}");
+        }
+        // Truncate to expected hex length.
         if result.len() > expected_len {
             result.truncate(expected_len);
         }
@@ -418,7 +422,7 @@ impl IsoVolumeDescriptor {
             return None;
         }
         // Type must be 1 (primary volume descriptor)
-        if data.get(0) != Some(&1) {
+        if data.first() != Some(&1) {
             return None;
         }
 
@@ -569,10 +573,7 @@ pub fn parse_iso_directory(data: &[u8], depth: u32) -> Vec<IsoEntry> {
         };
 
         // Skip "." and ".." entries
-        let skip = match raw_name {
-            [0x00] | [0x01] => true,
-            _ => false,
-        };
+        let skip = matches!(raw_name, [0x00] | [0x01]);
 
         if !skip && !raw_name.is_empty() {
             let name = String::from_utf8_lossy(raw_name)
@@ -597,7 +598,8 @@ pub fn parse_iso_directory(data: &[u8], depth: u32) -> Vec<IsoEntry> {
 
     // Sort: directories first, then alphabetical
     entries.sort_by(|a, b| {
-        b.is_directory.cmp(&a.is_directory)
+        b.is_directory
+            .cmp(&a.is_directory)
             .then_with(|| a.name.to_lowercase().cmp(&b.name.to_lowercase()))
     });
 
@@ -660,15 +662,12 @@ impl BootType {
 
 /// Detect boot type from image data.
 pub fn detect_boot_type(data: &[u8]) -> BootType {
-    let has_mbr = data.len() >= 512
-        && data.get(510) == Some(&0x55)
-        && data.get(511) == Some(&0xAA);
+    let has_mbr = data.len() >= 512 && data.get(510) == Some(&0x55) && data.get(511) == Some(&0xAA);
 
     // Check for El Torito boot catalog (ISO boot)
     let has_el_torito = if data.len() >= 0x8806 {
         // Boot record volume descriptor at sector 17
-        data.get(0x8801..0x8806) == Some(b"CD001")
-            && data.get(0x8800) == Some(&0)
+        data.get(0x8801..0x8806) == Some(b"CD001") && data.get(0x8800) == Some(&0)
     } else {
         false
     };
@@ -769,8 +768,7 @@ impl OperationProgress {
         self.bytes_done = self.bytes_done.saturating_add(bytes);
         self.elapsed_ms = elapsed_ms;
         if self.elapsed_ms > 0 {
-            self.speed_bytes_per_sec =
-                (self.bytes_done as f64) / (self.elapsed_ms as f64 / 1000.0);
+            self.speed_bytes_per_sec = (self.bytes_done as f64) / (self.elapsed_ms as f64 / 1000.0);
         }
         if self.speed_bytes_per_sec > 0.0 {
             let remaining = self.bytes_total.saturating_sub(self.bytes_done);
@@ -841,6 +839,12 @@ pub struct ConfirmDialog {
     pub hover_cancel: bool,
 }
 
+impl Default for ConfirmDialog {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ConfirmDialog {
     pub fn new() -> Self {
         Self {
@@ -861,10 +865,7 @@ impl ConfirmDialog {
         self.confirmed = false;
         self.cancelled = false;
         self.title = "Confirm Write".to_string();
-        self.message = format!(
-            "Write '{}' to '{}'?",
-            image_name, drive_name
-        );
+        self.message = format!("Write '{}' to '{}'?", image_name, drive_name);
         self.detail = format!(
             "WARNING: All data on {} ({}) will be permanently destroyed. \
              This operation cannot be undone.",
@@ -1026,6 +1027,12 @@ pub struct DiskImagerApp {
     pub tick_count: u64,
 }
 
+impl Default for DiskImagerApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DiskImagerApp {
     pub fn new() -> Self {
         let drives = Self::detect_drives();
@@ -1104,16 +1111,14 @@ impl DiskImagerApp {
                 size_bytes: 31_457_280_000,
                 drive_type: DriveType::Usb,
                 partition_table: PartitionTable::Mbr,
-                partitions: vec![
-                    Partition {
-                        index: 1,
-                        label: "USBDRIVE".to_string(),
-                        filesystem: "FAT32".to_string(),
-                        offset_bytes: 1_048_576,
-                        size_bytes: 31_456_231_424,
-                        is_boot: false,
-                    },
-                ],
+                partitions: vec![Partition {
+                    index: 1,
+                    label: "USBDRIVE".to_string(),
+                    filesystem: "FAT32".to_string(),
+                    offset_bytes: 1_048_576,
+                    size_bytes: 31_456_231_424,
+                    is_boot: false,
+                }],
                 is_system_drive: false,
                 is_removable: true,
                 is_readonly: false,
@@ -1154,9 +1159,7 @@ impl DiskImagerApp {
 
         // Parse ISO volume if applicable
         if format == ImageFormat::Iso9660 && data.len() >= 0x8800 {
-            if let Some(vol) = IsoVolumeDescriptor::parse(
-                data.get(0x8000..0x8800).unwrap_or(&[])
-            ) {
+            if let Some(vol) = IsoVolumeDescriptor::parse(data.get(0x8000..0x8800).unwrap_or(&[])) {
                 info.volume_label = vol.volume_id.clone();
                 info.filesystem_type = "ISO 9660".to_string();
                 info.creation_date = vol.creation_date.clone();
@@ -1166,7 +1169,8 @@ impl DiskImagerApp {
                 let root_lba = vol.root_directory_lba as usize;
                 let root_size = vol.root_directory_size as usize;
                 let block_size = vol.logical_block_size as usize;
-                let root_offset = root_lba.saturating_mul(if block_size > 0 { block_size } else { 2048 });
+                let root_offset =
+                    root_lba.saturating_mul(if block_size > 0 { block_size } else { 2048 });
                 let root_end = root_offset.saturating_add(root_size);
 
                 if root_end <= data.len() {
@@ -1218,20 +1222,29 @@ impl DiskImagerApp {
 
     /// Start writing the loaded image to the selected drive.
     pub fn start_write(&mut self) -> Result<(), String> {
-        let image = self.loaded_image.as_ref()
+        let image = self
+            .loaded_image
+            .as_ref()
             .ok_or_else(|| "No image loaded".to_string())?;
 
-        let drive_idx = self.selected_drive_index
+        let drive_idx = self
+            .selected_drive_index
             .ok_or_else(|| "No drive selected".to_string())?;
 
-        let drive = self.drives.get(drive_idx)
+        let drive = self
+            .drives
+            .get(drive_idx)
             .ok_or_else(|| "Invalid drive index".to_string())?;
 
         if drive.write_blocked() {
             return Err(format!(
                 "Cannot write to '{}': {}",
                 drive.name,
-                if drive.is_system_drive { "system drive" } else { "read-only" }
+                if drive.is_system_drive {
+                    "system drive"
+                } else {
+                    "read-only"
+                }
             ));
         }
 
@@ -1255,10 +1268,13 @@ impl DiskImagerApp {
 
     /// Start creating an image from the selected drive.
     pub fn start_create(&mut self, output_path: &str) -> Result<(), String> {
-        let drive_idx = self.selected_drive_index
+        let drive_idx = self
+            .selected_drive_index
             .ok_or_else(|| "No drive selected".to_string())?;
 
-        let drive = self.drives.get(drive_idx)
+        let drive = self
+            .drives
+            .get(drive_idx)
             .ok_or_else(|| "Invalid drive index".to_string())?;
 
         self.create_options.source_drive_id = drive.id.clone();
@@ -1273,7 +1289,9 @@ impl DiskImagerApp {
 
     /// Start byte-by-byte verification after write.
     pub fn start_verify_write(&mut self) -> Result<(), String> {
-        let image = self.loaded_image.as_ref()
+        let image = self
+            .loaded_image
+            .as_ref()
             .ok_or_else(|| "No image loaded".to_string())?;
         self.operation = Operation::VerifyingWrite;
         self.progress = OperationProgress::new(image.file_size);
@@ -1284,7 +1302,9 @@ impl DiskImagerApp {
 
     /// Start computing a hash of the loaded image.
     pub fn start_hash(&mut self) -> Result<(), String> {
-        let image = self.loaded_image.as_ref()
+        let image = self
+            .loaded_image
+            .as_ref()
             .ok_or_else(|| "No image loaded".to_string())?;
         self.hash_state = Some(HashState::new(self.hash_algorithm));
         self.computed_hash = None;
@@ -1316,10 +1336,9 @@ impl DiskImagerApp {
                 "Write complete".to_string()
             }
             Operation::VerifyingWrite => "Write verified successfully".to_string(),
-            Operation::CreatingImage => format!(
-                "Image created: {}",
-                self.create_options.output_path
-            ),
+            Operation::CreatingImage => {
+                format!("Image created: {}", self.create_options.output_path)
+            }
             Operation::ComputingHash => {
                 if let Some(state) = self.hash_state.as_mut() {
                     let hash = state.finalize();
@@ -1387,12 +1406,8 @@ impl DiskImagerApp {
                 }
                 EventResult::Consumed
             }
-            Event::Key(key_ev) if key_ev.pressed => {
-                self.handle_key(key_ev)
-            }
-            Event::Mouse(mouse_ev) => {
-                self.handle_mouse(mouse_ev)
-            }
+            Event::Key(key_ev) if key_ev.pressed => self.handle_key(key_ev),
+            Event::Mouse(mouse_ev) => self.handle_mouse(mouse_ev),
             _ => EventResult::Ignored,
         }
     }
@@ -1422,10 +1437,22 @@ impl DiskImagerApp {
         // Tab switching
         if key.modifiers.ctrl {
             match key.key {
-                Key::Num1 => { self.active_tab = MainTab::Write; return EventResult::Consumed; }
-                Key::Num2 => { self.active_tab = MainTab::Create; return EventResult::Consumed; }
-                Key::Num3 => { self.active_tab = MainTab::Browse; return EventResult::Consumed; }
-                Key::Num4 => { self.active_tab = MainTab::Verify; return EventResult::Consumed; }
+                Key::Num1 => {
+                    self.active_tab = MainTab::Write;
+                    return EventResult::Consumed;
+                }
+                Key::Num2 => {
+                    self.active_tab = MainTab::Create;
+                    return EventResult::Consumed;
+                }
+                Key::Num3 => {
+                    self.active_tab = MainTab::Browse;
+                    return EventResult::Consumed;
+                }
+                Key::Num4 => {
+                    self.active_tab = MainTab::Verify;
+                    return EventResult::Consumed;
+                }
                 _ => {}
             }
         }
@@ -1475,7 +1502,7 @@ impl DiskImagerApp {
                 }
 
                 // Tab bar clicks
-                if my >= TOOLBAR_HEIGHT && my < TOOLBAR_HEIGHT + ROW_HEIGHT + 8.0 {
+                if (TOOLBAR_HEIGHT..TOOLBAR_HEIGHT + ROW_HEIGHT + 8.0).contains(&my) {
                     return self.handle_tab_click(mx);
                 }
 
@@ -1562,7 +1589,13 @@ impl DiskImagerApp {
 
     pub fn render(&self, rt: &mut RenderTree) {
         // Background
-        rt.fill_rect(0.0, 0.0, self.window_width, self.window_height, colors::BASE);
+        rt.fill_rect(
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
+            colors::BASE,
+        );
 
         // Toolbar
         self.render_toolbar(rt);
@@ -1600,8 +1633,12 @@ impl DiskImagerApp {
     fn render_toolbar(&self, rt: &mut RenderTree) {
         // Toolbar background
         rt.fill_rounded_rect(
-            0.0, 0.0, self.window_width, TOOLBAR_HEIGHT,
-            colors::MANTLE, CornerRadii::ZERO,
+            0.0,
+            0.0,
+            self.window_width,
+            TOOLBAR_HEIGHT,
+            colors::MANTLE,
+            CornerRadii::ZERO,
         );
 
         // App title
@@ -1619,8 +1656,12 @@ impl DiskImagerApp {
         let refresh_x = self.window_width - 140.0;
         let btn_y = (TOOLBAR_HEIGHT - BUTTON_HEIGHT) / 2.0;
         rt.fill_rounded_rect(
-            refresh_x, btn_y, 128.0, BUTTON_HEIGHT,
-            colors::SURFACE0, CornerRadii::all(4.0),
+            refresh_x,
+            btn_y,
+            128.0,
+            BUTTON_HEIGHT,
+            colors::SURFACE0,
+            CornerRadii::all(4.0),
         );
         rt.push(RenderCommand::Text {
             x: refresh_x + 12.0,
@@ -1642,11 +1683,22 @@ impl DiskImagerApp {
             let tab_x = PANEL_PADDING + (idx as f32) * tab_width;
             let is_active = self.active_tab == *tab;
 
-            let bg = if is_active { colors::BASE } else { colors::CRUST };
-            let fg = if is_active { colors::BLUE } else { colors::SUBTEXT0 };
+            let bg = if is_active {
+                colors::BASE
+            } else {
+                colors::CRUST
+            };
+            let fg = if is_active {
+                colors::BLUE
+            } else {
+                colors::SUBTEXT0
+            };
 
             rt.fill_rounded_rect(
-                tab_x, y + 4.0, tab_width - 4.0, ROW_HEIGHT,
+                tab_x,
+                y + 4.0,
+                tab_width - 4.0,
+                ROW_HEIGHT,
                 bg,
                 CornerRadii {
                     top_left: CORNER_RADIUS,
@@ -1662,13 +1714,23 @@ impl DiskImagerApp {
                 text: tab.label().to_string(),
                 color: fg,
                 font_size: UI_FONT_SIZE,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_width - 24.0),
             });
 
             // Active tab indicator
             if is_active {
-                rt.fill_rect(tab_x, y + ROW_HEIGHT + 2.0, tab_width - 4.0, 2.0, colors::BLUE);
+                rt.fill_rect(
+                    tab_x,
+                    y + ROW_HEIGHT + 2.0,
+                    tab_width - 4.0,
+                    2.0,
+                    colors::BLUE,
+                );
             }
         }
     }
@@ -1727,8 +1789,12 @@ impl DiskImagerApp {
                 colors::MANTLE
             };
             rt.fill_rounded_rect(
-                x + 4.0, ey, width - 8.0, entry_height - 4.0,
-                bg, CornerRadii::all(4.0),
+                x + 4.0,
+                ey,
+                width - 8.0,
+                entry_height - 4.0,
+                bg,
+                CornerRadii::all(4.0),
             );
 
             // Selection indicator
@@ -1844,8 +1910,12 @@ impl DiskImagerApp {
             cy += 100.0;
         } else {
             rt.fill_rounded_rect(
-                px, cy, width - PANEL_PADDING * 2.0, 60.0,
-                colors::SURFACE0, CornerRadii::all(CORNER_RADIUS),
+                px,
+                cy,
+                width - PANEL_PADDING * 2.0,
+                60.0,
+                colors::SURFACE0,
+                CornerRadii::all(CORNER_RADIUS),
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
@@ -1876,8 +1946,12 @@ impl DiskImagerApp {
             cy += 72.0;
         } else {
             rt.fill_rounded_rect(
-                px, cy, width - PANEL_PADDING * 2.0, 40.0,
-                colors::SURFACE0, CornerRadii::all(CORNER_RADIUS),
+                px,
+                cy,
+                width - PANEL_PADDING * 2.0,
+                40.0,
+                colors::SURFACE0,
+                CornerRadii::all(CORNER_RADIUS),
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
@@ -1910,10 +1984,7 @@ impl DiskImagerApp {
         } else {
             colors::SURFACE1
         };
-        rt.fill_rounded_rect(
-            px, cy, 18.0, 18.0,
-            check_color, CornerRadii::all(3.0),
-        );
+        rt.fill_rounded_rect(px, cy, 18.0, 18.0, check_color, CornerRadii::all(3.0));
         if self.write_options.verify_after_write {
             rt.push(RenderCommand::Text {
                 x: px + 3.0,
@@ -1953,17 +2024,29 @@ impl DiskImagerApp {
             && self.selected_drive_index.is_some()
             && !self.operation.is_active();
 
-        let btn_color = if can_write { colors::BLUE } else { colors::SURFACE1 };
+        let btn_color = if can_write {
+            colors::BLUE
+        } else {
+            colors::SURFACE1
+        };
         let btn_w = 160.0_f32;
         rt.fill_rounded_rect(
-            px, cy, btn_w, BUTTON_HEIGHT,
-            btn_color, CornerRadii::all(CORNER_RADIUS),
+            px,
+            cy,
+            btn_w,
+            BUTTON_HEIGHT,
+            btn_color,
+            CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::Text {
             x: px + (btn_w - 80.0) / 2.0,
             y: cy + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
             text: "Write Image".to_string(),
-            color: if can_write { colors::CRUST } else { colors::OVERLAY0 },
+            color: if can_write {
+                colors::CRUST
+            } else {
+                colors::OVERLAY0
+            },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2051,8 +2134,12 @@ impl DiskImagerApp {
             cy += 72.0;
         } else {
             rt.fill_rounded_rect(
-                px, cy, width - PANEL_PADDING * 2.0, 40.0,
-                colors::SURFACE0, CornerRadii::all(CORNER_RADIUS),
+                px,
+                cy,
+                width - PANEL_PADDING * 2.0,
+                40.0,
+                colors::SURFACE0,
+                CornerRadii::all(CORNER_RADIUS),
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
@@ -2085,10 +2172,7 @@ impl DiskImagerApp {
         } else {
             colors::SURFACE1
         };
-        rt.fill_rounded_rect(
-            px, cy, 18.0, 18.0,
-            compress_color, CornerRadii::all(3.0),
-        );
+        rt.fill_rounded_rect(px, cy, 18.0, 18.0, compress_color, CornerRadii::all(3.0));
         if self.create_options.compress {
             rt.push(RenderCommand::Text {
                 x: px + 3.0,
@@ -2141,17 +2225,29 @@ impl DiskImagerApp {
 
         // Create button
         let can_create = self.selected_drive_index.is_some() && !self.operation.is_active();
-        let btn_color = if can_create { colors::GREEN } else { colors::SURFACE1 };
+        let btn_color = if can_create {
+            colors::GREEN
+        } else {
+            colors::SURFACE1
+        };
         let btn_w = 160.0_f32;
         rt.fill_rounded_rect(
-            px, cy, btn_w, BUTTON_HEIGHT,
-            btn_color, CornerRadii::all(CORNER_RADIUS),
+            px,
+            cy,
+            btn_w,
+            BUTTON_HEIGHT,
+            btn_color,
+            CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::Text {
             x: px + (btn_w - 90.0) / 2.0,
             y: cy + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
             text: "Create Image".to_string(),
-            color: if can_create { colors::CRUST } else { colors::OVERLAY0 },
+            color: if can_create {
+                colors::CRUST
+            } else {
+                colors::OVERLAY0
+            },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2201,7 +2297,9 @@ impl DiskImagerApp {
                 y: cy,
                 text: format!(
                     "{} files, {} directories, {} total",
-                    files, dirs, format_bytes(total),
+                    files,
+                    dirs,
+                    format_bytes(total),
                 ),
                 color: colors::SUBTEXT0,
                 font_size: SMALL_FONT_SIZE,
@@ -2232,10 +2330,7 @@ impl DiskImagerApp {
                 let is_selected = self.selected_iso_entry == Some(idx);
 
                 if is_selected {
-                    rt.fill_rect(
-                        px, ey, width - PANEL_PADDING * 2.0, row_h,
-                        colors::SURFACE0,
-                    );
+                    rt.fill_rect(px, ey, width - PANEL_PADDING * 2.0, row_h, colors::SURFACE0);
                 }
 
                 // Expand/collapse indicator
@@ -2299,8 +2394,12 @@ impl DiskImagerApp {
             rt.push(RenderCommand::PopClip);
         } else {
             rt.fill_rounded_rect(
-                px, cy, width - PANEL_PADDING * 2.0, 60.0,
-                colors::SURFACE0, CornerRadii::all(CORNER_RADIUS),
+                px,
+                cy,
+                width - PANEL_PADDING * 2.0,
+                60.0,
+                colors::SURFACE0,
+                CornerRadii::all(CORNER_RADIUS),
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
@@ -2335,8 +2434,12 @@ impl DiskImagerApp {
             cy += 100.0;
         } else {
             rt.fill_rounded_rect(
-                px, cy, width - PANEL_PADDING * 2.0, 40.0,
-                colors::SURFACE0, CornerRadii::all(CORNER_RADIUS),
+                px,
+                cy,
+                width - PANEL_PADDING * 2.0,
+                40.0,
+                colors::SURFACE0,
+                CornerRadii::all(CORNER_RADIUS),
             );
             rt.push(RenderCommand::Text {
                 x: px + PANEL_PADDING,
@@ -2362,26 +2465,39 @@ impl DiskImagerApp {
         });
         cy += 24.0;
 
-        let algorithms = [HashAlgorithm::Sha256, HashAlgorithm::Sha1, HashAlgorithm::Md5];
+        let algorithms = [
+            HashAlgorithm::Sha256,
+            HashAlgorithm::Sha1,
+            HashAlgorithm::Md5,
+        ];
         let btn_gap = 8.0_f32;
         let alg_btn_w = 90.0_f32;
         for (idx, alg) in algorithms.iter().enumerate() {
             let bx = px + (idx as f32) * (alg_btn_w + btn_gap);
             let is_selected = self.hash_algorithm == *alg;
-            let bg = if is_selected { colors::BLUE } else { colors::SURFACE0 };
-            let fg = if is_selected { colors::CRUST } else { colors::TEXT };
+            let bg = if is_selected {
+                colors::BLUE
+            } else {
+                colors::SURFACE0
+            };
+            let fg = if is_selected {
+                colors::CRUST
+            } else {
+                colors::TEXT
+            };
 
-            rt.fill_rounded_rect(
-                bx, cy, alg_btn_w, BUTTON_HEIGHT,
-                bg, CornerRadii::all(4.0),
-            );
+            rt.fill_rounded_rect(bx, cy, alg_btn_w, BUTTON_HEIGHT, bg, CornerRadii::all(4.0));
             rt.push(RenderCommand::Text {
                 x: bx + (alg_btn_w - (alg.name().len() as f32 * CHAR_WIDTH * UI_FONT_SIZE)) / 2.0,
                 y: cy + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
                 text: alg.name().to_string(),
                 color: fg,
                 font_size: UI_FONT_SIZE,
-                font_weight: if is_selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
         }
@@ -2401,8 +2517,12 @@ impl DiskImagerApp {
 
         let input_w = width - PANEL_PADDING * 2.0;
         rt.fill_rounded_rect(
-            px, cy, input_w, 28.0,
-            colors::SURFACE0, CornerRadii::all(4.0),
+            px,
+            cy,
+            input_w,
+            28.0,
+            colors::SURFACE0,
+            CornerRadii::all(4.0),
         );
         rt.push(RenderCommand::StrokeRect {
             x: px,
@@ -2436,17 +2556,29 @@ impl DiskImagerApp {
 
         // Compute button
         let can_hash = self.loaded_image.is_some() && !self.operation.is_active();
-        let btn_color = if can_hash { colors::MAUVE } else { colors::SURFACE1 };
+        let btn_color = if can_hash {
+            colors::MAUVE
+        } else {
+            colors::SURFACE1
+        };
         let btn_w = 180.0_f32;
         rt.fill_rounded_rect(
-            px, cy, btn_w, BUTTON_HEIGHT,
-            btn_color, CornerRadii::all(CORNER_RADIUS),
+            px,
+            cy,
+            btn_w,
+            BUTTON_HEIGHT,
+            btn_color,
+            CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::Text {
             x: px + 14.0,
             y: cy + (BUTTON_HEIGHT - UI_FONT_SIZE) / 2.0,
             text: format!("Compute {} Hash", self.hash_algorithm.name()),
-            color: if can_hash { colors::CRUST } else { colors::OVERLAY0 },
+            color: if can_hash {
+                colors::CRUST
+            } else {
+                colors::OVERLAY0
+            },
             font_size: UI_FONT_SIZE,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -2467,8 +2599,12 @@ impl DiskImagerApp {
             cy += 22.0;
 
             rt.fill_rounded_rect(
-                px, cy, input_w, 28.0,
-                colors::SURFACE0, CornerRadii::all(4.0),
+                px,
+                cy,
+                input_w,
+                28.0,
+                colors::SURFACE0,
+                CornerRadii::all(4.0),
             );
             rt.push(RenderCommand::Text {
                 x: px + 8.0,
@@ -2485,8 +2621,12 @@ impl DiskImagerApp {
             match &self.verification_result {
                 VerificationResult::Match => {
                     rt.fill_rounded_rect(
-                        px, cy, input_w, 32.0,
-                        Color::rgba(166, 227, 161, 30), CornerRadii::all(4.0),
+                        px,
+                        cy,
+                        input_w,
+                        32.0,
+                        Color::rgba(166, 227, 161, 30),
+                        CornerRadii::all(4.0),
                     );
                     rt.push(RenderCommand::Text {
                         x: px + 12.0,
@@ -2500,8 +2640,12 @@ impl DiskImagerApp {
                 }
                 VerificationResult::Mismatch { expected, computed } => {
                     rt.fill_rounded_rect(
-                        px, cy, input_w, 52.0,
-                        Color::rgba(243, 139, 168, 30), CornerRadii::all(4.0),
+                        px,
+                        cy,
+                        input_w,
+                        52.0,
+                        Color::rgba(243, 139, 168, 30),
+                        CornerRadii::all(4.0),
                     );
                     rt.push(RenderCommand::Text {
                         x: px + 12.0,
@@ -2539,8 +2683,12 @@ impl DiskImagerApp {
     fn render_image_card(&self, rt: &mut RenderTree, x: f32, y: f32, width: f32, img: &ImageInfo) {
         // Card background
         rt.fill_rounded_rect(
-            x, y, width, 90.0,
-            colors::SURFACE0, CornerRadii::all(CORNER_RADIUS),
+            x,
+            y,
+            width,
+            90.0,
+            colors::SURFACE0,
+            CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::StrokeRect {
             x,
@@ -2616,8 +2764,12 @@ impl DiskImagerApp {
         if img.is_bootable {
             let badge_x = x + width - 80.0;
             rt.fill_rounded_rect(
-                badge_x, y + 8.0, 68.0, 20.0,
-                colors::GREEN, CornerRadii::all(10.0),
+                badge_x,
+                y + 8.0,
+                68.0,
+                20.0,
+                colors::GREEN,
+                CornerRadii::all(10.0),
             );
             rt.push(RenderCommand::Text {
                 x: badge_x + 8.0,
@@ -2631,10 +2783,21 @@ impl DiskImagerApp {
         }
     }
 
-    fn render_drive_card(&self, rt: &mut RenderTree, x: f32, y: f32, width: f32, drive: &DriveInfo) {
+    fn render_drive_card(
+        &self,
+        rt: &mut RenderTree,
+        x: f32,
+        y: f32,
+        width: f32,
+        drive: &DriveInfo,
+    ) {
         rt.fill_rounded_rect(
-            x, y, width, 60.0,
-            colors::SURFACE0, CornerRadii::all(CORNER_RADIUS),
+            x,
+            y,
+            width,
+            60.0,
+            colors::SURFACE0,
+            CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::StrokeRect {
             x,
@@ -2661,7 +2824,12 @@ impl DiskImagerApp {
         rt.push(RenderCommand::Text {
             x: tx,
             y: y + 26.0,
-            text: format!("{} | {} | {}", drive.model, drive.size_display(), drive.partition_table.name()),
+            text: format!(
+                "{} | {} | {}",
+                drive.model,
+                drive.size_display(),
+                drive.partition_table.name()
+            ),
             color: colors::SUBTEXT0,
             font_size: SMALL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -2674,7 +2842,11 @@ impl DiskImagerApp {
             text: format!(
                 "{} partition(s) | Serial: {}",
                 drive.partitions.len(),
-                if drive.serial.is_empty() { "N/A" } else { &drive.serial }
+                if drive.serial.is_empty() {
+                    "N/A"
+                } else {
+                    &drive.serial
+                }
             ),
             color: colors::OVERLAY0,
             font_size: SMALL_FONT_SIZE,
@@ -2686,13 +2858,22 @@ impl DiskImagerApp {
         if drive.write_blocked() {
             let badge_x = x + width - 100.0;
             rt.fill_rounded_rect(
-                badge_x, y + 8.0, 88.0, 20.0,
-                colors::RED, CornerRadii::all(10.0),
+                badge_x,
+                y + 8.0,
+                88.0,
+                20.0,
+                colors::RED,
+                CornerRadii::all(10.0),
             );
             rt.push(RenderCommand::Text {
                 x: badge_x + 8.0,
                 y: y + 12.0,
-                text: if drive.is_system_drive { "System Drive" } else { "Read-Only" }.to_string(),
+                text: if drive.is_system_drive {
+                    "System Drive"
+                } else {
+                    "Read-Only"
+                }
+                .to_string(),
                 color: colors::CRUST,
                 font_size: SMALL_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,
@@ -2701,10 +2882,21 @@ impl DiskImagerApp {
         }
     }
 
-    fn render_volume_info(&self, rt: &mut RenderTree, x: f32, y: f32, width: f32, vol: &IsoVolumeDescriptor) {
+    fn render_volume_info(
+        &self,
+        rt: &mut RenderTree,
+        x: f32,
+        y: f32,
+        width: f32,
+        vol: &IsoVolumeDescriptor,
+    ) {
         rt.fill_rounded_rect(
-            x, y, width, 80.0,
-            colors::SURFACE0, CornerRadii::all(CORNER_RADIUS),
+            x,
+            y,
+            width,
+            80.0,
+            colors::SURFACE0,
+            CornerRadii::all(CORNER_RADIUS),
         );
         rt.push(RenderCommand::StrokeRect {
             x,
@@ -2798,7 +2990,8 @@ impl DiskImagerApp {
     fn render_progress_overlay(&self, rt: &mut RenderTree) {
         let bar_w = self.window_width - SIDEBAR_WIDTH - PANEL_PADDING * 4.0;
         let bar_x = SIDEBAR_WIDTH + PANEL_PADDING * 2.0;
-        let bar_y = self.window_height - STATUS_BAR_HEIGHT - PROGRESS_BAR_HEIGHT - PANEL_PADDING - 40.0;
+        let bar_y =
+            self.window_height - STATUS_BAR_HEIGHT - PROGRESS_BAR_HEIGHT - PANEL_PADDING - 40.0;
 
         // Background card
         rt.fill_rounded_rect(
@@ -2821,8 +3014,12 @@ impl DiskImagerApp {
 
         // Progress bar background
         rt.fill_rounded_rect(
-            bar_x, bar_y, bar_w, PROGRESS_BAR_HEIGHT,
-            colors::SURFACE0, CornerRadii::all(PROGRESS_BAR_HEIGHT / 2.0),
+            bar_x,
+            bar_y,
+            bar_w,
+            PROGRESS_BAR_HEIGHT,
+            colors::SURFACE0,
+            CornerRadii::all(PROGRESS_BAR_HEIGHT / 2.0),
         );
 
         // Progress bar fill
@@ -2836,8 +3033,12 @@ impl DiskImagerApp {
                 _ => colors::BLUE,
             };
             rt.fill_rounded_rect(
-                bar_x, bar_y, fill_w, PROGRESS_BAR_HEIGHT,
-                progress_color, CornerRadii::all(PROGRESS_BAR_HEIGHT / 2.0),
+                bar_x,
+                bar_y,
+                fill_w,
+                PROGRESS_BAR_HEIGHT,
+                progress_color,
+                CornerRadii::all(PROGRESS_BAR_HEIGHT / 2.0),
             );
         }
 
@@ -2879,7 +3080,10 @@ impl DiskImagerApp {
     fn render_confirm_dialog(&self, rt: &mut RenderTree) {
         // Dim overlay
         rt.fill_rect(
-            0.0, 0.0, self.window_width, self.window_height,
+            0.0,
+            0.0,
+            self.window_width,
+            self.window_height,
             Color::rgba(0, 0, 0, 150),
         );
 
@@ -2904,8 +3108,12 @@ impl DiskImagerApp {
 
         // Dialog background
         rt.fill_rounded_rect(
-            dialog_x, dialog_y, dialog_w, dialog_h,
-            colors::MANTLE, CornerRadii::all(CORNER_RADIUS * 2.0),
+            dialog_x,
+            dialog_y,
+            dialog_w,
+            dialog_h,
+            colors::MANTLE,
+            CornerRadii::all(CORNER_RADIUS * 2.0),
         );
         rt.push(RenderCommand::StrokeRect {
             x: dialog_x,
@@ -2957,8 +3165,12 @@ impl DiskImagerApp {
         // Cancel button
         let cancel_x = dialog_x + dialog_w - 200.0;
         rt.fill_rounded_rect(
-            cancel_x, btn_y, btn_w, BUTTON_HEIGHT,
-            colors::SURFACE0, CornerRadii::all(4.0),
+            cancel_x,
+            btn_y,
+            btn_w,
+            BUTTON_HEIGHT,
+            colors::SURFACE0,
+            CornerRadii::all(4.0),
         );
         rt.push(RenderCommand::Text {
             x: cancel_x + (btn_w - 42.0) / 2.0,
@@ -2973,8 +3185,12 @@ impl DiskImagerApp {
         // Confirm (destructive) button
         let confirm_x = dialog_x + dialog_w - 100.0;
         rt.fill_rounded_rect(
-            confirm_x, btn_y, btn_w, BUTTON_HEIGHT,
-            colors::RED, CornerRadii::all(4.0),
+            confirm_x,
+            btn_y,
+            btn_w,
+            BUTTON_HEIGHT,
+            colors::RED,
+            CornerRadii::all(4.0),
         );
         rt.push(RenderCommand::Text {
             x: confirm_x + (btn_w - 36.0) / 2.0,
@@ -3044,8 +3260,12 @@ fn extract_iso_datetime(data: &[u8], offset: usize) -> String {
     if s.len() >= 14 {
         format!(
             "{}-{}-{} {}:{}:{}",
-            &s[0..4], &s[4..6], &s[6..8],
-            &s[8..10], &s[10..12], &s[12..14],
+            &s[0..4],
+            &s[4..6],
+            &s[6..8],
+            &s[8..10],
+            &s[10..12],
+            &s[12..14],
         )
     } else {
         s.to_string()
@@ -3113,7 +3333,10 @@ mod tests {
 
     #[test]
     fn test_format_from_extension_iso() {
-        assert_eq!(ImageFormat::from_extension("file.iso"), ImageFormat::Iso9660);
+        assert_eq!(
+            ImageFormat::from_extension("file.iso"),
+            ImageFormat::Iso9660
+        );
     }
 
     #[test]
@@ -3133,17 +3356,26 @@ mod tests {
 
     #[test]
     fn test_format_from_extension_gz() {
-        assert_eq!(ImageFormat::from_extension("file.img.gz"), ImageFormat::GzipCompressed);
+        assert_eq!(
+            ImageFormat::from_extension("file.img.gz"),
+            ImageFormat::GzipCompressed
+        );
     }
 
     #[test]
     fn test_format_from_extension_unknown() {
-        assert_eq!(ImageFormat::from_extension("file.txt"), ImageFormat::Unknown);
+        assert_eq!(
+            ImageFormat::from_extension("file.txt"),
+            ImageFormat::Unknown
+        );
     }
 
     #[test]
     fn test_format_from_extension_case_insensitive() {
-        assert_eq!(ImageFormat::from_extension("FILE.ISO"), ImageFormat::Iso9660);
+        assert_eq!(
+            ImageFormat::from_extension("FILE.ISO"),
+            ImageFormat::Iso9660
+        );
     }
 
     #[test]
@@ -3490,18 +3722,16 @@ mod tests {
             size_bytes: 0,
             lba: 0,
             recording_date: String::new(),
-            children: vec![
-                IsoEntry {
-                    name: "subdir".into(),
-                    is_directory: true,
-                    size_bytes: 0,
-                    lba: 1,
-                    recording_date: String::new(),
-                    children: vec![],
-                    depth: 1,
-                    expanded: false,
-                },
-            ],
+            children: vec![IsoEntry {
+                name: "subdir".into(),
+                is_directory: true,
+                size_bytes: 0,
+                lba: 1,
+                recording_date: String::new(),
+                children: vec![],
+                depth: 1,
+                expanded: false,
+            }],
             depth: 0,
             expanded: true,
         };
@@ -3516,18 +3746,16 @@ mod tests {
             size_bytes: 0,
             lba: 0,
             recording_date: String::new(),
-            children: vec![
-                IsoEntry {
-                    name: "file".into(),
-                    is_directory: false,
-                    size_bytes: 500,
-                    lba: 1,
-                    recording_date: String::new(),
-                    children: vec![],
-                    depth: 1,
-                    expanded: false,
-                },
-            ],
+            children: vec![IsoEntry {
+                name: "file".into(),
+                is_directory: false,
+                size_bytes: 500,
+                lba: 1,
+                recording_date: String::new(),
+                children: vec![],
+                depth: 1,
+                expanded: false,
+            }],
             depth: 0,
             expanded: true,
         };
@@ -3542,18 +3770,16 @@ mod tests {
             size_bytes: 0,
             lba: 0,
             recording_date: String::new(),
-            children: vec![
-                IsoEntry {
-                    name: "child".into(),
-                    is_directory: false,
-                    size_bytes: 100,
-                    lba: 1,
-                    recording_date: String::new(),
-                    children: vec![],
-                    depth: 1,
-                    expanded: false,
-                },
-            ],
+            children: vec![IsoEntry {
+                name: "child".into(),
+                is_directory: false,
+                size_bytes: 100,
+                lba: 1,
+                recording_date: String::new(),
+                children: vec![],
+                depth: 1,
+                expanded: false,
+            }],
             depth: 0,
             expanded: false,
         };
@@ -3569,18 +3795,16 @@ mod tests {
             size_bytes: 0,
             lba: 0,
             recording_date: String::new(),
-            children: vec![
-                IsoEntry {
-                    name: "child".into(),
-                    is_directory: false,
-                    size_bytes: 100,
-                    lba: 1,
-                    recording_date: String::new(),
-                    children: vec![],
-                    depth: 1,
-                    expanded: false,
-                },
-            ],
+            children: vec![IsoEntry {
+                name: "child".into(),
+                is_directory: false,
+                size_bytes: 100,
+                lba: 1,
+                recording_date: String::new(),
+                children: vec![],
+                depth: 1,
+                expanded: false,
+            }],
             depth: 0,
             expanded: true,
         };
@@ -3951,7 +4175,11 @@ mod tests {
         app.load_image("b.img", &[0u8; 20]);
         app.load_image("a.img", &[0u8; 30]);
         // "a.img" should appear only once
-        let count = app.recent_images.iter().filter(|r| r.path == "a.img").count();
+        let count = app
+            .recent_images
+            .iter()
+            .filter(|r| r.path == "a.img")
+            .count();
         assert_eq!(count, 1);
     }
 
@@ -3971,7 +4199,10 @@ mod tests {
     #[test]
     fn test_handle_resize() {
         let mut app = DiskImagerApp::new();
-        let ev = Event::Resize { width: 1200, height: 800 };
+        let ev = Event::Resize {
+            width: 1200,
+            height: 800,
+        };
         let result = app.handle_event(&ev);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(app.window_width, 1200.0);
@@ -4102,7 +4333,8 @@ mod tests {
     #[test]
     fn test_render_with_confirm_dialog() {
         let mut app = DiskImagerApp::new();
-        app.confirm_dialog.show_write_confirm("test.img", "USB Drive", 32_000_000_000);
+        app.confirm_dialog
+            .show_write_confirm("test.img", "USB Drive", 32_000_000_000);
         let mut rt = RenderTree::new();
         app.render(&mut rt);
         assert!(!rt.is_empty());

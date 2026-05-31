@@ -29,6 +29,9 @@ const YELLOW: Color = Color::from_hex(0xF9E2AF);
 const PEACH: Color = Color::from_hex(0xFAB387);
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
+// Part of the complete Catppuccin Mocha palette; kept for completeness even
+// though no widget currently paints with it.
+#[allow(dead_code)]
 const TEAL: Color = Color::from_hex(0x94E2D5);
 const MAUVE: Color = Color::from_hex(0xCBA6F7);
 
@@ -388,7 +391,10 @@ impl SubtitleFormat {
     }
 
     pub fn is_text_based(self) -> bool {
-        matches!(self, Self::Srt | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText)
+        matches!(
+            self,
+            Self::Srt | Self::Ass | Self::Ssa | Self::WebVtt | Self::MovText
+        )
     }
 }
 
@@ -553,17 +559,17 @@ pub fn parse_webvtt(content: &str) -> Vec<SubtitleCue> {
     let mut lines = content.lines().peekable();
 
     // Skip WEBVTT header
-    if let Some(first) = lines.peek() {
-        if first.starts_with("WEBVTT") {
-            lines.next();
-            // Skip header lines until blank
-            while let Some(line) = lines.peek() {
-                if line.trim().is_empty() {
-                    lines.next();
-                    break;
-                }
+    if let Some(first) = lines.peek()
+        && first.starts_with("WEBVTT")
+    {
+        lines.next();
+        // Skip header lines until blank
+        while let Some(line) = lines.peek() {
+            if line.trim().is_empty() {
                 lines.next();
+                break;
             }
+            lines.next();
         }
     }
 
@@ -624,7 +630,7 @@ fn parse_webvtt_timestamp_line(line: &str) -> Option<(Duration, Duration)> {
         return None;
     }
     let start = parse_webvtt_time(parts.first()?.trim())?;
-    let end = parse_webvtt_time(parts.get(1)?.trim().split_whitespace().next()?)?;
+    let end = parse_webvtt_time(parts.get(1)?.split_whitespace().next()?)?;
     Some((start, end))
 }
 
@@ -638,9 +644,10 @@ fn parse_webvtt_time(s: &str) -> Option<Duration> {
             let seconds: u64 = sec_parts.first()?.parse().ok()?;
             let millis: u64 = sec_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             Some(Duration::from_millis(
-                minutes.checked_mul(60_000)?
+                minutes
+                    .checked_mul(60_000)?
                     .checked_add(seconds.checked_mul(1000)?)?
-                    .checked_add(millis)?
+                    .checked_add(millis)?,
             ))
         }
         3 => {
@@ -650,10 +657,11 @@ fn parse_webvtt_time(s: &str) -> Option<Duration> {
             let seconds: u64 = sec_parts.first()?.parse().ok()?;
             let millis: u64 = sec_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
             Some(Duration::from_millis(
-                hours.checked_mul(3_600_000)?
+                hours
+                    .checked_mul(3_600_000)?
                     .checked_add(minutes.checked_mul(60_000)?)?
                     .checked_add(seconds.checked_mul(1000)?)?
-                    .checked_add(millis)?
+                    .checked_add(millis)?,
             ))
         }
         _ => None,
@@ -698,7 +706,9 @@ impl MediaFile {
     }
 
     pub fn primary_audio(&self) -> Option<&AudioStream> {
-        self.audio_streams.iter().find(|a| a.is_default)
+        self.audio_streams
+            .iter()
+            .find(|a| a.is_default)
             .or_else(|| self.audio_streams.first())
     }
 
@@ -776,9 +786,13 @@ impl PlaybackSpeed {
     pub const TRIPLE: Self = Self(3.0);
 
     pub const PRESETS: &[Self] = &[
-        Self::QUARTER, Self::HALF, Self::NORMAL,
-        Self::ONE_AND_QUARTER, Self::ONE_AND_HALF,
-        Self::DOUBLE, Self::TRIPLE,
+        Self::QUARTER,
+        Self::HALF,
+        Self::NORMAL,
+        Self::ONE_AND_QUARTER,
+        Self::ONE_AND_HALF,
+        Self::DOUBLE,
+        Self::TRIPLE,
     ];
 
     pub fn value(self) -> f64 {
@@ -789,7 +803,10 @@ impl PlaybackSpeed {
         if (self.0 - 1.0).abs() < 0.001 {
             "1x".to_string()
         } else {
-            format!("{:.2}x", self.0).trim_end_matches('0').trim_end_matches('.').to_string()
+            format!("{:.2}", self.0)
+                .trim_end_matches('0')
+                .trim_end_matches('.')
+                .to_string()
                 + "x"
         }
     }
@@ -1071,10 +1088,22 @@ impl Playlist {
         self.current_index.and_then(|i| self.entries.get(i))
     }
 
-    pub fn add(&mut self, path: String, file_name: String, duration: Option<Duration>, title: Option<String>) {
+    pub fn add(
+        &mut self,
+        path: String,
+        file_name: String,
+        duration: Option<Duration>,
+        title: Option<String>,
+    ) {
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1);
-        self.entries.push(PlaylistEntry { id, path, file_name, duration, title });
+        self.entries.push(PlaylistEntry {
+            id,
+            path,
+            file_name,
+            duration,
+            title,
+        });
         if self.shuffle {
             self.shuffle_order.push(self.entries.len() - 1);
         }
@@ -1154,7 +1183,10 @@ impl Playlist {
                     RepeatMode::Off => return None,
                 }
             }
-            let idx = self.shuffle_order.get(self.shuffle_position).copied()
+            let idx = self
+                .shuffle_order
+                .get(self.shuffle_position)
+                .copied()
                 .unwrap_or(0);
             self.current_index = Some(idx);
             return self.current_index;
@@ -1193,7 +1225,10 @@ impl Playlist {
         if self.shuffle {
             if self.shuffle_position > 0 {
                 self.shuffle_position -= 1;
-                let idx = self.shuffle_order.get(self.shuffle_position).copied()
+                let idx = self
+                    .shuffle_order
+                    .get(self.shuffle_position)
+                    .copied()
                     .unwrap_or(0);
                 self.current_index = Some(idx);
                 return self.current_index;
@@ -1241,7 +1276,9 @@ impl Playlist {
         if len > 1 {
             let mut seed: u64 = 12345;
             for entry in &self.entries {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(entry.id);
+                seed = seed
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(entry.id);
             }
             for i in (1..len).rev() {
                 seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -1350,9 +1387,16 @@ impl EqPreset {
 
     pub fn all() -> &'static [Self] {
         &[
-            Self::Flat, Self::Rock, Self::Pop, Self::Jazz,
-            Self::Classical, Self::Bass, Self::Treble,
-            Self::Vocal, Self::Movie, Self::Custom,
+            Self::Flat,
+            Self::Rock,
+            Self::Pop,
+            Self::Jazz,
+            Self::Classical,
+            Self::Bass,
+            Self::Treble,
+            Self::Vocal,
+            Self::Movie,
+            Self::Custom,
         ]
     }
 }
@@ -1369,15 +1413,18 @@ impl Equalizer {
 
     fn default_bands() -> Vec<EqBand> {
         let frequencies = [32, 64, 125, 250, 500, 1000, 2000, 4000, 8000, 16000];
-        frequencies.iter().map(|&f| EqBand {
-            frequency: f,
-            gain: 0.0,
-            label: if f >= 1000 {
-                format!("{}kHz", f / 1000)
-            } else {
-                format!("{f}Hz")
-            },
-        }).collect()
+        frequencies
+            .iter()
+            .map(|&f| EqBand {
+                frequency: f,
+                gain: 0.0,
+                label: if f >= 1000 {
+                    format!("{}kHz", f / 1000)
+                } else {
+                    format!("{f}Hz")
+                },
+            })
+            .collect()
     }
 
     pub fn apply_preset(&mut self, preset: EqPreset) {
@@ -1617,17 +1664,27 @@ impl RecentHistory {
         }
     }
 
-    pub fn add(&mut self, path: String, file_name: String, position: Duration, timestamp: u64, duration: Option<Duration>) {
+    pub fn add(
+        &mut self,
+        path: String,
+        file_name: String,
+        position: Duration,
+        timestamp: u64,
+        duration: Option<Duration>,
+    ) {
         // Remove existing entry for this path
         self.files.retain(|f| f.path != path);
 
-        self.files.insert(0, RecentFile {
-            path,
-            file_name,
-            last_position: position,
-            last_opened_timestamp: timestamp,
-            duration,
-        });
+        self.files.insert(
+            0,
+            RecentFile {
+                path,
+                file_name,
+                last_position: position,
+                last_opened_timestamp: timestamp,
+                duration,
+            },
+        );
 
         if self.files.len() > self.max_entries {
             self.files.truncate(self.max_entries);
@@ -1849,8 +1906,13 @@ impl PlayerTab {
 
     pub fn all() -> &'static [Self] {
         &[
-            Self::Player, Self::Playlist, Self::MediaInfo,
-            Self::Equalizer, Self::Adjustments, Self::Settings, Self::Shortcuts,
+            Self::Player,
+            Self::Playlist,
+            Self::MediaInfo,
+            Self::Equalizer,
+            Self::Adjustments,
+            Self::Settings,
+            Self::Shortcuts,
         ]
     }
 }
@@ -1920,10 +1982,8 @@ impl VideoPlayerApp {
         match self.state {
             PlaybackState::Playing => self.pause(),
             PlaybackState::Paused => self.play(),
-            PlaybackState::Stopped => {
-                if self.current_file.is_some() {
-                    self.play();
-                }
+            PlaybackState::Stopped if self.current_file.is_some() => {
+                self.play();
             }
             _ => {}
         }
@@ -1938,7 +1998,11 @@ impl VideoPlayerApp {
     pub fn seek_to(&mut self, position: Duration) {
         if let Some(file) = &self.current_file {
             let max_pos = file.duration;
-            self.position = if position > max_pos { max_pos } else { position };
+            self.position = if position > max_pos {
+                max_pos
+            } else {
+                position
+            };
         }
     }
 
@@ -1971,14 +2035,17 @@ impl VideoPlayerApp {
     }
 
     pub fn current_chapter(&self) -> Option<(usize, &Chapter)> {
-        self.chapters.iter().enumerate().find(|(_, ch)| ch.contains(self.position))
+        self.chapters
+            .iter()
+            .enumerate()
+            .find(|(_, ch)| ch.contains(self.position))
     }
 
     pub fn next_chapter(&mut self) {
-        if let Some((idx, _)) = self.current_chapter() {
-            if idx + 1 < self.chapters.len() {
-                self.seek_to_chapter(idx + 1);
-            }
+        if let Some((idx, _)) = self.current_chapter()
+            && idx + 1 < self.chapters.len()
+        {
+            self.seek_to_chapter(idx + 1);
         }
     }
 
@@ -2015,10 +2082,10 @@ impl VideoPlayerApp {
                 }
             };
             self.selected_audio_track = next;
-            if let Some(idx) = next {
-                if let Some(stream) = file.audio_streams.iter().find(|s| s.index == idx) {
-                    self.show_osd(&format!("Audio: {}", stream.display_label()));
-                }
+            if let Some(idx) = next
+                && let Some(stream) = file.audio_streams.iter().find(|s| s.index == idx)
+            {
+                self.show_osd(&format!("Audio: {}", stream.display_label()));
             }
         }
     }
@@ -2036,10 +2103,14 @@ impl VideoPlayerApp {
                     self.subtitle_enabled = true;
                 }
                 Some(current) => {
-                    let pos = file.subtitle_streams.iter().position(|s| s.index == current);
+                    let pos = file
+                        .subtitle_streams
+                        .iter()
+                        .position(|s| s.index == current);
                     match pos {
                         Some(p) if p + 1 < file.subtitle_streams.len() => {
-                            self.selected_subtitle_track = file.subtitle_streams.get(p + 1).map(|s| s.index);
+                            self.selected_subtitle_track =
+                                file.subtitle_streams.get(p + 1).map(|s| s.index);
                             self.subtitle_enabled = true;
                         }
                         _ => {
@@ -2052,10 +2123,10 @@ impl VideoPlayerApp {
             }
 
             if self.subtitle_enabled {
-                if let Some(idx) = self.selected_subtitle_track {
-                    if let Some(stream) = file.subtitle_streams.iter().find(|s| s.index == idx) {
-                        self.show_osd(&format!("Subtitle: {}", stream.display_label()));
-                    }
+                if let Some(idx) = self.selected_subtitle_track
+                    && let Some(stream) = file.subtitle_streams.iter().find(|s| s.index == idx)
+                {
+                    self.show_osd(&format!("Subtitle: {}", stream.display_label()));
                 }
             } else {
                 self.show_osd("Subtitles: Off");
@@ -2065,7 +2136,11 @@ impl VideoPlayerApp {
 
     pub fn toggle_subtitles(&mut self) {
         self.subtitle_enabled = !self.subtitle_enabled;
-        self.show_osd(if self.subtitle_enabled { "Subtitles: On" } else { "Subtitles: Off" });
+        self.show_osd(if self.subtitle_enabled {
+            "Subtitles: On"
+        } else {
+            "Subtitles: Off"
+        });
     }
 
     // ========================================================================
@@ -2214,11 +2289,15 @@ impl VideoPlayerApp {
 
     pub fn active_subtitle_cue(&self) -> Option<&SubtitleCue> {
         let adjusted_pos = if self.subtitle_delay.ms >= 0 {
-            self.position.saturating_add(Duration::from_millis(self.subtitle_delay.ms as u64))
+            self.position
+                .saturating_add(Duration::from_millis(self.subtitle_delay.ms as u64))
         } else {
-            self.position.saturating_sub(Duration::from_millis((-self.subtitle_delay.ms) as u64))
+            self.position
+                .saturating_sub(Duration::from_millis((-self.subtitle_delay.ms) as u64))
         };
-        self.external_subtitles.iter().find(|cue| cue.is_active_at(adjusted_pos))
+        self.external_subtitles
+            .iter()
+            .find(|cue| cue.is_active_at(adjusted_pos))
     }
 
     // ========================================================================
@@ -2292,7 +2371,11 @@ impl VideoPlayerApp {
                 text: tab.label().to_string(),
                 font_size: 12.0,
                 color: fg,
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_width - 12.0),
             });
 
@@ -2359,44 +2442,44 @@ impl VideoPlayerApp {
             });
         } else {
             // Video frame placeholder
-            if let Some(file) = &self.current_file {
-                if let Some(vs) = file.primary_video() {
-                    let label = format!("{}x{} {}", vs.width, vs.height, vs.codec.display_name());
-                    cmds.push(RenderCommand::Text {
-                        x: self.width / 2.0 - 60.0,
-                        y: top + video_h / 2.0 - 8.0,
-                        text: label,
-                        font_size: 14.0,
-                        color: SURFACE2,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(300.0),
-                    });
-                }
+            if let Some(file) = &self.current_file
+                && let Some(vs) = file.primary_video()
+            {
+                let label = format!("{}x{} {}", vs.width, vs.height, vs.codec.display_name());
+                cmds.push(RenderCommand::Text {
+                    x: self.width / 2.0 - 60.0,
+                    y: top + video_h / 2.0 - 8.0,
+                    text: label,
+                    font_size: 14.0,
+                    color: SURFACE2,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(300.0),
+                });
             }
 
             // Subtitle display
-            if self.subtitle_enabled {
-                if let Some(cue) = self.active_subtitle_cue() {
-                    let sub_y = top + video_h - 60.0;
-                    // Shadow behind subtitle
-                    cmds.push(RenderCommand::FillRect {
-                        x: self.width / 2.0 - 200.0,
-                        y: sub_y - 4.0,
-                        width: 400.0,
-                        height: 36.0,
-                        color: Color::rgba(0, 0, 0, 180),
-                        corner_radii: CornerRadii::all(4.0),
-                    });
-                    cmds.push(RenderCommand::Text {
-                        x: self.width / 2.0 - 190.0,
-                        y: sub_y + 2.0,
-                        text: cue.text.clone(),
-                        font_size: 20.0,
-                        color: Color::rgb(255, 255, 255),
-                        font_weight: FontWeightHint::Bold,
-                        max_width: Some(380.0),
-                    });
-                }
+            if self.subtitle_enabled
+                && let Some(cue) = self.active_subtitle_cue()
+            {
+                let sub_y = top + video_h - 60.0;
+                // Shadow behind subtitle
+                cmds.push(RenderCommand::FillRect {
+                    x: self.width / 2.0 - 200.0,
+                    y: sub_y - 4.0,
+                    width: 400.0,
+                    height: 36.0,
+                    color: Color::rgba(0, 0, 0, 180),
+                    corner_radii: CornerRadii::all(4.0),
+                });
+                cmds.push(RenderCommand::Text {
+                    x: self.width / 2.0 - 190.0,
+                    y: sub_y + 2.0,
+                    text: cue.text.clone(),
+                    font_size: 20.0,
+                    color: Color::rgb(255, 255, 255),
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(380.0),
+                });
             }
 
             // OSD message
@@ -2555,16 +2638,60 @@ impl VideoPlayerApp {
         let center_x = self.width / 2.0;
 
         // Previous
-        self.render_button(cmds, center_x - btn_w * 2.5, btn_y, btn_w, btn_h, "|<", false);
+        self.render_button(
+            cmds,
+            center_x - btn_w * 2.5,
+            btn_y,
+            btn_w,
+            btn_h,
+            "|<",
+            false,
+        );
         // Rewind
-        self.render_button(cmds, center_x - btn_w * 1.5, btn_y, btn_w, btn_h, "<<", false);
+        self.render_button(
+            cmds,
+            center_x - btn_w * 1.5,
+            btn_y,
+            btn_w,
+            btn_h,
+            "<<",
+            false,
+        );
         // Play/Pause
-        let play_label = if self.state == PlaybackState::Playing { "||" } else { ">" };
-        self.render_button(cmds, center_x - btn_w * 0.5, btn_y, btn_w, btn_h, play_label, true);
+        let play_label = if self.state == PlaybackState::Playing {
+            "||"
+        } else {
+            ">"
+        };
+        self.render_button(
+            cmds,
+            center_x - btn_w * 0.5,
+            btn_y,
+            btn_w,
+            btn_h,
+            play_label,
+            true,
+        );
         // Forward
-        self.render_button(cmds, center_x + btn_w * 0.5, btn_y, btn_w, btn_h, ">>", false);
+        self.render_button(
+            cmds,
+            center_x + btn_w * 0.5,
+            btn_y,
+            btn_w,
+            btn_h,
+            ">>",
+            false,
+        );
         // Next
-        self.render_button(cmds, center_x + btn_w * 1.5, btn_y, btn_w, btn_h, ">|", false);
+        self.render_button(
+            cmds,
+            center_x + btn_w * 1.5,
+            btn_y,
+            btn_w,
+            btn_h,
+            ">|",
+            false,
+        );
 
         // Left controls: volume
         let vol_x = 16.0;
@@ -2626,7 +2753,11 @@ impl VideoPlayerApp {
             y: btn_y + 6.0,
             text: self.speed.label(),
             font_size: 11.0,
-            color: if self.speed.value() != 1.0 { PEACH } else { SUBTEXT0 },
+            color: if self.speed.value() != 1.0 {
+                PEACH
+            } else {
+                SUBTEXT0
+            },
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -2636,7 +2767,11 @@ impl VideoPlayerApp {
             y: btn_y + 6.0,
             text: self.repeat.icon().to_string(),
             font_size: 11.0,
-            color: if self.repeat != RepeatMode::Off { BLUE } else { SUBTEXT0 },
+            color: if self.repeat != RepeatMode::Off {
+                BLUE
+            } else {
+                SUBTEXT0
+            },
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
@@ -2644,9 +2779,18 @@ impl VideoPlayerApp {
         cmds.push(RenderCommand::Text {
             x: right_x + 70.0,
             y: btn_y + 6.0,
-            text: if self.playlist.is_shuffle() { "S+" } else { "S-" }.to_string(),
+            text: if self.playlist.is_shuffle() {
+                "S+"
+            } else {
+                "S-"
+            }
+            .to_string(),
             font_size: 11.0,
-            color: if self.playlist.is_shuffle() { GREEN } else { SUBTEXT0 },
+            color: if self.playlist.is_shuffle() {
+                GREEN
+            } else {
+                SUBTEXT0
+            },
             font_weight: FontWeightHint::Bold,
             max_width: None,
         });
@@ -2686,7 +2830,20 @@ impl VideoPlayerApp {
         });
     }
 
-    fn render_button(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32, label: &str, primary: bool) {
+    // A button is described by its rectangle (x/y/w/h), label, and a primary
+    // flag; passing these positionally keeps call sites compact and matches the
+    // other immediate-mode render helpers in this file.
+    #[allow(clippy::too_many_arguments)]
+    fn render_button(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        label: &str,
+        primary: bool,
+    ) {
         let bg = if primary { BLUE } else { SURFACE0 };
         let fg = if primary { CRUST } else { TEXT };
 
@@ -2728,7 +2885,11 @@ impl VideoPlayerApp {
         cmds.push(RenderCommand::Text {
             x: 16.0,
             y: top + 16.0,
-            text: format!("Playlist ({} items, total: {})", self.playlist.len(), self.playlist.total_duration().format()),
+            text: format!(
+                "Playlist ({} items, total: {})",
+                self.playlist.len(),
+                self.playlist.total_duration().format()
+            ),
             font_size: 14.0,
             color: TEXT,
             font_weight: FontWeightHint::Bold,
@@ -2739,7 +2900,15 @@ impl VideoPlayerApp {
         cmds.push(RenderCommand::Text {
             x: 16.0,
             y: top + 36.0,
-            text: format!("Shuffle: {} | {}", if self.playlist.is_shuffle() { "On" } else { "Off" }, self.repeat.label()),
+            text: format!(
+                "Shuffle: {} | {}",
+                if self.playlist.is_shuffle() {
+                    "On"
+                } else {
+                    "Off"
+                },
+                self.repeat.label()
+            ),
             font_size: 11.0,
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
@@ -2769,7 +2938,13 @@ impl VideoPlayerApp {
             height: panel_h - 58.0,
         });
 
-        for (i, entry) in self.playlist.entries().iter().enumerate().take(visible_items) {
+        for (i, entry) in self
+            .playlist
+            .entries()
+            .iter()
+            .enumerate()
+            .take(visible_items)
+        {
             let ey = list_y + i as f32 * item_h - self.playlist_scroll;
             let is_current = current_idx == Some(i);
 
@@ -2816,7 +2991,11 @@ impl VideoPlayerApp {
                 text: entry.display_name().to_string(),
                 font_size: 13.0,
                 color: if is_current { TEXT } else { SUBTEXT1 },
-                font_weight: if is_current { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_current {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(panel_w - 160.0),
             });
 
@@ -2880,27 +3059,28 @@ impl VideoPlayerApp {
                 *y += line_h + 4.0;
             };
 
-            let info_row = |cmds: &mut Vec<RenderCommand>, y: &mut f32, label: &str, value: &str| {
-                cmds.push(RenderCommand::Text {
-                    x: label_x + 8.0,
-                    y: *y,
-                    text: label.to_string(),
-                    font_size: 12.0,
-                    color: SUBTEXT0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(120.0),
-                });
-                cmds.push(RenderCommand::Text {
-                    x: value_x,
-                    y: *y,
-                    text: value.to_string(),
-                    font_size: 12.0,
-                    color: TEXT,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(400.0),
-                });
-                *y += line_h;
-            };
+            let info_row =
+                |cmds: &mut Vec<RenderCommand>, y: &mut f32, label: &str, value: &str| {
+                    cmds.push(RenderCommand::Text {
+                        x: label_x + 8.0,
+                        y: *y,
+                        text: label.to_string(),
+                        font_size: 12.0,
+                        color: SUBTEXT0,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(120.0),
+                    });
+                    cmds.push(RenderCommand::Text {
+                        x: value_x,
+                        y: *y,
+                        text: value.to_string(),
+                        font_size: 12.0,
+                        color: TEXT,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(400.0),
+                    });
+                    *y += line_h;
+                };
 
             // General
             info_section(cmds, &mut line_y, "General");
@@ -2908,15 +3088,30 @@ impl VideoPlayerApp {
             info_row(cmds, &mut line_y, "Format", file.container.display_name());
             info_row(cmds, &mut line_y, "File Size", &file.file_size_display());
             info_row(cmds, &mut line_y, "Duration", &file.duration.format());
-            info_row(cmds, &mut line_y, "Overall Bitrate", &format_bitrate(file.overall_bitrate()));
+            info_row(
+                cmds,
+                &mut line_y,
+                "Overall Bitrate",
+                &format_bitrate(file.overall_bitrate()),
+            );
 
             // Video streams
             for (i, vs) in file.video_streams.iter().enumerate() {
                 info_section(cmds, &mut line_y, &format!("Video Stream #{}", i + 1));
                 info_row(cmds, &mut line_y, "Codec", vs.codec.display_name());
-                info_row(cmds, &mut line_y, "Resolution", &format!("{}x{} ({})", vs.width, vs.height, vs.resolution_label()));
+                info_row(
+                    cmds,
+                    &mut line_y,
+                    "Resolution",
+                    &format!("{}x{} ({})", vs.width, vs.height, vs.resolution_label()),
+                );
                 info_row(cmds, &mut line_y, "Aspect Ratio", &vs.aspect_ratio());
-                info_row(cmds, &mut line_y, "Frame Rate", &format!("{:.3} fps", vs.frame_rate));
+                info_row(
+                    cmds,
+                    &mut line_y,
+                    "Frame Rate",
+                    &format!("{:.3} fps", vs.frame_rate),
+                );
                 info_row(cmds, &mut line_y, "Bit Rate", &vs.bitrate_display());
                 info_row(cmds, &mut line_y, "Pixel Format", &vs.pixel_format);
                 if vs.hdr {
@@ -2925,20 +3120,53 @@ impl VideoPlayerApp {
                 if let Some(cs) = &vs.color_space {
                     info_row(cmds, &mut line_y, "Color Space", cs);
                 }
-                info_row(cmds, &mut line_y, "HW Decode", if vs.codec.is_hardware_decodable() { "Supported" } else { "Not available" });
+                info_row(
+                    cmds,
+                    &mut line_y,
+                    "HW Decode",
+                    if vs.codec.is_hardware_decodable() {
+                        "Supported"
+                    } else {
+                        "Not available"
+                    },
+                );
             }
 
             // Audio streams
             for (i, audio) in file.audio_streams.iter().enumerate() {
                 info_section(cmds, &mut line_y, &format!("Audio Stream #{}", i + 1));
                 info_row(cmds, &mut line_y, "Codec", audio.codec.display_name());
-                info_row(cmds, &mut line_y, "Sample Rate", &format!("{} Hz", audio.sample_rate));
-                info_row(cmds, &mut line_y, "Channels", AudioCodec::channel_layout_name(audio.channels));
-                info_row(cmds, &mut line_y, "Bit Rate", &format_bitrate(audio.bit_rate));
+                info_row(
+                    cmds,
+                    &mut line_y,
+                    "Sample Rate",
+                    &format!("{} Hz", audio.sample_rate),
+                );
+                info_row(
+                    cmds,
+                    &mut line_y,
+                    "Channels",
+                    AudioCodec::channel_layout_name(audio.channels),
+                );
+                info_row(
+                    cmds,
+                    &mut line_y,
+                    "Bit Rate",
+                    &format_bitrate(audio.bit_rate),
+                );
                 if let Some(lang) = &audio.language {
                     info_row(cmds, &mut line_y, "Language", lang);
                 }
-                info_row(cmds, &mut line_y, "Lossless", if audio.codec.is_lossless() { "Yes" } else { "No" });
+                info_row(
+                    cmds,
+                    &mut line_y,
+                    "Lossless",
+                    if audio.codec.is_lossless() {
+                        "Yes"
+                    } else {
+                        "No"
+                    },
+                );
             }
 
             // Subtitle streams
@@ -2948,7 +3176,16 @@ impl VideoPlayerApp {
                 if let Some(lang) = &sub.language {
                     info_row(cmds, &mut line_y, "Language", lang);
                 }
-                info_row(cmds, &mut line_y, "Text Based", if sub.format.is_text_based() { "Yes" } else { "No" });
+                info_row(
+                    cmds,
+                    &mut line_y,
+                    "Text Based",
+                    if sub.format.is_text_based() {
+                        "Yes"
+                    } else {
+                        "No"
+                    },
+                );
                 if sub.is_forced {
                     info_row(cmds, &mut line_y, "Forced", "Yes");
                 }
@@ -2959,12 +3196,24 @@ impl VideoPlayerApp {
             let has_meta = meta.title.is_some() || meta.artist.is_some() || meta.album.is_some();
             if has_meta {
                 info_section(cmds, &mut line_y, "Metadata");
-                if let Some(t) = &meta.title { info_row(cmds, &mut line_y, "Title", t); }
-                if let Some(a) = &meta.artist { info_row(cmds, &mut line_y, "Artist", a); }
-                if let Some(a) = &meta.album { info_row(cmds, &mut line_y, "Album", a); }
-                if let Some(y) = meta.year { info_row(cmds, &mut line_y, "Year", &y.to_string()); }
-                if let Some(g) = &meta.genre { info_row(cmds, &mut line_y, "Genre", g); }
-                if let Some(e) = &meta.encoder { info_row(cmds, &mut line_y, "Encoder", e); }
+                if let Some(t) = &meta.title {
+                    info_row(cmds, &mut line_y, "Title", t);
+                }
+                if let Some(a) = &meta.artist {
+                    info_row(cmds, &mut line_y, "Artist", a);
+                }
+                if let Some(a) = &meta.album {
+                    info_row(cmds, &mut line_y, "Album", a);
+                }
+                if let Some(y) = meta.year {
+                    info_row(cmds, &mut line_y, "Year", &y.to_string());
+                }
+                if let Some(g) = &meta.genre {
+                    info_row(cmds, &mut line_y, "Genre", g);
+                }
+                if let Some(e) = &meta.encoder {
+                    info_row(cmds, &mut line_y, "Encoder", e);
+                }
             }
         } else {
             cmds.push(RenderCommand::Text {
@@ -3055,7 +3304,11 @@ impl VideoPlayerApp {
                 text: preset.label().to_string(),
                 font_size: 10.0,
                 color: fg,
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(56.0),
             });
             px += 64.0;
@@ -3113,7 +3366,13 @@ impl VideoPlayerApp {
                 let max_travel = bands_h / 2.0;
                 let bar_h = (band.gain / 12.0) * max_travel;
 
-                let color = if band.gain > 0.0 { GREEN } else if band.gain < 0.0 { RED } else { SURFACE2 };
+                let color = if band.gain > 0.0 {
+                    GREEN
+                } else if band.gain < 0.0 {
+                    RED
+                } else {
+                    SURFACE2
+                };
 
                 if bar_h.abs() > 1.0 {
                     if bar_h > 0.0 {
@@ -3234,7 +3493,11 @@ impl VideoPlayerApp {
 
             // Slider fill
             let range = max_val - min_val;
-            let frac = if range > 0.0 { ((value - min_val) / range) as f32 } else { 0.0 };
+            let frac = if range > 0.0 {
+                (value - min_val) / range
+            } else {
+                0.0
+            };
             cmds.push(RenderCommand::FillRect {
                 x: bar_x,
                 y: sy + 8.0,
@@ -3327,10 +3590,26 @@ impl VideoPlayerApp {
 
         let prefs = &self.preferences;
         let settings = [
-            ("Resume Playback", if prefs.resume_playback { "On" } else { "Off" }),
-            ("Remember Volume", if prefs.remember_volume { "On" } else { "Off" }),
-            ("Hardware Decode", if prefs.hardware_decode { "On" } else { "Off" }),
-            ("Auto-load Subtitles", if prefs.subtitle_auto_load { "On" } else { "Off" }),
+            (
+                "Resume Playback",
+                if prefs.resume_playback { "On" } else { "Off" },
+            ),
+            (
+                "Remember Volume",
+                if prefs.remember_volume { "On" } else { "Off" },
+            ),
+            (
+                "Hardware Decode",
+                if prefs.hardware_decode { "On" } else { "Off" },
+            ),
+            (
+                "Auto-load Subtitles",
+                if prefs.subtitle_auto_load {
+                    "On"
+                } else {
+                    "Off"
+                },
+            ),
             ("On Finish", prefs.on_finish.label()),
             ("Deinterlace", prefs.deinterlace.label()),
         ];
@@ -3360,7 +3639,13 @@ impl VideoPlayerApp {
                 max_width: Some(180.0),
             });
 
-            let value_color = if *value == "On" { GREEN } else if *value == "Off" { RED } else { SUBTEXT1 };
+            let value_color = if *value == "On" {
+                GREEN
+            } else if *value == "Off" {
+                RED
+            } else {
+                SUBTEXT1
+            };
             cmds.push(RenderCommand::Text {
                 x: value_x,
                 y: sy + 6.0,
@@ -3388,7 +3673,11 @@ impl VideoPlayerApp {
         cmds.push(RenderCommand::Text {
             x: label_x + 8.0,
             y: extra_y + 24.0,
-            text: format!("Small: {}s | Large: {}s", prefs.seek_small_step / 1000, prefs.seek_large_step / 1000),
+            text: format!(
+                "Small: {}s | Large: {}s",
+                prefs.seek_small_step / 1000,
+                prefs.seek_large_step / 1000
+            ),
             font_size: 12.0,
             color: SUBTEXT0,
             font_weight: FontWeightHint::Regular,
@@ -3436,7 +3725,11 @@ impl VideoPlayerApp {
                 "Format: {} | Quality: {}% | Include subs: {}",
                 prefs.screenshot_config.format.extension(),
                 prefs.screenshot_config.quality,
-                if prefs.screenshot_config.include_subtitles { "Yes" } else { "No" }
+                if prefs.screenshot_config.include_subtitles {
+                    "Yes"
+                } else {
+                    "No"
+                }
             ),
             font_size: 12.0,
             color: SUBTEXT0,
@@ -3473,7 +3766,7 @@ impl VideoPlayerApp {
         let col2_x = self.width / 2.0 + 10.0;
         let col2_val = self.width / 2.0 + 130.0;
 
-        let half = (shortcuts.len() + 1) / 2;
+        let half = shortcuts.len().div_ceil(2);
 
         for (i, (key, action)) in shortcuts.iter().enumerate() {
             let (kx, vx, row) = if i < half {
@@ -3611,12 +3904,36 @@ fn sample_media_file() -> MediaFile {
 
 fn sample_chapters() -> Vec<Chapter> {
     vec![
-        Chapter { title: "Opening Credits".to_string(), start: Duration::ZERO, end: Duration::from_secs(180) },
-        Chapter { title: "Act I - The Beginning".to_string(), start: Duration::from_secs(180), end: Duration::from_secs(1800) },
-        Chapter { title: "Act II - Rising Action".to_string(), start: Duration::from_secs(1800), end: Duration::from_secs(3600) },
-        Chapter { title: "Act III - Climax".to_string(), start: Duration::from_secs(3600), end: Duration::from_secs(5400) },
-        Chapter { title: "Act IV - Resolution".to_string(), start: Duration::from_secs(5400), end: Duration::from_secs(6900) },
-        Chapter { title: "End Credits".to_string(), start: Duration::from_secs(6900), end: Duration::from_secs(7200) },
+        Chapter {
+            title: "Opening Credits".to_string(),
+            start: Duration::ZERO,
+            end: Duration::from_secs(180),
+        },
+        Chapter {
+            title: "Act I - The Beginning".to_string(),
+            start: Duration::from_secs(180),
+            end: Duration::from_secs(1800),
+        },
+        Chapter {
+            title: "Act II - Rising Action".to_string(),
+            start: Duration::from_secs(1800),
+            end: Duration::from_secs(3600),
+        },
+        Chapter {
+            title: "Act III - Climax".to_string(),
+            start: Duration::from_secs(3600),
+            end: Duration::from_secs(5400),
+        },
+        Chapter {
+            title: "Act IV - Resolution".to_string(),
+            start: Duration::from_secs(5400),
+            end: Duration::from_secs(6900),
+        },
+        Chapter {
+            title: "End Credits".to_string(),
+            start: Duration::from_secs(6900),
+            end: Duration::from_secs(7200),
+        },
     ]
 }
 
@@ -3714,7 +4031,10 @@ mod tests {
 
     #[test]
     fn test_duration_format_precise() {
-        assert_eq!(Duration::from_millis(3661500).format_precise(), "01:01:01.500");
+        assert_eq!(
+            Duration::from_millis(3661500).format_precise(),
+            "01:01:01.500"
+        );
     }
 
     #[test]
@@ -3731,15 +4051,27 @@ mod tests {
 
     #[test]
     fn test_duration_saturating_ops() {
-        assert_eq!(Duration::from_secs(5).saturating_sub(Duration::from_secs(10)), Duration::ZERO);
-        assert_eq!(Duration::from_secs(5).saturating_add(Duration::from_secs(3)), Duration::from_secs(8));
+        assert_eq!(
+            Duration::from_secs(5).saturating_sub(Duration::from_secs(10)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            Duration::from_secs(5).saturating_add(Duration::from_secs(3)),
+            Duration::from_secs(8)
+        );
     }
 
     // Container format tests
     #[test]
     fn test_container_from_extension() {
-        assert_eq!(ContainerFormat::from_extension("mp4"), Some(ContainerFormat::Mp4));
-        assert_eq!(ContainerFormat::from_extension("MKV"), Some(ContainerFormat::Mkv));
+        assert_eq!(
+            ContainerFormat::from_extension("mp4"),
+            Some(ContainerFormat::Mp4)
+        );
+        assert_eq!(
+            ContainerFormat::from_extension("MKV"),
+            Some(ContainerFormat::Mkv)
+        );
         assert_eq!(ContainerFormat::from_extension("xyz"), None);
     }
 
@@ -3777,9 +4109,15 @@ mod tests {
     #[test]
     fn test_resolution_label() {
         let vs = VideoStream {
-            index: 0, codec: VideoCodec::H264, width: 1920, height: 1080,
-            frame_rate: 24.0, bit_rate: 5_000_000, pixel_format: "yuv420p".to_string(),
-            color_space: None, hdr: false,
+            index: 0,
+            codec: VideoCodec::H264,
+            width: 1920,
+            height: 1080,
+            frame_rate: 24.0,
+            bit_rate: 5_000_000,
+            pixel_format: "yuv420p".to_string(),
+            color_space: None,
+            hdr: false,
         };
         assert_eq!(vs.resolution_label(), "1080p (Full HD)");
     }
@@ -3787,9 +4125,15 @@ mod tests {
     #[test]
     fn test_aspect_ratio() {
         let vs = VideoStream {
-            index: 0, codec: VideoCodec::H264, width: 1920, height: 1080,
-            frame_rate: 24.0, bit_rate: 5_000_000, pixel_format: "yuv420p".to_string(),
-            color_space: None, hdr: false,
+            index: 0,
+            codec: VideoCodec::H264,
+            width: 1920,
+            height: 1080,
+            frame_rate: 24.0,
+            bit_rate: 5_000_000,
+            pixel_format: "yuv420p".to_string(),
+            color_space: None,
+            hdr: false,
         };
         assert_eq!(vs.aspect_ratio(), "16:9");
     }
@@ -3797,9 +4141,15 @@ mod tests {
     #[test]
     fn test_aspect_ratio_4_3() {
         let vs = VideoStream {
-            index: 0, codec: VideoCodec::Mpeg2, width: 640, height: 480,
-            frame_rate: 30.0, bit_rate: 2_000_000, pixel_format: "yuv420p".to_string(),
-            color_space: None, hdr: false,
+            index: 0,
+            codec: VideoCodec::Mpeg2,
+            width: 640,
+            height: 480,
+            frame_rate: 30.0,
+            bit_rate: 2_000_000,
+            pixel_format: "yuv420p".to_string(),
+            color_space: None,
+            hdr: false,
         };
         assert_eq!(vs.aspect_ratio(), "4:3");
     }
@@ -3808,9 +4158,14 @@ mod tests {
     #[test]
     fn test_audio_display_label() {
         let stream = AudioStream {
-            index: 1, codec: AudioCodec::Aac, sample_rate: 48000, channels: 2,
-            bit_rate: 192000, language: Some("English".to_string()),
-            title: None, is_default: true,
+            index: 1,
+            codec: AudioCodec::Aac,
+            sample_rate: 48000,
+            channels: 2,
+            bit_rate: 192000,
+            language: Some("English".to_string()),
+            title: None,
+            is_default: true,
         };
         assert_eq!(stream.display_label(), "English - AAC Stereo");
     }
@@ -3818,20 +4173,31 @@ mod tests {
     #[test]
     fn test_audio_display_label_with_title() {
         let stream = AudioStream {
-            index: 1, codec: AudioCodec::Ac3, sample_rate: 48000, channels: 6,
-            bit_rate: 640000, language: Some("English".to_string()),
-            title: Some("Commentary".to_string()), is_default: false,
+            index: 1,
+            codec: AudioCodec::Ac3,
+            sample_rate: 48000,
+            channels: 6,
+            bit_rate: 640000,
+            language: Some("English".to_string()),
+            title: Some("Commentary".to_string()),
+            is_default: false,
         };
-        assert_eq!(stream.display_label(), "Commentary (English) - Dolby Digital (AC-3) 5.1");
+        assert_eq!(
+            stream.display_label(),
+            "Commentary (English) - Dolby Digital (AC-3) 5.1"
+        );
     }
 
     // Subtitle tests
     #[test]
     fn test_subtitle_display_label() {
         let sub = SubtitleStream {
-            index: 0, format: SubtitleFormat::Srt,
-            language: Some("English".to_string()), title: None,
-            is_default: true, is_forced: false,
+            index: 0,
+            format: SubtitleFormat::Srt,
+            language: Some("English".to_string()),
+            title: None,
+            is_default: true,
+            is_forced: false,
         };
         assert_eq!(sub.display_label(), "English (SRT)");
     }
@@ -3839,9 +4205,12 @@ mod tests {
     #[test]
     fn test_subtitle_forced_label() {
         let sub = SubtitleStream {
-            index: 0, format: SubtitleFormat::Pgs,
-            language: Some("English".to_string()), title: Some("Signs".to_string()),
-            is_default: false, is_forced: true,
+            index: 0,
+            format: SubtitleFormat::Pgs,
+            language: Some("English".to_string()),
+            title: Some("Signs".to_string()),
+            is_default: false,
+            is_forced: true,
         };
         assert!(sub.display_label().contains("[Forced]"));
     }
@@ -4105,8 +4474,18 @@ mod tests {
     #[test]
     fn test_playlist_total_duration() {
         let mut pl = Playlist::new();
-        pl.add("a.mp4".to_string(), "a.mp4".to_string(), Some(Duration::from_secs(60)), None);
-        pl.add("b.mp4".to_string(), "b.mp4".to_string(), Some(Duration::from_secs(120)), None);
+        pl.add(
+            "a.mp4".to_string(),
+            "a.mp4".to_string(),
+            Some(Duration::from_secs(60)),
+            None,
+        );
+        pl.add(
+            "b.mp4".to_string(),
+            "b.mp4".to_string(),
+            Some(Duration::from_secs(120)),
+            None,
+        );
         pl.add("c.mp4".to_string(), "c.mp4".to_string(), None, None);
         assert_eq!(pl.total_duration(), Duration::from_secs(180));
     }
@@ -4219,11 +4598,35 @@ mod tests {
     #[test]
     fn test_recent_history() {
         let mut recent = RecentHistory::new(3);
-        recent.add("a.mp4".to_string(), "a.mp4".to_string(), Duration::ZERO, 100, None);
-        recent.add("b.mp4".to_string(), "b.mp4".to_string(), Duration::ZERO, 200, None);
-        recent.add("c.mp4".to_string(), "c.mp4".to_string(), Duration::ZERO, 300, None);
+        recent.add(
+            "a.mp4".to_string(),
+            "a.mp4".to_string(),
+            Duration::ZERO,
+            100,
+            None,
+        );
+        recent.add(
+            "b.mp4".to_string(),
+            "b.mp4".to_string(),
+            Duration::ZERO,
+            200,
+            None,
+        );
+        recent.add(
+            "c.mp4".to_string(),
+            "c.mp4".to_string(),
+            Duration::ZERO,
+            300,
+            None,
+        );
         assert_eq!(recent.files().len(), 3);
-        recent.add("d.mp4".to_string(), "d.mp4".to_string(), Duration::ZERO, 400, None);
+        recent.add(
+            "d.mp4".to_string(),
+            "d.mp4".to_string(),
+            Duration::ZERO,
+            400,
+            None,
+        );
         assert_eq!(recent.files().len(), 3);
         assert_eq!(recent.files()[0].file_name, "d.mp4");
     }
@@ -4231,9 +4634,27 @@ mod tests {
     #[test]
     fn test_recent_dedup() {
         let mut recent = RecentHistory::new(10);
-        recent.add("a.mp4".to_string(), "a.mp4".to_string(), Duration::from_secs(10), 100, None);
-        recent.add("b.mp4".to_string(), "b.mp4".to_string(), Duration::ZERO, 200, None);
-        recent.add("a.mp4".to_string(), "a.mp4".to_string(), Duration::from_secs(50), 300, None);
+        recent.add(
+            "a.mp4".to_string(),
+            "a.mp4".to_string(),
+            Duration::from_secs(10),
+            100,
+            None,
+        );
+        recent.add(
+            "b.mp4".to_string(),
+            "b.mp4".to_string(),
+            Duration::ZERO,
+            200,
+            None,
+        );
+        recent.add(
+            "a.mp4".to_string(),
+            "a.mp4".to_string(),
+            Duration::from_secs(50),
+            300,
+            None,
+        );
         assert_eq!(recent.files().len(), 2);
         assert_eq!(recent.files()[0].last_position, Duration::from_secs(50));
     }
@@ -4241,7 +4662,13 @@ mod tests {
     #[test]
     fn test_recent_find_by_path() {
         let mut recent = RecentHistory::new(10);
-        recent.add("a.mp4".to_string(), "a.mp4".to_string(), Duration::from_secs(30), 100, Some(Duration::from_secs(120)));
+        recent.add(
+            "a.mp4".to_string(),
+            "a.mp4".to_string(),
+            Duration::from_secs(30),
+            100,
+            Some(Duration::from_secs(120)),
+        );
         let found = recent.find_by_path("a.mp4").unwrap();
         assert_eq!(found.last_position, Duration::from_secs(30));
         assert!((found.progress_fraction() - 0.25).abs() < 0.01);
@@ -4447,13 +4874,22 @@ mod tests {
         app.current_file = Some(sample_media_file());
         app.chapters = sample_chapters();
         app.external_subtitles = parse_srt(sample_subtitle_srt());
-        app.playlist.add("test.mp4".to_string(), "test.mp4".to_string(), Some(Duration::from_secs(120)), None);
+        app.playlist.add(
+            "test.mp4".to_string(),
+            "test.mp4".to_string(),
+            Some(Duration::from_secs(120)),
+            None,
+        );
         app.playlist.set_current(0);
 
         for tab in PlayerTab::all() {
             app.active_tab = *tab;
             let cmds = app.render();
-            assert!(!cmds.is_empty(), "Tab {:?} produced no render commands", tab);
+            assert!(
+                !cmds.is_empty(),
+                "Tab {:?} produced no render commands",
+                tab
+            );
         }
     }
 

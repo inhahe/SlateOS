@@ -139,11 +139,7 @@ impl Suit {
 
     /// Display color for this suit.
     fn color(self) -> Color {
-        if self.is_red() {
-            CARD_RED
-        } else {
-            CARD_BLACK
-        }
+        if self.is_red() { CARD_RED } else { CARD_BLACK }
     }
 
     /// Index 0..3 for foundation ordering.
@@ -694,10 +690,7 @@ impl GameState {
 
     /// Check if the game is won (all foundations have 13 cards).
     fn check_win(&mut self) {
-        self.won = self
-            .foundations
-            .iter()
-            .all(|f| f.len() == 13);
+        self.won = self.foundations.iter().all(|f| f.len() == 13);
     }
 
     /// Auto-move: try to send the currently available card to its foundation.
@@ -879,7 +872,11 @@ impl GameState {
                         let fu = self.tableau_face_up_count(col);
                         if fu > 0 {
                             // Select from the offset position.
-                            let idx = if offset < fu { offset } else { fu.saturating_sub(1) };
+                            let idx = if offset < fu {
+                                offset
+                            } else {
+                                fu.saturating_sub(1)
+                            };
                             self.selection = Some(Selection::Tableau(col, idx));
                         }
                     }
@@ -998,7 +995,7 @@ impl GameState {
             }
             FocusArea::Tableau(col, offset) if delta < 0 && offset == 0 => {
                 // Move up from tableau to top row.
-                if col <= 0 {
+                if col == 0 {
                     self.focus = FocusArea::Stock;
                 } else if col == 1 {
                     self.focus = FocusArea::Waste;
@@ -1071,9 +1068,7 @@ impl GameState {
 
     /// Compute the y position for a card in a tableau column.
     fn tableau_card_y(face_down_count: usize, face_up_idx: usize) -> f32 {
-        TABLEAU_Y
-            + face_down_count as f32 * FACE_DOWN_OFFSET
-            + face_up_idx as f32 * CARD_GAP_Y
+        TABLEAU_Y + face_down_count as f32 * FACE_DOWN_OFFSET + face_up_idx as f32 * CARD_GAP_Y
     }
 
     /// Generate render commands for the entire game.
@@ -1198,13 +1193,7 @@ impl GameState {
     }
 
     /// Render a foundation pile.
-    fn render_foundation(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        idx: usize,
-        x: f32,
-        y: f32,
-    ) {
+    fn render_foundation(&self, cmds: &mut Vec<RenderCommand>, idx: usize, x: f32, y: f32) {
         let is_focused = self.focus == FocusArea::Foundation(idx);
         let is_selected = self.selection == Some(Selection::Foundation(idx));
 
@@ -1276,13 +1265,7 @@ impl GameState {
     }
 
     /// Render an empty pile placeholder.
-    fn render_empty_pile(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        focused: bool,
-    ) {
+    fn render_empty_pile(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, focused: bool) {
         let border_color = if focused { CURSOR_HIGHLIGHT } else { OVERLAY0 };
         cmds.push(RenderCommand::StrokeRect {
             x,
@@ -1304,13 +1287,7 @@ impl GameState {
     }
 
     /// Render a face-down card back.
-    fn render_card_back(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        focused: bool,
-    ) {
+    fn render_card_back(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, focused: bool) {
         // Border.
         if focused {
             cmds.push(RenderCommand::StrokeRect {
@@ -1567,11 +1544,27 @@ mod tests {
     }
 
     fn press(state: &mut GameState, key: Key) {
-        state.handle_key(key, Modifiers { shift: false, ctrl: false, alt: false, super_key: false });
+        state.handle_key(
+            key,
+            Modifiers {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
+        );
     }
 
     fn press_shift(state: &mut GameState, key: Key) {
-        state.handle_key(key, Modifiers { shift: true, ctrl: false, alt: false, super_key: false });
+        state.handle_key(
+            key,
+            Modifiers {
+                shift: true,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
+        );
     }
 
     // ── Deck & Card tests ──────────────────────────────────────────
@@ -2149,8 +2142,7 @@ mod tests {
         for col in 0..TABLEAU_COLS {
             if let Some(top) = gs.tableau[col].last() {
                 if top.card.rank == Rank::Ace {
-                    gs.tableau[col].last_mut().unwrap().card =
-                        card(Suit::Hearts, Rank::King);
+                    gs.tableau[col].last_mut().unwrap().card = card(Suit::Hearts, Rank::King);
                 }
             }
         }
@@ -2501,9 +2493,9 @@ mod tests {
     fn test_render_has_title() {
         let gs = new_game();
         let cmds = gs.render();
-        let has_title = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "Solitaire")
-        });
+        let has_title = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Solitaire"));
         assert!(has_title);
     }
 
@@ -2512,9 +2504,9 @@ mod tests {
         let mut gs = new_game();
         gs.won = true;
         let cmds = gs.render();
-        let has_win = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "You Win!")
-        });
+        let has_win = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "You Win!"));
         assert!(has_win);
     }
 
@@ -2523,9 +2515,9 @@ mod tests {
         let mut gs = new_game();
         gs.move_count = 42;
         let cmds = gs.render();
-        let has_count = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "Moves: 42")
-        });
+        let has_count = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Moves: 42"));
         assert!(has_count);
     }
 
@@ -2633,7 +2625,12 @@ mod tests {
         let mut app = SolitaireApp::new();
         app.handle_event(Event::Key(KeyEvent {
             key: Key::Tab,
-            modifiers: Modifiers { shift: false, ctrl: false, alt: false, super_key: false },
+            modifiers: Modifiers {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
             pressed: true,
             text: None,
         }));
@@ -2645,7 +2642,12 @@ mod tests {
         let mut app = SolitaireApp::new();
         app.handle_event(Event::Key(KeyEvent {
             key: Key::Tab,
-            modifiers: Modifiers { shift: false, ctrl: false, alt: false, super_key: false },
+            modifiers: Modifiers {
+                shift: false,
+                ctrl: false,
+                alt: false,
+                super_key: false,
+            },
             pressed: false,
             text: None,
         }));

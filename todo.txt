@@ -1,3 +1,12 @@
+## BUG (noticed+FIXED 2026-05-31): apps/solitaire — `cargo clippy` failed on a
+##   deny-by-default correctness lint (absurd_extreme_comparisons). At main.rs:1001
+##   the keyboard-focus navigation tested `if col <= 0` where `col` is an unsigned
+##   column index, so the `<` case can never occur — clippy flags it as always-equal-
+##   to-`col == 0`. The intent is "tableau column 0 → focus Stock"; changed to
+##   `col == 0`. Harmless in behavior but a real code-clarity/correctness smell, and it
+##   broke clippy for the crate. solitaire 114/114 tests pass; clippy error gone
+##   (style warnings remain, consistent with other non-pedantic-denying apps); ouros OK.
+##
 ## BUG (noticed+FIXED 2026-05-31): 17 apps failed `cargo clippy` (clippy::all/pedantic
 ##   deny breaks) — passwordgen, filesearch, snippets, dbviewer, undelete, renamer,
 ##   jsonviewer, qrcode, automator, sysmonitor, diagram, mediaconvert, photomanager,

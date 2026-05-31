@@ -255,6 +255,31 @@
 ##  when the corresponding kernel syscalls land (check roadmap for
 ##  net-config / mount / fs-admin syscall tasks).
 ##
+##  AUDIT CONCLUSION (2026-05-31): re-swept the "NO SUCH SYSCALL" group after
+##  discovering the fs-admin syscalls (FS_METADATA=628, FS_SET_OWNER=630,
+##  FS_SET_PERMS=631, FS_STATVFS=608) actually exist with live handlers.  THREE
+##  entries were mis-classified and are now FIXED: chown/chmod, df, and monctl
+##  (monctl had a real alternative — sysfs — so it was fixable even though no
+##  DPMS/backlight syscall exists).  The remaining SIX are CONFIRMED genuine
+##  design gaps — each verified absent from kernel/src/syscall/number.rs:
+##    * net-config (dhcpcd, fw, ifconfig, ip, nft, route): all use
+##      SYS_NET_IOCTL=810 (=UDP_BIND) for interface/route/DNS/firewall WRITES.
+##      No net-config write syscall exists; only NET_IF_INFO=842 / ARP_TABLE=843
+##      (read-only).  Unlike monctl there is no sysfs write path present, so
+##      neutering the bad syscall would just make every command fail with no
+##      alternative.  Needs a real net-config ABI or a network-manager daemon
+##      over IPC.  (A future partial win: wire the READ paths — ifconfig with no
+##      args, `ip addr show`, `route -n` — to NET_IF_INFO=842.)
+##    * mount/umount: no MOUNT/UMOUNT syscall (the numbers it used, 620/621, are
+##      FS_TRASH_RESTORE/EMPTY).
+##    * mkfs/fsck/diskutil: no FS_FORMAT/FS_VERIFY/FS_REPAIR/FS_TRIM syscall
+##      (650-655 are SEEK_DATA/SEEK_HOLE + unassigned).
+##    * chroot: no CHROOT/CHDIR/SETUID/SETGID/SETGROUPS syscall — needs a proper
+##      process-credential + filesystem-root ABI.
+##    * stty: no SYS_IOCTL/termios path (see terminal-attr DESIGN GAP below).
+##  So the deferred group is now exactly these six; no further mis-classifications
+##  remain.  TRIGGER unchanged: revisit when the matching kernel ABI lands.
+##
 ##  PROGRESS (2026-05-30):
 ##   [x] jq  — std rewrite committed (d07a1eda).  write_stdout/write_stderr now
 ##           use std::io; reading/exit already std.  Build clean, tests pass

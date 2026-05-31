@@ -1,3 +1,11 @@
+## BUG (noticed+FIXED 2026-05-31): nft had a non-compiling test build + 15
+##   pre-existing clippy errors.  userspace/nft/src/main.rs:
+##     * TEST BUILD DIDN'T COMPILE: test_nft_list_ruleset passed `&rs` to
+##       nft_command, which takes `&mut Ruleset` (every other call site uses
+##       `&mut rs`).  A test typo; changed to `&mut rs`.  102/102 tests pass.
+##     * 15 pre-existing collapsible-if clippy errors, auto-fixed.
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): avahi had 1 failing test (off-by-one in
 ##   the autoipd conflict limit) + ~10 pre-existing clippy errors.
 ##   userspace/avahi/src/main.rs:

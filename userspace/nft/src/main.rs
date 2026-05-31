@@ -560,7 +560,10 @@ impl Ruleset {
             self.tables.remove(idx);
             Ok(())
         } else {
-            Err(format!("Error: No such table '{}' in family {}", name, family))
+            Err(format!(
+                "Error: No such table '{}' in family {}",
+                name, family
+            ))
         }
     }
 
@@ -573,16 +576,14 @@ impl Ruleset {
             }
             Ok(())
         } else {
-            Err(format!("Error: No such table '{}' in family {}", name, family))
+            Err(format!(
+                "Error: No such table '{}' in family {}",
+                name, family
+            ))
         }
     }
 
-    fn add_chain(
-        &mut self,
-        family: Family,
-        table_name: &str,
-        chain: Chain,
-    ) -> Result<(), String> {
+    fn add_chain(&mut self, family: Family, table_name: &str, chain: Chain) -> Result<(), String> {
         let idx = self
             .find_table(family, table_name)
             .ok_or_else(|| format!("Error: No such table '{}'", table_name))?;
@@ -610,7 +611,10 @@ impl Ruleset {
                 t.chains.remove(cidx);
                 Ok(())
             } else {
-                Err(format!("Error: No such chain '{}' in table {}", chain_name, table_name))
+                Err(format!(
+                    "Error: No such chain '{}' in table {}",
+                    chain_name, table_name
+                ))
             }
         } else {
             Err(format!("Error: No such table '{}'", table_name))
@@ -629,10 +633,10 @@ impl Ruleset {
         let cidx = self
             .find_chain(tidx, chain_name)
             .ok_or_else(|| format!("Error: No such chain '{}'", chain_name))?;
-        if let Some(t) = self.tables.get_mut(tidx) {
-            if let Some(c) = t.chains.get_mut(cidx) {
-                c.rules.clear();
-            }
+        if let Some(t) = self.tables.get_mut(tidx)
+            && let Some(c) = t.chains.get_mut(cidx)
+        {
+            c.rules.clear();
         }
         Ok(())
     }
@@ -651,10 +655,10 @@ impl Ruleset {
             .find_chain(tidx, chain_name)
             .ok_or_else(|| format!("Error: No such chain '{}'", chain_name))?;
         let handle = rule.handle;
-        if let Some(t) = self.tables.get_mut(tidx) {
-            if let Some(c) = t.chains.get_mut(cidx) {
-                c.rules.push(rule);
-            }
+        if let Some(t) = self.tables.get_mut(tidx)
+            && let Some(c) = t.chains.get_mut(cidx)
+        {
+            c.rules.push(rule);
         }
         Ok(handle)
     }
@@ -672,13 +676,16 @@ impl Ruleset {
         let cidx = self
             .find_chain(tidx, chain_name)
             .ok_or_else(|| format!("Error: No such chain '{}'", chain_name))?;
-        if let Some(t) = self.tables.get_mut(tidx) {
-            if let Some(c) = t.chains.get_mut(cidx) {
-                let before = c.rules.len();
-                c.rules.retain(|r| r.handle != handle);
-                if c.rules.len() == before {
-                    return Err(format!("Error: No rule with handle {} in chain {}", handle, chain_name));
-                }
+        if let Some(t) = self.tables.get_mut(tidx)
+            && let Some(c) = t.chains.get_mut(cidx)
+        {
+            let before = c.rules.len();
+            c.rules.retain(|r| r.handle != handle);
+            if c.rules.len() == before {
+                return Err(format!(
+                    "Error: No rule with handle {} in chain {}",
+                    handle, chain_name
+                ));
             }
         }
         Ok(())
@@ -699,25 +706,20 @@ impl Ruleset {
             .find_chain(tidx, chain_name)
             .ok_or_else(|| format!("Error: No such chain '{}'", chain_name))?;
         let handle = rule.handle;
-        if let Some(t) = self.tables.get_mut(tidx) {
-            if let Some(c) = t.chains.get_mut(cidx) {
-                let pos = if position > c.rules.len() {
-                    c.rules.len()
-                } else {
-                    position
-                };
-                c.rules.insert(pos, rule);
-            }
+        if let Some(t) = self.tables.get_mut(tidx)
+            && let Some(c) = t.chains.get_mut(cidx)
+        {
+            let pos = if position > c.rules.len() {
+                c.rules.len()
+            } else {
+                position
+            };
+            c.rules.insert(pos, rule);
         }
         Ok(handle)
     }
 
-    fn add_set(
-        &mut self,
-        family: Family,
-        table_name: &str,
-        set: NftSet,
-    ) -> Result<(), String> {
+    fn add_set(&mut self, family: Family, table_name: &str, set: NftSet) -> Result<(), String> {
         let tidx = self
             .find_table(family, table_name)
             .ok_or_else(|| format!("Error: No such table '{}'", table_name))?;
@@ -754,12 +756,7 @@ impl Ruleset {
         }
     }
 
-    fn add_map(
-        &mut self,
-        family: Family,
-        table_name: &str,
-        map: NftMap,
-    ) -> Result<(), String> {
+    fn add_map(&mut self, family: Family, table_name: &str, map: NftMap) -> Result<(), String> {
         let tidx = self
             .find_table(family, table_name)
             .ok_or_else(|| format!("Error: No such table '{}'", table_name))?;
@@ -795,12 +792,7 @@ impl Ruleset {
         }
     }
 
-    fn add_counter(
-        &mut self,
-        family: Family,
-        table_name: &str,
-        name: &str,
-    ) -> Result<(), String> {
+    fn add_counter(&mut self, family: Family, table_name: &str, name: &str) -> Result<(), String> {
         let tidx = self
             .find_table(family, table_name)
             .ok_or_else(|| format!("Error: No such table '{}'", table_name))?;
@@ -836,12 +828,12 @@ fn format_ruleset(rs: &Ruleset, out: &mut dyn Write) -> io::Result<()> {
 fn format_table(table: &Table, out: &mut dyn Write) -> io::Result<()> {
     writeln!(out, "table {} {} {{", table.family, table.name)?;
     for counter in &table.counters {
+        writeln!(out, "\tcounter {} {{", counter.name)?;
         writeln!(
             out,
-            "\tcounter {} {{",
-            counter.name
+            "\t\tpackets {} bytes {}",
+            counter.packets, counter.bytes
         )?;
-        writeln!(out, "\t\tpackets {} bytes {}", counter.packets, counter.bytes)?;
         writeln!(out, "\t}}")?;
     }
     for set in &table.sets {
@@ -877,7 +869,11 @@ fn format_chain(chain: &Chain, out: &mut dyn Write) -> io::Result<()> {
     if let (Some(ct), Some(hook), Some(prio), Some(pol)) =
         (chain.chain_type, chain.hook, chain.priority, chain.policy)
     {
-        writeln!(out, "\t\ttype {} hook {} priority {} ; policy {} ;", ct, hook, prio, pol)?;
+        writeln!(
+            out,
+            "\t\ttype {} hook {} priority {} ; policy {} ;",
+            ct, hook, prio, pol
+        )?;
     }
     for rule in &chain.rules {
         writeln!(out, "\t\t{}", rule)?;
@@ -940,14 +936,13 @@ fn parse_match(tokens: &[&str]) -> Option<(MatchExpr, usize)> {
                             let hi: u16 = port_str[dash + 1..].parse().ok()?;
                             // We also want protocol match implied
                             let proto = Protocol::parse(proto_str)?;
-                            return Some((MatchExpr::Protocol(proto), 1))
-                                .map(|(m, c)| {
-                                    // Return two matches combined as just the dport range
-                                    // since Protocol is consumed separately — actually let
-                                    // the caller handle protocol.
-                                    let _ = m;
-                                    (MatchExpr::DportRange(lo, hi), c + 2)
-                                });
+                            return Some((MatchExpr::Protocol(proto), 1)).map(|(m, c)| {
+                                // Return two matches combined as just the dport range
+                                // since Protocol is consumed separately — actually let
+                                // the caller handle protocol.
+                                let _ = m;
+                                (MatchExpr::DportRange(lo, hi), c + 2)
+                            });
                         }
                         if let Ok(port) = port_str.parse::<u16>() {
                             return Some((MatchExpr::Dport(port), 3));
@@ -988,12 +983,10 @@ fn parse_match(tokens: &[&str]) -> Option<(MatchExpr, usize)> {
             let name = tokens.get(1).unwrap_or(&"").trim_matches('"');
             Some((MatchExpr::Oif(name.to_string()), 2))
         }
-        Some("ct") if tokens.len() >= 3 && tokens.get(1).copied() == Some("state") => {
-            Some((
-                MatchExpr::CtState(tokens.get(2).unwrap_or(&"").to_string()),
-                3,
-            ))
-        }
+        Some("ct") if tokens.len() >= 3 && tokens.get(1).copied() == Some("state") => Some((
+            MatchExpr::CtState(tokens.get(2).unwrap_or(&"").to_string()),
+            3,
+        )),
         Some("meta") if tokens.len() >= 3 => Some((
             MatchExpr::Meta(
                 tokens.get(1).unwrap_or(&"").to_string(),
@@ -1037,25 +1030,17 @@ fn parse_verdict(tokens: &[&str]) -> Option<(Verdict, usize)> {
             }
         }
         Some("snat") if tokens.len() >= 3 && tokens.get(1).copied() == Some("to") => {
-            Some((
-                Verdict::Snat(tokens.get(2).unwrap_or(&"").to_string()),
-                3,
-            ))
+            Some((Verdict::Snat(tokens.get(2).unwrap_or(&"").to_string()), 3))
         }
         Some("dnat") if tokens.len() >= 3 && tokens.get(1).copied() == Some("to") => {
-            Some((
-                Verdict::Dnat(tokens.get(2).unwrap_or(&"").to_string()),
-                3,
-            ))
+            Some((Verdict::Dnat(tokens.get(2).unwrap_or(&"").to_string()), 3))
         }
-        Some("jump") if tokens.len() >= 2 => Some((
-            Verdict::Jump(tokens.get(1).unwrap_or(&"").to_string()),
-            2,
-        )),
-        Some("goto") if tokens.len() >= 2 => Some((
-            Verdict::Goto(tokens.get(1).unwrap_or(&"").to_string()),
-            2,
-        )),
+        Some("jump") if tokens.len() >= 2 => {
+            Some((Verdict::Jump(tokens.get(1).unwrap_or(&"").to_string()), 2))
+        }
+        Some("goto") if tokens.len() >= 2 => {
+            Some((Verdict::Goto(tokens.get(1).unwrap_or(&"").to_string()), 2))
+        }
         _ => None,
     }
 }
@@ -1106,11 +1091,7 @@ fn parse_rule_expr(tokens: &[&str], handle: u64) -> Result<Rule, String> {
 // ============================================================================
 
 /// Process a single nft command.
-fn nft_command(
-    rs: &mut Ruleset,
-    args: &[&str],
-    out: &mut dyn Write,
-) -> Result<(), String> {
+fn nft_command(rs: &mut Ruleset, args: &[&str], out: &mut dyn Write) -> Result<(), String> {
     if args.is_empty() {
         return Err("Error: no command specified".to_string());
     }
@@ -1127,11 +1108,7 @@ fn nft_command(
     }
 }
 
-fn nft_add(
-    rs: &mut Ruleset,
-    args: &[&str],
-    _out: &mut dyn Write,
-) -> Result<(), String> {
+fn nft_add(rs: &mut Ruleset, args: &[&str], _out: &mut dyn Write) -> Result<(), String> {
     if args.is_empty() {
         return Err("Error: 'add' requires an object type".to_string());
     }
@@ -1180,21 +1157,13 @@ fn nft_delete(rs: &mut Ruleset, args: &[&str]) -> Result<(), String> {
     }
 }
 
-fn nft_list(
-    rs: &Ruleset,
-    args: &[&str],
-    out: &mut dyn Write,
-) -> Result<(), String> {
+fn nft_list(rs: &Ruleset, args: &[&str], out: &mut dyn Write) -> Result<(), String> {
     if args.is_empty() {
         return Err("Error: 'list' requires an object type".to_string());
     }
     match args.first().copied() {
-        Some("ruleset") => {
-            format_ruleset(rs, out).map_err(|e| e.to_string())
-        }
-        Some("tables") => {
-            format_tables_list(rs, out).map_err(|e| e.to_string())
-        }
+        Some("ruleset") => format_ruleset(rs, out).map_err(|e| e.to_string()),
+        Some("tables") => format_tables_list(rs, out).map_err(|e| e.to_string()),
         Some("table") => {
             let (family, name) = parse_family_name(&args[1..])?;
             if let Some(idx) = rs.find_table(family, name) {
@@ -1204,7 +1173,10 @@ fn nft_list(
                     Err(format!("Error: No such table '{}'", name))
                 }
             } else {
-                Err(format!("Error: No such table '{}' in family {}", name, family))
+                Err(format!(
+                    "Error: No such table '{}' in family {}",
+                    name, family
+                ))
             }
         }
         Some("chain") => {
@@ -1217,8 +1189,7 @@ fn nft_list(
                 .ok_or_else(|| format!("Error: No such chain '{}'", chain_name))?;
             if let Some(t) = rs.tables.get(tidx) {
                 if let Some(c) = t.chains.get(cidx) {
-                    writeln!(out, "table {} {} {{", t.family, t.name)
-                        .map_err(|e| e.to_string())?;
+                    writeln!(out, "table {} {} {{", t.family, t.name).map_err(|e| e.to_string())?;
                     format_chain(c, out).map_err(|e| e.to_string())?;
                     writeln!(out, "}}").map_err(|e| e.to_string())?;
                     Ok(())
@@ -1274,10 +1245,13 @@ fn nft_list(
                 for counter in &table.counters {
                     writeln!(out, "table {} {} {{", table.family, table.name)
                         .map_err(|e| e.to_string())?;
-                    writeln!(out, "\tcounter {} {{", counter.name)
-                        .map_err(|e| e.to_string())?;
-                    writeln!(out, "\t\tpackets {} bytes {}", counter.packets, counter.bytes)
-                        .map_err(|e| e.to_string())?;
+                    writeln!(out, "\tcounter {} {{", counter.name).map_err(|e| e.to_string())?;
+                    writeln!(
+                        out,
+                        "\t\tpackets {} bytes {}",
+                        counter.packets, counter.bytes
+                    )
+                    .map_err(|e| e.to_string())?;
                     writeln!(out, "\t}}").map_err(|e| e.to_string())?;
                     writeln!(out, "}}").map_err(|e| e.to_string())?;
                 }
@@ -1335,7 +1309,10 @@ fn nft_create(rs: &mut Ruleset, args: &[&str]) -> Result<(), String> {
         Some("table") => {
             let (family, name) = parse_family_name(&args[1..])?;
             if rs.find_table(family, name).is_some() {
-                return Err(format!("Error: table '{}' already exists in family {}", name, family));
+                return Err(format!(
+                    "Error: table '{}' already exists in family {}",
+                    name, family
+                ));
             }
             rs.add_table(family, name)
         }
@@ -1615,20 +1592,20 @@ fn parse_family_name<'a>(args: &[&'a str]) -> Result<(Family, &'a str), String> 
     if args.is_empty() {
         return Err("Error: expected <name>".to_string());
     }
-    if args.len() >= 2 {
-        if let Some(f) = Family::parse(args.first().copied().unwrap_or("")) {
-            return Ok((f, args.get(1).copied().unwrap_or("")));
-        }
+    if args.len() >= 2
+        && let Some(f) = Family::parse(args.first().copied().unwrap_or(""))
+    {
+        return Ok((f, args.get(1).copied().unwrap_or("")));
     }
     Ok((Family::Ip, args.first().copied().unwrap_or("")))
 }
 
 /// Split optional leading family token from args.
 fn split_family<'a>(args: &'a [&'a str]) -> (Family, &'a [&'a str]) {
-    if let Some(first) = args.first() {
-        if let Some(f) = Family::parse(first) {
-            return (f, &args[1..]);
-        }
+    if let Some(first) = args.first()
+        && let Some(f) = Family::parse(first)
+    {
+        return (f, &args[1..]);
     }
     (Family::Ip, args)
 }
@@ -1779,11 +1756,11 @@ fn parse_iptables_args(args: &[&str], ipv6: bool) -> Result<IptablesCmd, String>
                 i += 1;
                 cmd.chain = args.get(i).copied().unwrap_or("").to_string();
                 // Check if next arg is a number (delete by rule number)
-                if let Some(next) = args.get(i + 1) {
-                    if let Ok(n) = next.parse::<usize>() {
-                        cmd.rule_num = Some(n);
-                        i += 1;
-                    }
+                if let Some(next) = args.get(i + 1)
+                    && let Ok(n) = next.parse::<usize>()
+                {
+                    cmd.rule_num = Some(n);
+                    i += 1;
                 }
             }
             "-I" => {
@@ -1791,29 +1768,29 @@ fn parse_iptables_args(args: &[&str], ipv6: bool) -> Result<IptablesCmd, String>
                 i += 1;
                 cmd.chain = args.get(i).copied().unwrap_or("").to_string();
                 // Optional rule number
-                if let Some(next) = args.get(i + 1) {
-                    if let Ok(n) = next.parse::<usize>() {
-                        cmd.rule_num = Some(n);
-                        i += 1;
-                    }
+                if let Some(next) = args.get(i + 1)
+                    && let Ok(n) = next.parse::<usize>()
+                {
+                    cmd.rule_num = Some(n);
+                    i += 1;
                 }
             }
             "-L" | "--list" => {
                 cmd.action = IptAction::List;
-                if let Some(next) = args.get(i + 1) {
-                    if !next.starts_with('-') {
-                        cmd.chain = next.to_string();
-                        i += 1;
-                    }
+                if let Some(next) = args.get(i + 1)
+                    && !next.starts_with('-')
+                {
+                    cmd.chain = next.to_string();
+                    i += 1;
                 }
             }
             "-F" | "--flush" => {
                 cmd.action = IptAction::Flush;
-                if let Some(next) = args.get(i + 1) {
-                    if !next.starts_with('-') {
-                        cmd.chain = next.to_string();
-                        i += 1;
-                    }
+                if let Some(next) = args.get(i + 1)
+                    && !next.starts_with('-')
+                {
+                    cmd.chain = next.to_string();
+                    i += 1;
                 }
             }
             "-P" => {
@@ -1889,12 +1866,11 @@ fn parse_iptables_args(args: &[&str], ipv6: bool) -> Result<IptablesCmd, String>
                 let module = args.get(i).copied().unwrap_or("");
                 if module == "state" || module == "conntrack" {
                     // Look for --state / --ctstate next
-                    if let Some(next) = args.get(i + 1) {
-                        if *next == "--state" || *next == "--ctstate" {
-                            i += 2;
-                            cmd.ct_state =
-                                Some(args.get(i).copied().unwrap_or("").to_string());
-                        }
+                    if let Some(next) = args.get(i + 1)
+                        && (*next == "--state" || *next == "--ctstate")
+                    {
+                        i += 2;
+                        cmd.ct_state = Some(args.get(i).copied().unwrap_or("").to_string());
                     }
                 }
             }
@@ -1963,11 +1939,7 @@ fn iptables_to_nft_rule(cmd: &IptablesCmd, handle: u64) -> Rule {
 
 /// Map iptables table names to nft table + chain type / hook combinations.
 fn iptables_table_family(cmd: &IptablesCmd) -> Family {
-    if cmd.ipv6 {
-        Family::Ip6
-    } else {
-        Family::Ip
-    }
+    if cmd.ipv6 { Family::Ip6 } else { Family::Ip }
 }
 
 /// Ensure the iptables-compatible table + default chains exist.
@@ -2010,11 +1982,7 @@ fn ensure_iptables_table(rs: &mut Ruleset, cmd: &IptablesCmd) {
 }
 
 /// Execute a parsed iptables command.
-fn exec_iptables(
-    rs: &mut Ruleset,
-    cmd: &IptablesCmd,
-    out: &mut dyn Write,
-) -> Result<(), String> {
+fn exec_iptables(rs: &mut Ruleset, cmd: &IptablesCmd, out: &mut dyn Write) -> Result<(), String> {
     let prog = if cmd.ipv6 { "ip6tables" } else { "iptables" };
     match cmd.action {
         IptAction::Help => {
@@ -2050,10 +2018,7 @@ fn exec_iptables(
                     if let Some(c) = table.chains.iter().find(|c| c.name == cmd.chain) {
                         format_iptables_chain(c, cmd.numeric, out)?;
                     } else {
-                        return Err(format!(
-                            "{}: No chain/target/match by that name.",
-                            prog
-                        ));
+                        return Err(format!("{}: No chain/target/match by that name.", prog));
                     }
                 }
             }
@@ -2082,13 +2047,11 @@ fn exec_iptables(
                 .ok_or_else(|| format!("Error: table '{}' not found", cmd.table))?;
             let cidx = rs
                 .find_chain(tidx, &cmd.chain)
-                .ok_or_else(|| {
-                    format!("{}: No chain/target/match by that name.", prog)
-                })?;
-            if let Some(t) = rs.tables.get_mut(tidx) {
-                if let Some(c) = t.chains.get_mut(cidx) {
-                    c.policy = Some(pol);
-                }
+                .ok_or_else(|| format!("{}: No chain/target/match by that name.", prog))?;
+            if let Some(t) = rs.tables.get_mut(tidx)
+                && let Some(c) = t.chains.get_mut(cidx)
+            {
+                c.policy = Some(pol);
             }
             Ok(())
         }
@@ -2119,22 +2082,17 @@ fn exec_iptables(
                     .ok_or_else(|| format!("Error: table '{}' not found", cmd.table))?;
                 let cidx = rs
                     .find_chain(tidx, &cmd.chain)
-                    .ok_or_else(|| {
-                        format!("{}: No chain/target/match by that name.", prog)
-                    })?;
-                let idx = num.checked_sub(1).ok_or_else(|| {
-                    format!("{}: Invalid rule number.", prog)
-                })?;
-                if let Some(t) = rs.tables.get_mut(tidx) {
-                    if let Some(c) = t.chains.get_mut(cidx) {
-                        if idx >= c.rules.len() {
-                            return Err(format!(
-                                "{}: Index of deletion too big.",
-                                prog
-                            ));
-                        }
-                        c.rules.remove(idx);
+                    .ok_or_else(|| format!("{}: No chain/target/match by that name.", prog))?;
+                let idx = num
+                    .checked_sub(1)
+                    .ok_or_else(|| format!("{}: Invalid rule number.", prog))?;
+                if let Some(t) = rs.tables.get_mut(tidx)
+                    && let Some(c) = t.chains.get_mut(cidx)
+                {
+                    if idx >= c.rules.len() {
+                        return Err(format!("{}: Index of deletion too big.", prog));
                     }
+                    c.rules.remove(idx);
                 }
                 Ok(())
             } else {
@@ -2145,18 +2103,15 @@ fn exec_iptables(
                     .ok_or_else(|| format!("Error: table '{}' not found", cmd.table))?;
                 let cidx = rs
                     .find_chain(tidx, &cmd.chain)
-                    .ok_or_else(|| {
-                        format!("{}: No chain/target/match by that name.", prog)
-                    })?;
-                if let Some(t) = rs.tables.get_mut(tidx) {
-                    if let Some(c) = t.chains.get_mut(cidx) {
-                        if let Some(pos) = c.rules.iter().position(|r| {
-                            r.matches == target_rule.matches && r.verdicts == target_rule.verdicts
-                        }) {
-                            c.rules.remove(pos);
-                            return Ok(());
-                        }
-                    }
+                    .ok_or_else(|| format!("{}: No chain/target/match by that name.", prog))?;
+                if let Some(t) = rs.tables.get_mut(tidx)
+                    && let Some(c) = t.chains.get_mut(cidx)
+                    && let Some(pos) = c.rules.iter().position(|r| {
+                        r.matches == target_rule.matches && r.verdicts == target_rule.verdicts
+                    })
+                {
+                    c.rules.remove(pos);
+                    return Ok(());
                 }
                 Err(format!(
                     "{}: Bad rule (does a matching rule exist in that chain?).",
@@ -2177,11 +2132,7 @@ fn exec_iptables(
     }
 }
 
-fn format_iptables_chain(
-    chain: &Chain,
-    _numeric: bool,
-    out: &mut dyn Write,
-) -> Result<(), String> {
+fn format_iptables_chain(chain: &Chain, _numeric: bool, out: &mut dyn Write) -> Result<(), String> {
     let policy_str = chain
         .policy
         .map(|p| match p {
@@ -2191,11 +2142,7 @@ fn format_iptables_chain(
         .unwrap_or("-");
 
     if chain.chain_type.is_some() {
-        let _ = writeln!(
-            out,
-            "Chain {} (policy {})",
-            chain.name, policy_str
-        );
+        let _ = writeln!(out, "Chain {} (policy {})", chain.name, policy_str);
     } else {
         let _ = writeln!(out, "Chain {} (0 references)", chain.name);
     }
@@ -2334,7 +2281,10 @@ fn run_nft(args: &[&str], out: &mut dyn Write) -> i32 {
         let _ = writeln!(out, "\nCommands:");
         let _ = writeln!(out, "  add table|chain|rule|set|map|element|counter ...");
         let _ = writeln!(out, "  delete table|chain|rule ...");
-        let _ = writeln!(out, "  list ruleset|tables|table|chain|sets|maps|counters ...");
+        let _ = writeln!(
+            out,
+            "  list ruleset|tables|table|chain|sets|maps|counters ..."
+        );
         let _ = writeln!(out, "  flush ruleset|table|chain ...");
         let _ = writeln!(out, "  insert rule ...");
         let _ = writeln!(out, "  create table|chain ...");
@@ -2479,10 +2429,7 @@ mod tests {
             Verdict::Jump("my_chain".to_string()).to_string(),
             "jump my_chain"
         );
-        assert_eq!(
-            Verdict::Goto("other".to_string()).to_string(),
-            "goto other"
-        );
+        assert_eq!(Verdict::Goto("other".to_string()).to_string(), "goto other");
     }
 
     #[test]
@@ -2531,7 +2478,8 @@ mod tests {
     fn test_flush_table() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "filter").unwrap();
-        rs.add_chain(Family::Ip, "filter", Chain::new("input")).unwrap();
+        rs.add_chain(Family::Ip, "filter", Chain::new("input"))
+            .unwrap();
         let h = rs.alloc_handle();
         let mut rule = Rule::new(h);
         rule.verdicts.push(Verdict::Accept);
@@ -2562,7 +2510,10 @@ mod tests {
     fn test_add_chain() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "filter").unwrap();
-        assert!(rs.add_chain(Family::Ip, "filter", Chain::new("input")).is_ok());
+        assert!(
+            rs.add_chain(Family::Ip, "filter", Chain::new("input"))
+                .is_ok()
+        );
         assert_eq!(rs.tables[0].chains.len(), 1);
     }
 
@@ -2570,8 +2521,7 @@ mod tests {
     fn test_add_base_chain() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "filter").unwrap();
-        let chain =
-            Chain::new_base("input", ChainType::Filter, Hook::Input, 0, Policy::Accept);
+        let chain = Chain::new_base("input", ChainType::Filter, Hook::Input, 0, Policy::Accept);
         rs.add_chain(Family::Ip, "filter", chain).unwrap();
         let c = &rs.tables[0].chains[0];
         assert_eq!(c.chain_type, Some(ChainType::Filter));
@@ -2583,14 +2533,18 @@ mod tests {
     #[test]
     fn test_add_chain_no_table() {
         let mut rs = Ruleset::new();
-        assert!(rs.add_chain(Family::Ip, "missing", Chain::new("x")).is_err());
+        assert!(
+            rs.add_chain(Family::Ip, "missing", Chain::new("x"))
+                .is_err()
+        );
     }
 
     #[test]
     fn test_delete_chain() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "filter").unwrap();
-        rs.add_chain(Family::Ip, "filter", Chain::new("input")).unwrap();
+        rs.add_chain(Family::Ip, "filter", Chain::new("input"))
+            .unwrap();
         assert!(rs.delete_chain(Family::Ip, "filter", "input").is_ok());
         assert!(rs.tables[0].chains.is_empty());
     }
@@ -2606,7 +2560,8 @@ mod tests {
     fn test_flush_chain() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "filter").unwrap();
-        rs.add_chain(Family::Ip, "filter", Chain::new("input")).unwrap();
+        rs.add_chain(Family::Ip, "filter", Chain::new("input"))
+            .unwrap();
         let h = rs.alloc_handle();
         let mut rule = Rule::new(h);
         rule.verdicts.push(Verdict::Drop);
@@ -2621,7 +2576,8 @@ mod tests {
     fn test_add_rule() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "filter").unwrap();
-        rs.add_chain(Family::Ip, "filter", Chain::new("input")).unwrap();
+        rs.add_chain(Family::Ip, "filter", Chain::new("input"))
+            .unwrap();
         let h = rs.alloc_handle();
         let mut rule = Rule::new(h);
         rule.matches.push(MatchExpr::Protocol(Protocol::Tcp));
@@ -2636,7 +2592,8 @@ mod tests {
     fn test_delete_rule_by_handle() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "filter").unwrap();
-        rs.add_chain(Family::Ip, "filter", Chain::new("input")).unwrap();
+        rs.add_chain(Family::Ip, "filter", Chain::new("input"))
+            .unwrap();
         let h = rs.alloc_handle();
         let mut rule = Rule::new(h);
         rule.verdicts.push(Verdict::Accept);
@@ -2649,7 +2606,8 @@ mod tests {
     fn test_delete_rule_not_found() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "filter").unwrap();
-        rs.add_chain(Family::Ip, "filter", Chain::new("input")).unwrap();
+        rs.add_chain(Family::Ip, "filter", Chain::new("input"))
+            .unwrap();
         assert!(rs.delete_rule(Family::Ip, "filter", "input", 999).is_err());
     }
 
@@ -2657,7 +2615,8 @@ mod tests {
     fn test_insert_rule() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "filter").unwrap();
-        rs.add_chain(Family::Ip, "filter", Chain::new("input")).unwrap();
+        rs.add_chain(Family::Ip, "filter", Chain::new("input"))
+            .unwrap();
         let h1 = rs.alloc_handle();
         let mut r1 = Rule::new(h1);
         r1.verdicts.push(Verdict::Accept);
@@ -2666,7 +2625,8 @@ mod tests {
         let h2 = rs.alloc_handle();
         let mut r2 = Rule::new(h2);
         r2.verdicts.push(Verdict::Drop);
-        rs.insert_rule(Family::Ip, "filter", "input", 0, r2).unwrap();
+        rs.insert_rule(Family::Ip, "filter", "input", 0, r2)
+            .unwrap();
 
         assert_eq!(rs.tables[0].chains[0].rules[0].verdicts[0], Verdict::Drop);
         assert_eq!(rs.tables[0].chains[0].rules[1].verdicts[0], Verdict::Accept);
@@ -2705,8 +2665,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(rs
-            .add_set(
+        assert!(
+            rs.add_set(
                 Family::Ip,
                 "filter",
                 NftSet {
@@ -2715,7 +2675,8 @@ mod tests {
                     elements: Vec::new(),
                 },
             )
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
@@ -2743,9 +2704,10 @@ mod tests {
     fn test_add_set_element_no_set() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "filter").unwrap();
-        assert!(rs
-            .add_set_element(Family::Ip, "filter", "missing", "1.2.3.4")
-            .is_err());
+        assert!(
+            rs.add_set_element(Family::Ip, "filter", "missing", "1.2.3.4")
+                .is_err()
+        );
     }
 
     #[test]
@@ -2825,8 +2787,8 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(rs
-            .add_map(
+        assert!(
+            rs.add_map(
                 Family::Ip,
                 "nat",
                 NftMap {
@@ -2836,16 +2798,18 @@ mod tests {
                     elements: BTreeMap::new(),
                 },
             )
-            .is_err());
+            .is_err()
+        );
     }
 
     #[test]
     fn test_add_map_element_no_map() {
         let mut rs = Ruleset::new();
         rs.add_table(Family::Ip, "t").unwrap();
-        assert!(rs
-            .add_map_element(Family::Ip, "t", "missing", "k", "v")
-            .is_err());
+        assert!(
+            rs.add_map_element(Family::Ip, "t", "missing", "k", "v")
+                .is_err()
+        );
     }
 
     // --- Counter operations ---
@@ -2900,20 +2864,14 @@ mod tests {
     fn test_parse_rule_dnat() {
         let tokens = vec!["dnat", "to", "10.0.0.1:8080"];
         let rule = parse_rule_expr(&tokens, 1).unwrap();
-        assert_eq!(
-            rule.verdicts[0],
-            Verdict::Dnat("10.0.0.1:8080".to_string())
-        );
+        assert_eq!(rule.verdicts[0], Verdict::Dnat("10.0.0.1:8080".to_string()));
     }
 
     #[test]
     fn test_parse_rule_snat() {
         let tokens = vec!["snat", "to", "203.0.113.1"];
         let rule = parse_rule_expr(&tokens, 1).unwrap();
-        assert_eq!(
-            rule.verdicts[0],
-            Verdict::Snat("203.0.113.1".to_string())
-        );
+        assert_eq!(rule.verdicts[0], Verdict::Snat("203.0.113.1".to_string()));
     }
 
     #[test]
@@ -2927,10 +2885,7 @@ mod tests {
     fn test_parse_rule_log_prefix() {
         let tokens = vec!["log", "prefix", "\"DROPPED:\""];
         let rule = parse_rule_expr(&tokens, 1).unwrap();
-        assert_eq!(
-            rule.verdicts[0],
-            Verdict::Log(Some("DROPPED:".to_string()))
-        );
+        assert_eq!(rule.verdicts[0], Verdict::Log(Some("DROPPED:".to_string())));
     }
 
     #[test]
@@ -2986,20 +2941,14 @@ mod tests {
     fn test_parse_rule_jump() {
         let tokens = vec!["jump", "my_chain"];
         let rule = parse_rule_expr(&tokens, 1).unwrap();
-        assert_eq!(
-            rule.verdicts[0],
-            Verdict::Jump("my_chain".to_string())
-        );
+        assert_eq!(rule.verdicts[0], Verdict::Jump("my_chain".to_string()));
     }
 
     #[test]
     fn test_parse_rule_goto() {
         let tokens = vec!["goto", "other_chain"];
         let rule = parse_rule_expr(&tokens, 1).unwrap();
-        assert_eq!(
-            rule.verdicts[0],
-            Verdict::Goto("other_chain".to_string())
-        );
+        assert_eq!(rule.verdicts[0], Verdict::Goto("other_chain".to_string()));
     }
 
     #[test]
@@ -3086,9 +3035,7 @@ mod tests {
         // Delete rule by handle 1
         nft_command(
             &mut rs,
-            &[
-                "delete", "rule", "ip", "filter", "input", "handle", "1",
-            ],
+            &["delete", "rule", "ip", "filter", "input", "handle", "1"],
             &mut out,
         )
         .unwrap();
@@ -3123,7 +3070,7 @@ mod tests {
         .unwrap();
 
         let mut listing = out_buf();
-        nft_command(&rs, &["list", "ruleset"], &mut listing).unwrap();
+        nft_command(&mut rs, &["list", "ruleset"], &mut listing).unwrap();
         let text = String::from_utf8(listing).unwrap();
         assert!(text.contains("table ip filter"));
         assert!(text.contains("chain input"));
@@ -3211,7 +3158,16 @@ mod tests {
         nft_command(
             &mut rs,
             &[
-                "add", "set", "ip", "filter", "blocked", "{", "type", "ipv4_addr", ";", "}",
+                "add",
+                "set",
+                "ip",
+                "filter",
+                "blocked",
+                "{",
+                "type",
+                "ipv4_addr",
+                ";",
+                "}",
             ],
             &mut out,
         )
@@ -3228,7 +3184,16 @@ mod tests {
         nft_command(
             &mut rs,
             &[
-                "add", "set", "ip", "filter", "blocked", "{", "type", "ipv4_addr", ";", "}",
+                "add",
+                "set",
+                "ip",
+                "filter",
+                "blocked",
+                "{",
+                "type",
+                "ipv4_addr",
+                ";",
+                "}",
             ],
             &mut out,
         )
@@ -3236,7 +3201,15 @@ mod tests {
         nft_command(
             &mut rs,
             &[
-                "add", "element", "ip", "filter", "blocked", "{", "10.0.0.1,", "10.0.0.2", "}",
+                "add",
+                "element",
+                "ip",
+                "filter",
+                "blocked",
+                "{",
+                "10.0.0.1,",
+                "10.0.0.2",
+                "}",
             ],
             &mut out,
         )
@@ -3315,9 +3288,7 @@ mod tests {
 
     #[test]
     fn test_iptables_parse_nat_table() {
-        let args = vec![
-            "-t", "nat", "-A", "POSTROUTING", "-j", "MASQUERADE",
-        ];
+        let args = vec!["-t", "nat", "-A", "POSTROUTING", "-j", "MASQUERADE"];
         let cmd = parse_iptables_args(&args, false).unwrap();
         assert_eq!(cmd.table, "nat");
         assert_eq!(cmd.chain, "POSTROUTING");
@@ -3327,7 +3298,14 @@ mod tests {
     #[test]
     fn test_iptables_parse_source_dest() {
         let args = vec![
-            "-A", "FORWARD", "-s", "10.0.0.0/8", "-d", "192.168.0.0/16", "-j", "ACCEPT",
+            "-A",
+            "FORWARD",
+            "-s",
+            "10.0.0.0/8",
+            "-d",
+            "192.168.0.0/16",
+            "-j",
+            "ACCEPT",
         ];
         let cmd = parse_iptables_args(&args, false).unwrap();
         assert_eq!(cmd.source, Some("10.0.0.0/8".to_string()));
@@ -3336,9 +3314,7 @@ mod tests {
 
     #[test]
     fn test_iptables_parse_interfaces() {
-        let args = vec![
-            "-A", "FORWARD", "-i", "eth0", "-o", "eth1", "-j", "ACCEPT",
-        ];
+        let args = vec!["-A", "FORWARD", "-i", "eth0", "-o", "eth1", "-j", "ACCEPT"];
         let cmd = parse_iptables_args(&args, false).unwrap();
         assert_eq!(cmd.in_iface, Some("eth0".to_string()));
         assert_eq!(cmd.out_iface, Some("eth1".to_string()));
@@ -3347,7 +3323,14 @@ mod tests {
     #[test]
     fn test_iptables_parse_snat() {
         let args = vec![
-            "-t", "nat", "-A", "POSTROUTING", "-j", "SNAT", "--to-source", "1.2.3.4",
+            "-t",
+            "nat",
+            "-A",
+            "POSTROUTING",
+            "-j",
+            "SNAT",
+            "--to-source",
+            "1.2.3.4",
         ];
         let cmd = parse_iptables_args(&args, false).unwrap();
         assert_eq!(cmd.target, Some("SNAT".to_string()));
@@ -3357,8 +3340,18 @@ mod tests {
     #[test]
     fn test_iptables_parse_dnat() {
         let args = vec![
-            "-t", "nat", "-A", "PREROUTING", "-p", "tcp", "--dport", "80", "-j", "DNAT",
-            "--to-destination", "10.0.0.1:8080",
+            "-t",
+            "nat",
+            "-A",
+            "PREROUTING",
+            "-p",
+            "tcp",
+            "--dport",
+            "80",
+            "-j",
+            "DNAT",
+            "--to-destination",
+            "10.0.0.1:8080",
         ];
         let cmd = parse_iptables_args(&args, false).unwrap();
         assert_eq!(cmd.target, Some("DNAT".to_string()));
@@ -3367,9 +3360,7 @@ mod tests {
 
     #[test]
     fn test_iptables_parse_log_prefix() {
-        let args = vec![
-            "-A", "INPUT", "-j", "LOG", "--log-prefix", "BLOCKED:",
-        ];
+        let args = vec!["-A", "INPUT", "-j", "LOG", "--log-prefix", "BLOCKED:"];
         let cmd = parse_iptables_args(&args, false).unwrap();
         assert_eq!(cmd.target, Some("LOG".to_string()));
         assert_eq!(cmd.log_prefix, Some("BLOCKED:".to_string()));
@@ -3378,7 +3369,14 @@ mod tests {
     #[test]
     fn test_iptables_parse_conntrack() {
         let args = vec![
-            "-A", "INPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT",
+            "-A",
+            "INPUT",
+            "-m",
+            "state",
+            "--state",
+            "ESTABLISHED,RELATED",
+            "-j",
+            "ACCEPT",
         ];
         let cmd = parse_iptables_args(&args, false).unwrap();
         assert_eq!(cmd.ct_state, Some("ESTABLISHED,RELATED".to_string()));
@@ -3487,11 +3485,19 @@ mod tests {
 
         // Insert DROP at position 1 (front)
         let ins = vec!["-I", "INPUT", "1", "-j", "DROP"];
-        exec_iptables(&mut rs, &parse_iptables_args(&ins, false).unwrap(), &mut out).unwrap();
+        exec_iptables(
+            &mut rs,
+            &parse_iptables_args(&ins, false).unwrap(),
+            &mut out,
+        )
+        .unwrap();
 
         let tidx = rs.find_table(Family::Ip, "filter").unwrap();
         let cidx = rs.find_chain(tidx, "INPUT").unwrap();
-        assert_eq!(rs.tables[tidx].chains[cidx].rules[0].verdicts[0], Verdict::Drop);
+        assert_eq!(
+            rs.tables[tidx].chains[cidx].rules[0].verdicts[0],
+            Verdict::Drop
+        );
     }
 
     #[test]
@@ -3504,12 +3510,20 @@ mod tests {
         exec_iptables(&mut rs, &parse_iptables_args(&a2, false).unwrap(), &mut out).unwrap();
 
         let del = vec!["-D", "INPUT", "1"];
-        exec_iptables(&mut rs, &parse_iptables_args(&del, false).unwrap(), &mut out).unwrap();
+        exec_iptables(
+            &mut rs,
+            &parse_iptables_args(&del, false).unwrap(),
+            &mut out,
+        )
+        .unwrap();
 
         let tidx = rs.find_table(Family::Ip, "filter").unwrap();
         let cidx = rs.find_chain(tidx, "INPUT").unwrap();
         assert_eq!(rs.tables[tidx].chains[cidx].rules.len(), 1);
-        assert_eq!(rs.tables[tidx].chains[cidx].rules[0].verdicts[0], Verdict::Drop);
+        assert_eq!(
+            rs.tables[tidx].chains[cidx].rules[0].verdicts[0],
+            Verdict::Drop
+        );
     }
 
     #[test]
@@ -3568,10 +3582,7 @@ mod tests {
 
     #[test]
     fn test_personality_with_path() {
-        let args = vec![
-            "/usr/sbin/iptables".to_string(),
-            "-L".to_string(),
-        ];
+        let args = vec!["/usr/sbin/iptables".to_string(), "-L".to_string()];
         let mut out = out_buf();
         let rc = run(&args, &mut out);
         assert_eq!(rc, 0);
@@ -3678,9 +3689,7 @@ mod tests {
     fn test_iptables_nat_table_chains() {
         let mut rs = Ruleset::new();
         let mut out = out_buf();
-        let args = vec![
-            "-t", "nat", "-A", "POSTROUTING", "-j", "MASQUERADE",
-        ];
+        let args = vec!["-t", "nat", "-A", "POSTROUTING", "-j", "MASQUERADE"];
         let cmd = parse_iptables_args(&args, false).unwrap();
         exec_iptables(&mut rs, &cmd, &mut out).unwrap();
 

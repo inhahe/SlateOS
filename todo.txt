@@ -1,3 +1,27 @@
+## BUG (noticed+FIXED 2026-05-31): avahi had 1 failing test (off-by-one in
+##   the autoipd conflict limit) + ~10 pre-existing clippy errors.
+##   userspace/avahi/src/main.rs:
+##     * test_autoipd_max_conflicts failed: AutoIpd::step in the Conflict state
+##       gave up one retry too early (`_conflict_count >= MAX_CONFLICTS`).  The
+##       test does MAX_CONFLICTS (10) conflict/retry cycles and expects each to
+##       succeed, then a final conflict to be fatal.  Changed the check to
+##       `> MAX_CONFLICTS` so exactly MAX_CONFLICTS retries are tolerated and
+##       the next conflict is fatal — see JUDGMENT CALL below.  192/192 pass.
+##     * ~10 pre-existing clippy errors: write! ending in "\n" -> writeln!,
+##       collapsible if/match (auto-fixed 9); Ipv6Addr::new's 8-arg signature
+##       (too_many_arguments) #[allow]'d with a comment since it mirrors
+##       std::net::Ipv6Addr::new and the segment count is inherent to IPv6.
+##   Clippy-clean host + ouros; builds for ouros.
+##
+## JUDGMENT CALL (2026-05-31, avahi autoipd MAX_CONFLICTS semantics):
+##   The conflict counter previously failed when count >= MAX_CONFLICTS (10),
+##   i.e. it tolerated only 9 retries.  The unit test encodes the opposite
+##   intent (10 retries tolerated, fail on the 11th conflict), which matches
+##   RFC 3927 §2.2.1's "exceeds MAX_CONFLICTS" wording.  I changed production to
+##   `> MAX_CONFLICTS` to align with the test + RFC rather than relaxing the
+##   test.  Easy to reverse (one comparison at AutoIpd::step, Conflict arm) if
+##   the human prefers the stricter "give up at the 10th conflict" reading.
+##
 ## BUG (noticed+FIXED 2026-05-31): cups had a broken test build + ~9
 ##   pre-existing clippy errors.  userspace/cups/src/main.rs:
 ##     * TEST BUILD DIDN'T COMPILE: underscore-prefix anti-pattern on struct

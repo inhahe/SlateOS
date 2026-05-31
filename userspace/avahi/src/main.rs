@@ -204,7 +204,9 @@ struct Ipv4Addr {
 
 impl Ipv4Addr {
     fn new(a: u8, b: u8, c: u8, d: u8) -> Self {
-        Self { _octets: [a, b, c, d] }
+        Self {
+            _octets: [a, b, c, d],
+        }
     }
 
     fn from_u32(val: u32) -> Self {
@@ -251,6 +253,9 @@ struct Ipv6Addr {
 }
 
 impl Ipv6Addr {
+    // Mirrors std::net::Ipv6Addr::new's eight-segment constructor; the segment
+    // count is inherent to IPv6, so the argument count is intentional.
+    #[allow(clippy::too_many_arguments)]
     fn new(a: u16, b: u16, c: u16, d: u16, e: u16, f: u16, g: u16, h: u16) -> Self {
         Self {
             _segments: [a, b, c, d, e, f, g, h],
@@ -589,12 +594,7 @@ struct ServiceEntry {
 }
 
 impl ServiceEntry {
-    fn new(
-        name: &str,
-        service_type: ServiceType,
-        hostname: &str,
-        port: u16,
-    ) -> Self {
+    fn new(name: &str, service_type: ServiceType, hostname: &str, port: u16) -> Self {
         Self {
             _name: name.to_string(),
             _service_type: service_type,
@@ -689,8 +689,13 @@ impl ServiceEntry {
         // A record if IPv4 address is known
         if let Some(v4) = self._addr_v4 {
             records.push(
-                DnsRecord::new(&host_fqdn, DNS_CLASS_IN, DEFAULT_TTL / 3, DnsRecordData::A(v4))
-                    .with_cache_flush(true),
+                DnsRecord::new(
+                    &host_fqdn,
+                    DNS_CLASS_IN,
+                    DEFAULT_TTL / 3,
+                    DnsRecordData::A(v4),
+                )
+                .with_cache_flush(true),
             );
         }
 
@@ -716,10 +721,7 @@ impl std::fmt::Display for ServiceEntry {
         write!(
             f,
             "{} ({}) on {} port {}",
-            self._name,
-            self._service_type,
-            self._hostname,
-            self._port
+            self._name, self._service_type, self._hostname, self._port
         )?;
         if let Some(v4) = self._addr_v4 {
             write!(f, " [{v4}]")?;
@@ -872,15 +874,15 @@ impl ResolveResult {
 impl std::fmt::Display for ResolveResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(ref stype) = self._service_type {
-            write!(f, "  name = {}\n", self._name)?;
-            write!(f, "  type = {stype}\n")?;
-            write!(f, "  domain = {}\n", self._domain)?;
-            write!(f, "  hostname = {}\n", self._hostname)?;
+            writeln!(f, "  name = {}", self._name)?;
+            writeln!(f, "  type = {stype}")?;
+            writeln!(f, "  domain = {}", self._domain)?;
+            writeln!(f, "  hostname = {}", self._hostname)?;
             if let Some(port) = self._port {
-                write!(f, "  port = {port}\n")?;
+                writeln!(f, "  port = {port}")?;
             }
             if let Some(ref addr) = self._address {
-                write!(f, "  address = {addr}\n")?;
+                writeln!(f, "  address = {addr}")?;
             }
             if !self._txt.is_empty() {
                 write!(f, "  txt = [")?;
@@ -890,7 +892,7 @@ impl std::fmt::Display for ResolveResult {
                     }
                     write!(f, "\"{entry}\"")?;
                 }
-                write!(f, "]\n")?;
+                writeln!(f, "]")?;
             }
         } else {
             write!(f, "{}", self._hostname)?;
@@ -1124,16 +1126,9 @@ impl ServiceRegistry {
         types
     }
 
-    fn resolve(
-        &self,
-        name: &str,
-        service_type: &str,
-    ) -> Result<ResolveResult, AvahiError> {
+    fn resolve(&self, name: &str, service_type: &str) -> Result<ResolveResult, AvahiError> {
         for svc in &self._services {
-            if svc._active
-                && svc._name == name
-                && svc._service_type.type_string() == service_type
-            {
+            if svc._active && svc._name == name && svc._service_type.type_string() == service_type {
                 return Ok(ResolveResult::from_service(svc));
             }
         }
@@ -1278,12 +1273,10 @@ impl DaemonConfig {
                 self._use_ipv6 = value == "yes";
             }
             "allow-interfaces" => {
-                self._allow_interfaces =
-                    value.split(',').map(|s| s.trim().to_string()).collect();
+                self._allow_interfaces = value.split(',').map(|s| s.trim().to_string()).collect();
             }
             "deny-interfaces" => {
-                self._deny_interfaces =
-                    value.split(',').map(|s| s.trim().to_string()).collect();
+                self._deny_interfaces = value.split(',').map(|s| s.trim().to_string()).collect();
             }
             "enable-dbus" => {
                 self._enable_dbus = value == "yes";
@@ -1451,10 +1444,7 @@ impl AutoIpd {
                     let addr = self
                         ._selected_addr
                         .expect("address should be set during announcing");
-                    Ok(format!(
-                        "Address {addr} configured on {}",
-                        self._interface
-                    ))
+                    Ok(format!("Address {addr} configured on {}", self._interface))
                 } else {
                     let addr = self
                         ._selected_addr
@@ -1473,7 +1463,12 @@ impl AutoIpd {
             )),
             AutoIpState::Conflict => {
                 self._conflict_count += 1;
-                if self._conflict_count >= MAX_CONFLICTS {
+                // RFC 3927 §2.2.1: rate-limit/give up only once the number of
+                // conflicts *exceeds* MAX_CONFLICTS. We therefore tolerate
+                // exactly MAX_CONFLICTS retries (each picks a fresh candidate)
+                // and treat the next conflict as fatal. Using `>=` here would
+                // give up one retry early.
+                if self._conflict_count > MAX_CONFLICTS {
                     self._state = AutoIpState::Stopped;
                     return Err(AvahiError::MaxConflictsReached);
                 }
@@ -1532,13 +1527,13 @@ impl AutoIpd {
 /// DNS header flags.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DnsHeaderFlags {
-    _qr: bool,       // Query (false) or Response (true)
-    _opcode: u8,     // 0 = standard query
-    _aa: bool,       // Authoritative answer
-    _tc: bool,       // Truncated
-    _rd: bool,       // Recursion desired
-    _ra: bool,       // Recursion available
-    _rcode: u8,      // Response code
+    _qr: bool,   // Query (false) or Response (true)
+    _opcode: u8, // 0 = standard query
+    _aa: bool,   // Authoritative answer
+    _tc: bool,   // Truncated
+    _rd: bool,   // Recursion desired
+    _ra: bool,   // Recursion available
+    _rcode: u8,  // Response code
 }
 
 impl DnsHeaderFlags {
@@ -1894,10 +1889,7 @@ fn create_demo_registry() -> ServiceRegistry {
     // HTTP web server
     let http_type = ServiceType::new("_http", TransportProtocol::Tcp);
     let http_svc = ServiceEntry::new("OurOS Web Server", http_type, "ouros-host", 80)
-        .with_txt(vec![
-            "path=/".to_string(),
-            "version=1.0".to_string(),
-        ])
+        .with_txt(vec!["path=/".to_string(), "version=1.0".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
     let _ = reg.register(http_svc);
@@ -1938,7 +1930,9 @@ fn create_demo_registry() -> ServiceRegistry {
     let sftp_svc = ServiceEntry::new("OurOS SFTP", sftp_type, "ouros-host", 22)
         .with_txt(vec!["path=/".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
-        .with_addr_v6(Ipv6Addr::new(0xFE80, 0, 0, 0, 0x1234, 0x5678, 0x9ABC, 0xDEF0))
+        .with_addr_v6(Ipv6Addr::new(
+            0xFE80, 0, 0, 0, 0x1234, 0x5678, 0x9ABC, 0xDEF0,
+        ))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
     let _ = reg.register(sftp_svc);
 
@@ -1969,10 +1963,7 @@ fn create_demo_registry() -> ServiceRegistry {
     // Another machine on the network
     let http_type2 = ServiceType::new("_http", TransportProtocol::Tcp);
     let http_svc2 = ServiceEntry::new("NAS Web Interface", http_type2, "nas-1", 8080)
-        .with_txt(vec![
-            "path=/admin".to_string(),
-            "version=2.1".to_string(),
-        ])
+        .with_txt(vec!["path=/admin".to_string(), "version=2.1".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 150))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
     let _ = reg.register(http_svc2);
@@ -1980,9 +1971,7 @@ fn create_demo_registry() -> ServiceRegistry {
     // MQTT broker
     let mqtt_type = ServiceType::new("_mqtt", TransportProtocol::Tcp);
     let mqtt_svc = ServiceEntry::new("Home Automation MQTT", mqtt_type, "ouros-host", 1883)
-        .with_txt(vec![
-            "protocol=3.1.1".to_string(),
-        ])
+        .with_txt(vec!["protocol=3.1.1".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
     let _ = reg.register(mqtt_svc);
@@ -1990,11 +1979,11 @@ fn create_demo_registry() -> ServiceRegistry {
     // VNC server
     let vnc_type = ServiceType::new("_rfb", TransportProtocol::Tcp);
     let vnc_svc = ServiceEntry::new("OurOS Remote Desktop", vnc_type, "ouros-host", 5900)
-        .with_txt(vec![
-            "display=0".to_string(),
-        ])
+        .with_txt(vec!["display=0".to_string()])
         .with_addr_v4(Ipv4Addr::new(192, 168, 1, 100))
-        .with_addr_v6(Ipv6Addr::new(0xFE80, 0, 0, 0, 0x1234, 0x5678, 0x9ABC, 0xDEF0))
+        .with_addr_v6(Ipv6Addr::new(
+            0xFE80, 0, 0, 0, 0x1234, 0x5678, 0x9ABC, 0xDEF0,
+        ))
         .with_iface_proto(InterfaceProto::new(2, PROTO_INET));
     let _ = reg.register(vnc_svc);
 
@@ -2076,32 +2065,22 @@ fn resolve_hostname(hostname: &str) -> Vec<(IpAddr, i32)> {
     let mut results = Vec::new();
     match name.as_str() {
         "ouros-host.local" => {
+            results.push((IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)), PROTO_INET));
             results.push((
-                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 100)),
-                PROTO_INET,
-            ));
-            results.push((
-                IpAddr::V6(Ipv6Addr::new(0xFE80, 0, 0, 0, 0x1234, 0x5678, 0x9ABC, 0xDEF0)),
+                IpAddr::V6(Ipv6Addr::new(
+                    0xFE80, 0, 0, 0, 0x1234, 0x5678, 0x9ABC, 0xDEF0,
+                )),
                 PROTO_INET6,
             ));
         }
         "printer-1.local" => {
-            results.push((
-                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)),
-                PROTO_INET,
-            ));
+            results.push((IpAddr::V4(Ipv4Addr::new(192, 168, 1, 50)), PROTO_INET));
         }
         "nas-1.local" => {
-            results.push((
-                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 150)),
-                PROTO_INET,
-            ));
+            results.push((IpAddr::V4(Ipv4Addr::new(192, 168, 1, 150)), PROTO_INET));
         }
         "speaker-1.local" => {
-            results.push((
-                IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200)),
-                PROTO_INET,
-            ));
+            results.push((IpAddr::V4(Ipv4Addr::new(192, 168, 1, 200)), PROTO_INET));
         }
         _ => {}
     }
@@ -2170,9 +2149,7 @@ fn run_daemon(args: &[String]) -> i32 {
         "-D" | "--daemonize" | "--no-rlimits" | "--no-drop-root" | "--debug" => {
             run_daemon_main(args)
         }
-        "-f" | "--file" => {
-            run_daemon_main(args)
-        }
+        "-f" | "--file" => run_daemon_main(args),
         _ => {
             if cmd.starts_with('-') {
                 run_daemon_main(args)
@@ -2211,9 +2188,7 @@ fn run_daemon_main(args: &[String]) -> i32 {
                             }
                         }
                         Err(e) => {
-                            eprintln!(
-                                "avahi-daemon: Failed to read config {conf_path}: {e}"
-                            );
+                            eprintln!("avahi-daemon: Failed to read config {conf_path}: {e}");
                             return 1;
                         }
                     }
@@ -2232,9 +2207,7 @@ fn run_daemon_main(args: &[String]) -> i32 {
                         }
                     }
                     Err(e) => {
-                        eprintln!(
-                            "avahi-daemon: Failed to read config {conf_path}: {e}"
-                        );
+                        eprintln!("avahi-daemon: Failed to read config {conf_path}: {e}");
                         return 1;
                     }
                 }
@@ -2265,8 +2238,16 @@ fn run_daemon_main(args: &[String]) -> i32 {
     );
     println!(
         "avahi-daemon[1234]: IPv4: {}, IPv6: {}",
-        if config._use_ipv4 { "enabled" } else { "disabled" },
-        if config._use_ipv6 { "enabled" } else { "disabled" },
+        if config._use_ipv4 {
+            "enabled"
+        } else {
+            "disabled"
+        },
+        if config._use_ipv6 {
+            "enabled"
+        } else {
+            "disabled"
+        },
     );
     println!("avahi-daemon[1234]: Listening on {MDNS_MULTICAST_V4}:{MDNS_PORT}");
     if config._use_ipv6 {
@@ -2296,7 +2277,10 @@ fn run_daemon_main(args: &[String]) -> i32 {
 // ============================================================================
 
 fn run_browse(args: &[String]) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help".to_string());
     let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
 
     match cmd.as_str() {
@@ -2336,9 +2320,7 @@ fn run_browse(args: &[String]) -> i32 {
             dump_service_type_db();
             0
         }
-        "-a" | "--all" => {
-            browse_all_services(&cmd_args)
-        }
+        "-a" | "--all" => browse_all_services(&cmd_args),
         _ => {
             // Treat as service type to browse
             let mut resolve = false;
@@ -2363,8 +2345,7 @@ fn run_browse(args: &[String]) -> i32 {
                         "-p" | "--parsable" => parsable = true,
                         "-t" | "--terminate" => terminate = true,
                         "-c" | "--cache" => terminate = true,
-                        "-l" | "--ignore-local" | "-f" | "--no-fail" | "-k"
-                        | "--no-db-lookup" => {}
+                        "-l" | "--ignore-local" | "-f" | "--no-fail" | "-k" | "--no-db-lookup" => {}
                         "-d" | "--domain" => {
                             j += 1;
                             if j < all_args.len() {
@@ -2563,7 +2544,10 @@ fn service_type_database() -> Vec<(&'static str, &'static str)> {
 // ============================================================================
 
 fn run_resolve(args: &[String]) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help".to_string());
     let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
 
     match cmd.as_str() {
@@ -2655,9 +2639,7 @@ fn resolve_with_flags(args: &[String], protocol: i32) -> i32 {
                 return 1;
             }
             other if !other.starts_with('-') => {
-                if other.contains(':')
-                    || other.chars().all(|c| c.is_ascii_digit() || c == '.')
-                {
+                if other.contains(':') || other.chars().all(|c| c.is_ascii_digit() || c == '.') {
                     return resolve_address_cmd(other, false);
                 }
                 return resolve_name_cmd(other, protocol, false);
@@ -2673,9 +2655,7 @@ fn resolve_with_flags(args: &[String], protocol: i32) -> i32 {
 fn resolve_name_cmd(hostname: &str, protocol: i32, _verbose: bool) -> i32 {
     let results = resolve_hostname(hostname);
     if results.is_empty() {
-        eprintln!(
-            "avahi-resolve: Failed to resolve hostname '{hostname}': Timeout reached"
-        );
+        eprintln!("avahi-resolve: Failed to resolve hostname '{hostname}': Timeout reached");
         return 1;
     }
 
@@ -2700,9 +2680,7 @@ fn resolve_address_cmd(address: &str, _verbose: bool) -> i32 {
             0
         }
         None => {
-            eprintln!(
-                "avahi-resolve: Failed to resolve address '{address}': Timeout reached"
-            );
+            eprintln!("avahi-resolve: Failed to resolve address '{address}': Timeout reached");
             1
         }
     }
@@ -2713,7 +2691,10 @@ fn resolve_address_cmd(address: &str, _verbose: bool) -> i32 {
 // ============================================================================
 
 fn run_publish(args: &[String]) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help".to_string());
     let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
 
     match cmd.as_str() {
@@ -2803,31 +2784,29 @@ fn publish_service_cmd(args: &[String]) -> i32 {
             other if other.starts_with("--host=") => {
                 host = Some(other["--host=".len()..].to_string());
             }
-            other if !other.starts_with('-') => {
-                match positional {
-                    0 => {
-                        name = Some(other.to_string());
-                        positional += 1;
-                    }
-                    1 => {
-                        service_type = Some(other.to_string());
-                        positional += 1;
-                    }
-                    2 => {
-                        match other.parse::<u16>() {
-                            Ok(p) => port = Some(p),
-                            Err(_) => {
-                                eprintln!("avahi-publish: Invalid port: {other}");
-                                return 1;
-                            }
-                        }
-                        positional += 1;
-                    }
-                    _ => {
-                        txt_records.push(other.to_string());
-                    }
+            other if !other.starts_with('-') => match positional {
+                0 => {
+                    name = Some(other.to_string());
+                    positional += 1;
                 }
-            }
+                1 => {
+                    service_type = Some(other.to_string());
+                    positional += 1;
+                }
+                2 => {
+                    match other.parse::<u16>() {
+                        Ok(p) => port = Some(p),
+                        Err(_) => {
+                            eprintln!("avahi-publish: Invalid port: {other}");
+                            return 1;
+                        }
+                    }
+                    positional += 1;
+                }
+                _ => {
+                    txt_records.push(other.to_string());
+                }
+            },
             _ => {}
         }
         i += 1;
@@ -2879,15 +2858,8 @@ fn publish_service_cmd(args: &[String]) -> i32 {
         .with_domain(&domain)
         .with_txt(txt_records);
 
-    println!(
-        "Established under name '{}'",
-        entry._name
-    );
-    println!(
-        "Service: {} ({})",
-        entry.instance_name(),
-        entry._port
-    );
+    println!("Established under name '{}'", entry._name);
+    println!("Service: {} ({})", entry.instance_name(), entry._port);
     println!("Domain: {domain}");
     if !entry._txt.is_empty() {
         println!("TXT: {:?}", entry._txt);
@@ -2906,19 +2878,17 @@ fn publish_address_cmd(args: &[String]) -> i32 {
         match a.as_str() {
             "-R" | "--no-reverse" => no_reverse = true,
             "-v" | "--verbose" | "-f" | "--no-fail" => {}
-            other if !other.starts_with('-') => {
-                match positional {
-                    0 => {
-                        hostname = Some(other.to_string());
-                        positional += 1;
-                    }
-                    1 => {
-                        address = Some(other.to_string());
-                        positional += 1;
-                    }
-                    _ => {}
+            other if !other.starts_with('-') => match positional {
+                0 => {
+                    hostname = Some(other.to_string());
+                    positional += 1;
                 }
-            }
+                1 => {
+                    address = Some(other.to_string());
+                    positional += 1;
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -2970,7 +2940,10 @@ fn publish_address_cmd(args: &[String]) -> i32 {
 // ============================================================================
 
 fn run_autoipd(args: &[String]) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help".to_string());
     let cmd_args: Vec<String> = args.iter().skip(1).cloned().collect();
 
     match cmd.as_str() {
@@ -3029,12 +3002,9 @@ fn run_autoipd(args: &[String]) -> i32 {
                 match a.as_str() {
                     "-D" | "--daemonize" => daemonize = true,
                     "-w" | "--wait" => wait = true,
-                    "-s" | "--syslog" | "--no-drop-root" | "--no-chroot" | "-S"
-                    | "--start" => {}
-                    other if !other.starts_with('-') => {
-                        if interface.is_none() {
-                            interface = Some(other.to_string());
-                        }
+                    "-s" | "--syslog" | "--no-drop-root" | "--no-chroot" | "-S" | "--start" => {}
+                    other if !other.starts_with('-') && interface.is_none() => {
+                        interface = Some(other.to_string());
                     }
                     _ => {}
                 }
@@ -3053,16 +3023,12 @@ fn run_autoipd(args: &[String]) -> i32 {
                 println!("avahi-autoipd: Daemonizing...");
             }
 
-            println!(
-                "avahi-autoipd[2345]: Starting IPv4LL on interface {iface}"
-            );
+            println!("avahi-autoipd[2345]: Starting IPv4LL on interface {iface}");
 
             let mut autoipd = AutoIpd::new(&iface);
             match autoipd.run_to_completion() {
                 Ok(addr) => {
-                    println!(
-                        "avahi-autoipd[2345]: Successfully claimed address {addr}"
-                    );
+                    println!("avahi-autoipd[2345]: Successfully claimed address {addr}");
                     println!("avahi-autoipd[2345]: Configured {iface} with {addr}/16");
                     if wait {
                         println!("avahi-autoipd[2345]: Address acquired, wait complete");
@@ -3083,7 +3049,10 @@ fn run_autoipd(args: &[String]) -> i32 {
 // ============================================================================
 
 fn run_set_hostname(args: &[String]) -> i32 {
-    let cmd = args.first().cloned().unwrap_or_else(|| "--help".to_string());
+    let cmd = args
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "--help".to_string());
 
     match cmd.as_str() {
         "--help" | "-h" => {
@@ -3113,10 +3082,8 @@ fn run_set_hostname(args: &[String]) -> i32 {
             for a in &all_args {
                 match a.as_str() {
                     "-v" | "--verbose" => verbose = true,
-                    other if !other.starts_with('-') => {
-                        if hostname.is_none() {
-                            hostname = Some(other.to_string());
-                        }
+                    other if !other.starts_with('-') && hostname.is_none() => {
+                        hostname = Some(other.to_string());
                     }
                     _ => {}
                 }
@@ -3273,10 +3240,7 @@ impl RateLimiter {
         let elapsed = now_usec.saturating_sub(self._last_refill);
         if elapsed >= self._interval_usec {
             let refills = elapsed / self._interval_usec;
-            self._tokens = self
-                ._tokens
-                .saturating_add(refills as u32)
-                .min(self._burst);
+            self._tokens = self._tokens.saturating_add(refills as u32).min(self._burst);
             self._last_refill = now_usec;
         }
         if self._tokens > 0 {
@@ -3795,16 +3759,15 @@ mod tests {
     #[test]
     fn test_service_entry_with_txt() {
         let stype = ServiceType::new("_http", TransportProtocol::Tcp);
-        let entry = ServiceEntry::new("Test", stype, "host1", 80)
-            .with_txt(vec!["path=/".to_string()]);
+        let entry =
+            ServiceEntry::new("Test", stype, "host1", 80).with_txt(vec!["path=/".to_string()]);
         assert_eq!(entry._txt, vec!["path=/"]);
     }
 
     #[test]
     fn test_service_entry_with_domain() {
         let stype = ServiceType::new("_http", TransportProtocol::Tcp);
-        let entry = ServiceEntry::new("Test", stype, "host1", 80)
-            .with_domain("example.com");
+        let entry = ServiceEntry::new("Test", stype, "host1", 80).with_domain("example.com");
         assert_eq!(entry._domain, "example.com");
     }
 
@@ -3812,8 +3775,7 @@ mod tests {
     fn test_service_entry_with_addr_v4() {
         let stype = ServiceType::new("_http", TransportProtocol::Tcp);
         let addr = Ipv4Addr::new(10, 0, 0, 1);
-        let entry = ServiceEntry::new("Test", stype, "host1", 80)
-            .with_addr_v4(addr);
+        let entry = ServiceEntry::new("Test", stype, "host1", 80).with_addr_v4(addr);
         assert_eq!(entry._addr_v4, Some(addr));
     }
 
@@ -3821,8 +3783,7 @@ mod tests {
     fn test_service_entry_with_addr_v6() {
         let stype = ServiceType::new("_http", TransportProtocol::Tcp);
         let addr = Ipv6Addr::new(0xFE80, 0, 0, 0, 0, 0, 0, 1);
-        let entry = ServiceEntry::new("Test", stype, "host1", 80)
-            .with_addr_v6(addr);
+        let entry = ServiceEntry::new("Test", stype, "host1", 80).with_addr_v6(addr);
         assert_eq!(entry._addr_v6, Some(addr));
     }
 
@@ -3855,8 +3816,8 @@ mod tests {
     #[test]
     fn test_service_entry_display() {
         let stype = ServiceType::new("_http", TransportProtocol::Tcp);
-        let entry = ServiceEntry::new("Web", stype, "host1", 80)
-            .with_addr_v4(Ipv4Addr::new(10, 0, 0, 1));
+        let entry =
+            ServiceEntry::new("Web", stype, "host1", 80).with_addr_v4(Ipv4Addr::new(10, 0, 0, 1));
         let s = entry.to_string();
         assert!(s.contains("Web"));
         assert!(s.contains("_http._tcp"));
@@ -3931,8 +3892,8 @@ mod tests {
     #[test]
     fn test_resolve_result_from_service() {
         let stype = ServiceType::new("_http", TransportProtocol::Tcp);
-        let entry = ServiceEntry::new("Web", stype, "host1", 80)
-            .with_addr_v4(Ipv4Addr::new(10, 0, 0, 1));
+        let entry =
+            ServiceEntry::new("Web", stype, "host1", 80).with_addr_v4(Ipv4Addr::new(10, 0, 0, 1));
         let rr = ResolveResult::from_service(&entry);
         assert_eq!(rr._name, "Web");
         assert_eq!(rr._hostname, "host1");
@@ -4235,8 +4196,8 @@ mod tests {
     fn test_registry_resolve() {
         let mut reg = ServiceRegistry::new("myhost");
         let stype = ServiceType::new("_http", TransportProtocol::Tcp);
-        let entry = ServiceEntry::new("Web", stype, "myhost", 80)
-            .with_addr_v4(Ipv4Addr::new(10, 0, 0, 1));
+        let entry =
+            ServiceEntry::new("Web", stype, "myhost", 80).with_addr_v4(Ipv4Addr::new(10, 0, 0, 1));
         reg.register(entry).unwrap();
         let result = reg.resolve("Web", "_http._tcp").unwrap();
         assert_eq!(result._name, "Web");
@@ -4392,10 +4353,7 @@ publish-hinfo=no\n\
         config
             .parse_config_line("browse-domains=0pointer.de, zeroconf.org")
             .unwrap();
-        assert_eq!(
-            config._browse_domains,
-            vec!["0pointer.de", "zeroconf.org"]
-        );
+        assert_eq!(config._browse_domains, vec!["0pointer.de", "zeroconf.org"]);
     }
 
     // --- AutoIpd tests ---
@@ -4752,8 +4710,8 @@ publish-hinfo=no\n\
     #[test]
     fn test_build_service_response() {
         let stype = ServiceType::new("_http", TransportProtocol::Tcp);
-        let entry = ServiceEntry::new("Web", stype, "host1", 80)
-            .with_addr_v4(Ipv4Addr::new(10, 0, 0, 1));
+        let entry =
+            ServiceEntry::new("Web", stype, "host1", 80).with_addr_v4(Ipv4Addr::new(10, 0, 0, 1));
         let pkt = build_service_response(&entry);
         assert!(pkt.is_response());
         assert!(pkt.answer_count() >= 3); // PTR + SRV + TXT + A

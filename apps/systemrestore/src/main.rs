@@ -217,16 +217,16 @@ impl SnapshotComponent {
     /// Estimated size in bytes for this component.
     pub fn estimated_size_bytes(self) -> u64 {
         match self {
-            Self::SystemFiles => 2_000_000_000,       // ~2 GB
-            Self::UserSettings => 50_000_000,          // ~50 MB
-            Self::InstalledApps => 5_000_000_000,      // ~5 GB
-            Self::BootConfig => 5_000_000,             // ~5 MB
-            Self::NetworkConfig => 2_000_000,          // ~2 MB
-            Self::ServiceConfig => 10_000_000,         // ~10 MB
-            Self::DriverState => 100_000_000,          // ~100 MB
-            Self::PackageState => 200_000_000,         // ~200 MB
-            Self::DesktopConfig => 30_000_000,         // ~30 MB
-            Self::SecurityPolicy => 1_000_000,         // ~1 MB
+            Self::SystemFiles => 2_000_000_000,   // ~2 GB
+            Self::UserSettings => 50_000_000,     // ~50 MB
+            Self::InstalledApps => 5_000_000_000, // ~5 GB
+            Self::BootConfig => 5_000_000,        // ~5 MB
+            Self::NetworkConfig => 2_000_000,     // ~2 MB
+            Self::ServiceConfig => 10_000_000,    // ~10 MB
+            Self::DriverState => 100_000_000,     // ~100 MB
+            Self::PackageState => 200_000_000,    // ~200 MB
+            Self::DesktopConfig => 30_000_000,    // ~30 MB
+            Self::SecurityPolicy => 1_000_000,    // ~1 MB
         }
     }
 
@@ -270,7 +270,7 @@ impl fmt::Display for SnapshotComponent {
 // ============================================================================
 
 /// A single point-in-time system snapshot.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Snapshot {
     /// Unique identifier.
     pub id: u64,
@@ -382,17 +382,23 @@ impl SnapshotTree {
         parent_id: Option<u64>,
     ) -> Result<u64, SnapshotError> {
         // Validate parent exists if specified.
-        if let Some(pid) = parent_id {
-            if !self.snapshots.contains_key(&pid) {
-                return Err(SnapshotError::ParentNotFound(pid));
-            }
+        if let Some(pid) = parent_id
+            && !self.snapshots.contains_key(&pid)
+        {
+            return Err(SnapshotError::ParentNotFound(pid));
         }
 
         let id = self.next_id;
         self.next_id = self.next_id.saturating_add(1);
 
         let snapshot = Snapshot::new(
-            id, name, description, timestamp, snapshot_type, components, parent_id,
+            id,
+            name,
+            description,
+            timestamp,
+            snapshot_type,
+            components,
+            parent_id,
         );
         self.snapshots.insert(id, snapshot);
 
@@ -406,8 +412,7 @@ impl SnapshotTree {
     /// Remove a snapshot by ID. Fails if it has children (must delete leaf first).
     pub fn remove_snapshot(&mut self, id: u64) -> Result<Snapshot, SnapshotError> {
         // Check the snapshot exists.
-        let snapshot = self.snapshots.get(&id)
-            .ok_or(SnapshotError::NotFound(id))?;
+        let snapshot = self.snapshots.get(&id).ok_or(SnapshotError::NotFound(id))?;
 
         // Cannot remove if locked.
         if snapshot.locked {
@@ -415,22 +420,25 @@ impl SnapshotTree {
         }
 
         // Cannot remove if it has children.
-        if let Some(kids) = self.children.get(&id) {
-            if !kids.is_empty() {
-                return Err(SnapshotError::HasChildren(id));
-            }
+        if let Some(kids) = self.children.get(&id)
+            && !kids.is_empty()
+        {
+            return Err(SnapshotError::HasChildren(id));
         }
 
         // Remove from parent's child list.
-        if let Some(pid) = snapshot.parent_id {
-            if let Some(siblings) = self.children.get_mut(&pid) {
-                siblings.retain(|&cid| cid != id);
-            }
+        if let Some(pid) = snapshot.parent_id
+            && let Some(siblings) = self.children.get_mut(&pid)
+        {
+            siblings.retain(|&cid| cid != id);
         }
 
         self.children.remove(&id);
         // The snapshot is guaranteed to exist since we checked above.
-        Ok(self.snapshots.remove(&id).expect("snapshot was verified to exist"))
+        Ok(self
+            .snapshots
+            .remove(&id)
+            .expect("snapshot was verified to exist"))
     }
 
     /// Get a snapshot by ID.
@@ -459,7 +467,9 @@ impl SnapshotTree {
 
     /// Get all snapshot IDs sorted by timestamp.
     pub fn all_ids_by_timestamp(&self) -> Vec<u64> {
-        let mut ids: Vec<_> = self.snapshots.values()
+        let mut ids: Vec<_> = self
+            .snapshots
+            .values()
             .map(|s| (s.timestamp, s.id))
             .collect();
         ids.sort();
@@ -533,7 +543,9 @@ impl SnapshotTree {
 
     /// Lock a snapshot (prevent deletion by retention policies).
     pub fn lock_snapshot(&mut self, id: u64) -> Result<(), SnapshotError> {
-        let snap = self.snapshots.get_mut(&id)
+        let snap = self
+            .snapshots
+            .get_mut(&id)
             .ok_or(SnapshotError::NotFound(id))?;
         snap.locked = true;
         Ok(())
@@ -541,7 +553,9 @@ impl SnapshotTree {
 
     /// Unlock a snapshot.
     pub fn unlock_snapshot(&mut self, id: u64) -> Result<(), SnapshotError> {
-        let snap = self.snapshots.get_mut(&id)
+        let snap = self
+            .snapshots
+            .get_mut(&id)
             .ok_or(SnapshotError::NotFound(id))?;
         snap.locked = false;
         Ok(())
@@ -549,7 +563,9 @@ impl SnapshotTree {
 
     /// Add a tag to a snapshot.
     pub fn add_tag(&mut self, id: u64, tag: &str) -> Result<(), SnapshotError> {
-        let snap = self.snapshots.get_mut(&id)
+        let snap = self
+            .snapshots
+            .get_mut(&id)
             .ok_or(SnapshotError::NotFound(id))?;
         let tag_str = tag.to_string();
         if !snap.tags.contains(&tag_str) {
@@ -560,7 +576,9 @@ impl SnapshotTree {
 
     /// Remove a tag from a snapshot.
     pub fn remove_tag(&mut self, id: u64, tag: &str) -> Result<(), SnapshotError> {
-        let snap = self.snapshots.get_mut(&id)
+        let snap = self
+            .snapshots
+            .get_mut(&id)
             .ok_or(SnapshotError::NotFound(id))?;
         snap.tags.retain(|t| t != tag);
         Ok(())
@@ -569,7 +587,8 @@ impl SnapshotTree {
     /// Find snapshots matching a search query (name or description, case-insensitive).
     pub fn search(&self, query: &str) -> Vec<u64> {
         let q = query.to_ascii_lowercase();
-        self.snapshots.values()
+        self.snapshots
+            .values()
             .filter(|s| {
                 s.name.to_ascii_lowercase().contains(&q)
                     || s.description.to_ascii_lowercase().contains(&q)
@@ -580,7 +599,8 @@ impl SnapshotTree {
 
     /// Filter snapshots by type.
     pub fn filter_by_type(&self, snap_type: SnapshotType) -> Vec<u64> {
-        self.snapshots.values()
+        self.snapshots
+            .values()
             .filter(|s| s.snapshot_type == snap_type)
             .map(|s| s.id)
             .collect()
@@ -588,7 +608,8 @@ impl SnapshotTree {
 
     /// Filter snapshots that include a specific component.
     pub fn filter_by_component(&self, component: SnapshotComponent) -> Vec<u64> {
-        self.snapshots.values()
+        self.snapshots
+            .values()
             .filter(|s| s.has_component(component))
             .map(|s| s.id)
             .collect()
@@ -627,7 +648,9 @@ impl fmt::Display for SnapshotError {
         match self {
             Self::NotFound(id) => write!(f, "Snapshot {} not found", id),
             Self::ParentNotFound(id) => write!(f, "Parent snapshot {} not found", id),
-            Self::HasChildren(id) => write!(f, "Snapshot {} has children and cannot be deleted", id),
+            Self::HasChildren(id) => {
+                write!(f, "Snapshot {} has children and cannot be deleted", id)
+            }
             Self::Locked(id) => write!(f, "Snapshot {} is locked", id),
             Self::InvalidSchedule(msg) => write!(f, "Invalid schedule: {}", msg),
             Self::FormatError(msg) => write!(f, "Format error: {}", msg),
@@ -653,13 +676,21 @@ pub enum DiffEntry {
     /// A file was removed.
     FileRemoved(String),
     /// A setting was changed.
-    SettingChanged { key: String, old_value: String, new_value: String },
+    SettingChanged {
+        key: String,
+        old_value: String,
+        new_value: String,
+    },
     /// A package was installed.
     PackageInstalled(String),
     /// A package was removed.
     PackageUninstalled(String),
     /// A package version changed.
-    PackageUpdated { name: String, old_version: String, new_version: String },
+    PackageUpdated {
+        name: String,
+        old_version: String,
+        new_version: String,
+    },
 }
 
 impl DiffEntry {
@@ -669,7 +700,8 @@ impl DiffEntry {
             Self::ComponentAdded(_) | Self::ComponentRemoved(_) => "Components",
             Self::FileAdded(_) | Self::FileModified(_) | Self::FileRemoved(_) => "Files",
             Self::SettingChanged { .. } => "Settings",
-            Self::PackageInstalled(_) | Self::PackageUninstalled(_)
+            Self::PackageInstalled(_)
+            | Self::PackageUninstalled(_)
             | Self::PackageUpdated { .. } => "Packages",
         }
     }
@@ -682,12 +714,20 @@ impl DiffEntry {
             Self::FileAdded(path) => format!("+ File: {}", path),
             Self::FileModified(path) => format!("~ File: {}", path),
             Self::FileRemoved(path) => format!("- File: {}", path),
-            Self::SettingChanged { key, old_value, new_value } => {
+            Self::SettingChanged {
+                key,
+                old_value,
+                new_value,
+            } => {
                 format!("~ Setting: {} ({} -> {})", key, old_value, new_value)
             }
             Self::PackageInstalled(name) => format!("+ Package: {}", name),
             Self::PackageUninstalled(name) => format!("- Package: {}", name),
-            Self::PackageUpdated { name, old_version, new_version } => {
+            Self::PackageUpdated {
+                name,
+                old_version,
+                new_version,
+            } => {
                 format!("~ Package: {} ({} -> {})", name, old_version, new_version)
             }
         }
@@ -697,9 +737,7 @@ impl DiffEntry {
     pub fn is_addition(&self) -> bool {
         matches!(
             self,
-            Self::ComponentAdded(_)
-                | Self::FileAdded(_)
-                | Self::PackageInstalled(_)
+            Self::ComponentAdded(_) | Self::FileAdded(_) | Self::PackageInstalled(_)
         )
     }
 
@@ -707,9 +745,7 @@ impl DiffEntry {
     pub fn is_removal(&self) -> bool {
         matches!(
             self,
-            Self::ComponentRemoved(_)
-                | Self::FileRemoved(_)
-                | Self::PackageUninstalled(_)
+            Self::ComponentRemoved(_) | Self::FileRemoved(_) | Self::PackageUninstalled(_)
         )
     }
 
@@ -717,9 +753,7 @@ impl DiffEntry {
     pub fn is_modification(&self) -> bool {
         matches!(
             self,
-            Self::FileModified(_)
-                | Self::SettingChanged { .. }
-                | Self::PackageUpdated { .. }
+            Self::FileModified(_) | Self::SettingChanged { .. } | Self::PackageUpdated { .. }
         )
     }
 }
@@ -763,7 +797,10 @@ impl SnapshotDiffResult {
 
     /// Get entries filtered by category.
     pub fn by_category(&self, category: &str) -> Vec<&DiffEntry> {
-        self.entries.iter().filter(|e| e.category() == category).collect()
+        self.entries
+            .iter()
+            .filter(|e| e.category() == category)
+            .collect()
     }
 }
 
@@ -886,7 +923,8 @@ impl RetentionPolicy {
 
         // Count-based pruning: keep only max_count newest snapshots.
         if self.has_count_limit() {
-            let non_deleted: Vec<_> = snapshots.iter()
+            let non_deleted: Vec<_> = snapshots
+                .iter()
                 .filter(|(id, _, _, locked)| !locked && !to_delete.contains(id))
                 .collect();
             if non_deleted.len() > self.max_count {
@@ -902,7 +940,8 @@ impl RetentionPolicy {
 
         // Size-based pruning: delete oldest until under max_total_bytes.
         if self.has_size_limit() {
-            let mut total: u64 = snapshots.iter()
+            let mut total: u64 = snapshots
+                .iter()
                 .filter(|(id, _, _, _)| !to_delete.contains(id))
                 .map(|(_, _, sz, _)| sz)
                 .sum();
@@ -928,7 +967,10 @@ impl RetentionPolicy {
             parts.push(format!("keep {} snapshots", self.max_count));
         }
         if self.has_age_limit() {
-            parts.push(format!("max age {}", format_duration_short(self.max_age_secs)));
+            parts.push(format!(
+                "max age {}",
+                format_duration_short(self.max_age_secs)
+            ));
         }
         if self.has_size_limit() {
             parts.push(format!("max size {}", format_bytes(self.max_total_bytes)));
@@ -1119,7 +1161,8 @@ impl SnapshotExport {
         lines.push(format!("size={}", snap.size_bytes));
         lines.push(format!(
             "parent={}",
-            snap.parent_id.map_or_else(|| "none".to_string(), |id| id.to_string())
+            snap.parent_id
+                .map_or_else(|| "none".to_string(), |id| id.to_string())
         ));
         lines.push(format!("locked={}", snap.locked));
         let comp_str: Vec<&str> = snap.components.iter().map(|c| c.label()).collect();
@@ -1174,12 +1217,9 @@ impl SnapshotExport {
                         })?;
                     }
                     "type" => {
-                        snap_type = SnapshotType::from_label(value.trim())
-                            .ok_or_else(|| {
-                                SnapshotError::FormatError(
-                                    format!("unknown type: {}", value.trim()),
-                                )
-                            })?;
+                        snap_type = SnapshotType::from_label(value.trim()).ok_or_else(|| {
+                            SnapshotError::FormatError(format!("unknown type: {}", value.trim()))
+                        })?;
                     }
                     "size" => {
                         size_bytes = value.trim().parse::<u64>().map_err(|e| {
@@ -1200,10 +1240,10 @@ impl SnapshotExport {
                     "components" => {
                         for c_str in value.split(',') {
                             let c_str = c_str.trim();
-                            if !c_str.is_empty() {
-                                if let Some(c) = SnapshotComponent::from_label(c_str) {
-                                    components.push(c);
-                                }
+                            if !c_str.is_empty()
+                                && let Some(c) = SnapshotComponent::from_label(c_str)
+                            {
+                                components.push(c);
                             }
                         }
                     }
@@ -1221,7 +1261,13 @@ impl SnapshotExport {
         }
 
         let mut snap = Snapshot::new(
-            id, &name, &description, timestamp, snap_type, components, parent_id,
+            id,
+            &name,
+            &description,
+            timestamp,
+            snap_type,
+            components,
+            parent_id,
         );
         snap.size_bytes = size_bytes;
         snap.locked = locked;
@@ -1290,7 +1336,14 @@ impl SnapshotManager {
         components: Vec<SnapshotComponent>,
         parent_id: Option<u64>,
     ) -> Result<u64, SnapshotError> {
-        self.tree.add_snapshot(name, description, timestamp, snapshot_type, components, parent_id)
+        self.tree.add_snapshot(
+            name,
+            description,
+            timestamp,
+            snapshot_type,
+            components,
+            parent_id,
+        )
     }
 
     /// Delete a snapshot.
@@ -1305,9 +1358,13 @@ impl SnapshotManager {
         older_id: u64,
         newer_id: u64,
     ) -> Result<SnapshotDiffResult, SnapshotError> {
-        let older = self.tree.get_snapshot(older_id)
+        let older = self
+            .tree
+            .get_snapshot(older_id)
             .ok_or(SnapshotError::NotFound(older_id))?;
-        let newer = self.tree.get_snapshot(newer_id)
+        let newer = self
+            .tree
+            .get_snapshot(newer_id)
             .ok_or(SnapshotError::NotFound(newer_id))?;
 
         let mut entries = Vec::new();
@@ -1331,15 +1388,12 @@ impl SnapshotManager {
             let file_change_count = (time_gap / 86_400).min(20) as usize;
             for i in 0..file_change_count {
                 match i % 3 {
-                    0 => entries.push(DiffEntry::FileModified(
-                        format!("/system/lib/module_{}.so", i),
-                    )),
-                    1 => entries.push(DiffEntry::FileAdded(
-                        format!("/system/etc/conf_{}.yaml", i),
-                    )),
-                    _ => entries.push(DiffEntry::FileRemoved(
-                        format!("/tmp/cache_{}.dat", i),
-                    )),
+                    0 => entries.push(DiffEntry::FileModified(format!(
+                        "/system/lib/module_{}.so",
+                        i
+                    ))),
+                    1 => entries.push(DiffEntry::FileAdded(format!("/system/etc/conf_{}.yaml", i))),
+                    _ => entries.push(DiffEntry::FileRemoved(format!("/tmp/cache_{}.dat", i))),
                 }
             }
         }
@@ -1399,25 +1453,27 @@ impl SnapshotManager {
 
     /// Run retention policy and return IDs of snapshots that were pruned.
     pub fn apply_retention(&mut self, now: u64) -> Vec<u64> {
-        let snapshot_info: Vec<(u64, u64, u64, bool)> = self.tree
+        let snapshot_info: Vec<(u64, u64, u64, bool)> = self
+            .tree
             .all_ids_by_timestamp()
             .iter()
             .filter_map(|&id| {
-                self.tree.get_snapshot(id).map(|s| {
-                    (s.id, s.timestamp, s.size_bytes, s.locked)
-                })
+                self.tree
+                    .get_snapshot(id)
+                    .map(|s| (s.id, s.timestamp, s.size_bytes, s.locked))
             })
             .collect();
 
-        let to_prune = self.schedule.retention.snapshots_to_prune(&snapshot_info, now);
+        let to_prune = self
+            .schedule
+            .retention
+            .snapshots_to_prune(&snapshot_info, now);
 
         let mut pruned = Vec::new();
         for id in to_prune {
             // Only prune leaf snapshots (no children). Skip non-leaf silently.
-            if self.tree.children_of(id).is_empty() {
-                if self.tree.remove_snapshot(id).is_ok() {
-                    pruned.push(id);
-                }
+            if self.tree.children_of(id).is_empty() && self.tree.remove_snapshot(id).is_ok() {
+                pruned.push(id);
             }
         }
         pruned
@@ -1434,7 +1490,11 @@ impl SnapshotManager {
     }
 
     /// Import snapshots from text (adds them to the tree with new IDs).
-    pub fn import_snapshots(&mut self, text: &str, base_timestamp: u64) -> Result<Vec<u64>, SnapshotError> {
+    pub fn import_snapshots(
+        &mut self,
+        text: &str,
+        base_timestamp: u64,
+    ) -> Result<Vec<u64>, SnapshotError> {
         let imported = SnapshotExport::import_all(text)?;
         let mut new_ids = Vec::new();
 
@@ -1468,13 +1528,12 @@ impl SnapshotManager {
         // Suggest deleting old automatic snapshots.
         let mut old_auto_count = 0usize;
         for id in self.tree.all_ids_by_timestamp() {
-            if let Some(snap) = self.tree.get_snapshot(id) {
-                if snap.snapshot_type != SnapshotType::Manual
-                    && !snap.locked
-                    && now.saturating_sub(snap.timestamp) > 30 * 86_400
-                {
-                    old_auto_count += 1;
-                }
+            if let Some(snap) = self.tree.get_snapshot(id)
+                && snap.snapshot_type != SnapshotType::Manual
+                && !snap.locked
+                && now.saturating_sub(snap.timestamp) > 30 * 86_400
+            {
+                old_auto_count += 1;
             }
         }
         if old_auto_count > 0 {
@@ -1683,7 +1742,13 @@ impl ViewMode {
 
     /// All view modes.
     pub fn all() -> &'static [Self] {
-        &[Self::Tree, Self::Timeline, Self::Compare, Self::Schedule, Self::Storage]
+        &[
+            Self::Tree,
+            Self::Timeline,
+            Self::Compare,
+            Self::Schedule,
+            Self::Storage,
+        ]
     }
 }
 
@@ -1755,61 +1820,71 @@ impl SystemRestoreUI {
         let base_ts = 1_700_000_000u64;
 
         // Create demo snapshot tree.
-        let root_id = manager.create_snapshot(
-            "Initial Setup",
-            "Clean install with base system",
-            base_ts,
-            SnapshotType::Manual,
-            SnapshotComponent::default_set(),
-            None,
-        ).unwrap_or(0);
+        let root_id = manager
+            .create_snapshot(
+                "Initial Setup",
+                "Clean install with base system",
+                base_ts,
+                SnapshotType::Manual,
+                SnapshotComponent::default_set(),
+                None,
+            )
+            .unwrap_or(0);
 
-        let after_update_id = manager.create_snapshot(
-            "After System Update v1.1",
-            "System updated to version 1.1 with security patches",
-            base_ts + 86_400 * 7,
-            SnapshotType::PreUpdate,
-            vec![
-                SnapshotComponent::SystemFiles,
-                SnapshotComponent::BootConfig,
-                SnapshotComponent::PackageState,
-            ],
-            Some(root_id),
-        ).unwrap_or(0);
+        let after_update_id = manager
+            .create_snapshot(
+                "After System Update v1.1",
+                "System updated to version 1.1 with security patches",
+                base_ts + 86_400 * 7,
+                SnapshotType::PreUpdate,
+                vec![
+                    SnapshotComponent::SystemFiles,
+                    SnapshotComponent::BootConfig,
+                    SnapshotComponent::PackageState,
+                ],
+                Some(root_id),
+            )
+            .unwrap_or(0);
 
-        let _dev_branch = manager.create_snapshot(
-            "Dev Tools Installed",
-            "Added development toolchain and IDE",
-            base_ts + 86_400 * 10,
-            SnapshotType::PreInstall,
-            vec![
-                SnapshotComponent::InstalledApps,
-                SnapshotComponent::UserSettings,
-                SnapshotComponent::PackageState,
-            ],
-            Some(after_update_id),
-        ).unwrap_or(0);
+        let _dev_branch = manager
+            .create_snapshot(
+                "Dev Tools Installed",
+                "Added development toolchain and IDE",
+                base_ts + 86_400 * 10,
+                SnapshotType::PreInstall,
+                vec![
+                    SnapshotComponent::InstalledApps,
+                    SnapshotComponent::UserSettings,
+                    SnapshotComponent::PackageState,
+                ],
+                Some(after_update_id),
+            )
+            .unwrap_or(0);
 
-        let _weekly_auto = manager.create_snapshot(
-            "Weekly Auto Backup",
-            "Scheduled weekly snapshot",
-            base_ts + 86_400 * 14,
-            SnapshotType::Scheduled,
-            SnapshotComponent::default_set(),
-            Some(after_update_id),
-        ).unwrap_or(0);
+        let _weekly_auto = manager
+            .create_snapshot(
+                "Weekly Auto Backup",
+                "Scheduled weekly snapshot",
+                base_ts + 86_400 * 14,
+                SnapshotType::Scheduled,
+                SnapshotComponent::default_set(),
+                Some(after_update_id),
+            )
+            .unwrap_or(0);
 
-        let _net_config = manager.create_snapshot(
-            "Network Reconfigured",
-            "Changed to static IP and new DNS settings",
-            base_ts + 86_400 * 20,
-            SnapshotType::Manual,
-            vec![
-                SnapshotComponent::NetworkConfig,
-                SnapshotComponent::ServiceConfig,
-            ],
-            Some(root_id),
-        ).unwrap_or(0);
+        let _net_config = manager
+            .create_snapshot(
+                "Network Reconfigured",
+                "Changed to static IP and new DNS settings",
+                base_ts + 86_400 * 20,
+                SnapshotType::Manual,
+                vec![
+                    SnapshotComponent::NetworkConfig,
+                    SnapshotComponent::ServiceConfig,
+                ],
+                Some(root_id),
+            )
+            .unwrap_or(0);
 
         // Set up a default schedule.
         manager.schedule = ScheduleConfig {
@@ -1845,37 +1920,47 @@ impl SystemRestoreUI {
         let all_ids = if self.view_mode == ViewMode::Timeline {
             self.manager.tree.all_ids_by_timestamp()
         } else {
-            self.manager.tree.flatten_for_display().into_iter().map(|(id, _)| id).collect()
+            self.manager
+                .tree
+                .flatten_for_display()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
         };
 
-        all_ids.into_iter().filter(|&id| {
-            if let Some(snap) = self.manager.tree.get_snapshot(id) {
-                // Apply type filter.
-                if let Some(filter_type) = self.type_filter {
-                    if snap.snapshot_type != filter_type {
-                        return false;
-                    }
-                }
-                // Apply search query.
-                if !self.search_query.is_empty() {
-                    let q = self.search_query.to_ascii_lowercase();
-                    if !snap.name.to_ascii_lowercase().contains(&q)
-                        && !snap.description.to_ascii_lowercase().contains(&q)
+        all_ids
+            .into_iter()
+            .filter(|&id| {
+                if let Some(snap) = self.manager.tree.get_snapshot(id) {
+                    // Apply type filter.
+                    if let Some(filter_type) = self.type_filter
+                        && snap.snapshot_type != filter_type
                     {
                         return false;
                     }
+                    // Apply search query.
+                    if !self.search_query.is_empty() {
+                        let q = self.search_query.to_ascii_lowercase();
+                        if !snap.name.to_ascii_lowercase().contains(&q)
+                            && !snap.description.to_ascii_lowercase().contains(&q)
+                        {
+                            return false;
+                        }
+                    }
+                    true
+                } else {
+                    false
                 }
-                true
-            } else {
-                false
-            }
-        }).collect()
+            })
+            .collect()
     }
 
     /// Estimated size for the new snapshot form based on selected components.
     pub fn form_estimated_size(&self) -> u64 {
         let all_components = SnapshotComponent::all();
-        self.form_components.iter().enumerate()
+        self.form_components
+            .iter()
+            .enumerate()
             .filter(|(_, selected)| **selected)
             .filter_map(|(i, _)| all_components.get(i))
             .map(|c| c.estimated_size_bytes())
@@ -1885,7 +1970,9 @@ impl SystemRestoreUI {
     /// Get selected components from the form.
     pub fn form_selected_components(&self) -> Vec<SnapshotComponent> {
         let all_components = SnapshotComponent::all();
-        self.form_components.iter().enumerate()
+        self.form_components
+            .iter()
+            .enumerate()
             .filter(|(_, selected)| **selected)
             .filter_map(|(i, _)| all_components.get(i).copied())
             .collect()
@@ -2025,8 +2112,16 @@ impl SystemRestoreUI {
         for mode in ViewMode::all() {
             let is_active = *mode == self.view_mode;
             let tab_width = 80.0;
-            let tab_color = if is_active { COLOR_SURFACE0 } else { COLOR_MANTLE };
-            let text_color = if is_active { COLOR_BLUE } else { COLOR_SUBTEXT0 };
+            let tab_color = if is_active {
+                COLOR_SURFACE0
+            } else {
+                COLOR_MANTLE
+            };
+            let text_color = if is_active {
+                COLOR_BLUE
+            } else {
+                COLOR_SUBTEXT0
+            };
 
             rt.push(RenderCommand::FillRect {
                 x: tab_x,
@@ -2042,7 +2137,11 @@ impl SystemRestoreUI {
                 text: mode.label().to_string(),
                 color: text_color,
                 font_size: FONT_SIZE,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_width),
             });
             tab_x += tab_width + 4.0;
@@ -2120,10 +2219,10 @@ impl SystemRestoreUI {
         for (id, depth) in &flattened {
             if let Some(snap) = self.manager.tree.get_snapshot(*id) {
                 // Apply filters.
-                if let Some(ft) = self.type_filter {
-                    if snap.snapshot_type != ft {
-                        continue;
-                    }
+                if let Some(ft) = self.type_filter
+                    && snap.snapshot_type != ft
+                {
+                    continue;
                 }
                 if !self.search_query.is_empty() {
                     let q = self.search_query.to_ascii_lowercase();
@@ -2190,9 +2289,17 @@ impl SystemRestoreUI {
                     x: name_x,
                     y: row_y + 4.0,
                     text: snap.name.clone(),
-                    color: if is_selected { COLOR_TEXT } else { COLOR_SUBTEXT1 },
+                    color: if is_selected {
+                        COLOR_TEXT
+                    } else {
+                        COLOR_SUBTEXT1
+                    },
                     font_size: FONT_SIZE,
-                    font_weight: if is_selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                    font_weight: if is_selected {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
                     max_width: Some(300.0),
                 });
 
@@ -2298,9 +2405,17 @@ impl SystemRestoreUI {
                     x: text_x,
                     y: entry_y + 4.0,
                     text: snap.name.clone(),
-                    color: if is_selected { COLOR_TEXT } else { COLOR_SUBTEXT1 },
+                    color: if is_selected {
+                        COLOR_TEXT
+                    } else {
+                        COLOR_SUBTEXT1
+                    },
                     font_size: FONT_SIZE,
-                    font_weight: if is_selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                    font_weight: if is_selected {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
                     max_width: Some(400.0),
                 });
 
@@ -2428,8 +2543,16 @@ impl SystemRestoreUI {
         });
 
         // Status.
-        let status_text = if schedule.enabled { "Enabled" } else { "Disabled" };
-        let status_color = if schedule.enabled { COLOR_GREEN } else { COLOR_RED };
+        let status_text = if schedule.enabled {
+            "Enabled"
+        } else {
+            "Disabled"
+        };
+        let status_color = if schedule.enabled {
+            COLOR_GREEN
+        } else {
+            COLOR_RED
+        };
         rt.push(RenderCommand::FillRect {
             x: panel_x,
             y: y + PADDING + 30.0,
@@ -2483,12 +2606,16 @@ impl SystemRestoreUI {
 
         // Next snapshot due.
         if schedule.enabled {
-            let next_due = schedule.last_snapshot_timestamp
+            let next_due = schedule
+                .last_snapshot_timestamp
                 .saturating_add(schedule.frequency.interval_secs());
             let due_text = if self.current_timestamp >= next_due {
                 "Overdue".to_string()
             } else {
-                format!("in {}", format_duration_short(next_due.saturating_sub(self.current_timestamp)))
+                format!(
+                    "in {}",
+                    format_duration_short(next_due.saturating_sub(self.current_timestamp))
+                )
             };
             rt.push(RenderCommand::Text {
                 x: label_x,
@@ -2760,7 +2887,10 @@ impl SystemRestoreUI {
             ("Size:", snap.size_display()),
             ("Age:", snap.age_display(self.current_timestamp)),
             ("Components:", format!("{}", snap.component_count())),
-            ("Locked:", if snap.locked { "Yes" } else { "No" }.to_string()),
+            (
+                "Locked:",
+                if snap.locked { "Yes" } else { "No" }.to_string(),
+            ),
         ];
 
         let mut label_x = col1_x;
@@ -2947,7 +3077,10 @@ impl SystemRestoreUI {
 
         // Right: schedule status.
         let schedule_text = if self.manager.schedule.enabled {
-            format!("Schedule: {} (active)", self.manager.schedule.frequency.label())
+            format!(
+                "Schedule: {} (active)",
+                self.manager.schedule.frequency.label()
+            )
         } else {
             "Schedule: Off".to_string()
         };
@@ -2955,7 +3088,11 @@ impl SystemRestoreUI {
             x: WINDOW_WIDTH - 200.0,
             y: bar_y + STATUS_BAR_HEIGHT / 2.0 - FONT_SIZE_SMALL / 2.0,
             text: schedule_text,
-            color: if self.manager.schedule.enabled { COLOR_GREEN } else { COLOR_OVERLAY0 },
+            color: if self.manager.schedule.enabled {
+                COLOR_GREEN
+            } else {
+                COLOR_OVERLAY0
+            },
             font_size: FONT_SIZE_SMALL,
             font_weight: FontWeightHint::Regular,
             max_width: Some(180.0),
@@ -3056,8 +3193,16 @@ impl SystemRestoreUI {
             color: COLOR_SURFACE0,
             corner_radii: CornerRadii::all(4.0),
         });
-        let name_display = if self.form_name.is_empty() { "Enter snapshot name..." } else { &self.form_name };
-        let name_color = if self.form_name.is_empty() { COLOR_OVERLAY0 } else { COLOR_TEXT };
+        let name_display = if self.form_name.is_empty() {
+            "Enter snapshot name..."
+        } else {
+            &self.form_name
+        };
+        let name_color = if self.form_name.is_empty() {
+            COLOR_OVERLAY0
+        } else {
+            COLOR_TEXT
+        };
         rt.push(RenderCommand::Text {
             x: dx + PADDING + 8.0,
             y: field_y + 24.0,
@@ -3687,7 +3832,11 @@ impl SystemRestoreUI {
             // Progress bar fill.
             let fill_width = (overlay_w - 2.0 * PADDING) * progress.fraction();
             if fill_width > 0.0 {
-                let bar_color = if progress.error.is_some() { COLOR_RED } else { COLOR_BLUE };
+                let bar_color = if progress.error.is_some() {
+                    COLOR_RED
+                } else {
+                    COLOR_BLUE
+                };
                 rt.push(RenderCommand::FillRect {
                     x: ox + PADDING,
                     y: bar_y,
@@ -3844,11 +3993,26 @@ mod tests {
 
     #[test]
     fn test_snapshot_type_from_label() {
-        assert_eq!(SnapshotType::from_label("Manual"), Some(SnapshotType::Manual));
-        assert_eq!(SnapshotType::from_label("automatic"), Some(SnapshotType::Automatic));
-        assert_eq!(SnapshotType::from_label("Pre-Update"), Some(SnapshotType::PreUpdate));
-        assert_eq!(SnapshotType::from_label("preinstall"), Some(SnapshotType::PreInstall));
-        assert_eq!(SnapshotType::from_label("scheduled"), Some(SnapshotType::Scheduled));
+        assert_eq!(
+            SnapshotType::from_label("Manual"),
+            Some(SnapshotType::Manual)
+        );
+        assert_eq!(
+            SnapshotType::from_label("automatic"),
+            Some(SnapshotType::Automatic)
+        );
+        assert_eq!(
+            SnapshotType::from_label("Pre-Update"),
+            Some(SnapshotType::PreUpdate)
+        );
+        assert_eq!(
+            SnapshotType::from_label("preinstall"),
+            Some(SnapshotType::PreInstall)
+        );
+        assert_eq!(
+            SnapshotType::from_label("scheduled"),
+            Some(SnapshotType::Scheduled)
+        );
         assert_eq!(SnapshotType::from_label("unknown"), None);
     }
 
@@ -3871,7 +4035,8 @@ mod tests {
                     types[i].indicator_color(),
                     types[j].indicator_color(),
                     "Types {:?} and {:?} should have different colors",
-                    types[i], types[j],
+                    types[i],
+                    types[j],
                 );
             }
         }
@@ -3922,7 +4087,10 @@ mod tests {
 
     #[test]
     fn test_component_display() {
-        assert_eq!(format!("{}", SnapshotComponent::UserSettings), "User Settings");
+        assert_eq!(
+            format!("{}", SnapshotComponent::UserSettings),
+            "User Settings"
+        );
     }
 
     // --- Snapshot tests ---
@@ -3930,8 +4098,13 @@ mod tests {
     #[test]
     fn test_snapshot_new() {
         let snap = Snapshot::new(
-            1, "Test", "A test", 1000, SnapshotType::Manual,
-            vec![SnapshotComponent::SystemFiles], None,
+            1,
+            "Test",
+            "A test",
+            1000,
+            SnapshotType::Manual,
+            vec![SnapshotComponent::SystemFiles],
+            None,
         );
         assert_eq!(snap.id, 1);
         assert_eq!(snap.name, "Test");
@@ -3943,8 +4116,15 @@ mod tests {
     #[test]
     fn test_snapshot_size_calculated() {
         let snap = Snapshot::new(
-            1, "Test", "", 0, SnapshotType::Manual,
-            vec![SnapshotComponent::BootConfig, SnapshotComponent::NetworkConfig],
+            1,
+            "Test",
+            "",
+            0,
+            SnapshotType::Manual,
+            vec![
+                SnapshotComponent::BootConfig,
+                SnapshotComponent::NetworkConfig,
+            ],
             None,
         );
         let expected = SnapshotComponent::BootConfig.estimated_size_bytes()
@@ -3955,8 +4135,13 @@ mod tests {
     #[test]
     fn test_snapshot_size_display() {
         let snap = Snapshot::new(
-            1, "Test", "", 0, SnapshotType::Manual,
-            vec![SnapshotComponent::SystemFiles], None,
+            1,
+            "Test",
+            "",
+            0,
+            SnapshotType::Manual,
+            vec![SnapshotComponent::SystemFiles],
+            None,
         );
         let display = snap.size_display();
         assert!(display.contains("GB") || display.contains("MB"));
@@ -3974,8 +4159,15 @@ mod tests {
     #[test]
     fn test_snapshot_has_component() {
         let snap = Snapshot::new(
-            1, "Test", "", 0, SnapshotType::Manual,
-            vec![SnapshotComponent::SystemFiles, SnapshotComponent::BootConfig],
+            1,
+            "Test",
+            "",
+            0,
+            SnapshotType::Manual,
+            vec![
+                SnapshotComponent::SystemFiles,
+                SnapshotComponent::BootConfig,
+            ],
             None,
         );
         assert!(snap.has_component(SnapshotComponent::SystemFiles));
@@ -3985,8 +4177,15 @@ mod tests {
     #[test]
     fn test_snapshot_component_count() {
         let snap = Snapshot::new(
-            1, "Test", "", 0, SnapshotType::Manual,
-            vec![SnapshotComponent::SystemFiles, SnapshotComponent::BootConfig],
+            1,
+            "Test",
+            "",
+            0,
+            SnapshotType::Manual,
+            vec![
+                SnapshotComponent::SystemFiles,
+                SnapshotComponent::BootConfig,
+            ],
             None,
         );
         assert_eq!(snap.component_count(), 2);
@@ -4013,8 +4212,19 @@ mod tests {
     #[test]
     fn test_tree_add_child_snapshot() {
         let mut tree = SnapshotTree::new();
-        let root_id = tree.add_snapshot("Root", "", 100, SnapshotType::Manual, vec![], None).unwrap();
-        let child_id = tree.add_snapshot("Child", "", 200, SnapshotType::Manual, vec![], Some(root_id)).unwrap();
+        let root_id = tree
+            .add_snapshot("Root", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let child_id = tree
+            .add_snapshot(
+                "Child",
+                "",
+                200,
+                SnapshotType::Manual,
+                vec![],
+                Some(root_id),
+            )
+            .unwrap();
         assert_eq!(tree.count(), 2);
         assert_eq!(tree.children_of(root_id), &[child_id]);
     }
@@ -4029,7 +4239,9 @@ mod tests {
     #[test]
     fn test_tree_remove_leaf_snapshot() {
         let mut tree = SnapshotTree::new();
-        let id = tree.add_snapshot("Leaf", "", 100, SnapshotType::Manual, vec![], None).unwrap();
+        let id = tree
+            .add_snapshot("Leaf", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
         let removed = tree.remove_snapshot(id);
         assert!(removed.is_ok());
         assert!(tree.is_empty());
@@ -4044,15 +4256,31 @@ mod tests {
     #[test]
     fn test_tree_remove_with_children_fails() {
         let mut tree = SnapshotTree::new();
-        let root_id = tree.add_snapshot("Root", "", 100, SnapshotType::Manual, vec![], None).unwrap();
-        let _child = tree.add_snapshot("Child", "", 200, SnapshotType::Manual, vec![], Some(root_id)).unwrap();
-        assert_eq!(tree.remove_snapshot(root_id), Err(SnapshotError::HasChildren(root_id)));
+        let root_id = tree
+            .add_snapshot("Root", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let _child = tree
+            .add_snapshot(
+                "Child",
+                "",
+                200,
+                SnapshotType::Manual,
+                vec![],
+                Some(root_id),
+            )
+            .unwrap();
+        assert_eq!(
+            tree.remove_snapshot(root_id),
+            Err(SnapshotError::HasChildren(root_id))
+        );
     }
 
     #[test]
     fn test_tree_remove_locked_fails() {
         let mut tree = SnapshotTree::new();
-        let id = tree.add_snapshot("Locked", "", 100, SnapshotType::Manual, vec![], None).unwrap();
+        let id = tree
+            .add_snapshot("Locked", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
         tree.lock_snapshot(id).unwrap();
         assert_eq!(tree.remove_snapshot(id), Err(SnapshotError::Locked(id)));
     }
@@ -4060,9 +4288,15 @@ mod tests {
     #[test]
     fn test_tree_root_ids() {
         let mut tree = SnapshotTree::new();
-        let r1 = tree.add_snapshot("R1", "", 100, SnapshotType::Manual, vec![], None).unwrap();
-        let r2 = tree.add_snapshot("R2", "", 200, SnapshotType::Manual, vec![], None).unwrap();
-        let _c = tree.add_snapshot("C", "", 300, SnapshotType::Manual, vec![], Some(r1)).unwrap();
+        let r1 = tree
+            .add_snapshot("R1", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let r2 = tree
+            .add_snapshot("R2", "", 200, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let _c = tree
+            .add_snapshot("C", "", 300, SnapshotType::Manual, vec![], Some(r1))
+            .unwrap();
         let roots = tree.root_ids();
         assert!(roots.contains(&r1));
         assert!(roots.contains(&r2));
@@ -4072,12 +4306,19 @@ mod tests {
     #[test]
     fn test_tree_all_ids_by_timestamp() {
         let mut tree = SnapshotTree::new();
-        let _ = tree.add_snapshot("B", "", 200, SnapshotType::Manual, vec![], None).unwrap();
-        let _ = tree.add_snapshot("A", "", 100, SnapshotType::Manual, vec![], None).unwrap();
-        let _ = tree.add_snapshot("C", "", 300, SnapshotType::Manual, vec![], None).unwrap();
+        let _ = tree
+            .add_snapshot("B", "", 200, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let _ = tree
+            .add_snapshot("A", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let _ = tree
+            .add_snapshot("C", "", 300, SnapshotType::Manual, vec![], None)
+            .unwrap();
         let ids = tree.all_ids_by_timestamp();
         // Should be sorted by timestamp.
-        let timestamps: Vec<u64> = ids.iter()
+        let timestamps: Vec<u64> = ids
+            .iter()
             .filter_map(|&id| tree.get_snapshot(id).map(|s| s.timestamp))
             .collect();
         assert_eq!(timestamps, vec![100, 200, 300]);
@@ -4086,9 +4327,15 @@ mod tests {
     #[test]
     fn test_tree_depth_of() {
         let mut tree = SnapshotTree::new();
-        let r = tree.add_snapshot("R", "", 100, SnapshotType::Manual, vec![], None).unwrap();
-        let c = tree.add_snapshot("C", "", 200, SnapshotType::Manual, vec![], Some(r)).unwrap();
-        let gc = tree.add_snapshot("GC", "", 300, SnapshotType::Manual, vec![], Some(c)).unwrap();
+        let r = tree
+            .add_snapshot("R", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let c = tree
+            .add_snapshot("C", "", 200, SnapshotType::Manual, vec![], Some(r))
+            .unwrap();
+        let gc = tree
+            .add_snapshot("GC", "", 300, SnapshotType::Manual, vec![], Some(c))
+            .unwrap();
         assert_eq!(tree.depth_of(r), 0);
         assert_eq!(tree.depth_of(c), 1);
         assert_eq!(tree.depth_of(gc), 2);
@@ -4097,9 +4344,15 @@ mod tests {
     #[test]
     fn test_tree_ancestry_chain() {
         let mut tree = SnapshotTree::new();
-        let r = tree.add_snapshot("R", "", 100, SnapshotType::Manual, vec![], None).unwrap();
-        let c = tree.add_snapshot("C", "", 200, SnapshotType::Manual, vec![], Some(r)).unwrap();
-        let gc = tree.add_snapshot("GC", "", 300, SnapshotType::Manual, vec![], Some(c)).unwrap();
+        let r = tree
+            .add_snapshot("R", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let c = tree
+            .add_snapshot("C", "", 200, SnapshotType::Manual, vec![], Some(r))
+            .unwrap();
+        let gc = tree
+            .add_snapshot("GC", "", 300, SnapshotType::Manual, vec![], Some(c))
+            .unwrap();
         assert_eq!(tree.ancestry_chain(gc), vec![r, c, gc]);
         assert_eq!(tree.ancestry_chain(r), vec![r]);
     }
@@ -4107,9 +4360,15 @@ mod tests {
     #[test]
     fn test_tree_flatten_for_display() {
         let mut tree = SnapshotTree::new();
-        let r = tree.add_snapshot("R", "", 100, SnapshotType::Manual, vec![], None).unwrap();
-        let c1 = tree.add_snapshot("C1", "", 200, SnapshotType::Manual, vec![], Some(r)).unwrap();
-        let c2 = tree.add_snapshot("C2", "", 300, SnapshotType::Manual, vec![], Some(r)).unwrap();
+        let r = tree
+            .add_snapshot("R", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let c1 = tree
+            .add_snapshot("C1", "", 200, SnapshotType::Manual, vec![], Some(r))
+            .unwrap();
+        let c2 = tree
+            .add_snapshot("C2", "", 300, SnapshotType::Manual, vec![], Some(r))
+            .unwrap();
         let flat = tree.flatten_for_display();
         assert_eq!(flat, vec![(r, 0), (c1, 1), (c2, 1)]);
     }
@@ -4117,7 +4376,9 @@ mod tests {
     #[test]
     fn test_tree_lock_unlock() {
         let mut tree = SnapshotTree::new();
-        let id = tree.add_snapshot("S", "", 100, SnapshotType::Manual, vec![], None).unwrap();
+        let id = tree
+            .add_snapshot("S", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
         assert!(!tree.get_snapshot(id).unwrap().locked);
         tree.lock_snapshot(id).unwrap();
         assert!(tree.get_snapshot(id).unwrap().locked);
@@ -4128,7 +4389,9 @@ mod tests {
     #[test]
     fn test_tree_tags() {
         let mut tree = SnapshotTree::new();
-        let id = tree.add_snapshot("S", "", 100, SnapshotType::Manual, vec![], None).unwrap();
+        let id = tree
+            .add_snapshot("S", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
         tree.add_tag(id, "important").unwrap();
         tree.add_tag(id, "release").unwrap();
         tree.add_tag(id, "important").unwrap(); // Duplicate, should not add.
@@ -4141,8 +4404,26 @@ mod tests {
     #[test]
     fn test_tree_search() {
         let mut tree = SnapshotTree::new();
-        let _ = tree.add_snapshot("Weekly Backup", "auto backup", 100, SnapshotType::Scheduled, vec![], None).unwrap();
-        let _ = tree.add_snapshot("Manual Save", "before update", 200, SnapshotType::Manual, vec![], None).unwrap();
+        let _ = tree
+            .add_snapshot(
+                "Weekly Backup",
+                "auto backup",
+                100,
+                SnapshotType::Scheduled,
+                vec![],
+                None,
+            )
+            .unwrap();
+        let _ = tree
+            .add_snapshot(
+                "Manual Save",
+                "before update",
+                200,
+                SnapshotType::Manual,
+                vec![],
+                None,
+            )
+            .unwrap();
         let results = tree.search("backup");
         assert_eq!(results.len(), 1);
         let results = tree.search("MANUAL");
@@ -4152,9 +4433,15 @@ mod tests {
     #[test]
     fn test_tree_filter_by_type() {
         let mut tree = SnapshotTree::new();
-        let _ = tree.add_snapshot("A", "", 100, SnapshotType::Manual, vec![], None).unwrap();
-        let _ = tree.add_snapshot("B", "", 200, SnapshotType::Scheduled, vec![], None).unwrap();
-        let _ = tree.add_snapshot("C", "", 300, SnapshotType::Manual, vec![], None).unwrap();
+        let _ = tree
+            .add_snapshot("A", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let _ = tree
+            .add_snapshot("B", "", 200, SnapshotType::Scheduled, vec![], None)
+            .unwrap();
+        let _ = tree
+            .add_snapshot("C", "", 300, SnapshotType::Manual, vec![], None)
+            .unwrap();
         assert_eq!(tree.filter_by_type(SnapshotType::Manual).len(), 2);
         assert_eq!(tree.filter_by_type(SnapshotType::Scheduled).len(), 1);
         assert_eq!(tree.filter_by_type(SnapshotType::PreUpdate).len(), 0);
@@ -4163,18 +4450,66 @@ mod tests {
     #[test]
     fn test_tree_filter_by_component() {
         let mut tree = SnapshotTree::new();
-        let _ = tree.add_snapshot("A", "", 100, SnapshotType::Manual, vec![SnapshotComponent::BootConfig], None).unwrap();
-        let _ = tree.add_snapshot("B", "", 200, SnapshotType::Manual, vec![SnapshotComponent::SystemFiles], None).unwrap();
-        assert_eq!(tree.filter_by_component(SnapshotComponent::BootConfig).len(), 1);
-        assert_eq!(tree.filter_by_component(SnapshotComponent::SystemFiles).len(), 1);
-        assert_eq!(tree.filter_by_component(SnapshotComponent::DesktopConfig).len(), 0);
+        let _ = tree
+            .add_snapshot(
+                "A",
+                "",
+                100,
+                SnapshotType::Manual,
+                vec![SnapshotComponent::BootConfig],
+                None,
+            )
+            .unwrap();
+        let _ = tree
+            .add_snapshot(
+                "B",
+                "",
+                200,
+                SnapshotType::Manual,
+                vec![SnapshotComponent::SystemFiles],
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            tree.filter_by_component(SnapshotComponent::BootConfig)
+                .len(),
+            1
+        );
+        assert_eq!(
+            tree.filter_by_component(SnapshotComponent::SystemFiles)
+                .len(),
+            1
+        );
+        assert_eq!(
+            tree.filter_by_component(SnapshotComponent::DesktopConfig)
+                .len(),
+            0
+        );
     }
 
     #[test]
     fn test_tree_total_size() {
         let mut tree = SnapshotTree::new();
-        let _ = tree.add_snapshot("A", "", 100, SnapshotType::Manual, vec![SnapshotComponent::BootConfig], None).unwrap();
-        let _ = tree.add_snapshot("B", "", 200, SnapshotType::Manual, vec![SnapshotComponent::NetworkConfig], None).unwrap();
+        let _ = tree
+            .add_snapshot(
+                "A",
+                "",
+                100,
+                SnapshotType::Manual,
+                vec![SnapshotComponent::BootConfig],
+                None,
+            )
+            .unwrap();
+        let _ = tree
+            .add_snapshot(
+                "B",
+                "",
+                200,
+                SnapshotType::Manual,
+                vec![SnapshotComponent::NetworkConfig],
+                None,
+            )
+            .unwrap();
         let expected = SnapshotComponent::BootConfig.estimated_size_bytes()
             + SnapshotComponent::NetworkConfig.estimated_size_bytes();
         assert_eq!(tree.total_size_bytes(), expected);
@@ -4183,10 +4518,18 @@ mod tests {
     #[test]
     fn test_tree_branching() {
         let mut tree = SnapshotTree::new();
-        let root = tree.add_snapshot("Root", "", 100, SnapshotType::Manual, vec![], None).unwrap();
-        let b1 = tree.add_snapshot("Branch1", "", 200, SnapshotType::Manual, vec![], Some(root)).unwrap();
-        let b2 = tree.add_snapshot("Branch2", "", 300, SnapshotType::Manual, vec![], Some(root)).unwrap();
-        let _b1c = tree.add_snapshot("B1Child", "", 400, SnapshotType::Manual, vec![], Some(b1)).unwrap();
+        let root = tree
+            .add_snapshot("Root", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let b1 = tree
+            .add_snapshot("Branch1", "", 200, SnapshotType::Manual, vec![], Some(root))
+            .unwrap();
+        let b2 = tree
+            .add_snapshot("Branch2", "", 300, SnapshotType::Manual, vec![], Some(root))
+            .unwrap();
+        let _b1c = tree
+            .add_snapshot("B1Child", "", 400, SnapshotType::Manual, vec![], Some(b1))
+            .unwrap();
         assert_eq!(tree.children_of(root).len(), 2);
         assert!(tree.children_of(root).contains(&b1));
         assert!(tree.children_of(root).contains(&b2));
@@ -4195,8 +4538,12 @@ mod tests {
     #[test]
     fn test_tree_remove_updates_parent_children() {
         let mut tree = SnapshotTree::new();
-        let root = tree.add_snapshot("Root", "", 100, SnapshotType::Manual, vec![], None).unwrap();
-        let child = tree.add_snapshot("Child", "", 200, SnapshotType::Manual, vec![], Some(root)).unwrap();
+        let root = tree
+            .add_snapshot("Root", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
+        let child = tree
+            .add_snapshot("Child", "", 200, SnapshotType::Manual, vec![], Some(root))
+            .unwrap();
         tree.remove_snapshot(child).unwrap();
         assert!(tree.children_of(root).is_empty());
     }
@@ -4205,13 +4552,24 @@ mod tests {
 
     #[test]
     fn test_diff_entry_category() {
-        assert_eq!(DiffEntry::ComponentAdded(SnapshotComponent::BootConfig).category(), "Components");
+        assert_eq!(
+            DiffEntry::ComponentAdded(SnapshotComponent::BootConfig).category(),
+            "Components"
+        );
         assert_eq!(DiffEntry::FileAdded("test".to_string()).category(), "Files");
         assert_eq!(
-            DiffEntry::SettingChanged { key: "k".into(), old_value: "a".into(), new_value: "b".into() }.category(),
+            DiffEntry::SettingChanged {
+                key: "k".into(),
+                old_value: "a".into(),
+                new_value: "b".into()
+            }
+            .category(),
             "Settings",
         );
-        assert_eq!(DiffEntry::PackageInstalled("pkg".to_string()).category(), "Packages");
+        assert_eq!(
+            DiffEntry::PackageInstalled("pkg".to_string()).category(),
+            "Packages"
+        );
     }
 
     #[test]
@@ -4281,8 +4639,14 @@ mod tests {
 
     #[test]
     fn test_frequency_from_label() {
-        assert_eq!(ScheduleFrequency::from_label("daily"), Some(ScheduleFrequency::Daily));
-        assert_eq!(ScheduleFrequency::from_label("WEEKLY"), Some(ScheduleFrequency::Weekly));
+        assert_eq!(
+            ScheduleFrequency::from_label("daily"),
+            Some(ScheduleFrequency::Daily)
+        );
+        assert_eq!(
+            ScheduleFrequency::from_label("WEEKLY"),
+            Some(ScheduleFrequency::Weekly)
+        );
         assert_eq!(ScheduleFrequency::from_label("nope"), None);
     }
 
@@ -4290,7 +4654,9 @@ mod tests {
     fn test_frequency_intervals() {
         assert_eq!(ScheduleFrequency::Daily.interval_secs(), 86_400);
         assert_eq!(ScheduleFrequency::Weekly.interval_secs(), 604_800);
-        assert!(ScheduleFrequency::Monthly.interval_secs() > ScheduleFrequency::Weekly.interval_secs());
+        assert!(
+            ScheduleFrequency::Monthly.interval_secs() > ScheduleFrequency::Weekly.interval_secs()
+        );
     }
 
     // --- RetentionPolicy tests ---
@@ -4357,7 +4723,7 @@ mod tests {
     fn test_retention_locked_not_pruned() {
         let policy = RetentionPolicy::new(1, 0, 0);
         let snapshots = vec![
-            (1, 100, 1000, true),  // locked
+            (1, 100, 1000, true), // locked
             (2, 200, 1000, false),
             (3, 300, 1000, false),
         ];
@@ -4391,7 +4757,7 @@ mod tests {
         );
         config.last_snapshot_timestamp = 1000;
         assert!(!config.is_due(1000 + 86_399)); // Not yet.
-        assert!(config.is_due(1000 + 86_400));  // Exactly due.
+        assert!(config.is_due(1000 + 86_400)); // Exactly due.
         assert!(config.is_due(1000 + 100_000)); // Overdue.
     }
 
@@ -4435,11 +4801,32 @@ mod tests {
     #[test]
     fn test_storage_stats_computed() {
         let mut tree = SnapshotTree::new();
-        let _ = tree.add_snapshot("A", "", 100, SnapshotType::Manual, vec![SnapshotComponent::BootConfig], None).unwrap();
-        let _ = tree.add_snapshot("B", "", 200, SnapshotType::Scheduled, vec![SnapshotComponent::BootConfig], None).unwrap();
+        let _ = tree
+            .add_snapshot(
+                "A",
+                "",
+                100,
+                SnapshotType::Manual,
+                vec![SnapshotComponent::BootConfig],
+                None,
+            )
+            .unwrap();
+        let _ = tree
+            .add_snapshot(
+                "B",
+                "",
+                200,
+                SnapshotType::Scheduled,
+                vec![SnapshotComponent::BootConfig],
+                None,
+            )
+            .unwrap();
         let stats = StorageStats::from_tree(&tree);
         assert_eq!(stats.snapshot_count, 2);
-        assert_eq!(stats.total_bytes, SnapshotComponent::BootConfig.estimated_size_bytes() * 2);
+        assert_eq!(
+            stats.total_bytes,
+            SnapshotComponent::BootConfig.estimated_size_bytes() * 2
+        );
         assert!(stats.manual_bytes > 0);
         assert!(stats.auto_bytes > 0);
     }
@@ -4449,8 +4836,13 @@ mod tests {
     #[test]
     fn test_export_one() {
         let snap = Snapshot::new(
-            42, "My Snap", "desc", 1000, SnapshotType::Manual,
-            vec![SnapshotComponent::BootConfig], None,
+            42,
+            "My Snap",
+            "desc",
+            1000,
+            SnapshotType::Manual,
+            vec![SnapshotComponent::BootConfig],
+            None,
         );
         let exported = SnapshotExport::export_one(&snap);
         assert!(exported.contains("[snapshot]"));
@@ -4462,14 +4854,29 @@ mod tests {
     #[test]
     fn test_export_import_roundtrip() {
         let mut tree = SnapshotTree::new();
-        let _ = tree.add_snapshot(
-            "Snap1", "First", 100, SnapshotType::Manual,
-            vec![SnapshotComponent::SystemFiles, SnapshotComponent::BootConfig], None,
-        ).unwrap();
-        let _ = tree.add_snapshot(
-            "Snap2", "Second", 200, SnapshotType::Scheduled,
-            vec![SnapshotComponent::UserSettings], None,
-        ).unwrap();
+        let _ = tree
+            .add_snapshot(
+                "Snap1",
+                "First",
+                100,
+                SnapshotType::Manual,
+                vec![
+                    SnapshotComponent::SystemFiles,
+                    SnapshotComponent::BootConfig,
+                ],
+                None,
+            )
+            .unwrap();
+        let _ = tree
+            .add_snapshot(
+                "Snap2",
+                "Second",
+                200,
+                SnapshotType::Scheduled,
+                vec![SnapshotComponent::UserSettings],
+                None,
+            )
+            .unwrap();
 
         let exported = SnapshotExport::export_all(&tree);
         let imported = SnapshotExport::import_all(&exported).unwrap();
@@ -4496,7 +4903,9 @@ mod tests {
     #[test]
     fn test_manager_create_delete() {
         let mut mgr = SnapshotManager::new();
-        let id = mgr.create_snapshot("Test", "", 100, SnapshotType::Manual, vec![], None).unwrap();
+        let id = mgr
+            .create_snapshot("Test", "", 100, SnapshotType::Manual, vec![], None)
+            .unwrap();
         assert_eq!(mgr.tree.count(), 1);
         mgr.delete_snapshot(id).unwrap();
         assert_eq!(mgr.tree.count(), 0);
@@ -4505,20 +4914,42 @@ mod tests {
     #[test]
     fn test_manager_compare_snapshots() {
         let mut mgr = SnapshotManager::new();
-        let id1 = mgr.create_snapshot(
-            "Old", "", 100, SnapshotType::Manual,
-            vec![SnapshotComponent::SystemFiles, SnapshotComponent::BootConfig],
-            None,
-        ).unwrap();
-        let id2 = mgr.create_snapshot(
-            "New", "", 100 + 86_400 * 3, SnapshotType::Manual,
-            vec![SnapshotComponent::SystemFiles, SnapshotComponent::UserSettings],
-            None,
-        ).unwrap();
+        let id1 = mgr
+            .create_snapshot(
+                "Old",
+                "",
+                100,
+                SnapshotType::Manual,
+                vec![
+                    SnapshotComponent::SystemFiles,
+                    SnapshotComponent::BootConfig,
+                ],
+                None,
+            )
+            .unwrap();
+        let id2 = mgr
+            .create_snapshot(
+                "New",
+                "",
+                100 + 86_400 * 3,
+                SnapshotType::Manual,
+                vec![
+                    SnapshotComponent::SystemFiles,
+                    SnapshotComponent::UserSettings,
+                ],
+                None,
+            )
+            .unwrap();
         let diff = mgr.compare_snapshots(id1, id2).unwrap();
         // UserSettings was added, BootConfig was removed.
-        assert!(diff.entries.iter().any(|e| matches!(e, DiffEntry::ComponentAdded(SnapshotComponent::UserSettings))));
-        assert!(diff.entries.iter().any(|e| matches!(e, DiffEntry::ComponentRemoved(SnapshotComponent::BootConfig))));
+        assert!(diff.entries.iter().any(|e| matches!(
+            e,
+            DiffEntry::ComponentAdded(SnapshotComponent::UserSettings)
+        )));
+        assert!(diff.entries.iter().any(|e| matches!(
+            e,
+            DiffEntry::ComponentRemoved(SnapshotComponent::BootConfig)
+        )));
     }
 
     #[test]
@@ -4557,10 +4988,16 @@ mod tests {
     fn test_manager_apply_retention() {
         let mut mgr = SnapshotManager::new();
         for i in 0..5 {
-            let _ = mgr.create_snapshot(
-                &format!("S{}", i), "", 100 + i * 100, SnapshotType::Scheduled,
-                vec![SnapshotComponent::BootConfig], None,
-            ).unwrap();
+            let _ = mgr
+                .create_snapshot(
+                    &format!("S{}", i),
+                    "",
+                    100 + i * 100,
+                    SnapshotType::Scheduled,
+                    vec![SnapshotComponent::BootConfig],
+                    None,
+                )
+                .unwrap();
         }
         mgr.schedule.retention = RetentionPolicy::new(3, 0, 0);
         let pruned = mgr.apply_retention(1000);
@@ -4589,10 +5026,16 @@ mod tests {
     #[test]
     fn test_manager_storage_stats() {
         let mut mgr = SnapshotManager::new();
-        let _ = mgr.create_snapshot(
-            "S", "", 100, SnapshotType::Manual,
-            vec![SnapshotComponent::BootConfig], None,
-        ).unwrap();
+        let _ = mgr
+            .create_snapshot(
+                "S",
+                "",
+                100,
+                SnapshotType::Manual,
+                vec![SnapshotComponent::BootConfig],
+                None,
+            )
+            .unwrap();
         let stats = mgr.storage_stats();
         assert_eq!(stats.snapshot_count, 1);
         assert!(stats.total_bytes > 0);
@@ -4602,7 +5045,10 @@ mod tests {
 
     #[test]
     fn test_progress_new_create() {
-        let comps = vec![SnapshotComponent::SystemFiles, SnapshotComponent::BootConfig];
+        let comps = vec![
+            SnapshotComponent::SystemFiles,
+            SnapshotComponent::BootConfig,
+        ];
         let progress = OperationProgress::new_create(&comps);
         assert!(!progress.complete);
         assert_eq!(progress.step_index, 0);
@@ -4636,7 +5082,10 @@ mod tests {
 
     #[test]
     fn test_progress_simulate_create() {
-        let comps = vec![SnapshotComponent::BootConfig, SnapshotComponent::NetworkConfig];
+        let comps = vec![
+            SnapshotComponent::BootConfig,
+            SnapshotComponent::NetworkConfig,
+        ];
         let states = OperationProgress::simulate_create(&comps);
         assert!(states.len() >= 4); // initial + prepare + 2 comps + finalize + complete
         assert!(states.last().unwrap().complete);
@@ -4645,8 +5094,13 @@ mod tests {
     #[test]
     fn test_progress_simulate_restore() {
         let snap = Snapshot::new(
-            1, "S", "", 100, SnapshotType::Manual,
-            vec![SnapshotComponent::BootConfig], None,
+            1,
+            "S",
+            "",
+            100,
+            SnapshotType::Manual,
+            vec![SnapshotComponent::BootConfig],
+            None,
         );
         let states = OperationProgress::simulate_restore(&snap);
         assert!(states.last().unwrap().complete);
@@ -4753,7 +5207,9 @@ mod tests {
     #[test]
     fn test_ui_form_selected_components() {
         let mut ui = SystemRestoreUI::new();
-        ui.form_components = vec![true, false, true, false, false, false, false, false, false, false];
+        ui.form_components = vec![
+            true, false, true, false, false, false, false, false, false, false,
+        ];
         let selected = ui.form_selected_components();
         assert_eq!(selected.len(), 2);
         assert_eq!(selected[0], SnapshotComponent::SystemFiles);
@@ -4780,7 +5236,9 @@ mod tests {
     #[test]
     fn test_ui_render_with_progress() {
         let mut ui = SystemRestoreUI::new();
-        ui.progress = Some(OperationProgress::new_create(&[SnapshotComponent::BootConfig]));
+        ui.progress = Some(OperationProgress::new_create(&[
+            SnapshotComponent::BootConfig,
+        ]));
         let rt = ui.render();
         assert!(!rt.is_empty());
     }
@@ -4910,7 +5368,13 @@ mod tests {
     #[test]
     fn test_export_locked_and_tags() {
         let mut snap = Snapshot::new(
-            1, "Tagged", "with tags", 100, SnapshotType::Manual, vec![], None,
+            1,
+            "Tagged",
+            "with tags",
+            100,
+            SnapshotType::Manual,
+            vec![],
+            None,
         );
         snap.locked = true;
         snap.tags = vec!["important".to_string(), "v1".to_string()];
@@ -4924,10 +5388,16 @@ mod tests {
     #[test]
     fn test_manager_export_import_roundtrip() {
         let mut mgr = SnapshotManager::new();
-        let _ = mgr.create_snapshot(
-            "Backup", "full backup", 1000, SnapshotType::Manual,
-            vec![SnapshotComponent::SystemFiles], None,
-        ).unwrap();
+        let _ = mgr
+            .create_snapshot(
+                "Backup",
+                "full backup",
+                1000,
+                SnapshotType::Manual,
+                vec![SnapshotComponent::SystemFiles],
+                None,
+            )
+            .unwrap();
         let exported = mgr.export_all();
 
         let mut mgr2 = SnapshotManager::new();

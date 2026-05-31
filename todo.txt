@@ -1,3 +1,20 @@
+## BUG (noticed+FIXED 2026-05-31): apps/systemrestore tests would not COMPILE.
+##   3 assert_eq! calls compared Result<Snapshot, SnapshotError> but Snapshot
+##   derived only Clone+Debug — no PartialEq — so `==` could not be applied
+##   (SnapshotError already had PartialEq+Eq). All of Snapshot's fields
+##   (String/u64/Vec/Option/bool/SnapshotType/SnapshotComponent) are already
+##   Eq, so added #[derive(PartialEq, Eq)] to Snapshot. 108/108 tests pass.
+##   Also ran clippy --fix (8 collapsible-if style fixes). Builds for ouros.
+##
+## LIMITATION (noticed 2026-05-31): the shared GUI toolkit lib `guitk` carries
+##   ~75 clippy::all warnings (collapsible-if, derivable impls, complex types,
+##   manual Range::contains, elidable lifetimes, etc.). These surface for every
+##   GUI app that depends on it (systemrestore, paint, dbviewer, ...). guitk has
+##   no #![deny(clippy::all, clippy::pedantic)] so they are warn-level and do
+##   not block builds, but per CLAUDE.md every crate should be clippy-clean with
+##   those denies. Cleaning guitk (and adding the deny attribute) is a sizeable
+##   standalone task, intentionally deferred out of the per-tool bug sweep.
+##
 ## BUG (noticed+FIXED 2026-05-31): vi search wrap-around landed on the cursor's
 ##   own position instead of the next/previous match. userspace/vi/:
 ##   test_search_fwd_wraps failed. Both search_fwd and search_bwd had the same

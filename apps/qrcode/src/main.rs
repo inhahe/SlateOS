@@ -1,8 +1,8 @@
-//! OurOS QR Code Generator
+//! `OurOS` QR Code Generator
 //!
 //! A QR code and barcode generation tool with:
 //! - QR code generation from scratch (byte mode, Reed-Solomon EC, versions 1-10)
-//! - Input modes: text, URL, email, phone, WiFi, vCard
+//! - Input modes: text, URL, email, phone, `WiFi`, vCard
 //! - Customizable module size and foreground/background colors
 //! - Code128 barcode generation
 //! - History of recently generated codes
@@ -10,7 +10,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -92,21 +94,24 @@ impl GfTables {
         // exp[255] = exp[0] for wrap-around
         exp_table[255] = exp_table[0];
 
-        Self { exp_table, log_table }
+        Self {
+            exp_table,
+            log_table,
+        }
     }
 
     fn mul(&self, a: u8, b: u8) -> u8 {
         if a == 0 || b == 0 {
             return 0;
         }
-        let log_a = self.log_table[a as usize] as u16;
-        let log_b = self.log_table[b as usize] as u16;
+        let log_a = u16::from(self.log_table[a as usize]);
+        let log_b = u16::from(self.log_table[b as usize]);
         let log_sum = (log_a + log_b) % 255;
         self.exp_table[log_sum as usize]
     }
 
     fn exp(&self, power: u8) -> u8 {
-        self.exp_table[(power as u16 % 255) as usize]
+        self.exp_table[(u16::from(power) % 255) as usize]
     }
 }
 
@@ -203,7 +208,7 @@ impl EcLevel {
     }
 }
 
-/// QR version info: (version, ec_level) -> (total_codewords, ec_codewords_per_block, num_blocks)
+/// QR version info: (version, `ec_level`) -> (`total_codewords`, `ec_codewords_per_block`, `num_blocks`)
 /// Simplified table for versions 1-10.
 struct VersionInfo {
     version: u8,
@@ -289,10 +294,10 @@ fn get_version_info(version: u8, ec_level: EcLevel) -> Option<VersionInfo> {
 /// Select the smallest version that can hold the given number of data bytes.
 fn select_version(data_len: usize, ec_level: EcLevel) -> Option<u8> {
     for v in 1..=10 {
-        if let Some(info) = get_version_info(v, ec_level) {
-            if info.data_capacity_bytes >= data_len {
-                return Some(v);
-            }
+        if let Some(info) = get_version_info(v, ec_level)
+            && info.data_capacity_bytes >= data_len
+        {
+            return Some(v);
         }
     }
     None
@@ -380,9 +385,16 @@ impl QrMatrix {
     fn place_finder_pattern(&mut self, row: usize, col: usize) {
         for r in 0..7 {
             for c in 0..7 {
-                let dark = r == 0 || r == 6 || c == 0 || c == 6
-                    || (r >= 2 && r <= 4 && c >= 2 && c <= 4);
-                let module = if dark { Module::FunctionDark } else { Module::FunctionLight };
+                let dark = r == 0
+                    || r == 6
+                    || c == 0
+                    || c == 6
+                    || ((2..=4).contains(&r) && (2..=4).contains(&c));
+                let module = if dark {
+                    Module::FunctionDark
+                } else {
+                    Module::FunctionLight
+                };
                 self.set(row.saturating_add(r), col.saturating_add(c), module);
             }
         }
@@ -427,7 +439,11 @@ impl QrMatrix {
     /// Place timing patterns (row 6 and column 6).
     fn place_timing_patterns(&mut self) {
         for i in 8..self.size.saturating_sub(8) {
-            let module = if i % 2 == 0 { Module::FunctionDark } else { Module::FunctionLight };
+            let module = if i % 2 == 0 {
+                Module::FunctionDark
+            } else {
+                Module::FunctionLight
+            };
             if self.get(6, i).is_empty() {
                 self.set(6, i, module);
             }
@@ -439,9 +455,7 @@ impl QrMatrix {
 
     /// Place the dark module (always present at (4*version+9, 8)).
     fn place_dark_module(&mut self, version: u8) {
-        let row = 4_usize
-            .saturating_mul(version as usize)
-            .saturating_add(9);
+        let row = 4_usize.saturating_mul(version as usize).saturating_add(9);
         if row < self.size {
             self.set(row, 8, Module::FunctionDark);
         }
@@ -484,7 +498,11 @@ impl QrMatrix {
                 let dc = center_col.saturating_add(c).saturating_sub(2);
                 if dr < self.size && dc < self.size {
                     let dark = r == 0 || r == 4 || c == 0 || c == 4 || (r == 2 && c == 2);
-                    let module = if dark { Module::FunctionDark } else { Module::FunctionLight };
+                    let module = if dark {
+                        Module::FunctionDark
+                    } else {
+                        Module::FunctionLight
+                    };
                     // Only place if not already occupied by function pattern
                     if self.get(dr, dc).is_empty() || !self.get(dr, dc).is_function() {
                         self.set(dr, dc, module);
@@ -540,7 +558,8 @@ fn encode_data_bits(data: &[u8], version: u8, ec_level: EcLevel) -> Option<Vec<u
     }
 
     // Terminator (up to 4 zero bits)
-    let total_data_bits = info.total_codewords
+    let total_data_bits = info
+        .total_codewords
         .saturating_sub(info.ec_codewords_per_block.saturating_mul(info.num_blocks))
         .saturating_mul(8);
     let remaining = total_data_bits.saturating_sub(bits.len());
@@ -563,7 +582,11 @@ fn encode_data_bits(data: &[u8], version: u8, ec_level: EcLevel) -> Option<Vec<u
 }
 
 /// Apply error correction and interleave blocks.
-fn apply_error_correction(data_codewords: &[u8], version: u8, ec_level: EcLevel) -> Option<Vec<u8>> {
+fn apply_error_correction(
+    data_codewords: &[u8],
+    version: u8,
+    ec_level: EcLevel,
+) -> Option<Vec<u8>> {
     let info = get_version_info(version, ec_level)?;
     let gf = GfTables::new();
 
@@ -642,10 +665,10 @@ impl BitWriter {
             if byte_idx >= self.data.len() {
                 self.data.push(0);
             }
-            if let Some(byte) = self.data.get_mut(byte_idx) {
-                if bit == 1 {
-                    *byte |= 1u8 << bit_idx;
-                }
+            if let Some(byte) = self.data.get_mut(byte_idx)
+                && bit == 1
+            {
+                *byte |= 1u8 << bit_idx;
             }
             self.bit_count = self.bit_count.saturating_add(1);
         }
@@ -697,9 +720,7 @@ fn place_data_bits(matrix: &mut QrMatrix, data: &[u8]) {
                     if bit_idx < total_bits {
                         let byte_idx = bit_idx / 8;
                         let bit_offset = 7_usize.saturating_sub(bit_idx % 8);
-                        let bit_val = data
-                            .get(byte_idx)
-                            .map_or(0, |b| (b >> bit_offset) & 1);
+                        let bit_val = data.get(byte_idx).map_or(0, |b| (b >> bit_offset) & 1);
                         let module = if bit_val == 1 {
                             Module::DataDark
                         } else {
@@ -836,8 +857,8 @@ fn evaluate_penalty(matrix: &QrMatrix) -> u32 {
     let percentage = dark_count.saturating_mul(100) / total.max(1);
     let prev_five = (percentage / 5).saturating_mul(5);
     let next_five = prev_five.saturating_add(5);
-    let dev_prev = if prev_five >= 50 { prev_five - 50 } else { 50 - prev_five };
-    let dev_next = if next_five >= 50 { next_five - 50 } else { 50 - next_five };
+    let dev_prev = prev_five.abs_diff(50);
+    let dev_next = next_five.abs_diff(50);
     let min_dev = dev_prev.min(dev_next);
     penalty = penalty.saturating_add(min_dev.saturating_mul(2));
 
@@ -864,7 +885,7 @@ fn check_finder_like(matrix: &QrMatrix, row: usize, col: usize, horizontal: bool
 fn write_format_info(matrix: &mut QrMatrix, ec_level: EcLevel, mask_pattern: u8) {
     let format_data = (u16::from(ec_level.format_bits()) << 3) | u16::from(mask_pattern);
     let format_ecc = format_info_ecc(format_data);
-    let format_bits = ((format_data as u32) << 10) | (format_ecc as u32);
+    let format_bits = (u32::from(format_data) << 10) | u32::from(format_ecc);
     // XOR with mask pattern 101010000010010
     let format_bits = format_bits ^ 0x5412;
 
@@ -873,7 +894,11 @@ fn write_format_info(matrix: &mut QrMatrix, ec_level: EcLevel, mask_pattern: u8)
     // Place format bits around top-left finder
     for i in 0..15 {
         let bit = ((format_bits >> (14u32.saturating_sub(i as u32))) & 1) == 1;
-        let module = if bit { Module::FunctionDark } else { Module::FunctionLight };
+        let module = if bit {
+            Module::FunctionDark
+        } else {
+            Module::FunctionLight
+        };
 
         // Horizontal placement (row 8)
         let col = match i {
@@ -907,7 +932,7 @@ fn write_format_info(matrix: &mut QrMatrix, ec_level: EcLevel, mask_pattern: u8)
 
 /// Compute format information ECC (BCH code).
 fn format_info_ecc(data: u16) -> u16 {
-    let mut remainder = (data as u32) << 10;
+    let mut remainder = u32::from(data) << 10;
     let generator: u32 = 0b10100110111;
 
     for i in (0..=4).rev() {
@@ -990,10 +1015,8 @@ impl QrCode {
         for &r in &positions {
             for &c in &positions {
                 // Skip if overlapping with finder patterns
-                let overlaps_finder =
-                    (r <= 8 && c <= 8) ||
-                    (r <= 8 && c >= size.saturating_sub(8)) ||
-                    (r >= size.saturating_sub(8) && c <= 8);
+                let overlaps_finder = (r <= 8 && (c <= 8 || c >= size.saturating_sub(8)))
+                    || (r >= size.saturating_sub(8) && c <= 8);
                 if !overlaps_finder {
                     base_matrix.place_alignment_pattern(r, c);
                 }
@@ -1190,7 +1213,7 @@ impl Code128Barcode {
         // Convert characters to Code B values
         for ch in data.chars() {
             let ascii_val = ch as u32;
-            if ascii_val < 32 || ascii_val > 127 {
+            if !(32..=127).contains(&ascii_val) {
                 continue; // Skip non-printable for Code B
             }
             values.push(ascii_val.saturating_sub(32));
@@ -1212,9 +1235,7 @@ impl Code128Barcode {
         let mut bars = Vec::new();
 
         // Quiet zone
-        for _ in 0..10 {
-            bars.push(false);
-        }
+        bars.extend(core::iter::repeat_n(false, 10));
 
         for &val in &values {
             if let Some(pattern) = CODE128_PATTERNS.get(val as usize) {
@@ -1236,9 +1257,7 @@ impl Code128Barcode {
         }
 
         // Quiet zone
-        for _ in 0..10 {
-            bars.push(false);
-        }
+        bars.extend(core::iter::repeat_n(false, 10));
 
         Some(Code128Barcode {
             bars,
@@ -1291,7 +1310,7 @@ impl InputMode {
     }
 }
 
-/// WiFi configuration for QR encoding.
+/// `WiFi` configuration for QR encoding.
 #[derive(Clone, Debug)]
 pub struct WifiConfig {
     pub ssid: String,
@@ -1367,10 +1386,7 @@ fn format_qr_data(mode: InputMode, text: &str, wifi: &WifiConfig, vcard: &VCardI
         InputMode::VCard => {
             let mut card = String::from("BEGIN:VCARD\nVERSION:3.0\n");
             card.push_str(&format!("N:{};{}\n", vcard.last_name, vcard.first_name));
-            card.push_str(&format!(
-                "FN:{} {}\n",
-                vcard.first_name, vcard.last_name
-            ));
+            card.push_str(&format!("FN:{} {}\n", vcard.first_name, vcard.last_name));
             if !vcard.phone.is_empty() {
                 card.push_str(&format!("TEL:{}\n", vcard.phone));
             }
@@ -1474,6 +1490,12 @@ pub struct QrApp {
     timestamp: u64,
 }
 
+impl Default for QrApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QrApp {
     pub fn new() -> Self {
         Self {
@@ -1520,43 +1542,38 @@ impl QrApp {
         let ts = self.tick();
 
         match self.code_type {
-            CodeType::QrCode => {
-                match QrCode::encode(data.as_bytes(), self.ec_level) {
-                    Some(qr) => {
-                        self.current_qr = Some(qr);
-                        self.current_barcode = None;
-                        self.history.push(HistoryEntry {
-                            data: data.clone(),
-                            mode: self.input_mode,
-                            code_type: self.code_type,
-                            ec_level: self.ec_level,
-                            timestamp: ts,
-                        });
-                    }
-                    None => {
-                        self.error_message = Some("Data too long for QR version 1-10".to_owned());
-                    }
+            CodeType::QrCode => match QrCode::encode(data.as_bytes(), self.ec_level) {
+                Some(qr) => {
+                    self.current_qr = Some(qr);
+                    self.current_barcode = None;
+                    self.history.push(HistoryEntry {
+                        data: data.clone(),
+                        mode: self.input_mode,
+                        code_type: self.code_type,
+                        ec_level: self.ec_level,
+                        timestamp: ts,
+                    });
                 }
-            }
-            CodeType::Barcode128 => {
-                match Code128Barcode::encode(&data) {
-                    Some(barcode) => {
-                        self.current_barcode = Some(barcode);
-                        self.current_qr = None;
-                        self.history.push(HistoryEntry {
-                            data: data.clone(),
-                            mode: self.input_mode,
-                            code_type: self.code_type,
-                            ec_level: self.ec_level,
-                            timestamp: ts,
-                        });
-                    }
-                    None => {
-                        self.error_message =
-                            Some("Cannot encode data as Code128".to_owned());
-                    }
+                None => {
+                    self.error_message = Some("Data too long for QR version 1-10".to_owned());
                 }
-            }
+            },
+            CodeType::Barcode128 => match Code128Barcode::encode(&data) {
+                Some(barcode) => {
+                    self.current_barcode = Some(barcode);
+                    self.current_qr = None;
+                    self.history.push(HistoryEntry {
+                        data: data.clone(),
+                        mode: self.input_mode,
+                        code_type: self.code_type,
+                        ec_level: self.ec_level,
+                        timestamp: ts,
+                    });
+                }
+                None => {
+                    self.error_message = Some("Cannot encode data as Code128".to_owned());
+                }
+            },
         }
     }
 
@@ -1715,12 +1732,20 @@ impl QrApp {
                 qr.data_len,
             )
         } else if let Some(ref bc) = self.current_barcode {
-            format!("Code128 | Width: {} modules | Data: {} chars", bc.width(), bc.data.len())
+            format!(
+                "Code128 | Width: {} modules | Data: {} chars",
+                bc.width(),
+                bc.data.len()
+            )
         } else {
             "Ready — enter data and click Generate".to_owned()
         };
 
-        let status_color = if self.error_message.is_some() { RED } else { SUBTEXT0 };
+        let status_color = if self.error_message.is_some() {
+            RED
+        } else {
+            SUBTEXT0
+        };
         cmds.push(RenderCommand::Text {
             x: 12.0,
             y: bar_y + 6.0,
@@ -1844,7 +1869,11 @@ impl QrApp {
         } else {
             &self.input_text
         };
-        let text_color = if self.input_text.is_empty() { OVERLAY0 } else { TEXT_COLOR };
+        let text_color = if self.input_text.is_empty() {
+            OVERLAY0
+        } else {
+            TEXT_COLOR
+        };
         cmds.push(RenderCommand::Text {
             x: lx + 8.0,
             y: cy + 8.0,
@@ -1964,7 +1993,11 @@ impl QrApp {
             } else {
                 (*value).clone()
             };
-            let color = if value.is_empty() { OVERLAY0 } else { TEXT_COLOR };
+            let color = if value.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT_COLOR
+            };
             cmds.push(RenderCommand::Text {
                 x: lx + 8.0,
                 y: *cy + 6.0,
@@ -2030,7 +2063,11 @@ impl QrApp {
             } else {
                 (*value).clone()
             };
-            let color = if value.is_empty() { OVERLAY0 } else { TEXT_COLOR };
+            let color = if value.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT_COLOR
+            };
             cmds.push(RenderCommand::Text {
                 x: lx + 8.0,
                 y: *cy + 5.0,
@@ -2461,7 +2498,7 @@ impl QrApp {
             }
         } else if let Some(ref bc) = self.current_barcode {
             let info_lines = [
-                format!("Type: Code128"),
+                "Type: Code128".to_string(),
                 format!("Width: {} modules", bc.width()),
                 format!("Data: {} chars", bc.data.len()),
             ];

@@ -1,4 +1,4 @@
-//! OurOS System Monitor / Dashboard
+//! `OurOS` System Monitor / Dashboard
 //!
 //! A comprehensive system monitoring application combining Task Manager
 //! and Resource Monitor functionality. Features:
@@ -14,10 +14,12 @@
 //! - Auto-refresh with configurable interval
 //!
 //! Uses the guitk library for UI rendering. All data is gathered
-//! through OurOS syscalls; the structs here define the presentation
+//! through `OurOS` syscalls; the structs here define the presentation
 //! layer while the OS provides the actual system information.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -667,7 +669,7 @@ impl SysMonitorState {
 
     /// Refresh all data from the OS.
     ///
-    /// In production this calls OurOS syscalls. The data vectors
+    /// In production this calls `OurOS` syscalls. The data vectors
     /// are populated externally or via `load_demo_data()` for testing.
     pub fn refresh(&mut self) {
         self.rebuild_visible_list();
@@ -725,14 +727,14 @@ impl SysMonitorState {
         });
 
         // Clamp selection.
-        if let Some(sel) = self.selected_index {
-            if sel >= self.visible_indices.len() {
-                self.selected_index = if self.visible_indices.is_empty() {
-                    None
-                } else {
-                    Some(self.visible_indices.len().saturating_sub(1))
-                };
-            }
+        if let Some(sel) = self.selected_index
+            && sel >= self.visible_indices.len()
+        {
+            self.selected_index = if self.visible_indices.is_empty() {
+                None
+            } else {
+                Some(self.visible_indices.len().saturating_sub(1))
+            };
         }
     }
 
@@ -767,10 +769,7 @@ impl SysMonitorState {
         // CPU alert
         if self.system_info.cpu_overall >= self.thresholds.cpu_crit_percent {
             self.active_alerts.push(Alert {
-                message: format!(
-                    "CPU usage critical: {:.1}%",
-                    self.system_info.cpu_overall
-                ),
+                message: format!("CPU usage critical: {:.1}%", self.system_info.cpu_overall),
                 severity: AlertSeverity::Critical,
             });
         } else if self.system_info.cpu_overall >= self.thresholds.cpu_warn_percent {
@@ -841,41 +840,38 @@ impl SysMonitorState {
 
     /// Kill the selected process.
     pub fn kill_selected(&mut self) {
-        if let Some(sel) = self.selected_index {
-            if let Some(&proc_idx) = self.visible_indices.get(sel) {
-                if let Some(proc) = self.processes.get(proc_idx) {
-                    let pid = proc.pid;
-                    let name = proc.name.clone();
-                    // In production: sys_process_kill(pid)
-                    self.status_message = format!("Killed process {name} (PID {pid})");
-                    self.processes.remove(proc_idx);
-                    self.rebuild_visible_list();
-                }
-            }
+        if let Some(sel) = self.selected_index
+            && let Some(&proc_idx) = self.visible_indices.get(sel)
+            && let Some(proc) = self.processes.get(proc_idx)
+        {
+            let pid = proc.pid;
+            let name = proc.name.clone();
+            // In production: sys_process_kill(pid)
+            self.status_message = format!("Killed process {name} (PID {pid})");
+            self.processes.remove(proc_idx);
+            self.rebuild_visible_list();
         }
     }
 
     /// Stop (pause) the selected process.
     pub fn stop_selected(&mut self) {
-        if let Some(sel) = self.selected_index {
-            if let Some(&proc_idx) = self.visible_indices.get(sel) {
-                if let Some(proc) = self.processes.get_mut(proc_idx) {
-                    proc.status = ProcessStatus::Stopped;
-                    self.status_message = format!("Stopped {} (PID {})", proc.name, proc.pid);
-                }
-            }
+        if let Some(sel) = self.selected_index
+            && let Some(&proc_idx) = self.visible_indices.get(sel)
+            && let Some(proc) = self.processes.get_mut(proc_idx)
+        {
+            proc.status = ProcessStatus::Stopped;
+            self.status_message = format!("Stopped {} (PID {})", proc.name, proc.pid);
         }
     }
 
     /// Continue (resume) the selected process.
     pub fn continue_selected(&mut self) {
-        if let Some(sel) = self.selected_index {
-            if let Some(&proc_idx) = self.visible_indices.get(sel) {
-                if let Some(proc) = self.processes.get_mut(proc_idx) {
-                    proc.status = ProcessStatus::Running;
-                    self.status_message = format!("Resumed {} (PID {})", proc.name, proc.pid);
-                }
-            }
+        if let Some(sel) = self.selected_index
+            && let Some(&proc_idx) = self.visible_indices.get(sel)
+            && let Some(proc) = self.processes.get_mut(proc_idx)
+        {
+            proc.status = ProcessStatus::Running;
+            self.status_message = format!("Resumed {} (PID {})", proc.name, proc.pid);
         }
     }
 
@@ -1055,11 +1051,11 @@ impl SysMonitorState {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = key.text {
-                    if ch.is_ascii_graphic() || ch == ' ' {
-                        self.filter_text.push(ch);
-                        self.rebuild_visible_list();
-                    }
+                if let Some(ch) = key.text
+                    && (ch.is_ascii_graphic() || ch == ' ')
+                {
+                    self.filter_text.push(ch);
+                    self.rebuild_visible_list();
                 }
                 EventResult::Consumed
             }
@@ -1072,25 +1068,25 @@ impl SysMonitorState {
         let my = mouse.y;
 
         // Context menu handling
-        if let Some(menu) = self.context_menu.clone() {
-            if let MouseEventKind::Press(MouseButton::Left) = &mouse.kind {
-                let menu_w = 180.0;
-                let item_h = 24.0;
-                let item_count = ContextAction::ALL.len() as f32;
+        if let Some(menu) = self.context_menu.clone()
+            && let MouseEventKind::Press(MouseButton::Left) = &mouse.kind
+        {
+            let menu_w = 180.0;
+            let item_h = 24.0;
+            let item_count = ContextAction::ALL.len() as f32;
 
-                if mx >= menu.x
-                    && mx <= menu.x + menu_w
-                    && my >= menu.y
-                    && my <= menu.y + item_h * item_count
-                {
-                    let index = ((my - menu.y) / item_h) as usize;
-                    if let Some(&action) = ContextAction::ALL.get(index) {
-                        self.execute_context_action(action, menu.target_pid);
-                    }
+            if mx >= menu.x
+                && mx <= menu.x + menu_w
+                && my >= menu.y
+                && my <= menu.y + item_h * item_count
+            {
+                let index = ((my - menu.y) / item_h) as usize;
+                if let Some(&action) = ContextAction::ALL.get(index) {
+                    self.execute_context_action(action, menu.target_pid);
                 }
-                self.context_menu = None;
-                return EventResult::Consumed;
             }
+            self.context_menu = None;
+            return EventResult::Consumed;
         }
 
         match &mouse.kind {
@@ -1151,11 +1147,7 @@ impl SysMonitorState {
                         if row_idx < self.visible_indices.len() {
                             self.selected_index = Some(row_idx);
                             if let Some(&proc_idx) = self.visible_indices.get(row_idx) {
-                                let pid = self
-                                    .processes
-                                    .get(proc_idx)
-                                    .map(|p| p.pid)
-                                    .unwrap_or(0);
+                                let pid = self.processes.get(proc_idx).map_or(0, |p| p.pid);
                                 self.context_menu = Some(ContextMenu {
                                     x: mx,
                                     y: my,
@@ -1237,29 +1229,26 @@ impl SysMonitorState {
                 }
             }
             ContextAction::Stop => {
-                if let Some(idx) = proc_idx {
-                    if let Some(proc) = self.processes.get_mut(idx) {
-                        proc.status = ProcessStatus::Stopped;
-                        self.status_message =
-                            format!("Stopped {} (PID {target_pid})", proc.name);
-                    }
+                if let Some(idx) = proc_idx
+                    && let Some(proc) = self.processes.get_mut(idx)
+                {
+                    proc.status = ProcessStatus::Stopped;
+                    self.status_message = format!("Stopped {} (PID {target_pid})", proc.name);
                 }
             }
             ContextAction::Continue => {
-                if let Some(idx) = proc_idx {
-                    if let Some(proc) = self.processes.get_mut(idx) {
-                        proc.status = ProcessStatus::Running;
-                        self.status_message =
-                            format!("Resumed {} (PID {target_pid})", proc.name);
-                    }
+                if let Some(idx) = proc_idx
+                    && let Some(proc) = self.processes.get_mut(idx)
+                {
+                    proc.status = ProcessStatus::Running;
+                    self.status_message = format!("Resumed {} (PID {target_pid})", proc.name);
                 }
             }
             ContextAction::SetHighPriority
             | ContextAction::SetNormalPriority
             | ContextAction::SetLowPriority => {
                 let level = action.label();
-                self.status_message =
-                    format!("{level} for PID {target_pid} (not yet implemented)");
+                self.status_message = format!("{level} for PID {target_pid} (not yet implemented)");
             }
         }
     }
@@ -1523,14 +1512,7 @@ impl SysMonitorState {
 
         // CPU gauge card
         self.render_card(tree, CONTENT_PAD, cur_y, half_w, gauge_h);
-        render_bold_text(
-            tree,
-            CONTENT_PAD + 12.0,
-            cur_y + 8.0,
-            "CPU",
-            TEXT,
-            13.0,
-        );
+        render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, "CPU", TEXT, 13.0);
         let cpu_pct = self.system_info.cpu_overall;
         let cpu_color = self.thresholds.cpu_color(cpu_pct);
         let cpu_label = format!("{cpu_pct:.1}%");
@@ -1549,7 +1531,16 @@ impl SysMonitorState {
         let cpu_graph_y = cur_y + 28.0;
         let cpu_graph_w = half_w - 24.0;
         let cpu_graph_h = gauge_h - 40.0;
-        self.render_mini_graph(tree, cpu_graph_x, cpu_graph_y, cpu_graph_w, cpu_graph_h, &self.cpu_history, cpu_color, 100.0);
+        self.render_mini_graph(
+            tree,
+            cpu_graph_x,
+            cpu_graph_y,
+            cpu_graph_w,
+            cpu_graph_h,
+            &self.cpu_history,
+            cpu_color,
+            100.0,
+        );
 
         // Load average below the graph
         let load_label = format!(
@@ -1599,7 +1590,16 @@ impl SysMonitorState {
         let mem_graph_y = cur_y + 28.0;
         let mem_graph_w = half_w - 24.0;
         let mem_graph_h = gauge_h - 40.0;
-        self.render_mini_graph(tree, mem_graph_x, mem_graph_y, mem_graph_w, mem_graph_h, &self.mem_history, mem_color, 100.0);
+        self.render_mini_graph(
+            tree,
+            mem_graph_x,
+            mem_graph_y,
+            mem_graph_w,
+            mem_graph_h,
+            &self.mem_history,
+            mem_color,
+            100.0,
+        );
 
         // Swap info
         let swap_label = format!(
@@ -1624,14 +1624,7 @@ impl SysMonitorState {
 
         // Disk summary card
         self.render_card(tree, CONTENT_PAD, cur_y, half_w, disk_card_h);
-        render_bold_text(
-            tree,
-            CONTENT_PAD + 12.0,
-            cur_y + 8.0,
-            "Disks",
-            TEXT,
-            13.0,
-        );
+        render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, "Disks", TEXT, 13.0);
         let mut disk_y = cur_y + 26.0;
         for disk in self.disks.iter().take(3) {
             let usage_pct = disk.usage_fraction() * 100.0;
@@ -1657,14 +1650,7 @@ impl SysMonitorState {
         // Network summary card
         let net_card_x = CONTENT_PAD + half_w + CARD_GAP;
         self.render_card(tree, net_card_x, cur_y, half_w, disk_card_h);
-        render_bold_text(
-            tree,
-            net_card_x + 12.0,
-            cur_y + 8.0,
-            "Network",
-            TEXT,
-            13.0,
-        );
+        render_bold_text(tree, net_card_x + 12.0, cur_y + 8.0, "Network", TEXT, 13.0);
         let mut net_y = cur_y + 26.0;
         for iface in self.interfaces.iter().take(3) {
             let label = format!(
@@ -1694,14 +1680,7 @@ impl SysMonitorState {
                 .mul_add(self.active_alerts.len() as f32, 28.0)
                 .min(120.0);
             self.render_card(tree, CONTENT_PAD, cur_y, content_w, alert_h);
-            render_bold_text(
-                tree,
-                CONTENT_PAD + 12.0,
-                cur_y + 8.0,
-                "Alerts",
-                RED,
-                13.0,
-            );
+            render_bold_text(tree, CONTENT_PAD + 12.0, cur_y + 8.0, "Alerts", RED, 13.0);
             let mut alert_y = cur_y + 26.0;
             for alert in self.active_alerts.iter().take(5) {
                 tree.push(RenderCommand::FillRect {
@@ -1812,7 +1791,13 @@ impl SysMonitorState {
                 max_width: None,
             });
 
-            tree.fill_rect(col_x + cw - 1.0, content_y + 2.0, 1.0, HEADER_HEIGHT - 4.0, SURFACE0);
+            tree.fill_rect(
+                col_x + cw - 1.0,
+                content_y + 2.0,
+                1.0,
+                HEADER_HEIGHT - 4.0,
+                SURFACE0,
+            );
             col_x += cw;
         }
 
@@ -1975,7 +1960,16 @@ impl SysMonitorState {
         let chart_x = CONTENT_PAD + 12.0;
         let chart_y = content_y + 28.0;
         let chart_w = content_w - 24.0;
-        self.render_graph_area(tree, chart_x, chart_y, chart_w, graph_h, &self.cpu_history, cpu_color, 100.0);
+        self.render_graph_area(
+            tree,
+            chart_x,
+            chart_y,
+            chart_w,
+            graph_h,
+            &self.cpu_history,
+            cpu_color,
+            100.0,
+        );
 
         let cur_y = content_y + graph_h + 30.0 + CARD_GAP;
 
@@ -2090,7 +2084,16 @@ impl SysMonitorState {
         let chart_x = CONTENT_PAD + 12.0;
         let chart_y = content_y + 28.0;
         let chart_w = content_w - 24.0;
-        self.render_graph_area(tree, chart_x, chart_y, chart_w, graph_h, &self.mem_history, mem_color, 100.0);
+        self.render_graph_area(
+            tree,
+            chart_x,
+            chart_y,
+            chart_w,
+            graph_h,
+            &self.mem_history,
+            mem_color,
+            100.0,
+        );
 
         let cur_y = content_y + graph_h + 30.0 + CARD_GAP;
 
@@ -2300,8 +2303,26 @@ impl SysMonitorState {
                 .max(disk.write_history.max_value())
                 .max(1.0);
 
-            self.render_mini_graph(tree, bar_x, io_graph_y, io_graph_w, io_graph_h, &disk.read_history, GREEN, max_io);
-            self.render_mini_graph(tree, bar_x + io_graph_w + 8.0, io_graph_y, io_graph_w, io_graph_h, &disk.write_history, PEACH, max_io);
+            self.render_mini_graph(
+                tree,
+                bar_x,
+                io_graph_y,
+                io_graph_w,
+                io_graph_h,
+                &disk.read_history,
+                GREEN,
+                max_io,
+            );
+            self.render_mini_graph(
+                tree,
+                bar_x + io_graph_w + 8.0,
+                io_graph_y,
+                io_graph_w,
+                io_graph_h,
+                &disk.write_history,
+                PEACH,
+                max_io,
+            );
 
             // Legend under graphs
             tree.push(RenderCommand::FillRect {
@@ -2401,8 +2422,26 @@ impl SysMonitorState {
                 .max(iface.tx_history.max_value())
                 .max(1.0);
 
-            self.render_mini_graph(tree, CONTENT_PAD + 16.0, graph_y, graph_w, graph_h, &iface.rx_history, SKY, max_traffic);
-            self.render_mini_graph(tree, CONTENT_PAD + 24.0 + graph_w, graph_y, graph_w, graph_h, &iface.tx_history, PINK, max_traffic);
+            self.render_mini_graph(
+                tree,
+                CONTENT_PAD + 16.0,
+                graph_y,
+                graph_w,
+                graph_h,
+                &iface.rx_history,
+                SKY,
+                max_traffic,
+            );
+            self.render_mini_graph(
+                tree,
+                CONTENT_PAD + 24.0 + graph_w,
+                graph_y,
+                graph_w,
+                graph_h,
+                &iface.tx_history,
+                PINK,
+                max_traffic,
+            );
 
             // Legend
             tree.push(RenderCommand::FillRect {
@@ -2740,45 +2779,141 @@ impl SysMonitorState {
         self.processes = vec![
             make_demo_process(1, "init", ProcessStatus::Running, 0.1, 4_194_304, 2, 86472),
             make_demo_process(2, "kthread", ProcessStatus::Sleeping, 0.0, 0, 1, 86470),
-            make_demo_process(100, "compositor", ProcessStatus::Running, 8.5, 67_108_864, 6, 85000),
-            make_demo_process(101, "netd", ProcessStatus::Sleeping, 0.3, 12_582_912, 4, 85000),
-            make_demo_process(200, "desktop", ProcessStatus::Running, 3.2, 104_857_600, 12, 82000),
-            make_demo_process(201, "explorer", ProcessStatus::Running, 1.1, 52_428_800, 4, 80000),
-            make_demo_process(202, "terminal", ProcessStatus::Sleeping, 0.4, 20_971_520, 3, 70000),
-            make_demo_process(203, "editor", ProcessStatus::Running, 12.7, 157_286_400, 8, 50000),
-            make_demo_process(300, "httpd", ProcessStatus::Running, 2.1, 33_554_432, 16, 60000),
-            make_demo_process(301, "httpd-worker", ProcessStatus::Running, 5.4, 16_777_216, 1, 60000),
-            make_demo_process(302, "httpd-worker", ProcessStatus::Sleeping, 0.0, 16_777_216, 1, 60000),
-            make_demo_process(400, "sshd", ProcessStatus::Sleeping, 0.0, 8_388_608, 1, 85000),
-            make_demo_process(500, "sysmonitor", ProcessStatus::Running, 1.8, 28_311_552, 3, 1200),
+            make_demo_process(
+                100,
+                "compositor",
+                ProcessStatus::Running,
+                8.5,
+                67_108_864,
+                6,
+                85000,
+            ),
+            make_demo_process(
+                101,
+                "netd",
+                ProcessStatus::Sleeping,
+                0.3,
+                12_582_912,
+                4,
+                85000,
+            ),
+            make_demo_process(
+                200,
+                "desktop",
+                ProcessStatus::Running,
+                3.2,
+                104_857_600,
+                12,
+                82000,
+            ),
+            make_demo_process(
+                201,
+                "explorer",
+                ProcessStatus::Running,
+                1.1,
+                52_428_800,
+                4,
+                80000,
+            ),
+            make_demo_process(
+                202,
+                "terminal",
+                ProcessStatus::Sleeping,
+                0.4,
+                20_971_520,
+                3,
+                70000,
+            ),
+            make_demo_process(
+                203,
+                "editor",
+                ProcessStatus::Running,
+                12.7,
+                157_286_400,
+                8,
+                50000,
+            ),
+            make_demo_process(
+                300,
+                "httpd",
+                ProcessStatus::Running,
+                2.1,
+                33_554_432,
+                16,
+                60000,
+            ),
+            make_demo_process(
+                301,
+                "httpd-worker",
+                ProcessStatus::Running,
+                5.4,
+                16_777_216,
+                1,
+                60000,
+            ),
+            make_demo_process(
+                302,
+                "httpd-worker",
+                ProcessStatus::Sleeping,
+                0.0,
+                16_777_216,
+                1,
+                60000,
+            ),
+            make_demo_process(
+                400,
+                "sshd",
+                ProcessStatus::Sleeping,
+                0.0,
+                8_388_608,
+                1,
+                85000,
+            ),
+            make_demo_process(
+                500,
+                "sysmonitor",
+                ProcessStatus::Running,
+                1.8,
+                28_311_552,
+                3,
+                1200,
+            ),
             make_demo_process(501, "zombie_proc", ProcessStatus::Zombie, 0.0, 0, 0, 30000),
-            make_demo_process(600, "dhcpd", ProcessStatus::Sleeping, 0.1, 6_291_456, 2, 85000),
+            make_demo_process(
+                600,
+                "dhcpd",
+                ProcessStatus::Sleeping,
+                0.1,
+                6_291_456,
+                2,
+                85000,
+            ),
         ];
 
         // Push initial history data
         let cpu_samples = [
-            20.0, 25.0, 22.0, 30.0, 35.0, 28.0, 40.0, 38.0, 33.0, 36.0,
-            42.0, 38.0, 35.0, 30.0, 28.0, 25.0, 30.0, 33.0, 37.0, 33.0,
+            20.0, 25.0, 22.0, 30.0, 35.0, 28.0, 40.0, 38.0, 33.0, 36.0, 42.0, 38.0, 35.0, 30.0,
+            28.0, 25.0, 30.0, 33.0, 37.0, 33.0,
         ];
         for &s in &cpu_samples {
             self.cpu_history.push(s);
         }
 
         let mem_samples = [
-            35.0, 36.0, 38.0, 37.0, 39.0, 40.0, 42.0, 41.0, 40.0, 39.0,
-            38.0, 39.0, 40.0, 41.0, 42.0, 40.0, 39.0, 38.0, 39.0, 40.0,
+            35.0, 36.0, 38.0, 37.0, 39.0, 40.0, 42.0, 41.0, 40.0, 39.0, 38.0, 39.0, 40.0, 41.0,
+            42.0, 40.0, 39.0, 38.0, 39.0, 40.0,
         ];
         for &s in &mem_samples {
             self.mem_history.push(s);
         }
 
         let net_rx_samples = [
-            100_000.0, 150_000.0, 200_000.0, 180_000.0, 300_000.0,
-            500_000.0, 450_000.0, 350_000.0, 200_000.0, 150_000.0,
+            100_000.0, 150_000.0, 200_000.0, 180_000.0, 300_000.0, 500_000.0, 450_000.0, 350_000.0,
+            200_000.0, 150_000.0,
         ];
         let net_tx_samples = [
-            50_000.0, 80_000.0, 120_000.0, 100_000.0, 200_000.0,
-            180_000.0, 160_000.0, 130_000.0, 90_000.0, 70_000.0,
+            50_000.0, 80_000.0, 120_000.0, 100_000.0, 200_000.0, 180_000.0, 160_000.0, 130_000.0,
+            90_000.0, 70_000.0,
         ];
         if let Some(iface) = self.interfaces.get_mut(0) {
             for &s in &net_rx_samples {
@@ -2790,12 +2925,24 @@ impl SysMonitorState {
         }
 
         let disk_read_samples = [
-            50_000_000.0, 45_000_000.0, 52_000_000.0, 48_000_000.0,
-            55_000_000.0, 60_000_000.0, 52_000_000.0, 47_000_000.0,
+            50_000_000.0,
+            45_000_000.0,
+            52_000_000.0,
+            48_000_000.0,
+            55_000_000.0,
+            60_000_000.0,
+            52_000_000.0,
+            47_000_000.0,
         ];
         let disk_write_samples = [
-            10_000_000.0, 12_000_000.0, 8_000_000.0, 15_000_000.0,
-            11_000_000.0, 9_000_000.0, 13_000_000.0, 10_000_000.0,
+            10_000_000.0,
+            12_000_000.0,
+            8_000_000.0,
+            15_000_000.0,
+            11_000_000.0,
+            9_000_000.0,
+            13_000_000.0,
+            10_000_000.0,
         ];
         if let Some(disk) = self.disks.get_mut(0) {
             for &s in &disk_read_samples {
@@ -2821,7 +2968,14 @@ impl Default for SysMonitorState {
 // ============================================================================
 
 /// Render bold text.
-fn render_bold_text(tree: &mut RenderTree, x: f32, y: f32, text: &str, color: Color, font_size: f32) {
+fn render_bold_text(
+    tree: &mut RenderTree,
+    x: f32,
+    y: f32,
+    text: &str,
+    color: Color,
+    font_size: f32,
+) {
     tree.push(RenderCommand::Text {
         x,
         y,
@@ -2996,10 +3150,7 @@ fn main() {
     let render_tree = monitor.render();
     println!("System Monitor initialized");
     println!("  {} processes loaded", monitor.processes.len());
-    println!(
-        "  {} visible (after filter)",
-        monitor.visible_indices.len()
-    );
+    println!("  {} visible (after filter)", monitor.visible_indices.len());
     println!("  {} render commands", render_tree.len());
     println!("  {} active alerts", monitor.active_alerts.len());
     println!("  Status: {}", monitor.status_message);
@@ -3008,11 +3159,7 @@ fn main() {
     for tab in &Tab::ALL {
         monitor.active_tab = *tab;
         let tab_tree = monitor.render();
-        println!(
-            "  {} tab: {} render commands",
-            tab.label(),
-            tab_tree.len()
-        );
+        println!("  {} tab: {} render commands", tab.label(), tab_tree.len());
     }
 
     // Demonstrate sorting
@@ -3028,22 +3175,21 @@ fn main() {
             .visible_indices
             .first()
             .and_then(|&i| monitor.processes.get(i))
-            .map(|p| p.name.as_str())
-            .unwrap_or("(none)"),
+            .map_or("(none)", |p| p.name.as_str()),
     );
 
     // Demonstrate filtering
     monitor.filter_text = "http".to_string();
     monitor.rebuild_visible_list();
-    println!(
-        "Filter 'http': {} matches",
-        monitor.visible_indices.len()
-    );
+    println!("Filter 'http': {} matches", monitor.visible_indices.len());
 
     // Demonstrate alert checking
     monitor.system_info.cpu_overall = 95.0;
     monitor.check_alerts();
-    println!("After CPU spike to 95%: {} alerts", monitor.active_alerts.len());
+    println!(
+        "After CPU spike to 95%: {} alerts",
+        monitor.active_alerts.len()
+    );
     for alert in &monitor.active_alerts {
         println!("  [{:?}] {}", alert.severity, alert.message);
     }
@@ -3160,7 +3306,10 @@ mod tests {
 
     #[test]
     fn test_process_status_colors_differ() {
-        assert_ne!(ProcessStatus::Running.color(), ProcessStatus::Zombie.color());
+        assert_ne!(
+            ProcessStatus::Running.color(),
+            ProcessStatus::Zombie.color()
+        );
     }
 
     // -- ProcessColumn tests --
@@ -3517,7 +3666,11 @@ mod tests {
         s.load_demo_data();
         s.system_info.cpu_overall = 95.0;
         s.check_alerts();
-        assert!(s.active_alerts.iter().any(|a| a.severity == AlertSeverity::Critical));
+        assert!(
+            s.active_alerts
+                .iter()
+                .any(|a| a.severity == AlertSeverity::Critical)
+        );
     }
 
     #[test]
@@ -3526,7 +3679,11 @@ mod tests {
         s.load_demo_data();
         s.system_info.cpu_overall = 75.0;
         s.check_alerts();
-        assert!(s.active_alerts.iter().any(|a| a.severity == AlertSeverity::Warning));
+        assert!(
+            s.active_alerts
+                .iter()
+                .any(|a| a.severity == AlertSeverity::Warning)
+        );
     }
 
     #[test]

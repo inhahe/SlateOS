@@ -19,7 +19,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -324,7 +326,7 @@ impl ExifData {
     pub fn megapixels(&self) -> Option<f32> {
         match (self.width, self.height) {
             (Some(w), Some(h)) => {
-                let px = (w as f64) * (h as f64);
+                let px = f64::from(w) * f64::from(h);
                 Some((px / 1_000_000.0) as f32)
             }
             _ => None,
@@ -401,8 +403,8 @@ pub fn parse_exif_from_bytes(data: &[u8]) -> ExifData {
 }
 
 fn read_u16(data: &[u8], offset: usize, little_endian: bool) -> Option<u16> {
-    let b0 = *data.get(offset)? as u16;
-    let b1 = *data.get(offset.saturating_add(1))? as u16;
+    let b0 = u16::from(*data.get(offset)?);
+    let b1 = u16::from(*data.get(offset.saturating_add(1))?);
     if little_endian {
         Some(b0 | (b1 << 8))
     } else {
@@ -411,8 +413,8 @@ fn read_u16(data: &[u8], offset: usize, little_endian: bool) -> Option<u16> {
 }
 
 fn read_u32(data: &[u8], offset: usize, little_endian: bool) -> Option<u32> {
-    let lo = read_u16(data, offset, little_endian)? as u32;
-    let hi = read_u16(data, offset.saturating_add(2), little_endian)? as u32;
+    let lo = u32::from(read_u16(data, offset, little_endian)?);
+    let hi = u32::from(read_u16(data, offset.saturating_add(2), little_endian)?);
     if little_endian {
         Some(lo | (hi << 16))
     } else {
@@ -466,13 +468,17 @@ fn parse_ifd_entries(
         match tag {
             // ImageWidth
             0x0100 => {
-                if let Some(v) = read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count) {
+                if let Some(v) =
+                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
+                {
                     exif.width = Some(v);
                 }
             }
             // ImageHeight
             0x0101 => {
-                if let Some(v) = read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count) {
+                if let Some(v) =
+                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
+                {
                     exif.height = Some(v);
                 }
             }
@@ -532,23 +538,25 @@ fn parse_ifd_entries(
             }
             // ExposureTime
             0x829A => {
-                if let Some((num, den)) = read_rational(data, value_offset_raw, tiff_start, le, count) {
-                    if den != 0 {
-                        if num < den {
-                            exif.shutter_speed = Some(format!("{num}/{den}"));
-                        } else {
-                            let secs = num as f64 / den as f64;
-                            exif.shutter_speed = Some(format!("{secs:.1}"));
-                        }
+                if let Some((num, den)) =
+                    read_rational(data, value_offset_raw, tiff_start, le, count)
+                    && den != 0
+                {
+                    if num < den {
+                        exif.shutter_speed = Some(format!("{num}/{den}"));
+                    } else {
+                        let secs = f64::from(num) / f64::from(den);
+                        exif.shutter_speed = Some(format!("{secs:.1}"));
                     }
                 }
             }
             // FNumber
             0x829D => {
-                if let Some((num, den)) = read_rational(data, value_offset_raw, tiff_start, le, count) {
-                    if den != 0 {
-                        exif.aperture = Some(num as f32 / den as f32);
-                    }
+                if let Some((num, den)) =
+                    read_rational(data, value_offset_raw, tiff_start, le, count)
+                    && den != 0
+                {
+                    exif.aperture = Some(num as f32 / den as f32);
                 }
             }
             // ISO
@@ -571,10 +579,11 @@ fn parse_ifd_entries(
             }
             // FocalLength
             0x920A => {
-                if let Some((num, den)) = read_rational(data, value_offset_raw, tiff_start, le, count) {
-                    if den != 0 {
-                        exif.focal_length_mm = Some(num as f32 / den as f32);
-                    }
+                if let Some((num, den)) =
+                    read_rational(data, value_offset_raw, tiff_start, le, count)
+                    && den != 0
+                {
+                    exif.focal_length_mm = Some(num as f32 / den as f32);
                 }
             }
             // ColorSpace
@@ -589,13 +598,17 @@ fn parse_ifd_entries(
             }
             // PixelXDimension
             0xA002 => {
-                if let Some(v) = read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count) {
+                if let Some(v) =
+                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
+                {
                     exif.width = Some(v);
                 }
             }
             // PixelYDimension
             0xA003 => {
-                if let Some(v) = read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count) {
+                if let Some(v) =
+                    read_value_u32(data, value_offset_raw, tiff_start, le, data_type, count)
+                {
                     exif.height = Some(v);
                 }
             }
@@ -637,10 +650,11 @@ fn parse_ifd_entries(
             }
             // ExposureBiasValue
             0x9204 => {
-                if let Some((num, den)) = read_rational_signed(data, value_offset_raw, tiff_start, le, count) {
-                    if den != 0 {
-                        exif.exposure_bias = Some(num as f32 / den as f32);
-                    }
+                if let Some((num, den)) =
+                    read_rational_signed(data, value_offset_raw, tiff_start, le, count)
+                    && den != 0
+                {
+                    exif.exposure_bias = Some(num as f32 / den as f32);
                 }
             }
             // LensModel
@@ -655,13 +669,7 @@ fn parse_ifd_entries(
 }
 
 /// Parse GPS IFD entries.
-fn parse_gps_ifd(
-    data: &[u8],
-    ifd_offset: usize,
-    tiff_start: usize,
-    le: bool,
-    exif: &mut ExifData,
-) {
+fn parse_gps_ifd(data: &[u8], ifd_offset: usize, tiff_start: usize, le: bool, exif: &mut ExifData) {
     let entry_count = match read_u16(data, ifd_offset, le) {
         Some(c) => c as usize,
         None => return,
@@ -714,10 +722,9 @@ fn parse_gps_ifd(
                     if let (Some(num), Some(den)) = (
                         read_u32(data, abs_offset, le),
                         read_u32(data, abs_offset.saturating_add(4), le),
-                    ) {
-                        if den != 0 {
-                            exif.gps_altitude = Some(num as f32 / den as f32);
-                        }
+                    ) && den != 0
+                    {
+                        exif.gps_altitude = Some(num as f32 / den as f32);
                     }
                 }
             }
@@ -742,16 +749,21 @@ fn parse_gps_ifd(
     }
 }
 
-fn read_gps_dms(data: &[u8], value_offset: usize, tiff_start: usize, le: bool) -> Option<(f64, f64, f64)> {
+fn read_gps_dms(
+    data: &[u8],
+    value_offset: usize,
+    tiff_start: usize,
+    le: bool,
+) -> Option<(f64, f64, f64)> {
     let offset_val = read_u32(data, value_offset, le)? as usize;
     let abs = tiff_start.saturating_add(offset_val);
 
-    let d_num = read_u32(data, abs, le)? as f64;
-    let d_den = read_u32(data, abs.saturating_add(4), le)? as f64;
-    let m_num = read_u32(data, abs.saturating_add(8), le)? as f64;
-    let m_den = read_u32(data, abs.saturating_add(12), le)? as f64;
-    let s_num = read_u32(data, abs.saturating_add(16), le)? as f64;
-    let s_den = read_u32(data, abs.saturating_add(20), le)? as f64;
+    let d_num = f64::from(read_u32(data, abs, le)?);
+    let d_den = f64::from(read_u32(data, abs.saturating_add(4), le)?);
+    let m_num = f64::from(read_u32(data, abs.saturating_add(8), le)?);
+    let m_den = f64::from(read_u32(data, abs.saturating_add(12), le)?);
+    let s_num = f64::from(read_u32(data, abs.saturating_add(16), le)?);
+    let s_den = f64::from(read_u32(data, abs.saturating_add(20), le)?);
 
     if d_den == 0.0 || m_den == 0.0 || s_den == 0.0 {
         return None;
@@ -760,7 +772,13 @@ fn read_gps_dms(data: &[u8], value_offset: usize, tiff_start: usize, le: bool) -
     Some((d_num / d_den, m_num / m_den, s_num / s_den))
 }
 
-fn read_value_string(data: &[u8], value_offset: usize, tiff_start: usize, le: bool, count: usize) -> Option<String> {
+fn read_value_string(
+    data: &[u8],
+    value_offset: usize,
+    tiff_start: usize,
+    le: bool,
+    count: usize,
+) -> Option<String> {
     if count <= 4 {
         // Value stored inline in the 4-byte value field
         read_ascii_string(data, value_offset, count)
@@ -771,15 +789,28 @@ fn read_value_string(data: &[u8], value_offset: usize, tiff_start: usize, le: bo
     }
 }
 
-fn read_value_u32(data: &[u8], value_offset: usize, _tiff_start: usize, le: bool, data_type: u16, _count: usize) -> Option<u32> {
+fn read_value_u32(
+    data: &[u8],
+    value_offset: usize,
+    _tiff_start: usize,
+    le: bool,
+    data_type: u16,
+    _count: usize,
+) -> Option<u32> {
     match data_type {
         3 => read_u16(data, value_offset, le).map(u32::from), // SHORT
-        4 => read_u32(data, value_offset, le),                 // LONG
+        4 => read_u32(data, value_offset, le),                // LONG
         _ => None,
     }
 }
 
-fn read_rational(data: &[u8], value_offset: usize, tiff_start: usize, le: bool, _count: usize) -> Option<(u32, u32)> {
+fn read_rational(
+    data: &[u8],
+    value_offset: usize,
+    tiff_start: usize,
+    le: bool,
+    _count: usize,
+) -> Option<(u32, u32)> {
     let offset_val = read_u32(data, value_offset, le)? as usize;
     let abs = tiff_start.saturating_add(offset_val);
     let num = read_u32(data, abs, le)?;
@@ -787,7 +818,13 @@ fn read_rational(data: &[u8], value_offset: usize, tiff_start: usize, le: bool, 
     Some((num, den))
 }
 
-fn read_rational_signed(data: &[u8], value_offset: usize, tiff_start: usize, le: bool, _count: usize) -> Option<(i32, i32)> {
+fn read_rational_signed(
+    data: &[u8],
+    value_offset: usize,
+    tiff_start: usize,
+    le: bool,
+    _count: usize,
+) -> Option<(i32, i32)> {
     let offset_val = read_u32(data, value_offset, le)? as usize;
     let abs = tiff_start.saturating_add(offset_val);
     let num = read_u32(data, abs, le)? as i32;
@@ -965,7 +1002,14 @@ pub struct Photo {
 
 impl Photo {
     /// Create a new photo entry.
-    pub fn new(id: PhotoId, path: &str, name: &str, format: ImageFormat, size: u64, date_added: u64) -> Self {
+    pub fn new(
+        id: PhotoId,
+        path: &str,
+        name: &str,
+        format: ImageFormat,
+        size: u64,
+        date_added: u64,
+    ) -> Self {
         Self {
             id,
             file_path: path.to_owned(),
@@ -1026,15 +1070,15 @@ impl Photo {
                 return true;
             }
         }
-        if let Some(ref make) = self.exif.camera_make {
-            if make.to_lowercase().contains(&q) {
-                return true;
-            }
+        if let Some(ref make) = self.exif.camera_make
+            && make.to_lowercase().contains(&q)
+        {
+            return true;
         }
-        if let Some(ref model) = self.exif.camera_model {
-            if model.to_lowercase().contains(&q) {
-                return true;
-            }
+        if let Some(ref model) = self.exif.camera_model
+            && model.to_lowercase().contains(&q)
+        {
+            return true;
         }
         false
     }
@@ -1053,7 +1097,10 @@ impl Photo {
         } else if self.file_size < 1024 * 1024 * 1024 {
             format!("{:.1} MB", self.file_size as f64 / (1024.0 * 1024.0))
         } else {
-            format!("{:.2} GB", self.file_size as f64 / (1024.0 * 1024.0 * 1024.0))
+            format!(
+                "{:.2} GB",
+                self.file_size as f64 / (1024.0 * 1024.0 * 1024.0)
+            )
         }
     }
 }
@@ -1143,12 +1190,12 @@ impl SmartRule {
                 .exif
                 .camera_make
                 .as_ref()
-                .map_or(false, |m| m.to_lowercase().contains(&make.to_lowercase())),
+                .is_some_and(|m| m.to_lowercase().contains(&make.to_lowercase())),
             Self::CameraModel(model) => photo
                 .exif
                 .camera_model
                 .as_ref()
-                .map_or(false, |m| m.to_lowercase().contains(&model.to_lowercase())),
+                .is_some_and(|m| m.to_lowercase().contains(&model.to_lowercase())),
         }
     }
 
@@ -1332,10 +1379,7 @@ impl SlideshowState {
 
     pub fn advance(&mut self) {
         if !self.photo_ids.is_empty() {
-            self.current_index = self
-                .current_index
-                .saturating_add(1)
-                % self.photo_ids.len();
+            self.current_index = self.current_index.saturating_add(1) % self.photo_ids.len();
         }
     }
 
@@ -1457,6 +1501,12 @@ pub struct PhotoApp {
     timestamp_counter: u64,
 }
 
+impl Default for PhotoApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PhotoApp {
     /// Create a new empty photo manager.
     pub fn new() -> Self {
@@ -1494,7 +1544,13 @@ impl PhotoApp {
     // -----------------------------------------------------------------------
 
     /// Import a photo into the library.
-    pub fn import_photo(&mut self, path: &str, name: &str, format: ImageFormat, size: u64) -> PhotoId {
+    pub fn import_photo(
+        &mut self,
+        path: &str,
+        name: &str,
+        format: ImageFormat,
+        size: u64,
+    ) -> PhotoId {
         let ts = self.tick();
         let id = self.photo_id_gen.next_id();
         let photo = Photo::new(id, path, name, format, size, ts);
@@ -1503,7 +1559,14 @@ impl PhotoApp {
     }
 
     /// Import a photo with EXIF data.
-    pub fn import_photo_with_exif(&mut self, path: &str, name: &str, format: ImageFormat, size: u64, exif: ExifData) -> PhotoId {
+    pub fn import_photo_with_exif(
+        &mut self,
+        path: &str,
+        name: &str,
+        format: ImageFormat,
+        size: u64,
+        exif: ExifData,
+    ) -> PhotoId {
         let id = self.import_photo(path, name, format, size);
         if let Some(photo) = self.find_photo_mut(id) {
             photo.exif = exif;
@@ -1512,7 +1575,11 @@ impl PhotoApp {
     }
 
     /// Simulate importing from a directory, returning results.
-    pub fn simulate_import(&mut self, dir: &str, files: &[(&str, ImageFormat, u64)]) -> ImportResult {
+    pub fn simulate_import(
+        &mut self,
+        dir: &str,
+        files: &[(&str, ImageFormat, u64)],
+    ) -> ImportResult {
         let mut result = ImportResult::empty();
         for (name, format, size) in files {
             let path = format!("{dir}/{name}");
@@ -1795,10 +1862,17 @@ impl PhotoApp {
     pub fn visible_photos(&self) -> Vec<PhotoId> {
         let mut photos: Vec<&Photo> = match &self.sidebar_selection {
             SidebarItem::AllPhotos => self.photos.iter().filter(|p| !p.hidden).collect(),
-            SidebarItem::Favorites => self.photos.iter().filter(|p| p.flagged && !p.hidden).collect(),
+            SidebarItem::Favorites => self
+                .photos
+                .iter()
+                .filter(|p| p.flagged && !p.hidden)
+                .collect(),
             SidebarItem::RecentImports => {
                 let threshold = self.timestamp_counter.saturating_sub(100);
-                self.photos.iter().filter(|p| p.date_added >= threshold && !p.hidden).collect()
+                self.photos
+                    .iter()
+                    .filter(|p| p.date_added >= threshold && !p.hidden)
+                    .collect()
             }
             SidebarItem::Album(id) => {
                 if let Some(album) = self.albums.iter().find(|a| a.id == *id) {
@@ -1827,11 +1901,11 @@ impl PhotoApp {
 
         // Sort
         match self.sort_order {
-            PhotoSort::DateAdded => photos.sort_by(|a, b| b.date_added.cmp(&a.date_added)),
-            PhotoSort::DateTaken => photos.sort_by(|a, b| b.date_taken.cmp(&a.date_taken)),
-            PhotoSort::FileName => photos.sort_by(|a, b| a.file_name.to_lowercase().cmp(&b.file_name.to_lowercase())),
-            PhotoSort::FileSize => photos.sort_by(|a, b| b.file_size.cmp(&a.file_size)),
-            PhotoSort::Rating => photos.sort_by(|a, b| b.rating.cmp(&a.rating)),
+            PhotoSort::DateAdded => photos.sort_by_key(|p| core::cmp::Reverse(p.date_added)),
+            PhotoSort::DateTaken => photos.sort_by_key(|p| core::cmp::Reverse(p.date_taken)),
+            PhotoSort::FileName => photos.sort_by_key(|a| a.file_name.to_lowercase()),
+            PhotoSort::FileSize => photos.sort_by_key(|p| core::cmp::Reverse(p.file_size)),
+            PhotoSort::Rating => photos.sort_by_key(|p| core::cmp::Reverse(p.rating)),
         }
 
         photos.iter().map(|p| p.id).collect()
@@ -1854,7 +1928,10 @@ impl PhotoApp {
 
     /// Get current thumbnail size.
     pub fn current_thumb_size(&self) -> f32 {
-        THUMB_SIZES.get(self.thumb_size_idx).copied().unwrap_or(120.0)
+        THUMB_SIZES
+            .get(self.thumb_size_idx)
+            .copied()
+            .unwrap_or(120.0)
     }
 
     // -----------------------------------------------------------------------
@@ -1978,7 +2055,11 @@ impl PhotoApp {
         self.render_sidebar(&mut cmds, content_y, content_h);
 
         // Info panel (right side)
-        let info_w = if self.show_info_panel { INFO_PANEL_WIDTH } else { 0.0 };
+        let info_w = if self.show_info_panel {
+            INFO_PANEL_WIDTH
+        } else {
+            0.0
+        };
         if self.show_info_panel {
             self.render_info_panel(&mut cmds, width - info_w, content_y, info_w, content_h);
         }
@@ -2083,7 +2164,11 @@ impl PhotoApp {
         } else {
             self.search_query.clone()
         };
-        let search_color = if self.search_query.is_empty() { OVERLAY0 } else { TEXT };
+        let search_color = if self.search_query.is_empty() {
+            OVERLAY0
+        } else {
+            TEXT
+        };
         cmds.push(RenderCommand::Text {
             x: search_x + 8.0,
             y: 14.0,
@@ -2114,14 +2199,22 @@ impl PhotoApp {
             y: 8.0,
             width: 80.0,
             height: 24.0,
-            color: if self.slideshow.is_some() { SURFACE1 } else { SURFACE0 },
+            color: if self.slideshow.is_some() {
+                SURFACE1
+            } else {
+                SURFACE0
+            },
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
             x: ss_x + 8.0,
             y: 14.0,
             text: "Slideshow".to_owned(),
-            color: if self.slideshow.is_some() { GREEN } else { SUBTEXT0 },
+            color: if self.slideshow.is_some() {
+                GREEN
+            } else {
+                SUBTEXT0
+            },
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(70.0),
@@ -2163,10 +2256,7 @@ impl PhotoApp {
         let visible = self.visible_photos().len();
         let status_text = format!(
             "{} photos shown  |  {} total  |  {} albums  |  {} in trash",
-            visible,
-            stats.total_photos,
-            stats.total_albums,
-            stats.trash_count,
+            visible, stats.total_photos, stats.total_albums, stats.trash_count,
         );
         cmds.push(RenderCommand::Text {
             x: 12.0,
@@ -2179,19 +2269,19 @@ impl PhotoApp {
         });
 
         // Show selected photo info on right
-        if let Some(pid) = self.selected_photo {
-            if let Some(photo) = self.find_photo(pid) {
-                let sel_text = format!("{} — {}", photo.file_name, photo.human_size());
-                cmds.push(RenderCommand::Text {
-                    x: width - 300.0,
-                    y: bar_y + 6.0,
-                    text: sel_text,
-                    color: TEXT,
-                    font_size: 11.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(280.0),
-                });
-            }
+        if let Some(pid) = self.selected_photo
+            && let Some(photo) = self.find_photo(pid)
+        {
+            let sel_text = format!("{} — {}", photo.file_name, photo.human_size());
+            cmds.push(RenderCommand::Text {
+                x: width - 300.0,
+                y: bar_y + 6.0,
+                text: sel_text,
+                color: TEXT,
+                font_size: 11.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(280.0),
+            });
         }
     }
 
@@ -2256,7 +2346,11 @@ impl PhotoApp {
                 text: (*label).to_owned(),
                 color,
                 font_size: 12.0,
-                font_weight: if is_selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(SIDEBAR_WIDTH - 32.0),
             });
             cy += ITEM_HEIGHT;
@@ -2368,7 +2462,14 @@ impl PhotoApp {
         });
     }
 
-    fn render_info_panel(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_info_panel(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         // Background
         cmds.push(RenderCommand::FillRect {
             x,
@@ -2611,7 +2712,14 @@ impl PhotoApp {
         entries
     }
 
-    fn render_main_content(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_main_content(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         match self.view_mode {
             ViewMode::Grid => self.render_grid_view(cmds, x, y, width, height),
             ViewMode::Single => self.render_single_view(cmds, x, y, width, height),
@@ -2620,7 +2728,14 @@ impl PhotoApp {
         }
     }
 
-    fn render_grid_view(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_grid_view(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         let visible = self.visible_photos();
         let thumb = self.current_thumb_size();
         let cell_size = thumb + THUMB_PADDING;
@@ -2650,8 +2765,8 @@ impl PhotoApp {
                 break;
             }
 
-            let is_selected = self.selected_photo == Some(pid)
-                || self.selected_photos.contains(&pid);
+            let is_selected =
+                self.selected_photo == Some(pid) || self.selected_photos.contains(&pid);
 
             // Thumbnail placeholder
             let border_color = if is_selected { BLUE } else { SURFACE1 };
@@ -2725,7 +2840,14 @@ impl PhotoApp {
         }
     }
 
-    fn render_single_view(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_single_view(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         let Some(pid) = self.selected_photo else {
             cmds.push(RenderCommand::Text {
                 x: x + width / 2.0 - 80.0,
@@ -2802,7 +2924,14 @@ impl PhotoApp {
         });
     }
 
-    fn render_timeline_view(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_timeline_view(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         let groups = self.timeline_groups();
         let thumb = self.current_thumb_size() * 0.75;
         let cell_size = thumb + THUMB_PADDING;
@@ -2861,7 +2990,8 @@ impl PhotoApp {
                 }
             }
 
-            let rows_needed = (photo_ids.len().saturating_add(cols).saturating_sub(1)) / cols.max(1);
+            let rows_needed =
+                (photo_ids.len().saturating_add(cols).saturating_sub(1)) / cols.max(1);
             cy += (rows_needed as f32) * cell_size + 12.0;
         }
 
@@ -2878,7 +3008,14 @@ impl PhotoApp {
         }
     }
 
-    fn render_slideshow_view(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_slideshow_view(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         let Some(ss) = &self.slideshow else {
             return;
         };
@@ -2893,33 +3030,33 @@ impl PhotoApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        if let Some(pid) = ss.current_photo() {
-            if let Some(photo) = self.find_photo(pid) {
-                // Photo placeholder (centered)
-                let display_w = width * 0.8;
-                let display_h = height * 0.8;
-                let display_x = x + (width - display_w) / 2.0;
-                let display_y = y + (height - display_h) / 2.0;
+        if let Some(pid) = ss.current_photo()
+            && let Some(photo) = self.find_photo(pid)
+        {
+            // Photo placeholder (centered)
+            let display_w = width * 0.8;
+            let display_h = height * 0.8;
+            let display_x = x + (width - display_w) / 2.0;
+            let display_y = y + (height - display_h) / 2.0;
 
-                cmds.push(RenderCommand::FillRect {
-                    x: display_x,
-                    y: display_y,
-                    width: display_w,
-                    height: display_h,
-                    color: SURFACE0,
-                    corner_radii: CornerRadii::all(8.0),
-                });
+            cmds.push(RenderCommand::FillRect {
+                x: display_x,
+                y: display_y,
+                width: display_w,
+                height: display_h,
+                color: SURFACE0,
+                corner_radii: CornerRadii::all(8.0),
+            });
 
-                cmds.push(RenderCommand::Text {
-                    x: display_x + display_w / 2.0 - 60.0,
-                    y: display_y + display_h / 2.0,
-                    text: photo.file_name.clone(),
-                    color: TEXT,
-                    font_size: 16.0,
-                    font_weight: FontWeightHint::Bold,
-                    max_width: Some(display_w - 40.0),
-                });
-            }
+            cmds.push(RenderCommand::Text {
+                x: display_x + display_w / 2.0 - 60.0,
+                y: display_y + display_h / 2.0,
+                text: photo.file_name.clone(),
+                color: TEXT,
+                font_size: 16.0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(display_w - 40.0),
+            });
         }
 
         // Slideshow controls at bottom
@@ -3175,7 +3312,14 @@ mod tests {
 
     #[test]
     fn test_photo_search() {
-        let mut photo = Photo::new(1, "/photos/sunset.jpg", "sunset.jpg", ImageFormat::Jpeg, 1000, 1);
+        let mut photo = Photo::new(
+            1,
+            "/photos/sunset.jpg",
+            "sunset.jpg",
+            ImageFormat::Jpeg,
+            1000,
+            1,
+        );
         photo.add_tag("beach");
         assert!(photo.matches_search("sunset"));
         assert!(photo.matches_search("beach"));
@@ -3406,10 +3550,13 @@ mod tests {
         let mut app = PhotoApp::new();
         app.import_photo("/dir/photo1.jpg", "photo1.jpg", ImageFormat::Jpeg, 500);
 
-        let result = app.simulate_import("/dir", &[
-            ("photo1.jpg", ImageFormat::Jpeg, 500), // Duplicate
-            ("photo2.png", ImageFormat::Png, 1000),  // New
-        ]);
+        let result = app.simulate_import(
+            "/dir",
+            &[
+                ("photo1.jpg", ImageFormat::Jpeg, 500), // Duplicate
+                ("photo2.png", ImageFormat::Png, 1000), // New
+            ],
+        );
 
         assert_eq!(result.imported_count, 1);
         assert_eq!(result.duplicate_count, 1);
@@ -3442,7 +3589,12 @@ mod tests {
     fn test_app_search_filter() {
         let mut app = PhotoApp::new();
         app.import_photo("/photos/sunset.jpg", "sunset.jpg", ImageFormat::Jpeg, 100);
-        app.import_photo("/photos/mountain.png", "mountain.png", ImageFormat::Png, 200);
+        app.import_photo(
+            "/photos/mountain.png",
+            "mountain.png",
+            ImageFormat::Png,
+            200,
+        );
         app.set_search("sunset");
 
         let visible = app.visible_photos();
@@ -3613,8 +3765,7 @@ mod tests {
 
     #[test]
     fn test_face_region() {
-        let face = FaceRegion::new(100.0, 200.0, 50.0, 50.0)
-            .with_name("Alice");
+        let face = FaceRegion::new(100.0, 200.0, 50.0, 50.0).with_name("Alice");
         assert_eq!(face.name.as_deref(), Some("Alice"));
         assert_eq!(face.x, 100.0);
     }

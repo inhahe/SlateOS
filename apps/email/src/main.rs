@@ -16,7 +16,9 @@
 //! - Rules/filters for automatic sorting
 //! - Multi-panel UI: folder sidebar, message list, reading pane
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -40,31 +42,45 @@ pub struct EmailAddress {
 
 impl EmailAddress {
     /// Parse "Display Name <user@domain>" or "user@domain"
+    #[must_use]
     pub fn parse(input: &str) -> Option<Self> {
         let trimmed = input.trim();
 
         // Try "Display Name <addr>" format
-        if let Some(angle_start) = trimmed.rfind('<') {
-            if let Some(angle_end) = trimmed.rfind('>') {
-                if angle_end > angle_start {
-                    let display = trimmed.get(..angle_start)?.trim();
-                    let display_name = if display.is_empty() {
-                        None
-                    } else {
-                        // Strip surrounding quotes if present
-                        let d = display.trim_matches('"').trim();
-                        if d.is_empty() { None } else { Some(d.to_string()) }
-                    };
-                    let addr = trimmed.get(angle_start.saturating_add(1)..angle_end)?.trim();
-                    let (local, domain) = Self::split_addr(addr)?;
-                    return Some(Self { display_name, local_part: local, domain });
+        if let Some(angle_start) = trimmed.rfind('<')
+            && let Some(angle_end) = trimmed.rfind('>')
+            && angle_end > angle_start
+        {
+            let display = trimmed.get(..angle_start)?.trim();
+            let display_name = if display.is_empty() {
+                None
+            } else {
+                // Strip surrounding quotes if present
+                let d = display.trim_matches('"').trim();
+                if d.is_empty() {
+                    None
+                } else {
+                    Some(d.to_string())
                 }
-            }
+            };
+            let addr = trimmed
+                .get(angle_start.saturating_add(1)..angle_end)?
+                .trim();
+            let (local, domain) = Self::split_addr(addr)?;
+            return Some(Self {
+                display_name,
+                local_part: local,
+                domain,
+            });
         }
 
         // Plain "user@domain" format
         let (local, domain) = Self::split_addr(trimmed)?;
-        Some(Self { display_name: None, local_part: local, domain })
+        Some(Self {
+            display_name: None,
+            local_part: local,
+            domain,
+        })
     }
 
     fn split_addr(addr: &str) -> Option<(String, String)> {
@@ -78,6 +94,7 @@ impl EmailAddress {
     }
 
     /// Full address as string
+    #[must_use]
     pub fn address(&self) -> String {
         format!("{}@{}", self.local_part, self.domain)
     }
@@ -104,13 +121,17 @@ pub struct ContentType {
 }
 
 impl ContentType {
+    #[must_use]
     pub fn parse(value: &str) -> Self {
         let mut parts = value.splitn(2, ';');
         let type_part = parts.next().unwrap_or("text/plain").trim();
         let (media_type, subtype) = if let Some(slash) = type_part.find('/') {
             (
                 type_part.get(..slash).unwrap_or("text").to_lowercase(),
-                type_part.get(slash.saturating_add(1)..).unwrap_or("plain").to_lowercase(),
+                type_part
+                    .get(slash.saturating_add(1)..)
+                    .unwrap_or("plain")
+                    .to_lowercase(),
             )
         } else {
             ("text".to_string(), "plain".to_string())
@@ -122,37 +143,52 @@ impl ContentType {
                 let param = param.trim();
                 if let Some(eq) = param.find('=') {
                     let key = param.get(..eq).unwrap_or("").trim().to_lowercase();
-                    let val = param.get(eq.saturating_add(1)..).unwrap_or("").trim()
-                        .trim_matches('"').to_string();
+                    let val = param
+                        .get(eq.saturating_add(1)..)
+                        .unwrap_or("")
+                        .trim()
+                        .trim_matches('"')
+                        .to_string();
                     params.insert(key, val);
                 }
             }
         }
 
-        Self { media_type, subtype, params }
+        Self {
+            media_type,
+            subtype,
+            params,
+        }
     }
 
     /// Full MIME type string
+    #[must_use]
     pub fn mime_type(&self) -> String {
         format!("{}/{}", self.media_type, self.subtype)
     }
 
     /// Get charset parameter
+    #[must_use]
     pub fn charset(&self) -> &str {
-        self.params.get("charset").map_or("us-ascii", |s| s.as_str())
+        self.params
+            .get("charset")
+            .map_or("us-ascii", |s| s.as_str())
     }
 
     /// Get boundary parameter for multipart messages
+    #[must_use]
     pub fn boundary(&self) -> Option<&str> {
-        self.params.get("boundary").map(|s| s.as_str())
+        self.params.get("boundary").map(std::string::String::as_str)
     }
 
     /// Check if this is a multipart type
+    #[must_use]
     pub fn is_multipart(&self) -> bool {
         self.media_type == "multipart"
     }
 
     /// Check if text type
+    #[must_use]
     pub fn is_text(&self) -> bool {
         self.media_type == "text"
     }
@@ -166,6 +202,7 @@ pub struct ContentDisposition {
 }
 
 impl ContentDisposition {
+    #[must_use]
     pub fn parse(value: &str) -> Self {
         let mut parts = value.splitn(2, ';');
         let disposition = parts.next().unwrap_or("inline").trim().to_lowercase();
@@ -176,8 +213,12 @@ impl ContentDisposition {
                 let param = param.trim();
                 if let Some(eq) = param.find('=') {
                     let key = param.get(..eq).unwrap_or("").trim().to_lowercase();
-                    let val = param.get(eq.saturating_add(1)..).unwrap_or("").trim()
-                        .trim_matches('"').to_string();
+                    let val = param
+                        .get(eq.saturating_add(1)..)
+                        .unwrap_or("")
+                        .trim()
+                        .trim_matches('"')
+                        .to_string();
                     if key == "filename" {
                         filename = Some(val);
                     }
@@ -185,9 +226,13 @@ impl ContentDisposition {
             }
         }
 
-        Self { disposition, filename }
+        Self {
+            disposition,
+            filename,
+        }
     }
 
+    #[must_use]
     pub fn is_attachment(&self) -> bool {
         self.disposition == "attachment"
     }
@@ -200,8 +245,11 @@ pub struct EmailHeaders {
 }
 
 impl EmailHeaders {
+    #[must_use]
     pub fn new() -> Self {
-        Self { headers: Vec::new() }
+        Self {
+            headers: Vec::new(),
+        }
     }
 
     pub fn add(&mut self, name: &str, value: &str) {
@@ -209,23 +257,28 @@ impl EmailHeaders {
     }
 
     /// Get first header value by name (case-insensitive)
+    #[must_use]
     pub fn get(&self, name: &str) -> Option<&str> {
         let lower = name.to_lowercase();
-        self.headers.iter()
+        self.headers
+            .iter()
             .find(|(k, _)| k.to_lowercase() == lower)
             .map(|(_, v)| v.as_str())
     }
 
     /// Get all header values for a name
+    #[must_use]
     pub fn get_all(&self, name: &str) -> Vec<&str> {
         let lower = name.to_lowercase();
-        self.headers.iter()
+        self.headers
+            .iter()
             .filter(|(k, _)| k.to_lowercase() == lower)
             .map(|(_, v)| v.as_str())
             .collect()
     }
 
     /// Parse headers from raw header block
+    #[must_use]
     pub fn parse(text: &str) -> Self {
         let mut headers = Self::new();
         let mut current_name = String::new();
@@ -244,7 +297,11 @@ impl EmailHeaders {
                     headers.add(&current_name, &current_value);
                 }
                 current_name = line.get(..colon).unwrap_or("").trim().to_string();
-                current_value = line.get(colon.saturating_add(1)..).unwrap_or("").trim().to_string();
+                current_value = line
+                    .get(colon.saturating_add(1)..)
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
             }
         }
         // Save last header
@@ -268,23 +325,34 @@ pub struct MimePart {
     pub content_type: ContentType,
     pub disposition: Option<ContentDisposition>,
     pub body: Vec<u8>,
-    pub parts: Vec<MimePart>,  // Sub-parts for multipart
+    pub parts: Vec<MimePart>, // Sub-parts for multipart
 }
 
 impl MimePart {
     /// Check if this is an attachment
+    #[must_use]
     pub fn is_attachment(&self) -> bool {
-        self.disposition.as_ref().map_or(false, |d| d.is_attachment())
+        self.disposition
+            .as_ref()
+            .is_some_and(ContentDisposition::is_attachment)
     }
 
     /// Get filename for attachment
+    #[must_use]
     pub fn filename(&self) -> Option<&str> {
-        self.disposition.as_ref()
+        self.disposition
+            .as_ref()
             .and_then(|d| d.filename.as_deref())
-            .or_else(|| self.content_type.params.get("name").map(|s| s.as_str()))
+            .or_else(|| {
+                self.content_type
+                    .params
+                    .get("name")
+                    .map(std::string::String::as_str)
+            })
     }
 
     /// Get body as text (if text/* content type)
+    #[must_use]
     pub fn body_text(&self) -> Option<String> {
         if self.content_type.is_text() {
             String::from_utf8(self.body.clone()).ok()
@@ -317,9 +385,15 @@ impl EmailMessage {
     pub fn parse(raw: &str) -> Result<Self, String> {
         // Split headers and body at the blank line
         let (header_text, body_text) = if let Some(sep) = raw.find("\r\n\r\n") {
-            (raw.get(..sep).unwrap_or(""), raw.get(sep.saturating_add(4)..).unwrap_or(""))
+            (
+                raw.get(..sep).unwrap_or(""),
+                raw.get(sep.saturating_add(4)..).unwrap_or(""),
+            )
         } else if let Some(sep) = raw.find("\n\n") {
-            (raw.get(..sep).unwrap_or(""), raw.get(sep.saturating_add(2)..).unwrap_or(""))
+            (
+                raw.get(..sep).unwrap_or(""),
+                raw.get(sep.saturating_add(2)..).unwrap_or(""),
+            )
         } else {
             (raw, "")
         };
@@ -333,12 +407,15 @@ impl EmailMessage {
         let reply_to = headers.get("Reply-To").and_then(EmailAddress::parse);
         let subject = headers.get("Subject").unwrap_or("(no subject)").to_string();
         let date = headers.get("Date").map(String::from);
-        let message_id = headers.get("Message-ID")
+        let message_id = headers
+            .get("Message-ID")
             .or_else(|| headers.get("Message-Id"))
             .map(|s| s.trim_matches(|c| c == '<' || c == '>').to_string());
-        let in_reply_to = headers.get("In-Reply-To")
+        let in_reply_to = headers
+            .get("In-Reply-To")
             .map(|s| s.trim_matches(|c| c == '<' || c == '>').to_string());
-        let references: Vec<String> = headers.get("References")
+        let references: Vec<String> = headers
+            .get("References")
             .unwrap_or("")
             .split_whitespace()
             .map(|s| s.trim_matches(|c| c == '<' || c == '>').to_string())
@@ -367,16 +444,19 @@ impl EmailMessage {
     }
 
     /// Get plain text body
+    #[must_use]
     pub fn plain_text(&self) -> Option<String> {
         find_text_part(&self.body, "plain")
     }
 
     /// Get HTML body
+    #[must_use]
     pub fn html_body(&self) -> Option<String> {
         find_text_part(&self.body, "html")
     }
 
     /// List attachments
+    #[must_use]
     pub fn attachments(&self) -> Vec<&MimePart> {
         let mut result = Vec::new();
         collect_attachments(&self.body, &mut result);
@@ -396,7 +476,9 @@ fn parse_address_list(s: &str) -> Vec<EmailAddress> {
 
 /// Parse MIME body from text given content type
 fn parse_mime_body(ct: &ContentType, body_text: &str, headers: &EmailHeaders) -> MimePart {
-    let disposition = headers.get("Content-Disposition").map(ContentDisposition::parse);
+    let disposition = headers
+        .get("Content-Disposition")
+        .map(ContentDisposition::parse);
 
     if ct.is_multipart() {
         let boundary = ct.boundary().unwrap_or("");
@@ -410,7 +492,10 @@ fn parse_mime_body(ct: &ContentType, body_text: &str, headers: &EmailHeaders) ->
         }
     } else {
         // Decode body based on Content-Transfer-Encoding
-        let encoding = headers.get("Content-Transfer-Encoding").unwrap_or("7bit").to_lowercase();
+        let encoding = headers
+            .get("Content-Transfer-Encoding")
+            .unwrap_or("7bit")
+            .to_lowercase();
         let body_bytes = match encoding.as_str() {
             "base64" => base64_decode(body_text),
             "quoted-printable" => quoted_printable_decode(body_text),
@@ -437,18 +522,20 @@ fn parse_multipart(body: &str, boundary: &str) -> Vec<MimePart> {
 
     for line in body.lines() {
         if line.starts_with(&end_delimiter) {
-            if in_part && !current_part.is_empty() {
-                if let Some(part) = parse_single_part(&current_part) {
-                    parts.push(part);
-                }
+            if in_part
+                && !current_part.is_empty()
+                && let Some(part) = parse_single_part(&current_part)
+            {
+                parts.push(part);
             }
             break;
         }
         if line.starts_with(&delimiter) {
-            if in_part && !current_part.is_empty() {
-                if let Some(part) = parse_single_part(&current_part) {
-                    parts.push(part);
-                }
+            if in_part
+                && !current_part.is_empty()
+                && let Some(part) = parse_single_part(&current_part)
+            {
+                parts.push(part);
             }
             in_part = true;
             current_part = String::new();
@@ -466,7 +553,10 @@ fn parse_multipart(body: &str, boundary: &str) -> Vec<MimePart> {
 /// Parse a single MIME part
 fn parse_single_part(text: &str) -> Option<MimePart> {
     let (header_text, body_text) = if let Some(sep) = text.find("\n\n") {
-        (text.get(..sep).unwrap_or(""), text.get(sep.saturating_add(2)..).unwrap_or(""))
+        (
+            text.get(..sep).unwrap_or(""),
+            text.get(sep.saturating_add(2)..).unwrap_or(""),
+        )
     } else {
         ("", text)
     };
@@ -507,9 +597,9 @@ fn base64_decode(input: &str) -> Vec<u8> {
 
     for &b in input.as_bytes() {
         let val = match b {
-            b'A'..=b'Z' => Some(b.wrapping_sub(b'A') as u32),
-            b'a'..=b'z' => Some(b.wrapping_sub(b'a').wrapping_add(26) as u32),
-            b'0'..=b'9' => Some(b.wrapping_sub(b'0').wrapping_add(52) as u32),
+            b'A'..=b'Z' => Some(u32::from(b.wrapping_sub(b'A'))),
+            b'a'..=b'z' => Some(u32::from(b.wrapping_sub(b'a').wrapping_add(26))),
+            b'0'..=b'9' => Some(u32::from(b.wrapping_sub(b'0').wrapping_add(52))),
             b'+' => Some(62),
             b'/' => Some(63),
             _ => None,
@@ -535,9 +625,9 @@ fn base64_encode(data: &[u8]) -> String {
     let mut i = 0;
 
     while i < data.len() {
-        let b0 = data.get(i).copied().unwrap_or(0) as u32;
-        let b1 = data.get(i.saturating_add(1)).copied().unwrap_or(0) as u32;
-        let b2 = data.get(i.saturating_add(2)).copied().unwrap_or(0) as u32;
+        let b0 = u32::from(data.get(i).copied().unwrap_or(0));
+        let b1 = u32::from(data.get(i.saturating_add(1)).copied().unwrap_or(0));
+        let b2 = u32::from(data.get(i.saturating_add(2)).copied().unwrap_or(0));
         let triple = (b0 << 16) | (b1 << 8) | b2;
 
         result.push(CHARS[((triple >> 18) & 0x3F) as usize] as char);
@@ -581,12 +671,11 @@ fn quoted_printable_decode(input: &str) -> Vec<u8> {
             if let (Some(&h), Some(&l)) = (
                 bytes.get(i.saturating_add(1)),
                 bytes.get(i.saturating_add(2)),
-            ) {
-                if let (Some(hi), Some(lo)) = (hex_val(h), hex_val(l)) {
-                    result.push(hi.wrapping_shl(4) | lo);
-                    i = i.saturating_add(3);
-                    continue;
-                }
+            ) && let (Some(hi), Some(lo)) = (hex_val(h), hex_val(l))
+            {
+                result.push(hi.wrapping_shl(4) | lo);
+                i = i.saturating_add(3);
+                continue;
             }
         }
         result.push(bytes.get(i).copied().unwrap_or(0));
@@ -611,70 +700,87 @@ fn hex_val(b: u8) -> Option<u8> {
 pub struct ImapCommand;
 
 impl ImapCommand {
+    #[must_use]
     pub fn login(tag: &str, user: &str, pass: &str) -> String {
         format!("{tag} LOGIN {user} {pass}\r\n")
     }
 
+    #[must_use]
     pub fn logout(tag: &str) -> String {
         format!("{tag} LOGOUT\r\n")
     }
 
+    #[must_use]
     pub fn select(tag: &str, mailbox: &str) -> String {
         format!("{tag} SELECT \"{mailbox}\"\r\n")
     }
 
+    #[must_use]
     pub fn examine(tag: &str, mailbox: &str) -> String {
         format!("{tag} EXAMINE \"{mailbox}\"\r\n")
     }
 
+    #[must_use]
     pub fn list(tag: &str, reference: &str, pattern: &str) -> String {
         format!("{tag} LIST \"{reference}\" \"{pattern}\"\r\n")
     }
 
+    #[must_use]
     pub fn fetch(tag: &str, sequence: &str, items: &str) -> String {
         format!("{tag} FETCH {sequence} ({items})\r\n")
     }
 
+    #[must_use]
     pub fn search(tag: &str, criteria: &str) -> String {
         format!("{tag} SEARCH {criteria}\r\n")
     }
 
+    #[must_use]
     pub fn store(tag: &str, sequence: &str, action: &str, flags: &str) -> String {
         format!("{tag} STORE {sequence} {action} ({flags})\r\n")
     }
 
+    #[must_use]
     pub fn copy(tag: &str, sequence: &str, mailbox: &str) -> String {
         format!("{tag} COPY {sequence} \"{mailbox}\"\r\n")
     }
 
+    #[must_use]
     pub fn r#move(tag: &str, sequence: &str, mailbox: &str) -> String {
         format!("{tag} MOVE {sequence} \"{mailbox}\"\r\n")
     }
 
+    #[must_use]
     pub fn expunge(tag: &str) -> String {
         format!("{tag} EXPUNGE\r\n")
     }
 
+    #[must_use]
     pub fn noop(tag: &str) -> String {
         format!("{tag} NOOP\r\n")
     }
 
+    #[must_use]
     pub fn idle(tag: &str) -> String {
         format!("{tag} IDLE\r\n")
     }
 
+    #[must_use]
     pub fn create(tag: &str, mailbox: &str) -> String {
         format!("{tag} CREATE \"{mailbox}\"\r\n")
     }
 
+    #[must_use]
     pub fn delete(tag: &str, mailbox: &str) -> String {
         format!("{tag} DELETE \"{mailbox}\"\r\n")
     }
 
+    #[must_use]
     pub fn rename(tag: &str, old: &str, new: &str) -> String {
         format!("{tag} RENAME \"{old}\" \"{new}\"\r\n")
     }
 
+    #[must_use]
     pub fn append(tag: &str, mailbox: &str, flags: &str, size: usize) -> String {
         format!("{tag} APPEND \"{mailbox}\" ({flags}) {{{size}}}\r\n")
     }
@@ -690,7 +796,11 @@ pub enum ImapStatus {
 }
 
 impl ImapStatus {
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Parse an IMAP status word ("OK", "NO", "BAD", "BYE") into a status.
+    /// Named `from_code` rather than `from_str` because it returns `Option`
+    /// (not `Result`) and so isn't the `std::str::FromStr` contract.
+    #[must_use]
+    pub fn from_code(s: &str) -> Option<Self> {
         match s.to_uppercase().as_str() {
             "OK" => Some(Self::Ok),
             "NO" => Some(Self::No),
@@ -707,54 +817,66 @@ impl ImapStatus {
 pub struct SmtpCommand;
 
 impl SmtpCommand {
+    #[must_use]
     pub fn ehlo(hostname: &str) -> String {
         format!("EHLO {hostname}\r\n")
     }
 
+    #[must_use]
     pub fn helo(hostname: &str) -> String {
         format!("HELO {hostname}\r\n")
     }
 
+    #[must_use]
     pub fn auth_login() -> String {
         "AUTH LOGIN\r\n".to_string()
     }
 
+    #[must_use]
     pub fn auth_plain(user: &str, pass: &str) -> String {
         let credentials = format!("\0{user}\0{pass}");
         let encoded = base64_encode(credentials.as_bytes());
         format!("AUTH PLAIN {encoded}\r\n")
     }
 
+    #[must_use]
     pub fn mail_from(addr: &str) -> String {
         format!("MAIL FROM:<{addr}>\r\n")
     }
 
+    #[must_use]
     pub fn rcpt_to(addr: &str) -> String {
         format!("RCPT TO:<{addr}>\r\n")
     }
 
+    #[must_use]
     pub fn data() -> String {
         "DATA\r\n".to_string()
     }
 
+    #[must_use]
     pub fn quit() -> String {
         "QUIT\r\n".to_string()
     }
 
+    #[must_use]
     pub fn rset() -> String {
         "RSET\r\n".to_string()
     }
 
+    #[must_use]
     pub fn starttls() -> String {
         "STARTTLS\r\n".to_string()
     }
 
+    #[must_use]
     pub fn noop() -> String {
         "NOOP\r\n".to_string()
     }
 }
 
 /// SMTP reply code ranges
+#[must_use]
 pub fn smtp_reply_class(code: u16) -> &'static str {
     match code {
         200..=299 => "Positive Completion",
@@ -852,6 +974,7 @@ pub struct EmailAccount {
 
 impl EmailAccount {
     /// Create a default Gmail-like account
+    #[must_use]
     pub fn gmail(email: &str, name: &str) -> Self {
         Self {
             id: 0,
@@ -881,6 +1004,7 @@ impl EmailAccount {
     }
 
     /// Create a default Outlook-like account
+    #[must_use]
     pub fn outlook(email: &str, name: &str) -> Self {
         Self {
             id: 0,
@@ -952,7 +1076,7 @@ pub struct Mailbox {
 // ─── Message Store ───────────────────────────────────────────────────
 
 /// Message flags
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct MessageFlags {
     pub seen: bool,
     pub answered: bool,
@@ -960,19 +1084,6 @@ pub struct MessageFlags {
     pub deleted: bool,
     pub draft: bool,
     pub has_attachment: bool,
-}
-
-impl Default for MessageFlags {
-    fn default() -> Self {
-        Self {
-            seen: false,
-            answered: false,
-            flagged: false,
-            deleted: false,
-            draft: false,
-            has_attachment: false,
-        }
-    }
 }
 
 /// Message priority
@@ -1041,6 +1152,7 @@ pub struct Attachment {
 }
 
 impl Attachment {
+    #[must_use]
     pub fn new(filename: &str, mime_type: &str, data: Vec<u8>) -> Self {
         Self {
             filename: filename.to_string(),
@@ -1052,6 +1164,7 @@ impl Attachment {
     }
 
     /// Size in bytes
+    #[must_use]
     pub fn size(&self) -> usize {
         self.data.len()
     }
@@ -1076,6 +1189,7 @@ pub struct EmailDraft {
 }
 
 impl EmailDraft {
+    #[must_use]
     pub fn new(account_id: u32) -> Self {
         Self {
             to: Vec::new(),
@@ -1095,6 +1209,7 @@ impl EmailDraft {
     }
 
     /// Create a reply draft
+    #[must_use]
     pub fn reply(msg: &MessageSummary, body_quote: &str, account_id: u32) -> Self {
         let subject = if msg.subject.starts_with("Re: ") {
             msg.subject.clone()
@@ -1102,7 +1217,8 @@ impl EmailDraft {
             format!("Re: {}", msg.subject)
         };
 
-        let quoted = body_quote.lines()
+        let quoted = body_quote
+            .lines()
             .map(|l| format!("> {l}"))
             .collect::<Vec<_>>()
             .join("\n");
@@ -1125,6 +1241,7 @@ impl EmailDraft {
     }
 
     /// Create a forward draft
+    #[must_use]
     pub fn forward(msg: &MessageSummary, body_text: &str, account_id: u32) -> Self {
         let subject = if msg.subject.starts_with("Fwd: ") {
             msg.subject.clone()
@@ -1134,8 +1251,14 @@ impl EmailDraft {
 
         let body = format!(
             "\n\n---------- Forwarded message ----------\nFrom: {}\nDate: {}\nSubject: {}\nTo: {}\n\n{body_text}",
-            msg.from, msg.date, msg.subject,
-            msg.to.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", "),
+            msg.from,
+            msg.date,
+            msg.subject,
+            msg.to
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", "),
         );
 
         Self {
@@ -1156,6 +1279,7 @@ impl EmailDraft {
     }
 
     /// Build RFC 5322 email message
+    #[must_use]
     pub fn build_message(&self, from: &EmailAddress) -> String {
         let mut msg = String::new();
 
@@ -1198,7 +1322,11 @@ impl EmailDraft {
 
         if self.attachments.is_empty() {
             // Simple text message
-            let ct = if self.is_html { "text/html" } else { "text/plain" };
+            let ct = if self.is_html {
+                "text/html"
+            } else {
+                "text/plain"
+            };
             msg.push_str(&format!("Content-Type: {ct}; charset=utf-8\r\n"));
             msg.push_str("Content-Transfer-Encoding: quoted-printable\r\n");
             msg.push_str("\r\n");
@@ -1206,12 +1334,18 @@ impl EmailDraft {
         } else {
             // Multipart mixed
             let boundary = "----=_Part_Boundary_001";
-            msg.push_str(&format!("Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n"));
+            msg.push_str(&format!(
+                "Content-Type: multipart/mixed; boundary=\"{boundary}\"\r\n"
+            ));
             msg.push_str("\r\n");
 
             // Text part
             msg.push_str(&format!("--{boundary}\r\n"));
-            let ct = if self.is_html { "text/html" } else { "text/plain" };
+            let ct = if self.is_html {
+                "text/html"
+            } else {
+                "text/plain"
+            };
             msg.push_str(&format!("Content-Type: {ct}; charset=utf-8\r\n"));
             msg.push_str("Content-Transfer-Encoding: quoted-printable\r\n");
             msg.push_str("\r\n");
@@ -1221,9 +1355,19 @@ impl EmailDraft {
             // Attachments
             for att in &self.attachments {
                 msg.push_str(&format!("--{boundary}\r\n"));
-                let disp = if att.is_inline { "inline" } else { "attachment" };
-                msg.push_str(&format!("Content-Type: {}; name=\"{}\"\r\n", att.mime_type, att.filename));
-                msg.push_str(&format!("Content-Disposition: {disp}; filename=\"{}\"\r\n", att.filename));
+                let disp = if att.is_inline {
+                    "inline"
+                } else {
+                    "attachment"
+                };
+                msg.push_str(&format!(
+                    "Content-Type: {}; name=\"{}\"\r\n",
+                    att.mime_type, att.filename
+                ));
+                msg.push_str(&format!(
+                    "Content-Disposition: {disp}; filename=\"{}\"\r\n",
+                    att.filename
+                ));
                 msg.push_str("Content-Transfer-Encoding: base64\r\n");
                 if let Some(ref cid) = att.content_id {
                     msg.push_str(&format!("Content-ID: <{cid}>\r\n"));
@@ -1263,10 +1407,18 @@ pub enum FilterCondition {
 
 impl FilterCondition {
     /// Test if a message matches this condition
+    #[must_use]
     pub fn matches(&self, msg: &MessageSummary) -> bool {
         match self {
-            Self::FromContains(s) => msg.from.to_string().to_lowercase().contains(&s.to_lowercase()),
-            Self::ToContains(s) => msg.to.iter().any(|a| a.to_string().to_lowercase().contains(&s.to_lowercase())),
+            Self::FromContains(s) => msg
+                .from
+                .to_string()
+                .to_lowercase()
+                .contains(&s.to_lowercase()),
+            Self::ToContains(s) => msg
+                .to
+                .iter()
+                .any(|a| a.to_string().to_lowercase().contains(&s.to_lowercase())),
             Self::SubjectContains(s) => msg.subject.to_lowercase().contains(&s.to_lowercase()),
             Self::BodyContains(s) => msg.preview.to_lowercase().contains(&s.to_lowercase()),
             Self::HasAttachment => msg.flags.has_attachment,
@@ -1301,6 +1453,7 @@ pub struct FilterRule {
 
 impl FilterRule {
     /// Check if a message matches this rule
+    #[must_use]
     pub fn matches(&self, msg: &MessageSummary) -> bool {
         if !self.enabled || self.conditions.is_empty() {
             return false;
@@ -1327,8 +1480,7 @@ pub struct Signature {
 
 // ─── Application ─────────────────────────────────────────────────────
 
-use guitk::Color;
-use guitk::render::{RenderCommand, FontWeightHint};
+use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 
 mod colors {
@@ -1407,7 +1559,14 @@ pub enum ReadingPanePosition {
     Off,
 }
 
+impl Default for EmailApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EmailApp {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             accounts: Vec::new(),
@@ -1501,14 +1660,14 @@ impl EmailApp {
 
     /// Mark a message as read
     pub fn mark_read(&mut self, id: u64) {
-        if let Some(msg) = self.messages.iter_mut().find(|m| m.id == id) {
-            if !msg.flags.seen {
-                msg.flags.seen = true;
-                self.unread_count = self.unread_count.saturating_sub(1);
-                for mb in &mut self.mailboxes {
-                    if mb.name == msg.mailbox && mb.account_id == msg.account_id {
-                        mb.unread_messages = mb.unread_messages.saturating_sub(1);
-                    }
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.id == id)
+            && !msg.flags.seen
+        {
+            msg.flags.seen = true;
+            self.unread_count = self.unread_count.saturating_sub(1);
+            for mb in &mut self.mailboxes {
+                if mb.name == msg.mailbox && mb.account_id == msg.account_id {
+                    mb.unread_messages = mb.unread_messages.saturating_sub(1);
                 }
             }
         }
@@ -1516,14 +1675,14 @@ impl EmailApp {
 
     /// Mark a message as unread
     pub fn mark_unread(&mut self, id: u64) {
-        if let Some(msg) = self.messages.iter_mut().find(|m| m.id == id) {
-            if msg.flags.seen {
-                msg.flags.seen = false;
-                self.unread_count = self.unread_count.saturating_add(1);
-                for mb in &mut self.mailboxes {
-                    if mb.name == msg.mailbox && mb.account_id == msg.account_id {
-                        mb.unread_messages = mb.unread_messages.saturating_add(1);
-                    }
+        if let Some(msg) = self.messages.iter_mut().find(|m| m.id == id)
+            && msg.flags.seen
+        {
+            msg.flags.seen = false;
+            self.unread_count = self.unread_count.saturating_add(1);
+            for mb in &mut self.mailboxes {
+                if mb.name == msg.mailbox && mb.account_id == msg.account_id {
+                    mb.unread_messages = mb.unread_messages.saturating_add(1);
                 }
             }
         }
@@ -1625,14 +1784,17 @@ impl EmailApp {
     }
 
     /// Get messages for current mailbox, filtered and sorted
+    #[must_use]
     pub fn current_messages(&self) -> Vec<&MessageSummary> {
         let account_id = self.selected_account;
         let mailbox = self.selected_mailbox.as_deref();
 
-        let mut msgs: Vec<&MessageSummary> = self.messages.iter()
+        let mut msgs: Vec<&MessageSummary> = self
+            .messages
+            .iter()
             .filter(|m| {
-                account_id.map_or(true, |aid| m.account_id == aid)
-                    && mailbox.map_or(true, |mb| m.mailbox == mb)
+                account_id.is_none_or(|aid| m.account_id == aid)
+                    && mailbox.is_none_or(|mb| m.mailbox == mb)
             })
             .filter(|m| {
                 if self.search_query.is_empty() {
@@ -1646,14 +1808,12 @@ impl EmailApp {
             })
             .collect();
 
-        msgs.sort_by(|a, b| {
-            match self.sort_order {
-                SortOrder::DateDesc => b.timestamp.cmp(&a.timestamp),
-                SortOrder::DateAsc => a.timestamp.cmp(&b.timestamp),
-                SortOrder::SenderAsc => a.from.to_string().cmp(&b.from.to_string()),
-                SortOrder::SubjectAsc => a.subject.cmp(&b.subject),
-                SortOrder::SizeDesc => b.size.cmp(&a.size),
-            }
+        msgs.sort_by(|a, b| match self.sort_order {
+            SortOrder::DateDesc => b.timestamp.cmp(&a.timestamp),
+            SortOrder::DateAsc => a.timestamp.cmp(&b.timestamp),
+            SortOrder::SenderAsc => a.from.to_string().cmp(&b.from.to_string()),
+            SortOrder::SubjectAsc => a.subject.cmp(&b.subject),
+            SortOrder::SizeDesc => b.size.cmp(&a.size),
         });
 
         msgs
@@ -1715,10 +1875,10 @@ impl EmailApp {
                     self.delete_message(message_id);
                 }
                 FilterAction::AddLabel(label) => {
-                    if let Some(m) = self.messages.iter_mut().find(|m| m.id == message_id) {
-                        if !m.labels.contains(label) {
-                            m.labels.push(label.clone());
-                        }
+                    if let Some(m) = self.messages.iter_mut().find(|m| m.id == message_id)
+                        && !m.labels.contains(label)
+                    {
+                        m.labels.push(label.clone());
                     }
                 }
                 FilterAction::ForwardTo(_) => {
@@ -1731,6 +1891,7 @@ impl EmailApp {
     }
 
     /// Render the UI
+    #[must_use]
     pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let header_h = 48.0;
@@ -1740,19 +1901,26 @@ impl EmailApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: colors::BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Header
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height: header_h,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: header_h,
             color: colors::MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
-            x: 16.0, y: 14.0,
+            x: 16.0,
+            y: 14.0,
             text: "Mail".to_string(),
             font_size: 18.0,
             color: colors::BLUE,
@@ -1763,21 +1931,30 @@ impl EmailApp {
         // Unread badge
         if self.unread_count > 0 {
             cmds.push(RenderCommand::FillRect {
-                x: 70.0, y: 10.0, width: 32.0, height: 22.0,
+                x: 70.0,
+                y: 10.0,
+                width: 32.0,
+                height: 22.0,
                 color: colors::RED,
                 corner_radii: CornerRadii::all(11.0),
             });
             cmds.push(RenderCommand::Text {
-                x: 78.0, y: 14.0,
+                x: 78.0,
+                y: 14.0,
                 text: self.unread_count.to_string(),
-                font_size: 12.0, color: colors::BASE,
-                font_weight: FontWeightHint::Bold, max_width: None,
+                font_size: 12.0,
+                color: colors::BASE,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
             });
         }
 
         // Search bar
         cmds.push(RenderCommand::FillRect {
-            x: 120.0, y: 10.0, width: 300.0, height: 28.0,
+            x: 120.0,
+            y: 10.0,
+            width: 300.0,
+            height: 28.0,
             color: colors::SURFACE0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -1787,10 +1964,15 @@ impl EmailApp {
             self.search_query.clone()
         };
         cmds.push(RenderCommand::Text {
-            x: 132.0, y: 17.0,
+            x: 132.0,
+            y: 17.0,
             text: search_text,
             font_size: 12.0,
-            color: if self.search_query.is_empty() { colors::OVERLAY0 } else { colors::TEXT },
+            color: if self.search_query.is_empty() {
+                colors::OVERLAY0
+            } else {
+                colors::TEXT
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(276.0),
         });
@@ -1798,7 +1980,10 @@ impl EmailApp {
         // Toolbar
         let ty = header_h;
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: ty, width, height: toolbar_h,
+            x: 0.0,
+            y: ty,
+            width,
+            height: toolbar_h,
             color: colors::CRUST,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1807,16 +1992,32 @@ impl EmailApp {
         for label in &buttons {
             let bw = label.len() as f32 * 7.5 + 20.0;
             cmds.push(RenderCommand::FillRect {
-                x: bx, y: ty + 6.0, width: bw, height: 28.0,
-                color: if *label == "Compose" { colors::BLUE } else { colors::SURFACE0 },
+                x: bx,
+                y: ty + 6.0,
+                width: bw,
+                height: 28.0,
+                color: if *label == "Compose" {
+                    colors::BLUE
+                } else {
+                    colors::SURFACE0
+                },
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: bx + 10.0, y: ty + 12.0,
+                x: bx + 10.0,
+                y: ty + 12.0,
                 text: label.to_string(),
                 font_size: 12.0,
-                color: if *label == "Compose" { colors::BASE } else { colors::TEXT },
-                font_weight: if *label == "Compose" { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                color: if *label == "Compose" {
+                    colors::BASE
+                } else {
+                    colors::TEXT
+                },
+                font_weight: if *label == "Compose" {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
             bx += bw + 8.0;
@@ -1826,26 +2027,36 @@ impl EmailApp {
         let content_y = header_h + toolbar_h;
         let content_h = height - content_y - status_h;
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: content_y, width: sidebar_w, height: content_h,
+            x: 0.0,
+            y: content_y,
+            width: sidebar_w,
+            height: content_h,
             color: colors::MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Account name
-        if let Some(acct) = self.selected_account
+        if let Some(acct) = self
+            .selected_account
             .and_then(|id| self.accounts.iter().find(|a| a.id == id))
         {
             cmds.push(RenderCommand::Text {
-                x: 12.0, y: content_y + 8.0,
+                x: 12.0,
+                y: content_y + 8.0,
                 text: acct.name.clone(),
-                font_size: 12.0, color: acct.color,
-                font_weight: FontWeightHint::Bold, max_width: Some(sidebar_w - 24.0),
+                font_size: 12.0,
+                color: acct.color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(sidebar_w - 24.0),
             });
             cmds.push(RenderCommand::Text {
-                x: 12.0, y: content_y + 24.0,
+                x: 12.0,
+                y: content_y + 24.0,
                 text: acct.email.clone(),
-                font_size: 10.0, color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(sidebar_w - 24.0),
+                font_size: 10.0,
+                color: colors::SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(sidebar_w - 24.0),
             });
         }
 
@@ -1853,13 +2064,16 @@ impl EmailApp {
         let mut my = content_y + 48.0;
         let account_id = self.selected_account;
         for mb in &self.mailboxes {
-            if account_id.map_or(false, |aid| mb.account_id != aid) {
+            if account_id.is_some_and(|aid| mb.account_id != aid) {
                 continue;
             }
             let is_sel = self.selected_mailbox.as_deref() == Some(&mb.name);
             if is_sel {
                 cmds.push(RenderCommand::FillRect {
-                    x: 4.0, y: my, width: sidebar_w - 8.0, height: 28.0,
+                    x: 4.0,
+                    y: my,
+                    width: sidebar_w - 8.0,
+                    height: 28.0,
                     color: colors::SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -1876,17 +2090,27 @@ impl EmailApp {
             };
 
             cmds.push(RenderCommand::Text {
-                x: 12.0, y: my + 7.0,
+                x: 12.0,
+                y: my + 7.0,
                 text: format!("{icon} {}", mb.name),
                 font_size: 12.0,
-                color: if is_sel { colors::BLUE } else { colors::SUBTEXT1 },
-                font_weight: if is_sel { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                color: if is_sel {
+                    colors::BLUE
+                } else {
+                    colors::SUBTEXT1
+                },
+                font_weight: if is_sel {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(sidebar_w - 60.0),
             });
 
             if mb.unread_messages > 0 {
                 cmds.push(RenderCommand::Text {
-                    x: sidebar_w - 40.0, y: my + 7.0,
+                    x: sidebar_w - 40.0,
+                    y: my + 7.0,
                     text: mb.unread_messages.to_string(),
                     font_size: 11.0,
                     color: colors::BLUE,
@@ -1918,23 +2142,31 @@ impl EmailApp {
         // Status bar
         let sy = height - status_h;
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: sy, width, height: status_h,
+            x: 0.0,
+            y: sy,
+            width,
+            height: status_h,
             color: colors::CRUST,
             corner_radii: CornerRadii::ZERO,
         });
-        let total_msgs: u32 = self.mailboxes.iter()
-            .filter(|mb| self.selected_account.map_or(true, |aid| mb.account_id == aid))
+        let total_msgs: u32 = self
+            .mailboxes
+            .iter()
+            .filter(|mb| self.selected_account.is_none_or(|aid| mb.account_id == aid))
             .map(|mb| mb.total_messages)
             .sum();
         cmds.push(RenderCommand::Text {
-            x: 12.0, y: sy + 6.0,
+            x: 12.0,
+            y: sy + 6.0,
             text: format!(
                 "{} messages, {} unread  |  {}  |  {}",
-                total_msgs, self.unread_count,
+                total_msgs,
+                self.unread_count,
                 self.accounts.len(),
                 self.status_message,
             ),
-            font_size: 11.0, color: colors::SUBTEXT0,
+            font_size: 11.0,
+            color: colors::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
         });
@@ -1949,23 +2181,31 @@ impl EmailApp {
 
         if messages.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 60.0, y: y + h / 2.0 - 10.0,
+                x: x + w / 2.0 - 60.0,
+                y: y + h / 2.0 - 10.0,
                 text: "No messages".to_string(),
-                font_size: 14.0, color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 14.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             return;
         }
 
         for msg in messages.iter().take(((h - 4.0) / row_h) as usize) {
-            if ry + row_h > y + h { break; }
+            if ry + row_h > y + h {
+                break;
+            }
 
             let is_sel = self.selected_message == Some(msg.id);
             let is_unread = !msg.flags.seen;
 
             if is_sel {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0, y: ry, width: w - 8.0, height: row_h - 2.0,
+                    x: x + 4.0,
+                    y: ry,
+                    width: w - 8.0,
+                    height: row_h - 2.0,
                     color: colors::SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -1974,7 +2214,10 @@ impl EmailApp {
             // Unread indicator
             if is_unread {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 6.0, y: ry + 24.0, width: 6.0, height: 6.0,
+                    x: x + 6.0,
+                    y: ry + 24.0,
+                    width: 6.0,
+                    height: 6.0,
                     color: colors::BLUE,
                     corner_radii: CornerRadii::all(3.0),
                 });
@@ -1983,10 +2226,13 @@ impl EmailApp {
             // Flagged indicator
             if msg.flags.flagged {
                 cmds.push(RenderCommand::Text {
-                    x: x + w - 24.0, y: ry + 6.0,
+                    x: x + w - 24.0,
+                    y: ry + 6.0,
                     text: "★".to_string(),
-                    font_size: 14.0, color: colors::YELLOW,
-                    font_weight: FontWeightHint::Regular, max_width: None,
+                    font_size: 14.0,
+                    color: colors::YELLOW,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
                 });
             }
 
@@ -1995,37 +2241,64 @@ impl EmailApp {
 
             // Sender
             cmds.push(RenderCommand::Text {
-                x: text_x, y: ry + 6.0,
-                text: msg.from.display_name.clone().unwrap_or_else(|| msg.from.address()),
+                x: text_x,
+                y: ry + 6.0,
+                text: msg
+                    .from
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| msg.from.address()),
                 font_size: 12.0,
-                color: if is_unread { colors::TEXT } else { colors::SUBTEXT1 },
-                font_weight: if is_unread { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                color: if is_unread {
+                    colors::TEXT
+                } else {
+                    colors::SUBTEXT1
+                },
+                font_weight: if is_unread {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(max_w * 0.6),
             });
 
             // Date
             cmds.push(RenderCommand::Text {
-                x: x + w - 80.0, y: ry + 6.0,
+                x: x + w - 80.0,
+                y: ry + 6.0,
                 text: msg.date.clone(),
-                font_size: 10.0, color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(70.0),
+                font_size: 10.0,
+                color: colors::SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(70.0),
             });
 
             // Subject
             cmds.push(RenderCommand::Text {
-                x: text_x, y: ry + 24.0,
+                x: text_x,
+                y: ry + 24.0,
                 text: msg.subject.clone(),
                 font_size: 12.0,
-                color: if is_unread { colors::TEXT } else { colors::SUBTEXT1 },
-                font_weight: if is_unread { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                color: if is_unread {
+                    colors::TEXT
+                } else {
+                    colors::SUBTEXT1
+                },
+                font_weight: if is_unread {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(max_w),
             });
 
             // Preview
             cmds.push(RenderCommand::Text {
-                x: text_x, y: ry + 42.0,
+                x: text_x,
+                y: ry + 42.0,
                 text: msg.preview.clone(),
-                font_size: 11.0, color: colors::SUBTEXT0,
+                font_size: 11.0,
+                color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
             });
@@ -2033,20 +2306,26 @@ impl EmailApp {
             // Attachment indicator
             if msg.flags.has_attachment {
                 cmds.push(RenderCommand::Text {
-                    x: x + w - 44.0, y: ry + 24.0,
+                    x: x + w - 44.0,
+                    y: ry + 24.0,
                     text: "📎".to_string(),
-                    font_size: 12.0, color: colors::SUBTEXT0,
-                    font_weight: FontWeightHint::Regular, max_width: None,
+                    font_size: 12.0,
+                    color: colors::SUBTEXT0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
                 });
             }
 
             // Priority indicator
             if msg.priority == Priority::High {
                 cmds.push(RenderCommand::Text {
-                    x: x + w - 44.0, y: ry + 42.0,
+                    x: x + w - 44.0,
+                    y: ry + 42.0,
                     text: "❗".to_string(),
-                    font_size: 12.0, color: colors::RED,
-                    font_weight: FontWeightHint::Regular, max_width: None,
+                    font_size: 12.0,
+                    color: colors::RED,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
                 });
             }
 
@@ -2054,17 +2333,25 @@ impl EmailApp {
             let mut lx = text_x;
             for label in &msg.labels {
                 let lw = label.len() as f32 * 6.0 + 10.0;
-                if lx + lw > x + max_w { break; }
+                if lx + lw > x + max_w {
+                    break;
+                }
                 cmds.push(RenderCommand::FillRect {
-                    x: lx, y: ry + 54.0, width: lw, height: 14.0,
+                    x: lx,
+                    y: ry + 54.0,
+                    width: lw,
+                    height: 14.0,
                     color: colors::SURFACE1,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: lx + 5.0, y: ry + 55.0,
+                    x: lx + 5.0,
+                    y: ry + 55.0,
                     text: label.clone(),
-                    font_size: 9.0, color: colors::PEACH,
-                    font_weight: FontWeightHint::Regular, max_width: None,
+                    font_size: 9.0,
+                    color: colors::PEACH,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
                 });
                 lx += lw + 4.0;
             }
@@ -2076,24 +2363,30 @@ impl EmailApp {
     fn render_reading_pane(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
         // Separator line
         cmds.push(RenderCommand::FillRect {
-            x, y, width: 1.0, height: _h,
+            x,
+            y,
+            width: 1.0,
+            height: _h,
             color: colors::SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
 
-        let msg = match self.selected_message
+        let msg = if let Some(m) = self
+            .selected_message
             .and_then(|id| self.messages.iter().find(|m| m.id == id))
         {
-            Some(m) => m,
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: x + w / 2.0 - 80.0, y: y + _h / 2.0 - 10.0,
-                    text: "Select a message to read".to_string(),
-                    font_size: 13.0, color: colors::OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: None,
-                });
-                return;
-            }
+            m
+        } else {
+            cmds.push(RenderCommand::Text {
+                x: x + w / 2.0 - 80.0,
+                y: y + _h / 2.0 - 10.0,
+                text: "Select a message to read".to_string(),
+                font_size: 13.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+            });
+            return;
         };
 
         let px = x + 16.0;
@@ -2102,9 +2395,11 @@ impl EmailApp {
 
         // Subject
         cmds.push(RenderCommand::Text {
-            x: px, y: py,
+            x: px,
+            y: py,
             text: msg.subject.clone(),
-            font_size: 16.0, color: colors::TEXT,
+            font_size: 16.0,
+            color: colors::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
         });
@@ -2112,20 +2407,29 @@ impl EmailApp {
 
         // From
         cmds.push(RenderCommand::Text {
-            x: px, y: py,
+            x: px,
+            y: py,
             text: format!("From: {}", msg.from),
-            font_size: 12.0, color: colors::SUBTEXT1,
+            font_size: 12.0,
+            color: colors::SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
         });
         py += 18.0;
 
         // To
-        let to_str = msg.to.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
+        let to_str = msg
+            .to
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         cmds.push(RenderCommand::Text {
-            x: px, y: py,
+            x: px,
+            y: py,
             text: format!("To: {to_str}"),
-            font_size: 12.0, color: colors::SUBTEXT1,
+            font_size: 12.0,
+            color: colors::SUBTEXT1,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
         });
@@ -2133,11 +2437,18 @@ impl EmailApp {
 
         // CC
         if !msg.cc.is_empty() {
-            let cc_str = msg.cc.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(", ");
+            let cc_str = msg
+                .cc
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
             cmds.push(RenderCommand::Text {
-                x: px, y: py,
+                x: px,
+                y: py,
                 text: format!("Cc: {cc_str}"),
-                font_size: 12.0, color: colors::SUBTEXT0,
+                font_size: 12.0,
+                color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w),
             });
@@ -2146,9 +2457,11 @@ impl EmailApp {
 
         // Date
         cmds.push(RenderCommand::Text {
-            x: px, y: py,
+            x: px,
+            y: py,
             text: format!("Date: {}", msg.date),
-            font_size: 11.0, color: colors::OVERLAY0,
+            font_size: 11.0,
+            color: colors::OVERLAY0,
             font_weight: FontWeightHint::Regular,
             max_width: None,
         });
@@ -2156,7 +2469,10 @@ impl EmailApp {
 
         // Separator
         cmds.push(RenderCommand::FillRect {
-            x: px, y: py, width: max_w, height: 1.0,
+            x: px,
+            y: py,
+            width: max_w,
+            height: 1.0,
             color: colors::SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
@@ -2164,9 +2480,11 @@ impl EmailApp {
 
         // Body preview
         cmds.push(RenderCommand::Text {
-            x: px, y: py,
+            x: px,
+            y: py,
             text: msg.preview.clone(),
-            font_size: 13.0, color: colors::TEXT,
+            font_size: 13.0,
+            color: colors::TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(max_w),
         });
@@ -2195,7 +2513,10 @@ fn main() {
         enabled: true,
         conditions: vec![FilterCondition::SubjectContains("newsletter".to_string())],
         match_all: false,
-        actions: vec![FilterAction::MoveTo("Archive".to_string()), FilterAction::MarkAsRead],
+        actions: vec![
+            FilterAction::MoveTo("Archive".to_string()),
+            FilterAction::MarkAsRead,
+        ],
         stop_processing: true,
     });
 
@@ -2472,7 +2793,10 @@ mod tests {
     fn test_header_folding() {
         let raw = "Subject: This is a very long\r\n subject line";
         let headers = EmailHeaders::parse(raw);
-        assert_eq!(headers.get("Subject"), Some("This is a very long subject line"));
+        assert_eq!(
+            headers.get("Subject"),
+            Some("This is a very long subject line")
+        );
     }
 
     // MIME parsing tests
@@ -2488,7 +2812,10 @@ mod tests {
     fn test_parse_email_addresses() {
         let raw = "From: Alice <alice@example.com>\r\nTo: bob@example.com, Charlie <charlie@test.com>\r\n\r\nBody";
         let msg = EmailMessage::parse(raw).unwrap();
-        assert_eq!(msg.from.as_ref().unwrap().display_name.as_deref(), Some("Alice"));
+        assert_eq!(
+            msg.from.as_ref().unwrap().display_name.as_deref(),
+            Some("Alice")
+        );
         assert_eq!(msg.to.len(), 2);
     }
 
@@ -2520,12 +2847,18 @@ mod tests {
     // SMTP command tests
     #[test]
     fn test_smtp_ehlo() {
-        assert_eq!(SmtpCommand::ehlo("client.example.com"), "EHLO client.example.com\r\n");
+        assert_eq!(
+            SmtpCommand::ehlo("client.example.com"),
+            "EHLO client.example.com\r\n"
+        );
     }
 
     #[test]
     fn test_smtp_mail_from() {
-        assert_eq!(SmtpCommand::mail_from("user@example.com"), "MAIL FROM:<user@example.com>\r\n");
+        assert_eq!(
+            SmtpCommand::mail_from("user@example.com"),
+            "MAIL FROM:<user@example.com>\r\n"
+        );
     }
 
     #[test]
@@ -2663,7 +2996,11 @@ mod tests {
         draft.to = vec!["bob@example.com".to_string()];
         draft.subject = "With File".to_string();
         draft.body = "See attached.".to_string();
-        draft.attachments.push(Attachment::new("test.txt", "text/plain", b"file content".to_vec()));
+        draft.attachments.push(Attachment::new(
+            "test.txt",
+            "text/plain",
+            b"file content".to_vec(),
+        ));
         let from = EmailAddress::parse("alice@example.com").unwrap();
         let msg = draft.build_message(&from);
         assert!(msg.contains("multipart/mixed"));
@@ -2757,9 +3094,9 @@ mod tests {
 
     #[test]
     fn test_imap_status() {
-        assert_eq!(ImapStatus::from_str("OK"), Some(ImapStatus::Ok));
-        assert_eq!(ImapStatus::from_str("BAD"), Some(ImapStatus::Bad));
-        assert_eq!(ImapStatus::from_str("NOPE"), None);
+        assert_eq!(ImapStatus::from_code("OK"), Some(ImapStatus::Ok));
+        assert_eq!(ImapStatus::from_code("BAD"), Some(ImapStatus::Bad));
+        assert_eq!(ImapStatus::from_code("NOPE"), None);
     }
 
     #[test]

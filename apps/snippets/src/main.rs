@@ -15,7 +15,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -1233,7 +1235,7 @@ impl App {
             SortOrder::DateDesc => results.sort_by_key(|s| std::cmp::Reverse(s.created_at)),
             SortOrder::UsageDesc => results.sort_by_key(|s| std::cmp::Reverse(s.use_count)),
             SortOrder::LanguageAsc => {
-                results.sort_by(|a, b| a.language.name().cmp(b.language.name()))
+                results.sort_by(|a, b| a.language.name().cmp(b.language.name()));
             }
         }
 

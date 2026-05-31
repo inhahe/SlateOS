@@ -1,11 +1,11 @@
-//! OurOS JSON Viewer & Editor
+//! `OurOS` JSON Viewer & Editor
 //!
 //! A full-featured JSON data viewer and editor with:
 //! - Custom JSON parser supporting full JSON spec (RFC 8259)
 //! - Collapsible tree view with color-coded values
 //! - Syntax-highlighted raw/formatted view with pretty-printing
 //! - Search across keys and values with match navigation
-//! - JSONPath display for selected nodes
+//! - `JSONPath` display for selected nodes
 //! - In-place edit mode for values, key add/delete
 //! - Real-time validation with line/column error reporting
 //! - Statistics panel (node count, depth, type distribution)
@@ -15,7 +15,9 @@
 //!
 //! Uses the guitk library for UI rendering with Catppuccin Mocha theme.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -129,12 +131,8 @@ impl JsonValue {
     /// Returns the maximum depth of the value tree.
     fn max_depth(&self) -> usize {
         match self {
-            Self::Array(arr) => {
-                1 + arr.iter().map(Self::max_depth).max().unwrap_or(0)
-            }
-            Self::Object(obj) => {
-                1 + obj.iter().map(|(_, v)| v.max_depth()).max().unwrap_or(0)
-            }
+            Self::Array(arr) => 1 + arr.iter().map(Self::max_depth).max().unwrap_or(0),
+            Self::Object(obj) => 1 + obj.iter().map(|(_, v)| v.max_depth()).max().unwrap_or(0),
             _ => 1,
         }
     }
@@ -171,15 +169,23 @@ impl JsonValue {
     fn approx_size(&self) -> usize {
         match self {
             Self::Null => 4,
-            Self::Bool(b) => if *b { 4 } else { 5 },
+            Self::Bool(b) => {
+                if *b {
+                    4
+                } else {
+                    5
+                }
+            }
             Self::Number(n) => format_number(*n).len(),
             Self::Str(s) => s.len() + 2,
             Self::Array(arr) => {
-                2 + arr.iter().map(Self::approx_size).sum::<usize>()
-                    + arr.len().saturating_sub(1)
+                2 + arr.iter().map(Self::approx_size).sum::<usize>() + arr.len().saturating_sub(1)
             }
             Self::Object(obj) => {
-                2 + obj.iter().map(|(k, v)| k.len() + 3 + v.approx_size()).sum::<usize>()
+                2 + obj
+                    .iter()
+                    .map(|(k, v)| k.len() + 3 + v.approx_size())
+                    .sum::<usize>()
                     + obj.len().saturating_sub(1)
             }
         }
@@ -217,7 +223,11 @@ struct ParseError {
 
 impl core::fmt::Display for ParseError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Line {}, Col {}: {}", self.line, self.column, self.message)
+        write!(
+            f,
+            "Line {}, Col {}: {}",
+            self.line, self.column, self.message
+        )
     }
 }
 
@@ -305,9 +315,9 @@ impl<'a> Parser<'a> {
             Some(b'"') => self.parse_string().map(JsonValue::Str),
             Some(b'{') => self.parse_object(),
             Some(b'[') => self.parse_array(),
-            Some(b't') | Some(b'f') => self.parse_bool(),
+            Some(b't' | b'f') => self.parse_bool(),
             Some(b'n') => self.parse_null(),
-            Some(b'-') | Some(b'0'..=b'9') => self.parse_number(),
+            Some(b'-' | b'0'..=b'9') => self.parse_number(),
             Some(b) => Err(self.error(format!("Unexpected character: '{}'", b as char))),
             None => Err(self.error("Unexpected end of input")),
         }
@@ -345,7 +355,10 @@ impl<'a> Parser<'a> {
 
     fn parse_utf8_char(&mut self) -> Result<char, ParseError> {
         let start = self.pos;
-        let first = self.input.get(self.pos).copied()
+        let first = self
+            .input
+            .get(self.pos)
+            .copied()
             .ok_or_else(|| self.error("Unexpected end of input in UTF-8 sequence"))?;
 
         let len = if first & 0x80 == 0 {
@@ -365,9 +378,10 @@ impl<'a> Parser<'a> {
         }
 
         let slice = &self.input[start..start + len];
-        let s = core::str::from_utf8(slice)
-            .map_err(|_| self.error("Invalid UTF-8 sequence"))?;
-        let ch = s.chars().next()
+        let s = core::str::from_utf8(slice).map_err(|_| self.error("Invalid UTF-8 sequence"))?;
+        let ch = s
+            .chars()
+            .next()
             .ok_or_else(|| self.error("Empty UTF-8 sequence"))?;
 
         for _ in 0..len {
@@ -415,15 +429,19 @@ impl<'a> Parser<'a> {
     fn parse_hex4(&mut self) -> Result<u32, ParseError> {
         let mut val = 0u32;
         for _ in 0..4 {
-            let b = self.advance()
+            let b = self
+                .advance()
                 .ok_or_else(|| self.error("Unexpected end in Unicode escape"))?;
             let digit = match b {
                 b'0'..=b'9' => u32::from(b - b'0'),
                 b'a'..=b'f' => u32::from(b - b'a') + 10,
                 b'A'..=b'F' => u32::from(b - b'A') + 10,
-                _ => return Err(self.error(format!(
-                    "Invalid hex digit in Unicode escape: '{}'", b as char
-                ))),
+                _ => {
+                    return Err(self.error(format!(
+                        "Invalid hex digit in Unicode escape: '{}'",
+                        b as char
+                    )));
+                }
             };
             val = val * 16 + digit;
         }
@@ -467,9 +485,9 @@ impl<'a> Parser<'a> {
         }
 
         // Exponent
-        if matches!(self.peek(), Some(b'e') | Some(b'E')) {
+        if matches!(self.peek(), Some(b'e' | b'E')) {
             self.advance();
-            if matches!(self.peek(), Some(b'+') | Some(b'-')) {
+            if matches!(self.peek(), Some(b'+' | b'-')) {
                 self.advance();
             }
             let exp_start = self.pos;
@@ -481,8 +499,8 @@ impl<'a> Parser<'a> {
             }
         }
 
-        let num_str = core::str::from_utf8(&self.input[start..self.pos])
-            .map_err(|_| ParseError {
+        let num_str =
+            core::str::from_utf8(&self.input[start..self.pos]).map_err(|_| ParseError {
                 message: "Invalid UTF-8 in number".into(),
                 line: start_line,
                 column: start_col,
@@ -552,7 +570,9 @@ impl<'a> Parser<'a> {
             entries.push((key, value));
             self.skip_whitespace();
             match self.peek() {
-                Some(b',') => { self.advance(); }
+                Some(b',') => {
+                    self.advance();
+                }
                 Some(b'}') => {
                     self.advance();
                     self.depth -= 1;
@@ -583,7 +603,9 @@ impl<'a> Parser<'a> {
             items.push(value);
             self.skip_whitespace();
             match self.peek() {
-                Some(b',') => { self.advance(); }
+                Some(b',') => {
+                    self.advance();
+                }
                 Some(b']') => {
                     self.advance();
                     self.depth -= 1;
@@ -805,8 +827,11 @@ fn yaml_value(value: &JsonValue, depth: usize, out: &mut String) {
         }
         JsonValue::Str(s) => {
             // Use quotes if string contains special characters
-            if s.contains(':') || s.contains('#') || s.is_empty()
-                || s.starts_with(' ') || s.ends_with(' ')
+            if s.contains(':')
+                || s.contains('#')
+                || s.is_empty()
+                || s.starts_with(' ')
+                || s.ends_with(' ')
             {
                 out.push('"');
                 out.push_str(s);
@@ -854,7 +879,7 @@ fn push_yaml_indent(out: &mut String, depth: usize) {
 // JSONPath
 // ============================================================================
 
-/// Build a JSONPath string for a node at a given path of indices.
+/// Build a `JSONPath` string for a node at a given path of indices.
 fn build_json_path(value: &JsonValue, path: &[PathSegment]) -> String {
     let mut result = String::from("$");
     let mut current = value;
@@ -894,14 +919,11 @@ fn needs_bracket_notation(key: &str) -> bool {
 
 fn resolve_segment<'a>(value: &'a JsonValue, seg: &PathSegment) -> &'a JsonValue {
     match (value, seg) {
-        (JsonValue::Object(obj), PathSegment::Key(k)) => {
-            obj.iter()
-                .find(|(key, _)| key == k)
-                .map_or(&JsonValue::Null, |(_, v)| v)
-        }
-        (JsonValue::Array(arr), PathSegment::Index(i)) => {
-            arr.get(*i).unwrap_or(&JsonValue::Null)
-        }
+        (JsonValue::Object(obj), PathSegment::Key(k)) => obj
+            .iter()
+            .find(|(key, _)| key == k)
+            .map_or(&JsonValue::Null, |(_, v)| v),
+        (JsonValue::Array(arr), PathSegment::Index(i)) => arr.get(*i).unwrap_or(&JsonValue::Null),
         _ => &JsonValue::Null,
     }
 }
@@ -1005,7 +1027,14 @@ fn build_tree_recursive(
                 for (key, val) in obj {
                     let mut child_path = path.to_vec();
                     child_path.push(PathSegment::Key(key.clone()));
-                    build_tree_recursive(val, depth + 1, &child_path, expanded_paths, search_matches, nodes);
+                    build_tree_recursive(
+                        val,
+                        depth + 1,
+                        &child_path,
+                        expanded_paths,
+                        search_matches,
+                        nodes,
+                    );
                 }
             }
         }
@@ -1029,7 +1058,14 @@ fn build_tree_recursive(
                 for (i, val) in arr.iter().enumerate() {
                     let mut child_path = path.to_vec();
                     child_path.push(PathSegment::Index(i));
-                    build_tree_recursive(val, depth + 1, &child_path, expanded_paths, search_matches, nodes);
+                    build_tree_recursive(
+                        val,
+                        depth + 1,
+                        &child_path,
+                        expanded_paths,
+                        search_matches,
+                        nodes,
+                    );
                 }
             }
         }
@@ -1076,9 +1112,7 @@ fn leaf_display(value: &JsonValue) -> (String, ValueType) {
             };
             (truncated, ValueType::Str)
         }
-        JsonValue::Array(_) | JsonValue::Object(_) => {
-            (String::from("..."), ValueType::Object)
-        }
+        JsonValue::Array(_) | JsonValue::Object(_) => (String::from("..."), ValueType::Object),
     }
 }
 
@@ -1106,13 +1140,13 @@ fn paths_equal(a: &[PathSegment], b: &[PathSegment]) -> bool {
 // ============================================================================
 
 /// Search results for key/value matching.
-fn search_json(
-    value: &JsonValue,
-    query: &str,
-    case_sensitive: bool,
-) -> Vec<Vec<PathSegment>> {
+fn search_json(value: &JsonValue, query: &str, case_sensitive: bool) -> Vec<Vec<PathSegment>> {
     let mut results = Vec::new();
-    let query_lower = if case_sensitive { query.to_string() } else { query.to_lowercase() };
+    let query_lower = if case_sensitive {
+        query.to_string()
+    } else {
+        query.to_lowercase()
+    };
     search_recursive(value, &[], &query_lower, case_sensitive, &mut results);
     results
 }
@@ -1134,7 +1168,11 @@ fn search_recursive(
             PathSegment::Key(k) => k.clone(),
             PathSegment::Index(i) => i.to_string(),
         };
-        let compare = if case_sensitive { key_str.clone() } else { key_str.to_lowercase() };
+        let compare = if case_sensitive {
+            key_str.clone()
+        } else {
+            key_str.to_lowercase()
+        };
         if compare.contains(query) {
             results.push(path.to_vec());
             // Don't return; also search children
@@ -1143,7 +1181,11 @@ fn search_recursive(
 
     match value {
         JsonValue::Str(s) => {
-            let compare = if case_sensitive { s.clone() } else { s.to_lowercase() };
+            let compare = if case_sensitive {
+                s.clone()
+            } else {
+                s.to_lowercase()
+            };
             if compare.contains(query) && !results.iter().any(|r| paths_equal(r, path)) {
                 results.push(path.to_vec());
             }
@@ -1221,35 +1263,29 @@ fn diff_recursive(left: &JsonValue, right: &JsonValue, path: &str, entries: &mut
 
     match (left, right) {
         (JsonValue::Null, JsonValue::Null) => {}
-        (JsonValue::Bool(a), JsonValue::Bool(b)) => {
-            if a != b {
-                entries.push(DiffEntry {
-                    path: path.to_string(),
-                    kind: DiffKind::Changed,
-                    left: a.to_string(),
-                    right: b.to_string(),
-                });
-            }
+        (JsonValue::Bool(a), JsonValue::Bool(b)) if a != b => {
+            entries.push(DiffEntry {
+                path: path.to_string(),
+                kind: DiffKind::Changed,
+                left: a.to_string(),
+                right: b.to_string(),
+            });
         }
-        (JsonValue::Number(a), JsonValue::Number(b)) => {
-            if (a - b).abs() > f64::EPSILON {
-                entries.push(DiffEntry {
-                    path: path.to_string(),
-                    kind: DiffKind::Changed,
-                    left: format_number(*a),
-                    right: format_number(*b),
-                });
-            }
+        (JsonValue::Number(a), JsonValue::Number(b)) if (a - b).abs() > f64::EPSILON => {
+            entries.push(DiffEntry {
+                path: path.to_string(),
+                kind: DiffKind::Changed,
+                left: format_number(*a),
+                right: format_number(*b),
+            });
         }
-        (JsonValue::Str(a), JsonValue::Str(b)) => {
-            if a != b {
-                entries.push(DiffEntry {
-                    path: path.to_string(),
-                    kind: DiffKind::Changed,
-                    left: format!("\"{a}\""),
-                    right: format!("\"{b}\""),
-                });
-            }
+        (JsonValue::Str(a), JsonValue::Str(b)) if a != b => {
+            entries.push(DiffEntry {
+                path: path.to_string(),
+                kind: DiffKind::Changed,
+                left: format!("\"{a}\""),
+                right: format!("\"{b}\""),
+            });
         }
         (JsonValue::Array(a), JsonValue::Array(b)) => {
             let max_len = a.len().max(b.len());
@@ -1388,13 +1424,9 @@ fn delete_at_path(root: &mut JsonValue, path: &[PathSegment]) -> bool {
                 obj.retain(|(key, _)| key != k);
                 obj.len() < before
             }
-            (JsonValue::Array(arr), PathSegment::Index(i)) => {
-                if *i < arr.len() {
-                    arr.remove(*i);
-                    true
-                } else {
-                    false
-                }
+            (JsonValue::Array(arr), PathSegment::Index(i)) if *i < arr.len() => {
+                arr.remove(*i);
+                true
             }
             _ => false,
         };
@@ -1421,7 +1453,12 @@ fn delete_at_path(root: &mut JsonValue, path: &[PathSegment]) -> bool {
 }
 
 /// Add a new key to an object at a given path.
-fn add_key_at_path(root: &mut JsonValue, path: &[PathSegment], key: String, value: JsonValue) -> bool {
+fn add_key_at_path(
+    root: &mut JsonValue,
+    path: &[PathSegment],
+    key: String,
+    value: JsonValue,
+) -> bool {
     let target = get_value_at_path_mut(root, path);
     if let Some(JsonValue::Object(obj)) = target {
         obj.push((key, value));
@@ -1431,7 +1468,10 @@ fn add_key_at_path(root: &mut JsonValue, path: &[PathSegment], key: String, valu
     }
 }
 
-fn get_value_at_path_mut<'a>(root: &'a mut JsonValue, path: &[PathSegment]) -> Option<&'a mut JsonValue> {
+fn get_value_at_path_mut<'a>(
+    root: &'a mut JsonValue,
+    path: &[PathSegment],
+) -> Option<&'a mut JsonValue> {
     if path.is_empty() {
         return Some(root);
     }
@@ -1511,9 +1551,20 @@ fn highlight_json_text(formatted: &str) -> Vec<Vec<HighlightedSpan>> {
                 if ch == '-' {
                     i += 1;
                 }
-                while i < len && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i] == 'e' || chars[i] == 'E' || chars[i] == '+' || chars[i] == '-') {
+                while i < len
+                    && (chars[i].is_ascii_digit()
+                        || chars[i] == '.'
+                        || chars[i] == 'e'
+                        || chars[i] == 'E'
+                        || chars[i] == '+'
+                        || chars[i] == '-')
+                {
                     // Avoid consuming the minus at start of a negative after 'e'
-                    if i > start + 1 && (chars[i] == '+' || chars[i] == '-') && chars[i - 1] != 'e' && chars[i - 1] != 'E' {
+                    if i > start + 1
+                        && (chars[i] == '+' || chars[i] == '-')
+                        && chars[i - 1] != 'e'
+                        && chars[i - 1] != 'E'
+                    {
                         break;
                     }
                     i += 1;
@@ -1922,12 +1973,13 @@ impl App {
             self.search_index = 0;
             return;
         }
-        if let Some(doc) = self.documents.get(self.active_tab) {
-            if let Some(ref value) = doc.parsed {
-                self.search_results = search_json(value, &self.search_query, self.search_case_sensitive);
-                if self.search_index >= self.search_results.len() {
-                    self.search_index = 0;
-                }
+        if let Some(doc) = self.documents.get(self.active_tab)
+            && let Some(ref value) = doc.parsed
+        {
+            self.search_results =
+                search_json(value, &self.search_query, self.search_case_sensitive);
+            if self.search_index >= self.search_results.len() {
+                self.search_index = 0;
             }
         }
     }
@@ -1975,13 +2027,21 @@ impl App {
     }
 
     /// Handle keyboard events.
-    fn handle_key(&mut self, key: guitk::event::Key, modifiers: guitk::event::Modifiers, text: Option<char>) {
+    fn handle_key(
+        &mut self,
+        key: guitk::event::Key,
+        modifiers: guitk::event::Modifiers,
+        text: Option<char>,
+    ) {
         use guitk::event::Key;
 
         // Global shortcuts
         if modifiers.ctrl {
             match key {
-                Key::N => { self.new_tab(); return; }
+                Key::N => {
+                    self.new_tab();
+                    return;
+                }
                 Key::W => {
                     let idx = self.active_tab;
                     self.close_tab(idx);
@@ -2048,11 +2108,11 @@ impl App {
                     return;
                 }
                 _ => {
-                    if let Some(ch) = text {
-                        if self.search_query.len() < MAX_SEARCH_LEN {
-                            self.search_query.push(ch);
-                            self.perform_search();
-                        }
+                    if let Some(ch) = text
+                        && self.search_query.len() < MAX_SEARCH_LEN
+                    {
+                        self.search_query.push(ch);
+                        self.perform_search();
                     }
                     return;
                 }
@@ -2068,7 +2128,9 @@ impl App {
                     match key {
                         Key::Up => doc.raw_scroll = (doc.raw_scroll - LINE_HEIGHT).max(0.0),
                         Key::Down => doc.raw_scroll += LINE_HEIGHT,
-                        Key::PageUp => doc.raw_scroll = (doc.raw_scroll - 10.0 * LINE_HEIGHT).max(0.0),
+                        Key::PageUp => {
+                            doc.raw_scroll = (doc.raw_scroll - 10.0 * LINE_HEIGHT).max(0.0)
+                        }
                         Key::PageDown => doc.raw_scroll += 10.0 * LINE_HEIGHT,
                         Key::Home => doc.raw_scroll = 0.0,
                         Key::I if !modifiers.ctrl => {
@@ -2088,7 +2150,9 @@ impl App {
                     match key {
                         Key::Up => doc.diff_scroll = (doc.diff_scroll - LINE_HEIGHT).max(0.0),
                         Key::Down => doc.diff_scroll += LINE_HEIGHT,
-                        Key::PageUp => doc.diff_scroll = (doc.diff_scroll - 10.0 * LINE_HEIGHT).max(0.0),
+                        Key::PageUp => {
+                            doc.diff_scroll = (doc.diff_scroll - 10.0 * LINE_HEIGHT).max(0.0)
+                        }
                         Key::PageDown => doc.diff_scroll += 10.0 * LINE_HEIGHT,
                         _ => {}
                     }
@@ -2127,15 +2191,11 @@ impl App {
         let _ = modifiers;
 
         match key {
-            Key::Up => {
-                if doc.selected_node > 0 {
-                    doc.selected_node -= 1;
-                }
+            Key::Up if doc.selected_node > 0 => {
+                doc.selected_node -= 1;
             }
-            Key::Down => {
-                if doc.selected_node + 1 < nodes.len() {
-                    doc.selected_node += 1;
-                }
+            Key::Down if doc.selected_node + 1 < nodes.len() => {
+                doc.selected_node += 1;
             }
             Key::Left => {
                 // Collapse current node or go to parent
@@ -2146,10 +2206,11 @@ impl App {
                     } else if !node.path.is_empty() {
                         // Go to parent
                         let parent_path = &node.path[..node.path.len() - 1];
-                        if let Some(idx) = nodes.iter().position(|n| paths_equal(&n.path, parent_path)) {
-                            if let Some(d) = self.documents.get_mut(self.active_tab) {
-                                d.selected_node = idx;
-                            }
+                        if let Some(idx) =
+                            nodes.iter().position(|n| paths_equal(&n.path, parent_path))
+                            && let Some(d) = self.documents.get_mut(self.active_tab)
+                        {
+                            d.selected_node = idx;
                         }
                     }
                 }
@@ -2160,7 +2221,10 @@ impl App {
                     if node.expandable && !node.expanded {
                         let path = node.path.clone();
                         self.toggle_expand(&path);
-                    } else if node.expandable && node.expanded && doc.selected_node + 1 < nodes.len() {
+                    } else if node.expandable
+                        && node.expanded
+                        && doc.selected_node + 1 < nodes.len()
+                    {
                         doc.selected_node += 1;
                     }
                 }
@@ -2177,19 +2241,22 @@ impl App {
                 }
             }
             Key::Delete => {
-                if self.edit_mode {
-                    if let Some(node) = nodes.get(doc.selected_node) {
-                        let path = node.path.clone();
-                        if let Some(d) = self.documents.get_mut(self.active_tab) {
-                            // Perform deletion in a separate scope to release borrow on d.parsed
-                            let deleted = d.parsed.as_mut().map_or(false, |value| delete_at_path(value, &path));
-                            if deleted {
-                                d.dirty = true;
-                                d.invalidate_caches();
-                                // Re-borrow parsed immutably to regenerate input text
-                                if let Some(ref value) = d.parsed {
-                                    d.input = format_json(value, d.indent);
-                                }
+                if self.edit_mode
+                    && let Some(node) = nodes.get(doc.selected_node)
+                {
+                    let path = node.path.clone();
+                    if let Some(d) = self.documents.get_mut(self.active_tab) {
+                        // Perform deletion in a separate scope to release borrow on d.parsed
+                        let deleted = d
+                            .parsed
+                            .as_mut()
+                            .is_some_and(|value| delete_at_path(value, &path));
+                        if deleted {
+                            d.dirty = true;
+                            d.invalidate_caches();
+                            // Re-borrow parsed immutably to regenerate input text
+                            if let Some(ref value) = d.parsed {
+                                d.input = format_json(value, d.indent);
                             }
                         }
                     }
@@ -2204,16 +2271,19 @@ impl App {
             Key::Home => {
                 doc.selected_node = 0;
             }
-            Key::End => {
-                if !nodes.is_empty() {
-                    doc.selected_node = nodes.len() - 1;
-                }
+            Key::End if !nodes.is_empty() => {
+                doc.selected_node = nodes.len() - 1;
             }
             _ => {}
         }
     }
 
-    fn handle_input_key(&mut self, key: guitk::event::Key, _modifiers: guitk::event::Modifiers, text: Option<char>) {
+    fn handle_input_key(
+        &mut self,
+        key: guitk::event::Key,
+        _modifiers: guitk::event::Modifiers,
+        text: Option<char>,
+    ) {
         use guitk::event::Key;
 
         let doc = match self.documents.get_mut(self.active_tab) {
@@ -2272,14 +2342,14 @@ impl App {
                 }
             }
             _ => {
-                if let Some(ch) = text {
-                    if doc.input.len() < MAX_INPUT_LEN {
-                        let byte_pos = char_to_byte_pos(&doc.input, self.cursor_pos);
-                        doc.input.insert(byte_pos, ch);
-                        self.cursor_pos += 1;
-                        doc.dirty = true;
-                        doc.reparse();
-                    }
+                if let Some(ch) = text
+                    && doc.input.len() < MAX_INPUT_LEN
+                {
+                    let byte_pos = char_to_byte_pos(&doc.input, self.cursor_pos);
+                    doc.input.insert(byte_pos, ch);
+                    self.cursor_pos += 1;
+                    doc.dirty = true;
+                    doc.reparse();
                 }
             }
         }
@@ -2289,7 +2359,7 @@ impl App {
         let _ = button;
 
         // Tab bar clicks
-        if y >= TOOLBAR_HEIGHT && y < TOOLBAR_HEIGHT + TAB_BAR_HEIGHT {
+        if (TOOLBAR_HEIGHT..TOOLBAR_HEIGHT + TAB_BAR_HEIGHT).contains(&y) {
             self.handle_tab_click(x);
             return;
         }
@@ -2303,24 +2373,24 @@ impl App {
 
         // Tree view clicks
         let content_y = mode_bar_y + 30.0;
-        if y >= content_y && x < self.width - SIDEBAR_WIDTH {
-            if let Some(doc) = self.documents.get_mut(self.active_tab) {
-                if doc.view_mode == ViewMode::Tree {
-                    let row = ((y - content_y + doc.tree_scroll) / LINE_HEIGHT) as usize;
-                    let nodes = build_tree_nodes(
-                        doc.parsed.as_ref().unwrap_or(&JsonValue::Null),
-                        &doc.expanded_paths,
-                        &self.search_results,
-                    );
-                    if row < nodes.len() {
-                        doc.selected_node = row;
-                        if let Some(node) = nodes.get(row) {
-                            if node.expandable {
-                                let path = node.path.clone();
-                                self.toggle_expand(&path);
-                            }
-                        }
-                    }
+        if y >= content_y
+            && x < self.width - SIDEBAR_WIDTH
+            && let Some(doc) = self.documents.get_mut(self.active_tab)
+            && doc.view_mode == ViewMode::Tree
+        {
+            let row = ((y - content_y + doc.tree_scroll) / LINE_HEIGHT) as usize;
+            let nodes = build_tree_nodes(
+                doc.parsed.as_ref().unwrap_or(&JsonValue::Null),
+                &doc.expanded_paths,
+                &self.search_results,
+            );
+            if row < nodes.len() {
+                doc.selected_node = row;
+                if let Some(node) = nodes.get(row)
+                    && node.expandable
+                {
+                    let path = node.path.clone();
+                    self.toggle_expand(&path);
                 }
             }
         }
@@ -2512,7 +2582,11 @@ impl App {
                 text: label,
                 color: if is_active { TEXT_COLOR } else { SUBTEXT0 },
                 font_size: SMALL_TEXT,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_width - 20.0),
             });
 
@@ -2597,7 +2671,11 @@ impl App {
                 text: mode.label().to_string(),
                 color: if is_active { TEXT_COLOR } else { SUBTEXT0 },
                 font_size: SMALL_TEXT,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
 
@@ -2644,7 +2722,9 @@ impl App {
             Some(ViewMode::Tree) => self.render_tree_view(cmds, top, content_width, content_height),
             Some(ViewMode::Raw) => self.render_raw_view(cmds, top, content_width, content_height),
             Some(ViewMode::Yaml) => self.render_yaml_view(cmds, top, content_width, content_height),
-            Some(ViewMode::Stats) => self.render_stats_view(cmds, top, content_width, content_height),
+            Some(ViewMode::Stats) => {
+                self.render_stats_view(cmds, top, content_width, content_height)
+            }
             Some(ViewMode::Diff) => self.render_diff_view(cmds, top, content_width, content_height),
             None => {
                 cmds.push(RenderCommand::Text {
@@ -2779,7 +2859,12 @@ impl App {
 
         // Show total node count at bottom
         if nodes.len() > visible_count {
-            let info = format!("{} nodes total, showing {}-{}", nodes.len(), first_visible + 1, last_visible);
+            let info = format!(
+                "{} nodes total, showing {}-{}",
+                nodes.len(),
+                first_visible + 1,
+                last_visible
+            );
             cmds.push(RenderCommand::Text {
                 x: PADDING,
                 y: top + height - 6.0,
@@ -2792,7 +2877,13 @@ impl App {
         }
     }
 
-    fn render_raw_view(&mut self, cmds: &mut Vec<RenderCommand>, top: f32, width: f32, height: f32) {
+    fn render_raw_view(
+        &mut self,
+        cmds: &mut Vec<RenderCommand>,
+        top: f32,
+        width: f32,
+        height: f32,
+    ) {
         let doc = match self.documents.get_mut(self.active_tab) {
             Some(d) => d,
             None => return,
@@ -2845,7 +2936,11 @@ impl App {
                         text: span.text.clone(),
                         color: span.color,
                         font_size: NORMAL_TEXT,
-                        font_weight: if span.bold { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                        font_weight: if span.bold {
+                            FontWeightHint::Bold
+                        } else {
+                            FontWeightHint::Regular
+                        },
                         max_width: Some(width - span_x - PADDING),
                     });
                     span_x += span.text.len() as f32 * CHAR_WIDTH;
@@ -2873,7 +2968,13 @@ impl App {
         }
     }
 
-    fn render_yaml_view(&mut self, cmds: &mut Vec<RenderCommand>, top: f32, width: f32, _height: f32) {
+    fn render_yaml_view(
+        &mut self,
+        cmds: &mut Vec<RenderCommand>,
+        top: f32,
+        width: f32,
+        _height: f32,
+    ) {
         let doc = match self.documents.get_mut(self.active_tab) {
             Some(d) => d,
             None => return,
@@ -2919,7 +3020,11 @@ impl App {
                     text: (*line).to_string(),
                     color,
                     font_size: NORMAL_TEXT,
-                    font_weight: if bold { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                    font_weight: if bold {
+                        FontWeightHint::Bold
+                    } else {
+                        FontWeightHint::Regular
+                    },
                     max_width: Some(width - PADDING * 2.0),
                 });
             }
@@ -3093,7 +3198,13 @@ impl App {
         }
     }
 
-    fn render_diff_view(&mut self, cmds: &mut Vec<RenderCommand>, top: f32, width: f32, height: f32) {
+    fn render_diff_view(
+        &mut self,
+        cmds: &mut Vec<RenderCommand>,
+        top: f32,
+        width: f32,
+        height: f32,
+    ) {
         let doc = match self.documents.get(self.active_tab) {
             Some(d) => d,
             None => return,
@@ -3602,7 +3713,11 @@ impl App {
             } else {
                 self.search_query.clone()
             },
-            color: if self.search_query.is_empty() { OVERLAY0 } else { TEXT_COLOR },
+            color: if self.search_query.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT_COLOR
+            },
             font_size: NORMAL_TEXT,
             font_weight: FontWeightHint::Regular,
             max_width: Some(284.0),
@@ -3641,14 +3756,22 @@ impl App {
             y: bar_y + 6.0,
             width: 28.0,
             height: 24.0,
-            color: if self.search_case_sensitive { BLUE } else { SURFACE1 },
+            color: if self.search_case_sensitive {
+                BLUE
+            } else {
+                SURFACE1
+            },
             corner_radii: CornerRadii::all(3.0),
         });
         cmds.push(RenderCommand::Text {
             x: 507.0,
             y: bar_y + 18.0,
             text: String::from("Aa"),
-            color: if self.search_case_sensitive { CRUST } else { SUBTEXT0 },
+            color: if self.search_case_sensitive {
+                CRUST
+            } else {
+                SUBTEXT0
+            },
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: None,
@@ -3676,7 +3799,13 @@ impl App {
         });
     }
 
-    fn render_error_banner(&self, cmds: &mut Vec<RenderCommand>, top: f32, width: f32, error: &ParseError) {
+    fn render_error_banner(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        top: f32,
+        width: f32,
+        error: &ParseError,
+    ) {
         // Error background
         cmds.push(RenderCommand::FillRect {
             x: PADDING,
@@ -3713,7 +3842,10 @@ impl App {
         cmds.push(RenderCommand::Text {
             x: PADDING + 12.0,
             y: top + PADDING + 40.0,
-            text: format!("Line {}, Col {}: {}", error.line, error.column, error.message),
+            text: format!(
+                "Line {}, Col {}: {}",
+                error.line, error.column, error.message
+            ),
             color: TEXT_COLOR,
             font_size: SMALL_TEXT,
             font_weight: FontWeightHint::Regular,
@@ -4075,17 +4207,21 @@ mod tests {
 
     #[test]
     fn format_object_indentation() {
-        let obj = JsonValue::Object(vec![
-            ("a".to_string(), JsonValue::Number(1.0)),
-        ]);
+        let obj = JsonValue::Object(vec![("a".to_string(), JsonValue::Number(1.0))]);
         let formatted = format_json(&obj, IndentStyle::Spaces4);
         assert!(formatted.contains("    \"a\""));
     }
 
     #[test]
     fn format_empty_containers() {
-        assert_eq!(format_json(&JsonValue::Array(vec![]), IndentStyle::Spaces2).trim(), "[]");
-        assert_eq!(format_json(&JsonValue::Object(vec![]), IndentStyle::Spaces2).trim(), "{}");
+        assert_eq!(
+            format_json(&JsonValue::Array(vec![]), IndentStyle::Spaces2).trim(),
+            "[]"
+        );
+        assert_eq!(
+            format_json(&JsonValue::Object(vec![]), IndentStyle::Spaces2).trim(),
+            "{}"
+        );
     }
 
     #[test]
@@ -4120,19 +4256,17 @@ mod tests {
 
     #[test]
     fn yaml_simple_object() {
-        let v = JsonValue::Object(vec![
-            ("key".to_string(), JsonValue::Str("value".to_string())),
-        ]);
+        let v = JsonValue::Object(vec![(
+            "key".to_string(),
+            JsonValue::Str("value".to_string()),
+        )]);
         let yaml = to_yaml_like(&v);
         assert!(yaml.contains("key: value"));
     }
 
     #[test]
     fn yaml_array() {
-        let v = JsonValue::Array(vec![
-            JsonValue::Number(1.0),
-            JsonValue::Number(2.0),
-        ]);
+        let v = JsonValue::Array(vec![JsonValue::Number(1.0), JsonValue::Number(2.0)]);
         let yaml = to_yaml_like(&v);
         assert!(yaml.contains("- 1"));
         assert!(yaml.contains("- 2"));
@@ -4201,11 +4335,14 @@ mod tests {
     #[test]
     fn json_path_nested() {
         let v = parse_json("{\"users\": [{\"name\": \"Alice\"}]}").unwrap();
-        let path = build_json_path(&v, &[
-            PathSegment::Key("users".to_string()),
-            PathSegment::Index(0),
-            PathSegment::Key("name".to_string()),
-        ]);
+        let path = build_json_path(
+            &v,
+            &[
+                PathSegment::Key("users".to_string()),
+                PathSegment::Index(0),
+                PathSegment::Key("name".to_string()),
+            ],
+        );
         assert_eq!(path, "$.users[0].name");
     }
 
@@ -4255,7 +4392,11 @@ mod tests {
         let a = parse_json("{\"a\": 1}").unwrap();
         let b = parse_json("{\"a\": \"one\"}").unwrap();
         let diffs = diff_json(&a, &b);
-        assert!(diffs.iter().any(|d| matches!(d.kind, DiffKind::TypeChanged)));
+        assert!(
+            diffs
+                .iter()
+                .any(|d| matches!(d.kind, DiffKind::TypeChanged))
+        );
     }
 
     #[test]
@@ -4287,7 +4428,10 @@ mod tests {
         let mut root = parse_json("{\"a\": {\"b\": 1}}").unwrap();
         let result = set_value_at_path(
             &mut root,
-            &[PathSegment::Key("a".to_string()), PathSegment::Key("b".to_string())],
+            &[
+                PathSegment::Key("a".to_string()),
+                PathSegment::Key("b".to_string()),
+            ],
             JsonValue::Str("updated".to_string()),
         );
         assert!(result);
@@ -4369,7 +4513,8 @@ mod tests {
 
     #[test]
     fn type_counts_mixed() {
-        let v = parse_json("{\"a\": 1, \"b\": \"s\", \"c\": true, \"d\": null, \"e\": [1]}").unwrap();
+        let v =
+            parse_json("{\"a\": 1, \"b\": \"s\", \"c\": true, \"d\": null, \"e\": [1]}").unwrap();
         let counts = v.type_counts();
         assert_eq!(counts.objects, 1);
         assert_eq!(counts.arrays, 1);

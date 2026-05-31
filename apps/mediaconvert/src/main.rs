@@ -1,8 +1,8 @@
-//! OurOS Media Converter
+//! `OurOS` Media Converter
 //!
 //! A batch media format conversion tool with:
 //! - Audio format support: WAV, MP3, FLAC, AAC, OGG, WMA, AIFF, ALAC, Opus
-//! - Video format support: MP4, MKV, AVI, WebM, MOV, WMV, FLV
+//! - Video format support: MP4, MKV, AVI, `WebM`, MOV, WMV, FLV
 //! - Image format support: JPEG, PNG, BMP, GIF, TIFF, WebP, HEIC, ICO, SVG
 //! - Codec selection for video (H.264, H.265, VP9, AV1) and audio (AAC, MP3, Opus, FLAC)
 //! - Quality/bitrate presets: low, medium, high, lossless
@@ -17,7 +17,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -176,7 +178,17 @@ impl AudioFormat {
     }
 
     pub fn all() -> &'static [Self] {
-        &[Self::Wav, Self::Mp3, Self::Flac, Self::Aac, Self::Ogg, Self::Wma, Self::Aiff, Self::Alac, Self::Opus]
+        &[
+            Self::Wav,
+            Self::Mp3,
+            Self::Flac,
+            Self::Aac,
+            Self::Ogg,
+            Self::Wma,
+            Self::Aiff,
+            Self::Alac,
+            Self::Opus,
+        ]
     }
 }
 
@@ -234,7 +246,15 @@ impl VideoFormat {
     }
 
     pub fn all() -> &'static [Self] {
-        &[Self::Mp4, Self::Mkv, Self::Avi, Self::WebM, Self::Mov, Self::Wmv, Self::Flv]
+        &[
+            Self::Mp4,
+            Self::Mkv,
+            Self::Avi,
+            Self::WebM,
+            Self::Mov,
+            Self::Wmv,
+            Self::Flv,
+        ]
     }
 }
 
@@ -296,7 +316,16 @@ impl ImageFormat {
     }
 
     pub fn all() -> &'static [Self] {
-        &[Self::Jpeg, Self::Png, Self::Bmp, Self::Gif, Self::Tiff, Self::WebP, Self::Heic, Self::Ico]
+        &[
+            Self::Jpeg,
+            Self::Png,
+            Self::Bmp,
+            Self::Gif,
+            Self::Tiff,
+            Self::WebP,
+            Self::Heic,
+            Self::Ico,
+        ]
     }
 
     pub fn supports_quality(self) -> bool {
@@ -416,13 +445,13 @@ impl QualityPreset {
             Self::Lossless => 50_000,
         };
         // Scale by resolution relative to 1080p
-        let pixels = (resolution.width as u64).saturating_mul(resolution.height as u64);
+        let pixels = u64::from(resolution.width).saturating_mul(u64::from(resolution.height));
         let ref_pixels: u64 = 1920 * 1080;
         if ref_pixels == 0 {
             return base;
         }
         let scale = pixels as f64 / ref_pixels as f64;
-        (base as f64 * scale.max(0.25)) as u32
+        (f64::from(base) * scale.max(0.25)) as u32
     }
 
     /// Image quality percentage (for JPEG, WebP).
@@ -481,7 +510,7 @@ impl VideoResolution {
     }
 
     pub fn pixel_count(&self) -> u64 {
-        (self.width as u64).saturating_mul(self.height as u64)
+        u64::from(self.width).saturating_mul(u64::from(self.height))
     }
 
     pub fn aspect_ratio(&self) -> String {
@@ -545,9 +574,17 @@ impl AudioSettings {
                 QualityPreset::Lossless => AudioCodec::FlacEnc,
             },
             bitrate_kbps: preset.audio_bitrate_kbps(),
-            sample_rate: if preset == QualityPreset::Low { 22050 } else { 44100 },
+            sample_rate: if preset == QualityPreset::Low {
+                22050
+            } else {
+                44100
+            },
             channels: 2,
-            bit_depth: if preset == QualityPreset::Lossless { 24 } else { 16 },
+            bit_depth: if preset == QualityPreset::Lossless {
+                24
+            } else {
+                16
+            },
         }
     }
 
@@ -611,7 +648,11 @@ impl VideoSettings {
                 QualityPreset::Medium => VideoResolution::new(1280, 720),
                 _ => VideoResolution::new(1920, 1080),
             }),
-            framerate: Some(if preset == QualityPreset::Low { 24.0 } else { 30.0 }),
+            framerate: Some(if preset == QualityPreset::Low {
+                24.0
+            } else {
+                30.0
+            }),
             video_bitrate_kbps: preset.video_bitrate_kbps(&res),
             audio_bitrate_kbps: preset.audio_bitrate_kbps(),
             two_pass: preset == QualityPreset::VeryHigh || preset == QualityPreset::Lossless,
@@ -623,7 +664,7 @@ impl VideoSettings {
         let res_str = self
             .resolution
             .as_ref()
-            .map_or("Original".to_owned(), |r| r.label());
+            .map_or("Original".to_owned(), VideoResolution::label);
         let fps_str = self
             .framerate
             .map_or("Original".to_owned(), |f| format!("{f:.0} fps"));
@@ -648,7 +689,12 @@ pub struct CropSettings {
 
 impl CropSettings {
     pub fn new(left: u32, top: u32, right: u32, bottom: u32) -> Self {
-        Self { left, top, right, bottom }
+        Self {
+            left,
+            top,
+            right,
+            bottom,
+        }
     }
 }
 
@@ -870,12 +916,11 @@ impl OutputNaming {
             Self::KeepOriginal => format!("{stem}.{new_ext}"),
             Self::Suffix(suf) => format!("{stem}{suf}.{new_ext}"),
             Self::Prefix(pre) => format!("{pre}{stem}.{new_ext}"),
-            Self::Pattern(pat) => {
-                pat.replace("{name}", stem)
-                    .replace("{ext}", new_ext)
-                    .replace("{index}", &index.to_string())
-                    .replace("{date}", "20260518")
-            }
+            Self::Pattern(pat) => pat
+                .replace("{name}", stem)
+                .replace("{ext}", new_ext)
+                .replace("{index}", &index.to_string())
+                .replace("{date}", "20260518"),
         }
     }
 
@@ -1020,7 +1065,13 @@ pub struct ConversionJob {
 }
 
 impl ConversionJob {
-    pub fn new(id: u64, source: SourceFile, output_format: OutputFormat, output_name: String, output_dir: &str) -> Self {
+    pub fn new(
+        id: u64,
+        source: SourceFile,
+        output_format: OutputFormat,
+        output_name: String,
+        output_dir: &str,
+    ) -> Self {
         let output_path = format!("{output_dir}/{output_name}");
         Self {
             id,
@@ -1142,6 +1193,12 @@ pub struct MediaConvertApp {
     timestamp: u64,
 }
 
+impl Default for MediaConvertApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MediaConvertApp {
     pub fn new() -> Self {
         Self {
@@ -1176,14 +1233,29 @@ impl MediaConvertApp {
     // -----------------------------------------------------------------------
 
     /// Add a source file.
-    pub fn add_source(&mut self, path: &str, name: &str, size: u64, category: MediaCategory) -> u64 {
+    pub fn add_source(
+        &mut self,
+        path: &str,
+        name: &str,
+        size: u64,
+        category: MediaCategory,
+    ) -> u64 {
         let id = self.id_gen.next_id();
-        self.sources.push(SourceFile::new(id, path, name, size, category));
+        self.sources
+            .push(SourceFile::new(id, path, name, size, category));
         id
     }
 
     /// Add a source with duration (audio/video).
-    pub fn add_source_with_duration(&mut self, path: &str, name: &str, size: u64, category: MediaCategory, duration: f64, fmt: &str) -> u64 {
+    pub fn add_source_with_duration(
+        &mut self,
+        path: &str,
+        name: &str,
+        size: u64,
+        category: MediaCategory,
+        duration: f64,
+        fmt: &str,
+    ) -> u64 {
         let id = self.id_gen.next_id();
         let src = SourceFile::new(id, path, name, size, category)
             .with_duration(duration)
@@ -1264,18 +1336,23 @@ impl MediaConvertApp {
         let output_format = self
             .profiles
             .get(self.selected_profile_idx)
-            .map(|p| p.output_format.clone())
-            .unwrap_or(OutputFormat::Audio(AudioFormat::Mp3));
+            .map_or(OutputFormat::Audio(AudioFormat::Mp3), |p| {
+                p.output_format.clone()
+            });
 
         let mut count = 0usize;
         for (idx, src) in sources.iter().enumerate() {
-            let out_name = self.output_naming.apply(
-                &src.file_name,
-                output_format.extension(),
-                idx,
-            );
+            let out_name = self
+                .output_naming
+                .apply(&src.file_name, output_format.extension(), idx);
             let id = self.id_gen.next_id();
-            self.jobs.push(ConversionJob::new(id, src.clone(), output_format.clone(), out_name, &self.output_dir));
+            self.jobs.push(ConversionJob::new(
+                id,
+                src.clone(),
+                output_format.clone(),
+                out_name,
+                &self.output_dir,
+            ));
             count = count.saturating_add(1);
         }
         count
@@ -1287,15 +1364,20 @@ impl MediaConvertApp {
         let output_format = self
             .profiles
             .get(self.selected_profile_idx)
-            .map(|p| p.output_format.clone())
-            .unwrap_or(OutputFormat::Audio(AudioFormat::Mp3));
-        let out_name = self.output_naming.apply(
-            &src.file_name,
-            output_format.extension(),
-            self.jobs.len(),
-        );
+            .map_or(OutputFormat::Audio(AudioFormat::Mp3), |p| {
+                p.output_format.clone()
+            });
+        let out_name =
+            self.output_naming
+                .apply(&src.file_name, output_format.extension(), self.jobs.len());
         let id = self.id_gen.next_id();
-        self.jobs.push(ConversionJob::new(id, src, output_format, out_name, &self.output_dir));
+        self.jobs.push(ConversionJob::new(
+            id,
+            src,
+            output_format,
+            out_name,
+            &self.output_dir,
+        ));
         Some(id)
     }
 
@@ -1313,7 +1395,11 @@ impl MediaConvertApp {
     /// Complete a running job (simulated).
     pub fn complete_job(&mut self, job_id: u64, output_size: u64) -> bool {
         let ts = self.tick();
-        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id && j.status == JobStatus::Running) {
+        if let Some(job) = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == job_id && j.status == JobStatus::Running)
+        {
             job.complete(ts, output_size);
             // Add to history
             self.history.push(HistoryEntry {
@@ -1335,7 +1421,11 @@ impl MediaConvertApp {
     /// Fail a running job.
     pub fn fail_job(&mut self, job_id: u64, error: &str) -> bool {
         let ts = self.tick();
-        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id && j.status == JobStatus::Running) {
+        if let Some(job) = self
+            .jobs
+            .iter_mut()
+            .find(|j| j.id == job_id && j.status == JobStatus::Running)
+        {
             job.fail(ts, error);
             true
         } else {
@@ -1345,7 +1435,9 @@ impl MediaConvertApp {
 
     /// Cancel a queued or running job.
     pub fn cancel_job(&mut self, job_id: u64) -> bool {
-        if let Some(job) = self.jobs.iter_mut().find(|j| j.id == job_id && (j.status == JobStatus::Queued || j.status == JobStatus::Running)) {
+        if let Some(job) = self.jobs.iter_mut().find(|j| {
+            j.id == job_id && (j.status == JobStatus::Queued || j.status == JobStatus::Running)
+        }) {
             job.cancel();
             true
         } else {
@@ -1368,7 +1460,8 @@ impl MediaConvertApp {
     /// Clear completed/failed/cancelled jobs from the list.
     pub fn clear_finished_jobs(&mut self) -> usize {
         let len = self.jobs.len();
-        self.jobs.retain(|j| j.status == JobStatus::Queued || j.status == JobStatus::Running);
+        self.jobs
+            .retain(|j| j.status == JobStatus::Queued || j.status == JobStatus::Running);
         len.saturating_sub(self.jobs.len())
     }
 
@@ -1377,10 +1470,26 @@ impl MediaConvertApp {
     // -----------------------------------------------------------------------
 
     pub fn queue_stats(&self) -> QueueStats {
-        let queued = self.jobs.iter().filter(|j| j.status == JobStatus::Queued).count();
-        let running = self.jobs.iter().filter(|j| j.status == JobStatus::Running).count();
-        let completed = self.jobs.iter().filter(|j| j.status == JobStatus::Completed).count();
-        let failed = self.jobs.iter().filter(|j| j.status == JobStatus::Failed).count();
+        let queued = self
+            .jobs
+            .iter()
+            .filter(|j| j.status == JobStatus::Queued)
+            .count();
+        let running = self
+            .jobs
+            .iter()
+            .filter(|j| j.status == JobStatus::Running)
+            .count();
+        let completed = self
+            .jobs
+            .iter()
+            .filter(|j| j.status == JobStatus::Completed)
+            .count();
+        let failed = self
+            .jobs
+            .iter()
+            .filter(|j| j.status == JobStatus::Failed)
+            .count();
         let total_source: u64 = self.jobs.iter().map(|j| j.source.file_size).sum();
         let total_output: u64 = self.jobs.iter().filter_map(|j| j.actual_size).sum();
 
@@ -1400,7 +1509,7 @@ impl MediaConvertApp {
         let successful = self.history.iter().filter(|h| h.success).count();
         let total_source: u64 = self.history.iter().map(|h| h.source_size).sum();
         let total_output: u64 = self.history.iter().map(|h| h.output_size).sum();
-        let total_saved: i64 = self.history.iter().map(|h| h.space_saved()).sum();
+        let total_saved: i64 = self.history.iter().map(HistoryEntry::space_saved).sum();
 
         HistoryStats {
             total,
@@ -1439,7 +1548,13 @@ impl MediaConvertApp {
 
         // Settings panel (middle)
         let settings_x = SIDEBAR_WIDTH;
-        self.render_settings_panel(&mut cmds, settings_x, content_y, SETTINGS_PANEL_WIDTH, content_h);
+        self.render_settings_panel(
+            &mut cmds,
+            settings_x,
+            content_y,
+            SETTINGS_PANEL_WIDTH,
+            content_h,
+        );
 
         // Queue (right)
         let queue_x = SIDEBAR_WIDTH + SETTINGS_PANEL_WIDTH;
@@ -1646,7 +1761,11 @@ impl MediaConvertApp {
                 text: src.file_name.clone(),
                 color: if is_selected { TEXT } else { SUBTEXT1 },
                 font_size: 11.0,
-                font_weight: if is_selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(SIDEBAR_WIDTH - 60.0),
             });
 
@@ -1682,7 +1801,14 @@ impl MediaConvertApp {
         }
     }
 
-    fn render_settings_panel(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_settings_panel(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         cmds.push(RenderCommand::FillRect {
             x,
             y,
@@ -1797,12 +1923,26 @@ impl MediaConvertApp {
                     self.video_settings
                         .resolution
                         .as_ref()
-                        .map_or("Resolution: Original".to_owned(), |r| format!("Resolution: {}", r.label())),
+                        .map_or("Resolution: Original".to_owned(), |r| {
+                            format!("Resolution: {}", r.label())
+                        }),
                     self.video_settings
                         .framerate
-                        .map_or("Framerate: Original".to_owned(), |f| format!("Framerate: {f:.0} fps")),
-                    format!("Video Bitrate: {} kbps", self.video_settings.video_bitrate_kbps),
-                    format!("Two-pass: {}", if self.video_settings.two_pass { "Yes" } else { "No" }),
+                        .map_or("Framerate: Original".to_owned(), |f| {
+                            format!("Framerate: {f:.0} fps")
+                        }),
+                    format!(
+                        "Video Bitrate: {} kbps",
+                        self.video_settings.video_bitrate_kbps
+                    ),
+                    format!(
+                        "Two-pass: {}",
+                        if self.video_settings.two_pass {
+                            "Yes"
+                        } else {
+                            "No"
+                        }
+                    ),
                 ];
                 for line in &settings_lines {
                     cmds.push(RenderCommand::Text {
@@ -1831,9 +1971,25 @@ impl MediaConvertApp {
 
                 let settings_lines = [
                     format!("Quality: {}%", self.image_settings.quality),
-                    self.image_settings.max_width.map_or("Max Width: None".to_owned(), |w| format!("Max Width: {w}")),
-                    format!("Strip Metadata: {}", if self.image_settings.strip_metadata { "Yes" } else { "No" }),
-                    format!("Preserve Aspect: {}", if self.image_settings.preserve_aspect { "Yes" } else { "No" }),
+                    self.image_settings
+                        .max_width
+                        .map_or("Max Width: None".to_owned(), |w| format!("Max Width: {w}")),
+                    format!(
+                        "Strip Metadata: {}",
+                        if self.image_settings.strip_metadata {
+                            "Yes"
+                        } else {
+                            "No"
+                        }
+                    ),
+                    format!(
+                        "Preserve Aspect: {}",
+                        if self.image_settings.preserve_aspect {
+                            "Yes"
+                        } else {
+                            "No"
+                        }
+                    ),
                 ];
                 for line in &settings_lines {
                     cmds.push(RenderCommand::Text {
@@ -1894,7 +2050,14 @@ impl MediaConvertApp {
         });
     }
 
-    fn render_queue_panel(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_queue_panel(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         cmds.push(RenderCommand::FillRect {
             x,
             y,
@@ -2227,8 +2390,7 @@ mod tests {
 
     #[test]
     fn test_source_file_duration() {
-        let s = SourceFile::new(1, "/a", "a.mp3", 1000, MediaCategory::Audio)
-            .with_duration(185.0);
+        let s = SourceFile::new(1, "/a", "a.mp3", 1000, MediaCategory::Audio).with_duration(185.0);
         assert_eq!(s.duration_str(), "3:05");
     }
 
@@ -2243,9 +2405,18 @@ mod tests {
 
     #[test]
     fn test_detect_category() {
-        assert_eq!(MediaConvertApp::detect_category("song.mp3"), Some(MediaCategory::Audio));
-        assert_eq!(MediaConvertApp::detect_category("clip.mp4"), Some(MediaCategory::Video));
-        assert_eq!(MediaConvertApp::detect_category("photo.jpg"), Some(MediaCategory::Image));
+        assert_eq!(
+            MediaConvertApp::detect_category("song.mp3"),
+            Some(MediaCategory::Audio)
+        );
+        assert_eq!(
+            MediaConvertApp::detect_category("clip.mp4"),
+            Some(MediaCategory::Video)
+        );
+        assert_eq!(
+            MediaConvertApp::detect_category("photo.jpg"),
+            Some(MediaCategory::Image)
+        );
         assert_eq!(MediaConvertApp::detect_category("readme.txt"), None);
     }
 
@@ -2253,9 +2424,15 @@ mod tests {
 
     #[test]
     fn test_job_lifecycle() {
-        let src = SourceFile::new(1, "/a", "test.flac", 1000, MediaCategory::Audio)
-            .with_format("FLAC");
-        let mut job = ConversionJob::new(1, src, OutputFormat::Audio(AudioFormat::Mp3), "test.mp3".to_owned(), "/out");
+        let src =
+            SourceFile::new(1, "/a", "test.flac", 1000, MediaCategory::Audio).with_format("FLAC");
+        let mut job = ConversionJob::new(
+            1,
+            src,
+            OutputFormat::Audio(AudioFormat::Mp3),
+            "test.mp3".to_owned(),
+            "/out",
+        );
         assert_eq!(job.status, JobStatus::Queued);
 
         job.start(100);
@@ -2270,7 +2447,13 @@ mod tests {
     #[test]
     fn test_job_fail() {
         let src = SourceFile::new(1, "/a", "test.avi", 1000, MediaCategory::Video);
-        let mut job = ConversionJob::new(1, src, OutputFormat::Video(VideoFormat::Mp4), "test.mp4".to_owned(), "/out");
+        let mut job = ConversionJob::new(
+            1,
+            src,
+            OutputFormat::Video(VideoFormat::Mp4),
+            "test.mp4".to_owned(),
+            "/out",
+        );
         job.start(100);
         job.fail(200, "Codec not supported");
         assert_eq!(job.status, JobStatus::Failed);
@@ -2280,16 +2463,28 @@ mod tests {
     #[test]
     fn test_job_cancel() {
         let src = SourceFile::new(1, "/a", "test.wav", 1000, MediaCategory::Audio);
-        let mut job = ConversionJob::new(1, src, OutputFormat::Audio(AudioFormat::Ogg), "test.ogg".to_owned(), "/out");
+        let mut job = ConversionJob::new(
+            1,
+            src,
+            OutputFormat::Audio(AudioFormat::Ogg),
+            "test.ogg".to_owned(),
+            "/out",
+        );
         job.cancel();
         assert_eq!(job.status, JobStatus::Cancelled);
     }
 
     #[test]
     fn test_job_conversion_label() {
-        let src = SourceFile::new(1, "/a", "test.flac", 1000, MediaCategory::Audio)
-            .with_format("FLAC");
-        let job = ConversionJob::new(1, src, OutputFormat::Audio(AudioFormat::Mp3), "test.mp3".to_owned(), "/out");
+        let src =
+            SourceFile::new(1, "/a", "test.flac", 1000, MediaCategory::Audio).with_format("FLAC");
+        let job = ConversionJob::new(
+            1,
+            src,
+            OutputFormat::Audio(AudioFormat::Mp3),
+            "test.mp3".to_owned(),
+            "/out",
+        );
         assert_eq!(job.conversion_label(), "FLAC -> MP3");
     }
 

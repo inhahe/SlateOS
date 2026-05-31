@@ -1,4 +1,4 @@
-//! OurOS File Recovery / Undelete Utility
+//! `OurOS` File Recovery / Undelete Utility
 //!
 //! A comprehensive file recovery application that:
 //! - Scans ext4 filesystem inode tables and directory entries for deleted files
@@ -32,7 +32,9 @@
 //!
 //! Uses the guitk library for UI rendering with a Catppuccin Mocha dark theme.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -239,8 +241,9 @@ impl FileSignatureKind {
     pub fn category(self) -> FileCategory {
         match self {
             Self::Jpeg | Self::Png | Self::Gif | Self::Bmp | Self::Webp => FileCategory::Image,
-            Self::Pdf | Self::Doc | Self::Docx | Self::Xls | Self::Ppt
-            | Self::Xml | Self::Html => FileCategory::Document,
+            Self::Pdf | Self::Doc | Self::Docx | Self::Xls | Self::Ppt | Self::Xml | Self::Html => {
+                FileCategory::Document
+            }
             Self::Zip | Self::Gzip | Self::SevenZip | Self::Rar | Self::Tar => {
                 FileCategory::Archive
             }
@@ -299,7 +302,7 @@ impl FileSignature {
             return false;
         }
         let slice = data.get(self.offset..end);
-        let primary_ok = slice.map_or(false, |s| s == self.magic.as_slice());
+        let primary_ok = slice == Some(self.magic.as_slice());
         if !primary_ok {
             return false;
         }
@@ -308,8 +311,7 @@ impl FileSignature {
             if data.len() < sec_end {
                 return false;
             }
-            data.get(sec_off..sec_end)
-                .map_or(false, |s| s == sec_magic.as_slice())
+            data.get(sec_off..sec_end) == Some(sec_magic.as_slice())
         } else {
             true
         }
@@ -333,16 +335,11 @@ pub fn build_signature_database() -> Vec<FileSignature> {
         // BMP: BM
         FileSignature::new(FileSignatureKind::Bmp, 0, b"BM"),
         // WebP: RIFF....WEBP
-        FileSignature::new(FileSignatureKind::Webp, 0, b"RIFF")
-            .with_secondary(8, b"WEBP"),
+        FileSignature::new(FileSignatureKind::Webp, 0, b"RIFF").with_secondary(8, b"WEBP"),
         // PDF: %PDF
         FileSignature::new(FileSignatureKind::Pdf, 0, b"%PDF"),
         // ZIP (also DOCX/XLSX/PPTX via secondary check)
-        FileSignature::new(
-            FileSignatureKind::Zip,
-            0,
-            &[0x50, 0x4B, 0x03, 0x04],
-        ),
+        FileSignature::new(FileSignatureKind::Zip, 0, &[0x50, 0x4B, 0x03, 0x04]),
         // DOCX (ZIP + word/ content)
         FileSignature::new(FileSignatureKind::Docx, 0, &[0x50, 0x4B, 0x03, 0x04])
             .with_secondary(30, b"word/"),
@@ -365,19 +362,13 @@ pub fn build_signature_database() -> Vec<FileSignature> {
         // OGG: OggS
         FileSignature::new(FileSignatureKind::Ogg, 0, b"OggS"),
         // WAV: RIFF....WAVE
-        FileSignature::new(FileSignatureKind::Wav, 0, b"RIFF")
-            .with_secondary(8, b"WAVE"),
+        FileSignature::new(FileSignatureKind::Wav, 0, b"RIFF").with_secondary(8, b"WAVE"),
         // MP4: various boxes (ftyp at offset 4)
         FileSignature::new(FileSignatureKind::Mp4, 4, b"ftyp"),
         // AVI: RIFF....AVI
-        FileSignature::new(FileSignatureKind::Avi, 0, b"RIFF")
-            .with_secondary(8, b"AVI "),
+        FileSignature::new(FileSignatureKind::Avi, 0, b"RIFF").with_secondary(8, b"AVI "),
         // MKV: 1A 45 DF A3 (EBML header)
-        FileSignature::new(
-            FileSignatureKind::Mkv,
-            0,
-            &[0x1A, 0x45, 0xDF, 0xA3],
-        ),
+        FileSignature::new(FileSignatureKind::Mkv, 0, &[0x1A, 0x45, 0xDF, 0xA3]),
         // DOC (OLE2 Compound File): D0 CF 11 E0 A1 B1 1A E1
         FileSignature::new(
             FileSignatureKind::Doc,
@@ -692,7 +683,7 @@ pub struct BlockGroupDescriptor {
 
 impl BlockGroupDescriptor {
     pub fn new(group_number: u32) -> Self {
-        let base_block = (group_number as u64).saturating_mul(32768);
+        let base_block = u64::from(group_number).saturating_mul(32768);
         Self {
             group_number,
             inode_table_block: base_block.saturating_add(3),
@@ -749,9 +740,27 @@ impl Partition {
 /// Create a set of simulated partitions for the UI.
 pub fn simulated_partitions() -> Vec<Partition> {
     vec![
-        Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000),
-        Partition::new("/dev/sda2", "/dev/sda2", "/home", 1_000_000_000_000, 600_000_000_000),
-        Partition::new("/dev/sdb1", "/dev/sdb1", "/data", 2_000_000_000_000, 1_500_000_000_000),
+        Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        ),
+        Partition::new(
+            "/dev/sda2",
+            "/dev/sda2",
+            "/home",
+            1_000_000_000_000,
+            600_000_000_000,
+        ),
+        Partition::new(
+            "/dev/sdb1",
+            "/dev/sdb1",
+            "/data",
+            2_000_000_000_000,
+            1_500_000_000_000,
+        ),
     ]
 }
 
@@ -856,9 +865,10 @@ impl RecoverableFile {
         let (lo, hi) = confidence.percentage_range();
         let recovery_percent = (lo.saturating_add(hi)) / 2;
 
-        let filename = dir_entry
-            .map(|d| d.name.clone())
-            .unwrap_or_else(|| format!("inode_{}", inode.inode_number));
+        let filename = dir_entry.map_or_else(
+            || format!("inode_{}", inode.inode_number),
+            |d| d.name.clone(),
+        );
 
         let original_path = dir_entry.map(|d| format!("/recovered/{}", d.name));
 
@@ -938,6 +948,12 @@ pub struct SignatureDetector {
     signatures: Vec<FileSignature>,
 }
 
+impl Default for SignatureDetector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SignatureDetector {
     pub fn new() -> Self {
         Self {
@@ -979,11 +995,7 @@ impl SignatureDetector {
 
     /// Scan a large data buffer sector by sector. Returns (offset, kind) for
     /// each signature found.
-    pub fn scan_sectors(
-        &self,
-        data: &[u8],
-        sector_size: usize,
-    ) -> Vec<(u64, FileSignatureKind)> {
+    pub fn scan_sectors(&self, data: &[u8], sector_size: usize) -> Vec<(u64, FileSignatureKind)> {
         let mut results = Vec::new();
         if sector_size == 0 {
             return results;
@@ -991,10 +1003,10 @@ impl SignatureDetector {
         let mut offset: usize = 0;
         while offset.saturating_add(sector_size) <= data.len() {
             let sector = data.get(offset..offset.saturating_add(sector_size));
-            if let Some(sector_data) = sector {
-                if let Some(kind) = self.detect_best(sector_data) {
-                    results.push((offset as u64, kind));
-                }
+            if let Some(sector_data) = sector
+                && let Some(kind) = self.detect_best(sector_data)
+            {
+                results.push((offset as u64, kind));
             }
             offset = offset.saturating_add(sector_size);
         }
@@ -1016,6 +1028,12 @@ pub struct InodeScanner {
     dir_entries: Vec<Ext4DirEntry>,
     scanned_groups: u32,
     total_groups: u32,
+}
+
+impl Default for InodeScanner {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InodeScanner {
@@ -1045,13 +1063,14 @@ impl InodeScanner {
         // Simulate finding deleted inodes in this block group.
         // In a real implementation this would read the inode bitmap and
         // inode table from disk.
-        let base_inode = (bg.group_number as u64).saturating_mul(8192);
+        let base_inode = u64::from(bg.group_number).saturating_mul(8192);
         let num_deleted = bg.free_inodes.min(5);
 
         for i in 0..num_deleted {
-            let inode_num = base_inode.saturating_add(i as u64).saturating_add(100);
-            let file_size = ((i as u64).saturating_add(1)).saturating_mul(4096)
-                .saturating_mul(((bg.group_number as u64).saturating_add(1)) % 10);
+            let inode_num = base_inode.saturating_add(u64::from(i)).saturating_add(100);
+            let file_size = (u64::from(i).saturating_add(1))
+                .saturating_mul(4096)
+                .saturating_mul((u64::from(bg.group_number).saturating_add(1)) % 10);
 
             if file_size == 0 {
                 continue;
@@ -1063,12 +1082,11 @@ impl InodeScanner {
             let mut inode = Ext4Inode::new_deleted(inode_num, file_size)
                 .with_delete_time(
                     1_700_000_000_u64
-                        .saturating_add((bg.group_number as u64).saturating_mul(86400))
-                        .saturating_add((i as u64).saturating_mul(3600)),
+                        .saturating_add(u64::from(bg.group_number).saturating_mul(86400))
+                        .saturating_add(u64::from(i).saturating_mul(3600)),
                 )
                 .with_modify_time(
-                    1_699_900_000_u64
-                        .saturating_add((i as u64).saturating_mul(7200)),
+                    1_699_900_000_u64.saturating_add(u64::from(i).saturating_mul(7200)),
                 )
                 .with_blocks_reallocated(blocks_reallocated);
 
@@ -1077,7 +1095,7 @@ impl InodeScanner {
                     .map(|b| {
                         bg.inode_table_block
                             .saturating_add(1000)
-                            .saturating_add((i as u64).saturating_mul(10))
+                            .saturating_add(u64::from(i).saturating_mul(10))
                             .saturating_add(b)
                     })
                     .collect();
@@ -1143,6 +1161,12 @@ impl InodeScanner {
 /// Reads the OS recycle bin, returning entries that can be restored.
 pub struct RecycleBinReader {
     entries: Vec<RecycleBinEntry>,
+}
+
+impl Default for RecycleBinReader {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RecycleBinReader {
@@ -1279,6 +1303,12 @@ pub struct ScanProgress {
     pub elapsed_seconds: u32,
 }
 
+impl Default for ScanProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScanProgress {
     pub fn new() -> Self {
         Self {
@@ -1337,6 +1367,12 @@ pub struct RecoveryEngine {
     recycle_reader: RecycleBinReader,
     signature_detector: SignatureDetector,
     next_id: u64,
+}
+
+impl Default for RecoveryEngine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RecoveryEngine {
@@ -1411,11 +1447,7 @@ impl RecoveryEngine {
             file.partition_name.clone_from(&partition.name);
             self.files.push(file);
         }
-        self.progress.bytes_scanned = partition
-            .block_groups
-            .len() as u64
-            * 8192
-            * 256; // Approximate bytes of inode table scanned.
+        self.progress.bytes_scanned = partition.block_groups.len() as u64 * 8192 * 256; // Approximate bytes of inode table scanned.
     }
 
     fn scan_deep(&mut self, partition: &Partition) {
@@ -1475,10 +1507,7 @@ impl RecoveryEngine {
 
     /// Get files matching the current filter criteria.
     pub fn filtered_files(&self, filter: &ScanFilter) -> Vec<&RecoverableFile> {
-        self.files
-            .iter()
-            .filter(|f| filter.matches(f))
-            .collect()
+        self.files.iter().filter(|f| filter.matches(f)).collect()
     }
 
     /// Count of selected files.
@@ -1615,6 +1644,12 @@ pub struct ScanFilter {
     pub max_delete_time: Option<u64>,
 }
 
+impl Default for ScanFilter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScanFilter {
     pub fn new() -> Self {
         Self {
@@ -1666,45 +1701,46 @@ impl ScanFilter {
     }
 
     pub fn matches(&self, file: &RecoverableFile) -> bool {
-        if let Some(cat) = self.category {
-            if file.category() != cat {
-                return false;
-            }
+        if let Some(cat) = self.category
+            && file.category() != cat
+        {
+            return false;
         }
-        if let Some(min) = self.min_size {
-            if file.file_size < min {
-                return false;
-            }
+        if let Some(min) = self.min_size
+            && file.file_size < min
+        {
+            return false;
         }
-        if let Some(max) = self.max_size {
-            if file.file_size > max {
-                return false;
-            }
+        if let Some(max) = self.max_size
+            && file.file_size > max
+        {
+            return false;
         }
-        if let Some(min_conf) = self.min_confidence {
-            if file.confidence > min_conf {
-                return false;
-            }
+        if let Some(min_conf) = self.min_confidence
+            && file.confidence > min_conf
+        {
+            return false;
         }
-        if let Some(src) = self.source {
-            if file.source != src {
-                return false;
-            }
+        if let Some(src) = self.source
+            && file.source != src
+        {
+            return false;
         }
         if !self.filename_search.is_empty()
             && !file.filename.to_lowercase().contains(&self.filename_search)
         {
             return false;
         }
-        if let Some(min_dt) = self.min_delete_time {
-            if file.delete_time < min_dt && file.delete_time > 0 {
-                return false;
-            }
+        if let Some(min_dt) = self.min_delete_time
+            && file.delete_time < min_dt
+            && file.delete_time > 0
+        {
+            return false;
         }
-        if let Some(max_dt) = self.max_delete_time {
-            if file.delete_time > max_dt {
-                return false;
-            }
+        if let Some(max_dt) = self.max_delete_time
+            && file.delete_time > max_dt
+        {
+            return false;
         }
         true
     }
@@ -2242,7 +2278,7 @@ impl UndeleteApp {
             cmds.push(RenderCommand::Text {
                 x: PADDING * 2.0,
                 y: bar_y + 58.0,
-                text: format!("Estimated time remaining: {}s", remaining),
+                text: format!("Estimated time remaining: {remaining}s"),
                 color: OVERLAY0,
                 font_size: FONT_SIZE_SMALL,
                 font_weight: FontWeightHint::Regular,
@@ -2278,12 +2314,7 @@ impl UndeleteApp {
         self.render_status_bar(cmds);
     }
 
-    fn render_category_sidebar(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        y: f32,
-        height: f32,
-    ) {
+    fn render_category_sidebar(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
         // Sidebar background
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -2466,7 +2497,11 @@ impl UndeleteApp {
 
         for (field, col_x, col_w) in &columns {
             let label = if self.sort_field == *field {
-                format!("{}{}", field.display_name(), self.sort_direction.indicator())
+                format!(
+                    "{}{}",
+                    field.display_name(),
+                    self.sort_direction.indicator()
+                )
             } else {
                 field.display_name().to_string()
             };
@@ -2767,11 +2802,14 @@ impl UndeleteApp {
         // Metadata rows
         let metadata: Vec<(&str, String)> = vec![
             ("Size", file.size_display()),
-            ("Confidence", format!(
-                "{} ({}%)",
-                file.confidence.display_name(),
-                file.recovery_percent,
-            )),
+            (
+                "Confidence",
+                format!(
+                    "{} ({}%)",
+                    file.confidence.display_name(),
+                    file.recovery_percent,
+                ),
+            ),
             ("Source", file.source.display_name().to_string()),
             ("Deleted", file.delete_time_display()),
             ("Modified", format_timestamp(file.modify_time)),
@@ -2784,10 +2822,10 @@ impl UndeleteApp {
             all_meta.push(("Original Path", path.clone()));
         }
         if let Some(ino) = file.inode_number {
-            all_meta.push(("Inode", format!("{}", ino)));
+            all_meta.push(("Inode", format!("{ino}")));
         }
         if let Some(off) = file.disk_offset {
-            all_meta.push(("Disk Offset", format!("0x{:08X}", off)));
+            all_meta.push(("Disk Offset", format!("0x{off:08X}")));
         }
 
         for (label, value) in &all_meta {
@@ -2834,7 +2872,7 @@ impl UndeleteApp {
             color: SURFACE0,
             corner_radii: CornerRadii::all(PROGRESS_HEIGHT / 2.0),
         });
-        let pct = (file.recovery_percent as f32) / 100.0;
+        let pct = f32::from(file.recovery_percent) / 100.0;
         let fill_w = inner_w * pct;
         if fill_w > 0.0 {
             cmds.push(RenderCommand::FillRect {
@@ -3355,7 +3393,7 @@ pub fn format_size(bytes: u64) -> String {
     } else if bytes >= KB {
         format!("{:.1} KB", (bytes as f64) / (KB as f64))
     } else {
-        format!("{} B", bytes)
+        format!("{bytes} B")
     }
 }
 
@@ -3624,8 +3662,7 @@ mod tests {
 
     #[test]
     fn test_secondary_pattern_match() {
-        let sig = FileSignature::new(FileSignatureKind::Wav, 0, b"RIFF")
-            .with_secondary(8, b"WAVE");
+        let sig = FileSignature::new(FileSignatureKind::Wav, 0, b"RIFF").with_secondary(8, b"WAVE");
         let mut data = vec![0u8; 16];
         data[..4].copy_from_slice(b"RIFF");
         data[8..12].copy_from_slice(b"WAVE");
@@ -3634,8 +3671,7 @@ mod tests {
 
     #[test]
     fn test_secondary_pattern_mismatch() {
-        let sig = FileSignature::new(FileSignatureKind::Wav, 0, b"RIFF")
-            .with_secondary(8, b"WAVE");
+        let sig = FileSignature::new(FileSignatureKind::Wav, 0, b"RIFF").with_secondary(8, b"WAVE");
         let mut data = vec![0u8; 16];
         data[..4].copy_from_slice(b"RIFF");
         data[8..12].copy_from_slice(b"AVI ");
@@ -3674,15 +3710,13 @@ mod tests {
 
     #[test]
     fn test_inode_recovery_confidence_unlikely_when_blocks_reallocated() {
-        let inode = Ext4Inode::new_deleted(100, 4096)
-            .with_blocks_reallocated(true);
+        let inode = Ext4Inode::new_deleted(100, 4096).with_blocks_reallocated(true);
         assert_eq!(inode.recovery_confidence(), RecoveryConfidence::Unlikely);
     }
 
     #[test]
     fn test_inode_recovery_confidence_medium_with_blocks() {
-        let inode = Ext4Inode::new_deleted(100, 4096)
-            .with_direct_blocks(vec![1000, 1001, 1002]);
+        let inode = Ext4Inode::new_deleted(100, 4096).with_direct_blocks(vec![1000, 1001, 1002]);
         assert_eq!(inode.recovery_confidence(), RecoveryConfidence::Medium);
     }
 
@@ -3703,7 +3737,13 @@ mod tests {
     #[test]
     fn test_inode_scanner_finds_deleted_inodes() {
         let mut scanner = InodeScanner::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         scanner.scan_partition(&part);
         assert!(!scanner.deleted_inodes().is_empty());
     }
@@ -3711,7 +3751,13 @@ mod tests {
     #[test]
     fn test_inode_scanner_finds_dir_entries() {
         let mut scanner = InodeScanner::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         scanner.scan_partition(&part);
         assert!(!scanner.dir_entries().is_empty());
     }
@@ -3719,7 +3765,13 @@ mod tests {
     #[test]
     fn test_inode_scanner_progress() {
         let mut scanner = InodeScanner::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         scanner.scan_partition(&part);
         assert!((scanner.scan_progress() - 1.0).abs() < f32::EPSILON);
     }
@@ -3727,7 +3779,13 @@ mod tests {
     #[test]
     fn test_inode_scanner_find_dir_entry() {
         let mut scanner = InodeScanner::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         scanner.scan_partition(&part);
         // Dir entries only created for even-indexed inodes per group
         let first_dir = scanner.dir_entries().first();
@@ -3772,7 +3830,13 @@ mod tests {
     #[test]
     fn test_engine_quick_scan() {
         let mut engine = RecoveryEngine::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         engine.scan(&part, ScanMode::Quick);
         assert!(!engine.files.is_empty());
         assert_eq!(engine.progress.phase, ScanPhase::Complete);
@@ -3783,7 +3847,13 @@ mod tests {
     fn test_engine_deep_scan_finds_more() {
         let mut engine_quick = RecoveryEngine::new();
         let mut engine_deep = RecoveryEngine::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         engine_quick.scan(&part, ScanMode::Quick);
         engine_deep.scan(&part, ScanMode::Deep);
         assert!(engine_deep.files.len() > engine_quick.files.len());
@@ -3792,7 +3862,13 @@ mod tests {
     #[test]
     fn test_engine_stats() {
         let mut engine = RecoveryEngine::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         engine.scan(&part, ScanMode::Quick);
         let stats = engine.stats();
         assert!(stats.total_files > 0);
@@ -3802,7 +3878,13 @@ mod tests {
     #[test]
     fn test_engine_selection() {
         let mut engine = RecoveryEngine::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         engine.scan(&part, ScanMode::Quick);
         assert_eq!(engine.selected_count(), 0);
 
@@ -3818,7 +3900,13 @@ mod tests {
     #[test]
     fn test_engine_toggle_selection() {
         let mut engine = RecoveryEngine::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         engine.scan(&part, ScanMode::Quick);
         let id = engine.files[0].id;
         engine.toggle_selection(id);
@@ -3830,7 +3918,13 @@ mod tests {
     #[test]
     fn test_engine_recovery() {
         let mut engine = RecoveryEngine::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         engine.scan(&part, ScanMode::Quick);
         let filter = ScanFilter::new();
         engine.select_all(&filter);
@@ -3843,7 +3937,13 @@ mod tests {
     #[test]
     fn test_engine_recovery_no_selection() {
         let mut engine = RecoveryEngine::new();
-        let part = Partition::new("/dev/sda1", "/dev/sda1", "/", 500_000_000_000, 200_000_000_000);
+        let part = Partition::new(
+            "/dev/sda1",
+            "/dev/sda1",
+            "/",
+            500_000_000_000,
+            200_000_000_000,
+        );
         engine.scan(&part, ScanMode::Quick);
         let results = engine.recover_selected("/tmp/recovered");
         assert!(results.is_empty());
@@ -4008,8 +4108,7 @@ mod tests {
 
     #[test]
     fn test_file_from_inode_with_dir_entry() {
-        let inode = Ext4Inode::new_deleted(100, 4096)
-            .with_direct_blocks(vec![1000, 1001]);
+        let inode = Ext4Inode::new_deleted(100, 4096).with_direct_blocks(vec![1000, 1001]);
         let dir = Ext4DirEntry {
             inode_number: 100,
             name: String::from("test.txt"),

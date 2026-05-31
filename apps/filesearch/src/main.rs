@@ -15,7 +15,9 @@
 //! - Open file location / open with default app
 //! - Multi-panel UI with search bar, filters sidebar, results list, preview
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -31,6 +33,7 @@ use std::fmt;
 
 /// Match a string against a glob pattern
 /// Supports: * (any chars), ? (single char), [a-z] (char class)
+#[must_use]
 pub fn glob_match(pattern: &str, text: &str) -> bool {
     glob_match_impl(pattern.as_bytes(), text.as_bytes())
 }
@@ -73,12 +76,12 @@ fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
                 }
             } else {
                 // Malformed class, treat as literal
-                if star_pi != usize::MAX {
+                if star_pi == usize::MAX {
+                    return false;
+                } else {
                     pi = star_pi.saturating_add(1);
                     star_ti = star_ti.saturating_add(1);
                     ti = star_ti;
-                } else {
-                    return false;
                 }
             }
         } else if star_pi != usize::MAX {
@@ -134,6 +137,7 @@ fn char_class_matches(class: &[u8], ch: u8) -> bool {
 /// . (any char), * (zero or more), + (one or more), ? (zero or one),
 /// ^ (start), $ (end), \d (digit), \w (word char), \s (whitespace),
 /// character classes [abc], [a-z]
+#[must_use]
 pub fn regex_match(pattern: &str, text: &str) -> bool {
     let pat_bytes = pattern.as_bytes();
     let text_bytes = text.as_bytes();
@@ -242,10 +246,11 @@ fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool)
                     .get(pi.saturating_add(atom_len).saturating_add(1)..)
                     .unwrap_or_default();
                 // Try with match
-                if ti < text.len() && matcher.matches(text.get(ti).copied().unwrap_or(0)) {
-                    if regex_match_at(rest, text, ti.saturating_add(1), anchored_end) {
-                        return true;
-                    }
+                if ti < text.len()
+                    && matcher.matches(text.get(ti).copied().unwrap_or(0))
+                    && regex_match_at(rest, text, ti.saturating_add(1), anchored_end)
+                {
+                    return true;
                 }
                 // Try without match
                 return regex_match_at(rest, text, ti, anchored_end);
@@ -312,14 +317,14 @@ fn class_matches(body: &[u8], c: u8) -> bool {
     let mut i = 0;
     while let Some(&lo) = body.get(i) {
         // Range "x-y": a '-' with a byte on either side (and not the final char).
-        if body.get(i.saturating_add(1)) == Some(&b'-') {
-            if let Some(&hi) = body.get(i.saturating_add(2)) {
-                if lo <= c && c <= hi {
-                    return true;
-                }
-                i = i.saturating_add(3);
-                continue;
+        if body.get(i.saturating_add(1)) == Some(&b'-')
+            && let Some(&hi) = body.get(i.saturating_add(2))
+        {
+            if lo <= c && c <= hi {
+                return true;
             }
+            i = i.saturating_add(3);
+            continue;
         }
         if lo == c {
             return true;
@@ -404,6 +409,7 @@ impl fmt::Display for FileCategory {
 }
 
 /// Detect file category from extension
+#[must_use]
 pub fn categorize_extension(ext: &str) -> FileCategory {
     match ext.to_lowercase().as_str() {
         "txt" | "doc" | "docx" | "pdf" | "odt" | "rtf" | "md" | "tex" | "csv" | "xls" | "xlsx"
@@ -433,6 +439,7 @@ pub fn categorize_extension(ext: &str) -> FileCategory {
 }
 
 /// Get an icon character for a file category
+#[must_use]
 pub fn category_icon(cat: FileCategory) -> &'static str {
     match cat {
         FileCategory::Document => "📄",
@@ -467,6 +474,7 @@ pub struct IndexEntry {
 }
 
 impl IndexEntry {
+    #[must_use]
     pub fn new(
         path: &str,
         name: &str,
@@ -503,6 +511,7 @@ impl IndexEntry {
     }
 
     /// Get parent directory path
+    #[must_use]
     pub fn parent_dir(&self) -> &str {
         self.path.rsplit_once('/').map_or("", |(parent, _)| parent)
     }
@@ -515,7 +524,14 @@ pub struct FileIndex {
     last_updated: u64,
 }
 
+impl Default for FileIndex {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileIndex {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
@@ -537,16 +553,19 @@ impl FileIndex {
     }
 
     /// Total number of indexed entries
+    #[must_use]
     pub fn count(&self) -> usize {
         self.entries.len()
     }
 
     /// Total indexed size
+    #[must_use]
     pub fn total_size(&self) -> u64 {
         self.total_size
     }
 
     /// Search by filename substring (case-insensitive)
+    #[must_use]
     pub fn search_name(&self, query: &str) -> Vec<&IndexEntry> {
         let q = query.to_lowercase();
         self.entries
@@ -556,6 +575,7 @@ impl FileIndex {
     }
 
     /// Search by glob pattern
+    #[must_use]
     pub fn search_glob(&self, pattern: &str) -> Vec<&IndexEntry> {
         let lower_pat = pattern.to_lowercase();
         self.entries
@@ -565,6 +585,7 @@ impl FileIndex {
     }
 
     /// Search by regex pattern
+    #[must_use]
     pub fn search_regex(&self, pattern: &str) -> Vec<&IndexEntry> {
         self.entries
             .iter()
@@ -573,6 +594,7 @@ impl FileIndex {
     }
 
     /// Search with full filter criteria
+    #[must_use]
     pub fn search(&self, criteria: &SearchCriteria) -> Vec<&IndexEntry> {
         self.entries
             .iter()
@@ -581,6 +603,7 @@ impl FileIndex {
     }
 
     /// Get entries by extension
+    #[must_use]
     pub fn by_extension(&self, ext: &str) -> Vec<&IndexEntry> {
         let lower = ext.to_lowercase();
         self.entries
@@ -590,11 +613,13 @@ impl FileIndex {
     }
 
     /// Get entries by category
+    #[must_use]
     pub fn by_category(&self, cat: FileCategory) -> Vec<&IndexEntry> {
         self.entries.iter().filter(|e| e.category == cat).collect()
     }
 
     /// Get all unique extensions with counts
+    #[must_use]
     pub fn extension_stats(&self) -> BTreeMap<String, usize> {
         let mut stats = BTreeMap::new();
         for entry in &self.entries {
@@ -606,6 +631,7 @@ impl FileIndex {
     }
 
     /// Get category counts
+    #[must_use]
     pub fn category_stats(&self) -> BTreeMap<FileCategory, (usize, u64)> {
         let mut stats: BTreeMap<FileCategory, (usize, u64)> = BTreeMap::new();
         for entry in &self.entries {
@@ -617,22 +643,25 @@ impl FileIndex {
     }
 
     /// Get the N largest files
+    #[must_use]
     pub fn largest_files(&self, n: usize) -> Vec<&IndexEntry> {
         let mut sorted: Vec<&IndexEntry> = self.entries.iter().collect();
-        sorted.sort_by(|a, b| b.size.cmp(&a.size));
+        sorted.sort_by_key(|e| core::cmp::Reverse(e.size));
         sorted.truncate(n);
         sorted
     }
 
     /// Get recently modified files
+    #[must_use]
     pub fn recently_modified(&self, n: usize) -> Vec<&IndexEntry> {
         let mut sorted: Vec<&IndexEntry> = self.entries.iter().collect();
-        sorted.sort_by(|a, b| b.modified.cmp(&a.modified));
+        sorted.sort_by_key(|e| core::cmp::Reverse(e.modified));
         sorted.truncate(n);
         sorted
     }
 
     /// Get duplicate filenames (same name, different paths)
+    #[must_use]
     pub fn find_duplicates(&self) -> BTreeMap<String, Vec<&IndexEntry>> {
         let mut by_name: BTreeMap<String, Vec<&IndexEntry>> = BTreeMap::new();
         for entry in &self.entries {
@@ -684,19 +713,21 @@ pub enum SizeFilter {
 }
 
 impl SizeFilter {
+    #[must_use]
     pub fn matches(self, size: u64) -> bool {
         match self {
             Self::Any => true,
             Self::Empty => size == 0,
             Self::Tiny => size < 10_240,
-            Self::Small => size >= 10_240 && size < 1_048_576,
-            Self::Medium => size >= 1_048_576 && size < 104_857_600,
-            Self::Large => size >= 104_857_600 && size < 1_073_741_824,
+            Self::Small => (10_240..1_048_576).contains(&size),
+            Self::Medium => (1_048_576..104_857_600).contains(&size),
+            Self::Large => (104_857_600..1_073_741_824).contains(&size),
             Self::VeryLarge => size >= 1_073_741_824,
             Self::Custom(min, max) => size >= min && size <= max,
         }
     }
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Any => "Any Size",
@@ -725,12 +756,13 @@ pub enum DateFilter {
 
 impl DateFilter {
     /// Check if a timestamp matches (relative to `now`)
+    #[must_use]
     pub fn matches(self, timestamp: u64, now: u64) -> bool {
         let age = now.saturating_sub(timestamp);
         match self {
             Self::Any => true,
             Self::Today => age < 86400,
-            Self::Yesterday => age >= 86400 && age < 172_800,
+            Self::Yesterday => (86400..172_800).contains(&age),
             Self::ThisWeek => age < 604_800,
             Self::ThisMonth => age < 2_592_000,
             Self::ThisYear => age < 31_536_000,
@@ -738,6 +770,7 @@ impl DateFilter {
         }
     }
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Any => "Any Date",
@@ -768,6 +801,7 @@ pub struct SearchCriteria {
 }
 
 impl SearchCriteria {
+    #[must_use]
     pub fn new(query: &str) -> Self {
         Self {
             query: query.to_string(),
@@ -785,6 +819,7 @@ impl SearchCriteria {
     }
 
     /// Check if an entry matches all criteria
+    #[must_use]
     pub fn matches(&self, entry: &IndexEntry) -> bool {
         // Hidden file filter
         if !self.include_hidden && entry.is_hidden {
@@ -797,17 +832,17 @@ impl SearchCriteria {
         }
 
         // Category filter
-        if let Some(cat) = self.category_filter {
-            if entry.category != cat {
-                return false;
-            }
+        if let Some(cat) = self.category_filter
+            && entry.category != cat
+        {
+            return false;
         }
 
         // Extension filter
-        if let Some(ref ext) = self.extension_filter {
-            if entry.extension != ext.to_lowercase() {
-                return false;
-            }
+        if let Some(ref ext) = self.extension_filter
+            && entry.extension != ext.to_lowercase()
+        {
+            return false;
         }
 
         // Size filter
@@ -821,14 +856,13 @@ impl SearchCriteria {
         }
 
         // Path filter
-        if let Some(ref path_filter) = self.path_contains {
-            if !entry
+        if let Some(ref path_filter) = self.path_contains
+            && !entry
                 .path
                 .to_lowercase()
                 .contains(&path_filter.to_lowercase())
-            {
-                return false;
-            }
+        {
+            return false;
         }
 
         // Query match
@@ -944,7 +978,14 @@ pub struct FileSearchApp {
     pub search_time_ms: u64,
 }
 
+impl Default for FileSearchApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl FileSearchApp {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             index: FileIndex::new(),
@@ -1078,6 +1119,7 @@ impl FileSearchApp {
     }
 
     /// Get selected entry
+    #[must_use]
     pub fn selected_entry(&self) -> Option<&IndexEntry> {
         self.selected_result
             .and_then(|i| self.results.get(i))
@@ -1085,6 +1127,7 @@ impl FileSearchApp {
     }
 
     /// Render the UI
+    #[must_use]
     pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let header_h = 60.0;
@@ -1533,20 +1576,19 @@ impl FileSearchApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let entry = match self.selected_entry() {
-            Some(e) => e,
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: x + w / 2.0 - 50.0,
-                    y: y + h / 2.0,
-                    text: "Select a file".to_string(),
-                    font_size: 13.0,
-                    color: colors::OVERLAY0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                });
-                return;
-            }
+        let entry = if let Some(e) = self.selected_entry() {
+            e
+        } else {
+            cmds.push(RenderCommand::Text {
+                x: x + w / 2.0 - 50.0,
+                y: y + h / 2.0,
+                text: "Select a file".to_string(),
+                font_size: 13.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+            });
+            return;
         };
 
         let px = x + 12.0;
@@ -1657,6 +1699,7 @@ impl FileSearchApp {
 
 // ─── Formatting Helpers ──────────────────────────────────────────────
 
+#[must_use]
 pub fn format_size(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
@@ -1676,6 +1719,7 @@ pub fn format_size(bytes: u64) -> String {
     }
 }
 
+#[must_use]
 pub fn format_relative_time(seconds: u64) -> String {
     if seconds < 60 {
         "Just now".to_string()

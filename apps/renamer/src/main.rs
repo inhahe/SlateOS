@@ -1,4 +1,4 @@
-//! OurOS Batch File Renamer
+//! `OurOS` Batch File Renamer
 //!
 //! A powerful batch file renaming tool with:
 //! - Multiple rename operations (find/replace, insert, remove, case change,
@@ -15,7 +15,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -103,10 +105,7 @@ enum RenameOp {
         position: InsertPosition,
     },
     /// Remove characters from the filename.
-    Remove {
-        from: usize,
-        count: usize,
-    },
+    Remove { from: usize, count: usize },
     /// Change the case of the filename.
     ChangeCase(CaseMode),
     /// Add sequential numbering.
@@ -129,16 +128,11 @@ enum RenameOp {
         replacement: String,
     },
     /// Trim whitespace or specific characters.
-    Trim {
-        chars: String,
-        mode: TrimMode,
-    },
+    Trim { chars: String, mode: TrimMode },
     /// Change the file extension.
     Extension(ExtensionOp),
     /// Apply a template with variables.
-    Template {
-        template: String,
-    },
+    Template { template: String },
 }
 
 impl RenameOp {
@@ -212,11 +206,11 @@ impl CaseMode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DateFormat {
-    YmdHyphen,    // 2024-01-15
-    YmdSlash,     // 2024/01/15
-    DmyHyphen,    // 15-01-2024
-    YmdCompact,   // 20240115
-    Timestamp,    // 20240115_143022
+    YmdHyphen,  // 2024-01-15
+    YmdSlash,   // 2024/01/15
+    DmyHyphen,  // 15-01-2024
+    YmdCompact, // 20240115
+    Timestamp,  // 20240115_143022
 }
 
 impl DateFormat {
@@ -289,7 +283,9 @@ struct FileEntry {
 
 impl FileEntry {
     fn new(path: &str, name: &str, size: u64, modified_ms: u64) -> Self {
-        let extension = name.rsplit('.').next()
+        let extension = name
+            .rsplit('.')
+            .next()
             .filter(|e| e.len() < name.len())
             .unwrap_or("")
             .to_string();
@@ -327,7 +323,12 @@ impl RenameEngine {
         let (stem, ext) = FileEntry::split_name(name);
 
         match op {
-            RenameOp::FindReplace { find, replace, case_sensitive, replace_all } => {
+            RenameOp::FindReplace {
+                find,
+                replace,
+                case_sensitive,
+                replace_all,
+            } => {
                 let new_stem = if *case_sensitive {
                     if *replace_all {
                         stem.replace(find.as_str(), replace.as_str())
@@ -363,7 +364,13 @@ impl RenameEngine {
                 let new_stem = Self::apply_case(stem, *mode);
                 format!("{new_stem}{ext}")
             }
-            RenameOp::Number { start, step, padding, position, separator } => {
+            RenameOp::Number {
+                start,
+                step,
+                padding,
+                position,
+                separator,
+            } => {
                 let num = start.saturating_add(index.saturating_mul(*step));
                 let num_str = format!("{num:0>width$}", width = *padding);
                 let insert_str = match position {
@@ -384,7 +391,11 @@ impl RenameEngine {
                     }
                 }
             }
-            RenameOp::DateStamp { format, position, separator } => {
+            RenameOp::DateStamp {
+                format,
+                position,
+                separator,
+            } => {
                 // Mock date (in real OS, would use system time)
                 let date_str = format.format(2026, 5, 18, 14, 30, 0);
                 match position {
@@ -402,11 +413,14 @@ impl RenameEngine {
                     }
                 }
             }
-            RenameOp::Regex { pattern, replacement } => {
+            RenameOp::Regex {
+                pattern,
+                replacement,
+            } => {
                 // Simple regex: only support literal patterns for now
                 // (real implementation would use our NFA regex engine)
-                let new_name = name.replace(pattern.as_str(), replacement.as_str());
-                new_name
+
+                name.replace(pattern.as_str(), replacement.as_str())
             }
             RenameOp::Trim { chars, mode } => {
                 let new_stem = if chars.is_empty() {
@@ -418,62 +432,66 @@ impl RenameEngine {
                 } else {
                     let chars_arr: Vec<char> = chars.chars().collect();
                     match mode {
-                        TrimMode::Both => stem.trim_matches(|c: char| chars_arr.contains(&c)).to_string(),
-                        TrimMode::Start => stem.trim_start_matches(|c: char| chars_arr.contains(&c)).to_string(),
-                        TrimMode::End => stem.trim_end_matches(|c: char| chars_arr.contains(&c)).to_string(),
+                        TrimMode::Both => stem
+                            .trim_matches(|c: char| chars_arr.contains(&c))
+                            .to_string(),
+                        TrimMode::Start => stem
+                            .trim_start_matches(|c: char| chars_arr.contains(&c))
+                            .to_string(),
+                        TrimMode::End => stem
+                            .trim_end_matches(|c: char| chars_arr.contains(&c))
+                            .to_string(),
                     }
                 };
                 format!("{new_stem}{ext}")
             }
-            RenameOp::Extension(ext_op) => {
-                match ext_op {
-                    ExtensionOp::Replace(new_ext) => {
-                        if new_ext.starts_with('.') {
-                            format!("{stem}{new_ext}")
-                        } else {
-                            format!("{stem}.{new_ext}")
-                        }
+            RenameOp::Extension(ext_op) => match ext_op {
+                ExtensionOp::Replace(new_ext) => {
+                    if new_ext.starts_with('.') {
+                        format!("{stem}{new_ext}")
+                    } else {
+                        format!("{stem}.{new_ext}")
                     }
-                    ExtensionOp::Add(new_ext) => {
-                        if new_ext.starts_with('.') {
-                            format!("{name}{new_ext}")
-                        } else {
-                            format!("{name}.{new_ext}")
-                        }
-                    }
-                    ExtensionOp::Remove => stem.to_string(),
-                    ExtensionOp::Lower => format!("{stem}{}", ext.to_ascii_lowercase()),
-                    ExtensionOp::Upper => format!("{stem}{}", ext.to_ascii_uppercase()),
                 }
-            }
+                ExtensionOp::Add(new_ext) => {
+                    if new_ext.starts_with('.') {
+                        format!("{name}{new_ext}")
+                    } else {
+                        format!("{name}.{new_ext}")
+                    }
+                }
+                ExtensionOp::Remove => stem.to_string(),
+                ExtensionOp::Lower => format!("{stem}{}", ext.to_ascii_lowercase()),
+                ExtensionOp::Upper => format!("{stem}{}", ext.to_ascii_uppercase()),
+            },
             RenameOp::Template { template } => {
                 let (stem_part, ext_part) = FileEntry::split_name(name);
-                let result = template
+
+                template
                     .replace("{name}", stem_part)
                     .replace("{ext}", ext_part.trim_start_matches('.'))
                     .replace("{n}", &format!("{index}"))
                     .replace("{N}", &format!("{index:03}"))
-                    .replace("{original}", name);
-                result
+                    .replace("{original}", name)
             }
         }
     }
 
     fn case_insensitive_replace(s: &str, find: &str, replace: &str, all: bool) -> String {
-        if find.is_empty() { return s.to_string(); }
+        if find.is_empty() {
+            return s.to_string();
+        }
         let lower = s.to_ascii_lowercase();
         let find_lower = find.to_ascii_lowercase();
         let mut result = String::with_capacity(s.len());
         let mut start: usize = 0;
 
-        loop {
-            if let Some(pos) = lower[start..].find(&find_lower) {
-                let abs_pos = start.saturating_add(pos);
-                result.push_str(&s[start..abs_pos]);
-                result.push_str(replace);
-                start = abs_pos.saturating_add(find.len());
-                if !all { break; }
-            } else {
+        while let Some(pos) = lower[start..].find(&find_lower) {
+            let abs_pos = start.saturating_add(pos);
+            result.push_str(&s[start..abs_pos]);
+            result.push_str(replace);
+            start = abs_pos.saturating_add(find.len());
+            if !all {
                 break;
             }
         }
@@ -514,15 +532,16 @@ impl RenameEngine {
                 }
                 result
             }
-            CaseMode::Toggle => {
-                s.chars().map(|c| {
+            CaseMode::Toggle => s
+                .chars()
+                .map(|c| {
                     if c.is_uppercase() {
                         c.to_ascii_lowercase()
                     } else {
                         c.to_ascii_uppercase()
                     }
-                }).collect()
-            }
+                })
+                .collect(),
             CaseMode::CamelCase => {
                 let mut result = String::with_capacity(s.len());
                 let mut capitalize = false;
@@ -546,7 +565,7 @@ impl RenameEngine {
                     }
                     result.extend(ch.to_lowercase());
                 }
-                result.replace(' ', "_").replace('-', "_")
+                result.replace([' ', '-'], "_")
             }
             CaseMode::KebabCase => {
                 let mut result = String::with_capacity(s.len());
@@ -556,7 +575,7 @@ impl RenameEngine {
                     }
                     result.extend(ch.to_lowercase());
                 }
-                result.replace(' ', "-").replace('_', "-")
+                result.replace([' ', '_'], "-")
             }
         }
     }
@@ -569,7 +588,7 @@ impl RenameEngine {
 /// A record of a completed rename operation batch.
 #[derive(Debug, Clone)]
 struct RenameRecord {
-    /// Pairs of (old_name, new_name).
+    /// Pairs of (`old_name`, `new_name`).
     renames: Vec<(String, String)>,
     /// The operations that were applied.
     operations: Vec<String>,
@@ -642,14 +661,18 @@ impl RenamerApp {
 
     /// Add a file to the rename list.
     fn add_file(&mut self, path: &str, name: &str, size: u64, modified: u64) {
-        if self.files.len() >= MAX_FILES { return; }
+        if self.files.len() >= MAX_FILES {
+            return;
+        }
         self.files.push(FileEntry::new(path, name, size, modified));
         self.apply_operations();
     }
 
     /// Add a rename operation and recompute previews.
     fn add_operation(&mut self, op: RenameOp) {
-        if self.operations.len() >= MAX_OPERATIONS { return; }
+        if self.operations.len() >= MAX_OPERATIONS {
+            return;
+        }
         self.operations.push(op);
         self.apply_operations();
     }
@@ -698,18 +721,20 @@ impl RenamerApp {
         }
 
         // Check for duplicates among selected files
-        let names: Vec<String> = self.files.iter()
+        let names: Vec<String> = self
+            .files
+            .iter()
             .filter(|f| f.selected)
             .map(|f| f.new_name.to_ascii_lowercase())
             .collect();
 
         // Collect original names so we can check cross-collisions without borrowing self.files
-        let originals: Vec<String> = self.files.iter()
-            .map(|f| f.original_name.clone())
-            .collect();
+        let originals: Vec<String> = self.files.iter().map(|f| f.original_name.clone()).collect();
 
         for (i, file) in self.files.iter_mut().enumerate() {
-            if !file.selected { continue; }
+            if !file.selected {
+                continue;
+            }
             let lower = file.new_name.to_ascii_lowercase();
             // Count how many times this name appears
             let count = names.iter().filter(|n| **n == lower).count();
@@ -728,11 +753,17 @@ impl RenamerApp {
     /// Execute the rename (commit changes).
     fn execute_rename(&mut self) {
         let record = RenameRecord {
-            renames: self.files.iter()
+            renames: self
+                .files
+                .iter()
                 .filter(|f| f.selected && f.original_name != f.new_name && !f.conflict)
                 .map(|f| (f.original_name.clone(), f.new_name.clone()))
                 .collect(),
-            operations: self.operations.iter().map(|o| o.label().to_string()).collect(),
+            operations: self
+                .operations
+                .iter()
+                .map(|o| o.label().to_string())
+                .collect(),
             timestamp_ms: self.current_time_ms,
         };
 
@@ -747,9 +778,9 @@ impl RenamerApp {
         for file in &mut self.files {
             if file.selected && file.original_name != file.new_name && !file.conflict {
                 file.original_name = file.new_name.clone();
-                file.original_path = file.original_path.replace(
-                    &file.original_name, &file.new_name
-                );
+                file.original_path = file
+                    .original_path
+                    .replace(&file.original_name, &file.new_name);
             }
         }
 
@@ -805,19 +836,23 @@ impl RenamerApp {
 
     /// Get filtered files.
     fn filtered_files(&self) -> Vec<(usize, &FileEntry)> {
-        self.files.iter().enumerate()
+        self.files
+            .iter()
+            .enumerate()
             .filter(|(_, f)| {
                 if self.filter_conflicts && !f.conflict {
                     return false;
                 }
                 if !self.filter_extension.is_empty()
-                    && !f.extension.eq_ignore_ascii_case(&self.filter_extension) {
+                    && !f.extension.eq_ignore_ascii_case(&self.filter_extension)
+                {
                     return false;
                 }
                 if !self.search_text.is_empty() {
                     let lower = self.search_text.to_ascii_lowercase();
                     if !f.original_name.to_ascii_lowercase().contains(&lower)
-                        && !f.new_name.to_ascii_lowercase().contains(&lower) {
+                        && !f.new_name.to_ascii_lowercase().contains(&lower)
+                    {
                         return false;
                     }
                 }
@@ -828,7 +863,8 @@ impl RenamerApp {
 
     /// Count files that will be renamed (selected, changed, no conflict).
     fn rename_count(&self) -> usize {
-        self.files.iter()
+        self.files
+            .iter()
             .filter(|f| f.selected && f.original_name != f.new_name && !f.conflict)
             .count()
     }
@@ -866,8 +902,10 @@ impl RenamerApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: WINDOW_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -889,8 +927,10 @@ impl RenamerApp {
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: TOOLBAR_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: TOOLBAR_HEIGHT,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -913,8 +953,10 @@ impl RenamerApp {
         for (i, label) in btn_labels.iter().enumerate() {
             let bw = label.len() as f32 * 8.0 + 20.0;
             cmds.push(RenderCommand::FillRect {
-                x: bx, y: 6.0,
-                width: bw, height: BUTTON_HEIGHT,
+                x: bx,
+                y: 6.0,
+                width: bw,
+                height: BUTTON_HEIGHT,
                 color: SURFACE0,
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -954,8 +996,10 @@ impl RenamerApp {
         let h = WINDOW_HEIGHT - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
 
         cmds.push(RenderCommand::FillRect {
-            x, y,
-            width: SIDEBAR_WIDTH, height: h,
+            x,
+            y,
+            width: SIDEBAR_WIDTH,
+            height: h,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -972,15 +1016,19 @@ impl RenamerApp {
             };
             let bg = if is_active { SURFACE0 } else { MANTLE };
             cmds.push(RenderCommand::FillRect {
-                x: tx, y,
-                width: tab_w, height: 28.0,
+                x: tx,
+                y,
+                width: tab_w,
+                height: 28.0,
                 color: bg,
                 corner_radii: CornerRadii::ZERO,
             });
             if is_active {
                 cmds.push(RenderCommand::FillRect {
-                    x: tx, y,
-                    width: tab_w, height: 2.0,
+                    x: tx,
+                    y,
+                    width: tab_w,
+                    height: 2.0,
                     color: BLUE,
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -991,7 +1039,11 @@ impl RenamerApp {
                 text: (*tab).into(),
                 font_size: SMALL_TEXT,
                 color: if is_active { TEXT } else { SUBTEXT0 },
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_w - 12.0),
             });
         }
@@ -1080,17 +1132,24 @@ impl RenamerApp {
 
             // Operation details
             let detail = match op {
-                RenameOp::FindReplace { find, replace, .. } =>
-                    format!("\"{find}\" → \"{replace}\""),
-                RenameOp::Insert { text, position } =>
-                    format!("\"{text}\" at {}", match position {
+                RenameOp::FindReplace { find, replace, .. } => {
+                    format!("\"{find}\" → \"{replace}\"")
+                }
+                RenameOp::Insert { text, position } => format!(
+                    "\"{text}\" at {}",
+                    match position {
                         InsertPosition::Start => "start".into(),
                         InsertPosition::End => "end".into(),
                         InsertPosition::At(n) => format!("pos {n}"),
-                    }),
+                    }
+                ),
                 RenameOp::ChangeCase(mode) => mode.label().into(),
-                RenameOp::Number { start, step, padding, .. } =>
-                    format!("from {start} step {step} pad {padding}"),
+                RenameOp::Number {
+                    start,
+                    step,
+                    padding,
+                    ..
+                } => format!("from {start} step {step} pad {padding}"),
                 RenameOp::Extension(ext_op) => match ext_op {
                     ExtensionOp::Replace(e) => format!("→ .{e}"),
                     ExtensionOp::Add(e) => format!("+ .{e}"),
@@ -1164,7 +1223,13 @@ impl RenamerApp {
                 max_width: Some(80.0),
             });
             py += 16.0;
-            let name_color = if file.conflict { RED } else if file.new_name != file.original_name { GREEN } else { TEXT };
+            let name_color = if file.conflict {
+                RED
+            } else if file.new_name != file.original_name {
+                GREEN
+            } else {
+                TEXT
+            };
             cmds.push(RenderCommand::Text {
                 x: x + PADDING + 8.0,
                 y: py,
@@ -1216,7 +1281,14 @@ impl RenamerApp {
             cmds.push(RenderCommand::Text {
                 x: x + PADDING,
                 y: py,
-                text: format!("Extension: {}", if file.extension.is_empty() { "(none)" } else { &file.extension }),
+                text: format!(
+                    "Extension: {}",
+                    if file.extension.is_empty() {
+                        "(none)"
+                    } else {
+                        &file.extension
+                    }
+                ),
                 font_size: SMALL_TEXT,
                 color: SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
@@ -1260,8 +1332,11 @@ impl RenamerApp {
                 corner_radii: CornerRadii::all(3.0),
             });
 
-            let label = format!("{} files — {}", record.renames.len(),
-                record.operations.join(", "));
+            let label = format!(
+                "{} files — {}",
+                record.renames.len(),
+                record.operations.join(", ")
+            );
             cmds.push(RenderCommand::Text {
                 x: x + 10.0,
                 y: hy + 7.0,
@@ -1284,13 +1359,22 @@ impl RenamerApp {
 
         // Column headers
         cmds.push(RenderCommand::FillRect {
-            x, y,
-            width: w, height: 24.0,
+            x,
+            y,
+            width: w,
+            height: 24.0,
             color: SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
 
-        let headers = [("", 30.0), ("Original Name", 250.0), ("→", 20.0), ("New Name", 250.0), ("Size", 80.0), ("Status", 80.0)];
+        let headers = [
+            ("", 30.0),
+            ("Original Name", 250.0),
+            ("→", 20.0),
+            ("New Name", 250.0),
+            ("Size", 80.0),
+            ("Status", 80.0),
+        ];
         let mut hx = x + 4.0;
         for (label, col_w) in &headers {
             cmds.push(RenderCommand::Text {
@@ -1311,7 +1395,9 @@ impl RenamerApp {
         let start = (self.scroll_offset / LINE_HEIGHT) as usize;
 
         let mut ry = y + 24.0;
-        for (display_idx, (file_idx, file)) in filtered.iter().enumerate().skip(start).take(visible_rows) {
+        for (display_idx, (file_idx, file)) in
+            filtered.iter().enumerate().skip(start).take(visible_rows)
+        {
             let is_selected = *file_idx == self.selected_file;
             let bg = if is_selected {
                 SURFACE0
@@ -1322,8 +1408,10 @@ impl RenamerApp {
             };
 
             cmds.push(RenderCommand::FillRect {
-                x, y: ry,
-                width: w, height: LINE_HEIGHT,
+                x,
+                y: ry,
+                width: w,
+                height: LINE_HEIGHT,
                 color: bg,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -1335,7 +1423,8 @@ impl RenamerApp {
             cmds.push(RenderCommand::FillRect {
                 x: cx + 4.0,
                 y: ry + 4.0,
-                width: 14.0, height: 14.0,
+                width: 14.0,
+                height: 14.0,
                 color: check_color,
                 corner_radii: CornerRadii::all(2.0),
             });
@@ -1391,7 +1480,11 @@ impl RenamerApp {
                 text: file.new_name.clone(),
                 font_size: SMALL_TEXT,
                 color: new_color,
-                font_weight: if changed { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if changed {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(250.0),
             });
             cx += 258.0;
@@ -1436,8 +1529,10 @@ impl RenamerApp {
         let y = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
 
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y,
-            width: WINDOW_WIDTH, height: STATUS_BAR_HEIGHT,
+            x: 0.0,
+            y,
+            width: WINDOW_WIDTH,
+            height: STATUS_BAR_HEIGHT,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1529,7 +1624,10 @@ mod tests {
             case_sensitive: false,
             replace_all: false,
         };
-        assert_eq!(RenameEngine::apply(&op, "hello_file.txt", 0), "world_file.txt");
+        assert_eq!(
+            RenameEngine::apply(&op, "hello_file.txt", 0),
+            "world_file.txt"
+        );
     }
 
     #[test]
@@ -1569,7 +1667,10 @@ mod tests {
             text: "-mid-".into(),
             position: InsertPosition::At(4),
         };
-        assert_eq!(RenameEngine::apply(&op, "filename.txt", 0), "file-mid-name.txt");
+        assert_eq!(
+            RenameEngine::apply(&op, "filename.txt", 0),
+            "file-mid-name.txt"
+        );
     }
 
     // --- Remove ---
@@ -1588,7 +1689,10 @@ mod tests {
 
     #[test]
     fn test_remove_beyond_length() {
-        let op = RenameOp::Remove { from: 0, count: 100 };
+        let op = RenameOp::Remove {
+            from: 0,
+            count: 100,
+        };
         assert_eq!(RenameEngine::apply(&op, "short.txt", 0), ".txt");
     }
 
@@ -1609,13 +1713,19 @@ mod tests {
     #[test]
     fn test_case_title() {
         let op = RenameOp::ChangeCase(CaseMode::Title);
-        assert_eq!(RenameEngine::apply(&op, "hello world.txt", 0), "Hello World.txt");
+        assert_eq!(
+            RenameEngine::apply(&op, "hello world.txt", 0),
+            "Hello World.txt"
+        );
     }
 
     #[test]
     fn test_case_sentence() {
         let op = RenameOp::ChangeCase(CaseMode::Sentence);
-        assert_eq!(RenameEngine::apply(&op, "HELLO WORLD.txt", 0), "Hello world.txt");
+        assert_eq!(
+            RenameEngine::apply(&op, "HELLO WORLD.txt", 0),
+            "Hello world.txt"
+        );
     }
 
     #[test]
@@ -1627,19 +1737,28 @@ mod tests {
     #[test]
     fn test_case_snake() {
         let op = RenameOp::ChangeCase(CaseMode::SnakeCase);
-        assert_eq!(RenameEngine::apply(&op, "HelloWorld.txt", 0), "hello_world.txt");
+        assert_eq!(
+            RenameEngine::apply(&op, "HelloWorld.txt", 0),
+            "hello_world.txt"
+        );
     }
 
     #[test]
     fn test_case_kebab() {
         let op = RenameOp::ChangeCase(CaseMode::KebabCase);
-        assert_eq!(RenameEngine::apply(&op, "HelloWorld.txt", 0), "hello-world.txt");
+        assert_eq!(
+            RenameEngine::apply(&op, "HelloWorld.txt", 0),
+            "hello-world.txt"
+        );
     }
 
     #[test]
     fn test_case_camel() {
         let op = RenameOp::ChangeCase(CaseMode::CamelCase);
-        assert_eq!(RenameEngine::apply(&op, "hello_world.txt", 0), "helloWorld.txt");
+        assert_eq!(
+            RenameEngine::apply(&op, "hello_world.txt", 0),
+            "helloWorld.txt"
+        );
     }
 
     // --- Numbering ---
@@ -1730,19 +1849,28 @@ mod tests {
 
     #[test]
     fn test_trim_whitespace() {
-        let op = RenameOp::Trim { chars: String::new(), mode: TrimMode::Both };
+        let op = RenameOp::Trim {
+            chars: String::new(),
+            mode: TrimMode::Both,
+        };
         assert_eq!(RenameEngine::apply(&op, "  file  .txt", 0), "file.txt");
     }
 
     #[test]
     fn test_trim_custom_chars() {
-        let op = RenameOp::Trim { chars: "_-".into(), mode: TrimMode::Both };
+        let op = RenameOp::Trim {
+            chars: "_-".into(),
+            mode: TrimMode::Both,
+        };
         assert_eq!(RenameEngine::apply(&op, "__file__.txt", 0), "file.txt");
     }
 
     #[test]
     fn test_trim_start() {
-        let op = RenameOp::Trim { chars: String::new(), mode: TrimMode::Start };
+        let op = RenameOp::Trim {
+            chars: String::new(),
+            mode: TrimMode::Start,
+        };
         assert_eq!(RenameEngine::apply(&op, "  file  .txt", 0), "file  .txt");
     }
 
@@ -1750,13 +1878,17 @@ mod tests {
 
     #[test]
     fn test_template() {
-        let op = RenameOp::Template { template: "{name}_{N}.{ext}".into() };
+        let op = RenameOp::Template {
+            template: "{name}_{N}.{ext}".into(),
+        };
         assert_eq!(RenameEngine::apply(&op, "photo.jpg", 5), "photo_005.jpg");
     }
 
     #[test]
     fn test_template_original() {
-        let op = RenameOp::Template { template: "backup_{original}".into() };
+        let op = RenameOp::Template {
+            template: "backup_{original}".into(),
+        };
         assert_eq!(RenameEngine::apply(&op, "file.txt", 0), "backup_file.txt");
     }
 
@@ -1892,7 +2024,10 @@ mod tests {
         let mut app = RenamerApp::new();
         app.add_file("/test.txt", "test.txt", 0, 0);
         app.add_operation(RenameOp::ChangeCase(CaseMode::Upper));
-        app.add_operation(RenameOp::Insert { text: "x".into(), position: InsertPosition::Start });
+        app.add_operation(RenameOp::Insert {
+            text: "x".into(),
+            position: InsertPosition::Start,
+        });
         // After: [Upper, Insert "x"] → "xTEST.txt"
         assert_eq!(app.files[0].new_name, "xTEST.txt");
 
@@ -1922,10 +2057,22 @@ mod tests {
 
     #[test]
     fn test_date_formats() {
-        assert_eq!(DateFormat::YmdHyphen.format(2024, 1, 15, 14, 30, 0), "2024-01-15");
-        assert_eq!(DateFormat::DmyHyphen.format(2024, 1, 15, 14, 30, 0), "15-01-2024");
-        assert_eq!(DateFormat::YmdCompact.format(2024, 1, 15, 14, 30, 0), "20240115");
-        assert_eq!(DateFormat::Timestamp.format(2024, 1, 15, 14, 30, 45), "20240115_143045");
+        assert_eq!(
+            DateFormat::YmdHyphen.format(2024, 1, 15, 14, 30, 0),
+            "2024-01-15"
+        );
+        assert_eq!(
+            DateFormat::DmyHyphen.format(2024, 1, 15, 14, 30, 0),
+            "15-01-2024"
+        );
+        assert_eq!(
+            DateFormat::YmdCompact.format(2024, 1, 15, 14, 30, 0),
+            "20240115"
+        );
+        assert_eq!(
+            DateFormat::Timestamp.format(2024, 1, 15, 14, 30, 45),
+            "20240115_143045"
+        );
     }
 
     #[test]

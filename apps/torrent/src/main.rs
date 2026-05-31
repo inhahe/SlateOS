@@ -1,4 +1,4 @@
-//! BitTorrent client application
+//! `BitTorrent` client application
 //!
 //! Features:
 //! - Bencode parser (encode/decode)
@@ -13,7 +13,9 @@
 //! - Peer discovery and management
 //! - Multi-tab UI with transfer list, details, peers, files, trackers
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -38,28 +40,49 @@ pub enum BencodeValue {
 
 impl BencodeValue {
     /// Try to get as integer
+    #[must_use]
     pub fn as_int(&self) -> Option<i64> {
-        if let Self::Integer(n) = self { Some(*n) } else { None }
+        if let Self::Integer(n) = self {
+            Some(*n)
+        } else {
+            None
+        }
     }
 
     /// Try to get as byte slice
+    #[must_use]
     pub fn as_bytes(&self) -> Option<&[u8]> {
-        if let Self::Bytes(b) = self { Some(b) } else { None }
+        if let Self::Bytes(b) = self {
+            Some(b)
+        } else {
+            None
+        }
     }
 
     /// Try to get as UTF-8 string
+    #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         self.as_bytes().and_then(|b| std::str::from_utf8(b).ok())
     }
 
     /// Try to get as list
+    #[must_use]
     pub fn as_list(&self) -> Option<&[BencodeValue]> {
-        if let Self::List(l) = self { Some(l) } else { None }
+        if let Self::List(l) = self {
+            Some(l)
+        } else {
+            None
+        }
     }
 
     /// Try to get as dict
+    #[must_use]
     pub fn as_dict(&self) -> Option<&BTreeMap<String, BencodeValue>> {
-        if let Self::Dict(d) = self { Some(d) } else { None }
+        if let Self::Dict(d) = self {
+            Some(d)
+        } else {
+            None
+        }
     }
 }
 
@@ -85,22 +108,28 @@ impl BencodeParser {
 
     fn parse_integer(data: &[u8]) -> Result<(BencodeValue, usize), String> {
         // i<integer>e
-        let end = data.iter().position(|&b| b == b'e')
+        let end = data
+            .iter()
+            .position(|&b| b == b'e')
             .ok_or("unterminated integer")?;
         let num_str = std::str::from_utf8(data.get(1..end).unwrap_or_default())
             .map_err(|e| format!("invalid integer UTF-8: {e}"))?;
-        let n: i64 = num_str.parse()
+        let n: i64 = num_str
+            .parse()
             .map_err(|e| format!("invalid integer: {e}"))?;
         Ok((BencodeValue::Integer(n), end.saturating_add(1)))
     }
 
     fn parse_bytes(data: &[u8]) -> Result<(BencodeValue, usize), String> {
         // <length>:<content>
-        let colon = data.iter().position(|&b| b == b':')
+        let colon = data
+            .iter()
+            .position(|&b| b == b':')
             .ok_or("missing colon in byte string")?;
         let len_str = std::str::from_utf8(data.get(..colon).unwrap_or_default())
             .map_err(|e| format!("invalid length UTF-8: {e}"))?;
-        let len: usize = len_str.parse()
+        let len: usize = len_str
+            .parse()
             .map_err(|e| format!("invalid length: {e}"))?;
         let start = colon.saturating_add(1);
         let end = start.saturating_add(len);
@@ -142,8 +171,9 @@ impl BencodeParser {
             // Key must be a byte string
             let (key_val, key_consumed) = Self::parse(data.get(pos..).unwrap_or_default())?;
             let key = match key_val {
-                BencodeValue::Bytes(b) => String::from_utf8(b)
-                    .map_err(|e| format!("dict key not UTF-8: {e}"))?,
+                BencodeValue::Bytes(b) => {
+                    String::from_utf8(b).map_err(|e| format!("dict key not UTF-8: {e}"))?
+                }
                 _ => return Err("dict key must be a byte string".to_string()),
             };
             pos = pos.saturating_add(key_consumed);
@@ -155,6 +185,7 @@ impl BencodeParser {
 }
 
 /// Encode a bencode value to bytes
+#[must_use]
 pub fn bencode_encode(val: &BencodeValue) -> Vec<u8> {
     let mut out = Vec::new();
     bencode_encode_into(val, &mut out);
@@ -203,9 +234,22 @@ pub struct Sha1 {
     total_len: u64,
 }
 
-impl Sha1 {
-    const H0: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+impl Default for Sha1 {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
+impl Sha1 {
+    const H0: [u32; 5] = [
+        0x6745_2301,
+        0xEFCD_AB89,
+        0x98BA_DCFE,
+        0x1032_5476,
+        0xC3D2_E1F0,
+    ];
+
+    #[must_use]
     pub fn new() -> Self {
         Self {
             h: Self::H0,
@@ -224,7 +268,8 @@ impl Sha1 {
             let space = 64usize.saturating_sub(self.buf_len);
             let copy_len = space.min(data.len());
             if let (Some(dst), Some(src)) = (
-                self.buffer.get_mut(self.buf_len..self.buf_len.saturating_add(copy_len)),
+                self.buffer
+                    .get_mut(self.buf_len..self.buf_len.saturating_add(copy_len)),
                 data.get(..copy_len),
             ) {
                 dst.copy_from_slice(src);
@@ -252,10 +297,7 @@ impl Sha1 {
         // Buffer remainder
         let remaining = data.len().saturating_sub(offset);
         if remaining > 0 {
-            if let (Some(dst), Some(src)) = (
-                self.buffer.get_mut(..remaining),
-                data.get(offset..),
-            ) {
+            if let (Some(dst), Some(src)) = (self.buffer.get_mut(..remaining), data.get(offset..)) {
                 dst.copy_from_slice(src);
             }
             self.buf_len = remaining;
@@ -274,9 +316,11 @@ impl Sha1 {
             ]);
         }
         for i in 16..80 {
-            w[i] = (w[i.saturating_sub(3)] ^ w[i.saturating_sub(8)]
-                ^ w[i.saturating_sub(14)] ^ w[i.saturating_sub(16)])
-                .rotate_left(1);
+            w[i] = (w[i.saturating_sub(3)]
+                ^ w[i.saturating_sub(8)]
+                ^ w[i.saturating_sub(14)]
+                ^ w[i.saturating_sub(16)])
+            .rotate_left(1);
         }
 
         let [mut a, mut b, mut c, mut d, mut e] = self.h;
@@ -289,7 +333,8 @@ impl Sha1 {
                 _ => (b ^ c ^ d, 0xCA62_C1D6u32),
             };
 
-            let temp = a.rotate_left(5)
+            let temp = a
+                .rotate_left(5)
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
@@ -308,6 +353,7 @@ impl Sha1 {
         self.h[4] = self.h[4].wrapping_add(e);
     }
 
+    #[must_use]
     pub fn finalize(mut self) -> [u8; 20] {
         let bit_len = self.total_len.wrapping_mul(8);
 
@@ -330,6 +376,7 @@ impl Sha1 {
     }
 
     /// Compute SHA-1 of data in one call
+    #[must_use]
     pub fn digest(data: &[u8]) -> [u8; 20] {
         let mut sha = Self::new();
         sha.update(data);
@@ -338,6 +385,7 @@ impl Sha1 {
 }
 
 /// Format a SHA-1 hash as hex string
+#[must_use]
 pub fn hex_encode(data: &[u8]) -> String {
     let mut s = String::with_capacity(data.len().saturating_mul(2));
     for &b in data {
@@ -347,8 +395,9 @@ pub fn hex_encode(data: &[u8]) -> String {
 }
 
 /// Parse hex string to bytes
+#[must_use]
 pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     let mut result = Vec::with_capacity(s.len() / 2);
@@ -375,6 +424,7 @@ fn hex_digit(b: u8) -> Option<u8> {
 // ─── URL encoding ────────────────────────────────────────────────────
 
 /// URL-encode binary data (for tracker announces)
+#[must_use]
 pub fn url_encode_bytes(data: &[u8]) -> String {
     let mut out = String::new();
     for &b in data {
@@ -420,24 +470,35 @@ impl TorrentMetainfo {
         let (root, _) = BencodeParser::parse(data)?;
         let dict = root.as_dict().ok_or("torrent root must be a dict")?;
 
-        let announce = dict.get("announce")
+        let announce = dict
+            .get("announce")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
 
         let announce_list = if let Some(al) = dict.get("announce-list").and_then(|v| v.as_list()) {
-            al.iter().filter_map(|tier| {
-                tier.as_list().map(|urls| {
-                    urls.iter().filter_map(|u| u.as_str().map(String::from)).collect()
+            al.iter()
+                .filter_map(|tier| {
+                    tier.as_list().map(|urls| {
+                        urls.iter()
+                            .filter_map(|u| u.as_str().map(String::from))
+                            .collect()
+                    })
                 })
-            }).collect()
+                .collect()
         } else {
             Vec::new()
         };
 
-        let creation_date = dict.get("creation date").and_then(|v| v.as_int());
-        let comment = dict.get("comment").and_then(|v| v.as_str()).map(String::from);
-        let created_by = dict.get("created by").and_then(|v| v.as_str()).map(String::from);
+        let creation_date = dict.get("creation date").and_then(BencodeValue::as_int);
+        let comment = dict
+            .get("comment")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let created_by = dict
+            .get("created by")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         let info = dict.get("info").ok_or("missing 'info' dict")?;
         let info_dict = info.as_dict().ok_or("info must be a dict")?;
@@ -446,16 +507,19 @@ impl TorrentMetainfo {
         let info_bytes = bencode_encode(info);
         let info_hash = Sha1::digest(&info_bytes);
 
-        let name = info_dict.get("name")
+        let name = info_dict
+            .get("name")
             .and_then(|v| v.as_str())
             .ok_or("missing torrent name")?
             .to_string();
 
-        let piece_length = info_dict.get("piece length")
-            .and_then(|v| v.as_int())
+        let piece_length = info_dict
+            .get("piece length")
+            .and_then(BencodeValue::as_int)
             .ok_or("missing piece length")? as u64;
 
-        let pieces_bytes = info_dict.get("pieces")
+        let pieces_bytes = info_dict
+            .get("pieces")
             .and_then(|v| v.as_bytes())
             .ok_or("missing pieces")?;
 
@@ -463,7 +527,8 @@ impl TorrentMetainfo {
             return Err("pieces length not multiple of 20".to_string());
         }
 
-        let pieces: Vec<[u8; 20]> = pieces_bytes.chunks_exact(20)
+        let pieces: Vec<[u8; 20]> = pieces_bytes
+            .chunks_exact(20)
             .map(|chunk| {
                 let mut hash = [0u8; 20];
                 hash.copy_from_slice(chunk);
@@ -471,33 +536,50 @@ impl TorrentMetainfo {
             })
             .collect();
 
-        let is_private = info_dict.get("private")
-            .and_then(|v| v.as_int())
-            .map_or(false, |n| n == 1);
+        let is_private = info_dict.get("private").and_then(BencodeValue::as_int) == Some(1);
 
         // Single file or multi-file?
         let files = if let Some(files_list) = info_dict.get("files").and_then(|v| v.as_list()) {
             // Multi-file torrent
-            files_list.iter().filter_map(|f| {
-                let fd = f.as_dict()?;
-                let length = fd.get("length")?.as_int()? as u64;
-                let path_parts: Vec<&str> = fd.get("path")?.as_list()?
-                    .iter().filter_map(|p| p.as_str()).collect();
-                let path = if path_parts.is_empty() {
-                    "unknown".to_string()
-                } else {
-                    path_parts.join("/")
-                };
-                let md5sum = fd.get("md5sum").and_then(|v| v.as_str()).map(String::from);
-                Some(TorrentFile { path, length, md5sum })
-            }).collect()
+            files_list
+                .iter()
+                .filter_map(|f| {
+                    let fd = f.as_dict()?;
+                    let length = fd.get("length")?.as_int()? as u64;
+                    let path_parts: Vec<&str> = fd
+                        .get("path")?
+                        .as_list()?
+                        .iter()
+                        .filter_map(|p| p.as_str())
+                        .collect();
+                    let path = if path_parts.is_empty() {
+                        "unknown".to_string()
+                    } else {
+                        path_parts.join("/")
+                    };
+                    let md5sum = fd.get("md5sum").and_then(|v| v.as_str()).map(String::from);
+                    Some(TorrentFile {
+                        path,
+                        length,
+                        md5sum,
+                    })
+                })
+                .collect()
         } else {
             // Single file torrent
-            let length = info_dict.get("length")
-                .and_then(|v| v.as_int())
+            let length = info_dict
+                .get("length")
+                .and_then(BencodeValue::as_int)
                 .ok_or("missing file length")? as u64;
-            let md5sum = info_dict.get("md5sum").and_then(|v| v.as_str()).map(String::from);
-            vec![TorrentFile { path: name.clone(), length, md5sum }]
+            let md5sum = info_dict
+                .get("md5sum")
+                .and_then(|v| v.as_str())
+                .map(String::from);
+            vec![TorrentFile {
+                path: name.clone(),
+                length,
+                md5sum,
+            }]
         };
 
         let total_size: u64 = files.iter().map(|f| f.length).sum();
@@ -519,17 +601,23 @@ impl TorrentMetainfo {
     }
 
     /// Number of pieces
+    #[must_use]
     pub fn piece_count(&self) -> usize {
         self.pieces.len()
     }
 
     /// Size of a specific piece (last piece may be smaller)
+    #[must_use]
     pub fn piece_size(&self, index: usize) -> u64 {
         if index.saturating_add(1) < self.pieces.len() {
             self.piece_length
         } else {
             let remainder = self.total_size % self.piece_length;
-            if remainder == 0 { self.piece_length } else { remainder }
+            if remainder == 0 {
+                self.piece_length
+            } else {
+                remainder
+            }
         }
     }
 }
@@ -562,7 +650,10 @@ impl MagnetLink {
 
         for param in query.split('&') {
             let (key, value) = if let Some(eq) = param.find('=') {
-                (param.get(..eq).unwrap_or(""), param.get(eq.saturating_add(1)..).unwrap_or(""))
+                (
+                    param.get(..eq).unwrap_or(""),
+                    param.get(eq.saturating_add(1)..).unwrap_or(""),
+                )
             } else {
                 continue;
             };
@@ -573,8 +664,7 @@ impl MagnetLink {
                     if let Some(hash_str) = value.strip_prefix("urn:btih:") {
                         if hash_str.len() == 40 {
                             // Hex
-                            let bytes = hex_decode(hash_str)
-                                .ok_or("invalid hex in magnet")?;
+                            let bytes = hex_decode(hash_str).ok_or("invalid hex in magnet")?;
                             if bytes.len() != 20 {
                                 return Err("info hash must be 20 bytes".to_string());
                             }
@@ -583,8 +673,8 @@ impl MagnetLink {
                             info_hash = Some(h);
                         } else if hash_str.len() == 32 {
                             // Base32
-                            let decoded = base32_decode(hash_str)
-                                .ok_or("invalid base32 in magnet")?;
+                            let decoded =
+                                base32_decode(hash_str).ok_or("invalid base32 in magnet")?;
                             if decoded.len() != 20 {
                                 return Err("info hash must be 20 bytes".to_string());
                             }
@@ -624,6 +714,7 @@ impl MagnetLink {
     }
 
     /// Generate magnet URI string
+    #[must_use]
     pub fn to_uri(&self) -> String {
         let mut uri = format!("magnet:?xt=urn:btih:{}", hex_encode(&self.info_hash));
         if let Some(ref name) = self.display_name {
@@ -642,15 +733,16 @@ fn url_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes.get(i) == Some(&b'%') && i.saturating_add(2) < bytes.len() {
-            if let (Some(hi), Some(lo)) = (
+        if bytes.get(i) == Some(&b'%')
+            && i.saturating_add(2) < bytes.len()
+            && let (Some(hi), Some(lo)) = (
                 hex_digit(bytes.get(i.saturating_add(1)).copied().unwrap_or(0)),
                 hex_digit(bytes.get(i.saturating_add(2)).copied().unwrap_or(0)),
-            ) {
-                result.push(hi.wrapping_shl(4) | lo);
-                i = i.saturating_add(3);
-                continue;
-            }
+            )
+        {
+            result.push(hi.wrapping_shl(4) | lo);
+            i = i.saturating_add(3);
+            continue;
         }
         if bytes.get(i) == Some(&b'+') {
             result.push(b' ');
@@ -703,18 +795,38 @@ pub enum PeerMessage {
     Unchoke,
     Interested,
     NotInterested,
-    Have { piece_index: u32 },
+    Have {
+        piece_index: u32,
+    },
     Bitfield(Vec<u8>),
-    Request { index: u32, begin: u32, length: u32 },
-    Piece { index: u32, begin: u32, data: Vec<u8> },
-    Cancel { index: u32, begin: u32, length: u32 },
-    Port { port: u16 },
+    Request {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
+    Piece {
+        index: u32,
+        begin: u32,
+        data: Vec<u8>,
+    },
+    Cancel {
+        index: u32,
+        begin: u32,
+        length: u32,
+    },
+    Port {
+        port: u16,
+    },
     // BEP 10: Extension protocol
-    Extended { id: u8, payload: Vec<u8> },
+    Extended {
+        id: u8,
+        payload: Vec<u8>,
+    },
 }
 
 impl PeerMessage {
     /// Message type ID
+    #[must_use]
     pub fn message_id(&self) -> Option<u8> {
         match self {
             Self::KeepAlive => None,
@@ -733,6 +845,7 @@ impl PeerMessage {
     }
 
     /// Encode message to bytes (with 4-byte length prefix)
+    #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         match self {
             Self::KeepAlive => vec![0, 0, 0, 0],
@@ -755,7 +868,16 @@ impl PeerMessage {
                 buf.extend_from_slice(bits);
                 buf
             }
-            Self::Request { index, begin, length } | Self::Cancel { index, begin, length } => {
+            Self::Request {
+                index,
+                begin,
+                length,
+            }
+            | Self::Cancel {
+                index,
+                begin,
+                length,
+            } => {
                 let id = self.message_id().unwrap_or(0);
                 let mut buf = Vec::with_capacity(17);
                 buf.extend_from_slice(&13u32.to_be_bytes());
@@ -813,7 +935,7 @@ impl PeerMessage {
                     return Err("have message too short".to_string());
                 }
                 let piece_index = u32::from_be_bytes([
-                    payload.get(0).copied().unwrap_or(0),
+                    payload.first().copied().unwrap_or(0),
                     payload.get(1).copied().unwrap_or(0),
                     payload.get(2).copied().unwrap_or(0),
                     payload.get(3).copied().unwrap_or(0),
@@ -827,16 +949,22 @@ impl PeerMessage {
                 }
                 Ok(Self::Request {
                     index: u32::from_be_bytes([
-                        payload.get(0).copied().unwrap_or(0), payload.get(1).copied().unwrap_or(0),
-                        payload.get(2).copied().unwrap_or(0), payload.get(3).copied().unwrap_or(0),
+                        payload.first().copied().unwrap_or(0),
+                        payload.get(1).copied().unwrap_or(0),
+                        payload.get(2).copied().unwrap_or(0),
+                        payload.get(3).copied().unwrap_or(0),
                     ]),
                     begin: u32::from_be_bytes([
-                        payload.get(4).copied().unwrap_or(0), payload.get(5).copied().unwrap_or(0),
-                        payload.get(6).copied().unwrap_or(0), payload.get(7).copied().unwrap_or(0),
+                        payload.get(4).copied().unwrap_or(0),
+                        payload.get(5).copied().unwrap_or(0),
+                        payload.get(6).copied().unwrap_or(0),
+                        payload.get(7).copied().unwrap_or(0),
                     ]),
                     length: u32::from_be_bytes([
-                        payload.get(8).copied().unwrap_or(0), payload.get(9).copied().unwrap_or(0),
-                        payload.get(10).copied().unwrap_or(0), payload.get(11).copied().unwrap_or(0),
+                        payload.get(8).copied().unwrap_or(0),
+                        payload.get(9).copied().unwrap_or(0),
+                        payload.get(10).copied().unwrap_or(0),
+                        payload.get(11).copied().unwrap_or(0),
                     ]),
                 })
             }
@@ -846,12 +974,16 @@ impl PeerMessage {
                 }
                 Ok(Self::Piece {
                     index: u32::from_be_bytes([
-                        payload.get(0).copied().unwrap_or(0), payload.get(1).copied().unwrap_or(0),
-                        payload.get(2).copied().unwrap_or(0), payload.get(3).copied().unwrap_or(0),
+                        payload.first().copied().unwrap_or(0),
+                        payload.get(1).copied().unwrap_or(0),
+                        payload.get(2).copied().unwrap_or(0),
+                        payload.get(3).copied().unwrap_or(0),
                     ]),
                     begin: u32::from_be_bytes([
-                        payload.get(4).copied().unwrap_or(0), payload.get(5).copied().unwrap_or(0),
-                        payload.get(6).copied().unwrap_or(0), payload.get(7).copied().unwrap_or(0),
+                        payload.get(4).copied().unwrap_or(0),
+                        payload.get(5).copied().unwrap_or(0),
+                        payload.get(6).copied().unwrap_or(0),
+                        payload.get(7).copied().unwrap_or(0),
                     ]),
                     data: payload.get(8..).unwrap_or_default().to_vec(),
                 })
@@ -862,16 +994,22 @@ impl PeerMessage {
                 }
                 Ok(Self::Cancel {
                     index: u32::from_be_bytes([
-                        payload.get(0).copied().unwrap_or(0), payload.get(1).copied().unwrap_or(0),
-                        payload.get(2).copied().unwrap_or(0), payload.get(3).copied().unwrap_or(0),
+                        payload.first().copied().unwrap_or(0),
+                        payload.get(1).copied().unwrap_or(0),
+                        payload.get(2).copied().unwrap_or(0),
+                        payload.get(3).copied().unwrap_or(0),
                     ]),
                     begin: u32::from_be_bytes([
-                        payload.get(4).copied().unwrap_or(0), payload.get(5).copied().unwrap_or(0),
-                        payload.get(6).copied().unwrap_or(0), payload.get(7).copied().unwrap_or(0),
+                        payload.get(4).copied().unwrap_or(0),
+                        payload.get(5).copied().unwrap_or(0),
+                        payload.get(6).copied().unwrap_or(0),
+                        payload.get(7).copied().unwrap_or(0),
                     ]),
                     length: u32::from_be_bytes([
-                        payload.get(8).copied().unwrap_or(0), payload.get(9).copied().unwrap_or(0),
-                        payload.get(10).copied().unwrap_or(0), payload.get(11).copied().unwrap_or(0),
+                        payload.get(8).copied().unwrap_or(0),
+                        payload.get(9).copied().unwrap_or(0),
+                        payload.get(10).copied().unwrap_or(0),
+                        payload.get(11).copied().unwrap_or(0),
                     ]),
                 })
             }
@@ -881,7 +1019,7 @@ impl PeerMessage {
                 }
                 Ok(Self::Port {
                     port: u16::from_be_bytes([
-                        payload.get(0).copied().unwrap_or(0),
+                        payload.first().copied().unwrap_or(0),
                         payload.get(1).copied().unwrap_or(0),
                     ]),
                 })
@@ -908,10 +1046,11 @@ pub struct Handshake {
 }
 
 impl Handshake {
-    /// Standard BitTorrent protocol name
+    /// Standard `BitTorrent` protocol name
     pub const PROTOCOL: &str = "BitTorrent protocol";
 
     /// Create a new handshake
+    #[must_use]
     pub fn new(info_hash: [u8; 20], peer_id: [u8; 20]) -> Self {
         let mut reserved = [0u8; 8];
         // BEP 10: set extension protocol bit
@@ -927,6 +1066,7 @@ impl Handshake {
     }
 
     /// Encode handshake to bytes
+    #[must_use]
     pub fn encode(&self) -> Vec<u8> {
         let pstr = self.protocol.as_bytes();
         let mut buf = Vec::with_capacity(1usize.saturating_add(pstr.len()).saturating_add(48));
@@ -946,12 +1086,18 @@ impl Handshake {
         let pstr_len = data.first().copied().unwrap_or(0) as usize;
         let expected_len = 1usize.saturating_add(pstr_len).saturating_add(48);
         if data.len() < expected_len {
-            return Err(format!("handshake too short: {} < {expected_len}", data.len()));
+            return Err(format!(
+                "handshake too short: {} < {expected_len}",
+                data.len()
+            ));
         }
 
-        let protocol = std::str::from_utf8(data.get(1..1usize.saturating_add(pstr_len)).unwrap_or_default())
-            .map_err(|e| format!("invalid protocol string: {e}"))?
-            .to_string();
+        let protocol = std::str::from_utf8(
+            data.get(1..1usize.saturating_add(pstr_len))
+                .unwrap_or_default(),
+        )
+        .map_err(|e| format!("invalid protocol string: {e}"))?
+        .to_string();
 
         let reserved_start = 1usize.saturating_add(pstr_len);
         let mut reserved = [0u8; 8];
@@ -971,12 +1117,18 @@ impl Handshake {
             peer_id.copy_from_slice(src);
         }
 
-        Ok(Self { protocol, reserved, info_hash, peer_id })
+        Ok(Self {
+            protocol,
+            reserved,
+            info_hash,
+            peer_id,
+        })
     }
 
     /// Check if peer supports extension protocol (BEP 10)
+    #[must_use]
     pub fn supports_extensions(&self) -> bool {
-        self.reserved.get(5).map_or(false, |b| b & 0x10 != 0)
+        self.reserved.get(5).is_some_and(|b| b & 0x10 != 0)
     }
 }
 
@@ -998,6 +1150,7 @@ pub struct PieceTracker {
 }
 
 impl PieceTracker {
+    #[must_use]
     pub fn new(piece_count: usize) -> Self {
         let byte_count = piece_count.saturating_add(7) / 8;
         Self {
@@ -1010,10 +1163,13 @@ impl PieceTracker {
     }
 
     /// Check if we have a piece
+    #[must_use]
     pub fn has_piece(&self, index: usize) -> bool {
         let byte_idx = index / 8;
         let bit_idx = 7usize.saturating_sub(index % 8);
-        self.bitfield.get(byte_idx).map_or(false, |b| (b >> bit_idx) & 1 == 1)
+        self.bitfield
+            .get(byte_idx)
+            .is_some_and(|b| (b >> bit_idx) & 1 == 1)
     }
 
     /// Mark a piece as completed
@@ -1054,26 +1210,31 @@ impl PieceTracker {
     }
 
     /// Get our bitfield for sending to peers
+    #[must_use]
     pub fn bitfield(&self) -> &[u8] {
         &self.bitfield
     }
 
     /// Number of completed pieces
+    #[must_use]
     pub fn completed_count(&self) -> usize {
         self.completed
     }
 
     /// Total number of pieces
+    #[must_use]
     pub fn total_count(&self) -> usize {
         self.piece_count
     }
 
     /// Is download complete?
+    #[must_use]
     pub fn is_complete(&self) -> bool {
         self.completed == self.piece_count
     }
 
     /// Completion percentage
+    #[must_use]
     pub fn progress(&self) -> f64 {
         if self.piece_count == 0 {
             return 100.0;
@@ -1082,6 +1243,7 @@ impl PieceTracker {
     }
 
     /// Pick next piece to download using rarest-first with peer availability
+    #[must_use]
     pub fn pick_piece(&self, peer_bitfield: &[u8], availability: &[u32]) -> Option<usize> {
         let mut best_index = None;
         let mut best_avail = u32::MAX;
@@ -1099,7 +1261,9 @@ impl PieceTracker {
             // Check if peer has this piece
             let byte_idx = i / 8;
             let bit_idx = 7usize.saturating_sub(i % 8);
-            let peer_has = peer_bitfield.get(byte_idx).map_or(false, |b| (b >> bit_idx) & 1 == 1);
+            let peer_has = peer_bitfield
+                .get(byte_idx)
+                .is_some_and(|b| (b >> bit_idx) & 1 == 1);
             if !peer_has {
                 continue;
             }
@@ -1154,10 +1318,10 @@ pub struct PeerInfo {
     pub peer_choking: bool,
     pub peer_interested: bool,
     pub bitfield: Vec<u8>,
-    pub download_rate: u64,   // bytes per second
-    pub upload_rate: u64,     // bytes per second
-    pub downloaded: u64,      // total bytes downloaded from this peer
-    pub uploaded: u64,        // total bytes uploaded to this peer
+    pub download_rate: u64, // bytes per second
+    pub upload_rate: u64,   // bytes per second
+    pub downloaded: u64,    // total bytes downloaded from this peer
+    pub uploaded: u64,      // total bytes uploaded to this peer
     pub requests_pending: u32,
     pub connection_time: u64, // seconds since connected
     pub country: String,
@@ -1165,6 +1329,7 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
+    #[must_use]
     pub fn new(address: &str, port: u16) -> Self {
         Self {
             address: address.to_string(),
@@ -1189,13 +1354,14 @@ impl PeerInfo {
     }
 
     /// Identify client from peer ID (Azureus-style and Shadow-style)
+    #[must_use]
     pub fn identify_client(peer_id: &[u8; 20]) -> String {
         // Azureus-style: -XX0000-
         if peer_id.first() == Some(&b'-') && peer_id.get(7) == Some(&b'-') {
-            let client_code = std::str::from_utf8(peer_id.get(1..3).unwrap_or_default())
-                .unwrap_or("??");
-            let version = std::str::from_utf8(peer_id.get(3..7).unwrap_or_default())
-                .unwrap_or("????");
+            let client_code =
+                std::str::from_utf8(peer_id.get(1..3).unwrap_or_default()).unwrap_or("??");
+            let version =
+                std::str::from_utf8(peer_id.get(3..7).unwrap_or_default()).unwrap_or("????");
             let name = match client_code {
                 "qB" => "qBittorrent",
                 "UT" => "µTorrent",
@@ -1216,18 +1382,18 @@ impl PeerInfo {
         }
 
         // Shadow-style: single letter + 3 digit version
-        if let Some(&first) = peer_id.first() {
-            if first.is_ascii_alphabetic() {
-                let name = match first {
-                    b'A' => "ABC",
-                    b'M' => "Mainline",
-                    b'O' => "Osprey",
-                    b'S' => "Shadow",
-                    b'T' => "BitTornado",
-                    _ => "Unknown",
-                };
-                return name.to_string();
-            }
+        if let Some(&first) = peer_id.first()
+            && first.is_ascii_alphabetic()
+        {
+            let name = match first {
+                b'A' => "ABC",
+                b'M' => "Mainline",
+                b'O' => "Osprey",
+                b'S' => "Shadow",
+                b'T' => "BitTornado",
+                _ => "Unknown",
+            };
+            return name.to_string();
         }
 
         "Unknown".to_string()
@@ -1272,6 +1438,7 @@ pub struct AnnounceRequest {
 
 impl AnnounceRequest {
     /// Build announce URL with query parameters
+    #[must_use]
     pub fn build_url(&self, tracker_url: &str) -> String {
         let sep = if tracker_url.contains('?') { "&" } else { "?" };
         let mut url = format!(
@@ -1282,7 +1449,7 @@ impl AnnounceRequest {
             self.uploaded,
             self.downloaded,
             self.left,
-            if self.compact { 1 } else { 0 },
+            i32::from(self.compact),
         );
 
         if self.event != TrackerEvent::None {
@@ -1303,8 +1470,8 @@ pub struct AnnounceResponse {
     pub interval: u64,
     pub min_interval: Option<u64>,
     pub tracker_id: Option<String>,
-    pub complete: u32,   // seeders
-    pub incomplete: u32, // leechers
+    pub complete: u32,             // seeders
+    pub incomplete: u32,           // leechers
     pub peers: Vec<(String, u16)>, // (ip, port)
     pub warning_message: Option<String>,
     pub failure_reason: Option<String>,
@@ -1329,37 +1496,62 @@ impl AnnounceResponse {
             });
         }
 
-        let interval = dict.get("interval").and_then(|v| v.as_int()).unwrap_or(1800) as u64;
-        let min_interval = dict.get("min interval").and_then(|v| v.as_int()).map(|n| n as u64);
-        let tracker_id = dict.get("tracker id").and_then(|v| v.as_str()).map(String::from);
-        let complete = dict.get("complete").and_then(|v| v.as_int()).unwrap_or(0) as u32;
-        let incomplete = dict.get("incomplete").and_then(|v| v.as_int()).unwrap_or(0) as u32;
-        let warning_message = dict.get("warning message").and_then(|v| v.as_str()).map(String::from);
+        let interval = dict
+            .get("interval")
+            .and_then(BencodeValue::as_int)
+            .unwrap_or(1800) as u64;
+        let min_interval = dict
+            .get("min interval")
+            .and_then(BencodeValue::as_int)
+            .map(|n| n as u64);
+        let tracker_id = dict
+            .get("tracker id")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let complete = dict
+            .get("complete")
+            .and_then(BencodeValue::as_int)
+            .unwrap_or(0) as u32;
+        let incomplete = dict
+            .get("incomplete")
+            .and_then(BencodeValue::as_int)
+            .unwrap_or(0) as u32;
+        let warning_message = dict
+            .get("warning message")
+            .and_then(|v| v.as_str())
+            .map(String::from);
 
         // Parse peers: compact (binary) or dict format
         let peers = if let Some(peers_bytes) = dict.get("peers").and_then(|v| v.as_bytes()) {
             // Compact format: 6 bytes per peer (4 IP + 2 port)
-            peers_bytes.chunks_exact(6).map(|chunk| {
-                let ip = format!("{}.{}.{}.{}",
-                    chunk.first().copied().unwrap_or(0),
-                    chunk.get(1).copied().unwrap_or(0),
-                    chunk.get(2).copied().unwrap_or(0),
-                    chunk.get(3).copied().unwrap_or(0),
-                );
-                let port = u16::from_be_bytes([
-                    chunk.get(4).copied().unwrap_or(0),
-                    chunk.get(5).copied().unwrap_or(0),
-                ]);
-                (ip, port)
-            }).collect()
+            peers_bytes
+                .chunks_exact(6)
+                .map(|chunk| {
+                    let ip = format!(
+                        "{}.{}.{}.{}",
+                        chunk.first().copied().unwrap_or(0),
+                        chunk.get(1).copied().unwrap_or(0),
+                        chunk.get(2).copied().unwrap_or(0),
+                        chunk.get(3).copied().unwrap_or(0),
+                    );
+                    let port = u16::from_be_bytes([
+                        chunk.get(4).copied().unwrap_or(0),
+                        chunk.get(5).copied().unwrap_or(0),
+                    ]);
+                    (ip, port)
+                })
+                .collect()
         } else if let Some(peers_list) = dict.get("peers").and_then(|v| v.as_list()) {
             // Dict format
-            peers_list.iter().filter_map(|p| {
-                let pd = p.as_dict()?;
-                let ip = pd.get("ip")?.as_str()?.to_string();
-                let port = pd.get("port")?.as_int()? as u16;
-                Some((ip, port))
-            }).collect()
+            peers_list
+                .iter()
+                .filter_map(|p| {
+                    let pd = p.as_dict()?;
+                    let ip = pd.get("ip")?.as_str()?.to_string();
+                    let port = pd.get("port")?.as_int()? as u16;
+                    Some((ip, port))
+                })
+                .collect()
         } else {
             Vec::new()
         };
@@ -1428,6 +1620,7 @@ pub struct SpeedTracker {
 }
 
 impl SpeedTracker {
+    #[must_use]
     pub fn new(max_samples: usize, interval_ms: u64) -> Self {
         Self {
             samples: Vec::with_capacity(max_samples),
@@ -1447,18 +1640,21 @@ impl SpeedTracker {
     }
 
     /// Current speed in bytes per second
+    #[must_use]
     pub fn speed_bps(&self) -> u64 {
         if self.samples.is_empty() || self.sample_interval_ms == 0 {
             return 0;
         }
         let sum: u64 = self.samples.iter().sum();
-        let duration_s = (self.samples.len() as u64)
-            .saturating_mul(self.sample_interval_ms) / 1000;
-        if duration_s == 0 { return 0; }
+        let duration_s = (self.samples.len() as u64).saturating_mul(self.sample_interval_ms) / 1000;
+        if duration_s == 0 {
+            return 0;
+        }
         sum / duration_s
     }
 
     /// Total bytes transferred
+    #[must_use]
     pub fn total(&self) -> u64 {
         self.total_bytes
     }
@@ -1476,6 +1672,7 @@ pub struct BandwidthLimiter {
 }
 
 impl BandwidthLimiter {
+    #[must_use]
     pub fn new(limit_bps: u64) -> Self {
         Self {
             limit_bps,
@@ -1507,6 +1704,7 @@ impl BandwidthLimiter {
     }
 
     /// Check if unlimited
+    #[must_use]
     pub fn is_unlimited(&self) -> bool {
         self.limit_bps == 0
     }
@@ -1600,6 +1798,7 @@ impl fmt::Display for TrackerStatus {
 
 impl ManagedTorrent {
     /// Create from a parsed torrent file
+    #[must_use]
     pub fn from_metainfo(id: u32, meta: TorrentMetainfo, save_path: &str) -> Self {
         let piece_count = meta.piece_count();
         let file_count = meta.files.len();
@@ -1619,19 +1818,23 @@ impl ManagedTorrent {
                 error_message: None,
             }]
         } else {
-            meta.announce_list.iter().enumerate().flat_map(|(tier, urls)| {
-                urls.iter().map(move |url| TrackerEntry {
-                    url: url.clone(),
-                    tier: tier as u32,
-                    status: TrackerStatus::NotContacted,
-                    seeders: 0,
-                    leechers: 0,
-                    last_announce: None,
-                    next_announce: None,
-                    announce_count: 0,
-                    error_message: None,
+            meta.announce_list
+                .iter()
+                .enumerate()
+                .flat_map(|(tier, urls)| {
+                    urls.iter().map(move |url| TrackerEntry {
+                        url: url.clone(),
+                        tier: tier as u32,
+                        status: TrackerStatus::NotContacted,
+                        seeders: 0,
+                        leechers: 0,
+                        last_announce: None,
+                        next_announce: None,
+                        announce_count: 0,
+                        error_message: None,
+                    })
                 })
-            }).collect()
+                .collect()
         };
 
         Self {
@@ -1662,13 +1865,20 @@ impl ManagedTorrent {
     }
 
     /// Create from a magnet link
+    #[must_use]
     pub fn from_magnet(id: u32, magnet: MagnetLink, save_path: &str) -> Self {
         let name = magnet.display_name.clone().unwrap_or_else(|| {
-            hex_encode(&magnet.info_hash).get(..16).unwrap_or("unknown").to_string()
+            hex_encode(&magnet.info_hash)
+                .get(..16)
+                .unwrap_or("unknown")
+                .to_string()
         });
 
-        let trackers: Vec<TrackerEntry> = magnet.trackers.iter().enumerate().map(|(i, url)| {
-            TrackerEntry {
+        let trackers: Vec<TrackerEntry> = magnet
+            .trackers
+            .iter()
+            .enumerate()
+            .map(|(i, url)| TrackerEntry {
                 url: url.clone(),
                 tier: i as u32,
                 status: TrackerStatus::NotContacted,
@@ -1678,8 +1888,8 @@ impl ManagedTorrent {
                 next_announce: None,
                 announce_count: 0,
                 error_message: None,
-            }
-        }).collect();
+            })
+            .collect();
 
         Self {
             id,
@@ -1709,6 +1919,7 @@ impl ManagedTorrent {
     }
 
     /// Progress percentage
+    #[must_use]
     pub fn progress(&self) -> f64 {
         if self.total_size == 0 {
             return 0.0;
@@ -1717,6 +1928,7 @@ impl ManagedTorrent {
     }
 
     /// Share ratio
+    #[must_use]
     pub fn ratio(&self) -> f64 {
         if self.downloaded == 0 {
             return 0.0;
@@ -1725,6 +1937,7 @@ impl ManagedTorrent {
     }
 
     /// ETA in seconds based on current download speed
+    #[must_use]
     pub fn eta_seconds(&self) -> Option<u64> {
         let speed = self.download_speed.speed_bps();
         if speed == 0 {
@@ -1774,14 +1987,14 @@ pub struct ClientSettings {
     pub global_upload_limit: u64,
     pub default_save_path: String,
     pub dht_enabled: bool,
-    pub pex_enabled: bool,        // Peer exchange
-    pub lsd_enabled: bool,        // Local service discovery
+    pub pex_enabled: bool, // Peer exchange
+    pub lsd_enabled: bool, // Local service discovery
     pub encryption_mode: EncryptionMode,
     pub seed_ratio_limit: Option<f64>,
     pub seed_time_limit: Option<u64>, // seconds
     pub pre_allocate_storage: bool,
     pub check_hash_on_completion: bool,
-    pub enable_utp: bool,         // µTP (micro Transport Protocol)
+    pub enable_utp: bool, // µTP (micro Transport Protocol)
     pub proxy_type: ProxyType,
     pub proxy_host: String,
     pub proxy_port: u16,
@@ -1862,7 +2075,7 @@ impl Default for ClientSettings {
 
 // ─── Application ─────────────────────────────────────────────────────
 
-use guitk::render::{RenderCommand, FontWeightHint};
+use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 
 /// Catppuccin Mocha palette
@@ -1901,10 +2114,15 @@ pub enum Tab {
 
 impl Tab {
     pub const ALL: [Self; 6] = [
-        Self::Transfers, Self::Details, Self::Peers,
-        Self::Files, Self::Trackers, Self::Settings,
+        Self::Transfers,
+        Self::Details,
+        Self::Peers,
+        Self::Files,
+        Self::Trackers,
+        Self::Settings,
     ];
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::Transfers => "Transfers",
@@ -1968,6 +2186,7 @@ pub enum TorrentFilter {
 }
 
 impl TorrentFilter {
+    #[must_use]
     pub fn matches(self, state: TorrentState) -> bool {
         match self {
             Self::All => true,
@@ -1980,6 +2199,7 @@ impl TorrentFilter {
         }
     }
 
+    #[must_use]
     pub fn label(self) -> &'static str {
         match self {
             Self::All => "All",
@@ -1993,7 +2213,14 @@ impl TorrentFilter {
     }
 }
 
+impl Default for TorrentApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TorrentApp {
+    #[must_use]
     pub fn new() -> Self {
         // Generate peer ID: -OT0100- + 12 random chars (OT = OurTorrent)
         let mut peer_id = [0u8; 20];
@@ -2056,7 +2283,11 @@ impl TorrentApp {
     /// Remove a torrent by ID
     pub fn remove_torrent(&mut self, id: u32, delete_files: bool) {
         if let Some(pos) = self.torrents.iter().position(|t| t.id == id) {
-            let name = self.torrents.get(pos).map_or("Unknown", |t| &t.name).to_string();
+            let name = self
+                .torrents
+                .get(pos)
+                .map_or("Unknown", |t| &t.name)
+                .to_string();
             self.torrents.remove(pos);
             if self.selected_torrent == Some(id) {
                 self.selected_torrent = None;
@@ -2100,16 +2331,18 @@ impl TorrentApp {
     }
 
     /// Get filtered and sorted torrent list
+    #[must_use]
     pub fn filtered_torrents(&self) -> Vec<&ManagedTorrent> {
-        let mut list: Vec<&ManagedTorrent> = self.torrents.iter()
+        let mut list: Vec<&ManagedTorrent> = self
+            .torrents
+            .iter()
             .filter(|t| self.filter.matches(t.state))
             .filter(|t| {
                 if self.search_query.is_empty() {
                     true
                 } else {
                     let q = self.search_query.to_lowercase();
-                    t.name.to_lowercase().contains(&q)
-                        || t.label.to_lowercase().contains(&q)
+                    t.name.to_lowercase().contains(&q) || t.label.to_lowercase().contains(&q)
                 }
             })
             .filter(|t| {
@@ -2125,11 +2358,20 @@ impl TorrentApp {
             let cmp = match self.sort_column {
                 SortColumn::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
                 SortColumn::Size => a.total_size.cmp(&b.total_size),
-                SortColumn::Progress => a.progress().partial_cmp(&b.progress()).unwrap_or(std::cmp::Ordering::Equal),
+                SortColumn::Progress => a
+                    .progress()
+                    .partial_cmp(&b.progress())
+                    .unwrap_or(std::cmp::Ordering::Equal),
                 SortColumn::Status => (a.state as u8).cmp(&(b.state as u8)),
-                SortColumn::DownSpeed => a.download_speed.speed_bps().cmp(&b.download_speed.speed_bps()),
+                SortColumn::DownSpeed => a
+                    .download_speed
+                    .speed_bps()
+                    .cmp(&b.download_speed.speed_bps()),
                 SortColumn::UpSpeed => a.upload_speed.speed_bps().cmp(&b.upload_speed.speed_bps()),
-                SortColumn::Ratio => a.ratio().partial_cmp(&b.ratio()).unwrap_or(std::cmp::Ordering::Equal),
+                SortColumn::Ratio => a
+                    .ratio()
+                    .partial_cmp(&b.ratio())
+                    .unwrap_or(std::cmp::Ordering::Equal),
                 SortColumn::Eta => {
                     let ea = a.eta_seconds().unwrap_or(u64::MAX);
                     let eb = b.eta_seconds().unwrap_or(u64::MAX);
@@ -2143,16 +2385,29 @@ impl TorrentApp {
                 SortColumn::Peers => a.peers.len().cmp(&b.peers.len()),
                 SortColumn::Added => a.added_time.cmp(&b.added_time),
             };
-            if self.sort_ascending { cmp } else { cmp.reverse() }
+            if self.sort_ascending {
+                cmp
+            } else {
+                cmp.reverse()
+            }
         });
 
         list
     }
 
     /// Summary statistics
+    #[must_use]
     pub fn stats(&self) -> (usize, usize, usize, u64, u64) {
-        let downloading = self.torrents.iter().filter(|t| t.state == TorrentState::Downloading).count();
-        let seeding = self.torrents.iter().filter(|t| t.state == TorrentState::Seeding).count();
+        let downloading = self
+            .torrents
+            .iter()
+            .filter(|t| t.state == TorrentState::Downloading)
+            .count();
+        let seeding = self
+            .torrents
+            .iter()
+            .filter(|t| t.state == TorrentState::Seeding)
+            .count();
         let total = self.torrents.len();
         let dl_speed = self.global_download_speed.speed_bps();
         let ul_speed = self.global_upload_speed.speed_bps();
@@ -2160,6 +2415,7 @@ impl TorrentApp {
     }
 
     /// Render the UI
+    #[must_use]
     pub fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
         let mut cmds = Vec::new();
         let header_h = 48.0;
@@ -2169,21 +2425,28 @@ impl TorrentApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: colors::BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Header bar
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height: header_h,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: header_h,
             color: colors::MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: 16.0, y: 14.0,
+            x: 16.0,
+            y: 14.0,
             text: "Torrent".to_string(),
             font_size: 18.0,
             color: colors::BLUE,
@@ -2192,17 +2455,28 @@ impl TorrentApp {
         });
 
         // Toolbar buttons
-        let buttons = ["Add", "Remove", "Pause", "Resume", "Pause All", "Resume All"];
+        let buttons = [
+            "Add",
+            "Remove",
+            "Pause",
+            "Resume",
+            "Pause All",
+            "Resume All",
+        ];
         let mut bx = 120.0;
         for label in &buttons {
             let bw = label.len() as f32 * 8.0 + 24.0;
             cmds.push(RenderCommand::FillRect {
-                x: bx, y: 8.0, width: bw, height: 32.0,
+                x: bx,
+                y: 8.0,
+                width: bw,
+                height: 32.0,
                 color: colors::SURFACE0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: bx + 12.0, y: 16.0,
+                x: bx + 12.0,
+                y: 16.0,
                 text: label.to_string(),
                 font_size: 12.0,
                 color: colors::TEXT,
@@ -2216,15 +2490,22 @@ impl TorrentApp {
         let sidebar_y = header_h;
         let sidebar_h = height - header_h - status_h;
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: sidebar_y, width: sidebar_w, height: sidebar_h,
+            x: 0.0,
+            y: sidebar_y,
+            width: sidebar_w,
+            height: sidebar_h,
             color: colors::MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Filter items in sidebar
         let filters = [
-            TorrentFilter::All, TorrentFilter::Downloading, TorrentFilter::Seeding,
-            TorrentFilter::Completed, TorrentFilter::Paused, TorrentFilter::Active,
+            TorrentFilter::All,
+            TorrentFilter::Downloading,
+            TorrentFilter::Seeding,
+            TorrentFilter::Completed,
+            TorrentFilter::Paused,
+            TorrentFilter::Active,
             TorrentFilter::Error,
         ];
         let mut fy = sidebar_y + 8.0;
@@ -2232,18 +2513,34 @@ impl TorrentApp {
             let is_sel = *filter == self.filter;
             if is_sel {
                 cmds.push(RenderCommand::FillRect {
-                    x: 4.0, y: fy, width: sidebar_w - 8.0, height: 28.0,
+                    x: 4.0,
+                    y: fy,
+                    width: sidebar_w - 8.0,
+                    height: 28.0,
                     color: colors::SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
-            let count = self.torrents.iter().filter(|t| filter.matches(t.state)).count();
+            let count = self
+                .torrents
+                .iter()
+                .filter(|t| filter.matches(t.state))
+                .count();
             cmds.push(RenderCommand::Text {
-                x: 16.0, y: fy + 7.0,
+                x: 16.0,
+                y: fy + 7.0,
                 text: format!("{} ({})", filter.label(), count),
                 font_size: 12.0,
-                color: if is_sel { colors::BLUE } else { colors::SUBTEXT1 },
-                font_weight: if is_sel { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                color: if is_sel {
+                    colors::BLUE
+                } else {
+                    colors::SUBTEXT1
+                },
+                font_weight: if is_sel {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(sidebar_w - 24.0),
             });
             fy += 32.0;
@@ -2252,7 +2549,8 @@ impl TorrentApp {
         // Labels section
         fy += 16.0;
         cmds.push(RenderCommand::Text {
-            x: 16.0, y: fy,
+            x: 16.0,
+            y: fy,
             text: "Labels".to_string(),
             font_size: 11.0,
             color: colors::OVERLAY0,
@@ -2264,16 +2562,24 @@ impl TorrentApp {
             let is_sel = self.selected_label.as_ref() == Some(label);
             if is_sel {
                 cmds.push(RenderCommand::FillRect {
-                    x: 4.0, y: fy, width: sidebar_w - 8.0, height: 24.0,
+                    x: 4.0,
+                    y: fy,
+                    width: sidebar_w - 8.0,
+                    height: 24.0,
                     color: colors::SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
             cmds.push(RenderCommand::Text {
-                x: 16.0, y: fy + 5.0,
+                x: 16.0,
+                y: fy + 5.0,
                 text: label.clone(),
                 font_size: 12.0,
-                color: if is_sel { colors::BLUE } else { colors::SUBTEXT0 },
+                color: if is_sel {
+                    colors::BLUE
+                } else {
+                    colors::SUBTEXT0
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(sidebar_w - 24.0),
             });
@@ -2284,7 +2590,10 @@ impl TorrentApp {
         let content_x = sidebar_w;
         let content_w = width - sidebar_w;
         cmds.push(RenderCommand::FillRect {
-            x: content_x, y: header_h, width: content_w, height: tab_h,
+            x: content_x,
+            y: header_h,
+            width: content_w,
+            height: tab_h,
             color: colors::CRUST,
             corner_radii: CornerRadii::ZERO,
         });
@@ -2295,20 +2604,34 @@ impl TorrentApp {
             let tw = tab.label().len() as f32 * 8.0 + 20.0;
             if is_active {
                 cmds.push(RenderCommand::FillRect {
-                    x: tx, y: header_h + 4.0, width: tw, height: tab_h - 4.0,
+                    x: tx,
+                    y: header_h + 4.0,
+                    width: tw,
+                    height: tab_h - 4.0,
                     color: colors::BASE,
                     corner_radii: CornerRadii {
-                        top_left: 6.0, top_right: 6.0,
-                        bottom_left: 0.0, bottom_right: 0.0,
+                        top_left: 6.0,
+                        top_right: 6.0,
+                        bottom_left: 0.0,
+                        bottom_right: 0.0,
                     },
                 });
             }
             cmds.push(RenderCommand::Text {
-                x: tx + 10.0, y: header_h + 12.0,
+                x: tx + 10.0,
+                y: header_h + 12.0,
                 text: tab.label().to_string(),
                 font_size: 12.0,
-                color: if is_active { colors::BLUE } else { colors::SUBTEXT0 },
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                color: if is_active {
+                    colors::BLUE
+                } else {
+                    colors::SUBTEXT0
+                },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
             tx += tw + 4.0;
@@ -2319,29 +2642,45 @@ impl TorrentApp {
         let content_h = height - header_h - tab_h - status_h;
 
         match self.active_tab {
-            Tab::Transfers => self.render_transfers(&mut cmds, content_x, content_y, content_w, content_h),
-            Tab::Details => self.render_details(&mut cmds, content_x, content_y, content_w, content_h),
+            Tab::Transfers => {
+                self.render_transfers(&mut cmds, content_x, content_y, content_w, content_h)
+            }
+            Tab::Details => {
+                self.render_details(&mut cmds, content_x, content_y, content_w, content_h)
+            }
             Tab::Peers => self.render_peers(&mut cmds, content_x, content_y, content_w, content_h),
             Tab::Files => self.render_files(&mut cmds, content_x, content_y, content_w, content_h),
-            Tab::Trackers => self.render_trackers(&mut cmds, content_x, content_y, content_w, content_h),
-            Tab::Settings => self.render_settings(&mut cmds, content_x, content_y, content_w, content_h),
+            Tab::Trackers => {
+                self.render_trackers(&mut cmds, content_x, content_y, content_w, content_h)
+            }
+            Tab::Settings => {
+                self.render_settings(&mut cmds, content_x, content_y, content_w, content_h)
+            }
         }
 
         // Status bar
         let sy = height - status_h;
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: sy, width, height: status_h,
+            x: 0.0,
+            y: sy,
+            width,
+            height: status_h,
             color: colors::CRUST,
             corner_radii: CornerRadii::ZERO,
         });
 
         let (downloading, seeding, total, dl_speed, ul_speed) = self.stats();
         cmds.push(RenderCommand::Text {
-            x: 12.0, y: sy + 8.0,
+            x: 12.0,
+            y: sy + 8.0,
             text: format!(
                 "↓ {}  ↑ {}  |  {} downloading, {} seeding, {} total  |  {}",
-                format_speed(dl_speed), format_speed(ul_speed),
-                downloading, seeding, total, self.status_message
+                format_speed(dl_speed),
+                format_speed(ul_speed),
+                downloading,
+                seeding,
+                total,
+                self.status_message
             ),
             font_size: 11.0,
             color: colors::SUBTEXT0,
@@ -2354,14 +2693,22 @@ impl TorrentApp {
 
     fn render_transfers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Column headers
-        let cols = [("Name", 250.0), ("Size", 80.0), ("Progress", 120.0),
-                     ("Status", 80.0), ("↓ Speed", 80.0), ("↑ Speed", 80.0),
-                     ("Ratio", 60.0), ("ETA", 80.0)];
+        let cols = [
+            ("Name", 250.0),
+            ("Size", 80.0),
+            ("Progress", 120.0),
+            ("Status", 80.0),
+            ("↓ Speed", 80.0),
+            ("↑ Speed", 80.0),
+            ("Ratio", 60.0),
+            ("ETA", 80.0),
+        ];
         let mut cx = x + 8.0;
         let hy = y + 4.0;
         for (label, cw) in &cols {
             cmds.push(RenderCommand::Text {
-                x: cx, y: hy,
+                x: cx,
+                y: hy,
                 text: label.to_string(),
                 font_size: 11.0,
                 color: colors::OVERLAY0,
@@ -2384,7 +2731,10 @@ impl TorrentApp {
             let is_sel = self.selected_torrent == Some(torrent.id);
             if is_sel {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0, y: ry, width: w - 8.0, height: row_h - 2.0,
+                    x: x + 4.0,
+                    y: ry,
+                    width: w - 8.0,
+                    height: row_h - 2.0,
                     color: colors::SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -2394,7 +2744,8 @@ impl TorrentApp {
 
             // Name
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
+                x: cx,
+                y: ry + 6.0,
                 text: torrent.name.clone(),
                 font_size: 12.0,
                 color: colors::TEXT,
@@ -2403,7 +2754,8 @@ impl TorrentApp {
             });
             if !torrent.label.is_empty() {
                 cmds.push(RenderCommand::Text {
-                    x: cx, y: ry + 24.0,
+                    x: cx,
+                    y: ry + 24.0,
                     text: torrent.label.clone(),
                     font_size: 10.0,
                     color: colors::MAUVE,
@@ -2415,7 +2767,8 @@ impl TorrentApp {
 
             // Size
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
+                x: cx,
+                y: ry + 6.0,
                 text: format_size(torrent.total_size),
                 font_size: 12.0,
                 color: colors::SUBTEXT1,
@@ -2428,7 +2781,10 @@ impl TorrentApp {
             let bar_w = 112.0;
             let bar_h = 12.0;
             cmds.push(RenderCommand::FillRect {
-                x: cx, y: ry + 8.0, width: bar_w, height: bar_h,
+                x: cx,
+                y: ry + 8.0,
+                width: bar_w,
+                height: bar_h,
                 color: colors::SURFACE1,
                 corner_radii: CornerRadii::all(3.0),
             });
@@ -2443,14 +2799,18 @@ impl TorrentApp {
                     _ => colors::TEAL,
                 };
                 cmds.push(RenderCommand::FillRect {
-                    x: cx, y: ry + 8.0, width: fill_w, height: bar_h,
+                    x: cx,
+                    y: ry + 8.0,
+                    width: fill_w,
+                    height: bar_h,
                     color: bar_color,
                     corner_radii: CornerRadii::all(3.0),
                 });
             }
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 24.0,
-                text: format!("{:.1}%", progress),
+                x: cx,
+                y: ry + 24.0,
+                text: format!("{progress:.1}%"),
                 font_size: 10.0,
                 color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
@@ -2468,7 +2828,8 @@ impl TorrentApp {
                 _ => colors::SUBTEXT0,
             };
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
+                x: cx,
+                y: ry + 6.0,
                 text: torrent.state.to_string(),
                 font_size: 12.0,
                 color: status_color,
@@ -2479,7 +2840,8 @@ impl TorrentApp {
 
             // Down speed
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
+                x: cx,
+                y: ry + 6.0,
                 text: format_speed(torrent.download_speed.speed_bps()),
                 font_size: 12.0,
                 color: colors::TEAL,
@@ -2490,7 +2852,8 @@ impl TorrentApp {
 
             // Up speed
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
+                x: cx,
+                y: ry + 6.0,
                 text: format_speed(torrent.upload_speed.speed_bps()),
                 font_size: 12.0,
                 color: colors::PEACH,
@@ -2501,7 +2864,8 @@ impl TorrentApp {
 
             // Ratio
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
+                x: cx,
+                y: ry + 6.0,
                 text: format!("{:.2}", torrent.ratio()),
                 font_size: 12.0,
                 color: colors::SUBTEXT1,
@@ -2511,12 +2875,12 @@ impl TorrentApp {
             cx += 68.0;
 
             // ETA
-            let eta_str = torrent.eta_seconds().map_or_else(
-                || "∞".to_string(),
-                format_duration,
-            );
+            let eta_str = torrent
+                .eta_seconds()
+                .map_or_else(|| "∞".to_string(), format_duration);
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
+                x: cx,
+                y: ry + 6.0,
                 text: eta_str,
                 font_size: 12.0,
                 color: colors::SUBTEXT0,
@@ -2529,7 +2893,8 @@ impl TorrentApp {
 
         if filtered.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 80.0, y: y + h / 2.0 - 10.0,
+                x: x + w / 2.0 - 80.0,
+                y: y + h / 2.0 - 10.0,
                 text: "No torrents".to_string(),
                 font_size: 14.0,
                 color: colors::OVERLAY0,
@@ -2540,21 +2905,22 @@ impl TorrentApp {
     }
 
     fn render_details(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, _h: f32) {
-        let torrent = match self.selected_torrent
+        let torrent = if let Some(t) = self
+            .selected_torrent
             .and_then(|id| self.torrents.iter().find(|t| t.id == id))
         {
-            Some(t) => t,
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: x + 16.0, y: y + 20.0,
-                    text: "Select a torrent to view details".to_string(),
-                    font_size: 13.0,
-                    color: colors::OVERLAY0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                });
-                return;
-            }
+            t
+        } else {
+            cmds.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: y + 20.0,
+                text: "Select a torrent to view details".to_string(),
+                font_size: 13.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+            });
+            return;
         };
 
         let mut dy = y + 12.0;
@@ -2571,29 +2937,70 @@ impl TorrentApp {
             ("Ratio:", format!("{:.3}", torrent.ratio())),
             ("Status:", torrent.state.to_string()),
             ("Progress:", format!("{:.1}%", torrent.progress())),
-            ("Pieces:", format!("{} / {} ({} each)",
-                torrent.pieces.completed_count(),
-                torrent.pieces.total_count(),
-                torrent.metainfo.as_ref().map_or("?".to_string(), |m| format_size(m.piece_length)),
-            )),
+            (
+                "Pieces:",
+                format!(
+                    "{} / {} ({} each)",
+                    torrent.pieces.completed_count(),
+                    torrent.pieces.total_count(),
+                    torrent
+                        .metainfo
+                        .as_ref()
+                        .map_or("?".to_string(), |m| format_size(m.piece_length)),
+                ),
+            ),
             ("Peers:", format!("{} connected", torrent.peers.len())),
-            ("Info Hash:", torrent.metainfo.as_ref().map_or_else(
-                || torrent.magnet.as_ref().map_or("N/A".to_string(), |m| hex_encode(&m.info_hash)),
-                |m| hex_encode(&m.info_hash),
-            )),
-            ("Comment:", torrent.metainfo.as_ref()
-                .and_then(|m| m.comment.clone())
-                .unwrap_or_else(|| "N/A".to_string())),
-            ("Created By:", torrent.metainfo.as_ref()
-                .and_then(|m| m.created_by.clone())
-                .unwrap_or_else(|| "N/A".to_string())),
-            ("Sequential:", if torrent.sequential_download { "Yes" } else { "No" }.to_string()),
-            ("Label:", if torrent.label.is_empty() { "None".to_string() } else { torrent.label.clone() }),
+            (
+                "Info Hash:",
+                torrent.metainfo.as_ref().map_or_else(
+                    || {
+                        torrent
+                            .magnet
+                            .as_ref()
+                            .map_or("N/A".to_string(), |m| hex_encode(&m.info_hash))
+                    },
+                    |m| hex_encode(&m.info_hash),
+                ),
+            ),
+            (
+                "Comment:",
+                torrent
+                    .metainfo
+                    .as_ref()
+                    .and_then(|m| m.comment.clone())
+                    .unwrap_or_else(|| "N/A".to_string()),
+            ),
+            (
+                "Created By:",
+                torrent
+                    .metainfo
+                    .as_ref()
+                    .and_then(|m| m.created_by.clone())
+                    .unwrap_or_else(|| "N/A".to_string()),
+            ),
+            (
+                "Sequential:",
+                if torrent.sequential_download {
+                    "Yes"
+                } else {
+                    "No"
+                }
+                .to_string(),
+            ),
+            (
+                "Label:",
+                if torrent.label.is_empty() {
+                    "None".to_string()
+                } else {
+                    torrent.label.clone()
+                },
+            ),
         ];
 
         for (label, value) in &fields {
             cmds.push(RenderCommand::Text {
-                x: label_x, y: dy,
+                x: label_x,
+                y: dy,
                 text: label.to_string(),
                 font_size: 12.0,
                 color: colors::OVERLAY0,
@@ -2601,7 +3008,8 @@ impl TorrentApp {
                 max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: value_x, y: dy,
+                x: value_x,
+                y: dy,
                 text: value.clone(),
                 font_size: 12.0,
                 color: colors::TEXT,
@@ -2613,30 +3021,38 @@ impl TorrentApp {
     }
 
     fn render_peers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
-        let torrent = match self.selected_torrent
+        let torrent = if let Some(t) = self
+            .selected_torrent
             .and_then(|id| self.torrents.iter().find(|t| t.id == id))
         {
-            Some(t) => t,
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: x + 16.0, y: y + 20.0,
-                    text: "Select a torrent to view peers".to_string(),
-                    font_size: 13.0,
-                    color: colors::OVERLAY0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: None,
-                });
-                return;
-            }
+            t
+        } else {
+            cmds.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: y + 20.0,
+                text: "Select a torrent to view peers".to_string(),
+                font_size: 13.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+            });
+            return;
         };
 
         // Headers
-        let headers = [("Address", 160.0), ("Client", 140.0), ("↓ Speed", 80.0),
-                        ("↑ Speed", 80.0), ("Downloaded", 90.0), ("Flags", 80.0)];
+        let headers = [
+            ("Address", 160.0),
+            ("Client", 140.0),
+            ("↓ Speed", 80.0),
+            ("↑ Speed", 80.0),
+            ("Downloaded", 90.0),
+            ("Flags", 80.0),
+        ];
         let mut cx = x + 8.0;
         for (label, cw) in &headers {
             cmds.push(RenderCommand::Text {
-                x: cx, y: y + 4.0,
+                x: cx,
+                y: y + 4.0,
                 text: label.to_string(),
                 font_size: 11.0,
                 color: colors::OVERLAY0,
@@ -2648,13 +3064,16 @@ impl TorrentApp {
 
         let mut py = y + 24.0;
         for peer in &torrent.peers {
-            if py + 24.0 > y + h { break; }
+            if py + 24.0 > y + h {
+                break;
+            }
 
             let mut cx = x + 8.0;
 
             // Address
             cmds.push(RenderCommand::Text {
-                x: cx, y: py,
+                x: cx,
+                y: py,
                 text: format!("{}:{}", peer.address, peer.port),
                 font_size: 11.0,
                 color: colors::SUBTEXT1,
@@ -2665,7 +3084,8 @@ impl TorrentApp {
 
             // Client
             cmds.push(RenderCommand::Text {
-                x: cx, y: py,
+                x: cx,
+                y: py,
                 text: peer.client_name.clone(),
                 font_size: 11.0,
                 color: colors::TEXT,
@@ -2676,43 +3096,65 @@ impl TorrentApp {
 
             // Down speed
             cmds.push(RenderCommand::Text {
-                x: cx, y: py,
+                x: cx,
+                y: py,
                 text: format_speed(peer.download_rate),
-                font_size: 11.0, color: colors::TEAL,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: colors::TEAL,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cx += 88.0;
 
             // Up speed
             cmds.push(RenderCommand::Text {
-                x: cx, y: py,
+                x: cx,
+                y: py,
                 text: format_speed(peer.upload_rate),
-                font_size: 11.0, color: colors::PEACH,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: colors::PEACH,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cx += 88.0;
 
             // Downloaded
             cmds.push(RenderCommand::Text {
-                x: cx, y: py,
+                x: cx,
+                y: py,
                 text: format_size(peer.downloaded),
-                font_size: 11.0, color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: colors::SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cx += 98.0;
 
             // Flags
             let mut flags = String::new();
-            if !peer.am_choking { flags.push('u'); }     // uploading to them
-            if peer.am_interested { flags.push('I'); }    // interested in them
-            if !peer.peer_choking { flags.push('d'); }    // downloading from them
-            if peer.peer_interested { flags.push('i'); }  // they're interested
-            if peer.supports_extensions { flags.push('e'); }
+            if !peer.am_choking {
+                flags.push('u');
+            } // uploading to them
+            if peer.am_interested {
+                flags.push('I');
+            } // interested in them
+            if !peer.peer_choking {
+                flags.push('d');
+            } // downloading from them
+            if peer.peer_interested {
+                flags.push('i');
+            } // they're interested
+            if peer.supports_extensions {
+                flags.push('e');
+            }
             cmds.push(RenderCommand::Text {
-                x: cx, y: py,
+                x: cx,
+                y: py,
                 text: flags,
-                font_size: 11.0, color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: colors::SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
 
             py += 24.0;
@@ -2720,65 +3162,89 @@ impl TorrentApp {
 
         if torrent.peers.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 50.0, y: y + 40.0,
+                x: x + w / 2.0 - 50.0,
+                y: y + 40.0,
                 text: "No peers".to_string(),
-                font_size: 13.0, color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 13.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
         }
     }
 
     fn render_files(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, _w: f32, h: f32) {
-        let torrent = match self.selected_torrent
+        let torrent = if let Some(t) = self
+            .selected_torrent
             .and_then(|id| self.torrents.iter().find(|t| t.id == id))
         {
-            Some(t) => t,
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: x + 16.0, y: y + 20.0,
-                    text: "Select a torrent to view files".to_string(),
-                    font_size: 13.0, color: colors::OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: None,
-                });
-                return;
-            }
+            t
+        } else {
+            cmds.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: y + 20.0,
+                text: "Select a torrent to view files".to_string(),
+                font_size: 13.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+            });
+            return;
         };
 
-        let meta_files = torrent.metainfo.as_ref().map_or(&[] as &[TorrentFile], |m| &m.files);
+        let meta_files = torrent
+            .metainfo
+            .as_ref()
+            .map_or(&[] as &[TorrentFile], |m| &m.files);
 
         // Headers
         let headers = [("Name", 300.0), ("Size", 80.0), ("Priority", 80.0)];
         let mut cx = x + 8.0;
         for (label, cw) in &headers {
             cmds.push(RenderCommand::Text {
-                x: cx, y: y + 4.0,
+                x: cx,
+                y: y + 4.0,
                 text: label.to_string(),
-                font_size: 11.0, color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Bold, max_width: Some(*cw),
+                font_size: 11.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(*cw),
             });
             cx += cw + 8.0;
         }
 
         let mut fy = y + 24.0;
         for (i, file) in meta_files.iter().enumerate() {
-            if fy + 22.0 > y + h { break; }
+            if fy + 22.0 > y + h {
+                break;
+            }
 
-            let priority = torrent.file_priorities.get(i).copied().unwrap_or(FilePriority::Normal);
+            let priority = torrent
+                .file_priorities
+                .get(i)
+                .copied()
+                .unwrap_or(FilePriority::Normal);
             let mut cx = x + 8.0;
 
             cmds.push(RenderCommand::Text {
-                x: cx, y: fy,
+                x: cx,
+                y: fy,
                 text: file.path.clone(),
-                font_size: 11.0, color: colors::TEXT,
-                font_weight: FontWeightHint::Regular, max_width: Some(300.0),
+                font_size: 11.0,
+                color: colors::TEXT,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(300.0),
             });
             cx += 308.0;
 
             cmds.push(RenderCommand::Text {
-                x: cx, y: fy,
+                x: cx,
+                y: fy,
                 text: format_size(file.length),
-                font_size: 11.0, color: colors::SUBTEXT1,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: colors::SUBTEXT1,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cx += 88.0;
 
@@ -2789,10 +3255,13 @@ impl TorrentApp {
                 FilePriority::High => colors::GREEN,
             };
             cmds.push(RenderCommand::Text {
-                x: cx, y: fy,
+                x: cx,
+                y: fy,
                 text: priority.to_string(),
-                font_size: 11.0, color: prio_color,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: prio_color,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
 
             fy += 22.0;
@@ -2800,44 +3269,60 @@ impl TorrentApp {
     }
 
     fn render_trackers(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, _w: f32, h: f32) {
-        let torrent = match self.selected_torrent
+        let torrent = if let Some(t) = self
+            .selected_torrent
             .and_then(|id| self.torrents.iter().find(|t| t.id == id))
         {
-            Some(t) => t,
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: x + 16.0, y: y + 20.0,
-                    text: "Select a torrent to view trackers".to_string(),
-                    font_size: 13.0, color: colors::OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: None,
-                });
-                return;
-            }
+            t
+        } else {
+            cmds.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: y + 20.0,
+                text: "Select a torrent to view trackers".to_string(),
+                font_size: 13.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
+            });
+            return;
         };
 
-        let headers = [("URL", 300.0), ("Status", 100.0), ("Seeds", 60.0),
-                        ("Leechers", 60.0), ("Tier", 40.0)];
+        let headers = [
+            ("URL", 300.0),
+            ("Status", 100.0),
+            ("Seeds", 60.0),
+            ("Leechers", 60.0),
+            ("Tier", 40.0),
+        ];
         let mut cx = x + 8.0;
         for (label, cw) in &headers {
             cmds.push(RenderCommand::Text {
-                x: cx, y: y + 4.0,
+                x: cx,
+                y: y + 4.0,
                 text: label.to_string(),
-                font_size: 11.0, color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Bold, max_width: Some(*cw),
+                font_size: 11.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(*cw),
             });
             cx += cw + 8.0;
         }
 
         let mut ty = y + 24.0;
         for tracker in &torrent.trackers {
-            if ty + 22.0 > y + h { break; }
+            if ty + 22.0 > y + h {
+                break;
+            }
             let mut cx = x + 8.0;
 
             cmds.push(RenderCommand::Text {
-                x: cx, y: ty,
+                x: cx,
+                y: ty,
                 text: tracker.url.clone(),
-                font_size: 11.0, color: colors::TEXT,
-                font_weight: FontWeightHint::Regular, max_width: Some(300.0),
+                font_size: 11.0,
+                color: colors::TEXT,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(300.0),
             });
             cx += 308.0;
 
@@ -2848,34 +3333,46 @@ impl TorrentApp {
                 _ => colors::SUBTEXT0,
             };
             cmds.push(RenderCommand::Text {
-                x: cx, y: ty,
+                x: cx,
+                y: ty,
                 text: tracker.status.to_string(),
-                font_size: 11.0, color: status_color,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: status_color,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cx += 108.0;
 
             cmds.push(RenderCommand::Text {
-                x: cx, y: ty,
+                x: cx,
+                y: ty,
                 text: tracker.seeders.to_string(),
-                font_size: 11.0, color: colors::GREEN,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: colors::GREEN,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cx += 68.0;
 
             cmds.push(RenderCommand::Text {
-                x: cx, y: ty,
+                x: cx,
+                y: ty,
                 text: tracker.leechers.to_string(),
-                font_size: 11.0, color: colors::PEACH,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: colors::PEACH,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cx += 68.0;
 
             cmds.push(RenderCommand::Text {
-                x: cx, y: ty,
+                x: cx,
+                y: ty,
                 text: tracker.tier.to_string(),
-                font_size: 11.0, color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: colors::SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
 
             ty += 22.0;
@@ -2890,44 +3387,106 @@ impl TorrentApp {
 
         let settings: Vec<(&str, String)> = vec![
             ("Listen Port:", self.settings.listen_port.to_string()),
-            ("Max Active Downloads:", self.settings.max_active_downloads.to_string()),
-            ("Max Active Seeds:", self.settings.max_active_seeds.to_string()),
-            ("Max Connections:", self.settings.max_connections_global.to_string()),
-            ("Connections/Torrent:", self.settings.max_connections_per_torrent.to_string()),
-            ("Global Download Limit:", if self.settings.global_download_limit == 0 {
-                "Unlimited".to_string()
-            } else {
-                format_speed(self.settings.global_download_limit)
-            }),
-            ("Global Upload Limit:", if self.settings.global_upload_limit == 0 {
-                "Unlimited".to_string()
-            } else {
-                format_speed(self.settings.global_upload_limit)
-            }),
-            ("Default Save Path:", self.settings.default_save_path.clone()),
-            ("Encryption:", self.settings.encryption_mode.to_string()),
-            ("DHT:", if self.settings.dht_enabled { "Enabled" } else { "Disabled" }.to_string()),
-            ("PEX:", if self.settings.pex_enabled { "Enabled" } else { "Disabled" }.to_string()),
-            ("µTP:", if self.settings.enable_utp { "Enabled" } else { "Disabled" }.to_string()),
-            ("Seed Ratio Limit:", self.settings.seed_ratio_limit.map_or(
-                "Unlimited".to_string(), |r| format!("{r:.1}")),
+            (
+                "Max Active Downloads:",
+                self.settings.max_active_downloads.to_string(),
             ),
-            ("Pre-allocate Storage:", if self.settings.pre_allocate_storage { "Yes" } else { "No" }.to_string()),
+            (
+                "Max Active Seeds:",
+                self.settings.max_active_seeds.to_string(),
+            ),
+            (
+                "Max Connections:",
+                self.settings.max_connections_global.to_string(),
+            ),
+            (
+                "Connections/Torrent:",
+                self.settings.max_connections_per_torrent.to_string(),
+            ),
+            (
+                "Global Download Limit:",
+                if self.settings.global_download_limit == 0 {
+                    "Unlimited".to_string()
+                } else {
+                    format_speed(self.settings.global_download_limit)
+                },
+            ),
+            (
+                "Global Upload Limit:",
+                if self.settings.global_upload_limit == 0 {
+                    "Unlimited".to_string()
+                } else {
+                    format_speed(self.settings.global_upload_limit)
+                },
+            ),
+            (
+                "Default Save Path:",
+                self.settings.default_save_path.clone(),
+            ),
+            ("Encryption:", self.settings.encryption_mode.to_string()),
+            (
+                "DHT:",
+                if self.settings.dht_enabled {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+                .to_string(),
+            ),
+            (
+                "PEX:",
+                if self.settings.pex_enabled {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+                .to_string(),
+            ),
+            (
+                "µTP:",
+                if self.settings.enable_utp {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+                .to_string(),
+            ),
+            (
+                "Seed Ratio Limit:",
+                self.settings
+                    .seed_ratio_limit
+                    .map_or("Unlimited".to_string(), |r| format!("{r:.1}")),
+            ),
+            (
+                "Pre-allocate Storage:",
+                if self.settings.pre_allocate_storage {
+                    "Yes"
+                } else {
+                    "No"
+                }
+                .to_string(),
+            ),
             ("Proxy:", self.settings.proxy_type.to_string()),
         ];
 
         for (label, value) in &settings {
             cmds.push(RenderCommand::Text {
-                x: label_x, y: sy,
+                x: label_x,
+                y: sy,
                 text: label.to_string(),
-                font_size: 12.0, color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Bold, max_width: None,
+                font_size: 12.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: value_x, y: sy,
+                x: value_x,
+                y: sy,
                 text: value.clone(),
-                font_size: 12.0, color: colors::TEXT,
-                font_weight: FontWeightHint::Regular, max_width: Some(max_val_w),
+                font_size: 12.0,
+                color: colors::TEXT,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(max_val_w),
             });
             sy += 22.0;
         }
@@ -2937,6 +3496,7 @@ impl TorrentApp {
 // ─── Formatting helpers ──────────────────────────────────────────────
 
 /// Format bytes as human-readable size
+#[must_use]
 pub fn format_size(bytes: u64) -> String {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
@@ -2957,6 +3517,7 @@ pub fn format_size(bytes: u64) -> String {
 }
 
 /// Format speed in bytes/s as human-readable
+#[must_use]
 pub fn format_speed(bps: u64) -> String {
     if bps == 0 {
         return "0 B/s".to_string();
@@ -2965,6 +3526,7 @@ pub fn format_speed(bps: u64) -> String {
 }
 
 /// Format duration in seconds as human-readable
+#[must_use]
 pub fn format_duration(seconds: u64) -> String {
     if seconds >= 86400 {
         let d = seconds / 86400;
@@ -2989,12 +3551,20 @@ fn main() {
     let mut app = TorrentApp::new();
 
     // Add sample torrents for testing
-    let sample_torrent = create_sample_torrent("Ubuntu 24.04 LTS Desktop",
-        4_200_000_000, 262_144, "https://torrent.ubuntu.com/announce");
+    let sample_torrent = create_sample_torrent(
+        "Ubuntu 24.04 LTS Desktop",
+        4_200_000_000,
+        262_144,
+        "https://torrent.ubuntu.com/announce",
+    );
     app.add_torrent(sample_torrent, None);
 
-    let sample2 = create_sample_torrent("LibreOffice 7.6.4",
-        350_000_000, 524_288, "udp://tracker.opentrackr.org:1337/announce");
+    let sample2 = create_sample_torrent(
+        "LibreOffice 7.6.4",
+        350_000_000,
+        524_288,
+        "udp://tracker.opentrackr.org:1337/announce",
+    );
     let id2 = app.add_torrent(sample2, None);
     if let Some(t) = app.torrents.iter_mut().find(|t| t.id == id2) {
         t.state = TorrentState::Downloading;
@@ -3019,12 +3589,14 @@ fn main() {
 /// Create a sample torrent for testing
 fn create_sample_torrent(name: &str, size: u64, piece_len: u64, announce: &str) -> TorrentMetainfo {
     let piece_count = (size.saturating_add(piece_len).saturating_sub(1)) / piece_len;
-    let pieces: Vec<[u8; 20]> = (0..piece_count).map(|i| {
-        let mut hash = [0u8; 20];
-        hash[0] = (i & 0xFF) as u8;
-        hash[1] = ((i >> 8) & 0xFF) as u8;
-        hash
-    }).collect();
+    let pieces: Vec<[u8; 20]> = (0..piece_count)
+        .map(|i| {
+            let mut hash = [0u8; 20];
+            hash[0] = (i & 0xFF) as u8;
+            hash[1] = ((i >> 8) & 0xFF) as u8;
+            hash
+        })
+        .collect();
 
     TorrentMetainfo {
         info_hash: Sha1::digest(name.as_bytes()),
@@ -3101,10 +3673,10 @@ mod tests {
             let mut m = BTreeMap::new();
             m.insert("key".to_string(), BencodeValue::Bytes(b"value".to_vec()));
             m.insert("num".to_string(), BencodeValue::Integer(42));
-            m.insert("list".to_string(), BencodeValue::List(vec![
-                BencodeValue::Integer(1),
-                BencodeValue::Integer(2),
-            ]));
+            m.insert(
+                "list".to_string(),
+                BencodeValue::List(vec![BencodeValue::Integer(1), BencodeValue::Integer(2)]),
+            );
             m
         });
         let encoded = bencode_encode(&original);
@@ -3125,19 +3697,28 @@ mod tests {
     #[test]
     fn test_sha1_empty() {
         let hash = Sha1::digest(b"");
-        assert_eq!(hex_encode(&hash), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
+        assert_eq!(
+            hex_encode(&hash),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
     }
 
     #[test]
     fn test_sha1_abc() {
         let hash = Sha1::digest(b"abc");
-        assert_eq!(hex_encode(&hash), "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            hex_encode(&hash),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
     fn test_sha1_long() {
         let hash = Sha1::digest(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq");
-        assert_eq!(hex_encode(&hash), "84983e441c3bd26ebaae4aa1f95129e5e54670f1");
+        assert_eq!(
+            hex_encode(&hash),
+            "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
+        );
     }
 
     // Hex encoding tests
@@ -3173,7 +3754,10 @@ mod tests {
     fn test_magnet_parse_hex() {
         let uri = "magnet:?xt=urn:btih:aabbccddee00112233445566778899aabbccddee&dn=Test+File&tr=udp://tracker.example.com:1234";
         let magnet = MagnetLink::parse(uri).unwrap();
-        assert_eq!(hex_encode(&magnet.info_hash), "aabbccddee00112233445566778899aabbccddee");
+        assert_eq!(
+            hex_encode(&magnet.info_hash),
+            "aabbccddee00112233445566778899aabbccddee"
+        );
         assert_eq!(magnet.display_name.as_deref(), Some("Test File"));
         assert_eq!(magnet.trackers.len(), 1);
     }
@@ -3220,7 +3804,11 @@ mod tests {
 
     #[test]
     fn test_peer_request_roundtrip() {
-        let msg = PeerMessage::Request { index: 5, begin: 0, length: 16384 };
+        let msg = PeerMessage::Request {
+            index: 5,
+            begin: 0,
+            length: 16384,
+        };
         let encoded = msg.encode();
         let decoded = PeerMessage::decode(&encoded[4..]).unwrap();
         assert_eq!(decoded, msg);
@@ -3229,10 +3817,19 @@ mod tests {
     #[test]
     fn test_peer_piece_data() {
         let data = vec![1, 2, 3, 4, 5];
-        let msg = PeerMessage::Piece { index: 0, begin: 0, data: data.clone() };
+        let msg = PeerMessage::Piece {
+            index: 0,
+            begin: 0,
+            data: data.clone(),
+        };
         let encoded = msg.encode();
         let decoded = PeerMessage::decode(&encoded[4..]).unwrap();
-        if let PeerMessage::Piece { index, begin, data: d } = decoded {
+        if let PeerMessage::Piece {
+            index,
+            begin,
+            data: d,
+        } = decoded
+        {
             assert_eq!(index, 0);
             assert_eq!(begin, 0);
             assert_eq!(d, data);
@@ -3384,9 +3981,12 @@ mod tests {
         dict.insert("complete".to_string(), BencodeValue::Integer(10));
         dict.insert("incomplete".to_string(), BencodeValue::Integer(5));
         // Compact peers: 192.168.1.1:6881
-        dict.insert("peers".to_string(), BencodeValue::Bytes(vec![
-            192, 168, 1, 1, 0x1A, 0xE1, // 192.168.1.1:6881
-        ]));
+        dict.insert(
+            "peers".to_string(),
+            BencodeValue::Bytes(vec![
+                192, 168, 1, 1, 0x1A, 0xE1, // 192.168.1.1:6881
+            ]),
+        );
         let data = bencode_encode(&BencodeValue::Dict(dict));
         let resp = AnnounceResponse::from_bencode(&data).unwrap();
         assert_eq!(resp.interval, 1800);
@@ -3399,7 +3999,10 @@ mod tests {
     #[test]
     fn test_announce_response_failure() {
         let mut dict = BTreeMap::new();
-        dict.insert("failure reason".to_string(), BencodeValue::Bytes(b"torrent not found".to_vec()));
+        dict.insert(
+            "failure reason".to_string(),
+            BencodeValue::Bytes(b"torrent not found".to_vec()),
+        );
         let data = bencode_encode(&BencodeValue::Dict(dict));
         let resp = AnnounceResponse::from_bencode(&data).unwrap();
         assert!(resp.failure_reason.is_some());

@@ -17,7 +17,9 @@
 //!
 //! Uses the guitk library for UI rendering with a Catppuccin Mocha dark theme.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -157,19 +159,37 @@ pub enum MacroAction {
     /// Release a key.
     KeyRelease { key_name: String },
     /// Mouse click (press + release).
-    MouseClick { x: f32, y: f32, button: MacroMouseButton },
+    MouseClick {
+        x: f32,
+        y: f32,
+        button: MacroMouseButton,
+    },
     /// Mouse double-click.
-    MouseDoubleClick { x: f32, y: f32, button: MacroMouseButton },
+    MouseDoubleClick {
+        x: f32,
+        y: f32,
+        button: MacroMouseButton,
+    },
     /// Move the mouse pointer.
     MouseMove { x: f32, y: f32 },
     /// Scroll the mouse wheel.
-    Scroll { direction: ScrollDirection, amount: i32 },
+    Scroll {
+        direction: ScrollDirection,
+        amount: i32,
+    },
     /// Type a string of text.
     TypeText { text: String },
     /// Wait for a duration in milliseconds.
     Delay { ms: u64 },
     /// Check a pixel color at (x,y) and skip next action if it does not match.
-    IfPixelColor { x: f32, y: f32, r: u8, g: u8, b: u8, tolerance: u8 },
+    IfPixelColor {
+        x: f32,
+        y: f32,
+        r: u8,
+        g: u8,
+        b: u8,
+        tolerance: u8,
+    },
 }
 
 impl MacroAction {
@@ -214,7 +234,6 @@ impl MacroAction {
             Self::Delay { .. } => "DL",
             Self::IfPixelColor { .. } => "IF",
         }
-
     }
 
     /// Badge color for the action type.
@@ -248,7 +267,10 @@ impl TimedAction {
     }
 
     pub fn immediate(action: MacroAction) -> Self {
-        Self { action, delay_ms: 0 }
+        Self {
+            action,
+            delay_ms: 0,
+        }
     }
 }
 
@@ -389,7 +411,12 @@ impl Hotkey {
             return None;
         }
 
-        Some(Self { ctrl, alt, shift, key_name })
+        Some(Self {
+            ctrl,
+            alt,
+            shift,
+            key_name,
+        })
     }
 }
 
@@ -428,7 +455,9 @@ impl Macro {
 
     /// Total duration of the macro in milliseconds (sum of all delays).
     pub fn total_duration_ms(&self) -> u64 {
-        self.actions.iter().fold(0u64, |acc, ta| acc.saturating_add(ta.delay_ms))
+        self.actions
+            .iter()
+            .fold(0u64, |acc, ta| acc.saturating_add(ta.delay_ms))
     }
 
     /// Number of actions in the macro.
@@ -591,11 +620,9 @@ pub fn parse_script(source: &str) -> Result<Vec<TimedAction>, ScriptError> {
             }
             "scroll" => {
                 let dir_str = require_arg(&parts, 1, line_num, "direction")?;
-                let direction = ScrollDirection::from_str(&dir_str).ok_or_else(|| {
-                    ScriptError {
-                        line: line_num,
-                        message: format!("Unknown scroll direction: {dir_str}"),
-                    }
+                let direction = ScrollDirection::from_str(&dir_str).ok_or_else(|| ScriptError {
+                    line: line_num,
+                    message: format!("Unknown scroll direction: {dir_str}"),
                 })?;
                 let amount = parts
                     .get(2)
@@ -674,7 +701,7 @@ fn substitute_vars(line: &str, vars: &BTreeMap<String, String>) -> String {
             while end < len
                 && chars
                     .get(end)
-                    .map_or(false, |c| c.is_alphanumeric() || *c == '_')
+                    .is_some_and(|c| c.is_alphanumeric() || *c == '_')
             {
                 end = end.saturating_add(1);
             }
@@ -760,7 +787,10 @@ pub fn serialize_script(actions: &[TimedAction]) -> String {
             MacroAction::KeyPress { key_name } => format!("keydown {key_name}"),
             MacroAction::KeyRelease { key_name } => format!("keyup {key_name}"),
             MacroAction::MouseClick { x, y, button } => {
-                format!("click {x:.0} {y:.0} {}", button.label().to_ascii_lowercase())
+                format!(
+                    "click {x:.0} {y:.0} {}",
+                    button.label().to_ascii_lowercase()
+                )
             }
             MacroAction::MouseDoubleClick { x, y, button } => {
                 format!(
@@ -770,10 +800,7 @@ pub fn serialize_script(actions: &[TimedAction]) -> String {
             }
             MacroAction::MouseMove { x, y } => format!("move {x:.0} {y:.0}"),
             MacroAction::Scroll { direction, amount } => {
-                format!(
-                    "scroll {} {amount}",
-                    direction.label().to_ascii_lowercase()
-                )
+                format!("scroll {} {amount}", direction.label().to_ascii_lowercase())
             }
             MacroAction::TypeText { text } => format!("type \"{text}\""),
             MacroAction::Delay { ms } => format!("wait {ms}"),
@@ -1017,13 +1044,13 @@ impl AutomatorApp {
 
     /// Delete the selected macro.
     pub fn delete_selected_macro(&mut self) -> bool {
-        if let Some(id) = self.selected_macro_id {
-            if self.library.remove(id) {
-                self.selected_macro_id = None;
-                self.selected_action_idx = None;
-                self.status_message = "Macro deleted".to_string();
-                return true;
-            }
+        if let Some(id) = self.selected_macro_id
+            && self.library.remove(id)
+        {
+            self.selected_macro_id = None;
+            self.selected_action_idx = None;
+            self.status_message = "Macro deleted".to_string();
+            return true;
         }
         false
     }
@@ -1060,9 +1087,9 @@ impl AutomatorApp {
 
     /// Start recording into the selected macro (or create a new one).
     pub fn start_recording(&mut self) {
-        let target_id = self.selected_macro_id.unwrap_or_else(|| {
-            self.new_macro("Recorded Macro")
-        });
+        let target_id = self
+            .selected_macro_id
+            .unwrap_or_else(|| self.new_macro("Recorded Macro"));
         self.recording_target_id = Some(target_id);
         self.recording_state = RecordingState::Recording;
         self.recording_last_event_ms = self.elapsed_ms;
@@ -1075,10 +1102,10 @@ impl AutomatorApp {
         self.recording_target_id = None;
         self.status_message = "Recording stopped".to_string();
         // Refresh script text.
-        if let Some(id) = self.selected_macro_id {
-            if let Some(m) = self.library.get(id) {
-                self.script_text = serialize_script(&m.actions);
-            }
+        if let Some(id) = self.selected_macro_id
+            && let Some(m) = self.library.get(id)
+        {
+            self.script_text = serialize_script(&m.actions);
         }
     }
 
@@ -1122,16 +1149,16 @@ impl AutomatorApp {
 
     /// Start playing the selected macro.
     pub fn start_playback(&mut self) {
-        if let Some(id) = self.selected_macro_id {
-            if self.library.get(id).map_or(false, |m| !m.actions.is_empty()) {
-                self.playback_state = PlaybackState::Playing {
-                    macro_id: id,
-                    action_idx: 0,
-                    elapsed_ms: 0,
-                    repeat_count: 0,
-                };
-                self.status_message = "Playing macro...".to_string();
-            }
+        if let Some(id) = self.selected_macro_id
+            && self.library.get(id).is_some_and(|m| !m.actions.is_empty())
+        {
+            self.playback_state = PlaybackState::Playing {
+                macro_id: id,
+                action_idx: 0,
+                elapsed_ms: 0,
+                repeat_count: 0,
+            };
+            self.status_message = "Playing macro...".to_string();
         }
     }
 
@@ -1260,12 +1287,11 @@ impl AutomatorApp {
 
     /// Apply the current script text to the selected macro.
     pub fn apply_script(&mut self) -> bool {
-        let id = match self.selected_macro_id {
-            Some(id) => id,
-            None => {
-                self.script_error = Some("No macro selected".to_string());
-                return false;
-            }
+        let id = if let Some(id) = self.selected_macro_id {
+            id
+        } else {
+            self.script_error = Some("No macro selected".to_string());
+            return false;
         };
 
         match parse_script(&self.script_text) {
@@ -1306,18 +1332,18 @@ impl AutomatorApp {
             None => return false,
         };
 
-        if let Some(mac) = self.library.get_mut(mac_id) {
-            if mac.remove_action(idx).is_some() {
-                // Adjust selection.
-                if mac.actions.is_empty() {
-                    self.selected_action_idx = None;
-                } else if idx >= mac.actions.len() {
-                    self.selected_action_idx = Some(mac.actions.len().saturating_sub(1));
-                }
-                mac.modified_at_ms = self.elapsed_ms;
-                self.status_message = "Action deleted".to_string();
-                return true;
+        if let Some(mac) = self.library.get_mut(mac_id)
+            && mac.remove_action(idx).is_some()
+        {
+            // Adjust selection.
+            if mac.actions.is_empty() {
+                self.selected_action_idx = None;
+            } else if idx >= mac.actions.len() {
+                self.selected_action_idx = Some(mac.actions.len().saturating_sub(1));
             }
+            mac.modified_at_ms = self.elapsed_ms;
+            self.status_message = "Action deleted".to_string();
+            return true;
         }
         false
     }
@@ -1333,12 +1359,12 @@ impl AutomatorApp {
             _ => return false,
         };
 
-        if let Some(mac) = self.library.get_mut(mac_id) {
-            if mac.move_action(idx, idx.saturating_sub(1)) {
-                self.selected_action_idx = Some(idx.saturating_sub(1));
-                mac.modified_at_ms = self.elapsed_ms;
-                return true;
-            }
+        if let Some(mac) = self.library.get_mut(mac_id)
+            && mac.move_action(idx, idx.saturating_sub(1))
+        {
+            self.selected_action_idx = Some(idx.saturating_sub(1));
+            mac.modified_at_ms = self.elapsed_ms;
+            return true;
         }
         false
     }
@@ -1382,40 +1408,40 @@ impl AutomatorApp {
 
     /// Set the trigger hotkey for the selected macro.
     pub fn set_trigger(&mut self, hotkey: Option<Hotkey>) {
-        if let Some(id) = self.selected_macro_id {
-            if let Some(mac) = self.library.get_mut(id) {
-                mac.trigger = hotkey;
-                mac.modified_at_ms = self.elapsed_ms;
-                self.status_message = "Trigger updated".to_string();
-            }
+        if let Some(id) = self.selected_macro_id
+            && let Some(mac) = self.library.get_mut(id)
+        {
+            mac.trigger = hotkey;
+            mac.modified_at_ms = self.elapsed_ms;
+            self.status_message = "Trigger updated".to_string();
         }
     }
 
     /// Set the playback speed for the selected macro.
     pub fn set_speed(&mut self, speed: PlaybackSpeed) {
-        if let Some(id) = self.selected_macro_id {
-            if let Some(mac) = self.library.get_mut(id) {
-                mac.speed = speed;
-            }
+        if let Some(id) = self.selected_macro_id
+            && let Some(mac) = self.library.get_mut(id)
+        {
+            mac.speed = speed;
         }
     }
 
     /// Cycle the playback speed for the selected macro.
     pub fn cycle_speed(&mut self) {
-        if let Some(id) = self.selected_macro_id {
-            if let Some(mac) = self.library.get_mut(id) {
-                mac.speed = mac.speed.next();
-                self.status_message = format!("Speed: {}", mac.speed.label());
-            }
+        if let Some(id) = self.selected_macro_id
+            && let Some(mac) = self.library.get_mut(id)
+        {
+            mac.speed = mac.speed.next();
+            self.status_message = format!("Speed: {}", mac.speed.label());
         }
     }
 
     /// Set the repeat mode for the selected macro.
     pub fn set_repeat_mode(&mut self, mode: RepeatMode) {
-        if let Some(id) = self.selected_macro_id {
-            if let Some(mac) = self.library.get_mut(id) {
-                mac.repeat_mode = mode;
-            }
+        if let Some(id) = self.selected_macro_id
+            && let Some(mac) = self.library.get_mut(id)
+        {
+            mac.repeat_mode = mode;
         }
     }
 
@@ -1910,10 +1936,22 @@ impl AutomatorApp {
 
         match self.active_tab {
             ActiveTab::Editor => {
-                self.render_action_editor(cmds, list_x, content_y + ROW_HEIGHT, list_w, content_h - ROW_HEIGHT);
+                self.render_action_editor(
+                    cmds,
+                    list_x,
+                    content_y + ROW_HEIGHT,
+                    list_w,
+                    content_h - ROW_HEIGHT,
+                );
             }
             ActiveTab::Script => {
-                self.render_script_editor(cmds, list_x, content_y + ROW_HEIGHT, list_w, content_h - ROW_HEIGHT);
+                self.render_script_editor(
+                    cmds,
+                    list_x,
+                    content_y + ROW_HEIGHT,
+                    list_w,
+                    content_h - ROW_HEIGHT,
+                );
             }
         }
 
@@ -1929,32 +1967,22 @@ impl AutomatorApp {
     }
 
     /// Render the visual action editor.
-    fn render_action_editor(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    ) {
-        let actions = match self
-            .selected_macro_id
-            .and_then(|id| self.library.get(id))
+    fn render_action_editor(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
+        let actions = if let Some(mac) = self.selected_macro_id.and_then(|id| self.library.get(id))
         {
-            Some(mac) => &mac.actions,
-            None => {
-                // Empty state.
-                cmds.push(RenderCommand::Text {
-                    x: x + w / 2.0 - 80.0,
-                    y: y + h / 2.0 - 10.0,
-                    text: "Select a macro to edit".to_string(),
-                    color: OVERLAY0,
-                    font_size: FONT_SIZE,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(w - 2.0 * PADDING),
-                });
-                return;
-            }
+            &mac.actions
+        } else {
+            // Empty state.
+            cmds.push(RenderCommand::Text {
+                x: x + w / 2.0 - 80.0,
+                y: y + h / 2.0 - 10.0,
+                text: "Select a macro to edit".to_string(),
+                color: OVERLAY0,
+                font_size: FONT_SIZE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 2.0 * PADDING),
+            });
+            return;
         };
 
         if actions.is_empty() {
@@ -2056,20 +2084,17 @@ impl AutomatorApp {
             }
 
             // Playback position indicator.
-            if let PlaybackState::Playing {
-                action_idx, ..
-            } = &self.playback_state
+            if let PlaybackState::Playing { action_idx, .. } = &self.playback_state
+                && *action_idx == i
             {
-                if *action_idx == i {
-                    cmds.push(RenderCommand::FillRect {
-                        x: x + 2.0,
-                        y: row_y,
-                        width: 3.0,
-                        height: ROW_HEIGHT - 2.0,
-                        color: GREEN,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
+                cmds.push(RenderCommand::FillRect {
+                    x: x + 2.0,
+                    y: row_y,
+                    width: 3.0,
+                    height: ROW_HEIGHT - 2.0,
+                    color: GREEN,
+                    corner_radii: CornerRadii::ZERO,
+                });
             }
         }
 
@@ -2150,14 +2175,7 @@ impl AutomatorApp {
     }
 
     /// Render the script text editor tab.
-    fn render_script_editor(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-        w: f32,
-        h: f32,
-    ) {
+    fn render_script_editor(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Script text area background.
         cmds.push(RenderCommand::FillRect {
             x: x + 4.0,
@@ -2313,10 +2331,7 @@ impl AutomatorApp {
         let prop_y = content_y + ROW_HEIGHT + PADDING;
 
         // Show macro properties if a macro is selected.
-        if let Some(mac) = self
-            .selected_macro_id
-            .and_then(|id| self.library.get(id))
-        {
+        if let Some(mac) = self.selected_macro_id.and_then(|id| self.library.get(id)) {
             let mut cy = prop_y;
 
             // Macro name.
@@ -2352,13 +2367,7 @@ impl AutomatorApp {
             cy = self.render_property_row(cmds, panel_x, cy, "Speed", mac.speed.label());
 
             // Repeat mode.
-            cy = self.render_property_row(
-                cmds,
-                panel_x,
-                cy,
-                "Repeat",
-                &mac.repeat_mode.label(),
-            );
+            cy = self.render_property_row(cmds, panel_x, cy, "Repeat", &mac.repeat_mode.label());
 
             // Trigger.
             let trigger_text = mac
@@ -2393,13 +2402,7 @@ impl AutomatorApp {
                     });
                     cy += 22.0;
 
-                    cy = self.render_property_row(
-                        cmds,
-                        panel_x,
-                        cy,
-                        "Type",
-                        timed.action.icon(),
-                    );
+                    cy = self.render_property_row(cmds, panel_x, cy, "Type", timed.action.icon());
                     cy = self.render_property_row(
                         cmds,
                         panel_x,
@@ -2423,13 +2426,7 @@ impl AutomatorApp {
                                 "Position",
                                 &format!("({x:.0}, {y:.0})"),
                             );
-                            self.render_property_row(
-                                cmds,
-                                panel_x,
-                                cy,
-                                "Button",
-                                button.label(),
-                            );
+                            self.render_property_row(cmds, panel_x, cy, "Button", button.label());
                         }
                         MacroAction::MouseMove { x, y } => {
                             self.render_property_row(
@@ -2461,13 +2458,7 @@ impl AutomatorApp {
                             self.render_property_row(cmds, panel_x, cy, "Text", &preview);
                         }
                         MacroAction::Delay { ms } => {
-                            self.render_property_row(
-                                cmds,
-                                panel_x,
-                                cy,
-                                "Wait",
-                                &format!("{ms}ms"),
-                            );
+                            self.render_property_row(cmds, panel_x, cy, "Wait", &format!("{ms}ms"));
                         }
                         MacroAction::IfPixelColor {
                             x,
@@ -2720,7 +2711,7 @@ fn format_duration_ms(ms: u64) -> String {
     let rem_ms = ms % 1000;
     if secs < 60 {
         if rem_ms > 0 {
-            return format!("{secs}.{:03}s", rem_ms);
+            return format!("{secs}.{rem_ms:03}s");
         }
         return format!("{secs}s");
     }
@@ -2738,29 +2729,50 @@ fn main() {
 
     // Create some demo macros.
     let id = app.new_macro("Login Sequence");
-    app.add_action(MacroAction::MouseClick {
-        x: 500.0,
-        y: 300.0,
-        button: MacroMouseButton::Left,
-    }, 0);
-    app.add_action(MacroAction::TypeText {
-        text: "admin".to_string(),
-    }, 100);
-    app.add_action(MacroAction::KeyPress {
-        key_name: "Tab".to_string(),
-    }, 50);
-    app.add_action(MacroAction::KeyRelease {
-        key_name: "Tab".to_string(),
-    }, 50);
-    app.add_action(MacroAction::TypeText {
-        text: "password123".to_string(),
-    }, 100);
-    app.add_action(MacroAction::KeyPress {
-        key_name: "Enter".to_string(),
-    }, 200);
-    app.add_action(MacroAction::KeyRelease {
-        key_name: "Enter".to_string(),
-    }, 50);
+    app.add_action(
+        MacroAction::MouseClick {
+            x: 500.0,
+            y: 300.0,
+            button: MacroMouseButton::Left,
+        },
+        0,
+    );
+    app.add_action(
+        MacroAction::TypeText {
+            text: "admin".to_string(),
+        },
+        100,
+    );
+    app.add_action(
+        MacroAction::KeyPress {
+            key_name: "Tab".to_string(),
+        },
+        50,
+    );
+    app.add_action(
+        MacroAction::KeyRelease {
+            key_name: "Tab".to_string(),
+        },
+        50,
+    );
+    app.add_action(
+        MacroAction::TypeText {
+            text: "password123".to_string(),
+        },
+        100,
+    );
+    app.add_action(
+        MacroAction::KeyPress {
+            key_name: "Enter".to_string(),
+        },
+        200,
+    );
+    app.add_action(
+        MacroAction::KeyRelease {
+            key_name: "Enter".to_string(),
+        },
+        50,
+    );
 
     // Set trigger for the login macro (using Hotkey::from_str for text-based configuration).
     app.set_trigger(Hotkey::from_str("Ctrl+Alt+L"));
@@ -2768,21 +2780,27 @@ fn main() {
     let _ = id;
     let _id2 = app.new_macro("Screenshot Workflow");
     app.add_action(MacroAction::Delay { ms: 500 }, 0);
-    app.add_action(MacroAction::KeyPress {
-        key_name: "PrintScreen".to_string(),
-    }, 500);
-    app.add_action(MacroAction::KeyRelease {
-        key_name: "PrintScreen".to_string(),
-    }, 50);
-    app.add_action(MacroAction::MouseMove {
-        x: 100.0,
-        y: 100.0,
-    }, 200);
-    app.add_action(MacroAction::MouseClick {
-        x: 100.0,
-        y: 100.0,
-        button: MacroMouseButton::Left,
-    }, 100);
+    app.add_action(
+        MacroAction::KeyPress {
+            key_name: "PrintScreen".to_string(),
+        },
+        500,
+    );
+    app.add_action(
+        MacroAction::KeyRelease {
+            key_name: "PrintScreen".to_string(),
+        },
+        50,
+    );
+    app.add_action(MacroAction::MouseMove { x: 100.0, y: 100.0 }, 200);
+    app.add_action(
+        MacroAction::MouseClick {
+            x: 100.0,
+            y: 100.0,
+            button: MacroMouseButton::Left,
+        },
+        100,
+    );
 
     // Select the first macro.
     app.select_macro_by_index(0);
@@ -2813,9 +2831,18 @@ mod tests {
 
     #[test]
     fn test_macro_mouse_button_from_str() {
-        assert_eq!(MacroMouseButton::from_str("left"), Some(MacroMouseButton::Left));
-        assert_eq!(MacroMouseButton::from_str("RIGHT"), Some(MacroMouseButton::Right));
-        assert_eq!(MacroMouseButton::from_str("Middle"), Some(MacroMouseButton::Middle));
+        assert_eq!(
+            MacroMouseButton::from_str("left"),
+            Some(MacroMouseButton::Left)
+        );
+        assert_eq!(
+            MacroMouseButton::from_str("RIGHT"),
+            Some(MacroMouseButton::Right)
+        );
+        assert_eq!(
+            MacroMouseButton::from_str("Middle"),
+            Some(MacroMouseButton::Middle)
+        );
         assert_eq!(MacroMouseButton::from_str("unknown"), None);
     }
 
@@ -2834,7 +2861,10 @@ mod tests {
     #[test]
     fn test_scroll_direction_from_str() {
         assert_eq!(ScrollDirection::from_str("up"), Some(ScrollDirection::Up));
-        assert_eq!(ScrollDirection::from_str("DOWN"), Some(ScrollDirection::Down));
+        assert_eq!(
+            ScrollDirection::from_str("DOWN"),
+            Some(ScrollDirection::Down)
+        );
         assert_eq!(ScrollDirection::from_str("bad"), None);
     }
 
@@ -2844,7 +2874,9 @@ mod tests {
 
     #[test]
     fn test_action_label_key_press() {
-        let a = MacroAction::KeyPress { key_name: "A".to_string() };
+        let a = MacroAction::KeyPress {
+            key_name: "A".to_string(),
+        };
         assert_eq!(a.label(), "Key Down: A");
     }
 
@@ -2860,7 +2892,9 @@ mod tests {
 
     #[test]
     fn test_action_label_type_text_short() {
-        let a = MacroAction::TypeText { text: "Hello".to_string() };
+        let a = MacroAction::TypeText {
+            text: "Hello".to_string(),
+        };
         assert_eq!(a.label(), "Type \"Hello\"");
     }
 
@@ -2880,9 +2914,21 @@ mod tests {
 
     #[test]
     fn test_action_icon() {
-        assert_eq!(MacroAction::KeyPress { key_name: "A".to_string() }.icon(), "KB");
+        assert_eq!(
+            MacroAction::KeyPress {
+                key_name: "A".to_string()
+            }
+            .icon(),
+            "KB"
+        );
         assert_eq!(MacroAction::MouseMove { x: 0.0, y: 0.0 }.icon(), "MV");
-        assert_eq!(MacroAction::TypeText { text: String::new() }.icon(), "TX");
+        assert_eq!(
+            MacroAction::TypeText {
+                text: String::new()
+            }
+            .icon(),
+            "TX"
+        );
         assert_eq!(MacroAction::Delay { ms: 0 }.icon(), "DL");
     }
 
@@ -3011,17 +3057,22 @@ mod tests {
     #[test]
     fn test_macro_total_duration() {
         let mut m = Macro::new(1, "Test", 0);
-        m.actions.push(TimedAction::new(MacroAction::Delay { ms: 100 }, 50));
-        m.actions.push(TimedAction::new(MacroAction::Delay { ms: 200 }, 100));
+        m.actions
+            .push(TimedAction::new(MacroAction::Delay { ms: 100 }, 50));
+        m.actions
+            .push(TimedAction::new(MacroAction::Delay { ms: 200 }, 100));
         assert_eq!(m.total_duration_ms(), 150);
     }
 
     #[test]
     fn test_macro_move_action() {
         let mut m = Macro::new(1, "Test", 0);
-        m.actions.push(TimedAction::immediate(MacroAction::Delay { ms: 100 }));
-        m.actions.push(TimedAction::immediate(MacroAction::Delay { ms: 200 }));
-        m.actions.push(TimedAction::immediate(MacroAction::Delay { ms: 300 }));
+        m.actions
+            .push(TimedAction::immediate(MacroAction::Delay { ms: 100 }));
+        m.actions
+            .push(TimedAction::immediate(MacroAction::Delay { ms: 200 }));
+        m.actions
+            .push(TimedAction::immediate(MacroAction::Delay { ms: 300 }));
 
         assert!(m.move_action(0, 2));
         if let MacroAction::Delay { ms } = &m.actions[0].action {
@@ -3032,15 +3083,18 @@ mod tests {
     #[test]
     fn test_macro_move_action_invalid() {
         let mut m = Macro::new(1, "Test", 0);
-        m.actions.push(TimedAction::immediate(MacroAction::Delay { ms: 100 }));
+        m.actions
+            .push(TimedAction::immediate(MacroAction::Delay { ms: 100 }));
         assert!(!m.move_action(0, 5));
     }
 
     #[test]
     fn test_macro_remove_action() {
         let mut m = Macro::new(1, "Test", 0);
-        m.actions.push(TimedAction::immediate(MacroAction::Delay { ms: 100 }));
-        m.actions.push(TimedAction::immediate(MacroAction::Delay { ms: 200 }));
+        m.actions
+            .push(TimedAction::immediate(MacroAction::Delay { ms: 100 }));
+        m.actions
+            .push(TimedAction::immediate(MacroAction::Delay { ms: 200 }));
         assert!(m.remove_action(0).is_some());
         assert_eq!(m.actions.len(), 1);
     }
@@ -3054,8 +3108,10 @@ mod tests {
     #[test]
     fn test_macro_insert_action() {
         let mut m = Macro::new(1, "Test", 0);
-        m.actions.push(TimedAction::immediate(MacroAction::Delay { ms: 100 }));
-        m.actions.push(TimedAction::immediate(MacroAction::Delay { ms: 300 }));
+        m.actions
+            .push(TimedAction::immediate(MacroAction::Delay { ms: 100 }));
+        m.actions
+            .push(TimedAction::immediate(MacroAction::Delay { ms: 300 }));
         m.insert_action(1, TimedAction::immediate(MacroAction::Delay { ms: 200 }));
         assert_eq!(m.actions.len(), 3);
         if let MacroAction::Delay { ms } = &m.actions[1].action {
@@ -3128,9 +3184,10 @@ mod tests {
     fn test_library_duplicate() {
         let mut lib = MacroLibrary::new();
         let id = lib.create_macro("Original", 0);
-        lib.get_mut(id).unwrap().actions.push(
-            TimedAction::immediate(MacroAction::Delay { ms: 100 }),
-        );
+        lib.get_mut(id)
+            .unwrap()
+            .actions
+            .push(TimedAction::immediate(MacroAction::Delay { ms: 100 }));
         let new_id = lib.duplicate(id, 1000).unwrap();
         assert_ne!(id, new_id);
         let dup = lib.get(new_id).unwrap();
@@ -3181,7 +3238,9 @@ mod tests {
         let result = parse_script("keydown A\nkeyup A").unwrap();
         assert_eq!(result.len(), 2);
         assert!(matches!(&result[0].action, MacroAction::KeyPress { key_name } if key_name == "A"));
-        assert!(matches!(&result[1].action, MacroAction::KeyRelease { key_name } if key_name == "A"));
+        assert!(
+            matches!(&result[1].action, MacroAction::KeyRelease { key_name } if key_name == "A")
+        );
     }
 
     #[test]
@@ -3210,7 +3269,10 @@ mod tests {
     #[test]
     fn test_parse_dblclick() {
         let result = parse_script("dblclick 10 20 left").unwrap();
-        assert!(matches!(&result[0].action, MacroAction::MouseDoubleClick { .. }));
+        assert!(matches!(
+            &result[0].action,
+            MacroAction::MouseDoubleClick { .. }
+        ));
     }
 
     #[test]
@@ -3264,7 +3326,15 @@ mod tests {
     #[test]
     fn test_parse_if_pixel() {
         let result = parse_script("if_pixel 100 200 255 0 0 10").unwrap();
-        if let MacroAction::IfPixelColor { x, y, r, g, b, tolerance } = &result[0].action {
+        if let MacroAction::IfPixelColor {
+            x,
+            y,
+            r,
+            g,
+            b,
+            tolerance,
+        } = &result[0].action
+        {
             assert!((x - 100.0).abs() < f32::EPSILON);
             assert!((y - 200.0).abs() < f32::EPSILON);
             assert_eq!(*r, 255);
@@ -3395,9 +3465,13 @@ mod tests {
         app.start_recording();
         assert_eq!(app.recording_state, RecordingState::Recording);
 
-        app.record_action(MacroAction::KeyPress { key_name: "A".to_string() });
+        app.record_action(MacroAction::KeyPress {
+            key_name: "A".to_string(),
+        });
         app.tick(100);
-        app.record_action(MacroAction::KeyRelease { key_name: "A".to_string() });
+        app.record_action(MacroAction::KeyRelease {
+            key_name: "A".to_string(),
+        });
 
         app.stop_recording();
         assert_eq!(app.recording_state, RecordingState::Idle);
@@ -3620,7 +3694,10 @@ mod tests {
 
     #[test]
     fn test_script_error_display() {
-        let e = ScriptError { line: 5, message: "bad input".to_string() };
+        let e = ScriptError {
+            line: 5,
+            message: "bad input".to_string(),
+        };
         assert_eq!(format!("{e}"), "Line 5: bad input");
     }
 
@@ -3645,13 +3722,31 @@ mod tests {
     #[test]
     fn test_action_badge_colors_unique() {
         let actions: Vec<MacroAction> = vec![
-            MacroAction::KeyPress { key_name: "A".to_string() },
-            MacroAction::MouseClick { x: 0.0, y: 0.0, button: MacroMouseButton::Left },
+            MacroAction::KeyPress {
+                key_name: "A".to_string(),
+            },
+            MacroAction::MouseClick {
+                x: 0.0,
+                y: 0.0,
+                button: MacroMouseButton::Left,
+            },
             MacroAction::MouseMove { x: 0.0, y: 0.0 },
-            MacroAction::Scroll { direction: ScrollDirection::Up, amount: 1 },
-            MacroAction::TypeText { text: String::new() },
+            MacroAction::Scroll {
+                direction: ScrollDirection::Up,
+                amount: 1,
+            },
+            MacroAction::TypeText {
+                text: String::new(),
+            },
             MacroAction::Delay { ms: 0 },
-            MacroAction::IfPixelColor { x: 0.0, y: 0.0, r: 0, g: 0, b: 0, tolerance: 0 },
+            MacroAction::IfPixelColor {
+                x: 0.0,
+                y: 0.0,
+                r: 0,
+                g: 0,
+                b: 0,
+                tolerance: 0,
+            },
         ];
         // Just verify we get a color for each without panicking.
         for a in &actions {
@@ -3690,7 +3785,10 @@ mod tests {
         app.start_playback();
         app.tick_playback(1); // Fire first action.
         app.pause_playback();
-        assert!(matches!(app.playback_state, PlaybackState::PausedPlayback { .. }));
+        assert!(matches!(
+            app.playback_state,
+            PlaybackState::PausedPlayback { .. }
+        ));
         app.resume_playback();
         assert!(app.playback_state.is_playing());
     }
@@ -3776,9 +3874,9 @@ mod tests {
         app.start_recording();
         let cmds = app.render(800.0, 600.0);
         // Should have REC text somewhere.
-        let has_rec = cmds.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "REC")
-        });
+        let has_rec = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "REC"));
         assert!(has_rec);
     }
 

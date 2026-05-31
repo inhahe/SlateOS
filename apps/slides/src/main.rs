@@ -1,4 +1,4 @@
-//! OurOS Slides
+//! `OurOS` Slides
 //!
 //! A presentation/slideshow application with:
 //! - Slide model with background color, title, subtitle, body text, bullet points
@@ -9,7 +9,7 @@
 //! - Slide master/theme with consistent colors and font sizes
 //! - Slide sorter view: thumbnail overview of all slides
 //! - Edit mode: editing selected slide with element manipulation
-//! - Slide transitions: Fade, SlideLeft, SlideRight, Wipe, Dissolve
+//! - Slide transitions: Fade, `SlideLeft`, `SlideRight`, Wipe, Dissolve
 //! - Speaker notes per slide
 //! - Slide numbering
 //! - Export to self-contained HTML slideshow
@@ -20,7 +20,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -304,10 +306,34 @@ impl SlideElement {
     /// Get the bounding rectangle (x, y, width, height) of this element.
     pub fn bounds(&self) -> (f32, f32, f32, f32) {
         match self {
-            Self::TextBox { x, y, width, height, .. }
-            | Self::Shape { x, y, width, height, .. }
-            | Self::Image { x, y, width, height, .. }
-            | Self::BulletList { x, y, width, height, .. } => (*x, *y, *width, *height),
+            Self::TextBox {
+                x,
+                y,
+                width,
+                height,
+                ..
+            }
+            | Self::Shape {
+                x,
+                y,
+                width,
+                height,
+                ..
+            }
+            | Self::Image {
+                x,
+                y,
+                width,
+                height,
+                ..
+            }
+            | Self::BulletList {
+                x,
+                y,
+                width,
+                height,
+                ..
+            } => (*x, *y, *width, *height),
         }
     }
 
@@ -900,7 +926,8 @@ impl SlidesApp {
             return;
         }
         self.undo_mgr.save(&self.slides, self.current_index);
-        self.slides.swap(self.current_index, self.current_index.saturating_sub(1));
+        self.slides
+            .swap(self.current_index, self.current_index.saturating_sub(1));
         self.current_index = self.current_index.saturating_sub(1);
     }
 
@@ -1076,7 +1103,9 @@ impl SlidesApp {
         let mut html = String::with_capacity(4096);
         html.push_str("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n");
         html.push_str("<meta charset=\"UTF-8\">\n");
-        html.push_str("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n");
+        html.push_str(
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n",
+        );
         html.push_str("<title>");
         push_html_escaped(&mut html, &self.title);
         html.push_str("</title>\n");
@@ -1123,7 +1152,18 @@ impl SlidesApp {
             // Emit elements.
             for elem in &slide.elements {
                 match elem {
-                    SlideElement::TextBox { x, y, width, height, text, font_size, color, bold, centered, .. } => {
+                    SlideElement::TextBox {
+                        x,
+                        y,
+                        width,
+                        height,
+                        text,
+                        font_size,
+                        color,
+                        bold,
+                        centered,
+                        ..
+                    } => {
                         let fw = if *bold { "bold" } else { "normal" };
                         let ta = if *centered { "center" } else { "left" };
                         html.push_str(&format!(
@@ -1135,7 +1175,17 @@ impl SlidesApp {
                         push_html_escaped(&mut html, text);
                         html.push_str("</div>\n");
                     }
-                    SlideElement::Shape { kind, x, y, width, height, fill_color, stroke_color, stroke_width, .. } => {
+                    SlideElement::Shape {
+                        kind,
+                        x,
+                        y,
+                        width,
+                        height,
+                        fill_color,
+                        stroke_color,
+                        stroke_width,
+                        ..
+                    } => {
                         match kind {
                             ShapeKind::Rectangle => {
                                 html.push_str(&format!(
@@ -1164,14 +1214,29 @@ impl SlidesApp {
                             }
                         }
                     }
-                    SlideElement::Image { x, y, width, height, placeholder_label, .. } => {
+                    SlideElement::Image {
+                        x,
+                        y,
+                        width,
+                        height,
+                        placeholder_label,
+                        ..
+                    } => {
                         html.push_str(&format!(
                             "  <div class=\"img-placeholder\" style=\"left:{x}px;top:{y}px;width:{width}px;\
-                             height:{height}px;\">{}</div>\n",
-                            placeholder_label,
+                             height:{height}px;\">{placeholder_label}</div>\n",
                         ));
                     }
-                    SlideElement::BulletList { x, y, width, height, items, font_size, color, .. } => {
+                    SlideElement::BulletList {
+                        x,
+                        y,
+                        width,
+                        height,
+                        items,
+                        font_size,
+                        color,
+                        ..
+                    } => {
                         html.push_str(&format!(
                             "  <ul class=\"bullet-list\" style=\"left:{x}px;top:{y}px;width:{width}px;\
                              height:{height}px;font-size:{font_size}px;color:{};list-style:disc inside;\">\n",
@@ -1286,8 +1351,16 @@ impl SlidesApp {
         }
 
         // Undo/Redo indicators.
-        let undo_col = if self.undo_mgr.can_undo() { BLUE } else { OVERLAY0 };
-        let redo_col = if self.undo_mgr.can_redo() { BLUE } else { OVERLAY0 };
+        let undo_col = if self.undo_mgr.can_undo() {
+            BLUE
+        } else {
+            OVERLAY0
+        };
+        let redo_col = if self.undo_mgr.can_redo() {
+            BLUE
+        } else {
+            OVERLAY0
+        };
         cmds.push(RenderCommand::Text {
             x: 630.0,
             y: 12.0,
@@ -1604,19 +1677,19 @@ impl SlidesApp {
             cmds.push(RenderCommand::PopClip);
 
             // Selection highlight around selected element.
-            if let Some(eid) = self.selected_element {
-                if let Some(elem) = slide.element_by_id(eid) {
-                    let (ex, ey, ew, eh) = elem.bounds();
-                    cmds.push(RenderCommand::StrokeRect {
-                        x: cx + ex * scale - 1.0,
-                        y: cy + ey * scale - 1.0,
-                        width: ew * scale + 2.0,
-                        height: eh * scale + 2.0,
-                        color: SKY,
-                        line_width: 1.5,
-                        corner_radii: CornerRadii::ZERO,
-                    });
-                }
+            if let Some(eid) = self.selected_element
+                && let Some(elem) = slide.element_by_id(eid)
+            {
+                let (ex, ey, ew, eh) = elem.bounds();
+                cmds.push(RenderCommand::StrokeRect {
+                    x: cx + ex * scale - 1.0,
+                    y: cy + ey * scale - 1.0,
+                    width: ew * scale + 2.0,
+                    height: eh * scale + 2.0,
+                    color: SKY,
+                    line_width: 1.5,
+                    corner_radii: CornerRadii::ZERO,
+                });
             }
 
             // Slide number overlay.
@@ -1646,12 +1719,26 @@ impl SlidesApp {
         scale: f32,
     ) {
         match elem {
-            SlideElement::TextBox { x, y, width, text, font_size, color, bold, centered, .. } => {
+            SlideElement::TextBox {
+                x,
+                y,
+                width,
+                text,
+                font_size,
+                color,
+                bold,
+                centered,
+                ..
+            } => {
                 let fx = ox + x * scale;
                 let fy = oy + y * scale;
                 let fw = width * scale;
                 let fs = font_size * scale;
-                let weight = if *bold { FontWeightHint::Bold } else { FontWeightHint::Regular };
+                let weight = if *bold {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                };
 
                 // For centered text, add a half-width offset (simplified).
                 let text_x = if *centered { fx + fw * 0.1 } else { fx };
@@ -1667,7 +1754,17 @@ impl SlidesApp {
                     max_width: text_max,
                 });
             }
-            SlideElement::Shape { kind, x, y, width, height, fill_color, stroke_color, stroke_width, .. } => {
+            SlideElement::Shape {
+                kind,
+                x,
+                y,
+                width,
+                height,
+                fill_color,
+                stroke_color,
+                stroke_width,
+                ..
+            } => {
                 let sx = ox + x * scale;
                 let sy = oy + y * scale;
                 let sw = width * scale;
@@ -1762,7 +1859,14 @@ impl SlidesApp {
                     }
                 }
             }
-            SlideElement::Image { x, y, width, height, placeholder_label, .. } => {
+            SlideElement::Image {
+                x,
+                y,
+                width,
+                height,
+                placeholder_label,
+                ..
+            } => {
                 let ix = ox + x * scale;
                 let iy = oy + y * scale;
                 let iw = width * scale;
@@ -1789,7 +1893,15 @@ impl SlidesApp {
                     max_width: Some(iw * 0.5),
                 });
             }
-            SlideElement::BulletList { x, y, width, items, font_size, color, .. } => {
+            SlideElement::BulletList {
+                x,
+                y,
+                width,
+                items,
+                font_size,
+                color,
+                ..
+            } => {
                 let bx = ox + x * scale;
                 let by = oy + y * scale;
                 let bw = width * scale;
@@ -1917,38 +2029,95 @@ impl SlidesApp {
                     y += 18.0;
 
                     match elem {
-                        SlideElement::TextBox { text, font_size, bold, centered, .. } => {
+                        SlideElement::TextBox {
+                            text,
+                            font_size,
+                            bold,
+                            centered,
+                            ..
+                        } => {
                             self.render_property_row(cmds, lx, y, val_w, "Type", "TextBox");
                             y += 18.0;
-                            self.render_property_row(cmds, lx, y, val_w, "Size", &format!("{font_size:.0}"));
+                            self.render_property_row(
+                                cmds,
+                                lx,
+                                y,
+                                val_w,
+                                "Size",
+                                &format!("{font_size:.0}"),
+                            );
                             y += 18.0;
-                            self.render_property_row(cmds, lx, y, val_w, "Bold", if *bold { "Yes" } else { "No" });
+                            self.render_property_row(
+                                cmds,
+                                lx,
+                                y,
+                                val_w,
+                                "Bold",
+                                if *bold { "Yes" } else { "No" },
+                            );
                             y += 18.0;
-                            self.render_property_row(cmds, lx, y, val_w, "Center", if *centered { "Yes" } else { "No" });
+                            self.render_property_row(
+                                cmds,
+                                lx,
+                                y,
+                                val_w,
+                                "Center",
+                                if *centered { "Yes" } else { "No" },
+                            );
                             y += 18.0;
                             let preview: String = text.chars().take(20).collect();
                             self.render_property_row(cmds, lx, y, val_w, "Text", &preview);
                         }
-                        SlideElement::Shape { kind, stroke_width, .. } => {
+                        SlideElement::Shape {
+                            kind, stroke_width, ..
+                        } => {
                             self.render_property_row(cmds, lx, y, val_w, "Type", kind.label());
                             y += 18.0;
-                            self.render_property_row(cmds, lx, y, val_w, "Stroke", &format!("{stroke_width:.1}"));
+                            self.render_property_row(
+                                cmds,
+                                lx,
+                                y,
+                                val_w,
+                                "Stroke",
+                                &format!("{stroke_width:.1}"),
+                            );
                         }
-                        SlideElement::Image { placeholder_label, .. } => {
+                        SlideElement::Image {
+                            placeholder_label, ..
+                        } => {
                             self.render_property_row(cmds, lx, y, val_w, "Type", "Image");
                             y += 18.0;
-                            self.render_property_row(cmds, lx, y, val_w, "Label", placeholder_label);
+                            self.render_property_row(
+                                cmds,
+                                lx,
+                                y,
+                                val_w,
+                                "Label",
+                                placeholder_label,
+                            );
                         }
-                        SlideElement::BulletList { items, font_size, .. } => {
+                        SlideElement::BulletList {
+                            items, font_size, ..
+                        } => {
                             self.render_property_row(cmds, lx, y, val_w, "Type", "Bullets");
                             y += 18.0;
                             self.render_property_row(
-                                cmds, lx, y, val_w,
+                                cmds,
+                                lx,
+                                y,
+                                val_w,
                                 "Items",
                                 &format!("{}", items.len()),
                             );
                             y += 18.0;
-                            self.render_property_row(cmds, lx, y, val_w, "Size", &format!("{font_size:.0}"));
+                            self.render_property_row(
+                                cmds,
+                                lx,
+                                y,
+                                val_w,
+                                "Size",
+                                &format!("{font_size:.0}"),
+                            );
                         }
                     }
                 }
@@ -1976,7 +2145,8 @@ impl SlidesApp {
                 });
                 y += 20.0;
 
-                let insert_items: &[&str] = &["Text Box", "Rectangle", "Ellipse", "Line", "Arrow", "Image"];
+                let insert_items: &[&str] =
+                    &["Text Box", "Rectangle", "Ellipse", "Line", "Arrow", "Image"];
                 for label in insert_items {
                     self.render_button(cmds, lx, y, val_w - 4.0, 22.0, label, SURFACE0, TEXT);
                     y += 26.0;
@@ -2060,7 +2230,11 @@ impl SlidesApp {
             x: nx + 10.0,
             y: notes_y + 24.0,
             text: display.to_string(),
-            color: if notes_text.is_empty() { OVERLAY0 } else { TEXT },
+            color: if notes_text.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT
+            },
             font_size: 12.0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(notes_w - 20.0),
@@ -2202,7 +2376,8 @@ fn truncate_str(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        let end = s.char_indices()
+        let end = s
+            .char_indices()
             .nth(max.saturating_sub(3))
             .map_or(s.len(), |(i, _)| i);
         let mut result = s[..end].to_string();

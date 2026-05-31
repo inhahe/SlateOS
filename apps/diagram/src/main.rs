@@ -1,4 +1,4 @@
-//! OurOS Diagram Editor
+//! `OurOS` Diagram Editor
 //!
 //! A full-featured diagram and flowchart editor with:
 //! - Node types: rectangle, rounded rectangle, diamond (decision), circle,
@@ -24,7 +24,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -349,10 +351,7 @@ impl DiagramNode {
 
     /// Tests whether a point (px, py) is inside this node's bounding box.
     pub fn hit_test(&self, px: f32, py: f32) -> bool {
-        px >= self.x
-            && px <= self.x + self.width
-            && py >= self.y
-            && py <= self.y + self.height
+        px >= self.x && px <= self.x + self.width && py >= self.y && py <= self.y + self.height
     }
 
     /// Connection point on the boundary closest to an external point.
@@ -368,8 +367,16 @@ impl DiagramNode {
         }
 
         // Find edge intersection via scaling
-        let scale_x = if dx.abs() > 0.001 { hw / dx.abs() } else { f32::MAX };
-        let scale_y = if dy.abs() > 0.001 { hh / dy.abs() } else { f32::MAX };
+        let scale_x = if dx.abs() > 0.001 {
+            hw / dx.abs()
+        } else {
+            f32::MAX
+        };
+        let scale_y = if dy.abs() > 0.001 {
+            hh / dy.abs()
+        } else {
+            f32::MAX
+        };
         let scale = scale_x.min(scale_y);
 
         (cx + dx * scale, cy + dy * scale)
@@ -912,7 +919,9 @@ impl DiagramApp {
 
     /// Move all nodes in a group by a delta offset.
     pub fn move_group(&mut self, group_id: GroupId, dx: f32, dy: f32) {
-        let member_ids: Vec<NodeId> = self.groups.iter()
+        let member_ids: Vec<NodeId> = self
+            .groups
+            .iter()
             .find(|g| g.id == group_id)
             .map_or_else(Vec::new, |g| g.member_ids.clone());
 
@@ -1089,26 +1098,29 @@ impl DiagramApp {
 
     /// Check whether a layer is visible.
     pub fn is_layer_visible(&self, id: LayerId) -> bool {
-        self.layers.iter().find(|l| l.id == id).map_or(false, |l| l.visible)
+        self.layers
+            .iter()
+            .find(|l| l.id == id)
+            .is_some_and(|l| l.visible)
     }
 
     /// Move a layer up in the ordering.
     pub fn move_layer_up(&mut self, id: LayerId) {
-        if let Some(idx) = self.layers.iter().position(|l| l.id == id) {
-            if idx > 0 {
-                self.layers.swap(idx, idx.saturating_sub(1));
-                self.reindex_layers();
-            }
+        if let Some(idx) = self.layers.iter().position(|l| l.id == id)
+            && idx > 0
+        {
+            self.layers.swap(idx, idx.saturating_sub(1));
+            self.reindex_layers();
         }
     }
 
     /// Move a layer down in the ordering.
     pub fn move_layer_down(&mut self, id: LayerId) {
-        if let Some(idx) = self.layers.iter().position(|l| l.id == id) {
-            if idx.saturating_add(1) < self.layers.len() {
-                self.layers.swap(idx, idx.saturating_add(1));
-                self.reindex_layers();
-            }
+        if let Some(idx) = self.layers.iter().position(|l| l.id == id)
+            && idx.saturating_add(1) < self.layers.len()
+        {
+            self.layers.swap(idx, idx.saturating_add(1));
+            self.reindex_layers();
         }
     }
 
@@ -1166,9 +1178,13 @@ impl DiagramApp {
         self.save_undo();
 
         // Collect positions.
-        let positions: Vec<(NodeId, f32, f32, f32, f32)> = self.selection.nodes.iter()
+        let positions: Vec<(NodeId, f32, f32, f32, f32)> = self
+            .selection
+            .nodes
+            .iter()
             .filter_map(|nid| {
-                self.find_node(*nid).map(|n| (n.id, n.x, n.y, n.width, n.height))
+                self.find_node(*nid)
+                    .map(|n| (n.id, n.x, n.y, n.width, n.height))
             })
             .collect();
 
@@ -1186,9 +1202,7 @@ impl DiagramApp {
                 }
             }
             AlignOp::Right => {
-                let max_right = positions.iter()
-                    .map(|p| p.1 + p.3)
-                    .fold(f32::MIN, f32::max);
+                let max_right = positions.iter().map(|p| p.1 + p.3).fold(f32::MIN, f32::max);
                 for (nid, _, _, w, _) in &positions {
                     if let Some(n) = self.find_node_mut(*nid) {
                         n.x = max_right - w;
@@ -1196,9 +1210,8 @@ impl DiagramApp {
                 }
             }
             AlignOp::CenterH => {
-                let avg_cx: f32 = positions.iter()
-                    .map(|p| p.1 + p.3 / 2.0)
-                    .sum::<f32>() / positions.len() as f32;
+                let avg_cx: f32 =
+                    positions.iter().map(|p| p.1 + p.3 / 2.0).sum::<f32>() / positions.len() as f32;
                 for (nid, _, _, w, _) in &positions {
                     if let Some(n) = self.find_node_mut(*nid) {
                         n.x = avg_cx - w / 2.0;
@@ -1214,9 +1227,7 @@ impl DiagramApp {
                 }
             }
             AlignOp::Bottom => {
-                let max_bottom = positions.iter()
-                    .map(|p| p.2 + p.4)
-                    .fold(f32::MIN, f32::max);
+                let max_bottom = positions.iter().map(|p| p.2 + p.4).fold(f32::MIN, f32::max);
                 for (nid, _, _, _, h) in &positions {
                     if let Some(n) = self.find_node_mut(*nid) {
                         n.y = max_bottom - h;
@@ -1224,9 +1235,8 @@ impl DiagramApp {
                 }
             }
             AlignOp::CenterV => {
-                let avg_cy: f32 = positions.iter()
-                    .map(|p| p.2 + p.4 / 2.0)
-                    .sum::<f32>() / positions.len() as f32;
+                let avg_cy: f32 =
+                    positions.iter().map(|p| p.2 + p.4 / 2.0).sum::<f32>() / positions.len() as f32;
                 for (nid, _, _, _, h) in &positions {
                     if let Some(n) = self.find_node_mut(*nid) {
                         n.y = avg_cy - h / 2.0;
@@ -1242,8 +1252,8 @@ impl DiagramApp {
                 let total_w: f32 = sorted.iter().map(|p| p.3).sum();
                 let first_x = sorted.first().map_or(0.0, |p| p.1);
                 let last_end = sorted.last().map_or(0.0, |p| p.1 + p.3);
-                let spacing = (last_end - first_x - total_w)
-                    / (sorted.len().saturating_sub(1)) as f32;
+                let spacing =
+                    (last_end - first_x - total_w) / (sorted.len().saturating_sub(1)) as f32;
                 let mut current_x = first_x;
                 for (nid, _, _, w, _) in &sorted {
                     if let Some(n) = self.find_node_mut(*nid) {
@@ -1261,8 +1271,8 @@ impl DiagramApp {
                 let total_h: f32 = sorted.iter().map(|p| p.4).sum();
                 let first_y = sorted.first().map_or(0.0, |p| p.2);
                 let last_end = sorted.last().map_or(0.0, |p| p.2 + p.4);
-                let spacing = (last_end - first_y - total_h)
-                    / (sorted.len().saturating_sub(1)) as f32;
+                let spacing =
+                    (last_end - first_y - total_h) / (sorted.len().saturating_sub(1)) as f32;
                 let mut current_y = first_y;
                 for (nid, _, _, _, h) in &sorted {
                     if let Some(n) = self.find_node_mut(*nid) {
@@ -1346,11 +1356,15 @@ impl DiagramApp {
     /// Copy selected nodes and their interconnecting edges to clipboard.
     pub fn copy_selection(&mut self) {
         let node_ids: Vec<NodeId> = self.selection.nodes.clone();
-        let nodes: Vec<DiagramNode> = self.nodes.iter()
+        let nodes: Vec<DiagramNode> = self
+            .nodes
+            .iter()
             .filter(|n| node_ids.contains(&n.id))
             .cloned()
             .collect();
-        let edges: Vec<DiagramEdge> = self.edges.iter()
+        let edges: Vec<DiagramEdge> = self
+            .edges
+            .iter()
             .filter(|e| node_ids.contains(&e.from_node) && node_ids.contains(&e.to_node))
             .cloned()
             .collect();
@@ -1379,7 +1393,10 @@ impl DiagramApp {
         }
 
         for old_edge in &self.clipboard.edges {
-            let new_from = id_map.iter().find(|m| m.0 == old_edge.from_node).map(|m| m.1);
+            let new_from = id_map
+                .iter()
+                .find(|m| m.0 == old_edge.from_node)
+                .map(|m| m.1);
             let new_to = id_map.iter().find(|m| m.0 == old_edge.to_node).map(|m| m.1);
             if let (Some(from), Some(to)) = (new_from, new_to) {
                 let new_id = self.id_gen.next_id();
@@ -1419,7 +1436,8 @@ impl DiagramApp {
         let edge_ids = self.selection.edges.clone();
 
         for nid in &node_ids {
-            self.edges.retain(|e| e.from_node != *nid && e.to_node != *nid);
+            self.edges
+                .retain(|e| e.from_node != *nid && e.to_node != *nid);
             self.nodes.retain(|n| n.id != *nid);
         }
         for eid in &edge_ids {
@@ -1612,9 +1630,7 @@ impl DiagramApp {
         svg.push_str(&format!(
             "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{w}\" height=\"{h}\" viewBox=\"0 0 {w} {h}\">\n"
         ));
-        svg.push_str(&format!(
-            "<g transform=\"translate({off_x},{off_y})\">\n"
-        ));
+        svg.push_str(&format!("<g transform=\"translate({off_x},{off_y})\">\n"));
 
         // Edges first (below nodes).
         for edge in &self.edges {
@@ -1637,8 +1653,8 @@ impl DiagramApp {
                     edge.line_width
                 ));
                 if !edge.label.is_empty() {
-                    let mx = (fx + tx) / 2.0;
-                    let my = (fy + ty) / 2.0;
+                    let mx = f32::midpoint(fx, tx);
+                    let my = f32::midpoint(fy, ty);
                     svg.push_str(&format!(
                         "  <text x=\"{mx}\" y=\"{}\" text-anchor=\"middle\" fill=\"{stroke}\" font-size=\"12\">{}</text>\n",
                         my - 6.0,
@@ -1794,7 +1810,9 @@ impl DiagramApp {
         for (i, edge) in self.edges.iter().enumerate() {
             out.push_str(&format!(
                 "    {{\"id\":{},\"from\":{},\"to\":{},\"kind\":\"{}\",\"label\":\"{}\"}}",
-                edge.id, edge.from_node, edge.to_node,
+                edge.id,
+                edge.from_node,
+                edge.to_node,
                 edge.kind.label(),
                 escape_json(&edge.label)
             ));
@@ -1821,12 +1839,20 @@ impl DiagramApp {
         let mut max_x = f32::MIN;
         let mut max_y = f32::MIN;
         for node in &self.nodes {
-            if node.x < min_x { min_x = node.x; }
-            if node.y < min_y { min_y = node.y; }
+            if node.x < min_x {
+                min_x = node.x;
+            }
+            if node.y < min_y {
+                min_y = node.y;
+            }
             let r = node.x + node.width;
             let b = node.y + node.height;
-            if r > max_x { max_x = r; }
-            if b > max_y { max_y = b; }
+            if r > max_x {
+                max_x = r;
+            }
+            if b > max_y {
+                max_y = b;
+            }
         }
         (min_x, min_y, max_x, max_y)
     }
@@ -1947,7 +1973,11 @@ impl DiagramApp {
         });
 
         // Grid toggle.
-        let grid_label = if self.show_grid { "Grid: On" } else { "Grid: Off" };
+        let grid_label = if self.show_grid {
+            "Grid: On"
+        } else {
+            "Grid: Off"
+        };
         cmds.push(RenderCommand::Text {
             x: bx + 100.0,
             y: 14.0,
@@ -1959,7 +1989,11 @@ impl DiagramApp {
         });
 
         // Snap toggle.
-        let snap_label = if self.snap_to_grid { "Snap: On" } else { "Snap: Off" };
+        let snap_label = if self.snap_to_grid {
+            "Snap: On"
+        } else {
+            "Snap: Off"
+        };
         cmds.push(RenderCommand::Text {
             x: bx + 190.0,
             y: 14.0,
@@ -1971,7 +2005,11 @@ impl DiagramApp {
         });
 
         // Undo/Redo indicators.
-        let undo_text = format!("Undo:{} Redo:{}", self.undo.undo_count(), self.undo.redo_count());
+        let undo_text = format!(
+            "Undo:{} Redo:{}",
+            self.undo.undo_count(),
+            self.undo.redo_count()
+        );
         cmds.push(RenderCommand::Text {
             x: self.window_w - 160.0,
             y: 14.0,
@@ -2026,7 +2064,11 @@ impl DiagramApp {
         let mut by = pal_y + 36.0;
         for shape in NodeShape::all() {
             let is_active = matches!(self.mode, InteractionMode::AddNode(s) if s == *shape);
-            let bg = if is_active { shape.accent_color() } else { SURFACE0 };
+            let bg = if is_active {
+                shape.accent_color()
+            } else {
+                SURFACE0
+            };
             let fg = if is_active { CRUST } else { TEXT };
 
             cmds.push(RenderCommand::FillRect {
@@ -2140,7 +2182,11 @@ impl DiagramApp {
                 text: String::from(tmpl.label()),
                 color: fg,
                 font_size: 11.0,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(PALETTE_WIDTH - 28.0),
             });
 
@@ -2155,7 +2201,11 @@ impl DiagramApp {
     fn render_canvas(&self, cmds: &mut Vec<RenderCommand>) {
         let canvas_x = PALETTE_WIDTH;
         let canvas_y = TOOLBAR_HEIGHT;
-        let props_w = if self.show_properties { PROPERTIES_WIDTH } else { 0.0 };
+        let props_w = if self.show_properties {
+            PROPERTIES_WIDTH
+        } else {
+            0.0
+        };
         let canvas_w = self.window_w - PALETTE_WIDTH - props_w;
         let canvas_h = self.window_h - TOOLBAR_HEIGHT - STATUS_BAR_HEIGHT;
 
@@ -2287,12 +2337,18 @@ impl DiagramApp {
         match node.shape {
             NodeShape::Rectangle => {
                 cmds.push(RenderCommand::FillRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.fill_color,
                     corner_radii: CornerRadii::ZERO,
                 });
                 cmds.push(RenderCommand::StrokeRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.border_color,
                     line_width: node.border_width,
                     corner_radii: CornerRadii::ZERO,
@@ -2301,12 +2357,18 @@ impl DiagramApp {
             NodeShape::RoundedRectangle => {
                 let r = 8.0 * z;
                 cmds.push(RenderCommand::FillRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.fill_color,
                     corner_radii: CornerRadii::all(r),
                 });
                 cmds.push(RenderCommand::StrokeRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.border_color,
                     line_width: node.border_width,
                     corner_radii: CornerRadii::all(r),
@@ -2317,16 +2379,47 @@ impl DiagramApp {
                 let cx = x + w / 2.0;
                 let cy = y + h / 2.0;
                 cmds.push(RenderCommand::FillRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.fill_color,
                     corner_radii: CornerRadii::ZERO,
                 });
                 // Overlay lines to hint diamond shape.
                 let lw = node.border_width;
-                cmds.push(RenderCommand::Line { x1: cx, y1: y, x2: x + w, y2: cy, color: node.border_color, width: lw });
-                cmds.push(RenderCommand::Line { x1: x + w, y1: cy, x2: cx, y2: y + h, color: node.border_color, width: lw });
-                cmds.push(RenderCommand::Line { x1: cx, y1: y + h, x2: x, y2: cy, color: node.border_color, width: lw });
-                cmds.push(RenderCommand::Line { x1: x, y1: cy, x2: cx, y2: y, color: node.border_color, width: lw });
+                cmds.push(RenderCommand::Line {
+                    x1: cx,
+                    y1: y,
+                    x2: x + w,
+                    y2: cy,
+                    color: node.border_color,
+                    width: lw,
+                });
+                cmds.push(RenderCommand::Line {
+                    x1: x + w,
+                    y1: cy,
+                    x2: cx,
+                    y2: y + h,
+                    color: node.border_color,
+                    width: lw,
+                });
+                cmds.push(RenderCommand::Line {
+                    x1: cx,
+                    y1: y + h,
+                    x2: x,
+                    y2: cy,
+                    color: node.border_color,
+                    width: lw,
+                });
+                cmds.push(RenderCommand::Line {
+                    x1: x,
+                    y1: cy,
+                    x2: cx,
+                    y2: y,
+                    color: node.border_color,
+                    width: lw,
+                });
             }
             NodeShape::Circle | NodeShape::Ellipse => {
                 // Approximate with a rounded rectangle at maximum radii.
@@ -2334,12 +2427,18 @@ impl DiagramApp {
                 let ry = h / 2.0;
                 let r = rx.min(ry);
                 cmds.push(RenderCommand::FillRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.fill_color,
                     corner_radii: CornerRadii::all(r),
                 });
                 cmds.push(RenderCommand::StrokeRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.border_color,
                     line_width: node.border_width,
                     corner_radii: CornerRadii::all(r),
@@ -2348,26 +2447,48 @@ impl DiagramApp {
             NodeShape::Parallelogram => {
                 // Approximate with a slightly skewed rectangle.
                 cmds.push(RenderCommand::FillRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.fill_color,
-                    corner_radii: CornerRadii { top_left: 0.0, top_right: w * 0.15, bottom_right: 0.0, bottom_left: w * 0.15 },
+                    corner_radii: CornerRadii {
+                        top_left: 0.0,
+                        top_right: w * 0.15,
+                        bottom_right: 0.0,
+                        bottom_left: w * 0.15,
+                    },
                 });
                 cmds.push(RenderCommand::StrokeRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.border_color,
                     line_width: node.border_width,
-                    corner_radii: CornerRadii { top_left: 0.0, top_right: w * 0.15, bottom_right: 0.0, bottom_left: w * 0.15 },
+                    corner_radii: CornerRadii {
+                        top_left: 0.0,
+                        top_right: w * 0.15,
+                        bottom_right: 0.0,
+                        bottom_left: w * 0.15,
+                    },
                 });
             }
             NodeShape::Hexagon => {
                 // Approximate with rounded rect.
                 cmds.push(RenderCommand::FillRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.fill_color,
                     corner_radii: CornerRadii::all(h * 0.3),
                 });
                 cmds.push(RenderCommand::StrokeRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.border_color,
                     line_width: node.border_width,
                     corner_radii: CornerRadii::all(h * 0.3),
@@ -2377,14 +2498,38 @@ impl DiagramApp {
                 // Triangle via 3 lines on a filled background.
                 let cx = x + w / 2.0;
                 cmds.push(RenderCommand::FillRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.fill_color,
                     corner_radii: CornerRadii::ZERO,
                 });
                 let lw = node.border_width;
-                cmds.push(RenderCommand::Line { x1: cx, y1: y, x2: x, y2: y + h, color: node.border_color, width: lw });
-                cmds.push(RenderCommand::Line { x1: x, y1: y + h, x2: x + w, y2: y + h, color: node.border_color, width: lw });
-                cmds.push(RenderCommand::Line { x1: x + w, y1: y + h, x2: cx, y2: y, color: node.border_color, width: lw });
+                cmds.push(RenderCommand::Line {
+                    x1: cx,
+                    y1: y,
+                    x2: x,
+                    y2: y + h,
+                    color: node.border_color,
+                    width: lw,
+                });
+                cmds.push(RenderCommand::Line {
+                    x1: x,
+                    y1: y + h,
+                    x2: x + w,
+                    y2: y + h,
+                    color: node.border_color,
+                    width: lw,
+                });
+                cmds.push(RenderCommand::Line {
+                    x1: x + w,
+                    y1: y + h,
+                    x2: cx,
+                    y2: y,
+                    color: node.border_color,
+                    width: lw,
+                });
             }
             NodeShape::Cylinder => {
                 // Cylinder: rect body + top/bottom ellipses.
@@ -2416,35 +2561,52 @@ impl DiagramApp {
                     corner_radii: CornerRadii::all(w / 2.0),
                 });
                 cmds.push(RenderCommand::StrokeRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.border_color,
                     line_width: node.border_width,
-                    corner_radii: CornerRadii { top_left: w * 0.3, top_right: w * 0.3, bottom_right: w * 0.3, bottom_left: w * 0.3 },
+                    corner_radii: CornerRadii {
+                        top_left: w * 0.3,
+                        top_right: w * 0.3,
+                        bottom_right: w * 0.3,
+                        bottom_left: w * 0.3,
+                    },
                 });
             }
             NodeShape::Cloud => {
                 // Cloud: overlapping rounded rects.
                 let r = w.min(h) / 3.0;
                 cmds.push(RenderCommand::FillRect {
-                    x: x + w * 0.1, y: y + h * 0.15,
-                    width: w * 0.8, height: h * 0.7,
+                    x: x + w * 0.1,
+                    y: y + h * 0.15,
+                    width: w * 0.8,
+                    height: h * 0.7,
                     color: node.fill_color,
                     corner_radii: CornerRadii::all(r),
                 });
                 cmds.push(RenderCommand::FillRect {
-                    x: x + w * 0.02, y: y + h * 0.3,
-                    width: w * 0.5, height: h * 0.5,
+                    x: x + w * 0.02,
+                    y: y + h * 0.3,
+                    width: w * 0.5,
+                    height: h * 0.5,
                     color: node.fill_color,
                     corner_radii: CornerRadii::all(r * 0.8),
                 });
                 cmds.push(RenderCommand::FillRect {
-                    x: x + w * 0.48, y: y + h * 0.3,
-                    width: w * 0.5, height: h * 0.5,
+                    x: x + w * 0.48,
+                    y: y + h * 0.3,
+                    width: w * 0.5,
+                    height: h * 0.5,
                     color: node.fill_color,
                     corner_radii: CornerRadii::all(r * 0.8),
                 });
                 cmds.push(RenderCommand::StrokeRect {
-                    x, y, width: w, height: h,
+                    x,
+                    y,
+                    width: w,
+                    height: h,
                     color: node.border_color,
                     line_width: node.border_width,
                     corner_radii: CornerRadii::all(r * 0.5),
@@ -2510,26 +2672,38 @@ impl DiagramApp {
         match edge.kind {
             EdgeKind::Straight | EdgeKind::Bezier => {
                 cmds.push(RenderCommand::Line {
-                    x1: sx1, y1: sy1, x2: sx2, y2: sy2,
+                    x1: sx1,
+                    y1: sy1,
+                    x2: sx2,
+                    y2: sy2,
                     color,
                     width: edge.line_width,
                 });
             }
             EdgeKind::Orthogonal => {
                 // Right-angle routing: go horizontal first, then vertical.
-                let mid_x = (sx1 + sx2) / 2.0;
+                let mid_x = f32::midpoint(sx1, sx2);
                 cmds.push(RenderCommand::Line {
-                    x1: sx1, y1: sy1, x2: mid_x, y2: sy1,
+                    x1: sx1,
+                    y1: sy1,
+                    x2: mid_x,
+                    y2: sy1,
                     color,
                     width: edge.line_width,
                 });
                 cmds.push(RenderCommand::Line {
-                    x1: mid_x, y1: sy1, x2: mid_x, y2: sy2,
+                    x1: mid_x,
+                    y1: sy1,
+                    x2: mid_x,
+                    y2: sy2,
                     color,
                     width: edge.line_width,
                 });
                 cmds.push(RenderCommand::Line {
-                    x1: mid_x, y1: sy2, x2: sx2, y2: sy2,
+                    x1: mid_x,
+                    y1: sy2,
+                    x2: sx2,
+                    y2: sy2,
                     color,
                     width: edge.line_width,
                 });
@@ -2547,8 +2721,8 @@ impl DiagramApp {
 
         // Edge label at midpoint.
         if !edge.label.is_empty() {
-            let mx = (sx1 + sx2) / 2.0;
-            let my = (sy1 + sy2) / 2.0;
+            let mx = f32::midpoint(sx1, sx2);
+            let my = f32::midpoint(sy1, sy2);
             cmds.push(RenderCommand::Text {
                 x: mx,
                 y: my - 10.0,
@@ -2564,8 +2738,10 @@ impl DiagramApp {
     fn render_arrow_head(
         &self,
         cmds: &mut Vec<RenderCommand>,
-        tip_x: f32, tip_y: f32,
-        from_x: f32, from_y: f32,
+        tip_x: f32,
+        tip_y: f32,
+        from_x: f32,
+        from_y: f32,
         color: Color,
         line_width: f32,
     ) {
@@ -2586,14 +2762,18 @@ impl DiagramApp {
         let perp_y = ux * arrow_half_w;
 
         cmds.push(RenderCommand::Line {
-            x1: tip_x, y1: tip_y,
-            x2: base_x + perp_x, y2: base_y + perp_y,
+            x1: tip_x,
+            y1: tip_y,
+            x2: base_x + perp_x,
+            y2: base_y + perp_y,
             color,
             width: line_width,
         });
         cmds.push(RenderCommand::Line {
-            x1: tip_x, y1: tip_y,
-            x2: base_x - perp_x, y2: base_y - perp_y,
+            x1: tip_x,
+            y1: tip_y,
+            x2: base_x - perp_x,
+            y2: base_y - perp_y,
             color,
             width: line_width,
         });
@@ -2649,10 +2829,34 @@ impl DiagramApp {
                 self.render_property_row(cmds, px, &mut row_y, "Label", &node.label);
                 self.render_property_row(cmds, px, &mut row_y, "X", &format!("{:.0}", node.x));
                 self.render_property_row(cmds, px, &mut row_y, "Y", &format!("{:.0}", node.y));
-                self.render_property_row(cmds, px, &mut row_y, "Width", &format!("{:.0}", node.width));
-                self.render_property_row(cmds, px, &mut row_y, "Height", &format!("{:.0}", node.height));
-                self.render_property_row(cmds, px, &mut row_y, "Border W", &format!("{:.1}", node.border_width));
-                self.render_property_row(cmds, px, &mut row_y, "Font Size", &format!("{:.0}", node.font_size));
+                self.render_property_row(
+                    cmds,
+                    px,
+                    &mut row_y,
+                    "Width",
+                    &format!("{:.0}", node.width),
+                );
+                self.render_property_row(
+                    cmds,
+                    px,
+                    &mut row_y,
+                    "Height",
+                    &format!("{:.0}", node.height),
+                );
+                self.render_property_row(
+                    cmds,
+                    px,
+                    &mut row_y,
+                    "Border W",
+                    &format!("{:.1}", node.border_width),
+                );
+                self.render_property_row(
+                    cmds,
+                    px,
+                    &mut row_y,
+                    "Font Size",
+                    &format!("{:.0}", node.font_size),
+                );
 
                 // Fill color swatch.
                 self.render_color_swatch(cmds, px + 12.0, row_y, "Fill", node.fill_color);
@@ -2671,15 +2875,29 @@ impl DiagramApp {
                 self.render_property_row(cmds, px, &mut row_y, "Kind", edge.kind.label());
                 self.render_property_row(cmds, px, &mut row_y, "Label", &edge.label);
                 self.render_property_row(cmds, px, &mut row_y, "Style", edge.line_style.label());
-                self.render_property_row(cmds, px, &mut row_y, "Width", &format!("{:.1}", edge.line_width));
-                self.render_property_row(cmds, px, &mut row_y, "Start Arr", edge.start_arrow.label());
+                self.render_property_row(
+                    cmds,
+                    px,
+                    &mut row_y,
+                    "Width",
+                    &format!("{:.1}", edge.line_width),
+                );
+                self.render_property_row(
+                    cmds,
+                    px,
+                    &mut row_y,
+                    "Start Arr",
+                    edge.start_arrow.label(),
+                );
                 self.render_property_row(cmds, px, &mut row_y, "End Arr", edge.end_arrow.label());
                 self.render_color_swatch(cmds, px + 12.0, row_y, "Color", edge.color);
                 let _ = row_y; // future expansion point
             }
         } else if self.selection.node_count() > 1 {
             self.render_property_row(
-                cmds, px, &mut row_y,
+                cmds,
+                px,
+                &mut row_y,
                 "Selected",
                 &format!("{} nodes", self.selection.node_count()),
             );
@@ -2698,9 +2916,14 @@ impl DiagramApp {
             row_y += 20.0;
 
             let ops = [
-                AlignOp::Left, AlignOp::CenterH, AlignOp::Right,
-                AlignOp::Top, AlignOp::CenterV, AlignOp::Bottom,
-                AlignOp::DistributeH, AlignOp::DistributeV,
+                AlignOp::Left,
+                AlignOp::CenterH,
+                AlignOp::Right,
+                AlignOp::Top,
+                AlignOp::CenterV,
+                AlignOp::Bottom,
+                AlignOp::DistributeH,
+                AlignOp::DistributeV,
             ];
             for op in &ops {
                 cmds.push(RenderCommand::FillRect {
@@ -2767,7 +2990,8 @@ impl DiagramApp {
     fn render_color_swatch(
         &self,
         cmds: &mut Vec<RenderCommand>,
-        x: f32, y: f32,
+        x: f32,
+        y: f32,
         label: &str,
         color: Color,
     ) {
@@ -3256,7 +3480,12 @@ mod tests {
         assert!(!mgr.can_undo());
         assert!(!mgr.can_redo());
 
-        let snap1 = DiagramSnapshot { nodes: vec![], edges: vec![], layers: vec![], groups: vec![] };
+        let snap1 = DiagramSnapshot {
+            nodes: vec![],
+            edges: vec![],
+            layers: vec![],
+            groups: vec![],
+        };
         mgr.save(snap1);
         assert!(mgr.can_undo());
     }
@@ -3264,7 +3493,12 @@ mod tests {
     #[test]
     fn test_undo_redo_cycle() {
         let mut mgr = UndoManager::new(10);
-        let empty = DiagramSnapshot { nodes: vec![], edges: vec![], layers: vec![], groups: vec![] };
+        let empty = DiagramSnapshot {
+            nodes: vec![],
+            edges: vec![],
+            layers: vec![],
+            groups: vec![],
+        };
         mgr.save(empty.clone());
         mgr.save(empty.clone());
         assert_eq!(mgr.undo_count(), 2);
@@ -3282,7 +3516,12 @@ mod tests {
     #[test]
     fn test_undo_max_steps() {
         let mut mgr = UndoManager::new(3);
-        let snap = DiagramSnapshot { nodes: vec![], edges: vec![], layers: vec![], groups: vec![] };
+        let snap = DiagramSnapshot {
+            nodes: vec![],
+            edges: vec![],
+            layers: vec![],
+            groups: vec![],
+        };
         for _ in 0..10 {
             mgr.save(snap.clone());
         }

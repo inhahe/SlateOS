@@ -1,4 +1,4 @@
-//! OurOS Password Generator & Strength Analyzer
+//! `OurOS` Password Generator & Strength Analyzer
 //!
 //! A password utility tool with:
 //! - Configurable password generation (length, character classes)
@@ -15,19 +15,10 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_precision_loss)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::return_self_not_must_use)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::unreadable_literal)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml. This keeps the discipline
+// centralised rather than diverging per-crate.
 
 use guitk::Color;
 use guitk::render::{FontWeightHint, RenderCommand};
@@ -76,76 +67,66 @@ const AMBIGUOUS: &str = "0O1lI|";
 
 /// Word list for passphrase generation (subset of EFF Diceware).
 const WORD_LIST: &[&str] = &[
-    "abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract",
-    "absurd", "abuse", "access", "accident", "account", "accuse", "achieve", "acid",
-    "across", "action", "actor", "actual", "adapt", "address", "adjust", "admit",
-    "adult", "advance", "advice", "affair", "afford", "afraid", "again", "agent",
-    "agree", "ahead", "airport", "alarm", "album", "alert", "alien", "allow",
-    "almost", "alone", "alpha", "already", "alter", "always", "amateur", "amazing",
-    "among", "amount", "amused", "anchor", "ancient", "anger", "angle", "angry",
-    "animal", "ankle", "annual", "another", "answer", "antenna", "antique", "anxiety",
-    "apart", "apology", "appear", "apple", "approve", "april", "arctic", "arena",
-    "argue", "armor", "army", "arrange", "arrest", "arrive", "arrow", "artist",
-    "asthma", "atom", "attack", "attend", "attract", "auction", "august", "aunt",
-    "autumn", "average", "avoid", "awake", "awesome", "awful", "axis", "baby",
-    "bachelor", "bacon", "badge", "balance", "balcony", "bamboo", "banana", "banner",
-    "barely", "bargain", "barrel", "basket", "battle", "beach", "beauty", "become",
-    "before", "begin", "behave", "behind", "believe", "bench", "benefit", "best",
-    "betray", "beyond", "bicycle", "bird", "bitter", "blade", "blanket", "blast",
-    "blaze", "bleak", "bless", "blind", "blood", "blossom", "blue", "blur",
-    "board", "boat", "bonus", "book", "border", "boring", "borrow", "bottom",
-    "bounce", "box", "bracket", "brain", "brand", "brave", "bread", "bridge",
-    "brief", "bright", "bring", "broken", "brother", "brown", "brush", "bubble",
-    "buddy", "budget", "buffalo", "build", "bullet", "bundle", "burden", "burger",
-    "burst", "butter", "cabin", "cable", "cactus", "cage", "camera", "camp",
-    "canal", "cancel", "candy", "cannon", "canvas", "canyon", "captain", "carbon",
-    "cargo", "carpet", "carry", "castle", "casual", "catalog", "catch", "cattle",
-    "caught", "cause", "caution", "cave", "ceiling", "celery", "cement", "census",
-    "century", "cereal", "certain", "chair", "chalk", "chapter", "charge", "chase",
-    "cheap", "check", "cheese", "cherry", "chest", "chicken", "chief", "chimney",
-    "choice", "chunk", "circle", "citizen", "civil", "claim", "clap", "clarify",
-    "classic", "clean", "clever", "cliff", "climb", "clinic", "clock", "close",
-    "cloud", "clown", "cluster", "coach", "coast", "coconut", "coffee", "collect",
-    "color", "column", "combine", "comfort", "common", "company", "concept", "conduct",
-    "confirm", "connect", "correct", "couch", "country", "couple", "course", "cousin",
-    "cover", "coyote", "cradle", "craft", "crane", "crash", "crater", "crawl",
-    "crazy", "cream", "credit", "creek", "crew", "cricket", "crime", "crisp",
-    "critic", "crop", "cross", "crowd", "cruel", "cruise", "crumble", "crush",
-    "crystal", "culture", "cupboard", "curious", "current", "curtain", "curve", "custom",
-    "cycle", "damage", "dance", "danger", "daring", "dawn", "debate", "decade",
-    "december", "decide", "decline", "decorate", "decrease", "deer", "defense", "define",
-    "defy", "degree", "delay", "deliver", "demand", "denial", "dentist", "deny",
-    "depart", "depend", "deposit", "depth", "derive", "describe", "desert", "design",
-    "detect", "develop", "device", "devote", "diagram", "diamond", "diary", "diesel",
-    "differ", "digital", "dignity", "dilemma", "dinner", "dinosaur", "direct", "dirt",
-    "discover", "disease", "dish", "dismiss", "display", "distance", "divert", "dizzy",
-    "doctor", "dolphin", "domain", "donate", "donkey", "donor", "door", "double",
-    "dragon", "drama", "dream", "dress", "drift", "drink", "drip", "drive",
-    "drop", "drum", "duck", "dumb", "dune", "during", "dust", "dutch",
-    "dwarf", "dynamic", "eager", "eagle", "early", "earn", "earth", "easily",
-    "echo", "ecology", "economy", "edge", "edit", "educate", "effort", "eight",
-    "elbow", "elder", "electric", "elegant", "element", "elephant", "elevator", "elite",
-    "embrace", "emerge", "emotion", "employ", "empower", "enable", "endorse", "enemy",
-    "energy", "enforce", "engage", "engine", "enjoy", "enough", "ensure", "enter",
-    "entire", "entry", "envelop", "episode", "equal", "equip", "erosion", "error",
-    "escape", "essay", "essence", "estate", "eternal", "evening", "evidence", "evil",
-    "evolve", "exact", "example", "excess", "exchange", "excite", "exclude", "excuse",
-    "execute", "exercise", "exhaust", "exhibit", "exile", "exist", "expand", "expect",
-    "expire", "explain", "expose", "express", "extend", "extra", "fabric", "face",
-    "faculty", "faint", "faith", "false", "family", "famous", "fancy", "fantasy",
-    "fatal", "father", "fatigue", "fault", "favorite", "feature", "february", "federal",
-    "fence", "festival", "fetch", "fever", "fiber", "fiction", "field", "figure",
-    "filter", "final", "finger", "finish", "fire", "fiscal", "fitness", "flag",
-    "flame", "flash", "flavor", "flight", "float", "flock", "floor", "flower",
-    "fluid", "flush", "focus", "foil", "follow", "force", "forest", "forget",
-    "forward", "fossil", "foster", "found", "fragile", "frame", "frequent", "fresh",
-    "friend", "fringe", "frog", "frozen", "fruit", "fuel", "funny", "furnace",
-    "fury", "future", "gadget", "galaxy", "gallery", "garage", "garden", "garlic",
-    "gather", "gauge", "general", "genius", "genre", "gentle", "genuine", "gesture",
-    "ghost", "giant", "gift", "giggle", "ginger", "giraffe", "glad", "glance",
-    "glass", "globe", "gloom", "glory", "glove", "glucose", "goat", "goddess",
-    "golden", "gospel", "gossip", "govern", "grace", "grain", "grant", "grape",
-    "grass", "gravity", "great", "green", "grief", "grill", "grocery", "ground",
+    "abandon", "ability", "able", "about", "above", "absent", "absorb", "abstract", "absurd",
+    "abuse", "access", "accident", "account", "accuse", "achieve", "acid", "across", "action",
+    "actor", "actual", "adapt", "address", "adjust", "admit", "adult", "advance", "advice",
+    "affair", "afford", "afraid", "again", "agent", "agree", "ahead", "airport", "alarm", "album",
+    "alert", "alien", "allow", "almost", "alone", "alpha", "already", "alter", "always", "amateur",
+    "amazing", "among", "amount", "amused", "anchor", "ancient", "anger", "angle", "angry",
+    "animal", "ankle", "annual", "another", "answer", "antenna", "antique", "anxiety", "apart",
+    "apology", "appear", "apple", "approve", "april", "arctic", "arena", "argue", "armor", "army",
+    "arrange", "arrest", "arrive", "arrow", "artist", "asthma", "atom", "attack", "attend",
+    "attract", "auction", "august", "aunt", "autumn", "average", "avoid", "awake", "awesome",
+    "awful", "axis", "baby", "bachelor", "bacon", "badge", "balance", "balcony", "bamboo",
+    "banana", "banner", "barely", "bargain", "barrel", "basket", "battle", "beach", "beauty",
+    "become", "before", "begin", "behave", "behind", "believe", "bench", "benefit", "best",
+    "betray", "beyond", "bicycle", "bird", "bitter", "blade", "blanket", "blast", "blaze", "bleak",
+    "bless", "blind", "blood", "blossom", "blue", "blur", "board", "boat", "bonus", "book",
+    "border", "boring", "borrow", "bottom", "bounce", "box", "bracket", "brain", "brand", "brave",
+    "bread", "bridge", "brief", "bright", "bring", "broken", "brother", "brown", "brush", "bubble",
+    "buddy", "budget", "buffalo", "build", "bullet", "bundle", "burden", "burger", "burst",
+    "butter", "cabin", "cable", "cactus", "cage", "camera", "camp", "canal", "cancel", "candy",
+    "cannon", "canvas", "canyon", "captain", "carbon", "cargo", "carpet", "carry", "castle",
+    "casual", "catalog", "catch", "cattle", "caught", "cause", "caution", "cave", "ceiling",
+    "celery", "cement", "census", "century", "cereal", "certain", "chair", "chalk", "chapter",
+    "charge", "chase", "cheap", "check", "cheese", "cherry", "chest", "chicken", "chief",
+    "chimney", "choice", "chunk", "circle", "citizen", "civil", "claim", "clap", "clarify",
+    "classic", "clean", "clever", "cliff", "climb", "clinic", "clock", "close", "cloud", "clown",
+    "cluster", "coach", "coast", "coconut", "coffee", "collect", "color", "column", "combine",
+    "comfort", "common", "company", "concept", "conduct", "confirm", "connect", "correct", "couch",
+    "country", "couple", "course", "cousin", "cover", "coyote", "cradle", "craft", "crane",
+    "crash", "crater", "crawl", "crazy", "cream", "credit", "creek", "crew", "cricket", "crime",
+    "crisp", "critic", "crop", "cross", "crowd", "cruel", "cruise", "crumble", "crush", "crystal",
+    "culture", "cupboard", "curious", "current", "curtain", "curve", "custom", "cycle", "damage",
+    "dance", "danger", "daring", "dawn", "debate", "decade", "december", "decide", "decline",
+    "decorate", "decrease", "deer", "defense", "define", "defy", "degree", "delay", "deliver",
+    "demand", "denial", "dentist", "deny", "depart", "depend", "deposit", "depth", "derive",
+    "describe", "desert", "design", "detect", "develop", "device", "devote", "diagram", "diamond",
+    "diary", "diesel", "differ", "digital", "dignity", "dilemma", "dinner", "dinosaur", "direct",
+    "dirt", "discover", "disease", "dish", "dismiss", "display", "distance", "divert", "dizzy",
+    "doctor", "dolphin", "domain", "donate", "donkey", "donor", "door", "double", "dragon",
+    "drama", "dream", "dress", "drift", "drink", "drip", "drive", "drop", "drum", "duck", "dumb",
+    "dune", "during", "dust", "dutch", "dwarf", "dynamic", "eager", "eagle", "early", "earn",
+    "earth", "easily", "echo", "ecology", "economy", "edge", "edit", "educate", "effort", "eight",
+    "elbow", "elder", "electric", "elegant", "element", "elephant", "elevator", "elite", "embrace",
+    "emerge", "emotion", "employ", "empower", "enable", "endorse", "enemy", "energy", "enforce",
+    "engage", "engine", "enjoy", "enough", "ensure", "enter", "entire", "entry", "envelop",
+    "episode", "equal", "equip", "erosion", "error", "escape", "essay", "essence", "estate",
+    "eternal", "evening", "evidence", "evil", "evolve", "exact", "example", "excess", "exchange",
+    "excite", "exclude", "excuse", "execute", "exercise", "exhaust", "exhibit", "exile", "exist",
+    "expand", "expect", "expire", "explain", "expose", "express", "extend", "extra", "fabric",
+    "face", "faculty", "faint", "faith", "false", "family", "famous", "fancy", "fantasy", "fatal",
+    "father", "fatigue", "fault", "favorite", "feature", "february", "federal", "fence",
+    "festival", "fetch", "fever", "fiber", "fiction", "field", "figure", "filter", "final",
+    "finger", "finish", "fire", "fiscal", "fitness", "flag", "flame", "flash", "flavor", "flight",
+    "float", "flock", "floor", "flower", "fluid", "flush", "focus", "foil", "follow", "force",
+    "forest", "forget", "forward", "fossil", "foster", "found", "fragile", "frame", "frequent",
+    "fresh", "friend", "fringe", "frog", "frozen", "fruit", "fuel", "funny", "furnace", "fury",
+    "future", "gadget", "galaxy", "gallery", "garage", "garden", "garlic", "gather", "gauge",
+    "general", "genius", "genre", "gentle", "genuine", "gesture", "ghost", "giant", "gift",
+    "giggle", "ginger", "giraffe", "glad", "glance", "glass", "globe", "gloom", "glory", "glove",
+    "glucose", "goat", "goddess", "golden", "gospel", "gossip", "govern", "grace", "grain",
+    "grant", "grape", "grass", "gravity", "great", "green", "grief", "grill", "grocery", "ground",
     "group", "grow", "growth", "guard", "guitar", "gummy",
 ];
 
@@ -218,10 +199,18 @@ impl PasswordOptions {
     /// Count the number of active character classes.
     pub fn active_classes(&self) -> usize {
         let mut count = 0usize;
-        if self.use_lowercase { count = count.saturating_add(1); }
-        if self.use_uppercase { count = count.saturating_add(1); }
-        if self.use_digits { count = count.saturating_add(1); }
-        if self.use_symbols { count = count.saturating_add(1); }
+        if self.use_lowercase {
+            count = count.saturating_add(1);
+        }
+        if self.use_uppercase {
+            count = count.saturating_add(1);
+        }
+        if self.use_digits {
+            count = count.saturating_add(1);
+        }
+        if self.use_symbols {
+            count = count.saturating_add(1);
+        }
         count
     }
 
@@ -266,7 +255,7 @@ impl Default for PassphraseOptions {
 }
 
 impl PassphraseOptions {
-    /// Entropy for a passphrase (log2(word_list_size) per word).
+    /// Entropy for a passphrase (`log2(word_list_size)` per word).
     pub fn entropy(&self) -> f64 {
         let bits_per_word = (WORD_LIST.len() as f64).log2();
         let mut total = bits_per_word * self.word_count as f64;
@@ -324,7 +313,10 @@ impl Rng {
 
     /// Pick a random char from a char slice.
     pub fn pick_char(&mut self, chars: &[char]) -> char {
-        chars.get(self.next_usize(chars.len())).copied().unwrap_or('?')
+        chars
+            .get(self.next_usize(chars.len()))
+            .copied()
+            .unwrap_or('?')
     }
 }
 
@@ -340,10 +332,26 @@ pub fn generate_password(opts: &PasswordOptions, rng: &mut Rng) -> String {
     // If must_include_each_class, place one from each active class first
     if opts.must_include_each_class && opts.length >= opts.active_classes() {
         let classes: Vec<Vec<char>> = [
-            if opts.use_lowercase { Some(LOWERCASE.chars().collect::<Vec<_>>()) } else { None },
-            if opts.use_uppercase { Some(UPPERCASE.chars().collect::<Vec<_>>()) } else { None },
-            if opts.use_digits { Some(DIGITS.chars().collect::<Vec<_>>()) } else { None },
-            if opts.use_symbols { Some(SYMBOLS.chars().collect::<Vec<_>>()) } else { None },
+            if opts.use_lowercase {
+                Some(LOWERCASE.chars().collect::<Vec<_>>())
+            } else {
+                None
+            },
+            if opts.use_uppercase {
+                Some(UPPERCASE.chars().collect::<Vec<_>>())
+            } else {
+                None
+            },
+            if opts.use_digits {
+                Some(DIGITS.chars().collect::<Vec<_>>())
+            } else {
+                None
+            },
+            if opts.use_symbols {
+                Some(SYMBOLS.chars().collect::<Vec<_>>())
+            } else {
+                None
+            },
         ]
         .into_iter()
         .flatten()
@@ -380,11 +388,7 @@ pub fn generate_passphrase(opts: &PassphraseOptions, rng: &mut Rng) -> String {
     let mut words: Vec<String> = Vec::with_capacity(opts.word_count);
 
     for _ in 0..opts.word_count {
-        let word = rng
-            .pick(WORD_LIST)
-            .copied()
-            .unwrap_or("unknown")
-            .to_owned();
+        let word = rng.pick(WORD_LIST).copied().unwrap_or("unknown").to_owned();
         if opts.capitalize {
             let mut chars = word.chars();
             let capitalized = match chars.next() {
@@ -418,9 +422,7 @@ pub fn generate_passphrase(opts: &PassphraseOptions, rng: &mut Rng) -> String {
 /// Generate a PIN.
 pub fn generate_pin(length: usize, rng: &mut Rng) -> String {
     let digits: Vec<char> = DIGITS.chars().collect();
-    (0..length)
-        .map(|_| rng.pick_char(&digits))
-        .collect()
+    (0..length).map(|_| rng.pick_char(&digits)).collect()
 }
 
 /// Generate a pronounceable password (alternating consonant-vowel).
@@ -565,23 +567,23 @@ fn format_crack_time(guesses: f64, rate_per_sec: f64) -> String {
         return "Instant".to_owned();
     }
     if seconds < 60.0 {
-        return format!("{:.0} seconds", seconds);
+        return format!("{seconds:.0} seconds");
     }
     let minutes = seconds / 60.0;
     if minutes < 60.0 {
-        return format!("{:.0} minutes", minutes);
+        return format!("{minutes:.0} minutes");
     }
     let hours = minutes / 60.0;
     if hours < 24.0 {
-        return format!("{:.0} hours", hours);
+        return format!("{hours:.0} hours");
     }
     let days = hours / 24.0;
     if days < 365.0 {
-        return format!("{:.0} days", days);
+        return format!("{days:.0} days");
     }
     let years = days / 365.25;
     if years < 1_000.0 {
-        return format!("{:.0} years", years);
+        return format!("{years:.0} years");
     }
     if years < 1_000_000.0 {
         return format!("{:.0} thousand years", years / 1_000.0);
@@ -601,17 +603,33 @@ pub fn analyze_password(password: &str) -> PasswordAnalysis {
     let has_symbols = password.chars().any(|c| !c.is_ascii_alphanumeric());
 
     let mut classes = 0usize;
-    if has_lowercase { classes = classes.saturating_add(1); }
-    if has_uppercase { classes = classes.saturating_add(1); }
-    if has_digits { classes = classes.saturating_add(1); }
-    if has_symbols { classes = classes.saturating_add(1); }
+    if has_lowercase {
+        classes = classes.saturating_add(1);
+    }
+    if has_uppercase {
+        classes = classes.saturating_add(1);
+    }
+    if has_digits {
+        classes = classes.saturating_add(1);
+    }
+    if has_symbols {
+        classes = classes.saturating_add(1);
+    }
 
     // Calculate pool size based on actual character classes
     let mut pool_size = 0usize;
-    if has_lowercase { pool_size = pool_size.saturating_add(26); }
-    if has_uppercase { pool_size = pool_size.saturating_add(26); }
-    if has_digits { pool_size = pool_size.saturating_add(10); }
-    if has_symbols { pool_size = pool_size.saturating_add(30); }
+    if has_lowercase {
+        pool_size = pool_size.saturating_add(26);
+    }
+    if has_uppercase {
+        pool_size = pool_size.saturating_add(26);
+    }
+    if has_digits {
+        pool_size = pool_size.saturating_add(10);
+    }
+    if has_symbols {
+        pool_size = pool_size.saturating_add(30);
+    }
 
     let entropy = if pool_size > 0 && length > 0 {
         (pool_size as f64).log2() * length as f64
@@ -680,7 +698,7 @@ fn detect_patterns(password: &str, patterns: &mut Vec<PatternMatch>) {
         if count >= 3 {
             patterns.push(PatternMatch {
                 kind: PatternKind::RepeatedChars,
-                description: format!("'{}' repeated {} times", ch, count),
+                description: format!("'{ch}' repeated {count} times"),
                 penalty_bits: (count as f64 - 1.0) * 3.0,
             });
         }
@@ -698,7 +716,7 @@ fn detect_patterns(password: &str, patterns: &mut Vec<PatternMatch>) {
             if seq_len >= 3 {
                 patterns.push(PatternMatch {
                     kind: PatternKind::SequentialChars,
-                    description: format!("{} sequential characters", seq_len),
+                    description: format!("{seq_len} sequential characters"),
                     penalty_bits: seq_len as f64 * 2.0,
                 });
             }
@@ -708,15 +726,21 @@ fn detect_patterns(password: &str, patterns: &mut Vec<PatternMatch>) {
     if seq_len >= 3 {
         patterns.push(PatternMatch {
             kind: PatternKind::SequentialChars,
-            description: format!("{} sequential characters", seq_len),
+            description: format!("{seq_len} sequential characters"),
             penalty_bits: seq_len as f64 * 2.0,
         });
     }
 
     // Keyboard sequences
     let keyboard_sequences = [
-        "qwerty", "asdfgh", "zxcvbn", "qweasd", "1234567890",
-        "!@#$%^", "poiuyt", "lkjhgf",
+        "qwerty",
+        "asdfgh",
+        "zxcvbn",
+        "qweasd",
+        "1234567890",
+        "!@#$%^",
+        "poiuyt",
+        "lkjhgf",
     ];
     for seq in &keyboard_sequences {
         if lower.contains(seq) {
@@ -759,12 +783,36 @@ fn detect_patterns(password: &str, patterns: &mut Vec<PatternMatch>) {
 /// Check if a password is in the common passwords list.
 fn is_common_password(password: &str) -> bool {
     let common = [
-        "password", "123456", "12345678", "qwerty", "abc123",
-        "monkey", "1234567", "letmein", "trustno1", "dragon",
-        "baseball", "iloveyou", "master", "sunshine", "ashley",
-        "bailey", "shadow", "123123", "654321", "superman",
-        "qazwsx", "michael", "football", "password1", "password123",
-        "admin", "welcome", "login", "princess", "starwars",
+        "password",
+        "123456",
+        "12345678",
+        "qwerty",
+        "abc123",
+        "monkey",
+        "1234567",
+        "letmein",
+        "trustno1",
+        "dragon",
+        "baseball",
+        "iloveyou",
+        "master",
+        "sunshine",
+        "ashley",
+        "bailey",
+        "shadow",
+        "123123",
+        "654321",
+        "superman",
+        "qazwsx",
+        "michael",
+        "football",
+        "password1",
+        "password123",
+        "admin",
+        "welcome",
+        "login",
+        "princess",
+        "starwars",
     ];
     let lower = password.to_lowercase();
     common.iter().any(|c| *c == lower)
@@ -813,10 +861,10 @@ impl PasswordPolicy {
         if password.len() < self.min_length {
             violations.push(format!("Too short (minimum {} chars)", self.min_length));
         }
-        if let Some(max) = self.max_length {
-            if password.len() > max {
-                violations.push(format!("Too long (maximum {max} chars)"));
-            }
+        if let Some(max) = self.max_length
+            && password.len() > max
+        {
+            violations.push(format!("Too long (maximum {max} chars)"));
         }
         if self.require_lowercase && !analysis.has_lowercase {
             violations.push("Must contain lowercase letter".to_owned());
@@ -1102,7 +1150,11 @@ impl PasswordApp {
         });
 
         // Tab buttons
-        let tabs = [ActiveTab::Generator, ActiveTab::Analyzer, ActiveTab::History];
+        let tabs = [
+            ActiveTab::Generator,
+            ActiveTab::Analyzer,
+            ActiveTab::History,
+        ];
         let mut tx = 220.0;
         for tab in &tabs {
             let is_active = *tab == self.active_tab;
@@ -1121,7 +1173,11 @@ impl PasswordApp {
                 text: tab.label().to_owned(),
                 color: if is_active { BLUE } else { SUBTEXT0 },
                 font_size: 11.0,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(btn_w - 16.0),
             });
             tx += btn_w + 4.0;
@@ -1216,7 +1272,11 @@ impl PasswordApp {
         } else {
             self.current_password.clone()
         };
-        let pw_color = if self.current_password.is_empty() { OVERLAY0 } else { TEXT };
+        let pw_color = if self.current_password.is_empty() {
+            OVERLAY0
+        } else {
+            TEXT
+        };
         cmds.push(RenderCommand::Text {
             x: lx + 8.0,
             y: cy + 9.0,
@@ -1274,11 +1334,61 @@ impl PasswordApp {
 
         let options = [
             (format!("Length: {}", self.password_opts.length), true),
-            (format!("Lowercase: {}", if self.password_opts.use_lowercase { "Yes" } else { "No" }), self.password_opts.use_lowercase),
-            (format!("Uppercase: {}", if self.password_opts.use_uppercase { "Yes" } else { "No" }), self.password_opts.use_uppercase),
-            (format!("Digits: {}", if self.password_opts.use_digits { "Yes" } else { "No" }), self.password_opts.use_digits),
-            (format!("Symbols: {}", if self.password_opts.use_symbols { "Yes" } else { "No" }), self.password_opts.use_symbols),
-            (format!("Exclude Ambiguous: {}", if self.password_opts.exclude_ambiguous { "Yes" } else { "No" }), self.password_opts.exclude_ambiguous),
+            (
+                format!(
+                    "Lowercase: {}",
+                    if self.password_opts.use_lowercase {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ),
+                self.password_opts.use_lowercase,
+            ),
+            (
+                format!(
+                    "Uppercase: {}",
+                    if self.password_opts.use_uppercase {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ),
+                self.password_opts.use_uppercase,
+            ),
+            (
+                format!(
+                    "Digits: {}",
+                    if self.password_opts.use_digits {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ),
+                self.password_opts.use_digits,
+            ),
+            (
+                format!(
+                    "Symbols: {}",
+                    if self.password_opts.use_symbols {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ),
+                self.password_opts.use_symbols,
+            ),
+            (
+                format!(
+                    "Exclude Ambiguous: {}",
+                    if self.password_opts.exclude_ambiguous {
+                        "Yes"
+                    } else {
+                        "No"
+                    }
+                ),
+                self.password_opts.exclude_ambiguous,
+            ),
         ];
 
         for (label, active) in &options {
@@ -1296,7 +1406,14 @@ impl PasswordApp {
         }
     }
 
-    fn render_right_panel(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_right_panel(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         let lx = x + 12.0;
         let max_w = width - 24.0;
         let mut cy = y + 12.0;
@@ -1562,7 +1679,10 @@ mod tests {
     #[test]
     fn test_generate_password_length() {
         let mut rng = Rng::new(1);
-        let opts = PasswordOptions { length: 20, ..PasswordOptions::default() };
+        let opts = PasswordOptions {
+            length: 20,
+            ..PasswordOptions::default()
+        };
         let pw = generate_password(&opts, &mut rng);
         assert_eq!(pw.len(), 20);
     }
@@ -1612,7 +1732,10 @@ mod tests {
     #[test]
     fn test_generate_password_zero_length() {
         let mut rng = Rng::new(1);
-        let opts = PasswordOptions { length: 0, ..PasswordOptions::default() };
+        let opts = PasswordOptions {
+            length: 0,
+            ..PasswordOptions::default()
+        };
         let pw = generate_password(&opts, &mut rng);
         assert!(pw.is_empty());
     }
@@ -1664,7 +1787,10 @@ mod tests {
         // Alternating consonant-vowel pattern
         for (i, c) in pw.chars().enumerate() {
             if i % 2 == 0 {
-                assert!(CONSONANTS.contains(c), "Expected consonant at pos {i}, got {c}");
+                assert!(
+                    CONSONANTS.contains(c),
+                    "Expected consonant at pos {i}, got {c}"
+                );
             } else {
                 assert!(VOWELS.contains(c), "Expected vowel at pos {i}, got {c}");
             }
@@ -1704,21 +1830,30 @@ mod tests {
     #[test]
     fn test_detect_repeated_chars() {
         let analysis = analyze_password("aaabbbccc");
-        let has_repeat = analysis.patterns_found.iter().any(|p| p.kind == PatternKind::RepeatedChars);
+        let has_repeat = analysis
+            .patterns_found
+            .iter()
+            .any(|p| p.kind == PatternKind::RepeatedChars);
         assert!(has_repeat);
     }
 
     #[test]
     fn test_detect_sequential_chars() {
         let analysis = analyze_password("abcdefgh");
-        let has_seq = analysis.patterns_found.iter().any(|p| p.kind == PatternKind::SequentialChars);
+        let has_seq = analysis
+            .patterns_found
+            .iter()
+            .any(|p| p.kind == PatternKind::SequentialChars);
         assert!(has_seq);
     }
 
     #[test]
     fn test_detect_keyboard_sequence() {
         let analysis = analyze_password("myqwertypassword");
-        let has_kb = analysis.patterns_found.iter().any(|p| p.kind == PatternKind::KeyboardSequence);
+        let has_kb = analysis
+            .patterns_found
+            .iter()
+            .any(|p| p.kind == PatternKind::KeyboardSequence);
         assert!(has_kb);
     }
 
@@ -1791,7 +1926,10 @@ mod tests {
 
     #[test]
     fn test_policy_too_short() {
-        let policy = PasswordPolicy { min_length: 12, ..PasswordPolicy::default() };
+        let policy = PasswordPolicy {
+            min_length: 12,
+            ..PasswordPolicy::default()
+        };
         let violations = policy.check("Abc1!");
         assert!(violations.iter().any(|v| v.contains("short")));
     }

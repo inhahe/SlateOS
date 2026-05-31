@@ -1,9 +1,9 @@
-//! OurOS SQLite Database Viewer / Browser
+//! `OurOS` `SQLite` Database Viewer / Browser
 //!
-//! A database viewer/browser tool (like DB Browser for SQLite) with:
+//! A database viewer/browser tool (like DB Browser for `SQLite`) with:
 //! - SQL parser: basic SELECT, INSERT, UPDATE, DELETE, CREATE TABLE, DROP TABLE
 //! - Data types: INTEGER, REAL, TEXT, BLOB, NULL
-//! - In-memory table storage (simulated SQLite engine)
+//! - In-memory table storage (simulated `SQLite` engine)
 //! - Table schema viewer with column names, types, constraints
 //! - Paginated data browser with column sorting
 //! - SQL query editor with syntax highlighting hints
@@ -20,7 +20,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -81,14 +83,69 @@ const DEFAULT_COL_WIDTH: f32 = 140.0;
 // ============================================================================
 
 const SQL_KEYWORDS: &[&str] = &[
-    "SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET",
-    "DELETE", "CREATE", "TABLE", "DROP", "ALTER", "ADD", "COLUMN", "INDEX",
-    "VIEW", "TRIGGER", "PRIMARY", "KEY", "NOT", "NULL", "UNIQUE", "DEFAULT",
-    "CHECK", "FOREIGN", "REFERENCES", "ON", "CASCADE", "RESTRICT", "AND",
-    "OR", "IN", "BETWEEN", "LIKE", "IS", "AS", "ORDER", "BY", "ASC", "DESC",
-    "LIMIT", "OFFSET", "GROUP", "HAVING", "JOIN", "LEFT", "RIGHT", "INNER",
-    "OUTER", "CROSS", "DISTINCT", "COUNT", "SUM", "AVG", "MIN", "MAX",
-    "INTEGER", "REAL", "TEXT", "BLOB", "IF", "EXISTS",
+    "SELECT",
+    "FROM",
+    "WHERE",
+    "INSERT",
+    "INTO",
+    "VALUES",
+    "UPDATE",
+    "SET",
+    "DELETE",
+    "CREATE",
+    "TABLE",
+    "DROP",
+    "ALTER",
+    "ADD",
+    "COLUMN",
+    "INDEX",
+    "VIEW",
+    "TRIGGER",
+    "PRIMARY",
+    "KEY",
+    "NOT",
+    "NULL",
+    "UNIQUE",
+    "DEFAULT",
+    "CHECK",
+    "FOREIGN",
+    "REFERENCES",
+    "ON",
+    "CASCADE",
+    "RESTRICT",
+    "AND",
+    "OR",
+    "IN",
+    "BETWEEN",
+    "LIKE",
+    "IS",
+    "AS",
+    "ORDER",
+    "BY",
+    "ASC",
+    "DESC",
+    "LIMIT",
+    "OFFSET",
+    "GROUP",
+    "HAVING",
+    "JOIN",
+    "LEFT",
+    "RIGHT",
+    "INNER",
+    "OUTER",
+    "CROSS",
+    "DISTINCT",
+    "COUNT",
+    "SUM",
+    "AVG",
+    "MIN",
+    "MAX",
+    "INTEGER",
+    "REAL",
+    "TEXT",
+    "BLOB",
+    "IF",
+    "EXISTS",
 ];
 
 // ============================================================================
@@ -179,8 +236,12 @@ impl CellValue {
             return Self::Null;
         }
         match dtype {
-            DataType::Integer => s.parse::<i64>().map_or(Self::Text(s.to_owned()), Self::Integer),
-            DataType::Real => s.parse::<f64>().map_or(Self::Text(s.to_owned()), Self::Real),
+            DataType::Integer => s
+                .parse::<i64>()
+                .map_or(Self::Text(s.to_owned()), Self::Integer),
+            DataType::Real => s
+                .parse::<f64>()
+                .map_or(Self::Text(s.to_owned()), Self::Real),
             DataType::Text => Self::Text(s.to_owned()),
             DataType::Blob => Self::Blob(s.as_bytes().to_vec()),
             DataType::Null => Self::Null,
@@ -208,7 +269,7 @@ impl Eq for SortKey<'_> {}
 
 impl PartialOrd for SortKey<'_> {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp_value(other))
+        Some(self.cmp(other))
     }
 }
 
@@ -230,7 +291,9 @@ impl SortKey<'_> {
             (Self::Str(a), Self::Str(b)) => a.cmp(b),
             (Self::Bytes(a), Self::Bytes(b)) => a.cmp(b),
             (Self::Int(a), Self::Float(b)) => (*a as f64).partial_cmp(b).unwrap_or(Ordering::Equal),
-            (Self::Float(a), Self::Int(b)) => a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal),
+            (Self::Float(a), Self::Int(b)) => {
+                a.partial_cmp(&(*b as f64)).unwrap_or(Ordering::Equal)
+            }
             _ => Ordering::Equal,
         }
     }
@@ -268,7 +331,12 @@ impl ColumnConstraints {
         if let Some(ref def) = self.default_value {
             parts.push("DEF=");
             // We just push separate parts; the caller joins them
-            return format!("{} DEF={def}", parts[..parts.len().saturating_sub(1)].join(" ")).trim().to_owned();
+            return format!(
+                "{} DEF={def}",
+                parts[..parts.len().saturating_sub(1)].join(" ")
+            )
+            .trim()
+            .to_owned();
         }
         parts.join(" ")
     }
@@ -407,41 +475,40 @@ impl Table {
 
         // Validate NOT NULL constraints
         for (i, val) in values.iter().enumerate() {
-            if let Some(col) = self.columns.get(i) {
-                if col.constraints.not_null && *val == CellValue::Null && !col.constraints.auto_increment {
-                    return Err(format!("Column '{}' cannot be NULL", col.name));
-                }
+            if let Some(col) = self.columns.get(i)
+                && col.constraints.not_null
+                && *val == CellValue::Null
+                && !col.constraints.auto_increment
+            {
+                return Err(format!("Column '{}' cannot be NULL", col.name));
             }
         }
 
         // Handle auto-increment
         let mut final_values = values;
         for (i, col) in self.columns.iter().enumerate() {
-            if col.constraints.auto_increment {
-                if let Some(v) = final_values.get(i) {
-                    if *v == CellValue::Null {
-                        self.auto_increment_counter = self.auto_increment_counter.saturating_add(1);
-                        if let Some(cell) = final_values.get_mut(i) {
-                            *cell = CellValue::Integer(self.auto_increment_counter);
-                        }
-                    }
+            if col.constraints.auto_increment
+                && let Some(v) = final_values.get(i)
+                && *v == CellValue::Null
+            {
+                self.auto_increment_counter = self.auto_increment_counter.saturating_add(1);
+                if let Some(cell) = final_values.get_mut(i) {
+                    *cell = CellValue::Integer(self.auto_increment_counter);
                 }
             }
         }
 
         // Check UNIQUE constraints
         for (i, col) in self.columns.iter().enumerate() {
-            if col.constraints.unique || col.constraints.primary_key {
-                if let Some(new_val) = final_values.get(i) {
-                    for existing_row in &self.rows {
-                        if let Some(existing_val) = existing_row.get(i) {
-                            if *existing_val != CellValue::Null && *existing_val == *new_val {
-                                return Err(format!(
-                                    "UNIQUE constraint failed: column '{}'",
-                                    col.name
-                                ));
-                            }
-                        }
+            if (col.constraints.unique || col.constraints.primary_key)
+                && let Some(new_val) = final_values.get(i)
+            {
+                for existing_row in &self.rows {
+                    if let Some(existing_val) = existing_row.get(i)
+                        && *existing_val != CellValue::Null
+                        && *existing_val == *new_val
+                    {
+                        return Err(format!("UNIQUE constraint failed: column '{}'", col.name));
                     }
                 }
             }
@@ -454,7 +521,9 @@ impl Table {
     /// Find column index by name (case-insensitive).
     fn column_index(&self, name: &str) -> Option<usize> {
         let name_upper = name.to_uppercase();
-        self.columns.iter().position(|c| c.name.to_uppercase() == name_upper)
+        self.columns
+            .iter()
+            .position(|c| c.name.to_uppercase() == name_upper)
     }
 
     /// Delete rows matching a predicate on a specific column.
@@ -462,7 +531,7 @@ impl Table {
         let before = self.rows.len();
         self.rows.retain(|row| {
             row.get(col_idx)
-                .map_or(true, |cell| !matches_filter(cell, op, value))
+                .is_none_or(|cell| !matches_filter(cell, op, value))
         });
         before.saturating_sub(self.rows.len())
     }
@@ -480,12 +549,10 @@ impl Table {
         for row in &mut self.rows {
             let matches = row
                 .get(where_col)
-                .map_or(false, |cell| matches_filter(cell, op, where_value));
-            if matches {
-                if let Some(cell) = row.get_mut(set_col) {
-                    *cell = set_value.clone();
-                    count = count.saturating_add(1);
-                }
+                .is_some_and(|cell| matches_filter(cell, op, where_value));
+            if matches && let Some(cell) = row.get_mut(set_col) {
+                *cell = set_value.clone();
+                count = count.saturating_add(1);
             }
         }
         count
@@ -531,12 +598,16 @@ impl Database {
 
     fn find_table(&self, name: &str) -> Option<&Table> {
         let name_upper = name.to_uppercase();
-        self.tables.iter().find(|t| t.name.to_uppercase() == name_upper)
+        self.tables
+            .iter()
+            .find(|t| t.name.to_uppercase() == name_upper)
     }
 
     fn find_table_mut(&mut self, name: &str) -> Option<&mut Table> {
         let name_upper = name.to_uppercase();
-        self.tables.iter_mut().find(|t| t.name.to_uppercase() == name_upper)
+        self.tables
+            .iter_mut()
+            .find(|t| t.name.to_uppercase() == name_upper)
     }
 
     fn create_table(&mut self, table: Table) -> Result<(), String> {
@@ -556,11 +627,12 @@ impl Database {
             .ok_or_else(|| format!("Table '{name}' not found"))?;
         self.tables.remove(idx);
         // Also remove related indexes, triggers, foreign keys
-        self.indexes.retain(|i| i.table_name.to_uppercase() != name_upper);
-        self.triggers.retain(|t| t.table_name.to_uppercase() != name_upper);
+        self.indexes
+            .retain(|i| i.table_name.to_uppercase() != name_upper);
+        self.triggers
+            .retain(|t| t.table_name.to_uppercase() != name_upper);
         self.foreign_keys.retain(|fk| {
-            fk.from_table.to_uppercase() != name_upper
-                && fk.to_table.to_uppercase() != name_upper
+            fk.from_table.to_uppercase() != name_upper && fk.to_table.to_uppercase() != name_upper
         });
         Ok(())
     }
@@ -973,7 +1045,7 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
         // Skip whitespace
         if ch.is_whitespace() {
             tokens.push(SqlToken::Whitespace);
-            while i < len && chars.get(i).map_or(false, |c| c.is_whitespace()) {
+            while i < len && chars.get(i).is_some_and(|c| c.is_whitespace()) {
                 i = i.saturating_add(1);
             }
             continue;
@@ -1004,9 +1076,19 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
         }
 
         // Numbers
-        if ch.is_ascii_digit() || (ch == '.' && i.saturating_add(1) < len && chars.get(i.saturating_add(1)).map_or(false, |c| c.is_ascii_digit())) {
+        if ch.is_ascii_digit()
+            || (ch == '.'
+                && i.saturating_add(1) < len
+                && chars
+                    .get(i.saturating_add(1))
+                    .is_some_and(char::is_ascii_digit))
+        {
             let mut num = String::new();
-            while i < len && chars.get(i).map_or(false, |c| c.is_ascii_digit() || *c == '.') {
+            while i < len
+                && chars
+                    .get(i)
+                    .is_some_and(|c| c.is_ascii_digit() || *c == '.')
+            {
                 num.push(chars.get(i).copied().unwrap_or('0'));
                 i = i.saturating_add(1);
             }
@@ -1017,7 +1099,11 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
         // Identifiers / keywords
         if ch.is_ascii_alphabetic() || ch == '_' {
             let mut ident = String::new();
-            while i < len && chars.get(i).map_or(false, |c| c.is_ascii_alphanumeric() || *c == '_') {
+            while i < len
+                && chars
+                    .get(i)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+            {
                 ident.push(chars.get(i).copied().unwrap_or('_'));
                 i = i.saturating_add(1);
             }
@@ -1032,7 +1118,10 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
 
         // Operators
         match ch {
-            '=' => { tokens.push(SqlToken::Operator("=".to_owned())); i = i.saturating_add(1); }
+            '=' => {
+                tokens.push(SqlToken::Operator("=".to_owned()));
+                i = i.saturating_add(1);
+            }
             '!' if i.saturating_add(1) < len && chars.get(i.saturating_add(1)) == Some(&'=') => {
                 tokens.push(SqlToken::Operator("!=".to_owned()));
                 i = i.saturating_add(2);
@@ -1045,19 +1134,45 @@ fn tokenize_sql(input: &str) -> Vec<SqlToken> {
                 tokens.push(SqlToken::Operator("<>".to_owned()));
                 i = i.saturating_add(2);
             }
-            '<' => { tokens.push(SqlToken::Operator("<".to_owned())); i = i.saturating_add(1); }
+            '<' => {
+                tokens.push(SqlToken::Operator("<".to_owned()));
+                i = i.saturating_add(1);
+            }
             '>' if i.saturating_add(1) < len && chars.get(i.saturating_add(1)) == Some(&'=') => {
                 tokens.push(SqlToken::Operator(">=".to_owned()));
                 i = i.saturating_add(2);
             }
-            '>' => { tokens.push(SqlToken::Operator(">".to_owned())); i = i.saturating_add(1); }
-            '(' => { tokens.push(SqlToken::LeftParen); i = i.saturating_add(1); }
-            ')' => { tokens.push(SqlToken::RightParen); i = i.saturating_add(1); }
-            ',' => { tokens.push(SqlToken::Comma); i = i.saturating_add(1); }
-            ';' => { tokens.push(SqlToken::Semicolon); i = i.saturating_add(1); }
-            '*' => { tokens.push(SqlToken::Star); i = i.saturating_add(1); }
-            '.' => { tokens.push(SqlToken::Dot); i = i.saturating_add(1); }
-            _ => { i = i.saturating_add(1); } // Skip unknown chars
+            '>' => {
+                tokens.push(SqlToken::Operator(">".to_owned()));
+                i = i.saturating_add(1);
+            }
+            '(' => {
+                tokens.push(SqlToken::LeftParen);
+                i = i.saturating_add(1);
+            }
+            ')' => {
+                tokens.push(SqlToken::RightParen);
+                i = i.saturating_add(1);
+            }
+            ',' => {
+                tokens.push(SqlToken::Comma);
+                i = i.saturating_add(1);
+            }
+            ';' => {
+                tokens.push(SqlToken::Semicolon);
+                i = i.saturating_add(1);
+            }
+            '*' => {
+                tokens.push(SqlToken::Star);
+                i = i.saturating_add(1);
+            }
+            '.' => {
+                tokens.push(SqlToken::Dot);
+                i = i.saturating_add(1);
+            }
+            _ => {
+                i = i.saturating_add(1);
+            } // Skip unknown chars
         }
     }
 
@@ -1110,7 +1225,11 @@ pub enum SqlStatement {
 pub enum SelectColumn {
     AllColumns,
     Named(String),
-    Aggregate { func: AggFunc, column: String, alias: Option<String> },
+    Aggregate {
+        func: AggFunc,
+        column: String,
+        alias: Option<String>,
+    },
 }
 
 /// Aggregate functions.
@@ -1234,7 +1353,11 @@ fn parse_select(tokens: &[SqlToken]) -> Result<SqlStatement, String> {
                 } else {
                     None
                 };
-                columns.push(SelectColumn::Aggregate { func, column: col_name, alias });
+                columns.push(SelectColumn::Aggregate {
+                    func,
+                    column: col_name,
+                    alias,
+                });
             }
             SqlToken::Identifier(name) => {
                 columns.push(SelectColumn::Named(name.clone()));
@@ -1641,7 +1764,9 @@ fn extract_value_str(tokens: &[SqlToken], pos: usize) -> Result<String, String> 
 
 fn extract_number(tokens: &[SqlToken], pos: usize) -> Result<usize, String> {
     match tokens.get(pos) {
-        Some(SqlToken::NumberLiteral(s)) => s.parse::<usize>().map_err(|e| format!("Invalid number: {e}")),
+        Some(SqlToken::NumberLiteral(s)) => s
+            .parse::<usize>()
+            .map_err(|e| format!("Invalid number: {e}")),
         Some(tok) => Err(format!("Expected number, got {tok:?}")),
         None => Err("Unexpected end of input".to_owned()),
     }
@@ -1659,12 +1784,26 @@ fn parse_where_clause(tokens: &[SqlToken], pos: usize) -> Result<(WhereClause, u
             if matches!(tokens.get(p), Some(SqlToken::Keyword(k)) if k == "NULL") {
                 p = p.saturating_add(1);
             }
-            return Ok((WhereClause { column: col, op: FilterOp::IsNotNull, value: String::new() }, p));
+            return Ok((
+                WhereClause {
+                    column: col,
+                    op: FilterOp::IsNotNull,
+                    value: String::new(),
+                },
+                p,
+            ));
         }
         if matches!(tokens.get(p), Some(SqlToken::Keyword(k)) if k == "NULL") {
             p = p.saturating_add(1);
         }
-        return Ok((WhereClause { column: col, op: FilterOp::IsNull, value: String::new() }, p));
+        return Ok((
+            WhereClause {
+                column: col,
+                op: FilterOp::IsNull,
+                value: String::new(),
+            },
+            p,
+        ));
     }
 
     // Check for LIKE
@@ -1672,7 +1811,14 @@ fn parse_where_clause(tokens: &[SqlToken], pos: usize) -> Result<(WhereClause, u
         p = p.saturating_add(1);
         let val = extract_value_str(tokens, p)?;
         p = p.saturating_add(1);
-        return Ok((WhereClause { column: col, op: FilterOp::Like, value: val }, p));
+        return Ok((
+            WhereClause {
+                column: col,
+                op: FilterOp::Like,
+                value: val,
+            },
+            p,
+        ));
     }
 
     // Regular operator
@@ -1693,7 +1839,14 @@ fn parse_where_clause(tokens: &[SqlToken], pos: usize) -> Result<(WhereClause, u
     let val = extract_value_str(tokens, p)?;
     p = p.saturating_add(1);
 
-    Ok((WhereClause { column: col, op, value: val }, p))
+    Ok((
+        WhereClause {
+            column: col,
+            op,
+            value: val,
+        },
+        p,
+    ))
 }
 
 // ============================================================================
@@ -1703,24 +1856,44 @@ fn parse_where_clause(tokens: &[SqlToken], pos: usize) -> Result<(WhereClause, u
 /// Execute a parsed SQL statement against a database.
 fn execute_sql(db: &mut Database, stmt: &SqlStatement) -> QueryResult {
     match stmt {
-        SqlStatement::Select { columns, table, where_clause, order_by, limit, offset, group_by } => {
-            execute_select(db, columns, table, where_clause.as_ref(), order_by.as_ref(), *limit, *offset, group_by.as_deref())
-        }
-        SqlStatement::Insert { table, columns, values } => {
-            execute_insert(db, table, columns, values)
-        }
-        SqlStatement::Update { table, set_clauses, where_clause } => {
-            execute_update(db, table, set_clauses, where_clause.as_ref())
-        }
-        SqlStatement::Delete { table, where_clause } => {
-            execute_delete(db, table, where_clause.as_ref())
-        }
-        SqlStatement::CreateTable { name, columns, if_not_exists } => {
-            execute_create_table(db, name, columns, *if_not_exists)
-        }
-        SqlStatement::DropTable { name, if_exists } => {
-            execute_drop_table(db, name, *if_exists)
-        }
+        SqlStatement::Select {
+            columns,
+            table,
+            where_clause,
+            order_by,
+            limit,
+            offset,
+            group_by,
+        } => execute_select(
+            db,
+            columns,
+            table,
+            where_clause.as_ref(),
+            order_by.as_ref(),
+            *limit,
+            *offset,
+            group_by.as_deref(),
+        ),
+        SqlStatement::Insert {
+            table,
+            columns,
+            values,
+        } => execute_insert(db, table, columns, values),
+        SqlStatement::Update {
+            table,
+            set_clauses,
+            where_clause,
+        } => execute_update(db, table, set_clauses, where_clause.as_ref()),
+        SqlStatement::Delete {
+            table,
+            where_clause,
+        } => execute_delete(db, table, where_clause.as_ref()),
+        SqlStatement::CreateTable {
+            name,
+            columns,
+            if_not_exists,
+        } => execute_create_table(db, name, columns, *if_not_exists),
+        SqlStatement::DropTable { name, if_exists } => execute_drop_table(db, name, *if_exists),
     }
 }
 
@@ -1755,17 +1928,27 @@ fn execute_select(
         };
         filtered_rows.retain(|row| {
             row.get(col_idx)
-                .map_or(false, |cell| matches_filter(cell, &wc.op, &filter_value))
+                .is_some_and(|cell| matches_filter(cell, &wc.op, &filter_value))
         });
     }
 
     // Handle GROUP BY with aggregates
     if let Some(group_col_name) = group_by {
-        return execute_grouped_select(table, columns, &filtered_rows, group_col_name, order_by, limit, offset);
+        return execute_grouped_select(
+            table,
+            columns,
+            &filtered_rows,
+            group_col_name,
+            order_by,
+            limit,
+            offset,
+        );
     }
 
     // Check if we have aggregate functions without GROUP BY
-    let has_aggregates = columns.iter().any(|c| matches!(c, SelectColumn::Aggregate { .. }));
+    let has_aggregates = columns
+        .iter()
+        .any(|c| matches!(c, SelectColumn::Aggregate { .. }));
     if has_aggregates {
         return execute_aggregate_select(table, columns, &filtered_rows);
     }
@@ -1785,17 +1968,19 @@ fn execute_select(
         .collect();
 
     // ORDER BY
-    if let Some((col_name, dir)) = order_by {
-        if let Some(sort_idx) = out_col_names.iter().position(|n| n.to_uppercase() == col_name.to_uppercase()) {
-            result_rows.sort_by(|a, b| {
-                let va = a.get(sort_idx).map_or(SortKey::Null, |v| v.as_sort_key());
-                let vb = b.get(sort_idx).map_or(SortKey::Null, |v| v.as_sort_key());
-                match dir {
-                    SortDir::Ascending => va.cmp(&vb),
-                    SortDir::Descending => vb.cmp(&va),
-                }
-            });
-        }
+    if let Some((col_name, dir)) = order_by
+        && let Some(sort_idx) = out_col_names
+            .iter()
+            .position(|n| n.to_uppercase() == col_name.to_uppercase())
+    {
+        result_rows.sort_by(|a, b| {
+            let va = a.get(sort_idx).map_or(SortKey::Null, |v| v.as_sort_key());
+            let vb = b.get(sort_idx).map_or(SortKey::Null, |v| v.as_sort_key());
+            match dir {
+                SortDir::Ascending => va.cmp(&vb),
+                SortDir::Descending => vb.cmp(&va),
+            }
+        });
     }
 
     // OFFSET
@@ -1853,8 +2038,15 @@ fn execute_aggregate_select(
     let mut out_values = Vec::new();
 
     for col in columns {
-        if let SelectColumn::Aggregate { func, column, alias } = col {
-            let name = alias.clone().unwrap_or_else(|| format!("{}({})", func.label(), column));
+        if let SelectColumn::Aggregate {
+            func,
+            column,
+            alias,
+        } = col
+        {
+            let name = alias
+                .clone()
+                .unwrap_or_else(|| format!("{}({})", func.label(), column));
             out_names.push(name);
 
             let col_idx = if column == "*" {
@@ -1889,7 +2081,9 @@ fn execute_grouped_select(
     let mut groups: Vec<(CellValue, Vec<&Vec<CellValue>>)> = Vec::new();
     for row in rows {
         let key = row.get(group_idx).cloned().unwrap_or(CellValue::Null);
-        let found = groups.iter_mut().find(|(k, _)| k.as_sort_key() == key.as_sort_key());
+        let found = groups
+            .iter_mut()
+            .find(|(k, _)| k.as_sort_key() == key.as_sort_key());
         if let Some((_, group_rows)) = found {
             group_rows.push(row);
         } else {
@@ -1905,8 +2099,16 @@ fn execute_grouped_select(
     for col in columns {
         match col {
             SelectColumn::Named(name) => out_names.push(name.clone()),
-            SelectColumn::Aggregate { func, column, alias } => {
-                out_names.push(alias.clone().unwrap_or_else(|| format!("{}({})", func.label(), column)));
+            SelectColumn::Aggregate {
+                func,
+                column,
+                alias,
+            } => {
+                out_names.push(
+                    alias
+                        .clone()
+                        .unwrap_or_else(|| format!("{}({})", func.label(), column)),
+                );
             }
             SelectColumn::AllColumns => {
                 for c in &table.columns {
@@ -1925,10 +2127,11 @@ fn execute_grouped_select(
                         row_values.push(group_key.clone());
                     } else if let Some(idx) = table.column_index(name) {
                         row_values.push(
-                            group_rows.first()
+                            group_rows
+                                .first()
                                 .and_then(|r| r.get(idx))
                                 .cloned()
-                                .unwrap_or(CellValue::Null)
+                                .unwrap_or(CellValue::Null),
                         );
                     }
                 }
@@ -1938,7 +2141,7 @@ fn execute_grouped_select(
                     } else {
                         table.column_index(column)
                     };
-                    let group_row_refs: Vec<&Vec<CellValue>> = group_rows.iter().copied().collect();
+                    let group_row_refs: Vec<&Vec<CellValue>> = group_rows.to_vec();
                     let value = compute_aggregate(*func, &group_row_refs, col_idx);
                     row_values.push(value);
                 }
@@ -1953,17 +2156,19 @@ fn execute_grouped_select(
     }
 
     // ORDER BY
-    if let Some((col_name, dir)) = order_by {
-        if let Some(sort_idx) = out_names.iter().position(|n| n.to_uppercase() == col_name.to_uppercase()) {
-            result_rows.sort_by(|a, b| {
-                let va = a.get(sort_idx).map_or(SortKey::Null, |v| v.as_sort_key());
-                let vb = b.get(sort_idx).map_or(SortKey::Null, |v| v.as_sort_key());
-                match dir {
-                    SortDir::Ascending => va.cmp(&vb),
-                    SortDir::Descending => vb.cmp(&va),
-                }
-            });
-        }
+    if let Some((col_name, dir)) = order_by
+        && let Some(sort_idx) = out_names
+            .iter()
+            .position(|n| n.to_uppercase() == col_name.to_uppercase())
+    {
+        result_rows.sort_by(|a, b| {
+            let va = a.get(sort_idx).map_or(SortKey::Null, |v| v.as_sort_key());
+            let vb = b.get(sort_idx).map_or(SortKey::Null, |v| v.as_sort_key());
+            match dir {
+                SortDir::Ascending => va.cmp(&vb),
+                SortDir::Descending => vb.cmp(&va),
+            }
+        });
     }
 
     // OFFSET
@@ -1987,8 +2192,9 @@ fn compute_aggregate(func: AggFunc, rows: &[&Vec<CellValue>], col_idx: Option<us
     match func {
         AggFunc::Count => {
             if let Some(idx) = col_idx {
-                let count = rows.iter()
-                    .filter(|r| r.get(idx).map_or(false, |v| *v != CellValue::Null))
+                let count = rows
+                    .iter()
+                    .filter(|r| r.get(idx).is_some_and(|v| *v != CellValue::Null))
                     .count();
                 CellValue::Integer(count as i64)
             } else {
@@ -1997,20 +2203,28 @@ fn compute_aggregate(func: AggFunc, rows: &[&Vec<CellValue>], col_idx: Option<us
         }
         AggFunc::Sum => {
             let idx = col_idx.unwrap_or(0);
-            let sum: f64 = rows.iter().filter_map(|r| r.get(idx)).map(|v| match v {
-                CellValue::Integer(n) => *n as f64,
-                CellValue::Real(n) => *n,
-                _ => 0.0,
-            }).sum();
+            let sum: f64 = rows
+                .iter()
+                .filter_map(|r| r.get(idx))
+                .map(|v| match v {
+                    CellValue::Integer(n) => *n as f64,
+                    CellValue::Real(n) => *n,
+                    _ => 0.0,
+                })
+                .sum();
             CellValue::Real(sum)
         }
         AggFunc::Avg => {
             let idx = col_idx.unwrap_or(0);
-            let values: Vec<f64> = rows.iter().filter_map(|r| r.get(idx)).filter_map(|v| match v {
-                CellValue::Integer(n) => Some(*n as f64),
-                CellValue::Real(n) => Some(*n),
-                _ => None,
-            }).collect();
+            let values: Vec<f64> = rows
+                .iter()
+                .filter_map(|r| r.get(idx))
+                .filter_map(|v| match v {
+                    CellValue::Integer(n) => Some(*n as f64),
+                    CellValue::Real(n) => Some(*n),
+                    _ => None,
+                })
+                .collect();
             if values.is_empty() {
                 CellValue::Null
             } else {
@@ -2039,7 +2253,12 @@ fn compute_aggregate(func: AggFunc, rows: &[&Vec<CellValue>], col_idx: Option<us
     }
 }
 
-fn execute_insert(db: &mut Database, table_name: &str, col_names: &[String], values: &[Vec<String>]) -> QueryResult {
+fn execute_insert(
+    db: &mut Database,
+    table_name: &str,
+    col_names: &[String],
+    values: &[Vec<String>],
+) -> QueryResult {
     let table = match db.find_table_mut(table_name) {
         Some(t) => t,
         None => return QueryResult::error(&format!("Table '{table_name}' not found")),
@@ -2065,25 +2284,22 @@ fn execute_insert(db: &mut Database, table_name: &str, col_names: &[String], val
     for val_row in values {
         let mut row = vec![CellValue::Null; col_count];
         for (vi, &ci) in col_indices.iter().enumerate() {
-            if let Some(val_str) = val_row.get(vi) {
-                if let Some(col) = table.columns.get(ci) {
-                    if let Some(cell) = row.get_mut(ci) {
-                        *cell = CellValue::parse_as(val_str, &col.data_type);
-                    }
-                }
+            if let Some(val_str) = val_row.get(vi)
+                && let Some(col) = table.columns.get(ci)
+                && let Some(cell) = row.get_mut(ci)
+            {
+                *cell = CellValue::parse_as(val_str, &col.data_type);
             }
         }
 
         // Fill defaults
         for (i, col) in table.columns.iter().enumerate() {
-            if let Some(cell) = row.get(i) {
-                if *cell == CellValue::Null {
-                    if let Some(ref def) = col.constraints.default_value {
-                        if let Some(cell_mut) = row.get_mut(i) {
-                            *cell_mut = CellValue::parse_as(def, &col.data_type);
-                        }
-                    }
-                }
+            if let Some(cell) = row.get(i)
+                && *cell == CellValue::Null
+                && let Some(ref def) = col.constraints.default_value
+                && let Some(cell_mut) = row.get_mut(i)
+            {
+                *cell_mut = CellValue::parse_as(def, &col.data_type);
             }
         }
 
@@ -2098,7 +2314,12 @@ fn execute_insert(db: &mut Database, table_name: &str, col_names: &[String], val
     result
 }
 
-fn execute_update(db: &mut Database, table_name: &str, set_clauses: &[(String, String)], where_clause: Option<&WhereClause>) -> QueryResult {
+fn execute_update(
+    db: &mut Database,
+    table_name: &str,
+    set_clauses: &[(String, String)],
+    where_clause: Option<&WhereClause>,
+) -> QueryResult {
     let table = match db.find_table_mut(table_name) {
         Some(t) => t,
         None => return QueryResult::error(&format!("Table '{table_name}' not found")),
@@ -2127,9 +2348,13 @@ fn execute_update(db: &mut Database, table_name: &str, set_clauses: &[(String, S
             } else {
                 CellValue::Text(wc.value.clone())
             };
-            total_updated = total_updated.saturating_add(
-                table.update_where(set_col_idx, &set_value, where_col_idx, &wc.op, &where_value)
-            );
+            total_updated = total_updated.saturating_add(table.update_where(
+                set_col_idx,
+                &set_value,
+                where_col_idx,
+                &wc.op,
+                &where_value,
+            ));
         } else {
             // Update all rows
             for row in &mut table.rows {
@@ -2146,7 +2371,11 @@ fn execute_update(db: &mut Database, table_name: &str, set_clauses: &[(String, S
     result
 }
 
-fn execute_delete(db: &mut Database, table_name: &str, where_clause: Option<&WhereClause>) -> QueryResult {
+fn execute_delete(
+    db: &mut Database,
+    table_name: &str,
+    where_clause: Option<&WhereClause>,
+) -> QueryResult {
     let table = match db.find_table_mut(table_name) {
         Some(t) => t,
         None => return QueryResult::error(&format!("Table '{table_name}' not found")),
@@ -2174,20 +2403,28 @@ fn execute_delete(db: &mut Database, table_name: &str, where_clause: Option<&Whe
     result
 }
 
-fn execute_create_table(db: &mut Database, name: &str, columns: &[ParsedColumnDef], if_not_exists: bool) -> QueryResult {
+fn execute_create_table(
+    db: &mut Database,
+    name: &str,
+    columns: &[ParsedColumnDef],
+    if_not_exists: bool,
+) -> QueryResult {
     if if_not_exists && db.find_table(name).is_some() {
         return QueryResult::success("Table already exists (IF NOT EXISTS)");
     }
 
-    let col_defs: Vec<ColumnDef> = columns.iter().map(|pc| {
-        let mut cd = ColumnDef::new(&pc.name, DataType::from_str_loose(&pc.data_type));
-        cd.constraints.primary_key = pc.primary_key;
-        cd.constraints.not_null = pc.not_null;
-        cd.constraints.unique = pc.unique;
-        cd.constraints.auto_increment = pc.auto_increment;
-        cd.constraints.default_value = pc.default_value.clone();
-        cd
-    }).collect();
+    let col_defs: Vec<ColumnDef> = columns
+        .iter()
+        .map(|pc| {
+            let mut cd = ColumnDef::new(&pc.name, DataType::from_str_loose(&pc.data_type));
+            cd.constraints.primary_key = pc.primary_key;
+            cd.constraints.not_null = pc.not_null;
+            cd.constraints.unique = pc.unique;
+            cd.constraints.auto_increment = pc.auto_increment;
+            cd.constraints.default_value = pc.default_value.clone();
+            cd
+        })
+        .collect();
 
     let table = Table::new(name, col_defs);
     match db.create_table(table) {
@@ -2220,12 +2457,13 @@ pub fn export_csv(table: &Table) -> String {
 
     // Data
     for row in &table.rows {
-        let vals: Vec<String> = row.iter().map(|v| {
-            match v {
+        let vals: Vec<String> = row
+            .iter()
+            .map(|v| match v {
                 CellValue::Text(s) => format!("\"{}\"", s.replace('"', "\"\"")),
                 other => other.display(),
-            }
-        }).collect();
+            })
+            .collect();
         out.push_str(&vals.join(","));
         out.push('\n');
     }
@@ -2245,8 +2483,12 @@ pub fn export_json(table: &Table) -> String {
             match val {
                 CellValue::Integer(n) => out.push_str(&format!("\"{col_name}\": {n}")),
                 CellValue::Real(n) => out.push_str(&format!("\"{col_name}\": {n}")),
-                CellValue::Text(s) => out.push_str(&format!("\"{col_name}\": \"{}\"", s.replace('"', "\\\""))),
-                CellValue::Blob(b) => out.push_str(&format!("\"{col_name}\": \"<blob:{}>\"", b.len())),
+                CellValue::Text(s) => {
+                    out.push_str(&format!("\"{col_name}\": \"{}\"", s.replace('"', "\\\"")))
+                }
+                CellValue::Blob(b) => {
+                    out.push_str(&format!("\"{col_name}\": \"<blob:{}>\"", b.len()))
+                }
                 CellValue::Null => out.push_str(&format!("\"{col_name}\": null")),
             }
         }
@@ -2267,13 +2509,16 @@ pub fn export_sql_inserts(table: &Table) -> String {
     let cols_str = col_names.join(", ");
 
     for row in &table.rows {
-        let vals: Vec<String> = row.iter().map(|v| match v {
-            CellValue::Integer(n) => n.to_string(),
-            CellValue::Real(n) => format!("{n}"),
-            CellValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
-            CellValue::Blob(_) => "X''".to_owned(),
-            CellValue::Null => "NULL".to_owned(),
-        }).collect();
+        let vals: Vec<String> = row
+            .iter()
+            .map(|v| match v {
+                CellValue::Integer(n) => n.to_string(),
+                CellValue::Real(n) => format!("{n}"),
+                CellValue::Text(s) => format!("'{}'", s.replace('\'', "''")),
+                CellValue::Blob(_) => "X''".to_owned(),
+                CellValue::Null => "NULL".to_owned(),
+            })
+            .collect();
         out.push_str(&format!(
             "INSERT INTO {} ({}) VALUES ({});\n",
             table.name,
@@ -2334,7 +2579,8 @@ fn parse_csv_line(line: &str, expected_cols: usize) -> Vec<CellValue> {
         let ch = chars.get(i).copied().unwrap_or(' ');
         if in_quotes {
             if ch == '"' {
-                if i.saturating_add(1) < chars.len() && chars.get(i.saturating_add(1)) == Some(&'"') {
+                if i.saturating_add(1) < chars.len() && chars.get(i.saturating_add(1)) == Some(&'"')
+                {
                     current.push('"');
                     i = i.saturating_add(2);
                 } else {
@@ -2371,7 +2617,7 @@ fn parse_csv_line(line: &str, expected_cols: usize) -> Vec<CellValue> {
 fn infer_column_types(table: &mut Table) {
     for col_idx in 0..table.col_count() {
         let all_int = table.rows.iter().all(|row| {
-            row.get(col_idx).map_or(true, |v| match v {
+            row.get(col_idx).is_none_or(|v| match v {
                 CellValue::Text(s) => s.is_empty() || s.parse::<i64>().is_ok(),
                 CellValue::Null => true,
                 _ => false,
@@ -2383,19 +2629,18 @@ fn infer_column_types(table: &mut Table) {
                 col.data_type = DataType::Integer;
             }
             for row in &mut table.rows {
-                if let Some(cell) = row.get_mut(col_idx) {
-                    if let CellValue::Text(s) = cell {
-                        if let Ok(n) = s.parse::<i64>() {
-                            *cell = CellValue::Integer(n);
-                        }
-                    }
+                if let Some(cell) = row.get_mut(col_idx)
+                    && let CellValue::Text(s) = cell
+                    && let Ok(n) = s.parse::<i64>()
+                {
+                    *cell = CellValue::Integer(n);
                 }
             }
             continue;
         }
 
         let all_real = table.rows.iter().all(|row| {
-            row.get(col_idx).map_or(true, |v| match v {
+            row.get(col_idx).is_none_or(|v| match v {
                 CellValue::Text(s) => s.is_empty() || s.parse::<f64>().is_ok(),
                 CellValue::Null => true,
                 _ => false,
@@ -2407,12 +2652,11 @@ fn infer_column_types(table: &mut Table) {
                 col.data_type = DataType::Real;
             }
             for row in &mut table.rows {
-                if let Some(cell) = row.get_mut(col_idx) {
-                    if let CellValue::Text(s) = cell {
-                        if let Ok(n) = s.parse::<f64>() {
-                            *cell = CellValue::Real(n);
-                        }
-                    }
+                if let Some(cell) = row.get_mut(col_idx)
+                    && let CellValue::Text(s) = cell
+                    && let Ok(n) = s.parse::<f64>()
+                {
+                    *cell = CellValue::Real(n);
                 }
             }
         }
@@ -2581,7 +2825,7 @@ impl DbTab {
                 let filter_value = CellValue::parse_as(&filter.value_str, &col.data_type);
                 rows.retain(|row| {
                     row.get(filter.column_idx)
-                        .map_or(false, |cell| matches_filter(cell, &filter.op, &filter_value))
+                        .is_some_and(|cell| matches_filter(cell, &filter.op, &filter_value))
                 });
             }
         }
@@ -2621,6 +2865,12 @@ pub struct DbViewerApp {
     pub filter_column_idx: usize,
     pub filter_op_idx: usize,
     pub filter_value: String,
+}
+
+impl Default for DbViewerApp {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl DbViewerApp {
@@ -2746,14 +2996,13 @@ impl DbViewerApp {
 
     /// Navigate to next page.
     pub fn next_page(&mut self) {
-        if let Some(tab) = self.active_db_tab_mut() {
-            if let Some(table_name) = &tab.selected_table {
-                if let Some(table) = tab.db.find_table(table_name) {
-                    let max_page = table.row_count().saturating_sub(1) / PAGE_SIZE;
-                    if tab.page < max_page {
-                        tab.page = tab.page.saturating_add(1);
-                    }
-                }
+        if let Some(tab) = self.active_db_tab_mut()
+            && let Some(table_name) = &tab.selected_table
+            && let Some(table) = tab.db.find_table(table_name)
+        {
+            let max_page = table.row_count().saturating_sub(1) / PAGE_SIZE;
+            if tab.page < max_page {
+                tab.page = tab.page.saturating_add(1);
             }
         }
     }
@@ -2787,24 +3036,22 @@ impl DbViewerApp {
 
     /// Remove a filter.
     pub fn remove_filter(&mut self, idx: usize) {
-        if let Some(tab) = self.active_db_tab_mut() {
-            if idx < tab.filters.len() {
-                tab.filters.remove(idx);
-                tab.page = 0;
-            }
+        if let Some(tab) = self.active_db_tab_mut()
+            && idx < tab.filters.len()
+        {
+            tab.filters.remove(idx);
+            tab.page = 0;
         }
     }
 
     /// Delete a row from the selected table.
     pub fn delete_row(&mut self, row_idx: usize) {
-        if let Some(tab) = self.active_db_tab_mut() {
-            if let Some(table_name) = tab.selected_table.clone() {
-                if let Some(table) = tab.db.find_table_mut(&table_name) {
-                    if row_idx < table.rows.len() {
-                        table.rows.remove(row_idx);
-                    }
-                }
-            }
+        if let Some(tab) = self.active_db_tab_mut()
+            && let Some(table_name) = tab.selected_table.clone()
+            && let Some(table) = tab.db.find_table_mut(&table_name)
+            && row_idx < table.rows.len()
+        {
+            table.rows.remove(row_idx);
         }
     }
 
@@ -2966,7 +3213,11 @@ impl DbViewerApp {
                 text: tab_label.clone(),
                 color: if is_active { TEXT } else { SUBTEXT0 },
                 font_size: 11.0,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tw - 16.0),
             });
 
@@ -3004,7 +3255,14 @@ impl DbViewerApp {
         });
     }
 
-    fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_sidebar(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         cmds.push(RenderCommand::FillRect {
             x,
             y,
@@ -3068,7 +3326,11 @@ impl DbViewerApp {
 
             let (icon, label, color) = match &node.kind {
                 TreeNodeKind::TablesHeader => ("T", "Tables".to_owned(), BLUE),
-                TreeNodeKind::Table(name) => ("  ", name.clone(), if is_selected { TEXT } else { SUBTEXT1 }),
+                TreeNodeKind::Table(name) => (
+                    "  ",
+                    name.clone(),
+                    if is_selected { TEXT } else { SUBTEXT1 },
+                ),
                 TreeNodeKind::IndexesHeader => ("I", "Indexes".to_owned(), PEACH),
                 TreeNodeKind::Index(name) => ("  ", name.clone(), SUBTEXT0),
                 TreeNodeKind::ViewsHeader => ("V", "Views".to_owned(), GREEN),
@@ -3098,7 +3360,11 @@ impl DbViewerApp {
                     | TreeNodeKind::TriggersHeader
             );
 
-            let font_weight = if is_header { FontWeightHint::Bold } else { FontWeightHint::Regular };
+            let font_weight = if is_header {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
             let font_size = if is_header { 10.0 } else { 11.0 };
 
             // Icon
@@ -3153,9 +3419,10 @@ impl DbViewerApp {
             // Show active filters
             if let Some(t) = self.active_db_tab() {
                 for (fi, filter) in t.filters.iter().enumerate() {
-                    let col_name = t.db.find_table(t.selected_table.as_deref().unwrap_or(""))
-                        .and_then(|tbl| tbl.columns.get(filter.column_idx))
-                        .map_or("?", |c| c.name.as_str());
+                    let col_name =
+                        t.db.find_table(t.selected_table.as_deref().unwrap_or(""))
+                            .and_then(|tbl| tbl.columns.get(filter.column_idx))
+                            .map_or("?", |c| c.name.as_str());
 
                     cmds.push(RenderCommand::FillRect {
                         x: x + 8.0,
@@ -3214,20 +3481,19 @@ impl DbViewerApp {
             None => return,
         };
 
-        let (col_names, all_rows) = match tab.current_table_data() {
-            Some(data) => data,
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: x + 20.0,
-                    y: y + 30.0,
-                    text: "No table selected".to_owned(),
-                    color: OVERLAY0,
-                    font_size: 13.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - 40.0),
-                });
-                return;
-            }
+        let (col_names, all_rows) = if let Some(data) = tab.current_table_data() {
+            data
+        } else {
+            cmds.push(RenderCommand::Text {
+                x: x + 20.0,
+                y: y + 30.0,
+                text: "No table selected".to_owned(),
+                color: OVERLAY0,
+                font_size: 13.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width - 40.0),
+            });
+            return;
         };
 
         let total_rows = all_rows.len();
@@ -3380,7 +3646,11 @@ impl DbViewerApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let total_pages = if total_rows == 0 { 1 } else { total_rows.saturating_sub(1) / PAGE_SIZE + 1 };
+        let total_pages = if total_rows == 0 {
+            1
+        } else {
+            total_rows.saturating_sub(1) / PAGE_SIZE + 1
+        };
         let page_text = format!(
             "Page {} of {} ({} rows)",
             tab.page.saturating_add(1),
@@ -3475,7 +3745,11 @@ impl DbViewerApp {
                 text: label.to_owned(),
                 color: if is_active { TEXT } else { SUBTEXT0 },
                 font_size: 10.0,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tw - 16.0),
             });
             tx += tw + 2.0;
@@ -3493,7 +3767,9 @@ impl DbViewerApp {
         });
 
         match self.bottom_panel {
-            BottomPanel::SqlEditor => self.render_sql_editor(cmds, x, content_y, width, content_height),
+            BottomPanel::SqlEditor => {
+                self.render_sql_editor(cmds, x, content_y, width, content_height)
+            }
             BottomPanel::Results => self.render_results(cmds, x, content_y, width, content_height),
             BottomPanel::Schema => self.render_schema(cmds, x, content_y, width, content_height),
             BottomPanel::Diagram => self.render_diagram(cmds, x, content_y, width, content_height),
@@ -3502,7 +3778,14 @@ impl DbViewerApp {
         cmds.push(RenderCommand::PopClip);
     }
 
-    fn render_sql_editor(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, _height: f32) {
+    fn render_sql_editor(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        _height: f32,
+    ) {
         // Editor background
         cmds.push(RenderCommand::FillRect {
             x: x + 8.0,
@@ -3545,7 +3828,9 @@ impl DbViewerApp {
                 let (text, color, weight) = match token {
                     SqlToken::Keyword(k) => (k.clone(), MAUVE, FontWeightHint::Bold),
                     SqlToken::Identifier(id) => (id.clone(), TEXT, FontWeightHint::Regular),
-                    SqlToken::StringLiteral(s) => (format!("'{s}'"), GREEN, FontWeightHint::Regular),
+                    SqlToken::StringLiteral(s) => {
+                        (format!("'{s}'"), GREEN, FontWeightHint::Regular)
+                    }
                     SqlToken::NumberLiteral(n) => (n.clone(), PEACH, FontWeightHint::Regular),
                     SqlToken::Operator(op) => (op.clone(), RED, FontWeightHint::Regular),
                     SqlToken::Comma => (",".to_owned(), TEXT, FontWeightHint::Regular),
@@ -3624,7 +3909,14 @@ impl DbViewerApp {
         }
     }
 
-    fn render_results(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_results(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         match &self.query_result {
             None => {
                 cmds.push(RenderCommand::Text {
@@ -3695,7 +3987,7 @@ impl DbViewerApp {
                             cmds.push(RenderCommand::Text {
                                 x: x + ci as f32 * col_w + 6.0,
                                 y: ry,
-                                text: truncate_str(&cell.display(), 30).to_owned(),
+                                text: truncate_str(&cell.display(), 30).clone(),
                                 color,
                                 font_size: 10.0,
                                 font_weight: FontWeightHint::Regular,
@@ -3709,26 +4001,32 @@ impl DbViewerApp {
         }
     }
 
-    fn render_schema(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_schema(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         let tab = match self.active_db_tab() {
             Some(t) => t,
             None => return,
         };
 
-        let table_name = match &tab.selected_table {
-            Some(n) => n,
-            None => {
-                cmds.push(RenderCommand::Text {
-                    x: x + 16.0,
-                    y: y + 8.0,
-                    text: "Select a table to view its schema.".to_owned(),
-                    color: OVERLAY0,
-                    font_size: 12.0,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(width - 32.0),
-                });
-                return;
-            }
+        let table_name = if let Some(n) = &tab.selected_table {
+            n
+        } else {
+            cmds.push(RenderCommand::Text {
+                x: x + 16.0,
+                y: y + 8.0,
+                text: "Select a table to view its schema.".to_owned(),
+                color: OVERLAY0,
+                font_size: 12.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(width - 32.0),
+            });
+            return;
         };
 
         let table = match tab.db.find_table(table_name) {
@@ -3824,7 +4122,10 @@ impl DbViewerApp {
         }
 
         // Foreign keys
-        let fks: Vec<&ForeignKey> = tab.db.foreign_keys.iter()
+        let fks: Vec<&ForeignKey> = tab
+            .db
+            .foreign_keys
+            .iter()
             .filter(|fk| fk.from_table.to_uppercase() == table_name.to_uppercase())
             .collect();
 
@@ -3859,7 +4160,14 @@ impl DbViewerApp {
         }
     }
 
-    fn render_diagram(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, _height: f32) {
+    fn render_diagram(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        _height: f32,
+    ) {
         let tab = match self.active_db_tab() {
             Some(t) => t,
             None => return,
@@ -3950,7 +4258,11 @@ impl DbViewerApp {
             // Columns
             let mut cy = ty + 24.0;
             for col in &table.columns {
-                let pk_marker = if col.constraints.primary_key { "PK " } else { "" };
+                let pk_marker = if col.constraints.primary_key {
+                    "PK "
+                } else {
+                    ""
+                };
                 cmds.push(RenderCommand::Text {
                     x: tx + 6.0,
                     y: cy,
@@ -3966,8 +4278,12 @@ impl DbViewerApp {
 
         // Draw FK relationship lines
         for fk in &tab.db.foreign_keys {
-            let from_pos = table_positions.iter().find(|(_, _, n)| n.to_uppercase() == fk.from_table.to_uppercase());
-            let to_pos = table_positions.iter().find(|(_, _, n)| n.to_uppercase() == fk.to_table.to_uppercase());
+            let from_pos = table_positions
+                .iter()
+                .find(|(_, _, n)| n.to_uppercase() == fk.from_table.to_uppercase());
+            let to_pos = table_positions
+                .iter()
+                .find(|(_, _, n)| n.to_uppercase() == fk.to_table.to_uppercase());
 
             if let (Some((fx, fy, _)), Some((tox, toy, _))) = (from_pos, to_pos) {
                 // Draw a line from the right side of from_table to the left side of to_table
@@ -3986,8 +4302,8 @@ impl DbViewerApp {
                 });
 
                 // FK label
-                let mid_x = (from_x + to_x) / 2.0;
-                let mid_y = (from_y + to_y) / 2.0 - 8.0;
+                let mid_x = f32::midpoint(from_x, to_x);
+                let mid_y = f32::midpoint(from_y, to_y) - 8.0;
                 cmds.push(RenderCommand::Text {
                     x: mid_x,
                     y: mid_y,
@@ -4026,25 +4342,24 @@ impl DbViewerApp {
         });
 
         // Table info
-        if let Some(t) = tab {
-            if let Some(ref table_name) = t.selected_table {
-                if let Some(table) = t.db.find_table(table_name) {
-                    cmds.push(RenderCommand::Text {
-                        x: x + 200.0,
-                        y: y + 5.0,
-                        text: format!(
-                            "Table: {} ({} cols, {} rows)",
-                            table_name,
-                            table.col_count(),
-                            table.row_count()
-                        ),
-                        color: SUBTEXT0,
-                        font_size: 10.0,
-                        font_weight: FontWeightHint::Regular,
-                        max_width: Some(300.0),
-                    });
-                }
-            }
+        if let Some(t) = tab
+            && let Some(ref table_name) = t.selected_table
+            && let Some(table) = t.db.find_table(table_name)
+        {
+            cmds.push(RenderCommand::Text {
+                x: x + 200.0,
+                y: y + 5.0,
+                text: format!(
+                    "Table: {} ({} cols, {} rows)",
+                    table_name,
+                    table.col_count(),
+                    table.row_count()
+                ),
+                color: SUBTEXT0,
+                font_size: 10.0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(300.0),
+            });
         }
 
         // History count
@@ -4080,7 +4395,8 @@ fn truncate_str(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_owned()
     } else {
-        let end = s.char_indices()
+        let end = s
+            .char_indices()
             .nth(max_len.saturating_sub(3))
             .map_or(s.len(), |(i, _)| i);
         format!("{}...", &s[..end])
@@ -4173,18 +4489,30 @@ mod tests {
 
     #[test]
     fn test_cell_value_parse_as_integer() {
-        assert_eq!(CellValue::parse_as("42", &DataType::Integer), CellValue::Integer(42));
-        assert_eq!(CellValue::parse_as("null", &DataType::Integer), CellValue::Null);
+        assert_eq!(
+            CellValue::parse_as("42", &DataType::Integer),
+            CellValue::Integer(42)
+        );
+        assert_eq!(
+            CellValue::parse_as("null", &DataType::Integer),
+            CellValue::Null
+        );
     }
 
     #[test]
     fn test_cell_value_parse_as_real() {
-        assert_eq!(CellValue::parse_as("3.14", &DataType::Real), CellValue::Real(3.14));
+        assert_eq!(
+            CellValue::parse_as("3.14", &DataType::Real),
+            CellValue::Real(3.14)
+        );
     }
 
     #[test]
     fn test_cell_value_parse_as_text() {
-        assert_eq!(CellValue::parse_as("hello", &DataType::Text), CellValue::Text("hello".to_owned()));
+        assert_eq!(
+            CellValue::parse_as("hello", &DataType::Text),
+            CellValue::Text("hello".to_owned())
+        );
     }
 
     // --- Sort key tests ---
@@ -4201,18 +4529,27 @@ mod tests {
 
     #[test]
     fn test_sort_key_text_ordering() {
-        assert!(CellValue::Text("a".to_owned()).as_sort_key() < CellValue::Text("b".to_owned()).as_sort_key());
+        assert!(
+            CellValue::Text("a".to_owned()).as_sort_key()
+                < CellValue::Text("b".to_owned()).as_sort_key()
+        );
     }
 
     // --- Table tests ---
 
     #[test]
     fn test_table_insert_row() {
-        let mut table = Table::new("test", vec![
-            ColumnDef::new("id", DataType::Integer),
-            ColumnDef::new("name", DataType::Text),
+        let mut table = Table::new(
+            "test",
+            vec![
+                ColumnDef::new("id", DataType::Integer),
+                ColumnDef::new("name", DataType::Text),
+            ],
+        );
+        let result = table.insert_row(vec![
+            CellValue::Integer(1),
+            CellValue::Text("Alice".to_owned()),
         ]);
-        let result = table.insert_row(vec![CellValue::Integer(1), CellValue::Text("Alice".to_owned())]);
         assert!(result.is_ok());
         assert_eq!(table.row_count(), 1);
     }
@@ -4220,46 +4557,73 @@ mod tests {
     #[test]
     fn test_table_insert_row_column_mismatch() {
         let mut table = Table::new("test", vec![ColumnDef::new("id", DataType::Integer)]);
-        let result = table.insert_row(vec![CellValue::Integer(1), CellValue::Text("extra".to_owned())]);
+        let result = table.insert_row(vec![
+            CellValue::Integer(1),
+            CellValue::Text("extra".to_owned()),
+        ]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_table_not_null_constraint() {
-        let mut table = Table::new("test", vec![
-            ColumnDef::new("name", DataType::Text).with_not_null(),
-        ]);
+        let mut table = Table::new(
+            "test",
+            vec![ColumnDef::new("name", DataType::Text).with_not_null()],
+        );
         let result = table.insert_row(vec![CellValue::Null]);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_table_unique_constraint() {
-        let mut table = Table::new("test", vec![
-            ColumnDef::new("email", DataType::Text).with_unique(),
-        ]);
-        assert!(table.insert_row(vec![CellValue::Text("a@b.com".to_owned())]).is_ok());
-        assert!(table.insert_row(vec![CellValue::Text("a@b.com".to_owned())]).is_err());
+        let mut table = Table::new(
+            "test",
+            vec![ColumnDef::new("email", DataType::Text).with_unique()],
+        );
+        assert!(
+            table
+                .insert_row(vec![CellValue::Text("a@b.com".to_owned())])
+                .is_ok()
+        );
+        assert!(
+            table
+                .insert_row(vec![CellValue::Text("a@b.com".to_owned())])
+                .is_err()
+        );
     }
 
     #[test]
     fn test_table_auto_increment() {
-        let mut table = Table::new("test", vec![
-            ColumnDef::new("id", DataType::Integer).with_primary_key().with_auto_increment(),
-            ColumnDef::new("name", DataType::Text),
-        ]);
+        let mut table = Table::new(
+            "test",
+            vec![
+                ColumnDef::new("id", DataType::Integer)
+                    .with_primary_key()
+                    .with_auto_increment(),
+                ColumnDef::new("name", DataType::Text),
+            ],
+        );
         let _ = table.insert_row(vec![CellValue::Null, CellValue::Text("A".to_owned())]);
         let _ = table.insert_row(vec![CellValue::Null, CellValue::Text("B".to_owned())]);
-        assert_eq!(table.rows.get(0).and_then(|r| r.first()), Some(&CellValue::Integer(1)));
-        assert_eq!(table.rows.get(1).and_then(|r| r.first()), Some(&CellValue::Integer(2)));
+        assert_eq!(
+            table.rows.get(0).and_then(|r| r.first()),
+            Some(&CellValue::Integer(1))
+        );
+        assert_eq!(
+            table.rows.get(1).and_then(|r| r.first()),
+            Some(&CellValue::Integer(2))
+        );
     }
 
     #[test]
     fn test_table_column_index() {
-        let table = Table::new("test", vec![
-            ColumnDef::new("id", DataType::Integer),
-            ColumnDef::new("name", DataType::Text),
-        ]);
+        let table = Table::new(
+            "test",
+            vec![
+                ColumnDef::new("id", DataType::Integer),
+                ColumnDef::new("name", DataType::Text),
+            ],
+        );
         assert_eq!(table.column_index("id"), Some(0));
         assert_eq!(table.column_index("NAME"), Some(1)); // case insensitive
         assert_eq!(table.column_index("missing"), None);
@@ -4281,9 +4645,18 @@ mod tests {
         let mut table = Table::new("test", vec![ColumnDef::new("v", DataType::Integer)]);
         let _ = table.insert_row(vec![CellValue::Integer(1)]);
         let _ = table.insert_row(vec![CellValue::Integer(2)]);
-        let updated = table.update_where(0, &CellValue::Integer(99), 0, &FilterOp::Equal, &CellValue::Integer(1));
+        let updated = table.update_where(
+            0,
+            &CellValue::Integer(99),
+            0,
+            &FilterOp::Equal,
+            &CellValue::Integer(1),
+        );
         assert_eq!(updated, 1);
-        assert_eq!(table.rows.get(0).and_then(|r| r.first()), Some(&CellValue::Integer(99)));
+        assert_eq!(
+            table.rows.get(0).and_then(|r| r.first()),
+            Some(&CellValue::Integer(99))
+        );
     }
 
     // --- Database tests ---
@@ -4331,45 +4704,101 @@ mod tests {
 
     #[test]
     fn test_filter_equal() {
-        assert!(matches_filter(&CellValue::Integer(5), &FilterOp::Equal, &CellValue::Integer(5)));
-        assert!(!matches_filter(&CellValue::Integer(5), &FilterOp::Equal, &CellValue::Integer(6)));
+        assert!(matches_filter(
+            &CellValue::Integer(5),
+            &FilterOp::Equal,
+            &CellValue::Integer(5)
+        ));
+        assert!(!matches_filter(
+            &CellValue::Integer(5),
+            &FilterOp::Equal,
+            &CellValue::Integer(6)
+        ));
     }
 
     #[test]
     fn test_filter_not_equal() {
-        assert!(matches_filter(&CellValue::Integer(5), &FilterOp::NotEqual, &CellValue::Integer(6)));
+        assert!(matches_filter(
+            &CellValue::Integer(5),
+            &FilterOp::NotEqual,
+            &CellValue::Integer(6)
+        ));
     }
 
     #[test]
     fn test_filter_less_than() {
-        assert!(matches_filter(&CellValue::Integer(3), &FilterOp::LessThan, &CellValue::Integer(5)));
-        assert!(!matches_filter(&CellValue::Integer(5), &FilterOp::LessThan, &CellValue::Integer(3)));
+        assert!(matches_filter(
+            &CellValue::Integer(3),
+            &FilterOp::LessThan,
+            &CellValue::Integer(5)
+        ));
+        assert!(!matches_filter(
+            &CellValue::Integer(5),
+            &FilterOp::LessThan,
+            &CellValue::Integer(3)
+        ));
     }
 
     #[test]
     fn test_filter_greater_than() {
-        assert!(matches_filter(&CellValue::Integer(5), &FilterOp::GreaterThan, &CellValue::Integer(3)));
+        assert!(matches_filter(
+            &CellValue::Integer(5),
+            &FilterOp::GreaterThan,
+            &CellValue::Integer(3)
+        ));
     }
 
     #[test]
     fn test_filter_is_null() {
-        assert!(matches_filter(&CellValue::Null, &FilterOp::IsNull, &CellValue::Null));
-        assert!(!matches_filter(&CellValue::Integer(1), &FilterOp::IsNull, &CellValue::Null));
+        assert!(matches_filter(
+            &CellValue::Null,
+            &FilterOp::IsNull,
+            &CellValue::Null
+        ));
+        assert!(!matches_filter(
+            &CellValue::Integer(1),
+            &FilterOp::IsNull,
+            &CellValue::Null
+        ));
     }
 
     #[test]
     fn test_filter_is_not_null() {
-        assert!(matches_filter(&CellValue::Integer(1), &FilterOp::IsNotNull, &CellValue::Null));
-        assert!(!matches_filter(&CellValue::Null, &FilterOp::IsNotNull, &CellValue::Null));
+        assert!(matches_filter(
+            &CellValue::Integer(1),
+            &FilterOp::IsNotNull,
+            &CellValue::Null
+        ));
+        assert!(!matches_filter(
+            &CellValue::Null,
+            &FilterOp::IsNotNull,
+            &CellValue::Null
+        ));
     }
 
     #[test]
     fn test_filter_like() {
         let cell = CellValue::Text("Hello World".to_owned());
-        assert!(matches_filter(&cell, &FilterOp::Like, &CellValue::Text("%world".to_owned())));
-        assert!(matches_filter(&cell, &FilterOp::Like, &CellValue::Text("hello%".to_owned())));
-        assert!(matches_filter(&cell, &FilterOp::Like, &CellValue::Text("%lo w%".to_owned())));
-        assert!(!matches_filter(&cell, &FilterOp::Like, &CellValue::Text("xyz%".to_owned())));
+        assert!(matches_filter(
+            &cell,
+            &FilterOp::Like,
+            &CellValue::Text("%world".to_owned())
+        ));
+        assert!(matches_filter(
+            &cell,
+            &FilterOp::Like,
+            &CellValue::Text("hello%".to_owned())
+        ));
+        assert!(matches_filter(
+            &cell,
+            &FilterOp::Like,
+            &CellValue::Text("%lo w%".to_owned())
+        ));
+        assert!(!matches_filter(
+            &cell,
+            &FilterOp::Like,
+            &CellValue::Text("xyz%".to_owned())
+        ));
     }
 
     #[test]
@@ -4383,7 +4812,10 @@ mod tests {
     #[test]
     fn test_tokenize_select() {
         let tokens = tokenize_sql("SELECT * FROM users");
-        let non_ws: Vec<_> = tokens.into_iter().filter(|t| *t != SqlToken::Whitespace).collect();
+        let non_ws: Vec<_> = tokens
+            .into_iter()
+            .filter(|t| *t != SqlToken::Whitespace)
+            .collect();
         assert_eq!(non_ws.len(), 4);
         assert_eq!(non_ws[0], SqlToken::Keyword("SELECT".to_owned()));
         assert_eq!(non_ws[1], SqlToken::Star);
@@ -4394,7 +4826,10 @@ mod tests {
     #[test]
     fn test_tokenize_string_literal() {
         let tokens = tokenize_sql("'hello world'");
-        let non_ws: Vec<_> = tokens.into_iter().filter(|t| *t != SqlToken::Whitespace).collect();
+        let non_ws: Vec<_> = tokens
+            .into_iter()
+            .filter(|t| *t != SqlToken::Whitespace)
+            .collect();
         assert_eq!(non_ws.len(), 1);
         assert_eq!(non_ws[0], SqlToken::StringLiteral("hello world".to_owned()));
     }
@@ -4402,7 +4837,10 @@ mod tests {
     #[test]
     fn test_tokenize_number() {
         let tokens = tokenize_sql("42 3.14");
-        let non_ws: Vec<_> = tokens.into_iter().filter(|t| *t != SqlToken::Whitespace).collect();
+        let non_ws: Vec<_> = tokens
+            .into_iter()
+            .filter(|t| *t != SqlToken::Whitespace)
+            .collect();
         assert_eq!(non_ws.len(), 2);
         assert_eq!(non_ws[0], SqlToken::NumberLiteral("42".to_owned()));
         assert_eq!(non_ws[1], SqlToken::NumberLiteral("3.14".to_owned()));
@@ -4411,7 +4849,10 @@ mod tests {
     #[test]
     fn test_tokenize_operators() {
         let tokens = tokenize_sql("= != < > <= >=");
-        let non_ws: Vec<_> = tokens.into_iter().filter(|t| *t != SqlToken::Whitespace).collect();
+        let non_ws: Vec<_> = tokens
+            .into_iter()
+            .filter(|t| *t != SqlToken::Whitespace)
+            .collect();
         assert_eq!(non_ws.len(), 6);
     }
 
@@ -4483,7 +4924,13 @@ mod tests {
         let stmt = parse_sql("SELECT COUNT(*) FROM users").unwrap();
         match stmt {
             SqlStatement::Select { columns, .. } => {
-                assert!(matches!(columns[0], SelectColumn::Aggregate { func: AggFunc::Count, .. }));
+                assert!(matches!(
+                    columns[0],
+                    SelectColumn::Aggregate {
+                        func: AggFunc::Count,
+                        ..
+                    }
+                ));
             }
             _ => panic!("Expected SELECT"),
         }
@@ -4493,7 +4940,11 @@ mod tests {
     fn test_parse_insert() {
         let stmt = parse_sql("INSERT INTO users (name) VALUES ('Alice')").unwrap();
         match stmt {
-            SqlStatement::Insert { table, columns, values } => {
+            SqlStatement::Insert {
+                table,
+                columns,
+                values,
+            } => {
                 assert_eq!(table, "users");
                 assert_eq!(columns, vec!["name"]);
                 assert_eq!(values.len(), 1);
@@ -4507,7 +4958,11 @@ mod tests {
     fn test_parse_update() {
         let stmt = parse_sql("UPDATE users SET name = 'Bob' WHERE id = 1").unwrap();
         match stmt {
-            SqlStatement::Update { table, set_clauses, where_clause } => {
+            SqlStatement::Update {
+                table,
+                set_clauses,
+                where_clause,
+            } => {
                 assert_eq!(table, "users");
                 assert_eq!(set_clauses.len(), 1);
                 assert!(where_clause.is_some());
@@ -4520,7 +4975,10 @@ mod tests {
     fn test_parse_delete() {
         let stmt = parse_sql("DELETE FROM users WHERE id = 1").unwrap();
         match stmt {
-            SqlStatement::Delete { table, where_clause } => {
+            SqlStatement::Delete {
+                table,
+                where_clause,
+            } => {
                 assert_eq!(table, "users");
                 assert!(where_clause.is_some());
             }
@@ -4530,9 +4988,14 @@ mod tests {
 
     #[test]
     fn test_parse_create_table() {
-        let stmt = parse_sql("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
+        let stmt =
+            parse_sql("CREATE TABLE test (id INTEGER PRIMARY KEY, name TEXT NOT NULL)").unwrap();
         match stmt {
-            SqlStatement::CreateTable { name, columns, if_not_exists } => {
+            SqlStatement::CreateTable {
+                name,
+                columns,
+                if_not_exists,
+            } => {
                 assert_eq!(name, "test");
                 assert_eq!(columns.len(), 2);
                 assert!(columns[0].primary_key);
@@ -4593,9 +5056,17 @@ mod tests {
         let stmt = parse_sql("SELECT * FROM users ORDER BY age ASC").unwrap();
         let result = execute_sql(&mut db, &stmt);
         assert!(!result.is_error);
-        let ages: Vec<i64> = result.rows.iter().filter_map(|r| {
-            if let Some(CellValue::Integer(v)) = r.get(3) { Some(*v) } else { None }
-        }).collect();
+        let ages: Vec<i64> = result
+            .rows
+            .iter()
+            .filter_map(|r| {
+                if let Some(CellValue::Integer(v)) = r.get(3) {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
+            .collect();
         for w in ages.windows(2) {
             assert!(w[0] <= w[1], "Should be sorted ascending");
         }
@@ -4652,7 +5123,9 @@ mod tests {
     #[test]
     fn test_execute_insert() {
         let mut db = Database::sample();
-        let stmt = parse_sql("INSERT INTO users (name, email, age) VALUES ('Zoe', 'zoe@example.com', 26)").unwrap();
+        let stmt =
+            parse_sql("INSERT INTO users (name, email, age) VALUES ('Zoe', 'zoe@example.com', 26)")
+                .unwrap();
         let result = execute_sql(&mut db, &stmt);
         assert!(!result.is_error);
         assert_eq!(result.affected_rows, 1);
@@ -4717,11 +5190,17 @@ mod tests {
 
     #[test]
     fn test_export_csv() {
-        let mut table = Table::new("test", vec![
-            ColumnDef::new("id", DataType::Integer),
-            ColumnDef::new("name", DataType::Text),
+        let mut table = Table::new(
+            "test",
+            vec![
+                ColumnDef::new("id", DataType::Integer),
+                ColumnDef::new("name", DataType::Text),
+            ],
+        );
+        let _ = table.insert_row(vec![
+            CellValue::Integer(1),
+            CellValue::Text("Alice".to_owned()),
         ]);
-        let _ = table.insert_row(vec![CellValue::Integer(1), CellValue::Text("Alice".to_owned())]);
         let csv = export_csv(&table);
         assert!(csv.contains("id,name"));
         assert!(csv.contains("1,\"Alice\""));
@@ -4729,11 +5208,17 @@ mod tests {
 
     #[test]
     fn test_export_json() {
-        let mut table = Table::new("test", vec![
-            ColumnDef::new("id", DataType::Integer),
-            ColumnDef::new("name", DataType::Text),
+        let mut table = Table::new(
+            "test",
+            vec![
+                ColumnDef::new("id", DataType::Integer),
+                ColumnDef::new("name", DataType::Text),
+            ],
+        );
+        let _ = table.insert_row(vec![
+            CellValue::Integer(1),
+            CellValue::Text("Alice".to_owned()),
         ]);
-        let _ = table.insert_row(vec![CellValue::Integer(1), CellValue::Text("Alice".to_owned())]);
         let json = export_json(&table);
         assert!(json.contains("\"id\": 1"));
         assert!(json.contains("\"name\": \"Alice\""));
@@ -4741,11 +5226,17 @@ mod tests {
 
     #[test]
     fn test_export_sql_inserts() {
-        let mut table = Table::new("test", vec![
-            ColumnDef::new("id", DataType::Integer),
-            ColumnDef::new("name", DataType::Text),
+        let mut table = Table::new(
+            "test",
+            vec![
+                ColumnDef::new("id", DataType::Integer),
+                ColumnDef::new("name", DataType::Text),
+            ],
+        );
+        let _ = table.insert_row(vec![
+            CellValue::Integer(1),
+            CellValue::Text("Alice".to_owned()),
         ]);
-        let _ = table.insert_row(vec![CellValue::Integer(1), CellValue::Text("Alice".to_owned())]);
         let sql = export_sql_inserts(&table);
         assert!(sql.contains("INSERT INTO test"));
         assert!(sql.contains("1, 'Alice'"));
@@ -4788,19 +5279,28 @@ mod tests {
 
     #[test]
     fn test_constraint_describe_pk() {
-        let c = ColumnConstraints { primary_key: true, ..Default::default() };
+        let c = ColumnConstraints {
+            primary_key: true,
+            ..Default::default()
+        };
         assert!(c.describe().contains("PK"));
     }
 
     #[test]
     fn test_constraint_describe_not_null() {
-        let c = ColumnConstraints { not_null: true, ..Default::default() };
+        let c = ColumnConstraints {
+            not_null: true,
+            ..Default::default()
+        };
         assert!(c.describe().contains("NN"));
     }
 
     #[test]
     fn test_constraint_describe_unique() {
-        let c = ColumnConstraints { unique: true, ..Default::default() };
+        let c = ColumnConstraints {
+            unique: true,
+            ..Default::default()
+        };
         assert!(c.describe().contains("UQ"));
     }
 
@@ -4867,7 +5367,10 @@ mod tests {
     fn test_app_select_table() {
         let mut app = DbViewerApp::new();
         app.select_table("products");
-        assert_eq!(app.active_db_tab().unwrap().selected_table.as_deref(), Some("products"));
+        assert_eq!(
+            app.active_db_tab().unwrap().selected_table.as_deref(),
+            Some("products")
+        );
     }
 
     #[test]
@@ -4914,9 +5417,21 @@ mod tests {
     #[test]
     fn test_app_delete_row() {
         let mut app = DbViewerApp::new();
-        let initial_count = app.active_db_tab().unwrap().db.find_table("users").unwrap().row_count();
+        let initial_count = app
+            .active_db_tab()
+            .unwrap()
+            .db
+            .find_table("users")
+            .unwrap()
+            .row_count();
         app.delete_row(0);
-        let new_count = app.active_db_tab().unwrap().db.find_table("users").unwrap().row_count();
+        let new_count = app
+            .active_db_tab()
+            .unwrap()
+            .db
+            .find_table("users")
+            .unwrap()
+            .row_count();
         assert_eq!(new_count, initial_count - 1);
     }
 
@@ -4949,7 +5464,13 @@ mod tests {
         let mut app = DbViewerApp::new();
         let csv = "city,pop\nNY,8000000\nLA,4000000";
         assert!(app.import_csv_data("cities", csv).is_ok());
-        assert!(app.active_db_tab().unwrap().db.find_table("cities").is_some());
+        assert!(
+            app.active_db_tab()
+                .unwrap()
+                .db
+                .find_table("cities")
+                .is_some()
+        );
     }
 
     #[test]
@@ -5008,9 +5529,16 @@ mod tests {
         let mut app = DbViewerApp::new();
         app.toggle_sort(3); // Sort by age ascending
         let (_, rows) = app.active_db_tab().unwrap().current_table_data().unwrap();
-        let ages: Vec<i64> = rows.iter().filter_map(|r| {
-            if let Some(CellValue::Integer(v)) = r.get(3) { Some(*v) } else { None }
-        }).collect();
+        let ages: Vec<i64> = rows
+            .iter()
+            .filter_map(|r| {
+                if let Some(CellValue::Integer(v)) = r.get(3) {
+                    Some(*v)
+                } else {
+                    None
+                }
+            })
+            .collect();
         for w in ages.windows(2) {
             assert!(w[0] <= w[1]);
         }

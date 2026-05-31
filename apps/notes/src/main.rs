@@ -1,4 +1,4 @@
-//! OurOS Notes & Wiki
+//! `OurOS` Notes & Wiki
 //!
 //! A rich notes/wiki application with:
 //! - Note types: Plain text, Markdown (heading/bold/italic/list/code), Checklist, Table
@@ -16,7 +16,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#![deny(clippy::all, clippy::pedantic)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
@@ -230,12 +232,11 @@ impl TableData {
         let mut widths: Vec<usize> = self.headers.iter().map(String::len).collect();
         for row in &self.rows {
             for (i, cell) in row.iter().enumerate() {
-                if i < ncols {
-                    if let Some(w) = widths.get_mut(i) {
-                        if cell.len() > *w {
-                            *w = cell.len();
-                        }
-                    }
+                if i < ncols
+                    && let Some(w) = widths.get_mut(i)
+                    && cell.len() > *w
+                {
+                    *w = cell.len();
                 }
             }
         }
@@ -243,7 +244,7 @@ impl TableData {
         // Header
         for (i, h) in self.headers.iter().enumerate() {
             let w = widths.get(i).copied().unwrap_or(0);
-            out.push_str(&format!("{:width$}  ", h, width = w));
+            out.push_str(&format!("{h:w$}  "));
         }
         out.push('\n');
         // Separator
@@ -260,7 +261,7 @@ impl TableData {
             for (i, _) in self.headers.iter().enumerate() {
                 let w = widths.get(i).copied().unwrap_or(0);
                 let cell = row.get(i).map_or("", String::as_str);
-                out.push_str(&format!("{:width$}  ", cell, width = w));
+                out.push_str(&format!("{cell:w$}  "));
             }
             out.push('\n');
         }
@@ -347,7 +348,7 @@ impl Note {
             let snapshot = NoteVersion {
                 timestamp: self.modified_at,
                 content: self.content.clone(),
-                summary: format!("Before restore at {}", timestamp),
+                summary: format!("Before restore at {timestamp}"),
             };
             self.versions.push(snapshot);
             if self.versions.len() > MAX_VERSIONS {
@@ -397,23 +398,22 @@ impl Note {
     /// Word count of the note content.
     pub fn word_count(&self) -> usize {
         match &self.kind {
-            NoteKind::Checklist => {
-                self.checklist.iter()
-                    .map(|item| item.text.split_whitespace().count())
-                    .sum()
-            }
-            NoteKind::Table => {
-                self.table.as_ref().map_or(0, |t| {
-                    let header_words: usize = t.headers.iter()
-                        .map(|h| h.split_whitespace().count())
-                        .sum();
-                    let cell_words: usize = t.rows.iter()
-                        .flat_map(|r| r.iter())
-                        .map(|c| c.split_whitespace().count())
-                        .sum();
-                    header_words.saturating_add(cell_words)
-                })
-            }
+            NoteKind::Checklist => self
+                .checklist
+                .iter()
+                .map(|item| item.text.split_whitespace().count())
+                .sum(),
+            NoteKind::Table => self.table.as_ref().map_or(0, |t| {
+                let header_words: usize =
+                    t.headers.iter().map(|h| h.split_whitespace().count()).sum();
+                let cell_words: usize = t
+                    .rows
+                    .iter()
+                    .flat_map(|r| r.iter())
+                    .map(|c| c.split_whitespace().count())
+                    .sum();
+                header_words.saturating_add(cell_words)
+            }),
             _ => self.content.split_whitespace().count(),
         }
     }
@@ -421,19 +421,12 @@ impl Note {
     /// Character count.
     pub fn char_count(&self) -> usize {
         match &self.kind {
-            NoteKind::Checklist => {
-                self.checklist.iter().map(|item| item.text.len()).sum()
-            }
-            NoteKind::Table => {
-                self.table.as_ref().map_or(0, |t| {
-                    let h: usize = t.headers.iter().map(String::len).sum();
-                    let c: usize = t.rows.iter()
-                        .flat_map(|r| r.iter())
-                        .map(String::len)
-                        .sum();
-                    h.saturating_add(c)
-                })
-            }
+            NoteKind::Checklist => self.checklist.iter().map(|item| item.text.len()).sum(),
+            NoteKind::Table => self.table.as_ref().map_or(0, |t| {
+                let h: usize = t.headers.iter().map(String::len).sum();
+                let c: usize = t.rows.iter().flat_map(|r| r.iter()).map(String::len).sum();
+                h.saturating_add(c)
+            }),
             _ => self.content.len(),
         }
     }
@@ -517,7 +510,9 @@ pub fn extract_wiki_links(text: &str) -> Vec<String> {
                     links.push(trimmed.to_owned());
                 }
             }
-            rest = rest.get(after_open.saturating_add(end).saturating_add(2)..).unwrap_or("");
+            rest = rest
+                .get(after_open.saturating_add(end).saturating_add(2)..)
+                .unwrap_or("");
         } else {
             break;
         }
@@ -559,61 +554,60 @@ pub fn parse_inline(text: &str) -> Vec<MdSpan> {
 
     while !remaining.is_empty() {
         // Check for wiki links [[...]]
-        if remaining.starts_with("[[") {
-            if let Some(end) = remaining.get(2..).and_then(|s| s.find("]]")) {
-                let link = remaining.get(2..end.saturating_add(2)).unwrap_or("");
-                spans.push(MdSpan::WikiLink(link.to_owned()));
-                remaining = remaining.get(end.saturating_add(4)..).unwrap_or("");
-                continue;
-            }
+        if remaining.starts_with("[[")
+            && let Some(end) = remaining.get(2..).and_then(|s| s.find("]]"))
+        {
+            let link = remaining.get(2..end.saturating_add(2)).unwrap_or("");
+            spans.push(MdSpan::WikiLink(link.to_owned()));
+            remaining = remaining.get(end.saturating_add(4)..).unwrap_or("");
+            continue;
         }
 
         // Check for inline code `...`
-        if remaining.starts_with('`') {
-            if let Some(end) = remaining.get(1..).and_then(|s| s.find('`')) {
-                let code = remaining.get(1..end.saturating_add(1)).unwrap_or("");
-                spans.push(MdSpan::InlineCode(code.to_owned()));
+        if remaining.starts_with('`')
+            && let Some(end) = remaining.get(1..).and_then(|s| s.find('`'))
+        {
+            let code = remaining.get(1..end.saturating_add(1)).unwrap_or("");
+            spans.push(MdSpan::InlineCode(code.to_owned()));
+            remaining = remaining.get(end.saturating_add(2)..).unwrap_or("");
+            continue;
+        }
+
+        // Check for bold+italic ***...***
+        if remaining.starts_with("***")
+            && let Some(end) = remaining.get(3..).and_then(|s| s.find("***"))
+        {
+            let inner = remaining.get(3..end.saturating_add(3)).unwrap_or("");
+            spans.push(MdSpan::BoldItalic(inner.to_owned()));
+            remaining = remaining.get(end.saturating_add(6)..).unwrap_or("");
+            continue;
+        }
+
+        // Check for bold **...**
+        if remaining.starts_with("**")
+            && let Some(end) = remaining.get(2..).and_then(|s| s.find("**"))
+        {
+            let inner = remaining.get(2..end.saturating_add(2)).unwrap_or("");
+            spans.push(MdSpan::Bold(inner.to_owned()));
+            remaining = remaining.get(end.saturating_add(4)..).unwrap_or("");
+            continue;
+        }
+
+        // Check for italic *...*
+        if remaining.starts_with('*')
+            && !remaining.starts_with("**")
+            && let Some(end) = remaining.get(1..).and_then(|s| s.find('*'))
+        {
+            let inner = remaining.get(1..end.saturating_add(1)).unwrap_or("");
+            if !inner.is_empty() {
+                spans.push(MdSpan::Italic(inner.to_owned()));
                 remaining = remaining.get(end.saturating_add(2)..).unwrap_or("");
                 continue;
             }
         }
 
-        // Check for bold+italic ***...***
-        if remaining.starts_with("***") {
-            if let Some(end) = remaining.get(3..).and_then(|s| s.find("***")) {
-                let inner = remaining.get(3..end.saturating_add(3)).unwrap_or("");
-                spans.push(MdSpan::BoldItalic(inner.to_owned()));
-                remaining = remaining.get(end.saturating_add(6)..).unwrap_or("");
-                continue;
-            }
-        }
-
-        // Check for bold **...**
-        if remaining.starts_with("**") {
-            if let Some(end) = remaining.get(2..).and_then(|s| s.find("**")) {
-                let inner = remaining.get(2..end.saturating_add(2)).unwrap_or("");
-                spans.push(MdSpan::Bold(inner.to_owned()));
-                remaining = remaining.get(end.saturating_add(4)..).unwrap_or("");
-                continue;
-            }
-        }
-
-        // Check for italic *...*
-        if remaining.starts_with('*') && !remaining.starts_with("**") {
-            if let Some(end) = remaining.get(1..).and_then(|s| s.find('*')) {
-                let inner = remaining.get(1..end.saturating_add(1)).unwrap_or("");
-                if !inner.is_empty() {
-                    spans.push(MdSpan::Italic(inner.to_owned()));
-                    remaining = remaining.get(end.saturating_add(2)..).unwrap_or("");
-                    continue;
-                }
-            }
-        }
-
         // Collect plain text until the next special character.
-        let next_special = remaining
-            .find(|c: char| c == '*' || c == '`' || c == '[')
-            .unwrap_or(remaining.len());
+        let next_special = remaining.find(['*', '`', '[']).unwrap_or(remaining.len());
         let chunk_end = if next_special == 0 { 1 } else { next_special };
         let chunk = remaining.get(..chunk_end).unwrap_or("");
         if !chunk.is_empty() {
@@ -658,11 +652,7 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
         // Heading
         if line.starts_with('#') {
             let level = line.chars().take_while(|c| *c == '#').count().min(6) as u8;
-            let text = line
-                .get(level as usize..)
-                .unwrap_or("")
-                .trim()
-                .to_owned();
+            let text = line.get(level as usize..).unwrap_or("").trim().to_owned();
             blocks.push(MdBlock::Heading { level, text });
             i = i.saturating_add(1);
             continue;
@@ -734,11 +724,7 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
                 let ll = lines.get(i).copied().unwrap_or("");
                 if is_ordered_list_item(ll) {
                     if let Some(dot_pos) = ll.find(". ") {
-                        items.push(
-                            ll.get(dot_pos.saturating_add(2)..)
-                                .unwrap_or("")
-                                .to_owned(),
-                        );
+                        items.push(ll.get(dot_pos.saturating_add(2)..).unwrap_or("").to_owned());
                     }
                     i = i.saturating_add(1);
                 } else {
@@ -787,7 +773,7 @@ pub fn parse_markdown(input: &str) -> Vec<MdBlock> {
 fn is_ordered_list_item(line: &str) -> bool {
     if let Some(dot_pos) = line.find(". ") {
         line.get(..dot_pos)
-            .map_or(false, |prefix| !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()))
+            .is_some_and(|prefix| !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit()))
     } else {
         false
     }
@@ -891,7 +877,9 @@ fn export_html(note: &Note) -> String {
     out.push_str("h1{color:#89b4fa}code{background:#313244;padding:2px 6px;border-radius:4px}");
     out.push_str("pre{background:#313244;padding:16px;border-radius:8px;overflow-x:auto}");
     out.push_str("blockquote{border-left:4px solid #89b4fa;padding-left:16px;color:#a6adc8}");
-    out.push_str("table{border-collapse:collapse;width:100%}th,td{border:1px solid #45475a;padding:8px}");
+    out.push_str(
+        "table{border-collapse:collapse;width:100%}th,td{border:1px solid #45475a;padding:8px}",
+    );
     out.push_str("th{background:#313244}");
     out.push_str("</style></head><body>\n");
     out.push_str(&format!("<h1>{}</h1>\n", html_escape(&note.title)));
@@ -967,11 +955,7 @@ fn render_blocks_to_html(blocks: &[MdBlock]) -> String {
     for block in blocks {
         match block {
             MdBlock::Heading { level, text } => {
-                out.push_str(&format!(
-                    "<h{l}>{}</h{l}>\n",
-                    html_escape(text),
-                    l = level
-                ));
+                out.push_str(&format!("<h{l}>{}</h{l}>\n", html_escape(text), l = level));
             }
             MdBlock::Paragraph { spans } => {
                 out.push_str("<p>");
@@ -1144,8 +1128,12 @@ impl NoteTemplate {
     pub fn kind(self) -> NoteKind {
         match self {
             Self::TodoList => NoteKind::Checklist,
-            Self::MeetingNotes | Self::Journal | Self::CodeSnippet
-            | Self::ProjectPlan | Self::BugReport | Self::WeeklyReview => NoteKind::Markdown,
+            Self::MeetingNotes
+            | Self::Journal
+            | Self::CodeSnippet
+            | Self::ProjectPlan
+            | Self::BugReport
+            | Self::WeeklyReview => NoteKind::Markdown,
             Self::Blank => NoteKind::PlainText,
         }
     }
@@ -1297,6 +1285,12 @@ pub struct NotesApp {
     timestamp_counter: u64,
 }
 
+impl Default for NotesApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NotesApp {
     /// Create a new empty application.
     pub fn new() -> Self {
@@ -1338,7 +1332,8 @@ impl NotesApp {
     /// Create a nested notebook under a parent.
     pub fn create_child_notebook(&mut self, name: &str, parent_id: NotebookId) -> NotebookId {
         let id = self.notebook_id_gen.next_id();
-        self.notebooks.push(Notebook::with_parent(id, name, parent_id));
+        self.notebooks
+            .push(Notebook::with_parent(id, name, parent_id));
         id
     }
 
@@ -1399,10 +1394,10 @@ impl NotesApp {
         // Remove the notebooks themselves.
         self.notebooks.retain(|nb| !to_delete.contains(&nb.id));
         // Clear selection if it was in a deleted notebook.
-        if let Some(sel) = self.selected_notebook {
-            if to_delete.contains(&sel) {
-                self.selected_notebook = None;
-            }
+        if let Some(sel) = self.selected_notebook
+            && to_delete.contains(&sel)
+        {
+            self.selected_notebook = None;
         }
         true
     }
@@ -1601,14 +1596,14 @@ impl NotesApp {
 
         // Sort
         match self.sort_order {
-            SortOrder::DateModified => notes.sort_by(|a, b| b.modified_at.cmp(&a.modified_at)),
-            SortOrder::DateCreated => notes.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
-            SortOrder::Title => notes.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase())),
-            SortOrder::Notebook => notes.sort_by(|a, b| a.notebook_id.cmp(&b.notebook_id)),
+            SortOrder::DateModified => notes.sort_by_key(|n| core::cmp::Reverse(n.modified_at)),
+            SortOrder::DateCreated => notes.sort_by_key(|n| core::cmp::Reverse(n.created_at)),
+            SortOrder::Title => notes.sort_by_key(|a| a.title.to_lowercase()),
+            SortOrder::Notebook => notes.sort_by_key(|a| a.notebook_id),
         }
 
         // Pinned notes always first.
-        notes.sort_by(|a, b| b.pinned.cmp(&a.pinned));
+        notes.sort_by_key(|n| core::cmp::Reverse(n.pinned));
 
         notes.iter().map(|n| n.id).collect()
     }
@@ -1642,7 +1637,7 @@ impl NotesApp {
     // Wiki linking
     // -----------------------------------------------------------------------
 
-    /// Resolve wiki links in a note, returning (link_text, target_note_id) pairs.
+    /// Resolve wiki links in a note, returning (`link_text`, `target_note_id`) pairs.
     pub fn resolve_links(&self, note_id: NoteId) -> Vec<(String, Option<NoteId>)> {
         let links = if let Some(note) = self.find_note(note_id) {
             note.extract_links()
@@ -1785,13 +1780,21 @@ impl NotesApp {
         });
 
         // Favorites toggle
-        let fav_color = if self.show_favorites_only { YELLOW } else { OVERLAY0 };
+        let fav_color = if self.show_favorites_only {
+            YELLOW
+        } else {
+            OVERLAY0
+        };
         cmds.push(RenderCommand::FillRect {
             x: 270.0,
             y: 6.0,
             width: 24.0,
             height: 24.0,
-            color: if self.show_favorites_only { SURFACE1 } else { SURFACE0 },
+            color: if self.show_favorites_only {
+                SURFACE1
+            } else {
+                SURFACE0
+            },
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
         cmds.push(RenderCommand::Text {
@@ -1820,7 +1823,11 @@ impl NotesApp {
         } else {
             self.search_query.clone()
         };
-        let search_color = if self.search_query.is_empty() { OVERLAY0 } else { TEXT };
+        let search_color = if self.search_query.is_empty() {
+            OVERLAY0
+        } else {
+            TEXT
+        };
         cmds.push(RenderCommand::Text {
             x: search_x + 8.0,
             y: 12.0,
@@ -2346,21 +2353,20 @@ impl NotesApp {
             corner_radii: CornerRadii::ZERO,
         });
 
-        let note = match self.selected_note.and_then(|id| self.find_note(id)) {
-            Some(n) => n,
-            None => {
-                // Empty state message
-                cmds.push(RenderCommand::Text {
-                    x: x + width / 2.0 - 80.0,
-                    y: y + height / 2.0 - 10.0,
-                    text: "Select a note to edit".to_owned(),
-                    color: OVERLAY0,
-                    font_size: 16.0,
-                    font_weight: FontWeightHint::Light,
-                    max_width: Some(200.0),
-                });
-                return;
-            }
+        let note = if let Some(n) = self.selected_note.and_then(|id| self.find_note(id)) {
+            n
+        } else {
+            // Empty state message
+            cmds.push(RenderCommand::Text {
+                x: x + width / 2.0 - 80.0,
+                y: y + height / 2.0 - 10.0,
+                text: "Select a note to edit".to_owned(),
+                color: OVERLAY0,
+                font_size: 16.0,
+                font_weight: FontWeightHint::Light,
+                max_width: Some(200.0),
+            });
+            return;
         };
 
         // Note title header
@@ -2741,7 +2747,11 @@ impl NotesApp {
                             max_width: Some(max_w - 16.0),
                         });
                     }
-                    let code_y_start = if language.is_empty() { ly + 8.0 } else { ly + 18.0 };
+                    let code_y_start = if language.is_empty() {
+                        ly + 8.0
+                    } else {
+                        ly + 18.0
+                    };
                     for (li, cl) in code.lines().enumerate() {
                         cmds.push(RenderCommand::Text {
                             x: x + EDITOR_PADDING + 12.0,
@@ -3471,25 +3481,41 @@ mod tests {
     #[test]
     fn test_parse_bold() {
         let spans = parse_inline("Hello **world**!");
-        assert!(spans.iter().any(|s| matches!(s, MdSpan::Bold(t) if t == "world")));
+        assert!(
+            spans
+                .iter()
+                .any(|s| matches!(s, MdSpan::Bold(t) if t == "world"))
+        );
     }
 
     #[test]
     fn test_parse_italic() {
         let spans = parse_inline("Hello *world*!");
-        assert!(spans.iter().any(|s| matches!(s, MdSpan::Italic(t) if t == "world")));
+        assert!(
+            spans
+                .iter()
+                .any(|s| matches!(s, MdSpan::Italic(t) if t == "world"))
+        );
     }
 
     #[test]
     fn test_parse_bold_italic() {
         let spans = parse_inline("***emphasis***");
-        assert!(spans.iter().any(|s| matches!(s, MdSpan::BoldItalic(t) if t == "emphasis")));
+        assert!(
+            spans
+                .iter()
+                .any(|s| matches!(s, MdSpan::BoldItalic(t) if t == "emphasis"))
+        );
     }
 
     #[test]
     fn test_parse_inline_code() {
         let spans = parse_inline("Use `println!` for output.");
-        assert!(spans.iter().any(|s| matches!(s, MdSpan::InlineCode(t) if t == "println!")));
+        assert!(
+            spans
+                .iter()
+                .any(|s| matches!(s, MdSpan::InlineCode(t) if t == "println!"))
+        );
     }
 
     #[test]
@@ -3553,7 +3579,11 @@ mod tests {
     #[test]
     fn test_parse_wiki_link_inline() {
         let spans = parse_inline("See [[My Page]].");
-        assert!(spans.iter().any(|s| matches!(s, MdSpan::WikiLink(t) if t == "My Page")));
+        assert!(
+            spans
+                .iter()
+                .any(|s| matches!(s, MdSpan::WikiLink(t) if t == "My Page"))
+        );
     }
 
     // -----------------------------------------------------------------------

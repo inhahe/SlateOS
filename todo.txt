@@ -1,3 +1,29 @@
+## BUG (noticed+FIXED 2026-05-31): 17 apps failed `cargo clippy` (clippy::all/pedantic
+##   deny breaks) — passwordgen, filesearch, snippets, dbviewer, undelete, renamer,
+##   jsonviewer, qrcode, automator, sysmonitor, diagram, mediaconvert, photomanager,
+##   slides, notes, email, torrent. ROOT CAUSE: each carried a per-file
+##   `#![deny(clippy::all, clippy::pedantic)]` with an ad-hoc, incomplete allow-list and
+##   did NOT inherit the workspace lint policy, so they tripped hundreds of pedantic/
+##   restriction lints that the project DELIBERATELY relaxes in the root
+##   [workspace.lints.clippy] (e.g. format_push_string is allowed precisely because its
+##   clippy "fix" adds .unwrap(), which the project's unwrap_used lint discourages).
+##   PROPER FIX (not a band-aid): made these crates adopt the centralized policy —
+##   added `[lints] workspace = true` to each Cargo.toml and removed the divergent
+##   per-file deny line (replaced with a short explanatory comment). This sets all=deny,
+##   pedantic=warn with the documented allow-list, matching every other app.
+##   That left only a handful of GENUINE clippy::all (deny) issues, fixed properly:
+##     - filesearch/photomanager/notes: descending `sort_by(|a,b| b.x.cmp(&a.x))`
+##       → `sort_by_key(|e| core::cmp::Reverse(e.x))` (unnecessary_sort_by).
+##     - dbviewer: PartialOrd::partial_cmp delegated to a private cmp_value instead of
+##       Ord::cmp (non_canonical_partial_cmp) → `Some(self.cmp(other))`.
+##     - renamer: `loop { if let Some=.. {..} else {break} }` → `while let Some=.. {..}`.
+##     - qrcode: factored a redundant boolean (nonminimal_bool) and replaced two
+##       `for _ in 0..10 { v.push(false) }` quiet-zone loops with `extend(repeat_n)`.
+##     - photomanager/notes: added `Default` impls delegating to `new()` (new_without_default).
+##     - email: renamed inherent `ImapStatus::from_str` (returns Option, not the FromStr
+##       Result contract) to `from_code` + updated its 3 test call sites (should_implement_trait).
+##   All 17 now pass clippy clean; tests all green (1115 across the batch); ouros builds OK.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/wordle — build break PLUS a PRODUCTION borrow bug
 ##   PLUS data bugs. (1) Cargo.toml was missing its [dependencies] section, so `use guitk::*`
 ##   failed (crate not in scope) and the bin/tests would not compile; added

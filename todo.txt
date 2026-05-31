@@ -1,3 +1,18 @@
+## BUG (noticed+FIXED 2026-05-31): apps/installer test harnesses hit the UAC
+##   os-error-740 launch failure ("installer" contains "install"). Unlike the
+##   single-binary crates, installer has BOTH a [lib] and a [[bin]], so cargo
+##   test builds TWO unit-test harnesses (installer-<hash>.exe each). The usual
+##   embed_manifest() fix only emits `rustc-link-arg-bins`, which covers the bin
+##   + bin unit-test but NOT the lib unit-test. Fixed by ALSO emitting the broad
+##   `cargo:rustc-link-arg` scope (applies to the lib unit-test build) pointing
+##   at the same OUT_DIR/embed-manifest.o object. (`rustc-link-arg-tests` is
+##   rejected as an invalid instruction by this cargo / no [[test]] target.) The
+##   broad scope also re-covers bins so the object links twice there, which is
+##   benign — harnesses launch without UAC (proving a valid asInvoker manifest)
+##   and it only affects host test artifacts; the shipped OurOS binary embeds no
+##   manifest. 86/86 lib tests pass; 9 clippy warnings cleaned (lib + grub.rs).
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): patch mis-applied normal-diff append.
 ##   userspace/patch/: test_end_to_end_normal_add failed — "1a2" (append after
 ##   line 1) produced ["b","a","c"] instead of ["a","b","c"]. apply_hunk always

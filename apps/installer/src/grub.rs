@@ -352,18 +352,17 @@ fn extract_grub_setting<'a>(content: &'a str, key: &str) -> Option<&'a str> {
             continue;
         }
         // `KEY=VALUE` form (e.g. GRUB_TIMEOUT=5)
-        if let Some(rest) = trimmed.strip_prefix(key) {
-            if let Some(val) = rest.strip_prefix('=') {
-                return Some(val.trim().trim_matches('"'));
-            }
+        if let Some(rest) = trimmed.strip_prefix(key)
+            && let Some(val) = rest.strip_prefix('=')
+        {
+            return Some(val.trim().trim_matches('"'));
         }
         // `set key=value` form (inside grub.cfg)
-        if let Some(rest) = trimmed.strip_prefix("set ") {
-            if let Some(rest) = rest.strip_prefix(key) {
-                if let Some(val) = rest.strip_prefix('=') {
-                    return Some(val.trim().trim_matches('"').trim_matches('\''));
-                }
-            }
+        if let Some(rest) = trimmed.strip_prefix("set ")
+            && let Some(rest) = rest.strip_prefix(key)
+            && let Some(val) = rest.strip_prefix('=')
+        {
+            return Some(val.trim().trim_matches('"').trim_matches('\''));
         }
     }
     None
@@ -389,8 +388,7 @@ pub fn parse_grub_config(root: &Path) -> Option<GrubConfig> {
     // Check /etc/default/grub for os-prober.
     let defaults_path = root.join("etc/default/grub");
     let os_prober_enabled = if let Ok(defaults) = fs::read_to_string(defaults_path) {
-        extract_grub_setting(&defaults, "GRUB_DISABLE_OS_PROBER")
-            .map_or(true, |v| v != "true")
+        extract_grub_setting(&defaults, "GRUB_DISABLE_OS_PROBER") != Some("true")
     } else {
         true
     };
@@ -419,20 +417,20 @@ pub fn is_valid_uuid(s: &str) -> bool {
     }
     // Long form (36 chars with dashes).
     if s.len() == 36 {
-        return s
-            .chars()
-            .enumerate()
-            .all(|(i, c)| match i {
-                8 | 13 | 18 | 23 => c == '-',
-                _ => c.is_ascii_hexdigit(),
-            });
+        return s.chars().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => c == '-',
+            _ => c.is_ascii_hexdigit(),
+        });
     }
     // Short form (9 chars with one dash, e.g. "1234-5678").
     if s.len() == 9 {
-        return s
-            .chars()
-            .enumerate()
-            .all(|(i, c)| if i == 4 { c == '-' } else { c.is_ascii_hexdigit() });
+        return s.chars().enumerate().all(|(i, c)| {
+            if i == 4 {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        });
     }
     false
 }
@@ -611,9 +609,9 @@ impl GrubUpdateRunner {
                 }
             }
 
-            let output = cmd.output().map_err(|e| {
-                GrubError::UpdateFailed(format!("failed to run {program}: {e}"))
-            })?;
+            let output = cmd
+                .output()
+                .map_err(|e| GrubError::UpdateFailed(format!("failed to run {program}: {e}")))?;
 
             if output.status.success() {
                 return Ok(());
@@ -634,10 +632,10 @@ impl GrubUpdateRunner {
         for cmd_args in UPDATE_COMMANDS {
             let program = cmd_args[0];
             let which = Command::new("which").arg(program).output();
-            if let Ok(out) = which {
-                if out.status.success() {
-                    return Some(program);
-                }
+            if let Ok(out) = which
+                && out.status.success()
+            {
+                return Some(program);
             }
         }
         None
@@ -662,11 +660,7 @@ mod tests {
     // -- helpers --------------------------------------------------------------
 
     /// Create a temporary directory tree that looks like a GRUB installation.
-    fn make_grub_tree(
-        dir: &Path,
-        cfg_subpath: &str,
-        cfg_content: &str,
-    ) {
+    fn make_grub_tree(dir: &Path, cfg_subpath: &str, cfg_content: &str) {
         let full = dir.join(cfg_subpath);
         if let Some(parent) = full.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -885,11 +879,13 @@ mod tests {
         let detector = GrubDetector::with_root(&tmp);
         let install = detector.detect().expect("should detect");
         assert!(install.is_efi());
-        assert!(install
-            .efi_partition
-            .as_ref()
-            .unwrap()
-            .ends_with("boot/efi"));
+        assert!(
+            install
+                .efi_partition
+                .as_ref()
+                .unwrap()
+                .ends_with("boot/efi")
+        );
     }
 
     #[test]
@@ -918,10 +914,7 @@ mod tests {
     fn test_extract_grub_setting_equals() {
         let content = "GRUB_TIMEOUT=10\nGRUB_DEFAULT=saved\n";
         assert_eq!(extract_grub_setting(content, "GRUB_TIMEOUT"), Some("10"));
-        assert_eq!(
-            extract_grub_setting(content, "GRUB_DEFAULT"),
-            Some("saved")
-        );
+        assert_eq!(extract_grub_setting(content, "GRUB_DEFAULT"), Some("saved"));
     }
 
     #[test]
@@ -1084,11 +1077,7 @@ mod tests {
     #[test]
     fn test_detect_efi_via_efi_mount() {
         let tmp = tempdir();
-        make_grub_tree(
-            &tmp,
-            "boot/efi/EFI/fedora/grub.cfg",
-            "set timeout=5\n",
-        );
+        make_grub_tree(&tmp, "boot/efi/EFI/fedora/grub.cfg", "set timeout=5\n");
         fs::create_dir_all(tmp.join("sys/firmware/efi")).unwrap();
 
         let detector = GrubDetector::with_root(&tmp);

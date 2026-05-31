@@ -269,11 +269,11 @@ impl YamlParser {
         for (i, &b) in bytes.iter().enumerate() {
             match b {
                 b'\'' if !in_double => in_single = !in_single,
-                b'"' if !in_single => {
+                b'"' if !in_single
                     // Check for escaped quote.
-                    if i == 0 || bytes[i.wrapping_sub(1)] != b'\\' {
-                        in_double = !in_double;
-                    }
+                    && (i == 0 || bytes[i.wrapping_sub(1)] != b'\\') =>
+                {
+                    in_double = !in_double;
                 }
                 b'#' if !in_single && !in_double && prev_space => {
                     return s[..i].trim_end().to_string();
@@ -314,7 +314,7 @@ impl YamlParser {
 
         // Scalar.
         *pos = pos.wrapping_add(1);
-        Ok(Self::parse_scalar(&line.content, line.number)?)
+        Self::parse_scalar(&line.content, line.number)
     }
 
     /// Detect whether a line looks like `key: value` (not a scalar that
@@ -327,10 +327,8 @@ impl YamlParser {
         for (i, &b) in bytes.iter().enumerate() {
             match b {
                 b'\'' if !in_double => in_single = !in_single,
-                b'"' if !in_single => {
-                    if i == 0 || bytes[i.wrapping_sub(1)] != b'\\' {
-                        in_double = !in_double;
-                    }
+                b'"' if !in_single && (i == 0 || bytes[i.wrapping_sub(1)] != b'\\') => {
+                    in_double = !in_double;
                 }
                 b':' if !in_single && !in_double => {
                     // Must be followed by space, EOL, or be at the end.
@@ -372,8 +370,12 @@ impl YamlParser {
 
             *pos = pos.wrapping_add(1);
 
-            if rest == "|" || rest == ">" || rest == "|+" || rest == ">+"
-                || rest == "|-" || rest == ">-"
+            if rest == "|"
+                || rest == ">"
+                || rest == "|+"
+                || rest == ">+"
+                || rest == "|-"
+                || rest == ">-"
             {
                 // Multi-line string block.
                 let folded = rest.starts_with('>');
@@ -533,10 +535,7 @@ impl YamlParser {
                 if line.is_empty() {
                     out.push('\n');
                 } else {
-                    if i > 0
-                        && !collected[i.wrapping_sub(1)].is_empty()
-                        && !out.ends_with('\n')
-                    {
+                    if i > 0 && !collected[i.wrapping_sub(1)].is_empty() && !out.ends_with('\n') {
                         out.push(' ');
                     }
                     out.push_str(line);
@@ -579,10 +578,8 @@ impl YamlParser {
         for (i, &b) in bytes.iter().enumerate() {
             match b {
                 b'\'' if !in_double => in_single = !in_single,
-                b'"' if !in_single => {
-                    if i == 0 || bytes[i.wrapping_sub(1)] != b'\\' {
-                        in_double = !in_double;
-                    }
+                b'"' if !in_single && (i == 0 || bytes[i.wrapping_sub(1)] != b'\\') => {
+                    in_double = !in_double;
                 }
                 b':' if !in_single && !in_double => {
                     let after = i.wrapping_add(1);
@@ -612,7 +609,12 @@ impl YamlParser {
         let trimmed = s.trim();
 
         // Null.
-        if trimmed.is_empty() || trimmed == "null" || trimmed == "~" || trimmed == "Null" || trimmed == "NULL" {
+        if trimmed.is_empty()
+            || trimmed == "null"
+            || trimmed == "~"
+            || trimmed == "Null"
+            || trimmed == "NULL"
+        {
             return Ok(YamlValue::Null);
         }
 
@@ -881,8 +883,7 @@ impl InstallConfig {
     fn from_yaml_value(root: &YamlValue) -> Result<Self, ConfigError> {
         let hostname = Self::require_str(root, "hostname")?;
         let locale = Self::opt_str(root, "locale").unwrap_or_else(|| "en_US.UTF-8".to_string());
-        let timezone =
-            Self::opt_str(root, "timezone").unwrap_or_else(|| "UTC".to_string());
+        let timezone = Self::opt_str(root, "timezone").unwrap_or_else(|| "UTC".to_string());
         let keyboard_layout =
             Self::opt_str(root, "keyboard_layout").unwrap_or_else(|| "us".to_string());
         let auto_reboot = root
@@ -958,9 +959,7 @@ impl InstallConfig {
         }
 
         // Validate timezone format — must contain a slash (Area/Location).
-        if self.timezone != "UTC"
-            && !self.timezone.contains('/')
-        {
+        if self.timezone != "UTC" && !self.timezone.contains('/') {
             errors.push(ConfigError::InvalidValue {
                 field: "timezone".to_string(),
                 message: format!(
@@ -974,10 +973,7 @@ impl InstallConfig {
         if !self.locale.contains('_') || !self.locale.contains('.') {
             errors.push(ConfigError::InvalidValue {
                 field: "locale".to_string(),
-                message: format!(
-                    "expected format like 'en_US.UTF-8', got '{}'",
-                    self.locale
-                ),
+                message: format!("expected format like 'en_US.UTF-8', got '{}'", self.locale),
             });
         }
 
@@ -1032,9 +1028,7 @@ impl InstallConfig {
     }
 
     fn opt_str(root: &YamlValue, key: &str) -> Option<String> {
-        root.get(key)
-            .and_then(YamlValue::as_str)
-            .map(String::from)
+        root.get(key).and_then(YamlValue::as_str).map(String::from)
     }
 
     fn parse_string_list(root: &YamlValue, key: &str) -> Vec<String> {
@@ -1070,7 +1064,9 @@ impl InstallConfig {
             other => {
                 return Err(ConfigError::InvalidValue {
                     field: "disk.scheme".to_string(),
-                    message: format!("unsupported partition scheme '{other}', only 'gpt' is supported"),
+                    message: format!(
+                        "unsupported partition scheme '{other}', only 'gpt' is supported"
+                    ),
                 });
             }
         };
@@ -1101,9 +1097,7 @@ impl InstallConfig {
             let label = entry
                 .get("label")
                 .and_then(YamlValue::as_str)
-                .ok_or_else(|| {
-                    ConfigError::MissingField(format!("disk.partitions[{idx}].label"))
-                })?
+                .ok_or_else(|| ConfigError::MissingField(format!("disk.partitions[{idx}].label")))?
                 .to_string();
 
             let size = Self::parse_partition_size(entry, idx)?;
@@ -1126,13 +1120,10 @@ impl InstallConfig {
         Ok(out)
     }
 
-    fn parse_partition_size(
-        entry: &YamlValue,
-        idx: usize,
-    ) -> Result<PartitionSize, ConfigError> {
-        let val = entry.get("size").ok_or_else(|| {
-            ConfigError::MissingField(format!("disk.partitions[{idx}].size"))
-        })?;
+    fn parse_partition_size(entry: &YamlValue, idx: usize) -> Result<PartitionSize, ConfigError> {
+        let val = entry
+            .get("size")
+            .ok_or_else(|| ConfigError::MissingField(format!("disk.partitions[{idx}].size")))?;
 
         match val {
             YamlValue::Str(s) => {
@@ -1142,23 +1133,25 @@ impl InstallConfig {
                 }
                 // "50%" format.
                 if let Some(stripped) = s_lower.strip_suffix('%') {
-                    let pct = stripped.trim().parse::<u8>().map_err(|_| {
-                        ConfigError::InvalidValue {
-                            field: format!("disk.partitions[{idx}].size"),
-                            message: format!("invalid percentage '{s}'"),
-                        }
-                    })?;
+                    let pct =
+                        stripped
+                            .trim()
+                            .parse::<u8>()
+                            .map_err(|_| ConfigError::InvalidValue {
+                                field: format!("disk.partitions[{idx}].size"),
+                                message: format!("invalid percentage '{s}'"),
+                            })?;
                     return Ok(PartitionSize::Percentage(pct));
                 }
                 // "512M", "1G", "2T" etc.
                 Self::parse_size_with_unit(s, idx)
             }
-            YamlValue::Int(n) => Ok(PartitionSize::Fixed(
-                u64::try_from(*n).map_err(|_| ConfigError::InvalidValue {
+            YamlValue::Int(n) => Ok(PartitionSize::Fixed(u64::try_from(*n).map_err(|_| {
+                ConfigError::InvalidValue {
                     field: format!("disk.partitions[{idx}].size"),
                     message: "size must be positive".to_string(),
-                })?,
-            )),
+                }
+            })?)),
             _ => Err(ConfigError::TypeError {
                 field: format!("disk.partitions[{idx}].size"),
                 expected: "string or integer".to_string(),
@@ -1181,7 +1174,10 @@ impl InstallConfig {
                     .get(split.wrapping_sub(1))
                     .is_some_and(|b| b.is_ascii_alphabetic())
             {
-                (&s_trimmed[..split.wrapping_sub(1)], &s_trimmed[split.wrapping_sub(1)..])
+                (
+                    &s_trimmed[..split.wrapping_sub(1)],
+                    &s_trimmed[split.wrapping_sub(1)..],
+                )
             } else {
                 (&s_trimmed[..split], &s_trimmed[split..])
             }
@@ -1189,10 +1185,13 @@ impl InstallConfig {
             (s_trimmed, "")
         };
 
-        let num: u64 = num_part.trim().parse().map_err(|_| ConfigError::InvalidValue {
-            field: format!("disk.partitions[{idx}].size"),
-            message: format!("invalid size '{s}'"),
-        })?;
+        let num: u64 = num_part
+            .trim()
+            .parse()
+            .map_err(|_| ConfigError::InvalidValue {
+                field: format!("disk.partitions[{idx}].size"),
+                message: format!("invalid size '{s}'"),
+            })?;
 
         let multiplier: u64 = match unit.to_ascii_uppercase().as_str() {
             "" | "B" => 1,
@@ -1208,10 +1207,12 @@ impl InstallConfig {
             }
         };
 
-        let total = num.checked_mul(multiplier).ok_or_else(|| ConfigError::InvalidValue {
-            field: format!("disk.partitions[{idx}].size"),
-            message: "size overflow".to_string(),
-        })?;
+        let total = num
+            .checked_mul(multiplier)
+            .ok_or_else(|| ConfigError::InvalidValue {
+                field: format!("disk.partitions[{idx}].size"),
+                message: "size overflow".to_string(),
+            })?;
 
         Ok(PartitionSize::Fixed(total))
     }
@@ -1243,12 +1244,13 @@ impl InstallConfig {
                 items
                     .iter()
                     .filter_map(|v| {
-                        v.as_str().and_then(|s| match s.to_ascii_lowercase().as_str() {
-                            "boot" => Some(PartitionFlag::Boot),
-                            "efi" | "esp" => Some(PartitionFlag::Efi),
-                            "swap" => Some(PartitionFlag::Swap),
-                            _ => None,
-                        })
+                        v.as_str()
+                            .and_then(|s| match s.to_ascii_lowercase().as_str() {
+                                "boot" => Some(PartitionFlag::Boot),
+                                "efi" | "esp" => Some(PartitionFlag::Efi),
+                                "swap" => Some(PartitionFlag::Swap),
+                                _ => None,
+                            })
                     })
                     .collect()
             })
@@ -1266,9 +1268,7 @@ impl InstallConfig {
             let username = entry
                 .get("username")
                 .and_then(YamlValue::as_str)
-                .ok_or_else(|| {
-                    ConfigError::MissingField(format!("users[{idx}].username"))
-                })?
+                .ok_or_else(|| ConfigError::MissingField(format!("users[{idx}].username")))?
                 .to_string();
 
             let display_name = entry
@@ -1347,14 +1347,18 @@ impl InstallConfig {
                     .get("address")
                     .and_then(YamlValue::as_str)
                     .ok_or_else(|| {
-                        ConfigError::MissingField("network.address (required for static mode)".to_string())
+                        ConfigError::MissingField(
+                            "network.address (required for static mode)".to_string(),
+                        )
                     })?
                     .to_string();
                 let gateway = net
                     .get("gateway")
                     .and_then(YamlValue::as_str)
                     .ok_or_else(|| {
-                        ConfigError::MissingField("network.gateway (required for static mode)".to_string())
+                        ConfigError::MissingField(
+                            "network.gateway (required for static mode)".to_string(),
+                        )
                     })?
                     .to_string();
                 NetworkMode::Static(StaticNetConfig { address, gateway })
@@ -1715,8 +1719,10 @@ impl InstallProgress {
                 .unwrap_or(0);
             self.percent = if pct > 100 { 100 } else { pct as u8 };
         }
-        self.log
-            .push(format!("[{}/{}] {step_name}", self.current_step, self.total_steps));
+        self.log.push(format!(
+            "[{}/{}] {step_name}",
+            self.current_step, self.total_steps
+        ));
     }
 
     /// Record a log message.
@@ -1953,13 +1959,7 @@ mod tests {
     fn yaml_parse_deeply_nested() {
         let yaml = "a:\n  b:\n    c: deep";
         let val = YamlParser::parse(yaml).unwrap();
-        let c = val
-            .get("a")
-            .unwrap()
-            .get("b")
-            .unwrap()
-            .get("c")
-            .unwrap();
+        let c = val.get("a").unwrap().get("b").unwrap().get("c").unwrap();
         assert_eq!(c.as_str(), Some("deep"));
     }
 
@@ -2088,9 +2088,11 @@ users:
 "#;
         let config = InstallConfig::from_yaml(yaml).unwrap();
         let errors = config.validate().unwrap_err();
-        assert!(errors.iter().any(|e| {
-            matches!(e, ConfigError::MissingField(f) if f.contains("/"))
-        }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| { matches!(e, ConfigError::MissingField(f) if f.contains("/")) })
+        );
     }
 
     #[test]
@@ -2112,9 +2114,11 @@ users:
 "#;
         let config = InstallConfig::from_yaml(yaml).unwrap();
         let errors = config.validate().unwrap_err();
-        assert!(errors.iter().any(|e| {
-            matches!(e, ConfigError::MissingField(f) if f.contains("EFI"))
-        }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| { matches!(e, ConfigError::MissingField(f) if f.contains("EFI")) })
+        );
     }
 
     #[test]
@@ -2158,9 +2162,11 @@ users:
             auto_reboot: false,
         };
         let errors = config.validate().unwrap_err();
-        assert!(errors.iter().any(|e| {
-            matches!(e, ConfigError::MissingField(f) if f == "users")
-        }));
+        assert!(
+            errors
+                .iter()
+                .any(|e| { matches!(e, ConfigError::MissingField(f) if f == "users") })
+        );
     }
 
     #[test]
@@ -2396,7 +2402,11 @@ users:
         // Verify step ordering: wipe -> create -> format -> mount -> copy ->
         // config -> user -> packages -> services -> post_install -> bootloader
         // -> unmount -> reboot.
-        assert!(plan.steps.len() >= 10, "too few steps: {}", plan.steps.len());
+        assert!(
+            plan.steps.len() >= 10,
+            "too few steps: {}",
+            plan.steps.len()
+        );
 
         // First step should be WipeDisk (since wipe: true).
         assert!(matches!(&plan.steps[0], InstallStep::WipeDisk { .. }));
@@ -2412,7 +2422,10 @@ users:
             .iter()
             .rposition(|s| matches!(s, InstallStep::MountPartition { .. }))
             .expect("no mount steps");
-        assert!(copy_idx > last_mount_idx, "CopyBaseSystem must come after mounts");
+        assert!(
+            copy_idx > last_mount_idx,
+            "CopyBaseSystem must come after mounts"
+        );
 
         // Bootloader must come after CopyBaseSystem.
         let boot_idx = plan
@@ -2420,7 +2433,10 @@ users:
             .iter()
             .position(|s| matches!(s, InstallStep::InstallBootloader { .. }))
             .expect("InstallBootloader step missing");
-        assert!(boot_idx > copy_idx, "bootloader must come after base system copy");
+        assert!(
+            boot_idx > copy_idx,
+            "bootloader must come after base system copy"
+        );
 
         // Unmount must come after bootloader.
         let unmount_idx = plan
@@ -2468,7 +2484,12 @@ users:
             auto_reboot: false,
         };
         let plan = InstallPlan::from_config(&config);
-        assert!(!plan.steps.iter().any(|s| matches!(s, InstallStep::WipeDisk { .. })));
+        assert!(
+            !plan
+                .steps
+                .iter()
+                .any(|s| matches!(s, InstallStep::WipeDisk { .. }))
+        );
     }
 
     #[test]

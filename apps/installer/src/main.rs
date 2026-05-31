@@ -12,7 +12,7 @@ use std::env;
 use std::fs;
 use std::process;
 
-use installer::{generate_sample_config, InstallConfig, InstallPlan};
+use installer::{InstallConfig, InstallPlan, generate_sample_config};
 
 /// CLI operating mode.
 enum Mode {
@@ -173,7 +173,10 @@ fn cmd_install(path: &str) {
 
     // Validate.
     if let Err(errors) = config.validate() {
-        eprintln!("Installation aborted: configuration has {} error(s):", errors.len());
+        eprintln!(
+            "Installation aborted: configuration has {} error(s):",
+            errors.len()
+        );
         for (i, err) in errors.iter().enumerate() {
             let num = i.wrapping_add(1);
             eprintln!("  {num}. {err}");
@@ -210,9 +213,7 @@ fn cmd_install(path: &str) {
             installer::InstallStep::MountPartition { label, mount_point } => {
                 format!("Mounting '{label}' at {mount_point}")
             }
-            installer::InstallStep::CopyBaseSystem => {
-                "Copying base system files".to_string()
-            }
+            installer::InstallStep::CopyBaseSystem => "Copying base system files".to_string(),
             installer::InstallStep::InstallPackages { packages } => {
                 format!("Installing {} package(s)", packages.len())
             }

@@ -3,6 +3,10 @@ name = "installer"
 version = "0.1.0"
 edition = "2024"
 description = "OurOS Installer — unattended and interactive installation"
+
+[build-dependencies]
+embed-manifest = "1.5.0"
+
 [lib]
 name = "installer"
 path = "src/lib.rs"

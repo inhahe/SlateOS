@@ -1,4 +1,4 @@
-//! OurOS File Diff/Compare Tool
+//! `OurOS` File Diff/Compare Tool
 //!
 //! A desktop application for comparing files and directories with:
 //! - Myers diff algorithm for optimal edit scripts
@@ -196,6 +196,10 @@ pub struct InlineEdit {
 ///
 /// Returns the edit script as a list of `DiffEdit` entries.
 /// Uses the classic Myers algorithm with linear-space optimization.
+// The single-character bindings (n, m, k, x, y, v, d) are the canonical names
+// from Myers' paper; renaming them would obscure the algorithm. The usize->isize
+// casts are bounded by line counts, which never approach isize::MAX in practice.
+#[allow(clippy::many_single_char_names, clippy::cast_possible_wrap)]
 #[must_use]
 pub fn myers_diff(left: &[&str], right: &[&str]) -> Vec<DiffEdit> {
     let n = left.len();
@@ -293,6 +297,8 @@ pub fn myers_diff(left: &[&str], right: &[&str]) -> Vec<DiffEdit> {
 }
 
 /// Backtrack through the Myers trace to reconstruct the edit script.
+// Same Myers conventions as `myers_diff`: single-char names and bounded casts.
+#[allow(clippy::many_single_char_names, clippy::cast_possible_wrap)]
 fn backtrack_edits(
     trace: &[Vec<isize>],
     left: &[&str],
@@ -377,7 +383,7 @@ fn backtrack_edits(
 }
 
 /// Apply ignore options to a line before comparison.
-fn normalize_line(line: &str, opts: &IgnoreOptions) -> String {
+fn normalize_line(line: &str, opts: IgnoreOptions) -> String {
     let mut result = line.to_string();
     if opts.ignore_case {
         result = result.to_lowercase();
@@ -407,9 +413,14 @@ pub fn compute_diff(left_text: &str, right_text: &str, opts: &IgnoreOptions) -> 
 
     // Apply normalization for comparison if needed
     let edits = if opts.has_any() {
-        let norm_left: Vec<String> = left_lines.iter().map(|l| normalize_line(l, opts)).collect();
-        let norm_right: Vec<String> =
-            right_lines.iter().map(|l| normalize_line(l, opts)).collect();
+        let norm_left: Vec<String> = left_lines
+            .iter()
+            .map(|l| normalize_line(l, *opts))
+            .collect();
+        let norm_right: Vec<String> = right_lines
+            .iter()
+            .map(|l| normalize_line(l, *opts))
+            .collect();
         let norm_left_refs: Vec<&str> = norm_left.iter().map(String::as_str).collect();
         let norm_right_refs: Vec<&str> = norm_right.iter().map(String::as_str).collect();
 
@@ -505,10 +516,7 @@ fn group_into_hunks(edits: &[DiffEdit], context: usize) -> Vec<DiffHunk> {
         let hunk_start = start.saturating_sub(context);
         let hunk_end = (end.saturating_add(context).saturating_add(1)).min(edits.len());
 
-        let hunk_edits: Vec<DiffEdit> = edits
-            .get(hunk_start..hunk_end)
-            .unwrap_or(&[])
-            .to_vec();
+        let hunk_edits: Vec<DiffEdit> = edits.get(hunk_start..hunk_end).unwrap_or(&[]).to_vec();
 
         let mut left_start: usize = 0;
         let mut right_start: usize = 0;
@@ -570,8 +578,7 @@ pub fn inline_diff(left: &str, right: &str) -> (Vec<InlineEdit>, Vec<InlineEdit>
 
     // Find common suffix (not overlapping prefix)
     let mut suffix_len = 0;
-    while suffix_len < (n.saturating_sub(prefix_len))
-        && suffix_len < (m.saturating_sub(prefix_len))
+    while suffix_len < (n.saturating_sub(prefix_len)) && suffix_len < (m.saturating_sub(prefix_len))
     {
         let li = n.saturating_sub(1).saturating_sub(suffix_len);
         let ri = m.saturating_sub(1).saturating_sub(suffix_len);
@@ -1183,20 +1190,20 @@ fn build_side_by_side_pairs(edits: &[DiffEdit]) -> Vec<SideBySidePair> {
             DiffOp::Delete => {
                 // Check if the next edit is an insert (paired modification)
                 let next = edits.get(i.saturating_add(1));
-                if let Some(next_edit) = next {
-                    if next_edit.op == DiffOp::Insert {
-                        // Paired: show delete on left, insert on right
-                        pairs.push(SideBySidePair {
-                            left_line: edit.left_line,
-                            left_text: Some(edit.text.clone()),
-                            left_op: Some(DiffOp::Delete),
-                            right_line: next_edit.right_line,
-                            right_text: Some(next_edit.text.clone()),
-                            right_op: Some(DiffOp::Insert),
-                        });
-                        i = i.saturating_add(2);
-                        continue;
-                    }
+                if let Some(next_edit) = next
+                    && next_edit.op == DiffOp::Insert
+                {
+                    // Paired: show delete on left, insert on right
+                    pairs.push(SideBySidePair {
+                        left_line: edit.left_line,
+                        left_text: Some(edit.text.clone()),
+                        left_op: Some(DiffOp::Delete),
+                        right_line: next_edit.right_line,
+                        right_text: Some(next_edit.text.clone()),
+                        right_op: Some(DiffOp::Insert),
+                    });
+                    i = i.saturating_add(2);
+                    continue;
                 }
                 // Unpaired delete
                 pairs.push(SideBySidePair {
@@ -1259,26 +1266,25 @@ fn build_inline_rows(edits: &[DiffEdit]) -> Vec<InlineRow> {
             }
             DiffOp::Delete => {
                 let next = edits.get(i.saturating_add(1));
-                if let Some(next_edit) = next {
-                    if next_edit.op == DiffOp::Insert {
-                        let (left_spans, right_spans) =
-                            inline_diff(&edit.text, &next_edit.text);
+                if let Some(next_edit) = next
+                    && next_edit.op == DiffOp::Insert
+                {
+                    let (left_spans, right_spans) = inline_diff(&edit.text, &next_edit.text);
 
-                        rows.push(InlineRow {
-                            op: DiffOp::Delete,
-                            line_num: edit.left_line,
-                            text: edit.text.clone(),
-                            spans: left_spans,
-                        });
-                        rows.push(InlineRow {
-                            op: DiffOp::Insert,
-                            line_num: next_edit.right_line,
-                            text: next_edit.text.clone(),
-                            spans: right_spans,
-                        });
-                        i = i.saturating_add(2);
-                        continue;
-                    }
+                    rows.push(InlineRow {
+                        op: DiffOp::Delete,
+                        line_num: edit.left_line,
+                        text: edit.text.clone(),
+                        spans: left_spans,
+                    });
+                    rows.push(InlineRow {
+                        op: DiffOp::Insert,
+                        line_num: next_edit.right_line,
+                        text: next_edit.text.clone(),
+                        spans: right_spans,
+                    });
+                    i = i.saturating_add(2);
+                    continue;
                 }
                 rows.push(InlineRow {
                     op: DiffOp::Delete,
@@ -1452,10 +1458,11 @@ impl FileDiffApp {
         self.selected_hunk = 0;
 
         // Re-run search if active
-        if self.search.visible && !self.search.query.is_empty() {
-            if let Some(ref diff) = self.diff {
-                self.search.search(&diff.edits);
-            }
+        if self.search.visible
+            && !self.search.query.is_empty()
+            && let Some(ref diff) = self.diff
+        {
+            self.search.search(&diff.edits);
         }
     }
 
@@ -1688,8 +1695,7 @@ impl FileDiffApp {
                 if let Some(ref diff) = self.diff {
                     let hunk_count = diff.hunks.len();
                     if hunk_count > 0 {
-                        self.selected_hunk =
-                            (self.selected_hunk.saturating_add(1)) % hunk_count;
+                        self.selected_hunk = (self.selected_hunk.saturating_add(1)) % hunk_count;
                     }
                 }
                 EventResult::Consumed
@@ -1945,13 +1951,10 @@ impl FileDiffApp {
     }
 
     /// Render navigation buttons.
-    fn render_nav_buttons(
-        &self,
-        tree: &mut RenderTree,
-        btn_x: &mut f32,
-        btn_y: f32,
-        btn_h: f32,
-    ) {
+    // Kept as a `&self` method for consistency with the rest of the
+    // `render_*` toolbar family, several of which do read `self`.
+    #[allow(clippy::unused_self)]
+    fn render_nav_buttons(&self, tree: &mut RenderTree, btn_x: &mut f32, btn_y: f32, btn_h: f32) {
         let nav_buttons = [("Prev", "F7"), ("Next", "F8")];
         for (label, shortcut) in &nav_buttons {
             let full_label = format!("{label} ({shortcut})");
@@ -2109,23 +2112,29 @@ impl FileDiffApp {
             let y = lines_y + vi as f32 * LINE_HEIGHT;
             if let Some(pair) = pairs.get(pair_idx) {
                 // Left side
-                render_diff_line(tree, &DiffLineParams {
-                    x: 0.0,
-                    y,
-                    width: panel_width,
-                    line_num: pair.left_line,
-                    text: pair.left_text.as_deref(),
-                    op: pair.left_op,
-                });
+                render_diff_line(
+                    tree,
+                    &DiffLineParams {
+                        x: 0.0,
+                        y,
+                        width: panel_width,
+                        line_num: pair.left_line,
+                        text: pair.left_text.as_deref(),
+                        op: pair.left_op,
+                    },
+                );
                 // Right side
-                render_diff_line(tree, &DiffLineParams {
-                    x: panel_width + SEPARATOR_WIDTH,
-                    y,
-                    width: panel_width,
-                    line_num: pair.right_line,
-                    text: pair.right_text.as_deref(),
-                    op: pair.right_op,
-                });
+                render_diff_line(
+                    tree,
+                    &DiffLineParams {
+                        x: panel_width + SEPARATOR_WIDTH,
+                        y,
+                        width: panel_width,
+                        line_num: pair.right_line,
+                        text: pair.right_text.as_deref(),
+                        op: pair.right_op,
+                    },
+                );
             }
         }
 
@@ -2347,13 +2356,10 @@ impl FileDiffApp {
     }
 
     /// Render character-level spans for an inline row.
-    fn render_inline_spans(
-        &self,
-        tree: &mut RenderTree,
-        text_x: f32,
-        y: f32,
-        row: &InlineRow,
-    ) {
+    // Kept as a `&self` method for consistency with the rest of the
+    // `render_*` row family, several of which do read `self`.
+    #[allow(clippy::unused_self)]
+    fn render_inline_spans(&self, tree: &mut RenderTree, text_x: f32, y: f32, row: &InlineRow) {
         let mut char_offset: f32 = 0.0;
         for span in &row.spans {
             let span_text = row.text.get(span.start..span.end).unwrap_or("");
@@ -3069,8 +3075,12 @@ mod tests {
 
     #[test]
     fn test_hunk_grouping_multiple_changes() {
-        let left = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj";
-        let right = "a\nX\nc\nd\ne\nf\ng\nY\ni\nj";
+        // The two changes (line 2 and line 13) are separated by 10 unchanged
+        // lines, which exceeds 2*context (=6) so they form two distinct hunks.
+        // (Changes closer than that are correctly merged into one hunk, matching
+        // `diff -U3` semantics.)
+        let left = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn";
+        let right = "a\nB\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nM\nn";
         let opts = IgnoreOptions::default();
         let result = compute_diff(left, right, &opts);
         assert!(result.hunks.len() >= 2);
@@ -3557,7 +3567,7 @@ mod tests {
             ignore_case: true,
             ..Default::default()
         };
-        assert_eq!(normalize_line("Hello WORLD", &opts), "hello world");
+        assert_eq!(normalize_line("Hello WORLD", opts), "hello world");
     }
 
     #[test]
@@ -3566,7 +3576,7 @@ mod tests {
             ignore_whitespace: true,
             ..Default::default()
         };
-        assert_eq!(normalize_line("  hello   world  ", &opts), "hello world");
+        assert_eq!(normalize_line("  hello   world  ", opts), "hello world");
     }
 
     // --- FileCompareStatus tests ---
@@ -3596,12 +3606,16 @@ mod tests {
     #[test]
     fn test_handle_scroll_down() {
         let mut app = FileDiffApp::new();
-        app.load_files(
-            "a",
-            "a\nb\nc\nd\ne\nf\ng\nh",
-            "b",
-            "a\nb\nc\nd\ne\nf\ng\nX",
-        );
+        // Use more lines than fit in the viewport so there is room to scroll
+        // (an 8-line file fits entirely on screen and would never scroll).
+        let left: String = (0..60)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut right_lines: Vec<String> = (0..60).map(|i| format!("line{i}")).collect();
+        right_lines[59] = "changed".to_string();
+        let right = right_lines.join("\n");
+        app.load_files("a", &left, "b", &right);
         let key = KeyEvent {
             key: Key::Down,
             pressed: true,

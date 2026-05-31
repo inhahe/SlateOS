@@ -302,7 +302,10 @@ impl core::fmt::Display for AssocError {
                 write!(f, "App '{app_id}' does not support .{extension}")
             }
             Self::AlreadyExists(ext) => write!(f, "Association already exists for .{ext}"),
-            Self::ParseError { line_number, detail } => {
+            Self::ParseError {
+                line_number,
+                detail,
+            } => {
                 write!(f, "Parse error at line {line_number}: {detail}")
             }
         }
@@ -367,7 +370,7 @@ impl AssociationRegistry {
         self.categories.remove(&ext);
         self.file_types
             .remove(&ext)
-            .ok_or_else(|| AssocError::FileTypeNotFound(ext))
+            .ok_or(AssocError::FileTypeNotFound(ext))
     }
 
     /// Get a file type by extension.
@@ -455,11 +458,7 @@ impl AssociationRegistry {
     /// Set (or replace) the default app for a file extension.
     /// Validates that the file type exists, the app exists, and the app
     /// supports the extension.
-    pub fn set_default_app(
-        &mut self,
-        extension: &str,
-        app_id: &str,
-    ) -> Result<(), AssocError> {
+    pub fn set_default_app(&mut self, extension: &str, app_id: &str) -> Result<(), AssocError> {
         let ext = extension.to_lowercase();
 
         if !self.file_types.contains_key(&ext) {
@@ -539,11 +538,7 @@ impl AssociationRegistry {
     }
 
     /// Search and also filter to a specific category.
-    pub fn search_in_category(
-        &self,
-        query: &str,
-        category: FileCategory,
-    ) -> Vec<&FileType> {
+    pub fn search_in_category(&self, query: &str, category: FileCategory) -> Vec<&FileType> {
         let q = query.to_lowercase();
         self.file_types
             .values()
@@ -563,7 +558,7 @@ impl AssociationRegistry {
     pub fn export_config(&self) -> String {
         let mut out = String::from("# OurOS File Associations\n");
         for (ext, assoc) in &self.associations {
-            out.push_str(&ext);
+            out.push_str(ext);
             out.push('=');
             out.push_str(&assoc.app_id);
             out.push('\n');
@@ -605,23 +600,78 @@ impl AssociationRegistry {
         // (extension, mime_type, description, category)
         let defaults: &[(&str, &str, &str, FileCategory)] = &[
             // Documents
-            ("txt", "text/plain", "Plain Text Document", FileCategory::Documents),
-            ("pdf", "application/pdf", "PDF Document", FileCategory::Documents),
-            ("doc", "application/msword", "Word Document", FileCategory::Documents),
-            ("docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", "Word Document (OOXML)", FileCategory::Documents),
-            ("xls", "application/vnd.ms-excel", "Excel Spreadsheet", FileCategory::Documents),
-            ("xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "Excel Spreadsheet (OOXML)", FileCategory::Documents),
-            ("pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "PowerPoint Presentation", FileCategory::Documents),
-            ("odt", "application/vnd.oasis.opendocument.text", "OpenDocument Text", FileCategory::Documents),
-            ("rtf", "application/rtf", "Rich Text Format", FileCategory::Documents),
-            ("csv", "text/csv", "Comma-Separated Values", FileCategory::Documents),
+            (
+                "txt",
+                "text/plain",
+                "Plain Text Document",
+                FileCategory::Documents,
+            ),
+            (
+                "pdf",
+                "application/pdf",
+                "PDF Document",
+                FileCategory::Documents,
+            ),
+            (
+                "doc",
+                "application/msword",
+                "Word Document",
+                FileCategory::Documents,
+            ),
+            (
+                "docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "Word Document (OOXML)",
+                FileCategory::Documents,
+            ),
+            (
+                "xls",
+                "application/vnd.ms-excel",
+                "Excel Spreadsheet",
+                FileCategory::Documents,
+            ),
+            (
+                "xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                "Excel Spreadsheet (OOXML)",
+                FileCategory::Documents,
+            ),
+            (
+                "pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "PowerPoint Presentation",
+                FileCategory::Documents,
+            ),
+            (
+                "odt",
+                "application/vnd.oasis.opendocument.text",
+                "OpenDocument Text",
+                FileCategory::Documents,
+            ),
+            (
+                "rtf",
+                "application/rtf",
+                "Rich Text Format",
+                FileCategory::Documents,
+            ),
+            (
+                "csv",
+                "text/csv",
+                "Comma-Separated Values",
+                FileCategory::Documents,
+            ),
             // Images
             ("png", "image/png", "PNG Image", FileCategory::Images),
             ("jpg", "image/jpeg", "JPEG Image", FileCategory::Images),
             ("jpeg", "image/jpeg", "JPEG Image", FileCategory::Images),
             ("gif", "image/gif", "GIF Image", FileCategory::Images),
             ("bmp", "image/bmp", "Bitmap Image", FileCategory::Images),
-            ("svg", "image/svg+xml", "SVG Vector Image", FileCategory::Images),
+            (
+                "svg",
+                "image/svg+xml",
+                "SVG Vector Image",
+                FileCategory::Images,
+            ),
             ("webp", "image/webp", "WebP Image", FileCategory::Images),
             ("ico", "image/x-icon", "Icon File", FileCategory::Images),
             // Audio
@@ -632,26 +682,76 @@ impl AssociationRegistry {
             ("m4a", "audio/mp4", "M4A Audio", FileCategory::Audio),
             // Video
             ("mp4", "video/mp4", "MP4 Video", FileCategory::Video),
-            ("mkv", "video/x-matroska", "Matroska Video", FileCategory::Video),
+            (
+                "mkv",
+                "video/x-matroska",
+                "Matroska Video",
+                FileCategory::Video,
+            ),
             ("avi", "video/x-msvideo", "AVI Video", FileCategory::Video),
             ("webm", "video/webm", "WebM Video", FileCategory::Video),
-            ("mov", "video/quicktime", "QuickTime Video", FileCategory::Video),
+            (
+                "mov",
+                "video/quicktime",
+                "QuickTime Video",
+                FileCategory::Video,
+            ),
             // Archives
-            ("zip", "application/zip", "ZIP Archive", FileCategory::Archives),
-            ("tar", "application/x-tar", "Tar Archive", FileCategory::Archives),
-            ("gz", "application/gzip", "Gzip Archive", FileCategory::Archives),
-            ("7z", "application/x-7z-compressed", "7-Zip Archive", FileCategory::Archives),
-            ("rar", "application/vnd.rar", "RAR Archive", FileCategory::Archives),
+            (
+                "zip",
+                "application/zip",
+                "ZIP Archive",
+                FileCategory::Archives,
+            ),
+            (
+                "tar",
+                "application/x-tar",
+                "Tar Archive",
+                FileCategory::Archives,
+            ),
+            (
+                "gz",
+                "application/gzip",
+                "Gzip Archive",
+                FileCategory::Archives,
+            ),
+            (
+                "7z",
+                "application/x-7z-compressed",
+                "7-Zip Archive",
+                FileCategory::Archives,
+            ),
+            (
+                "rar",
+                "application/vnd.rar",
+                "RAR Archive",
+                FileCategory::Archives,
+            ),
             // Code
             ("rs", "text/x-rust", "Rust Source", FileCategory::Code),
             ("py", "text/x-python", "Python Source", FileCategory::Code),
-            ("js", "text/javascript", "JavaScript Source", FileCategory::Code),
-            ("ts", "text/typescript", "TypeScript Source", FileCategory::Code),
+            (
+                "js",
+                "text/javascript",
+                "JavaScript Source",
+                FileCategory::Code,
+            ),
+            (
+                "ts",
+                "text/typescript",
+                "TypeScript Source",
+                FileCategory::Code,
+            ),
             ("html", "text/html", "HTML Document", FileCategory::Code),
             ("css", "text/css", "CSS Stylesheet", FileCategory::Code),
             ("json", "application/json", "JSON Data", FileCategory::Code),
             ("xml", "application/xml", "XML Document", FileCategory::Code),
-            ("toml", "application/toml", "TOML Config", FileCategory::Code),
+            (
+                "toml",
+                "application/toml",
+                "TOML Config",
+                FileCategory::Code,
+            ),
             ("yaml", "text/yaml", "YAML Config", FileCategory::Code),
             ("c", "text/x-c", "C Source", FileCategory::Code),
             ("cpp", "text/x-c++", "C++ Source", FileCategory::Code),
@@ -659,8 +759,18 @@ impl AssociationRegistry {
             // Other
             ("log", "text/plain", "Log File", FileCategory::Other),
             ("ini", "text/plain", "INI Config File", FileCategory::Other),
-            ("iso", "application/x-iso9660-image", "Disc Image", FileCategory::Other),
-            ("bin", "application/octet-stream", "Binary File", FileCategory::Other),
+            (
+                "iso",
+                "application/x-iso9660-image",
+                "Disc Image",
+                FileCategory::Other,
+            ),
+            (
+                "bin",
+                "application/octet-stream",
+                "Binary File",
+                FileCategory::Other,
+            ),
         ];
 
         for (ext, mime, desc, category) in defaults {
@@ -676,19 +786,12 @@ impl AssociationRegistry {
                 "Text Editor",
                 "/usr/bin/textedit",
                 &[
-                    "txt", "rs", "py", "js", "ts", "html", "css", "json", "xml",
-                    "toml", "yaml", "c", "cpp", "h", "log", "ini", "csv", "rtf",
-                    "odt",
+                    "txt", "rs", "py", "js", "ts", "html", "css", "json", "xml", "toml", "yaml",
+                    "c", "cpp", "h", "log", "ini", "csv", "rtf", "odt",
                 ],
                 1,
             ),
-            (
-                "pdfviewer",
-                "PDF Viewer",
-                "/usr/bin/pdfviewer",
-                &["pdf"],
-                2,
-            ),
+            ("pdfviewer", "PDF Viewer", "/usr/bin/pdfviewer", &["pdf"], 2),
             (
                 "photoviewer",
                 "Photo Viewer",
@@ -736,8 +839,8 @@ impl AssociationRegistry {
                 "Code Editor",
                 "/usr/bin/codeeditor",
                 &[
-                    "rs", "py", "js", "ts", "html", "css", "json", "xml", "toml",
-                    "yaml", "c", "cpp", "h",
+                    "txt", "rs", "py", "js", "ts", "html", "css", "json", "xml", "toml", "yaml",
+                    "c", "cpp", "h",
                 ],
                 9,
             ),
@@ -811,13 +914,13 @@ impl AssociationRegistry {
             for (def_cat, app_id) in category_defaults {
                 if cat == def_cat {
                     // Only assign if the app actually supports this extension.
-                    if let Some(app) = self.apps.get(*app_id) {
-                        if app.supports_extension(ext) {
-                            self.associations
-                                .insert(ext.clone(), Association::new(ext, app_id));
-                            if let Some(ft) = self.file_types.get_mut(ext) {
-                                ft.default_app_id = Some(app_id.to_string());
-                            }
+                    if let Some(app) = self.apps.get(*app_id)
+                        && app.supports_extension(ext)
+                    {
+                        self.associations
+                            .insert(ext.clone(), Association::new(ext, app_id));
+                        if let Some(ft) = self.file_types.get_mut(ext) {
+                            ft.default_app_id = Some(app_id.to_string());
                         }
                     }
                     break;
@@ -828,15 +931,14 @@ impl AssociationRegistry {
         // Second pass: apply specific overrides.
         for (ext, app_id) in specific_overrides {
             let ext_lower = ext.to_lowercase();
-            if self.file_types.contains_key(&ext_lower) {
-                if let Some(app) = self.apps.get(*app_id) {
-                    if app.supports_extension(&ext_lower) {
-                        self.associations
-                            .insert(ext_lower.clone(), Association::new(&ext_lower, app_id));
-                        if let Some(ft) = self.file_types.get_mut(&ext_lower) {
-                            ft.default_app_id = Some(app_id.to_string());
-                        }
-                    }
+            if self.file_types.contains_key(&ext_lower)
+                && let Some(app) = self.apps.get(*app_id)
+                && app.supports_extension(&ext_lower)
+            {
+                self.associations
+                    .insert(ext_lower.clone(), Association::new(&ext_lower, app_id));
+                if let Some(ft) = self.file_types.get_mut(&ext_lower) {
+                    ft.default_app_id = Some(app_id.to_string());
                 }
             }
         }
@@ -950,12 +1052,12 @@ impl FileAssocUI {
         let ext = self.dialog_target_ext.clone();
         let compatible = self.registry.apps_for_extension(&ext);
 
-        if let Some(sel_idx) = self.dialog_selected_app {
-            if let Some(app) = compatible.get(sel_idx) {
-                let app_id = app.id.clone();
-                if self.dialog_always_use {
-                    self.registry.set_default_app(&ext, &app_id)?;
-                }
+        if let Some(sel_idx) = self.dialog_selected_app
+            && let Some(app) = compatible.get(sel_idx)
+        {
+            let app_id = app.id.clone();
+            if self.dialog_always_use {
+                self.registry.set_default_app(&ext, &app_id)?;
             }
         }
 
@@ -1212,11 +1314,7 @@ impl FileAssocUI {
             });
 
             // Category label
-            let label_color = if is_selected {
-                COLOR_BLUE
-            } else {
-                COLOR_TEXT
-            };
+            let label_color = if is_selected { COLOR_BLUE } else { COLOR_TEXT };
             rt.push(RenderCommand::Text {
                 x: PADDING + 28.0,
                 y: y + 10.0,
@@ -1252,8 +1350,7 @@ impl FileAssocUI {
     fn render_table(&self, rt: &mut RenderTree) {
         let table_x = SIDEBAR_WIDTH;
         let table_y = TOOLBAR_HEIGHT;
-        let table_w =
-            self.window_width - SIDEBAR_WIDTH - DETAILS_PANEL_WIDTH;
+        let table_w = self.window_width - SIDEBAR_WIDTH - DETAILS_PANEL_WIDTH;
         let table_h = self.window_height - TOOLBAR_HEIGHT;
 
         // Table background
@@ -1498,9 +1595,7 @@ impl FileAssocUI {
         y += 28.0;
 
         let filtered = self.filtered_file_types();
-        let selected_ft = self
-            .selected_index
-            .and_then(|i| filtered.get(i).copied());
+        let selected_ft = self.selected_index.and_then(|i| filtered.get(i).copied());
 
         match selected_ft {
             None => {
@@ -1626,11 +1721,7 @@ impl FileAssocUI {
                 } else {
                     for app in &compatible {
                         let is_default = ft.default_app_id.as_deref() == Some(&app.id);
-                        let name_color = if is_default {
-                            COLOR_GREEN
-                        } else {
-                            COLOR_TEXT
-                        };
+                        let name_color = if is_default { COLOR_GREEN } else { COLOR_TEXT };
 
                         rt.push(RenderCommand::FillRect {
                             x,
@@ -1662,14 +1753,7 @@ impl FileAssocUI {
     }
 
     /// Helper: render a label+value detail row.
-    fn render_detail_row(
-        &self,
-        rt: &mut RenderTree,
-        x: f32,
-        y: f32,
-        label: &str,
-        value: &str,
-    ) {
+    fn render_detail_row(&self, rt: &mut RenderTree, x: f32, y: f32, label: &str, value: &str) {
         rt.push(RenderCommand::Text {
             x,
             y,
@@ -1774,11 +1858,7 @@ impl FileAssocUI {
             } else {
                 COLOR_SURFACE0
             };
-            let text_color = if is_selected {
-                COLOR_BASE
-            } else {
-                COLOR_TEXT
-            };
+            let text_color = if is_selected { COLOR_BASE } else { COLOR_TEXT };
 
             rt.push(RenderCommand::FillRect {
                 x: dx + 4.0,
@@ -1920,8 +2000,14 @@ mod tests {
 
     #[test]
     fn test_category_from_label() {
-        assert_eq!(FileCategory::from_label("documents"), Some(FileCategory::Documents));
-        assert_eq!(FileCategory::from_label("IMAGES"), Some(FileCategory::Images));
+        assert_eq!(
+            FileCategory::from_label("documents"),
+            Some(FileCategory::Documents)
+        );
+        assert_eq!(
+            FileCategory::from_label("IMAGES"),
+            Some(FileCategory::Images)
+        );
         assert_eq!(FileCategory::from_label("Audio"), Some(FileCategory::Audio));
         assert_eq!(FileCategory::from_label("unknown"), None);
     }
@@ -2271,7 +2357,10 @@ mod tests {
         );
         reg.register_app(AppInfo::new("imgapp", "Img", "/bin/img", &["png"], 1));
         let result = reg.set_default_app("txt", "imgapp");
-        assert!(matches!(result, Err(AssocError::UnsupportedExtension { .. })));
+        assert!(matches!(
+            result,
+            Err(AssocError::UnsupportedExtension { .. })
+        ));
     }
 
     #[test]
@@ -2424,10 +2513,7 @@ mod tests {
                 restored.is_some(),
                 "association for .{ext} was not restored"
             );
-            assert_eq!(
-                restored.map(|a| a.id.as_str()),
-                Some(assoc.app_id.as_str()),
-            );
+            assert_eq!(restored.map(|a| a.id.as_str()), Some(assoc.app_id.as_str()),);
         }
     }
 
@@ -2480,10 +2566,7 @@ mod tests {
         let filtered = ui.filtered_file_types();
         assert!(!filtered.is_empty());
         for ft in &filtered {
-            assert_eq!(
-                ui.registry.get_category(&ft.extension),
-                FileCategory::Code
-            );
+            assert_eq!(ui.registry.get_category(&ft.extension), FileCategory::Code);
         }
     }
 

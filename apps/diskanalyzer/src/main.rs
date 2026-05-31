@@ -239,6 +239,12 @@ pub struct ScanProgress {
     pub phase: ScanPhase,
 }
 
+impl Default for ScanProgress {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ScanProgress {
     pub fn new() -> Self {
         Self {
@@ -299,7 +305,7 @@ pub fn calculate_sizes(node: &mut FileNode) {
 pub fn find_largest(node: &FileNode, n: usize) -> Vec<(String, u64)> {
     let mut results: Vec<(String, u64)> = Vec::new();
     collect_all_entries(node, &mut results);
-    results.sort_by(|a, b| b.1.cmp(&a.1));
+    results.sort_by_key(|&(_, size)| std::cmp::Reverse(size));
     results.truncate(n);
     results
 }
@@ -402,7 +408,7 @@ pub fn compute_treemap(
 
     // Collect children sorted by size (descending).
     let mut children: Vec<&FileNode> = node.children.iter().collect();
-    children.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+    children.sort_by_key(|c| std::cmp::Reverse(c.size_bytes));
 
     // Filter out zero-size entries.
     let children: Vec<&FileNode> = children.into_iter().filter(|c| c.size_bytes > 0).collect();
@@ -413,14 +419,13 @@ pub fn compute_treemap(
     let sizes: Vec<f64> = children.iter().map(|c| c.size_bytes as f64).collect();
     let total: f64 = sizes.iter().sum();
 
-    squarify_layout(
-        &children, &sizes, total, x, y, width, height, &mut rects,
-    );
+    squarify_layout(&children, &sizes, total, x, y, width, height, &mut rects);
 
     rects
 }
 
 /// Squarified treemap recursive layout.
+#[allow(clippy::too_many_arguments)]
 fn squarify_layout(
     children: &[&FileNode],
     sizes: &[f64],
@@ -547,12 +552,7 @@ fn squarify_layout(
 }
 
 /// Compute the worst (largest) aspect ratio among items in a row.
-fn worst_aspect_in_row(
-    sizes: &[f64],
-    row_sum: f64,
-    full_length: f64,
-    row_cross: f64,
-) -> f64 {
+fn worst_aspect_in_row(sizes: &[f64], row_sum: f64, full_length: f64, row_cross: f64) -> f64 {
     let mut worst = 0.0f64;
     for &sz in sizes {
         let item_fraction = if row_sum > 0.0 { sz / row_sum } else { 0.0 };
@@ -591,8 +591,8 @@ fn color_for_extension(ext: &str) -> Color {
         // Documents
         "pdf" | "doc" | "docx" | "odt" | "txt" | "rtf" | "xls" | "xlsx" => COLOR_YELLOW,
         // Code
-        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "java" | "go" | "rb" | "toml"
-        | "json" | "yaml" | "xml" | "html" | "css" => COLOR_PEACH,
+        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "java" | "go" | "rb" | "toml" | "json"
+        | "yaml" | "xml" | "html" | "css" => COLOR_PEACH,
         // Archives
         "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" => COLOR_RED,
         // Audio
@@ -610,11 +610,7 @@ fn color_for_extension(ext: &str) -> Color {
 pub fn treemap_hit_test(rects: &[TreemapRect], mx: f32, my: f32) -> Option<usize> {
     // Iterate in reverse so the last-drawn (topmost) rect wins ties.
     for (i, rect) in rects.iter().enumerate().rev() {
-        if mx >= rect.x
-            && mx < rect.x + rect.width
-            && my >= rect.y
-            && my < rect.y + rect.height
-        {
+        if mx >= rect.x && mx < rect.x + rect.width && my >= rect.y && my < rect.y + rect.height {
             return Some(i);
         }
     }
@@ -662,7 +658,7 @@ pub fn compute_extension_stats(node: &FileNode) -> Vec<ExtensionStat> {
         .collect();
 
     // Sort by total size descending.
-    stats.sort_by(|a, b| b.total_size.cmp(&a.total_size));
+    stats.sort_by_key(|s| std::cmp::Reverse(s.total_size));
     stats
 }
 
@@ -778,7 +774,10 @@ fn flatten_node(
     } else {
         0.0
     };
-    let is_expanded = expanded_paths.contains(&node.path);
+    // The root (depth 0) is always expanded: after a scan `expanded_paths` is
+    // empty, and the user expects to see the top-level contents immediately
+    // rather than a single collapsed root row.
+    let is_expanded = node.depth == 0 || expanded_paths.contains(&node.path);
     rows.push(ListRow {
         name: node.name.clone(),
         path: node.path.clone(),
@@ -792,7 +791,7 @@ fn flatten_node(
 
     if is_expanded {
         let mut children: Vec<&FileNode> = node.children.iter().collect();
-        children.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
+        children.sort_by_key(|c| std::cmp::Reverse(c.size_bytes));
         for child in children {
             flatten_node(child, node.size_bytes, expanded_paths, rows);
         }
@@ -921,6 +920,12 @@ pub struct DiskAnalyzerUI {
     pub list_rows: Vec<ListRow>,
 }
 
+impl Default for DiskAnalyzerUI {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl DiskAnalyzerUI {
     /// Create a new UI with default state.
     pub fn new() -> Self {
@@ -959,11 +964,7 @@ impl DiskAnalyzerUI {
             PADDING,
             TOOLBAR_HEIGHT + BREADCRUMB_HEIGHT + PADDING,
             WINDOW_WIDTH - 2.0 * PADDING,
-            WINDOW_HEIGHT
-                - TOOLBAR_HEIGHT
-                - BREADCRUMB_HEIGHT
-                - STATUS_BAR_HEIGHT
-                - 2.0 * PADDING,
+            WINDOW_HEIGHT - TOOLBAR_HEIGHT - BREADCRUMB_HEIGHT - STATUS_BAR_HEIGHT - 2.0 * PADDING,
         );
         self.extension_stats = compute_extension_stats(&tree.root);
         self.breadcrumbs = vec![tree.root.name.clone()];
@@ -975,16 +976,8 @@ impl DiskAnalyzerUI {
 
     /// Refresh the list rows from the current tree.
     fn refresh_list(&mut self, tree: &DirTree) {
-        self.list_rows = flatten_tree(
-            &tree.root,
-            tree.total_size,
-            &self.expanded_paths,
-        );
-        sort_rows(
-            &mut self.list_rows,
-            self.sort_column,
-            self.sort_direction,
-        );
+        self.list_rows = flatten_tree(&tree.root, tree.total_size, &self.expanded_paths);
+        sort_rows(&mut self.list_rows, self.sort_column, self.sort_direction);
     }
 
     /// Toggle expansion of a path in the list view.
@@ -1008,11 +1001,7 @@ impl DiskAnalyzerUI {
             self.sort_column = column;
             self.sort_direction = SortDirection::Descending;
         }
-        sort_rows(
-            &mut self.list_rows,
-            self.sort_column,
-            self.sort_direction,
-        );
+        sort_rows(&mut self.list_rows, self.sort_column, self.sort_direction);
     }
 
     /// Handle mouse hover over the treemap at (mx, my).
@@ -1020,11 +1009,7 @@ impl DiskAnalyzerUI {
         self.hovered_rect = treemap_hit_test(&self.treemap_rects, mx, my);
         if let Some(idx) = self.hovered_rect {
             if let Some(rect) = self.treemap_rects.get(idx) {
-                self.tooltip_text = format!(
-                    "{}\n{}",
-                    rect.path,
-                    format_size(rect.size_bytes),
-                );
+                self.tooltip_text = format!("{}\n{}", rect.path, format_size(rect.size_bytes),);
                 self.tooltip_x = mx;
                 self.tooltip_y = my;
             }
@@ -1351,11 +1336,7 @@ impl DiskAnalyzerUI {
 
             // Expand/collapse indicator for directories
             let prefix = if row.has_children {
-                if row.is_expanded {
-                    "v "
-                } else {
-                    "> "
-                }
+                if row.is_expanded { "v " } else { "> " }
             } else {
                 "  "
             };
@@ -1645,7 +1626,11 @@ mod tests {
         let mut root = FileNode::new_dir("root", "/root");
 
         let mut docs = FileNode::new_dir("docs", "/root/docs");
-        docs.add_child(FileNode::new_file("readme.txt", "/root/docs/readme.txt", 1024));
+        docs.add_child(FileNode::new_file(
+            "readme.txt",
+            "/root/docs/readme.txt",
+            1024,
+        ));
         docs.add_child(FileNode::new_file("spec.pdf", "/root/docs/spec.pdf", 5120));
         root.add_child(docs);
 
@@ -1691,16 +1676,8 @@ mod tests {
         root.add_child(music);
 
         let mut code = FileNode::new_dir("code", "/home/code");
-        code.add_child(FileNode::new_file(
-            "app.rs",
-            "/home/code/app.rs",
-            10_000,
-        ));
-        code.add_child(FileNode::new_file(
-            "test.rs",
-            "/home/code/test.rs",
-            5_000,
-        ));
+        code.add_child(FileNode::new_file("app.rs", "/home/code/app.rs", 10_000));
+        code.add_child(FileNode::new_file("test.rs", "/home/code/test.rs", 5_000));
         code.add_child(FileNode::new_file(
             "data.json",
             "/home/code/data.json",
@@ -1713,11 +1690,7 @@ mod tests {
             "/home/archive.zip",
             200_000,
         ));
-        root.add_child(FileNode::new_file(
-            "photo.jpg",
-            "/home/photo.jpg",
-            150_000,
-        ));
+        root.add_child(FileNode::new_file("photo.jpg", "/home/photo.jpg", 150_000));
 
         root
     }
@@ -2247,11 +2220,7 @@ mod tests {
                 has_children: false,
             },
         ];
-        sort_rows(
-            &mut rows,
-            SortColumn::Percentage,
-            SortDirection::Ascending,
-        );
+        sort_rows(&mut rows, SortColumn::Percentage, SortDirection::Ascending);
         assert_eq!(rows[0].name, "b");
     }
 
@@ -2385,15 +2354,17 @@ mod tests {
     fn test_ui_toggle_expand() {
         let mut ui = DiskAnalyzerUI::new();
         ui.load_tree(sample_tree());
+        // The root is always expanded, so its immediate children (docs, src,
+        // logo.png) are visible from the start. Expanding a child directory
+        // reveals that directory's contents.
         let initial_rows = ui.list_rows.len();
-        // Expand root to show children.
-        ui.toggle_expand("/root");
-        assert!(ui.expanded_paths.contains(&"/root".to_string()));
+        ui.toggle_expand("/root/src");
+        assert!(ui.expanded_paths.contains(&"/root/src".to_string()));
         let expanded_rows = ui.list_rows.len();
         assert!(expanded_rows > initial_rows);
         // Collapse.
-        ui.toggle_expand("/root");
-        assert!(!ui.expanded_paths.contains(&"/root".to_string()));
+        ui.toggle_expand("/root/src");
+        assert!(!ui.expanded_paths.contains(&"/root/src".to_string()));
     }
 
     #[test]

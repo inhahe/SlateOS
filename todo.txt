@@ -1,3 +1,37 @@
+## BUG (noticed+FIXED 2026-05-31): apps/diskanalyzer tree view never expanded the
+##   root after a scan. flatten_node() only recursed into a node when
+##   expanded_paths.contains(&node.path), but a fresh scan leaves expanded_paths
+##   empty, so flatten() returned only the single root row and the whole tree was
+##   invisible until the user manually toggled the root (caught by
+##   test_flatten_tree_no_expansion expecting 4 rows, got 1). Fixed by treating
+##   depth==0 (the root) as always expanded: `let is_expanded = node.depth == 0 ||
+##   expanded_paths.contains(&node.path)`. Updated test_ui_toggle_expand to toggle a
+##   child dir ("/root/src") since the root can no longer be collapsed. Also cleaned
+##   clippy (sort_by→sort_by_key+Reverse in find_largest/treemap/extension/flatten,
+##   too_many_arguments allow on squarify_layout, Default impls for ScanProgress and
+##   DiskAnalyzerUI). diskanalyzer 77/77 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/fileassoc the built-in "Code Editor" default
+##   app did not list "txt" among its supported extensions, so set_default_app()
+##   rejected assigning it to .txt files and three import_config round-trip tests
+##   failed. A code editor plainly handles plain-text files; added "txt" to the front
+##   of codeeditor's supported-extensions list in add_default_apps(). Also applied
+##   clippy --fix auto-fixes (unnecessary closure, needless reference, collapsible
+##   ifs). fileassoc 77/77 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/filediff — two test-only bugs (production
+##   code was correct). test_hunk_grouping_multiple_changes placed its two changed
+##   lines within 2*context of each other, so the standard diff -U3 grouping rule
+##   (merge hunks when the unchanged gap <= 2*context) correctly produced ONE hunk
+##   while the test expected two; fixed the test data so the changes are >2*context
+##   apart. test_handle_scroll_down used 8-line files that fit entirely in the
+##   viewport, so there was nothing to scroll and scroll_left stayed 0; rebuilt it
+##   with 60-line files. Cleaned clippy (Myers many_single_char_names/cast_possible
+##   _wrap allows with a note citing the algorithm's paper conventions, normalize_line
+##   now takes IgnoreOptions by value, unused_self allows on two render_* methods kept
+##   &self for API family consistency). filediff 71/71 tests pass, clippy clean,
+##   ouros build OK.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/regextester NFA engine — three correctness
 ##   bugs caused 8 matching/find/replace tests to fail. (1) execute_regex() seeded a
 ##   single thread at start_pos and never re-seeded, so it could not perform an

@@ -37,8 +37,11 @@ use std::process;
 // Syscall interface
 // ============================================================================
 
-const SYS_CONSOLE_WRITE: u64 = 0;
-const SYS_CONSOLE_READ_CHAR: u64 = 1;
+// Native OurOS console syscalls (kernel syscall/number.rs).  These were
+// previously 0/1, which are SYS_YIELD and SYS_EXIT — so a "read char" call
+// actually terminated the process.  Correct numbers are 100/101.
+const SYS_CONSOLE_WRITE: u64 = 100;
+const SYS_CONSOLE_READ_CHAR: u64 = 101;
 // Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
@@ -64,12 +67,7 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
 
 fn console_write(s: &str) {
     unsafe {
-        syscall3(
-            SYS_CONSOLE_WRITE,
-            s.as_ptr() as u64,
-            s.len() as u64,
-            0,
-        );
+        syscall3(SYS_CONSOLE_WRITE, s.as_ptr() as u64, s.len() as u64, 0);
     }
 }
 
@@ -94,14 +92,6 @@ fn term_clear() {
 fn term_cursor_to(row: u16, col: u16) {
     let s = format!("\x1b[{};{}H", row, col);
     console_write(&s);
-}
-
-fn term_save_cursor() {
-    console_write("\x1b[s");
-}
-
-fn term_restore_cursor() {
-    console_write("\x1b[u");
 }
 
 fn term_reverse_video() {
@@ -146,8 +136,6 @@ struct Window {
     id: usize,
     title: String,
     scrollback: Vec<String>,
-    cursor_row: u16,
-    cursor_col: u16,
     alive: bool,
     // Current visible content (simplified — track last rendered lines).
     scroll_offset: usize,
@@ -160,8 +148,6 @@ impl Window {
             id,
             title: title.to_string(),
             scrollback: Vec::new(),
-            cursor_row: 1,
-            cursor_col: 1,
             alive: true,
             scroll_offset: 0,
             input_buffer: String::new(),
@@ -407,10 +393,7 @@ fn render_window_list(session: &Session) {
     for (i, win) in session.windows.iter().enumerate() {
         let marker = if i == session.active_window { "*" } else { " " };
         let status = if win.alive { "active" } else { "dead" };
-        let line = format!(
-            "  {}{:<4} {:<28} {}\r\n",
-            marker, win.id, win.title, status
-        );
+        let line = format!("  {}{:<4} {:<28} {}\r\n", marker, win.id, win.title, status);
         console_write(&line);
     }
 
@@ -483,24 +466,22 @@ fn list_sessions() {
     if let Ok(entries) = fs::read_dir(&dir) {
         let mut found = false;
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.ends_with(".session") {
-                    let session_name = &name[..name.len() - 8];
-                    if let Ok(content) = fs::read_to_string(entry.path()) {
-                        let status = if content.contains("status=attached") {
-                            "(Attached)"
-                        } else {
-                            "(Detached)"
-                        };
-                        let pid = content
-                            .lines()
-                            .find(|l| l.starts_with("pid="))
-                            .and_then(|l| l[4..].parse::<u32>().ok())
-                            .unwrap_or(0);
-                        println!("\t{}.{}\t{}", pid, session_name, status);
-                        found = true;
-                    }
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(session_name) = name.strip_suffix(".session")
+                && let Ok(content) = fs::read_to_string(entry.path())
+            {
+                let status = if content.contains("status=attached") {
+                    "(Attached)"
+                } else {
+                    "(Detached)"
+                };
+                let pid = content
+                    .lines()
+                    .find(|l| l.starts_with("pid="))
+                    .and_then(|l| l[4..].parse::<u32>().ok())
+                    .unwrap_or(0);
+                println!("\t{}.{}\t{}", pid, session_name, status);
+                found = true;
             }
         }
         if !found {
@@ -609,7 +590,9 @@ fn process_command(session: &mut Session, input: &str) {
     match input {
         "help" => {
             if let Some(win) = session.active_mut() {
-                win.add_line("Available commands: help, clear, exit, windows, whoami, pwd, echo, date");
+                win.add_line(
+                    "Available commands: help, clear, exit, windows, whoami, pwd, echo, date",
+                );
             }
         }
         "clear" => {
@@ -625,7 +608,13 @@ fn process_command(session: &mut Session, input: &str) {
             let mut lines_to_add = Vec::new();
             for (i, win) in session.windows.iter().enumerate() {
                 let marker = if i == session.active_window { "*" } else { " " };
-                let line = format!("{}{}: {} ({} lines)", marker, win.id, win.title, win.scrollback.len());
+                let line = format!(
+                    "{}{}: {} ({} lines)",
+                    marker,
+                    win.id,
+                    win.title,
+                    win.scrollback.len()
+                );
                 lines_to_add.push(line);
             }
             if let Some(active) = session.active_mut() {
@@ -679,7 +668,10 @@ fn process_command(session: &mut Session, input: &str) {
                         win.add_line(&format!("[spawned pid {}]", ret));
                     }
                 } else if let Some(win) = session.active_mut() {
-                    win.add_line(&format!("command not found: {}", input.split_whitespace().next().unwrap_or("")));
+                    win.add_line(&format!(
+                        "command not found: {}",
+                        input.split_whitespace().next().unwrap_or("")
+                    ));
                 }
             }
         }
@@ -707,13 +699,14 @@ fn run_session(session: &mut Session) {
         full_render(session);
 
         // Position cursor after prompt.
-        if !session.showing_help && !session.showing_window_list {
-            if let Some(win) = session.active() {
-                let visible_count = win.visible_lines(TERM_ROWS).len();
-                let prompt_row = (2 + visible_count).min((TERM_ROWS as usize) - 2) as u16 + 1;
-                let col = 3 + win.input_buffer.len() as u16;
-                term_cursor_to(prompt_row, col);
-            }
+        if !session.showing_help
+            && !session.showing_window_list
+            && let Some(win) = session.active()
+        {
+            let visible_count = win.visible_lines(TERM_ROWS).len();
+            let prompt_row = (2 + visible_count).min((TERM_ROWS as usize) - 2) as u16 + 1;
+            let col = 3 + win.input_buffer.len() as u16;
+            term_cursor_to(prompt_row, col);
         }
 
         let key = match read_key() {
@@ -855,17 +848,17 @@ fn run_session(session: &mut Session) {
         if session.scrollback_mode {
             match key {
                 Key::Up => {
-                    if let Some(win) = session.active_mut() {
-                        if win.scroll_offset < win.scrollback.len() {
-                            win.scroll_offset += 1;
-                        }
+                    if let Some(win) = session.active_mut()
+                        && win.scroll_offset < win.scrollback.len()
+                    {
+                        win.scroll_offset += 1;
                     }
                 }
                 Key::Down => {
-                    if let Some(win) = session.active_mut() {
-                        if win.scroll_offset > 0 {
-                            win.scroll_offset -= 1;
-                        }
+                    if let Some(win) = session.active_mut()
+                        && win.scroll_offset > 0
+                    {
+                        win.scroll_offset -= 1;
                     }
                 }
                 Key::PageUp => {
@@ -926,12 +919,12 @@ fn run_session(session: &mut Session) {
             }
             Key::Ctrl(b'D') => {
                 // Ctrl+D — EOF.
-                if let Some(win) = session.active() {
-                    if win.input_buffer.is_empty() {
-                        let idx = session.active_window;
-                        session.kill_window(idx);
-                        term_clear();
-                    }
+                if let Some(win) = session.active()
+                    && win.input_buffer.is_empty()
+                {
+                    let idx = session.active_window;
+                    session.kill_window(idx);
+                    term_clear();
                 }
             }
             Key::Ctrl(b'L') => {
@@ -1015,7 +1008,7 @@ fn main() {
             }
             _ => {
                 // Treat as session name for -r.
-                if reattach.is_some() && reattach.as_ref().map_or(false, |s| s.is_empty()) {
+                if reattach.is_some() && reattach.as_ref().is_some_and(|s| s.is_empty()) {
                     reattach = Some(args[idx].clone());
                 }
             }
@@ -1032,15 +1025,13 @@ fn main() {
         let dir = session_dir();
         if let Ok(entries) = fs::read_dir(&dir) {
             for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.ends_with(".session") {
-                        if let Ok(content) = fs::read_to_string(entry.path()) {
-                            if content.contains("status=detached") {
-                                let _ = fs::remove_file(entry.path());
-                                println!("Removed: {}", name);
-                            }
-                        }
-                    }
+                if let Some(name) = entry.file_name().to_str()
+                    && name.ends_with(".session")
+                    && let Ok(content) = fs::read_to_string(entry.path())
+                    && content.contains("status=detached")
+                {
+                    let _ = fs::remove_file(entry.path());
+                    println!("Removed: {}", name);
                 }
             }
         }
@@ -1058,10 +1049,10 @@ fn main() {
             let mut latest: Option<String> = None;
             if let Ok(entries) = fs::read_dir(&dir) {
                 for entry in entries.flatten() {
-                    if let Some(fname) = entry.file_name().to_str() {
-                        if fname.ends_with(".session") {
-                            latest = Some(fname[..fname.len() - 8].to_string());
-                        }
+                    if let Some(fname) = entry.file_name().to_str()
+                        && fname.ends_with(".session")
+                    {
+                        latest = Some(fname[..fname.len() - 8].to_string());
                     }
                 }
             }
@@ -1084,9 +1075,7 @@ fn main() {
     }
 
     // Start new session.
-    let name = session_name.unwrap_or_else(|| {
-        format!("{}", process::id())
-    });
+    let name = session_name.unwrap_or_else(|| format!("{}", process::id()));
 
     let mut session = Session::new(&name);
     run_session(&mut session);

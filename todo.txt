@@ -1,3 +1,17 @@
+## BUG (noticed+FIXED 2026-05-31): gui/toolkit Color::over() integer overflow.
+##   color.rs alpha-compositing computed `channel as u16 * da * inv_sa` which
+##   peaks at 255*255*255 ≈ 16.6M and overflowed u16 → debug panic (caught by
+##   paint's test_pixel_buffer_blend). Rewrote with u32 intermediates and a
+##   precomputed destination-alpha contribution (da*inv_sa/255); numerators now
+##   peak at ~130k, well within u32. guitk 598/598 + paint 155/155 tests pass.
+##
+## BUG (noticed+FIXED 2026-05-31, test-only): apps/paint test_pixel_buffer_
+##   rotate_90_ccw expected the wrong destination. It set BLUE at the top-right
+##   (2,0) of a 3x2 buffer and expected it at (0,2), but a correct 90° CCW
+##   rotation sends the top-right corner to the top-left (0,0) — verified
+##   against the (passing, correct) CW test and physical rotation semantics.
+##   Production rotate_90_ccw is correct; fixed the test's expected coordinate.
+##
 ## BUG (noticed+FIXED 2026-05-31, test-only): apps/dbviewer
 ##   test_current_table_data_with_filter used filter_op_idx = 4 with the comment
 ##   "// GreaterOrEqual", but FilterOp::all()[4] is LessOrEqual (GreaterOrEqual

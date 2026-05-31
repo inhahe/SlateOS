@@ -36,18 +36,26 @@ impl Color {
             return below;
         }
 
-        let sa = self.a as u16;
-        let da = below.a as u16;
+        // Use u32 for the intermediates: a naive `channel * da * inv_sa` can
+        // reach 255*255*255 ≈ 16.6M, which overflows u16 and panics in debug.
+        let sa = self.a as u32;
+        let da = below.a as u32;
         let inv_sa = 255 - sa;
 
-        let out_a = sa + (da * inv_sa) / 255;
+        // Destination alpha contribution once covered by the source (0..=255).
+        let da_contrib = da * inv_sa / 255;
+        let out_a = sa + da_contrib;
         if out_a == 0 {
             return Color::TRANSPARENT;
         }
 
-        let r = ((self.r as u16 * sa + below.r as u16 * da * inv_sa / 255) / out_a) as u8;
-        let g = ((self.g as u16 * sa + below.g as u16 * da * inv_sa / 255) / out_a) as u8;
-        let b = ((self.b as u16 * sa + below.b as u16 * da * inv_sa / 255) / out_a) as u8;
+        // Numerator peaks at 255*255 + 255*255 = 130_050, well within u32.
+        let blend = |src: u8, dst: u8| -> u8 {
+            ((src as u32 * sa + dst as u32 * da_contrib) / out_a) as u8
+        };
+        let r = blend(self.r, below.r);
+        let g = blend(self.g, below.g);
+        let b = blend(self.b, below.b);
 
         Color::rgba(r, g, b, out_a as u8)
     }

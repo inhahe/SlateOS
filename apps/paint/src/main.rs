@@ -4321,7 +4321,9 @@ mod tests {
         let rotated = buf.rotate_90_ccw();
         assert_eq!(rotated.width, 2);
         assert_eq!(rotated.height, 3);
-        assert_eq!(rotated.get_pixel(0, 2).unwrap(), Color::BLUE);
+        // 90° CCW sends the top-right corner (2,0) of the 3x2 source to the
+        // top-left corner (0,0) of the 2x3 result.
+        assert_eq!(rotated.get_pixel(0, 0).unwrap(), Color::BLUE);
     }
 
     #[test]

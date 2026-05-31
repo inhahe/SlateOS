@@ -1,3 +1,45 @@
+## BUG (noticed+FIXED 2026-05-31): apps/settings — search robustness bug. matches_search
+##   did a plain lowercase substring test, so the query "wifi" did NOT match the page
+##   label "Wi-Fi" (the hyphen broke the substring), and filtered_categories therefore
+##   omitted Network. Made matching punctuation/whitespace-insensitive: if the raw
+##   substring test fails, retry with all non-alphanumeric chars stripped from both the
+##   query and the label (so "wifi" matches "Wi-Fi", "nightlight" matches "Night Light").
+##   An all-punctuation query (strips to empty) is treated as no-match rather than
+##   matching everything. settings 114/114 tests pass, clippy clean (own code), ouros OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/pinball — PRODUCTION combo-scoring bug. award_points
+##   tracked the last scoring time in a u64 initialized to 0 and always took the "within
+##   combo window" branch on the FIRST hit (since total_ms - 0 <= window), so the very
+##   first hit was scored at x2 and the combo counter started at 2. Tests expect the
+##   first hit at x1 (comment: "First: 100*1=100, Second: 100*2=200"). Changed
+##   last_score_ms to Option<u64> (None = no prior scoring event) so the first hit, or
+##   one after the window lapses, starts a fresh x1 combo and only consecutive in-window
+##   hits increment. pinball 120/120 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/netmanager — wrong-expectation test bug.
+##   test_add_dns_server_valid added "1.1.1.1", but the default edit_ip_config is seeded
+##   from the first sample interface whose dns_servers already include 1.1.1.1, so
+##   add_dns_server correctly rejected the duplicate (Err). Production duplicate-rejection
+##   is correct; changed the test to add 9.9.9.9 (valid, not already present).
+##   netmanager 78/78 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/musicplayer — wrong-expectation test bug.
+##   test_wav_header_parsing built a WAV with an 88200-byte data chunk and asserted a
+##   1.0s duration, but at 44100 Hz / 2ch / 16-bit the byte rate is 176400 B/s, so 88200
+##   bytes is 0.5s (parse_wav_header computed 0.5 correctly). Fixed the test data to use
+##   176400 bytes (and matching RIFF size) for a true 1 second. musicplayer 25/25 tests
+##   pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/logviewer — wrong-expectation test bug PLUS a
+##   pre-existing clippy-deny break. (1) test_app_search_navigation searched for "info"
+##   and expected matches, but update_search is a text search over message + source
+##   (levels are handled by the level filter), and no sample message/source contains
+##   "info" — it's only a level. Changed the query to "net" (source of several entries)
+##   and the assert to count > 1 so next/prev wrap is exercised. (2) logviewer denies
+##   clippy::pedantic and had 10 pre-existing clippy errors (or-patterns, doc backticks,
+##   collapsible-if x6, sort_by_key); fixed all (clippy --fix for 9, manual sort_by_key
+##   with core::cmp::Reverse). logviewer 43/43 tests pass, clippy clean, ouros build OK.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/imageviewer — PRODUCTION navigation bug +
 ##   inefficiency. load_current_entry (called by next/prev/first/last_image and the
 ##   slideshow tick) delegated to open_file, which RE-SCANS and re-sorts the on-disk

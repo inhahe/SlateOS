@@ -578,7 +578,11 @@ impl NetManagerApp {
         if !is_valid_ipv4(server) {
             return Err(format!("Invalid DNS address: {server}"));
         }
-        if self.edit_ip_config.dns_servers.contains(&server.to_string()) {
+        if self
+            .edit_ip_config
+            .dns_servers
+            .contains(&server.to_string())
+        {
             return Err("DNS server already in list".into());
         }
         self.edit_ip_config.dns_servers.push(server.to_string());
@@ -655,11 +659,7 @@ impl NetManagerApp {
         self.vpn_states[index] = new_state;
 
         if let Some(vpn) = self.vpn_configs.get(index) {
-            self.status_message = format!(
-                "VPN '{}' {}",
-                vpn.name,
-                self.vpn_states[index].label()
-            );
+            self.status_message = format!("VPN '{}' {}", vpn.name, self.vpn_states[index].label());
         }
         Ok(())
     }
@@ -838,10 +838,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &NetManagerApp) {
     }
 
     // Enable/Disable toggle on the right side
-    let toggle_label = if app
-        .selected_iface()
-        .map_or(false, |iface| iface.enabled)
-    {
+    let toggle_label = if app.selected_iface().map_or(false, |iface| iface.enabled) {
         "Disable"
     } else {
         "Enable"
@@ -1068,13 +1065,7 @@ fn render_tab_bar(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, 
 }
 
 /// Render the Properties tab content.
-fn render_tab_properties(
-    tree: &mut RenderTree,
-    app: &NetManagerApp,
-    px: f32,
-    py: f32,
-    pw: f32,
-) {
+fn render_tab_properties(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let Some(iface) = app.selected_iface() else {
         render_no_selection(tree, px, py, pw);
         return;
@@ -1153,13 +1144,7 @@ fn render_tab_properties(
 }
 
 /// Render the IP Config tab content.
-fn render_tab_ip_config(
-    tree: &mut RenderTree,
-    app: &NetManagerApp,
-    px: f32,
-    py: f32,
-    pw: f32,
-) {
+fn render_tab_ip_config(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let Some(_iface) = app.selected_iface() else {
         render_no_selection(tree, px, py, pw);
         return;
@@ -1218,13 +1203,7 @@ fn render_tab_ip_config(
 }
 
 /// Render the DNS tab content.
-fn render_tab_dns(
-    tree: &mut RenderTree,
-    app: &NetManagerApp,
-    px: f32,
-    py: f32,
-    pw: f32,
-) {
+fn render_tab_dns(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let Some(_iface) = app.selected_iface() else {
         render_no_selection(tree, px, py, pw);
         return;
@@ -1346,13 +1325,7 @@ fn render_tab_dns(
 }
 
 /// Render the WiFi tab content.
-fn render_tab_wifi(
-    tree: &mut RenderTree,
-    app: &NetManagerApp,
-    px: f32,
-    py: f32,
-    pw: f32,
-) {
+fn render_tab_wifi(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let mut y = py + SECTION_PADDING;
     let lx = px + SECTION_PADDING;
 
@@ -1454,13 +1427,7 @@ fn render_signal_bars(tree: &mut RenderTree, bars: u8, x: f32, y: f32) {
 }
 
 /// Render the VPN tab content.
-fn render_tab_vpn(
-    tree: &mut RenderTree,
-    app: &NetManagerApp,
-    px: f32,
-    py: f32,
-    pw: f32,
-) {
+fn render_tab_vpn(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let mut y = py + SECTION_PADDING;
     let lx = px + SECTION_PADDING;
 
@@ -1480,7 +1447,11 @@ fn render_tab_vpn(
     }
 
     for (i, vpn) in app.vpn_configs.iter().enumerate() {
-        let state = app.vpn_states.get(i).cloned().unwrap_or(ConnectionState::Disconnected);
+        let state = app
+            .vpn_states
+            .get(i)
+            .cloned()
+            .unwrap_or(ConnectionState::Disconnected);
         let item_y = y;
 
         // Card background
@@ -1553,13 +1524,7 @@ fn render_tab_vpn(
 }
 
 /// Render the Profiles tab content.
-fn render_tab_profiles(
-    tree: &mut RenderTree,
-    app: &NetManagerApp,
-    px: f32,
-    py: f32,
-    pw: f32,
-) {
+fn render_tab_profiles(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let mut y = py + SECTION_PADDING;
     let lx = px + SECTION_PADDING;
 
@@ -1653,13 +1618,7 @@ fn render_tab_profiles(
 }
 
 /// Render the Traffic tab content with a simple bar chart.
-fn render_tab_traffic(
-    tree: &mut RenderTree,
-    app: &NetManagerApp,
-    px: f32,
-    py: f32,
-    pw: f32,
-) {
+fn render_tab_traffic(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let Some(iface) = app.selected_iface() else {
         render_no_selection(tree, px, py, pw);
         return;
@@ -1803,13 +1762,7 @@ fn render_tab_traffic(
 }
 
 /// Render the Diagnostics tab content.
-fn render_tab_diagnostics(
-    tree: &mut RenderTree,
-    app: &NetManagerApp,
-    px: f32,
-    py: f32,
-    pw: f32,
-) {
+fn render_tab_diagnostics(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py: f32, pw: f32) {
     let mut y = py + SECTION_PADDING;
     let lx = px + SECTION_PADDING;
 
@@ -1965,14 +1918,7 @@ fn render_section_title(tree: &mut RenderTree, title: &str, x: f32, y: f32) -> f
 }
 
 /// Render a label-value field row.
-fn render_field_row(
-    tree: &mut RenderTree,
-    label: &str,
-    value: &str,
-    lx: f32,
-    vx: f32,
-    y: f32,
-) {
+fn render_field_row(tree: &mut RenderTree, label: &str, value: &str, lx: f32, vx: f32, y: f32) {
     tree.push(RenderCommand::Text {
         x: lx,
         y,
@@ -2204,11 +2150,7 @@ fn sample_interfaces() -> Vec<NetworkInterface> {
                 ip_address: "192.168.1.100".into(),
                 subnet_mask: "255.255.255.0".into(),
                 gateway: "192.168.1.1".into(),
-                dns_servers: vec![
-                    "8.8.8.8".into(),
-                    "8.8.4.4".into(),
-                    "1.1.1.1".into(),
-                ],
+                dns_servers: vec!["8.8.8.8".into(), "8.8.4.4".into(), "1.1.1.1".into()],
                 dhcp_enabled: true,
             },
             state: ConnectionState::Connected,
@@ -2466,10 +2408,7 @@ mod tests {
         assert_eq!(ConnectionState::Connected.label(), "Connected");
         assert_eq!(ConnectionState::Disconnected.label(), "Disconnected");
         assert_eq!(ConnectionState::Connecting.label(), "Connecting...");
-        assert_eq!(
-            ConnectionState::Error("fail".into()).label(),
-            "Error",
-        );
+        assert_eq!(ConnectionState::Error("fail".into()).label(), "Error",);
     }
 
     #[test]
@@ -2882,7 +2821,9 @@ mod tests {
     fn test_add_dns_server_valid() {
         let mut app = NetManagerApp::new();
         let before = app.edit_ip_config.dns_servers.len();
-        assert!(app.add_dns_server("1.1.1.1").is_ok());
+        // Use an address NOT already in the default config (which seeds 8.8.8.8,
+        // 8.8.4.4 and 1.1.1.1); add_dns_server correctly rejects duplicates.
+        assert!(app.add_dns_server("9.9.9.9").is_ok());
         assert_eq!(app.edit_ip_config.dns_servers.len(), before + 1);
     }
 
@@ -3105,9 +3046,9 @@ mod tests {
         let app = NetManagerApp::new();
         let tree = render_app(&app);
         // Should contain the title text
-        let has_title = tree.commands.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "Network Connections")
-        });
+        let has_title = tree.commands.iter().any(
+            |cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Network Connections"),
+        );
         assert!(has_title);
     }
 
@@ -3115,9 +3056,10 @@ mod tests {
     fn test_render_has_interface_names() {
         let app = NetManagerApp::new();
         let tree = render_app(&app);
-        let has_eth = tree.commands.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "Ethernet 1")
-        });
+        let has_eth = tree
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text == "Ethernet 1"));
         assert!(has_eth);
     }
 
@@ -3142,9 +3084,10 @@ mod tests {
         app.run_diagnostics();
         app.set_tab(DetailTab::Diagnostics);
         let tree = render_app(&app);
-        let has_ping = tree.commands.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Ping"))
-        });
+        let has_ping = tree
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Text { text, .. } if text.contains("Ping")));
         assert!(has_ping);
     }
 
@@ -3155,9 +3098,15 @@ mod tests {
         let ifaces = sample_interfaces();
         assert!(ifaces.len() >= 4);
         // Should have at least one of each major type
-        let has_eth = ifaces.iter().any(|i| i.interface_type == InterfaceType::Ethernet);
-        let has_wifi = ifaces.iter().any(|i| i.interface_type == InterfaceType::WiFi);
-        let has_vpn = ifaces.iter().any(|i| i.interface_type == InterfaceType::VPN);
+        let has_eth = ifaces
+            .iter()
+            .any(|i| i.interface_type == InterfaceType::Ethernet);
+        let has_wifi = ifaces
+            .iter()
+            .any(|i| i.interface_type == InterfaceType::WiFi);
+        let has_vpn = ifaces
+            .iter()
+            .any(|i| i.interface_type == InterfaceType::VPN);
         assert!(has_eth);
         assert!(has_wifi);
         assert!(has_vpn);

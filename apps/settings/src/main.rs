@@ -16,7 +16,9 @@ mod snapshots;
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 #[allow(unused_imports)]
 use guitk::layout::{FlexAlign, FlexDirection, FlexWrap, Size};
 #[allow(unused_imports)]
@@ -178,14 +180,8 @@ impl SettingsCategory {
                 SettingsPage::StartupApps,
                 SettingsPage::InstalledApps,
             ],
-            Self::Accounts => &[
-                SettingsPage::UserAccounts,
-                SettingsPage::LoginOptions,
-            ],
-            Self::Privacy => &[
-                SettingsPage::Permissions,
-                SettingsPage::Capabilities,
-            ],
+            Self::Accounts => &[SettingsPage::UserAccounts, SettingsPage::LoginOptions],
+            Self::Privacy => &[SettingsPage::Permissions, SettingsPage::Capabilities],
             Self::Accessibility => &[
                 SettingsPage::Visual,
                 SettingsPage::Audio,
@@ -774,7 +770,7 @@ impl SettingsState {
             window_height: 800.0,
 
             // Display defaults
-            resolution_index: 2, // 1920x1080
+            resolution_index: 2,   // 1920x1080
             refresh_rate_index: 1, // 60 Hz
             scale: ScalePercent::S100,
             night_light_enabled: false,
@@ -783,25 +779,56 @@ impl SettingsState {
 
             // Sound defaults
             output_devices: vec![
-                AudioDevice { name: "Speakers (Built-in)".into(), is_default: true },
-                AudioDevice { name: "HDMI Audio Output".into(), is_default: false },
-                AudioDevice { name: "Bluetooth Headphones".into(), is_default: false },
+                AudioDevice {
+                    name: "Speakers (Built-in)".into(),
+                    is_default: true,
+                },
+                AudioDevice {
+                    name: "HDMI Audio Output".into(),
+                    is_default: false,
+                },
+                AudioDevice {
+                    name: "Bluetooth Headphones".into(),
+                    is_default: false,
+                },
             ],
             output_device_index: 0,
             output_volume: 75,
             output_muted: false,
             input_devices: vec![
-                AudioDevice { name: "Microphone (Built-in)".into(), is_default: true },
-                AudioDevice { name: "USB Microphone".into(), is_default: false },
+                AudioDevice {
+                    name: "Microphone (Built-in)".into(),
+                    is_default: true,
+                },
+                AudioDevice {
+                    name: "USB Microphone".into(),
+                    is_default: false,
+                },
             ],
             input_device_index: 0,
             input_volume: 80,
             system_sounds_enabled: true,
             app_volumes: vec![
-                AppVolume { app_name: "System".into(), volume: 100, muted: false },
-                AppVolume { app_name: "Browser".into(), volume: 85, muted: false },
-                AppVolume { app_name: "Music Player".into(), volume: 60, muted: false },
-                AppVolume { app_name: "Video Player".into(), volume: 90, muted: false },
+                AppVolume {
+                    app_name: "System".into(),
+                    volume: 100,
+                    muted: false,
+                },
+                AppVolume {
+                    app_name: "Browser".into(),
+                    volume: 85,
+                    muted: false,
+                },
+                AppVolume {
+                    app_name: "Music Player".into(),
+                    volume: 60,
+                    muted: false,
+                },
+                AppVolume {
+                    app_name: "Video Player".into(),
+                    volume: 90,
+                    muted: false,
+                },
             ],
 
             // Personalization defaults
@@ -874,29 +901,74 @@ impl SettingsState {
             // Privacy defaults
             location_enabled: true,
             location_apps: vec![
-                AppPermission { app_name: "Maps".into(), allowed: true },
-                AppPermission { app_name: "Weather".into(), allowed: true },
-                AppPermission { app_name: "Camera".into(), allowed: false },
-                AppPermission { app_name: "Browser".into(), allowed: true },
+                AppPermission {
+                    app_name: "Maps".into(),
+                    allowed: true,
+                },
+                AppPermission {
+                    app_name: "Weather".into(),
+                    allowed: true,
+                },
+                AppPermission {
+                    app_name: "Camera".into(),
+                    allowed: false,
+                },
+                AppPermission {
+                    app_name: "Browser".into(),
+                    allowed: true,
+                },
             ],
             camera_enabled: true,
             camera_apps: vec![
-                AppPermission { app_name: "Video Chat".into(), allowed: true },
-                AppPermission { app_name: "Browser".into(), allowed: true },
-                AppPermission { app_name: "Social Media".into(), allowed: false },
+                AppPermission {
+                    app_name: "Video Chat".into(),
+                    allowed: true,
+                },
+                AppPermission {
+                    app_name: "Browser".into(),
+                    allowed: true,
+                },
+                AppPermission {
+                    app_name: "Social Media".into(),
+                    allowed: false,
+                },
             ],
             microphone_enabled: true,
             microphone_apps: vec![
-                AppPermission { app_name: "Video Chat".into(), allowed: true },
-                AppPermission { app_name: "Voice Recorder".into(), allowed: true },
-                AppPermission { app_name: "Browser".into(), allowed: false },
+                AppPermission {
+                    app_name: "Video Chat".into(),
+                    allowed: true,
+                },
+                AppPermission {
+                    app_name: "Voice Recorder".into(),
+                    allowed: true,
+                },
+                AppPermission {
+                    app_name: "Browser".into(),
+                    allowed: false,
+                },
             ],
             background_apps: vec![
-                AppPermission { app_name: "Email".into(), allowed: true },
-                AppPermission { app_name: "Music Player".into(), allowed: true },
-                AppPermission { app_name: "Updater".into(), allowed: true },
-                AppPermission { app_name: "Social Media".into(), allowed: false },
-                AppPermission { app_name: "News Reader".into(), allowed: false },
+                AppPermission {
+                    app_name: "Email".into(),
+                    allowed: true,
+                },
+                AppPermission {
+                    app_name: "Music Player".into(),
+                    allowed: true,
+                },
+                AppPermission {
+                    app_name: "Updater".into(),
+                    allowed: true,
+                },
+                AppPermission {
+                    app_name: "Social Media".into(),
+                    allowed: false,
+                },
+                AppPermission {
+                    app_name: "News Reader".into(),
+                    allowed: false,
+                },
             ],
             diagnostic_level: DiagnosticLevel::Basic,
 
@@ -1007,7 +1079,15 @@ fn text_clipped(
 /// Render a toggle switch (on/off).
 fn render_toggle(tree: &mut RenderTree, x: f32, y: f32, enabled: bool) {
     let track_color = if enabled { COL_GREEN } else { COL_SURFACE2 };
-    fill_rounded(tree, x, y, TOGGLE_WIDTH, TOGGLE_HEIGHT, track_color, TOGGLE_HEIGHT / 2.0);
+    fill_rounded(
+        tree,
+        x,
+        y,
+        TOGGLE_WIDTH,
+        TOGGLE_HEIGHT,
+        track_color,
+        TOGGLE_HEIGHT / 2.0,
+    );
 
     // Handle circle
     let handle_margin = 3.0;
@@ -1018,7 +1098,15 @@ fn render_toggle(tree: &mut RenderTree, x: f32, y: f32, enabled: bool) {
         x + handle_margin
     };
     let handle_y = y + handle_margin;
-    fill_rounded(tree, handle_x, handle_y, handle_diameter, handle_diameter, COL_TEXT, handle_diameter / 2.0);
+    fill_rounded(
+        tree,
+        handle_x,
+        handle_y,
+        handle_diameter,
+        handle_diameter,
+        COL_TEXT,
+        handle_diameter / 2.0,
+    );
 }
 
 /// Render a horizontal slider at the given position.
@@ -1027,12 +1115,28 @@ fn render_slider(tree: &mut RenderTree, x: f32, y: f32, value: f32) {
     let track_y = y + (ITEM_HEIGHT - SLIDER_HEIGHT) / 2.0;
 
     // Track background
-    fill_rounded(tree, x, track_y, SLIDER_WIDTH, SLIDER_HEIGHT, COL_SURFACE2, SLIDER_HEIGHT / 2.0);
+    fill_rounded(
+        tree,
+        x,
+        track_y,
+        SLIDER_WIDTH,
+        SLIDER_HEIGHT,
+        COL_SURFACE2,
+        SLIDER_HEIGHT / 2.0,
+    );
 
     // Filled portion
     let fill_width = SLIDER_WIDTH * value.clamp(0.0, 1.0);
     if fill_width > 0.5 {
-        fill_rounded(tree, x, track_y, fill_width, SLIDER_HEIGHT, COL_ACCENT, SLIDER_HEIGHT / 2.0);
+        fill_rounded(
+            tree,
+            x,
+            track_y,
+            fill_width,
+            SLIDER_HEIGHT,
+            COL_ACCENT,
+            SLIDER_HEIGHT / 2.0,
+        );
     }
 
     // Handle
@@ -1064,13 +1168,7 @@ fn render_setting_row(
 }
 
 /// Render a dropdown button (closed state).
-fn render_dropdown_button(
-    tree: &mut RenderTree,
-    x: f32,
-    y: f32,
-    label: &str,
-    width: f32,
-) {
+fn render_dropdown_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, width: f32) {
     fill_rounded(tree, x, y + 6.0, width, 32.0, COL_SURFACE1, 6.0);
     tree.push(RenderCommand::StrokeRect {
         x,
@@ -1081,7 +1179,15 @@ fn render_dropdown_button(
         line_width: 1.0,
         corner_radii: CornerRadii::all(6.0),
     });
-    text_clipped(tree, x + 10.0, y + 16.0, label, COL_TEXT, 13.0, width - 30.0);
+    text_clipped(
+        tree,
+        x + 10.0,
+        y + 16.0,
+        label,
+        COL_TEXT,
+        13.0,
+        width - 30.0,
+    );
     // Down arrow indicator
     tree.text(x + width - 20.0, y + 16.0, "\u{25BC}", COL_SUBTEXT0, 10.0);
 }
@@ -1150,9 +1256,23 @@ impl SettingsState {
 
         // Search bar
         let search_y = HEADER_HEIGHT;
-        fill_rounded(tree, 12.0, search_y, SIDEBAR_WIDTH - 24.0, SEARCH_BAR_HEIGHT, COL_SURFACE0, 8.0);
+        fill_rounded(
+            tree,
+            12.0,
+            search_y,
+            SIDEBAR_WIDTH - 24.0,
+            SEARCH_BAR_HEIGHT,
+            COL_SURFACE0,
+            8.0,
+        );
         if self.search_query.is_empty() {
-            tree.text(24.0, search_y + 12.0, "\u{1F50D} Search settings...", COL_OVERLAY0, 13.0);
+            tree.text(
+                24.0,
+                search_y + 12.0,
+                "\u{1F50D} Search settings...",
+                COL_OVERLAY0,
+                13.0,
+            );
         } else {
             text_clipped(
                 tree,
@@ -1174,15 +1294,45 @@ impl SettingsState {
 
             // Background highlight
             if is_selected {
-                fill_rounded(tree, 8.0, item_y, SIDEBAR_WIDTH - 16.0, CATEGORY_ITEM_HEIGHT - 4.0, COL_SURFACE0, 8.0);
+                fill_rounded(
+                    tree,
+                    8.0,
+                    item_y,
+                    SIDEBAR_WIDTH - 16.0,
+                    CATEGORY_ITEM_HEIGHT - 4.0,
+                    COL_SURFACE0,
+                    8.0,
+                );
                 // Accent bar on the left
-                fill_rounded(tree, 4.0, item_y + 8.0, 3.0, CATEGORY_ITEM_HEIGHT - 20.0, COL_ACCENT, 2.0);
+                fill_rounded(
+                    tree,
+                    4.0,
+                    item_y + 8.0,
+                    3.0,
+                    CATEGORY_ITEM_HEIGHT - 20.0,
+                    COL_ACCENT,
+                    2.0,
+                );
             } else if is_hovered {
-                fill_rounded(tree, 8.0, item_y, SIDEBAR_WIDTH - 16.0, CATEGORY_ITEM_HEIGHT - 4.0, COL_SURFACE1, 8.0);
+                fill_rounded(
+                    tree,
+                    8.0,
+                    item_y,
+                    SIDEBAR_WIDTH - 16.0,
+                    CATEGORY_ITEM_HEIGHT - 4.0,
+                    COL_SURFACE1,
+                    8.0,
+                );
             }
 
             // Icon
-            tree.text(24.0, item_y + 12.0, category.icon_char(), COL_SUBTEXT0, 16.0);
+            tree.text(
+                24.0,
+                item_y + 12.0,
+                category.icon_char(),
+                COL_SUBTEXT0,
+                16.0,
+            );
 
             // Label
             let label_color = if is_selected { COL_TEXT } else { COL_SUBTEXT1 };
@@ -1193,7 +1343,13 @@ impl SettingsState {
     /// Render the page header with breadcrumb navigation.
     fn render_page_header(&self, tree: &mut RenderTree, content_x: f32) {
         // Header background
-        tree.fill_rect(content_x, 0.0, self.window_width - content_x, HEADER_HEIGHT, COL_BASE);
+        tree.fill_rect(
+            content_x,
+            0.0,
+            self.window_width - content_x,
+            HEADER_HEIGHT,
+            COL_BASE,
+        );
 
         // Breadcrumb: Category > Page
         let breadcrumb = format!(
@@ -1201,7 +1357,14 @@ impl SettingsState {
             self.current_category.label(),
             self.current_page.label()
         );
-        text_bold(tree, content_x + CONTENT_PADDING, 22.0, &breadcrumb, COL_TEXT, 18.0);
+        text_bold(
+            tree,
+            content_x + CONTENT_PADDING,
+            22.0,
+            &breadcrumb,
+            COL_TEXT,
+            18.0,
+        );
 
         // Sub-page tabs
         let pages = self.current_category.pages();
@@ -1270,13 +1433,18 @@ impl SettingsState {
         y = render_section_header(tree, x, y, "Resolution & Scaling");
         render_setting_row(tree, x, y, "Resolution", 0.0);
         let res = RESOLUTIONS.get(self.resolution_index);
-        let res_label = res.map(|r| r.label()).unwrap_or_else(|| "Unknown".to_string());
+        let res_label = res
+            .map(|r| r.label())
+            .unwrap_or_else(|| "Unknown".to_string());
         render_dropdown_button(tree, right_x, y, &res_label, DROPDOWN_WIDTH);
         y += ITEM_HEIGHT;
 
         // Refresh rate
         render_setting_row(tree, x, y, "Refresh Rate", 0.0);
-        let rate = REFRESH_RATES.get(self.refresh_rate_index).copied().unwrap_or(60);
+        let rate = REFRESH_RATES
+            .get(self.refresh_rate_index)
+            .copied()
+            .unwrap_or(60);
         let rate_label = format!("{} Hz", rate);
         render_dropdown_button(tree, right_x, y, &rate_label, DROPDOWN_WIDTH);
         y += ITEM_HEIGHT;
@@ -1312,7 +1480,8 @@ impl SettingsState {
         let monitor_w = 100.0;
         let monitor_h = 70.0;
         let spacing = 20.0;
-        let total_w = (self.monitor_count as f32) * monitor_w + ((self.monitor_count as f32) - 1.0) * spacing;
+        let total_w =
+            (self.monitor_count as f32) * monitor_w + ((self.monitor_count as f32) - 1.0) * spacing;
         let start_x = x + (preview_bg_w - total_w) / 2.0;
         let start_y = y + (preview_bg_h - monitor_h) / 2.0;
 
@@ -1321,10 +1490,24 @@ impl SettingsState {
             // Monitor bezel
             fill_rounded(tree, mx, start_y, monitor_w, monitor_h, COL_SURFACE2, 4.0);
             // Screen area
-            fill_rounded(tree, mx + 4.0, start_y + 4.0, monitor_w - 8.0, monitor_h - 12.0, COL_ACCENT, 2.0);
+            fill_rounded(
+                tree,
+                mx + 4.0,
+                start_y + 4.0,
+                monitor_w - 8.0,
+                monitor_h - 12.0,
+                COL_ACCENT,
+                2.0,
+            );
             // Monitor number
             let num_label = format!("{}", i + 1);
-            tree.text(mx + monitor_w / 2.0 - 4.0, start_y + monitor_h / 2.0 - 12.0, &num_label, COL_BASE, 16.0);
+            tree.text(
+                mx + monitor_w / 2.0 - 4.0,
+                start_y + monitor_h / 2.0 - 12.0,
+                &num_label,
+                COL_BASE,
+                16.0,
+            );
         }
     }
 
@@ -1337,7 +1520,9 @@ impl SettingsState {
         // Output section
         y = render_section_header(tree, x, y, "Output");
         render_setting_row(tree, x, y, "Output Device", 0.0);
-        let output_name = self.output_devices.get(self.output_device_index)
+        let output_name = self
+            .output_devices
+            .get(self.output_device_index)
             .map(|d| d.name.as_str())
             .unwrap_or("None");
         render_dropdown_button(tree, right_x, y, output_name, DROPDOWN_WIDTH);
@@ -1349,7 +1534,13 @@ impl SettingsState {
         render_slider(tree, right_x, y, vol_norm);
         // Volume percentage label
         let vol_label = format!("{}%", self.output_volume);
-        tree.text(right_x + SLIDER_WIDTH + 12.0, y + 14.0, &vol_label, COL_SUBTEXT0, 12.0);
+        tree.text(
+            right_x + SLIDER_WIDTH + 12.0,
+            y + 14.0,
+            &vol_label,
+            COL_SUBTEXT0,
+            12.0,
+        );
         y += ITEM_HEIGHT;
 
         // Mute toggle
@@ -1360,7 +1551,9 @@ impl SettingsState {
         // Input section
         y = render_section_header(tree, x, y, "Input");
         render_setting_row(tree, x, y, "Input Device", 0.0);
-        let input_name = self.input_devices.get(self.input_device_index)
+        let input_name = self
+            .input_devices
+            .get(self.input_device_index)
             .map(|d| d.name.as_str())
             .unwrap_or("None");
         render_dropdown_button(tree, right_x, y, input_name, DROPDOWN_WIDTH);
@@ -1370,7 +1563,13 @@ impl SettingsState {
         let in_vol_norm = self.input_volume as f32 / 100.0;
         render_slider(tree, right_x, y, in_vol_norm);
         let in_vol_label = format!("{}%", self.input_volume);
-        tree.text(right_x + SLIDER_WIDTH + 12.0, y + 14.0, &in_vol_label, COL_SUBTEXT0, 12.0);
+        tree.text(
+            right_x + SLIDER_WIDTH + 12.0,
+            y + 14.0,
+            &in_vol_label,
+            COL_SUBTEXT0,
+            12.0,
+        );
         y += ITEM_HEIGHT + SECTION_SPACING;
 
         // System sounds
@@ -1386,10 +1585,22 @@ impl SettingsState {
             let app_norm = app_vol.volume as f32 / 100.0;
             render_slider(tree, right_x, y, app_norm);
             let app_label = format!("{}%", app_vol.volume);
-            tree.text(right_x + SLIDER_WIDTH + 12.0, y + 14.0, &app_label, COL_SUBTEXT0, 12.0);
+            tree.text(
+                right_x + SLIDER_WIDTH + 12.0,
+                y + 14.0,
+                &app_label,
+                COL_SUBTEXT0,
+                12.0,
+            );
             // Mute indicator
             if app_vol.muted {
-                tree.text(right_x + SLIDER_WIDTH + 50.0, y + 14.0, "(muted)", COL_RED, 11.0);
+                tree.text(
+                    right_x + SLIDER_WIDTH + 50.0,
+                    y + 14.0,
+                    "(muted)",
+                    COL_RED,
+                    11.0,
+                );
             }
             y += ITEM_HEIGHT;
         }
@@ -1410,7 +1621,11 @@ impl SettingsState {
             let is_selected = *mode == self.theme_mode;
 
             // Card background
-            let card_bg = if is_selected { COL_SURFACE1 } else { COL_SURFACE0 };
+            let card_bg = if is_selected {
+                COL_SURFACE1
+            } else {
+                COL_SURFACE0
+            };
             fill_rounded(tree, cx, y, card_w, card_h, card_bg, 8.0);
 
             // Selection border
@@ -1437,13 +1652,25 @@ impl SettingsState {
                 ThemeMode::Dark => (Color::from_hex(0x1E1E2E), Color::from_hex(0xCDD6F4)),
                 ThemeMode::System => (Color::from_hex(0x313244), Color::from_hex(0xBAC2DE)),
             };
-            fill_rounded(tree, preview_x, preview_y, preview_w, preview_h, win_bg, 4.0);
+            fill_rounded(
+                tree, preview_x, preview_y, preview_w, preview_h, win_bg, 4.0,
+            );
             tree.text(preview_x + 8.0, preview_y + 18.0, "Aa", win_text, 16.0);
 
             // Label
             let label_y = y + card_h - 22.0;
-            let label_color = if is_selected { COL_ACCENT } else { COL_SUBTEXT0 };
-            tree.text(cx + card_w / 2.0 - 16.0, label_y, mode.label(), label_color, 13.0);
+            let label_color = if is_selected {
+                COL_ACCENT
+            } else {
+                COL_SUBTEXT0
+            };
+            tree.text(
+                cx + card_w / 2.0 - 16.0,
+                label_y,
+                mode.label(),
+                label_color,
+                13.0,
+            );
         }
         y += card_h + SECTION_SPACING;
 
@@ -1472,7 +1699,13 @@ impl SettingsState {
         let mut y = start_y;
 
         y = render_section_header(tree, x, y, "Accent Color");
-        tree.text(x, y, "Choose an accent color for buttons, links, and highlights:", COL_SUBTEXT0, 13.0);
+        tree.text(
+            x,
+            y,
+            "Choose an accent color for buttons, links, and highlights:",
+            COL_SUBTEXT0,
+            13.0,
+        );
         y += 28.0;
 
         // Color grid
@@ -1486,7 +1719,15 @@ impl SettingsState {
             let sx = x + (col as f32) * (swatch_size + swatch_spacing);
             let sy = y + (row as f32) * (swatch_size + swatch_spacing);
 
-            fill_rounded(tree, sx, sy, swatch_size, swatch_size, *color, swatch_size / 2.0);
+            fill_rounded(
+                tree,
+                sx,
+                sy,
+                swatch_size,
+                swatch_size,
+                *color,
+                swatch_size / 2.0,
+            );
 
             // Selection ring
             if idx == self.accent_color_index {
@@ -1507,7 +1748,10 @@ impl SettingsState {
 
         // Preview of current accent color
         y = render_section_header(tree, x, y, "Preview");
-        let preview_color = ACCENT_COLORS.get(self.accent_color_index).copied().unwrap_or(COL_ACCENT);
+        let preview_color = ACCENT_COLORS
+            .get(self.accent_color_index)
+            .copied()
+            .unwrap_or(COL_ACCENT);
 
         // Sample button
         fill_rounded(tree, x, y, 120.0, 36.0, preview_color, 6.0);
@@ -1533,16 +1777,30 @@ impl SettingsState {
         for (idx, adapter) in self.adapters.iter().enumerate() {
             let row_y = y;
             let is_selected = idx == self.selected_adapter;
-            let row_bg = if is_selected { COL_SURFACE0 } else { Color::TRANSPARENT };
+            let row_bg = if is_selected {
+                COL_SURFACE0
+            } else {
+                Color::TRANSPARENT
+            };
             fill_rounded(tree, x - 8.0, row_y, 600.0, ITEM_HEIGHT, row_bg, 6.0);
 
             // Status indicator
-            let status_color = if adapter.connected { COL_GREEN } else { COL_OVERLAY0 };
+            let status_color = if adapter.connected {
+                COL_GREEN
+            } else {
+                COL_OVERLAY0
+            };
             fill_rounded(tree, x, row_y + 18.0, 10.0, 10.0, status_color, 5.0);
 
             // Adapter name and type
             tree.text(x + 20.0, row_y + 8.0, &adapter.name, COL_TEXT, 14.0);
-            tree.text(x + 20.0, row_y + 26.0, adapter.adapter_type.label(), COL_SUBTEXT0, 11.0);
+            tree.text(
+                x + 20.0,
+                row_y + 26.0,
+                adapter.adapter_type.label(),
+                COL_SUBTEXT0,
+                11.0,
+            );
 
             // IP address or status
             let status_text = if adapter.connected {
@@ -1559,7 +1817,13 @@ impl SettingsState {
         // IP Configuration for selected adapter
         y = render_section_header(tree, x, y, "IP Configuration");
         render_setting_row(tree, x, y, "Mode", 0.0);
-        render_dropdown_button(tree, right_x, y, self.ip_config_mode.label(), DROPDOWN_WIDTH);
+        render_dropdown_button(
+            tree,
+            right_x,
+            y,
+            self.ip_config_mode.label(),
+            DROPDOWN_WIDTH,
+        );
         y += ITEM_HEIGHT;
 
         if self.ip_config_mode == IpConfigMode::Static {
@@ -1627,17 +1891,34 @@ impl SettingsState {
 
                 // Account picture
                 y = render_section_header(tree, x, y, "Account Picture");
-                tree.text(x, y + 4.0, "Choose a picture for your account:", COL_SUBTEXT0, 13.0);
+                tree.text(
+                    x,
+                    y + 4.0,
+                    "Choose a picture for your account:",
+                    COL_SUBTEXT0,
+                    13.0,
+                );
                 y += 28.0;
 
                 // Picture selection grid (placeholder icons)
                 let icon_size = 48.0;
                 let icon_spacing = 12.0;
-                let icons = ["\u{1F464}", "\u{1F468}", "\u{1F469}", "\u{1F474}", "\u{1F475}", "\u{1F476}"];
+                let icons = [
+                    "\u{1F464}",
+                    "\u{1F468}",
+                    "\u{1F469}",
+                    "\u{1F474}",
+                    "\u{1F475}",
+                    "\u{1F476}",
+                ];
                 for (idx, icon) in icons.iter().enumerate() {
                     let ix = x + (idx as f32) * (icon_size + icon_spacing);
                     let is_selected = idx == 0; // first is default selected
-                    let bg = if is_selected { COL_SURFACE1 } else { COL_SURFACE0 };
+                    let bg = if is_selected {
+                        COL_SURFACE1
+                    } else {
+                        COL_SURFACE0
+                    };
                     fill_rounded(tree, ix, y, icon_size, icon_size, bg, 8.0);
                     if is_selected {
                         tree.push(RenderCommand::StrokeRect {
@@ -1663,12 +1944,24 @@ impl SettingsState {
         for (idx, account) in self.user_accounts.iter().enumerate() {
             let row_y = y;
             let is_selected = idx == self.selected_account;
-            let row_bg = if is_selected { COL_SURFACE0 } else { Color::TRANSPARENT };
+            let row_bg = if is_selected {
+                COL_SURFACE0
+            } else {
+                Color::TRANSPARENT
+            };
             fill_rounded(tree, x - 8.0, row_y, 620.0, 60.0, row_bg, 8.0);
 
             // Avatar placeholder
             let avatar_size = 40.0;
-            fill_rounded(tree, x + 4.0, row_y + 10.0, avatar_size, avatar_size, COL_SURFACE2, avatar_size / 2.0);
+            fill_rounded(
+                tree,
+                x + 4.0,
+                row_y + 10.0,
+                avatar_size,
+                avatar_size,
+                COL_SURFACE2,
+                avatar_size / 2.0,
+            );
             tree.text(x + 16.0, row_y + 20.0, "\u{1F464}", COL_TEXT, 16.0);
 
             // Name and email
@@ -1709,7 +2002,13 @@ impl SettingsState {
             y += ITEM_HEIGHT;
 
             render_setting_row(tree, x, y, "Account Type", 0.0);
-            tree.text(right_x, y + 14.0, account.account_type.label(), account.account_type.color(), 13.0);
+            tree.text(
+                right_x,
+                y + 14.0,
+                account.account_type.label(),
+                account.account_type.color(),
+                13.0,
+            );
             y += ITEM_HEIGHT;
 
             render_setting_row(tree, x, y, "Login Count", 0.0);
@@ -1725,7 +2024,13 @@ impl SettingsState {
             if account.account_type == AccountType::Child {
                 y += SECTION_SPACING;
                 y = render_section_header(tree, x, y, "Family Safety");
-                tree.text(x, y + 4.0, "Screen time limits and content filters are active", COL_SUBTEXT0, 13.0);
+                tree.text(
+                    x,
+                    y + 4.0,
+                    "Screen time limits and content filters are active",
+                    COL_SUBTEXT0,
+                    13.0,
+                );
                 y += 24.0;
                 self.render_button(tree, x, y, "Manage Family Settings", COL_PEACH);
             }
@@ -1742,7 +2047,13 @@ impl SettingsState {
             SettingsPage::Capabilities => {
                 // App permissions summary sub-page
                 y = render_section_header(tree, x, y, "App Permissions Summary");
-                tree.text(x, y + 4.0, "Overview of which apps have access to sensitive resources:", COL_SUBTEXT0, 13.0);
+                tree.text(
+                    x,
+                    y + 4.0,
+                    "Overview of which apps have access to sensitive resources:",
+                    COL_SUBTEXT0,
+                    13.0,
+                );
                 y += 32.0;
 
                 // Summary table header
@@ -1755,14 +2066,27 @@ impl SettingsState {
 
                 // Divider
                 tree.push(RenderCommand::Line {
-                    x1: x, y1: y, x2: x + 560.0, y2: y,
-                    color: COL_SURFACE1, width: 1.0,
+                    x1: x,
+                    y1: y,
+                    x2: x + 560.0,
+                    y2: y,
+                    color: COL_SURFACE1,
+                    width: 1.0,
                 });
                 y += 8.0;
 
                 // Build summary from all apps mentioned
-                let all_apps = ["Maps", "Weather", "Camera", "Browser", "Video Chat",
-                    "Social Media", "Voice Recorder", "Email", "Music Player"];
+                let all_apps = [
+                    "Maps",
+                    "Weather",
+                    "Camera",
+                    "Browser",
+                    "Video Chat",
+                    "Social Media",
+                    "Voice Recorder",
+                    "Email",
+                    "Music Player",
+                ];
                 for app_name in all_apps {
                     let loc = self.location_apps.iter().find(|a| a.app_name == app_name);
                     let cam = self.camera_apps.iter().find(|a| a.app_name == app_name);
@@ -1776,28 +2100,44 @@ impl SettingsState {
 
                     // Location
                     if let Some(p) = loc {
-                        let (sym, col) = if p.allowed { (check, COL_GREEN) } else { (cross, COL_RED) };
+                        let (sym, col) = if p.allowed {
+                            (check, COL_GREEN)
+                        } else {
+                            (cross, COL_RED)
+                        };
                         tree.text(x + 220.0, y + 4.0, sym, col, 13.0);
                     } else {
                         tree.text(x + 220.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
                     }
                     // Camera
                     if let Some(p) = cam {
-                        let (sym, col) = if p.allowed { (check, COL_GREEN) } else { (cross, COL_RED) };
+                        let (sym, col) = if p.allowed {
+                            (check, COL_GREEN)
+                        } else {
+                            (cross, COL_RED)
+                        };
                         tree.text(x + 310.0, y + 4.0, sym, col, 13.0);
                     } else {
                         tree.text(x + 310.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
                     }
                     // Mic
                     if let Some(p) = mic {
-                        let (sym, col) = if p.allowed { (check, COL_GREEN) } else { (cross, COL_RED) };
+                        let (sym, col) = if p.allowed {
+                            (check, COL_GREEN)
+                        } else {
+                            (cross, COL_RED)
+                        };
                         tree.text(x + 385.0, y + 4.0, sym, col, 13.0);
                     } else {
                         tree.text(x + 385.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
                     }
                     // Background
                     if let Some(p) = bg {
-                        let (sym, col) = if p.allowed { (check, COL_GREEN) } else { (cross, COL_RED) };
+                        let (sym, col) = if p.allowed {
+                            (check, COL_GREEN)
+                        } else {
+                            (cross, COL_RED)
+                        };
                         tree.text(x + 465.0, y + 4.0, sym, col, 13.0);
                     } else {
                         tree.text(x + 465.0, y + 4.0, "-", COL_OVERLAY0, 13.0);
@@ -1857,7 +2197,13 @@ impl SettingsState {
 
         // Background apps
         y = render_section_header(tree, x, y, "Background Apps");
-        tree.text(x, y + 4.0, "Choose which apps can run in the background:", COL_SUBTEXT0, 13.0);
+        tree.text(
+            x,
+            y + 4.0,
+            "Choose which apps can run in the background:",
+            COL_SUBTEXT0,
+            13.0,
+        );
         y += 28.0;
 
         for app in &self.background_apps {
@@ -1870,12 +2216,24 @@ impl SettingsState {
         // Diagnostics
         y = render_section_header(tree, x, y, "Diagnostics & Data");
         render_setting_row(tree, x, y, "Diagnostic data collection", 0.0);
-        render_dropdown_button(tree, right_x, y, self.diagnostic_level.label(), DROPDOWN_WIDTH);
+        render_dropdown_button(
+            tree,
+            right_x,
+            y,
+            self.diagnostic_level.label(),
+            DROPDOWN_WIDTH,
+        );
         y += ITEM_HEIGHT + SECTION_SPACING;
 
         // Activity history
         y = render_section_header(tree, x, y, "Activity History");
-        tree.text(x, y + 4.0, "Clear your activity history stored on this device.", COL_SUBTEXT0, 13.0);
+        tree.text(
+            x,
+            y + 4.0,
+            "Clear your activity history stored on this device.",
+            COL_SUBTEXT0,
+            13.0,
+        );
         y += 28.0;
         self.render_button(tree, x, y, "Clear Activity History", COL_RED);
     }
@@ -1909,11 +2267,23 @@ impl SettingsState {
                     render_setting_row(tree, x, y, "Voice Rate", 0.0);
                     render_slider(tree, right_x, y, self.narrator_rate);
                     tree.text(right_x, y + 36.0, "Slow", COL_SUBTEXT0, 11.0);
-                    tree.text(right_x + SLIDER_WIDTH - 24.0, y + 36.0, "Fast", COL_SUBTEXT0, 11.0);
+                    tree.text(
+                        right_x + SLIDER_WIDTH - 24.0,
+                        y + 36.0,
+                        "Fast",
+                        COL_SUBTEXT0,
+                        11.0,
+                    );
                     y += ITEM_HEIGHT + 16.0;
 
                     render_setting_row(tree, x, y, "Verbosity", 0.0);
-                    render_dropdown_button(tree, right_x, y, self.narrator_verbosity.label(), DROPDOWN_WIDTH);
+                    render_dropdown_button(
+                        tree,
+                        right_x,
+                        y,
+                        self.narrator_verbosity.label(),
+                        DROPDOWN_WIDTH,
+                    );
                 }
                 return;
             }
@@ -1924,19 +2294,37 @@ impl SettingsState {
                 render_setting_row(tree, x, y, "Sticky Keys", 0.0);
                 render_toggle(tree, right_x, y + 12.0, self.sticky_keys);
                 y += ITEM_HEIGHT;
-                tree.text(x + 16.0, y - 4.0, "Press modifier keys one at a time", COL_SUBTEXT0, 11.0);
+                tree.text(
+                    x + 16.0,
+                    y - 4.0,
+                    "Press modifier keys one at a time",
+                    COL_SUBTEXT0,
+                    11.0,
+                );
                 y += 12.0;
 
                 render_setting_row(tree, x, y, "Filter Keys", 0.0);
                 render_toggle(tree, right_x, y + 12.0, self.filter_keys);
                 y += ITEM_HEIGHT;
-                tree.text(x + 16.0, y - 4.0, "Ignore brief or repeated keystrokes", COL_SUBTEXT0, 11.0);
+                tree.text(
+                    x + 16.0,
+                    y - 4.0,
+                    "Ignore brief or repeated keystrokes",
+                    COL_SUBTEXT0,
+                    11.0,
+                );
                 y += 12.0;
 
                 render_setting_row(tree, x, y, "Toggle Keys", 0.0);
                 render_toggle(tree, right_x, y + 12.0, self.toggle_keys);
                 y += ITEM_HEIGHT;
-                tree.text(x + 16.0, y - 4.0, "Play a sound when pressing Caps/Num/Scroll Lock", COL_SUBTEXT0, 11.0);
+                tree.text(
+                    x + 16.0,
+                    y - 4.0,
+                    "Play a sound when pressing Caps/Num/Scroll Lock",
+                    COL_SUBTEXT0,
+                    11.0,
+                );
                 y += 12.0;
 
                 render_setting_row(tree, x, y, "On-Screen Keyboard", 0.0);
@@ -1973,11 +2361,23 @@ impl SettingsState {
         let text_size_norm = (self.text_size_percent as f32 - 50.0) / 200.0;
         render_slider(tree, right_x, y, text_size_norm);
         let size_label = format!("{}%", self.text_size_percent);
-        tree.text(right_x + SLIDER_WIDTH + 12.0, y + 14.0, &size_label, COL_SUBTEXT0, 12.0);
+        tree.text(
+            right_x + SLIDER_WIDTH + 12.0,
+            y + 14.0,
+            &size_label,
+            COL_SUBTEXT0,
+            12.0,
+        );
         y += ITEM_HEIGHT;
         // Range labels
         tree.text(right_x, y - 8.0, "50%", COL_SUBTEXT0, 11.0);
-        tree.text(right_x + SLIDER_WIDTH - 28.0, y - 8.0, "250%", COL_SUBTEXT0, 11.0);
+        tree.text(
+            right_x + SLIDER_WIDTH - 28.0,
+            y - 8.0,
+            "250%",
+            COL_SUBTEXT0,
+            11.0,
+        );
         y += 8.0;
 
         render_setting_row(tree, x, y, "High Contrast", 0.0);
@@ -2007,8 +2407,20 @@ impl SettingsState {
         if self.color_filter != ColorFilter::None {
             y += 8.0;
             fill_rounded(tree, x, y, 300.0, 40.0, COL_SURFACE0, 6.0);
-            tree.text(x + 12.0, y + 12.0, "Color filter active: ", COL_SUBTEXT0, 12.0);
-            tree.text(x + 150.0, y + 12.0, self.color_filter.label(), COL_ACCENT, 12.0);
+            tree.text(
+                x + 12.0,
+                y + 12.0,
+                "Color filter active: ",
+                COL_SUBTEXT0,
+                12.0,
+            );
+            tree.text(
+                x + 150.0,
+                y + 12.0,
+                self.color_filter.label(),
+                COL_ACCENT,
+                12.0,
+            );
         }
     }
 
@@ -2022,13 +2434,32 @@ impl SettingsState {
             SettingsPage::Recovery => {
                 // Recovery sub-page
                 y = render_section_header(tree, x, y, "Recovery Options");
-                tree.text(x, y + 4.0, "If your PC isn't working well, recovering may help.", COL_SUBTEXT0, 13.0);
+                tree.text(
+                    x,
+                    y + 4.0,
+                    "If your PC isn't working well, recovering may help.",
+                    COL_SUBTEXT0,
+                    13.0,
+                );
                 y += 32.0;
 
                 // Go back option
                 fill_rounded(tree, x, y, 580.0, 80.0, COL_SURFACE0, 8.0);
-                text_bold(tree, x + 16.0, y + 12.0, "Go Back to Previous Version", COL_TEXT, 14.0);
-                tree.text(x + 16.0, y + 34.0, "Revert to the previous OS build. Available for 10 days", COL_SUBTEXT0, 12.0);
+                text_bold(
+                    tree,
+                    x + 16.0,
+                    y + 12.0,
+                    "Go Back to Previous Version",
+                    COL_TEXT,
+                    14.0,
+                );
+                tree.text(
+                    x + 16.0,
+                    y + 34.0,
+                    "Revert to the previous OS build. Available for 10 days",
+                    COL_SUBTEXT0,
+                    12.0,
+                );
                 tree.text(x + 16.0, y + 50.0, "after an update.", COL_SUBTEXT0, 12.0);
                 self.render_button(tree, x + 440.0, y + 28.0, "Go Back", COL_PEACH);
                 y += 96.0;
@@ -2036,15 +2467,33 @@ impl SettingsState {
                 // Fresh start
                 fill_rounded(tree, x, y, 580.0, 80.0, COL_SURFACE0, 8.0);
                 text_bold(tree, x + 16.0, y + 12.0, "Fresh Start", COL_TEXT, 14.0);
-                tree.text(x + 16.0, y + 34.0, "Reinstall the OS while keeping your personal files.", COL_SUBTEXT0, 12.0);
-                tree.text(x + 16.0, y + 50.0, "All apps and settings will be removed.", COL_SUBTEXT0, 12.0);
+                tree.text(
+                    x + 16.0,
+                    y + 34.0,
+                    "Reinstall the OS while keeping your personal files.",
+                    COL_SUBTEXT0,
+                    12.0,
+                );
+                tree.text(
+                    x + 16.0,
+                    y + 50.0,
+                    "All apps and settings will be removed.",
+                    COL_SUBTEXT0,
+                    12.0,
+                );
                 self.render_button(tree, x + 440.0, y + 28.0, "Reset", COL_RED);
                 return;
             }
             SettingsPage::Snapshots => {
                 // Snapshots sub-page (system restore points)
                 y = render_section_header(tree, x, y, "System Snapshots");
-                tree.text(x, y + 4.0, "Package generation snapshots for safe rollback:", COL_SUBTEXT0, 13.0);
+                tree.text(
+                    x,
+                    y + 4.0,
+                    "Package generation snapshots for safe rollback:",
+                    COL_SUBTEXT0,
+                    13.0,
+                );
                 y += 32.0;
 
                 let snapshots = [
@@ -2056,7 +2505,11 @@ impl SettingsState {
 
                 for (name, date, desc) in snapshots {
                     let is_current = desc == "Current";
-                    let bg = if is_current { COL_SURFACE1 } else { COL_SURFACE0 };
+                    let bg = if is_current {
+                        COL_SURFACE1
+                    } else {
+                        COL_SURFACE0
+                    };
                     fill_rounded(tree, x, y, 580.0, 48.0, bg, 6.0);
 
                     text_bold(tree, x + 12.0, y + 8.0, name, COL_TEXT, 13.0);
@@ -2089,7 +2542,13 @@ impl SettingsState {
         };
         self.render_button(tree, x, y, btn_label, COL_ACCENT);
         if !self.checking_for_updates {
-            tree.text(x + 160.0, y + 10.0, "Your device is up to date", COL_GREEN, 13.0);
+            tree.text(
+                x + 160.0,
+                y + 10.0,
+                "Your device is up to date",
+                COL_GREEN,
+                13.0,
+            );
         }
         y += 44.0 + SECTION_SPACING;
 
@@ -2101,7 +2560,10 @@ impl SettingsState {
 
         // Active hours
         render_setting_row(tree, x, y, "Active hours (no restart)", 0.0);
-        let hours_label = format!("{:02}:00 - {:02}:00", self.active_hours_start, self.active_hours_end);
+        let hours_label = format!(
+            "{:02}:00 - {:02}:00",
+            self.active_hours_start, self.active_hours_end
+        );
         tree.text(right_x, y + 14.0, &hours_label, COL_TEXT, 13.0);
         y += ITEM_HEIGHT + SECTION_SPACING;
 
@@ -2111,14 +2573,26 @@ impl SettingsState {
         let defer_feat_norm = self.defer_feature_days as f32 / 365.0;
         render_slider(tree, right_x, y, defer_feat_norm);
         let feat_label = format!("{} days", self.defer_feature_days);
-        tree.text(right_x + SLIDER_WIDTH + 12.0, y + 14.0, &feat_label, COL_SUBTEXT0, 12.0);
+        tree.text(
+            right_x + SLIDER_WIDTH + 12.0,
+            y + 14.0,
+            &feat_label,
+            COL_SUBTEXT0,
+            12.0,
+        );
         y += ITEM_HEIGHT;
 
         render_setting_row(tree, x, y, "Defer quality updates (days)", 0.0);
         let defer_qual_norm = self.defer_quality_days as f32 / 30.0;
         render_slider(tree, right_x, y, defer_qual_norm);
         let qual_label = format!("{} days", self.defer_quality_days);
-        tree.text(right_x + SLIDER_WIDTH + 12.0, y + 14.0, &qual_label, COL_SUBTEXT0, 12.0);
+        tree.text(
+            right_x + SLIDER_WIDTH + 12.0,
+            y + 14.0,
+            &qual_label,
+            COL_SUBTEXT0,
+            12.0,
+        );
         y += ITEM_HEIGHT + SECTION_SPACING;
 
         // Update history
@@ -2167,7 +2641,13 @@ impl SettingsState {
         let card_y = start_y + 100.0;
         fill_rounded(tree, x, card_y, 400.0, 150.0, COL_SURFACE0, 12.0);
         tree.text(x + 170.0, card_y + 50.0, "\u{1F6A7}", COL_PEACH, 36.0);
-        tree.text(x + 120.0, card_y + 110.0, "Coming soon...", COL_SUBTEXT0, 14.0);
+        tree.text(
+            x + 120.0,
+            card_y + 110.0,
+            "Coming soon...",
+            COL_SUBTEXT0,
+            14.0,
+        );
     }
 
     // --- Helper: render a text field ---
@@ -2185,7 +2665,15 @@ impl SettingsState {
             line_width: 1.0,
             corner_radii: CornerRadii::all(6.0),
         });
-        text_clipped(tree, x + 8.0, field_y + 8.0, value, COL_TEXT, 13.0, width - 16.0);
+        text_clipped(
+            tree,
+            x + 8.0,
+            field_y + 8.0,
+            value,
+            COL_TEXT,
+            13.0,
+            width - 16.0,
+        );
     }
 
     // --- Dropdown overlay rendering ---
@@ -2199,52 +2687,138 @@ impl SettingsState {
         let (items, selected, dropdown_x, dropdown_y) = match dropdown_id {
             DropdownId::Resolution => {
                 let items: Vec<String> = RESOLUTIONS.iter().map(|r| r.label()).collect();
-                (items, self.resolution_index, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 180.0)
+                (
+                    items,
+                    self.resolution_index,
+                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
+                    HEADER_HEIGHT + 180.0,
+                )
             }
             DropdownId::RefreshRate => {
-                let items: Vec<String> = REFRESH_RATES.iter().map(|r| format!("{} Hz", r)).collect();
-                (items, self.refresh_rate_index, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 228.0)
+                let items: Vec<String> =
+                    REFRESH_RATES.iter().map(|r| format!("{} Hz", r)).collect();
+                (
+                    items,
+                    self.refresh_rate_index,
+                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
+                    HEADER_HEIGHT + 228.0,
+                )
             }
             DropdownId::Scale => {
-                let items: Vec<String> = ScalePercent::ALL.iter().map(|s| s.label().to_string()).collect();
-                (items, ScalePercent::ALL.iter().position(|s| *s == self.scale).unwrap_or(0),
-                 SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 276.0)
+                let items: Vec<String> = ScalePercent::ALL
+                    .iter()
+                    .map(|s| s.label().to_string())
+                    .collect();
+                (
+                    items,
+                    ScalePercent::ALL
+                        .iter()
+                        .position(|s| *s == self.scale)
+                        .unwrap_or(0),
+                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
+                    HEADER_HEIGHT + 276.0,
+                )
             }
             DropdownId::OutputDevice => {
-                let items: Vec<String> = self.output_devices.iter().map(|d| d.name.clone()).collect();
-                (items, self.output_device_index, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 68.0)
+                let items: Vec<String> =
+                    self.output_devices.iter().map(|d| d.name.clone()).collect();
+                (
+                    items,
+                    self.output_device_index,
+                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
+                    HEADER_HEIGHT + 68.0,
+                )
             }
             DropdownId::InputDevice => {
-                let items: Vec<String> = self.input_devices.iter().map(|d| d.name.clone()).collect();
-                (items, self.input_device_index, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 250.0)
+                let items: Vec<String> =
+                    self.input_devices.iter().map(|d| d.name.clone()).collect();
+                (
+                    items,
+                    self.input_device_index,
+                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
+                    HEADER_HEIGHT + 250.0,
+                )
             }
             DropdownId::IpConfig => {
                 let items = vec![
                     IpConfigMode::Dhcp.label().to_string(),
                     IpConfigMode::Static.label().to_string(),
                 ];
-                let sel = if self.ip_config_mode == IpConfigMode::Dhcp { 0 } else { 1 };
-                (items, sel, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 300.0)
+                let sel = if self.ip_config_mode == IpConfigMode::Dhcp {
+                    0
+                } else {
+                    1
+                };
+                (
+                    items,
+                    sel,
+                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
+                    HEADER_HEIGHT + 300.0,
+                )
             }
             DropdownId::DiagnosticLevel => {
-                let items: Vec<String> = DiagnosticLevel::ALL.iter().map(|d| d.label().to_string()).collect();
-                let sel = DiagnosticLevel::ALL.iter().position(|d| *d == self.diagnostic_level).unwrap_or(0);
-                (items, sel, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 200.0)
+                let items: Vec<String> = DiagnosticLevel::ALL
+                    .iter()
+                    .map(|d| d.label().to_string())
+                    .collect();
+                let sel = DiagnosticLevel::ALL
+                    .iter()
+                    .position(|d| *d == self.diagnostic_level)
+                    .unwrap_or(0);
+                (
+                    items,
+                    sel,
+                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
+                    HEADER_HEIGHT + 200.0,
+                )
             }
             DropdownId::ColorFilter => {
-                let items: Vec<String> = ColorFilter::ALL.iter().map(|f| f.label().to_string()).collect();
-                let sel = ColorFilter::ALL.iter().position(|f| *f == self.color_filter).unwrap_or(0);
-                (items, sel, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 200.0)
+                let items: Vec<String> = ColorFilter::ALL
+                    .iter()
+                    .map(|f| f.label().to_string())
+                    .collect();
+                let sel = ColorFilter::ALL
+                    .iter()
+                    .position(|f| *f == self.color_filter)
+                    .unwrap_or(0);
+                (
+                    items,
+                    sel,
+                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
+                    HEADER_HEIGHT + 200.0,
+                )
             }
             DropdownId::CursorSize => {
-                let items: Vec<String> = CursorSize::ALL.iter().map(|c| c.label().to_string()).collect();
-                let sel = CursorSize::ALL.iter().position(|c| *c == self.cursor_size).unwrap_or(0);
-                (items, sel, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 160.0)
+                let items: Vec<String> = CursorSize::ALL
+                    .iter()
+                    .map(|c| c.label().to_string())
+                    .collect();
+                let sel = CursorSize::ALL
+                    .iter()
+                    .position(|c| *c == self.cursor_size)
+                    .unwrap_or(0);
+                (
+                    items,
+                    sel,
+                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
+                    HEADER_HEIGHT + 160.0,
+                )
             }
             DropdownId::NarratorVerbosity => {
-                let items: Vec<String> = NarratorVerbosity::ALL.iter().map(|v| v.label().to_string()).collect();
-                let sel = NarratorVerbosity::ALL.iter().position(|v| *v == self.narrator_verbosity).unwrap_or(0);
-                (items, sel, SIDEBAR_WIDTH + CONTENT_PADDING + 350.0, HEADER_HEIGHT + 250.0)
+                let items: Vec<String> = NarratorVerbosity::ALL
+                    .iter()
+                    .map(|v| v.label().to_string())
+                    .collect();
+                let sel = NarratorVerbosity::ALL
+                    .iter()
+                    .position(|v| *v == self.narrator_verbosity)
+                    .unwrap_or(0);
+                (
+                    items,
+                    sel,
+                    SIDEBAR_WIDTH + CONTENT_PADDING + 350.0,
+                    HEADER_HEIGHT + 250.0,
+                )
             }
         };
 
@@ -2267,7 +2841,15 @@ impl SettingsState {
         });
 
         // Background
-        fill_rounded(tree, dropdown_x, dropdown_y, popup_w, popup_h, COL_SURFACE0, 8.0);
+        fill_rounded(
+            tree,
+            dropdown_x,
+            dropdown_y,
+            popup_w,
+            popup_h,
+            COL_SURFACE0,
+            8.0,
+        );
         tree.push(RenderCommand::StrokeRect {
             x: dropdown_x,
             y: dropdown_y,
@@ -2284,15 +2866,37 @@ impl SettingsState {
             let is_selected = idx == selected;
 
             if is_selected {
-                fill_rounded(tree, dropdown_x + 4.0, iy, popup_w - 8.0, DROPDOWN_ITEM_HEIGHT - 2.0, COL_SURFACE1, 4.0);
+                fill_rounded(
+                    tree,
+                    dropdown_x + 4.0,
+                    iy,
+                    popup_w - 8.0,
+                    DROPDOWN_ITEM_HEIGHT - 2.0,
+                    COL_SURFACE1,
+                    4.0,
+                );
             }
 
             let item_color = if is_selected { COL_ACCENT } else { COL_TEXT };
-            text_clipped(tree, dropdown_x + 12.0, iy + 10.0, item, item_color, 13.0, popup_w - 24.0);
+            text_clipped(
+                tree,
+                dropdown_x + 12.0,
+                iy + 10.0,
+                item,
+                item_color,
+                13.0,
+                popup_w - 24.0,
+            );
 
             // Checkmark for selected
             if is_selected {
-                tree.text(dropdown_x + popup_w - 24.0, iy + 10.0, "\u{2713}", COL_ACCENT, 14.0);
+                tree.text(
+                    dropdown_x + popup_w - 24.0,
+                    iy + 10.0,
+                    "\u{2713}",
+                    COL_ACCENT,
+                    14.0,
+                );
             }
         }
     }
@@ -2594,8 +3198,10 @@ impl SettingsState {
         // Transparency toggle
         let effects_y = cards_y + card_h + SECTION_SPACING + 24.0 + 12.0;
         let toggle_x = content_x + 350.0;
-        if my >= effects_y && my < effects_y + ITEM_HEIGHT
-            && mx >= toggle_x && mx < toggle_x + TOGGLE_WIDTH
+        if my >= effects_y
+            && my < effects_y + ITEM_HEIGHT
+            && mx >= toggle_x
+            && mx < toggle_x + TOGGLE_WIDTH
         {
             self.transparency_effects = !self.transparency_effects;
             return;
@@ -2653,7 +3259,11 @@ impl SettingsState {
         }
 
         // IP config dropdown
-        let ip_section_y = adapters_y + (self.adapters.len() as f32) * (ITEM_HEIGHT + 4.0) + SECTION_SPACING + 24.0 + 12.0;
+        let ip_section_y = adapters_y
+            + (self.adapters.len() as f32) * (ITEM_HEIGHT + 4.0)
+            + SECTION_SPACING
+            + 24.0
+            + 12.0;
         if my >= ip_section_y && my < ip_section_y + ITEM_HEIGHT && mx >= content_x + 350.0 {
             self.open_dropdown = Some(DropdownId::IpConfig);
         }
@@ -2697,8 +3307,10 @@ impl SettingsState {
         let section_y = base_y + 24.0 + 12.0;
 
         // Location master toggle
-        if my >= section_y && my < section_y + ITEM_HEIGHT
-            && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+        if my >= section_y
+            && my < section_y + ITEM_HEIGHT
+            && mx >= right_x
+            && mx < right_x + TOGGLE_WIDTH
         {
             self.location_enabled = !self.location_enabled;
             return;
@@ -2708,8 +3320,10 @@ impl SettingsState {
         if self.location_enabled {
             let mut y = section_y + ITEM_HEIGHT;
             for app in &mut self.location_apps {
-                if my >= y && my < y + ITEM_HEIGHT - 8.0
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                if my >= y
+                    && my < y + ITEM_HEIGHT - 8.0
+                    && mx >= right_x
+                    && mx < right_x + TOGGLE_WIDTH
                 {
                     app.allowed = !app.allowed;
                     return;
@@ -2726,24 +3340,30 @@ impl SettingsState {
             SettingsPage::Audio => {
                 let section_y = base_y + 24.0 + 12.0;
                 // Mono audio toggle
-                if my >= section_y && my < section_y + ITEM_HEIGHT
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                if my >= section_y
+                    && my < section_y + ITEM_HEIGHT
+                    && mx >= right_x
+                    && mx < right_x + TOGGLE_WIDTH
                 {
                     self.mono_audio = !self.mono_audio;
                     return;
                 }
                 // Visual alerts toggle
                 let va_y = section_y + ITEM_HEIGHT;
-                if my >= va_y && my < va_y + ITEM_HEIGHT
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                if my >= va_y
+                    && my < va_y + ITEM_HEIGHT
+                    && mx >= right_x
+                    && mx < right_x + TOGGLE_WIDTH
                 {
                     self.visual_alerts = !self.visual_alerts;
                     return;
                 }
                 // Narrator toggle
                 let narrator_section_y = va_y + ITEM_HEIGHT + SECTION_SPACING + 24.0 + 12.0;
-                if my >= narrator_section_y && my < narrator_section_y + ITEM_HEIGHT
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
+                if my >= narrator_section_y
+                    && my < narrator_section_y + ITEM_HEIGHT
+                    && mx >= right_x
+                    && mx < right_x + TOGGLE_WIDTH
                 {
                     self.narrator_enabled = !self.narrator_enabled;
                 }
@@ -2752,33 +3372,25 @@ impl SettingsState {
                 let section_y = base_y + 24.0 + 12.0;
                 let mut y = section_y;
                 // Sticky keys
-                if my >= y && my < y + ITEM_HEIGHT
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
-                {
+                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
                     self.sticky_keys = !self.sticky_keys;
                     return;
                 }
                 y += ITEM_HEIGHT + 12.0;
                 // Filter keys
-                if my >= y && my < y + ITEM_HEIGHT
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
-                {
+                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
                     self.filter_keys = !self.filter_keys;
                     return;
                 }
                 y += ITEM_HEIGHT + 12.0;
                 // Toggle keys
-                if my >= y && my < y + ITEM_HEIGHT
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
-                {
+                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
                     self.toggle_keys = !self.toggle_keys;
                     return;
                 }
                 y += ITEM_HEIGHT + 12.0;
                 // On-screen keyboard
-                if my >= y && my < y + ITEM_HEIGHT
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
-                {
+                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
                     self.onscreen_keyboard = !self.onscreen_keyboard;
                 }
             }
@@ -2789,9 +3401,7 @@ impl SettingsState {
                 y += 8.0; // range labels
 
                 // High contrast toggle
-                if my >= y && my < y + ITEM_HEIGHT
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
-                {
+                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
                     self.high_contrast = !self.high_contrast;
                     return;
                 }
@@ -2803,9 +3413,7 @@ impl SettingsState {
                 }
                 y += ITEM_HEIGHT;
                 // Reduce animations
-                if my >= y && my < y + ITEM_HEIGHT
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
-                {
+                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
                     self.reduce_animations = !self.reduce_animations;
                     return;
                 }
@@ -2817,9 +3425,7 @@ impl SettingsState {
                 }
                 y += ITEM_HEIGHT;
                 // Reduce transparency
-                if my >= y && my < y + ITEM_HEIGHT
-                    && mx >= right_x && mx < right_x + TOGGLE_WIDTH
-                {
+                if my >= y && my < y + ITEM_HEIGHT && mx >= right_x && mx < right_x + TOGGLE_WIDTH {
                     self.reduce_transparency = !self.reduce_transparency;
                 }
             }
@@ -2916,7 +3522,22 @@ impl SettingsState {
             return true;
         }
         let query_lower = self.search_query.to_lowercase();
-        text.to_lowercase().contains(&query_lower)
+        let text_lower = text.to_lowercase();
+        if text_lower.contains(&query_lower) {
+            return true;
+        }
+        // Be punctuation/whitespace-insensitive so a query like "wifi" matches a
+        // label like "Wi-Fi" (and "nightlight" matches "Night Light"). Compare
+        // with all non-alphanumeric characters stripped from both sides.
+        let strip = |s: &str| {
+            s.chars()
+                .filter(char::is_ascii_alphanumeric)
+                .collect::<String>()
+        };
+        let stripped_query = strip(&query_lower);
+        // An all-punctuation query strips to empty; don't let that match
+        // everything — fall back to "no match" in that case.
+        !stripped_query.is_empty() && strip(&text_lower).contains(&stripped_query)
     }
 
     /// Get filtered categories based on search query.
@@ -2955,7 +3576,10 @@ fn main() {
     assert!(!tree.is_empty(), "Settings UI must produce render commands");
 
     // Simulate a resize event
-    let resize_event = Event::Resize { width: 1400, height: 900 };
+    let resize_event = Event::Resize {
+        width: 1400,
+        height: 900,
+    };
     let result = state.handle_event(&resize_event);
     assert_eq!(result, EventResult::Consumed);
 
@@ -3080,7 +3704,10 @@ mod tests {
     #[test]
     fn test_resize_event() {
         let mut state = SettingsState::new();
-        let evt = Event::Resize { width: 1600, height: 1000 };
+        let evt = Event::Resize {
+            width: 1600,
+            height: 1000,
+        };
         let result = state.handle_event(&evt);
         assert_eq!(result, EventResult::Consumed);
         assert_eq!(state.window_width, 1600.0);

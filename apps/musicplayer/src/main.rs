@@ -16,9 +16,9 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, KeyEvent, Key, Modifiers, MouseEvent, MouseEventKind, MouseButton};
+use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{RenderTree, RenderCommand, FontWeightHint};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -168,20 +168,15 @@ pub fn parse_wav_header(data: &[u8]) -> Option<WavInfo> {
 
         if chunk_id == b"fmt " && chunk_size >= 16 {
             let fmt_start = offset + 8;
-            channels = u16::from_le_bytes([
-                *data.get(fmt_start + 2)?,
-                *data.get(fmt_start + 3)?,
-            ]);
+            channels = u16::from_le_bytes([*data.get(fmt_start + 2)?, *data.get(fmt_start + 3)?]);
             sample_rate = u32::from_le_bytes([
                 *data.get(fmt_start + 4)?,
                 *data.get(fmt_start + 5)?,
                 *data.get(fmt_start + 6)?,
                 *data.get(fmt_start + 7)?,
             ]);
-            bits_per_sample = u16::from_le_bytes([
-                *data.get(fmt_start + 14)?,
-                *data.get(fmt_start + 15)?,
-            ]);
+            bits_per_sample =
+                u16::from_le_bytes([*data.get(fmt_start + 14)?, *data.get(fmt_start + 15)?]);
             found_fmt = true;
         } else if chunk_id == b"data" {
             data_size = chunk_size;
@@ -247,9 +242,8 @@ pub fn parse_flac_header(data: &[u8]) -> Option<FlacInfo> {
     }
 
     // Block size: 3 bytes at offset 5
-    let block_size = ((*data.get(5)? as u32) << 16)
-        | ((*data.get(6)? as u32) << 8)
-        | (*data.get(7)? as u32);
+    let block_size =
+        ((*data.get(5)? as u32) << 16) | ((*data.get(6)? as u32) << 8) | (*data.get(7)? as u32);
     if block_size < 34 || data.len() < 8 + block_size as usize {
         return None;
     }
@@ -649,9 +643,7 @@ impl PlayerState {
 
     /// Total duration of current track.
     pub fn current_duration(&self) -> f32 {
-        self.current_track()
-            .map(|t| t.duration_secs)
-            .unwrap_or(0.0)
+        self.current_track().map(|t| t.duration_secs).unwrap_or(0.0)
     }
 
     /// Toggle play/pause.
@@ -974,7 +966,13 @@ fn render_tab_bar(state: &PlayerState, tree: &mut RenderTree) {
 
         if active {
             // Active indicator line
-            tree.fill_rect(x + 10.0, TAB_BAR_HEIGHT - 3.0, tab_width - 20.0, 3.0, LAVENDER);
+            tree.fill_rect(
+                x + 10.0,
+                TAB_BAR_HEIGHT - 3.0,
+                tab_width - 20.0,
+                3.0,
+                LAVENDER,
+            );
         }
 
         x += tab_width + 8.0;
@@ -1071,8 +1069,7 @@ fn render_now_playing(state: &PlayerState, tree: &mut RenderTree, content_height
             let amplitude = if state.playing {
                 // Generate pseudo-random bar heights based on position and index
                 let seed = (state.position_secs * 10.0) as u32;
-                let val = ((seed.wrapping_mul(31).wrapping_add(i as u32 * 7)) % 100) as f32
-                    / 100.0;
+                let val = ((seed.wrapping_mul(31).wrapping_add(i as u32 * 7)) % 100) as f32 / 100.0;
                 val * max_bar_height
             } else {
                 2.0 // Flat line when paused
@@ -1537,7 +1534,15 @@ fn render_controls(state: &PlayerState, tree: &mut RenderTree) {
     );
 
     // Stop button
-    render_button(tree, btn_center_x - 130.0, btn_y, BUTTON_SIZE, "⏹", SURFACE0, TEXT_COLOR);
+    render_button(
+        tree,
+        btn_center_x - 130.0,
+        btn_y,
+        BUTTON_SIZE,
+        "⏹",
+        SURFACE0,
+        TEXT_COLOR,
+    );
 
     // Repeat mode button
     let repeat_color = match state.repeat_mode {
@@ -1925,7 +1930,9 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
 
                 // Progress bar click
                 let progress_y_local = 8.0;
-                if rel_y >= progress_y_local && rel_y <= progress_y_local + PROGRESS_BAR_HEIGHT + 8.0 {
+                if rel_y >= progress_y_local
+                    && rel_y <= progress_y_local + PROGRESS_BAR_HEIGHT + 8.0
+                {
                     let progress_x = 16.0;
                     let progress_width = state.width - 32.0;
                     if x >= progress_x && x <= progress_x + progress_width {
@@ -2010,9 +2017,8 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
             if y >= content_y && y < content_y + content_height {
                 let rel_y = y - content_y;
                 if rel_y > TRACK_ROW_HEIGHT {
-                    let row_idx =
-                        ((rel_y - TRACK_ROW_HEIGHT + state.scroll_offset) / TRACK_ROW_HEIGHT)
-                            as usize;
+                    let row_idx = ((rel_y - TRACK_ROW_HEIGHT + state.scroll_offset)
+                        / TRACK_ROW_HEIGHT) as usize;
                     state.selected_index = Some(row_idx);
                     return true;
                 }
@@ -2075,9 +2081,8 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
             if y >= content_y && y < content_y + content_height {
                 let rel_y = y - content_y;
                 if rel_y > TRACK_ROW_HEIGHT {
-                    let row_idx =
-                        ((rel_y - TRACK_ROW_HEIGHT + state.scroll_offset) / TRACK_ROW_HEIGHT)
-                            as usize;
+                    let row_idx = ((rel_y - TRACK_ROW_HEIGHT + state.scroll_offset)
+                        / TRACK_ROW_HEIGHT) as usize;
 
                     match state.active_tab {
                         Tab::Library => {
@@ -2136,7 +2141,9 @@ fn album_color(album: &str) -> Color {
     }
 
     // Use hash to pick from a set of pleasing colors
-    let palette = [MAUVE, BLUE, SAPPHIRE, GREEN, PEACH, PINK, LAVENDER, YELLOW, RED];
+    let palette = [
+        MAUVE, BLUE, SAPPHIRE, GREEN, PEACH, PINK, LAVENDER, YELLOW, RED,
+    ];
     let idx = (hash as usize) % palette.len();
     let base_color = palette[idx];
 
@@ -2158,21 +2165,86 @@ fn main() {
 
     // Add some demo tracks to show the UI populated
     let demo_tracks = [
-        ("Midnight Drive", "Neon Waves", "Synthwave Dreams", 234.0, AudioFormat::Mp3),
-        ("Crystal Caves", "Aurora Borealis", "Northern Lights", 187.0, AudioFormat::Flac),
-        ("Summer Rain", "The Drifters", "Coastal Vibes", 312.0, AudioFormat::Wav),
-        ("Binary Stars", "Quantum Loop", "Digital Horizons", 256.0, AudioFormat::Ogg),
-        ("Velvet Thunder", "Storm Chasers", "Electric Sky", 198.0, AudioFormat::Mp3),
-        ("Paper Moon", "Origami Hearts", "Folded Memories", 275.0, AudioFormat::Flac),
-        ("Desert Wind", "Sandstone", "Arid Dreams", 341.0, AudioFormat::Wav),
-        ("Neon Pulse", "Circuit Breaker", "Digital Horizons", 223.0, AudioFormat::Mp3),
-        ("Ocean Floor", "Deep Blue", "Abyssal", 289.0, AudioFormat::Flac),
-        ("Starlight", "Cosmos", "Infinite Void", 167.0, AudioFormat::Ogg),
+        (
+            "Midnight Drive",
+            "Neon Waves",
+            "Synthwave Dreams",
+            234.0,
+            AudioFormat::Mp3,
+        ),
+        (
+            "Crystal Caves",
+            "Aurora Borealis",
+            "Northern Lights",
+            187.0,
+            AudioFormat::Flac,
+        ),
+        (
+            "Summer Rain",
+            "The Drifters",
+            "Coastal Vibes",
+            312.0,
+            AudioFormat::Wav,
+        ),
+        (
+            "Binary Stars",
+            "Quantum Loop",
+            "Digital Horizons",
+            256.0,
+            AudioFormat::Ogg,
+        ),
+        (
+            "Velvet Thunder",
+            "Storm Chasers",
+            "Electric Sky",
+            198.0,
+            AudioFormat::Mp3,
+        ),
+        (
+            "Paper Moon",
+            "Origami Hearts",
+            "Folded Memories",
+            275.0,
+            AudioFormat::Flac,
+        ),
+        (
+            "Desert Wind",
+            "Sandstone",
+            "Arid Dreams",
+            341.0,
+            AudioFormat::Wav,
+        ),
+        (
+            "Neon Pulse",
+            "Circuit Breaker",
+            "Digital Horizons",
+            223.0,
+            AudioFormat::Mp3,
+        ),
+        (
+            "Ocean Floor",
+            "Deep Blue",
+            "Abyssal",
+            289.0,
+            AudioFormat::Flac,
+        ),
+        (
+            "Starlight",
+            "Cosmos",
+            "Infinite Void",
+            167.0,
+            AudioFormat::Ogg,
+        ),
     ];
 
     for (title, artist, album, duration, format) in &demo_tracks {
         let track = Track {
-            path: PathBuf::from(format!("/music/{}/{}.{}", artist, title, format.name().to_lowercase())),
+            path: PathBuf::from(format!(
+                "/music/{}/{}.{}",
+                artist,
+                title,
+                format.name().to_lowercase()
+            )),
             title: title.to_string(),
             artist: artist.to_string(),
             album: album.to_string(),
@@ -2235,7 +2307,9 @@ mod tests {
 
     #[test]
     fn test_audio_format_detection_mp3_sync() {
-        let data = vec![0xFF, 0xFB, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00];
+        let data = vec![
+            0xFF, 0xFB, 0x90, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        ];
         assert_eq!(AudioFormat::detect(&data), AudioFormat::Mp3);
     }
 
@@ -2247,10 +2321,11 @@ mod tests {
 
     #[test]
     fn test_wav_header_parsing() {
-        // Minimal valid WAV: 44100 Hz, 2 channels, 16 bits, 88200 bytes of data (1 second)
+        // Minimal valid WAV: 44100 Hz, 2 channels, 16 bits. 1 second of audio is
+        // 44100 * 2 channels * 2 bytes = 176400 bytes of PCM data.
         let mut data = vec![0u8; 44];
         data[0..4].copy_from_slice(b"RIFF");
-        data[4..8].copy_from_slice(&(36 + 88200u32).to_le_bytes());
+        data[4..8].copy_from_slice(&(36 + 176400u32).to_le_bytes());
         data[8..12].copy_from_slice(b"WAVE");
         // fmt chunk
         data[12..16].copy_from_slice(b"fmt ");
@@ -2263,7 +2338,7 @@ mod tests {
         data[34..36].copy_from_slice(&16u16.to_le_bytes()); // bits per sample
         // data chunk
         data[36..40].copy_from_slice(b"data");
-        data[40..44].copy_from_slice(&88200u32.to_le_bytes());
+        data[40..44].copy_from_slice(&176400u32.to_le_bytes());
 
         let info = parse_wav_header(&data).expect("Should parse valid WAV header");
         assert_eq!(info.sample_rate, 44100);

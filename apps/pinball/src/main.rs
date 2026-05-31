@@ -25,9 +25,9 @@
 //! ball launching.
 
 use guitk::color::Color;
-use guitk::event::{Event, Key, KeyEvent};
 #[cfg(test)]
 use guitk::event::Modifiers;
+use guitk::event::{Event, Key, KeyEvent};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 
@@ -284,10 +284,7 @@ impl Ball {
 
     /// The ball rests in the plunger lane before launch.
     fn plunger_position() -> Vec2 {
-        Vec2::new(
-            TABLE_WIDTH - PLUNGER_LANE_WIDTH / 2.0,
-            TABLE_HEIGHT - 40.0,
-        )
+        Vec2::new(TABLE_WIDTH - PLUNGER_LANE_WIDTH / 2.0, TABLE_HEIGHT - 40.0)
     }
 }
 
@@ -561,8 +558,9 @@ struct Pinball {
     high_scores: Vec<HighScoreEntry>,
     /// Current combo multiplier.
     combo: u32,
-    /// Time of last scoring event for combo tracking.
-    last_score_ms: u64,
+    /// Time of last scoring event for combo tracking. `None` means no scoring
+    /// event has occurred yet, so the next hit starts a fresh combo (x1).
+    last_score_ms: Option<u64>,
     /// Total elapsed time in ms.
     total_ms: u64,
     /// Plunger launch power (0.0 to 1.0).
@@ -607,19 +605,12 @@ impl Pinball {
             DropTarget::new(200.0, 280.0, 30.0, 10.0),
         ];
 
-        let ramp = Ramp::new(
-            Vec2::new(60.0, 350.0),
-            Vec2::new(40.0, 100.0),
-            40.0,
-        );
+        let ramp = Ramp::new(Vec2::new(60.0, 350.0), Vec2::new(40.0, 100.0), 40.0);
 
         let mut app = Self {
             balls: Vec::new(),
             left_flipper: Flipper::new(FlipperSide::Left, Vec2::new(LEFT_FLIPPER_X, FLIPPER_Y)),
-            right_flipper: Flipper::new(
-                FlipperSide::Right,
-                Vec2::new(RIGHT_FLIPPER_X, FLIPPER_Y),
-            ),
+            right_flipper: Flipper::new(FlipperSide::Right, Vec2::new(RIGHT_FLIPPER_X, FLIPPER_Y)),
             bumpers,
             targets,
             ramp,
@@ -635,7 +626,7 @@ impl Pinball {
                 HighScoreEntry { score: 1000 },
             ],
             combo: 1,
-            last_score_ms: 0,
+            last_score_ms: None,
             total_ms: 0,
             launch_power: 0.0,
             multi_ball_active: false,
@@ -683,13 +674,18 @@ impl Pinball {
 
     /// Award points with combo multiplier.
     fn award_points(&mut self, base_points: u32) {
-        // Update combo.
-        if self.total_ms.saturating_sub(self.last_score_ms) > COMBO_WINDOW_MS {
-            self.combo = 1;
-        } else {
-            self.combo = (self.combo + 1).min(MAX_COMBO);
+        // Update combo. The first scoring event (or one after the combo window
+        // has lapsed) starts a fresh combo at x1; a hit within the window of the
+        // previous one increments the multiplier.
+        match self.last_score_ms {
+            Some(prev) if self.total_ms.saturating_sub(prev) <= COMBO_WINDOW_MS => {
+                self.combo = self.combo.saturating_add(1).min(MAX_COMBO);
+            }
+            _ => {
+                self.combo = 1;
+            }
         }
-        self.last_score_ms = self.total_ms;
+        self.last_score_ms = Some(self.total_ms);
 
         let points = base_points * self.combo;
         self.score += points;
@@ -721,14 +717,15 @@ impl Pinball {
         }
         self.multi_ball_active = true;
         // Add two extra balls at various positions.
-        let positions = [
-            Vec2::new(100.0, 200.0),
-            Vec2::new(180.0, 250.0),
-        ];
+        let positions = [Vec2::new(100.0, 200.0), Vec2::new(180.0, 250.0)];
         for &pos in &positions {
             let mut ball = Ball::new(pos);
             ball.active = true;
-            let vx = if self.rng.next_f32() > 0.5 { 80.0 } else { -80.0 };
+            let vx = if self.rng.next_f32() > 0.5 {
+                80.0
+            } else {
+                -80.0
+            };
             ball.vel = Vec2::new(vx, -200.0);
             self.balls.push(ball);
         }
@@ -898,7 +895,11 @@ impl Pinball {
 
         // Award points for bumper hits (check if any bumper was just hit this frame).
         let current_ms = self.total_ms;
-        let bumper_hit_count = self.bumpers.iter().filter(|b| b.last_hit_ms == current_ms).count();
+        let bumper_hit_count = self
+            .bumpers
+            .iter()
+            .filter(|b| b.last_hit_ms == current_ms)
+            .count();
         for _ in 0..bumper_hit_count {
             self.award_points(BUMPER_POINTS);
             self.total_bumper_hits += 1;
@@ -996,10 +997,7 @@ impl Pinball {
                     FlipperSide::Right => -(core::f32::consts::PI - 1.2) - t * 0.8,
                 };
                 let speed = FLIPPER_HIT_SPEED * speed_factor;
-                self.balls[idx].vel = Vec2::new(
-                    base_angle.cos() * speed,
-                    base_angle.sin() * speed,
-                );
+                self.balls[idx].vel = Vec2::new(base_angle.cos() * speed, base_angle.sin() * speed);
             } else {
                 // Passive flipper: just bounce.
                 let reflected = self.balls[idx].vel.reflect(normal);
@@ -1318,7 +1316,11 @@ impl Pinball {
             x: sx + 10.0,
             y: stats_y + 72.0,
             text: format!("Targets: {}/{}", targets_hit, targets_total),
-            color: if targets_hit == targets_total { GREEN } else { SUBTEXT0 },
+            color: if targets_hit == targets_total {
+                GREEN
+            } else {
+                SUBTEXT0
+            },
             font_size: LABEL_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -1616,7 +1618,13 @@ impl Pinball {
         self.render_one_flipper(cmds, tx, ty, &self.right_flipper);
     }
 
-    fn render_one_flipper(&self, cmds: &mut Vec<RenderCommand>, tx: f32, ty: f32, flipper: &Flipper) {
+    fn render_one_flipper(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        tx: f32,
+        ty: f32,
+        flipper: &Flipper,
+    ) {
         let pivot = flipper.pivot;
         let tip = flipper.tip();
 
@@ -1690,7 +1698,10 @@ impl Pinball {
 
     fn render_balls(&self, cmds: &mut Vec<RenderCommand>, tx: f32, ty: f32) {
         for ball in &self.balls {
-            if !ball.active && self.phase != GamePhase::ReadyToLaunch && self.phase != GamePhase::Launching {
+            if !ball.active
+                && self.phase != GamePhase::ReadyToLaunch
+                && self.phase != GamePhase::Launching
+            {
                 continue;
             }
             let bx = tx + ball.pos.x;
@@ -1790,7 +1801,9 @@ impl Pinball {
         cmds.push(RenderCommand::Text {
             x: PADDING,
             y: fy + 12.0,
-            text: "L-Shift/Z: Left Flip | R-Shift/M: Right Flip | Space: Launch | N: New | P: Pause".to_string(),
+            text:
+                "L-Shift/Z: Left Flip | R-Shift/M: Right Flip | Space: Launch | N: New | P: Pause"
+                    .to_string(),
             color: OVERLAY0,
             font_size: FOOTER_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
@@ -2904,7 +2917,9 @@ mod tests {
         app.phase = GamePhase::GameOver;
         let cmds = app.render();
         // Should contain game over text.
-        let has_game_over = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("GAME OVER")));
+        let has_game_over = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("GAME OVER")));
         assert!(has_game_over);
     }
 
@@ -2913,7 +2928,9 @@ mod tests {
         let mut app = test_app();
         app.phase = GamePhase::Paused;
         let cmds = app.render();
-        let has_paused = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("PAUSED")));
+        let has_paused = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("PAUSED")));
         assert!(has_paused);
     }
 
@@ -2922,7 +2939,9 @@ mod tests {
         let mut app = test_app();
         app.phase = GamePhase::BallLost;
         let cmds = app.render();
-        let has_ball_lost = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("BALL LOST")));
+        let has_ball_lost = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("BALL LOST")));
         assert!(has_ball_lost);
     }
 
@@ -2930,7 +2949,9 @@ mod tests {
     fn test_render_has_score_text() {
         let app = test_app();
         let cmds = app.render();
-        let has_score = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("SCORE")));
+        let has_score = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("SCORE")));
         assert!(has_score);
     }
 
@@ -2938,7 +2959,9 @@ mod tests {
     fn test_render_has_pinball_title() {
         let app = test_app();
         let cmds = app.render();
-        let has_title = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("PINBALL")));
+        let has_title = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("PINBALL")));
         assert!(has_title);
     }
 
@@ -2946,7 +2969,9 @@ mod tests {
     fn test_render_has_footer() {
         let app = test_app();
         let cmds = app.render();
-        let has_footer = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Launch")));
+        let has_footer = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Launch")));
         assert!(has_footer);
     }
 
@@ -2967,7 +2992,9 @@ mod tests {
         let mut app = test_app();
         app.multi_ball_active = true;
         let cmds = app.render();
-        let has_multi = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("MULTI-BALL")));
+        let has_multi = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("MULTI-BALL")));
         assert!(has_multi);
     }
 
@@ -2976,7 +3003,9 @@ mod tests {
         let mut app = test_app();
         app.tilt.tilted = true;
         let cmds = app.render();
-        let has_tilt = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("TILT")));
+        let has_tilt = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("TILT")));
         assert!(has_tilt);
     }
 
@@ -2984,7 +3013,9 @@ mod tests {
     fn test_render_high_scores_visible() {
         let app = test_app();
         let cmds = app.render();
-        let has_hs = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("HIGH SCORES")));
+        let has_hs = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("HIGH SCORES")));
         assert!(has_hs);
     }
 
@@ -2993,7 +3024,9 @@ mod tests {
         let app = test_app();
         let cmds = app.render();
         // Plunger renders a FillRect with PEACH color for the head.
-        let has_plunger = cmds.iter().any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == PEACH));
+        let has_plunger = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == PEACH));
         assert!(has_plunger);
     }
 }

@@ -1,4 +1,4 @@
-//! OurOS System Log Viewer
+//! `OurOS` System Log Viewer
 //!
 //! A log viewing and analysis tool with:
 //! - JSON-lines log format parsing (the OS's native log format)
@@ -152,7 +152,14 @@ impl LogLevel {
     }
 
     fn all() -> &'static [Self] {
-        &[Self::Trace, Self::Debug, Self::Info, Self::Warn, Self::Error, Self::Fatal]
+        &[
+            Self::Trace,
+            Self::Debug,
+            Self::Info,
+            Self::Warn,
+            Self::Error,
+            Self::Fatal,
+        ]
     }
 
     fn severity(self) -> u8 {
@@ -208,30 +215,53 @@ fn parse_json_line(line: &str, line_number: usize) -> Option<LogEntry> {
     // Simple JSON object parser
     let fields = parse_json_object(trimmed)?;
 
-    let timestamp = fields.iter()
+    let timestamp = fields
+        .iter()
         .find(|(k, _)| k == "timestamp" || k == "ts" || k == "time" || k == "t")
         .and_then(|(_, v)| v.parse::<u64>().ok())
         .unwrap_or(0);
 
-    let level = fields.iter()
+    let level = fields
+        .iter()
         .find(|(k, _)| k == "level" || k == "lvl" || k == "severity")
         .and_then(|(_, v)| LogLevel::from_str(v))
         .unwrap_or(LogLevel::Info);
 
-    let source = fields.iter()
-        .find(|(k, _)| k == "source" || k == "src" || k == "component" || k == "module" || k == "logger")
+    let source = fields
+        .iter()
+        .find(|(k, _)| {
+            k == "source" || k == "src" || k == "component" || k == "module" || k == "logger"
+        })
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
 
-    let message = fields.iter()
+    let message = fields
+        .iter()
         .find(|(k, _)| k == "message" || k == "msg" || k == "text")
         .map(|(_, v)| v.clone())
         .unwrap_or_default();
 
-    let extra_fields: Vec<(String, String)> = fields.iter()
+    let extra_fields: Vec<(String, String)> = fields
+        .iter()
         .filter(|(k, _)| {
-            !matches!(k.as_str(), "timestamp" | "ts" | "time" | "t" | "level" | "lvl" | "severity"
-                | "source" | "src" | "component" | "module" | "logger" | "message" | "msg" | "text")
+            !matches!(
+                k.as_str(),
+                "timestamp"
+                    | "ts"
+                    | "time"
+                    | "t"
+                    | "level"
+                    | "lvl"
+                    | "severity"
+                    | "source"
+                    | "src"
+                    | "component"
+                    | "module"
+                    | "logger"
+                    | "message"
+                    | "msg"
+                    | "text"
+            )
         })
         .cloned()
         .collect();
@@ -254,19 +284,25 @@ fn parse_json_object(s: &str) -> Option<Vec<(String, String)>> {
 
     // Skip whitespace and opening brace
     skip_ws(&chars, &mut i);
-    if chars.get(i) != Some(&'{') { return None; }
+    if chars.get(i) != Some(&'{') {
+        return None;
+    }
     i = i.saturating_add(1);
 
     let mut fields = Vec::new();
 
     loop {
         skip_ws(&chars, &mut i);
-        if chars.get(i) == Some(&'}') { break; }
+        if chars.get(i) == Some(&'}') {
+            break;
+        }
 
         // Parse key
         let key = parse_json_string(&chars, &mut i)?;
         skip_ws(&chars, &mut i);
-        if chars.get(i) != Some(&':') { return None; }
+        if chars.get(i) != Some(&':') {
+            return None;
+        }
         i = i.saturating_add(1);
         skip_ws(&chars, &mut i);
 
@@ -290,7 +326,9 @@ fn skip_ws(chars: &[char], i: &mut usize) {
 }
 
 fn parse_json_string(chars: &[char], i: &mut usize) -> Option<String> {
-    if chars.get(*i) != Some(&'"') { return None; }
+    if chars.get(*i) != Some(&'"') {
+        return None;
+    }
     *i = i.saturating_add(1);
 
     let mut s = String::new();
@@ -319,11 +357,10 @@ fn parse_json_string(chars: &[char], i: &mut usize) -> Option<String> {
                                 *i = i.saturating_add(1);
                             }
                         }
-                        if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                            if let Some(ch) = char::from_u32(code) {
+                        if let Ok(code) = u32::from_str_radix(&hex, 16)
+                            && let Some(ch) = char::from_u32(code) {
                                 s.push(ch);
                             }
-                        }
                         continue;
                     }
                     Some(&c) => s.push(c),
@@ -343,7 +380,14 @@ fn parse_json_value(chars: &[char], i: &mut usize) -> Option<String> {
         Some('"') => parse_json_string(chars, i),
         Some(c) if c.is_ascii_digit() || *c == '-' => {
             let mut n = String::new();
-            while *i < chars.len() && (chars[*i].is_ascii_digit() || chars[*i] == '.' || chars[*i] == '-' || chars[*i] == 'e' || chars[*i] == 'E' || chars[*i] == '+') {
+            while *i < chars.len()
+                && (chars[*i].is_ascii_digit()
+                    || chars[*i] == '.'
+                    || chars[*i] == '-'
+                    || chars[*i] == 'e'
+                    || chars[*i] == 'E'
+                    || chars[*i] == '+')
+            {
                 n.push(chars[*i]);
                 *i = i.saturating_add(1);
             }
@@ -351,26 +395,44 @@ fn parse_json_value(chars: &[char], i: &mut usize) -> Option<String> {
         }
         Some('t') => {
             // true
-            if chars.get(*i..i.saturating_add(4)).map(|s| s.iter().collect::<String>()) == Some("true".into()) {
+            if chars
+                .get(*i..i.saturating_add(4))
+                .map(|s| s.iter().collect::<String>())
+                == Some("true".into())
+            {
                 *i = i.saturating_add(4);
                 Some("true".into())
-            } else { None }
+            } else {
+                None
+            }
         }
         Some('f') => {
             // false
-            if chars.get(*i..i.saturating_add(5)).map(|s| s.iter().collect::<String>()) == Some("false".into()) {
+            if chars
+                .get(*i..i.saturating_add(5))
+                .map(|s| s.iter().collect::<String>())
+                == Some("false".into())
+            {
                 *i = i.saturating_add(5);
                 Some("false".into())
-            } else { None }
+            } else {
+                None
+            }
         }
         Some('n') => {
             // null
-            if chars.get(*i..i.saturating_add(4)).map(|s| s.iter().collect::<String>()) == Some("null".into()) {
+            if chars
+                .get(*i..i.saturating_add(4))
+                .map(|s| s.iter().collect::<String>())
+                == Some("null".into())
+            {
                 *i = i.saturating_add(4);
                 Some("null".into())
-            } else { None }
+            } else {
+                None
+            }
         }
-        Some('[') | Some('{') => {
+        Some('[' | '{') => {
             // Skip nested structures (arrays/objects) as a single string
             let start = *i;
             let open = chars[*i];
@@ -381,7 +443,10 @@ fn parse_json_value(chars: &[char], i: &mut usize) -> Option<String> {
                 match chars[*i] {
                     c if c == open => depth = depth.saturating_add(1),
                     c if c == close => depth = depth.saturating_sub(1),
-                    '"' => { let _ = parse_json_string(chars, i); continue; }
+                    '"' => {
+                        let _ = parse_json_string(chars, i);
+                        continue;
+                    }
                     _ => {}
                 }
                 *i = i.saturating_add(1);
@@ -407,7 +472,8 @@ fn parse_plain_line(line: &str, line_number: usize) -> LogEntry {
         LogLevel::Debug
     } else if upper.contains("[TRACE]") || upper.contains(" TRACE ") {
         LogLevel::Trace
-    } else if upper.contains("[FATAL]") || upper.contains(" FATAL ") || upper.contains("[CRITICAL]") {
+    } else if upper.contains("[FATAL]") || upper.contains(" FATAL ") || upper.contains("[CRITICAL]")
+    {
         LogLevel::Fatal
     } else {
         LogLevel::Info
@@ -455,7 +521,9 @@ impl LogFile {
         self.is_json = first_line.trim().starts_with('{');
 
         for (i, line) in content.lines().enumerate() {
-            if self.entries.len() >= MAX_LOG_ENTRIES { break; }
+            if self.entries.len() >= MAX_LOG_ENTRIES {
+                break;
+            }
 
             let entry = if self.is_json {
                 parse_json_line(line, i.saturating_add(1))
@@ -502,14 +570,16 @@ impl LogFile {
     fn top_sources(&self, limit: usize) -> Vec<(String, usize)> {
         let mut counts: Vec<(String, usize)> = Vec::new();
         for entry in &self.entries {
-            if entry.source.is_empty() { continue; }
+            if entry.source.is_empty() {
+                continue;
+            }
             if let Some(item) = counts.iter_mut().find(|(s, _)| *s == entry.source) {
                 item.1 = item.1.saturating_add(1);
             } else {
                 counts.push((entry.source.clone(), 1));
             }
         }
-        counts.sort_by(|a, b| b.1.cmp(&a.1));
+        counts.sort_by_key(|c| core::cmp::Reverse(c.1));
         counts.truncate(limit);
         counts
     }
@@ -550,19 +620,20 @@ impl FilterState {
         }
 
         // Source filter
-        if let Some(src) = &self.source_filter {
-            if !entry.source.eq_ignore_ascii_case(src) {
+        if let Some(src) = &self.source_filter
+            && !entry.source.eq_ignore_ascii_case(src) {
                 return false;
             }
-        }
 
         // Time range
-        if let Some(start) = self.time_start {
-            if entry.timestamp < start { return false; }
-        }
-        if let Some(end) = self.time_end {
-            if entry.timestamp > end { return false; }
-        }
+        if let Some(start) = self.time_start
+            && entry.timestamp < start {
+                return false;
+            }
+        if let Some(end) = self.time_end
+            && entry.timestamp > end {
+                return false;
+            }
 
         // Bookmarked only
         if self.show_bookmarked_only && !entry.bookmarked {
@@ -574,7 +645,10 @@ impl FilterState {
             let lower = self.search_query.to_ascii_lowercase();
             let msg_match = entry.message.to_ascii_lowercase().contains(&lower);
             let src_match = entry.source.to_ascii_lowercase().contains(&lower);
-            let field_match = entry.fields.iter().any(|(_, v)| v.to_ascii_lowercase().contains(&lower));
+            let field_match = entry
+                .fields
+                .iter()
+                .any(|(_, v)| v.to_ascii_lowercase().contains(&lower));
             if !(msg_match || src_match || field_match) {
                 return false;
             }
@@ -689,7 +763,8 @@ impl App {
 
     fn filtered_entries(&self) -> Vec<(usize, &LogEntry)> {
         if let Some(log) = self.active_log() {
-            log.entries.iter()
+            log.entries
+                .iter()
                 .enumerate()
                 .filter(|(_, e)| self.filter.matches(e))
                 .collect()
@@ -699,24 +774,28 @@ impl App {
     }
 
     fn toggle_bookmark(&mut self, entry_idx: usize) {
-        if let Some(log) = self.files.get_mut(self.active_file) {
-            if let Some(entry) = log.entries.get_mut(entry_idx) {
+        if let Some(log) = self.files.get_mut(self.active_file)
+            && let Some(entry) = log.entries.get_mut(entry_idx) {
                 entry.bookmarked = !entry.bookmarked;
             }
-        }
     }
 
     fn update_search(&mut self) {
         self.search_results.clear();
-        if self.filter.search_query.is_empty() { return; }
+        if self.filter.search_query.is_empty() {
+            return;
+        }
 
         let lower = self.filter.search_query.to_ascii_lowercase();
         // Use field access instead of active_log() to allow partial borrowing
         if let Some(log) = self.files.get(self.active_file) {
             for (i, entry) in log.entries.iter().enumerate() {
-                if self.search_results.len() >= MAX_SEARCH_RESULTS { break; }
+                if self.search_results.len() >= MAX_SEARCH_RESULTS {
+                    break;
+                }
                 if entry.message.to_ascii_lowercase().contains(&lower)
-                    || entry.source.to_ascii_lowercase().contains(&lower) {
+                    || entry.source.to_ascii_lowercase().contains(&lower)
+                {
                     self.search_results.push(i);
                 }
             }
@@ -726,7 +805,8 @@ impl App {
 
     fn next_search_result(&mut self) {
         if !self.search_results.is_empty() {
-            self.current_search_result = (self.current_search_result.saturating_add(1)) % self.search_results.len();
+            self.current_search_result =
+                (self.current_search_result.saturating_add(1)) % self.search_results.len();
         }
     }
 
@@ -745,8 +825,10 @@ impl App {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: WINDOW_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -770,15 +852,18 @@ impl App {
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: TOOLBAR_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: TOOLBAR_HEIGHT,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: PADDING, y: 13.0,
+            x: PADDING,
+            y: 13.0,
             text: "Log Viewer".into(),
             font_size: TITLE_TEXT,
             color: TEXT,
@@ -793,17 +878,24 @@ impl App {
             let active = fi == self.active_file;
 
             cmds.push(RenderCommand::FillRect {
-                x: tab_x, y: 8.0,
-                width: w, height: 28.0,
+                x: tab_x,
+                y: 8.0,
+                width: w,
+                height: 28.0,
                 color: if active { SURFACE0 } else { CRUST },
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: tab_x + 10.0, y: 14.0,
+                x: tab_x + 10.0,
+                y: 14.0,
                 text: file.name.clone(),
                 font_size: SMALL_TEXT,
                 color: if active { TEXT } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w),
             });
             tab_x += w + 4.0;
@@ -818,13 +910,16 @@ impl App {
             let active = *mode == self.view_mode;
 
             cmds.push(RenderCommand::FillRect {
-                x: mx, y: 8.0,
-                width: w, height: 28.0,
+                x: mx,
+                y: 8.0,
+                width: w,
+                height: 28.0,
                 color: if active { BLUE } else { SURFACE0 },
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: mx + 8.0, y: 14.0,
+                x: mx + 8.0,
+                y: 14.0,
                 text: label.into(),
                 font_size: SMALL_TEXT,
                 color: if active { CRUST } else { SUBTEXT0 },
@@ -835,9 +930,14 @@ impl App {
         }
 
         // Auto-scroll toggle
-        let auto_label = if self.auto_scroll { "Auto [ON]" } else { "Auto [OFF]" };
+        let auto_label = if self.auto_scroll {
+            "Auto [ON]"
+        } else {
+            "Auto [OFF]"
+        };
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 80.0, y: 14.0,
+            x: WINDOW_WIDTH - 80.0,
+            y: 14.0,
             text: auto_label.into(),
             font_size: SMALL_TEXT,
             color: if self.auto_scroll { GREEN } else { OVERLAY0 },
@@ -850,8 +950,10 @@ impl App {
         let y = TOOLBAR_HEIGHT;
 
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y,
-            width: WINDOW_WIDTH, height: FILTER_BAR_HEIGHT,
+            x: 0.0,
+            y,
+            width: WINDOW_WIDTH,
+            height: FILTER_BAR_HEIGHT,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -864,13 +966,16 @@ impl App {
             let active = level.severity() >= self.filter.min_level.severity();
 
             cmds.push(RenderCommand::FillRect {
-                x: lx, y: y + 6.0,
-                width: w, height: 24.0,
+                x: lx,
+                y: y + 6.0,
+                width: w,
+                height: 24.0,
                 color: if active { level.color() } else { SURFACE0 },
                 corner_radii: CornerRadii::all(12.0),
             });
             cmds.push(RenderCommand::Text {
-                x: lx + 6.0, y: y + 11.0,
+                x: lx + 6.0,
+                y: y + 11.0,
                 text: label.into(),
                 font_size: 10.0,
                 color: if active { CRUST } else { OVERLAY0 },
@@ -884,8 +989,10 @@ impl App {
         let search_x = lx + 12.0;
         let search_w = 250.0;
         cmds.push(RenderCommand::FillRect {
-            x: search_x, y: y + 6.0,
-            width: search_w, height: 24.0,
+            x: search_x,
+            y: y + 6.0,
+            width: search_w,
+            height: 24.0,
             color: SURFACE0,
             corner_radii: CornerRadii::all(12.0),
         });
@@ -896,19 +1003,29 @@ impl App {
             &self.filter.search_query
         };
         cmds.push(RenderCommand::Text {
-            x: search_x + 10.0, y: y + 11.0,
+            x: search_x + 10.0,
+            y: y + 11.0,
             text: search_text.into(),
             font_size: SMALL_TEXT,
-            color: if self.filter.search_query.is_empty() { OVERLAY0 } else { TEXT },
+            color: if self.filter.search_query.is_empty() {
+                OVERLAY0
+            } else {
+                TEXT
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(search_w - 20.0),
         });
 
         // Search result count
         if !self.search_results.is_empty() {
-            let count_text = format!("{}/{}", self.current_search_result.saturating_add(1), self.search_results.len());
+            let count_text = format!(
+                "{}/{}",
+                self.current_search_result.saturating_add(1),
+                self.search_results.len()
+            );
             cmds.push(RenderCommand::Text {
-                x: search_x + search_w + 8.0, y: y + 11.0,
+                x: search_x + search_w + 8.0,
+                y: y + 11.0,
                 text: count_text,
                 font_size: SMALL_TEXT,
                 color: GREEN,
@@ -921,13 +1038,16 @@ impl App {
         if let Some(src) = &self.filter.source_filter {
             let src_x = WINDOW_WIDTH - 200.0;
             cmds.push(RenderCommand::FillRect {
-                x: src_x, y: y + 6.0,
-                width: 150.0, height: 24.0,
+                x: src_x,
+                y: y + 6.0,
+                width: 150.0,
+                height: 24.0,
                 color: TEAL,
                 corner_radii: CornerRadii::all(12.0),
             });
             cmds.push(RenderCommand::Text {
-                x: src_x + 8.0, y: y + 11.0,
+                x: src_x + 8.0,
+                y: y + 11.0,
                 text: format!("src: {src}"),
                 font_size: 10.0,
                 color: CRUST,
@@ -939,8 +1059,10 @@ impl App {
         // Filter active indicator
         if self.filter.is_active() {
             cmds.push(RenderCommand::FillRect {
-                x: WINDOW_WIDTH - 40.0, y: y + 12.0,
-                width: 12.0, height: 12.0,
+                x: WINDOW_WIDTH - 40.0,
+                y: y + 12.0,
+                width: 12.0,
+                height: 12.0,
                 color: PEACH,
                 corner_radii: CornerRadii::all(6.0),
             });
@@ -952,7 +1074,8 @@ impl App {
         let max_visible = (height / LINE_HEIGHT) as usize;
         let scroll = (self.scroll_offset / LINE_HEIGHT) as usize;
 
-        for (vi, (original_idx, entry)) in entries.iter().enumerate().skip(scroll).take(max_visible) {
+        for (vi, (original_idx, entry)) in entries.iter().enumerate().skip(scroll).take(max_visible)
+        {
             let ey = y + ((vi - scroll) as f32) * LINE_HEIGHT;
             let selected = self.selected_entry == Some(*original_idx);
             let is_search_hit = self.search_results.contains(original_idx);
@@ -971,8 +1094,10 @@ impl App {
             };
 
             cmds.push(RenderCommand::FillRect {
-                x: 0.0, y: ey,
-                width: WINDOW_WIDTH, height: LINE_HEIGHT,
+                x: 0.0,
+                y: ey,
+                width: WINDOW_WIDTH,
+                height: LINE_HEIGHT,
                 color: bg,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -982,7 +1107,8 @@ impl App {
             // Bookmark indicator
             if entry.bookmarked {
                 cmds.push(RenderCommand::Text {
-                    x: cx, y: ey + 3.0,
+                    x: cx,
+                    y: ey + 3.0,
                     text: "*".into(),
                     font_size: NORMAL_TEXT,
                     color: YELLOW,
@@ -995,7 +1121,8 @@ impl App {
             // Line number
             if self.show_line_numbers {
                 cmds.push(RenderCommand::Text {
-                    x: cx, y: ey + 3.0,
+                    x: cx,
+                    y: ey + 3.0,
                     text: format!("{:>5}", entry.line_number),
                     font_size: SMALL_TEXT,
                     color: OVERLAY0,
@@ -1008,7 +1135,8 @@ impl App {
             // Timestamp
             if self.show_timestamps && entry.timestamp > 0 {
                 cmds.push(RenderCommand::Text {
-                    x: cx, y: ey + 3.0,
+                    x: cx,
+                    y: ey + 3.0,
                     text: entry.timestamp_display(),
                     font_size: SMALL_TEXT,
                     color: SUBTEXT0,
@@ -1022,13 +1150,16 @@ impl App {
             let level_label = entry.level.short_label();
             let level_w = (level_label.len() as f32) * 7.0 + 8.0;
             cmds.push(RenderCommand::FillRect {
-                x: cx, y: ey + 2.0,
-                width: level_w, height: 16.0,
+                x: cx,
+                y: ey + 2.0,
+                width: level_w,
+                height: 16.0,
                 color: entry.level.color(),
                 corner_radii: CornerRadii::all(3.0),
             });
             cmds.push(RenderCommand::Text {
-                x: cx + 4.0, y: ey + 4.0,
+                x: cx + 4.0,
+                y: ey + 4.0,
                 text: level_label.into(),
                 font_size: 10.0,
                 color: CRUST,
@@ -1040,7 +1171,8 @@ impl App {
             // Source
             if self.show_source && !entry.source.is_empty() {
                 cmds.push(RenderCommand::Text {
-                    x: cx, y: ey + 3.0,
+                    x: cx,
+                    y: ey + 3.0,
                     text: format!("[{}]", entry.source),
                     font_size: SMALL_TEXT,
                     color: SKY,
@@ -1052,9 +1184,14 @@ impl App {
 
             // Message
             let msg_width = WINDOW_WIDTH - cx - PADDING;
-            let display_msg: String = entry.message.chars().take((msg_width / CHAR_WIDTH) as usize).collect();
+            let display_msg: String = entry
+                .message
+                .chars()
+                .take((msg_width / CHAR_WIDTH) as usize)
+                .collect();
             cmds.push(RenderCommand::Text {
-                x: cx, y: ey + 3.0,
+                x: cx,
+                y: ey + 3.0,
                 text: display_msg,
                 font_size: NORMAL_TEXT,
                 color: TEXT,
@@ -1065,7 +1202,8 @@ impl App {
 
         if entries.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH / 2.0 - 80.0, y: y + height / 2.0,
+                x: WINDOW_WIDTH / 2.0 - 80.0,
+                y: y + height / 2.0,
                 text: "No log entries match filters".into(),
                 font_size: NORMAL_TEXT,
                 color: OVERLAY0,
@@ -1082,7 +1220,8 @@ impl App {
 
             // Level distribution
             cmds.push(RenderCommand::Text {
-                x: PADDING + 12.0, y: y + 16.0,
+                x: PADDING + 12.0,
+                y: y + 16.0,
                 text: "Level Distribution".into(),
                 font_size: HEADER_TEXT,
                 color: BLUE,
@@ -1093,12 +1232,17 @@ impl App {
             let bar_max_w = 400.0;
             for (i, (level, count)) in counts.iter().enumerate() {
                 let sy = y + 44.0 + (i as f32) * 32.0;
-                let pct = if total > 0 { (*count as f32) / (total as f32) } else { 0.0 };
+                let pct = if total > 0 {
+                    (*count as f32) / (total as f32)
+                } else {
+                    0.0
+                };
                 let bar_w = pct * bar_max_w;
 
                 // Label
                 cmds.push(RenderCommand::Text {
-                    x: PADDING + 12.0, y: sy + 4.0,
+                    x: PADDING + 12.0,
+                    y: sy + 4.0,
                     text: level.label().into(),
                     font_size: NORMAL_TEXT,
                     color: level.color(),
@@ -1108,15 +1252,18 @@ impl App {
 
                 // Bar
                 cmds.push(RenderCommand::FillRect {
-                    x: 100.0, y: sy + 2.0,
-                    width: bar_w.max(2.0), height: 18.0,
+                    x: 100.0,
+                    y: sy + 2.0,
+                    width: bar_w.max(2.0),
+                    height: 18.0,
                     color: level.color(),
                     corner_radii: CornerRadii::all(3.0),
                 });
 
                 // Count
                 cmds.push(RenderCommand::Text {
-                    x: 100.0 + bar_w + 8.0, y: sy + 4.0,
+                    x: 100.0 + bar_w + 8.0,
+                    y: sy + 4.0,
                     text: format!("{count} ({:.1}%)", pct * 100.0),
                     font_size: SMALL_TEXT,
                     color: SUBTEXT0,
@@ -1128,7 +1275,8 @@ impl App {
             // Top sources
             let sources_y = y + 250.0;
             cmds.push(RenderCommand::Text {
-                x: PADDING + 12.0, y: sources_y,
+                x: PADDING + 12.0,
+                y: sources_y,
                 text: "Top Sources".into(),
                 font_size: HEADER_TEXT,
                 color: TEAL,
@@ -1139,7 +1287,8 @@ impl App {
             for (si, (source, count)) in log.top_sources(10).iter().enumerate() {
                 let sy = sources_y + 28.0 + (si as f32) * 24.0;
                 cmds.push(RenderCommand::Text {
-                    x: PADDING + 20.0, y: sy,
+                    x: PADDING + 20.0,
+                    y: sy,
                     text: source.clone(),
                     font_size: NORMAL_TEXT,
                     color: TEXT,
@@ -1147,7 +1296,8 @@ impl App {
                     max_width: Some(200.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: 250.0, y: sy,
+                    x: 250.0,
+                    y: sy,
                     text: format!("{count}"),
                     font_size: NORMAL_TEXT,
                     color: SUBTEXT0,
@@ -1159,7 +1309,8 @@ impl App {
             // Summary stats on right
             let stats_x = WINDOW_WIDTH / 2.0 + 40.0;
             cmds.push(RenderCommand::Text {
-                x: stats_x, y: y + 16.0,
+                x: stats_x,
+                y: y + 16.0,
                 text: "Summary".into(),
                 font_size: HEADER_TEXT,
                 color: PEACH,
@@ -1170,16 +1321,46 @@ impl App {
             let summary_items = [
                 ("Total entries", format!("{total}")),
                 ("Sources", format!("{}", log.unique_sources().len())),
-                ("Errors", format!("{}", counts.iter().find(|(l, _)| *l == LogLevel::Error).map_or(0, |(_, c)| *c))),
-                ("Warnings", format!("{}", counts.iter().find(|(l, _)| *l == LogLevel::Warn).map_or(0, |(_, c)| *c))),
-                ("Format", if log.is_json { "JSON-lines" } else { "Plain text" }.into()),
-                ("Bookmarks", format!("{}", log.entries.iter().filter(|e| e.bookmarked).count())),
+                (
+                    "Errors",
+                    format!(
+                        "{}",
+                        counts
+                            .iter()
+                            .find(|(l, _)| *l == LogLevel::Error)
+                            .map_or(0, |(_, c)| *c)
+                    ),
+                ),
+                (
+                    "Warnings",
+                    format!(
+                        "{}",
+                        counts
+                            .iter()
+                            .find(|(l, _)| *l == LogLevel::Warn)
+                            .map_or(0, |(_, c)| *c)
+                    ),
+                ),
+                (
+                    "Format",
+                    if log.is_json {
+                        "JSON-lines"
+                    } else {
+                        "Plain text"
+                    }
+                    .into(),
+                ),
+                (
+                    "Bookmarks",
+                    format!("{}", log.entries.iter().filter(|e| e.bookmarked).count()),
+                ),
             ];
 
             for (si, (label, value)) in summary_items.iter().enumerate() {
                 let sy = y + 44.0 + (si as f32) * 26.0;
                 cmds.push(RenderCommand::Text {
-                    x: stats_x, y: sy,
+                    x: stats_x,
+                    y: sy,
                     text: (*label).into(),
                     font_size: NORMAL_TEXT,
                     color: SUBTEXT0,
@@ -1187,7 +1368,8 @@ impl App {
                     max_width: Some(120.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: stats_x + 140.0, y: sy,
+                    x: stats_x + 140.0,
+                    y: sy,
                     text: value.clone(),
                     font_size: NORMAL_TEXT,
                     color: TEXT,
@@ -1199,29 +1381,39 @@ impl App {
     }
 
     fn render_detail(&self, cmds: &mut Vec<RenderCommand>, y: f32, height: f32) {
-        if let Some(idx) = self.selected_entry {
-            if let Some(log) = self.active_log() {
-                if let Some(entry) = log.entries.get(idx) {
+        if let Some(idx) = self.selected_entry
+            && let Some(log) = self.active_log()
+                && let Some(entry) = log.entries.get(idx) {
                     let panel_w = WINDOW_WIDTH - 2.0 * PADDING;
 
                     // Header
                     cmds.push(RenderCommand::FillRect {
-                        x: PADDING, y: y + PADDING,
-                        width: panel_w, height: 50.0,
+                        x: PADDING,
+                        y: y + PADDING,
+                        width: panel_w,
+                        height: 50.0,
                         color: MANTLE,
-                        corner_radii: CornerRadii { top_left: 8.0, top_right: 8.0, bottom_left: 0.0, bottom_right: 0.0 },
+                        corner_radii: CornerRadii {
+                            top_left: 8.0,
+                            top_right: 8.0,
+                            bottom_left: 0.0,
+                            bottom_right: 0.0,
+                        },
                     });
 
                     // Level badge
                     let level_w = (entry.level.label().len() as f32) * 8.0 + 16.0;
                     cmds.push(RenderCommand::FillRect {
-                        x: PADDING + 12.0, y: y + PADDING + 10.0,
-                        width: level_w, height: 24.0,
+                        x: PADDING + 12.0,
+                        y: y + PADDING + 10.0,
+                        width: level_w,
+                        height: 24.0,
                         color: entry.level.color(),
                         corner_radii: CornerRadii::all(4.0),
                     });
                     cmds.push(RenderCommand::Text {
-                        x: PADDING + 20.0, y: y + PADDING + 14.0,
+                        x: PADDING + 20.0,
+                        y: y + PADDING + 14.0,
                         text: entry.level.label().into(),
                         font_size: NORMAL_TEXT,
                         color: CRUST,
@@ -1231,7 +1423,8 @@ impl App {
 
                     // Source and time
                     cmds.push(RenderCommand::Text {
-                        x: PADDING + level_w + 20.0, y: y + PADDING + 14.0,
+                        x: PADDING + level_w + 20.0,
+                        y: y + PADDING + 14.0,
                         text: format!("[{}] at {}", entry.source, entry.timestamp_display()),
                         font_size: NORMAL_TEXT,
                         color: SUBTEXT1,
@@ -1240,7 +1433,8 @@ impl App {
                     });
 
                     cmds.push(RenderCommand::Text {
-                        x: PADDING + 12.0, y: y + PADDING + 38.0,
+                        x: PADDING + 12.0,
+                        y: y + PADDING + 38.0,
                         text: format!("Line {}", entry.line_number),
                         font_size: SMALL_TEXT,
                         color: OVERLAY0,
@@ -1251,15 +1445,23 @@ impl App {
                     // Message body
                     let body_y = y + PADDING + 54.0;
                     cmds.push(RenderCommand::FillRect {
-                        x: PADDING, y: body_y,
-                        width: panel_w, height: height - 80.0,
+                        x: PADDING,
+                        y: body_y,
+                        width: panel_w,
+                        height: height - 80.0,
                         color: CRUST,
-                        corner_radii: CornerRadii { top_left: 0.0, top_right: 0.0, bottom_left: 8.0, bottom_right: 8.0 },
+                        corner_radii: CornerRadii {
+                            top_left: 0.0,
+                            top_right: 0.0,
+                            bottom_left: 8.0,
+                            bottom_right: 8.0,
+                        },
                     });
 
                     // Message
                     cmds.push(RenderCommand::Text {
-                        x: PADDING + 16.0, y: body_y + 12.0,
+                        x: PADDING + 16.0,
+                        y: body_y + 12.0,
                         text: "Message:".into(),
                         font_size: SMALL_TEXT,
                         color: SUBTEXT0,
@@ -1267,7 +1469,8 @@ impl App {
                         max_width: Some(100.0),
                     });
                     cmds.push(RenderCommand::Text {
-                        x: PADDING + 16.0, y: body_y + 30.0,
+                        x: PADDING + 16.0,
+                        y: body_y + 30.0,
                         text: entry.message.clone(),
                         font_size: NORMAL_TEXT,
                         color: TEXT,
@@ -1279,7 +1482,8 @@ impl App {
                     if !entry.fields.is_empty() {
                         let fields_y = body_y + 60.0;
                         cmds.push(RenderCommand::Text {
-                            x: PADDING + 16.0, y: fields_y,
+                            x: PADDING + 16.0,
+                            y: fields_y,
                             text: "Fields:".into(),
                             font_size: SMALL_TEXT,
                             color: SUBTEXT0,
@@ -1290,7 +1494,8 @@ impl App {
                         for (fi, (key, value)) in entry.fields.iter().enumerate() {
                             let fy = fields_y + 20.0 + (fi as f32) * LINE_HEIGHT;
                             cmds.push(RenderCommand::Text {
-                                x: PADDING + 24.0, y: fy,
+                                x: PADDING + 24.0,
+                                y: fy,
                                 text: format!("{key}:"),
                                 font_size: SMALL_TEXT,
                                 color: TEAL,
@@ -1298,7 +1503,8 @@ impl App {
                                 max_width: Some(150.0),
                             });
                             cmds.push(RenderCommand::Text {
-                                x: PADDING + 180.0, y: fy,
+                                x: PADDING + 180.0,
+                                y: fy,
                                 text: value.clone(),
                                 font_size: SMALL_TEXT,
                                 color: TEXT,
@@ -1311,7 +1517,8 @@ impl App {
                     // Raw JSON
                     let raw_y = body_y + 120.0 + (entry.fields.len() as f32) * LINE_HEIGHT;
                     cmds.push(RenderCommand::Text {
-                        x: PADDING + 16.0, y: raw_y,
+                        x: PADDING + 16.0,
+                        y: raw_y,
                         text: "Raw:".into(),
                         font_size: SMALL_TEXT,
                         color: SUBTEXT0,
@@ -1319,13 +1526,16 @@ impl App {
                         max_width: Some(100.0),
                     });
                     cmds.push(RenderCommand::FillRect {
-                        x: PADDING + 16.0, y: raw_y + 18.0,
-                        width: panel_w - 32.0, height: LINE_HEIGHT + 8.0,
+                        x: PADDING + 16.0,
+                        y: raw_y + 18.0,
+                        width: panel_w - 32.0,
+                        height: LINE_HEIGHT + 8.0,
                         color: SURFACE0,
                         corner_radii: CornerRadii::all(4.0),
                     });
                     cmds.push(RenderCommand::Text {
-                        x: PADDING + 24.0, y: raw_y + 22.0,
+                        x: PADDING + 24.0,
+                        y: raw_y + 22.0,
                         text: truncate_str(&entry.raw, 120),
                         font_size: SMALL_TEXT,
                         color: OVERLAY0,
@@ -1335,12 +1545,11 @@ impl App {
 
                     return;
                 }
-            }
-        }
 
         // No selection
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH / 2.0 - 100.0, y: y + height / 2.0,
+            x: WINDOW_WIDTH / 2.0 - 100.0,
+            y: y + height / 2.0,
             text: "Select a log entry to view details".into(),
             font_size: NORMAL_TEXT,
             color: OVERLAY0,
@@ -1353,8 +1562,10 @@ impl App {
         let y = WINDOW_HEIGHT - STATUS_BAR_HEIGHT;
 
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y,
-            width: WINDOW_WIDTH, height: STATUS_BAR_HEIGHT,
+            x: 0.0,
+            y,
+            width: WINDOW_WIDTH,
+            height: STATUS_BAR_HEIGHT,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1364,7 +1575,8 @@ impl App {
 
         // Entry count
         cmds.push(RenderCommand::Text {
-            x: PADDING, y: y + 5.0,
+            x: PADDING,
+            y: y + 5.0,
             text: format!("{} / {} entries", entries.len(), total),
             font_size: SMALL_TEXT,
             color: SUBTEXT0,
@@ -1375,7 +1587,8 @@ impl App {
         // File info
         if let Some(log) = self.active_log() {
             cmds.push(RenderCommand::Text {
-                x: 200.0, y: y + 5.0,
+                x: 200.0,
+                y: y + 5.0,
                 text: log.path.clone(),
                 font_size: SMALL_TEXT,
                 color: OVERLAY0,
@@ -1385,8 +1598,14 @@ impl App {
 
             // Format
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH - 120.0, y: y + 5.0,
-                text: if log.is_json { "JSON-lines" } else { "Plain text" }.into(),
+                x: WINDOW_WIDTH - 120.0,
+                y: y + 5.0,
+                text: if log.is_json {
+                    "JSON-lines"
+                } else {
+                    "Plain text"
+                }
+                .into(),
                 font_size: SMALL_TEXT,
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
@@ -1397,8 +1616,9 @@ impl App {
 }
 
 fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max { s.into() }
-    else {
+    if s.len() <= max {
+        s.into()
+    } else {
         let t: String = s.chars().take(max.saturating_sub(3)).collect();
         format!("{t}...")
     }
@@ -1554,9 +1774,14 @@ mod tests {
     #[test]
     fn test_timestamp_display() {
         let entry = LogEntry {
-            line_number: 1, timestamp: 3_661_500, level: LogLevel::Info,
-            source: String::new(), message: String::new(), fields: Vec::new(),
-            raw: String::new(), bookmarked: false,
+            line_number: 1,
+            timestamp: 3_661_500,
+            level: LogLevel::Info,
+            source: String::new(),
+            message: String::new(),
+            fields: Vec::new(),
+            raw: String::new(),
+            bookmarked: false,
         };
         assert_eq!(entry.timestamp_display(), "01:01:01.500");
     }
@@ -1564,9 +1789,14 @@ mod tests {
     #[test]
     fn test_timestamp_display_zero() {
         let entry = LogEntry {
-            line_number: 1, timestamp: 0, level: LogLevel::Info,
-            source: String::new(), message: String::new(), fields: Vec::new(),
-            raw: String::new(), bookmarked: false,
+            line_number: 1,
+            timestamp: 0,
+            level: LogLevel::Info,
+            source: String::new(),
+            message: String::new(),
+            fields: Vec::new(),
+            raw: String::new(),
+            bookmarked: false,
         };
         assert_eq!(entry.timestamp_display(), "00:00:00.000");
     }
@@ -1576,8 +1806,10 @@ mod tests {
     #[test]
     fn test_log_file_parse_json() {
         let mut file = LogFile::new("test", "/test");
-        file.parse_content(r#"{"level":"INFO","message":"hello"}
-{"level":"ERROR","message":"fail"}"#);
+        file.parse_content(
+            r#"{"level":"INFO","message":"hello"}
+{"level":"ERROR","message":"fail"}"#,
+        );
         assert_eq!(file.entries.len(), 2);
         assert!(file.is_json);
     }
@@ -1593,20 +1825,27 @@ mod tests {
     #[test]
     fn test_log_file_level_counts() {
         let mut file = LogFile::new("test", "/test");
-        file.parse_content(r#"{"level":"INFO","message":"a"}
+        file.parse_content(
+            r#"{"level":"INFO","message":"a"}
 {"level":"INFO","message":"b"}
-{"level":"ERROR","message":"c"}"#);
+{"level":"ERROR","message":"c"}"#,
+        );
         let counts = file.level_counts();
-        let info_count = counts.iter().find(|(l, _)| *l == LogLevel::Info).map_or(0, |(_, c)| *c);
+        let info_count = counts
+            .iter()
+            .find(|(l, _)| *l == LogLevel::Info)
+            .map_or(0, |(_, c)| *c);
         assert_eq!(info_count, 2);
     }
 
     #[test]
     fn test_log_file_unique_sources() {
         let mut file = LogFile::new("test", "/test");
-        file.parse_content(r#"{"level":"INFO","source":"a","message":"x"}
+        file.parse_content(
+            r#"{"level":"INFO","source":"a","message":"x"}
 {"level":"INFO","source":"b","message":"y"}
-{"level":"INFO","source":"a","message":"z"}"#);
+{"level":"INFO","source":"a","message":"z"}"#,
+        );
         let sources = file.unique_sources();
         assert_eq!(sources.len(), 2);
     }
@@ -1614,9 +1853,11 @@ mod tests {
     #[test]
     fn test_log_file_top_sources() {
         let mut file = LogFile::new("test", "/test");
-        file.parse_content(r#"{"level":"INFO","source":"a","message":"1"}
+        file.parse_content(
+            r#"{"level":"INFO","source":"a","message":"1"}
 {"level":"INFO","source":"a","message":"2"}
-{"level":"INFO","source":"b","message":"3"}"#);
+{"level":"INFO","source":"b","message":"3"}"#,
+        );
         let top = file.top_sources(5);
         assert_eq!(top[0].0, "a");
         assert_eq!(top[0].1, 2);
@@ -1633,7 +1874,10 @@ mod tests {
 
     #[test]
     fn test_filter_by_level() {
-        let filter = FilterState { min_level: LogLevel::Warn, ..Default::default() };
+        let filter = FilterState {
+            min_level: LogLevel::Warn,
+            ..Default::default()
+        };
         let info_entry = make_entry(LogLevel::Info, "", "test");
         let warn_entry = make_entry(LogLevel::Warn, "", "test");
         assert!(!filter.matches(&info_entry));
@@ -1731,10 +1975,14 @@ mod tests {
     #[test]
     fn test_app_search_navigation() {
         let mut app = App::new();
-        app.filter.search_query = "info".into();
+        // update_search is a text search over message + source (NOT the level
+        // field — levels are handled by the level filter). "net" is the source
+        // of several sample entries, so it yields multiple matches, which is
+        // what we need to exercise next/prev wrap-around below.
+        app.filter.search_query = "net".into();
         app.update_search();
         let count = app.search_results.len();
-        assert!(count > 0);
+        assert!(count > 1);
 
         app.next_search_result();
         assert_eq!(app.current_search_result, 1);

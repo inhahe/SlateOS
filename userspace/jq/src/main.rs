@@ -7,45 +7,23 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::{self, Read as _};
+use std::io::{self, Read as _, Write as _};
 
 // ============================================================================
-// Syscall layer
+// Output helpers
 // ============================================================================
-
-const SYS_READ: u64 = 0;
-const SYS_WRITE: u64 = 1;
-const SYS_OPEN: u64 = 2;
-const SYS_CLOSE: u64 = 3;
-const SYS_EXIT: u64 = 60;
-
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 { -1 }
+//
+// These route through std, which reaches the native OurOS write syscall via
+// the posix libc layer.  (Previously they hand-rolled `syscall(1, ...)` using
+// the Linux write number — but native syscall 1 is SYS_EXIT, so every write
+// terminated the process.)
 
 fn write_stdout(s: &str) {
-    let _ = unsafe { syscall3(SYS_WRITE, 1, s.as_ptr() as u64, s.len() as u64) };
+    let _ = io::stdout().write_all(s.as_bytes());
 }
 
 fn write_stderr(s: &str) {
-    let _ = unsafe { syscall3(SYS_WRITE, 2, s.as_ptr() as u64, s.len() as u64) };
+    let _ = io::stderr().write_all(s.as_bytes());
 }
 
 // ============================================================================

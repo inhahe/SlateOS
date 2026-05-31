@@ -523,10 +523,10 @@ fn parse_utf16le_name(raw: &[u8]) -> String {
 /// Detect and parse partition table from disk image bytes.
 fn parse_partition_table(data: &[u8]) -> Result<PartitionTable, String> {
     // Try GPT first (GPT disks also have a protective MBR).
-    if let Ok(entries) = parse_gpt(data) {
-        if !entries.is_empty() {
-            return Ok(PartitionTable::Gpt { entries });
-        }
+    if let Ok(entries) = parse_gpt(data)
+        && !entries.is_empty()
+    {
+        return Ok(PartitionTable::Gpt { entries });
     }
 
     // Fall back to MBR.
@@ -753,16 +753,19 @@ fn print_device_info(dev: &MappedDevice, out: &mut dyn Write) {
     let _ = writeln!(out, "Name:              {}", dev.name);
     let _ = writeln!(out, "State:             {}", dev.state);
     let _ = writeln!(out, "Read Ahead:        256");
-    let _ = writeln!(out, "Tables present:    {}",
-        if dev.inactive_table.is_some() { "LIVE & INACTIVE" } else { "LIVE" });
+    let _ = writeln!(
+        out,
+        "Tables present:    {}",
+        if dev.inactive_table.is_some() {
+            "LIVE & INACTIVE"
+        } else {
+            "LIVE"
+        }
+    );
     let _ = writeln!(out, "Open count:        {}", dev.open_count);
     let _ = writeln!(out, "Event number:      {}", dev.event_nr);
     let _ = writeln!(out, "Major, minor:      {}, {}", dev.major, dev.minor);
-    let _ = writeln!(
-        out,
-        "Number of targets:  {}",
-        dev.active_table.len()
-    );
+    let _ = writeln!(out, "Number of targets:  {}", dev.active_table.len());
     let _ = writeln!(out, "UUID:              {}", dev.uuid);
     let _ = writeln!(out);
 }
@@ -854,8 +857,13 @@ fn dmsetup_deps(state: &DmState, args: &[String], out: &mut dyn Write) -> i32 {
     if args.is_empty() {
         for dev in state.devices.values() {
             let deps = extract_deps(&dev.active_table);
-            let _ = writeln!(out, "{}: {} dependencies: [{}]",
-                dev.name, deps.len(), deps.join(", "));
+            let _ = writeln!(
+                out,
+                "{}: {} dependencies: [{}]",
+                dev.name,
+                deps.len(),
+                deps.join(", ")
+            );
         }
         return 0;
     }
@@ -897,10 +905,14 @@ fn dmsetup_wait(state: &mut DmState, args: &[String], out: &mut dyn Write) -> i3
         Some(dev) => {
             // Simulate an event bump.
             dev.event_nr = dev.event_nr.saturating_add(1);
-            if let Some(nr) = expected_nr {
-                if dev.event_nr <= nr {
-                    let _ = writeln!(out, "Event {} already passed (current: {})", nr, dev.event_nr);
-                }
+            if let Some(nr) = expected_nr
+                && dev.event_nr <= nr
+            {
+                let _ = writeln!(
+                    out,
+                    "Event {} already passed (current: {})",
+                    nr, dev.event_nr
+                );
             }
             let _ = writeln!(out, "{}: event_nr={}", dev.name, dev.event_nr);
             0
@@ -1013,24 +1025,75 @@ fn dmsetup_help(out: &mut dyn Write) -> i32 {
     let _ = writeln!(out, "Usage: dmsetup <command> [options]");
     let _ = writeln!(out);
     let _ = writeln!(out, "Commands:");
-    let _ = writeln!(out, "  create <name> --table \"<table>\"  Create a mapped device");
-    let _ = writeln!(out, "  remove <name>                    Remove a mapped device");
-    let _ = writeln!(out, "  remove_all                       Remove all mapped devices");
-    let _ = writeln!(out, "  suspend <name>                   Suspend a mapped device");
-    let _ = writeln!(out, "  resume <name>                    Resume a suspended device");
-    let _ = writeln!(out, "  load <name> --table \"<table>\"    Load inactive table");
-    let _ = writeln!(out, "  info [name]                      Display device info");
-    let _ = writeln!(out, "  table [name]                     Display mapping table");
-    let _ = writeln!(out, "  status [name]                    Display target status");
-    let _ = writeln!(out, "  ls [--tree]                      List mapped devices");
-    let _ = writeln!(out, "  deps [name]                      Display dependencies");
-    let _ = writeln!(out, "  targets                          List available target types");
-    let _ = writeln!(out, "  version                          Display version info");
+    let _ = writeln!(
+        out,
+        "  create <name> --table \"<table>\"  Create a mapped device"
+    );
+    let _ = writeln!(
+        out,
+        "  remove <name>                    Remove a mapped device"
+    );
+    let _ = writeln!(
+        out,
+        "  remove_all                       Remove all mapped devices"
+    );
+    let _ = writeln!(
+        out,
+        "  suspend <name>                   Suspend a mapped device"
+    );
+    let _ = writeln!(
+        out,
+        "  resume <name>                    Resume a suspended device"
+    );
+    let _ = writeln!(
+        out,
+        "  load <name> --table \"<table>\"    Load inactive table"
+    );
+    let _ = writeln!(
+        out,
+        "  info [name]                      Display device info"
+    );
+    let _ = writeln!(
+        out,
+        "  table [name]                     Display mapping table"
+    );
+    let _ = writeln!(
+        out,
+        "  status [name]                    Display target status"
+    );
+    let _ = writeln!(
+        out,
+        "  ls [--tree]                      List mapped devices"
+    );
+    let _ = writeln!(
+        out,
+        "  deps [name]                      Display dependencies"
+    );
+    let _ = writeln!(
+        out,
+        "  targets                          List available target types"
+    );
+    let _ = writeln!(
+        out,
+        "  version                          Display version info"
+    );
     let _ = writeln!(out, "  wait <name> [event_nr]           Wait for an event");
-    let _ = writeln!(out, "  message <name> <sector> <msg>    Send message to target");
-    let _ = writeln!(out, "  setgeometry <name> <c> <h> <s> <sz>  Set device geometry");
-    let _ = writeln!(out, "  splitname <name>                 Split LVM VG-LV name");
-    let _ = writeln!(out, "  udevcomplete [cookie]            Complete udev transaction");
+    let _ = writeln!(
+        out,
+        "  message <name> <sector> <msg>    Send message to target"
+    );
+    let _ = writeln!(
+        out,
+        "  setgeometry <name> <c> <h> <s> <sz>  Set device geometry"
+    );
+    let _ = writeln!(
+        out,
+        "  splitname <name>                 Split LVM VG-LV name"
+    );
+    let _ = writeln!(
+        out,
+        "  udevcomplete [cookie]            Complete udev transaction"
+    );
     let _ = writeln!(out, "  udevcookies                      List udev cookies");
     let _ = writeln!(out, "  udevcreatecookie                 Create udev cookie");
     let _ = writeln!(out, "  help                             Show this help");
@@ -1041,11 +1104,7 @@ fn dmsetup_help(out: &mut dyn Write) -> i32 {
 // dmstats commands
 // ---------------------------------------------------------------------------
 
-fn dmstats_create(
-    state: &mut DmState,
-    args: &[String],
-    out: &mut dyn Write,
-) -> i32 {
+fn dmstats_create(state: &mut DmState, args: &[String], out: &mut dyn Write) -> i32 {
     if args.is_empty() {
         let _ = writeln!(out, "Error: device name required");
         return 1;
@@ -1080,10 +1139,10 @@ fn dmstats_create(
     }
 
     // If length is 0, use the device's full size.
-    if length == 0 {
-        if let Some(dev) = state.devices.get(device) {
-            length = dev.total_sectors();
-        }
+    if length == 0
+        && let Some(dev) = state.devices.get(device)
+    {
+        length = dev.total_sectors();
     }
 
     let region_id = state.next_region_id;
@@ -1095,11 +1154,7 @@ fn dmstats_create(
     0
 }
 
-fn dmstats_delete(
-    state: &mut DmState,
-    args: &[String],
-    out: &mut dyn Write,
-) -> i32 {
+fn dmstats_delete(state: &mut DmState, args: &[String], out: &mut dyn Write) -> i32 {
     if args.is_empty() {
         let _ = writeln!(out, "Error: device name required");
         return 1;
@@ -1177,9 +1232,7 @@ fn dmstats_print(state: &DmState, args: &[String], out: &mut dyn Write) -> i32 {
     let regions: Vec<&StatsRegion> = state
         .stats_regions
         .iter()
-        .filter(|r| {
-            r.device_name == *device && filter_id.map_or(true, |id| r.region_id == id)
-        })
+        .filter(|r| r.device_name == *device && filter_id.is_none_or(|id| r.region_id == id))
         .collect();
 
     if regions.is_empty() {
@@ -1228,8 +1281,16 @@ fn dmstats_report(state: &DmState, args: &[String], out: &mut dyn Write) -> i32 
     let _ = writeln!(
         out,
         "{:<8} {:<10} {:<10} {:<8} {:<8} {:<12} {:<12} {:<10} {:<10} {:<8}",
-        "Region", "Start", "Length", "Reads", "Writes", "RdSectors", "WrSectors",
-        "RdMs", "WrMs", "InFlight"
+        "Region",
+        "Start",
+        "Length",
+        "Reads",
+        "Writes",
+        "RdSectors",
+        "WrSectors",
+        "RdMs",
+        "WrMs",
+        "InFlight"
     );
     for r in regions {
         let _ = writeln!(
@@ -1262,13 +1323,22 @@ fn dmstats_help(out: &mut dyn Write) -> i32 {
         out,
         "  delete <device> [--allregions | <region_id>] Delete region(s)"
     );
-    let _ = writeln!(out, "  list <device>                                List regions");
+    let _ = writeln!(
+        out,
+        "  list <device>                                List regions"
+    );
     let _ = writeln!(
         out,
         "  print <device> [region_id]                   Print raw counters"
     );
-    let _ = writeln!(out, "  report <device>                              Formatted report");
-    let _ = writeln!(out, "  help                                         Show this help");
+    let _ = writeln!(
+        out,
+        "  report <device>                              Formatted report"
+    );
+    let _ = writeln!(
+        out,
+        "  help                                         Show this help"
+    );
     0
 }
 
@@ -1276,12 +1346,7 @@ fn dmstats_help(out: &mut dyn Write) -> i32 {
 // kpartx commands
 // ---------------------------------------------------------------------------
 
-fn kpartx_add(
-    state: &mut DmState,
-    device: &str,
-    disk_data: &[u8],
-    out: &mut dyn Write,
-) -> i32 {
+fn kpartx_add(state: &mut DmState, device: &str, disk_data: &[u8], out: &mut dyn Write) -> i32 {
     let table = match parse_partition_table(disk_data) {
         Ok(t) => t,
         Err(e) => {
@@ -1290,10 +1355,7 @@ fn kpartx_add(
         }
     };
 
-    let dev_base = device
-        .rsplit(|c: char| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(device);
+    let dev_base = device.rsplit(['/', '\\']).next().unwrap_or(device);
 
     let parts = partition_mappings(&table, dev_base);
     if parts.is_empty() {
@@ -1307,9 +1369,10 @@ fn kpartx_add(
             continue;
         }
         let minor = state.alloc_minor();
-        state
-            .devices
-            .insert(map_name.clone(), MappedDevice::new(map_name, minor, vec![entry.clone()]));
+        state.devices.insert(
+            map_name.clone(),
+            MappedDevice::new(map_name, minor, vec![entry.clone()]),
+        );
         let _ = writeln!(
             out,
             "add map {map_name}: {} {} linear {}",
@@ -1328,10 +1391,7 @@ fn kpartx_delete(state: &mut DmState, device: &str, disk_data: &[u8], out: &mut 
         }
     };
 
-    let dev_base = device
-        .rsplit(|c: char| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(device);
+    let dev_base = device.rsplit(['/', '\\']).next().unwrap_or(device);
 
     let parts = partition_mappings(&table, dev_base);
     for (map_name, _) in &parts {
@@ -1351,10 +1411,7 @@ fn kpartx_list(device: &str, disk_data: &[u8], out: &mut dyn Write) -> i32 {
         }
     };
 
-    let dev_base = device
-        .rsplit(|c: char| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(device);
+    let dev_base = device.rsplit(['/', '\\']).next().unwrap_or(device);
 
     let parts = partition_mappings(&table, dev_base);
     if parts.is_empty() {
@@ -1808,7 +1865,8 @@ mod tests {
 
     #[test]
     fn parse_table_crypt() {
-        let e = parse_table_line("0 2048 crypt aes-xts-plain64 0123456789abcdef 0 /dev/sda 0").unwrap();
+        let e =
+            parse_table_line("0 2048 crypt aes-xts-plain64 0123456789abcdef 0 /dev/sda 0").unwrap();
         assert_eq!(e.target_type, "crypt");
     }
 
@@ -1859,10 +1917,24 @@ mod tests {
 
     #[test]
     fn mapped_device_total_sectors() {
-        let dev = MappedDevice::new("test", 0, vec![
-            TableEntry { start_sector: 0, length: 512, target_type: "linear".to_string(), target_args: String::new() },
-            TableEntry { start_sector: 512, length: 512, target_type: "linear".to_string(), target_args: String::new() },
-        ]);
+        let dev = MappedDevice::new(
+            "test",
+            0,
+            vec![
+                TableEntry {
+                    start_sector: 0,
+                    length: 512,
+                    target_type: "linear".to_string(),
+                    target_args: String::new(),
+                },
+                TableEntry {
+                    start_sector: 512,
+                    length: 512,
+                    target_type: "linear".to_string(),
+                    target_args: String::new(),
+                },
+            ],
+        );
         assert_eq!(dev.total_sectors(), 1024);
     }
 
@@ -1879,7 +1951,10 @@ mod tests {
     #[test]
     fn create_basic() {
         let mut s = new_state();
-        let (code, _) = run_dm(&mut s, &["create", "test", "--table", "0 1024 linear /dev/sda 0"]);
+        let (code, _) = run_dm(
+            &mut s,
+            &["create", "test", "--table", "0 1024 linear /dev/sda 0"],
+        );
         assert_eq!(code, 0);
         assert!(s.devices.contains_key("test"));
     }
@@ -2515,7 +2590,10 @@ mod tests {
     fn stats_create_with_range() {
         let mut s = new_state();
         create_test_device(&mut s, "dev", "0 2048 zero");
-        let (code, _) = run_stats(&mut s, &["create", "dev", "--start", "512", "--length", "256"]);
+        let (code, _) = run_stats(
+            &mut s,
+            &["create", "dev", "--start", "512", "--length", "256"],
+        );
         assert_eq!(code, 0);
         assert_eq!(s.stats_regions[0].start_sector, 512);
         assert_eq!(s.stats_regions[0].length, 256);
@@ -2526,7 +2604,10 @@ mod tests {
         let mut s = new_state();
         create_test_device(&mut s, "dev", "0 2048 zero");
         run_stats(&mut s, &["create", "dev"]);
-        run_stats(&mut s, &["create", "dev", "--start", "512", "--length", "256"]);
+        run_stats(
+            &mut s,
+            &["create", "dev", "--start", "512", "--length", "256"],
+        );
         assert_eq!(s.stats_regions.len(), 2);
         assert_eq!(s.stats_regions[0].region_id, 0);
         assert_eq!(s.stats_regions[1].region_id, 1);
@@ -3070,10 +3151,7 @@ mod tests {
     #[test]
     fn kpartx_add_mbr() {
         let mut s = new_state();
-        let disk = make_mbr_disk(&[
-            (MBR_LINUX_PARTITION, 2048, 1024),
-            (MBR_FAT32, 4096, 2048),
-        ]);
+        let disk = make_mbr_disk(&[(MBR_LINUX_PARTITION, 2048, 1024), (MBR_FAT32, 4096, 2048)]);
         let mut out = Vec::new();
         let code = kpartx_add(&mut s, "/dev/sda", &disk, &mut out);
         assert_eq!(code, 0);
@@ -3130,10 +3208,7 @@ mod tests {
 
     #[test]
     fn kpartx_list_output() {
-        let disk = make_mbr_disk(&[
-            (MBR_LINUX_PARTITION, 2048, 1024),
-            (MBR_FAT32, 4096, 2048),
-        ]);
+        let disk = make_mbr_disk(&[(MBR_LINUX_PARTITION, 2048, 1024), (MBR_FAT32, 4096, 2048)]);
         let mut out = Vec::new();
         let code = kpartx_list("/dev/sda", &disk, &mut out);
         assert_eq!(code, 0);
@@ -3209,12 +3284,25 @@ mod tests {
     fn partition_mappings_mbr() {
         let table = PartitionTable::Mbr {
             primary: vec![
-                MbrPartition { status: 0x80, part_type: MBR_LINUX_PARTITION, lba_start: 2048, sector_count: 1024 },
-                MbrPartition { status: 0, part_type: MBR_FAT32, lba_start: 4096, sector_count: 2048 },
+                MbrPartition {
+                    status: 0x80,
+                    part_type: MBR_LINUX_PARTITION,
+                    lba_start: 2048,
+                    sector_count: 1024,
+                },
+                MbrPartition {
+                    status: 0,
+                    part_type: MBR_FAT32,
+                    lba_start: 4096,
+                    sector_count: 2048,
+                },
             ],
-            logical: vec![
-                MbrPartition { status: 0, part_type: MBR_LINUX_PARTITION, lba_start: 8192, sector_count: 512 },
-            ],
+            logical: vec![MbrPartition {
+                status: 0,
+                part_type: MBR_LINUX_PARTITION,
+                lba_start: 8192,
+                sector_count: 512,
+            }],
         };
         let maps = partition_mappings(&table, "sda");
         assert_eq!(maps.len(), 3);
@@ -3226,15 +3314,13 @@ mod tests {
     #[test]
     fn partition_mappings_gpt() {
         let table = PartitionTable::Gpt {
-            entries: vec![
-                GptPartition {
-                    type_guid: [1; 16],
-                    unique_guid: [2; 16],
-                    first_lba: 2048,
-                    last_lba: 4095,
-                    name: "EFI".to_string(),
-                },
-            ],
+            entries: vec![GptPartition {
+                type_guid: [1; 16],
+                unique_guid: [2; 16],
+                first_lba: 2048,
+                last_lba: 4095,
+                name: "EFI".to_string(),
+            }],
         };
         let maps = partition_mappings(&table, "nvme0n1");
         assert_eq!(maps.len(), 1);
@@ -3348,14 +3434,19 @@ mod tests {
     #[test]
     fn print_tree_output() {
         let mut devs = BTreeMap::new();
-        devs.insert("vol".to_string(), MappedDevice::new("vol", 0, vec![
-            TableEntry {
-                start_sector: 0,
-                length: 1024,
-                target_type: "linear".to_string(),
-                target_args: "/dev/sda 0".to_string(),
-            },
-        ]));
+        devs.insert(
+            "vol".to_string(),
+            MappedDevice::new(
+                "vol",
+                0,
+                vec![TableEntry {
+                    start_sector: 0,
+                    length: 1024,
+                    target_type: "linear".to_string(),
+                    target_args: "/dev/sda 0".to_string(),
+                }],
+            ),
+        );
         let mut out = Vec::new();
         print_tree(&devs, &mut out);
         let output = String::from_utf8_lossy(&out);
@@ -3372,7 +3463,10 @@ mod tests {
         let mut s = new_state();
 
         // Create.
-        assert_eq!(create_test_device(&mut s, "myvol", "0 2048 linear /dev/sda 0"), 0);
+        assert_eq!(
+            create_test_device(&mut s, "myvol", "0 2048 linear /dev/sda 0"),
+            0
+        );
 
         // Info.
         let (_, out) = run_dm(&mut s, &["info", "myvol"]);
@@ -3385,7 +3479,10 @@ mod tests {
         assert!(out.contains("SUSPENDED"));
 
         // Load new table.
-        let (code, _) = run_dm(&mut s, &["load", "myvol", "--table", "0 4096 linear /dev/sdb 0"]);
+        let (code, _) = run_dm(
+            &mut s,
+            &["load", "myvol", "--table", "0 4096 linear /dev/sdb 0"],
+        );
         assert_eq!(code, 0);
 
         // Resume (promotes inactive table).
@@ -3416,7 +3513,10 @@ mod tests {
 
         // Create two regions.
         run_stats(&mut s, &["create", "dev"]);
-        run_stats(&mut s, &["create", "dev", "--start", "1024", "--length", "512"]);
+        run_stats(
+            &mut s,
+            &["create", "dev", "--start", "1024", "--length", "512"],
+        );
         assert_eq!(s.stats_regions.len(), 2);
 
         // List.
@@ -3440,10 +3540,7 @@ mod tests {
     #[test]
     fn kpartx_full_lifecycle() {
         let mut s = new_state();
-        let disk = make_mbr_disk(&[
-            (MBR_LINUX_PARTITION, 2048, 1024),
-            (MBR_FAT32, 4096, 2048),
-        ]);
+        let disk = make_mbr_disk(&[(MBR_LINUX_PARTITION, 2048, 1024), (MBR_FAT32, 4096, 2048)]);
 
         // List.
         let mut out = Vec::new();
@@ -3469,7 +3566,11 @@ mod tests {
     #[test]
     fn status_mirror_target() {
         let mut s = new_state();
-        create_test_device(&mut s, "m", "0 4096 mirror core 1 1024 2 /dev/sda 0 /dev/sdb 0");
+        create_test_device(
+            &mut s,
+            "m",
+            "0 4096 mirror core 1 1024 2 /dev/sda 0 /dev/sdb 0",
+        );
         let (_, out) = run_dm(&mut s, &["status", "m"]);
         assert!(out.contains("AA"));
     }

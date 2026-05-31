@@ -1,3 +1,23 @@
+## BUG (noticed+FIXED 2026-05-31): dmsetup `cargo test` could not launch its
+##   test harness + 7 pre-existing clippy errors.  userspace/dmsetup/:
+##     * TEST HARNESS WOULDN'T LAUNCH: "The requested operation requires
+##       elevation." (os error 740).  Windows' installer-detection heuristic
+##       forces UAC elevation on any exe whose name contains "setup" — the
+##       cargo unit-test exe is named `dmsetup-<hash>.exe`.  The crate already
+##       had a build.rs that tried to embed an asInvoker manifest, but the GNU
+##       path shelled out to `windres`, which is NOT installed on this machine
+##       (the windows-gnu toolchain ships no resource compiler), so the branch
+##       silently no-op'd and no manifest was ever embedded on this host.
+##       PROPER FIX: replaced the windres dance with the pure-Rust
+##       `embed-manifest` crate (build-dependency), which generates the COFF
+##       resource object itself — no external tools.  embed_manifest() links via
+##       `cargo:rustc-link-arg-bins`, which also covers the bin's unit-test
+##       harness, so `cargo test` now launches.  190/190 tests pass.  The ouros
+##       target is unaffected (TARGET matches no Windows ABI -> manifest skipped).
+##     * 7 pre-existing clippy errors (collapsible-if x3, map_or->is_*,
+##       manual char comparison x3) auto-fixed.
+##   Clippy-clean host + ouros; builds for host + ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): sshd had 2 failing tests (base64_decode
 ##   dropped trailing bytes) + ~32 pre-existing clippy errors + 13 dead-code
 ##   warnings.  userspace/sshd/src/main.rs:

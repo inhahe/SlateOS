@@ -1,54 +1,39 @@
+//! Build script: embed a Windows "asInvoker" application manifest.
+//!
+//! Windows' installer-detection heuristic demands elevation (UAC) for any
+//! executable whose name contains "setup" — which includes both the real
+//! `dmsetup.exe` binary and, crucially, the unit-test harness exe that Cargo
+//! names `dmsetup-<hash>.exe`. Without a manifest declaring `asInvoker`,
+//! `cargo test` cannot even launch the harness: it fails with
+//! "The requested operation requires elevation." (os error 740).
+//!
+//! We previously tried to embed the manifest via `windres`, but `windres` is
+//! not installed on the dev machine (the windows-gnu toolchain ships no
+//! resource compiler), so that path silently no-op'd and the manifest was
+//! never embedded on this host. The proper fix is `embed-manifest`, which
+//! generates the COFF resource object in pure Rust — no external tools.
+//!
+//! `embed_manifest()` links the manifest into the `bins` target kind via
+//! `cargo:rustc-link-arg-bins`. The unit-test harness compiled from a binary's
+//! `src/main.rs` is part of that same bin target, so the `-bins` link arg
+//! covers it — which is exactly what lets `cargo test` launch the harness. The
+//! ouros target is left untouched: its TARGET triple matches neither Windows
+//! ABI below, so no manifest is linked (the userspace ELF needs none).
+
 fn main() {
-    // Embed a Windows application manifest that declares "asInvoker" execution
-    // level. Without this, Windows heuristics detect "setup" in the binary
-    // name and demand elevation (UAC), which breaks `cargo test`.
-    #[cfg(target_os = "windows")]
-    {
-        static MANIFEST: &str = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
-    <security>
-      <requestedPrivileges>
-        <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
-      </requestedPrivileges>
-    </security>
-  </trustInfo>
-</assembly>"#;
+    println!("cargo:rerun-if-changed=build.rs");
 
-        let out_dir = std::env::var("OUT_DIR").unwrap();
-        let manifest_path = std::path::Path::new(&out_dir).join("dmsetup.exe.manifest");
-        std::fs::write(&manifest_path, MANIFEST).unwrap();
-
-        // For MSVC targets, embed the manifest via the linker.
-        let target = std::env::var("TARGET").unwrap_or_default();
-        if target.contains("msvc") {
-            println!(
-                "cargo:rustc-link-arg-bins=/MANIFEST:EMBED",
-            );
-            println!(
-                "cargo:rustc-link-arg-bins=/MANIFESTINPUT:{}",
-                manifest_path.display()
-            );
-        } else if target.contains("gnu") {
-            // For GNU targets on Windows, use windres via a .rc file.
-            let rc_path = std::path::Path::new(&out_dir).join("manifest.rc");
-            std::fs::write(
-                &rc_path,
-                format!("1 24 \"{}\"", manifest_path.display().to_string().replace('\\', "\\\\")),
-            )
-            .unwrap();
-            // Try to compile the resource file.
-            let status = std::process::Command::new("windres")
-                .arg(&rc_path)
-                .arg("-o")
-                .arg(std::path::Path::new(&out_dir).join("manifest.o"))
-                .arg("--output-format=coff")
-                .status();
-            if let Ok(s) = status {
-                if s.success() {
-                    println!("cargo:rustc-link-arg-bins={}", std::path::Path::new(&out_dir).join("manifest.o").display());
-                }
-            }
-        }
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let is_windows = target.contains("windows-msvc")
+        || target.contains("windows-gnu")
+        || target.contains("windows-gnullvm");
+    if !is_windows {
+        return;
     }
+
+    // new_manifest defaults to an asInvoker execution level, which is exactly
+    // what disables Windows' installer-detection heuristic. embed-manifest
+    // generates the COFF resource object in pure Rust (no windres needed).
+    embed_manifest::embed_manifest(embed_manifest::new_manifest("OurOS.dmsetup"))
+        .expect("failed to embed Windows manifest");
 }

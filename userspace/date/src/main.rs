@@ -105,9 +105,7 @@ fn clock_settime(clock_id: u64, sec: i64, nsec: i64) -> Result<(), String> {
     // Combine into nanoseconds-since-epoch.  `sec` is non-negative and within
     // range for any realistic date, so the multiply/add cannot overflow i64
     // (i64::MAX ns is year 2262); saturate defensively regardless.
-    let target_ns = sec
-        .saturating_mul(NSEC_PER_SEC)
-        .saturating_add(nsec) as u64;
+    let target_ns = sec.saturating_mul(NSEC_PER_SEC).saturating_add(nsec) as u64;
     let ret: i64;
 
     // SAFETY: SYS_CLOCK_SETTIME takes a single scalar argument (target ns) and
@@ -308,11 +306,7 @@ fn datetime_to_epoch(dt: &DateTime) -> Result<i64, String> {
     }
 
     // Howard Hinnant's days_from_civil.
-    let y = if dt.month <= 2 {
-        dt.year - 1
-    } else {
-        dt.year
-    };
+    let y = if dt.month <= 2 { dt.year - 1 } else { dt.year };
     let m = if dt.month <= 2 {
         dt.month as i64 + 9
     } else {
@@ -326,10 +320,8 @@ fn datetime_to_epoch(dt: &DateTime) -> Result<i64, String> {
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let total_days = era * 146_097 + doe - 719_468;
 
-    let epoch = total_days * 86400
-        + dt.hour as i64 * 3600
-        + dt.minute as i64 * 60
-        + dt.second as i64;
+    let epoch =
+        total_days * 86400 + dt.hour as i64 * 3600 + dt.minute as i64 * 60 + dt.second as i64;
 
     Ok(epoch)
 }
@@ -451,10 +443,7 @@ fn format_datetime(dt: &DateTime, epoch_sec: i64, fmt: &str) -> String {
                 }
                 // %T = %H:%M:%S
                 'T' => {
-                    result.push_str(&format!(
-                        "{:02}:{:02}:{:02}",
-                        dt.hour, dt.minute, dt.second
-                    ));
+                    result.push_str(&format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second));
                 }
                 // %R = %H:%M
                 'R' => {
@@ -491,10 +480,7 @@ fn format_datetime(dt: &DateTime, epoch_sec: i64, fmt: &str) -> String {
                 }
                 // %X = locale time.
                 'X' => {
-                    result.push_str(&format!(
-                        "{:02}:{:02}:{:02}",
-                        dt.hour, dt.minute, dt.second
-                    ));
+                    result.push_str(&format!("{:02}:{:02}:{:02}", dt.hour, dt.minute, dt.second));
                 }
                 // %r = 12-hour time with AM/PM.
                 'r' => {
@@ -695,7 +681,9 @@ fn parse_time_suffix(s: &str) -> Result<(u32, u32, u32), String> {
                 .map_err(|_| format!("invalid second: {}", parts[2]))?;
             Ok((hour, minute, second))
         }
-        _ => Err(format!("invalid time format: '{s}' (expected HH:MM or HH:MM:SS)")),
+        _ => Err(format!(
+            "invalid time format: '{s}' (expected HH:MM or HH:MM:SS)"
+        )),
     }
 }
 
@@ -1027,9 +1015,7 @@ fn parse_args(args: &[String]) -> Options {
                 });
             }
             _ if arg.starts_with("--rfc-3339=") => {
-                let precision = arg
-                    .strip_prefix("--rfc-3339=")
-                    .unwrap_or("seconds");
+                let precision = arg.strip_prefix("--rfc-3339=").unwrap_or("seconds");
                 action = Some(Action::Rfc3339 {
                     precision: precision.to_string(),
                 });
@@ -1055,9 +1041,7 @@ fn parse_args(args: &[String]) -> Options {
             format: format_str,
         },
         Some(other) => other,
-        None => Action::Display {
-            format: format_str,
-        },
+        None => Action::Display { format: format_str },
     };
 
     Options { utc, action }
@@ -1279,8 +1263,8 @@ mod tests {
 
     #[test]
     fn test_epoch_to_datetime_with_time() {
-        // 2025-05-17 14:30:45 UTC = 1747491045
-        let dt = epoch_to_datetime(1_747_491_045, 0);
+        // 2025-05-17 14:30:45 UTC = 1747492245
+        let dt = epoch_to_datetime(1_747_492_245, 0);
         assert_eq!(dt.year, 2025);
         assert_eq!(dt.month, 5);
         assert_eq!(dt.day, 17);
@@ -1294,7 +1278,7 @@ mod tests {
         let test_epochs: Vec<i64> = vec![
             0,
             1_704_067_200,
-            1_747_491_045,
+            1_747_492_245,
             86400,
             -86400,
             946_684_800, // 2000-01-01
@@ -1366,36 +1350,33 @@ mod tests {
 
     #[test]
     fn test_format_year() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%Y"), "2025");
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%Y"), "2025");
     }
 
     #[test]
     fn test_format_2digit_year() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%y"), "25");
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%y"), "25");
     }
 
     #[test]
     fn test_format_month_day() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%m-%d"), "05-17");
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%m-%d"), "05-17");
     }
 
     #[test]
     fn test_format_hms() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(
-            format_datetime(&dt, 1_747_491_045, "%H:%M:%S"),
-            "14:30:45"
-        );
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%H:%M:%S"), "14:30:45");
     }
 
     #[test]
     fn test_format_12hour() {
         // 14:30 -> 02:30 PM
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%I:%M %p"), "02:30 PM");
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%I:%M %p"), "02:30 PM");
 
         // 00:00 -> 12:00 AM
         let dt_midnight = epoch_to_datetime(1_747_440_000, 0);
@@ -1408,43 +1389,34 @@ mod tests {
     #[test]
     fn test_format_weekday() {
         // 2025-05-17 is Saturday.
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%a"), "Sat");
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%A"), "Saturday");
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%a"), "Sat");
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%A"), "Saturday");
     }
 
     #[test]
     fn test_format_month_name() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%b"), "May");
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%B"), "May");
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%b"), "May");
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%B"), "May");
     }
 
     #[test]
     fn test_format_composite_f() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(
-            format_datetime(&dt, 1_747_491_045, "%F"),
-            "2025-05-17"
-        );
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%F"), "2025-05-17");
     }
 
     #[test]
     fn test_format_composite_t() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(
-            format_datetime(&dt, 1_747_491_045, "%T"),
-            "14:30:45"
-        );
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%T"), "14:30:45");
     }
 
     #[test]
     fn test_format_epoch_seconds() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(
-            format_datetime(&dt, 1_747_491_045, "%s"),
-            "1747491045"
-        );
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%s"), "1747492245");
     }
 
     #[test]
@@ -1480,16 +1452,16 @@ mod tests {
 
     #[test]
     fn test_format_day_of_year() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
+        let dt = epoch_to_datetime(1_747_492_245, 0);
         // May 17 = 31+28+31+30+17 = 137
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%j"), "137");
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%j"), "137");
     }
 
     #[test]
     fn test_format_weekday_number() {
         // Saturday = 6 in ISO (u)
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%u"), "6");
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%u"), "6");
     }
 
     // --- Date parsing ---
@@ -1497,7 +1469,7 @@ mod tests {
     #[test]
     fn test_parse_ymd() {
         let (sec, _) = parse_date_string("2025-05-17 14:30:45").unwrap();
-        assert_eq!(sec, 1_747_491_045);
+        assert_eq!(sec, 1_747_492_245);
     }
 
     #[test]
@@ -1513,19 +1485,19 @@ mod tests {
     #[test]
     fn test_parse_iso_with_t() {
         let (sec, _) = parse_date_string("2025-05-17T14:30:45").unwrap();
-        assert_eq!(sec, 1_747_491_045);
+        assert_eq!(sec, 1_747_492_245);
     }
 
     #[test]
     fn test_parse_epoch() {
-        let (sec, _) = parse_date_string("@1747491045").unwrap();
-        assert_eq!(sec, 1_747_491_045);
+        let (sec, _) = parse_date_string("@1747492245").unwrap();
+        assert_eq!(sec, 1_747_492_245);
     }
 
     #[test]
     fn test_parse_mdy() {
         let (sec, _) = parse_date_string("05/17/2025 14:30:45").unwrap();
-        assert_eq!(sec, 1_747_491_045);
+        assert_eq!(sec, 1_747_492_245);
     }
 
     #[test]
@@ -1539,38 +1511,32 @@ mod tests {
 
     #[test]
     fn test_rfc5322_format() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        let out = format_rfc5322(&dt, 1_747_491_045);
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        let out = format_rfc5322(&dt, 1_747_492_245);
         assert_eq!(out, "Sat, 17 May 2025 14:30:45 +0000");
     }
 
     #[test]
     fn test_iso8601_date() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
+        let dt = epoch_to_datetime(1_747_492_245, 0);
         assert_eq!(format_iso8601(&dt, "date"), "2025-05-17");
     }
 
     #[test]
     fn test_iso8601_seconds() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(
-            format_iso8601(&dt, "seconds"),
-            "2025-05-17T14:30:45+00:00"
-        );
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_iso8601(&dt, "seconds"), "2025-05-17T14:30:45+00:00");
     }
 
     #[test]
     fn test_rfc3339_seconds() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(
-            format_rfc3339(&dt, "seconds"),
-            "2025-05-17 14:30:45+00:00"
-        );
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_rfc3339(&dt, "seconds"), "2025-05-17 14:30:45+00:00");
     }
 
     #[test]
     fn test_rfc3339_ns() {
-        let dt = epoch_to_datetime(1_747_491_045, 123_456_789);
+        let dt = epoch_to_datetime(1_747_492_245, 123_456_789);
         assert_eq!(
             format_rfc3339(&dt, "ns"),
             "2025-05-17 14:30:45.123456789+00:00"
@@ -1581,9 +1547,9 @@ mod tests {
 
     #[test]
     fn test_json_output() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        let json = format_json(&dt, 1_747_491_045);
-        assert!(json.contains("\"epoch\":1747491045"));
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        let json = format_json(&dt, 1_747_492_245);
+        assert!(json.contains("\"epoch\":1747492245"));
         assert!(json.contains("\"year\":2025"));
         assert!(json.contains("\"month\":5"));
         assert!(json.contains("\"day\":17"));
@@ -1595,8 +1561,8 @@ mod tests {
 
     #[test]
     fn test_default_format() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        let out = format_default(&dt, 1_747_491_045);
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        let out = format_default(&dt, 1_747_492_245);
         assert_eq!(out, "Sat May 17 14:30:45 UTC 2025");
     }
 
@@ -1650,16 +1616,13 @@ mod tests {
 
     #[test]
     fn test_format_r_12hour() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(
-            format_datetime(&dt, 1_747_491_045, "%r"),
-            "02:30:45 PM"
-        );
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%r"), "02:30:45 PM");
     }
 
     #[test]
     fn test_format_d_us_date() {
-        let dt = epoch_to_datetime(1_747_491_045, 0);
-        assert_eq!(format_datetime(&dt, 1_747_491_045, "%D"), "05/17/25");
+        let dt = epoch_to_datetime(1_747_492_245, 0);
+        assert_eq!(format_datetime(&dt, 1_747_492_245, "%D"), "05/17/25");
     }
 }

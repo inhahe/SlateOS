@@ -141,16 +141,22 @@ fn execute(state: &mut DcState, input: &str, output: &mut dyn Write) -> Result<b
             // Whitespace: skip
             ' ' | '\t' | '\n' | '\r' => {}
 
-            // Numbers
-            '0'..='9' | '.' | '_' => {
+            // Numbers.  A dc number may begin with a hex digit A-F (dc treats
+            // A-F as the digit values 10-15 regardless of ibase), so the
+            // number scanner must trigger on those too — not just 0-9.
+            '0'..='9' | '.' | '_' | 'A'..='F' => {
                 let start = i;
                 let negative = c == '_';
                 if negative {
                     i += 1;
                 }
-                // Collect digits and decimal point
+                // Collect digits (0-9 and A-F) and the decimal point.
                 let mut num_str = String::new();
-                while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i].is_ascii_uppercase()) {
+                while i < chars.len()
+                    && (chars[i].is_ascii_digit()
+                        || chars[i] == '.'
+                        || ('A'..='F').contains(&chars[i]))
+                {
                     num_str.push(chars[i]);
                     i += 1;
                 }
@@ -161,7 +167,8 @@ fn execute(state: &mut DcState, input: &str, output: &mut dyn Write) -> Result<b
                 } else if state.ibase != 10 {
                     parse_base_number(&num_str, state.ibase)?
                 } else {
-                    num_str.parse::<f64>()
+                    num_str
+                        .parse::<f64>()
                         .map_err(|_| format!("invalid number: '{}'", &input[start..i]))?
                 };
 
@@ -450,7 +457,9 @@ fn execute(state: &mut DcState, input: &str, output: &mut dyn Write) -> Result<b
                     }
                 }
             }
-            '!' if i + 1 < chars.len() && (chars[i + 1] == '>' || chars[i + 1] == '<' || chars[i + 1] == '=') => {
+            '!' if i + 1 < chars.len()
+                && (chars[i + 1] == '>' || chars[i + 1] == '<' || chars[i + 1] == '=') =>
+            {
                 let op = chars[i + 1];
                 i += 2;
                 if i >= chars.len() {
@@ -482,7 +491,9 @@ fn execute(state: &mut DcState, input: &str, output: &mut dyn Write) -> Result<b
                 // Read a line from stdin and execute it
                 let stdin = io::stdin();
                 let mut line = String::new();
-                stdin.lock().read_line(&mut line)
+                stdin
+                    .lock()
+                    .read_line(&mut line)
                     .map_err(|e| format!("read: {e}"))?;
                 let should_quit = execute(state, line.trim(), output)?;
                 if should_quit {
@@ -548,7 +559,9 @@ fn parse_base_number(s: &str, base: u32) -> Result<f64, String> {
 }
 
 fn mod_pow(mut base: i64, mut exp: i64, modulus: i64) -> i64 {
-    if modulus == 1 { return 0; }
+    if modulus == 1 {
+        return 0;
+    }
     let mut result: i64 = 1;
     base %= modulus;
     while exp > 0 {
@@ -615,8 +628,7 @@ fn run() -> Result<(), String> {
 
     // Execute files
     for file in &files {
-        let content = fs::read_to_string(file)
-            .map_err(|e| format!("{file}: {e}"))?;
+        let content = fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
         if execute(&mut state, &content, &mut out)? {
             return Ok(());
         }

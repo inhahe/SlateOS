@@ -1,3 +1,41 @@
+## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 4 — RUNTIME test
+##   failures (test builds compiled, but assertions failed) found by running the full
+##   `cargo test --no-fail-fast` across all 275 substantial userspace crates. 10 crates.
+##   PRODUCTION bugs (8):
+##     - tcpdump (tcp_flags_string): flag emission order was arbitrary (SYN, ACK, FIN, RST,
+##       PSH, URG), producing "[.F]" for FIN|ACK. Real tcpdump uses the fixed
+##       `tcp_flag_values` order F,S,R,P,.(ACK),U. Reordered to match → FIN|ACK = "[F.]".
+##       (Test for PSH|ACK expecting "[.P]" was a TEST-DATA bug; canonical is "[P.]" — fixed.)
+##     - seq (regex_match_expr, group `\(...\)` capture): the inner subexpression only had to
+##       match a PREFIX of the candidate slice, so `\(abc\)` against "abcdef" took the longest
+##       slice (whole string) whose prefix matched → captured "abcdef". Fixed: inner match must
+##       consume the ENTIRE candidate slice (consumed == sub_text.len()) for an anchored exact fit.
+##     - login (verify_password): the locked-account guard lumped empty hash in with "!"/"*",
+##       returning false and making the intended "empty hash = passwordless" block dead code.
+##       Removed hash.is_empty() from the locked guard so an empty hash falls through to the
+##       passwordless path (empty supplied password authenticates; non-empty does not).
+##     - m4 (collect_args + Changequote): quote level was stripped in collect_args then
+##       re-expanded by expand_args (double-strip). Fixed by re-wrapping the quoted text so a
+##       single later expand pass strips exactly one level. changequote() with one empty arg
+##       was mis-treated as "no args" (kept quoting on) instead of disabling quoting.
+##     - du (human_readable/si_readable): whole-number special case printed "1K" where GNU
+##       prints "1.0K". Removed special case; now <10 → one decimal, >=10 → zero decimals.
+##     - crond2 (next_match_after): after zeroing seconds the computed time could fall BEFORE
+##       `from` (same-minute truncation). Added a guard advancing to the next minute when so.
+##     - dc (number scanner): hex digits A-F were not accepted as a number start nor inside the
+##       number loop (used is_ascii_uppercase wrongly). Added 'A'..='F' to start arm and inner
+##       loop; verified no command arm uses A-F.
+##     - doas (tokenize): quoted strings were only recognised as whole standalone tokens, so an
+##       embedded quote like PATH="/usr/bin:/bin" was kept verbatim. Unified into one token loop
+##       that strips quotes appearing anywhere in a word, handles \ escapes, errors on unterminated
+##       quotes, and uses a have_token flag so `""` still yields an (empty) token.
+##   TEST-DATA bugs (2):
+##     - date: epoch constants labelled 14:30:45 were actually 1_747_491_045 = 14:10:45 UTC
+##       (20-min/1200s off). Corrected to 1_747_492_245.
+##     - cpupower: test asserted format_freq_khz(1000) == "1000 MHz"; 1000 kHz = 1 MHz, fn was
+##       correct → fixed the expectation to "1 MHz". (Also fixed a pre-existing collapsible_if
+##       clippy deny in read_cpu_model via let-chain.)
+
 ## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 3 — final 14 crates
 ##   from the `--keep-going` sweep whose TEST BUILDS did not compile on the host target.
 ##   Root causes & PROPER fixes:

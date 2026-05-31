@@ -158,7 +158,12 @@ fn read_u32_be(data: &[u8], offset: usize) -> u32 {
     if offset + 4 > data.len() {
         return 0;
     }
-    u32::from_be_bytes([data[offset], data[offset + 1], data[offset + 2], data[offset + 3]])
+    u32::from_be_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
 }
 
 fn parse_ethernet(data: &[u8]) -> Option<EthernetHeader> {
@@ -283,21 +288,23 @@ fn format_ip(ip: u32) -> String {
 }
 
 fn tcp_flags_string(flags: u8) -> String {
+    // Flag ordering matches real tcpdump's `tcp_flag_values` table:
+    // F (FIN), S (SYN), R (RST), P (PSH), . (ACK), U (URG).
     let mut s = String::from("[");
-    if flags & TCP_SYN != 0 {
-        s.push('S');
-    }
-    if flags & TCP_ACK != 0 {
-        s.push('.');
-    }
     if flags & TCP_FIN != 0 {
         s.push('F');
+    }
+    if flags & TCP_SYN != 0 {
+        s.push('S');
     }
     if flags & TCP_RST != 0 {
         s.push('R');
     }
     if flags & TCP_PSH != 0 {
         s.push('P');
+    }
+    if flags & TCP_ACK != 0 {
+        s.push('.');
     }
     if flags & TCP_URG != 0 {
         s.push('U');
@@ -392,18 +399,24 @@ fn hex_dump(data: &[u8], max_bytes: usize) {
 
 #[derive(Default)]
 struct Filter {
-    protocol: Option<u8>,  // PROTO_TCP, PROTO_UDP, PROTO_ICMP
-    host: Option<u32>,     // Match src or dst IP
+    protocol: Option<u8>, // PROTO_TCP, PROTO_UDP, PROTO_ICMP
+    host: Option<u32>,    // Match src or dst IP
     src_host: Option<u32>,
     dst_host: Option<u32>,
-    port: Option<u16>,     // Match src or dst port
+    port: Option<u16>, // Match src or dst port
     src_port: Option<u16>,
     dst_port: Option<u16>,
     arp_only: bool,
 }
 
 impl Filter {
-    fn matches(&self, eth: &EthernetHeader, ip: Option<&Ipv4Header>, sport: u16, dport: u16) -> bool {
+    fn matches(
+        &self,
+        eth: &EthernetHeader,
+        ip: Option<&Ipv4Header>,
+        sport: u16,
+        dport: u16,
+    ) -> bool {
         // ARP filter.
         if self.arp_only {
             return eth.ethertype == ETHER_ARP;
@@ -489,7 +502,8 @@ struct PcapWriter {
 
 impl PcapWriter {
     fn new(path: &str, snaplen: u32) -> Result<Self, String> {
-        let mut file = fs::File::create(path).map_err(|e| format!("cannot create {}: {}", path, e))?;
+        let mut file =
+            fs::File::create(path).map_err(|e| format!("cannot create {}: {}", path, e))?;
 
         // Write global header.
         let mut hdr = Vec::with_capacity(24);
@@ -501,7 +515,8 @@ impl PcapWriter {
         hdr.extend_from_slice(&snaplen.to_le_bytes());
         hdr.extend_from_slice(&PCAP_LINKTYPE_ETHERNET.to_le_bytes());
 
-        file.write_all(&hdr).map_err(|e| format!("write error: {}", e))?;
+        file.write_all(&hdr)
+            .map_err(|e| format!("write error: {}", e))?;
         Ok(PcapWriter { file })
     }
 
@@ -516,7 +531,9 @@ impl PcapWriter {
         rec.extend_from_slice(&orig_len.to_le_bytes());
         rec.extend_from_slice(data);
 
-        self.file.write_all(&rec).map_err(|e| format!("write error: {}", e))
+        self.file
+            .write_all(&rec)
+            .map_err(|e| format!("write error: {}", e))
     }
 }
 
@@ -602,7 +619,7 @@ enum TimestampMode {
 }
 
 struct DisplayOpts {
-    verbose: u8,           // 0, 1, 2, 3
+    verbose: u8, // 0, 1, 2, 3
     numeric: bool,
     hex_dump: bool,
     timestamp: TimestampMode,
@@ -616,7 +633,11 @@ fn display_packet(data: &[u8], opts: &DisplayOpts, ts_ns: u64, prev_ts_ns: u64) 
         } else {
             0
         };
-        format!("{}.{:06} ", delta / 1_000_000_000, (delta / 1000) % 1_000_000)
+        format!(
+            "{}.{:06} ",
+            delta / 1_000_000_000,
+            (delta / 1000) % 1_000_000
+        )
     } else {
         format_timestamp(ts_ns, opts.timestamp)
     };
@@ -654,13 +675,23 @@ fn display_packet(data: &[u8], opts: &DisplayOpts, ts_ns: u64, prev_ts_ns: u64) 
                 PROTO_TCP => {
                     if let Some(tcp) = parse_tcp(transport) {
                         let flags = tcp_flags_string(tcp.flags);
-                        let payload_len = ip.total_length as i32 - ip_hdr_len as i32 - (tcp.data_offset as i32 * 4);
+                        let payload_len = ip.total_length as i32
+                            - ip_hdr_len as i32
+                            - (tcp.data_offset as i32 * 4);
                         let payload_len = payload_len.max(0) as u32;
 
                         print!(
                             "{}IP {}.{} > {}.{}: Flags {}, seq {}, ack {}, win {}, length {}",
-                            ts_str, src, tcp.src_port, dst, tcp.dst_port, flags,
-                            tcp.seq_num, tcp.ack_num, tcp.window, payload_len,
+                            ts_str,
+                            src,
+                            tcp.src_port,
+                            dst,
+                            tcp.dst_port,
+                            flags,
+                            tcp.seq_num,
+                            tcp.ack_num,
+                            tcp.window,
+                            payload_len,
                         );
 
                         if opts.verbose >= 1 {
@@ -759,8 +790,12 @@ fn display_packet(data: &[u8], opts: &DisplayOpts, ts_ns: u64, prev_ts_ns: u64) 
             }
         }
         ETHER_IPV6 => {
-            println!("{}IP6 {} > {} [IPv6 not fully parsed]", ts_str,
-                format_mac(&eth.src_mac), format_mac(&eth.dst_mac));
+            println!(
+                "{}IP6 {} > {} [IPv6 not fully parsed]",
+                ts_str,
+                format_mac(&eth.src_mac),
+                format_mac(&eth.dst_mac)
+            );
         }
         other => {
             println!(
@@ -784,7 +819,13 @@ fn display_packet(data: &[u8], opts: &DisplayOpts, ts_ns: u64, prev_ts_ns: u64) 
 // Live capture
 // ============================================================================
 
-fn capture_live(iface: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts, write_path: Option<&str>) {
+fn capture_live(
+    iface: &str,
+    count: Option<u32>,
+    filter: &Filter,
+    opts: &DisplayOpts,
+    write_path: Option<&str>,
+) {
     // Try reading packets from /proc/net/capture or /dev/netraw.
     let capture_path = format!("/proc/net/capture/{}", iface);
     let alt_path = "/proc/net/capture";
@@ -806,7 +847,9 @@ fn capture_live(iface: &str, count: Option<u32>, filter: &Filter, opts: &Display
                 capture_from_proc_net(count, filter, opts, write_path);
                 return;
             }
-            eprintln!("tcpdump: cannot open capture interface (no /proc/net/capture or /dev/netraw)");
+            eprintln!(
+                "tcpdump: cannot open capture interface (no /proc/net/capture or /dev/netraw)"
+            );
             eprintln!("hint: packet capture may not be enabled in the kernel");
             process::exit(1);
         }
@@ -820,7 +863,10 @@ fn capture_live(iface: &str, count: Option<u32>, filter: &Filter, opts: &Display
     });
 
     if !opts.numeric {
-        eprintln!("tcpdump: listening on {}, link-type EN10MB (Ethernet), snapshot length {} bytes", iface, opts.snaplen);
+        eprintln!(
+            "tcpdump: listening on {}, link-type EN10MB (Ethernet), snapshot length {} bytes",
+            iface, opts.snaplen
+        );
     }
 
     let mut captured = 0u32;
@@ -930,7 +976,12 @@ fn capture_live(iface: &str, count: Option<u32>, filter: &Filter, opts: &Display
 }
 
 /// Fallback: parse text-based packet log from /proc/net/packets.
-fn capture_from_proc_net(count: Option<u32>, filter: &Filter, opts: &DisplayOpts, _write_path: Option<&str>) {
+fn capture_from_proc_net(
+    count: Option<u32>,
+    filter: &Filter,
+    opts: &DisplayOpts,
+    _write_path: Option<&str>,
+) {
     let content = match fs::read_to_string("/proc/net/packets") {
         Ok(c) => c,
         Err(e) => {
@@ -1015,7 +1066,9 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
                     if pkt_data.len() > 14 + ip_hdr_len + 4 {
                         let transport = &pkt_data[14 + ip_hdr_len..];
                         match ip.protocol {
-                            PROTO_TCP | PROTO_UDP => (read_u16_be(transport, 0), read_u16_be(transport, 2)),
+                            PROTO_TCP | PROTO_UDP => {
+                                (read_u16_be(transport, 0), read_u16_be(transport, 2))
+                            }
                             _ => (0, 0),
                         }
                     } else {
@@ -1290,7 +1343,10 @@ mod tests {
 
     #[test]
     fn test_format_mac() {
-        assert_eq!(format_mac(&[0x52, 0x54, 0x00, 0x12, 0x34, 0x56]), "52:54:00:12:34:56");
+        assert_eq!(
+            format_mac(&[0x52, 0x54, 0x00, 0x12, 0x34, 0x56]),
+            "52:54:00:12:34:56"
+        );
     }
 
     #[test]
@@ -1299,7 +1355,7 @@ mod tests {
         assert_eq!(tcp_flags_string(TCP_SYN | TCP_ACK), "[S.]");
         assert_eq!(tcp_flags_string(TCP_FIN | TCP_ACK), "[F.]");
         assert_eq!(tcp_flags_string(TCP_RST), "[R]");
-        assert_eq!(tcp_flags_string(TCP_ACK | TCP_PSH), "[.P]");
+        assert_eq!(tcp_flags_string(TCP_ACK | TCP_PSH), "[P.]");
     }
 
     #[test]

@@ -325,10 +325,7 @@ fn parse_args() -> Config {
                                 match args[i].parse::<usize>() {
                                     Ok(n) => cfg.max_depth = Some(n),
                                     Err(_) => {
-                                        eprintln!(
-                                            "du: invalid maximum depth '{}'",
-                                            args[i]
-                                        );
+                                        eprintln!("du: invalid maximum depth '{}'", args[i]);
                                         process::exit(1);
                                     }
                                 }
@@ -519,10 +516,12 @@ fn human_readable(bytes: u64) -> String {
     let mut val = bytes as f64;
     for &unit in UNITS {
         if val < 1024.0 || unit == "P" {
-            return if val >= 100.0 || (val - val.round()).abs() < 0.05 {
-                format!("{:.0}{unit}", val)
-            } else if val >= 10.0 {
-                format!("{val:.1}{unit}")
+            // GNU du -h shows one decimal place for scaled values below 10
+            // (e.g. "1.0K", "1.5K") and no decimals at or above 10 ("512B",
+            // "10K"). Do NOT special-case whole numbers — GNU prints "1.0K",
+            // not "1K", for exactly 1024 bytes.
+            return if val >= 10.0 {
+                format!("{val:.0}{unit}")
             } else {
                 format!("{val:.1}{unit}")
             };
@@ -541,10 +540,9 @@ fn si_readable(bytes: u64) -> String {
     let mut val = bytes as f64;
     for &unit in UNITS {
         if val < 1000.0 || unit == "PB" {
-            return if val >= 100.0 || (val - val.round()).abs() < 0.05 {
-                format!("{:.0}{unit}", val)
-            } else if val >= 10.0 {
-                format!("{val:.1}{unit}")
+            // Match GNU du --si: one decimal below 10, none at or above.
+            return if val >= 10.0 {
+                format!("{val:.0}{unit}")
             } else {
                 format!("{val:.1}{unit}")
             };
@@ -628,10 +626,7 @@ fn json_escape(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if c.is_control() => {
                 for unit in c.encode_utf16(&mut [0u16; 2]) {
-                    let _ = std::fmt::Write::write_fmt(
-                        &mut out,
-                        format_args!("\\u{unit:04x}"),
-                    );
+                    let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\\u{unit:04x}"));
                 }
             }
             c => out.push(c),
@@ -702,10 +697,7 @@ fn disk_usage(apparent: u64) -> u64 {
         return 0;
     }
     // Round up to the next multiple of BLOCK_SIZE.
-    apparent
-        .saturating_add(BLOCK_SIZE - 1)
-        / BLOCK_SIZE
-        * BLOCK_SIZE
+    apparent.saturating_add(BLOCK_SIZE - 1) / BLOCK_SIZE * BLOCK_SIZE
 }
 
 // ============================================================================
@@ -779,7 +771,11 @@ fn walk(
 
     if meta.is_file() || meta.is_symlink() {
         let apparent = meta_ext::file_size(&meta);
-        let size = if cfg.use_apparent_size() { apparent } else { disk_usage(apparent) };
+        let size = if cfg.use_apparent_size() {
+            apparent
+        } else {
+            disk_usage(apparent)
+        };
         let inode_count = 1u64;
 
         return (size, inode_count);
@@ -884,7 +880,11 @@ fn print_results(entries: &[DuEntry], cfg: &Config) {
         };
 
         if let Some(threshold) = cfg.threshold {
-            let effective = if cfg.inodes { entry.inode_count } else { entry.size };
+            let effective = if cfg.inodes {
+                entry.inode_count
+            } else {
+                entry.size
+            };
             if effective < threshold {
                 continue;
             }
@@ -932,10 +932,7 @@ fn print_json(entries: &[DuEntry], cfg: &Config) {
                     "  {{\"path\":\"{path}\",\"size\":{size},\"time\":\"{time_escaped}\"}}{comma}",
                 );
             } else {
-                let _ = writeln!(
-                    out,
-                    "  {{\"path\":\"{path}\",\"size\":{size}}}{comma}",
-                );
+                let _ = writeln!(out, "  {{\"path\":\"{path}\",\"size\":{size}}}{comma}",);
             }
         }
     }
@@ -1005,7 +1002,11 @@ fn run() -> i32 {
 
     // Grand total row (with -c / --total).
     if cfg.total {
-        let display_total = if cfg.inodes { grand_inodes } else { grand_total };
+        let display_total = if cfg.inodes {
+            grand_inodes
+        } else {
+            grand_total
+        };
         all_entries.push(DuEntry {
             path: "total".to_string(),
             size: display_total,
@@ -1257,8 +1258,15 @@ mod tests {
         let mut results = Vec::new();
         let mut exit_code = 0;
 
-        let (total, _inodes) =
-            walk(&dir, 0, &cfg, &mut visited, None, &mut results, &mut exit_code);
+        let (total, _inodes) = walk(
+            &dir,
+            0,
+            &cfg,
+            &mut visited,
+            None,
+            &mut results,
+            &mut exit_code,
+        );
 
         assert_eq!(exit_code, 0);
         // Both files are small, so each takes one block = 16384.
@@ -1284,8 +1292,15 @@ mod tests {
         let mut results = Vec::new();
         let mut exit_code = 0;
 
-        let (total, _) =
-            walk(&dir, 0, &cfg, &mut visited, None, &mut results, &mut exit_code);
+        let (total, _) = walk(
+            &dir,
+            0,
+            &cfg,
+            &mut visited,
+            None,
+            &mut results,
+            &mut exit_code,
+        );
 
         assert_eq!(exit_code, 0);
         assert_eq!(total, 5); // "12345" is 5 bytes.
@@ -1309,8 +1324,15 @@ mod tests {
         let mut results = Vec::new();
         let mut exit_code = 0;
 
-        let (total, _) =
-            walk(&dir, 0, &cfg, &mut visited, None, &mut results, &mut exit_code);
+        let (total, _) = walk(
+            &dir,
+            0,
+            &cfg,
+            &mut visited,
+            None,
+            &mut results,
+            &mut exit_code,
+        );
 
         assert_eq!(exit_code, 0);
         // Only keep.txt should be counted: one block.

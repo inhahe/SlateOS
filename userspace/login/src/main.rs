@@ -167,8 +167,8 @@ fn lookup_shadow(username: &str) -> Option<ShadowEntry> {
 /// In a real system this would use crypt(3) with the appropriate algorithm
 /// (SHA-512, bcrypt, etc.). Here we implement a basic SHA-256 comparison.
 fn verify_password(password: &str, hash: &str) -> bool {
-    if hash.is_empty() || hash == "!" || hash == "!!" || hash == "*" {
-        // Locked or no password
+    if hash == "!" || hash == "!!" || hash == "*" {
+        // Locked account: never authenticates regardless of supplied password.
         return false;
     }
 
@@ -177,7 +177,8 @@ fn verify_password(password: &str, hash: &str) -> bool {
         return false;
     }
 
-    // Empty hash = no password required
+    // Empty hash = no password required (traditional Unix passwordless account).
+    // An empty supplied password authenticates; a non-empty one does not.
     if hash.is_empty() {
         return password.is_empty();
     }

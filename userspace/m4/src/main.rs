@@ -73,10 +73,8 @@ fn parse_args(args: &[String]) -> Options {
             if i < args.len() {
                 let spec = &args[i];
                 if let Some(eq) = spec.find('=') {
-                    opts.defines.push((
-                        spec[..eq].to_string(),
-                        spec[eq + 1..].to_string(),
-                    ));
+                    opts.defines
+                        .push((spec[..eq].to_string(), spec[eq + 1..].to_string()));
                 } else {
                     opts.defines.push((spec.clone(), String::new()));
                 }
@@ -295,8 +293,7 @@ impl Processor {
         };
         for (name, bi) in builtin_names() {
             let prefixed = format!("m4_{name}");
-            p.macros
-                .insert(prefixed, vec![MacroDef::BuiltinDef(bi)]);
+            p.macros.insert(prefixed, vec![MacroDef::BuiltinDef(bi)]);
         }
         p
     }
@@ -391,8 +388,7 @@ impl Processor {
 
         while pos < len {
             // 1. Try to match comment opening.
-            if !self.comment_open.is_empty()
-                && self.starts_with_at(&chars, pos, &self.comment_open)
+            if !self.comment_open.is_empty() && self.starts_with_at(&chars, pos, &self.comment_open)
             {
                 let com_close = self.comment_close.clone();
                 let com_open = self.comment_open.clone();
@@ -414,9 +410,7 @@ impl Processor {
             }
 
             // 2. Try to match quote opening.
-            if !self.quote_open.is_empty()
-                && self.starts_with_at(&chars, pos, &self.quote_open)
-            {
+            if !self.quote_open.is_empty() && self.starts_with_at(&chars, pos, &self.quote_open) {
                 let text = self.scan_quoted(&chars, &mut pos);
                 self.output(&text);
                 continue;
@@ -542,10 +536,21 @@ impl Processor {
         }
 
         while *pos < len {
-            // Check for quote.
+            // Check for quote.  Preserve one level of quoting in the collected
+            // argument text: argument collection and macro expansion are a
+            // single logical pass in m4, but this implementation collects raw
+            // args first and expands them via `expand_args`.  If we stripped
+            // the quotes here, that later expansion pass would re-scan the
+            // (now unquoted) text and wrongly expand it — e.g. the `foo` in
+            // `define(`x', defn(`foo'))` or the name in `undefine(`x')` would
+            // be expanded as a macro instead of taken literally.  Re-wrapping
+            // with the quote delimiters lets `expand_args` strip exactly one
+            // level and treat the contents literally.
             if !self.quote_open.is_empty() && self.starts_with_at(chars, *pos, &self.quote_open) {
                 let quoted = self.scan_quoted(chars, pos);
+                current.push_str(&self.quote_open);
                 current.push_str(&quoted);
+                current.push_str(&self.quote_close);
                 continue;
             }
 
@@ -584,7 +589,9 @@ impl Processor {
     /// Look up a macro by name.  Returns a clone of the most recent
     /// definition if present.
     fn lookup_macro(&self, name: &str) -> Option<MacroDef> {
-        self.macros.get(name).and_then(|stack| stack.last().cloned())
+        self.macros
+            .get(name)
+            .and_then(|stack| stack.last().cloned())
     }
 
     /// Expand a string and capture the output into a new `String`, rather
@@ -693,25 +700,24 @@ impl Processor {
             Builtin::Shift => {
                 // Return all arguments except the first, comma-separated.
                 if args.len() > 1 {
-                    let shifted: Vec<&str> =
-                        args.iter().skip(1).map(|s| s.as_str()).collect();
+                    let shifted: Vec<&str> = args.iter().skip(1).map(|s| s.as_str()).collect();
                     self.output(&shifted.join(","));
                 }
             }
             Builtin::Changequote => {
-                if args.is_empty() {
-                    // Reset to default.
+                // Reset to the default ` ' quotes when called with no arguments
+                // OR with an empty open-quote argument.  A bare `changequote()`
+                // call yields a single empty-string argument (argc==1, $1==""),
+                // not an empty arg list, so checking `args.is_empty()` alone
+                // would fall through and set an empty open quote, silently
+                // disabling all quoting.
+                let open = args.first().map_or("", |s| s.as_str());
+                if open.is_empty() {
                     self.quote_open = "`".to_string();
                     self.quote_close = "'".to_string();
                 } else {
-                    self.quote_open = args
-                        .first()
-                        .map_or("`", |s| s.as_str())
-                        .to_string();
-                    self.quote_close = args
-                        .get(1)
-                        .map_or("'", |s| s.as_str())
-                        .to_string();
+                    self.quote_open = open.to_string();
+                    self.quote_close = args.get(1).map_or("'", |s| s.as_str()).to_string();
                 }
             }
             Builtin::Changecom => {
@@ -720,14 +726,8 @@ impl Processor {
                     self.comment_open = String::new();
                     self.comment_close = String::new();
                 } else {
-                    self.comment_open = args
-                        .first()
-                        .map_or("", |s| s.as_str())
-                        .to_string();
-                    self.comment_close = args
-                        .get(1)
-                        .map_or("\n", |s| s.as_str())
-                        .to_string();
+                    self.comment_open = args.first().map_or("", |s| s.as_str()).to_string();
+                    self.comment_close = args.get(1).map_or("\n", |s| s.as_str()).to_string();
                 }
             }
             Builtin::Dnl => {
@@ -755,9 +755,7 @@ impl Processor {
                     let current = self.current_diversion;
                     for i in 1..self.diversions.len() {
                         if i as i32 != current {
-                            let text = std::mem::take(
-                                &mut self.diversions[i],
-                            );
+                            let text = std::mem::take(&mut self.diversions[i]);
                             self.output(&text);
                         }
                     }
@@ -768,9 +766,7 @@ impl Processor {
                                 && n < self.diversions.len()
                                 && n as i32 != self.current_diversion
                             {
-                                let text = std::mem::take(
-                                    &mut self.diversions[n],
-                                );
+                                let text = std::mem::take(&mut self.diversions[n]);
                                 self.output(&text);
                             }
                         }
@@ -787,9 +783,7 @@ impl Processor {
             Builtin::Index => {
                 let haystack = args.first().map_or("", |s| s.as_str());
                 let needle = args.get(1).map_or("", |s| s.as_str());
-                let idx = haystack
-                    .find(needle)
-                    .map_or(-1, |i| i as i64);
+                let idx = haystack.find(needle).map_or(-1, |i| i as i64);
                 self.output(&idx.to_string());
             }
             Builtin::Substr => {
@@ -801,9 +795,12 @@ impl Processor {
                 if start >= s.len() {
                     // Empty result.
                 } else if let Some(len_arg) = args.get(2) {
-                    let sub_len =
-                        len_arg.trim().parse::<i64>().unwrap_or(0);
-                    let sub_len = if sub_len < 0 { 0usize } else { sub_len as usize };
+                    let sub_len = len_arg.trim().parse::<i64>().unwrap_or(0);
+                    let sub_len = if sub_len < 0 {
+                        0usize
+                    } else {
+                        sub_len as usize
+                    };
                     let end = s.len().min(start + sub_len);
                     self.output(&s[start..end]);
                 } else {
@@ -872,9 +869,7 @@ impl Processor {
                     let mut entries: Vec<(String, MacroDef)> = self
                         .macros
                         .iter()
-                        .filter_map(|(k, stack)| {
-                            stack.last().map(|d| (k.clone(), d.clone()))
-                        })
+                        .filter_map(|(k, stack)| stack.last().map(|d| (k.clone(), d.clone())))
                         .collect();
                     entries.sort_by(|a, b| a.0.cmp(&b.0));
                     for (name_key, def) in &entries {
@@ -1045,8 +1040,7 @@ fn substitute_args(name: &str, body: &str, args: &[String]) -> String {
                 }
                 '*' => {
                     // All args, comma-separated, unquoted.
-                    let joined: Vec<&str> =
-                        args.iter().map(|s| s.as_str()).collect();
+                    let joined: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                     result.push_str(&joined.join(","));
                     i += 2;
                 }
@@ -1169,24 +1163,24 @@ enum ExprToken {
     Star,
     Slash,
     Percent,
-    Power,     // **
-    Eq,        // ==
-    Ne,        // !=
+    Power, // **
+    Eq,    // ==
+    Ne,    // !=
     Lt,
     Gt,
-    Le,        // <=
-    Ge,        // >=
-    And,       // &&
-    Or,        // ||
-    BitAnd,    // &
-    BitOr,     // |
-    BitXor,    // ^
-    BitNot,    // ~
-    Not,       // !
-    Shl,       // <<
-    Shr,       // >>
-    Question,  // ?
-    Colon,     // :
+    Le,       // <=
+    Ge,       // >=
+    And,      // &&
+    Or,       // ||
+    BitAnd,   // &
+    BitOr,    // |
+    BitXor,   // ^
+    BitNot,   // ~
+    Not,      // !
+    Shl,      // <<
+    Shr,      // >>
+    Question, // ?
+    Colon,    // :
     LParen,
     RParen,
 }
@@ -1247,15 +1241,51 @@ fn tokenize_expr(expr: &str) -> Result<Vec<ExprToken>, String> {
         if i + 1 < len {
             let two: String = chars[i..i + 2].iter().collect();
             match two.as_str() {
-                "**" => { tokens.push(ExprToken::Power); i += 2; continue; }
-                "==" => { tokens.push(ExprToken::Eq); i += 2; continue; }
-                "!=" => { tokens.push(ExprToken::Ne); i += 2; continue; }
-                "<=" => { tokens.push(ExprToken::Le); i += 2; continue; }
-                ">=" => { tokens.push(ExprToken::Ge); i += 2; continue; }
-                "&&" => { tokens.push(ExprToken::And); i += 2; continue; }
-                "||" => { tokens.push(ExprToken::Or); i += 2; continue; }
-                "<<" => { tokens.push(ExprToken::Shl); i += 2; continue; }
-                ">>" => { tokens.push(ExprToken::Shr); i += 2; continue; }
+                "**" => {
+                    tokens.push(ExprToken::Power);
+                    i += 2;
+                    continue;
+                }
+                "==" => {
+                    tokens.push(ExprToken::Eq);
+                    i += 2;
+                    continue;
+                }
+                "!=" => {
+                    tokens.push(ExprToken::Ne);
+                    i += 2;
+                    continue;
+                }
+                "<=" => {
+                    tokens.push(ExprToken::Le);
+                    i += 2;
+                    continue;
+                }
+                ">=" => {
+                    tokens.push(ExprToken::Ge);
+                    i += 2;
+                    continue;
+                }
+                "&&" => {
+                    tokens.push(ExprToken::And);
+                    i += 2;
+                    continue;
+                }
+                "||" => {
+                    tokens.push(ExprToken::Or);
+                    i += 2;
+                    continue;
+                }
+                "<<" => {
+                    tokens.push(ExprToken::Shl);
+                    i += 2;
+                    continue;
+                }
+                ">>" => {
+                    tokens.push(ExprToken::Shr);
+                    i += 2;
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -1687,10 +1717,7 @@ fn format_printf(fmt: &str, args: &[String]) -> String {
 
             let spec = chars[i];
             i += 1;
-            let arg_val = args
-                .get(arg_idx)
-                .map(|s| s.as_str())
-                .unwrap_or("");
+            let arg_val = args.get(arg_idx).map(|s| s.as_str()).unwrap_or("");
             arg_idx += 1;
 
             let formatted = match spec {
@@ -1843,12 +1870,7 @@ fn simple_match_at(string_chars: &[char], start: usize, pattern: &str) -> bool {
 }
 
 /// Recursive pattern matcher.
-fn match_recursive(
-    s: &[char],
-    mut si: usize,
-    p: &[char],
-    mut pi: usize,
-) -> bool {
+fn match_recursive(s: &[char], mut si: usize, p: &[char], mut pi: usize) -> bool {
     while pi < p.len() {
         // Check for `$` anchor at end.
         if p[pi] == '$' && pi + 1 == p.len() {
@@ -2043,13 +2065,7 @@ fn match_exact(s: &[char], start: usize, end: usize, pat_chars: &[char]) -> bool
     match_exact_recursive(s, start, end, pat_chars, 0)
 }
 
-fn match_exact_recursive(
-    s: &[char],
-    si: usize,
-    end: usize,
-    p: &[char],
-    pi: usize,
-) -> bool {
+fn match_exact_recursive(s: &[char], si: usize, end: usize, p: &[char], pi: usize) -> bool {
     if pi == p.len() {
         return si == end;
     }
@@ -2120,7 +2136,6 @@ fn match_exact_recursive(
 
     false
 }
-
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -2264,10 +2279,7 @@ mod tests {
 
     #[test]
     fn test_define_multiple_args() {
-        assert_eq!(
-            run("define(`pair', `($1, $2)')pair(`a', `b')"),
-            "(a, b)"
-        );
+        assert_eq!(run("define(`pair', `($1, $2)')pair(`a', `b')"), "(a, b)");
     }
 
     #[test]
@@ -2281,42 +2293,30 @@ mod tests {
 
     #[test]
     fn test_define_dollar_hash() {
-        assert_eq!(
-            run("define(`count', `$#')count(`a', `b', `c')"),
-            "3"
-        );
+        assert_eq!(run("define(`count', `$#')count(`a', `b', `c')"), "3");
     }
 
     #[test]
     fn test_define_dollar_star() {
-        assert_eq!(
-            run("define(`all', `$*')all(`a', `b', `c')"),
-            "a,b,c"
-        );
+        assert_eq!(run("define(`all', `$*')all(`a', `b', `c')"), "a,b,c");
     }
 
     #[test]
     fn test_define_dollar_at() {
         assert_eq!(
             run("define(`allq', `$@')allq(`a', `b')"),
-            "a,b"  // $@ quotes get stripped on rescan.
+            "a,b" // $@ quotes get stripped on rescan.
         );
     }
 
     #[test]
     fn test_undefine() {
-        assert_eq!(
-            run("define(`foo', `bar')undefine(`foo')foo"),
-            "foo"
-        );
+        assert_eq!(run("define(`foo', `bar')undefine(`foo')foo"), "foo");
     }
 
     #[test]
     fn test_redefine() {
-        assert_eq!(
-            run("define(`x', `1')define(`x', `2')x"),
-            "2"
-        );
+        assert_eq!(run("define(`x', `1')define(`x', `2')x"), "2");
     }
 
     // -- defn --
@@ -2378,52 +2378,34 @@ mod tests {
 
     #[test]
     fn test_ifdef_defined() {
-        assert_eq!(
-            run("define(`foo', `1')ifdef(`foo', `yes', `no')"),
-            "yes"
-        );
+        assert_eq!(run("define(`foo', `1')ifdef(`foo', `yes', `no')"), "yes");
     }
 
     #[test]
     fn test_ifdef_undefined() {
-        assert_eq!(
-            run("ifdef(`foo', `yes', `no')"),
-            "no"
-        );
+        assert_eq!(run("ifdef(`foo', `yes', `no')"), "no");
     }
 
     #[test]
     fn test_ifdef_no_else() {
-        assert_eq!(
-            run("ifdef(`foo', `yes')"),
-            ""
-        );
+        assert_eq!(run("ifdef(`foo', `yes')"), "");
     }
 
     // -- ifelse --
 
     #[test]
     fn test_ifelse_equal() {
-        assert_eq!(
-            run("ifelse(`a', `a', `yes', `no')"),
-            "yes"
-        );
+        assert_eq!(run("ifelse(`a', `a', `yes', `no')"), "yes");
     }
 
     #[test]
     fn test_ifelse_not_equal() {
-        assert_eq!(
-            run("ifelse(`a', `b', `yes', `no')"),
-            "no"
-        );
+        assert_eq!(run("ifelse(`a', `b', `yes', `no')"), "no");
     }
 
     #[test]
     fn test_ifelse_chained() {
-        assert_eq!(
-            run("ifelse(`a', `b', `1', `a', `a', `2', `3')"),
-            "2"
-        );
+        assert_eq!(run("ifelse(`a', `b', `1', `a', `a', `2', `3')"), "2");
     }
 
     #[test]
@@ -2438,10 +2420,7 @@ mod tests {
 
     #[test]
     fn test_shift() {
-        assert_eq!(
-            run("shift(`a', `b', `c')"),
-            "b,c"
-        );
+        assert_eq!(run("shift(`a', `b', `c')"), "b,c");
     }
 
     #[test]
@@ -2494,26 +2473,17 @@ mod tests {
 
     #[test]
     fn test_translit_simple() {
-        assert_eq!(
-            run("translit(`hello', `elo', `ELO')"),
-            "hELLO"
-        );
+        assert_eq!(run("translit(`hello', `elo', `ELO')"), "hELLO");
     }
 
     #[test]
     fn test_translit_delete() {
-        assert_eq!(
-            run("translit(`hello', `l')"),
-            "heo"
-        );
+        assert_eq!(run("translit(`hello', `l')"), "heo");
     }
 
     #[test]
     fn test_translit_range() {
-        assert_eq!(
-            run("translit(`hello', `a-z', `A-Z')"),
-            "HELLO"
-        );
+        assert_eq!(run("translit(`hello', `a-z', `A-Z')"), "HELLO");
     }
 
     // -- incr / decr --
@@ -2654,18 +2624,12 @@ mod tests {
 
     #[test]
     fn test_divert_basic() {
-        assert_eq!(
-            run("divert(`1')hello divert(`0')world"),
-            "worldhello "
-        );
+        assert_eq!(run("divert(`1')hello divert(`0')world"), "worldhello ");
     }
 
     #[test]
     fn test_divert_discard() {
-        assert_eq!(
-            run("divert(`-1')discarded divert(`0')kept"),
-            "kept"
-        );
+        assert_eq!(run("divert(`-1')discarded divert(`0')kept"), "kept");
     }
 
     #[test]
@@ -2675,10 +2639,7 @@ mod tests {
 
     #[test]
     fn test_divnum_after_divert() {
-        assert_eq!(
-            run("divert(`3')divnum"),
-            "3"
-        );
+        assert_eq!(run("divert(`3')divnum"), "3");
     }
 
     #[test]
@@ -2693,10 +2654,7 @@ mod tests {
 
     #[test]
     fn test_changequote() {
-        assert_eq!(
-            run("changequote(`[', `]')define([foo], [bar])foo"),
-            "bar"
-        );
+        assert_eq!(run("changequote(`[', `]')define([foo], [bar])foo"), "bar");
     }
 
     #[test]
@@ -2721,18 +2679,12 @@ mod tests {
 
     #[test]
     fn test_dnl() {
-        assert_eq!(
-            run("define(`foo', `bar')dnl this is discarded\nfoo"),
-            "bar"
-        );
+        assert_eq!(run("define(`foo', `bar')dnl this is discarded\nfoo"), "bar");
     }
 
     #[test]
     fn test_dnl_multiple() {
-        assert_eq!(
-            run("define(`a', `1')dnl\ndefine(`b', `2')dnl\na b"),
-            "1 2"
-        );
+        assert_eq!(run("define(`a', `1')dnl\ndefine(`b', `2')dnl\na b"), "1 2");
     }
 
     // -- include / sinclude --
@@ -2781,42 +2733,27 @@ mod tests {
 
     #[test]
     fn test_format_string() {
-        assert_eq!(
-            run("format(`hello %s', `world')"),
-            "hello world"
-        );
+        assert_eq!(run("format(`hello %s', `world')"), "hello world");
     }
 
     #[test]
     fn test_format_integer() {
-        assert_eq!(
-            run("format(`num=%d', `42')"),
-            "num=42"
-        );
+        assert_eq!(run("format(`num=%d', `42')"), "num=42");
     }
 
     #[test]
     fn test_format_hex() {
-        assert_eq!(
-            run("format(`hex=%x', `255')"),
-            "hex=ff"
-        );
+        assert_eq!(run("format(`hex=%x', `255')"), "hex=ff");
     }
 
     #[test]
     fn test_format_width() {
-        assert_eq!(
-            run("format(`[%10s]', `hi')"),
-            "[        hi]"
-        );
+        assert_eq!(run("format(`[%10s]', `hi')"), "[        hi]");
     }
 
     #[test]
     fn test_format_percent() {
-        assert_eq!(
-            run("format(`100%%')"),
-            "100%"
-        );
+        assert_eq!(run("format(`100%%')"), "100%");
     }
 
     // -- regexp --
@@ -2850,10 +2787,7 @@ mod tests {
 
     #[test]
     fn test_nested_expansion() {
-        assert_eq!(
-            run("define(`a', `b')define(`b', `c')a"),
-            "c"
-        );
+        assert_eq!(run("define(`a', `b')define(`b', `c')a"), "c");
     }
 
     #[test]
@@ -2868,10 +2802,7 @@ mod tests {
 
     #[test]
     fn test_empty_define() {
-        assert_eq!(
-            run("define(`foo', `')foo."),
-            "."
-        );
+        assert_eq!(run("define(`foo', `')foo."), ".");
     }
 
     #[test]
@@ -2913,18 +2844,12 @@ mod tests {
 
     #[test]
     fn test_args_with_nested_parens() {
-        assert_eq!(
-            run("define(`wrap', `[$1]')wrap(`(a,b)')"),
-            "[(a,b)]"
-        );
+        assert_eq!(run("define(`wrap', `[$1]')wrap(`(a,b)')"), "[(a,b)]");
     }
 
     #[test]
     fn test_args_with_quotes() {
-        assert_eq!(
-            run("define(`f', `<$1>')f(`a,b')"),
-            "<a,b>"
-        );
+        assert_eq!(run("define(`f', `<$1>')f(`a,b')"), "<a,b>");
     }
 
     // -- parse_args tests --

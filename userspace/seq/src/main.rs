@@ -179,7 +179,10 @@ fn run_seq(args: &[String]) -> i32 {
                     .replace("%G", &format_g(n, max_decimals).to_uppercase())
             } else if fmt.contains("%f") || fmt.contains("%F") {
                 fmt.replace("%f", &format!("{:.prec$}", n, prec = max_decimals))
-                    .replace("%F", &format!("{:.prec$}", n, prec = max_decimals).to_uppercase())
+                    .replace(
+                        "%F",
+                        &format!("{:.prec$}", n, prec = max_decimals).to_uppercase(),
+                    )
             } else if fmt.contains("%e") || fmt.contains("%E") {
                 fmt.replace("%e", &format!("{:e}", n))
                     .replace("%E", &format!("{:E}", n))
@@ -452,11 +455,7 @@ impl ExprParser {
         while self.peek() == Some(&ExprToken::Or) {
             self.next();
             let right = self.parse_and()?;
-            left = if !left.is_null_or_zero() {
-                left
-            } else {
-                right
-            };
+            left = if !left.is_null_or_zero() { left } else { right };
         }
 
         Ok(left)
@@ -728,14 +727,19 @@ fn regex_match_expr(
             let inner = &pat[pi + 2..close];
             let rest = &pat[close + 2..]; // skip \)
 
-            // Try all possible match lengths for the inner pattern
+            // Try all possible match lengths for the inner pattern. The inner
+            // subexpression must consume the *entire* candidate substring
+            // [group_start..end] (anchored, exact fit) — otherwise a short
+            // pattern like `abc` would falsely "match" a longer slice such as
+            // `abcdef` by only matching its prefix, capturing too much.
             for end in (group_start..=text.len()).rev() {
                 let sub_text = &text[group_start..end];
-                if let Some((_, _)) = regex_match_expr(inner, 0, sub_text, 0) {
-                    if let Some((full_len, _)) = regex_match_expr(rest, 0, text, end) {
-                        let _ = full_len;
-                        return Some((end, Some(text[group_start..end].to_string())));
-                    }
+                if let Some((consumed, _)) = regex_match_expr(inner, 0, sub_text, 0)
+                    && consumed == sub_text.len()
+                    && let Some((full_len, _)) = regex_match_expr(rest, 0, text, end)
+                {
+                    let _ = full_len;
+                    return Some((end, Some(text[group_start..end].to_string())));
                 }
             }
             return None;
@@ -999,7 +1003,10 @@ mod tests {
     #[test]
     fn test_tokenize_ops() {
         let tokens = tokenize_expr(&["+".to_string(), "-".to_string(), "*".to_string()]);
-        assert_eq!(tokens, vec![ExprToken::Plus, ExprToken::Minus, ExprToken::Multiply]);
+        assert_eq!(
+            tokens,
+            vec![ExprToken::Plus, ExprToken::Minus, ExprToken::Multiply]
+        );
     }
 
     #[test]
@@ -1134,11 +1141,7 @@ mod tests {
 
     #[test]
     fn test_expr_index() {
-        let tokens = tokenize_expr(&[
-            "index".to_string(),
-            "hello".to_string(),
-            "lo".to_string(),
-        ]);
+        let tokens = tokenize_expr(&["index".to_string(), "hello".to_string(), "lo".to_string()]);
         let mut parser = ExprParser::new(tokens);
         let result = parser.parse().unwrap();
         assert_eq!(result, ExprValue::Int(3)); // 'l' is at position 3
@@ -1146,11 +1149,7 @@ mod tests {
 
     #[test]
     fn test_expr_index_not_found() {
-        let tokens = tokenize_expr(&[
-            "index".to_string(),
-            "hello".to_string(),
-            "xyz".to_string(),
-        ]);
+        let tokens = tokenize_expr(&["index".to_string(), "hello".to_string(), "xyz".to_string()]);
         let mut parser = ExprParser::new(tokens);
         let result = parser.parse().unwrap();
         assert_eq!(result, ExprValue::Int(0));

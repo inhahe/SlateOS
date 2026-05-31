@@ -87,12 +87,12 @@ fn now_secs() -> u64 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BrokenTime {
     year: i64,
-    month: u32,   // 1-12
-    day: u32,     // 1-31
-    hour: u32,    // 0-23
-    minute: u32,  // 0-59
+    month: u32,  // 1-12
+    day: u32,    // 1-31
+    hour: u32,   // 0-23
+    minute: u32, // 0-59
     #[allow(dead_code)]
-    second: u32,  // 0-59
+    second: u32, // 0-59
     weekday: u32, // 0=Sunday .. 6=Saturday
 }
 
@@ -195,11 +195,7 @@ fn broken_to_unix(bt: &BrokenTime) -> u64 {
     let total_secs =
         days * 86400 + i64::from(bt.hour) * 3600 + i64::from(bt.minute) * 60 + i64::from(bt.second);
 
-    if total_secs < 0 {
-        0
-    } else {
-        total_secs as u64
-    }
+    if total_secs < 0 { 0 } else { total_secs as u64 }
 }
 
 // ============================================================================
@@ -453,9 +449,9 @@ fn no_names(_s: &str) -> Option<u32> {
 struct CronExpr {
     minute: FieldBitset,
     hour: FieldBitset,
-    dom: FieldBitset,   // day of month
+    dom: FieldBitset, // day of month
     month: FieldBitset,
-    dow: FieldBitset,   // day of week
+    dow: FieldBitset, // day of week
     /// Both dom and dow were explicitly specified (not wildcards).
     /// Per POSIX, if both are restricted, match is a union (OR), not
     /// intersection (AND).
@@ -517,8 +513,16 @@ impl CronExpr {
     /// reasonable horizon (4 years).
     fn next_match_after(&self, from: u64) -> Option<u64> {
         let mut bt = unix_to_broken(from);
-        // Start at the beginning of the current minute.
+        // Start at the beginning of the current minute.  If `from` is not
+        // exactly on a minute boundary, that truncated instant lies in the
+        // past; advance to the next minute boundary.  Cron fires on minute
+        // boundaries and the next match must never be earlier than `from`.
         bt.second = 0;
+        if broken_to_unix(&bt) < from {
+            let next_minute = broken_to_unix(&bt) + 60;
+            bt = unix_to_broken(next_minute);
+            bt.second = 0;
+        }
 
         // Search up to ~4 years to cover leap year cycles.
         let limit = from + 4 * 366 * 86400;
@@ -770,7 +774,10 @@ impl CronTab {
                     });
                 }
                 Err(e) => {
-                    log_msg(2, &format!("bad line in {}: {e}: {trimmed}", path.display()));
+                    log_msg(
+                        2,
+                        &format!("bad line in {}: {e}: {trimmed}", path.display()),
+                    );
                 }
             }
         }
@@ -813,7 +820,10 @@ impl CronTab {
                     });
                 }
                 Err(e) => {
-                    log_msg(2, &format!("bad line in {}: {e}: {trimmed}", path.display()));
+                    log_msg(
+                        2,
+                        &format!("bad line in {}: {e}: {trimmed}", path.display()),
+                    );
                 }
             }
         }
@@ -891,7 +901,9 @@ fn parse_crontab_line(
     // Special @keyword lines.
     if trimmed.starts_with('@') {
         let extra_fields = if has_user_field { 2 } else { 1 };
-        let parts: Vec<&str> = trimmed.splitn(1 + extra_fields, char::is_whitespace).collect();
+        let parts: Vec<&str> = trimmed
+            .splitn(1 + extra_fields, char::is_whitespace)
+            .collect();
         if parts.len() < 1 + extra_fields {
             return Err("need @keyword and command".to_string());
         }
@@ -980,8 +992,8 @@ struct AnacronTab {
 
 impl AnacronTab {
     fn load(path: &Path) -> Result<Self, String> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+        let content =
+            fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
 
         let mut entries = Vec::new();
         let mut env_vars = HashMap::new();
@@ -1007,13 +1019,13 @@ impl AnacronTab {
                 ));
             }
 
-            let period_days: u32 = parts[0].parse().map_err(|_| {
-                format!("line {}: bad period: {}", line_num + 1, parts[0])
-            })?;
+            let period_days: u32 = parts[0]
+                .parse()
+                .map_err(|_| format!("line {}: bad period: {}", line_num + 1, parts[0]))?;
 
-            let delay_minutes: u32 = parts[1].parse().map_err(|_| {
-                format!("line {}: bad delay: {}", line_num + 1, parts[1])
-            })?;
+            let delay_minutes: u32 = parts[1]
+                .parse()
+                .map_err(|_| format!("line {}: bad delay: {}", line_num + 1, parts[1]))?;
 
             let job_id = parts[2].to_string();
             let command = parts[3].to_string();
@@ -1085,7 +1097,10 @@ fn write_anacron_timestamp(job_id: &str, secs: u64) {
     let path = dir.join(job_id);
 
     if let Err(e) = fs::write(&path, date_str.as_bytes()) {
-        log_msg(1, &format!("cannot write timestamp {}: {e}", path.display()));
+        log_msg(
+            1,
+            &format!("cannot write timestamp {}: {e}", path.display()),
+        );
     }
 }
 
@@ -1192,7 +1207,11 @@ fn execute_command(command: &str, user: &str, env_vars: &HashMap<String, String>
 /// Send command output to the user's mail spool.
 fn send_mail(user: &str, command: &str, body: &str) {
     let mail_dir = format!("/var/mail/{user}");
-    let _ = fs::create_dir_all(Path::new(&mail_dir).parent().unwrap_or(Path::new("/var/mail")));
+    let _ = fs::create_dir_all(
+        Path::new(&mail_dir)
+            .parent()
+            .unwrap_or(Path::new("/var/mail")),
+    );
 
     let bt = unix_to_broken(now_secs());
     let header = format!(
@@ -1239,10 +1258,7 @@ fn load_all_crontabs() -> CronTab {
             let Ok(entry) = entry else { continue };
             let path = entry.path();
             if path.is_file() {
-                let user = entry
-                    .file_name()
-                    .to_string_lossy()
-                    .to_string();
+                let user = entry.file_name().to_string_lossy().to_string();
                 log_msg(2, &format!("loading crontab for user {user}"));
                 tab.load_user_crontab(&path, &user);
             }
@@ -1382,10 +1398,7 @@ fn run_anacron(
         }
 
         if update_only {
-            log_msg(
-                1,
-                &format!("updating timestamp for `{}`", entry.job_id),
-            );
+            log_msg(1, &format!("updating timestamp for `{}`", entry.job_id));
             write_anacron_timestamp(&entry.job_id, now);
             continue;
         }
@@ -1403,10 +1416,7 @@ fn run_anacron(
 
         let handle = std::thread::spawn(move || {
             if delay_secs > 0 {
-                log_msg(
-                    1,
-                    &format!("job `{job_id}`: delaying {delay_secs}s"),
-                );
+                log_msg(1, &format!("job `{job_id}`: delaying {delay_secs}s"));
                 std::thread::sleep(std::time::Duration::from_secs(delay_secs));
             }
 
@@ -2264,8 +2274,7 @@ mod tests {
 
     #[test]
     fn parse_user_crontab_line() {
-        let (expr, is_reboot, cmd) =
-            parse_crontab_line("30 8 * * * /bin/backup", false).unwrap();
+        let (expr, is_reboot, cmd) = parse_crontab_line("30 8 * * * /bin/backup", false).unwrap();
         assert!(!is_reboot);
         assert!(expr.is_some());
         assert_eq!(cmd, "/bin/backup");
@@ -2281,8 +2290,7 @@ mod tests {
 
     #[test]
     fn parse_crontab_reboot_line() {
-        let (expr, is_reboot, cmd) =
-            parse_crontab_line("@reboot /bin/startup", false).unwrap();
+        let (expr, is_reboot, cmd) = parse_crontab_line("@reboot /bin/startup", false).unwrap();
         assert!(is_reboot);
         assert!(expr.is_none());
         assert_eq!(cmd, "/bin/startup");
@@ -2290,8 +2298,7 @@ mod tests {
 
     #[test]
     fn parse_crontab_daily_line() {
-        let (expr, is_reboot, cmd) =
-            parse_crontab_line("@daily /bin/cleanup", false).unwrap();
+        let (expr, is_reboot, cmd) = parse_crontab_line("@daily /bin/cleanup", false).unwrap();
         assert!(!is_reboot);
         assert!(expr.is_some());
         assert_eq!(cmd, "/bin/cleanup");
@@ -2342,10 +2349,7 @@ mod tests {
 
         let tab = AnacronTab::load(&path).unwrap();
         assert_eq!(tab.entries.len(), 1);
-        assert_eq!(
-            tab.env_vars.get("SHELL"),
-            Some(&"/bin/bash".to_string())
-        );
+        assert_eq!(tab.env_vars.get("SHELL"), Some(&"/bin/bash".to_string()));
 
         let _ = fs::remove_dir_all(&tmpdir);
     }

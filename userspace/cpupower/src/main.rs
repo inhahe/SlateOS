@@ -87,8 +87,8 @@ fn read_cpu_topology() -> CpuTopology {
         let max_freq = read_sysfs_u64(&format!("{}/scaling_max_freq", base));
         let governor = read_sysfs_string(&format!("{}/scaling_governor", base))
             .unwrap_or_else(|| "unknown".to_string());
-        let avail_gov = read_sysfs_string(&format!("{}/scaling_available_governors", base))
-            .unwrap_or_default();
+        let avail_gov =
+            read_sysfs_string(&format!("{}/scaling_available_governors", base)).unwrap_or_default();
         let avail_freq = read_sysfs_string(&format!("{}/scaling_available_frequencies", base))
             .unwrap_or_default();
         let driver = read_sysfs_string(&format!("{}/scaling_driver", base))
@@ -100,12 +100,20 @@ fn read_cpu_topology() -> CpuTopology {
             .unwrap_or(true); // CPU0 typically has no online file
 
         let governors: Vec<String> = if avail_gov.is_empty() {
-            vec!["performance".to_string(), "powersave".to_string(), "schedutil".to_string()]
+            vec![
+                "performance".to_string(),
+                "powersave".to_string(),
+                "schedutil".to_string(),
+            ]
         } else {
-            avail_gov.split_whitespace().map(|s| s.to_string()).collect()
+            avail_gov
+                .split_whitespace()
+                .map(|s| s.to_string())
+                .collect()
         };
 
-        let frequencies: Vec<u64> = avail_freq.split_whitespace()
+        let frequencies: Vec<u64> = avail_freq
+            .split_whitespace()
             .filter_map(|s| s.parse().ok())
             .collect();
 
@@ -134,10 +142,10 @@ fn read_cpu_topology() -> CpuTopology {
 fn read_cpu_model() -> String {
     if let Ok(content) = std::fs::read_to_string(PROC_CPUINFO) {
         for line in content.lines() {
-            if let Some(rest) = line.strip_prefix("model name") {
-                if let Some((_,val)) = rest.split_once(':') {
-                    return val.trim().to_string();
-                }
+            if let Some(rest) = line.strip_prefix("model name")
+                && let Some((_, val)) = rest.split_once(':')
+            {
+                return val.trim().to_string();
             }
         }
     }
@@ -156,7 +164,8 @@ fn read_sysfs_string(path: &str) -> Option<String> {
 
 fn cmd_frequency_info(args: &[String]) {
     let topo = read_cpu_topology();
-    let cpu_filter: Option<u32> = args.iter()
+    let cpu_filter: Option<u32> = args
+        .iter()
         .position(|a| a == "-c" || a == "--cpu")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok());
@@ -195,29 +204,51 @@ fn cmd_frequency_info(args: &[String]) {
     for cpu in &cpus {
         println!("analyzing CPU {}:", cpu.id);
         println!("  driver: {}", cpu.driver);
-        println!("  CPUs which run at the same hardware frequency: {}", cpu.id);
-        println!("  CPUs which need to have their frequency coordinated by software: {}", cpu.id);
+        println!(
+            "  CPUs which run at the same hardware frequency: {}",
+            cpu.id
+        );
+        println!(
+            "  CPUs which need to have their frequency coordinated by software: {}",
+            cpu.id
+        );
         println!("  maximum transition latency: 4294.55 ms");
-        println!("  hardware limits: {} - {}",
-            format_freq_khz(cpu.min_freq_khz), format_freq_khz(cpu.max_freq_khz));
-        println!("  available frequency steps: {}",
+        println!(
+            "  hardware limits: {} - {}",
+            format_freq_khz(cpu.min_freq_khz),
+            format_freq_khz(cpu.max_freq_khz)
+        );
+        println!(
+            "  available frequency steps: {}",
             if cpu.available_frequencies.is_empty() {
                 "N/A".to_string()
             } else {
-                cpu.available_frequencies.iter()
+                cpu.available_frequencies
+                    .iter()
                     .map(|f| format_freq_khz(*f))
                     .collect::<Vec<_>>()
                     .join(", ")
-            });
-        println!("  available cpufreq governors: {}",
-            cpu.available_governors.join(", "));
-        println!("  current policy: frequency should be within {} and {}",
-            format_freq_khz(cpu.min_freq_khz), format_freq_khz(cpu.max_freq_khz));
-        println!("  current CPU frequency: {} (asserted by call to hardware)",
-            format_freq_khz(cpu.cur_freq_khz));
+            }
+        );
+        println!(
+            "  available cpufreq governors: {}",
+            cpu.available_governors.join(", ")
+        );
+        println!(
+            "  current policy: frequency should be within {} and {}",
+            format_freq_khz(cpu.min_freq_khz),
+            format_freq_khz(cpu.max_freq_khz)
+        );
+        println!(
+            "  current CPU frequency: {} (asserted by call to hardware)",
+            format_freq_khz(cpu.cur_freq_khz)
+        );
 
         if show_all {
-            println!("  energy performance preference: {}", cpu.energy_perf_preference);
+            println!(
+                "  energy performance preference: {}",
+                cpu.energy_perf_preference
+            );
         }
         println!();
     }
@@ -268,16 +299,26 @@ fn cmd_frequency_set(args: &[String]) {
         i += 1;
     }
 
-    let cpu_str = cpu_id.map(|c| format!("CPU {}", c)).unwrap_or_else(|| "all CPUs".to_string());
+    let cpu_str = cpu_id
+        .map(|c| format!("CPU {}", c))
+        .unwrap_or_else(|| "all CPUs".to_string());
 
     if let Some(g) = &governor {
         println!("Setting governor '{}' on {}", g, cpu_str);
     }
     if let Some(f) = min_freq {
-        println!("Setting minimum frequency {} on {}", format_freq_khz(f), cpu_str);
+        println!(
+            "Setting minimum frequency {} on {}",
+            format_freq_khz(f),
+            cpu_str
+        );
     }
     if let Some(f) = max_freq {
-        println!("Setting maximum frequency {} on {}", format_freq_khz(f), cpu_str);
+        println!(
+            "Setting maximum frequency {} on {}",
+            format_freq_khz(f),
+            cpu_str
+        );
     }
     if let Some(f) = freq {
         println!("Setting frequency {} on {}", format_freq_khz(f), cpu_str);
@@ -290,7 +331,8 @@ fn cmd_frequency_set(args: &[String]) {
 }
 
 fn cmd_idle_info(args: &[String]) {
-    let cpu_filter: Option<u32> = args.iter()
+    let cpu_filter: Option<u32> = args
+        .iter()
         .position(|a| a == "-c" || a == "--cpu")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok());
@@ -316,7 +358,10 @@ fn cmd_idle_info(args: &[String]) {
         println!("CPU {} idle states:", cpu);
         println!("  Available idle states: {}", idle_states.len());
         for (name, latency, residency) in &idle_states {
-            println!("    {}: latency {}us, residency {}us", name, latency, residency);
+            println!(
+                "    {}: latency {}us, residency {}us",
+                name, latency, residency
+            );
         }
         println!();
     }
@@ -387,7 +432,8 @@ fn cmd_set(args: &[String]) {
 }
 
 fn cmd_info(args: &[String]) {
-    let cpu_filter: Option<u32> = args.iter()
+    let cpu_filter: Option<u32> = args
+        .iter()
         .position(|a| a == "-c" || a == "--cpu")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok());
@@ -403,10 +449,12 @@ fn cmd_info(args: &[String]) {
     for cpu in &cpus {
         println!("CPU {} info:", cpu.id);
         println!("  Model: {}", cpu.model_name);
-        println!("  Frequency: {} ({} - {})",
+        println!(
+            "  Frequency: {} ({} - {})",
             format_freq_khz(cpu.cur_freq_khz),
             format_freq_khz(cpu.min_freq_khz),
-            format_freq_khz(cpu.max_freq_khz));
+            format_freq_khz(cpu.max_freq_khz)
+        );
         println!("  Governor: {}", cpu.governor);
         println!("  Driver: {}", cpu.driver);
         println!("  EPP: {}", cpu.energy_perf_preference);
@@ -424,8 +472,12 @@ fn cmd_monitor(args: &[String]) {
 
     for cpu in &topo.cpus {
         print!("{:>4}", cpu.id);
-        println!("  {:>12}  {:>10}  {:>10}",
-            format_freq_khz(cpu.cur_freq_khz), cpu.governor, "N/A");
+        println!(
+            "  {:>12}  {:>10}  {:>10}",
+            format_freq_khz(cpu.cur_freq_khz),
+            cpu.governor,
+            "N/A"
+        );
     }
     println!("\n(snapshot — continuous monitoring requires daemon mode)");
 }
@@ -433,7 +485,8 @@ fn cmd_monitor(args: &[String]) {
 // ── turbostat personality ──────────────────────────────────────────────
 
 fn run_turbostat(args: &[String]) {
-    let interval: u32 = args.iter()
+    let interval: u32 = args
+        .iter()
         .position(|a| a == "-i" || a == "--interval")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
@@ -445,20 +498,18 @@ fn run_turbostat(args: &[String]) {
     println!("Interval: {} seconds", interval);
     println!();
 
-    println!("{:>4} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-        "CPU", "Avg_MHz", "Busy%", "Bzy_MHz", "TSC_MHz", "C1%", "C6%");
+    println!(
+        "{:>4} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "CPU", "Avg_MHz", "Busy%", "Bzy_MHz", "TSC_MHz", "C1%", "C6%"
+    );
 
     for cpu in &topo.cpus {
         let tsc_mhz = cpu.max_freq_khz / 1000;
         let bzy_mhz = cpu.cur_freq_khz / 1000;
-        println!("{:>4} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
-            cpu.id,
-            bzy_mhz,
-            "N/A",
-            bzy_mhz,
-            tsc_mhz,
-            "N/A",
-            "N/A");
+        println!(
+            "{:>4} {:>8} {:>8} {:>8} {:>8} {:>8} {:>8}",
+            cpu.id, bzy_mhz, "N/A", bzy_mhz, tsc_mhz, "N/A", "N/A"
+        );
     }
     println!("\n(snapshot — continuous monitoring requires daemon mode)");
 }
@@ -648,7 +699,9 @@ mod tests {
     #[test]
     fn test_format_freq_boundaries() {
         assert_eq!(format_freq_khz(999), "999 kHz");
-        assert_eq!(format_freq_khz(1000), "1000 MHz");
+        // 1000 kHz is exactly 1 MHz (this was a copy-paste typo expecting
+        // "1000 MHz", which would require 1_000_000 kHz).
+        assert_eq!(format_freq_khz(1000), "1 MHz");
         assert_eq!(format_freq_khz(999999), "1000 MHz");
     }
 

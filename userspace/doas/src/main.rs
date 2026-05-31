@@ -46,29 +46,21 @@ const PERSIST_TIMEOUT_SECS: u64 = 300; // 5 minutes
 
 /// SHA-256 round constants.
 const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 /// Compute SHA-256 and return the hex digest string.
 fn sha256_hex(data: &[u8]) -> String {
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
 
     // Padding.
@@ -93,12 +85,8 @@ fn sha256_hex(data: &[u8]) -> String {
             ]);
         }
         for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7)
-                ^ w[i - 15].rotate_right(18)
-                ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17)
-                ^ w[i - 2].rotate_right(19)
-                ^ (w[i - 2] >> 10);
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
             w[i] = w[i - 16]
                 .wrapping_add(s0)
                 .wrapping_add(w[i - 7])
@@ -327,7 +315,9 @@ fn read_group_entries() -> Vec<GroupEntry> {
 /// Check whether a user is a member of the named group.
 fn user_in_group(username: &str, group_name: &str) -> bool {
     let groups = read_group_entries();
-    groups.iter().any(|g| g.name == group_name && g.members.iter().any(|m| m == username))
+    groups
+        .iter()
+        .any(|g| g.name == group_name && g.members.iter().any(|m| m == username))
 }
 
 // ============================================================================
@@ -400,8 +390,7 @@ fn parse_config(content: &str) -> Result<Vec<Rule>, String> {
             continue;
         }
 
-        let rule = parse_rule(line)
-            .map_err(|e| format!("line {}: {e}", line_num + 1))?;
+        let rule = parse_rule(line).map_err(|e| format!("line {}: {e}", line_num + 1))?;
         rules.push(rule);
     }
 
@@ -483,8 +472,11 @@ fn parse_rule(line: &str) -> Result<Rule, String> {
     }
 
     if action == RuleAction::Deny
-        && (options.nopass || options.persist || options.keepenv
-            || !options.setenv.is_empty() || !options.unsetenv.is_empty())
+        && (options.nopass
+            || options.persist
+            || options.keepenv
+            || !options.setenv.is_empty()
+            || !options.unsetenv.is_empty())
     {
         return Err("options are not valid on 'deny' rules".to_string());
     }
@@ -572,37 +564,39 @@ fn tokenize(line: &str) -> Result<Vec<String>, String> {
             continue;
         }
 
-        // Quoted string.
-        if ch == '"' {
-            chars.next(); // consume opening quote
-            let mut s = String::new();
-            loop {
-                match chars.next() {
-                    Some('\\') => {
-                        // Escaped character inside quotes.
-                        if let Some(escaped) = chars.next() {
-                            s.push(escaped);
-                        }
-                    }
-                    Some('"') => break,
-                    Some(c) => s.push(c),
-                    None => return Err("unterminated quoted string".to_string()),
-                }
-            }
-            tokens.push(s);
-            continue;
-        }
-
-        // Bare word: run until whitespace, '#', '{', or '}'.
+        // A token is a run of bare characters and/or quoted segments, ending
+        // at top-level whitespace, '#', '{', or '}'.  Quotes may appear
+        // anywhere within a token (e.g. `PATH="/usr/bin:/bin"`), not just at
+        // its start, and are stripped from the resulting token.
         let mut word = String::new();
+        let mut have_token = false;
         while let Some(&c) = chars.peek() {
             if c.is_whitespace() || c == '#' || c == '{' || c == '}' {
                 break;
             }
+            if c == '"' {
+                chars.next(); // consume opening quote
+                have_token = true; // even an empty "" yields a token
+                loop {
+                    match chars.next() {
+                        Some('\\') => {
+                            // Escaped character inside quotes.
+                            if let Some(escaped) = chars.next() {
+                                word.push(escaped);
+                            }
+                        }
+                        Some('"') => break,
+                        Some(other) => word.push(other),
+                        None => return Err("unterminated quoted string".to_string()),
+                    }
+                }
+                continue;
+            }
             word.push(c);
+            have_token = true;
             chars.next();
         }
-        if !word.is_empty() {
+        if have_token {
             tokens.push(word);
         }
     }
@@ -849,8 +843,7 @@ fn resolve_command(command: &str) -> String {
         return command.to_string();
     }
 
-    let path_var = env::var("PATH")
-        .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+    let path_var = env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
 
     for dir in path_var.split(':') {
         if dir.is_empty() {
@@ -1188,12 +1181,7 @@ fn main() {
     let environment = build_environment(&opts, &target, &caller_name);
 
     // Execute.
-    let exit_code = exec_command(
-        &target,
-        &resolved_cmd,
-        &args.arguments,
-        &environment,
-    );
+    let exit_code = exec_command(&target, &resolved_cmd, &args.arguments, &environment);
 
     process::exit(exit_code);
 }
@@ -1416,7 +1404,10 @@ mod tests {
     #[test]
     fn tokenize_with_braces() {
         let tokens = tokenize("permit setenv { HOME=/root } alice").unwrap();
-        assert_eq!(tokens, vec!["permit", "setenv", "{", "HOME=/root", "}", "alice"]);
+        assert_eq!(
+            tokens,
+            vec!["permit", "setenv", "{", "HOME=/root", "}", "alice"]
+        );
     }
 
     #[test]
@@ -1527,8 +1518,14 @@ mod tests {
     fn parse_setenv() {
         let rules = parse_config("permit setenv { HOME=/root FOO=bar } alice\n").unwrap();
         assert_eq!(rules[0].options.setenv.len(), 2);
-        assert_eq!(rules[0].options.setenv[0], ("HOME".to_string(), "/root".to_string()));
-        assert_eq!(rules[0].options.setenv[1], ("FOO".to_string(), "bar".to_string()));
+        assert_eq!(
+            rules[0].options.setenv[0],
+            ("HOME".to_string(), "/root".to_string())
+        );
+        assert_eq!(
+            rules[0].options.setenv[1],
+            ("FOO".to_string(), "bar".to_string())
+        );
     }
 
     #[test]
@@ -1775,7 +1772,10 @@ mod tests {
         let environment = build_environment(&opts, &target, "alice");
 
         let find_val = |key: &str| -> Option<String> {
-            environment.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+            environment
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
         };
 
         assert_eq!(find_val("HOME"), Some("/root".to_string()));
@@ -1791,7 +1791,10 @@ mod tests {
         let opts = RuleOptions::default();
         let target = make_target_user();
         let environment = build_environment(&opts, &target, "alice");
-        let path = environment.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone());
+        let path = environment
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.clone());
         assert!(path.unwrap().contains("/sbin"));
     }
 
@@ -1806,7 +1809,10 @@ mod tests {
             shell: "/bin/bash".to_string(),
         };
         let environment = build_environment(&opts, &target, "bob");
-        let path = environment.iter().find(|(k, _)| k == "PATH").map(|(_, v)| v.clone());
+        let path = environment
+            .iter()
+            .find(|(k, _)| k == "PATH")
+            .map(|(_, v)| v.clone());
         assert!(!path.unwrap().contains("/sbin"));
     }
 
@@ -1840,7 +1846,10 @@ mod tests {
         let environment = build_environment(&opts, &target, "alice");
 
         let find_val = |key: &str| -> Option<String> {
-            environment.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
+            environment
+                .iter()
+                .find(|(k, _)| k == key)
+                .map(|(_, v)| v.clone())
         };
 
         assert_eq!(find_val("EDITOR"), Some("vim".to_string()));
@@ -1855,7 +1864,10 @@ mod tests {
         };
         let target = make_target_user();
         let environment = build_environment(&opts, &target, "alice");
-        let home = environment.iter().find(|(k, _)| k == "HOME").map(|(_, v)| v.clone());
+        let home = environment
+            .iter()
+            .find(|(k, _)| k == "HOME")
+            .map(|(_, v)| v.clone());
         assert_eq!(home, Some("/custom".to_string()));
     }
 
@@ -1912,7 +1924,7 @@ mod tests {
         let now: u64 = 1000;
         let stamp: u64 = 700;
         let elapsed = now.saturating_sub(stamp);
-        assert!(!( elapsed < PERSIST_TIMEOUT_SECS));
+        assert!(!(elapsed < PERSIST_TIMEOUT_SECS));
     }
 
     #[test]
@@ -2003,11 +2015,7 @@ mod tests {
 
     #[test]
     fn args_non_interactive() {
-        let raw = vec![
-            "doas".to_string(),
-            "-n".to_string(),
-            "ls".to_string(),
-        ];
+        let raw = vec!["doas".to_string(), "-n".to_string(), "ls".to_string()];
         let args = parse_args(&raw).unwrap();
         assert!(args.non_interactive);
     }
@@ -2077,9 +2085,7 @@ mod tests {
 
     #[test]
     fn set_env_var_new() {
-        let mut env_map: Vec<(String, String)> = vec![
-            ("A".to_string(), "1".to_string()),
-        ];
+        let mut env_map: Vec<(String, String)> = vec![("A".to_string(), "1".to_string())];
         set_env_var(&mut env_map, "B", "2");
         assert_eq!(env_map.len(), 2);
         assert_eq!(env_map[1], ("B".to_string(), "2".to_string()));
@@ -2087,9 +2093,7 @@ mod tests {
 
     #[test]
     fn set_env_var_override() {
-        let mut env_map: Vec<(String, String)> = vec![
-            ("A".to_string(), "1".to_string()),
-        ];
+        let mut env_map: Vec<(String, String)> = vec![("A".to_string(), "1".to_string())];
         set_env_var(&mut env_map, "A", "99");
         assert_eq!(env_map.len(), 1);
         assert_eq!(env_map[0], ("A".to_string(), "99".to_string()));

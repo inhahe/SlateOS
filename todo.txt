@@ -1,3 +1,40 @@
+## BUG (noticed+FIXED 2026-05-31): userspace/{sha256sum,shell,coreutils} build.rs
+##   emitted the per-crate `linker.ld` link arg UNCONDITIONALLY (for every target).
+##   The custom script is only valid for the bare-metal x86_64-ouros target; applying
+##   it to the host x86_64-pc-windows-gnu test target broke linking with a flood of
+##   "relocation truncated to fit" errors against the Windows std import libs
+##   (bcryptprimitives.dll / api-ms-win-core-synch). This meant `cargo test` on the
+##   host could never link these crates. PROPER FIX: gate the link-arg on the target
+##   triple in build.rs — emit `-T linker.ld` only when TARGET contains "ouros",
+##   otherwise return early (keeping `rerun-if-changed`). After fix: sha256sum links
+##   and runs 59/59 host tests; shell links (0 tests, a toolchain-validation stub).
+##
+## BUG (noticed+FIXED 2026-05-31): userspace/{sha256sum,shell}/linker.ld were missing
+##   the `.debug_gdb_scripts` section block that coreutils/linker.ld already had, so the
+##   ouros DEBUG build failed to link: "relocation refers to a symbol in a discarded
+##   section: __rustc_debug_gdb_scripts_section__" (rustc emits a live reloc to the gdb
+##   pretty-printer section in debug builds, and the blanket `*(.debug*)` /DISCARD/ rule
+##   swallowed it). PROPER FIX: propagated coreutils' explicit non-alloc
+##   `.debug_gdb_scripts 0 (INFO)` section (placed before /DISCARD/) to both linker.ld
+##   files. ouros debug build of sha256sum+shell now links clean.
+##
+## BUG (noticed+FIXED 2026-05-31): userspace/shell/src/main.rs used `let pi = 3.14159;`
+##   which trips clippy's deny-by-default `approx_constant`. It's a toolchain-validation
+##   demo of float formatting; changed to `std::f64::consts::PI` (formats identically to
+##   4 dp). Also cleaned sha256sum's needless_range_loop in the SHA-1 compression loop
+##   (`for i in 0..80 { ... w[i] }` → `for (i, &wi) in w.iter().enumerate()`) plus 2
+##   trivial clippy autofixes. sha256sum clippy clean, 59/59 pass.
+##
+## LIMITATION (noticed 2026-05-31): userspace/coreutils unit tests CANNOT compile on the
+##   Windows host target (x86_64-pc-windows-gnu): bins like test.rs and tar.rs use
+##   `std::os::unix::fs::{PermissionsExt,MetadataExt}` (mode/uid/gid/mtime), which only
+##   exist on unix-family targets. The ouros target (os=linux) has them, so PRODUCTION
+##   compiles fine — verified `cargo build -p coreutils` for ouros is clean. There is no
+##   way to RUN ouros test binaries on this Windows dev box, so coreutils host-testing is
+##   inherently unavailable; its verification path is the ouros build. Not a code bug —
+##   a cross-platform host-testing gap. Same caveat applies to any userspace crate that
+##   uses std::os::unix in its test code.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/solitaire — `cargo clippy` failed on a
 ##   deny-by-default correctness lint (absurd_extreme_comparisons). At main.rs:1001
 ##   the keyboard-focus navigation tested `if col <= 0` where `col` is an unsigned

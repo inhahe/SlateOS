@@ -17,7 +17,7 @@ fn main() {
     // 1. Formatted output
     println!("[1] Formatted output");
     let x = 42;
-    let pi = 3.14159;
+    let pi = std::f64::consts::PI;
     println!("  integer: {x}");
     println!("  float:   {pi:.4}");
     println!("  hex:     {x:#x}");
@@ -64,7 +64,9 @@ fn main() {
     println!("[5] Environment variables");
     // Set and read back
     // SAFETY: single-threaded at this point — no concurrent env access.
-    unsafe { env::set_var("SHELL_TEST", "it_works"); }
+    unsafe {
+        env::set_var("SHELL_TEST", "it_works");
+    }
     match env::var("SHELL_TEST") {
         Ok(val) => println!("  SHELL_TEST = {val}"),
         Err(e) => println!("  SHELL_TEST error: {e}"),
@@ -93,8 +95,11 @@ fn main() {
             if content == test_content {
                 println!("  read back matches: OK");
             } else {
-                println!("  MISMATCH: read {} bytes vs wrote {}",
-                         content.len(), test_content.len());
+                println!(
+                    "  MISMATCH: read {} bytes vs wrote {}",
+                    content.len(),
+                    test_content.len()
+                );
             }
         }
         Err(e) => println!("  read error: {e}"),
@@ -102,8 +107,7 @@ fn main() {
 
     // Stat
     match fs::metadata(test_path) {
-        Ok(meta) => println!("  metadata: len={}, is_file={}",
-                             meta.len(), meta.is_file()),
+        Ok(meta) => println!("  metadata: len={}, is_file={}", meta.len(), meta.is_file()),
         Err(e) => println!("  metadata error: {e}"),
     }
 
@@ -136,7 +140,8 @@ fn main() {
     let sum: i64 = (1..=100).filter(|n| n % 2 == 0).sum();
     println!("  sum of even 1..100 = {sum}");
     let words = "the quick brown fox";
-    let capitalized: String = words.split_whitespace()
+    let capitalized: String = words
+        .split_whitespace()
         .map(|w| {
             let mut c = w.chars();
             match c.next() {

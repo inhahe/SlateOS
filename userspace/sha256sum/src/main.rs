@@ -70,10 +70,7 @@ impl Algorithm {
 /// Detect algorithm from the program name in argv[0].
 fn detect_algorithm(argv0: &str) -> Algorithm {
     // Extract just the filename, stripping directory separators and extension.
-    let name = argv0
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
 
@@ -103,8 +100,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 const HEX_CHARS: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd',
-    'e', 'f',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
 ];
 
 // ---------------------------------------------------------------------------
@@ -184,14 +180,8 @@ fn parse_args(algo: Algorithm) -> Options {
                             't' => opts.binary = false,
                             'w' => opts.warn = true,
                             _ => {
-                                eprintln!(
-                                    "{}: invalid option -- '{ch}'",
-                                    algo.command()
-                                );
-                                eprintln!(
-                                    "Try '{} --help' for more information.",
-                                    algo.command()
-                                );
+                                eprintln!("{}: invalid option -- '{ch}'", algo.command());
+                                eprintln!("Try '{} --help' for more information.", algo.command());
                                 valid = false;
                                 break;
                             }
@@ -201,14 +191,8 @@ fn parse_args(algo: Algorithm) -> Options {
                         process::exit(1);
                     }
                 } else {
-                    eprintln!(
-                        "{}: unrecognized option '{other}'",
-                        algo.command()
-                    );
-                    eprintln!(
-                        "Try '{} --help' for more information.",
-                        algo.command()
-                    );
+                    eprintln!("{}: unrecognized option '{other}'", algo.command());
+                    eprintln!("Try '{} --help' for more information.", algo.command());
                     process::exit(1);
                 }
             }
@@ -345,11 +329,7 @@ fn run_check(opts: &Options) -> i32 {
             match File::open(checksum_file) {
                 Ok(f) => Box::new(io::BufReader::new(f)),
                 Err(e) => {
-                    let _ = writeln!(
-                        err,
-                        "{}: {checksum_file}: {e}",
-                        opts.algo.command()
-                    );
+                    let _ = writeln!(err, "{}: {checksum_file}: {e}", opts.algo.command());
                     exit_code = 1;
                     continue;
                 }
@@ -397,11 +377,7 @@ fn run_check(opts: &Options) -> i32 {
                 match io::stdin().read_to_end(&mut buf) {
                     Ok(_) => opts.algo.hash_bytes(&buf),
                     Err(e) => {
-                        let _ = writeln!(
-                            err,
-                            "{}: {filename}: {e}",
-                            opts.algo.command()
-                        );
+                        let _ = writeln!(err, "{}: {filename}: {e}", opts.algo.command());
                         total_failed += 1;
                         if !opts.status {
                             let _ = writeln!(out, "{filename}: FAILED open or read");
@@ -416,28 +392,17 @@ fn run_check(opts: &Options) -> i32 {
                         match f.read_to_end(&mut buf) {
                             Ok(_) => opts.algo.hash_bytes(&buf),
                             Err(e) => {
-                                let _ = writeln!(
-                                    err,
-                                    "{}: {filename}: {e}",
-                                    opts.algo.command()
-                                );
+                                let _ = writeln!(err, "{}: {filename}: {e}", opts.algo.command());
                                 total_failed += 1;
                                 if !opts.status {
-                                    let _ = writeln!(
-                                        out,
-                                        "{filename}: FAILED open or read"
-                                    );
+                                    let _ = writeln!(out, "{filename}: FAILED open or read");
                                 }
                                 continue;
                             }
                         }
                     }
                     Err(e) => {
-                        let _ = writeln!(
-                            err,
-                            "{}: {filename}: {e}",
-                            opts.algo.command()
-                        );
+                        let _ = writeln!(err, "{}: {filename}: {e}", opts.algo.command());
                         total_failed += 1;
                         if !opts.status {
                             let _ = writeln!(out, "{filename}: FAILED open or read");
@@ -484,11 +449,7 @@ fn run_check(opts: &Options) -> i32 {
     }
 
     if total_checked == 0 && exit_code == 0 {
-        let _ = writeln!(
-            err,
-            "{}: no file was verified",
-            opts.algo.command()
-        );
+        let _ = writeln!(err, "{}: no file was verified", opts.algo.command());
         exit_code = 1;
     }
 
@@ -506,20 +467,17 @@ fn parse_check_line(
     // Try BSD format first: "ALGO (filename) = hash"
     if let Some(rest) = line.strip_prefix(algo.name()) {
         let rest = rest.trim_start();
-        if let Some(rest) = rest.strip_prefix('(') {
-            if let Some(paren_end) = rest.rfind(')') {
-                let filename = &rest[..paren_end];
-                let after = rest[paren_end + 1..].trim_start();
-                if let Some(hash_str) = after.strip_prefix('=') {
-                    let hash_str = hash_str.trim();
-                    if hash_str.len() == expected_hex_len
-                        && hash_str.chars().all(|c| c.is_ascii_hexdigit())
-                    {
-                        return Some((
-                            hash_str.to_ascii_lowercase(),
-                            filename.to_string(),
-                        ));
-                    }
+        if let Some(rest) = rest.strip_prefix('(')
+            && let Some(paren_end) = rest.rfind(')')
+        {
+            let filename = &rest[..paren_end];
+            let after = rest[paren_end + 1..].trim_start();
+            if let Some(hash_str) = after.strip_prefix('=') {
+                let hash_str = hash_str.trim();
+                if hash_str.len() == expected_hex_len
+                    && hash_str.chars().all(|c| c.is_ascii_hexdigit())
+                {
+                    return Some((hash_str.to_ascii_lowercase(), filename.to_string()));
                 }
             }
         }
@@ -575,30 +533,77 @@ fn md5(data: &[u8]) -> Vec<u8> {
 
     // Per-round shift amounts
     const S: [u32; 64] = [
-        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
-        5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20, 5,  9, 14, 20,
-        4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
-        6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
 
     // Pre-computed constants: floor(2^32 * |sin(i+1)|)
     const K: [u32; 64] = [
-        0xd76a_a478, 0xe8c7_b756, 0x2420_70db, 0xc1bd_ceee,
-        0xf57c_0faf, 0x4787_c62a, 0xa830_4613, 0xfd46_9501,
-        0x6980_98d8, 0x8b44_f7af, 0xffff_5bb1, 0x895c_d7be,
-        0x6b90_1122, 0xfd98_7193, 0xa679_438e, 0x49b4_0821,
-        0xf61e_2562, 0xc040_b340, 0x265e_5a51, 0xe9b6_c7aa,
-        0xd62f_105d, 0x0244_1453, 0xd8a1_e681, 0xe7d3_fbc8,
-        0x21e1_cde6, 0xc337_07d6, 0xf4d5_0d87, 0x455a_14ed,
-        0xa9e3_e905, 0xfcef_a3f8, 0x676f_02d9, 0x8d2a_4c8a,
-        0xfffa_3942, 0x8771_f681, 0x6d9d_6122, 0xfde5_380c,
-        0xa4be_ea44, 0x4bde_cfa9, 0xf6bb_4b60, 0xbebf_bc70,
-        0x289b_7ec6, 0xeaa1_27fa, 0xd4ef_3085, 0x0488_1d05,
-        0xd9d4_d039, 0xe6db_99e5, 0x1fa2_7cf8, 0xc4ac_5665,
-        0xf429_2244, 0x432a_ff97, 0xab94_23a7, 0xfc93_a039,
-        0x655b_59c3, 0x8f0c_cc92, 0xffef_f47d, 0x8584_5dd1,
-        0x6fa8_7e4f, 0xfe2c_e6e0, 0xa301_4314, 0x4e08_11a1,
-        0xf753_7e82, 0xbd3a_f235, 0x2ad7_d2bb, 0xeb86_d391,
+        0xd76a_a478,
+        0xe8c7_b756,
+        0x2420_70db,
+        0xc1bd_ceee,
+        0xf57c_0faf,
+        0x4787_c62a,
+        0xa830_4613,
+        0xfd46_9501,
+        0x6980_98d8,
+        0x8b44_f7af,
+        0xffff_5bb1,
+        0x895c_d7be,
+        0x6b90_1122,
+        0xfd98_7193,
+        0xa679_438e,
+        0x49b4_0821,
+        0xf61e_2562,
+        0xc040_b340,
+        0x265e_5a51,
+        0xe9b6_c7aa,
+        0xd62f_105d,
+        0x0244_1453,
+        0xd8a1_e681,
+        0xe7d3_fbc8,
+        0x21e1_cde6,
+        0xc337_07d6,
+        0xf4d5_0d87,
+        0x455a_14ed,
+        0xa9e3_e905,
+        0xfcef_a3f8,
+        0x676f_02d9,
+        0x8d2a_4c8a,
+        0xfffa_3942,
+        0x8771_f681,
+        0x6d9d_6122,
+        0xfde5_380c,
+        0xa4be_ea44,
+        0x4bde_cfa9,
+        0xf6bb_4b60,
+        0xbebf_bc70,
+        0x289b_7ec6,
+        0xeaa1_27fa,
+        0xd4ef_3085,
+        0x0488_1d05,
+        0xd9d4_d039,
+        0xe6db_99e5,
+        0x1fa2_7cf8,
+        0xc4ac_5665,
+        0xf429_2244,
+        0x432a_ff97,
+        0xab94_23a7,
+        0xfc93_a039,
+        0x655b_59c3,
+        0x8f0c_cc92,
+        0xffef_f47d,
+        0x8584_5dd1,
+        0x6fa8_7e4f,
+        0xfe2c_e6e0,
+        0xa301_4314,
+        0x4e08_11a1,
+        0xf753_7e82,
+        0xbd3a_f235,
+        0x2ad7_d2bb,
+        0xeb86_d391,
     ];
 
     for chunk in padded.chunks_exact(64) {
@@ -623,10 +628,7 @@ fn md5(data: &[u8]) -> Vec<u8> {
                 _ => (c ^ (b | !d), (7 * i) % 16),
             };
 
-            let f = f
-                .wrapping_add(a)
-                .wrapping_add(K[i])
-                .wrapping_add(m[g_idx]);
+            let f = f.wrapping_add(a).wrapping_add(K[i]).wrapping_add(m[g_idx]);
             a = d;
             d = c;
             c = b;
@@ -691,7 +693,7 @@ fn sha1(data: &[u8]) -> Vec<u8> {
 
         let (mut a, mut b, mut c, mut d, mut e) = (h0, h1, h2, h3, h4);
 
-        for i in 0..80 {
+        for (i, &wi) in w.iter().enumerate() {
             let (f, k) = match i {
                 0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
                 20..=39 => (b ^ c ^ d, 0x6ED9_EBA1u32),
@@ -704,7 +706,7 @@ fn sha1(data: &[u8]) -> Vec<u8> {
                 .wrapping_add(f)
                 .wrapping_add(e)
                 .wrapping_add(k)
-                .wrapping_add(w[i]);
+                .wrapping_add(wi);
             e = d;
             d = c;
             c = b.rotate_left(30);
@@ -735,27 +737,81 @@ fn sha1(data: &[u8]) -> Vec<u8> {
 /// Compute the SHA-256 hash of `data`, returning a 32-byte digest.
 fn sha256(data: &[u8]) -> Vec<u8> {
     let mut h: [u32; 8] = [
-        0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a,
-        0x510e_527f, 0x9b05_688c, 0x1f83_d9ab, 0x5be0_cd19,
+        0x6a09_e667,
+        0xbb67_ae85,
+        0x3c6e_f372,
+        0xa54f_f53a,
+        0x510e_527f,
+        0x9b05_688c,
+        0x1f83_d9ab,
+        0x5be0_cd19,
     ];
 
     const K: [u32; 64] = [
-        0x428a_2f98, 0x7137_4491, 0xb5c0_fbcf, 0xe9b5_dba5,
-        0x3956_c25b, 0x59f1_11f1, 0x923f_82a4, 0xab1c_5ed5,
-        0xd807_aa98, 0x1283_5b01, 0x2431_85be, 0x550c_7dc3,
-        0x72be_5d74, 0x80de_b1fe, 0x9bdc_06a7, 0xc19b_f174,
-        0xe49b_69c1, 0xefbe_4786, 0x0fc1_9dc6, 0x240c_a1cc,
-        0x2de9_2c6f, 0x4a74_84aa, 0x5cb0_a9dc, 0x76f9_88da,
-        0x983e_5152, 0xa831_c66d, 0xb003_27c8, 0xbf59_7fc7,
-        0xc6e0_0bf3, 0xd5a7_9147, 0x06ca_6351, 0x1429_2967,
-        0x27b7_0a85, 0x2e1b_2138, 0x4d2c_6dfc, 0x5338_0d13,
-        0x650a_7354, 0x766a_0abb, 0x81c2_c92e, 0x9272_2c85,
-        0xa2bf_e8a1, 0xa81a_664b, 0xc24b_8b70, 0xc76c_51a3,
-        0xd192_e819, 0xd699_0624, 0xf40e_3585, 0x106a_a070,
-        0x19a4_c116, 0x1e37_6c08, 0x2748_774c, 0x34b0_bcb5,
-        0x391c_0cb3, 0x4ed8_aa4a, 0x5b9c_ca4f, 0x682e_6ff3,
-        0x748f_82ee, 0x78a5_636f, 0x84c8_7814, 0x8cc7_0208,
-        0x90be_fffa, 0xa450_6ceb, 0xbef9_a3f7, 0xc671_78f2,
+        0x428a_2f98,
+        0x7137_4491,
+        0xb5c0_fbcf,
+        0xe9b5_dba5,
+        0x3956_c25b,
+        0x59f1_11f1,
+        0x923f_82a4,
+        0xab1c_5ed5,
+        0xd807_aa98,
+        0x1283_5b01,
+        0x2431_85be,
+        0x550c_7dc3,
+        0x72be_5d74,
+        0x80de_b1fe,
+        0x9bdc_06a7,
+        0xc19b_f174,
+        0xe49b_69c1,
+        0xefbe_4786,
+        0x0fc1_9dc6,
+        0x240c_a1cc,
+        0x2de9_2c6f,
+        0x4a74_84aa,
+        0x5cb0_a9dc,
+        0x76f9_88da,
+        0x983e_5152,
+        0xa831_c66d,
+        0xb003_27c8,
+        0xbf59_7fc7,
+        0xc6e0_0bf3,
+        0xd5a7_9147,
+        0x06ca_6351,
+        0x1429_2967,
+        0x27b7_0a85,
+        0x2e1b_2138,
+        0x4d2c_6dfc,
+        0x5338_0d13,
+        0x650a_7354,
+        0x766a_0abb,
+        0x81c2_c92e,
+        0x9272_2c85,
+        0xa2bf_e8a1,
+        0xa81a_664b,
+        0xc24b_8b70,
+        0xc76c_51a3,
+        0xd192_e819,
+        0xd699_0624,
+        0xf40e_3585,
+        0x106a_a070,
+        0x19a4_c116,
+        0x1e37_6c08,
+        0x2748_774c,
+        0x34b0_bcb5,
+        0x391c_0cb3,
+        0x4ed8_aa4a,
+        0x5b9c_ca4f,
+        0x682e_6ff3,
+        0x748f_82ee,
+        0x78a5_636f,
+        0x84c8_7814,
+        0x8cc7_0208,
+        0x90be_fffa,
+        0xa450_6ceb,
+        0xbef9_a3f7,
+        0xc671_78f2,
     ];
 
     let padded = sha_pad_32(data);
@@ -773,12 +829,8 @@ fn sha256(data: &[u8]) -> Vec<u8> {
         }
 
         for j in 16..64 {
-            let s0 = w[j - 15].rotate_right(7)
-                ^ w[j - 15].rotate_right(18)
-                ^ (w[j - 15] >> 3);
-            let s1 = w[j - 2].rotate_right(17)
-                ^ w[j - 2].rotate_right(19)
-                ^ (w[j - 2] >> 10);
+            let s0 = w[j - 15].rotate_right(7) ^ w[j - 15].rotate_right(18) ^ (w[j - 15] >> 3);
+            let s1 = w[j - 2].rotate_right(17) ^ w[j - 2].rotate_right(19) ^ (w[j - 2] >> 10);
             w[j] = w[j - 16]
                 .wrapping_add(s0)
                 .wrapping_add(w[j - 7])
@@ -863,46 +915,86 @@ fn sha512(data: &[u8]) -> Vec<u8> {
     ];
 
     const K: [u64; 80] = [
-        0x428a_2f98_d728_ae22, 0x7137_4491_23ef_65cd,
-        0xb5c0_fbcf_ec4d_3b2f, 0xe9b5_dba5_8189_dbbc,
-        0x3956_c25b_f348_b538, 0x59f1_11f1_b605_d019,
-        0x923f_82a4_af19_4f9b, 0xab1c_5ed5_da6d_8118,
-        0xd807_aa98_a303_0242, 0x1283_5b01_4570_6fbe,
-        0x2431_85be_4ee4_b28c, 0x550c_7dc3_d5ff_b4e2,
-        0x72be_5d74_f27b_896f, 0x80de_b1fe_3b16_96b1,
-        0x9bdc_06a7_25c7_1235, 0xc19b_f174_cf69_2694,
-        0xe49b_69c1_9ef1_4ad2, 0xefbe_4786_384f_25e3,
-        0x0fc1_9dc6_8b8c_d5b5, 0x240c_a1cc_77ac_9c65,
-        0x2de9_2c6f_592b_0275, 0x4a74_84aa_6ea6_e483,
-        0x5cb0_a9dc_bd41_fbd4, 0x76f9_88da_8311_53b5,
-        0x983e_5152_ee66_dfab, 0xa831_c66d_2db4_3210,
-        0xb003_27c8_98fb_213f, 0xbf59_7fc7_beef_0ee4,
-        0xc6e0_0bf3_3da8_8fc2, 0xd5a7_9147_930a_a725,
-        0x06ca_6351_e003_826f, 0x1429_2967_0a0e_6e70,
-        0x27b7_0a85_46d2_2ffc, 0x2e1b_2138_5c26_c926,
-        0x4d2c_6dfc_5ac4_2aed, 0x5338_0d13_9d95_b3df,
-        0x650a_7354_8baf_63de, 0x766a_0abb_3c77_b2a8,
-        0x81c2_c92e_47ed_aee6, 0x9272_2c85_1482_353b,
-        0xa2bf_e8a1_4cf1_0364, 0xa81a_664b_bc42_3001,
-        0xc24b_8b70_d0f8_9791, 0xc76c_51a3_0654_be30,
-        0xd192_e819_d6ef_5218, 0xd699_0624_5565_a910,
-        0xf40e_3585_5771_202a, 0x106a_a070_32bb_d1b8,
-        0x19a4_c116_b8d2_d0c8, 0x1e37_6c08_5141_ab53,
-        0x2748_774c_df8e_eb99, 0x34b0_bcb5_e19b_48a8,
-        0x391c_0cb3_c5c9_5a63, 0x4ed8_aa4a_e341_8acb,
-        0x5b9c_ca4f_7763_e373, 0x682e_6ff3_d6b2_b8a3,
-        0x748f_82ee_5def_b2fc, 0x78a5_636f_4317_2f60,
-        0x84c8_7814_a1f0_ab72, 0x8cc7_0208_1a64_39ec,
-        0x90be_fffa_2363_1e28, 0xa450_6ceb_de82_bde9,
-        0xbef9_a3f7_b2c6_7915, 0xc671_78f2_e372_532b,
-        0xca27_3ece_ea26_619c, 0xd186_b8c7_21c0_c207,
-        0xeada_7dd6_cde0_eb1e, 0xf57d_4f7f_ee6e_d178,
-        0x06f0_67aa_7217_6fba, 0x0a63_7dc5_a2c8_98a6,
-        0x113f_9804_bef9_0dae, 0x1b71_0b35_131c_471b,
-        0x28db_77f5_2304_7d84, 0x32ca_ab7b_40c7_2493,
-        0x3c9e_be0a_15c9_bebc, 0x431d_67c4_9c10_0d4c,
-        0x4cc5_d4be_cb3e_42b6, 0x597f_299c_fc65_7e2a,
-        0x5fcb_6fab_3ad6_faec, 0x6c44_198c_4a47_5817,
+        0x428a_2f98_d728_ae22,
+        0x7137_4491_23ef_65cd,
+        0xb5c0_fbcf_ec4d_3b2f,
+        0xe9b5_dba5_8189_dbbc,
+        0x3956_c25b_f348_b538,
+        0x59f1_11f1_b605_d019,
+        0x923f_82a4_af19_4f9b,
+        0xab1c_5ed5_da6d_8118,
+        0xd807_aa98_a303_0242,
+        0x1283_5b01_4570_6fbe,
+        0x2431_85be_4ee4_b28c,
+        0x550c_7dc3_d5ff_b4e2,
+        0x72be_5d74_f27b_896f,
+        0x80de_b1fe_3b16_96b1,
+        0x9bdc_06a7_25c7_1235,
+        0xc19b_f174_cf69_2694,
+        0xe49b_69c1_9ef1_4ad2,
+        0xefbe_4786_384f_25e3,
+        0x0fc1_9dc6_8b8c_d5b5,
+        0x240c_a1cc_77ac_9c65,
+        0x2de9_2c6f_592b_0275,
+        0x4a74_84aa_6ea6_e483,
+        0x5cb0_a9dc_bd41_fbd4,
+        0x76f9_88da_8311_53b5,
+        0x983e_5152_ee66_dfab,
+        0xa831_c66d_2db4_3210,
+        0xb003_27c8_98fb_213f,
+        0xbf59_7fc7_beef_0ee4,
+        0xc6e0_0bf3_3da8_8fc2,
+        0xd5a7_9147_930a_a725,
+        0x06ca_6351_e003_826f,
+        0x1429_2967_0a0e_6e70,
+        0x27b7_0a85_46d2_2ffc,
+        0x2e1b_2138_5c26_c926,
+        0x4d2c_6dfc_5ac4_2aed,
+        0x5338_0d13_9d95_b3df,
+        0x650a_7354_8baf_63de,
+        0x766a_0abb_3c77_b2a8,
+        0x81c2_c92e_47ed_aee6,
+        0x9272_2c85_1482_353b,
+        0xa2bf_e8a1_4cf1_0364,
+        0xa81a_664b_bc42_3001,
+        0xc24b_8b70_d0f8_9791,
+        0xc76c_51a3_0654_be30,
+        0xd192_e819_d6ef_5218,
+        0xd699_0624_5565_a910,
+        0xf40e_3585_5771_202a,
+        0x106a_a070_32bb_d1b8,
+        0x19a4_c116_b8d2_d0c8,
+        0x1e37_6c08_5141_ab53,
+        0x2748_774c_df8e_eb99,
+        0x34b0_bcb5_e19b_48a8,
+        0x391c_0cb3_c5c9_5a63,
+        0x4ed8_aa4a_e341_8acb,
+        0x5b9c_ca4f_7763_e373,
+        0x682e_6ff3_d6b2_b8a3,
+        0x748f_82ee_5def_b2fc,
+        0x78a5_636f_4317_2f60,
+        0x84c8_7814_a1f0_ab72,
+        0x8cc7_0208_1a64_39ec,
+        0x90be_fffa_2363_1e28,
+        0xa450_6ceb_de82_bde9,
+        0xbef9_a3f7_b2c6_7915,
+        0xc671_78f2_e372_532b,
+        0xca27_3ece_ea26_619c,
+        0xd186_b8c7_21c0_c207,
+        0xeada_7dd6_cde0_eb1e,
+        0xf57d_4f7f_ee6e_d178,
+        0x06f0_67aa_7217_6fba,
+        0x0a63_7dc5_a2c8_98a6,
+        0x113f_9804_bef9_0dae,
+        0x1b71_0b35_131c_471b,
+        0x28db_77f5_2304_7d84,
+        0x32ca_ab7b_40c7_2493,
+        0x3c9e_be0a_15c9_bebc,
+        0x431d_67c4_9c10_0d4c,
+        0x4cc5_d4be_cb3e_42b6,
+        0x597f_299c_fc65_7e2a,
+        0x5fcb_6fab_3ad6_faec,
+        0x6c44_198c_4a47_5817,
     ];
 
     let padded = sha_pad_64(data);
@@ -924,12 +1016,8 @@ fn sha512(data: &[u8]) -> Vec<u8> {
         }
 
         for j in 16..80 {
-            let s0 = w[j - 15].rotate_right(1)
-                ^ w[j - 15].rotate_right(8)
-                ^ (w[j - 15] >> 7);
-            let s1 = w[j - 2].rotate_right(19)
-                ^ w[j - 2].rotate_right(61)
-                ^ (w[j - 2] >> 6);
+            let s0 = w[j - 15].rotate_right(1) ^ w[j - 15].rotate_right(8) ^ (w[j - 15] >> 7);
+            let s1 = w[j - 2].rotate_right(19) ^ w[j - 2].rotate_right(61) ^ (w[j - 2] >> 6);
             w[j] = w[j - 16]
                 .wrapping_add(s0)
                 .wrapping_add(w[j - 7])
@@ -1289,7 +1377,10 @@ mod tests {
     #[test]
     fn detect_sha256sum() {
         assert_eq!(detect_algorithm("sha256sum"), Algorithm::Sha256);
-        assert_eq!(detect_algorithm("/usr/local/bin/sha256sum"), Algorithm::Sha256);
+        assert_eq!(
+            detect_algorithm("/usr/local/bin/sha256sum"),
+            Algorithm::Sha256
+        );
     }
 
     #[test]
@@ -1432,8 +1523,7 @@ mod tests {
 
     #[test]
     fn parse_filename_with_spaces() {
-        let line =
-            "d41d8cd98f00b204e9800998ecf8427e  my file with spaces.txt";
+        let line = "d41d8cd98f00b204e9800998ecf8427e  my file with spaces.txt";
         let result = parse_check_line(line, 32, Algorithm::Md5);
         assert!(result.is_some());
         let (_, name) = result.unwrap();
@@ -1523,7 +1613,10 @@ mod tests {
     fn sha256_55_bytes() {
         let data = vec![0x42u8; 55];
         let h = hash_hex(Algorithm::Sha256, &data);
-        assert_eq!(h, "1eed5900533b34bb08a62c072a0b0a67058b181b53a8f6e14d3d88d1d78fbe2b");
+        assert_eq!(
+            h,
+            "1eed5900533b34bb08a62c072a0b0a67058b181b53a8f6e14d3d88d1d78fbe2b"
+        );
     }
 
     #[test]

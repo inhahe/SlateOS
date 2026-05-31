@@ -50,13 +50,15 @@ const EXT4_FEATURE_RO_COMPAT_LARGE_FILE: u32 = 0x0002;
 const EXT4_FEATURE_RO_COMPAT_HUGE_FILE: u32 = 0x0008;
 const EXT4_FEATURE_RO_COMPAT_METADATA_CSUM: u32 = 0x0400;
 const _EXT2_FT_UNKNOWN: u8 = 0;
-const _EXT2_FT_REG_FILE: u8 = 1;
+#[allow(dead_code)] // spec constant; referenced by tests, not yet by dispatch
+const EXT2_FT_REG_FILE: u8 = 1;
 const EXT2_FT_DIR: u8 = 2;
 const _EXT2_FT_CHRDEV: u8 = 3;
 const _EXT2_FT_BLKDEV: u8 = 4;
 const _EXT2_FT_FIFO: u8 = 5;
 const _EXT2_FT_SOCK: u8 = 6;
-const _EXT2_FT_SYMLINK: u8 = 7;
+#[allow(dead_code)] // spec constant; referenced by tests, not yet by dispatch
+const EXT2_FT_SYMLINK: u8 = 7;
 
 const S_IFMT: u16 = 0xF000;
 const S_IFREG: u16 = 0x8000;
@@ -67,8 +69,7 @@ const _S_IFCHR: u16 = 0x2000;
 
 // Default UUIDs for simulation
 const DEFAULT_UUID: [u8; 16] = [
-    0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18,
-    0x29, 0x3a, 0x4b, 0x5c, 0x6d, 0x7e, 0x8f, 0x90,
+    0xa1, 0xb2, 0xc3, 0xd4, 0xe5, 0xf6, 0x07, 0x18, 0x29, 0x3a, 0x4b, 0x5c, 0x6d, 0x7e, 0x8f, 0x90,
 ];
 
 // ---------------------------------------------------------------------------
@@ -268,7 +269,11 @@ enum FsType {
 }
 
 impl FsType {
-    fn _name(self) -> &'static str {
+    // Tested accessors below are not yet wired into the command-dispatch path
+    // (this binary's per-personality logic is still being built out), so they
+    // carry #[allow(dead_code)] until then. See todo.txt.
+    #[allow(dead_code)]
+    fn name(self) -> &'static str {
         match self {
             FsType::Ext2 => "ext2",
             FsType::Ext3 => "ext3",
@@ -397,7 +402,7 @@ impl Default for Superblock {
             s_mnt_count: 0,
             s_max_mnt_count: u16::MAX,
             s_magic: EXT2_MAGIC,
-            s_state: 1, // EXT2_VALID_FS
+            s_state: 1,  // EXT2_VALID_FS
             s_errors: 1, // EXT2_ERRORS_CONTINUE
             s_minor_rev_level: 0,
             s_lastcheck: 1700000000,
@@ -442,18 +447,15 @@ impl Superblock {
     }
 
     fn total_blocks(&self) -> u64 {
-        self.s_blocks_count
-            | (u64::from(self.s_blocks_count_hi) << 32)
+        self.s_blocks_count | (u64::from(self.s_blocks_count_hi) << 32)
     }
 
     fn total_free_blocks(&self) -> u64 {
-        self.s_free_blocks_count
-            | (u64::from(self.s_free_blocks_count_hi) << 32)
+        self.s_free_blocks_count | (u64::from(self.s_free_blocks_count_hi) << 32)
     }
 
     fn reserved_blocks(&self) -> u64 {
-        self.s_r_blocks_count
-            | (u64::from(self.s_r_blocks_count_hi) << 32)
+        self.s_r_blocks_count | (u64::from(self.s_r_blocks_count_hi) << 32)
     }
 
     fn group_count(&self) -> u32 {
@@ -461,8 +463,7 @@ impl Superblock {
             return 1;
         }
         let total = self.total_blocks();
-        let groups = (total + u64::from(self.s_blocks_per_group) - 1)
-            / u64::from(self.s_blocks_per_group);
+        let groups = total.div_ceil(u64::from(self.s_blocks_per_group));
         groups as u32
     }
 
@@ -485,20 +486,32 @@ impl Superblock {
     fn format_uuid(&self) -> String {
         format!(
             "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-            self.s_uuid[0], self.s_uuid[1], self.s_uuid[2], self.s_uuid[3],
-            self.s_uuid[4], self.s_uuid[5],
-            self.s_uuid[6], self.s_uuid[7],
-            self.s_uuid[8], self.s_uuid[9],
-            self.s_uuid[10], self.s_uuid[11], self.s_uuid[12], self.s_uuid[13],
-            self.s_uuid[14], self.s_uuid[15],
+            self.s_uuid[0],
+            self.s_uuid[1],
+            self.s_uuid[2],
+            self.s_uuid[3],
+            self.s_uuid[4],
+            self.s_uuid[5],
+            self.s_uuid[6],
+            self.s_uuid[7],
+            self.s_uuid[8],
+            self.s_uuid[9],
+            self.s_uuid[10],
+            self.s_uuid[11],
+            self.s_uuid[12],
+            self.s_uuid[13],
+            self.s_uuid[14],
+            self.s_uuid[15],
         )
     }
 
-    fn _is_valid(&self) -> bool {
+    #[allow(dead_code)] // tested; not yet on the dispatch path (see todo.txt)
+    fn is_valid(&self) -> bool {
         self.s_magic == EXT2_MAGIC
     }
 
-    fn _fs_type(&self) -> FsType {
+    #[allow(dead_code)] // tested; not yet on the dispatch path (see todo.txt)
+    fn fs_type(&self) -> FsType {
         if self.s_feature_incompat.has_extents() {
             FsType::Ext4
         } else if self.s_feature_compat.has_journal() {
@@ -687,12 +700,17 @@ impl Inode {
         u64::from(self.i_size) | (u64::from(self.i_size_high) << 32)
     }
 
-    fn _set_size(&mut self, size: u64) {
+    // The accessors below are tested but not yet wired into the dispatch path
+    // (debugfs/dumpe2fs output is still being built out); #[allow(dead_code)]
+    // until then. See todo.txt.
+    #[allow(dead_code)]
+    fn set_size(&mut self, size: u64) {
         self.i_size = size as u32;
         self.i_size_high = (size >> 32) as u32;
     }
 
-    fn _is_dir(&self) -> bool {
+    #[allow(dead_code)]
+    fn is_dir(&self) -> bool {
         self.i_mode & S_IFMT == S_IFDIR
     }
 
@@ -700,15 +718,18 @@ impl Inode {
         self.i_mode & S_IFMT == S_IFREG
     }
 
-    fn _is_symlink(&self) -> bool {
+    #[allow(dead_code)]
+    fn is_symlink(&self) -> bool {
         self.i_mode & S_IFMT == S_IFLNK
     }
 
-    fn _is_deleted(&self) -> bool {
+    #[allow(dead_code)]
+    fn is_deleted(&self) -> bool {
         self.i_dtime != 0
     }
 
-    fn _file_type_char(&self) -> char {
+    #[allow(dead_code)]
+    fn file_type_char(&self) -> char {
         match self.i_mode & S_IFMT {
             S_IFREG => '-',
             S_IFDIR => 'd',
@@ -721,10 +742,11 @@ impl Inode {
         }
     }
 
-    fn _permissions_str(&self) -> String {
+    #[allow(dead_code)]
+    fn permissions_str(&self) -> String {
         let mode = self.i_mode;
         let mut s = String::with_capacity(10);
-        s.push(self._file_type_char());
+        s.push(self.file_type_char());
         s.push(if mode & 0o400 != 0 { 'r' } else { '-' });
         s.push(if mode & 0o200 != 0 { 'w' } else { '-' });
         s.push(if mode & 0o100 != 0 { 'x' } else { '-' });
@@ -737,17 +759,36 @@ impl Inode {
         s
     }
 
-    fn _format_flags(&self) -> String {
+    #[allow(dead_code)]
+    fn format_flags(&self) -> String {
         let mut flags = Vec::new();
-        if self.i_flags & 0x0000_0001 != 0 { flags.push("Secure_Deletion"); }
-        if self.i_flags & 0x0000_0002 != 0 { flags.push("Undelete"); }
-        if self.i_flags & 0x0000_0004 != 0 { flags.push("Compressed"); }
-        if self.i_flags & 0x0000_0008 != 0 { flags.push("Synchronous"); }
-        if self.i_flags & 0x0000_0010 != 0 { flags.push("Immutable"); }
-        if self.i_flags & 0x0000_0020 != 0 { flags.push("Append_Only"); }
-        if self.i_flags & 0x0000_0040 != 0 { flags.push("No_Dump"); }
-        if self.i_flags & 0x0000_0080 != 0 { flags.push("No_Atime"); }
-        if self.i_flags & 0x0008_0000 != 0 { flags.push("Extents"); }
+        if self.i_flags & 0x0000_0001 != 0 {
+            flags.push("Secure_Deletion");
+        }
+        if self.i_flags & 0x0000_0002 != 0 {
+            flags.push("Undelete");
+        }
+        if self.i_flags & 0x0000_0004 != 0 {
+            flags.push("Compressed");
+        }
+        if self.i_flags & 0x0000_0008 != 0 {
+            flags.push("Synchronous");
+        }
+        if self.i_flags & 0x0000_0010 != 0 {
+            flags.push("Immutable");
+        }
+        if self.i_flags & 0x0000_0020 != 0 {
+            flags.push("Append_Only");
+        }
+        if self.i_flags & 0x0000_0040 != 0 {
+            flags.push("No_Dump");
+        }
+        if self.i_flags & 0x0000_0080 != 0 {
+            flags.push("No_Atime");
+        }
+        if self.i_flags & 0x0008_0000 != 0 {
+            flags.push("Extents");
+        }
         if flags.is_empty() {
             String::from("(none)")
         } else {
@@ -803,8 +844,12 @@ impl DirEntry {
 // Extent tree (ext4)
 // ---------------------------------------------------------------------------
 
+// ExtentHeader/ExtentIndex model the ext4 extent-tree on-disk structures.
+// They're tested but the extent-tree walk isn't yet wired into the dumpe2fs/
+// debugfs output path, so they carry #[allow(dead_code)] for now. See todo.txt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct _ExtentHeader {
+#[allow(dead_code)]
+struct ExtentHeader {
     eh_magic: u16,
     eh_entries: u16,
     eh_max: u16,
@@ -812,8 +857,9 @@ struct _ExtentHeader {
     _eh_generation: u32,
 }
 
-impl _ExtentHeader {
-    fn _new(entries: u16, max: u16, depth: u16) -> Self {
+impl ExtentHeader {
+    #[allow(dead_code)]
+    fn new(entries: u16, max: u16, depth: u16) -> Self {
         Self {
             eh_magic: 0xF30A,
             eh_entries: entries,
@@ -823,7 +869,8 @@ impl _ExtentHeader {
         }
     }
 
-    fn _is_valid(&self) -> bool {
+    #[allow(dead_code)]
+    fn is_valid(&self) -> bool {
         self.eh_magic == 0xF30A
     }
 }
@@ -864,15 +911,17 @@ impl Extent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct _ExtentIndex {
+#[allow(dead_code)]
+struct ExtentIndex {
     ei_block: u32,
     ei_leaf_lo: u32,
     ei_leaf_hi: u16,
     _ei_unused: u16,
 }
 
-impl _ExtentIndex {
-    fn _leaf_block(&self) -> u64 {
+impl ExtentIndex {
+    #[allow(dead_code)]
+    fn leaf_block(&self) -> u64 {
         u64::from(self.ei_leaf_lo) | (u64::from(self.ei_leaf_hi) << 32)
     }
 }
@@ -930,7 +979,8 @@ impl Default for JournalSuperblock {
 }
 
 impl JournalSuperblock {
-    fn _is_valid(&self) -> bool {
+    #[allow(dead_code)] // tested; journal inspection not yet on the dispatch path
+    fn is_valid(&self) -> bool {
         self.js_header_magic == 0xC03B_3998
     }
 }
@@ -941,7 +991,8 @@ impl JournalSuperblock {
 
 #[derive(Debug, Clone)]
 struct FilesystemImage {
-    _device: String,
+    #[allow(dead_code)] // recorded at creation; not yet read by the dispatch path
+    device: String,
     superblock: Superblock,
     block_groups: Vec<BlockGroupDesc>,
     inodes: Vec<Inode>,
@@ -954,7 +1005,7 @@ struct FilesystemImage {
 impl FilesystemImage {
     fn new(device: &str) -> Self {
         Self {
-            _device: device.to_string(),
+            device: device.to_string(),
             superblock: Superblock::default(),
             block_groups: Vec::new(),
             inodes: Vec::new(),
@@ -1032,46 +1083,33 @@ impl FilesystemImage {
         }
 
         // Create block group descriptors
-        let free_blocks_per_group = if group_count > 0 {
-            sb.s_free_blocks_count as u32 / group_count
-        } else {
-            0
-        };
-        let free_inodes_per_group = if group_count > 0 {
-            sb.s_free_inodes_count / group_count
-        } else {
-            0
-        };
+        let free_blocks_per_group = (sb.s_free_blocks_count as u32)
+            .checked_div(group_count)
+            .unwrap_or(0);
+        let free_inodes_per_group = sb.s_free_inodes_count.checked_div(group_count).unwrap_or(0);
 
         for i in 0..group_count {
-            let base = u64::from(sb.s_first_data_block)
-                + u64::from(i) * u64::from(sb.s_blocks_per_group);
+            let base =
+                u64::from(sb.s_first_data_block) + u64::from(i) * u64::from(sb.s_blocks_per_group);
             let block_bitmap = base + 1;
             let inode_bitmap = base + 2;
             let inode_table = base + 3;
 
             let free_b = if i == group_count - 1 {
                 // Last group may differ
-                sb.s_free_blocks_count as u32
-                    - free_blocks_per_group * (group_count - 1)
+                sb.s_free_blocks_count as u32 - free_blocks_per_group * (group_count - 1)
             } else {
                 free_blocks_per_group
             };
 
             let free_i = if i == group_count - 1 {
-                sb.s_free_inodes_count
-                    - free_inodes_per_group * (group_count - 1)
+                sb.s_free_inodes_count - free_inodes_per_group * (group_count - 1)
             } else {
                 free_inodes_per_group
             };
 
-            let mut bgd = BlockGroupDesc::new(
-                block_bitmap,
-                inode_bitmap,
-                inode_table,
-                free_b,
-                free_i,
-            );
+            let mut bgd =
+                BlockGroupDesc::new(block_bitmap, inode_bitmap, inode_table, free_b, free_i);
             bgd.bg_checksum = bgd.compute_checksum(i, &sb.s_uuid);
             if i == 0 {
                 bgd.bg_used_dirs_count = 2; // root + lost+found
@@ -1086,7 +1124,7 @@ impl FilesystemImage {
         }
 
         // Root inode (#2, index 1)
-        let root_data_block = sb.s_first_data_block + u32::from(group_count) + 10;
+        let root_data_block = sb.s_first_data_block + group_count + 10;
         {
             let root = &mut img.inodes[1];
             root.i_mode = S_IFDIR | 0o755;
@@ -1183,9 +1221,7 @@ fn format_timestamp(ts: u32) -> String {
     let remaining_days = days % 365;
     let month = remaining_days / 30 + 1;
     let day = remaining_days % 30 + 1;
-    format!(
-        "{years}-{month:02}-{day:02} {hours:02}:{mins:02}:{secs:02}"
-    )
+    format!("{years}-{month:02}-{day:02} {hours:02}:{mins:02}:{secs:02}")
 }
 
 fn parse_size(s: &str) -> Result<u64, String> {
@@ -1257,7 +1293,7 @@ fn is_power_of(n: u32, base: u32) -> bool {
     }
     let mut v = n;
     while v > 1 {
-        if v % base != 0 {
+        if !v.is_multiple_of(base) {
             return false;
         }
         v /= base;
@@ -1267,7 +1303,11 @@ fn is_power_of(n: u32, base: u32) -> bool {
 
 fn has_superblock_backup(group: u32) -> bool {
     // Sparse superblock: copies in groups 0, 1, and powers of 3, 5, 7
-    group == 0 || group == 1 || is_power_of(group, 3) || is_power_of(group, 5) || is_power_of(group, 7)
+    group == 0
+        || group == 1
+        || is_power_of(group, 3)
+        || is_power_of(group, 5)
+        || is_power_of(group, 7)
 }
 
 // ---------------------------------------------------------------------------
@@ -1393,10 +1433,7 @@ fn parse_mke2fs_args(args: &[String]) -> Result<Mke2fsOptions, String> {
                 }
                 opts.label = args[i].clone();
                 if opts.label.len() > EXT2_LABEL_LEN {
-                    return Err(format!(
-                        "label too long: max {} characters",
-                        EXT2_LABEL_LEN
-                    ));
+                    return Err(format!("label too long: max {} characters", EXT2_LABEL_LEN));
                 }
             }
             "-U" => {
@@ -1425,10 +1462,8 @@ fn parse_mke2fs_args(args: &[String]) -> Result<Mke2fsOptions, String> {
                     match feat.trim() {
                         "^has_journal" => opts.no_journal = true,
                         "has_journal" => opts.journal = true,
-                        "^extent" | "^extents" => {
-                            if opts.fs_type == FsType::Ext4 {
-                                opts.fs_type = FsType::Ext3;
-                            }
+                        "^extent" | "^extents" if opts.fs_type == FsType::Ext4 => {
+                            opts.fs_type = FsType::Ext3;
                         }
                         _ => {} // Silently ignore unknown features for forward compat
                     }
@@ -1441,9 +1476,7 @@ fn parse_mke2fs_args(args: &[String]) -> Result<Mke2fsOptions, String> {
                 }
                 for param in args[i].split(',') {
                     if let Some(val) = param.strip_prefix("stride=") {
-                        opts.stride = val
-                            .parse()
-                            .map_err(|e| format!("invalid stride: {e}"))?;
+                        opts.stride = val.parse().map_err(|e| format!("invalid stride: {e}"))?;
                     } else if let Some(val) = param.strip_prefix("stripe-width=") {
                         opts.stripe_width = val
                             .parse()
@@ -1485,7 +1518,9 @@ fn run_mke2fs(args: &[String]) -> i32 {
         Ok(o) => o,
         Err(e) => {
             eprintln!("mke2fs: {e}");
-            eprintln!("Usage: mke2fs [-t fs-type] [-b block-size] [-L label] [-U uuid] device [blocks]");
+            eprintln!(
+                "Usage: mke2fs [-t fs-type] [-b block-size] [-L label] [-U uuid] device [blocks]"
+            );
             return 1;
         }
     };
@@ -1518,19 +1553,14 @@ fn run_mke2fs(args: &[String]) -> i32 {
     if !opts.quiet {
         let sb = &img.superblock;
         let total_bytes = u64::from(sb.block_size()) * sb.total_blocks();
-        println!(
-            "mke2fs 1.47.0 (OurOS)"
-        );
+        println!("mke2fs 1.47.0 (OurOS)");
         println!(
             "Creating filesystem with {} {}k blocks and {} inodes",
             sb.total_blocks(),
             sb.block_size() / 1024,
             sb.s_inodes_count,
         );
-        println!(
-            "Filesystem UUID: {}",
-            sb.format_uuid()
-        );
+        println!("Filesystem UUID: {}", sb.format_uuid());
         if !opts.label.is_empty() {
             println!("Filesystem label: {}", opts.label);
         }
@@ -1539,17 +1569,10 @@ fn run_mke2fs(args: &[String]) -> i32 {
             format_backup_blocks(sb)
         );
         println!();
-        println!(
-            "Allocating group tables: done"
-        );
+        println!("Allocating group tables: done");
         println!("Writing inode tables: done");
-        if journal_enabled {
-            if let Some(ref j) = img.journal {
-                println!(
-                    "Creating journal ({} blocks): done",
-                    j.js_maxlen
-                );
-            }
+        if journal_enabled && let Some(ref j) = img.journal {
+            println!("Creating journal ({} blocks): done", j.js_maxlen);
         }
         println!("Writing superblocks and filesystem accounting information: done");
         println!();
@@ -1572,8 +1595,8 @@ fn format_backup_blocks(sb: &Superblock) -> String {
     let group_count = sb.group_count();
     for g in 1..group_count {
         if has_superblock_backup(g) {
-            let block = u64::from(sb.s_first_data_block)
-                + u64::from(g) * u64::from(sb.s_blocks_per_group);
+            let block =
+                u64::from(sb.s_first_data_block) + u64::from(g) * u64::from(sb.s_blocks_per_group);
             backups.push(block.to_string());
         }
         if backups.len() >= 10 {
@@ -1587,6 +1610,7 @@ fn format_backup_blocks(sb: &Superblock) -> String {
 // tune2fs — adjust filesystem parameters
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 struct Tune2fsOptions {
     device: String,
     label: Option<String>,
@@ -1603,28 +1627,6 @@ struct Tune2fsOptions {
     set_features: Vec<String>,
     clear_features: Vec<String>,
     mount_opts: Option<String>,
-}
-
-impl Default for Tune2fsOptions {
-    fn default() -> Self {
-        Self {
-            device: String::new(),
-            label: None,
-            uuid: None,
-            max_mount_count: None,
-            check_interval: None,
-            error_behavior: None,
-            reserved_percent: None,
-            reserved_uid: None,
-            reserved_gid: None,
-            add_journal: false,
-            remove_journal: false,
-            list_contents: false,
-            set_features: Vec::new(),
-            clear_features: Vec::new(),
-            mount_opts: None,
-        }
-    }
 }
 
 fn parse_tune2fs_args(args: &[String]) -> Result<Tune2fsOptions, String> {
@@ -1713,22 +1715,14 @@ fn parse_tune2fs_args(args: &[String]) -> Result<Tune2fsOptions, String> {
                 if i >= args.len() {
                     return Err("-r requires an argument".to_string());
                 }
-                opts.reserved_uid = Some(
-                    args[i]
-                        .parse()
-                        .map_err(|e| format!("invalid UID: {e}"))?,
-                );
+                opts.reserved_uid = Some(args[i].parse().map_err(|e| format!("invalid UID: {e}"))?);
             }
             "-g" => {
                 i += 1;
                 if i >= args.len() {
                     return Err("-g requires an argument".to_string());
                 }
-                opts.reserved_gid = Some(
-                    args[i]
-                        .parse()
-                        .map_err(|e| format!("invalid GID: {e}"))?,
-                );
+                opts.reserved_gid = Some(args[i].parse().map_err(|e| format!("invalid GID: {e}"))?);
             }
             "-j" => opts.add_journal = true,
             "-O" => {
@@ -1806,8 +1800,8 @@ fn run_tune2fs(args: &[String]) -> i32 {
             "random" => {
                 // Simulated random UUID
                 img.superblock.s_uuid = [
-                    0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-                    0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0,
+                    0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0x12, 0x34, 0x56, 0x78, 0x9A,
+                    0xBC, 0xDE, 0xF0,
                 ];
                 println!("tune2fs: setting UUID to {}", img.superblock.format_uuid());
                 changed = true;
@@ -1820,8 +1814,8 @@ fn run_tune2fs(args: &[String]) -> i32 {
             "time" => {
                 // Time-based UUID (simulated)
                 img.superblock.s_uuid = [
-                    0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF,
-                    0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10,
+                    0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, 0xFE, 0xDC, 0xBA, 0x98, 0x76,
+                    0x54, 0x32, 0x10,
                 ];
                 println!("tune2fs: setting UUID to {}", img.superblock.format_uuid());
                 changed = true;
@@ -1911,16 +1905,30 @@ fn run_tune2fs(args: &[String]) -> i32 {
 }
 
 fn print_superblock_info(sb: &Superblock) {
-    println!("Filesystem volume name:   {}", if sb.label().is_empty() { "<none>" } else { sb.label() });
+    println!(
+        "Filesystem volume name:   {}",
+        if sb.label().is_empty() {
+            "<none>"
+        } else {
+            sb.label()
+        }
+    );
     println!("Last mounted on:          <not available>");
     println!("Filesystem UUID:          {}", sb.format_uuid());
     println!("Filesystem magic number:  0x{:04X}", sb.s_magic);
-    println!("Filesystem revision #:    {} ({})",
+    println!(
+        "Filesystem revision #:    {} ({})",
         sb.s_rev_level,
-        if sb.s_rev_level == EXT2_GOOD_OLD_REV { "original" } else { "dynamic" }
+        if sb.s_rev_level == EXT2_GOOD_OLD_REV {
+            "original"
+        } else {
+            "dynamic"
+        }
     );
-    println!("Filesystem features:      {}",
-        sb.s_feature_compat.format_flags());
+    println!(
+        "Filesystem features:      {}",
+        sb.s_feature_compat.format_flags()
+    );
     println!("Filesystem flags:         signed_directory_hash");
     println!("Default mount options:    user_xattr acl");
     println!("Filesystem state:         {}", sb.state_str());
@@ -1938,23 +1946,39 @@ fn print_superblock_info(sb: &Superblock) {
     println!("Blocks per group:         {}", sb.s_blocks_per_group);
     println!("Fragments per group:      {}", sb.s_frags_per_group);
     println!("Inodes per group:         {}", sb.s_inodes_per_group);
-    println!("Inode blocks per group:   {}",
-        u32::from(sb.s_inode_size) * sb.s_inodes_per_group / sb.block_size());
+    println!(
+        "Inode blocks per group:   {}",
+        u32::from(sb.s_inode_size) * sb.s_inodes_per_group / sb.block_size()
+    );
     println!("Inode size:               {}", sb.s_inode_size);
     println!("Required extra isize:     {}", sb.s_min_extra_isize);
     println!("Desired extra isize:      {}", sb.s_want_extra_isize);
     println!("Journal inode:            {}", sb.s_journal_inum);
     println!("Default directory hash:   half_md4");
-    println!("Filesystem created:       {}", format_timestamp(sb.s_mkfs_time));
+    println!(
+        "Filesystem created:       {}",
+        format_timestamp(sb.s_mkfs_time)
+    );
     println!("Last mount time:          {}", format_timestamp(sb.s_mtime));
     println!("Last write time:          {}", format_timestamp(sb.s_wtime));
     println!("Mount count:              {}", sb.s_mnt_count);
-    println!("Maximum mount count:      {}",
-        if sb.s_max_mnt_count == u16::MAX { -1i16 as i32 } else { i32::from(sb.s_max_mnt_count) });
-    println!("Last checked:             {}", format_timestamp(sb.s_lastcheck));
-    println!("Check interval:           {} ({} days)",
+    println!(
+        "Maximum mount count:      {}",
+        if sb.s_max_mnt_count == u16::MAX {
+            -1i16 as i32
+        } else {
+            i32::from(sb.s_max_mnt_count)
+        }
+    );
+    println!(
+        "Last checked:             {}",
+        format_timestamp(sb.s_lastcheck)
+    );
+    println!(
+        "Check interval:           {} ({} days)",
         sb.s_checkinterval,
-        sb.s_checkinterval / 86400);
+        sb.s_checkinterval / 86400
+    );
     println!("Reserved blocks uid:      {}", sb.s_def_resuid);
     println!("Reserved blocks gid:      {}", sb.s_def_resgid);
     println!("First inode:              {}", sb.s_first_ino);
@@ -1966,7 +1990,8 @@ fn print_superblock_info(sb: &Superblock) {
 
 struct Dumpe2fsOptions {
     device: String,
-    _show_groups: bool,
+    #[allow(dead_code)] // parsed/defaulted; group dump always emitted for now
+    show_groups: bool,
     show_header_only: bool,
     _hex_dump: bool,
     image_file: bool,
@@ -1976,7 +2001,7 @@ impl Default for Dumpe2fsOptions {
     fn default() -> Self {
         Self {
             device: String::new(),
-            _show_groups: true,
+            show_groups: true,
             show_header_only: false,
             _hex_dump: false,
             image_file: false,
@@ -2030,14 +2055,26 @@ fn run_dumpe2fs(args: &[String]) -> i32 {
 
     let sb = &img.superblock;
     print_superblock_info(sb);
-    println!("Filesystem compatible features:   {}", sb.s_feature_compat.format_flags());
-    println!("Filesystem incompatible features: {}", sb.s_feature_incompat.format_flags());
-    println!("Filesystem ro-compatible features:{}", sb.s_feature_ro_compat.format_flags());
+    println!(
+        "Filesystem compatible features:   {}",
+        sb.s_feature_compat.format_flags()
+    );
+    println!(
+        "Filesystem incompatible features: {}",
+        sb.s_feature_incompat.format_flags()
+    );
+    println!(
+        "Filesystem ro-compatible features:{}",
+        sb.s_feature_ro_compat.format_flags()
+    );
 
     if let Some(ref journal) = img.journal {
         println!();
         println!("Journal features:         (none)");
-        println!("Journal size:             {}M", u64::from(journal.js_maxlen) * u64::from(journal.js_blocksize) / (1024 * 1024));
+        println!(
+            "Journal size:             {}M",
+            u64::from(journal.js_maxlen) * u64::from(journal.js_blocksize) / (1024 * 1024)
+        );
         println!("Journal length:           {}", journal.js_maxlen);
         println!("Journal sequence:         0x{:08x}", journal.js_sequence);
         println!("Journal start:            {}", journal.js_start);
@@ -2050,31 +2087,57 @@ fn run_dumpe2fs(args: &[String]) -> i32 {
     println!();
 
     for (i, bg) in img.block_groups.iter().enumerate() {
-        println!("Group {i}: (Blocks {}-{})",
-            u64::from(sb.s_first_data_block) + u64::from(i as u32) * u64::from(sb.s_blocks_per_group),
-            (u64::from(sb.s_first_data_block) + u64::from(i as u32 + 1) * u64::from(sb.s_blocks_per_group)).saturating_sub(1)
-                .min(sb.total_blocks().saturating_sub(1)),
+        println!(
+            "Group {i}: (Blocks {}-{})",
+            u64::from(sb.s_first_data_block)
+                + u64::from(i as u32) * u64::from(sb.s_blocks_per_group),
+            (u64::from(sb.s_first_data_block)
+                + u64::from(i as u32 + 1) * u64::from(sb.s_blocks_per_group))
+            .saturating_sub(1)
+            .min(sb.total_blocks().saturating_sub(1)),
         );
 
         if has_superblock_backup(i as u32) {
-            let backup_block = u64::from(sb.s_first_data_block) + u64::from(i as u32) * u64::from(sb.s_blocks_per_group);
-            println!("  Primary superblock at {backup_block}, Group descriptors at {}-{}",
-                backup_block + 1, backup_block + 2);
+            let backup_block = u64::from(sb.s_first_data_block)
+                + u64::from(i as u32) * u64::from(sb.s_blocks_per_group);
+            println!(
+                "  Primary superblock at {backup_block}, Group descriptors at {}-{}",
+                backup_block + 1,
+                backup_block + 2
+            );
         }
 
-        println!("  Block bitmap at {} (+{})",
+        println!(
+            "  Block bitmap at {} (+{})",
             bg.bg_block_bitmap,
-            bg.bg_block_bitmap - u64::from(sb.s_first_data_block) - u64::from(i as u32) * u64::from(sb.s_blocks_per_group));
-        println!("  Inode bitmap at {} (+{})",
+            bg.bg_block_bitmap
+                - u64::from(sb.s_first_data_block)
+                - u64::from(i as u32) * u64::from(sb.s_blocks_per_group)
+        );
+        println!(
+            "  Inode bitmap at {} (+{})",
             bg.bg_inode_bitmap,
-            bg.bg_inode_bitmap - u64::from(sb.s_first_data_block) - u64::from(i as u32) * u64::from(sb.s_blocks_per_group));
-        println!("  Inode table at {}-{} (+{})",
+            bg.bg_inode_bitmap
+                - u64::from(sb.s_first_data_block)
+                - u64::from(i as u32) * u64::from(sb.s_blocks_per_group)
+        );
+        println!(
+            "  Inode table at {}-{} (+{})",
             bg.bg_inode_table,
-            bg.bg_inode_table + u64::from(sb.s_inodes_per_group * u32::from(sb.s_inode_size) / sb.block_size()) - 1,
-            bg.bg_inode_table - u64::from(sb.s_first_data_block) - u64::from(i as u32) * u64::from(sb.s_blocks_per_group));
-        println!("  {} free blocks, {} free inodes, {} directories, {} unused inodes",
-            bg.bg_free_blocks_count, bg.bg_free_inodes_count,
-            bg.bg_used_dirs_count, bg._bg_itable_unused);
+            bg.bg_inode_table
+                + u64::from(sb.s_inodes_per_group * u32::from(sb.s_inode_size) / sb.block_size())
+                - 1,
+            bg.bg_inode_table
+                - u64::from(sb.s_first_data_block)
+                - u64::from(i as u32) * u64::from(sb.s_blocks_per_group)
+        );
+        println!(
+            "  {} free blocks, {} free inodes, {} directories, {} unused inodes",
+            bg.bg_free_blocks_count,
+            bg.bg_free_inodes_count,
+            bg.bg_used_dirs_count,
+            bg._bg_itable_unused
+        );
         println!("  Free blocks: (simulated range)");
         println!("  Free inodes: (simulated range)");
         println!("  Checksum: 0x{:04x}", bg.bg_checksum);
@@ -2087,22 +2150,12 @@ fn run_dumpe2fs(args: &[String]) -> i32 {
 // debugfs — filesystem debugger
 // ---------------------------------------------------------------------------
 
+#[derive(Default)]
 struct DebugfsOptions {
     device: String,
     writable: bool,
     _catastrophic: bool,
     commands: Vec<String>,
-}
-
-impl Default for DebugfsOptions {
-    fn default() -> Self {
-        Self {
-            device: String::new(),
-            writable: false,
-            _catastrophic: false,
-            commands: Vec::new(),
-        }
-    }
 }
 
 fn parse_debugfs_args(args: &[String]) -> Result<DebugfsOptions, String> {
@@ -2236,9 +2289,15 @@ fn run_debugfs_command(cmd: &str, img: &FilesystemImage) -> bool {
         }
         "supported_features" => {
             println!("Supported feature flags:");
-            println!("  Compatible:   has_journal dir_prealloc imagic_inodes resize_inode dir_index");
-            println!("  Incompatible: compression filetype recover journal_dev meta_bg extents 64bit flex_bg mmp");
-            println!("  Read-only:    sparse_super large_file huge_file btree_dir dir_nlink extra_isize metadata_csum");
+            println!(
+                "  Compatible:   has_journal dir_prealloc imagic_inodes resize_inode dir_index"
+            );
+            println!(
+                "  Incompatible: compression filetype recover journal_dev meta_bg extents 64bit flex_bg mmp"
+            );
+            println!(
+                "  Read-only:    sparse_super large_file huge_file btree_dir dir_nlink extra_isize metadata_csum"
+            );
         }
         "testb" => {
             if parts.len() < 2 {
@@ -2248,7 +2307,14 @@ fn run_debugfs_command(cmd: &str, img: &FilesystemImage) -> bool {
                 let sb = &img.superblock;
                 // Simulated: low blocks are always in use
                 let in_use = block < 100 || (block % u64::from(sb.s_blocks_per_group)) < 50;
-                println!("Block {block} {}", if in_use { "marked in use" } else { "not in use" });
+                println!(
+                    "Block {block} {}",
+                    if in_use {
+                        "marked in use"
+                    } else {
+                        "not in use"
+                    }
+                );
             }
         }
         "ncheck" => {
@@ -2272,7 +2338,10 @@ fn run_debugfs_command(cmd: &str, img: &FilesystemImage) -> bool {
             if parts.len() < 2 {
                 println!("[pwd]   INODE: 2  PATH: /");
             } else {
-                println!("[pwd]   INODE: 2  PATH: /{}", parts[1].trim_start_matches('/'));
+                println!(
+                    "[pwd]   INODE: 2  PATH: /{}",
+                    parts[1].trim_start_matches('/')
+                );
             }
         }
         other => {
@@ -2292,7 +2361,8 @@ fn debugfs_stat(ino: u32, img: &FilesystemImage) {
     let inode = &img.inodes[idx];
     let sb = &img.superblock;
 
-    println!("Inode: {ino}   Type: {}   Mode:  {:04o}   Flags: 0x{:x}",
+    println!(
+        "Inode: {ino}   Type: {}   Mode:  {:04o}   Flags: 0x{:x}",
         match inode.i_mode & S_IFMT {
             S_IFREG => "regular",
             S_IFDIR => "directory",
@@ -2304,33 +2374,52 @@ fn debugfs_stat(ino: u32, img: &FilesystemImage) {
         inode.i_mode & 0o7777,
         inode.i_flags,
     );
-    println!("Generation: {}    Version: 0x00000000",
-        inode.i_generation);
-    println!("User:  {}   Group:  {}   Size: {}",
-        inode.i_uid, inode.i_gid, inode.size());
-    println!("File ACL: {}    Directory ACL: 0",
-        inode.i_file_acl);
-    println!("Links: {}   Blockcount: {}",
-        inode.i_links_count, inode.i_blocks);
+    println!("Generation: {}    Version: 0x00000000", inode.i_generation);
+    println!(
+        "User:  {}   Group:  {}   Size: {}",
+        inode.i_uid,
+        inode.i_gid,
+        inode.size()
+    );
+    println!("File ACL: {}    Directory ACL: 0", inode.i_file_acl);
+    println!(
+        "Links: {}   Blockcount: {}",
+        inode.i_links_count, inode.i_blocks
+    );
     println!("Fragment:  Address: 0    Number: 0    Size: 0");
 
-    println!("ctime: 0x{:08x} -- {}",
-        inode.i_ctime, format_timestamp(inode.i_ctime));
-    println!("atime: 0x{:08x} -- {}",
-        inode.i_atime, format_timestamp(inode.i_atime));
-    println!("mtime: 0x{:08x} -- {}",
-        inode.i_mtime, format_timestamp(inode.i_mtime));
-    println!("crtime: 0x{:08x} -- {}",
-        inode.i_crtime, format_timestamp(inode.i_crtime));
+    println!(
+        "ctime: 0x{:08x} -- {}",
+        inode.i_ctime,
+        format_timestamp(inode.i_ctime)
+    );
+    println!(
+        "atime: 0x{:08x} -- {}",
+        inode.i_atime,
+        format_timestamp(inode.i_atime)
+    );
+    println!(
+        "mtime: 0x{:08x} -- {}",
+        inode.i_mtime,
+        format_timestamp(inode.i_mtime)
+    );
+    println!(
+        "crtime: 0x{:08x} -- {}",
+        inode.i_crtime,
+        format_timestamp(inode.i_crtime)
+    );
 
     if sb.s_feature_incompat.has_extents() && inode.i_flags & 0x0008_0000 != 0 {
         println!("EXTENTS:");
         if let Some((_, extents)) = img.extents.iter().find(|(i, _)| *i == ino) {
             for ext in extents {
-                println!("  ({}, {}): {} - {}",
-                    ext.ee_block, ext.actual_len(),
+                println!(
+                    "  ({}, {}): {} - {}",
+                    ext.ee_block,
+                    ext.actual_len(),
                     ext.physical_block(),
-                    ext.physical_block() + u64::from(ext.actual_len()) - 1);
+                    ext.physical_block() + u64::from(ext.actual_len()) - 1
+                );
             }
         }
     } else {
@@ -2356,7 +2445,8 @@ fn debugfs_stat(ino: u32, img: &FilesystemImage) {
 fn debugfs_ls(ino: u32, img: &FilesystemImage) {
     if let Some((_, entries)) = img.dir_entries.iter().find(|(i, _)| *i == ino) {
         for entry in entries {
-            println!("{:>8} {:>3} {:>5} {:>6} {}",
+            println!(
+                "{:>8} {:>3} {:>5} {:>6} {}",
                 entry.inode,
                 entry.rec_len,
                 entry.name_len,
@@ -2380,7 +2470,10 @@ fn debugfs_cat(ino: u32, img: &FilesystemImage) {
         eprintln!("cat: inode {ino} is not a regular file");
         return;
     }
-    println!("(simulated file content for inode {ino}, {} bytes)", inode.size());
+    println!(
+        "(simulated file content for inode {ino}, {} bytes)",
+        inode.size()
+    );
 }
 
 fn debugfs_inode_dump(ino: u32, img: &FilesystemImage) {
@@ -2390,9 +2483,17 @@ fn debugfs_inode_dump(ino: u32, img: &FilesystemImage) {
     }
     let idx = (ino - 1) as usize;
     let inode = &img.inodes[idx];
-    println!("0000  {:04x} {:04x} {:08x} {:08x}  {:08x} {:08x} {:04x} {:04x}",
-        inode.i_mode, inode.i_uid, inode.i_size, inode.i_atime,
-        inode.i_ctime, inode.i_mtime, inode.i_gid, inode.i_links_count);
+    println!(
+        "0000  {:04x} {:04x} {:08x} {:08x}  {:08x} {:08x} {:04x} {:04x}",
+        inode.i_mode,
+        inode.i_uid,
+        inode.i_size,
+        inode.i_atime,
+        inode.i_ctime,
+        inode.i_mtime,
+        inode.i_gid,
+        inode.i_links_count
+    );
     println!("0020  {:08x} {:08x}", inode.i_blocks, inode.i_flags);
     for (i, block) in inode.i_block.iter().enumerate() {
         if i % 4 == 0 {
@@ -2446,8 +2547,11 @@ fn debugfs_dump_extents(ino: u32, img: &FilesystemImage) {
         println!("Level Entries       Logical          Physical Length Flags");
         for (i, ext) in extents.iter().enumerate() {
             let uninitialized = if ext.is_uninitialized() { "Uninit" } else { "" };
-            println!(" 0/{:>2} {:>3}/{:>3}  {:>5} - {:>5}  {:>10} - {:>10}  {:>5} {}",
-                0, i + 1, extents.len(),
+            println!(
+                " 0/{:>2} {:>3}/{:>3}  {:>5} - {:>5}  {:>10} - {:>10}  {:>5} {}",
+                0,
+                i + 1,
+                extents.len(),
                 ext.ee_block,
                 ext.ee_block + u32::from(ext.actual_len()) - 1,
                 ext.physical_block(),
@@ -2503,10 +2607,16 @@ fn run_debugfs(args: &[String]) -> i32 {
     if opts.commands.is_empty() {
         println!("debugfs 1.47.0 (OurOS)");
         if !opts.device.is_empty() {
-            let mode = if opts.writable { "read/write" } else { "read-only" };
+            let mode = if opts.writable {
+                "read/write"
+            } else {
+                "read-only"
+            };
             println!("debugfs: opened {} in {mode} mode", opts.device);
         }
-        println!("debugfs: use -R <command> to run a command, or type 'help' for interactive commands");
+        println!(
+            "debugfs: use -R <command> to run a command, or type 'help' for interactive commands"
+        );
         return 0;
     }
 
@@ -2629,38 +2739,50 @@ fn run_resize2fs(args: &[String]) -> i32 {
     println!("resize2fs 1.47.0 (OurOS)");
 
     if new_blocks == current_blocks {
-        println!("The filesystem is already {} ({}) blocks long. Nothing to do!",
-            current_blocks, current_blocks);
+        println!(
+            "The filesystem is already {} ({}) blocks long. Nothing to do!",
+            current_blocks, current_blocks
+        );
         return 0;
     }
 
     let min_blocks = current_blocks - sb.total_free_blocks();
     if new_blocks < min_blocks && !opts.force {
-        eprintln!("resize2fs: new size {} is smaller than minimum {} blocks",
-            new_blocks, min_blocks);
+        eprintln!(
+            "resize2fs: new size {} is smaller than minimum {} blocks",
+            new_blocks, min_blocks
+        );
         eprintln!("resize2fs: use -f to force");
         return 1;
     }
 
     if new_blocks > current_blocks {
-        println!("Resizing the filesystem on {} to {} ({}) blocks.",
-            opts.device, new_blocks, new_blocks);
+        println!(
+            "Resizing the filesystem on {} to {} ({}) blocks.",
+            opts.device, new_blocks, new_blocks
+        );
         if opts.progress {
             println!("(pass 1/1)");
             println!("Extending the inode table     \x1b[K done");
-            println!("The filesystem on {} is now {} ({}) blocks long.",
-                opts.device, new_blocks, new_blocks);
+            println!(
+                "The filesystem on {} is now {} ({}) blocks long.",
+                opts.device, new_blocks, new_blocks
+            );
         }
     } else {
-        println!("Resizing the filesystem on {} to {} ({}) blocks.",
-            opts.device, new_blocks, new_blocks);
+        println!(
+            "Resizing the filesystem on {} to {} ({}) blocks.",
+            opts.device, new_blocks, new_blocks
+        );
         if opts.progress {
             println!("(pass 1/4) Checking for unmovable inodes  done");
             println!("(pass 2/4) Moving blocks                  done");
             println!("(pass 3/4) Scanning inode table            done");
             println!("(pass 4/4) Updating block group descriptors done");
-            println!("The filesystem on {} is now {} ({}) blocks long.",
-                opts.device, new_blocks, new_blocks);
+            println!(
+                "The filesystem on {} is now {} ({}) blocks long.",
+                opts.device, new_blocks, new_blocks
+            );
         }
     }
 
@@ -2784,7 +2906,8 @@ fn run_e2fsck(args: &[String]) -> i32 {
     // Check if filesystem is clean
     if sb.s_state == 1 && !opts.force {
         if opts.verbosity != FsckVerbosity::Quiet {
-            println!("{}: clean, {}/{} files, {}/{} blocks",
+            println!(
+                "{}: clean, {}/{} files, {}/{} blocks",
                 opts.device,
                 sb.s_inodes_count - sb.s_free_inodes_count,
                 sb.s_inodes_count,
@@ -2841,24 +2964,27 @@ fn run_e2fsck(args: &[String]) -> i32 {
         println!("Pass 5: Checking group summary information");
     }
 
-    if opts.check_blocks {
-        if opts.verbosity != FsckVerbosity::Quiet {
-            println!("Checking bad block list...");
-        }
+    if opts.check_blocks && opts.verbosity != FsckVerbosity::Quiet {
+        println!("Checking bad block list...");
     }
 
     // Summary
     if opts.verbosity != FsckVerbosity::Quiet {
         println!();
-        println!("{}: {}/{} files ({:.1}% non-contiguous), {}/{} blocks",
+        println!(
+            "{}: {}/{} files ({:.1}% non-contiguous), {}/{} blocks",
             opts.device,
-            stats.inodes_used, stats.inodes_total,
+            stats.inodes_used,
+            stats.inodes_total,
             0.0f64,
-            stats.blocks_used, stats.blocks_total,
+            stats.blocks_used,
+            stats.blocks_total,
         );
         if stats.errors_found > 0 {
-            println!("  {} errors found, {} fixed",
-                stats.errors_found, stats.errors_fixed);
+            println!(
+                "  {} errors found, {} fixed",
+                stats.errors_found, stats.errors_fixed
+            );
         }
     }
 
@@ -2903,7 +3029,10 @@ fn run_e2label(args: &[String]) -> i32 {
 
     let new_label = &args[2];
     if new_label.len() > EXT2_LABEL_LEN {
-        eprintln!("e2label: label too long (max {} characters)", EXT2_LABEL_LEN);
+        eprintln!(
+            "e2label: label too long (max {} characters)",
+            EXT2_LABEL_LEN
+        );
         return 1;
     }
 
@@ -2995,8 +3124,10 @@ fn run_e2image(args: &[String]) -> i32 {
     let sb = &img.superblock;
 
     if opts.install {
-        println!("e2image: installing image from '{}' to '{}'",
-            opts.output, opts.device);
+        println!(
+            "e2image: installing image from '{}' to '{}'",
+            opts.output, opts.device
+        );
         println!("  Restoring superblock...");
         println!("  Restoring block group descriptors...");
         println!("  Restoring inode table...");
@@ -3010,8 +3141,10 @@ fn run_e2image(args: &[String]) -> i32 {
         ImageFormat::Qcow2 => "QCOW2",
     };
 
-    println!("e2image: saving {} format image of '{}' to '{}'",
-        format_name, opts.device, opts.output);
+    println!(
+        "e2image: saving {} format image of '{}' to '{}'",
+        format_name, opts.device, opts.output
+    );
 
     // Simulate writing metadata
     let metadata_blocks = 2 + // superblock + backup
@@ -3021,14 +3154,20 @@ fn run_e2image(args: &[String]) -> i32 {
 
     let metadata_bytes = u64::from(metadata_blocks) * u64::from(sb.block_size());
 
-    println!("  Copying {} metadata blocks ({})...",
-        metadata_blocks, format_bytes(metadata_bytes));
+    println!(
+        "  Copying {} metadata blocks ({})...",
+        metadata_blocks,
+        format_bytes(metadata_bytes)
+    );
 
     if opts.all_data {
         let data_blocks = sb.total_blocks() - sb.total_free_blocks();
         let data_bytes = data_blocks * u64::from(sb.block_size());
-        println!("  Copying {} data blocks ({})...",
-            data_blocks, format_bytes(data_bytes));
+        println!(
+            "  Copying {} data blocks ({})...",
+            data_blocks,
+            format_bytes(data_bytes)
+        );
     }
 
     if opts.scramble_dir {
@@ -3119,7 +3258,7 @@ fn simulate_file_extents(file_size: u64, block_size: u32) -> Vec<FragExtent> {
         return Vec::new();
     }
 
-    let total_blocks = (file_size + u64::from(block_size) - 1) / u64::from(block_size);
+    let total_blocks = file_size.div_ceil(u64::from(block_size));
     let mut extents = Vec::new();
     let mut logical = 0u64;
     let mut physical = 1000u64; // Starting physical block
@@ -3175,9 +3314,13 @@ fn run_filefrag(args: &[String]) -> i32 {
 
         if opts.verbose {
             println!("Filesystem type is: ext4");
-            println!("File size of {file} is {file_size} ({} blocks of {block_size} bytes)",
-                (file_size + u64::from(block_size) - 1) / u64::from(block_size));
-            println!(" ext:     logical_offset:        physical_offset: length:   expected: flags:");
+            println!(
+                "File size of {file} is {file_size} ({} blocks of {block_size} bytes)",
+                file_size.div_ceil(u64::from(block_size))
+            );
+            println!(
+                " ext:     logical_offset:        physical_offset: length:   expected: flags:"
+            );
             for (i, ext) in extents.iter().enumerate() {
                 let expected = if i > 0 {
                     let prev = &extents[i - 1];
@@ -3185,8 +3328,13 @@ fn run_filefrag(args: &[String]) -> i32 {
                 } else {
                     String::new()
                 };
-                let flags = if ext._flags & 0x1 != 0 { "last,eof" } else { "" };
-                println!("   {i}:  {:>12}..{:>12}: {:>12}..{:>12}: {:>6}: {:>9} {flags}",
+                let flags = if ext._flags & 0x1 != 0 {
+                    "last,eof"
+                } else {
+                    ""
+                };
+                println!(
+                    "   {i}:  {:>12}..{:>12}: {:>12}..{:>12}: {:>6}: {:>9} {flags}",
                     ext.logical_offset,
                     ext.logical_offset + ext.length - 1,
                     ext.physical_offset,
@@ -3198,8 +3346,10 @@ fn run_filefrag(args: &[String]) -> i32 {
         }
 
         let fragment_count = if extents.is_empty() { 0 } else { extents.len() };
-        println!("{file}: {fragment_count} extent{} found",
-            if fragment_count == 1 { "" } else { "s" });
+        println!(
+            "{file}: {fragment_count} extent{} found",
+            if fragment_count == 1 { "" } else { "s" }
+        );
 
         if fragment_count > 1 {
             exit_code = 1; // Fragmented file
@@ -3223,12 +3373,18 @@ fn simulate_file_size(file: &str) -> u64 {
 // Usage / version helpers
 // ---------------------------------------------------------------------------
 
-fn _print_version(personality: Personality) {
-    let name = _personality_name(personality);
+// These usage/version helpers are tested but not yet wired into the per-
+// personality `run_*` dispatch (each currently does its own ad-hoc arg
+// handling). Centralising `--help`/`--version` through them is a follow-up;
+// see todo.txt. #[allow(dead_code)] until then.
+#[allow(dead_code)]
+fn print_version(personality: Personality) {
+    let name = personality_name(personality);
     println!("{name} 1.47.0 (OurOS)");
 }
 
-fn _personality_name(p: Personality) -> &'static str {
+#[allow(dead_code)]
+fn personality_name(p: Personality) -> &'static str {
     match p {
         Personality::Mke2fs => "mke2fs",
         Personality::Tune2fs => "tune2fs",
@@ -3242,7 +3398,8 @@ fn _personality_name(p: Personality) -> &'static str {
     }
 }
 
-fn _print_usage(personality: Personality) {
+#[allow(dead_code)]
+fn print_usage(personality: Personality) {
     match personality {
         Personality::Mke2fs => {
             eprintln!("Usage: mke2fs [-t fs-type] [-b block-size] [-I inode-size] [-L label]");
@@ -4236,27 +4393,47 @@ mod tests {
 
     #[test]
     fn test_mke2fs_args_with_type() {
-        let args = vec!["mke2fs".into(), "-t".into(), "ext3".into(), "/dev/sda1".into()];
+        let args = vec![
+            "mke2fs".into(),
+            "-t".into(),
+            "ext3".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_mke2fs_args(&args).unwrap();
         assert_eq!(opts.fs_type, FsType::Ext3);
     }
 
     #[test]
     fn test_mke2fs_args_with_block_size() {
-        let args = vec!["mke2fs".into(), "-b".into(), "1024".into(), "/dev/sda1".into()];
+        let args = vec![
+            "mke2fs".into(),
+            "-b".into(),
+            "1024".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_mke2fs_args(&args).unwrap();
         assert_eq!(opts.block_size, 1024);
     }
 
     #[test]
     fn test_mke2fs_args_invalid_block_size() {
-        let args = vec!["mke2fs".into(), "-b".into(), "3000".into(), "/dev/sda1".into()];
+        let args = vec![
+            "mke2fs".into(),
+            "-b".into(),
+            "3000".into(),
+            "/dev/sda1".into(),
+        ];
         assert!(parse_mke2fs_args(&args).is_err());
     }
 
     #[test]
     fn test_mke2fs_args_with_label() {
-        let args = vec!["mke2fs".into(), "-L".into(), "mylabel".into(), "/dev/sda1".into()];
+        let args = vec![
+            "mke2fs".into(),
+            "-L".into(),
+            "mylabel".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_mke2fs_args(&args).unwrap();
         assert_eq!(opts.label, "mylabel");
     }
@@ -4291,7 +4468,12 @@ mod tests {
 
     #[test]
     fn test_mke2fs_args_reserved_percent() {
-        let args = vec!["mke2fs".into(), "-m".into(), "10".into(), "/dev/sda1".into()];
+        let args = vec![
+            "mke2fs".into(),
+            "-m".into(),
+            "10".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_mke2fs_args(&args).unwrap();
         assert!((opts.reserved_percent - 10.0).abs() < f64::EPSILON);
     }
@@ -4310,21 +4492,36 @@ mod tests {
 
     #[test]
     fn test_mke2fs_args_features() {
-        let args = vec!["mke2fs".into(), "-O".into(), "^has_journal".into(), "/dev/sda1".into()];
+        let args = vec![
+            "mke2fs".into(),
+            "-O".into(),
+            "^has_journal".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_mke2fs_args(&args).unwrap();
         assert!(opts.no_journal);
     }
 
     #[test]
     fn test_mke2fs_args_inode_size() {
-        let args = vec!["mke2fs".into(), "-I".into(), "128".into(), "/dev/sda1".into()];
+        let args = vec![
+            "mke2fs".into(),
+            "-I".into(),
+            "128".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_mke2fs_args(&args).unwrap();
         assert_eq!(opts.inode_size, 128);
     }
 
     #[test]
     fn test_mke2fs_args_invalid_inode_size() {
-        let args = vec!["mke2fs".into(), "-I".into(), "64".into(), "/dev/sda1".into()];
+        let args = vec![
+            "mke2fs".into(),
+            "-I".into(),
+            "64".into(),
+            "/dev/sda1".into(),
+        ];
         assert!(parse_mke2fs_args(&args).is_err());
     }
 
@@ -4334,49 +4531,84 @@ mod tests {
 
     #[test]
     fn test_tune2fs_args_label() {
-        let args = vec!["tune2fs".into(), "-L".into(), "newlabel".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-L".into(),
+            "newlabel".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_tune2fs_args(&args).unwrap();
         assert_eq!(opts.label, Some("newlabel".to_string()));
     }
 
     #[test]
     fn test_tune2fs_args_uuid() {
-        let args = vec!["tune2fs".into(), "-U".into(), "random".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-U".into(),
+            "random".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_tune2fs_args(&args).unwrap();
         assert_eq!(opts.uuid, Some("random".to_string()));
     }
 
     #[test]
     fn test_tune2fs_args_max_mount() {
-        let args = vec!["tune2fs".into(), "-c".into(), "30".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-c".into(),
+            "30".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_tune2fs_args(&args).unwrap();
         assert_eq!(opts.max_mount_count, Some(30));
     }
 
     #[test]
     fn test_tune2fs_args_interval_days() {
-        let args = vec!["tune2fs".into(), "-i".into(), "30d".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-i".into(),
+            "30d".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_tune2fs_args(&args).unwrap();
         assert_eq!(opts.check_interval, Some(30 * 86400));
     }
 
     #[test]
     fn test_tune2fs_args_interval_weeks() {
-        let args = vec!["tune2fs".into(), "-i".into(), "4w".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-i".into(),
+            "4w".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_tune2fs_args(&args).unwrap();
         assert_eq!(opts.check_interval, Some(4 * 604800));
     }
 
     #[test]
     fn test_tune2fs_args_interval_months() {
-        let args = vec!["tune2fs".into(), "-i".into(), "6m".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-i".into(),
+            "6m".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_tune2fs_args(&args).unwrap();
         assert_eq!(opts.check_interval, Some(6 * 2592000));
     }
 
     #[test]
     fn test_tune2fs_args_error_behavior() {
-        let args = vec!["tune2fs".into(), "-e".into(), "panic".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-e".into(),
+            "panic".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_tune2fs_args(&args).unwrap();
         assert_eq!(opts.error_behavior, Some(3));
     }
@@ -4403,7 +4635,12 @@ mod tests {
 
     #[test]
     fn test_tune2fs_args_remove_journal() {
-        let args = vec!["tune2fs".into(), "-O".into(), "^has_journal".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-O".into(),
+            "^has_journal".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_tune2fs_args(&args).unwrap();
         assert!(opts.remove_journal);
     }
@@ -4454,7 +4691,12 @@ mod tests {
 
     #[test]
     fn test_debugfs_args_command() {
-        let args = vec!["debugfs".into(), "-R".into(), "stats".into(), "/dev/sda1".into()];
+        let args = vec![
+            "debugfs".into(),
+            "-R".into(),
+            "stats".into(),
+            "/dev/sda1".into(),
+        ];
         let opts = parse_debugfs_args(&args).unwrap();
         assert_eq!(opts.commands.len(), 1);
         assert_eq!(opts.commands[0], "stats");
@@ -4603,28 +4845,48 @@ mod tests {
 
     #[test]
     fn test_e2image_args_raw() {
-        let args = vec!["e2image".into(), "-r".into(), "/dev/sda1".into(), "output.img".into()];
+        let args = vec![
+            "e2image".into(),
+            "-r".into(),
+            "/dev/sda1".into(),
+            "output.img".into(),
+        ];
         let opts = parse_e2image_args(&args).unwrap();
         assert_eq!(opts.format, ImageFormat::Raw);
     }
 
     #[test]
     fn test_e2image_args_qcow2() {
-        let args = vec!["e2image".into(), "-Q".into(), "/dev/sda1".into(), "output.qcow2".into()];
+        let args = vec![
+            "e2image".into(),
+            "-Q".into(),
+            "/dev/sda1".into(),
+            "output.qcow2".into(),
+        ];
         let opts = parse_e2image_args(&args).unwrap();
         assert_eq!(opts.format, ImageFormat::Qcow2);
     }
 
     #[test]
     fn test_e2image_args_all_data() {
-        let args = vec!["e2image".into(), "-a".into(), "/dev/sda1".into(), "output.img".into()];
+        let args = vec![
+            "e2image".into(),
+            "-a".into(),
+            "/dev/sda1".into(),
+            "output.img".into(),
+        ];
         let opts = parse_e2image_args(&args).unwrap();
         assert!(opts.all_data);
     }
 
     #[test]
     fn test_e2image_args_install() {
-        let args = vec!["e2image".into(), "-I".into(), "/dev/sda1".into(), "input.img".into()];
+        let args = vec![
+            "e2image".into(),
+            "-I".into(),
+            "/dev/sda1".into(),
+            "input.img".into(),
+        ];
         let opts = parse_e2image_args(&args).unwrap();
         assert!(opts.install);
     }
@@ -4656,7 +4918,12 @@ mod tests {
 
     #[test]
     fn test_filefrag_args_multiple_files() {
-        let args = vec!["filefrag".into(), "a.txt".into(), "b.txt".into(), "c.txt".into()];
+        let args = vec![
+            "filefrag".into(),
+            "a.txt".into(),
+            "b.txt".into(),
+            "c.txt".into(),
+        ];
         let opts = parse_filefrag_args(&args).unwrap();
         assert_eq!(opts.files.len(), 3);
     }
@@ -4714,7 +4981,13 @@ mod tests {
 
     #[test]
     fn test_run_mke2fs_with_label() {
-        let args = vec!["mke2fs".into(), "-q".into(), "-L".into(), "test".into(), "/dev/sda1".into()];
+        let args = vec![
+            "mke2fs".into(),
+            "-q".into(),
+            "-L".into(),
+            "test".into(),
+            "/dev/sda1".into(),
+        ];
         assert_eq!(run_mke2fs(&args), 0);
     }
 
@@ -4732,7 +5005,12 @@ mod tests {
 
     #[test]
     fn test_run_tune2fs_set_label() {
-        let args = vec!["tune2fs".into(), "-L".into(), "new".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-L".into(),
+            "new".into(),
+            "/dev/sda1".into(),
+        ];
         assert_eq!(run_tune2fs(&args), 0);
     }
 
@@ -4750,19 +5028,34 @@ mod tests {
 
     #[test]
     fn test_run_tune2fs_uuid_random() {
-        let args = vec!["tune2fs".into(), "-U".into(), "random".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-U".into(),
+            "random".into(),
+            "/dev/sda1".into(),
+        ];
         assert_eq!(run_tune2fs(&args), 0);
     }
 
     #[test]
     fn test_run_tune2fs_uuid_clear() {
-        let args = vec!["tune2fs".into(), "-U".into(), "clear".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-U".into(),
+            "clear".into(),
+            "/dev/sda1".into(),
+        ];
         assert_eq!(run_tune2fs(&args), 0);
     }
 
     #[test]
     fn test_run_tune2fs_uuid_time() {
-        let args = vec!["tune2fs".into(), "-U".into(), "time".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-U".into(),
+            "time".into(),
+            "/dev/sda1".into(),
+        ];
         assert_eq!(run_tune2fs(&args), 0);
     }
 
@@ -4786,7 +5079,12 @@ mod tests {
 
     #[test]
     fn test_run_debugfs_with_command() {
-        let args = vec!["debugfs".into(), "-R".into(), "stats".into(), "/dev/sda1".into()];
+        let args = vec![
+            "debugfs".into(),
+            "-R".into(),
+            "stats".into(),
+            "/dev/sda1".into(),
+        ];
         assert_eq!(run_debugfs(&args), 0);
     }
 
@@ -4863,13 +5161,23 @@ mod tests {
 
     #[test]
     fn test_run_e2image_install() {
-        let args = vec!["e2image".into(), "-I".into(), "/dev/sda1".into(), "input.img".into()];
+        let args = vec![
+            "e2image".into(),
+            "-I".into(),
+            "/dev/sda1".into(),
+            "input.img".into(),
+        ];
         assert_eq!(run_e2image(&args), 0);
     }
 
     #[test]
     fn test_run_e2image_qcow2() {
-        let args = vec!["e2image".into(), "-Q".into(), "/dev/sda1".into(), "out.qcow2".into()];
+        let args = vec![
+            "e2image".into(),
+            "-Q".into(),
+            "/dev/sda1".into(),
+            "out.qcow2".into(),
+        ];
         assert_eq!(run_e2image(&args), 0);
     }
 
@@ -4931,25 +5239,46 @@ mod tests {
 
     #[test]
     fn test_mke2fs_ext2_no_journal() {
-        let args = vec!["mke2fs".into(), "-q".into(), "-t".into(), "ext2".into(), "/dev/sda1".into()];
+        let args = vec![
+            "mke2fs".into(),
+            "-q".into(),
+            "-t".into(),
+            "ext2".into(),
+            "/dev/sda1".into(),
+        ];
         assert_eq!(run_mke2fs(&args), 0);
     }
 
     #[test]
     fn test_tune2fs_error_continue() {
-        let args = vec!["tune2fs".into(), "-e".into(), "continue".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-e".into(),
+            "continue".into(),
+            "/dev/sda1".into(),
+        ];
         assert_eq!(run_tune2fs(&args), 0);
     }
 
     #[test]
     fn test_tune2fs_error_remount_ro() {
-        let args = vec!["tune2fs".into(), "-e".into(), "remount-ro".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-e".into(),
+            "remount-ro".into(),
+            "/dev/sda1".into(),
+        ];
         assert_eq!(run_tune2fs(&args), 0);
     }
 
     #[test]
     fn test_tune2fs_reserved_percent() {
-        let args = vec!["tune2fs".into(), "-m".into(), "10".into(), "/dev/sda1".into()];
+        let args = vec![
+            "tune2fs".into(),
+            "-m".into(),
+            "10".into(),
+            "/dev/sda1".into(),
+        ];
         assert_eq!(run_tune2fs(&args), 0);
     }
 
@@ -5017,7 +5346,12 @@ mod tests {
 
     #[test]
     fn test_e2fsck_timing() {
-        let args = vec!["e2fsck".into(), "-f".into(), "-t".into(), "/dev/sda1".into()];
+        let args = vec![
+            "e2fsck".into(),
+            "-f".into(),
+            "-t".into(),
+            "/dev/sda1".into(),
+        ];
         let code = run_e2fsck(&args);
         assert!(code == 0 || code == 1);
     }

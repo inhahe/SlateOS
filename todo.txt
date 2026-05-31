@@ -1,3 +1,29 @@
+## BUG (noticed+FIXED 2026-05-31): e2fsprogs had a broken test build + 12
+##   pre-existing clippy errors.  userspace/e2fsprogs/src/main.rs:
+##     * TEST BUILD DIDN'T COMPILE (57+ errors): the same underscore-prefix
+##       anti-pattern as iptables, at scale.  Production code defined many items
+##       with a leading `_` to dodge dead-code warnings (main/dispatch never
+##       calls them), while the test module referenced the unprefixed names.
+##       Renamed them all to real names + #[allow(dead_code)] with documenting
+##       comments: EXT2_FT_REG_FILE/EXT2_FT_SYMLINK, FsType::name,
+##       Superblock::is_valid/fs_type, Inode::set_size/is_dir/is_symlink/
+##       is_deleted/file_type_char/permissions_str/format_flags,
+##       print_version/personality_name/print_usage, ExtentHeader(+new+is_valid)/
+##       ExtentIndex(+leaf_block), JournalSuperblock::is_valid,
+##       FilesystemImage.device, Dumpe2fsOptions.show_groups.  229/229 tests pass.
+##     * 12 pre-existing clippy errors (crate has its own #![deny(clippy::all)]
+##       and does NOT inherit the workspace's curated allows): auto-fixed 10,
+##       manually fixed 2 "manual checked division" (free_blocks/inodes_per_group
+##       `if group_count>0 {x/group_count} else {0}` -> checked_div().unwrap_or(0)).
+##     * LIMITATION (dispatch-wiring gap): substantial tested logic is NOT wired
+##       into the per-personality run_* dispatch / main — Superblock validation,
+##       the Inode helper accessors, the extent-tree structs (ExtentHeader/Index),
+##       --help/--version (print_usage/print_version) and dumpe2fs show_groups
+##       are implemented + unit-tested but unreachable from the CLI entry points.
+##       Reserved with #[allow(dead_code)]; wiring them into the dispatch path is
+##       a deferred improvement.
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): iptables had a broken test build + a real
 ##   production bug + 16 pre-existing clippy errors.  userspace/iptables/src/main.rs:
 ##     * TEST BUILD DIDN'T COMPILE: the CIDR/port membership methods were named

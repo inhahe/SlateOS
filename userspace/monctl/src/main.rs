@@ -26,46 +26,51 @@ use std::fs;
 use std::process;
 
 // ============================================================================
-// Syscall interface
+// Display-control interface
 // ============================================================================
+//
+// monctl drives the display through sysfs:
+//   * DPMS power state: /sys/class/drm/<connector>/dpms
+//   * Backlight:        /sys/class/backlight/<dev>/brightness (+ max_brightness)
+//
+// The previous version issued a "DRM ioctl" via syscall 850 — which on OurOS
+// is SYS_TCP_SET_NODELAY, NOT a display call. There is no DPMS or backlight
+// syscall in the OurOS ABI (the SYS_DRM_* family, 1000-1060, exposes only the
+// compositor's GEM/framebuffer/mode-info primitives). Calling 850 to control a
+// monitor was meaningless and potentially harmful, so the raw-syscall path has
+// been removed; sysfs is the sole control mechanism. DPMS *policy* (idle-timeout
+// enable/disable and timers) belongs to the display server, not the kernel —
+// see the monctl DESIGN GAP note in todo.txt.
 
-const SYS_DRM_IOCTL: u64 = 850;
+/// DPMS power states, as written to the sysfs `dpms` node.
+const DPMS_STATE_ON: &str = "On";
+const DPMS_STATE_STANDBY: &str = "Standby";
+const DPMS_STATE_SUSPEND: &str = "Suspend";
+const DPMS_STATE_OFF: &str = "Off";
 
-// DRM IOCTL sub-commands for display control.
-const DRM_DPMS_SET: u64 = 1;
-const DRM_BRIGHTNESS_SET: u64 = 2;
-#[allow(dead_code)] // Available for direct brightness query via ioctl.
-const DRM_BRIGHTNESS_GET: u64 = 3;
-const DRM_DPMS_ENABLE: u64 = 4;
-const DRM_DPMS_TIMERS: u64 = 5;
-
-// DPMS states.
-const DPMS_ON: u64 = 0;
-const DPMS_STANDBY: u64 = 1;
-const DPMS_SUSPEND: u64 = 2;
-const DPMS_OFF: u64 = 3;
-
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller ensures arguments are valid for the given syscall.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+/// Compute a brightness percentage (0-100) from raw current/max values.
+fn backlight_pct(current: u32, max: u32) -> u32 {
+    if max == 0 {
+        return 0;
     }
-    ret
+    // current * 100 / max, guarded against overflow on large raw values.
+    let pct = (u64::from(current) * 100) / u64::from(max);
+    (pct.min(100)) as u32
 }
 
-fn drm_ioctl(cmd: u64, arg1: u64, arg2: u64) -> i64 {
-    unsafe { syscall3(SYS_DRM_IOCTL, cmd, arg1, arg2) }
+/// Convert a desired percentage (0-100) into a raw backlight value for `max`.
+fn pct_to_raw(percent: u32, max: u32) -> u32 {
+    let percent = percent.min(100);
+    ((u64::from(max) * u64::from(percent)) / 100) as u32
+}
+
+/// Parse the refresh rate (Hz) from a mode string like "1920x1080@60Hz".
+fn parse_refresh_hz(resolution: &str) -> u32 {
+    resolution
+        .split('@')
+        .nth(1)
+        .and_then(|s| s.trim_end_matches("Hz").parse().ok())
+        .unwrap_or(60)
 }
 
 // ============================================================================
@@ -110,10 +115,7 @@ fn read_displays() -> Vec<DisplayInfo> {
                     .unwrap_or("unknown")
                     .to_string();
 
-                let refresh_hz = resolution.split('@')
-                    .nth(1)
-                    .and_then(|s| s.trim_end_matches("Hz").parse().ok())
-                    .unwrap_or(60);
+                let refresh_hz = parse_refresh_hz(&resolution);
 
                 let dpms = read_file(&format!("{base}/dpms"))
                     .unwrap_or_else(|| "On".to_string());
@@ -134,20 +136,20 @@ fn read_displays() -> Vec<DisplayInfo> {
     }
 
     // Fallback: check /proc/drm/displays.
-    if displays.is_empty() {
-        if let Some(content) = read_file("/proc/drm/displays") {
-            for line in content.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 3 {
-                    displays.push(DisplayInfo {
-                        name: parts[0].to_string(),
-                        connected: parts[1] == "connected",
-                        resolution: parts.get(2).unwrap_or(&"?").to_string(),
-                        refresh_hz: parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(60),
-                        brightness: read_backlight_percent(),
-                        dpms_state: "On".to_string(),
-                    });
-                }
+    if displays.is_empty()
+        && let Some(content) = read_file("/proc/drm/displays")
+    {
+        for line in content.lines() {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                displays.push(DisplayInfo {
+                    name: parts[0].to_string(),
+                    connected: parts[1] == "connected",
+                    resolution: parts.get(2).unwrap_or(&"?").to_string(),
+                    refresh_hz: parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(60),
+                    brightness: read_backlight_percent(),
+                    dpms_state: "On".to_string(),
+                });
             }
         }
     }
@@ -169,7 +171,7 @@ fn read_backlight_percent() -> u32 {
                     .unwrap_or(100);
 
                 if max > 0 {
-                    return (current * 100) / max;
+                    return backlight_pct(current, max);
                 }
             }
         }
@@ -181,7 +183,7 @@ fn read_backlight_percent() -> u32 {
 fn set_backlight_percent(percent: u32) -> Result<(), String> {
     let percent = percent.min(100);
 
-    // Try sysfs first.
+    // sysfs is the only backlight-control interface on OurOS.
     if let Ok(entries) = fs::read_dir("/sys/class/backlight") {
         for entry in entries.flatten() {
             if let Some(name) = entry.file_name().to_str() {
@@ -190,7 +192,7 @@ fn set_backlight_percent(percent: u32) -> Result<(), String> {
                     .and_then(|s| s.parse::<u32>().ok())
                     .unwrap_or(100);
 
-                let value = (max * percent) / 100;
+                let value = pct_to_raw(percent, max);
                 if fs::write(format!("{base}/brightness"), value.to_string()).is_ok() {
                     return Ok(());
                 }
@@ -198,78 +200,56 @@ fn set_backlight_percent(percent: u32) -> Result<(), String> {
         }
     }
 
-    // Fall back to DRM ioctl.
-    let ret = drm_ioctl(DRM_BRIGHTNESS_SET, percent as u64, 0);
-    if ret < 0 {
-        Err(format!("failed to set brightness: error {ret}"))
-    } else {
-        Ok(())
-    }
+    Err(
+        "no controllable backlight found (is /sys/class/backlight present and writable?)"
+            .to_string(),
+    )
 }
 
 // ============================================================================
 // Commands
 // ============================================================================
 
+/// Apply a DPMS power state via sysfs, exiting with an error if no display
+/// connector accepts the write.
+fn apply_dpms(state: &str, action: &str) {
+    if !write_dpms_sysfs(state) {
+        eprintln!("Failed to {action}: no DPMS-capable display found");
+        eprintln!("(is /sys/class/drm present and writable?)");
+        process::exit(1);
+    }
+}
+
 fn cmd_off() {
     println!("Turning monitor off...");
-    let ret = drm_ioctl(DRM_DPMS_SET, DPMS_OFF, 0);
-    if ret < 0 {
-        // Try writing to sysfs as fallback.
-        let wrote = write_dpms_sysfs("Off");
-        if !wrote {
-            eprintln!("Failed to turn off monitor (error {ret})");
-            eprintln!("Try running with appropriate permissions.");
-            process::exit(1);
-        }
-    }
+    apply_dpms(DPMS_STATE_OFF, "turn off monitor");
 }
 
 fn cmd_on() {
     println!("Turning monitor on...");
-    let ret = drm_ioctl(DRM_DPMS_SET, DPMS_ON, 0);
-    if ret < 0 {
-        let wrote = write_dpms_sysfs("On");
-        if !wrote {
-            eprintln!("Failed to wake monitor (error {ret})");
-            process::exit(1);
-        }
-    }
+    apply_dpms(DPMS_STATE_ON, "wake monitor");
 }
 
 fn cmd_standby() {
     println!("Setting monitor to standby...");
-    let ret = drm_ioctl(DRM_DPMS_SET, DPMS_STANDBY, 0);
-    if ret < 0 {
-        let wrote = write_dpms_sysfs("Standby");
-        if !wrote {
-            eprintln!("Failed (error {ret})");
-            process::exit(1);
-        }
-    }
+    apply_dpms(DPMS_STATE_STANDBY, "set standby");
 }
 
 fn cmd_suspend() {
     println!("Setting monitor to suspend...");
-    let ret = drm_ioctl(DRM_DPMS_SET, DPMS_SUSPEND, 0);
-    if ret < 0 {
-        let wrote = write_dpms_sysfs("Suspend");
-        if !wrote {
-            eprintln!("Failed (error {ret})");
-            process::exit(1);
-        }
-    }
+    apply_dpms(DPMS_STATE_SUSPEND, "set suspend");
 }
 
 fn write_dpms_sysfs(state: &str) -> bool {
     if let Ok(entries) = fs::read_dir("/sys/class/drm") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if name.starts_with("card") && name.contains('-') {
-                    let path = format!("/sys/class/drm/{name}/dpms");
-                    if fs::write(&path, state).is_ok() {
-                        return true;
-                    }
+            if let Some(name) = entry.file_name().to_str()
+                && name.starts_with("card")
+                && name.contains('-')
+            {
+                let path = format!("/sys/class/drm/{name}/dpms");
+                if fs::write(&path, state).is_ok() {
+                    return true;
                 }
             }
         }
@@ -368,43 +348,27 @@ fn cmd_dpms(args: &[String]) {
         return;
     }
 
+    // DPMS *policy* — whether the display server blanks the screen after an
+    // idle timeout, and the standby/suspend/off thresholds — is owned by the
+    // display server (compositor), not the kernel. OurOS exposes no syscall or
+    // sysfs node for it, so these subcommands report that clearly rather than
+    // pretending to succeed. Immediate power-state changes (on/off/standby/
+    // suspend) are available as the top-level commands and go through sysfs.
     match args[0].as_str() {
-        "on" | "enable" => {
-            let ret = drm_ioctl(DRM_DPMS_ENABLE, 1, 0);
-            if ret < 0 {
-                eprintln!("Failed to enable DPMS (error {ret})");
-            } else {
-                println!("DPMS enabled");
-            }
-        }
-        "off" | "disable" => {
-            let ret = drm_ioctl(DRM_DPMS_ENABLE, 0, 0);
-            if ret < 0 {
-                eprintln!("Failed to disable DPMS (error {ret})");
-            } else {
-                println!("DPMS disabled");
-            }
-        }
-        "timers" => {
-            if args.len() < 4 {
-                eprintln!("usage: monctl dpms timers <standby_sec> <suspend_sec> <off_sec>");
-                process::exit(1);
-            }
-            let standby: u64 = args[1].parse().unwrap_or(600);
-            let suspend: u64 = args[2].parse().unwrap_or(900);
-            let off: u64 = args[3].parse().unwrap_or(1200);
-            // Pack timers: standby in bits 0-15, suspend 16-31, off 32-47.
-            let packed = (standby & 0xFFFF) | ((suspend & 0xFFFF) << 16) | ((off & 0xFFFF) << 32);
-            let ret = drm_ioctl(DRM_DPMS_TIMERS, packed, 0);
-            if ret < 0 {
-                eprintln!("Failed to set DPMS timers (error {ret})");
-            } else {
-                println!("DPMS timers: standby={standby}s, suspend={suspend}s, off={off}s");
-            }
+        "on" | "enable" | "off" | "disable" | "timers" => {
+            eprintln!(
+                "monctl: DPMS idle-timeout policy is managed by the display server, \
+                 not the kernel; there is no monctl interface for it yet."
+            );
+            eprintln!(
+                "For an immediate power-state change use: monctl off | on | standby | suspend"
+            );
+            process::exit(1);
         }
         other => {
             eprintln!("unknown DPMS command: {other}");
-            eprintln!("Options: on, off, timers");
+            eprintln!("Options: on, off, timers (all managed by the display server)");
+            process::exit(1);
         }
     }
 }
@@ -463,5 +427,56 @@ fn main() {
             eprintln!("Run 'monctl help' for usage.");
             process::exit(1);
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn backlight_pct_basic() {
+        assert_eq!(backlight_pct(0, 100), 0);
+        assert_eq!(backlight_pct(50, 100), 50);
+        assert_eq!(backlight_pct(100, 100), 100);
+        // Non-percent max ranges scale correctly.
+        assert_eq!(backlight_pct(120, 240), 50);
+    }
+
+    #[test]
+    fn backlight_pct_zero_max_is_safe() {
+        assert_eq!(backlight_pct(50, 0), 0);
+    }
+
+    #[test]
+    fn backlight_pct_no_overflow_on_large_values() {
+        // current near u32::MAX must not overflow the intermediate product.
+        assert_eq!(backlight_pct(u32::MAX, u32::MAX), 100);
+    }
+
+    #[test]
+    fn pct_to_raw_basic() {
+        assert_eq!(pct_to_raw(0, 255), 0);
+        assert_eq!(pct_to_raw(100, 255), 255);
+        assert_eq!(pct_to_raw(50, 240), 120);
+    }
+
+    #[test]
+    fn pct_to_raw_clamps_over_100() {
+        assert_eq!(pct_to_raw(150, 255), 255);
+    }
+
+    #[test]
+    fn parse_refresh_hz_variants() {
+        assert_eq!(parse_refresh_hz("1920x1080@60Hz"), 60);
+        assert_eq!(parse_refresh_hz("3840x2160@144Hz"), 144);
+        // No @ part -> default 60.
+        assert_eq!(parse_refresh_hz("1280x720"), 60);
+        // Malformed refresh -> default.
+        assert_eq!(parse_refresh_hz("800x600@bogusHz"), 60);
     }
 }

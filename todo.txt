@@ -230,7 +230,12 @@
 ##       fixable now, NOT a design gap.  FIXED — see PROGRESS below.
 ##     chroot (CHROOT=61=SYSCTL_SET CHDIR=49=DMA_DETACH SETUID=105 SETGID=106
 ##       SETGROUPS=116 — none exist as named; needs proper process-cred ABI)
-##     monctl (DRM_IOCTL=850=TCP_SET_NODELAY — no DRM ioctl syscall)
+##     [x] monctl (DRM_IOCTL=850=TCP_SET_NODELAY — no DRM ioctl syscall) —
+##       the SYS_DRM_* family (1000-1060) exists but is compositor primitives
+##       (GEM/framebuffer/mode-info), NOT DPMS/backlight; 850 is TCP_SET_NODELAY.
+##       FIXED by removing the harmful raw-syscall path and using sysfs (the
+##       interface monctl already used for reads).  See PROGRESS below; DPMS
+##       idle-timeout policy remains a display-server DESIGN GAP.
 ##   MINOR WRONG (channel close off by one):
 ##     [x] logind, powerctl, service (CHANNEL_CLOSE=203=CHANNEL_TRY_RECV —
 ##       should be 204; CHANNEL_OPEN=200 maps to CHANNEL_CREATE which is fine).
@@ -444,6 +449,40 @@
 ##           human/SI/block formatting, usage %, pseudo-fs detection, display
 ##           filtering, best-mount-prefix selection, JSON escaping).  Clippy-
 ##           clean on host and ouros; build-ouros clean.
+##
+##   [x] monctl — the old code issued a "DRM ioctl" via syscall 850, which on
+##           OurOS is SYS_TCP_SET_NODELAY (not a display call).  The SYS_DRM_*
+##           family (1000-1060) DOES exist but only exposes compositor
+##           primitives (GEM buffers, framebuffers, page-flip, and read-only
+##           mode/connector info) — there is NO DPMS or backlight syscall.  So
+##           every drm_ioctl(DPMS_SET/BRIGHTNESS_SET/DPMS_ENABLE/DPMS_TIMERS)
+##           dialed TCP_SET_NODELAY with garbage args.  PROPER FIX (not a
+##           band-aid): removed the raw-syscall path entirely (SYS_DRM_IOCTL,
+##           syscall3, drm_ioctl, the DRM_* subcommand + DPMS_* state consts)
+##           and made sysfs the sole control mechanism — the same interface
+##           monctl already used for status/list/resolution/brightness reads:
+##             * off/on/standby/suspend -> write /sys/class/drm/<conn>/dpms;
+##               clear error + exit 1 if no connector accepts the write.
+##             * brightness set -> write /sys/class/backlight/<dev>/brightness;
+##               clear error if no controllable backlight.
+##             * dpms enable/disable/timers (idle-timeout POLICY) -> reported as
+##               unsupported: that policy belongs to the display server, not the
+##               kernel (see DESIGN GAP below).  Immediate power changes stay as
+##               the top-level off/on/standby/suspend commands.
+##           Extracted backlight_pct / pct_to_raw / parse_refresh_hz as pure
+##           helpers (overflow-safe via u64 intermediates) + a 6-test module.
+##           Clippy-clean on host and ouros (fixed two collapsible_if via
+##           let-chains); build-ouros clean.
+##
+##  DESIGN GAP — no DPMS idle-timeout policy interface (monctl dpms on/off/timers):
+##   Whether the screen blanks after N seconds idle, and the standby/suspend/off
+##   thresholds, is display-server (compositor) policy — exactly as X11's DPMS
+##   timers live in the X server, not the kernel.  OurOS exposes no syscall or
+##   sysfs node for it.  Immediate DPMS power-state changes DO work via
+##   /sys/class/drm/<conn>/dpms (monctl off/on/standby/suspend).  CORRECT FUTURE
+##   DIRECTION: when the compositor exposes a control channel, route "monctl dpms
+##   timers ..." to it over IPC (set the idle-blank policy in the display server).
+##   TRIGGER: when the compositor's display-power control IPC protocol lands.
 ##
 ##  DESIGN GAP — no kernel-module loading (insmod/rmmod/modprobe load+remove):
 ##   OurOS is a microkernel.  There are no loadable kernel modules: device

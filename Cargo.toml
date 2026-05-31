@@ -176,6 +176,19 @@ needless_pass_by_value = "allow"
 # only.
 manual_checked_ops = "allow"
 
+# decimal_bitwise_operands: ~3000+ hits.  Clippy 1.95 lint demanding
+# binary/hex/octal literals for any literal used in a bitwise operation,
+# e.g. `AUDIT_ARCH_ARM = 40 | AUDIT_ARCH_LE`.  Our syscall/ABI constant
+# tables (linux_audit_arch_types.rs, linux_efi.rs, the linux_* families)
+# mirror the upstream Linux kernel headers *verbatim* so they can be
+# diffed against the source of truth: the `40` there IS the canonical
+# `EM_ARM` machine number from elf.h, and rewriting it as `0x28` would
+# obscure that correspondence rather than improve readability.  Same
+# rationale as `unreadable_literal`/`similar_names` above — the literals
+# mirror an external spec and should not be reformatted to satisfy a
+# cosmetic lint.  Pure style; never caused a bug.
+decimal_bitwise_operands = "allow"
+
 # declare_interior_mutable_const: ~70 hits.  All flag the canonical
 # array-init idiom:
 #     static T: [AtomicU64; N] = { const Z: AtomicU64 = AtomicU64::new(0); [Z; N] };

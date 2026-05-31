@@ -1,6 +1,6 @@
-//! OurOS Telnet Client
+//! `OurOS` Telnet Client
 //!
-//! An RFC 854 telnet client for OurOS. Connects to a remote host on the
+//! An RFC 854 telnet client for `OurOS`. Connects to a remote host on the
 //! default telnet port (23) or a specified port, negotiates telnet options,
 //! and provides an interactive terminal session.
 //!
@@ -43,8 +43,8 @@
 use std::env;
 use std::process;
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 use std::thread;
 use std::time::{Duration, Instant};
@@ -53,14 +53,18 @@ use std::time::{Duration, Instant};
 // Syscall numbers (from kernel/src/syscall/net syscall table)
 // ============================================================================
 
-const SYS_READ: u64 = 0;
-const SYS_WRITE: u64 = 1;
+// OurOS native console syscalls (kernel syscall/number.rs).  There is no
+// Linux-style fd read/write or ioctl: 0 and 1 are SYS_YIELD/SYS_EXIT here, so
+// the previous SYS_READ=0/SYS_WRITE=1 actually yielded and *terminated* the
+// process.  Terminal I/O goes through the bootstrap console syscalls instead.
+const SYS_CONSOLE_WRITE: u64 = 100;
+const SYS_CONSOLE_READ_CHAR: u64 = 101;
+const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
 const SYS_TCP_CONNECT: u64 = 800;
-const SYS_TCP_SEND: u64 = 802;
-const SYS_TCP_RECV: u64 = 803;
-const SYS_TCP_CLOSE: u64 = 804;
+const SYS_TCP_SEND: u64 = 801;
+const SYS_TCP_RECV: u64 = 802;
+const SYS_TCP_CLOSE: u64 = 803;
 const SYS_DNS_RESOLVE: u64 = 820;
-const SYS_IOCTL: u64 = 16;
 
 // ============================================================================
 // Syscall wrappers
@@ -136,11 +140,7 @@ fn tcp_connect(ip: u32, port: u16, timeout_ms: u64) -> Result<u64, i64> {
     // arg3 encodes timeout in milliseconds; 0 = use kernel default.
     // SAFETY: SYS_TCP_CONNECT takes (ip, port, timeout_ms), all scalars.
     let ret = unsafe { syscall3(SYS_TCP_CONNECT, u64::from(ip), u64::from(port), timeout_ms) };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        Ok(ret as u64)
-    }
+    if ret < 0 { Err(ret) } else { Ok(ret as u64) }
 }
 
 /// Send `data` on a TCP connection. Returns bytes sent.
@@ -154,11 +154,7 @@ fn tcp_send(handle: u64, data: &[u8]) -> Result<usize, i64> {
             data.len() as u64,
         )
     };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        Ok(ret as usize)
-    }
+    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
 }
 
 /// Send all bytes in `data`, looping until fully transmitted.
@@ -187,11 +183,7 @@ fn tcp_recv(handle: u64, buf: &mut [u8]) -> Result<usize, i64> {
             buf.len() as u64,
         )
     };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        Ok(ret as usize)
-    }
+    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
 }
 
 /// Non-blocking receive. Returns `Err(-11)` (EAGAIN/EWOULDBLOCK) if no data.
@@ -223,11 +215,7 @@ fn tcp_recv_nonblock(handle: u64, buf: &mut [u8]) -> Result<usize, i64> {
         }
         r
     };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        Ok(ret as usize)
-    }
+    if ret < 0 { Err(ret) } else { Ok(ret as usize) }
 }
 
 /// Close a TCP connection.
@@ -238,124 +226,126 @@ fn tcp_close(handle: u64) {
 
 /// Resolve a hostname to a u32 IPv4 address (network byte order).
 fn dns_resolve(hostname: &str) -> Result<u32, i64> {
-    let mut ip: u32 = 0;
-    // SAFETY: hostname slice is valid; ip is a stack u32 with sufficient lifetime.
+    // The kernel writes the four address octets [a, b, c, d] (MSB first) into
+    // this buffer.  Reading them back as a native-endian u32 on little-endian
+    // x86_64 would reverse the address, so reassemble explicitly with
+    // from_be_bytes (matching sys_tcp_connect's Ipv4Addr::from_u32 == to_be_bytes).
+    let mut octets = [0u8; 4];
+    // SAFETY: hostname slice is valid; octets is a 4-byte stack buffer.
     let ret = unsafe {
         syscall3(
             SYS_DNS_RESOLVE,
             hostname.as_ptr() as u64,
             hostname.len() as u64,
-            &raw mut ip as u64,
+            octets.as_mut_ptr() as u64,
         )
     };
     if ret < 0 {
         Err(ret)
     } else {
-        Ok(ip)
+        Ok(u32::from_be_bytes(octets))
     }
 }
 
 // ============================================================================
-// IOCTL: terminal window size
+// Terminal window size
 // ============================================================================
 
-/// TIOCGWINSZ ioctl request number.
-const TIOCGWINSZ: u64 = 0x5413;
+/// Rows of the `OurOS` bootstrap framebuffer console.
+const CONSOLE_ROWS: u16 = 25;
+/// Columns of the `OurOS` bootstrap framebuffer console.
+const CONSOLE_COLS: u16 = 80;
 
-/// Terminal window size structure as returned by TIOCGWINSZ.
-#[repr(C)]
-struct WinSize {
-    rows: u16,
-    cols: u16,
-    xpixel: u16,
-    ypixel: u16,
-}
-
-/// Query the terminal dimensions. Returns (rows, cols) or a default of (24, 80).
+/// Return the terminal dimensions as (rows, cols).
+///
+/// `OurOS` has no `ioctl`/`TIOCGWINSZ` syscall (and no resizable terminal yet):
+/// the bootstrap console is a fixed-size framebuffer grid.  Report its actual
+/// dimensions so NAWS negotiation advertises a sensible size.
 fn get_terminal_size() -> (u16, u16) {
-    let mut ws = WinSize {
-        rows: 24,
-        cols: 80,
-        xpixel: 0,
-        ypixel: 0,
-    };
-    // SAFETY: fd=1 (stdout) is a valid terminal fd. ws is a stack struct with
-    // the correct layout for TIOCGWINSZ. The kernel writes rows/cols into it.
-    let ret = unsafe {
-        syscall3(
-            SYS_IOCTL,
-            1, // stdout fd
-            TIOCGWINSZ,
-            &raw mut ws as u64,
-        )
-    };
-    if ret == 0 && ws.rows > 0 && ws.cols > 0 {
-        (ws.rows, ws.cols)
-    } else {
-        (24, 80)
-    }
+    (CONSOLE_ROWS, CONSOLE_COLS)
 }
 
 // ============================================================================
 // Low-level I/O: raw stdin read / stdout write
 // ============================================================================
 
-/// Read up to `buf.len()` bytes from stdin (fd 0). Returns bytes read or 0 on EOF.
+/// Read available keyboard bytes into `buf`.
+///
+/// Blocks until at least one byte is available (matching a typical blocking
+/// stdin read), then drains any further immediately-available bytes without
+/// blocking.  Returns the number of bytes read.
+///
+/// The `OurOS` bootstrap console keyboard never reports EOF, so for a non-empty
+/// `buf` this only returns 0 on a syscall error.  Because the first read
+/// blocks, a thread parked here cannot observe a shutdown flag until the next
+/// keypress — a known limitation of the fixed bootstrap console.
 fn stdin_read(buf: &mut [u8]) -> usize {
-    // SAFETY: SYS_READ with fd=0 (stdin). buf is a valid mutable slice.
-    let ret = unsafe {
-        syscall3(
-            SYS_READ,
-            0,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret <= 0 {
-        0
-    } else {
-        ret as usize
+    if buf.is_empty() {
+        return 0;
+    }
+    let mut ch: u8 = 0;
+    // Block for the first byte.
+    // SAFETY: SYS_CONSOLE_READ_CHAR writes one byte to the provided pointer.
+    let ret = unsafe { syscall1(SYS_CONSOLE_READ_CHAR, &raw mut ch as u64) };
+    if ret < 0 {
+        return 0;
+    }
+    let mut n = 0usize;
+    if let Some(slot) = buf.get_mut(n) {
+        *slot = ch;
+        n = n.saturating_add(1);
+    }
+    // Drain any further buffered bytes without blocking.
+    while n < buf.len() {
+        // SAFETY: SYS_CONSOLE_TRY_READ_CHAR writes one byte or returns WouldBlock.
+        let r = unsafe { syscall1(SYS_CONSOLE_TRY_READ_CHAR, &raw mut ch as u64) };
+        if r < 0 {
+            break; // WouldBlock: no more buffered input.
+        }
+        if let Some(slot) = buf.get_mut(n) {
+            *slot = ch;
+            n = n.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    n
+}
+
+/// Write all bytes of `data` to the console.
+fn console_write_all(data: &[u8]) {
+    let mut offset = 0usize;
+    while offset < data.len() {
+        let Some(chunk) = data.get(offset..) else {
+            break;
+        };
+        // SAFETY: SYS_CONSOLE_WRITE takes (ptr, len) and writes to the console.
+        let ret = unsafe {
+            syscall3(
+                SYS_CONSOLE_WRITE,
+                chunk.as_ptr() as u64,
+                chunk.len() as u64,
+                0,
+            )
+        };
+        if ret <= 0 {
+            break;
+        }
+        offset = offset.saturating_add(ret as usize);
     }
 }
 
-/// Write all bytes of `data` to stdout (fd 1).
+/// Write all bytes of `data` to the console (stdout).
 fn stdout_write(data: &[u8]) {
-    let mut offset = 0usize;
-    while offset < data.len() {
-        // SAFETY: SYS_WRITE with fd=1 (stdout). slice is valid.
-        let ret = unsafe {
-            syscall3(
-                SYS_WRITE,
-                1,
-                data[offset..].as_ptr() as u64,
-                (data.len() - offset) as u64,
-            )
-        };
-        if ret <= 0 {
-            break;
-        }
-        offset = offset.saturating_add(ret as usize);
-    }
+    console_write_all(data);
 }
 
-/// Write all bytes of `data` to stderr (fd 2).
+/// Write all bytes of `data` to the console (stderr).
+///
+/// `OurOS`'s bootstrap console has no separate stderr stream, so this writes to
+/// the same console as `stdout_write`.
 fn stderr_write(data: &[u8]) {
-    let mut offset = 0usize;
-    while offset < data.len() {
-        // SAFETY: SYS_WRITE with fd=2 (stderr). slice is valid.
-        let ret = unsafe {
-            syscall3(
-                SYS_WRITE,
-                2,
-                data[offset..].as_ptr() as u64,
-                (data.len() - offset) as u64,
-            )
-        };
-        if ret <= 0 {
-            break;
-        }
-        offset = offset.saturating_add(ret as usize);
-    }
+    console_write_all(data);
 }
 
 // ============================================================================
@@ -363,6 +353,8 @@ fn stderr_write(data: &[u8]) {
 // ============================================================================
 
 /// Parse a dotted-decimal IPv4 string into a network-byte-order u32.
+// a/b/c/d are the conventional names for the four IPv4 octets.
+#[allow(clippy::many_single_char_names)]
 fn parse_ipv4(s: &str) -> Option<u32> {
     let mut parts = s.splitn(5, '.');
     let a: u8 = parts.next()?.parse().ok()?;
@@ -390,7 +382,7 @@ fn resolve_host(hostname: &str) -> Result<u32, String> {
     if hostname == "localhost" {
         return Ok(0x7F00_0001);
     }
-    dns_resolve(hostname).map_err(|e| format!("cannot resolve '{}': error {}", hostname, e))
+    dns_resolve(hostname).map_err(|e| format!("cannot resolve '{hostname}': error {e}"))
 }
 
 // ============================================================================
@@ -689,13 +681,12 @@ fn handle_option_negotiation(session: &mut Session, cmd: u8, opt: u8, net_out: &
                 }
             }
         }
-        WONT => {
+        WONT
             // Server refuses or disables opt on its side. Acknowledge.
-            if session.opts.remote[uopt] != OptState::No {
+            if session.opts.remote[uopt] != OptState::No => {
                 session.opts.remote[uopt] = OptState::No;
                 iac_dont(net_out, opt);
             }
-        }
         DO => {
             // Server requests we enable opt on our side.
             match opt {
@@ -726,13 +717,12 @@ fn handle_option_negotiation(session: &mut Session, cmd: u8, opt: u8, net_out: &
                 }
             }
         }
-        DONT => {
+        DONT
             // Server wants us to stop the option. Acknowledge.
-            if session.opts.local[uopt] != OptState::No {
+            if session.opts.local[uopt] != OptState::No => {
                 session.opts.local[uopt] = OptState::No;
                 iac_wont(net_out, opt);
             }
-        }
         _ => {
             // Should not reach here — Opt() only stores WILL/WONT/DO/DONT.
         }
@@ -745,16 +735,15 @@ fn handle_subnegotiation(_session: &mut Session, payload: &[u8], net_out: &mut V
         return;
     }
     match payload[0] {
-        OPT_TTYPE => {
+        OPT_TTYPE
             // Expect: TTYPE SEND — server is asking for our terminal type.
-            if payload.get(1) == Some(&TTYPE_SEND) {
+            if payload.get(1) == Some(&TTYPE_SEND) => {
                 // Reply: IAC SB TTYPE IS "xterm-256color" IAC SE
                 let term = b"xterm-256color";
                 net_out.extend_from_slice(&[IAC, SB, OPT_TTYPE, TTYPE_IS]);
                 net_out.extend_from_slice(term);
                 net_out.extend_from_slice(&[IAC, SE]);
             }
-        }
         OPT_NAWS => {
             // Server requesting NAWS again — resend.
             append_naws(net_out);
@@ -867,7 +856,11 @@ fn print_status(session: &Session) {
             } else {
                 "local"
             };
-            let msg2 = format!("Echo: {}. Escape character: ^{}.\r\n", echo, (session.escape_char + b'@') as char);
+            let msg2 = format!(
+                "Echo: {}. Escape character: ^{}.\r\n",
+                echo,
+                (session.escape_char + b'@') as char
+            );
             stdout_write(msg2.as_bytes());
         }
         ConnState::Disconnected | ConnState::Closed => {
@@ -955,7 +948,7 @@ fn run_escape_mode(session: &mut Session) -> bool {
         }
         EscapeCmd::Unknown(ref s) => {
             if !s.is_empty() {
-                let msg = format!("?Invalid command '{}'\r\n", s);
+                let msg = format!("?Invalid command '{s}'\r\n");
                 stdout_write(msg.as_bytes());
             }
         }
@@ -995,6 +988,11 @@ fn encode_data(input: &[u8], out: &mut Vec<u8>) {
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
 /// Connect and run the interactive telnet session.
+// This is the linear session driver (resolve, connect, spawn the stdin
+// thread, run the select-style poll loop, then tear down).  The steps share
+// a lot of tightly-coupled local state, so splitting it would scatter that
+// state across helpers and hurt readability more than the length does.
+#[allow(clippy::too_many_lines)]
 fn run_session(session: &mut Session, connect_timeout_ms: u64) -> Result<(), String> {
     // Resolve host.
     let ip = resolve_host(&session.remote_host)?;
@@ -1029,7 +1027,7 @@ fn run_session(session: &mut Session, connect_timeout_ms: u64) -> Result<(), Str
 
     // Send initial option negotiation.
     if let Err(e) = send_initial_options(handle) {
-        let err_msg = format!("telnet: warning: could not send options (error {})\r\n", e);
+        let err_msg = format!("telnet: warning: could not send options (error {e})\r\n");
         stderr_write(err_msg.as_bytes());
     }
 
@@ -1087,10 +1085,10 @@ fn run_session(session: &mut Session, connect_timeout_ms: u64) -> Result<(), Str
                 send_data.push(b);
             }
 
-            if !send_data.is_empty() {
-                if let Ok(mut guard) = stdin_buf_tx.lock() {
-                    guard.extend_from_slice(&send_data);
-                }
+            if !send_data.is_empty()
+                && let Ok(mut guard) = stdin_buf_tx.lock()
+            {
+                guard.extend_from_slice(&send_data);
             }
 
             if saw_escape {
@@ -1116,16 +1114,14 @@ fn run_session(session: &mut Session, connect_timeout_ms: u64) -> Result<(), Str
         // Drain stdin data and send to server.
         {
             let mut encoded = Vec::new();
-            if let Ok(mut guard) = stdin_buf.lock() {
-                if !guard.is_empty() {
-                    encode_data(&guard, &mut encoded);
-                    guard.clear();
-                }
+            if let Ok(mut guard) = stdin_buf.lock()
+                && !guard.is_empty()
+            {
+                encode_data(&guard, &mut encoded);
+                guard.clear();
             }
-            if !encoded.is_empty() {
-                if tcp_send_all(session.handle, &encoded).is_err() {
-                    break;
-                }
+            if !encoded.is_empty() && tcp_send_all(session.handle, &encoded).is_err() {
+                break;
             }
         }
 
@@ -1158,10 +1154,8 @@ fn run_session(session: &mut Session, connect_timeout_ms: u64) -> Result<(), Str
                 if !plain.is_empty() {
                     stdout_write(&plain);
                 }
-                if !net_out.is_empty() {
-                    if tcp_send_all(session.handle, &net_out).is_err() {
-                        break;
-                    }
+                if !net_out.is_empty() && tcp_send_all(session.handle, &net_out).is_err() {
+                    break;
                 }
             }
             Err(-11) => {
@@ -1169,7 +1163,7 @@ fn run_session(session: &mut Session, connect_timeout_ms: u64) -> Result<(), Str
                 thread::sleep(Duration::from_millis(5));
             }
             Err(e) => {
-                let msg = format!("\r\ntelnet: recv error {}\r\n", e);
+                let msg = format!("\r\ntelnet: recv error {e}\r\n");
                 stderr_write(msg.as_bytes());
                 break;
             }
@@ -1258,11 +1252,11 @@ fn parse_args() -> Result<CliOptions, String> {
                     .ok_or_else(|| "-w requires a timeout in seconds".to_string())?;
                 let secs: u64 = val
                     .parse()
-                    .map_err(|_| format!("invalid timeout '{}'", val))?;
+                    .map_err(|_| format!("invalid timeout '{val}'"))?;
                 connect_timeout_ms = secs.saturating_mul(1000);
             }
             other if other.starts_with('-') => {
-                return Err(format!("unknown option '{}'", other));
+                return Err(format!("unknown option '{other}'"));
             }
             _ => {
                 positionals.push(argv[i].clone());
@@ -1301,7 +1295,13 @@ fn parse_args() -> Result<CliOptions, String> {
 fn parse_escape_char(s: &str) -> Result<u8, String> {
     if s.starts_with('^') && s.len() == 2 {
         let ch = s.as_bytes()[1];
-        if ch.is_ascii_alphabetic() || ch == b'[' || ch == b'\\' || ch == b']' || ch == b'^' || ch == b'_' {
+        if ch.is_ascii_alphabetic()
+            || ch == b'['
+            || ch == b'\\'
+            || ch == b']'
+            || ch == b'^'
+            || ch == b'_'
+        {
             let ctrl = ch.to_ascii_uppercase() & 0x1F;
             return Ok(ctrl);
         }
@@ -1316,9 +1316,9 @@ fn parse_escape_char(s: &str) -> Result<u8, String> {
     }
     // Try 0xNN hex.
     if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        return u8::from_str_radix(hex, 16).map_err(|_| format!("invalid escape character '{}'", s));
+        return u8::from_str_radix(hex, 16).map_err(|_| format!("invalid escape character '{s}'"));
     }
-    Err(format!("invalid escape character '{}'", s))
+    Err(format!("invalid escape character '{s}'"))
 }
 
 // ============================================================================
@@ -1328,12 +1328,7 @@ fn parse_escape_char(s: &str) -> Result<u8, String> {
 fn run() -> Result<(), String> {
     let opts = parse_args()?;
 
-    let mut session = Session::new(
-        opts.host,
-        opts.port,
-        opts.escape_char,
-        opts.login_user,
-    );
+    let mut session = Session::new(opts.host, opts.port, opts.escape_char, opts.login_user);
 
     run_session(&mut session, opts.connect_timeout_ms)
 }
@@ -1342,7 +1337,7 @@ fn main() {
     match run() {
         Ok(()) => {}
         Err(e) => {
-            let msg = format!("telnet: {}\r\n", e);
+            let msg = format!("telnet: {e}\r\n");
             stderr_write(msg.as_bytes());
             process::exit(1);
         }
@@ -1527,7 +1522,12 @@ mod tests {
         let mut plain = Vec::new();
         let mut net_out = Vec::new();
         // Server sends WILL ECHO.
-        process_incoming(&mut session, &[IAC, WILL, OPT_ECHO], &mut plain, &mut net_out);
+        process_incoming(
+            &mut session,
+            &[IAC, WILL, OPT_ECHO],
+            &mut plain,
+            &mut net_out,
+        );
         assert!(plain.is_empty());
         assert_eq!(net_out, [IAC, DO, OPT_ECHO]);
         assert_eq!(session.opts.remote[usize::from(OPT_ECHO)], OptState::Yes);
@@ -1548,7 +1548,12 @@ mod tests {
         let mut session = Session::new("host".into(), 23, 0x1D, None);
         let mut plain = Vec::new();
         let mut net_out = Vec::new();
-        process_incoming(&mut session, &[IAC, DO, OPT_TTYPE], &mut plain, &mut net_out);
+        process_incoming(
+            &mut session,
+            &[IAC, DO, OPT_TTYPE],
+            &mut plain,
+            &mut net_out,
+        );
         assert_eq!(&net_out[..3], &[IAC, WILL, OPT_TTYPE]);
     }
 

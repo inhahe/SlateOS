@@ -113,10 +113,10 @@ fn list_groups() -> Vec<String> {
     let mut groups = Vec::new();
     if let Ok(entries) = fs::read_dir(ADMIN_DIR) {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if !name.starts_with('.') {
-                    groups.push(name.to_string());
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && !name.starts_with('.')
+            {
+                groups.push(name.to_string());
             }
         }
     }
@@ -177,7 +177,10 @@ fn parse_group_file(name: &str, content: &str) -> Option<AlternativeGroup> {
     }
 
     let current = if mode == "manual" {
-        alternatives.first().map(|a| a.path.clone()).unwrap_or_default()
+        alternatives
+            .first()
+            .map(|a| a.path.clone())
+            .unwrap_or_default()
     } else {
         String::new()
     };
@@ -304,9 +307,7 @@ fn cmd_install(
 
     match save_group(&group) {
         Ok(()) => {
-            println!(
-                "update-alternatives: using {path} to provide {link} ({name}) in auto mode"
-            );
+            println!("update-alternatives: using {path} to provide {link} ({name}) in auto mode");
             0
         }
         Err(e) => {
@@ -443,7 +444,13 @@ fn cmd_query(name: &str) -> i32 {
     println!("Name: {}", group.name);
     println!("Link: {}", group.link);
     println!("Status: {}", group.mode);
-    println!("Best: {}", group.best_alternative().map(|a| a.path.as_str()).unwrap_or("none"));
+    println!(
+        "Best: {}",
+        group
+            .best_alternative()
+            .map(|a| a.path.as_str())
+            .unwrap_or("none")
+    );
     println!("Value: {}", group.current_path());
     println!();
 
@@ -479,7 +486,12 @@ fn cmd_get_selections() -> i32 {
     let groups = list_groups();
     for name in &groups {
         if let Some(group) = load_group(name) {
-            println!("{:<30} {:>8} {}", group.name, group.mode, group.current_path());
+            println!(
+                "{:<30} {:>8} {}",
+                group.name,
+                group.mode,
+                group.current_path()
+            );
         }
     }
     0
@@ -499,23 +511,19 @@ fn cmd_config(name: &str) -> i32 {
         return 1;
     }
 
-    println!("There are {} choices for {}:", group.alternatives.len(), group.name);
-    println!();
     println!(
-        "  {:>4}  {:<50} {:>8}",
-        "Sel", "Path", "Priority"
+        "There are {} choices for {}:",
+        group.alternatives.len(),
+        group.name
     );
+    println!();
+    println!("  {:>4}  {:<50} {:>8}", "Sel", "Path", "Priority");
     println!("{}", "-".repeat(70));
 
     let current = group.current_path();
     for (idx, alt) in group.alternatives.iter().enumerate() {
         let marker = if alt.path == current { "*" } else { " " };
-        println!(
-            "{marker} {:>4}  {:<50} {:>8}",
-            idx,
-            alt.path,
-            alt.priority
-        );
+        println!("{marker} {:>4}  {:<50} {:>8}", idx, alt.path, alt.priority);
     }
     println!();
 
@@ -613,9 +621,7 @@ fn update_alternatives_main(args: &[String]) -> i32 {
     match command {
         "--install" => {
             if cmd_args.len() < 4 {
-                eprintln!(
-                    "update-alternatives: --install needs <link> <name> <path> <priority>"
-                );
+                eprintln!("update-alternatives: --install needs <link> <name> <path> <priority>");
                 return 1;
             }
             let link = &cmd_args[0];
@@ -636,9 +642,7 @@ fn update_alternatives_main(args: &[String]) -> i32 {
             }
 
             if verbose {
-                eprintln!(
-                    "update-alternatives: installing {path} as {name} (priority {priority})"
-                );
+                eprintln!("update-alternatives: installing {path} as {name} (priority {priority})");
             }
 
             cmd_install(link, name, path, priority, &slaves)
@@ -744,26 +748,11 @@ fn print_help() {
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("update-alternatives");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
     let rest: Vec<String> = args.into_iter().skip(1).collect();
 
-    let exit_code = match prog_name.as_str() {
-        "alternatives" | "update-alternatives" | _ => update_alternatives_main(&rest),
-    };
+    // `update-alternatives` and its `alternatives` alias share a single entry
+    // point, so there is no need to dispatch on the invocation name.
+    let exit_code = update_alternatives_main(&rest);
 
     process::exit(exit_code);
 }
@@ -780,30 +769,34 @@ mod tests {
         AlternativeGroup {
             name: "editor".to_string(),
             link: "/usr/bin/editor".to_string(),
-            slave_links: vec![
-                ("editor.1".to_string(), "/usr/share/man/man1/editor.1".to_string()),
-            ],
+            slave_links: vec![(
+                "editor.1".to_string(),
+                "/usr/share/man/man1/editor.1".to_string(),
+            )],
             alternatives: vec![
                 Alternative {
                     path: "/usr/bin/vim".to_string(),
                     priority: 50,
-                    slaves: vec![
-                        ("editor.1".to_string(), "/usr/share/man/man1/vim.1".to_string()),
-                    ],
+                    slaves: vec![(
+                        "editor.1".to_string(),
+                        "/usr/share/man/man1/vim.1".to_string(),
+                    )],
                 },
                 Alternative {
                     path: "/usr/bin/nano".to_string(),
                     priority: 40,
-                    slaves: vec![
-                        ("editor.1".to_string(), "/usr/share/man/man1/nano.1".to_string()),
-                    ],
+                    slaves: vec![(
+                        "editor.1".to_string(),
+                        "/usr/share/man/man1/nano.1".to_string(),
+                    )],
                 },
                 Alternative {
                     path: "/usr/bin/emacs".to_string(),
                     priority: 60,
-                    slaves: vec![
-                        ("editor.1".to_string(), "/usr/share/man/man1/emacs.1".to_string()),
-                    ],
+                    slaves: vec![(
+                        "editor.1".to_string(),
+                        "/usr/share/man/man1/emacs.1".to_string(),
+                    )],
                 },
             ],
             mode: "auto".to_string(),

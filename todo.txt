@@ -1,3 +1,24 @@
+## BUG (noticed+FIXED 2026-05-31): more installer-keyword crates hit the same
+##   UAC-elevation test-launch failure (os error 740) as dmsetup/updatedb.
+##   Swept all userspace crate names for setup/install/update/patch and fixed:
+##     * cryptsetup, cryptsetup-cli ("setup"), install ("install"),
+##       update-alternatives ("update") — added build.rs embedding an asInvoker
+##       manifest via embed-manifest (build-dependency). All now launch tests.
+##     * cryptsetup also had 6 clippy errors (manual char cmp, div_ceil x2,
+##       is_multiple_of, needless ref, loop-index) auto/hand-fixed, and 4
+##       dead-code header `deserialize`/active_slot_count/read_padded_string
+##       items annotated #[allow(dead_code)] (LIMITATION: the LUKS/verity/
+##       integrity on-disk-header *read* path is not wired into commands yet;
+##       these are exercised only by unit tests).
+##     * update-alternatives had 2 clippy errors (collapsible-if + a redundant
+##       single-behavior match on the invocation name); removed the dead
+##       multi-call basename dispatch since both names behave identically.
+##   speech-dispatcher-cli ("dispatcher" contains "patch") did NOT trip the
+##   heuristic — no fix needed.  NOTE: losetup (test compile error) and patch
+##   (1 failing test) and install (2 failing tests) are SEPARATE real bugs,
+##   tracked below / handled separately.
+##   All clippy-clean host + ouros; build for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): updatedb `cargo test` could not launch its
 ##   test harness (same root cause as dmsetup) + 6 pre-existing clippy errors.
 ##   userspace/updatedb/:

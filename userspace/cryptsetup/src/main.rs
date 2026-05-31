@@ -63,10 +63,7 @@ impl Tool {
 }
 
 fn detect_tool(argv0: &str) -> Tool {
-    let basename = argv0
-        .rsplit(|c| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(argv0);
+    let basename = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let basename = basename.strip_suffix(".exe").unwrap_or(basename);
     let lower = basename.to_ascii_lowercase();
 
@@ -84,27 +81,18 @@ fn detect_tool(argv0: &str) -> Tool {
 // ---------------------------------------------------------------------------
 
 const SHA256_K: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-    0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-    0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-    0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-    0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-    0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-    0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-    0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 const SHA256_INIT: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
 struct Sha256 {
@@ -191,12 +179,8 @@ impl Sha256 {
             ]);
         }
         for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7)
-                ^ w[i - 15].rotate_right(18)
-                ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17)
-                ^ w[i - 2].rotate_right(19)
-                ^ (w[i - 2] >> 10);
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
             w[i] = w[i - 16]
                 .wrapping_add(s0)
                 .wrapping_add(w[i - 7])
@@ -280,7 +264,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
 
 fn pbkdf2_sha256(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize) -> Vec<u8> {
     let mut result = Vec::with_capacity(dk_len);
-    let blocks_needed = (dk_len + 31) / 32;
+    let blocks_needed = dk_len.div_ceil(32);
 
     for block_idx in 1..=blocks_needed {
         let mut salt_with_idx = Vec::with_capacity(salt.len() + 4);
@@ -318,12 +302,11 @@ fn hex_encode(data: &[u8]) -> String {
 }
 
 const HEX_CHARS: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7',
-    '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
 ];
 
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(s.len() / 2);
@@ -362,11 +345,22 @@ fn generate_uuid(seed: &[u8]) -> String {
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
     )
 }
 
@@ -435,10 +429,12 @@ impl LuksHeader {
         let iterations = iter_time_ms.saturating_mul(1000);
         let mk_digest = pbkdf2_sha256(b"masterkey", &mk_digest_salt, 1000, LUKS_DIGEST_SIZE);
 
-        let mut key_slots: [LuksKeySlot; LUKS_KEY_SLOTS] = std::array::from_fn(|_| LuksKeySlot::inactive());
+        let mut key_slots: [LuksKeySlot; LUKS_KEY_SLOTS] =
+            std::array::from_fn(|_| LuksKeySlot::inactive());
         let slot_salt = deterministic_salt(device_path.as_bytes(), 1);
-        let base_offset = (LUKS_HEADER_SIZE as u32 + LUKS_ALIGN - 1) / LUKS_ALIGN * LUKS_ALIGN;
-        key_slots[0] = LuksKeySlot::new_active(iterations, slot_salt, base_offset / LUKS_SECTOR_SIZE);
+        let base_offset = (LUKS_HEADER_SIZE as u32).div_ceil(LUKS_ALIGN) * LUKS_ALIGN;
+        key_slots[0] =
+            LuksKeySlot::new_active(iterations, slot_salt, base_offset / LUKS_SECTOR_SIZE);
 
         let payload_offset = base_offset + LUKS_MK_BYTES as u32 * 8 * LUKS_KEY_SLOTS as u32;
 
@@ -499,11 +495,15 @@ impl LuksHeader {
         buf
     }
 
+    // On-disk header parsing. Exercised by unit tests; reserved for the header
+    // *read* path (luksDump / open against an existing device), which is not
+    // yet wired — commands currently only serialize freshly-formatted headers.
+    #[allow(dead_code)]
     fn deserialize(data: &[u8]) -> Option<Self> {
         if data.len() < LUKS_HEADER_SIZE {
             return None;
         }
-        if &data[..6] != &LUKS_MAGIC {
+        if data[..6] != LUKS_MAGIC {
             return None;
         }
 
@@ -521,17 +521,30 @@ impl LuksHeader {
         let mk_digest_iter = u32::from_be_bytes([data[176], data[177], data[178], data[179]]);
         let uuid = read_padded_string(&data[180..220]);
 
-        let mut key_slots: [LuksKeySlot; LUKS_KEY_SLOTS] = std::array::from_fn(|_| LuksKeySlot::inactive());
+        let mut key_slots: [LuksKeySlot; LUKS_KEY_SLOTS] =
+            std::array::from_fn(|_| LuksKeySlot::inactive());
         let slot_base = 220;
-        for i in 0..LUKS_KEY_SLOTS {
+        for (i, slot) in key_slots.iter_mut().enumerate() {
             let off = slot_base + i * 48;
-            let marker = u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
-            let iterations = u32::from_be_bytes([data[off + 4], data[off + 5], data[off + 6], data[off + 7]]);
+            let marker =
+                u32::from_be_bytes([data[off], data[off + 1], data[off + 2], data[off + 3]]);
+            let iterations =
+                u32::from_be_bytes([data[off + 4], data[off + 5], data[off + 6], data[off + 7]]);
             let mut salt = [0u8; LUKS_SALT_SIZE];
             salt.copy_from_slice(&data[off + 8..off + 40]);
-            let km_offset = u32::from_be_bytes([data[off + 40], data[off + 41], data[off + 42], data[off + 43]]);
-            let stripes = u32::from_be_bytes([data[off + 44], data[off + 45], data[off + 46], data[off + 47]]);
-            key_slots[i] = LuksKeySlot {
+            let km_offset = u32::from_be_bytes([
+                data[off + 40],
+                data[off + 41],
+                data[off + 42],
+                data[off + 43],
+            ]);
+            let stripes = u32::from_be_bytes([
+                data[off + 44],
+                data[off + 45],
+                data[off + 46],
+                data[off + 47],
+            ]);
+            *slot = LuksKeySlot {
                 active: marker == 0x00ac71f3,
                 iterations,
                 salt,
@@ -555,6 +568,9 @@ impl LuksHeader {
         })
     }
 
+    // Reserved for luksDump output (reporting active key slots); exercised by
+    // unit tests but not yet called by a command.
+    #[allow(dead_code)]
     fn active_slot_count(&self) -> usize {
         self.key_slots.iter().filter(|s| s.active).count()
     }
@@ -573,6 +589,10 @@ fn write_padded_string(buf: &mut Vec<u8>, s: &str, len: usize) {
     }
 }
 
+// Reads a NUL-padded text field from an on-disk header. Only used by the
+// header `deserialize` paths above (reserved for the read path), so it is dead
+// in the current bin; exercised directly by unit tests.
+#[allow(dead_code)]
 fn read_padded_string(data: &[u8]) -> String {
     let end = data.iter().position(|&b| b == 0).unwrap_or(data.len());
     String::from_utf8_lossy(&data[..end]).into_owned()
@@ -609,7 +629,8 @@ impl VeritySuperblock {
     fn new(data_device: &str, hash_device: &str) -> Self {
         let uuid = generate_uuid(format!("{}-{}", data_device, hash_device).as_bytes());
         let salt_hash = Sha256::digest(format!("verity-salt-{}", data_device).as_bytes());
-        let root_hash = Sha256::digest(format!("verity-root-{}-{}", data_device, hash_device).as_bytes());
+        let root_hash =
+            Sha256::digest(format!("verity-root-{}-{}", data_device, hash_device).as_bytes());
         Self {
             version: VERITY_VERSION,
             hash_type: 1,
@@ -639,6 +660,9 @@ impl VeritySuperblock {
         buf
     }
 
+    // On-disk superblock parsing. Exercised by unit tests; reserved for the
+    // verity read/verify path, not yet wired into a command.
+    #[allow(dead_code)]
     fn deserialize(data: &[u8]) -> Option<Self> {
         if data.len() < 100 {
             return None;
@@ -653,8 +677,7 @@ impl VeritySuperblock {
         let data_block_size = u32::from_be_bytes([data[88], data[89], data[90], data[91]]);
         let hash_block_size = u32::from_be_bytes([data[92], data[93], data[94], data[95]]);
         let data_blocks = u64::from_be_bytes([
-            data[96], data[97], data[98], data[99],
-            data[100], data[101], data[102], data[103],
+            data[96], data[97], data[98], data[99], data[100], data[101], data[102], data[103],
         ]);
         let salt_len = u16::from_be_bytes([data[104], data[105]]) as usize;
         let salt = if data.len() >= 106 + salt_len {
@@ -721,6 +744,9 @@ impl IntegritySuperblock {
         buf
     }
 
+    // On-disk superblock parsing. Exercised by unit tests; reserved for the
+    // integrity read/verify path, not yet wired into a command.
+    #[allow(dead_code)]
     fn deserialize(data: &[u8]) -> Option<Self> {
         if data.len() < 100 {
             return None;
@@ -737,8 +763,8 @@ impl IntegritySuperblock {
         let interleave_sectors = u32::from_be_bytes([data[96], data[97], data[98], data[99]]);
         let provided_data_sectors = if data.len() >= 108 {
             u64::from_be_bytes([
-                data[100], data[101], data[102], data[103],
-                data[104], data[105], data[106], data[107],
+                data[100], data[101], data[102], data[103], data[104], data[105], data[106],
+                data[107],
             ])
         } else {
             0
@@ -924,7 +950,11 @@ fn cmd_luks_open(opts: &Options, out: &mut dyn Write) -> i32 {
     // Simulate key derivation
     let dk = pbkdf2_sha256(b"passphrase", b"salt", 1000, 32);
     if opts.verbose {
-        let _ = writeln!(out, "Key derivation: PBKDF2-SHA256, {} iterations", opts.iter_time * 1000);
+        let _ = writeln!(
+            out,
+            "Key derivation: PBKDF2-SHA256, {} iterations",
+            opts.iter_time * 1000
+        );
         let _ = writeln!(out, "Derived key: {}", hex_encode(&dk[..8]));
     }
     let _ = writeln!(out, "Key slot 0 unlocked.");
@@ -966,9 +996,21 @@ fn cmd_luks_dump(opts: &Options, out: &mut dyn Write) -> i32 {
     let _ = writeln!(out, "Hash spec:      {}", header.hash_spec);
     let _ = writeln!(out, "Payload offset: {}", header.payload_offset);
     let _ = writeln!(out, "MK bits:        {}", header.key_bytes * 8);
-    let _ = writeln!(out, "MK digest:      {}", hex_encode(&header.mk_digest[..20]));
-    let _ = writeln!(out, "MK salt:        {}", hex_encode(&header.mk_digest_salt[..16]));
-    let _ = writeln!(out, "              : {}", hex_encode(&header.mk_digest_salt[16..]));
+    let _ = writeln!(
+        out,
+        "MK digest:      {}",
+        hex_encode(&header.mk_digest[..20])
+    );
+    let _ = writeln!(
+        out,
+        "MK salt:        {}",
+        hex_encode(&header.mk_digest_salt[..16])
+    );
+    let _ = writeln!(
+        out,
+        "              : {}",
+        hex_encode(&header.mk_digest_salt[16..])
+    );
     let _ = writeln!(out, "MK iterations:  {}", header.mk_digest_iter);
     let _ = writeln!(out, "UUID:           {}", header.uuid);
     let _ = writeln!(out);
@@ -977,8 +1019,16 @@ fn cmd_luks_dump(opts: &Options, out: &mut dyn Write) -> i32 {
         if slot.active {
             let _ = writeln!(out, "Key Slot {}: ENABLED", i);
             let _ = writeln!(out, "  Iterations:           {}", slot.iterations);
-            let _ = writeln!(out, "  Salt:                 {}", hex_encode(&slot.salt[..16]));
-            let _ = writeln!(out, "                        {}", hex_encode(&slot.salt[16..]));
+            let _ = writeln!(
+                out,
+                "  Salt:                 {}",
+                hex_encode(&slot.salt[..16])
+            );
+            let _ = writeln!(
+                out,
+                "                        {}",
+                hex_encode(&slot.salt[16..])
+            );
             let _ = writeln!(out, "  Key material offset:  {}", slot.key_material_offset);
             let _ = writeln!(out, "  AF stripes:           {}", slot.stripes);
         } else {
@@ -996,8 +1046,12 @@ fn cmd_luks_add_key(opts: &Options, out: &mut dyn Write) -> i32 {
     let device = &opts.positional[0];
 
     let header = LuksHeader::new(
-        &opts.cipher, &opts.cipher_mode, &opts.hash,
-        opts.key_size / 8, opts.iter_time, device,
+        &opts.cipher,
+        &opts.cipher_mode,
+        &opts.hash,
+        opts.key_size / 8,
+        opts.iter_time,
+        device,
     );
 
     match header.first_inactive_slot() {
@@ -1039,7 +1093,12 @@ fn cmd_luks_kill_slot(opts: &Options, out: &mut dyn Write) -> i32 {
         }
     };
     if slot >= LUKS_KEY_SLOTS as u32 {
-        let _ = writeln!(out, "Error: slot {} out of range (0-{})", slot, LUKS_KEY_SLOTS - 1);
+        let _ = writeln!(
+            out,
+            "Error: slot {} out of range (0-{})",
+            slot,
+            LUKS_KEY_SLOTS - 1
+        );
         return 1;
     }
     let _ = writeln!(out, "Key slot {} on {} destroyed.", slot, device);
@@ -1074,11 +1133,19 @@ fn cmd_luks_header_backup(opts: &Options, out: &mut dyn Write) -> i32 {
     };
 
     let header = LuksHeader::new(
-        &opts.cipher, &opts.cipher_mode, &opts.hash,
-        opts.key_size / 8, opts.iter_time, device,
+        &opts.cipher,
+        &opts.cipher_mode,
+        &opts.hash,
+        opts.key_size / 8,
+        opts.iter_time,
+        device,
     );
     let data = header.serialize();
-    let _ = writeln!(out, "LUKS header backup from {} to {}.", device, backup_file);
+    let _ = writeln!(
+        out,
+        "LUKS header backup from {} to {}.",
+        device, backup_file
+    );
     let _ = writeln!(out, "Backup size: {} bytes", data.len());
     0
 }
@@ -1100,9 +1167,17 @@ fn cmd_luks_header_restore(opts: &Options, out: &mut dyn Write) -> i32 {
     if !opts.batch_mode {
         let _ = writeln!(out, "WARNING!");
         let _ = writeln!(out, "========");
-        let _ = writeln!(out, "This will overwrite LUKS header on {} with backup from {}.", device, backup_file);
+        let _ = writeln!(
+            out,
+            "This will overwrite LUKS header on {} with backup from {}.",
+            device, backup_file
+        );
     }
-    let _ = writeln!(out, "LUKS header restored to {} from {}.", device, backup_file);
+    let _ = writeln!(
+        out,
+        "LUKS header restored to {} from {}.",
+        device, backup_file
+    );
     0
 }
 
@@ -1171,8 +1246,14 @@ fn cmd_resize(opts: &Options, out: &mut dyn Write) -> i32 {
 }
 
 fn cmd_benchmark(opts: &Options, out: &mut dyn Write) -> i32 {
-    let _ = writeln!(out, "# Tests are approximate using memory only (no storage IO).");
-    let _ = writeln!(out, "# Algorithm |       Key |      Encryption |      Decryption");
+    let _ = writeln!(
+        out,
+        "# Tests are approximate using memory only (no storage IO)."
+    );
+    let _ = writeln!(
+        out,
+        "# Algorithm |       Key |      Encryption |      Decryption"
+    );
 
     let ciphers = [
         ("aes-cbc", 128, 1050.0, 3150.0),
@@ -1240,7 +1321,10 @@ fn cmd_verity_format(opts: &Options, out: &mut dyn Write) -> i32 {
 
 fn cmd_verity_open(opts: &Options, out: &mut dyn Write) -> i32 {
     if opts.positional.len() < 4 {
-        let _ = writeln!(out, "Error: <data_device> <name> <hash_device> <root_hash> required");
+        let _ = writeln!(
+            out,
+            "Error: <data_device> <name> <hash_device> <root_hash> required"
+        );
         return 1;
     }
     let data_dev = &opts.positional[0];
@@ -1272,7 +1356,10 @@ fn cmd_verity_close(opts: &Options, out: &mut dyn Write) -> i32 {
 
 fn cmd_verity_verify(opts: &Options, out: &mut dyn Write) -> i32 {
     if opts.positional.len() < 3 {
-        let _ = writeln!(out, "Error: <data_device> <hash_device> <root_hash> required");
+        let _ = writeln!(
+            out,
+            "Error: <data_device> <hash_device> <root_hash> required"
+        );
         return 1;
     }
     let data_dev = &opts.positional[0];
@@ -1284,7 +1371,11 @@ fn cmd_verity_verify(opts: &Options, out: &mut dyn Write) -> i32 {
         return 1;
     }
 
-    let _ = writeln!(out, "Verification of {} using hash device {} and root hash {}.", data_dev, hash_dev, root_hash);
+    let _ = writeln!(
+        out,
+        "Verification of {} using hash device {} and root hash {}.",
+        data_dev, hash_dev, root_hash
+    );
     let _ = writeln!(out, "Verification OK.");
     0
 }
@@ -1425,34 +1516,79 @@ fn print_cryptsetup_help(out: &mut dyn Write) {
     let _ = writeln!(out, "Usage: cryptsetup <action> [options] <args>");
     let _ = writeln!(out);
     let _ = writeln!(out, "Actions:");
-    let _ = writeln!(out, "  luksFormat <device>             Format device with LUKS header");
-    let _ = writeln!(out, "  luksOpen <device> <name>        Open/decrypt LUKS device");
-    let _ = writeln!(out, "  luksClose <name>                Close encrypted mapping");
-    let _ = writeln!(out, "  luksDump <device>               Dump LUKS header info");
-    let _ = writeln!(out, "  luksAddKey <device>             Add passphrase to LUKS slot");
-    let _ = writeln!(out, "  luksRemoveKey <device>          Remove passphrase from slot");
+    let _ = writeln!(
+        out,
+        "  luksFormat <device>             Format device with LUKS header"
+    );
+    let _ = writeln!(
+        out,
+        "  luksOpen <device> <name>        Open/decrypt LUKS device"
+    );
+    let _ = writeln!(
+        out,
+        "  luksClose <name>                Close encrypted mapping"
+    );
+    let _ = writeln!(
+        out,
+        "  luksDump <device>               Dump LUKS header info"
+    );
+    let _ = writeln!(
+        out,
+        "  luksAddKey <device>             Add passphrase to LUKS slot"
+    );
+    let _ = writeln!(
+        out,
+        "  luksRemoveKey <device>          Remove passphrase from slot"
+    );
     let _ = writeln!(out, "  luksKillSlot <device> <slot>    Destroy key slot");
     let _ = writeln!(out, "  luksChangeKey <device>          Change passphrase");
     let _ = writeln!(out, "  luksHeaderBackup <device>       Backup LUKS header");
     let _ = writeln!(out, "  luksHeaderRestore <device>      Restore LUKS header");
-    let _ = writeln!(out, "  isLuks <device>                 Test if device is LUKS");
-    let _ = writeln!(out, "  status <name>                   Show active mapping status");
-    let _ = writeln!(out, "  open --type plain <dev> <name>  Plain dm-crypt mapping");
+    let _ = writeln!(
+        out,
+        "  isLuks <device>                 Test if device is LUKS"
+    );
+    let _ = writeln!(
+        out,
+        "  status <name>                   Show active mapping status"
+    );
+    let _ = writeln!(
+        out,
+        "  open --type plain <dev> <name>  Plain dm-crypt mapping"
+    );
     let _ = writeln!(out, "  close <name>                    Close any mapping");
-    let _ = writeln!(out, "  resize <name>                   Resize active mapping");
+    let _ = writeln!(
+        out,
+        "  resize <name>                   Resize active mapping"
+    );
     let _ = writeln!(out, "  benchmark                       Cipher benchmark");
     let _ = writeln!(out);
     let _ = writeln!(out, "Options:");
-    let _ = writeln!(out, "  --hash, -h <hash>               Hash algorithm (default: sha256)");
-    let _ = writeln!(out, "  --cipher, -c <cipher>           Cipher specification");
+    let _ = writeln!(
+        out,
+        "  --hash, -h <hash>               Hash algorithm (default: sha256)"
+    );
+    let _ = writeln!(
+        out,
+        "  --cipher, -c <cipher>           Cipher specification"
+    );
     let _ = writeln!(out, "  --key-size, -s <bits>           Key size in bits");
-    let _ = writeln!(out, "  --iter-time, -i <ms>            PBKDF2 iteration time in ms");
+    let _ = writeln!(
+        out,
+        "  --iter-time, -i <ms>            PBKDF2 iteration time in ms"
+    );
     let _ = writeln!(out, "  --batch-mode, -q                Suppress warnings");
     let _ = writeln!(out, "  --verbose, -v                   Verbose output");
     let _ = writeln!(out, "  --debug                         Debug output");
-    let _ = writeln!(out, "  --type <type>                   Device type (luks1/luks2/plain)");
+    let _ = writeln!(
+        out,
+        "  --type <type>                   Device type (luks1/luks2/plain)"
+    );
     let _ = writeln!(out, "  --key-file <file>               Key file path");
-    let _ = writeln!(out, "  --header-backup-file <file>     Header backup file path");
+    let _ = writeln!(
+        out,
+        "  --header-backup-file <file>     Header backup file path"
+    );
     let _ = writeln!(out, "  --key-slot <num>                Key slot number");
     let _ = writeln!(out, "  --help                          Show this help");
     let _ = writeln!(out, "  --version                       Show version");
@@ -1464,12 +1600,30 @@ fn print_veritysetup_help(out: &mut dyn Write) {
     let _ = writeln!(out, "Usage: veritysetup <action> [options] <args>");
     let _ = writeln!(out);
     let _ = writeln!(out, "Actions:");
-    let _ = writeln!(out, "  format <data_dev> <hash_dev>    Create verity hash tree");
-    let _ = writeln!(out, "  open <data> <name> <hash> <rh>  Activate verity device");
-    let _ = writeln!(out, "  close <name>                    Deactivate verity device");
-    let _ = writeln!(out, "  verify <data> <hash> <rh>       Verify data integrity");
-    let _ = writeln!(out, "  status <name>                   Show verity device status");
-    let _ = writeln!(out, "  dump <hash_dev>                 Dump verity superblock");
+    let _ = writeln!(
+        out,
+        "  format <data_dev> <hash_dev>    Create verity hash tree"
+    );
+    let _ = writeln!(
+        out,
+        "  open <data> <name> <hash> <rh>  Activate verity device"
+    );
+    let _ = writeln!(
+        out,
+        "  close <name>                    Deactivate verity device"
+    );
+    let _ = writeln!(
+        out,
+        "  verify <data> <hash> <rh>       Verify data integrity"
+    );
+    let _ = writeln!(
+        out,
+        "  status <name>                   Show verity device status"
+    );
+    let _ = writeln!(
+        out,
+        "  dump <hash_dev>                 Dump verity superblock"
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Options:");
     let _ = writeln!(out, "  --verbose, -v                   Verbose output");
@@ -1484,11 +1638,26 @@ fn print_integritysetup_help(out: &mut dyn Write) {
     let _ = writeln!(out, "Usage: integritysetup <action> [options] <args>");
     let _ = writeln!(out);
     let _ = writeln!(out, "Actions:");
-    let _ = writeln!(out, "  format <device>                 Format with integrity metadata");
-    let _ = writeln!(out, "  open <device> <name>            Activate integrity device");
-    let _ = writeln!(out, "  close <name>                    Deactivate integrity device");
-    let _ = writeln!(out, "  status <name>                   Show integrity status");
-    let _ = writeln!(out, "  dump <device>                   Dump integrity superblock");
+    let _ = writeln!(
+        out,
+        "  format <device>                 Format with integrity metadata"
+    );
+    let _ = writeln!(
+        out,
+        "  open <device> <name>            Activate integrity device"
+    );
+    let _ = writeln!(
+        out,
+        "  close <name>                    Deactivate integrity device"
+    );
+    let _ = writeln!(
+        out,
+        "  status <name>                   Show integrity status"
+    );
+    let _ = writeln!(
+        out,
+        "  dump <device>                   Dump integrity superblock"
+    );
     let _ = writeln!(out);
     let _ = writeln!(out, "Options:");
     let _ = writeln!(out, "  --verbose, -v                   Verbose output");
@@ -1928,7 +2097,10 @@ mod tests {
 
     #[test]
     fn detect_integritysetup_windows() {
-        assert_eq!(detect_tool("C:\\bin\\integritysetup.exe"), Tool::Integritysetup);
+        assert_eq!(
+            detect_tool("C:\\bin\\integritysetup.exe"),
+            Tool::Integritysetup
+        );
     }
 
     #[test]
@@ -1990,7 +2162,10 @@ mod tests {
         }
         assert_eq!(h.key_slots[0].iterations, h2.key_slots[0].iterations);
         assert_eq!(h.key_slots[0].salt, h2.key_slots[0].salt);
-        assert_eq!(h.key_slots[0].key_material_offset, h2.key_slots[0].key_material_offset);
+        assert_eq!(
+            h.key_slots[0].key_material_offset,
+            h2.key_slots[0].key_material_offset
+        );
         assert_eq!(h.key_slots[0].stripes, h2.key_slots[0].stripes);
     }
 
@@ -2128,7 +2303,9 @@ mod tests {
     #[test]
     fn parse_options_with_device() {
         let args: Vec<String> = vec!["luksFormat", "/dev/sda1"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         let opts = parse_options(&args);
         assert_eq!(opts.subcommand, "luksFormat");
         assert_eq!(opts.positional, vec!["/dev/sda1"]);
@@ -2137,7 +2314,9 @@ mod tests {
     #[test]
     fn parse_options_cipher() {
         let args: Vec<String> = vec!["--cipher", "aes-cbc-essiv:sha256", "luksFormat", "/dev/sda"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         let opts = parse_options(&args);
         assert_eq!(opts.cipher, "aes");
         assert_eq!(opts.cipher_mode, "cbc-essiv:sha256");
@@ -2146,7 +2325,9 @@ mod tests {
     #[test]
     fn parse_options_key_size() {
         let args: Vec<String> = vec!["--key-size", "512", "luksFormat", "/dev/sda"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         let opts = parse_options(&args);
         assert_eq!(opts.key_size, 512);
     }
@@ -2154,7 +2335,9 @@ mod tests {
     #[test]
     fn parse_options_batch_mode() {
         let args: Vec<String> = vec!["-q", "luksFormat", "/dev/sda"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         let opts = parse_options(&args);
         assert!(opts.batch_mode);
     }
@@ -2162,7 +2345,9 @@ mod tests {
     #[test]
     fn parse_options_verbose() {
         let args: Vec<String> = vec!["-v", "luksFormat", "/dev/sda"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         let opts = parse_options(&args);
         assert!(opts.verbose);
     }
@@ -2170,15 +2355,24 @@ mod tests {
     #[test]
     fn parse_options_type() {
         let args: Vec<String> = vec!["--type", "plain", "open", "/dev/sda", "test"]
-            .into_iter().map(String::from).collect();
+            .into_iter()
+            .map(String::from)
+            .collect();
         let opts = parse_options(&args);
         assert_eq!(opts.device_type, "plain");
     }
 
     #[test]
     fn parse_options_header_backup_file() {
-        let args: Vec<String> = vec!["luksHeaderBackup", "/dev/sda", "--header-backup-file", "/tmp/backup"]
-            .into_iter().map(String::from).collect();
+        let args: Vec<String> = vec![
+            "luksHeaderBackup",
+            "/dev/sda",
+            "--header-backup-file",
+            "/tmp/backup",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
         let opts = parse_options(&args);
         assert_eq!(opts.header_backup_file, Some("/tmp/backup".to_string()));
     }
@@ -2240,7 +2434,13 @@ mod tests {
 
     #[test]
     fn luks_format_custom_cipher() {
-        let (code, out) = run_cryptsetup(&["-q", "--cipher", "serpent-cbc-plain", "luksFormat", "/dev/sda"]);
+        let (code, out) = run_cryptsetup(&[
+            "-q",
+            "--cipher",
+            "serpent-cbc-plain",
+            "luksFormat",
+            "/dev/sda",
+        ]);
         assert_eq!(code, 0);
         assert!(out.contains("serpent"));
     }
@@ -2348,8 +2548,10 @@ mod tests {
     #[test]
     fn luks_header_backup_success() {
         let (code, out) = run_cryptsetup(&[
-            "luksHeaderBackup", "/dev/sda1",
-            "--header-backup-file", "/tmp/backup.bin",
+            "luksHeaderBackup",
+            "/dev/sda1",
+            "--header-backup-file",
+            "/tmp/backup.bin",
         ]);
         assert_eq!(code, 0);
         assert!(out.contains("backup"));
@@ -2365,8 +2567,11 @@ mod tests {
     #[test]
     fn luks_header_restore_success() {
         let (code, out) = run_cryptsetup(&[
-            "-q", "luksHeaderRestore", "/dev/sda1",
-            "--header-backup-file", "/tmp/backup.bin",
+            "-q",
+            "luksHeaderRestore",
+            "/dev/sda1",
+            "--header-backup-file",
+            "/tmp/backup.bin",
         ]);
         assert_eq!(code, 0);
         assert!(out.contains("restored"));
@@ -2375,8 +2580,10 @@ mod tests {
     #[test]
     fn luks_header_restore_warning() {
         let (code, out) = run_cryptsetup(&[
-            "luksHeaderRestore", "/dev/sda1",
-            "--header-backup-file", "/tmp/backup.bin",
+            "luksHeaderRestore",
+            "/dev/sda1",
+            "--header-backup-file",
+            "/tmp/backup.bin",
         ]);
         assert_eq!(code, 0);
         assert!(out.contains("WARNING"));
@@ -2526,7 +2733,10 @@ mod tests {
     #[test]
     fn verity_open_success() {
         let (code, out) = run_verity(&[
-            "open", "/dev/sda1", "verity_vol", "/dev/sda2",
+            "open",
+            "/dev/sda1",
+            "verity_vol",
+            "/dev/sda2",
             "aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabb",
         ]);
         assert_eq!(code, 0);
@@ -2562,7 +2772,9 @@ mod tests {
     #[test]
     fn verity_verify_success() {
         let (code, out) = run_verity(&[
-            "verify", "/dev/sda1", "/dev/sda2",
+            "verify",
+            "/dev/sda1",
+            "/dev/sda2",
             "aabbccdd00112233445566778899aabbccddeeff00112233445566778899aabb",
         ]);
         assert_eq!(code, 0);

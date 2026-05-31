@@ -560,7 +560,10 @@ struct PpdChoice {
 struct PpdOption {
     keyword: String,
     text: String,
-    _option_type: PpdOptionType,
+    // Stored on every option but not yet consulted by the constraint engine;
+    // reserved for option-type-aware UI/validation, exercised in tests.
+    #[allow(dead_code)]
+    option_type: PpdOptionType,
     default_choice: String,
     choices: Vec<PpdChoice>,
 }
@@ -570,7 +573,7 @@ impl PpdOption {
         Self {
             keyword: keyword.to_string(),
             text: text.to_string(),
-            _option_type: option_type,
+            option_type,
             default_choice: default_choice.to_string(),
             choices: Vec::new(),
         }
@@ -593,31 +596,35 @@ impl PpdOption {
     }
 }
 
+// The constraint-violation check (is_violated) is implemented and unit-tested
+// but not yet wired into the print-option validation path, so option1/option2
+// are read only from tests today.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct PpdConstraint {
     keyword1: String,
-    _option1: String,
+    option1: String,
     keyword2: String,
-    _option2: String,
+    option2: String,
 }
 
 impl PpdConstraint {
     fn new(kw1: &str, opt1: &str, kw2: &str, opt2: &str) -> Self {
         Self {
             keyword1: kw1.to_string(),
-            _option1: opt1.to_string(),
+            option1: opt1.to_string(),
             keyword2: kw2.to_string(),
-            _option2: opt2.to_string(),
+            option2: opt2.to_string(),
         }
     }
 
     fn _is_violated(&self, selections: &[(String, String)]) -> bool {
         let has_first = selections
             .iter()
-            .any(|(k, v)| k == &self.keyword1 && v == &self._option1);
+            .any(|(k, v)| k == &self.keyword1 && v == &self.option1);
         let has_second = selections
             .iter()
-            .any(|(k, v)| k == &self.keyword2 && v == &self._option2);
+            .any(|(k, v)| k == &self.keyword2 && v == &self.option2);
         has_first && has_second
     }
 }
@@ -865,18 +872,18 @@ impl JobOptions {
     fn parse_option(&mut self, key: &str, value: &str) -> CupsResult<()> {
         match key {
             "copies" => {
-                self.copies = value.parse::<u32>().map_err(|_| {
-                    CupsError::new(&format!("Invalid copies value: {value}"))
-                })?;
+                self.copies = value
+                    .parse::<u32>()
+                    .map_err(|_| CupsError::new(&format!("Invalid copies value: {value}")))?;
                 if self.copies == 0 {
                     return Err(CupsError::new("Copies must be at least 1"));
                 }
                 Ok(())
             }
             "priority" => {
-                self.priority = value.parse::<u32>().map_err(|_| {
-                    CupsError::new(&format!("Invalid priority value: {value}"))
-                })?;
+                self.priority = value
+                    .parse::<u32>()
+                    .map_err(|_| CupsError::new(&format!("Invalid priority value: {value}")))?;
                 if self.priority > MAX_PRIORITY {
                     return Err(CupsError::new(&format!(
                         "Priority must be 0-{MAX_PRIORITY}"
@@ -889,51 +896,42 @@ impl JobOptions {
                     self.page_ranges = value.to_string();
                     Ok(())
                 } else {
-                    Err(CupsError::new(&format!(
-                        "Invalid page range: {value}"
-                    )))
+                    Err(CupsError::new(&format!("Invalid page range: {value}")))
                 }
             }
             "media" => {
-                self.media = MediaSize::from_str(value).ok_or_else(|| {
-                    CupsError::new(&format!("Unknown media size: {value}"))
-                })?;
+                self.media = MediaSize::from_str(value)
+                    .ok_or_else(|| CupsError::new(&format!("Unknown media size: {value}")))?;
                 Ok(())
             }
             "orientation-requested" => {
-                self.orientation = Orientation::from_str(value).ok_or_else(|| {
-                    CupsError::new(&format!("Unknown orientation: {value}"))
-                })?;
+                self.orientation = Orientation::from_str(value)
+                    .ok_or_else(|| CupsError::new(&format!("Unknown orientation: {value}")))?;
                 Ok(())
             }
             "sides" => {
-                self.sides = Sides::from_str(value).ok_or_else(|| {
-                    CupsError::new(&format!("Unknown sides value: {value}"))
-                })?;
+                self.sides = Sides::from_str(value)
+                    .ok_or_else(|| CupsError::new(&format!("Unknown sides value: {value}")))?;
                 Ok(())
             }
             "print-quality" => {
-                self.quality = PrintQuality::from_str(value).ok_or_else(|| {
-                    CupsError::new(&format!("Unknown quality: {value}"))
-                })?;
+                self.quality = PrintQuality::from_str(value)
+                    .ok_or_else(|| CupsError::new(&format!("Unknown quality: {value}")))?;
                 Ok(())
             }
             "print-color-mode" => {
-                self.color_mode = ColorMode::from_str(value).ok_or_else(|| {
-                    CupsError::new(&format!("Unknown color mode: {value}"))
-                })?;
+                self.color_mode = ColorMode::from_str(value)
+                    .ok_or_else(|| CupsError::new(&format!("Unknown color mode: {value}")))?;
                 Ok(())
             }
             "media-source" => {
-                self.media_source = MediaSource::from_str(value).ok_or_else(|| {
-                    CupsError::new(&format!("Unknown media source: {value}"))
-                })?;
+                self.media_source = MediaSource::from_str(value)
+                    .ok_or_else(|| CupsError::new(&format!("Unknown media source: {value}")))?;
                 Ok(())
             }
             "number-up" => {
-                self.number_up = NumberUp::from_str(value).ok_or_else(|| {
-                    CupsError::new(&format!("Invalid number-up: {value}"))
-                })?;
+                self.number_up = NumberUp::from_str(value)
+                    .ok_or_else(|| CupsError::new(&format!("Invalid number-up: {value}")))?;
                 Ok(())
             }
             "collate" => {
@@ -949,26 +947,26 @@ impl JobOptions {
     }
 
     fn to_option_strings(&self) -> Vec<(String, String)> {
-        let mut out = Vec::new();
-        out.push(("copies".to_string(), self.copies.to_string()));
-        out.push(("priority".to_string(), self.priority.to_string()));
-        out.push(("page-ranges".to_string(), self.page_ranges.clone()));
-        out.push(("media".to_string(), self.media.to_string()));
-        out.push((
-            "orientation-requested".to_string(),
-            self.orientation.to_string(),
-        ));
-        out.push(("sides".to_string(), self.sides.to_string()));
-        out.push(("print-quality".to_string(), self.quality.to_string()));
-        out.push(("print-color-mode".to_string(), self.color_mode.to_string()));
-        out.push(("media-source".to_string(), self.media_source.to_string()));
-        out.push(("number-up".to_string(), self.number_up.to_string()));
-        out.push(("collate".to_string(), bool_to_str(self.collate).to_string()));
-        out.push((
-            "fit-to-page".to_string(),
-            bool_to_str(self.fit_to_page).to_string(),
-        ));
-        out
+        vec![
+            ("copies".to_string(), self.copies.to_string()),
+            ("priority".to_string(), self.priority.to_string()),
+            ("page-ranges".to_string(), self.page_ranges.clone()),
+            ("media".to_string(), self.media.to_string()),
+            (
+                "orientation-requested".to_string(),
+                self.orientation.to_string(),
+            ),
+            ("sides".to_string(), self.sides.to_string()),
+            ("print-quality".to_string(), self.quality.to_string()),
+            ("print-color-mode".to_string(), self.color_mode.to_string()),
+            ("media-source".to_string(), self.media_source.to_string()),
+            ("number-up".to_string(), self.number_up.to_string()),
+            ("collate".to_string(), bool_to_str(self.collate).to_string()),
+            (
+                "fit-to-page".to_string(),
+                bool_to_str(self.fit_to_page).to_string(),
+            ),
+        ]
     }
 }
 
@@ -1090,7 +1088,10 @@ impl Printer {
     }
 
     fn active_jobs(&self) -> Vec<&PrintJob> {
-        self.jobs.iter().filter(|j| !j.state.is_terminal()).collect()
+        self.jobs
+            .iter()
+            .filter(|j| !j.state.is_terminal())
+            .collect()
     }
 
     fn all_jobs(&self) -> &[PrintJob] {
@@ -1116,8 +1117,7 @@ impl Printer {
     fn set_option(&mut self, key: &str, value: &str) {
         // Remove existing option with the same key
         self.options.retain(|(k, _)| k != key);
-        self.options
-            .push((key.to_string(), value.to_string()));
+        self.options.push((key.to_string(), value.to_string()));
     }
 
     fn _get_option(&self, key: &str) -> Option<&str> {
@@ -1295,11 +1295,7 @@ impl CupsSystem {
         p2.ppd = Some(ppd2);
         self.printers.push(p2);
 
-        let mut p3 = Printer::new(
-            "PDF_Printer",
-            "cups-pdf:/",
-            "CUPS-PDF Virtual Printer",
-        );
+        let mut p3 = Printer::new("PDF_Printer", "cups-pdf:/", "CUPS-PDF Virtual Printer");
         p3.location = "Virtual".to_string();
         p3.description = "Print to PDF".to_string();
         p3.shared = true;
@@ -1386,9 +1382,9 @@ impl CupsSystem {
         size: u64,
         options: JobOptions,
     ) -> CupsResult<u32> {
-        let printer = self.find_printer(printer_name).ok_or_else(|| {
-            CupsError::new(&format!("Printer '{printer_name}' not found"))
-        })?;
+        let printer = self
+            .find_printer(printer_name)
+            .ok_or_else(|| CupsError::new(&format!("Printer '{printer_name}' not found")))?;
         if !printer.accepting {
             return Err(CupsError::new(&format!(
                 "Printer '{}' is not accepting jobs",
@@ -1410,19 +1406,21 @@ impl CupsSystem {
         job.size = size;
         job.options = options;
         // Must re-borrow mutably after the immutable borrow above
-        let printer = self.find_printer_mut(printer_name).ok_or_else(|| {
-            CupsError::new(&format!("Printer '{printer_name}' not found"))
-        })?;
+        let printer = self
+            .find_printer_mut(printer_name)
+            .ok_or_else(|| CupsError::new(&format!("Printer '{printer_name}' not found")))?;
         printer.jobs.push(job);
         Ok(job_id)
     }
 
     fn cancel_job(&mut self, printer_name: &str, job_id: u32) -> CupsResult<()> {
-        let printer = self.find_printer_mut(printer_name).ok_or_else(|| {
-            CupsError::new(&format!("Printer '{printer_name}' not found"))
-        })?;
+        let printer = self
+            .find_printer_mut(printer_name)
+            .ok_or_else(|| CupsError::new(&format!("Printer '{printer_name}' not found")))?;
         let job = printer.find_job_mut(job_id).ok_or_else(|| {
-            CupsError::new(&format!("Job {job_id} not found on printer '{printer_name}'"))
+            CupsError::new(&format!(
+                "Job {job_id} not found on printer '{printer_name}'"
+            ))
         })?;
         if !job.can_cancel() {
             return Err(CupsError::new(&format!(
@@ -1435,9 +1433,9 @@ impl CupsSystem {
     }
 
     fn cancel_all_jobs(&mut self, printer_name: &str) -> CupsResult<u32> {
-        let printer = self.find_printer_mut(printer_name).ok_or_else(|| {
-            CupsError::new(&format!("Printer '{printer_name}' not found"))
-        })?;
+        let printer = self
+            .find_printer_mut(printer_name)
+            .ok_or_else(|| CupsError::new(&format!("Printer '{printer_name}' not found")))?;
         let mut count = 0u32;
         for job in &mut printer.jobs {
             if job.can_cancel() {
@@ -1510,18 +1508,12 @@ fn parse_bool_option(value: &str) -> CupsResult<bool> {
     match value {
         "true" | "yes" | "on" | "1" => Ok(true),
         "false" | "no" | "off" | "0" => Ok(false),
-        _ => Err(CupsError::new(&format!(
-            "Invalid boolean value: {value}"
-        ))),
+        _ => Err(CupsError::new(&format!("Invalid boolean value: {value}"))),
     }
 }
 
 fn bool_to_str(b: bool) -> &'static str {
-    if b {
-        "true"
-    } else {
-        "false"
-    }
+    if b { "true" } else { "false" }
 }
 
 fn parse_option_pair(s: &str) -> Option<(&str, &str)> {
@@ -1543,9 +1535,7 @@ fn validate_printer_name(name: &str) -> CupsResult<()> {
         }
     }
     if name.starts_with('-') || name.starts_with('.') {
-        return Err(CupsError::new(
-            "Printer name cannot start with '-' or '.'",
-        ));
+        return Err(CupsError::new("Printer name cannot start with '-' or '.'"));
     }
     Ok(())
 }
@@ -1572,9 +1562,7 @@ fn format_timestamp(ts: u64) -> String {
     let remaining_days = days % 365;
     let month = remaining_days / 30 + 1;
     let day = remaining_days % 30 + 1;
-    format!(
-        "{years:04}-{month:02}-{day:02} {hours:02}:{mins:02}:{secs:02}"
-    )
+    format!("{years:04}-{month:02}-{day:02} {hours:02}:{mins:02}:{secs:02}")
 }
 
 // ============================================================================
@@ -1681,11 +1669,7 @@ fn build_simulated_drivers() -> Vec<DriverInfo> {
             "drv:///lexmark.drv/lexmark-ms431dn.ppd",
             "Lexmark MS431dn",
         ),
-        DriverInfo::new(
-            "ppd",
-            "everywhere",
-            "IPP Everywhere",
-        ),
+        DriverInfo::new("ppd", "everywhere", "IPP Everywhere"),
     ]
 }
 
@@ -1702,47 +1686,99 @@ fn build_sample_ppd(filename: &str, manufacturer: &str, model: &str) -> PpdFile 
     page_size.add_choice("Legal", "US Legal", "<</PageSize[612 1008]>>setpagedevice");
     page_size.add_choice("A4", "A4", "<</PageSize[595 842]>>setpagedevice");
     page_size.add_choice("A5", "A5", "<</PageSize[420 595]>>setpagedevice");
-    page_size.add_choice("Executive", "Executive", "<</PageSize[522 756]>>setpagedevice");
+    page_size.add_choice(
+        "Executive",
+        "Executive",
+        "<</PageSize[522 756]>>setpagedevice",
+    );
     ppd.add_option(page_size);
 
     // Resolution option
-    let mut resolution =
-        PpdOption::new("Resolution", "Output Resolution", PpdOptionType::PickOne, "600dpi");
-    resolution.add_choice("300dpi", "300 DPI", "<</HWResolution[300 300]>>setpagedevice");
-    resolution.add_choice("600dpi", "600 DPI", "<</HWResolution[600 600]>>setpagedevice");
-    resolution.add_choice("1200dpi", "1200 DPI", "<</HWResolution[1200 1200]>>setpagedevice");
+    let mut resolution = PpdOption::new(
+        "Resolution",
+        "Output Resolution",
+        PpdOptionType::PickOne,
+        "600dpi",
+    );
+    resolution.add_choice(
+        "300dpi",
+        "300 DPI",
+        "<</HWResolution[300 300]>>setpagedevice",
+    );
+    resolution.add_choice(
+        "600dpi",
+        "600 DPI",
+        "<</HWResolution[600 600]>>setpagedevice",
+    );
+    resolution.add_choice(
+        "1200dpi",
+        "1200 DPI",
+        "<</HWResolution[1200 1200]>>setpagedevice",
+    );
     ppd.add_option(resolution);
 
     // Duplex option
-    let mut duplex = PpdOption::new("Duplex", "Two-Sided Printing", PpdOptionType::PickOne, "None");
+    let mut duplex = PpdOption::new(
+        "Duplex",
+        "Two-Sided Printing",
+        PpdOptionType::PickOne,
+        "None",
+    );
     duplex.add_choice("None", "Off", "<</Duplex false>>setpagedevice");
-    duplex.add_choice("DuplexNoTumble", "Long Edge", "<</Duplex true/Tumble false>>setpagedevice");
-    duplex.add_choice("DuplexTumble", "Short Edge", "<</Duplex true/Tumble true>>setpagedevice");
+    duplex.add_choice(
+        "DuplexNoTumble",
+        "Long Edge",
+        "<</Duplex true/Tumble false>>setpagedevice",
+    );
+    duplex.add_choice(
+        "DuplexTumble",
+        "Short Edge",
+        "<</Duplex true/Tumble true>>setpagedevice",
+    );
     ppd.add_option(duplex);
 
     // InputSlot option
     let mut input_slot =
         PpdOption::new("InputSlot", "Media Source", PpdOptionType::PickOne, "Auto");
     input_slot.add_choice("Auto", "Automatic", "");
-    input_slot.add_choice("Tray1", "Tray 1", "<</ManualFeed false /MediaPosition 0>>setpagedevice");
-    input_slot.add_choice("Tray2", "Tray 2", "<</ManualFeed false /MediaPosition 1>>setpagedevice");
+    input_slot.add_choice(
+        "Tray1",
+        "Tray 1",
+        "<</ManualFeed false /MediaPosition 0>>setpagedevice",
+    );
+    input_slot.add_choice(
+        "Tray2",
+        "Tray 2",
+        "<</ManualFeed false /MediaPosition 1>>setpagedevice",
+    );
     input_slot.add_choice("Manual", "Manual Feed", "<</ManualFeed true>>setpagedevice");
     ppd.add_option(input_slot);
 
     // MediaType option
-    let mut media_type =
-        PpdOption::new("MediaType", "Media Type", PpdOptionType::PickOne, "Plain");
+    let mut media_type = PpdOption::new("MediaType", "Media Type", PpdOptionType::PickOne, "Plain");
     media_type.add_choice("Plain", "Plain Paper", "<</MediaType(Plain)>>setpagedevice");
     media_type.add_choice("Thick", "Thick Paper", "<</MediaType(Thick)>>setpagedevice");
     media_type.add_choice("Thin", "Thin Paper", "<</MediaType(Thin)>>setpagedevice");
-    media_type.add_choice("Envelope", "Envelope", "<</MediaType(Envelope)>>setpagedevice");
-    media_type.add_choice("Transparency", "Transparency", "<</MediaType(Transparency)>>setpagedevice");
+    media_type.add_choice(
+        "Envelope",
+        "Envelope",
+        "<</MediaType(Envelope)>>setpagedevice",
+    );
+    media_type.add_choice(
+        "Transparency",
+        "Transparency",
+        "<</MediaType(Transparency)>>setpagedevice",
+    );
     media_type.add_choice("Labels", "Labels", "<</MediaType(Labels)>>setpagedevice");
     ppd.add_option(media_type);
 
     // OutputMode option (color / mono)
-    let mut output_mode =
-        PpdOption::new("OutputMode", "Output Mode", PpdOptionType::PickOne, "Normal");
+    let mut output_mode = PpdOption::new(
+        "OutputMode",
+        "Output Mode",
+        PpdOptionType::PickOne,
+        "Normal",
+    );
     output_mode.add_choice("Normal", "Color", "");
     output_mode.add_choice("Monochrome", "Monochrome", "");
     ppd.add_option(output_mode);
@@ -1816,10 +1852,7 @@ fn run_cupsd(args: &[String]) -> i32 {
     println!("cupsd: log directory: {LOG_DIR}");
     println!("cupsd: PPD directory: {PPD_DIR}");
     println!("cupsd: listening on *:{}", config.port);
-    println!(
-        "cupsd: server name: {}",
-        config.server_name
-    );
+    println!("cupsd: server name: {}", config.server_name);
     println!("cupsd: ready to accept connections");
     0
 }
@@ -2142,10 +2175,7 @@ fn run_lpstat(args: &[String]) -> i32 {
 
     if show_default {
         match system.default_printer() {
-            Some(p) => println!(
-                "system default destination: {}",
-                p.name
-            ),
+            Some(p) => println!("system default destination: {}", p.name),
             None => println!("no system default destination"),
         }
     }
@@ -2180,22 +2210,17 @@ fn run_lpstat(args: &[String]) -> i32 {
                 println!("\tLocation: {}", printer.location);
                 println!("\tConnection: {}", printer.uri);
                 println!("\tDriver: {}", printer.driver);
-                println!("\tState: {} (IPP {})", printer.state, printer.state.ipp_code());
+                println!(
+                    "\tState: {} (IPP {})",
+                    printer.state,
+                    printer.state.ipp_code()
+                );
                 println!("\tAccepting: {accepting}");
                 println!("\tShared: {}", bool_to_str(printer.shared));
                 println!("\tDefault: {}", bool_to_str(printer.is_default));
-                println!(
-                    "\tActive jobs: {}",
-                    printer.active_job_count()
-                );
-                println!(
-                    "\tTotal jobs: {}",
-                    printer.job_count()
-                );
-                println!(
-                    "\tURI: {}",
-                    printer.printer_uri()
-                );
+                println!("\tActive jobs: {}", printer.active_job_count());
+                println!("\tTotal jobs: {}", printer.job_count());
+                println!("\tURI: {}", printer.printer_uri());
             }
         }
 
@@ -2213,10 +2238,7 @@ fn run_lpstat(args: &[String]) -> i32 {
 
     if show_devices {
         for printer in &system.printers {
-            println!(
-                "device for {}: {}",
-                printer.name, printer.uri
-            );
+            println!("device for {}: {}", printer.name, printer.uri);
         }
     }
 
@@ -2224,16 +2246,16 @@ fn run_lpstat(args: &[String]) -> i32 {
         let all = system.all_jobs();
         for (printer, job) in &all {
             // Filter by printer
-            if let Some(ref name) = specific_printer {
-                if printer.name != name.as_str() {
-                    continue;
-                }
+            if let Some(ref name) = specific_printer
+                && printer.name != name.as_str()
+            {
+                continue;
             }
             // Filter by user
-            if let Some(ref user) = specific_user {
-                if job.owner != user.as_str() {
-                    continue;
-                }
+            if let Some(ref user) = specific_user
+                && job.owner != user.as_str()
+            {
+                continue;
             }
             // Filter by completion status
             if !show_completed && job.state.is_terminal() {
@@ -2390,15 +2412,13 @@ fn run_lpadmin(args: &[String]) -> i32 {
                 if i < args.len() {
                     if let Some((key, value)) = parse_option_pair(&args[i]) {
                         match key {
-                            "printer-is-shared" => {
-                                match parse_bool_option(value) {
-                                    Ok(v) => shared = Some(v),
-                                    Err(e) => {
-                                        eprintln!("lpadmin: {e}");
-                                        return 1;
-                                    }
+                            "printer-is-shared" => match parse_bool_option(value) {
+                                Ok(v) => shared = Some(v),
+                                Err(e) => {
+                                    eprintln!("lpadmin: {e}");
+                                    return 1;
                                 }
-                            }
+                            },
                             _ => {
                                 options.push((key.to_string(), value.to_string()));
                             }
@@ -2473,9 +2493,9 @@ fn run_lpadmin(args: &[String]) -> i32 {
     // Create or modify printer
     if system.find_printer(&pname).is_some() {
         // Modify existing printer
-        let printer = system.find_printer_mut(&pname).unwrap_or_else(|| {
-            unreachable!("printer exists but find_printer_mut failed")
-        });
+        let printer = system
+            .find_printer_mut(&pname)
+            .unwrap_or_else(|| unreachable!("printer exists but find_printer_mut failed"));
         if let Some(ref uri) = device_uri {
             printer.uri = uri.clone();
             printer._device_uri = uri.clone();
@@ -2605,8 +2625,7 @@ fn run_cancel(args: &[String]) -> i32 {
     if cancel_all {
         // Cancel all jobs on all or specified printer
         let default_name = system.default_printer_name();
-        let pname_owned = printer_name
-            .unwrap_or(default_name);
+        let pname_owned = printer_name.unwrap_or(default_name);
         match system.cancel_all_jobs(&pname_owned) {
             Ok(count) => {
                 if purge {
@@ -2665,16 +2684,13 @@ fn run_cancel(args: &[String]) -> i32 {
             };
 
             // Check user filter
-            if let Some(ref user) = user_filter {
-                if let Some((_, job)) = system.find_job_globally(id) {
-                    if job.owner != user.as_str() {
-                        eprintln!(
-                            "cancel: job {id} not owned by '{user}'"
-                        );
-                        exit_code = 1;
-                        continue;
-                    }
-                }
+            if let Some(ref user) = user_filter
+                && let Some((_, job)) = system.find_job_globally(id)
+                && job.owner != user.as_str()
+            {
+                eprintln!("cancel: job {id} not owned by '{user}'");
+                exit_code = 1;
+                continue;
             }
 
             match system.cancel_job(&target_printer, id) {
@@ -2815,11 +2831,7 @@ fn run_cupsdisable(args: &[String]) -> i32 {
 
 fn run_enable_disable(args: &[String], enable: bool) -> i32 {
     let mut system = CupsSystem::new();
-    let cmd_name = if enable {
-        "cupsenable"
-    } else {
-        "cupsdisable"
-    };
+    let cmd_name = if enable { "cupsenable" } else { "cupsdisable" };
     let mut reason: Option<String> = None;
     let mut hold = false;
     let mut printer_names: Vec<String> = Vec::new();
@@ -2984,24 +2996,19 @@ fn run_lpinfo(args: &[String]) -> i32 {
         for device in &system.devices {
             // Apply scheme filter
             if let Some(ref scheme) = scheme_filter {
-                let dev_scheme = device
-                    .device_uri
-                    .split("://")
-                    .next()
-                    .unwrap_or("");
+                let dev_scheme = device.device_uri.split("://").next().unwrap_or("");
                 if dev_scheme != scheme.as_str() {
                     continue;
                 }
             }
             // Apply make-and-model filter
-            if let Some(ref filter) = make_model_filter {
-                if !device
+            if let Some(ref filter) = make_model_filter
+                && !device
                     .device_make_and_model
                     .to_lowercase()
                     .contains(filter.as_str())
-                {
-                    continue;
-                }
+            {
+                continue;
             }
             if show_long {
                 println!(
@@ -3019,14 +3026,13 @@ fn run_lpinfo(args: &[String]) -> i32 {
 
     if show_drivers {
         for driver in &system.drivers {
-            if let Some(ref filter) = make_model_filter {
-                if !driver
+            if let Some(ref filter) = make_model_filter
+                && !driver
                     .driver_make_and_model
                     .to_lowercase()
                     .contains(filter.as_str())
-                {
-                    continue;
-                }
+            {
+                continue;
             }
             if show_long {
                 println!(
@@ -3145,21 +3151,16 @@ fn run_lpoptions(args: &[String]) -> i32 {
                         }
                     })
                     .collect();
-                println!(
-                    "{}/{}: {}",
-                    opt.keyword,
-                    opt.text,
-                    choices_str.join(" ")
-                );
+                println!("{}/{}: {}", opt.keyword, opt.text, choices_str.join(" "));
             }
         } else {
             println!("lpoptions: no PPD options for '{pname}'");
         }
 
         // Also show instance options
-        let printer = system.find_printer(&pname).unwrap_or_else(|| {
-            unreachable!("printer was found above")
-        });
+        let printer = system
+            .find_printer(&pname)
+            .unwrap_or_else(|| unreachable!("printer was found above"));
         if !printer.options.is_empty() {
             println!();
             println!("Printer instance options:");
@@ -3239,10 +3240,7 @@ fn run_lpoptions(args: &[String]) -> i32 {
 
     let default_opts = JobOptions::new();
     let opts = default_opts.to_option_strings();
-    let parts: Vec<String> = opts
-        .iter()
-        .map(|(k, v)| format!("{k}={v}"))
-        .collect();
+    let parts: Vec<String> = opts.iter().map(|(k, v)| format!("{k}={v}")).collect();
     println!("{}", parts.join(" "));
 
     // Show printer-specific options
@@ -3293,10 +3291,7 @@ fn run_cupstestppd(args: &[String]) -> i32 {
                     match PpdConformance::from_str(&args[i]) {
                         Some(c) => conformance = c,
                         None => {
-                            eprintln!(
-                                "cupstestppd: unknown conformance level '{}'",
-                                args[i]
-                            );
+                            eprintln!("cupstestppd: unknown conformance level '{}'", args[i]);
                             return 1;
                         }
                     }
@@ -3405,7 +3400,12 @@ fn build_test_ppd(filename: &str) -> PpdFile {
         opt.add_choice("Letter", "Letter", "");
         ppd.add_option(opt);
         // Constraint referencing unknown options
-        ppd.add_constraint(PpdConstraint::new("PageSize", "Letter", "NonExistent", "Foo"));
+        ppd.add_constraint(PpdConstraint::new(
+            "PageSize",
+            "Letter",
+            "NonExistent",
+            "Foo",
+        ));
         ppd
     } else if filename.contains("warn") {
         let mut ppd = build_sample_ppd(filename, "TestMfg", "Test Printer");
@@ -3464,7 +3464,8 @@ fn main() {
         "lpinfo" => run_lpinfo(&rest),
         "lpoptions" => run_lpoptions(&rest),
         "cupstestppd" => run_cupstestppd(&rest),
-        "cupsd" | _ => run_cupsd(&rest),
+        // "cupsd" and any unrecognised personality fall back to the daemon.
+        _ => run_cupsd(&rest),
     };
 
     process::exit(exit_code);
@@ -3524,7 +3525,10 @@ mod tests {
     fn test_job_state_from_str() {
         assert_eq!(JobState::_from_str("pending"), Some(JobState::Pending));
         assert_eq!(JobState::_from_str("held"), Some(JobState::Held));
-        assert_eq!(JobState::_from_str("processing"), Some(JobState::Processing));
+        assert_eq!(
+            JobState::_from_str("processing"),
+            Some(JobState::Processing)
+        );
         assert_eq!(JobState::_from_str("completed"), Some(JobState::Completed));
         assert_eq!(JobState::_from_str("canceled"), Some(JobState::Canceled));
         assert_eq!(JobState::_from_str("aborted"), Some(JobState::_Aborted));
@@ -3620,10 +3624,7 @@ mod tests {
             Sides::from_str("two-sided-long-edge"),
             Some(Sides::TwoSidedLongEdge)
         );
-        assert_eq!(
-            Sides::from_str("two-sided"),
-            Some(Sides::TwoSidedLongEdge)
-        );
+        assert_eq!(Sides::from_str("two-sided"), Some(Sides::TwoSidedLongEdge));
         assert_eq!(
             Sides::from_str("two-sided-short-edge"),
             Some(Sides::TwoSidedShortEdge)
@@ -3642,14 +3643,8 @@ mod tests {
 
     #[test]
     fn test_print_quality_from_str() {
-        assert_eq!(
-            PrintQuality::from_str("draft"),
-            Some(PrintQuality::Draft)
-        );
-        assert_eq!(
-            PrintQuality::from_str("normal"),
-            Some(PrintQuality::Normal)
-        );
+        assert_eq!(PrintQuality::from_str("draft"), Some(PrintQuality::Draft));
+        assert_eq!(PrintQuality::from_str("normal"), Some(PrintQuality::Normal));
         assert_eq!(PrintQuality::from_str("high"), Some(PrintQuality::High));
         assert_eq!(PrintQuality::from_str("best"), Some(PrintQuality::High));
         assert_eq!(PrintQuality::from_str("3"), Some(PrintQuality::Draft));
@@ -3715,15 +3710,9 @@ mod tests {
         );
         assert_eq!(MediaSize::from_str("legal"), Some(MediaSize::Legal));
         assert_eq!(MediaSize::from_str("a4"), Some(MediaSize::A4));
-        assert_eq!(
-            MediaSize::from_str("iso_a4_210x297mm"),
-            Some(MediaSize::A4)
-        );
+        assert_eq!(MediaSize::from_str("iso_a4_210x297mm"), Some(MediaSize::A4));
         assert_eq!(MediaSize::from_str("tabloid"), Some(MediaSize::Tabloid));
-        assert_eq!(
-            MediaSize::from_str("env-10"),
-            Some(MediaSize::Envelope10)
-        );
+        assert_eq!(MediaSize::from_str("env-10"), Some(MediaSize::Envelope10));
         assert_eq!(MediaSize::from_str("custom"), Some(MediaSize::Custom));
         assert_eq!(MediaSize::from_str("nonexistent"), None);
     }
@@ -3752,10 +3741,7 @@ mod tests {
     fn test_media_source_from_str() {
         assert_eq!(MediaSource::from_str("auto"), Some(MediaSource::Auto));
         assert_eq!(MediaSource::from_str("tray-1"), Some(MediaSource::Tray1));
-        assert_eq!(
-            MediaSource::from_str("manual"),
-            Some(MediaSource::Manual)
-        );
+        assert_eq!(MediaSource::from_str("manual"), Some(MediaSource::Manual));
         assert_eq!(
             MediaSource::from_str("envelope"),
             Some(MediaSource::Envelope)
@@ -3803,10 +3789,7 @@ mod tests {
             PpdConformance::from_str("strict"),
             Some(PpdConformance::Strict)
         );
-        assert_eq!(
-            PpdConformance::from_str("warn"),
-            Some(PpdConformance::Warn)
-        );
+        assert_eq!(PpdConformance::from_str("warn"), Some(PpdConformance::Warn));
         assert_eq!(
             PpdConformance::from_str("relaxed"),
             Some(PpdConformance::Relaxed)
@@ -3976,20 +3959,21 @@ mod tests {
         let opt = PpdOption::new("PageSize", "Size", PpdOptionType::PickOne, "Letter");
         ppd.add_option(opt);
         let issues = ppd.validate();
-        let has_no_choices = issues
-            .iter()
-            .any(|i| i.message.contains("has no choices"));
+        let has_no_choices = issues.iter().any(|i| i.message.contains("has no choices"));
         assert!(has_no_choices);
     }
 
     #[test]
     fn test_ppd_validate_unknown_constraint_ref() {
         let mut ppd = build_sample_ppd("test.ppd", "Test", "Test");
-        ppd.add_constraint(PpdConstraint::new("PageSize", "Letter", "FakeOption", "Foo"));
+        ppd.add_constraint(PpdConstraint::new(
+            "PageSize",
+            "Letter",
+            "FakeOption",
+            "Foo",
+        ));
         let issues = ppd.validate();
-        let has_unknown = issues
-            .iter()
-            .any(|i| i.message.contains("unknown option"));
+        let has_unknown = issues.iter().any(|i| i.message.contains("unknown option"));
         assert!(has_unknown);
     }
 
@@ -4062,7 +4046,10 @@ mod tests {
     #[test]
     fn test_job_options_parse_orientation() {
         let mut opts = JobOptions::new();
-        assert!(opts.parse_option("orientation-requested", "landscape").is_ok());
+        assert!(
+            opts.parse_option("orientation-requested", "landscape")
+                .is_ok()
+        );
         assert!(matches!(opts.orientation, Orientation::Landscape));
     }
 
@@ -4201,10 +4188,7 @@ mod tests {
     #[test]
     fn test_printer_uri() {
         let p = Printer::new("MyPrinter", "ipp://test", "drv");
-        assert_eq!(
-            p.printer_uri(),
-            "ipp://localhost:631/printers/MyPrinter"
-        );
+        assert_eq!(p.printer_uri(), "ipp://localhost:631/printers/MyPrinter");
     }
 
     #[test]
@@ -4355,9 +4339,10 @@ mod tests {
     fn test_cups_system_submit_job_nonexistent_printer() {
         let mut sys = CupsSystem::new();
         let opts = JobOptions::new();
-        assert!(sys
-            .submit_job("Ghost", "bob", "report.pdf", 4096, opts)
-            .is_err());
+        assert!(
+            sys.submit_job("Ghost", "bob", "report.pdf", 4096, opts)
+                .is_err()
+        );
     }
 
     #[test]
@@ -4365,9 +4350,10 @@ mod tests {
         let mut sys = CupsSystem::new();
         sys.find_printer_mut("HP_LaserJet").unwrap().accepting = false;
         let opts = JobOptions::new();
-        assert!(sys
-            .submit_job("HP_LaserJet", "bob", "report.pdf", 4096, opts)
-            .is_err());
+        assert!(
+            sys.submit_job("HP_LaserJet", "bob", "report.pdf", 4096, opts)
+                .is_err()
+        );
     }
 
     #[test]
@@ -4375,9 +4361,10 @@ mod tests {
         let mut sys = CupsSystem::new();
         sys.find_printer_mut("HP_LaserJet").unwrap().state = PrinterState::Stopped;
         let opts = JobOptions::new();
-        assert!(sys
-            .submit_job("HP_LaserJet", "bob", "report.pdf", 4096, opts)
-            .is_err());
+        assert!(
+            sys.submit_job("HP_LaserJet", "bob", "report.pdf", 4096, opts)
+                .is_err()
+        );
     }
 
     #[test]
@@ -4503,10 +4490,7 @@ mod tests {
     #[test]
     fn test_parse_option_pair() {
         assert_eq!(parse_option_pair("key=value"), Some(("key", "value")));
-        assert_eq!(
-            parse_option_pair("key=val=ue"),
-            Some(("key", "val=ue"))
-        );
+        assert_eq!(parse_option_pair("key=val=ue"), Some(("key", "val=ue")));
         assert_eq!(parse_option_pair("noequals"), None);
     }
 
@@ -4818,37 +4802,25 @@ mod tests {
 
     #[test]
     fn test_lpadmin_delete_printer() {
-        let args = vec![
-            "-x".to_string(),
-            "PDF_Printer".to_string(),
-        ];
+        let args = vec!["-x".to_string(), "PDF_Printer".to_string()];
         assert_eq!(run_lpadmin(&args), 0);
     }
 
     #[test]
     fn test_lpadmin_delete_nonexistent() {
-        let args = vec![
-            "-x".to_string(),
-            "Ghost".to_string(),
-        ];
+        let args = vec!["-x".to_string(), "Ghost".to_string()];
         assert_eq!(run_lpadmin(&args), 1);
     }
 
     #[test]
     fn test_lpadmin_set_default() {
-        let args = vec![
-            "-d".to_string(),
-            "Epson_Inkjet".to_string(),
-        ];
+        let args = vec!["-d".to_string(), "Epson_Inkjet".to_string()];
         assert_eq!(run_lpadmin(&args), 0);
     }
 
     #[test]
     fn test_lpadmin_create_no_uri() {
-        let args = vec![
-            "-p".to_string(),
-            "NewPrinter".to_string(),
-        ];
+        let args = vec!["-p".to_string(), "NewPrinter".to_string()];
         assert_eq!(run_lpadmin(&args), 1);
     }
 
@@ -4992,11 +4964,7 @@ mod tests {
 
     #[test]
     fn test_lpinfo_devices_scheme() {
-        let args = vec![
-            "-v".to_string(),
-            "--scheme".to_string(),
-            "ipp".to_string(),
-        ];
+        let args = vec!["-v".to_string(), "--scheme".to_string(), "ipp".to_string()];
         assert_eq!(run_lpinfo(&args), 0);
     }
 
@@ -5068,11 +5036,7 @@ mod tests {
 
     #[test]
     fn test_lpoptions_nonexistent_printer() {
-        let args = vec![
-            "-p".to_string(),
-            "Ghost".to_string(),
-            "-l".to_string(),
-        ];
+        let args = vec!["-p".to_string(), "Ghost".to_string(), "-l".to_string()];
         assert_eq!(run_lpoptions(&args), 1);
     }
 
@@ -5128,19 +5092,13 @@ mod tests {
 
     #[test]
     fn test_cupstestppd_verbose() {
-        let args = vec![
-            "-v".to_string(),
-            "good_printer.ppd".to_string(),
-        ];
+        let args = vec!["-v".to_string(), "good_printer.ppd".to_string()];
         assert_eq!(run_cupstestppd(&args), 0);
     }
 
     #[test]
     fn test_cupstestppd_quiet() {
-        let args = vec![
-            "-q".to_string(),
-            "good_printer.ppd".to_string(),
-        ];
+        let args = vec!["-q".to_string(), "good_printer.ppd".to_string()];
         assert_eq!(run_cupstestppd(&args), 0);
     }
 
@@ -5296,10 +5254,7 @@ mod tests {
 
     #[test]
     fn test_lpstat_completed_jobs() {
-        let args = vec![
-            "-W".to_string(),
-            "completed".to_string(),
-        ];
+        let args = vec!["-W".to_string(), "completed".to_string()];
         assert_eq!(run_lpstat(&args), 0);
     }
 
@@ -5315,10 +5270,7 @@ mod tests {
 
     #[test]
     fn test_cupsdisable_hold() {
-        let args = vec![
-            "--hold".to_string(),
-            "HP_LaserJet".to_string(),
-        ];
+        let args = vec!["--hold".to_string(), "HP_LaserJet".to_string()];
         assert_eq!(run_cupsdisable(&args), 0);
     }
 }

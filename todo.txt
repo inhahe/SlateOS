@@ -1,3 +1,21 @@
+## BUG (noticed+FIXED 2026-05-31): cups had a broken test build + ~9
+##   pre-existing clippy errors.  userspace/cups/src/main.rs:
+##     * TEST BUILD DIDN'T COMPILE: underscore-prefix anti-pattern on struct
+##       fields — PpdOption._option_type and PpdConstraint._option1/_option2,
+##       while tests read .option_type/.option1/.option2.  Renamed to clean
+##       names + #[allow(dead_code)] (option_type isn't consulted by the
+##       constraint engine yet; the constraint is_violated check is implemented
+##       and tested but not wired into the print-option validation path).
+##       206/206 tests pass.
+##     * ~9 pre-existing clippy errors: redundant field init, collapsible ifs,
+##       a wildcard `"cupsd" | _` arm, and a Vec::new()+push chain rewritten as
+##       a vec![] literal.  Auto-fixed 7, manually fixed the push-chain and the
+##       wildcard arm.
+##     * LIMITATION (dispatch-wiring gap): PpdConstraint::is_violated and the
+##       option_type metadata exist + are tested but aren't reached from the
+##       option-validation path; reserved for a future PPD-constraint pass.
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): pipewire had a broken test build, a real
 ##   production arg-parsing bug, and ~18 pre-existing clippy errors.
 ##   userspace/pipewire/src/main.rs:

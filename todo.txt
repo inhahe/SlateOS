@@ -1,24 +1,41 @@
-## BUG (noticed 2026-05-30): SYSTEMIC — userspace time tools call WRONG
-##                            syscall numbers (clock access broken across
-##                            ~12 std binaries); std::time is also broken.
+## BUG (noticed 2026-05-30): SYSTEMIC — a swathe of userspace tools call
+##                            WRONG syscall numbers because they hand-roll
+##                            raw `syscall` wrappers instead of using std.
 ##
-##  SEVERITY: high (functional + safety).  Several user-facing time tools
-##  do not work at all, and some invoke privileged/unintended syscalls.
+##  SEVERITY: high (functional + safety).  Several user-facing tools do not
+##  work at all, and some invoke privileged/unintended syscalls.
 ##
-##  ROOT CAUSE (two compounding problems):
-##   1. The userspace target (toolchain/x86_64-ouros.json) declares
-##      llvm-target x86_64-unknown-linux-musl, os=linux, env=musl.  So
-##      Rust std (built via build-std) uses the Linux/musl platform layer:
-##      std::time::SystemTime::now()/Instant::now() issue the *Linux*
-##      clock_gettime syscall (rax=228 on x86_64 Linux) via the SYSCALL
-##      instruction.  But our kernel has NO Linux syscall-translation layer
-##      (roadmap line 5079 is unchecked) and its dispatch table is indexed
-##      by NATIVE numbers: kernel rax=228 is SYS_PIPE_POLL, not
-##      clock_gettime.  => std::time hits the wrong handler => returns
-##      garbage/EBADF.  So std time does not work on this OS today.
-##   2. Because std time doesn't work, each time tool hand-rolls a raw
-##      `syscall` wrapper — and there is NO shared source of truth for the
-##      numbers, so they each guessed differently and mostly WRONG:
+##  *** CORRECTION (2026-05-30): the original premise below — "std::time is
+##  broken, std issues raw Linux syscalls that hit the wrong native handler"
+##  — is WRONG.  std actually WORKS on this OS.  The userspace target links
+##  against the sysroot's libc.a + libstubs.a (toolchain/sysroot/lib), and
+##  the `posix` crate implements the libc symbols (clock_gettime, open,
+##  read, write, rename, statvfs, mkfifo, utimensat, ...) as `extern "C"`
+##  functions that route to NATIVE OurOS syscalls.  So std::time calls the
+##  posix `clock_gettime`, which calls syscall0(SYS_CLOCK_REALTIME=14) /
+##  syscall0(SYS_CLOCK_MONOTONIC=10) — the correct native numbers — and
+##  std::fs / std::net / std::process likewise route through posix.  This is
+##  confirmed: nmap and stat now use std::fs/std::io/std::time/std::process
+##  and build clean for x86_64-ouros.
+##
+##  THEREFORE the proper fix for any hand-rolled tool is simply to USE STD
+##  (std::time / std::fs / std::process), not to hand-correct raw syscall
+##  numbers.  The earlier per-tool number fixes (date/at/dig/rsync/scp/etc.)
+##  are functionally correct but are the wrong *approach*; they should be
+##  migrated to std in the broader audit below.  For the handful of POSIX
+##  ops std doesn't expose (statvfs, mkfifo, utimensat) declare a thin
+##  `extern "C"` binding to the posix symbol — see stat for the pattern.
+##
+##  ORIGINAL (now-disproven) ROOT-CAUSE ANALYSIS, kept for context:
+##   1. [DISPROVEN] It was believed std (os=linux/musl) issued the *Linux*
+##      clock_gettime syscall (rax=228) directly via the SYSCALL instruction,
+##      and that since kernel rax=228 = SYS_PIPE_POLL, std::time returned
+##      garbage.  In fact std calls the libc `clock_gettime` *symbol*, which
+##      our posix crate provides and routes to the native no-arg clock
+##      syscalls.  std::time works.
+##   2. Independently, each hand-rolled time tool wrote a raw `syscall`
+##      wrapper — with NO shared source of truth for the numbers, so they
+##      each guessed differently and mostly WRONG:
 ##        - at, date, nmap:           SYS_CLOCK_GETTIME = 40  -> kernel 40 = SYS_PORT_READ
 ##        - date:                     SYS_CLOCK_SETTIME = 41  -> kernel 41 = SYS_PORT_WRITE
 ##        - dig, rsync, scp, screen,
@@ -79,7 +96,23 @@
 ##    * at    — realtime read 40->14 (no-arg ns); dead Timespec removed.
 ##    * nmap  — RTT timer 40->SYS_CLOCK_MONOTONIC=10 (monotonic is the right
 ##              clock for elapsed-time measurement).
-##    * stat  — realtime read 228->14 (dead_code helper, fixed anyway).
+##    * stat  (FULLY FIXED 2026-05-30) — this multi-personality binary
+##              (stat/touch/ln/readlink/realpath/mkfifo) hand-rolled ELEVEN
+##              filesystem syscalls with wrong Linux numbers that collide with
+##              unrelated native syscalls (SYS_STAT=18 unassigned, SYS_LSTAT=19
+##              unassigned, SYS_FSTATAT=20=SYS_MMAP, SYS_UNLINK=10=
+##              SYS_CLOCK_MONOTONIC, SYS_RENAME=41=SYS_PORT_WRITE, SYS_STATFS=42=
+##              SYS_DMA_ALLOC, SYS_UTIMENSAT=35, SYS_LINK=37, SYS_SYMLINK=38,
+##              SYS_READLINK=39, SYS_MKFIFO=40=SYS_PORT_READ) — i.e. it was
+##              entirely non-functional and several paths fired dangerous
+##              port-I/O / mmap / DMA syscalls.  Rewrote to use std::fs for
+##              stat/lstat/readlink/link/symlink/unlink/rename (all route to
+##              native syscalls via posix libc) and thin extern "C" bindings to
+##              the posix statvfs/mkfifo/utimensat symbols for the three ops std
+##              lacks.  Unix-only paths gated #[cfg(unix)] with inert host stubs;
+##              84 host tests pass, builds clean for x86_64-ouros.  (Earlier note
+##              had only flagged the dead-code clock helper at 228->14; the real
+##              breakage was the whole filesystem-syscall block.)
 ##    * dig, rsync, scp, screen, tcpdump — monotonic 30->10 (one-line const;
 ##              they already used the correct no-arg calling convention).
 ##    * ntpd  (FIXED 2026-05-30) — read via SYS_CLOCK_REALTIME=14, step via
@@ -106,13 +139,22 @@
 ##  uid/gid/groups); root-equals-CAP_SYS_TIME matches the documented model and
 ##  is the correct interim. TRIGGER to revisit: when the PCB gains a real POSIX
 ##  capability set.
-##  ALSO STILL OPEN: the shared-`oursys`-crate
-##  refactor (option B) to delete the per-tool hardcoded number tables for
-##  good.  NOTE: while fixing stat I also saw it hardcodes SYS_RENAME=41 and
-##  SYS_STATFS=42, and nmap hardcodes SYS_WRITE=1 — these may be wrong too
-##  (41=SYS_PORT_WRITE); a broader userspace-ABI audit beyond clocks is
-##  warranted.  TRIGGER for the shared-crate refactor + ABI audit: next
-##  dedicated userspace-ABI pass.
+##  ALSO STILL OPEN: a broader userspace-ABI audit.  Now that std is known
+##  to work via the posix libc layer, the shared-`oursys`-crate idea (option
+##  B) is mostly MOOT for the std binaries — the right fix is to delete their
+##  hand-rolled raw-syscall wrappers and call std (and extern "C" posix
+##  symbols for the few ops std lacks), exactly as nmap and stat now do.  A
+##  shared crate is only worth it for the genuinely no_std bare-metal
+##  binaries that cannot link std.
+##  nmap (FIXED 2026-05-30) — had SYS_WRITE=1 (=SYS_EXIT, terminated the
+##    process on first output!) and SYS_EXIT=60 (=SYS_SYSCTL_GET then loop{}
+##    hang); migrated to std::io / std::fs::File / std::process::exit.
+##  REMAINING AUDIT (not yet done): grep the tree for tools that hand-roll
+##  `core::arch::asm!("syscall")` with hardcoded numbers and migrate each to
+##  std where it links std.  ~50 userspace crates use inline-asm syscalls;
+##  many likely have wrong Linux numbers like stat/nmap did.  This is the
+##  next dedicated userspace-ABI pass.  TRIGGER: ongoing — work through them
+##  as encountered or in a focused sweep.
 
 "The dlltool issue blocks host tests on this toolchain (known limitation per CLAUDE.md). Let me confirm the code at least type-checks against the custom target, then cross-compile." what is this dlltool issue?
 

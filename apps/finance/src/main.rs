@@ -54,14 +54,29 @@ enum Category {
 
 impl Category {
     const ALL: [Self; 12] = [
-        Self::Food, Self::Housing, Self::Transportation, Self::Utilities,
-        Self::Healthcare, Self::Entertainment, Self::Shopping, Self::Education,
-        Self::Savings, Self::Income, Self::Investment, Self::Other,
+        Self::Food,
+        Self::Housing,
+        Self::Transportation,
+        Self::Utilities,
+        Self::Healthcare,
+        Self::Entertainment,
+        Self::Shopping,
+        Self::Education,
+        Self::Savings,
+        Self::Income,
+        Self::Investment,
+        Self::Other,
     ];
 
     const EXPENSE_CATS: [Self; 9] = [
-        Self::Food, Self::Housing, Self::Transportation, Self::Utilities,
-        Self::Healthcare, Self::Entertainment, Self::Shopping, Self::Education,
+        Self::Food,
+        Self::Housing,
+        Self::Transportation,
+        Self::Utilities,
+        Self::Healthcare,
+        Self::Entertainment,
+        Self::Shopping,
+        Self::Education,
         Self::Other,
     ];
 
@@ -140,9 +155,18 @@ impl SimpleDate {
 
     fn month_label(&self) -> &'static str {
         match self.month {
-            1 => "January", 2 => "February", 3 => "March", 4 => "April",
-            5 => "May", 6 => "June", 7 => "July", 8 => "August",
-            9 => "September", 10 => "October", 11 => "November", 12 => "December",
+            1 => "January",
+            2 => "February",
+            3 => "March",
+            4 => "April",
+            5 => "May",
+            6 => "June",
+            7 => "July",
+            8 => "August",
+            9 => "September",
+            10 => "October",
+            11 => "November",
+            12 => "December",
             _ => "Unknown",
         }
     }
@@ -155,7 +179,15 @@ impl SimpleDate {
         let days_in_month = match self.month {
             1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
             4 | 6 | 9 | 11 => 30,
-            2 => if self.year % 4 == 0 && (self.year % 100 != 0 || self.year % 400 == 0) { 29 } else { 28 },
+            2 => {
+                if self.year.is_multiple_of(4)
+                    && (!self.year.is_multiple_of(100) || self.year.is_multiple_of(400))
+                {
+                    29
+                } else {
+                    28
+                }
+            }
             _ => 30,
         };
         if self.day < days_in_month {
@@ -249,7 +281,7 @@ struct Budget {
 }
 
 // ── View / screen ───────────────────────────────────────────────────
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Screen {
     Dashboard,
     Transactions,
@@ -260,8 +292,11 @@ enum Screen {
 
 impl Screen {
     const ALL: [Self; 5] = [
-        Self::Dashboard, Self::Transactions, Self::Budgets,
-        Self::Accounts, Self::Reports,
+        Self::Dashboard,
+        Self::Transactions,
+        Self::Budgets,
+        Self::Accounts,
+        Self::Reports,
     ];
 
     fn label(self) -> &'static str {
@@ -336,25 +371,177 @@ impl FinanceApp {
 
         // Sample transactions for May 2026
         let may = |day: u8| SimpleDate::new(2026, 5, day);
-        self.add_transaction(may(1), "Monthly Salary", 500_000, Category::Income, checking_id, "", false);
-        self.add_transaction(may(1), "Rent Payment", -150_000, Category::Housing, checking_id, "Monthly rent", true);
-        self.add_transaction(may(2), "Grocery Store", -8_500, Category::Food, credit_id, "", false);
-        self.add_transaction(may(3), "Electric Bill", -9_500, Category::Utilities, checking_id, "", true);
-        self.add_transaction(may(4), "Coffee Shop", -550, Category::Food, credit_id, "", false);
-        self.add_transaction(may(5), "Gas Station", -4_500, Category::Transportation, credit_id, "", false);
-        self.add_transaction(may(6), "Netflix", -1_599, Category::Entertainment, credit_id, "Monthly sub", true);
-        self.add_transaction(may(7), "Restaurant Dinner", -6_200, Category::Food, credit_id, "", false);
-        self.add_transaction(may(8), "Pharmacy", -2_300, Category::Healthcare, credit_id, "", false);
-        self.add_transaction(may(9), "Online Shopping", -4_999, Category::Shopping, credit_id, "", false);
-        self.add_transaction(may(10), "Transfer to Savings", -50_000, Category::Savings, checking_id, "", true);
-        self.add_transaction(may(10), "Savings Deposit", 50_000, Category::Savings, savings_id, "", false);
-        self.add_transaction(may(11), "Lunch", -1_200, Category::Food, credit_id, "", false);
-        self.add_transaction(may(12), "Book Purchase", -2_499, Category::Education, credit_id, "", false);
-        self.add_transaction(may(13), "Internet Bill", -7_999, Category::Utilities, checking_id, "", true);
-        self.add_transaction(may(14), "Grocery Store", -11_200, Category::Food, credit_id, "Weekly groceries", false);
-        self.add_transaction(may(15), "Freelance Payment", 75_000, Category::Income, checking_id, "Web project", false);
-        self.add_transaction(may(16), "Movie Tickets", -3_000, Category::Entertainment, credit_id, "", false);
-        self.add_transaction(may(17), "Public Transit", -276, Category::Transportation, credit_id, "Bus fare", false);
+        self.add_transaction(
+            may(1),
+            "Monthly Salary",
+            500_000,
+            Category::Income,
+            checking_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(1),
+            "Rent Payment",
+            -150_000,
+            Category::Housing,
+            checking_id,
+            "Monthly rent",
+            true,
+        );
+        self.add_transaction(
+            may(2),
+            "Grocery Store",
+            -8_500,
+            Category::Food,
+            credit_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(3),
+            "Electric Bill",
+            -9_500,
+            Category::Utilities,
+            checking_id,
+            "",
+            true,
+        );
+        self.add_transaction(
+            may(4),
+            "Coffee Shop",
+            -550,
+            Category::Food,
+            credit_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(5),
+            "Gas Station",
+            -4_500,
+            Category::Transportation,
+            credit_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(6),
+            "Netflix",
+            -1_599,
+            Category::Entertainment,
+            credit_id,
+            "Monthly sub",
+            true,
+        );
+        self.add_transaction(
+            may(7),
+            "Restaurant Dinner",
+            -6_200,
+            Category::Food,
+            credit_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(8),
+            "Pharmacy",
+            -2_300,
+            Category::Healthcare,
+            credit_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(9),
+            "Online Shopping",
+            -4_999,
+            Category::Shopping,
+            credit_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(10),
+            "Transfer to Savings",
+            -50_000,
+            Category::Savings,
+            checking_id,
+            "",
+            true,
+        );
+        self.add_transaction(
+            may(10),
+            "Savings Deposit",
+            50_000,
+            Category::Savings,
+            savings_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(11),
+            "Lunch",
+            -1_200,
+            Category::Food,
+            credit_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(12),
+            "Book Purchase",
+            -2_499,
+            Category::Education,
+            credit_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(13),
+            "Internet Bill",
+            -7_999,
+            Category::Utilities,
+            checking_id,
+            "",
+            true,
+        );
+        self.add_transaction(
+            may(14),
+            "Grocery Store",
+            -11_200,
+            Category::Food,
+            credit_id,
+            "Weekly groceries",
+            false,
+        );
+        self.add_transaction(
+            may(15),
+            "Freelance Payment",
+            75_000,
+            Category::Income,
+            checking_id,
+            "Web project",
+            false,
+        );
+        self.add_transaction(
+            may(16),
+            "Movie Tickets",
+            -3_000,
+            Category::Entertainment,
+            credit_id,
+            "",
+            false,
+        );
+        self.add_transaction(
+            may(17),
+            "Public Transit",
+            -276,
+            Category::Transportation,
+            credit_id,
+            "Bus fare",
+            false,
+        );
     }
 
     fn add_account(&mut self, name: &str, atype: AccountType, initial: i64) -> u32 {
@@ -369,16 +556,29 @@ impl FinanceApp {
         id
     }
 
+    // A transaction is defined by its date, description, amount, category,
+    // owning account, note, and recurring flag; these are independent scalar
+    // fields with no natural grouping, so they are passed positionally.
+    #[allow(clippy::too_many_arguments)]
     fn add_transaction(
-        &mut self, date: SimpleDate, desc: &str, amount: i64,
-        category: Category, account_id: u32, notes: &str, recurring: bool,
+        &mut self,
+        date: SimpleDate,
+        desc: &str,
+        amount: i64,
+        category: Category,
+        account_id: u32,
+        notes: &str,
+        recurring: bool,
     ) -> u32 {
         let id = self.next_tx_id;
         self.next_tx_id += 1;
         self.transactions.push(Transaction {
-            id, date,
+            id,
+            date,
             description: desc.to_string(),
-            amount, category, account_id,
+            amount,
+            category,
+            account_id,
             notes: notes.to_string(),
             recurring,
         });
@@ -399,26 +599,32 @@ impl FinanceApp {
         if let Some(b) = self.budgets.iter_mut().find(|b| b.category == category) {
             b.monthly_limit = monthly_limit;
         } else {
-            self.budgets.push(Budget { category, monthly_limit });
+            self.budgets.push(Budget {
+                category,
+                monthly_limit,
+            });
         }
     }
 
     // ── Queries ─────────────────────────────────────────────────────
     fn month_transactions(&self) -> Vec<&Transaction> {
-        self.transactions.iter()
+        self.transactions
+            .iter()
             .filter(|tx| tx.date.same_month(&self.view_month))
             .collect()
     }
 
     fn month_income(&self) -> i64 {
-        self.month_transactions().iter()
+        self.month_transactions()
+            .iter()
             .filter(|tx| tx.is_income() && !matches!(tx.category, Category::Savings))
             .map(|tx| tx.amount)
             .sum()
     }
 
     fn month_expenses(&self) -> i64 {
-        self.month_transactions().iter()
+        self.month_transactions()
+            .iter()
             .filter(|tx| tx.is_expense() && !matches!(tx.category, Category::Savings))
             .map(|tx| tx.amount.abs())
             .sum()
@@ -429,31 +635,39 @@ impl FinanceApp {
     }
 
     fn category_spending(&self, cat: Category) -> i64 {
-        self.month_transactions().iter()
+        self.month_transactions()
+            .iter()
             .filter(|tx| tx.category == cat && tx.is_expense())
             .map(|tx| tx.amount.abs())
             .sum()
     }
 
     fn budget_for(&self, cat: Category) -> Option<i64> {
-        self.budgets.iter()
+        self.budgets
+            .iter()
             .find(|b| b.category == cat)
             .map(|b| b.monthly_limit)
     }
 
     fn budget_usage(&self, cat: Category) -> Option<f32> {
         self.budget_for(cat).map(|limit| {
-            if limit == 0 { return 0.0; }
+            if limit == 0 {
+                return 0.0;
+            }
             let spent = self.category_spending(cat);
             spent as f32 / limit as f32
         })
     }
 
     fn account_balance(&self, account_id: u32) -> i64 {
-        let initial = self.accounts.iter()
+        let initial = self
+            .accounts
+            .iter()
             .find(|a| a.id == account_id)
             .map_or(0, |a| a.initial_balance);
-        let tx_sum: i64 = self.transactions.iter()
+        let tx_sum: i64 = self
+            .transactions
+            .iter()
             .filter(|tx| tx.account_id == account_id)
             .map(|tx| tx.amount)
             .sum();
@@ -461,16 +675,21 @@ impl FinanceApp {
     }
 
     fn total_balance(&self) -> i64 {
-        self.accounts.iter()
+        self.accounts
+            .iter()
             .map(|a| self.account_balance(a.id))
             .sum()
     }
 
     fn filtered_transactions(&self) -> Vec<(usize, &Transaction)> {
-        self.transactions.iter().enumerate()
+        self.transactions
+            .iter()
+            .enumerate()
             .filter(|(_, tx)| {
-                if let Some(cat) = self.category_filter {
-                    if tx.category != cat { return false; }
+                if let Some(cat) = self.category_filter
+                    && tx.category != cat
+                {
+                    return false;
                 }
                 if !self.search_query.is_empty() {
                     let q = self.search_query.to_ascii_lowercase();
@@ -486,11 +705,12 @@ impl FinanceApp {
     }
 
     fn top_expense_categories(&self) -> Vec<(Category, i64)> {
-        let mut cats: Vec<(Category, i64)> = Category::EXPENSE_CATS.iter()
+        let mut cats: Vec<(Category, i64)> = Category::EXPENSE_CATS
+            .iter()
             .map(|&c| (c, self.category_spending(c)))
             .filter(|(_, amt)| *amt > 0)
             .collect();
-        cats.sort_by(|a, b| b.1.cmp(&a.1));
+        cats.sort_by_key(|c| std::cmp::Reverse(c.1));
         cats
     }
 
@@ -498,8 +718,13 @@ impl FinanceApp {
     fn handle_key(&mut self, key: &str, ctrl: bool, _shift: bool) {
         if self.search_active {
             match key {
-                "Escape" => { self.search_active = false; self.search_query.clear(); }
-                "Backspace" => { self.search_query.pop(); }
+                "Escape" => {
+                    self.search_active = false;
+                    self.search_query.clear();
+                }
+                "Backspace" => {
+                    self.search_query.pop();
+                }
                 _ => {}
             }
             return;
@@ -510,17 +735,22 @@ impl FinanceApp {
             "3" => self.screen = Screen::Budgets,
             "4" => self.screen = Screen::Accounts,
             "5" => self.screen = Screen::Reports,
-            "Left" => { self.view_month = self.view_month.prev_month(); }
-            "Right" => { self.view_month = self.view_month.next_month(); }
-            "Up" | "k" => {
-                if self.selected_tx > 0 { self.selected_tx -= 1; }
+            "Left" => {
+                self.view_month = self.view_month.prev_month();
             }
-            "Down" | "j" => {
-                if self.selected_tx + 1 < self.transactions.len() {
-                    self.selected_tx += 1;
-                }
+            "Right" => {
+                self.view_month = self.view_month.next_month();
             }
-            "/" => { self.search_active = true; self.search_query.clear(); }
+            "Up" | "k" if self.selected_tx > 0 => {
+                self.selected_tx -= 1;
+            }
+            "Down" | "j" if self.selected_tx + 1 < self.transactions.len() => {
+                self.selected_tx += 1;
+            }
+            "/" => {
+                self.search_active = true;
+                self.search_query.clear();
+            }
             "c" => {
                 // Cycle category filter
                 self.category_filter = match self.category_filter {
@@ -564,7 +794,13 @@ impl FinanceApp {
 
     fn format_currency_colored(cents: i64) -> (String, Color) {
         let text = Self::format_currency(cents);
-        let color = if cents > 0 { GREEN } else if cents < 0 { RED } else { TEXT_COLOR };
+        let color = if cents > 0 {
+            GREEN
+        } else if cents < 0 {
+            RED
+        } else {
+            TEXT_COLOR
+        };
         (text, color)
     }
 
@@ -573,18 +809,30 @@ impl FinanceApp {
     const HEADER_H: f32 = 50.0;
     const STATUS_H: f32 = 28.0;
 
-    fn content_x(&self) -> f32 { Self::SIDEBAR_W }
-    fn content_w(&self) -> f32 { (self.width - Self::SIDEBAR_W).max(100.0) }
-    fn content_y(&self) -> f32 { Self::HEADER_H }
-    fn content_h(&self) -> f32 { (self.height - Self::HEADER_H - Self::STATUS_H).max(100.0) }
+    fn content_x(&self) -> f32 {
+        Self::SIDEBAR_W
+    }
+    fn content_w(&self) -> f32 {
+        (self.width - Self::SIDEBAR_W).max(100.0)
+    }
+    fn content_y(&self) -> f32 {
+        Self::HEADER_H
+    }
+    fn content_h(&self) -> f32 {
+        (self.height - Self::HEADER_H - Self::STATUS_H).max(100.0)
+    }
 
     // ── Rendering ───────────────────────────────────────────────────
     fn render(&self) -> Vec<RenderCommand> {
         let mut cmds = Vec::with_capacity(512);
 
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: self.height,
-            color: BASE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: BASE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         self.render_sidebar(&mut cmds);
@@ -604,16 +852,23 @@ impl FinanceApp {
 
     fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>) {
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: Self::SIDEBAR_W, height: self.height,
-            color: CRUST, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: Self::SIDEBAR_W,
+            height: self.height,
+            color: CRUST,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Logo
         cmds.push(RenderCommand::Text {
-            x: 16.0, y: 16.0,
+            x: 16.0,
+            y: 16.0,
             text: String::from("\u{1F4B0} Finance"),
-            font_size: 18.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(Self::SIDEBAR_W - 24.0),
+            font_size: 18.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(Self::SIDEBAR_W - 24.0),
         });
 
         // Nav items
@@ -621,18 +876,32 @@ impl FinanceApp {
         for (i, screen) in Screen::ALL.iter().enumerate() {
             let iy = nav_y + i as f32 * 40.0;
             let is_active = *screen == self.screen;
-            let bg = if is_active { SURFACE1 } else { Color::rgba(0, 0, 0, 0) };
+            let bg = if is_active {
+                SURFACE1
+            } else {
+                Color::rgba(0, 0, 0, 0)
+            };
             let tc = if is_active { BLUE } else { SUBTEXT0 };
 
             cmds.push(RenderCommand::FillRect {
-                x: 8.0, y: iy, width: Self::SIDEBAR_W - 16.0, height: 36.0,
-                color: bg, corner_radii: CornerRadii::all(6.0),
+                x: 8.0,
+                y: iy,
+                width: Self::SIDEBAR_W - 16.0,
+                height: 36.0,
+                color: bg,
+                corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: 20.0, y: iy + 9.0,
+                x: 20.0,
+                y: iy + 9.0,
                 text: format!("{} {}", i + 1, screen.label()),
-                font_size: 13.0, color: tc,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_size: 13.0,
+                color: tc,
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(Self::SIDEBAR_W - 40.0),
             });
         }
@@ -641,32 +910,48 @@ impl FinanceApp {
         let total = self.total_balance();
         let (total_str, total_color) = Self::format_currency_colored(total);
         cmds.push(RenderCommand::Text {
-            x: 16.0, y: self.height - 60.0,
+            x: 16.0,
+            y: self.height - 60.0,
             text: String::from("Total Balance"),
-            font_size: 11.0, color: OVERLAY0,
-            font_weight: FontWeightHint::Regular, max_width: Some(Self::SIDEBAR_W - 24.0),
+            font_size: 11.0,
+            color: OVERLAY0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(Self::SIDEBAR_W - 24.0),
         });
         cmds.push(RenderCommand::Text {
-            x: 16.0, y: self.height - 42.0,
-            text: total_str, font_size: 18.0, color: total_color,
-            font_weight: FontWeightHint::Bold, max_width: Some(Self::SIDEBAR_W - 24.0),
+            x: 16.0,
+            y: self.height - 42.0,
+            text: total_str,
+            font_size: 18.0,
+            color: total_color,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(Self::SIDEBAR_W - 24.0),
         });
     }
 
     fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
         cmds.push(RenderCommand::FillRect {
-            x: Self::SIDEBAR_W, y: 0.0,
-            width: self.content_w(), height: Self::HEADER_H,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x: Self::SIDEBAR_W,
+            y: 0.0,
+            width: self.content_w(),
+            height: Self::HEADER_H,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Month navigation
         cmds.push(RenderCommand::Text {
-            x: Self::SIDEBAR_W + 16.0, y: 14.0,
-            text: format!("\u{25C0} {} {} \u{25B6}",
-                self.view_month.month_label(), self.view_month.year),
-            font_size: 18.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(300.0),
+            x: Self::SIDEBAR_W + 16.0,
+            y: 14.0,
+            text: format!(
+                "\u{25C0} {} {} \u{25B6}",
+                self.view_month.month_label(),
+                self.view_month.year
+            ),
+            font_size: 18.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(300.0),
         });
 
         // Monthly summary in header
@@ -677,22 +962,37 @@ impl FinanceApp {
         for (label, amount, color, offset) in [
             ("Income", income, GREEN, 0.0_f32),
             ("Expenses", expenses, RED, 150.0),
-            ("Savings", savings, if savings >= 0 { TEAL } else { RED }, 300.0),
+            (
+                "Savings",
+                savings,
+                if savings >= 0 { TEAL } else { RED },
+                300.0,
+            ),
         ] {
             cmds.push(RenderCommand::Text {
-                x: hx + offset, y: 6.0,
-                text: label.to_string(), font_size: 10.0, color: OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: Some(80.0),
+                x: hx + offset,
+                y: 6.0,
+                text: label.to_string(),
+                font_size: 10.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(80.0),
             });
+            // Expenses are accumulated as a positive magnitude; render them as
+            // a money-out (negative) figure so the header reads "-$X.XX".
             let val = if label == "Expenses" {
-                Self::format_currency(amount as i64)
+                Self::format_currency(-amount)
             } else {
                 Self::format_currency(amount)
             };
             cmds.push(RenderCommand::Text {
-                x: hx + offset, y: 22.0,
-                text: val, font_size: 16.0, color,
-                font_weight: FontWeightHint::Bold, max_width: Some(140.0),
+                x: hx + offset,
+                y: 22.0,
+                text: val,
+                font_size: 16.0,
+                color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(140.0),
             });
         }
     }
@@ -704,10 +1004,13 @@ impl FinanceApp {
 
         // Budget overview cards
         cmds.push(RenderCommand::Text {
-            x: cx, y: cy,
+            x: cx,
+            y: cy,
             text: String::from("Budget Overview"),
-            font_size: 16.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(200.0),
+            font_size: 16.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(200.0),
         });
 
         let card_w = (cw - 16.0) / 2.0;
@@ -727,25 +1030,45 @@ impl FinanceApp {
             } else {
                 0.0
             };
-            let bar_color = if usage > 1.0 { RED } else if usage > 0.8 { YELLOW } else { GREEN };
+            let bar_color = if usage > 1.0 {
+                RED
+            } else if usage > 0.8 {
+                YELLOW
+            } else {
+                GREEN
+            };
 
             cmds.push(RenderCommand::FillRect {
-                x: card_x, y: card_y, width: card_w, height: card_h,
-                color: SURFACE0, corner_radii: CornerRadii::all(8.0),
+                x: card_x,
+                y: card_y,
+                width: card_w,
+                height: card_h,
+                color: SURFACE0,
+                corner_radii: CornerRadii::all(8.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: card_x + 8.0, y: card_y + 6.0,
+                x: card_x + 8.0,
+                y: card_y + 6.0,
                 text: format!("{} {}", budget.category.icon(), budget.category.label()),
-                font_size: 12.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Bold, max_width: Some(card_w - 16.0),
+                font_size: 12.0,
+                color: TEXT_COLOR,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(card_w - 16.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: card_x + 8.0, y: card_y + 24.0,
-                text: format!("{} / {}", Self::format_currency(spent as i64), Self::format_currency(budget.monthly_limit)),
-                font_size: 11.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(card_w - 16.0),
+                x: card_x + 8.0,
+                y: card_y + 24.0,
+                text: format!(
+                    "{} / {}",
+                    Self::format_currency(spent),
+                    Self::format_currency(budget.monthly_limit)
+                ),
+                font_size: 11.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(card_w - 16.0),
             });
 
             // Progress bar
@@ -754,14 +1077,22 @@ impl FinanceApp {
             let bar_w = card_w - 16.0;
             let bar_h = 8.0;
             cmds.push(RenderCommand::FillRect {
-                x: bar_x, y: bar_y, width: bar_w, height: bar_h,
-                color: SURFACE2, corner_radii: CornerRadii::all(4.0),
+                x: bar_x,
+                y: bar_y,
+                width: bar_w,
+                height: bar_h,
+                color: SURFACE2,
+                corner_radii: CornerRadii::all(4.0),
             });
             let fill_w = (bar_w * usage.min(1.0)).max(0.0);
             if fill_w > 0.0 {
                 cmds.push(RenderCommand::FillRect {
-                    x: bar_x, y: bar_y, width: fill_w, height: bar_h,
-                    color: bar_color, corner_radii: CornerRadii::all(4.0),
+                    x: bar_x,
+                    y: bar_y,
+                    width: fill_w,
+                    height: bar_h,
+                    color: bar_color,
+                    corner_radii: CornerRadii::all(4.0),
                 });
             }
         }
@@ -769,10 +1100,13 @@ impl FinanceApp {
         // Top spending categories
         let section_y = card_y + card_h + 24.0;
         cmds.push(RenderCommand::Text {
-            x: cx, y: section_y,
+            x: cx,
+            y: section_y,
             text: String::from("Top Spending Categories"),
-            font_size: 16.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(300.0),
+            font_size: 16.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(300.0),
         });
 
         let top_cats = self.top_expense_categories();
@@ -783,51 +1117,76 @@ impl FinanceApp {
             let bar_w = (cw - 200.0) * bar_ratio;
 
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 4.0,
+                x: cx,
+                y: ry + 4.0,
                 text: format!("{} {}", cat.icon(), cat.label()),
-                font_size: 12.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Regular, max_width: Some(140.0),
+                font_size: 12.0,
+                color: TEXT_COLOR,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(140.0),
             });
             cmds.push(RenderCommand::FillRect {
-                x: cx + 150.0, y: ry + 2.0, width: bar_w.max(4.0), height: 20.0,
-                color: cat.color(), corner_radii: CornerRadii::all(4.0),
+                x: cx + 150.0,
+                y: ry + 2.0,
+                width: bar_w.max(4.0),
+                height: 20.0,
+                color: cat.color(),
+                corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: cx + 155.0 + bar_w, y: ry + 4.0,
-                text: Self::format_currency(*amount as i64),
-                font_size: 11.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(100.0),
+                x: cx + 155.0 + bar_w,
+                y: ry + 4.0,
+                text: Self::format_currency(*amount),
+                font_size: 11.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(100.0),
             });
         }
 
         // Recent transactions
         let recent_y = section_y + 28.0 + 5.0 * 36.0 + 16.0;
         cmds.push(RenderCommand::Text {
-            x: cx, y: recent_y,
+            x: cx,
+            y: recent_y,
             text: String::from("Recent Transactions"),
-            font_size: 16.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(300.0),
+            font_size: 16.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(300.0),
         });
 
         let mut sorted: Vec<&Transaction> = self.month_transactions();
-        sorted.sort_by(|a, b| b.date.cmp(&a.date));
+        sorted.sort_by_key(|tx| std::cmp::Reverse(tx.date));
         for (i, tx) in sorted.iter().take(5).enumerate() {
             let ry = recent_y + 28.0 + i as f32 * 28.0;
             cmds.push(RenderCommand::Text {
-                x: cx + 4.0, y: ry,
-                text: tx.date.format(), font_size: 11.0, color: OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: Some(90.0),
+                x: cx + 4.0,
+                y: ry,
+                text: tx.date.format(),
+                font_size: 11.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(90.0),
             });
             cmds.push(RenderCommand::Text {
-                x: cx + 100.0, y: ry,
-                text: tx.description.clone(), font_size: 12.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Regular, max_width: Some(300.0),
+                x: cx + 100.0,
+                y: ry,
+                text: tx.description.clone(),
+                font_size: 12.0,
+                color: TEXT_COLOR,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(300.0),
             });
             let (amt_str, amt_color) = Self::format_currency_colored(tx.amount);
             cmds.push(RenderCommand::Text {
-                x: cx + cw - 120.0, y: ry,
-                text: amt_str, font_size: 12.0, color: amt_color,
-                font_weight: FontWeightHint::Bold, max_width: Some(110.0),
+                x: cx + cw - 120.0,
+                y: ry,
+                text: amt_str,
+                font_size: 12.0,
+                color: amt_color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(110.0),
             });
         }
     }
@@ -839,46 +1198,81 @@ impl FinanceApp {
 
         // Search bar
         cmds.push(RenderCommand::FillRect {
-            x: cx, y: cy, width: cw, height: 32.0,
-            color: SURFACE0, corner_radii: CornerRadii::all(6.0),
+            x: cx,
+            y: cy,
+            width: cw,
+            height: 32.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(6.0),
         });
         let search_text = if self.search_query.is_empty() {
-            if self.search_active { String::from("|") } else { String::from("Press / to search...") }
+            if self.search_active {
+                String::from("|")
+            } else {
+                String::from("Press / to search...")
+            }
         } else {
             format!("{}|", self.search_query)
         };
         cmds.push(RenderCommand::Text {
-            x: cx + 12.0, y: cy + 8.0,
+            x: cx + 12.0,
+            y: cy + 8.0,
             text: search_text,
             font_size: 13.0,
-            color: if self.search_query.is_empty() && !self.search_active { OVERLAY0 } else { TEXT_COLOR },
-            font_weight: FontWeightHint::Regular, max_width: Some(cw - 24.0),
+            color: if self.search_query.is_empty() && !self.search_active {
+                OVERLAY0
+            } else {
+                TEXT_COLOR
+            },
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(cw - 24.0),
         });
 
         // Filter indicator
         if let Some(cat) = self.category_filter {
             cmds.push(RenderCommand::FillRect {
-                x: cx + cw - 140.0, y: cy + 4.0, width: 130.0, height: 24.0,
-                color: cat.color(), corner_radii: CornerRadii::all(12.0),
+                x: cx + cw - 140.0,
+                y: cy + 4.0,
+                width: 130.0,
+                height: 24.0,
+                color: cat.color(),
+                corner_radii: CornerRadii::all(12.0),
             });
             cmds.push(RenderCommand::Text {
-                x: cx + cw - 132.0, y: cy + 8.0,
-                text: cat.label().to_string(), font_size: 11.0, color: CRUST,
-                font_weight: FontWeightHint::Bold, max_width: Some(120.0),
+                x: cx + cw - 132.0,
+                y: cy + 8.0,
+                text: cat.label().to_string(),
+                font_size: 11.0,
+                color: CRUST,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(120.0),
             });
         }
 
         // Column headers
         let list_y = cy + 40.0;
         cmds.push(RenderCommand::FillRect {
-            x: cx, y: list_y, width: cw, height: 28.0,
-            color: CRUST, corner_radii: CornerRadii::ZERO,
+            x: cx,
+            y: list_y,
+            width: cw,
+            height: 28.0,
+            color: CRUST,
+            corner_radii: CornerRadii::ZERO,
         });
-        for (hx, label) in [(0.0, "Date"), (90.0, "Description"), (380.0, "Category"), (520.0, "Amount")] {
+        for (hx, label) in [
+            (0.0, "Date"),
+            (90.0, "Description"),
+            (380.0, "Category"),
+            (520.0, "Amount"),
+        ] {
             cmds.push(RenderCommand::Text {
-                x: cx + hx + 8.0, y: list_y + 6.0,
-                text: label.to_string(), font_size: 11.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Bold, max_width: Some(120.0),
+                x: cx + hx + 8.0,
+                y: list_y + 6.0,
+                text: label.to_string(),
+                font_size: 11.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(120.0),
             });
         }
 
@@ -888,41 +1282,72 @@ impl FinanceApp {
         let start = list_y + 32.0;
         for (vi, (orig_idx, tx)) in filtered.iter().enumerate() {
             let ry = start + vi as f32 * row_h;
-            if ry > self.height - Self::STATUS_H { break; }
+            if ry > self.height - Self::STATUS_H {
+                break;
+            }
             let is_sel = *orig_idx == self.selected_tx;
-            let bg = if is_sel { SURFACE1 } else if vi % 2 == 0 { SURFACE0 } else { BASE };
+            let bg = if is_sel {
+                SURFACE1
+            } else if vi % 2 == 0 {
+                SURFACE0
+            } else {
+                BASE
+            };
 
             cmds.push(RenderCommand::FillRect {
-                x: cx, y: ry, width: cw, height: row_h,
-                color: bg, corner_radii: CornerRadii::ZERO,
+                x: cx,
+                y: ry,
+                width: cw,
+                height: row_h,
+                color: bg,
+                corner_radii: CornerRadii::ZERO,
             });
             cmds.push(RenderCommand::Text {
-                x: cx + 8.0, y: ry + 10.0,
-                text: tx.date.format(), font_size: 12.0, color: OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: Some(80.0),
+                x: cx + 8.0,
+                y: ry + 10.0,
+                text: tx.date.format(),
+                font_size: 12.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(80.0),
             });
             cmds.push(RenderCommand::Text {
-                x: cx + 98.0, y: ry + 10.0,
-                text: tx.description.clone(), font_size: 13.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Regular, max_width: Some(270.0),
+                x: cx + 98.0,
+                y: ry + 10.0,
+                text: tx.description.clone(),
+                font_size: 13.0,
+                color: TEXT_COLOR,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(270.0),
             });
             cmds.push(RenderCommand::Text {
-                x: cx + 388.0, y: ry + 10.0,
+                x: cx + 388.0,
+                y: ry + 10.0,
                 text: format!("{} {}", tx.category.icon(), tx.category.label()),
-                font_size: 11.0, color: tx.category.color(),
-                font_weight: FontWeightHint::Regular, max_width: Some(120.0),
+                font_size: 11.0,
+                color: tx.category.color(),
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(120.0),
             });
             let (amt_str, amt_color) = Self::format_currency_colored(tx.amount);
             cmds.push(RenderCommand::Text {
-                x: cx + 528.0, y: ry + 10.0,
-                text: amt_str, font_size: 13.0, color: amt_color,
-                font_weight: FontWeightHint::Bold, max_width: Some(100.0),
+                x: cx + 528.0,
+                y: ry + 10.0,
+                text: amt_str,
+                font_size: 13.0,
+                color: amt_color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(100.0),
             });
             if tx.recurring {
                 cmds.push(RenderCommand::Text {
-                    x: cx + cw - 24.0, y: ry + 10.0,
-                    text: String::from("\u{1F501}"), font_size: 11.0, color: OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: Some(20.0),
+                    x: cx + cw - 24.0,
+                    y: ry + 10.0,
+                    text: String::from("\u{1F501}"),
+                    font_size: 11.0,
+                    color: OVERLAY0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(20.0),
                 });
             }
         }
@@ -934,40 +1359,71 @@ impl FinanceApp {
         let cw = self.content_w() - 32.0;
 
         cmds.push(RenderCommand::Text {
-            x: cx, y: cy,
-            text: format!("Budgets for {} {}", self.view_month.month_label(), self.view_month.year),
-            font_size: 18.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(400.0),
+            x: cx,
+            y: cy,
+            text: format!(
+                "Budgets for {} {}",
+                self.view_month.month_label(),
+                self.view_month.year
+            ),
+            font_size: 18.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(400.0),
         });
 
         let item_h = 80.0;
         for (i, budget) in self.budgets.iter().enumerate() {
             let iy = cy + 36.0 + i as f32 * (item_h + 8.0);
-            if iy + item_h > self.height - Self::STATUS_H { break; }
+            if iy + item_h > self.height - Self::STATUS_H {
+                break;
+            }
             let spent = self.category_spending(budget.category);
             let usage = if budget.monthly_limit > 0 {
                 spent as f32 / budget.monthly_limit as f32
-            } else { 0.0 };
-            let remaining = budget.monthly_limit - spent as i64;
-            let bar_color = if usage > 1.0 { RED } else if usage > 0.8 { YELLOW } else { GREEN };
+            } else {
+                0.0
+            };
+            let remaining = budget.monthly_limit - spent;
+            let bar_color = if usage > 1.0 {
+                RED
+            } else if usage > 0.8 {
+                YELLOW
+            } else {
+                GREEN
+            };
 
             cmds.push(RenderCommand::FillRect {
-                x: cx, y: iy, width: cw, height: item_h,
-                color: SURFACE0, corner_radii: CornerRadii::all(8.0),
+                x: cx,
+                y: iy,
+                width: cw,
+                height: item_h,
+                color: SURFACE0,
+                corner_radii: CornerRadii::all(8.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: cx + 12.0, y: iy + 8.0,
+                x: cx + 12.0,
+                y: iy + 8.0,
                 text: format!("{} {}", budget.category.icon(), budget.category.label()),
-                font_size: 15.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Bold, max_width: Some(250.0),
+                font_size: 15.0,
+                color: TEXT_COLOR,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(250.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: cx + cw - 200.0, y: iy + 8.0,
-                text: format!("{} / {}", Self::format_currency(spent as i64), Self::format_currency(budget.monthly_limit)),
-                font_size: 14.0, color: if remaining >= 0 { GREEN } else { RED },
-                font_weight: FontWeightHint::Bold, max_width: Some(190.0),
+                x: cx + cw - 200.0,
+                y: iy + 8.0,
+                text: format!(
+                    "{} / {}",
+                    Self::format_currency(spent),
+                    Self::format_currency(budget.monthly_limit)
+                ),
+                font_size: 14.0,
+                color: if remaining >= 0 { GREEN } else { RED },
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(190.0),
             });
 
             // Progress bar
@@ -976,23 +1432,34 @@ impl FinanceApp {
             let bar_w = cw - 24.0;
             let bar_h = 12.0;
             cmds.push(RenderCommand::FillRect {
-                x: bar_x, y: bar_y, width: bar_w, height: bar_h,
-                color: SURFACE2, corner_radii: CornerRadii::all(6.0),
+                x: bar_x,
+                y: bar_y,
+                width: bar_w,
+                height: bar_h,
+                color: SURFACE2,
+                corner_radii: CornerRadii::all(6.0),
             });
             let fill_w = (bar_w * usage.min(1.0)).max(0.0);
             if fill_w > 0.0 {
                 cmds.push(RenderCommand::FillRect {
-                    x: bar_x, y: bar_y, width: fill_w, height: bar_h,
-                    color: bar_color, corner_radii: CornerRadii::all(6.0),
+                    x: bar_x,
+                    y: bar_y,
+                    width: fill_w,
+                    height: bar_h,
+                    color: bar_color,
+                    corner_radii: CornerRadii::all(6.0),
                 });
             }
 
             // Usage percentage and remaining
             cmds.push(RenderCommand::Text {
-                x: cx + 12.0, y: iy + 54.0,
+                x: cx + 12.0,
+                y: iy + 54.0,
                 text: format!("{:.0}% used", usage * 100.0),
-                font_size: 11.0, color: OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: Some(100.0),
+                font_size: 11.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(100.0),
             });
             let rem_text = if remaining >= 0 {
                 format!("{} remaining", Self::format_currency(remaining))
@@ -1000,10 +1467,13 @@ impl FinanceApp {
                 format!("{} over budget!", Self::format_currency(-remaining))
             };
             cmds.push(RenderCommand::Text {
-                x: cx + 140.0, y: iy + 54.0,
-                text: rem_text, font_size: 11.0,
+                x: cx + 140.0,
+                y: iy + 54.0,
+                text: rem_text,
+                font_size: 11.0,
                 color: if remaining >= 0 { TEAL } else { RED },
-                font_weight: FontWeightHint::Regular, max_width: Some(200.0),
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(200.0),
             });
         }
     }
@@ -1014,10 +1484,13 @@ impl FinanceApp {
         let cw = self.content_w() - 32.0;
 
         cmds.push(RenderCommand::Text {
-            x: cx, y: cy,
+            x: cx,
+            y: cy,
             text: String::from("Accounts"),
-            font_size: 18.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(200.0),
+            font_size: 18.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(200.0),
         });
 
         let card_w = (cw - 16.0) / 2.0;
@@ -1032,25 +1505,39 @@ impl FinanceApp {
             let (bal_str, bal_color) = Self::format_currency_colored(balance);
 
             cmds.push(RenderCommand::FillRect {
-                x: ax, y: ay, width: card_w, height: card_h,
-                color: SURFACE0, corner_radii: CornerRadii::all(8.0),
+                x: ax,
+                y: ay,
+                width: card_w,
+                height: card_h,
+                color: SURFACE0,
+                corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
-                x: ax + 12.0, y: ay + 10.0,
+                x: ax + 12.0,
+                y: ay + 10.0,
                 text: account.name.clone(),
-                font_size: 15.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Bold, max_width: Some(card_w - 24.0),
+                font_size: 15.0,
+                color: TEXT_COLOR,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(card_w - 24.0),
             });
             cmds.push(RenderCommand::Text {
-                x: ax + 12.0, y: ay + 32.0,
+                x: ax + 12.0,
+                y: ay + 32.0,
                 text: account.account_type.label().to_string(),
-                font_size: 11.0, color: OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: Some(100.0),
+                font_size: 11.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(100.0),
             });
             cmds.push(RenderCommand::Text {
-                x: ax + 12.0, y: ay + 50.0,
-                text: bal_str, font_size: 22.0, color: bal_color,
-                font_weight: FontWeightHint::Bold, max_width: Some(card_w - 24.0),
+                x: ax + 12.0,
+                y: ay + 50.0,
+                text: bal_str,
+                font_size: 22.0,
+                color: bal_color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(card_w - 24.0),
             });
         }
     }
@@ -1061,10 +1548,17 @@ impl FinanceApp {
         let cw = self.content_w() - 32.0;
 
         cmds.push(RenderCommand::Text {
-            x: cx, y: cy,
-            text: format!("Financial Report — {} {}", self.view_month.month_label(), self.view_month.year),
-            font_size: 18.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(400.0),
+            x: cx,
+            y: cy,
+            text: format!(
+                "Financial Report — {} {}",
+                self.view_month.month_label(),
+                self.view_month.year
+            ),
+            font_size: 18.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(400.0),
         });
 
         let income = self.month_income();
@@ -1075,42 +1569,60 @@ impl FinanceApp {
         // Summary cards
         let summaries = [
             ("Total Income", income, GREEN),
-            ("Total Expenses", expenses as i64, RED),
+            ("Total Expenses", expenses, RED),
             ("Net Savings", net, if net >= 0 { TEAL } else { RED }),
         ];
         for (i, (label, amount, color)) in summaries.iter().enumerate() {
             let sx = cx + i as f32 * (cw / 3.0);
             let sw = cw / 3.0 - 12.0;
             cmds.push(RenderCommand::FillRect {
-                x: sx, y: cy + 36.0, width: sw, height: 70.0,
-                color: SURFACE0, corner_radii: CornerRadii::all(8.0),
+                x: sx,
+                y: cy + 36.0,
+                width: sw,
+                height: 70.0,
+                color: SURFACE0,
+                corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
-                x: sx + 12.0, y: cy + 46.0,
-                text: (*label).to_string(), font_size: 12.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(sw - 24.0),
+                x: sx + 12.0,
+                y: cy + 46.0,
+                text: (*label).to_string(),
+                font_size: 12.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(sw - 24.0),
             });
             cmds.push(RenderCommand::Text {
-                x: sx + 12.0, y: cy + 66.0,
-                text: Self::format_currency(*amount), font_size: 22.0, color: *color,
-                font_weight: FontWeightHint::Bold, max_width: Some(sw - 24.0),
+                x: sx + 12.0,
+                y: cy + 66.0,
+                text: Self::format_currency(*amount),
+                font_size: 22.0,
+                color: *color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(sw - 24.0),
             });
         }
 
         // Transaction count
         cmds.push(RenderCommand::Text {
-            x: cx, y: cy + 120.0,
+            x: cx,
+            y: cy + 120.0,
             text: format!("{tx_count} transactions this month"),
-            font_size: 13.0, color: OVERLAY0,
-            font_weight: FontWeightHint::Regular, max_width: Some(300.0),
+            font_size: 13.0,
+            color: OVERLAY0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(300.0),
         });
 
         // Category breakdown
         cmds.push(RenderCommand::Text {
-            x: cx, y: cy + 150.0,
+            x: cx,
+            y: cy + 150.0,
             text: String::from("Expense Breakdown by Category"),
-            font_size: 16.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(400.0),
+            font_size: 16.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(400.0),
         });
 
         let top = self.top_expense_categories();
@@ -1121,20 +1633,30 @@ impl FinanceApp {
             let bar_w = (cw - 280.0) * (*amount as f32 / total_exp);
 
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 4.0,
+                x: cx,
+                y: ry + 4.0,
                 text: format!("{} {}", cat.icon(), cat.label()),
-                font_size: 12.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Regular, max_width: Some(140.0),
+                font_size: 12.0,
+                color: TEXT_COLOR,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(140.0),
             });
             cmds.push(RenderCommand::FillRect {
-                x: cx + 150.0, y: ry + 2.0, width: bar_w.max(4.0), height: 20.0,
-                color: cat.color(), corner_radii: CornerRadii::all(4.0),
+                x: cx + 150.0,
+                y: ry + 2.0,
+                width: bar_w.max(4.0),
+                height: 20.0,
+                color: cat.color(),
+                corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: cx + 160.0 + bar_w, y: ry + 4.0,
-                text: format!("{} ({pct:.1}%)", Self::format_currency(*amount as i64)),
-                font_size: 11.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(150.0),
+                x: cx + 160.0 + bar_w,
+                y: ry + 4.0,
+                text: format!("{} ({pct:.1}%)", Self::format_currency(*amount)),
+                font_size: 11.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(150.0),
             });
         }
 
@@ -1143,11 +1665,19 @@ impl FinanceApp {
             let savings_rate = net as f64 / income as f64 * 100.0;
             let sry = cy + 178.0 + top.len() as f32 * 32.0 + 24.0;
             cmds.push(RenderCommand::Text {
-                x: cx, y: sry,
+                x: cx,
+                y: sry,
                 text: format!("Savings Rate: {savings_rate:.1}%"),
                 font_size: 16.0,
-                color: if savings_rate >= 20.0 { GREEN } else if savings_rate >= 0.0 { YELLOW } else { RED },
-                font_weight: FontWeightHint::Bold, max_width: Some(300.0),
+                color: if savings_rate >= 20.0 {
+                    GREEN
+                } else if savings_rate >= 0.0 {
+                    YELLOW
+                } else {
+                    RED
+                },
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(300.0),
             });
         }
     }
@@ -1155,13 +1685,21 @@ impl FinanceApp {
     fn render_status(&self, cmds: &mut Vec<RenderCommand>) {
         let sy = self.height - Self::STATUS_H;
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: sy, width: self.width, height: Self::STATUS_H,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: sy,
+            width: self.width,
+            height: Self::STATUS_H,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
-            x: Self::SIDEBAR_W + 8.0, y: sy + 6.0,
-            text: self.status_msg.clone(), font_size: 12.0, color: SUBTEXT1,
-            font_weight: FontWeightHint::Regular, max_width: Some(400.0),
+            x: Self::SIDEBAR_W + 8.0,
+            y: sy + 6.0,
+            text: self.status_msg.clone(),
+            font_size: 12.0,
+            color: SUBTEXT1,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(400.0),
         });
     }
 }
@@ -1209,8 +1747,13 @@ mod tests {
         let mut app = FinanceApp::new();
         let n = app.transactions.len();
         app.add_transaction(
-            SimpleDate::new(2026, 5, 18), "Test", -1000,
-            Category::Food, 1, "", false,
+            SimpleDate::new(2026, 5, 18),
+            "Test",
+            -1000,
+            Category::Food,
+            1,
+            "",
+            false,
         );
         assert_eq!(app.transactions.len(), n + 1);
     }
@@ -1359,9 +1902,9 @@ mod tests {
         let (_, c1) = FinanceApp::format_currency_colored(100);
         let (_, c2) = FinanceApp::format_currency_colored(-100);
         let (_, c3) = FinanceApp::format_currency_colored(0);
-        assert_eq!(c1.r(), GREEN.r());
-        assert_eq!(c2.r(), RED.r());
-        assert_eq!(c3.r(), TEXT_COLOR.r());
+        assert_eq!(c1.r, GREEN.r);
+        assert_eq!(c2.r, RED.r);
+        assert_eq!(c3.r, TEXT_COLOR.r);
     }
 
     #[test]
@@ -1476,10 +2019,14 @@ mod tests {
     #[test]
     fn test_transaction_amount_dollars() {
         let tx = Transaction {
-            id: 1, date: SimpleDate::new(2026, 5, 1),
-            description: String::new(), amount: 12345,
-            category: Category::Income, account_id: 1,
-            notes: String::new(), recurring: false,
+            id: 1,
+            date: SimpleDate::new(2026, 5, 1),
+            description: String::new(),
+            amount: 12345,
+            category: Category::Income,
+            account_id: 1,
+            notes: String::new(),
+            recurring: false,
         };
         assert!((tx.amount_dollars() - 123.45).abs() < 0.01);
     }
@@ -1487,19 +2034,27 @@ mod tests {
     #[test]
     fn test_transaction_income_expense() {
         let income = Transaction {
-            id: 1, date: SimpleDate::new(2026, 5, 1),
-            description: String::new(), amount: 1000,
-            category: Category::Income, account_id: 1,
-            notes: String::new(), recurring: false,
+            id: 1,
+            date: SimpleDate::new(2026, 5, 1),
+            description: String::new(),
+            amount: 1000,
+            category: Category::Income,
+            account_id: 1,
+            notes: String::new(),
+            recurring: false,
         };
         assert!(income.is_income());
         assert!(!income.is_expense());
 
         let expense = Transaction {
-            id: 2, date: SimpleDate::new(2026, 5, 1),
-            description: String::new(), amount: -1000,
-            category: Category::Food, account_id: 1,
-            notes: String::new(), recurring: false,
+            id: 2,
+            date: SimpleDate::new(2026, 5, 1),
+            description: String::new(),
+            amount: -1000,
+            category: Category::Food,
+            account_id: 1,
+            notes: String::new(),
+            recurring: false,
         };
         assert!(!expense.is_income());
         assert!(expense.is_expense());
@@ -1624,8 +2179,13 @@ mod tests {
 
     #[test]
     fn test_account_type_labels() {
-        let types = [AccountType::Checking, AccountType::Savings,
-            AccountType::CreditCard, AccountType::Cash, AccountType::Investment];
+        let types = [
+            AccountType::Checking,
+            AccountType::Savings,
+            AccountType::CreditCard,
+            AccountType::Cash,
+            AccountType::Investment,
+        ];
         for t in &types {
             assert!(!t.label().is_empty());
         }

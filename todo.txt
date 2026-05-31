@@ -1,3 +1,24 @@
+## BUG (noticed+FIXED 2026-05-31): apps/mindmap redo of node additions lost nodes.
+##   MindMapApp::apply_forward(Action::AddNode) called MindMap::add_child(), which
+##   allocates a FRESH node id. After undo/undo then redo/redo, the first redo
+##   re-created node A under a new id, so the second redo (re-adding child B whose
+##   stored parent_id still pointed at A's ORIGINAL id) found no such parent and
+##   silently dropped B (node_count stuck at 2 instead of 3 — caught by
+##   test_multiple_undo_redo). Added MindMap::add_child_with_id() which restores a
+##   node under its original id (and shape) and refuses if the parent is missing
+##   or the id is taken; apply_forward now uses it so parent references survive
+##   redo. mindmap 118/118 tests pass.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/finance test_format_currency_colored called
+##   Color::r()/GREEN.r() as methods, but guitk::Color exposes r/g/b/a as public
+##   fields — test would not compile (E0599). Also Screen lacked Debug so the
+##   assert_eq! on app.screen failed to compile (E0277). Fixed the test to use
+##   field access and derived Debug on Screen. While here, fixed a dropped-intent
+##   bug in render_header: the `if label == "Expenses"` branch formatted the value
+##   identically to the else branch (clippy if_same_then_else). month_expenses()
+##   returns a positive magnitude, so the special-case clearly meant to show it as
+##   money-out; now renders format_currency(-amount) → "-$X.XX". finance 57/57 pass.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/diskimager HashState::finalize() produced
 ##   colliding digests for short inputs. update() distributes input bytes across 8
 ##   state words by idx%8, but finalize() emitted the raw words then truncated to

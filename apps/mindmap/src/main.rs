@@ -118,6 +118,12 @@ pub struct IdGenerator {
     next: u32,
 }
 
+impl Default for IdGenerator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl IdGenerator {
     pub const fn new() -> Self {
         Self { next: 1 }
@@ -211,7 +217,13 @@ pub struct MindMapNode {
 
 impl MindMapNode {
     /// Create a new node at a given position.
-    pub fn new(id: NodeId, text: String, parent: Option<NodeId>, color: Color, color_index: u8) -> Self {
+    pub fn new(
+        id: NodeId,
+        text: String,
+        parent: Option<NodeId>,
+        color: Color,
+        color_index: u8,
+    ) -> Self {
         let (w, h) = if parent.is_none() {
             (ROOT_NODE_W, ROOT_NODE_H)
         } else {
@@ -223,7 +235,11 @@ impl MindMapNode {
             parent,
             children: Vec::new(),
             color,
-            shape: if parent.is_none() { NodeShape::Ellipse } else { NodeShape::RoundedRect },
+            shape: if parent.is_none() {
+                NodeShape::Ellipse
+            } else {
+                NodeShape::RoundedRect
+            },
             x: 0.0,
             y: 0.0,
             width: w,
@@ -235,7 +251,12 @@ impl MindMapNode {
 
     /// Bounding rectangle: top-left corner, width, height.
     pub fn bounds(&self) -> (f32, f32, f32, f32) {
-        (self.x - self.width / 2.0, self.y - self.height / 2.0, self.width, self.height)
+        (
+            self.x - self.width / 2.0,
+            self.y - self.height / 2.0,
+            self.width,
+            self.height,
+        )
     }
 
     /// Check if a point (in canvas space) is inside this node.
@@ -312,9 +333,7 @@ pub enum Action {
         new_y: f32,
     },
     /// Toggle collapsed state.
-    ToggleCollapse {
-        node_id: NodeId,
-    },
+    ToggleCollapse { node_id: NodeId },
 }
 
 // ============================================================================
@@ -365,7 +384,13 @@ impl MindMap {
     }
 
     /// Add a child node to a parent. Returns the new node's ID.
-    pub fn add_child(&mut self, parent_id: NodeId, text: String, color: Color, color_index: u8) -> Option<NodeId> {
+    pub fn add_child(
+        &mut self,
+        parent_id: NodeId,
+        text: String,
+        color: Color,
+        color_index: u8,
+    ) -> Option<NodeId> {
         if !self.nodes.contains_key(&parent_id) {
             return None;
         }
@@ -378,8 +403,42 @@ impl MindMap {
         Some(new_id)
     }
 
+    /// Re-add a child node reusing a previously-allocated ID and shape.
+    ///
+    /// Used by redo: re-running an `AddNode` action must restore the node under
+    /// its *original* ID, not allocate a fresh one. If a new ID were generated,
+    /// any later action that references this node as a parent (by its original
+    /// ID) would fail to find it, silently dropping the redo. Returns `false`
+    /// if the parent does not exist or the ID is already in use.
+    pub fn add_child_with_id(
+        &mut self,
+        node_id: NodeId,
+        parent_id: NodeId,
+        text: String,
+        color: Color,
+        color_index: u8,
+        shape: NodeShape,
+    ) -> bool {
+        if !self.nodes.contains_key(&parent_id) || self.nodes.contains_key(&node_id) {
+            return false;
+        }
+        let mut node = MindMapNode::new(node_id, text, Some(parent_id), color, color_index);
+        node.shape = shape;
+        self.nodes.insert(node_id, node);
+        if let Some(parent) = self.nodes.get_mut(&parent_id) {
+            parent.children.push(node_id);
+        }
+        true
+    }
+
     /// Add a sibling node after the given node. Returns the new node's ID.
-    pub fn add_sibling(&mut self, sibling_id: NodeId, text: String, color: Color, color_index: u8) -> Option<NodeId> {
+    pub fn add_sibling(
+        &mut self,
+        sibling_id: NodeId,
+        text: String,
+        color: Color,
+        color_index: u8,
+    ) -> Option<NodeId> {
         let parent_id = self.nodes.get(&sibling_id)?.parent?;
         let new_id = self.id_gen.next_id();
         let node = MindMapNode::new(new_id, text, Some(parent_id), color, color_index);
@@ -413,7 +472,10 @@ impl MindMap {
 
     /// Delete a subtree rooted at `node_id`. Returns all removed nodes in
     /// tree order, or None if the node doesn't exist or is the root.
-    pub fn delete_subtree(&mut self, node_id: NodeId) -> Option<(Vec<MindMapNode>, Option<NodeId>, usize)> {
+    pub fn delete_subtree(
+        &mut self,
+        node_id: NodeId,
+    ) -> Option<(Vec<MindMapNode>, Option<NodeId>, usize)> {
         if node_id == self.root_id {
             return None; // cannot delete root
         }
@@ -421,7 +483,8 @@ impl MindMap {
 
         // Find index in parent's children list
         let child_index = if let Some(pid) = parent_id {
-            self.nodes.get(&pid)
+            self.nodes
+                .get(&pid)
                 .and_then(|p| p.children.iter().position(|&c| c == node_id))
                 .unwrap_or(0)
         } else {
@@ -437,17 +500,22 @@ impl MindMap {
         }
 
         // Remove from parent's children
-        if let Some(pid) = parent_id {
-            if let Some(parent) = self.nodes.get_mut(&pid) {
-                parent.children.retain(|&c| c != node_id);
-            }
+        if let Some(pid) = parent_id
+            && let Some(parent) = self.nodes.get_mut(&pid)
+        {
+            parent.children.retain(|&c| c != node_id);
         }
 
         Some((removed, parent_id, child_index))
     }
 
     /// Re-insert a previously deleted subtree.
-    pub fn restore_subtree(&mut self, nodes: &[MindMapNode], parent_id: Option<NodeId>, child_index: usize) {
+    pub fn restore_subtree(
+        &mut self,
+        nodes: &[MindMapNode],
+        parent_id: Option<NodeId>,
+        child_index: usize,
+    ) {
         if nodes.is_empty() {
             return;
         }
@@ -457,11 +525,11 @@ impl MindMap {
             self.nodes.insert(node.id, node.clone());
         }
 
-        if let Some(pid) = parent_id {
-            if let Some(parent) = self.nodes.get_mut(&pid) {
-                let idx = child_index.min(parent.children.len());
-                parent.children.insert(idx, subtree_root_id);
-            }
+        if let Some(pid) = parent_id
+            && let Some(parent) = self.nodes.get_mut(&pid)
+        {
+            let idx = child_index.min(parent.children.len());
+            parent.children.insert(idx, subtree_root_id);
         }
     }
 
@@ -473,7 +541,12 @@ impl MindMap {
     }
 
     /// Change the color of a node. Returns the old color and index.
-    pub fn change_color(&mut self, node_id: NodeId, color: Color, color_index: u8) -> Option<(Color, u8)> {
+    pub fn change_color(
+        &mut self,
+        node_id: NodeId,
+        color: Color,
+        color_index: u8,
+    ) -> Option<(Color, u8)> {
         let node = self.nodes.get_mut(&node_id)?;
         let old_color = node.color;
         let old_index = node.color_index;
@@ -515,11 +588,11 @@ impl MindMap {
         let mut stack = vec![self.root_id];
         while let Some(id) = stack.pop() {
             result.push(id);
-            if let Some(node) = self.nodes.get(&id) {
-                if !node.collapsed {
-                    for &child_id in node.children.iter().rev() {
-                        stack.push(child_id);
-                    }
+            if let Some(node) = self.nodes.get(&id)
+                && !node.collapsed
+            {
+                for &child_id in node.children.iter().rev() {
+                    stack.push(child_id);
                 }
             }
         }
@@ -600,7 +673,9 @@ pub fn auto_layout(map: &mut MindMap, center_x: f32, center_y: f32) {
     }
 
     // Gather children of root
-    let root_children: Vec<NodeId> = map.nodes.get(&root_id)
+    let root_children: Vec<NodeId> = map
+        .nodes
+        .get(&root_id)
         .map(|n| n.children.clone())
         .unwrap_or_default();
 
@@ -620,9 +695,21 @@ pub fn auto_layout(map: &mut MindMap, center_x: f32, center_y: f32) {
     }
 
     // Layout right side
-    layout_branch(map, &right_children, center_x + ROOT_NODE_W / 2.0 + RADIAL_H_GAP, center_y, true);
+    layout_branch(
+        map,
+        &right_children,
+        center_x + ROOT_NODE_W / 2.0 + RADIAL_H_GAP,
+        center_y,
+        true,
+    );
     // Layout left side
-    layout_branch(map, &left_children, center_x - ROOT_NODE_W / 2.0 - RADIAL_H_GAP, center_y, false);
+    layout_branch(
+        map,
+        &left_children,
+        center_x - ROOT_NODE_W / 2.0 - RADIAL_H_GAP,
+        center_y,
+        false,
+    );
 }
 
 /// Measure the total vertical height needed for a subtree.
@@ -647,14 +734,23 @@ fn measure_subtree_height(map: &MindMap, node_id: NodeId) -> f32 {
 }
 
 /// Layout a branch of children vertically centered around `center_y`.
-fn layout_branch(map: &mut MindMap, children: &[NodeId], start_x: f32, center_y: f32, going_right: bool) {
+fn layout_branch(
+    map: &mut MindMap,
+    children: &[NodeId],
+    start_x: f32,
+    center_y: f32,
+    going_right: bool,
+) {
     if children.is_empty() {
         return;
     }
 
     // Measure total height needed
     let mut total_height = 0.0f32;
-    let heights: Vec<f32> = children.iter().map(|&cid| measure_subtree_height(map, cid)).collect();
+    let heights: Vec<f32> = children
+        .iter()
+        .map(|&cid| measure_subtree_height(map, cid))
+        .collect();
     for (i, h) in heights.iter().enumerate() {
         if i > 0 {
             total_height += RADIAL_V_GAP;
@@ -681,10 +777,12 @@ fn layout_branch(map: &mut MindMap, children: &[NodeId], start_x: f32, center_y:
         }
 
         // Recursively layout grandchildren
-        let grandchildren: Vec<NodeId> = map.nodes.get(&child_id)
+        let grandchildren: Vec<NodeId> = map
+            .nodes
+            .get(&child_id)
             .map(|n| n.children.clone())
             .unwrap_or_default();
-        let collapsed = map.nodes.get(&child_id).map_or(false, |n| n.collapsed);
+        let collapsed = map.nodes.get(&child_id).is_some_and(|n| n.collapsed);
 
         if !grandchildren.is_empty() && !collapsed {
             let next_x = if going_right {
@@ -775,6 +873,12 @@ pub struct MindMapApp {
     pub edit_buffer: String,
     /// Whether we are in text editing mode.
     pub editing_node: Option<NodeId>,
+}
+
+impl Default for MindMapApp {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MindMapApp {
@@ -883,7 +987,11 @@ impl MindMapApp {
 
     /// X origin of the canvas area.
     fn canvas_x(&self) -> f32 {
-        if self.show_sidebar { SIDEBAR_WIDTH } else { 0.0 }
+        if self.show_sidebar {
+            SIDEBAR_WIDTH
+        } else {
+            0.0
+        }
     }
 
     /// Y origin of the canvas area.
@@ -893,7 +1001,11 @@ impl MindMapApp {
 
     /// Width of the canvas area.
     fn canvas_width(&self) -> f32 {
-        let sidebar = if self.show_sidebar { SIDEBAR_WIDTH } else { 0.0 };
+        let sidebar = if self.show_sidebar {
+            SIDEBAR_WIDTH
+        } else {
+            0.0
+        };
         (self.win_width - sidebar).max(1.0)
     }
 
@@ -931,10 +1043,13 @@ impl MindMapApp {
     /// Add a child to the selected node (or root if nothing selected).
     pub fn add_child_to_selected(&mut self, text: String) -> Option<NodeId> {
         let parent_id = self.selected_node.unwrap_or(self.active_map_ref().root_id);
-        let color_index = (self.active_map_ref().depth(parent_id).saturating_add(1) as u8) % (NODE_COLORS.len() as u8);
+        let color_index = (self.active_map_ref().depth(parent_id).saturating_add(1) as u8)
+            % (NODE_COLORS.len() as u8);
         let color = NODE_COLORS[color_index as usize];
 
-        let new_id = self.active_map_mut().add_child(parent_id, text.clone(), color, color_index)?;
+        let new_id =
+            self.active_map_mut()
+                .add_child(parent_id, text.clone(), color, color_index)?;
 
         self.push_undo(Action::AddNode {
             node_id: new_id,
@@ -958,13 +1073,17 @@ impl MindMapApp {
             return None;
         }
 
-        let color_index = self.active_map_ref().node(sel)
+        let color_index = self
+            .active_map_ref()
+            .node(sel)
             .map(|n| n.color_index)
             .unwrap_or(0);
         let color = NODE_COLORS[color_index as usize];
 
         let parent_id = self.active_map_ref().node(sel)?.parent;
-        let new_id = self.active_map_mut().add_sibling(sel, text.clone(), color, color_index)?;
+        let new_id = self
+            .active_map_mut()
+            .add_sibling(sel, text.clone(), color, color_index)?;
 
         self.push_undo(Action::AddNode {
             node_id: new_id,
@@ -1006,11 +1125,11 @@ impl MindMapApp {
 
     /// Start editing the selected node's text.
     pub fn start_editing(&mut self) {
-        if let Some(sel) = self.selected_node {
-            if let Some(node) = self.active_map_ref().node(sel) {
-                self.edit_buffer = node.text.clone();
-                self.editing_node = Some(sel);
-            }
+        if let Some(sel) = self.selected_node
+            && let Some(node) = self.active_map_ref().node(sel)
+        {
+            self.edit_buffer = node.text.clone();
+            self.editing_node = Some(sel);
         }
     }
 
@@ -1018,14 +1137,14 @@ impl MindMapApp {
     pub fn finish_editing(&mut self) {
         if let Some(node_id) = self.editing_node.take() {
             let new_text = self.edit_buffer.clone();
-            if let Some(old_text) = self.active_map_mut().edit_text(node_id, new_text.clone()) {
-                if old_text != new_text {
-                    self.push_undo(Action::EditText {
-                        node_id,
-                        old_text,
-                        new_text,
-                    });
-                }
+            if let Some(old_text) = self.active_map_mut().edit_text(node_id, new_text.clone())
+                && old_text != new_text
+            {
+                self.push_undo(Action::EditText {
+                    node_id,
+                    old_text,
+                    new_text,
+                });
             }
         }
     }
@@ -1039,13 +1158,18 @@ impl MindMapApp {
     /// Cycle the selected node's color to the next preset.
     pub fn cycle_color(&mut self) {
         if let Some(sel) = self.selected_node {
-            let old_index = self.active_map_ref().node(sel)
+            let old_index = self
+                .active_map_ref()
+                .node(sel)
                 .map(|n| n.color_index)
                 .unwrap_or(0);
             let new_index = (old_index.wrapping_add(1)) % (NODE_COLORS.len() as u8);
             let new_color = NODE_COLORS[new_index as usize];
 
-            if let Some((old_color, oi)) = self.active_map_mut().change_color(sel, new_color, new_index) {
+            if let Some((old_color, oi)) = self
+                .active_map_mut()
+                .change_color(sel, new_color, new_index)
+            {
                 self.push_undo(Action::ChangeColor {
                     node_id: sel,
                     old_color,
@@ -1060,7 +1184,9 @@ impl MindMapApp {
     /// Cycle the selected node's shape.
     pub fn cycle_shape(&mut self) {
         if let Some(sel) = self.selected_node {
-            let old_shape = self.active_map_ref().node(sel)
+            let old_shape = self
+                .active_map_ref()
+                .node(sel)
                 .map(|n| n.shape)
                 .unwrap_or(NodeShape::RoundedRect);
             let new_shape = old_shape.next();
@@ -1120,21 +1246,41 @@ impl MindMapApp {
                 }
                 self.relayout();
             }
-            Action::DeleteSubtree { nodes, parent_id, child_index } => {
+            Action::DeleteSubtree {
+                nodes,
+                parent_id,
+                child_index,
+            } => {
                 // Reverse of delete: restore
-                self.active_map_mut().restore_subtree(nodes, *parent_id, *child_index);
+                self.active_map_mut()
+                    .restore_subtree(nodes, *parent_id, *child_index);
                 self.relayout();
             }
-            Action::EditText { node_id, old_text, .. } => {
+            Action::EditText {
+                node_id, old_text, ..
+            } => {
                 self.active_map_mut().edit_text(*node_id, old_text.clone());
             }
-            Action::ChangeColor { node_id, old_color, old_index, .. } => {
-                self.active_map_mut().change_color(*node_id, *old_color, *old_index);
+            Action::ChangeColor {
+                node_id,
+                old_color,
+                old_index,
+                ..
+            } => {
+                self.active_map_mut()
+                    .change_color(*node_id, *old_color, *old_index);
             }
-            Action::ChangeShape { node_id, old_shape, .. } => {
+            Action::ChangeShape {
+                node_id, old_shape, ..
+            } => {
                 self.active_map_mut().change_shape(*node_id, *old_shape);
             }
-            Action::MoveNode { node_id, old_x, old_y, .. } => {
+            Action::MoveNode {
+                node_id,
+                old_x,
+                old_y,
+                ..
+            } => {
                 self.active_map_mut().move_node(*node_id, *old_x, *old_y);
             }
             Action::ToggleCollapse { node_id } => {
@@ -1146,9 +1292,25 @@ impl MindMapApp {
 
     fn apply_forward(&mut self, action: &Action) {
         match action {
-            Action::AddNode { node_id: _, parent_id, text, color, color_index, .. } => {
+            Action::AddNode {
+                node_id,
+                parent_id,
+                text,
+                color,
+                color_index,
+                shape,
+            } => {
+                // Restore under the original ID so later actions that reference
+                // this node as a parent still resolve after a redo.
                 if let Some(pid) = parent_id {
-                    self.active_map_mut().add_child(*pid, text.clone(), *color, *color_index);
+                    self.active_map_mut().add_child_with_id(
+                        *node_id,
+                        *pid,
+                        text.clone(),
+                        *color,
+                        *color_index,
+                        *shape,
+                    );
                 }
                 self.relayout();
             }
@@ -1158,16 +1320,31 @@ impl MindMapApp {
                     self.relayout();
                 }
             }
-            Action::EditText { node_id, new_text, .. } => {
+            Action::EditText {
+                node_id, new_text, ..
+            } => {
                 self.active_map_mut().edit_text(*node_id, new_text.clone());
             }
-            Action::ChangeColor { node_id, new_color, new_index, .. } => {
-                self.active_map_mut().change_color(*node_id, *new_color, *new_index);
+            Action::ChangeColor {
+                node_id,
+                new_color,
+                new_index,
+                ..
+            } => {
+                self.active_map_mut()
+                    .change_color(*node_id, *new_color, *new_index);
             }
-            Action::ChangeShape { node_id, new_shape, .. } => {
+            Action::ChangeShape {
+                node_id, new_shape, ..
+            } => {
                 self.active_map_mut().change_shape(*node_id, *new_shape);
             }
-            Action::MoveNode { node_id, new_x, new_y, .. } => {
+            Action::MoveNode {
+                node_id,
+                new_x,
+                new_y,
+                ..
+            } => {
                 self.active_map_mut().move_node(*node_id, *new_x, *new_y);
             }
             Action::ToggleCollapse { node_id } => {
@@ -1245,10 +1422,10 @@ impl MindMapApp {
         let visible = self.active_map_ref().visible_node_ids();
         // Test in reverse order so topmost (last rendered) nodes are hit first
         for &id in visible.iter().rev() {
-            if let Some(node) = self.active_map_ref().node(id) {
-                if node.contains(cx, cy) {
-                    return Some(id);
-                }
+            if let Some(node) = self.active_map_ref().node(id)
+                && node.contains(cx, cy)
+            {
+                return Some(id);
             }
         }
         None
@@ -1290,12 +1467,22 @@ impl MindMapApp {
     /// Update drag position.
     pub fn update_drag(&mut self, mouse_x: f32, mouse_y: f32) {
         match self.drag.clone() {
-            DragState::DraggingNode { node_id, offset_x, offset_y, .. } => {
+            DragState::DraggingNode {
+                node_id,
+                offset_x,
+                offset_y,
+                ..
+            } => {
                 let new_x = mouse_x - offset_x;
                 let new_y = mouse_y - offset_y;
                 self.active_map_mut().move_node(node_id, new_x, new_y);
             }
-            DragState::Panning { start_pan_x, start_pan_y, start_mouse_x, start_mouse_y } => {
+            DragState::Panning {
+                start_pan_x,
+                start_pan_y,
+                start_mouse_x,
+                start_mouse_y,
+            } => {
                 self.pan_x = start_pan_x + (mouse_x - start_mouse_x);
                 self.pan_y = start_pan_y + (mouse_y - start_mouse_y);
             }
@@ -1305,18 +1492,23 @@ impl MindMapApp {
 
     /// End drag operation.
     pub fn end_drag(&mut self) {
-        if let DragState::DraggingNode { node_id, start_x, start_y, .. } = self.drag {
-            if let Some(node) = self.active_map_ref().node(node_id) {
-                let (new_x, new_y) = (node.x, node.y);
-                if (new_x - start_x).abs() > 0.1 || (new_y - start_y).abs() > 0.1 {
-                    self.push_undo(Action::MoveNode {
-                        node_id,
-                        old_x: start_x,
-                        old_y: start_y,
-                        new_x,
-                        new_y,
-                    });
-                }
+        if let DragState::DraggingNode {
+            node_id,
+            start_x,
+            start_y,
+            ..
+        } = self.drag
+            && let Some(node) = self.active_map_ref().node(node_id)
+        {
+            let (new_x, new_y) = (node.x, node.y);
+            if (new_x - start_x).abs() > 0.1 || (new_y - start_y).abs() > 0.1 {
+                self.push_undo(Action::MoveNode {
+                    node_id,
+                    old_x: start_x,
+                    old_y: start_y,
+                    new_x,
+                    new_y,
+                });
             }
         }
         self.drag = DragState::None;
@@ -1328,59 +1520,48 @@ impl MindMapApp {
 
     /// Select the parent of the currently selected node.
     pub fn select_parent(&mut self) {
-        if let Some(sel) = self.selected_node {
-            if let Some(node) = self.active_map_ref().node(sel) {
-                if let Some(pid) = node.parent {
-                    self.selected_node = Some(pid);
-                }
-            }
+        if let Some(sel) = self.selected_node
+            && let Some(node) = self.active_map_ref().node(sel)
+            && let Some(pid) = node.parent
+        {
+            self.selected_node = Some(pid);
         }
     }
 
     /// Select the first child of the currently selected node.
     pub fn select_first_child(&mut self) {
-        if let Some(sel) = self.selected_node {
-            if let Some(node) = self.active_map_ref().node(sel) {
-                if let Some(&first) = node.children.first() {
-                    if !node.collapsed {
-                        self.selected_node = Some(first);
-                    }
-                }
-            }
+        if let Some(sel) = self.selected_node
+            && let Some(node) = self.active_map_ref().node(sel)
+            && let Some(&first) = node.children.first()
+            && !node.collapsed
+        {
+            self.selected_node = Some(first);
         }
     }
 
     /// Select the next sibling.
     pub fn select_next_sibling(&mut self) {
-        if let Some(sel) = self.selected_node {
-            if let Some(node) = self.active_map_ref().node(sel) {
-                if let Some(pid) = node.parent {
-                    if let Some(parent) = self.active_map_ref().node(pid) {
-                        if let Some(pos) = parent.children.iter().position(|&c| c == sel) {
-                            if pos + 1 < parent.children.len() {
-                                self.selected_node = Some(parent.children[pos + 1]);
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(sel) = self.selected_node
+            && let Some(node) = self.active_map_ref().node(sel)
+            && let Some(pid) = node.parent
+            && let Some(parent) = self.active_map_ref().node(pid)
+            && let Some(pos) = parent.children.iter().position(|&c| c == sel)
+            && pos + 1 < parent.children.len()
+        {
+            self.selected_node = Some(parent.children[pos + 1]);
         }
     }
 
     /// Select the previous sibling.
     pub fn select_prev_sibling(&mut self) {
-        if let Some(sel) = self.selected_node {
-            if let Some(node) = self.active_map_ref().node(sel) {
-                if let Some(pid) = node.parent {
-                    if let Some(parent) = self.active_map_ref().node(pid) {
-                        if let Some(pos) = parent.children.iter().position(|&c| c == sel) {
-                            if pos > 0 {
-                                self.selected_node = Some(parent.children[pos - 1]);
-                            }
-                        }
-                    }
-                }
-            }
+        if let Some(sel) = self.selected_node
+            && let Some(node) = self.active_map_ref().node(sel)
+            && let Some(pid) = node.parent
+            && let Some(parent) = self.active_map_ref().node(pid)
+            && let Some(pos) = parent.children.iter().position(|&c| c == sel)
+            && pos > 0
+        {
+            self.selected_node = Some(parent.children[pos - 1]);
         }
     }
 
@@ -1530,7 +1711,11 @@ impl MindMapApp {
                 text: map.name.clone(),
                 font_size: 11.0,
                 color: text_color,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(tab_w - 16.0),
             });
 
@@ -1703,7 +1888,12 @@ impl MindMapApp {
         }
     }
 
-    fn render_single_node(&self, cmds: &mut Vec<RenderCommand>, node: &MindMapNode, node_id: NodeId) {
+    fn render_single_node(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        node: &MindMapNode,
+        node_id: NodeId,
+    ) {
         let (bx, by, bw, bh) = node.bounds();
         let (sx, sy) = self.canvas_to_screen(bx, by);
         let sw = bw * self.zoom;
@@ -1727,11 +1917,7 @@ impl MindMapApp {
         }
 
         // Node fill
-        let fill_color = if is_editing {
-            SURFACE1
-        } else {
-            node.color
-        };
+        let fill_color = if is_editing { SURFACE1 } else { node.color };
 
         let cr = self.corner_radii_for_shape(node.shape, NODE_CORNER_RADIUS);
         cmds.push(RenderCommand::FillRect {
@@ -1763,7 +1949,11 @@ impl MindMapApp {
 
         // Node text
         let is_root = node.parent.is_none();
-        let font_size = if is_root { ROOT_FONT_SIZE } else { NODE_FONT_SIZE };
+        let font_size = if is_root {
+            ROOT_FONT_SIZE
+        } else {
+            NODE_FONT_SIZE
+        };
         let display_text = if is_editing {
             format!("{}|", self.edit_buffer)
         } else {
@@ -1783,7 +1973,11 @@ impl MindMapApp {
             text: display_text,
             font_size: font_size * self.zoom,
             color: text_color,
-            font_weight: if is_root { FontWeightHint::Bold } else { FontWeightHint::Regular },
+            font_weight: if is_root {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            },
             max_width: Some(sw - 16.0),
         });
 
@@ -1934,7 +2128,11 @@ impl MindMapApp {
                 sy += 18.0;
 
                 // Collapsed state
-                let state_text = if node.collapsed { "Collapsed" } else { "Expanded" };
+                let state_text = if node.collapsed {
+                    "Collapsed"
+                } else {
+                    "Expanded"
+                };
                 cmds.push(RenderCommand::Text {
                     x: x + 10.0,
                     y: sy,
@@ -2000,7 +2198,7 @@ impl MindMapApp {
             cmds.push(RenderCommand::Text {
                 x: x + 10.0,
                 y: sy,
-                text: format!("{key}"),
+                text: key.to_string(),
                 font_size: 10.0,
                 color: BLUE,
                 font_weight: FontWeightHint::Bold,
@@ -2065,7 +2263,11 @@ impl MindMapApp {
         } else {
             self.search_query.clone()
         };
-        let query_color = if self.search_query.is_empty() { OVERLAY0 } else { TEXT };
+        let query_color = if self.search_query.is_empty() {
+            OVERLAY0
+        } else {
+            TEXT
+        };
 
         cmds.push(RenderCommand::Text {
             x: bx + 70.0,
@@ -2082,7 +2284,11 @@ impl MindMapApp {
             let count_text = if self.search_results.is_empty() {
                 "0 results".to_string()
             } else {
-                format!("{}/{}", self.search_index.saturating_add(1), self.search_results.len())
+                format!(
+                    "{}/{}",
+                    self.search_index.saturating_add(1),
+                    self.search_results.len()
+                )
             };
             cmds.push(RenderCommand::Text {
                 x: bx + bar_width - 60.0,
@@ -2131,19 +2337,23 @@ impl MindMapApp {
         });
 
         // Selected node info on the right
-        if let Some(sel_id) = self.selected_node {
-            if let Some(node) = map.node(sel_id) {
-                let sel_info = format!("Selected: \"{}\" (ID: {})", truncate_str(&node.text, 20), sel_id);
-                cmds.push(RenderCommand::Text {
-                    x: self.win_width - 300.0,
-                    y: y + 5.0,
-                    text: sel_info,
-                    font_size: 11.0,
-                    color: BLUE,
-                    font_weight: FontWeightHint::Regular,
-                    max_width: Some(290.0),
-                });
-            }
+        if let Some(sel_id) = self.selected_node
+            && let Some(node) = map.node(sel_id)
+        {
+            let sel_info = format!(
+                "Selected: \"{}\" (ID: {})",
+                truncate_str(&node.text, 20),
+                sel_id
+            );
+            cmds.push(RenderCommand::Text {
+                x: self.win_width - 300.0,
+                y: y + 5.0,
+                text: sel_info,
+                font_size: 11.0,
+                color: BLUE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(290.0),
+            });
         }
     }
 }
@@ -2277,8 +2487,8 @@ mod tests {
         node.height = 40.0;
         // Center is (100, 100), so bounds are (30, 80, 140, 40)
         assert!(node.contains(100.0, 100.0)); // center
-        assert!(node.contains(31.0, 81.0));   // near top-left
-        assert!(!node.contains(0.0, 0.0));     // far away
+        assert!(node.contains(31.0, 81.0)); // near top-left
+        assert!(!node.contains(0.0, 0.0)); // far away
     }
 
     #[test]
@@ -2867,7 +3077,10 @@ mod tests {
         app.edit_buffer = "Changed".to_string();
         app.cancel_editing();
         assert!(app.editing_node.is_none());
-        assert_eq!(app.active_map_ref().node(root).unwrap().text, "Central Idea");
+        assert_eq!(
+            app.active_map_ref().node(root).unwrap().text,
+            "Central Idea"
+        );
     }
 
     #[test]
@@ -2944,7 +3157,10 @@ mod tests {
         app.finish_editing();
         assert_eq!(app.active_map_ref().node(root).unwrap().text, "Changed");
         app.undo();
-        assert_eq!(app.active_map_ref().node(root).unwrap().text, "Central Idea");
+        assert_eq!(
+            app.active_map_ref().node(root).unwrap().text,
+            "Central Idea"
+        );
     }
 
     #[test]
@@ -2954,9 +3170,15 @@ mod tests {
         app.selected_node = Some(root);
         let old_idx = app.active_map_ref().node(root).unwrap().color_index;
         app.cycle_color();
-        assert_ne!(app.active_map_ref().node(root).unwrap().color_index, old_idx);
+        assert_ne!(
+            app.active_map_ref().node(root).unwrap().color_index,
+            old_idx
+        );
         app.undo();
-        assert_eq!(app.active_map_ref().node(root).unwrap().color_index, old_idx);
+        assert_eq!(
+            app.active_map_ref().node(root).unwrap().color_index,
+            old_idx
+        );
     }
 
     #[test]
@@ -3121,7 +3343,11 @@ mod tests {
         let mut app = MindMapApp::new();
         app.start_pan(100.0, 200.0);
         match &app.drag {
-            DragState::Panning { start_mouse_x, start_mouse_y, .. } => {
+            DragState::Panning {
+                start_mouse_x,
+                start_mouse_y,
+                ..
+            } => {
                 assert!((start_mouse_x - 100.0).abs() < 0.01);
                 assert!((start_mouse_y - 200.0).abs() < 0.01);
             }
@@ -3414,7 +3640,8 @@ mod tests {
 
         app.start_node_drag(root, orig_x, orig_y);
         // Simulate moving to (orig + 100, orig + 50)
-        app.active_map_mut().move_node(root, orig_x + 100.0, orig_y + 50.0);
+        app.active_map_mut()
+            .move_node(root, orig_x + 100.0, orig_y + 50.0);
         app.end_drag();
 
         assert!(app.can_undo());

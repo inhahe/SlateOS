@@ -38,316 +38,115 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::missing_panics_doc)]
 #![allow(clippy::missing_errors_doc)]
+// FIPS 180-4 / RFC 8032 use single-letter working variables (a..h, the field
+// limbs); keeping those names matches the specifications they implement.
+#![allow(clippy::many_single_char_names)]
+#![allow(clippy::similar_names)]
+#![allow(clippy::doc_markdown)]
+// OurOS filesystems are case-sensitive by design, so matching the ".pub"
+// suffix exactly (not case-insensitively) is the correct behaviour here.
+#![allow(clippy::case_sensitive_file_extension_comparisons)]
 
 use std::env;
 use std::fmt;
-use std::path::PathBuf;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
 
 // ============================================================================
-// Syscall numbers
+// I/O + randomness
 // ============================================================================
+//
+// All file and stdout/stderr I/O routes through std, which reaches the native
+// OurOS syscalls via the posix libc layer.  A previous hand-rolled syscall
+// stub here hardcoded Linux numbers that collide with unrelated native
+// syscalls — WRITE=1=SYS_EXIT (so every write terminated the process),
+// OPEN=2=SYS_TASK_ID, CLOSE=3 unassigned, STAT=4 unassigned, EXIT=60=
+// SYS_SYSCTL_GET, MKDIR=83 unassigned — making the tool completely
+// non-functional.  Randomness uses the posix `getrandom` C symbol because no
+// std API exposes the kernel CSPRNG.
 
-const SYS_READ: u64 = 0;
-const SYS_WRITE: u64 = 1;
-const SYS_OPEN: u64 = 2;
-const SYS_CLOSE: u64 = 3;
-const SYS_EXIT: u64 = 60;
-const SYS_MKDIR: u64 = 83;
-const SYS_GETRANDOM: u64 = 318;
-const SYS_STAT: u64 = 4;
+#[cfg(unix)]
+unsafe extern "C" {
+    /// Fill `buf` with `buflen` random bytes; returns bytes written or -1.
+    fn getrandom(buf: *mut u8, buflen: usize, flags: u32) -> isize;
+}
 
-// open(2) flags
-const O_RDONLY: u64 = 0;
-const O_WRONLY: u64 = 1;
-const O_CREAT: u64 = 0o100;
-const O_TRUNC: u64 = 0o1000;
-
-// ============================================================================
-// Syscall interface
-// ============================================================================
-
-/// Issue a 1-argument syscall.
-///
-/// # Safety
-///
-/// The caller must ensure `nr` is a valid syscall number and `a1` is a valid
-/// argument for that syscall.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller guarantees arguments are valid. The `syscall` instruction
-    // clobbers rcx and r11 per the System V AMD64 ABI.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+/// Fill `buf` with cryptographically random bytes from the kernel CSPRNG.
+fn fill_random(buf: &mut [u8]) -> Result<(), KeygenError> {
+    #[cfg(unix)]
+    {
+        // SAFETY: valid mutable buffer pointer and exact length; the posix
+        // getrandom writes at most `buflen` bytes and returns the count or -1.
+        let ret = unsafe { getrandom(buf.as_mut_ptr(), buf.len(), 0) };
+        if ret < 0 || usize::try_from(ret).unwrap_or(0) != buf.len() {
+            return Err(KeygenError::RandomFailed);
+        }
+        Ok(())
     }
-    ret
-}
-
-/// Issue a 3-argument syscall.
-///
-/// # Safety
-///
-/// The caller must ensure `nr` is a valid syscall number and all arguments are
-/// valid for that syscall.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller guarantees arguments are valid. The `syscall` instruction
-    // clobbers rcx and r11 per the System V AMD64 ABI.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
+    #[cfg(not(unix))]
+    {
+        // Host test toolchain has no kernel CSPRNG; key generation is not
+        // exercised in host unit tests, so fail explicitly if reached.
+        let _ = buf;
+        Err(KeygenError::RandomFailed)
     }
-    ret
 }
 
-// Stub syscall implementations for non-x86_64 targets (used during `cargo test`
-// on the host which may be x86_64 Linux, but we keep the stubs for completeness).
-#[cfg(not(target_arch = "x86_64"))]
-#[allow(dead_code)]
-unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 {
-    -1
+/// Apply a Unix permission `mode` to `path` (best effort; no-op off-unix).
+#[cfg(unix)]
+fn set_mode(path: &str, mode: u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode));
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-#[allow(dead_code)]
-unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    -1
-}
+#[cfg(not(unix))]
+fn set_mode(_path: &str, _mode: u32) {}
 
-// ============================================================================
-// Syscall wrappers
-// ============================================================================
-
-/// Fill `buf` with cryptographically random bytes via the kernel's GETRANDOM.
-///
-/// Returns `Ok(())` on success or `Err` if the kernel call fails.
-fn getrandom(buf: &mut [u8]) -> Result<(), KeygenError> {
-    // SAFETY: We pass a valid mutable buffer pointer and its exact length.
-    // The kernel writes exactly `buf.len()` bytes into the buffer on success.
-    let ret = unsafe {
-        syscall3(
-            SYS_GETRANDOM,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-            0,
-        )
-    };
-    if ret < 0 {
-        return Err(KeygenError::RandomFailed);
-    }
-    Ok(())
-}
-
-/// Write `data` to stdout (fd 1).
+/// Write `data` to stdout.
 fn write_stdout(data: &[u8]) -> Result<(), KeygenError> {
-    let mut written = 0usize;
-    while written < data.len() {
-        // SAFETY: We pass fd=1 (stdout), a valid pointer into `data`, and the
-        // remaining length. The kernel writes up to that many bytes and returns
-        // the count or a negative error.
-        let ret = unsafe {
-            syscall3(
-                SYS_WRITE,
-                1,
-                data.as_ptr().add(written) as u64,
-                (data.len() - written) as u64,
-            )
-        };
-        if ret <= 0 {
-            return Err(KeygenError::WriteError("stdout".to_string()));
-        }
-        written = written
-            .checked_add(ret as usize)
-            .ok_or_else(|| KeygenError::WriteError("stdout overflow".to_string()))?;
-    }
-    Ok(())
+    std::io::stdout()
+        .write_all(data)
+        .map_err(|_| KeygenError::WriteError("stdout".to_string()))
 }
 
-/// Write `data` to stderr (fd 2).
+/// Write `data` to stderr (best effort).
 fn write_stderr(data: &[u8]) {
-    let mut written = 0usize;
-    while written < data.len() {
-        // SAFETY: Same as write_stdout, but fd=2 (stderr).
-        let ret = unsafe {
-            syscall3(
-                SYS_WRITE,
-                2,
-                data.as_ptr().add(written) as u64,
-                (data.len() - written) as u64,
-            )
-        };
-        if ret <= 0 {
-            break;
-        }
-        written = written.saturating_add(ret as usize);
+    let _ = std::io::stderr().write_all(data);
+}
+
+/// Create a directory with the given `mode`, ignoring "already exists".
+fn mkdir(path: &str, mode: u32) {
+    // Best effort: only stamp the mode when we actually created the directory.
+    // Other errors (e.g. parent missing) surface when we try to create files
+    // inside, mirroring the previous behaviour.
+    if std::fs::create_dir(path).is_ok() {
+        set_mode(path, mode);
     }
 }
 
-/// Open a file for reading. Returns a file descriptor on success.
-fn open_read(path: &str) -> Result<i64, KeygenError> {
-    let path_cstr = make_cstring(path);
-    // SAFETY: We pass a null-terminated C string pointer, O_RDONLY, and mode 0.
-    // The kernel returns a non-negative fd or a negative error code.
-    let ret = unsafe {
-        syscall3(
-            SYS_OPEN,
-            path_cstr.as_ptr() as u64,
-            O_RDONLY,
-            0,
-        )
-    };
-    if ret < 0 {
-        return Err(KeygenError::FileNotFound(path.to_string()));
-    }
-    Ok(ret)
-}
-
-/// Open (or create + truncate) a file for writing. Returns a file descriptor.
-fn open_write(path: &str, mode: u64) -> Result<i64, KeygenError> {
-    let path_cstr = make_cstring(path);
-    // SAFETY: We pass a null-terminated C string, create+trunc flags, and the
-    // given permission mode. The kernel returns a non-negative fd or error.
-    let ret = unsafe {
-        syscall3(
-            SYS_OPEN,
-            path_cstr.as_ptr() as u64,
-            O_WRONLY | O_CREAT | O_TRUNC,
-            mode,
-        )
-    };
-    if ret < 0 {
-        return Err(KeygenError::WriteError(path.to_string()));
-    }
-    Ok(ret)
-}
-
-/// Read up to `buf.len()` bytes from a file descriptor. Returns bytes read.
-fn read_fd(fd: i64, buf: &mut [u8]) -> Result<usize, KeygenError> {
-    // SAFETY: We pass a valid fd, a mutable buffer pointer, and its length.
-    let ret = unsafe {
-        syscall3(
-            SYS_READ,
-            fd as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(KeygenError::ReadError);
-    }
-    Ok(ret as usize)
-}
-
-/// Write all of `data` to a file descriptor.
-fn write_fd(fd: i64, data: &[u8]) -> Result<(), KeygenError> {
-    let mut written = 0usize;
-    while written < data.len() {
-        // SAFETY: Valid fd, valid pointer, valid remaining length.
-        let ret = unsafe {
-            syscall3(
-                SYS_WRITE,
-                fd as u64,
-                data.as_ptr().add(written) as u64,
-                (data.len() - written) as u64,
-            )
-        };
-        if ret <= 0 {
-            return Err(KeygenError::WriteError("fd".to_string()));
-        }
-        written = written
-            .checked_add(ret as usize)
-            .ok_or_else(|| KeygenError::WriteError("fd overflow".to_string()))?;
-    }
-    Ok(())
-}
-
-/// Close a file descriptor. Errors are silently ignored (best-effort cleanup).
-fn close_fd(fd: i64) {
-    // SAFETY: We pass the fd. Ignoring the return is safe: the fd is invalid
-    // regardless of what the kernel does, so leaking the error is fine.
-    let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
-}
-
-/// Create a directory (ignoring EEXIST).
-fn mkdir(path: &str, mode: u64) {
-    let path_cstr = make_cstring(path);
-    // SAFETY: Valid null-terminated path and mode. We ignore the return: if the
-    // directory already exists, that is fine; other errors will surface when we
-    // try to create files inside the directory.
-    let _ = unsafe { syscall3(SYS_MKDIR, path_cstr.as_ptr() as u64, mode, 0) };
-}
-
-/// Check whether a path exists by calling stat(2).
+/// Check whether a path exists.
 fn path_exists(path: &str) -> bool {
-    let path_cstr = make_cstring(path);
-    // SAFETY: We pass a valid null-terminated path and a 144-byte buffer
-    // (enough for a stat struct). The kernel only uses the pointer to write
-    // into the buffer; we ignore the content and only inspect the return code.
-    let mut statbuf = [0u8; 144];
-    let ret = unsafe {
-        syscall3(
-            SYS_STAT,
-            path_cstr.as_ptr() as u64,
-            statbuf.as_mut_ptr() as u64,
-            0,
-        )
-    };
-    ret >= 0
+    Path::new(path).exists()
 }
 
 /// Read an entire file into a `Vec<u8>`.
 fn read_file(path: &str) -> Result<Vec<u8>, KeygenError> {
-    let fd = open_read(path)?;
-    let mut buf = Vec::new();
-    let mut tmp = [0u8; 4096];
-    loop {
-        let n = read_fd(fd, &mut tmp)?;
-        if n == 0 {
-            break;
-        }
-        buf.extend_from_slice(&tmp[..n]);
-    }
-    close_fd(fd);
-    Ok(buf)
+    std::fs::read(path).map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => KeygenError::FileNotFound(path.to_string()),
+        _ => KeygenError::ReadError,
+    })
 }
 
-/// Write `data` to `path`, creating or truncating the file.
-fn write_file(path: &str, data: &[u8], mode: u64) -> Result<(), KeygenError> {
-    let fd = open_write(path, mode)?;
-    let res = write_fd(fd, data);
-    close_fd(fd);
-    res
+/// Write `data` to `path` (creating/truncating) and apply `mode`.
+fn write_file(path: &str, data: &[u8], mode: u32) -> Result<(), KeygenError> {
+    std::fs::write(path, data).map_err(|_| KeygenError::WriteError(path.to_string()))?;
+    set_mode(path, mode);
+    Ok(())
 }
 
 /// Terminate the process with the given exit code.
 fn exit(code: i32) -> ! {
-    // SAFETY: exit(2) never returns.
-    unsafe { syscall1(SYS_EXIT, code as u64) };
-    // Unreachable, but the compiler needs this to accept `-> !`.
-    loop {}
-}
-
-/// Append a NUL byte to a Rust string slice, producing a C-compatible byte vec.
-fn make_cstring(s: &str) -> Vec<u8> {
-    let mut v = s.as_bytes().to_vec();
-    v.push(0);
-    v
+    std::process::exit(code)
 }
 
 // ============================================================================
@@ -392,7 +191,7 @@ static B64_CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuv
 
 /// Encode `data` to standard base64 with `=` padding.
 fn base64_encode(data: &[u8]) -> String {
-    let mut out = Vec::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = Vec::with_capacity(data.len().div_ceil(3) * 4);
     let mut i = 0usize;
     while i < data.len() {
         let b0 = data[i] as u32;
@@ -487,7 +286,7 @@ const SHA256_K: [u32; 64] = [
     0x19a4_c116, 0x1e37_6c08, 0x2748_774c, 0x34b0_bcb5,
     0x391c_0cb3, 0x4ed8_aa4a, 0x5b9c_ca4f, 0x682e_6ff3,
     0x748f_82ee, 0x78a5_636f, 0x84c8_7814, 0x8cc7_0208,
-    0x90be_fffa, 0xa450_6ceb, 0xbef9_a3f7, 0xc67f_c082,
+    0x90be_fffa, 0xa450_6ceb, 0xbef9_a3f7, 0xc671_78f2,
 ];
 
 /// Initial hash values for SHA-256 (first 32 bits of fractional parts of the
@@ -596,32 +395,32 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 /// SHA-512 round constants.
 #[rustfmt::skip]
 const SHA512_K: [u64; 80] = [
-    0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc,
-    0x3956c25bf348b538, 0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118,
-    0xd807aa98a3030242, 0x12835b0145706fbe, 0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2,
-    0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235, 0xc19bf174cf692694,
-    0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
-    0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5,
-    0x983e5152ee66dfab, 0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4,
-    0xc6e00bf33da88fc2, 0xd5a79147930aa725, 0x06ca6351e003826f, 0x142929670a0e6e70,
-    0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed, 0x53380d139d95b3df,
-    0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
-    0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30,
-    0xd192e819d6ef5218, 0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8,
-    0x19a4c116b8d2d0c8, 0x1e376c085141ab53, 0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8,
-    0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373, 0x682e6ff3d6b2b8a3,
-    0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
-    0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b,
-    0xca273eceea26619c, 0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178,
-    0x06f067aa72176fba, 0x0a637dc5a2c898a6, 0x113f9804bef90dae, 0x1b710b35131c471b,
-    0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc, 0x431d67c49c100d4c,
-    0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817,
+    0x428a_2f98_d728_ae22, 0x7137_4491_23ef_65cd, 0xb5c0_fbcf_ec4d_3b2f, 0xe9b5_dba5_8189_dbbc,
+    0x3956_c25b_f348_b538, 0x59f1_11f1_b605_d019, 0x923f_82a4_af19_4f9b, 0xab1c_5ed5_da6d_8118,
+    0xd807_aa98_a303_0242, 0x1283_5b01_4570_6fbe, 0x2431_85be_4ee4_b28c, 0x550c_7dc3_d5ff_b4e2,
+    0x72be_5d74_f27b_896f, 0x80de_b1fe_3b16_96b1, 0x9bdc_06a7_25c7_1235, 0xc19b_f174_cf69_2694,
+    0xe49b_69c1_9ef1_4ad2, 0xefbe_4786_384f_25e3, 0x0fc1_9dc6_8b8c_d5b5, 0x240c_a1cc_77ac_9c65,
+    0x2de9_2c6f_592b_0275, 0x4a74_84aa_6ea6_e483, 0x5cb0_a9dc_bd41_fbd4, 0x76f9_88da_8311_53b5,
+    0x983e_5152_ee66_dfab, 0xa831_c66d_2db4_3210, 0xb003_27c8_98fb_213f, 0xbf59_7fc7_beef_0ee4,
+    0xc6e0_0bf3_3da8_8fc2, 0xd5a7_9147_930a_a725, 0x06ca_6351_e003_826f, 0x1429_2967_0a0e_6e70,
+    0x27b7_0a85_46d2_2ffc, 0x2e1b_2138_5c26_c926, 0x4d2c_6dfc_5ac4_2aed, 0x5338_0d13_9d95_b3df,
+    0x650a_7354_8baf_63de, 0x766a_0abb_3c77_b2a8, 0x81c2_c92e_47ed_aee6, 0x9272_2c85_1482_353b,
+    0xa2bf_e8a1_4cf1_0364, 0xa81a_664b_bc42_3001, 0xc24b_8b70_d0f8_9791, 0xc76c_51a3_0654_be30,
+    0xd192_e819_d6ef_5218, 0xd699_0624_5565_a910, 0xf40e_3585_5771_202a, 0x106a_a070_32bb_d1b8,
+    0x19a4_c116_b8d2_d0c8, 0x1e37_6c08_5141_ab53, 0x2748_774c_df8e_eb99, 0x34b0_bcb5_e19b_48a8,
+    0x391c_0cb3_c5c9_5a63, 0x4ed8_aa4a_e341_8acb, 0x5b9c_ca4f_7763_e373, 0x682e_6ff3_d6b2_b8a3,
+    0x748f_82ee_5def_b2fc, 0x78a5_636f_4317_2f60, 0x84c8_7814_a1f0_ab72, 0x8cc7_0208_1a64_39ec,
+    0x90be_fffa_2363_1e28, 0xa450_6ceb_de82_bde9, 0xbef9_a3f7_b2c6_7915, 0xc671_78f2_e372_532b,
+    0xca27_3ece_ea26_619c, 0xd186_b8c7_21c0_c207, 0xeada_7dd6_cde0_eb1e, 0xf57d_4f7f_ee6e_d178,
+    0x06f0_67aa_7217_6fba, 0x0a63_7dc5_a2c8_98a6, 0x113f_9804_bef9_0dae, 0x1b71_0b35_131c_471b,
+    0x28db_77f5_2304_7d84, 0x32ca_ab7b_40c7_2493, 0x3c9e_be0a_15c9_bebc, 0x431d_67c4_9c10_0d4c,
+    0x4cc5_d4be_cb3e_42b6, 0x597f_299c_fc65_7e2a, 0x5fcb_6fab_3ad6_faec, 0x6c44_198c_4a47_5817,
 ];
 
 /// SHA-512 initial hash values.
 const SHA512_INIT: [u64; 8] = [
-    0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1,
-    0x510e527fade682d1, 0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+    0x6a09_e667_f3bc_c908, 0xbb67_ae85_84ca_a73b, 0x3c6e_f372_fe94_f82b, 0xa54f_f53a_5f1d_36f1,
+    0x510e_527f_ade6_82d1, 0x9b05_688c_2b3e_6c1f, 0x1f83_d9ab_fb41_bd6b, 0x5be0_cd19_137e_2179,
 ];
 
 /// Process one 128-byte block into the running SHA-512 state.
@@ -785,50 +584,45 @@ impl Fe {
         out
     }
 
-    /// Fully reduce the element mod p using the identity 2^255 ≡ 19 (mod p).
+    /// Fully reduce the element to its canonical representative in `[0, p)`,
+    /// using the identity 2^255 ≡ 19 (mod p).
     fn reduce(self) -> Self {
+        let mask = 0x0007_ffff_ffff_ffff_u64;
         let [mut h0, mut h1, mut h2, mut h3, mut h4] = self.0;
 
-        // Carry propagation pass 1.
-        let c0 = h0 >> 51; h0 &= 0x0007_ffff_ffff_ffff; h1 = h1.wrapping_add(c0);
-        let c1 = h1 >> 51; h1 &= 0x0007_ffff_ffff_ffff; h2 = h2.wrapping_add(c1);
-        let c2 = h2 >> 51; h2 &= 0x0007_ffff_ffff_ffff; h3 = h3.wrapping_add(c2);
-        let c3 = h3 >> 51; h3 &= 0x0007_ffff_ffff_ffff; h4 = h4.wrapping_add(c3);
-        let c4 = h4 >> 51; h4 &= 0x0007_ffff_ffff_ffff; h0 = h0.wrapping_add(c4.wrapping_mul(19));
+        // Two full carry passes (each folding the 2^255 overflow back as ×19)
+        // bring any field-operation output — whose limbs are < 2^53 in the
+        // worst case (sub: 2p plus a reduced limb) — down to a value `v` that
+        // is congruent mod p and lies in [0, 2^255 + 19) ⊂ [0, 2p). After this
+        // every limb is < 2^51 except h0, which may be up to 2^51 + 18 from the
+        // final fold; the carry chains below tolerate that.
+        for _ in 0..2 {
+            let c = h0 >> 51; h0 &= mask; h1 = h1.wrapping_add(c);
+            let c = h1 >> 51; h1 &= mask; h2 = h2.wrapping_add(c);
+            let c = h2 >> 51; h2 &= mask; h3 = h3.wrapping_add(c);
+            let c = h3 >> 51; h3 &= mask; h4 = h4.wrapping_add(c);
+            let c = h4 >> 51; h4 &= mask; h0 = h0.wrapping_add(c.wrapping_mul(19));
+        }
 
-        // Carry propagation pass 2 (after the final fold).
-        let c0 = h0 >> 51; h0 &= 0x0007_ffff_ffff_ffff; h1 = h1.wrapping_add(c0);
-        let c1 = h1 >> 51; h1 &= 0x0007_ffff_ffff_ffff; h2 = h2.wrapping_add(c1);
-        let c2 = h2 >> 51; h2 &= 0x0007_ffff_ffff_ffff; h3 = h3.wrapping_add(c2);
-        let c3 = h3 >> 51; h3 &= 0x0007_ffff_ffff_ffff; h4 = h4.wrapping_add(c3);
+        // q = 1 iff v ≥ p, computed as the carry out of bit 255 of (v + 19).
+        // Since p = 2^255 - 19, (v + 19) ≥ 2^255 exactly when v ≥ p, and
+        // v < 2p guarantees q ∈ {0, 1}. The limb additions only track the
+        // running carry, so individual limbs above 2^51 are fine.
+        let mut q = h0.wrapping_add(19) >> 51;
+        q = h1.wrapping_add(q) >> 51;
+        q = h2.wrapping_add(q) >> 51;
+        q = h3.wrapping_add(q) >> 51;
+        q = h4.wrapping_add(q) >> 51;
 
-        // Final conditional subtraction: if value ≥ p, subtract p.
-        // p = 2^255 - 19 = (2^51 - 1)^4 * 2^204 + (2^51 - 1)^3 * 2^153 + …
-        // In limb form p = [2^51-19, 2^51-1, 2^51-1, 2^51-1, 2^51-1].
-        let mask = 0x0007_ffff_ffff_ffff_u64;
-        let p4_top = 0x0007_ffff_ffff_ffff_u64;
-
-        // Compute tentative reduced value.
-        let t0 = h0.wrapping_add(19);
-        let t1 = h1.wrapping_add(t0 >> 51);
-        let t2 = h2.wrapping_add(t1 >> 51);
-        let t3 = h3.wrapping_add(t2 >> 51);
-        let t4 = h4.wrapping_add(t3 >> 51);
-
-        // If t4 has overflowed the top limb, the subtraction was needed.
-        let carry = t4 >> 51;
-        // carry is 1 if we need to subtract, 0 otherwise.
-        // Use wrapping arithmetic to avoid branching in a straightforward way.
-        let need_sub = carry & 1;
-        h0 = h0.wrapping_add(need_sub.wrapping_mul(19)) & mask;
-        h1 = h1.wrapping_add(h0 >> 51) & mask; // re-propagate
-        let _ = (t0, t1, t2, t3, t4); // silence unused warnings
-        // Re-reduce fully after the conditional add.
+        // Conditionally subtract p: v - q·p = v + 19·q - q·2^255. Add 19·q,
+        // carry-propagate (without folding), then mask off the 2^255 bit, which
+        // performs the - q·2^255. The result is the canonical value in [0, p).
+        h0 = h0.wrapping_add(q.wrapping_mul(19));
         let c = h0 >> 51; h0 &= mask; h1 = h1.wrapping_add(c);
         let c = h1 >> 51; h1 &= mask; h2 = h2.wrapping_add(c);
         let c = h2 >> 51; h2 &= mask; h3 = h3.wrapping_add(c);
         let c = h3 >> 51; h3 &= mask; h4 = h4.wrapping_add(c);
-        h4 &= p4_top;
+        h4 &= mask;
 
         Fe([h0, h1, h2, h3, h4])
     }
@@ -860,6 +654,15 @@ impl Fe {
             TWICE_P[3].wrapping_add(self.0[3]).wrapping_sub(rhs.0[3]),
             TWICE_P[4].wrapping_add(self.0[4]).wrapping_sub(rhs.0[4]),
         ])
+    }
+
+    /// Field negation: `-self ≡ 0 - self (mod p)`.
+    ///
+    /// Only exercised by unit tests today; gated so it does not trip
+    /// `dead_code` in the production (non-test) build.
+    #[cfg(test)]
+    fn neg(self) -> Self {
+        FE_ZERO.sub(self)
     }
 
     fn mul(self, rhs: Self) -> Self {
@@ -1087,9 +890,9 @@ impl Ed25519KeyPair {
         // Step 2: Clamp the first 32 bytes to produce the scalar.
         let mut scalar = [0u8; 32];
         scalar.copy_from_slice(&h[..32]);
-        scalar[0] &= 248;   // clear the lowest 3 bits
-        scalar[31] &= 127;  // clear the highest bit
-        scalar[31] |= 64;   // set the second-highest bit
+        scalar[0] &= 0xf8;   // clear the lowest 3 bits
+        scalar[31] &= 0x7f;  // clear the highest bit
+        scalar[31] |= 0x40;  // set the second-highest bit
 
         // Step 3: Compute the public key as scalar * G.
         let public_point = EdPoint::base_point().scalar_mul(&scalar);
@@ -1338,10 +1141,10 @@ fn public_key_path(private_path: &str) -> String {
 /// Generate a new Ed25519 key pair and write it to disk.
 fn generate_key(args: &Args) -> Result<(), KeygenError> {
     // Validate key type if specified.
-    if let Some(ref t) = args.key_type {
-        if t != "ed25519" {
-            return Err(KeygenError::UnsupportedKeyType(t.clone()));
-        }
+    if let Some(t) = &args.key_type
+        && t != "ed25519"
+    {
+        return Err(KeygenError::UnsupportedKeyType(t.clone()));
     }
 
     let priv_path = args
@@ -1357,17 +1160,16 @@ fn generate_key(args: &Args) -> Result<(), KeygenError> {
 
     // Generate 32 random bytes as the seed.
     let mut seed = [0u8; 32];
-    getrandom(&mut seed)?;
+    fill_random(&mut seed)?;
 
     let kp = Ed25519KeyPair::from_seed(seed);
 
     // Ensure the parent directory exists.
-    if let Some(parent) = PathBuf::from(&priv_path).parent() {
-        if let Some(p) = parent.to_str() {
-            if !p.is_empty() {
-                mkdir(p, 0o700);
-            }
-        }
+    if let Some(parent) = PathBuf::from(&priv_path).parent()
+        && let Some(p) = parent.to_str()
+        && !p.is_empty()
+    {
+        mkdir(p, 0o700);
     }
 
     // Refuse to overwrite an existing private key.
@@ -1565,15 +1367,16 @@ mod tests {
 
     #[test]
     fn test_sha256_abc() {
-        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2ec7...
+        // SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+        // (canonical FIPS 180-4 example).
         let digest = sha256(b"abc");
         assert_eq!(
             digest,
             [
                 0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea,
-                0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x2e, 0xc7,
-                0x3b, 0x2a, 0x8b, 0x31, 0x37, 0xe5, 0x27, 0x65,
-                0x45, 0x23, 0x63, 0xf9, 0x77, 0x10, 0x0e, 0x20,
+                0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23,
+                0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
+                0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
             ]
         );
     }

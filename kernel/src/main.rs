@@ -178,6 +178,27 @@ mod workqueue;
 // Kernel entry point
 // ---------------------------------------------------------------------------
 
+/// Size of the dedicated kernel boot stack (512 KiB).
+///
+/// Limine's default boot stack is only 64 KiB and lives in
+/// bootloader-reclaimable memory immediately above the page tables Limine
+/// set up (the kernel reuses Limine's PML4 rather than building its own).
+/// Running the kernel's full boot-time self-test suite on that stack —
+/// deep call chains with large per-frame locals in the unoptimized debug
+/// build (e.g. `Task::new_kernel` reserves a 4 KiB `FpuState` frame) — grew
+/// the stack down across the active PML4 and silently corrupted it (writes
+/// into the HHDM-mapped page tables do not fault; the stale TLB hid the
+/// damage until a later walk wedged the CPU).  We therefore switch to this
+/// dedicated stack, in the kernel's own `.bss` and far from any bootloader
+/// structures, before doing any real work.
+const KERNEL_BOOT_STACK_SIZE: usize = 512 * 1024;
+
+/// The dedicated kernel boot stack.  16-byte aligned for the System V ABI.
+#[repr(C, align(16))]
+struct KernelBootStack([u8; KERNEL_BOOT_STACK_SIZE]);
+
+static mut KERNEL_BOOT_STACK: KernelBootStack = KernelBootStack([0; KERNEL_BOOT_STACK_SIZE]);
+
 /// Kernel entry point, called by the Limine bootloader.
 ///
 /// At this point we have:
@@ -185,9 +206,41 @@ mod workqueue;
 /// - Identity map + HHDM for physical memory access
 /// - Interrupts disabled
 /// - BSS zeroed
-/// - A temporary stack provided by the bootloader
+/// - A temporary, small stack provided by the bootloader
+///
+/// This is a minimal trampoline: it immediately switches `RSP` to the top
+/// of the dedicated [`KERNEL_BOOT_STACK`] and tail-calls [`kernel_main`], so
+/// that no meaningful work — and in particular none of the deep boot-time
+/// self-tests — ever runs on Limine's small reclaimable-memory stack.
 #[unsafe(no_mangle)]
 extern "C" fn kmain() -> ! {
+    // SAFETY: `KERNEL_BOOT_STACK` is a dedicated 512 KiB static used only as
+    // the kernel boot stack and touched nowhere else, so there is no
+    // aliasing concern in computing its top address.  We load the top
+    // (highest address; the static's size is a multiple of 16 and it is
+    // 16-byte aligned, so the top is 16-byte aligned as the ABI requires
+    // before a `call`) into RSP, zero RBP to terminate stack-frame chains,
+    // then `call kernel_main`.  The old Limine stack frame is abandoned;
+    // `kernel_main` is `-> !` and never returns, so the discarded frame is
+    // never referenced again.
+    unsafe {
+        let stack_top = core::ptr::addr_of_mut!(KERNEL_BOOT_STACK)
+            .cast::<u8>()
+            .add(KERNEL_BOOT_STACK_SIZE) as u64;
+        core::arch::asm!(
+            "mov rsp, {top}",
+            "xor rbp, rbp",
+            "call {main}",
+            top = in(reg) stack_top,
+            main = sym kernel_main,
+            options(noreturn),
+        );
+    }
+}
+
+/// The real kernel entry, running on the dedicated [`KERNEL_BOOT_STACK`].
+#[unsafe(no_mangle)]
+extern "C" fn kernel_main() -> ! {
     // Step 1: Initialize serial console for debug output.
     // This must be first so we can log everything that follows.
     //
@@ -459,14 +512,18 @@ extern "C" fn kmain() -> ! {
     // Stream sockets are bidirectional kernel-buffered byte streams — the
     // primitive backing POSIX socketpair(AF_UNIX, SOCK_STREAM, ...).
     //
-    // NOTE: The stream_socket::self_test() is intentionally NOT invoked at
-    // boot.  The self_test is verified to pass (all 7 subtests printed OK in
-    // an earlier boot), but its heap allocation churn triggers a pre-existing,
-    // state/timing-sensitive boot hang during later ring-3 process spawns
-    // (reproducible with socket-free 64 KiB heap churn alone).  See the
-    // "ADVANCED DIAGNOSIS" entry in todo.txt under "Cross-Zone Bug Reports".
-    // The function is retained and can be run on demand once that MM/fault
-    // bug is fixed.
+    // This self-test was previously disabled because its heap-allocation
+    // churn appeared to trigger a "later" boot hang during ring-3 process
+    // spawns.  That hang was in fact the boot-stack-vs-PML4 collision (the
+    // kernel ran on Limine's small reclaimable-memory stack, which grew down
+    // into the active page tables); the churn only shifted allocation/timing
+    // enough to expose it.  With the kernel now switched to a dedicated
+    // 512 KiB boot stack (see `KERNEL_BOOT_STACK`), the underlying bug is
+    // fixed and the self-test runs normally at boot.
+    if let Err(e) = ipc::stream_socket::self_test() {
+        serial_println!("FATAL: Stream socket self-test failed: {}", e);
+        cpu::halt_loop();
+    }
 
     // Step 14: Initialize shared memory subsystem.
     // Shared memory regions let tasks (and future processes) map the

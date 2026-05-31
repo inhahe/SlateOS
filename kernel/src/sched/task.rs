@@ -854,7 +854,6 @@ impl Task {
         // switch_context switches to this task, it "returns" into
         // the task_entry_trampoline which calls entry(arg).
         let context = Self::prepare_context(stack_top, entry, arg);
-
         Ok(Self {
             id,
             name,

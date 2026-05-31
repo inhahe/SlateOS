@@ -20,22 +20,28 @@ use std::process;
 const VERSION: &str = "0.1.0";
 
 /// Maximum number of sinks the simulated server tracks.
-const _MAX_SINKS: usize = 8;
+/// Reserved for future server-side resource limits; validated in tests.
+#[allow(dead_code)]
+const MAX_SINKS: usize = 8;
 
 /// Maximum number of sources the simulated server tracks.
-const _MAX_SOURCES: usize = 8;
+#[allow(dead_code)]
+const MAX_SOURCES: usize = 8;
 
 /// Maximum number of modules the simulated server tracks.
 const MAX_MODULES: usize = 64;
 
 /// Maximum number of cards the simulated server tracks.
-const _MAX_CARDS: usize = 8;
+#[allow(dead_code)]
+const MAX_CARDS: usize = 8;
 
 /// Maximum number of active sink inputs.
-const _MAX_SINK_INPUTS: usize = 32;
+#[allow(dead_code)]
+const MAX_SINK_INPUTS: usize = 32;
 
 /// Maximum number of active source outputs.
-const _MAX_SOURCE_OUTPUTS: usize = 32;
+#[allow(dead_code)]
+const MAX_SOURCE_OUTPUTS: usize = 32;
 
 /// Default sample rate for audio playback/recording.
 const DEFAULT_SAMPLE_RATE: u32 = 44100;
@@ -101,8 +107,12 @@ impl SampleFormat {
             Self::U8 | Self::_Alaw | Self::_Ulaw => 1,
             Self::S16Le | Self::_S16Be => 2,
             Self::S24Le | Self::_S24Be => 3,
-            Self::Float32Le | Self::_Float32Be | Self::S32Le | Self::_S32Be
-            | Self::_S2432Le | Self::_S2432Be => 4,
+            Self::Float32Le
+            | Self::_Float32Be
+            | Self::S32Le
+            | Self::_S32Be
+            | Self::_S2432Le
+            | Self::_S2432Be => 4,
         }
     }
 
@@ -140,23 +150,34 @@ struct SampleSpec {
 
 impl SampleSpec {
     fn new(format: SampleFormat, rate: u32, channels: u16) -> Self {
-        Self { format, rate, channels }
+        Self {
+            format,
+            rate,
+            channels,
+        }
     }
 
     fn bytes_per_second(self) -> u64 {
-        u64::from(self.format.bytes_per_sample())
-            * u64::from(self.rate)
-            * u64::from(self.channels)
+        u64::from(self.format.bytes_per_sample()) * u64::from(self.rate) * u64::from(self.channels)
     }
 
-    fn _frame_size(self) -> u32 {
+    // Reserved for buffer-size math once the playback/record paths are wired;
+    // currently exercised only by unit tests.
+    #[allow(dead_code)]
+    fn frame_size(self) -> u32 {
         self.format.bytes_per_sample() * u32::from(self.channels)
     }
 }
 
 impl std::fmt::Display for SampleSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {}ch {}Hz", self.format.as_str(), self.channels, self.rate)
+        write!(
+            f,
+            "{} {}ch {}Hz",
+            self.format.as_str(),
+            self.channels,
+            self.rate
+        )
     }
 }
 
@@ -165,18 +186,21 @@ impl std::fmt::Display for SampleSpec {
 // ---------------------------------------------------------------------------
 
 /// Identifies a single audio channel position.
+// Some positions (rear-center, side-left/right) are defined for completeness of
+// the channel-map model but are not yet produced by any built-in map preset.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChannelPosition {
     Mono,
     FrontLeft,
     FrontRight,
-    _FrontCenter,
-    _RearLeft,
-    _RearRight,
-    _RearCenter,
-    _Lfe,
-    _SideLeft,
-    _SideRight,
+    FrontCenter,
+    RearLeft,
+    RearRight,
+    RearCenter,
+    Lfe,
+    SideLeft,
+    SideRight,
 }
 
 impl ChannelPosition {
@@ -185,13 +209,13 @@ impl ChannelPosition {
             Self::Mono => "mono",
             Self::FrontLeft => "front-left",
             Self::FrontRight => "front-right",
-            Self::_FrontCenter => "front-center",
-            Self::_RearLeft => "rear-left",
-            Self::_RearRight => "rear-right",
-            Self::_RearCenter => "rear-center",
-            Self::_Lfe => "lfe",
-            Self::_SideLeft => "side-left",
-            Self::_SideRight => "side-right",
+            Self::FrontCenter => "front-center",
+            Self::RearLeft => "rear-left",
+            Self::RearRight => "rear-right",
+            Self::RearCenter => "rear-center",
+            Self::Lfe => "lfe",
+            Self::SideLeft => "side-left",
+            Self::SideRight => "side-right",
         }
     }
 }
@@ -215,15 +239,17 @@ impl ChannelMap {
         }
     }
 
-    fn _surround51() -> Self {
+    // 5.1 channel-map preset; reserved for multichannel device setup, tested.
+    #[allow(dead_code)]
+    fn surround51() -> Self {
         Self {
             positions: vec![
                 ChannelPosition::FrontLeft,
                 ChannelPosition::FrontRight,
-                ChannelPosition::_FrontCenter,
-                ChannelPosition::_Lfe,
-                ChannelPosition::_RearLeft,
-                ChannelPosition::_RearRight,
+                ChannelPosition::FrontCenter,
+                ChannelPosition::Lfe,
+                ChannelPosition::RearLeft,
+                ChannelPosition::RearRight,
             ],
         }
     }
@@ -318,9 +344,12 @@ impl std::fmt::Display for Volume {
 // ---------------------------------------------------------------------------
 
 /// Operating state of a sink.
+// Running/Suspended are part of the state model but the simulated server only
+// ever reports Idle today; reserved for when real streams drive state changes.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SinkState {
-    _Running,
+    Running,
     Idle,
     Suspended,
 }
@@ -328,7 +357,7 @@ enum SinkState {
 impl SinkState {
     fn as_str(self) -> &'static str {
         match self {
-            Self::_Running => "RUNNING",
+            Self::Running => "RUNNING",
             Self::Idle => "IDLE",
             Self::Suspended => "SUSPENDED",
         }
@@ -340,19 +369,21 @@ impl SinkState {
 // ---------------------------------------------------------------------------
 
 /// Operating state of a source.
+// See SinkState: Running/Suspended reserved for live-stream state transitions.
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum SourceState {
-    _Running,
+    Running,
     Idle,
-    _Suspended,
+    Suspended,
 }
 
 impl SourceState {
     fn as_str(self) -> &'static str {
         match self {
-            Self::_Running => "RUNNING",
+            Self::Running => "RUNNING",
             Self::Idle => "IDLE",
-            Self::_Suspended => "SUSPENDED",
+            Self::Suspended => "SUSPENDED",
         }
     }
 }
@@ -797,7 +828,10 @@ impl ServerInfo {
     fn format_info(&self) -> String {
         let mut out = String::new();
         out.push_str(&format!("Server String: {}\n", self.server_name));
-        out.push_str(&format!("Library Protocol Version: {}\n", self.server_version));
+        out.push_str(&format!(
+            "Library Protocol Version: {}\n",
+            self.server_version
+        ));
         out.push_str(&format!("Default Sink: {}\n", self.default_sink_name));
         out.push_str(&format!("Default Source: {}\n", self.default_source_name));
         out.push_str(&format!(
@@ -840,10 +874,7 @@ impl StatInfo {
             "Allocated during whole lifetime: {} blocks containing {} bytes total.\n",
             self.memblock_total, self.memblock_total_size
         ));
-        out.push_str(&format!(
-            "Sample cache size: {} bytes.\n",
-            self.scache_size
-        ));
+        out.push_str(&format!("Sample cache size: {} bytes.\n", self.scache_size));
         out
     }
 }
@@ -870,7 +901,8 @@ struct PulseState {
 
 impl PulseState {
     fn default_state() -> Self {
-        let default_spec = SampleSpec::new(SampleFormat::S16Le, DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS);
+        let default_spec =
+            SampleSpec::new(SampleFormat::S16Le, DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS);
         let default_map = ChannelMap::stereo();
 
         let mut state = Self {
@@ -1153,12 +1185,16 @@ fn parse_volume(s: &str, current: u32) -> Result<u32, String> {
 
 fn parse_relative_or_absolute_pct(s: &str, current: u32) -> Result<u32, String> {
     if let Some(rest) = s.strip_prefix('+') {
-        let pct: u32 = rest.parse().map_err(|_| format!("invalid percentage: {s}%"))?;
+        let pct: u32 = rest
+            .parse()
+            .map_err(|_| format!("invalid percentage: {s}%"))?;
         let delta = (u64::from(VOLUME_NORM) * u64::from(pct) / 100) as u32;
         let result = current.saturating_add(delta);
         Ok(result.min(VOLUME_MAX))
     } else if let Some(rest) = s.strip_prefix('-') {
-        let pct: u32 = rest.parse().map_err(|_| format!("invalid percentage: {s}%"))?;
+        let pct: u32 = rest
+            .parse()
+            .map_err(|_| format!("invalid percentage: {s}%"))?;
         let delta = (u64::from(VOLUME_NORM) * u64::from(pct) / 100) as u32;
         Ok(current.saturating_sub(delta))
     } else {
@@ -1228,7 +1264,9 @@ impl Personality {
         }
     }
 
-    fn _name(self) -> &'static str {
+    // Inverse of from_name; reserved for diagnostics/usage output, tested.
+    #[allow(dead_code)]
+    fn name(self) -> &'static str {
         match self {
             Self::Pactl => "pactl",
             Self::Pacmd => "pacmd",
@@ -1708,11 +1746,11 @@ fn run_pactl_set_default_sink(args: &[String], state: &mut PulseState) -> i32 {
     }
 
     // If numeric index was given, resolve to the sink name
-    if let Ok(idx) = sink_id.parse::<u32>() {
-        if let Some(pos) = state.sinks.iter().position(|s| s.index == idx) {
-            state.server.default_sink_name = state.sinks[pos].name.clone();
-            return 0;
-        }
+    if let Ok(idx) = sink_id.parse::<u32>()
+        && let Some(pos) = state.sinks.iter().position(|s| s.index == idx)
+    {
+        state.server.default_sink_name = state.sinks[pos].name.clone();
+        return 0;
     }
     state.server.default_sink_name = sink_id.clone();
     0
@@ -1730,11 +1768,11 @@ fn run_pactl_set_default_source(args: &[String], state: &mut PulseState) -> i32 
         return 1;
     }
 
-    if let Ok(idx) = source_id.parse::<u32>() {
-        if let Some(pos) = state.sources.iter().position(|s| s.index == idx) {
-            state.server.default_source_name = state.sources[pos].name.clone();
-            return 0;
-        }
+    if let Ok(idx) = source_id.parse::<u32>()
+        && let Some(pos) = state.sources.iter().position(|s| s.index == idx)
+    {
+        state.server.default_source_name = state.sources[pos].name.clone();
+        return 0;
     }
     state.server.default_source_name = source_id.clone();
     0
@@ -2123,11 +2161,7 @@ fn pacmd_dump(state: &PulseState) {
     println!();
     // Sink volumes and mutes
     for s in &state.sinks {
-        println!(
-            "set-sink-volume {} 0x{:x}",
-            s.name,
-            s.volume.average()
-        );
+        println!("set-sink-volume {} 0x{:x}", s.name, s.volume.average());
         println!(
             "set-sink-mute {} {}",
             s.name,
@@ -2136,11 +2170,7 @@ fn pacmd_dump(state: &PulseState) {
     }
     // Source volumes and mutes
     for s in &state.sources {
-        println!(
-            "set-source-volume {} 0x{:x}",
-            s.name,
-            s.volume.average()
-        );
+        println!("set-source-volume {} 0x{:x}", s.name, s.volume.average());
         println!(
             "set-source-mute {} {}",
             s.name,
@@ -2670,7 +2700,9 @@ fn run_pasuspender(args: &[String]) -> i32 {
         }
     };
 
-    let server_name = server.as_deref().unwrap_or("unix:/run/user/1000/pulse/native");
+    let server_name = server
+        .as_deref()
+        .unwrap_or("unix:/run/user/1000/pulse/native");
     println!("Suspending PulseAudio on server '{server_name}'...");
     println!("Running: {command}");
     println!("Command completed (simulated).");
@@ -2910,10 +2942,7 @@ fn run_pulseaudio(args: &[String]) -> i32 {
 
 fn dump_daemon_conf(opts: &DaemonOptions) {
     println!("### Daemon configuration dump ###");
-    println!(
-        "daemonize = {}",
-        if opts._daemonize { "yes" } else { "no" }
-    );
+    println!("daemonize = {}", if opts._daemonize { "yes" } else { "no" });
     println!(
         "system-instance = {}",
         if opts._system { "yes" } else { "no" }
@@ -2956,20 +2985,41 @@ fn dump_available_modules() {
     let modules = [
         ("module-null-sink", "Clocked NULL sink"),
         ("module-null-source", "Clocked NULL source"),
-        ("module-device-restore", "Automatically restore device volumes/mute"),
-        ("module-stream-restore", "Automatically restore stream volumes/mute"),
+        (
+            "module-device-restore",
+            "Automatically restore device volumes/mute",
+        ),
+        (
+            "module-stream-restore",
+            "Automatically restore stream volumes/mute",
+        ),
         ("module-card-restore", "Automatically restore card profiles"),
         ("module-augment-properties", "Augment stream properties"),
-        ("module-switch-on-port-available", "Switch sink/source on port availability"),
+        (
+            "module-switch-on-port-available",
+            "Switch sink/source on port availability",
+        ),
         ("module-alsa-card", "ALSA card"),
         ("module-alsa-sink", "ALSA sink"),
         ("module-alsa-source", "ALSA source"),
-        ("module-native-protocol-unix", "Native protocol (UNIX sockets)"),
+        (
+            "module-native-protocol-unix",
+            "Native protocol (UNIX sockets)",
+        ),
         ("module-native-protocol-tcp", "Native protocol (TCP)"),
-        ("module-cli-protocol-unix", "Command line interface protocol (UNIX sockets)"),
-        ("module-default-device-restore", "Automatically restore default sink/source"),
+        (
+            "module-cli-protocol-unix",
+            "Command line interface protocol (UNIX sockets)",
+        ),
+        (
+            "module-default-device-restore",
+            "Automatically restore default sink/source",
+        ),
         ("module-always-sink", "Always keep at least one sink loaded"),
-        ("module-rescue-streams", "Move streams when sinks/sources are removed"),
+        (
+            "module-rescue-streams",
+            "Move streams when sinks/sources are removed",
+        ),
         ("module-suspend-on-idle", "Suspend sinks/sources on idle"),
         ("module-loopback", "Loopback from source to sink"),
         ("module-combine-sink", "Combine multiple sinks into one"),
@@ -2978,7 +3028,10 @@ fn dump_available_modules() {
         ("module-echo-cancel", "Echo cancellation"),
         ("module-equalizer-sink", "Equalizer"),
         ("module-ladspa-sink", "LADSPA plugin sink"),
-        ("module-bluetooth-discover", "Bluetooth audio device discovery"),
+        (
+            "module-bluetooth-discover",
+            "Bluetooth audio device discovery",
+        ),
         ("module-bluetooth-policy", "Bluetooth audio routing policy"),
         ("module-zeroconf-discover", "mDNS/DNS-SD discovery"),
         ("module-zeroconf-publish", "mDNS/DNS-SD publishing"),
@@ -3054,7 +3107,9 @@ fn print_pulseaudio_usage() {
     println!("  --high-priority             Enable high priority scheduling");
     println!("  --disallow-exit             Disallow exit via protocol");
     println!("  --disallow-module-loading   Disallow loading modules after startup");
-    println!("  --log-level=LEVEL           Log level (0=error, 1=warn, 2=notice, 3=info, 4=debug)");
+    println!(
+        "  --log-level=LEVEL           Log level (0=error, 1=warn, 2=notice, 3=info, 4=debug)"
+    );
     println!("  --log-target=TARGET         Log target (auto, syslog, stderr, file:PATH)");
     println!("  --exit-idle-time=SECS       Exit when idle for N seconds (-1 to disable)");
     println!("  --scache-idle-time=SECS     Unload sample cache entries after N seconds");
@@ -3073,13 +3128,15 @@ fn print_pulseaudio_usage() {
 // ---------------------------------------------------------------------------
 
 /// Format a volume as a percentage string (for display).
-fn _volume_to_percent(vol: u32) -> String {
+#[allow(dead_code)]
+fn volume_to_percent(vol: u32) -> String {
     let pct = (u64::from(vol) * 100) / u64::from(VOLUME_NORM);
     format!("{pct}%")
 }
 
 /// Format a volume as a dB string.
-fn _volume_to_db(vol: u32) -> String {
+#[allow(dead_code)]
+fn volume_to_db(vol: u32) -> String {
     if vol == 0 {
         return "-inf dB".to_string();
     }
@@ -3089,37 +3146,41 @@ fn _volume_to_db(vol: u32) -> String {
 }
 
 /// Validate that a sink index is within bounds.
-fn _validate_sink_count(count: usize) -> Result<(), String> {
-    if count >= _MAX_SINKS {
-        Err(format!("maximum sink count ({_MAX_SINKS}) reached"))
+#[allow(dead_code)]
+fn validate_sink_count(count: usize) -> Result<(), String> {
+    if count >= MAX_SINKS {
+        Err(format!("maximum sink count ({MAX_SINKS}) reached"))
     } else {
         Ok(())
     }
 }
 
 /// Validate that a source index is within bounds.
-fn _validate_source_count(count: usize) -> Result<(), String> {
-    if count >= _MAX_SOURCES {
-        Err(format!("maximum source count ({_MAX_SOURCES}) reached"))
+#[allow(dead_code)]
+fn validate_source_count(count: usize) -> Result<(), String> {
+    if count >= MAX_SOURCES {
+        Err(format!("maximum source count ({MAX_SOURCES}) reached"))
     } else {
         Ok(())
     }
 }
 
 /// Validate that a card index is within bounds.
-fn _validate_card_count(count: usize) -> Result<(), String> {
-    if count >= _MAX_CARDS {
-        Err(format!("maximum card count ({_MAX_CARDS}) reached"))
+#[allow(dead_code)]
+fn validate_card_count(count: usize) -> Result<(), String> {
+    if count >= MAX_CARDS {
+        Err(format!("maximum card count ({MAX_CARDS}) reached"))
     } else {
         Ok(())
     }
 }
 
 /// Validate that a sink input index is within bounds.
-fn _validate_sink_input_count(count: usize) -> Result<(), String> {
-    if count >= _MAX_SINK_INPUTS {
+#[allow(dead_code)]
+fn validate_sink_input_count(count: usize) -> Result<(), String> {
+    if count >= MAX_SINK_INPUTS {
         Err(format!(
-            "maximum sink input count ({_MAX_SINK_INPUTS}) reached"
+            "maximum sink input count ({MAX_SINK_INPUTS}) reached"
         ))
     } else {
         Ok(())
@@ -3127,10 +3188,11 @@ fn _validate_sink_input_count(count: usize) -> Result<(), String> {
 }
 
 /// Validate that a source output index is within bounds.
-fn _validate_source_output_count(count: usize) -> Result<(), String> {
-    if count >= _MAX_SOURCE_OUTPUTS {
+#[allow(dead_code)]
+fn validate_source_output_count(count: usize) -> Result<(), String> {
+    if count >= MAX_SOURCE_OUTPUTS {
         Err(format!(
-            "maximum source output count ({_MAX_SOURCE_OUTPUTS}) reached"
+            "maximum source output count ({MAX_SOURCE_OUTPUTS}) reached"
         ))
     } else {
         Ok(())
@@ -3138,38 +3200,45 @@ fn _validate_source_output_count(count: usize) -> Result<(), String> {
 }
 
 /// Clamp a volume value to the valid range.
-fn _clamp_volume(vol: u32) -> u32 {
+#[allow(dead_code)]
+fn clamp_volume(vol: u32) -> u32 {
     vol.min(VOLUME_MAX)
 }
 
 /// Convert percentage to raw PA volume.
-fn _percent_to_volume(pct: u32) -> u32 {
+#[allow(dead_code)]
+fn percent_to_volume(pct: u32) -> u32 {
     let v = (u64::from(VOLUME_NORM) * u64::from(pct) / 100) as u32;
-    _clamp_volume(v)
+    clamp_volume(v)
 }
 
 /// Convert raw PA volume to percentage.
-fn _volume_to_percent_val(vol: u32) -> u32 {
+#[allow(dead_code)]
+fn volume_to_percent_val(vol: u32) -> u32 {
     ((u64::from(vol) * 100) / u64::from(VOLUME_NORM)) as u32
 }
 
 /// Check if a string looks like a numeric index.
-fn _is_numeric(s: &str) -> bool {
+#[allow(dead_code)]
+fn is_numeric(s: &str) -> bool {
     !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Compute the byte rate for a given spec.
-fn _compute_byte_rate(format: SampleFormat, channels: u16, rate: u32) -> u64 {
+#[allow(dead_code)]
+fn compute_byte_rate(format: SampleFormat, channels: u16, rate: u32) -> u64 {
     u64::from(format.bytes_per_sample()) * u64::from(channels) * u64::from(rate)
 }
 
 /// Compute the frame size for a given spec.
-fn _compute_frame_size(format: SampleFormat, channels: u16) -> u32 {
+#[allow(dead_code)]
+fn compute_frame_size(format: SampleFormat, channels: u16) -> u32 {
     format.bytes_per_sample() * u32::from(channels)
 }
 
 /// Compute the usec duration for a given number of bytes.
-fn _bytes_to_usec(bytes: u64, spec: &SampleSpec) -> u64 {
+#[allow(dead_code)]
+fn bytes_to_usec(bytes: u64, spec: &SampleSpec) -> u64 {
     let bps = spec.bytes_per_second();
     if bps == 0 {
         return 0;
@@ -3178,7 +3247,8 @@ fn _bytes_to_usec(bytes: u64, spec: &SampleSpec) -> u64 {
 }
 
 /// Compute the number of bytes for a given usec duration.
-fn _usec_to_bytes(usec: u64, spec: &SampleSpec) -> u64 {
+#[allow(dead_code)]
+fn usec_to_bytes(usec: u64, spec: &SampleSpec) -> u64 {
     let bps = spec.bytes_per_second();
     bps * usec / 1_000_000
 }
@@ -3331,7 +3401,10 @@ mod tests {
 
     #[test]
     fn test_basename_nested_windows() {
-        assert_eq!(extract_basename("D:\\a\\b\\c\\pasuspender.exe"), "pasuspender");
+        assert_eq!(
+            extract_basename("D:\\a\\b\\c\\pasuspender.exe"),
+            "pasuspender"
+        );
     }
 
     #[test]
@@ -3364,22 +3437,40 @@ mod tests {
 
     #[test]
     fn test_sample_format_from_str() {
-        assert_eq!(SampleFormat::from_str_opt("s16le"), Some(SampleFormat::S16Le));
-        assert_eq!(SampleFormat::from_str_opt("float32le"), Some(SampleFormat::Float32Le));
+        assert_eq!(
+            SampleFormat::from_str_opt("s16le"),
+            Some(SampleFormat::S16Le)
+        );
+        assert_eq!(
+            SampleFormat::from_str_opt("float32le"),
+            Some(SampleFormat::Float32Le)
+        );
         assert_eq!(SampleFormat::from_str_opt("u8"), Some(SampleFormat::U8));
         assert_eq!(SampleFormat::from_str_opt("invalid"), None);
     }
 
     #[test]
     fn test_sample_format_from_str_alaw_case() {
-        assert_eq!(SampleFormat::from_str_opt("aLaw"), Some(SampleFormat::_Alaw));
-        assert_eq!(SampleFormat::from_str_opt("alaw"), Some(SampleFormat::_Alaw));
+        assert_eq!(
+            SampleFormat::from_str_opt("aLaw"),
+            Some(SampleFormat::_Alaw)
+        );
+        assert_eq!(
+            SampleFormat::from_str_opt("alaw"),
+            Some(SampleFormat::_Alaw)
+        );
     }
 
     #[test]
     fn test_sample_format_from_str_ulaw_case() {
-        assert_eq!(SampleFormat::from_str_opt("uLaw"), Some(SampleFormat::_Ulaw));
-        assert_eq!(SampleFormat::from_str_opt("ulaw"), Some(SampleFormat::_Ulaw));
+        assert_eq!(
+            SampleFormat::from_str_opt("uLaw"),
+            Some(SampleFormat::_Ulaw)
+        );
+        assert_eq!(
+            SampleFormat::from_str_opt("ulaw"),
+            Some(SampleFormat::_Ulaw)
+        );
     }
 
     // -- SampleSpec ------------------------------------------------------------
@@ -3482,9 +3573,7 @@ mod tests {
 
     #[test]
     fn test_volume_average_empty() {
-        let v = Volume {
-            values: Vec::new(),
-        };
+        let v = Volume { values: Vec::new() };
         assert_eq!(v.average(), 0);
     }
 
@@ -3713,21 +3802,36 @@ mod tests {
     #[test]
     fn test_list_entity_from_str() {
         assert_eq!(ListEntity::from_str_opt("sinks"), Some(ListEntity::Sinks));
-        assert_eq!(ListEntity::from_str_opt("sources"), Some(ListEntity::Sources));
-        assert_eq!(ListEntity::from_str_opt("sink-inputs"), Some(ListEntity::SinkInputs));
+        assert_eq!(
+            ListEntity::from_str_opt("sources"),
+            Some(ListEntity::Sources)
+        );
+        assert_eq!(
+            ListEntity::from_str_opt("sink-inputs"),
+            Some(ListEntity::SinkInputs)
+        );
         assert_eq!(
             ListEntity::from_str_opt("source-outputs"),
             Some(ListEntity::SourceOutputs)
         );
         assert_eq!(ListEntity::from_str_opt("cards"), Some(ListEntity::Cards));
-        assert_eq!(ListEntity::from_str_opt("modules"), Some(ListEntity::Modules));
-        assert_eq!(ListEntity::from_str_opt("clients"), Some(ListEntity::Clients));
+        assert_eq!(
+            ListEntity::from_str_opt("modules"),
+            Some(ListEntity::Modules)
+        );
+        assert_eq!(
+            ListEntity::from_str_opt("clients"),
+            Some(ListEntity::Clients)
+        );
     }
 
     #[test]
     fn test_list_entity_case_insensitive() {
         assert_eq!(ListEntity::from_str_opt("SINKS"), Some(ListEntity::Sinks));
-        assert_eq!(ListEntity::from_str_opt("Sources"), Some(ListEntity::Sources));
+        assert_eq!(
+            ListEntity::from_str_opt("Sources"),
+            Some(ListEntity::Sources)
+        );
     }
 
     #[test]
@@ -4460,9 +4564,9 @@ mod tests {
         assert_eq!(ChannelPosition::FrontLeft.as_str(), "front-left");
         assert_eq!(ChannelPosition::FrontRight.as_str(), "front-right");
         assert_eq!(ChannelPosition::FrontCenter.as_str(), "front-center");
-        assert_eq!(ChannelPosition::_RearLeft.as_str(), "rear-left");
-        assert_eq!(ChannelPosition::_RearRight.as_str(), "rear-right");
-        assert_eq!(ChannelPosition::_Lfe.as_str(), "lfe");
+        assert_eq!(ChannelPosition::RearLeft.as_str(), "rear-left");
+        assert_eq!(ChannelPosition::RearRight.as_str(), "rear-right");
+        assert_eq!(ChannelPosition::Lfe.as_str(), "lfe");
     }
 
     // -- CardProfile -----------------------------------------------------------
@@ -4610,17 +4714,21 @@ mod tests {
     #[test]
     fn test_paplay_with_device() {
         assert_eq!(
-            run_paplay(&["-d".to_string(), "mysink".to_string(), "test.wav".to_string()].to_vec()),
+            run_paplay(
+                &[
+                    "-d".to_string(),
+                    "mysink".to_string(),
+                    "test.wav".to_string()
+                ]
+                .to_vec()
+            ),
             0
         );
     }
 
     #[test]
     fn test_paplay_list_file_formats() {
-        assert_eq!(
-            run_paplay(&["--list-file-formats".to_string()].to_vec()),
-            0
-        );
+        assert_eq!(run_paplay(&["--list-file-formats".to_string()].to_vec()), 0);
     }
 
     #[test]
@@ -4654,7 +4762,12 @@ mod tests {
     fn test_parecord_with_device() {
         assert_eq!(
             run_parecord(
-                &["-d".to_string(), "mysource".to_string(), "output.wav".to_string()].to_vec()
+                &[
+                    "-d".to_string(),
+                    "mysource".to_string(),
+                    "output.wav".to_string()
+                ]
+                .to_vec()
             ),
             0
         );
@@ -4694,8 +4807,13 @@ mod tests {
     fn test_pasuspender_with_server() {
         assert_eq!(
             run_pasuspender(
-                &["-s".to_string(), "localhost".to_string(), "--".to_string(), "cmd".to_string()]
-                    .to_vec()
+                &[
+                    "-s".to_string(),
+                    "localhost".to_string(),
+                    "--".to_string(),
+                    "cmd".to_string()
+                ]
+                .to_vec()
             ),
             0
         );
@@ -4735,10 +4853,7 @@ mod tests {
 
     #[test]
     fn test_pulseaudio_dump_modules() {
-        assert_eq!(
-            run_pulseaudio(&["--dump-modules".to_string()].to_vec()),
-            0
-        );
+        assert_eq!(run_pulseaudio(&["--dump-modules".to_string()].to_vec()), 0);
     }
 
     #[test]
@@ -4751,10 +4866,7 @@ mod tests {
 
     #[test]
     fn test_pulseaudio_cleanup_shm() {
-        assert_eq!(
-            run_pulseaudio(&["--cleanup-shm".to_string()].to_vec()),
-            0
-        );
+        assert_eq!(run_pulseaudio(&["--cleanup-shm".to_string()].to_vec()), 0);
     }
 
     #[test]

@@ -1,3 +1,27 @@
+## BUG (noticed+FIXED 2026-05-31): pulseaudio had a broken test build + 2
+##   pre-existing clippy errors.  userspace/pulseaudio/src/main.rs:
+##     * TEST BUILD DIDN'T COMPILE: the same underscore-prefix anti-pattern.
+##       Production defined constants (_MAX_SINKS/_MAX_SOURCES/_MAX_CARDS/
+##       _MAX_SINK_INPUTS/_MAX_SOURCE_OUTPUTS), ~15 free helper functions
+##       (volume_to_percent/_db/_val, percent_to_volume, clamp_volume,
+##       validate_{sink,source,card,sink_input,source_output}_count, is_numeric,
+##       compute_byte_rate/_frame_size, bytes_to_usec/usec_to_bytes), methods
+##       (SampleSpec::frame_size, ChannelMap::surround51, Personality::name) and
+##       enum variants (ChannelPosition::FrontCenter/RearLeft/..., SinkState/
+##       SourceState::Running/Suspended) all with a leading `_`, while the tests
+##       referenced the clean names.  Renamed all to clean names + documented
+##       #[allow(dead_code)] (reserved for when real streams/limits are wired).
+##       221/221 tests pass.
+##     * 2 pre-existing clippy errors: two collapsible nested `if let` in
+##       run_pactl_set_default_{sink,source} -> let-chains.
+##     * LIMITATION (dispatch-wiring gap): the volume math, count validators,
+##       byte/usec timing helpers, frame-size, the 5.1 channel map, and the
+##       RUNNING/SUSPENDED device states are implemented + unit-tested but not
+##       reached from the per-personality run_* dispatch — the simulated server
+##       reports Idle and never enforces the MAX_* limits.  Reserved for a future
+##       wiring pass.
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): e2fsprogs had a broken test build + 12
 ##   pre-existing clippy errors.  userspace/e2fsprogs/src/main.rs:
 ##     * TEST BUILD DIDN'T COMPILE (57+ errors): the same underscore-prefix

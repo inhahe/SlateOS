@@ -134,6 +134,44 @@ fn require_cap_type(
     }
 }
 
+/// Check that the calling process is privileged enough to set the system
+/// wall clock (`SYS_CLOCK_SETTIME` / `SYS_CLOCK_ADJTIME`).
+///
+/// Setting the global wall clock is a system-wide side effect: it affects
+/// every process's notion of time, filesystem timestamps, certificate
+/// validity, scheduled jobs, etc.  In POSIX terms it requires `CAP_SYS_TIME`,
+/// which on our system maps to running as root (uid 0).  The user/group model
+/// documents that all processes currently run as uid 0 during early
+/// development, so this gate is a no-op today but becomes load-bearing the
+/// moment a login service assigns non-root credentials — at which point the
+/// userspace advisory check in the posix layer is no longer the only line of
+/// defence.
+///
+/// Kernel tasks (no owning process, or PID 0) bypass the check: the kernel and
+/// its bare tasks have implicit authority, mirroring [`require_cap_type`].
+///
+/// # Errors
+///
+/// - `PermissionDenied` — the calling process is not root.
+fn require_clock_authority() -> Result<(), KernelError> {
+    let pid = match caller_pid() {
+        Some(pid) => pid,
+        None => return Ok(()), // Bare kernel task — bypass.
+    };
+    if pid == 0 {
+        return Ok(()); // Kernel process — implicit authority.
+    }
+    match crate::proc::pcb::get_credentials(pid) {
+        // Only root may set the system clock.
+        Some(creds) if creds.is_root() => Ok(()),
+        // A live, non-root process: deny.
+        Some(_) => Err(KernelError::PermissionDenied),
+        // No credentials record (e.g. the process exited out from under us):
+        // deny rather than fail open.
+        None => Err(KernelError::PermissionDenied),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kernel-core handlers (0–199)
 // ---------------------------------------------------------------------------
@@ -3933,12 +3971,19 @@ pub fn sys_clock_realtime(args: &SyscallArgs) -> SyscallResult {
 /// requested value.  Backs POSIX `clock_settime(CLOCK_REALTIME)` /
 /// `settimeofday`.
 ///
+/// Requires `CAP_SYS_TIME` (root): setting the wall clock is a system-wide
+/// side effect, so an unprivileged process is rejected with `PermissionDenied`
+/// via [`require_clock_authority`] before any state is touched.
+///
 /// Rejects the call with `EINVAL` when timekeeping is uninitialized: with no
 /// RTC base, `clock_realtime` returns 0 and `set_realtime` would compute its
 /// offset against a meaningless base, so the clock would jump the moment the
 /// base later becomes valid.  Better to fail loudly than to silently lock in a
 /// wrong offset.
 pub fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_clock_authority() {
+        return SyscallResult::err(e);
+    }
     if !crate::timekeeping::is_initialized() {
         return SyscallResult::err(KernelError::InvalidArgument);
     }
@@ -3959,11 +4004,18 @@ pub fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
 /// shift rather than the absolute write that `SYS_CLOCK_SETTIME` performs,
 /// so there is no read-modify-write race.
 ///
+/// Requires `CAP_SYS_TIME` (root) via [`require_clock_authority`], same as
+/// [`sys_clock_settime`]: an unprivileged caller is rejected with
+/// `PermissionDenied` before any state is touched.
+///
 /// Rejects the call with `EINVAL` when timekeeping is uninitialized — with no
 /// RTC base, `clock_realtime` returns 0 and the adjustment would apply against
 /// a meaningless base once the RTC later becomes valid.  Mirrors the guard in
 /// [`sys_clock_settime`].
 pub fn sys_clock_adjtime(args: &SyscallArgs) -> SyscallResult {
+    if let Err(e) = require_clock_authority() {
+        return SyscallResult::err(e);
+    }
     if !crate::timekeeping::is_initialized() {
         return SyscallResult::err(KernelError::InvalidArgument);
     }

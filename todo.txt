@@ -95,8 +95,18 @@
 ##  REMAINING (still broken, NOT yet fixed):
 ##    * Implement /proc/time in procfs as a convenience read-only mirror
 ##      (optional) — but the *control* path must be the syscalls, not /proc.
-##  ALSO STILL OPEN: add CAP_SYS_TIME enforcement inside sys_clock_settime /
-##  sys_clock_adjtime (kernel handlers).  And the shared-`oursys`-crate
+##  CAP_SYS_TIME enforcement (FIXED 2026-05-30): sys_clock_settime and
+##  sys_clock_adjtime now call require_clock_authority() before touching any
+##  state, rejecting non-root callers with PermissionDenied.  Kernel/bare tasks
+##  (caller_pid None or pid 0) bypass.  Currently a no-op because all processes
+##  run as uid 0 during early development, but it becomes load-bearing the
+##  moment a login service assigns non-root credentials.  NOTE: ideally this
+##  would key off a per-process CAP_SYS_TIME bit rather than uid==0, but the
+##  PCB has no POSIX-capability bitmask yet (ProcessCredentials is just
+##  uid/gid/groups); root-equals-CAP_SYS_TIME matches the documented model and
+##  is the correct interim. TRIGGER to revisit: when the PCB gains a real POSIX
+##  capability set.
+##  ALSO STILL OPEN: the shared-`oursys`-crate
 ##  refactor (option B) to delete the per-tool hardcoded number tables for
 ##  good.  NOTE: while fixing stat I also saw it hardcodes SYS_RENAME=41 and
 ##  SYS_STATFS=42, and nmap hardcodes SYS_WRITE=1 — these may be wrong too

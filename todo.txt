@@ -283,6 +283,36 @@
 ##           way ([u8;4] + from_be_bytes).  Clippy-clean (removed a duplicate
 ##           unreachable match arm I briefly introduced, let-chains, map_or,
 ##           allow(match_same_arms) on the TLD lookup table).  35 host tests pass.
+##   [x] screen — CONSOLE syscall numbers were 0/1 (YIELD/EXIT!), now 100 (WRITE)
+##           and 103 (TRY_READ_CHAR) per kernel number.rs (b7f0f162).  Removed
+##           dead term_save/restore_cursor + cursor_row/col fields.  Bringing it
+##           up exposed a REAL shipped bug: keyboard read issued the EXIT syscall
+##           and read a char from a null pointer -> input was completely broken.
+##           Rewrote console_read_char to TRY_READ_CHAR into a real 1-byte buffer
+##           (053ea9cf).
+##   [x] telnet — full ABI rewrite (161f95fc): removed Linux READ/WRITE/IOCTL
+##           consts; added CONSOLE_WRITE=100/READ_CHAR=101/TRY_READ_CHAR=103,
+##           TCP 801/802/803.  Same DNS byte-order bug, fixed ([u8;4] +
+##           from_be_bytes).  REAL shipped bug found: stdout/stderr wrote via the
+##           EXIT syscall.  Replaced the ioctl/TIOCGWINSZ winsize query (no such
+##           syscall on OurOS) with a fixed 25x80 console size.  Clippy-clean.
+##   [x] ftp — Linux file syscalls -> std::fs/std::env (327aad0f): get_cwd/
+##           change_dir/file_stat/list_directory/get/put now use std.  Same DNS
+##           byte-order bug, fixed.  Removed dead Linux file-syscall consts +
+##           O_* flags + unused syscall2.  Clippy-clean.
+##   [x] sftp — Linux file syscalls (READ=0/WRITE=1/OPEN=2/CLOSE=3/STAT=4/
+##           MKDIR=83/UNLINK=87/GETDENTS=78/GETCWD=79/CHDIR=80/RENAME=82/
+##           CHMOD=90) -> std::fs/std::env; all os_* helpers rewritten on std.
+##           TCP off-by-one fixed (SEND/RECV/CLOSE 802/803/804 -> 801/802/803).
+##           REAL shipped bug found: parse_ipv4 applied a spurious host-endian
+##           .to_be() to the address u32, which reverses the octets on
+##           little-endian x86_64 (kernel from_u32 == to_be_bytes), so every
+##           IP was dialed byte-reversed.  Fixed to u32::from_be_bytes([a,b,c,d]).
+##           st_mode read + chmod are unix-only std APIs, so metadata_to_stat and
+##           os_chmod are #[cfg(unix)] with a non-unix host fallback (the real
+##           target is unix; the fallback only exists so host `cargo test`
+##           compiles).  Removed dead KernelStat/KernelDirent64/to_cstring/
+##           syscall2.  Clippy-clean; 51 host tests pass.
 ##
 ##  BUG — DNS byte-order (REAL, was shipped in curl + whois; FIXED above):
 ##   Both read the 4 octets the kernel writes for a resolved A record as a

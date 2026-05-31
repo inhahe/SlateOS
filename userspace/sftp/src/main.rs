@@ -1,4 +1,4 @@
-//! OurOS SFTP Client
+//! `OurOS` SFTP Client
 //!
 //! An interactive and batch-mode SFTP client that implements SFTP protocol v3
 //! (SSH File Transfer Protocol, draft-ietf-secsh-filexfer-02).
@@ -11,7 +11,7 @@
 //! **Remote mode** — connect to an SFTP server via TCP on port 22 (or custom
 //! port). The client speaks the SFTP subsystem wire protocol directly over a
 //! raw TCP connection (a real deployment would layer this over SSH; here the
-//! transport is the OurOS TCP syscall layer).
+//! transport is the `OurOS` TCP syscall layer).
 //!
 //! # Usage
 //!
@@ -36,6 +36,13 @@
 #![allow(clippy::cast_possible_truncation)]
 #![allow(clippy::cast_sign_loss)]
 #![allow(clippy::cast_possible_wrap)]
+// Human-readable size formatting deliberately casts byte counts to f64; the
+// minor precision loss for multi-petabyte files is irrelevant to a display string.
+#![allow(clippy::cast_precision_loss)]
+// Interactive command handlers share a uniform `fn(..) -> Result<(), SftpError>`
+// signature so the dispatcher can treat them uniformly with `?`; a few handlers
+// are trivially infallible, which would otherwise trip `unnecessary_wraps`.
+#![allow(clippy::unnecessary_wraps)]
 
 use std::env;
 use std::fmt;
@@ -45,28 +52,14 @@ use std::io::{self, BufRead, Read, Write};
 // Syscall numbers
 // ============================================================================
 
-const SYS_READ: u64 = 0;
-const SYS_WRITE: u64 = 1;
-const SYS_OPEN: u64 = 2;
-const SYS_CLOSE: u64 = 3;
-const SYS_STAT: u64 = 4;
-const SYS_MKDIR: u64 = 83;
-const SYS_UNLINK: u64 = 87;
-const SYS_GETDENTS: u64 = 78;
-const SYS_GETCWD: u64 = 79;
-const SYS_CHDIR: u64 = 80;
-const SYS_RENAME: u64 = 82;
-const SYS_CHMOD: u64 = 90;
+// Native OurOS TCP syscall numbers (see kernel/src/syscall/number.rs).
+// Local-filesystem operations are performed via `std::fs`/`std::env`, which the
+// userspace `posix` crate routes to the native OurOS syscalls — there are no
+// generic Linux read/write/open/stat syscall numbers on this OS.
 const SYS_TCP_CONNECT: u64 = 800;
-const SYS_TCP_SEND: u64 = 802;
-const SYS_TCP_RECV: u64 = 803;
-const SYS_TCP_CLOSE: u64 = 804;
-
-// Open flags
-const O_RDONLY: u64 = 0;
-const O_WRONLY: u64 = 1;
-const O_CREAT: u64 = 0o100;
-const O_TRUNC: u64 = 0o1000;
+const SYS_TCP_SEND: u64 = 801;
+const SYS_TCP_RECV: u64 = 802;
+const SYS_TCP_CLOSE: u64 = 803;
 
 // ============================================================================
 // Syscall interface
@@ -88,30 +81,6 @@ unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
             "syscall",
             inlateout("rax") nr as i64 => ret,
             in("rdi") a1,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Issue a 2-argument raw syscall.
-///
-/// # Safety
-///
-/// The caller must ensure `nr` is a valid syscall number and all arguments
-/// are valid for that syscall.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller guarantees arguments are valid.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack),
@@ -151,302 +120,162 @@ unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 {
     -1
 }
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn syscall2(_nr: u64, _a1: u64, _a2: u64) -> i64 {
-    -1
-}
-#[cfg(not(target_arch = "x86_64"))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -1
 }
 
 // ============================================================================
-// Raw syscall wrappers
+// Local filesystem helpers (std::fs / std::env)
 // ============================================================================
+//
+// Local-mode file operations go through `std::fs`/`std::env`, which the
+// userspace `posix` crate routes to the native OurOS syscalls. We deliberately
+// avoid raw Linux file syscalls — OurOS does not expose generic read/write/open
+// numbers, and `std` already provides correct, error-checked wrappers.
 
-/// Kernel `stat` result layout (matches x86_64 Linux stat64).
-#[repr(C)]
-#[derive(Default, Clone)]
-struct KernelStat {
-    st_dev: u64,
-    st_ino: u64,
-    st_nlink: u64,
-    st_mode: u32,
-    st_uid: u32,
-    st_gid: u32,
-    _pad0: u32,
-    st_rdev: u64,
-    st_size: i64,
-    st_blksize: i64,
-    st_blocks: i64,
-    st_atime: i64,
-    st_atime_ns: u64,
-    st_mtime: i64,
-    st_mtime_ns: u64,
-    st_ctime: i64,
-    st_ctime_ns: u64,
-    _reserved: [i64; 3],
+/// A subset of file metadata used by the SFTP client's local-mode commands.
+struct FileStat {
+    size: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    atime: i64,
+    mtime: i64,
 }
 
-/// Kernel `getdents64` directory entry.
-#[repr(C)]
-struct KernelDirent64 {
-    d_ino: u64,
-    d_off: i64,
-    d_reclen: u16,
-    d_type: u8,
-    // d_name follows as variable-length null-terminated string
+/// Extract `FileStat` from `std::fs::Metadata`.
+///
+/// On unix (the real OurOS target) this reads the full POSIX stat fields. On a
+/// non-unix host (where `cargo test` runs) it synthesises a plausible mode from
+/// the file type so listings still render; the unix path is what actually ships.
+#[cfg(unix)]
+fn metadata_to_stat(md: &std::fs::Metadata) -> FileStat {
+    use std::os::unix::fs::MetadataExt;
+    FileStat {
+        size: md.size(),
+        mode: md.mode(),
+        uid: md.uid(),
+        gid: md.gid(),
+        atime: md.atime(),
+        mtime: md.mtime(),
+    }
 }
 
-const DT_DIR: u8 = 4;
-const DT_LNK: u8 = 10;
+#[cfg(not(unix))]
+fn metadata_to_stat(md: &std::fs::Metadata) -> FileStat {
+    // Host fallback: derive a POSIX-style mode from the file type. The shipping
+    // target is unix, so this branch is only exercised by host-side tests.
+    let mode = if md.is_dir() { 0o040_755 } else { 0o100_644 };
+    FileStat {
+        size: md.len(),
+        mode,
+        uid: 0,
+        gid: 0,
+        atime: 0,
+        mtime: 0,
+    }
+}
 
 /// Stat a path (follows symlinks).
-fn os_stat(path: &str) -> Result<KernelStat, OsError> {
-    let cpath = to_cstring(path);
-    let mut st = KernelStat::default();
-    // SAFETY: cpath is a valid null-terminated C string; st is a valid writable
-    // KernelStat-sized buffer.
-    let ret = unsafe {
-        syscall2(
-            SYS_STAT,
-            cpath.as_ptr() as u64,
-            &mut st as *mut KernelStat as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(OsError::Syscall("stat", ret));
-    }
-    Ok(st)
+fn os_stat(path: &str) -> Result<FileStat, OsError> {
+    let md = std::fs::metadata(path)?;
+    Ok(metadata_to_stat(&md))
 }
 
-/// Open a file; returns an fd on success.
-fn os_open(path: &str, flags: u64, mode: u32) -> Result<i64, OsError> {
-    let cpath = to_cstring(path);
-    // SAFETY: cpath is valid; flags and mode are plain integers.
-    let ret = unsafe { syscall3(SYS_OPEN, cpath.as_ptr() as u64, flags, u64::from(mode)) };
-    if ret < 0 {
-        return Err(OsError::Syscall("open", ret));
-    }
-    Ok(ret)
-}
-
-/// Close a file descriptor. Ignores errors (fd becomes invalid either way).
-fn os_close(fd: i64) {
-    // SAFETY: We pass a valid (or already-invalid) fd; worst case the syscall
-    // returns an error which we intentionally ignore.
-    let _ = unsafe { syscall1(SYS_CLOSE, fd as u64) };
-}
-
-/// Read up to `buf.len()` bytes from `fd`. Returns bytes read (0 = EOF).
-fn os_read(fd: i64, buf: &mut [u8]) -> Result<usize, OsError> {
-    // SAFETY: buf is a valid writable buffer; fd was opened successfully.
-    let ret = unsafe {
-        syscall3(
-            SYS_READ,
-            fd as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(OsError::Syscall("read", ret));
-    }
-    Ok(ret as usize)
-}
-
-/// Write `buf` to `fd`. Returns bytes written.
-fn os_write(fd: i64, buf: &[u8]) -> Result<usize, OsError> {
-    // SAFETY: buf is a valid read-only buffer; fd was opened successfully.
-    let ret = unsafe {
-        syscall3(
-            SYS_WRITE,
-            fd as u64,
-            buf.as_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(OsError::Syscall("write", ret));
-    }
-    Ok(ret as usize)
-}
-
-/// Write all of `buf` to `fd`, looping until done.
-fn os_write_all(fd: i64, buf: &[u8]) -> Result<(), OsError> {
-    let mut offset = 0usize;
-    while offset < buf.len() {
-        let n = os_write(fd, &buf[offset..])?;
-        if n == 0 {
-            return Err(OsError::Syscall("write", -1));
-        }
-        offset = offset.checked_add(n).ok_or(OsError::Syscall("write", -1))?;
-    }
-    Ok(())
-}
-
-/// Read file contents into a Vec, looping until EOF.
+/// Read file contents into a `Vec`.
 fn os_read_file(path: &str) -> Result<Vec<u8>, OsError> {
-    let fd = os_open(path, O_RDONLY, 0)?;
-    let mut buf = Vec::new();
-    let mut chunk = [0u8; 4096];
-    loop {
-        let n = match os_read(fd, &mut chunk) {
-            Ok(0) => break,
-            Ok(n) => n,
-            Err(e) => {
-                os_close(fd);
-                return Err(e);
-            }
-        };
-        buf.extend_from_slice(&chunk[..n]);
-    }
-    os_close(fd);
-    Ok(buf)
+    Ok(std::fs::read(path)?)
 }
 
 /// Write a byte slice to a file, creating or truncating it.
 fn os_write_file(path: &str, data: &[u8]) -> Result<(), OsError> {
-    let fd = os_open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o644)?;
-    let result = os_write_all(fd, data);
-    os_close(fd);
-    result
+    std::fs::write(path, data)?;
+    Ok(())
 }
 
-/// Create a directory (mode 0755).
+/// Create a directory.
 fn os_mkdir(path: &str) -> Result<(), OsError> {
-    let cpath = to_cstring(path);
-    // SAFETY: cpath is a valid null-terminated path string.
-    let ret = unsafe { syscall2(SYS_MKDIR, cpath.as_ptr() as u64, 0o755) };
-    if ret < 0 {
-        return Err(OsError::Syscall("mkdir", ret));
-    }
+    std::fs::create_dir(path)?;
     Ok(())
 }
 
 /// Remove a file.
 fn os_unlink(path: &str) -> Result<(), OsError> {
-    let cpath = to_cstring(path);
-    // SAFETY: cpath is a valid null-terminated path string.
-    let ret = unsafe { syscall1(SYS_UNLINK, cpath.as_ptr() as u64) };
-    if ret < 0 {
-        return Err(OsError::Syscall("unlink", ret));
-    }
+    std::fs::remove_file(path)?;
+    Ok(())
+}
+
+/// Remove an (empty) directory.
+fn os_rmdir(path: &str) -> Result<(), OsError> {
+    std::fs::remove_dir(path)?;
     Ok(())
 }
 
 /// Rename / move a file or directory.
 fn os_rename(old: &str, new: &str) -> Result<(), OsError> {
-    let cold = to_cstring(old);
-    let cnew = to_cstring(new);
-    // SAFETY: Both paths are valid null-terminated C strings.
-    let ret = unsafe { syscall2(SYS_RENAME, cold.as_ptr() as u64, cnew.as_ptr() as u64) };
-    if ret < 0 {
-        return Err(OsError::Syscall("rename", ret));
-    }
+    std::fs::rename(old, new)?;
     Ok(())
 }
 
 /// Change file permissions.
+///
+/// On unix this applies the requested POSIX mode bits. On a non-unix host it is
+/// a no-op (the host has no concept of unix mode bits); the shipping unix target
+/// performs the real `chmod`.
+#[cfg(unix)]
 fn os_chmod(path: &str, mode: u32) -> Result<(), OsError> {
-    let cpath = to_cstring(path);
-    // SAFETY: cpath is a valid null-terminated path; mode is a plain integer.
-    let ret = unsafe { syscall2(SYS_CHMOD, cpath.as_ptr() as u64, u64::from(mode)) };
-    if ret < 0 {
-        return Err(OsError::Syscall("chmod", ret));
-    }
+    use std::os::unix::fs::PermissionsExt;
+    let perms = std::fs::Permissions::from_mode(mode);
+    std::fs::set_permissions(path, perms)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn os_chmod(_path: &str, _mode: u32) -> Result<(), OsError> {
     Ok(())
 }
 
 /// Change the working directory.
 fn os_chdir(path: &str) -> Result<(), OsError> {
-    let cpath = to_cstring(path);
-    // SAFETY: cpath is a valid null-terminated path string.
-    let ret = unsafe { syscall1(SYS_CHDIR, cpath.as_ptr() as u64) };
-    if ret < 0 {
-        return Err(OsError::Syscall("chdir", ret));
-    }
+    std::env::set_current_dir(path)?;
     Ok(())
 }
 
 /// Get the current working directory as a UTF-8 string.
 fn os_getcwd() -> Result<String, OsError> {
-    let mut buf = vec![0u8; 4096];
-    // SAFETY: buf is a valid writable buffer of the given length.
-    let ret = unsafe {
-        syscall2(
-            SYS_GETCWD,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(OsError::Syscall("getcwd", ret));
-    }
-    // Trim the null terminator and convert to String.
-    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    String::from_utf8(buf[..end].to_vec()).map_err(|_| OsError::BadUtf8)
+    let cwd = std::env::current_dir()?;
+    cwd.into_os_string()
+        .into_string()
+        .map_err(|_| OsError::BadUtf8)
 }
 
-/// Read directory entries. Returns a list of (name, is_dir, size) tuples.
+/// Read directory entries, returning sorted `DirEntry` values.
 fn os_readdir(path: &str) -> Result<Vec<DirEntry>, OsError> {
-    let fd = os_open(path, O_RDONLY, 0)?;
     let mut entries = Vec::new();
-    let mut buf = vec![0u8; 4096];
-
-    loop {
-        // SAFETY: buf is a valid writable buffer; fd is an open directory fd.
-        let ret = unsafe {
-            syscall3(
-                SYS_GETDENTS,
-                fd as u64,
-                buf.as_mut_ptr() as u64,
-                buf.len() as u64,
-            )
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        // Skip non-UTF-8 names for display purposes.
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
         };
-        if ret < 0 {
-            os_close(fd);
-            return Err(OsError::Syscall("getdents", ret));
+        if name == "." || name == ".." {
+            continue;
         }
-        if ret == 0 {
-            break;
-        }
-        let nbytes = ret as usize;
-        let mut offset = 0usize;
-        while offset < nbytes {
-            if offset.checked_add(core::mem::size_of::<KernelDirent64>()).map_or(true, |end| end > nbytes) {
-                break;
-            }
-            // SAFETY: We checked that there are enough bytes for the header.
-            let dirent = unsafe { &*(buf.as_ptr().add(offset) as *const KernelDirent64) };
-            let reclen = dirent.d_reclen as usize;
-            if reclen == 0 || offset.checked_add(reclen).map_or(true, |end| end > nbytes) {
-                break;
-            }
-            // Name starts immediately after the fixed header.
-            let name_offset = offset + core::mem::size_of::<KernelDirent64>();
-            let name_end = buf[name_offset..offset + reclen]
-                .iter()
-                .position(|&b| b == 0)
-                .map(|p| name_offset + p)
-                .unwrap_or(offset + reclen);
-            if let Ok(name) = std::str::from_utf8(&buf[name_offset..name_end]) {
-                if name != "." && name != ".." {
-                    let is_dir = dirent.d_type == DT_DIR;
-                    let is_link = dirent.d_type == DT_LNK;
-                    let full = format!("{path}/{name}");
-                    let size = os_stat(&full).map(|s| s.st_size as u64).unwrap_or(0);
-                    entries.push(DirEntry {
-                        name: name.to_string(),
-                        is_dir,
-                        is_link,
-                        size,
-                    });
-                }
-            }
-            offset = offset.checked_add(reclen).unwrap_or(nbytes);
-        }
+        // `file_type()` does not follow symlinks, so links are reported as
+        // links rather than their target type.
+        let ftype = entry.file_type()?;
+        let is_dir = ftype.is_dir();
+        let is_link = ftype.is_symlink();
+        // `DirEntry::metadata()` does not traverse symlinks, so this is the
+        // entry's own size; fall back to 0 if the metadata can't be read.
+        let size = entry.metadata().map_or(0, |m| m.len());
+        entries.push(DirEntry {
+            name,
+            is_dir,
+            is_link,
+            size,
+        });
     }
-    os_close(fd);
     entries.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(entries)
 }
@@ -492,7 +321,9 @@ fn tcp_send_all(handle: u64, data: &[u8]) -> Result<(), SftpError> {
         if n == 0 {
             return Err(SftpError::NetworkError("connection closed".into()));
         }
-        offset = offset.checked_add(n).ok_or_else(|| SftpError::NetworkError("overflow".into()))?;
+        offset = offset
+            .checked_add(n)
+            .ok_or_else(|| SftpError::NetworkError("overflow".into()))?;
     }
     Ok(())
 }
@@ -522,7 +353,9 @@ fn tcp_recv_exact(handle: u64, buf: &mut [u8]) -> Result<(), SftpError> {
         if n == 0 {
             return Err(SftpError::NetworkError("connection closed mid-read".into()));
         }
-        offset = offset.checked_add(n).ok_or_else(|| SftpError::NetworkError("overflow".into()))?;
+        offset = offset
+            .checked_add(n)
+            .ok_or_else(|| SftpError::NetworkError("overflow".into()))?;
     }
     Ok(())
 }
@@ -538,15 +371,6 @@ fn tcp_close(handle: u64) {
 // Helper utilities
 // ============================================================================
 
-/// Append a null byte to a string slice and return a Vec<u8> suitable as a
-/// C string pointer. The lifetime of the returned Vec must exceed any syscall
-/// that uses its pointer.
-fn to_cstring(s: &str) -> Vec<u8> {
-    let mut v = s.as_bytes().to_vec();
-    v.push(0);
-    v
-}
-
 /// Parse a simple octal number string (e.g. "644", "755") into a u32.
 fn parse_octal(s: &str) -> Option<u32> {
     u32::from_str_radix(s, 8).ok()
@@ -560,6 +384,10 @@ fn glob_match(pattern: &str, name: &str) -> bool {
     glob_match_inner(&p, &n)
 }
 
+// The match arms are kept distinct (rather than merged) so each glob state —
+// pattern exhausted, literal mismatch, `?` past end of text — reads as its own
+// case; merging them by shared body would obscure the state machine.
+#[allow(clippy::match_same_arms)]
 fn glob_match_inner(p: &[char], n: &[char]) -> bool {
     match (p.first(), n.first()) {
         (None, None) => true,
@@ -664,8 +492,8 @@ fn print_progress(filename: &str, transferred: u64, total: u64) {
     }
     let pct = (transferred * 100) / total;
     let filled = (pct as usize * 40) / 100;
-    let bar: String = std::iter::repeat('#').take(filled)
-        .chain(std::iter::repeat(' ').take(40usize.saturating_sub(filled)))
+    let bar: String = std::iter::repeat_n('#', filled)
+        .chain(std::iter::repeat_n(' ', 40usize.saturating_sub(filled)))
         .collect();
     print!(
         "\r{filename:<20} [{bar}] {:>3}% {}/{}   ",
@@ -680,19 +508,27 @@ fn print_progress(filename: &str, transferred: u64, total: u64) {
 // Error types
 // ============================================================================
 
-/// Low-level OS / syscall errors.
+/// Low-level OS / filesystem errors.
 #[derive(Debug)]
 enum OsError {
-    Syscall(&'static str, i64),
+    /// An I/O error from a `std::fs`/`std::env` operation.
+    Io(io::Error),
+    /// A path or directory name was not valid UTF-8.
     BadUtf8,
 }
 
 impl fmt::Display for OsError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Syscall(name, code) => write!(f, "{name} failed (code {code})"),
+            Self::Io(e) => write!(f, "{e}"),
             Self::BadUtf8 => write!(f, "path contains invalid UTF-8"),
         }
+    }
+}
+
+impl From<io::Error> for OsError {
+    fn from(e: io::Error) -> Self {
+        Self::Io(e)
     }
 }
 
@@ -801,16 +637,16 @@ mod status {
 
 /// SFTP open flags.
 mod pflags {
-    pub const SSH_FXF_READ: u32 = 0x00000001;
-    pub const SSH_FXF_WRITE: u32 = 0x00000002;
-    pub const SSH_FXF_CREAT: u32 = 0x00000008;
-    pub const SSH_FXF_TRUNC: u32 = 0x00000010;
+    pub const SSH_FXF_READ: u32 = 0x0000_0001;
+    pub const SSH_FXF_WRITE: u32 = 0x0000_0002;
+    pub const SSH_FXF_CREAT: u32 = 0x0000_0008;
+    pub const SSH_FXF_TRUNC: u32 = 0x0000_0010;
 }
 
 /// SFTP attribute flags.
 mod attr_flags {
-    pub const SSH_FILEXFER_ATTR_SIZE: u32 = 0x00000001;
-    pub const SSH_FILEXFER_ATTR_PERMISSIONS: u32 = 0x00000004;
+    pub const SSH_FILEXFER_ATTR_SIZE: u32 = 0x0000_0001;
+    pub const SSH_FILEXFER_ATTR_PERMISSIONS: u32 = 0x0000_0004;
 }
 
 /// File attributes as used in SFTP packets.
@@ -862,7 +698,7 @@ enum SftpPacket {
     },
 }
 
-/// A single name entry from SSH_FXP_NAME.
+/// A single name entry from `SSH_FXP_NAME`.
 #[derive(Debug, Clone)]
 struct NameEntry {
     filename: String,
@@ -1003,7 +839,7 @@ impl<'a> Cursor<'a> {
         if flags & attr_flags::SSH_FILEXFER_ATTR_SIZE != 0 {
             attrs.size = Some(self.read_u64()?);
         }
-        if flags & 0x00000002 != 0 {
+        if flags & 0x0000_0002 != 0 {
             // uidgid
             attrs.uid = Some(self.read_u32()?);
             attrs.gid = Some(self.read_u32()?);
@@ -1011,13 +847,13 @@ impl<'a> Cursor<'a> {
         if flags & attr_flags::SSH_FILEXFER_ATTR_PERMISSIONS != 0 {
             attrs.permissions = Some(self.read_u32()?);
         }
-        if flags & 0x00000008 != 0 {
+        if flags & 0x0000_0008 != 0 {
             // acmodtime
             attrs.atime = Some(self.read_u32()?);
             attrs.mtime = Some(self.read_u32()?);
         }
         // Skip any extended attributes
-        if flags & 0x80000000 != 0 {
+        if flags & 0x8000_0000 != 0 {
             let count = self.read_u32()?;
             for _ in 0..count {
                 let _name = self.read_string()?;
@@ -1049,7 +885,11 @@ fn parse_sftp_packet(payload: &[u8]) -> Result<SftpPacket, SftpError> {
             } else {
                 String::new()
             };
-            Ok(SftpPacket::Status { request_id, code, message })
+            Ok(SftpPacket::Status {
+                request_id,
+                code,
+                message,
+            })
         }
         t if t == fxp::SSH_FXP_HANDLE => {
             let request_id = cur.read_u32()?;
@@ -1069,9 +909,16 @@ fn parse_sftp_packet(payload: &[u8]) -> Result<SftpPacket, SftpError> {
                 let filename = cur.read_string()?;
                 let longname = cur.read_string()?;
                 let attrs = cur.read_attrs()?;
-                entries.push(NameEntry { filename, longname, attrs });
+                entries.push(NameEntry {
+                    filename,
+                    longname,
+                    attrs,
+                });
             }
-            Ok(SftpPacket::Name { request_id, entries })
+            Ok(SftpPacket::Name {
+                request_id,
+                entries,
+            })
         }
         t if t == fxp::SSH_FXP_ATTRS => {
             let request_id = cur.read_u32()?;
@@ -1095,7 +942,11 @@ struct RemoteConn {
 
 impl RemoteConn {
     fn new(handle: u64, verbose: bool) -> Self {
-        Self { handle, next_id: 1, verbose }
+        Self {
+            handle,
+            next_id: 1,
+            verbose,
+        }
     }
 
     /// Allocate the next request ID.
@@ -1125,12 +976,16 @@ impl RemoteConn {
         let mut payload = vec![0u8; len];
         tcp_recv_exact(self.handle, &mut payload)?;
         if self.verbose {
-            eprintln!("[sftp] ← {} bytes, type={}", len, payload.first().copied().unwrap_or(0));
+            eprintln!(
+                "[sftp] ← {} bytes, type={}",
+                len,
+                payload.first().copied().unwrap_or(0)
+            );
         }
         parse_sftp_packet(&payload)
     }
 
-    /// Send SSH_FXP_INIT and receive SSH_FXP_VERSION.
+    /// Send `SSH_FXP_INIT` and receive `SSH_FXP_VERSION`.
     fn init(&mut self) -> Result<u32, SftpError> {
         let mut payload = Vec::new();
         payload.push(fxp::SSH_FXP_INIT);
@@ -1138,7 +993,9 @@ impl RemoteConn {
         self.send_packet(&payload)?;
         match self.recv_packet()? {
             SftpPacket::Version { version } => Ok(version),
-            other => Err(SftpError::Protocol(format!("expected VERSION, got {other:?}"))),
+            other => Err(SftpError::Protocol(format!(
+                "expected VERSION, got {other:?}"
+            ))),
         }
     }
 
@@ -1154,9 +1011,7 @@ impl RemoteConn {
         self.send_packet(&payload)?;
         match self.recv_packet()? {
             SftpPacket::Handle { request_id, handle } if request_id == id => Ok(handle),
-            SftpPacket::Status { code, message, .. } => {
-                Err(SftpError::Remote { code, message })
-            }
+            SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to OPEN".into())),
         }
     }
@@ -1170,7 +1025,9 @@ impl RemoteConn {
         push_bytes(&mut payload, handle);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status { code, message: _, .. } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status {
+                code, message: _, ..
+            } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to CLOSE".into())),
         }
@@ -1205,7 +1062,9 @@ impl RemoteConn {
         push_bytes(&mut payload, data);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status { code, message: _, .. } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status {
+                code, message: _, ..
+            } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to WRITE".into())),
         }
@@ -1279,10 +1138,18 @@ impl RemoteConn {
         payload.push(fxp::SSH_FXP_MKDIR);
         push_u32(&mut payload, id);
         push_str(&mut payload, path);
-        push_attrs(&mut payload, &FileAttrs { permissions: Some(0o755), ..Default::default() });
+        push_attrs(
+            &mut payload,
+            &FileAttrs {
+                permissions: Some(0o755),
+                ..Default::default()
+            },
+        );
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status { code, message: _, .. } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status {
+                code, message: _, ..
+            } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to MKDIR".into())),
         }
@@ -1297,7 +1164,9 @@ impl RemoteConn {
         push_str(&mut payload, path);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status { code, message: _, .. } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status {
+                code, message: _, ..
+            } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to RMDIR".into())),
         }
@@ -1312,7 +1181,9 @@ impl RemoteConn {
         push_str(&mut payload, path);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status { code, message: _, .. } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status {
+                code, message: _, ..
+            } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to REMOVE".into())),
         }
@@ -1328,7 +1199,9 @@ impl RemoteConn {
         push_str(&mut payload, new);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status { code, message: _, .. } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status {
+                code, message: _, ..
+            } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to RENAME".into())),
         }
@@ -1344,7 +1217,9 @@ impl RemoteConn {
         push_attrs(&mut payload, attrs);
         self.send_packet(&payload)?;
         match self.recv_packet()? {
-            SftpPacket::Status { code, message: _, .. } if code == status::SSH_FX_OK => Ok(()),
+            SftpPacket::Status {
+                code, message: _, ..
+            } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to SETSTAT".into())),
         }
@@ -1360,7 +1235,10 @@ enum Remote {
     /// Local-only mode: remote and local both refer to the local filesystem.
     Local { cwd: String },
     /// Connected TCP mode with an active SFTP session.
-    Connected { conn: RemoteConn, remote_cwd: String },
+    Connected {
+        conn: RemoteConn,
+        remote_cwd: String,
+    },
 }
 
 /// Top-level session: holds local and remote state.
@@ -1457,8 +1335,18 @@ fn cmd_ls(session: &mut Session, path: Option<&str>) -> Result<(), SftpError> {
         println!("(empty)");
     } else {
         for e in &entries {
-            let suffix = if e.is_dir { "/" } else if e.is_link { "@" } else { "" };
-            println!("  {:<40} {:>8}", format!("{}{suffix}", e.name), format_size(e.size));
+            let suffix = if e.is_dir {
+                "/"
+            } else if e.is_link {
+                "@"
+            } else {
+                ""
+            };
+            println!(
+                "  {:<40} {:>8}",
+                format!("{}{suffix}", e.name),
+                format_size(e.size)
+            );
         }
     }
     Ok(())
@@ -1471,8 +1359,8 @@ fn cmd_cd(session: &mut Session, path: &str) -> Result<(), SftpError> {
     // Verify the remote directory exists before changing to it.
     remote_stat(session, &new_dir)?;
     match &mut session.remote {
-        Remote::Local { cwd } => *cwd = new_dir.clone(),
-        Remote::Connected { remote_cwd, .. } => *remote_cwd = new_dir.clone(),
+        Remote::Local { cwd } => cwd.clone_from(&new_dir),
+        Remote::Connected { remote_cwd, .. } => remote_cwd.clone_from(&new_dir),
     }
     println!("Remote working directory: {new_dir}");
     Ok(())
@@ -1494,10 +1382,9 @@ fn cmd_lcd(session: &mut Session, path: &str) -> Result<(), SftpError> {
         format!("{}/{path}", session.local_cwd)
     };
     let new_dir = normalise_path(&new_dir);
-    // On target this changes the kernel CWD; on host we just update the field.
-    #[cfg(target_arch = "x86_64")]
+    // Update the process working directory to match the session's local cwd.
     os_chdir(&new_dir)?;
-    session.local_cwd = new_dir.clone();
+    session.local_cwd.clone_from(&new_dir);
     println!("Local working directory: {new_dir}");
     Ok(())
 }
@@ -1511,11 +1398,14 @@ fn cmd_lpwd(session: &mut Session) -> Result<(), SftpError> {
 
 // ---- get ----
 
-fn cmd_get(session: &mut Session, remote_path: &str, local_path: Option<&str>) -> Result<(), SftpError> {
+fn cmd_get(
+    session: &mut Session,
+    remote_path: &str,
+    local_path: Option<&str>,
+) -> Result<(), SftpError> {
     let remote_abs = resolve_path(session.remote_cwd(), remote_path);
-    let local_name = local_path.unwrap_or_else(|| {
-        remote_abs.rsplit('/').next().unwrap_or(remote_path)
-    });
+    let local_name =
+        local_path.unwrap_or_else(|| remote_abs.rsplit('/').next().unwrap_or(remote_path));
     let local_abs = if local_name.starts_with('/') {
         local_name.to_string()
     } else {
@@ -1534,8 +1424,7 @@ fn cmd_get(session: &mut Session, remote_path: &str, local_path: Option<&str>) -
             let total = attrs.size.unwrap_or(0);
             let open_flags = pflags::SSH_FXF_READ;
             let handle = conn.open(&remote_abs, open_flags, &FileAttrs::default())?;
-            let local_fd = os_open(&local_abs, O_WRONLY | O_CREAT | O_TRUNC, 0o644)
-                .map_err(SftpError::from)?;
+            let mut local_file = std::fs::File::create(&local_abs)?;
             let chunk_size: u32 = 32768;
             let mut offset: u64 = 0;
             loop {
@@ -1545,8 +1434,7 @@ fn cmd_get(session: &mut Session, remote_path: &str, local_path: Option<&str>) -
                         if data.is_empty() {
                             break;
                         }
-                        if let Err(e) = os_write_all(local_fd, &data) {
-                            os_close(local_fd);
+                        if let Err(e) = local_file.write_all(&data) {
                             let _ = conn.close(&handle);
                             return Err(SftpError::from(e));
                         }
@@ -1555,7 +1443,6 @@ fn cmd_get(session: &mut Session, remote_path: &str, local_path: Option<&str>) -
                     }
                 }
             }
-            os_close(local_fd);
             conn.close(&handle)?;
             println!(); // newline after progress
         }
@@ -1566,7 +1453,11 @@ fn cmd_get(session: &mut Session, remote_path: &str, local_path: Option<&str>) -
 
 // ---- put ----
 
-fn cmd_put(session: &mut Session, local_path: &str, remote_path: Option<&str>) -> Result<(), SftpError> {
+fn cmd_put(
+    session: &mut Session,
+    local_path: &str,
+    remote_path: Option<&str>,
+) -> Result<(), SftpError> {
     let local_abs = if local_path.starts_with('/') {
         local_path.to_string()
     } else {
@@ -1579,7 +1470,10 @@ fn cmd_put(session: &mut Session, local_path: &str, remote_path: Option<&str>) -
     match &mut session.remote {
         Remote::Local { .. } => {
             let data = os_read_file(&local_abs).map_err(SftpError::from)?;
-            println!("Uploading {local_abs} → {remote_abs} ({} bytes)", data.len());
+            println!(
+                "Uploading {local_abs} → {remote_abs} ({} bytes)",
+                data.len()
+            );
             os_write_file(&remote_abs, &data).map_err(SftpError::from)?;
         }
         Remote::Connected { conn, .. } => {
@@ -1616,7 +1510,11 @@ fn cmd_mget(session: &mut Session, pattern: &str) -> Result<(), SftpError> {
             // We need to pass a clone of the local_cwd and remote_cwd to avoid
             // the borrow checker conflict when calling cmd_get.
             let local_cwd = session.local_cwd.clone();
-            let _ = cmd_get(session, &remote_path, Some(&format!("{}/{}", local_cwd, entry.name)));
+            let _ = cmd_get(
+                session,
+                &remote_path,
+                Some(&format!("{}/{}", local_cwd, entry.name)),
+            );
             matched = matched.saturating_add(1);
         }
     }
@@ -1665,15 +1563,7 @@ fn cmd_mkdir(session: &mut Session, path: &str) -> Result<(), SftpError> {
 fn cmd_rmdir(session: &mut Session, path: &str) -> Result<(), SftpError> {
     let abs = resolve_path(session.remote_cwd(), path);
     match &mut session.remote {
-        Remote::Local { .. } => {
-            // Kernel rmdir — for local mode use our syscall path.
-            let cpath = to_cstring(&abs);
-            // SAFETY: cpath is a valid null-terminated path string.
-            let ret = unsafe { syscall1(SYS_UNLINK, cpath.as_ptr() as u64) };
-            if ret < 0 {
-                return Err(OsError::Syscall("rmdir", ret).into());
-            }
-        }
+        Remote::Local { .. } => os_rmdir(&abs).map_err(SftpError::from)?,
         Remote::Connected { conn, .. } => conn.rmdir(&abs)?,
     }
     println!("Removed directory: {abs}");
@@ -1712,7 +1602,13 @@ fn cmd_chmod(session: &mut Session, mode: u32, path: &str) -> Result<(), SftpErr
     match &mut session.remote {
         Remote::Local { .. } => os_chmod(&abs, mode).map_err(SftpError::from)?,
         Remote::Connected { conn, .. } => {
-            conn.setstat(&abs, &FileAttrs { permissions: Some(mode), ..Default::default() })?;
+            conn.setstat(
+                &abs,
+                &FileAttrs {
+                    permissions: Some(mode),
+                    ..Default::default()
+                },
+            )?;
         }
     }
     println!("chmod {mode:04o} {abs}");
@@ -1736,12 +1632,12 @@ fn cmd_lstat(session: &mut Session, path: &str) -> Result<(), SftpError> {
         Remote::Local { .. } => {
             let st = os_stat(&abs)?;
             FileAttrs {
-                size: Some(st.st_size as u64),
-                permissions: Some(st.st_mode),
-                uid: Some(st.st_uid),
-                gid: Some(st.st_gid),
-                atime: Some(st.st_atime as u32),
-                mtime: Some(st.st_mtime as u32),
+                size: Some(st.size),
+                permissions: Some(st.mode),
+                uid: Some(st.uid),
+                gid: Some(st.gid),
+                atime: Some(st.atime as u32),
+                mtime: Some(st.mtime as u32),
             }
         }
         Remote::Connected { conn, .. } => conn.lstat(&abs)?,
@@ -1826,8 +1722,14 @@ fn remote_readdir(session: &mut Session, path: &str) -> Result<Vec<DirEntry>, Sf
                             if ne.filename == "." || ne.filename == ".." {
                                 continue;
                             }
-                            let is_dir = ne.attrs.permissions.map_or(false, |p| (p & 0o170000) == 0o040000);
-                            let is_link = ne.attrs.permissions.map_or(false, |p| (p & 0o170000) == 0o120000);
+                            let is_dir = ne
+                                .attrs
+                                .permissions
+                                .is_some_and(|p| (p & 0o170_000) == 0o040_000);
+                            let is_link = ne
+                                .attrs
+                                .permissions
+                                .is_some_and(|p| (p & 0o170_000) == 0o120_000);
                             entries.push(DirEntry {
                                 name: ne.filename,
                                 is_dir,
@@ -1851,12 +1753,12 @@ fn remote_stat(session: &mut Session, path: &str) -> Result<FileAttrs, SftpError
         Remote::Local { .. } => {
             let st = os_stat(path)?;
             Ok(FileAttrs {
-                size: Some(st.st_size as u64),
-                permissions: Some(st.st_mode),
-                uid: Some(st.st_uid),
-                gid: Some(st.st_gid),
-                atime: Some(st.st_atime as u32),
-                mtime: Some(st.st_mtime as u32),
+                size: Some(st.size),
+                permissions: Some(st.mode),
+                uid: Some(st.uid),
+                gid: Some(st.gid),
+                atime: Some(st.atime as u32),
+                mtime: Some(st.mtime as u32),
             })
         }
         Remote::Connected { conn, .. } => conn.stat(path),
@@ -1875,15 +1777,27 @@ enum SftpCommand {
     Pwd,
     Lcd(String),
     Lpwd,
-    Get { remote: String, local: Option<String> },
-    Put { local: String, remote: Option<String> },
+    Get {
+        remote: String,
+        local: Option<String>,
+    },
+    Put {
+        local: String,
+        remote: Option<String>,
+    },
     Mget(String),
     Mput(String),
     Mkdir(String),
     Rmdir(String),
     Rm(String),
-    Rename { old: String, new: String },
-    Chmod { mode: u32, path: String },
+    Rename {
+        old: String,
+        new: String,
+    },
+    Chmod {
+        mode: u32,
+        path: String,
+    },
     Stat(String),
     Lstat(String),
     Shell(String),
@@ -1897,7 +1811,9 @@ fn parse_command(line: &str) -> Result<SftpCommand, String> {
     if line.is_empty() || line.starts_with('#') {
         return Err(String::new()); // empty / comment → skip
     }
-    let mut parts = line.splitn(4, char::is_whitespace).filter(|s| !s.is_empty());
+    let mut parts = line
+        .splitn(4, char::is_whitespace)
+        .filter(|s| !s.is_empty());
     let verb = parts.next().unwrap_or("").to_lowercase();
     let arg1 = parts.next().map(str::to_string);
     let arg2 = parts.next().map(str::to_string);
@@ -1905,47 +1821,67 @@ fn parse_command(line: &str) -> Result<SftpCommand, String> {
 
     match verb.as_str() {
         "ls" | "dir" => Ok(SftpCommand::Ls(arg1)),
-        "cd" => arg1.map(SftpCommand::Cd).ok_or_else(|| "cd: missing argument".into()),
+        "cd" => arg1
+            .map(SftpCommand::Cd)
+            .ok_or_else(|| "cd: missing argument".into()),
         "pwd" => Ok(SftpCommand::Pwd),
-        "lcd" => arg1.map(SftpCommand::Lcd).ok_or_else(|| "lcd: missing argument".into()),
+        "lcd" => arg1
+            .map(SftpCommand::Lcd)
+            .ok_or_else(|| "lcd: missing argument".into()),
         "lpwd" => Ok(SftpCommand::Lpwd),
-        "get" => {
-            arg1.map(|r| SftpCommand::Get { remote: r, local: arg2 })
-                .ok_or_else(|| "get: missing remote path".into())
-        }
-        "put" => {
-            arg1.map(|l| SftpCommand::Put { local: l, remote: arg2 })
-                .ok_or_else(|| "put: missing local path".into())
-        }
-        "mget" => arg1.map(SftpCommand::Mget).ok_or_else(|| "mget: missing pattern".into()),
-        "mput" => arg1.map(SftpCommand::Mput).ok_or_else(|| "mput: missing pattern".into()),
-        "mkdir" => arg1.map(SftpCommand::Mkdir).ok_or_else(|| "mkdir: missing argument".into()),
-        "rmdir" => arg1.map(SftpCommand::Rmdir).ok_or_else(|| "rmdir: missing argument".into()),
-        "rm" | "delete" => arg1.map(SftpCommand::Rm).ok_or_else(|| "rm: missing argument".into()),
-        "rename" | "mv" => {
-            match (arg1, arg2) {
-                (Some(old), Some(new)) => Ok(SftpCommand::Rename { old, new }),
-                _ => Err("rename: requires two arguments".into()),
+        "get" => arg1
+            .map(|r| SftpCommand::Get {
+                remote: r,
+                local: arg2,
+            })
+            .ok_or_else(|| "get: missing remote path".into()),
+        "put" => arg1
+            .map(|l| SftpCommand::Put {
+                local: l,
+                remote: arg2,
+            })
+            .ok_or_else(|| "put: missing local path".into()),
+        "mget" => arg1
+            .map(SftpCommand::Mget)
+            .ok_or_else(|| "mget: missing pattern".into()),
+        "mput" => arg1
+            .map(SftpCommand::Mput)
+            .ok_or_else(|| "mput: missing pattern".into()),
+        "mkdir" => arg1
+            .map(SftpCommand::Mkdir)
+            .ok_or_else(|| "mkdir: missing argument".into()),
+        "rmdir" => arg1
+            .map(SftpCommand::Rmdir)
+            .ok_or_else(|| "rmdir: missing argument".into()),
+        "rm" | "delete" => arg1
+            .map(SftpCommand::Rm)
+            .ok_or_else(|| "rm: missing argument".into()),
+        "rename" | "mv" => match (arg1, arg2) {
+            (Some(old), Some(new)) => Ok(SftpCommand::Rename { old, new }),
+            _ => Err("rename: requires two arguments".into()),
+        },
+        "chmod" => match (arg1, arg2) {
+            (Some(mode_str), Some(path)) => {
+                let mode = parse_octal(&mode_str)
+                    .ok_or_else(|| format!("chmod: invalid mode '{mode_str}'"))?;
+                Ok(SftpCommand::Chmod { mode, path })
             }
-        }
-        "chmod" => {
-            match (arg1, arg2) {
-                (Some(mode_str), Some(path)) => {
-                    let mode = parse_octal(&mode_str)
-                        .ok_or_else(|| format!("chmod: invalid mode '{mode_str}'"))?;
-                    Ok(SftpCommand::Chmod { mode, path })
-                }
-                _ => Err("chmod: requires mode and path arguments".into()),
-            }
-        }
-        "stat" => arg1.map(SftpCommand::Stat).ok_or_else(|| "stat: missing argument".into()),
-        "lstat" => arg1.map(SftpCommand::Lstat).ok_or_else(|| "lstat: missing argument".into()),
+            _ => Err("chmod: requires mode and path arguments".into()),
+        },
+        "stat" => arg1
+            .map(SftpCommand::Stat)
+            .ok_or_else(|| "stat: missing argument".into()),
+        "lstat" => arg1
+            .map(SftpCommand::Lstat)
+            .ok_or_else(|| "lstat: missing argument".into()),
         _ if line.starts_with('!') => Ok(SftpCommand::Shell(line[1..].trim().to_string())),
         "help" | "?" => Ok(SftpCommand::Help),
         "bye" | "quit" | "exit" => Ok(SftpCommand::Quit),
         _ => {
             let _ = arg3; // suppress unused-var lint
-            Err(format!("Unknown command '{verb}'. Type 'help' for a list of commands."))
+            Err(format!(
+                "Unknown command '{verb}'. Type 'help' for a list of commands."
+            ))
         }
     }
 }
@@ -1984,16 +1920,25 @@ fn parse_args(args: &[String]) -> Result<Config, SftpError> {
     while i < args.len() {
         match args[i].as_str() {
             "-P" | "--port" => {
-                i = i.checked_add(1).ok_or_else(|| SftpError::BadArg("overflow".into()))?;
-                let port_str = args.get(i).ok_or_else(|| SftpError::BadArg("-P requires a port number".into()))?;
-                cfg.port = port_str.parse::<u16>()
+                i = i
+                    .checked_add(1)
+                    .ok_or_else(|| SftpError::BadArg("overflow".into()))?;
+                let port_str = args
+                    .get(i)
+                    .ok_or_else(|| SftpError::BadArg("-P requires a port number".into()))?;
+                cfg.port = port_str
+                    .parse::<u16>()
                     .map_err(|_| SftpError::BadArg(format!("invalid port '{port_str}'")))?;
             }
             "-b" | "--batch" => {
-                i = i.checked_add(1).ok_or_else(|| SftpError::BadArg("overflow".into()))?;
-                cfg.batch_file = Some(args.get(i)
-                    .ok_or_else(|| SftpError::BadArg("-b requires a filename".into()))?
-                    .clone());
+                i = i
+                    .checked_add(1)
+                    .ok_or_else(|| SftpError::BadArg("overflow".into()))?;
+                cfg.batch_file = Some(
+                    args.get(i)
+                        .ok_or_else(|| SftpError::BadArg("-b requires a filename".into()))?
+                        .clone(),
+                );
             }
             "-v" | "--verbose" => {
                 cfg.verbose = true;
@@ -2017,7 +1962,9 @@ fn parse_args(args: &[String]) -> Result<Config, SftpError> {
                 return Err(SftpError::BadArg(format!("unrecognised option '{other}'")));
             }
         }
-        i = i.checked_add(1).ok_or_else(|| SftpError::BadArg("overflow".into()))?;
+        i = i
+            .checked_add(1)
+            .ok_or_else(|| SftpError::BadArg("overflow".into()))?;
     }
     Ok(cfg)
 }
@@ -2027,6 +1974,7 @@ fn parse_args(args: &[String]) -> Result<Config, SftpError> {
 // ============================================================================
 
 /// Parse an IPv4 dotted-decimal address string into a network-byte-order u32.
+#[allow(clippy::many_single_char_names)] // a, b, c, d are the conventional octet names
 fn parse_ipv4(s: &str) -> Option<u32> {
     let mut parts = s.split('.');
     let a = parts.next()?.parse::<u8>().ok()?;
@@ -2036,12 +1984,14 @@ fn parse_ipv4(s: &str) -> Option<u32> {
     if parts.next().is_some() {
         return None;
     }
-    // Network byte order: a.b.c.d → a<<24 | b<<16 | c<<8 | d
-    let ip = (u32::from(a) << 24) | (u32::from(b) << 16) | (u32::from(c) << 8) | u32::from(d);
-    Some(ip.to_be())
+    // The kernel's SYS_TCP_CONNECT does `Ipv4Addr::from_u32(v) = v.to_be_bytes()`,
+    // so the u32 we pass must satisfy `v.to_be_bytes() == [a, b, c, d]`. That is
+    // exactly `u32::from_be_bytes([a, b, c, d])` — no host-endian `.to_be()`
+    // swap, which would reverse the octets on little-endian x86_64.
+    Some(u32::from_be_bytes([a, b, c, d]))
 }
 
-/// Attempt to connect to an SFTP server and exchange SSH_FXP_INIT/VERSION.
+/// Attempt to connect to an SFTP server and exchange `SSH_FXP_INIT/VERSION`.
 fn connect_sftp(host: &str, port: u16, verbose: bool) -> Result<RemoteConn, SftpError> {
     // Try to parse host as a raw IPv4 address first; then assume it is already
     // an address that the kernel resolves (in a full implementation we would
@@ -2056,9 +2006,8 @@ fn connect_sftp(host: &str, port: u16, verbose: bool) -> Result<RemoteConn, Sftp
     }
     let handle = tcp_connect(ip, port)?;
     let mut conn = RemoteConn::new(handle, verbose);
-    let version = conn.init().map_err(|e| {
+    let version = conn.init().inspect_err(|_| {
         tcp_close(handle);
-        e
     })?;
     if verbose {
         eprintln!("[sftp] server SFTP version {version}");
@@ -2102,15 +2051,13 @@ fn run_interactive<R: BufRead>(session: &mut Session, reader: &mut R) -> Result<
             continue;
         }
         match parse_command(trimmed) {
-            Err(e) if e.is_empty() => continue,
+            Err(e) if e.is_empty() => {}
             Err(e) => eprintln!("sftp: {e}"),
-            Ok(cmd) => {
-                match execute_command(session, &cmd) {
-                    Ok(false) => break,
-                    Ok(true) => {}
-                    Err(e) => eprintln!("sftp: {e}"),
-                }
-            }
+            Ok(cmd) => match execute_command(session, &cmd) {
+                Ok(false) => break,
+                Ok(true) => {}
+                Err(e) => eprintln!("sftp: {e}"),
+            },
         }
     }
     Ok(())
@@ -2123,7 +2070,10 @@ fn run_batch(session: &mut Session, batch_file: &str) -> Result<(), SftpError> {
         .map_err(|_| SftpError::BadArg(format!("batch file '{batch_file}' is not valid UTF-8")))?;
     let mut reader = io::Cursor::new(text.as_bytes().to_vec());
     // In batch mode we still use run_interactive but without a real terminal.
-    run_interactive(session, &mut io::BufReader::new(&mut reader as &mut dyn Read))
+    run_interactive(
+        session,
+        &mut io::BufReader::new(&mut reader as &mut dyn Read),
+    )
 }
 
 // ============================================================================
@@ -2139,7 +2089,8 @@ fn run() -> Result<(), SftpError> {
 
     let mut session = if let Some(ref host) = cfg.host {
         let conn = connect_sftp(host, cfg.port, cfg.verbose)?;
-        let remote_cwd = cfg.remote_start_path
+        let remote_cwd = cfg
+            .remote_start_path
             .clone()
             .unwrap_or_else(|| "/".to_string());
         println!("Connected to {host}.");
@@ -2231,9 +2182,9 @@ mod tests {
 
     #[test]
     fn ipv4_valid() {
-        // 127.0.0.1 in network byte order
+        // parse_ipv4 returns the u32 the kernel expects: `to_be_bytes()` must
+        // yield the dotted-decimal octets in order.
         let nbo = parse_ipv4("127.0.0.1").unwrap();
-        // The raw u32 in native byte order after .to_be() should have bytes 127,0,0,1.
         let bytes = nbo.to_be_bytes();
         assert_eq!(bytes, [127, 0, 0, 1]);
     }
@@ -2350,12 +2301,18 @@ mod tests {
 
     #[test]
     fn parse_ls_with_path() {
-        assert_eq!(parse_command("ls /tmp"), Ok(SftpCommand::Ls(Some("/tmp".into()))));
+        assert_eq!(
+            parse_command("ls /tmp"),
+            Ok(SftpCommand::Ls(Some("/tmp".into())))
+        );
     }
 
     #[test]
     fn parse_cd() {
-        assert_eq!(parse_command("cd /home"), Ok(SftpCommand::Cd("/home".into())));
+        assert_eq!(
+            parse_command("cd /home"),
+            Ok(SftpCommand::Cd("/home".into()))
+        );
     }
 
     #[test]
@@ -2389,7 +2346,10 @@ mod tests {
     fn parse_chmod_valid() {
         assert_eq!(
             parse_command("chmod 755 script.sh"),
-            Ok(SftpCommand::Chmod { mode: 0o755, path: "script.sh".into() })
+            Ok(SftpCommand::Chmod {
+                mode: 0o755,
+                path: "script.sh".into()
+            })
         );
     }
 
@@ -2402,7 +2362,10 @@ mod tests {
     fn parse_rename() {
         assert_eq!(
             parse_command("rename old.txt new.txt"),
-            Ok(SftpCommand::Rename { old: "old.txt".into(), new: "new.txt".into() })
+            Ok(SftpCommand::Rename {
+                old: "old.txt".into(),
+                new: "new.txt".into()
+            })
         );
     }
 
@@ -2452,7 +2415,10 @@ mod tests {
 
     #[test]
     fn args_user_at_host() {
-        let args: Vec<String> = ["alice@example.com"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["alice@example.com"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.user.as_deref(), Some("alice"));
         assert_eq!(cfg.host.as_deref(), Some("example.com"));
@@ -2460,7 +2426,10 @@ mod tests {
 
     #[test]
     fn args_host_with_path() {
-        let args: Vec<String> = ["alice@192.168.1.1:/home/alice"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["alice@192.168.1.1:/home/alice"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.remote_start_path.as_deref(), Some("/home/alice"));
         assert_eq!(cfg.host.as_deref(), Some("192.168.1.1"));
@@ -2480,7 +2449,11 @@ mod tests {
 
         let pkt = parse_sftp_packet(&payload).unwrap();
         match pkt {
-            SftpPacket::Status { request_id, code, message } => {
+            SftpPacket::Status {
+                request_id,
+                code,
+                message,
+            } => {
                 assert_eq!(request_id, 42);
                 assert_eq!(code, status::SSH_FX_OK);
                 assert_eq!(message, "OK");
@@ -2513,7 +2486,13 @@ mod tests {
         push_u32(&mut payload, 1); // count = 1
         push_str(&mut payload, "file.txt");
         push_str(&mut payload, "-rw-r--r-- 1 user group 100 Jan 1 file.txt");
-        push_attrs(&mut payload, &FileAttrs { size: Some(100), ..Default::default() });
+        push_attrs(
+            &mut payload,
+            &FileAttrs {
+                size: Some(100),
+                ..Default::default()
+            },
+        );
         let pkt = parse_sftp_packet(&payload).unwrap();
         match pkt {
             SftpPacket::Name { entries, .. } => {
@@ -2583,19 +2562,5 @@ mod tests {
         push_u32(&mut buf, 100); // claim 100 bytes but provide none
         let mut cur = Cursor::new(&buf);
         assert!(cur.read_string().is_err());
-    }
-
-    // --- to_cstring ---
-
-    #[test]
-    fn cstring_null_terminated() {
-        let cs = to_cstring("hello");
-        assert_eq!(cs, b"hello\0");
-    }
-
-    #[test]
-    fn cstring_empty() {
-        let cs = to_cstring("");
-        assert_eq!(cs, b"\0");
     }
 }

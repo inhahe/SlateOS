@@ -2,6 +2,10 @@
 /target/
 **/target/
 **/*.rs.bk
+# Stray rustc codegen-unit objects written to the Windows `nul` device name
+# (these land in the crate root, not target/, when a build/clippy invocation
+# redirects output to `nul` on Windows).
+**/nul.*.rcgu.o
 
 # IDE
 .idea/

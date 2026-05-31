@@ -18,10 +18,43 @@
 ##       Added #[derive(Debug)]; 48/48 tests pass; clippy-clean host + ouros
 ##       (also cleared 2 pre-existing warnings: needless &mut self on
 ##       write_all_bytes + the now-unused `mut pad`).
-##   STILL OPEN (noticed, not yet fixed) from the same sweep:
-##     * coreutils crate test build fails on host: `cannot find unix in os`
-##       (an ungated std::os::unix use needs #[cfg(unix)] for the windows-gnu
-##       host test build, same class as the service/sftp fixes).
+##   coreutils crate investigated (2026-05-31) — turned up several issues:
+##     * FIXED: debug `build-ouros -p coreutils` failed to LINK with
+##       "relocation refers to a symbol in a discarded section:
+##       __rustc_debug_gdb_scripts_section__".  coreutils/linker.ld discards
+##       `*(.debug*)`, which swallowed `.debug_gdb_scripts`; in debug builds
+##       rustc emits a live relocation to that section's symbol, so the link
+##       failed.  (RELEASE — the canonical/deployed build per requests/
+##       coreutils_needs_kernel_embedding.md — was unaffected because release
+##       emits no gdb-scripts section.)  FIX: list `.debug_gdb_scripts 0 (INFO)`
+##       as a non-allocated output section before /DISCARD/ so it's kept out of
+##       any PT_LOAD but its symbol resolves.  Debug + release now both build.
+##     * FIXED: coreutils/build.rs (which emits `rustc-link-arg=-T.../linker.ld`
+##       — the ONLY thing wiring the custom linker script into the build) was
+##       UNTRACKED in git.  A clean checkout would have lost the custom linking
+##       entirely.  Committed it.
+##     * FIXED: ~37 stray `nul.<hash>.rcgu.o` codegen-unit objects were sitting
+##       in the crate root (rustc output accidentally written to the Windows
+##       `nul` device name by some build/clippy invocation).  Deleted them and
+##       added `**/nul.*.rcgu.o` to .gitignore.
+##     * NOT FIXED (by design): the crate does NOT compile for the host
+##       (windows-gnu) target because several bins (test, du, stat, chmod,
+##       chown, tar) use unix-only std extension traits (PermissionsExt /
+##       MetadataExt / FileTypeExt) without #[cfg(unix)] gating.  It has ZERO
+##       test modules, so there are no host tests to run; it builds correctly
+##       for its real target (x86_64-ouros, which is unix).  Gating all six
+##       bins would be churn with no test payoff, so left as-is.  TRIGGER:
+##       revisit if/when coreutils gains unit tests that need to run on host.
+##  JUDGMENT CALL / DESIGN QUESTION (2026-05-31, needs human): there is
+##  DUPLICATION between the coreutils crate's bins (coreutils/src/bin/{tr,dd,
+##  chown,df,...}) and the standalone per-tool workspace crates (userspace/tr,
+##  userspace/dd, userspace/chown, userspace/df, ...).  The kernel-embedding
+##  request points at coreutils/target for deployment, but the standalone
+##  crates are the ones that are workspace members, have unit tests, and got
+##  the syscall-ABI fixes this session.  Which set is canonical for the OS
+##  image is unclear and the two can drift.  Someone should decide: fold the
+##  fixed standalone tools into coreutils (or vice-versa), or make the image
+##  build install the standalone crates and retire the coreutils duplicates.
 ##
 ## BUG (noticed 2026-05-30): SYSTEMIC — a swathe of userspace tools call
 ##                            WRONG syscall numbers because they hand-roll

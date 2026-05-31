@@ -50,6 +50,18 @@ SECTIONS
         __bss_end = .;
     } :load
 
+    /* Keep the gdb pretty-printer script section as a non-allocated section
+     * (no SHF_ALLOC, so it is never placed in a PT_LOAD and the kernel loader
+     * ignores it).  In debug builds rustc emits a live relocation to
+     * `__rustc_debug_gdb_scripts_section__`; if we let the blanket
+     * `*(.debug*)` discard below swallow it, the link fails with
+     * "relocation refers to a symbol in a discarded section".  Listing it
+     * explicitly here (before /DISCARD/) claims the input section so the
+     * discard rule no longer matches it.  Release builds emit nothing here. */
+    .debug_gdb_scripts 0 (INFO) : {
+        *(.debug_gdb_scripts)
+    }
+
     /* Discard unwanted sections. */
     /DISCARD/ : {
         *(.comment)

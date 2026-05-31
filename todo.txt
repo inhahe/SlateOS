@@ -1,3 +1,30 @@
+## BUG (noticed+FIXED 2026-05-31): iptables had a broken test build + a real
+##   production bug + 16 pre-existing clippy errors.  userspace/iptables/src/main.rs:
+##     * TEST BUILD DIDN'T COMPILE: the CIDR/port membership methods were named
+##       `_contains` (underscore-prefixed to dodge dead-code warnings) but every
+##       test called `.contains()`.  Renamed Ipv4Cidr/Ipv6Cidr/PortSpec/MultiPort
+##       `_contains` -> `contains` and documented them #[allow(dead_code)] (this
+##       is a rule-MANAGEMENT tool; it edits rule tables and doesn't evaluate
+##       packets, so the membership primitives aren't on the management path yet
+##       — reserved + tested for a future --check/packet-match path).
+##     * REAL PRODUCTION BUG: restore_firewall (iptables-restore) tracked the
+##       current `*table` block but never applied it.  Rule lines like
+##       `-A POSTROUTING -j MASQUERADE` carry no `-t`, so the parsed Command
+##       defaulted to the `filter` table and `execute_command` applied nat rules
+##       to filter -> "chain 'POSTROUTING' not found in table 'filter'".  Added
+##       Command::table_mut() and override the parsed command's table with the
+##       block context.  219/219 tests pass.
+##     * 16 pre-existing clippy errors (crate has its own #![deny(clippy::all)]
+##       and does NOT inherit the workspace's curated allows): auto-fixed 14
+##       (collapsible_if, as_ref().map, etc.), manually fixed a needless_range
+##       loop (zip), an if-same-then-else (numeric/symbolic list header is
+##       identical), an unnecessary to_string, and a needless mut+peekable.
+##     * LIMITATION: `-n`/`--numeric` is accepted but a no-op — output is always
+##       numeric because we never do reverse-DNS or /etc/services lookups (which
+##       is what `-n` would produce upstream anyway).  Field kept with
+##       #[allow(dead_code)] for when symbolic rendering is added.
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): rsync had 1 failing test + a pile of latent
 ##   warnings.  userspace/rsync/src/main.rs:
 ##     * itemize_unchanged expected ".f..........." (13 chars); rsync's itemize

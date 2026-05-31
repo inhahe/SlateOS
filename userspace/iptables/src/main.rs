@@ -43,7 +43,12 @@ impl Ipv4Cidr {
         Ok(Self { addr, prefix_len })
     }
 
-    fn _contains(&self, ip: &[u8; 4]) -> bool {
+    /// True if `ip` falls within this CIDR block.  Not used by the rule
+    /// *management* path (this tool edits rule tables, it doesn't evaluate
+    /// packets), but kept and tested as the membership primitive a future
+    /// `--check`/packet-match path will need.
+    #[allow(dead_code)]
+    fn contains(&self, ip: &[u8; 4]) -> bool {
         if self.prefix_len == 0 {
             return true;
         }
@@ -106,14 +111,17 @@ impl Ipv6Cidr {
         Ok(Self { addr, prefix_len })
     }
 
-    fn _contains(&self, ip: &[u8; 16]) -> bool {
+    /// True if `ip` falls within this CIDR block.  See `Ipv4Cidr::contains`
+    /// for why this is `#[allow(dead_code)]`.
+    #[allow(dead_code)]
+    fn contains(&self, ip: &[u8; 16]) -> bool {
         if self.prefix_len == 0 {
             return true;
         }
         let full_bytes = (self.prefix_len / 8) as usize;
         let remaining_bits = self.prefix_len % 8;
-        for i in 0..full_bytes {
-            if self.addr[i] != ip[i] {
+        for (a, b) in self.addr.iter().zip(ip.iter()).take(full_bytes) {
+            if a != b {
                 return false;
             }
         }
@@ -131,8 +139,7 @@ impl fmt::Display for Ipv6Cidr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let segments: Vec<String> = (0..8)
             .map(|i| {
-                let val =
-                    u16::from_be_bytes([self.addr[i * 2], self.addr[i * 2 + 1]]);
+                let val = u16::from_be_bytes([self.addr[i * 2], self.addr[i * 2 + 1]]);
                 format!("{val:x}")
             })
             .collect();
@@ -180,8 +187,8 @@ fn parse_ipv6_addr(s: &str) -> Result<[u8; 16], String> {
     let zero_fill = 8 - total;
 
     for (i, grp) in left_groups.iter().enumerate() {
-        let val = u16::from_str_radix(grp, 16)
-            .map_err(|_| format!("invalid IPv6 group '{grp}'"))?;
+        let val =
+            u16::from_str_radix(grp, 16).map_err(|_| format!("invalid IPv6 group '{grp}'"))?;
         let bytes = val.to_be_bytes();
         addr[i * 2] = bytes[0];
         addr[i * 2 + 1] = bytes[1];
@@ -189,8 +196,8 @@ fn parse_ipv6_addr(s: &str) -> Result<[u8; 16], String> {
 
     let right_start = left_groups.len() + zero_fill;
     for (i, grp) in right_groups.iter().enumerate() {
-        let val = u16::from_str_radix(grp, 16)
-            .map_err(|_| format!("invalid IPv6 group '{grp}'"))?;
+        let val =
+            u16::from_str_radix(grp, 16).map_err(|_| format!("invalid IPv6 group '{grp}'"))?;
         let bytes = val.to_be_bytes();
         let idx = right_start + i;
         addr[idx * 2] = bytes[0];
@@ -292,14 +299,15 @@ impl PortSpec {
             }
             Ok(Self::Range(lo, hi))
         } else {
-            let port: u16 = s
-                .parse()
-                .map_err(|_| format!("invalid port '{s}'"))?;
+            let port: u16 = s.parse().map_err(|_| format!("invalid port '{s}'"))?;
             Ok(Self::Single(port))
         }
     }
 
-    fn _contains(&self, port: u16) -> bool {
+    /// True if `port` matches this spec.  See `Ipv4Cidr::contains` for why
+    /// this is `#[allow(dead_code)]`.
+    #[allow(dead_code)]
+    fn contains(&self, port: u16) -> bool {
         match self {
             Self::Single(p) => *p == port,
             Self::Range(lo, hi) => port >= *lo && port <= *hi,
@@ -332,8 +340,11 @@ impl MultiPort {
         Ok(Self(specs))
     }
 
-    fn _contains(&self, port: u16) -> bool {
-        self.0.iter().any(|ps| ps._contains(port))
+    /// True if any contained spec matches `port`.  See `Ipv4Cidr::contains`
+    /// for why this is `#[allow(dead_code)]`.
+    #[allow(dead_code)]
+    fn contains(&self, port: u16) -> bool {
+        self.0.iter().any(|ps| ps.contains(port))
     }
 }
 
@@ -443,7 +454,12 @@ impl LimitSpec {
             "m" | "min" | "minute" => LimitUnit::Minute,
             "h" | "hour" => LimitUnit::Hour,
             "d" | "day" => LimitUnit::Day,
-            _ => return Err(format!("unknown limit unit '{}' (use sec/min/hour/day)", parts[1])),
+            _ => {
+                return Err(format!(
+                    "unknown limit unit '{}' (use sec/min/hour/day)",
+                    parts[1]
+                ));
+            }
         };
         Ok((rate, unit))
     }
@@ -451,7 +467,13 @@ impl LimitSpec {
 
 impl fmt::Display for LimitSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}/{} burst {}", self.rate, self.unit.as_str(), self.burst)
+        write!(
+            f,
+            "{}/{} burst {}",
+            self.rate,
+            self.unit.as_str(),
+            self.burst
+        )
     }
 }
 
@@ -558,7 +580,9 @@ impl fmt::Display for Target {
         match self {
             Self::Accept => write!(f, "ACCEPT"),
             Self::Drop => write!(f, "DROP"),
-            Self::Reject { reject_with: Some(r) } => {
+            Self::Reject {
+                reject_with: Some(r),
+            } => {
                 write!(f, "REJECT --reject-with {r}")
             }
             Self::Reject { reject_with: None } => write!(f, "REJECT"),
@@ -903,7 +927,12 @@ struct Firewall {
 impl Firewall {
     fn new(ipv6: bool) -> Self {
         let mut tables = HashMap::new();
-        for tn in &[TableName::Filter, TableName::Nat, TableName::Mangle, TableName::Raw] {
+        for tn in &[
+            TableName::Filter,
+            TableName::Nat,
+            TableName::Mangle,
+            TableName::Raw,
+        ] {
             tables.insert(tn.clone(), Table::new(tn.clone()));
         }
         Self { tables, ipv6 }
@@ -951,7 +980,10 @@ impl Personality {
     }
 
     fn is_ipv6(&self) -> bool {
-        matches!(self, Self::Ip6tables | Self::Ip6tablesSave | Self::Ip6tablesRestore)
+        matches!(
+            self,
+            Self::Ip6tables | Self::Ip6tablesSave | Self::Ip6tablesRestore
+        )
     }
 
     fn prog_name(&self) -> &'static str {
@@ -972,18 +1004,94 @@ impl Personality {
 
 #[derive(Debug)]
 enum Command {
-    Append { table: TableName, chain: String, rule: Rule },
-    Insert { table: TableName, chain: String, pos: Option<usize>, rule: Rule },
-    Delete { table: TableName, chain: String, rule_or_num: DeleteTarget },
-    Replace { table: TableName, chain: String, pos: usize, rule: Rule },
-    List { table: TableName, chain: Option<String>, numeric: bool, verbose: bool, line_numbers: bool },
-    Flush { table: TableName, chain: Option<String> },
-    Zero { table: TableName, chain: Option<String> },
-    NewChain { table: TableName, chain: String },
-    DeleteChain { table: TableName, chain: Option<String> },
-    Policy { table: TableName, chain: String, policy: ChainPolicy },
-    RenameChain { table: TableName, old_name: String, new_name: String },
-    Check { table: TableName, chain: String, rule: Rule },
+    Append {
+        table: TableName,
+        chain: String,
+        rule: Rule,
+    },
+    Insert {
+        table: TableName,
+        chain: String,
+        pos: Option<usize>,
+        rule: Rule,
+    },
+    Delete {
+        table: TableName,
+        chain: String,
+        rule_or_num: DeleteTarget,
+    },
+    Replace {
+        table: TableName,
+        chain: String,
+        pos: usize,
+        rule: Rule,
+    },
+    List {
+        table: TableName,
+        chain: Option<String>,
+        // Set by `-n`/`--numeric` but not yet acted on: output is always
+        // numeric because we never do DNS/service-name resolution. Kept as
+        // part of the parsed command surface for when symbolic rendering is
+        // added. See todo.txt.
+        #[allow(dead_code)]
+        numeric: bool,
+        verbose: bool,
+        line_numbers: bool,
+    },
+    Flush {
+        table: TableName,
+        chain: Option<String>,
+    },
+    Zero {
+        table: TableName,
+        chain: Option<String>,
+    },
+    NewChain {
+        table: TableName,
+        chain: String,
+    },
+    DeleteChain {
+        table: TableName,
+        chain: Option<String>,
+    },
+    Policy {
+        table: TableName,
+        chain: String,
+        policy: ChainPolicy,
+    },
+    RenameChain {
+        table: TableName,
+        old_name: String,
+        new_name: String,
+    },
+    Check {
+        table: TableName,
+        chain: String,
+        rule: Rule,
+    },
+}
+
+impl Command {
+    /// Mutable access to the command's target table. Every variant carries a
+    /// `table`; this lets the `iptables-restore` parser override the table with
+    /// the current `*table` block context (restore-format rule lines never
+    /// carry their own `-t`, so the parsed command defaults to `filter`).
+    fn table_mut(&mut self) -> &mut TableName {
+        match self {
+            Command::Append { table, .. }
+            | Command::Insert { table, .. }
+            | Command::Delete { table, .. }
+            | Command::Replace { table, .. }
+            | Command::List { table, .. }
+            | Command::Flush { table, .. }
+            | Command::Zero { table, .. }
+            | Command::NewChain { table, .. }
+            | Command::DeleteChain { table, .. }
+            | Command::Policy { table, .. }
+            | Command::RenameChain { table, .. }
+            | Command::Check { table, .. } => table,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1055,24 +1163,24 @@ impl ArgParser {
                     command = Some("insert".to_string());
                     chain_name = Some(self.expect_arg("chain name")?);
                     // Next arg might be a position number
-                    if let Some(next) = self.peek() {
-                        if let Ok(n) = next.parse::<usize>() {
-                            insert_pos = Some(n);
-                            self.pos += 1;
-                        }
+                    if let Some(next) = self.peek()
+                        && let Ok(n) = next.parse::<usize>()
+                    {
+                        insert_pos = Some(n);
+                        self.pos += 1;
                     }
                 }
                 "-D" | "--delete" => {
                     command = Some("delete".to_string());
                     chain_name = Some(self.expect_arg("chain name")?);
                     // Next arg might be a rule number
-                    if let Some(next) = self.peek() {
-                        if let Ok(n) = next.parse::<usize>() {
-                            // Only treat as number if there are no further
-                            // match/target args that would indicate a spec.
-                            delete_num = Some(n);
-                            self.pos += 1;
-                        }
+                    if let Some(next) = self.peek()
+                        && let Ok(n) = next.parse::<usize>()
+                    {
+                        // Only treat as number if there are no further
+                        // match/target args that would indicate a spec.
+                        delete_num = Some(n);
+                        self.pos += 1;
                     }
                 }
                 "-R" | "--replace" => {
@@ -1080,34 +1188,36 @@ impl ArgParser {
                     chain_name = Some(self.expect_arg("chain name")?);
                     let pos_str = self.expect_arg("rule number")?;
                     insert_pos = Some(
-                        pos_str.parse().map_err(|_| format!("invalid rule number '{pos_str}'"))?,
+                        pos_str
+                            .parse()
+                            .map_err(|_| format!("invalid rule number '{pos_str}'"))?,
                     );
                 }
                 "-L" | "--list" => {
                     command = Some("list".to_string());
-                    if let Some(next) = self.peek() {
-                        if !next.starts_with('-') {
-                            chain_name = Some(next.to_string());
-                            self.pos += 1;
-                        }
+                    if let Some(next) = self.peek()
+                        && !next.starts_with('-')
+                    {
+                        chain_name = Some(next.to_string());
+                        self.pos += 1;
                     }
                 }
                 "-F" | "--flush" => {
                     command = Some("flush".to_string());
-                    if let Some(next) = self.peek() {
-                        if !next.starts_with('-') {
-                            chain_name = Some(next.to_string());
-                            self.pos += 1;
-                        }
+                    if let Some(next) = self.peek()
+                        && !next.starts_with('-')
+                    {
+                        chain_name = Some(next.to_string());
+                        self.pos += 1;
                     }
                 }
                 "-Z" | "--zero" => {
                     command = Some("zero".to_string());
-                    if let Some(next) = self.peek() {
-                        if !next.starts_with('-') {
-                            chain_name = Some(next.to_string());
-                            self.pos += 1;
-                        }
+                    if let Some(next) = self.peek()
+                        && !next.starts_with('-')
+                    {
+                        chain_name = Some(next.to_string());
+                        self.pos += 1;
                     }
                 }
                 "-N" | "--new-chain" => {
@@ -1116,11 +1226,11 @@ impl ArgParser {
                 }
                 "-X" | "--delete-chain" => {
                     command = Some("delete-chain".to_string());
-                    if let Some(next) = self.peek() {
-                        if !next.starts_with('-') {
-                            chain_name = Some(next.to_string());
-                            self.pos += 1;
-                        }
+                    if let Some(next) = self.peek()
+                        && !next.starts_with('-')
+                    {
+                        chain_name = Some(next.to_string());
+                        self.pos += 1;
                     }
                 }
                 "-P" | "--policy" => {
@@ -1252,7 +1362,11 @@ impl ArgParser {
                 } else {
                     DeleteTarget::BySpec(rule)
                 };
-                Ok(Command::Delete { table, chain, rule_or_num: target })
+                Ok(Command::Delete {
+                    table,
+                    chain,
+                    rule_or_num: target,
+                })
             }
             "replace" => Ok(Command::Replace {
                 table,
@@ -1267,13 +1381,22 @@ impl ArgParser {
                 verbose,
                 line_numbers,
             }),
-            "flush" => Ok(Command::Flush { table, chain: chain_name }),
-            "zero" => Ok(Command::Zero { table, chain: chain_name }),
+            "flush" => Ok(Command::Flush {
+                table,
+                chain: chain_name,
+            }),
+            "zero" => Ok(Command::Zero {
+                table,
+                chain: chain_name,
+            }),
             "new-chain" => Ok(Command::NewChain {
                 table,
                 chain: chain_name.ok_or("chain name required")?,
             }),
-            "delete-chain" => Ok(Command::DeleteChain { table, chain: chain_name }),
+            "delete-chain" => Ok(Command::DeleteChain {
+                table,
+                chain: chain_name,
+            }),
             "policy" => Ok(Command::Policy {
                 table,
                 chain: chain_name.ok_or("chain name required")?,
@@ -1299,11 +1422,11 @@ impl ArgParser {
             "DROP" => Ok(Target::Drop),
             "REJECT" => {
                 let mut reject_with = None;
-                if let Some(next) = self.peek() {
-                    if next == "--reject-with" {
-                        self.pos += 1;
-                        reject_with = Some(self.expect_arg("reject type")?);
-                    }
+                if let Some(next) = self.peek()
+                    && next == "--reject-with"
+                {
+                    self.pos += 1;
+                    reject_with = Some(self.expect_arg("reject type")?);
                 }
                 Ok(Target::Reject { reject_with })
             }
@@ -1338,7 +1461,9 @@ impl ArgParser {
                 if self.peek() == Some("--to-destination") {
                     self.pos += 1;
                     let addr = self.expect_arg("DNAT address")?;
-                    Ok(Target::Dnat { to_destination: addr })
+                    Ok(Target::Dnat {
+                        to_destination: addr,
+                    })
                 } else {
                     Err("DNAT requires --to-destination".to_string())
                 }
@@ -1381,7 +1506,9 @@ impl ArgParser {
                 }
             }
             "multiport" => {
-                let next = self.peek().ok_or("-m multiport requires --dports or --sports")?;
+                let next = self
+                    .peek()
+                    .ok_or("-m multiport requires --dports or --sports")?;
                 match next {
                     "--dports" | "--destination-ports" => {
                         self.pos += 1;
@@ -1449,7 +1576,12 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
             ch.rules.push(rule);
             Ok(String::new())
         }
-        Command::Insert { table, chain, pos, rule } => {
+        Command::Insert {
+            table,
+            chain,
+            pos,
+            rule,
+        } => {
             let tbl = fw.get_table_mut(&table);
             let ch = tbl.get_chain_mut(&chain)?;
             let idx = match pos {
@@ -1469,7 +1601,11 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
             ch.rules.insert(idx, rule);
             Ok(String::new())
         }
-        Command::Delete { table, chain, rule_or_num } => {
+        Command::Delete {
+            table,
+            chain,
+            rule_or_num,
+        } => {
             let tbl = fw.get_table_mut(&table);
             let ch = tbl.get_chain_mut(&chain)?;
             match rule_or_num {
@@ -1493,7 +1629,12 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
                 }
             }
         }
-        Command::Replace { table, chain, pos, rule } => {
+        Command::Replace {
+            table,
+            chain,
+            pos,
+            rule,
+        } => {
             let tbl = fw.get_table_mut(&table);
             let ch = tbl.get_chain_mut(&chain)?;
             if pos == 0 || pos > ch.rules.len() {
@@ -1505,7 +1646,17 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
             ch.rules[pos - 1] = rule;
             Ok(String::new())
         }
-        Command::List { table, chain, numeric, verbose, line_numbers } => {
+        Command::List {
+            table,
+            chain,
+            // `-n`/`--numeric` is accepted but has no effect: this tool never
+            // performs reverse-DNS or /etc/services lookups, so addresses and
+            // ports are always rendered numerically (exactly what `-n` would
+            // produce in upstream iptables). See todo.txt.
+            numeric: _,
+            verbose,
+            line_numbers,
+        } => {
             let tbl = fw.get_table(&table);
             let chains_to_list: Vec<&Chain> = if let Some(ref cname) = chain {
                 vec![tbl.get_chain(cname)?]
@@ -1524,15 +1675,11 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
                     .unwrap_or_else(|| "no policy".to_string());
                 output.push_str(&format!("Chain {} ({policy_str})\n", ch.name));
                 if verbose {
-                    output.push_str(&format!(
-                        " pkts bytes target     prot opt in     out     source               destination\n"
-                    ));
-                } else if numeric {
-                    output
-                        .push_str("target     prot opt source               destination\n");
+                    output.push_str(" pkts bytes target     prot opt in     out     source               destination\n");
                 } else {
-                    output
-                        .push_str("target     prot opt source               destination\n");
+                    // The header row is identical for numeric and symbolic
+                    // output; `numeric` only changes how addresses below render.
+                    output.push_str("target     prot opt source               destination\n");
                 }
                 for (ri, rule) in ch.rules.iter().enumerate() {
                     let mut line = String::new();
@@ -1540,10 +1687,7 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
                         line.push_str(&format!("{:<5}", ri + 1));
                     }
                     if verbose {
-                        line.push_str(&format!(
-                            "{:<6}{:<6}",
-                            rule.packets, rule.bytes
-                        ));
+                        line.push_str(&format!("{:<6}{:<6}", rule.packets, rule.bytes));
                     }
                     let target_str = rule
                         .target
@@ -1572,16 +1716,8 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
                         })
                         .unwrap_or_else(|| "0.0.0.0/0".to_string());
                     if verbose {
-                        let in_str = rule
-                            .in_interface
-                            .as_ref()
-                            .map(|s| s.as_str())
-                            .unwrap_or("*");
-                        let out_str = rule
-                            .out_interface
-                            .as_ref()
-                            .map(|s| s.as_str())
-                            .unwrap_or("*");
+                        let in_str = rule.in_interface.as_deref().unwrap_or("*");
+                        let out_str = rule.out_interface.as_deref().unwrap_or("*");
                         line.push_str(&format!(
                             "{:<11}{:<5}{:<4}{:<7}{:<8}{:<21}{:<21}",
                             target_str, proto_str, "--", in_str, out_str, src_str, dst_str
@@ -1599,7 +1735,9 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
                     // Append target options
                     if let Some(ref tgt) = rule.target {
                         match tgt {
-                            Target::Reject { reject_with: Some(r) } => {
+                            Target::Reject {
+                                reject_with: Some(r),
+                            } => {
                                 line.push_str(&format!(" reject-with {r}"));
                             }
                             Target::Log { prefix, level } => {
@@ -1622,7 +1760,7 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
                         let neg = if rule.not_dport { "!" } else { "" };
                         line.push_str(&format!(" dpt:{neg}{dp}"));
                     }
-                    output.push_str(&line.trim_end().to_string());
+                    output.push_str(line.trim_end());
                     output.push('\n');
                 }
             }
@@ -1680,20 +1818,18 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
                     return Err(format!("cannot delete built-in chain '{cname}'"));
                 }
                 if !tbl.chains[idx].rules.is_empty() {
-                    return Err(format!(
-                        "cannot delete non-empty chain '{cname}'"
-                    ));
+                    return Err(format!("cannot delete non-empty chain '{cname}'"));
                 }
                 // Check no other chain references this one
                 for ch in &tbl.chains {
                     for rule in &ch.rules {
-                        if let Some(Target::UserChain(ref name)) = rule.target {
-                            if name == &cname {
-                                return Err(format!(
-                                    "cannot delete chain '{cname}': referenced by chain '{}'",
-                                    ch.name
-                                ));
-                            }
+                        if let Some(Target::UserChain(ref name)) = rule.target
+                            && name == &cname
+                        {
+                            return Err(format!(
+                                "cannot delete chain '{cname}': referenced by chain '{}'",
+                                ch.name
+                            ));
                         }
                     }
                 }
@@ -1713,18 +1849,24 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
             }
             Ok(String::new())
         }
-        Command::Policy { table, chain, policy } => {
+        Command::Policy {
+            table,
+            chain,
+            policy,
+        } => {
             let tbl = fw.get_table_mut(&table);
             let ch = tbl.get_chain_mut(&chain)?;
             if !ch.builtin {
-                return Err(format!(
-                    "cannot set policy on user-defined chain '{chain}'"
-                ));
+                return Err(format!("cannot set policy on user-defined chain '{chain}'"));
             }
             ch.policy = Some(policy);
             Ok(String::new())
         }
-        Command::RenameChain { table, old_name, new_name } => {
+        Command::RenameChain {
+            table,
+            old_name,
+            new_name,
+        } => {
             let tbl = fw.get_table_mut(&table);
             let idx = tbl
                 .find_chain(&old_name)
@@ -1740,10 +1882,10 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
             let old_name_clone = old_name.clone();
             for ch in &mut tbl.chains {
                 for rule in &mut ch.rules {
-                    if let Some(Target::UserChain(ref mut name)) = rule.target {
-                        if *name == old_name_clone {
-                            *name = new_name.clone();
-                        }
+                    if let Some(Target::UserChain(ref mut name)) = rule.target
+                        && *name == old_name_clone
+                    {
+                        *name = new_name.clone();
                     }
                 }
             }
@@ -1767,17 +1909,21 @@ fn execute_command(fw: &mut Firewall, cmd: Command) -> Result<String, String> {
 
 fn save_firewall(fw: &Firewall) -> String {
     let mut output = String::new();
-    let table_order = [TableName::Raw, TableName::Mangle, TableName::Nat, TableName::Filter];
+    let table_order = [
+        TableName::Raw,
+        TableName::Mangle,
+        TableName::Nat,
+        TableName::Filter,
+    ];
     for tn in &table_order {
         let tbl = fw.get_table(tn);
         // Only output tables that have non-default state.
         let has_rules = tbl.chains.iter().any(|c| !c.rules.is_empty());
         let has_custom_chains = tbl.chains.iter().any(|c| !c.builtin);
-        let has_non_accept_policy = tbl.chains.iter().any(|c| {
-            c.policy
-                .as_ref()
-                .is_some_and(|p| *p != ChainPolicy::Accept)
-        });
+        let has_non_accept_policy = tbl
+            .chains
+            .iter()
+            .any(|c| c.policy.as_ref().is_some_and(|p| *p != ChainPolicy::Accept));
         if !has_rules && !has_custom_chains && !has_non_accept_policy {
             // Still output the table header and COMMIT for completeness
         }
@@ -1893,15 +2039,19 @@ fn restore_firewall(fw: &mut Firewall, input: &str) -> Result<(), String> {
         }
 
         let mut parser = ArgParser::new(words, fw.ipv6);
-        let mut cmd = parser.parse_command().map_err(|e| {
-            format!("line {}: {e}", line_num + 1)
-        })?;
+        let mut cmd = parser
+            .parse_command()
+            .map_err(|e| format!("line {}: {e}", line_num + 1))?;
+
+        // In iptables-restore format the table comes from the enclosing
+        // `*table` block, not from a per-rule `-t`. Override whatever the
+        // command parser defaulted to (filter) with the current block's table.
+        *cmd.table_mut() = tn.clone();
 
         // Apply counter from bracket prefix
         if rule_pkts != 0 || rule_bytes != 0 {
             match &mut cmd {
-                Command::Append { rule, .. }
-                | Command::Insert { rule, .. } => {
+                Command::Append { rule, .. } | Command::Insert { rule, .. } => {
                     rule.packets = rule_pkts;
                     rule.bytes = rule_bytes;
                 }
@@ -1909,9 +2059,7 @@ fn restore_firewall(fw: &mut Firewall, input: &str) -> Result<(), String> {
             }
         }
 
-        execute_command(fw, cmd).map_err(|e| {
-            format!("line {}: {e}", line_num + 1)
-        })?;
+        execute_command(fw, cmd).map_err(|e| format!("line {}: {e}", line_num + 1))?;
     }
 
     Ok(())
@@ -1937,9 +2085,7 @@ fn shell_split(s: &str) -> Result<Vec<String>, String> {
     let mut words = Vec::new();
     let mut current = String::new();
     let mut in_quotes = false;
-    let mut chars = s.chars().peekable();
-
-    while let Some(ch) = chars.next() {
+    for ch in s.chars() {
         if in_quotes {
             if ch == '"' {
                 in_quotes = false;
@@ -2434,10 +2580,7 @@ mod tests {
         );
         assert_eq!(ConnState::parse("RELATED").unwrap(), ConnState::Related);
         assert_eq!(ConnState::parse("INVALID").unwrap(), ConnState::Invalid);
-        assert_eq!(
-            ConnState::parse("UNTRACKED").unwrap(),
-            ConnState::Untracked
-        );
+        assert_eq!(ConnState::parse("UNTRACKED").unwrap(), ConnState::Untracked);
     }
 
     #[test]
@@ -2704,10 +2847,7 @@ mod tests {
     // Append and list rules
     // -----------------------------------------------------------------------
 
-    fn parse_and_exec(
-        fw: &mut Firewall,
-        args: &[&str],
-    ) -> Result<String, String> {
+    fn parse_and_exec(fw: &mut Firewall, args: &[&str]) -> Result<String, String> {
         let args_vec: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let mut parser = ArgParser::new(args_vec, fw.ipv6);
         let cmd = parser.parse_command()?;
@@ -2757,11 +2897,7 @@ mod tests {
     #[test]
     fn test_append_with_destination() {
         let mut fw = Firewall::new(false);
-        parse_and_exec(
-            &mut fw,
-            &["-A", "OUTPUT", "-d", "10.0.0.0/8", "-j", "DROP"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-A", "OUTPUT", "-d", "10.0.0.0/8", "-j", "DROP"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let output = filter.get_chain("OUTPUT").unwrap();
         assert!(output.rules[0].destination.is_some());
@@ -2770,11 +2906,7 @@ mod tests {
     #[test]
     fn test_append_with_interface() {
         let mut fw = Firewall::new(false);
-        parse_and_exec(
-            &mut fw,
-            &["-A", "INPUT", "-i", "eth0", "-j", "ACCEPT"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-A", "INPUT", "-i", "eth0", "-j", "ACCEPT"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let input = filter.get_chain("INPUT").unwrap();
         assert_eq!(input.rules[0].in_interface, Some("eth0".to_string()));
@@ -2783,8 +2915,7 @@ mod tests {
     #[test]
     fn test_append_to_nonexistent_chain() {
         let mut fw = Firewall::new(false);
-        let result =
-            parse_and_exec(&mut fw, &["-A", "NONEXISTENT", "-j", "ACCEPT"]);
+        let result = parse_and_exec(&mut fw, &["-A", "NONEXISTENT", "-j", "ACCEPT"]);
         assert!(result.is_err());
     }
 
@@ -2796,11 +2927,7 @@ mod tests {
     fn test_insert_at_beginning() {
         let mut fw = Firewall::new(false);
         parse_and_exec(&mut fw, &["-A", "INPUT", "-p", "tcp", "-j", "ACCEPT"]).unwrap();
-        parse_and_exec(
-            &mut fw,
-            &["-I", "INPUT", "-p", "udp", "-j", "DROP"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-I", "INPUT", "-p", "udp", "-j", "DROP"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let input = filter.get_chain("INPUT").unwrap();
         assert_eq!(input.rules.len(), 2);
@@ -2813,11 +2940,7 @@ mod tests {
         let mut fw = Firewall::new(false);
         parse_and_exec(&mut fw, &["-A", "INPUT", "-p", "tcp", "-j", "ACCEPT"]).unwrap();
         parse_and_exec(&mut fw, &["-A", "INPUT", "-p", "udp", "-j", "ACCEPT"]).unwrap();
-        parse_and_exec(
-            &mut fw,
-            &["-I", "INPUT", "2", "-p", "icmp", "-j", "DROP"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-I", "INPUT", "2", "-p", "icmp", "-j", "DROP"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let input = filter.get_chain("INPUT").unwrap();
         assert_eq!(input.rules.len(), 3);
@@ -2828,11 +2951,7 @@ mod tests {
     fn test_insert_at_end() {
         let mut fw = Firewall::new(false);
         parse_and_exec(&mut fw, &["-A", "INPUT", "-p", "tcp", "-j", "ACCEPT"]).unwrap();
-        parse_and_exec(
-            &mut fw,
-            &["-I", "INPUT", "2", "-p", "udp", "-j", "DROP"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-I", "INPUT", "2", "-p", "udp", "-j", "DROP"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let input = filter.get_chain("INPUT").unwrap();
         assert_eq!(input.rules.len(), 2);
@@ -2859,11 +2978,7 @@ mod tests {
     fn test_delete_by_spec() {
         let mut fw = Firewall::new(false);
         parse_and_exec(&mut fw, &["-A", "INPUT", "-p", "tcp", "-j", "ACCEPT"]).unwrap();
-        parse_and_exec(
-            &mut fw,
-            &["-D", "INPUT", "-p", "tcp", "-j", "ACCEPT"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-D", "INPUT", "-p", "tcp", "-j", "ACCEPT"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let input = filter.get_chain("INPUT").unwrap();
         assert_eq!(input.rules.len(), 0);
@@ -2879,10 +2994,7 @@ mod tests {
     #[test]
     fn test_delete_nonexistent_spec() {
         let mut fw = Firewall::new(false);
-        let result = parse_and_exec(
-            &mut fw,
-            &["-D", "INPUT", "-p", "tcp", "-j", "ACCEPT"],
-        );
+        let result = parse_and_exec(&mut fw, &["-D", "INPUT", "-p", "tcp", "-j", "ACCEPT"]);
         assert!(result.is_err());
     }
 
@@ -2894,11 +3006,7 @@ mod tests {
     fn test_replace_rule() {
         let mut fw = Firewall::new(false);
         parse_and_exec(&mut fw, &["-A", "INPUT", "-p", "tcp", "-j", "ACCEPT"]).unwrap();
-        parse_and_exec(
-            &mut fw,
-            &["-R", "INPUT", "1", "-p", "udp", "-j", "DROP"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-R", "INPUT", "1", "-p", "udp", "-j", "DROP"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let input = filter.get_chain("INPUT").unwrap();
         assert_eq!(input.rules[0].protocol, Some(Protocol::Udp));
@@ -2907,10 +3015,7 @@ mod tests {
     #[test]
     fn test_replace_invalid_position() {
         let mut fw = Firewall::new(false);
-        let result = parse_and_exec(
-            &mut fw,
-            &["-R", "INPUT", "1", "-p", "tcp", "-j", "ACCEPT"],
-        );
+        let result = parse_and_exec(&mut fw, &["-R", "INPUT", "1", "-p", "tcp", "-j", "ACCEPT"]);
         assert!(result.is_err());
     }
 
@@ -2933,11 +3038,7 @@ mod tests {
     fn test_flush_all() {
         let mut fw = Firewall::new(false);
         parse_and_exec(&mut fw, &["-A", "INPUT", "-p", "tcp", "-j", "ACCEPT"]).unwrap();
-        parse_and_exec(
-            &mut fw,
-            &["-A", "OUTPUT", "-p", "udp", "-j", "DROP"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-A", "OUTPUT", "-p", "udp", "-j", "DROP"]).unwrap();
         parse_and_exec(&mut fw, &["-F"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         for ch in &filter.chains {
@@ -3028,11 +3129,7 @@ mod tests {
     fn test_delete_nonempty_chain_fails() {
         let mut fw = Firewall::new(false);
         parse_and_exec(&mut fw, &["-N", "MYCHAIN"]).unwrap();
-        parse_and_exec(
-            &mut fw,
-            &["-A", "MYCHAIN", "-p", "tcp", "-j", "ACCEPT"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-A", "MYCHAIN", "-p", "tcp", "-j", "ACCEPT"]).unwrap();
         let result = parse_and_exec(&mut fw, &["-X", "MYCHAIN"]);
         assert!(result.is_err());
     }
@@ -3196,11 +3293,7 @@ mod tests {
     #[test]
     fn test_raw_table() {
         let mut fw = Firewall::new(false);
-        parse_and_exec(
-            &mut fw,
-            &["-t", "raw", "-A", "PREROUTING", "-j", "ACCEPT"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-t", "raw", "-A", "PREROUTING", "-j", "ACCEPT"]).unwrap();
         let raw = fw.get_table(&TableName::Raw);
         let pre = raw.get_chain("PREROUTING").unwrap();
         assert_eq!(pre.rules.len(), 1);
@@ -3429,10 +3522,7 @@ mod tests {
     fn test_target_name() {
         assert_eq!(Target::Accept.name(), "ACCEPT");
         assert_eq!(Target::Drop.name(), "DROP");
-        assert_eq!(
-            Target::UserChain("FOO".to_string()).name(),
-            "FOO"
-        );
+        assert_eq!(Target::UserChain("FOO".to_string()).name(), "FOO");
     }
 
     // -----------------------------------------------------------------------
@@ -3468,11 +3558,7 @@ mod tests {
     #[test]
     fn test_negation_protocol() {
         let mut fw = Firewall::new(false);
-        parse_and_exec(
-            &mut fw,
-            &["-A", "INPUT", "!", "-p", "tcp", "-j", "DROP"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-A", "INPUT", "!", "-p", "tcp", "-j", "DROP"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let input = filter.get_chain("INPUT").unwrap();
         assert!(input.rules[0].not_protocol);
@@ -3481,11 +3567,7 @@ mod tests {
     #[test]
     fn test_negation_interface() {
         let mut fw = Firewall::new(false);
-        parse_and_exec(
-            &mut fw,
-            &["-A", "INPUT", "!", "-i", "lo", "-j", "DROP"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-A", "INPUT", "!", "-i", "lo", "-j", "DROP"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let input = filter.get_chain("INPUT").unwrap();
         assert!(input.rules[0].not_in_interface);
@@ -3700,7 +3782,16 @@ mod tests {
         let mut fw = Firewall::new(false);
         parse_and_exec(
             &mut fw,
-            &["-A", "INPUT", "-p", "tcp", "--sport", "1024:65535", "-j", "ACCEPT"],
+            &[
+                "-A",
+                "INPUT",
+                "-p",
+                "tcp",
+                "--sport",
+                "1024:65535",
+                "-j",
+                "ACCEPT",
+            ],
         )
         .unwrap();
         let filter = fw.get_table(&TableName::Filter);
@@ -3728,8 +3819,7 @@ mod tests {
     #[test]
     fn test_list_empty_chain() {
         let mut fw = Firewall::new(false);
-        let output =
-            parse_and_exec(&mut fw, &["-L", "INPUT"]).unwrap();
+        let output = parse_and_exec(&mut fw, &["-L", "INPUT"]).unwrap();
         assert!(output.contains("Chain INPUT"));
         assert!(output.contains("policy ACCEPT"));
     }
@@ -3742,8 +3832,7 @@ mod tests {
             &["-A", "INPUT", "-p", "tcp", "--dport", "80", "-j", "ACCEPT"],
         )
         .unwrap();
-        let output =
-            parse_and_exec(&mut fw, &["-L", "INPUT"]).unwrap();
+        let output = parse_and_exec(&mut fw, &["-L", "INPUT"]).unwrap();
         assert!(output.contains("ACCEPT"));
         assert!(output.contains("tcp"));
     }
@@ -3751,13 +3840,8 @@ mod tests {
     #[test]
     fn test_list_verbose() {
         let mut fw = Firewall::new(false);
-        parse_and_exec(
-            &mut fw,
-            &["-A", "INPUT", "-p", "tcp", "-j", "ACCEPT"],
-        )
-        .unwrap();
-        let output =
-            parse_and_exec(&mut fw, &["-L", "INPUT", "-v"]).unwrap();
+        parse_and_exec(&mut fw, &["-A", "INPUT", "-p", "tcp", "-j", "ACCEPT"]).unwrap();
+        let output = parse_and_exec(&mut fw, &["-L", "INPUT", "-v"]).unwrap();
         assert!(output.contains("pkts"));
         assert!(output.contains("bytes"));
     }
@@ -3767,8 +3851,7 @@ mod tests {
         let mut fw = Firewall::new(false);
         parse_and_exec(&mut fw, &["-A", "INPUT", "-j", "ACCEPT"]).unwrap();
         parse_and_exec(&mut fw, &["-A", "INPUT", "-j", "DROP"]).unwrap();
-        let output =
-            parse_and_exec(&mut fw, &["-L", "INPUT", "--line-numbers"]).unwrap();
+        let output = parse_and_exec(&mut fw, &["-L", "INPUT", "--line-numbers"]).unwrap();
         assert!(output.contains("1"));
         assert!(output.contains("2"));
     }
@@ -3781,16 +3864,14 @@ mod tests {
             &["-A", "INPUT", "-s", "192.168.1.0/24", "-j", "ACCEPT"],
         )
         .unwrap();
-        let output =
-            parse_and_exec(&mut fw, &["-L", "INPUT", "-n"]).unwrap();
+        let output = parse_and_exec(&mut fw, &["-L", "INPUT", "-n"]).unwrap();
         assert!(output.contains("192.168.1.0/24"));
     }
 
     #[test]
     fn test_list_all_chains() {
         let mut fw = Firewall::new(false);
-        let output =
-            parse_and_exec(&mut fw, &["-L"]).unwrap();
+        let output = parse_and_exec(&mut fw, &["-L"]).unwrap();
         assert!(output.contains("Chain INPUT"));
         assert!(output.contains("Chain FORWARD"));
         assert!(output.contains("Chain OUTPUT"));
@@ -4191,16 +4272,7 @@ mod tests {
         // Allow SSH
         parse_and_exec(
             &mut fw,
-            &[
-                "-A",
-                "INPUT",
-                "-p",
-                "tcp",
-                "--dport",
-                "22",
-                "-j",
-                "ACCEPT",
-            ],
+            &["-A", "INPUT", "-p", "tcp", "--dport", "22", "-j", "ACCEPT"],
         )
         .unwrap();
         // Allow HTTP/HTTPS
@@ -4344,17 +4416,10 @@ mod tests {
     #[test]
     fn test_out_interface_rule() {
         let mut fw = Firewall::new(false);
-        parse_and_exec(
-            &mut fw,
-            &["-A", "OUTPUT", "-o", "eth0", "-j", "ACCEPT"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-A", "OUTPUT", "-o", "eth0", "-j", "ACCEPT"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let output = filter.get_chain("OUTPUT").unwrap();
-        assert_eq!(
-            output.rules[0].out_interface,
-            Some("eth0".to_string())
-        );
+        assert_eq!(output.rules[0].out_interface, Some("eth0".to_string()));
     }
 
     #[test]
@@ -4450,11 +4515,7 @@ mod tests {
     fn test_limit_defaults() {
         let mut fw = Firewall::new(false);
         // Default limit: 3/hour, burst 5
-        parse_and_exec(
-            &mut fw,
-            &["-A", "INPUT", "-m", "limit", "-j", "ACCEPT"],
-        )
-        .unwrap();
+        parse_and_exec(&mut fw, &["-A", "INPUT", "-m", "limit", "-j", "ACCEPT"]).unwrap();
         let filter = fw.get_table(&TableName::Filter);
         let input = filter.get_chain("INPUT").unwrap();
         if let MatchExt::Limit(ref spec) = input.rules[0].match_extensions[0] {
@@ -4527,28 +4588,27 @@ mod tests {
 
     #[test]
     fn test_snat_requires_to_source() {
-        let args: Vec<String> = vec![
-            "-t", "nat", "-A", "POSTROUTING", "-j", "SNAT",
-        ].into_iter().map(String::from).collect();
+        let args: Vec<String> = vec!["-t", "nat", "-A", "POSTROUTING", "-j", "SNAT"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         let mut parser = ArgParser::new(args, false);
         assert!(parser.parse_command().is_err());
     }
 
     #[test]
     fn test_dnat_requires_to_destination() {
-        let args: Vec<String> = vec![
-            "-t", "nat", "-A", "PREROUTING", "-j", "DNAT",
-        ].into_iter().map(String::from).collect();
+        let args: Vec<String> = vec!["-t", "nat", "-A", "PREROUTING", "-j", "DNAT"]
+            .into_iter()
+            .map(String::from)
+            .collect();
         let mut parser = ArgParser::new(args, false);
         assert!(parser.parse_command().is_err());
     }
 
     #[test]
     fn test_no_command_error() {
-        let args: Vec<String> = vec!["-t", "filter"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let args: Vec<String> = vec!["-t", "filter"].into_iter().map(String::from).collect();
         let mut parser = ArgParser::new(args, false);
         assert!(parser.parse_command().is_err());
     }
@@ -4578,10 +4638,7 @@ mod tests {
         let t = Target::Reject {
             reject_with: Some("icmp-port-unreachable".to_string()),
         };
-        assert_eq!(
-            t.to_string(),
-            "REJECT --reject-with icmp-port-unreachable"
-        );
+        assert_eq!(t.to_string(), "REJECT --reject-with icmp-port-unreachable");
     }
 
     #[test]
@@ -4609,10 +4666,7 @@ mod tests {
         let t = Target::Dnat {
             to_destination: "192.168.1.1:80".to_string(),
         };
-        assert_eq!(
-            t.to_string(),
-            "DNAT --to-destination 192.168.1.1:80"
-        );
+        assert_eq!(t.to_string(), "DNAT --to-destination 192.168.1.1:80");
     }
 
     #[test]
@@ -4635,10 +4689,7 @@ mod tests {
     fn test_insert_position_zero_error() {
         let mut fw = Firewall::new(false);
         parse_and_exec(&mut fw, &["-A", "INPUT", "-j", "ACCEPT"]).unwrap();
-        let result = parse_and_exec(
-            &mut fw,
-            &["-I", "INPUT", "0", "-j", "DROP"],
-        );
+        let result = parse_and_exec(&mut fw, &["-I", "INPUT", "0", "-j", "DROP"]);
         assert!(result.is_err());
     }
 
@@ -4646,10 +4697,7 @@ mod tests {
     fn test_replace_position_zero_error() {
         let mut fw = Firewall::new(false);
         parse_and_exec(&mut fw, &["-A", "INPUT", "-j", "ACCEPT"]).unwrap();
-        let result = parse_and_exec(
-            &mut fw,
-            &["-R", "INPUT", "0", "-j", "DROP"],
-        );
+        let result = parse_and_exec(&mut fw, &["-R", "INPUT", "0", "-j", "DROP"]);
         assert!(result.is_err());
     }
 

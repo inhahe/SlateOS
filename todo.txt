@@ -1,3 +1,86 @@
+## BUG (noticed 2026-05-30): SYSTEMIC — userspace time tools call WRONG
+##                            syscall numbers (clock access broken across
+##                            ~12 std binaries); std::time is also broken.
+##
+##  SEVERITY: high (functional + safety).  Several user-facing time tools
+##  do not work at all, and some invoke privileged/unintended syscalls.
+##
+##  ROOT CAUSE (two compounding problems):
+##   1. The userspace target (toolchain/x86_64-ouros.json) declares
+##      llvm-target x86_64-unknown-linux-musl, os=linux, env=musl.  So
+##      Rust std (built via build-std) uses the Linux/musl platform layer:
+##      std::time::SystemTime::now()/Instant::now() issue the *Linux*
+##      clock_gettime syscall (rax=228 on x86_64 Linux) via the SYSCALL
+##      instruction.  But our kernel has NO Linux syscall-translation layer
+##      (roadmap line 5079 is unchecked) and its dispatch table is indexed
+##      by NATIVE numbers: kernel rax=228 is SYS_PIPE_POLL, not
+##      clock_gettime.  => std::time hits the wrong handler => returns
+##      garbage/EBADF.  So std time does not work on this OS today.
+##   2. Because std time doesn't work, each time tool hand-rolls a raw
+##      `syscall` wrapper — and there is NO shared source of truth for the
+##      numbers, so they each guessed differently and mostly WRONG:
+##        - at, date, nmap:           SYS_CLOCK_GETTIME = 40  -> kernel 40 = SYS_PORT_READ
+##        - date:                     SYS_CLOCK_SETTIME = 41  -> kernel 41 = SYS_PORT_WRITE
+##        - dig, rsync, scp, screen,
+##          tcpdump:                  SYS_CLOCK_MONOTONIC=30  -> kernel 30 = SYS_IRQ_REGISTER
+##        - stat:                     SYS_CLOCK_GETTIME = 228 -> kernel 228 = SYS_PIPE_POLL
+##        - inetd, sshd:              SYS_CLOCK_MONOTONIC=10  -> CORRECT (kernel 10)
+##      They also assume a POSIX combined ABI clock_gettime(clock_id,
+##      timespec*) that the kernel does NOT provide.
+##
+##  KERNEL CLOCK ABI (the authoritative, correct interface — number.rs):
+##    SYS_CLOCK_MONOTONIC = 10  no args; returns boot-relative ns in rax (i64)
+##    SYS_CLOCK_REALTIME  = 14  no args; returns wall-clock ns-since-epoch in rax
+##    SYS_CLOCK_SETTIME   = 15  arg0 = target_epoch_ns (u64); 0 / -EINVAL
+##    SYS_CLOCK_ADJTIME   = 16  arg0 = signed delta ns (i64 bit-pattern); 0 / -EINVAL
+##  There is NO combined clock_gettime(clock_id, *ts) syscall; each clock is
+##  its own no-arg syscall returning a single ns value in rax.
+##
+##  CONSEQUENCES OBSERVED (by reading the code; not boot-tested):
+##    * date: reads time via SYS_PORT_READ(=40) and `date --set` writes via
+##      SYS_PORT_WRITE(=41) — i.e. completely non-functional, and the set
+##      path aims a port-I/O syscall at hardware (gated by the port-I/O cap,
+##      so likely EPERM rather than real harm, but it is the wrong syscall).
+##    * ntpd & hwclock: read/set the clock via /proc/time, which has NO
+##      provider in procfs (no "time" arm in generate()) AND procfs is
+##      read-only (no write_file).  So both cannot read or set the clock;
+##      ntpd's read falls back to unwrap_or(0) => treats time as 1970, and
+##      its writes are silently discarded (`let _ = write_system_time(...)`).
+##    * ntpd additionally truncates all corrections to whole seconds
+##      (offset_us / 1_000_000), so even with a working setter, every
+##      sub-second NTP correction (the normal case) becomes a no-op.
+##    * dig/rsync/scp/screen/tcpdump: their "elapsed time" calls hit
+##      SYS_IRQ_REGISTER(=30) instead of clock_monotonic.
+##
+##  RELATED KERNEL GAP (separate, also document/fix): sys_clock_settime and
+##  sys_clock_adjtime (handlers.rs ~3941/3966) do NOT check CAP_SYS_TIME —
+##  the capability gate lives only in the userspace posix wrapper
+##  (security_settime64).  A process issuing the raw syscall sets/steps the
+##  wall clock with no privilege check.  The cap check belongs in the kernel
+##  handler (defense in depth); userspace gating is advisory only.
+##
+##  PROPER FIX (architectural — pick one; recommend B short-term + A later):
+##   A. Implement the Linux syscall-translation layer (roadmap 5079) so
+##      os=linux std "just works" and the Linux numbers map to native
+##      handlers.  Large; fixes std + all Linux-numbered callers at once.
+##   B. Provide a shared `oursys` (or extend an existing shared userspace
+##      lib) crate with audited NATIVE clock wrappers (realtime/monotonic
+##      no-arg ns reads; settime/adjtime), and migrate every time tool to
+##      it.  Removes the per-tool hardcoded-number duplication that caused
+##      this.  Reversible; correct regardless of whether A lands later.
+##   Also: add CAP_SYS_TIME enforcement inside sys_clock_settime /
+##   sys_clock_adjtime.
+##
+##  STATUS (2026-05-30): documented here in full.  Began the per-tool
+##  correctness fix with `date` (the canonical user-facing tool and the one
+##  that mis-fires port-I/O syscalls): rewired it to the native ABI
+##  (SYS_CLOCK_REALTIME=14 no-arg ns read, SYS_CLOCK_SETTIME=15 single-ns
+##  set).  Remaining tools to migrate: at, nmap (40), stat (228),
+##  dig/rsync/scp/screen/tcpdump (30, monotonic), ntpd + hwclock (/proc/time
+##  -> native settime/adjtime + sub-second precision).  Track until all use
+##  the correct ABI (ideally via the shared crate from option B).
+##  TRIGGER for the shared-crate refactor: next dedicated userspace-ABI pass.
+
 "The dlltool issue blocks host tests on this toolchain (known limitation per CLAUDE.md). Let me confirm the code at least type-checks against the custom target, then cross-compile." what is this dlltool issue?
 
   ANSWER (2026-05-27, FIXED):

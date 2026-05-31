@@ -24,8 +24,11 @@
 //!
 //! # Syscall Interface
 //!
-//! Uses `clock_gettime` (syscall 40) and `clock_settime` (syscall 41) via
-//! inline x86_64 assembly.
+//! Reads the wall clock via the native `SYS_CLOCK_REALTIME` syscall and
+//! sets it via `SYS_CLOCK_SETTIME`, using inline x86_64 assembly.  The
+//! kernel has no combined POSIX `clock_gettime(clock_id, *ts)` syscall:
+//! each clock is its own no-argument syscall that returns a single
+//! nanoseconds value in `rax` (see kernel `syscall/number.rs`).
 
 use std::env;
 use std::fs;
@@ -35,20 +38,17 @@ use std::process;
 // Syscall constants
 // ============================================================================
 
-const SYS_CLOCK_GETTIME: u64 = 40;
-const SYS_CLOCK_SETTIME: u64 = 41;
+// Native OurOS clock syscall numbers (kernel syscall/number.rs is the ABI
+// source of truth).  These are NOT the Linux numbers, and they are NOT the
+// combined clock_gettime(clock_id, *ts) form: SYS_CLOCK_REALTIME takes no
+// arguments and returns wall-clock nanoseconds-since-epoch in rax;
+// SYS_CLOCK_SETTIME takes the target time in nanoseconds-since-epoch as its
+// only argument.
+const SYS_CLOCK_REALTIME: u64 = 14;
+const SYS_CLOCK_SETTIME: u64 = 15;
 const CLOCK_REALTIME: u64 = 0;
-
-// ============================================================================
-// Timespec
-// ============================================================================
-
-/// Kernel timespec structure for clock_gettime/clock_settime.
-#[repr(C)]
-struct Timespec {
-    tv_sec: i64,
-    tv_nsec: i64,
-}
+/// Nanoseconds per second, used to split/combine the kernel's ns clock value.
+const NSEC_PER_SEC: i64 = 1_000_000_000;
 
 // ============================================================================
 // Syscall wrappers
@@ -56,28 +56,28 @@ struct Timespec {
 
 /// Read the current time from the specified clock.
 ///
-/// Returns (seconds_since_epoch, nanoseconds) on success.
+/// Returns (seconds_since_epoch, nanoseconds) on success.  Only
+/// `CLOCK_REALTIME` is supported; the kernel exposes the wall clock through
+/// the no-argument `SYS_CLOCK_REALTIME` syscall, which returns
+/// nanoseconds-since-epoch in `rax`.
 fn clock_gettime(clock_id: u64) -> Result<(i64, i64), String> {
-    let mut ts = Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
+    if clock_id != CLOCK_REALTIME {
+        return Err(format!("unsupported clock id {clock_id}"));
+    }
+
     let ret: i64;
 
-    // SAFETY: We pass a valid pointer to a stack-allocated Timespec struct.
-    // The kernel writes tv_sec and tv_nsec into it. The struct is repr(C)
-    // with the expected layout. The pointer is valid for the duration of the
-    // syscall.
+    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and only reads the kernel
+    // clock, writing nothing to userspace.  rcx/r11 are clobbered by the
+    // SYSCALL instruction per the x86_64 ABI; we mark them as such.
     unsafe {
         core::arch::asm!(
             "syscall",
-            in("rax") SYS_CLOCK_GETTIME,
-            in("rdi") clock_id,
-            in("rsi") &mut ts as *mut Timespec,
+            in("rax") SYS_CLOCK_REALTIME,
             lateout("rax") ret,
             lateout("rcx") _,
             lateout("r11") _,
-            options(nostack),
+            options(nostack, nomem),
         );
     }
 
@@ -85,39 +85,48 @@ fn clock_gettime(clock_id: u64) -> Result<(i64, i64), String> {
         return Err(format!("clock_gettime failed with error {ret}"));
     }
 
-    Ok((ts.tv_sec, ts.tv_nsec))
+    // `ret` is nanoseconds since the Unix epoch (positive until year 2262).
+    Ok((ret / NSEC_PER_SEC, ret % NSEC_PER_SEC))
 }
 
 /// Set the specified clock to the given time.
 ///
-/// Requires root privileges.
+/// Requires `CAP_SYS_TIME`.  Only `CLOCK_REALTIME` is settable; the kernel's
+/// `SYS_CLOCK_SETTIME` takes the absolute target time in
+/// nanoseconds-since-epoch as its single argument.
 fn clock_settime(clock_id: u64, sec: i64, nsec: i64) -> Result<(), String> {
-    let ts = Timespec {
-        tv_sec: sec,
-        tv_nsec: nsec,
-    };
+    if clock_id != CLOCK_REALTIME {
+        return Err(format!("unsupported clock id {clock_id}"));
+    }
+    if sec < 0 || !(0..NSEC_PER_SEC).contains(&nsec) {
+        return Err(format!("invalid time {sec}.{nsec:09}"));
+    }
+
+    // Combine into nanoseconds-since-epoch.  `sec` is non-negative and within
+    // range for any realistic date, so the multiply/add cannot overflow i64
+    // (i64::MAX ns is year 2262); saturate defensively regardless.
+    let target_ns = sec
+        .saturating_mul(NSEC_PER_SEC)
+        .saturating_add(nsec) as u64;
     let ret: i64;
 
-    // SAFETY: We pass a valid pointer to a stack-allocated Timespec struct.
-    // The kernel reads tv_sec and tv_nsec from it. The struct is repr(C)
-    // with the expected layout. The pointer is valid for the duration of the
-    // syscall.
+    // SAFETY: SYS_CLOCK_SETTIME takes a single scalar argument (target ns) and
+    // touches no userspace memory.  rcx/r11 are clobbered by SYSCALL.
     unsafe {
         core::arch::asm!(
             "syscall",
             in("rax") SYS_CLOCK_SETTIME,
-            in("rdi") clock_id,
-            in("rsi") &ts as *const Timespec,
+            in("rdi") target_ns,
             lateout("rax") ret,
             lateout("rcx") _,
             lateout("r11") _,
-            options(nostack),
+            options(nostack, nomem),
         );
     }
 
     if ret < 0 {
         return Err(format!(
-            "clock_settime failed with error {ret} (are you root?)"
+            "clock_settime failed with error {ret} (need CAP_SYS_TIME?)"
         ));
     }
 

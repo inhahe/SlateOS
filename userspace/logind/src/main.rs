@@ -25,6 +25,16 @@
 //   loginctl hibernate [--force]
 
 #![cfg_attr(not(test), no_main)]
+// The daemon-side state machine below (the `Daemon` struct and its
+// session/seat/user/inhibitor/idle API, plus the supporting enums and
+// constants) is built ahead of the resident daemon event loop. Today only the
+// `loginctl` control personality is wired into `main`, and it operates on
+// freshly-read in-memory state rather than talking to a running daemon. The
+// full `Daemon` API is exercised by the test suite and is the integration point
+// for the future event loop, so these currently-unconstructed types and unused
+// methods/fields are intentional scaffolding, not dead code. See todo.txt
+// ("logind daemon event loop not yet implemented") for the tracking note.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;
@@ -69,51 +79,16 @@ const DEFAULT_IDLE_ACTION_DELAY: u64 = 30;
 /// Maximum session ID value before wrapping.
 const MAX_SESSION_ID: u64 = 999_999;
 
-// ============================================================================
-// Syscall numbers (OurOS ABI)
-// ============================================================================
-
-const SYS_CHANNEL_OPEN: u64 = 200;
-const SYS_CHANNEL_SEND: u64 = 201;
-const SYS_CHANNEL_RECV: u64 = 202;
-const SYS_CHANNEL_CLOSE: u64 = 203;
-const SYS_SHUTDOWN: u64 = 90;
-const SYS_REBOOT: u64 = 91;
-
-/// ACPI S3 - suspend to RAM.
-const ACPI_S3_SUSPEND: u64 = 3;
-/// ACPI S4 - hibernate (suspend to disk).
-const ACPI_S4_HIBERNATE: u64 = 4;
-
-// ============================================================================
-// Syscall interface
-// ============================================================================
-
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller ensures arguments are valid for the given syscall number.
-    // The `syscall` instruction is the defined kernel entry point on x86-64.
-    // rcx and r11 are clobbered per the hardware specification.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
-    -1
-}
+// NOTE: logind/loginctl currently performs no syscalls of its own. Power
+// actions (poweroff/reboot/suspend/hibernate) are *decided* here
+// (request_power_action enforces inhibitor + policy), but the actual state
+// change must be delegated to the service manager over IPC — OurOS has no
+// power-management syscall (see the power-management DESIGN GAP in todo.txt).
+// The previous scaffolding declared a syscall3 wrapper and SYS_SHUTDOWN=90 /
+// SYS_REBOOT=91 / SYS_CHANNEL_CLOSE=203 constants that were both unused and
+// wrong (90/91 are unassigned; channel close is 204), so it has been removed
+// rather than left as misleading dead code. When power delegation is wired up,
+// add a real IPC client mirroring userspace/powerctl's service-manager path.
 
 // ============================================================================
 // Session types and state
@@ -665,6 +640,59 @@ impl Default for DaemonConfig {
 // Daemon state
 // ============================================================================
 
+/// Parameters for [`Daemon::create_session`].
+///
+/// Session creation legitimately needs a dozen attributes (UID, user, type,
+/// class, seat, VT, TTY, remote info, service, desktop, leader PID). Grouping
+/// them into a struct with named fields keeps call sites self-documenting and
+/// prevents silent argument-swap bugs among the several `&str` fields. The
+/// [`Default`] impl lets callers specify only the attributes they care about.
+struct CreateSessionParams<'a> {
+    /// UID of the user owning the session.
+    uid: u32,
+    /// Username.
+    user: &'a str,
+    /// Session type (tty/x11/wayland).
+    session_type: SessionType,
+    /// Session class (user/greeter/lock-screen).
+    class: SessionClass,
+    /// Seat to attach to (empty for none).
+    seat_id: &'a str,
+    /// Virtual terminal number (0 for none).
+    vt_nr: u32,
+    /// TTY or display identifier.
+    tty: &'a str,
+    /// Whether the session is remote.
+    remote: bool,
+    /// Remote hostname (empty for local).
+    remote_host: &'a str,
+    /// Service that created the session (e.g. "sshd", "login").
+    service: &'a str,
+    /// Desktop environment identifier.
+    desktop: &'a str,
+    /// Leader PID of the session.
+    leader_pid: u32,
+}
+
+impl Default for CreateSessionParams<'_> {
+    fn default() -> Self {
+        Self {
+            uid: 0,
+            user: "",
+            session_type: SessionType::Unspecified,
+            class: SessionClass::User,
+            seat_id: "",
+            vt_nr: 0,
+            tty: "",
+            remote: false,
+            remote_host: "",
+            service: "",
+            desktop: "",
+            leader_pid: 0,
+        }
+    }
+}
+
 /// The complete state of the logind daemon.
 #[derive(Debug)]
 struct Daemon {
@@ -715,40 +743,27 @@ impl Daemon {
     }
 
     /// Create a new session and register it with the daemon.
-    fn create_session(
-        &mut self,
-        uid: u32,
-        user: &str,
-        session_type: SessionType,
-        class: SessionClass,
-        seat_id: &str,
-        vt_nr: u32,
-        tty: &str,
-        remote: bool,
-        remote_host: &str,
-        service: &str,
-        desktop: &str,
-        leader_pid: u32,
-    ) -> Result<String, &'static str> {
+    fn create_session(&mut self, params: CreateSessionParams) -> Result<String, &'static str> {
         if self.sessions.len() >= self.config.max_sessions {
             return Err("maximum session limit reached");
         }
 
         let id = self.allocate_session_id();
-        let mut session = Session::new(&id, uid, user);
-        session.session_type = session_type;
-        session.class = class;
-        session.vt_nr = vt_nr;
-        session.tty = tty.to_string();
-        session.remote = remote;
-        session.remote_host = remote_host.to_string();
-        session.service = service.to_string();
-        session.desktop = desktop.to_string();
-        session.leader_pid = leader_pid;
+        let mut session = Session::new(&id, params.uid, params.user);
+        session.session_type = params.session_type;
+        session.class = params.class;
+        session.vt_nr = params.vt_nr;
+        session.tty = params.tty.to_string();
+        session.remote = params.remote;
+        session.remote_host = params.remote_host.to_string();
+        session.service = params.service.to_string();
+        session.desktop = params.desktop.to_string();
+        session.leader_pid = params.leader_pid;
         session.state = SessionState::Active;
         session.scope = format!("session-{id}.scope");
 
         // Attach to seat if specified.
+        let seat_id = params.seat_id;
         if !seat_id.is_empty() {
             session.seat = seat_id.to_string();
             if let Some(seat) = self.seats.get_mut(seat_id) {
@@ -761,7 +776,10 @@ impl Daemon {
         }
 
         // Track user.
-        let user_entry = self.users.entry(uid).or_insert_with(|| User::new(uid, user));
+        let user_entry = self
+            .users
+            .entry(params.uid)
+            .or_insert_with(|| User::new(params.uid, params.user));
         user_entry.sessions.push(id.clone());
         user_entry.state = "active".to_string();
 
@@ -778,14 +796,13 @@ impl Daemon {
         let seat_id = session.seat.clone();
 
         // Remove from seat.
-        if !seat_id.is_empty() {
-            if let Some(seat) = self.seats.get_mut(&seat_id) {
+        if !seat_id.is_empty()
+            && let Some(seat) = self.seats.get_mut(&seat_id) {
                 seat.sessions.retain(|s| s != session_id);
                 if seat.active_session == session_id {
                     seat.active_session = seat.sessions.first().cloned().unwrap_or_default();
                 }
             }
-        }
 
         // Remove from user tracking.
         if let Some(user) = self.users.get_mut(&uid) {
@@ -838,13 +855,11 @@ impl Daemon {
         let seat = self.seats.get(&seat_id).ok_or("seat not found")?;
         let prev_active = seat.active_session.clone();
 
-        if !prev_active.is_empty() && prev_active != session_id {
-            if let Some(prev) = self.sessions.get_mut(&prev_active) {
-                if prev.state == SessionState::Active {
+        if !prev_active.is_empty() && prev_active != session_id
+            && let Some(prev) = self.sessions.get_mut(&prev_active)
+                && prev.state == SessionState::Active {
                     prev.state = SessionState::Background;
                 }
-            }
-        }
 
         // Activate the requested session.
         if let Some(sess) = self.sessions.get_mut(session_id) {
@@ -1352,7 +1367,7 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
 
     match cmd {
         LoginctlCommand::ListSessions => {
-            let _ = writeln!(out, "{:<8} {:<6} {:<16} {:<12} {}", "SESSION", "UID", "USER", "SEAT", "TTY");
+            let _ = writeln!(out, "{:<8} {:<6} {:<16} {:<12} TTY", "SESSION", "UID", "USER", "SEAT");
             let mut sessions: Vec<&Session> = daemon.sessions.values().collect();
             sessions.sort_by(|a, b| a.id.cmp(&b.id));
             for session in &sessions {
@@ -1362,7 +1377,7 @@ fn run_loginctl_command(daemon: &mut Daemon, cmd: &LoginctlCommand) -> i32 {
             0
         }
         LoginctlCommand::ListUsers => {
-            let _ = writeln!(out, "{:<8} {:<16} {}", "UID", "USER", "STATE");
+            let _ = writeln!(out, "{:<8} {:<16} STATE", "UID", "USER");
             let mut users: Vec<&User> = daemon.users.values().collect();
             users.sort_by_key(|u| u.uid);
             for user in &users {
@@ -1701,18 +1716,42 @@ mod tests {
 
     fn test_daemon() -> Daemon {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.create_session(
-            1000, "alice", SessionType::Wayland, SessionClass::User,
-            "seat0", 1, "/dev/tty1", false, "", "login", "gnome", 100,
-        ).unwrap();
-        d.create_session(
-            1001, "bob", SessionType::Tty, SessionClass::User,
-            "seat0", 2, "/dev/tty2", false, "", "login", "", 200,
-        ).unwrap();
-        d.create_session(
-            1000, "alice", SessionType::X11, SessionClass::User,
-            "", 0, ":1", false, "", "sshd", "kde", 300,
-        ).unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "alice",
+            session_type: SessionType::Wayland,
+            seat_id: "seat0",
+            vt_nr: 1,
+            tty: "/dev/tty1",
+            service: "login",
+            desktop: "gnome",
+            leader_pid: 100,
+            ..Default::default()
+        })
+        .unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1001,
+            user: "bob",
+            session_type: SessionType::Tty,
+            seat_id: "seat0",
+            vt_nr: 2,
+            tty: "/dev/tty2",
+            service: "login",
+            leader_pid: 200,
+            ..Default::default()
+        })
+        .unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "alice",
+            session_type: SessionType::X11,
+            tty: ":1",
+            service: "sshd",
+            desktop: "kde",
+            leader_pid: 300,
+            ..Default::default()
+        })
+        .unwrap();
         d
     }
 
@@ -1828,10 +1867,19 @@ mod tests {
     #[test]
     fn test_create_session_basic() {
         let mut d = Daemon::new(DaemonConfig::default());
-        let id = d.create_session(
-            1000, "alice", SessionType::Tty, SessionClass::User,
-            "seat0", 1, "/dev/tty1", false, "", "login", "", 42,
-        ).unwrap();
+        let id = d
+            .create_session(CreateSessionParams {
+                uid: 1000,
+                user: "alice",
+                session_type: SessionType::Tty,
+                seat_id: "seat0",
+                vt_nr: 1,
+                tty: "/dev/tty1",
+                service: "login",
+                leader_pid: 42,
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(id, "1");
         assert_eq!(d.sessions.len(), 1);
         let s = d.sessions.get("1").unwrap();
@@ -1845,10 +1893,18 @@ mod tests {
     #[test]
     fn test_create_session_assigns_seat() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.create_session(
-            1000, "alice", SessionType::Tty, SessionClass::User,
-            "seat0", 1, "/dev/tty1", false, "", "login", "", 100,
-        ).unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "alice",
+            session_type: SessionType::Tty,
+            seat_id: "seat0",
+            vt_nr: 1,
+            tty: "/dev/tty1",
+            service: "login",
+            leader_pid: 100,
+            ..Default::default()
+        })
+        .unwrap();
         let seat = d.seats.get("seat0").unwrap();
         assert!(seat.sessions.contains(&"1".to_string()));
         assert_eq!(seat.active_session, "1");
@@ -1857,10 +1913,14 @@ mod tests {
     #[test]
     fn test_create_session_tracks_user() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.create_session(
-            1000, "alice", SessionType::Tty, SessionClass::User,
-            "", 0, "", false, "", "", "", 100,
-        ).unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "alice",
+            session_type: SessionType::Tty,
+            leader_pid: 100,
+            ..Default::default()
+        })
+        .unwrap();
         let user = d.users.get(&1000).unwrap();
         assert_eq!(user.name, "alice");
         assert_eq!(user.sessions.len(), 1);
@@ -1869,8 +1929,22 @@ mod tests {
     #[test]
     fn test_create_multiple_sessions_same_user() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.create_session(1000, "alice", SessionType::Tty, SessionClass::User, "", 0, "", false, "", "", "", 100).unwrap();
-        d.create_session(1000, "alice", SessionType::X11, SessionClass::User, "", 0, "", false, "", "", "", 200).unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "alice",
+            session_type: SessionType::Tty,
+            leader_pid: 100,
+            ..Default::default()
+        })
+        .unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "alice",
+            session_type: SessionType::X11,
+            leader_pid: 200,
+            ..Default::default()
+        })
+        .unwrap();
         assert_eq!(d.sessions.len(), 2);
         let user = d.users.get(&1000).unwrap();
         assert_eq!(user.sessions.len(), 2);
@@ -1881,9 +1955,29 @@ mod tests {
         let mut config = DaemonConfig::default();
         config.max_sessions = 2;
         let mut d = Daemon::new(config);
-        d.create_session(1000, "a", SessionType::Tty, SessionClass::User, "", 0, "", false, "", "", "", 1).unwrap();
-        d.create_session(1001, "b", SessionType::Tty, SessionClass::User, "", 0, "", false, "", "", "", 2).unwrap();
-        let err = d.create_session(1002, "c", SessionType::Tty, SessionClass::User, "", 0, "", false, "", "", "", 3);
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "a",
+            session_type: SessionType::Tty,
+            leader_pid: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1001,
+            user: "b",
+            session_type: SessionType::Tty,
+            leader_pid: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        let err = d.create_session(CreateSessionParams {
+            uid: 1002,
+            user: "c",
+            session_type: SessionType::Tty,
+            leader_pid: 3,
+            ..Default::default()
+        });
         assert!(err.is_err());
     }
 
@@ -1911,10 +2005,18 @@ mod tests {
     #[test]
     fn test_session_remote() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.create_session(
-            1000, "alice", SessionType::Tty, SessionClass::User,
-            "", 0, "pts/0", true, "10.0.0.5", "sshd", "", 100,
-        ).unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "alice",
+            session_type: SessionType::Tty,
+            tty: "pts/0",
+            remote: true,
+            remote_host: "10.0.0.5",
+            service: "sshd",
+            leader_pid: 100,
+            ..Default::default()
+        })
+        .unwrap();
         let s = d.sessions.get("1").unwrap();
         assert!(s.remote);
         assert_eq!(s.remote_host, "10.0.0.5");
@@ -1941,7 +2043,14 @@ mod tests {
     #[test]
     fn test_terminate_session_updates_user() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.create_session(1000, "alice", SessionType::Tty, SessionClass::User, "", 0, "", false, "", "", "", 100).unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "alice",
+            session_type: SessionType::Tty,
+            leader_pid: 100,
+            ..Default::default()
+        })
+        .unwrap();
         d.terminate_session("1").unwrap();
         let user = d.users.get(&1000).unwrap();
         assert_eq!(user.state, "closing");
@@ -2208,10 +2317,17 @@ mod tests {
     fn test_remove_seat_detaches_sessions() {
         let mut d = Daemon::new(DaemonConfig::default());
         d.create_seat("seat1").unwrap();
-        d.create_session(
-            1000, "alice", SessionType::Tty, SessionClass::User,
-            "seat1", 1, "/dev/tty1", false, "", "", "", 100,
-        ).unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "alice",
+            session_type: SessionType::Tty,
+            seat_id: "seat1",
+            vt_nr: 1,
+            tty: "/dev/tty1",
+            leader_pid: 100,
+            ..Default::default()
+        })
+        .unwrap();
         d.remove_seat("seat1").unwrap();
         let s = d.sessions.get("1").unwrap();
         assert!(s.seat.is_empty());
@@ -2560,7 +2676,14 @@ HandleSuspendKey=ignore
     #[test]
     fn test_user_linger() {
         let mut d = Daemon::new(DaemonConfig::default());
-        d.create_session(1000, "alice", SessionType::Tty, SessionClass::User, "", 0, "", false, "", "", "", 100).unwrap();
+        d.create_session(CreateSessionParams {
+            uid: 1000,
+            user: "alice",
+            session_type: SessionType::Tty,
+            leader_pid: 100,
+            ..Default::default()
+        })
+        .unwrap();
         d.users.get_mut(&1000).unwrap().linger = true;
         d.terminate_session("1").unwrap();
         let user = d.users.get(&1000).unwrap();

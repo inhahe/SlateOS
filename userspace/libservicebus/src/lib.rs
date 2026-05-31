@@ -18,11 +18,12 @@
 //!
 //! # Examples
 //!
-//! ```rust
+//! ```no_run
 //! use libservicebus::{Connection, Message};
 //!
+//! # fn main() -> Result<(), libservicebus::BusError> {
 //! // Connect to the display compositor
-//! let conn = Connection::connect("display.compositor")?;
+//! let mut conn = Connection::connect("display.compositor")?;
 //!
 //! // Send a method call
 //! let msg = Message::method_call("CreateWindow")
@@ -32,26 +33,30 @@
 //! // Wait for reply
 //! let reply = conn.recv()?;
 //! assert!(reply.is_reply());
+//! # Ok(())
+//! # }
 //! ```
 //!
 //! # Event Loop
 //!
-//! ```rust
-//! use libservicebus::{EventLoop, Connection, EventHandler};
+//! ```no_run
+//! use libservicebus::{EventLoop, Connection};
 //!
+//! # fn main() -> Result<(), libservicebus::BusError> {
 //! let mut evloop = EventLoop::new()?;
 //! let conn = Connection::connect("net.dns")?;
-//! evloop.register(&conn, 1)?;  // user_data = 1
+//! evloop.register_connection(&conn, 1)?;  // user_data = 1
 //!
 //! loop {
 //!     let events = evloop.wait()?;
-//!     for event in &events {
+//!     for event in events {
 //!         match event.user_data {
 //!             1 => { /* handle DNS reply */ }
 //!             _ => {}
 //!         }
 //!     }
 //! }
+//! # }
 //! ```
 
 use std::fmt;

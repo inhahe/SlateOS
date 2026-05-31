@@ -1,3 +1,13 @@
+## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 6 — stale DOCTESTS.
+##   libservicebus's module-level doc examples didn't compile (2 failing doctests): they
+##   imported a non-existent `EventHandler`, called `EventLoop::register` (real method is
+##   `register_connection`), iterated `&events` where `wait()` already returns `&[Event]`
+##   (so `&events` was `&&[Event]`, not an iterator), used `?` in a `fn main()` returning `()`,
+##   and bound `conn` immutably though `send`/`recv` take `&mut self`. Rewrote both examples to
+##   the real API, marked them `no_run` (they issue real IPC syscalls), and wrapped each in a
+##   hidden `fn main() -> Result<(), libservicebus::BusError>` so `?` is valid. Verified the
+##   doc + unit tests pass.
+
 ## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 5 — TEST HANG
 ##   (infinite block, not a failed assertion). Found because the full substantial-crate
 ##   `cargo test` run wedged on `vi`'s test binary ("running for over 60 seconds" for every

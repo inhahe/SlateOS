@@ -149,12 +149,99 @@
 ##  nmap (FIXED 2026-05-30) — had SYS_WRITE=1 (=SYS_EXIT, terminated the
 ##    process on first output!) and SYS_EXIT=60 (=SYS_SYSCTL_GET then loop{}
 ##    hang); migrated to std::io / std::fs::File / std::process::exit.
-##  REMAINING AUDIT (not yet done): grep the tree for tools that hand-roll
-##  `core::arch::asm!("syscall")` with hardcoded numbers and migrate each to
-##  std where it links std.  ~50 userspace crates use inline-asm syscalls;
-##  many likely have wrong Linux numbers like stat/nmap did.  This is the
-##  next dedicated userspace-ABI pass.  TRIGGER: ongoing — work through them
-##  as encountered or in a focused sweep.
+##  ===================================================================
+##  USERSPACE-ABI AUDIT (done 2026-05-30) — 55 tools hand-roll inline-asm
+##  syscalls; cross-checked every `const SYS_* = N` against the authoritative
+##  kernel/src/syscall/number.rs.  Authoritative reference numbers used:
+##    EXIT=1 TASK_ID=2 CLOCK_MONOTONIC=10 SLEEP=11 CLOCK_REALTIME=14
+##    CLOCK_SETTIME=15 CLOCK_ADJTIME=16 IRQ_REGISTER=30 IRQ_WAIT=31
+##    DMA_DETACH=49 SYSCTL_GET=60 SYSCTL_SET=61 CONSOLE_WRITE=100
+##    CONSOLE_READ_CHAR=101 CHANNEL_CREATE=200 CHANNEL_SEND=201
+##    CHANNEL_RECV=202 CHANNEL_TRY_RECV=203 CHANNEL_CLOSE=204
+##    PROCESS_SPAWN=500 PROCESS_ID=502 PROCESS_KILL=506 THREAD_SUSPEND=513
+##    THREAD_RESUME=514 FS_READ_FILE=600 FS_WRITE_FILE=601 FS_DELETE=602
+##    FS_STAT=606 FS_STATVFS=608 FS_OPEN=610 FS_CLOSE=611 FS_READ=612
+##    FS_WRITE=613 FS_RENAME=616 FS_SET_OWNER=630 FS_SET_PERMS=631
+##    FS_SET_TIMES=632 FS_SYMLINK=637 FS_READLINK=638 FS_LSTAT=639
+##    FS_SEEK_DATA=650 FS_SEEK_HOLE=651 TCP_CONNECT=800 TCP_SEND=801
+##    TCP_RECV=802 TCP_CLOSE=803 TCP_BIND=804 TCP_ACCEPT=805
+##    TCP_CLOSE_LISTENER=806 TCP_PEER_ADDR=808 UDP_BIND=810 UDP_SEND=811
+##    UDP_RECV=812 UDP_CLOSE=813 DNS_RESOLVE=820 DNS_REVERSE_RESOLVE=821
+##    ICMP_PING=830 ICMP_PING_WAIT=831 NET_IF_INFO=842 ARP_TABLE=843
+##    TCP_POLL_STATUS=845 UDP_RX_READY=847 TCP_SET_NODELAY=850 TCP_SHUTDOWN=855
+##  Note: there is NO SYS_NET_IOCTL, NO SYS_FS_IOCTL/FORMAT/VERIFY/REPAIR/
+##  STATFS, NO SYS_MOUNT/UMOUNT, NO SYS_CHOWN/CHMOD/CHROOT/CHDIR/IOCTL,
+##  NO SYS_DRM_IOCTL, NO Linux-style READ/WRITE/OPEN/CLOSE/STAT/MKDIR/etc.
+##  in the native ABI.  Tools assuming these are simply broken.
+##
+##  VERDICT PER TOOL:
+##   OK (numbers correct, no change needed):
+##     ssh, nc, wget, ftpd, inetd, sshd, ping, traceroute, kill, pgrep,
+##     htop, ntpd, hwclock, at, date, rsync, scp, tcpdump, mount-of-channels
+##     tools using only channel/service/process numbers that match.
+##   CATASTROPHIC (use 1=EXIT as WRITE → process dies on first output, and/or
+##   0=YIELD as READ, 60=SYSCTL_GET as EXIT, 4=? as STAT) — same class as the
+##   nmap bug; fix by migrating I/O+exit to std (and correct any remaining
+##   network numbers):
+##     arp  (READ=0 WRITE=1 OPEN=2 CLOSE=3 EXIT=60; ARP_ADD=840=TCP_LIST,
+##           ARP_DEL=841 ARP_PROBE=842=NET_IF_INFO IFMAC=843=ARP_TABLE — the
+##           arp control syscalls it wants don't exist; only ARP_TABLE=843
+##           (read) exists)
+##     jq   (READ=0 WRITE=1 OPEN=2 CLOSE=3 EXIT=60) — pure std rewrite
+##     zip  (READ=0 WRITE=1 OPEN=2 CLOSE=3 STAT=4 LSEEK=8 MKDIR=83 GETDENTS=78
+##           EXIT=60) — pure std rewrite
+##     ssh-keygen (READ=0 WRITE=1 OPEN=2 CLOSE=3 EXIT=60 MKDIR=83
+##           GETRANDOM=318 STAT=4) — std for I/O; getrandom via std or posix
+##     ftp  (READ=0 WRITE=1 OPEN=2 CLOSE=3 STAT=4 GETCWD=79 CHDIR=80
+##           GETDENTS=78; TCP 800-806 are CORRECT, DNS=820 correct) — migrate
+##           local file/console I/O to std, keep correct TCP numbers
+##     sftp (READ=0 WRITE=1 OPEN=2 CLOSE=3 STAT=4 MKDIR=83 UNLINK=87
+##           GETDENTS=78 GETCWD=79 CHDIR=80 RENAME=82 CHMOD=90; TCP_SEND=802
+##           RECV=803 CLOSE=804 all OFF BY ONE) — std local I/O + fix TCP
+##           numbers (SEND=801 RECV=802 CLOSE=803)
+##     telnet (READ=0 WRITE=1; TCP_SEND=802 RECV=803 CLOSE=804 off-by-one;
+##           IOCTL=16=CLOCK_ADJTIME) — std stdio + fix TCP + drop/replace ioctl
+##     screen (CONSOLE_WRITE=0=YIELD CONSOLE_READ_CHAR=1=EXIT) — should be
+##           100/101, or migrate to std stdio; CLOCK_MONOTONIC=10/SPAWN=500 ok
+##     stty (IOCTL=16=CLOCK_ADJTIME CLOSE=3) — needs a real termios path;
+##           no SYS_IOCTL exists.  Investigate what terminal-attr syscall (if
+##           any) the kernel exposes; may need a new syscall.
+##   WRONG NETWORK NUMBERS (TCP send/recv/close off by one: they use
+##   SEND=802 RECV=803 CLOSE=804 instead of 801/802/803):
+##     curl, dig (dig ALSO has UDP_BIND=820=DNS_RESOLVE SEND=821 RECV=822 —
+##           should be 810/811/812), whois — one-line const fixes each.
+##   NO SUCH SYSCALL — these assume syscalls that don't exist; needs design
+##   decision on what the real net/fs-admin ABI is before they can work:
+##     dhcpcd fw ifconfig ip nft route  (all NET_IOCTL=810 = UDP_BIND — there
+##       is no net-ioctl syscall; net config likely must go via NET_IF_INFO=842
+##       / ARP_TABLE=843 / a new syscall set — DESIGN GAP)
+##     diskutil (FS_IOCTL=650=FS_SEEK_DATA FORMAT=651=FS_SEEK_HOLE VERIFY/
+##       REPAIR/TRIM/STATFS 652-655 unassigned)
+##     df    (FS_STAT=650=FS_SEEK_DATA — should be FS_STATVFS=608)
+##     fsck  (FS_VERIFY=652 FS_REPAIR=653 unassigned — no fsck syscall)
+##     mkfs  (FS_FORMAT=651=FS_SEEK_HOLE — no format syscall)
+##     mount (MOUNT=620=FS_TRASH_RESTORE UMOUNT=621=FS_TRASH_EMPTY — no
+##       mount/umount syscall in ABI)
+##     chown (CHOWN=30=IRQ_REGISTER CHMOD=31=IRQ_WAIT — should be
+##       FS_SET_OWNER=630 / FS_SET_PERMS=631)
+##     chroot (CHROOT=61=SYSCTL_SET CHDIR=49=DMA_DETACH SETUID=105 SETGID=106
+##       SETGROUPS=116 — none exist as named; needs proper process-cred ABI)
+##     monctl (DRM_IOCTL=850=TCP_SET_NODELAY — no DRM ioctl syscall)
+##   MINOR WRONG (channel close off by one):
+##     logind, powerctl, service (CHANNEL_CLOSE=203=CHANNEL_TRY_RECV — should
+##       be 204; also CHANNEL_OPEN=200 maps to CHANNEL_CREATE which is fine).
+##       logind/powerctl also use SHUTDOWN=90/REBOOT=91 — verify those exist.
+##   UNVERIFIED: lsmod (INIT_MODULE=150 DELETE_MODULE=151 — check module ABI).
+##
+##  FIX ORDER (this pass): catastrophic std-capable tools first (jq, zip,
+##  ssh-keygen — pure std rewrites), then off-by-one network const fixes
+##  (curl, dig, whois), then the mixed local-I/O+network tools (ftp, sftp,
+##  telnet, screen).  The "NO SUCH SYSCALL" group is a DESIGN GAP — those
+##  tools need the kernel to actually expose mount/net-ioctl/fs-admin/chown
+##  syscalls (or a posix-layer route) before they can be fixed; documented
+##  here, deferred until that ABI exists.  TRIGGER for the deferred group:
+##  when the corresponding kernel syscalls land (check roadmap for
+##  net-config / mount / fs-admin syscall tasks).
 
 "The dlltool issue blocks host tests on this toolchain (known limitation per CLAUDE.md). Let me confirm the code at least type-checks against the custom target, then cross-compile." what is this dlltool issue?
 

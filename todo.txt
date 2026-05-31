@@ -1,3 +1,13 @@
+## BUG (noticed+FIXED 2026-05-31): apps/imageviewer — PRODUCTION navigation bug +
+##   inefficiency. load_current_entry (called by next/prev/first/last_image and the
+##   slideshow tick) delegated to open_file, which RE-SCANS and re-sorts the on-disk
+##   directory and recomputes current_index by searching for the path every time.
+##   So every navigation step did a full O(n log n) directory re-read, and if the
+##   listing was set in memory (or the dir changed) the index reset to 0. Split out a
+##   display_image(path) helper that only loads/shows the image; open_file calls it
+##   then (re)builds the listing, while load_current_entry calls display_image alone.
+##   imageviewer 94/94 tests pass, clippy clean (own code), ouros build OK.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/filesearch — SEVERE PRODUCTION regex bug. The
 ##   regex engine's parse_regex_atom returned a bare `fn(u8) -> bool`, which cannot
 ##   capture a specific literal byte, so every literal character was matched as a

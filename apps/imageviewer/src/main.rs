@@ -14,9 +14,9 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, KeyEvent, Key, Modifiers, MouseEvent, MouseEventKind, MouseButton};
+use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 #[allow(unused_imports)]
-use guitk::render::{RenderTree, RenderCommand, FontWeightHint};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
@@ -238,7 +238,12 @@ impl ImageData {
                 }
             }
         }
-        Self { width, height, pixels, image_id }
+        Self {
+            width,
+            height,
+            pixels,
+            image_id,
+        }
     }
 }
 
@@ -558,6 +563,28 @@ impl ViewerState {
 
     /// Open an image file by path.
     pub fn open_file(&mut self, path: &Path) {
+        self.display_image(path);
+
+        // Update directory listing. This is only done when opening a file
+        // directly (e.g. from the file picker), NOT when navigating within an
+        // already-loaded directory — see load_current_entry — so that next/prev
+        // don't re-scan and re-sort the directory on every step.
+        if let Some(parent) = path.parent() {
+            self.load_directory(parent);
+            // Find our index in the listing
+            self.current_index = self
+                .entries
+                .iter()
+                .position(|e| e.path == path)
+                .unwrap_or(0);
+        }
+    }
+
+    /// Load and display the image at `path` without touching the directory
+    /// listing or `current_index`. Used both by `open_file` (which then
+    /// (re)builds the listing) and by `load_current_entry` (which navigates
+    /// within the existing listing).
+    fn display_image(&mut self, path: &Path) {
         let filename = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -565,9 +592,7 @@ impl ViewerState {
 
         // Populate basic info from path
         self.image_info.filename = filename;
-        self.image_info.file_size = std::fs::metadata(path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        self.image_info.file_size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         self.image_info.date_modified = std::fs::metadata(path)
             .ok()
             .and_then(|m| m.modified().ok())
@@ -593,17 +618,6 @@ impl ViewerState {
 
         // Reset transform for new image
         self.transform.reset();
-
-        // Update directory listing
-        if let Some(parent) = path.parent() {
-            self.load_directory(parent);
-            // Find our index in the listing
-            self.current_index = self
-                .entries
-                .iter()
-                .position(|e| e.path == path)
-                .unwrap_or(0);
-        }
     }
 
     /// Load the image file listing for a directory.
@@ -687,7 +701,9 @@ impl ViewerState {
     fn load_current_entry(&mut self) {
         if let Some(entry) = self.entries.get(self.current_index) {
             let path = entry.path.clone();
-            self.open_file(&path);
+            // Display only — do NOT reload the directory listing (that would
+            // wipe the listing and reset current_index on every navigation).
+            self.display_image(&path);
         }
     }
 
@@ -819,36 +835,90 @@ impl ViewerState {
 
         match event.key {
             // Navigation
-            Key::Left if !ctrl => { self.execute_action(ViewerAction::PrevImage); true }
-            Key::Right if !ctrl => { self.execute_action(ViewerAction::NextImage); true }
-            Key::Home => { self.execute_action(ViewerAction::FirstImage); true }
-            Key::End => { self.execute_action(ViewerAction::LastImage); true }
+            Key::Left if !ctrl => {
+                self.execute_action(ViewerAction::PrevImage);
+                true
+            }
+            Key::Right if !ctrl => {
+                self.execute_action(ViewerAction::NextImage);
+                true
+            }
+            Key::Home => {
+                self.execute_action(ViewerAction::FirstImage);
+                true
+            }
+            Key::End => {
+                self.execute_action(ViewerAction::LastImage);
+                true
+            }
 
             // Zoom
-            Key::Equals if ctrl => { self.execute_action(ViewerAction::ZoomIn); true }
-            Key::Minus if ctrl => { self.execute_action(ViewerAction::ZoomOut); true }
-            Key::Num0 if ctrl => { self.execute_action(ViewerAction::FitToWindow); true }
-            Key::Num1 if ctrl => { self.execute_action(ViewerAction::ActualSize); true }
+            Key::Equals if ctrl => {
+                self.execute_action(ViewerAction::ZoomIn);
+                true
+            }
+            Key::Minus if ctrl => {
+                self.execute_action(ViewerAction::ZoomOut);
+                true
+            }
+            Key::Num0 if ctrl => {
+                self.execute_action(ViewerAction::FitToWindow);
+                true
+            }
+            Key::Num1 if ctrl => {
+                self.execute_action(ViewerAction::ActualSize);
+                true
+            }
 
             // Rotation / flip
-            Key::R if ctrl && !shift => { self.execute_action(ViewerAction::RotateCw); true }
-            Key::R if ctrl && shift => { self.execute_action(ViewerAction::RotateCcw); true }
-            Key::H if ctrl => { self.execute_action(ViewerAction::FlipHorizontal); true }
-            Key::V if ctrl => { self.execute_action(ViewerAction::FlipVertical); true }
+            Key::R if ctrl && !shift => {
+                self.execute_action(ViewerAction::RotateCw);
+                true
+            }
+            Key::R if ctrl && shift => {
+                self.execute_action(ViewerAction::RotateCcw);
+                true
+            }
+            Key::H if ctrl => {
+                self.execute_action(ViewerAction::FlipHorizontal);
+                true
+            }
+            Key::V if ctrl => {
+                self.execute_action(ViewerAction::FlipVertical);
+                true
+            }
 
             // Panels
-            Key::I if !ctrl => { self.execute_action(ViewerAction::ToggleInfo); true }
-            Key::T if !ctrl => { self.execute_action(ViewerAction::ToggleThumbnails); true }
+            Key::I if !ctrl => {
+                self.execute_action(ViewerAction::ToggleInfo);
+                true
+            }
+            Key::T if !ctrl => {
+                self.execute_action(ViewerAction::ToggleThumbnails);
+                true
+            }
 
             // Slideshow
-            Key::F5 => { self.execute_action(ViewerAction::ToggleSlideshow); true }
-            Key::Space => { self.execute_action(ViewerAction::PauseSlideshow); true }
+            Key::F5 => {
+                self.execute_action(ViewerAction::ToggleSlideshow);
+                true
+            }
+            Key::Space => {
+                self.execute_action(ViewerAction::PauseSlideshow);
+                true
+            }
 
             // Fullscreen
-            Key::F11 => { self.execute_action(ViewerAction::ToggleFullscreen); true }
+            Key::F11 => {
+                self.execute_action(ViewerAction::ToggleFullscreen);
+                true
+            }
 
             // Delete
-            Key::Delete => { self.execute_action(ViewerAction::DeleteImage); true }
+            Key::Delete => {
+                self.execute_action(ViewerAction::DeleteImage);
+                true
+            }
 
             // Escape exits fullscreen or slideshow
             Key::Escape => {
@@ -983,12 +1053,25 @@ pub fn render(state: &ViewerState) -> RenderTree {
 
     // Clip to image area and render image
     tree.clip(0.0, content_y, image_area_width, image_area_height);
-    render_image(state, &mut tree, 0.0, content_y, image_area_width, image_area_height);
+    render_image(
+        state,
+        &mut tree,
+        0.0,
+        content_y,
+        image_area_width,
+        image_area_height,
+    );
     tree.unclip();
 
     // Info panel
     if state.show_info_panel {
-        render_info_panel(state, &mut tree, image_area_width, content_y, image_area_height);
+        render_info_panel(
+            state,
+            &mut tree,
+            image_area_width,
+            content_y,
+            image_area_height,
+        );
     }
 
     // Thumbnail strip
@@ -1009,7 +1092,13 @@ fn render_toolbar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
     // Toolbar background
     tree.fill_rect(0.0, y, state.window_width, TOOLBAR_HEIGHT, TOOLBAR_BG);
     // Bottom border
-    tree.fill_rect(0.0, y + TOOLBAR_HEIGHT - 1.0, state.window_width, 1.0, BORDER_COLOR);
+    tree.fill_rect(
+        0.0,
+        y + TOOLBAR_HEIGHT - 1.0,
+        state.window_width,
+        1.0,
+        BORDER_COLOR,
+    );
 
     let buttons = toolbar_buttons();
     let button_y = y + 6.0;
@@ -1143,13 +1232,7 @@ fn render_image(
 }
 
 /// Render the image information panel on the right side.
-fn render_info_panel(
-    state: &ViewerState,
-    tree: &mut RenderTree,
-    x: f32,
-    y: f32,
-    height: f32,
-) {
+fn render_info_panel(state: &ViewerState, tree: &mut RenderTree, x: f32, y: f32, height: f32) {
     // Panel background
     tree.fill_rect(x, y, INFO_PANEL_WIDTH, height, INFO_PANEL_BG);
     // Left border
@@ -1192,7 +1275,9 @@ fn render_info_panel(
         ("Dimensions:", info.dimensions_display()),
         (
             "Format:",
-            info.format.map(|f| f.name().to_string()).unwrap_or_else(|| String::from("—")),
+            info.format
+                .map(|f| f.name().to_string())
+                .unwrap_or_else(|| String::from("—")),
         ),
         (
             "Depth:",
@@ -1208,7 +1293,9 @@ fn render_info_panel(
         ),
         (
             "Modified:",
-            info.date_modified.clone().unwrap_or_else(|| String::from("—")),
+            info.date_modified
+                .clone()
+                .unwrap_or_else(|| String::from("—")),
         ),
     ];
 
@@ -1323,7 +1410,10 @@ fn render_info_panel(
     let zoom_pct = (state.transform.zoom * 100.0) as u32;
     let view_fields: Vec<(&str, String)> = vec![
         ("Zoom:", format!("{}%", zoom_pct)),
-        ("Rotation:", format!("{}deg", state.transform.rotation.degrees())),
+        (
+            "Rotation:",
+            format!("{}deg", state.transform.rotation.degrees()),
+        ),
         (
             "Flip:",
             match (state.transform.flip_h, state.transform.flip_v) {
@@ -1361,7 +1451,13 @@ fn render_info_panel(
 /// Render the thumbnail strip at the bottom.
 fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
     // Background
-    tree.fill_rect(0.0, y, state.window_width, THUMBNAIL_STRIP_HEIGHT, TOOLBAR_BG);
+    tree.fill_rect(
+        0.0,
+        y,
+        state.window_width,
+        THUMBNAIL_STRIP_HEIGHT,
+        TOOLBAR_BG,
+    );
     // Top border
     tree.fill_rect(0.0, y, state.window_width, 1.0, BORDER_COLOR);
 
@@ -1385,7 +1481,11 @@ fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
         let is_current = abs_idx == state.current_index;
 
         // Thumbnail border (highlight current)
-        let border_color = if is_current { ACCENT_COLOR } else { BORDER_COLOR };
+        let border_color = if is_current {
+            ACCENT_COLOR
+        } else {
+            BORDER_COLOR
+        };
         tree.push(RenderCommand::StrokeRect {
             x: thumb_x,
             y: thumb_y,
@@ -1418,7 +1518,11 @@ fn render_thumbnail_strip(state: &ViewerState, tree: &mut RenderTree, y: f32) {
                 x: thumb_x + 2.0,
                 y: thumb_y + thumb_size - 12.0,
                 text: display_name,
-                color: if is_current { TEXT_PRIMARY } else { TEXT_SECONDARY },
+                color: if is_current {
+                    TEXT_PRIMARY
+                } else {
+                    TEXT_SECONDARY
+                },
                 font_size: 9.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(thumb_size - 4.0),
@@ -1475,11 +1579,7 @@ fn render_status_bar(state: &ViewerState, tree: &mut RenderTree, y: f32) {
 
     // Image N of M
     if !state.entries.is_empty() {
-        let pos_text = format!(
-            "{} / {}",
-            state.current_index + 1,
-            state.entries.len()
-        );
+        let pos_text = format!("{} / {}", state.current_index + 1, state.entries.len());
         tree.push(RenderCommand::Text {
             x: state.window_width - 80.0,
             y: text_y,
@@ -1504,13 +1604,33 @@ fn toolbar_buttons() -> Vec<ToolbarButton> {
         (">|", "Next (Right)", ViewerAction::NextImage, 28.0),
         ("+", "Zoom in (Ctrl++)", ViewerAction::ZoomIn, 24.0),
         ("-", "Zoom out (Ctrl+-)", ViewerAction::ZoomOut, 24.0),
-        ("Fit", "Fit to window (Ctrl+0)", ViewerAction::FitToWindow, 32.0),
-        ("1:1", "Actual size (Ctrl+1)", ViewerAction::ActualSize, 32.0),
+        (
+            "Fit",
+            "Fit to window (Ctrl+0)",
+            ViewerAction::FitToWindow,
+            32.0,
+        ),
+        (
+            "1:1",
+            "Actual size (Ctrl+1)",
+            ViewerAction::ActualSize,
+            32.0,
+        ),
         ("CW", "Rotate CW (Ctrl+R)", ViewerAction::RotateCw, 30.0),
-        ("CCW", "Rotate CCW (Ctrl+Shift+R)", ViewerAction::RotateCcw, 36.0),
+        (
+            "CCW",
+            "Rotate CCW (Ctrl+Shift+R)",
+            ViewerAction::RotateCcw,
+            36.0,
+        ),
         ("H", "Flip H (Ctrl+H)", ViewerAction::FlipHorizontal, 24.0),
         ("V", "Flip V (Ctrl+V)", ViewerAction::FlipVertical, 24.0),
-        ("Show", "Slideshow (F5)", ViewerAction::ToggleSlideshow, 42.0),
+        (
+            "Show",
+            "Slideshow (F5)",
+            ViewerAction::ToggleSlideshow,
+            42.0,
+        ),
         ("Info", "Info panel (I)", ViewerAction::ToggleInfo, 36.0),
     ];
 
@@ -1696,7 +1816,10 @@ mod tests {
         assert_eq!(r.rotate_cw(), Rotation::Cw90);
         assert_eq!(r.rotate_cw().rotate_cw(), Rotation::Cw180);
         assert_eq!(r.rotate_cw().rotate_cw().rotate_cw(), Rotation::Cw270);
-        assert_eq!(r.rotate_cw().rotate_cw().rotate_cw().rotate_cw(), Rotation::None);
+        assert_eq!(
+            r.rotate_cw().rotate_cw().rotate_cw().rotate_cw(),
+            Rotation::None
+        );
     }
 
     #[test]
@@ -1755,7 +1878,10 @@ mod tests {
         assert_eq!(i.next(), SlideshowInterval::FiveSeconds);
         assert_eq!(i.next().next(), SlideshowInterval::TenSeconds);
         assert_eq!(i.next().next().next(), SlideshowInterval::ThirtySeconds);
-        assert_eq!(i.next().next().next().next(), SlideshowInterval::ThreeSeconds);
+        assert_eq!(
+            i.next().next().next().next(),
+            SlideshowInterval::ThreeSeconds
+        );
     }
 
     #[test]
@@ -1830,7 +1956,10 @@ mod tests {
         let tree = render(&state);
         assert!(!tree.is_empty());
         // Should contain an Image command
-        let has_image = tree.commands.iter().any(|cmd| matches!(cmd, RenderCommand::Image { .. }));
+        let has_image = tree
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Image { .. }));
         assert!(has_image);
     }
 
@@ -1838,9 +1967,21 @@ mod tests {
     fn test_handle_tick_advances_slideshow() {
         let mut state = ViewerState::new(800.0, 600.0);
         state.entries = vec![
-            DirectoryEntry { path: PathBuf::from("/a.png"), filename: String::from("a.png"), file_size: 100 },
-            DirectoryEntry { path: PathBuf::from("/b.png"), filename: String::from("b.png"), file_size: 200 },
-            DirectoryEntry { path: PathBuf::from("/c.png"), filename: String::from("c.png"), file_size: 300 },
+            DirectoryEntry {
+                path: PathBuf::from("/a.png"),
+                filename: String::from("a.png"),
+                file_size: 100,
+            },
+            DirectoryEntry {
+                path: PathBuf::from("/b.png"),
+                filename: String::from("b.png"),
+                file_size: 200,
+            },
+            DirectoryEntry {
+                path: PathBuf::from("/c.png"),
+                filename: String::from("c.png"),
+                file_size: 300,
+            },
         ];
         state.current_index = 0;
         state.slideshow.active = true;
@@ -1859,8 +2000,16 @@ mod tests {
     fn test_handle_tick_paused() {
         let mut state = ViewerState::new(800.0, 600.0);
         state.entries = vec![
-            DirectoryEntry { path: PathBuf::from("/a.png"), filename: String::from("a.png"), file_size: 100 },
-            DirectoryEntry { path: PathBuf::from("/b.png"), filename: String::from("b.png"), file_size: 200 },
+            DirectoryEntry {
+                path: PathBuf::from("/a.png"),
+                filename: String::from("a.png"),
+                file_size: 100,
+            },
+            DirectoryEntry {
+                path: PathBuf::from("/b.png"),
+                filename: String::from("b.png"),
+                file_size: 200,
+            },
         ];
         state.current_index = 0;
         state.slideshow.active = true;
@@ -1983,9 +2132,21 @@ mod tests {
     fn test_navigation_wraps() {
         let mut state = ViewerState::new(800.0, 600.0);
         state.entries = vec![
-            DirectoryEntry { path: PathBuf::from("/a.png"), filename: String::from("a.png"), file_size: 100 },
-            DirectoryEntry { path: PathBuf::from("/b.png"), filename: String::from("b.png"), file_size: 200 },
-            DirectoryEntry { path: PathBuf::from("/c.png"), filename: String::from("c.png"), file_size: 300 },
+            DirectoryEntry {
+                path: PathBuf::from("/a.png"),
+                filename: String::from("a.png"),
+                file_size: 100,
+            },
+            DirectoryEntry {
+                path: PathBuf::from("/b.png"),
+                filename: String::from("b.png"),
+                file_size: 200,
+            },
+            DirectoryEntry {
+                path: PathBuf::from("/c.png"),
+                filename: String::from("c.png"),
+                file_size: 300,
+            },
         ];
         state.current_index = 2;
         state.next_image();

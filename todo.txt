@@ -282,9 +282,10 @@
 ##
 ##  PROGRESS (2026-05-30):
 ##   [x] jq  — std rewrite committed (d07a1eda).  write_stdout/write_stderr now
-##           use std::io; reading/exit already std.  Build clean, tests pass
-##           EXCEPT two PRE-EXISTING jq filter-logic bugs (NOT I/O, NOT a
-##           regression — confirmed via git stash on baseline); see BUG note.
+##           use std::io; reading/exit already std.  Build clean.  The two
+##           PRE-EXISTING jq filter-logic bugs (NOT I/O) are now ALSO FIXED
+##           (2026-05-31, 6512f749): object-construction parse bug + missing
+##           type-selection builtins.  69/69 tests pass.  See RESOLVED BUG note.
 ##   [x] zip — dead-code syscall stub removed (it was #[allow(dead_code)] and
 ##           unused; zip already used std::fs/std::io/std::process).
 ##           Brought the crate clippy-clean (28 pre-existing pedantic

@@ -27,7 +27,7 @@ struct IrqStat {
     irq: u32,
     _name: String,
     per_cpu: Vec<u64>,
-    _affinity_mask: u64,
+    affinity_mask: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -107,7 +107,7 @@ fn read_irq_stats() -> Vec<IrqStat> {
             irq,
             _name: name,
             per_cpu,
-            _affinity_mask: affinity,
+            affinity_mask: affinity,
         });
     }
 
@@ -131,7 +131,10 @@ fn write_irq_affinity(irq: u32, mask: u64) -> io::Result<()> {
 
 fn compute_cpu_loads(stats: &[IrqStat], num_cpus: usize) -> Vec<CpuLoad> {
     let mut loads: Vec<CpuLoad> = (0..num_cpus as u32)
-        .map(|id| CpuLoad { cpu_id: id, irq_count: 0 })
+        .map(|id| CpuLoad {
+            cpu_id: id,
+            irq_count: 0,
+        })
         .collect();
 
     for stat in stats {
@@ -214,20 +217,18 @@ fn balance_once(opts: &BalanceOpts) -> Vec<(u32, u64)> {
     if let (Some(most), Some(least)) = (
         find_most_loaded_cpu(&loads, opts.banned_cpus),
         find_least_loaded_cpu(&loads, opts.banned_cpus),
-    ) {
-        if most != least {
-            if let Some(irq) = busiest_irq_on_cpu(&stats, most, &opts.banned_irqs) {
-                let new_mask = 1u64 << least;
-                if let Err(e) = write_irq_affinity(irq, new_mask) {
-                    if opts.debug {
-                        eprintln!("irqbalance: failed to set affinity for IRQ {irq}: {e}");
-                    }
-                } else if opts.debug {
-                    eprintln!("irqbalance: moved IRQ {irq} from CPU{most} to CPU{least}");
-                }
-                migrations.push((irq, new_mask));
+    ) && most != least
+        && let Some(irq) = busiest_irq_on_cpu(&stats, most, &opts.banned_irqs)
+    {
+        let new_mask = 1u64 << least;
+        if let Err(e) = write_irq_affinity(irq, new_mask) {
+            if opts.debug {
+                eprintln!("irqbalance: failed to set affinity for IRQ {irq}: {e}");
             }
+        } else if opts.debug {
+            eprintln!("irqbalance: moved IRQ {irq} from CPU{most} to CPU{least}");
         }
+        migrations.push((irq, new_mask));
     }
 
     migrations
@@ -297,10 +298,10 @@ fn parse_args(args: &[String]) -> BalanceOpts {
                 }
             }
             s if s.starts_with("--banirq=") => {
-                if let Some(val) = s.strip_prefix("--banirq=") {
-                    if let Ok(irq) = val.parse::<u32>() {
-                        opts.banned_irqs.push(irq);
-                    }
+                if let Some(val) = s.strip_prefix("--banirq=")
+                    && let Ok(irq) = val.parse::<u32>()
+                {
+                    opts.banned_irqs.push(irq);
                 }
             }
             s if s.starts_with("--hintpolicy=") => {
@@ -394,9 +395,18 @@ mod tests {
     #[test]
     fn test_find_least_loaded() {
         let loads = vec![
-            CpuLoad { cpu_id: 0, irq_count: 100 },
-            CpuLoad { cpu_id: 1, irq_count: 50 },
-            CpuLoad { cpu_id: 2, irq_count: 200 },
+            CpuLoad {
+                cpu_id: 0,
+                irq_count: 100,
+            },
+            CpuLoad {
+                cpu_id: 1,
+                irq_count: 50,
+            },
+            CpuLoad {
+                cpu_id: 2,
+                irq_count: 200,
+            },
         ];
         assert_eq!(find_least_loaded_cpu(&loads, 0), Some(1));
     }
@@ -404,9 +414,18 @@ mod tests {
     #[test]
     fn test_find_most_loaded() {
         let loads = vec![
-            CpuLoad { cpu_id: 0, irq_count: 100 },
-            CpuLoad { cpu_id: 1, irq_count: 50 },
-            CpuLoad { cpu_id: 2, irq_count: 200 },
+            CpuLoad {
+                cpu_id: 0,
+                irq_count: 100,
+            },
+            CpuLoad {
+                cpu_id: 1,
+                irq_count: 50,
+            },
+            CpuLoad {
+                cpu_id: 2,
+                irq_count: 200,
+            },
         ];
         assert_eq!(find_most_loaded_cpu(&loads, 0), Some(2));
     }
@@ -414,9 +433,18 @@ mod tests {
     #[test]
     fn test_find_least_with_banned() {
         let loads = vec![
-            CpuLoad { cpu_id: 0, irq_count: 100 },
-            CpuLoad { cpu_id: 1, irq_count: 10 },
-            CpuLoad { cpu_id: 2, irq_count: 50 },
+            CpuLoad {
+                cpu_id: 0,
+                irq_count: 100,
+            },
+            CpuLoad {
+                cpu_id: 1,
+                irq_count: 10,
+            },
+            CpuLoad {
+                cpu_id: 2,
+                irq_count: 50,
+            },
         ];
         // Ban CPU 1.
         assert_eq!(find_least_loaded_cpu(&loads, 0b010), Some(2));
@@ -425,8 +453,14 @@ mod tests {
     #[test]
     fn test_load_imbalance_balanced() {
         let loads = vec![
-            CpuLoad { cpu_id: 0, irq_count: 100 },
-            CpuLoad { cpu_id: 1, irq_count: 100 },
+            CpuLoad {
+                cpu_id: 0,
+                irq_count: 100,
+            },
+            CpuLoad {
+                cpu_id: 1,
+                irq_count: 100,
+            },
         ];
         assert!(load_imbalance(&loads) < 0.01);
     }
@@ -434,8 +468,14 @@ mod tests {
     #[test]
     fn test_load_imbalance_unbalanced() {
         let loads = vec![
-            CpuLoad { cpu_id: 0, irq_count: 1000 },
-            CpuLoad { cpu_id: 1, irq_count: 0 },
+            CpuLoad {
+                cpu_id: 0,
+                irq_count: 1000,
+            },
+            CpuLoad {
+                cpu_id: 1,
+                irq_count: 0,
+            },
         ];
         assert!(load_imbalance(&loads) > 1.0);
     }
@@ -457,10 +497,7 @@ mod tests {
 
     #[test]
     fn test_busiest_irq_banned() {
-        let stats = vec![
-            make_stat(0, vec![100, 0]),
-            make_stat(1, vec![200, 0]),
-        ];
+        let stats = vec![make_stat(0, vec![100, 0]), make_stat(1, vec![200, 0])];
         assert_eq!(busiest_irq_on_cpu(&stats, 0, &[1]), Some(0));
     }
 

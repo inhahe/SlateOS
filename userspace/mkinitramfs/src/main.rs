@@ -33,7 +33,7 @@ struct InitramfsConfig {
     /// Extra files/directories to include.
     extra_files: Vec<PathBuf>,
     /// Hooks/scripts to run.
-    _hooks: Vec<String>,
+    hooks: Vec<String>,
     /// Compression method.
     compression: Compression,
     /// Module directory base.
@@ -56,7 +56,7 @@ enum Compression {
 }
 
 impl Compression {
-    fn _extension(&self) -> &str {
+    fn extension(&self) -> &str {
         match self {
             Compression::Gzip => ".gz",
             Compression::Xz => ".xz",
@@ -85,7 +85,7 @@ impl Default for InitramfsConfig {
             kernel_version: detect_kernel_version(),
             modules: Vec::new(),
             extra_files: Vec::new(),
-            _hooks: vec![
+            hooks: vec![
                 "base".to_string(),
                 "udev".to_string(),
                 "modconf".to_string(),
@@ -159,13 +159,11 @@ fn read_config(config_dir: &Path) -> InitramfsConfig {
                             config.compression = c;
                         }
                     }
-                    "MODULES" => {
-                        match value {
-                            "most" => config.include_firmware = true,
-                            "dep" => config.include_firmware = false,
-                            _ => {}
-                        }
-                    }
+                    "MODULES" => match value {
+                        "most" => config.include_firmware = true,
+                        "dep" => config.include_firmware = false,
+                        _ => {}
+                    },
                     _ => {}
                 }
             }
@@ -328,14 +326,14 @@ impl CpioEntry {
         // Pad to 4-byte boundary after header + name.
         let header_name_len = 110 + namesize;
         let pad = (4 - (header_name_len % 4)) % 4;
-        buf.extend(std::iter::repeat(0u8).take(pad));
+        buf.extend(std::iter::repeat_n(0u8, pad));
 
         // File data.
         buf.extend_from_slice(&self.data);
 
         // Pad data to 4-byte boundary.
         let data_pad = (4 - (filesize % 4)) % 4;
-        buf.extend(std::iter::repeat(0u8).take(data_pad));
+        buf.extend(std::iter::repeat_n(0u8, data_pad));
 
         buf
     }
@@ -352,7 +350,7 @@ fn build_cpio(entries: &[CpioEntry]) -> Vec<u8> {
 
     // Pad to 512-byte boundary (block size).
     let block_pad = (512 - (buf.len() % 512)) % 512;
-    buf.extend(std::iter::repeat(0u8).take(block_pad));
+    buf.extend(std::iter::repeat_n(0u8, block_pad));
 
     buf
 }
@@ -421,9 +419,25 @@ fn build_initramfs_entries(config: &InitramfsConfig) -> Vec<CpioEntry> {
 
     // Create directory structure.
     let dirs = [
-        ".", "bin", "sbin", "etc", "lib", "lib/modules", "lib/firmware",
-        "dev", "proc", "sys", "run", "tmp", "newroot", "usr",
-        "usr/bin", "usr/sbin", "usr/lib", "var", "var/run",
+        ".",
+        "bin",
+        "sbin",
+        "etc",
+        "lib",
+        "lib/modules",
+        "lib/firmware",
+        "dev",
+        "proc",
+        "sys",
+        "run",
+        "tmp",
+        "newroot",
+        "usr",
+        "usr/bin",
+        "usr/sbin",
+        "usr/lib",
+        "var",
+        "var/run",
     ];
     for dir in &dirs {
         entries.push(CpioEntry::directory(dir, 0o755));
@@ -456,7 +470,11 @@ fn build_initramfs_entries(config: &InitramfsConfig) -> Vec<CpioEntry> {
     }
 
     // Add /etc/fstab stub.
-    entries.push(CpioEntry::file("etc/fstab", 0o644, b"# initramfs fstab\n".to_vec()));
+    entries.push(CpioEntry::file(
+        "etc/fstab",
+        0o644,
+        b"# initramfs fstab\n".to_vec(),
+    ));
 
     entries
 }
@@ -468,33 +486,47 @@ fn find_modules(mod_dir: &Path, requested: &[String]) -> Vec<(String, Vec<u8>)> 
     // If specific modules requested, find them.
     if !requested.is_empty() {
         for modname in requested {
-            let ko_name = if modname.ends_with(".ko") || modname.ends_with(".ko.zst")
-                || modname.ends_with(".ko.xz") || modname.ends_with(".ko.gz")
+            let ko_name = if modname.ends_with(".ko")
+                || modname.ends_with(".ko.zst")
+                || modname.ends_with(".ko.xz")
+                || modname.ends_with(".ko.gz")
             {
                 modname.clone()
             } else {
                 format!("{modname}.ko")
             };
-            if let Some((path, data)) = find_module_file(mod_dir, &ko_name) {
-                if seen.insert(path.clone()) {
-                    results.push((path, data));
-                }
+            if let Some((path, data)) = find_module_file(mod_dir, &ko_name)
+                && seen.insert(path.clone())
+            {
+                results.push((path, data));
             }
         }
     } else {
         // Include essential modules by default.
         let essential = [
-            "ext4", "vfat", "fat", "nls_cp437", "nls_utf8",
-            "ahci", "sd_mod", "sr_mod", "usb_storage",
-            "ehci_hcd", "ohci_hcd", "uhci_hcd", "xhci_hcd",
-            "virtio_blk", "virtio_pci", "virtio_scsi",
+            "ext4",
+            "vfat",
+            "fat",
+            "nls_cp437",
+            "nls_utf8",
+            "ahci",
+            "sd_mod",
+            "sr_mod",
+            "usb_storage",
+            "ehci_hcd",
+            "ohci_hcd",
+            "uhci_hcd",
+            "xhci_hcd",
+            "virtio_blk",
+            "virtio_pci",
+            "virtio_scsi",
         ];
         for name in &essential {
             let ko_name = format!("{name}.ko");
-            if let Some((path, data)) = find_module_file(mod_dir, &ko_name) {
-                if seen.insert(path.clone()) {
-                    results.push((path, data));
-                }
+            if let Some((path, data)) = find_module_file(mod_dir, &ko_name)
+                && seen.insert(path.clone())
+            {
+                results.push((path, data));
             }
         }
     }
@@ -514,12 +546,12 @@ fn _scan_dir_for_module(base: &Path, dir: &Path, name: &str) -> Option<(String, 
             if let Some(result) = _scan_dir_for_module(base, &path, name) {
                 return Some(result);
             }
-        } else if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-            if fname == name || fname.starts_with(name) {
-                let rel = path.strip_prefix(base).ok()?;
-                let data = fs::read(&path).ok()?;
-                return Some((rel.to_string_lossy().to_string(), data));
-            }
+        } else if let Some(fname) = path.file_name().and_then(|n| n.to_str())
+            && (fname == name || fname.starts_with(name))
+        {
+            let rel = path.strip_prefix(base).ok()?;
+            let data = fs::read(&path).ok()?;
+            return Some((rel.to_string_lossy().to_string(), data));
         }
     }
     None
@@ -768,7 +800,10 @@ fn mkinitramfs_main(args: &[String]) -> i32 {
             0
         }
         Err(e) => {
-            eprintln!("mkinitramfs: failed to write '{}': {e}", config.output.display());
+            eprintln!(
+                "mkinitramfs: failed to write '{}': {e}",
+                config.output.display()
+            );
             1
         }
     }
@@ -851,10 +886,12 @@ fn update_initramfs_main(args: &[String]) -> i32 {
                 if verbose {
                     eprintln!("update-initramfs: {action}ing {}", img_path.display());
                 }
-                let mut config = InitramfsConfig::default();
-                config.kernel_version = ver.clone();
-                config.output = img_path;
-                config.verbose = verbose;
+                let config = InitramfsConfig {
+                    kernel_version: ver.clone(),
+                    output: img_path,
+                    verbose,
+                    ..InitramfsConfig::default()
+                };
 
                 let entries = build_initramfs_entries(&config);
                 let cpio_data = build_cpio(&entries);

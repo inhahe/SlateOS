@@ -169,6 +169,7 @@ struct LoginEntry {
 // Options for last/lastb
 // ============================================================================
 
+#[derive(Debug)]
 struct LastOptions {
     /// Maximum number of entries to display (0 = unlimited).
     count: usize,
@@ -213,6 +214,7 @@ impl LastOptions {
 // Options for lastlog
 // ============================================================================
 
+#[derive(Debug)]
 struct LastlogOptions {
     /// Show only for this user.
     user_filter: Option<String>,

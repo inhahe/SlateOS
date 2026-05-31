@@ -1,3 +1,27 @@
+## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 2 — 7 more crates'
+##   TEST BUILDS did not compile on the host target (same `--keep-going` sweep as batch 1).
+##   Root causes & PROPER fixes:
+##     - iw: enum `Tool` lacked `#[derive(Debug)]` (tests use assert_eq! on it) → added.
+##     - lvm: enum `Personality` lacked Debug → added.
+##     - mkswap: enums `SwapType` and `Personality` lacked Debug → added to both.
+##     - last: structs `LastOptions`/`LastlogOptions` lacked Debug → derived.
+##     - mktemp: struct `IdOpts` lacked Debug → derived. ALSO a real PRODUCTION bug:
+##       run_whoami used `for arg in args.iter().skip(1) { match arg.as_str() {..all arms
+##       return..} }` — a never_loop (clippy correctness deny) that could only ever inspect
+##       the FIRST extra arg, silently ignoring the rest; rewrote as `if let Some(arg) =
+##       args.get(1)` which is the actual intended single-arg semantics. ALSO 2
+##       collapsible_if denies in get_effective_username (USER/LOGNAME env lookup) → let-chains.
+##     - irqbalance: field `_affinity_mask` underscore-mangled, test reads `.affinity_mask`
+##       → renamed. ALSO collapsed a 3-level nested-if balancing block and a `--banirq=`
+##       parse into let-chains (collapsible_if denies).
+##     - mkinitramfs: `Compression::_extension` method and `InitramfsConfig._hooks` field
+##       underscore-mangled vs bare names in tests → renamed. ALSO 3× `repeat(0u8).take(N)`
+##       → `repeat_n(0u8, N)` (manual_repeat_n), a field-reassign-after-default → struct
+##       literal with `..Default::default()` (field_reassign_with_default), and 3
+##       collapsible_if → let-chains.
+##   All 7 build, pass tests (16/12/65/39/21/48/53 = 254), are clippy-clean on the lints
+##   they deny, and build for ouros. ~14 more crates from the same sweep remain.
+##
 ## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 1 — 10 crates'
 ##   TEST BUILDS did not compile on the host target (a `cargo build --tests --keep-going`
 ##   across the 275 substantial userspace crates surfaced 31 such crates). Root causes &

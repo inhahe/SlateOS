@@ -44,7 +44,7 @@ struct SwapEntry {
     priority: i32,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum SwapType {
     Partition,
     File,
@@ -61,7 +61,7 @@ impl fmt::Display for SwapType {
 
 // ── Personality Detection ──────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Personality {
     Mkswap,
     Swapon,

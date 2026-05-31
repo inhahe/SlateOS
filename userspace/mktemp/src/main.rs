@@ -230,8 +230,7 @@ fn groups_for_user(username: &str) -> Vec<(u32, String)> {
 
     // Primary group from /etc/passwd.
     if let Some(primary_gid) = name_to_gid(username) {
-        let gname = gid_to_name(primary_gid)
-            .unwrap_or_else(|| primary_gid.to_string());
+        let gname = gid_to_name(primary_gid).unwrap_or_else(|| primary_gid.to_string());
         result.push((primary_gid, gname));
     }
 
@@ -514,10 +513,7 @@ fn run_mktemp(args: &[String]) -> i32 {
         .count();
     if trailing_x < 3 {
         if !opts.quiet {
-            eprintln!(
-                "mktemp: too few X's in template '{}'",
-                opts.template
-            );
+            eprintln!("mktemp: too few X's in template '{}'", opts.template);
         }
         return 1;
     }
@@ -562,6 +558,7 @@ fn print_mktemp_help() {
 // ============================================================================
 
 /// Options parsed from id command-line arguments.
+#[derive(Debug)]
 struct IdOpts {
     /// Print only effective user ID.
     user_only: bool,
@@ -672,9 +669,7 @@ fn run_id(args: &[String]) -> i32 {
         }
     } else {
         // SAFETY: these are simple POSIX getters with no pointer arguments.
-        unsafe {
-            (getuid(), geteuid(), getgid(), getegid())
-        }
+        unsafe { (getuid(), geteuid(), getgid(), getegid()) }
     };
 
     let effective_uid = if opts.use_real { uid } else { euid };
@@ -682,8 +677,7 @@ fn run_id(args: &[String]) -> i32 {
 
     if opts.user_only {
         if opts.use_name {
-            let name = uid_to_name(effective_uid)
-                .unwrap_or_else(|| effective_uid.to_string());
+            let name = uid_to_name(effective_uid).unwrap_or_else(|| effective_uid.to_string());
             println!("{name}");
         } else {
             println!("{effective_uid}");
@@ -693,8 +687,7 @@ fn run_id(args: &[String]) -> i32 {
 
     if opts.group_only {
         if opts.use_name {
-            let name = gid_to_name(effective_gid)
-                .unwrap_or_else(|| effective_gid.to_string());
+            let name = gid_to_name(effective_gid).unwrap_or_else(|| effective_gid.to_string());
             println!("{name}");
         } else {
             println!("{effective_gid}");
@@ -783,14 +776,12 @@ fn collect_all_groups(opts: &IdOpts) -> Vec<(u32, String)> {
 
         // SAFETY: getegid is a simple POSIX getter.
         let primary_gid = unsafe { getegid() };
-        let primary_name = gid_to_name(primary_gid)
-            .unwrap_or_else(|| primary_gid.to_string());
+        let primary_name = gid_to_name(primary_gid).unwrap_or_else(|| primary_gid.to_string());
         result.push((primary_gid, primary_name));
 
         for gid_val in get_supplementary_gids() {
             if gid_val != primary_gid {
-                let name = gid_to_name(gid_val)
-                    .unwrap_or_else(|| gid_val.to_string());
+                let name = gid_to_name(gid_val).unwrap_or_else(|| gid_val.to_string());
                 result.push((gid_val, name));
             }
         }
@@ -921,8 +912,9 @@ fn print_groups_for(username: &str) {
 
 /// Run the whoami command.
 fn run_whoami(args: &[String]) -> i32 {
-    // whoami takes no meaningful positional arguments.
-    for arg in args.iter().skip(1) {
+    // whoami takes no meaningful positional arguments; only the first one is
+    // ever relevant (a flag, or an error on an extra operand).
+    if let Some(arg) = args.get(1) {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!("whoami (OurOS) 0.1.0 -- Print effective username");
@@ -961,15 +953,15 @@ fn get_effective_username() -> String {
     }
 
     // Try environment variables.
-    if let Ok(name) = env::var("USER") {
-        if !name.is_empty() {
-            return name;
-        }
+    if let Ok(name) = env::var("USER")
+        && !name.is_empty()
+    {
+        return name;
     }
-    if let Ok(name) = env::var("LOGNAME") {
-        if !name.is_empty() {
-            return name;
-        }
+    if let Ok(name) = env::var("LOGNAME")
+        && !name.is_empty()
+    {
+        return name;
     }
 
     // Last resort: numeric UID.
@@ -1053,7 +1045,10 @@ mod tests {
 
     #[test]
     fn test_personality_whoami_path() {
-        assert_eq!(detect_personality("C:\\Windows\\whoami.exe"), Personality::Whoami);
+        assert_eq!(
+            detect_personality("C:\\Windows\\whoami.exe"),
+            Personality::Whoami
+        );
     }
 
     #[test]
@@ -1322,11 +1317,7 @@ mod tests {
 
     #[test]
     fn test_id_args_long_options() {
-        let args = vec![
-            "id".to_string(),
-            "--user".to_string(),
-            "--name".to_string(),
-        ];
+        let args = vec!["id".to_string(), "--user".to_string(), "--name".to_string()];
         let opts = parse_id_args(&args).unwrap();
         assert!(opts.user_only);
         assert!(opts.use_name);

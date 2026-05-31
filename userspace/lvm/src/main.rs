@@ -28,7 +28,7 @@ const PE_SIZE_BYTES: u64 = PE_DEFAULT_SIZE_MB * 1024 * 1024;
 
 // ── Personality Detection ──────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Personality {
     Pvcreate,
     Vgcreate,

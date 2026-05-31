@@ -1,3 +1,18 @@
+## BUG (noticed+FIXED 2026-05-31): vi search wrap-around landed on the cursor's
+##   own position instead of the next/previous match. userspace/vi/:
+##   test_search_fwd_wraps failed. Both search_fwd and search_bwd had the same
+##   off-by-one: the loop computed r = (row +/- i +/- 1) so at i==0 it visited
+##   the NEXT/PREVIOUS line, yet applied the cursor-column skip (col+1 / col-1)
+##   to that wrong line; the starting line was then revisited LAST with
+##   start_col=0 / before=len, re-matching the cursor's own position. E.g.
+##   forward search for "abc" from row2,col0 of ["abc","def","abc"] returned
+##   row2 instead of wrapping to row0. Rewrote both to visit nr+1 (line,col)
+##   pairs starting at the current line (skipping the cursor) and ending with
+##   the current line again, rejecting the cursor position on the final wrap.
+##   Fixed search_bwd too (same root cause; no test covered the multiline wrap).
+##   53/53 tests pass; cleaned 5 clippy warnings (incl. while_let_loop).
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/installer test harnesses hit the UAC
 ##   os-error-740 launch failure ("installer" contains "install"). Unlike the
 ##   single-binary crates, installer has BOTH a [lib] and a [[bin]], so cargo

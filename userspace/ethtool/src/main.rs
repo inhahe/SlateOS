@@ -181,7 +181,7 @@ struct EepromInfo {
 
 // ── Argument Parsing ───────────────────────────────────────────────────
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 enum Command {
     ShowSettings,        // default: show device settings
     ShowDriverInfo,      // -i, --driver

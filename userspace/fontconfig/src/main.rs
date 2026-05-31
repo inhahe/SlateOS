@@ -48,13 +48,13 @@ enum FontStyle {
     Regular,
     Bold,
     Italic,
-    _BoldItalic,
+    BoldItalic,
     Light,
-    _Thin,
-    _Medium,
-    _SemiBold,
-    _ExtraBold,
-    _Black,
+    Thin,
+    Medium,
+    SemiBold,
+    ExtraBold,
+    Black,
 }
 
 impl std::fmt::Display for FontStyle {
@@ -63,13 +63,13 @@ impl std::fmt::Display for FontStyle {
             Self::Regular => write!(f, "Regular"),
             Self::Bold => write!(f, "Bold"),
             Self::Italic => write!(f, "Italic"),
-            Self::_BoldItalic => write!(f, "Bold Italic"),
+            Self::BoldItalic => write!(f, "Bold Italic"),
             Self::Light => write!(f, "Light"),
-            Self::_Thin => write!(f, "Thin"),
-            Self::_Medium => write!(f, "Medium"),
-            Self::_SemiBold => write!(f, "SemiBold"),
-            Self::_ExtraBold => write!(f, "ExtraBold"),
-            Self::_Black => write!(f, "Black"),
+            Self::Thin => write!(f, "Thin"),
+            Self::Medium => write!(f, "Medium"),
+            Self::SemiBold => write!(f, "SemiBold"),
+            Self::ExtraBold => write!(f, "ExtraBold"),
+            Self::Black => write!(f, "Black"),
         }
     }
 }
@@ -83,15 +83,15 @@ enum FontSlant {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum FontWeight {
-    _Thin,
+    Thin,
     _ExtraLight,
     _Light,
     _Regular,
-    _Medium,
-    _SemiBold,
+    Medium,
+    SemiBold,
     _Bold,
-    _ExtraBold,
-    _Black,
+    ExtraBold,
+    Black,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -38,7 +38,7 @@ struct CgroupInfo {
 struct SubsysInfo {
     name: String,
     _hierarchy: u32,
-    _num_cgroups: u32,
+    num_cgroups: u32,
     enabled: bool,
 }
 
@@ -70,7 +70,7 @@ fn write_cgroup_param(group: &str, param: &str, value: &str) -> Result<(), Strin
     fs::write(&path, value).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
-fn _list_controllers() -> Vec<String> {
+fn list_controllers() -> Vec<String> {
     let path = Path::new(CGROUP_ROOT).join("cgroup.controllers");
     if let Ok(data) = fs::read_to_string(&path) {
         data.split_whitespace().map(|s| s.to_string()).collect()
@@ -97,31 +97,31 @@ fn list_cgroups_recursive(base: &Path, prefix: &str, result: &mut Vec<CgroupInfo
 
     if let Ok(entries) = fs::read_dir(&dir) {
         for entry in entries.flatten() {
-            if let Ok(ft) = entry.file_type() {
-                if ft.is_dir() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    let child_prefix = if prefix.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{prefix}/{name}")
-                    };
+            if let Ok(ft) = entry.file_type()
+                && ft.is_dir()
+            {
+                let name = entry.file_name().to_string_lossy().to_string();
+                let child_prefix = if prefix.is_empty() {
+                    name.clone()
+                } else {
+                    format!("{prefix}/{name}")
+                };
 
-                    // Read controllers for this cgroup.
-                    let ctrl_path = entry.path().join("cgroup.controllers");
-                    let controllers = if let Ok(data) = fs::read_to_string(&ctrl_path) {
-                        data.split_whitespace().map(|s| s.to_string()).collect()
-                    } else {
-                        Vec::new()
-                    };
+                // Read controllers for this cgroup.
+                let ctrl_path = entry.path().join("cgroup.controllers");
+                let controllers = if let Ok(data) = fs::read_to_string(&ctrl_path) {
+                    data.split_whitespace().map(|s| s.to_string()).collect()
+                } else {
+                    Vec::new()
+                };
 
-                    result.push(CgroupInfo {
-                        path: PathBuf::from(&child_prefix),
-                        controllers,
-                        _frozen: false,
-                    });
+                result.push(CgroupInfo {
+                    path: PathBuf::from(&child_prefix),
+                    controllers,
+                    _frozen: false,
+                });
 
-                    list_cgroups_recursive(base, &child_prefix, result);
-                }
+                list_cgroups_recursive(base, &child_prefix, result);
             }
         }
     }
@@ -129,14 +129,54 @@ fn list_cgroups_recursive(base: &Path, prefix: &str, result: &mut Vec<CgroupInfo
 
 fn generate_default_subsystems() -> Vec<SubsysInfo> {
     vec![
-        SubsysInfo { name: "cpu".to_string(), _hierarchy: 0, _num_cgroups: 1, enabled: true },
-        SubsysInfo { name: "cpuset".to_string(), _hierarchy: 0, _num_cgroups: 1, enabled: true },
-        SubsysInfo { name: "io".to_string(), _hierarchy: 0, _num_cgroups: 1, enabled: true },
-        SubsysInfo { name: "memory".to_string(), _hierarchy: 0, _num_cgroups: 1, enabled: true },
-        SubsysInfo { name: "pids".to_string(), _hierarchy: 0, _num_cgroups: 1, enabled: true },
-        SubsysInfo { name: "rdma".to_string(), _hierarchy: 0, _num_cgroups: 1, enabled: false },
-        SubsysInfo { name: "hugetlb".to_string(), _hierarchy: 0, _num_cgroups: 1, enabled: true },
-        SubsysInfo { name: "misc".to_string(), _hierarchy: 0, _num_cgroups: 1, enabled: false },
+        SubsysInfo {
+            name: "cpu".to_string(),
+            _hierarchy: 0,
+            num_cgroups: 1,
+            enabled: true,
+        },
+        SubsysInfo {
+            name: "cpuset".to_string(),
+            _hierarchy: 0,
+            num_cgroups: 1,
+            enabled: true,
+        },
+        SubsysInfo {
+            name: "io".to_string(),
+            _hierarchy: 0,
+            num_cgroups: 1,
+            enabled: true,
+        },
+        SubsysInfo {
+            name: "memory".to_string(),
+            _hierarchy: 0,
+            num_cgroups: 1,
+            enabled: true,
+        },
+        SubsysInfo {
+            name: "pids".to_string(),
+            _hierarchy: 0,
+            num_cgroups: 1,
+            enabled: true,
+        },
+        SubsysInfo {
+            name: "rdma".to_string(),
+            _hierarchy: 0,
+            num_cgroups: 1,
+            enabled: false,
+        },
+        SubsysInfo {
+            name: "hugetlb".to_string(),
+            _hierarchy: 0,
+            num_cgroups: 1,
+            enabled: true,
+        },
+        SubsysInfo {
+            name: "misc".to_string(),
+            _hierarchy: 0,
+            num_cgroups: 1,
+            enabled: false,
+        },
     ]
 }
 
@@ -144,12 +184,22 @@ fn generate_default_cgroups() -> Vec<CgroupInfo> {
     vec![
         CgroupInfo {
             path: PathBuf::from("system.slice"),
-            controllers: vec!["cpu".to_string(), "memory".to_string(), "io".to_string(), "pids".to_string()],
+            controllers: vec![
+                "cpu".to_string(),
+                "memory".to_string(),
+                "io".to_string(),
+                "pids".to_string(),
+            ],
             _frozen: false,
         },
         CgroupInfo {
             path: PathBuf::from("user.slice"),
-            controllers: vec!["cpu".to_string(), "memory".to_string(), "io".to_string(), "pids".to_string()],
+            controllers: vec![
+                "cpu".to_string(),
+                "memory".to_string(),
+                "io".to_string(),
+                "pids".to_string(),
+            ],
             _frozen: false,
         },
         CgroupInfo {
@@ -224,7 +274,8 @@ fn cmd_cgcreate(args: &[String]) {
                 eprintln!("cgcreate: created {}", path.display());
                 // Enable controllers if specified.
                 if !controllers.is_empty() {
-                    let ctrl_str = controllers.iter()
+                    let ctrl_str = controllers
+                        .iter()
                         .map(|c| format!("+{c}"))
                         .collect::<Vec<_>>()
                         .join(" ");
@@ -390,8 +441,11 @@ fn cmd_cgexec(args: &[String]) {
     // For now, just print what would happen.
     let stdout = io::stdout();
     let mut out = stdout.lock();
-    let _ = writeln!(out, "cgexec: [simulated] running '{}' in cgroup '{group}'",
-        cmd_args.join(" "));
+    let _ = writeln!(
+        out,
+        "cgexec: [simulated] running '{}' in cgroup '{group}'",
+        cmd_args.join(" ")
+    );
 }
 
 // ============================================================================
@@ -434,7 +488,9 @@ fn cmd_cgset(args: &[String]) {
             }
             "--copy-from" => {
                 i += 1;
-                if i < args.len() { copy_from = Some(args[i].clone()); }
+                if i < args.len() {
+                    copy_from = Some(args[i].clone());
+                }
             }
             s if !s.starts_with('-') => {
                 groups.push(s.to_string());
@@ -454,8 +510,12 @@ fn cmd_cgset(args: &[String]) {
     // Copy params from source cgroup if specified.
     if let Some(ref src) = copy_from {
         let src_params = vec![
-            "cpu.weight", "cpu.max", "memory.max", "memory.high",
-            "io.max", "pids.max",
+            "cpu.weight",
+            "cpu.max",
+            "memory.max",
+            "memory.high",
+            "io.max",
+            "pids.max",
         ];
         for param_name in src_params {
             if let Some(val) = read_cgroup_param(src, param_name) {
@@ -510,7 +570,9 @@ fn cmd_cgget(args: &[String]) {
             "-a" | "--all" => all = true,
             "-r" => {
                 i += 1;
-                if i < args.len() { params.push(args[i].clone()); }
+                if i < args.len() {
+                    params.push(args[i].clone());
+                }
             }
             s if !s.starts_with('-') => {
                 groups.push(s.to_string());
@@ -719,13 +781,15 @@ fn cmd_lscgroup(args: &[String]) {
     }
 
     // Filter by controller if specified.
-    let filter_controller = filter_ctrl.as_ref().and_then(|s| s.split_once(':').map(|(c, _)| c.to_string()));
+    let filter_controller = filter_ctrl
+        .as_ref()
+        .and_then(|s| s.split_once(':').map(|(c, _)| c.to_string()));
 
     for cg in &cgroups {
-        if let Some(ref ctrl) = filter_controller {
-            if !cg.controllers.contains(ctrl) {
-                continue;
-            }
+        if let Some(ref ctrl) = filter_controller
+            && !cg.controllers.contains(ctrl)
+        {
+            continue;
         }
 
         let controllers = if cg.controllers.is_empty() {
@@ -797,9 +861,14 @@ fn read_subsystems() -> Vec<SubsysInfo> {
             if parts.len() >= 4 {
                 let name = parts[0].to_string();
                 let _hierarchy = parts[1].parse().unwrap_or(0);
-                let _num_cgroups = parts[2].parse().unwrap_or(0);
+                let num_cgroups = parts[2].parse().unwrap_or(0);
                 let enabled = parts[3] == "1";
-                result.push(SubsysInfo { name, _hierarchy, _num_cgroups, enabled });
+                result.push(SubsysInfo {
+                    name,
+                    _hierarchy,
+                    num_cgroups,
+                    enabled,
+                });
             }
         }
         if !result.is_empty() {
@@ -868,7 +937,10 @@ mod tests {
     #[test]
     fn test_cgroup_path_nested() {
         let p = cgroup_path("system.slice/ssh.service");
-        assert_eq!(p, PathBuf::from(format!("{CGROUP_ROOT}/system.slice/ssh.service")));
+        assert_eq!(
+            p,
+            PathBuf::from(format!("{CGROUP_ROOT}/system.slice/ssh.service"))
+        );
     }
 
     #[test]
@@ -928,7 +1000,7 @@ mod tests {
         let info = SubsysInfo {
             name: "cpu".to_string(),
             _hierarchy: 0,
-            _num_cgroups: 5,
+            num_cgroups: 5,
             enabled: true,
         };
         let c = info.clone();

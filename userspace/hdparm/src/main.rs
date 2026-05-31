@@ -34,7 +34,7 @@ const AAM_LOUD: u8 = 254;
 
 // ── Personality Detection ──────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Personality {
     Hdparm,
     Sdparm,

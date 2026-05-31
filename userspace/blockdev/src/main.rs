@@ -64,8 +64,7 @@ fn read_block_dev_info(device: &str) -> BlockDevInfo {
     let rotational = read_sysfs_value(device, "queue/rotational")
         .map(|s| s == "1")
         .unwrap_or(true);
-    let _model = read_sysfs_value(device, "device/model")
-        .unwrap_or_else(|| "Unknown".to_string());
+    let _model = read_sysfs_value(device, "device/model").unwrap_or_else(|| "Unknown".to_string());
 
     BlockDevInfo {
         _path: device.to_string(),
@@ -96,9 +95,12 @@ fn generate_default_info(device: &str) -> BlockDevInfo {
     }
 }
 
-fn __format_bytes(bytes: u64) -> String {
+fn _format_bytes(bytes: u64) -> String {
     if bytes >= 1024 * 1024 * 1024 * 1024 {
-        format!("{:.2} TiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0 * 1024.0))
+        format!(
+            "{:.2} TiB",
+            bytes as f64 / (1024.0 * 1024.0 * 1024.0 * 1024.0)
+        )
     } else if bytes >= 1024 * 1024 * 1024 {
         format!("{:.2} GiB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
     } else if bytes >= 1024 * 1024 {
@@ -138,8 +140,16 @@ fn cmd_blockdev(args: &[String]) {
             s if s.starts_with("--") => {
                 operations.push(s.to_string());
                 // Some operations take a value argument.
-                if matches!(s, "--setro" | "--setrw" | "--setbsz" | "--setra" | "--setfra"
-                    | "--flushbufs" | "--rereadpt") {
+                if matches!(
+                    s,
+                    "--setro"
+                        | "--setrw"
+                        | "--setbsz"
+                        | "--setra"
+                        | "--setfra"
+                        | "--flushbufs"
+                        | "--rereadpt"
+                ) {
                     // No value needed.
                 } else if s.starts_with("--set") {
                     i += 1;
@@ -204,19 +214,19 @@ fn cmd_blockdev(args: &[String]) {
                     eprintln!("blockdev: set {device} read-write");
                 }
                 "--setra" => {
-                    if let Some(ref val) = set_value {
-                        if let Ok(ra) = val.parse::<u32>() {
-                            info.read_ahead = ra;
-                            eprintln!("blockdev: set {device} read-ahead to {ra}");
-                        }
+                    if let Some(ref val) = set_value
+                        && let Ok(ra) = val.parse::<u32>()
+                    {
+                        info.read_ahead = ra;
+                        eprintln!("blockdev: set {device} read-ahead to {ra}");
                     }
                 }
                 "--setbsz" => {
-                    if let Some(ref val) = set_value {
-                        if let Ok(bs) = val.parse::<u32>() {
-                            info.block_size = bs;
-                            eprintln!("blockdev: set {device} block size to {bs}");
-                        }
+                    if let Some(ref val) = set_value
+                        && let Ok(bs) = val.parse::<u32>()
+                    {
+                        info.block_size = bs;
+                        eprintln!("blockdev: set {device} block size to {bs}");
                     }
                 }
                 "--flushbufs" => {
@@ -227,13 +237,16 @@ fn cmd_blockdev(args: &[String]) {
                 }
                 "--report" => {
                     let _ = writeln!(out, "RO    RA   SSZ   BSZ        SIZE   DEVICE");
-                    let _ = writeln!(out, "{:>2} {:>5} {:>5} {:>5} {:>11}   {}",
+                    let _ = writeln!(
+                        out,
+                        "{:>2} {:>5} {:>5} {:>5} {:>11}   {}",
                         if info.read_only { "ro" } else { "rw" },
                         info.read_ahead,
                         info.sector_size,
                         info.block_size,
                         info.size_bytes,
-                        device);
+                        device
+                    );
                 }
                 _ => {
                     let _ = writeln!(out, "blockdev: unknown operation: {op}");
@@ -244,13 +257,16 @@ fn cmd_blockdev(args: &[String]) {
         if operations.is_empty() {
             // Default: show report.
             let _ = writeln!(out, "RO    RA   SSZ   BSZ        SIZE   DEVICE");
-            let _ = writeln!(out, "{:>2} {:>5} {:>5} {:>5} {:>11}   {}",
+            let _ = writeln!(
+                out,
+                "{:>2} {:>5} {:>5} {:>5} {:>11}   {}",
                 if info.read_only { "ro" } else { "rw" },
                 info.read_ahead,
                 info.sector_size,
                 info.block_size,
                 info.size_bytes,
-                device);
+                device
+            );
         }
     }
 }
@@ -321,8 +337,14 @@ fn cmd_blkzone(args: &[String]) {
             let device = args.last().map(|s| s.as_str()).unwrap_or("/dev/sda");
             let stdout = io::stdout();
             let mut out = stdout.lock();
-            let _ = writeln!(out, "  start: 0x000000000, len 0x080000, cap 0x080000, wptr 0x000000 reset:0 non-seq:0, zcond: 1(em) [type: 2(SEQ_WRITE_REQUIRED)]");
-            let _ = writeln!(out, "  start: 0x000080000, len 0x080000, cap 0x080000, wptr 0x000000 reset:0 non-seq:0, zcond: 1(em) [type: 2(SEQ_WRITE_REQUIRED)]");
+            let _ = writeln!(
+                out,
+                "  start: 0x000000000, len 0x080000, cap 0x080000, wptr 0x000000 reset:0 non-seq:0, zcond: 1(em) [type: 2(SEQ_WRITE_REQUIRED)]"
+            );
+            let _ = writeln!(
+                out,
+                "  start: 0x000080000, len 0x080000, cap 0x080000, wptr 0x000000 reset:0 non-seq:0, zcond: 1(em) [type: 2(SEQ_WRITE_REQUIRED)]"
+            );
             let _ = writeln!(out, "Total zones for {device}: 2");
         }
         cmd => {
@@ -433,7 +455,10 @@ mod tests {
     #[test]
     fn test_default_sector_count() {
         let info = generate_default_info("/dev/sda");
-        assert_eq!(info._size_sectors, info.size_bytes / info.sector_size as u64);
+        assert_eq!(
+            info._size_sectors,
+            info.size_bytes / info.sector_size as u64
+        );
     }
 
     #[test]

@@ -36,16 +36,16 @@ struct NtpSource {
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum SourceMode {
     Server,
-    _Peer,
-    _Refclock,
+    Peer,
+    Refclock,
 }
 
 impl std::fmt::Display for SourceMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Server => write!(f, "^"),
-            Self::_Peer => write!(f, "="),
-            Self::_Refclock => write!(f, "#"),
+            Self::Peer => write!(f, "="),
+            Self::Refclock => write!(f, "#"),
         }
     }
 }

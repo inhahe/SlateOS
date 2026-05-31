@@ -119,6 +119,7 @@ fn get_current_time() -> Result<i64, String> {
 // ============================================================================
 
 /// All errors the tool can produce.
+#[derive(Debug)]
 enum Error {
     /// Bad command-line usage.
     Usage(String),
@@ -649,7 +650,11 @@ fn parse_job_file(content: &str) -> Option<(i64, char, String, i64, String)> {
     let mut queue: Option<char> = None;
     let mut user: Option<String> = None;
     let mut created: Option<i64> = None;
-    let mut command_start: usize = 0;
+    // `None` until we encounter the first non-header line. Leaving it unset
+    // distinguishes "header-only file (no commands)" from "commands begin at
+    // byte 0" — without this, a job file with no command body would echo the
+    // entire header back as its command text.
+    let mut command_start: Option<usize> = None;
 
     for (idx, line) in content.lines().enumerate() {
         let trimmed = line.trim();
@@ -677,18 +682,19 @@ fn parse_job_file(content: &str) -> Option<(i64, char, String, i64, String)> {
         }
         // First non-header line marks the start of commands.
         // Calculate byte offset to this line.
-        command_start = content
-            .lines()
-            .take(idx)
-            .map(|l| l.len() + 1) // +1 for newline
-            .sum();
+        command_start = Some(
+            content
+                .lines()
+                .take(idx)
+                .map(|l| l.len() + 1) // +1 for newline
+                .sum(),
+        );
         break;
     }
 
-    let commands = if command_start < content.len() {
-        content[command_start..].to_string()
-    } else {
-        String::new()
+    let commands = match command_start {
+        Some(start) if start < content.len() => content[start..].to_string(),
+        _ => String::new(),
     };
 
     Some((
@@ -1362,7 +1368,7 @@ mod tests {
             0,
             86400,
             1_704_067_200,  // 2024-01-01
-            1_747_491_045,  // 2025-05-17 14:30:45
+            1_747_491_045,  // 2025-05-17 14:10:45 UTC
             946_684_800,    // 2000-01-01
         ];
         for &epoch in test_epochs {
@@ -1386,7 +1392,7 @@ mod tests {
     #[test]
     fn epoch_to_datetime_known() {
         // 2025-05-17 14:30:45 UTC
-        let dt = epoch_to_datetime(1_747_491_045);
+        let dt = epoch_to_datetime(1_747_492_245);
         assert_eq!(dt.year, 2025);
         assert_eq!(dt.month, 5);
         assert_eq!(dt.day, 17);
@@ -1478,7 +1484,7 @@ mod tests {
 
     #[test]
     fn format_datetime_display() {
-        let dt = epoch_to_datetime(1_747_491_045);
+        let dt = epoch_to_datetime(1_747_492_245);
         let formatted = format_datetime(&dt);
         assert_eq!(formatted, "Sat May 17 14:30:45 2025");
     }
@@ -1591,7 +1597,7 @@ mod tests {
 
     #[test]
     fn timespec_tomorrow() {
-        let now = 1_747_491_045_i64; // 2025-05-17 14:30:45
+        let now = 1_747_491_045_i64; // 2025-05-17 14:10:45 UTC
         let target = parse_timespec("tomorrow", now).unwrap();
         assert_eq!(target, now + SECS_PER_DAY);
     }

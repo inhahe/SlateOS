@@ -30,7 +30,7 @@ struct EarlyOomConfig {
     dryrun: bool,
     _use_sigkill: bool,
     _use_sigterm: bool,
-    _priority: KillPriority,
+    priority: KillPriority,
     report_interval: u64,
 }
 
@@ -47,7 +47,7 @@ impl Default for EarlyOomConfig {
             dryrun: false,
             _use_sigkill: true,
             _use_sigterm: true,
-            _priority: KillPriority::OomScore,
+            priority: KillPriority::OomScore,
             report_interval: 1,
         }
     }
@@ -80,22 +80,64 @@ struct ProcessInfo {
 
 fn read_meminfo() -> MemInfo {
     MemInfo {
-        mem_total_kb: 32_768_000,   // ~32 GB
+        mem_total_kb: 32_768_000,    // ~32 GB
         mem_available_kb: 2_048_000, // ~2 GB available (low!)
-        swap_total_kb: 8_192_000,   // ~8 GB swap
-        swap_free_kb: 4_096_000,    // ~4 GB free
+        swap_total_kb: 8_192_000,    // ~8 GB swap
+        swap_free_kb: 4_096_000,     // ~4 GB free
     }
 }
 
 fn read_processes() -> Vec<ProcessInfo> {
     vec![
-        ProcessInfo { pid: 1234, name: "chromium".to_string(), oom_score: 800, vm_rss_kb: 4_096_000, _uid: 1000 },
-        ProcessInfo { pid: 2345, name: "electron-app".to_string(), oom_score: 600, vm_rss_kb: 2_048_000, _uid: 1000 },
-        ProcessInfo { pid: 3456, name: "java".to_string(), oom_score: 500, vm_rss_kb: 1_536_000, _uid: 1000 },
-        ProcessInfo { pid: 4567, name: "firefox".to_string(), oom_score: 400, vm_rss_kb: 1_024_000, _uid: 1000 },
-        ProcessInfo { pid: 5678, name: "code".to_string(), oom_score: 300, vm_rss_kb: 768_000, _uid: 1000 },
-        ProcessInfo { pid: 100, name: "systemd".to_string(), oom_score: -1000, vm_rss_kb: 12_000, _uid: 0 },
-        ProcessInfo { pid: 200, name: "sshd".to_string(), oom_score: 0, vm_rss_kb: 8_000, _uid: 0 },
+        ProcessInfo {
+            pid: 1234,
+            name: "chromium".to_string(),
+            oom_score: 800,
+            vm_rss_kb: 4_096_000,
+            _uid: 1000,
+        },
+        ProcessInfo {
+            pid: 2345,
+            name: "electron-app".to_string(),
+            oom_score: 600,
+            vm_rss_kb: 2_048_000,
+            _uid: 1000,
+        },
+        ProcessInfo {
+            pid: 3456,
+            name: "java".to_string(),
+            oom_score: 500,
+            vm_rss_kb: 1_536_000,
+            _uid: 1000,
+        },
+        ProcessInfo {
+            pid: 4567,
+            name: "firefox".to_string(),
+            oom_score: 400,
+            vm_rss_kb: 1_024_000,
+            _uid: 1000,
+        },
+        ProcessInfo {
+            pid: 5678,
+            name: "code".to_string(),
+            oom_score: 300,
+            vm_rss_kb: 768_000,
+            _uid: 1000,
+        },
+        ProcessInfo {
+            pid: 100,
+            name: "systemd".to_string(),
+            oom_score: -1000,
+            vm_rss_kb: 12_000,
+            _uid: 0,
+        },
+        ProcessInfo {
+            pid: 200,
+            name: "sshd".to_string(),
+            oom_score: 0,
+            vm_rss_kb: 8_000,
+            _uid: 0,
+        },
     ]
 }
 
@@ -211,14 +253,18 @@ fn run_daemon(config: &EarlyOomConfig) -> i32 {
     };
 
     println!("earlyoom: started");
-    println!("  Memory threshold: {:.0}% of {} = {}",
+    println!(
+        "  Memory threshold: {:.0}% of {} = {}",
         config.mem_threshold_percent,
         format_kb(meminfo.mem_total_kb),
-        format_kb((meminfo.mem_total_kb as f64 * config.mem_threshold_percent / 100.0) as u64));
-    println!("  Swap threshold: {:.0}% of {} = {}",
+        format_kb((meminfo.mem_total_kb as f64 * config.mem_threshold_percent / 100.0) as u64)
+    );
+    println!(
+        "  Swap threshold: {:.0}% of {} = {}",
         config.swap_threshold_percent,
         format_kb(meminfo.swap_total_kb),
-        format_kb((meminfo.swap_total_kb as f64 * config.swap_threshold_percent / 100.0) as u64));
+        format_kb((meminfo.swap_total_kb as f64 * config.swap_threshold_percent / 100.0) as u64)
+    );
     if let Some(ref prefer) = config.prefer_regex {
         println!("  Prefer: {}", prefer);
     }
@@ -231,14 +277,18 @@ fn run_daemon(config: &EarlyOomConfig) -> i32 {
     println!();
 
     // Status report
-    println!("mem avail: {} of {} ({:.1}%)",
+    println!(
+        "mem avail: {} of {} ({:.1}%)",
         format_kb(meminfo.mem_available_kb),
         format_kb(meminfo.mem_total_kb),
-        mem_percent);
-    println!("swap free: {} of {} ({:.1}%)",
+        mem_percent
+    );
+    println!(
+        "swap free: {} of {} ({:.1}%)",
         format_kb(meminfo.swap_free_kb),
         format_kb(meminfo.swap_total_kb),
-        swap_percent);
+        swap_percent
+    );
     println!();
 
     // Check thresholds
@@ -248,12 +298,16 @@ fn run_daemon(config: &EarlyOomConfig) -> i32 {
     if mem_low || swap_low {
         println!("earlyoom: LOW MEMORY CONDITION DETECTED!");
         if mem_low {
-            println!("  Memory available ({:.1}%) below threshold ({:.0}%)",
-                mem_percent, config.mem_threshold_percent);
+            println!(
+                "  Memory available ({:.1}%) below threshold ({:.0}%)",
+                mem_percent, config.mem_threshold_percent
+            );
         }
         if swap_low {
-            println!("  Swap free ({:.1}%) below threshold ({:.0}%)",
-                swap_percent, config.swap_threshold_percent);
+            println!(
+                "  Swap free ({:.1}%) below threshold ({:.0}%)",
+                swap_percent, config.swap_threshold_percent
+            );
         }
         println!();
 
@@ -262,11 +316,21 @@ fn run_daemon(config: &EarlyOomConfig) -> i32 {
         match victim {
             Some(proc) => {
                 if config.dryrun {
-                    println!("earlyoom: DRY RUN — would kill pid {} ({}), oom_score={}, rss={}",
-                        proc.pid, proc.name, proc.oom_score, format_kb(proc.vm_rss_kb));
+                    println!(
+                        "earlyoom: DRY RUN — would kill pid {} ({}), oom_score={}, rss={}",
+                        proc.pid,
+                        proc.name,
+                        proc.oom_score,
+                        format_kb(proc.vm_rss_kb)
+                    );
                 } else {
-                    println!("earlyoom: sending SIGTERM to pid {} ({}), oom_score={}, rss={}",
-                        proc.pid, proc.name, proc.oom_score, format_kb(proc.vm_rss_kb));
+                    println!(
+                        "earlyoom: sending SIGTERM to pid {} ({}), oom_score={}, rss={}",
+                        proc.pid,
+                        proc.name,
+                        proc.oom_score,
+                        format_kb(proc.vm_rss_kb)
+                    );
                     if config.notify {
                         println!("earlyoom: desktop notification sent");
                     }
@@ -277,7 +341,10 @@ fn run_daemon(config: &EarlyOomConfig) -> i32 {
             }
         }
     } else {
-        println!("earlyoom: memory OK, monitoring (every {}s)", config.report_interval);
+        println!(
+            "earlyoom: memory OK, monitoring (every {}s)",
+            config.report_interval
+        );
     }
 
     0
@@ -307,7 +374,7 @@ fn select_victim(config: &EarlyOomConfig) -> Option<ProcessInfo> {
             }
         });
     } else {
-        processes.sort_by(|a, b| b.oom_score.cmp(&a.oom_score));
+        processes.sort_by_key(|p| core::cmp::Reverse(p.oom_score));
     }
 
     processes.into_iter().next()

@@ -1,3 +1,34 @@
+## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 1 — 10 crates'
+##   TEST BUILDS did not compile on the host target (a `cargo build --tests --keep-going`
+##   across the 275 substantial userspace crates surfaced 31 such crates). Root causes &
+##   PROPER fixes:
+##     - at: `Error` enum lacked `#[derive(Debug)]` (tests use .unwrap()/.unwrap_err()).
+##       ALSO 2 real test-DATA bugs: epoch 1_747_491_045 was annotated "14:30:45" but is
+##       actually 14:10:45 UTC ((n/60)%60==10); function output was correct, fixed the
+##       two assertions to use epoch 1_747_492_245 (the real 14:30:45) and corrected the
+##       misleading comments. ALSO a real PRODUCTION bug in parse_job_file: `command_start`
+##       was a `usize` initialised to 0 and only updated on the first non-header line, so a
+##       header-only job file (no commands) returned the ENTIRE header as its command text;
+##       changed to `Option<usize>` so "no commands" yields an empty body. 44/44 pass.
+##     - blockdev: `__format_bytes` (double-underscore mangling) vs test `_format_bytes`
+##       → renamed to single-underscore to match the codebase's retained-but-unwired
+##       convention. ALSO 2 pre-existing collapsible_if clippy denies (let-chains).
+##     - cgroup: `_list_controllers`/`_num_cgroups` underscore-mangled but tests use the
+##       bare names → renamed. ALSO 2 pre-existing collapsible_if denies (let-chains).
+##     - chrony: enum `SourceMode::{_Peer,_Refclock}` mangled, test uses `Peer` → renamed.
+##     - chroot: `Options` lacked Debug → derived.
+##     - ethtool/fstrim/hdparm: `Command`/`Tool`/`Personality` lacked Debug → added to
+##       existing derive lists.
+##     - earlyoom: field `_priority` mangled, test reads `.priority` → renamed. ALSO a
+##       pre-existing unnecessary_sort_by clippy deny → sort_by_key(Reverse).
+##     - fontconfig: `FontStyle::{_BoldItalic,_Thin,_Medium,_SemiBold,_ExtraBold,_Black}`
+##       mangled; dropped the underscores (a complete, legitimately-named style enum).
+##   All 10 build, pass tests, clippy-clean (clippy::all), and build for ouros. NOTE: the
+##   underscore-mangling (functions/fields/variants prefixed with `_` to quiet dead_code,
+##   which doesn't actually silence it for those item kinds) is a recurring pattern across
+##   userspace; the tests were written against the original un-mangled names. ~21 more
+##   crates from the same sweep remain to fix.
+##
 ## BUG (noticed+FIXED 2026-05-31): userspace/{sha256sum,shell,coreutils} build.rs
 ##   emitted the per-crate `linker.ld` link arg UNCONDITIONALLY (for every target).
 ##   The custom script is only valid for the bare-metal x86_64-ouros target; applying

@@ -363,6 +363,7 @@ fn get_caller_uid(users: &[UserEntry]) -> u32 {
 // ============================================================================
 
 /// Parsed command-line options for chroot.
+#[derive(Debug)]
 struct Options {
     /// The new root directory path.
     newroot: String,

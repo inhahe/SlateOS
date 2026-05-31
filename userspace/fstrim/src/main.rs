@@ -70,7 +70,7 @@ fn print_err(msg: &[u8]) {
 
 // ── Data Types ─────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tool {
     Fstrim,
     Blkdiscard,

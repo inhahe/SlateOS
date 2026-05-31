@@ -228,9 +228,10 @@
 ##       SETGROUPS=116 — none exist as named; needs proper process-cred ABI)
 ##     monctl (DRM_IOCTL=850=TCP_SET_NODELAY — no DRM ioctl syscall)
 ##   MINOR WRONG (channel close off by one):
-##     logind, powerctl, service (CHANNEL_CLOSE=203=CHANNEL_TRY_RECV — should
-##       be 204; also CHANNEL_OPEN=200 maps to CHANNEL_CREATE which is fine).
-##       logind/powerctl also use SHUTDOWN=90/REBOOT=91 — verify those exist.
+##     [x] logind, powerctl, service (CHANNEL_CLOSE=203=CHANNEL_TRY_RECV —
+##       should be 204; CHANNEL_OPEN=200 maps to CHANNEL_CREATE which is fine).
+##       Verified SHUTDOWN=90/REBOOT=91 do NOT exist (90/91 unassigned) — see
+##       PROGRESS + power-management DESIGN GAP below.
 ##   UNVERIFIED: lsmod (INIT_MODULE=150 DELETE_MODULE=151 — check module ABI).
 ##
 ##  FIX ORDER (this pass): catastrophic std-capable tools first (jq, zip,
@@ -330,6 +331,62 @@
 ##           /proc/net/arp path entirely (it was never the real source).
 ##           Add/delete/probe become a clean ArpError::Unsupported (see DESIGN
 ##           GAP below).  Clippy-clean; 40 host tests pass; build-ouros clean.
+##   [x] service (f6c69767) — CHANNEL_CLOSE 203 -> 204.  Also fixed a real
+##           host-build break found in passing: cmd_enable called
+##           std::os::unix::fs::symlink unconditionally, which fails to compile
+##           on the windows host (so the crate couldn't even be tested);
+##           gated behind a #[cfg(unix)] make_symlink helper with a non-unix
+##           Unsupported fallback (the shipping target is unix).  recv length
+##           clamp uses (recv_ret as usize).min(buf.len()).  +6 tests;
+##           clippy-clean; build-ouros clean.
+##   [x] powerctl (cae914f3) — CHANNEL_CLOSE 203 -> 204.  Removed the fictional
+##           SYS_SHUTDOWN=90/SYS_REBOOT=91 consts and the SHUTDOWN_REASON_* /
+##           ACPI_S3/S4 consts: 90/91 are unassigned on OurOS, so the "direct
+##           syscall" fallback was dialing the wrong syscall.  IPC to the
+##           service manager (CHANNEL_OPEN/SEND/RECV/CLOSE) is retained as the
+##           primary path; the direct fallbacks now drive ACPI via procfs/sysfs
+##           knobs (/proc/acpi/power, /proc/acpi/sleep, /sys/power/state) and
+##           exit with a clear error if those writes fail.  Battery % uses
+##           checked_mul/checked_div.  +6 tests; clippy-clean; build-ouros clean.
+##   [x] logind (cff52b10) — CHANNEL_CLOSE was 203 (wrong) inside a dead syscall
+##           block that ALSO declared a syscall3 wrapper + SYS_SHUTDOWN=90 /
+##           SYS_REBOOT=91 — all unused and all wrong.  The block was never
+##           referenced (loginctl's power path is a stub that prints
+##           "Requesting <action>..." after policy/inhibitor checks), so it was
+##           removed wholesale and replaced with a NOTE explaining power actions
+##           must be delegated to the service manager over IPC (see power DESIGN
+##           GAP below).  Brought the crate clippy-clean while there: refactored
+##           Daemon::create_session's 12 positional args into a
+##           CreateSessionParams struct (named fields + Default; immune to silent
+##           &str arg swaps) and added a documented crate-level
+##           #![allow(dead_code)] — the daemon-side state machine is intentional
+##           scaffolding built ahead of the resident daemon event loop (only the
+##           loginctl personality is wired into main; the full Daemon API is
+##           exercised by the test suite).  100 host tests pass; build-ouros clean.
+##
+##  DESIGN GAP — no power-management syscall (shutdown/reboot/suspend/hibernate):
+##   OurOS has NO userspace syscall to change system power state; syscall
+##   numbers 90/91 (which powerctl/logind previously assumed were SHUTDOWN/
+##   REBOOT) are unassigned.  The real mechanism is to send an IPC request to
+##   the service manager (init), which orchestrates an ordered shutdown (stop
+##   units, sync filesystems, then trigger the platform power transition).
+##   Current state: powerctl sends that IPC request as its primary path and
+##   falls back to poking ACPI procfs/sysfs knobs directly; logind's loginctl
+##   power verbs are a stub that only runs policy/inhibitor checks and prints
+##   what it would do.  CORRECT FIX (when prioritised): define and implement
+##   the service-manager power-request IPC protocol (message type + ack/err),
+##   give powerctl and logind a shared client for it, and have init perform the
+##   final platform transition (ACPI S5/S3/S4) from kernel-mediated code rather
+##   than userspace writing ACPI registers.  TRIGGER: when the service-manager
+##   shutdown protocol or a dedicated power syscall lands in the roadmap.
+##
+##  TERMINAL DESIGN GAP — stty needs a termios/terminal-attribute path:
+##   stty currently targets IOCTL=16 (which is CLOCK_ADJTIME) — there is no
+##   SYS_IOCTL on OurOS, so there is no way to get/set terminal attributes
+##   (baud, echo, canonical mode, etc.) from userspace today.  DEFERRED until
+##   the kernel/console exposes a terminal-attribute syscall (or a console
+##   control channel).  Until then stty cannot be fixed correctly; documented
+##   here rather than wired to the wrong syscall.
 ##
 ##  DESIGN GAP — no ARP mutation syscalls (arp -d / -s / -D):
 ##   OurOS exposes SYS_ARP_TABLE=843 (read) and SYS_NET_IF_INFO=842 (interface

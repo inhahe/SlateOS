@@ -1,6 +1,6 @@
-//! OurOS FTP Client
+//! `OurOS` FTP Client
 //!
-//! A full-featured interactive FTP client for OurOS. Implements the FTP
+//! A full-featured interactive FTP client for `OurOS`. Implements the FTP
 //! protocol (RFC 959) over the kernel's TCP syscall interface with support
 //! for both active and passive data connections, ASCII and binary transfer
 //! modes, glob-based multi-file transfers, and anonymous login.
@@ -70,21 +70,19 @@
 
 use std::env;
 use std::fmt;
-use std::io::{self, Write};
+use std::fs;
+use std::io::{self, Read, Write};
 use std::process;
 
 // ============================================================================
 // Syscall numbers (from kernel/src/syscall/ tables)
 // ============================================================================
-
-const SYS_READ: u64 = 0;
-const SYS_WRITE: u64 = 1;
-const SYS_OPEN: u64 = 2;
-const SYS_CLOSE: u64 = 3;
-const SYS_STAT: u64 = 4;
-const SYS_GETCWD: u64 = 79;
-const SYS_CHDIR: u64 = 80;
-const SYS_GETDENTS: u64 = 78;
+//
+// Networking goes through the native OurOS TCP/DNS syscalls.  Local file I/O
+// (open/read/write/stat/getcwd/chdir/readdir) is handled entirely through
+// `std::fs`/`std::env`, which the OurOS libc routes to the correct native
+// syscalls — the previous raw Linux syscall numbers (0/1/2/3/4/78/79/80) did
+// not exist on this OS (0 and 1 are SYS_YIELD/SYS_EXIT here).
 
 const SYS_TCP_CONNECT: u64 = 800;
 const SYS_TCP_SEND: u64 = 801;
@@ -94,12 +92,6 @@ const SYS_TCP_BIND: u64 = 804;
 const SYS_TCP_ACCEPT: u64 = 805;
 const SYS_TCP_CLOSE_LISTENER: u64 = 806;
 const SYS_DNS_RESOLVE: u64 = 820;
-
-// Open flags
-const O_RDONLY: u64 = 0;
-const O_WRONLY: u64 = 1;
-const O_CREAT: u64 = 0o100;
-const O_TRUNC: u64 = 0o1000;
 
 // ============================================================================
 // Syscall interface
@@ -121,30 +113,6 @@ unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
             "syscall",
             inlateout("rax") nr as i64 => ret,
             in("rdi") a1,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Issue a 2-argument raw syscall.
-///
-/// # Safety
-///
-/// The caller must ensure `nr` is a valid syscall number and all arguments
-/// are valid for that syscall.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller guarantees arguments are valid.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack),
@@ -186,10 +154,6 @@ unsafe fn syscall1(_nr: u64, _a1: u64) -> i64 {
     -1
 }
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn syscall2(_nr: u64, _a1: u64, _a2: u64) -> i64 {
-    -1
-}
-#[cfg(not(target_arch = "x86_64"))]
 unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
     -1
 }
@@ -200,21 +164,25 @@ unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 
 /// Resolve a hostname to an IPv4 address (network byte order).
 fn dns_resolve(hostname: &str) -> Result<u32, FtpError> {
-    let mut result_ip: u32 = 0;
+    // The kernel writes the four address octets [a, b, c, d] (MSB first) here.
+    // Reading them back as a native-endian u32 on little-endian x86_64 would
+    // reverse the address, so reassemble explicitly with from_be_bytes (matching
+    // sys_tcp_connect's Ipv4Addr::from_u32 == to_be_bytes and parse_ipv4 below).
+    let mut octets = [0u8; 4];
     // SAFETY: We pass valid pointer/length for the hostname string and a valid
-    // mutable pointer for the kernel to write the resolved 4-byte IP address.
+    // mutable 4-byte buffer for the kernel to write the resolved IP address.
     let ret = unsafe {
         syscall3(
             SYS_DNS_RESOLVE,
             hostname.as_ptr() as u64,
             hostname.len() as u64,
-            &mut result_ip as *mut u32 as u64,
+            octets.as_mut_ptr() as u64,
         )
     };
     if ret < 0 {
         return Err(FtpError::DnsFailure(hostname.to_string()));
     }
-    Ok(result_ip)
+    Ok(u32::from_be_bytes(octets))
 }
 
 /// Open a TCP connection to the given IPv4 address and port.
@@ -225,8 +193,7 @@ fn tcp_connect(ip: u32, port: u16) -> Result<u64, FtpError> {
     let ret = unsafe { syscall3(SYS_TCP_CONNECT, u64::from(ip), u64::from(port), 0) };
     if ret < 0 {
         return Err(FtpError::ConnectionFailed(format!(
-            "tcp_connect failed: {}",
-            ret
+            "tcp_connect failed: {ret}"
         )));
     }
     Ok(ret as u64)
@@ -292,8 +259,7 @@ fn tcp_bind(port: u16) -> Result<u64, FtpError> {
     let ret = unsafe { syscall1(SYS_TCP_BIND, u64::from(port)) };
     if ret < 0 {
         return Err(FtpError::ConnectionFailed(format!(
-            "tcp_bind failed: {}",
-            ret
+            "tcp_bind failed: {ret}"
         )));
     }
     Ok(ret as u64)
@@ -305,8 +271,7 @@ fn tcp_accept(listener: u64) -> Result<u64, FtpError> {
     let ret = unsafe { syscall1(SYS_TCP_ACCEPT, listener) };
     if ret < 0 {
         return Err(FtpError::ConnectionFailed(format!(
-            "tcp_accept failed: {}",
-            ret
+            "tcp_accept failed: {ret}"
         )));
     }
     Ok(ret as u64)
@@ -320,190 +285,35 @@ fn tcp_close_listener(listener: u64) {
 
 /// Get the current working directory as a String.
 fn get_cwd() -> Result<String, FtpError> {
-    let mut buf = [0u8; 4096];
-    // SAFETY: We pass a valid writable buffer and its length.
-    let ret = unsafe {
-        syscall2(
-            SYS_GETCWD,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(FtpError::IoError("getcwd failed".to_string()));
-    }
-    let len = buf.iter().position(|&b| b == 0).unwrap_or(ret as usize);
-    String::from_utf8(buf[..len].to_vec())
-        .map_err(|_| FtpError::IoError("invalid cwd encoding".to_string()))
+    let dir = env::current_dir().map_err(|e| FtpError::IoError(format!("getcwd failed: {e}")))?;
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 /// Change the local working directory.
 fn change_dir(path: &str) -> Result<(), FtpError> {
-    let c_path: Vec<u8> = path.bytes().chain(core::iter::once(0)).collect();
-    // SAFETY: Null-terminated path string.
-    let ret = unsafe { syscall1(SYS_CHDIR, c_path.as_ptr() as u64) };
-    if ret < 0 {
-        return Err(FtpError::IoError(format!("chdir to '{}' failed", path)));
-    }
-    Ok(())
+    env::set_current_dir(path)
+        .map_err(|e| FtpError::IoError(format!("chdir to '{path}' failed: {e}")))
 }
 
-/// Open a file. Returns a file descriptor.
-fn file_open(path: &str, flags: u64, mode: u64) -> Result<u64, FtpError> {
-    let c_path: Vec<u8> = path.bytes().chain(core::iter::once(0)).collect();
-    // SAFETY: Null-terminated path, valid flags/mode combination.
-    let ret = unsafe { syscall3(SYS_OPEN, c_path.as_ptr() as u64, flags, mode) };
-    if ret < 0 {
-        return Err(FtpError::IoError(format!("open '{}' failed", path)));
-    }
-    Ok(ret as u64)
+/// Return the size of a file in bytes (also verifies it exists/is readable).
+fn file_size(path: &str) -> Result<u64, FtpError> {
+    let meta =
+        fs::metadata(path).map_err(|e| FtpError::IoError(format!("stat '{path}' failed: {e}")))?;
+    Ok(meta.len())
 }
 
-/// Read from a file descriptor. Returns bytes read.
-fn file_read(fd: u64, buf: &mut [u8]) -> Result<usize, FtpError> {
-    // SAFETY: Valid fd and writable buffer with correct length.
-    let ret = unsafe {
-        syscall3(
-            SYS_READ,
-            fd,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(FtpError::IoError("read failed".to_string()));
-    }
-    Ok(ret as usize)
-}
-
-/// Write to a file descriptor. Returns bytes written.
-fn file_write(fd: u64, data: &[u8]) -> Result<usize, FtpError> {
-    // SAFETY: Valid fd and readable buffer with correct length.
-    let ret = unsafe {
-        syscall3(
-            SYS_WRITE,
-            fd,
-            data.as_ptr() as u64,
-            data.len() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(FtpError::IoError("write failed".to_string()));
-    }
-    Ok(ret as usize)
-}
-
-/// Close a file descriptor.
-fn file_close(fd: u64) {
-    // SAFETY: Valid fd. Close failures are not actionable.
-    let _ = unsafe { syscall1(SYS_CLOSE, fd) };
-}
-
-/// Stat a file. Returns (size, mode) on success.
-fn file_stat(path: &str) -> Result<(u64, u32), FtpError> {
-    #[repr(C)]
-    struct KernelStat {
-        st_dev: u64,
-        st_ino: u64,
-        st_nlink: u64,
-        st_mode: u32,
-        st_uid: u32,
-        st_gid: u32,
-        _pad0: u32,
-        st_rdev: u64,
-        st_size: i64,
-        st_blksize: i64,
-        st_blocks: i64,
-        st_atime: i64,
-        st_atime_ns: u64,
-        st_mtime: i64,
-        st_mtime_ns: u64,
-        st_ctime: i64,
-        st_ctime_ns: u64,
-        _reserved: [i64; 3],
-    }
-
-    let c_path: Vec<u8> = path.bytes().chain(core::iter::once(0)).collect();
-    let mut stat_buf = core::mem::MaybeUninit::<KernelStat>::zeroed();
-    // SAFETY: Null-terminated path and properly-sized buffer for kernel stat.
-    let ret = unsafe {
-        syscall2(
-            SYS_STAT,
-            c_path.as_ptr() as u64,
-            stat_buf.as_mut_ptr() as u64,
-        )
-    };
-    if ret < 0 {
-        return Err(FtpError::IoError(format!("stat '{}' failed", path)));
-    }
-    // SAFETY: Kernel wrote a complete KernelStat on success.
-    let st = unsafe { stat_buf.assume_init() };
-    Ok((st.st_size as u64, st.st_mode))
-}
-
-/// List entries in a directory. Returns a vector of filenames.
+/// List entries in a directory. Returns a vector of filenames (excluding `.`/`..`).
 fn list_directory(path: &str) -> Result<Vec<String>, FtpError> {
-    #[repr(C)]
-    struct KernelDirent64 {
-        d_ino: u64,
-        d_off: i64,
-        d_reclen: u16,
-        d_type: u8,
-        // d_name follows as variable-length null-terminated string
+    let mut names = Vec::new();
+    let read_dir = fs::read_dir(path)
+        .map_err(|e| FtpError::IoError(format!("read_dir '{path}' failed: {e}")))?;
+    for entry in read_dir {
+        let dir_entry =
+            entry.map_err(|e| FtpError::IoError(format!("read_dir '{path}' failed: {e}")))?;
+        // std::fs::read_dir never yields "." or ".." entries.
+        names.push(dir_entry.file_name().to_string_lossy().into_owned());
     }
-
-    let fd = file_open(path, O_RDONLY, 0)?;
-    let mut entries = Vec::new();
-    let mut buf = [0u8; 4096];
-
-    loop {
-        // SAFETY: Valid fd, valid writable buffer.
-        let ret = unsafe {
-            syscall3(
-                SYS_GETDENTS,
-                fd,
-                buf.as_mut_ptr() as u64,
-                buf.len() as u64,
-            )
-        };
-        if ret < 0 {
-            file_close(fd);
-            return Err(FtpError::IoError("getdents failed".to_string()));
-        }
-        let nread = ret as usize;
-        if nread == 0 {
-            break;
-        }
-        let mut offset = 0;
-        while offset < nread {
-            if offset + core::mem::size_of::<KernelDirent64>() > nread {
-                break;
-            }
-            // SAFETY: We verified that offset + header size fits within nread.
-            // The kernel wrote valid dirent64 entries.
-            let dirent = unsafe {
-                &*(buf.as_ptr().add(offset) as *const KernelDirent64)
-            };
-            let name_offset = offset + core::mem::size_of::<KernelDirent64>();
-            let reclen = dirent.d_reclen as usize;
-            if reclen == 0 || offset + reclen > nread {
-                break;
-            }
-            let name_end = offset + reclen;
-            let name_bytes = &buf[name_offset..name_end];
-            let name_len = name_bytes.iter().position(|&b| b == 0)
-                .unwrap_or(name_bytes.len());
-            if let Ok(name) = core::str::from_utf8(&name_bytes[..name_len]) {
-                if name != "." && name != ".." {
-                    entries.push(name.to_string());
-                }
-            }
-            offset += reclen;
-        }
-    }
-
-    file_close(fd);
-    Ok(entries)
+    Ok(names)
 }
 
 // ============================================================================
@@ -597,7 +407,7 @@ fn parse_reply_code(line: &str) -> Option<u16> {
     }
     let code_str = &line[..3];
     let code: u16 = code_str.parse().ok()?;
-    if code < 100 || code > 599 {
+    if !(100..=599).contains(&code) {
         return None;
     }
     Some(code)
@@ -668,21 +478,21 @@ fn glob_match(pattern: &str, text: &str) -> bool {
 fn glob_match_bytes(pattern: &[u8], text: &[u8]) -> bool {
     let mut pi = 0;
     let mut ti = 0;
-    let mut star_pi = usize::MAX;
-    let mut star_ti = usize::MAX;
+    let mut star_pat = usize::MAX;
+    let mut star_txt = usize::MAX;
 
     while ti < text.len() {
         if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == text[ti]) {
             pi += 1;
             ti += 1;
         } else if pi < pattern.len() && pattern[pi] == b'*' {
-            star_pi = pi;
-            star_ti = ti;
+            star_pat = pi;
+            star_txt = ti;
             pi += 1;
-        } else if star_pi != usize::MAX {
-            pi = star_pi + 1;
-            star_ti += 1;
-            ti = star_ti;
+        } else if star_pat != usize::MAX {
+            pi = star_pat + 1;
+            star_txt += 1;
+            ti = star_txt;
         } else {
             return false;
         }
@@ -740,10 +550,10 @@ fn parse_args(args: &[String]) -> CliArgs {
             "-p" => result.passive = true,
             "-a" => result.passive = false,
             _ => {
-                if arg.starts_with('-') {
+                if let Some(flags) = arg.strip_prefix('-') {
                     // Try combined flags like "-nv"
                     let mut recognized = true;
-                    for ch in arg[1..].chars() {
+                    for ch in flags.chars() {
                         match ch {
                             'n' => result.auto_login = false,
                             'v' => result.verbose = true,
@@ -791,22 +601,52 @@ fn parse_args(args: &[String]) -> CliArgs {
 /// A parsed interactive command from the user.
 #[derive(Debug, PartialEq)]
 enum Command {
-    Open { host: String, port: u16 },
+    Open {
+        host: String,
+        port: u16,
+    },
     Close,
     Quit,
-    User { name: Option<String> },
-    Cd { path: String },
+    User {
+        name: Option<String>,
+    },
+    Cd {
+        path: String,
+    },
     Pwd,
-    Ls { path: Option<String> },
-    Dir { path: Option<String> },
-    Get { remote: String, local: Option<String> },
-    Put { local: String, remote: Option<String> },
-    Mget { pattern: String },
-    Mput { pattern: String },
-    Mkdir { path: String },
-    Rmdir { path: String },
-    Delete { path: String },
-    Rename { from: String, to: String },
+    Ls {
+        path: Option<String>,
+    },
+    Dir {
+        path: Option<String>,
+    },
+    Get {
+        remote: String,
+        local: Option<String>,
+    },
+    Put {
+        local: String,
+        remote: Option<String>,
+    },
+    Mget {
+        pattern: String,
+    },
+    Mput {
+        pattern: String,
+    },
+    Mkdir {
+        path: String,
+    },
+    Rmdir {
+        path: String,
+    },
+    Delete {
+        path: String,
+    },
+    Rename {
+        from: String,
+        to: String,
+    },
     Binary,
     Ascii,
     Type,
@@ -814,12 +654,16 @@ enum Command {
     Active,
     Status,
     System,
-    Size { path: String },
+    Size {
+        path: String,
+    },
     Hash,
     Bell,
     Verbose,
     Debug,
-    Lcd { path: Option<String> },
+    Lcd {
+        path: Option<String>,
+    },
     Lpwd,
     Prompt,
     Glob,
@@ -852,7 +696,7 @@ fn parse_command(line: &str) -> Command {
         "close" | "disconnect" => Command::Close,
         "quit" | "bye" | "exit" => Command::Quit,
         "user" => Command::User {
-            name: arg1.map(|s| s.to_string()),
+            name: arg1.map(std::string::ToString::to_string),
         },
         "cd" | "cwd" => {
             let path = match arg1 {
@@ -863,10 +707,10 @@ fn parse_command(line: &str) -> Command {
         }
         "pwd" => Command::Pwd,
         "ls" | "nlist" => Command::Ls {
-            path: arg1.map(|s| s.to_string()),
+            path: arg1.map(std::string::ToString::to_string),
         },
         "dir" | "list" => Command::Dir {
-            path: arg1.map(|s| s.to_string()),
+            path: arg1.map(std::string::ToString::to_string),
         },
         "get" | "recv" => {
             let remote = match arg1 {
@@ -875,7 +719,7 @@ fn parse_command(line: &str) -> Command {
             };
             Command::Get {
                 remote,
-                local: arg2.map(|s| s.to_string()),
+                local: arg2.map(std::string::ToString::to_string),
             }
         }
         "put" | "send" => {
@@ -885,7 +729,7 @@ fn parse_command(line: &str) -> Command {
             };
             Command::Put {
                 local,
-                remote: arg2.map(|s| s.to_string()),
+                remote: arg2.map(std::string::ToString::to_string),
             }
         }
         "mget" => {
@@ -953,7 +797,7 @@ fn parse_command(line: &str) -> Command {
         "verbose" => Command::Verbose,
         "debug" => Command::Debug,
         "lcd" => Command::Lcd {
-            path: arg1.map(|s| s.to_string()),
+            path: arg1.map(std::string::ToString::to_string),
         },
         "lpwd" => Command::Lpwd,
         "prompt" => Command::Prompt,
@@ -1095,17 +939,17 @@ impl FtpSession {
                 }
                 full_text.push_str(&line);
 
-                if let Some(code) = final_code {
-                    if is_final_reply_line(&line, code) {
-                        if self.verbose && !self.debug {
-                            // In verbose (but non-debug) mode, print the reply.
-                            println!("{full_text}");
-                        }
-                        return Ok(FtpReply {
-                            code,
-                            text: full_text,
-                        });
+                if let Some(code) = final_code
+                    && is_final_reply_line(&line, code)
+                {
+                    if self.verbose && !self.debug {
+                        // In verbose (but non-debug) mode, print the reply.
+                        println!("{full_text}");
                     }
+                    return Ok(FtpReply {
+                        code,
+                        text: full_text,
+                    });
                 }
 
                 continue;
@@ -1276,9 +1120,8 @@ impl FtpSession {
             )));
         }
 
-        let (ip, port) = parse_pasv_response(&reply.text).ok_or_else(|| {
-            FtpError::ProtocolError("Failed to parse PASV response".to_string())
-        })?;
+        let (ip, port) = parse_pasv_response(&reply.text)
+            .ok_or_else(|| FtpError::ProtocolError("Failed to parse PASV response".to_string()))?;
 
         tcp_connect(ip, port)
     }
@@ -1431,10 +1274,7 @@ impl FtpSession {
 
         let local_name = local.unwrap_or(remote);
         // Extract just the filename if remote contains a path.
-        let local_name = local_name
-            .rsplit('/')
-            .next()
-            .unwrap_or(local_name);
+        let local_name = local_name.rsplit('/').next().unwrap_or(local_name);
 
         let data_handle = self.open_data_connection()?;
 
@@ -1449,8 +1289,16 @@ impl FtpSession {
             )));
         }
 
-        // Open local file for writing.
-        let fd = file_open(local_name, O_WRONLY | O_CREAT | O_TRUNC, 0o644)?;
+        // Open local file for writing (create/truncate).
+        let mut file = match fs::File::create(local_name) {
+            Ok(f) => f,
+            Err(e) => {
+                tcp_close(data_handle);
+                return Err(FtpError::IoError(format!(
+                    "open '{local_name}' failed: {e}"
+                )));
+            }
+        };
 
         let mut total: u64 = 0;
         let mut buf = [0u8; 8192];
@@ -1462,15 +1310,11 @@ impl FtpSession {
                 break;
             }
             // Write to local file.
-            let mut written = 0;
-            while written < n {
-                let w = file_write(fd, &buf[written..n])?;
-                if w == 0 {
-                    file_close(fd);
-                    tcp_close(data_handle);
-                    return Err(FtpError::IoError("write to local file failed".to_string()));
-                }
-                written += w;
+            if let Err(e) = file.write_all(&buf[..n]) {
+                tcp_close(data_handle);
+                return Err(FtpError::IoError(format!(
+                    "write to local file failed: {e}"
+                )));
             }
             total += n as u64;
 
@@ -1484,7 +1328,7 @@ impl FtpSession {
             }
         }
 
-        file_close(fd);
+        drop(file);
         tcp_close(data_handle);
 
         if self.hash_print {
@@ -1513,13 +1357,10 @@ impl FtpSession {
 
         let remote_name = remote.unwrap_or(local);
         // Extract just the filename if local contains a path.
-        let remote_name = remote_name
-            .rsplit('/')
-            .next()
-            .unwrap_or(remote_name);
+        let remote_name = remote_name.rsplit('/').next().unwrap_or(remote_name);
 
         // Check that the local file exists and get its size.
-        let (file_size, _mode) = file_stat(local)?;
+        let local_size = file_size(local)?;
 
         let data_handle = self.open_data_connection()?;
 
@@ -1535,14 +1376,28 @@ impl FtpSession {
         }
 
         // Open local file for reading.
-        let fd = file_open(local, O_RDONLY, 0)?;
+        let mut file = match fs::File::open(local) {
+            Ok(f) => f,
+            Err(e) => {
+                tcp_close(data_handle);
+                return Err(FtpError::IoError(format!("open '{local}' failed: {e}")));
+            }
+        };
 
         let mut total: u64 = 0;
         let mut buf = [0u8; 8192];
         let mut hash_count: u64 = 0;
 
         loop {
-            let n = file_read(fd, &mut buf)?;
+            let n = match file.read(&mut buf) {
+                Ok(n) => n,
+                Err(e) => {
+                    tcp_close(data_handle);
+                    return Err(FtpError::IoError(format!(
+                        "read from local file failed: {e}"
+                    )));
+                }
+            };
             if n == 0 {
                 break;
             }
@@ -1559,14 +1414,14 @@ impl FtpSession {
             }
         }
 
-        file_close(fd);
+        drop(file);
         tcp_close(data_handle);
 
         if self.hash_print {
             println!();
         }
 
-        println!("{total} bytes sent (file size: {file_size}).");
+        println!("{total} bytes sent (file size: {local_size}).");
 
         if self.bell {
             print!("\x07");
@@ -1808,7 +1663,11 @@ impl FtpSession {
         }
         println!(
             "Mode: {}; Type: {}; Verbose: {}; Debug: {}",
-            if self.passive_mode { "passive" } else { "active" },
+            if self.passive_mode {
+                "passive"
+            } else {
+                "active"
+            },
             self.transfer_type,
             if self.verbose { "on" } else { "off" },
             if self.debug { "on" } else { "off" },
@@ -1871,9 +1730,12 @@ fn read_line(prompt: &str) -> Option<String> {
     let _ = io::stdout().flush();
     let mut line = String::new();
     match io::stdin().read_line(&mut line) {
-        Ok(0) => None,
-        Ok(_) => Some(line.trim_end_matches('\n').trim_end_matches('\r').to_string()),
-        Err(_) => None,
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(
+            line.trim_end_matches('\n')
+                .trim_end_matches('\r')
+                .to_string(),
+        ),
     }
 }
 
@@ -1886,12 +1748,8 @@ fn read_password(prompt: &str) -> Option<String> {
 
 /// Run the interactive FTP REPL.
 fn run_repl(session: &mut FtpSession) {
-    loop {
-        let line = match read_line("ftp> ") {
-            Some(l) => l,
-            None => break, // EOF
-        };
-
+    // `read_line` returns None on EOF, which ends the REPL.
+    while let Some(line) = read_line("ftp> ") {
         let cmd = parse_command(&line);
         let result = execute_command(session, cmd);
 
@@ -1918,7 +1776,11 @@ fn execute_command(session: &mut FtpSession, cmd: Command) -> Result<bool, FtpEr
             if session.is_connected() {
                 // Prompt for username.
                 let user = read_line("Name: ").unwrap_or_default();
-                let user = if user.is_empty() { "anonymous".to_string() } else { user };
+                let user = if user.is_empty() {
+                    "anonymous".to_string()
+                } else {
+                    user
+                };
                 let pass = if user == "anonymous" {
                     "user@ouros".to_string()
                 } else {
@@ -1950,7 +1812,11 @@ fn execute_command(session: &mut FtpSession, cmd: Command) -> Result<bool, FtpEr
                 Some(n) => n,
                 None => read_line("Name: ").unwrap_or_default(),
             };
-            let user = if user.is_empty() { "anonymous".to_string() } else { user };
+            let user = if user.is_empty() {
+                "anonymous".to_string()
+            } else {
+                user
+            };
             let pass = if user == "anonymous" {
                 "user@ouros".to_string()
             } else {
@@ -2034,10 +1900,7 @@ fn execute_command(session: &mut FtpSession, cmd: Command) -> Result<bool, FtpEr
         }
         Command::Bell => {
             session.bell = !session.bell;
-            println!(
-                "Bell {}.",
-                if session.bell { "on" } else { "off" }
-            );
+            println!("Bell {}.", if session.bell { "on" } else { "off" });
         }
         Command::Verbose => {
             session.verbose = !session.verbose;
@@ -2058,17 +1921,14 @@ fn execute_command(session: &mut FtpSession, cmd: Command) -> Result<bool, FtpEr
             );
         }
         Command::Lcd { path } => {
-            match path {
-                Some(p) => {
-                    change_dir(&p)?;
-                    let cwd = get_cwd().unwrap_or_else(|_| p.clone());
-                    println!("Local directory now: {cwd}");
-                }
-                None => {
-                    // No path = go to home / root.
-                    change_dir("/")?;
-                    println!("Local directory now: /");
-                }
+            if let Some(p) = path {
+                change_dir(&p)?;
+                let cwd = get_cwd().unwrap_or_else(|_| p.clone());
+                println!("Local directory now: {cwd}");
+            } else {
+                // No path = go to home / root.
+                change_dir("/")?;
+                println!("Local directory now: /");
             }
         }
         Command::Lpwd => {
@@ -2079,7 +1939,11 @@ fn execute_command(session: &mut FtpSession, cmd: Command) -> Result<bool, FtpEr
             session.interactive_prompt = !session.interactive_prompt;
             println!(
                 "Interactive prompting {}.",
-                if session.interactive_prompt { "on" } else { "off" }
+                if session.interactive_prompt {
+                    "on"
+                } else {
+                    "off"
+                }
             );
         }
         Command::Glob => {
@@ -2443,7 +2307,10 @@ mod tests {
             }
         );
         // rm is alias for delete
-        assert!(matches!(parse_command("rm file.txt"), Command::Delete { .. }));
+        assert!(matches!(
+            parse_command("rm file.txt"),
+            Command::Delete { .. }
+        ));
     }
 
     #[test]
@@ -2497,7 +2364,10 @@ mod tests {
         assert!(matches!(parse_command("rmdir"), Command::Unknown(_)));
         assert!(matches!(parse_command("delete"), Command::Unknown(_)));
         assert!(matches!(parse_command("rename"), Command::Unknown(_)));
-        assert!(matches!(parse_command("rename onlyOne"), Command::Unknown(_)));
+        assert!(matches!(
+            parse_command("rename onlyOne"),
+            Command::Unknown(_)
+        ));
         assert!(matches!(parse_command("size"), Command::Unknown(_)));
     }
 

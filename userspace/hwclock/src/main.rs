@@ -379,20 +379,48 @@ fn write_rtc(dt: &DateTime) -> Result<(), String> {
 // System time helpers
 // ---------------------------------------------------------------------------
 
-/// Read the system (kernel) clock as a Unix timestamp, using
-/// `/proc/clock` or `/proc/time`. Returns seconds since the Unix epoch.
+// Native OurOS clock syscalls (kernel syscall/number.rs is the ABI source of
+// truth).  There is NO combined clock_gettime(clock_id, *ts): SYS_CLOCK_REALTIME
+// takes no arguments and returns wall-clock nanoseconds-since-epoch in rax, and
+// SYS_CLOCK_SETTIME takes the absolute target ns as its only argument.  hwclock
+// previously read and wrote the wall clock through the nonexistent, read-only
+// /proc/time provider, so it could neither read nor set the system clock.
+const SYS_CLOCK_REALTIME: u64 = 14;
+const SYS_CLOCK_SETTIME: u64 = 15;
+const NS_PER_SEC: i64 = 1_000_000_000;
+
+/// Read the wall clock as nanoseconds since the Unix epoch via
+/// `SYS_CLOCK_REALTIME`.
+fn read_realtime_ns() -> Result<i64, String> {
+    let ret: i64;
+    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
+    // userspace; it only reads the kernel clock into rax.  rcx/r11 are
+    // clobbered by the SYSCALL instruction per the x86_64 ABI.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_CLOCK_REALTIME,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack, nomem),
+        );
+    }
+    if ret < 0 {
+        return Err(format!("clock_realtime failed with error {ret}"));
+    }
+    Ok(ret)
+}
+
+/// Read the system (kernel) clock as a Unix timestamp (whole seconds).
 fn read_system_time() -> Result<u64, String> {
-    // OurOS exposes the current UTC Unix timestamp in /proc/time.
-    if let Ok(content) = fs::read_to_string("/proc/time") {
-        let trimmed = content.trim();
-        // May be "seconds.nanoseconds" — take only the integer part.
-        let secs_str = trimmed.split('.').next().unwrap_or(trimmed);
-        return secs_str
-            .parse::<u64>()
-            .map_err(|e| format!("/proc/time parse error: {e}"));
+    // Primary: the native kernel wall clock.
+    if let Ok(ns) = read_realtime_ns() {
+        return Ok((ns / NS_PER_SEC) as u64);
     }
 
-    // Fallback: read /proc/uptime and /proc/stat for boot time.
+    // Fallback: derive from boot time + uptime if the wall clock is not yet
+    // initialised (kernel returns EINVAL until timekeeping is up).
     let uptime_content = fs::read_to_string("/proc/uptime")
         .map_err(|e| format!("/proc/uptime: {e}"))?;
     let uptime_secs_str = uptime_content
@@ -417,14 +445,33 @@ fn read_system_time() -> Result<u64, String> {
         }
     }
 
-    Err("could not determine system time: no /proc/time, no btime in /proc/stat".into())
+    Err("could not determine system time: clock_realtime failed and no btime in /proc/stat".into())
 }
 
-/// Set the system clock to a given Unix timestamp by writing to `/proc/time`.
+/// Set the system clock to a given Unix timestamp via `SYS_CLOCK_SETTIME`.
+/// Requires `CAP_SYS_TIME`.
 fn write_system_time(unix_secs: u64) -> Result<(), String> {
-    let path = "/proc/time";
-    fs::write(path, format!("{unix_secs}").as_bytes())
-        .map_err(|e| format!("{path}: {e}"))
+    let target_ns = (unix_secs as i64).saturating_mul(NS_PER_SEC);
+    let ret: i64;
+    // SAFETY: single scalar argument (absolute target ns); touches no userspace
+    // memory.  rcx/r11 are clobbered by SYSCALL per the x86_64 ABI.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_CLOCK_SETTIME,
+            in("rdi") target_ns as u64,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack, nomem),
+        );
+    }
+    if ret < 0 {
+        return Err(format!(
+            "clock_settime failed with error {ret} (need CAP_SYS_TIME?)"
+        ));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

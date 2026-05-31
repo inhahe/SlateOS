@@ -60,7 +60,8 @@ impl Rng {
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         self.state
@@ -118,15 +119,27 @@ impl Pattern {
     /// Returns cells as (row_offset, col_offset) relative to placement point
     fn cells(self) -> Vec<(i32, i32)> {
         match self {
-            Self::Glider => vec![(0,1), (1,2), (2,0), (2,1), (2,2)],
-            Self::Blinker => vec![(0,0), (0,1), (0,2)],
-            Self::Toad => vec![(0,1), (0,2), (0,3), (1,0), (1,1), (1,2)],
-            Self::Beacon => vec![(0,0), (0,1), (1,0), (2,3), (3,2), (3,3)],
+            Self::Glider => vec![(0, 1), (1, 2), (2, 0), (2, 1), (2, 2)],
+            Self::Blinker => vec![(0, 0), (0, 1), (0, 2)],
+            Self::Toad => vec![(0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2)],
+            Self::Beacon => vec![(0, 0), (0, 1), (1, 0), (2, 3), (3, 2), (3, 3)],
             Self::Pulsar => {
                 let mut cells = Vec::new();
                 // Pulsar is symmetric — define one quadrant and mirror
-                let quarter = [(1,2), (1,3), (1,4), (2,1), (3,1), (4,1),
-                               (2,6), (3,6), (4,6), (6,2), (6,3), (6,4)];
+                let quarter = [
+                    (1, 2),
+                    (1, 3),
+                    (1, 4),
+                    (2, 1),
+                    (3, 1),
+                    (4, 1),
+                    (2, 6),
+                    (3, 6),
+                    (4, 6),
+                    (6, 2),
+                    (6, 3),
+                    (6, 4),
+                ];
                 for &(r, c) in &quarter {
                     cells.push((r, c));
                     cells.push((r, 12 - c));
@@ -138,37 +151,57 @@ impl Pattern {
                 cells
             }
             Self::GosperGun => vec![
-                (0,24),
-                (1,22), (1,24),
-                (2,12), (2,13), (2,20), (2,21), (2,34), (2,35),
-                (3,11), (3,15), (3,20), (3,21), (3,34), (3,35),
-                (4,0), (4,1), (4,10), (4,16), (4,20), (4,21),
-                (5,0), (5,1), (5,10), (5,14), (5,16), (5,17), (5,22), (5,24),
-                (6,10), (6,16), (6,24),
-                (7,11), (7,15),
-                (8,12), (8,13),
+                (0, 24),
+                (1, 22),
+                (1, 24),
+                (2, 12),
+                (2, 13),
+                (2, 20),
+                (2, 21),
+                (2, 34),
+                (2, 35),
+                (3, 11),
+                (3, 15),
+                (3, 20),
+                (3, 21),
+                (3, 34),
+                (3, 35),
+                (4, 0),
+                (4, 1),
+                (4, 10),
+                (4, 16),
+                (4, 20),
+                (4, 21),
+                (5, 0),
+                (5, 1),
+                (5, 10),
+                (5, 14),
+                (5, 16),
+                (5, 17),
+                (5, 22),
+                (5, 24),
+                (6, 10),
+                (6, 16),
+                (6, 24),
+                (7, 11),
+                (7, 15),
+                (8, 12),
+                (8, 13),
             ],
             Self::Lwss => vec![
-                (0,1), (0,4),
-                (1,0),
-                (2,0), (2,4),
-                (3,0), (3,1), (3,2), (3,3),
+                (0, 1),
+                (0, 4),
+                (1, 0),
+                (2, 0),
+                (2, 4),
+                (3, 0),
+                (3, 1),
+                (3, 2),
+                (3, 3),
             ],
-            Self::Diehard => vec![
-                (0,6),
-                (1,0), (1,1),
-                (2,1), (2,5), (2,6), (2,7),
-            ],
-            Self::Acorn => vec![
-                (0,1),
-                (1,3),
-                (2,0), (2,1), (2,4), (2,5), (2,6),
-            ],
-            Self::RPentomino => vec![
-                (0,1), (0,2),
-                (1,0), (1,1),
-                (2,1),
-            ],
+            Self::Diehard => vec![(0, 6), (1, 0), (1, 1), (2, 1), (2, 5), (2, 6), (2, 7)],
+            Self::Acorn => vec![(0, 1), (1, 3), (2, 0), (2, 1), (2, 4), (2, 5), (2, 6)],
+            Self::RPentomino => vec![(0, 1), (0, 2), (1, 0), (1, 1), (2, 1)],
         }
     }
 }
@@ -194,7 +227,10 @@ impl Grid {
 
     fn get(&self, row: usize, col: usize) -> bool {
         if row < self.height && col < self.width {
-            self.cells.get(row * self.width + col).copied().unwrap_or(false)
+            self.cells
+                .get(row * self.width + col)
+                .copied()
+                .unwrap_or(false)
         } else {
             false
         }
@@ -463,7 +499,12 @@ impl LifeApp {
                     _ => {}
                 }
             }
-            Event::Mouse(MouseEvent { kind: MouseEventKind::Press(MouseButton::Left), x, y, .. }) => {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x,
+                y,
+                ..
+            }) => {
                 let grid_y_start = 44.0;
                 if *y >= grid_y_start {
                     let row = ((y - grid_y_start) / self.cell_size) as usize + self.view_row;
@@ -481,29 +522,28 @@ impl LifeApp {
 
     fn handle_pattern_event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, .. }) => {
-                match key {
-                    Key::Up => {
-                        if self.selected_pattern > 0 {
-                            self.selected_pattern -= 1;
-                        }
+            Event::Key(KeyEvent { key, .. }) => match key {
+                Key::Up => {
+                    if self.selected_pattern > 0 {
+                        self.selected_pattern -= 1;
                     }
-                    Key::Down => {
-                        if self.selected_pattern + 1 < Pattern::ALL.len() {
-                            self.selected_pattern += 1;
-                        }
-                    }
-                    Key::Enter => {
-                        let pat = Pattern::ALL[self.selected_pattern];
-                        self.grid.place_pattern(pat, self.cursor_row, self.cursor_col);
-                        self.view = View::Main;
-                    }
-                    Key::Escape => {
-                        self.view = View::Main;
-                    }
-                    _ => {}
                 }
-            }
+                Key::Down => {
+                    if self.selected_pattern + 1 < Pattern::ALL.len() {
+                        self.selected_pattern += 1;
+                    }
+                }
+                Key::Enter => {
+                    let pat = Pattern::ALL[self.selected_pattern];
+                    self.grid
+                        .place_pattern(pat, self.cursor_row, self.cursor_col);
+                    self.view = View::Main;
+                }
+                Key::Escape => {
+                    self.view = View::Main;
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -513,21 +553,28 @@ impl LifeApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: COL_CRUST,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Top bar
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height: 40.0,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: 40.0,
             color: COL_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: 12.0, y: 10.0,
+            x: 12.0,
+            y: 10.0,
             text: "Game of Life".to_string(),
             font_size: 18.0,
             color: COL_TEXT,
@@ -539,7 +586,8 @@ impl LifeApp {
         let status = if self.running { "Running" } else { "Paused" };
         let status_color = if self.running { COL_GREEN } else { COL_YELLOW };
         cmds.push(RenderCommand::Text {
-            x: 160.0, y: 12.0,
+            x: 160.0,
+            y: 12.0,
             text: status.to_string(),
             font_size: 14.0,
             color: status_color,
@@ -549,7 +597,8 @@ impl LifeApp {
 
         // Generation
         cmds.push(RenderCommand::Text {
-            x: 260.0, y: 12.0,
+            x: 260.0,
+            y: 12.0,
             text: format!("Gen: {}", self.generation),
             font_size: 14.0,
             color: COL_SUBTEXT0,
@@ -559,7 +608,8 @@ impl LifeApp {
 
         // Population
         cmds.push(RenderCommand::Text {
-            x: 400.0, y: 12.0,
+            x: 400.0,
+            y: 12.0,
             text: format!("Pop: {}", self.grid.population()),
             font_size: 14.0,
             color: COL_SUBTEXT0,
@@ -569,7 +619,8 @@ impl LifeApp {
 
         // Speed
         cmds.push(RenderCommand::Text {
-            x: 530.0, y: 12.0,
+            x: 530.0,
+            y: 12.0,
             text: format!("Speed: {}", self.speed),
             font_size: 14.0,
             color: COL_SUBTEXT0,
@@ -579,7 +630,8 @@ impl LifeApp {
 
         // Grid size
         cmds.push(RenderCommand::Text {
-            x: 640.0, y: 12.0,
+            x: 640.0,
+            y: 12.0,
             text: format!("{}x{}", self.grid.width, self.grid.height),
             font_size: 14.0,
             color: COL_OVERLAY0,
@@ -605,7 +657,8 @@ impl LifeApp {
                 if alive {
                     let color = if is_cursor { COL_LAVENDER } else { COL_GREEN };
                     cmds.push(RenderCommand::FillRect {
-                        x: cx, y: cy,
+                        x: cx,
+                        y: cy,
                         width: self.cell_size - 0.5,
                         height: self.cell_size - 0.5,
                         color,
@@ -613,7 +666,8 @@ impl LifeApp {
                     });
                 } else if is_cursor {
                     cmds.push(RenderCommand::FillRect {
-                        x: cx, y: cy,
+                        x: cx,
+                        y: cy,
                         width: self.cell_size - 0.5,
                         height: self.cell_size - 0.5,
                         color: COL_SURFACE1,
@@ -624,7 +678,8 @@ impl LifeApp {
                 // Grid lines
                 if self.show_grid && self.cell_size >= 4.0 {
                     cmds.push(RenderCommand::StrokeRect {
-                        x: cx, y: cy,
+                        x: cx,
+                        y: cy,
                         width: self.cell_size,
                         height: self.cell_size,
                         color: COL_SURFACE0,
@@ -661,7 +716,10 @@ impl LifeApp {
     fn render_pattern_select(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
         // Dim background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: Color::rgba(0, 0, 0, 180),
             corner_radii: CornerRadii::ZERO,
         });
@@ -672,13 +730,17 @@ impl LifeApp {
         let bh = 340.0;
 
         cmds.push(RenderCommand::FillRect {
-            x: bx, y: by, width: bw, height: bh,
+            x: bx,
+            y: by,
+            width: bw,
+            height: bh,
             color: COL_MANTLE,
             corner_radii: CornerRadii::all(12.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: bx + bw / 2.0 - 60.0, y: by + 16.0,
+            x: bx + bw / 2.0 - 60.0,
+            y: by + 16.0,
             text: "Place Pattern".to_string(),
             font_size: 18.0,
             color: COL_TEXT,
@@ -692,8 +754,10 @@ impl LifeApp {
 
             if is_sel {
                 cmds.push(RenderCommand::FillRect {
-                    x: bx + 10.0, y: cy - 2.0,
-                    width: bw - 20.0, height: 24.0,
+                    x: bx + 10.0,
+                    y: cy - 2.0,
+                    width: bw - 20.0,
+                    height: 24.0,
                     color: COL_SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -701,18 +765,24 @@ impl LifeApp {
 
             let color = if is_sel { COL_BLUE } else { COL_SUBTEXT0 };
             cmds.push(RenderCommand::Text {
-                x: bx + 20.0, y: cy,
+                x: bx + 20.0,
+                y: cy,
                 text: pat.name().to_string(),
                 font_size: 14.0,
                 color,
-                font_weight: if is_sel { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_sel {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
             cy += 28.0;
         }
 
         cmds.push(RenderCommand::Text {
-            x: bx + 20.0, y: by + bh - 30.0,
+            x: bx + 20.0,
+            y: by + bh - 30.0,
             text: "Enter=Place  Esc=Cancel".to_string(),
             font_size: 12.0,
             color: COL_OVERLAY0,
@@ -723,7 +793,10 @@ impl LifeApp {
 
     fn render_help(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: Color::rgba(0, 0, 0, 180),
             corner_radii: CornerRadii::ZERO,
         });
@@ -734,13 +807,17 @@ impl LifeApp {
         let bh = 300.0;
 
         cmds.push(RenderCommand::FillRect {
-            x: bx, y: by, width: bw, height: bh,
+            x: bx,
+            y: by,
+            width: bw,
+            height: bh,
             color: COL_MANTLE,
             corner_radii: CornerRadii::all(12.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: bx + bw / 2.0 - 50.0, y: by + 16.0,
+            x: bx + bw / 2.0 - 50.0,
+            y: by + 16.0,
             text: "Controls".to_string(),
             font_size: 20.0,
             color: COL_TEXT,
@@ -765,7 +842,8 @@ impl LifeApp {
         let mut cy = by + 50.0;
         for (key, desc) in &helps {
             cmds.push(RenderCommand::Text {
-                x: bx + 24.0, y: cy,
+                x: bx + 24.0,
+                y: cy,
                 text: (*key).to_string(),
                 font_size: 13.0,
                 color: COL_BLUE,
@@ -773,7 +851,8 @@ impl LifeApp {
                 max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: bx + 150.0, y: cy,
+                x: bx + 150.0,
+                y: cy,
                 text: (*desc).to_string(),
                 font_size: 13.0,
                 color: COL_SUBTEXT0,
@@ -883,7 +962,9 @@ mod tests {
         // Surround (2,2) with all 8 neighbors
         for dr in [-1i32, 0, 1] {
             for dc in [-1i32, 0, 1] {
-                if dr == 0 && dc == 0 { continue; }
+                if dr == 0 && dc == 0 {
+                    continue;
+                }
                 grid.set((2 + dr) as usize, (2 + dc) as usize, true);
             }
         }
@@ -1450,7 +1531,6 @@ mod tests {
             kind: MouseEventKind::Press(MouseButton::Left),
             x: 16.0, // col = 16/8 = 2
             y: 52.0, // row = (52-44)/8 = 1
-            modifiers: Modifiers::default(),
         }));
         assert!(app.grid.get(1, 2));
     }
@@ -1461,7 +1541,10 @@ mod tests {
         let pop = app.grid.population();
         app.event(&Event::Key(KeyEvent {
             key: Key::C,
-            modifiers: Modifiers { ctrl: true, ..Modifiers::default() },
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
             pressed: true,
             text: None,
         }));

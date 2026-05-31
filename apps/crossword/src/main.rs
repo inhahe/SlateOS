@@ -315,7 +315,11 @@ impl CrosswordApp {
                     && self.cells.get(idx + 1).and_then(|c| c.as_ref()).is_some();
                 let starts_down = (row == 0 || self.cells[idx.wrapping_sub(self.width)].is_none())
                     && row + 1 < self.height
-                    && self.cells.get(idx + self.width).and_then(|c| c.as_ref()).is_some();
+                    && self
+                        .cells
+                        .get(idx + self.width)
+                        .and_then(|c| c.as_ref())
+                        .is_some();
 
                 if starts_across || starts_down {
                     num += 1;
@@ -374,9 +378,9 @@ impl CrosswordApp {
     }
 
     fn find_numbered_cell(&self, num: u16) -> Option<usize> {
-        self.cells.iter().position(|c| {
-            c.as_ref().map_or(false, |cell| cell.number == num)
-        })
+        self.cells
+            .iter()
+            .position(|c| c.as_ref().map_or(false, |cell| cell.number == num))
     }
 
     fn word_length(&self, row: usize, col: usize, dir: Direction) -> usize {
@@ -401,7 +405,9 @@ impl CrosswordApp {
 
     fn cell_at(&self, row: usize, col: usize) -> Option<&Cell> {
         if row < self.height && col < self.width {
-            self.cells.get(row * self.width + col).and_then(|c| c.as_ref())
+            self.cells
+                .get(row * self.width + col)
+                .and_then(|c| c.as_ref())
         } else {
             None
         }
@@ -594,17 +600,13 @@ impl CrosswordApp {
     }
 
     fn check_completion(&mut self) {
-        let all_filled = self.cells.iter().all(|c| {
-            match c {
-                None => true,
-                Some(cell) => cell.entry.is_some(),
-            }
+        let all_filled = self.cells.iter().all(|c| match c {
+            None => true,
+            Some(cell) => cell.entry.is_some(),
         });
-        let all_correct = self.cells.iter().all(|c| {
-            match c {
-                None => true,
-                Some(cell) => cell.is_correct(),
-            }
+        let all_correct = self.cells.iter().all(|c| match c {
+            None => true,
+            Some(cell) => cell.is_correct(),
         });
         if all_filled && all_correct {
             self.view = View::Completed;
@@ -617,9 +619,10 @@ impl CrosswordApp {
         // Find the clue number at the start of this word
         if let Some(cell) = self.cell_at(start_r, start_c) {
             if cell.number > 0 {
-                return self.clues.iter().find(|cl| {
-                    cl.number == cell.number && cl.direction == self.direction
-                });
+                return self
+                    .clues
+                    .iter()
+                    .find(|cl| cl.number == cell.number && cl.direction == self.direction);
             }
         }
         None
@@ -656,7 +659,9 @@ impl CrosswordApp {
                             self.direction = Direction::Down;
                             return;
                         }
-                        if r == 0 { break; }
+                        if r == 0 {
+                            break;
+                        }
                         r -= 1;
                     }
                 }
@@ -681,7 +686,9 @@ impl CrosswordApp {
                             self.direction = Direction::Across;
                             return;
                         }
-                        if c == 0 { break; }
+                        if c == 0 {
+                            break;
+                        }
                         c -= 1;
                     }
                 }
@@ -709,9 +716,11 @@ impl CrosswordApp {
 
     fn filled_count(&self) -> (usize, usize) {
         let total = self.cells.iter().filter(|c| c.is_some()).count();
-        let filled = self.cells.iter().filter(|c| {
-            c.as_ref().map_or(false, |cell| cell.entry.is_some())
-        }).count();
+        let filled = self
+            .cells
+            .iter()
+            .filter(|c| c.as_ref().map_or(false, |cell| cell.entry.is_some()))
+            .count();
         (filled, total)
     }
 
@@ -727,7 +736,9 @@ impl CrosswordApp {
                     self.selected_puzzle += 1;
                 }
             }
-            Event::Key(KeyEvent { key: Key::Enter, .. }) => {
+            Event::Key(KeyEvent {
+                key: Key::Enter, ..
+            }) => {
                 self.load_puzzle(self.selected_puzzle);
             }
             _ => {}
@@ -779,7 +790,12 @@ impl CrosswordApp {
                     }
                 }
             }
-            Event::Mouse(MouseEvent { kind: MouseEventKind::Press(MouseButton::Left), x, y, .. }) => {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x,
+                y,
+                ..
+            }) => {
                 // Try to click on a grid cell
                 self.handle_grid_click(*x, *y);
             }
@@ -815,20 +831,32 @@ impl CrosswordApp {
         let current = self.current_clue().map(|c| (c.number, c.direction));
 
         // Get sorted list of clues matching current direction first
-        let mut across_clues: Vec<&Clue> = self.clues.iter()
+        let mut across_clues: Vec<&Clue> = self
+            .clues
+            .iter()
             .filter(|c| c.direction == Direction::Across)
             .collect();
         across_clues.sort_by_key(|c| c.number);
 
-        let mut down_clues: Vec<&Clue> = self.clues.iter()
+        let mut down_clues: Vec<&Clue> = self
+            .clues
+            .iter()
             .filter(|c| c.direction == Direction::Down)
             .collect();
         down_clues.sort_by_key(|c| c.number);
 
         let all_clues: Vec<&Clue> = if self.direction == Direction::Across {
-            across_clues.iter().chain(down_clues.iter()).copied().collect()
+            across_clues
+                .iter()
+                .chain(down_clues.iter())
+                .copied()
+                .collect()
         } else {
-            down_clues.iter().chain(across_clues.iter()).copied().collect()
+            down_clues
+                .iter()
+                .chain(across_clues.iter())
+                .copied()
+                .collect()
         };
 
         if all_clues.is_empty() {
@@ -836,9 +864,13 @@ impl CrosswordApp {
         }
 
         // Find index of current clue, move to next
-        let current_idx = current.and_then(|(num, dir)| {
-            all_clues.iter().position(|c| c.number == num && c.direction == dir)
-        }).unwrap_or(0);
+        let current_idx = current
+            .and_then(|(num, dir)| {
+                all_clues
+                    .iter()
+                    .position(|c| c.number == num && c.direction == dir)
+            })
+            .unwrap_or(0);
 
         let next_idx = (current_idx + 1) % all_clues.len();
         let next_clue = all_clues[next_idx];
@@ -849,7 +881,10 @@ impl CrosswordApp {
     }
 
     fn handle_event_completed(&mut self, event: &Event) {
-        if let Event::Key(KeyEvent { key: Key::Enter, .. }) = event {
+        if let Event::Key(KeyEvent {
+            key: Key::Enter, ..
+        }) = event
+        {
             self.view = View::PuzzleSelect;
         }
     }
@@ -857,14 +892,18 @@ impl CrosswordApp {
     fn render_select(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: COL_BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: width / 2.0 - 100.0, y: 30.0,
+            x: width / 2.0 - 100.0,
+            y: 30.0,
             text: "Crossword Puzzles".to_string(),
             font_size: 24.0,
             color: COL_TEXT,
@@ -881,8 +920,10 @@ impl CrosswordApp {
 
             if is_selected {
                 cmds.push(RenderCommand::FillRect {
-                    x: 40.0, y,
-                    width: width - 80.0, height: 40.0,
+                    x: 40.0,
+                    y,
+                    width: width - 80.0,
+                    height: 40.0,
                     color: COL_SURFACE0,
                     corner_radii: CornerRadii::all(6.0),
                 });
@@ -890,7 +931,8 @@ impl CrosswordApp {
 
             let text_color = if is_selected { COL_BLUE } else { COL_TEXT };
             cmds.push(RenderCommand::Text {
-                x: 60.0, y: y + 12.0,
+                x: 60.0,
+                y: y + 12.0,
                 text: format!("{}. {}", i + 1, puzzle.name),
                 font_size: 18.0,
                 color: text_color,
@@ -899,7 +941,8 @@ impl CrosswordApp {
             });
 
             cmds.push(RenderCommand::Text {
-                x: 300.0, y: y + 14.0,
+                x: 300.0,
+                y: y + 14.0,
                 text: format!("{}x{}", puzzle.width, puzzle.height),
                 font_size: 14.0,
                 color: COL_SUBTEXT0,
@@ -910,7 +953,8 @@ impl CrosswordApp {
 
         // Instructions
         cmds.push(RenderCommand::Text {
-            x: 60.0, y: height - 40.0,
+            x: 60.0,
+            y: height - 40.0,
             text: "Up/Down to select, Enter to start".to_string(),
             font_size: 14.0,
             color: COL_OVERLAY0,
@@ -922,20 +966,27 @@ impl CrosswordApp {
     fn render_playing(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: COL_BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title bar
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height: 44.0,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: 44.0,
             color: COL_MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         cmds.push(RenderCommand::Text {
-            x: 20.0, y: 12.0,
+            x: 20.0,
+            y: 12.0,
             text: self.puzzle_name.clone(),
             font_size: 18.0,
             color: COL_TEXT,
@@ -945,7 +996,8 @@ impl CrosswordApp {
 
         // Timer
         cmds.push(RenderCommand::Text {
-            x: width - 100.0, y: 14.0,
+            x: width - 100.0,
+            y: 14.0,
             text: self.format_time(),
             font_size: 16.0,
             color: COL_SUBTEXT0,
@@ -956,7 +1008,8 @@ impl CrosswordApp {
         // Progress
         let (filled, total) = self.filled_count();
         cmds.push(RenderCommand::Text {
-            x: width - 220.0, y: 14.0,
+            x: width - 220.0,
+            y: 14.0,
             text: format!("{filled}/{total}"),
             font_size: 16.0,
             color: COL_SUBTEXT0,
@@ -971,7 +1024,8 @@ impl CrosswordApp {
                 Direction::Down => "Down",
             };
             cmds.push(RenderCommand::Text {
-                x: 20.0, y: 50.0,
+                x: 20.0,
+                y: 50.0,
                 text: format!("{} {} — {}", clue.number, dir_str, clue.text),
                 font_size: 14.0,
                 color: COL_YELLOW,
@@ -996,8 +1050,10 @@ impl CrosswordApp {
                     None => {
                         // Black cell
                         cmds.push(RenderCommand::FillRect {
-                            x: cx, y: cy,
-                            width: cell_size, height: cell_size,
+                            x: cx,
+                            y: cy,
+                            width: cell_size,
+                            height: cell_size,
                             color: COL_CRUST,
                             corner_radii: CornerRadii::ZERO,
                         });
@@ -1016,8 +1072,10 @@ impl CrosswordApp {
                         };
 
                         cmds.push(RenderCommand::FillRect {
-                            x: cx + 1.0, y: cy + 1.0,
-                            width: cell_size - 2.0, height: cell_size - 2.0,
+                            x: cx + 1.0,
+                            y: cy + 1.0,
+                            width: cell_size - 2.0,
+                            height: cell_size - 2.0,
                             color: bg,
                             corner_radii: CornerRadii::all(2.0),
                         });
@@ -1025,7 +1083,8 @@ impl CrosswordApp {
                         // Clue number
                         if cell.number > 0 {
                             cmds.push(RenderCommand::Text {
-                                x: cx + 3.0, y: cy + 2.0,
+                                x: cx + 3.0,
+                                y: cy + 2.0,
                                 text: format!("{}", cell.number),
                                 font_size: 9.0,
                                 color: if is_cursor { COL_CRUST } else { COL_OVERLAY0 },
@@ -1063,7 +1122,8 @@ impl CrosswordApp {
 
         // Grid border
         cmds.push(RenderCommand::StrokeRect {
-            x: grid_x, y: grid_y,
+            x: grid_x,
+            y: grid_y,
             width: self.width as f32 * cell_size,
             height: self.height as f32 * cell_size,
             color: COL_OVERLAY0,
@@ -1082,8 +1142,10 @@ impl CrosswordApp {
 
         // Help hint
         cmds.push(RenderCommand::Text {
-            x: 20.0, y: height - 24.0,
-            text: "F1=Help  Space=Toggle Dir  Tab=Next Clue  Ctrl+C=Check  Ctrl+R=Reveal  Esc=Back".to_string(),
+            x: 20.0,
+            y: height - 24.0,
+            text: "F1=Help  Space=Toggle Dir  Tab=Next Clue  Ctrl+C=Check  Ctrl+R=Reveal  Esc=Back"
+                .to_string(),
             font_size: 11.0,
             color: COL_OVERLAY0,
             font_weight: FontWeightHint::Regular,
@@ -1096,14 +1158,22 @@ impl CrosswordApp {
         }
     }
 
-    fn render_clue_panel(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, dir: Direction) {
+    fn render_clue_panel(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        w: f32,
+        dir: Direction,
+    ) {
         let title = match dir {
             Direction::Across => "ACROSS",
             Direction::Down => "DOWN",
         };
 
         cmds.push(RenderCommand::Text {
-            x, y,
+            x,
+            y,
             text: title.to_string(),
             font_size: 14.0,
             color: COL_LAVENDER,
@@ -1112,9 +1182,7 @@ impl CrosswordApp {
         });
 
         let mut cy = y + 22.0;
-        let clues: Vec<&Clue> = self.clues.iter()
-            .filter(|c| c.direction == dir)
-            .collect();
+        let clues: Vec<&Clue> = self.clues.iter().filter(|c| c.direction == dir).collect();
 
         let scroll = match dir {
             Direction::Across => self.clue_scroll_across,
@@ -1127,7 +1195,11 @@ impl CrosswordApp {
             });
 
             let color = if is_current { COL_YELLOW } else { COL_SUBTEXT0 };
-            let weight = if is_current { FontWeightHint::Bold } else { FontWeightHint::Regular };
+            let weight = if is_current {
+                FontWeightHint::Bold
+            } else {
+                FontWeightHint::Regular
+            };
 
             // Truncate clue text to fit
             let max_chars = (w / 7.0) as usize;
@@ -1138,7 +1210,8 @@ impl CrosswordApp {
             };
 
             cmds.push(RenderCommand::Text {
-                x, y: cy,
+                x,
+                y: cy,
                 text: format!("{}. {display_text}", clue.number),
                 font_size: 12.0,
                 color,
@@ -1152,7 +1225,10 @@ impl CrosswordApp {
     fn render_help_overlay(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
         // Dim background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: Color::rgba(0, 0, 0, 180),
             corner_radii: CornerRadii::ZERO,
         });
@@ -1163,13 +1239,17 @@ impl CrosswordApp {
         let bh = 280.0;
 
         cmds.push(RenderCommand::FillRect {
-            x: bx, y: by, width: bw, height: bh,
+            x: bx,
+            y: by,
+            width: bw,
+            height: bh,
             color: COL_MANTLE,
             corner_radii: CornerRadii::all(12.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: bx + bw / 2.0 - 30.0, y: by + 16.0,
+            x: bx + bw / 2.0 - 30.0,
+            y: by + 16.0,
             text: "Help".to_string(),
             font_size: 20.0,
             color: COL_TEXT,
@@ -1194,7 +1274,8 @@ impl CrosswordApp {
         let mut cy = by + 50.0;
         for (key, desc) in &helps {
             cmds.push(RenderCommand::Text {
-                x: bx + 30.0, y: cy,
+                x: bx + 30.0,
+                y: cy,
                 text: (*key).to_string(),
                 font_size: 13.0,
                 color: COL_BLUE,
@@ -1202,7 +1283,8 @@ impl CrosswordApp {
                 max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: bx + 150.0, y: cy,
+                x: bx + 150.0,
+                y: cy,
                 text: (*desc).to_string(),
                 font_size: 13.0,
                 color: COL_SUBTEXT0,
@@ -1216,7 +1298,10 @@ impl CrosswordApp {
     fn render_completed(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: COL_BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1224,7 +1309,8 @@ impl CrosswordApp {
         let cx = width / 2.0;
 
         cmds.push(RenderCommand::Text {
-            x: cx - 100.0, y: height / 2.0 - 60.0,
+            x: cx - 100.0,
+            y: height / 2.0 - 60.0,
             text: "Puzzle Complete!".to_string(),
             font_size: 28.0,
             color: COL_GREEN,
@@ -1233,7 +1319,8 @@ impl CrosswordApp {
         });
 
         cmds.push(RenderCommand::Text {
-            x: cx - 60.0, y: height / 2.0 - 10.0,
+            x: cx - 60.0,
+            y: height / 2.0 - 10.0,
             text: format!("Time: {}", self.format_time()),
             font_size: 20.0,
             color: COL_TEXT,
@@ -1242,7 +1329,8 @@ impl CrosswordApp {
         });
 
         cmds.push(RenderCommand::Text {
-            x: cx - 80.0, y: height / 2.0 + 30.0,
+            x: cx - 80.0,
+            y: height / 2.0 + 30.0,
             text: self.puzzle_name.clone(),
             font_size: 16.0,
             color: COL_SUBTEXT0,
@@ -1250,12 +1338,15 @@ impl CrosswordApp {
             max_width: None,
         });
 
-        let revealed = self.cells.iter().filter(|c| {
-            c.as_ref().map_or(false, |cell| cell.revealed)
-        }).count();
+        let revealed = self
+            .cells
+            .iter()
+            .filter(|c| c.as_ref().map_or(false, |cell| cell.revealed))
+            .count();
         if revealed > 0 {
             cmds.push(RenderCommand::Text {
-                x: cx - 80.0, y: height / 2.0 + 60.0,
+                x: cx - 80.0,
+                y: height / 2.0 + 60.0,
                 text: format!("{revealed} letter(s) revealed"),
                 font_size: 14.0,
                 color: COL_PEACH,
@@ -1265,7 +1356,8 @@ impl CrosswordApp {
         }
 
         cmds.push(RenderCommand::Text {
-            x: cx - 80.0, y: height / 2.0 + 100.0,
+            x: cx - 80.0,
+            y: height / 2.0 + 100.0,
             text: "Press Enter to continue".to_string(),
             font_size: 14.0,
             color: COL_OVERLAY0,
@@ -1403,8 +1495,16 @@ mod tests {
     fn test_clues_loaded() {
         let app = make_app();
         assert!(!app.clues.is_empty());
-        let across_count = app.clues.iter().filter(|c| c.direction == Direction::Across).count();
-        let down_count = app.clues.iter().filter(|c| c.direction == Direction::Down).count();
+        let across_count = app
+            .clues
+            .iter()
+            .filter(|c| c.direction == Direction::Across)
+            .count();
+        let down_count = app
+            .clues
+            .iter()
+            .filter(|c| c.direction == Direction::Down)
+            .count();
         assert!(across_count > 0);
         assert!(down_count > 0);
     }
@@ -1503,6 +1603,8 @@ mod tests {
         app.handle_event_playing(&Event::Key(KeyEvent {
             key: Key::Space,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert_eq!(app.direction, Direction::Down);
     }
@@ -1717,11 +1819,15 @@ mod tests {
         app.handle_event_select(&Event::Key(KeyEvent {
             key: Key::Down,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert_eq!(app.selected_puzzle, 1);
         app.handle_event_select(&Event::Key(KeyEvent {
             key: Key::Up,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert_eq!(app.selected_puzzle, 0);
     }
@@ -1732,6 +1838,8 @@ mod tests {
         app.handle_event_select(&Event::Key(KeyEvent {
             key: Key::Enter,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert_eq!(app.view, View::Playing);
     }
@@ -1742,6 +1850,8 @@ mod tests {
         app.handle_event_playing(&Event::Key(KeyEvent {
             key: Key::Escape,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert_eq!(app.view, View::PuzzleSelect);
     }
@@ -1753,6 +1863,8 @@ mod tests {
         app.handle_event_completed(&Event::Key(KeyEvent {
             key: Key::Enter,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert_eq!(app.view, View::PuzzleSelect);
     }
@@ -1765,7 +1877,12 @@ mod tests {
         app.enter_letter('Z');
         app.handle_event_playing(&Event::Key(KeyEvent {
             key: Key::C,
-            modifiers: Modifiers { ctrl: true, ..Modifiers::default() },
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            pressed: true,
+            text: None,
         }));
         assert!(app.check_mode);
     }
@@ -1777,7 +1894,12 @@ mod tests {
         app.cursor_col = 0;
         app.handle_event_playing(&Event::Key(KeyEvent {
             key: Key::R,
-            modifiers: Modifiers { ctrl: true, ..Modifiers::default() },
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            pressed: true,
+            text: None,
         }));
         assert!(app.cell_at(0, 0).unwrap().revealed);
     }
@@ -1790,7 +1912,12 @@ mod tests {
         app.direction = Direction::Across;
         app.handle_event_playing(&Event::Key(KeyEvent {
             key: Key::W,
-            modifiers: Modifiers { ctrl: true, ..Modifiers::default() },
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            pressed: true,
+            text: None,
         }));
         for col in 0..4 {
             assert!(app.cell_at(0, col).unwrap().revealed);
@@ -1804,11 +1931,15 @@ mod tests {
         app.handle_event_playing(&Event::Key(KeyEvent {
             key: Key::F1,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert!(app.show_help);
         app.handle_event_playing(&Event::Key(KeyEvent {
             key: Key::F1,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert!(!app.show_help);
     }
@@ -1824,6 +1955,8 @@ mod tests {
         app.handle_event_playing(&Event::Key(KeyEvent {
             key: Key::Tab,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         // Should have moved to a different position
         assert!(app.cursor_row != start_row || app.cursor_col != start_col);
@@ -1912,7 +2045,7 @@ mod tests {
     fn test_grid_click() {
         let mut app = make_app();
         // Click on cell (0,0) in grid coordinates
-        app.handle_grid_click(20 + 18, 60 + 18);
+        app.handle_grid_click(20.0 + 18.0, 60.0 + 18.0);
         assert_eq!(app.cursor_row, 0);
         assert_eq!(app.cursor_col, 0);
     }
@@ -1924,7 +2057,7 @@ mod tests {
         app.cursor_col = 0;
         app.direction = Direction::Across;
         // Click same cell
-        app.handle_grid_click(20 + 18, 60 + 18);
+        app.handle_grid_click(20.0 + 18.0, 60.0 + 18.0);
         // Clicking same cell should toggle direction
         // (cursor was already at 0,0)
     }
@@ -1936,6 +2069,8 @@ mod tests {
         app.handle_event_select(&Event::Key(KeyEvent {
             key: Key::Up,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert_eq!(app.selected_puzzle, 0);
     }
@@ -1947,6 +2082,8 @@ mod tests {
         app.handle_event_select(&Event::Key(KeyEvent {
             key: Key::Down,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert_eq!(app.selected_puzzle, PUZZLES.len() - 1);
     }
@@ -2000,7 +2137,9 @@ mod tests {
         for i in 0..PUZZLES.len() {
             let mut app = CrosswordApp::new();
             app.load_puzzle(i);
-            let numbered = app.cells.iter()
+            let numbered = app
+                .cells
+                .iter()
                 .filter(|c| c.as_ref().map_or(false, |cell| cell.number > 0))
                 .count();
             assert!(numbered > 0, "Puzzle {i} has no numbered cells");
@@ -2075,7 +2214,12 @@ mod tests {
         assert!(app.check_mode);
         app.handle_event_playing(&Event::Key(KeyEvent {
             key: Key::U,
-            modifiers: Modifiers { ctrl: true, ..Modifiers::default() },
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+            pressed: true,
+            text: None,
         }));
         assert!(!app.check_mode);
     }
@@ -2087,6 +2231,8 @@ mod tests {
         app.event(&Event::Key(KeyEvent {
             key: Key::Enter,
             modifiers: Modifiers::default(),
+            pressed: true,
+            text: None,
         }));
         assert_eq!(app.view, View::Playing);
     }

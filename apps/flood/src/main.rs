@@ -52,18 +52,21 @@ impl Rng {
         Self { state: seed }
     }
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         self.state
     }
     fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 { return 0; }
+        if max == 0 {
+            return 0;
+        }
         (self.next() % max as u64) as usize
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GameState {
     Playing,
     Won,
@@ -157,7 +160,11 @@ impl FloodIt {
                 (r, c + 1),
             ];
             for (nr, nc) in neighbors {
-                if nr < self.size && nc < self.size && !visited[nr][nc] && self.grid[nr][nc] == old_color {
+                if nr < self.size
+                    && nc < self.size
+                    && !visited[nr][nc]
+                    && self.grid[nr][nc] == old_color
+                {
                     visited[nr][nc] = true;
                     queue.push((nr, nc));
                 }
@@ -194,7 +201,11 @@ impl FloodIt {
                 (r, c + 1),
             ];
             for (nr, nc) in neighbors {
-                if nr < self.size && nc < self.size && !visited[nr][nc] && self.grid[nr][nc] == target {
+                if nr < self.size
+                    && nc < self.size
+                    && !visited[nr][nc]
+                    && self.grid[nr][nc] == target
+                {
                     visited[nr][nc] = true;
                     queue.push((nr, nc));
                 }
@@ -271,14 +282,18 @@ impl FloodIt {
         let mut cmds = Vec::new();
 
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: 50.0, y: 26.0,
+            x: 50.0,
+            y: 26.0,
             text: "Flood It".into(),
             color: LAVENDER,
             font_size: 24.0,
@@ -296,14 +311,17 @@ impl FloodIt {
             let bx = btn_start_x + i as f32 * (btn_w + 8.0);
             let is_current = self.grid[0][0] == i as u8;
             cmds.push(RenderCommand::FillRect {
-                x: bx, y: btn_y,
-                width: btn_w, height: btn_h,
+                x: bx,
+                y: btn_y,
+                width: btn_w,
+                height: btn_h,
                 color: PALETTE[i],
                 corner_radii: CornerRadii::all(4.0),
             });
             // Button label
             cmds.push(RenderCommand::Text {
-                x: bx + 5.0, y: btn_y + 6.0,
+                x: bx + 5.0,
+                y: btn_y + 6.0,
                 text: format!("{} {}", i + 1, PALETTE_LABELS[i]),
                 color: if is_current { CRUST } else { CRUST },
                 font_size: 12.0,
@@ -313,8 +331,10 @@ impl FloodIt {
             // Highlight current color
             if is_current {
                 cmds.push(RenderCommand::FillRect {
-                    x: bx, y: btn_y + btn_h + 2.0,
-                    width: btn_w, height: 3.0,
+                    x: bx,
+                    y: btn_y + btn_h + 2.0,
+                    width: btn_w,
+                    height: 3.0,
                     color: TEXT,
                     corner_radii: CornerRadii::ZERO,
                 });
@@ -324,8 +344,10 @@ impl FloodIt {
         // Info
         let info = format!(
             "Moves: {}/{}   Filled: {}/{}",
-            self.moves, self.max_moves,
-            self.filled_count(), self.size * self.size
+            self.moves,
+            self.max_moves,
+            self.filled_count(),
+            self.size * self.size
         );
         cmds.push(RenderCommand::Text {
             x: btn_start_x + NUM_COLORS as f32 * (btn_w + 8.0) + 10.0,
@@ -344,8 +366,10 @@ impl FloodIt {
         let grid_total = cs * self.size as f32;
 
         cmds.push(RenderCommand::FillRect {
-            x: grid_x - 3.0, y: grid_y - 3.0,
-            width: grid_total + 6.0, height: grid_total + 6.0,
+            x: grid_x - 3.0,
+            y: grid_y - 3.0,
+            width: grid_total + 6.0,
+            height: grid_total + 6.0,
             color: CRUST,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -369,7 +393,8 @@ impl FloodIt {
         match self.state {
             GameState::Won => {
                 cmds.push(RenderCommand::Text {
-                    x: grid_x, y: grid_y + grid_total + 16.0,
+                    x: grid_x,
+                    y: grid_y + grid_total + 16.0,
                     text: format!("Board flooded in {} moves!", self.moves),
                     color: GREEN,
                     font_size: 18.0,
@@ -379,7 +404,8 @@ impl FloodIt {
             }
             GameState::Lost => {
                 cmds.push(RenderCommand::Text {
-                    x: grid_x, y: grid_y + grid_total + 16.0,
+                    x: grid_x,
+                    y: grid_y + grid_total + 16.0,
                     text: format!("Out of moves! ({}/{})", self.moves, self.max_moves),
                     color: RED,
                     font_size: 18.0,
@@ -391,7 +417,8 @@ impl FloodIt {
         }
         if self.state != GameState::Playing {
             cmds.push(RenderCommand::Text {
-                x: grid_x, y: grid_y + grid_total + 40.0,
+                x: grid_x,
+                y: grid_y + grid_total + 40.0,
                 text: "Press N for new game".into(),
                 color: SUBTEXT0,
                 font_size: 13.0,
@@ -405,13 +432,16 @@ impl FloodIt {
             let help_x = grid_x + grid_total + 20.0;
             let help_y = grid_y;
             cmds.push(RenderCommand::FillRect {
-                x: help_x, y: help_y,
-                width: 160.0, height: 160.0,
+                x: help_x,
+                y: help_y,
+                width: 160.0,
+                height: 160.0,
                 color: SURFACE0,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
-                x: help_x + 10.0, y: help_y + 14.0,
+                x: help_x + 10.0,
+                y: help_y + 14.0,
                 text: "Controls".into(),
                 color: YELLOW,
                 font_size: 14.0,
@@ -428,7 +458,8 @@ impl FloodIt {
             for (i, (k, v)) in lines.iter().enumerate() {
                 let ly = help_y + 38.0 + i as f32 * 22.0;
                 cmds.push(RenderCommand::Text {
-                    x: help_x + 10.0, y: ly,
+                    x: help_x + 10.0,
+                    y: ly,
                     text: (*k).into(),
                     color: BLUE,
                     font_size: 11.0,
@@ -436,7 +467,8 @@ impl FloodIt {
                     max_width: None,
                 });
                 cmds.push(RenderCommand::Text {
-                    x: help_x + 60.0, y: ly,
+                    x: help_x + 60.0,
+                    y: ly,
                     text: (*v).into(),
                     color: SUBTEXT0,
                     font_size: 11.0,
@@ -446,7 +478,8 @@ impl FloodIt {
             }
         } else {
             cmds.push(RenderCommand::Text {
-                x: grid_x + grid_total + 20.0, y: grid_y,
+                x: grid_x + grid_total + 20.0,
+                y: grid_y,
                 text: "H for help".into(),
                 color: OVERLAY0,
                 font_size: 12.0,
@@ -671,8 +704,10 @@ mod tests {
     fn test_key_1_chooses_color() {
         let mut app = FloodIt::new();
         let evt = Event::Key(KeyEvent {
-            key: Key::Num1, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::Num1,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&evt);
         // May or may not change based on current grid, but should not panic
@@ -683,8 +718,10 @@ mod tests {
         let mut app = FloodIt::new();
         app.moves = 10;
         let evt = Event::Key(KeyEvent {
-            key: Key::N, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::N,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&evt);
         assert_eq!(app.moves, 0);
@@ -695,8 +732,10 @@ mod tests {
         let mut app = FloodIt::new();
         assert!(!app.show_help);
         let evt = Event::Key(KeyEvent {
-            key: Key::H, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::H,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&evt);
         assert!(app.show_help);

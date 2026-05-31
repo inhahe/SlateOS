@@ -18,9 +18,9 @@
 //! captured pieces display, and a Catppuccin Mocha themed board.
 
 use guitk::color::Color;
+use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
 use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
-use guitk::event::{Event, Key, KeyEvent, Modifiers, MouseEvent, MouseEventKind, MouseButton};
 
 // ── Catppuccin Mocha palette ────────────────────────────────────────
 const BASE: Color = Color::from_hex(0x1E1E2E);
@@ -76,69 +76,40 @@ const AI_DEPTH: i32 = 3;
 // Values from a simplified evaluation: bonus for good positions.
 // Indexed as [rank * 8 + file] where rank 0 = rank 1 (white's back rank).
 const PAWN_TABLE: [i32; 64] = [
-     0,  0,  0,  0,  0,  0,  0,  0,
-    50, 50, 50, 50, 50, 50, 50, 50,
-    10, 10, 20, 30, 30, 20, 10, 10,
-     5,  5, 10, 25, 25, 10,  5,  5,
-     0,  0,  0, 20, 20,  0,  0,  0,
-     5, -5,-10,  0,  0,-10, -5,  5,
-     5, 10, 10,-20,-20, 10, 10,  5,
-     0,  0,  0,  0,  0,  0,  0,  0,
+    0, 0, 0, 0, 0, 0, 0, 0, 50, 50, 50, 50, 50, 50, 50, 50, 10, 10, 20, 30, 30, 20, 10, 10, 5, 5,
+    10, 25, 25, 10, 5, 5, 0, 0, 0, 20, 20, 0, 0, 0, 5, -5, -10, 0, 0, -10, -5, 5, 5, 10, 10, -20,
+    -20, 10, 10, 5, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 const KNIGHT_TABLE: [i32; 64] = [
-    -50,-40,-30,-30,-30,-30,-40,-50,
-    -40,-20,  0,  0,  0,  0,-20,-40,
-    -30,  0, 10, 15, 15, 10,  0,-30,
-    -30,  5, 15, 20, 20, 15,  5,-30,
-    -30,  0, 15, 20, 20, 15,  0,-30,
-    -30,  5, 10, 15, 15, 10,  5,-30,
-    -40,-20,  0,  5,  5,  0,-20,-40,
-    -50,-40,-30,-30,-30,-30,-40,-50,
+    -50, -40, -30, -30, -30, -30, -40, -50, -40, -20, 0, 0, 0, 0, -20, -40, -30, 0, 10, 15, 15, 10,
+    0, -30, -30, 5, 15, 20, 20, 15, 5, -30, -30, 0, 15, 20, 20, 15, 0, -30, -30, 5, 10, 15, 15, 10,
+    5, -30, -40, -20, 0, 5, 5, 0, -20, -40, -50, -40, -30, -30, -30, -30, -40, -50,
 ];
 
 const BISHOP_TABLE: [i32; 64] = [
-    -20,-10,-10,-10,-10,-10,-10,-20,
-    -10,  0,  0,  0,  0,  0,  0,-10,
-    -10,  0, 10, 10, 10, 10,  0,-10,
-    -10,  5,  5, 10, 10,  5,  5,-10,
-    -10,  0,  5, 10, 10,  5,  0,-10,
-    -10, 10, 10, 10, 10, 10, 10,-10,
-    -10,  5,  0,  0,  0,  0,  5,-10,
-    -20,-10,-10,-10,-10,-10,-10,-20,
+    -20, -10, -10, -10, -10, -10, -10, -20, -10, 0, 0, 0, 0, 0, 0, -10, -10, 0, 10, 10, 10, 10, 0,
+    -10, -10, 5, 5, 10, 10, 5, 5, -10, -10, 0, 5, 10, 10, 5, 0, -10, -10, 10, 10, 10, 10, 10, 10,
+    -10, -10, 5, 0, 0, 0, 0, 5, -10, -20, -10, -10, -10, -10, -10, -10, -20,
 ];
 
 const ROOK_TABLE: [i32; 64] = [
-     0,  0,  0,  0,  0,  0,  0,  0,
-     5, 10, 10, 10, 10, 10, 10,  5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-    -5,  0,  0,  0,  0,  0,  0, -5,
-     0,  0,  0,  5,  5,  0,  0,  0,
+    0, 0, 0, 0, 0, 0, 0, 0, 5, 10, 10, 10, 10, 10, 10, 5, -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0,
+    0, 0, -5, -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0, 0, -5, 0, 0,
+    0, 5, 5, 0, 0, 0,
 ];
 
 const QUEEN_TABLE: [i32; 64] = [
-    -20,-10,-10, -5, -5,-10,-10,-20,
-    -10,  0,  0,  0,  0,  0,  0,-10,
-    -10,  0,  5,  5,  5,  5,  0,-10,
-     -5,  0,  5,  5,  5,  5,  0, -5,
-      0,  0,  5,  5,  5,  5,  0, -5,
-    -10,  5,  5,  5,  5,  5,  0,-10,
-    -10,  0,  5,  0,  0,  0,  0,-10,
-    -20,-10,-10, -5, -5,-10,-10,-20,
+    -20, -10, -10, -5, -5, -10, -10, -20, -10, 0, 0, 0, 0, 0, 0, -10, -10, 0, 5, 5, 5, 5, 0, -10,
+    -5, 0, 5, 5, 5, 5, 0, -5, 0, 0, 5, 5, 5, 5, 0, -5, -10, 5, 5, 5, 5, 5, 0, -10, -10, 0, 5, 0, 0,
+    0, 0, -10, -20, -10, -10, -5, -5, -10, -10, -20,
 ];
 
 const KING_MIDDLEGAME_TABLE: [i32; 64] = [
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -30,-40,-40,-50,-50,-40,-40,-30,
-    -20,-30,-30,-40,-40,-30,-30,-20,
-    -10,-20,-20,-20,-20,-20,-20,-10,
-     20, 20,  0,  0,  0,  0, 20, 20,
-     20, 30, 10,  0,  0, 10, 30, 20,
+    -30, -40, -40, -50, -50, -40, -40, -30, -30, -40, -40, -50, -50, -40, -40, -30, -30, -40, -40,
+    -50, -50, -40, -40, -30, -30, -40, -40, -50, -50, -40, -40, -30, -20, -30, -30, -40, -40, -30,
+    -30, -20, -10, -20, -20, -20, -20, -20, -20, -10, 20, 20, 0, 0, 0, 0, 20, 20, 20, 30, 10, 0, 0,
+    10, 30, 20,
 ];
 
 // ── Chess types ─────────────────────────────────────────────────────
@@ -466,8 +437,14 @@ impl Board {
     fn is_attacked_by(&self, pos: Pos, attacker: Side) -> bool {
         // Check knight attacks
         for &(dr, dc) in &[
-            (-2, -1), (-2, 1), (-1, -2), (-1, 2),
-            (1, -2), (1, 2), (2, -1), (2, 1),
+            (-2, -1),
+            (-2, 1),
+            (-1, -2),
+            (-1, 2),
+            (1, -2),
+            (1, 2),
+            (2, -1),
+            (2, 1),
         ] {
             let p = Pos::new(pos.row + dr, pos.col + dc);
             if let Some(piece) = self.get(p) {
@@ -612,7 +589,12 @@ impl Board {
         let one_ahead = Pos::new(pos.row + dir, pos.col);
         if one_ahead.is_valid() && self.get(one_ahead).is_none() {
             if one_ahead.row == promo_rank {
-                for &kind in &[PieceKind::Queen, PieceKind::Rook, PieceKind::Bishop, PieceKind::Knight] {
+                for &kind in &[
+                    PieceKind::Queen,
+                    PieceKind::Rook,
+                    PieceKind::Bishop,
+                    PieceKind::Knight,
+                ] {
                     moves.push(Move::promotion(pos, one_ahead, kind));
                 }
             } else {
@@ -638,7 +620,12 @@ impl Board {
             if let Some(target) = self.get(cap_pos) {
                 if target.side != side {
                     if cap_pos.row == promo_rank {
-                        for &kind in &[PieceKind::Queen, PieceKind::Rook, PieceKind::Bishop, PieceKind::Knight] {
+                        for &kind in &[
+                            PieceKind::Queen,
+                            PieceKind::Rook,
+                            PieceKind::Bishop,
+                            PieceKind::Knight,
+                        ] {
                             moves.push(Move::promotion(pos, cap_pos, kind));
                         }
                     } else {
@@ -653,8 +640,14 @@ impl Board {
 
     fn generate_knight_moves(&self, pos: Pos, side: Side, moves: &mut Vec<Move>) {
         for &(dr, dc) in &[
-            (-2, -1), (-2, 1), (-1, -2), (-1, 2),
-            (1, -2), (1, 2), (2, -1), (2, 1),
+            (-2, -1),
+            (-2, 1),
+            (-1, -2),
+            (-1, 2),
+            (1, -2),
+            (1, 2),
+            (2, -1),
+            (2, 1),
         ] {
             let to = Pos::new(pos.row + dr, pos.col + dc);
             if !to.is_valid() {
@@ -816,10 +809,7 @@ impl Board {
         if piece.kind == PieceKind::Pawn {
             let diff = mv.to.row - mv.from.row;
             if diff == 2 || diff == -2 {
-                self.en_passant = Some(Pos::new(
-                    (mv.from.row + mv.to.row) / 2,
-                    mv.from.col,
-                ));
+                self.en_passant = Some(Pos::new((mv.from.row + mv.to.row) / 2, mv.from.col));
             }
         }
 
@@ -875,8 +865,14 @@ impl Board {
 const ROOK_DIRS: [(i8, i8); 4] = [(0, 1), (0, -1), (1, 0), (-1, 0)];
 const BISHOP_DIRS: [(i8, i8); 4] = [(1, 1), (1, -1), (-1, 1), (-1, -1)];
 const QUEEN_DIRS: [(i8, i8); 8] = [
-    (0, 1), (0, -1), (1, 0), (-1, 0),
-    (1, 1), (1, -1), (-1, 1), (-1, -1),
+    (0, 1),
+    (0, -1),
+    (1, 0),
+    (-1, 0),
+    (1, 1),
+    (1, -1),
+    (-1, 1),
+    (-1, -1),
 ];
 
 // ── AI Evaluation ───────────────────────────────────────────────────
@@ -927,13 +923,7 @@ fn piece_square_value(piece: Piece, pos: Pos) -> i32 {
 /// Minimax with alpha-beta pruning.
 /// Returns the evaluation score from the perspective of the side to move
 /// at the root call.
-fn minimax(
-    board: &Board,
-    depth: i32,
-    mut alpha: i32,
-    mut beta: i32,
-    maximizing: bool,
-) -> i32 {
+fn minimax(board: &Board, depth: i32, mut alpha: i32, mut beta: i32, maximizing: bool) -> i32 {
     if depth == 0 {
         let eval = evaluate(board);
         return if maximizing { eval } else { -eval };
@@ -944,7 +934,11 @@ fn minimax(
     if moves.is_empty() {
         if board.is_in_check(board.side_to_move) {
             // Checkmate — worst for the side to move
-            return if maximizing { -KING_VALUE - depth } else { KING_VALUE + depth };
+            return if maximizing {
+                -KING_VALUE - depth
+            } else {
+                KING_VALUE + depth
+            };
         }
         // Stalemate
         return 0;
@@ -1185,9 +1179,9 @@ impl ChessApp {
     fn find_legal_move(&self, from: Pos, to: Pos) -> Option<Move> {
         let legal = self.board.generate_legal_moves();
         // First try queen promotion (most common choice)
-        let queen_promo = legal.iter().find(|m| {
-            m.from == from && m.to == to && m.promotion == Some(PieceKind::Queen)
-        });
+        let queen_promo = legal
+            .iter()
+            .find(|m| m.from == from && m.to == to && m.promotion == Some(PieceKind::Queen));
         if let Some(mv) = queen_promo {
             return Some(*mv);
         }
@@ -1853,7 +1847,11 @@ mod tests {
         place(&mut board, 0, 0, Side::White, PieceKind::King);
         place(&mut board, 7, 7, Side::Black, PieceKind::King);
         let moves = board.generate_legal_moves();
-        assert!(moves.iter().any(|m| m.from == Pos::new(3, 4) && m.to == Pos::new(4, 4)));
+        assert!(
+            moves
+                .iter()
+                .any(|m| m.from == Pos::new(3, 4) && m.to == Pos::new(4, 4))
+        );
     }
 
     #[test]
@@ -1861,9 +1859,11 @@ mod tests {
         let board = Board::new();
         let moves = board.generate_legal_moves();
         // e2-e4 should be available
-        assert!(moves
-            .iter()
-            .any(|m| m.from == Pos::new(1, 4) && m.to == Pos::new(3, 4)));
+        assert!(
+            moves
+                .iter()
+                .any(|m| m.from == Pos::new(1, 4) && m.to == Pos::new(3, 4))
+        );
     }
 
     #[test]
@@ -1876,9 +1876,11 @@ mod tests {
         place(&mut board, 7, 7, Side::Black, PieceKind::King);
         let moves = board.generate_legal_moves();
         // No forward moves for the pawn
-        assert!(!moves
-            .iter()
-            .any(|m| m.from == Pos::new(3, 4) && m.to == Pos::new(4, 4)));
+        assert!(
+            !moves
+                .iter()
+                .any(|m| m.from == Pos::new(3, 4) && m.to == Pos::new(4, 4))
+        );
     }
 
     #[test]
@@ -1890,9 +1892,11 @@ mod tests {
         place(&mut board, 0, 0, Side::White, PieceKind::King);
         place(&mut board, 7, 7, Side::Black, PieceKind::King);
         let moves = board.generate_legal_moves();
-        assert!(moves
-            .iter()
-            .any(|m| m.from == Pos::new(3, 4) && m.to == Pos::new(4, 5)));
+        assert!(
+            moves
+                .iter()
+                .any(|m| m.from == Pos::new(3, 4) && m.to == Pos::new(4, 5))
+        );
     }
 
     #[test]
@@ -1904,9 +1908,11 @@ mod tests {
         place(&mut board, 0, 0, Side::White, PieceKind::King);
         place(&mut board, 7, 7, Side::Black, PieceKind::King);
         let moves = board.generate_legal_moves();
-        assert!(!moves
-            .iter()
-            .any(|m| m.from == Pos::new(3, 4) && m.to == Pos::new(4, 5)));
+        assert!(
+            !moves
+                .iter()
+                .any(|m| m.from == Pos::new(3, 4) && m.to == Pos::new(4, 5))
+        );
     }
 
     #[test]
@@ -1919,8 +1925,16 @@ mod tests {
         place(&mut board, 7, 7, Side::Black, PieceKind::King);
         let moves = board.generate_legal_moves();
         // Can't push at all when blocked one square ahead
-        assert!(!moves.iter().any(|m| m.from == Pos::new(1, 4) && m.to == Pos::new(3, 4)));
-        assert!(!moves.iter().any(|m| m.from == Pos::new(1, 4) && m.to == Pos::new(2, 4)));
+        assert!(
+            !moves
+                .iter()
+                .any(|m| m.from == Pos::new(1, 4) && m.to == Pos::new(3, 4))
+        );
+        assert!(
+            !moves
+                .iter()
+                .any(|m| m.from == Pos::new(1, 4) && m.to == Pos::new(2, 4))
+        );
     }
 
     // ── En passant tests ────────────────────────────────────────────
@@ -2054,9 +2068,11 @@ mod tests {
         place(&mut board, 0, 0, Side::White, PieceKind::King);
         place(&mut board, 7, 7, Side::Black, PieceKind::King);
         let moves = board.generate_legal_moves();
-        assert!(moves
-            .iter()
-            .any(|m| m.from == Pos::new(3, 3) && m.to == Pos::new(3, 6)));
+        assert!(
+            moves
+                .iter()
+                .any(|m| m.from == Pos::new(3, 3) && m.to == Pos::new(3, 6))
+        );
     }
 
     // ── Queen movement tests ────────────────────────────────────────
@@ -2110,7 +2126,11 @@ mod tests {
         place(&mut board, 0, 7, Side::White, PieceKind::Rook);
         place(&mut board, 7, 7, Side::Black, PieceKind::King);
         let moves = board.generate_legal_moves();
-        assert!(moves.iter().any(|m| m.is_castling && m.to == Pos::new(0, 6)));
+        assert!(
+            moves
+                .iter()
+                .any(|m| m.is_castling && m.to == Pos::new(0, 6))
+        );
     }
 
     #[test]
@@ -2122,7 +2142,11 @@ mod tests {
         place(&mut board, 0, 0, Side::White, PieceKind::Rook);
         place(&mut board, 7, 7, Side::Black, PieceKind::King);
         let moves = board.generate_legal_moves();
-        assert!(moves.iter().any(|m| m.is_castling && m.to == Pos::new(0, 2)));
+        assert!(
+            moves
+                .iter()
+                .any(|m| m.is_castling && m.to == Pos::new(0, 2))
+        );
     }
 
     #[test]
@@ -2135,7 +2159,11 @@ mod tests {
         place(&mut board, 0, 7, Side::White, PieceKind::Rook);
         place(&mut board, 7, 7, Side::Black, PieceKind::King);
         let moves = board.generate_legal_moves();
-        assert!(!moves.iter().any(|m| m.is_castling && m.to == Pos::new(0, 6)));
+        assert!(
+            !moves
+                .iter()
+                .any(|m| m.is_castling && m.to == Pos::new(0, 6))
+        );
     }
 
     #[test]
@@ -2149,7 +2177,11 @@ mod tests {
         place(&mut board, 7, 0, Side::Black, PieceKind::King);
         let moves = board.generate_legal_moves();
         // Can't castle through f1 which is attacked
-        assert!(!moves.iter().any(|m| m.is_castling && m.to == Pos::new(0, 6)));
+        assert!(
+            !moves
+                .iter()
+                .any(|m| m.is_castling && m.to == Pos::new(0, 6))
+        );
     }
 
     #[test]
@@ -2382,12 +2414,15 @@ mod tests {
         board.side_to_move = Side::Black;
         place(&mut board, 7, 4, Side::Black, PieceKind::King);
         place(&mut board, 6, 5, Side::White, PieceKind::Queen); // Qf7
-        place(&mut board, 4, 2, Side::White, PieceKind::Bishop); // Bc5 supports
+        // Bc4 (on the a2-g8 diagonal a2-b3-c4-d5-e6-f7) defends the queen on f7,
+        // so the king cannot capture it. c5 would NOT defend f7.
+        place(&mut board, 3, 2, Side::White, PieceKind::Bishop); // Bc4 supports Qf7
         place(&mut board, 0, 4, Side::White, PieceKind::King);
-        // Block escape squares
+        // Block escape squares. d8/f8 hold the king's own queen/bishop; the d7
+        // pawn blocks d7; e7 is empty but covered by the adjacent queen on f7.
         place(&mut board, 7, 3, Side::Black, PieceKind::Queen);
         place(&mut board, 7, 5, Side::Black, PieceKind::Bishop);
-        place(&mut board, 6, 4, Side::Black, PieceKind::Pawn); // e7 blocked
+        place(&mut board, 6, 3, Side::Black, PieceKind::Pawn); // d7 blocked
 
         assert!(board.is_in_check(Side::Black));
         let moves = board.generate_legal_moves();
@@ -2489,7 +2524,10 @@ mod tests {
         place(&mut board, 3, 3, Side::White, PieceKind::Queen);
         let score = evaluate(&board);
         // White has a queen advantage
-        assert!(score > 800, "Queen advantage should give high eval, got {score}");
+        assert!(
+            score > 800,
+            "Queen advantage should give high eval, got {score}"
+        );
     }
 
     #[test]
@@ -2500,20 +2538,19 @@ mod tests {
         place(&mut board, 3, 3, Side::Black, PieceKind::Queen);
         let score = evaluate(&board);
         // Black has a queen advantage — score should be negative
-        assert!(score < -800, "Black queen advantage should give negative eval, got {score}");
+        assert!(
+            score < -800,
+            "Black queen advantage should give negative eval, got {score}"
+        );
     }
 
     #[test]
     fn test_piece_square_bonus() {
         // Knight in center should have higher bonus than in corner
-        let center_bonus = piece_square_value(
-            Piece::new(Side::White, PieceKind::Knight),
-            Pos::new(3, 3),
-        );
-        let corner_bonus = piece_square_value(
-            Piece::new(Side::White, PieceKind::Knight),
-            Pos::new(0, 0),
-        );
+        let center_bonus =
+            piece_square_value(Piece::new(Side::White, PieceKind::Knight), Pos::new(3, 3));
+        let corner_bonus =
+            piece_square_value(Piece::new(Side::White, PieceKind::Knight), Pos::new(0, 0));
         assert!(
             center_bonus > corner_bonus,
             "Center knight should have better bonus: center={center_bonus}, corner={corner_bonus}"
@@ -2658,7 +2695,11 @@ mod tests {
         board.side_to_move = Side::White;
         place(&mut board, 6, 4, Side::White, PieceKind::Pawn);
         place(&mut board, 0, 0, Side::White, PieceKind::King);
-        place(&mut board, 7, 0, Side::Black, PieceKind::King);
+        // Keep the black king off the 8th rank and the e-file (and off the new
+        // queen's diagonals) so the promotion to e8 does NOT incidentally give
+        // check — this test isolates the "=Q" promotion notation, not the check
+        // suffix. a1 (0,0) is taken by the white king, so use h1 (0,7).
+        place(&mut board, 0, 7, Side::Black, PieceKind::King);
         let mv = Move::promotion(Pos::new(6, 4), Pos::new(7, 4), PieceKind::Queen);
         let notation = move_to_algebraic(&board, mv);
         assert_eq!(notation, "e8=Q");
@@ -2853,7 +2894,9 @@ mod tests {
     fn test_render_has_background() {
         let app = ChessApp::new();
         let commands = app.render();
-        let has_bg = commands.iter().any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BASE));
+        let has_bg = commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { color, .. } if *color == BASE));
         assert!(has_bg, "Should render background");
     }
 
@@ -2861,9 +2904,9 @@ mod tests {
     fn test_render_has_title() {
         let app = ChessApp::new();
         let commands = app.render();
-        let has_title = commands.iter().any(|c| {
-            matches!(c, RenderCommand::Text { text, .. } if text == "Chess")
-        });
+        let has_title = commands
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Chess"));
         assert!(has_title, "Should render title");
     }
 
@@ -2876,7 +2919,10 @@ mod tests {
             .iter()
             .filter(|c| matches!(c, RenderCommand::FillRect { .. }))
             .count();
-        assert!(fill_count >= 64, "Should render 64 board squares, got {fill_count}");
+        assert!(
+            fill_count >= 64,
+            "Should render 64 board squares, got {fill_count}"
+        );
     }
 
     #[test]
@@ -2891,7 +2937,10 @@ mod tests {
                     if text.chars().any(|ch| "\u{2654}\u{2655}\u{2656}\u{2657}\u{2658}\u{2659}\u{265A}\u{265B}\u{265C}\u{265D}\u{265E}\u{265F}".contains(ch)))
             })
             .count();
-        assert_eq!(piece_texts, 32, "Should render 32 pieces, got {piece_texts}");
+        assert_eq!(
+            piece_texts, 32,
+            "Should render 32 pieces, got {piece_texts}"
+        );
     }
 
     #[test]
@@ -2899,9 +2948,9 @@ mod tests {
         let mut app = ChessApp::new();
         app.click_square(Pos::new(0, 1)); // select knight
         let commands = app.render();
-        let has_selection = commands.iter().any(|c| {
-            matches!(c, RenderCommand::StrokeRect { color, .. } if *color == SELECTED_SQUARE)
-        });
+        let has_selection = commands.iter().any(
+            |c| matches!(c, RenderCommand::StrokeRect { color, .. } if *color == SELECTED_SQUARE),
+        );
         assert!(has_selection, "Should render selected square highlight");
     }
 
@@ -2912,11 +2961,14 @@ mod tests {
         let commands = app.render();
         let dot_count = commands
             .iter()
-            .filter(|c| {
-                matches!(c, RenderCommand::FillRect { color, .. } if *color == LEGAL_MOVE_DOT)
-            })
+            .filter(
+                |c| matches!(c, RenderCommand::FillRect { color, .. } if *color == LEGAL_MOVE_DOT),
+            )
             .count();
-        assert!(dot_count >= 2, "Should show legal move dots for knight, got {dot_count}");
+        assert!(
+            dot_count >= 2,
+            "Should show legal move dots for knight, got {dot_count}"
+        );
     }
 
     // ── Mouse event tests ───────────────────────────────────────────
@@ -3063,7 +3115,10 @@ mod tests {
         let mut app = ChessApp::new();
         app.game_result = GameResult::WhiteWins;
         app.click_square(Pos::new(1, 4)); // try to select
-        assert!(app.selected.is_none(), "Should not allow selection when game is over");
+        assert!(
+            app.selected.is_none(),
+            "Should not allow selection when game is over"
+        );
     }
 
     // ── Halfmove clock tests ────────────────────────────────────────
@@ -3098,7 +3153,11 @@ mod tests {
         place(&mut board, 7, 7, Side::Black, PieceKind::Rook);
         place(&mut board, 0, 0, Side::White, PieceKind::King);
         let moves = board.generate_legal_moves();
-        assert!(moves.iter().any(|m| m.is_castling && m.to == Pos::new(7, 6)));
+        assert!(
+            moves
+                .iter()
+                .any(|m| m.is_castling && m.to == Pos::new(7, 6))
+        );
     }
 
     #[test]
@@ -3110,7 +3169,11 @@ mod tests {
         place(&mut board, 7, 0, Side::Black, PieceKind::Rook);
         place(&mut board, 0, 0, Side::White, PieceKind::King);
         let moves = board.generate_legal_moves();
-        assert!(moves.iter().any(|m| m.is_castling && m.to == Pos::new(7, 2)));
+        assert!(
+            moves
+                .iter()
+                .any(|m| m.is_castling && m.to == Pos::new(7, 2))
+        );
     }
 
     // ── Black pawn tests ────────────────────────────────────────────
@@ -3124,8 +3187,16 @@ mod tests {
         place(&mut board, 0, 0, Side::White, PieceKind::King);
         let moves = board.generate_legal_moves();
         // Black pawn should move from row 6 to row 5 (and double push to row 4)
-        assert!(moves.iter().any(|m| m.from == Pos::new(6, 4) && m.to == Pos::new(5, 4)));
-        assert!(moves.iter().any(|m| m.from == Pos::new(6, 4) && m.to == Pos::new(4, 4)));
+        assert!(
+            moves
+                .iter()
+                .any(|m| m.from == Pos::new(6, 4) && m.to == Pos::new(5, 4))
+        );
+        assert!(
+            moves
+                .iter()
+                .any(|m| m.from == Pos::new(6, 4) && m.to == Pos::new(4, 4))
+        );
     }
 
     #[test]

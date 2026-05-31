@@ -41,22 +41,22 @@ const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 const HEAP_COLORS: [Color; 5] = [RED, PEACH, YELLOW, GREEN, TEAL];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Player {
     Human,
     Computer,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GameState {
     Playing,
     Won(Player),
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum NimVariant {
-    Misere,  // Last to take loses
-    Normal,  // Last to take wins
+    Misere, // Last to take loses
+    Normal, // Last to take wins
 }
 
 struct Nim {
@@ -66,21 +66,27 @@ struct Nim {
     current_player: Player,
     state: GameState,
     variant: NimVariant,
-    preset: usize,  // which preset configuration
+    preset: usize, // which preset configuration
     show_help: bool,
-    scores: [u32; 2],  // [human, computer]
+    scores: [u32; 2], // [human, computer]
 }
 
 // Preset heap configurations
 const PRESETS: [[u32; 4]; 5] = [
-    [1, 3, 5, 7],   // Classic
-    [3, 4, 5, 0],   // Three heaps
-    [2, 3, 4, 5],   // Four heaps
-    [1, 2, 3, 0],   // Simple
-    [5, 7, 9, 0],   // Large
+    [1, 3, 5, 7], // Classic
+    [3, 4, 5, 0], // Three heaps
+    [2, 3, 4, 5], // Four heaps
+    [1, 2, 3, 0], // Simple
+    [5, 7, 9, 0], // Large
 ];
 
-const PRESET_NAMES: [&str; 5] = ["Classic (1,3,5,7)", "Three (3,4,5)", "Four (2,3,4,5)", "Simple (1,2,3)", "Large (5,7,9)"];
+const PRESET_NAMES: [&str; 5] = [
+    "Classic (1,3,5,7)",
+    "Three (3,4,5)",
+    "Four (2,3,4,5)",
+    "Simple (1,2,3)",
+    "Large (5,7,9)",
+];
 
 impl Nim {
     fn new() -> Self {
@@ -189,7 +195,9 @@ impl Nim {
         }
 
         // Count non-empty heaps
-        let non_empty: Vec<usize> = (0..self.heaps.len()).filter(|&i| self.heaps[i] > 0).collect();
+        let non_empty: Vec<usize> = (0..self.heaps.len())
+            .filter(|&i| self.heaps[i] > 0)
+            .collect();
 
         if self.variant == NimVariant::Misere {
             // Misère endgame: if all heaps are 0 or 1, take to leave odd number
@@ -286,7 +294,9 @@ impl Nim {
                             }
                         }
                         Key::Enter | Key::Space => {
-                            if self.current_player == Player::Human && self.state == GameState::Playing {
+                            if self.current_player == Player::Human
+                                && self.state == GameState::Playing
+                            {
                                 if self.take(self.selected_heap, self.take_count) {
                                     self.take_count = 1;
                                     self.computer_move();
@@ -313,7 +323,10 @@ impl Nim {
         let mut cmds = Vec::new();
 
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -324,7 +337,8 @@ impl Nim {
             NimVariant::Normal => "Normal",
         };
         cmds.push(RenderCommand::Text {
-            x: 50.0, y: 28.0,
+            x: 50.0,
+            y: 28.0,
             text: format!("Nim ({})", variant_label),
             color: LAVENDER,
             font_size: 24.0,
@@ -334,7 +348,8 @@ impl Nim {
 
         // Preset name
         cmds.push(RenderCommand::Text {
-            x: 50.0, y: 56.0,
+            x: 50.0,
+            y: 56.0,
             text: PRESET_NAMES[self.preset].into(),
             color: SUBTEXT0,
             font_size: 13.0,
@@ -344,12 +359,10 @@ impl Nim {
 
         // Turn / status
         let status = match self.state {
-            GameState::Playing => {
-                match self.current_player {
-                    Player::Human => "Your turn".into(),
-                    Player::Computer => "Computer thinking...".into(),
-                }
-            }
+            GameState::Playing => match self.current_player {
+                Player::Human => "Your turn".into(),
+                Player::Computer => "Computer thinking...".into(),
+            },
             GameState::Won(Player::Human) => "You win!".into(),
             GameState::Won(Player::Computer) => "Computer wins!".into(),
         };
@@ -359,7 +372,8 @@ impl Nim {
             _ => TEXT,
         };
         cmds.push(RenderCommand::Text {
-            x: 300.0, y: 56.0,
+            x: 300.0,
+            y: 56.0,
             text: status,
             color: status_color,
             font_size: 14.0,
@@ -369,7 +383,8 @@ impl Nim {
 
         // Scores
         cmds.push(RenderCommand::Text {
-            x: 500.0, y: 56.0,
+            x: 500.0,
+            y: 56.0,
             text: format!("Score: You {} - {} CPU", self.scores[0], self.scores[1]),
             color: SUBTEXT0,
             font_size: 13.0,
@@ -390,11 +405,16 @@ impl Nim {
             // Heap label
             let label_color = if is_selected { YELLOW } else { SUBTEXT0 };
             cmds.push(RenderCommand::Text {
-                x: hx, y: heap_y,
+                x: hx,
+                y: heap_y,
                 text: format!("Heap {} ({})", i + 1, count),
                 color: label_color,
                 font_size: 14.0,
-                font_weight: if is_selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
 
@@ -405,14 +425,17 @@ impl Nim {
                 let is_marked = is_selected && j >= count.saturating_sub(self.take_count);
                 let tc = if is_marked { SURFACE1 } else { color };
                 cmds.push(RenderCommand::FillRect {
-                    x: hx, y: ty,
-                    width: token_size * 3.0, height: token_size,
+                    x: hx,
+                    y: ty,
+                    width: token_size * 3.0,
+                    height: token_size,
                     color: tc,
                     corner_radii: CornerRadii::all(4.0),
                 });
                 if is_marked {
                     cmds.push(RenderCommand::Text {
-                        x: hx + token_size, y: ty + 4.0,
+                        x: hx + token_size,
+                        y: ty + 4.0,
                         text: "X".into(),
                         color: RED,
                         font_size: 14.0,
@@ -425,8 +448,10 @@ impl Nim {
             // Selection indicator
             if is_selected {
                 cmds.push(RenderCommand::FillRect {
-                    x: hx, y: heap_y + 24.0 + count as f32 * (token_size + token_gap) + 4.0,
-                    width: token_size * 3.0, height: 3.0,
+                    x: hx,
+                    y: heap_y + 24.0 + count as f32 * (token_size + token_gap) + 4.0,
+                    width: token_size * 3.0,
+                    height: 3.0,
                     color: YELLOW,
                     corner_radii: CornerRadii::all(1.0),
                 });
@@ -437,15 +462,21 @@ impl Nim {
         if self.state == GameState::Playing && self.current_player == Player::Human {
             let take_y = heap_y + 24.0 + 10.0 * (token_size + token_gap);
             cmds.push(RenderCommand::Text {
-                x: 60.0, y: take_y,
-                text: format!("Taking {} from Heap {}", self.take_count, self.selected_heap + 1),
+                x: 60.0,
+                y: take_y,
+                text: format!(
+                    "Taking {} from Heap {}",
+                    self.take_count,
+                    self.selected_heap + 1
+                ),
                 color: TEXT,
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: 60.0, y: take_y + 22.0,
+                x: 60.0,
+                y: take_y + 22.0,
                 text: "Up/Down to change amount, Enter to take".into(),
                 color: OVERLAY0,
                 font_size: 12.0,
@@ -459,13 +490,16 @@ impl Nim {
             let hx = 500.0_f32;
             let hy = 100.0_f32;
             cmds.push(RenderCommand::FillRect {
-                x: hx, y: hy,
-                width: 200.0, height: 220.0,
+                x: hx,
+                y: hy,
+                width: 200.0,
+                height: 220.0,
                 color: SURFACE0,
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
-                x: hx + 10.0, y: hy + 14.0,
+                x: hx + 10.0,
+                y: hy + 14.0,
                 text: "Controls".into(),
                 color: YELLOW,
                 font_size: 14.0,
@@ -484,7 +518,8 @@ impl Nim {
             for (i, (k, v)) in lines.iter().enumerate() {
                 let ly = hy + 38.0 + i as f32 * 24.0;
                 cmds.push(RenderCommand::Text {
-                    x: hx + 10.0, y: ly,
+                    x: hx + 10.0,
+                    y: ly,
                     text: (*k).into(),
                     color: BLUE,
                     font_size: 11.0,
@@ -492,7 +527,8 @@ impl Nim {
                     max_width: None,
                 });
                 cmds.push(RenderCommand::Text {
-                    x: hx + 95.0, y: ly,
+                    x: hx + 95.0,
+                    y: ly,
                     text: (*v).into(),
                     color: SUBTEXT0,
                     font_size: 11.0,
@@ -659,8 +695,10 @@ mod tests {
         let mut app = Nim::new();
         app.selected_heap = 2;
         let evt = Event::Key(KeyEvent {
-            key: Key::Left, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::Left,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&evt);
         assert_eq!(app.selected_heap, 1);
@@ -671,8 +709,10 @@ mod tests {
         let mut app = Nim::new();
         app.selected_heap = 0;
         let evt = Event::Key(KeyEvent {
-            key: Key::Right, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::Right,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&evt);
         assert_eq!(app.selected_heap, 1);
@@ -683,14 +723,18 @@ mod tests {
         let mut app = Nim::new();
         app.selected_heap = 1; // heap with 3
         let up = Event::Key(KeyEvent {
-            key: Key::Up, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::Up,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&up);
         assert_eq!(app.take_count, 2);
         let down = Event::Key(KeyEvent {
-            key: Key::Down, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::Down,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&down);
         assert_eq!(app.take_count, 1);
@@ -702,8 +746,10 @@ mod tests {
         app.selected_heap = 0;
         app.take_count = 1;
         let evt = Event::Key(KeyEvent {
-            key: Key::Enter, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::Enter,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&evt);
         // Human took, then computer moved
@@ -715,8 +761,10 @@ mod tests {
         let mut app = Nim::new();
         app.heaps = vec![0, 0, 0, 0];
         let evt = Event::Key(KeyEvent {
-            key: Key::N, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::N,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&evt);
         assert_eq!(app.total_remaining(), 16);
@@ -726,8 +774,10 @@ mod tests {
     fn test_key_v_toggle() {
         let mut app = Nim::new();
         let evt = Event::Key(KeyEvent {
-            key: Key::V, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::V,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&evt);
         assert_eq!(app.variant, NimVariant::Normal);
@@ -766,7 +816,10 @@ mod tests {
     fn test_game_state_eq() {
         assert_eq!(GameState::Playing, GameState::Playing);
         assert_eq!(GameState::Won(Player::Human), GameState::Won(Player::Human));
-        assert_ne!(GameState::Won(Player::Human), GameState::Won(Player::Computer));
+        assert_ne!(
+            GameState::Won(Player::Human),
+            GameState::Won(Player::Computer)
+        );
     }
 
     #[test]
@@ -795,8 +848,10 @@ mod tests {
         // Try to increase beyond heap size
         app.take_count = 1;
         let up = Event::Key(KeyEvent {
-            key: Key::Up, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::Up,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&up);
         assert_eq!(app.take_count, 1); // can't go above 1
@@ -807,8 +862,10 @@ mod tests {
         let mut app = Nim::new();
         app.take_count = 1;
         let down = Event::Key(KeyEvent {
-            key: Key::Down, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::Down,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&down);
         assert_eq!(app.take_count, 1); // can't go below 1

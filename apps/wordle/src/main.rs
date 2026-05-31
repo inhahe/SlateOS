@@ -39,10 +39,10 @@ const MAUVE: Color = Color::from_hex(0xCBA6F7);
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum TileState {
     Empty,
-    Filled,   // letter entered but not evaluated
-    Correct,  // green — right letter, right position
-    Present,  // yellow — right letter, wrong position
-    Absent,   // gray — letter not in word
+    Filled,  // letter entered but not evaluated
+    Correct, // green — right letter, right position
+    Present, // yellow — right letter, wrong position
+    Absent,  // gray — letter not in word
 }
 
 impl TileState {
@@ -80,9 +80,9 @@ impl LetterState {
 // ── Difficulty ──
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Difficulty {
-    Easy,    // 4 letters
-    Normal,  // 5 letters (classic)
-    Hard,    // 6 letters
+    Easy,   // 4 letters
+    Normal, // 5 letters (classic)
+    Hard,   // 6 letters
 }
 
 impl Difficulty {
@@ -118,7 +118,10 @@ impl Rng {
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         self.state
     }
 
@@ -132,72 +135,61 @@ impl Rng {
 
 // ── Word lists ──
 const WORDS_4: &[&str] = &[
-    "able", "also", "area", "army", "away", "back", "band", "bank", "base", "bath",
-    "bean", "bear", "beat", "bell", "best", "bird", "bite", "blow", "blue", "boat",
-    "body", "bomb", "bone", "book", "born", "boss", "both", "bowl", "burn", "busy",
-    "cafe", "cage", "cake", "call", "calm", "came", "camp", "card", "care", "case",
-    "cash", "cast", "cave", "chat", "chip", "city", "clap", "clay", "clip", "club",
-    "coal", "coat", "code", "coin", "cold", "come", "cook", "cool", "cope", "copy",
-    "core", "cost", "crew", "crop", "curl", "cute", "dare", "dark", "data", "date",
-    "dawn", "dead", "deaf", "deal", "dear", "debt", "deck", "deep", "deer", "deny",
-    "desk", "diet", "dirt", "dish", "disk", "dock", "does", "done", "door", "dose",
-    "down", "drag", "draw", "drop", "drum", "dual", "duck", "dull", "dump", "dust",
-    "duty", "each", "earn", "ease", "east", "easy", "edge", "edit", "else", "epic",
-    "even", "ever", "evil", "exam", "exit", "face", "fact", "fade", "fail", "fair",
-    "fake", "fall", "fame", "farm", "fast", "fate", "fear", "feed", "feel", "file",
-    "fill", "film", "find", "fine", "fire", "firm", "fish", "flag", "flat", "flew",
-    "flip", "flow", "fold", "folk", "fond", "font", "food", "fool", "foot", "fork",
-    "form", "fort", "foul", "four", "free", "from", "fuel", "full", "fund", "fury",
-    "fuse", "gain", "game", "gang", "gate", "gave", "gaze", "gear", "gift", "girl",
-    "give", "glad", "glow", "glue", "goal", "goat", "goes", "gold", "golf", "gone",
-    "good", "grab", "gray", "grew", "grid", "grin", "grip", "grow", "gulf", "gust",
-    "guys", "hack", "hair", "half", "hall", "halt", "hand", "hang", "hard", "harm",
-    "harp", "hate", "have", "head", "heal", "heap", "hear", "heat", "heel", "held",
-    "help", "herb", "here", "hero", "hide", "high", "hike", "hill", "hint", "hire",
-    "hold", "hole", "holy", "home", "hood", "hook", "hope", "horn", "host", "hour",
-    "huge", "hung", "hunt", "hurt", "hymn", "icon", "idea", "inch", "into", "iron",
-    "item", "jack", "jail", "jazz", "jean", "jobs", "join", "joke", "jump", "jury",
-    "just", "keen", "keep", "kept", "kick", "kids", "kill", "kind", "king", "kiss",
-    "knee", "knew", "knit", "knob", "knot", "know", "lack", "laid", "lake", "lamp",
-    "land", "lane", "last", "late", "lawn", "lead", "leaf", "lean", "left", "lend",
-    "lens", "less", "lied", "life", "lift", "like", "limb", "lime", "line", "link",
-    "lion", "list", "live", "load", "loan", "lock", "logo", "long", "look", "loop",
-    "lord", "lose", "loss", "lost", "lots", "loud", "love", "luck", "lung", "made",
-    "mail", "main", "make", "male", "mall", "many", "maps", "mark", "mass", "mate",
-    "maze", "meal", "mean", "meat", "meet", "melt", "menu", "mere", "mesh", "mess",
-    "mild", "mile", "milk", "mill", "mind", "mine", "mint", "miss", "mode", "mood",
-    "moon", "more", "moss", "most", "move", "much", "must", "myth", "nail", "name",
-    "navy", "near", "neat", "neck", "need", "nest", "nets", "next", "nice", "nine",
-    "node", "none", "norm", "nose", "note", "noun", "odds", "okay", "once", "ones",
-    "only", "onto", "open", "oral", "oven", "over", "pace", "pack", "page", "paid",
-    "pain", "pair", "pale", "palm", "pane", "park", "part", "pass", "past", "path",
-    "peak", "peel", "peer", "pick", "pile", "pine", "pink", "pipe", "plan", "play",
-    "plot", "plug", "plus", "poem", "poet", "pole", "poll", "pond", "pool", "poor",
-    "pope", "pork", "port", "pose", "post", "pour", "pray", "prey", "pull", "pump",
-    "pure", "push", "quit", "quiz", "race", "rack", "rage", "raid", "rail", "rain",
-    "rank", "rare", "rate", "read", "real", "rear", "reef", "rely", "rent", "rest",
-    "rice", "rich", "ride", "ring", "rise", "risk", "road", "rock", "rode", "role",
-    "roll", "roof", "room", "root", "rope", "rose", "ruin", "rule", "rush", "safe",
-    "sage", "said", "sake", "sale", "salt", "same", "sand", "sang", "save", "seal",
-    "seat", "seed", "seek", "seem", "seen", "self", "sell", "send", "sent", "sept",
-    "shed", "ship", "shop", "shot", "show", "shut", "sick", "side", "sigh", "sign",
-    "silk", "sing", "sink", "site", "size", "skin", "slam", "slid", "slim", "slip",
-    "slot", "slow", "snap", "snow", "soap", "sofa", "soft", "soil", "sold", "sole",
-    "some", "song", "soon", "sort", "soul", "soup", "spin", "spot", "star", "stay",
-    "stem", "step", "stir", "stop", "such", "suit", "sure", "surf", "swim", "tack",
-    "tail", "take", "tale", "talk", "tall", "tank", "tape", "task", "taxi", "team",
-    "tear", "tell", "tend", "tent", "term", "test", "text", "than", "that", "them",
-    "then", "they", "thin", "this", "thus", "tick", "tide", "tidy", "tied", "tier",
-    "tile", "till", "time", "tiny", "tire", "toad", "told", "toll", "tone", "took",
-    "tool", "tops", "tore", "torn", "tour", "town", "trap", "tray", "tree", "trim",
-    "trio", "trip", "true", "tube", "tuck", "tune", "turn", "twin", "type", "ugly",
-    "unit", "upon", "urge", "used", "user", "vale", "vary", "vast", "veil", "vein",
-    "vent", "verb", "very", "vest", "view", "vine", "visa", "void", "volt", "vote",
-    "wade", "wage", "wait", "wake", "walk", "wall", "want", "ward", "warm", "warn",
-    "warp", "wash", "wave", "weak", "wear", "weed", "week", "well", "went", "were",
-    "west", "what", "when", "whom", "wide", "wife", "wild", "will", "wind", "wine",
-    "wing", "wire", "wise", "wish", "with", "woke", "wolf", "wood", "wool", "word",
-    "wore", "work", "worm", "worn", "wrap", "yard", "year", "yell", "yoga", "your",
+    "able", "also", "area", "army", "away", "back", "band", "bank", "base", "bath", "bean", "bear",
+    "beat", "bell", "best", "bird", "bite", "blow", "blue", "boat", "body", "bomb", "bone", "book",
+    "born", "boss", "both", "bowl", "burn", "busy", "cafe", "cage", "cake", "call", "calm", "came",
+    "camp", "card", "care", "case", "cash", "cast", "cave", "chat", "chip", "city", "clap", "clay",
+    "clip", "club", "coal", "coat", "code", "coin", "cold", "come", "cook", "cool", "cope", "copy",
+    "core", "cost", "crew", "crop", "curl", "cute", "dare", "dark", "data", "date", "dawn", "dead",
+    "deaf", "deal", "dear", "debt", "deck", "deep", "deer", "deny", "desk", "diet", "dirt", "dish",
+    "disk", "dock", "does", "done", "door", "dose", "down", "drag", "draw", "drop", "drum", "dual",
+    "duck", "dull", "dump", "dust", "duty", "each", "earn", "ease", "east", "easy", "edge", "edit",
+    "else", "epic", "even", "ever", "evil", "exam", "exit", "face", "fact", "fade", "fail", "fair",
+    "fake", "fall", "fame", "farm", "fast", "fate", "fear", "feed", "feel", "file", "fill", "film",
+    "find", "fine", "fire", "firm", "fish", "flag", "flat", "flew", "flip", "flow", "fold", "folk",
+    "fond", "font", "food", "fool", "foot", "fork", "form", "fort", "foul", "four", "free", "from",
+    "fuel", "full", "fund", "fury", "fuse", "gain", "game", "gang", "gate", "gave", "gaze", "gear",
+    "gift", "girl", "give", "glad", "glow", "glue", "goal", "goat", "goes", "gold", "golf", "gone",
+    "good", "grab", "gray", "grew", "grid", "grin", "grip", "grow", "gulf", "gust", "guys", "hack",
+    "hair", "half", "hall", "halt", "hand", "hang", "hard", "harm", "harp", "hate", "have", "head",
+    "heal", "heap", "hear", "heat", "heel", "held", "help", "herb", "here", "hero", "hide", "high",
+    "hike", "hill", "hint", "hire", "hold", "hole", "holy", "home", "hood", "hook", "hope", "horn",
+    "host", "hour", "huge", "hung", "hunt", "hurt", "hymn", "icon", "idea", "inch", "into", "iron",
+    "item", "jack", "jail", "jazz", "jean", "jobs", "join", "joke", "jump", "jury", "just", "keen",
+    "keep", "kept", "kick", "kids", "kill", "kind", "king", "kiss", "knee", "knew", "knit", "knob",
+    "knot", "know", "lack", "laid", "lake", "lamp", "land", "lane", "last", "late", "lawn", "lead",
+    "leaf", "lean", "left", "lend", "lens", "less", "lied", "life", "lift", "like", "limb", "lime",
+    "line", "link", "lion", "list", "live", "load", "loan", "lock", "logo", "long", "look", "loop",
+    "lord", "lose", "loss", "lost", "lots", "loud", "love", "luck", "lung", "made", "mail", "main",
+    "make", "male", "mall", "many", "maps", "mark", "mass", "mate", "maze", "meal", "mean", "meat",
+    "meet", "melt", "menu", "mere", "mesh", "mess", "mild", "mile", "milk", "mill", "mind", "mine",
+    "mint", "miss", "mode", "mood", "moon", "more", "moss", "most", "move", "much", "must", "myth",
+    "nail", "name", "navy", "near", "neat", "neck", "need", "nest", "nets", "next", "nice", "nine",
+    "node", "none", "norm", "nose", "note", "noun", "odds", "okay", "once", "ones", "only", "onto",
+    "open", "oral", "oven", "over", "pace", "pack", "page", "paid", "pain", "pair", "pale", "palm",
+    "pane", "park", "part", "pass", "past", "path", "peak", "peel", "peer", "pick", "pile", "pine",
+    "pink", "pipe", "plan", "play", "plot", "plug", "plus", "poem", "poet", "pole", "poll", "pond",
+    "pool", "poor", "pope", "pork", "port", "pose", "post", "pour", "pray", "prey", "pull", "pump",
+    "pure", "push", "quit", "quiz", "race", "rack", "rage", "raid", "rail", "rain", "rank", "rare",
+    "rate", "read", "real", "rear", "reef", "rely", "rent", "rest", "rice", "rich", "ride", "ring",
+    "rise", "risk", "road", "rock", "rode", "role", "roll", "roof", "room", "root", "rope", "rose",
+    "ruin", "rule", "rush", "safe", "sage", "said", "sake", "sale", "salt", "same", "sand", "sang",
+    "save", "seal", "seat", "seed", "seek", "seem", "seen", "self", "sell", "send", "sent", "sept",
+    "shed", "ship", "shop", "shot", "show", "shut", "sick", "side", "sigh", "sign", "silk", "sing",
+    "sink", "site", "size", "skin", "slam", "slid", "slim", "slip", "slot", "slow", "snap", "snow",
+    "soap", "sofa", "soft", "soil", "sold", "sole", "some", "song", "soon", "sort", "soul", "soup",
+    "spin", "spot", "star", "stay", "stem", "step", "stir", "stop", "such", "suit", "sure", "surf",
+    "swim", "tack", "tail", "take", "tale", "talk", "tall", "tank", "tape", "task", "taxi", "team",
+    "tear", "tell", "tend", "tent", "term", "test", "text", "than", "that", "them", "then", "they",
+    "thin", "this", "thus", "tick", "tide", "tidy", "tied", "tier", "tile", "till", "time", "tiny",
+    "tire", "toad", "told", "toll", "tone", "took", "tool", "tops", "tore", "torn", "tour", "town",
+    "trap", "tray", "tree", "trim", "trio", "trip", "true", "tube", "tuck", "tune", "turn", "twin",
+    "type", "ugly", "unit", "upon", "urge", "used", "user", "vale", "vary", "vast", "veil", "vein",
+    "vent", "verb", "very", "vest", "view", "vine", "visa", "void", "volt", "vote", "wade", "wage",
+    "wait", "wake", "walk", "wall", "want", "ward", "warm", "warn", "warp", "wash", "wave", "weak",
+    "wear", "weed", "week", "well", "went", "were", "west", "what", "when", "whom", "wide", "wife",
+    "wild", "will", "wind", "wine", "wing", "wire", "wise", "wish", "with", "woke", "wolf", "wood",
+    "wool", "word", "wore", "work", "worm", "worn", "wrap", "yard", "year", "yell", "yoga", "your",
     "zero", "zone", "zoom",
 ];
 
@@ -296,12 +288,12 @@ const WORDS_6: &[&str] = &[
     "commit", "common", "comply", "convey", "cookie", "copper", "corner", "costly", "cotton",
     "county", "couple", "course", "cousin", "create", "credit", "crisis", "custom", "damage",
     "danger", "dealer", "debate", "decade", "decide", "defeat", "defend", "define", "degree",
-    "deliver", "demand", "dental", "depart", "deploy", "deputy", "derive", "desert", "design",
+    "delete", "demand", "dental", "depart", "deploy", "deputy", "derive", "desert", "design",
     "desire", "detail", "detect", "device", "differ", "digest", "dinner", "direct", "divide",
     "domain", "double", "driver", "during", "easily", "eating", "editor", "effect", "effort",
     "emerge", "empire", "enable", "endure", "energy", "engage", "engine", "enough", "ensure",
     "entire", "entity", "equity", "escape", "estate", "ethnic", "evolve", "exceed", "except",
-    "excite", "excuse", "exempt", "exist", "expand", "expect", "expert", "export", "expose",
+    "excite", "excuse", "exempt", "exotic", "expand", "expect", "expert", "export", "expose",
     "extend", "extent", "fabric", "factor", "fairly", "family", "famous", "farmer", "father",
     "faucet", "fellow", "female", "fierce", "figure", "filter", "finger", "fiscal", "flight",
     "flower", "follow", "forbid", "forced", "forest", "forget", "format", "former", "foster",
@@ -344,7 +336,7 @@ const WORDS_6: &[&str] = &[
     "target", "temple", "tenant", "tender", "terror", "threat", "thrive", "throne", "ticket",
     "timber", "tissue", "tongue", "toward", "travel", "treaty", "tribal", "trophy", "tunnel",
     "twelve", "unfair", "unfold", "unique", "united", "unless", "unlike", "unveil", "update",
-    "uphold", "urgent", "useful", "valley", "vanish", "vendor", "venture", "verbal", "verify",
+    "uphold", "urgent", "useful", "valley", "vanish", "vendor", "veneer", "verbal", "verify",
     "victim", "violet", "virtue", "vision", "visual", "volume", "wander", "warmth", "wealth",
     "weapon", "weekly", "widely", "window", "winter", "wisdom", "within", "wonder", "worker",
     "worthy", "wounds", "writer", "yellow",
@@ -360,7 +352,7 @@ enum GamePhase {
 
 struct Wordle {
     difficulty: Difficulty,
-    target: [char; 6],   // target word (up to 6 chars)
+    target: [char; 6], // target word (up to 6 chars)
     target_len: usize,
     guesses: Vec<([char; 6], [TileState; 6])>, // each guess with its evaluation
     current_input: Vec<char>,
@@ -440,7 +432,12 @@ impl Wordle {
         // First pass: mark correct (green)
         for i in 0..len {
             let g = guess.get(i).copied().unwrap_or(' ').to_ascii_lowercase();
-            let t = self.target.get(i).copied().unwrap_or(' ').to_ascii_lowercase();
+            let t = self
+                .target
+                .get(i)
+                .copied()
+                .unwrap_or(' ')
+                .to_ascii_lowercase();
             if g == t {
                 if let Some(r) = result.get_mut(i) {
                     *r = TileState::Correct;
@@ -465,7 +462,12 @@ impl Wordle {
                 if target_used.get(j).copied().unwrap_or(false) {
                     continue;
                 }
-                let t = self.target.get(j).copied().unwrap_or(' ').to_ascii_lowercase();
+                let t = self
+                    .target
+                    .get(j)
+                    .copied()
+                    .unwrap_or(' ')
+                    .to_ascii_lowercase();
                 if g == t {
                     if let Some(r) = result.get_mut(i) {
                         *r = TileState::Present;
@@ -477,10 +479,8 @@ impl Wordle {
                     break;
                 }
             }
-            if !found {
-                if let Some(r) = result.get_mut(i) {
-                    *r = TileState::Absent;
-                }
+            if !found && let Some(r) = result.get_mut(i) {
+                *r = TileState::Absent;
             }
         }
 
@@ -504,18 +504,23 @@ impl Wordle {
                 TileState::Absent => LetterState::Absent,
                 _ => continue,
             };
-            let current = self.keyboard_state.get(idx).copied().unwrap_or(LetterState::Unknown);
+            let current = self
+                .keyboard_state
+                .get(idx)
+                .copied()
+                .unwrap_or(LetterState::Unknown);
             // Only upgrade: Correct > Present > Absent > Unknown
-            let should_update = match (current, new_state) {
-                (LetterState::Unknown, _) => true,
-                (LetterState::Absent, LetterState::Present | LetterState::Correct) => true,
-                (LetterState::Present, LetterState::Correct) => true,
-                _ => false,
-            };
-            if should_update {
-                if let Some(slot) = self.keyboard_state.get_mut(idx) {
-                    *slot = new_state;
-                }
+            let should_update = matches!(
+                (current, new_state),
+                (LetterState::Unknown, _)
+                    | (
+                        LetterState::Absent,
+                        LetterState::Present | LetterState::Correct
+                    )
+                    | (LetterState::Present, LetterState::Correct)
+            );
+            if should_update && let Some(slot) = self.keyboard_state.get_mut(idx) {
+                *slot = new_state;
             }
         }
     }
@@ -529,7 +534,11 @@ impl Wordle {
         for (prev_guess, prev_eval) in &self.guesses {
             for i in 0..self.target_len {
                 let prev_tile = prev_eval.get(i).copied().unwrap_or(TileState::Empty);
-                let prev_ch = prev_guess.get(i).copied().unwrap_or(' ').to_ascii_lowercase();
+                let prev_ch = prev_guess
+                    .get(i)
+                    .copied()
+                    .unwrap_or(' ')
+                    .to_ascii_lowercase();
                 let curr_ch = guess.get(i).copied().unwrap_or(' ').to_ascii_lowercase();
 
                 if prev_tile == TileState::Correct && curr_ch != prev_ch {
@@ -540,7 +549,11 @@ impl Wordle {
             for i in 0..self.target_len {
                 let prev_tile = prev_eval.get(i).copied().unwrap_or(TileState::Empty);
                 if prev_tile == TileState::Present {
-                    let prev_ch = prev_guess.get(i).copied().unwrap_or(' ').to_ascii_lowercase();
+                    let prev_ch = prev_guess
+                        .get(i)
+                        .copied()
+                        .unwrap_or(' ')
+                        .to_ascii_lowercase();
                     let used = (0..self.target_len).any(|j| {
                         guess.get(j).copied().unwrap_or(' ').to_ascii_lowercase() == prev_ch
                     });
@@ -580,14 +593,15 @@ impl Wordle {
         }
 
         let eval = self.evaluate_guess(&self.current_input);
-        self.update_keyboard(&self.current_input, &eval);
+        // Use the local `guess_arr` copy (not `self.current_input`) so we don't
+        // hold an immutable borrow of `self` across the `&mut self` call.
+        self.update_keyboard(&guess_arr, &eval);
         self.guesses.push((guess_arr, eval));
         self.message = None;
 
         // Check win/lose
-        let all_correct = (0..self.target_len).all(|i| {
-            eval.get(i).copied().unwrap_or(TileState::Empty) == TileState::Correct
-        });
+        let all_correct = (0..self.target_len)
+            .all(|i| eval.get(i).copied().unwrap_or(TileState::Empty) == TileState::Correct);
 
         if all_correct {
             self.phase = GamePhase::Won;
@@ -701,10 +715,8 @@ impl Wordle {
                     Key::Num1 => self.set_difficulty(Difficulty::Easy),
                     Key::Num2 => self.set_difficulty(Difficulty::Normal),
                     Key::Num3 => self.set_difficulty(Difficulty::Hard),
-                    Key::Escape => {
-                        if self.phase != GamePhase::Playing {
-                            self.new_game();
-                        }
+                    Key::Escape if self.phase != GamePhase::Playing => {
+                        self.new_game();
                     }
                     _ => {}
                 }
@@ -727,9 +739,9 @@ impl Wordle {
         let gap = 4.0_f32;
 
         let rows: &[&[char]] = &[
-            &['Q','W','E','R','T','Y','U','I','O','P'],
-            &['A','S','D','F','G','H','J','K','L'],
-            &['Z','X','C','V','B','N','M'],
+            &['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
+            &['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
+            &['Z', 'X', 'C', 'V', 'B', 'N', 'M'],
         ];
 
         for (row_idx, row) in rows.iter().enumerate() {
@@ -772,14 +784,18 @@ impl Wordle {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: width / 2.0 - 40.0, y: 15.0,
+            x: width / 2.0 - 40.0,
+            y: 15.0,
             text: "WORDLE".to_string(),
             color: TEXT,
             font_size: 28.0,
@@ -790,7 +806,8 @@ impl Wordle {
         // Difficulty indicator
         let diff_label = self.difficulty.label();
         cmds.push(RenderCommand::Text {
-            x: width / 2.0 - 30.0, y: 48.0,
+            x: width / 2.0 - 30.0,
+            y: 48.0,
             text: diff_label.to_string(),
             color: SUBTEXT0,
             font_size: 14.0,
@@ -801,7 +818,8 @@ impl Wordle {
         // Hard mode indicator
         if self.hard_mode {
             cmds.push(RenderCommand::Text {
-                x: width - 100.0, y: 15.0,
+                x: width - 100.0,
+                y: 15.0,
                 text: "HARD".to_string(),
                 color: RED,
                 font_size: 14.0,
@@ -816,7 +834,8 @@ impl Wordle {
             self.games_played, self.games_won, self.streak, self.best_streak
         );
         cmds.push(RenderCommand::Text {
-            x: 10.0, y: 15.0,
+            x: 10.0,
+            y: 15.0,
             text: stats_text,
             color: OVERLAY0,
             font_size: 11.0,
@@ -857,34 +876,56 @@ impl Wordle {
 
                 // Tile background
                 cmds.push(RenderCommand::FillRect {
-                    x: tx, y: ty,
-                    width: tile_size, height: tile_size,
+                    x: tx,
+                    y: ty,
+                    width: tile_size,
+                    height: tile_size,
                     color: state.color(),
                     corner_radii: CornerRadii::all(4.0),
                 });
 
                 // Tile border for empty/filled
                 if state == TileState::Empty || state == TileState::Filled {
-                    let border_color = if state == TileState::Filled { SURFACE2 } else { SURFACE1 };
+                    let border_color = if state == TileState::Filled {
+                        SURFACE2
+                    } else {
+                        SURFACE1
+                    };
                     // Top
                     cmds.push(RenderCommand::Line {
-                        x1: tx, y1: ty, x2: tx + tile_size, y2: ty,
-                        color: border_color, width: 2.0,
+                        x1: tx,
+                        y1: ty,
+                        x2: tx + tile_size,
+                        y2: ty,
+                        color: border_color,
+                        width: 2.0,
                     });
                     // Bottom
                     cmds.push(RenderCommand::Line {
-                        x1: tx, y1: ty + tile_size, x2: tx + tile_size, y2: ty + tile_size,
-                        color: border_color, width: 2.0,
+                        x1: tx,
+                        y1: ty + tile_size,
+                        x2: tx + tile_size,
+                        y2: ty + tile_size,
+                        color: border_color,
+                        width: 2.0,
                     });
                     // Left
                     cmds.push(RenderCommand::Line {
-                        x1: tx, y1: ty, x2: tx, y2: ty + tile_size,
-                        color: border_color, width: 2.0,
+                        x1: tx,
+                        y1: ty,
+                        x2: tx,
+                        y2: ty + tile_size,
+                        color: border_color,
+                        width: 2.0,
                     });
                     // Right
                     cmds.push(RenderCommand::Line {
-                        x1: tx + tile_size, y1: ty, x2: tx + tile_size, y2: ty + tile_size,
-                        color: border_color, width: 2.0,
+                        x1: tx + tile_size,
+                        y1: ty,
+                        x2: tx + tile_size,
+                        y2: ty + tile_size,
+                        color: border_color,
+                        width: 2.0,
                     });
                 }
 
@@ -911,7 +952,8 @@ impl Wordle {
         if let Some(msg) = self.message {
             let msg_y = grid_y + (max_guesses as f32) * (tile_size + tile_gap) + 5.0;
             cmds.push(RenderCommand::Text {
-                x: width / 2.0 - 80.0, y: msg_y,
+                x: width / 2.0 - 80.0,
+                y: msg_y,
                 text: msg.to_string(),
                 color: PEACH,
                 font_size: 16.0,
@@ -927,9 +969,9 @@ impl Wordle {
         let gap = 4.0_f32;
 
         let rows: &[&[char]] = &[
-            &['Q','W','E','R','T','Y','U','I','O','P'],
-            &['A','S','D','F','G','H','J','K','L'],
-            &['Z','X','C','V','B','N','M'],
+            &['Q', 'W', 'E', 'R', 'T', 'Y', 'U', 'I', 'O', 'P'],
+            &['A', 'S', 'D', 'F', 'G', 'H', 'J', 'K', 'L'],
+            &['Z', 'X', 'C', 'V', 'B', 'N', 'M'],
         ];
 
         for (row_idx, row) in rows.iter().enumerate() {
@@ -946,7 +988,10 @@ impl Wordle {
 
                 let idx = (*ch as u8).wrapping_sub(b'A') as usize;
                 let letter_state = if idx < 26 {
-                    self.keyboard_state.get(idx).copied().unwrap_or(LetterState::Unknown)
+                    self.keyboard_state
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(LetterState::Unknown)
                 } else {
                     LetterState::Unknown
                 };
@@ -958,8 +1003,10 @@ impl Wordle {
                 };
 
                 cmds.push(RenderCommand::FillRect {
-                    x: kx, y: ky,
-                    width: key_w, height: key_h,
+                    x: kx,
+                    y: ky,
+                    width: key_w,
+                    height: key_h,
                     color: bg,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -981,13 +1028,16 @@ impl Wordle {
 
         // Enter
         cmds.push(RenderCommand::FillRect {
-            x: 80.0, y: enter_y,
-            width: 32.0, height: key_h,
+            x: 80.0,
+            y: enter_y,
+            width: 32.0,
+            height: key_h,
             color: SURFACE1,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: 82.0, y: enter_y + 12.0,
+            x: 82.0,
+            y: enter_y + 12.0,
             text: "ENT".to_string(),
             color: TEXT,
             font_size: 12.0,
@@ -998,13 +1048,16 @@ impl Wordle {
         // Backspace
         let bksp_x = 80.0_f32 + 36.0_f32 + 7.0 * (key_w + gap) + 36.0;
         cmds.push(RenderCommand::FillRect {
-            x: bksp_x, y: enter_y,
-            width: 50.0, height: key_h,
+            x: bksp_x,
+            y: enter_y,
+            width: 50.0,
+            height: key_h,
             color: SURFACE1,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: bksp_x + 6.0, y: enter_y + 12.0,
+            x: bksp_x + 6.0,
+            y: enter_y + 12.0,
             text: "DEL".to_string(),
             color: TEXT,
             font_size: 12.0,
@@ -1029,7 +1082,8 @@ impl Wordle {
             cmds.push(RenderCommand::FillRect {
                 x: width / 2.0 - 140.0,
                 y: height / 2.0 - 60.0,
-                width: 280.0, height: 120.0,
+                width: 280.0,
+                height: 120.0,
                 color: MANTLE,
                 corner_radii: CornerRadii::all(12.0),
             });
@@ -1051,8 +1105,11 @@ impl Wordle {
             });
 
             if self.phase == GamePhase::Won {
-                let guesses_text = format!("Solved in {} guess{}", self.guesses.len(),
-                    if self.guesses.len() == 1 { "" } else { "es" });
+                let guesses_text = format!(
+                    "Solved in {} guess{}",
+                    self.guesses.len(),
+                    if self.guesses.len() == 1 { "" } else { "es" }
+                );
                 cmds.push(RenderCommand::Text {
                     x: width / 2.0 - 70.0,
                     y: height / 2.0 - 10.0,
@@ -1145,17 +1202,30 @@ mod tests {
     #[test]
     fn test_tile_state_colors() {
         // Just make sure all variants return distinct colors
-        let colors: Vec<_> = [TileState::Empty, TileState::Filled, TileState::Correct,
-                              TileState::Present, TileState::Absent]
-            .iter().map(|s| s.color()).collect();
+        let colors: Vec<_> = [
+            TileState::Empty,
+            TileState::Filled,
+            TileState::Correct,
+            TileState::Present,
+            TileState::Absent,
+        ]
+        .iter()
+        .map(|s| s.color())
+        .collect();
         assert_eq!(colors.len(), 5);
     }
 
     #[test]
     fn test_letter_state_colors() {
-        let colors: Vec<_> = [LetterState::Unknown, LetterState::Correct,
-                              LetterState::Present, LetterState::Absent]
-            .iter().map(|s| s.color()).collect();
+        let colors: Vec<_> = [
+            LetterState::Unknown,
+            LetterState::Correct,
+            LetterState::Present,
+            LetterState::Absent,
+        ]
+        .iter()
+        .map(|s| s.color())
+        .collect();
         assert_eq!(colors.len(), 4);
     }
 
@@ -1268,7 +1338,7 @@ mod tests {
         let eval = game.evaluate_guess(&['a', 'c', 'o', 'r', 'n']);
         assert_eq!(eval[0], TileState::Present); // a in word but not pos 0
         assert_eq!(eval[1], TileState::Present); // c in word but not pos 1
-        assert_eq!(eval[2], TileState::Absent);  // o not in word
+        assert_eq!(eval[2], TileState::Absent); // o not in word
         assert_eq!(eval[3], TileState::Present); // r in word but not pos 3
         assert_eq!(eval[4], TileState::Present); // n in word but not pos 4
     }
@@ -1279,11 +1349,11 @@ mod tests {
         game.target = ['c', 'r', 'a', 'n', 'e', ' '];
         game.target_len = 5;
         let eval = game.evaluate_guess(&['c', 'l', 'e', 'a', 'r']);
-        assert_eq!(eval[0], TileState::Correct);  // c correct
-        assert_eq!(eval[1], TileState::Absent);   // l not in word
-        assert_eq!(eval[2], TileState::Present);   // e in word but not pos 2
-        assert_eq!(eval[3], TileState::Present);   // a in word but not pos 3
-        assert_eq!(eval[4], TileState::Present);   // r in word but not pos 4
+        assert_eq!(eval[0], TileState::Correct); // c correct
+        assert_eq!(eval[1], TileState::Absent); // l not in word
+        assert_eq!(eval[2], TileState::Present); // e in word but not pos 2
+        assert_eq!(eval[3], TileState::Present); // a in word but not pos 3
+        assert_eq!(eval[4], TileState::Present); // r in word but not pos 4
     }
 
     #[test]
@@ -1293,11 +1363,11 @@ mod tests {
         game.target_len = 5;
         // Guess "creep" — two e's: e at pos 2 is correct, e at pos 3 is correct
         let eval = game.evaluate_guess(&['c', 'r', 'e', 'e', 'p']);
-        assert_eq!(eval[0], TileState::Absent);   // c not in word
-        assert_eq!(eval[1], TileState::Absent);   // r not in word (not at that position, not present)
-        assert_eq!(eval[2], TileState::Correct);   // e correct at pos 2
-        assert_eq!(eval[3], TileState::Correct);   // e correct at pos 3
-        assert_eq!(eval[4], TileState::Present);   // p present (pos 1)
+        assert_eq!(eval[0], TileState::Absent); // c not in word
+        assert_eq!(eval[1], TileState::Absent); // r not in word (not at that position, not present)
+        assert_eq!(eval[2], TileState::Correct); // e correct at pos 2
+        assert_eq!(eval[3], TileState::Correct); // e correct at pos 3
+        assert_eq!(eval[4], TileState::Present); // p present (pos 1)
     }
 
     #[test]
@@ -1374,7 +1444,7 @@ mod tests {
         game.target = ['c', 'r', 'a', 'n', 'e', ' '];
         game.target_len = 5;
         // 6 wrong guesses
-        let words = ["about", "brain", "drift", "equal", "flesh", "grill"];
+        let words = ["about", "brain", "drift", "equal", "flesh", "globe"];
         for word in &words {
             for ch in word.chars() {
                 game.add_letter(ch);
@@ -1418,7 +1488,9 @@ mod tests {
         // After this, E should be at least Present
         let e_idx = 4; // E
         let state_after_first = game.keyboard_state[e_idx];
-        assert!(state_after_first == LetterState::Present || state_after_first == LetterState::Correct);
+        assert!(
+            state_after_first == LetterState::Present || state_after_first == LetterState::Correct
+        );
     }
 
     #[test]
@@ -1429,7 +1501,11 @@ mod tests {
         assert!(game.current_input.is_empty());
         assert!(game.guesses.is_empty());
         assert_eq!(game.phase, GamePhase::Playing);
-        assert!(game.keyboard_state.iter().all(|s| *s == LetterState::Unknown));
+        assert!(
+            game.keyboard_state
+                .iter()
+                .all(|s| *s == LetterState::Unknown)
+        );
     }
 
     #[test]
@@ -1549,7 +1625,7 @@ mod tests {
         game.best_streak = 5;
         game.target = ['c', 'r', 'a', 'n', 'e', ' '];
         game.target_len = 5;
-        let words = ["about", "brain", "drift", "equal", "flesh", "grill"];
+        let words = ["about", "brain", "drift", "equal", "flesh", "globe"];
         for word in &words {
             for ch in word.chars() {
                 game.add_letter(ch);
@@ -1831,7 +1907,12 @@ mod tests {
         let mut game = Wordle::new();
         let event = Event::Key(KeyEvent {
             key: Key::A,
-            modifiers: Modifiers { shift: false, ctrl: true, alt: false, super_key: false },
+            modifiers: Modifiers {
+                shift: false,
+                ctrl: true,
+                alt: false,
+                super_key: false,
+            },
             pressed: true,
             text: None,
         });

@@ -1,3 +1,42 @@
+## BUG (noticed+FIXED 2026-05-31): apps/wordle — build break PLUS a PRODUCTION borrow bug
+##   PLUS data bugs. (1) Cargo.toml was missing its [dependencies] section, so `use guitk::*`
+##   failed (crate not in scope) and the bin/tests would not compile; added
+##   guitk = { path = "../../gui/toolkit" }. (2) PRODUCTION: submit_guess called
+##   self.update_keyboard(&self.current_input, &eval) — an immutable borrow of self across
+##   an &mut self call (E0502); switched to the local guess_arr copy of the same chars.
+##   (3) DATA: WORDS_6 contained three wrong-length entries — "deliver" (7) and "venture"
+##   (7) and "exist" (5); replaced with valid, alphabetically-ordered 6-letter words
+##   ("delete", "veneer", "exotic") not already in the list. (4) TEST: lose-detection and
+##   streak-reset tests submitted "grill", which isn't in the sample WORDS_5 dictionary, so
+##   the 6th guess was correctly rejected ("Not in word list") and the game never reached
+##   Lost; a limited dictionary is correct Wordle behavior, so changed the test word to
+##   "globe" (present in WORDS_5). wordle 65/65 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/mandelbrot — clippy-deny break PLUS a test bug.
+##   (1) ColorScheme::Neon used the magic literal 6.283 for a full turn (clippy
+##   approx_constant is deny-by-default → blocked clippy), with phase offsets 2.094 and
+##   4.189. Replaced with core::f64::consts::TAU and TAU/3, 2*TAU/3 for the RGB thirds;
+##   also turned a .max(0.0).min(1.0) into .clamp(0.0,1.0) (manual_clamp). (2) TEST:
+##   test_mandelbrot_far_point asserted iter == 0, but z0 = 0 never escapes so the minimum
+##   returned iteration count is 1 (a point escaping immediately returns 1, never 0); fixed
+##   to assert 1. Also a MouseEvent literal carried a non-existent `modifiers` field (E0560),
+##   removed. mandelbrot 52/52 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/{chess,crossword,flood,life,nim} — test-compile
+##   breaks from stale guitk event-struct literals and missing derives. (a) flood/nim:
+##   assert_eq! on enum values required Debug — added #[derive(Debug)] to GameState/Player/
+##   NimVariant. (b) life/mandelbrot: a MouseEvent literal included a `modifiers:` field
+##   that MouseEvent no longer has (E0560) — removed. (c) crossword: KeyEvent literals were
+##   missing the required `pressed`/`text` fields (E0063) — added pressed: true, text: None;
+##   and handle_grid_click was called with integer args where it takes f32 (E0308) — used
+##   float literals. (d) chess: two TEST positions were wrong — test_notation_promotion put
+##   the black king where the promoting queen gave incidental check (so "+" was correct, not
+##   the bug); moved the king to h1 off the rank/file/diagonal to isolate promotion notation.
+##   test_scholars_mate_position wasn't actually mate (bishop didn't defend f7, escape square
+##   uncovered); re-derived the real Scholar's-mate position (Bc4 defends Qf7, d7 pawn blocks).
+##   All test-only fixes except the derives. Tests: chess 113, crossword 75, flood 32,
+##   life 69, nim 33 — all pass; clippy clean (own code), ouros builds OK.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/settings — search robustness bug. matches_search
 ##   did a plain lowercase substring test, so the query "wifi" did NOT match the page
 ##   label "Wi-Fi" (the hyphen broke the substring), and filtered_categories therefore

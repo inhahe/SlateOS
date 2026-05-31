@@ -101,23 +101,21 @@ impl ColorScheme {
                 let r = (t * 3.0).min(1.0);
                 let g = ((t - 0.33).max(0.0) * 3.0).min(1.0);
                 let b = ((t - 0.66).max(0.0) * 3.0).min(1.0);
-                Color::rgb(
-                    (r * 255.0) as u8,
-                    (g * 255.0) as u8,
-                    (b * 255.0) as u8,
-                )
+                Color::rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
             }
             Self::Ocean => {
-                let r = ((t * 2.0 - 0.5).max(0.0).min(1.0) * 100.0) as u8;
+                let r = ((t * 2.0 - 0.5).clamp(0.0, 1.0) * 100.0) as u8;
                 let g = ((t * 1.5).min(1.0) * 200.0) as u8;
                 let b = (t.min(1.0) * 255.0) as u8;
                 Color::rgb(r, g, b)
             }
             Self::Neon => {
-                let phase = t * 6.283;
+                let phase = t * core::f64::consts::TAU;
+                // RGB channels offset by thirds of a full turn for a smooth rainbow.
+                let third = core::f64::consts::TAU / 3.0;
                 let r = ((phase.sin() * 0.5 + 0.5) * 255.0) as u8;
-                let g = (((phase + 2.094).sin() * 0.5 + 0.5) * 255.0) as u8;
-                let b = (((phase + 4.189).sin() * 0.5 + 0.5) * 255.0) as u8;
+                let g = (((phase + third).sin() * 0.5 + 0.5) * 255.0) as u8;
+                let b = (((phase + 2.0 * third).sin() * 0.5 + 0.5) * 255.0) as u8;
                 Color::rgb(r, g, b)
             }
             Self::Grayscale => {
@@ -298,7 +296,12 @@ impl MandelbrotApp {
                     _ => {}
                 }
             }
-            Event::Mouse(MouseEvent { kind: MouseEventKind::Press(MouseButton::Left), x, y, .. }) => {
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x,
+                y,
+                ..
+            }) => {
                 // Center on clicked point
                 // We need screen dimensions; approximate from the render call
                 let (cx, cy) = self.screen_to_complex(*x, *y, 800.0, 600.0);
@@ -315,7 +318,10 @@ impl MandelbrotApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: Color::from_hex(0x000000),
             corner_radii: CornerRadii::ZERO,
         });
@@ -351,17 +357,25 @@ impl MandelbrotApp {
         if self.show_info {
             // Semi-transparent background for info
             cmds.push(RenderCommand::FillRect {
-                x: 0.0, y: 0.0, width, height: 26.0,
+                x: 0.0,
+                y: 0.0,
+                width,
+                height: 26.0,
                 color: Color::rgba(0, 0, 0, 180),
                 corner_radii: CornerRadii::ZERO,
             });
 
             cmds.push(RenderCommand::Text {
-                x: 8.0, y: 5.0,
+                x: 8.0,
+                y: 5.0,
                 text: format!(
                     "Center: ({:.6}, {:.6})  Scale: {:.2e}  Iter: {}  Scheme: {}  Res: {:.0}px",
-                    self.center_x, self.center_y, self.scale,
-                    self.max_iter, self.color_scheme.name(), self.pixel_size
+                    self.center_x,
+                    self.center_y,
+                    self.scale,
+                    self.max_iter,
+                    self.color_scheme.name(),
+                    self.pixel_size
                 ),
                 font_size: 12.0,
                 color: COL_TEXT,
@@ -371,7 +385,10 @@ impl MandelbrotApp {
 
             // Bottom help bar
             cmds.push(RenderCommand::FillRect {
-                x: 0.0, y: height - 22.0, width, height: 22.0,
+                x: 0.0,
+                y: height - 22.0,
+                width,
+                height: 22.0,
                 color: Color::rgba(0, 0, 0, 180),
                 corner_radii: CornerRadii::ZERO,
             });
@@ -396,7 +413,10 @@ impl MandelbrotApp {
 
     fn render_help(&self, cmds: &mut Vec<RenderCommand>, width: f32, height: f32) {
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: Color::rgba(0, 0, 0, 200),
             corner_radii: CornerRadii::ZERO,
         });
@@ -407,13 +427,17 @@ impl MandelbrotApp {
         let bh = 320.0;
 
         cmds.push(RenderCommand::FillRect {
-            x: bx, y: by, width: bw, height: bh,
+            x: bx,
+            y: by,
+            width: bw,
+            height: bh,
             color: COL_MANTLE,
             corner_radii: CornerRadii::all(12.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: bx + bw / 2.0 - 80.0, y: by + 16.0,
+            x: bx + bw / 2.0 - 80.0,
+            y: by + 16.0,
             text: "Mandelbrot Explorer".to_string(),
             font_size: 18.0,
             color: COL_TEXT,
@@ -441,7 +465,8 @@ impl MandelbrotApp {
         let mut cy = by + 50.0;
         for (key, desc) in &helps {
             cmds.push(RenderCommand::Text {
-                x: bx + 24.0, y: cy,
+                x: bx + 24.0,
+                y: cy,
                 text: (*key).to_string(),
                 font_size: 12.0,
                 color: COL_BLUE,
@@ -449,7 +474,8 @@ impl MandelbrotApp {
                 max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: bx + 140.0, y: cy,
+                x: bx + 140.0,
+                y: cy,
                 text: (*desc).to_string(),
                 font_size: 12.0,
                 color: COL_SUBTEXT0,
@@ -505,9 +531,11 @@ mod tests {
 
     #[test]
     fn test_mandelbrot_far_point() {
-        // Far from set, escapes in 1 iteration
+        // Far from the set: z0 = 0 (never escaped), then z1 = c has |z|^2 = 200 > 4,
+        // so escape is detected after exactly 1 iteration. (0 is impossible since
+        // z0 = 0 is always within the escape radius.)
         let iter = mandelbrot_iter(10.0, 10.0, 100);
-        assert_eq!(iter, 0);
+        assert_eq!(iter, 1);
     }
 
     #[test]
@@ -857,7 +885,10 @@ mod tests {
         let old_x = app.center_x;
         app.event(&Event::Key(KeyEvent {
             key: Key::R,
-            modifiers: Modifiers { ctrl: true, ..Modifiers::default() },
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
             pressed: true,
             text: None,
         }));
@@ -930,7 +961,6 @@ mod tests {
             kind: MouseEventKind::Press(MouseButton::Left),
             x: 400.0,
             y: 300.0,
-            modifiers: Modifiers::default(),
         }));
         assert!(app.scale < old_scale);
     }

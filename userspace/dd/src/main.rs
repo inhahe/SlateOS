@@ -179,7 +179,7 @@ fn parse_conv(s: &str) -> Result<ConvFlags, String> {
 // Status level
 // ============================================================================
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum StatusLevel {
     /// Default: print final summary.
     Default,
@@ -277,8 +277,7 @@ fn parse_args() -> Result<Options, String> {
             "if" => opts.input_file = Some(value.to_string()),
             "of" => opts.output_file = Some(value.to_string()),
             "bs" => {
-                let size = parse_size(value)
-                    .map_err(|e| format!("invalid bs: {e}"))?;
+                let size = parse_size(value).map_err(|e| format!("invalid bs: {e}"))?;
                 if size == 0 {
                     return Err("bs must be greater than 0".to_string());
                 }
@@ -287,8 +286,7 @@ fn parse_args() -> Result<Options, String> {
                 bs_set = true;
             }
             "ibs" => {
-                let size = parse_size(value)
-                    .map_err(|e| format!("invalid ibs: {e}"))?;
+                let size = parse_size(value).map_err(|e| format!("invalid ibs: {e}"))?;
                 if size == 0 {
                     return Err("ibs must be greater than 0".to_string());
                 }
@@ -299,25 +297,21 @@ fn parse_args() -> Result<Options, String> {
                 }
             }
             "obs" => {
-                let size = parse_size(value)
-                    .map_err(|e| format!("invalid obs: {e}"))?;
+                let size = parse_size(value).map_err(|e| format!("invalid obs: {e}"))?;
                 if size == 0 {
                     return Err("obs must be greater than 0".to_string());
                 }
                 opts.obs = size;
             }
             "count" => {
-                let n = parse_size(value)
-                    .map_err(|e| format!("invalid count: {e}"))?;
+                let n = parse_size(value).map_err(|e| format!("invalid count: {e}"))?;
                 opts.count = Some(n);
             }
             "skip" => {
-                opts.skip = parse_size(value)
-                    .map_err(|e| format!("invalid skip: {e}"))?;
+                opts.skip = parse_size(value).map_err(|e| format!("invalid skip: {e}"))?;
             }
             "seek" => {
-                opts.seek = parse_size(value)
-                    .map_err(|e| format!("invalid seek: {e}"))?;
+                opts.seek = parse_size(value).map_err(|e| format!("invalid seek: {e}"))?;
             }
             "conv" => {
                 opts.conv = parse_conv(value)?;
@@ -579,8 +573,7 @@ fn run() -> Result<(), String> {
     // --- Open input ---
     let mut input = match &opts.input_file {
         Some(path) => {
-            let f = File::open(path)
-                .map_err(|e| format!("failed to open '{}': {}", path, e))?;
+            let f = File::open(path).map_err(|e| format!("failed to open '{}': {}", path, e))?;
             Input::File(f)
         }
         None => Input::Stdin(io::stdin()),
@@ -604,7 +597,9 @@ fn run() -> Result<(), String> {
 
     // --- Skip input blocks ---
     if opts.skip > 0 {
-        let skip_bytes = opts.skip.checked_mul(opts.ibs)
+        let skip_bytes = opts
+            .skip
+            .checked_mul(opts.ibs)
             .ok_or_else(|| "skip * ibs overflow".to_string())?;
 
         // Try seeking first; fall back to reading and discarding.
@@ -632,7 +627,9 @@ fn run() -> Result<(), String> {
 
     // --- Seek in output ---
     if opts.seek > 0 {
-        let seek_bytes = opts.seek.checked_mul(opts.obs)
+        let seek_bytes = opts
+            .seek
+            .checked_mul(opts.obs)
             .ok_or_else(|| "seek * obs overflow".to_string())?;
 
         let seeked = if let Output::File(ref mut f) = output {
@@ -643,12 +640,12 @@ fn run() -> Result<(), String> {
 
         // If seek failed (e.g. stdout), write NUL padding.
         if !seeked {
-            let mut pad = vec![0u8; opts.obs.min(65536) as usize];
+            let pad = vec![0u8; opts.obs.min(65536) as usize];
             let mut remaining = seek_bytes;
             while remaining > 0 {
                 let to_write = remaining.min(pad.len() as u64) as usize;
                 output
-                    .write_all_bytes(&mut pad[..to_write])
+                    .write_all_bytes(&pad[..to_write])
                     .map_err(|e| format!("error seeking output: {e}"))?;
                 remaining = remaining.saturating_sub(to_write as u64);
             }
@@ -681,10 +678,10 @@ fn run() -> Result<(), String> {
         }
 
         // Check block count limit.
-        if let Some(max) = opts.count {
-            if blocks_read >= max {
-                break;
-            }
+        if let Some(max) = opts.count
+            && blocks_read >= max
+        {
+            break;
         }
 
         // Read one input block.
@@ -778,9 +775,7 @@ fn run() -> Result<(), String> {
 
     // conv=fsync: force data to disk.
     if opts.conv.fsync {
-        output
-            .sync_all()
-            .map_err(|e| format!("fsync error: {e}"))?;
+        output.sync_all().map_err(|e| format!("fsync error: {e}"))?;
     }
 
     // Print final statistics.
@@ -963,7 +958,10 @@ mod tests {
 
     #[test]
     fn apply_ucase() {
-        let conv = ConvFlags { ucase: true, ..ConvFlags::default() };
+        let conv = ConvFlags {
+            ucase: true,
+            ..ConvFlags::default()
+        };
         let mut data = b"hello WORLD 123".to_vec();
         apply_conversions(&mut data, &conv);
         assert_eq!(&data, b"HELLO WORLD 123");
@@ -971,7 +969,10 @@ mod tests {
 
     #[test]
     fn apply_lcase() {
-        let conv = ConvFlags { lcase: true, ..ConvFlags::default() };
+        let conv = ConvFlags {
+            lcase: true,
+            ..ConvFlags::default()
+        };
         let mut data = b"HELLO world 123".to_vec();
         apply_conversions(&mut data, &conv);
         assert_eq!(&data, b"hello world 123");
@@ -979,7 +980,10 @@ mod tests {
 
     #[test]
     fn apply_swab_even() {
-        let conv = ConvFlags { swab: true, ..ConvFlags::default() };
+        let conv = ConvFlags {
+            swab: true,
+            ..ConvFlags::default()
+        };
         let mut data = vec![0x01, 0x02, 0x03, 0x04];
         apply_conversions(&mut data, &conv);
         assert_eq!(data, vec![0x02, 0x01, 0x04, 0x03]);
@@ -987,7 +991,10 @@ mod tests {
 
     #[test]
     fn apply_swab_odd() {
-        let conv = ConvFlags { swab: true, ..ConvFlags::default() };
+        let conv = ConvFlags {
+            swab: true,
+            ..ConvFlags::default()
+        };
         let mut data = vec![0x01, 0x02, 0x03];
         apply_conversions(&mut data, &conv);
         // Only the first pair is swapped; the trailing byte is untouched.
@@ -996,7 +1003,10 @@ mod tests {
 
     #[test]
     fn apply_swab_empty() {
-        let conv = ConvFlags { swab: true, ..ConvFlags::default() };
+        let conv = ConvFlags {
+            swab: true,
+            ..ConvFlags::default()
+        };
         let mut data: Vec<u8> = vec![];
         apply_conversions(&mut data, &conv);
         assert!(data.is_empty());
@@ -1014,7 +1024,11 @@ mod tests {
     #[test]
     fn apply_swab_then_ucase() {
         // swab is applied before ucase.
-        let conv = ConvFlags { swab: true, ucase: true, ..ConvFlags::default() };
+        let conv = ConvFlags {
+            swab: true,
+            ucase: true,
+            ..ConvFlags::default()
+        };
         let mut data = b"abcd".to_vec();
         apply_conversions(&mut data, &conv);
         // After swab: b"badc", after ucase: b"BADC"

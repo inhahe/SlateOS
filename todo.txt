@@ -12,10 +12,13 @@
 ##   byte-str literal, RangeInclusive::contains, iter_mut enumerate); builds for
 ##   the ouros target.  Found while sweeping interpreter/parser coreutils for
 ##   latent failing tests after the jq fix.
+##   ALSO FIXED in the same sweep (2026-05-31):
+##     * dd test module didn't compile: `StatusLevel` didn't implement Debug, so
+##       the assert_eq! in the parse_status tests failed to build the harness.
+##       Added #[derive(Debug)]; 48/48 tests pass; clippy-clean host + ouros
+##       (also cleared 2 pre-existing warnings: needless &mut self on
+##       write_all_bytes + the now-unused `mut pad`).
 ##   STILL OPEN (noticed, not yet fixed) from the same sweep:
-##     * dd test module doesn't compile: `StatusLevel` doesn't implement Debug
-##       (a #[derive(Debug)] is missing on that enum; host `cargo test -p dd`
-##       fails to build the test harness).
 ##     * coreutils crate test build fails on host: `cannot find unix in os`
 ##       (an ungated std::os::unix use needs #[cfg(unix)] for the windows-gnu
 ##       host test build, same class as the service/sftp fixes).

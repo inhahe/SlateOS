@@ -150,14 +150,22 @@ impl ColorFilter {
     fn apply(self, r: u8, g: u8, b: u8) -> (u8, u8, u8) {
         match self {
             Self::None => (r, g, b),
-            Self::Inverted => (255u8.wrapping_sub(r), 255u8.wrapping_sub(g), 255u8.wrapping_sub(b)),
+            Self::Inverted => (
+                255u8.wrapping_sub(r),
+                255u8.wrapping_sub(g),
+                255u8.wrapping_sub(b),
+            ),
             Self::HighContrastYellowBlack => {
                 let luma = Self::luma(r, g, b);
                 if luma > 128 { (255, 255, 0) } else { (0, 0, 0) }
             }
             Self::HighContrastWhiteBlack => {
                 let luma = Self::luma(r, g, b);
-                if luma > 128 { (255, 255, 255) } else { (0, 0, 0) }
+                if luma > 128 {
+                    (255, 255, 255)
+                } else {
+                    (0, 0, 0)
+                }
             }
             Self::HighContrastGreenBlack => {
                 let luma = Self::luma(r, g, b);
@@ -467,8 +475,11 @@ impl MagnifierApp {
                 r.end_x = self.center_x;
                 r.end_y = self.center_y;
                 let dist = r.screen_distance(self.zoom_level);
-                self.status_message =
-                    format!("Ruler: {:.1}px on screen ({:.1}px at zoom)", r.distance(), dist);
+                self.status_message = format!(
+                    "Ruler: {:.1}px on screen ({:.1}px at zoom)",
+                    r.distance(),
+                    dist
+                );
             }
             self.ruler_measuring = false;
         } else {
@@ -1227,7 +1238,9 @@ mod tests {
     #[test]
     fn test_luma() {
         assert_eq!(ColorFilter::luma(0, 0, 0), 0);
-        assert_eq!(ColorFilter::luma(255, 255, 255), 254); // 0.299*255 + 0.587*255 + 0.114*255 ≈ 254.7
+        // BT.601 coefficients sum to exactly 1.0, so pure white maps to 255:
+        // 255*(0.299 + 0.587 + 0.114) = 255*1.0 = 255.
+        assert_eq!(ColorFilter::luma(255, 255, 255), 255);
     }
 
     // ── Lens shape tests ───────────────────────────────────────────────

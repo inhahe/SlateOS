@@ -69,15 +69,42 @@ impl TimeSignature {
 }
 
 const COMMON_SIGNATURES: &[TimeSignature] = &[
-    TimeSignature { beats_per_measure: 2, beat_value: 4 },
-    TimeSignature { beats_per_measure: 3, beat_value: 4 },
-    TimeSignature { beats_per_measure: 4, beat_value: 4 },
-    TimeSignature { beats_per_measure: 5, beat_value: 4 },
-    TimeSignature { beats_per_measure: 6, beat_value: 8 },
-    TimeSignature { beats_per_measure: 7, beat_value: 8 },
-    TimeSignature { beats_per_measure: 3, beat_value: 8 },
-    TimeSignature { beats_per_measure: 9, beat_value: 8 },
-    TimeSignature { beats_per_measure: 12, beat_value: 8 },
+    TimeSignature {
+        beats_per_measure: 2,
+        beat_value: 4,
+    },
+    TimeSignature {
+        beats_per_measure: 3,
+        beat_value: 4,
+    },
+    TimeSignature {
+        beats_per_measure: 4,
+        beat_value: 4,
+    },
+    TimeSignature {
+        beats_per_measure: 5,
+        beat_value: 4,
+    },
+    TimeSignature {
+        beats_per_measure: 6,
+        beat_value: 8,
+    },
+    TimeSignature {
+        beats_per_measure: 7,
+        beat_value: 8,
+    },
+    TimeSignature {
+        beats_per_measure: 3,
+        beat_value: 8,
+    },
+    TimeSignature {
+        beats_per_measure: 9,
+        beat_value: 8,
+    },
+    TimeSignature {
+        beats_per_measure: 12,
+        beat_value: 8,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -87,8 +114,8 @@ const COMMON_SIGNATURES: &[TimeSignature] = &[
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Subdivision {
     None,
-    Eighth,  // 2 per beat
-    Triplet, // 3 per beat
+    Eighth,    // 2 per beat
+    Triplet,   // 3 per beat
     Sixteenth, // 4 per beat
 }
 
@@ -147,8 +174,8 @@ fn tempo_name(bpm: u32) -> &'static str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BeatType {
-    Accent,     // First beat of measure (downbeat)
-    Normal,     // Regular beat
+    Accent,      // First beat of measure (downbeat)
+    Normal,      // Regular beat
     Subdivision, // Sub-beat
 }
 
@@ -164,11 +191,11 @@ struct MetronomeApp {
     playing: bool,
 
     // Beat tracking
-    current_beat: u32,         // 0-indexed within measure
-    current_sub: u32,          // 0-indexed within beat
+    current_beat: u32, // 0-indexed within measure
+    current_sub: u32,  // 0-indexed within beat
     total_beats: u64,
     last_beat_time_ms: u64,
-    beat_flash_ms: u64,        // time remaining for beat flash visual
+    beat_flash_ms: u64, // time remaining for beat flash visual
 
     // Tap tempo
     tap_times_ms: Vec<u64>,
@@ -269,7 +296,9 @@ impl MetronomeApp {
         }
 
         if self.tap_times_ms.len() >= 2 {
-            let intervals: Vec<u64> = self.tap_times_ms.windows(2)
+            let intervals: Vec<u64> = self
+                .tap_times_ms
+                .windows(2)
                 .map(|w| w[1].saturating_sub(w[0]))
                 .collect();
             let avg_interval: u64 = intervals.iter().sum::<u64>() / intervals.len() as u64;
@@ -330,7 +359,9 @@ impl MetronomeApp {
                 // Practice mode: increment BPM after N measures
                 if self.practice_mode {
                     self.practice_measure_count += 1;
-                    if self.practice_measure_count >= self.practice_measures && self.bpm < self.practice_target_bpm {
+                    if self.practice_measure_count >= self.practice_measures
+                        && self.bpm < self.practice_target_bpm
+                    {
                         self.practice_measure_count = 0;
                         self.increase_bpm(self.practice_increment);
                         if self.bpm > self.practice_target_bpm {
@@ -346,7 +377,8 @@ impl MetronomeApp {
         if self.current_sub > 0 {
             return BeatType::Subdivision;
         }
-        if self.current_beat < self.accents.len() as u32 && self.accents[self.current_beat as usize] {
+        if self.current_beat < self.accents.len() as u32 && self.accents[self.current_beat as usize]
+        {
             BeatType::Accent
         } else {
             BeatType::Normal
@@ -391,8 +423,15 @@ impl MetronomeApp {
                 self.practice_measure_count = 0;
                 self.beat_flash_ms = 0;
             }
-            Key::Num1 | Key::Num2 | Key::Num3 | Key::Num4 |
-            Key::Num5 | Key::Num6 | Key::Num7 | Key::Num8 | Key::Num9 => {
+            Key::Num1
+            | Key::Num2
+            | Key::Num3
+            | Key::Num4
+            | Key::Num5
+            | Key::Num6
+            | Key::Num7
+            | Key::Num8
+            | Key::Num9 => {
                 let beat_num = match event.key {
                     Key::Num1 => 0,
                     Key::Num2 => 1,
@@ -423,7 +462,8 @@ impl MetronomeApp {
             }
             Key::Down => {
                 if self.practice_mode {
-                    self.practice_target_bpm = self.practice_target_bpm.saturating_sub(10).max(MIN_BPM);
+                    self.practice_target_bpm =
+                        self.practice_target_bpm.saturating_sub(10).max(MIN_BPM);
                 }
             }
             _ => {}
@@ -445,7 +485,10 @@ impl MetronomeApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: Color::from_hex(COL_BASE),
             corner_radii: CornerRadii::ZERO,
         });
@@ -462,7 +505,8 @@ impl MetronomeApp {
     fn render_main(&self, cmds: &mut Vec<RenderCommand>, _width: f32) {
         // Title
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 15.0,
+            x: 30.0,
+            y: 15.0,
             text: String::from("Metronome"),
             color: Color::from_hex(COL_LAVENDER),
             font_size: 28.0,
@@ -477,7 +521,8 @@ impl MetronomeApp {
             ("○ STOPPED", COL_OVERLAY0)
         };
         cmds.push(RenderCommand::Text {
-            x: 250.0, y: 22.0,
+            x: 250.0,
+            y: 22.0,
             text: String::from(status_text),
             color: Color::from_hex(status_color),
             font_size: 16.0,
@@ -487,12 +532,16 @@ impl MetronomeApp {
 
         // BPM display
         cmds.push(RenderCommand::FillRect {
-            x: 30.0, y: 55.0, width: 250.0, height: 90.0,
+            x: 30.0,
+            y: 55.0,
+            width: 250.0,
+            height: 90.0,
             color: Color::from_hex(COL_MANTLE),
             corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::Text {
-            x: 60.0, y: 65.0,
+            x: 60.0,
+            y: 65.0,
             text: self.bpm.to_string(),
             color: Color::from_hex(COL_TEXT),
             font_size: 56.0,
@@ -500,7 +549,8 @@ impl MetronomeApp {
             max_width: None,
         });
         cmds.push(RenderCommand::Text {
-            x: 200.0, y: 95.0,
+            x: 200.0,
+            y: 95.0,
             text: String::from("BPM"),
             color: Color::from_hex(COL_SUBTEXT0),
             font_size: 18.0,
@@ -510,7 +560,8 @@ impl MetronomeApp {
 
         // Tempo name
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 150.0,
+            x: 30.0,
+            y: 150.0,
             text: String::from(tempo_name(self.bpm)),
             color: Color::from_hex(COL_MAUVE),
             font_size: 18.0,
@@ -521,7 +572,8 @@ impl MetronomeApp {
         // Time signature & subdivision
         let info_y = 175.0;
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: info_y,
+            x: 30.0,
+            y: info_y,
             text: format!(
                 "Time: {}  |  Sub: {}  |  Interval: {}ms",
                 self.time_signature.display(),
@@ -559,8 +611,10 @@ impl MetronomeApp {
             };
 
             cmds.push(RenderCommand::FillRect {
-                x: cx, y: beat_y,
-                width: circle_size, height: circle_size,
+                x: cx,
+                y: beat_y,
+                width: circle_size,
+                height: circle_size,
                 color,
                 corner_radii: CornerRadii::all(circle_size / 2.0),
             });
@@ -589,8 +643,10 @@ impl MetronomeApp {
                 let sx = start_x + s as f32 * 14.0;
                 let is_current_sub = s == self.current_sub;
                 cmds.push(RenderCommand::FillRect {
-                    x: sx, y: sub_y,
-                    width: 10.0, height: 10.0,
+                    x: sx,
+                    y: sub_y,
+                    width: 10.0,
+                    height: 10.0,
                     color: if is_current_sub && self.beat_flash_ms > 0 {
                         Color::from_hex(COL_TEAL)
                     } else {
@@ -606,7 +662,8 @@ impl MetronomeApp {
         if self.playing {
             let measure = self.total_beats / self.time_signature.beats_per_measure as u64 + 1;
             cmds.push(RenderCommand::Text {
-                x: 30.0, y: stats_y,
+                x: 30.0,
+                y: stats_y,
                 text: format!(
                     "Beat: {}/{}  |  Measure: {}  |  Total beats: {}",
                     self.current_beat + 1,
@@ -624,13 +681,16 @@ impl MetronomeApp {
         // Practice mode indicator
         if self.practice_mode {
             cmds.push(RenderCommand::FillRect {
-                x: 30.0, y: stats_y + 25.0,
-                width: 400.0, height: 30.0,
+                x: 30.0,
+                y: stats_y + 25.0,
+                width: 400.0,
+                height: 30.0,
                 color: Color::from_hex(COL_SURFACE0),
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: 40.0, y: stats_y + 30.0,
+                x: 40.0,
+                y: stats_y + 30.0,
                 text: format!(
                     "Practice: {} → {} BPM (+{} every {} measures)",
                     self.practice_start_bpm,
@@ -656,7 +716,8 @@ impl MetronomeApp {
         ];
         for (i, line) in controls.iter().enumerate() {
             cmds.push(RenderCommand::Text {
-                x: 30.0, y: ctrl_y + i as f32 * 18.0,
+                x: 30.0,
+                y: ctrl_y + i as f32 * 18.0,
                 text: String::from(*line),
                 color: Color::from_hex(COL_OVERLAY0),
                 font_size: 12.0,
@@ -668,7 +729,8 @@ impl MetronomeApp {
 
     fn render_settings(&self, cmds: &mut Vec<RenderCommand>, _width: f32) {
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 20.0,
+            x: 30.0,
+            y: 20.0,
             text: String::from("Metronome Settings"),
             color: Color::from_hex(COL_LAVENDER),
             font_size: 24.0,
@@ -677,7 +739,8 @@ impl MetronomeApp {
         });
 
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 55.0,
+            x: 30.0,
+            y: 55.0,
             text: String::from("Esc/Enter: Back"),
             color: Color::from_hex(COL_OVERLAY0),
             font_size: 13.0,
@@ -687,24 +750,51 @@ impl MetronomeApp {
 
         let settings = [
             (format!("BPM: {}", self.bpm), COL_TEXT),
-            (format!("Time Signature: {}", self.time_signature.display()), COL_TEXT),
-            (format!("Subdivision: {}", self.subdivision.name()), COL_TEXT),
+            (
+                format!("Time Signature: {}", self.time_signature.display()),
+                COL_TEXT,
+            ),
+            (
+                format!("Subdivision: {}", self.subdivision.name()),
+                COL_TEXT,
+            ),
             (format!("Tempo: {}", tempo_name(self.bpm)), COL_MAUVE),
-            (format!("Practice Mode: {}", if self.practice_mode { "ON" } else { "OFF" }), COL_YELLOW),
-            (format!("Practice Target: {} BPM (↑/↓ to adjust)", self.practice_target_bpm), COL_TEAL),
-            (format!("Practice Increment: +{} BPM", self.practice_increment), COL_TEAL),
-            (format!("Practice Measures: {}", self.practice_measures), COL_TEAL),
+            (
+                format!(
+                    "Practice Mode: {}",
+                    if self.practice_mode { "ON" } else { "OFF" }
+                ),
+                COL_YELLOW,
+            ),
+            (
+                format!(
+                    "Practice Target: {} BPM (↑/↓ to adjust)",
+                    self.practice_target_bpm
+                ),
+                COL_TEAL,
+            ),
+            (
+                format!("Practice Increment: +{} BPM", self.practice_increment),
+                COL_TEAL,
+            ),
+            (
+                format!("Practice Measures: {}", self.practice_measures),
+                COL_TEAL,
+            ),
         ];
 
         for (i, (text, col)) in settings.iter().enumerate() {
             cmds.push(RenderCommand::FillRect {
-                x: 30.0, y: 80.0 + i as f32 * 38.0,
-                width: 450.0, height: 32.0,
+                x: 30.0,
+                y: 80.0 + i as f32 * 38.0,
+                width: 450.0,
+                height: 32.0,
                 color: Color::from_hex(COL_SURFACE0),
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: 45.0, y: 86.0 + i as f32 * 38.0,
+                x: 45.0,
+                y: 86.0 + i as f32 * 38.0,
                 text: text.clone(),
                 color: Color::from_hex(*col),
                 font_size: 15.0,
@@ -731,7 +821,7 @@ mod tests {
         KeyEvent {
             key,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         }
     }
@@ -740,7 +830,7 @@ mod tests {
         KeyEvent {
             key,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: true },
+            modifiers: Modifiers::shift(),
             text: None,
         }
     }
@@ -917,7 +1007,10 @@ mod tests {
             app.cycle_time_signature();
         }
         // Should wrap back to first
-        assert_eq!(app.sig_index, (2 + COMMON_SIGNATURES.len()) % COMMON_SIGNATURES.len());
+        assert_eq!(
+            app.sig_index,
+            (2 + COMMON_SIGNATURES.len()) % COMMON_SIGNATURES.len()
+        );
     }
 
     #[test]
@@ -1210,7 +1303,7 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::Space,
             pressed: false,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert!(!app.playing);
@@ -1252,7 +1345,9 @@ mod tests {
         let app = MetronomeApp::new();
         let cmds = app.render(600.0, 800.0);
         assert!(!cmds.is_empty());
-        let has_title = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Metronome"));
+        let has_title = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Metronome"));
         assert!(has_title);
     }
 
@@ -1260,7 +1355,9 @@ mod tests {
     fn render_bpm_display() {
         let app = MetronomeApp::new();
         let cmds = app.render(600.0, 800.0);
-        let has_bpm = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "120"));
+        let has_bpm = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "120"));
         assert!(has_bpm);
     }
 
@@ -1269,7 +1366,9 @@ mod tests {
         let mut app = MetronomeApp::new();
         app.playing = true;
         let cmds = app.render(600.0, 800.0);
-        let has_playing = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("PLAYING")));
+        let has_playing = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("PLAYING")));
         assert!(has_playing);
     }
 
@@ -1278,7 +1377,9 @@ mod tests {
         let mut app = MetronomeApp::new();
         app.show_settings = true;
         let cmds = app.render(600.0, 800.0);
-        let has_settings = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Metronome Settings"));
+        let has_settings = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Metronome Settings"));
         assert!(has_settings);
     }
 
@@ -1286,7 +1387,9 @@ mod tests {
     fn render_has_background() {
         let app = MetronomeApp::new();
         let cmds = app.render(600.0, 800.0);
-        let has_bg = cmds.iter().any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
+        let has_bg = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
         assert!(has_bg);
     }
 
@@ -1295,10 +1398,13 @@ mod tests {
         let app = MetronomeApp::new();
         let cmds = app.render(600.0, 800.0);
         // Should have 4 beat indicator circles (4/4 time)
-        let beat_circles = cmds.iter().filter(|c| {
-            matches!(c, RenderCommand::FillRect { corner_radii, height, .. }
+        let beat_circles = cmds
+            .iter()
+            .filter(|c| {
+                matches!(c, RenderCommand::FillRect { corner_radii, height, .. }
                 if *height > 30.0 && *height < 40.0 && corner_radii.top_left > 10.0)
-        }).count();
+            })
+            .count();
         assert_eq!(beat_circles, 4);
     }
 
@@ -1307,7 +1413,9 @@ mod tests {
         let mut app = MetronomeApp::new();
         app.practice_mode = true;
         let cmds = app.render(600.0, 800.0);
-        let has_practice = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Practice:")));
+        let has_practice = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Practice:")));
         assert!(has_practice);
     }
 }

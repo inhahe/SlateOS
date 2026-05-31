@@ -177,7 +177,11 @@ impl Date {
             d += days_in_month(y, m) as i32;
         }
 
-        Self { year: y, month: m, day: d as u32 }
+        Self {
+            year: y,
+            month: m,
+            day: d as u32,
+        }
     }
 
     /// Add months (clamping day to valid range).
@@ -186,7 +190,11 @@ impl Date {
         let new_year = total_months.div_euclid(12);
         let new_month = (total_months.rem_euclid(12) + 1) as u32;
         let max_d = days_in_month(new_year, new_month);
-        Self { year: new_year, month: new_month, day: self.day.min(max_d) }
+        Self {
+            year: new_year,
+            month: new_month,
+            day: self.day.min(max_d),
+        }
     }
 
     /// Difference in days (self - other), approximate via Julian day number.
@@ -210,7 +218,13 @@ impl Date {
     }
 
     pub fn format_long(self) -> String {
-        format!("{}, {} {}, {}", self.day_of_week_name(), self.month_name(), self.day, self.year)
+        format!(
+            "{}, {} {}, {}",
+            self.day_of_week_name(),
+            self.month_name(),
+            self.day,
+            self.year
+        )
     }
 
     pub fn format_medium(self) -> String {
@@ -238,7 +252,10 @@ impl Time {
     }
 
     pub fn from_minutes(total: u32) -> Self {
-        Self { hour: (total / 60).min(23), minute: total % 60 }
+        Self {
+            hour: (total / 60).min(23),
+            minute: total % 60,
+        }
     }
 
     pub fn format_24h(self) -> String {
@@ -276,7 +293,11 @@ impl DateTime {
     }
 
     pub fn format_medium(self) -> String {
-        format!("{} at {}", self.date.format_medium(), self.time.format_12h())
+        format!(
+            "{} at {}",
+            self.date.format_medium(),
+            self.time.format_12h()
+        )
     }
 
     /// Difference in minutes (approximate, same-month only for simplicity).
@@ -299,27 +320,49 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap_year(year) { 29 } else { 28 },
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 0,
     }
 }
 
 pub fn month_name(month: u32) -> &'static str {
     match month {
-        1 => "January", 2 => "February", 3 => "March",
-        4 => "April", 5 => "May", 6 => "June",
-        7 => "July", 8 => "August", 9 => "September",
-        10 => "October", 11 => "November", 12 => "December",
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
         _ => "Unknown",
     }
 }
 
 pub fn month_short(month: u32) -> &'static str {
     match month {
-        1 => "Jan", 2 => "Feb", 3 => "Mar",
-        4 => "Apr", 5 => "May", 6 => "Jun",
-        7 => "Jul", 8 => "Aug", 9 => "Sep",
-        10 => "Oct", 11 => "Nov", 12 => "Dec",
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
         _ => "???",
     }
 }
@@ -447,8 +490,14 @@ impl TaskCategory {
 
     pub fn all() -> &'static [Self] {
         &[
-            Self::Work, Self::Personal, Self::Health, Self::Finance,
-            Self::Shopping, Self::Education, Self::Home, Self::Social,
+            Self::Work,
+            Self::Personal,
+            Self::Health,
+            Self::Finance,
+            Self::Shopping,
+            Self::Education,
+            Self::Home,
+            Self::Social,
         ]
     }
 
@@ -522,9 +571,7 @@ impl RecurrenceRule {
                 let diff = check.days_since(origin);
                 diff >= 0 && diff % 7 == 0
             }
-            Self::Monthly => {
-                origin.day == check.day && check >= origin
-            }
+            Self::Monthly => origin.day == check.day && check >= origin,
             Self::Yearly => {
                 origin.month == check.month && origin.day == check.day && check >= origin
             }
@@ -573,7 +620,9 @@ impl RecurrenceRule {
                 if let Some(rest) = other.strip_prefix("custom:")
                     && let Ok(days) = rest.parse::<u32>()
                 {
-                    return Self::Custom { interval_days: days };
+                    return Self::Custom {
+                        interval_days: days,
+                    };
                 }
                 Self::None
             }
@@ -616,7 +665,12 @@ impl SnoozeDuration {
     }
 
     pub fn presets() -> &'static [Self] {
-        &[Self::Minutes5, Self::Minutes15, Self::Minutes30, Self::Hour1]
+        &[
+            Self::Minutes5,
+            Self::Minutes15,
+            Self::Minutes30,
+            Self::Hour1,
+        ]
     }
 }
 
@@ -773,7 +827,11 @@ impl Task {
             } else if diff < -1 {
                 format!("{} days ago", -diff)
             } else if diff <= 7 {
-                format!("{} at {}", due.date.day_of_week_name(), due.time.format_12h())
+                format!(
+                    "{} at {}",
+                    due.date.day_of_week_name(),
+                    due.time.format_12h()
+                )
             } else {
                 due.format_medium()
             }
@@ -789,9 +847,17 @@ impl Task {
         } else {
             "null".to_string()
         };
-        let subtask_json: Vec<String> = self.subtasks.iter().map(|s| {
-            format!("{{\"title\":\"{}\",\"completed\":{}}}", escape_json(&s.title), s.completed)
-        }).collect();
+        let subtask_json: Vec<String> = self
+            .subtasks
+            .iter()
+            .map(|s| {
+                format!(
+                    "{{\"title\":\"{}\",\"completed\":{}}}",
+                    escape_json(&s.title),
+                    s.completed
+                )
+            })
+            .collect();
 
         format!(
             "{{\"id\":{},\"title\":\"{}\",\"description\":\"{}\",\"due\":{},\
@@ -850,7 +916,12 @@ impl SortMode {
     }
 
     pub fn all() -> &'static [Self] {
-        &[Self::DueDate, Self::Priority, Self::CreationDate, Self::Alphabetical]
+        &[
+            Self::DueDate,
+            Self::Priority,
+            Self::CreationDate,
+            Self::Alphabetical,
+        ]
     }
 
     pub fn next(self) -> Self {
@@ -913,7 +984,13 @@ impl ViewFilter {
 
     /// Standard views (non-category).
     pub fn standard_views() -> &'static [Self] {
-        &[Self::Today, Self::Upcoming, Self::All, Self::Overdue, Self::Completed]
+        &[
+            Self::Today,
+            Self::Upcoming,
+            Self::All,
+            Self::Overdue,
+            Self::Completed,
+        ]
     }
 }
 
@@ -990,22 +1067,22 @@ impl TaskStore {
     pub fn filtered(&self, view: ViewFilter, now: DateTime) -> Vec<&Task> {
         let today = now.date;
         match view {
-            ViewFilter::Today => self.tasks.iter()
+            ViewFilter::Today => self
+                .tasks
+                .iter()
                 .filter(|t| !t.completed && t.is_due_today(today))
                 .collect(),
-            ViewFilter::Upcoming => self.tasks.iter()
+            ViewFilter::Upcoming => self
+                .tasks
+                .iter()
                 .filter(|t| !t.completed && t.is_due_within(today, 7))
                 .collect(),
-            ViewFilter::All => self.tasks.iter()
-                .filter(|t| !t.completed)
-                .collect(),
-            ViewFilter::Overdue => self.tasks.iter()
-                .filter(|t| t.is_overdue(now))
-                .collect(),
-            ViewFilter::Completed => self.tasks.iter()
-                .filter(|t| t.completed)
-                .collect(),
-            ViewFilter::ByCategory(cat) => self.tasks.iter()
+            ViewFilter::All => self.tasks.iter().filter(|t| !t.completed).collect(),
+            ViewFilter::Overdue => self.tasks.iter().filter(|t| t.is_overdue(now)).collect(),
+            ViewFilter::Completed => self.tasks.iter().filter(|t| t.completed).collect(),
+            ViewFilter::ByCategory(cat) => self
+                .tasks
+                .iter()
                 .filter(|t| !t.completed && t.category == cat)
                 .collect(),
         }
@@ -1025,12 +1102,18 @@ impl TaskStore {
 
     /// Search tasks by title/description.
     pub fn search(&self, query: &str) -> Vec<&Task> {
-        self.tasks.iter().filter(|t| t.matches_query(query)).collect()
+        self.tasks
+            .iter()
+            .filter(|t| t.matches_query(query))
+            .collect()
     }
 
     /// Count tasks by category.
     pub fn count_by_category(&self, cat: TaskCategory) -> usize {
-        self.tasks.iter().filter(|t| !t.completed && t.category == cat).count()
+        self.tasks
+            .iter()
+            .filter(|t| !t.completed && t.category == cat)
+            .count()
     }
 
     /// Count overdue tasks.
@@ -1050,21 +1133,24 @@ impl TaskStore {
 
     /// Get tasks that should trigger a notification now.
     pub fn due_now(&self, now: DateTime) -> Vec<&Task> {
-        self.tasks.iter().filter(|t| {
-            if t.completed {
-                return false;
-            }
-            if t.is_snoozed(now) {
-                return false;
-            }
-            if let Some(due) = t.due {
-                // Due within the last 5 minutes (notification window)
-                let diff = now.minutes_since(due);
-                (0..=5).contains(&diff)
-            } else {
-                false
-            }
-        }).collect()
+        self.tasks
+            .iter()
+            .filter(|t| {
+                if t.completed {
+                    return false;
+                }
+                if t.is_snoozed(now) {
+                    return false;
+                }
+                if let Some(due) = t.due {
+                    // Due within the last 5 minutes (notification window)
+                    let diff = now.minutes_since(due);
+                    (0..=5).contains(&diff)
+                } else {
+                    false
+                }
+            })
+            .collect()
     }
 
     /// Export all tasks as JSON.
@@ -1306,11 +1392,15 @@ fn parse_time_12h(s: &str) -> Option<Time> {
 fn parse_subtasks_json(json: &str) -> Vec<Subtask> {
     let mut result = Vec::new();
     let marker = "\"subtasks\":[";
-    let Some(pos) = json.find(marker) else { return result };
+    let Some(pos) = json.find(marker) else {
+        return result;
+    };
     let start = pos + marker.len();
     let rest = &json[start..];
     // Find the matching ]
-    let Some(end) = rest.find(']') else { return result };
+    let Some(end) = rest.find(']') else {
+        return result;
+    };
     let array_content = &rest[..end];
     if array_content.trim().is_empty() {
         return result;
@@ -1380,7 +1470,10 @@ impl RemindersApp {
     pub fn check_notifications(&mut self) {
         let due_tasks = self.store.due_now(self.now);
         for task in due_tasks {
-            let already = self.notifications.iter().any(|n| n.task_id == task.id && !n.dismissed);
+            let already = self
+                .notifications
+                .iter()
+                .any(|n| n.task_id == task.id && !n.dismissed);
             if !already {
                 self.notifications.push(Notification {
                     task_id: task.id,
@@ -1425,16 +1518,17 @@ impl RemindersApp {
         } else {
             let search_results = self.store.search(&self.search_query);
             // Apply view filter to search results too
-            search_results.into_iter().filter(|t| {
-                match self.view {
+            search_results
+                .into_iter()
+                .filter(|t| match self.view {
                     ViewFilter::All => !t.completed,
                     ViewFilter::Today => !t.completed && t.is_due_today(self.today),
                     ViewFilter::Upcoming => !t.completed && t.is_due_within(self.today, 7),
                     ViewFilter::Overdue => t.is_overdue(self.now),
                     ViewFilter::Completed => t.completed,
                     ViewFilter::ByCategory(cat) => !t.completed && t.category == cat,
-                }
-            }).collect()
+                })
+                .collect()
         };
         TaskStore::sorted(&filtered, self.sort_mode)
     }
@@ -1457,8 +1551,12 @@ impl RemindersApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: self.height,
-            color: BASE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: BASE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Notification banner (if any active notifications)
@@ -1481,7 +1579,13 @@ impl RemindersApp {
         // Detail panel
         let main_w = if self.detail_visible && self.selected_task_id.is_some() {
             let detail_x = self.width - DETAIL_PANEL_WIDTH;
-            self.render_detail_panel(&mut cmds, detail_x, content_y, DETAIL_PANEL_WIDTH, content_h);
+            self.render_detail_panel(
+                &mut cmds,
+                detail_x,
+                content_y,
+                DETAIL_PANEL_WIDTH,
+                content_h,
+            );
             detail_x - main_x
         } else {
             self.width - main_x
@@ -1504,8 +1608,12 @@ impl RemindersApp {
 
         // Background for all notifications
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: total_h,
-            color: CRUST, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: total_h,
+            color: CRUST,
+            corner_radii: CornerRadii::ZERO,
         });
 
         for (i, notif) in active.iter().enumerate() {
@@ -1513,48 +1621,72 @@ impl RemindersApp {
 
             // Accent bar
             cmds.push(RenderCommand::FillRect {
-                x: 0.0, y, width: 4.0, height: NOTIFICATION_HEIGHT,
-                color: PEACH, corner_radii: CornerRadii::ZERO,
+                x: 0.0,
+                y,
+                width: 4.0,
+                height: NOTIFICATION_HEIGHT,
+                color: PEACH,
+                corner_radii: CornerRadii::ZERO,
             });
 
             // Bell icon placeholder
             cmds.push(RenderCommand::Text {
-                x: 16.0, y: y + 14.0,
+                x: 16.0,
+                y: y + 14.0,
                 text: "[!]".to_string(),
-                font_size: 16.0, color: PEACH,
-                font_weight: FontWeightHint::Bold, max_width: Some(30.0),
+                font_size: 16.0,
+                color: PEACH,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(30.0),
             });
 
             // Message
             cmds.push(RenderCommand::Text {
-                x: 48.0, y: y + 14.0,
+                x: 48.0,
+                y: y + 14.0,
                 text: notif.message.clone(),
-                font_size: 14.0, color: TEXT,
-                font_weight: FontWeightHint::Bold, max_width: Some(self.width - 200.0),
+                font_size: 14.0,
+                color: TEXT,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(self.width - 200.0),
             });
 
             // Dismiss button
             cmds.push(RenderCommand::FillRect {
-                x: self.width - 100.0, y: y + 10.0, width: 80.0, height: 28.0,
-                color: SURFACE0, corner_radii: CornerRadii::all(SMALL_RADIUS),
+                x: self.width - 100.0,
+                y: y + 10.0,
+                width: 80.0,
+                height: 28.0,
+                color: SURFACE0,
+                corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             cmds.push(RenderCommand::Text {
-                x: self.width - 88.0, y: y + 16.0,
+                x: self.width - 88.0,
+                y: y + 16.0,
                 text: "Dismiss".to_string(),
-                font_size: 11.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(70.0),
+                font_size: 11.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(70.0),
             });
 
             // Snooze button
             cmds.push(RenderCommand::FillRect {
-                x: self.width - 200.0, y: y + 10.0, width: 80.0, height: 28.0,
-                color: SURFACE0, corner_radii: CornerRadii::all(SMALL_RADIUS),
+                x: self.width - 200.0,
+                y: y + 10.0,
+                width: 80.0,
+                height: 28.0,
+                color: SURFACE0,
+                corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
             cmds.push(RenderCommand::Text {
-                x: self.width - 190.0, y: y + 16.0,
+                x: self.width - 190.0,
+                y: y + 16.0,
                 text: "Snooze".to_string(),
-                font_size: 11.0, color: BLUE,
-                font_weight: FontWeightHint::Regular, max_width: Some(70.0),
+                font_size: 11.0,
+                color: BLUE,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(70.0),
             });
         }
 
@@ -1565,43 +1697,64 @@ impl RemindersApp {
     fn render_header(&self, cmds: &mut Vec<RenderCommand>, y_offset: f32) {
         // Header background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: y_offset, width: self.width, height: HEADER_HEIGHT,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: y_offset,
+            width: self.width,
+            height: HEADER_HEIGHT,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Bottom border
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: y_offset + HEADER_HEIGHT - 1.0,
-            width: self.width, height: 1.0,
-            color: SURFACE0, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: y_offset + HEADER_HEIGHT - 1.0,
+            width: self.width,
+            height: 1.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // App title
         cmds.push(RenderCommand::Text {
-            x: PADDING, y: y_offset + 8.0,
+            x: PADDING,
+            y: y_offset + 8.0,
             text: "Reminders".to_string(),
-            font_size: 20.0, color: LAVENDER,
-            font_weight: FontWeightHint::Bold, max_width: Some(150.0),
+            font_size: 20.0,
+            color: LAVENDER,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(150.0),
         });
 
         // Current view label
         cmds.push(RenderCommand::Text {
-            x: PADDING, y: y_offset + 34.0,
+            x: PADDING,
+            y: y_offset + 34.0,
             text: self.view.label(),
-            font_size: 12.0, color: SUBTEXT0,
-            font_weight: FontWeightHint::Regular, max_width: Some(200.0),
+            font_size: 12.0,
+            color: SUBTEXT0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(200.0),
         });
 
         // Search box
         let search_x = 240.0;
         let search_w = 300.0;
         cmds.push(RenderCommand::FillRect {
-            x: search_x, y: y_offset + 12.0, width: search_w, height: 32.0,
-            color: SURFACE0, corner_radii: CornerRadii::all(SMALL_RADIUS),
+            x: search_x,
+            y: y_offset + 12.0,
+            width: search_w,
+            height: 32.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         cmds.push(RenderCommand::StrokeRect {
-            x: search_x, y: y_offset + 12.0, width: search_w, height: 32.0,
-            color: SURFACE1, line_width: 1.0,
+            x: search_x,
+            y: y_offset + 12.0,
+            width: search_w,
+            height: 32.0,
+            color: SURFACE1,
+            line_width: 1.0,
             corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         let search_text = if self.search_query.is_empty() {
@@ -1609,33 +1762,56 @@ impl RemindersApp {
         } else {
             self.search_query.clone()
         };
-        let search_color = if self.search_query.is_empty() { OVERLAY0 } else { TEXT };
+        let search_color = if self.search_query.is_empty() {
+            OVERLAY0
+        } else {
+            TEXT
+        };
         cmds.push(RenderCommand::Text {
-            x: search_x + 12.0, y: y_offset + 20.0,
-            text: search_text, font_size: 13.0, color: search_color,
-            font_weight: FontWeightHint::Regular, max_width: Some(search_w - 24.0),
+            x: search_x + 12.0,
+            y: y_offset + 20.0,
+            text: search_text,
+            font_size: 13.0,
+            color: search_color,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(search_w - 24.0),
         });
 
         // Sort indicator
         let sort_x = search_x + search_w + 20.0;
         cmds.push(RenderCommand::FillRect {
-            x: sort_x, y: y_offset + 12.0, width: 100.0, height: 32.0,
-            color: SURFACE0, corner_radii: CornerRadii::all(SMALL_RADIUS),
+            x: sort_x,
+            y: y_offset + 12.0,
+            width: 100.0,
+            height: 32.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(SMALL_RADIUS),
         });
         cmds.push(RenderCommand::Text {
-            x: sort_x + 8.0, y: y_offset + 20.0,
+            x: sort_x + 8.0,
+            y: y_offset + 20.0,
             text: format!("Sort: {}", self.sort_mode.label()),
-            font_size: 11.0, color: SUBTEXT1,
-            font_weight: FontWeightHint::Regular, max_width: Some(90.0),
+            font_size: 11.0,
+            color: SUBTEXT1,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(90.0),
         });
 
         // Task count
         let tasks = self.current_tasks();
-        let count_text = format!("{} task{}", tasks.len(), if tasks.len() == 1 { "" } else { "s" });
+        let count_text = format!(
+            "{} task{}",
+            tasks.len(),
+            if tasks.len() == 1 { "" } else { "s" }
+        );
         cmds.push(RenderCommand::Text {
-            x: self.width - 120.0, y: y_offset + 20.0,
-            text: count_text, font_size: 13.0, color: SUBTEXT0,
-            font_weight: FontWeightHint::Regular, max_width: Some(110.0),
+            x: self.width - 120.0,
+            y: y_offset + 20.0,
+            text: count_text,
+            font_size: 13.0,
+            color: SUBTEXT0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(110.0),
         });
     }
 
@@ -1643,24 +1819,35 @@ impl RemindersApp {
     fn render_sidebar(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Background
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x,
+            y,
+            width: w,
+            height: h,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Right border
         cmds.push(RenderCommand::FillRect {
-            x: x + w - 1.0, y, width: 1.0, height: h,
-            color: SURFACE0, corner_radii: CornerRadii::ZERO,
+            x: x + w - 1.0,
+            y,
+            width: 1.0,
+            height: h,
+            color: SURFACE0,
+            corner_radii: CornerRadii::ZERO,
         });
 
         let mut row_y = y + PADDING;
 
         // Views section
         cmds.push(RenderCommand::Text {
-            x: x + PADDING, y: row_y,
+            x: x + PADDING,
+            y: row_y,
             text: "VIEWS".to_string(),
-            font_size: 10.0, color: OVERLAY0,
-            font_weight: FontWeightHint::Bold, max_width: Some(w - PADDING * 2.0),
+            font_size: 10.0,
+            color: OVERLAY0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - PADDING * 2.0),
         });
         row_y += 20.0;
 
@@ -1670,24 +1857,37 @@ impl RemindersApp {
             let text_color = if is_active { view.color() } else { SUBTEXT1 };
 
             cmds.push(RenderCommand::FillRect {
-                x: x + 4.0, y: row_y, width: w - 8.0, height: 30.0,
-                color: bg_color, corner_radii: CornerRadii::all(SMALL_RADIUS),
+                x: x + 4.0,
+                y: row_y,
+                width: w - 8.0,
+                height: 30.0,
+                color: bg_color,
+                corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
 
             // Icon
             cmds.push(RenderCommand::Text {
-                x: x + PADDING, y: row_y + 8.0,
+                x: x + PADDING,
+                y: row_y + 8.0,
                 text: view.icon().to_string(),
-                font_size: 11.0, color: text_color,
-                font_weight: FontWeightHint::Bold, max_width: Some(30.0),
+                font_size: 11.0,
+                color: text_color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(30.0),
             });
 
             // Label
             cmds.push(RenderCommand::Text {
-                x: x + PADDING + 30.0, y: row_y + 8.0,
+                x: x + PADDING + 30.0,
+                y: row_y + 8.0,
                 text: view.label(),
-                font_size: 12.0, color: text_color,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_size: 12.0,
+                color: text_color,
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w - PADDING * 2.0 - 60.0),
             });
 
@@ -1702,15 +1902,21 @@ impl RemindersApp {
                 let badge_text = format!("{badge_count}");
                 let badge_w = 10.0 + badge_text.len() as f32 * 7.0;
                 cmds.push(RenderCommand::FillRect {
-                    x: x + w - badge_w - 12.0, y: row_y + 6.0,
-                    width: badge_w, height: 18.0,
+                    x: x + w - badge_w - 12.0,
+                    y: row_y + 6.0,
+                    width: badge_w,
+                    height: 18.0,
                     color: view.color(),
                     corner_radii: CornerRadii::all(9.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + w - badge_w - 7.0, y: row_y + 9.0,
-                    text: badge_text, font_size: 10.0, color: CRUST,
-                    font_weight: FontWeightHint::Bold, max_width: Some(badge_w),
+                    x: x + w - badge_w - 7.0,
+                    y: row_y + 9.0,
+                    text: badge_text,
+                    font_size: 10.0,
+                    color: CRUST,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(badge_w),
                 });
             }
 
@@ -1720,16 +1926,23 @@ impl RemindersApp {
         // Categories section
         row_y += 12.0;
         cmds.push(RenderCommand::FillRect {
-            x: x + PADDING, y: row_y, width: w - PADDING * 2.0, height: 1.0,
-            color: SURFACE0, corner_radii: CornerRadii::ZERO,
+            x: x + PADDING,
+            y: row_y,
+            width: w - PADDING * 2.0,
+            height: 1.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::ZERO,
         });
         row_y += 12.0;
 
         cmds.push(RenderCommand::Text {
-            x: x + PADDING, y: row_y,
+            x: x + PADDING,
+            y: row_y,
             text: "CATEGORIES".to_string(),
-            font_size: 10.0, color: OVERLAY0,
-            font_weight: FontWeightHint::Bold, max_width: Some(w - PADDING * 2.0),
+            font_size: 10.0,
+            color: OVERLAY0,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - PADDING * 2.0),
         });
         row_y += 20.0;
 
@@ -1739,22 +1952,36 @@ impl RemindersApp {
             let text_color = if is_active { cat.color() } else { SUBTEXT1 };
 
             cmds.push(RenderCommand::FillRect {
-                x: x + 4.0, y: row_y, width: w - 8.0, height: 28.0,
-                color: bg_color, corner_radii: CornerRadii::all(SMALL_RADIUS),
+                x: x + 4.0,
+                y: row_y,
+                width: w - 8.0,
+                height: 28.0,
+                color: bg_color,
+                corner_radii: CornerRadii::all(SMALL_RADIUS),
             });
 
             // Color dot
             cmds.push(RenderCommand::FillRect {
-                x: x + PADDING, y: row_y + 9.0, width: 10.0, height: 10.0,
-                color: cat.color(), corner_radii: CornerRadii::all(5.0),
+                x: x + PADDING,
+                y: row_y + 9.0,
+                width: 10.0,
+                height: 10.0,
+                color: cat.color(),
+                corner_radii: CornerRadii::all(5.0),
             });
 
             // Label
             cmds.push(RenderCommand::Text {
-                x: x + PADDING + 18.0, y: row_y + 7.0,
+                x: x + PADDING + 18.0,
+                y: row_y + 7.0,
                 text: cat.label().to_string(),
-                font_size: 12.0, color: text_color,
-                font_weight: if is_active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_size: 12.0,
+                color: text_color,
+                font_weight: if is_active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w - PADDING * 2.0 - 50.0),
             });
 
@@ -1762,10 +1989,13 @@ impl RemindersApp {
             let count = self.store.count_by_category(*cat);
             if count > 0 {
                 cmds.push(RenderCommand::Text {
-                    x: x + w - 30.0, y: row_y + 7.0,
+                    x: x + w - 30.0,
+                    y: row_y + 7.0,
                     text: format!("{count}"),
-                    font_size: 11.0, color: OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: Some(25.0),
+                    font_size: 11.0,
+                    color: OVERLAY0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(25.0),
                 });
             }
 
@@ -1774,13 +2004,14 @@ impl RemindersApp {
     }
 
     /// Render the main task list panel.
-    fn render_task_list(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32, y: f32, w: f32, h: f32,
-    ) {
+    fn render_task_list(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Clip region
-        cmds.push(RenderCommand::PushClip { x, y, width: w, height: h });
+        cmds.push(RenderCommand::PushClip {
+            x,
+            y,
+            width: w,
+            height: h,
+        });
 
         let tasks = self.current_tasks();
         let mut row_y = y + PADDING;
@@ -1788,16 +2019,22 @@ impl RemindersApp {
         if tasks.is_empty() {
             // Empty state
             cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 80.0, y: y + h / 2.0 - 30.0,
+                x: x + w / 2.0 - 80.0,
+                y: y + h / 2.0 - 30.0,
                 text: "No tasks".to_string(),
-                font_size: 18.0, color: OVERLAY0,
-                font_weight: FontWeightHint::Bold, max_width: Some(200.0),
+                font_size: 18.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(200.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 100.0, y: y + h / 2.0,
+                x: x + w / 2.0 - 100.0,
+                y: y + h / 2.0,
                 text: "Create a new task to get started".to_string(),
-                font_size: 13.0, color: SURFACE2,
-                font_weight: FontWeightHint::Regular, max_width: Some(250.0),
+                font_size: 13.0,
+                color: SURFACE2,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(250.0),
             });
             cmds.push(RenderCommand::PopClip);
             return;
@@ -1809,7 +2046,14 @@ impl RemindersApp {
             }
 
             let is_selected = self.selected_task_id == Some(task.id);
-            self.render_task_item(cmds, task, x + PADDING, row_y, w - PADDING * 2.0, is_selected);
+            self.render_task_item(
+                cmds,
+                task,
+                x + PADDING,
+                row_y,
+                w - PADDING * 2.0,
+                is_selected,
+            );
             row_y += ITEM_HEIGHT + 4.0;
         }
 
@@ -1821,37 +2065,56 @@ impl RemindersApp {
         &self,
         cmds: &mut Vec<RenderCommand>,
         task: &Task,
-        x: f32, y: f32, w: f32,
+        x: f32,
+        y: f32,
+        w: f32,
         selected: bool,
     ) {
         let card_color = if selected { SURFACE0 } else { MANTLE };
 
         // Card shadow (subtle)
         cmds.push(RenderCommand::BoxShadow {
-            x, y, width: w, height: ITEM_HEIGHT,
-            offset_x: 0.0, offset_y: 1.0, blur: 4.0, spread: 0.0,
+            x,
+            y,
+            width: w,
+            height: ITEM_HEIGHT,
+            offset_x: 0.0,
+            offset_y: 1.0,
+            blur: 4.0,
+            spread: 0.0,
             color: Color::rgba(0, 0, 0, 40),
             corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
         // Card background
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: ITEM_HEIGHT,
-            color: card_color, corner_radii: CornerRadii::all(CORNER_RADIUS),
+            x,
+            y,
+            width: w,
+            height: ITEM_HEIGHT,
+            color: card_color,
+            corner_radii: CornerRadii::all(CORNER_RADIUS),
         });
 
         // Selection highlight
         if selected {
             cmds.push(RenderCommand::StrokeRect {
-                x, y, width: w, height: ITEM_HEIGHT,
-                color: BLUE, line_width: 1.5,
+                x,
+                y,
+                width: w,
+                height: ITEM_HEIGHT,
+                color: BLUE,
+                line_width: 1.5,
                 corner_radii: CornerRadii::all(CORNER_RADIUS),
             });
         }
 
         // Priority bar on the left
         cmds.push(RenderCommand::FillRect {
-            x, y: y + 4.0, width: 4.0, height: ITEM_HEIGHT - 8.0,
+            x,
+            y: y + 4.0,
+            width: 4.0,
+            height: ITEM_HEIGHT - 8.0,
             color: task.priority.color(),
             corner_radii: CornerRadii::all(2.0),
         });
@@ -1860,23 +2123,32 @@ impl RemindersApp {
         let checkbox_x = x + 14.0;
         let checkbox_y = y + ITEM_HEIGHT / 2.0 - 10.0;
         cmds.push(RenderCommand::StrokeRect {
-            x: checkbox_x, y: checkbox_y, width: 20.0, height: 20.0,
+            x: checkbox_x,
+            y: checkbox_y,
+            width: 20.0,
+            height: 20.0,
             color: if task.completed { GREEN } else { SURFACE2 },
             line_width: 1.5,
             corner_radii: CornerRadii::all(4.0),
         });
         if task.completed {
             cmds.push(RenderCommand::FillRect {
-                x: checkbox_x + 3.0, y: checkbox_y + 3.0,
-                width: 14.0, height: 14.0,
-                color: GREEN, corner_radii: CornerRadii::all(3.0),
+                x: checkbox_x + 3.0,
+                y: checkbox_y + 3.0,
+                width: 14.0,
+                height: 14.0,
+                color: GREEN,
+                corner_radii: CornerRadii::all(3.0),
             });
             // Checkmark text
             cmds.push(RenderCommand::Text {
-                x: checkbox_x + 4.0, y: checkbox_y + 3.0,
+                x: checkbox_x + 4.0,
+                y: checkbox_y + 3.0,
                 text: "v".to_string(),
-                font_size: 12.0, color: CRUST,
-                font_weight: FontWeightHint::Bold, max_width: Some(16.0),
+                font_size: 12.0,
+                color: CRUST,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(16.0),
             });
         }
 
@@ -1884,27 +2156,40 @@ impl RemindersApp {
         let text_x = checkbox_x + 30.0;
         let title_color = if task.completed { OVERLAY0 } else { TEXT };
         cmds.push(RenderCommand::Text {
-            x: text_x, y: y + 12.0,
+            x: text_x,
+            y: y + 12.0,
             text: task.title.clone(),
-            font_size: 14.0, color: title_color,
+            font_size: 14.0,
+            color: title_color,
             font_weight: FontWeightHint::Bold,
             max_width: Some(w - 100.0),
         });
 
         // Due date label
         let due_text = task.due_label(self.today);
-        let due_color = if task.is_overdue(self.now) { RED } else { SUBTEXT0 };
+        let due_color = if task.is_overdue(self.now) {
+            RED
+        } else {
+            SUBTEXT0
+        };
         cmds.push(RenderCommand::Text {
-            x: text_x, y: y + 30.0,
-            text: due_text, font_size: 11.0, color: due_color,
-            font_weight: FontWeightHint::Regular, max_width: Some(w - 120.0),
+            x: text_x,
+            y: y + 30.0,
+            text: due_text,
+            font_size: 11.0,
+            color: due_color,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(w - 120.0),
         });
 
         // Category + priority badges
         let badge_y = y + 48.0;
         // Category badge
         cmds.push(RenderCommand::FillRect {
-            x: text_x, y: badge_y, width: 60.0, height: 18.0,
+            x: text_x,
+            y: badge_y,
+            width: 60.0,
+            height: 18.0,
             color: Color::rgba(
                 task.category.color().r,
                 task.category.color().g,
@@ -1914,16 +2199,22 @@ impl RemindersApp {
             corner_radii: CornerRadii::all(9.0),
         });
         cmds.push(RenderCommand::Text {
-            x: text_x + 8.0, y: badge_y + 3.0,
+            x: text_x + 8.0,
+            y: badge_y + 3.0,
             text: task.category.label().to_string(),
-            font_size: 9.0, color: task.category.color(),
-            font_weight: FontWeightHint::Bold, max_width: Some(55.0),
+            font_size: 9.0,
+            color: task.category.color(),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(55.0),
         });
 
         // Priority badge
         let pri_x = text_x + 68.0;
         cmds.push(RenderCommand::FillRect {
-            x: pri_x, y: badge_y, width: 55.0, height: 18.0,
+            x: pri_x,
+            y: badge_y,
+            width: 55.0,
+            height: 18.0,
             color: Color::rgba(
                 task.priority.color().r,
                 task.priority.color().g,
@@ -1933,20 +2224,26 @@ impl RemindersApp {
             corner_radii: CornerRadii::all(9.0),
         });
         cmds.push(RenderCommand::Text {
-            x: pri_x + 6.0, y: badge_y + 3.0,
+            x: pri_x + 6.0,
+            y: badge_y + 3.0,
             text: task.priority.label().to_string(),
-            font_size: 9.0, color: task.priority.color(),
-            font_weight: FontWeightHint::Bold, max_width: Some(50.0),
+            font_size: 9.0,
+            color: task.priority.color(),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(50.0),
         });
 
         // Recurrence indicator
         if task.recurrence != RecurrenceRule::None {
             let rec_x = pri_x + 62.0;
             cmds.push(RenderCommand::Text {
-                x: rec_x, y: badge_y + 3.0,
+                x: rec_x,
+                y: badge_y + 3.0,
                 text: format!("[{}]", task.recurrence.label()),
-                font_size: 9.0, color: TEAL,
-                font_weight: FontWeightHint::Regular, max_width: Some(100.0),
+                font_size: 9.0,
+                color: TEAL,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(100.0),
             });
         }
 
@@ -1960,48 +2257,67 @@ impl RemindersApp {
 
             // Track
             cmds.push(RenderCommand::FillRect {
-                x: bar_x, y: bar_y, width: bar_w, height: bar_h,
-                color: SURFACE1, corner_radii: CornerRadii::all(3.0),
+                x: bar_x,
+                y: bar_y,
+                width: bar_w,
+                height: bar_h,
+                color: SURFACE1,
+                corner_radii: CornerRadii::all(3.0),
             });
 
             // Fill
             let fill_w = (bar_w * pct as f32) / 100.0;
             if fill_w > 0.0 {
                 cmds.push(RenderCommand::FillRect {
-                    x: bar_x, y: bar_y, width: fill_w, height: bar_h,
-                    color: GREEN, corner_radii: CornerRadii::all(3.0),
+                    x: bar_x,
+                    y: bar_y,
+                    width: fill_w,
+                    height: bar_h,
+                    color: GREEN,
+                    corner_radii: CornerRadii::all(3.0),
                 });
             }
 
             // Percentage text
             cmds.push(RenderCommand::Text {
-                x: bar_x, y: bar_y + 10.0,
+                x: bar_x,
+                y: bar_y + 10.0,
                 text: format!("{pct}%"),
-                font_size: 9.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(bar_w),
+                font_size: 9.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(bar_w),
             });
         }
     }
 
     /// Render the detail panel for the selected task.
-    fn render_detail_panel(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32, y: f32, w: f32, h: f32,
-    ) {
-        let Some(task_id) = self.selected_task_id else { return };
-        let Some(task) = self.store.get(task_id) else { return };
+    fn render_detail_panel(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
+        let Some(task_id) = self.selected_task_id else {
+            return;
+        };
+        let Some(task) = self.store.get(task_id) else {
+            return;
+        };
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x,
+            y,
+            width: w,
+            height: h,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Left border
         cmds.push(RenderCommand::FillRect {
-            x, y, width: 1.0, height: h,
-            color: SURFACE0, corner_radii: CornerRadii::ZERO,
+            x,
+            y,
+            width: 1.0,
+            height: h,
+            color: SURFACE0,
+            corner_radii: CornerRadii::ZERO,
         });
 
         let pad = PADDING;
@@ -2010,33 +2326,50 @@ impl RemindersApp {
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: row_y,
+            x: x + pad,
+            y: row_y,
             text: task.title.clone(),
-            font_size: 18.0, color: TEXT,
-            font_weight: FontWeightHint::Bold, max_width: Some(content_w),
+            font_size: 18.0,
+            color: TEXT,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(content_w),
         });
         row_y += 28.0;
 
         // Status pill
-        let status_text = if task.completed { "Completed" } else { "Active" };
+        let status_text = if task.completed {
+            "Completed"
+        } else {
+            "Active"
+        };
         let status_color = if task.completed { GREEN } else { BLUE };
         cmds.push(RenderCommand::FillRect {
-            x: x + pad, y: row_y, width: 80.0, height: 22.0,
+            x: x + pad,
+            y: row_y,
+            width: 80.0,
+            height: 22.0,
             color: Color::rgba(status_color.r, status_color.g, status_color.b, 40),
             corner_radii: CornerRadii::all(11.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + pad + 10.0, y: row_y + 4.0,
+            x: x + pad + 10.0,
+            y: row_y + 4.0,
             text: status_text.to_string(),
-            font_size: 11.0, color: status_color,
-            font_weight: FontWeightHint::Bold, max_width: Some(70.0),
+            font_size: 11.0,
+            color: status_color,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(70.0),
         });
         row_y += 32.0;
 
         // Separator
         cmds.push(RenderCommand::FillRect {
-            x: x + pad, y: row_y, width: content_w, height: 1.0,
-            color: SURFACE0, corner_radii: CornerRadii::ZERO,
+            x: x + pad,
+            y: row_y,
+            width: content_w,
+            height: 1.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::ZERO,
         });
         row_y += 12.0;
 
@@ -2046,10 +2379,13 @@ impl RemindersApp {
 
         // Due date
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: row_y,
+            x: x + pad,
+            y: row_y,
             text: "Due".to_string(),
-            font_size: 10.0, color: field_label_color,
-            font_weight: FontWeightHint::Bold, max_width: Some(content_w),
+            font_size: 10.0,
+            color: field_label_color,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(content_w),
         });
         row_y += 14.0;
         let due_text = if let Some(due) = task.due {
@@ -2057,91 +2393,134 @@ impl RemindersApp {
         } else {
             "Not set".to_string()
         };
-        let due_color = if task.is_overdue(self.now) { RED } else { field_value_color };
+        let due_color = if task.is_overdue(self.now) {
+            RED
+        } else {
+            field_value_color
+        };
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: row_y,
+            x: x + pad,
+            y: row_y,
             text: due_text,
-            font_size: 13.0, color: due_color,
-            font_weight: FontWeightHint::Regular, max_width: Some(content_w),
+            font_size: 13.0,
+            color: due_color,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(content_w),
         });
         row_y += 22.0;
 
         // Priority
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: row_y,
+            x: x + pad,
+            y: row_y,
             text: "Priority".to_string(),
-            font_size: 10.0, color: field_label_color,
-            font_weight: FontWeightHint::Bold, max_width: Some(content_w),
+            font_size: 10.0,
+            color: field_label_color,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(content_w),
         });
         row_y += 14.0;
         cmds.push(RenderCommand::FillRect {
-            x: x + pad, y: row_y, width: 8.0, height: 8.0,
-            color: task.priority.color(), corner_radii: CornerRadii::all(4.0),
+            x: x + pad,
+            y: row_y,
+            width: 8.0,
+            height: 8.0,
+            color: task.priority.color(),
+            corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + pad + 14.0, y: row_y - 2.0,
+            x: x + pad + 14.0,
+            y: row_y - 2.0,
             text: task.priority.label().to_string(),
-            font_size: 13.0, color: task.priority.color(),
-            font_weight: FontWeightHint::Bold, max_width: Some(content_w - 20.0),
+            font_size: 13.0,
+            color: task.priority.color(),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(content_w - 20.0),
         });
         row_y += 22.0;
 
         // Category
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: row_y,
+            x: x + pad,
+            y: row_y,
             text: "Category".to_string(),
-            font_size: 10.0, color: field_label_color,
-            font_weight: FontWeightHint::Bold, max_width: Some(content_w),
+            font_size: 10.0,
+            color: field_label_color,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(content_w),
         });
         row_y += 14.0;
         cmds.push(RenderCommand::FillRect {
-            x: x + pad, y: row_y, width: 8.0, height: 8.0,
-            color: task.category.color(), corner_radii: CornerRadii::all(4.0),
+            x: x + pad,
+            y: row_y,
+            width: 8.0,
+            height: 8.0,
+            color: task.category.color(),
+            corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + pad + 14.0, y: row_y - 2.0,
+            x: x + pad + 14.0,
+            y: row_y - 2.0,
             text: task.category.label().to_string(),
-            font_size: 13.0, color: task.category.color(),
-            font_weight: FontWeightHint::Bold, max_width: Some(content_w - 20.0),
+            font_size: 13.0,
+            color: task.category.color(),
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(content_w - 20.0),
         });
         row_y += 22.0;
 
         // Recurrence
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: row_y,
+            x: x + pad,
+            y: row_y,
             text: "Repeats".to_string(),
-            font_size: 10.0, color: field_label_color,
-            font_weight: FontWeightHint::Bold, max_width: Some(content_w),
+            font_size: 10.0,
+            color: field_label_color,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(content_w),
         });
         row_y += 14.0;
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: row_y,
+            x: x + pad,
+            y: row_y,
             text: task.recurrence.label().to_string(),
-            font_size: 13.0, color: field_value_color,
-            font_weight: FontWeightHint::Regular, max_width: Some(content_w),
+            font_size: 13.0,
+            color: field_value_color,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(content_w),
         });
         row_y += 22.0;
 
         // Description
         if !task.description.is_empty() {
             cmds.push(RenderCommand::FillRect {
-                x: x + pad, y: row_y, width: content_w, height: 1.0,
-                color: SURFACE0, corner_radii: CornerRadii::ZERO,
+                x: x + pad,
+                y: row_y,
+                width: content_w,
+                height: 1.0,
+                color: SURFACE0,
+                corner_radii: CornerRadii::ZERO,
             });
             row_y += 12.0;
 
             cmds.push(RenderCommand::Text {
-                x: x + pad, y: row_y,
+                x: x + pad,
+                y: row_y,
                 text: "Description".to_string(),
-                font_size: 10.0, color: field_label_color,
-                font_weight: FontWeightHint::Bold, max_width: Some(content_w),
+                font_size: 10.0,
+                color: field_label_color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(content_w),
             });
             row_y += 14.0;
             cmds.push(RenderCommand::Text {
-                x: x + pad, y: row_y,
+                x: x + pad,
+                y: row_y,
                 text: task.description.clone(),
-                font_size: 12.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(content_w),
+                font_size: 12.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(content_w),
             });
             row_y += 24.0;
         }
@@ -2149,17 +2528,23 @@ impl RemindersApp {
         // Notes
         if !task.notes.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: x + pad, y: row_y,
+                x: x + pad,
+                y: row_y,
                 text: "Notes".to_string(),
-                font_size: 10.0, color: field_label_color,
-                font_weight: FontWeightHint::Bold, max_width: Some(content_w),
+                font_size: 10.0,
+                color: field_label_color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(content_w),
             });
             row_y += 14.0;
             cmds.push(RenderCommand::Text {
-                x: x + pad, y: row_y,
+                x: x + pad,
+                y: row_y,
                 text: task.notes.clone(),
-                font_size: 12.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(content_w),
+                font_size: 12.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(content_w),
             });
             row_y += 24.0;
         }
@@ -2167,31 +2552,46 @@ impl RemindersApp {
         // Subtasks
         if !task.subtasks.is_empty() {
             cmds.push(RenderCommand::FillRect {
-                x: x + pad, y: row_y, width: content_w, height: 1.0,
-                color: SURFACE0, corner_radii: CornerRadii::ZERO,
+                x: x + pad,
+                y: row_y,
+                width: content_w,
+                height: 1.0,
+                color: SURFACE0,
+                corner_radii: CornerRadii::ZERO,
             });
             row_y += 12.0;
 
             let done_count = task.subtasks.iter().filter(|s| s.completed).count();
             cmds.push(RenderCommand::Text {
-                x: x + pad, y: row_y,
+                x: x + pad,
+                y: row_y,
                 text: format!("Subtasks ({}/{})", done_count, task.subtasks.len()),
-                font_size: 10.0, color: field_label_color,
-                font_weight: FontWeightHint::Bold, max_width: Some(content_w),
+                font_size: 10.0,
+                color: field_label_color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(content_w),
             });
             row_y += 16.0;
 
             // Progress bar
             let pct = task.completion_percent();
             cmds.push(RenderCommand::FillRect {
-                x: x + pad, y: row_y, width: content_w, height: 6.0,
-                color: SURFACE1, corner_radii: CornerRadii::all(3.0),
+                x: x + pad,
+                y: row_y,
+                width: content_w,
+                height: 6.0,
+                color: SURFACE1,
+                corner_radii: CornerRadii::all(3.0),
             });
             let fill_w = (content_w * pct as f32) / 100.0;
             if fill_w > 0.0 {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + pad, y: row_y, width: fill_w, height: 6.0,
-                    color: GREEN, corner_radii: CornerRadii::all(3.0),
+                    x: x + pad,
+                    y: row_y,
+                    width: fill_w,
+                    height: 6.0,
+                    color: GREEN,
+                    corner_radii: CornerRadii::all(3.0),
                 });
             }
             row_y += 14.0;
@@ -2204,23 +2604,31 @@ impl RemindersApp {
 
                 // Mini checkbox
                 cmds.push(RenderCommand::StrokeRect {
-                    x: x + pad, y: row_y, width: 14.0, height: 14.0,
+                    x: x + pad,
+                    y: row_y,
+                    width: 14.0,
+                    height: 14.0,
                     color: if st.completed { GREEN } else { SURFACE2 },
                     line_width: 1.0,
                     corner_radii: CornerRadii::all(3.0),
                 });
                 if st.completed {
                     cmds.push(RenderCommand::FillRect {
-                        x: x + pad + 2.0, y: row_y + 2.0,
-                        width: 10.0, height: 10.0,
-                        color: GREEN, corner_radii: CornerRadii::all(2.0),
+                        x: x + pad + 2.0,
+                        y: row_y + 2.0,
+                        width: 10.0,
+                        height: 10.0,
+                        color: GREEN,
+                        corner_radii: CornerRadii::all(2.0),
                     });
                 }
 
                 cmds.push(RenderCommand::Text {
-                    x: x + pad + 20.0, y: row_y,
+                    x: x + pad + 20.0,
+                    y: row_y,
                     text: st.title.clone(),
-                    font_size: 12.0, color: st_color,
+                    font_size: 12.0,
+                    color: st_color,
                     font_weight: FontWeightHint::Regular,
                     max_width: Some(content_w - 24.0),
                 });
@@ -2232,16 +2640,23 @@ impl RemindersApp {
         if task.due.is_some() && !task.completed {
             row_y += 8.0;
             cmds.push(RenderCommand::FillRect {
-                x: x + pad, y: row_y, width: content_w, height: 1.0,
-                color: SURFACE0, corner_radii: CornerRadii::ZERO,
+                x: x + pad,
+                y: row_y,
+                width: content_w,
+                height: 1.0,
+                color: SURFACE0,
+                corner_radii: CornerRadii::ZERO,
             });
             row_y += 12.0;
 
             cmds.push(RenderCommand::Text {
-                x: x + pad, y: row_y,
+                x: x + pad,
+                y: row_y,
                 text: "Snooze".to_string(),
-                font_size: 10.0, color: field_label_color,
-                font_weight: FontWeightHint::Bold, max_width: Some(content_w),
+                font_size: 10.0,
+                color: field_label_color,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(content_w),
             });
             row_y += 16.0;
 
@@ -2253,14 +2668,21 @@ impl RemindersApp {
                 let by = row_y + row_idx as f32 * 30.0;
 
                 cmds.push(RenderCommand::FillRect {
-                    x: bx, y: by, width: btn_w, height: 24.0,
-                    color: SURFACE0, corner_radii: CornerRadii::all(SMALL_RADIUS),
+                    x: bx,
+                    y: by,
+                    width: btn_w,
+                    height: 24.0,
+                    color: SURFACE0,
+                    corner_radii: CornerRadii::all(SMALL_RADIUS),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: bx + 8.0, y: by + 5.0,
+                    x: bx + 8.0,
+                    y: by + 5.0,
                     text: preset.label(),
-                    font_size: 11.0, color: SKY,
-                    font_weight: FontWeightHint::Regular, max_width: Some(btn_w - 16.0),
+                    font_size: 11.0,
+                    color: SKY,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(btn_w - 16.0),
                 });
             }
         }
@@ -2268,10 +2690,13 @@ impl RemindersApp {
         // Created date at the bottom
         let created_y = y + h - 24.0;
         cmds.push(RenderCommand::Text {
-            x: x + pad, y: created_y,
+            x: x + pad,
+            y: created_y,
             text: format!("Created: {}", task.created.format_short()),
-            font_size: 10.0, color: OVERLAY0,
-            font_weight: FontWeightHint::Regular, max_width: Some(content_w),
+            font_size: 10.0,
+            color: OVERLAY0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(content_w),
         });
     }
 }
@@ -2286,11 +2711,21 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
     // Overdue task
     let mut t = Task::new(0, "Review quarterly report", now);
     t.description = "Go through Q1 numbers and prepare summary".to_string();
-    t.due = Some(DateTime::new(today.add_days(-2), Time { hour: 17, minute: 0 }));
+    t.due = Some(DateTime::new(
+        today.add_days(-2),
+        Time {
+            hour: 17,
+            minute: 0,
+        },
+    ));
     t.priority = Priority::High;
     t.category = TaskCategory::Work;
     t.subtasks = vec![
-        { let mut s = Subtask::new("Read financials"); s.completed = true; s },
+        {
+            let mut s = Subtask::new("Read financials");
+            s.completed = true;
+            s
+        },
         Subtask::new("Write summary"),
         Subtask::new("Send to team"),
     ];
@@ -2299,7 +2734,13 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
     // Due today
     let mut t = Task::new(0, "Buy groceries", now);
     t.description = "Milk, eggs, bread, vegetables".to_string();
-    t.due = Some(DateTime::new(today, Time { hour: 18, minute: 0 }));
+    t.due = Some(DateTime::new(
+        today,
+        Time {
+            hour: 18,
+            minute: 0,
+        },
+    ));
     t.priority = Priority::Medium;
     t.category = TaskCategory::Shopping;
     store.add(t);
@@ -2307,14 +2748,26 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
     // Due today, high priority
     let mut t = Task::new(0, "Doctor appointment", now);
     t.description = "Annual checkup at 2pm".to_string();
-    t.due = Some(DateTime::new(today, Time { hour: 14, minute: 0 }));
+    t.due = Some(DateTime::new(
+        today,
+        Time {
+            hour: 14,
+            minute: 0,
+        },
+    ));
     t.priority = Priority::High;
     t.category = TaskCategory::Health;
     store.add(t);
 
     // Due tomorrow
     let mut t = Task::new(0, "Submit tax documents", now);
-    t.due = Some(DateTime::new(today.add_days(1), Time { hour: 12, minute: 0 }));
+    t.due = Some(DateTime::new(
+        today.add_days(1),
+        Time {
+            hour: 12,
+            minute: 0,
+        },
+    ));
     t.priority = Priority::Critical;
     t.category = TaskCategory::Finance;
     store.add(t);
@@ -2322,7 +2775,10 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
     // Recurring daily
     let mut t = Task::new(0, "Morning exercise", now);
     t.description = "30 min cardio + stretching".to_string();
-    t.due = Some(DateTime::new(today.add_days(1), Time { hour: 7, minute: 0 }));
+    t.due = Some(DateTime::new(
+        today.add_days(1),
+        Time { hour: 7, minute: 0 },
+    ));
     t.priority = Priority::Medium;
     t.category = TaskCategory::Health;
     t.recurrence = RecurrenceRule::Daily;
@@ -2330,7 +2786,10 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
 
     // Recurring weekly
     let mut t = Task::new(0, "Team standup meeting", now);
-    t.due = Some(DateTime::new(today.add_days(2), Time { hour: 9, minute: 0 }));
+    t.due = Some(DateTime::new(
+        today.add_days(2),
+        Time { hour: 9, minute: 0 },
+    ));
     t.priority = Priority::Medium;
     t.category = TaskCategory::Work;
     t.recurrence = RecurrenceRule::Weekly;
@@ -2338,7 +2797,13 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
 
     // Due in 5 days
     let mut t = Task::new(0, "Pay electricity bill", now);
-    t.due = Some(DateTime::new(today.add_days(5), Time { hour: 23, minute: 59 }));
+    t.due = Some(DateTime::new(
+        today.add_days(5),
+        Time {
+            hour: 23,
+            minute: 59,
+        },
+    ));
     t.priority = Priority::High;
     t.category = TaskCategory::Finance;
     t.notes = "Account #12345, auto-pay not set up yet".to_string();
@@ -2347,12 +2812,26 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
     // Due in a week
     let mut t = Task::new(0, "Plan birthday party", now);
     t.description = "Venue, guest list, catering".to_string();
-    t.due = Some(DateTime::new(today.add_days(7), Time { hour: 10, minute: 0 }));
+    t.due = Some(DateTime::new(
+        today.add_days(7),
+        Time {
+            hour: 10,
+            minute: 0,
+        },
+    ));
     t.priority = Priority::Low;
     t.category = TaskCategory::Social;
     t.subtasks = vec![
-        { let mut s = Subtask::new("Choose venue"); s.completed = true; s },
-        { let mut s = Subtask::new("Send invitations"); s.completed = true; s },
+        {
+            let mut s = Subtask::new("Choose venue");
+            s.completed = true;
+            s
+        },
+        {
+            let mut s = Subtask::new("Send invitations");
+            s.completed = true;
+            s
+        },
         Subtask::new("Order cake"),
         Subtask::new("Buy decorations"),
         Subtask::new("Arrange catering"),
@@ -2361,7 +2840,13 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
 
     // Monthly recurring
     let mut t = Task::new(0, "Monthly budget review", now);
-    t.due = Some(DateTime::new(today.add_days(14), Time { hour: 20, minute: 0 }));
+    t.due = Some(DateTime::new(
+        today.add_days(14),
+        Time {
+            hour: 20,
+            minute: 0,
+        },
+    ));
     t.priority = Priority::Medium;
     t.category = TaskCategory::Finance;
     t.recurrence = RecurrenceRule::Monthly;
@@ -2370,11 +2855,21 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
     // Education
     let mut t = Task::new(0, "Complete Rust course module 5", now);
     t.description = "Async programming and futures".to_string();
-    t.due = Some(DateTime::new(today.add_days(3), Time { hour: 21, minute: 0 }));
+    t.due = Some(DateTime::new(
+        today.add_days(3),
+        Time {
+            hour: 21,
+            minute: 0,
+        },
+    ));
     t.priority = Priority::Medium;
     t.category = TaskCategory::Education;
     t.subtasks = vec![
-        { let mut s = Subtask::new("Watch lectures"); s.completed = true; s },
+        {
+            let mut s = Subtask::new("Watch lectures");
+            s.completed = true;
+            s
+        },
         Subtask::new("Do exercises"),
         Subtask::new("Submit assignment"),
     ];
@@ -2382,11 +2877,23 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
 
     // Completed task
     let mut t = Task::new(0, "Clean the garage", now);
-    t.due = Some(DateTime::new(today.add_days(-1), Time { hour: 10, minute: 0 }));
+    t.due = Some(DateTime::new(
+        today.add_days(-1),
+        Time {
+            hour: 10,
+            minute: 0,
+        },
+    ));
     t.priority = Priority::Low;
     t.category = TaskCategory::Home;
     t.completed = true;
-    t.completed_at = Some(DateTime::new(today.add_days(-1), Time { hour: 16, minute: 0 }));
+    t.completed_at = Some(DateTime::new(
+        today.add_days(-1),
+        Time {
+            hour: 16,
+            minute: 0,
+        },
+    ));
     store.add(t);
 
     // No due date
@@ -2398,8 +2905,15 @@ fn sample_tasks(store: &mut TaskStore, now: DateTime) {
 
 fn main() {
     let now = DateTime::new(
-        Date { year: 2026, month: 5, day: 18 },
-        Time { hour: 10, minute: 30 },
+        Date {
+            year: 2026,
+            month: 5,
+            day: 18,
+        },
+        Time {
+            hour: 10,
+            minute: 30,
+        },
     );
     let mut app = RemindersApp::new(WINDOW_WIDTH, WINDOW_HEIGHT, now);
 
@@ -2444,8 +2958,15 @@ mod tests {
 
     fn make_now() -> DateTime {
         DateTime::new(
-            Date { year: 2026, month: 5, day: 18 },
-            Time { hour: 10, minute: 30 },
+            Date {
+                year: 2026,
+                month: 5,
+                day: 18,
+            },
+            Time {
+                hour: 10,
+                minute: 30,
+            },
         )
     }
 
@@ -2489,16 +3010,28 @@ mod tests {
     #[test]
     fn test_day_of_week() {
         // 2024-01-01 is Monday
-        let d = Date { year: 2024, month: 1, day: 1 };
+        let d = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        };
         assert_eq!(d.day_of_week(), 1);
         // 2024-01-07 is Sunday
-        let d = Date { year: 2024, month: 1, day: 7 };
+        let d = Date {
+            year: 2024,
+            month: 1,
+            day: 7,
+        };
         assert_eq!(d.day_of_week(), 0);
     }
 
     #[test]
     fn test_date_add_days_forward() {
-        let d = Date { year: 2026, month: 1, day: 30 };
+        let d = Date {
+            year: 2026,
+            month: 1,
+            day: 30,
+        };
         let next = d.add_days(3);
         assert_eq!(next.month, 2);
         assert_eq!(next.day, 2);
@@ -2506,7 +3039,11 @@ mod tests {
 
     #[test]
     fn test_date_add_days_backward() {
-        let d = Date { year: 2026, month: 3, day: 1 };
+        let d = Date {
+            year: 2026,
+            month: 3,
+            day: 1,
+        };
         let prev = d.add_days(-1);
         assert_eq!(prev.month, 2);
         assert_eq!(prev.day, 28);
@@ -2514,7 +3051,11 @@ mod tests {
 
     #[test]
     fn test_date_add_days_year_boundary() {
-        let d = Date { year: 2026, month: 12, day: 30 };
+        let d = Date {
+            year: 2026,
+            month: 12,
+            day: 30,
+        };
         let next = d.add_days(5);
         assert_eq!(next.year, 2027);
         assert_eq!(next.month, 1);
@@ -2522,7 +3063,11 @@ mod tests {
 
     #[test]
     fn test_date_add_months() {
-        let d = Date { year: 2026, month: 1, day: 31 };
+        let d = Date {
+            year: 2026,
+            month: 1,
+            day: 31,
+        };
         let next = d.add_months(1);
         assert_eq!(next.month, 2);
         assert_eq!(next.day, 28); // Clamped
@@ -2530,7 +3075,11 @@ mod tests {
 
     #[test]
     fn test_date_add_months_year_wrap() {
-        let d = Date { year: 2026, month: 11, day: 15 };
+        let d = Date {
+            year: 2026,
+            month: 11,
+            day: 15,
+        };
         let next = d.add_months(3);
         assert_eq!(next.year, 2027);
         assert_eq!(next.month, 2);
@@ -2538,14 +3087,26 @@ mod tests {
 
     #[test]
     fn test_date_days_since() {
-        let a = Date { year: 2026, month: 1, day: 10 };
-        let b = Date { year: 2026, month: 1, day: 1 };
+        let a = Date {
+            year: 2026,
+            month: 1,
+            day: 10,
+        };
+        let b = Date {
+            year: 2026,
+            month: 1,
+            day: 1,
+        };
         assert_eq!(a.days_since(b), 9);
     }
 
     #[test]
     fn test_date_format() {
-        let d = Date { year: 2026, month: 3, day: 15 };
+        let d = Date {
+            year: 2026,
+            month: 3,
+            day: 15,
+        };
         assert_eq!(d.format_short(), "2026-03-15");
         assert!(d.format_long().contains("March"));
         assert!(d.format_medium().contains("Mar"));
@@ -2567,17 +3128,26 @@ mod tests {
 
     #[test]
     fn test_time_format_12h() {
-        let t = Time { hour: 14, minute: 30 };
+        let t = Time {
+            hour: 14,
+            minute: 30,
+        };
         assert_eq!(t.format_12h(), "2:30 PM");
         let t = Time { hour: 0, minute: 0 };
         assert_eq!(t.format_12h(), "12:00 AM");
-        let t = Time { hour: 12, minute: 0 };
+        let t = Time {
+            hour: 12,
+            minute: 0,
+        };
         assert_eq!(t.format_12h(), "12:00 PM");
     }
 
     #[test]
     fn test_time_to_from_minutes() {
-        let t = Time { hour: 2, minute: 30 };
+        let t = Time {
+            hour: 2,
+            minute: 30,
+        };
         assert_eq!(t.to_minutes(), 150);
         let t2 = Time::from_minutes(150);
         assert_eq!(t2.hour, 2);
@@ -2622,8 +3192,14 @@ mod tests {
 
     #[test]
     fn test_category_from_str() {
-        assert_eq!(TaskCategory::from_str_label("work"), Some(TaskCategory::Work));
-        assert_eq!(TaskCategory::from_str_label("HEALTH"), Some(TaskCategory::Health));
+        assert_eq!(
+            TaskCategory::from_str_label("work"),
+            Some(TaskCategory::Work)
+        );
+        assert_eq!(
+            TaskCategory::from_str_label("HEALTH"),
+            Some(TaskCategory::Health)
+        );
         assert_eq!(TaskCategory::from_str_label("xyz"), None);
     }
 
@@ -2632,7 +3208,11 @@ mod tests {
     #[test]
     fn test_recurrence_none() {
         let r = RecurrenceRule::None;
-        let d = Date { year: 2026, month: 1, day: 1 };
+        let d = Date {
+            year: 2026,
+            month: 1,
+            day: 1,
+        };
         assert!(r.matches(d, d));
         assert!(!r.matches(d, d.add_days(1)));
         assert!(r.next_occurrence(d).is_none());
@@ -2641,7 +3221,11 @@ mod tests {
     #[test]
     fn test_recurrence_daily() {
         let r = RecurrenceRule::Daily;
-        let origin = Date { year: 2026, month: 1, day: 1 };
+        let origin = Date {
+            year: 2026,
+            month: 1,
+            day: 1,
+        };
         assert!(r.matches(origin, origin.add_days(5)));
         assert_eq!(r.next_occurrence(origin), Some(origin.add_days(1)));
     }
@@ -2649,7 +3233,11 @@ mod tests {
     #[test]
     fn test_recurrence_weekly() {
         let r = RecurrenceRule::Weekly;
-        let origin = Date { year: 2026, month: 1, day: 1 };
+        let origin = Date {
+            year: 2026,
+            month: 1,
+            day: 1,
+        };
         assert!(r.matches(origin, origin.add_days(7)));
         assert!(r.matches(origin, origin.add_days(14)));
         assert!(!r.matches(origin, origin.add_days(3)));
@@ -2658,23 +3246,63 @@ mod tests {
     #[test]
     fn test_recurrence_monthly() {
         let r = RecurrenceRule::Monthly;
-        let origin = Date { year: 2026, month: 1, day: 15 };
-        assert!(r.matches(origin, Date { year: 2026, month: 3, day: 15 }));
-        assert!(!r.matches(origin, Date { year: 2026, month: 3, day: 16 }));
+        let origin = Date {
+            year: 2026,
+            month: 1,
+            day: 15,
+        };
+        assert!(r.matches(
+            origin,
+            Date {
+                year: 2026,
+                month: 3,
+                day: 15
+            }
+        ));
+        assert!(!r.matches(
+            origin,
+            Date {
+                year: 2026,
+                month: 3,
+                day: 16
+            }
+        ));
     }
 
     #[test]
     fn test_recurrence_yearly() {
         let r = RecurrenceRule::Yearly;
-        let origin = Date { year: 2026, month: 6, day: 15 };
-        assert!(r.matches(origin, Date { year: 2027, month: 6, day: 15 }));
-        assert!(!r.matches(origin, Date { year: 2027, month: 7, day: 15 }));
+        let origin = Date {
+            year: 2026,
+            month: 6,
+            day: 15,
+        };
+        assert!(r.matches(
+            origin,
+            Date {
+                year: 2027,
+                month: 6,
+                day: 15
+            }
+        ));
+        assert!(!r.matches(
+            origin,
+            Date {
+                year: 2027,
+                month: 7,
+                day: 15
+            }
+        ));
     }
 
     #[test]
     fn test_recurrence_custom() {
         let r = RecurrenceRule::Custom { interval_days: 3 };
-        let origin = Date { year: 2026, month: 1, day: 1 };
+        let origin = Date {
+            year: 2026,
+            month: 1,
+            day: 1,
+        };
         assert!(r.matches(origin, origin.add_days(3)));
         assert!(r.matches(origin, origin.add_days(6)));
         assert!(!r.matches(origin, origin.add_days(4)));
@@ -2683,7 +3311,11 @@ mod tests {
     #[test]
     fn test_recurrence_custom_zero() {
         let r = RecurrenceRule::Custom { interval_days: 0 };
-        let d = Date { year: 2026, month: 1, day: 1 };
+        let d = Date {
+            year: 2026,
+            month: 1,
+            day: 1,
+        };
         assert!(r.matches(d, d));
         assert!(!r.matches(d, d.add_days(1)));
         assert!(r.next_occurrence(d).is_none());
@@ -2692,8 +3324,19 @@ mod tests {
     #[test]
     fn test_recurrence_before_origin() {
         let r = RecurrenceRule::Daily;
-        let origin = Date { year: 2026, month: 5, day: 10 };
-        assert!(!r.matches(origin, Date { year: 2026, month: 5, day: 9 }));
+        let origin = Date {
+            year: 2026,
+            month: 5,
+            day: 10,
+        };
+        assert!(!r.matches(
+            origin,
+            Date {
+                year: 2026,
+                month: 5,
+                day: 9
+            }
+        ));
     }
 
     #[test]
@@ -2746,7 +3389,11 @@ mod tests {
         let now = make_now();
         let mut t = make_task("Test", now);
         t.subtasks = vec![
-            { let mut s = Subtask::new("A"); s.completed = true; s },
+            {
+                let mut s = Subtask::new("A");
+                s.completed = true;
+                s
+            },
             Subtask::new("B"),
             Subtask::new("C"),
             Subtask::new("D"),
@@ -2766,7 +3413,13 @@ mod tests {
     fn test_task_overdue() {
         let now = make_now();
         let mut t = make_task("Test", now);
-        t.due = Some(DateTime::new(now.date.add_days(-1), Time { hour: 12, minute: 0 }));
+        t.due = Some(DateTime::new(
+            now.date.add_days(-1),
+            Time {
+                hour: 12,
+                minute: 0,
+            },
+        ));
         assert!(t.is_overdue(now));
     }
 
@@ -2774,7 +3427,13 @@ mod tests {
     fn test_task_not_overdue_when_completed() {
         let now = make_now();
         let mut t = make_task("Test", now);
-        t.due = Some(DateTime::new(now.date.add_days(-1), Time { hour: 12, minute: 0 }));
+        t.due = Some(DateTime::new(
+            now.date.add_days(-1),
+            Time {
+                hour: 12,
+                minute: 0,
+            },
+        ));
         t.completed = true;
         assert!(!t.is_overdue(now));
     }
@@ -2783,7 +3442,13 @@ mod tests {
     fn test_task_due_today() {
         let now = make_now();
         let mut t = make_task("Test", now);
-        t.due = Some(DateTime::new(now.date, Time { hour: 18, minute: 0 }));
+        t.due = Some(DateTime::new(
+            now.date,
+            Time {
+                hour: 18,
+                minute: 0,
+            },
+        ));
         assert!(t.is_due_today(now.date));
     }
 
@@ -2791,7 +3456,13 @@ mod tests {
     fn test_task_due_within() {
         let now = make_now();
         let mut t = make_task("Test", now);
-        t.due = Some(DateTime::new(now.date.add_days(3), Time { hour: 10, minute: 0 }));
+        t.due = Some(DateTime::new(
+            now.date.add_days(3),
+            Time {
+                hour: 10,
+                minute: 0,
+            },
+        ));
         assert!(t.is_due_within(now.date, 7));
         assert!(!t.is_due_within(now.date, 2));
     }
@@ -2803,7 +3474,13 @@ mod tests {
         t.snooze(now, SnoozeDuration::Minutes15);
         assert!(t.is_snoozed(now));
         // 20 minutes later
-        let later = DateTime::new(now.date, Time { hour: 10, minute: 50 });
+        let later = DateTime::new(
+            now.date,
+            Time {
+                hour: 10,
+                minute: 50,
+            },
+        );
         assert!(!t.is_snoozed(later));
     }
 
@@ -2812,8 +3489,20 @@ mod tests {
         let now = make_now();
         let mut t = make_task("Test", now);
         t.snooze(now, SnoozeDuration::Hour1);
-        assert!(t.is_snoozed(DateTime::new(now.date, Time { hour: 11, minute: 0 })));
-        assert!(!t.is_snoozed(DateTime::new(now.date, Time { hour: 11, minute: 31 })));
+        assert!(t.is_snoozed(DateTime::new(
+            now.date,
+            Time {
+                hour: 11,
+                minute: 0
+            }
+        )));
+        assert!(!t.is_snoozed(DateTime::new(
+            now.date,
+            Time {
+                hour: 11,
+                minute: 31
+            }
+        )));
     }
 
     #[test]
@@ -2821,7 +3510,10 @@ mod tests {
         let now = make_now();
         let mut t = make_task("Buy groceries", now);
         t.description = "Milk and bread".to_string();
-        assert!(t.matches_query("grocery"));
+        // Substring match: "grocer" is a substring of "groceries" (the title is
+        // "Buy groceries"). matches_query does plain case-insensitive substring
+        // search, not stemming, so "grocery" would NOT match "groceries".
+        assert!(t.matches_query("grocer"));
         assert!(t.matches_query("milk"));
         assert!(t.matches_query("")); // Empty query matches all
         assert!(!t.matches_query("exercise"));
@@ -2831,7 +3523,13 @@ mod tests {
     fn test_task_due_label_today() {
         let now = make_now();
         let mut t = make_task("Test", now);
-        t.due = Some(DateTime::new(now.date, Time { hour: 14, minute: 0 }));
+        t.due = Some(DateTime::new(
+            now.date,
+            Time {
+                hour: 14,
+                minute: 0,
+            },
+        ));
         let label = t.due_label(now.date);
         assert!(label.contains("Today"));
     }
@@ -2840,7 +3538,10 @@ mod tests {
     fn test_task_due_label_tomorrow() {
         let now = make_now();
         let mut t = make_task("Test", now);
-        t.due = Some(DateTime::new(now.date.add_days(1), Time { hour: 9, minute: 0 }));
+        t.due = Some(DateTime::new(
+            now.date.add_days(1),
+            Time { hour: 9, minute: 0 },
+        ));
         let label = t.due_label(now.date);
         assert!(label.contains("Tomorrow"));
     }
@@ -2882,11 +3583,20 @@ mod tests {
         let now = make_now();
         let mut store = TaskStore::new();
         let mut t = make_task("Due today", now);
-        t.due = Some(DateTime::new(now.date, Time { hour: 18, minute: 0 }));
+        t.due = Some(DateTime::new(
+            now.date,
+            Time {
+                hour: 18,
+                minute: 0,
+            },
+        ));
         store.add(t);
 
         let mut t2 = make_task("Due tomorrow", now);
-        t2.due = Some(DateTime::new(now.date.add_days(1), Time { hour: 9, minute: 0 }));
+        t2.due = Some(DateTime::new(
+            now.date.add_days(1),
+            Time { hour: 9, minute: 0 },
+        ));
         store.add(t2);
 
         let today = store.filtered(ViewFilter::Today, now);
@@ -2899,11 +3609,23 @@ mod tests {
         let now = make_now();
         let mut store = TaskStore::new();
         let mut t = make_task("Overdue", now);
-        t.due = Some(DateTime::new(now.date.add_days(-1), Time { hour: 12, minute: 0 }));
+        t.due = Some(DateTime::new(
+            now.date.add_days(-1),
+            Time {
+                hour: 12,
+                minute: 0,
+            },
+        ));
         store.add(t);
 
         let mut t2 = make_task("Not overdue", now);
-        t2.due = Some(DateTime::new(now.date.add_days(1), Time { hour: 12, minute: 0 }));
+        t2.due = Some(DateTime::new(
+            now.date.add_days(1),
+            Time {
+                hour: 12,
+                minute: 0,
+            },
+        ));
         store.add(t2);
 
         let overdue = store.filtered(ViewFilter::Overdue, now);
@@ -3044,7 +3766,13 @@ mod tests {
         store.add(t1);
 
         let mut t2 = make_task("Overdue", now);
-        t2.due = Some(DateTime::new(now.date.add_days(-2), Time { hour: 12, minute: 0 }));
+        t2.due = Some(DateTime::new(
+            now.date.add_days(-2),
+            Time {
+                hour: 12,
+                minute: 0,
+            },
+        ));
         store.add(t2);
 
         let mut t3 = make_task("Done", now);
@@ -3066,7 +3794,13 @@ mod tests {
         store.add(t);
 
         let mut t2 = make_task("Not yet", now);
-        t2.due = Some(DateTime::new(now.date.add_days(1), Time { hour: 12, minute: 0 }));
+        t2.due = Some(DateTime::new(
+            now.date.add_days(1),
+            Time {
+                hour: 12,
+                minute: 0,
+            },
+        ));
         store.add(t2);
 
         let due = store.due_now(now);
@@ -3111,7 +3845,11 @@ mod tests {
         t.category = TaskCategory::Health;
         t.recurrence = RecurrenceRule::Weekly;
         t.subtasks = vec![
-            { let mut s = Subtask::new("Step A"); s.completed = true; s },
+            {
+                let mut s = Subtask::new("Step A");
+                s.completed = true;
+                s
+            },
             Subtask::new("Step B"),
         ];
         store.add(t);
@@ -3173,10 +3911,31 @@ mod tests {
 
     #[test]
     fn test_parse_time_12h() {
-        assert_eq!(parse_time_12h("3:00 PM"), Some(Time { hour: 15, minute: 0 }));
-        assert_eq!(parse_time_12h("12:00 AM"), Some(Time { hour: 0, minute: 0 }));
-        assert_eq!(parse_time_12h("12:30 PM"), Some(Time { hour: 12, minute: 30 }));
-        assert_eq!(parse_time_12h("11:59 AM"), Some(Time { hour: 11, minute: 59 }));
+        assert_eq!(
+            parse_time_12h("3:00 PM"),
+            Some(Time {
+                hour: 15,
+                minute: 0
+            })
+        );
+        assert_eq!(
+            parse_time_12h("12:00 AM"),
+            Some(Time { hour: 0, minute: 0 })
+        );
+        assert_eq!(
+            parse_time_12h("12:30 PM"),
+            Some(Time {
+                hour: 12,
+                minute: 30
+            })
+        );
+        assert_eq!(
+            parse_time_12h("11:59 AM"),
+            Some(Time {
+                hour: 11,
+                minute: 59
+            })
+        );
         assert!(parse_time_12h("invalid").is_none());
     }
 
@@ -3333,15 +4092,52 @@ mod tests {
 
     #[test]
     fn test_datetime_minutes_since() {
-        let a = DateTime::new(Date { year: 2026, month: 5, day: 18 }, Time { hour: 12, minute: 0 });
-        let b = DateTime::new(Date { year: 2026, month: 5, day: 18 }, Time { hour: 10, minute: 0 });
+        let a = DateTime::new(
+            Date {
+                year: 2026,
+                month: 5,
+                day: 18,
+            },
+            Time {
+                hour: 12,
+                minute: 0,
+            },
+        );
+        let b = DateTime::new(
+            Date {
+                year: 2026,
+                month: 5,
+                day: 18,
+            },
+            Time {
+                hour: 10,
+                minute: 0,
+            },
+        );
         assert_eq!(a.minutes_since(b), 120);
     }
 
     #[test]
     fn test_datetime_minutes_since_cross_day() {
-        let a = DateTime::new(Date { year: 2026, month: 5, day: 19 }, Time { hour: 1, minute: 0 });
-        let b = DateTime::new(Date { year: 2026, month: 5, day: 18 }, Time { hour: 23, minute: 0 });
+        let a = DateTime::new(
+            Date {
+                year: 2026,
+                month: 5,
+                day: 19,
+            },
+            Time { hour: 1, minute: 0 },
+        );
+        let b = DateTime::new(
+            Date {
+                year: 2026,
+                month: 5,
+                day: 18,
+            },
+            Time {
+                hour: 23,
+                minute: 0,
+            },
+        );
         assert_eq!(a.minutes_since(b), 120);
     }
 

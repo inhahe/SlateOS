@@ -40,57 +40,61 @@ const OVERLAY0: Color = Color::from_hex(0x6C7086);
 
 // Symbols for card faces
 const SYMBOLS: [&str; 18] = [
-    "A", "B", "C", "D", "E", "F", "G", "H", "I",
-    "J", "K", "L", "M", "N", "O", "P", "Q", "R",
+    "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N", "O", "P", "Q", "R",
 ];
 const SYMBOL_COLORS: [Color; 18] = [
-    RED, BLUE, GREEN, YELLOW, PEACH, MAUVE, TEAL, LAVENDER, RED,
-    BLUE, GREEN, YELLOW, PEACH, MAUVE, TEAL, LAVENDER, RED, BLUE,
+    RED, BLUE, GREEN, YELLOW, PEACH, MAUVE, TEAL, LAVENDER, RED, BLUE, GREEN, YELLOW, PEACH, MAUVE,
+    TEAL, LAVENDER, RED, BLUE,
 ];
 
 struct Rng {
     state: u64,
 }
 impl Rng {
-    fn new(seed: u64) -> Self { Self { state: seed } }
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         self.state
     }
     fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 { return 0; }
+        if max == 0 {
+            return 0;
+        }
         (self.next() % max as u64) as usize
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum CardState {
     FaceDown,
     FaceUp,
     Matched,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GameState {
     Playing,
     Won,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Phase {
     FirstPick,
     SecondPick,
-    Showing,  // brief display before hiding mismatched cards
+    Showing, // brief display before hiding mismatched cards
 }
 
 struct MemoryGame {
-    cards: Vec<u8>,       // symbol index for each card
+    cards: Vec<u8>, // symbol index for each card
     states: Vec<CardState>,
     rows: usize,
     cols: usize,
-    cursor: usize,        // flat index
+    cursor: usize, // flat index
     first_pick: Option<usize>,
     second_pick: Option<usize>,
     phase: Phase,
@@ -98,7 +102,7 @@ struct MemoryGame {
     pairs_found: u32,
     total_pairs: u32,
     state: GameState,
-    best_moves: [Option<u32>; 3],  // 4x4, 4x6, 6x6
+    best_moves: [Option<u32>; 3], // 4x4, 4x6, 6x6
     rng: Rng,
     show_help: bool,
 }
@@ -334,13 +338,17 @@ impl MemoryGame {
         let mut cmds = Vec::new();
 
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         cmds.push(RenderCommand::Text {
-            x: 50.0, y: 28.0,
+            x: 50.0,
+            y: 28.0,
             text: "Memory".into(),
             color: LAVENDER,
             font_size: 24.0,
@@ -348,10 +356,13 @@ impl MemoryGame {
             max_width: None,
         });
 
-        let size_label = format!("{}x{}   Moves: {}   Pairs: {}/{}",
-            self.rows, self.cols, self.moves, self.pairs_found, self.total_pairs);
+        let size_label = format!(
+            "{}x{}   Moves: {}   Pairs: {}/{}",
+            self.rows, self.cols, self.moves, self.pairs_found, self.total_pairs
+        );
         cmds.push(RenderCommand::Text {
-            x: 50.0, y: 56.0,
+            x: 50.0,
+            y: 56.0,
             text: size_label,
             color: SUBTEXT0,
             font_size: 14.0,
@@ -376,12 +387,16 @@ impl MemoryGame {
                 match self.states[idx] {
                     CardState::FaceDown => {
                         cmds.push(RenderCommand::FillRect {
-                            x: cx, y: cy, width: card_w, height: card_h,
+                            x: cx,
+                            y: cy,
+                            width: card_w,
+                            height: card_h,
                             color: SURFACE1,
                             corner_radii: CornerRadii::all(6.0),
                         });
                         cmds.push(RenderCommand::Text {
-                            x: cx + card_w / 2.0 - 5.0, y: cy + card_h / 2.0 - 8.0,
+                            x: cx + card_w / 2.0 - 5.0,
+                            y: cy + card_h / 2.0 - 8.0,
                             text: "?".into(),
                             color: OVERLAY0,
                             font_size: 20.0,
@@ -394,12 +409,16 @@ impl MemoryGame {
                         let sym = SYMBOLS[sym_idx % SYMBOLS.len()];
                         let sym_color = SYMBOL_COLORS[sym_idx % SYMBOL_COLORS.len()];
                         cmds.push(RenderCommand::FillRect {
-                            x: cx, y: cy, width: card_w, height: card_h,
+                            x: cx,
+                            y: cy,
+                            width: card_w,
+                            height: card_h,
                             color: MANTLE,
                             corner_radii: CornerRadii::all(6.0),
                         });
                         cmds.push(RenderCommand::Text {
-                            x: cx + card_w / 2.0 - 8.0, y: cy + card_h / 2.0 - 12.0,
+                            x: cx + card_w / 2.0 - 8.0,
+                            y: cy + card_h / 2.0 - 12.0,
                             text: sym.into(),
                             color: sym_color,
                             font_size: 28.0,
@@ -411,12 +430,16 @@ impl MemoryGame {
                         let sym_idx = self.cards[idx] as usize;
                         let sym = SYMBOLS[sym_idx % SYMBOLS.len()];
                         cmds.push(RenderCommand::FillRect {
-                            x: cx, y: cy, width: card_w, height: card_h,
+                            x: cx,
+                            y: cy,
+                            width: card_w,
+                            height: card_h,
                             color: CRUST,
                             corner_radii: CornerRadii::all(6.0),
                         });
                         cmds.push(RenderCommand::Text {
-                            x: cx + card_w / 2.0 - 8.0, y: cy + card_h / 2.0 - 12.0,
+                            x: cx + card_w / 2.0 - 8.0,
+                            y: cy + card_h / 2.0 - 12.0,
                             text: sym.into(),
                             color: OVERLAY0,
                             font_size: 28.0,
@@ -435,7 +458,10 @@ impl MemoryGame {
                         (cx + card_w - 3.0, cy, 3.0, card_h),
                     ] {
                         cmds.push(RenderCommand::FillRect {
-                            x: bx, y: by, width: bw, height: bh,
+                            x: bx,
+                            y: by,
+                            width: bw,
+                            height: bh,
                             color: YELLOW,
                             corner_radii: CornerRadii::ZERO,
                         });
@@ -448,7 +474,8 @@ impl MemoryGame {
         if self.state == GameState::Won {
             let total_h = self.rows as f32 * (card_h + gap);
             cmds.push(RenderCommand::Text {
-                x: grid_x, y: grid_y + total_h + 16.0,
+                x: grid_x,
+                y: grid_y + total_h + 16.0,
                 text: format!("All pairs found in {} moves!", self.moves),
                 color: GREEN,
                 font_size: 18.0,
@@ -462,13 +489,16 @@ impl MemoryGame {
         let panel_x = grid_x + total_w + 20.0;
         let panel_y = grid_y;
         cmds.push(RenderCommand::FillRect {
-            x: panel_x, y: panel_y,
-            width: 150.0, height: 120.0,
+            x: panel_x,
+            y: panel_y,
+            width: 150.0,
+            height: 120.0,
             color: SURFACE0,
             corner_radii: CornerRadii::all(8.0),
         });
         cmds.push(RenderCommand::Text {
-            x: panel_x + 10.0, y: panel_y + 14.0,
+            x: panel_x + 10.0,
+            y: panel_y + 14.0,
             text: "Best Scores".into(),
             color: YELLOW,
             font_size: 14.0,
@@ -483,7 +513,8 @@ impl MemoryGame {
                 None => format!("{}: ---", label),
             };
             cmds.push(RenderCommand::Text {
-                x: panel_x + 10.0, y: sy,
+                x: panel_x + 10.0,
+                y: sy,
                 text: s,
                 color: TEXT,
                 font_size: 12.0,
@@ -495,7 +526,8 @@ impl MemoryGame {
         // Help hint
         if !self.show_help {
             cmds.push(RenderCommand::Text {
-                x: panel_x + 10.0, y: panel_y + 130.0,
+                x: panel_x + 10.0,
+                y: panel_y + 130.0,
                 text: "H for help".into(),
                 color: OVERLAY0,
                 font_size: 12.0,
@@ -686,9 +718,11 @@ mod tests {
     fn test_size_index() {
         let mut app = MemoryGame::new();
         assert_eq!(app.size_index(), 0);
-        app.rows = 4; app.cols = 6;
+        app.rows = 4;
+        app.cols = 6;
         assert_eq!(app.size_index(), 1);
-        app.rows = 6; app.cols = 6;
+        app.rows = 6;
+        app.cols = 6;
         assert_eq!(app.size_index(), 2);
     }
 
@@ -728,8 +762,10 @@ mod tests {
         let mut app = MemoryGame::new();
         app.cursor = 5;
         let right = Event::Key(KeyEvent {
-            key: Key::Right, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::Right,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&right);
         assert_eq!(app.cursor, 6);
@@ -739,8 +775,10 @@ mod tests {
     fn test_key_enter() {
         let mut app = MemoryGame::new();
         let evt = Event::Key(KeyEvent {
-            key: Key::Enter, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::Enter,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&evt);
         assert_eq!(app.states[0], CardState::FaceUp);
@@ -751,8 +789,10 @@ mod tests {
         let mut app = MemoryGame::new();
         app.moves = 20;
         let evt = Event::Key(KeyEvent {
-            key: Key::N, modifiers: Modifiers::NONE,
-            pressed: true, text: None,
+            key: Key::N,
+            modifiers: Modifiers::NONE,
+            pressed: true,
+            text: None,
         });
         app.event(&evt);
         assert_eq!(app.moves, 0);

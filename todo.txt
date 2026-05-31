@@ -1,3 +1,29 @@
+## BUG (noticed+FIXED 2026-05-31): apps/metronome test build did not compile.
+##   guitk::event::Modifiers gained a `super_key` field, but three test helpers
+##   constructed Modifiers with an explicit { ctrl, alt, shift } literal, so the test
+##   build failed with E0063 (missing field). Switched the helpers to the resilient
+##   builder API (Modifiers::NONE / Modifiers::shift()) so future field additions
+##   won't break them. metronome 61/61 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/memory test build did not compile. Tests use
+##   assert_eq! on the CardState, GameState, and Phase enums, which requires Debug,
+##   but none of the three derived it (E0277). Added #[derive(Debug)] to all three
+##   small Copy enums. memory 27/27 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/reminders test_task_matches_query asserted
+##   that matches_query("grocery") matched a task titled "Buy groceries". matches_query
+##   does plain case-insensitive substring search (not stemming), and "grocery" is NOT
+##   a substring of "groceries", so the assertion was a test typo. Changed the query to
+##   "grocer" (a real substring) and documented that search is substring-based.
+##   reminders 86/86 tests pass.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/magnifier test_luma asserted that
+##   luma(255,255,255) == 254 with a comment claiming "0.299*255 + 0.587*255 +
+##   0.114*255 ≈ 254.7". The BT.601 coefficients sum to exactly 1.0, so pure white
+##   maps to 255 (the implementation correctly clamps/returns 255); the test
+##   expectation and its arithmetic were wrong. Corrected the assertion to 255.
+##   magnifier 51/51 tests pass.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/emojipicker test build did not compile.
 ##   render_with_search_text_shows_query referenced a bare `RenderCommand` type that
 ##   was never imported (production code uses the fully-qualified

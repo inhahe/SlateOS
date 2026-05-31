@@ -39,9 +39,11 @@ use std::process;
 
 // Native OurOS console syscalls (kernel syscall/number.rs).  These were
 // previously 0/1, which are SYS_YIELD and SYS_EXIT — so a "read char" call
-// actually terminated the process.  Correct numbers are 100/101.
+// actually terminated the process.  The render loop polls for input (it must
+// keep refreshing the status bar while idle), so it uses the *non-blocking*
+// try-read variant (103); the blocking variant (101) would freeze the loop.
 const SYS_CONSOLE_WRITE: u64 = 100;
-const SYS_CONSOLE_READ_CHAR: u64 = 101;
+const SYS_CONSOLE_TRY_READ_CHAR: u64 = 103;
 // Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
 // boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
@@ -72,8 +74,13 @@ fn console_write(s: &str) {
 }
 
 fn console_read_char() -> Option<u8> {
-    let ret = unsafe { syscall3(SYS_CONSOLE_READ_CHAR, 0, 0, 0) };
-    if ret < 0 { None } else { Some(ret as u8) }
+    // SYS_CONSOLE_TRY_READ_CHAR requires a non-null, writable 1-byte buffer:
+    // it writes the key there and returns 1, or returns WouldBlock (negative)
+    // when no key is buffered.  (Passing a null pointer returns InvalidArgument,
+    // which is why the previous null-arg form never read any input.)
+    let mut ch: u8 = 0;
+    let ret = unsafe { syscall3(SYS_CONSOLE_TRY_READ_CHAR, &raw mut ch as u64, 0, 0) };
+    if ret < 0 { None } else { Some(ch) }
 }
 
 fn clock_ns() -> u64 {

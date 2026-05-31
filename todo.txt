@@ -1,3 +1,11 @@
+## BUG (noticed+FIXED 2026-05-31, test-only): apps/dbviewer
+##   test_current_table_data_with_filter used filter_op_idx = 4 with the comment
+##   "// GreaterOrEqual", but FilterOp::all()[4] is LessOrEqual (GreaterOrEqual
+##   is index 5). The filter therefore selected age <= 35, so a row with age<35
+##   was returned and the `*age >= 35` assertion failed. Production filter logic
+##   (matches_filter / add_filter / FilterOp::all ordering) is self-consistent;
+##   only the test's index was wrong. Corrected 4 -> 5. 112/112 tests pass.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/systemrestore tests would not COMPILE.
 ##   3 assert_eq! calls compared Result<Snapshot, SnapshotError> but Snapshot
 ##   derived only Clone+Debug — no PartialEq — so `==` could not be applied

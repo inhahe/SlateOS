@@ -4992,7 +4992,7 @@ mod tests {
     fn test_current_table_data_with_filter() {
         let mut app = DbViewerApp::new();
         app.filter_column_idx = 3; // age
-        app.filter_op_idx = 4; // GreaterOrEqual
+        app.filter_op_idx = 5; // GreaterOrEqual (FilterOp::all() index)
         app.filter_value = "35".to_owned();
         app.add_filter();
         let (_, rows) = app.active_db_tab().unwrap().current_table_data().unwrap();

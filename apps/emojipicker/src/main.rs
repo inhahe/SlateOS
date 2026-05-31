@@ -14,7 +14,9 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderTree};
 #[allow(unused_imports)]
@@ -127,14 +129,14 @@ impl EmojiCategory {
     /// A representative emoji icon for the category tab.
     pub fn icon(self) -> &'static str {
         match self {
-            Self::SmileysAndPeople => "\u{1F600}",  // grinning face
-            Self::AnimalsAndNature => "\u{1F43E}",  // paw prints
-            Self::FoodAndDrink => "\u{1F354}",      // hamburger
-            Self::TravelAndPlaces => "\u{2708}",    // airplane
-            Self::Activities => "\u{26BD}",          // soccer ball
-            Self::Objects => "\u{1F4A1}",            // light bulb
-            Self::Symbols => "\u{2764}",             // red heart
-            Self::Flags => "\u{1F3F4}",              // black flag
+            Self::SmileysAndPeople => "\u{1F600}", // grinning face
+            Self::AnimalsAndNature => "\u{1F43E}", // paw prints
+            Self::FoodAndDrink => "\u{1F354}",     // hamburger
+            Self::TravelAndPlaces => "\u{2708}",   // airplane
+            Self::Activities => "\u{26BD}",        // soccer ball
+            Self::Objects => "\u{1F4A1}",          // light bulb
+            Self::Symbols => "\u{2764}",           // red heart
+            Self::Flags => "\u{1F3F4}",            // black flag
         }
     }
 
@@ -276,8 +278,7 @@ impl EmojiDatabase {
         self.entries
             .iter()
             .filter(|e| {
-                e.name.to_lowercase().contains(&q)
-                    || e.keywords.iter().any(|kw| kw.contains(&q))
+                e.name.to_lowercase().contains(&q) || e.keywords.iter().any(|kw| kw.contains(&q))
             })
             .collect()
     }
@@ -325,101 +326,479 @@ impl EmojiDatabase {
         let e = Self::entry;
         vec![
             // -- Smileys & People (16) --
-            e("\u{1F600}", "grinning face", SmileysAndPeople, &["happy", "smile", "joy"]),
-            e("\u{1F602}", "face with tears of joy", SmileysAndPeople, &["laugh", "cry", "lol"]),
-            e("\u{1F60D}", "smiling face with heart-eyes", SmileysAndPeople, &["love", "crush", "adore"]),
-            e("\u{1F914}", "thinking face", SmileysAndPeople, &["think", "hmm", "consider"]),
-            e("\u{1F44D}", "thumbs up", SmileysAndPeople, &["ok", "agree", "yes", "like"]),
-            e("\u{1F44E}", "thumbs down", SmileysAndPeople, &["dislike", "no", "bad"]),
-            e("\u{1F44B}", "waving hand", SmileysAndPeople, &["hello", "hi", "bye", "wave"]),
-            e("\u{1F64F}", "folded hands", SmileysAndPeople, &["pray", "please", "thanks"]),
-            e("\u{1F622}", "crying face", SmileysAndPeople, &["sad", "cry", "tear"]),
-            e("\u{1F621}", "angry face", SmileysAndPeople, &["mad", "angry", "rage"]),
-            e("\u{1F60E}", "smiling face with sunglasses", SmileysAndPeople, &["cool", "sunglasses"]),
-            e("\u{1F917}", "hugging face", SmileysAndPeople, &["hug", "embrace"]),
-            e("\u{1F631}", "face screaming in fear", SmileysAndPeople, &["scream", "horror", "fear"]),
-            e("\u{1F4AA}", "flexed biceps", SmileysAndPeople, &["strong", "muscle", "power"]),
-            e("\u{270B}", "raised hand", SmileysAndPeople, &["stop", "hand", "high five"]),
-            e("\u{1F44F}", "clapping hands", SmileysAndPeople, &["clap", "bravo", "applause"]),
-
+            e(
+                "\u{1F600}",
+                "grinning face",
+                SmileysAndPeople,
+                &["happy", "smile", "joy"],
+            ),
+            e(
+                "\u{1F602}",
+                "face with tears of joy",
+                SmileysAndPeople,
+                &["laugh", "cry", "lol"],
+            ),
+            e(
+                "\u{1F60D}",
+                "smiling face with heart-eyes",
+                SmileysAndPeople,
+                &["love", "crush", "adore"],
+            ),
+            e(
+                "\u{1F914}",
+                "thinking face",
+                SmileysAndPeople,
+                &["think", "hmm", "consider"],
+            ),
+            e(
+                "\u{1F44D}",
+                "thumbs up",
+                SmileysAndPeople,
+                &["ok", "agree", "yes", "like"],
+            ),
+            e(
+                "\u{1F44E}",
+                "thumbs down",
+                SmileysAndPeople,
+                &["dislike", "no", "bad"],
+            ),
+            e(
+                "\u{1F44B}",
+                "waving hand",
+                SmileysAndPeople,
+                &["hello", "hi", "bye", "wave"],
+            ),
+            e(
+                "\u{1F64F}",
+                "folded hands",
+                SmileysAndPeople,
+                &["pray", "please", "thanks"],
+            ),
+            e(
+                "\u{1F622}",
+                "crying face",
+                SmileysAndPeople,
+                &["sad", "cry", "tear"],
+            ),
+            e(
+                "\u{1F621}",
+                "angry face",
+                SmileysAndPeople,
+                &["mad", "angry", "rage"],
+            ),
+            e(
+                "\u{1F60E}",
+                "smiling face with sunglasses",
+                SmileysAndPeople,
+                &["cool", "sunglasses"],
+            ),
+            e(
+                "\u{1F917}",
+                "hugging face",
+                SmileysAndPeople,
+                &["hug", "embrace"],
+            ),
+            e(
+                "\u{1F631}",
+                "face screaming in fear",
+                SmileysAndPeople,
+                &["scream", "horror", "fear"],
+            ),
+            e(
+                "\u{1F4AA}",
+                "flexed biceps",
+                SmileysAndPeople,
+                &["strong", "muscle", "power"],
+            ),
+            e(
+                "\u{270B}",
+                "raised hand",
+                SmileysAndPeople,
+                &["stop", "hand", "high five"],
+            ),
+            e(
+                "\u{1F44F}",
+                "clapping hands",
+                SmileysAndPeople,
+                &["clap", "bravo", "applause"],
+            ),
             // -- Animals & Nature (12) --
-            e("\u{1F436}", "dog face", AnimalsAndNature, &["dog", "puppy", "pet"]),
-            e("\u{1F431}", "cat face", AnimalsAndNature, &["cat", "kitten", "pet"]),
-            e("\u{1F42D}", "mouse face", AnimalsAndNature, &["mouse", "rodent"]),
+            e(
+                "\u{1F436}",
+                "dog face",
+                AnimalsAndNature,
+                &["dog", "puppy", "pet"],
+            ),
+            e(
+                "\u{1F431}",
+                "cat face",
+                AnimalsAndNature,
+                &["cat", "kitten", "pet"],
+            ),
+            e(
+                "\u{1F42D}",
+                "mouse face",
+                AnimalsAndNature,
+                &["mouse", "rodent"],
+            ),
             e("\u{1F43B}", "bear", AnimalsAndNature, &["bear", "animal"]),
-            e("\u{1F981}", "lion", AnimalsAndNature, &["lion", "king", "cat"]),
-            e("\u{1F422}", "turtle", AnimalsAndNature, &["turtle", "slow", "shell"]),
-            e("\u{1F98B}", "butterfly", AnimalsAndNature, &["butterfly", "insect", "pretty"]),
-            e("\u{1F33B}", "sunflower", AnimalsAndNature, &["flower", "sun", "plant"]),
-            e("\u{1F332}", "evergreen tree", AnimalsAndNature, &["tree", "pine", "forest"]),
-            e("\u{1F335}", "cactus", AnimalsAndNature, &["cactus", "desert", "plant"]),
-            e("\u{1F340}", "four leaf clover", AnimalsAndNature, &["luck", "clover", "irish"]),
-            e("\u{1F308}", "rainbow", AnimalsAndNature, &["rainbow", "colors", "weather"]),
-
+            e(
+                "\u{1F981}",
+                "lion",
+                AnimalsAndNature,
+                &["lion", "king", "cat"],
+            ),
+            e(
+                "\u{1F422}",
+                "turtle",
+                AnimalsAndNature,
+                &["turtle", "slow", "shell"],
+            ),
+            e(
+                "\u{1F98B}",
+                "butterfly",
+                AnimalsAndNature,
+                &["butterfly", "insect", "pretty"],
+            ),
+            e(
+                "\u{1F33B}",
+                "sunflower",
+                AnimalsAndNature,
+                &["flower", "sun", "plant"],
+            ),
+            e(
+                "\u{1F332}",
+                "evergreen tree",
+                AnimalsAndNature,
+                &["tree", "pine", "forest"],
+            ),
+            e(
+                "\u{1F335}",
+                "cactus",
+                AnimalsAndNature,
+                &["cactus", "desert", "plant"],
+            ),
+            e(
+                "\u{1F340}",
+                "four leaf clover",
+                AnimalsAndNature,
+                &["luck", "clover", "irish"],
+            ),
+            e(
+                "\u{1F308}",
+                "rainbow",
+                AnimalsAndNature,
+                &["rainbow", "colors", "weather"],
+            ),
             // -- Food & Drink (10) --
-            e("\u{1F34E}", "red apple", FoodAndDrink, &["apple", "fruit", "healthy"]),
-            e("\u{1F354}", "hamburger", FoodAndDrink, &["burger", "fast food", "meat"]),
-            e("\u{1F355}", "pizza", FoodAndDrink, &["pizza", "food", "italian"]),
-            e("\u{1F382}", "birthday cake", FoodAndDrink, &["cake", "birthday", "party"]),
-            e("\u{2615}", "hot beverage", FoodAndDrink, &["coffee", "tea", "drink", "hot"]),
-            e("\u{1F37A}", "beer mug", FoodAndDrink, &["beer", "drink", "alcohol"]),
-            e("\u{1F377}", "wine glass", FoodAndDrink, &["wine", "drink", "alcohol"]),
-            e("\u{1F370}", "shortcake", FoodAndDrink, &["cake", "dessert", "sweet"]),
-            e("\u{1F363}", "sushi", FoodAndDrink, &["sushi", "japanese", "fish"]),
-            e("\u{1F36B}", "chocolate bar", FoodAndDrink, &["chocolate", "candy", "sweet"]),
-
+            e(
+                "\u{1F34E}",
+                "red apple",
+                FoodAndDrink,
+                &["apple", "fruit", "healthy"],
+            ),
+            e(
+                "\u{1F354}",
+                "hamburger",
+                FoodAndDrink,
+                &["burger", "fast food", "meat"],
+            ),
+            e(
+                "\u{1F355}",
+                "pizza",
+                FoodAndDrink,
+                &["pizza", "food", "italian"],
+            ),
+            e(
+                "\u{1F382}",
+                "birthday cake",
+                FoodAndDrink,
+                &["cake", "birthday", "party"],
+            ),
+            e(
+                "\u{2615}",
+                "hot beverage",
+                FoodAndDrink,
+                &["coffee", "tea", "drink", "hot"],
+            ),
+            e(
+                "\u{1F37A}",
+                "beer mug",
+                FoodAndDrink,
+                &["beer", "drink", "alcohol"],
+            ),
+            e(
+                "\u{1F377}",
+                "wine glass",
+                FoodAndDrink,
+                &["wine", "drink", "alcohol"],
+            ),
+            e(
+                "\u{1F370}",
+                "shortcake",
+                FoodAndDrink,
+                &["cake", "dessert", "sweet"],
+            ),
+            e(
+                "\u{1F363}",
+                "sushi",
+                FoodAndDrink,
+                &["sushi", "japanese", "fish"],
+            ),
+            e(
+                "\u{1F36B}",
+                "chocolate bar",
+                FoodAndDrink,
+                &["chocolate", "candy", "sweet"],
+            ),
             // -- Travel & Places (10) --
-            e("\u{1F697}", "automobile", TravelAndPlaces, &["car", "drive", "vehicle"]),
-            e("\u{2708}\u{FE0F}", "airplane", TravelAndPlaces, &["plane", "fly", "travel"]),
-            e("\u{1F3E0}", "house", TravelAndPlaces, &["home", "house", "building"]),
-            e("\u{1F3D6}\u{FE0F}", "beach with umbrella", TravelAndPlaces, &["beach", "vacation", "sun"]),
-            e("\u{26F0}\u{FE0F}", "mountain", TravelAndPlaces, &["mountain", "climb", "nature"]),
-            e("\u{1F680}", "rocket", TravelAndPlaces, &["rocket", "space", "launch"]),
-            e("\u{1F30D}", "globe europe-africa", TravelAndPlaces, &["earth", "world", "globe"]),
-            e("\u{1F3F0}", "castle", TravelAndPlaces, &["castle", "medieval", "palace"]),
-            e("\u{26F2}", "fountain", TravelAndPlaces, &["fountain", "water", "park"]),
-            e("\u{1F6A2}", "ship", TravelAndPlaces, &["ship", "boat", "cruise"]),
-
+            e(
+                "\u{1F697}",
+                "automobile",
+                TravelAndPlaces,
+                &["car", "drive", "vehicle"],
+            ),
+            e(
+                "\u{2708}\u{FE0F}",
+                "airplane",
+                TravelAndPlaces,
+                &["plane", "fly", "travel"],
+            ),
+            e(
+                "\u{1F3E0}",
+                "house",
+                TravelAndPlaces,
+                &["home", "house", "building"],
+            ),
+            e(
+                "\u{1F3D6}\u{FE0F}",
+                "beach with umbrella",
+                TravelAndPlaces,
+                &["beach", "vacation", "sun"],
+            ),
+            e(
+                "\u{26F0}\u{FE0F}",
+                "mountain",
+                TravelAndPlaces,
+                &["mountain", "climb", "nature"],
+            ),
+            e(
+                "\u{1F680}",
+                "rocket",
+                TravelAndPlaces,
+                &["rocket", "space", "launch"],
+            ),
+            e(
+                "\u{1F30D}",
+                "globe europe-africa",
+                TravelAndPlaces,
+                &["earth", "world", "globe"],
+            ),
+            e(
+                "\u{1F3F0}",
+                "castle",
+                TravelAndPlaces,
+                &["castle", "medieval", "palace"],
+            ),
+            e(
+                "\u{26F2}",
+                "fountain",
+                TravelAndPlaces,
+                &["fountain", "water", "park"],
+            ),
+            e(
+                "\u{1F6A2}",
+                "ship",
+                TravelAndPlaces,
+                &["ship", "boat", "cruise"],
+            ),
             // -- Activities (10) --
-            e("\u{26BD}", "soccer ball", Activities, &["soccer", "football", "sport"]),
-            e("\u{1F3C0}", "basketball", Activities, &["basketball", "sport", "nba"]),
-            e("\u{1F3BE}", "tennis", Activities, &["tennis", "sport", "racket"]),
-            e("\u{1F3AE}", "video game", Activities, &["game", "controller", "play"]),
-            e("\u{1F3A8}", "artist palette", Activities, &["art", "paint", "draw"]),
-            e("\u{1F3B5}", "musical note", Activities, &["music", "note", "song"]),
-            e("\u{1F3AC}", "clapper board", Activities, &["movie", "film", "cinema"]),
-            e("\u{1F3A4}", "microphone", Activities, &["microphone", "sing", "karaoke"]),
-            e("\u{1F3C6}", "trophy", Activities, &["trophy", "win", "champion"]),
-            e("\u{1F3AF}", "bullseye", Activities, &["target", "goal", "dart"]),
-
+            e(
+                "\u{26BD}",
+                "soccer ball",
+                Activities,
+                &["soccer", "football", "sport"],
+            ),
+            e(
+                "\u{1F3C0}",
+                "basketball",
+                Activities,
+                &["basketball", "sport", "nba"],
+            ),
+            e(
+                "\u{1F3BE}",
+                "tennis",
+                Activities,
+                &["tennis", "sport", "racket"],
+            ),
+            e(
+                "\u{1F3AE}",
+                "video game",
+                Activities,
+                &["game", "controller", "play"],
+            ),
+            e(
+                "\u{1F3A8}",
+                "artist palette",
+                Activities,
+                &["art", "paint", "draw"],
+            ),
+            e(
+                "\u{1F3B5}",
+                "musical note",
+                Activities,
+                &["music", "note", "song"],
+            ),
+            e(
+                "\u{1F3AC}",
+                "clapper board",
+                Activities,
+                &["movie", "film", "cinema"],
+            ),
+            e(
+                "\u{1F3A4}",
+                "microphone",
+                Activities,
+                &["microphone", "sing", "karaoke"],
+            ),
+            e(
+                "\u{1F3C6}",
+                "trophy",
+                Activities,
+                &["trophy", "win", "champion"],
+            ),
+            e(
+                "\u{1F3AF}",
+                "bullseye",
+                Activities,
+                &["target", "goal", "dart"],
+            ),
             // -- Objects (10) --
-            e("\u{1F4A1}", "light bulb", Objects, &["idea", "light", "bulb"]),
-            e("\u{1F4BB}", "laptop", Objects, &["computer", "laptop", "tech"]),
-            e("\u{1F4F1}", "mobile phone", Objects, &["phone", "cell", "mobile"]),
-            e("\u{1F4DA}", "books", Objects, &["book", "read", "study", "library"]),
-            e("\u{1F4E7}", "e-mail", Objects, &["email", "mail", "message"]),
+            e(
+                "\u{1F4A1}",
+                "light bulb",
+                Objects,
+                &["idea", "light", "bulb"],
+            ),
+            e(
+                "\u{1F4BB}",
+                "laptop",
+                Objects,
+                &["computer", "laptop", "tech"],
+            ),
+            e(
+                "\u{1F4F1}",
+                "mobile phone",
+                Objects,
+                &["phone", "cell", "mobile"],
+            ),
+            e(
+                "\u{1F4DA}",
+                "books",
+                Objects,
+                &["book", "read", "study", "library"],
+            ),
+            e(
+                "\u{1F4E7}",
+                "e-mail",
+                Objects,
+                &["email", "mail", "message"],
+            ),
             e("\u{1F511}", "key", Objects, &["key", "lock", "security"]),
-            e("\u{1F6E0}\u{FE0F}", "hammer and wrench", Objects, &["tools", "fix", "repair"]),
-            e("\u{23F0}", "alarm clock", Objects, &["alarm", "clock", "time", "wake"]),
-            e("\u{1F4B0}", "money bag", Objects, &["money", "rich", "bag", "dollar"]),
-            e("\u{1F50D}", "magnifying glass", Objects, &["search", "find", "look"]),
-
+            e(
+                "\u{1F6E0}\u{FE0F}",
+                "hammer and wrench",
+                Objects,
+                &["tools", "fix", "repair"],
+            ),
+            e(
+                "\u{23F0}",
+                "alarm clock",
+                Objects,
+                &["alarm", "clock", "time", "wake"],
+            ),
+            e(
+                "\u{1F4B0}",
+                "money bag",
+                Objects,
+                &["money", "rich", "bag", "dollar"],
+            ),
+            e(
+                "\u{1F50D}",
+                "magnifying glass",
+                Objects,
+                &["search", "find", "look"],
+            ),
             // -- Symbols (8) --
-            e("\u{2764}\u{FE0F}", "red heart", Symbols, &["heart", "love", "romance"]),
-            e("\u{1F494}", "broken heart", Symbols, &["heartbreak", "sad", "love"]),
-            e("\u{2705}", "check mark", Symbols, &["check", "yes", "done", "correct"]),
-            e("\u{274C}", "cross mark", Symbols, &["no", "wrong", "error", "cancel"]),
+            e(
+                "\u{2764}\u{FE0F}",
+                "red heart",
+                Symbols,
+                &["heart", "love", "romance"],
+            ),
+            e(
+                "\u{1F494}",
+                "broken heart",
+                Symbols,
+                &["heartbreak", "sad", "love"],
+            ),
+            e(
+                "\u{2705}",
+                "check mark",
+                Symbols,
+                &["check", "yes", "done", "correct"],
+            ),
+            e(
+                "\u{274C}",
+                "cross mark",
+                Symbols,
+                &["no", "wrong", "error", "cancel"],
+            ),
             e("\u{2B50}", "star", Symbols, &["star", "favorite", "rating"]),
-            e("\u{26A0}\u{FE0F}", "warning", Symbols, &["warning", "caution", "alert"]),
-            e("\u{267B}\u{FE0F}", "recycling symbol", Symbols, &["recycle", "environment", "green"]),
-            e("\u{1F4AF}", "hundred points", Symbols, &["hundred", "perfect", "score"]),
-
+            e(
+                "\u{26A0}\u{FE0F}",
+                "warning",
+                Symbols,
+                &["warning", "caution", "alert"],
+            ),
+            e(
+                "\u{267B}\u{FE0F}",
+                "recycling symbol",
+                Symbols,
+                &["recycle", "environment", "green"],
+            ),
+            e(
+                "\u{1F4AF}",
+                "hundred points",
+                Symbols,
+                &["hundred", "perfect", "score"],
+            ),
             // -- Flags (6) --
-            e("\u{1F3F3}\u{FE0F}", "white flag", Flags, &["flag", "surrender", "peace"]),
+            e(
+                "\u{1F3F3}\u{FE0F}",
+                "white flag",
+                Flags,
+                &["flag", "surrender", "peace"],
+            ),
             e("\u{1F3F4}", "black flag", Flags, &["flag", "pirate"]),
-            e("\u{1F3C1}", "chequered flag", Flags, &["flag", "race", "finish"]),
-            e("\u{1F6A9}", "triangular flag", Flags, &["flag", "post", "marker"]),
-            e("\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}", "rainbow flag", Flags, &["flag", "pride", "rainbow", "lgbtq"]),
+            e(
+                "\u{1F3C1}",
+                "chequered flag",
+                Flags,
+                &["flag", "race", "finish"],
+            ),
+            e(
+                "\u{1F6A9}",
+                "triangular flag",
+                Flags,
+                &["flag", "post", "marker"],
+            ),
+            e(
+                "\u{1F3F3}\u{FE0F}\u{200D}\u{1F308}",
+                "rainbow flag",
+                Flags,
+                &["flag", "pride", "rainbow", "lgbtq"],
+            ),
             e("\u{2690}", "white pennant", Flags, &["flag", "pennant"]),
         ]
     }
@@ -447,8 +826,8 @@ impl Tab {
     /// Icon for the tab.
     pub fn icon(self) -> &'static str {
         match self {
-            Self::Recent => "\u{1F552}",   // clock face
-            Self::Search => "\u{1F50E}",   // magnifying glass tilted right
+            Self::Recent => "\u{1F552}", // clock face
+            Self::Search => "\u{1F50E}", // magnifying glass tilted right
             Self::Category(c) => c.icon(),
         }
     }
@@ -512,7 +891,7 @@ impl EmojiPickerState {
     /// Total content height of the grid for the current visible emoji set.
     pub fn grid_content_height(&self) -> f32 {
         let count = self.visible_emoji().len();
-        let rows = (count + GRID_COLUMNS - 1) / GRID_COLUMNS;
+        let rows = count.div_ceil(GRID_COLUMNS);
         rows as f32 * CELL_SIZE + GRID_PADDING * 2.0
     }
 
@@ -622,7 +1001,11 @@ fn render_tab_bar(state: &EmojiPickerState, tree: &mut RenderTree) {
         // Tab icon (emoji text).
         let icon_x = x + (tab_width - TAB_ICON_SIZE) / 2.0;
         let icon_y = (TAB_BAR_HEIGHT - TAB_ICON_SIZE) / 2.0;
-        let color = if is_active { mocha::BLUE } else { mocha::OVERLAY0 };
+        let color = if is_active {
+            mocha::BLUE
+        } else {
+            mocha::OVERLAY0
+        };
         tree.push(guitk::render::RenderCommand::Text {
             x: icon_x,
             y: icon_y,
@@ -913,13 +1296,13 @@ fn handle_key(state: &mut EmojiPickerState, key: &KeyEvent) -> EventResult {
             EventResult::Consumed
         }
         _ if state.search_focused => {
-            if let Some(ch) = key.text {
-                if !ch.is_control() {
-                    state.search_query.push(ch);
-                    state.active_tab = Tab::Search;
-                    state.scroll_offset = 0.0;
-                    return EventResult::Consumed;
-                }
+            if let Some(ch) = key.text
+                && !ch.is_control()
+            {
+                state.search_query.push(ch);
+                state.active_tab = Tab::Search;
+                state.scroll_offset = 0.0;
+                return EventResult::Consumed;
             }
             EventResult::Ignored
         }
@@ -940,7 +1323,7 @@ fn handle_mouse(state: &mut EmojiPickerState, mouse: &MouseEvent) -> EventResult
             }
 
             // Search field click — focus it.
-            if y >= TAB_BAR_HEIGHT && y < TAB_BAR_HEIGHT + SEARCH_HEIGHT {
+            if (TAB_BAR_HEIGHT..TAB_BAR_HEIGHT + SEARCH_HEIGHT).contains(&y) {
                 state.search_focused = true;
                 return EventResult::Consumed;
             }
@@ -1019,11 +1402,7 @@ fn handle_tab_click(state: &mut EmojiPickerState, x: f32) -> EventResult {
         if let Tab::Category(cat) = tab {
             state.selected_category = cat;
         }
-        if tab == Tab::Search {
-            state.search_focused = true;
-        } else {
-            state.search_focused = false;
-        }
+        state.search_focused = tab == Tab::Search;
     }
     EventResult::Consumed
 }
@@ -1106,11 +1485,7 @@ mod tests {
         let db = EmojiDatabase::new();
         for &cat in EmojiCategory::ALL {
             let count = db.by_category(cat).len();
-            assert!(
-                count > 0,
-                "category {:?} has no emoji",
-                cat
-            );
+            assert!(count > 0, "category {:?} has no emoji", cat);
         }
     }
 
@@ -1163,7 +1538,10 @@ mod tests {
         let db = EmojiDatabase::new();
         // "happy" is a keyword for grinning face
         let results = db.search("happy");
-        assert!(!results.is_empty(), "'happy' keyword search should return results");
+        assert!(
+            !results.is_empty(),
+            "'happy' keyword search should return results"
+        );
     }
 
     #[test]
@@ -1182,7 +1560,10 @@ mod tests {
     fn search_no_results() {
         let db = EmojiDatabase::new();
         let results = db.search("xyznonexistent");
-        assert!(results.is_empty(), "nonsense query should return no results");
+        assert!(
+            results.is_empty(),
+            "nonsense query should return no results"
+        );
     }
 
     #[test]
@@ -1290,7 +1671,10 @@ mod tests {
         let mut db = EmojiDatabase::new();
         db.record_use("NOT_IN_DB");
         let recent = db.recent_entries();
-        assert!(recent.is_empty(), "unknown emoji should not appear in recent_entries");
+        assert!(
+            recent.is_empty(),
+            "unknown emoji should not appear in recent_entries"
+        );
     }
 
     #[test]
@@ -1381,10 +1765,7 @@ mod tests {
     fn render_produces_non_empty_tree() {
         let state = EmojiPickerState::new();
         let tree = render(&state);
-        assert!(
-            !tree.is_empty(),
-            "render should produce commands"
-        );
+        assert!(!tree.is_empty(), "render should produce commands");
     }
 
     #[test]
@@ -1417,7 +1798,7 @@ mod tests {
         let tree = render(&state);
         // The tree should contain a text command with the query.
         let has_query = tree.commands.iter().any(|cmd| {
-            matches!(cmd, RenderCommand::Text { text, .. } if text == "test query")
+            matches!(cmd, guitk::render::RenderCommand::Text { text, .. } if text == "test query")
         });
         assert!(has_query, "render should include the search query text");
     }
@@ -1602,7 +1983,11 @@ mod tests {
 
     #[test]
     fn tab_icons_are_non_empty() {
-        let tabs = [Tab::Recent, Tab::Search, Tab::Category(EmojiCategory::Flags)];
+        let tabs = [
+            Tab::Recent,
+            Tab::Search,
+            Tab::Category(EmojiCategory::Flags),
+        ];
         for tab in &tabs {
             assert!(!tab.icon().is_empty());
         }

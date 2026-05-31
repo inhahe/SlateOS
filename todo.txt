@@ -1,3 +1,11 @@
+## BUG (noticed+FIXED 2026-05-31): apps/emojipicker test build did not compile.
+##   render_with_search_text_shows_query referenced a bare `RenderCommand` type that
+##   was never imported (production code uses the fully-qualified
+##   `guitk::render::RenderCommand` everywhere), so `cargo test -p emojipicker` failed
+##   with E0433. Qualified the path in the test. Also applied clippy --fix auto-fixes
+##   (collapsible ifs, manual div_ceil → div_ceil). emojipicker 48/48 tests pass,
+##   clippy clean, ouros build OK.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/diskanalyzer tree view never expanded the
 ##   root after a scan. flatten_node() only recursed into a node when
 ##   expanded_paths.contains(&node.path), but a fresh scan leaves expanded_paths

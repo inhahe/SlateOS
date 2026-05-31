@@ -567,20 +567,26 @@
 ##   sys_dns_resolve writes [a,b,c,d]; sys_tcp_connect's Ipv4Addr::from_u32 ==
 ##   to_be_bytes, so reassemble with u32::from_be_bytes.
 ##
-##  BUG — jq filter logic (PRE-EXISTING, unrelated to the ABI fix):
-##   userspace/jq/src/main.rs has two failing tests that are genuine
-##   interpreter bugs, not I/O:
-##     * test_object_construct: `{a: .x, b: .y}` over {"x":1,"y":2} does not
-##       produce {a:1,b:2} (object-construction filter maps keys/values wrong).
-##       Note the test only asserts inside `if let Value::Object(map) = v`, so
-##       the failure means it IS an object but with wrong contents.
-##     * test_recurse: `.. | numbers` over {"a":1,"b":{"c":2}} does not yield
-##       both 1 and 2 — recursive-descent `..` doesn't traverse nested objects
-##       correctly.
-##   FIX: debug jq's object-construction eval and the `..` recursive-descent
-##   operator.  Both are in the filter evaluator, independent of the syscall
-##   layer.  Deferred (out of scope for the ABI pass); logged per the
-##   "document all bugs you notice" rule.
+##  BUG — jq filter logic (PRE-EXISTING, unrelated to the ABI fix): RESOLVED 2026-05-31.
+##   userspace/jq/src/main.rs had two failing tests.  The earlier diagnosis in
+##   this note was wrong on both counts; the real root causes were:
+##     * test_object_construct: a PARSE bug, not an eval bug.  Object-entry
+##       values were parsed with parse_pipe(), which includes the comma
+##       operator, so `{a: .x, b: .y}` was read as a single entry `a` whose
+##       value is the comma expression `.x, b` — then the parser hit `:` and
+##       errored with "expected '}'".  FIX: added parse_obj_value(), a `|`
+##       pipe chain whose operands are parse_or() (stops before a top-level
+##       comma), and used it for object-construction values.
+##     * test_recurse: `.. | numbers` failed because the `numbers` builtin was
+##       simply unimplemented ("filter not implemented: FuncCall(numbers,[])").
+##       `..` recursive-descent (recurse_into) was already correct.  FIX: added
+##       a TypeClass enum + Filter::TypeSelect and wired up the type-selection
+##       builtins numbers/strings/booleans/arrays/objects/nulls/iterables/
+##       scalars (each keeps only inputs of its class).  ("values" was left as
+##       the pre-existing non-standard object/array-values filter.)
+##   Both fixed; jq now 69/69 tests pass, clippy-clean on host + ouros, builds
+##   for the ouros target.  Also cleaned up 12 pre-existing clippy warnings
+##   (map_or->is_some_and, one collapsible_if).
 
 "The dlltool issue blocks host tests on this toolchain (known limitation per CLAUDE.md). Let me confirm the code at least type-checks against the custom target, then cross-compile." what is this dlltool issue?
 

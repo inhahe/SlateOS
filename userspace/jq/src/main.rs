@@ -245,20 +245,20 @@ impl<'a> Parser<'a> {
         if self.peek() == Some(b'0') {
             self.pos += 1;
         } else {
-            if !self.peek().map_or(false, |b| b.is_ascii_digit()) {
+            if !self.peek().is_some_and(|b| b.is_ascii_digit()) {
                 return Err("invalid number".into());
             }
-            while self.peek().map_or(false, |b| b.is_ascii_digit()) {
+            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
                 self.pos += 1;
             }
         }
         // Fractional part
         if self.peek() == Some(b'.') {
             self.pos += 1;
-            if !self.peek().map_or(false, |b| b.is_ascii_digit()) {
+            if !self.peek().is_some_and(|b| b.is_ascii_digit()) {
                 return Err("expected digit after decimal point".into());
             }
-            while self.peek().map_or(false, |b| b.is_ascii_digit()) {
+            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
                 self.pos += 1;
             }
         }
@@ -268,10 +268,10 @@ impl<'a> Parser<'a> {
             if self.peek() == Some(b'+') || self.peek() == Some(b'-') {
                 self.pos += 1;
             }
-            if !self.peek().map_or(false, |b| b.is_ascii_digit()) {
+            if !self.peek().is_some_and(|b| b.is_ascii_digit()) {
                 return Err("expected digit in exponent".into());
             }
-            while self.peek().map_or(false, |b| b.is_ascii_digit()) {
+            while self.peek().is_some_and(|b| b.is_ascii_digit()) {
                 self.pos += 1;
             }
         }
@@ -440,6 +440,20 @@ fn format_value(val: &Value, out: &mut String, compact: bool, indent: usize, dep
 // Filter AST
 // ============================================================================
 
+/// Value-type class used by the type-selection builtins (`numbers`, `strings`,
+/// `arrays`, etc.), each of which keeps only inputs matching the class.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TypeClass {
+    Numbers,
+    Strings,
+    Booleans,
+    Arrays,
+    Objects,
+    Nulls,
+    Iterables, // arrays and objects
+    Scalars,   // anything except arrays and objects
+}
+
 #[derive(Clone, Debug)]
 enum Filter {
     Identity,                           // .
@@ -484,6 +498,7 @@ enum Filter {
     ObjConstruct(Vec<(String, Filter)>), // {key: expr, ...}
     ArrConstruct(Box<Filter>),          // [f]
     Recurse,                            // ..
+    TypeSelect(TypeClass),              // numbers/strings/booleans/arrays/objects/nulls/values/iterables/scalars
     Env,                                // env
     Null,                               // null literal filter
     Input,                              // input
@@ -753,6 +768,19 @@ impl<'a> FilterParser<'a> {
         Ok(left)
     }
 
+    /// Parse an object-construction value: a `|` pipe chain whose operands stop
+    /// before a top-level `,` (which separates object entries) so that
+    /// `{a: .x, b: .y}` is read as two entries rather than one comma expression.
+    fn parse_obj_value(&mut self) -> Result<Filter, String> {
+        let mut left = self.parse_or()?;
+        while matches!(self.peek(), Some(Token::Pipe)) {
+            self.advance();
+            let right = self.parse_or()?;
+            left = Filter::Pipe(Box::new(left), Box::new(right));
+        }
+        Ok(left)
+    }
+
     fn parse_or(&mut self) -> Result<Filter, String> {
         let mut left = self.parse_and()?;
         while matches!(self.peek(), Some(Token::Or)) {
@@ -964,7 +992,7 @@ impl<'a> FilterParser<'a> {
                         };
                         if matches!(self.peek(), Some(Token::Colon)) {
                             self.advance();
-                            let val = self.parse_pipe()?;
+                            let val = self.parse_obj_value()?;
                             fields.push((key, val));
                         } else {
                             // Shorthand: {name} means {name: .name}
@@ -1064,6 +1092,14 @@ impl<'a> FilterParser<'a> {
             "input" => Ok(Filter::Input),
             "debug" => Ok(Filter::Debug),
             "paths" | "leaf_paths" => Ok(Filter::Paths),
+            "numbers" => Ok(Filter::TypeSelect(TypeClass::Numbers)),
+            "strings" => Ok(Filter::TypeSelect(TypeClass::Strings)),
+            "booleans" => Ok(Filter::TypeSelect(TypeClass::Booleans)),
+            "arrays" => Ok(Filter::TypeSelect(TypeClass::Arrays)),
+            "objects" => Ok(Filter::TypeSelect(TypeClass::Objects)),
+            "nulls" => Ok(Filter::TypeSelect(TypeClass::Nulls)),
+            "iterables" => Ok(Filter::TypeSelect(TypeClass::Iterables)),
+            "scalars" => Ok(Filter::TypeSelect(TypeClass::Scalars)),
             "nan" => Ok(Filter::Literal(Value::Number(f64::NAN))),
             "infinite" => Ok(Filter::Literal(Value::Number(f64::INFINITY))),
             "isinfinite" => Ok(Filter::FuncCall("isinfinite".into(), vec![])),
@@ -1534,10 +1570,10 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
             let result = match op {
                 CmpOp::Eq => l == r,
                 CmpOp::Ne => l != r,
-                CmpOp::Lt => l.partial_cmp(&r).map_or(false, |o| o == std::cmp::Ordering::Less),
-                CmpOp::Gt => l.partial_cmp(&r).map_or(false, |o| o == std::cmp::Ordering::Greater),
-                CmpOp::Le => l.partial_cmp(&r).map_or(false, |o| o != std::cmp::Ordering::Greater),
-                CmpOp::Ge => l.partial_cmp(&r).map_or(false, |o| o != std::cmp::Ordering::Less),
+                CmpOp::Lt => l.partial_cmp(&r) == Some(std::cmp::Ordering::Less),
+                CmpOp::Gt => l.partial_cmp(&r) == Some(std::cmp::Ordering::Greater),
+                CmpOp::Le => l.partial_cmp(&r).is_some_and(|o| o != std::cmp::Ordering::Greater),
+                CmpOp::Ge => l.partial_cmp(&r).is_some_and(|o| o != std::cmp::Ordering::Less),
             };
             Ok(vec![Value::Bool(result)])
         }
@@ -1625,6 +1661,19 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
             let mut results = Vec::new();
             recurse_into(input, &mut results);
             Ok(results)
+        }
+        Filter::TypeSelect(class) => {
+            let keep = match class {
+                TypeClass::Numbers => matches!(input, Value::Number(_)),
+                TypeClass::Strings => matches!(input, Value::String(_)),
+                TypeClass::Booleans => matches!(input, Value::Bool(_)),
+                TypeClass::Arrays => matches!(input, Value::Array(_)),
+                TypeClass::Objects => matches!(input, Value::Object(_)),
+                TypeClass::Nulls => matches!(input, Value::Null),
+                TypeClass::Iterables => matches!(input, Value::Array(_) | Value::Object(_)),
+                TypeClass::Scalars => !matches!(input, Value::Array(_) | Value::Object(_)),
+            };
+            if keep { Ok(vec![input.clone()]) } else { Ok(vec![]) }
         }
         Filter::AsciiDown => {
             match input {
@@ -1728,11 +1777,10 @@ fn eval(filter: &Filter, input: &Value) -> Result<Vec<Value>, String> {
                 Value::Array(arr) => {
                     let mut best = &arr[0];
                     for item in &arr[1..] {
-                        if let Some(ord) = item.partial_cmp(best) {
-                            if (*is_max && ord == std::cmp::Ordering::Greater) || (!*is_max && ord == std::cmp::Ordering::Less) {
+                        if let Some(ord) = item.partial_cmp(best)
+                            && ((*is_max && ord == std::cmp::Ordering::Greater) || (!*is_max && ord == std::cmp::Ordering::Less)) {
                                 best = item;
                             }
-                        }
                     }
                     Ok(vec![best.clone()])
                 }
@@ -1868,7 +1916,7 @@ fn value_contains(haystack: &Value, needle: &Value) -> bool {
             n.iter().all(|needle_item| h.iter().any(|h_item| value_contains(h_item, needle_item)))
         }
         (Value::Object(h), Value::Object(n)) => {
-            n.iter().all(|(k, nv)| h.get(k).map_or(false, |hv| value_contains(hv, nv)))
+            n.iter().all(|(k, nv)| h.get(k).is_some_and(|hv| value_contains(hv, nv)))
         }
         (a, b) => a == b,
     }

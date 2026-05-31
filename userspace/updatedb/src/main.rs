@@ -25,19 +25,55 @@ const DEFAULT_DB_PATH: &str = "/var/lib/mlocate/mlocate.db";
 const DEFAULT_CONFIG_PATH: &str = "/etc/updatedb.conf";
 
 const DEFAULT_PRUNEPATHS: &[&str] = &[
-    "/proc", "/sys", "/dev", "/tmp", "/run", "/mnt", "/media",
-    "/lost+found", "/var/tmp", "/snap",
+    "/proc",
+    "/sys",
+    "/dev",
+    "/tmp",
+    "/run",
+    "/mnt",
+    "/media",
+    "/lost+found",
+    "/var/tmp",
+    "/snap",
 ];
 
 const DEFAULT_PRUNEFS: &[&str] = &[
-    "9p", "afs", "autofs", "binfmt_misc", "cgroup", "cgroup2",
-    "configfs", "debugfs", "devpts", "devtmpfs", "fuse.sshfs",
-    "fusectl", "hugetlbfs", "mqueue", "nfs", "nfs4", "overlay",
-    "proc", "pstore", "rpc_pipefs", "securityfs", "sysfs",
-    "tmpfs", "tracefs", "usbfs",
+    "9p",
+    "afs",
+    "autofs",
+    "binfmt_misc",
+    "cgroup",
+    "cgroup2",
+    "configfs",
+    "debugfs",
+    "devpts",
+    "devtmpfs",
+    "fuse.sshfs",
+    "fusectl",
+    "hugetlbfs",
+    "mqueue",
+    "nfs",
+    "nfs4",
+    "overlay",
+    "proc",
+    "pstore",
+    "rpc_pipefs",
+    "securityfs",
+    "sysfs",
+    "tmpfs",
+    "tracefs",
+    "usbfs",
 ];
 
-const DEFAULT_PRUNENAMES: &[&str] = &[".git", ".svn", ".hg", ".bzr", "CVS", "__pycache__", "node_modules"];
+const DEFAULT_PRUNENAMES: &[&str] = &[
+    ".git",
+    ".svn",
+    ".hg",
+    ".bzr",
+    "CVS",
+    "__pycache__",
+    "node_modules",
+];
 
 // ---------------------------------------------------------------------------
 // Mode detection
@@ -50,7 +86,7 @@ enum Mode {
 }
 
 fn detect_mode(argv0: &str) -> Mode {
-    let name = argv0.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     let lower = name.to_ascii_lowercase();
     if lower.contains("updatedb") {
@@ -61,7 +97,7 @@ fn detect_mode(argv0: &str) -> Mode {
 }
 
 fn detect_program_name(argv0: &str) -> &str {
-    let name = argv0.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
     if name.is_empty() { "locate" } else { name }
 }
@@ -121,12 +157,9 @@ impl DbHeader {
             return Err(format!("unsupported database version: {version}"));
         }
         let timestamp = u64::from_le_bytes([
-            data[9], data[10], data[11], data[12],
-            data[13], data[14], data[15], data[16],
+            data[9], data[10], data[11], data[12], data[13], data[14], data[15], data[16],
         ]);
-        let root_path_len = u32::from_le_bytes([
-            data[17], data[18], data[19], data[20],
-        ]) as usize;
+        let root_path_len = u32::from_le_bytes([data[17], data[18], data[19], data[20]]) as usize;
         if data.len() < 21 + root_path_len + 16 {
             return Err("database header truncated".to_string());
         }
@@ -134,12 +167,24 @@ impl DbHeader {
             .map_err(|e| format!("invalid root path: {e}"))?;
         let off = 21 + root_path_len;
         let entry_count = u64::from_le_bytes([
-            data[off], data[off + 1], data[off + 2], data[off + 3],
-            data[off + 4], data[off + 5], data[off + 6], data[off + 7],
+            data[off],
+            data[off + 1],
+            data[off + 2],
+            data[off + 3],
+            data[off + 4],
+            data[off + 5],
+            data[off + 6],
+            data[off + 7],
         ]);
         let total_size = u64::from_le_bytes([
-            data[off + 8], data[off + 9], data[off + 10], data[off + 11],
-            data[off + 12], data[off + 13], data[off + 14], data[off + 15],
+            data[off + 8],
+            data[off + 9],
+            data[off + 10],
+            data[off + 11],
+            data[off + 12],
+            data[off + 13],
+            data[off + 14],
+            data[off + 15],
         ]);
         let header = Self {
             magic,
@@ -185,7 +230,13 @@ impl DbEntry {
         }
         let suffix = String::from_utf8(data[4..4 + suffix_len].to_vec())
             .map_err(|e| format!("invalid entry suffix: {e}"))?;
-        Ok((Self { shared_prefix_len, suffix }, 4 + suffix_len))
+        Ok((
+            Self {
+                shared_prefix_len,
+                suffix,
+            },
+            4 + suffix_len,
+        ))
     }
 }
 
@@ -320,10 +371,7 @@ fn parse_config_line(line: &str) -> Option<(String, Vec<String>)> {
     // Strip surrounding quotes if present.
     let val_part = val_part.strip_prefix('"').unwrap_or(val_part);
     let val_part = val_part.strip_suffix('"').unwrap_or(val_part);
-    let values: Vec<String> = val_part
-        .split_whitespace()
-        .map(|s| s.to_string())
-        .collect();
+    let values: Vec<String> = val_part.split_whitespace().map(|s| s.to_string()).collect();
     Some((key, values))
 }
 
@@ -613,10 +661,10 @@ fn regex_match_anchored(pattern: &str, text: &str) -> bool {
             }
         } else if end_anchored {
             for start in 0..=text_bytes.len() {
-                if let Some(end) = regex_core(alt, text_bytes, start) {
-                    if end == text_bytes.len() {
-                        return true;
-                    }
+                if let Some(end) = regex_core(alt, text_bytes, start)
+                    && end == text_bytes.len()
+                {
+                    return true;
                 }
             }
         } else {
@@ -631,16 +679,16 @@ fn regex_match_anchored(pattern: &str, text: &str) -> bool {
 }
 
 fn parse_anchors(pat: &[u8]) -> (bool, bool, &[u8]) {
-    let start = if !pat.is_empty() && pat[0] == b'^' { true } else { false };
-    let end = if !pat.is_empty() && pat[pat.len() - 1] == b'$'
-        && (pat.len() < 2 || pat[pat.len() - 2] != b'\\')
-    {
-        true
-    } else {
-        false
-    };
+    let start = !pat.is_empty() && pat[0] == b'^';
+    let end = !pat.is_empty()
+        && pat[pat.len() - 1] == b'$'
+        && (pat.len() < 2 || pat[pat.len() - 2] != b'\\');
     let from = if start { 1 } else { 0 };
-    let to = if end { pat.len().saturating_sub(1) } else { pat.len() };
+    let to = if end {
+        pat.len().saturating_sub(1)
+    } else {
+        pat.len()
+    };
     let inner = if from <= to { &pat[from..to] } else { &[] };
     (start, end, inner)
 }
@@ -652,12 +700,17 @@ fn split_alternatives(pat: &[u8]) -> Vec<&[u8]> {
     let mut i = 0;
     while i < pat.len() {
         match pat[i] {
-            b'\\' => { i += 2; continue; }
+            b'\\' => {
+                i += 2;
+                continue;
+            }
             b'[' => {
                 // Skip bracket expression.
                 i += 1;
                 while i < pat.len() && pat[i] != b']' {
-                    if pat[i] == b'\\' { i += 1; }
+                    if pat[i] == b'\\' {
+                        i += 1;
+                    }
                     i += 1;
                 }
             }
@@ -698,7 +751,10 @@ fn regex_core(pattern: &[u8], text: &[u8], pos: usize) -> Option<usize> {
             // Greedy matching.
             let mut count = 0;
             let save_ti = ti;
-            while count < max && ti < text.len() && matches_atom(atom_ch, is_class, pattern, pi, text[ti]) {
+            while count < max
+                && ti < text.len()
+                && matches_atom(atom_ch, is_class, pattern, pi, text[ti])
+            {
                 ti += 1;
                 count += 1;
             }
@@ -737,9 +793,7 @@ fn parse_atom(pattern: &[u8], pi: usize) -> Option<(usize, u8, bool)> {
         return None;
     }
     match pattern[pi] {
-        b'\\' if pi + 1 < pattern.len() => {
-            Some((pi + 2, pattern[pi + 1], false))
-        }
+        b'\\' if pi + 1 < pattern.len() => Some((pi + 2, pattern[pi + 1], false)),
         b'.' => Some((pi + 1, b'.', true)),
         b'[' => {
             // Find closing bracket.
@@ -808,7 +862,10 @@ fn path_matches(path: &str, pattern: &str, config: &LocateConfig) -> bool {
 
 /// Check if all patterns match a path (AND logic).
 fn all_patterns_match(path: &str, config: &LocateConfig) -> bool {
-    config.patterns.iter().all(|p| path_matches(path, p, config))
+    config
+        .patterns
+        .iter()
+        .all(|p| path_matches(path, p, config))
 }
 
 // ---------------------------------------------------------------------------
@@ -860,7 +917,8 @@ fn parse_updatedb_args(args: &[String]) -> Result<UpdateDbConfig, String> {
                 if i >= args.len() {
                     return Err("--add-prunepaths requires an argument".to_string());
                 }
-                let extras: Vec<String> = args[i].split_whitespace().map(|s| s.to_string()).collect();
+                let extras: Vec<String> =
+                    args[i].split_whitespace().map(|s| s.to_string()).collect();
                 config.prunepaths.extend(extras);
             }
             "--add-prunefs" => {
@@ -868,7 +926,8 @@ fn parse_updatedb_args(args: &[String]) -> Result<UpdateDbConfig, String> {
                 if i >= args.len() {
                     return Err("--add-prunefs requires an argument".to_string());
                 }
-                let extras: Vec<String> = args[i].split_whitespace().map(|s| s.to_string()).collect();
+                let extras: Vec<String> =
+                    args[i].split_whitespace().map(|s| s.to_string()).collect();
                 config.prunefs.extend(extras);
             }
             "-l" | "--require-visibility" => {
@@ -923,7 +982,8 @@ fn parse_locate_args(args: &[String]) -> Result<LocateConfig, String> {
                 if i >= args.len() {
                     return Err(format!("{} requires a number", args[i - 1]));
                 }
-                let n: usize = args[i].parse()
+                let n: usize = args[i]
+                    .parse()
                     .map_err(|_| format!("invalid number: {}", args[i]))?;
                 config.limit = Some(n);
             }
@@ -980,38 +1040,86 @@ fn print_updatedb_help(out: &mut dyn Write) {
     let _ = writeln!(out, "Usage: updatedb [OPTION]...");
     let _ = writeln!(out, "Update a file name database.");
     let _ = writeln!(out);
-    let _ = writeln!(out, "  -o, --output DB          database file to build (default: {DEFAULT_DB_PATH})");
-    let _ = writeln!(out, "  -U, --database-root PATH starting point for scanning (default: /)");
-    let _ = writeln!(out, "      --prunepaths PATHS   space-separated paths to skip");
-    let _ = writeln!(out, "      --prunefs FS         space-separated filesystem types to skip");
-    let _ = writeln!(out, "      --prunenames NAMES   space-separated dir name patterns to skip");
+    let _ = writeln!(
+        out,
+        "  -o, --output DB          database file to build (default: {DEFAULT_DB_PATH})"
+    );
+    let _ = writeln!(
+        out,
+        "  -U, --database-root PATH starting point for scanning (default: /)"
+    );
+    let _ = writeln!(
+        out,
+        "      --prunepaths PATHS   space-separated paths to skip"
+    );
+    let _ = writeln!(
+        out,
+        "      --prunefs FS         space-separated filesystem types to skip"
+    );
+    let _ = writeln!(
+        out,
+        "      --prunenames NAMES   space-separated dir name patterns to skip"
+    );
     let _ = writeln!(out, "      --add-prunepaths P   add to existing prunepaths");
     let _ = writeln!(out, "      --add-prunefs FS     add to existing prunefs");
-    let _ = writeln!(out, "  -l, --require-visibility 0|1  check visibility (default: 1)");
+    let _ = writeln!(
+        out,
+        "  -l, --require-visibility 0|1  check visibility (default: 1)"
+    );
     let _ = writeln!(out, "  -v, --verbose            show scanned files");
     let _ = writeln!(out, "      --debug-pruning      show pruning decisions");
     let _ = writeln!(out, "  -h, --help               display this help and exit");
-    let _ = writeln!(out, "      --version            output version information and exit");
+    let _ = writeln!(
+        out,
+        "      --version            output version information and exit"
+    );
 }
 
 fn print_locate_help(out: &mut dyn Write, prog: &str) {
     let _ = writeln!(out, "Usage: {prog} [OPTION]... PATTERN...");
     let _ = writeln!(out, "Search for entries in a file name database.");
     let _ = writeln!(out);
-    let _ = writeln!(out, "  -b, --basename           match only the base name of path names");
-    let _ = writeln!(out, "  -c, --count              only print number of found entries");
-    let _ = writeln!(out, "  -d, --database DBPATH    use DBPATH instead of default database");
-    let _ = writeln!(out, "  -e, --existing           only print entries for currently existing files");
-    let _ = writeln!(out, "  -L, --follow             follow trailing symbolic links when checking existence");
-    let _ = writeln!(out, "  -g                       interpret PATTERN as a glob pattern");
+    let _ = writeln!(
+        out,
+        "  -b, --basename           match only the base name of path names"
+    );
+    let _ = writeln!(
+        out,
+        "  -c, --count              only print number of found entries"
+    );
+    let _ = writeln!(
+        out,
+        "  -d, --database DBPATH    use DBPATH instead of default database"
+    );
+    let _ = writeln!(
+        out,
+        "  -e, --existing           only print entries for currently existing files"
+    );
+    let _ = writeln!(
+        out,
+        "  -L, --follow             follow trailing symbolic links when checking existence"
+    );
+    let _ = writeln!(
+        out,
+        "  -g                       interpret PATTERN as a glob pattern"
+    );
     let _ = writeln!(out, "  -i, --ignore-case        ignore case distinctions");
     let _ = writeln!(out, "  -l, --limit, -n N        limit output to N entries");
-    let _ = writeln!(out, "  -r, --regex              interpret PATTERN as an extended regex");
+    let _ = writeln!(
+        out,
+        "  -r, --regex              interpret PATTERN as an extended regex"
+    );
     let _ = writeln!(out, "  -w, --wholename          match whole path (default)");
     let _ = writeln!(out, "  -0, --null               separate entries with NUL");
-    let _ = writeln!(out, "  -S, --statistics         display database statistics");
+    let _ = writeln!(
+        out,
+        "  -S, --statistics         display database statistics"
+    );
     let _ = writeln!(out, "  -h, --help               display this help and exit");
-    let _ = writeln!(out, "      --version            output version information and exit");
+    let _ = writeln!(
+        out,
+        "      --version            output version information and exit"
+    );
 }
 
 fn print_version(out: &mut dyn Write, prog: &str) {
@@ -1076,7 +1184,12 @@ fn run_updatedb(args: &[String]) -> i32 {
             if config.verbose {
                 let stderr = io::stderr();
                 let mut handle = stderr.lock();
-                let _ = writeln!(handle, "updatedb: wrote {} entries to {}", paths.len(), config.output);
+                let _ = writeln!(
+                    handle,
+                    "updatedb: wrote {} entries to {}",
+                    paths.len(),
+                    config.output
+                );
             }
             0
         }
@@ -1132,7 +1245,11 @@ fn run_locate(args: &[String], prog_name: &str) -> i32 {
         Err(e) => {
             let stderr = io::stderr();
             let mut err = stderr.lock();
-            let _ = writeln!(err, "{prog_name}: invalid database `{}': {e}", config.database);
+            let _ = writeln!(
+                err,
+                "{prog_name}: invalid database `{}': {e}",
+                config.database
+            );
             return 1;
         }
     };
@@ -1163,10 +1280,10 @@ fn run_locate(args: &[String], prog_name: &str) -> i32 {
     let terminator = if config.null_terminated { "\0" } else { "\n" };
 
     for path in &paths {
-        if let Some(limit) = config.limit {
-            if count as usize >= limit {
-                break;
-            }
+        if let Some(limit) = config.limit
+            && count as usize >= limit
+        {
+            break;
         }
 
         if !all_patterns_match(path, &config) {
@@ -1303,10 +1420,7 @@ mod tests {
 
     #[test]
     fn test_encode_paths_shared_prefix() {
-        let paths = vec![
-            "/usr/bin/cat".to_string(),
-            "/usr/bin/ls".to_string(),
-        ];
+        let paths = vec!["/usr/bin/cat".to_string(), "/usr/bin/ls".to_string()];
         let entries = encode_paths(&paths);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].shared_prefix_len, 0);
@@ -1332,11 +1446,7 @@ mod tests {
 
     #[test]
     fn test_encode_decode_no_shared_prefix() {
-        let paths = vec![
-            "/aaa".to_string(),
-            "/bbb".to_string(),
-            "/ccc".to_string(),
-        ];
+        let paths = vec!["/aaa".to_string(), "/bbb".to_string(), "/ccc".to_string()];
         let entries = encode_paths(&paths);
         // First entry compares against "", so shared_prefix_len is 0.
         assert_eq!(entries[0].shared_prefix_len, 0);
@@ -2029,7 +2139,11 @@ PRUNENAMES = \".git .hg\"
 
     #[test]
     fn test_parse_locate_args_database() {
-        let args = vec!["-d".to_string(), "/tmp/my.db".to_string(), "pat".to_string()];
+        let args = vec![
+            "-d".to_string(),
+            "/tmp/my.db".to_string(),
+            "pat".to_string(),
+        ];
         let config = parse_locate_args(&args).unwrap();
         assert_eq!(config.database, "/tmp/my.db");
     }
@@ -2104,7 +2218,8 @@ PRUNENAMES = \".git .hg\"
             patterns: vec!["bin".to_string()],
             ..LocateConfig::default()
         };
-        let results: Vec<&String> = decoded.iter()
+        let results: Vec<&String> = decoded
+            .iter()
             .filter(|p| all_patterns_match(p, &config))
             .collect();
         assert_eq!(results.len(), 4);
@@ -2115,7 +2230,8 @@ PRUNENAMES = \".git .hg\"
             patterns: vec!["host".to_string()],
             ..LocateConfig::default()
         };
-        let results: Vec<&String> = decoded.iter()
+        let results: Vec<&String> = decoded
+            .iter()
             .filter(|p| all_patterns_match(p, &config))
             .collect();
         assert_eq!(results.len(), 2);
@@ -2137,7 +2253,8 @@ PRUNENAMES = \".git .hg\"
             patterns: vec!["*.txt".to_string()],
             ..LocateConfig::default()
         };
-        let results: Vec<&String> = decoded.iter()
+        let results: Vec<&String> = decoded
+            .iter()
             .filter(|p| all_patterns_match(p, &config))
             .collect();
         assert_eq!(results.len(), 3);
@@ -2159,7 +2276,8 @@ PRUNENAMES = \".git .hg\"
             patterns: vec![r"\.rs$".to_string()],
             ..LocateConfig::default()
         };
-        let results: Vec<&String> = decoded.iter()
+        let results: Vec<&String> = decoded
+            .iter()
             .filter(|p| all_patterns_match(p, &config))
             .collect();
         assert_eq!(results.len(), 2);
@@ -2181,7 +2299,8 @@ PRUNENAMES = \".git .hg\"
             patterns: vec!["readme".to_string()],
             ..LocateConfig::default()
         };
-        let results: Vec<&String> = decoded.iter()
+        let results: Vec<&String> = decoded
+            .iter()
             .filter(|p| all_patterns_match(p, &config))
             .collect();
         assert_eq!(results.len(), 2);
@@ -2203,7 +2322,8 @@ PRUNENAMES = \".git .hg\"
             patterns: vec!["cat".to_string()],
             ..LocateConfig::default()
         };
-        let results: Vec<&String> = decoded.iter()
+        let results: Vec<&String> = decoded
+            .iter()
             .filter(|p| all_patterns_match(p, &config))
             .collect();
         // "cat" and "cat.txt" match in basename; "data" does not.
@@ -2212,9 +2332,7 @@ PRUNENAMES = \".git .hg\"
 
     #[test]
     fn test_database_search_limit() {
-        let paths: Vec<String> = (0..100)
-            .map(|i| format!("/data/file{i:04}.txt"))
-            .collect();
+        let paths: Vec<String> = (0..100).map(|i| format!("/data/file{i:04}.txt")).collect();
         let config = LocateConfig {
             match_mode: MatchMode::Substring,
             patterns: vec!["file".to_string()],
@@ -2246,7 +2364,8 @@ PRUNENAMES = \".git .hg\"
             patterns: vec!["python3".to_string(), "bin".to_string()],
             ..LocateConfig::default()
         };
-        let results: Vec<&String> = paths.iter()
+        let results: Vec<&String> = paths
+            .iter()
             .filter(|p| all_patterns_match(p, &config))
             .collect();
         assert_eq!(results.len(), 1);
@@ -2261,7 +2380,8 @@ PRUNENAMES = \".git .hg\"
             patterns: vec!["nonexistent".to_string()],
             ..LocateConfig::default()
         };
-        let results: Vec<&String> = paths.iter()
+        let results: Vec<&String> = paths
+            .iter()
             .filter(|p| all_patterns_match(p, &config))
             .collect();
         assert!(results.is_empty());
@@ -2339,11 +2459,7 @@ PRUNENAMES = \".git .hg\"
 
     #[test]
     fn test_serialize_database_preserves_order() {
-        let paths = vec![
-            "/a".to_string(),
-            "/b".to_string(),
-            "/c".to_string(),
-        ];
+        let paths = vec!["/a".to_string(), "/b".to_string(), "/c".to_string()];
         let db = serialize_database("/", &paths);
         let (_, decoded) = deserialize_database(&db).unwrap();
         assert_eq!(decoded, paths);
@@ -2388,7 +2504,8 @@ PRUNENAMES = \".git\"
 
     #[test]
     fn test_locate_database_long_form() {
-        let config = parse_locate_args(&["--database".into(), "/x.db".into(), "pat".into()]).unwrap();
+        let config =
+            parse_locate_args(&["--database".into(), "/x.db".into(), "pat".into()]).unwrap();
         assert_eq!(config.database, "/x.db");
     }
 

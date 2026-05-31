@@ -1,3 +1,17 @@
+## BUG (noticed+FIXED 2026-05-31): updatedb `cargo test` could not launch its
+##   test harness (same root cause as dmsetup) + 6 pre-existing clippy errors.
+##   userspace/updatedb/:
+##     * TEST HARNESS WOULDN'T LAUNCH: os error 740 "requires elevation".
+##       Windows installer-detection forces UAC on exes whose name contains an
+##       installer keyword — "update" matches "updatedb". Added a build.rs that
+##       embeds an asInvoker manifest via the pure-Rust embed-manifest crate
+##       (same fix as dmsetup). 132/132 tests pass; ouros unaffected.
+##     * 6 clippy errors (manual char comparison x2, collapsible-if x2,
+##       needless-bool x2) auto-fixed.
+##   NOTE: any future tool whose binary name contains setup/install/update/patch
+##   will hit the same heuristic and needs the same build.rs.
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): apparmor had 4 failing tests (two real
 ##   profile-parsing bugs) + 11 pre-existing clippy errors.
 ##   userspace/apparmor/src/main.rs:

@@ -56,11 +56,14 @@ const SPOOL_DIR: &str = "/var/spool/at";
 /// Default queue letter.
 const DEFAULT_QUEUE: char = 'a';
 
-/// Syscall number for clock_gettime on OurOS.
-const SYS_CLOCK_GETTIME: u64 = 40;
+/// Native OurOS wall-clock syscall (kernel syscall/number.rs); no-arg,
+/// returns nanoseconds-since-epoch in rax.  The kernel has no combined
+/// clock_gettime(clock_id, *ts) form.  (Syscall 40 is SYS_PORT_READ; the old
+/// SYS_CLOCK_GETTIME=40 was wrong.)
+const SYS_CLOCK_REALTIME: u64 = 14;
 
-/// Realtime clock ID.
-const CLOCK_REALTIME: u64 = 0;
+/// Nanoseconds per second, to convert the kernel's ns clock value to seconds.
+const NSEC_PER_SEC: i64 = 1_000_000_000;
 
 /// Seconds per day.
 const SECS_PER_DAY: i64 = 86400;
@@ -75,45 +78,36 @@ const SECS_PER_MINUTE: i64 = 60;
 // Timespec / syscall
 // ============================================================================
 
-/// Kernel timespec structure for clock_gettime.
-#[repr(C)]
-struct Timespec {
-    tv_sec: i64,
-    tv_nsec: i64,
-}
-
 /// Read the current wall-clock time.
 ///
-/// Returns epoch seconds on success.
+/// Returns epoch seconds on success.  Uses the native no-argument
+/// `SYS_CLOCK_REALTIME` syscall, which returns nanoseconds-since-epoch in
+/// `rax`.
 fn get_current_time() -> Result<i64, String> {
-    // Try the OurOS syscall first.
-    let mut ts = Timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
     let ret: i64;
 
-    // SAFETY: We pass a valid pointer to a stack-allocated Timespec. The kernel
-    // writes tv_sec and tv_nsec into it. The struct is repr(C) with the layout
-    // the kernel expects.
+    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
+    // userspace; it only reads the kernel clock into rax.  rcx/r11 are
+    // clobbered by the SYSCALL instruction.
     unsafe {
         core::arch::asm!(
             "syscall",
-            in("rax") SYS_CLOCK_GETTIME,
-            in("rdi") CLOCK_REALTIME,
-            in("rsi") &mut ts as *mut Timespec,
+            in("rax") SYS_CLOCK_REALTIME,
             lateout("rax") ret,
             lateout("rcx") _,
             lateout("r11") _,
-            options(nostack),
+            options(nostack, nomem),
         );
     }
 
     if ret >= 0 {
-        return Ok(ts.tv_sec);
+        // `ret` is nanoseconds since the epoch; return whole seconds.
+        return Ok(ret / NSEC_PER_SEC);
     }
 
-    // Fallback: std SystemTime.
+    // Fallback: std SystemTime (currently non-functional on this OS since the
+    // target is linux/musl with no syscall-translation layer, but returns a
+    // clean error rather than panicking).
     match std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH) {
         Ok(dur) => Ok(dur.as_secs() as i64),
         Err(e) => Err(format!("cannot get current time: {e}")),

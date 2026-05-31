@@ -43,7 +43,9 @@ const SYS_TCP_CONNECT: u64 = 800;
 const SYS_TCP_SEND: u64 = 802;
 const SYS_TCP_RECV: u64 = 803;
 const SYS_TCP_CLOSE: u64 = 804;
-const SYS_CLOCK_MONOTONIC: u64 = 30;
+// Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+// boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
+const SYS_CLOCK_MONOTONIC: u64 = 10;
 
 // ============================================================================
 // Syscall interface

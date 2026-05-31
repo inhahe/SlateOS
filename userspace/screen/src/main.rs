@@ -39,7 +39,9 @@ use std::process;
 
 const SYS_CONSOLE_WRITE: u64 = 0;
 const SYS_CONSOLE_READ_CHAR: u64 = 1;
-const SYS_CLOCK_MONOTONIC: u64 = 30;
+// Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+// boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
+const SYS_CLOCK_MONOTONIC: u64 = 10;
 const SYS_PROCESS_SPAWN: u64 = 500;
 
 #[cfg(target_arch = "x86_64")]

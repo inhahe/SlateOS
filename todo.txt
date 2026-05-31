@@ -71,15 +71,35 @@
 ##   Also: add CAP_SYS_TIME enforcement inside sys_clock_settime /
 ##   sys_clock_adjtime.
 ##
-##  STATUS (2026-05-30): documented here in full.  Began the per-tool
-##  correctness fix with `date` (the canonical user-facing tool and the one
-##  that mis-fires port-I/O syscalls): rewired it to the native ABI
-##  (SYS_CLOCK_REALTIME=14 no-arg ns read, SYS_CLOCK_SETTIME=15 single-ns
-##  set).  Remaining tools to migrate: at, nmap (40), stat (228),
-##  dig/rsync/scp/screen/tcpdump (30, monotonic), ntpd + hwclock (/proc/time
-##  -> native settime/adjtime + sub-second precision).  Track until all use
-##  the correct ABI (ideally via the shared crate from option B).
-##  TRIGGER for the shared-crate refactor: next dedicated userspace-ABI pass.
+##  STATUS (2026-05-30): documented here in full and migrated the raw-syscall
+##  callers to the native ABI (all build clean for x86_64-ouros):
+##    * date  — realtime read 40->14 (no-arg ns), set 41->15 (single-ns);
+##              dropped the bogus clock_gettime(clock_id,*ts) form + dead
+##              Timespec.
+##    * at    — realtime read 40->14 (no-arg ns); dead Timespec removed.
+##    * nmap  — RTT timer 40->SYS_CLOCK_MONOTONIC=10 (monotonic is the right
+##              clock for elapsed-time measurement).
+##    * stat  — realtime read 228->14 (dead_code helper, fixed anyway).
+##    * dig, rsync, scp, screen, tcpdump — monotonic 30->10 (one-line const;
+##              they already used the correct no-arg calling convention).
+##  REMAINING (still broken, NOT yet fixed):
+##    * ntpd & hwclock — both read/set the clock through the nonexistent,
+##      read-only /proc/time.  Proper fix: route reads through
+##      SYS_CLOCK_REALTIME=14 and sets through SYS_CLOCK_SETTIME=15 (and use
+##      SYS_CLOCK_ADJTIME=16 for ntpd slew), AND fix ntpd's whole-second
+##      truncation so sub-second corrections actually apply.  This is more
+##      than a constant swap (rewrites read_system_time/write_system_time and
+##      the discipline apply path), so it is split out as its own task.
+##    * Implement /proc/time in procfs as a convenience read-only mirror
+##      (optional) — but the *control* path must be the syscalls, not /proc.
+##  ALSO STILL OPEN: add CAP_SYS_TIME enforcement inside sys_clock_settime /
+##  sys_clock_adjtime (kernel handlers).  And the shared-`oursys`-crate
+##  refactor (option B) to delete the per-tool hardcoded number tables for
+##  good.  NOTE: while fixing stat I also saw it hardcodes SYS_RENAME=41 and
+##  SYS_STATFS=42, and nmap hardcodes SYS_WRITE=1 — these may be wrong too
+##  (41=SYS_PORT_WRITE); a broader userspace-ABI audit beyond clocks is
+##  warranted.  TRIGGER for the shared-crate refactor + ABI audit: next
+##  dedicated userspace-ABI pass.
 
 "The dlltool issue blocks host tests on this toolchain (known limitation per CLAUDE.md). Let me confirm the code at least type-checks against the custom target, then cross-compile." what is this dlltool issue?
 

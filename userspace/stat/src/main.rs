@@ -108,10 +108,13 @@ const SYS_UNLINK: u64 = 10;
 const SYS_RENAME: u64 = 41;
 /// statfs(path, buf) -> 0 or -errno
 const SYS_STATFS: u64 = 42;
-/// clock_gettime(clock_id, timespec) -> 0 or -errno
-/// Kept for future use by get_current_time().
+/// Native OurOS wall-clock syscall (kernel syscall/number.rs); no-arg,
+/// returns nanoseconds-since-epoch in rax.  The kernel has no combined
+/// clock_gettime(clock_id, *ts) form.  Kept for future use by
+/// get_current_time().  (Syscall 228 is SYS_PIPE_POLL; the old
+/// SYS_CLOCK_GETTIME=228 — a Linux number — was wrong.)
 #[allow(dead_code)]
-const SYS_CLOCK_GETTIME: u64 = 228;
+const SYS_CLOCK_REALTIME: u64 = 14;
 
 // ============================================================================
 // Low-level syscall interface
@@ -579,16 +582,17 @@ fn do_utimensat(path: &str, times: &[Timespec; 2]) -> Result<(), String> {
 /// callers that need an explicit timestamp rather than the UTIME_NOW sentinel.
 #[allow(dead_code)]
 fn get_current_time() -> Timespec {
-    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
-    // SAFETY: We pass CLOCK_REALTIME (0) and a valid timespec pointer.
-    unsafe {
-        syscall2(
-            SYS_CLOCK_GETTIME,
-            0, // CLOCK_REALTIME
-            &mut ts as *mut Timespec as u64,
-        );
+    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
+    // userspace; it returns nanoseconds-since-epoch in rax.  The extra zero
+    // args are ignored by the kernel.
+    let ns = unsafe { syscall2(SYS_CLOCK_REALTIME, 0, 0) };
+    if ns < 0 {
+        return Timespec { tv_sec: 0, tv_nsec: 0 };
     }
-    ts
+    Timespec {
+        tv_sec: ns / 1_000_000_000,
+        tv_nsec: ns % 1_000_000_000,
+    }
 }
 
 // ============================================================================

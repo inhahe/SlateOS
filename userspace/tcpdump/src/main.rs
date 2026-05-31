@@ -28,7 +28,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 // Syscall interface
 // ============================================================================
 
-const SYS_CLOCK_MONOTONIC: u64 = 30;
+// Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+// boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
+const SYS_CLOCK_MONOTONIC: u64 = 10;
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {

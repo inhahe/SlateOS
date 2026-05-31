@@ -56,8 +56,11 @@ const SYS_ICMP_RECV: u64 = 831;
 const SYS_DNS_RESOLVE: u64 = 820;
 /// nanosleep-style sleep: arg1=milliseconds.
 const SYS_SLEEP: u64 = 11;
-/// Get clock time: arg1=clock_id(0=REALTIME), arg2=timespec_ptr. Returns 0 or neg.
-const SYS_CLOCK_GETTIME: u64 = 40;
+/// Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+/// boot-relative nanoseconds in rax.  Used only for elapsed-time (RTT)
+/// measurement, so monotonic — not realtime — is the correct clock.
+/// (Syscall 40 is SYS_PORT_READ; the old SYS_CLOCK_GETTIME=40 was wrong.)
+const SYS_CLOCK_MONOTONIC: u64 = 10;
 /// Write to file descriptor: arg1=fd, arg2=buf_ptr, arg3=len. Returns bytes.
 const SYS_WRITE: u64 = 1;
 /// Open file: arg1=path_ptr, arg2=path_len, arg3=flags. Returns fd or neg.
@@ -293,16 +296,13 @@ fn exit(code: i32) -> ! {
     loop {}
 }
 
-// Monotonic wall-clock nanoseconds using SYS_CLOCK_GETTIME (CLOCK_REALTIME=0).
-// We use this only to measure elapsed time, so absolute value doesn't matter.
+// Boot-relative nanoseconds via SYS_CLOCK_MONOTONIC.  Used only to measure
+// elapsed time, so a monotonic (never-stepped) source is exactly right.
 fn clock_nanos() -> u64 {
-    // Layout: u64 tv_sec, u64 tv_nsec (our kernel's timespec is 16 bytes)
-    let mut ts = [0u64; 2];
-    // SAFETY: ts is a live stack array; clock_id = 0 (CLOCK_REALTIME).
-    let _ = unsafe { syscall3(SYS_CLOCK_GETTIME, 0, ts.as_mut_ptr() as u64, 0) };
-    ts[0]
-        .saturating_mul(1_000_000_000)
-        .saturating_add(ts[1])
+    // SAFETY: SYS_CLOCK_MONOTONIC takes no pointer arguments and returns the
+    // nanosecond count directly in rax.
+    let ret = unsafe { syscall3(SYS_CLOCK_MONOTONIC, 0, 0, 0) };
+    if ret < 0 { 0 } else { ret as u64 }
 }
 
 // ============================================================================

@@ -58,8 +58,9 @@ const VERSION: &str = "0.1.0";
 /// Buffer size for file I/O (64 KiB).
 const COPY_BUF_SIZE: usize = 64 * 1024;
 
-/// Syscall number for monotonic clock (returns nanoseconds since boot).
-const SYS_CLOCK_MONOTONIC: u64 = 30;
+/// Native OurOS monotonic clock (kernel syscall/number.rs); no-arg, returns
+/// boot-relative nanoseconds in rax.  (Syscall 30 is SYS_IRQ_REGISTER.)
+const SYS_CLOCK_MONOTONIC: u64 = 10;
 
 // ============================================================================
 // Syscall interface

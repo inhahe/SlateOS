@@ -1,3 +1,19 @@
+## BUG (noticed+FIXED 2026-05-31): install had 2 failing tests AND the same
+##   UAC-elevation test-launch failure. userspace/install/:
+##     * TEST HARNESS WOULDN'T LAUNCH at first: os error 740 — "install" is an
+##       installer keyword. Added build.rs embedding an asInvoker manifest via
+##       embed-manifest (build-dependency). Harness then launched: 27 passed,
+##       2 failed.
+##     * REAL PRODUCTION BUG in parse_symbolic_mode: setuid/setgid/sticky bits
+##       were silently masked out. The code OR'd the special bits into perm_bits
+##       (s -> 0o6000, t -> 0o1000) then computed `effective = perm_bits &
+##       who_mask`, so e.g. "u+s" gave 0o6000 & 0o700 = 0 and "+t" gave
+##       0o1000 & 0o777 = 0 — both special bits vanished. Fixed by tracking
+##       has_setid/has_sticky separately: apply setuid (0o4000) when who
+##       includes owner or no who specified, setgid (0o2000) when who includes
+##       group or no who specified, sticky (0o1000) always. 29/29 tests pass.
+##     * 3 collapsible-if clippy warnings auto-fixed. Clippy-clean host + ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): more installer-keyword crates hit the same
 ##   UAC-elevation test-launch failure (os error 740) as dmsetup/updatedb.
 ##   Swept all userspace crate names for setup/install/update/patch and fixed:

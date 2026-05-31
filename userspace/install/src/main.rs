@@ -83,14 +83,12 @@ fn parse_mode(s: &str) -> Result<u32, String> {
         if stripped.is_empty() {
             return Ok(0);
         }
-        return u32::from_str_radix(stripped, 8)
-            .map_err(|_| format!("invalid mode: '{s}'"));
+        return u32::from_str_radix(stripped, 8).map_err(|_| format!("invalid mode: '{s}'"));
     }
 
     // Try as plain octal digits
     if s.chars().all(|c| c.is_ascii_digit()) {
-        return u32::from_str_radix(s, 8)
-            .map_err(|_| format!("invalid mode: '{s}'"));
+        return u32::from_str_radix(s, 8).map_err(|_| format!("invalid mode: '{s}'"));
     }
 
     // Symbolic mode parsing (simplified: u+rwx,g+rx,o+rx style)
@@ -110,18 +108,34 @@ fn parse_symbolic_mode(s: &str, base: u32) -> Result<u32, String> {
 
         // Parse who: u, g, o, a
         let mut who_mask = 0u32;
+        let mut who_specified = false;
         while let Some(&c) = chars.peek() {
             match c {
-                'u' => { who_mask |= 0o700; chars.next(); }
-                'g' => { who_mask |= 0o070; chars.next(); }
-                'o' => { who_mask |= 0o007; chars.next(); }
-                'a' => { who_mask |= 0o777; chars.next(); }
+                'u' => {
+                    who_mask |= 0o700;
+                    who_specified = true;
+                    chars.next();
+                }
+                'g' => {
+                    who_mask |= 0o070;
+                    who_specified = true;
+                    chars.next();
+                }
+                'o' => {
+                    who_mask |= 0o007;
+                    who_specified = true;
+                    chars.next();
+                }
+                'a' => {
+                    who_mask |= 0o777;
+                    who_specified = true;
+                    chars.next();
+                }
                 _ => break,
             }
         }
-        if who_mask == 0 {
-            who_mask = 0o777; // Default: all
-        }
+        // Default (no who) = all, for the regular rwx bits.
+        let who_mask = if who_mask == 0 { 0o777 } else { who_mask };
 
         // Parse op: +, -, =
         let op = chars.next().ok_or_else(|| format!("invalid mode: '{s}'"))?;
@@ -129,25 +143,47 @@ fn parse_symbolic_mode(s: &str, base: u32) -> Result<u32, String> {
             return Err(format!("invalid mode operator: '{op}'"));
         }
 
-        // Parse perms: r, w, x, s, t, X
+        // Parse perms: r, w, x, X, s, t. The setuid/setgid/sticky bits live
+        // outside the 0o777 rwx range, so they must NOT be masked by who_mask
+        // (which only selects the rwx triads). Track them separately.
         let mut perm_bits = 0u32;
+        let mut has_setid = false;
+        let mut has_sticky = false;
         for c in chars {
             match c {
                 'r' => perm_bits |= 0o444,
                 'w' => perm_bits |= 0o222,
-                'x' => perm_bits |= 0o111,
-                'X' => perm_bits |= 0o111, // Treat X like x for simplicity
-                's' => perm_bits |= 0o6000,
-                't' => perm_bits |= 0o1000,
+                'x' | 'X' => perm_bits |= 0o111, // Treat X like x for simplicity
+                's' => has_setid = true,
+                't' => has_sticky = true,
                 _ => return Err(format!("invalid permission character: '{c}'")),
             }
         }
 
-        let effective = perm_bits & who_mask;
+        // Regular rwx bits restricted to the selected who triads.
+        let mut effective = perm_bits & who_mask;
+
+        // Special bits. `s` means setuid when applied to the owner triad and
+        // setgid when applied to the group triad; with no who (or `a`) it sets
+        // both. `t` is the sticky bit and is independent of who.
+        if has_setid {
+            if !who_specified || who_mask & 0o700 != 0 {
+                effective |= 0o4000; // setuid
+            }
+            if !who_specified || who_mask & 0o070 != 0 {
+                effective |= 0o2000; // setgid
+            }
+        }
+        if has_sticky {
+            effective |= 0o1000;
+        }
+
         match op {
             '+' => result |= effective,
             '-' => result &= !effective,
             '=' => {
+                // Clear the affected rwx triads plus any special bits being set,
+                // then apply.
                 result &= !who_mask;
                 result |= effective;
             }
@@ -356,7 +392,10 @@ fn parse_args() -> Args {
         if positionals.len() < 2 {
             if positionals.len() == 1 && args.create_dirs {
                 // -D with single arg: create parent dirs, then... need a source
-                eprintln!("install: missing destination file operand after '{}'", positionals[0]);
+                eprintln!(
+                    "install: missing destination file operand after '{}'",
+                    positionals[0]
+                );
                 process::exit(1);
             }
             eprintln!("install: missing file operand");
@@ -402,8 +441,8 @@ fn resolve_user(name: &str) -> Result<u32, String> {
         return Ok(uid);
     }
 
-    let content = fs::read_to_string("/etc/passwd")
-        .map_err(|e| format!("cannot read /etc/passwd: {e}"))?;
+    let content =
+        fs::read_to_string("/etc/passwd").map_err(|e| format!("cannot read /etc/passwd: {e}"))?;
     for line in content.lines() {
         if line.starts_with('#') || line.is_empty() {
             continue;
@@ -425,8 +464,8 @@ fn resolve_group(name: &str) -> Result<u32, String> {
         return Ok(gid);
     }
 
-    let content = fs::read_to_string("/etc/group")
-        .map_err(|e| format!("cannot read /etc/group: {e}"))?;
+    let content =
+        fs::read_to_string("/etc/group").map_err(|e| format!("cannot read /etc/group: {e}"))?;
     for line in content.lines() {
         if line.starts_with('#') || line.is_empty() {
             continue;
@@ -564,10 +603,11 @@ fn create_directory_with_parents(path: &Path, mode: u32, verbose: bool) -> Resul
     }
 
     // Create parent directories
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
-            create_directory_with_parents(parent, mode, verbose)?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        create_directory_with_parents(parent, mode, verbose)?;
     }
 
     fs::create_dir(path)
@@ -586,11 +626,7 @@ fn create_directory_with_parents(path: &Path, mode: u32, verbose: bool) -> Resul
 
 // ── Install file ───────────────────────────────────────────────────
 
-fn install_file(
-    src: &Path,
-    dst: &Path,
-    args: &Args,
-) -> Result<(), String> {
+fn install_file(src: &Path, dst: &Path, args: &Args) -> Result<(), String> {
     // Compare mode: skip if files are identical
     if args.compare && files_are_same(src, dst) {
         return Ok(());
@@ -600,19 +636,16 @@ fn install_file(
     if args.backup && dst.exists() {
         let backup_path = format!("{}{}", dst.display(), args.backup_suffix);
         fs::rename(dst, &backup_path)
-            .map_err(|e| format!(
-                "cannot backup '{}' to '{backup_path}': {e}",
-                dst.display()
-            ))?;
+            .map_err(|e| format!("cannot backup '{}' to '{backup_path}': {e}", dst.display()))?;
     }
 
     // Create parent directories if -D
-    if args.create_dirs {
-        if let Some(parent) = dst.parent() {
-            if !parent.as_os_str().is_empty() && !parent.exists() {
-                create_directory_with_parents(parent, DEFAULT_MODE, args.verbose)?;
-            }
-        }
+    if args.create_dirs
+        && let Some(parent) = dst.parent()
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        create_directory_with_parents(parent, DEFAULT_MODE, args.verbose)?;
     }
 
     // Copy the file: read source, write to temp, rename
@@ -628,12 +661,11 @@ fn install_file(
     ));
 
     // Read source
-    let data = fs::read(src)
-        .map_err(|e| format!("cannot read '{}': {e}", src.display()))?;
+    let data = fs::read(src).map_err(|e| format!("cannot read '{}': {e}", src.display()))?;
 
     // Write to temp
-    let mut tmp_file = fs::File::create(&temp_name)
-        .map_err(|e| format!("cannot create temp file: {e}"))?;
+    let mut tmp_file =
+        fs::File::create(&temp_name).map_err(|e| format!("cannot create temp file: {e}"))?;
     tmp_file
         .write_all(&data)
         .map_err(|e| format!("cannot write temp file: {e}"))?;
@@ -762,11 +794,7 @@ fn run() -> Result<(), String> {
             return Err("too many source files for single-file install".to_string());
         }
         let src_path = PathBuf::from(&args.sources[0]);
-        let dst_path = PathBuf::from(
-            args.target
-                .as_deref()
-                .ok_or("missing destination")?,
-        );
+        let dst_path = PathBuf::from(args.target.as_deref().ok_or("missing destination")?);
         install_file(&src_path, &dst_path, &args)?;
     }
 
@@ -968,10 +996,7 @@ mod tests {
 
     #[test]
     fn test_symbolic_mode_multiple_clauses() {
-        assert_eq!(
-            parse_symbolic_mode("u=rwx,g=rx,o=", 0).unwrap(),
-            0o750
-        );
+        assert_eq!(parse_symbolic_mode("u=rwx,g=rx,o=", 0).unwrap(), 0o750);
     }
 
     #[test]

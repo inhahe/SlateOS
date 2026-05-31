@@ -1,3 +1,25 @@
+## BUG (noticed+FIXED 2026-05-31): losetup had a test COMPILE error, a real
+##   parse bug, dead code, and the UAC test-launch failure. userspace/losetup/:
+##     * TEST WOULDN'T COMPILE: test_is_swap_active_nonexistent called
+##       is_swap_active(), which did not exist. Real losetup must not detach a
+##       loop device that backs an active swap area, so this was a genuine
+##       missing safety check, not a stale test. Implemented is_swap_active()
+##       (reads /proc/swaps, matches the first column against the device path)
+##       and wired it into do_detach() to refuse detaching an in-use swap.
+##     * REAL PARSE BUG: parse_size() could not parse the decimal forms that
+##       format_size() itself emits — format_size(1024) -> "1.0K" but
+##       parse_size("1.0K") tried "1.0".parse::<u64>() and returned None
+##       (test_parse_size_roundtrip failed). Fixed: raw byte counts stay exact
+##       integers; suffixed values now accept a fractional part (parse as f64,
+##       scale by multiplier, round), with overflow/finiteness guards.
+##     * DEAD CODE: `list_free` local was declared mut, never assigned, and OR'd
+##       into the list condition (always false). Removed it and the dead clause.
+##     * UAC: test harness "losetup-<hash>.exe" hit os error 740 ("setup"
+##       keyword). Added build.rs embedding an asInvoker manifest via
+##       embed-manifest. 3 pre-existing clippy errors (collapsible-if,
+##       manual_find, write_literal) also fixed. 15/15 tests pass; clippy-clean
+##       host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): install had 2 failing tests AND the same
 ##   UAC-elevation test-launch failure. userspace/install/:
 ##     * TEST HARNESS WOULDN'T LAUNCH at first: os error 740 — "install" is an

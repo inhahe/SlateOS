@@ -23,6 +23,8 @@ const VERSION: &str = "0.1.0";
 const LOOP_CONTROL: &str = "/dev/loop-control";
 const SYS_BLOCK: &str = "/sys/block";
 const MAX_LOOP_DEVICES: u32 = 256;
+/// Kernel-exported table of active swap areas (one per line after the header).
+const PROC_SWAPS: &str = "/proc/swaps";
 
 // ============================================================================
 // Data structures
@@ -151,13 +153,33 @@ fn read_sysfs_bool(path: &str) -> bool {
     read_sysfs_u64(path) != 0
 }
 
+/// Return `true` if `device` is currently in use as an active swap area.
+///
+/// Reads `/proc/swaps`, whose first column is the swap area path. A loop
+/// device backing an active swap must not be detached, so the detach path
+/// consults this before tearing the device down. A missing or unreadable
+/// `/proc/swaps` (e.g. the device path simply isn't listed) means "not
+/// active", which is the safe default for the lookup itself — the detach
+/// will still be attempted and the kernel remains the final arbiter.
+fn is_swap_active(device: &str) -> bool {
+    let Ok(content) = fs::read_to_string(PROC_SWAPS) else {
+        return false;
+    };
+    // Skip the header line; match the first whitespace-delimited field.
+    content
+        .lines()
+        .skip(1)
+        .filter_map(|line| line.split_whitespace().next())
+        .any(|filename| filename == device)
+}
+
 /// Find the first available (unattached) loop device.
 fn find_free_loop() -> Option<u32> {
     // First try the loop-control device.
-    if let Ok(content) = fs::read_to_string(LOOP_CONTROL) {
-        if let Ok(n) = content.trim().parse::<u32>() {
-            return Some(n);
-        }
+    if let Ok(content) = fs::read_to_string(LOOP_CONTROL)
+        && let Ok(n) = content.trim().parse::<u32>()
+    {
+        return Some(n);
     }
 
     // Fallback: scan existing devices.
@@ -179,12 +201,9 @@ fn find_loop_for_file(file: &str) -> Option<LoopInfo> {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| file.to_string());
 
-    for dev in devices {
-        if dev.backing_file == canonical || dev.backing_file == file {
-            return Some(dev);
-        }
-    }
-    None
+    devices
+        .into_iter()
+        .find(|dev| dev.backing_file == canonical || dev.backing_file == file)
 }
 
 // ============================================================================
@@ -231,7 +250,25 @@ fn parse_size(s: &str) -> Option<u64> {
         (s, 1)
     };
 
-    num_str.parse::<u64>().ok().map(|n| n * multiplier)
+    // A raw byte count (no suffix) must be an exact integer. A suffixed value
+    // may carry a fractional part — e.g. "1.5G", and crucially the decimal
+    // forms that `format_size` itself emits ("1.0K") — so scale a float by the
+    // multiplier and round to the nearest byte. Integer-with-suffix stays exact.
+    if multiplier == 1 {
+        num_str.parse::<u64>().ok()
+    } else if let Ok(n) = num_str.parse::<u64>() {
+        n.checked_mul(multiplier)
+    } else {
+        let f = num_str.parse::<f64>().ok()?;
+        if !f.is_finite() || f < 0.0 {
+            return None;
+        }
+        let bytes = f * multiplier as f64;
+        if bytes > u64::MAX as f64 {
+            return None;
+        }
+        Some(bytes.round() as u64)
+    }
 }
 
 // ============================================================================
@@ -263,7 +300,11 @@ fn print_loop_json(devices: &[LoopInfo]) {
         let comma = if i + 1 < devices.len() { "," } else { "" };
         let _ = writeln!(out, "    {{");
         let _ = writeln!(out, "      \"name\": \"{}\",", json_escape(&dev.device));
-        let _ = writeln!(out, "      \"back-file\": \"{}\",", json_escape(&dev.backing_file));
+        let _ = writeln!(
+            out,
+            "      \"back-file\": \"{}\",",
+            json_escape(&dev.backing_file)
+        );
         let _ = writeln!(out, "      \"offset\": {},", dev.offset);
         let _ = writeln!(out, "      \"sizelimit\": {},", dev.sizelimit);
         let _ = writeln!(out, "      \"ro\": {},", dev.read_only);
@@ -282,7 +323,6 @@ fn print_loop_json(devices: &[LoopInfo]) {
 
 fn cmd_losetup(args: &[String]) {
     let mut list_all = false;
-    let mut list_free = false;
     let mut detach: Option<String> = None;
     let mut detach_all = false;
     let mut json_output = false;
@@ -393,7 +433,7 @@ fn cmd_losetup(args: &[String]) {
     }
 
     // List all loop devices.
-    if list_all || list_free {
+    if list_all {
         do_list(json_output);
         return;
     }
@@ -474,7 +514,8 @@ fn print_usage() {
 
 fn do_list(json: bool) {
     let devices = enumerate_loop_devices();
-    let active: Vec<LoopInfo> = devices.into_iter()
+    let active: Vec<LoopInfo> = devices
+        .into_iter()
         .filter(|d| !d.backing_file.is_empty())
         .collect();
 
@@ -483,23 +524,33 @@ fn do_list(json: bool) {
     } else {
         let stdout = io::stdout();
         let mut out = stdout.lock();
-        let _ = writeln!(out, "{:<20} {:>6} {:>10} {:>10} {:>4} {:>5} {:>3} {}",
-            "NAME", "OFFSET", "SIZELIMIT", "FILESIZE", "RO", "AUTOCL", "DIO", "BACK-FILE");
+        let _ = writeln!(
+            out,
+            "{:<20} {:>6} {:>10} {:>10} {:>4} {:>5} {:>3} BACK-FILE",
+            "NAME", "OFFSET", "SIZELIMIT", "FILESIZE", "RO", "AUTOCL", "DIO"
+        );
 
         for dev in &active {
             let file_size = fs::metadata(&dev.backing_file)
                 .map(|m| m.len())
                 .unwrap_or(0);
 
-            let _ = writeln!(out, "{:<20} {:>6} {:>10} {:>10} {:>4} {:>5} {:>3} {}",
+            let _ = writeln!(
+                out,
+                "{:<20} {:>6} {:>10} {:>10} {:>4} {:>5} {:>3} {}",
                 dev.device,
                 dev.offset,
-                if dev.sizelimit > 0 { format_size(dev.sizelimit) } else { "0".into() },
+                if dev.sizelimit > 0 {
+                    format_size(dev.sizelimit)
+                } else {
+                    "0".into()
+                },
                 format_size(file_size),
                 if dev.read_only { "1" } else { "0" },
                 if dev.autoclear { "1" } else { "0" },
                 if dev.dio { "1" } else { "0" },
-                dev.backing_file);
+                dev.backing_file
+            );
         }
     }
 }
@@ -526,7 +577,11 @@ fn do_show_device(device: &str, json: bool) {
     } else {
         let stdout = io::stdout();
         let mut out = stdout.lock();
-        let _ = writeln!(out, "{}: []:({}) {}", info.device, info.offset, info.backing_file);
+        let _ = writeln!(
+            out,
+            "{}: []:({}) {}",
+            info.device, info.offset, info.backing_file
+        );
     }
 }
 
@@ -537,7 +592,11 @@ fn do_associated(file: &str, json: bool) {
         } else {
             let stdout = io::stdout();
             let mut out = stdout.lock();
-            let _ = writeln!(out, "{}: []:({}) {}", info.device, info.offset, info.backing_file);
+            let _ = writeln!(
+                out,
+                "{}: []:({}) {}",
+                info.device, info.offset, info.backing_file
+            );
         }
     }
     // No output if no association found (matching Linux behavior).
@@ -569,8 +628,13 @@ fn do_setup(opts: &SetupOptions, verbose: bool) {
     // We simulate by writing to a control file.
     let setup_cmd = format!(
         "setup {} file={} offset={} sizelimit={} ro={} partscan={} dio={}",
-        device, opts.file, opts.offset, opts.sizelimit,
-        opts.read_only as u8, opts.partscan as u8, opts.direct_io as u8,
+        device,
+        opts.file,
+        opts.offset,
+        opts.sizelimit,
+        opts.read_only as u8,
+        opts.partscan as u8,
+        opts.direct_io as u8,
     );
 
     match fs::write(LOOP_CONTROL, &setup_cmd) {
@@ -590,6 +654,12 @@ fn do_setup(opts: &SetupOptions, verbose: bool) {
 }
 
 fn do_detach(device: &str, verbose: bool) {
+    // Refuse to detach a device that is backing an active swap area: tearing
+    // it down would yank memory out from under the kernel's swap subsystem.
+    if is_swap_active(device) {
+        eprintln!("losetup: {device}: in use as swap, refusing to detach");
+        process::exit(1);
+    }
     let detach_cmd = format!("detach {device}");
     match fs::write(LOOP_CONTROL, &detach_cmd) {
         Ok(()) => {
@@ -800,7 +870,10 @@ mod tests {
     fn test_format_size_edge_cases() {
         assert_eq!(format_size(1), "1");
         assert_eq!(format_size(1023), "1023");
-        assert_eq!(format_size(u64::MAX), format!("{:.1}T", u64::MAX as f64 / 1_099_511_627_776.0));
+        assert_eq!(
+            format_size(u64::MAX),
+            format!("{:.1}T", u64::MAX as f64 / 1_099_511_627_776.0)
+        );
     }
 
     #[test]

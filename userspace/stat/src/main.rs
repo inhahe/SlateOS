@@ -82,112 +82,71 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 // ============================================================================
-// Syscall numbers (OurOS ABI)
+// libc bindings (OurOS posix layer)
 // ============================================================================
+//
+// std::fs covers stat/lstat/readlink/link/symlink/unlink/rename, all of which
+// route through the posix libc layer to native OurOS syscalls.  The three
+// operations std does not expose — statvfs, mkfifo, and utimensat — are called
+// directly through their C ABI symbols, which the posix crate implements as
+// `extern "C"` functions backed by native syscalls.
+//
+// The libc-backed paths require the unix platform abstractions
+// (`std::os::unix`, `extern "C"` symbols from the posix sysroot), so they are
+// gated to `#[cfg(unix)]`.  This matches the real target (x86_64-ouros, which
+// is `target-family = unix`); host unit tests run on a non-unix toolchain and
+// exercise only the portable argument-parsing/formatting logic, so the gated
+// functions get inert stubs there.
 
-/// stat(path, buf) -> 0 or -errno
-const SYS_STAT: u64 = 18;
-/// lstat(path, buf) -> 0 or -errno (does not follow symlinks)
-const SYS_LSTAT: u64 = 19;
-/// fstatat(dirfd, path, buf, flags) -- unused here, kept for reference
-#[allow(dead_code)]
-const SYS_FSTATAT: u64 = 20;
-/// utimensat(dirfd, path, times, flags) -> 0 or -errno
-const SYS_UTIMENSAT: u64 = 35;
-/// link(oldpath, newpath) -> 0 or -errno
-const SYS_LINK: u64 = 37;
-/// symlink(target, linkpath) -> 0 or -errno
-const SYS_SYMLINK: u64 = 38;
-/// readlink(path, buf, bufsiz) -> length or -errno
-const SYS_READLINK: u64 = 39;
-/// mkfifo(path, mode) -> 0 or -errno
-const SYS_MKFIFO: u64 = 40;
-/// unlink(path) -> 0 or -errno
-const SYS_UNLINK: u64 = 10;
-/// rename(old, new) -> 0 or -errno
-const SYS_RENAME: u64 = 41;
-/// statfs(path, buf) -> 0 or -errno
-const SYS_STATFS: u64 = 42;
-/// Native OurOS wall-clock syscall (kernel syscall/number.rs); no-arg,
-/// returns nanoseconds-since-epoch in rax.  The kernel has no combined
-/// clock_gettime(clock_id, *ts) form.  Kept for future use by
-/// get_current_time().  (Syscall 228 is SYS_PIPE_POLL; the old
-/// SYS_CLOCK_GETTIME=228 — a Linux number — was wrong.)
-#[allow(dead_code)]
-const SYS_CLOCK_REALTIME: u64 = 14;
+/// `AT_FDCWD` for the `dirfd` argument of `utimensat` (resolve relative to cwd).
+#[cfg(unix)]
+const AT_FDCWD: i32 = -100;
 
-// ============================================================================
-// Low-level syscall interface
-// ============================================================================
-
-/// Issue a three-argument syscall.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller ensures arguments are valid for the given syscall number.
-    // The `syscall` instruction is the defined kernel entry point on x86-64.
-    // rcx and r11 are clobbered per the hardware specification.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+/// Filesystem statistics, matching the posix-crate `struct statvfs` layout
+/// (11 `u64` fields).  Populated by the [`statvfs`] binding.
+#[cfg(unix)]
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct PosixStatvfs {
+    f_bsize: u64,
+    f_frsize: u64,
+    f_blocks: u64,
+    f_bfree: u64,
+    f_bavail: u64,
+    f_files: u64,
+    f_ffree: u64,
+    f_favail: u64,
+    f_fsid: u64,
+    f_flag: u64,
+    f_namemax: u64,
 }
 
-/// Issue a two-argument syscall.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Same as syscall3; rdx is not used by the syscall but is still
-    // safe to leave untouched.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+// SAFETY: These symbols are provided by the posix crate (linked via the
+// sysroot's libstubs) with exactly these C signatures.  Each returns 0 on
+// success and -1 on error with `errno` set, which we surface via
+// `std::io::Error::last_os_error()`.
+#[cfg(unix)]
+unsafe extern "C" {
+    /// Query filesystem statistics for `path` (NUL-terminated C string).
+    fn statvfs(path: *const u8, buf: *mut PosixStatvfs) -> i32;
+    /// Create a FIFO at `pathname` (NUL-terminated C string) with `mode`.
+    fn mkfifo(pathname: *const u8, mode: u32) -> i32;
+    /// Set access/modification times of `path` with nanosecond precision.
+    fn utimensat(dirfd: i32, path: *const u8, times: *const Timespec, flags: i32) -> i32;
 }
 
-// ============================================================================
-// Errno helpers
-// ============================================================================
+/// Build a NUL-terminated C string from a path, mapping interior-NUL errors
+/// to the same `String` error type the `do_*` wrappers return.
+#[cfg(unix)]
+fn cstr(path: &str) -> Result<std::ffi::CString, String> {
+    std::ffi::CString::new(path).map_err(|_| format!("invalid path (contains NUL): {path}"))
+}
 
-/// Map a negative syscall return code to a human-readable error string.
-fn errno_to_string(errno: i64) -> String {
-    match errno {
-        -1 => "operation not permitted (EPERM)".into(),
-        -2 => "no such file or directory (ENOENT)".into(),
-        -4 => "interrupted system call (EINTR)".into(),
-        -5 => "input/output error (EIO)".into(),
-        -12 => "out of memory (ENOMEM)".into(),
-        -13 => "permission denied (EACCES)".into(),
-        -17 => "file exists (EEXIST)".into(),
-        -18 => "invalid cross-device link (EXDEV)".into(),
-        -20 => "not a directory (ENOTDIR)".into(),
-        -21 => "is a directory (EISDIR)".into(),
-        -22 => "invalid argument (EINVAL)".into(),
-        -28 => "no space left on device (ENOSPC)".into(),
-        -30 => "read-only file system (EROFS)".into(),
-        -36 => "file name too long (ENAMETOOLONG)".into(),
-        -38 => "function not implemented (ENOSYS)".into(),
-        -39 => "directory not empty (ENOTEMPTY)".into(),
-        -40 => "too many levels of symbolic links (ELOOP)".into(),
-        other => format!("error {other}"),
-    }
+/// Convert a possibly-negative timestamp component to `u64`, clamping
+/// pre-epoch values to 0.  Avoids clippy's `cast_sign_loss`.
+#[cfg(unix)]
+fn nonneg_u64(v: i64) -> u64 {
+    u64::try_from(v).unwrap_or(0)
 }
 
 // ============================================================================
@@ -418,181 +377,154 @@ fn is_leap_year(y: u64) -> bool {
 // Syscall wrappers
 // ============================================================================
 
-fn do_stat(path: &str, follow_symlinks: bool) -> Result<KernelStat, String> {
-    let mut buf = KernelStat::default();
-    let nr = if follow_symlinks { SYS_STAT } else { SYS_LSTAT };
-    // SAFETY: We pass a valid pointer to a stack-allocated KernelStat buffer
-    // and the path slice is valid for the syscall duration. The kernel writes
-    // into `buf` within its declared size.
-    let ret = unsafe {
-        syscall3(
-            nr,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            &mut buf as *mut KernelStat as u64,
-        )
-    };
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(buf)
+/// Populate a [`KernelStat`] from a `std::fs::Metadata`, which routes through
+/// the posix libc layer to the native OurOS `stat`/`lstat` syscalls.
+#[cfg(unix)]
+fn metadata_to_kernel_stat(meta: &fs::Metadata) -> KernelStat {
+    use std::os::unix::fs::MetadataExt;
+    KernelStat {
+        st_dev: meta.dev(),
+        st_ino: meta.ino(),
+        st_mode: u64::from(meta.mode()),
+        st_nlink: meta.nlink(),
+        st_uid: u64::from(meta.uid()),
+        st_gid: u64::from(meta.gid()),
+        st_rdev: meta.rdev(),
+        st_size: meta.size(),
+        st_blksize: meta.blksize(),
+        st_blocks: meta.blocks(),
+        st_atime_sec: nonneg_u64(meta.atime()),
+        st_atime_nsec: nonneg_u64(meta.atime_nsec()),
+        st_mtime_sec: nonneg_u64(meta.mtime()),
+        st_mtime_nsec: nonneg_u64(meta.mtime_nsec()),
+        st_ctime_sec: nonneg_u64(meta.ctime()),
+        st_ctime_nsec: nonneg_u64(meta.ctime_nsec()),
     }
 }
 
-fn do_statfs(path: &str) -> Result<KernelStatFs, String> {
-    let mut buf = KernelStatFs::default();
-    // SAFETY: Same as do_stat; the buffer is stack-allocated and valid.
-    let ret = unsafe {
-        syscall2(
-            SYS_STATFS,
-            path.as_ptr() as u64,
-            &mut buf as *mut KernelStatFs as u64,
-        )
-    };
-    if ret < 0 {
-        Err(errno_to_string(ret))
+#[cfg(unix)]
+fn do_stat(path: &str, follow_symlinks: bool) -> Result<KernelStat, String> {
+    let meta = if follow_symlinks {
+        fs::metadata(path)
     } else {
-        Ok(buf)
+        fs::symlink_metadata(path)
     }
+    .map_err(|e| e.to_string())?;
+    Ok(metadata_to_kernel_stat(&meta))
+}
+
+#[cfg(unix)]
+fn do_statfs(path: &str) -> Result<KernelStatFs, String> {
+    let cpath = cstr(path)?;
+    let mut vfs = PosixStatvfs::default();
+    // SAFETY: `cpath` is a valid NUL-terminated C string and `vfs` is a valid,
+    // writable buffer of the correct layout for the duration of the call.
+    let ret = unsafe { statvfs(cpath.as_ptr().cast::<u8>(), &mut vfs) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    // statvfs has no filesystem-type field, so report 0 for f_type.  The
+    // remaining fields map directly from the POSIX statvfs structure.
+    Ok(KernelStatFs {
+        f_type: 0,
+        f_bsize: vfs.f_bsize,
+        f_blocks: vfs.f_blocks,
+        f_bfree: vfs.f_bfree,
+        f_bavail: vfs.f_bavail,
+        f_files: vfs.f_files,
+        f_ffree: vfs.f_ffree,
+        f_fsid: vfs.f_fsid,
+        f_namelen: vfs.f_namemax,
+        f_frsize: vfs.f_frsize,
+        f_flags: vfs.f_flag,
+        _spare: [0; 4],
+    })
 }
 
 fn do_readlink(path: &str) -> Result<String, String> {
-    let mut buf = [0u8; 4096];
-    // SAFETY: We pass a valid buffer pointer and size. The kernel writes at
-    // most `buf.len()` bytes and returns the number of bytes written.
-    let ret = unsafe {
-        syscall3(
-            SYS_READLINK,
-            path.as_ptr() as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    };
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        let len = ret as usize;
-        String::from_utf8(buf[..len].to_vec())
-            .map_err(|_| "readlink: target contains invalid UTF-8".into())
-    }
+    let target = fs::read_link(path).map_err(|e| e.to_string())?;
+    target
+        .into_os_string()
+        .into_string()
+        .map_err(|_| "readlink: target contains invalid UTF-8".into())
 }
 
 fn do_link(target: &str, linkpath: &str) -> Result<(), String> {
-    // Pack both path+len pairs. We use syscall with 4 args but our wrapper
-    // only has 3, so we pack target (ptr, len) into a stack struct.
-    // For simplicity, use the std fs::hard_link fallback approach: we encode
-    // target_ptr:target_len in a1:a2 and linkpath_ptr:linkpath_len in a3:unused.
-    // Actually, the kernel expects: a1=old_ptr, a2=old_len, a3=new_ptr, a4=new_len.
-    // We need a 4-arg syscall. Let's add one.
-    let ret = syscall4_link(SYS_LINK, target, linkpath);
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
-    }
+    fs::hard_link(target, linkpath).map_err(|e| e.to_string())
 }
 
+#[cfg(unix)]
 fn do_symlink(target: &str, linkpath: &str) -> Result<(), String> {
-    let ret = syscall4_link(SYS_SYMLINK, target, linkpath);
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
-    }
-}
-
-/// Four-argument syscall for link/symlink which need two path+length pairs.
-#[cfg(target_arch = "x86_64")]
-fn syscall4_link(nr: u64, path1: &str, path2: &str) -> i64 {
-    let ret: i64;
-    // SAFETY: Both path slices are valid for the duration of the syscall.
-    // Register mapping: rdi=path1_ptr, rsi=path1_len, rdx=path2_ptr, r10=path2_len.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") path1.as_ptr() as u64,
-            in("rsi") path1.len() as u64,
-            in("rdx") path2.as_ptr() as u64,
-            in("r10") path2.len() as u64,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+    std::os::unix::fs::symlink(target, linkpath).map_err(|e| e.to_string())
 }
 
 fn do_unlink(path: &str) -> Result<(), String> {
-    // SAFETY: Path slice is valid for the syscall duration.
-    let ret = unsafe {
-        syscall2(SYS_UNLINK, path.as_ptr() as u64, path.len() as u64)
-    };
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
-    }
+    fs::remove_file(path).map_err(|e| e.to_string())
 }
 
 fn do_rename(old: &str, new: &str) -> Result<(), String> {
-    let ret = syscall4_link(SYS_RENAME, old, new);
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
-    }
+    fs::rename(old, new).map_err(|e| e.to_string())
 }
 
+#[cfg(unix)]
 fn do_mkfifo(path: &str, mode: u32) -> Result<(), String> {
-    // SAFETY: Path slice is valid for the syscall duration.
-    let ret = unsafe {
-        syscall3(
-            SYS_MKFIFO,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            mode as u64,
-        )
-    };
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
+    let cpath = cstr(path)?;
+    // SAFETY: `cpath` is a valid NUL-terminated C string for the call duration.
+    let ret = unsafe { mkfifo(cpath.as_ptr().cast::<u8>(), mode) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
     }
+    Ok(())
 }
 
+#[cfg(unix)]
 fn do_utimensat(path: &str, times: &[Timespec; 2]) -> Result<(), String> {
-    // SAFETY: Path slice and timespec array are valid for the syscall duration.
-    let ret = unsafe {
-        syscall3(
-            SYS_UTIMENSAT,
-            path.as_ptr() as u64,
-            path.len() as u64,
-            times.as_ptr() as u64,
-        )
-    };
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
+    let cpath = cstr(path)?;
+    // SAFETY: `cpath` is a valid NUL-terminated C string and `times` points to
+    // two valid Timespecs (layout-compatible with the posix Timespec) for the
+    // duration of the call.  `AT_FDCWD` resolves `path` relative to the cwd.
+    let ret = unsafe { utimensat(AT_FDCWD, cpath.as_ptr().cast::<u8>(), times.as_ptr(), 0) };
+    if ret != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
     }
+    Ok(())
 }
 
-/// Retrieve the current wall-clock time via the kernel. Available for
-/// callers that need an explicit timestamp rather than the UTIME_NOW sentinel.
-#[allow(dead_code)]
-fn get_current_time() -> Timespec {
-    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
-    // userspace; it returns nanoseconds-since-epoch in rax.  The extra zero
-    // args are ignored by the kernel.
-    let ns = unsafe { syscall2(SYS_CLOCK_REALTIME, 0, 0) };
-    if ns < 0 {
-        return Timespec { tv_sec: 0, tv_nsec: 0 };
-    }
-    Timespec {
-        tv_sec: ns / 1_000_000_000,
-        tv_nsec: ns % 1_000_000_000,
-    }
+// ---------------------------------------------------------------------------
+// Non-unix stubs (host unit-test toolchain only)
+// ---------------------------------------------------------------------------
+//
+// The real target is unix; these stubs exist solely so the binary's portable
+// logic (argument parsing, formatting, timestamp math) stays compilable and
+// testable on the host test toolchain, which is not unix.  They never run on
+// the OS itself.
+
+#[cfg(not(unix))]
+const UNSUPPORTED_ON_HOST: &str = "operation unavailable on host test toolchain";
+
+#[cfg(not(unix))]
+fn do_stat(_path: &str, _follow_symlinks: bool) -> Result<KernelStat, String> {
+    Err(UNSUPPORTED_ON_HOST.into())
+}
+
+#[cfg(not(unix))]
+fn do_statfs(_path: &str) -> Result<KernelStatFs, String> {
+    Err(UNSUPPORTED_ON_HOST.into())
+}
+
+#[cfg(not(unix))]
+fn do_symlink(_target: &str, _linkpath: &str) -> Result<(), String> {
+    Err(UNSUPPORTED_ON_HOST.into())
+}
+
+#[cfg(not(unix))]
+fn do_mkfifo(_path: &str, _mode: u32) -> Result<(), String> {
+    Err(UNSUPPORTED_ON_HOST.into())
+}
+
+#[cfg(not(unix))]
+fn do_utimensat(_path: &str, _times: &[Timespec; 2]) -> Result<(), String> {
+    Err(UNSUPPORTED_ON_HOST.into())
 }
 
 // ============================================================================

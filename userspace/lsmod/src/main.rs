@@ -20,67 +20,28 @@ use std::fs;
 use std::process;
 
 // ============================================================================
-// Syscall interface
+// Module load/unload support
 // ============================================================================
+//
+// OurOS is a microkernel: there are no loadable kernel modules. Device drivers
+// run as ordinary userspace processes managed by the driver framework / service
+// manager, not as code injected into the kernel address space. There is
+// therefore no `init_module`/`delete_module` syscall to call (the previous code
+// targeted Linux numbers 150/151, which are unassigned on OurOS and so just
+// returned NotSupported). The mutating personalities (insmod, rmmod, and
+// modprobe's load/remove paths) report this clearly rather than invoking a
+// nonexistent syscall. The read-only `lsmod` listing and modprobe's dependency
+// resolution / dry-run / show-depends remain useful and work unchanged.
+//
+// See todo.txt ("DESIGN GAP — no kernel-module loading: OurOS is a microkernel")
+// for the tracking note and the correct future direction (route driver
+// load/unload requests to the userspace driver framework over IPC).
 
-/// Syscall: load a kernel module from a memory image.
-///
-/// `arg0`: pointer to module image data.
-/// `arg1`: length of image in bytes.
-/// `arg2`: pointer to null-terminated parameter string.
-const SYS_INIT_MODULE: u64 = 150;
-
-/// Syscall: remove a loaded kernel module.
-///
-/// `arg0`: pointer to null-terminated module name.
-/// `arg1`: flags (MODULE_FORCE = 1).
-const SYS_DELETE_MODULE: u64 = 151;
-
-/// Invoke a raw syscall with up to 3 arguments.
-///
-/// Uses the standard x86_64 Linux syscall convention:
-/// `rax` = syscall number, `rdi` = arg1, `rsi` = arg2, `rdx` = arg3.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller guarantees that nr is a valid syscall number and that
-    // a1..a3 are valid arguments (pointers to accessible memory or numeric
-    // values).  The kernel validates all inputs before acting on them.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-// ============================================================================
-// Error code mapping
-// ============================================================================
-
-/// Map a negative errno-style return code to a human-readable message.
-fn errno_message(code: i64) -> &'static str {
-    match code {
-        -1 => "operation not permitted",
-        -2 => "no such file or directory",
-        -11 => "resource temporarily unavailable",
-        -12 => "out of memory",
-        -13 => "permission denied",
-        -14 => "bad address",
-        -16 => "device or resource busy",
-        -17 => "file exists",
-        -22 => "invalid argument",
-        -38 => "function not implemented",
-        _ => "unknown error",
-    }
-}
+/// Human-readable explanation returned whenever a caller attempts to load or
+/// unload a kernel module.
+const MODULE_UNSUPPORTED: &str = "kernel modules are not supported on OurOS \
+(microkernel: device drivers run as userspace processes managed by the driver \
+framework, not as loadable kernel modules)";
 
 // ============================================================================
 // /proc/modules parser
@@ -321,10 +282,10 @@ fn get_kernel_version() -> String {
     }
 
     // Try /proc/version (format: "OurOS version X.Y.Z ...").
-    if let Ok(ver) = fs::read_to_string("/proc/version") {
-        if let Some(third) = ver.split_whitespace().nth(2) {
-            return third.to_string();
-        }
+    if let Ok(ver) = fs::read_to_string("/proc/version")
+        && let Some(third) = ver.split_whitespace().nth(2)
+    {
+        return third.to_string();
     }
 
     // Fallback.
@@ -338,54 +299,23 @@ fn modules_dep_path() -> String {
 }
 
 // ============================================================================
-// Syscall wrappers
+// Module load/unload operations
 // ============================================================================
 
 /// Load a kernel module from a memory image.
 ///
-/// `image`: raw bytes of the module file (.ko).
-/// `params`: null-terminated parameter string (e.g., "param1=val1 param2=val2").
-fn do_init_module(image: &[u8], params: &str) -> Result<(), String> {
-    let params_cstr = format!("{params}\0");
-
-    let ret = unsafe {
-        syscall3(
-            SYS_INIT_MODULE,
-            image.as_ptr() as u64,
-            image.len() as u64,
-            params_cstr.as_ptr() as u64,
-        )
-    };
-
-    if ret < 0 {
-        Err(format!("init_module failed: {} (error {})", errno_message(ret), ret))
-    } else {
-        Ok(())
-    }
+/// Unsupported on OurOS — see the `MODULE_UNSUPPORTED` documentation above.
+/// The image bytes and parameter string are accepted for signature
+/// compatibility with the calling personalities but cannot be acted on.
+fn do_init_module(_image: &[u8], _params: &str) -> Result<(), String> {
+    Err(MODULE_UNSUPPORTED.to_string())
 }
 
 /// Remove a loaded kernel module.
 ///
-/// `name`: module name (not file path).
-/// `force`: if true, force removal even if the module is in use.
-fn do_delete_module(name: &str, force: bool) -> Result<(), String> {
-    let name_cstr = format!("{name}\0");
-    let flags: u64 = if force { 1 } else { 0 };
-
-    let ret = unsafe {
-        syscall3(
-            SYS_DELETE_MODULE,
-            name_cstr.as_ptr() as u64,
-            flags,
-            0,
-        )
-    };
-
-    if ret < 0 {
-        Err(format!("delete_module '{}' failed: {} (error {})", name, errno_message(ret), ret))
-    } else {
-        Ok(())
-    }
+/// Unsupported on OurOS — see the `MODULE_UNSUPPORTED` documentation above.
+fn do_delete_module(_name: &str, _force: bool) -> Result<(), String> {
+    Err(MODULE_UNSUPPORTED.to_string())
 }
 
 // ============================================================================
@@ -411,8 +341,8 @@ fn format_size(bytes: u64) -> String {
 
 /// Display loaded kernel modules in tabular format.
 fn run_lsmod(args: &[String]) -> i32 {
-    // lsmod accepts --help and that's about it.
-    for arg in args {
+    // lsmod takes no positional arguments; only --help is recognised.
+    if let Some(arg) = args.first() {
         match arg.as_str() {
             "--help" | "-h" | "help" => {
                 println!("Usage: lsmod");
@@ -452,11 +382,9 @@ fn run_lsmod(args: &[String]) -> i32 {
 
     // Print header.
     println!(
-        "{:<nw$}  {:>sw$}  {}  {}",
+        "{:<nw$}  {:>sw$}  Used  By",
         "Module",
         "Size",
-        "Used",
-        "By",
         nw = name_width,
         sw = size_width,
     );
@@ -488,6 +416,7 @@ fn run_lsmod(args: &[String]) -> i32 {
 // ============================================================================
 
 /// Parsed modprobe command-line options.
+#[derive(Debug)]
 struct ModprobeOpts {
     /// Module name to operate on.
     module: String,
@@ -721,11 +650,11 @@ fn modprobe_remove(opts: &ModprobeOpts, dep_entries: &[DepEntry]) -> i32 {
             println!("rmmod {name}");
         }
 
-        if let Err(e) = do_delete_module(name, false) {
-            if !opts.quiet {
-                eprintln!("modprobe: {e}");
-            }
-            // Don't fail entirely; continue removing what we can.
+        // Don't fail entirely; continue removing what we can.
+        if let Err(e) = do_delete_module(name, false)
+            && !opts.quiet
+        {
+            eprintln!("modprobe: {e}");
         }
     }
 
@@ -884,7 +813,7 @@ fn run_rmmod(args: &[String]) -> i32 {
 // ============================================================================
 
 /// Supported tool personalities.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Personality {
     Lsmod,
     Modprobe,
@@ -1386,18 +1315,27 @@ kernel/b.ko: kernel/a.ko
         assert_eq!(format_size(2 * 1024 * 1024), "2.0 MiB");
     }
 
-    // === errno_message ===
+    // === Module load/unload unsupported ===
 
     #[test]
-    fn errno_known_codes() {
-        assert_eq!(errno_message(-1), "operation not permitted");
-        assert_eq!(errno_message(-13), "permission denied");
-        assert_eq!(errno_message(-16), "device or resource busy");
+    fn init_module_is_unsupported() {
+        let err = do_init_module(b"\x7fELF", "").unwrap_err();
+        assert_eq!(err, MODULE_UNSUPPORTED);
     }
 
     #[test]
-    fn errno_unknown_code() {
-        assert_eq!(errno_message(-9999), "unknown error");
+    fn delete_module_is_unsupported() {
+        let err = do_delete_module("dummy", false).unwrap_err();
+        assert_eq!(err, MODULE_UNSUPPORTED);
+    }
+
+    #[test]
+    fn insmod_reports_unsupported() {
+        // A readable but bogus path would still fail at the load step; use a
+        // path that does not exist so we exercise the read-error branch too.
+        // Either way insmod must return a non-zero exit code.
+        let code = run_insmod(&["/nonexistent/module.ko".to_string()]);
+        assert_eq!(code, 1);
     }
 
     // === Module info display (lsmod output) ===

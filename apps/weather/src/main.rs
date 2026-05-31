@@ -600,9 +600,11 @@ pub fn hpa_to_mmhg(hpa: f32) -> f32 {
 
 /// Format temperature with the given unit.
 pub fn format_temp(c: f32, unit: TempUnit) -> String {
+    // Round half away from zero (e.g. 22.5 -> 23) rather than relying on the
+    // formatter's round-half-to-even, which surprises users (22.5 -> 22).
     match unit {
-        TempUnit::Celsius => format!("{:.0}\u{00B0}C", c),
-        TempUnit::Fahrenheit => format!("{:.0}\u{00B0}F", c_to_f(c)),
+        TempUnit::Celsius => format!("{:.0}\u{00B0}C", c.round()),
+        TempUnit::Fahrenheit => format!("{:.0}\u{00B0}F", c_to_f(c).round()),
     }
 }
 
@@ -691,28 +693,37 @@ pub fn sample_current_weather() -> CurrentWeather {
 /// Generate sample hourly forecast (24 hours).
 pub fn sample_hourly_forecast() -> Vec<HourForecast> {
     let temps = [
-        18.0, 17.5, 17.0, 16.5, 16.0, 16.5, 17.0, 18.5, 20.0, 21.5,
-        23.0, 24.0, 24.5, 25.0, 24.5, 24.0, 23.0, 22.0, 21.0, 20.0,
-        19.0, 18.5, 18.0, 17.5,
+        18.0, 17.5, 17.0, 16.5, 16.0, 16.5, 17.0, 18.5, 20.0, 21.5, 23.0, 24.0, 24.5, 25.0, 24.5,
+        24.0, 23.0, 22.0, 21.0, 20.0, 19.0, 18.5, 18.0, 17.5,
     ];
     let conditions = [
-        WeatherCondition::Clear, WeatherCondition::Clear,
-        WeatherCondition::Clear, WeatherCondition::Clear,
-        WeatherCondition::Clear, WeatherCondition::Clear,
-        WeatherCondition::PartlyCloudy, WeatherCondition::PartlyCloudy,
-        WeatherCondition::PartlyCloudy, WeatherCondition::Cloudy,
-        WeatherCondition::Cloudy, WeatherCondition::Cloudy,
-        WeatherCondition::PartlyCloudy, WeatherCondition::PartlyCloudy,
-        WeatherCondition::LightRain, WeatherCondition::LightRain,
-        WeatherCondition::Rain, WeatherCondition::Rain,
-        WeatherCondition::LightRain, WeatherCondition::Cloudy,
-        WeatherCondition::Cloudy, WeatherCondition::PartlyCloudy,
-        WeatherCondition::Clear, WeatherCondition::Clear,
+        WeatherCondition::Clear,
+        WeatherCondition::Clear,
+        WeatherCondition::Clear,
+        WeatherCondition::Clear,
+        WeatherCondition::Clear,
+        WeatherCondition::Clear,
+        WeatherCondition::PartlyCloudy,
+        WeatherCondition::PartlyCloudy,
+        WeatherCondition::PartlyCloudy,
+        WeatherCondition::Cloudy,
+        WeatherCondition::Cloudy,
+        WeatherCondition::Cloudy,
+        WeatherCondition::PartlyCloudy,
+        WeatherCondition::PartlyCloudy,
+        WeatherCondition::LightRain,
+        WeatherCondition::LightRain,
+        WeatherCondition::Rain,
+        WeatherCondition::Rain,
+        WeatherCondition::LightRain,
+        WeatherCondition::Cloudy,
+        WeatherCondition::Cloudy,
+        WeatherCondition::PartlyCloudy,
+        WeatherCondition::Clear,
+        WeatherCondition::Clear,
     ];
     let precips = [
-        0, 0, 0, 0, 0, 0, 5, 5, 10, 10,
-        15, 15, 10, 10, 40, 50, 70, 65, 40, 20,
-        10, 5, 0, 0,
+        0, 0, 0, 0, 0, 0, 5, 5, 10, 10, 15, 15, 10, 10, 40, 50, 70, 65, 40, 20, 10, 5, 0, 0,
     ];
     (0..24)
         .map(|i| HourForecast {
@@ -741,8 +752,12 @@ pub fn sample_daily_forecast() -> Vec<DayForecast> {
     let precips: [u8; 7] = [10, 0, 80, 30, 45, 0, 5];
     let winds = [12.0, 8.0, 25.0, 18.0, 15.0, 10.0, 7.0];
     let dirs = [
-        WindDirection::SW, WindDirection::S, WindDirection::W,
-        WindDirection::NW, WindDirection::N, WindDirection::SE,
+        WindDirection::SW,
+        WindDirection::S,
+        WindDirection::W,
+        WindDirection::NW,
+        WindDirection::N,
+        WindDirection::SE,
         WindDirection::E,
     ];
     (0..7)
@@ -771,9 +786,18 @@ pub fn sample_alerts() -> Vec<WeatherAlert> {
 /// Default saved locations.
 pub fn default_locations() -> Vec<Location> {
     vec![
-        Location { name: "New York, NY".to_string(), is_default: true },
-        Location { name: "London, UK".to_string(), is_default: false },
-        Location { name: "Tokyo, JP".to_string(), is_default: false },
+        Location {
+            name: "New York, NY".to_string(),
+            is_default: true,
+        },
+        Location {
+            name: "London, UK".to_string(),
+            is_default: false,
+        },
+        Location {
+            name: "Tokyo, JP".to_string(),
+            is_default: false,
+        },
     ]
 }
 
@@ -858,10 +882,8 @@ impl WeatherApp {
             self.active_location_idx = self.locations.len() - 1;
         }
         // If we removed the default, promote the first location
-        if was_default {
-            if let Some(loc) = self.locations.first_mut() {
-                loc.is_default = true;
-            }
+        if was_default && let Some(loc) = self.locations.first_mut() {
+            loc.is_default = true;
         }
         true
     }
@@ -879,7 +901,9 @@ impl WeatherApp {
         } else if from < self.active_location_idx && to >= self.active_location_idx {
             self.active_location_idx = self.active_location_idx.saturating_sub(1);
         } else if from > self.active_location_idx && to <= self.active_location_idx {
-            self.active_location_idx = self.active_location_idx.saturating_add(1)
+            self.active_location_idx = self
+                .active_location_idx
+                .saturating_add(1)
                 .min(self.locations.len().saturating_sub(1));
         }
         true
@@ -1137,12 +1161,7 @@ impl WeatherApp {
     }
 
     /// Render the current weather card. Returns the Y after the card.
-    fn render_current_weather_card(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-    ) -> f32 {
+    fn render_current_weather_card(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) -> f32 {
         let card_w = self.width - x * 2.0;
         let card_h = 200.0;
 
@@ -1316,12 +1335,7 @@ impl WeatherApp {
     }
 
     /// Render the hourly forecast strip. Returns Y after.
-    fn render_hourly_strip(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-    ) -> f32 {
+    fn render_hourly_strip(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) -> f32 {
         let strip_w = self.width - x * 2.0;
         let strip_h = 120.0;
         let item_w = 72.0;
@@ -1432,12 +1446,7 @@ impl WeatherApp {
     }
 
     /// Render the temperature graph. Returns Y after.
-    fn render_temp_graph(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-    ) -> f32 {
+    fn render_temp_graph(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) -> f32 {
         let graph_w = self.width - x * 2.0;
         let graph_h = 160.0;
         let plot_x = x + 50.0;
@@ -1557,12 +1566,7 @@ impl WeatherApp {
     }
 
     /// Render the daily forecast table. Returns Y after.
-    fn render_daily_table(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-    ) -> f32 {
+    fn render_daily_table(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) -> f32 {
         let table_w = self.width - x * 2.0;
         let header_h = 34.0;
         let row_h = 36.0;
@@ -1714,12 +1718,7 @@ impl WeatherApp {
     }
 
     /// Render the air quality card. Returns Y after.
-    fn render_air_quality_card(
-        &self,
-        cmds: &mut Vec<RenderCommand>,
-        x: f32,
-        y: f32,
-    ) -> f32 {
+    fn render_air_quality_card(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32) -> f32 {
         let card_w = self.width - x * 2.0;
         let card_h = 80.0;
         let aq = AirQuality::from_aqi(self.current.aqi);
@@ -2782,7 +2781,10 @@ mod tests {
         let initial = app.locations.len();
         app.add_location("Paris, FR".to_string());
         assert_eq!(app.locations.len(), initial + 1);
-        assert_eq!(app.locations.last().map(|l| l.name.as_str()), Some("Paris, FR"));
+        assert_eq!(
+            app.locations.last().map(|l| l.name.as_str()),
+            Some("Paris, FR")
+        );
         assert!(!app.locations.last().map(|l| l.is_default).unwrap_or(true));
     }
 
@@ -2953,9 +2955,7 @@ mod tests {
         let app = WeatherApp::new(900.0, 800.0);
         let cmds = app.render();
         match &cmds[0] {
-            RenderCommand::FillRect {
-                x, y, color, ..
-            } => {
+            RenderCommand::FillRect { x, y, color, .. } => {
                 assert_eq!(*x, 0.0);
                 assert_eq!(*y, 0.0);
                 assert_eq!(*color, BASE);
@@ -3002,7 +3002,9 @@ mod tests {
         let cmds = app.render();
         let has_alert_text = cmds.iter().any(|c| {
             if let RenderCommand::Text { text, .. } = c {
-                text.contains("[Watch]") || text.contains("[Warning]") || text.contains("[Advisory]")
+                text.contains("[Watch]")
+                    || text.contains("[Warning]")
+                    || text.contains("[Advisory]")
             } else {
                 false
             }

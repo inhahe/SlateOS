@@ -1,3 +1,48 @@
+## BUG (noticed+FIXED 2026-05-31): apps/regextester NFA engine — three correctness
+##   bugs caused 8 matching/find/replace tests to fail. (1) execute_regex() seeded a
+##   single thread at start_pos and never re-seeded, so it could not perform an
+##   unanchored leftmost scan — \d+ on "abc123def" returned None because 'a' is not a
+##   digit and the only thread died immediately. (2) A post-loop "final threads"
+##   block unconditionally set end=input_len for any surviving Match thread, so
+##   "hello" on "hello world" reported end=11 instead of 5. (3) The `*` and `?`
+##   compilation set the Split's skip/exit branch to the Jump node (or the atom's
+##   own body) instead of the node AFTER the loop: the inserted Split's targets were
+##   computed in mixed pre/post-insert coordinates and adjust_after_insert() skips
+##   the inserted node, so the exit index was off by one — "ab*c"/"ab?c" could never
+##   match "ac". Rewrote execute_regex() as a proper Pike VM that seeds a new
+##   start-thread at each position until a match is found (leftmost), tracks each
+##   thread's true start, and prefers earliest-start/longest-extent; fixed the `*`
+##   and `?` exit-index math (exit = post-insert index past the loop). Also corrected
+##   test_match_digit, which asserted start==0 with the comment "NFA will start from
+##   0" — that reflected the old start_pos-reporting quirk; the engine now reports
+##   the true start (3) which is required for find_all/replacement to be correct.
+##   Cleaned up pre-existing clippy errors in the crate (unnecessary_wraps,
+##   needless let-match, items_after_statements, format-append→write!, unused_self
+##   →associated fns, too_many_arguments allows). regextester 83/83 tests pass,
+##   clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/snippets — language auto-detection and the
+##   tokenizer were wrong, plus clippy errors. detect_from_content() required
+##   "fn " AND "let " AND "->" AND "::" all present to call something Rust, so most
+##   real Rust snippets fell through to PlainText; relaxed to "fn " plus ANY of
+##   let/->/:: . tokenize() returned zero lines for empty input (str::lines() yields
+##   nothing for ""), so a freshly-created empty snippet rendered no line at all;
+##   now pushes one empty line. Also fixed clippy errors (format-append→write!/
+##   writeln!, unnecessary_sort_by→sort_by_key+Reverse). snippets 56/56 tests pass.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/startupmanager config deserialize() used
+##   rest.splitn(10, '|'), which split on '|' characters that were backslash-escaped
+##   inside fields (escape_field escapes '|' as "\|"), so a description/path
+##   containing '|' produced too many fields and InvalidField/MalformedEntry errors
+##   on reload (caught by round-trip tests). Added split_escaped() which honours
+##   backslash escaping when splitting, and switched deserialize() to slice
+##   destructuring of exactly 10 fields. startupmanager 82/82 tests pass.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/weather format_temp() used "{:.0}" which
+##   rounds half-to-even (banker's rounding), so 22.5°C displayed as "22°" instead of
+##   the expected "23°"; same for Fahrenheit. Switched both branches to .round()
+##   (half-away-from-zero) before formatting. weather 112/112 tests pass.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/mindmap redo of node additions lost nodes.
 ##   MindMapApp::apply_forward(Action::AddNode) called MindMap::add_child(), which
 ##   allocates a FRESH node id. After undo/undo then redo/redo, the first redo

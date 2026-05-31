@@ -1,4 +1,4 @@
-//! OurOS Code Snippet Manager
+//! `OurOS` Code Snippet Manager
 //!
 //! A code snippet organizer and manager with:
 //! - Snippet storage with language detection and syntax highlighting
@@ -160,51 +160,157 @@ impl Language {
 
     fn keywords(self) -> &'static [&'static str] {
         match self {
-            Self::Rust => &["fn", "let", "mut", "pub", "struct", "enum", "impl", "trait",
-                           "use", "mod", "match", "if", "else", "for", "while", "loop",
-                           "return", "self", "Self", "const", "static", "type", "where",
-                           "async", "await", "move", "ref", "unsafe", "extern", "crate"],
-            Self::Python => &["def", "class", "import", "from", "if", "elif", "else", "for",
-                            "while", "return", "yield", "with", "as", "try", "except",
-                            "finally", "raise", "pass", "break", "continue", "lambda",
-                            "and", "or", "not", "in", "is", "True", "False", "None"],
-            Self::JavaScript | Self::TypeScript => &["function", "const", "let", "var", "if", "else",
-                            "for", "while", "return", "class", "new", "this", "import",
-                            "export", "default", "async", "await", "try", "catch",
-                            "throw", "typeof", "instanceof", "null", "undefined", "true", "false"],
-            Self::C | Self::Cpp => &["int", "char", "float", "double", "void", "if", "else",
-                            "for", "while", "do", "return", "struct", "typedef", "enum",
-                            "switch", "case", "break", "continue", "sizeof", "static",
-                            "const", "unsigned", "signed", "long", "short", "extern",
-                            "include", "define", "ifdef", "ifndef", "endif"],
-            Self::Java => &["class", "public", "private", "protected", "static", "void",
-                          "int", "boolean", "String", "new", "return", "if", "else",
-                          "for", "while", "import", "package", "extends", "implements",
-                          "interface", "try", "catch", "throw", "throws", "final",
-                          "abstract", "synchronized", "this", "super", "null", "true", "false"],
-            Self::Go => &["func", "package", "import", "var", "const", "type", "struct",
-                        "interface", "map", "chan", "go", "defer", "return", "if", "else",
-                        "for", "range", "switch", "case", "select", "break", "continue",
-                        "nil", "true", "false", "make", "append", "len", "cap"],
-            Self::Shell => &["if", "then", "else", "elif", "fi", "for", "do", "done",
-                           "while", "until", "case", "esac", "function", "return",
-                           "echo", "exit", "export", "source", "local", "readonly",
-                           "shift", "set", "unset", "eval", "exec", "trap"],
-            Self::Sql => &["SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE",
-                         "CREATE", "DROP", "ALTER", "TABLE", "INDEX", "VIEW",
-                         "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON",
-                         "AND", "OR", "NOT", "IN", "LIKE", "ORDER", "BY",
-                         "GROUP", "HAVING", "LIMIT", "OFFSET", "AS", "NULL",
-                         "INTO", "VALUES", "SET", "DISTINCT", "COUNT", "SUM", "AVG"],
-            Self::Html => &["html", "head", "body", "div", "span", "p", "a", "img",
-                          "table", "tr", "td", "th", "ul", "ol", "li", "form",
-                          "input", "button", "script", "style", "link", "meta",
-                          "h1", "h2", "h3", "h4", "h5", "h6", "br", "hr"],
-            Self::Css => &["color", "background", "margin", "padding", "border",
-                         "font", "display", "position", "width", "height",
-                         "flex", "grid", "align", "justify", "transform",
-                         "transition", "animation", "opacity", "overflow",
-                         "cursor", "z-index", "box-shadow", "text-align"],
+            Self::Rust => &[
+                "fn", "let", "mut", "pub", "struct", "enum", "impl", "trait", "use", "mod",
+                "match", "if", "else", "for", "while", "loop", "return", "self", "Self", "const",
+                "static", "type", "where", "async", "await", "move", "ref", "unsafe", "extern",
+                "crate",
+            ],
+            Self::Python => &[
+                "def", "class", "import", "from", "if", "elif", "else", "for", "while", "return",
+                "yield", "with", "as", "try", "except", "finally", "raise", "pass", "break",
+                "continue", "lambda", "and", "or", "not", "in", "is", "True", "False", "None",
+            ],
+            Self::JavaScript | Self::TypeScript => &[
+                "function",
+                "const",
+                "let",
+                "var",
+                "if",
+                "else",
+                "for",
+                "while",
+                "return",
+                "class",
+                "new",
+                "this",
+                "import",
+                "export",
+                "default",
+                "async",
+                "await",
+                "try",
+                "catch",
+                "throw",
+                "typeof",
+                "instanceof",
+                "null",
+                "undefined",
+                "true",
+                "false",
+            ],
+            Self::C | Self::Cpp => &[
+                "int", "char", "float", "double", "void", "if", "else", "for", "while", "do",
+                "return", "struct", "typedef", "enum", "switch", "case", "break", "continue",
+                "sizeof", "static", "const", "unsigned", "signed", "long", "short", "extern",
+                "include", "define", "ifdef", "ifndef", "endif",
+            ],
+            Self::Java => &[
+                "class",
+                "public",
+                "private",
+                "protected",
+                "static",
+                "void",
+                "int",
+                "boolean",
+                "String",
+                "new",
+                "return",
+                "if",
+                "else",
+                "for",
+                "while",
+                "import",
+                "package",
+                "extends",
+                "implements",
+                "interface",
+                "try",
+                "catch",
+                "throw",
+                "throws",
+                "final",
+                "abstract",
+                "synchronized",
+                "this",
+                "super",
+                "null",
+                "true",
+                "false",
+            ],
+            Self::Go => &[
+                "func",
+                "package",
+                "import",
+                "var",
+                "const",
+                "type",
+                "struct",
+                "interface",
+                "map",
+                "chan",
+                "go",
+                "defer",
+                "return",
+                "if",
+                "else",
+                "for",
+                "range",
+                "switch",
+                "case",
+                "select",
+                "break",
+                "continue",
+                "nil",
+                "true",
+                "false",
+                "make",
+                "append",
+                "len",
+                "cap",
+            ],
+            Self::Shell => &[
+                "if", "then", "else", "elif", "fi", "for", "do", "done", "while", "until", "case",
+                "esac", "function", "return", "echo", "exit", "export", "source", "local",
+                "readonly", "shift", "set", "unset", "eval", "exec", "trap",
+            ],
+            Self::Sql => &[
+                "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "CREATE", "DROP", "ALTER",
+                "TABLE", "INDEX", "VIEW", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON", "AND",
+                "OR", "NOT", "IN", "LIKE", "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET",
+                "AS", "NULL", "INTO", "VALUES", "SET", "DISTINCT", "COUNT", "SUM", "AVG",
+            ],
+            Self::Html => &[
+                "html", "head", "body", "div", "span", "p", "a", "img", "table", "tr", "td", "th",
+                "ul", "ol", "li", "form", "input", "button", "script", "style", "link", "meta",
+                "h1", "h2", "h3", "h4", "h5", "h6", "br", "hr",
+            ],
+            Self::Css => &[
+                "color",
+                "background",
+                "margin",
+                "padding",
+                "border",
+                "font",
+                "display",
+                "position",
+                "width",
+                "height",
+                "flex",
+                "grid",
+                "align",
+                "justify",
+                "transform",
+                "transition",
+                "animation",
+                "opacity",
+                "overflow",
+                "cursor",
+                "z-index",
+                "box-shadow",
+                "text-align",
+            ],
             Self::PlainText => &[],
         }
     }
@@ -232,13 +338,24 @@ impl Language {
 
         // Shebang detection
         if first_line.starts_with("#!") {
-            if first_line.contains("python") { return Self::Python; }
-            if first_line.contains("node") { return Self::JavaScript; }
-            if first_line.contains("bash") || first_line.contains("sh") { return Self::Shell; }
+            if first_line.contains("python") {
+                return Self::Python;
+            }
+            if first_line.contains("node") {
+                return Self::JavaScript;
+            }
+            if first_line.contains("bash") || first_line.contains("sh") {
+                return Self::Shell;
+            }
         }
 
-        // Keyword-based heuristic
-        if content.contains("fn ") && content.contains("let ") && (content.contains("->") || content.contains("::")) {
+        // Keyword-based heuristic. `fn ` is a strong Rust signal (no other
+        // supported language uses it); pair it with any one of the common Rust
+        // tokens rather than requiring all of them, since plenty of valid Rust
+        // has no `->` or `::`.
+        if content.contains("fn ")
+            && (content.contains("let ") || content.contains("->") || content.contains("::"))
+        {
             return Self::Rust;
         }
         if content.contains("def ") && content.contains("import ") && !content.contains('{') {
@@ -270,9 +387,19 @@ impl Language {
 
     fn all() -> &'static [Self] {
         &[
-            Self::Rust, Self::Python, Self::JavaScript, Self::TypeScript,
-            Self::C, Self::Cpp, Self::Java, Self::Go, Self::Shell,
-            Self::Sql, Self::Html, Self::Css, Self::PlainText,
+            Self::Rust,
+            Self::Python,
+            Self::JavaScript,
+            Self::TypeScript,
+            Self::C,
+            Self::Cpp,
+            Self::Java,
+            Self::Go,
+            Self::Shell,
+            Self::Sql,
+            Self::Html,
+            Self::Css,
+            Self::PlainText,
         ]
     }
 }
@@ -325,6 +452,12 @@ fn tokenize(content: &str, language: Language) -> Vec<Vec<Token>> {
         result.push(tokens);
     }
 
+    // `str::lines()` yields nothing for an empty string, but an empty document
+    // still has a single (empty) line in editor terms.
+    if result.is_empty() {
+        result.push(Vec::new());
+    }
+
     result
 }
 
@@ -339,17 +472,26 @@ fn tokenize_line(line: &str, keywords: &[&str], language: Language) -> Vec<Token
         // Comment detection
         if c == '/' && chars.get(i.saturating_add(1)) == Some(&'/') {
             let rest: String = chars[i..].iter().collect();
-            tokens.push(Token { text: rest, kind: TokenKind::Comment });
+            tokens.push(Token {
+                text: rest,
+                kind: TokenKind::Comment,
+            });
             break;
         }
         if c == '#' && matches!(language, Language::Python | Language::Shell) {
             let rest: String = chars[i..].iter().collect();
-            tokens.push(Token { text: rest, kind: TokenKind::Comment });
+            tokens.push(Token {
+                text: rest,
+                kind: TokenKind::Comment,
+            });
             break;
         }
         if c == '-' && chars.get(i.saturating_add(1)) == Some(&'-') && language == Language::Sql {
             let rest: String = chars[i..].iter().collect();
-            tokens.push(Token { text: rest, kind: TokenKind::Comment });
+            tokens.push(Token {
+                text: rest,
+                kind: TokenKind::Comment,
+            });
             break;
         }
 
@@ -364,26 +506,44 @@ fn tokenize_line(line: &str, keywords: &[&str], language: Language) -> Vec<Token
                 s.push(sc);
                 if sc == '\\' {
                     i = i.saturating_add(1);
-                    if i < chars.len() { s.push(chars[i]); }
+                    if i < chars.len() {
+                        s.push(chars[i]);
+                    }
                 } else if sc == quote {
                     break;
                 }
                 i = i.saturating_add(1);
             }
-            tokens.push(Token { text: s, kind: TokenKind::String });
+            tokens.push(Token {
+                text: s,
+                kind: TokenKind::String,
+            });
             i = i.saturating_add(1);
             continue;
         }
 
         // Number
-        if c.is_ascii_digit() || (c == '.' && chars.get(i.saturating_add(1)).map_or(false, |n| n.is_ascii_digit())) {
+        if c.is_ascii_digit()
+            || (c == '.'
+                && chars
+                    .get(i.saturating_add(1))
+                    .is_some_and(char::is_ascii_digit))
+        {
             let mut n = String::new();
-            while i < chars.len() && (chars[i].is_ascii_digit() || chars[i] == '.' || chars[i] == 'x' || chars[i] == 'b'
-                || (chars[i].is_ascii_hexdigit() && n.contains("0x"))) {
+            while i < chars.len()
+                && (chars[i].is_ascii_digit()
+                    || chars[i] == '.'
+                    || chars[i] == 'x'
+                    || chars[i] == 'b'
+                    || (chars[i].is_ascii_hexdigit() && n.contains("0x")))
+            {
                 n.push(chars[i]);
                 i = i.saturating_add(1);
             }
-            tokens.push(Token { text: n, kind: TokenKind::Number });
+            tokens.push(Token {
+                text: n,
+                kind: TokenKind::Number,
+            });
             continue;
         }
 
@@ -395,9 +555,11 @@ fn tokenize_line(line: &str, keywords: &[&str], language: Language) -> Vec<Token
                 i = i.saturating_add(1);
             }
 
-            let kind = if keywords.iter().any(|&kw| kw == ident.as_str()) {
+            let kind = if keywords.contains(&ident.as_str()) {
                 TokenKind::Keyword
-            } else if ident.chars().next().map_or(false, |c| c.is_ascii_uppercase()) && language != Language::Sql {
+            } else if ident.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+                && language != Language::Sql
+            {
                 TokenKind::Type
             } else {
                 TokenKind::Identifier
@@ -417,19 +579,28 @@ fn tokenize_line(line: &str, keywords: &[&str], language: Language) -> Vec<Token
                 op.push(chars[i]);
                 i = i.saturating_add(1);
             }
-            tokens.push(Token { text: op, kind: TokenKind::Operator });
+            tokens.push(Token {
+                text: op,
+                kind: TokenKind::Operator,
+            });
             continue;
         }
 
         // Punctuation
         if "(){}[].,;:@#?".contains(c) {
-            tokens.push(Token { text: c.to_string(), kind: TokenKind::Punctuation });
+            tokens.push(Token {
+                text: c.to_string(),
+                kind: TokenKind::Punctuation,
+            });
             i = i.saturating_add(1);
             continue;
         }
 
         // Whitespace and other
-        tokens.push(Token { text: c.to_string(), kind: TokenKind::Plain });
+        tokens.push(Token {
+            text: c.to_string(),
+            kind: TokenKind::Plain,
+        });
         i = i.saturating_add(1);
     }
 
@@ -508,25 +679,35 @@ impl SearchScope {
     }
 }
 
-fn search_snippets<'a>(snippets: &'a [Snippet], query: &str, scope: SearchScope) -> Vec<&'a Snippet> {
+fn search_snippets<'a>(
+    snippets: &'a [Snippet],
+    query: &str,
+    scope: SearchScope,
+) -> Vec<&'a Snippet> {
     if query.is_empty() {
         return snippets.iter().collect();
     }
 
     let lower_query = query.to_ascii_lowercase();
-    snippets.iter().filter(|s| {
-        match scope {
+    snippets
+        .iter()
+        .filter(|s| match scope {
             SearchScope::All => {
                 s.title.to_ascii_lowercase().contains(&lower_query)
                     || s.content.to_ascii_lowercase().contains(&lower_query)
-                    || s.tags.iter().any(|t| t.to_ascii_lowercase().contains(&lower_query))
+                    || s.tags
+                        .iter()
+                        .any(|t| t.to_ascii_lowercase().contains(&lower_query))
                     || s.description.to_ascii_lowercase().contains(&lower_query)
             }
             SearchScope::Title => s.title.to_ascii_lowercase().contains(&lower_query),
             SearchScope::Content => s.content.to_ascii_lowercase().contains(&lower_query),
-            SearchScope::Tags => s.tags.iter().any(|t| t.to_ascii_lowercase().contains(&lower_query)),
-        }
-    }).collect()
+            SearchScope::Tags => s
+                .tags
+                .iter()
+                .any(|t| t.to_ascii_lowercase().contains(&lower_query)),
+        })
+        .collect()
 }
 
 // ============================================================================
@@ -534,24 +715,35 @@ fn search_snippets<'a>(snippets: &'a [Snippet], query: &str, scope: SearchScope)
 // ============================================================================
 
 fn export_snippets_json(snippets: &[Snippet]) -> String {
+    use std::fmt::Write as _;
     let mut json = String::from("{\n  \"snippets\": [\n");
 
     for (i, snippet) in snippets.iter().enumerate() {
         json.push_str("    {\n");
-        json.push_str(&format!("      \"title\": {},\n", json_escape(&snippet.title)));
-        json.push_str(&format!("      \"language\": \"{}\",\n", snippet.language.name()));
-        json.push_str(&format!("      \"content\": {},\n", json_escape(&snippet.content)));
-        json.push_str(&format!("      \"description\": {},\n", json_escape(&snippet.description)));
+        let _ = writeln!(json, "      \"title\": {},", json_escape(&snippet.title));
+        let _ = writeln!(json, "      \"language\": \"{}\",", snippet.language.name());
+        let _ = writeln!(
+            json,
+            "      \"content\": {},",
+            json_escape(&snippet.content)
+        );
+        let _ = writeln!(
+            json,
+            "      \"description\": {},",
+            json_escape(&snippet.description)
+        );
 
         json.push_str("      \"tags\": [");
         for (ti, tag) in snippet.tags.iter().enumerate() {
-            if ti > 0 { json.push_str(", "); }
+            if ti > 0 {
+                json.push_str(", ");
+            }
             json.push_str(&json_escape(tag));
         }
         json.push_str("],\n");
 
-        json.push_str(&format!("      \"favorite\": {},\n", snippet.favorite));
-        json.push_str(&format!("      \"is_template\": {}\n", snippet.is_template));
+        let _ = writeln!(json, "      \"favorite\": {},", snippet.favorite);
+        let _ = writeln!(json, "      \"is_template\": {}", snippet.is_template);
 
         json.push_str("    }");
         if i < snippets.len().saturating_sub(1) {
@@ -565,6 +757,7 @@ fn export_snippets_json(snippets: &[Snippet]) -> String {
 }
 
 fn json_escape(s: &str) -> String {
+    use std::fmt::Write as _;
     let mut escaped = String::from("\"");
     for c in s.chars() {
         match c {
@@ -574,7 +767,7 @@ fn json_escape(s: &str) -> String {
             '\r' => escaped.push_str("\\r"),
             '\t' => escaped.push_str("\\t"),
             c if (c as u32) < 0x20 => {
-                escaped.push_str(&format!("\\u{:04x}", c as u32));
+                let _ = write!(escaped, "\\u{:04x}", c as u32);
             }
             c => escaped.push(c),
         }
@@ -657,7 +850,7 @@ fn compute_stats(snippets: &[Snippet], folders: &[Folder]) -> LibraryStats {
             by_language.push((*lang, count));
         }
     }
-    by_language.sort_by(|a, b| b.1.cmp(&a.1));
+    by_language.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
 
     let total_lines: usize = snippets.iter().map(|s| s.content.lines().count()).sum();
     let total_chars: usize = snippets.iter().map(|s| s.content.len()).sum();
@@ -846,7 +1039,12 @@ impl App {
             use_count: 10,
             description: "Rust function template with placeholders".into(),
             is_template: true,
-            template_vars: vec!["function_name".into(), "params".into(), "return_type".into(), "body".into()],
+            template_vars: vec![
+                "function_name".into(),
+                "params".into(),
+                "return_type".into(),
+                "body".into(),
+            ],
         });
 
         snippets.push(Snippet {
@@ -964,7 +1162,9 @@ impl App {
             }
         }
         // Delete child folders
-        let child_ids: Vec<FolderId> = self.folders.iter()
+        let child_ids: Vec<FolderId> = self
+            .folders
+            .iter()
             .filter(|f| f.parent_id == Some(id))
             .map(|f| f.id)
             .collect();
@@ -1015,7 +1215,10 @@ impl App {
                 results.retain(|s| recent.contains(&s.id));
                 // Sort by recency
                 results.sort_by_key(|s| {
-                    recent.iter().position(|&id| id == s.id).unwrap_or(usize::MAX)
+                    recent
+                        .iter()
+                        .position(|&id| id == s.id)
+                        .unwrap_or(usize::MAX)
                 });
                 return results;
             }
@@ -1027,16 +1230,19 @@ impl App {
             SortOrder::NameAsc => results.sort_by(|a, b| a.title.cmp(&b.title)),
             SortOrder::NameDesc => results.sort_by(|a, b| b.title.cmp(&a.title)),
             SortOrder::DateAsc => results.sort_by_key(|s| s.created_at),
-            SortOrder::DateDesc => results.sort_by(|a, b| b.created_at.cmp(&a.created_at)),
-            SortOrder::UsageDesc => results.sort_by(|a, b| b.use_count.cmp(&a.use_count)),
-            SortOrder::LanguageAsc => results.sort_by(|a, b| a.language.name().cmp(b.language.name())),
+            SortOrder::DateDesc => results.sort_by_key(|s| std::cmp::Reverse(s.created_at)),
+            SortOrder::UsageDesc => results.sort_by_key(|s| std::cmp::Reverse(s.use_count)),
+            SortOrder::LanguageAsc => {
+                results.sort_by(|a, b| a.language.name().cmp(b.language.name()))
+            }
         }
 
         results
     }
 
     fn selected_snippet(&self) -> Option<&Snippet> {
-        self.selected_snippet_id.and_then(|id| self.snippets.iter().find(|s| s.id == id))
+        self.selected_snippet_id
+            .and_then(|id| self.snippets.iter().find(|s| s.id == id))
     }
 
     fn stats(&self) -> LibraryStats {
@@ -1054,7 +1260,7 @@ impl App {
                 }
             }
         }
-        tag_counts.sort_by(|a, b| b.1.cmp(&a.1));
+        tag_counts.sort_by_key(|&(_, count)| std::cmp::Reverse(count));
         tag_counts
     }
 
@@ -1063,8 +1269,10 @@ impl App {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: WINDOW_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1096,15 +1304,18 @@ impl App {
 
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: TOOLBAR_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: TOOLBAR_HEIGHT,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: PADDING, y: 13.0,
+            x: PADDING,
+            y: 13.0,
             text: "Snippet Manager".into(),
             font_size: TITLE_TEXT,
             color: TEXT,
@@ -1113,18 +1324,26 @@ impl App {
         });
 
         // Action buttons
-        let buttons = [("+ New", BLUE), ("Import", TEAL), ("Export", GREEN), ("Stats", MAUVE)];
+        let buttons = [
+            ("+ New", BLUE),
+            ("Import", TEAL),
+            ("Export", GREEN),
+            ("Stats", MAUVE),
+        ];
         let mut bx = 180.0;
         for (label, color) in &buttons {
             let bw = (label.len() as f32) * CHAR_WIDTH + 16.0;
             cmds.push(RenderCommand::FillRect {
-                x: bx, y: 8.0,
-                width: bw, height: 28.0,
+                x: bx,
+                y: 8.0,
+                width: bw,
+                height: 28.0,
                 color: *color,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: bx + 8.0, y: 14.0,
+                x: bx + 8.0,
+                y: 14.0,
                 text: (*label).into(),
                 font_size: SMALL_TEXT,
                 color: CRUST,
@@ -1138,16 +1357,27 @@ impl App {
         let search_x = WINDOW_WIDTH - 320.0;
         let search_w = 250.0;
         cmds.push(RenderCommand::FillRect {
-            x: search_x, y: 8.0,
-            width: search_w, height: 28.0,
+            x: search_x,
+            y: 8.0,
+            width: search_w,
+            height: 28.0,
             color: SURFACE0,
             corner_radii: CornerRadii::all(14.0),
         });
 
-        let search_display = if self.search_query.is_empty() { "Search snippets..." } else { &self.search_query };
-        let search_color = if self.search_query.is_empty() { OVERLAY0 } else { TEXT };
+        let search_display = if self.search_query.is_empty() {
+            "Search snippets..."
+        } else {
+            &self.search_query
+        };
+        let search_color = if self.search_query.is_empty() {
+            OVERLAY0
+        } else {
+            TEXT
+        };
         cmds.push(RenderCommand::Text {
-            x: search_x + 12.0, y: 15.0,
+            x: search_x + 12.0,
+            y: 15.0,
             text: search_display.into(),
             font_size: SMALL_TEXT,
             color: search_color,
@@ -1157,7 +1387,8 @@ impl App {
 
         // Snippet count
         cmds.push(RenderCommand::Text {
-            x: WINDOW_WIDTH - 60.0, y: 15.0,
+            x: WINDOW_WIDTH - 60.0,
+            y: 15.0,
             text: format!("{}", self.snippets.len()),
             font_size: SMALL_TEXT,
             color: SUBTEXT0,
@@ -1171,16 +1402,22 @@ impl App {
 
         // Sidebar background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y,
-            width: SIDEBAR_WIDTH, height,
+            x: 0.0,
+            y,
+            width: SIDEBAR_WIDTH,
+            height,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // View categories
         let views = [
-            SidebarView::Folders, SidebarView::Tags, SidebarView::Languages,
-            SidebarView::Favorites, SidebarView::Recent, SidebarView::Templates,
+            SidebarView::Folders,
+            SidebarView::Tags,
+            SidebarView::Languages,
+            SidebarView::Favorites,
+            SidebarView::Recent,
+            SidebarView::Templates,
         ];
 
         for (vi, view) in views.iter().enumerate() {
@@ -1189,15 +1426,18 @@ impl App {
 
             if selected {
                 cmds.push(RenderCommand::FillRect {
-                    x: 4.0, y: vy,
-                    width: SIDEBAR_WIDTH - 8.0, height: 26.0,
+                    x: 4.0,
+                    y: vy,
+                    width: SIDEBAR_WIDTH - 8.0,
+                    height: 26.0,
                     color: SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
 
             cmds.push(RenderCommand::Text {
-                x: 12.0, y: vy + 5.0,
+                x: 12.0,
+                y: vy + 5.0,
                 text: view.icon().into(),
                 font_size: SMALL_TEXT,
                 color: if selected { BLUE } else { OVERLAY0 },
@@ -1206,11 +1446,16 @@ impl App {
             });
 
             cmds.push(RenderCommand::Text {
-                x: 44.0, y: vy + 6.0,
+                x: 44.0,
+                y: vy + 6.0,
                 text: view.label().into(),
                 font_size: NORMAL_TEXT,
                 color: if selected { TEXT } else { SUBTEXT0 },
-                font_weight: if selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(SIDEBAR_WIDTH - 56.0),
             });
         }
@@ -1218,8 +1463,10 @@ impl App {
         // Separator
         let sep_y = y + 4.0 + (views.len() as f32) * 30.0 + 4.0;
         cmds.push(RenderCommand::FillRect {
-            x: 8.0, y: sep_y,
-            width: SIDEBAR_WIDTH - 16.0, height: 1.0,
+            x: 8.0,
+            y: sep_y,
+            width: SIDEBAR_WIDTH - 16.0,
+            height: 1.0,
             color: SURFACE1,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1229,16 +1476,22 @@ impl App {
         match self.sidebar_view {
             SidebarView::Folders => {
                 for (fi, folder) in self.folders.iter().enumerate() {
-                    if folder.parent_id.is_some() { continue; } // only top-level for now
+                    if folder.parent_id.is_some() {
+                        continue;
+                    } // only top-level for now
                     let fy = items_y + (fi as f32) * 26.0;
-                    if fy > WINDOW_HEIGHT - 20.0 { break; }
+                    if fy > WINDOW_HEIGHT - 20.0 {
+                        break;
+                    }
 
                     let selected = self.selected_folder_id == Some(folder.id);
 
                     if selected {
                         cmds.push(RenderCommand::FillRect {
-                            x: 4.0, y: fy,
-                            width: SIDEBAR_WIDTH - 8.0, height: 22.0,
+                            x: 4.0,
+                            y: fy,
+                            width: SIDEBAR_WIDTH - 8.0,
+                            height: 22.0,
                             color: SURFACE0,
                             corner_radii: CornerRadii::all(3.0),
                         });
@@ -1246,14 +1499,17 @@ impl App {
 
                     // Folder color dot
                     cmds.push(RenderCommand::FillRect {
-                        x: 14.0, y: fy + 6.0,
-                        width: 10.0, height: 10.0,
+                        x: 14.0,
+                        y: fy + 6.0,
+                        width: 10.0,
+                        height: 10.0,
                         color: folder.color,
                         corner_radii: CornerRadii::all(5.0),
                     });
 
                     cmds.push(RenderCommand::Text {
-                        x: 30.0, y: fy + 4.0,
+                        x: 30.0,
+                        y: fy + 4.0,
                         text: folder.name.clone(),
                         font_size: SMALL_TEXT,
                         color: if selected { TEXT } else { SUBTEXT0 },
@@ -1262,9 +1518,14 @@ impl App {
                     });
 
                     // Count
-                    let count = self.snippets.iter().filter(|s| s.folder_id == Some(folder.id)).count();
+                    let count = self
+                        .snippets
+                        .iter()
+                        .filter(|s| s.folder_id == Some(folder.id))
+                        .count();
                     cmds.push(RenderCommand::Text {
-                        x: SIDEBAR_WIDTH - 30.0, y: fy + 4.0,
+                        x: SIDEBAR_WIDTH - 30.0,
+                        y: fy + 4.0,
                         text: format!("{count}"),
                         font_size: SMALL_TEXT,
                         color: OVERLAY0,
@@ -1277,10 +1538,13 @@ impl App {
                 let tags = self.all_tags();
                 for (ti, (tag, count)) in tags.iter().enumerate() {
                     let ty = items_y + (ti as f32) * 22.0;
-                    if ty > WINDOW_HEIGHT - 20.0 { break; }
+                    if ty > WINDOW_HEIGHT - 20.0 {
+                        break;
+                    }
 
                     cmds.push(RenderCommand::Text {
-                        x: 14.0, y: ty + 2.0,
+                        x: 14.0,
+                        y: ty + 2.0,
                         text: format!("#{tag}"),
                         font_size: SMALL_TEXT,
                         color: TEAL,
@@ -1288,7 +1552,8 @@ impl App {
                         max_width: Some(SIDEBAR_WIDTH - 50.0),
                     });
                     cmds.push(RenderCommand::Text {
-                        x: SIDEBAR_WIDTH - 30.0, y: ty + 2.0,
+                        x: SIDEBAR_WIDTH - 30.0,
+                        y: ty + 2.0,
                         text: format!("{count}"),
                         font_size: SMALL_TEXT,
                         color: OVERLAY0,
@@ -1300,18 +1565,25 @@ impl App {
             SidebarView::Languages => {
                 for (li, lang) in Language::all().iter().enumerate() {
                     let count = self.snippets.iter().filter(|s| s.language == *lang).count();
-                    if count == 0 { continue; }
+                    if count == 0 {
+                        continue;
+                    }
                     let ly = items_y + (li as f32) * 22.0;
-                    if ly > WINDOW_HEIGHT - 20.0 { break; }
+                    if ly > WINDOW_HEIGHT - 20.0 {
+                        break;
+                    }
 
                     cmds.push(RenderCommand::FillRect {
-                        x: 14.0, y: ly + 5.0,
-                        width: 8.0, height: 8.0,
+                        x: 14.0,
+                        y: ly + 5.0,
+                        width: 8.0,
+                        height: 8.0,
                         color: lang.color(),
                         corner_radii: CornerRadii::all(4.0),
                     });
                     cmds.push(RenderCommand::Text {
-                        x: 28.0, y: ly + 2.0,
+                        x: 28.0,
+                        y: ly + 2.0,
                         text: lang.name().into(),
                         font_size: SMALL_TEXT,
                         color: SUBTEXT0,
@@ -1319,7 +1591,8 @@ impl App {
                         max_width: Some(SIDEBAR_WIDTH - 60.0),
                     });
                     cmds.push(RenderCommand::Text {
-                        x: SIDEBAR_WIDTH - 30.0, y: ly + 2.0,
+                        x: SIDEBAR_WIDTH - 30.0,
+                        y: ly + 2.0,
                         text: format!("{count}"),
                         font_size: SMALL_TEXT,
                         color: OVERLAY0,
@@ -1337,29 +1610,36 @@ impl App {
 
         // List background
         cmds.push(RenderCommand::FillRect {
-            x, y,
-            width: LIST_WIDTH, height,
+            x,
+            y,
+            width: LIST_WIDTH,
+            height,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Border
         cmds.push(RenderCommand::FillRect {
-            x, y,
-            width: 1.0, height,
+            x,
+            y,
+            width: 1.0,
+            height,
             color: SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Sort header
         cmds.push(RenderCommand::FillRect {
-            x: x + 1.0, y,
-            width: LIST_WIDTH - 1.0, height: 28.0,
+            x: x + 1.0,
+            y,
+            width: LIST_WIDTH - 1.0,
+            height: 28.0,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
-            x: x + 8.0, y: y + 7.0,
+            x: x + 8.0,
+            y: y + 7.0,
             text: format!("Sort: {}", self.sort_order.label()),
             font_size: SMALL_TEXT,
             color: SUBTEXT0,
@@ -1374,14 +1654,18 @@ impl App {
 
         for (si, snippet) in filtered.iter().enumerate() {
             let sy = list_y + (si as f32) * item_height - self.list_scroll;
-            if sy < list_y - item_height || sy > WINDOW_HEIGHT { continue; }
+            if sy < list_y - item_height || sy > WINDOW_HEIGHT {
+                continue;
+            }
 
             let selected = self.selected_snippet_id == Some(snippet.id);
 
             // Item background
             cmds.push(RenderCommand::FillRect {
-                x: x + 4.0, y: sy,
-                width: LIST_WIDTH - 8.0, height: item_height - 4.0,
+                x: x + 4.0,
+                y: sy,
+                width: LIST_WIDTH - 8.0,
+                height: item_height - 4.0,
                 color: if selected { SURFACE0 } else { BASE },
                 corner_radii: CornerRadii::all(4.0),
             });
@@ -1389,13 +1673,16 @@ impl App {
             // Language badge
             let badge_w = (snippet.language.name().len() as f32) * 6.0 + 8.0;
             cmds.push(RenderCommand::FillRect {
-                x: x + 8.0, y: sy + 4.0,
-                width: badge_w, height: 16.0,
+                x: x + 8.0,
+                y: sy + 4.0,
+                width: badge_w,
+                height: 16.0,
                 color: snippet.language.color(),
                 corner_radii: CornerRadii::all(8.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: sy + 6.0,
+                x: x + 12.0,
+                y: sy + 6.0,
                 text: snippet.language.name().into(),
                 font_size: 10.0,
                 color: CRUST,
@@ -1406,7 +1693,8 @@ impl App {
             // Favorite star
             if snippet.favorite {
                 cmds.push(RenderCommand::Text {
-                    x: x + LIST_WIDTH - 24.0, y: sy + 4.0,
+                    x: x + LIST_WIDTH - 24.0,
+                    y: sy + 4.0,
                     text: "*".into(),
                     font_size: NORMAL_TEXT,
                     color: YELLOW,
@@ -1417,7 +1705,8 @@ impl App {
 
             // Title
             cmds.push(RenderCommand::Text {
-                x: x + 8.0, y: sy + 22.0,
+                x: x + 8.0,
+                y: sy + 22.0,
                 text: truncate_str(&snippet.title, 32),
                 font_size: NORMAL_TEXT,
                 color: if selected { TEXT } else { SUBTEXT1 },
@@ -1427,9 +1716,16 @@ impl App {
 
             // Tags
             if !snippet.tags.is_empty() {
-                let tags_str: String = snippet.tags.iter().take(3).map(|t| format!("#{t}")).collect::<Vec<_>>().join(" ");
+                let tags_str: String = snippet
+                    .tags
+                    .iter()
+                    .take(3)
+                    .map(|t| format!("#{t}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 cmds.push(RenderCommand::Text {
-                    x: x + 8.0, y: sy + 40.0,
+                    x: x + 8.0,
+                    y: sy + 40.0,
                     text: tags_str,
                     font_size: 10.0,
                     color: OVERLAY0,
@@ -1441,7 +1737,8 @@ impl App {
 
         if filtered.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: x + (LIST_WIDTH / 2.0) - 50.0, y: list_y + 40.0,
+                x: x + (LIST_WIDTH / 2.0) - 50.0,
+                y: list_y + 40.0,
                 text: "No snippets".into(),
                 font_size: NORMAL_TEXT,
                 color: OVERLAY0,
@@ -1456,16 +1753,20 @@ impl App {
 
         // Editor background
         cmds.push(RenderCommand::FillRect {
-            x, y,
-            width, height,
+            x,
+            y,
+            width,
+            height,
             color: MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Left border
         cmds.push(RenderCommand::FillRect {
-            x, y,
-            width: 1.0, height,
+            x,
+            y,
+            width: 1.0,
+            height,
             color: SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1473,15 +1774,18 @@ impl App {
         if let Some(snippet) = self.selected_snippet() {
             // Header
             cmds.push(RenderCommand::FillRect {
-                x: x + 1.0, y,
-                width: width - 1.0, height: 40.0,
+                x: x + 1.0,
+                y,
+                width: width - 1.0,
+                height: 40.0,
                 color: CRUST,
                 corner_radii: CornerRadii::ZERO,
             });
 
             // Title
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: y + 5.0,
+                x: x + 12.0,
+                y: y + 5.0,
                 text: snippet.title.clone(),
                 font_size: HEADER_TEXT,
                 color: TEXT,
@@ -1492,13 +1796,16 @@ impl App {
             // Template indicator
             if snippet.is_template {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + width - 100.0, y: y + 6.0,
-                    width: 70.0, height: 18.0,
+                    x: x + width - 100.0,
+                    y: y + 6.0,
+                    width: 70.0,
+                    height: 18.0,
                     color: YELLOW,
                     corner_radii: CornerRadii::all(9.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + width - 92.0, y: y + 9.0,
+                    x: x + width - 92.0,
+                    y: y + 9.0,
                     text: "Template".into(),
                     font_size: 10.0,
                     color: CRUST,
@@ -1509,7 +1816,8 @@ impl App {
 
             // Language badge
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: y + 25.0,
+                x: x + 12.0,
+                y: y + 25.0,
                 text: snippet.language.name().into(),
                 font_size: SMALL_TEXT,
                 color: snippet.language.color(),
@@ -1519,7 +1827,8 @@ impl App {
 
             // Use count
             cmds.push(RenderCommand::Text {
-                x: x + 100.0, y: y + 25.0,
+                x: x + 100.0,
+                y: y + 25.0,
                 text: format!("Used {} times", snippet.use_count),
                 font_size: SMALL_TEXT,
                 color: OVERLAY0,
@@ -1530,7 +1839,8 @@ impl App {
             // Description
             if !snippet.description.is_empty() {
                 cmds.push(RenderCommand::Text {
-                    x: x + 12.0, y: y + 45.0,
+                    x: x + 12.0,
+                    y: y + 45.0,
                     text: snippet.description.clone(),
                     font_size: SMALL_TEXT,
                     color: SUBTEXT0,
@@ -1544,8 +1854,10 @@ impl App {
             let code_h = height - 64.0 - 30.0; // leave room for status bar
 
             cmds.push(RenderCommand::FillRect {
-                x: x + 8.0, y: code_y,
-                width: width - 16.0, height: code_h,
+                x: x + 8.0,
+                y: code_y,
+                width: width - 16.0,
+                height: code_h,
                 color: BASE,
                 corner_radii: CornerRadii::all(6.0),
             });
@@ -1560,7 +1872,8 @@ impl App {
 
                 // Line number
                 cmds.push(RenderCommand::Text {
-                    x: x + 14.0, y: ly,
+                    x: x + 14.0,
+                    y: ly,
                     text: format!("{:>3}", li.saturating_add(1)),
                     font_size: SMALL_TEXT,
                     color: OVERLAY0,
@@ -1573,11 +1886,16 @@ impl App {
                 for token in line_tokens {
                     let tw = (token.text.len() as f32) * CHAR_WIDTH;
                     cmds.push(RenderCommand::Text {
-                        x: tx, y: ly,
+                        x: tx,
+                        y: ly,
                         text: token.text.clone(),
                         font_size: NORMAL_TEXT,
                         color: token.kind.color(),
-                        font_weight: if token.kind == TokenKind::Keyword { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                        font_weight: if token.kind == TokenKind::Keyword {
+                            FontWeightHint::Bold
+                        } else {
+                            FontWeightHint::Regular
+                        },
                         max_width: Some(width - (tx - x) - 12.0),
                     });
                     tx += tw;
@@ -1587,8 +1905,10 @@ impl App {
             // Tags bar at bottom
             let tags_y = y + height - 28.0;
             cmds.push(RenderCommand::FillRect {
-                x: x + 1.0, y: tags_y,
-                width: width - 1.0, height: 28.0,
+                x: x + 1.0,
+                y: tags_y,
+                width: width - 1.0,
+                height: 28.0,
                 color: CRUST,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -1597,13 +1917,16 @@ impl App {
             for tag in &snippet.tags {
                 let tw = (tag.len() as f32) * 7.0 + 16.0;
                 cmds.push(RenderCommand::FillRect {
-                    x: tag_x, y: tags_y + 4.0,
-                    width: tw, height: 20.0,
+                    x: tag_x,
+                    y: tags_y + 4.0,
+                    width: tw,
+                    height: 20.0,
                     color: SURFACE0,
                     corner_radii: CornerRadii::all(10.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: tag_x + 8.0, y: tags_y + 8.0,
+                    x: tag_x + 8.0,
+                    y: tags_y + 8.0,
                     text: format!("#{tag}"),
                     font_size: 10.0,
                     color: TEAL,
@@ -1616,18 +1939,19 @@ impl App {
             // Line count
             let line_count = snippet.content.lines().count();
             cmds.push(RenderCommand::Text {
-                x: x + width - 80.0, y: tags_y + 8.0,
+                x: x + width - 80.0,
+                y: tags_y + 8.0,
                 text: format!("{line_count} lines"),
                 font_size: SMALL_TEXT,
                 color: OVERLAY0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(70.0),
             });
-
         } else {
             // Empty state
             cmds.push(RenderCommand::Text {
-                x: x + width / 2.0 - 80.0, y: y + height / 2.0 - 20.0,
+                x: x + width / 2.0 - 80.0,
+                y: y + height / 2.0 - 20.0,
                 text: "Select a snippet".into(),
                 font_size: HEADER_TEXT,
                 color: OVERLAY0,
@@ -1635,7 +1959,8 @@ impl App {
                 max_width: Some(200.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + width / 2.0 - 100.0, y: y + height / 2.0 + 10.0,
+                x: x + width / 2.0 - 100.0,
+                y: y + height / 2.0 + 10.0,
                 text: "or create a new one".into(),
                 font_size: NORMAL_TEXT,
                 color: OVERLAY0,
@@ -1654,22 +1979,27 @@ impl App {
 
         // Backdrop
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: WINDOW_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
             color: Color::rgba(0, 0, 0, 128),
             corner_radii: CornerRadii::ZERO,
         });
 
         // Dialog
         cmds.push(RenderCommand::FillRect {
-            x: ox, y: oy,
-            width: overlay_w, height: overlay_h,
+            x: ox,
+            y: oy,
+            width: overlay_w,
+            height: overlay_h,
             color: MANTLE,
             corner_radii: CornerRadii::all(12.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: ox + 16.0, y: oy + 16.0,
+            x: ox + 16.0,
+            y: oy + 16.0,
             text: "Library Statistics".into(),
             font_size: TITLE_TEXT,
             color: BLUE,
@@ -1690,7 +2020,8 @@ impl App {
         for (si, (label, value)) in stat_items.iter().enumerate() {
             let sy = oy + 50.0 + (si as f32) * 24.0;
             cmds.push(RenderCommand::Text {
-                x: ox + 20.0, y: sy,
+                x: ox + 20.0,
+                y: sy,
                 text: (*label).into(),
                 font_size: NORMAL_TEXT,
                 color: SUBTEXT0,
@@ -1698,7 +2029,8 @@ impl App {
                 max_width: Some(150.0),
             });
             cmds.push(RenderCommand::Text {
-                x: ox + 180.0, y: sy,
+                x: ox + 180.0,
+                y: sy,
                 text: value.clone(),
                 font_size: NORMAL_TEXT,
                 color: TEXT,
@@ -1710,7 +2042,8 @@ impl App {
         // Language breakdown
         let lang_y = oy + 50.0 + (stat_items.len() as f32) * 24.0 + 10.0;
         cmds.push(RenderCommand::Text {
-            x: ox + 16.0, y: lang_y,
+            x: ox + 16.0,
+            y: lang_y,
             text: "By Language:".into(),
             font_size: SMALL_TEXT,
             color: SUBTEXT1,
@@ -1721,13 +2054,16 @@ impl App {
         for (li, (lang, count)) in stats.by_language.iter().take(5).enumerate() {
             let ly = lang_y + 20.0 + (li as f32) * 18.0;
             cmds.push(RenderCommand::FillRect {
-                x: ox + 20.0, y: ly + 3.0,
-                width: 8.0, height: 8.0,
+                x: ox + 20.0,
+                y: ly + 3.0,
+                width: 8.0,
+                height: 8.0,
                 color: lang.color(),
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: ox + 34.0, y: ly,
+                x: ox + 34.0,
+                y: ly,
                 text: format!("{}: {count}", lang.name()),
                 font_size: SMALL_TEXT,
                 color: SUBTEXT0,
@@ -1855,7 +2191,11 @@ mod tests {
     fn test_tokenize_keyword() {
         let result = tokenize("fn main", Language::Rust);
         assert_eq!(result.len(), 1);
-        assert!(result[0].iter().any(|t| t.kind == TokenKind::Keyword && t.text == "fn"));
+        assert!(
+            result[0]
+                .iter()
+                .any(|t| t.kind == TokenKind::Keyword && t.text == "fn")
+        );
     }
 
     #[test]
@@ -1867,7 +2207,11 @@ mod tests {
     #[test]
     fn test_tokenize_number() {
         let result = tokenize("let x = 42", Language::Rust);
-        assert!(result[0].iter().any(|t| t.kind == TokenKind::Number && t.text == "42"));
+        assert!(
+            result[0]
+                .iter()
+                .any(|t| t.kind == TokenKind::Number && t.text == "42")
+        );
     }
 
     #[test]
@@ -1904,9 +2248,7 @@ mod tests {
 
     #[test]
     fn test_search_empty_query() {
-        let snippets = vec![
-            make_test_snippet(1, "Hello", "world", Language::Rust),
-        ];
+        let snippets = vec![make_test_snippet(1, "Hello", "world", Language::Rust)];
         let results = search_snippets(&snippets, "", SearchScope::All);
         assert_eq!(results.len(), 1);
     }
@@ -1933,9 +2275,7 @@ mod tests {
 
     #[test]
     fn test_search_case_insensitive() {
-        let snippets = vec![
-            make_test_snippet(1, "RUST Code", "content", Language::Rust),
-        ];
+        let snippets = vec![make_test_snippet(1, "RUST Code", "content", Language::Rust)];
         let results = search_snippets(&snippets, "rust", SearchScope::All);
         assert_eq!(results.len(), 1);
     }
@@ -1979,9 +2319,7 @@ mod tests {
 
     #[test]
     fn test_export_json() {
-        let snippets = vec![
-            make_test_snippet(1, "Test", "fn main() {}", Language::Rust),
-        ];
+        let snippets = vec![make_test_snippet(1, "Test", "fn main() {}", Language::Rust)];
         let json = export_snippets_json(&snippets);
         assert!(json.contains("\"title\""));
         assert!(json.contains("Test"));
@@ -2055,9 +2393,15 @@ mod tests {
     fn test_app_use_snippet() {
         let mut app = App::new();
         let id = app.create_snippet("Test", "content", Language::PlainText);
-        assert_eq!(app.snippets.iter().find(|s| s.id == id).unwrap().use_count, 0);
+        assert_eq!(
+            app.snippets.iter().find(|s| s.id == id).unwrap().use_count,
+            0
+        );
         app.use_snippet(id);
-        assert_eq!(app.snippets.iter().find(|s| s.id == id).unwrap().use_count, 1);
+        assert_eq!(
+            app.snippets.iter().find(|s| s.id == id).unwrap().use_count,
+            1
+        );
         assert_eq!(app.recently_used[0], id);
     }
 

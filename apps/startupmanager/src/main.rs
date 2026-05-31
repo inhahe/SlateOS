@@ -252,7 +252,11 @@ impl StartupEntry {
 
     /// Status color for display.
     pub fn status_color(&self) -> Color {
-        if self.enabled { COLOR_GREEN } else { COLOR_OVERLAY0 }
+        if self.enabled {
+            COLOR_GREEN
+        } else {
+            COLOR_OVERLAY0
+        }
     }
 }
 
@@ -503,7 +507,10 @@ impl StartupManager {
         let mut entries: Vec<&StartupEntry> = self.entries.values().collect();
         entries.sort_by(|a, b| {
             let cmp = match column {
-                SortColumn::Name => a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()),
+                SortColumn::Name => a
+                    .name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase()),
                 SortColumn::Publisher => a
                     .publisher
                     .to_ascii_lowercase()
@@ -511,7 +518,10 @@ impl StartupManager {
                 SortColumn::Status => a.enabled.cmp(&b.enabled),
                 SortColumn::Impact => a.impact.cmp(&b.impact),
                 SortColumn::Type => a.startup_type.cmp(&b.startup_type),
-                SortColumn::Path => a.path.to_ascii_lowercase().cmp(&b.path.to_ascii_lowercase()),
+                SortColumn::Path => a
+                    .path
+                    .to_ascii_lowercase()
+                    .cmp(&b.path.to_ascii_lowercase()),
             };
             match order {
                 SortOrder::Ascending => cmp,
@@ -547,7 +557,10 @@ impl StartupManager {
         let mut entries = self.search_entries(query);
         entries.sort_by(|a, b| {
             let cmp = match column {
-                SortColumn::Name => a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()),
+                SortColumn::Name => a
+                    .name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase()),
                 SortColumn::Publisher => a
                     .publisher
                     .to_ascii_lowercase()
@@ -555,7 +568,10 @@ impl StartupManager {
                 SortColumn::Status => a.enabled.cmp(&b.enabled),
                 SortColumn::Impact => a.impact.cmp(&b.impact),
                 SortColumn::Type => a.startup_type.cmp(&b.startup_type),
-                SortColumn::Path => a.path.to_ascii_lowercase().cmp(&b.path.to_ascii_lowercase()),
+                SortColumn::Path => a
+                    .path
+                    .to_ascii_lowercase()
+                    .cmp(&b.path.to_ascii_lowercase()),
             };
             match order {
                 SortOrder::Ascending => cmp,
@@ -572,9 +588,7 @@ impl StartupManager {
         for entry in self.entries.values() {
             if entry.enabled {
                 s.enabled += 1;
-                s.total_impact_weight = s
-                    .total_impact_weight
-                    .saturating_add(entry.impact.weight());
+                s.total_impact_weight = s.total_impact_weight.saturating_add(entry.impact.weight());
             } else {
                 s.disabled += 1;
             }
@@ -739,36 +753,46 @@ impl StartupConfig {
                 continue;
             }
 
-            if trimmed.starts_with("VERSION|") {
+            if let Some(ver_str) = trimmed.strip_prefix("VERSION|") {
                 // Version check — we only support version 1.
-                let ver_str = &trimmed["VERSION|".len()..];
                 if ver_str.trim() != "1" {
                     return Err(ConfigError::UnsupportedVersion(ver_str.trim().to_string()));
                 }
                 continue;
             }
 
-            if trimmed.starts_with("ENTRY|") {
-                let rest = &trimmed["ENTRY|".len()..];
-                let fields: Vec<&str> = rest.splitn(10, '|').collect();
-                if fields.len() < 10 {
+            if let Some(rest) = trimmed.strip_prefix("ENTRY|") {
+                let fields = Self::split_escaped(rest, 10);
+                let [
+                    id_f,
+                    name_f,
+                    path_f,
+                    args_f,
+                    type_f,
+                    enabled_f,
+                    impact_f,
+                    pub_f,
+                    desc_f,
+                    ts_f,
+                ] = fields.as_slice()
+                else {
                     return Err(ConfigError::MalformedEntry(trimmed.to_string()));
-                }
+                };
 
-                let id: u64 = fields[0]
+                let id: u64 = id_f
                     .parse()
                     .map_err(|_| ConfigError::InvalidField("id".to_string()))?;
-                let name = Self::unescape_field(fields[1]);
-                let path = Self::unescape_field(fields[2]);
-                let args = Self::unescape_field(fields[3]);
-                let startup_type = StartupType::from_label(fields[4])
+                let name = Self::unescape_field(name_f);
+                let path = Self::unescape_field(path_f);
+                let args = Self::unescape_field(args_f);
+                let startup_type = StartupType::from_label(type_f)
                     .ok_or_else(|| ConfigError::InvalidField("type".to_string()))?;
-                let enabled = fields[5] == "1";
-                let impact = StartupImpact::from_label(fields[6])
+                let enabled = enabled_f.as_str() == "1";
+                let impact = StartupImpact::from_label(impact_f)
                     .ok_or_else(|| ConfigError::InvalidField("impact".to_string()))?;
-                let publisher = Self::unescape_field(fields[7]);
-                let description = Self::unescape_field(fields[8]);
-                let added_timestamp: u64 = fields[9]
+                let publisher = Self::unescape_field(pub_f);
+                let description = Self::unescape_field(desc_f);
+                let added_timestamp: u64 = ts_f
                     .parse()
                     .map_err(|_| ConfigError::InvalidField("timestamp".to_string()))?;
 
@@ -798,6 +822,34 @@ impl StartupConfig {
         // Ensure next_id is beyond any imported entry.
         manager.next_id = max_id.saturating_add(1);
         Ok(manager)
+    }
+
+    /// Split a serialized ENTRY payload into at most `max` fields on `|`,
+    /// honoring backslash escaping so an escaped pipe (`\|`) inside a field
+    /// value is not treated as a separator. The escape sequences are left
+    /// intact for [`Self::unescape_field`] to interpret. Mirrors `splitn`
+    /// semantics: once `max - 1` separators have been consumed, the remainder
+    /// (including any further pipes) becomes the final field.
+    fn split_escaped(s: &str, max: usize) -> Vec<String> {
+        let mut fields = Vec::new();
+        let mut cur = String::new();
+        let mut chars = s.chars();
+        while let Some(ch) = chars.next() {
+            if ch == '\\' {
+                // A backslash escapes the next char; keep both together so the
+                // escaped pipe/backslash is preserved for later unescaping.
+                cur.push('\\');
+                if let Some(next) = chars.next() {
+                    cur.push(next);
+                }
+            } else if ch == '|' && fields.len().saturating_add(1) < max {
+                fields.push(core::mem::take(&mut cur));
+            } else {
+                cur.push(ch);
+            }
+        }
+        fields.push(cur);
+        fields
     }
 
     /// Escape pipe characters and backslashes within a field value.
@@ -1037,11 +1089,9 @@ impl StartupUI {
 
     /// Get the currently visible filtered and sorted entries.
     pub fn visible_entries(&self) -> Vec<&StartupEntry> {
-        let all = self.manager.filtered_sorted(
-            &self.search_query,
-            self.sort_column,
-            self.sort_order,
-        );
+        let all =
+            self.manager
+                .filtered_sorted(&self.search_query, self.sort_column, self.sort_order);
         let start = self.scroll_offset.min(all.len());
         let end = (start + self.visible_rows()).min(all.len());
         all.get(start..end).unwrap_or(&[]).to_vec()
@@ -1064,11 +1114,9 @@ impl StartupUI {
 
     /// Select the next entry in the filtered list.
     pub fn select_next(&mut self) {
-        let entries = self.manager.filtered_sorted(
-            &self.search_query,
-            self.sort_column,
-            self.sort_order,
-        );
+        let entries =
+            self.manager
+                .filtered_sorted(&self.search_query, self.sort_column, self.sort_order);
         if entries.is_empty() {
             return;
         }
@@ -1092,11 +1140,9 @@ impl StartupUI {
 
     /// Select the previous entry in the filtered list.
     pub fn select_prev(&mut self) {
-        let entries = self.manager.filtered_sorted(
-            &self.search_query,
-            self.sort_column,
-            self.sort_order,
-        );
+        let entries =
+            self.manager
+                .filtered_sorted(&self.search_query, self.sort_column, self.sort_order);
         if entries.is_empty() {
             return;
         }
@@ -1123,19 +1169,19 @@ impl StartupUI {
 
     /// Open the edit dialog for the selected entry.
     pub fn open_edit_dialog(&mut self) {
-        if let Some(id) = self.selected_id {
-            if let Some(entry) = self.manager.get_entry(id) {
-                self.dialog = DialogState::AddEdit(AddEditDialog::new_edit(entry));
-            }
+        if let Some(id) = self.selected_id
+            && let Some(entry) = self.manager.get_entry(id)
+        {
+            self.dialog = DialogState::AddEdit(AddEditDialog::new_edit(entry));
         }
     }
 
     /// Open the confirm-delete dialog for the selected entry.
     pub fn open_delete_dialog(&mut self) {
-        if let Some(id) = self.selected_id {
-            if self.manager.get_entry(id).is_some() {
-                self.dialog = DialogState::ConfirmDelete(id);
-            }
+        if let Some(id) = self.selected_id
+            && self.manager.get_entry(id).is_some()
+        {
+            self.dialog = DialogState::ConfirmDelete(id);
         }
     }
 
@@ -1458,12 +1504,7 @@ impl StartupUI {
             let bg = if is_selected {
                 Color::rgba(COLOR_BLUE.r, COLOR_BLUE.g, COLOR_BLUE.b, 30)
             } else if i % 2 == 1 {
-                Color::rgba(
-                    COLOR_SURFACE0.r,
-                    COLOR_SURFACE0.g,
-                    COLOR_SURFACE0.b,
-                    80,
-                )
+                Color::rgba(COLOR_SURFACE0.r, COLOR_SURFACE0.g, COLOR_SURFACE0.b, 80)
             } else {
                 COLOR_BASE
             };
@@ -1587,11 +1628,11 @@ impl StartupUI {
             width: 1.0,
         });
 
-        if let Some(id) = self.selected_id {
-            if let Some(entry) = self.manager.get_entry(id) {
-                self.render_details_content(tree, y, entry);
-                return;
-            }
+        if let Some(id) = self.selected_id
+            && let Some(entry) = self.manager.get_entry(id)
+        {
+            self.render_details_content(tree, y, entry);
+            return;
         }
 
         // No selection message.
@@ -1883,11 +1924,7 @@ impl StartupUI {
             corner_radii: CornerRadii::all(4.0),
         });
 
-        let display = if value.is_empty() {
-            label
-        } else {
-            value
-        };
+        let display = if value.is_empty() { label } else { value };
         let text_color = if value.is_empty() {
             COLOR_OVERLAY0
         } else {
@@ -2023,8 +2060,14 @@ mod tests {
     #[test]
     fn test_startup_type_from_label() {
         assert_eq!(StartupType::from_label("login"), Some(StartupType::Login));
-        assert_eq!(StartupType::from_label("SERVICE"), Some(StartupType::Service));
-        assert_eq!(StartupType::from_label("Scheduled"), Some(StartupType::Scheduled));
+        assert_eq!(
+            StartupType::from_label("SERVICE"),
+            Some(StartupType::Service)
+        );
+        assert_eq!(
+            StartupType::from_label("Scheduled"),
+            Some(StartupType::Scheduled)
+        );
         assert_eq!(StartupType::from_label("DRIVER"), Some(StartupType::Driver));
         assert_eq!(StartupType::from_label("unknown"), None);
     }
@@ -2056,7 +2099,10 @@ mod tests {
     fn test_impact_from_label() {
         assert_eq!(StartupImpact::from_label("none"), Some(StartupImpact::None));
         assert_eq!(StartupImpact::from_label("LOW"), Some(StartupImpact::Low));
-        assert_eq!(StartupImpact::from_label("Medium"), Some(StartupImpact::Medium));
+        assert_eq!(
+            StartupImpact::from_label("Medium"),
+            Some(StartupImpact::Medium)
+        );
         assert_eq!(StartupImpact::from_label("HIGH"), Some(StartupImpact::High));
         assert_eq!(StartupImpact::from_label("extreme"), None);
     }
@@ -2090,9 +2136,15 @@ mod tests {
     #[test]
     fn test_entry_creation() {
         let entry = StartupEntry::new(
-            1, "Test", "/bin/test", "--flag",
-            StartupType::Login, StartupImpact::Low,
-            "Publisher", "A test entry", 1000,
+            1,
+            "Test",
+            "/bin/test",
+            "--flag",
+            StartupType::Login,
+            StartupImpact::Low,
+            "Publisher",
+            "A test entry",
+            1000,
         );
         assert_eq!(entry.id, 1);
         assert_eq!(entry.name, "Test");
@@ -2102,9 +2154,15 @@ mod tests {
     #[test]
     fn test_entry_status_label() {
         let mut entry = StartupEntry::new(
-            1, "T", "/bin/t", "",
-            StartupType::Login, StartupImpact::None,
-            "", "", 0,
+            1,
+            "T",
+            "/bin/t",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
         );
         assert_eq!(entry.status_label(), "Enabled");
         entry.enabled = false;
@@ -2114,9 +2172,15 @@ mod tests {
     #[test]
     fn test_entry_status_color() {
         let mut entry = StartupEntry::new(
-            1, "T", "/bin/t", "",
-            StartupType::Login, StartupImpact::None,
-            "", "", 0,
+            1,
+            "T",
+            "/bin/t",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
         );
         assert_eq!(entry.status_color(), COLOR_GREEN);
         entry.enabled = false;
@@ -2129,8 +2193,14 @@ mod tests {
     fn test_manager_add_entry() {
         let mut mgr = StartupManager::new();
         let id = mgr.add_entry(
-            "Test", "/bin/test", "", StartupType::Login,
-            StartupImpact::Low, "Pub", "Desc", 1000,
+            "Test",
+            "/bin/test",
+            "",
+            StartupType::Login,
+            StartupImpact::Low,
+            "Pub",
+            "Desc",
+            1000,
         );
         assert_eq!(id, 1);
         assert_eq!(mgr.entry_count(), 1);
@@ -2139,8 +2209,26 @@ mod tests {
     #[test]
     fn test_manager_add_multiple_entries() {
         let mut mgr = StartupManager::new();
-        let id1 = mgr.add_entry("A", "/a", "", StartupType::Login, StartupImpact::Low, "", "", 0);
-        let id2 = mgr.add_entry("B", "/b", "", StartupType::Service, StartupImpact::High, "", "", 0);
+        let id1 = mgr.add_entry(
+            "A",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::Low,
+            "",
+            "",
+            0,
+        );
+        let id2 = mgr.add_entry(
+            "B",
+            "/b",
+            "",
+            StartupType::Service,
+            StartupImpact::High,
+            "",
+            "",
+            0,
+        );
         assert_ne!(id1, id2);
         assert_eq!(mgr.entry_count(), 2);
     }
@@ -2148,7 +2236,16 @@ mod tests {
     #[test]
     fn test_manager_remove_entry() {
         let mut mgr = StartupManager::new();
-        let id = mgr.add_entry("T", "/t", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        let id = mgr.add_entry(
+            "T",
+            "/t",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         assert!(mgr.remove_entry(id));
         assert_eq!(mgr.entry_count(), 0);
     }
@@ -2162,7 +2259,16 @@ mod tests {
     #[test]
     fn test_manager_enable_disable() {
         let mut mgr = StartupManager::new();
-        let id = mgr.add_entry("T", "/t", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        let id = mgr.add_entry(
+            "T",
+            "/t",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
 
         assert!(mgr.disable_entry(id));
         assert!(!mgr.get_entry(id).map(|e| e.enabled).unwrap_or(true));
@@ -2181,7 +2287,16 @@ mod tests {
     #[test]
     fn test_manager_toggle_entry() {
         let mut mgr = StartupManager::new();
-        let id = mgr.add_entry("T", "/t", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        let id = mgr.add_entry(
+            "T",
+            "/t",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
 
         // Initially enabled, toggle should disable.
         let new_state = mgr.toggle_entry(id);
@@ -2201,7 +2316,16 @@ mod tests {
     #[test]
     fn test_manager_get_entry() {
         let mut mgr = StartupManager::new();
-        let id = mgr.add_entry("Test", "/bin/test", "", StartupType::Login, StartupImpact::Low, "P", "D", 42);
+        let id = mgr.add_entry(
+            "Test",
+            "/bin/test",
+            "",
+            StartupType::Login,
+            StartupImpact::Low,
+            "P",
+            "D",
+            42,
+        );
         let entry = mgr.get_entry(id);
         assert!(entry.is_some());
         assert_eq!(entry.map(|e| e.name.as_str()), Some("Test"));
@@ -2217,8 +2341,26 @@ mod tests {
     #[test]
     fn test_manager_update_entry() {
         let mut mgr = StartupManager::new();
-        let id = mgr.add_entry("Old", "/old", "", StartupType::Login, StartupImpact::Low, "", "", 0);
-        let ok = mgr.update_entry(id, "New", "/new", "--arg", StartupType::Service, StartupImpact::High, "Pub", "Desc");
+        let id = mgr.add_entry(
+            "Old",
+            "/old",
+            "",
+            StartupType::Login,
+            StartupImpact::Low,
+            "",
+            "",
+            0,
+        );
+        let ok = mgr.update_entry(
+            id,
+            "New",
+            "/new",
+            "--arg",
+            StartupType::Service,
+            StartupImpact::High,
+            "Pub",
+            "Desc",
+        );
         assert!(ok);
         let entry = mgr.get_entry(id);
         assert_eq!(entry.map(|e| e.name.as_str()), Some("New"));
@@ -2228,14 +2370,41 @@ mod tests {
     #[test]
     fn test_manager_update_nonexistent() {
         let mut mgr = StartupManager::new();
-        assert!(!mgr.update_entry(999, "N", "/n", "", StartupType::Login, StartupImpact::None, "", ""));
+        assert!(!mgr.update_entry(
+            999,
+            "N",
+            "/n",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            ""
+        ));
     }
 
     #[test]
     fn test_manager_entry_ids() {
         let mut mgr = StartupManager::new();
-        let id1 = mgr.add_entry("A", "/a", "", StartupType::Login, StartupImpact::None, "", "", 0);
-        let id2 = mgr.add_entry("B", "/b", "", StartupType::Service, StartupImpact::Low, "", "", 0);
+        let id1 = mgr.add_entry(
+            "A",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
+        let id2 = mgr.add_entry(
+            "B",
+            "/b",
+            "",
+            StartupType::Service,
+            StartupImpact::Low,
+            "",
+            "",
+            0,
+        );
         let ids = mgr.entry_ids();
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
@@ -2247,8 +2416,26 @@ mod tests {
     #[test]
     fn test_sort_by_name_ascending() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("Zebra", "/z", "", StartupType::Login, StartupImpact::None, "", "", 0);
-        mgr.add_entry("Apple", "/a", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "Zebra",
+            "/z",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "Apple",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         let sorted = mgr.sorted_entries(SortColumn::Name, SortOrder::Ascending);
         assert_eq!(sorted[0].name, "Apple");
         assert_eq!(sorted[1].name, "Zebra");
@@ -2257,8 +2444,26 @@ mod tests {
     #[test]
     fn test_sort_by_name_descending() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("Apple", "/a", "", StartupType::Login, StartupImpact::None, "", "", 0);
-        mgr.add_entry("Zebra", "/z", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "Apple",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "Zebra",
+            "/z",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         let sorted = mgr.sorted_entries(SortColumn::Name, SortOrder::Descending);
         assert_eq!(sorted[0].name, "Zebra");
         assert_eq!(sorted[1].name, "Apple");
@@ -2267,9 +2472,36 @@ mod tests {
     #[test]
     fn test_sort_by_impact() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("High", "/h", "", StartupType::Login, StartupImpact::High, "", "", 0);
-        mgr.add_entry("Low", "/l", "", StartupType::Login, StartupImpact::Low, "", "", 0);
-        mgr.add_entry("Med", "/m", "", StartupType::Login, StartupImpact::Medium, "", "", 0);
+        mgr.add_entry(
+            "High",
+            "/h",
+            "",
+            StartupType::Login,
+            StartupImpact::High,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "Low",
+            "/l",
+            "",
+            StartupType::Login,
+            StartupImpact::Low,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "Med",
+            "/m",
+            "",
+            StartupType::Login,
+            StartupImpact::Medium,
+            "",
+            "",
+            0,
+        );
         let sorted = mgr.sorted_entries(SortColumn::Impact, SortOrder::Ascending);
         assert_eq!(sorted[0].name, "Low");
         assert_eq!(sorted[1].name, "Med");
@@ -2279,8 +2511,26 @@ mod tests {
     #[test]
     fn test_sort_by_type() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("Drv", "/d", "", StartupType::Driver, StartupImpact::None, "", "", 0);
-        mgr.add_entry("Log", "/l", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "Drv",
+            "/d",
+            "",
+            StartupType::Driver,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "Log",
+            "/l",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         let sorted = mgr.sorted_entries(SortColumn::Type, SortOrder::Ascending);
         assert_eq!(sorted[0].startup_type, StartupType::Login);
         assert_eq!(sorted[1].startup_type, StartupType::Driver);
@@ -2289,8 +2539,26 @@ mod tests {
     #[test]
     fn test_sort_by_status() {
         let mut mgr = StartupManager::new();
-        let id1 = mgr.add_entry("Dis", "/d", "", StartupType::Login, StartupImpact::None, "", "", 0);
-        mgr.add_entry("En", "/e", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        let id1 = mgr.add_entry(
+            "Dis",
+            "/d",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "En",
+            "/e",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         mgr.disable_entry(id1);
         let sorted = mgr.sorted_entries(SortColumn::Status, SortOrder::Ascending);
         assert!(!sorted[0].enabled);
@@ -2302,8 +2570,26 @@ mod tests {
     #[test]
     fn test_search_by_name() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("Firefox", "/ff", "", StartupType::Login, StartupImpact::Low, "", "", 0);
-        mgr.add_entry("Chrome", "/ch", "", StartupType::Login, StartupImpact::Low, "", "", 0);
+        mgr.add_entry(
+            "Firefox",
+            "/ff",
+            "",
+            StartupType::Login,
+            StartupImpact::Low,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "Chrome",
+            "/ch",
+            "",
+            StartupType::Login,
+            StartupImpact::Low,
+            "",
+            "",
+            0,
+        );
         let results = mgr.search_entries("fire");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "Firefox");
@@ -2312,8 +2598,26 @@ mod tests {
     #[test]
     fn test_search_by_publisher() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("App", "/app", "", StartupType::Login, StartupImpact::None, "MyCorp", "", 0);
-        mgr.add_entry("Other", "/o", "", StartupType::Login, StartupImpact::None, "TheirCorp", "", 0);
+        mgr.add_entry(
+            "App",
+            "/app",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "MyCorp",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "Other",
+            "/o",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "TheirCorp",
+            "",
+            0,
+        );
         let results = mgr.search_entries("mycorp");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].publisher, "MyCorp");
@@ -2322,8 +2626,26 @@ mod tests {
     #[test]
     fn test_search_by_path() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("A", "/usr/bin/foo", "", StartupType::Login, StartupImpact::None, "", "", 0);
-        mgr.add_entry("B", "/opt/bar", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "A",
+            "/usr/bin/foo",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "B",
+            "/opt/bar",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         let results = mgr.search_entries("/opt/");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, "B");
@@ -2332,8 +2654,26 @@ mod tests {
     #[test]
     fn test_search_empty_query_returns_all() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("A", "/a", "", StartupType::Login, StartupImpact::None, "", "", 0);
-        mgr.add_entry("B", "/b", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "A",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "B",
+            "/b",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         let results = mgr.search_entries("");
         assert_eq!(results.len(), 2);
     }
@@ -2341,7 +2681,16 @@ mod tests {
     #[test]
     fn test_search_case_insensitive() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("MyApp", "/my", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "MyApp",
+            "/my",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         let results = mgr.search_entries("MYAPP");
         assert_eq!(results.len(), 1);
     }
@@ -2349,7 +2698,16 @@ mod tests {
     #[test]
     fn test_search_no_results() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("A", "/a", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "A",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         let results = mgr.search_entries("zzz");
         assert!(results.is_empty());
     }
@@ -2357,9 +2715,36 @@ mod tests {
     #[test]
     fn test_filtered_sorted() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("Zebra App", "/z", "", StartupType::Login, StartupImpact::High, "", "", 0);
-        mgr.add_entry("Alpha App", "/a", "", StartupType::Login, StartupImpact::Low, "", "", 0);
-        mgr.add_entry("Other Thing", "/o", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "Zebra App",
+            "/z",
+            "",
+            StartupType::Login,
+            StartupImpact::High,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "Alpha App",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::Low,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "Other Thing",
+            "/o",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         let results = mgr.filtered_sorted("app", SortColumn::Name, SortOrder::Ascending);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].name, "Alpha App");
@@ -2380,10 +2765,46 @@ mod tests {
     #[test]
     fn test_stats_counts() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("A", "/a", "", StartupType::Login, StartupImpact::Low, "", "", 0);
-        let id2 = mgr.add_entry("B", "/b", "", StartupType::Service, StartupImpact::High, "", "", 0);
-        mgr.add_entry("C", "/c", "", StartupType::Scheduled, StartupImpact::Medium, "", "", 0);
-        mgr.add_entry("D", "/d", "", StartupType::Driver, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "A",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::Low,
+            "",
+            "",
+            0,
+        );
+        let id2 = mgr.add_entry(
+            "B",
+            "/b",
+            "",
+            StartupType::Service,
+            StartupImpact::High,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "C",
+            "/c",
+            "",
+            StartupType::Scheduled,
+            StartupImpact::Medium,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "D",
+            "/d",
+            "",
+            StartupType::Driver,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         mgr.disable_entry(id2);
 
         let s = mgr.stats();
@@ -2399,8 +2820,26 @@ mod tests {
     #[test]
     fn test_stats_impact_weight() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("A", "/a", "", StartupType::Login, StartupImpact::Low, "", "", 0);
-        mgr.add_entry("B", "/b", "", StartupType::Login, StartupImpact::High, "", "", 0);
+        mgr.add_entry(
+            "A",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::Low,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "B",
+            "/b",
+            "",
+            StartupType::Login,
+            StartupImpact::High,
+            "",
+            "",
+            0,
+        );
         let s = mgr.stats();
         // Low=1, High=6, total=7
         assert_eq!(s.total_impact_weight, 7);
@@ -2409,7 +2848,16 @@ mod tests {
     #[test]
     fn test_stats_disabled_excluded_from_impact() {
         let mut mgr = StartupManager::new();
-        let id = mgr.add_entry("A", "/a", "", StartupType::Login, StartupImpact::High, "", "", 0);
+        let id = mgr.add_entry(
+            "A",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::High,
+            "",
+            "",
+            0,
+        );
         mgr.disable_entry(id);
         let s = mgr.stats();
         assert_eq!(s.total_impact_weight, 0);
@@ -2417,15 +2865,30 @@ mod tests {
 
     #[test]
     fn test_stats_impact_summary() {
-        let s = StartupStats { total_impact_weight: 0, ..Default::default() };
+        let s = StartupStats {
+            total_impact_weight: 0,
+            ..Default::default()
+        };
         assert_eq!(s.impact_summary(), "Minimal");
-        let s = StartupStats { total_impact_weight: 3, ..Default::default() };
+        let s = StartupStats {
+            total_impact_weight: 3,
+            ..Default::default()
+        };
         assert_eq!(s.impact_summary(), "Low");
-        let s = StartupStats { total_impact_weight: 10, ..Default::default() };
+        let s = StartupStats {
+            total_impact_weight: 10,
+            ..Default::default()
+        };
         assert_eq!(s.impact_summary(), "Medium");
-        let s = StartupStats { total_impact_weight: 20, ..Default::default() };
+        let s = StartupStats {
+            total_impact_weight: 20,
+            ..Default::default()
+        };
         assert_eq!(s.impact_summary(), "High");
-        let s = StartupStats { total_impact_weight: 50, ..Default::default() };
+        let s = StartupStats {
+            total_impact_weight: 50,
+            ..Default::default()
+        };
         assert_eq!(s.impact_summary(), "Very High");
     }
 
@@ -2434,8 +2897,26 @@ mod tests {
     #[test]
     fn test_config_roundtrip() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("Test App", "/bin/test", "--flag", StartupType::Login, StartupImpact::Medium, "TestCo", "A test", 1000);
-        let id2 = mgr.add_entry("Service", "/sbin/svc", "", StartupType::Service, StartupImpact::High, "OurOS", "Core svc", 2000);
+        mgr.add_entry(
+            "Test App",
+            "/bin/test",
+            "--flag",
+            StartupType::Login,
+            StartupImpact::Medium,
+            "TestCo",
+            "A test",
+            1000,
+        );
+        let id2 = mgr.add_entry(
+            "Service",
+            "/sbin/svc",
+            "",
+            StartupType::Service,
+            StartupImpact::High,
+            "OurOS",
+            "Core svc",
+            2000,
+        );
         mgr.disable_entry(id2);
 
         let text = StartupConfig::serialize(&mgr);
@@ -2468,7 +2949,16 @@ mod tests {
     #[test]
     fn test_config_escape_pipe_in_fields() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("My|App", "/bin/test|me", "", StartupType::Login, StartupImpact::None, "A|B", "has|pipes", 0);
+        mgr.add_entry(
+            "My|App",
+            "/bin/test|me",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "A|B",
+            "has|pipes",
+            0,
+        );
         let text = StartupConfig::serialize(&mgr);
         let restored = StartupConfig::deserialize(&text).expect("should roundtrip");
         let e = restored.get_entry(1).expect("should exist");
@@ -2480,7 +2970,16 @@ mod tests {
     #[test]
     fn test_config_escape_backslash_in_fields() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("C:\\App", "C:\\Program Files\\app.exe", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "C:\\App",
+            "C:\\Program Files\\app.exe",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         let text = StartupConfig::serialize(&mgr);
         let restored = StartupConfig::deserialize(&text).expect("should roundtrip");
         let e = restored.get_entry(1).expect("should exist");
@@ -2505,12 +3004,39 @@ mod tests {
     #[test]
     fn test_config_next_id_after_import() {
         let mut mgr = StartupManager::new();
-        mgr.add_entry("A", "/a", "", StartupType::Login, StartupImpact::None, "", "", 0);
-        mgr.add_entry("B", "/b", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        mgr.add_entry(
+            "A",
+            "/a",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
+        mgr.add_entry(
+            "B",
+            "/b",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         let text = StartupConfig::serialize(&mgr);
         let mut restored = StartupConfig::deserialize(&text).expect("should deserialize");
         // Adding a new entry should get id=3 (max existing is 2).
-        let new_id = restored.add_entry("C", "/c", "", StartupType::Login, StartupImpact::None, "", "", 0);
+        let new_id = restored.add_entry(
+            "C",
+            "/c",
+            "",
+            StartupType::Login,
+            StartupImpact::None,
+            "",
+            "",
+            0,
+        );
         assert_eq!(new_id, 3);
     }
 
@@ -2556,8 +3082,15 @@ mod tests {
     #[test]
     fn test_edit_dialog_from_entry() {
         let entry = StartupEntry::new(
-            5, "Test", "/test", "--arg", StartupType::Service,
-            StartupImpact::High, "Pub", "Desc", 100,
+            5,
+            "Test",
+            "/test",
+            "--arg",
+            StartupType::Service,
+            StartupImpact::High,
+            "Pub",
+            "Desc",
+            100,
         );
         let dlg = AddEditDialog::new_edit(&entry);
         assert_eq!(dlg.editing_id, Some(5));

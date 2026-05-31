@@ -1,4 +1,4 @@
-//! OurOS Regex Tester & Debugger
+//! `OurOS` Regex Tester & Debugger
 //!
 //! An interactive regex testing tool with:
 //! - Custom regex engine supporting common regex features
@@ -97,7 +97,11 @@ enum RegexNode {
     /// Match any character (.)
     AnyChar,
     /// Match a character class [abc] or [a-z]
-    CharClass { chars: Vec<char>, ranges: Vec<(char, char)>, negated: bool },
+    CharClass {
+        chars: Vec<char>,
+        ranges: Vec<(char, char)>,
+        negated: bool,
+    },
     /// Predefined class: \d, \w, \s, etc.
     PredefinedClass(PredefinedClass),
     /// Anchor: ^ or $
@@ -118,11 +122,11 @@ enum RegexNode {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PredefinedClass {
-    Digit,       // \d
-    NonDigit,    // \D
-    Word,        // \w
-    NonWord,     // \W
-    Whitespace,  // \s
+    Digit,         // \d
+    NonDigit,      // \D
+    Word,          // \w
+    NonWord,       // \W
+    Whitespace,    // \s
     NonWhitespace, // \S
 }
 
@@ -151,6 +155,10 @@ struct RegexMatch {
 #[derive(Debug, Clone)]
 struct Thread {
     pc: usize,
+    /// Input position where this thread's potential match began. Tracked
+    /// per-thread so the engine can report the true match start when scanning
+    /// forward for an unanchored leftmost match.
+    start: usize,
     groups: Vec<Option<(usize, usize)>>,
     group_starts: Vec<Option<usize>>,
 }
@@ -301,53 +309,84 @@ impl RegexCompiler {
             Some('*') => {
                 self.advance();
                 let greedy = self.peek() != Some('?');
-                if !greedy { self.advance(); }
+                if !greedy {
+                    self.advance();
+                }
                 // a* = Split(a, skip); a -> Jump(split)
                 let split_pos = atom_start;
-                let after = atom_end.saturating_add(1); // after the jump we'll add
                 self.nodes.push(RegexNode::Jump(split_pos));
-                let jump_target = self.nodes.len();
-                // Insert split at atom_start
+                // After inserting the Split at `atom_start`, every node at or
+                // after `atom_start` shifts up by one. The Jump currently sits
+                // at the end; the exit (next node to be pushed) lands one past
+                // it post-insert, i.e. nodes.len() + 1.
+                let exit = self.nodes.len().saturating_add(1);
+                let body = split_pos.saturating_add(1);
                 let split = if greedy {
-                    RegexNode::Split { first: split_pos.saturating_add(1), second: jump_target }
+                    RegexNode::Split {
+                        first: body,
+                        second: exit,
+                    }
                 } else {
-                    RegexNode::Split { first: jump_target, second: split_pos.saturating_add(1) }
+                    RegexNode::Split {
+                        first: exit,
+                        second: body,
+                    }
                 };
                 self.nodes.insert(atom_start, split);
-                // Adjust all indices after insertion
-                adjust_after_insert(&mut self.nodes, atom_start, after);
+                // Adjust indices of *other* nodes after insertion. The Split's
+                // own targets are already expressed in post-insert coordinates.
+                adjust_after_insert(&mut self.nodes, atom_start, exit);
             }
             Some('+') => {
                 self.advance();
                 let greedy = self.peek() != Some('?');
-                if !greedy { self.advance(); }
+                if !greedy {
+                    self.advance();
+                }
                 // a+ = a; Split(a, skip)
                 let split_pos = self.nodes.len();
                 let after = split_pos.saturating_add(1);
                 let split = if greedy {
-                    RegexNode::Split { first: atom_start, second: after }
+                    RegexNode::Split {
+                        first: atom_start,
+                        second: after,
+                    }
                 } else {
-                    RegexNode::Split { first: after, second: atom_start }
+                    RegexNode::Split {
+                        first: after,
+                        second: atom_start,
+                    }
                 };
                 self.nodes.push(split);
             }
             Some('?') => {
                 self.advance();
                 let greedy = self.peek() != Some('?');
-                if !greedy { self.advance(); }
-                // a? = Split(a, skip)
-                let after = atom_end;
+                if !greedy {
+                    self.advance();
+                }
+                // a? = Split(a, skip). After inserting the Split at atom_start,
+                // the atom occupies [atom_start+1, atom_end+1) and the exit
+                // (next node to be pushed) lands at atom_end+1.
+                let body = atom_start.saturating_add(1);
+                let exit = atom_end.saturating_add(1);
                 let split = if greedy {
-                    RegexNode::Split { first: atom_start.saturating_add(1), second: after }
+                    RegexNode::Split {
+                        first: body,
+                        second: exit,
+                    }
                 } else {
-                    RegexNode::Split { first: after, second: atom_start.saturating_add(1) }
+                    RegexNode::Split {
+                        first: exit,
+                        second: body,
+                    }
                 };
                 self.nodes.insert(atom_start, split);
-                adjust_after_insert(&mut self.nodes, atom_start, atom_end.saturating_add(1));
+                adjust_after_insert(&mut self.nodes, atom_start, exit);
             }
             Some('{') => {
                 if let Some((min, max)) = self.try_parse_repetition() {
-                    self.apply_repetition(atom_start, atom_end, min, max)?;
+                    self.apply_repetition(atom_start, atom_end, min, max);
                 }
             }
             _ => {}
@@ -413,7 +452,13 @@ impl RegexCompiler {
         }
     }
 
-    fn apply_repetition(&mut self, atom_start: usize, atom_end: usize, min: usize, max: Option<usize>) -> Result<(), RegexError> {
+    fn apply_repetition(
+        &mut self,
+        atom_start: usize,
+        atom_end: usize,
+        min: usize,
+        max: Option<usize>,
+    ) {
         let atom_nodes: Vec<RegexNode> = self.nodes[atom_start..atom_end].to_vec();
         self.nodes.truncate(atom_start);
 
@@ -428,32 +473,15 @@ impl RegexCompiler {
         }
 
         // Optional copies (up to max)
-        match max {
-            Some(max_val) => {
-                for _ in min..max_val {
-                    let split_pos = self.nodes.len();
-                    let body_start = split_pos.saturating_add(1);
-                    // Will be fixed up after we know the body end
-                    self.nodes.push(RegexNode::Split { first: body_start, second: 0 });
-
-                    let offset = self.nodes.len().wrapping_sub(atom_start);
-                    for node in &atom_nodes {
-                        let mut n = node.clone();
-                        adjust_node_offset(&mut n, offset);
-                        self.nodes.push(n);
-                    }
-
-                    let after = self.nodes.len();
-                    if let Some(RegexNode::Split { second, .. }) = self.nodes.get_mut(split_pos) {
-                        *second = after;
-                    }
-                }
-            }
-            None => {
-                // {n,} = min copies + star
+        if let Some(max_val) = max {
+            for _ in min..max_val {
                 let split_pos = self.nodes.len();
                 let body_start = split_pos.saturating_add(1);
-                self.nodes.push(RegexNode::Split { first: body_start, second: 0 });
+                // Will be fixed up after we know the body end
+                self.nodes.push(RegexNode::Split {
+                    first: body_start,
+                    second: 0,
+                });
 
                 let offset = self.nodes.len().wrapping_sub(atom_start);
                 for node in &atom_nodes {
@@ -461,16 +489,34 @@ impl RegexCompiler {
                     adjust_node_offset(&mut n, offset);
                     self.nodes.push(n);
                 }
-                self.nodes.push(RegexNode::Jump(split_pos));
 
                 let after = self.nodes.len();
                 if let Some(RegexNode::Split { second, .. }) = self.nodes.get_mut(split_pos) {
                     *second = after;
                 }
             }
-        }
+        } else {
+            // {n,} = min copies + star
+            let split_pos = self.nodes.len();
+            let body_start = split_pos.saturating_add(1);
+            self.nodes.push(RegexNode::Split {
+                first: body_start,
+                second: 0,
+            });
 
-        Ok(())
+            let offset = self.nodes.len().wrapping_sub(atom_start);
+            for node in &atom_nodes {
+                let mut n = node.clone();
+                adjust_node_offset(&mut n, offset);
+                self.nodes.push(n);
+            }
+            self.nodes.push(RegexNode::Jump(split_pos));
+
+            let after = self.nodes.len();
+            if let Some(RegexNode::Split { second, .. }) = self.nodes.get_mut(split_pos) {
+                *second = after;
+            }
+        }
     }
 
     fn parse_atom(&mut self) -> Result<(), RegexError> {
@@ -480,7 +526,9 @@ impl RegexCompiler {
                 let capturing;
                 let group_id;
 
-                if self.peek() == Some('?') && self.pattern.get(self.pos.saturating_add(1)).copied() == Some(':') {
+                if self.peek() == Some('?')
+                    && self.pattern.get(self.pos.saturating_add(1)).copied() == Some(':')
+                {
                     self.advance(); // ?
                     self.advance(); // :
                     capturing = false;
@@ -492,13 +540,19 @@ impl RegexCompiler {
                 }
 
                 if capturing {
-                    self.nodes.push(RegexNode::GroupStart { group_id, capturing });
+                    self.nodes.push(RegexNode::GroupStart {
+                        group_id,
+                        capturing,
+                    });
                 }
 
                 self.parse_alternation()?;
 
                 if self.peek() != Some(')') {
-                    return Err(RegexError { message: "Unmatched '('".into(), position: self.pos });
+                    return Err(RegexError {
+                        message: "Unmatched '('".into(),
+                        position: self.pos,
+                    });
                 }
                 self.advance();
 
@@ -509,7 +563,9 @@ impl RegexCompiler {
             Some('[') => {
                 self.advance();
                 let negated = self.peek() == Some('^');
-                if negated { self.advance(); }
+                if negated {
+                    self.advance();
+                }
 
                 let mut chars = Vec::new();
                 let mut ranges = Vec::new();
@@ -526,7 +582,12 @@ impl RegexCompiler {
                         break;
                     }
                     let ch = self.parse_char_in_class()?;
-                    if self.peek() == Some('-') && self.pattern.get(self.pos.saturating_add(1)).map_or(false, |&next| next != ']') {
+                    if self.peek() == Some('-')
+                        && self
+                            .pattern
+                            .get(self.pos.saturating_add(1))
+                            .is_some_and(|&next| next != ']')
+                    {
                         self.advance(); // consume '-'
                         let end_ch = self.parse_char_in_class()?;
                         ranges.push((ch, end_ch));
@@ -536,19 +597,26 @@ impl RegexCompiler {
                 }
 
                 if self.case_insensitive {
-                    let extra: Vec<char> = chars.iter().flat_map(|c| {
-                        if c.is_ascii_lowercase() {
-                            Some(c.to_ascii_uppercase())
-                        } else if c.is_ascii_uppercase() {
-                            Some(c.to_ascii_lowercase())
-                        } else {
-                            None
-                        }
-                    }).collect();
+                    let extra: Vec<char> = chars
+                        .iter()
+                        .filter_map(|c| {
+                            if c.is_ascii_lowercase() {
+                                Some(c.to_ascii_uppercase())
+                            } else if c.is_ascii_uppercase() {
+                                Some(c.to_ascii_lowercase())
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     chars.extend(extra);
                 }
 
-                self.nodes.push(RegexNode::CharClass { chars, ranges, negated });
+                self.nodes.push(RegexNode::CharClass {
+                    chars,
+                    ranges,
+                    negated,
+                });
             }
             Some('.') => {
                 self.advance();
@@ -565,16 +633,52 @@ impl RegexCompiler {
             Some('\\') => {
                 self.advance();
                 match self.peek() {
-                    Some('d') => { self.advance(); self.nodes.push(RegexNode::PredefinedClass(PredefinedClass::Digit)); }
-                    Some('D') => { self.advance(); self.nodes.push(RegexNode::PredefinedClass(PredefinedClass::NonDigit)); }
-                    Some('w') => { self.advance(); self.nodes.push(RegexNode::PredefinedClass(PredefinedClass::Word)); }
-                    Some('W') => { self.advance(); self.nodes.push(RegexNode::PredefinedClass(PredefinedClass::NonWord)); }
-                    Some('s') => { self.advance(); self.nodes.push(RegexNode::PredefinedClass(PredefinedClass::Whitespace)); }
-                    Some('S') => { self.advance(); self.nodes.push(RegexNode::PredefinedClass(PredefinedClass::NonWhitespace)); }
-                    Some('b') => { self.advance(); self.nodes.push(RegexNode::WordBoundary); }
-                    Some('n') => { self.advance(); self.push_literal('\n'); }
-                    Some('r') => { self.advance(); self.push_literal('\r'); }
-                    Some('t') => { self.advance(); self.push_literal('\t'); }
+                    Some('d') => {
+                        self.advance();
+                        self.nodes
+                            .push(RegexNode::PredefinedClass(PredefinedClass::Digit));
+                    }
+                    Some('D') => {
+                        self.advance();
+                        self.nodes
+                            .push(RegexNode::PredefinedClass(PredefinedClass::NonDigit));
+                    }
+                    Some('w') => {
+                        self.advance();
+                        self.nodes
+                            .push(RegexNode::PredefinedClass(PredefinedClass::Word));
+                    }
+                    Some('W') => {
+                        self.advance();
+                        self.nodes
+                            .push(RegexNode::PredefinedClass(PredefinedClass::NonWord));
+                    }
+                    Some('s') => {
+                        self.advance();
+                        self.nodes
+                            .push(RegexNode::PredefinedClass(PredefinedClass::Whitespace));
+                    }
+                    Some('S') => {
+                        self.advance();
+                        self.nodes
+                            .push(RegexNode::PredefinedClass(PredefinedClass::NonWhitespace));
+                    }
+                    Some('b') => {
+                        self.advance();
+                        self.nodes.push(RegexNode::WordBoundary);
+                    }
+                    Some('n') => {
+                        self.advance();
+                        self.push_literal('\n');
+                    }
+                    Some('r') => {
+                        self.advance();
+                        self.push_literal('\r');
+                    }
+                    Some('t') => {
+                        self.advance();
+                        self.push_literal('\t');
+                    }
                     Some(c) if !c.is_alphanumeric() => {
                         let ch = c;
                         self.advance();
@@ -594,7 +698,15 @@ impl RegexCompiler {
                     }
                 }
             }
-            Some(c) if c != ')' && c != '|' && c != '*' && c != '+' && c != '?' && c != '{' && c != '}' => {
+            Some(c)
+                if c != ')'
+                    && c != '|'
+                    && c != '*'
+                    && c != '+'
+                    && c != '?'
+                    && c != '{'
+                    && c != '}' =>
+            {
                 self.advance();
                 self.push_literal(c);
             }
@@ -631,17 +743,21 @@ impl RegexCompiler {
 
     fn parse_char_in_class(&mut self) -> Result<char, RegexError> {
         match self.advance() {
-            Some('\\') => {
-                match self.advance() {
-                    Some('n') => Ok('\n'),
-                    Some('r') => Ok('\r'),
-                    Some('t') => Ok('\t'),
-                    Some(c) => Ok(c),
-                    None => Err(RegexError { message: "Trailing backslash in class".into(), position: self.pos }),
-                }
-            }
+            Some('\\') => match self.advance() {
+                Some('n') => Ok('\n'),
+                Some('r') => Ok('\r'),
+                Some('t') => Ok('\t'),
+                Some(c) => Ok(c),
+                None => Err(RegexError {
+                    message: "Trailing backslash in class".into(),
+                    position: self.pos,
+                }),
+            },
             Some(c) => Ok(c),
-            None => Err(RegexError { message: "Unterminated character class".into(), position: self.pos }),
+            None => Err(RegexError {
+                message: "Unterminated character class".into(),
+                position: self.pos,
+            }),
         }
     }
 }
@@ -665,14 +781,20 @@ fn adjust_node_offset(node: &mut RegexNode, offset: usize) {
 
 fn adjust_after_insert(nodes: &mut [RegexNode], insert_pos: usize, _count: usize) {
     for (i, node) in nodes.iter_mut().enumerate() {
-        if i == insert_pos { continue; }
+        if i == insert_pos {
+            continue;
+        }
         match node {
             RegexNode::Split { first, second } => {
-                if *first > insert_pos { *first = first.saturating_add(1); }
-                if *second > insert_pos { *second = second.saturating_add(1); }
+                if *first > insert_pos {
+                    *first = first.saturating_add(1);
+                }
+                if *second > insert_pos {
+                    *second = second.saturating_add(1);
+                }
             }
-            RegexNode::Jump(target) => {
-                if *target > insert_pos { *target = target.saturating_add(1); }
+            RegexNode::Jump(target) if *target > insert_pos => {
+                *target = target.saturating_add(1);
             }
             _ => {}
         }
@@ -707,119 +829,118 @@ fn execute_regex(compiled: &CompiledRegex, input: &str, start_pos: usize) -> Opt
     let chars: Vec<char> = input.chars().collect();
     let len = chars.len();
     let group_count = compiled.group_count;
+    let nodes = &compiled.nodes;
 
+    // Pike-VM simulation. We seed a fresh start-thread at every input position
+    // until a match is found; this performs an unanchored leftmost scan from
+    // `start_pos` while reporting the true match start. Once a match exists we
+    // stop seeding new (later-starting) threads so the leftmost start is locked
+    // in, and let the surviving threads run on to find the longest extension.
     let mut threads: Vec<Thread> = Vec::new();
-    let mut new_threads: Vec<Thread> = Vec::new();
-
-    // Seed the initial thread
-    let init_thread = Thread {
-        pc: 0,
-        groups: vec![None; group_count.saturating_add(1)],
-        group_starts: vec![None; group_count.saturating_add(1)],
-    };
-    threads.push(init_thread);
-
-    // Add epsilon-closure threads
-    add_epsilon_threads(&mut threads, &compiled.nodes, &chars, start_pos, len);
-
     let mut best_match: Option<RegexMatch> = None;
 
     for i in start_pos..=len {
+        if best_match.is_none() {
+            threads.push(Thread {
+                pc: 0,
+                start: i,
+                groups: vec![None; group_count.saturating_add(1)],
+                group_starts: vec![None; group_count.saturating_add(1)],
+            });
+        }
+
+        // Epsilon-closure at the current position (resolves splits, jumps,
+        // group markers and anchors before we attempt to consume a character).
+        add_epsilon_threads(&mut threads, nodes, &chars, i, len);
+
         let current_char = chars.get(i).copied();
+        let mut new_threads: Vec<Thread> = Vec::new();
 
         for thread in &threads {
-            let node = match compiled.nodes.get(thread.pc) {
-                Some(n) => n,
-                None => continue,
+            let Some(node) = nodes.get(thread.pc) else {
+                continue;
             };
 
             match node {
                 RegexNode::Match => {
                     let m = RegexMatch {
-                        start: start_pos,
+                        start: thread.start,
                         end: i,
                         groups: thread.groups.clone(),
                     };
-                    // Prefer longest match
-                    if best_match.as_ref().map_or(true, |prev| m.end > prev.end) {
+                    // Leftmost-longest: prefer the earliest start, and among
+                    // matches with the same start, the longest extent.
+                    let better = match &best_match {
+                        None => true,
+                        Some(prev) => {
+                            m.start < prev.start || (m.start == prev.start && m.end > prev.end)
+                        }
+                    };
+                    if better {
                         best_match = Some(m);
                     }
                 }
-                RegexNode::Literal(expected) => {
-                    if let Some(c) = current_char {
-                        if c == *expected {
-                            let mut new_t = thread.clone();
-                            new_t.pc = thread.pc.saturating_add(1);
-                            new_threads.push(new_t);
-                        }
-                    }
+                RegexNode::Literal(expected) if current_char == Some(*expected) => {
+                    let mut new_t = thread.clone();
+                    new_t.pc = thread.pc.saturating_add(1);
+                    new_threads.push(new_t);
                 }
                 RegexNode::AnyChar => {
-                    if let Some(c) = current_char {
-                        if c != '\n' {
-                            let mut new_t = thread.clone();
-                            new_t.pc = thread.pc.saturating_add(1);
-                            new_threads.push(new_t);
-                        }
+                    if let Some(c) = current_char
+                        && c != '\n'
+                    {
+                        let mut new_t = thread.clone();
+                        new_t.pc = thread.pc.saturating_add(1);
+                        new_threads.push(new_t);
                     }
                 }
-                RegexNode::CharClass { chars: cc, ranges, negated } => {
-                    if let Some(c) = current_char {
-                        if matches_char_class(c, cc, ranges, *negated) {
-                            let mut new_t = thread.clone();
-                            new_t.pc = thread.pc.saturating_add(1);
-                            new_threads.push(new_t);
-                        }
+                RegexNode::CharClass {
+                    chars: cc,
+                    ranges,
+                    negated,
+                } => {
+                    if let Some(c) = current_char
+                        && matches_char_class(c, cc, ranges, *negated)
+                    {
+                        let mut new_t = thread.clone();
+                        new_t.pc = thread.pc.saturating_add(1);
+                        new_threads.push(new_t);
                     }
                 }
                 RegexNode::PredefinedClass(class) => {
-                    if let Some(c) = current_char {
-                        if matches_predefined(c, *class) {
-                            let mut new_t = thread.clone();
-                            new_t.pc = thread.pc.saturating_add(1);
-                            new_threads.push(new_t);
-                        }
+                    if let Some(c) = current_char
+                        && matches_predefined(c, *class)
+                    {
+                        let mut new_t = thread.clone();
+                        new_t.pc = thread.pc.saturating_add(1);
+                        new_threads.push(new_t);
                     }
                 }
-                // Epsilon transitions handled in add_epsilon_threads
+                // Epsilon transitions are resolved in add_epsilon_threads.
                 _ => {}
             }
         }
 
-        if new_threads.is_empty() && best_match.is_some() {
+        threads = new_threads;
+
+        // No surviving threads: if we already have a match we are done, since
+        // any later start could only be further right. Otherwise keep going so
+        // the next iteration can seed a fresh start-thread further along.
+        if threads.is_empty() && best_match.is_some() {
             break;
-        }
-
-        threads.clear();
-        std::mem::swap(&mut threads, &mut new_threads);
-
-        add_epsilon_threads(&mut threads, &compiled.nodes, &chars, i.saturating_add(1), len);
-
-        if threads.is_empty() {
-            break;
-        }
-    }
-
-    // Check final threads for match state
-    for thread in &threads {
-        if let Some(RegexNode::Match) = compiled.nodes.get(thread.pc) {
-            let end = chars.len().min(start_pos.saturating_add(input.len()));
-            let m = RegexMatch {
-                start: start_pos,
-                end: len,
-                groups: thread.groups.clone(),
-            };
-            let _ = end;
-            if best_match.as_ref().map_or(true, |prev| m.end >= prev.end) {
-                best_match = Some(m);
-            }
         }
     }
 
     best_match
 }
 
-fn add_epsilon_threads(threads: &mut Vec<Thread>, nodes: &[RegexNode], chars: &[char], pos: usize, len: usize) {
+fn add_epsilon_threads(
+    threads: &mut Vec<Thread>,
+    nodes: &[RegexNode],
+    chars: &[char],
+    pos: usize,
+    len: usize,
+) {
     let mut i = 0;
     let mut seen: Vec<bool> = vec![false; nodes.len()];
 
@@ -846,7 +967,10 @@ fn add_epsilon_threads(threads: &mut Vec<Thread>, nodes: &[RegexNode], chars: &[
                 threads[i].pc = *target;
                 continue;
             }
-            RegexNode::GroupStart { group_id, capturing } => {
+            RegexNode::GroupStart {
+                group_id,
+                capturing,
+            } => {
                 if *capturing {
                     threads[i].group_starts[*group_id] = Some(pos);
                 }
@@ -874,8 +998,14 @@ fn add_epsilon_threads(threads: &mut Vec<Thread>, nodes: &[RegexNode], chars: &[
                 continue;
             }
             RegexNode::WordBoundary => {
-                let before = if pos > 0 { chars.get(pos.wrapping_sub(1)).map_or(false, |c| is_word_char(*c)) } else { false };
-                let after = chars.get(pos).map_or(false, |c| is_word_char(*c));
+                let before = if pos > 0 {
+                    chars
+                        .get(pos.wrapping_sub(1))
+                        .is_some_and(|c| is_word_char(*c))
+                } else {
+                    false
+                };
+                let after = chars.get(pos).is_some_and(|c| is_word_char(*c));
                 if before != after {
                     threads[i].pc = pc.saturating_add(1);
                     continue;
@@ -931,22 +1061,22 @@ fn apply_replacement(input: &str, matches: &[RegexMatch], replacement: &str) -> 
         let mut ri = 0;
         while ri < rep_chars.len() {
             if rep_chars[ri] == '$' {
-                if let Some(&next) = rep_chars.get(ri.saturating_add(1)) {
-                    if next.is_ascii_digit() {
-                        let group_idx = (next as usize).wrapping_sub('0' as usize);
-                        if group_idx == 0 {
-                            // $0 = entire match
-                            for &c in &chars[m.start..m.end] {
-                                result.push(c);
-                            }
-                        } else if let Some(Some((gs, ge))) = m.groups.get(group_idx) {
-                            for &c in &chars[*gs..*ge] {
-                                result.push(c);
-                            }
+                if let Some(&next) = rep_chars.get(ri.saturating_add(1))
+                    && next.is_ascii_digit()
+                {
+                    let group_idx = (next as usize).wrapping_sub('0' as usize);
+                    if group_idx == 0 {
+                        // $0 = entire match
+                        for &c in &chars[m.start..m.end] {
+                            result.push(c);
                         }
-                        ri = ri.saturating_add(2);
-                        continue;
+                    } else if let Some(Some((gs, ge))) = m.groups.get(group_idx) {
+                        for &c in &chars[*gs..*ge] {
+                            result.push(c);
+                        }
                     }
+                    ri = ri.saturating_add(2);
+                    continue;
                 }
                 result.push('$');
             } else if rep_chars[ri] == '\\' {
@@ -1018,7 +1148,9 @@ fn explain_regex(pattern: &str) -> Vec<String> {
             }
             '|' => explanations.push("|  Alternation (OR)".into()),
             '(' => {
-                if chars.get(i.saturating_add(1)) == Some(&'?') && chars.get(i.saturating_add(2)) == Some(&':') {
+                if chars.get(i.saturating_add(1)) == Some(&'?')
+                    && chars.get(i.saturating_add(2)) == Some(&':')
+                {
                     explanations.push("(?:  Non-capturing group".into());
                     i = i.saturating_add(2);
                 } else {
@@ -1081,7 +1213,7 @@ fn explain_regex(pattern: &str) -> Vec<String> {
                     explanations.push(format!("{rep}  Repetition quantifier"));
                 } else {
                     i = start;
-                    explanations.push(format!("{{  Literal '{{'"));
+                    explanations.push("{  Literal '{'".to_string());
                 }
             }
             _ => {
@@ -1426,7 +1558,11 @@ impl App {
 
         // Replace
         if self.show_replace && self.compiled.is_some() && !self.replace_text.is_empty() {
-            self.replace_result = Some(apply_replacement(&self.input_text, &self.matches, &self.replace_text));
+            self.replace_result = Some(apply_replacement(
+                &self.input_text,
+                &self.matches,
+                &self.replace_text,
+            ));
         } else {
             self.replace_result = None;
         }
@@ -1435,12 +1571,10 @@ impl App {
         self.explanations = explain_regex(&self.pattern);
 
         // Clamp match index
-        if !self.matches.is_empty() {
-            if self.current_match_index >= self.matches.len() {
-                self.current_match_index = self.matches.len().saturating_sub(1);
-            }
-        } else {
+        if self.matches.is_empty() {
             self.current_match_index = 0;
+        } else if self.current_match_index >= self.matches.len() {
+            self.current_match_index = self.matches.len().saturating_sub(1);
         }
     }
 
@@ -1450,15 +1584,22 @@ impl App {
         }
 
         // Don't add duplicates
-        if self.history.first().map_or(false, |h| h.pattern == self.pattern) {
+        if self
+            .history
+            .first()
+            .is_some_and(|h| h.pattern == self.pattern)
+        {
             return;
         }
 
-        self.history.insert(0, HistoryEntry {
-            pattern: self.pattern.clone(),
-            flags: self.flags,
-            match_count: self.matches.len(),
-        });
+        self.history.insert(
+            0,
+            HistoryEntry {
+                pattern: self.pattern.clone(),
+                flags: self.flags,
+                match_count: self.matches.len(),
+            },
+        );
 
         if self.history.len() > MAX_HISTORY {
             self.history.truncate(MAX_HISTORY);
@@ -1488,7 +1629,8 @@ impl App {
 
     fn next_match(&mut self) {
         if !self.matches.is_empty() {
-            self.current_match_index = (self.current_match_index.saturating_add(1)) % self.matches.len();
+            self.current_match_index =
+                (self.current_match_index.saturating_add(1)) % self.matches.len();
         }
     }
 
@@ -1503,22 +1645,32 @@ impl App {
     }
 
     fn match_stats(&self) -> String {
+        use std::fmt::Write as _;
         let count = self.matches.len();
         if count == 0 {
             return "No matches".into();
         }
 
-        let total_chars: usize = self.matches.iter().map(|m| m.end.saturating_sub(m.start)).sum();
-        let group_count = self.matches.first().map_or(0, |m| {
-            m.groups.iter().filter(|g| g.is_some()).count()
-        });
+        let total_chars: usize = self
+            .matches
+            .iter()
+            .map(|m| m.end.saturating_sub(m.start))
+            .sum();
+        let group_count = self
+            .matches
+            .first()
+            .map_or(0, |m| m.groups.iter().filter(|g| g.is_some()).count());
 
         let mut stats = format!("{count} match");
-        if count != 1 { stats.push_str("es"); }
-        stats.push_str(&format!(", {total_chars} chars matched"));
+        if count != 1 {
+            stats.push_str("es");
+        }
+        let _ = write!(stats, ", {total_chars} chars matched");
         if group_count > 0 {
-            stats.push_str(&format!(", {group_count} group"));
-            if group_count != 1 { stats.push('s'); }
+            let _ = write!(stats, ", {group_count} group");
+            if group_count != 1 {
+                stats.push('s');
+            }
         }
         stats
     }
@@ -1528,8 +1680,10 @@ impl App {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: WINDOW_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: WINDOW_HEIGHT,
             color: BASE,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1541,7 +1695,7 @@ impl App {
         match self.active_tab {
             ActiveTab::Tester => self.render_tester_tab(&mut cmds),
             ActiveTab::Library => self.render_library_tab(&mut cmds),
-            ActiveTab::Reference => self.render_reference_tab(&mut cmds),
+            ActiveTab::Reference => Self::render_reference_tab(&mut cmds),
         }
 
         cmds
@@ -1550,15 +1704,18 @@ impl App {
     fn render_toolbar(&self, cmds: &mut Vec<RenderCommand>) {
         // Toolbar background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0,
-            width: WINDOW_WIDTH, height: TOOLBAR_HEIGHT,
+            x: 0.0,
+            y: 0.0,
+            width: WINDOW_WIDTH,
+            height: TOOLBAR_HEIGHT,
             color: CRUST,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: PADDING, y: 13.0,
+            x: PADDING,
+            y: 13.0,
             text: "Regex Tester".into(),
             font_size: TITLE_TEXT,
             color: TEXT,
@@ -1576,19 +1733,26 @@ impl App {
 
             if active {
                 cmds.push(RenderCommand::FillRect {
-                    x: tab_x, y: 8.0,
-                    width: w, height: 28.0,
+                    x: tab_x,
+                    y: 8.0,
+                    width: w,
+                    height: 28.0,
                     color: SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
 
             cmds.push(RenderCommand::Text {
-                x: tab_x + 10.0, y: 15.0,
+                x: tab_x + 10.0,
+                y: 15.0,
                 text: label.into(),
                 font_size: NORMAL_TEXT,
                 color: if active { BLUE } else { SUBTEXT0 },
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w),
             });
 
@@ -1606,13 +1770,16 @@ impl App {
         for (fi, (label, active, tooltip)) in flag_items.iter().enumerate() {
             let fx = flags_x + (fi as f32) * 40.0;
             cmds.push(RenderCommand::FillRect {
-                x: fx, y: 8.0,
-                width: 30.0, height: 28.0,
+                x: fx,
+                y: 8.0,
+                width: 30.0,
+                height: 28.0,
                 color: if *active { BLUE } else { SURFACE0 },
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: fx + 11.0, y: 15.0,
+                x: fx + 11.0,
+                y: 15.0,
                 text: (*label).into(),
                 font_size: NORMAL_TEXT,
                 color: if *active { CRUST } else { SUBTEXT0 },
@@ -1624,9 +1791,14 @@ impl App {
 
         // Match navigation on far right
         if !self.matches.is_empty() {
-            let nav_text = format!("{}/{}", self.current_match_index.saturating_add(1), self.matches.len());
+            let nav_text = format!(
+                "{}/{}",
+                self.current_match_index.saturating_add(1),
+                self.matches.len()
+            );
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH - 100.0, y: 15.0,
+                x: WINDOW_WIDTH - 100.0,
+                y: 15.0,
                 text: nav_text,
                 font_size: SMALL_TEXT,
                 color: SUBTEXT1,
@@ -1642,14 +1814,23 @@ impl App {
 
         // Pattern input area
         let pattern_y = content_y;
-        self.render_input_field(cmds, PADDING, pattern_y, WINDOW_WIDTH - 2.0 * PADDING, 36.0,
-            "Pattern:", &self.pattern, self.active_field == ActiveField::Pattern);
+        Self::render_input_field(
+            cmds,
+            PADDING,
+            pattern_y,
+            WINDOW_WIDTH - 2.0 * PADDING,
+            36.0,
+            "Pattern:",
+            &self.pattern,
+            self.active_field == ActiveField::Pattern,
+        );
 
         // Error or stats line
         let status_y = pattern_y + 40.0;
         if let Some(err) = &self.compile_error {
             cmds.push(RenderCommand::Text {
-                x: PADDING + 80.0, y: status_y,
+                x: PADDING + 80.0,
+                y: status_y,
                 text: format!("Error: {err}"),
                 font_size: SMALL_TEXT,
                 color: RED,
@@ -1658,7 +1839,8 @@ impl App {
             });
         } else if !self.pattern.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: PADDING + 80.0, y: status_y,
+                x: PADDING + 80.0,
+                y: status_y,
                 text: self.match_stats(),
                 font_size: SMALL_TEXT,
                 color: GREEN,
@@ -1670,8 +1852,16 @@ impl App {
         // Replace input (optional)
         let mut next_y = status_y + 20.0;
         if self.show_replace {
-            self.render_input_field(cmds, PADDING, next_y, WINDOW_WIDTH - 2.0 * PADDING, 36.0,
-                "Replace:", &self.replace_text, self.active_field == ActiveField::Replace);
+            Self::render_input_field(
+                cmds,
+                PADDING,
+                next_y,
+                WINDOW_WIDTH - 2.0 * PADDING,
+                36.0,
+                "Replace:",
+                &self.replace_text,
+                self.active_field == ActiveField::Replace,
+            );
             next_y += 42.0;
         }
 
@@ -1683,18 +1873,38 @@ impl App {
         let right_width = WINDOW_WIDTH - right_x - PADDING;
 
         // Input text area
-        self.render_text_area(cmds, PADDING, split_y, left_width, split_height,
-            "Test Input:", &self.input_text, self.active_field == ActiveField::Input);
+        self.render_text_area(
+            cmds,
+            PADDING,
+            split_y,
+            left_width,
+            split_height,
+            "Test Input:",
+            &self.input_text,
+            self.active_field == ActiveField::Input,
+        );
 
         // Results panel
         self.render_results_panel(cmds, right_x, split_y, right_width, split_height);
     }
 
-    fn render_input_field(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32,
-                          label: &str, value: &str, focused: bool) {
+    // Stateless render helper: takes the field geometry and content directly
+    // rather than reading from `self`, hence an associated function.
+    #[allow(clippy::too_many_arguments)]
+    fn render_input_field(
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        label: &str,
+        value: &str,
+        focused: bool,
+    ) {
         // Label
         cmds.push(RenderCommand::Text {
-            x, y: y + 10.0,
+            x,
+            y: y + 10.0,
             text: label.into(),
             font_size: SMALL_TEXT,
             color: SUBTEXT0,
@@ -1706,16 +1916,20 @@ impl App {
         let input_x = x + 80.0;
         let input_width = width - 80.0;
         cmds.push(RenderCommand::FillRect {
-            x: input_x, y,
-            width: input_width, height,
+            x: input_x,
+            y,
+            width: input_width,
+            height,
             color: MANTLE,
             corner_radii: CornerRadii::all(4.0),
         });
 
         // Border
         cmds.push(RenderCommand::StrokeRect {
-            x: input_x, y,
-            width: input_width, height,
+            x: input_x,
+            y,
+            width: input_width,
+            height,
             color: if focused { BLUE } else { SURFACE1 },
             line_width: if focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(4.0),
@@ -1727,10 +1941,15 @@ impl App {
         } else {
             value
         };
-        let text_color = if value.is_empty() && !focused { OVERLAY0 } else { TEXT };
+        let text_color = if value.is_empty() && !focused {
+            OVERLAY0
+        } else {
+            TEXT
+        };
 
         cmds.push(RenderCommand::Text {
-            x: input_x + 8.0, y: y + 10.0,
+            x: input_x + 8.0,
+            y: y + 10.0,
             text: truncate_display(display, ((input_width - 16.0) / CHAR_WIDTH) as usize),
             font_size: NORMAL_TEXT,
             color: text_color,
@@ -1742,25 +1961,45 @@ impl App {
         if focused {
             let cursor_x = input_x + 8.0 + (value.len().min(60) as f32) * CHAR_WIDTH;
             cmds.push(RenderCommand::FillRect {
-                x: cursor_x, y: y + 6.0,
-                width: 2.0, height: height - 12.0,
+                x: cursor_x,
+                y: y + 6.0,
+                width: 2.0,
+                height: height - 12.0,
                 color: BLUE,
                 corner_radii: CornerRadii::ZERO,
             });
         }
     }
 
-    fn render_text_area(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32,
-                        label: &str, text: &str, focused: bool) {
+    #[allow(clippy::too_many_arguments)]
+    fn render_text_area(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+        label: &str,
+        text: &str,
+        focused: bool,
+    ) {
         // Header
         cmds.push(RenderCommand::FillRect {
-            x, y,
-            width, height: 24.0,
+            x,
+            y,
+            width,
+            height: 24.0,
             color: SURFACE0,
-            corner_radii: CornerRadii { top_left: 4.0, top_right: 4.0, bottom_left: 0.0, bottom_right: 0.0 },
+            corner_radii: CornerRadii {
+                top_left: 4.0,
+                top_right: 4.0,
+                bottom_left: 0.0,
+                bottom_right: 0.0,
+            },
         });
         cmds.push(RenderCommand::Text {
-            x: x + 8.0, y: y + 5.0,
+            x: x + 8.0,
+            y: y + 5.0,
             text: label.into(),
             font_size: SMALL_TEXT,
             color: SUBTEXT1,
@@ -1772,16 +2011,25 @@ impl App {
         let body_y = y + 24.0;
         let body_height = height - 24.0;
         cmds.push(RenderCommand::FillRect {
-            x, y: body_y,
-            width, height: body_height,
+            x,
+            y: body_y,
+            width,
+            height: body_height,
             color: MANTLE,
-            corner_radii: CornerRadii { top_left: 0.0, top_right: 0.0, bottom_left: 4.0, bottom_right: 4.0 },
+            corner_radii: CornerRadii {
+                top_left: 0.0,
+                top_right: 0.0,
+                bottom_left: 4.0,
+                bottom_right: 4.0,
+            },
         });
 
         // Border
         cmds.push(RenderCommand::StrokeRect {
-            x, y,
-            width, height,
+            x,
+            y,
+            width,
+            height,
             color: if focused { BLUE } else { SURFACE1 },
             line_width: if focused { 2.0 } else { 1.0 },
             corner_radii: CornerRadii::all(4.0),
@@ -1800,7 +2048,8 @@ impl App {
 
             // Line number
             cmds.push(RenderCommand::Text {
-                x: x + 4.0, y: ly,
+                x: x + 4.0,
+                y: ly,
                 text: format!("{:>3}", li.saturating_add(1)),
                 font_size: SMALL_TEXT,
                 color: OVERLAY0,
@@ -1823,8 +2072,10 @@ impl App {
                 let hl_w = ((hl_end.saturating_sub(hl_start)) as f32) * CHAR_WIDTH;
 
                 cmds.push(RenderCommand::FillRect {
-                    x: hl_x, y: ly - 2.0,
-                    width: hl_w, height: LINE_HEIGHT,
+                    x: hl_x,
+                    y: ly - 2.0,
+                    width: hl_w,
+                    height: LINE_HEIGHT,
                     color: Color::rgba(137, 180, 250, 60), // Blue highlight
                     corner_radii: CornerRadii::all(2.0),
                 });
@@ -1833,7 +2084,8 @@ impl App {
             // Line text
             let display_line = truncate_display(line, chars_per_line);
             cmds.push(RenderCommand::Text {
-                x: x + 40.0, y: ly,
+                x: x + 40.0,
+                y: ly,
                 text: display_line,
                 font_size: NORMAL_TEXT,
                 color: TEXT,
@@ -1846,7 +2098,8 @@ impl App {
 
         // Show line count
         cmds.push(RenderCommand::Text {
-            x: x + width - 80.0, y: y + 5.0,
+            x: x + width - 80.0,
+            y: y + 5.0,
             text: format!("{} lines", lines.len()),
             font_size: SMALL_TEXT,
             color: OVERLAY0,
@@ -1855,11 +2108,20 @@ impl App {
         });
     }
 
-    fn render_results_panel(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_results_panel(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         // Panel background
         cmds.push(RenderCommand::FillRect {
-            x, y,
-            width, height,
+            x,
+            y,
+            width,
+            height,
             color: MANTLE,
             corner_radii: CornerRadii::all(4.0),
         });
@@ -1873,15 +2135,18 @@ impl App {
 
             if selected {
                 cmds.push(RenderCommand::FillRect {
-                    x: tx, y: y + 4.0,
-                    width: tw, height: 22.0,
+                    x: tx,
+                    y: y + 4.0,
+                    width: tw,
+                    height: 22.0,
                     color: SURFACE0,
                     corner_radii: CornerRadii::all(3.0),
                 });
             }
 
             cmds.push(RenderCommand::Text {
-                x: tx + 8.0, y: y + 8.0,
+                x: tx + 8.0,
+                y: y + 8.0,
                 text: (*label).into(),
                 font_size: SMALL_TEXT,
                 color: if selected { BLUE } else { SUBTEXT0 },
@@ -1898,7 +2163,8 @@ impl App {
         if self.matches.is_empty() {
             if self.pattern.is_empty() {
                 cmds.push(RenderCommand::Text {
-                    x: x + 12.0, y: content_y + 20.0,
+                    x: x + 12.0,
+                    y: content_y + 20.0,
                     text: "Enter a pattern to begin".into(),
                     font_size: NORMAL_TEXT,
                     color: OVERLAY0,
@@ -1907,7 +2173,8 @@ impl App {
                 });
             } else if self.compile_error.is_none() {
                 cmds.push(RenderCommand::Text {
-                    x: x + 12.0, y: content_y + 20.0,
+                    x: x + 12.0,
+                    y: content_y + 20.0,
                     text: "No matches found".into(),
                     font_size: NORMAL_TEXT,
                     color: YELLOW,
@@ -1921,17 +2188,21 @@ impl App {
 
         // Explanation section at bottom
         if !self.explanations.is_empty() {
-            let explain_y = y + height - (self.explanations.len().min(6) as f32) * LINE_HEIGHT - 30.0;
+            let explain_y =
+                y + height - (self.explanations.len().min(6) as f32) * LINE_HEIGHT - 30.0;
 
             cmds.push(RenderCommand::FillRect {
-                x: x + 4.0, y: explain_y - 4.0,
-                width: width - 8.0, height: 1.0,
+                x: x + 4.0,
+                y: explain_y - 4.0,
+                width: width - 8.0,
+                height: 1.0,
                 color: SURFACE1,
                 corner_radii: CornerRadii::ZERO,
             });
 
             cmds.push(RenderCommand::Text {
-                x: x + 8.0, y: explain_y + 2.0,
+                x: x + 8.0,
+                y: explain_y + 2.0,
                 text: "Pattern Breakdown:".into(),
                 font_size: SMALL_TEXT,
                 color: SUBTEXT1,
@@ -1953,20 +2224,35 @@ impl App {
         }
     }
 
-    fn render_match_list(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, width: f32, height: f32) {
+    fn render_match_list(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        width: f32,
+        height: f32,
+    ) {
         let input_chars: Vec<char> = self.input_text.chars().collect();
         let max_visible = ((height - 10.0) / (LINE_HEIGHT * 2.0)) as usize;
         let scroll = (self.match_scroll_offset / (LINE_HEIGHT * 2.0)) as usize;
 
-        for (mi, m) in self.matches.iter().enumerate().skip(scroll).take(max_visible) {
+        for (mi, m) in self
+            .matches
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(max_visible)
+        {
             let row_y = y + 4.0 + ((mi - scroll) as f32) * LINE_HEIGHT * 2.0;
             let is_current = mi == self.current_match_index;
 
             // Highlight current match row
             if is_current {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0, y: row_y,
-                    width: width - 8.0, height: LINE_HEIGHT * 2.0 - 4.0,
+                    x: x + 4.0,
+                    y: row_y,
+                    width: width - 8.0,
+                    height: LINE_HEIGHT * 2.0 - 4.0,
                     color: SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -1974,7 +2260,8 @@ impl App {
 
             // Match index and position
             cmds.push(RenderCommand::Text {
-                x: x + 8.0, y: row_y + 2.0,
+                x: x + 8.0,
+                y: row_y + 2.0,
                 text: format!("#{} [{}-{}]", mi.saturating_add(1), m.start, m.end),
                 font_size: SMALL_TEXT,
                 color: if is_current { BLUE } else { OVERLAY0 },
@@ -1994,7 +2281,8 @@ impl App {
             };
 
             cmds.push(RenderCommand::Text {
-                x: x + 8.0, y: row_y + LINE_HEIGHT,
+                x: x + 8.0,
+                y: row_y + LINE_HEIGHT,
                 text: format!("\"{display}\""),
                 font_size: SMALL_TEXT,
                 color: GREEN,
@@ -2004,7 +2292,9 @@ impl App {
 
             // Show groups if enabled
             if self.show_groups {
-                let group_texts: Vec<String> = m.groups.iter()
+                let group_texts: Vec<String> = m
+                    .groups
+                    .iter()
                     .enumerate()
                     .skip(1) // skip group 0 (whole match)
                     .filter_map(|(gi, g)| {
@@ -2021,7 +2311,8 @@ impl App {
                 if !group_texts.is_empty() {
                     let groups_str = group_texts.join("  ");
                     cmds.push(RenderCommand::Text {
-                        x: x + 120.0, y: row_y + 2.0,
+                        x: x + 120.0,
+                        y: row_y + 2.0,
                         text: groups_str,
                         font_size: SMALL_TEXT,
                         color: MAUVE,
@@ -2054,13 +2345,16 @@ impl App {
             let selected = self.library_category_filter == *cat;
 
             cmds.push(RenderCommand::FillRect {
-                x: cat_x, y: content_y,
-                width: w, height: 24.0,
+                x: cat_x,
+                y: content_y,
+                width: w,
+                height: 24.0,
                 color: if selected { SURFACE1 } else { SURFACE0 },
                 corner_radii: CornerRadii::all(12.0),
             });
             cmds.push(RenderCommand::Text {
-                x: cat_x + 8.0, y: content_y + 5.0,
+                x: cat_x + 8.0,
+                y: content_y + 5.0,
                 text: label.into(),
                 font_size: SMALL_TEXT,
                 color: if selected {
@@ -2068,7 +2362,11 @@ impl App {
                 } else {
                     SUBTEXT0
                 },
-                font_weight: if selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w),
             });
             cat_x += w + 6.0;
@@ -2076,20 +2374,27 @@ impl App {
 
         // Library entries
         let list_y = content_y + 34.0;
-        let filtered: Vec<(usize, &PatternEntry)> = self.library.iter().enumerate()
-            .filter(|(_, e)| self.library_category_filter.map_or(true, |f| e.category == f))
+        let filtered: Vec<(usize, &PatternEntry)> = self
+            .library
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| self.library_category_filter.is_none_or(|f| e.category == f))
             .collect();
 
         for (vi, (original_idx, entry)) in filtered.iter().enumerate() {
             let row_y = list_y + (vi as f32) * 60.0;
-            if row_y > WINDOW_HEIGHT - 30.0 { break; }
+            if row_y > WINDOW_HEIGHT - 30.0 {
+                break;
+            }
 
             let selected = self.selected_library_entry == Some(*original_idx);
 
             // Row background
             cmds.push(RenderCommand::FillRect {
-                x: PADDING, y: row_y,
-                width: WINDOW_WIDTH - 2.0 * PADDING, height: 54.0,
+                x: PADDING,
+                y: row_y,
+                width: WINDOW_WIDTH - 2.0 * PADDING,
+                height: 54.0,
                 color: if selected { SURFACE0 } else { MANTLE },
                 corner_radii: CornerRadii::all(6.0),
             });
@@ -2098,13 +2403,16 @@ impl App {
             let cat_label = entry.category.label();
             let badge_w = (cat_label.len() as f32) * 7.0 + 12.0;
             cmds.push(RenderCommand::FillRect {
-                x: PADDING + 8.0, y: row_y + 6.0,
-                width: badge_w, height: 18.0,
+                x: PADDING + 8.0,
+                y: row_y + 6.0,
+                width: badge_w,
+                height: 18.0,
                 color: entry.category.color(),
                 corner_radii: CornerRadii::all(9.0),
             });
             cmds.push(RenderCommand::Text {
-                x: PADDING + 14.0, y: row_y + 9.0,
+                x: PADDING + 14.0,
+                y: row_y + 9.0,
                 text: cat_label.into(),
                 font_size: 10.0,
                 color: CRUST,
@@ -2114,7 +2422,8 @@ impl App {
 
             // Name
             cmds.push(RenderCommand::Text {
-                x: PADDING + badge_w + 16.0, y: row_y + 8.0,
+                x: PADDING + badge_w + 16.0,
+                y: row_y + 8.0,
                 text: entry.name.clone(),
                 font_size: NORMAL_TEXT,
                 color: TEXT,
@@ -2124,7 +2433,8 @@ impl App {
 
             // Pattern
             cmds.push(RenderCommand::Text {
-                x: PADDING + 8.0, y: row_y + 30.0,
+                x: PADDING + 8.0,
+                y: row_y + 30.0,
                 text: truncate_display(&entry.pattern, 80),
                 font_size: SMALL_TEXT,
                 color: SKY,
@@ -2134,7 +2444,8 @@ impl App {
 
             // Description on right
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH - 250.0, y: row_y + 8.0,
+                x: WINDOW_WIDTH - 250.0,
+                y: row_y + 8.0,
                 text: entry.description.clone(),
                 font_size: SMALL_TEXT,
                 color: SUBTEXT0,
@@ -2145,7 +2456,8 @@ impl App {
 
         if filtered.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: WINDOW_WIDTH / 2.0 - 80.0, y: list_y + 40.0,
+                x: WINDOW_WIDTH / 2.0 - 80.0,
+                y: list_y + 40.0,
                 text: "No patterns in this category".into(),
                 font_size: NORMAL_TEXT,
                 color: OVERLAY0,
@@ -2155,20 +2467,23 @@ impl App {
         }
     }
 
-    fn render_reference_tab(&self, cmds: &mut Vec<RenderCommand>) {
+    fn render_reference_tab(cmds: &mut Vec<RenderCommand>) {
         let content_y = TOOLBAR_HEIGHT + PADDING;
         let col_width = (WINDOW_WIDTH - 3.0 * PADDING) / 2.0;
 
         // Left column: Syntax reference
         cmds.push(RenderCommand::FillRect {
-            x: PADDING, y: content_y,
-            width: col_width, height: WINDOW_HEIGHT - content_y - PADDING,
+            x: PADDING,
+            y: content_y,
+            width: col_width,
+            height: WINDOW_HEIGHT - content_y - PADDING,
             color: MANTLE,
             corner_radii: CornerRadii::all(6.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: PADDING + 12.0, y: content_y + 10.0,
+            x: PADDING + 12.0,
+            y: content_y + 10.0,
             text: "Syntax Reference".into(),
             font_size: HEADER_TEXT,
             color: BLUE,
@@ -2206,10 +2521,13 @@ impl App {
 
         for (si, (syntax, desc)) in syntax_items.iter().enumerate() {
             let sy = content_y + 36.0 + (si as f32) * LINE_HEIGHT;
-            if sy > WINDOW_HEIGHT - 30.0 { break; }
+            if sy > WINDOW_HEIGHT - 30.0 {
+                break;
+            }
 
             cmds.push(RenderCommand::Text {
-                x: PADDING + 12.0, y: sy,
+                x: PADDING + 12.0,
+                y: sy,
                 text: (*syntax).into(),
                 font_size: SMALL_TEXT,
                 color: GREEN,
@@ -2217,7 +2535,8 @@ impl App {
                 max_width: Some(80.0),
             });
             cmds.push(RenderCommand::Text {
-                x: PADDING + 100.0, y: sy,
+                x: PADDING + 100.0,
+                y: sy,
                 text: (*desc).into(),
                 font_size: SMALL_TEXT,
                 color: SUBTEXT0,
@@ -2229,14 +2548,17 @@ impl App {
         // Right column: Replace reference
         let right_x = PADDING + col_width + PADDING;
         cmds.push(RenderCommand::FillRect {
-            x: right_x, y: content_y,
-            width: col_width, height: WINDOW_HEIGHT - content_y - PADDING,
+            x: right_x,
+            y: content_y,
+            width: col_width,
+            height: WINDOW_HEIGHT - content_y - PADDING,
             color: MANTLE,
             corner_radii: CornerRadii::all(6.0),
         });
 
         cmds.push(RenderCommand::Text {
-            x: right_x + 12.0, y: content_y + 10.0,
+            x: right_x + 12.0,
+            y: content_y + 10.0,
             text: "Replacement Reference".into(),
             font_size: HEADER_TEXT,
             color: PEACH,
@@ -2256,7 +2578,8 @@ impl App {
             let ry = content_y + 36.0 + (ri as f32) * LINE_HEIGHT;
 
             cmds.push(RenderCommand::Text {
-                x: right_x + 12.0, y: ry,
+                x: right_x + 12.0,
+                y: ry,
                 text: (*syntax).into(),
                 font_size: SMALL_TEXT,
                 color: PEACH,
@@ -2264,7 +2587,8 @@ impl App {
                 max_width: Some(80.0),
             });
             cmds.push(RenderCommand::Text {
-                x: right_x + 100.0, y: ry,
+                x: right_x + 100.0,
+                y: ry,
                 text: (*desc).into(),
                 font_size: SMALL_TEXT,
                 color: SUBTEXT0,
@@ -2276,7 +2600,8 @@ impl App {
         // Tips section
         let tips_y = content_y + 140.0;
         cmds.push(RenderCommand::Text {
-            x: right_x + 12.0, y: tips_y,
+            x: right_x + 12.0,
+            y: tips_y,
             text: "Tips & Tricks".into(),
             font_size: HEADER_TEXT,
             color: TEAL,
@@ -2296,10 +2621,13 @@ impl App {
 
         for (ti, tip) in tips.iter().enumerate() {
             let ty = tips_y + 26.0 + (ti as f32) * LINE_HEIGHT;
-            if ty > WINDOW_HEIGHT - 30.0 { break; }
+            if ty > WINDOW_HEIGHT - 30.0 {
+                break;
+            }
 
             cmds.push(RenderCommand::Text {
-                x: right_x + 16.0, y: ty,
+                x: right_x + 16.0,
+                y: ty,
                 text: format!("- {tip}"),
                 font_size: SMALL_TEXT,
                 color: SUBTEXT0,
@@ -2365,56 +2693,96 @@ mod tests {
     fn test_compile_char_class() {
         let compiler = RegexCompiler::new("[abc]", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::CharClass { .. })));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::CharClass { .. }))
+        );
     }
 
     #[test]
     fn test_compile_negated_class() {
         let compiler = RegexCompiler::new("[^abc]", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::CharClass { negated: true, .. })));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::CharClass { negated: true, .. }))
+        );
     }
 
     #[test]
     fn test_compile_char_range() {
         let compiler = RegexCompiler::new("[a-z]", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::CharClass { ranges, .. } if !ranges.is_empty())));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::CharClass { ranges, .. } if !ranges.is_empty()))
+        );
     }
 
     #[test]
     fn test_compile_predefined_digit() {
         let compiler = RegexCompiler::new("\\d", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::PredefinedClass(PredefinedClass::Digit))));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::PredefinedClass(PredefinedClass::Digit)))
+        );
     }
 
     #[test]
     fn test_compile_predefined_word() {
         let compiler = RegexCompiler::new("\\w", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::PredefinedClass(PredefinedClass::Word))));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::PredefinedClass(PredefinedClass::Word)))
+        );
     }
 
     #[test]
     fn test_compile_predefined_whitespace() {
         let compiler = RegexCompiler::new("\\s", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::PredefinedClass(PredefinedClass::Whitespace))));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::PredefinedClass(PredefinedClass::Whitespace)))
+        );
     }
 
     #[test]
     fn test_compile_anchor_start() {
         let compiler = RegexCompiler::new("^abc", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::Anchor(AnchorKind::Start))));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::Anchor(AnchorKind::Start)))
+        );
     }
 
     #[test]
     fn test_compile_anchor_end() {
         let compiler = RegexCompiler::new("abc$", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::Anchor(AnchorKind::End))));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::Anchor(AnchorKind::End)))
+        );
     }
 
     #[test]
@@ -2442,7 +2810,12 @@ mod tests {
     fn test_compile_quantifier_star() {
         let compiler = RegexCompiler::new("a*", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::Split { .. })));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::Split { .. }))
+        );
     }
 
     #[test]
@@ -2470,7 +2843,12 @@ mod tests {
     fn test_compile_escape_special() {
         let compiler = RegexCompiler::new("\\.", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::Literal('.'))));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::Literal('.')))
+        );
     }
 
     #[test]
@@ -2491,7 +2869,12 @@ mod tests {
     fn test_compile_word_boundary() {
         let compiler = RegexCompiler::new("\\bword\\b", false);
         let result = compiler.compile().unwrap();
-        assert!(result.nodes.iter().any(|n| matches!(n, RegexNode::WordBoundary)));
+        assert!(
+            result
+                .nodes
+                .iter()
+                .any(|n| matches!(n, RegexNode::WordBoundary))
+        );
     }
 
     #[test]
@@ -2578,7 +2961,9 @@ mod tests {
         let m = execute_regex(&compiled, "abc123def", 0);
         assert!(m.is_some());
         let m = m.unwrap();
-        assert_eq!(m.start, 0); // NFA will start from 0
+        // Unanchored leftmost scan: the first digit run "123" begins at index 3.
+        assert_eq!(m.start, 3);
+        assert_eq!(m.end, 6);
     }
 
     #[test]
@@ -2596,7 +2981,9 @@ mod tests {
 
     #[test]
     fn test_match_group_capture() {
-        let compiled = RegexCompiler::new("(\\d+)-(\\d+)", false).compile().unwrap();
+        let compiled = RegexCompiler::new("(\\d+)-(\\d+)", false)
+            .compile()
+            .unwrap();
         let m = execute_regex(&compiled, "123-456", 0);
         assert!(m.is_some());
         let m = m.unwrap();
@@ -2645,7 +3032,9 @@ mod tests {
 
     #[test]
     fn test_replace_backreference() {
-        let compiled = RegexCompiler::new("(\\w+)@(\\w+)", false).compile().unwrap();
+        let compiled = RegexCompiler::new("(\\w+)@(\\w+)", false)
+            .compile()
+            .unwrap();
         let matches = find_all_matches(&compiled, "user@host");
         let result = apply_replacement("user@host", &matches, "$1 at $2");
         // Should replace with group captures
@@ -2721,8 +3110,12 @@ mod tests {
         for entry in &patterns {
             let compiler = RegexCompiler::new(&entry.pattern, false);
             let result = compiler.compile();
-            assert!(result.is_ok(), "Failed to compile pattern '{}': {:?}", entry.name,
-                result.err().map(|e| e.message));
+            assert!(
+                result.is_ok(),
+                "Failed to compile pattern '{}': {:?}",
+                entry.name,
+                result.err().map(|e| e.message)
+            );
         }
     }
 
@@ -2730,7 +3123,9 @@ mod tests {
     fn test_email_pattern_matches() {
         let patterns = built_in_patterns();
         let email_pattern = patterns.iter().find(|p| p.name == "Email").unwrap();
-        let compiled = RegexCompiler::new(&email_pattern.pattern, false).compile().unwrap();
+        let compiled = RegexCompiler::new(&email_pattern.pattern, false)
+            .compile()
+            .unwrap();
         assert!(execute_regex(&compiled, "user@example.com", 0).is_some());
     }
 
@@ -2738,7 +3133,9 @@ mod tests {
     fn test_integer_pattern_matches() {
         let patterns = built_in_patterns();
         let int_pattern = patterns.iter().find(|p| p.name == "Integer").unwrap();
-        let compiled = RegexCompiler::new(&int_pattern.pattern, false).compile().unwrap();
+        let compiled = RegexCompiler::new(&int_pattern.pattern, false)
+            .compile()
+            .unwrap();
         assert!(execute_regex(&compiled, "42", 0).is_some());
         assert!(execute_regex(&compiled, "-7", 0).is_some());
     }
@@ -2995,7 +3392,10 @@ mod tests {
 
     #[test]
     fn test_regex_error_display() {
-        let err = RegexError { message: "bad pattern".into(), position: 5 };
+        let err = RegexError {
+            message: "bad pattern".into(),
+            position: 5,
+        };
         let display = format!("{err}");
         assert!(display.contains("position 5"));
         assert!(display.contains("bad pattern"));

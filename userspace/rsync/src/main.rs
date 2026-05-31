@@ -48,8 +48,18 @@
 //! recognized, producing a clear error since SSH transport is not yet wired.
 
 #![cfg_attr(not(test), no_main)]
+// Under `cfg(test)` the freestanding `extern "C" fn main` entry point (and
+// therefore the entire production call tree it reaches: rsync_run/scp_run,
+// transfer/sync helpers, etc.) is excluded, because the test harness supplies
+// its own `main` and exercises the individual functions directly.  That makes
+// the production tree legitimately unreachable in the test build, so silence
+// the resulting dead-code noise there only; the non-test build still warns.
+#![cfg_attr(test, allow(dead_code))]
 
 use std::collections::HashMap;
+// `env::args` is only used by the freestanding `main`, which is excluded under
+// `cfg(test)`; gate the import to avoid an unused-import warning in tests.
+#[cfg(not(test))]
 use std::env;
 use std::fs::{self, File, Metadata};
 use std::io::{self, Read, Write};
@@ -93,8 +103,7 @@ fn detect_personality(argv0: &[u8]) -> Personality {
         argv0
     };
     // Strip `.exe` suffix if present.
-    let name = if basename.len() > 4
-        && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe")
+    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe")
     {
         &basename[..basename.len() - 4]
     } else {
@@ -163,29 +172,38 @@ fn write_stderr(data: &[u8]) {
     let _ = io::stderr().write_all(data);
 }
 
-fn write_stderr_str(s: &str) {
-    write_stderr(s.as_bytes());
-}
-
-fn write_stdout_str(s: &str) {
-    write_stdout(s.as_bytes());
-}
-
 // ============================================================================
 // Rolling checksum (Adler32-style)
 // ============================================================================
 
 /// Rolling Adler32-style checksum for delta detection.
+///
+/// `new`/`roll`/`reset_with` (and the `count` field they depend on) implement
+/// the *sliding-window* primitive of the classic rsync algorithm: advancing the
+/// window one byte at a time to find matching blocks at arbitrary offsets after
+/// insertions/deletions.  The current local file-to-file `delta_transfer` only
+/// compares blocks at identical offsets (sufficient to skip rewriting unchanged
+/// blocks on disk), so the sliding-window methods are not yet wired into a
+/// production path — true rolling-window delta only pays off over a network
+/// transport, which this binary does not yet implement.  They are kept (and
+/// unit-tested) as the correct primitive for that future path; see todo.txt.
 #[derive(Clone, Copy)]
 struct RollingChecksum {
     a: u32,
     b: u32,
+    // Read only by `roll` (below), which is reserved for the sliding-window path.
+    #[allow(dead_code)]
     count: usize,
 }
 
 impl RollingChecksum {
+    #[allow(dead_code)] // sliding-window primitive; see struct-level note
     fn new() -> Self {
-        Self { a: 1, b: 0, count: 0 }
+        Self {
+            a: 1,
+            b: 0,
+            count: 0,
+        }
     }
 
     /// Compute checksum over a full block.
@@ -196,7 +214,11 @@ impl RollingChecksum {
             a = (a.wrapping_add(byte as u32)) % ADLER_MOD;
             b = (b.wrapping_add(a)) % ADLER_MOD;
         }
-        Self { a, b, count: data.len() }
+        Self {
+            a,
+            b,
+            count: data.len(),
+        }
     }
 
     /// Digest value combining both halves.
@@ -205,14 +227,22 @@ impl RollingChecksum {
     }
 
     /// Roll the checksum: remove `old_byte`, add `new_byte`.
+    #[allow(dead_code)] // sliding-window primitive; see struct-level note
     fn roll(&mut self, old_byte: u8, new_byte: u8) {
-        self.a = (self.a.wrapping_add(new_byte as u32).wrapping_sub(old_byte as u32)) % ADLER_MOD;
-        self.b = (self.b.wrapping_add(self.a)
-            .wrapping_sub((self.count as u32).wrapping_mul(old_byte as u32).wrapping_add(1)))
+        self.a = (self
+            .a
+            .wrapping_add(new_byte as u32)
+            .wrapping_sub(old_byte as u32))
             % ADLER_MOD;
+        self.b = (self.b.wrapping_add(self.a).wrapping_sub(
+            (self.count as u32)
+                .wrapping_mul(old_byte as u32)
+                .wrapping_add(1),
+        )) % ADLER_MOD;
     }
 
     /// Reset and compute over a new block.
+    #[allow(dead_code)] // sliding-window primitive; see struct-level note
     fn reset_with(&mut self, data: &[u8]) {
         *self = Self::from_block(data);
     }
@@ -231,29 +261,23 @@ struct Sha256 {
 
 impl Sha256 {
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     fn new() -> Self {
         Self {
             state: [
-                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-                0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+                0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+                0x5be0cd19,
             ],
             buffer: [0u8; 64],
             buf_len: 0,
@@ -268,8 +292,7 @@ impl Sha256 {
         if self.buf_len > 0 {
             let space = 64 - self.buf_len;
             let copy_len = space.min(data.len());
-            self.buffer[self.buf_len..self.buf_len + copy_len]
-                .copy_from_slice(&data[..copy_len]);
+            self.buffer[self.buf_len..self.buf_len + copy_len].copy_from_slice(&data[..copy_len]);
             self.buf_len += copy_len;
             offset = copy_len;
             if self.buf_len == 64 {
@@ -297,7 +320,11 @@ impl Sha256 {
         let bit_len = self.total_len.wrapping_mul(8);
         let mut pad = vec![0x80u8];
         let current = (self.buf_len + 1) % 64;
-        let zeros_needed = if current <= 56 { 56 - current } else { 120 - current };
+        let zeros_needed = if current <= 56 {
+            56 - current
+        } else {
+            120 - current
+        };
         pad.resize(1 + zeros_needed, 0);
         pad.extend_from_slice(&bit_len.to_be_bytes());
         self.update(&pad);
@@ -315,33 +342,32 @@ impl Sha256 {
 
     fn compress(&mut self, block: &[u8; 64]) {
         let mut w = [0u32; 64];
-        for i in 0..16 {
+        for (i, wi) in w.iter_mut().enumerate().take(16) {
             let base = i * 4;
-            w[i] = u32::from_be_bytes([
-                block[base], block[base + 1], block[base + 2], block[base + 3],
+            *wi = u32::from_be_bytes([
+                block[base],
+                block[base + 1],
+                block[base + 2],
+                block[base + 3],
             ]);
         }
         for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7)
-                ^ w[i - 15].rotate_right(18)
-                ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17)
-                ^ w[i - 2].rotate_right(19)
-                ^ (w[i - 2] >> 10);
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
             w[i] = w[i - 16]
                 .wrapping_add(s0)
                 .wrapping_add(w[i - 7])
                 .wrapping_add(s1);
         }
         let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = self.state;
-        for i in 0..64 {
+        for (i, &wi) in w.iter().enumerate() {
             let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
             let ch = (e & f) ^ ((!e) & g);
             let temp1 = h
                 .wrapping_add(s1)
                 .wrapping_add(ch)
                 .wrapping_add(Self::K[i])
-                .wrapping_add(w[i]);
+                .wrapping_add(wi);
             let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
             let maj = (a & b) ^ (a & c) ^ (b & c);
             let temp2 = s0.wrapping_add(maj);
@@ -561,8 +587,10 @@ fn set_file_mtime(path: &Path, mtime_secs: u64) -> Result<(), String> {
             .map_err(|_| format!("invalid path '{}': contains null byte", path.display()))?;
 
         let times: [i64; 4] = [
-            mtime_secs as i64, 0, // atime
-            mtime_secs as i64, 0, // mtime
+            mtime_secs as i64,
+            0, // atime
+            mtime_secs as i64,
+            0, // mtime
         ];
 
         // SAFETY: utimensat with AT_FDCWD (-100) sets timestamps on the file
@@ -570,9 +598,12 @@ fn set_file_mtime(path: &Path, mtime_secs: u64) -> Result<(), String> {
         // a pointer to two timespec structs. flags=0 follows symlinks.
         let ret = unsafe { utimensat(-100, c_path.as_ptr(), times.as_ptr(), 0) };
         if ret != 0 {
-            return Err(format!("set mtime on '{}': utimensat failed", path.display()));
+            return Err(format!(
+                "set mtime on '{}': utimensat failed",
+                path.display()
+            ));
         }
-        return Ok(());
+        Ok(())
     }
 
     #[cfg(not(target_family = "unix"))]
@@ -597,10 +628,23 @@ struct FileEntry {
     meta: Metadata,
 }
 
-fn scan_tree(root: &Path, excludes: &[String], includes: &[String],
-             max_size: Option<u64>, min_size: Option<u64>) -> Result<Vec<FileEntry>, String> {
+fn scan_tree(
+    root: &Path,
+    excludes: &[String],
+    includes: &[String],
+    max_size: Option<u64>,
+    min_size: Option<u64>,
+) -> Result<Vec<FileEntry>, String> {
     let mut entries = Vec::new();
-    scan_tree_inner(root, root, excludes, includes, max_size, min_size, &mut entries)?;
+    scan_tree_inner(
+        root,
+        root,
+        excludes,
+        includes,
+        max_size,
+        min_size,
+        &mut entries,
+    )?;
     entries.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
     Ok(entries)
 }
@@ -614,19 +658,24 @@ fn scan_tree_inner(
     min_size: Option<u64>,
     entries: &mut Vec<FileEntry>,
 ) -> Result<(), String> {
-    let read_dir = fs::read_dir(current)
-        .map_err(|e| format!("read dir '{}': {e}", current.display()))?;
+    let read_dir =
+        fs::read_dir(current).map_err(|e| format!("read dir '{}': {e}", current.display()))?;
 
     for entry in read_dir {
-        let entry =
-            entry.map_err(|e| format!("read dir entry in '{}': {e}", current.display()))?;
+        let entry = entry.map_err(|e| format!("read dir entry in '{}': {e}", current.display()))?;
         let path = entry.path();
-        let meta = fs::symlink_metadata(&path)
-            .map_err(|e| format!("stat '{}': {e}", path.display()))?;
+        let meta =
+            fs::symlink_metadata(&path).map_err(|e| format!("stat '{}': {e}", path.display()))?;
 
         let rel = path
             .strip_prefix(root)
-            .map_err(|_| format!("path '{}' not under root '{}'", path.display(), root.display()))?
+            .map_err(|_| {
+                format!(
+                    "path '{}' not under root '{}'",
+                    path.display(),
+                    root.display()
+                )
+            })?
             .to_string_lossy()
             .replace('\\', "/");
 
@@ -635,15 +684,15 @@ fn scan_tree_inner(
         }
 
         if meta.is_file() {
-            if let Some(max) = max_size {
-                if meta.len() > max {
-                    continue;
-                }
+            if let Some(max) = max_size
+                && meta.len() > max
+            {
+                continue;
             }
-            if let Some(min) = min_size {
-                if meta.len() < min {
-                    continue;
-                }
+            if let Some(min) = min_size
+                && meta.len() < min
+            {
+                continue;
             }
         }
 
@@ -676,8 +725,11 @@ struct ItemizeFlags {
 impl ItemizeFlags {
     fn format(&self) -> String {
         let mut buf = String::with_capacity(11);
-        if self.is_new || self.content_changed || self.size_changed
-            || self.time_changed || self.perms_changed
+        if self.is_new
+            || self.content_changed
+            || self.size_changed
+            || self.time_changed
+            || self.perms_changed
         {
             buf.push('>');
         } else {
@@ -713,7 +765,14 @@ fn compute_itemize(
             (true, true, true, true)
         };
 
-    ItemizeFlags { file_type, content_changed, size_changed, time_changed, perms_changed, is_new }
+    ItemizeFlags {
+        file_type,
+        content_changed,
+        size_changed,
+        time_changed,
+        perms_changed,
+        is_new,
+    }
 }
 
 // ============================================================================
@@ -900,9 +959,26 @@ fn rsync_parse_args(args: &[String]) -> Result<RsyncParseResult, String> {
     let sources = positional;
 
     Ok(RsyncParseResult::Run(RsyncConfig {
-        sources, dest, recursive, verbose, dry_run, delete, excludes, includes,
-        progress, checksum, update, human_readable, stats, preserve_perms,
-        preserve_times, preserve_links, itemize, compress, max_size, min_size,
+        sources,
+        dest,
+        recursive,
+        verbose,
+        dry_run,
+        delete,
+        excludes,
+        includes,
+        progress,
+        checksum,
+        update,
+        human_readable,
+        stats,
+        preserve_perms,
+        preserve_times,
+        preserve_links,
+        itemize,
+        compress,
+        max_size,
+        min_size,
     }))
 }
 
@@ -997,9 +1073,11 @@ fn read_full(reader: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
 
 /// Build a block-signature map for the destination file: each block's rolling
 /// checksum maps to its offset. Used for rsync-style delta detection.
-fn build_block_signatures(path: &Path, block_size: usize) -> Result<HashMap<u32, Vec<u64>>, String> {
-    let mut file = File::open(path)
-        .map_err(|e| format!("open '{}': {e}", path.display()))?;
+fn build_block_signatures(
+    path: &Path,
+    block_size: usize,
+) -> Result<HashMap<u32, Vec<u64>>, String> {
+    let mut file = File::open(path).map_err(|e| format!("open '{}': {e}", path.display()))?;
     let mut map: HashMap<u32, Vec<u64>> = HashMap::new();
     let mut buf = vec![0u8; block_size];
     let mut offset: u64 = 0;
@@ -1029,8 +1107,8 @@ fn delta_transfer(
 ) -> Result<u64, String> {
     let dst_sigs = build_block_signatures(dst_path, DELTA_BLOCK_SIZE)?;
 
-    let mut src = File::open(src_path)
-        .map_err(|e| format!("open '{}': {e}", src_path.display()))?;
+    let mut src =
+        File::open(src_path).map_err(|e| format!("open '{}': {e}", src_path.display()))?;
     let mut dst = fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -1111,17 +1189,18 @@ fn full_copy(
     show_progress: bool,
     stats: &mut RsyncStats,
 ) -> Result<u64, String> {
-    let mut src = File::open(src_path)
-        .map_err(|e| format!("open '{}': {e}", src_path.display()))?;
-    let mut dst = File::create(dst_path)
-        .map_err(|e| format!("create '{}': {e}", dst_path.display()))?;
+    let mut src =
+        File::open(src_path).map_err(|e| format!("open '{}': {e}", src_path.display()))?;
+    let mut dst =
+        File::create(dst_path).map_err(|e| format!("create '{}': {e}", dst_path.display()))?;
 
     let mut buf = [0u8; COPY_BUF_SIZE];
     let mut written: u64 = 0;
     let mut last_pct: u64 = u64::MAX;
 
     loop {
-        let n = src.read(&mut buf)
+        let n = src
+            .read(&mut buf)
             .map_err(|e| format!("read '{}': {e}", src_path.display()))?;
         if n == 0 {
             break;
@@ -1158,8 +1237,8 @@ fn transfer_file(
     cfg: &RsyncConfig,
     stats: &mut RsyncStats,
 ) -> Result<u64, String> {
-    let src_meta = fs::metadata(src_path)
-        .map_err(|e| format!("stat '{}': {e}", src_path.display()))?;
+    let src_meta =
+        fs::metadata(src_path).map_err(|e| format!("stat '{}': {e}", src_path.display()))?;
     let file_size = src_meta.len();
     stats.bytes_total = stats.bytes_total.wrapping_add(file_size);
 
@@ -1168,18 +1247,29 @@ fn transfer_file(
     }
 
     // Try delta transfer if dest exists and has the same size.
-    if dst_path.is_file() {
-        if let Ok(dst_meta) = fs::metadata(dst_path) {
-            if dst_meta.len() == file_size && file_size > 0 {
-                return delta_transfer(
-                    src_path, dst_path, file_size,
-                    cfg.human_readable, cfg.progress, stats,
-                );
-            }
-        }
+    if dst_path.is_file()
+        && let Ok(dst_meta) = fs::metadata(dst_path)
+        && dst_meta.len() == file_size
+        && file_size > 0
+    {
+        return delta_transfer(
+            src_path,
+            dst_path,
+            file_size,
+            cfg.human_readable,
+            cfg.progress,
+            stats,
+        );
     }
 
-    full_copy(src_path, dst_path, file_size, cfg.human_readable, cfg.progress, stats)
+    full_copy(
+        src_path,
+        dst_path,
+        file_size,
+        cfg.human_readable,
+        cfg.progress,
+        stats,
+    )
 }
 
 // ============================================================================
@@ -1188,8 +1278,7 @@ fn transfer_file(
 
 #[cfg(target_family = "unix")]
 fn copy_symlink(src: &Path, dst: &Path, dry_run: bool) -> Result<(), String> {
-    let target = fs::read_link(src)
-        .map_err(|e| format!("readlink '{}': {e}", src.display()))?;
+    let target = fs::read_link(src).map_err(|e| format!("readlink '{}': {e}", src.display()))?;
     if dry_run {
         return Ok(());
     }
@@ -1207,9 +1296,13 @@ fn copy_symlink(src: &Path, dst: &Path, dry_run: bool) -> Result<(), String> {
     if dry_run {
         return Ok(());
     }
-    fs::copy(src, dst)
-        .map(|_| ())
-        .map_err(|e| format!("copy symlink '{}' -> '{}': {e}", src.display(), dst.display()))
+    fs::copy(src, dst).map(|_| ()).map_err(|e| {
+        format!(
+            "copy symlink '{}' -> '{}': {e}",
+            src.display(),
+            dst.display()
+        )
+    })
 }
 
 // ============================================================================
@@ -1245,30 +1338,29 @@ fn sync_file_entry(
         write_stdout(msg.as_bytes());
     }
 
-    if !cfg.dry_run {
-        if let Some(parent) = dst_path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)
-                    .map_err(|e| format!("create dir '{}': {e}", parent.display()))?;
-            }
-        }
+    if !cfg.dry_run
+        && let Some(parent) = dst_path.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("create dir '{}': {e}", parent.display()))?;
     }
 
     transfer_file(src_path, dst_path, cfg, stats)?;
     stats.files_transferred += 1;
 
     if !cfg.dry_run {
-        if cfg.preserve_perms {
-            if let Err(e) = set_file_permissions(dst_path, get_mode(src_meta)) {
-                let msg = format!("rsync: warning: {e}\n");
-                write_stderr(msg.as_bytes());
-            }
+        if cfg.preserve_perms
+            && let Err(e) = set_file_permissions(dst_path, get_mode(src_meta))
+        {
+            let msg = format!("rsync: warning: {e}\n");
+            write_stderr(msg.as_bytes());
         }
-        if cfg.preserve_times {
-            if let Err(e) = set_file_mtime(dst_path, get_mtime(src_meta)) {
-                let msg = format!("rsync: warning: {e}\n");
-                write_stderr(msg.as_bytes());
-            }
+        if cfg.preserve_times
+            && let Err(e) = set_file_mtime(dst_path, get_mtime(src_meta))
+        {
+            let msg = format!("rsync: warning: {e}\n");
+            write_stderr(msg.as_bytes());
         }
     }
     Ok(())
@@ -1310,7 +1402,11 @@ fn delete_extraneous(
     stats: &mut RsyncStats,
 ) -> Result<(), String> {
     let dst_entries = match scan_tree(
-        dst_base, &cfg.excludes, &cfg.includes, cfg.max_size, cfg.min_size,
+        dst_base,
+        &cfg.excludes,
+        &cfg.includes,
+        cfg.max_size,
+        cfg.min_size,
     ) {
         Ok(e) => e,
         Err(_) => return Ok(()),
@@ -1321,7 +1417,11 @@ fn delete_extraneous(
             continue;
         }
         if cfg.verbose || cfg.itemize {
-            let prefix = if cfg.itemize { "*deleting " } else { "deleting " };
+            let prefix = if cfg.itemize {
+                "*deleting "
+            } else {
+                "deleting "
+            };
             let msg = format!("{prefix}{}\n", entry.rel_path);
             write_stdout(msg.as_bytes());
         }
@@ -1356,11 +1456,17 @@ fn sync_one(
     }
 
     if !src_meta.is_dir() {
-        return Err(format!("'{}' is not a file or directory", src_path.display()));
+        return Err(format!(
+            "'{}' is not a file or directory",
+            src_path.display()
+        ));
     }
 
     if !cfg.recursive {
-        return Err(format!("skipping directory '{}' (use -r for recursive)", src_path.display()));
+        return Err(format!(
+            "skipping directory '{}' (use -r for recursive)",
+            src_path.display()
+        ));
     }
 
     if !cfg.dry_run {
@@ -1369,7 +1475,11 @@ fn sync_one(
     }
 
     let src_entries = scan_tree(
-        src_path, &cfg.excludes, &cfg.includes, cfg.max_size, cfg.min_size,
+        src_path,
+        &cfg.excludes,
+        &cfg.includes,
+        cfg.max_size,
+        cfg.min_size,
     )?;
 
     let src_rel_set: HashMap<&str, ()> = src_entries
@@ -1384,9 +1494,8 @@ fn sync_one(
             if !dst_entry_path.is_dir() {
                 if cfg.verbose || cfg.itemize {
                     let prefix = if cfg.itemize {
-                        let flags = compute_itemize(
-                            &entry.full_path, &dst_entry_path, &entry.meta, 'd',
-                        );
+                        let flags =
+                            compute_itemize(&entry.full_path, &dst_entry_path, &entry.meta, 'd');
                         format!("{} ", flags.format())
                     } else {
                         String::new()
@@ -1400,19 +1509,30 @@ fn sync_one(
                 }
                 stats.dirs_created += 1;
             }
-            if cfg.preserve_perms && !cfg.dry_run && dst_entry_path.is_dir() {
-                if let Err(e) = set_file_permissions(&dst_entry_path, get_mode(&entry.meta)) {
-                    let msg = format!("rsync: warning: {e}\n");
-                    write_stderr(msg.as_bytes());
-                }
+            if cfg.preserve_perms
+                && !cfg.dry_run
+                && dst_entry_path.is_dir()
+                && let Err(e) = set_file_permissions(&dst_entry_path, get_mode(&entry.meta))
+            {
+                let msg = format!("rsync: warning: {e}\n");
+                write_stderr(msg.as_bytes());
             }
         } else if entry.meta.is_symlink() && cfg.preserve_links {
             sync_symlink_entry(
-                &entry.full_path, &dst_entry_path, &entry.rel_path, cfg, stats,
+                &entry.full_path,
+                &dst_entry_path,
+                &entry.rel_path,
+                cfg,
+                stats,
             )?;
         } else if entry.meta.is_file() {
             sync_file_entry(
-                &entry.full_path, &dst_entry_path, &entry.meta, &entry.rel_path, cfg, stats,
+                &entry.full_path,
+                &dst_entry_path,
+                &entry.meta,
+                &entry.rel_path,
+                cfg,
+                stats,
             )?;
         }
     }
@@ -1489,7 +1609,9 @@ fn rsync_run(args: &[String]) -> i32 {
     // Stats summary.
     if cfg.stats {
         // Simulate bytes_received as the file-list metadata overhead.
-        stats.bytes_received = stats.files_transferred.saturating_mul(64)
+        stats.bytes_received = stats
+            .files_transferred
+            .saturating_mul(64)
             .saturating_add(stats.dirs_created.saturating_mul(32));
 
         let total = stats.bytes_total;
@@ -1536,14 +1658,20 @@ fn rsync_run(args: &[String]) -> i32 {
 #[derive(Clone)]
 enum ScpLocation {
     Local(String),
-    Remote { user: Option<String>, host: String, path: String },
+    Remote {
+        user: Option<String>,
+        host: String,
+        path: String,
+    },
 }
 
 impl ScpLocation {
     fn parse(s: &str) -> Self {
         if let Some(colon_pos) = s.find(':') {
             let is_drive_letter = colon_pos == 1
-                && s.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic());
+                && s.as_bytes()
+                    .first()
+                    .is_some_and(|b| b.is_ascii_alphabetic());
             if !is_drive_letter && colon_pos > 0 {
                 let before_colon = &s[..colon_pos];
                 if !before_colon.contains('/') && !before_colon.contains('\\') {
@@ -1554,16 +1682,28 @@ impl ScpLocation {
                         let host = &host_part[at_pos + 1..];
                         if !host.is_empty() {
                             return Self::Remote {
-                                user: if user.is_empty() { None } else { Some(user.to_string()) },
+                                user: if user.is_empty() {
+                                    None
+                                } else {
+                                    Some(user.to_string())
+                                },
                                 host: host.to_string(),
-                                path: if path_part.is_empty() { ".".into() } else { path_part.to_string() },
+                                path: if path_part.is_empty() {
+                                    ".".into()
+                                } else {
+                                    path_part.to_string()
+                                },
                             };
                         }
                     } else if !host_part.is_empty() {
                         return Self::Remote {
                             user: None,
                             host: host_part.to_string(),
-                            path: if path_part.is_empty() { ".".into() } else { path_part.to_string() },
+                            path: if path_part.is_empty() {
+                                ".".into()
+                            } else {
+                                path_part.to_string()
+                            },
                         };
                     }
                 }
@@ -1652,16 +1792,22 @@ fn scp_parse_args(args: &[String]) -> Result<ScpParseResult, String> {
     let target = ScpLocation::parse(&target_str);
     let sources: Vec<ScpLocation> = positional.iter().map(|s| ScpLocation::parse(s)).collect();
 
-    if sources.len() > 1 {
-        if let ScpLocation::Local(ref p) = target {
-            let path = Path::new(p);
-            if !path.is_dir() && !p.ends_with('/') && !p.ends_with('\\') {
-                return Err("scp: target must be a directory when copying multiple sources".into());
-            }
+    if sources.len() > 1
+        && let ScpLocation::Local(ref p) = target
+    {
+        let path = Path::new(p);
+        if !path.is_dir() && !p.ends_with('/') && !p.ends_with('\\') {
+            return Err("scp: target must be a directory when copying multiple sources".into());
         }
     }
 
-    Ok(ScpParseResult::Run(ScpConfig { sources, target, recursive, preserve, verbose }))
+    Ok(ScpParseResult::Run(ScpConfig {
+        sources,
+        target,
+        recursive,
+        preserve,
+        verbose,
+    }))
 }
 
 fn scp_print_help() {
@@ -1702,7 +1848,12 @@ struct ScpStats {
 
 impl ScpStats {
     fn new() -> Self {
-        Self { files: 0, directories: 0, bytes: 0, errors: 0 }
+        Self {
+            files: 0,
+            directories: 0,
+            bytes: 0,
+            errors: 0,
+        }
     }
 }
 
@@ -1718,7 +1869,13 @@ struct ScpProgress {
 impl ScpProgress {
     fn new(file_name: &str, total_bytes: u64) -> Self {
         let now = clock_ns();
-        Self { file_name: file_name.to_string(), total_bytes, transferred: 0, start_ns: now, last_print_ns: 0 }
+        Self {
+            file_name: file_name.to_string(),
+            total_bytes,
+            transferred: 0,
+            start_ns: now,
+            last_print_ns: 0,
+        }
     }
 
     fn update(&mut self, additional: u64) {
@@ -1740,13 +1897,16 @@ impl ScpProgress {
     }
 
     fn print_line(&self, now: u64) {
-        let pct = if self.total_bytes > 0 {
-            self.transferred.saturating_mul(100) / self.total_bytes
-        } else {
-            100
-        };
+        let pct = self
+            .transferred
+            .saturating_mul(100)
+            .checked_div(self.total_bytes)
+            .unwrap_or(100);
         let elapsed_sec = now.saturating_sub(self.start_ns) / 1_000_000_000;
-        let speed = if elapsed_sec > 0 { self.transferred / elapsed_sec } else { self.transferred };
+        let speed = self
+            .transferred
+            .checked_div(elapsed_sec)
+            .unwrap_or(self.transferred);
         let eta = if speed > 0 && self.transferred < self.total_bytes {
             (self.total_bytes.saturating_sub(self.transferred)) / speed
         } else {
@@ -1778,8 +1938,7 @@ fn scp_copy_file(
     cfg: &ScpConfig,
     stats: &mut ScpStats,
 ) -> Result<(), String> {
-    let src_meta = fs::metadata(src)
-        .map_err(|e| format!("scp: {}: {e}", src.display()))?;
+    let src_meta = fs::metadata(src).map_err(|e| format!("scp: {}: {e}", src.display()))?;
     if src_meta.is_dir() {
         return Err(format!("scp: {}: is a directory (use -r)", src.display()));
     }
@@ -1790,31 +1949,32 @@ fn scp_copy_file(
         write_stderr(msg.as_bytes());
     }
 
-    if let Some(parent) = dst.parent() {
-        if !parent.exists() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("scp: cannot create {}: {e}", parent.display()))?;
-        }
+    if let Some(parent) = dst.parent()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("scp: cannot create {}: {e}", parent.display()))?;
     }
 
-    let mut reader = File::open(src)
-        .map_err(|e| format!("scp: {}: {e}", src.display()))?;
-    let mut writer = File::create(dst)
-        .map_err(|e| format!("scp: {}: {e}", dst.display()))?;
+    let mut reader = File::open(src).map_err(|e| format!("scp: {}: {e}", src.display()))?;
+    let mut writer = File::create(dst).map_err(|e| format!("scp: {}: {e}", dst.display()))?;
 
     let mut buf = [0u8; COPY_BUF_SIZE];
-    let file_name = src.file_name()
+    let file_name = src
+        .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| src.display().to_string());
     let mut progress = ScpProgress::new(&file_name, file_size);
 
     loop {
-        let n = reader.read(&mut buf)
+        let n = reader
+            .read(&mut buf)
             .map_err(|e| format!("scp: read {}: {e}", src.display()))?;
         if n == 0 {
             break;
         }
-        writer.write_all(&buf[..n])
+        writer
+            .write_all(&buf[..n])
             .map_err(|e| format!("scp: write {}: {e}", dst.display()))?;
         if cfg.verbose {
             progress.update(n as u64);
@@ -1855,8 +2015,7 @@ fn scp_copy_directory(
         let msg = format!("d {}\n", dst.display());
         write_stderr(msg.as_bytes());
     }
-    fs::create_dir_all(dst)
-        .map_err(|e| format!("scp: cannot create {}: {e}", dst.display()))?;
+    fs::create_dir_all(dst).map_err(|e| format!("scp: cannot create {}: {e}", dst.display()))?;
     stats.directories = stats.directories.saturating_add(1);
 
     let mut entries: Vec<_> = fs::read_dir(src)
@@ -1868,17 +2027,18 @@ fn scp_copy_directory(
     for entry in entries {
         let entry_path = entry.path();
         let dst_child = dst.join(entry.file_name());
-        let ft = entry.file_type()
+        let ft = entry
+            .file_type()
             .map_err(|e| format!("scp: {}: {e}", entry_path.display()))?;
 
         if ft.is_dir() {
             scp_copy_directory(&entry_path, &dst_child, cfg, stats)?;
-        } else if ft.is_file() {
-            if let Err(e) = scp_copy_file(&entry_path, &dst_child, cfg, stats) {
-                let msg = format!("{e}\n");
-                write_stderr(msg.as_bytes());
-                stats.errors = stats.errors.saturating_add(1);
-            }
+        } else if ft.is_file()
+            && let Err(e) = scp_copy_file(&entry_path, &dst_child, cfg, stats)
+        {
+            let msg = format!("{e}\n");
+            write_stderr(msg.as_bytes());
+            stats.errors = stats.errors.saturating_add(1);
         }
     }
     Ok(())
@@ -1907,10 +2067,15 @@ fn scp_run(args: &[String]) -> i32 {
     let any_remote = cfg.sources.iter().any(|s| s.is_remote()) || cfg.target.is_remote();
     if any_remote {
         // Find the first remote location for the error message.
-        let remote_loc = cfg.sources.iter()
+        let remote_loc = cfg
+            .sources
+            .iter()
             .find(|s| s.is_remote())
             .unwrap_or(&cfg.target);
-        let msg = format!("scp: remote transfer not yet supported: {}\n", remote_loc.display());
+        let msg = format!(
+            "scp: remote transfer not yet supported: {}\n",
+            remote_loc.display()
+        );
         write_stderr(msg.as_bytes());
         return 1;
     }
@@ -1927,12 +2092,13 @@ fn scp_run(args: &[String]) -> i32 {
         || target_str.ends_with('\\')
         || cfg.sources.len() > 1;
 
-    if target_is_dir && !target_path.exists() {
-        if let Err(e) = fs::create_dir_all(&target_path) {
-            let msg = format!("scp: cannot create {}: {e}\n", target_path.display());
-            write_stderr(msg.as_bytes());
-            return 1;
-        }
+    if target_is_dir
+        && !target_path.exists()
+        && let Err(e) = fs::create_dir_all(&target_path)
+    {
+        let msg = format!("scp: cannot create {}: {e}\n", target_path.display());
+        write_stderr(msg.as_bytes());
+        return 1;
     }
 
     for src in &cfg.sources {
@@ -1950,7 +2116,8 @@ fn scp_run(args: &[String]) -> i32 {
         }
 
         let dst_path = if target_is_dir {
-            let name = src_path.file_name()
+            let name = src_path
+                .file_name()
                 .map(|n| n.to_os_string())
                 .unwrap_or_else(|| src_path.as_os_str().to_os_string());
             target_path.join(name)
@@ -1984,7 +2151,8 @@ fn scp_run(args: &[String]) -> i32 {
     if cfg.verbose {
         let msg = format!(
             "Transferred {} file(s), {} dir(s), {}\n",
-            stats.files, stats.directories,
+            stats.files,
+            stats.directories,
             format_size(stats.bytes, true),
         );
         write_stderr(msg.as_bytes());
@@ -2059,7 +2227,10 @@ mod tests {
 
     #[test]
     fn personality_rsync_exe() {
-        assert_eq!(detect_personality(b"C:\\bin\\rsync.EXE"), Personality::Rsync);
+        assert_eq!(
+            detect_personality(b"C:\\bin\\rsync.EXE"),
+            Personality::Rsync
+        );
     }
 
     #[test]
@@ -2367,7 +2538,11 @@ mod tests {
             is_new: false,
         };
         let s = flags.format();
-        assert_eq!(&s, ".f...........");
+        // rsync's itemize string (%i) is exactly 11 chars: update-type, file
+        // type, then c s t p o g u a x.  Here: '.' (no change), 'f', then 4
+        // change flags (c/s/t/p) and 5 trailing dots = ".f.........".
+        assert_eq!(&s, ".f.........");
+        assert_eq!(s.len(), 11);
     }
 
     #[test]
@@ -2485,8 +2660,10 @@ mod tests {
     #[test]
     fn rsync_args_exclude_include() {
         let args: Vec<String> = vec![
-            "--exclude=*.o".into(), "--include=keep.o".into(),
-            "s".into(), "d".into(),
+            "--exclude=*.o".into(),
+            "--include=keep.o".into(),
+            "s".into(),
+            "d".into(),
         ];
         match rsync_parse_args(&args).unwrap() {
             RsyncParseResult::Run(c) => {
@@ -2500,13 +2677,19 @@ mod tests {
     #[test]
     fn rsync_args_help() {
         let args: Vec<String> = vec!["--help".into()];
-        assert!(matches!(rsync_parse_args(&args).unwrap(), RsyncParseResult::Help));
+        assert!(matches!(
+            rsync_parse_args(&args).unwrap(),
+            RsyncParseResult::Help
+        ));
     }
 
     #[test]
     fn rsync_args_version() {
         let args: Vec<String> = vec!["--version".into()];
-        assert!(matches!(rsync_parse_args(&args).unwrap(), RsyncParseResult::Version));
+        assert!(matches!(
+            rsync_parse_args(&args).unwrap(),
+            RsyncParseResult::Version
+        ));
     }
 
     #[test]
@@ -2530,8 +2713,10 @@ mod tests {
     #[test]
     fn rsync_args_max_min_size() {
         let args: Vec<String> = vec![
-            "--max-size=10M".into(), "--min-size=1K".into(),
-            "a".into(), "b".into(),
+            "--max-size=10M".into(),
+            "--min-size=1K".into(),
+            "a".into(),
+            "b".into(),
         ];
         match rsync_parse_args(&args).unwrap() {
             RsyncParseResult::Run(c) => {
@@ -2651,7 +2836,9 @@ mod tests {
     #[test]
     fn scp_loc_display_remote_user() {
         let loc = ScpLocation::Remote {
-            user: Some("bob".into()), host: "srv".into(), path: "/data".into(),
+            user: Some("bob".into()),
+            host: "srv".into(),
+            path: "/data".into(),
         };
         assert_eq!(loc.display(), "bob@srv:/data");
     }
@@ -2659,7 +2846,9 @@ mod tests {
     #[test]
     fn scp_loc_display_remote_no_user() {
         let loc = ScpLocation::Remote {
-            user: None, host: "srv".into(), path: "/data".into(),
+            user: None,
+            host: "srv".into(),
+            path: "/data".into(),
         };
         assert_eq!(loc.display(), "srv:/data");
     }

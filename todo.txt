@@ -1,3 +1,29 @@
+## BUG (noticed+FIXED 2026-05-31): rsync had 1 failing test + a pile of latent
+##   warnings.  userspace/rsync/src/main.rs:
+##     * itemize_unchanged expected ".f..........." (13 chars); rsync's itemize
+##       string (%i) is exactly 11 chars (update-type, file-type, then
+##       c/s/t/p/o/g/u/a/x).  The sibling itemize_changed test correctly asserts
+##       len()==11.  Wrong test constant -> fixed to ".f........." + len check.
+##     * Production (ouros) build had real warnings: removed two genuinely-dead
+##       helpers (write_stderr_str/write_stdout_str, never referenced anywhere);
+##       converted two needless_range_loop SHA-256 loops to iterators; converted
+##       two manual `if x>0 {a/x} else {d}` to checked_div().unwrap_or(d).
+##     * The RollingChecksum sliding-window primitives (new/roll/reset_with +
+##       `count`) are correct and unit-tested but NOT wired into production: the
+##       local file-to-file delta_transfer only compares blocks at identical
+##       offsets (enough to skip rewriting unchanged disk blocks).  True
+##       rolling-window delta (matching shifted blocks after insert/delete) only
+##       pays off over a NETWORK transport, which this binary does not yet
+##       implement.  Kept the primitives with a documented #[allow(dead_code)]
+##       and a struct-level note rather than deleting tested machinery.
+##       DEFERRED PROPER FIX: when SSH/network transport is added, wire the
+##       sliding window into delta_transfer for a real rsync delta.
+##     * Test-build dead-code noise: `main` is #[cfg(not(test))] (no_main entry),
+##       so under cfg(test) the whole production call tree is unreachable.  Added
+##       a justified crate-level `#![cfg_attr(test, allow(dead_code))]` (+ gated
+##       `use std::env` to cfg(not(test))).  89/89 tests pass; clippy-clean host
+##       + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): wget had 3 failing tests, all WRONG TEST
 ##   CONSTANTS (not production bugs — same class as the earlier curl fix).
 ##   userspace/wget/src/main.rs production code (ip_to_string, find_header_end,

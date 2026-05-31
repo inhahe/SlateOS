@@ -42,36 +42,59 @@ use std::process;
 // ============================================================================
 // Syscall numbers (fs zone: 600-799)
 // ============================================================================
+//
+// These map to the real OurOS VFS handlers. The previous version targeted
+// Linux numbers 30/31 — which on OurOS are IRQ_REGISTER / IRQ_WAIT, so a chown
+// or chmod would have tried to register or block on a hardware interrupt line.
 
-/// Change file owner and group.
+/// Read file metadata (`SYS_FS_METADATA`).
 ///
-/// arg1 = pointer to path bytes
-/// arg2 = path length
-/// arg3 = packed ownership: low 32 bits = uid, high 32 bits = gid
-const SYS_CHOWN: u64 = 30;
+/// arg0 = path pointer, arg1 = path length, arg2 = output buffer pointer
+/// (`FS_META_SIZE` bytes). On success returns 0 and fills the buffer.
+const SYS_FS_METADATA: u64 = 628;
 
-/// Change file permission mode bits.
+/// Change file owner and group (`SYS_FS_SET_OWNER`).
 ///
-/// arg1 = pointer to path bytes
-/// arg2 = path length
-/// arg3 = mode (u32, only low 16 bits used: rwx + setuid/setgid/sticky)
-const SYS_CHMOD: u64 = 31;
+/// arg0 = path pointer, arg1 = path length, arg2 = uid (u32), arg3 = gid (u32).
+/// A uid or gid of `u32::MAX` means "leave that field unchanged"; the kernel
+/// resolves the sentinel against the file's current owner.
+const SYS_FS_SET_OWNER: u64 = 630;
+
+/// Change file permission mode bits (`SYS_FS_SET_PERMS`).
+///
+/// arg0 = path pointer, arg1 = path length, arg2 = mode (low 12 bits used:
+/// rwx + setuid/setgid/sticky).
+const SYS_FS_SET_PERMS: u64 = 631;
+
+/// Size of the `SYS_FS_METADATA` output buffer, in bytes.
+const FS_META_SIZE: usize = 64;
+
+/// Byte offset of the u32 uid field within the metadata buffer.
+const META_OFF_UID: usize = 48;
+/// Byte offset of the u32 gid field within the metadata buffer.
+const META_OFF_GID: usize = 52;
+/// Byte offset of the u16 permission-bits field within the metadata buffer.
+const META_OFF_PERMS: usize = 56;
 
 // ============================================================================
 // Low-level syscall interface
 // ============================================================================
 
-/// Issue a three-argument syscall using the x86-64 `syscall` instruction.
+/// Issue a four-argument syscall using the x86-64 `syscall` instruction.
 ///
 /// Register mapping follows the OurOS syscall ABI:
-///   rax = syscall number, rdi = arg1, rsi = arg2, rdx = arg3
+///   rax = syscall number, rdi = arg0, rsi = arg1, rdx = arg2, r10 = arg3
 ///   Return value in rax. rcx and r11 are clobbered by the CPU.
+///
+/// Three-argument syscalls pass 0 for `a4`.
 #[cfg(target_arch = "x86_64")]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+unsafe fn syscall4(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     let ret: i64;
     // SAFETY: Caller ensures arguments are valid for the given syscall number.
     // The `syscall` instruction is the defined kernel entry point on x86-64.
-    // rcx and r11 are marked as clobbered per the hardware specification.
+    // The kernel reads arg3 from r10 (not rcx, which the syscall instruction
+    // overwrites with the return address). rcx and r11 are clobbered per the
+    // hardware specification.
     unsafe {
         core::arch::asm!(
             "syscall",
@@ -79,6 +102,7 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
             in("rdi") a1,
             in("rsi") a2,
             in("rdx") a3,
+            in("r10") a4,
             lateout("rcx") _,
             lateout("r11") _,
             options(nostack),
@@ -87,22 +111,40 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
+/// Convenience wrapper for three-argument syscalls.
+#[cfg(target_arch = "x86_64")]
+unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    // SAFETY: forwarded to syscall4 with a zero fourth argument; the safety
+    // contract is identical and upheld by the caller.
+    unsafe { syscall4(nr, a1, a2, a3, 0) }
+}
+
 // ============================================================================
-// Errno helpers
+// Error helpers
 // ============================================================================
 
-/// Map a negative syscall return code to a human-readable error string.
-fn errno_to_string(errno: i64) -> String {
-    match errno {
-        -1 => "operation not permitted (EPERM)".to_string(),
-        -2 => "no such file or directory (ENOENT)".to_string(),
-        -13 => "permission denied (EACCES)".to_string(),
-        -20 => "not a directory (ENOTDIR)".to_string(),
-        -22 => "invalid argument (EINVAL)".to_string(),
-        -30 => "read-only file system (EROFS)".to_string(),
-        -40 => "too many levels of symbolic links (ELOOP)".to_string(),
-        other => format!("error {other}"),
-    }
+/// Map a negative OurOS kernel error code to a human-readable string.
+///
+/// These are `KernelError` discriminants (see kernel `error.rs`), NOT Linux
+/// errnos — e.g. -2 is "operation not supported", not ENOENT.
+fn kernel_error_to_string(code: i64) -> String {
+    let msg = match code {
+        -1 => "internal kernel error",
+        -2 => "operation not supported",
+        -3 => "invalid argument",
+        -400 => "permission denied",
+        -401 => "invalid capability",
+        -500 => "no such file or directory",
+        -502 => "not a directory",
+        -503 => "is a directory",
+        -505 => "invalid handle",
+        -506 => "too many symbolic links",
+        -509 => "read-only filesystem",
+        -600 => "I/O error",
+        -601 => "no such device",
+        _ => return format!("error {code}"),
+    };
+    format!("{msg} ({code})")
 }
 
 // ============================================================================
@@ -242,50 +284,124 @@ fn resolve_gid(name: &str, groups: &[GroupEntry]) -> Option<u32> {
 // Filesystem helpers
 // ============================================================================
 
-/// Perform the chown syscall on a single path.
-///
-/// `uid` and `gid` are the new owner/group. Pass `u32::MAX` for either to
-/// leave it unchanged (the kernel interprets `0xFFFFFFFF` as "no change").
-fn do_chown(path: &str, uid: u32, gid: u32) -> Result<(), String> {
-    let packed: u64 = (uid as u64) | ((gid as u64) << 32);
+/// Resolved file metadata fields that chown/chmod care about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FileMeta {
+    uid: u32,
+    gid: u32,
+    /// Permission bits (low 12: rwx + setuid/setgid/sticky).
+    perms: u32,
+}
 
-    // SAFETY: SYS_CHOWN takes a pointer to path bytes, the path length, and
-    // a packed uid|gid value. The path slice is valid for the duration of the
-    // syscall.
+/// Parse the uid/gid/perms fields out of a raw `SYS_FS_METADATA` buffer.
+///
+/// Split out from [`read_metadata`] so it can be unit-tested on the host where
+/// the syscall cannot run. Returns `None` if the buffer is too small.
+fn parse_metadata_buffer(buf: &[u8]) -> Option<FileMeta> {
+    let uid_bytes = buf.get(META_OFF_UID..META_OFF_UID + 4)?;
+    let gid_bytes = buf.get(META_OFF_GID..META_OFF_GID + 4)?;
+    let perm_bytes = buf.get(META_OFF_PERMS..META_OFF_PERMS + 2)?;
+
+    let uid = u32::from_le_bytes([uid_bytes[0], uid_bytes[1], uid_bytes[2], uid_bytes[3]]);
+    let gid = u32::from_le_bytes([gid_bytes[0], gid_bytes[1], gid_bytes[2], gid_bytes[3]]);
+    let perms = u16::from_le_bytes([perm_bytes[0], perm_bytes[1]]) as u32;
+
+    Some(FileMeta { uid, gid, perms })
+}
+
+/// Read a file's metadata via `SYS_FS_METADATA`.
+///
+/// Returns the owner uid, group gid, and permission bits. Used both to
+/// implement `--reference` (copy owner/mode from another file) and to detect
+/// whether an operation actually changed anything (for `-c` / `-v`).
+#[cfg(target_arch = "x86_64")]
+fn read_metadata(path: &str) -> Result<FileMeta, String> {
+    let mut buf = [0u8; FS_META_SIZE];
+
+    // SAFETY: SYS_FS_METADATA reads `path.len()` bytes from `path.as_ptr()` and
+    // writes exactly `FS_META_SIZE` bytes to `buf`. Both the path slice and the
+    // stack buffer are valid for the duration of the syscall, and `buf` is sized
+    // to the ABI-defined output length.
     let ret = unsafe {
         syscall3(
-            SYS_CHOWN,
+            SYS_FS_METADATA,
             path.as_ptr() as u64,
             path.len() as u64,
-            packed,
+            buf.as_mut_ptr() as u64,
         )
     };
 
     if ret < 0 {
-        Err(errno_to_string(ret))
+        return Err(kernel_error_to_string(ret));
+    }
+
+    parse_metadata_buffer(&buf).ok_or_else(|| "metadata buffer too small".to_string())
+}
+
+/// Host fallback: the metadata syscall cannot run on the build host.
+#[cfg(not(target_arch = "x86_64"))]
+fn read_metadata(_path: &str) -> Result<FileMeta, String> {
+    Err("metadata unavailable on this platform".to_string())
+}
+
+/// Perform the chown syscall on a single path.
+///
+/// `uid` and `gid` are the new owner/group. Pass `u32::MAX` for either to
+/// leave it unchanged (the kernel interprets `0xFFFFFFFF` as "no change",
+/// resolving the sentinel against the file's current owner in the VFS layer).
+#[cfg(target_arch = "x86_64")]
+fn do_chown(path: &str, uid: u32, gid: u32) -> Result<(), String> {
+    // SAFETY: SYS_FS_SET_OWNER reads `path.len()` bytes from `path.as_ptr()`
+    // and takes uid in arg2 and gid in arg3. The path slice outlives the call.
+    let ret = unsafe {
+        syscall4(
+            SYS_FS_SET_OWNER,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            uid as u64,
+            gid as u64,
+        )
+    };
+
+    if ret < 0 {
+        Err(kernel_error_to_string(ret))
     } else {
         Ok(())
     }
 }
 
+/// Host fallback so the crate compiles for tests on non-x86_64 hosts.
+#[cfg(not(target_arch = "x86_64"))]
+fn do_chown(_path: &str, _uid: u32, _gid: u32) -> Result<(), String> {
+    Err("chown syscall unavailable on this platform".to_string())
+}
+
 /// Perform the chmod syscall on a single path.
+#[cfg(target_arch = "x86_64")]
 fn do_chmod(path: &str, mode: u32) -> Result<(), String> {
-    // SAFETY: SYS_CHMOD takes a pointer to path bytes, path length, and the
-    // new mode value. The path slice is valid for the duration of the syscall.
+    // SAFETY: SYS_FS_SET_PERMS reads `path.len()` bytes from `path.as_ptr()`
+    // and takes the new mode (low 12 bits) in arg2. The path slice outlives
+    // the call.
     let ret = unsafe {
         syscall3(
-            SYS_CHMOD,
+            SYS_FS_SET_PERMS,
             path.as_ptr() as u64,
             path.len() as u64,
-            mode as u64,
+            (mode & 0o7777) as u64,
         )
     };
 
     if ret < 0 {
-        Err(errno_to_string(ret))
+        Err(kernel_error_to_string(ret))
     } else {
         Ok(())
     }
+}
+
+/// Host fallback so the crate compiles for tests on non-x86_64 hosts.
+#[cfg(not(target_arch = "x86_64"))]
+fn do_chmod(_path: &str, _mode: u32) -> Result<(), String> {
+    Err("chmod syscall unavailable on this platform".to_string())
 }
 
 /// Recursively collect all paths under a directory (depth-first).
@@ -465,7 +581,7 @@ fn parse_symbolic_mode(mode_str: &str) -> Result<Vec<ModeClause>, String> {
     }
 
     if clauses.is_empty() {
-        return Err(format!("empty mode string"));
+        return Err("empty mode string".to_string());
     }
 
     Ok(clauses)
@@ -719,7 +835,7 @@ fn print_chmod_json(path: &str, mode: u32, ok: bool, err: &str) {
 // ============================================================================
 
 /// Which binary personality we are running as.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Mode {
     Chown,
     Chmod,
@@ -908,20 +1024,61 @@ fn chown_one(
     spec: &OwnerSpec,
     opts: &Options,
 ) -> (bool, Option<String>) {
+    // Read current metadata (best-effort) for --from matching and accurate
+    // change detection. If it fails we fall back to assuming a field changes
+    // whenever it is specified.
+    let current = read_metadata(path).ok();
+
+    // --from filter: only operate on files whose current owner/group match.
+    if opts.from_uid.is_some() || opts.from_gid.is_some() {
+        match &current {
+            Some(meta) => {
+                let uid_match = opts.from_uid.is_none_or(|u| u == meta.uid);
+                let gid_match = opts.from_gid.is_none_or(|g| g == meta.gid);
+                if !uid_match || !gid_match {
+                    // Current ownership does not match the filter: skip.
+                    return (false, None);
+                }
+            }
+            None => {
+                // Cannot verify the current ownership, so we cannot safely
+                // honor --from. Skip rather than risk an unwanted change.
+                if !opts.silent {
+                    eprintln!(
+                        "chown: cannot verify current ownership of '{path}' for --from; skipping"
+                    );
+                }
+                return (false, None);
+            }
+        }
+    }
+
+    // Determine whether this call will actually change anything.
+    let changed = match &current {
+        Some(meta) => {
+            let uid_changes = spec.uid.is_some_and(|u| u != meta.uid);
+            let gid_changes = spec.gid.is_some_and(|g| g != meta.gid);
+            uid_changes || gid_changes
+        }
+        None => spec.uid.is_some() || spec.gid.is_some(),
+    };
+
     // "No change" sentinel for syscall.
     let uid = spec.uid.unwrap_or(u32::MAX);
     let gid = spec.gid.unwrap_or(u32::MAX);
 
     match do_chown(path, uid, gid) {
         Ok(()) => {
-            let changed = spec.uid.is_some() || spec.gid.is_some();
+            let owner_str = format_owner(spec.uid, spec.gid);
             if opts.json {
                 print_chown_json(path, spec.uid, spec.gid, true, "");
             } else if opts.verbose {
-                let owner_str = format_owner(spec.uid, spec.gid);
-                eprintln!("changed ownership of '{path}' to {owner_str}");
+                if changed {
+                    eprintln!("changed ownership of '{path}' to {owner_str}");
+                } else {
+                    eprintln!("ownership of '{path}' retained as {owner_str}");
+                }
             } else if opts.changes && changed {
-                let owner_str = format_owner(spec.uid, spec.gid);
                 eprintln!("changed ownership of '{path}' to {owner_str}");
             }
             (changed, None)
@@ -952,24 +1109,26 @@ fn run_chown(
     users: &[UserEntry],
     groups: &[GroupEntry],
 ) -> bool {
+    // -h / --no-dereference asks us to operate on the symlink itself. The
+    // OurOS VFS set_owner path resolves symlinks (resolve_follow) and there is
+    // no lchown-equivalent syscall yet, so we cannot honor this. Warn rather
+    // than silently chown the target. (Tracked in todo.txt.)
+    if opts.no_deref && !opts.silent {
+        eprintln!(
+            "chown: warning: -h/--no-dereference is not supported on OurOS; symlink targets will be affected"
+        );
+    }
+
     let spec = if let Some(ref refpath) = opts.reference {
-        // --reference: read owner/group from the reference file's metadata.
-        // For now we parse the uid/gid from /proc/self/fd or fall back to
-        // treating the file metadata's uid/gid values. On OurOS the std
-        // Metadata may not populate uid/gid, so we use a best-effort approach.
-        match fs::metadata(refpath) {
-            Ok(_meta) => {
-                // std::os::unix metadata extensions are not available on our
-                // custom target. Fall back to returning a dummy spec and
-                // informing the user that --reference requires kernel support.
-                eprintln!(
-                    "chown: --reference is not yet supported (no stat uid/gid on OurOS)"
-                );
-                return false;
-            }
+        // --reference: copy owner/group from the reference file's metadata.
+        match read_metadata(refpath) {
+            Ok(meta) => OwnerSpec {
+                uid: Some(meta.uid),
+                gid: Some(meta.gid),
+            },
             Err(e) => {
                 if !opts.silent {
-                    eprintln!("chown: cannot stat reference '{refpath}': {e}");
+                    eprintln!("chown: cannot read reference '{refpath}': {e}");
                 }
                 return false;
             }
@@ -1000,18 +1159,8 @@ fn run_chown(
 
         for path in &paths {
             let path_str = path.to_string_lossy();
-
-            // --from filter: skip files whose current owner/group do not match.
-            // (This is a best-effort check; without stat support on OurOS the
-            // filter cannot actually verify current ownership. We attempt the
-            // chown unconditionally and let the kernel enforce the filter if
-            // it supports it. Document this as a known limitation.)
-            if opts.from_uid.is_some() || opts.from_gid.is_some() {
-                // The kernel is expected to reject the chown if the --from
-                // condition is not met. We pass the filter via the spec
-                // encoding above. For now, proceed with the call.
-            }
-
+            // --from filtering is handled inside chown_one, which has access
+            // to the file's current metadata.
             let (_, err) = chown_one(&path_str, &spec, opts);
             if err.is_some() {
                 any_error = true;
@@ -1027,17 +1176,34 @@ fn run_chown(
 // ============================================================================
 
 /// Run chmod on a single file. Returns (changed: bool, error: Option<String>).
-fn chmod_one(path: &str, mode_val: u32, opts: &Options) -> (bool, Option<String>) {
+///
+/// `old_mode` is the file's current permission bits if known (used for change
+/// detection); pass `None` when the current mode could not be read.
+fn chmod_one(
+    path: &str,
+    mode_val: u32,
+    old_mode: Option<u32>,
+    opts: &Options,
+) -> (bool, Option<String>) {
+    let changed = match old_mode {
+        Some(old) => (old & 0o7777) != (mode_val & 0o7777),
+        None => true,
+    };
+
     match do_chmod(path, mode_val) {
         Ok(()) => {
             if opts.json {
                 print_chmod_json(path, mode_val, true, "");
             } else if opts.verbose {
-                eprintln!("mode of '{path}' changed to {:04o}", mode_val);
-            } else if opts.changes {
-                eprintln!("mode of '{path}' changed to {:04o}", mode_val);
+                if changed {
+                    eprintln!("mode of '{path}' changed to {:04o}", mode_val & 0o7777);
+                } else {
+                    eprintln!("mode of '{path}' retained as {:04o}", mode_val & 0o7777);
+                }
+            } else if opts.changes && changed {
+                eprintln!("mode of '{path}' changed to {:04o}", mode_val & 0o7777);
             }
-            (true, None)
+            (changed, None)
         }
         Err(e) => {
             if opts.json {
@@ -1052,18 +1218,14 @@ fn chmod_one(path: &str, mode_val: u32, opts: &Options) -> (bool, Option<String>
 
 /// Execute chmod for all target files.
 fn run_chmod(opts: &Options) -> bool {
-    // Parse the mode spec.
+    // Parse the mode spec. --reference copies the reference file's mode as an
+    // absolute value.
     let mode_spec = if let Some(ref refpath) = opts.reference {
-        match fs::metadata(refpath) {
-            Ok(_meta) => {
-                eprintln!(
-                    "chmod: --reference is not yet supported (no stat mode on OurOS)"
-                );
-                return false;
-            }
+        match read_metadata(refpath) {
+            Ok(meta) => ModeSpec::Absolute(meta.perms & 0o7777),
             Err(e) => {
                 if !opts.silent {
-                    eprintln!("chmod: cannot stat reference '{refpath}': {e}");
+                    eprintln!("chmod: cannot read reference '{refpath}': {e}");
                 }
                 return false;
             }
@@ -1095,20 +1257,23 @@ fn run_chmod(opts: &Options) -> bool {
         for path in &paths {
             let path_str = path.to_string_lossy();
 
+            // Read the current mode (best-effort) for symbolic application and
+            // change detection.
+            let current_mode = read_metadata(&path_str).ok().map(|m| m.perms & 0o7777);
+
             let mode_val = match &mode_spec {
                 ModeSpec::Absolute(m) => *m,
                 ModeSpec::Symbolic(clauses) => {
-                    // Symbolic modes need the current mode to apply deltas.
-                    // Without a working stat syscall, we assume 0o000 as the
-                    // base. This means '+' and '=' work correctly, but '-' on
-                    // bits that are not set is a no-op (which is harmless).
-                    // TODO: use actual current mode once stat returns it.
-                    let current = 0o000;
-                    apply_symbolic_mode(current, clauses)
+                    // Symbolic modes apply deltas to the current mode. If the
+                    // current mode is unknown, fall back to 0o000 as the base:
+                    // '+' and '=' still behave correctly, and '-' on unset bits
+                    // is a harmless no-op.
+                    let base = current_mode.unwrap_or(0o000);
+                    apply_symbolic_mode(base, clauses)
                 }
             };
 
-            let (_, err) = chmod_one(&path_str, mode_val, opts);
+            let (_, err) = chmod_one(&path_str, mode_val, current_mode, opts);
             if err.is_some() {
                 any_error = true;
             }
@@ -1222,5 +1387,346 @@ fn main() {
 
     if !success {
         process::exit(1);
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sample_users() -> Vec<UserEntry> {
+        vec![
+            UserEntry {
+                uid: 0,
+                username: "root".to_string(),
+                groups: vec!["root".to_string(), "admin".to_string()],
+            },
+            UserEntry {
+                uid: 1000,
+                username: "alice".to_string(),
+                groups: vec!["users".to_string(), "staff".to_string()],
+            },
+        ]
+    }
+
+    // ---- mode detection ----------------------------------------------------
+
+    #[test]
+    fn detect_mode_recognizes_chmod() {
+        assert_eq!(detect_mode("chmod"), Mode::Chmod);
+        assert_eq!(detect_mode("/usr/bin/chmod"), Mode::Chmod);
+        assert_eq!(detect_mode("C:\\bin\\chmod.exe"), Mode::Chmod);
+        assert_eq!(detect_mode("chmod.exe"), Mode::Chmod);
+    }
+
+    #[test]
+    fn detect_mode_defaults_to_chown() {
+        assert_eq!(detect_mode("chown"), Mode::Chown);
+        assert_eq!(detect_mode("/usr/bin/chown"), Mode::Chown);
+        assert_eq!(detect_mode("anything-else"), Mode::Chown);
+    }
+
+    // ---- octal mode parsing ------------------------------------------------
+
+    #[test]
+    fn parse_mode_octal_basic() {
+        match parse_mode("755").unwrap() {
+            ModeSpec::Absolute(m) => assert_eq!(m, 0o755),
+            ModeSpec::Symbolic(_) => panic!("expected absolute"),
+        }
+    }
+
+    #[test]
+    fn parse_mode_octal_with_leading_zero() {
+        match parse_mode("0644").unwrap() {
+            ModeSpec::Absolute(m) => assert_eq!(m, 0o644),
+            ModeSpec::Symbolic(_) => panic!("expected absolute"),
+        }
+    }
+
+    #[test]
+    fn parse_mode_octal_with_setuid() {
+        match parse_mode("4755").unwrap() {
+            ModeSpec::Absolute(m) => assert_eq!(m, 0o4755),
+            ModeSpec::Symbolic(_) => panic!("expected absolute"),
+        }
+    }
+
+    #[test]
+    fn parse_mode_rejects_too_large() {
+        assert!(parse_mode("77777").is_err());
+    }
+
+    #[test]
+    fn parse_mode_digit_8_is_symbolic_not_octal() {
+        // "8" is not a valid octal digit, so it falls through to symbolic
+        // parsing, which then fails (no operator).
+        assert!(parse_mode("8").is_err());
+    }
+
+    // ---- symbolic mode parsing ---------------------------------------------
+
+    #[test]
+    fn symbolic_add_user_execute() {
+        let clauses = parse_symbolic_mode("u+x").unwrap();
+        let result = apply_symbolic_mode(0o644, &clauses);
+        assert_eq!(result, 0o744);
+    }
+
+    #[test]
+    fn symbolic_remove_group_other_write() {
+        let clauses = parse_symbolic_mode("go-w").unwrap();
+        let result = apply_symbolic_mode(0o666, &clauses);
+        assert_eq!(result, 0o644);
+    }
+
+    #[test]
+    fn symbolic_set_exact_all() {
+        let clauses = parse_symbolic_mode("a=rx").unwrap();
+        let result = apply_symbolic_mode(0o777, &clauses);
+        assert_eq!(result, 0o555);
+    }
+
+    #[test]
+    fn symbolic_no_who_defaults_to_all() {
+        let clauses = parse_symbolic_mode("+x").unwrap();
+        let result = apply_symbolic_mode(0o644, &clauses);
+        assert_eq!(result, 0o755);
+    }
+
+    #[test]
+    fn symbolic_multiple_clauses() {
+        let clauses = parse_symbolic_mode("u=rwx,g=rx,o=r").unwrap();
+        let result = apply_symbolic_mode(0o000, &clauses);
+        assert_eq!(result, 0o754);
+    }
+
+    #[test]
+    fn symbolic_setuid() {
+        let clauses = parse_symbolic_mode("u+s").unwrap();
+        let result = apply_symbolic_mode(0o755, &clauses);
+        assert_eq!(result, 0o4755);
+    }
+
+    #[test]
+    fn symbolic_sticky() {
+        let clauses = parse_symbolic_mode("+t").unwrap();
+        let result = apply_symbolic_mode(0o755, &clauses);
+        assert_eq!(result, 0o1755);
+    }
+
+    #[test]
+    fn symbolic_set_clears_unmentioned_bits() {
+        // u=r should clear the existing write/execute bits for the user.
+        let clauses = parse_symbolic_mode("u=r").unwrap();
+        let result = apply_symbolic_mode(0o777, &clauses);
+        assert_eq!(result, 0o477);
+    }
+
+    #[test]
+    fn symbolic_missing_operator_errors() {
+        assert!(parse_symbolic_mode("u").is_err());
+    }
+
+    #[test]
+    fn symbolic_invalid_perm_char_errors() {
+        assert!(parse_symbolic_mode("u+z").is_err());
+    }
+
+    #[test]
+    fn symbolic_empty_errors() {
+        assert!(parse_symbolic_mode("").is_err());
+    }
+
+    // ---- clause bit helpers ------------------------------------------------
+
+    #[test]
+    fn clause_bits_user_rwx() {
+        let clauses = parse_symbolic_mode("u+rwx").unwrap();
+        assert_eq!(clause_bits(&clauses[0]), S_IRUSR | S_IWUSR | S_IXUSR);
+    }
+
+    #[test]
+    fn clause_who_mask_user_includes_setuid() {
+        let clauses = parse_symbolic_mode("u=r").unwrap();
+        let mask = clause_who_mask(&clauses[0]);
+        assert!(mask & S_ISUID != 0);
+        assert!(mask & S_IRUSR != 0);
+        assert!(mask & S_IRGRP == 0);
+    }
+
+    // ---- owner spec parsing ------------------------------------------------
+
+    #[test]
+    fn owner_spec_user_only() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        let spec = parse_owner_spec("alice", &users, &groups).unwrap();
+        assert_eq!(spec.uid, Some(1000));
+        assert_eq!(spec.gid, None);
+    }
+
+    #[test]
+    fn owner_spec_user_and_group() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        let spec = parse_owner_spec("root:admin", &users, &groups).unwrap();
+        assert_eq!(spec.uid, Some(0));
+        assert_eq!(spec.gid, Some(1)); // admin = gid 1
+    }
+
+    #[test]
+    fn owner_spec_group_only() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        let spec = parse_owner_spec(":users", &users, &groups).unwrap();
+        assert_eq!(spec.uid, None);
+        assert_eq!(spec.gid, Some(100)); // users = gid 100
+    }
+
+    #[test]
+    fn owner_spec_numeric() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        let spec = parse_owner_spec("4242:99", &users, &groups).unwrap();
+        assert_eq!(spec.uid, Some(4242));
+        assert_eq!(spec.gid, Some(99));
+    }
+
+    #[test]
+    fn owner_spec_trailing_colon_uses_primary_group() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        // alice's primary (first) group is "users" = gid 100.
+        let spec = parse_owner_spec("alice:", &users, &groups).unwrap();
+        assert_eq!(spec.uid, Some(1000));
+        assert_eq!(spec.gid, Some(100));
+    }
+
+    #[test]
+    fn owner_spec_unknown_user_errors() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        assert!(parse_owner_spec("nobody", &users, &groups).is_err());
+    }
+
+    #[test]
+    fn owner_spec_unknown_group_errors() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        assert!(parse_owner_spec(":nogroup", &users, &groups).is_err());
+    }
+
+    // ---- group table / resolution -----------------------------------------
+
+    #[test]
+    fn group_table_well_known_ids() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        assert_eq!(resolve_gid("root", &groups), Some(0));
+        assert_eq!(resolve_gid("admin", &groups), Some(1));
+        assert_eq!(resolve_gid("users", &groups), Some(100));
+    }
+
+    #[test]
+    fn group_table_assigns_new_ids_from_101() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        // "staff" is the only non-well-known group; gets first free id 101.
+        assert_eq!(resolve_gid("staff", &groups), Some(101));
+    }
+
+    #[test]
+    fn resolve_uid_numeric_and_name() {
+        let users = sample_users();
+        assert_eq!(resolve_uid("alice", &users), Some(1000));
+        assert_eq!(resolve_uid("0", &users), Some(0));
+        assert_eq!(resolve_uid("7777", &users), Some(7777));
+        assert_eq!(resolve_uid("ghost", &users), None);
+    }
+
+    // ---- --from filter parsing ---------------------------------------------
+
+    #[test]
+    fn from_filter_owner_and_group() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        let (u, g) = parse_from_filter("root:admin", &users, &groups).unwrap();
+        assert_eq!(u, Some(0));
+        assert_eq!(g, Some(1));
+    }
+
+    #[test]
+    fn from_filter_owner_only() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        let (u, g) = parse_from_filter("alice", &users, &groups).unwrap();
+        assert_eq!(u, Some(1000));
+        assert_eq!(g, None);
+    }
+
+    #[test]
+    fn from_filter_group_only() {
+        let users = sample_users();
+        let groups = build_group_table(&users);
+        let (u, g) = parse_from_filter(":users", &users, &groups).unwrap();
+        assert_eq!(u, None);
+        assert_eq!(g, Some(100));
+    }
+
+    // ---- metadata buffer parsing -------------------------------------------
+
+    #[test]
+    fn metadata_buffer_parses_fields() {
+        let mut buf = [0u8; FS_META_SIZE];
+        buf[META_OFF_UID..META_OFF_UID + 4].copy_from_slice(&1000u32.to_le_bytes());
+        buf[META_OFF_GID..META_OFF_GID + 4].copy_from_slice(&100u32.to_le_bytes());
+        buf[META_OFF_PERMS..META_OFF_PERMS + 2].copy_from_slice(&0o755u16.to_le_bytes());
+
+        let meta = parse_metadata_buffer(&buf).unwrap();
+        assert_eq!(meta.uid, 1000);
+        assert_eq!(meta.gid, 100);
+        assert_eq!(meta.perms, 0o755);
+    }
+
+    #[test]
+    fn metadata_buffer_too_small_returns_none() {
+        let buf = [0u8; 8];
+        assert!(parse_metadata_buffer(&buf).is_none());
+    }
+
+    // ---- error mapping -----------------------------------------------------
+
+    #[test]
+    fn kernel_error_known_codes() {
+        assert!(kernel_error_to_string(-500).contains("no such file"));
+        assert!(kernel_error_to_string(-400).contains("permission denied"));
+        assert!(kernel_error_to_string(-2).contains("not supported"));
+    }
+
+    #[test]
+    fn kernel_error_unknown_code() {
+        assert_eq!(kernel_error_to_string(-9999), "error -9999");
+    }
+
+    // ---- formatting helpers ------------------------------------------------
+
+    #[test]
+    fn format_owner_variants() {
+        assert_eq!(format_owner(Some(0), Some(1)), "0:1");
+        assert_eq!(format_owner(Some(5), None), "5");
+        assert_eq!(format_owner(None, Some(7)), ":7");
+        assert_eq!(format_owner(None, None), "(unchanged)");
+    }
+
+    #[test]
+    fn json_escape_handles_special_chars() {
+        assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
+        assert_eq!(json_escape("line\nbreak"), "line\\nbreak");
+        assert_eq!(json_escape("plain"), "plain");
     }
 }

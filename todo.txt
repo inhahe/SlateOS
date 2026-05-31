@@ -217,13 +217,17 @@
 ##       / ARP_TABLE=843 / a new syscall set — DESIGN GAP)
 ##     diskutil (FS_IOCTL=650=FS_SEEK_DATA FORMAT=651=FS_SEEK_HOLE VERIFY/
 ##       REPAIR/TRIM/STATFS 652-655 unassigned)
-##     df    (FS_STAT=650=FS_SEEK_DATA — should be FS_STATVFS=608)
+##     df    (FS_STAT=650=FS_SEEK_DATA — should be FS_STATVFS=608) — MIS-
+##       CLASSIFIED: FS_STATVFS=608 EXISTS with a live handler, so df is
+##       fixable NOW (not a design gap).  NEXT TASK after chown.
 ##     fsck  (FS_VERIFY=652 FS_REPAIR=653 unassigned — no fsck syscall)
 ##     mkfs  (FS_FORMAT=651=FS_SEEK_HOLE — no format syscall)
 ##     mount (MOUNT=620=FS_TRASH_RESTORE UMOUNT=621=FS_TRASH_EMPTY — no
 ##       mount/umount syscall in ABI)
-##     chown (CHOWN=30=IRQ_REGISTER CHMOD=31=IRQ_WAIT — should be
-##       FS_SET_OWNER=630 / FS_SET_PERMS=631)
+##     [x] chown (CHOWN=30=IRQ_REGISTER CHMOD=31=IRQ_WAIT — should be
+##       FS_SET_OWNER=630 / FS_SET_PERMS=631) — MIS-CLASSIFIED: those fs-admin
+##       syscalls (628/630/631) EXIST with live handlers, so chown/chmod were
+##       fixable now, NOT a design gap.  FIXED — see PROGRESS below.
 ##     chroot (CHROOT=61=SYSCTL_SET CHDIR=49=DMA_DETACH SETUID=105 SETGID=106
 ##       SETGROUPS=116 — none exist as named; needs proper process-cred ABI)
 ##     monctl (DRM_IOCTL=850=TCP_SET_NODELAY — no DRM ioctl syscall)
@@ -380,6 +384,46 @@
 ##           been silently un-run; added the derives, all 56 pass.  Clippy-clean
 ##           (fixed pre-existing never_loop / collapsible-if / print_literal);
 ##           build-ouros clean.
+##
+##   [x] chown/chmod — MIS-CLASSIFIED in the "NO SUCH SYSCALL" group above:
+##           the old code used CHOWN=30/CHMOD=31 (which are IRQ_REGISTER/
+##           IRQ_WAIT!), but the correct fs-admin syscalls DO exist with live
+##           handlers — SYS_FS_SET_OWNER=630, SYS_FS_SET_PERMS=631,
+##           SYS_FS_METADATA=628.  So this was fixable now, not a design gap.
+##           Rewrote the syscall layer on the real ABI:
+##             * syscall4 wrapper with arg3 in r10 (the syscall insn clobbers
+##               rcx with the return address, so arg3 CANNOT go in rcx);
+##               syscall3 forwards with a0..a2 + zero a4.
+##             * do_chown -> syscall4(SET_OWNER, ptr, len, uid, gid); uid/gid
+##               of u32::MAX = "leave unchanged" (resolved by Vfs::set_owner).
+##             * do_chmod -> syscall3(SET_PERMS, ptr, len, mode & 0o7777).
+##             * Replaced the bogus Linux-errno mapper with kernel_error_to_string
+##               mapping OurOS KernelError discriminants (-500 = NotFound, etc.,
+##               NOT ENOENT).
+##           Used SYS_FS_METADATA=628 (64-byte buffer; uid@48 gid@52 perms@56,
+##           all LE) to implement the previously-stubbed features PROPERLY:
+##             * --reference now reads the ref file's owner/mode (was: "not yet
+##               supported").
+##             * symbolic chmod (u+x etc.) now applies deltas to the file's
+##               ACTUAL current mode (was: assumed base 0o000, so '-' on set
+##               bits silently no-op'd).
+##             * --from filter now verifies real current ownership before
+##               changing (was: a no-op placeholder that changed unconditionally).
+##             * -c/--changes and -v/--verbose now report accurately (compare
+##               old vs new), distinguishing "changed" from "retained as".
+##           parse_metadata_buffer split out so it's host-unit-testable; the
+##           syscall fns are #[cfg(target_arch="x86_64")] with non-x86_64 host
+##           fallbacks so `cargo test` compiles on the windows host.  Added a
+##           39-test module (octal/symbolic mode parse+apply, owner-spec parse,
+##           group-table/uid-gid resolution, --from parse, metadata-buffer parse,
+##           error mapping, formatting).  Clippy-clean on both host and ouros
+##           targets; build-ouros clean.
+##           KNOWN LIMITATION: -h/--no-dereference cannot be honored — the VFS
+##           SET_OWNER path resolves symlinks (resolve_follow) and there is no
+##           lchown-equivalent syscall yet, so chown -h now WARNS that the target
+##           will be affected rather than silently chowning the wrong inode.
+##           (Same root cause as the lchown/lchmod limitation logged ~line 1364.)
+##           TRIGGER to fix: when a no-follow variant of SET_OWNER lands.
 ##
 ##  DESIGN GAP — no kernel-module loading (insmod/rmmod/modprobe load+remove):
 ##   OurOS is a microkernel.  There are no loadable kernel modules: device

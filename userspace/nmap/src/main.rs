@@ -32,6 +32,8 @@
 )]
 
 use std::env;
+use std::fs::File;
+use std::io::Write;
 
 // ============================================================================
 // Syscall numbers
@@ -61,29 +63,20 @@ const SYS_SLEEP: u64 = 11;
 /// measurement, so monotonic — not realtime — is the correct clock.
 /// (Syscall 40 is SYS_PORT_READ; the old SYS_CLOCK_GETTIME=40 was wrong.)
 const SYS_CLOCK_MONOTONIC: u64 = 10;
-/// Write to file descriptor: arg1=fd, arg2=buf_ptr, arg3=len. Returns bytes.
-const SYS_WRITE: u64 = 1;
-/// Open file: arg1=path_ptr, arg2=path_len, arg3=flags. Returns fd or neg.
-const SYS_OPEN: u64 = 2;
-/// Close file descriptor: arg1=fd. Returns 0 or neg.
-const SYS_CLOSE: u64 = 3;
-/// Exit process: arg1=exit_code.
-const SYS_EXIT: u64 = 60;
+
+// NOTE: file descriptor I/O (stdout/stderr writes, the -oN output file) and
+// process exit go through std (std::io, std::fs, std::process::exit), which is
+// backed by the OurOS libc/posix layer and issues the correct native FS
+// syscalls.  An earlier version hand-rolled these with Linux syscall numbers
+// (write=1, open=2, close=3, exit=60) — on the native ABI those map to
+// SYS_EXIT, SYS_TASK_ID, an unimplemented slot, and SYS_SYSCTL_GET, so writing
+// output terminated the process and "exit" hung in a loop.
 
 // TCP poll status codes returned by SYS_TCP_POLL_STATUS
 const TCP_STATUS_CONNECTED: i64 = 1;
 const TCP_STATUS_REFUSED: i64 = 2;
 const TCP_STATUS_TIMEOUT: i64 = 3;
 const TCP_STATUS_IN_PROGRESS: i64 = 4;
-
-// File open flags (O_WRONLY | O_CREAT | O_TRUNC)
-const O_WRONLY: u64 = 0x0001;
-const O_CREAT: u64 = 0x0040;
-const O_TRUNC: u64 = 0x0200;
-
-// Standard file descriptors
-const STDOUT_FD: u64 = 1;
-const STDERR_FD: u64 = 2;
 
 // ============================================================================
 // Syscall interface
@@ -257,43 +250,12 @@ fn sleep_ms(ms: u64) {
     let _ = unsafe { syscall1(SYS_SLEEP, ms) };
 }
 
-/// Write raw bytes to a file descriptor (stdout or an output file).
-fn fd_write(fd: u64, data: &[u8]) {
-    // SAFETY: fd is a valid open descriptor; buf ptr+len from a live slice.
-    let _ = unsafe { syscall3(SYS_WRITE, fd, data.as_ptr() as u64, data.len() as u64) };
-}
-
-/// Open or create a file for writing. Returns an fd on success.
-fn file_open_write(path: &str) -> Result<u64, i64> {
-    let bytes = path.as_bytes();
-    // SAFETY: path ptr+len are valid. Flags O_WRONLY|O_CREAT|O_TRUNC.
-    let ret = unsafe {
-        syscall3(
-            SYS_OPEN,
-            bytes.as_ptr() as u64,
-            bytes.len() as u64,
-            O_WRONLY | O_CREAT | O_TRUNC,
-        )
-    };
-    if ret < 0 {
-        Err(ret)
-    } else {
-        Ok(ret as u64)
-    }
-}
-
-/// Close a file descriptor.
-fn file_close(fd: u64) {
-    // SAFETY: SYS_CLOSE takes one scalar fd argument.
-    let _ = unsafe { syscall1(SYS_CLOSE, fd) };
-}
-
 /// Exit the process with `code`.
+///
+/// Delegates to `std::process::exit`, which runs through the OurOS libc and
+/// issues the correct native `SYS_EXIT`.
 fn exit(code: i32) -> ! {
-    // SAFETY: SYS_EXIT terminates the process; no invariants to uphold.
-    unsafe { syscall1(SYS_EXIT, code as u64) };
-    // Unreachable, but satisfies the `!` return type for non-hosted targets.
-    loop {}
+    std::process::exit(code)
 }
 
 // Boot-relative nanoseconds via SYS_CLOCK_MONOTONIC.  Used only to measure
@@ -792,12 +754,14 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
 // Output helpers
 // ============================================================================
 
-/// Write `s` to stdout (and optionally to an output fd).
-fn out(s: &str, out_fd: Option<u64>) {
+/// Write `s` to stdout (and optionally to an output file).
+fn out(s: &str, out_file: Option<&mut File>) {
     let bytes = s.as_bytes();
-    fd_write(STDOUT_FD, bytes);
-    if let Some(fd) = out_fd {
-        fd_write(fd, bytes);
+    // Best-effort: a failed write to stdout or the report file should not abort
+    // an in-progress scan.
+    let _ = std::io::stdout().write_all(bytes);
+    if let Some(f) = out_file {
+        let _ = f.write_all(bytes);
     }
 }
 
@@ -842,12 +806,12 @@ Examples:
   nmap -sP 192.168.1.0/24
   nmap -T4 -p- 10.0.0.1
 ";
-    fd_write(STDOUT_FD, usage.as_bytes());
+    let _ = std::io::stdout().write_all(usage.as_bytes());
 }
 
 /// Print to stderr.
 fn eprint_str(s: &str) {
-    fd_write(STDERR_FD, s.as_bytes());
+    let _ = std::io::stderr().write_all(s.as_bytes());
 }
 
 // ============================================================================
@@ -1204,7 +1168,7 @@ fn fmt_summary(
 // Main scan orchestration
 // ============================================================================
 
-fn run_scan(cfg: &Config, out_fd: Option<u64>) -> i32 {
+fn run_scan(cfg: &Config, out_file: &mut Option<File>) -> i32 {
     let scan_start_nanos = clock_nanos();
 
     // Expand targets.
@@ -1230,7 +1194,7 @@ fn run_scan(cfg: &Config, out_fd: Option<u64>) -> i32 {
             total_ips,
             if total_ips == 1 { "" } else { "s" }
         ),
-        out_fd,
+        out_file.as_mut(),
     );
 
     let mut host_results: Vec<HostResult> = Vec::new();
@@ -1291,7 +1255,7 @@ fn run_scan(cfg: &Config, out_fd: Option<u64>) -> i32 {
     // Print results.
     for host in &host_results {
         let s = fmt_host_result(host, cfg, cfg.scan_type);
-        out(&s, out_fd);
+        out(&s, out_file.as_mut());
     }
 
     // Summary.
@@ -1321,7 +1285,7 @@ fn run_scan(cfg: &Config, out_fd: Option<u64>) -> i32 {
         total_closed,
         total_filtered,
     );
-    out(&summary, out_fd);
+    out(&summary, out_file.as_mut());
 
     0
 }
@@ -1346,12 +1310,13 @@ fn main() {
         }
     };
 
-    // Open output file if requested.
-    let out_fd: Option<u64> = if let Some(ref path) = cfg.output_file {
-        match file_open_write(path) {
-            Ok(fd) => Some(fd),
+    // Open output file if requested.  The File is dropped (and thus closed) at
+    // the end of main.
+    let mut out_file: Option<File> = if let Some(ref path) = cfg.output_file {
+        match File::create(path) {
+            Ok(f) => Some(f),
             Err(e) => {
-                eprint_str(&format!("nmap: cannot open output file '{path}': error {e}\n"));
+                eprint_str(&format!("nmap: cannot open output file '{path}': {e}\n"));
                 exit(1);
             }
         }
@@ -1359,10 +1324,11 @@ fn main() {
         None
     };
 
-    let rc = run_scan(&cfg, out_fd);
+    let rc = run_scan(&cfg, &mut out_file);
 
-    if let Some(fd) = out_fd {
-        file_close(fd);
+    // Flush any buffered report data before exit.
+    if let Some(ref mut f) = out_file {
+        let _ = f.flush();
     }
 
     exit(rc);

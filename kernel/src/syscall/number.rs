@@ -69,6 +69,21 @@ pub const SYS_CLOCK_REALTIME: u64 = 14;
 /// nonsensical offset.
 pub const SYS_CLOCK_SETTIME: u64 = 15;
 
+/// Adjust the realtime (wall-clock) time by a signed nanosecond delta.
+///
+/// `arg0`: signed nanosecond offset (reinterpret the `u64` as `i64`).
+///         Positive advances the clock, negative steps it back.
+///
+/// Backed by [`crate::timekeeping::adjust_realtime`], which atomically adds
+/// the delta to the standing realtime adjustment (`fetch_add`) — unlike
+/// `SYS_CLOCK_SETTIME`, there is no read-modify-write race because the shift
+/// is relative.  This is what POSIX `adjtimex`/`clock_adjtime` use to apply
+/// an `ADJ_SETOFFSET` clock step (the abrupt correction chrony/ntpd issue).
+/// Returns `EINVAL` when the realtime clock base is uninitialized (the RTC
+/// has not been read yet), mirroring `SYS_CLOCK_SETTIME`, so callers never
+/// lock in an adjustment against a meaningless base.
+pub const SYS_CLOCK_ADJTIME: u64 = 16;
+
 /// Sleep for a specified number of nanoseconds.
 ///
 /// `arg0`: duration in nanoseconds.

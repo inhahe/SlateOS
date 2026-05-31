@@ -4,6 +4,11 @@
 //! for kernel clock discipline (NTP, PTP, etc.).
 
 use crate::errno;
+// Only the real OS build (target_os = "none") issues native syscalls; the host
+// test build links no kernel, so the syscall path is compiled out there (see
+// the ADJ_SETOFFSET application in `adjtimex`).
+#[cfg(target_os = "none")]
+use crate::syscall::{SYS_CLOCK_ADJTIME, syscall1};
 
 // ---------------------------------------------------------------------------
 // Mode bits for Timex.modes
@@ -390,6 +395,27 @@ pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
         return -1;
     }
 
+    // ADJ_SETOFFSET requests an immediate step of the wall clock by the
+    // supplied (possibly negative) offset.  Capture the delta now — before the
+    // read-back below zeroes the tx time fields — and apply it to the kernel
+    // clock after the discipline state is updated.  The sub-second field is
+    // nanoseconds when ADJ_NANO is set, otherwise microseconds (already range-
+    // checked above); the seconds field is signed, so the total may be
+    // negative (stepping the clock backwards).  saturating_* guards the
+    // astronomically large offsets that would only arise from a malformed tx.
+    let setoffset_delta_ns: Option<i64> = if (modes & ADJ_SETOFFSET) != 0 {
+        // SAFETY: caller contract — `tx` points to a readable Timex.
+        let (secs, sub) = unsafe { ((*tx).time_tv_sec, (*tx).time_tv_usec) };
+        let sub_ns = if (modes & ADJ_NANO) != 0 {
+            sub
+        } else {
+            sub.saturating_mul(1_000)
+        };
+        Some(secs.saturating_mul(1_000_000_000).saturating_add(sub_ns))
+    } else {
+        None
+    };
+
     let _guard = lock_timex();
 
     // SAFETY: serialized by TIMEX_LOCK.
@@ -457,6 +483,27 @@ pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
         (*tx).errcnt = 0;
         (*tx).stbcnt = 0;
     }
+
+    // Apply the ADJ_SETOFFSET clock step to the kernel wall clock.  This is
+    // the abrupt correction chrony/ntpd issue via clock_step(); before this
+    // was wired, the step was validated and "succeeded" but never moved the
+    // clock, so the daemon believed it had stepped and would not fall back to
+    // settimeofday.  We discard the kernel return: SYS_CLOCK_ADJTIME only
+    // fails (EINVAL) when the realtime base is uninitialized (no usable RTC),
+    // in which case the clock is 0-based anyway and there is nothing to step;
+    // adjtimex's return value reflects the NTP status word, not the step
+    // result, matching Linux's do_adjtimex semantics.
+    #[cfg(target_os = "none")]
+    #[allow(clippy::cast_sign_loss)]
+    if let Some(delta_ns) = setoffset_delta_ns {
+        let _ = syscall1(SYS_CLOCK_ADJTIME, delta_ns as u64);
+    }
+    // On the host test build there is no kernel to step; the discipline-state
+    // update and return value above are identical on both builds (which is
+    // what the host tests assert), so we only need to keep the captured delta
+    // from tripping the unused-variable lint.
+    #[cfg(not(target_os = "none"))]
+    let _ = &setoffset_delta_ns;
 
     status_to_return(state.status)
 }

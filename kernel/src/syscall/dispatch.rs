@@ -30,6 +30,7 @@ use super::number::{
     SYS_CLOCK_MONOTONIC,
     SYS_CLOCK_REALTIME,
     SYS_CLOCK_SETTIME,
+    SYS_CLOCK_ADJTIME,
     SYS_DEBUG_PRINT, SYS_LOG_READ,
     SYS_CHANNEL_SEND_BLOCKING, SYS_CHANNEL_SEND_TIMEOUT,
     SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_HAS_VALUE,
@@ -373,6 +374,7 @@ const fn build_v1_table() -> SyscallTable {
     handlers[SYS_CLOCK_MONOTONIC as usize] = Some(handlers::sys_clock_monotonic);
     handlers[SYS_CLOCK_REALTIME as usize] = Some(handlers::sys_clock_realtime);
     handlers[SYS_CLOCK_SETTIME as usize] = Some(handlers::sys_clock_settime);
+    handlers[SYS_CLOCK_ADJTIME as usize] = Some(handlers::sys_clock_adjtime);
     handlers[SYS_SLEEP as usize] = Some(handlers::sys_sleep);
     handlers[SYS_TIMER_CREATE as usize] = Some(handlers::sys_timer_create);
     handlers[SYS_TIMER_CANCEL as usize] = Some(handlers::sys_timer_cancel);
@@ -639,6 +641,7 @@ pub fn self_test() -> KernelResult<()> {
     test_dispatch_clock_monotonic()?;
     test_dispatch_clock_realtime()?;
     test_dispatch_clock_settime()?;
+    test_dispatch_clock_adjtime()?;
     test_dispatch_console_write()?;
     test_dispatch_fs_roundtrip()?;
 
@@ -891,6 +894,66 @@ fn test_dispatch_clock_settime() -> KernelResult<()> {
             return Err(KernelError::InternalError);
         }
         serial_println!("[syscall]   Dispatch SYS_CLOCK_SETTIME: OK (rejected, uninitialized)");
+    }
+    Ok(())
+}
+
+/// Test the `SYS_CLOCK_ADJTIME` dispatch path.
+///
+/// Applies a small forward step (+1 ms) and then the exact inverse (−1 ms) so
+/// the running system's wall clock is left unchanged.  Asserts: when the clock
+/// is initialized the call succeeds (0) and the forward step does not move time
+/// backwards; when uninitialized it rejects with an error (matching
+/// `SYS_CLOCK_SETTIME`).
+fn test_dispatch_clock_adjtime() -> KernelResult<()> {
+    const STEP_NS: u64 = 1_000_000; // 1 ms
+
+    let read = SyscallArgs {
+        arg0: 0, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let before = dispatch(SYS_CLOCK_REALTIME, &read).value;
+
+    let forward = SyscallArgs {
+        arg0: STEP_NS, arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+    };
+    let result = dispatch(SYS_CLOCK_ADJTIME, &forward);
+
+    if crate::timekeeping::is_initialized() {
+        if result.value != 0 {
+            serial_println!(
+                "[syscall]   FAIL: clock_adjtime returned {} (expected 0)",
+                result.value
+            );
+            return Err(KernelError::InternalError);
+        }
+        let after = dispatch(SYS_CLOCK_REALTIME, &read).value;
+        // Restore the clock by applying the inverse step regardless of the
+        // assertion outcome, so the self-test never leaves the wall clock
+        // skewed.
+        let restore = SyscallArgs {
+            // -STEP_NS reinterpreted as u64 (inverse of the forward step).
+            arg0: (STEP_NS as i64).wrapping_neg() as u64,
+            arg1: 0, arg2: 0, arg3: 0, arg4: 0, arg5: 0,
+        };
+        let _ = dispatch(SYS_CLOCK_ADJTIME, &restore);
+
+        if after < before {
+            serial_println!(
+                "[syscall]   FAIL: clock_adjtime moved time backwards ({} -> {})",
+                before, after
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall]   Dispatch SYS_CLOCK_ADJTIME: OK (+1ms then restored)");
+    } else {
+        if result.value >= 0 {
+            serial_println!(
+                "[syscall]   FAIL: clock_adjtime succeeded ({}) on uninitialized clock",
+                result.value
+            );
+            return Err(KernelError::InternalError);
+        }
+        serial_println!("[syscall]   Dispatch SYS_CLOCK_ADJTIME: OK (rejected, uninitialized)");
     }
     Ok(())
 }

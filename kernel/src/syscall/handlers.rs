@@ -3949,6 +3949,35 @@ pub fn sys_clock_settime(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(0)
 }
 
+/// `SYS_CLOCK_ADJTIME` — adjust the wall-clock time by a signed delta.
+///
+/// `arg0`: signed nanosecond offset (the `u64` is reinterpreted as `i64`).
+///
+/// Delegates to [`crate::timekeeping::adjust_realtime`], which atomically
+/// adds the delta to the standing realtime adjustment.  Backs the
+/// `ADJ_SETOFFSET` step path of POSIX `adjtimex`/`clock_adjtime`: a relative
+/// shift rather than the absolute write that `SYS_CLOCK_SETTIME` performs,
+/// so there is no read-modify-write race.
+///
+/// Rejects the call with `EINVAL` when timekeeping is uninitialized — with no
+/// RTC base, `clock_realtime` returns 0 and the adjustment would apply against
+/// a meaningless base once the RTC later becomes valid.  Mirrors the guard in
+/// [`sys_clock_settime`].
+pub fn sys_clock_adjtime(args: &SyscallArgs) -> SyscallResult {
+    if !crate::timekeeping::is_initialized() {
+        return SyscallResult::err(KernelError::InvalidArgument);
+    }
+
+    // The ABI passes args as u64; the realtime delta is signed.  Reinterpret
+    // the bit pattern as i64 (two's-complement) — this is the inverse of the
+    // `delta_ns as u64` the userspace caller performs.
+    #[allow(clippy::cast_possible_wrap)]
+    let delta_ns = args.arg0 as i64;
+    crate::timekeeping::adjust_realtime(delta_ns);
+
+    SyscallResult::ok(0)
+}
+
 /// `SYS_SLEEP` — sleep for a specified duration in nanoseconds.
 ///
 /// `arg0`: duration in nanoseconds.

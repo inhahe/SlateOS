@@ -1,9 +1,9 @@
 //! OurOS Disk Free Space Utility
 //!
 //! Displays filesystem disk space usage by reading mount information from
-//! `/proc/mounts` and querying per-filesystem statistics via the `SYS_FS_STAT`
-//! syscall. Falls back to `/sys/block/*/size` and `/proc/partitions` when the
-//! syscall is unavailable.
+//! `/proc/mounts` and querying per-filesystem statistics via the
+//! `SYS_FS_STATVFS` syscall. Falls back to `/sys/block/*/size` and
+//! `/proc/partitions` when the syscall is unavailable.
 //!
 //! # Usage
 //!
@@ -30,46 +30,64 @@ use std::process;
 // ============================================================================
 // Syscall interface
 // ============================================================================
+//
+// df queries per-filesystem space via SYS_FS_STATVFS=608 (fs zone 600-799).
+// The previous version used 650, which on OurOS is SYS_FS_SEEK_DATA, and ALSO
+// passed the arguments in the wrong order (buffer where the length belongs):
+// it could never have returned valid filesystem statistics. The real handler's
+// ABI is arg0=path ptr, arg1=path len, arg2=output-buffer ptr.
 
-/// Filesystem stat syscall number (fs zone: 600-799).
-const SYS_FS_STAT: u64 = 650;
+/// Query filesystem space/configuration (`SYS_FS_STATVFS`).
+const SYS_FS_STATVFS: u64 = 608;
 
-/// Buffer filled by the `SYS_FS_STAT` syscall.
+/// Size of the `SYS_FS_STATVFS` output buffer, in bytes.
+const FS_STATVFS_SIZE: usize = 64;
+
+/// Parsed `SYS_FS_STATVFS` result.
 ///
-/// Matches the kernel's `FsStatBuf` layout: 8 u64 fields, 64 bytes total.
-#[repr(C)]
-struct FsStatBuf {
-    /// Total blocks on filesystem.
+/// OurOS statvfs does not distinguish "free" from "available to unprivileged
+/// users" (there is no reserved-block pool), so callers treat available == free.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct StatVfs {
+    /// Block size in bytes.
+    block_size: u64,
+    /// Total blocks on the filesystem.
     total_blocks: u64,
     /// Free blocks.
     free_blocks: u64,
-    /// Blocks available to unprivileged users.
-    avail_blocks: u64,
     /// Total inodes.
     total_inodes: u64,
     /// Free inodes.
     free_inodes: u64,
-    /// Block size in bytes.
-    block_size: u64,
-    /// Filesystem type identifier.
-    fs_type: u64,
-    /// Mount flags.
-    flags: u64,
+    /// Maximum filename length.
+    max_name_len: u64,
+    /// Whether the filesystem is mounted read-only.
+    read_only: bool,
 }
 
-impl FsStatBuf {
-    fn zeroed() -> Self {
-        Self {
-            total_blocks: 0,
-            free_blocks: 0,
-            avail_blocks: 0,
-            total_inodes: 0,
-            free_inodes: 0,
-            block_size: 0,
-            fs_type: 0,
-            flags: 0,
-        }
-    }
+/// Parse the 64-byte `SYS_FS_STATVFS` buffer.
+///
+/// Layout (all little-endian, matching the kernel's `sys_fs_statvfs`):
+///   [0..8] block_size, [8..16] total_blocks, [16..24] free_blocks,
+///   [24..32] total_inodes, [32..40] free_inodes, [40..48] max_name_len,
+///   [48] read_only (u8). Split out for host unit testing.
+fn parse_statvfs_buffer(buf: &[u8]) -> Option<StatVfs> {
+    let read_u64 = |off: usize| -> Option<u64> {
+        let b = buf.get(off..off + 8)?;
+        Some(u64::from_le_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
+    };
+
+    Some(StatVfs {
+        block_size: read_u64(0)?,
+        total_blocks: read_u64(8)?,
+        free_blocks: read_u64(16)?,
+        total_inodes: read_u64(24)?,
+        free_inodes: read_u64(32)?,
+        max_name_len: read_u64(40)?,
+        read_only: *buf.get(48)? != 0,
+    })
 }
 
 /// Invoke a 3-argument syscall via inline x86_64 assembly.
@@ -93,26 +111,37 @@ unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     ret
 }
 
-/// Call `SYS_FS_STAT` on a mount point path, returning the stat buffer on
-/// success or the negative error code on failure.
-fn fs_stat(path: &str) -> Result<FsStatBuf, i64> {
+/// Call `SYS_FS_STATVFS` on a mount point path, returning parsed statistics on
+/// success or the negative kernel error code on failure.
+#[cfg(target_arch = "x86_64")]
+fn fs_statvfs(path: &str) -> Result<StatVfs, i64> {
     let path_bytes = path.as_bytes();
-    let mut buf = FsStatBuf::zeroed();
+    let mut buf = [0u8; FS_STATVFS_SIZE];
 
-    // SAFETY: `path_bytes` is a valid byte slice whose pointer and length we
-    // pass to the kernel. `buf` is a stack-allocated `repr(C)` struct with
-    // the layout the kernel expects. Both remain live for the duration of the
-    // syscall.
+    // SAFETY: arg0/arg1 describe the path slice (pointer + length) and arg2 is
+    // our stack buffer sized to the ABI-defined output length. All three stay
+    // live for the duration of the syscall, and the kernel validates them.
     let ret = unsafe {
         syscall3(
-            SYS_FS_STAT,
+            SYS_FS_STATVFS,
             path_bytes.as_ptr() as u64,
-            (&raw mut buf) as u64,
             path_bytes.len() as u64,
+            buf.as_mut_ptr() as u64,
         )
     };
 
-    if ret < 0 { Err(ret) } else { Ok(buf) }
+    if ret < 0 {
+        return Err(ret);
+    }
+    // -1 stands in for "kernel returned success but the buffer was malformed",
+    // which should never happen given a 64-byte stack buffer.
+    parse_statvfs_buffer(&buf).ok_or(-1)
+}
+
+/// Host fallback: the statvfs syscall cannot run on the build host.
+#[cfg(not(target_arch = "x86_64"))]
+fn fs_statvfs(_path: &str) -> Result<StatVfs, i64> {
+    Err(-2)
 }
 
 // ============================================================================
@@ -236,16 +265,18 @@ struct FsInfo {
 /// Gather filesystem statistics for a mount entry. Returns `None` if we
 /// cannot determine anything useful about the filesystem.
 fn gather_fs_info(entry: &MountEntry) -> Option<FsInfo> {
-    // Try the SYS_FS_STAT syscall first.
-    if let Ok(buf) = fs_stat(&entry.mountpoint)
-        && buf.block_size > 0
-        && buf.total_blocks > 0
+    // Try the SYS_FS_STATVFS syscall first.
+    if let Ok(st) = fs_statvfs(&entry.mountpoint)
+        && st.block_size > 0
+        && st.total_blocks > 0
     {
-        let total = buf.total_blocks.saturating_mul(buf.block_size);
-        let free = buf.free_blocks.saturating_mul(buf.block_size);
-        let avail = buf.avail_blocks.saturating_mul(buf.block_size);
+        let total = st.total_blocks.saturating_mul(st.block_size);
+        let free = st.free_blocks.saturating_mul(st.block_size);
+        // OurOS statvfs has no reserved-block pool, so the space available to
+        // unprivileged users equals the free space.
+        let avail = free;
         let used = total.saturating_sub(free);
-        let iused = buf.total_inodes.saturating_sub(buf.free_inodes);
+        let iused = st.total_inodes.saturating_sub(st.free_inodes);
         return Some(FsInfo {
             device: entry.device.clone(),
             mountpoint: entry.mountpoint.clone(),
@@ -253,9 +284,9 @@ fn gather_fs_info(entry: &MountEntry) -> Option<FsInfo> {
             total_bytes: total,
             used_bytes: used,
             avail_bytes: avail,
-            total_inodes: buf.total_inodes,
+            total_inodes: st.total_inodes,
             used_inodes: iused,
-            free_inodes: buf.free_inodes,
+            free_inodes: st.free_inodes,
         });
     }
 
@@ -978,4 +1009,173 @@ fn run() -> i32 {
 
 fn main() {
     process::exit(run());
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mount(device: &str, mountpoint: &str, fstype: &str) -> MountEntry {
+        MountEntry {
+            device: device.to_string(),
+            mountpoint: mountpoint.to_string(),
+            fstype: fstype.to_string(),
+            options: "rw".to_string(),
+        }
+    }
+
+    // ---- statvfs buffer parsing --------------------------------------------
+
+    #[test]
+    fn statvfs_buffer_parses_all_fields() {
+        let mut buf = [0u8; FS_STATVFS_SIZE];
+        buf[0..8].copy_from_slice(&16384u64.to_le_bytes()); // block_size (16 KiB)
+        buf[8..16].copy_from_slice(&1000u64.to_le_bytes()); // total_blocks
+        buf[16..24].copy_from_slice(&400u64.to_le_bytes()); // free_blocks
+        buf[24..32].copy_from_slice(&256u64.to_le_bytes()); // total_inodes
+        buf[32..40].copy_from_slice(&200u64.to_le_bytes()); // free_inodes
+        buf[40..48].copy_from_slice(&255u64.to_le_bytes()); // max_name_len
+        buf[48] = 1; // read_only
+
+        let st = parse_statvfs_buffer(&buf).unwrap();
+        assert_eq!(st.block_size, 16384);
+        assert_eq!(st.total_blocks, 1000);
+        assert_eq!(st.free_blocks, 400);
+        assert_eq!(st.total_inodes, 256);
+        assert_eq!(st.free_inodes, 200);
+        assert_eq!(st.max_name_len, 255);
+        assert!(st.read_only);
+    }
+
+    #[test]
+    fn statvfs_buffer_read_only_false() {
+        let buf = [0u8; FS_STATVFS_SIZE];
+        let st = parse_statvfs_buffer(&buf).unwrap();
+        assert!(!st.read_only);
+    }
+
+    #[test]
+    fn statvfs_buffer_too_small_returns_none() {
+        let buf = [0u8; 40];
+        assert!(parse_statvfs_buffer(&buf).is_none());
+    }
+
+    // ---- human / SI formatting ---------------------------------------------
+
+    #[test]
+    fn human_readable_units() {
+        assert_eq!(human_readable(0), "0");
+        assert_eq!(human_readable(512), "512B");
+        // Exact multiples drop the fractional part (".0").
+        assert_eq!(human_readable(1024), "1K");
+        assert_eq!(human_readable(1536), "1.5K");
+        assert_eq!(human_readable(1024 * 1024), "1M");
+    }
+
+    #[test]
+    fn si_readable_units() {
+        assert_eq!(si_readable(0), "0");
+        assert_eq!(si_readable(1000), "1kB");
+        assert_eq!(si_readable(1500), "1.5kB");
+        assert_eq!(si_readable(1_000_000), "1MB");
+    }
+
+    #[test]
+    fn block_str_rounds_up() {
+        // 1 KiB blocks: 1025 bytes -> 2 blocks (ceil).
+        assert_eq!(block_str(1025, 1024), "2");
+        assert_eq!(block_str(1024, 1024), "1");
+        assert_eq!(block_str(0, 1024), "0");
+    }
+
+    // ---- usage percentage --------------------------------------------------
+
+    #[test]
+    fn usage_pct_basics() {
+        assert_eq!(usage_pct(0, 0), "-");
+        assert_eq!(usage_pct(0, 100), "0%");
+        assert_eq!(usage_pct(100, 100), "100%");
+        // Linux rounds the percentage up.
+        assert_eq!(usage_pct(1, 100), "1%");
+        assert_eq!(usage_pct(101, 1000), "11%");
+    }
+
+    // ---- pseudo-fs detection -----------------------------------------------
+
+    #[test]
+    fn pseudo_fs_detection() {
+        assert!(is_pseudo_fs("proc"));
+        assert!(is_pseudo_fs("TMPFS"));
+        assert!(!is_pseudo_fs("ext4"));
+    }
+
+    // ---- display filtering -------------------------------------------------
+
+    #[test]
+    fn should_display_skips_pseudo_by_default() {
+        let cfg = Config::default_config();
+        assert!(!should_display(&mount("tmpfs", "/tmp", "tmpfs"), &cfg));
+        assert!(should_display(&mount("/dev/sda1", "/", "ext4"), &cfg));
+    }
+
+    #[test]
+    fn should_display_include_type_filter() {
+        let mut cfg = Config::default_config();
+        cfg.include_types.push("ext4".to_string());
+        assert!(should_display(&mount("/dev/sda1", "/", "ext4"), &cfg));
+        assert!(!should_display(&mount("/dev/sdb1", "/data", "xfs"), &cfg));
+    }
+
+    #[test]
+    fn should_display_exclude_type_filter() {
+        let mut cfg = Config::default_config();
+        cfg.exclude_types.push("ext4".to_string());
+        assert!(!should_display(&mount("/dev/sda1", "/", "ext4"), &cfg));
+    }
+
+    // ---- best-mount selection ----------------------------------------------
+
+    #[test]
+    fn best_mount_picks_longest_prefix() {
+        let mut infos = vec![
+            FsInfo {
+                device: "/dev/sda1".to_string(),
+                mountpoint: "/".to_string(),
+                fstype: "ext4".to_string(),
+                total_bytes: 0,
+                used_bytes: 0,
+                avail_bytes: 0,
+                total_inodes: 0,
+                used_inodes: 0,
+                free_inodes: 0,
+            },
+            FsInfo {
+                device: "/dev/sda2".to_string(),
+                mountpoint: "/home".to_string(),
+                fstype: "ext4".to_string(),
+                total_bytes: 0,
+                used_bytes: 0,
+                avail_bytes: 0,
+                total_inodes: 0,
+                used_inodes: 0,
+                free_inodes: 0,
+            },
+        ];
+        best_mount_for_paths(&mut infos, &["/home/alice".to_string()]);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].mountpoint, "/home");
+    }
+
+    // ---- JSON escaping -----------------------------------------------------
+
+    #[test]
+    fn json_escape_specials() {
+        assert_eq!(json_escape("a\"b\\c"), "a\\\"b\\\\c");
+        assert_eq!(json_escape("x\ty"), "x\\ty");
+        assert_eq!(json_escape("plain"), "plain");
+    }
 }

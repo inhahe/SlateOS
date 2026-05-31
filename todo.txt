@@ -1,3 +1,27 @@
+## BUG (noticed+FIXED 2026-05-31): apps/game2048 — test build break PLUS one logic
+##   test bug. Multiple make_key/KeyEvent constructions used a Modifiers { ctrl, alt,
+##   shift } literal that broke when guitk added super_key (E0063); switched to
+##   Modifiers::NONE / Modifiers::ctrl(). Separately, won_continuing_allows_moves set
+##   the grid to [2048, 2, 0, 0] (already left-packed) then asserted a Left move
+##   returned true — but a left move on an already-left-packed row correctly does
+##   nothing, so make_move returned false. Fixed the test data to [2048, 0, 2, 0] so
+##   the Left move actually slides a tile. game2048 83/83 tests pass, clippy clean,
+##   ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/pipes test build did not compile — ten
+##   make_key/KeyEvent constructions used a Modifiers { ctrl, alt, shift } literal that
+##   broke when guitk added super_key (E0063). Switched all to Modifiers::NONE.
+##   pipes 60/60 tests pass, clippy clean, ouros build OK.
+##
+## NOTE (2026-05-31): guitk::event::Modifiers gained a `super_key` field, which broke
+##   the test builds of every app that constructed Modifiers with an explicit field
+##   literal lacking super_key (typingtutor, stopwatch, metronome, game2048, pipes —
+##   all fixed). Apps using `..Modifiers::default()` spread (crossword, mandelbrot,
+##   maze, life, pong) or already listing super_key (freecell, solitaire, fontmanager,
+##   wordle) were unaffected. Going forward, construct Modifiers via the NONE/ctrl()/
+##   shift()/alt() builders rather than field literals so future field additions don't
+##   break callers.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/stopwatch — test build break PLUS two logic
 ##   test failures. (1) make_key() built Modifiers with a { ctrl, alt, shift } literal
 ##   that broke when guitk added super_key (E0063); switched to Modifiers::NONE. (2)

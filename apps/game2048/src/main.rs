@@ -65,7 +65,10 @@ impl Lcg {
 
     fn next(&mut self) -> u64 {
         // Numerical Recipes LCG parameters
-        self.state = self.state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
         self.state
     }
 
@@ -575,13 +578,22 @@ impl Game2048App {
         // Score display
         let score_x = BOARD_X + 240.0;
         self.render_score_box(&mut cmds, score_x, 15.0, "SCORE", self.state.score);
-        self.render_score_box(&mut cmds, score_x + 130.0, 15.0, "BEST", self.state.best_score);
+        self.render_score_box(
+            &mut cmds,
+            score_x + 130.0,
+            15.0,
+            "BEST",
+            self.state.best_score,
+        );
 
         // Moves count
         cmds.push(RenderCommand::Text {
             x: BOARD_X,
             y: 80.0,
-            text: format!("Moves: {}  |  Highest: {}", self.state.moves_count, self.state.highest_tile),
+            text: format!(
+                "Moves: {}  |  Highest: {}",
+                self.state.moves_count, self.state.highest_tile
+            ),
             color: Color::from_hex(COL_SUBTEXT0),
             font_size: 16.0,
             font_weight: FontWeightHint::Regular,
@@ -649,10 +661,24 @@ impl Game2048App {
         // Game status overlay
         match self.state.status {
             GameStatus::Won => {
-                self.render_overlay(&mut cmds, board_w, board_h, "You Win!", "Press C to continue or N for new game", Color::from_hex(COL_GREEN));
+                self.render_overlay(
+                    &mut cmds,
+                    board_w,
+                    board_h,
+                    "You Win!",
+                    "Press C to continue or N for new game",
+                    Color::from_hex(COL_GREEN),
+                );
             }
             GameStatus::Lost => {
-                self.render_overlay(&mut cmds, board_w, board_h, "Game Over", "Press N for new game or U to undo", Color::from_hex(COL_RED));
+                self.render_overlay(
+                    &mut cmds,
+                    board_w,
+                    board_h,
+                    "Game Over",
+                    "Press N for new game or U to undo",
+                    Color::from_hex(COL_RED),
+                );
             }
             _ => {}
         }
@@ -665,7 +691,14 @@ impl Game2048App {
         cmds
     }
 
-    fn render_score_box(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, label: &str, score: u32) {
+    fn render_score_box(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        label: &str,
+        score: u32,
+    ) {
         cmds.push(RenderCommand::FillRect {
             x,
             y,
@@ -694,7 +727,15 @@ impl Game2048App {
         });
     }
 
-    fn render_overlay(&self, cmds: &mut Vec<RenderCommand>, board_w: f32, board_h: f32, title: &str, subtitle: &str, accent: Color) {
+    fn render_overlay(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        board_w: f32,
+        board_h: f32,
+        title: &str,
+        subtitle: &str,
+        accent: Color,
+    ) {
         // Semi-transparent overlay
         cmds.push(RenderCommand::FillRect {
             x: BOARD_X,
@@ -997,12 +1038,7 @@ mod tests {
     #[test]
     fn apply_move_left() {
         let mut state = GameState::new();
-        state.grid = [
-            [0, 0, 2, 2],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        state.grid = [[0, 0, 2, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         let moved = state.apply_move(Direction::Left);
         assert!(moved);
         assert_eq!(state.grid[0][0], 4);
@@ -1013,12 +1049,7 @@ mod tests {
     #[test]
     fn apply_move_right() {
         let mut state = GameState::new();
-        state.grid = [
-            [2, 2, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        state.grid = [[2, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         let moved = state.apply_move(Direction::Right);
         assert!(moved);
         assert_eq!(state.grid[0][3], 4);
@@ -1028,12 +1059,7 @@ mod tests {
     #[test]
     fn apply_move_up() {
         let mut state = GameState::new();
-        state.grid = [
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [2, 0, 0, 0],
-            [2, 0, 0, 0],
-        ];
+        state.grid = [[0, 0, 0, 0], [0, 0, 0, 0], [2, 0, 0, 0], [2, 0, 0, 0]];
         let moved = state.apply_move(Direction::Up);
         assert!(moved);
         assert_eq!(state.grid[0][0], 4);
@@ -1044,12 +1070,7 @@ mod tests {
     #[test]
     fn apply_move_down() {
         let mut state = GameState::new();
-        state.grid = [
-            [2, 0, 0, 0],
-            [2, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        state.grid = [[2, 0, 0, 0], [2, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         let moved = state.apply_move(Direction::Down);
         assert!(moved);
         assert_eq!(state.grid[3][0], 4);
@@ -1059,12 +1080,7 @@ mod tests {
     #[test]
     fn apply_move_no_change() {
         let mut state = GameState::new();
-        state.grid = [
-            [2, 4, 8, 16],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        state.grid = [[2, 4, 8, 16], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         let moved = state.apply_move(Direction::Left);
         assert!(!moved);
         assert_eq!(state.score, 0);
@@ -1101,12 +1117,7 @@ mod tests {
     #[test]
     fn cannot_move_stuck() {
         let mut state = GameState::new();
-        state.grid = [
-            [2, 4, 8, 16],
-            [16, 8, 4, 2],
-            [2, 4, 8, 16],
-            [16, 8, 4, 2],
-        ];
+        state.grid = [[2, 4, 8, 16], [16, 8, 4, 2], [2, 4, 8, 16], [16, 8, 4, 2]];
         assert!(!state.can_move());
     }
 
@@ -1195,7 +1206,12 @@ mod tests {
         app.max_undo = 3;
         // Keep making moves that change the board
         for _ in 0..10 {
-            let dirs = [Direction::Left, Direction::Right, Direction::Up, Direction::Down];
+            let dirs = [
+                Direction::Left,
+                Direction::Right,
+                Direction::Up,
+                Direction::Down,
+            ];
             for &d in &dirs {
                 app.make_move(d);
             }
@@ -1250,12 +1266,7 @@ mod tests {
     fn make_move_no_change_no_spawn() {
         let mut app = Game2048App::with_seed(42);
         // Set up a board where left move does nothing
-        app.state.grid = [
-            [2, 4, 8, 16],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        app.state.grid = [[2, 4, 8, 16], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         let count_before: usize = app.state.grid.iter().flatten().filter(|&&v| v != 0).count();
         let moved = app.make_move(Direction::Left);
         assert!(!moved);
@@ -1268,12 +1279,7 @@ mod tests {
     #[test]
     fn win_detection() {
         let mut app = Game2048App::with_seed(42);
-        app.state.grid = [
-            [1024, 1024, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        app.state.grid = [[1024, 1024, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         app.make_move(Direction::Left);
         assert_eq!(app.state.status, GameStatus::Won);
     }
@@ -1297,12 +1303,9 @@ mod tests {
     #[test]
     fn won_continuing_allows_moves() {
         let mut app = Game2048App::with_seed(42);
-        app.state.grid = [
-            [2048, 2, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        // Leave a gap so a left move actually slides a tile (the old data
+        // [2048, 2, 0, 0] was already left-packed, so make_move returned false).
+        app.state.grid = [[2048, 0, 2, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         app.state.status = GameStatus::WonContinuing;
         let moved = app.make_move(Direction::Left);
         assert!(moved);
@@ -1330,12 +1333,7 @@ mod tests {
         ];
         // After left, last row becomes [16, 8, 4, 0], so not game over
         // Let's directly test can_move on a stuck board
-        app.state.grid = [
-            [2, 4, 8, 16],
-            [16, 8, 4, 2],
-            [2, 4, 8, 16],
-            [16, 8, 4, 2],
-        ];
+        app.state.grid = [[2, 4, 8, 16], [16, 8, 4, 2], [2, 4, 8, 16], [16, 8, 4, 2]];
         assert!(!app.state.can_move());
     }
 
@@ -1352,16 +1350,11 @@ mod tests {
     #[test]
     fn key_left_arrow() {
         let mut app = Game2048App::with_seed(42);
-        app.state.grid = [
-            [0, 0, 2, 2],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        app.state.grid = [[0, 0, 2, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         app.handle_key(&KeyEvent {
             key: Key::Left,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.state.grid[0][0], 4);
@@ -1370,16 +1363,11 @@ mod tests {
     #[test]
     fn key_right_arrow() {
         let mut app = Game2048App::with_seed(42);
-        app.state.grid = [
-            [2, 2, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        app.state.grid = [[2, 2, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         app.handle_key(&KeyEvent {
             key: Key::Right,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.state.grid[0][3], 4);
@@ -1388,16 +1376,11 @@ mod tests {
     #[test]
     fn key_wasd() {
         let mut app = Game2048App::with_seed(42);
-        app.state.grid = [
-            [0, 0, 2, 2],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        app.state.grid = [[0, 0, 2, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         app.handle_key(&KeyEvent {
             key: Key::A,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: Some('a'),
         });
         assert_eq!(app.state.grid[0][0], 4);
@@ -1410,13 +1393,13 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::Left,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         });
         app.handle_key(&KeyEvent {
             key: Key::U,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: Some('u'),
         });
         assert_eq!(app.state.grid, grid_before);
@@ -1429,13 +1412,13 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::Left,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         });
         app.handle_key(&KeyEvent {
             key: Key::Z,
             pressed: true,
-            modifiers: Modifiers { ctrl: true, alt: false, shift: false },
+            modifiers: Modifiers::ctrl(),
             text: None,
         });
         assert_eq!(app.state.grid, grid_before);
@@ -1448,7 +1431,7 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::N,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: Some('n'),
         });
         assert_eq!(app.state.score, 0);
@@ -1462,14 +1445,14 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::H,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: Some('h'),
         });
         assert!(app.show_help);
         app.handle_key(&KeyEvent {
             key: Key::H,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: Some('h'),
         });
         assert!(!app.show_help);
@@ -1482,7 +1465,7 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::C,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: Some('c'),
         });
         assert_eq!(app.state.status, GameStatus::WonContinuing);
@@ -1495,7 +1478,7 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::Left,
             pressed: false,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.state.grid, grid_before);
@@ -1509,7 +1492,7 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::Left,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.state.grid, grid_before);
@@ -1520,7 +1503,9 @@ mod tests {
     #[test]
     fn tile_color_variants() {
         // Just verify no panics and each value returns a color
-        let values = [0, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384];
+        let values = [
+            0, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384,
+        ];
         for v in values {
             let _ = Game2048App::tile_color(v);
             let _ = Game2048App::tile_text_color(v);
@@ -1547,7 +1532,9 @@ mod tests {
     fn render_has_background() {
         let app = Game2048App::new();
         let cmds = app.render(600.0, 800.0);
-        let has_bg = cmds.iter().any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
+        let has_bg = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
         assert!(has_bg);
     }
 
@@ -1555,7 +1542,9 @@ mod tests {
     fn render_has_title() {
         let app = Game2048App::new();
         let cmds = app.render(600.0, 800.0);
-        let has_title = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "2048"));
+        let has_title = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "2048"));
         assert!(has_title);
     }
 
@@ -1564,7 +1553,10 @@ mod tests {
         let app = Game2048App::new();
         let cmds = app.render(600.0, 800.0);
         // Should have at least 16 fill rects for cells + board bg + screen bg
-        let fill_count = cmds.iter().filter(|c| matches!(c, RenderCommand::FillRect { .. })).count();
+        let fill_count = cmds
+            .iter()
+            .filter(|c| matches!(c, RenderCommand::FillRect { .. }))
+            .count();
         assert!(fill_count >= 18);
     }
 
@@ -1573,7 +1565,9 @@ mod tests {
         let mut app = Game2048App::with_seed(42);
         app.state.status = GameStatus::Won;
         let cmds = app.render(600.0, 800.0);
-        let has_win = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "You Win!"));
+        let has_win = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "You Win!"));
         assert!(has_win);
     }
 
@@ -1582,7 +1576,9 @@ mod tests {
         let mut app = Game2048App::with_seed(42);
         app.state.status = GameStatus::Lost;
         let cmds = app.render(600.0, 800.0);
-        let has_lose = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Game Over"));
+        let has_lose = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Game Over"));
         assert!(has_lose);
     }
 
@@ -1591,7 +1587,9 @@ mod tests {
         let mut app = Game2048App::with_seed(42);
         app.show_help = true;
         let cmds = app.render(600.0, 800.0);
-        let has_help = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Arrow keys")));
+        let has_help = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Arrow keys")));
         assert!(has_help);
     }
 
@@ -1608,7 +1606,9 @@ mod tests {
         let mut app = Game2048App::with_seed(42);
         app.state.score = 256;
         let cmds = app.render(600.0, 800.0);
-        let has_score = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "256"));
+        let has_score = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "256"));
         assert!(has_score);
     }
 
@@ -1617,12 +1617,7 @@ mod tests {
     #[test]
     fn multiple_moves_scoring() {
         let mut app = Game2048App::with_seed(42);
-        app.state.grid = [
-            [2, 2, 4, 4],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        app.state.grid = [[2, 2, 4, 4], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         app.make_move(Direction::Left);
         // 2+2=4, 4+4=8, score = 12
         assert_eq!(app.state.score, 12);
@@ -1633,12 +1628,7 @@ mod tests {
     #[test]
     fn best_score_tracking() {
         let mut app = Game2048App::with_seed(42);
-        app.state.grid = [
-            [128, 128, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        app.state.grid = [[128, 128, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         app.make_move(Direction::Left);
         assert_eq!(app.state.best_score, 256);
         app.new_game();
@@ -1660,12 +1650,7 @@ mod tests {
     #[test]
     fn highest_tile_tracking() {
         let mut app = Game2048App::with_seed(42);
-        app.state.grid = [
-            [512, 512, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        app.state.grid = [[512, 512, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         app.make_move(Direction::Left);
         assert_eq!(app.state.highest_tile, 1024);
     }
@@ -1673,16 +1658,11 @@ mod tests {
     #[test]
     fn event_handling() {
         let mut app = Game2048App::with_seed(42);
-        app.state.grid = [
-            [0, 0, 2, 2],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-        ];
+        app.state.grid = [[0, 0, 2, 2], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
         app.handle_event(&Event::Key(KeyEvent {
             key: Key::Left,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         }));
         assert_eq!(app.state.grid[0][0], 4);
@@ -1712,12 +1692,7 @@ mod tests {
     #[test]
     fn full_board_with_moves() {
         let mut state = GameState::new();
-        state.grid = [
-            [2, 4, 2, 4],
-            [4, 2, 4, 2],
-            [2, 4, 2, 4],
-            [4, 2, 4, 2],
-        ];
+        state.grid = [[2, 4, 2, 4], [4, 2, 4, 2], [2, 4, 2, 4], [4, 2, 4, 2]];
         // Board is full but no adjacent equal, so no moves
         assert!(!state.can_move());
     }

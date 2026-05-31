@@ -87,12 +87,12 @@ impl Dir {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PipeKind {
-    Straight,  // two opposite openings
-    Corner,    // two adjacent openings (L-shaped)
-    Tee,       // three openings (T-shaped)
-    Cross,     // four openings (+ shaped)
-    End,       // one opening (dead end / source/drain)
-    Empty,     // no pipe
+    Straight, // two opposite openings
+    Corner,   // two adjacent openings (L-shaped)
+    Tee,      // three openings (T-shaped)
+    Cross,    // four openings (+ shaped)
+    End,      // one opening (dead end / source/drain)
+    Empty,    // no pipe
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -103,7 +103,10 @@ struct Pipe {
 
 impl Pipe {
     fn new(kind: PipeKind, rotation: u8) -> Self {
-        Self { kind, rotation: rotation % 4 }
+        Self {
+            kind,
+            rotation: rotation % 4,
+        }
     }
 
     fn openings(self) -> Vec<Dir> {
@@ -115,13 +118,15 @@ impl Pipe {
             PipeKind::End => vec![Dir::Up],
             PipeKind::Empty => vec![],
         };
-        base.into_iter().map(|d| {
-            let mut dir = d;
-            for _ in 0..self.rotation {
-                dir = dir.rotate_cw();
-            }
-            dir
-        }).collect()
+        base.into_iter()
+            .map(|d| {
+                let mut dir = d;
+                for _ in 0..self.rotation {
+                    dir = dir.rotate_cw();
+                }
+                dir
+            })
+            .collect()
     }
 
     fn has_opening(self, dir: Dir) -> bool {
@@ -151,13 +156,17 @@ impl Lcg {
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6_364_136_223_846_793_005)
+        self.state = self
+            .state
+            .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         self.state
     }
 
     fn next_range(&mut self, max: usize) -> usize {
-        if max == 0 { return 0; }
+        if max == 0 {
+            return 0;
+        }
         (self.next() >> 33) as usize % max
     }
 }
@@ -391,7 +400,13 @@ impl Board {
         }
     }
 
-    fn random_path(rows: usize, cols: usize, start: (usize, usize), end: (usize, usize), rng: &mut Lcg) -> Vec<(usize, usize)> {
+    fn random_path(
+        rows: usize,
+        cols: usize,
+        start: (usize, usize),
+        end: (usize, usize),
+        rng: &mut Lcg,
+    ) -> Vec<(usize, usize)> {
         let mut visited = vec![vec![false; cols]; rows];
         let mut path = vec![start];
         visited[start.0][start.1] = true;
@@ -593,14 +608,18 @@ impl PipesApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: Color::from_hex(COL_BASE),
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: 20.0, y: 15.0,
+            x: 20.0,
+            y: 15.0,
             text: String::from("Pipes"),
             color: Color::from_hex(COL_BLUE),
             font_size: 28.0,
@@ -609,10 +628,15 @@ impl PipesApp {
         });
 
         // Status
-        let status = if self.solved { "SOLVED!" } else { self.difficulty.name() };
+        let status = if self.solved {
+            "SOLVED!"
+        } else {
+            self.difficulty.name()
+        };
         let status_color = if self.solved { COL_GREEN } else { COL_SUBTEXT0 };
         cmds.push(RenderCommand::Text {
-            x: 130.0, y: 22.0,
+            x: 130.0,
+            y: 22.0,
             text: String::from(status),
             color: Color::from_hex(status_color),
             font_size: 16.0,
@@ -622,8 +646,12 @@ impl PipesApp {
 
         // Stats
         cmds.push(RenderCommand::Text {
-            x: 20.0, y: 50.0,
-            text: format!("Moves: {}  |  Won: {}  |  Grid: {}x{}", self.moves, self.games_won, self.board.rows, self.board.cols),
+            x: 20.0,
+            y: 50.0,
+            text: format!(
+                "Moves: {}  |  Won: {}  |  Grid: {}x{}",
+                self.moves, self.games_won, self.board.rows, self.board.cols
+            ),
             color: Color::from_hex(COL_SUBTEXT0),
             font_size: 13.0,
             font_weight: FontWeightHint::Regular,
@@ -632,8 +660,11 @@ impl PipesApp {
 
         // Controls
         cmds.push(RenderCommand::Text {
-            x: 20.0, y: 70.0,
-            text: String::from("Arrows: Move  |  Space: Rotate CW  |  Z: CCW  |  N: New  |  1-3: Difficulty"),
+            x: 20.0,
+            y: 70.0,
+            text: String::from(
+                "Arrows: Move  |  Space: Rotate CW  |  Z: CCW  |  N: New  |  1-3: Difficulty",
+            ),
             color: Color::from_hex(COL_OVERLAY0),
             font_size: 11.0,
             font_weight: FontWeightHint::Regular,
@@ -644,7 +675,11 @@ impl PipesApp {
         let cell_size = 50.0_f32.min(400.0 / self.board.cols as f32);
         let board_x = 20.0;
         let board_y = 95.0;
-        let flow = if self.show_flow { self.board.flood_fill() } else { vec![vec![false; self.board.cols]; self.board.rows] };
+        let flow = if self.show_flow {
+            self.board.flood_fill()
+        } else {
+            vec![vec![false; self.board.cols]; self.board.rows]
+        };
 
         for r in 0..self.board.rows {
             for c in 0..self.board.cols {
@@ -666,8 +701,10 @@ impl PipesApp {
                     COL_SURFACE0
                 };
                 cmds.push(RenderCommand::FillRect {
-                    x: cx, y: cy,
-                    width: cell_size - 2.0, height: cell_size - 2.0,
+                    x: cx,
+                    y: cy,
+                    width: cell_size - 2.0,
+                    height: cell_size - 2.0,
                     color: Color::from_hex(bg_color),
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -675,8 +712,10 @@ impl PipesApp {
                 // Cursor highlight
                 if is_cursor {
                     cmds.push(RenderCommand::StrokeRect {
-                        x: cx, y: cy,
-                        width: cell_size - 2.0, height: cell_size - 2.0,
+                        x: cx,
+                        y: cy,
+                        width: cell_size - 2.0,
+                        height: cell_size - 2.0,
                         color: Color::from_hex(COL_YELLOW),
                         line_width: 2.0,
                         corner_radii: CornerRadii::all(4.0),
@@ -705,8 +744,10 @@ impl PipesApp {
                         Dir::Right => (cx + cell_size - 2.0, mid_y),
                     };
                     cmds.push(RenderCommand::Line {
-                        x1: mid_x, y1: mid_y,
-                        x2: ex, y2: ey,
+                        x1: mid_x,
+                        y1: mid_y,
+                        x2: ex,
+                        y2: ey,
                         color: Color::from_hex(pipe_color),
                         width: pipe_w,
                     });
@@ -715,8 +756,10 @@ impl PipesApp {
                 // Center dot for non-empty pipes
                 if pipe.kind != PipeKind::Empty {
                     cmds.push(RenderCommand::FillRect {
-                        x: mid_x - 4.0, y: mid_y - 4.0,
-                        width: 8.0, height: 8.0,
+                        x: mid_x - 4.0,
+                        y: mid_y - 4.0,
+                        width: 8.0,
+                        height: 8.0,
                         color: Color::from_hex(pipe_color),
                         corner_radii: CornerRadii::all(4.0),
                     });
@@ -725,7 +768,8 @@ impl PipesApp {
                 // Source/drain labels
                 if is_source {
                     cmds.push(RenderCommand::Text {
-                        x: cx + 2.0, y: cy + 2.0,
+                        x: cx + 2.0,
+                        y: cy + 2.0,
                         text: String::from("S"),
                         color: Color::from_hex(COL_GREEN),
                         font_size: 12.0,
@@ -735,7 +779,8 @@ impl PipesApp {
                 }
                 if is_drain {
                     cmds.push(RenderCommand::Text {
-                        x: cx + 2.0, y: cy + 2.0,
+                        x: cx + 2.0,
+                        y: cy + 2.0,
                         text: String::from("D"),
                         color: Color::from_hex(COL_RED),
                         font_size: 12.0,
@@ -750,7 +795,8 @@ impl PipesApp {
         if self.solved {
             let msg_y = board_y + self.board.rows as f32 * cell_size + 15.0;
             cmds.push(RenderCommand::Text {
-                x: 20.0, y: msg_y,
+                x: 20.0,
+                y: msg_y,
                 text: format!("Congratulations! Solved in {} moves!", self.moves),
                 color: Color::from_hex(COL_GREEN),
                 font_size: 20.0,
@@ -758,7 +804,8 @@ impl PipesApp {
                 max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: 20.0, y: msg_y + 28.0,
+                x: 20.0,
+                y: msg_y + 28.0,
                 text: String::from("Press N for a new puzzle"),
                 color: Color::from_hex(COL_SUBTEXT0),
                 font_size: 14.0,
@@ -1037,8 +1084,9 @@ mod tests {
     fn cursor_move_down() {
         let mut app = PipesApp::new();
         app.handle_key(&KeyEvent {
-            key: Key::Down, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::Down,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.cursor_r, 1);
@@ -1048,8 +1096,9 @@ mod tests {
     fn cursor_move_right() {
         let mut app = PipesApp::new();
         app.handle_key(&KeyEvent {
-            key: Key::Right, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::Right,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.cursor_c, 1);
@@ -1059,8 +1108,9 @@ mod tests {
     fn cursor_clamped_top() {
         let mut app = PipesApp::new();
         app.handle_key(&KeyEvent {
-            key: Key::Up, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::Up,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.cursor_r, 0);
@@ -1070,8 +1120,9 @@ mod tests {
     fn cursor_clamped_left() {
         let mut app = PipesApp::new();
         app.handle_key(&KeyEvent {
-            key: Key::Left, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::Left,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.cursor_c, 0);
@@ -1081,8 +1132,9 @@ mod tests {
     fn rotate_increments_moves() {
         let mut app = PipesApp::new();
         app.handle_key(&KeyEvent {
-            key: Key::Space, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::Space,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.moves, 1);
@@ -1111,8 +1163,9 @@ mod tests {
         let mut app = PipesApp::new();
         app.moves = 5;
         app.handle_key(&KeyEvent {
-            key: Key::N, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::N,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.moves, 0);
@@ -1122,8 +1175,9 @@ mod tests {
     fn key_difficulty() {
         let mut app = PipesApp::new();
         app.handle_key(&KeyEvent {
-            key: Key::Num2, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::Num2,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.difficulty, Difficulty::Medium);
@@ -1133,8 +1187,9 @@ mod tests {
     fn key_released_ignored() {
         let mut app = PipesApp::new();
         app.handle_key(&KeyEvent {
-            key: Key::Space, pressed: false,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::Space,
+            pressed: false,
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.moves, 0);
@@ -1153,8 +1208,9 @@ mod tests {
         let mut app = PipesApp::new();
         assert!(app.show_flow);
         app.handle_key(&KeyEvent {
-            key: Key::F, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::F,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert!(!app.show_flow);
@@ -1164,8 +1220,9 @@ mod tests {
     fn handle_event() {
         let mut app = PipesApp::new();
         app.handle_event(&Event::Key(KeyEvent {
-            key: Key::Down, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::Down,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: None,
         }));
         assert_eq!(app.cursor_r, 1);
@@ -1184,7 +1241,9 @@ mod tests {
     fn render_has_title() {
         let app = PipesApp::new();
         let cmds = app.render(600.0, 800.0);
-        let has_title = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Pipes"));
+        let has_title = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Pipes"));
         assert!(has_title);
     }
 
@@ -1192,7 +1251,9 @@ mod tests {
     fn render_has_background() {
         let app = PipesApp::new();
         let cmds = app.render(600.0, 800.0);
-        let has_bg = cmds.iter().any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
+        let has_bg = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
         assert!(has_bg);
     }
 
@@ -1202,7 +1263,9 @@ mod tests {
         app.solved = true;
         app.moves = 15;
         let cmds = app.render(600.0, 800.0);
-        let has_solved = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Congratulations")));
+        let has_solved = cmds.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text.contains("Congratulations")),
+        );
         assert!(has_solved);
     }
 
@@ -1210,7 +1273,9 @@ mod tests {
     fn render_has_source_label() {
         let app = PipesApp::new();
         let cmds = app.render(600.0, 800.0);
-        let has_s = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "S"));
+        let has_s = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "S"));
         assert!(has_s);
     }
 
@@ -1218,7 +1283,9 @@ mod tests {
     fn render_has_drain_label() {
         let app = PipesApp::new();
         let cmds = app.render(600.0, 800.0);
-        let has_d = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "D"));
+        let has_d = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "D"));
         assert!(has_d);
     }
 

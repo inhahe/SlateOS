@@ -82,14 +82,17 @@
 ##    * stat  — realtime read 228->14 (dead_code helper, fixed anyway).
 ##    * dig, rsync, scp, screen, tcpdump — monotonic 30->10 (one-line const;
 ##              they already used the correct no-arg calling convention).
+##    * ntpd  (FIXED 2026-05-30) — read via SYS_CLOCK_REALTIME=14, step via
+##              SYS_CLOCK_SETTIME=15 (read abs ns, add correction, write back),
+##              slew via SYS_CLOCK_ADJTIME=16 (race-free relative delta).  T1/T4
+##              now carry microsecond precision (read_unix_secs_micros), and
+##              BOTH apply paths (ntpdate + daemon) work in ns end-to-end,
+##              fixing the whole-second truncation that discarded every
+##              sub-second correction.  Removed now-dead write_system_time.
+##    * hwclock (FIXED 2026-05-30) — read via SYS_CLOCK_REALTIME=14 (btime+uptime
+##              kept as a fallback for uninitialised timekeeping), set via
+##              SYS_CLOCK_SETTIME=15.  Was reading/writing /proc/time both ways.
 ##  REMAINING (still broken, NOT yet fixed):
-##    * ntpd & hwclock — both read/set the clock through the nonexistent,
-##      read-only /proc/time.  Proper fix: route reads through
-##      SYS_CLOCK_REALTIME=14 and sets through SYS_CLOCK_SETTIME=15 (and use
-##      SYS_CLOCK_ADJTIME=16 for ntpd slew), AND fix ntpd's whole-second
-##      truncation so sub-second corrections actually apply.  This is more
-##      than a constant swap (rewrites read_system_time/write_system_time and
-##      the discipline apply path), so it is split out as its own task.
 ##    * Implement /proc/time in procfs as a convenience read-only mirror
 ##      (optional) — but the *control* path must be the syscalls, not /proc.
 ##  ALSO STILL OPEN: add CAP_SYS_TIME enforcement inside sys_clock_settime /

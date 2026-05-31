@@ -152,32 +152,44 @@ fn default_lessons() -> Vec<Lesson> {
         Lesson {
             category: LessonCategory::CommonWords,
             title: String::from("Most Common Words"),
-            text: String::from("the quick brown fox jumps over the lazy dog and then runs back again to find more food"),
+            text: String::from(
+                "the quick brown fox jumps over the lazy dog and then runs back again to find more food",
+            ),
         },
         Lesson {
             category: LessonCategory::CommonWords,
             title: String::from("Frequent Words"),
-            text: String::from("about their would other which water people could these first after where those because right"),
+            text: String::from(
+                "about their would other which water people could these first after where those because right",
+            ),
         },
         Lesson {
             category: LessonCategory::Sentences,
             title: String::from("Simple Sentences"),
-            text: String::from("The cat sat on the mat. A dog ran through the park. She wrote a letter to her friend."),
+            text: String::from(
+                "The cat sat on the mat. A dog ran through the park. She wrote a letter to her friend.",
+            ),
         },
         Lesson {
             category: LessonCategory::Sentences,
             title: String::from("Complex Sentences"),
-            text: String::from("Although the weather was cold, they decided to go hiking in the mountains near the river."),
+            text: String::from(
+                "Although the weather was cold, they decided to go hiking in the mountains near the river.",
+            ),
         },
         Lesson {
             category: LessonCategory::Paragraphs,
             title: String::from("Short Paragraph"),
-            text: String::from("Programming is the art of telling a computer what to do. It requires patience, logic, and creativity. Good programmers write code that humans can understand."),
+            text: String::from(
+                "Programming is the art of telling a computer what to do. It requires patience, logic, and creativity. Good programmers write code that humans can understand.",
+            ),
         },
         Lesson {
             category: LessonCategory::Paragraphs,
             title: String::from("Medium Paragraph"),
-            text: String::from("The operating system is the most important software on a computer. It manages memory, processes, and devices. Without it, the computer would be unable to function."),
+            text: String::from(
+                "The operating system is the most important software on a computer. It manages memory, processes, and devices. Without it, the computer would be unable to function.",
+            ),
         },
     ]
 }
@@ -302,11 +314,17 @@ impl TypingSession {
     }
 
     fn correct_count(&self) -> usize {
-        self.statuses.iter().filter(|s| **s == CharStatus::Correct).count()
+        self.statuses
+            .iter()
+            .filter(|s| **s == CharStatus::Correct)
+            .count()
     }
 
     fn incorrect_count(&self) -> usize {
-        self.statuses.iter().filter(|s| **s == CharStatus::Incorrect).count()
+        self.statuses
+            .iter()
+            .filter(|s| **s == CharStatus::Incorrect)
+            .count()
     }
 }
 
@@ -704,7 +722,10 @@ impl TypingTutorApp {
             y: 55.0,
             text: format!(
                 "WPM: {:.0}  |  Accuracy: {:.1}%  |  Time: {}:{:02}  |  Esc: quit",
-                wpm, acc, secs / 60, secs % 60
+                wpm,
+                acc,
+                secs / 60,
+                secs % 60
             ),
             color: Color::from_hex(COL_SUBTEXT0),
             font_size: 14.0,
@@ -848,7 +869,11 @@ impl TypingTutorApp {
             ("WPM", format!("{wpm:.0}"), COL_BLUE),
             ("Accuracy", format!("{acc:.1}%"), COL_GREEN),
             ("Time", format!("{}:{:02}", secs / 60, secs % 60), COL_PEACH),
-            ("Keystrokes", session.total_keystrokes.to_string(), COL_YELLOW),
+            (
+                "Keystrokes",
+                session.total_keystrokes.to_string(),
+                COL_YELLOW,
+            ),
             ("Correct", session.correct_keystrokes.to_string(), COL_TEAL),
             ("Errors", session.incorrect_keystrokes.to_string(), COL_RED),
         ];
@@ -950,8 +975,16 @@ impl TypingTutorApp {
                 ("Lessons", self.results.len().to_string(), COL_BLUE),
                 ("Avg WPM", format!("{:.0}", self.average_wpm()), COL_GREEN),
                 ("Best WPM", format!("{:.0}", self.best_wpm()), COL_YELLOW),
-                ("Avg Accuracy", format!("{:.1}%", self.average_accuracy()), COL_TEAL),
-                ("Total Chars", self.total_chars_typed().to_string(), COL_PEACH),
+                (
+                    "Avg Accuracy",
+                    format!("{:.1}%", self.average_accuracy()),
+                    COL_TEAL,
+                ),
+                (
+                    "Total Chars",
+                    self.total_chars_typed().to_string(),
+                    COL_PEACH,
+                ),
             ];
 
             for (i, (label, value, col)) in summary.iter().enumerate() {
@@ -1089,7 +1122,7 @@ mod tests {
         KeyEvent {
             key,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text,
         }
     }
@@ -1432,7 +1465,7 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::A,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: Some(first_char),
         });
         let session = app.session.as_ref().unwrap();
@@ -1448,7 +1481,7 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::A,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: Some(first_char),
         });
         app.handle_key(&make_key(Key::Backspace, None));
@@ -1469,14 +1502,16 @@ mod tests {
         app.start_lesson(idx);
         app.current_time_ms = 1000;
         app.handle_key(&KeyEvent {
-            key: Key::A, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::A,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: Some('a'),
         });
         app.current_time_ms = 2000;
         app.handle_key(&KeyEvent {
-            key: Key::B, pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            key: Key::B,
+            pressed: true,
+            modifiers: Modifiers::NONE,
             text: Some('b'),
         });
         assert_eq!(app.view, AppView::Results);
@@ -1625,7 +1660,9 @@ mod tests {
         let app = TypingTutorApp::new();
         let cmds = app.render(600.0, 800.0);
         assert!(!cmds.is_empty());
-        let has_title = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Typing Tutor"));
+        let has_title = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Typing Tutor"));
         assert!(has_title);
     }
 
@@ -1637,7 +1674,9 @@ mod tests {
         assert!(!cmds.is_empty());
         // Should have the lesson title
         let title = &app.lessons[0].title;
-        let has_lesson = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == title));
+        let has_lesson = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == title));
         assert!(has_lesson);
     }
 
@@ -1647,7 +1686,9 @@ mod tests {
         app.view = AppView::Results;
         app.session = Some(TypingSession::new("test"));
         let cmds = app.render(600.0, 800.0);
-        let has_complete = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Lesson Complete!"));
+        let has_complete = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Lesson Complete!"));
         assert!(has_complete);
     }
 
@@ -1656,9 +1697,13 @@ mod tests {
         let mut app = TypingTutorApp::new();
         app.view = AppView::Statistics;
         let cmds = app.render(600.0, 800.0);
-        let has_title = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Statistics"));
+        let has_title = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Statistics"));
         assert!(has_title);
-        let has_empty_msg = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("No lessons")));
+        let has_empty_msg = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("No lessons")));
         assert!(has_empty_msg);
     }
 
@@ -1675,7 +1720,9 @@ mod tests {
             text_length: 100,
         });
         let cmds = app.render(600.0, 800.0);
-        let has_recent = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Recent Results"));
+        let has_recent = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Recent Results"));
         assert!(has_recent);
     }
 
@@ -1683,7 +1730,9 @@ mod tests {
     fn render_has_background() {
         let app = TypingTutorApp::new();
         let cmds = app.render(600.0, 800.0);
-        let has_bg = cmds.iter().any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
+        let has_bg = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
         assert!(has_bg);
     }
 
@@ -1705,7 +1754,7 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::Down,
             pressed: false,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.selected_lesson, 0);

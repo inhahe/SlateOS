@@ -96,8 +96,8 @@ enum AppView {
 #[derive(Debug, Clone)]
 struct Lap {
     number: u32,
-    split_ms: u64,   // time since start
-    lap_ms: u64,     // time since previous lap
+    split_ms: u64, // time since start
+    lap_ms: u64,   // time since previous lap
 }
 
 // ---------------------------------------------------------------------------
@@ -129,7 +129,7 @@ struct StopwatchApp {
     // Countdown-specific
     countdown_target_ms: u64,
     countdown_remaining_ms: u64,
-    countdown_setup_field: usize, // 0=hours, 1=mins, 2=secs
+    countdown_setup_field: usize,     // 0=hours, 1=mins, 2=secs
     countdown_setup_values: [u32; 3], // hours, mins, secs
     countdown_finished: bool,
 
@@ -197,7 +197,8 @@ impl StopwatchApp {
             let best = self.laps.iter().map(|l| l.lap_ms).min();
             let worst = self.laps.iter().map(|l| l.lap_ms).max();
             let total = if self.mode == AppMode::Countdown {
-                self.countdown_target_ms.saturating_sub(self.countdown_remaining_ms)
+                self.countdown_target_ms
+                    .saturating_sub(self.countdown_remaining_ms)
             } else {
                 self.elapsed_ms
             };
@@ -254,7 +255,8 @@ impl StopwatchApp {
                         self.countdown_finished = true;
                         self.state = TimerState::Paused;
                     } else {
-                        self.countdown_remaining_ms = self.countdown_remaining_ms.saturating_sub(delta);
+                        self.countdown_remaining_ms =
+                            self.countdown_remaining_ms.saturating_sub(delta);
                     }
                 }
             }
@@ -372,8 +374,7 @@ impl StopwatchApp {
         match event.key {
             Key::Escape | Key::Enter => {
                 // Apply values
-                self.countdown_target_ms =
-                    self.countdown_setup_values[0] as u64 * 3_600_000
+                self.countdown_target_ms = self.countdown_setup_values[0] as u64 * 3_600_000
                     + self.countdown_setup_values[1] as u64 * 60_000
                     + self.countdown_setup_values[2] as u64 * 1_000;
                 self.countdown_remaining_ms = self.countdown_target_ms;
@@ -390,7 +391,11 @@ impl StopwatchApp {
                 }
             }
             Key::Up => {
-                let max = if self.countdown_setup_field == 0 { 23 } else { 59 };
+                let max = if self.countdown_setup_field == 0 {
+                    23
+                } else {
+                    59
+                };
                 if self.countdown_setup_values[self.countdown_setup_field] < max {
                     self.countdown_setup_values[self.countdown_setup_field] += 1;
                 }
@@ -419,7 +424,10 @@ impl StopwatchApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: Color::from_hex(COL_BASE),
             corner_radii: CornerRadii::ZERO,
         });
@@ -444,7 +452,8 @@ impl StopwatchApp {
             AppMode::Countdown => COL_PEACH,
         };
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 20.0,
+            x: 30.0,
+            y: 20.0,
             text: String::from(mode_text),
             color: Color::from_hex(mode_color),
             font_size: 18.0,
@@ -459,12 +468,16 @@ impl StopwatchApp {
             TimerState::Paused => ("PAUSED", COL_YELLOW),
         };
         cmds.push(RenderCommand::FillRect {
-            x: 200.0, y: 18.0, width: 90.0, height: 24.0,
+            x: 200.0,
+            y: 18.0,
+            width: 90.0,
+            height: 24.0,
             color: Color::from_hex(COL_SURFACE0),
             corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::Text {
-            x: 212.0, y: 21.0,
+            x: 212.0,
+            y: 21.0,
             text: String::from(state_text),
             color: Color::from_hex(state_color),
             font_size: 13.0,
@@ -482,7 +495,8 @@ impl StopwatchApp {
             COL_SUBTEXT0
         };
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 70.0,
+            x: 30.0,
+            y: 70.0,
             text: time_str,
             color: Color::from_hex(time_color),
             font_size: 56.0,
@@ -493,12 +507,16 @@ impl StopwatchApp {
         // Countdown finished alert
         if self.countdown_finished {
             cmds.push(RenderCommand::FillRect {
-                x: 30.0, y: 140.0, width: 300.0, height: 36.0,
+                x: 30.0,
+                y: 140.0,
+                width: 300.0,
+                height: 36.0,
                 color: Color::from_hex(COL_RED),
                 corner_radii: CornerRadii::all(6.0),
             });
             cmds.push(RenderCommand::Text {
-                x: 50.0, y: 148.0,
+                x: 50.0,
+                y: 148.0,
                 text: String::from("TIME'S UP!"),
                 color: Color::from_hex(COL_BASE),
                 font_size: 20.0,
@@ -508,13 +526,22 @@ impl StopwatchApp {
         }
 
         // Controls
-        let controls_y = if self.countdown_finished { 190.0 } else { 145.0 };
+        let controls_y = if self.countdown_finished {
+            190.0
+        } else {
+            145.0
+        };
         let controls = match self.mode {
-            AppMode::Stopwatch => "Space: Start/Pause  |  L: Lap  |  R: Reset  |  M: Mode  |  H: History",
-            AppMode::Countdown => "Space: Start/Pause  |  R: Reset  |  T: Set Time  |  M: Mode  |  H: History",
+            AppMode::Stopwatch => {
+                "Space: Start/Pause  |  L: Lap  |  R: Reset  |  M: Mode  |  H: History"
+            }
+            AppMode::Countdown => {
+                "Space: Start/Pause  |  R: Reset  |  T: Set Time  |  M: Mode  |  H: History"
+            }
         };
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: controls_y,
+            x: 30.0,
+            y: controls_y,
             text: String::from(controls),
             color: Color::from_hex(COL_OVERLAY0),
             font_size: 13.0,
@@ -527,7 +554,8 @@ impl StopwatchApp {
             let lap_y = controls_y + 35.0;
 
             cmds.push(RenderCommand::Text {
-                x: 30.0, y: lap_y,
+                x: 30.0,
+                y: lap_y,
                 text: String::from("Laps"),
                 color: Color::from_hex(COL_LAVENDER),
                 font_size: 18.0,
@@ -540,7 +568,8 @@ impl StopwatchApp {
             let cols = [("Lap", 30.0), ("Lap Time", 120.0), ("Split", 280.0)];
             for (label, x) in cols {
                 cmds.push(RenderCommand::Text {
-                    x, y: header_y,
+                    x,
+                    y: header_y,
                     text: String::from(label),
                     color: Color::from_hex(COL_SUBTEXT0),
                     font_size: 12.0,
@@ -551,8 +580,10 @@ impl StopwatchApp {
 
             // Separator line
             cmds.push(RenderCommand::Line {
-                x1: 30.0, y1: header_y + 18.0,
-                x2: 420.0, y2: header_y + 18.0,
+                x1: 30.0,
+                y1: header_y + 18.0,
+                x2: 420.0,
+                y2: header_y + 18.0,
                 color: Color::from_hex(COL_SURFACE1),
                 width: 1.0,
             });
@@ -575,7 +606,8 @@ impl StopwatchApp {
                 };
 
                 cmds.push(RenderCommand::Text {
-                    x: 30.0, y: ly,
+                    x: 30.0,
+                    y: ly,
                     text: format!("#{}", lap.number),
                     color: Color::from_hex(lap_color),
                     font_size: 15.0,
@@ -583,7 +615,8 @@ impl StopwatchApp {
                     max_width: None,
                 });
                 cmds.push(RenderCommand::Text {
-                    x: 120.0, y: ly,
+                    x: 120.0,
+                    y: ly,
                     text: format_time_ms(lap.lap_ms),
                     color: Color::from_hex(lap_color),
                     font_size: 15.0,
@@ -591,7 +624,8 @@ impl StopwatchApp {
                     max_width: None,
                 });
                 cmds.push(RenderCommand::Text {
-                    x: 280.0, y: ly,
+                    x: 280.0,
+                    y: ly,
                     text: format_time_ms(lap.split_ms),
                     color: Color::from_hex(COL_SUBTEXT0),
                     font_size: 15.0,
@@ -604,13 +638,16 @@ impl StopwatchApp {
             if let Some(avg) = self.average_lap_ms() {
                 let stats_y = header_y + 24.0 + (end - start) as f32 * 28.0 + 15.0;
                 cmds.push(RenderCommand::Line {
-                    x1: 30.0, y1: stats_y - 5.0,
-                    x2: 420.0, y2: stats_y - 5.0,
+                    x1: 30.0,
+                    y1: stats_y - 5.0,
+                    x2: 420.0,
+                    y2: stats_y - 5.0,
                     color: Color::from_hex(COL_SURFACE1),
                     width: 1.0,
                 });
                 cmds.push(RenderCommand::Text {
-                    x: 30.0, y: stats_y,
+                    x: 30.0,
+                    y: stats_y,
                     text: format!("Avg: {}  |  {} laps", format_time_ms(avg), self.laps.len()),
                     color: Color::from_hex(COL_TEAL),
                     font_size: 14.0,
@@ -623,7 +660,8 @@ impl StopwatchApp {
 
     fn render_history(&self, cmds: &mut Vec<RenderCommand>, _width: f32) {
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 20.0,
+            x: 30.0,
+            y: 20.0,
             text: String::from("Session History"),
             color: Color::from_hex(COL_LAVENDER),
             font_size: 24.0,
@@ -632,7 +670,8 @@ impl StopwatchApp {
         });
 
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 55.0,
+            x: 30.0,
+            y: 55.0,
             text: String::from("Esc/H: Back"),
             color: Color::from_hex(COL_OVERLAY0),
             font_size: 13.0,
@@ -642,7 +681,8 @@ impl StopwatchApp {
 
         if self.history.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: 30.0, y: 100.0,
+                x: 30.0,
+                y: 100.0,
                 text: String::from("No sessions recorded yet."),
                 color: Color::from_hex(COL_SUBTEXT0),
                 font_size: 16.0,
@@ -652,10 +692,16 @@ impl StopwatchApp {
             return;
         }
 
-        let headers = [("Mode", 30.0), ("Time", 140.0), ("Laps", 280.0), ("Best Lap", 340.0)];
+        let headers = [
+            ("Mode", 30.0),
+            ("Time", 140.0),
+            ("Laps", 280.0),
+            ("Best Lap", 340.0),
+        ];
         for (label, x) in headers {
             cmds.push(RenderCommand::Text {
-                x, y: 80.0,
+                x,
+                y: 80.0,
                 text: String::from(label),
                 color: Color::from_hex(COL_SUBTEXT0),
                 font_size: 12.0,
@@ -673,7 +719,8 @@ impl StopwatchApp {
                 AppMode::Countdown => "Countdown",
             };
             cmds.push(RenderCommand::Text {
-                x: 30.0, y: ry,
+                x: 30.0,
+                y: ry,
                 text: String::from(mode_str),
                 color: Color::from_hex(COL_TEXT),
                 font_size: 14.0,
@@ -681,7 +728,8 @@ impl StopwatchApp {
                 max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: 140.0, y: ry,
+                x: 140.0,
+                y: ry,
                 text: format_time_short(rec.total_ms),
                 color: Color::from_hex(COL_GREEN),
                 font_size: 14.0,
@@ -689,16 +737,20 @@ impl StopwatchApp {
                 max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: 280.0, y: ry,
+                x: 280.0,
+                y: ry,
                 text: rec.lap_count.to_string(),
                 color: Color::from_hex(COL_PEACH),
                 font_size: 14.0,
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
             });
-            let best = rec.best_lap_ms.map_or(String::from("-"), |ms| format_time_short(ms));
+            let best = rec
+                .best_lap_ms
+                .map_or(String::from("-"), |ms| format_time_short(ms));
             cmds.push(RenderCommand::Text {
-                x: 340.0, y: ry,
+                x: 340.0,
+                y: ry,
                 text: best,
                 color: Color::from_hex(COL_TEAL),
                 font_size: 14.0,
@@ -710,7 +762,8 @@ impl StopwatchApp {
 
     fn render_countdown_setup(&self, cmds: &mut Vec<RenderCommand>, _width: f32) {
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 20.0,
+            x: 30.0,
+            y: 20.0,
             text: String::from("Set Countdown Timer"),
             color: Color::from_hex(COL_PEACH),
             font_size: 24.0,
@@ -719,7 +772,8 @@ impl StopwatchApp {
         });
 
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 55.0,
+            x: 30.0,
+            y: 55.0,
             text: String::from("←/→: Select field  |  ↑/↓: Adjust  |  Enter: Confirm"),
             color: Color::from_hex(COL_OVERLAY0),
             font_size: 13.0,
@@ -735,7 +789,10 @@ impl StopwatchApp {
             let is_active = i == self.countdown_setup_field;
 
             cmds.push(RenderCommand::FillRect {
-                x, y: 100.0, width: 130.0, height: 100.0,
+                x,
+                y: 100.0,
+                width: 130.0,
+                height: 100.0,
                 color: if is_active {
                     Color::from_hex(COL_SURFACE0)
                 } else {
@@ -746,7 +803,10 @@ impl StopwatchApp {
 
             if is_active {
                 cmds.push(RenderCommand::StrokeRect {
-                    x, y: 100.0, width: 130.0, height: 100.0,
+                    x,
+                    y: 100.0,
+                    width: 130.0,
+                    height: 100.0,
                     color: Color::from_hex(COL_BLUE),
                     line_width: 2.0,
                     corner_radii: CornerRadii::all(8.0),
@@ -754,7 +814,8 @@ impl StopwatchApp {
             }
 
             cmds.push(RenderCommand::Text {
-                x: x + 15.0, y: 110.0,
+                x: x + 15.0,
+                y: 110.0,
                 text: String::from(*label),
                 color: Color::from_hex(COL_SUBTEXT0),
                 font_size: 13.0,
@@ -763,7 +824,8 @@ impl StopwatchApp {
             });
 
             cmds.push(RenderCommand::Text {
-                x: x + 25.0, y: 135.0,
+                x: x + 25.0,
+                y: 135.0,
                 text: format!("{val:02}"),
                 color: if is_active {
                     Color::from_hex(COL_BLUE)
@@ -777,11 +839,11 @@ impl StopwatchApp {
         }
 
         // Preview
-        let total_ms = values[0] as u64 * 3_600_000
-            + values[1] as u64 * 60_000
-            + values[2] as u64 * 1_000;
+        let total_ms =
+            values[0] as u64 * 3_600_000 + values[1] as u64 * 60_000 + values[2] as u64 * 1_000;
         cmds.push(RenderCommand::Text {
-            x: 30.0, y: 220.0,
+            x: 30.0,
+            y: 220.0,
             text: format!("Total: {}", format_time_ms(total_ms)),
             color: Color::from_hex(COL_TEAL),
             font_size: 18.0,
@@ -807,7 +869,7 @@ mod tests {
         KeyEvent {
             key,
             pressed: true,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         }
     }
@@ -1075,8 +1137,9 @@ mod tests {
     fn countdown_tick() {
         let mut app = StopwatchApp::new();
         app.mode = AppMode::Countdown;
-        app.countdown_target_ms = 10000;
-        app.countdown_remaining_ms = 10000;
+        // start() recomputes the target from setup_values (h, m, s) in Countdown
+        // mode, so configure 10 seconds there rather than poking the derived field.
+        app.countdown_setup_values = [0, 0, 10];
         app.last_tick_ms = 0;
         app.start();
         app.tick(3000);
@@ -1087,8 +1150,8 @@ mod tests {
     fn countdown_finishes() {
         let mut app = StopwatchApp::new();
         app.mode = AppMode::Countdown;
-        app.countdown_target_ms = 5000;
-        app.countdown_remaining_ms = 5000;
+        // start() recomputes the target from setup_values in Countdown mode.
+        app.countdown_setup_values = [0, 0, 5];
         app.last_tick_ms = 0;
         app.start();
         app.tick(6000);
@@ -1249,7 +1312,7 @@ mod tests {
         app.handle_key(&KeyEvent {
             key: Key::Space,
             pressed: false,
-            modifiers: Modifiers { ctrl: false, alt: false, shift: false },
+            modifiers: Modifiers::NONE,
             text: None,
         });
         assert_eq!(app.state, TimerState::Stopped);
@@ -1300,7 +1363,9 @@ mod tests {
         let app = StopwatchApp::new();
         let cmds = app.render(600.0, 800.0);
         assert!(!cmds.is_empty());
-        let has_mode = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "STOPWATCH"));
+        let has_mode = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "STOPWATCH"));
         assert!(has_mode);
     }
 
@@ -1309,7 +1374,9 @@ mod tests {
         let mut app = StopwatchApp::new();
         app.start();
         let cmds = app.render(600.0, 800.0);
-        let has_running = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "RUNNING"));
+        let has_running = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "RUNNING"));
         assert!(has_running);
     }
 
@@ -1318,7 +1385,9 @@ mod tests {
         let mut app = StopwatchApp::new();
         app.mode = AppMode::Countdown;
         let cmds = app.render(600.0, 800.0);
-        let has_mode = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "COUNTDOWN"));
+        let has_mode = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "COUNTDOWN"));
         assert!(has_mode);
     }
 
@@ -1328,7 +1397,9 @@ mod tests {
         app.mode = AppMode::Countdown;
         app.countdown_finished = true;
         let cmds = app.render(600.0, 800.0);
-        let has_alert = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "TIME'S UP!"));
+        let has_alert = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "TIME'S UP!"));
         assert!(has_alert);
     }
 
@@ -1337,7 +1408,9 @@ mod tests {
         let mut app = StopwatchApp::new();
         app.view = AppView::History;
         let cmds = app.render(600.0, 800.0);
-        let has_empty = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("No sessions")));
+        let has_empty = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text.contains("No sessions")));
         assert!(has_empty);
     }
 
@@ -1353,7 +1426,9 @@ mod tests {
             worst_lap_ms: Some(5000),
         });
         let cmds = app.render(600.0, 800.0);
-        let has_title = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Session History"));
+        let has_title = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Session History"));
         assert!(has_title);
     }
 
@@ -1362,7 +1437,9 @@ mod tests {
         let mut app = StopwatchApp::new();
         app.view = AppView::CountdownSetup;
         let cmds = app.render(600.0, 800.0);
-        let has_title = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Set Countdown Timer"));
+        let has_title = cmds.iter().any(
+            |c| matches!(c, RenderCommand::Text { text, .. } if text == "Set Countdown Timer"),
+        );
         assert!(has_title);
     }
 
@@ -1375,7 +1452,9 @@ mod tests {
         app.elapsed_ms = 9000;
         app.lap();
         let cmds = app.render(600.0, 800.0);
-        let has_laps = cmds.iter().any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Laps"));
+        let has_laps = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::Text { text, .. } if text == "Laps"));
         assert!(has_laps);
     }
 
@@ -1383,7 +1462,9 @@ mod tests {
     fn render_has_background() {
         let app = StopwatchApp::new();
         let cmds = app.render(600.0, 800.0);
-        let has_bg = cmds.iter().any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
+        let has_bg = cmds
+            .iter()
+            .any(|c| matches!(c, RenderCommand::FillRect { x, y, .. } if *x == 0.0 && *y == 0.0));
         assert!(has_bg);
     }
 

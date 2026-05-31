@@ -1,3 +1,29 @@
+## BUG (noticed+FIXED 2026-05-31): apps/stopwatch — test build break PLUS two logic
+##   test failures. (1) make_key() built Modifiers with a { ctrl, alt, shift } literal
+##   that broke when guitk added super_key (E0063); switched to Modifiers::NONE. (2)
+##   countdown_tick/countdown_finishes set countdown_target_ms/countdown_remaining_ms
+##   directly then called start(), but start() in Countdown mode RECOMPUTES the target
+##   from countdown_setup_values (default 5 min), overwriting the manual values — so
+##   tick() counted down from 300000 instead of 10000/5000. Fixed the tests to set
+##   countdown_setup_values ([0,0,10] and [0,0,5]) which is what start() actually reads.
+##   stopwatch 60/60 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/typingtutor test build did not compile — six
+##   make_key/KeyEvent constructions used a Modifiers { ctrl, alt, shift } literal that
+##   broke when guitk added super_key (E0063). Switched all to Modifiers::NONE.
+##   typingtutor 62/62 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/unitconverter test build did not compile. The
+##   test module referenced Modifiers (via Modifiers::NONE/::ctrl()) but neither main
+##   nor the test module imported the type (E0433). Added `use guitk::event::Modifiers;`
+##   inside the tests module (not the main import, to avoid an unused-import warning in
+##   non-test builds). unitconverter 110/110 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/worldclock test build did not compile. Tests
+##   assert_eq! on the ViewMode and ClockStyle enums, which requires Debug, but neither
+##   derived it (E0277). Added #[derive(Debug)] to both. worldclock 53/53 tests pass,
+##   clippy clean, ouros build OK.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/metronome test build did not compile.
 ##   guitk::event::Modifiers gained a `super_key` field, but three test helpers
 ##   constructed Modifiers with an explicit { ctrl, alt, shift } literal, so the test

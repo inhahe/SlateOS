@@ -181,12 +181,7 @@ impl UnitDef {
     }
 
     /// Create an affine unit (temperature).
-    const fn affine(
-        symbol: &'static str,
-        name: &'static str,
-        factor: f64,
-        offset: f64,
-    ) -> Self {
+    const fn affine(symbol: &'static str, name: &'static str, factor: f64, offset: f64) -> Self {
         Self {
             symbol,
             name,
@@ -391,7 +386,13 @@ pub fn formula_text(from: &UnitDef, to: &UnitDef) -> String {
         }
         let ratio = from.factor / to.factor;
         let mut buf = String::new();
-        let _ = write!(buf, "1 {} = {} {}", from.symbol, format_number(ratio), to.symbol);
+        let _ = write!(
+            buf,
+            "1 {} = {} {}",
+            from.symbol,
+            format_number(ratio),
+            to.symbol
+        );
         buf
     } else {
         // Affine (temperature-like).
@@ -762,8 +763,7 @@ impl UnitConverterApp {
                 _ => {
                     // Type a character.
                     if let Some(ch) = key.text {
-                        if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == 'e' || ch == 'E'
-                        {
+                        if ch.is_ascii_digit() || ch == '.' || ch == '-' || ch == 'e' || ch == 'E' {
                             self.from_input.insert(self.from_cursor, ch);
                             self.from_cursor += 1;
                             self.do_convert();
@@ -843,11 +843,7 @@ impl UnitConverterApp {
             let dd_to_y: f32 = 150.0;
             let dd_to_w: f32 = 180.0;
             let dd_to_h: f32 = 32.0;
-            if x >= dd_to_x
-                && x <= dd_to_x + dd_to_w
-                && y >= dd_to_y
-                && y <= dd_to_y + dd_to_h
-            {
+            if x >= dd_to_x && x <= dd_to_x + dd_to_w && y >= dd_to_y && y <= dd_to_y + dd_to_h {
                 self.to_dropdown_open = !self.to_dropdown_open;
                 self.from_dropdown_open = false;
                 return true;
@@ -858,11 +854,7 @@ impl UnitConverterApp {
             let input_y: f32 = 100.0;
             let input_w: f32 = 180.0;
             let input_h: f32 = 36.0;
-            if x >= input_x
-                && x <= input_x + input_w
-                && y >= input_y
-                && y <= input_y + input_h
-            {
+            if x >= input_x && x <= input_x + input_w && y >= input_y && y <= input_y + input_h {
                 self.from_focused = true;
                 return true;
             }
@@ -1209,7 +1201,15 @@ impl UnitConverterApp {
         let input_y: f32 = 88.0;
         let input_w: f32 = 180.0;
         let input_h: f32 = 36.0;
-        self.render_input_field(tree, input_x, input_y, input_w, input_h, &self.from_input, true);
+        self.render_input_field(
+            tree,
+            input_x,
+            input_y,
+            input_w,
+            input_h,
+            &self.from_input,
+            true,
+        );
 
         // From unit dropdown button.
         let dd_x = main_left + 20.0;
@@ -1864,6 +1864,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use guitk::event::Modifiers;
 
     // -- Conversion engine tests --
 

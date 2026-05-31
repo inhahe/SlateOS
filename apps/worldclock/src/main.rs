@@ -48,45 +48,195 @@ struct TimezoneInfo {
 }
 
 const TIMEZONES: &[TimezoneInfo] = &[
-    TimezoneInfo { city: "London", country: "United Kingdom", offset_minutes: 0, abbreviation: "GMT" },
-    TimezoneInfo { city: "Paris", country: "France", offset_minutes: 60, abbreviation: "CET" },
-    TimezoneInfo { city: "Berlin", country: "Germany", offset_minutes: 60, abbreviation: "CET" },
-    TimezoneInfo { city: "Moscow", country: "Russia", offset_minutes: 180, abbreviation: "MSK" },
-    TimezoneInfo { city: "Dubai", country: "UAE", offset_minutes: 240, abbreviation: "GST" },
-    TimezoneInfo { city: "Mumbai", country: "India", offset_minutes: 330, abbreviation: "IST" },
-    TimezoneInfo { city: "Dhaka", country: "Bangladesh", offset_minutes: 360, abbreviation: "BST" },
-    TimezoneInfo { city: "Bangkok", country: "Thailand", offset_minutes: 420, abbreviation: "ICT" },
-    TimezoneInfo { city: "Singapore", country: "Singapore", offset_minutes: 480, abbreviation: "SGT" },
-    TimezoneInfo { city: "Beijing", country: "China", offset_minutes: 480, abbreviation: "CST" },
-    TimezoneInfo { city: "Tokyo", country: "Japan", offset_minutes: 540, abbreviation: "JST" },
-    TimezoneInfo { city: "Seoul", country: "South Korea", offset_minutes: 540, abbreviation: "KST" },
-    TimezoneInfo { city: "Sydney", country: "Australia", offset_minutes: 600, abbreviation: "AEST" },
-    TimezoneInfo { city: "Auckland", country: "New Zealand", offset_minutes: 720, abbreviation: "NZST" },
-    TimezoneInfo { city: "Honolulu", country: "USA", offset_minutes: -600, abbreviation: "HST" },
-    TimezoneInfo { city: "Anchorage", country: "USA", offset_minutes: -540, abbreviation: "AKST" },
-    TimezoneInfo { city: "Los Angeles", country: "USA", offset_minutes: -480, abbreviation: "PST" },
-    TimezoneInfo { city: "Denver", country: "USA", offset_minutes: -420, abbreviation: "MST" },
-    TimezoneInfo { city: "Chicago", country: "USA", offset_minutes: -360, abbreviation: "CST" },
-    TimezoneInfo { city: "New York", country: "USA", offset_minutes: -300, abbreviation: "EST" },
-    TimezoneInfo { city: "São Paulo", country: "Brazil", offset_minutes: -180, abbreviation: "BRT" },
-    TimezoneInfo { city: "Cairo", country: "Egypt", offset_minutes: 120, abbreviation: "EET" },
-    TimezoneInfo { city: "Istanbul", country: "Turkey", offset_minutes: 180, abbreviation: "TRT" },
-    TimezoneInfo { city: "Nairobi", country: "Kenya", offset_minutes: 180, abbreviation: "EAT" },
-    TimezoneInfo { city: "Lagos", country: "Nigeria", offset_minutes: 60, abbreviation: "WAT" },
-    TimezoneInfo { city: "Kathmandu", country: "Nepal", offset_minutes: 345, abbreviation: "NPT" },
-    TimezoneInfo { city: "Kolkata", country: "India", offset_minutes: 330, abbreviation: "IST" },
-    TimezoneInfo { city: "Jakarta", country: "Indonesia", offset_minutes: 420, abbreviation: "WIB" },
-    TimezoneInfo { city: "Manila", country: "Philippines", offset_minutes: 480, abbreviation: "PHT" },
-    TimezoneInfo { city: "Taipei", country: "Taiwan", offset_minutes: 480, abbreviation: "CST" },
+    TimezoneInfo {
+        city: "London",
+        country: "United Kingdom",
+        offset_minutes: 0,
+        abbreviation: "GMT",
+    },
+    TimezoneInfo {
+        city: "Paris",
+        country: "France",
+        offset_minutes: 60,
+        abbreviation: "CET",
+    },
+    TimezoneInfo {
+        city: "Berlin",
+        country: "Germany",
+        offset_minutes: 60,
+        abbreviation: "CET",
+    },
+    TimezoneInfo {
+        city: "Moscow",
+        country: "Russia",
+        offset_minutes: 180,
+        abbreviation: "MSK",
+    },
+    TimezoneInfo {
+        city: "Dubai",
+        country: "UAE",
+        offset_minutes: 240,
+        abbreviation: "GST",
+    },
+    TimezoneInfo {
+        city: "Mumbai",
+        country: "India",
+        offset_minutes: 330,
+        abbreviation: "IST",
+    },
+    TimezoneInfo {
+        city: "Dhaka",
+        country: "Bangladesh",
+        offset_minutes: 360,
+        abbreviation: "BST",
+    },
+    TimezoneInfo {
+        city: "Bangkok",
+        country: "Thailand",
+        offset_minutes: 420,
+        abbreviation: "ICT",
+    },
+    TimezoneInfo {
+        city: "Singapore",
+        country: "Singapore",
+        offset_minutes: 480,
+        abbreviation: "SGT",
+    },
+    TimezoneInfo {
+        city: "Beijing",
+        country: "China",
+        offset_minutes: 480,
+        abbreviation: "CST",
+    },
+    TimezoneInfo {
+        city: "Tokyo",
+        country: "Japan",
+        offset_minutes: 540,
+        abbreviation: "JST",
+    },
+    TimezoneInfo {
+        city: "Seoul",
+        country: "South Korea",
+        offset_minutes: 540,
+        abbreviation: "KST",
+    },
+    TimezoneInfo {
+        city: "Sydney",
+        country: "Australia",
+        offset_minutes: 600,
+        abbreviation: "AEST",
+    },
+    TimezoneInfo {
+        city: "Auckland",
+        country: "New Zealand",
+        offset_minutes: 720,
+        abbreviation: "NZST",
+    },
+    TimezoneInfo {
+        city: "Honolulu",
+        country: "USA",
+        offset_minutes: -600,
+        abbreviation: "HST",
+    },
+    TimezoneInfo {
+        city: "Anchorage",
+        country: "USA",
+        offset_minutes: -540,
+        abbreviation: "AKST",
+    },
+    TimezoneInfo {
+        city: "Los Angeles",
+        country: "USA",
+        offset_minutes: -480,
+        abbreviation: "PST",
+    },
+    TimezoneInfo {
+        city: "Denver",
+        country: "USA",
+        offset_minutes: -420,
+        abbreviation: "MST",
+    },
+    TimezoneInfo {
+        city: "Chicago",
+        country: "USA",
+        offset_minutes: -360,
+        abbreviation: "CST",
+    },
+    TimezoneInfo {
+        city: "New York",
+        country: "USA",
+        offset_minutes: -300,
+        abbreviation: "EST",
+    },
+    TimezoneInfo {
+        city: "São Paulo",
+        country: "Brazil",
+        offset_minutes: -180,
+        abbreviation: "BRT",
+    },
+    TimezoneInfo {
+        city: "Cairo",
+        country: "Egypt",
+        offset_minutes: 120,
+        abbreviation: "EET",
+    },
+    TimezoneInfo {
+        city: "Istanbul",
+        country: "Turkey",
+        offset_minutes: 180,
+        abbreviation: "TRT",
+    },
+    TimezoneInfo {
+        city: "Nairobi",
+        country: "Kenya",
+        offset_minutes: 180,
+        abbreviation: "EAT",
+    },
+    TimezoneInfo {
+        city: "Lagos",
+        country: "Nigeria",
+        offset_minutes: 60,
+        abbreviation: "WAT",
+    },
+    TimezoneInfo {
+        city: "Kathmandu",
+        country: "Nepal",
+        offset_minutes: 345,
+        abbreviation: "NPT",
+    },
+    TimezoneInfo {
+        city: "Kolkata",
+        country: "India",
+        offset_minutes: 330,
+        abbreviation: "IST",
+    },
+    TimezoneInfo {
+        city: "Jakarta",
+        country: "Indonesia",
+        offset_minutes: 420,
+        abbreviation: "WIB",
+    },
+    TimezoneInfo {
+        city: "Manila",
+        country: "Philippines",
+        offset_minutes: 480,
+        abbreviation: "PHT",
+    },
+    TimezoneInfo {
+        city: "Taipei",
+        country: "Taiwan",
+        offset_minutes: 480,
+        abbreviation: "CST",
+    },
 ];
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ViewMode {
     Grid,
     List,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ClockStyle {
     Digital,
     Analog,
@@ -124,12 +274,30 @@ struct WorldClockApp {
 impl WorldClockApp {
     fn new() -> Self {
         let default_clocks = vec![
-            ClockEntry { tz_idx: 19, pinned: true },   // New York
-            ClockEntry { tz_idx: 0, pinned: true },     // London
-            ClockEntry { tz_idx: 1, pinned: false },    // Paris
-            ClockEntry { tz_idx: 10, pinned: true },    // Tokyo
-            ClockEntry { tz_idx: 12, pinned: false },   // Sydney
-            ClockEntry { tz_idx: 5, pinned: false },    // Mumbai
+            ClockEntry {
+                tz_idx: 19,
+                pinned: true,
+            }, // New York
+            ClockEntry {
+                tz_idx: 0,
+                pinned: true,
+            }, // London
+            ClockEntry {
+                tz_idx: 1,
+                pinned: false,
+            }, // Paris
+            ClockEntry {
+                tz_idx: 10,
+                pinned: true,
+            }, // Tokyo
+            ClockEntry {
+                tz_idx: 12,
+                pinned: false,
+            }, // Sydney
+            ClockEntry {
+                tz_idx: 5,
+                pinned: false,
+            }, // Mumbai
         ];
 
         Self {
@@ -210,11 +378,16 @@ impl WorldClockApp {
     }
 
     fn day_night_icon(h: u32) -> &'static str {
-        if h >= 6 && h < 18 { "\u{2600}" } else { "\u{263D}" }
+        if h >= 6 && h < 18 {
+            "\u{2600}"
+        } else {
+            "\u{263D}"
+        }
     }
 
     fn diff_from_home(&self, offset_minutes: i32) -> String {
-        let home_offset = TIMEZONES.get(self.home_tz_idx)
+        let home_offset = TIMEZONES
+            .get(self.home_tz_idx)
             .map_or(0, |tz| tz.offset_minutes);
         let diff = offset_minutes - home_offset;
         let diff_h = diff / 60;
@@ -239,7 +412,10 @@ impl WorldClockApp {
             self.status_msg = String::from("City already added");
             return;
         }
-        self.clocks.push(ClockEntry { tz_idx, pinned: false });
+        self.clocks.push(ClockEntry {
+            tz_idx,
+            pinned: false,
+        });
         if let Some(tz) = TIMEZONES.get(tz_idx) {
             self.status_msg = format!("Added {}", tz.city);
         }
@@ -274,9 +450,13 @@ impl WorldClockApp {
 
     fn filtered_timezones(&self) -> Vec<usize> {
         let query = self.picker_search.to_ascii_lowercase();
-        TIMEZONES.iter().enumerate()
+        TIMEZONES
+            .iter()
+            .enumerate()
             .filter(|(_, tz)| {
-                if query.is_empty() { return true; }
+                if query.is_empty() {
+                    return true;
+                }
                 tz.city.to_ascii_lowercase().contains(&query)
                     || tz.country.to_ascii_lowercase().contains(&query)
                     || tz.abbreviation.to_ascii_lowercase().contains(&query)
@@ -289,7 +469,10 @@ impl WorldClockApp {
         if self.show_picker {
             match key {
                 "Escape" => self.show_picker = false,
-                "Backspace" => { self.picker_search.pop(); self.picker_scroll = 0; }
+                "Backspace" => {
+                    self.picker_search.pop();
+                    self.picker_scroll = 0;
+                }
                 "Enter" => {
                     let filtered = self.filtered_timezones();
                     if let Some(&tz_idx) = filtered.first() {
@@ -303,7 +486,9 @@ impl WorldClockApp {
         }
         match key {
             "Left" | "h" => {
-                if self.selected_clock > 0 { self.selected_clock -= 1; }
+                if self.selected_clock > 0 {
+                    self.selected_clock -= 1;
+                }
             }
             "Right" | "l" => {
                 if self.selected_clock + 1 < self.clocks.len() {
@@ -357,8 +542,12 @@ impl WorldClockApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: self.height,
-            color: BASE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: BASE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         self.render_header(&mut cmds);
@@ -379,14 +568,20 @@ impl WorldClockApp {
 
     fn render_header(&self, cmds: &mut Vec<RenderCommand>) {
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: Self::HEADER_H,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: Self::HEADER_H,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         cmds.push(RenderCommand::Text {
-            x: 16.0, y: 14.0,
+            x: 16.0,
+            y: 14.0,
             text: String::from("\u{1F30D} World Clock"),
-            font_size: 20.0, color: TEXT_COLOR,
+            font_size: 20.0,
+            color: TEXT_COLOR,
             font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
         });
@@ -395,33 +590,65 @@ impl WorldClockApp {
         let mut bx = 240.0;
         let btn_h = 30.0;
         let btn_y = 10.0;
-        let grid_bg = if self.view_mode == ViewMode::Grid { SURFACE1 } else { SURFACE0 };
-        let list_bg = if self.view_mode == ViewMode::List { SURFACE1 } else { SURFACE0 };
+        let grid_bg = if self.view_mode == ViewMode::Grid {
+            SURFACE1
+        } else {
+            SURFACE0
+        };
+        let list_bg = if self.view_mode == ViewMode::List {
+            SURFACE1
+        } else {
+            SURFACE0
+        };
         for (label, bg, w) in [("Grid", grid_bg, 50.0_f32), ("List", list_bg, 50.0)] {
             cmds.push(RenderCommand::FillRect {
-                x: bx, y: btn_y, width: w, height: btn_h,
-                color: bg, corner_radii: CornerRadii::all(4.0),
+                x: bx,
+                y: btn_y,
+                width: w,
+                height: btn_h,
+                color: bg,
+                corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: bx + 8.0, y: btn_y + 7.0,
-                text: label.to_string(), font_size: 12.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Regular, max_width: Some(w - 16.0),
+                x: bx + 8.0,
+                y: btn_y + 7.0,
+                text: label.to_string(),
+                font_size: 12.0,
+                color: TEXT_COLOR,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 16.0),
             });
             bx += w + 4.0;
         }
 
         bx += 12.0;
-        let dig_bg = if self.clock_style == ClockStyle::Digital { SURFACE1 } else { SURFACE0 };
-        let ana_bg = if self.clock_style == ClockStyle::Analog { SURFACE1 } else { SURFACE0 };
+        let dig_bg = if self.clock_style == ClockStyle::Digital {
+            SURFACE1
+        } else {
+            SURFACE0
+        };
+        let ana_bg = if self.clock_style == ClockStyle::Analog {
+            SURFACE1
+        } else {
+            SURFACE0
+        };
         for (label, bg, w) in [("Digital", dig_bg, 60.0_f32), ("Analog", ana_bg, 60.0)] {
             cmds.push(RenderCommand::FillRect {
-                x: bx, y: btn_y, width: w, height: btn_h,
-                color: bg, corner_radii: CornerRadii::all(4.0),
+                x: bx,
+                y: btn_y,
+                width: w,
+                height: btn_h,
+                color: bg,
+                corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: bx + 6.0, y: btn_y + 7.0,
-                text: label.to_string(), font_size: 12.0, color: TEXT_COLOR,
-                font_weight: FontWeightHint::Regular, max_width: Some(w - 12.0),
+                x: bx + 6.0,
+                y: btn_y + 7.0,
+                text: label.to_string(),
+                font_size: 12.0,
+                color: TEXT_COLOR,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 12.0),
             });
             bx += w + 4.0;
         }
@@ -429,41 +656,60 @@ impl WorldClockApp {
         bx += 12.0;
         let h24_bg = if self.use_24h { BLUE } else { SURFACE0 };
         cmds.push(RenderCommand::FillRect {
-            x: bx, y: btn_y, width: 44.0, height: btn_h,
-            color: h24_bg, corner_radii: CornerRadii::all(4.0),
+            x: bx,
+            y: btn_y,
+            width: 44.0,
+            height: btn_h,
+            color: h24_bg,
+            corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: bx + 6.0, y: btn_y + 7.0,
-            text: String::from("24h"), font_size: 12.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Regular, max_width: Some(36.0),
+            x: bx + 6.0,
+            y: btn_y + 7.0,
+            text: String::from("24h"),
+            font_size: 12.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(36.0),
         });
         bx += 52.0;
 
         // Add city button
         cmds.push(RenderCommand::FillRect {
-            x: bx, y: btn_y, width: 80.0, height: btn_h,
-            color: BLUE, corner_radii: CornerRadii::all(4.0),
+            x: bx,
+            y: btn_y,
+            width: 80.0,
+            height: btn_h,
+            color: BLUE,
+            corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: bx + 10.0, y: btn_y + 7.0,
-            text: String::from("+ Add City"), font_size: 12.0, color: CRUST,
-            font_weight: FontWeightHint::Bold, max_width: Some(70.0),
+            x: bx + 10.0,
+            y: btn_y + 7.0,
+            text: String::from("+ Add City"),
+            font_size: 12.0,
+            color: CRUST,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(70.0),
         });
 
         // UTC time
         let (uh, um, us) = self.time_for_offset(0);
         cmds.push(RenderCommand::Text {
-            x: self.width - 180.0, y: 16.0,
+            x: self.width - 180.0,
+            y: 16.0,
             text: format!("UTC {uh:02}:{um:02}:{us:02}"),
-            font_size: 16.0, color: SUBTEXT0,
-            font_weight: FontWeightHint::Regular, max_width: Some(170.0),
+            font_size: 16.0,
+            color: SUBTEXT0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(170.0),
         });
     }
 
     fn render_grid(&self, cmds: &mut Vec<RenderCommand>) {
         let start_y = Self::HEADER_H + 12.0 - self.scroll_offset;
-        let cols = ((self.width - Self::CARD_GAP) / (Self::CARD_W + Self::CARD_GAP))
-            .max(1.0) as usize;
+        let cols =
+            ((self.width - Self::CARD_GAP) / (Self::CARD_W + Self::CARD_GAP)).max(1.0) as usize;
 
         for (i, entry) in self.clocks.iter().enumerate() {
             let col = i % cols;
@@ -483,77 +729,129 @@ impl WorldClockApp {
     }
 
     fn render_clock_card(
-        &self, cmds: &mut Vec<RenderCommand>,
-        x: f32, y: f32,
-        tz: &TimezoneInfo, entry: &ClockEntry, selected: bool,
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        tz: &TimezoneInfo,
+        entry: &ClockEntry,
+        selected: bool,
     ) {
         let (h, m, s) = self.time_for_offset(tz.offset_minutes);
         let is_day = Self::is_daytime(h);
-        let border_color = if selected { BLUE } else if is_day { YELLOW } else { LAVENDER };
-        let card_bg = if is_day { Color::from_hex(0x2A2A3E) } else { SURFACE0 };
+        let border_color = if selected {
+            BLUE
+        } else if is_day {
+            YELLOW
+        } else {
+            LAVENDER
+        };
+        let card_bg = if is_day {
+            Color::from_hex(0x2A2A3E)
+        } else {
+            SURFACE0
+        };
 
         if selected {
             cmds.push(RenderCommand::StrokeRect {
-                x: x - 1.0, y: y - 1.0,
-                width: Self::CARD_W + 2.0, height: Self::CARD_H + 2.0,
-                color: BLUE, line_width: 2.0,
+                x: x - 1.0,
+                y: y - 1.0,
+                width: Self::CARD_W + 2.0,
+                height: Self::CARD_H + 2.0,
+                color: BLUE,
+                line_width: 2.0,
                 corner_radii: CornerRadii::all(9.0),
             });
         }
 
         cmds.push(RenderCommand::FillRect {
-            x, y, width: Self::CARD_W, height: Self::CARD_H,
-            color: card_bg, corner_radii: CornerRadii::all(8.0),
+            x,
+            y,
+            width: Self::CARD_W,
+            height: Self::CARD_H,
+            color: card_bg,
+            corner_radii: CornerRadii::all(8.0),
         });
 
         // Day/night indicator strip
         cmds.push(RenderCommand::FillRect {
-            x, y, width: Self::CARD_W, height: 4.0,
-            color: border_color, corner_radii: CornerRadii { top_left: 8.0, top_right: 8.0, bottom_right: 0.0, bottom_left: 0.0 },
+            x,
+            y,
+            width: Self::CARD_W,
+            height: 4.0,
+            color: border_color,
+            corner_radii: CornerRadii {
+                top_left: 8.0,
+                top_right: 8.0,
+                bottom_right: 0.0,
+                bottom_left: 0.0,
+            },
         });
 
         // Pin / home indicators
         if entry.pinned {
             cmds.push(RenderCommand::Text {
-                x: x + Self::CARD_W - 24.0, y: y + 8.0,
-                text: String::from("\u{1F4CC}"), font_size: 12.0, color: PEACH,
-                font_weight: FontWeightHint::Regular, max_width: Some(20.0),
+                x: x + Self::CARD_W - 24.0,
+                y: y + 8.0,
+                text: String::from("\u{1F4CC}"),
+                font_size: 12.0,
+                color: PEACH,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(20.0),
             });
         }
         if entry.tz_idx == self.home_tz_idx {
             cmds.push(RenderCommand::Text {
-                x: x + Self::CARD_W - 44.0, y: y + 8.0,
-                text: String::from("\u{1F3E0}"), font_size: 12.0, color: GREEN,
-                font_weight: FontWeightHint::Regular, max_width: Some(20.0),
+                x: x + Self::CARD_W - 44.0,
+                y: y + 8.0,
+                text: String::from("\u{1F3E0}"),
+                font_size: 12.0,
+                color: GREEN,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(20.0),
             });
         }
 
         // City name and country
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: y + 12.0,
-            text: tz.city.to_string(), font_size: 16.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(Self::CARD_W - 56.0),
+            x: x + 12.0,
+            y: y + 12.0,
+            text: tz.city.to_string(),
+            font_size: 16.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(Self::CARD_W - 56.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: y + 32.0,
-            text: tz.country.to_string(), font_size: 11.0, color: SUBTEXT0,
-            font_weight: FontWeightHint::Regular, max_width: Some(Self::CARD_W - 24.0),
+            x: x + 12.0,
+            y: y + 32.0,
+            text: tz.country.to_string(),
+            font_size: 11.0,
+            color: SUBTEXT0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(Self::CARD_W - 24.0),
         });
 
         match self.clock_style {
             ClockStyle::Digital => {
                 let time_str = self.format_time(h, m, s);
                 cmds.push(RenderCommand::Text {
-                    x: x + 12.0, y: y + 56.0,
-                    text: time_str, font_size: 28.0, color: TEXT_COLOR,
+                    x: x + 12.0,
+                    y: y + 56.0,
+                    text: time_str,
+                    font_size: 28.0,
+                    color: TEXT_COLOR,
                     font_weight: FontWeightHint::Bold,
                     max_width: Some(Self::CARD_W - 24.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + Self::CARD_W - 36.0, y: y + 60.0,
+                    x: x + Self::CARD_W - 36.0,
+                    y: y + 60.0,
                     text: Self::day_night_icon(h).to_string(),
-                    font_size: 20.0, color: Self::day_night_color(h),
-                    font_weight: FontWeightHint::Regular, max_width: Some(30.0),
+                    font_size: 20.0,
+                    color: Self::day_night_color(h),
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(30.0),
                 });
             }
             ClockStyle::Analog => {
@@ -563,40 +861,65 @@ impl WorldClockApp {
 
         // Bottom info
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: y + Self::CARD_H - 30.0,
-            text: format!("{} ({})", Self::format_offset(tz.offset_minutes), tz.abbreviation),
-            font_size: 11.0, color: OVERLAY0,
-            font_weight: FontWeightHint::Regular, max_width: Some(Self::CARD_W / 2.0 - 16.0),
+            x: x + 12.0,
+            y: y + Self::CARD_H - 30.0,
+            text: format!(
+                "{} ({})",
+                Self::format_offset(tz.offset_minutes),
+                tz.abbreviation
+            ),
+            font_size: 11.0,
+            color: OVERLAY0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(Self::CARD_W / 2.0 - 16.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + Self::CARD_W / 2.0 + 8.0, y: y + Self::CARD_H - 30.0,
+            x: x + Self::CARD_W / 2.0 + 8.0,
+            y: y + Self::CARD_H - 30.0,
             text: self.diff_from_home(tz.offset_minutes),
-            font_size: 11.0, color: TEAL,
-            font_weight: FontWeightHint::Regular, max_width: Some(Self::CARD_W / 2.0 - 20.0),
+            font_size: 11.0,
+            color: TEAL,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(Self::CARD_W / 2.0 - 20.0),
         });
         let dn_label = if is_day { "Daytime" } else { "Nighttime" };
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: y + Self::CARD_H - 14.0,
-            text: dn_label.to_string(), font_size: 10.0, color: Self::day_night_color(h),
-            font_weight: FontWeightHint::Regular, max_width: Some(80.0),
+            x: x + 12.0,
+            y: y + Self::CARD_H - 14.0,
+            text: dn_label.to_string(),
+            font_size: 10.0,
+            color: Self::day_night_color(h),
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(80.0),
         });
     }
 
     fn render_analog_clock(
-        &self, cmds: &mut Vec<RenderCommand>,
-        cx: f32, cy: f32, radius: f32,
-        h: u32, m: u32, s: u32,
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        h: u32,
+        m: u32,
+        s: u32,
     ) {
         // Clock face
         cmds.push(RenderCommand::FillRect {
-            x: cx - radius, y: cy - radius,
-            width: radius * 2.0, height: radius * 2.0,
-            color: CRUST, corner_radii: CornerRadii::all(radius),
+            x: cx - radius,
+            y: cy - radius,
+            width: radius * 2.0,
+            height: radius * 2.0,
+            color: CRUST,
+            corner_radii: CornerRadii::all(radius),
         });
         cmds.push(RenderCommand::StrokeRect {
-            x: cx - radius, y: cy - radius,
-            width: radius * 2.0, height: radius * 2.0,
-            color: SURFACE2, line_width: 1.5,
+            x: cx - radius,
+            y: cy - radius,
+            width: radius * 2.0,
+            height: radius * 2.0,
+            color: SURFACE2,
+            line_width: 1.5,
             corner_radii: CornerRadii::all(radius),
         });
 
@@ -604,7 +927,11 @@ impl WorldClockApp {
         for i in 0..12_u32 {
             let angle = (i as f32 * 30.0 - 90.0) * core::f32::consts::PI / 180.0;
             let outer_r = radius - 3.0;
-            let inner_r = if i % 3 == 0 { radius - 10.0 } else { radius - 7.0 };
+            let inner_r = if i % 3 == 0 {
+                radius - 10.0
+            } else {
+                radius - 7.0
+            };
             cmds.push(RenderCommand::Line {
                 x1: cx + inner_r * angle.cos(),
                 y1: cy + inner_r * angle.sin(),
@@ -616,38 +943,49 @@ impl WorldClockApp {
         }
 
         // Hour hand
-        let h_angle = ((h % 12) as f32 * 30.0 + m as f32 * 0.5 - 90.0) * core::f32::consts::PI / 180.0;
+        let h_angle =
+            ((h % 12) as f32 * 30.0 + m as f32 * 0.5 - 90.0) * core::f32::consts::PI / 180.0;
         cmds.push(RenderCommand::Line {
-            x1: cx, y1: cy,
+            x1: cx,
+            y1: cy,
             x2: cx + radius * 0.5 * h_angle.cos(),
             y2: cy + radius * 0.5 * h_angle.sin(),
-            color: TEXT_COLOR, width: 3.0,
+            color: TEXT_COLOR,
+            width: 3.0,
         });
 
         // Minute hand
         let m_angle = (m as f32 * 6.0 + s as f32 * 0.1 - 90.0) * core::f32::consts::PI / 180.0;
         cmds.push(RenderCommand::Line {
-            x1: cx, y1: cy,
+            x1: cx,
+            y1: cy,
             x2: cx + radius * 0.7 * m_angle.cos(),
             y2: cy + radius * 0.7 * m_angle.sin(),
-            color: SUBTEXT1, width: 2.0,
+            color: SUBTEXT1,
+            width: 2.0,
         });
 
         // Second hand
         if self.show_seconds {
             let s_angle = (s as f32 * 6.0 - 90.0) * core::f32::consts::PI / 180.0;
             cmds.push(RenderCommand::Line {
-                x1: cx, y1: cy,
+                x1: cx,
+                y1: cy,
                 x2: cx + radius * 0.8 * s_angle.cos(),
                 y2: cy + radius * 0.8 * s_angle.sin(),
-                color: RED, width: 1.0,
+                color: RED,
+                width: 1.0,
             });
         }
 
         // Center dot
         cmds.push(RenderCommand::FillRect {
-            x: cx - 2.0, y: cy - 2.0, width: 4.0, height: 4.0,
-            color: TEXT_COLOR, corner_radii: CornerRadii::all(2.0),
+            x: cx - 2.0,
+            y: cy - 2.0,
+            width: 4.0,
+            height: 4.0,
+            color: TEXT_COLOR,
+            corner_radii: CornerRadii::all(2.0),
         });
     }
 
@@ -655,14 +993,28 @@ impl WorldClockApp {
         let start_y = Self::HEADER_H + 4.0 - self.scroll_offset;
         // Column headers
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: start_y, width: self.width, height: 28.0,
-            color: CRUST, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: start_y,
+            width: self.width,
+            height: 28.0,
+            color: CRUST,
+            corner_radii: CornerRadii::ZERO,
         });
-        for (hx, label) in [(16.0, "City"), (200.0, "Time"), (380.0, "UTC Offset"), (520.0, "Diff"), (620.0, "Day/Night")] {
+        for (hx, label) in [
+            (16.0, "City"),
+            (200.0, "Time"),
+            (380.0, "UTC Offset"),
+            (520.0, "Diff"),
+            (620.0, "Day/Night"),
+        ] {
             cmds.push(RenderCommand::Text {
-                x: hx, y: start_y + 6.0,
-                text: label.to_string(), font_size: 12.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Bold, max_width: Some(150.0),
+                x: hx,
+                y: start_y + 6.0,
+                text: label.to_string(),
+                font_size: 12.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(150.0),
             });
         }
 
@@ -675,52 +1027,90 @@ impl WorldClockApp {
             if let Some(tz) = TIMEZONES.get(entry.tz_idx) {
                 let (h, m, s) = self.time_for_offset(tz.offset_minutes);
                 let is_selected = i == self.selected_clock;
-                let bg = if is_selected { SURFACE1 } else if i % 2 == 0 { SURFACE0 } else { BASE };
+                let bg = if is_selected {
+                    SURFACE1
+                } else if i % 2 == 0 {
+                    SURFACE0
+                } else {
+                    BASE
+                };
 
                 cmds.push(RenderCommand::FillRect {
-                    x: 0.0, y: ry, width: self.width, height: Self::LIST_ROW_H,
-                    color: bg, corner_radii: CornerRadii::ZERO,
+                    x: 0.0,
+                    y: ry,
+                    width: self.width,
+                    height: Self::LIST_ROW_H,
+                    color: bg,
+                    corner_radii: CornerRadii::ZERO,
                 });
 
                 let mut markers = String::new();
-                if entry.pinned { markers.push_str("\u{1F4CC} "); }
-                if entry.tz_idx == self.home_tz_idx { markers.push_str("\u{1F3E0} "); }
+                if entry.pinned {
+                    markers.push_str("\u{1F4CC} ");
+                }
+                if entry.tz_idx == self.home_tz_idx {
+                    markers.push_str("\u{1F3E0} ");
+                }
 
                 cmds.push(RenderCommand::Text {
-                    x: 16.0, y: ry + 8.0,
+                    x: 16.0,
+                    y: ry + 8.0,
                     text: format!("{markers}{}", tz.city),
-                    font_size: 14.0, color: TEXT_COLOR,
-                    font_weight: FontWeightHint::Bold, max_width: Some(180.0),
+                    font_size: 14.0,
+                    color: TEXT_COLOR,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(180.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: 16.0, y: ry + 28.0,
-                    text: tz.country.to_string(), font_size: 11.0, color: SUBTEXT0,
-                    font_weight: FontWeightHint::Regular, max_width: Some(180.0),
+                    x: 16.0,
+                    y: ry + 28.0,
+                    text: tz.country.to_string(),
+                    font_size: 11.0,
+                    color: SUBTEXT0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(180.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: 200.0, y: ry + 12.0,
-                    text: self.format_time(h, m, s), font_size: 20.0, color: TEXT_COLOR,
-                    font_weight: FontWeightHint::Bold, max_width: Some(170.0),
+                    x: 200.0,
+                    y: ry + 12.0,
+                    text: self.format_time(h, m, s),
+                    font_size: 20.0,
+                    color: TEXT_COLOR,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(170.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: 380.0, y: ry + 16.0,
-                    text: format!("{} ({})", Self::format_offset(tz.offset_minutes), tz.abbreviation),
-                    font_size: 13.0, color: OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: Some(130.0),
+                    x: 380.0,
+                    y: ry + 16.0,
+                    text: format!(
+                        "{} ({})",
+                        Self::format_offset(tz.offset_minutes),
+                        tz.abbreviation
+                    ),
+                    font_size: 13.0,
+                    color: OVERLAY0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(130.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: 520.0, y: ry + 16.0,
+                    x: 520.0,
+                    y: ry + 16.0,
                     text: self.diff_from_home(tz.offset_minutes),
-                    font_size: 13.0, color: TEAL,
-                    font_weight: FontWeightHint::Regular, max_width: Some(90.0),
+                    font_size: 13.0,
+                    color: TEAL,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(90.0),
                 });
                 let dn_icon = Self::day_night_icon(h);
                 let dn_label = if Self::is_daytime(h) { "Day" } else { "Night" };
                 cmds.push(RenderCommand::Text {
-                    x: 620.0, y: ry + 16.0,
+                    x: 620.0,
+                    y: ry + 16.0,
                     text: format!("{dn_icon} {dn_label}"),
-                    font_size: 13.0, color: Self::day_night_color(h),
-                    font_weight: FontWeightHint::Regular, max_width: Some(100.0),
+                    font_size: 13.0,
+                    color: Self::day_night_color(h),
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(100.0),
                 });
             }
         }
@@ -729,8 +1119,12 @@ impl WorldClockApp {
     fn render_picker(&self, cmds: &mut Vec<RenderCommand>) {
         // Overlay
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: self.height,
-            color: Color::rgba(0, 0, 0, 160), corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: Color::rgba(0, 0, 0, 160),
+            corner_radii: CornerRadii::ZERO,
         });
 
         let pw = 420.0_f32;
@@ -739,30 +1133,50 @@ impl WorldClockApp {
         let py = (self.height - ph) / 2.0;
 
         cmds.push(RenderCommand::FillRect {
-            x: px, y: py, width: pw, height: ph,
-            color: MANTLE, corner_radii: CornerRadii::all(12.0),
+            x: px,
+            y: py,
+            width: pw,
+            height: ph,
+            color: MANTLE,
+            corner_radii: CornerRadii::all(12.0),
         });
         cmds.push(RenderCommand::Text {
-            x: px + 16.0, y: py + 14.0,
-            text: String::from("Add City"), font_size: 18.0, color: TEXT_COLOR,
-            font_weight: FontWeightHint::Bold, max_width: Some(pw - 32.0),
+            x: px + 16.0,
+            y: py + 14.0,
+            text: String::from("Add City"),
+            font_size: 18.0,
+            color: TEXT_COLOR,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(pw - 32.0),
         });
 
         // Search input
         cmds.push(RenderCommand::FillRect {
-            x: px + 12.0, y: py + 44.0, width: pw - 24.0, height: 32.0,
-            color: SURFACE0, corner_radii: CornerRadii::all(6.0),
+            x: px + 12.0,
+            y: py + 44.0,
+            width: pw - 24.0,
+            height: 32.0,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(6.0),
         });
         let search_text = if self.picker_search.is_empty() {
             String::from("Search cities...")
         } else {
             format!("{}|", self.picker_search)
         };
-        let search_color = if self.picker_search.is_empty() { OVERLAY0 } else { TEXT_COLOR };
+        let search_color = if self.picker_search.is_empty() {
+            OVERLAY0
+        } else {
+            TEXT_COLOR
+        };
         cmds.push(RenderCommand::Text {
-            x: px + 20.0, y: py + 52.0,
-            text: search_text, font_size: 13.0, color: search_color,
-            font_weight: FontWeightHint::Regular, max_width: Some(pw - 48.0),
+            x: px + 20.0,
+            y: py + 52.0,
+            text: search_text,
+            font_size: 13.0,
+            color: search_color,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(pw - 48.0),
         });
 
         // Timezone list
@@ -772,34 +1186,56 @@ impl WorldClockApp {
         let filtered = self.filtered_timezones();
         let visible_items = (list_h / item_h) as usize;
 
-        for (vis_i, &tz_idx) in filtered.iter().skip(self.picker_scroll).take(visible_items).enumerate() {
+        for (vis_i, &tz_idx) in filtered
+            .iter()
+            .skip(self.picker_scroll)
+            .take(visible_items)
+            .enumerate()
+        {
             if let Some(tz) = TIMEZONES.get(tz_idx) {
                 let iy = list_y + vis_i as f32 * item_h;
                 let already = self.clocks.iter().any(|c| c.tz_idx == tz_idx);
                 let bg = if already { SURFACE1 } else { SURFACE0 };
 
                 cmds.push(RenderCommand::FillRect {
-                    x: px + 8.0, y: iy, width: pw - 16.0, height: item_h - 2.0,
-                    color: bg, corner_radii: CornerRadii::all(4.0),
+                    x: px + 8.0,
+                    y: iy,
+                    width: pw - 16.0,
+                    height: item_h - 2.0,
+                    color: bg,
+                    corner_radii: CornerRadii::all(4.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: px + 16.0, y: iy + 6.0,
+                    x: px + 16.0,
+                    y: iy + 6.0,
                     text: format!("{}, {}", tz.city, tz.country),
                     font_size: 13.0,
                     color: if already { OVERLAY0 } else { TEXT_COLOR },
-                    font_weight: FontWeightHint::Bold, max_width: Some(pw - 40.0),
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(pw - 40.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: px + 16.0, y: iy + 24.0,
-                    text: format!("{} ({})", Self::format_offset(tz.offset_minutes), tz.abbreviation),
-                    font_size: 11.0, color: SUBTEXT0,
-                    font_weight: FontWeightHint::Regular, max_width: Some(200.0),
+                    x: px + 16.0,
+                    y: iy + 24.0,
+                    text: format!(
+                        "{} ({})",
+                        Self::format_offset(tz.offset_minutes),
+                        tz.abbreviation
+                    ),
+                    font_size: 11.0,
+                    color: SUBTEXT0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(200.0),
                 });
                 if already {
                     cmds.push(RenderCommand::Text {
-                        x: px + pw - 70.0, y: iy + 12.0,
-                        text: String::from("Added"), font_size: 11.0, color: GREEN,
-                        font_weight: FontWeightHint::Regular, max_width: Some(50.0),
+                        x: px + pw - 70.0,
+                        y: iy + 12.0,
+                        text: String::from("Added"),
+                        font_size: 11.0,
+                        color: GREEN,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(50.0),
                     });
                 }
             }
@@ -809,19 +1245,30 @@ impl WorldClockApp {
     fn render_status(&self, cmds: &mut Vec<RenderCommand>) {
         let sy = self.height - Self::STATUS_H;
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: sy, width: self.width, height: Self::STATUS_H,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: sy,
+            width: self.width,
+            height: Self::STATUS_H,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
-            x: 8.0, y: sy + 6.0,
-            text: self.status_msg.clone(), font_size: 12.0, color: SUBTEXT1,
-            font_weight: FontWeightHint::Regular, max_width: Some(400.0),
+            x: 8.0,
+            y: sy + 6.0,
+            text: self.status_msg.clone(),
+            font_size: 12.0,
+            color: SUBTEXT1,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(400.0),
         });
         cmds.push(RenderCommand::Text {
-            x: self.width - 120.0, y: sy + 6.0,
+            x: self.width - 120.0,
+            y: sy + 6.0,
             text: format!("{} clocks", self.clocks.len()),
-            font_size: 11.0, color: OVERLAY0,
-            font_weight: FontWeightHint::Regular, max_width: Some(110.0),
+            font_size: 11.0,
+            color: OVERLAY0,
+            font_weight: FontWeightHint::Regular,
+            max_width: Some(110.0),
         });
     }
 }

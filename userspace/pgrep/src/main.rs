@@ -71,7 +71,7 @@ const SYS_THREAD_RESUME: u64 = 514;
 // ============================================================================
 
 /// Operating mode determined by argv[0].
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Mode {
     Pgrep,
     Pkill,
@@ -95,7 +95,7 @@ fn detect_mode(argv0: &str) -> Mode {
 // ============================================================================
 
 /// Action to perform when a "signal" is requested.
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum SignalAction {
     /// IPC-based graceful terminate.
     Term,
@@ -129,17 +129,61 @@ struct SignalDef {
 
 /// Compatibility signal table mapping POSIX names/numbers to OurOS actions.
 const SIGNALS: &[SignalDef] = &[
-    SignalDef { number: 1,  name: "HUP",  action: SignalAction::Hup },
-    SignalDef { number: 2,  name: "INT",  action: SignalAction::Int },
-    SignalDef { number: 3,  name: "QUIT", action: SignalAction::Quit },
-    SignalDef { number: 9,  name: "KILL", action: SignalAction::Kill },
-    SignalDef { number: 10, name: "USR1", action: SignalAction::Usr1 },
-    SignalDef { number: 12, name: "USR2", action: SignalAction::Usr2 },
-    SignalDef { number: 13, name: "PIPE", action: SignalAction::Pipe },
-    SignalDef { number: 14, name: "ALRM", action: SignalAction::Alrm },
-    SignalDef { number: 15, name: "TERM", action: SignalAction::Term },
-    SignalDef { number: 17, name: "STOP", action: SignalAction::Stop },
-    SignalDef { number: 18, name: "CONT", action: SignalAction::Cont },
+    SignalDef {
+        number: 1,
+        name: "HUP",
+        action: SignalAction::Hup,
+    },
+    SignalDef {
+        number: 2,
+        name: "INT",
+        action: SignalAction::Int,
+    },
+    SignalDef {
+        number: 3,
+        name: "QUIT",
+        action: SignalAction::Quit,
+    },
+    SignalDef {
+        number: 9,
+        name: "KILL",
+        action: SignalAction::Kill,
+    },
+    SignalDef {
+        number: 10,
+        name: "USR1",
+        action: SignalAction::Usr1,
+    },
+    SignalDef {
+        number: 12,
+        name: "USR2",
+        action: SignalAction::Usr2,
+    },
+    SignalDef {
+        number: 13,
+        name: "PIPE",
+        action: SignalAction::Pipe,
+    },
+    SignalDef {
+        number: 14,
+        name: "ALRM",
+        action: SignalAction::Alrm,
+    },
+    SignalDef {
+        number: 15,
+        name: "TERM",
+        action: SignalAction::Term,
+    },
+    SignalDef {
+        number: 17,
+        name: "STOP",
+        action: SignalAction::Stop,
+    },
+    SignalDef {
+        number: 18,
+        name: "CONT",
+        action: SignalAction::Cont,
+    },
 ];
 
 /// Look up a signal by number (1-31).
@@ -212,9 +256,7 @@ fn send_process_command(command: &str) -> Result<String, String> {
     // SAFETY: SYS_CHANNEL_SEND takes the channel handle, a pointer to the
     // message buffer, and its length. `msg` lives on the stack for the
     // duration of the syscall.
-    let send_ret = unsafe {
-        syscall3(SYS_CHANNEL_SEND, ch, msg.as_ptr() as u64, msg.len() as u64)
-    };
+    let send_ret = unsafe { syscall3(SYS_CHANNEL_SEND, ch, msg.as_ptr() as u64, msg.len() as u64) };
 
     if send_ret < 0 {
         // SAFETY: ch is a valid handle from a successful connect.
@@ -269,8 +311,12 @@ fn force_kill(pid: u64, exit_code: u64) -> Result<i64, i64> {
 /// Send the appropriate action to a process.
 fn send_signal(pid: u64, action: SignalAction) -> Result<(), String> {
     match action {
-        SignalAction::Term | SignalAction::Usr1 | SignalAction::Usr2
-        | SignalAction::Alrm | SignalAction::Pipe | SignalAction::Quit => {
+        SignalAction::Term
+        | SignalAction::Usr1
+        | SignalAction::Usr2
+        | SignalAction::Alrm
+        | SignalAction::Pipe
+        | SignalAction::Quit => {
             // Try IPC first, fall back to force kill.
             let cmd_name = match action {
                 SignalAction::Term => "PROCESS_TERMINATE",
@@ -286,53 +332,42 @@ fn send_signal(pid: u64, action: SignalAction) -> Result<(), String> {
                 Ok(resp) if ipc_response_ok(&resp) => Ok(()),
                 _ => {
                     // Fallback to direct kill.
-                    force_kill(pid, 143).map(|_| ()).map_err(|e| {
-                        format!("failed to terminate {pid}: error {e}")
-                    })
+                    force_kill(pid, 143)
+                        .map(|_| ())
+                        .map_err(|e| format!("failed to terminate {pid}: error {e}"))
                 }
             }
         }
-        SignalAction::Kill => {
-            force_kill(pid, 137).map(|_| ()).map_err(|e| {
-                format!("failed to kill {pid}: error {e}")
-            })
-        }
+        SignalAction::Kill => force_kill(pid, 137)
+            .map(|_| ())
+            .map_err(|e| format!("failed to kill {pid}: error {e}")),
         SignalAction::Hup => {
             let cmd = format!("PROCESS_HANGUP {pid}");
             match send_process_command(&cmd) {
                 Ok(resp) if ipc_response_ok(&resp) => Ok(()),
-                _ => {
-                    force_kill(pid, 129).map(|_| ()).map_err(|e| {
-                        format!("failed to HUP {pid}: error {e}")
-                    })
-                }
+                _ => force_kill(pid, 129)
+                    .map(|_| ())
+                    .map_err(|e| format!("failed to HUP {pid}: error {e}")),
             }
         }
         SignalAction::Int => {
             let cmd = format!("PROCESS_INTERRUPT {pid}");
             match send_process_command(&cmd) {
                 Ok(resp) if ipc_response_ok(&resp) => Ok(()),
-                _ => {
-                    force_kill(pid, 130).map(|_| ()).map_err(|e| {
-                        format!("failed to INT {pid}: error {e}")
-                    })
-                }
+                _ => force_kill(pid, 130)
+                    .map(|_| ())
+                    .map_err(|e| format!("failed to INT {pid}: error {e}")),
             }
         }
-        SignalAction::Stop => {
-            stop_process(pid)
-        }
-        SignalAction::Cont => {
-            continue_process(pid)
-        }
+        SignalAction::Stop => stop_process(pid),
+        SignalAction::Cont => continue_process(pid),
     }
 }
 
 /// Suspend all threads of a process by reading /proc/<pid>/task/.
 fn stop_process(pid: u64) -> Result<(), String> {
     let task_dir = format!("/proc/{pid}/task");
-    let entries = fs::read_dir(&task_dir)
-        .map_err(|e| format!("cannot read {task_dir}: {e}"))?;
+    let entries = fs::read_dir(&task_dir).map_err(|e| format!("cannot read {task_dir}: {e}"))?;
 
     let mut count = 0u32;
     let mut last_err: Option<String> = None;
@@ -366,8 +401,7 @@ fn stop_process(pid: u64) -> Result<(), String> {
 /// Resume all threads of a process.
 fn continue_process(pid: u64) -> Result<(), String> {
     let task_dir = format!("/proc/{pid}/task");
-    let entries = fs::read_dir(&task_dir)
-        .map_err(|e| format!("cannot read {task_dir}: {e}"))?;
+    let entries = fs::read_dir(&task_dir).map_err(|e| format!("cannot read {task_dir}: {e}"))?;
 
     let mut count = 0u32;
     let mut last_err: Option<String> = None;
@@ -544,7 +578,10 @@ enum Token {
     AnyChar,
     /// `[...]` character class. Contains (byte, byte) inclusive ranges.
     /// `negated` means `[^...]`.
-    CharClass { ranges: Vec<(u8, u8)>, negated: bool },
+    CharClass {
+        ranges: Vec<(u8, u8)>,
+        negated: bool,
+    },
     /// `^` -- anchor to start of string.
     StartAnchor,
     /// `$` -- anchor to end of string.
@@ -717,10 +754,7 @@ fn compile_branch(branch: &str) -> Result<PatternBranch, String> {
 /// Parse a `[...]` or `[^...]` character class starting at position `start`
 /// (which points at the `[`). Returns the ranges, negated flag, and the
 /// index just past the closing `]`.
-fn parse_char_class(
-    bytes: &[u8],
-    start: usize,
-) -> Result<(Vec<(u8, u8)>, bool, usize), String> {
+fn parse_char_class(bytes: &[u8], start: usize) -> Result<(Vec<(u8, u8)>, bool, usize), String> {
     let mut i = start + 1; // skip `[`
     let mut negated = false;
     let mut ranges: Vec<(u8, u8)> = Vec::new();
@@ -746,7 +780,9 @@ fn parse_char_class(
             let escaped = bytes[i + 1];
             i += 2;
             // Check for range: \x-y
-            if i + 1 < bytes.len() && bytes[i] == b'-' && i + 1 < bytes.len()
+            if i + 1 < bytes.len()
+                && bytes[i] == b'-'
+                && i + 1 < bytes.len()
                 && bytes[i + 1] != b']'
             {
                 let end = if bytes[i + 1] == b'\\' && i + 2 < bytes.len() {
@@ -942,11 +978,7 @@ fn lower_pattern(pattern: &mut CompiledPattern) {
 }
 
 fn to_ascii_lower(b: u8) -> u8 {
-    if b >= b'A' && b <= b'Z' {
-        b + 32
-    } else {
-        b
-    }
+    if b >= b'A' && b <= b'Z' { b + 32 } else { b }
 }
 
 // ============================================================================
@@ -1083,10 +1115,7 @@ impl Options {
 
 /// Parse command-line arguments. Returns Err for usage errors.
 fn parse_args(args: &[String]) -> Result<Options, String> {
-    let mode = args
-        .first()
-        .map(|a| detect_mode(a))
-        .unwrap_or(Mode::Pgrep);
+    let mode = args.first().map(|a| detect_mode(a)).unwrap_or(Mode::Pgrep);
 
     let mut opts = Options::new(mode);
     let mut i = 1;
@@ -1120,18 +1149,14 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             continue;
         }
         if let Some(rest) = arg.strip_prefix("--euid=") {
-            opts.filter_euid = Some(
-                resolve_uid(rest)
-                    .ok_or_else(|| format!("unknown user: {rest}"))?,
-            );
+            opts.filter_euid =
+                Some(resolve_uid(rest).ok_or_else(|| format!("unknown user: {rest}"))?);
             i += 1;
             continue;
         }
         if let Some(rest) = arg.strip_prefix("--uid=") {
-            opts.filter_ruid = Some(
-                resolve_uid(rest)
-                    .ok_or_else(|| format!("unknown user: {rest}"))?,
-            );
+            opts.filter_ruid =
+                Some(resolve_uid(rest).ok_or_else(|| format!("unknown user: {rest}"))?);
             i += 1;
             continue;
         }
@@ -1144,10 +1169,8 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
             continue;
         }
         if let Some(rest) = arg.strip_prefix("--terminal=") {
-            opts.filter_tty = Some(
-                resolve_tty(rest)
-                    .ok_or_else(|| format!("invalid terminal: {rest}"))?,
-            );
+            opts.filter_tty =
+                Some(resolve_tty(rest).ok_or_else(|| format!("invalid terminal: {rest}"))?);
             i += 1;
             continue;
         }
@@ -1208,8 +1231,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     return Err("-u requires a user/UID".to_string());
                 }
                 opts.filter_euid = Some(
-                    resolve_uid(&args[i])
-                        .ok_or_else(|| format!("unknown user: {}", args[i]))?,
+                    resolve_uid(&args[i]).ok_or_else(|| format!("unknown user: {}", args[i]))?,
                 );
             }
             "-U" | "--uid" => {
@@ -1218,8 +1240,7 @@ fn parse_args(args: &[String]) -> Result<Options, String> {
                     return Err("-U requires a user/UID".to_string());
                 }
                 opts.filter_ruid = Some(
-                    resolve_uid(&args[i])
-                        .ok_or_else(|| format!("unknown user: {}", args[i]))?,
+                    resolve_uid(&args[i]).ok_or_else(|| format!("unknown user: {}", args[i]))?,
                 );
             }
             "-g" | "--pgroup" => {
@@ -1491,10 +1512,7 @@ fn print_usage(mode: Mode) {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let mode = args
-        .first()
-        .map(|a| detect_mode(a))
-        .unwrap_or(Mode::Pgrep);
+    let mode = args.first().map(|a| detect_mode(a)).unwrap_or(Mode::Pgrep);
 
     let opts = match parse_args(&args) {
         Ok(o) => o,
@@ -1503,7 +1521,11 @@ fn main() {
                 print_usage(mode);
                 process::exit(0);
             }
-            let prog = if mode == Mode::Pkill { "pkill" } else { "pgrep" };
+            let prog = if mode == Mode::Pkill {
+                "pkill"
+            } else {
+                "pgrep"
+            };
             eprintln!("{prog}: {msg}");
             eprintln!("Try '{prog} --help' for usage.");
             process::exit(2);
@@ -1539,7 +1561,11 @@ fn main() {
     }
 
     if matches.is_empty() {
-        let prog = if mode == Mode::Pkill { "pkill" } else { "pgrep" };
+        let prog = if mode == Mode::Pkill {
+            "pkill"
+        } else {
+            "pgrep"
+        };
         // pgrep/pkill exit 1 when no processes matched (not an error).
         if mode == Mode::Pgrep && opts.count_only {
             println!("0");
@@ -1879,11 +1905,7 @@ mod tests {
 
     #[test]
     fn test_parse_pkill_with_signal() {
-        let args = vec![
-            "pkill".to_string(),
-            "-9".to_string(),
-            "runaway".to_string(),
-        ];
+        let args = vec!["pkill".to_string(), "-9".to_string(), "runaway".to_string()];
         let opts = parse_args(&args).unwrap();
         assert_eq!(opts.mode, Mode::Pkill);
         assert_eq!(opts.signal, SignalAction::Kill);
@@ -1892,11 +1914,7 @@ mod tests {
 
     #[test]
     fn test_parse_pkill_signal_name() {
-        let args = vec![
-            "pkill".to_string(),
-            "-HUP".to_string(),
-            "myapp".to_string(),
-        ];
+        let args = vec!["pkill".to_string(), "-HUP".to_string(), "myapp".to_string()];
         let opts = parse_args(&args).unwrap();
         assert_eq!(opts.signal, SignalAction::Hup);
     }
@@ -2025,7 +2043,11 @@ mod tests {
     #[test]
     fn test_match_full_cmdline() {
         let proc_info = make_proc(10, "python3", "python3 /opt/server.py --port 8080");
-        let args = vec!["pgrep".to_string(), "-f".to_string(), "server\\.py".to_string()];
+        let args = vec![
+            "pgrep".to_string(),
+            "-f".to_string(),
+            "server\\.py".to_string(),
+        ];
         let opts = parse_args(&args).unwrap();
         assert!(process_matches(&proc_info, &opts, 999));
     }

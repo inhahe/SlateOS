@@ -1,3 +1,42 @@
+## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 3 — final 14 crates
+##   from the `--keep-going` sweep whose TEST BUILDS did not compile on the host target.
+##   Root causes & PROPER fixes:
+##     - quota/taskset/timedatectl/modprobe/smartctl/pgrep: enums/structs used in test
+##       assertions lacked `#[derive(Debug)]` → added (Personality, QuotaType, Tool,
+##       TimedateCommand/HostnameCommand/LocaleCommand, DeviceType/HealthStatus,
+##       Mode/SignalAction). su (SuOptions/SudoOptions) and who (Options) had no derive
+##       at all → added `#[derive(Debug)]`.
+##     - sbctl: struct `__KeyInfo` (double-underscore mangle) vs test `_KeyInfo` → renamed.
+##     - prlimit: const `_ALL_RESOURCES` mangled, test uses `ALL_RESOURCES` → renamed.
+##     - resolvectl: field `_interface` mangled, test reads `.interface` (and constructs
+##       DnsServer with it) → renamed across all sites.
+##     - xattr: fns `_xattr_namespace`/`_parse_value` mangled, tests call the bare names →
+##       renamed. ALSO 2 clippy denies: manual Range::contains (`b>=0x20 && b<0x7f` →
+##       `(0x20..0x7f).contains(&b)`) and as_bytes-after-slice (`s[1..n].as_bytes()` →
+##       `s.as_bytes()[1..n]`).
+##     - useradd: test struct `TestEnv { dir: PathBuf }` but the test module only imported
+##       `Path` → added `use std::path::PathBuf;` to the test module. ALSO 18 clippy
+##       collapsible_if / redundant-closure denies (let-chains, filter_map(parser)).
+##     - thermald: fn `__parse_temp` mangled, test calls `_parse_temp` → renamed. ALSO a
+##       real PRODUCTION bug in _parse_temp: it tested `strip_suffix('c')` BEFORE
+##       `strip_suffix("mc")`, so a millicelsius value like "100000mc" matched the celsius
+##       branch (leaving "100000m", which fails to parse) and was rejected as None;
+##       reordered to check "mc" first. ALSO 4 clippy denies (collapsible_if let-chain,
+##       2× manual_checked_division via checked_div, print_literal "POLICY" inlined).
+##     - modprobe: a real PRODUCTION inconsistency — `cmd_depmod`'s sim_modules encodes the
+##       full chain virtio_net→virtio_pci→virtio_ring→virtio, but `get_module_info` (used by
+##       resolve_dependencies) only encoded virtio_net→virtio_pci and stopped, so transitive
+##       resolution produced dep_count=1 not >=3. Added virtio_pci→virtio_ring and
+##       virtio_ring→virtio cases to get_module_info to match the canonical graph.
+##     - who: a real PRODUCTION copy-paste bug — the "who am i" detection was
+##       `(a1=="am" && a2=="i") || (a1=="am" && a2=="i")` (equal_op deny; the second clause
+##       duplicated the first). Replaced with the GNU rule (any two non-option operands →
+##       -m / current-user), which keeps test_parse_args_am_i passing and avoids a
+##       `who -a -b` regression.
+##   All 14 build, pass tests (thermald 12, modprobe 20, who 51, useradd 16, plus the rest),
+##   are clippy-clean on the lints they deny, and build for ouros. This completes the
+##   userspace test-build-failure sweep (31 crates total across batches 1–3).
+##
 ## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 2 — 7 more crates'
 ##   TEST BUILDS did not compile on the host target (same `--keep-going` sweep as batch 1).
 ##   Root causes & PROPER fixes:

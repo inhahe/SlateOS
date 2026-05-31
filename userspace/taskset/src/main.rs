@@ -40,7 +40,7 @@ const NICE_MAX: i32 = 19;
 
 // ── Personality Detection ──────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Personality {
     Taskset,
     Chrt,
@@ -55,7 +55,8 @@ fn detect_personality(argv0: &[u8]) -> Personality {
         argv0
     };
 
-    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe") {
+    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe")
+    {
         &basename[..basename.len() - 4]
     } else {
         basename
@@ -898,7 +899,9 @@ fn parse_renice_args(args: &[Vec<u8>]) -> ReniceArgs {
             mode = b'g';
         } else if arg == b"-u" || arg == b"--user" {
             mode = b'u';
-        } else if !arg.starts_with(b"-") || (arg.len() > 1 && arg[0] == b'-' && arg[1].is_ascii_digit()) {
+        } else if !arg.starts_with(b"-")
+            || (arg.len() > 1 && arg[0] == b'-' && arg[1].is_ascii_digit())
+        {
             // Could be priority (first positional) or target
             if result.priority.is_none() {
                 if let Some(p) = parse_i32_bytes(arg) {
@@ -1061,7 +1064,11 @@ fn parse_i32_bytes(s: &[u8]) -> Option<i32> {
         }
     }
 
-    if negative { Some(-result) } else { Some(result) }
+    if negative {
+        Some(-result)
+    } else {
+        Some(result)
+    }
 }
 
 fn parse_usize(s: &[u8]) -> Option<usize> {
@@ -1109,8 +1116,13 @@ fn format_usize(n: usize) -> Vec<u8> {
 }
 
 fn trim_bytes(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n').unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+    let start = s
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
         .map(|p| p + 1)
         .unwrap_or(start);
     if start >= end { &[] } else { &s[start..end] }
@@ -1196,7 +1208,10 @@ mod tests {
     #[test]
     fn test_detect_taskset() {
         assert_eq!(detect_personality(b"taskset"), Personality::Taskset);
-        assert_eq!(detect_personality(b"/usr/bin/taskset"), Personality::Taskset);
+        assert_eq!(
+            detect_personality(b"/usr/bin/taskset"),
+            Personality::Taskset
+        );
     }
 
     #[test]
@@ -1471,7 +1486,14 @@ mod tests {
 
     #[test]
     fn test_ionice_args_with_class() {
-        let args = parse_ionice_args(&[b"-c".to_vec(), b"2".to_vec(), b"-n".to_vec(), b"4".to_vec(), b"-p".to_vec(), b"1234".to_vec()]);
+        let args = parse_ionice_args(&[
+            b"-c".to_vec(),
+            b"2".to_vec(),
+            b"-n".to_vec(),
+            b"4".to_vec(),
+            b"-p".to_vec(),
+            b"1234".to_vec(),
+        ]);
         assert_eq!(args.class, Some(IOPRIO_CLASS_BE));
         assert_eq!(args.classdata, Some(4));
         assert_eq!(args.pid, Some(1234));

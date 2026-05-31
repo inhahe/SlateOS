@@ -126,7 +126,7 @@ impl LimitValue {
     }
 }
 
-const _ALL_RESOURCES: &[Resource] = &[
+const ALL_RESOURCES: &[Resource] = &[
     Resource::AddressSpace,
     Resource::CoreSize,
     Resource::CpuTime,
@@ -195,13 +195,19 @@ fn parse_proc_limits(data: &str) -> Vec<ResourceLimit> {
         };
 
         if let Some(res) = resource {
-            let rest = if trimmed.len() > 25 { &trimmed[25..] } else { "" };
+            let rest = if trimmed.len() > 25 {
+                &trimmed[25..]
+            } else {
+                ""
+            };
             let parts: Vec<&str> = rest.split_whitespace().collect();
 
-            let soft = parts.first()
+            let soft = parts
+                .first()
                 .and_then(|s| LimitValue::parse(s))
                 .unwrap_or(LimitValue::Unlimited);
-            let hard = parts.get(1)
+            let hard = parts
+                .get(1)
                 .and_then(|s| LimitValue::parse(s))
                 .unwrap_or(LimitValue::Unlimited);
 
@@ -219,22 +225,102 @@ fn parse_proc_limits(data: &str) -> Vec<ResourceLimit> {
 
 fn generate_default_limits() -> Vec<ResourceLimit> {
     vec![
-        ResourceLimit { resource: Resource::AddressSpace, soft: LimitValue::Unlimited, hard: LimitValue::Unlimited, units: "bytes" },
-        ResourceLimit { resource: Resource::CoreSize, soft: LimitValue::Value(0), hard: LimitValue::Unlimited, units: "bytes" },
-        ResourceLimit { resource: Resource::CpuTime, soft: LimitValue::Unlimited, hard: LimitValue::Unlimited, units: "seconds" },
-        ResourceLimit { resource: Resource::DataSize, soft: LimitValue::Unlimited, hard: LimitValue::Unlimited, units: "bytes" },
-        ResourceLimit { resource: Resource::FileSize, soft: LimitValue::Unlimited, hard: LimitValue::Unlimited, units: "bytes" },
-        ResourceLimit { resource: Resource::Locks, soft: LimitValue::Unlimited, hard: LimitValue::Unlimited, units: "" },
-        ResourceLimit { resource: Resource::MemLock, soft: LimitValue::Value(65536), hard: LimitValue::Value(65536), units: "bytes" },
-        ResourceLimit { resource: Resource::MsgQueue, soft: LimitValue::Value(819200), hard: LimitValue::Value(819200), units: "bytes" },
-        ResourceLimit { resource: Resource::Nice, soft: LimitValue::Value(0), hard: LimitValue::Value(0), units: "" },
-        ResourceLimit { resource: Resource::OpenFiles, soft: LimitValue::Value(1024), hard: LimitValue::Value(1048576), units: "" },
-        ResourceLimit { resource: Resource::Processes, soft: LimitValue::Value(63195), hard: LimitValue::Value(63195), units: "" },
-        ResourceLimit { resource: Resource::Rss, soft: LimitValue::Unlimited, hard: LimitValue::Unlimited, units: "bytes" },
-        ResourceLimit { resource: Resource::RtPrio, soft: LimitValue::Value(0), hard: LimitValue::Value(0), units: "" },
-        ResourceLimit { resource: Resource::RtTime, soft: LimitValue::Unlimited, hard: LimitValue::Unlimited, units: "microseconds" },
-        ResourceLimit { resource: Resource::SigPending, soft: LimitValue::Value(63195), hard: LimitValue::Value(63195), units: "" },
-        ResourceLimit { resource: Resource::StackSize, soft: LimitValue::Value(8388608), hard: LimitValue::Unlimited, units: "bytes" },
+        ResourceLimit {
+            resource: Resource::AddressSpace,
+            soft: LimitValue::Unlimited,
+            hard: LimitValue::Unlimited,
+            units: "bytes",
+        },
+        ResourceLimit {
+            resource: Resource::CoreSize,
+            soft: LimitValue::Value(0),
+            hard: LimitValue::Unlimited,
+            units: "bytes",
+        },
+        ResourceLimit {
+            resource: Resource::CpuTime,
+            soft: LimitValue::Unlimited,
+            hard: LimitValue::Unlimited,
+            units: "seconds",
+        },
+        ResourceLimit {
+            resource: Resource::DataSize,
+            soft: LimitValue::Unlimited,
+            hard: LimitValue::Unlimited,
+            units: "bytes",
+        },
+        ResourceLimit {
+            resource: Resource::FileSize,
+            soft: LimitValue::Unlimited,
+            hard: LimitValue::Unlimited,
+            units: "bytes",
+        },
+        ResourceLimit {
+            resource: Resource::Locks,
+            soft: LimitValue::Unlimited,
+            hard: LimitValue::Unlimited,
+            units: "",
+        },
+        ResourceLimit {
+            resource: Resource::MemLock,
+            soft: LimitValue::Value(65536),
+            hard: LimitValue::Value(65536),
+            units: "bytes",
+        },
+        ResourceLimit {
+            resource: Resource::MsgQueue,
+            soft: LimitValue::Value(819200),
+            hard: LimitValue::Value(819200),
+            units: "bytes",
+        },
+        ResourceLimit {
+            resource: Resource::Nice,
+            soft: LimitValue::Value(0),
+            hard: LimitValue::Value(0),
+            units: "",
+        },
+        ResourceLimit {
+            resource: Resource::OpenFiles,
+            soft: LimitValue::Value(1024),
+            hard: LimitValue::Value(1048576),
+            units: "",
+        },
+        ResourceLimit {
+            resource: Resource::Processes,
+            soft: LimitValue::Value(63195),
+            hard: LimitValue::Value(63195),
+            units: "",
+        },
+        ResourceLimit {
+            resource: Resource::Rss,
+            soft: LimitValue::Unlimited,
+            hard: LimitValue::Unlimited,
+            units: "bytes",
+        },
+        ResourceLimit {
+            resource: Resource::RtPrio,
+            soft: LimitValue::Value(0),
+            hard: LimitValue::Value(0),
+            units: "",
+        },
+        ResourceLimit {
+            resource: Resource::RtTime,
+            soft: LimitValue::Unlimited,
+            hard: LimitValue::Unlimited,
+            units: "microseconds",
+        },
+        ResourceLimit {
+            resource: Resource::SigPending,
+            soft: LimitValue::Value(63195),
+            hard: LimitValue::Value(63195),
+            units: "",
+        },
+        ResourceLimit {
+            resource: Resource::StackSize,
+            soft: LimitValue::Value(8388608),
+            hard: LimitValue::Unlimited,
+            units: "bytes",
+        },
     ]
 }
 
@@ -242,15 +328,26 @@ fn generate_default_limits() -> Vec<ResourceLimit> {
 // Output
 // ============================================================================
 
-fn print_limits_table(out: &mut io::StdoutLock<'_>, limits: &[ResourceLimit], json: bool, raw: bool) {
+fn print_limits_table(
+    out: &mut io::StdoutLock<'_>,
+    limits: &[ResourceLimit],
+    json: bool,
+    raw: bool,
+) {
     if json {
         let _ = writeln!(out, "{{");
         let _ = writeln!(out, "  \"limits\": [");
         for (i, lim) in limits.iter().enumerate() {
             let comma = if i + 1 < limits.len() { "," } else { "" };
-            let _ = writeln!(out, "    {{\"resource\":\"{}\",\"description\":\"{}\",\"soft\":\"{}\",\"hard\":\"{}\",\"units\":\"{}\"}}{comma}",
-                lim.resource.name(), lim.resource.description(),
-                lim.soft.display(), lim.hard.display(), lim.units);
+            let _ = writeln!(
+                out,
+                "    {{\"resource\":\"{}\",\"description\":\"{}\",\"soft\":\"{}\",\"hard\":\"{}\",\"units\":\"{}\"}}{comma}",
+                lim.resource.name(),
+                lim.resource.description(),
+                lim.soft.display(),
+                lim.hard.display(),
+                lim.units
+            );
         }
         let _ = writeln!(out, "  ]");
         let _ = writeln!(out, "}}");
@@ -259,21 +356,33 @@ fn print_limits_table(out: &mut io::StdoutLock<'_>, limits: &[ResourceLimit], js
 
     if raw {
         for lim in limits {
-            let _ = writeln!(out, "{}:{}:{}:{}",
-                lim.resource.name(), lim.soft.display(), lim.hard.display(), lim.units);
+            let _ = writeln!(
+                out,
+                "{}:{}:{}:{}",
+                lim.resource.name(),
+                lim.soft.display(),
+                lim.hard.display(),
+                lim.units
+            );
         }
         return;
     }
 
-    let _ = writeln!(out, "{:<14} {:<36} {:>14} {:>14} {:>12}",
-        "RESOURCE", "DESCRIPTION", "SOFT", "HARD", "UNITS");
+    let _ = writeln!(
+        out,
+        "{:<14} {:<36} {:>14} {:>14} {:>12}",
+        "RESOURCE", "DESCRIPTION", "SOFT", "HARD", "UNITS"
+    );
     for lim in limits {
-        let _ = writeln!(out, "{:<14} {:<36} {:>14} {:>14} {:>12}",
+        let _ = writeln!(
+            out,
+            "{:<14} {:<36} {:>14} {:>14} {:>12}",
             lim.resource.name(),
             lim.resource.description(),
             lim.soft.display(),
             lim.hard.display(),
-            lim.units);
+            lim.units
+        );
     }
 }
 
@@ -331,13 +440,17 @@ fn cmd_prlimit(args: &[String]) {
             }
             "-p" | "--pid" => {
                 i += 1;
-                if i < args.len() { pid = args[i].parse().ok(); }
+                if i < args.len() {
+                    pid = args[i].parse().ok();
+                }
             }
             "-J" | "--json" => json = true,
             "--raw" => raw = true,
             "-o" | "--output" => {
                 i += 1;
-                if i < args.len() { output_cols = Some(args[i].clone()); }
+                if i < args.len() {
+                    output_cols = Some(args[i].clone());
+                }
             }
             s if s.starts_with("--") => {
                 let rest = &s[2..];
@@ -345,8 +458,14 @@ fn cmd_prlimit(args: &[String]) {
                     // Set operation.
                     if let Some(res) = parse_resource_name(name) {
                         let parts: Vec<&str> = value.split(':').collect();
-                        let soft = LimitValue::parse(parts.first().unwrap_or(&"unlimited")).unwrap_or(LimitValue::Unlimited);
-                        let hard = LimitValue::parse(parts.get(1).unwrap_or(parts.first().unwrap_or(&"unlimited"))).unwrap_or(LimitValue::Unlimited);
+                        let soft = LimitValue::parse(parts.first().unwrap_or(&"unlimited"))
+                            .unwrap_or(LimitValue::Unlimited);
+                        let hard = LimitValue::parse(
+                            parts
+                                .get(1)
+                                .unwrap_or(parts.first().unwrap_or(&"unlimited")),
+                        )
+                        .unwrap_or(LimitValue::Unlimited);
                         set_operations.push((res, soft, hard));
                     }
                 } else if let Some(res) = parse_resource_name(rest) {
@@ -364,8 +483,13 @@ fn cmd_prlimit(args: &[String]) {
     // Handle set operations.
     if !set_operations.is_empty() {
         for (res, soft, hard) in &set_operations {
-            eprintln!("prlimit: setting {} for PID {}: soft={}, hard={}",
-                res.name(), target_pid, soft.display(), hard.display());
+            eprintln!(
+                "prlimit: setting {} for PID {}: soft={}, hard={}",
+                res.name(),
+                target_pid,
+                soft.display(),
+                hard.display()
+            );
         }
         return;
     }
@@ -375,7 +499,8 @@ fn cmd_prlimit(args: &[String]) {
     let filtered = if filter_resources.is_empty() {
         limits
     } else {
-        limits.into_iter()
+        limits
+            .into_iter()
             .filter(|l| filter_resources.contains(&l.resource))
             .collect()
     };
@@ -529,7 +654,10 @@ mod tests {
 
     #[test]
     fn test_resource_descriptions() {
-        assert_eq!(Resource::OpenFiles.description(), "max number of open files");
+        assert_eq!(
+            Resource::OpenFiles.description(),
+            "max number of open files"
+        );
         assert_eq!(Resource::StackSize.description(), "max stack size");
     }
 
@@ -577,7 +705,10 @@ mod tests {
     #[test]
     fn test_default_open_files() {
         let limits = generate_default_limits();
-        let nofile = limits.iter().find(|l| l.resource == Resource::OpenFiles).unwrap();
+        let nofile = limits
+            .iter()
+            .find(|l| l.resource == Resource::OpenFiles)
+            .unwrap();
         assert_eq!(nofile.soft, LimitValue::Value(1024));
         assert_eq!(nofile.hard, LimitValue::Value(1048576));
     }
@@ -585,7 +716,10 @@ mod tests {
     #[test]
     fn test_default_stack_size() {
         let limits = generate_default_limits();
-        let stack = limits.iter().find(|l| l.resource == Resource::StackSize).unwrap();
+        let stack = limits
+            .iter()
+            .find(|l| l.resource == Resource::StackSize)
+            .unwrap();
         assert_eq!(stack.soft, LimitValue::Value(8388608));
         assert_eq!(stack.hard, LimitValue::Unlimited);
     }
@@ -593,7 +727,10 @@ mod tests {
     #[test]
     fn test_default_core_size() {
         let limits = generate_default_limits();
-        let core = limits.iter().find(|l| l.resource == Resource::CoreSize).unwrap();
+        let core = limits
+            .iter()
+            .find(|l| l.resource == Resource::CoreSize)
+            .unwrap();
         assert_eq!(core.soft, LimitValue::Value(0));
         assert_eq!(core.hard, LimitValue::Unlimited);
     }

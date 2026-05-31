@@ -126,7 +126,7 @@ fn print_err(msg: &[u8]) {
 
 // ── Data Types ─────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DeviceType {
     Ata,
     Scsi,
@@ -134,7 +134,7 @@ enum DeviceType {
     Auto,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum HealthStatus {
     Passed,
     Failed,
@@ -238,24 +238,24 @@ struct Options {
     device: [u8; 256],
     device_len: usize,
     device_type: DeviceType,
-    info: bool,          // -i
-    health: bool,        // -H
-    capabilities: bool,  // -c
-    attributes: bool,    // -A
-    all: bool,           // -a
-    everything: bool,    // -x
-    error_log: bool,     // -l error
-    selftest_log: bool,  // -l selftest
-    test_short: bool,    // -t short
-    test_long: bool,     // -t long
+    info: bool,            // -i
+    health: bool,          // -H
+    capabilities: bool,    // -c
+    attributes: bool,      // -A
+    all: bool,             // -a
+    everything: bool,      // -x
+    error_log: bool,       // -l error
+    selftest_log: bool,    // -l selftest
+    test_short: bool,      // -t short
+    test_long: bool,       // -t long
     test_conveyance: bool, // -t conveyance
-    test_abort: bool,    // -X
-    enable_smart: bool,  // -s on
-    disable_smart: bool, // -s off
-    json: bool,          // -j
-    quiet: bool,         // -q
-    verbose: bool,       // -v
-    scan: bool,          // --scan
+    test_abort: bool,      // -X
+    enable_smart: bool,    // -s on
+    disable_smart: bool,   // -s off
+    json: bool,            // -j
+    quiet: bool,           // -q
+    verbose: bool,         // -v
+    scan: bool,            // --scan
 }
 
 // ── Argument Parsing ───────────────────────────────────────────────────
@@ -424,10 +424,19 @@ fn parse_args(argc: i32, argv: *const *const u8) -> Result<Options, i32> {
     }
 
     // Default to showing info+health if nothing specified
-    if !opts.info && !opts.health && !opts.capabilities && !opts.attributes
-        && !opts.error_log && !opts.selftest_log && !opts.test_short
-        && !opts.test_long && !opts.test_conveyance && !opts.test_abort
-        && !opts.enable_smart && !opts.disable_smart && !opts.scan
+    if !opts.info
+        && !opts.health
+        && !opts.capabilities
+        && !opts.attributes
+        && !opts.error_log
+        && !opts.selftest_log
+        && !opts.test_short
+        && !opts.test_long
+        && !opts.test_conveyance
+        && !opts.test_abort
+        && !opts.enable_smart
+        && !opts.disable_smart
+        && !opts.scan
     {
         opts.info = true;
         opts.health = true;
@@ -723,32 +732,56 @@ fn format_attr_flags(flags: u16, buf: &mut [u8]) -> usize {
     let mut pos = 0;
     // Pre-fail (P) vs Old-age (O)
     if pos < buf.len() {
-        buf[pos] = if flags & SMART_FLAG_PREFAIL != 0 { b'P' } else { b'-' };
+        buf[pos] = if flags & SMART_FLAG_PREFAIL != 0 {
+            b'P'
+        } else {
+            b'-'
+        };
         pos += 1;
     }
     // Online (O)
     if pos < buf.len() {
-        buf[pos] = if flags & SMART_FLAG_ONLINE != 0 { b'O' } else { b'-' };
+        buf[pos] = if flags & SMART_FLAG_ONLINE != 0 {
+            b'O'
+        } else {
+            b'-'
+        };
         pos += 1;
     }
     // Performance (S)
     if pos < buf.len() {
-        buf[pos] = if flags & SMART_FLAG_PERFORMANCE != 0 { b'S' } else { b'-' };
+        buf[pos] = if flags & SMART_FLAG_PERFORMANCE != 0 {
+            b'S'
+        } else {
+            b'-'
+        };
         pos += 1;
     }
     // Error rate (R)
     if pos < buf.len() {
-        buf[pos] = if flags & SMART_FLAG_ERROR_RATE != 0 { b'R' } else { b'-' };
+        buf[pos] = if flags & SMART_FLAG_ERROR_RATE != 0 {
+            b'R'
+        } else {
+            b'-'
+        };
         pos += 1;
     }
     // Event count (C)
     if pos < buf.len() {
-        buf[pos] = if flags & SMART_FLAG_EVENT_COUNT != 0 { b'C' } else { b'-' };
+        buf[pos] = if flags & SMART_FLAG_EVENT_COUNT != 0 {
+            b'C'
+        } else {
+            b'-'
+        };
         pos += 1;
     }
     // Self-preserving (K)
     if pos < buf.len() {
-        buf[pos] = if flags & SMART_FLAG_SELF_PRESERVING != 0 { b'K' } else { b'-' };
+        buf[pos] = if flags & SMART_FLAG_SELF_PRESERVING != 0 {
+            b'K'
+        } else {
+            b'-'
+        };
         pos += 1;
     }
     pos
@@ -888,20 +921,111 @@ fn get_smart_data(_path: &[u8], dtype: DeviceType) -> SmartData {
     if dtype != DeviceType::Nvme {
         // Simulate typical ATA SMART attributes
         let attrs: &[(u8, u16, u8, u8, u8, u64)] = &[
-            (ATTR_RAW_READ_ERROR,       SMART_FLAG_PREFAIL | SMART_FLAG_ONLINE | SMART_FLAG_ERROR_RATE, 100, 100, 6, 0),
-            (ATTR_THROUGHPUT_PERF,       SMART_FLAG_ONLINE | SMART_FLAG_PERFORMANCE, 100, 100, 54, 0),
-            (ATTR_SPIN_UP_TIME,          SMART_FLAG_PREFAIL | SMART_FLAG_PERFORMANCE, 100, 100, 24, 250),
-            (ATTR_START_STOP_COUNT,      SMART_FLAG_ONLINE | SMART_FLAG_EVENT_COUNT, 100, 100, 20, 456),
-            (ATTR_REALLOC_SECTOR,        SMART_FLAG_PREFAIL | SMART_FLAG_ONLINE, 100, 100, 10, 0),
-            (ATTR_SEEK_ERROR,            SMART_FLAG_ONLINE | SMART_FLAG_ERROR_RATE, 100, 100, 67, 0),
-            (ATTR_POWER_ON_HOURS,        SMART_FLAG_ONLINE | SMART_FLAG_EVENT_COUNT, 86, 86, 0, 12345),
-            (ATTR_SPIN_RETRY,            SMART_FLAG_PREFAIL | SMART_FLAG_ONLINE, 100, 100, 60, 0),
-            (ATTR_POWER_CYCLE,           SMART_FLAG_ONLINE | SMART_FLAG_EVENT_COUNT, 100, 100, 20, 456),
-            (ATTR_TEMPERATURE,           SMART_FLAG_ONLINE | SMART_FLAG_PERFORMANCE, 166, 166, 0, 34),
-            (ATTR_REALLOC_EVENT,         SMART_FLAG_ONLINE | SMART_FLAG_EVENT_COUNT, 100, 100, 0, 0),
-            (ATTR_CURRENT_PENDING,       SMART_FLAG_ONLINE, 100, 100, 0, 0),
-            (ATTR_OFFLINE_UNCORRECTABLE, SMART_FLAG_ONLINE, 100, 100, 0, 0),
-            (ATTR_UDMA_CRC_ERROR,        SMART_FLAG_ONLINE | SMART_FLAG_ERROR_RATE, 200, 200, 0, 0),
+            (
+                ATTR_RAW_READ_ERROR,
+                SMART_FLAG_PREFAIL | SMART_FLAG_ONLINE | SMART_FLAG_ERROR_RATE,
+                100,
+                100,
+                6,
+                0,
+            ),
+            (
+                ATTR_THROUGHPUT_PERF,
+                SMART_FLAG_ONLINE | SMART_FLAG_PERFORMANCE,
+                100,
+                100,
+                54,
+                0,
+            ),
+            (
+                ATTR_SPIN_UP_TIME,
+                SMART_FLAG_PREFAIL | SMART_FLAG_PERFORMANCE,
+                100,
+                100,
+                24,
+                250,
+            ),
+            (
+                ATTR_START_STOP_COUNT,
+                SMART_FLAG_ONLINE | SMART_FLAG_EVENT_COUNT,
+                100,
+                100,
+                20,
+                456,
+            ),
+            (
+                ATTR_REALLOC_SECTOR,
+                SMART_FLAG_PREFAIL | SMART_FLAG_ONLINE,
+                100,
+                100,
+                10,
+                0,
+            ),
+            (
+                ATTR_SEEK_ERROR,
+                SMART_FLAG_ONLINE | SMART_FLAG_ERROR_RATE,
+                100,
+                100,
+                67,
+                0,
+            ),
+            (
+                ATTR_POWER_ON_HOURS,
+                SMART_FLAG_ONLINE | SMART_FLAG_EVENT_COUNT,
+                86,
+                86,
+                0,
+                12345,
+            ),
+            (
+                ATTR_SPIN_RETRY,
+                SMART_FLAG_PREFAIL | SMART_FLAG_ONLINE,
+                100,
+                100,
+                60,
+                0,
+            ),
+            (
+                ATTR_POWER_CYCLE,
+                SMART_FLAG_ONLINE | SMART_FLAG_EVENT_COUNT,
+                100,
+                100,
+                20,
+                456,
+            ),
+            (
+                ATTR_TEMPERATURE,
+                SMART_FLAG_ONLINE | SMART_FLAG_PERFORMANCE,
+                166,
+                166,
+                0,
+                34,
+            ),
+            (
+                ATTR_REALLOC_EVENT,
+                SMART_FLAG_ONLINE | SMART_FLAG_EVENT_COUNT,
+                100,
+                100,
+                0,
+                0,
+            ),
+            (ATTR_CURRENT_PENDING, SMART_FLAG_ONLINE, 100, 100, 0, 0),
+            (
+                ATTR_OFFLINE_UNCORRECTABLE,
+                SMART_FLAG_ONLINE,
+                100,
+                100,
+                0,
+                0,
+            ),
+            (
+                ATTR_UDMA_CRC_ERROR,
+                SMART_FLAG_ONLINE | SMART_FLAG_ERROR_RATE,
+                200,
+                200,
+                0,
+                0,
+            ),
         ];
 
         for (idx, &(id, flags, cur, worst, thresh, raw)) in attrs.iter().enumerate() {
@@ -1057,7 +1181,11 @@ fn show_device_info(info: &DeviceInfo) {
     if info.smart_supported {
         pos = copy_bytes(&mut buf, pos, b"Available - device has SMART capability.\n");
     } else {
-        pos = copy_bytes(&mut buf, pos, b"Unavailable - device lacks SMART capability.\n");
+        pos = copy_bytes(
+            &mut buf,
+            pos,
+            b"Unavailable - device lacks SMART capability.\n",
+        );
     }
     print_out(&buf[..pos]);
 
@@ -1090,15 +1218,21 @@ fn show_capabilities(info: &DeviceInfo) {
         print_out(b"Offline data collection status:  (0x00) Offline data collection activity\n");
         print_out(b"                                        was never started.\n");
     }
-    print_out(b"Self-test execution status:      (   0) The previous self-test routine completed\n");
+    print_out(
+        b"Self-test execution status:      (   0) The previous self-test routine completed\n",
+    );
     print_out(b"                                        without error or no self-test has ever\n");
     print_out(b"                                        been run.\n");
     print_out(b"Total time to complete Offline\n");
     print_out(b"data collection:                 ( 120) seconds.\n");
     print_out(b"Offline data collection\n");
     print_out(b"capabilities:                    (0x5b) SMART execute Offline immediate.\n");
-    print_out(b"                                        Auto Offline data collection on/off support.\n");
-    print_out(b"                                        Suspend Offline collection upon new command.\n");
+    print_out(
+        b"                                        Auto Offline data collection on/off support.\n",
+    );
+    print_out(
+        b"                                        Suspend Offline collection upon new command.\n",
+    );
     print_out(b"                                        Offline surface scan supported.\n");
     print_out(b"                                        Self-test supported.\n");
     print_out(b"                                        Conveyance Self-test supported.\n");
@@ -1118,7 +1252,9 @@ fn show_capabilities(info: &DeviceInfo) {
 fn show_attributes(data: &SmartData) {
     print_out(b"SMART Attributes Data Structure revision number: 16\n");
     print_out(b"Vendor Specific SMART Attributes with Thresholds:\n");
-    print_out(b"ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  RAW_VALUE\n");
+    print_out(
+        b"ID# ATTRIBUTE_NAME          FLAG     VALUE WORST THRESH TYPE      UPDATED  RAW_VALUE\n",
+    );
 
     let mut buf = [0u8; 256];
     for i in 0..data.attr_count {
@@ -1315,7 +1451,11 @@ fn show_nvme_health(log: &NvmeSmartLog) {
     print_out(&buf[..pos]);
 
     // Temperature
-    let temp_c = if log.temperature > 273 { log.temperature - 273 } else { 0 };
+    let temp_c = if log.temperature > 273 {
+        log.temperature - 273
+    } else {
+        0
+    };
     pos = copy_bytes(&mut buf, 0, b"Temperature:                        ");
     pos += format_u64(temp_c as u64, &mut buf[pos..]);
     pos = copy_bytes(&mut buf, pos, b" Celsius\n");
@@ -1657,7 +1797,11 @@ fn start_selftest(path: &[u8], test_type: u8) {
     // In a real implementation, this would issue ATA SMART EXECUTE OFF-LINE IMMEDIATE
     pos = copy_bytes(&mut buf, 0, b"Sending command: \"Execute SMART ");
     pos = copy_bytes(&mut buf, pos, type_name);
-    pos = copy_bytes(&mut buf, pos, b" self-test routine immediately in off-line mode\".\n");
+    pos = copy_bytes(
+        &mut buf,
+        pos,
+        b" self-test routine immediately in off-line mode\".\n",
+    );
     print_out(&buf[..pos]);
 
     let est_minutes = match test_type {
@@ -1669,7 +1813,11 @@ fn start_selftest(path: &[u8], test_type: u8) {
 
     pos = copy_bytes(&mut buf, 0, b"Drive command \"Execute SMART ");
     pos = copy_bytes(&mut buf, pos, type_name);
-    pos = copy_bytes(&mut buf, pos, b" self-test routine immediately in off-line mode\" successful.\n");
+    pos = copy_bytes(
+        &mut buf,
+        pos,
+        b" self-test routine immediately in off-line mode\" successful.\n",
+    );
     print_out(&buf[..pos]);
 
     pos = copy_bytes(&mut buf, 0, b"Testing has begun.\n");
@@ -1866,7 +2014,10 @@ mod tests {
     fn test_attribute_name_known() {
         assert_eq!(attribute_name(ATTR_TEMPERATURE), b"Temperature_Celsius");
         assert_eq!(attribute_name(ATTR_POWER_ON_HOURS), b"Power_On_Hours");
-        assert_eq!(attribute_name(ATTR_REALLOC_SECTOR), b"Reallocated_Sector_Ct");
+        assert_eq!(
+            attribute_name(ATTR_REALLOC_SECTOR),
+            b"Reallocated_Sector_Ct"
+        );
     }
 
     #[test]

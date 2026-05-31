@@ -168,27 +168,21 @@ fn find_user_by_uid<'a>(users: &'a [User], uid: u32) -> Option<&'a User> {
 /// SHA-256 hash, returning a lowercase hex string.
 fn sha256_hex(data: &[u8]) -> String {
     const K: [u32; 64] = [
-        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5,
-        0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
-        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc,
-        0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
-        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3,
-        0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5,
-        0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
-        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
     ];
 
     let mut h: [u32; 8] = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-        0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
     ];
 
     // Padding.
@@ -212,12 +206,8 @@ fn sha256_hex(data: &[u8]) -> String {
             ]);
         }
         for i in 16..64 {
-            let s0 = w[i - 15].rotate_right(7)
-                ^ w[i - 15].rotate_right(18)
-                ^ (w[i - 15] >> 3);
-            let s1 = w[i - 2].rotate_right(17)
-                ^ w[i - 2].rotate_right(19)
-                ^ (w[i - 2] >> 10);
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
             w[i] = w[i - 16]
                 .wrapping_add(s0)
                 .wrapping_add(w[i - 7])
@@ -363,9 +353,7 @@ fn record_session(username: &str, tty: &str) {
     // OurOS native session file.
     let session_dir = "/run/sessions";
     let _ = fs::create_dir_all(session_dir);
-    let session_content = format!(
-        "user={username}\ntty={tty}\nhost=\ntime={now}\npid={pid}\n"
-    );
+    let session_content = format!("user={username}\ntty={tty}\nhost=\ntime={now}\npid={pid}\n");
     let _ = fs::write(format!("{session_dir}/{pid}"), &session_content);
 
     // Fallback marker for /tmp/.users/.
@@ -513,6 +501,7 @@ fn detect_tty() -> String {
 // ============================================================================
 
 /// Parsed options for `su`.
+#[derive(Debug)]
 struct SuOptions {
     /// Target username (default: "root").
     target_user: String,
@@ -697,6 +686,7 @@ fn run_su(args: &[String]) -> i32 {
 // ============================================================================
 
 /// Parsed options for `sudo`.
+#[derive(Debug)]
 struct SudoOptions {
     /// Target username (default: "root").
     target_user: String,
@@ -793,8 +783,7 @@ fn sudo_authorised(caller: &User, target_uid: u32) -> bool {
     // For non-root targets, the caller must be root.
     if target_uid != 0 {
         // Allow wheel/admin members to sudo to any user.
-        return caller.groups.iter().any(|g| g == "wheel" || g == "admin")
-            || caller.admin;
+        return caller.groups.iter().any(|g| g == "wheel" || g == "admin") || caller.admin;
     }
 
     // Wheel/admin members can sudo to root.
@@ -806,9 +795,7 @@ fn sudo_list_permissions(caller: &User) {
     println!("User {} may run the following commands:", caller.username);
     if caller.uid == 0 {
         println!("    (ALL) ALL");
-    } else if caller.admin
-        || caller.groups.iter().any(|g| g == "wheel" || g == "admin")
-    {
+    } else if caller.admin || caller.groups.iter().any(|g| g == "wheel" || g == "admin") {
         println!("    (ALL) ALL  [via wheel/admin group membership]");
     } else {
         println!("    (NONE)");
@@ -898,8 +885,8 @@ fn run_sudo(args: &[String]) -> i32 {
         target,
         None,
         Some(&command_str),
-        false,  // not a login shell
-        false,  // don't preserve env
+        false, // not a login shell
+        false, // don't preserve env
     );
 
     exit_code
@@ -909,9 +896,7 @@ fn run_sudo(args: &[String]) -> i32 {
 fn log_sudo_failure(username: &str, command: &[String]) {
     let now = current_epoch_secs();
     let cmd_str = command.join(" ");
-    let msg = format!(
-        "{now} sudo: DENIED user={username} command=\"{cmd_str}\"\n"
-    );
+    let msg = format!("{now} sudo: DENIED user={username} command=\"{cmd_str}\"\n");
     // Best-effort: append to the auth log.
     if let Ok(mut file) = fs::OpenOptions::new()
         .create(true)
@@ -935,10 +920,7 @@ fn basename(path: &str) -> &str {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let prog = args
-        .first()
-        .map(|s| basename(s))
-        .unwrap_or("su");
+    let prog = args.first().map(|s| basename(s)).unwrap_or("su");
 
     let exit_code = if prog == "sudo" || prog == "sudo.exe" {
         run_sudo(&args)
@@ -1249,11 +1231,7 @@ users:
 
     #[test]
     fn test_su_args_login_dash_user() {
-        let args = vec![
-            "su".to_string(),
-            "-".to_string(),
-            "alice".to_string(),
-        ];
+        let args = vec!["su".to_string(), "-".to_string(), "alice".to_string()];
         let opts = parse_su_args(&args).unwrap();
         assert!(opts.login);
         assert_eq!(opts.target_user, "alice");
@@ -1261,11 +1239,7 @@ users:
 
     #[test]
     fn test_su_args_login_l() {
-        let args = vec![
-            "su".to_string(),
-            "-l".to_string(),
-            "bob".to_string(),
-        ];
+        let args = vec!["su".to_string(), "-l".to_string(), "bob".to_string()];
         let opts = parse_su_args(&args).unwrap();
         assert!(opts.login);
         assert_eq!(opts.target_user, "bob");
@@ -1339,11 +1313,7 @@ users:
 
     #[test]
     fn test_sudo_args_simple_command() {
-        let args = vec![
-            "sudo".to_string(),
-            "ls".to_string(),
-            "-la".to_string(),
-        ];
+        let args = vec!["sudo".to_string(), "ls".to_string(), "-la".to_string()];
         let opts = parse_sudo_args(&args).unwrap();
         assert_eq!(opts.target_user, "root");
         assert_eq!(opts.command, vec!["ls", "-la"]);
@@ -1459,11 +1429,7 @@ users:
         // Only the last positional is the username; earlier ones are ignored.
         // (Matches traditional su behavior: extra args before the username
         //  are not meaningful.)
-        let args = vec![
-            "su".to_string(),
-            "first".to_string(),
-            "second".to_string(),
-        ];
+        let args = vec!["su".to_string(), "first".to_string(), "second".to_string()];
         let opts = parse_su_args(&args).unwrap();
         assert_eq!(opts.target_user, "second");
     }

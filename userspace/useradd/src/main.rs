@@ -264,7 +264,7 @@ impl Database {
             Ok(c) => c,
             Err(_) => return Vec::new(),
         };
-        content.lines().filter_map(|l| parser(l)).collect()
+        content.lines().filter_map(parser).collect()
     }
 
     /// Write all four files atomically: write temp, create backup, rename.
@@ -385,7 +385,8 @@ fn validate_username(name: &str) -> Result<(), String> {
         return Err("username must start with a lowercase letter or underscore".to_string());
     }
     for ch in name.chars() {
-        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-' || ch == '.') {
+        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-' || ch == '.')
+        {
             return Err(format!(
                 "invalid character '{}' in username (allowed: a-z, 0-9, _, -, .)",
                 ch
@@ -403,7 +404,8 @@ fn validate_groupname(name: &str) -> Result<(), String> {
         return Err("group name too long (max 32 characters)".to_string());
     }
     for ch in name.chars() {
-        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-' || ch == '.') {
+        if !(ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_' || ch == '-' || ch == '.')
+        {
             return Err(format!(
                 "invalid character '{}' in group name (allowed: a-z, 0-9, _, -, .)",
                 ch
@@ -784,10 +786,10 @@ fn cmd_useradd(argv: &[String]) -> i32 {
             }
         }
         let found_gs = db.gshadow.iter_mut().find(|g| g.name == *gname);
-        if let Some(gs) = found_gs {
-            if !gs.members.contains(&username) {
-                gs.members.push(username.clone());
-            }
+        if let Some(gs) = found_gs
+            && !gs.members.contains(&username)
+        {
+            gs.members.push(username.clone());
         }
     }
 
@@ -799,9 +801,7 @@ fn cmd_useradd(argv: &[String]) -> i32 {
 
     // Create home directory if requested.
     if opts.create_home {
-        let skel = opts
-            .skel_dir
-            .unwrap_or_else(|| SKEL_DIR.to_string());
+        let skel = opts.skel_dir.unwrap_or_else(|| SKEL_DIR.to_string());
         if let Err(e) = create_home_dir(&home, &skel, uid, gid) {
             write_stderr(&format!("useradd: {}", e));
             return 1;
@@ -897,11 +897,11 @@ fn cmd_userdel(argv: &[String]) -> i32 {
     }
 
     // Remove home directory if requested.
-    if opts.remove_home {
-        if let Err(e) = remove_home_dir(&user.home) {
-            write_stderr(&format!("userdel: warning: {}", e));
-            // Not fatal, user was already deleted.
-        }
+    if opts.remove_home
+        && let Err(e) = remove_home_dir(&user.home)
+    {
+        write_stderr(&format!("userdel: warning: {}", e));
+        // Not fatal, user was already deleted.
     }
 
     0
@@ -1098,11 +1098,7 @@ fn cmd_usermod(argv: &[String]) -> i32 {
     }
 
     // Supplementary groups.
-    let effective_username = opts
-        .new_login
-        .as_deref()
-        .unwrap_or(&username)
-        .to_string();
+    let effective_username = opts.new_login.as_deref().unwrap_or(&username).to_string();
 
     if opts.supp_groups_set {
         // Verify all groups exist.
@@ -1116,68 +1112,63 @@ fn cmd_usermod(argv: &[String]) -> i32 {
         if opts.append_groups {
             // Append mode: add to listed groups without removing from existing.
             for gname in &opts.supp_groups {
-                if let Some(ge) = db.groups.iter_mut().find(|g| g.name == *gname) {
-                    if !ge.members.contains(&effective_username) {
-                        ge.members.push(effective_username.clone());
-                    }
+                if let Some(ge) = db.groups.iter_mut().find(|g| g.name == *gname)
+                    && !ge.members.contains(&effective_username)
+                {
+                    ge.members.push(effective_username.clone());
                 }
-                if let Some(gs) = db.gshadow.iter_mut().find(|g| g.name == *gname) {
-                    if !gs.members.contains(&effective_username) {
-                        gs.members.push(effective_username.clone());
-                    }
+                if let Some(gs) = db.gshadow.iter_mut().find(|g| g.name == *gname)
+                    && !gs.members.contains(&effective_username)
+                {
+                    gs.members.push(effective_username.clone());
                 }
             }
         } else {
             // Replace mode: remove from all groups, add to listed groups.
             db.remove_user_from_groups(&effective_username);
             for gname in &opts.supp_groups {
-                if let Some(ge) = db.groups.iter_mut().find(|g| g.name == *gname) {
-                    if !ge.members.contains(&effective_username) {
-                        ge.members.push(effective_username.clone());
-                    }
+                if let Some(ge) = db.groups.iter_mut().find(|g| g.name == *gname)
+                    && !ge.members.contains(&effective_username)
+                {
+                    ge.members.push(effective_username.clone());
                 }
-                if let Some(gs) = db.gshadow.iter_mut().find(|g| g.name == *gname) {
-                    if !gs.members.contains(&effective_username) {
-                        gs.members.push(effective_username.clone());
-                    }
+                if let Some(gs) = db.gshadow.iter_mut().find(|g| g.name == *gname)
+                    && !gs.members.contains(&effective_username)
+                {
+                    gs.members.push(effective_username.clone());
                 }
             }
         }
     }
 
     // Lock/unlock.
-    if opts.lock {
-        if let Some(se) = db
+    if opts.lock
+        && let Some(se) = db
             .shadow
             .iter_mut()
             .find(|s| s.username == effective_username)
-        {
-            if !se.hash.starts_with('!') {
-                se.hash = format!("!{}", se.hash);
-            }
-        }
+        && !se.hash.starts_with('!')
+    {
+        se.hash = format!("!{}", se.hash);
     }
-    if opts.unlock {
-        if let Some(se) = db
+    if opts.unlock
+        && let Some(se) = db
             .shadow
             .iter_mut()
             .find(|s| s.username == effective_username)
-        {
-            if se.hash.starts_with('!') {
-                se.hash = se.hash[1..].to_string();
-            }
-        }
+        && se.hash.starts_with('!')
+    {
+        se.hash = se.hash[1..].to_string();
     }
 
     // Expire date.
-    if let Some(ref exp) = opts.expire_date {
-        if let Some(se) = db
+    if let Some(ref exp) = opts.expire_date
+        && let Some(se) = db
             .shadow
             .iter_mut()
             .find(|s| s.username == effective_username)
-        {
-            se.expire = exp.clone();
-        }
+    {
+        se.expire = exp.clone();
     }
 
     if let Err(e) = db.save() {
@@ -1186,18 +1177,17 @@ fn cmd_usermod(argv: &[String]) -> i32 {
     }
 
     // Move home directory if requested.
-    if opts.move_home {
-        if let Some(ref new_home) = opts.home_dir {
-            if Path::new(&old_home).exists() && old_home != *new_home {
-                if let Err(e) = fs::rename(&old_home, new_home) {
-                    write_stderr(&format!(
-                        "usermod: failed to move {} to {}: {}",
-                        old_home, new_home, e
-                    ));
-                    return 1;
-                }
-            }
-        }
+    if opts.move_home
+        && let Some(ref new_home) = opts.home_dir
+        && Path::new(&old_home).exists()
+        && old_home != *new_home
+        && let Err(e) = fs::rename(&old_home, new_home)
+    {
+        write_stderr(&format!(
+            "usermod: failed to move {} to {}: {}",
+            old_home, new_home, e
+        ));
+        return 1;
     }
 
     0
@@ -1471,13 +1461,12 @@ fn cmd_groupmod(argv: &[String]) -> i32 {
     }
 
     // Validate new GID.
-    if let Some(new_gid) = opts.new_gid {
-        if let Some(existing) = db.find_group_by_gid(new_gid) {
-            if existing.name != groupname {
-                write_stderr(&format!("groupmod: GID {} already in use", new_gid));
-                return 1;
-            }
-        }
+    if let Some(new_gid) = opts.new_gid
+        && let Some(existing) = db.find_group_by_gid(new_gid)
+        && existing.name != groupname
+    {
+        write_stderr(&format!("groupmod: GID {} already in use", new_gid));
+        return 1;
     }
 
     let old_gid = db.groups[group_idx].gid;
@@ -1558,10 +1547,7 @@ fn cmd_newgrp(argv: &[String]) -> i32 {
 
 /// Extract the basename of argv[0], stripping path separators and .exe suffix.
 fn detect_personality(argv0: &str) -> &str {
-    let name = argv0
-        .rsplit(|c: char| c == '/' || c == '\\')
-        .next()
-        .unwrap_or(argv0);
+    let name = argv0.rsplit(['/', '\\']).next().unwrap_or(argv0);
     name.strip_suffix(".exe").unwrap_or(name)
 }
 
@@ -1613,6 +1599,7 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     // Each test uses a unique temp directory to avoid interference.
@@ -2228,8 +2215,7 @@ mod tests {
             home: String::new(),
             shell: String::new(),
         }];
-        Database::atomic_write(&path, &entries, PasswdEntry::serialize)
-            .expect("write");
+        Database::atomic_write(&path, &entries, PasswdEntry::serialize).expect("write");
 
         let backup_content = fs::read_to_string(&backup).expect("read backup");
         assert_eq!(backup_content, "original\n");
@@ -2439,7 +2425,12 @@ mod tests {
 
     #[test]
     fn test_parse_groupadd_system() {
-        let args = vec!["-r".to_string(), "-g".to_string(), "500".to_string(), "sysgroup".to_string()];
+        let args = vec![
+            "-r".to_string(),
+            "-g".to_string(),
+            "500".to_string(),
+            "sysgroup".to_string(),
+        ];
         let opts = parse_groupadd_args(&args);
         assert!(opts.system_group);
         assert_eq!(opts.gid, Some(500));
@@ -2460,11 +2451,7 @@ mod tests {
 
     #[test]
     fn test_parse_groupmod_change_gid() {
-        let args = vec![
-            "-g".to_string(),
-            "5000".to_string(),
-            "mygroup".to_string(),
-        ];
+        let args = vec!["-g".to_string(), "5000".to_string(), "mygroup".to_string()];
         let opts = parse_groupmod_args(&args);
         assert_eq!(opts.new_gid, Some(5000));
         assert_eq!(opts.groupname.as_deref(), Some("mygroup"));
@@ -2929,27 +2916,16 @@ mod tests {
             name: "team".to_string(),
             password: "x".to_string(),
             gid: 100,
-            members: vec![
-                "alice".to_string(),
-                "bob".to_string(),
-                "carol".to_string(),
-            ],
+            members: vec!["alice".to_string(), "bob".to_string(), "carol".to_string()],
         });
         db.gshadow.push(GshadowEntry {
             name: "team".to_string(),
             password: "!".to_string(),
             admins: String::new(),
-            members: vec![
-                "alice".to_string(),
-                "bob".to_string(),
-                "carol".to_string(),
-            ],
+            members: vec!["alice".to_string(), "bob".to_string(), "carol".to_string()],
         });
         db.rename_user_in_groups("bob", "robert");
-        assert_eq!(
-            db.groups[0].members,
-            vec!["alice", "robert", "carol"]
-        );
+        assert_eq!(db.groups[0].members, vec!["alice", "robert", "carol"]);
     }
 
     #[test]

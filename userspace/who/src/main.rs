@@ -88,6 +88,7 @@ struct SessionRecord {
 }
 
 /// What the user asked us to do.
+#[derive(Debug)]
 struct Options {
     /// Show all record types, not just USER_PROCESS.
     show_all: bool,
@@ -924,9 +925,7 @@ fn print_w(records: &[&SessionRecord]) {
     };
     let user_word = if user_count == 1 { "user" } else { "users" };
 
-    println!(
-        " {time_str} {uptime_str},  {user_count} {user_word},  {load_str}"
-    );
+    println!(" {time_str} {uptime_str},  {user_count} {user_word},  {load_str}");
 
     // Column headings.
     println!(
@@ -970,10 +969,7 @@ fn json_escape(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             c if c.is_control() => {
                 for unit in c.encode_utf16(&mut [0u16; 2]) {
-                    let _ = std::fmt::Write::write_fmt(
-                        &mut out,
-                        format_args!("\\u{unit:04x}"),
-                    );
+                    let _ = std::fmt::Write::write_fmt(&mut out, format_args!("\\u{unit:04x}"));
                 }
             }
             c => out.push(c),
@@ -1007,44 +1003,26 @@ fn print_json(records: &[&SessionRecord], opts: &Options) {
         };
 
         println!("    {{");
-        println!(
-            "      \"user\": \"{}\",",
-            json_escape(&record.user)
-        );
-        println!(
-            "      \"tty\": \"{}\",",
-            json_escape(&record.tty)
-        );
-        println!(
-            "      \"host\": \"{}\",",
-            json_escape(&record.host)
-        );
+        println!("      \"user\": \"{}\",", json_escape(&record.user));
+        println!("      \"tty\": \"{}\",", json_escape(&record.tty));
+        println!("      \"host\": \"{}\",", json_escape(&record.host));
         println!("      \"login_time\": {},", record.login_time);
         println!(
             "      \"login_time_formatted\": \"{}\",",
             json_escape(&format_datetime(record.login_time))
         );
         println!("      \"pid\": {},", record.pid);
-        println!(
-            "      \"type\": \"{}\",",
-            type_name(record.record_type)
-        );
+        println!("      \"type\": \"{}\",", type_name(record.record_type));
 
         if opts.show_idle || opts.w_mode {
             println!("      \"idle_seconds\": {idle},");
         }
         if opts.show_mesg {
-            println!(
-                "      \"mesg\": \"{}\",",
-                json_escape(&mesg)
-            );
+            println!("      \"mesg\": \"{}\",", json_escape(&mesg));
         }
 
         // The last field must not have a trailing comma.
-        println!(
-            "      \"id\": \"{}\"",
-            json_escape(&record.id)
-        );
+        println!("      \"id\": \"{}\"", json_escape(&record.id));
         println!("    }}{comma}");
     }
 
@@ -1107,14 +1085,15 @@ fn parse_args(args: &[String]) -> Result<Options, i32> {
         }
     }
 
-    // Check for "who am i" pattern: args are ["who", "am", "i"] or similar.
-    if args.len() >= 3 {
-        let a1 = args[1].to_ascii_lowercase();
-        let a2 = args[2].to_ascii_lowercase();
-        if (a1 == "am" && a2 == "i") || (a1 == "am" && a2 == "i") {
-            opts.am_i = true;
-            return Ok(opts);
-        }
+    // GNU `who` treats any invocation with exactly two non-option operands
+    // ("who am i", "who mom likes", ...) as the -m / current-user form.
+    if let (Some(a1), Some(a2)) = (args.get(1), args.get(2))
+        && args.len() == 3
+        && !a1.starts_with('-')
+        && !a2.starts_with('-')
+    {
+        opts.am_i = true;
+        return Ok(opts);
     }
 
     let mut i = 1;
@@ -1291,10 +1270,7 @@ mod tests {
 
     #[test]
     fn test_format_datetime_full() {
-        assert_eq!(
-            format_datetime_full(1_718_461_845),
-            "2024-06-15 14:30:45"
-        );
+        assert_eq!(format_datetime_full(1_718_461_845), "2024-06-15 14:30:45");
     }
 
     #[test]

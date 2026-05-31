@@ -92,12 +92,30 @@ impl Default for ThermalConfig {
         Self {
             uuid: "default".to_string(),
             trips: vec![
-                ConfigTrip { _name: "passive".to_string(), trip_type: "passive".to_string(), temperature: 85000 },
-                ConfigTrip { _name: "critical".to_string(), trip_type: "critical".to_string(), temperature: 100000 },
+                ConfigTrip {
+                    _name: "passive".to_string(),
+                    trip_type: "passive".to_string(),
+                    temperature: 85000,
+                },
+                ConfigTrip {
+                    _name: "critical".to_string(),
+                    trip_type: "critical".to_string(),
+                    temperature: 100000,
+                },
             ],
             cooling_devices: vec![
-                ConfigCooling { _name: "cpu-fan".to_string(), _cooling_type: "fan".to_string(), _min_state: 0, _max_state: 10 },
-                ConfigCooling { _name: "cpu-freq".to_string(), _cooling_type: "processor".to_string(), _min_state: 0, _max_state: 5 },
+                ConfigCooling {
+                    _name: "cpu-fan".to_string(),
+                    _cooling_type: "fan".to_string(),
+                    _min_state: 0,
+                    _max_state: 10,
+                },
+                ConfigCooling {
+                    _name: "cpu-freq".to_string(),
+                    _cooling_type: "processor".to_string(),
+                    _min_state: 0,
+                    _max_state: 5,
+                },
             ],
         }
     }
@@ -110,13 +128,15 @@ fn format_temp(mc: i64) -> String {
     format!("{:.1}°C", celsius)
 }
 
-fn __parse_temp(s: &str) -> Option<i64> {
+fn _parse_temp(s: &str) -> Option<i64> {
     let s = s.trim().to_lowercase();
-    if let Some(n) = s.strip_suffix('c') {
+    // Check "mc" (millicelsius) before 'c' (celsius): "100000mc" also ends in
+    // 'c', so the celsius branch must not claim it first.
+    if let Some(n) = s.strip_suffix("mc") {
+        n.trim().parse().ok()
+    } else if let Some(n) = s.strip_suffix('c') {
         let val: f64 = n.trim().parse().ok()?;
         Some((val * 1000.0) as i64)
-    } else if let Some(n) = s.strip_suffix("mc") {
-        n.trim().parse().ok()
     } else if let Ok(val) = s.parse::<f64>() {
         if val > 200.0 {
             // Likely millicelsius
@@ -144,19 +164,21 @@ fn read_thermal_zones() -> Vec<ThermalZone> {
         if !name_str.starts_with("thermal_zone") {
             continue;
         }
-        let id: u32 = match name_str.strip_prefix("thermal_zone").and_then(|s| s.parse().ok()) {
+        let id: u32 = match name_str
+            .strip_prefix("thermal_zone")
+            .and_then(|s| s.parse().ok())
+        {
             Some(v) => v,
             None => continue,
         };
 
         let base = entry.path();
-        let zone_type = read_file_string(&base.join("type"))
-            .unwrap_or_else(|| "unknown".to_string());
+        let zone_type =
+            read_file_string(&base.join("type")).unwrap_or_else(|| "unknown".to_string());
         let temp_mc = read_file_i64(&base.join("temp")).unwrap_or(0);
-        let policy = read_file_string(&base.join("policy"))
-            .unwrap_or_else(|| "step_wise".to_string());
-        let mode = read_file_string(&base.join("mode"))
-            .unwrap_or_else(|| "enabled".to_string());
+        let policy =
+            read_file_string(&base.join("policy")).unwrap_or_else(|| "step_wise".to_string());
+        let mode = read_file_string(&base.join("mode")).unwrap_or_else(|| "enabled".to_string());
 
         let mut trip_points = Vec::new();
         for tp_id in 0..20 {
@@ -210,8 +232,18 @@ fn fallback_zones() -> Vec<ThermalZone> {
             zone_type: "x86_pkg_temp".to_string(),
             temp_mc: 45000,
             trip_points: vec![
-                TripPoint { id: 0, trip_type: TripType::Passive, temp_mc: 85000, _hysteresis: 5000 },
-                TripPoint { id: 1, trip_type: TripType::Critical, temp_mc: 100000, _hysteresis: 0 },
+                TripPoint {
+                    id: 0,
+                    trip_type: TripType::Passive,
+                    temp_mc: 85000,
+                    _hysteresis: 5000,
+                },
+                TripPoint {
+                    id: 1,
+                    trip_type: TripType::Critical,
+                    temp_mc: 100000,
+                    _hysteresis: 0,
+                },
             ],
             policy: "step_wise".to_string(),
             _mode: "enabled".to_string(),
@@ -221,9 +253,24 @@ fn fallback_zones() -> Vec<ThermalZone> {
             zone_type: "acpitz".to_string(),
             temp_mc: 40000,
             trip_points: vec![
-                TripPoint { id: 0, trip_type: TripType::Active, temp_mc: 50000, _hysteresis: 2000 },
-                TripPoint { id: 1, trip_type: TripType::Passive, temp_mc: 80000, _hysteresis: 5000 },
-                TripPoint { id: 2, trip_type: TripType::Critical, temp_mc: 95000, _hysteresis: 0 },
+                TripPoint {
+                    id: 0,
+                    trip_type: TripType::Active,
+                    temp_mc: 50000,
+                    _hysteresis: 2000,
+                },
+                TripPoint {
+                    id: 1,
+                    trip_type: TripType::Passive,
+                    temp_mc: 80000,
+                    _hysteresis: 5000,
+                },
+                TripPoint {
+                    id: 2,
+                    trip_type: TripType::Critical,
+                    temp_mc: 95000,
+                    _hysteresis: 0,
+                },
             ],
             policy: "step_wise".to_string(),
             _mode: "enabled".to_string(),
@@ -244,14 +291,17 @@ fn read_cooling_devices() -> Vec<CoolingDevice> {
         if !name_str.starts_with("cooling_device") {
             continue;
         }
-        let id: u32 = match name_str.strip_prefix("cooling_device").and_then(|s| s.parse().ok()) {
+        let id: u32 = match name_str
+            .strip_prefix("cooling_device")
+            .and_then(|s| s.parse().ok())
+        {
             Some(v) => v,
             None => continue,
         };
 
         let base = entry.path();
-        let device_type = read_file_string(&base.join("type"))
-            .unwrap_or_else(|| "unknown".to_string());
+        let device_type =
+            read_file_string(&base.join("type")).unwrap_or_else(|| "unknown".to_string());
         let cur_state = read_file_string(&base.join("cur_state"))
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
@@ -277,9 +327,24 @@ fn read_cooling_devices() -> Vec<CoolingDevice> {
 
 fn fallback_cooling() -> Vec<CoolingDevice> {
     vec![
-        CoolingDevice { id: 0, device_type: "Processor".to_string(), cur_state: 0, max_state: 5 },
-        CoolingDevice { id: 1, device_type: "Fan".to_string(), cur_state: 3, max_state: 10 },
-        CoolingDevice { id: 2, device_type: "intel_powerclamp".to_string(), cur_state: 0, max_state: 50 },
+        CoolingDevice {
+            id: 0,
+            device_type: "Processor".to_string(),
+            cur_state: 0,
+            max_state: 5,
+        },
+        CoolingDevice {
+            id: 1,
+            device_type: "Fan".to_string(),
+            cur_state: 3,
+            max_state: 10,
+        },
+        CoolingDevice {
+            id: 2,
+            device_type: "intel_powerclamp".to_string(),
+            cur_state: 0,
+            max_state: 50,
+        },
     ]
 }
 
@@ -300,18 +365,26 @@ fn read_thermal_config() -> ThermalConfig {
     // Simple XML-like parsing
     let mut config = ThermalConfig::default();
     let mut in_trip = false;
-    let mut current_trip = ConfigTrip { _name: String::new(), trip_type: String::new(), temperature: 0 };
+    let mut current_trip = ConfigTrip {
+        _name: String::new(),
+        trip_type: String::new(),
+        temperature: 0,
+    };
 
     for line in content.lines() {
         let line = line.trim();
-        if line.contains("<UUID>") {
-            if let Some(uuid) = extract_xml_value(line, "UUID") {
-                config.uuid = uuid;
-            }
+        if line.contains("<UUID>")
+            && let Some(uuid) = extract_xml_value(line, "UUID")
+        {
+            config.uuid = uuid;
         }
         if line.contains("<TripPoint>") {
             in_trip = true;
-            current_trip = ConfigTrip { _name: String::new(), trip_type: String::new(), temperature: 0 };
+            current_trip = ConfigTrip {
+                _name: String::new(),
+                trip_type: String::new(),
+                temperature: 0,
+            };
         }
         if in_trip {
             if let Some(name) = extract_xml_value(line, "Name") {
@@ -349,55 +422,95 @@ fn cmd_status() {
 
     println!("Thermal Zones:");
     for z in &zones {
-        let status = if z.trip_points.iter().any(|tp| tp.trip_type == TripType::Critical && z.temp_mc >= tp.temp_mc) {
+        let status = if z
+            .trip_points
+            .iter()
+            .any(|tp| tp.trip_type == TripType::Critical && z.temp_mc >= tp.temp_mc)
+        {
             "CRITICAL"
-        } else if z.trip_points.iter().any(|tp| tp.trip_type == TripType::Passive && z.temp_mc >= tp.temp_mc) {
+        } else if z
+            .trip_points
+            .iter()
+            .any(|tp| tp.trip_type == TripType::Passive && z.temp_mc >= tp.temp_mc)
+        {
             "THROTTLING"
         } else {
             "OK"
         };
-        println!("  zone{}: {} {} [{}] (policy: {})",
-            z.id, z.zone_type, format_temp(z.temp_mc), status, z.policy);
+        println!(
+            "  zone{}: {} {} [{}] (policy: {})",
+            z.id,
+            z.zone_type,
+            format_temp(z.temp_mc),
+            status,
+            z.policy
+        );
         for tp in &z.trip_points {
-            let active = if z.temp_mc >= tp.temp_mc { " [ACTIVE]" } else { "" };
-            println!("    trip{}: {} @ {}{}",
-                tp.id, tp.trip_type, format_temp(tp.temp_mc), active);
+            let active = if z.temp_mc >= tp.temp_mc {
+                " [ACTIVE]"
+            } else {
+                ""
+            };
+            println!(
+                "    trip{}: {} @ {}{}",
+                tp.id,
+                tp.trip_type,
+                format_temp(tp.temp_mc),
+                active
+            );
         }
     }
 
     println!("\nCooling Devices:");
     for d in &cooling {
-        let pct = if d.max_state > 0 {
-            format!("{}%", d.cur_state * 100 / d.max_state)
-        } else {
-            "N/A".to_string()
+        let pct = match (d.cur_state * 100).checked_div(d.max_state) {
+            Some(p) => format!("{p}%"),
+            None => "N/A".to_string(),
         };
-        println!("  cooling{}: {} (state {}/{}, {})",
-            d.id, d.device_type, d.cur_state, d.max_state, pct);
+        println!(
+            "  cooling{}: {} (state {}/{}, {})",
+            d.id, d.device_type, d.cur_state, d.max_state, pct
+        );
     }
 }
 
 fn cmd_zones() {
     let zones = read_thermal_zones();
-    println!("{:<6} {:<20} {:>10} {:>8} {}", "ZONE", "TYPE", "TEMP", "TRIPS", "POLICY");
+    println!(
+        "{:<6} {:<20} {:>10} {:>8} POLICY",
+        "ZONE", "TYPE", "TEMP", "TRIPS"
+    );
     for z in &zones {
-        println!("{:<6} {:<20} {:>10} {:>8} {}",
-            format!("zone{}", z.id), z.zone_type, format_temp(z.temp_mc),
-            z.trip_points.len(), z.policy);
+        println!(
+            "{:<6} {:<20} {:>10} {:>8} {}",
+            format!("zone{}", z.id),
+            z.zone_type,
+            format_temp(z.temp_mc),
+            z.trip_points.len(),
+            z.policy
+        );
     }
 }
 
 fn cmd_cooling() {
     let devices = read_cooling_devices();
-    println!("{:<10} {:<20} {:>6} {:>6} {:>6}", "DEVICE", "TYPE", "CUR", "MAX", "PCT");
+    println!(
+        "{:<10} {:<20} {:>6} {:>6} {:>6}",
+        "DEVICE", "TYPE", "CUR", "MAX", "PCT"
+    );
     for d in &devices {
-        let pct = if d.max_state > 0 {
-            format!("{}%", d.cur_state * 100 / d.max_state)
-        } else {
-            "N/A".to_string()
+        let pct = match (d.cur_state * 100).checked_div(d.max_state) {
+            Some(p) => format!("{p}%"),
+            None => "N/A".to_string(),
         };
-        println!("{:<10} {:<20} {:>6} {:>6} {:>6}",
-            format!("cool{}", d.id), d.device_type, d.cur_state, d.max_state, pct);
+        println!(
+            "{:<10} {:<20} {:>6} {:>6} {:>6}",
+            format!("cool{}", d.id),
+            d.device_type,
+            d.cur_state,
+            d.max_state,
+            pct
+        );
     }
 }
 
@@ -407,12 +520,19 @@ fn cmd_config_show() {
     println!("  UUID: {}", config.uuid);
     println!("\n  Trip Points:");
     for tp in &config.trips {
-        println!("    {} ({}): {}", tp._name, tp.trip_type, format_temp(tp.temperature));
+        println!(
+            "    {} ({}): {}",
+            tp._name,
+            tp.trip_type,
+            format_temp(tp.temperature)
+        );
     }
     println!("\n  Cooling Devices:");
     for cd in &config.cooling_devices {
-        println!("    {} ({}): state {}-{}",
-            cd._name, cd._cooling_type, cd._min_state, cd._max_state);
+        println!(
+            "    {} ({}): state {}-{}",
+            cd._name, cd._cooling_type, cd._min_state, cd._max_state
+        );
     }
 }
 
@@ -440,8 +560,12 @@ fn run_daemon_mode(args: &[String]) {
 
     let zones = read_thermal_zones();
     for z in &zones {
-        println!("thermald: monitoring zone{} ({}) at {}",
-            z.id, z.zone_type, format_temp(z.temp_mc));
+        println!(
+            "thermald: monitoring zone{} ({}) at {}",
+            z.id,
+            z.zone_type,
+            format_temp(z.temp_mc)
+        );
     }
 
     println!("thermald: daemon ready");
@@ -498,7 +622,10 @@ fn run_thermald(args: Vec<String>) -> i32 {
 
 fn run_monitor(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-    let cmd = rest.first().cloned().unwrap_or_else(|| "status".to_string());
+    let cmd = rest
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "status".to_string());
 
     if cmd == "-h" || cmd == "--help" {
         print_monitor_help();
@@ -630,8 +757,14 @@ mod tests {
 
     #[test]
     fn test_extract_xml_value() {
-        assert_eq!(extract_xml_value("<UUID>abc123</UUID>", "UUID"), Some("abc123".to_string()));
-        assert_eq!(extract_xml_value("<Temperature>85000</Temperature>", "Temperature"), Some("85000".to_string()));
+        assert_eq!(
+            extract_xml_value("<UUID>abc123</UUID>", "UUID"),
+            Some("abc123".to_string())
+        );
+        assert_eq!(
+            extract_xml_value("<Temperature>85000</Temperature>", "Temperature"),
+            Some("85000".to_string())
+        );
         assert_eq!(extract_xml_value("no xml here", "UUID"), None);
     }
 
@@ -640,8 +773,11 @@ mod tests {
         let zones = fallback_zones();
         for z in &zones {
             for i in 1..z.trip_points.len() {
-                assert!(z.trip_points[i].temp_mc >= z.trip_points[i-1].temp_mc,
-                    "Trip points not ordered in zone{}", z.id);
+                assert!(
+                    z.trip_points[i].temp_mc >= z.trip_points[i - 1].temp_mc,
+                    "Trip points not ordered in zone{}",
+                    z.id
+                );
             }
         }
     }

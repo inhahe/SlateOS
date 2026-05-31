@@ -71,7 +71,7 @@ fn print_err(msg: &[u8]) {
 
 // ── Data Types ─────────────────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Tool {
     Modprobe,
     Insmod,
@@ -162,9 +162,9 @@ impl ModuleParam {
 #[derive(Clone, Copy)]
 struct LoadedModule {
     name: ModuleName,
-    size: u64,         // size in bytes
-    refcount: u32,     // reference count
-    state: u8,         // MOD_LIVE, MOD_LOADING, MOD_UNLOADING
+    size: u64,     // size in bytes
+    refcount: u32, // reference count
+    state: u8,     // MOD_LIVE, MOD_LOADING, MOD_UNLOADING
     used_by: [ModuleName; 8],
     used_by_count: usize,
 }
@@ -307,26 +307,26 @@ impl ConfigEntry {
 struct ModprobeOpts {
     tool: Tool,
     module_name: ModuleName,
-    module_path: ModulePath,  // for insmod: full path to .ko
-    remove: bool,             // -r for modprobe
-    force: bool,              // -f
-    verbose: bool,            // -v
-    dry_run: bool,            // -n
-    quiet: bool,              // -q
-    show_depends: bool,       // -D / --show-depends
-    first_time: bool,         // --first-time
-    ignore_install: bool,     // -i
-    all: bool,                // -a (all matching)
+    module_path: ModulePath, // for insmod: full path to .ko
+    remove: bool,            // -r for modprobe
+    force: bool,             // -f
+    verbose: bool,           // -v
+    dry_run: bool,           // -n
+    quiet: bool,             // -q
+    show_depends: bool,      // -D / --show-depends
+    first_time: bool,        // --first-time
+    ignore_install: bool,    // -i
+    all: bool,               // -a (all matching)
     params: [ModuleParam; MAX_PARAMS],
     param_count: usize,
     // depmod specific
-    depmod_all: bool,         // -a for depmod
-    depmod_quick: bool,       // -A
+    depmod_all: bool,          // -a for depmod
+    depmod_quick: bool,        // -A
     depmod_config: ModulePath, // -C
     // modinfo specific
     modinfo_field: [u8; 64],
     modinfo_field_len: usize,
-    modinfo_null: bool,       // -0
+    modinfo_null: bool, // -0
 }
 
 impl ModprobeOpts {
@@ -471,7 +471,11 @@ fn normalize_module_name(name: &[u8]) -> ModuleName {
     // Replace '-' with '_'
     let mut result = ModuleName::new();
     for i in 0..stripped.len().min(MAX_NAME_LEN) {
-        result.data[i] = if stripped[i] == b'-' { b'_' } else { stripped[i] };
+        result.data[i] = if stripped[i] == b'-' {
+            b'_'
+        } else {
+            stripped[i]
+        };
     }
     result.len = stripped.len().min(MAX_NAME_LEN);
     result
@@ -693,7 +697,7 @@ fn parse_args(argc: i32, argv: *const *const u8) -> Result<ModprobeOpts, i32> {
 
     // Validate required arguments
     match tool {
-        Tool::Lsmod => {} // No args needed
+        Tool::Lsmod => {}  // No args needed
         Tool::Depmod => {} // Defaults to -a behavior
         Tool::Insmod => {
             if opts.module_path.len == 0 {
@@ -896,7 +900,11 @@ fn get_module_info(name: &[u8]) -> ModuleInfo {
     if starts_with(normalized, b"ext4") {
         set_field(&mut info.license, &mut info.license_len, b"GPL");
         set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
-        set_field(&mut info.description, &mut info.desc_len, b"ext4 filesystem driver");
+        set_field(
+            &mut info.description,
+            &mut info.desc_len,
+            b"ext4 filesystem driver",
+        );
         set_field(&mut info.version, &mut info.version_len, b"0.1.0");
         info.depends[0] = ModuleName::from_bytes(b"mbcache");
         info.depends[1] = ModuleName::from_bytes(b"jbd2");
@@ -905,32 +913,88 @@ fn get_module_info(name: &[u8]) -> ModuleInfo {
     } else if starts_with(normalized, b"virtio_net") {
         set_field(&mut info.license, &mut info.license_len, b"GPL");
         set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
-        set_field(&mut info.description, &mut info.desc_len, b"Virtio network driver");
+        set_field(
+            &mut info.description,
+            &mut info.desc_len,
+            b"Virtio network driver",
+        );
         set_field(&mut info.version, &mut info.version_len, b"0.1.0");
         info.depends[0] = ModuleName::from_bytes(b"virtio_pci");
         info.dep_count = 1;
         // Aliases
-        set_alias(&mut info.aliases, &mut info.alias_count, b"pci:v00001AF4d00001000*");
-        set_alias(&mut info.aliases, &mut info.alias_count, b"virtio:d00000001v*");
+        set_alias(
+            &mut info.aliases,
+            &mut info.alias_count,
+            b"pci:v00001AF4d00001000*",
+        );
+        set_alias(
+            &mut info.aliases,
+            &mut info.alias_count,
+            b"virtio:d00000001v*",
+        );
     } else if starts_with(normalized, b"virtio_blk") {
         set_field(&mut info.license, &mut info.license_len, b"GPL");
         set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
-        set_field(&mut info.description, &mut info.desc_len, b"Virtio block driver");
+        set_field(
+            &mut info.description,
+            &mut info.desc_len,
+            b"Virtio block driver",
+        );
         set_field(&mut info.version, &mut info.version_len, b"0.1.0");
         info.depends[0] = ModuleName::from_bytes(b"virtio_pci");
+        info.dep_count = 1;
+    } else if starts_with(normalized, b"virtio_pci") {
+        set_field(&mut info.license, &mut info.license_len, b"GPL");
+        set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
+        set_field(
+            &mut info.description,
+            &mut info.desc_len,
+            b"Virtio PCI bus driver",
+        );
+        set_field(&mut info.version, &mut info.version_len, b"0.1.0");
+        // Mirror the canonical chain in cmd_depmod's sim_modules so that
+        // resolve_dependencies can walk virtio_net -> virtio_pci -> virtio_ring -> virtio.
+        info.depends[0] = ModuleName::from_bytes(b"virtio_ring");
+        info.dep_count = 1;
+    } else if starts_with(normalized, b"virtio_ring") {
+        set_field(&mut info.license, &mut info.license_len, b"GPL");
+        set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
+        set_field(
+            &mut info.description,
+            &mut info.desc_len,
+            b"Virtio ring buffer",
+        );
+        set_field(&mut info.version, &mut info.version_len, b"0.1.0");
+        info.depends[0] = ModuleName::from_bytes(b"virtio");
         info.dep_count = 1;
     } else if starts_with(normalized, b"e1000") {
         set_field(&mut info.license, &mut info.license_len, b"GPL");
         set_field(&mut info.author, &mut info.author_len, b"OurOS Project");
-        set_field(&mut info.description, &mut info.desc_len, b"Intel PRO/1000 Network Driver");
+        set_field(
+            &mut info.description,
+            &mut info.desc_len,
+            b"Intel PRO/1000 Network Driver",
+        );
         set_field(&mut info.version, &mut info.version_len, b"0.1.0");
-        set_alias(&mut info.aliases, &mut info.alias_count, b"pci:v00008086d0000100E*");
-        set_alias(&mut info.aliases, &mut info.alias_count, b"pci:v00008086d0000100F*");
+        set_alias(
+            &mut info.aliases,
+            &mut info.alias_count,
+            b"pci:v00008086d0000100E*",
+        );
+        set_alias(
+            &mut info.aliases,
+            &mut info.alias_count,
+            b"pci:v00008086d0000100F*",
+        );
         // Parameters
         if info.param_count < MAX_PARAMS {
             let p = &mut info.params[info.param_count];
             set_buf(&mut p.name, &mut p.name_len, b"debug");
-            set_buf(&mut p.value, &mut p.value_len, b"int:Debug level (0=none,...,16=all)");
+            set_buf(
+                &mut p.value,
+                &mut p.value_len,
+                b"int:Debug level (0=none,...,16=all)",
+            );
             info.param_count += 1;
         }
     } else {
@@ -1282,7 +1346,11 @@ fn cmd_show_depends(opts: &ModprobeOpts) -> i32 {
 
 fn cmd_modinfo(opts: &ModprobeOpts) -> i32 {
     let info = get_module_info(opts.module_name.as_bytes());
-    let sep = if opts.modinfo_null { b"\0" as &[u8] } else { b"\n" as &[u8] };
+    let sep = if opts.modinfo_null {
+        b"\0" as &[u8]
+    } else {
+        b"\n" as &[u8]
+    };
 
     // If -F specified, only show that field
     if opts.modinfo_field_len > 0 {

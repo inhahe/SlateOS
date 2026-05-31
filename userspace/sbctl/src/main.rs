@@ -36,7 +36,7 @@ struct SecureBootStatus {
 }
 
 #[derive(Clone, Debug)]
-struct __KeyInfo {
+struct _KeyInfo {
     key_type: _KeyType,
     owner: String,
     _guid: String,
@@ -82,8 +82,14 @@ struct _BundleInfo {
 // ── Secure Boot status ─────────────────────────────────────────────────
 
 fn read_sb_status() -> SecureBootStatus {
-    let sb_path = format!("{}/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c", EFI_SYSFS);
-    let setup_path = format!("{}/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c", EFI_SYSFS);
+    let sb_path = format!(
+        "{}/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c",
+        EFI_SYSFS
+    );
+    let setup_path = format!(
+        "{}/efivars/SetupMode-8be4df61-93ca-11d2-aa0d-00e098032b8c",
+        EFI_SYSFS
+    );
 
     let enabled = std::fs::read(&sb_path)
         .map(|data| !data.is_empty() && data.last().copied() == Some(1))
@@ -94,11 +100,17 @@ fn read_sb_status() -> SecureBootStatus {
         .unwrap_or(true);
 
     let pk_enrolled = std::path::Path::new(PK_DIR).exists()
-        && std::fs::read_dir(PK_DIR).map(|e| e.count() > 0).unwrap_or(false);
+        && std::fs::read_dir(PK_DIR)
+            .map(|e| e.count() > 0)
+            .unwrap_or(false);
     let kek_enrolled = std::path::Path::new(KEK_DIR).exists()
-        && std::fs::read_dir(KEK_DIR).map(|e| e.count() > 0).unwrap_or(false);
+        && std::fs::read_dir(KEK_DIR)
+            .map(|e| e.count() > 0)
+            .unwrap_or(false);
     let db_enrolled = std::path::Path::new(DB_DIR).exists()
-        && std::fs::read_dir(DB_DIR).map(|e| e.count() > 0).unwrap_or(false);
+        && std::fs::read_dir(DB_DIR)
+            .map(|e| e.count() > 0)
+            .unwrap_or(false);
 
     SecureBootStatus {
         enabled,
@@ -143,13 +155,48 @@ fn cmd_status() {
 
     println!("Installed:   sbctl");
     println!("Owner:       OurOS");
-    println!("Setup Mode:  {}", if status.setup_mode { "Enabled" } else { "Disabled" });
-    println!("Secure Boot: {}", if status.enabled { "Enabled" } else { "Disabled" });
+    println!(
+        "Setup Mode:  {}",
+        if status.setup_mode {
+            "Enabled"
+        } else {
+            "Disabled"
+        }
+    );
+    println!(
+        "Secure Boot: {}",
+        if status.enabled {
+            "Enabled"
+        } else {
+            "Disabled"
+        }
+    );
     println!();
     println!("Keys:");
-    println!("  PK:  {}", if status.pk_enrolled { "Enrolled" } else { "Not enrolled" });
-    println!("  KEK: {}", if status.kek_enrolled { "Enrolled" } else { "Not enrolled" });
-    println!("  db:  {}", if status.db_enrolled { "Enrolled" } else { "Not enrolled" });
+    println!(
+        "  PK:  {}",
+        if status.pk_enrolled {
+            "Enrolled"
+        } else {
+            "Not enrolled"
+        }
+    );
+    println!(
+        "  KEK: {}",
+        if status.kek_enrolled {
+            "Enrolled"
+        } else {
+            "Not enrolled"
+        }
+    );
+    println!(
+        "  db:  {}",
+        if status.db_enrolled {
+            "Enrolled"
+        } else {
+            "Not enrolled"
+        }
+    );
 }
 
 fn cmd_create_keys() {
@@ -336,19 +383,27 @@ fn cmd_bundle(args: &[String]) {
         match args[i].as_str() {
             "-k" | "--kernel" => {
                 i += 1;
-                if i < args.len() { kernel = args[i].clone(); }
+                if i < args.len() {
+                    kernel = args[i].clone();
+                }
             }
             "-i" | "--initrd" => {
                 i += 1;
-                if i < args.len() { initrd = args[i].clone(); }
+                if i < args.len() {
+                    initrd = args[i].clone();
+                }
             }
             "-c" | "--cmdline" => {
                 i += 1;
-                if i < args.len() { cmdline = args[i].clone(); }
+                if i < args.len() {
+                    cmdline = args[i].clone();
+                }
             }
             "-o" | "--output" => {
                 i += 1;
-                if i < args.len() { output = args[i].clone(); }
+                if i < args.len() {
+                    output = args[i].clone();
+                }
             }
             _ => {}
         }
@@ -361,9 +416,15 @@ fn cmd_bundle(args: &[String]) {
     }
 
     println!("Creating unified kernel image...");
-    if !kernel.is_empty() { println!("  Kernel:  {}", kernel); }
-    if !initrd.is_empty() { println!("  Initrd:  {}", initrd); }
-    if !cmdline.is_empty() { println!("  Cmdline: {}", cmdline); }
+    if !kernel.is_empty() {
+        println!("  Kernel:  {}", kernel);
+    }
+    if !initrd.is_empty() {
+        println!("  Initrd:  {}", initrd);
+    }
+    if !cmdline.is_empty() {
+        println!("  Cmdline: {}", cmdline);
+    }
     println!("  Output:  {}", output);
     println!("Bundle created successfully.");
 }
@@ -387,10 +448,27 @@ fn run_sbsign(args: Vec<String>) -> i32 {
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
-            "--key" => { i += 1; if i < rest.len() { key = rest[i].clone(); } }
-            "--cert" => { i += 1; if i < rest.len() { cert = rest[i].clone(); } }
-            "--output" => { i += 1; if i < rest.len() { output = Some(rest[i].clone()); } }
-            _ if !rest[i].starts_with('-') => { file = rest[i].clone(); }
+            "--key" => {
+                i += 1;
+                if i < rest.len() {
+                    key = rest[i].clone();
+                }
+            }
+            "--cert" => {
+                i += 1;
+                if i < rest.len() {
+                    cert = rest[i].clone();
+                }
+            }
+            "--output" => {
+                i += 1;
+                if i < rest.len() {
+                    output = Some(rest[i].clone());
+                }
+            }
+            _ if !rest[i].starts_with('-') => {
+                file = rest[i].clone();
+            }
             _ => {}
         }
         i += 1;
@@ -424,8 +502,15 @@ fn run_sbverify(args: Vec<String>) -> i32 {
     let mut i = 0;
     while i < rest.len() {
         match rest[i].as_str() {
-            "--cert" => { i += 1; if i < rest.len() { cert = Some(rest[i].clone()); } }
-            _ if !rest[i].starts_with('-') => { file = rest[i].clone(); }
+            "--cert" => {
+                i += 1;
+                if i < rest.len() {
+                    cert = Some(rest[i].clone());
+                }
+            }
+            _ if !rest[i].starts_with('-') => {
+                file = rest[i].clone();
+            }
             _ => {}
         }
         i += 1;
@@ -507,7 +592,10 @@ fn print_sbctl_help() {
 
 fn run_sbctl(args: Vec<String>) -> i32 {
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-    let cmd = rest.first().cloned().unwrap_or_else(|| "status".to_string());
+    let cmd = rest
+        .first()
+        .cloned()
+        .unwrap_or_else(|| "status".to_string());
     let cmd_args: Vec<String> = rest.into_iter().skip(1).collect();
 
     if cmd == "-h" || cmd == "--help" {
@@ -570,7 +658,10 @@ mod tests {
     #[test]
     fn test_key_type_display() {
         assert_eq!(format!("{}", _KeyType::PlatformKey), "Platform Key (PK)");
-        assert_eq!(format!("{}", _KeyType::KeyExchangeKey), "Key Exchange Key (KEK)");
+        assert_eq!(
+            format!("{}", _KeyType::KeyExchangeKey),
+            "Key Exchange Key (KEK)"
+        );
         assert_eq!(format!("{}", _KeyType::Db), "Signature Database (db)");
         assert_eq!(format!("{}", _KeyType::Dbx), "Forbidden Signatures (dbx)");
     }

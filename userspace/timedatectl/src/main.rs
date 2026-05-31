@@ -20,7 +20,7 @@ const VCONSOLE_PATH: &[u8] = b"/etc/vconsole.conf";
 
 // ── Personality Detection ──────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Personality {
     Timedatectl,
     Hostnamectl,
@@ -34,7 +34,8 @@ fn detect_personality(argv0: &[u8]) -> Personality {
         argv0
     };
 
-    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe") {
+    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe")
+    {
         &basename[..basename.len() - 4]
     } else {
         basename
@@ -51,7 +52,7 @@ fn detect_personality(argv0: &[u8]) -> Personality {
 
 // ── timedatectl ────────────────────────────────────────────────────────
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 enum TimedateCommand {
     Status,
     SetTime,
@@ -230,18 +231,38 @@ fn timedate_set_timezone(zone: &[u8]) -> i32 {
 fn timedate_list_timezones() -> i32 {
     // Common IANA timezone names
     let zones: &[&[u8]] = &[
-        b"Africa/Abidjan", b"Africa/Cairo", b"Africa/Johannesburg",
-        b"America/Anchorage", b"America/Chicago", b"America/Denver",
-        b"America/Los_Angeles", b"America/New_York", b"America/Sao_Paulo",
-        b"Asia/Calcutta", b"Asia/Dubai", b"Asia/Hong_Kong",
-        b"Asia/Seoul", b"Asia/Shanghai", b"Asia/Singapore", b"Asia/Tokyo",
+        b"Africa/Abidjan",
+        b"Africa/Cairo",
+        b"Africa/Johannesburg",
+        b"America/Anchorage",
+        b"America/Chicago",
+        b"America/Denver",
+        b"America/Los_Angeles",
+        b"America/New_York",
+        b"America/Sao_Paulo",
+        b"Asia/Calcutta",
+        b"Asia/Dubai",
+        b"Asia/Hong_Kong",
+        b"Asia/Seoul",
+        b"Asia/Shanghai",
+        b"Asia/Singapore",
+        b"Asia/Tokyo",
         b"Atlantic/Reykjavik",
-        b"Australia/Melbourne", b"Australia/Sydney",
-        b"Europe/Amsterdam", b"Europe/Berlin", b"Europe/Dublin",
-        b"Europe/Istanbul", b"Europe/London", b"Europe/Madrid",
-        b"Europe/Moscow", b"Europe/Paris", b"Europe/Rome",
-        b"Europe/Stockholm", b"Europe/Zurich",
-        b"Pacific/Auckland", b"Pacific/Honolulu",
+        b"Australia/Melbourne",
+        b"Australia/Sydney",
+        b"Europe/Amsterdam",
+        b"Europe/Berlin",
+        b"Europe/Dublin",
+        b"Europe/Istanbul",
+        b"Europe/London",
+        b"Europe/Madrid",
+        b"Europe/Moscow",
+        b"Europe/Paris",
+        b"Europe/Rome",
+        b"Europe/Stockholm",
+        b"Europe/Zurich",
+        b"Pacific/Auckland",
+        b"Pacific/Honolulu",
         b"UTC",
     ];
 
@@ -307,7 +328,7 @@ fn timedate_show_timesync() -> i32 {
 
 // ── hostnamectl ────────────────────────────────────────────────────────
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 enum HostnameCommand {
     Status,
     Hostname,
@@ -548,8 +569,16 @@ fn hostname_set_property(property: &[u8], value: &[u8]) -> i32 {
 fn hostname_set_chassis(chassis: &[u8]) -> i32 {
     // Valid chassis types
     let valid = [
-        b"desktop".as_slice(), b"laptop", b"convertible", b"server",
-        b"tablet", b"handset", b"watch", b"embedded", b"vm", b"container",
+        b"desktop".as_slice(),
+        b"laptop",
+        b"convertible",
+        b"server",
+        b"tablet",
+        b"handset",
+        b"watch",
+        b"embedded",
+        b"vm",
+        b"container",
     ];
 
     let is_valid = valid.iter().any(|v| *v == chassis);
@@ -567,7 +596,7 @@ fn hostname_set_chassis(chassis: &[u8]) -> i32 {
 
 // ── localectl ──────────────────────────────────────────────────────────
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 enum LocaleCommand {
     Status,
     SetLocale,
@@ -725,10 +754,21 @@ fn locale_set(locales: &[Vec<u8>]) -> i32 {
 
             // Validate variable name
             let valid_vars = [
-                b"LANG".as_slice(), b"LANGUAGE", b"LC_CTYPE", b"LC_NUMERIC",
-                b"LC_TIME", b"LC_COLLATE", b"LC_MONETARY", b"LC_MESSAGES",
-                b"LC_PAPER", b"LC_NAME", b"LC_ADDRESS", b"LC_TELEPHONE",
-                b"LC_MEASUREMENT", b"LC_IDENTIFICATION", b"LC_ALL",
+                b"LANG".as_slice(),
+                b"LANGUAGE",
+                b"LC_CTYPE",
+                b"LC_NUMERIC",
+                b"LC_TIME",
+                b"LC_COLLATE",
+                b"LC_MONETARY",
+                b"LC_MESSAGES",
+                b"LC_PAPER",
+                b"LC_NAME",
+                b"LC_ADDRESS",
+                b"LC_TELEPHONE",
+                b"LC_MEASUREMENT",
+                b"LC_IDENTIFICATION",
+                b"LC_ALL",
             ];
 
             if !valid_vars.iter().any(|v| *v == var) {
@@ -757,21 +797,31 @@ fn locale_set(locales: &[Vec<u8>]) -> i32 {
 
 fn locale_list_locales() -> i32 {
     let locales: &[&[u8]] = &[
-        b"C", b"C.UTF-8", b"POSIX",
-        b"de_DE.UTF-8", b"de_AT.UTF-8",
-        b"en_AU.UTF-8", b"en_CA.UTF-8", b"en_GB.UTF-8",
-        b"en_NZ.UTF-8", b"en_US.UTF-8",
-        b"es_ES.UTF-8", b"es_MX.UTF-8",
-        b"fr_FR.UTF-8", b"fr_CA.UTF-8",
+        b"C",
+        b"C.UTF-8",
+        b"POSIX",
+        b"de_DE.UTF-8",
+        b"de_AT.UTF-8",
+        b"en_AU.UTF-8",
+        b"en_CA.UTF-8",
+        b"en_GB.UTF-8",
+        b"en_NZ.UTF-8",
+        b"en_US.UTF-8",
+        b"es_ES.UTF-8",
+        b"es_MX.UTF-8",
+        b"fr_FR.UTF-8",
+        b"fr_CA.UTF-8",
         b"it_IT.UTF-8",
         b"ja_JP.UTF-8",
         b"ko_KR.UTF-8",
         b"nl_NL.UTF-8",
         b"pl_PL.UTF-8",
-        b"pt_BR.UTF-8", b"pt_PT.UTF-8",
+        b"pt_BR.UTF-8",
+        b"pt_PT.UTF-8",
         b"ru_RU.UTF-8",
         b"sv_SE.UTF-8",
-        b"zh_CN.UTF-8", b"zh_TW.UTF-8",
+        b"zh_CN.UTF-8",
+        b"zh_TW.UTF-8",
     ];
 
     for locale in locales {
@@ -805,20 +855,40 @@ fn locale_set_keymap(values: &[Vec<u8>], no_convert: bool) -> i32 {
 
 fn locale_list_keymaps() -> i32 {
     let keymaps: &[&[u8]] = &[
-        b"ANSI-dvorak", b"amiga-de", b"amiga-us",
-        b"be-latin1", b"br-abnt2",
-        b"de", b"de-latin1", b"de-latin1-nodeadkeys",
-        b"dk", b"dvorak", b"es",
-        b"fi", b"fr", b"fr-latin1",
-        b"hu", b"is-latin1", b"it",
+        b"ANSI-dvorak",
+        b"amiga-de",
+        b"amiga-us",
+        b"be-latin1",
+        b"br-abnt2",
+        b"de",
+        b"de-latin1",
+        b"de-latin1-nodeadkeys",
+        b"dk",
+        b"dvorak",
+        b"es",
+        b"fi",
+        b"fr",
+        b"fr-latin1",
+        b"hu",
+        b"is-latin1",
+        b"it",
         b"jp106",
-        b"ko", b"la-latin1",
-        b"nl", b"no", b"pl2",
-        b"pt-latin1", b"ro",
-        b"ru", b"se-lat6",
-        b"sg", b"sk-qwerty",
-        b"trq", b"ua-utf",
-        b"uk", b"us", b"us-acentos",
+        b"ko",
+        b"la-latin1",
+        b"nl",
+        b"no",
+        b"pl2",
+        b"pt-latin1",
+        b"ro",
+        b"ru",
+        b"se-lat6",
+        b"sg",
+        b"sk-qwerty",
+        b"trq",
+        b"ua-utf",
+        b"uk",
+        b"us",
+        b"us-acentos",
     ];
 
     for km in keymaps {
@@ -865,10 +935,19 @@ fn locale_set_x11_keymap(values: &[Vec<u8>], no_convert: bool) -> i32 {
 
 fn locale_list_x11_models() -> i32 {
     let models: &[&[u8]] = &[
-        b"pc101", b"pc102", b"pc104", b"pc105",
-        b"dell", b"hp", b"lenovo", b"thinkpad",
-        b"apple", b"macbook78", b"macbook79",
-        b"chromebook", b"microsoft",
+        b"pc101",
+        b"pc102",
+        b"pc104",
+        b"pc105",
+        b"dell",
+        b"hp",
+        b"lenovo",
+        b"thinkpad",
+        b"apple",
+        b"macbook78",
+        b"macbook79",
+        b"chromebook",
+        b"microsoft",
     ];
 
     for m in models {
@@ -880,25 +959,10 @@ fn locale_list_x11_models() -> i32 {
 
 fn locale_list_x11_layouts() -> i32 {
     let layouts: &[&[u8]] = &[
-        b"am", b"ara", b"at", b"au",
-        b"be", b"bg", b"br",
-        b"ca", b"ch", b"cn", b"cz",
-        b"de", b"dk",
-        b"ee", b"es", b"et",
-        b"fi", b"fr",
-        b"gb", b"ge", b"gr",
-        b"hr", b"hu",
-        b"ie", b"il", b"in", b"is", b"it",
-        b"jp",
-        b"kr",
-        b"lt", b"lv",
-        b"mk", b"mt",
-        b"nl", b"no",
-        b"pl", b"pt",
-        b"ro", b"rs", b"ru",
-        b"se", b"si", b"sk",
-        b"tr",
-        b"ua", b"us", b"uz",
+        b"am", b"ara", b"at", b"au", b"be", b"bg", b"br", b"ca", b"ch", b"cn", b"cz", b"de", b"dk",
+        b"ee", b"es", b"et", b"fi", b"fr", b"gb", b"ge", b"gr", b"hr", b"hu", b"ie", b"il", b"in",
+        b"is", b"it", b"jp", b"kr", b"lt", b"lv", b"mk", b"mt", b"nl", b"no", b"pl", b"pt", b"ro",
+        b"rs", b"ru", b"se", b"si", b"sk", b"tr", b"ua", b"us", b"uz",
     ];
 
     for l in layouts {
@@ -914,11 +978,18 @@ fn locale_list_x11_variants(values: &[Vec<u8>]) -> i32 {
 
     // Show common variants
     let variants: &[&[u8]] = &[
-        b"nodeadkeys", b"deadacute", b"deadgraveacute",
-        b"mac", b"dvorak", b"colemak",
-        b"intl", b"alt-intl",
-        b"workman", b"norman",
-        b"phonetic", b"legacy",
+        b"nodeadkeys",
+        b"deadacute",
+        b"deadgraveacute",
+        b"mac",
+        b"dvorak",
+        b"colemak",
+        b"intl",
+        b"alt-intl",
+        b"workman",
+        b"norman",
+        b"phonetic",
+        b"legacy",
     ];
 
     for v in variants {
@@ -1030,20 +1101,32 @@ mod tests {
     #[test]
     fn test_detect_timedatectl() {
         assert_eq!(detect_personality(b"timedatectl"), Personality::Timedatectl);
-        assert_eq!(detect_personality(b"/usr/bin/timedatectl"), Personality::Timedatectl);
-        assert_eq!(detect_personality(b"timedatectl.exe"), Personality::Timedatectl);
+        assert_eq!(
+            detect_personality(b"/usr/bin/timedatectl"),
+            Personality::Timedatectl
+        );
+        assert_eq!(
+            detect_personality(b"timedatectl.exe"),
+            Personality::Timedatectl
+        );
     }
 
     #[test]
     fn test_detect_hostnamectl() {
         assert_eq!(detect_personality(b"hostnamectl"), Personality::Hostnamectl);
-        assert_eq!(detect_personality(b"/usr/bin/hostnamectl"), Personality::Hostnamectl);
+        assert_eq!(
+            detect_personality(b"/usr/bin/hostnamectl"),
+            Personality::Hostnamectl
+        );
     }
 
     #[test]
     fn test_detect_localectl() {
         assert_eq!(detect_personality(b"localectl"), Personality::Localectl);
-        assert_eq!(detect_personality(b"/usr/bin/localectl"), Personality::Localectl);
+        assert_eq!(
+            detect_personality(b"/usr/bin/localectl"),
+            Personality::Localectl
+        );
     }
 
     #[test]
@@ -1094,7 +1177,11 @@ mod tests {
 
     #[test]
     fn test_timedate_options() {
-        let args = parse_timedate_args(&[b"--no-pager".to_vec(), b"--adjust-system-clock".to_vec(), b"status".to_vec()]);
+        let args = parse_timedate_args(&[
+            b"--no-pager".to_vec(),
+            b"--adjust-system-clock".to_vec(),
+            b"status".to_vec(),
+        ]);
         assert!(args.no_pager);
         assert!(args.adjust_system_clock);
         assert_eq!(args.command, TimedateCommand::Status);
@@ -1308,7 +1395,9 @@ mod tests {
     #[test]
     fn test_locale_set_x11_keymap() {
         let args = parse_locale_args(&[
-            b"set-x11-keymap".to_vec(), b"us".to_vec(), b"pc105".to_vec()
+            b"set-x11-keymap".to_vec(),
+            b"us".to_vec(),
+            b"pc105".to_vec(),
         ]);
         assert_eq!(args.command, LocaleCommand::SetX11Keymap);
         assert_eq!(args.values.len(), 2);
@@ -1316,7 +1405,11 @@ mod tests {
 
     #[test]
     fn test_locale_no_convert() {
-        let args = parse_locale_args(&[b"--no-convert".to_vec(), b"set-keymap".to_vec(), b"us".to_vec()]);
+        let args = parse_locale_args(&[
+            b"--no-convert".to_vec(),
+            b"set-keymap".to_vec(),
+            b"us".to_vec(),
+        ]);
         assert!(args.no_convert);
     }
 

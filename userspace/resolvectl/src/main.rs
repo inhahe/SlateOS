@@ -29,7 +29,7 @@ const _RESOLVED_CONF: &str = "/etc/systemd/resolved.conf";
 #[derive(Clone, Debug)]
 struct DnsServer {
     address: String,
-    _interface: Option<String>,
+    interface: Option<String>,
     _protocol: DnsProtocol,
 }
 
@@ -88,7 +88,7 @@ fn read_resolv_conf() -> DnsConfig {
                 if !addr.is_empty() {
                     config.servers.push(DnsServer {
                         address: addr,
-                        _interface: None,
+                        interface: None,
                         _protocol: DnsProtocol::Classic,
                     });
                 }
@@ -115,9 +115,11 @@ fn read_resolv_conf() -> DnsConfig {
 
     // Default config if nothing found.
     if config.servers.is_empty() {
-        config.servers = vec![
-            DnsServer { address: "127.0.0.53".to_string(), _interface: None, _protocol: DnsProtocol::Classic },
-        ];
+        config.servers = vec![DnsServer {
+            address: "127.0.0.53".to_string(),
+            interface: None,
+            _protocol: DnsProtocol::Classic,
+        }];
     }
 
     config
@@ -174,7 +176,10 @@ fn resolve_hostname(hostname: &str) -> Vec<IpAddr> {
 
     // Well-known fallbacks.
     match hostname {
-        "localhost" => vec![IpAddr::V4(Ipv4Addr::LOCALHOST), IpAddr::V6(Ipv6Addr::LOCALHOST)],
+        "localhost" => vec![
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ],
         _ => Vec::new(),
     }
 }
@@ -285,7 +290,10 @@ fn cmd_resolvectl_status() {
     let mut out = stdout.lock();
 
     let _ = writeln!(out, "Global");
-    let _ = writeln!(out, "       Protocols: +LLMNR +mDNS -DNSOverTLS DNSSEC=allow-downgrade/no");
+    let _ = writeln!(
+        out,
+        "       Protocols: +LLMNR +mDNS -DNSOverTLS DNSSEC=allow-downgrade/no"
+    );
     let _ = write!(out, "resolv.conf mode: stub");
     let _ = writeln!(out);
 
@@ -317,12 +325,19 @@ fn cmd_resolvectl_status() {
         let _ = writeln!(out);
         let _ = writeln!(out, "Link {} ({})", link.index, link.name);
         let _ = write!(out, "    Current Scopes: DNS");
-        if link._mdns { let _ = write!(out, " mDNS"); }
-        if link._llmnr { let _ = write!(out, " LLMNR"); }
+        if link._mdns {
+            let _ = write!(out, " mDNS");
+        }
+        if link._llmnr {
+            let _ = write!(out, " LLMNR");
+        }
         let _ = writeln!(out);
 
         let tls = if link.dns_over_tls { "yes" } else { "no" };
-        let _ = writeln!(out, "         Protocols: +DefaultRoute +LLMNR +mDNS -DNSOverTLS({tls}) DNSSEC=allow-downgrade/no");
+        let _ = writeln!(
+            out,
+            "         Protocols: +DefaultRoute +LLMNR +mDNS -DNSOverTLS({tls}) DNSSEC=allow-downgrade/no"
+        );
 
         let _ = write!(out, "Current DNS Server:");
         if let Some(first) = link.dns_servers.first() {
@@ -369,7 +384,11 @@ fn cmd_resolvectl_query(args: &[String]) {
                 let _ = writeln!(out, "{name} -- {ip}");
             }
             let _ = writeln!(out);
-            let _ = writeln!(out, "-- Information acquired via protocol DNS in {:.1}ms.", 0.5);
+            let _ = writeln!(
+                out,
+                "-- Information acquired via protocol DNS in {:.1}ms.",
+                0.5
+            );
         }
     }
 }
@@ -432,8 +451,14 @@ fn cmd_resolvectl_dns(args: &[String]) {
         if servers.is_empty() {
             eprintln!("resolvectl dns: no servers specified for link {link}");
         } else {
-            eprintln!("resolvectl: set DNS servers for {link}: {}",
-                servers.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+            eprintln!(
+                "resolvectl: set DNS servers for {link}: {}",
+                servers
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
     }
 }
@@ -454,8 +479,14 @@ fn cmd_resolvectl_domain(args: &[String]) {
         if domains.is_empty() {
             eprintln!("resolvectl domain: no domains specified for link {link}");
         } else {
-            eprintln!("resolvectl: set search domains for {link}: {}",
-                domains.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+            eprintln!(
+                "resolvectl: set search domains for {link}: {}",
+                domains
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
         }
     }
 }
@@ -591,7 +622,11 @@ fn cmd_nslookup(args: &[String]) {
 
     let config = read_resolv_conf();
     let dns_server = server.unwrap_or_else(|| {
-        config.servers.first().map(|s| s.address.clone()).unwrap_or_else(|| "127.0.0.53".to_string())
+        config
+            .servers
+            .first()
+            .map(|s| s.address.clone())
+            .unwrap_or_else(|| "127.0.0.53".to_string())
     });
 
     let stdout = io::stdout();
@@ -661,7 +696,9 @@ fn cmd_host(args: &[String]) {
             "-v" => verbose = true,
             "-t" => {
                 i += 1;
-                if i < args.len() { query_type = Some(args[i].clone()); }
+                if i < args.len() {
+                    query_type = Some(args[i].clone());
+                }
             }
             s if !s.starts_with('-') => {
                 names.push(s.to_string());
@@ -810,7 +847,7 @@ mod tests {
     fn test_dns_server_clone() {
         let server = DnsServer {
             address: "8.8.8.8".to_string(),
-            _interface: Some("eth0".to_string()),
+            interface: Some("eth0".to_string()),
             _protocol: DnsProtocol::Classic,
         };
         let c = server.clone();
@@ -823,7 +860,7 @@ mod tests {
         let config = DnsConfig {
             servers: vec![DnsServer {
                 address: "1.1.1.1".to_string(),
-                _interface: None,
+                interface: None,
                 _protocol: DnsProtocol::_Tls,
             }],
             search_domains: vec!["example.com".to_string()],

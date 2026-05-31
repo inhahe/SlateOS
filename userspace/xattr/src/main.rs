@@ -37,7 +37,7 @@ struct FileXattrs {
 // Namespace helpers
 // ============================================================================
 
-fn _xattr_namespace(name: &str) -> &str {
+fn xattr_namespace(name: &str) -> &str {
     if let Some(dot_pos) = name.find('.') {
         &name[..dot_pos]
     } else {
@@ -57,7 +57,7 @@ fn format_value(value: &[u8], hex: bool, text_mode: bool) -> String {
     if hex {
         let hex_str: String = value.iter().map(|b| format!("{b:02x}")).collect();
         format!("0x{hex_str}")
-    } else if text_mode || value.iter().all(|&b| b >= 0x20 && b < 0x7f) {
+    } else if text_mode || value.iter().all(|&b| (0x20..0x7f).contains(&b)) {
         format!("\"{}\"", String::from_utf8_lossy(value))
     } else {
         let hex_str: String = value.iter().map(|b| format!("{b:02x}")).collect();
@@ -65,7 +65,7 @@ fn format_value(value: &[u8], hex: bool, text_mode: bool) -> String {
     }
 }
 
-fn _parse_value(s: &str) -> Vec<u8> {
+fn parse_value(s: &str) -> Vec<u8> {
     if let Some(hex) = s.strip_prefix("0x") {
         // Hex value.
         let mut bytes = Vec::new();
@@ -79,7 +79,7 @@ fn _parse_value(s: &str) -> Vec<u8> {
         }
         bytes
     } else if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
-        s[1..s.len() - 1].as_bytes().to_vec()
+        s.as_bytes()[1..s.len() - 1].to_vec()
     } else {
         s.as_bytes().to_vec()
     }
@@ -116,9 +116,10 @@ fn read_xattrs(path: &str, match_pattern: &Option<String>) -> FileXattrs {
 
 fn generate_default_xattrs(path: &str) -> Vec<XattrEntry> {
     let ext = path.rsplit('.').next().unwrap_or("");
-    let mut attrs = vec![
-        XattrEntry { name: "user.mime_type".to_string(), value: Some(mime_for_ext(ext).as_bytes().to_vec()) },
-    ];
+    let mut attrs = vec![XattrEntry {
+        name: "user.mime_type".to_string(),
+        value: Some(mime_for_ext(ext).as_bytes().to_vec()),
+    }];
 
     // Add security attrs for executables.
     if ext == "sh" || ext == "bin" || path.contains("/bin/") {
@@ -224,15 +225,21 @@ fn cmd_getfattr(args: &[String]) {
             "--only-values" => names_only = false,
             "-e" => {
                 i += 1;
-                if i < args.len() && args[i] == "hex" { hex = true; }
+                if i < args.len() && args[i] == "hex" {
+                    hex = true;
+                }
             }
             "-n" | "--name" => {
                 i += 1;
-                if i < args.len() { specific_name = Some(args[i].clone()); }
+                if i < args.len() {
+                    specific_name = Some(args[i].clone());
+                }
             }
             "-m" | "--match" => {
                 i += 1;
-                if i < args.len() { match_pattern = Some(args[i].clone()); }
+                if i < args.len() {
+                    match_pattern = Some(args[i].clone());
+                }
             }
             "-R" | "--recursive" => recursive = true,
             s if !s.starts_with('-') => paths.push(s.to_string()),
@@ -314,15 +321,21 @@ fn cmd_setfattr(args: &[String]) {
             }
             "-n" | "--name" => {
                 i += 1;
-                if i < args.len() { name = Some(args[i].clone()); }
+                if i < args.len() {
+                    name = Some(args[i].clone());
+                }
             }
             "-v" | "--value" => {
                 i += 1;
-                if i < args.len() { value = Some(args[i].clone()); }
+                if i < args.len() {
+                    value = Some(args[i].clone());
+                }
             }
             "-x" | "--remove" => {
                 i += 1;
-                if i < args.len() { remove = Some(args[i].clone()); }
+                if i < args.len() {
+                    remove = Some(args[i].clone());
+                }
             }
             s if !s.starts_with('-') => paths.push(s.to_string()),
             _ => {}
@@ -388,7 +401,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_xattr_namespace() {
+    fn testxattr_namespace() {
         assert_eq!(xattr_namespace("user.mime_type"), "user");
         assert_eq!(xattr_namespace("security.selinux"), "security");
         assert_eq!(xattr_namespace("system.posix_acl_access"), "system");
@@ -427,19 +440,19 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_value_hex() {
+    fn testparse_value_hex() {
         let result = parse_value("0xdeadbeef");
         assert_eq!(result, vec![0xDE, 0xAD, 0xBE, 0xEF]);
     }
 
     #[test]
-    fn test_parse_value_quoted() {
+    fn testparse_value_quoted() {
         let result = parse_value("\"hello\"");
         assert_eq!(result, b"hello");
     }
 
     #[test]
-    fn test_parse_value_raw() {
+    fn testparse_value_raw() {
         let result = parse_value("test");
         assert_eq!(result, b"test");
     }
@@ -482,7 +495,10 @@ mod tests {
     fn test_file_xattrs_clone() {
         let fx = FileXattrs {
             path: "/test".to_string(),
-            attrs: vec![XattrEntry { name: "user.x".to_string(), value: None }],
+            attrs: vec![XattrEntry {
+                name: "user.x".to_string(),
+                value: None,
+            }],
         };
         let c = fx.clone();
         assert_eq!(c.path, "/test");

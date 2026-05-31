@@ -22,7 +22,7 @@ const DEFAULT_INODE_GRACE: u64 = 604800; // 7 days
 
 // ── Personality Detection ──────────────────────────────────────────────
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum Personality {
     Quota,
     Edquota,
@@ -38,7 +38,8 @@ fn detect_personality(argv0: &[u8]) -> Personality {
         argv0
     };
 
-    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe") {
+    let name = if basename.len() > 4 && basename[basename.len() - 4..].eq_ignore_ascii_case(b".exe")
+    {
         &basename[..basename.len() - 4]
     } else {
         basename
@@ -61,15 +62,15 @@ fn detect_personality(argv0: &[u8]) -> Personality {
 
 #[derive(Clone)]
 struct QuotaInfo {
-    block_usage: u64,      // current block usage in KB
-    block_soft: u64,       // soft limit (warning threshold)
-    block_hard: u64,       // hard limit (absolute maximum)
-    block_grace: u64,      // grace period for soft limit (seconds)
+    block_usage: u64,        // current block usage in KB
+    block_soft: u64,         // soft limit (warning threshold)
+    block_hard: u64,         // hard limit (absolute maximum)
+    block_grace: u64,        // grace period for soft limit (seconds)
     block_grace_expire: u64, // expiry timestamp for soft limit grace
-    inode_usage: u64,      // current inode (file) count
-    inode_soft: u64,       // soft limit
-    inode_hard: u64,       // hard limit
-    inode_grace: u64,      // grace period for soft limit
+    inode_usage: u64,        // current inode (file) count
+    inode_soft: u64,         // soft limit
+    inode_hard: u64,         // hard limit
+    inode_grace: u64,        // grace period for soft limit
     inode_grace_expire: u64,
 }
 
@@ -107,11 +108,11 @@ impl QuotaInfo {
 
     fn status_char(&self) -> u8 {
         if self.blocks_over_hard() || self.inodes_over_hard() {
-            b'!'  // over hard limit
+            b'!' // over hard limit
         } else if self.blocks_over_soft() || self.inodes_over_soft() {
-            b'+'  // over soft limit (in grace)
+            b'+' // over soft limit (in grace)
         } else {
-            b'-'  // within limits
+            b'-' // within limits
         }
     }
 }
@@ -122,7 +123,7 @@ struct QuotaEntry {
     info: QuotaInfo,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 enum QuotaType {
     User,
     Group,
@@ -563,8 +564,13 @@ fn format_u64(mut n: u64) -> Vec<u8> {
 }
 
 fn trim_bytes(s: &[u8]) -> &[u8] {
-    let start = s.iter().position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n').unwrap_or(s.len());
-    let end = s.iter().rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+    let start = s
+        .iter()
+        .position(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
+        .unwrap_or(s.len());
+    let end = s
+        .iter()
+        .rposition(|&b| b != b' ' && b != b'\t' && b != b'\r' && b != b'\n')
         .map(|p| p + 1)
         .unwrap_or(start);
     if start >= end { &[] } else { &s[start..end] }

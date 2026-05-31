@@ -276,7 +276,7 @@ fn read_key() -> Option<Key> {
         10 => Some(Key::Enter),    // Ctrl+J / LF
         11 => Some(Key::Ctrl('k')),
         12 => Some(Key::Ctrl('l')),
-        13 => Some(Key::Enter),    // Ctrl+M / CR
+        13 => Some(Key::Enter), // Ctrl+M / CR
         14..=26 => Some(Key::Ctrl((b'a' + b - 1) as char)),
         27 => {
             // Escape sequence
@@ -356,9 +356,8 @@ fn read_key() -> Option<Key> {
         0xE0..=0xEF => {
             let b2 = read_byte_eager().unwrap_or(0);
             let b3 = read_byte_eager().unwrap_or(0);
-            let cp = (u32::from(b & 0x0F) << 12)
-                | (u32::from(b2 & 0x3F) << 6)
-                | u32::from(b3 & 0x3F);
+            let cp =
+                (u32::from(b & 0x0F) << 12) | (u32::from(b2 & 0x3F) << 6) | u32::from(b3 & 0x3F);
             char::from_u32(cp).map(Key::Char)
         }
         0xF0..=0xF7 => {
@@ -421,6 +420,13 @@ fn terminal_size() -> (usize, usize) {
     }
 
     // Fallback: probe by moving cursor to bottom-right and querying position.
+    // This handshake blocks reading the terminal's reply from stdin, so it must
+    // only run on a real interactive terminal — under a pipe/redirect/test the
+    // reply never arrives and the read would hang forever.
+    use std::io::IsTerminal;
+    if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
+        return (24, 80);
+    }
     write_str("\x1b[999;999H\x1b[6n");
     flush();
     // Read response: \x1b[<rows>;<cols>R
@@ -467,24 +473,14 @@ enum UndoAction {
         text: String,
     },
     /// Inserted a new line (Enter pressed). Stores the line index of the new line.
-    InsertLine {
-        line: usize,
-    },
+    InsertLine { line: usize },
     /// Joined two lines (Backspace at start). Stores the line index and the
     /// column where the join happened (original length of the upper line).
-    JoinLine {
-        line: usize,
-        col: usize,
-    },
+    JoinLine { line: usize, col: usize },
     /// Cut a line. Stores the line index and its content.
-    CutLine {
-        line: usize,
-        content: String,
-    },
+    CutLine { line: usize, content: String },
     /// Pasted (uncutted) a line. Stores the line index.
-    PasteLine {
-        line: usize,
-    },
+    PasteLine { line: usize },
 }
 
 struct UndoStack {
@@ -539,13 +535,13 @@ impl Highlight {
     /// ANSI 256-color code for this highlight category.
     fn color(self) -> u8 {
         match self {
-            Self::Normal => 255,    // white
-            Self::Keyword => 204,   // pink/red
-            Self::Type => 222,      // gold
-            Self::String => 114,    // green
-            Self::Comment => 242,   // gray
-            Self::Number => 141,    // purple
-            Self::Operator => 81,   // cyan
+            Self::Normal => 255,  // white
+            Self::Keyword => 204, // pink/red
+            Self::Type => 222,    // gold
+            Self::String => 114,  // green
+            Self::Comment => 242, // gray
+            Self::Number => 141,  // purple
+            Self::Operator => 81, // cyan
         }
     }
 }
@@ -572,32 +568,33 @@ fn keywords_for(filetype: &str) -> (&'static [&'static str], &'static [&'static 
         "rust" => (
             &[
                 "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else",
-                "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop",
-                "match", "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static",
-                "struct", "super", "trait", "true", "type", "unsafe", "use", "where", "while",
-                "yield",
+                "enum", "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match",
+                "mod", "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct",
+                "super", "trait", "true", "type", "unsafe", "use", "where", "while", "yield",
             ],
             &[
-                "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize",
-                "str", "u8", "u16", "u32", "u64", "u128", "usize", "String", "Vec", "Option",
-                "Result", "Box", "Rc", "Arc",
+                "bool", "char", "f32", "f64", "i8", "i16", "i32", "i64", "i128", "isize", "str",
+                "u8", "u16", "u32", "u64", "u128", "usize", "String", "Vec", "Option", "Result",
+                "Box", "Rc", "Arc",
             ],
         ),
         "python" => (
             &[
                 "and", "as", "assert", "async", "await", "break", "class", "continue", "def",
-                "del", "elif", "else", "except", "False", "finally", "for", "from", "global",
-                "if", "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass",
-                "raise", "return", "True", "try", "while", "with", "yield",
+                "del", "elif", "else", "except", "False", "finally", "for", "from", "global", "if",
+                "import", "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass", "raise",
+                "return", "True", "try", "while", "with", "yield",
             ],
-            &["int", "float", "str", "bool", "list", "dict", "set", "tuple", "bytes"],
+            &[
+                "int", "float", "str", "bool", "list", "dict", "set", "tuple", "bytes",
+            ],
         ),
         "c" => (
             &[
-                "auto", "break", "case", "char", "const", "continue", "default", "do",
-                "double", "else", "enum", "extern", "float", "for", "goto", "if", "inline",
-                "int", "long", "register", "return", "short", "signed", "sizeof", "static",
-                "struct", "switch", "typedef", "union", "unsigned", "void", "volatile", "while",
+                "auto", "break", "case", "char", "const", "continue", "default", "do", "double",
+                "else", "enum", "extern", "float", "for", "goto", "if", "inline", "int", "long",
+                "register", "return", "short", "signed", "sizeof", "static", "struct", "switch",
+                "typedef", "union", "unsigned", "void", "volatile", "while",
             ],
             &[
                 "int8_t", "int16_t", "int32_t", "int64_t", "uint8_t", "uint16_t", "uint32_t",
@@ -606,9 +603,9 @@ fn keywords_for(filetype: &str) -> (&'static [&'static str], &'static [&'static 
         ),
         "shell" => (
             &[
-                "if", "then", "else", "elif", "fi", "case", "esac", "for", "while", "until",
-                "do", "done", "in", "function", "select", "return", "exit", "break",
-                "continue", "local", "export", "readonly", "declare", "typeset", "source",
+                "if", "then", "else", "elif", "fi", "case", "esac", "for", "while", "until", "do",
+                "done", "in", "function", "select", "return", "exit", "break", "continue", "local",
+                "export", "readonly", "declare", "typeset", "source",
             ],
             &["true", "false"],
         ),
@@ -684,11 +681,10 @@ fn highlight_line(line: &str, filetype: Option<&str>) -> Vec<Highlight> {
         }
 
         // Numbers.
-        if b.is_ascii_digit()
-            || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit())
-        {
+        if b.is_ascii_digit() || (b == b'.' && i + 1 < len && bytes[i + 1].is_ascii_digit()) {
             // Check that the previous char is not alphanumeric (word boundary).
-            let prev_alpha = i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
+            let prev_alpha =
+                i > 0 && (bytes[i - 1].is_ascii_alphanumeric() || bytes[i - 1] == b'_');
             if !prev_alpha {
                 while i < len
                     && (bytes[i].is_ascii_digit()
@@ -711,8 +707,18 @@ fn highlight_line(line: &str, filetype: Option<&str>) -> Vec<Highlight> {
         // Operators.
         if matches!(
             b,
-            b'+' | b'-' | b'*' | b'/' | b'%' | b'=' | b'!' | b'<' | b'>' | b'&' | b'|'
-                | b'^' | b'~'
+            b'+' | b'-'
+                | b'*'
+                | b'/'
+                | b'%'
+                | b'='
+                | b'!'
+                | b'<'
+                | b'>'
+                | b'&'
+                | b'|'
+                | b'^'
+                | b'~'
         ) {
             hl[i] = Highlight::Operator;
             i += 1;
@@ -848,10 +854,7 @@ impl Editor {
     fn open_file(&mut self, path: &str) {
         match fs::read_to_string(path) {
             Ok(content) => {
-                self.lines = content
-                    .lines()
-                    .map(|l| l.to_string())
-                    .collect();
+                self.lines = content.lines().map(|l| l.to_string()).collect();
                 if self.lines.is_empty() {
                     self.lines.push(String::new());
                 }
@@ -1163,14 +1166,22 @@ impl Editor {
             return;
         };
         match action.clone() {
-            UndoAction::Insert { line, col, ref text } => {
+            UndoAction::Insert {
+                line,
+                col,
+                ref text,
+            } => {
                 // Remove the inserted text.
                 let end = col + text.len();
                 self.lines[line].replace_range(col..end, "");
                 self.cursor_line = line;
                 self.cursor_col = col;
             }
-            UndoAction::DeleteRange { line, col, ref text } => {
+            UndoAction::DeleteRange {
+                line,
+                col,
+                ref text,
+            } => {
                 // Re-insert the deleted text.
                 self.lines[line].insert_str(col, text);
                 self.cursor_line = line;
@@ -1223,12 +1234,20 @@ impl Editor {
             return;
         };
         match action.clone() {
-            UndoAction::Insert { line, col, ref text } => {
+            UndoAction::Insert {
+                line,
+                col,
+                ref text,
+            } => {
                 self.lines[line].insert_str(col, text);
                 self.cursor_line = line;
                 self.cursor_col = col + text.len();
             }
-            UndoAction::DeleteRange { line, col, ref text } => {
+            UndoAction::DeleteRange {
+                line,
+                col,
+                ref text,
+            } => {
                 let end = col + text.len();
                 self.lines[line].replace_range(col..end, "");
                 self.cursor_line = line;
@@ -1297,7 +1316,10 @@ impl Editor {
 
             // Position cursor inside the prompt.
             let prompt_cursor_col = message.len() + cursor;
-            cursor_to(status_row, prompt_cursor_col.min(self.term_cols.saturating_sub(1)));
+            cursor_to(
+                status_row,
+                prompt_cursor_col.min(self.term_cols.saturating_sub(1)),
+            );
             show_cursor();
             flush();
 
@@ -1479,7 +1501,7 @@ impl Editor {
         use std::fmt::Write;
 
         let _ = write!(buf, "\x1b[1;1H"); // row 1, col 1
-        let _ = write!(buf, "\x1b[7m");   // reverse video
+        let _ = write!(buf, "\x1b[7m"); // reverse video
 
         let fname = self.filename.as_deref().unwrap_or("[New Buffer]");
         let mod_indicator = if self.modified { " [Modified]" } else { "" };
@@ -1726,10 +1748,7 @@ impl Editor {
             return true;
         }
         let fname = self.filename.as_deref().unwrap_or("[New Buffer]");
-        let answer = self.prompt(
-            &format!("Save modified buffer ({fname})? (Y/N/C): "),
-            "",
-        );
+        let answer = self.prompt(&format!("Save modified buffer ({fname})? (Y/N/C): "), "");
         match answer.as_deref() {
             Some("Y") | Some("y") | Some("yes") => {
                 self.cmd_save();
@@ -1745,9 +1764,7 @@ impl Editor {
         let line = self.cursor_line + 1;
         let col = self.cursor_col + 1;
         let total_chars: usize = self.lines.iter().map(|l| l.len() + 1).sum();
-        self.status_msg = format!(
-            "line {line}/{total_lines}, col {col}, chars: {total_chars}"
-        );
+        self.status_msg = format!("line {line}/{total_lines}, col {col}, chars: {total_chars}");
     }
 
     // ========================================================================

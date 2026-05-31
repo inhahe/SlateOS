@@ -1,3 +1,21 @@
+## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 5 — TEST HANG
+##   (infinite block, not a failed assertion). Found because the full substantial-crate
+##   `cargo test` run wedged on `vi`'s test binary ("running for over 60 seconds" for every
+##   test, emitting `\e[999;999H\e[6n` to the captured output).
+##   ROOT CAUSE (PRODUCTION bug, affects vi, htop, nano): their terminal-size detection has a
+##   final fallback that writes the ANSI cursor-position-report handshake (move cursor to
+##   bottom-right, send DSR `\e[6n`) and then BLOCKS reading the reply from stdin. Under a
+##   pipe / file redirect / test harness (stdin is an open pipe with no data and no EOF) the
+##   reply never arrives, so the blocking read hangs forever. vi calls this from Editor::new(),
+##   which nearly every vi test constructs → whole test binary deadlocks.
+##   FIX: guard the handshake behind `std::io::IsTerminal` — only perform the query when BOTH
+##   stdin and stdout are real terminals; otherwise return the (24, 80) default immediately.
+##   This also fixes the real interactive-use bug: piping into vi/htop/nano would have hung.
+##   (Verified is_terminal() compiles+links on the x86_64-ouros target for all three.)
+##   NOTE/follow-up: htop and nano parse the terminal reply with String::from_utf8_lossy,
+##   which the coding standard forbids; low-risk here (reply is ASCII digits) but worth
+##   replacing with a byte parse if these files are touched again.
+
 ## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 4 — RUNTIME test
 ##   failures (test builds compiled, but assertions failed) found by running the full
 ##   `cargo test --no-fail-fast` across all 275 substantial userspace crates. 10 crates.

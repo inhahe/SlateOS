@@ -336,6 +336,13 @@ fn terminal_size() -> (usize, usize) {
     }
 
     // Fallback: probe by moving cursor to bottom-right and querying position.
+    // This handshake blocks reading the terminal's reply from stdin, so it must
+    // only run on a real interactive terminal — under a pipe/redirect/test the
+    // reply never arrives and the read would hang forever.
+    use std::io::IsTerminal;
+    if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
+        return (24, 80);
+    }
     write_str("\x1b[999;999H\x1b[6n");
     flush();
     let mut resp = Vec::new();
@@ -428,7 +435,8 @@ fn read_key() -> Key {
                             let mut next = read_byte_eager();
                             while let Some(d) = next {
                                 if d.is_ascii_digit() {
-                                    num1 = num1.saturating_mul(10).saturating_add((d - b'0') as u16);
+                                    num1 =
+                                        num1.saturating_mul(10).saturating_add((d - b'0') as u16);
                                     next = read_byte_eager();
                                 } else {
                                     break;
@@ -518,8 +526,7 @@ struct CpuStat {
 
 impl CpuStat {
     fn total(&self) -> u64 {
-        self.user + self.nice + self.system + self.idle
-            + self.iowait + self.irq + self.softirq
+        self.user + self.nice + self.system + self.idle + self.iowait + self.irq + self.softirq
     }
 }
 
@@ -614,9 +621,18 @@ impl SortField {
 
     fn all() -> &'static [SortField] {
         &[
-            Self::Pid, Self::User, Self::Priority, Self::Nice,
-            Self::Virt, Self::Res, Self::Shr, Self::State,
-            Self::Cpu, Self::Mem, Self::Time, Self::Command,
+            Self::Pid,
+            Self::User,
+            Self::Priority,
+            Self::Nice,
+            Self::Virt,
+            Self::Res,
+            Self::Shr,
+            Self::State,
+            Self::Cpu,
+            Self::Mem,
+            Self::Time,
+            Self::Command,
         ]
     }
 }
@@ -692,7 +708,8 @@ fn read_cpu_stats() -> Vec<CpuStat> {
         for line in stat.lines() {
             // Skip the aggregate "cpu " line; only read per-core "cpuN" lines.
             if line.starts_with("cpu") && !line.starts_with("cpu ") {
-                let parts: Vec<u64> = line.split_whitespace()
+                let parts: Vec<u64> = line
+                    .split_whitespace()
                     .skip(1) // skip "cpuN" label
                     .filter_map(|s| s.parse().ok())
                     .collect();
@@ -715,7 +732,8 @@ fn read_cpu_stats() -> Vec<CpuStat> {
         if let Some(stat) = read_file("/proc/stat") {
             for line in stat.lines() {
                 if let Some(rest) = line.strip_prefix("cpu ") {
-                    let parts: Vec<u64> = rest.split_whitespace()
+                    let parts: Vec<u64> = rest
+                        .split_whitespace()
                         .filter_map(|s| s.parse().ok())
                         .collect();
                     if parts.len() >= 7 {
@@ -835,7 +853,8 @@ fn read_process(pid: u32, mem_total_kb: u64) -> Option<ProcessInfo> {
         .and_then(|content| {
             for line in content.lines() {
                 if let Some(val) = line.strip_prefix("Uid:") {
-                    return val.trim()
+                    return val
+                        .trim()
                         .split_whitespace()
                         .next()
                         .and_then(|s| s.parse().ok());
@@ -902,13 +921,10 @@ fn read_all_processes(mem_total_kb: u64) -> Vec<ProcessInfo> {
 }
 
 /// Compute CPU usage percentages by comparing two snapshots.
-fn compute_cpu_usage(
-    current: &mut [ProcessInfo],
-    prev: &[(u32, u64)],
-    total_cpu_delta: u64,
-) {
+fn compute_cpu_usage(current: &mut [ProcessInfo], prev: &[(u32, u64)], total_cpu_delta: u64) {
     for proc_info in current.iter_mut() {
-        let prev_ticks = prev.iter()
+        let prev_ticks = prev
+            .iter()
             .find(|(pid, _)| *pid == proc_info.pid)
             .map(|(_, t)| *t)
             .unwrap_or(0);
@@ -954,8 +970,10 @@ fn format_uptime(secs: u64) -> String {
     let mins = (secs % 3600) / 60;
     let s = secs % 60;
     if days > 0 {
-        format!("{days} day{}, {hours:02}:{mins:02}:{s:02}",
-            if days == 1 { "" } else { "s" })
+        format!(
+            "{days} day{}, {hours:02}:{mins:02}:{s:02}",
+            if days == 1 { "" } else { "s" }
+        )
     } else {
         format!("{hours:02}:{mins:02}:{s:02}")
     }
@@ -988,9 +1006,13 @@ fn sort_processes(procs: &mut [ProcessInfo], field: SortField) {
             SortField::Res => a.rss_kb.cmp(&b.rss_kb),
             SortField::Shr => a.shr_kb.cmp(&b.shr_kb),
             SortField::State => a.state.cmp(&b.state),
-            SortField::Cpu => a.cpu_pct.partial_cmp(&b.cpu_pct)
+            SortField::Cpu => a
+                .cpu_pct
+                .partial_cmp(&b.cpu_pct)
                 .unwrap_or(std::cmp::Ordering::Equal),
-            SortField::Mem => a.mem_pct.partial_cmp(&b.mem_pct)
+            SortField::Mem => a
+                .mem_pct
+                .partial_cmp(&b.mem_pct)
                 .unwrap_or(std::cmp::Ordering::Equal),
             SortField::Time => a.cpu_ticks.cmp(&b.cpu_ticks),
             SortField::Command => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
@@ -1016,7 +1038,8 @@ fn build_tree(procs: &[ProcessInfo]) -> Vec<(ProcessInfo, usize)> {
     let mut result = Vec::with_capacity(procs.len());
 
     // Collect roots.
-    let mut roots: Vec<&ProcessInfo> = procs.iter()
+    let mut roots: Vec<&ProcessInfo> = procs
+        .iter()
         .filter(|p| p.ppid == 0 || !pids.contains(&p.ppid))
         .collect();
     roots.sort_by_key(|p| p.pid);
@@ -1044,7 +1067,8 @@ fn add_children(
 ) {
     result.push((parent.clone(), depth));
 
-    let mut children: Vec<&ProcessInfo> = all.iter()
+    let mut children: Vec<&ProcessInfo> = all
+        .iter()
         .filter(|p| p.ppid == parent.pid && p.pid != parent.pid)
         .collect();
     children.sort_by_key(|p| p.pid);
@@ -1173,7 +1197,8 @@ impl App {
             self.processes.clone()
         } else {
             let needle = self.filter.to_lowercase();
-            self.processes.iter()
+            self.processes
+                .iter()
                 .filter(|p| {
                     p.name.to_lowercase().contains(&needle)
                         || p.cmdline.to_lowercase().contains(&needle)
@@ -1321,7 +1346,12 @@ impl App {
             let buf_frac = self.mem.buffers_kb as f64 / total;
             let cache_frac = self.mem.cached_kb as f64 / total;
             self.render_mem_bar_into(&mut s, bar_width, used_frac, buf_frac, cache_frac);
-            let _ = write!(s, " {}/{}", format_mib(self.mem.used_kb()), format_mib(self.mem.total_kb));
+            let _ = write!(
+                s,
+                " {}/{}",
+                format_mib(self.mem.used_kb()),
+                format_mib(self.mem.total_kb)
+            );
             lines.push(s);
         }
 
@@ -1333,7 +1363,12 @@ impl App {
             let total = self.mem.swap_total_kb.max(1) as f64;
             let used_frac = self.mem.swap_used_kb() as f64 / total;
             self.render_swap_bar_into(&mut s, bar_width, used_frac);
-            let _ = write!(s, " {}/{}", format_mib(self.mem.swap_used_kb()), format_mib(self.mem.swap_total_kb));
+            let _ = write!(
+                s,
+                " {}/{}",
+                format_mib(self.mem.swap_used_kb()),
+                format_mib(self.mem.swap_total_kb)
+            );
             lines.push(s);
         }
 
@@ -1343,16 +1378,24 @@ impl App {
             let running = self.processes.iter().filter(|p| p.state == 'R').count();
             let threads: u32 = self.processes.iter().map(|p| p.threads).sum();
             let mut s = String::new();
-            let _ = write!(s, "{BOLD}Tasks:{RESET} {BOLD_WHITE}{total}{RESET}, {GREEN}{running} running{RESET}; {DIM}{threads} thr{RESET}");
+            let _ = write!(
+                s,
+                "{BOLD}Tasks:{RESET} {BOLD_WHITE}{total}{RESET}, {GREEN}{running} running{RESET}; {DIM}{threads} thr{RESET}"
+            );
             lines.push(s);
         }
 
         // Line 3: Load average and uptime.
         {
             let mut s = String::new();
-            let _ = write!(s, "{BOLD}Load:{RESET} {} {} {} {BOLD}Uptime:{RESET} {}",
-                self.load.0, self.load.1, self.load.2,
-                format_uptime(self.uptime));
+            let _ = write!(
+                s,
+                "{BOLD}Load:{RESET} {} {} {} {BOLD}Uptime:{RESET} {}",
+                self.load.0,
+                self.load.1,
+                self.load.2,
+                format_uptime(self.uptime)
+            );
             lines.push(s);
         }
 
@@ -1388,7 +1431,14 @@ impl App {
         let _ = write!(buf, "{RESET}]");
     }
 
-    fn render_mem_bar_into(&self, buf: &mut String, width: usize, used: f64, buffers: f64, cache: f64) {
+    fn render_mem_bar_into(
+        &self,
+        buf: &mut String,
+        width: usize,
+        used: f64,
+        buffers: f64,
+        cache: f64,
+    ) {
         let _ = write!(buf, "[");
 
         let used_chars = (used * width as f64).round() as usize;
@@ -1639,7 +1689,10 @@ impl App {
 
     fn render_help(&self, buf: &mut String) {
         let _ = write!(buf, "\x1b[2J\x1b[H");
-        let _ = write!(buf, "{BOLD}{REVERSE} htop {VERSION} -- OurOS Interactive Process Viewer ");
+        let _ = write!(
+            buf,
+            "{BOLD}{REVERSE} htop {VERSION} -- OurOS Interactive Process Viewer "
+        );
         // Pad to full width.
         let title_len = 47;
         for _ in title_len..self.term_cols {
@@ -1698,8 +1751,16 @@ impl App {
             let screen_row = row + 1 + i;
             let _ = write!(buf, "\x1b[{screen_row};1H\x1b[K");
             let marker = if i == self.sort_cursor { ">" } else { " " };
-            let highlight = if *field == self.config.sort_field { BOLD_GREEN } else { "" };
-            let _ = write!(buf, " {BOLD}{marker}{RESET} {highlight}{}{RESET}", field.label());
+            let highlight = if *field == self.config.sort_field {
+                BOLD_GREEN
+            } else {
+                ""
+            };
+            let _ = write!(
+                buf,
+                " {BOLD}{marker}{RESET} {highlight}{}{RESET}",
+                field.label()
+            );
         }
 
         // Clear remaining lines.
@@ -1710,7 +1771,10 @@ impl App {
 
         // Footer.
         let _ = write!(buf, "\x1b[{};1H\x1b[K", self.term_rows);
-        let _ = write!(buf, " {DIM}Up/Down to select, Enter to confirm, Esc to cancel{RESET}");
+        let _ = write!(
+            buf,
+            " {DIM}Up/Down to select, Enter to confirm, Esc to cancel{RESET}"
+        );
     }
 
     fn render_kill_prompt(&self, buf: &mut String) {
@@ -1721,7 +1785,10 @@ impl App {
         if self.cursor < display.len() {
             let pid = display[self.cursor].0.pid;
             let name = &display[self.cursor].0.name;
-            let _ = write!(buf, " {BOLD_RED}Kill{RESET} PID {BOLD}{pid}{RESET} ({name})? [y/N] ");
+            let _ = write!(
+                buf,
+                " {BOLD_RED}Kill{RESET} PID {BOLD}{pid}{RESET} ({name})? [y/N] "
+            );
         } else {
             let _ = write!(buf, " {DIM}No process selected{RESET}");
         }
@@ -1777,7 +1844,8 @@ impl App {
                 };
             }
             Key::F(6) => {
-                self.sort_cursor = SortField::all().iter()
+                self.sort_cursor = SortField::all()
+                    .iter()
                     .position(|f| *f == self.config.sort_field)
                     .unwrap_or(0);
                 self.overlay = Overlay::SortPicker;
@@ -1986,7 +2054,8 @@ impl App {
             let key = read_key();
 
             // Clear status message after the first render following the action.
-            if key != Key::None && !self.status_msg.is_empty()
+            if key != Key::None
+                && !self.status_msg.is_empty()
                 && self.overlay != Overlay::KillConfirm
             {
                 self.status_msg.clear();
@@ -2095,7 +2164,9 @@ fn main() {
                     Some(f) => f,
                     None => {
                         eprintln!("error: unknown sort field: {}", args[i + 1]);
-                        eprintln!("Valid: cpu, mem, pid, user, cmd, time, pri, ni, virt, res, shr, state");
+                        eprintln!(
+                            "Valid: cpu, mem, pid, user, cmd, time, pri, ni, virt, res, shr, state"
+                        );
                         process::exit(1);
                     }
                 };

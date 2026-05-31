@@ -144,6 +144,16 @@ fn get_terminal_size() -> (usize, usize) {
             return (ws.ws_row as usize, ws.ws_col as usize);
         }
     }
+    // The ANSI cursor-position-report fallback (move cursor to the far
+    // bottom-right, then ask the terminal where it ended up) requires an
+    // interactive terminal: it writes a query and then *blocks* reading the
+    // reply from stdin. In a pipe, file redirect, or test harness no reply
+    // ever arrives and the read would hang forever, so only attempt the
+    // handshake when both stdin and stdout are real terminals.
+    use std::io::IsTerminal;
+    if !(io::stdin().is_terminal() && io::stdout().is_terminal()) {
+        return (24, 80);
+    }
     let _ = io::stdout().write_all(b"\x1b[999;999H\x1b[6n");
     let _ = io::stdout().flush();
     let mut buf = Vec::with_capacity(32);

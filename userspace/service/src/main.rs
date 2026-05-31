@@ -32,7 +32,7 @@ use std::process;
 const SYS_CHANNEL_OPEN: u64 = 200;
 const SYS_CHANNEL_SEND: u64 = 201;
 const SYS_CHANNEL_RECV: u64 = 202;
-const SYS_CHANNEL_CLOSE: u64 = 203;
+const SYS_CHANNEL_CLOSE: u64 = 204;
 
 #[cfg(target_arch = "x86_64")]
 unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
@@ -61,19 +61,24 @@ fn send_service_command(command: &str, service_name: &str) -> Result<String, Str
     // Open a channel to the service manager (well-known name: "org.ouros.ServiceManager").
     let svc_name = b"org.ouros.ServiceManager\0";
     let channel = unsafe {
-        syscall3(SYS_CHANNEL_OPEN, svc_name.as_ptr() as u64, svc_name.len() as u64, 0)
+        syscall3(
+            SYS_CHANNEL_OPEN,
+            svc_name.as_ptr() as u64,
+            svc_name.len() as u64,
+            0,
+        )
     };
 
     if channel < 0 {
-        return Err(format!("cannot connect to service manager (error {channel})"));
+        return Err(format!(
+            "cannot connect to service manager (error {channel})"
+        ));
     }
 
     let ch = channel as u64;
 
     // Send the command.
-    let send_ret = unsafe {
-        syscall3(SYS_CHANNEL_SEND, ch, msg.as_ptr() as u64, msg.len() as u64)
-    };
+    let send_ret = unsafe { syscall3(SYS_CHANNEL_SEND, ch, msg.as_ptr() as u64, msg.len() as u64) };
 
     if send_ret < 0 {
         let _ = unsafe { syscall3(SYS_CHANNEL_CLOSE, ch, 0, 0) };
@@ -83,7 +88,12 @@ fn send_service_command(command: &str, service_name: &str) -> Result<String, Str
     // Receive the response.
     let mut buf = [0u8; 4096];
     let recv_ret = unsafe {
-        syscall3(SYS_CHANNEL_RECV, ch, buf.as_mut_ptr() as u64, buf.len() as u64)
+        syscall3(
+            SYS_CHANNEL_RECV,
+            ch,
+            buf.as_mut_ptr() as u64,
+            buf.len() as u64,
+        )
     };
 
     let _ = unsafe { syscall3(SYS_CHANNEL_CLOSE, ch, 0, 0) };
@@ -92,9 +102,29 @@ fn send_service_command(command: &str, service_name: &str) -> Result<String, Str
         return Err(format!("recv failed (error {recv_ret})"));
     }
 
-    let len = recv_ret as usize;
+    let len = (recv_ret as usize).min(buf.len());
     let response = String::from_utf8_lossy(&buf[..len]).to_string();
     Ok(response)
+}
+
+/// Create a filesystem symlink (`target` is the existing file, `link` is the
+/// new symlink path).
+///
+/// On the shipping `x86_64-ouros` target (which is unix) this uses the real
+/// `std::os::unix::fs::symlink`.  The `#[cfg(not(unix))]` arm exists only so
+/// the crate compiles for `cargo test`/clippy on the Windows dev host; it is
+/// never the runtime path.
+#[cfg(unix)]
+fn make_symlink(target: &str, link: &str) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(not(unix))]
+fn make_symlink(_target: &str, _link: &str) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "symlink creation is only supported on the unix (ouros) target",
+    ))
 }
 
 // ============================================================================
@@ -130,22 +160,18 @@ fn read_service_status(name: &str) -> Option<ServiceInfo> {
     let run_path = format!("/run/services/{name}");
     let def_path = format!("/etc/services/{name}.service");
 
-    let status = read_file(&format!("{run_path}/status"))
-        .unwrap_or_else(|| "stopped".to_string());
-    let pid = read_file(&format!("{run_path}/pid"))
-        .and_then(|s| s.parse::<u32>().ok());
-    let started_at = read_file(&format!("{run_path}/started_at"))
-        .and_then(|s| s.parse::<u64>().ok());
-    let exit_code = read_file(&format!("{run_path}/exit_code"))
-        .and_then(|s| s.parse::<i32>().ok());
+    let status = read_file(&format!("{run_path}/status")).unwrap_or_else(|| "stopped".to_string());
+    let pid = read_file(&format!("{run_path}/pid")).and_then(|s| s.parse::<u32>().ok());
+    let started_at =
+        read_file(&format!("{run_path}/started_at")).and_then(|s| s.parse::<u64>().ok());
+    let exit_code = read_file(&format!("{run_path}/exit_code")).and_then(|s| s.parse::<i32>().ok());
     let restart_count = read_file(&format!("{run_path}/restarts"))
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
 
     // Compute uptime.
-    let uptime_secs = started_at.and_then(|start| {
-        current_time_secs().map(|now| now.saturating_sub(start))
-    });
+    let uptime_secs =
+        started_at.and_then(|start| current_time_secs().map(|now| now.saturating_sub(start)));
 
     // Read service definition.
     let (description, dependencies, exec_path, enabled) = read_service_def(&def_path);
@@ -184,7 +210,8 @@ fn read_service_def(path: &str) -> (String, Vec<String>, String, bool) {
             exec_path = val.trim().trim_matches('"').to_string();
         } else if let Some(val) = line.strip_prefix("enabled:") {
             enabled = val.trim() == "true" || val.trim() == "yes";
-        } else if line.starts_with("- ") && !dependencies.is_empty() || line.starts_with("depends:") {
+        } else if line.starts_with("- ") && !dependencies.is_empty() || line.starts_with("depends:")
+        {
             if let Some(val) = line.strip_prefix("depends:") {
                 // Inline list: depends: [a, b, c]
                 let val = val.trim().trim_matches(|c: char| c == '[' || c == ']');
@@ -211,11 +238,11 @@ fn list_all_services() -> Vec<ServiceInfo> {
     // Scan /run/services/ for running/recently-stopped services.
     if let Ok(entries) = fs::read_dir("/run/services") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Some(info) = read_service_status(name) {
-                    seen.push(name.to_string());
-                    services.push(info);
-                }
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(info) = read_service_status(name)
+            {
+                seen.push(name.to_string());
+                services.push(info);
             }
         }
     }
@@ -226,9 +253,8 @@ fn list_all_services() -> Vec<ServiceInfo> {
             if let Some(name) = entry.file_name().to_str() {
                 let svc_name = name.strip_suffix(".service").unwrap_or(name);
                 if !seen.contains(&svc_name.to_string()) {
-                    let (desc, deps, exec, enabled) = read_service_def(
-                        &format!("/etc/services/{name}")
-                    );
+                    let (desc, deps, exec, enabled) =
+                        read_service_def(&format!("/etc/services/{name}"));
                     services.push(ServiceInfo {
                         name: svc_name.to_string(),
                         status: "stopped".to_string(),
@@ -288,9 +314,9 @@ fn format_uptime(secs: u64) -> String {
 
 fn status_indicator(status: &str) -> &str {
     match status {
-        "running" => "\x1b[32m●\x1b[0m", // green dot
+        "running" => "\x1b[32m●\x1b[0m",  // green dot
         "stopped" => "\x1b[90m○\x1b[0m",  // gray dot
-        "failed"  => "\x1b[31m●\x1b[0m",  // red dot
+        "failed" => "\x1b[31m●\x1b[0m",   // red dot
         "starting" => "\x1b[33m◐\x1b[0m", // yellow half
         "stopping" => "\x1b[33m◑\x1b[0m", // yellow half
         _ => "?",
@@ -310,35 +336,42 @@ fn cmd_list() {
         return;
     }
 
-    println!("{:<3} {:<24} {:<10} {:>6} {:>8} {}",
-        "", "SERVICE", "STATUS", "PID", "UPTIME", "DESCRIPTION");
-    println!("{:<3} {:<24} {:<10} {:>6} {:>8} {}",
-        "", "-------", "------", "---", "------", "-----------");
+    println!(
+        "{:<3} {:<24} {:<10} {:>6} {:>8} DESCRIPTION",
+        "", "SERVICE", "STATUS", "PID", "UPTIME"
+    );
+    println!(
+        "{:<3} {:<24} {:<10} {:>6} {:>8} -----------",
+        "", "-------", "------", "---", "------"
+    );
 
     for svc in &services {
         let indicator = status_indicator(&svc.status);
-        let pid_str = svc.pid
+        let pid_str = svc
+            .pid
             .map(|p| p.to_string())
             .unwrap_or_else(|| "-".to_string());
-        let uptime_str = svc.uptime_secs
-            .map(|s| format_uptime(s))
+        let uptime_str = svc
+            .uptime_secs
+            .map(format_uptime)
             .unwrap_or_else(|| "-".to_string());
 
         let enabled_marker = if svc.enabled { "" } else { " (disabled)" };
 
-        println!("{indicator} {:<24} {:<10} {:>6} {:>8} {}{}",
-            svc.name,
-            svc.status,
-            pid_str,
-            uptime_str,
-            svc.description,
-            enabled_marker,
+        println!(
+            "{indicator} {:<24} {:<10} {:>6} {:>8} {}{}",
+            svc.name, svc.status, pid_str, uptime_str, svc.description, enabled_marker,
         );
     }
 
     let running = services.iter().filter(|s| s.status == "running").count();
     let failed = services.iter().filter(|s| s.status == "failed").count();
-    println!("\n{} services, {} running, {} failed", services.len(), running, failed);
+    println!(
+        "\n{} services, {} running, {} failed",
+        services.len(),
+        running,
+        failed
+    );
 }
 
 fn cmd_status(name: &str) {
@@ -427,7 +460,7 @@ fn cmd_enable(name: &str) {
             // Fall back: create a symlink in /etc/services/enabled/
             let link = format!("/etc/services/enabled/{name}");
             let target = format!("/etc/services/{name}.service");
-            match std::os::unix::fs::symlink(&target, &link) {
+            match make_symlink(&target, &link) {
                 Ok(()) => println!("Enabled {name}"),
                 Err(e) => {
                     eprintln!("Failed to enable {name}: {e}");
@@ -492,9 +525,14 @@ fn cmd_tree() {
     // Find root services (no dependencies or deps not in our list).
     let svc_names: Vec<&str> = services.iter().map(|s| s.name.as_str()).collect();
 
-    let roots: Vec<&ServiceInfo> = services.iter()
-        .filter(|s| s.dependencies.is_empty()
-            || s.dependencies.iter().all(|d| !svc_names.contains(&d.as_str())))
+    let roots: Vec<&ServiceInfo> = services
+        .iter()
+        .filter(|s| {
+            s.dependencies.is_empty()
+                || s.dependencies
+                    .iter()
+                    .all(|d| !svc_names.contains(&d.as_str()))
+        })
         .collect();
 
     for root in &roots {
@@ -504,19 +542,15 @@ fn cmd_tree() {
     }
 }
 
-fn print_dep_tree(
-    services: &[ServiceInfo],
-    parent: &str,
-    prefix: &str,
-    visited: &mut Vec<String>,
-) {
+fn print_dep_tree(services: &[ServiceInfo], parent: &str, prefix: &str, visited: &mut Vec<String>) {
     if visited.contains(&parent.to_string()) {
         return; // Avoid cycles.
     }
     visited.push(parent.to_string());
 
     // Find services that depend on this one.
-    let dependents: Vec<&ServiceInfo> = services.iter()
+    let dependents: Vec<&ServiceInfo> = services
+        .iter()
         .filter(|s| s.dependencies.iter().any(|d| d == parent))
         .collect();
 
@@ -641,6 +675,64 @@ fn main() {
             eprintln!("unknown command: {other}");
             eprintln!("Run 'service help' for usage.");
             process::exit(1);
+        }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_uptime_seconds() {
+        assert_eq!(format_uptime(0), "0s");
+        assert_eq!(format_uptime(45), "45s");
+    }
+
+    #[test]
+    fn format_uptime_minutes() {
+        assert_eq!(format_uptime(60), "1m 0s");
+        assert_eq!(format_uptime(125), "2m 5s");
+    }
+
+    #[test]
+    fn format_uptime_hours() {
+        assert_eq!(format_uptime(3600), "1h 0m");
+        assert_eq!(format_uptime(3661), "1h 1m");
+    }
+
+    #[test]
+    fn format_uptime_days() {
+        assert_eq!(format_uptime(86400), "1d 0h");
+        assert_eq!(format_uptime(90000), "1d 1h");
+    }
+
+    #[test]
+    fn status_indicator_known_states() {
+        // Each known state maps to a distinct, non-empty marker.
+        for s in ["running", "stopped", "failed", "starting", "stopping"] {
+            assert!(!status_indicator(s).is_empty());
+        }
+        assert_eq!(status_indicator("unknown-state"), "?");
+    }
+
+    #[test]
+    fn make_symlink_unsupported_on_host() {
+        // On the non-unix dev host the helper must report Unsupported (it is
+        // never the runtime path; the shipping ouros target uses the real
+        // symlink call).  On a unix host the call will attempt a real symlink
+        // into a path that does not exist and fail with a different error — so
+        // we only assert the error kind on non-unix.
+        #[cfg(not(unix))]
+        {
+            let err = make_symlink("/nonexistent/target", "/nonexistent/link")
+                .expect_err("symlink must be unsupported on non-unix host");
+            assert_eq!(err.kind(), std::io::ErrorKind::Unsupported);
         }
     }
 }

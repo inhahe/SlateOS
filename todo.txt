@@ -1,3 +1,27 @@
+## BUG (noticed+FIXED 2026-05-31): sshd had 2 failing tests (base64_decode
+##   dropped trailing bytes) + ~32 pre-existing clippy errors + 13 dead-code
+##   warnings.  userspace/sshd/src/main.rs:
+##     * PRODUCTION BUG: base64_decode's main loop used `while i + 3 < len`,
+##       which skips the final 2-or-3-char group after `=` padding is stripped,
+##       so the last 1-2 decoded bytes were lost.  Rewrote to `while i + 1 <
+##       len` with bounds-checked reads of the 3rd/4th chars (treating missing
+##       chars as padding).  Fixes test_base64_decode_* .  114/114 tests pass.
+##     * Clippy: format_push_string in SshdConfig::dump (rebuilt via vec! + join);
+##       format_collect for hex (added hex_encode helper using write!);
+##       many_single_char_names allow on sha256/base64_decode; unreadable_literal
+##       allow crate-wide (SHA-256 K/H tables); needless_range_loop in sha256;
+##       assigning_clones (clone_into x3); 2 no-op drop(&mut channel) removed
+##       (NLL already ends the borrow); let-else in handle_channel_request;
+##       duplicate "none"=>false match arm removed; PtyRequest type alias.
+##     * Dead-code: SYS_* ABI constants, tcp_close_listener/process_spawn/
+##       increment_counter/parse_version_string, AuthorizedKey.{key_type,comment},
+##       Channel.remote_max_packet — all #[allow(dead_code)] with comments noting
+##       the wiring gap (per-session spawn, listener teardown, CTR cipher,
+##       publickey algo selection / audit, outbound DATA capping). LIMITATION:
+##       sshd does not yet spawn login shells, do CTR transport encryption, or
+##       use parsed authorized-key metadata; these helpers are staged for that.
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): nft had a non-compiling test build + 15
 ##   pre-existing clippy errors.  userspace/nft/src/main.rs:
 ##     * TEST BUILD DIDN'T COMPILE: test_nft_list_ruleset passed `&rs` to

@@ -1,6 +1,6 @@
-//! OurOS SSH Server Daemon (sshd)
+//! `OurOS` SSH Server Daemon (sshd)
 //!
-//! An SSH-2 protocol server for OurOS. Listens for incoming SSH connections,
+//! An SSH-2 protocol server for `OurOS`. Listens for incoming SSH connections,
 //! authenticates users, and spawns interactive shell sessions or executes
 //! commands on behalf of authenticated users.
 //!
@@ -26,7 +26,7 @@
 //! - Host key: ssh-ed25519 (structured)
 //! - Encryption: AES-128-CTR
 //! - MAC: HMAC-SHA256
-//! - User auth: password (against /etc/shadow), public key (authorized_keys)
+//! - User auth: password (against /etc/shadow), public key (`authorized_keys`)
 //! - Session channels with PTY allocation and shell/exec requests
 
 #![deny(clippy::all, clippy::pedantic)]
@@ -39,6 +39,10 @@
 #![allow(clippy::too_many_lines)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::similar_names)]
+// The SHA-256 round constants / init vector are well-known 32-bit hex values
+// reproduced verbatim from FIPS 180-4; digit-group separators would obscure the
+// recognised constants rather than aid readability.
+#![allow(clippy::unreadable_literal)]
 
 use std::env;
 use std::fmt;
@@ -50,22 +54,36 @@ use std::process;
 // ============================================================================
 // Syscall numbers (from kernel/src/syscall/number.rs)
 // ============================================================================
+//
+// The full syscall ABI is mirrored here so that helpers can be wired up as the
+// daemon grows (per-session process spawning, listener teardown, fd shutdown,
+// authorized-keys file writes, etc.). Numbers that are not yet referenced by an
+// active code path are kept (rather than deleted) to keep this table a complete,
+// authoritative copy of the kernel ABI; `#[allow(dead_code)]` documents that the
+// gap is intentional, not an oversight.
 
+#[allow(dead_code)]
 const SYS_EXIT: u64 = 1;
 const SYS_CLOCK_MONOTONIC: u64 = 10;
+#[allow(dead_code)]
 const SYS_PROCESS_SPAWN: u64 = 500;
 const SYS_PROCESS_ID: u64 = 502;
 const SYS_FS_READ_FILE: u64 = 600;
+#[allow(dead_code)]
 const SYS_FS_WRITE_FILE: u64 = 601;
+#[allow(dead_code)]
 const SYS_FS_STAT: u64 = 606;
+#[allow(dead_code)]
 const SYS_TCP_CONNECT: u64 = 800;
 const SYS_TCP_SEND: u64 = 801;
 const SYS_TCP_RECV: u64 = 802;
 const SYS_TCP_CLOSE: u64 = 803;
 const SYS_TCP_BIND: u64 = 804;
 const SYS_TCP_ACCEPT: u64 = 805;
+#[allow(dead_code)]
 const SYS_TCP_CLOSE_LISTENER: u64 = 806;
 const SYS_TCP_PEER_ADDR: u64 = 808;
+#[allow(dead_code)]
 const SYS_TCP_SHUTDOWN: u64 = 855;
 
 // ============================================================================
@@ -228,9 +246,7 @@ fn tcp_accept(listener: u64) -> Result<u64, SshdError> {
     // SAFETY: listener is a valid listener handle from tcp_bind.
     let ret = unsafe { syscall1(SYS_TCP_ACCEPT, listener) };
     if ret < 0 {
-        return Err(SshdError::NetworkError(format!(
-            "tcp_accept failed: {ret}"
-        )));
+        return Err(SshdError::NetworkError(format!("tcp_accept failed: {ret}")));
     }
     Ok(ret as u64)
 }
@@ -292,24 +308,20 @@ fn tcp_close(handle: u64) {
 }
 
 /// Close a TCP listener handle.
+// Reserved for graceful-shutdown wiring: the main accept loop will call this to
+// release the bound listener when the daemon is asked to stop. Not yet invoked.
+#[allow(dead_code)]
 fn tcp_close_listener(listener: u64) {
     // SAFETY: listener is (or was) a valid TCP listener handle.
     let _ = unsafe { syscall1(SYS_TCP_CLOSE_LISTENER, listener) };
 }
 
 /// Get the peer address of a TCP connection.
-/// Returns (ip_u32_network_order, port).
+/// Returns (`ip_u32_network_order`, port).
 fn tcp_peer_addr(handle: u64) -> Result<(u32, u16), SshdError> {
     let mut buf = [0u8; 6];
     // SAFETY: handle is valid. buf is a stack-allocated 6-byte buffer.
-    let ret = unsafe {
-        syscall3(
-            SYS_TCP_PEER_ADDR,
-            handle,
-            buf.as_mut_ptr() as u64,
-            0,
-        )
-    };
+    let ret = unsafe { syscall3(SYS_TCP_PEER_ADDR, handle, buf.as_mut_ptr() as u64, 0) };
     if ret < 0 {
         return Err(SshdError::NetworkError("tcp_peer_addr failed".into()));
     }
@@ -319,6 +331,10 @@ fn tcp_peer_addr(handle: u64) -> Result<(u32, u16), SshdError> {
 }
 
 /// Spawn a new process. Returns child pid on success.
+// Reserved for session wiring: once a channel session request is granted the
+// daemon will spawn the user's login shell / requested command via this helper.
+// The exec path is not yet wired into handle_channel_request. Not yet invoked.
+#[allow(dead_code)]
 fn process_spawn(path: &str) -> Result<u64, SshdError> {
     // SAFETY: We pass a valid path pointer and its length.
     let ret = unsafe {
@@ -330,10 +346,9 @@ fn process_spawn(path: &str) -> Result<u64, SshdError> {
         )
     };
     if ret < 0 {
-        return Err(SshdError::IoError(io::Error::new(
-            io::ErrorKind::Other,
-            format!("process_spawn({path}) failed: {ret}"),
-        )));
+        return Err(SshdError::IoError(io::Error::other(format!(
+            "process_spawn({path}) failed: {ret}"
+        ))));
     }
     Ok(ret as u64)
 }
@@ -515,10 +530,7 @@ fn read_packet(
 
         let expected_mac = compute_mac(&enc.mac_key_c2s, seq, &dec);
         if mac_data.len() >= mac_len
-            && !constant_time_eq(
-                mac_data.get(..mac_len).unwrap_or_default(),
-                &expected_mac,
-            )
+            && !constant_time_eq(mac_data.get(..mac_len).unwrap_or_default(), &expected_mac)
         {
             return Err(SshdError::ProtocolError("MAC verification failed".into()));
         }
@@ -903,7 +915,11 @@ impl BigUint {
         for i in (0..len).rev() {
             let av = i16::from(a[i]);
             let bi = i as isize - (len as isize - b.len() as isize);
-            let bv = if bi >= 0 { i16::from(b[bi as usize]) } else { 0 };
+            let bv = if bi >= 0 {
+                i16::from(b[bi as usize])
+            } else {
+                0
+            };
             let diff = av - bv - borrow;
             if diff < 0 {
                 result[i] = (diff + 256) as u8;
@@ -938,23 +954,24 @@ impl BigUint {
 // ============================================================================
 
 const K256: [u32; 64] = [
-    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
-    0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
-    0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
-    0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
-    0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
-    0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
-    0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
-    0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
-    0xc67178f2,
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
 ];
 
 const H256_INIT: [u32; 8] = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-    0x5be0cd19,
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
 ];
 
+// The single-letter working variables a..h (and the message schedule w) follow
+// the FIPS 180-4 SHA-256 pseudocode verbatim; renaming them would hurt, not
+// help, readability for anyone checking the implementation against the spec.
+#[allow(clippy::many_single_char_names)]
 fn sha256(data: &[u8]) -> [u8; 32] {
     let mut hash = H256_INIT;
 
@@ -968,9 +985,9 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 
     for chunk in sha_msg.chunks_exact(64) {
         let mut w = [0u32; 64];
-        for i in 0..16 {
+        for (i, wi) in w.iter_mut().take(16).enumerate() {
             let off = i * 4;
-            w[i] = u32::from_be_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
+            *wi = u32::from_be_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -1057,7 +1074,7 @@ fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     sha256(&outer)
 }
 
-/// SSH MAC: HMAC-SHA256(key, sequence_number(u32 be) || unencrypted_packet).
+/// SSH MAC: HMAC-SHA256(key, `sequence_number(u32` be) || `unencrypted_packet`).
 fn compute_mac(key: &[u8], seq: u32, packet: &[u8]) -> Vec<u8> {
     let mut mac_input = Vec::with_capacity(4 + packet.len());
     mac_input.extend_from_slice(&seq.to_be_bytes());
@@ -1082,24 +1099,22 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 // ============================================================================
 
 const AES_SBOX: [u8; 256] = [
-    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab,
-    0x76, 0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4,
-    0x72, 0xc0, 0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71,
-    0xd8, 0x31, 0x15, 0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2,
-    0xeb, 0x27, 0xb2, 0x75, 0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6,
-    0xb3, 0x29, 0xe3, 0x2f, 0x84, 0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb,
-    0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf, 0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45,
-    0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8, 0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5,
-    0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2, 0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44,
-    0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73, 0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a,
-    0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb, 0xe0, 0x32, 0x3a, 0x0a, 0x49,
-    0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79, 0xe7, 0xc8, 0x37, 0x6d,
-    0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08, 0xba, 0x78, 0x25,
-    0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a, 0x70, 0x3e,
-    0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e, 0xe1,
-    0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
-    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb,
-    0x16,
+    0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+    0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+    0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+    0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+    0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+    0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+    0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+    0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+    0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+    0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+    0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+    0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+    0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+    0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+    0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+    0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16,
 ];
 
 const AES_RCON: [u8; 10] = [0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36];
@@ -1120,7 +1135,12 @@ fn aes128_expand_key(key: &[u8]) -> Vec<u8> {
     let mut i = 16;
     let mut rcon_idx = 0;
     while i < 176 {
-        let mut temp = [expanded[i - 4], expanded[i - 3], expanded[i - 2], expanded[i - 1]];
+        let mut temp = [
+            expanded[i - 4],
+            expanded[i - 3],
+            expanded[i - 2],
+            expanded[i - 1],
+        ];
 
         if i % 16 == 0 {
             temp.rotate_left(1);
@@ -1207,6 +1227,10 @@ fn aes128_encrypt_block(block: &mut [u8; 16], round_keys: &[u8]) {
 }
 
 /// Increment a 128-bit counter (big-endian) for CTR mode.
+// Reserved for the AES-CTR cipher path: the keystream generator will bump the
+// per-block counter via this helper once CTR transport encryption is wired into
+// the packet layer. Not yet invoked.
+#[allow(dead_code)]
 fn increment_counter(ctr: &mut [u8; 16]) {
     for i in (0..16).rev() {
         let (val, overflow) = ctr[i].overflowing_add(1);
@@ -1226,7 +1250,7 @@ fn build_ctr(iv: &[u8], seq: u32, block_idx: usize) -> [u8; 16] {
     // For SSH AES-CTR, the IV is used as the initial counter and incremented
     // per block. We add seq * (large_blocks) + block_idx to get the correct
     // counter for a given packet/block.
-    let offset = (seq as u64)
+    let offset = u64::from(seq)
         .wrapping_mul(256)
         .wrapping_add(block_idx as u64);
     let mut carry = offset;
@@ -1319,7 +1343,11 @@ impl EncryptionState {
 
 /// Derive SSH transport keys from the shared secret and exchange hash.
 /// RFC 4253, Section 7.2.
-fn derive_keys(shared_secret: &[u8], exchange_hash: &[u8; 32], session_id: &[u8; 32]) -> EncryptionState {
+fn derive_keys(
+    shared_secret: &[u8],
+    exchange_hash: &[u8; 32],
+    session_id: &[u8; 32],
+) -> EncryptionState {
     let k_enc = encode_mpint(shared_secret);
 
     let derive = |label: u8| -> Vec<u8> {
@@ -1433,7 +1461,7 @@ impl HostKey {
         Self::from_seed(seed)
     }
 
-    /// Encode the public key in SSH wire format: "ssh-ed25519" + key_data.
+    /// Encode the public key in SSH wire format: "ssh-ed25519" + `key_data`.
     fn public_key_blob(&self) -> Vec<u8> {
         let mut blob = Vec::new();
         blob.extend_from_slice(&ssh_string(b"ssh-ed25519"));
@@ -1476,7 +1504,7 @@ impl HostKey {
         }
         // Try hex-encoded.
         let text = String::from_utf8_lossy(&data);
-        let hex_str: String = text.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+        let hex_str: String = text.chars().filter(char::is_ascii_hexdigit).collect();
         if hex_str.len() >= 64 {
             let mut seed = [0u8; 32];
             for i in 0..32 {
@@ -1496,7 +1524,9 @@ impl HostKey {
             let seed = sha256(line.as_bytes());
             return Ok(Self::from_seed(seed));
         }
-        Err(SshdError::ConfigError(format!("cannot parse host key from {path}")))
+        Err(SshdError::ConfigError(format!(
+            "cannot parse host key from {path}"
+        )))
     }
 }
 
@@ -1531,6 +1561,9 @@ fn base64_encode(data: &[u8]) -> String {
 }
 
 /// Minimal base64 decoder.
+// a..d are the four decoded sextets of a base64 quartet; short names match the
+// usual base64 decode formulation.
+#[allow(clippy::many_single_char_names)]
 fn base64_decode(input: &str) -> Vec<u8> {
     const DECODE: [u8; 128] = {
         let mut table = [0xFFu8; 128];
@@ -1551,13 +1584,26 @@ fn base64_decode(input: &str) -> Vec<u8> {
     };
 
     let mut output = Vec::new();
-    let bytes: Vec<u8> = input.bytes().filter(|&b| b != b'=' && b != b'\n' && b != b'\r' && b != b' ').collect();
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|&b| b != b'=' && b != b'\n' && b != b'\r' && b != b' ')
+        .collect();
     let mut i = 0;
-    while i + 3 < bytes.len() {
+    // Process 4-char groups. The padding ('=') has already been stripped, so
+    // the final group may legitimately be 2 or 3 chars (encoding 1 or 2 bytes);
+    // read the 3rd/4th positions with bounds checks rather than requiring a
+    // full quartet (the old `i + 3 < len` condition dropped the last group).
+    while i + 1 < bytes.len() {
         let a = DECODE.get(bytes[i] as usize).copied().unwrap_or(0xFF);
         let b = DECODE.get(bytes[i + 1] as usize).copied().unwrap_or(0xFF);
-        let c = DECODE.get(bytes[i + 2] as usize).copied().unwrap_or(0xFF);
-        let d = DECODE.get(bytes[i + 3] as usize).copied().unwrap_or(0xFF);
+        let c = bytes
+            .get(i + 2)
+            .and_then(|&x| DECODE.get(x as usize).copied())
+            .unwrap_or(0xFF);
+        let d = bytes
+            .get(i + 3)
+            .and_then(|&x| DECODE.get(x as usize).copied())
+            .unwrap_or(0xFF);
         if a == 0xFF || b == 0xFF {
             break;
         }
@@ -1573,11 +1619,23 @@ fn base64_decode(input: &str) -> Vec<u8> {
     output
 }
 
+/// Lowercase hex encoding of a byte slice.
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes
+        .iter()
+        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
+            // Writing to a String is infallible, so the Result is ignored.
+            let _ = write!(s, "{b:02x}");
+            s
+        })
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
 
-/// SSH server configuration parsed from sshd_config.
+/// SSH server configuration parsed from `sshd_config`.
 #[derive(Clone)]
 struct SshdConfig {
     port: u16,
@@ -1630,7 +1688,7 @@ impl SshdConfig {
         }
     }
 
-    /// Parse configuration from sshd_config file contents.
+    /// Parse configuration from `sshd_config` file contents.
     fn parse(content: &str) -> Result<Self, SshdError> {
         let mut config = Self::default_config();
 
@@ -1662,7 +1720,9 @@ impl SshdConfig {
                     config.permit_root_login = match value.to_lowercase().as_str() {
                         "yes" => PermitRootLogin::Yes,
                         "no" => PermitRootLogin::No,
-                        "prohibit-password" | "without-password" => PermitRootLogin::ProhibitPassword,
+                        "prohibit-password" | "without-password" => {
+                            PermitRootLogin::ProhibitPassword
+                        }
                         _ => {
                             return Err(SshdError::ConfigError(format!(
                                 "invalid PermitRootLogin: {value}"
@@ -1680,19 +1740,19 @@ impl SshdConfig {
                     config.authorized_keys_file = value.into();
                 }
                 "maxauthtries" => {
-                    config.max_auth_tries = value
-                        .parse()
-                        .map_err(|_| SshdError::ConfigError(format!("invalid MaxAuthTries: {value}")))?;
+                    config.max_auth_tries = value.parse().map_err(|_| {
+                        SshdError::ConfigError(format!("invalid MaxAuthTries: {value}"))
+                    })?;
                 }
                 "logingracetime" => {
-                    config.login_grace_time = value
-                        .parse()
-                        .map_err(|_| SshdError::ConfigError(format!("invalid LoginGraceTime: {value}")))?;
+                    config.login_grace_time = value.parse().map_err(|_| {
+                        SshdError::ConfigError(format!("invalid LoginGraceTime: {value}"))
+                    })?;
                 }
                 "maxsessions" => {
-                    config.max_sessions = value
-                        .parse()
-                        .map_err(|_| SshdError::ConfigError(format!("invalid MaxSessions: {value}")))?;
+                    config.max_sessions = value.parse().map_err(|_| {
+                        SshdError::ConfigError(format!("invalid MaxSessions: {value}"))
+                    })?;
                 }
                 "banner" => {
                     config.banner_file = value.into();
@@ -1702,7 +1762,9 @@ impl SshdConfig {
                 }
                 "subsystem" => {
                     if let Some((name, cmd)) = value.split_once(|c: char| c.is_whitespace()) {
-                        config.subsystems.push((name.trim().into(), cmd.trim().into()));
+                        config
+                            .subsystems
+                            .push((name.trim().into(), cmd.trim().into()));
                     }
                 }
                 "allowusers" => {
@@ -1736,41 +1798,50 @@ impl SshdConfig {
 
     /// Format config as human-readable text (for -T option).
     fn dump(&self) -> String {
-        let mut out = String::new();
-        out.push_str(&format!("port {}\n", self.port));
-        out.push_str(&format!("listenaddress {}\n", self.listen_address));
-        out.push_str(&format!("hostkey {}\n", self.host_key_file));
         let root_login = match &self.permit_root_login {
             PermitRootLogin::Yes => "yes",
             PermitRootLogin::No => "no",
             PermitRootLogin::ProhibitPassword => "prohibit-password",
         };
-        out.push_str(&format!("permitrootlogin {root_login}\n"));
-        out.push_str(&format!("passwordauthentication {}\n", if self.password_authentication { "yes" } else { "no" }));
-        out.push_str(&format!("pubkeyauthentication {}\n", if self.pubkey_authentication { "yes" } else { "no" }));
-        out.push_str(&format!("authorizedkeysfile {}\n", self.authorized_keys_file));
-        out.push_str(&format!("maxauthtries {}\n", self.max_auth_tries));
-        out.push_str(&format!("logingracetime {}\n", self.login_grace_time));
-        out.push_str(&format!("maxsessions {}\n", self.max_sessions));
+        let yn = |b: bool| if b { "yes" } else { "no" };
+        let mut lines = vec![
+            format!("port {}", self.port),
+            format!("listenaddress {}", self.listen_address),
+            format!("hostkey {}", self.host_key_file),
+            format!("permitrootlogin {root_login}"),
+            format!(
+                "passwordauthentication {}",
+                yn(self.password_authentication)
+            ),
+            format!("pubkeyauthentication {}", yn(self.pubkey_authentication)),
+            format!("authorizedkeysfile {}", self.authorized_keys_file),
+            format!("maxauthtries {}", self.max_auth_tries),
+            format!("logingracetime {}", self.login_grace_time),
+            format!("maxsessions {}", self.max_sessions),
+        ];
         if !self.banner_file.is_empty() {
-            out.push_str(&format!("banner {}\n", self.banner_file));
+            lines.push(format!("banner {}", self.banner_file));
         }
-        out.push_str(&format!("printmotd {}\n", if self.print_motd { "yes" } else { "no" }));
+        lines.push(format!("printmotd {}", yn(self.print_motd)));
         for (name, cmd) in &self.subsystems {
-            out.push_str(&format!("subsystem {name} {cmd}\n"));
+            lines.push(format!("subsystem {name} {cmd}"));
         }
         if !self.allow_users.is_empty() {
-            out.push_str(&format!("allowusers {}\n", self.allow_users.join(" ")));
+            lines.push(format!("allowusers {}", self.allow_users.join(" ")));
         }
         if !self.deny_users.is_empty() {
-            out.push_str(&format!("denyusers {}\n", self.deny_users.join(" ")));
+            lines.push(format!("denyusers {}", self.deny_users.join(" ")));
         }
         if !self.allow_groups.is_empty() {
-            out.push_str(&format!("allowgroups {}\n", self.allow_groups.join(" ")));
+            lines.push(format!("allowgroups {}", self.allow_groups.join(" ")));
         }
         if !self.deny_groups.is_empty() {
-            out.push_str(&format!("denygroups {}\n", self.deny_groups.join(" ")));
+            lines.push(format!("denygroups {}", self.deny_groups.join(" ")));
         }
+        // Each directive on its own line, with a trailing newline to match the
+        // historical per-line `push_str(... "\n")` output.
+        let mut out = lines.join("\n");
+        out.push('\n');
         out
     }
 }
@@ -1823,33 +1894,33 @@ fn verify_password(password: &str, stored_hash: &str) -> bool {
     }
 
     // Check if it's a $5$salt$hash format (SHA-256 crypt).
-    if let Some(rest) = stored_hash.strip_prefix("$5$") {
-        if let Some((salt, expected_hash)) = rest.rsplit_once('$') {
-            let mut salted = Vec::new();
-            salted.extend_from_slice(password.as_bytes());
-            salted.extend_from_slice(salt.as_bytes());
-            let computed = sha256(&salted);
-            let computed_hex: String = computed.iter().map(|b| format!("{b:02x}")).collect();
-            return constant_time_eq(computed_hex.as_bytes(), expected_hash.as_bytes());
-        }
+    if let Some(rest) = stored_hash.strip_prefix("$5$")
+        && let Some((salt, expected_hash)) = rest.rsplit_once('$')
+    {
+        let mut salted = Vec::new();
+        salted.extend_from_slice(password.as_bytes());
+        salted.extend_from_slice(salt.as_bytes());
+        let computed = sha256(&salted);
+        let computed_hex = hex_encode(&computed);
+        return constant_time_eq(computed_hex.as_bytes(), expected_hash.as_bytes());
     }
 
     // Check if it's a $6$salt$hash format (SHA-512 -- we approximate with SHA-256).
-    if let Some(rest) = stored_hash.strip_prefix("$6$") {
-        if let Some((salt, expected_hash)) = rest.rsplit_once('$') {
-            let mut salted = Vec::new();
-            salted.extend_from_slice(password.as_bytes());
-            salted.extend_from_slice(salt.as_bytes());
-            let computed = sha256(&salted);
-            let computed_hex: String = computed.iter().map(|b| format!("{b:02x}")).collect();
-            return constant_time_eq(computed_hex.as_bytes(), expected_hash.as_bytes());
-        }
+    if let Some(rest) = stored_hash.strip_prefix("$6$")
+        && let Some((salt, expected_hash)) = rest.rsplit_once('$')
+    {
+        let mut salted = Vec::new();
+        salted.extend_from_slice(password.as_bytes());
+        salted.extend_from_slice(salt.as_bytes());
+        let computed = sha256(&salted);
+        let computed_hex = hex_encode(&computed);
+        return constant_time_eq(computed_hex.as_bytes(), expected_hash.as_bytes());
     }
 
     // Plain SHA-256 hex hash.
     if stored_hash.len() == 64 && stored_hash.chars().all(|c| c.is_ascii_hexdigit()) {
         let computed = sha256(password.as_bytes());
-        let computed_hex: String = computed.iter().map(|b| format!("{b:02x}")).collect();
+        let computed_hex = hex_encode(&computed);
         return constant_time_eq(computed_hex.as_bytes(), stored_hash.as_bytes());
     }
 
@@ -1857,15 +1928,20 @@ fn verify_password(password: &str, stored_hash: &str) -> bool {
     constant_time_eq(password.as_bytes(), stored_hash.as_bytes())
 }
 
-/// An entry from an authorized_keys file.
+/// An entry from an `authorized_keys` file.
 #[derive(Clone, Debug)]
 struct AuthorizedKey {
+    // Parsed and retained for completeness; publickey auth currently matches on
+    // `key_data` (the wire blob) only. `key_type` will gate algorithm selection
+    // and `comment` will appear in audit logs once those paths are wired.
+    #[allow(dead_code)]
     key_type: String,
     key_data: Vec<u8>,
+    #[allow(dead_code)]
     comment: String,
 }
 
-/// Parse an authorized_keys file.
+/// Parse an `authorized_keys` file.
 fn parse_authorized_keys(content: &str) -> Vec<AuthorizedKey> {
     let mut keys = Vec::new();
     for line in content.lines() {
@@ -1880,7 +1956,12 @@ fn parse_authorized_keys(content: &str) -> Vec<AuthorizedKey> {
             // Validate key type.
             if !matches!(
                 key_type.as_str(),
-                "ssh-rsa" | "ssh-ed25519" | "ecdsa-sha2-nistp256" | "ecdsa-sha2-nistp384" | "ecdsa-sha2-nistp521" | "ssh-dss"
+                "ssh-rsa"
+                    | "ssh-ed25519"
+                    | "ecdsa-sha2-nistp256"
+                    | "ecdsa-sha2-nistp384"
+                    | "ecdsa-sha2-nistp521"
+                    | "ssh-dss"
             ) {
                 continue;
             }
@@ -1901,7 +1982,7 @@ fn parse_authorized_keys(content: &str) -> Vec<AuthorizedKey> {
 }
 
 /// Check if a username is allowed by the allow/deny user/group lists.
-fn is_user_allowed(username: &str, _groups: &[String], config: &SshdConfig) -> bool {
+fn is_user_allowed(username: &str, groups: &[String], config: &SshdConfig) -> bool {
     // DenyUsers takes precedence.
     if !config.deny_users.is_empty() && config.deny_users.iter().any(|u| u == username) {
         return false;
@@ -1909,7 +1990,7 @@ fn is_user_allowed(username: &str, _groups: &[String], config: &SshdConfig) -> b
 
     // DenyGroups.
     if !config.deny_groups.is_empty() {
-        for group in _groups {
+        for group in groups {
             if config.deny_groups.iter().any(|g| g == group) {
                 return false;
             }
@@ -1923,7 +2004,9 @@ fn is_user_allowed(username: &str, _groups: &[String], config: &SshdConfig) -> b
 
     // AllowGroups: if specified, at least one group must match.
     if !config.allow_groups.is_empty() {
-        let has_match = _groups.iter().any(|g| config.allow_groups.iter().any(|ag| ag == g));
+        let has_match = groups
+            .iter()
+            .any(|g| config.allow_groups.iter().any(|ag| ag == g));
         if !has_match {
             return false;
         }
@@ -1955,6 +2038,9 @@ struct Channel {
     /// Our window size.
     local_window: u32,
     /// Maximum packet size for sending.
+    // Stored from the channel-open request; will cap outbound DATA payloads once
+    // the daemon writes channel data back to the client. Not yet read in prod.
+    #[allow(dead_code)]
     remote_max_packet: u32,
     /// Whether a PTY has been requested.
     pty_requested: bool,
@@ -1992,12 +2078,12 @@ impl Channel {
 // PTY request parsing
 // ============================================================================
 
-/// Parse a PTY request payload (after the "pty-req" string and want_reply byte).
-/// Returns (term, width_cols, height_rows, width_px, height_px, modes).
-fn parse_pty_request(
-    data: &[u8],
-    offset: usize,
-) -> Result<(String, u32, u32, u32, u32, Vec<u8>), SshdError> {
+/// Parsed PTY request payload:
+/// (term, `width_cols`, `height_rows`, `width_px`, `height_px`, modes).
+type PtyRequest = (String, u32, u32, u32, u32, Vec<u8>);
+
+/// Parse a PTY request payload (after the "pty-req" string and `want_reply` byte).
+fn parse_pty_request(data: &[u8], offset: usize) -> Result<PtyRequest, SshdError> {
     let (term_bytes, off) = read_ssh_string(data, offset)?;
     let term = String::from_utf8_lossy(term_bytes).into_owned();
     let (width_cols, off) = read_u32(data, off)?;
@@ -2005,7 +2091,14 @@ fn parse_pty_request(
     let (width_px, off) = read_u32(data, off)?;
     let (height_px, off) = read_u32(data, off)?;
     let (modes, _off) = read_ssh_string(data, off)?;
-    Ok((term, width_cols, height_rows, width_px, height_px, modes.to_vec()))
+    Ok((
+        term,
+        width_cols,
+        height_rows,
+        width_px,
+        height_px,
+        modes.to_vec(),
+    ))
 }
 
 // ============================================================================
@@ -2084,15 +2177,11 @@ impl ConnectionState {
 }
 
 /// Handle a single SSH connection.
-fn handle_connection(
-    handle: u64,
-    config: &SshdConfig,
-    host_key: &HostKey,
-    debug_mode: bool,
-) {
-    let peer = tcp_peer_addr(handle)
-        .map(|(ip, port)| format!("{}:{}", format_ip(ip), port))
-        .unwrap_or_else(|_| "unknown".into());
+fn handle_connection(handle: u64, config: &SshdConfig, host_key: &HostKey, debug_mode: bool) {
+    let peer = tcp_peer_addr(handle).map_or_else(
+        |_| "unknown".into(),
+        |(ip, port)| format!("{}:{}", format_ip(ip), port),
+    );
 
     if debug_mode {
         eprintln!("sshd: connection from {peer}");
@@ -2103,10 +2192,10 @@ fn handle_connection(
 
     let result = run_connection(&mut conn);
 
-    if let Err(e) = &result {
-        if debug_mode {
-            eprintln!("sshd: connection from {peer} error: {e}");
-        }
+    if let Err(e) = &result
+        && debug_mode
+    {
+        eprintln!("sshd: connection from {peer} error: {e}");
     }
 
     tcp_close(handle);
@@ -2168,7 +2257,9 @@ fn read_version_line(conn: &mut ConnectionState) -> Result<String, SshdError> {
     loop {
         let n = tcp_recv(conn.handle, &mut single)?;
         if n == 0 {
-            return Err(SshdError::ProtocolError("connection closed during version exchange".into()));
+            return Err(SshdError::ProtocolError(
+                "connection closed during version exchange".into(),
+            ));
         }
         if single[0] == b'\n' {
             break;
@@ -2185,6 +2276,10 @@ fn read_version_line(conn: &mut ConnectionState) -> Result<String, SshdError> {
 }
 
 /// Parse an SSH version string, returning the software version.
+// Reserved for peer-compatibility handling: the banner exchange will use the
+// parsed software version to enable known-client workarounds. The current
+// handshake only validates the "SSH-2.0" prefix. Not yet invoked (but tested).
+#[allow(dead_code)]
 fn parse_version_string(version: &str) -> Option<&str> {
     // Format: SSH-protoversion-softwareversion SP comments
     let version = version.trim();
@@ -2371,14 +2466,14 @@ fn handle_service_request(conn: &mut ConnectionState) -> Result<(), SshdError> {
     conn.send_packet(&accept)?;
 
     // Send banner if configured.
-    if !conn.config.banner_file.is_empty() {
-        if let Ok(banner_data) = fs_read_file(&conn.config.banner_file) {
-            let mut banner_msg = Vec::new();
-            banner_msg.push(msg::SSH_MSG_USERAUTH_BANNER);
-            banner_msg.extend_from_slice(&ssh_string(&banner_data));
-            banner_msg.extend_from_slice(&ssh_string(b"")); // language tag
-            let _ = conn.send_packet(&banner_msg);
-        }
+    if !conn.config.banner_file.is_empty()
+        && let Ok(banner_data) = fs_read_file(&conn.config.banner_file)
+    {
+        let mut banner_msg = Vec::new();
+        banner_msg.push(msg::SSH_MSG_USERAUTH_BANNER);
+        banner_msg.extend_from_slice(&ssh_string(&banner_data));
+        banner_msg.extend_from_slice(&ssh_string(b"")); // language tag
+        let _ = conn.send_packet(&banner_msg);
     }
 
     Ok(())
@@ -2408,7 +2503,7 @@ fn do_user_auth(conn: &mut ConnectionState) -> Result<(), SshdError> {
         let method = String::from_utf8_lossy(method_bytes).into_owned();
 
         conn.debug_log(&format!("auth request: user={username} method={method}"));
-        conn.username = username.clone();
+        username.clone_into(&mut conn.username);
 
         // Check user allow/deny lists.
         if !is_user_allowed(&username, &[], &conn.config) {
@@ -2435,28 +2530,18 @@ fn do_user_auth(conn: &mut ConnectionState) -> Result<(), SshdError> {
         }
 
         let success = match method.as_str() {
-            "none" => false,
-            "password" => {
-                if !conn.config.password_authentication {
-                    false
-                } else {
-                    handle_password_auth(&payload, off, &username)?
-                }
+            "password" if conn.config.password_authentication => {
+                handle_password_auth(&payload, off, &username)?
             }
-            "publickey" => {
-                if !conn.config.pubkey_authentication {
-                    false
-                } else {
-                    handle_pubkey_auth(&payload, off, &username, &conn.config)?
-                }
+            "publickey" if conn.config.pubkey_authentication => {
+                handle_pubkey_auth(&payload, off, &username, &conn.config)?
             }
             _ => false,
         };
 
         if success {
             conn.authenticated = true;
-            let mut msg_buf = Vec::new();
-            msg_buf.push(msg::SSH_MSG_USERAUTH_SUCCESS);
+            let msg_buf = vec![msg::SSH_MSG_USERAUTH_SUCCESS];
             conn.send_packet(&msg_buf)?;
             conn.debug_log(&format!("user {username} authenticated via {method}"));
             return Ok(());
@@ -2473,11 +2558,7 @@ fn do_user_auth(conn: &mut ConnectionState) -> Result<(), SshdError> {
 }
 
 /// Handle password authentication.
-fn handle_password_auth(
-    payload: &[u8],
-    offset: usize,
-    username: &str,
-) -> Result<bool, SshdError> {
+fn handle_password_auth(payload: &[u8], offset: usize, username: &str) -> Result<bool, SshdError> {
     // Skip the "change password" boolean.
     let (_change, off) = read_bool(payload, offset)?;
     let (password_bytes, _) = read_ssh_string(payload, off)?;
@@ -2541,7 +2622,7 @@ fn handle_pubkey_auth(
     }
 }
 
-/// Send SSH_MSG_USERAUTH_FAILURE.
+/// Send `SSH_MSG_USERAUTH_FAILURE`.
 fn send_auth_failure(conn: &mut ConnectionState, partial: bool) -> Result<(), SshdError> {
     let mut methods = Vec::new();
     if conn.config.password_authentication {
@@ -2559,7 +2640,7 @@ fn send_auth_failure(conn: &mut ConnectionState, partial: bool) -> Result<(), Ss
     conn.send_packet(&msg_buf)
 }
 
-/// Send SSH_MSG_DISCONNECT.
+/// Send `SSH_MSG_DISCONNECT`.
 fn send_disconnect(
     conn: &mut ConnectionState,
     reason: u32,
@@ -2626,11 +2707,8 @@ fn handle_channels(conn: &mut ConnectionState) -> Result<(), SshdError> {
     }
 }
 
-/// Handle CHANNEL_OPEN.
-fn handle_channel_open(
-    conn: &mut ConnectionState,
-    payload: &[u8],
-) -> Result<(), SshdError> {
+/// Handle `CHANNEL_OPEN`.
+fn handle_channel_open(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (chan_type_bytes, off) = read_ssh_string(payload, 1)?;
     let chan_type = String::from_utf8_lossy(chan_type_bytes);
     let (sender_channel, off) = read_u32(payload, off)?;
@@ -2681,11 +2759,8 @@ fn handle_channel_open(
     conn.send_packet(&reply)
 }
 
-/// Handle CHANNEL_REQUEST.
-fn handle_channel_request(
-    conn: &mut ConnectionState,
-    payload: &[u8],
-) -> Result<(), SshdError> {
+/// Handle `CHANNEL_REQUEST`.
+fn handle_channel_request(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (recipient, off) = read_u32(payload, 1)?;
     let (req_type_bytes, off) = read_ssh_string(payload, off)?;
     let req_type = String::from_utf8_lossy(req_type_bytes).into_owned();
@@ -2695,18 +2770,13 @@ fn handle_channel_request(
         "channel request: channel={recipient} type={req_type} want_reply={want_reply}"
     ));
 
-    let channel = conn.channels.iter_mut().find(|ch| ch.local_id == recipient);
-    let channel = match channel {
-        Some(ch) => ch,
-        None => {
-            if want_reply {
-                let mut fail = Vec::new();
-                fail.push(msg::SSH_MSG_CHANNEL_FAILURE);
-                fail.extend_from_slice(&recipient.to_be_bytes());
-                conn.send_packet(&fail)?;
-            }
-            return Ok(());
+    let Some(channel) = conn.channels.iter_mut().find(|ch| ch.local_id == recipient) else {
+        if want_reply {
+            let mut fail = vec![msg::SSH_MSG_CHANNEL_FAILURE];
+            fail.extend_from_slice(&recipient.to_be_bytes());
+            conn.send_packet(&fail)?;
         }
+        return Ok(());
     };
 
     let remote_id = channel.remote_id;
@@ -2722,7 +2792,8 @@ fn handle_channel_request(
                 "PTY: term={} {}x{}",
                 channel.term, channel.term_width, channel.term_height
             );
-            drop(channel);
+            // The mutable borrow of `channel` ends here (its last read above),
+            // so `conn` is free for the debug log below.
             conn.debug_log(&term_info);
 
             if want_reply {
@@ -2743,10 +2814,7 @@ fn handle_channel_request(
             }
 
             // Send a welcome message.
-            let welcome = format!(
-                "Welcome to OurOS, {}!\r\n$ ",
-                conn.username
-            );
+            let welcome = format!("Welcome to OurOS, {}!\r\n$ ", conn.username);
             send_channel_data(conn, remote_id, welcome.as_bytes())?;
         }
         "exec" => {
@@ -2774,7 +2842,11 @@ fn handle_channel_request(
             let subsys = String::from_utf8_lossy(subsys_bytes).into_owned();
             conn.debug_log(&format!("subsystem request: {subsys}"));
 
-            let found = conn.config.subsystems.iter().any(|(name, _)| name == &subsys);
+            let found = conn
+                .config
+                .subsystems
+                .iter()
+                .any(|(name, _)| name == &subsys);
 
             if want_reply {
                 let msg_type = if found {
@@ -2821,11 +2893,8 @@ fn handle_channel_request(
     Ok(())
 }
 
-/// Handle CHANNEL_DATA.
-fn handle_channel_data(
-    conn: &mut ConnectionState,
-    payload: &[u8],
-) -> Result<(), SshdError> {
+/// Handle `CHANNEL_DATA`.
+fn handle_channel_data(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (recipient, off) = read_u32(payload, 1)?;
     let (data, _) = read_ssh_string(payload, off)?;
 
@@ -2845,18 +2914,16 @@ fn handle_channel_data(
     Ok(())
 }
 
-/// Handle CHANNEL_WINDOW_ADJUST.
-fn handle_window_adjust(
-    conn: &mut ConnectionState,
-    payload: &[u8],
-) -> Result<(), SshdError> {
+/// Handle `CHANNEL_WINDOW_ADJUST`.
+fn handle_window_adjust(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (recipient, off) = read_u32(payload, 1)?;
     let (bytes_to_add, _) = read_u32(payload, off)?;
 
     if let Some(channel) = conn.channels.iter_mut().find(|ch| ch.local_id == recipient) {
         channel.remote_window = channel.remote_window.saturating_add(bytes_to_add);
         let new_window = channel.remote_window;
-        drop(channel);
+        // The mutable borrow of `channel` ends here (its last read above), so
+        // `conn` is free for the debug log below.
         conn.debug_log(&format!(
             "window adjust: channel={recipient} +{bytes_to_add} (now {new_window})"
         ));
@@ -2865,21 +2932,15 @@ fn handle_window_adjust(
     Ok(())
 }
 
-/// Handle CHANNEL_EOF.
-fn handle_channel_eof(
-    conn: &mut ConnectionState,
-    payload: &[u8],
-) -> Result<(), SshdError> {
+/// Handle `CHANNEL_EOF`.
+fn handle_channel_eof(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (recipient, _) = read_u32(payload, 1)?;
     conn.debug_log(&format!("channel EOF: channel={recipient}"));
     Ok(())
 }
 
-/// Handle CHANNEL_CLOSE.
-fn handle_channel_close(
-    conn: &mut ConnectionState,
-    payload: &[u8],
-) -> Result<(), SshdError> {
+/// Handle `CHANNEL_CLOSE`.
+fn handle_channel_close(conn: &mut ConnectionState, payload: &[u8]) -> Result<(), SshdError> {
     let (recipient, _) = read_u32(payload, 1)?;
     conn.debug_log(&format!("channel close: channel={recipient}"));
 
@@ -2931,10 +2992,7 @@ fn send_channel_data(
 }
 
 /// Send EOF on a channel.
-fn send_channel_eof(
-    conn: &mut ConnectionState,
-    remote_channel_id: u32,
-) -> Result<(), SshdError> {
+fn send_channel_eof(conn: &mut ConnectionState, remote_channel_id: u32) -> Result<(), SshdError> {
     let mut msg_buf = Vec::new();
     msg_buf.push(msg::SSH_MSG_CHANNEL_EOF);
     msg_buf.extend_from_slice(&remote_channel_id.to_be_bytes());
@@ -2942,10 +3000,7 @@ fn send_channel_eof(
 }
 
 /// Send close on a channel.
-fn send_channel_close(
-    conn: &mut ConnectionState,
-    local_channel_id: u32,
-) -> Result<(), SshdError> {
+fn send_channel_close(conn: &mut ConnectionState, local_channel_id: u32) -> Result<(), SshdError> {
     // Extract info first to avoid overlapping borrows with send_channel_eof
     let chan_info = conn
         .channels
@@ -2958,7 +3013,11 @@ fn send_channel_close(
             send_channel_eof(conn, remote_id)?;
         }
         // Now update the channel state
-        if let Some(channel) = conn.channels.iter_mut().find(|ch| ch.local_id == local_channel_id) {
+        if let Some(channel) = conn
+            .channels
+            .iter_mut()
+            .find(|ch| ch.local_id == local_channel_id)
+        {
             channel.closed = true;
             channel.eof_sent = true;
         }
@@ -3015,8 +3074,8 @@ impl CliOptions {
                 }
                 "-f" => {
                     i += 1;
-                    if i < args.len() {
-                        opts.config_file = args[i].clone();
+                    if let Some(arg) = args.get(i) {
+                        arg.clone_into(&mut opts.config_file);
                     }
                 }
                 "-d" => {
@@ -3092,36 +3151,33 @@ fn main() {
     let opts = CliOptions::parse_args();
 
     // Load config.
-    let mut config = match fs_read_file(&opts.config_file) {
-        Ok(data) => {
-            let content = String::from_utf8_lossy(&data);
-            match SshdConfig::parse(&content) {
-                Ok(c) => c,
-                Err(e) => {
-                    log_error(&format!("config parse error: {e}"), opts.log_stderr);
-                    process::exit(1);
-                }
-            }
-        }
-        Err(_) => {
-            if opts.config_file != "/etc/ssh/sshd_config" {
-                log_error(
-                    &format!("cannot read config: {}", opts.config_file),
-                    opts.log_stderr,
-                );
+    let mut config = if let Ok(data) = fs_read_file(&opts.config_file) {
+        let content = String::from_utf8_lossy(&data);
+        match SshdConfig::parse(&content) {
+            Ok(c) => c,
+            Err(e) => {
+                log_error(&format!("config parse error: {e}"), opts.log_stderr);
                 process::exit(1);
             }
-            // Use defaults if default config file doesn't exist.
-            SshdConfig::default_config()
         }
+    } else {
+        if opts.config_file != "/etc/ssh/sshd_config" {
+            log_error(
+                &format!("cannot read config: {}", opts.config_file),
+                opts.log_stderr,
+            );
+            process::exit(1);
+        }
+        // Use defaults if default config file doesn't exist.
+        SshdConfig::default_config()
     };
 
     // Apply CLI overrides.
     if let Some(port) = opts.port {
         config.port = port;
     }
-    if let Some(ref hk) = opts.host_key_file {
-        config.host_key_file = hk.clone();
+    if let Some(hk) = &opts.host_key_file {
+        hk.clone_into(&mut config.host_key_file);
     }
 
     // Test mode.
@@ -3135,12 +3191,11 @@ fn main() {
     }
 
     // Load host key.
-    let host_key = match HostKey::load_from_file(&config.host_key_file) {
-        Ok(hk) => hk,
-        Err(_) => {
-            log_info("no host key found, generating default", opts.log_stderr);
-            HostKey::generate_default()
-        }
+    let host_key = if let Ok(hk) = HostKey::load_from_file(&config.host_key_file) {
+        hk
+    } else {
+        log_info("no host key found, generating default", opts.log_stderr);
+        HostKey::generate_default()
     };
 
     log_info(
@@ -3158,7 +3213,10 @@ fn main() {
     let listener = match tcp_bind(config.port) {
         Ok(l) => l,
         Err(e) => {
-            log_error(&format!("cannot bind port {}: {e}", config.port), opts.log_stderr);
+            log_error(
+                &format!("cannot bind port {}: {e}", config.port),
+                opts.log_stderr,
+            );
             process::exit(1);
         }
     };
@@ -3452,7 +3510,12 @@ mod tests {
         let config = SshdConfig::parse("Subsystem sftp /usr/lib/sftp-server").unwrap();
         // Default already has sftp; we add another.
         assert!(config.subsystems.len() >= 2);
-        assert!(config.subsystems.iter().any(|(n, c)| n == "sftp" && c == "/usr/lib/sftp-server"));
+        assert!(
+            config
+                .subsystems
+                .iter()
+                .any(|(n, c)| n == "sftp" && c == "/usr/lib/sftp-server")
+        );
     }
 
     #[test]
@@ -3677,7 +3740,8 @@ DenyGroups nogroup
 
     #[test]
     fn test_parse_shadow() {
-        let content = "root:$5$salt$hash:18000:0:99999:7:::\nalice:password123:18000:0:99999:7:::\n";
+        let content =
+            "root:$5$salt$hash:18000:0:99999:7:::\nalice:password123:18000:0:99999:7:::\n";
         let entries = parse_shadow(content);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].username, "root");
@@ -3767,11 +3831,11 @@ DenyGroups nogroup
     fn test_parse_pty_request() {
         let mut data = Vec::new();
         data.extend_from_slice(&ssh_string(b"xterm-256color"));
-        data.extend_from_slice(&80u32.to_be_bytes());  // width cols
-        data.extend_from_slice(&24u32.to_be_bytes());  // height rows
+        data.extend_from_slice(&80u32.to_be_bytes()); // width cols
+        data.extend_from_slice(&24u32.to_be_bytes()); // height rows
         data.extend_from_slice(&640u32.to_be_bytes()); // width px
         data.extend_from_slice(&480u32.to_be_bytes()); // height px
-        data.extend_from_slice(&ssh_string(b""));       // modes
+        data.extend_from_slice(&ssh_string(b"")); // modes
 
         let (term, w, h, wpx, hpx, modes) = parse_pty_request(&data, 0).unwrap();
         assert_eq!(term, "xterm-256color");
@@ -3889,7 +3953,12 @@ DenyGroups nogroup
     #[test]
     fn test_subsystem_custom() {
         let config = SshdConfig::parse("Subsystem scp /usr/lib/scp-server").unwrap();
-        assert!(config.subsystems.iter().any(|(n, c)| n == "scp" && c == "/usr/lib/scp-server"));
+        assert!(
+            config
+                .subsystems
+                .iter()
+                .any(|(n, c)| n == "scp" && c == "/usr/lib/scp-server")
+        );
     }
 
     // ---- Banner loading ----
@@ -3912,14 +3981,20 @@ DenyGroups nogroup
     fn test_sha256_empty() {
         let hash = sha256(b"");
         let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
     fn test_sha256_hello() {
         let hash = sha256(b"hello");
         let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(hex, "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824");
+        assert_eq!(
+            hex,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 
     // ---- HMAC-SHA256 ----
@@ -3929,7 +4004,10 @@ DenyGroups nogroup
         let mac = hmac_sha256(b"key", b"data");
         // Known test vector for HMAC-SHA256("key", "data").
         let hex: String = mac.iter().map(|b| format!("{b:02x}")).collect();
-        assert_eq!(hex, "5031fe3d989c6d1537a013fa6e739da23463fdaec3b70137d828e36ace221bd0");
+        assert_eq!(
+            hex,
+            "5031fe3d989c6d1537a013fa6e739da23463fdaec3b70137d828e36ace221bd0"
+        );
     }
 
     // ---- Base64 ----

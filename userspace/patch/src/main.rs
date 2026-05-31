@@ -254,10 +254,10 @@ fn resolve_target_path(fp: &FilePatch, opts: &Options) -> PathBuf {
     };
 
     let mut path = PathBuf::from(&stripped);
-    if let Some(ref dir) = opts.directory {
-        if !path.is_absolute() {
-            path = PathBuf::from(dir).join(path);
-        }
+    if let Some(ref dir) = opts.directory
+        && !path.is_absolute()
+    {
+        path = PathBuf::from(dir).join(path);
     }
     path
 }
@@ -278,11 +278,7 @@ fn choose_best_path(primary: &str, fallback: &str) -> String {
 
 /// Strip trailing carriage returns for DOS compatibility.
 fn strip_cr(s: &str) -> String {
-    if s.ends_with('\r') {
-        s[..s.len() - 1].to_string()
-    } else {
-        s.to_string()
-    }
+    s.strip_suffix('\r').unwrap_or(s).to_string()
 }
 
 /// Normalize a line for whitespace-insensitive comparison.
@@ -330,7 +326,9 @@ fn is_normal_diff_command(line: &str) -> bool {
         return false;
     }
     // Find the command letter.
-    let cmd_pos = bytes.iter().position(|&b| b == b'a' || b == b'd' || b == b'c');
+    let cmd_pos = bytes
+        .iter()
+        .position(|&b| b == b'a' || b == b'd' || b == b'c');
     let cmd_pos = match cmd_pos {
         Some(p) => p,
         None => return false,
@@ -340,10 +338,7 @@ fn is_normal_diff_command(line: &str) -> bool {
     }
     // Everything before cmd must be digits and commas.
     let before = &line[..cmd_pos];
-    if !before
-        .chars()
-        .all(|c| c.is_ascii_digit() || c == ',')
-    {
+    if !before.chars().all(|c| c.is_ascii_digit() || c == ',') {
         return false;
     }
     // Everything after cmd must be digits and commas.
@@ -526,8 +521,7 @@ fn parse_context(input: &str) -> Vec<FilePatch> {
                         0
                     };
 
-                    let hunk_lines =
-                        merge_context_sections(&old_section_lines, &new_section_lines);
+                    let hunk_lines = merge_context_sections(&old_section_lines, &new_section_lines);
 
                     hunks.push(Hunk {
                         old_start,
@@ -536,7 +530,9 @@ fn parse_context(input: &str) -> Vec<FilePatch> {
                         new_count,
                         lines: hunk_lines,
                     });
-                } else if raw_lines[i].starts_with("*** ") && !raw_lines[i].starts_with("***************") {
+                } else if raw_lines[i].starts_with("*** ")
+                    && !raw_lines[i].starts_with("***************")
+                {
                     // Next file header.
                     break;
                 } else {
@@ -721,11 +717,19 @@ fn parse_normal(input: &str) -> Vec<FilePatch> {
                 } else if hline.starts_with('<') {
                     // "< " with empty content.
                     hunk_lines.push(HunkLine::Remove(
-                        hline.strip_prefix('<').unwrap_or("").trim_start().to_string(),
+                        hline
+                            .strip_prefix('<')
+                            .unwrap_or("")
+                            .trim_start()
+                            .to_string(),
                     ));
                 } else if hline.starts_with('>') {
                     hunk_lines.push(HunkLine::Add(
-                        hline.strip_prefix('>').unwrap_or("").trim_start().to_string(),
+                        hline
+                            .strip_prefix('>')
+                            .unwrap_or("")
+                            .trim_start()
+                            .to_string(),
                     ));
                 } else {
                     // Not part of this hunk.
@@ -736,15 +740,11 @@ fn parse_normal(input: &str) -> Vec<FilePatch> {
 
             let old_count = match cmd.kind {
                 NormalCmdKind::Add => 0,
-                NormalCmdKind::Delete | NormalCmdKind::Change => {
-                    cmd.old_end - cmd.old_start + 1
-                }
+                NormalCmdKind::Delete | NormalCmdKind::Change => cmd.old_end - cmd.old_start + 1,
             };
             let new_count = match cmd.kind {
                 NormalCmdKind::Delete => 0,
-                NormalCmdKind::Add | NormalCmdKind::Change => {
-                    cmd.new_end - cmd.new_start + 1
-                }
+                NormalCmdKind::Add | NormalCmdKind::Change => cmd.new_end - cmd.new_start + 1,
             };
 
             hunks.push(Hunk {
@@ -878,7 +878,16 @@ fn apply_hunk(
     fuzz: usize,
     ignore_ws: bool,
 ) -> Option<(Vec<String>, i64)> {
-    let target_start = (hunk.old_start as i64 + offset - 1).max(0) as usize;
+    // A pure insertion (old_count == 0, e.g. the normal-diff "1a2" command)
+    // names in old_start the line to insert *after*, so 1-indexed line N maps
+    // to insertion index N (old_start == 0 means prepend at the top). For
+    // delete/change hunks old_start is the first affected line, whose 0-indexed
+    // position is old_start - 1.
+    let target_start = if hunk.old_count == 0 {
+        (hunk.old_start as i64 + offset).max(0) as usize
+    } else {
+        (hunk.old_start as i64 + offset - 1).max(0) as usize
+    };
 
     // Search with increasing fuzz distance.
     let max_search = fuzz.max(50);
@@ -893,9 +902,7 @@ fn apply_hunk(
         } else {
             // Try below.
             let below = target_start + dist;
-            if below <= lines.len()
-                && try_hunk_at(lines, hunk, below, ignore_ws)
-            {
+            if below <= lines.len() && try_hunk_at(lines, hunk, below, ignore_ws) {
                 best_pos = Some(below);
                 break;
             }
@@ -963,11 +970,7 @@ fn reverse_hunk(hunk: &Hunk) -> Hunk {
 }
 
 /// Check if a patch appears to already be applied.
-fn patch_already_applied(
-    lines: &[String],
-    hunks: &[Hunk],
-    ignore_ws: bool,
-) -> bool {
+fn patch_already_applied(lines: &[String], hunks: &[Hunk], ignore_ws: bool) -> bool {
     // A patch is "already applied" if the reversed hunks match at their
     // expected positions.
     let reversed: Vec<Hunk> = hunks.iter().map(reverse_hunk).collect();
@@ -1039,10 +1042,10 @@ fn main() {
     let opts = parse_args();
 
     // Change directory if -d was given.
-    if let Some(ref dir) = opts.directory {
-        if let Err(e) = env::set_current_dir(dir) {
-            die(&format!("cannot change to directory {dir}: {e}"));
-        }
+    if let Some(ref dir) = opts.directory
+        && let Err(e) = env::set_current_dir(dir)
+    {
+        die(&format!("cannot change to directory {dir}: {e}"));
     }
 
     // Read patch input.
@@ -1100,10 +1103,7 @@ fn main() {
             }
         };
 
-        let mut lines: Vec<String> = original
-            .lines()
-            .map(|l| strip_cr(l))
-            .collect();
+        let mut lines: Vec<String> = original.lines().map(strip_cr).collect();
 
         // Prepare hunks, applying reverse if needed.
         let hunks: Vec<Hunk> = if opts.reverse {
@@ -1115,9 +1115,7 @@ fn main() {
         // Forward mode: skip if already applied.
         if opts.forward && patch_already_applied(&lines, &hunks, opts.ignore_whitespace) {
             if !opts.silent {
-                eprintln!(
-                    "patch: {file_path_str} already patched, skipping"
-                );
+                eprintln!("patch: {file_path_str} already patched, skipping");
             }
             continue;
         }
@@ -1145,11 +1143,7 @@ fn main() {
                     hunks_failed += 1;
                     failed_hunks.push(hunk);
                     if !opts.silent {
-                        eprintln!(
-                            "patch: Hunk #{} FAILED at line {}",
-                            idx + 1,
-                            hunk.old_start
-                        );
+                        eprintln!("patch: Hunk #{} FAILED at line {}", idx + 1, hunk.old_start);
                     }
                 }
             }
@@ -1174,8 +1168,7 @@ fn main() {
             };
 
             // Backup if requested (and the file exists).
-            let should_backup =
-                opts.backup && !(opts.no_backup_if_mismatch && hunks_failed > 0);
+            let should_backup = opts.backup && !(opts.no_backup_if_mismatch && hunks_failed > 0);
             if should_backup && dest.exists() && opts.output_file.is_none() {
                 let mut backup = dest.as_os_str().to_os_string();
                 backup.push(&opts.backup_suffix);
@@ -1186,10 +1179,10 @@ fn main() {
             }
 
             // Ensure parent directory exists.
-            if let Some(parent) = dest.parent() {
-                if !parent.as_os_str().is_empty() {
-                    let _ = fs::create_dir_all(parent);
-                }
+            if let Some(parent) = dest.parent()
+                && !parent.as_os_str().is_empty()
+            {
+                let _ = fs::create_dir_all(parent);
             }
 
             // Reconstruct file content.
@@ -1204,14 +1197,14 @@ fn main() {
             }
 
             // Remove empty files if requested.
-            if opts.remove_empty_files && dest.exists() {
-                if let Ok(meta) = fs::metadata(&dest) {
-                    if meta.len() == 0 {
-                        let _ = fs::remove_file(&dest);
-                        if opts.verbose {
-                            eprintln!("patch: removed empty file {}", dest.display());
-                        }
-                    }
+            if opts.remove_empty_files
+                && dest.exists()
+                && let Ok(meta) = fs::metadata(&dest)
+                && meta.len() == 0
+            {
+                let _ = fs::remove_file(&dest);
+                if opts.verbose {
+                    eprintln!("patch: removed empty file {}", dest.display());
                 }
             }
         }
@@ -1374,10 +1367,7 @@ mod tests {
 
     #[test]
     fn test_parse_hunk_header_single_line() {
-        assert_eq!(
-            parse_unified_hunk_header("@@ -5 +5 @@"),
-            Some((5, 1, 5, 1))
-        );
+        assert_eq!(parse_unified_hunk_header("@@ -5 +5 @@"), Some((5, 1, 5, 1)));
     }
 
     #[test]
@@ -1568,10 +1558,7 @@ mod tests {
 
     #[test]
     fn test_apply_simple_add() {
-        let lines: Vec<String> = vec!["a", "b", "c"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let lines: Vec<String> = vec!["a", "b", "c"].into_iter().map(String::from).collect();
         let hunk = Hunk {
             old_start: 2,
             old_count: 1,
@@ -1590,10 +1577,7 @@ mod tests {
 
     #[test]
     fn test_apply_simple_remove() {
-        let lines: Vec<String> = vec!["a", "b", "c"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let lines: Vec<String> = vec!["a", "b", "c"].into_iter().map(String::from).collect();
         let hunk = Hunk {
             old_start: 1,
             old_count: 3,
@@ -1637,10 +1621,7 @@ mod tests {
 
     #[test]
     fn test_apply_hunk_mismatch() {
-        let lines: Vec<String> = vec!["x", "y", "z"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let lines: Vec<String> = vec!["x", "y", "z"].into_iter().map(String::from).collect();
         let hunk = Hunk {
             old_start: 1,
             old_count: 2,
@@ -1929,10 +1910,7 @@ mod tests {
             old_count: 1,
             new_start: 1,
             new_count: 2,
-            lines: vec![
-                HunkLine::Context("a".into()),
-                HunkLine::Add("x".into()),
-            ],
+            lines: vec![HunkLine::Context("a".into()), HunkLine::Add("x".into())],
         };
         let (lines2, offset) = apply_hunk(&lines, &h1, 0, 2, false).unwrap();
         assert_eq!(lines2, vec!["a", "x", "b", "c", "d", "e"]);
@@ -1944,10 +1922,7 @@ mod tests {
             old_count: 1,
             new_start: 5,
             new_count: 1,
-            lines: vec![
-                HunkLine::Remove("d".into()),
-                HunkLine::Add("D".into()),
-            ],
+            lines: vec![HunkLine::Remove("d".into()), HunkLine::Add("D".into())],
         };
         let (lines3, _) = apply_hunk(&lines2, &h2, offset, 2, false).unwrap();
         assert_eq!(lines3, vec!["a", "x", "b", "c", "D", "e"]);
@@ -1975,8 +1950,7 @@ mod tests {
         let mut lines: Vec<String> = original.lines().map(String::from).collect();
         let mut offset = 0i64;
         for hunk in &patches[0].hunks {
-            let (new_lines, new_offset) =
-                apply_hunk(&lines, hunk, offset, 2, false).unwrap();
+            let (new_lines, new_offset) = apply_hunk(&lines, hunk, offset, 2, false).unwrap();
             lines = new_lines;
             offset = new_offset;
         }
@@ -1998,8 +1972,7 @@ mod tests {
         let mut lines: Vec<String> = original.lines().map(String::from).collect();
         let mut offset = 0i64;
         for hunk in &patches[0].hunks {
-            let (new_lines, new_offset) =
-                apply_hunk(&lines, hunk, offset, 2, false).unwrap();
+            let (new_lines, new_offset) = apply_hunk(&lines, hunk, offset, 2, false).unwrap();
             lines = new_lines;
             offset = new_offset;
         }
@@ -2015,8 +1988,7 @@ mod tests {
         let mut lines: Vec<String> = original.lines().map(String::from).collect();
         let mut offset = 0i64;
         for hunk in &patches[0].hunks {
-            let (new_lines, new_offset) =
-                apply_hunk(&lines, hunk, offset, 2, false).unwrap();
+            let (new_lines, new_offset) = apply_hunk(&lines, hunk, offset, 2, false).unwrap();
             lines = new_lines;
             offset = new_offset;
         }
@@ -2032,8 +2004,7 @@ mod tests {
         let mut lines: Vec<String> = original.lines().map(String::from).collect();
         let mut offset = 0i64;
         for hunk in &patches[0].hunks {
-            let (new_lines, new_offset) =
-                apply_hunk(&lines, hunk, offset, 2, false).unwrap();
+            let (new_lines, new_offset) = apply_hunk(&lines, hunk, offset, 2, false).unwrap();
             lines = new_lines;
             offset = new_offset;
         }
@@ -2136,10 +2107,7 @@ mod tests {
 
     #[test]
     fn test_empty_hunk() {
-        let lines: Vec<String> = vec!["a", "b"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let lines: Vec<String> = vec!["a", "b"].into_iter().map(String::from).collect();
         let hunk = Hunk {
             old_start: 1,
             old_count: 0,
@@ -2155,19 +2123,13 @@ mod tests {
 
     #[test]
     fn test_apply_at_end_of_file() {
-        let lines: Vec<String> = vec!["a", "b", "c"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let lines: Vec<String> = vec!["a", "b", "c"].into_iter().map(String::from).collect();
         let hunk = Hunk {
             old_start: 3,
             old_count: 1,
             new_start: 3,
             new_count: 2,
-            lines: vec![
-                HunkLine::Context("c".into()),
-                HunkLine::Add("d".into()),
-            ],
+            lines: vec![HunkLine::Context("c".into()), HunkLine::Add("d".into())],
         };
         let result = apply_hunk(&lines, &hunk, 0, 2, false);
         assert!(result.is_some());
@@ -2177,19 +2139,13 @@ mod tests {
 
     #[test]
     fn test_apply_at_beginning() {
-        let lines: Vec<String> = vec!["a", "b", "c"]
-            .into_iter()
-            .map(String::from)
-            .collect();
+        let lines: Vec<String> = vec!["a", "b", "c"].into_iter().map(String::from).collect();
         let hunk = Hunk {
             old_start: 1,
             old_count: 1,
             new_start: 1,
             new_count: 2,
-            lines: vec![
-                HunkLine::Add("z".into()),
-                HunkLine::Context("a".into()),
-            ],
+            lines: vec![HunkLine::Add("z".into()), HunkLine::Context("a".into())],
         };
         let result = apply_hunk(&lines, &hunk, 0, 2, false);
         assert!(result.is_some());

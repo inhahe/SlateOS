@@ -1,3 +1,15 @@
+## BUG (noticed+FIXED 2026-05-31): patch mis-applied normal-diff append.
+##   userspace/patch/: test_end_to_end_normal_add failed — "1a2" (append after
+##   line 1) produced ["b","a","c"] instead of ["a","b","c"]. apply_hunk always
+##   computed target_start = old_start + offset - 1, but a pure insertion
+##   (old_count == 0) names in old_start the line to insert *after*, so the
+##   0-indexed insertion point is old_start (no -1). The -1 is only correct for
+##   delete/change where old_start is the first affected line. Fixed by
+##   special-casing old_count == 0. 61/61 tests pass; 7 clippy warnings cleaned
+##   (incl. manual_strip). Clippy-clean host + ouros; builds for ouros.
+##   (NB: "patch" is an installer keyword but its test harness launched fine —
+##   no UAC build.rs needed, unlike losetup/install/etc.)
+##
 ## BUG (noticed+FIXED 2026-05-31): losetup had a test COMPILE error, a real
 ##   parse bug, dead code, and the UAC test-launch failure. userspace/losetup/:
 ##     * TEST WOULDN'T COMPILE: test_is_swap_active_nonexistent called

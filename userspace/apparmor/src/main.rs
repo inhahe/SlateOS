@@ -498,20 +498,23 @@ fn parse_rule_line(line: &str, profile: &mut Profile) {
     let trimmed = line.trim();
     let trimmed = trimmed.strip_suffix(',').unwrap_or(trimmed);
 
-    if trimmed.starts_with('#') || trimmed.is_empty() {
-        return;
-    }
-
-    if trimmed.starts_with("include") || trimmed.starts_with("#include") {
-        let rest = if trimmed.starts_with("#include") {
-            &trimmed[8..]
-        } else {
-            &trimmed[7..]
-        };
-        let inc = rest.trim().trim_matches(|c| c == '<' || c == '>' || c == '"');
+    // Include directives must be handled BEFORE the comment guard below:
+    // AppArmor's classic include syntax is `#include <abstractions/base>`,
+    // which starts with '#' yet is a directive, not a comment.
+    if let Some(rest) = trimmed
+        .strip_prefix("#include")
+        .or_else(|| trimmed.strip_prefix("include"))
+    {
+        let inc = rest
+            .trim()
+            .trim_matches(|c| c == '<' || c == '>' || c == '"');
         if !inc.is_empty() {
             profile.includes.push(inc.to_string());
         }
+        return;
+    }
+
+    if trimmed.starts_with('#') || trimmed.is_empty() {
         return;
     }
 
@@ -531,7 +534,9 @@ fn parse_rule_line(line: &str, profile: &mut Profile) {
         if !parts.is_empty() {
             let domain = NetDomain::from_str(parts[0]);
             let sock_type = parts.get(1).map(|s| NetType::from_str(s));
-            profile.network_rules.push(NetworkRule { domain, sock_type });
+            profile
+                .network_rules
+                .push(NetworkRule { domain, sock_type });
         }
         return;
     }
@@ -549,7 +554,8 @@ fn parse_rule_line(line: &str, profile: &mut Profile) {
         let path = parts[0];
         let perms_str = parts[1].strip_suffix(',').unwrap_or(parts[1]);
         let perm = FilePermission::from_str(perms_str);
-        if !perm.is_empty() && (path.starts_with('/') || path.starts_with('@') || path.contains('*'))
+        if !perm.is_empty()
+            && (path.starts_with('/') || path.starts_with('@') || path.contains('*'))
         {
             profile.file_rules.push(FileRule {
                 path: path.to_string(),
@@ -635,9 +641,7 @@ fn parse_profile_content(content: &str, source_file: Option<&Path>) -> Vec<Profi
                 if ch == '{' {
                     brace_depth += 1;
                 } else if ch == '}' {
-                    if brace_depth > 0 {
-                        brace_depth -= 1;
-                    }
+                    brace_depth = brace_depth.saturating_sub(1);
                 }
             }
 
@@ -684,10 +688,10 @@ fn load_profiles_from_dir(dir: &Path) -> Vec<Profile> {
         if path.is_dir() {
             continue;
         }
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with('.') || name.ends_with('~') || name.ends_with(".dpkg-old") {
-                continue;
-            }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && (name.starts_with('.') || name.ends_with('~') || name.ends_with(".dpkg-old"))
+        {
+            continue;
         }
 
         let content = match fs::read_to_string(&path) {
@@ -988,19 +992,24 @@ fn preprocess_profile(content: &str) -> String {
     for line in content.lines() {
         let trimmed = line.trim();
 
-        // Variable assignment: @{var}=value
-        if trimmed.starts_with("@{") {
-            if let Some(eq_pos) = trimmed.find('}') {
-                let var_name = &trimmed[2..eq_pos];
-                let rest = trimmed[eq_pos + 1..].trim();
-                if let Some(val) = rest.strip_prefix('=') {
-                    vars.insert(var_name.to_string(), val.trim().to_string());
-                }
+        // Variable assignment: `@{var}=value`. Only treat the line as an
+        // assignment when the closing brace is followed by `=`; otherwise a
+        // line that merely *uses* a variable at its start (e.g.
+        // `@{HOME}/data r,`) would be misread as an assignment and skip
+        // variable expansion below.
+        if trimmed.starts_with("@{")
+            && let Some(brace) = trimmed.find('}')
+        {
+            let after = trimmed[brace + 1..].trim_start();
+            if let Some(val) = after.strip_prefix('=') {
+                let var_name = &trimmed[2..brace];
+                vars.insert(var_name.to_string(), val.trim().to_string());
+                out.push_str(line);
+                out.push('\n');
+                continue;
             }
-            out.push_str(line);
-            out.push('\n');
-            continue;
         }
+        // Not an assignment — fall through to variable expansion.
 
         // Expand variables in line
         let mut expanded = line.to_string();
@@ -1010,13 +1019,11 @@ fn preprocess_profile(content: &str) -> String {
         }
 
         // Resolve includes
-        if trimmed.starts_with("#include") || trimmed.starts_with("include") {
-            let rest = if trimmed.starts_with("#include") {
-                trimmed[8..].trim()
-            } else {
-                trimmed[7..].trim()
-            };
-
+        if let Some(rest) = trimmed
+            .strip_prefix("#include")
+            .or_else(|| trimmed.strip_prefix("include"))
+        {
+            let rest = rest.trim();
             let inc_path = rest.trim_matches(|c| c == '<' || c == '>' || c == '"');
             // Resolve relative to tunables/abstractions
             let resolved = if inc_path.starts_with('/') {
@@ -1049,10 +1056,11 @@ fn validate_profile(profile: &Profile) -> Vec<String> {
     }
 
     // Check binary path exists (if it looks like an absolute path)
-    if let Some(ref bin) = profile.binary_path {
-        if bin.starts_with('/') && !Path::new(bin).exists() {
-            errors.push(format!("Binary path does not exist: {}", bin));
-        }
+    if let Some(ref bin) = profile.binary_path
+        && bin.starts_with('/')
+        && !Path::new(bin).exists()
+    {
+        errors.push(format!("Binary path does not exist: {}", bin));
     }
 
     // Check for duplicate file rules
@@ -1140,8 +1148,10 @@ fn cmd_status(args: &[String]) -> i32 {
 
     // Scan processes
     let processes = scan_processes(PROC_DIR);
-    let confined_procs: Vec<&ProcessInfo> = processes.iter().filter(|p| p.profile.is_some()).collect();
-    let unconfined_procs: Vec<&ProcessInfo> = processes.iter().filter(|p| p.profile.is_none()).collect();
+    let confined_procs: Vec<&ProcessInfo> =
+        processes.iter().filter(|p| p.profile.is_some()).collect();
+    let unconfined_procs: Vec<&ProcessInfo> =
+        processes.iter().filter(|p| p.profile.is_none()).collect();
 
     if use_json {
         println!("{{");
@@ -1213,7 +1223,10 @@ fn cmd_enforce(args: &[String]) -> i32 {
     let mut exit_code = 0;
     for profile_arg in args {
         if let Err(e) = set_profile_mode(profile_arg, ProfileMode::Enforce) {
-            eprintln!("aa-enforce: error setting '{}' to enforce: {}", profile_arg, e);
+            eprintln!(
+                "aa-enforce: error setting '{}' to enforce: {}",
+                profile_arg, e
+            );
             exit_code = 1;
         } else {
             println!("Setting {} to enforce mode.", profile_arg);
@@ -1282,10 +1295,7 @@ fn cmd_disable(args: &[String]) -> i32 {
     let mut exit_code = 0;
     for profile_arg in args {
         if let Err(e) = set_profile_mode(profile_arg, ProfileMode::Disable) {
-            eprintln!(
-                "aa-disable: error disabling '{}': {}",
-                profile_arg, e
-            );
+            eprintln!("aa-disable: error disabling '{}': {}", profile_arg, e);
             exit_code = 1;
         } else {
             println!("Disabling {}.", profile_arg);
@@ -1416,7 +1426,10 @@ fn cmd_genprof(args: &[String]) -> i32 {
         println!("Generate an AppArmor profile for the specified binary.");
         println!();
         println!("Options:");
-        println!("  -d DIR         Profile directory (default: {})", PROFILES_DIR);
+        println!(
+            "  -d DIR         Profile directory (default: {})",
+            PROFILES_DIR
+        );
         println!("  -f FILE        Output to specific file");
         println!("  --help, -h     Show this help");
         if args.is_empty() {
@@ -1472,10 +1485,10 @@ fn cmd_genprof(args: &[String]) -> i32 {
     }
 
     // Resolve to absolute path
-    if !binary_path.starts_with('/') {
-        if let Ok(cwd) = env::current_dir() {
-            binary_path = format!("{}/{}", cwd.display(), binary_path);
-        }
+    if !binary_path.starts_with('/')
+        && let Ok(cwd) = env::current_dir()
+    {
+        binary_path = format!("{}/{}", cwd.display(), binary_path);
     }
 
     let profile_content = generate_profile(&binary_path);
@@ -1522,7 +1535,10 @@ fn cmd_logprof(args: &[String]) -> i32 {
                 println!();
                 println!("Options:");
                 println!("  -f FILE        Audit log file (default: {})", LOG_FILE);
-                println!("  -d DIR         Profile directory (default: {})", PROFILES_DIR);
+                println!(
+                    "  -d DIR         Profile directory (default: {})",
+                    PROFILES_DIR
+                );
                 println!("  --help, -h     Show this help");
                 return 0;
             }
@@ -1652,24 +1668,21 @@ fn cmd_unconfined(args: &[String]) -> i32 {
         unconfined.len()
     );
     for proc in &unconfined {
-        let has_profile = kernel_profiles.iter().any(|(n, _)| {
-            n == &proc.name
-                || proc
-                    .name
-                    .contains(n.as_str())
-        });
+        let has_profile = kernel_profiles
+            .iter()
+            .any(|(n, _)| n == &proc.name || proc.name.contains(n.as_str()));
         if has_profile {
-            println!("  {} ({}) - profile exists but not loaded", proc.pid, proc.name);
+            println!(
+                "  {} ({}) - profile exists but not loaded",
+                proc.pid, proc.name
+            );
         } else {
             println!("  {} ({}) - not confined", proc.pid, proc.name);
         }
     }
 
     if with_paranoid && !complain_procs.is_empty() {
-        println!(
-            "\n{} processes in complain mode:",
-            complain_procs.len()
-        );
+        println!("\n{} processes in complain mode:", complain_procs.len());
         for proc in &complain_procs {
             println!(
                 "  {} ({}) - {} (complain)",
@@ -1700,6 +1713,21 @@ fn has_open_ports(pid: u32) -> bool {
     };
 
     check(&tcp_path) || check(&tcp6_path)
+}
+
+/// Binary-profile cache configuration parsed from the parser CLI flags
+/// (`--base`/`-b`, `--cache-loc`/`-L`, `--write-cache`/`-W`, `--skip-cache`).
+///
+/// AppArmor's compiled-policy cache is not yet implemented, so these options
+/// are not read during parsing. The struct keeps the parsed values together so
+/// that wiring cache load/store into `process_profile_content` later is a
+/// localized change rather than re-threading four positional arguments.
+#[allow(dead_code)]
+struct CacheOptions {
+    base_dir: String,
+    cache_dir: String,
+    write_cache: bool,
+    skip_cache: bool,
 }
 
 /// apparmor_parser: compile/load/remove profiles.
@@ -1761,6 +1789,13 @@ fn cmd_parser(args: &[String]) -> i32 {
         i += 1;
     }
 
+    let cache = CacheOptions {
+        base_dir,
+        cache_dir,
+        write_cache,
+        skip_cache,
+    };
+
     if profile_files.is_empty() {
         // Read from stdin
         if !quiet {
@@ -1780,7 +1815,7 @@ fn cmd_parser(args: &[String]) -> i32 {
                 }
             }
         }
-        return process_profile_content(&content, "<stdin>", action, debug, &base_dir, &cache_dir, write_cache, skip_cache, quiet);
+        return process_profile_content(&content, "<stdin>", action, debug, &cache, quiet);
     }
 
     let mut exit_code = 0;
@@ -1793,7 +1828,7 @@ fn cmd_parser(args: &[String]) -> i32 {
                 continue;
             }
         };
-        let code = process_profile_content(&content, file, action, debug, &base_dir, &cache_dir, write_cache, skip_cache, quiet);
+        let code = process_profile_content(&content, file, action, debug, &cache, quiet);
         if code != 0 {
             exit_code = code;
         }
@@ -1814,8 +1849,14 @@ fn print_parser_help() {
     println!("  --preprocess, -p   Preprocess profiles (resolve includes)");
     println!();
     println!("Options:");
-    println!("  --base DIR, -b     Base directory for includes (default: {})", PROFILES_DIR);
-    println!("  --cache-loc DIR    Cache directory (default: {})", CACHE_DIR);
+    println!(
+        "  --base DIR, -b     Base directory for includes (default: {})",
+        PROFILES_DIR
+    );
+    println!(
+        "  --cache-loc DIR    Cache directory (default: {})",
+        CACHE_DIR
+    );
     println!("  --write-cache, -W  Write compiled profiles to cache");
     println!("  --skip-cache       Don't use cached profiles");
     println!("  --debug, -d        Show debug output");
@@ -1830,10 +1871,7 @@ fn process_profile_content(
     source: &str,
     action: ParserAction,
     debug: bool,
-    _base_dir: &str,
-    _cache_dir: &str,
-    _write_cache: bool,
-    _skip_cache: bool,
+    _cache: &CacheOptions,
     quiet: bool,
 ) -> i32 {
     if action == ParserAction::Preprocess {
@@ -1852,7 +1890,11 @@ fn process_profile_content(
     }
 
     if debug {
-        eprintln!("apparmor_parser: found {} profile(s) in '{}'", profiles.len(), source);
+        eprintln!(
+            "apparmor_parser: found {} profile(s) in '{}'",
+            profiles.len(),
+            source
+        );
     }
 
     let exit_code = 0;
@@ -1884,13 +1926,13 @@ fn process_profile_content(
                 }
                 // In a real system, write to /sys/kernel/security/apparmor/.load
                 let load_path = format!("{}/.load", APPARMORFS);
-                if let Err(e) = write_profile_to_kernel(&load_path, profile) {
-                    if debug {
-                        eprintln!(
-                            "apparmor_parser: cannot load '{}': {} (expected on non-AppArmor systems)",
-                            profile.name, e
-                        );
-                    }
+                if let Err(e) = write_profile_to_kernel(&load_path, profile)
+                    && debug
+                {
+                    eprintln!(
+                        "apparmor_parser: cannot load '{}': {} (expected on non-AppArmor systems)",
+                        profile.name, e
+                    );
                 }
             }
             ParserAction::Replace => {
@@ -1898,13 +1940,13 @@ fn process_profile_content(
                     println!("Replacing profile: {}", profile.name);
                 }
                 let replace_path = format!("{}/.replace", APPARMORFS);
-                if let Err(e) = write_profile_to_kernel(&replace_path, profile) {
-                    if debug {
-                        eprintln!(
-                            "apparmor_parser: cannot replace '{}': {} (expected on non-AppArmor systems)",
-                            profile.name, e
-                        );
-                    }
+                if let Err(e) = write_profile_to_kernel(&replace_path, profile)
+                    && debug
+                {
+                    eprintln!(
+                        "apparmor_parser: cannot replace '{}': {} (expected on non-AppArmor systems)",
+                        profile.name, e
+                    );
                 }
             }
             ParserAction::Remove => {
@@ -1912,13 +1954,13 @@ fn process_profile_content(
                     println!("Removing profile: {}", profile.name);
                 }
                 let remove_path = format!("{}/.remove", APPARMORFS);
-                if let Err(e) = write_profile_to_kernel(&remove_path, profile) {
-                    if debug {
-                        eprintln!(
-                            "apparmor_parser: cannot remove '{}': {} (expected on non-AppArmor systems)",
-                            profile.name, e
-                        );
-                    }
+                if let Err(e) = write_profile_to_kernel(&remove_path, profile)
+                    && debug
+                {
+                    eprintln!(
+                        "apparmor_parser: cannot remove '{}': {} (expected on non-AppArmor systems)",
+                        profile.name, e
+                    );
                 }
             }
             ParserAction::Preprocess => {
@@ -1971,7 +2013,10 @@ fn main() {
         "aa-unconfined" => cmd_unconfined(&sub_args),
         "apparmor_parser" => cmd_parser(&sub_args),
         _ => {
-            eprintln!("apparmor: unknown personality '{}', defaulting to aa-status", prog_name);
+            eprintln!(
+                "apparmor: unknown personality '{}', defaulting to aa-status",
+                prog_name
+            );
             cmd_status(&sub_args)
         }
     };
@@ -2043,7 +2088,10 @@ mod tests {
 
     #[test]
     fn test_capability_from_str_known() {
-        assert_eq!(Capability::from_str("net_bind_service"), Capability::NetBindService);
+        assert_eq!(
+            Capability::from_str("net_bind_service"),
+            Capability::NetBindService
+        );
         assert_eq!(Capability::from_str("sys_admin"), Capability::SysAdmin);
         assert_eq!(Capability::from_str("kill"), Capability::Kill);
     }
@@ -2078,10 +2126,23 @@ mod tests {
     #[test]
     fn test_capability_all_known_variants() {
         let caps = [
-            "net_bind_service", "net_admin", "net_raw", "sys_admin",
-            "sys_ptrace", "sys_rawio", "dac_override", "dac_read_search",
-            "fowner", "fsetid", "kill", "setgid", "setuid", "chown",
-            "mknod", "sys_chroot", "audit_write",
+            "net_bind_service",
+            "net_admin",
+            "net_raw",
+            "sys_admin",
+            "sys_ptrace",
+            "sys_rawio",
+            "dac_override",
+            "dac_read_search",
+            "fowner",
+            "fsetid",
+            "kill",
+            "setgid",
+            "setuid",
+            "chown",
+            "mknod",
+            "sys_chroot",
+            "audit_write",
         ];
         for cap in &caps {
             let c = Capability::from_str(cap);
@@ -2483,8 +2544,7 @@ mod tests {
 
     #[test]
     fn test_parse_profile_with_capabilities() {
-        let content =
-            "/usr/bin/test {\n  capability net_admin,\n  capability sys_ptrace,\n  capability chown,\n}\n";
+        let content = "/usr/bin/test {\n  capability net_admin,\n  capability sys_ptrace,\n  capability chown,\n}\n";
         let profiles = parse_profile_content(content, None);
         assert_eq!(profiles.len(), 1);
         assert_eq!(profiles[0].capabilities.len(), 3);
@@ -2585,7 +2645,8 @@ mod tests {
 
     #[test]
     fn test_parse_audit_denial_timestamp() {
-        let line = r#"msg=audit(1609459200.123:456) apparmor="DENIED" operation="open" profile="/test""#;
+        let line =
+            r#"msg=audit(1609459200.123:456) apparmor="DENIED" operation="open" profile="/test""#;
         let denial = parse_audit_denial_line(line);
         assert!(denial.is_some());
         assert_eq!(denial.unwrap().timestamp, "1609459200.123:456");

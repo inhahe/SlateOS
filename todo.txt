@@ -1,3 +1,29 @@
+## BUG (noticed+FIXED 2026-05-31): apparmor had 4 failing tests (two real
+##   profile-parsing bugs) + 11 pre-existing clippy errors.
+##   userspace/apparmor/src/main.rs:
+##     * PRODUCTION BUG 1 (#include swallowed as comment): parse_rule_line()
+##       checked `trimmed.starts_with('#')` (return) BEFORE the include check,
+##       so AppArmor's classic `#include <abstractions/base>` directives — which
+##       start with '#' — were treated as comments and never recorded. The
+##       `#include` branch was effectively dead code. Reordered: handle include
+##       directives before the comment guard. Fixes test_parse_rule_line_include,
+##       test_parse_profile_with_includes, test_full_profile_parse_and_validate.
+##     * PRODUCTION BUG 2 (variable use misread as assignment): preprocess_
+##       profile() treated ANY line starting with `@{` as a variable assignment
+##       (`@{var}=value`) and `continue`d without expanding. So a rule line that
+##       merely USES a variable at its start (`@{HOME}/data r,`) skipped
+##       expansion entirely. Fixed: only treat as an assignment when the closing
+##       brace is followed by `=`; otherwise fall through to expansion. Fixes
+##       test_preprocess_variable_expansion. 139/139 tests pass.
+##     * 11 clippy errors: 9 collapsible-if + manual-strip-prefix (auto/hand
+##       fixed), implicit saturating-subtraction, and too_many_arguments (9/7)
+##       on process_profile_content. The latter took 4 unused cache params
+##       (--base/--cache-loc/--write-cache/--skip-cache); refactored them into a
+##       `CacheOptions` struct (#[allow(dead_code)] — the compiled-policy cache
+##       isn't implemented yet). LIMITATION: apparmor does not yet read/write a
+##       binary profile cache; CacheOptions is staged plumbing for it.
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): dmsetup `cargo test` could not launch its
 ##   test harness + 7 pre-existing clippy errors.  userspace/dmsetup/:
 ##     * TEST HARNESS WOULDN'T LAUNCH: "The requested operation requires

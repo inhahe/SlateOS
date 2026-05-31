@@ -232,7 +232,9 @@
 ##       should be 204; CHANNEL_OPEN=200 maps to CHANNEL_CREATE which is fine).
 ##       Verified SHUTDOWN=90/REBOOT=91 do NOT exist (90/91 unassigned) — see
 ##       PROGRESS + power-management DESIGN GAP below.
-##   UNVERIFIED: lsmod (INIT_MODULE=150 DELETE_MODULE=151 — check module ABI).
+##   [x] lsmod (INIT_MODULE=150 DELETE_MODULE=151 — VERIFIED these are
+##       unassigned on OurOS; there is no module ABI because OurOS is a
+##       microkernel.  See PROGRESS + kernel-module DESIGN GAP below.)
 ##
 ##  FIX ORDER (this pass): catastrophic std-capable tools first (jq, zip,
 ##  ssh-keygen — pure std rewrites), then off-by-one network const fixes
@@ -363,6 +365,35 @@
 ##           scaffolding built ahead of the resident daemon event loop (only the
 ##           loginctl personality is wired into main; the full Daemon API is
 ##           exercised by the test suite).  100 host tests pass; build-ouros clean.
+##
+##   [x] lsmod (39245d22) — multi-personality lsmod/modprobe/insmod/rmmod.
+##           Removed the fictional SYS_INIT_MODULE=150 / SYS_DELETE_MODULE=151
+##           consts + the raw syscall3 wrapper + the orphaned errno_message
+##           mapper; 150/151 are unassigned on OurOS so the load/unload calls
+##           just returned NotSupported.  do_init_module/do_delete_module now
+##           return a clear "kernel modules are not supported on OurOS" error
+##           (microkernel — drivers are userspace processes).  Read-only lsmod
+##           listing (/proc/modules) and modprobe dep-resolution/dry-run/
+##           show-depends are unchanged.  REAL pre-existing bug fixed: the test
+##           suite never compiled on the host (Personality + ModprobeOpts lacked
+##           #[derive(Debug)] needed by assert_eq!/unwrap_err), so 56 tests had
+##           been silently un-run; added the derives, all 56 pass.  Clippy-clean
+##           (fixed pre-existing never_loop / collapsible-if / print_literal);
+##           build-ouros clean.
+##
+##  DESIGN GAP — no kernel-module loading (insmod/rmmod/modprobe load+remove):
+##   OurOS is a microkernel.  There are no loadable kernel modules: device
+##   drivers run as ordinary userspace processes managed by the driver framework
+##   / service manager, not as code injected into the kernel.  So there is no
+##   init_module/delete_module syscall and never will be in the Linux sense.
+##   lsmod's mutating personalities therefore report "not supported" instead of
+##   invoking a nonexistent syscall.  CORRECT FUTURE DIRECTION (not a syscall):
+##   when the driver framework exposes a control interface, point insmod/rmmod/
+##   modprobe at it over IPC (load = spawn/register a userspace driver process;
+##   rmmod = ask the framework to stop+unregister one) and have lsmod enumerate
+##   running drivers from the framework rather than from a Linux-style
+##   /proc/modules.  TRIGGER: when the driver framework's load/enumerate/unload
+##   IPC protocol lands.
 ##
 ##  DESIGN GAP — no power-management syscall (shutdown/reboot/suspend/hibernate):
 ##   OurOS has NO userspace syscall to change system power state; syscall

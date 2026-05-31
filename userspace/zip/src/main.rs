@@ -24,6 +24,14 @@
     clippy::cast_sign_loss,
     clippy::cast_possible_wrap,
     clippy::cast_lossless,
+    // Size/ratio values are only ever shown to the user as rounded
+    // human-readable strings; f64 precision loss is immaterial here.
+    clippy::cast_precision_loss,
+    // star_pi/star_si and similar paired indices are clearer kept parallel.
+    clippy::similar_names,
+    // Table-header rows pass column labels as positional args; inlining the
+    // literals would break alignment with the width-specified data columns.
+    clippy::print_literal,
     clippy::wildcard_imports,
     clippy::too_many_lines,
     clippy::too_many_arguments,
@@ -39,46 +47,11 @@ use std::path::{Path, PathBuf};
 use std::process;
 use std::time::SystemTime;
 
-// ============================================================================
-// Syscall interface (for completeness; std::fs wrappers are used in practice)
-// ============================================================================
-
-#[allow(dead_code)]
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack)
-        );
-    }
-    ret
-}
-
-#[allow(dead_code)]
-const SYS_READ: u64 = 0;
-#[allow(dead_code)]
-const SYS_WRITE: u64 = 1;
-#[allow(dead_code)]
-const SYS_OPEN: u64 = 2;
-#[allow(dead_code)]
-const SYS_CLOSE: u64 = 3;
-#[allow(dead_code)]
-const SYS_STAT: u64 = 4;
-#[allow(dead_code)]
-const SYS_LSEEK: u64 = 8;
-#[allow(dead_code)]
-const SYS_MKDIR: u64 = 83;
-#[allow(dead_code)]
-const SYS_GETDENTS: u64 = 78;
-#[allow(dead_code)]
-const SYS_EXIT: u64 = 60;
+// Note: all I/O goes through std (std::fs / std::io / std::process), which
+// reaches native OurOS syscalls via the posix libc layer.  A previous
+// hand-rolled syscall stub here hardcoded Linux numbers (WRITE=1=SYS_EXIT,
+// OPEN=2=SYS_TASK_ID, EXIT=60=SYS_SYSCTL_GET, ...) that collide with
+// unrelated native syscalls; it was dead code and has been removed.
 
 // ============================================================================
 // CRC32 (polynomial 0xEDB88320 — same as PKZIP standard)
@@ -133,8 +106,7 @@ fn encode_dos_datetime(t: SystemTime) -> (u16, u16) {
     // Fall back to a fixed timestamp on error: 1980-01-01 00:00:00
     let secs = t
         .duration_since(SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
 
     // Convert Unix epoch seconds to a rough calendar date.
     // We use a simple Gregorian calendar calculation (no leap-second awareness).
@@ -157,10 +129,10 @@ fn unix_secs_to_datetime(secs: u64) -> (u32, u32, u32, u32, u32, u32) {
 
     // Gregorian calendar from days since 1970-01-01
     // Using algorithm from http://howardhinnant.github.io/date_algorithms.html
-    let z = days_total as i64 + 719468;
-    let era = if z >= 0 { z } else { z - 146096 } / 146097;
-    let doe = (z - era * 146097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let z = days_total as i64 + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe as i64 + era * 400;
     let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
     let mp = (5 * doy + 2) / 153;
@@ -622,12 +594,12 @@ fn decode_huffman_block(
                     return Err(format!("deflate: distance code {dc} out of range"));
                 }
                 let (base_dist, extra_dbits) = DISTANCE_TABLE[dc];
-                let extrad = if extra_dbits > 0 {
+                let dist_extra = if extra_dbits > 0 {
                     reader.read_bits(u32::from(extra_dbits))? as u16
                 } else {
                     0
                 };
-                let match_dist = (base_dist + extrad) as usize;
+                let match_dist = (base_dist + dist_extra) as usize;
 
                 if match_dist > output.len() {
                     return Err(format!(
@@ -650,12 +622,12 @@ fn decode_huffman_block(
 fn decode_dynamic_headers(
     reader: &mut BitReader<'_>,
 ) -> Result<(HuffmanTable, HuffmanTable), String> {
+    const CLEN_ORDER: [usize; 19] =
+        [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+
     let hlit = reader.read_bits(5)? as usize + 257;
     let hdist = reader.read_bits(5)? as usize + 1;
     let hclen = reader.read_bits(4)? as usize + 4;
-
-    const CLEN_ORDER: [usize; 19] =
-        [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
 
     let mut clen_lengths = [0u8; 19];
     for i in 0..hclen {
@@ -810,7 +782,7 @@ fn lz77_compress(input: &[u8], level: u8) -> Vec<Token> {
 /// Compress `input` into a raw DEFLATE stream (no gzip wrapper).
 fn deflate_compress(input: &[u8], level: u8) -> Result<Vec<u8>, String> {
     if level == 0 {
-        return deflate_compress_stored(input);
+        return Ok(deflate_compress_stored(input));
     }
 
     let tokens = lz77_compress(input, level);
@@ -867,11 +839,11 @@ fn deflate_compress(input: &[u8], level: u8) -> Result<Vec<u8>, String> {
     Ok(output)
 }
 
-fn deflate_compress_stored(input: &[u8]) -> Result<Vec<u8>, String> {
+fn deflate_compress_stored(input: &[u8]) -> Vec<u8> {
     let mut output = Vec::new();
     let mut pos = 0;
     loop {
-        let chunk_end = (pos + 65535).min(input.len());
+        let chunk_end = (pos + 65_535).min(input.len());
         let chunk = &input[pos..chunk_end];
         let len = chunk.len() as u16;
         let nlen = !len;
@@ -885,7 +857,7 @@ fn deflate_compress_stored(input: &[u8]) -> Result<Vec<u8>, String> {
         pos = chunk_end;
         if is_final { break; }
     }
-    Ok(output)
+    output
 }
 
 // ============================================================================
@@ -1337,11 +1309,10 @@ fn file_mtime(path: &Path) -> SystemTime {
 
 /// Create parent directories for a path, if they don't exist.
 fn create_parent_dirs(path: &Path) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent)
-                .map_err(|e| format!("{}: mkdir: {e}", parent.display()))?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|e| format!("{}: mkdir: {e}", parent.display()))?;
     }
     Ok(())
 }
@@ -1355,31 +1326,37 @@ fn glob_matches(pattern: &str, name: &str) -> bool {
 }
 
 fn glob_match_inner(pat: &[u8], s: &[u8]) -> bool {
-    let (mut pi, mut si) = (0, 0);
-    let (mut star_pi, mut star_si) = (usize::MAX, usize::MAX);
+    let (mut pi, mut si) = (0usize, 0usize);
+    // `star_pi` records the pattern position just after the most recent `*`;
+    // `star_si` records how far into `s` that `*` has been stretched so far.
+    let mut star_pi: Option<usize> = None;
+    let mut star_si = 0usize;
 
-    loop {
-        if pi < pat.len() && si < s.len() && (pat[pi] == b'?' || pat[pi] == s[si]) {
+    // Advance through the string. Each branch makes progress; the star-backtrack
+    // case only ever increments `star_si` up to `s.len()`, so this terminates.
+    while si < s.len() {
+        if pi < pat.len() && (pat[pi] == b'?' || pat[pi] == s[si]) {
             pi += 1;
             si += 1;
         } else if pi < pat.len() && pat[pi] == b'*' {
-            star_pi = pi;
+            star_pi = Some(pi);
             star_si = si;
             pi += 1;
-        } else if star_pi != usize::MAX {
+        } else if let Some(sp) = star_pi {
+            // Backtrack: let the last `*` swallow one more character of `s`.
+            pi = sp + 1;
             star_si += 1;
             si = star_si;
-            pi = star_pi + 1;
-        } else if pi == pat.len() && si == s.len() {
-            return true;
         } else {
             return false;
         }
-
-        if pi == pat.len() && si == s.len() {
-            return true;
-        }
     }
+
+    // String consumed: any trailing pattern must be all `*` to match.
+    while pi < pat.len() && pat[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pat.len()
 }
 
 /// Format file size as a human-readable string.
@@ -1644,7 +1621,7 @@ fn parse_unzip_args(args: &[String]) -> Result<UnzipOptions, String> {
                         if i >= args.len() {
                             return Err("unzip: -d requires a directory argument".to_string());
                         }
-                        dest_dir = args[i].clone();
+                        dest_dir.clone_from(&args[i]);
                     }
                     'l' => list = true,
                     't' => test = true,
@@ -1692,7 +1669,7 @@ fn parse_unzip_args(args: &[String]) -> Result<UnzipOptions, String> {
 // zip mode implementation
 // ============================================================================
 
-fn run_zip(opts: ZipOptions) -> Result<(), String> {
+fn run_zip(opts: &ZipOptions) -> Result<(), String> {
     if opts.sources.is_empty() {
         return Err("zip: no source files specified".to_string());
     }
@@ -1827,18 +1804,18 @@ fn add_one_file(
     total_bytes: &mut u64,
 ) -> Result<(), String> {
     // In update mode, check if a newer version already exists in the archive.
-    if update {
-        if let Some(existing_entry) = existing.iter().find(|e| e.name == arc_name) {
-            let file_mtime = encode_dos_datetime(file_mtime(path));
-            let entry_mtime = (existing_entry.mod_date, existing_entry.mod_time);
-            if entry_mtime >= file_mtime {
-                // Existing entry is as new or newer; copy it.
-                let comp_data = zip_read_local_data(existing_data, existing_entry)
-                    .map_err(|e| format!("zip: update mode: {e}"))?;
-                writer.buf.extend_from_slice(comp_data); // simplified copy
-                writer.entries.push(existing_entry.clone());
-                return Ok(());
-            }
+    if update
+        && let Some(existing_entry) = existing.iter().find(|e| e.name == arc_name)
+    {
+        let file_mtime = encode_dos_datetime(file_mtime(path));
+        let entry_mtime = (existing_entry.mod_date, existing_entry.mod_time);
+        if entry_mtime >= file_mtime {
+            // Existing entry is as new or newer; copy it.
+            let comp_data = zip_read_local_data(existing_data, existing_entry)
+                .map_err(|e| format!("zip: update mode: {e}"))?;
+            writer.buf.extend_from_slice(comp_data); // simplified copy
+            writer.entries.push(existing_entry.clone());
+            return Ok(());
         }
     }
 
@@ -1867,7 +1844,7 @@ fn add_one_file(
 // unzip mode implementation
 // ============================================================================
 
-fn run_unzip(opts: UnzipOptions) -> Result<(), String> {
+fn run_unzip(opts: &UnzipOptions) -> Result<(), String> {
     let archive_path = Path::new(&opts.archive);
     let archive_data = read_file(archive_path)
         .map_err(|e| format!("unzip: cannot open {}: {e}", opts.archive))?;
@@ -1876,27 +1853,34 @@ fn run_unzip(opts: UnzipOptions) -> Result<(), String> {
         .map_err(|e| format!("unzip: {}: {e}", opts.archive))?;
 
     if opts.list || opts.verbose {
-        return list_archive(&entries, &opts);
+        list_archive(&entries, opts);
+        return Ok(());
     }
 
     if opts.test {
-        return test_archive(&archive_data, &entries, &opts);
+        return test_archive(&archive_data, &entries, opts);
     }
 
-    extract_archive(&archive_data, &entries, &opts)
+    extract_archive(&archive_data, &entries, opts)
 }
 
-fn list_archive(entries: &[ZipEntry], opts: &UnzipOptions) -> Result<(), String> {
+fn list_archive(entries: &[ZipEntry], opts: &UnzipOptions) {
+    // Pre-rendered dashed separator rows (avoids passing empty literals to
+    // width/fill format specifiers).
+    const SEP_VERBOSE: &str =
+        "---------- ----- ---------- ----------  ----------------  --------------------";
+    const SEP_PLAIN: &str = "----------  ----------------  --------------------";
+
     if !opts.quiet {
         if opts.verbose {
             println!(
                 "{:>10} {:>5} {:>10} {:>10}  {}  {}",
                 "Length", "Method", "Compressed", "Ratio", "Date/Time", "Name"
             );
-            println!("{:-<10} {:-<5} {:-<10} {:-<10}  {:-<16}  {:-<20}", "", "", "", "", "", "");
+            println!("{SEP_VERBOSE}");
         } else {
             println!("{:>10}  {}  {}", "Length", "Date/Time        ", "Name");
-            println!("{:-<10}  {:-<16}  {:-<20}", "", "", "");
+            println!("{SEP_PLAIN}");
         }
     }
 
@@ -1941,23 +1925,20 @@ fn list_archive(entries: &[ZipEntry], opts: &UnzipOptions) -> Result<(), String>
 
     if !opts.quiet {
         if opts.verbose {
-            println!("{:-<10} {:-<5} {:-<10} {:-<10}  {:-<16}  {:-<20}", "", "", "", "", "", "");
+            println!("{SEP_VERBOSE}");
             let ratio = if total_uncomp == 0 {
                 0.0
             } else {
                 100.0 * (1.0 - total_comp as f64 / total_uncomp as f64)
             };
             println!(
-                "{:>10}          {:>10} {:>9.0}%                    {} files",
-                total_uncomp, total_comp, ratio, count
+                "{total_uncomp:>10}          {total_comp:>10} {ratio:>9.0}%                    {count} files"
             );
         } else {
-            println!("{:-<10}  {:-<16}  {:-<20}", "", "", "");
-            println!("{:>10}                    {} files", total_uncomp, count);
+            println!("{SEP_PLAIN}");
+            println!("{total_uncomp:>10}                    {count} files");
         }
     }
-
-    Ok(())
 }
 
 fn test_archive(
@@ -2071,13 +2052,13 @@ fn extract_archive(
         println!("unzip: extracted {extracted} file(s) to '{}'", dest.display());
     }
 
-    if !errors.is_empty() {
+    if errors.is_empty() {
+        Ok(())
+    } else {
         for e in &errors {
             eprintln!("{e}");
         }
         Err(format!("unzip: {} error(s)", errors.len()))
-    } else {
-        Ok(())
     }
 }
 
@@ -2129,7 +2110,7 @@ Options:
 
 fn main() {
     let args: Vec<String> = env::args().collect();
-    let argv0 = args.first().map(String::as_str).unwrap_or("zip");
+    let argv0 = args.first().map_or("zip", String::as_str);
     let mode = detect_mode(argv0);
 
     let cli_args = if args.len() > 1 { &args[1..] } else { &[] as &[String] };
@@ -2137,13 +2118,13 @@ fn main() {
     let result = match mode {
         ToolMode::Zip => {
             match parse_zip_args(cli_args) {
-                Ok(opts) => run_zip(opts),
+                Ok(opts) => run_zip(&opts),
                 Err(e) => Err(e),
             }
         }
         ToolMode::Unzip => {
             match parse_unzip_args(cli_args) {
-                Ok(opts) => run_unzip(opts),
+                Ok(opts) => run_unzip(&opts),
                 Err(e) => Err(e),
             }
         }
@@ -2267,6 +2248,24 @@ mod tests {
         assert!(glob_matches("*", ""));
     }
 
+    #[test]
+    fn test_glob_no_match_terminates() {
+        // Regression: a `*` followed by a suffix that never matches used to
+        // spin forever (si ran past the end of the string unbounded).
+        assert!(!glob_matches("*.txt", "hello.rs"));
+        assert!(!glob_matches("*abc", "xyz"));
+        assert!(!glob_matches("a*z", "abc"));
+        assert!(!glob_matches("foo*", "fo"));
+    }
+
+    #[test]
+    fn test_glob_multiple_stars() {
+        assert!(glob_matches("*a*b*", "xaybz"));
+        assert!(glob_matches("a*b*c", "abc"));
+        assert!(glob_matches("**", "anything"));
+        assert!(!glob_matches("a*b*c", "abx"));
+    }
+
     // ---- DEFLATE compressor/decompressor ----
 
     #[test]
@@ -2331,7 +2330,7 @@ mod tests {
     #[test]
     fn test_deflate_stored_block() {
         let input = b"stored block test data";
-        let comp = deflate_compress_stored(input).unwrap();
+        let comp = deflate_compress_stored(input);
         let mut out = Vec::new();
         let mut reader = BitReader::new(&comp);
         deflate_decompress(&mut reader, &mut out).unwrap();

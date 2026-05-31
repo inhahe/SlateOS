@@ -1,9 +1,8 @@
 //! OurOS ARP Table Management Utility
 //!
-//! Reads, adds, and deletes entries in the ARP (Address Resolution Protocol)
-//! cache.  The cache is accessed through `/proc/net/arp` for reads and via
-//! dedicated syscalls for mutations.  A simplified raw-socket ARP probe is
-//! also supported for on-demand address resolution.
+//! Displays the ARP (Address Resolution Protocol) cache.  The cache is read
+//! through the dedicated `SYS_ARP_TABLE` syscall, which returns the resolved
+//! IP→MAC mappings the kernel currently holds.
 //!
 //! # Usage
 //!
@@ -13,70 +12,38 @@
 //! arp -n                      Display entries, numeric output only
 //! arp -i eth0                 Limit display to interface eth0
 //! arp -v                      Verbose output
-//! arp -d hostname             Delete an ARP entry
-//! arp -s hostname hw_addr     Add a static ARP entry
-//! arp -D -s hostname iface    Use device MAC for a static entry
+//! arp -d hostname             Delete an ARP entry (unsupported on OurOS)
+//! arp -s hostname hw_addr     Add a static ARP entry (unsupported on OurOS)
+//! arp -D -s hostname iface    Use device MAC for a static entry (unsupported)
 //! ```
-
-// The syscall constants and low-level wrappers below document the full OurOS
-// syscall ABI for this subsystem.  Several are present as building blocks for
-// future extension and are not yet called from the command handlers; suppress
-// the resulting dead_code warnings rather than deleting intentional API stubs.
-#![allow(dead_code)]
+//!
+//! # ABI note
+//!
+//! OurOS exposes `SYS_ARP_TABLE` (read) and `SYS_NET_IF_INFO` (interface
+//! configuration, including the local MAC) but has **no** syscall to add,
+//! delete, or probe ARP entries.  Those operations therefore report a clear
+//! "not supported" error rather than silently invoking the wrong syscall.
+//! See `todo.txt` for the design-gap note.
 
 use std::env;
-use std::fs;
 use std::io::{self, Write};
 use std::process;
 
 // ============================================================================
-// Syscall numbers (OurOS-specific assignments in the net range 800-999)
+// Syscall numbers (authoritative values from kernel/src/syscall/number.rs)
 // ============================================================================
 
-/// Read raw bytes from an open file descriptor.
-/// arg1 = fd, arg2 = buf ptr, arg3 = count.
-/// Returns bytes read (>= 0) or negative errno.
-const SYS_READ: u64 = 0;
+/// `SYS_ARP_TABLE` — read the ARP cache.
+/// arg0 = ptr to output buffer, arg1 = buffer length in bytes.
+/// Writes one 12-byte record per entry: [0..4] IPv4 (network order),
+/// [4..10] MAC, [10..12] TTL seconds (u16 LE).  Returns the record count.
+const SYS_ARP_TABLE: u64 = 843;
 
-/// Write raw bytes to a file descriptor.
-/// arg1 = fd, arg2 = buf ptr, arg3 = count.
-/// Returns bytes written (>= 0) or negative errno.
-const SYS_WRITE: u64 = 1;
+/// Size in bytes of a single `SYS_ARP_TABLE` record.
+const ARP_RECORD_SIZE: usize = 12;
 
-/// Open a file, returning a file descriptor.
-/// arg1 = path ptr, arg2 = path len, arg3 = flags (O_RDONLY=0, O_WRONLY=1).
-/// Returns fd (>= 0) or negative errno.
-const SYS_OPEN: u64 = 2;
-
-/// Close a file descriptor.
-/// arg1 = fd.
-/// Returns 0 or negative errno.
-const SYS_CLOSE: u64 = 3;
-
-/// Terminate the process.
-/// arg1 = exit code.
-/// Does not return.
-const SYS_EXIT: u64 = 60;
-
-/// Add a static ARP entry.
-/// arg1 = ptr to ArpRequest, arg2 = sizeof(ArpRequest), arg3 = 0.
-/// Returns 0 on success or negative errno.
-const SYS_ARP_ADD: u64 = 840;
-
-/// Delete an ARP entry by IP.
-/// arg1 = IPv4 address (u32, host byte order), arg2 = 0, arg3 = 0.
-/// Returns 0 on success or negative errno.
-const SYS_ARP_DEL: u64 = 841;
-
-/// Probe an IP address via ARP request and wait for a reply.
-/// arg1 = IPv4 address (u32, host byte order), arg2 = timeout_ms, arg3 = 0.
-/// Returns 0 on success or negative errno.
-const SYS_ARP_PROBE: u64 = 842;
-
-/// Query the MAC address of a network interface.
-/// arg1 = ptr to interface name (null-terminated), arg2 = ptr to [u8; 6] result buf, arg3 = 0.
-/// Returns 0 on success or negative errno.
-const SYS_IFMAC: u64 = 843;
+/// Maximum number of ARP records we are willing to read in one call.
+const MAX_ARP_RECORDS: usize = 1024;
 
 // ============================================================================
 // Syscall interface
@@ -117,7 +84,7 @@ unsafe fn syscall3(_nr: u64, _a1: u64, _a2: u64, _a3: u64) -> i64 {
 }
 
 // ============================================================================
-// Low-level syscall wrappers
+// Diagnostics
 // ============================================================================
 
 /// Map a negative syscall return code to a human-readable string.
@@ -144,67 +111,18 @@ fn errno_str(code: i64) -> &'static str {
     }
 }
 
-/// Open `/proc/net/arp` (or any path) for reading.
-///
-/// On our OS we use `std::fs::read_to_string` to stay portable; the raw
-/// syscall wrappers below are provided for completeness and used by the
-/// mutating operations that have no `std` counterpart.
-fn sys_open_readonly(path: &str) -> Result<i32, i64> {
-    let ret = unsafe {
-        // SAFETY: path is a valid UTF-8 string pointer with accurate length.
-        // Flags 0 = O_RDONLY.
-        syscall3(SYS_OPEN, path.as_ptr() as u64, path.len() as u64, 0)
-    };
-    if ret < 0 { Err(ret) } else { Ok(ret as i32) }
-}
-
-/// Close a file descriptor returned by `sys_open_readonly`.
-fn sys_close(fd: i32) {
-    // SAFETY: fd is a non-negative file descriptor obtained from SYS_OPEN.
-    // We deliberately ignore the return value — a failed close on a
-    // read-only descriptor has no meaningful recovery path.
-    let _ = unsafe { syscall3(SYS_CLOSE, fd as u64, 0, 0) };
-}
-
-/// Read at most `buf.len()` bytes from `fd` into `buf`.
-/// Returns the number of bytes actually read, or a negative errno.
-fn sys_read(fd: i32, buf: &mut [u8]) -> i64 {
-    // SAFETY: fd is valid, buf is a mutable slice with accurate pointer and length.
-    unsafe {
-        syscall3(
-            SYS_READ,
-            fd as u64,
-            buf.as_mut_ptr() as u64,
-            buf.len() as u64,
-        )
-    }
-}
-
-/// Write `buf` to `fd`.  Returns bytes written or negative errno.
-fn sys_write(fd: i32, buf: &[u8]) -> i64 {
-    // SAFETY: fd is valid (stdout=1 / stderr=2), buf pointer and length are accurate.
-    unsafe {
-        syscall3(
-            SYS_WRITE,
-            fd as u64,
-            buf.as_ptr() as u64,
-            buf.len() as u64,
-        )
-    }
-}
-
-/// Write a string to stderr without going through `std::io`.
+/// Write a diagnostic string to stderr (best-effort).
 fn write_stderr(msg: &str) {
-    // stderr fd = 2.  Ignore partial-write; this is best-effort diagnostic output.
-    let _ = sys_write(2, msg.as_bytes());
+    // A failed diagnostic write has no meaningful recovery path; ignore it.
+    let _ = io::stderr().write_all(msg.as_bytes());
 }
 
 // ============================================================================
 // IP / MAC address parsing and formatting
 // ============================================================================
 
-/// Parse a dotted-decimal IPv4 address into a `u32` in host byte order.
-/// Returns `None` on malformed input.
+/// Parse a dotted-decimal IPv4 address into a `u32` whose big-endian byte
+/// representation is `A.B.C.D`.  Returns `None` on malformed input.
 fn parse_ipv4(s: &str) -> Option<u32> {
     let mut octets = [0u8; 4];
     let mut idx = 0usize;
@@ -243,27 +161,10 @@ fn parse_ipv4(s: &str) -> Option<u32> {
     Some(u32::from_be_bytes(octets))
 }
 
-/// Format a `u32` IPv4 address (host byte order) as `A.B.C.D`.
+/// Format a `u32` IPv4 address (big-endian byte order) as `A.B.C.D`.
 fn format_ipv4(ip: u32) -> String {
     let b = ip.to_be_bytes();
     format!("{}.{}.{}.{}", b[0], b[1], b[2], b[3])
-}
-
-/// Parse a colon-separated MAC address such as `aa:bb:cc:dd:ee:ff` into
-/// a `[u8; 6]`.  Returns `None` on malformed input.
-fn parse_mac(s: &str) -> Option<[u8; 6]> {
-    let mut out = [0u8; 6];
-    let parts: Vec<&str> = s.split(':').collect();
-    if parts.len() != 6 {
-        return None;
-    }
-    for (i, part) in parts.iter().enumerate() {
-        if part.len() != 2 {
-            return None;
-        }
-        out[i] = u8::from_str_radix(part, 16).ok()?;
-    }
-    Some(out)
 }
 
 /// Format a `[u8; 6]` MAC address as `XX:XX:XX:XX:XX:XX` (lower-case hex).
@@ -283,7 +184,9 @@ fn mac_is_zero(mac: &[u8; 6]) -> bool {
 // ARP cache entry
 // ============================================================================
 
-/// ARP cache flags as exposed by `/proc/net/arp`.
+/// ARP cache flags.  OurOS reports only resolved/unresolved state, so the
+/// vocabulary mirrors Linux's `arp` output for familiarity even though only
+/// `COMPLETE` is currently synthesised from kernel data.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ArpFlags(pub u16);
 
@@ -294,12 +197,10 @@ impl ArpFlags {
     pub const PERMANENT: u16 = 0x04;
     /// Published — kernel answers ARP requests on behalf of this host.
     pub const PUBLISHED: u16 = 0x08;
-    /// Entry is in use.
-    pub const USED: u16 = 0x01;
 
-    /// Human-readable flag summary: `CMP` style (space-padded if absent).
+    /// Human-readable flag summary in `CMP` style.
     pub fn summary(self) -> String {
-        let mut s = String::with_capacity(4);
+        let mut s = String::with_capacity(3);
         if self.0 & Self::COMPLETE != 0 {
             s.push('C');
         }
@@ -316,7 +217,7 @@ impl ArpFlags {
 /// One row from the ARP table.
 #[derive(Debug, Clone)]
 pub struct ArpEntry {
-    /// IPv4 address of the peer.
+    /// IPv4 address of the peer (big-endian byte order: `to_be_bytes` = A.B.C.D).
     pub ip: u32,
     /// Hardware (Ethernet) type; 1 = Ethernet.
     pub hw_type: u16,
@@ -343,7 +244,8 @@ impl ArpEntry {
     /// Format this entry for display.
     ///
     /// `numeric` suppresses hostname lookups (we always skip them here since
-    /// we have no resolver; the flag is a no-op placeholder for compatibility).
+    /// we have no resolver; the flag controls only the leading `?` host
+    /// placeholder for compatibility with Linux `arp`).
     fn display(&self, numeric: bool, verbose: bool) -> String {
         let ip_str = format_ipv4(self.ip);
         let mac_str = if mac_is_zero(&self.mac) {
@@ -355,15 +257,14 @@ impl ArpEntry {
         let flags = self.flags.summary();
 
         if verbose {
+            let flag_str = if flags.is_empty() {
+                "<none>".to_string()
+            } else {
+                flags
+            };
             format!(
-                "{}{} ({}) at {} [{}] {} on {}",
-                if numeric { "" } else { "" }, // placeholder: hostname would go here
-                ip_str,
-                ip_str,
-                mac_str,
-                hw_name,
-                if flags.is_empty() { "<none>".to_string() } else { flags },
-                self.iface,
+                "{ip_str} ({ip_str}) at {mac_str} [{hw_name}] {flag_str} on {}",
+                self.iface
             )
         } else {
             // Standard `arp -a` style: "? (1.2.3.4) at aa:bb:cc:dd:ee:ff [ether] on eth0"
@@ -372,247 +273,88 @@ impl ArpEntry {
             } else {
                 format!("? ({ip_str})")
             };
-            format!(
-                "{host_part} at {mac_str} [{hw_name}] on {}",
-                self.iface
-            )
+            format!("{host_part} at {mac_str} [{hw_name}] on {}", self.iface)
         }
     }
 }
 
 // ============================================================================
-// /proc/net/arp parser
+// Errors
 // ============================================================================
 
-/// Errors that can occur while reading/parsing the ARP table.
+/// Errors that can occur while reading the ARP table or handling a command.
 #[derive(Debug)]
 pub enum ArpError {
-    /// Could not open or read `/proc/net/arp`.
+    /// An I/O error occurred while writing output.
     IoError(String),
-    /// A line in the file had an unexpected format.
-    ParseError(String),
     /// A syscall returned a negative error code.
     SyscallError(i64),
+    /// The requested operation is not supported on OurOS.
+    Unsupported(&'static str),
 }
 
 impl std::fmt::Display for ArpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::IoError(msg) => write!(f, "I/O error: {msg}"),
-            Self::ParseError(msg) => write!(f, "parse error: {msg}"),
             Self::SyscallError(code) => {
                 write!(f, "syscall error {code}: {}", errno_str(*code))
             }
+            Self::Unsupported(msg) => write!(f, "{msg}"),
         }
     }
 }
 
-/// Parse the contents of `/proc/net/arp` into a vector of `ArpEntry`.
+// ============================================================================
+// ARP table read (SYS_ARP_TABLE)
+// ============================================================================
+
+/// Parse a flat buffer of 12-byte `SYS_ARP_TABLE` records into `ArpEntry`s.
 ///
-/// Expected format (first line is the header):
-/// ```text
-/// IP address       HW type     Flags       HW address            Mask     Device
-/// 192.168.1.1      0x1         0x2         aa:bb:cc:dd:ee:ff     *        eth0
-/// ```
-pub fn parse_proc_arp(content: &str) -> Result<Vec<ArpEntry>, ArpError> {
-    let mut entries = Vec::new();
-    let mut lines = content.lines();
-
-    // Skip the header line.
-    if lines.next().is_none() {
-        return Ok(entries);
-    }
-
-    for (lineno, line) in lines.enumerate() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-
-        // Split on whitespace; expected columns:
-        // 0: IP address
-        // 1: HW type (0x1)
-        // 2: Flags (0x2)
-        // 3: HW address (MAC or 00:00:00:00:00:00)
-        // 4: Mask (* )
-        // 5: Device (interface name)
-        let cols: Vec<&str> = line.split_whitespace().collect();
-        if cols.len() < 6 {
-            return Err(ArpError::ParseError(format!(
-                "line {}: expected 6 columns, got {}",
-                lineno + 2,
-                cols.len()
-            )));
-        }
-
-        let ip = parse_ipv4(cols[0]).ok_or_else(|| {
-            ArpError::ParseError(format!(
-                "line {}: invalid IP address '{}'",
-                lineno + 2,
-                cols[0]
-            ))
-        })?;
-
-        let hw_type = parse_hex_u16(cols[1]).ok_or_else(|| {
-            ArpError::ParseError(format!(
-                "line {}: invalid HW type '{}'",
-                lineno + 2,
-                cols[1]
-            ))
-        })?;
-
-        let flag_bits = parse_hex_u16(cols[2]).ok_or_else(|| {
-            ArpError::ParseError(format!(
-                "line {}: invalid flags '{}'",
-                lineno + 2,
-                cols[2]
-            ))
-        })?;
-
-        let mac = parse_mac(cols[3]).ok_or_else(|| {
-            ArpError::ParseError(format!(
-                "line {}: invalid MAC address '{}'",
-                lineno + 2,
-                cols[3]
-            ))
-        })?;
-
-        let iface = cols[5].to_string();
-
-        entries.push(ArpEntry {
-            ip,
-            hw_type,
-            flags: ArpFlags(flag_bits),
-            mac,
-            iface,
-        });
-    }
-
-    Ok(entries)
+/// Each record: [0..4] IPv4 (network order = `A.B.C.D`), [4..10] MAC,
+/// [10..12] TTL seconds (u16 LE).  A trailing partial record (if any) is
+/// ignored by `chunks_exact`.
+fn parse_arp_records(buf: &[u8]) -> Vec<ArpEntry> {
+    buf.chunks_exact(ARP_RECORD_SIZE)
+        .map(|rec| {
+            // rec.len() == ARP_RECORD_SIZE (12) is guaranteed by chunks_exact.
+            let ip = u32::from_be_bytes([rec[0], rec[1], rec[2], rec[3]]);
+            let mac = [rec[4], rec[5], rec[6], rec[7], rec[8], rec[9]];
+            // TTL (rec[10..12]) is read but not displayed; reserved for future use.
+            let flags = if mac_is_zero(&mac) {
+                ArpFlags(0)
+            } else {
+                ArpFlags(ArpFlags::COMPLETE)
+            };
+            ArpEntry {
+                ip,
+                hw_type: 1, // SYS_ARP_TABLE only tracks Ethernet peers.
+                flags,
+                mac,
+                // The kernel exposes a single global interface; name it eth0
+                // for output compatibility (see InterfaceInfo in net/interface).
+                iface: "eth0".to_string(),
+            }
+        })
+        .collect()
 }
 
-/// Parse a `0x`-prefixed hexadecimal string into a `u16`.
-fn parse_hex_u16(s: &str) -> Option<u16> {
-    let hex = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X"))?;
-    u16::from_str_radix(hex, 16).ok()
-}
-
-// ============================================================================
-// ARP table read
-// ============================================================================
-
-/// Read and parse the ARP cache from `/proc/net/arp`.
-/// Falls back to `std::fs` for portability during testing.
+/// Read and parse the ARP cache via `SYS_ARP_TABLE`.
 fn read_arp_table() -> Result<Vec<ArpEntry>, ArpError> {
-    let content = fs::read_to_string("/proc/net/arp")
-        .map_err(|e| ArpError::IoError(e.to_string()))?;
-    parse_proc_arp(&content)
-}
-
-// ============================================================================
-// Kernel ARP mutation syscalls
-// ============================================================================
-
-/// Wire-format structure passed to `SYS_ARP_ADD`.
-///
-/// Layout (all fields little-endian unless noted):
-/// ```
-/// offset  size  field
-///      0     4  ip          (host byte order)
-///      4     6  mac
-///     10     2  flags
-///     12    16  iface (null-padded)
-/// ```
-#[repr(C)]
-struct ArpRequest {
-    ip: u32,
-    mac: [u8; 6],
-    flags: u16,
-    iface: [u8; 16],
-}
-
-/// Add a static ARP entry for `ip` with MAC `mac` on interface `iface`.
-fn arp_add(ip: u32, mac: [u8; 6], iface: &str) -> Result<(), ArpError> {
-    let mut req = ArpRequest {
-        ip,
-        mac,
-        flags: ArpFlags::PERMANENT | ArpFlags::COMPLETE,
-        iface: [0u8; 16],
-    };
-
-    // Copy interface name into the fixed-size field, truncating if needed.
-    let name_bytes = iface.as_bytes();
-    let copy_len = name_bytes.len().min(15);
-    req.iface[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-    // Remaining bytes are already zero (null-terminated).
-
+    let mut buf = vec![0u8; MAX_ARP_RECORDS * ARP_RECORD_SIZE];
     let ret = unsafe {
-        // SAFETY: req is a fully-initialised struct with the correct layout
-        // expected by SYS_ARP_ADD.  We pass its pointer and byte size.
-        syscall3(
-            SYS_ARP_ADD,
-            &raw const req as u64,
-            size_of::<ArpRequest>() as u64,
-            0,
-        )
+        // SAFETY: buf is a valid, writable slice; we pass its pointer and exact
+        // byte length.  SYS_ARP_TABLE writes at most that many bytes and returns
+        // the number of 12-byte records written.
+        syscall3(SYS_ARP_TABLE, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
     };
-
     if ret < 0 {
-        Err(ArpError::SyscallError(ret))
-    } else {
-        Ok(())
+        return Err(ArpError::SyscallError(ret));
     }
-}
-
-/// Delete the ARP cache entry for `ip`.
-fn arp_del(ip: u32) -> Result<(), ArpError> {
-    // SAFETY: SYS_ARP_DEL takes a scalar IPv4 address; no pointer
-    // dereferences occur in userspace.
-    let ret = unsafe { syscall3(SYS_ARP_DEL, u64::from(ip), 0, 0) };
-    if ret < 0 {
-        Err(ArpError::SyscallError(ret))
-    } else {
-        Ok(())
-    }
-}
-
-/// Send an ARP probe for `ip` and wait up to `timeout_ms` for a reply.
-fn arp_probe(ip: u32, timeout_ms: u64) -> Result<(), ArpError> {
-    // SAFETY: SYS_ARP_PROBE takes two scalar arguments; no pointer
-    // dereferences occur in userspace.
-    let ret = unsafe { syscall3(SYS_ARP_PROBE, u64::from(ip), timeout_ms, 0) };
-    if ret < 0 {
-        Err(ArpError::SyscallError(ret))
-    } else {
-        Ok(())
-    }
-}
-
-/// Query the hardware (MAC) address of `iface`.
-fn iface_mac(iface: &str) -> Result<[u8; 6], ArpError> {
-    // Provide a null-terminated name buffer.
-    let mut name_buf = [0u8; 16];
-    let copy_len = iface.as_bytes().len().min(15);
-    name_buf[..copy_len].copy_from_slice(&iface.as_bytes()[..copy_len]);
-
-    let mut mac = [0u8; 6];
-
-    let ret = unsafe {
-        // SAFETY: name_buf is null-terminated and mac has exactly 6 bytes.
-        // SYS_IFMAC reads name_buf and writes 6 bytes into mac.
-        syscall3(
-            SYS_IFMAC,
-            name_buf.as_ptr() as u64,
-            mac.as_mut_ptr() as u64,
-            0,
-        )
-    };
-
-    if ret < 0 {
-        Err(ArpError::SyscallError(ret))
-    } else {
-        Ok(mac)
-    }
+    let count = usize::try_from(ret).unwrap_or(0);
+    let byte_len = count.saturating_mul(ARP_RECORD_SIZE).min(buf.len());
+    let records = buf.get(..byte_len).unwrap_or(&[]);
+    Ok(parse_arp_records(records))
 }
 
 // ============================================================================
@@ -624,9 +366,9 @@ fn iface_mac(iface: &str) -> Result<[u8; 6], ArpError> {
 enum Mode {
     /// Display the ARP table (default / `-a`).
     Display,
-    /// Delete the entry for the given hostname/IP (`-d`).
+    /// Delete the entry for the given hostname/IP (`-d`) — unsupported.
     Delete,
-    /// Add a static entry (`-s hostname hw_addr`).
+    /// Add a static entry (`-s hostname hw_addr`) — unsupported.
     Add,
 }
 
@@ -670,25 +412,25 @@ fn print_usage() {
     let msg = "\
 Usage: arp [OPTIONS] [hostname]
 
-Display/modify the kernel ARP cache.
+Display the kernel ARP cache.
 
 Options:
   -a, --all           Display all entries (default)
   -n                  Numeric output; do not resolve hostnames
   -v                  Verbose output
   -i <iface>          Limit to interface <iface>
-  -d <hostname>       Delete ARP entry for <hostname>
-  -s <hostname> <hw>  Add static entry: hostname -> hw (XX:XX:XX:XX:XX:XX)
-  -D                  With -s: use the device MAC (requires -i)
+  -d <hostname>       Delete ARP entry (unsupported on OurOS)
+  -s <hostname> <hw>  Add static entry (unsupported on OurOS)
+  -D                  With -s: use the device MAC (unsupported on OurOS)
   -h, --help          Show this help
+
+Note: OurOS has no kernel syscall to add, delete, or probe ARP entries, so
+the -d/-s/-D operations report \"not supported\".
 
 Examples:
   arp                         Show all entries
   arp -n                      Show all entries, numeric IPs
   arp -i eth0                 Show entries for eth0
-  arp -d 192.168.1.1          Delete entry for 192.168.1.1
-  arp -s 192.168.1.50 aa:bb:cc:dd:ee:ff   Add static entry
-  arp -D -s 192.168.1.50 eth0             Add entry using eth0's MAC
 ";
     let _ = io::stderr().write_all(msg.as_bytes());
 }
@@ -700,7 +442,10 @@ fn parse_args() -> Result<Options, String> {
     let mut i = 1usize;
 
     while i < argv.len() {
-        let arg = argv[i].as_str();
+        let arg = argv
+            .get(i)
+            .ok_or("internal: argv index out of range")?
+            .as_str();
         match arg {
             "-h" | "--help" => {
                 print_usage();
@@ -773,15 +518,13 @@ fn parse_args() -> Result<Options, String> {
         );
     }
 
-    // Validate -D: requires -i and (-s or a hostname to be supplied separately)
+    // Validate -D: requires -s and an interface (Linux `arp -Ds host iface`
+    // convention promotes the hw_addr argument to the interface name).
     if opts.use_device_mac {
         if opts.mode != Mode::Add {
             return Err("-D requires -s".to_string());
         }
         if opts.interface.is_none() {
-            // When -D is used, the hw_addr field may hold the interface name
-            // (Linux arp -Ds hostname iface convention).
-            // In that case promote hw_addr to interface and clear it.
             if let Some(hw) = opts.hw_addr.take() {
                 opts.interface = Some(hw);
             } else {
@@ -798,39 +541,41 @@ fn parse_args() -> Result<Options, String> {
 // ============================================================================
 
 /// Print the ARP table, optionally filtered by interface and/or host.
-fn cmd_display(
-    opts: &Options,
-    stdout: &mut dyn Write,
-) -> Result<(), ArpError> {
+fn cmd_display(opts: &Options, stdout: &mut dyn Write) -> Result<(), ArpError> {
     let entries = read_arp_table()?;
 
-    // Column header for non-verbose mode.
+    // Column header for verbose mode.
     if opts.verbose {
-        writeln!(stdout, "Address                  HWtype  HWaddress           Flags Mask     Iface")
-            .map_err(|e| ArpError::IoError(e.to_string()))?;
+        writeln!(
+            stdout,
+            "Address                  HWtype  HWaddress           Flags Mask     Iface"
+        )
+        .map_err(|e| ArpError::IoError(e.to_string()))?;
     }
+
+    // Pre-resolve a host filter: a dotted-decimal IP is compared numerically
+    // (robust against zero-padding), otherwise we fall back to matching the
+    // interface name (no DNS resolver is available).
+    let host_ip = opts.host.as_deref().and_then(parse_ipv4);
 
     let mut count = 0usize;
 
     for entry in &entries {
         // Interface filter.
-        if let Some(ref iface) = opts.interface {
-            if &entry.iface != iface {
-                continue;
-            }
+        if let Some(ref iface) = opts.interface
+            && &entry.iface != iface
+        {
+            continue;
         }
         // Host/IP filter.
         if let Some(ref host) = opts.host {
-            let ip_str = format_ipv4(entry.ip);
-            if &ip_str != host && entry.iface != *host {
-                // Host might be specified as a hostname; for now match by IP only.
-                // A full implementation would resolve `host` via DNS.
+            let matches = host_ip == Some(entry.ip) || &entry.iface == host;
+            if !matches {
                 continue;
             }
         }
 
         if opts.verbose {
-            // Tabular format matching Linux `arp -v`.
             let ip_str = format_ipv4(entry.ip);
             let hw_name = ArpEntry::hw_type_name(entry.hw_type);
             let mac_str = if mac_is_zero(&entry.mac) {
@@ -857,80 +602,10 @@ fn cmd_display(
     }
 
     if opts.verbose {
-        writeln!(stdout, "Entries: {count}   Skipped: {}   Found: {count}",
-                 entries.len().saturating_sub(count))
-            .map_err(|e| ArpError::IoError(e.to_string()))?;
-    }
-
-    Ok(())
-}
-
-// ============================================================================
-// Delete
-// ============================================================================
-
-/// Delete the ARP entry for the host/IP in `opts.host`.
-fn cmd_delete(opts: &Options) -> Result<(), ArpError> {
-    let host = opts
-        .host
-        .as_deref()
-        .ok_or_else(|| ArpError::IoError("no hostname specified".to_string()))?;
-
-    // Resolve to IP: accept dotted-decimal or look it up in the ARP table.
-    let ip = resolve_to_ip(host)?;
-
-    arp_del(ip)?;
-
-    if opts.verbose {
-        writeln!(io::stdout(), "arp: deleted {host} ({}) from ARP cache", format_ipv4(ip))
-            .map_err(|e| ArpError::IoError(e.to_string()))?;
-    }
-
-    Ok(())
-}
-
-// ============================================================================
-// Add
-// ============================================================================
-
-/// Add a static ARP entry as specified by `opts`.
-fn cmd_add(opts: &Options) -> Result<(), ArpError> {
-    let host = opts
-        .host
-        .as_deref()
-        .ok_or_else(|| ArpError::IoError("no hostname specified".to_string()))?;
-
-    let ip = resolve_to_ip(host)?;
-
-    // Determine MAC: either explicit or from the interface via SYS_IFMAC.
-    let mac: [u8; 6] = if opts.use_device_mac {
-        let iface = opts
-            .interface
-            .as_deref()
-            .ok_or_else(|| ArpError::IoError("-D requires an interface".to_string()))?;
-        iface_mac(iface)?
-    } else {
-        let hw_str = opts
-            .hw_addr
-            .as_deref()
-            .ok_or_else(|| ArpError::IoError("no hardware address specified".to_string()))?;
-        parse_mac(hw_str).ok_or_else(|| {
-            ArpError::ParseError(format!("invalid hardware address: '{hw_str}'"))
-        })?
-    };
-
-    // Default interface to "eth0" if not specified.
-    let iface = opts.interface.as_deref().unwrap_or("eth0");
-
-    arp_add(ip, mac, iface)?;
-
-    if opts.verbose {
         writeln!(
-            io::stdout(),
-            "arp: added {} ({}) -> {} on {iface}",
-            host,
-            format_ipv4(ip),
-            format_mac(&mac),
+            stdout,
+            "Entries: {count}   Skipped: {}   Found: {count}",
+            entries.len().saturating_sub(count)
         )
         .map_err(|e| ArpError::IoError(e.to_string()))?;
     }
@@ -939,34 +614,23 @@ fn cmd_add(opts: &Options) -> Result<(), ArpError> {
 }
 
 // ============================================================================
-// Host resolution helper
+// Unsupported mutating operations
 // ============================================================================
 
-/// Resolve a hostname or dotted-decimal address to a `u32` IPv4 address.
-///
-/// For now we only support dotted-decimal input and ARP table lookups —
-/// full DNS would require additional syscalls.  If `host` is not a valid
-/// IPv4 string we scan the local ARP table for a matching entry.
-fn resolve_to_ip(host: &str) -> Result<u32, ArpError> {
-    // Fast path: already a dotted-decimal address.
-    if let Some(ip) = parse_ipv4(host) {
-        return Ok(ip);
-    }
+/// Deleting ARP entries is unsupported: the kernel exposes no ARP-delete
+/// syscall.  Report a clear error instead of invoking the wrong syscall.
+fn cmd_delete(_opts: &Options) -> Result<(), ArpError> {
+    Err(ArpError::Unsupported(
+        "deleting ARP entries is not supported on OurOS: the kernel exposes no ARP-delete syscall",
+    ))
+}
 
-    // Slow path: search the ARP table for an entry whose interface name or a
-    // (hypothetical) reverse-DNS name matches.  In production this would call
-    // SYS_DNS_RESOLVE; here we do a best-effort table scan.
-    let entries = read_arp_table()?;
-    for entry in &entries {
-        // Match on interface name as a last resort.
-        if entry.iface == host {
-            return Ok(entry.ip);
-        }
-    }
-
-    Err(ArpError::IoError(format!(
-        "cannot resolve '{host}': not a valid IPv4 address and not found in ARP table"
-    )))
+/// Adding static ARP entries is unsupported: the kernel exposes no ARP-add
+/// syscall.  Report a clear error instead of invoking the wrong syscall.
+fn cmd_add(_opts: &Options) -> Result<(), ArpError> {
+    Err(ArpError::Unsupported(
+        "adding static ARP entries is not supported on OurOS: the kernel exposes no ARP-add syscall",
+    ))
 }
 
 // ============================================================================
@@ -974,7 +638,7 @@ fn resolve_to_ip(host: &str) -> Result<u32, ArpError> {
 // ============================================================================
 
 fn run() -> Result<(), String> {
-    let opts = parse_args().map_err(|e| e.to_string())?;
+    let opts = parse_args()?;
 
     let result = match opts.mode {
         Mode::Display => {
@@ -1087,49 +751,6 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // MAC address parsing
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_mac_basic() {
-        let mac = parse_mac("aa:bb:cc:dd:ee:ff");
-        assert_eq!(mac, Some([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]));
-    }
-
-    #[test]
-    fn parse_mac_zeros() {
-        let mac = parse_mac("00:00:00:00:00:00");
-        assert_eq!(mac, Some([0u8; 6]));
-    }
-
-    #[test]
-    fn parse_mac_broadcast() {
-        let mac = parse_mac("ff:ff:ff:ff:ff:ff");
-        assert_eq!(mac, Some([0xff; 6]));
-    }
-
-    #[test]
-    fn parse_mac_too_short() {
-        assert_eq!(parse_mac("aa:bb:cc"), None);
-    }
-
-    #[test]
-    fn parse_mac_too_long() {
-        assert_eq!(parse_mac("aa:bb:cc:dd:ee:ff:00"), None);
-    }
-
-    #[test]
-    fn parse_mac_invalid_hex() {
-        assert_eq!(parse_mac("gg:bb:cc:dd:ee:ff"), None);
-    }
-
-    #[test]
-    fn parse_mac_bad_octet_len() {
-        // Each group must be exactly 2 hex digits.
-        assert_eq!(parse_mac("a:bb:cc:dd:ee:ff"), None);
-    }
-
-    // -----------------------------------------------------------------------
     // MAC formatting
     // -----------------------------------------------------------------------
 
@@ -1144,14 +765,6 @@ mod tests {
         assert_eq!(format_mac(&[0u8; 6]), "00:00:00:00:00:00");
     }
 
-    #[test]
-    fn mac_roundtrip() {
-        for s in ["00:11:22:33:44:55", "de:ad:be:ef:00:01", "ff:ff:ff:ff:ff:ff"] {
-            let mac = parse_mac(s).expect("valid MAC");
-            assert_eq!(format_mac(&mac), s);
-        }
-    }
-
     // -----------------------------------------------------------------------
     // mac_is_zero
     // -----------------------------------------------------------------------
@@ -1164,34 +777,6 @@ mod tests {
     #[test]
     fn mac_is_zero_nonzero() {
         assert!(!mac_is_zero(&[0, 0, 0, 0, 0, 1]));
-    }
-
-    // -----------------------------------------------------------------------
-    // parse_hex_u16
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn parse_hex_u16_basic() {
-        assert_eq!(parse_hex_u16("0x1"), Some(1));
-        assert_eq!(parse_hex_u16("0x2"), Some(2));
-        assert_eq!(parse_hex_u16("0xff"), Some(255));
-        assert_eq!(parse_hex_u16("0x10"), Some(16));
-    }
-
-    #[test]
-    fn parse_hex_u16_uppercase_prefix() {
-        assert_eq!(parse_hex_u16("0X4"), Some(4));
-    }
-
-    #[test]
-    fn parse_hex_u16_no_prefix() {
-        // Without a 0x prefix, should return None.
-        assert_eq!(parse_hex_u16("4"), None);
-    }
-
-    #[test]
-    fn parse_hex_u16_empty() {
-        assert_eq!(parse_hex_u16(""), None);
     }
 
     // -----------------------------------------------------------------------
@@ -1232,74 +817,75 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // /proc/net/arp parser
+    // SYS_ARP_TABLE record parsing
     // -----------------------------------------------------------------------
 
-    const SAMPLE_ARP: &str = "\
-IP address       HW type     Flags       HW address            Mask     Device
-192.168.1.1      0x1         0x2         aa:bb:cc:dd:ee:ff     *        eth0
-10.0.0.1         0x1         0x6         11:22:33:44:55:66     *        eth1
-172.16.0.254     0x1         0x0         00:00:00:00:00:00     *        eth0
-";
-
-    #[test]
-    fn parse_proc_arp_basic() {
-        let entries = parse_proc_arp(SAMPLE_ARP).expect("parse should succeed");
-        assert_eq!(entries.len(), 3);
-
-        let e0 = &entries[0];
-        assert_eq!(format_ipv4(e0.ip), "192.168.1.1");
-        assert_eq!(e0.hw_type, 1);
-        assert_eq!(e0.flags.0, 2);
-        assert_eq!(format_mac(&e0.mac), "aa:bb:cc:dd:ee:ff");
-        assert_eq!(e0.iface, "eth0");
+    /// Build a 12-byte record: IP (network order), MAC, TTL (LE).
+    fn make_record(ip: [u8; 4], mac: [u8; 6], ttl: u16) -> [u8; 12] {
+        let mut r = [0u8; 12];
+        r[0..4].copy_from_slice(&ip);
+        r[4..10].copy_from_slice(&mac);
+        r[10..12].copy_from_slice(&ttl.to_le_bytes());
+        r
     }
 
     #[test]
-    fn parse_proc_arp_permanent_flag() {
-        let entries = parse_proc_arp(SAMPLE_ARP).expect("parse should succeed");
-        assert_eq!(entries[1].flags.0 & ArpFlags::PERMANENT, ArpFlags::PERMANENT);
+    fn parse_records_basic() {
+        let rec = make_record([192, 168, 1, 1], [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff], 60);
+        let entries = parse_arp_records(&rec);
+        assert_eq!(entries.len(), 1);
+        let e = &entries[0];
+        assert_eq!(format_ipv4(e.ip), "192.168.1.1");
+        assert_eq!(format_mac(&e.mac), "aa:bb:cc:dd:ee:ff");
+        assert_eq!(e.hw_type, 1);
+        assert_eq!(e.iface, "eth0");
+        // Resolved MAC → COMPLETE flag set.
+        assert_eq!(e.flags.0 & ArpFlags::COMPLETE, ArpFlags::COMPLETE);
     }
 
     #[test]
-    fn parse_proc_arp_incomplete_entry() {
-        let entries = parse_proc_arp(SAMPLE_ARP).expect("parse should succeed");
-        assert!(mac_is_zero(&entries[2].mac));
+    fn parse_records_incomplete_entry() {
+        // All-zero MAC means unresolved → no COMPLETE flag.
+        let rec = make_record([10, 0, 0, 1], [0u8; 6], 0);
+        let entries = parse_arp_records(&rec);
+        assert_eq!(entries.len(), 1);
+        assert!(mac_is_zero(&entries[0].mac));
+        assert_eq!(entries[0].flags.0 & ArpFlags::COMPLETE, 0);
     }
 
     #[test]
-    fn parse_proc_arp_empty_content() {
-        // Just a header, no data rows.
-        let content = "IP address       HW type     Flags       HW address            Mask     Device\n";
-        let entries = parse_proc_arp(content).expect("parse should succeed");
+    fn parse_records_multiple() {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&make_record(
+            [192, 168, 1, 1],
+            [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+            60,
+        ));
+        buf.extend_from_slice(&make_record(
+            [10, 0, 0, 1],
+            [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+            30,
+        ));
+        let entries = parse_arp_records(&buf);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(format_ipv4(entries[0].ip), "192.168.1.1");
+        assert_eq!(format_ipv4(entries[1].ip), "10.0.0.1");
+    }
+
+    #[test]
+    fn parse_records_empty() {
+        let entries = parse_arp_records(&[]);
         assert!(entries.is_empty());
     }
 
     #[test]
-    fn parse_proc_arp_malformed_ip() {
-        let content = "\
-IP address       HW type     Flags       HW address            Mask     Device
-not-an-ip        0x1         0x2         aa:bb:cc:dd:ee:ff     *        eth0
-";
-        assert!(parse_proc_arp(content).is_err());
-    }
-
-    #[test]
-    fn parse_proc_arp_malformed_mac() {
-        let content = "\
-IP address       HW type     Flags       HW address            Mask     Device
-192.168.1.1      0x1         0x2         not-a-mac             *        eth0
-";
-        assert!(parse_proc_arp(content).is_err());
-    }
-
-    #[test]
-    fn parse_proc_arp_too_few_columns() {
-        let content = "\
-IP address       HW type     Flags       HW address            Mask     Device
-192.168.1.1      0x1
-";
-        assert!(parse_proc_arp(content).is_err());
+    fn parse_records_ignores_trailing_partial() {
+        // 12 valid bytes + 5 trailing bytes that don't form a record.
+        let mut buf = make_record([1, 2, 3, 4], [1, 2, 3, 4, 5, 6], 10).to_vec();
+        buf.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x00]);
+        let entries = parse_arp_records(&buf);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(format_ipv4(entries[0].ip), "1.2.3.4");
     }
 
     // -----------------------------------------------------------------------
@@ -1312,7 +898,7 @@ IP address       HW type     Flags       HW address            Mask     Device
             ip: parse_ipv4("192.168.1.1").unwrap(),
             hw_type: 1,
             flags: ArpFlags(ArpFlags::COMPLETE),
-            mac: parse_mac("aa:bb:cc:dd:ee:ff").unwrap(),
+            mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
             iface: "eth0".to_string(),
         };
         let s = entry.display(false, false);
@@ -1341,14 +927,16 @@ IP address       HW type     Flags       HW address            Mask     Device
             ip: parse_ipv4("8.8.8.8").unwrap(),
             hw_type: 1,
             flags: ArpFlags(ArpFlags::COMPLETE),
-            mac: parse_mac("de:ad:be:ef:00:01").unwrap(),
+            mac: [0xde, 0xad, 0xbe, 0xef, 0x00, 0x01],
             iface: "eth0".to_string(),
         };
         let numeric_s = entry.display(true, false);
         let normal_s = entry.display(false, false);
-        // Both contain the IP.
         assert!(numeric_s.contains("8.8.8.8"));
         assert!(normal_s.contains("8.8.8.8"));
+        // Non-numeric output carries the leading "?" host placeholder.
+        assert!(normal_s.contains('?'));
+        assert!(!numeric_s.contains('?'));
     }
 
     // -----------------------------------------------------------------------
@@ -1369,97 +957,122 @@ IP address       HW type     Flags       HW address            Mask     Device
     }
 
     // -----------------------------------------------------------------------
-    // cmd_display (integration-style, using a synthetic /proc/net/arp)
+    // Unsupported operations
     // -----------------------------------------------------------------------
 
-    /// A wrapper that runs `cmd_display` against synthesised content.
-    fn display_with_content(content: &str, opts: &Options) -> Result<String, ArpError> {
-        let entries = parse_proc_arp(content)?;
+    #[test]
+    fn cmd_delete_is_unsupported() {
+        let opts = Options {
+            mode: Mode::Delete,
+            host: Some("192.168.1.1".to_string()),
+            ..Options::default()
+        };
+        match cmd_delete(&opts) {
+            Err(ArpError::Unsupported(_)) => {}
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
 
+    #[test]
+    fn cmd_add_is_unsupported() {
+        let opts = Options {
+            mode: Mode::Add,
+            host: Some("192.168.1.50".to_string()),
+            hw_addr: Some("aa:bb:cc:dd:ee:ff".to_string()),
+            ..Options::default()
+        };
+        match cmd_add(&opts) {
+            Err(ArpError::Unsupported(_)) => {}
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // ArpError Display
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn arp_error_display_unsupported() {
+        let e = ArpError::Unsupported("nope");
+        assert_eq!(e.to_string(), "nope");
+    }
+
+    #[test]
+    fn arp_error_display_syscall() {
+        let e = ArpError::SyscallError(-22);
+        assert!(e.to_string().contains("invalid argument"));
+    }
+
+    // -----------------------------------------------------------------------
+    // cmd_display (integration-style) against synthesised records
+    // -----------------------------------------------------------------------
+
+    /// Run the same filtering/formatting logic as `cmd_display` against an
+    /// in-memory set of entries (avoids the SYS_ARP_TABLE syscall in tests).
+    fn display_entries(entries: &[ArpEntry], opts: &Options) -> String {
+        let host_ip = opts.host.as_deref().and_then(parse_ipv4);
         let mut buf: Vec<u8> = Vec::new();
-        let mut count = 0usize;
-
-        for entry in &entries {
-            if let Some(ref iface) = opts.interface {
-                if &entry.iface != iface {
-                    continue;
-                }
+        for entry in entries {
+            if let Some(ref iface) = opts.interface
+                && &entry.iface != iface
+            {
+                continue;
             }
-            if let Some(ref host) = opts.host {
-                if format_ipv4(entry.ip) != *host {
-                    continue;
-                }
+            if opts.host.is_some() && host_ip != Some(entry.ip) {
+                continue;
             }
             let line = format!("{}\n", entry.display(opts.numeric, opts.verbose));
             buf.extend_from_slice(line.as_bytes());
-            count = count.saturating_add(1);
         }
+        String::from_utf8(buf).unwrap_or_default()
+    }
 
-        if opts.verbose {
-            let footer = format!(
-                "Entries: {count}   Skipped: {}   Found: {count}\n",
-                entries.len().saturating_sub(count)
-            );
-            buf.extend_from_slice(footer.as_bytes());
-        }
-
-        String::from_utf8(buf).map_err(|e| ArpError::ParseError(e.to_string()))
+    fn sample_entries() -> Vec<ArpEntry> {
+        vec![
+            ArpEntry {
+                ip: parse_ipv4("192.168.1.1").unwrap(),
+                hw_type: 1,
+                flags: ArpFlags(ArpFlags::COMPLETE),
+                mac: [0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff],
+                iface: "eth0".to_string(),
+            },
+            ArpEntry {
+                ip: parse_ipv4("10.0.0.1").unwrap(),
+                hw_type: 1,
+                flags: ArpFlags(ArpFlags::COMPLETE),
+                mac: [0x11, 0x22, 0x33, 0x44, 0x55, 0x66],
+                iface: "eth1".to_string(),
+            },
+        ]
     }
 
     #[test]
     fn cmd_display_shows_all_entries() {
         let opts = Options::default();
-        let out = display_with_content(SAMPLE_ARP, &opts).unwrap();
+        let out = display_entries(&sample_entries(), &opts);
         assert!(out.contains("192.168.1.1"));
         assert!(out.contains("10.0.0.1"));
-        assert!(out.contains("172.16.0.254"));
     }
 
     #[test]
     fn cmd_display_interface_filter() {
-        let mut opts = Options::default();
-        opts.interface = Some("eth0".to_string());
-        let out = display_with_content(SAMPLE_ARP, &opts).unwrap();
+        let opts = Options {
+            interface: Some("eth0".to_string()),
+            ..Options::default()
+        };
+        let out = display_entries(&sample_entries(), &opts);
         assert!(out.contains("192.168.1.1"));
-        assert!(!out.contains("10.0.0.1")); // eth1 entry filtered out
-        assert!(out.contains("172.16.0.254"));
+        assert!(!out.contains("10.0.0.1"));
     }
 
     #[test]
     fn cmd_display_host_filter() {
-        let mut opts = Options::default();
-        opts.host = Some("10.0.0.1".to_string());
-        let out = display_with_content(SAMPLE_ARP, &opts).unwrap();
+        let opts = Options {
+            host: Some("10.0.0.1".to_string()),
+            ..Options::default()
+        };
+        let out = display_entries(&sample_entries(), &opts);
         assert!(out.contains("10.0.0.1"));
         assert!(!out.contains("192.168.1.1"));
-    }
-
-    #[test]
-    fn cmd_display_verbose_footer() {
-        let mut opts = Options::default();
-        opts.verbose = true;
-        let out = display_with_content(SAMPLE_ARP, &opts).unwrap();
-        assert!(out.contains("Entries:"));
-    }
-
-    // -----------------------------------------------------------------------
-    // ArpRequest struct layout sanity
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn arp_request_size() {
-        // ip(4) + mac(6) + flags(2) + iface(16) = 28 bytes.
-        assert_eq!(size_of::<ArpRequest>(), 28);
-    }
-
-    // -----------------------------------------------------------------------
-    // resolve_to_ip (when /proc/net/arp is unavailable, function returns Err)
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn resolve_to_ip_dotted_decimal() {
-        // When the input is already a valid IPv4, no I/O is needed.
-        let result = resolve_to_ip("192.168.1.1");
-        assert_eq!(result.ok(), Some(0xC0A8_0101));
     }
 }

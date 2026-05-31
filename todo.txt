@@ -183,10 +183,10 @@
 ##   0=YIELD as READ, 60=SYSCTL_GET as EXIT, 4=? as STAT) — same class as the
 ##   nmap bug; fix by migrating I/O+exit to std (and correct any remaining
 ##   network numbers):
-##     arp  (READ=0 WRITE=1 OPEN=2 CLOSE=3 EXIT=60; ARP_ADD=840=TCP_LIST,
+##     [x] arp  (READ=0 WRITE=1 OPEN=2 CLOSE=3 EXIT=60; ARP_ADD=840=TCP_LIST,
 ##           ARP_DEL=841 ARP_PROBE=842=NET_IF_INFO IFMAC=843=ARP_TABLE — the
 ##           arp control syscalls it wants don't exist; only ARP_TABLE=843
-##           (read) exists)
+##           (read) exists) — FIXED, see PROGRESS + DESIGN GAP below.
 ##     jq   (READ=0 WRITE=1 OPEN=2 CLOSE=3 EXIT=60) — pure std rewrite
 ##     zip  (READ=0 WRITE=1 OPEN=2 CLOSE=3 STAT=4 LSEEK=8 MKDIR=83 GETDENTS=78
 ##           EXIT=60) — pure std rewrite
@@ -313,6 +313,34 @@
 ##           target is unix; the fallback only exists so host `cargo test`
 ##           compiles).  Removed dead KernelStat/KernelDirent64/to_cstring/
 ##           syscall2.  Clippy-clean; 51 host tests pass.
+##   [x] arp — CATASTROPHIC ABI misuse fixed.  Old consts: READ=0 WRITE=1
+##           OPEN=2 CLOSE=3 EXIT=60 and ARP_ADD=840 ARP_DEL=841 ARP_PROBE=842
+##           IFMAC=843 — every one of those numbers means something else on
+##           OurOS (840=TCP_LIST, 842=NET_IF_INFO, 843=ARP_TABLE) and WRITE=1
+##           is actually EXIT, so write_stderr() KILLED the process on the
+##           first byte of any error message.  Rewrote on the real ABI:
+##           read_arp_table() now calls SYS_ARP_TABLE=843 into a 1024x12-byte
+##           buffer and parses each 12-byte record (IP via from_be_bytes to
+##           match the kernel's network-order octets, MAC [4..10], TTL u16 LE
+##           [10..12]); flags synthesise COMPLETE when the MAC is non-zero;
+##           hw_type=1, iface="eth0" (the kernel exposes a single global
+##           interface — InterfaceInfo has no name field).  write_stderr and
+##           all output now use std::io.  Removed the raw open/close/read/write
+##           wrappers, ArpRequest, parse_proc_arp/parse_hex_u16 and the
+##           /proc/net/arp path entirely (it was never the real source).
+##           Add/delete/probe become a clean ArpError::Unsupported (see DESIGN
+##           GAP below).  Clippy-clean; 40 host tests pass; build-ouros clean.
+##
+##  DESIGN GAP — no ARP mutation syscalls (arp -d / -s / -D):
+##   OurOS exposes SYS_ARP_TABLE=843 (read) and SYS_NET_IF_INFO=842 (interface
+##   config incl. local MAC) but has NO syscall to add, delete, or probe ARP
+##   cache entries.  The arp tool therefore reports a clear "not supported on
+##   OurOS: the kernel exposes no ARP-add/delete syscall" rather than invoking
+##   the wrong syscall.  CORRECT FIX (when prioritised): add kernel handlers
+##   SYS_ARP_ADD (ip+mac+iface -> insert static/permanent entry), SYS_ARP_DEL
+##   (ip -> evict), and optionally SYS_ARP_PROBE (ip,timeout -> active probe),
+##   plumbed to the per-namespace ARP cache in net/.  Until then, arp is a
+##   read-only display tool, which matches what the kernel can actually do.
 ##
 ##  BUG — DNS byte-order (REAL, was shipped in curl + whois; FIXED above):
 ##   Both read the 4 octets the kernel writes for a resolved A record as a

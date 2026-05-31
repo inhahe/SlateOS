@@ -42,8 +42,7 @@ fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
     let mut star_ti = 0;
 
     while ti < text.len() {
-        if pi < pattern.len() && (pattern.get(pi) == Some(&b'?')
-            || pattern.get(pi) == text.get(ti))
+        if pi < pattern.len() && (pattern.get(pi) == Some(&b'?') || pattern.get(pi) == text.get(ti))
         {
             pi = pi.saturating_add(1);
             ti = ti.saturating_add(1);
@@ -53,7 +52,9 @@ fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
             pi = pi.saturating_add(1);
         } else if pi < pattern.len() && pattern.get(pi) == Some(&b'[') {
             // Character class
-            let class_end = pattern.get(pi..).and_then(|s| s.iter().position(|&b| b == b']'));
+            let class_end = pattern
+                .get(pi..)
+                .and_then(|s| s.iter().position(|&b| b == b']'));
             if let Some(end_offset) = class_end {
                 let class_start = pi.saturating_add(1);
                 let class_end_pos = pi.saturating_add(end_offset);
@@ -100,7 +101,11 @@ fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
 /// Check if a character matches a character class like [a-z] or [abc]
 fn char_class_matches(class: &[u8], ch: u8) -> bool {
     let negated = class.first() == Some(&b'!') || class.first() == Some(&b'^');
-    let class = if negated { class.get(1..).unwrap_or_default() } else { class };
+    let class = if negated {
+        class.get(1..).unwrap_or_default()
+    } else {
+        class
+    };
 
     let mut matches = false;
     let mut i = 0;
@@ -142,7 +147,10 @@ pub fn regex_match(pattern: &str, text: &str) -> bool {
 
     // Check if anchored at end
     let (pat, anchored_end) = if pat.last() == Some(&b'$') {
-        (pat.get(..pat.len().saturating_sub(1)).unwrap_or_default(), true)
+        (
+            pat.get(..pat.len().saturating_sub(1)).unwrap_or_default(),
+            true,
+        )
     } else {
         (pat, false)
     };
@@ -166,7 +174,7 @@ fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool)
 
     while pi < pattern.len() {
         // Parse current atom
-        let (atom_matches, atom_len) = parse_regex_atom(pattern, pi);
+        let (matcher, atom_len) = parse_regex_atom(pattern, pi);
 
         // Check for quantifier
         let next = pattern.get(pi.saturating_add(atom_len)).copied();
@@ -175,52 +183,66 @@ fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool)
                 // Greedy: match as many as possible, then backtrack
                 let mut count = 0;
                 while ti.saturating_add(count) < text.len()
-                    && atom_matches(text.get(ti.saturating_add(count)).copied().unwrap_or(0))
+                    && matcher.matches(text.get(ti.saturating_add(count)).copied().unwrap_or(0))
                 {
                     count = count.saturating_add(1);
                 }
                 // Try from max down to 0
                 loop {
                     if regex_match_at(
-                        pattern.get(pi.saturating_add(atom_len).saturating_add(1)..).unwrap_or_default(),
-                        text, ti.saturating_add(count), anchored_end
+                        pattern
+                            .get(pi.saturating_add(atom_len).saturating_add(1)..)
+                            .unwrap_or_default(),
+                        text,
+                        ti.saturating_add(count),
+                        anchored_end,
                     ) {
                         return true;
                     }
-                    if count == 0 { break; }
+                    if count == 0 {
+                        break;
+                    }
                     count = count.saturating_sub(1);
                 }
                 return false;
             }
             Some(b'+') => {
                 // One or more
-                if ti >= text.len() || !atom_matches(text.get(ti).copied().unwrap_or(0)) {
+                if ti >= text.len() || !matcher.matches(text.get(ti).copied().unwrap_or(0)) {
                     return false;
                 }
                 ti = ti.saturating_add(1);
                 let mut count = 0;
                 while ti.saturating_add(count) < text.len()
-                    && atom_matches(text.get(ti.saturating_add(count)).copied().unwrap_or(0))
+                    && matcher.matches(text.get(ti.saturating_add(count)).copied().unwrap_or(0))
                 {
                     count = count.saturating_add(1);
                 }
                 loop {
                     if regex_match_at(
-                        pattern.get(pi.saturating_add(atom_len).saturating_add(1)..).unwrap_or_default(),
-                        text, ti.saturating_add(count), anchored_end
+                        pattern
+                            .get(pi.saturating_add(atom_len).saturating_add(1)..)
+                            .unwrap_or_default(),
+                        text,
+                        ti.saturating_add(count),
+                        anchored_end,
                     ) {
                         return true;
                     }
-                    if count == 0 { break; }
+                    if count == 0 {
+                        break;
+                    }
                     count = count.saturating_sub(1);
                 }
                 return false;
             }
             Some(b'?') => {
                 // Zero or one
-                let rest = pattern.get(pi.saturating_add(atom_len).saturating_add(1)..).unwrap_or_default();
+                let rest = pattern
+                    .get(pi.saturating_add(atom_len).saturating_add(1)..)
+                    .unwrap_or_default();
                 // Try with match
-                if ti < text.len() && atom_matches(text.get(ti).copied().unwrap_or(0)) {
+                if ti < text.len() && matcher.matches(text.get(ti).copied().unwrap_or(0)) {
                     if regex_match_at(rest, text, ti.saturating_add(1), anchored_end) {
                         return true;
                     }
@@ -230,7 +252,7 @@ fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool)
             }
             _ => {
                 // Exactly one match required
-                if ti >= text.len() || !atom_matches(text.get(ti).copied().unwrap_or(0)) {
+                if ti >= text.len() || !matcher.matches(text.get(ti).copied().unwrap_or(0)) {
                     return false;
                 }
                 ti = ti.saturating_add(1);
@@ -242,42 +264,106 @@ fn regex_match_at(pattern: &[u8], text: &[u8], start: usize, anchored_end: bool)
     if anchored_end { ti == text.len() } else { true }
 }
 
-/// Returns (matcher function, bytes consumed from pattern)
-fn parse_regex_atom(pattern: &[u8], pos: usize) -> (fn(u8) -> bool, usize) {
+/// A single matchable regex atom. Unlike a bare `fn(u8) -> bool`, this enum can
+/// carry the specific literal byte to match and a borrowed character-class body,
+/// so literal characters match by value (e.g. `world` matches only "world", not
+/// "any five lowercase letters").
+#[derive(Clone, Copy)]
+enum Matcher<'a> {
+    Any,
+    Literal(u8),
+    Digit,
+    NotDigit,
+    Word,
+    NotWord,
+    Space,
+    NotSpace,
+    /// Character class `[...]`. `body` is the bytes between the brackets; if the
+    /// class began with `^` the sense is negated and `^` is excluded from `body`.
+    Class {
+        body: &'a [u8],
+        negated: bool,
+    },
+    /// Matches nothing (end of pattern / malformed).
+    Never,
+}
+
+impl Matcher<'_> {
+    fn matches(self, c: u8) -> bool {
+        match self {
+            Matcher::Any => true,
+            Matcher::Literal(b) => c == b,
+            Matcher::Digit => c.is_ascii_digit(),
+            Matcher::NotDigit => !c.is_ascii_digit(),
+            Matcher::Word => c.is_ascii_alphanumeric() || c == b'_',
+            Matcher::NotWord => !c.is_ascii_alphanumeric() && c != b'_',
+            Matcher::Space => c.is_ascii_whitespace(),
+            Matcher::NotSpace => !c.is_ascii_whitespace(),
+            Matcher::Class { body, negated } => class_matches(body, c) != negated,
+            Matcher::Never => false,
+        }
+    }
+}
+
+/// Test whether byte `c` is a member of a character-class body (the text between
+/// `[` and `]`, with any leading `^` already stripped). Supports literal bytes
+/// and `a-z` style ranges.
+fn class_matches(body: &[u8], c: u8) -> bool {
+    let mut i = 0;
+    while let Some(&lo) = body.get(i) {
+        // Range "x-y": a '-' with a byte on either side (and not the final char).
+        if body.get(i.saturating_add(1)) == Some(&b'-') {
+            if let Some(&hi) = body.get(i.saturating_add(2)) {
+                if lo <= c && c <= hi {
+                    return true;
+                }
+                i = i.saturating_add(3);
+                continue;
+            }
+        }
+        if lo == c {
+            return true;
+        }
+        i = i.saturating_add(1);
+    }
+    false
+}
+
+/// Returns (matcher, bytes consumed from pattern).
+fn parse_regex_atom(pattern: &[u8], pos: usize) -> (Matcher<'_>, usize) {
     match pattern.get(pos) {
-        Some(b'.') => (|_| true, 1),
-        Some(b'\\') => {
-            match pattern.get(pos.saturating_add(1)) {
-                Some(b'd') => (|c: u8| c.is_ascii_digit(), 2),
-                Some(b'w') => (|c: u8| c.is_ascii_alphanumeric() || c == b'_', 2),
-                Some(b's') => (|c: u8| c.is_ascii_whitespace(), 2),
-                Some(b'D') => (|c: u8| !c.is_ascii_digit(), 2),
-                Some(b'W') => (|c: u8| !c.is_ascii_alphanumeric() && c != b'_', 2),
-                Some(b'S') => (|c: u8| !c.is_ascii_whitespace(), 2),
-                _ => (|_| true, 2), // Escaped literal (simplified)
-            }
-        }
+        Some(b'.') => (Matcher::Any, 1),
+        Some(b'\\') => match pattern.get(pos.saturating_add(1)) {
+            Some(b'd') => (Matcher::Digit, 2),
+            Some(b'w') => (Matcher::Word, 2),
+            Some(b's') => (Matcher::Space, 2),
+            Some(b'D') => (Matcher::NotDigit, 2),
+            Some(b'W') => (Matcher::NotWord, 2),
+            Some(b'S') => (Matcher::NotSpace, 2),
+            // Escaped literal: \. \$ \\ etc. match the literal following byte.
+            Some(&ch) => (Matcher::Literal(ch), 2),
+            // Trailing backslash: match a literal backslash.
+            None => (Matcher::Literal(b'\\'), 1),
+        },
         Some(b'[') => {
-            // Character class — simplified: just check length
-            let end = pattern.get(pos..).and_then(|s| s.iter().position(|&b| b == b']'));
-            if let Some(end_offset) = end {
-                let len = end_offset.saturating_add(1);
-                (|_| true, len) // Simplified — full impl would parse class
+            // Find the closing ']' relative to the '['.
+            let rest = pattern.get(pos.saturating_add(1)..).unwrap_or_default();
+            if let Some(close) = rest.iter().position(|&b| b == b']') {
+                let inner = rest.get(..close).unwrap_or_default();
+                let (negated, body) = match inner.first() {
+                    Some(b'^') => (true, inner.get(1..).unwrap_or_default()),
+                    _ => (false, inner),
+                };
+                // Total consumed = '[' + body/negation + ']'.
+                let len = close.saturating_add(2);
+                (Matcher::Class { body, negated }, len)
             } else {
-                (|c: u8| c == b'[', 1)
+                // No closing bracket: treat '[' as a literal.
+                (Matcher::Literal(b'['), 1)
             }
         }
-        Some(&ch) => {
-            // For literal matching we can't easily return a closure over `ch`
-            // without boxing, so we use a simplified approach
-            match ch {
-                b'a'..=b'z' => (|c: u8| c.is_ascii_lowercase(), 1),
-                b'A'..=b'Z' => (|c: u8| c.is_ascii_uppercase(), 1),
-                b'0'..=b'9' => (|c: u8| c.is_ascii_digit(), 1),
-                _ => (|_| true, 1),
-            }
-        }
-        None => (|_| false, 0),
+        Some(&ch) => (Matcher::Literal(ch), 1),
+        None => (Matcher::Never, 0),
     }
 }
 
@@ -320,13 +406,25 @@ impl fmt::Display for FileCategory {
 /// Detect file category from extension
 pub fn categorize_extension(ext: &str) -> FileCategory {
     match ext.to_lowercase().as_str() {
-        "txt" | "doc" | "docx" | "pdf" | "odt" | "rtf" | "md" | "tex" | "csv" | "xls" | "xlsx" | "pptx" => FileCategory::Document,
-        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "svg" | "ico" | "webp" | "tiff" | "psd" | "raw" => FileCategory::Image,
-        "mp3" | "wav" | "flac" | "ogg" | "aac" | "wma" | "opus" | "m4a" | "mid" | "midi" => FileCategory::Audio,
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "vob" | "mpg" | "mpeg" => FileCategory::Video,
-        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "lz4" | "cab" => FileCategory::Archive,
-        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "java" | "go" | "rb" | "php" | "cs" | "swift" | "kt" | "lua" | "sh" | "bash" | "zsh" | "fish" | "ps1" | "html" | "css" | "scss" | "json" | "xml" | "yaml" | "yml" | "toml" | "sql" => FileCategory::Code,
-        "exe" | "msi" | "app" | "bin" | "elf" | "so" | "dll" | "dylib" | "wasm" => FileCategory::Executable,
+        "txt" | "doc" | "docx" | "pdf" | "odt" | "rtf" | "md" | "tex" | "csv" | "xls" | "xlsx"
+        | "pptx" => FileCategory::Document,
+        "jpg" | "jpeg" | "png" | "gif" | "bmp" | "svg" | "ico" | "webp" | "tiff" | "psd"
+        | "raw" => FileCategory::Image,
+        "mp3" | "wav" | "flac" | "ogg" | "aac" | "wma" | "opus" | "m4a" | "mid" | "midi" => {
+            FileCategory::Audio
+        }
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "vob" | "mpg" | "mpeg" => {
+            FileCategory::Video
+        }
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "lz4" | "cab" => {
+            FileCategory::Archive
+        }
+        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "java" | "go" | "rb" | "php" | "cs"
+        | "swift" | "kt" | "lua" | "sh" | "bash" | "zsh" | "fish" | "ps1" | "html" | "css"
+        | "scss" | "json" | "xml" | "yaml" | "yml" | "toml" | "sql" => FileCategory::Code,
+        "exe" | "msi" | "app" | "bin" | "elf" | "so" | "dll" | "dylib" | "wasm" => {
+            FileCategory::Executable
+        }
         "ttf" | "otf" | "woff" | "woff2" | "eot" => FileCategory::Font,
         "db" | "sqlite" | "sqlite3" | "mdb" | "accdb" => FileCategory::Database,
         "conf" | "cfg" | "ini" | "env" | "properties" => FileCategory::Config,
@@ -361,7 +459,7 @@ pub struct IndexEntry {
     pub name_lower: String,
     pub extension: String,
     pub size: u64,
-    pub modified: u64,    // Unix timestamp
+    pub modified: u64, // Unix timestamp
     pub created: u64,
     pub is_directory: bool,
     pub is_hidden: bool,
@@ -369,12 +467,25 @@ pub struct IndexEntry {
 }
 
 impl IndexEntry {
-    pub fn new(path: &str, name: &str, size: u64, modified: u64, created: u64, is_dir: bool) -> Self {
-        let ext = name.rsplit('.').next()
+    pub fn new(
+        path: &str,
+        name: &str,
+        size: u64,
+        modified: u64,
+        created: u64,
+        is_dir: bool,
+    ) -> Self {
+        let ext = name
+            .rsplit('.')
+            .next()
             .filter(|e| e.len() < 10 && !e.contains('/'))
             .unwrap_or("")
             .to_string();
-        let category = if is_dir { FileCategory::Other } else { categorize_extension(&ext) };
+        let category = if is_dir {
+            FileCategory::Other
+        } else {
+            categorize_extension(&ext)
+        };
         let is_hidden = name.starts_with('.');
 
         Self {
@@ -438,7 +549,8 @@ impl FileIndex {
     /// Search by filename substring (case-insensitive)
     pub fn search_name(&self, query: &str) -> Vec<&IndexEntry> {
         let q = query.to_lowercase();
-        self.entries.iter()
+        self.entries
+            .iter()
             .filter(|e| e.name_lower.contains(&q))
             .collect()
     }
@@ -446,21 +558,24 @@ impl FileIndex {
     /// Search by glob pattern
     pub fn search_glob(&self, pattern: &str) -> Vec<&IndexEntry> {
         let lower_pat = pattern.to_lowercase();
-        self.entries.iter()
+        self.entries
+            .iter()
             .filter(|e| glob_match(&lower_pat, &e.name_lower))
             .collect()
     }
 
     /// Search by regex pattern
     pub fn search_regex(&self, pattern: &str) -> Vec<&IndexEntry> {
-        self.entries.iter()
+        self.entries
+            .iter()
             .filter(|e| regex_match(pattern, &e.name))
             .collect()
     }
 
     /// Search with full filter criteria
     pub fn search(&self, criteria: &SearchCriteria) -> Vec<&IndexEntry> {
-        self.entries.iter()
+        self.entries
+            .iter()
             .filter(|e| criteria.matches(e))
             .collect()
     }
@@ -468,16 +583,15 @@ impl FileIndex {
     /// Get entries by extension
     pub fn by_extension(&self, ext: &str) -> Vec<&IndexEntry> {
         let lower = ext.to_lowercase();
-        self.entries.iter()
+        self.entries
+            .iter()
             .filter(|e| e.extension == lower)
             .collect()
     }
 
     /// Get entries by category
     pub fn by_category(&self, cat: FileCategory) -> Vec<&IndexEntry> {
-        self.entries.iter()
-            .filter(|e| e.category == cat)
-            .collect()
+        self.entries.iter().filter(|e| e.category == cat).collect()
     }
 
     /// Get all unique extensions with counts
@@ -522,9 +636,13 @@ impl FileIndex {
     pub fn find_duplicates(&self) -> BTreeMap<String, Vec<&IndexEntry>> {
         let mut by_name: BTreeMap<String, Vec<&IndexEntry>> = BTreeMap::new();
         for entry in &self.entries {
-            by_name.entry(entry.name_lower.clone()).or_default().push(entry);
+            by_name
+                .entry(entry.name_lower.clone())
+                .or_default()
+                .push(entry);
         }
-        by_name.into_iter()
+        by_name
+            .into_iter()
             .filter(|(_, entries)| entries.len() > 1)
             .collect()
     }
@@ -557,11 +675,11 @@ impl fmt::Display for SearchMode {
 pub enum SizeFilter {
     Any,
     Empty,
-    Tiny,           // < 10 KB
-    Small,          // 10 KB - 1 MB
-    Medium,         // 1 MB - 100 MB
-    Large,          // 100 MB - 1 GB
-    VeryLarge,      // > 1 GB
+    Tiny,             // < 10 KB
+    Small,            // 10 KB - 1 MB
+    Medium,           // 1 MB - 100 MB
+    Large,            // 100 MB - 1 GB
+    VeryLarge,        // > 1 GB
     Custom(u64, u64), // min, max bytes
 }
 
@@ -704,7 +822,11 @@ impl SearchCriteria {
 
         // Path filter
         if let Some(ref path_filter) = self.path_contains {
-            if !entry.path.to_lowercase().contains(&path_filter.to_lowercase()) {
+            if !entry
+                .path
+                .to_lowercase()
+                .contains(&path_filter.to_lowercase())
+            {
                 return false;
             }
         }
@@ -781,7 +903,7 @@ impl fmt::Display for SortColumn {
 
 // ─── Application ─────────────────────────────────────────────────────
 
-use guitk::render::{RenderCommand, FontWeightHint};
+use guitk::render::{FontWeightHint, RenderCommand};
 use guitk::style::CornerRadii;
 
 mod colors {
@@ -809,7 +931,7 @@ mod colors {
 pub struct FileSearchApp {
     pub index: FileIndex,
     pub criteria: SearchCriteria,
-    pub results: Vec<usize>,  // Indices into index.entries
+    pub results: Vec<usize>, // Indices into index.entries
     pub selected_result: Option<usize>,
     pub sort_column: SortColumn,
     pub sort_ascending: bool,
@@ -846,7 +968,10 @@ impl FileSearchApp {
         self.is_searching = true;
         let start = std::time::Instant::now();
 
-        let matching: Vec<usize> = self.index.entries.iter()
+        let matching: Vec<usize> = self
+            .index
+            .entries
+            .iter()
             .enumerate()
             .filter(|(_, e)| self.criteria.matches(e))
             .map(|(i, _)| i)
@@ -859,14 +984,17 @@ impl FileSearchApp {
         self.is_searching = false;
 
         // Calculate total size of results
-        let total_size: u64 = self.results.iter()
+        let total_size: u64 = self
+            .results
+            .iter()
             .filter_map(|&i| self.index.entries.get(i))
             .map(|e| e.size)
             .sum();
 
         self.status_message = format!(
             "{count} results ({}) in {}ms",
-            format_size(total_size), self.search_time_ms
+            format_size(total_size),
+            self.search_time_ms
         );
 
         // Add to history
@@ -919,7 +1047,11 @@ impl FileSearchApp {
         });
 
         // Keep last 50 non-bookmarked
-        let bookmarked_count = self.search_history.iter().filter(|s| s.is_bookmarked).count();
+        let bookmarked_count = self
+            .search_history
+            .iter()
+            .filter(|s| s.is_bookmarked)
+            .count();
         while self.search_history.len().saturating_sub(bookmarked_count) > 50 {
             if let Some(pos) = self.search_history.iter().position(|s| !s.is_bookmarked) {
                 self.search_history.remove(pos);
@@ -962,21 +1094,28 @@ impl FileSearchApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: colors::BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Header with search bar
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height: header_h,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height: header_h,
             color: colors::MANTLE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // App title
         cmds.push(RenderCommand::Text {
-            x: 16.0, y: 8.0,
+            x: 16.0,
+            y: 8.0,
             text: "File Search".to_string(),
             font_size: 14.0,
             color: colors::BLUE,
@@ -988,7 +1127,10 @@ impl FileSearchApp {
         let search_x = 16.0;
         let search_w = width - 32.0;
         cmds.push(RenderCommand::FillRect {
-            x: search_x, y: 28.0, width: search_w, height: 28.0,
+            x: search_x,
+            y: 28.0,
+            width: search_w,
+            height: 28.0,
             color: colors::SURFACE0,
             corner_radii: CornerRadii::all(6.0),
         });
@@ -999,25 +1141,36 @@ impl FileSearchApp {
             self.criteria.query.clone()
         };
         cmds.push(RenderCommand::Text {
-            x: search_x + 12.0, y: 36.0,
+            x: search_x + 12.0,
+            y: 36.0,
             text: search_text,
             font_size: 13.0,
-            color: if self.criteria.query.is_empty() { colors::OVERLAY0 } else { colors::TEXT },
+            color: if self.criteria.query.is_empty() {
+                colors::OVERLAY0
+            } else {
+                colors::TEXT
+            },
             font_weight: FontWeightHint::Regular,
             max_width: Some(search_w - 120.0),
         });
 
         // Search mode indicator
         cmds.push(RenderCommand::FillRect {
-            x: search_x + search_w - 80.0, y: 30.0, width: 68.0, height: 24.0,
+            x: search_x + search_w - 80.0,
+            y: 30.0,
+            width: 68.0,
+            height: 24.0,
             color: colors::SURFACE1,
             corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: search_x + search_w - 72.0, y: 36.0,
+            x: search_x + search_w - 72.0,
+            y: 36.0,
             text: self.criteria.mode.to_string(),
-            font_size: 11.0, color: colors::MAUVE,
-            font_weight: FontWeightHint::Bold, max_width: None,
+            font_size: 11.0,
+            color: colors::MAUVE,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
         });
 
         let content_y = header_h;
@@ -1026,7 +1179,10 @@ impl FileSearchApp {
         // Filters sidebar
         if self.show_filters {
             cmds.push(RenderCommand::FillRect {
-                x: 0.0, y: content_y, width: sidebar_w, height: content_h,
+                x: 0.0,
+                y: content_y,
+                width: sidebar_w,
+                height: content_h,
                 color: colors::MANTLE,
                 corner_radii: CornerRadii::ZERO,
             });
@@ -1048,17 +1204,19 @@ impl FileSearchApp {
         // Status bar
         let sy = height - status_h;
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: sy, width, height: status_h,
+            x: 0.0,
+            y: sy,
+            width,
+            height: status_h,
             color: colors::CRUST,
             corner_radii: CornerRadii::ZERO,
         });
         cmds.push(RenderCommand::Text {
-            x: 12.0, y: sy + 6.0,
-            text: format!("{} indexed  |  {}",
-                self.index.count(),
-                self.status_message
-            ),
-            font_size: 11.0, color: colors::SUBTEXT0,
+            x: 12.0,
+            y: sy + 6.0,
+            text: format!("{} indexed  |  {}", self.index.count(), self.status_message),
+            font_size: 11.0,
+            color: colors::SUBTEXT0,
             font_weight: FontWeightHint::Regular,
             max_width: Some(width - 24.0),
         });
@@ -1071,34 +1229,55 @@ impl FileSearchApp {
 
         // Categories section
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: fy,
+            x: x + 12.0,
+            y: fy,
             text: "File Type".to_string(),
-            font_size: 11.0, color: colors::OVERLAY0,
-            font_weight: FontWeightHint::Bold, max_width: None,
+            font_size: 11.0,
+            color: colors::OVERLAY0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
         });
         fy += 20.0;
 
         let categories = [
-            FileCategory::Document, FileCategory::Image, FileCategory::Audio,
-            FileCategory::Video, FileCategory::Archive, FileCategory::Code,
-            FileCategory::Executable, FileCategory::Config, FileCategory::Other,
+            FileCategory::Document,
+            FileCategory::Image,
+            FileCategory::Audio,
+            FileCategory::Video,
+            FileCategory::Archive,
+            FileCategory::Code,
+            FileCategory::Executable,
+            FileCategory::Config,
+            FileCategory::Other,
         ];
 
         for cat in &categories {
             let is_sel = self.criteria.category_filter == Some(*cat);
             if is_sel {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0, y: fy, width: w - 8.0, height: 22.0,
+                    x: x + 4.0,
+                    y: fy,
+                    width: w - 8.0,
+                    height: 22.0,
                     color: colors::SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: fy + 4.0,
+                x: x + 12.0,
+                y: fy + 4.0,
                 text: format!("{} {cat}", category_icon(*cat)),
                 font_size: 11.0,
-                color: if is_sel { colors::BLUE } else { colors::SUBTEXT1 },
-                font_weight: if is_sel { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                color: if is_sel {
+                    colors::BLUE
+                } else {
+                    colors::SUBTEXT1
+                },
+                font_weight: if is_sel {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(w - 24.0),
             });
             fy += 24.0;
@@ -1107,32 +1286,47 @@ impl FileSearchApp {
         // Size filter section
         fy += 12.0;
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: fy,
+            x: x + 12.0,
+            y: fy,
             text: "Size".to_string(),
-            font_size: 11.0, color: colors::OVERLAY0,
-            font_weight: FontWeightHint::Bold, max_width: None,
+            font_size: 11.0,
+            color: colors::OVERLAY0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
         });
         fy += 20.0;
 
         let sizes = [
-            SizeFilter::Any, SizeFilter::Empty, SizeFilter::Tiny,
-            SizeFilter::Small, SizeFilter::Medium, SizeFilter::Large,
+            SizeFilter::Any,
+            SizeFilter::Empty,
+            SizeFilter::Tiny,
+            SizeFilter::Small,
+            SizeFilter::Medium,
+            SizeFilter::Large,
             SizeFilter::VeryLarge,
         ];
         for sf in &sizes {
             let is_sel = self.criteria.size_filter == *sf;
             if is_sel {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 4.0, y: fy, width: w - 8.0, height: 22.0,
+                    x: x + 4.0,
+                    y: fy,
+                    width: w - 8.0,
+                    height: 22.0,
                     color: colors::SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
             }
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: fy + 4.0,
+                x: x + 12.0,
+                y: fy + 4.0,
                 text: sf.label().to_string(),
                 font_size: 11.0,
-                color: if is_sel { colors::BLUE } else { colors::SUBTEXT1 },
+                color: if is_sel {
+                    colors::BLUE
+                } else {
+                    colors::SUBTEXT1
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
             });
@@ -1142,24 +1336,35 @@ impl FileSearchApp {
         // Date filter section
         fy += 12.0;
         cmds.push(RenderCommand::Text {
-            x: x + 12.0, y: fy,
+            x: x + 12.0,
+            y: fy,
             text: "Modified".to_string(),
-            font_size: 11.0, color: colors::OVERLAY0,
-            font_weight: FontWeightHint::Bold, max_width: None,
+            font_size: 11.0,
+            color: colors::OVERLAY0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
         });
         fy += 20.0;
 
         let dates = [
-            DateFilter::Any, DateFilter::Today, DateFilter::ThisWeek,
-            DateFilter::ThisMonth, DateFilter::ThisYear,
+            DateFilter::Any,
+            DateFilter::Today,
+            DateFilter::ThisWeek,
+            DateFilter::ThisMonth,
+            DateFilter::ThisYear,
         ];
         for df in &dates {
             let is_sel = self.criteria.date_filter == *df;
             cmds.push(RenderCommand::Text {
-                x: x + 12.0, y: fy + 4.0,
+                x: x + 12.0,
+                y: fy + 4.0,
                 text: df.label().to_string(),
                 font_size: 11.0,
-                color: if is_sel { colors::BLUE } else { colors::SUBTEXT1 },
+                color: if is_sel {
+                    colors::BLUE
+                } else {
+                    colors::SUBTEXT1
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(w - 24.0),
             });
@@ -1169,13 +1374,21 @@ impl FileSearchApp {
 
     fn render_results(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Column headers
-        let cols = [("Name", 260.0), ("Path", 200.0), ("Size", 80.0), ("Modified", 120.0), ("Type", 80.0)];
+        let cols = [
+            ("Name", 260.0),
+            ("Path", 200.0),
+            ("Size", 80.0),
+            ("Modified", 120.0),
+            ("Type", 80.0),
+        ];
         let mut cx = x + 8.0;
         for (label, cw) in &cols {
             cmds.push(RenderCommand::Text {
-                x: cx, y: y + 4.0,
+                x: cx,
+                y: y + 4.0,
                 text: label.to_string(),
-                font_size: 11.0, color: colors::OVERLAY0,
+                font_size: 11.0,
+                color: colors::OVERLAY0,
                 font_weight: FontWeightHint::Bold,
                 max_width: Some(*cw),
             });
@@ -1192,16 +1405,21 @@ impl FileSearchApp {
                 "No results found"
             };
             cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 50.0, y: y + h / 2.0,
+                x: x + w / 2.0 - 50.0,
+                y: y + h / 2.0,
                 text: msg.to_string(),
-                font_size: 14.0, color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 14.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             return;
         }
 
         for (display_idx, &result_idx) in self.results.iter().enumerate() {
-            if ry + row_h > y + h { break; }
+            if ry + row_h > y + h {
+                break;
+            }
 
             let entry = match self.index.entries.get(result_idx) {
                 Some(e) => e,
@@ -1211,7 +1429,10 @@ impl FileSearchApp {
             let is_sel = self.selected_result == Some(display_idx);
             if is_sel {
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 2.0, y: ry, width: w - 4.0, height: row_h - 2.0,
+                    x: x + 2.0,
+                    y: ry,
+                    width: w - 4.0,
+                    height: row_h - 2.0,
                     color: colors::SURFACE0,
                     corner_radii: CornerRadii::all(4.0),
                 });
@@ -1220,12 +1441,21 @@ impl FileSearchApp {
             let mut cx = x + 8.0;
 
             // Name with icon
-            let icon = if entry.is_directory { "📁" } else { category_icon(entry.category) };
+            let icon = if entry.is_directory {
+                "📁"
+            } else {
+                category_icon(entry.category)
+            };
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
+                x: cx,
+                y: ry + 6.0,
                 text: format!("{icon} {}", entry.name),
                 font_size: 12.0,
-                color: if entry.is_directory { colors::BLUE } else { colors::TEXT },
+                color: if entry.is_directory {
+                    colors::BLUE
+                } else {
+                    colors::TEXT
+                },
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(260.0),
             });
@@ -1233,9 +1463,11 @@ impl FileSearchApp {
 
             // Path
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
+                x: cx,
+                y: ry + 6.0,
                 text: entry.parent_dir().to_string(),
-                font_size: 11.0, color: colors::SUBTEXT0,
+                font_size: 11.0,
+                color: colors::SUBTEXT0,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(200.0),
             });
@@ -1243,10 +1475,17 @@ impl FileSearchApp {
 
             // Size
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
-                text: if entry.is_directory { "—".to_string() } else { format_size(entry.size) },
-                font_size: 11.0, color: colors::SUBTEXT1,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                x: cx,
+                y: ry + 6.0,
+                text: if entry.is_directory {
+                    "—".to_string()
+                } else {
+                    format_size(entry.size)
+                },
+                font_size: 11.0,
+                color: colors::SUBTEXT1,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             cx += 88.0;
 
@@ -1254,19 +1493,29 @@ impl FileSearchApp {
             let age = self.criteria.current_time.saturating_sub(entry.modified);
             let date_str = format_relative_time(age);
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
+                x: cx,
+                y: ry + 6.0,
                 text: date_str,
-                font_size: 11.0, color: colors::SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(120.0),
+                font_size: 11.0,
+                color: colors::SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(120.0),
             });
             cx += 128.0;
 
             // Type
             cmds.push(RenderCommand::Text {
-                x: cx, y: ry + 6.0,
-                text: if entry.extension.is_empty() { "—".to_string() } else { entry.extension.to_uppercase() },
-                font_size: 11.0, color: colors::PEACH,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                x: cx,
+                y: ry + 6.0,
+                text: if entry.extension.is_empty() {
+                    "—".to_string()
+                } else {
+                    entry.extension.to_uppercase()
+                },
+                font_size: 11.0,
+                color: colors::PEACH,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
 
             ry += row_h;
@@ -1276,7 +1525,10 @@ impl FileSearchApp {
     fn render_preview(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32) {
         // Separator
         cmds.push(RenderCommand::FillRect {
-            x, y, width: 1.0, height: h,
+            x,
+            y,
+            width: 1.0,
+            height: h,
             color: colors::SURFACE0,
             corner_radii: CornerRadii::ZERO,
         });
@@ -1285,10 +1537,13 @@ impl FileSearchApp {
             Some(e) => e,
             None => {
                 cmds.push(RenderCommand::Text {
-                    x: x + w / 2.0 - 50.0, y: y + h / 2.0,
+                    x: x + w / 2.0 - 50.0,
+                    y: y + h / 2.0,
                     text: "Select a file".to_string(),
-                    font_size: 13.0, color: colors::OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: None,
+                    font_size: 13.0,
+                    color: colors::OVERLAY0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
                 });
                 return;
             }
@@ -1299,11 +1554,17 @@ impl FileSearchApp {
         let mut py = y + 12.0;
 
         // Icon and name
-        let icon = if entry.is_directory { "📁" } else { category_icon(entry.category) };
+        let icon = if entry.is_directory {
+            "📁"
+        } else {
+            category_icon(entry.category)
+        };
         cmds.push(RenderCommand::Text {
-            x: px, y: py,
+            x: px,
+            y: py,
             text: format!("{icon} {}", entry.name),
-            font_size: 14.0, color: colors::TEXT,
+            font_size: 14.0,
+            color: colors::TEXT,
             font_weight: FontWeightHint::Bold,
             max_width: Some(max_w),
         });
@@ -1313,24 +1574,44 @@ impl FileSearchApp {
         let fields: Vec<(&str, String)> = vec![
             ("Path:", entry.path.clone()),
             ("Size:", format_size(entry.size)),
-            ("Type:", format!("{} (.{})", entry.category, entry.extension)),
-            ("Modified:", format_relative_time(self.criteria.current_time.saturating_sub(entry.modified))),
-            ("Created:", format_relative_time(self.criteria.current_time.saturating_sub(entry.created))),
-            ("Hidden:", if entry.is_hidden { "Yes" } else { "No" }.to_string()),
-            ("Directory:", if entry.is_directory { "Yes" } else { "No" }.to_string()),
+            (
+                "Type:",
+                format!("{} (.{})", entry.category, entry.extension),
+            ),
+            (
+                "Modified:",
+                format_relative_time(self.criteria.current_time.saturating_sub(entry.modified)),
+            ),
+            (
+                "Created:",
+                format_relative_time(self.criteria.current_time.saturating_sub(entry.created)),
+            ),
+            (
+                "Hidden:",
+                if entry.is_hidden { "Yes" } else { "No" }.to_string(),
+            ),
+            (
+                "Directory:",
+                if entry.is_directory { "Yes" } else { "No" }.to_string(),
+            ),
         ];
 
         for (label, value) in &fields {
             cmds.push(RenderCommand::Text {
-                x: px, y: py,
+                x: px,
+                y: py,
                 text: label.to_string(),
-                font_size: 11.0, color: colors::OVERLAY0,
-                font_weight: FontWeightHint::Bold, max_width: None,
+                font_size: 11.0,
+                color: colors::OVERLAY0,
+                font_weight: FontWeightHint::Bold,
+                max_width: None,
             });
             cmds.push(RenderCommand::Text {
-                x: px + 80.0, y: py,
+                x: px + 80.0,
+                y: py,
                 text: value.clone(),
-                font_size: 11.0, color: colors::SUBTEXT1,
+                font_size: 11.0,
+                color: colors::SUBTEXT1,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(max_w - 80.0),
             });
@@ -1340,25 +1621,34 @@ impl FileSearchApp {
         // Quick actions
         py += 16.0;
         cmds.push(RenderCommand::Text {
-            x: px, y: py,
+            x: px,
+            y: py,
             text: "Actions".to_string(),
-            font_size: 11.0, color: colors::OVERLAY0,
-            font_weight: FontWeightHint::Bold, max_width: None,
+            font_size: 11.0,
+            color: colors::OVERLAY0,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
         });
         py += 20.0;
 
         let actions = ["Open", "Open Location", "Copy Path", "Properties"];
         for action in &actions {
             cmds.push(RenderCommand::FillRect {
-                x: px, y: py, width: max_w, height: 24.0,
+                x: px,
+                y: py,
+                width: max_w,
+                height: 24.0,
                 color: colors::SURFACE0,
                 corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: px + 10.0, y: py + 5.0,
+                x: px + 10.0,
+                y: py + 5.0,
                 text: action.to_string(),
-                font_size: 11.0, color: colors::TEAL,
-                font_weight: FontWeightHint::Regular, max_width: None,
+                font_size: 11.0,
+                color: colors::TEAL,
+                font_weight: FontWeightHint::Regular,
+                max_width: None,
             });
             py += 28.0;
         }
@@ -1423,30 +1713,137 @@ fn main() {
 fn populate_sample_index(index: &mut FileIndex) {
     let now: u64 = 1_779_000_000;
     let files = [
-        ("/home/user/Documents/report.pdf", "report.pdf", 2_500_000, now - 3600),
-        ("/home/user/Documents/budget.xlsx", "budget.xlsx", 150_000, now - 86400),
-        ("/home/user/Documents/notes.md", "notes.md", 5_000, now - 7200),
-        ("/home/user/Pictures/vacation.jpg", "vacation.jpg", 4_200_000, now - 604_800),
-        ("/home/user/Pictures/screenshot.png", "screenshot.png", 350_000, now - 172_800),
-        ("/home/user/Music/song.mp3", "song.mp3", 8_500_000, now - 86400),
-        ("/home/user/Music/album.flac", "album.flac", 45_000_000, now - 2_592_000),
-        ("/home/user/Videos/recording.mp4", "recording.mp4", 250_000_000, now - 604_800),
-        ("/home/user/Projects/app/src/main.rs", "main.rs", 12_000, now - 1800),
-        ("/home/user/Projects/app/src/lib.rs", "lib.rs", 8_000, now - 1800),
-        ("/home/user/Projects/app/Cargo.toml", "Cargo.toml", 500, now - 3600),
-        ("/home/user/Projects/config.yaml", "config.yaml", 2_000, now - 7200),
-        ("/home/user/Projects/app/.gitignore", ".gitignore", 200, now - 86400),
-        ("/home/user/.config/editor/config.toml", "config.toml", 1_500, now - 259_200),
-        ("/home/user/.config/shell/config.sh", "config.sh", 3_000, now - 604_800),
-        ("/home/user/Downloads/installer.exe", "installer.exe", 50_000_000, now - 172_800),
-        ("/home/user/Downloads/archive.tar.gz", "archive.tar.gz", 25_000_000, now - 259_200),
-        ("/home/user/Downloads/font.ttf", "font.ttf", 500_000, now - 86400),
-        ("/home/user/backup.db", "backup.db", 100_000_000, now - 43_200),
-        ("/home/user/readme.txt", "readme.txt", 4_000, now - 31_536_000),
+        (
+            "/home/user/Documents/report.pdf",
+            "report.pdf",
+            2_500_000,
+            now - 3600,
+        ),
+        (
+            "/home/user/Documents/budget.xlsx",
+            "budget.xlsx",
+            150_000,
+            now - 86400,
+        ),
+        (
+            "/home/user/Documents/notes.md",
+            "notes.md",
+            5_000,
+            now - 7200,
+        ),
+        (
+            "/home/user/Pictures/vacation.jpg",
+            "vacation.jpg",
+            4_200_000,
+            now - 604_800,
+        ),
+        (
+            "/home/user/Pictures/screenshot.png",
+            "screenshot.png",
+            350_000,
+            now - 172_800,
+        ),
+        (
+            "/home/user/Music/song.mp3",
+            "song.mp3",
+            8_500_000,
+            now - 86400,
+        ),
+        (
+            "/home/user/Music/album.flac",
+            "album.flac",
+            45_000_000,
+            now - 2_592_000,
+        ),
+        (
+            "/home/user/Videos/recording.mp4",
+            "recording.mp4",
+            250_000_000,
+            now - 604_800,
+        ),
+        (
+            "/home/user/Projects/app/src/main.rs",
+            "main.rs",
+            12_000,
+            now - 1800,
+        ),
+        (
+            "/home/user/Projects/app/src/lib.rs",
+            "lib.rs",
+            8_000,
+            now - 1800,
+        ),
+        (
+            "/home/user/Projects/app/Cargo.toml",
+            "Cargo.toml",
+            500,
+            now - 3600,
+        ),
+        (
+            "/home/user/Projects/config.yaml",
+            "config.yaml",
+            2_000,
+            now - 7200,
+        ),
+        (
+            "/home/user/Projects/app/.gitignore",
+            ".gitignore",
+            200,
+            now - 86400,
+        ),
+        (
+            "/home/user/.config/editor/config.toml",
+            "config.toml",
+            1_500,
+            now - 259_200,
+        ),
+        (
+            "/home/user/.config/shell/config.sh",
+            "config.sh",
+            3_000,
+            now - 604_800,
+        ),
+        (
+            "/home/user/Downloads/installer.exe",
+            "installer.exe",
+            50_000_000,
+            now - 172_800,
+        ),
+        (
+            "/home/user/Downloads/archive.tar.gz",
+            "archive.tar.gz",
+            25_000_000,
+            now - 259_200,
+        ),
+        (
+            "/home/user/Downloads/font.ttf",
+            "font.ttf",
+            500_000,
+            now - 86400,
+        ),
+        (
+            "/home/user/backup.db",
+            "backup.db",
+            100_000_000,
+            now - 43_200,
+        ),
+        (
+            "/home/user/readme.txt",
+            "readme.txt",
+            4_000,
+            now - 31_536_000,
+        ),
     ];
 
     for (path, name, size, modified) in &files {
-        index.add(IndexEntry::new(path, name, *size, *modified, *modified - 86400, false));
+        index.add(IndexEntry::new(
+            path,
+            name,
+            *size,
+            *modified,
+            *modified - 86400,
+            false,
+        ));
     }
 
     // Add some directories
@@ -1571,8 +1968,22 @@ mod tests {
     #[test]
     fn test_index_add_search() {
         let mut index = FileIndex::new();
-        index.add(IndexEntry::new("/test/hello.txt", "hello.txt", 100, 0, 0, false));
-        index.add(IndexEntry::new("/test/world.rs", "world.rs", 200, 0, 0, false));
+        index.add(IndexEntry::new(
+            "/test/hello.txt",
+            "hello.txt",
+            100,
+            0,
+            0,
+            false,
+        ));
+        index.add(IndexEntry::new(
+            "/test/world.rs",
+            "world.rs",
+            200,
+            0,
+            0,
+            false,
+        ));
         assert_eq!(index.count(), 2);
         assert_eq!(index.total_size(), 300);
 
@@ -1643,7 +2054,14 @@ mod tests {
         let mut index = FileIndex::new();
         index.add(IndexEntry::new("/a/file.txt", "file.txt", 100, 0, 0, false));
         index.add(IndexEntry::new("/b/file.txt", "file.txt", 200, 0, 0, false));
-        index.add(IndexEntry::new("/c/other.txt", "other.txt", 100, 0, 0, false));
+        index.add(IndexEntry::new(
+            "/c/other.txt",
+            "other.txt",
+            100,
+            0,
+            0,
+            false,
+        ));
 
         let dupes = index.find_duplicates();
         assert_eq!(dupes.len(), 1);

@@ -1,3 +1,23 @@
+## BUG (noticed+FIXED 2026-05-31): apps/filesearch — SEVERE PRODUCTION regex bug. The
+##   regex engine's parse_regex_atom returned a bare `fn(u8) -> bool`, which cannot
+##   capture a specific literal byte, so every literal character was matched as a
+##   character CLASS instead: a lowercase letter matched `is_ascii_lowercase`, etc.
+##   Consequently `world` matched ANY five lowercase letters — `^world` "matched"
+##   "hello world" and `hello$` matched its tail. Character classes `[...]` were also
+##   stubbed to "match anything". Replaced the fn-pointer with a Matcher enum that
+##   carries Literal(u8) and a borrowed Class { body, negated }, added a real
+##   class_matches (literals + a-z ranges + negation) and proper escaped-literal
+##   handling (\\. etc. now match the literal char). filesearch 37/37 tests pass,
+##   clippy clean (own code), ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/calendar — PRODUCTION ICS round-trip bug.
+##   ics_unescape used chained .replace() ("\\n"->newline, then "\\;", "\\,", "\\\\").
+##   That mis-decodes an escaped backslash followed by a literal 'n' ("\\\\n"): the
+##   first pass matches the trailing "\\n" as a newline escape, corrupting the value.
+##   Rewrote ics_unescape as a single left-to-right pass that decodes each backslash
+##   pair exactly once (\\\\, \\;, \\,, \\n/\\N per RFC 5545). calendar 52/52 tests
+##   pass, clippy clean, ouros build OK.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/tictactoe — test build break PLUS two REAL
 ##   production bugs. (1) test_mouse_click constructed a MouseEvent with a `modifiers`
 ##   field, but MouseEvent has no such field (E0560); removed it. (2) PRODUCTION:

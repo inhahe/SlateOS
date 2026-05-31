@@ -755,10 +755,29 @@ fn parse_ics_datetime(s: &str) -> Option<DateTime> {
 }
 
 fn ics_unescape(s: &str) -> String {
-    s.replace("\\n", "\n")
-        .replace("\\;", ";")
-        .replace("\\,", ",")
-        .replace("\\\\", "\\")
+    // Single left-to-right pass. Chained `.replace()` is incorrect here: e.g.
+    // an escaped backslash followed by a literal 'n' ("\\n") would be matched as
+    // a "\n" newline escape by an earlier pass, corrupting the round-trip. RFC
+    // 5545 defines the escapes \\, \;, \, and \n/\N (both mean newline).
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n' | 'N') => result.push('\n'),
+                Some(';') => result.push(';'),
+                Some(',') => result.push(','),
+                Some('\\') => result.push('\\'),
+                // Unknown escape: malformed input — keep the following char as-is.
+                Some(other) => result.push(other),
+                // Trailing backslash with nothing after it: keep it literally.
+                None => result.push('\\'),
+            }
+        } else {
+            result.push(c);
+        }
+    }
+    result
 }
 
 /// Generate ICS calendar file from events.

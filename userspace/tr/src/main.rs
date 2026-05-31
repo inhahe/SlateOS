@@ -135,13 +135,15 @@ fn expand_set(spec: &[u8]) -> Vec<u8> {
 
     while i < len {
         // Check for POSIX class [:name:]
-        if i + 2 < len && spec[i] == b'[' && spec[i + 1] == b':' {
-            if let Some(end) = find_posix_class_end(spec, i) {
-                let class_name = &spec[i + 2..end - 1]; // between [: and :]
-                expand_posix_class(class_name, &mut result);
-                i = end + 1; // skip past the closing ]
-                continue;
-            }
+        if i + 2 < len
+            && spec[i] == b'['
+            && spec[i + 1] == b':'
+            && let Some(end) = find_posix_class_end(spec, i)
+        {
+            let class_name = &spec[i + 2..end - 1]; // between [: and :]
+            expand_posix_class(class_name, &mut result);
+            i = end + 1; // skip past the closing ]
+            continue;
         }
 
         // Check for equivalence class [=c=]
@@ -157,14 +159,15 @@ fn expand_set(spec: &[u8]) -> Vec<u8> {
         }
 
         // Check for repeat [c*N] or [c*]
-        if i + 3 < len && spec[i] == b'[' {
-            if let Some((ch, count, consumed)) = parse_repeat(spec, i) {
-                for _ in 0..count {
-                    result.push(ch);
-                }
-                i += consumed;
-                continue;
+        if i + 3 < len
+            && spec[i] == b'['
+            && let Some((ch, count, consumed)) = parse_repeat(spec, i)
+        {
+            for _ in 0..count {
+                result.push(ch);
             }
+            i += consumed;
+            continue;
         }
 
         // Escape sequences
@@ -175,31 +178,28 @@ fn expand_set(spec: &[u8]) -> Vec<u8> {
             continue;
         }
 
-        // Range: a-z
-        if i + 2 < len && spec[i + 1] == b'-' && i > 0_usize.wrapping_sub(1) {
-            // Only treat as range when there is a preceding context and the
-            // dash is between two literal characters (not at start or end).
-            if !result.is_empty() || i > 0 {
-                // We need both endpoints to form a range.
-                // However, a dash at the very start or end of the spec is literal.
-                if i + 2 < len && spec[i + 1] == b'-' {
-                    let lo = spec[i];
-                    let hi = spec[i + 2];
-                    if lo <= hi {
-                        for b in lo..=hi {
-                            result.push(b);
-                        }
-                        i += 3;
-                        continue;
-                    }
-                    // If lo > hi, GNU tr treats this as an error.
-                    die(&format!(
-                        "range-endpoints of '{}-{}' are in wrong order",
-                        char::from(lo),
-                        char::from(hi)
-                    ));
+        // Range: a-z.  `spec[i]` is the low endpoint, `spec[i + 1]` the dash,
+        // and `spec[i + 2]` the high endpoint.  A dash is only a range
+        // separator when a high endpoint follows it (`i + 2 < len`); a dash at
+        // the very end of the set is literal (it falls through to the
+        // push-single path below), and a leading dash is handled the same way
+        // because then `spec[i]` itself is the dash, not `spec[i + 1]`.
+        if i + 2 < len && spec[i + 1] == b'-' {
+            let lo = spec[i];
+            let hi = spec[i + 2];
+            if lo <= hi {
+                for b in lo..=hi {
+                    result.push(b);
                 }
+                i += 3;
+                continue;
             }
+            // If lo > hi, GNU tr treats this as an error.
+            die(&format!(
+                "range-endpoints of '{}-{}' are in wrong order",
+                char::from(lo),
+                char::from(hi)
+            ));
         }
 
         result.push(spec[i]);
@@ -269,7 +269,7 @@ fn expand_posix_class(name: &[u8], out: &mut Vec<u8>) {
             out.extend_from_slice(&[b' ', b'\t', b'\n', 0x0B, 0x0C, b'\r']);
         }
         b"blank" => {
-            out.extend_from_slice(&[b' ', b'\t']);
+            out.extend_from_slice(b" \t");
         }
         b"punct" => {
             for b in 0x21u8..=0x2F {
@@ -394,7 +394,7 @@ fn parse_escape(spec: &[u8], start: usize) -> (u8, usize) {
         b'v' => (0x0B, 2), // vertical tab
         b'\\' => (b'\\', 2),
         // Octal: \NNN (1-3 digits)
-        d if d >= b'0' && d <= b'7' => {
+        d if (b'0'..=b'7').contains(&d) => {
             let mut val = (d - b'0') as u16;
             let mut consumed = 2;
             for off in 2..=3 {
@@ -433,8 +433,8 @@ fn build_membership(set: &[u8]) -> [bool; 256] {
 fn build_translate_table(set1: &[u8], set2: &[u8], truncate: bool) -> [u8; 256] {
     let mut table: [u8; 256] = [0; 256];
     // Identity mapping by default.
-    for i in 0..256 {
-        table[i] = i as u8;
+    for (i, entry) in table.iter_mut().enumerate() {
+        *entry = i as u8;
     }
 
     if set2.is_empty() {
@@ -498,10 +498,8 @@ fn run(opts: &Opts) -> io::Result<()> {
                 if del_member[b as usize] {
                     continue; // deleted
                 }
-                if sq_member[b as usize] {
-                    if last_out == Some(b) {
-                        continue; // squeezed
-                    }
+                if sq_member[b as usize] && last_out == Some(b) {
+                    continue; // squeezed
                 }
                 last_out = Some(b);
                 writer.write_all(&[b])?;
@@ -616,11 +614,7 @@ fn fill_repeats(set1: &[u8], set2: &mut Vec<u8>, raw_set2: &Option<Vec<u8>>) {
     let mut has_fill = false;
     let mut i = 0;
     while i < raw.len() {
-        if i + 3 < raw.len()
-            && raw[i] == b'['
-            && raw[i + 2] == b'*'
-            && raw[i + 3] == b']'
-        {
+        if i + 3 < raw.len() && raw[i] == b'[' && raw[i + 2] == b'*' && raw[i + 3] == b']' {
             has_fill = true;
             break;
         }

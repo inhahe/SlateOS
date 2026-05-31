@@ -1,3 +1,25 @@
+## BUG (noticed+FIXED 2026-05-31): tr range expansion was completely broken.
+##   userspace/tr/src/main.rs expand_set() guarded the `a-z` range branch with
+##   `&& i > 0_usize.wrapping_sub(1)`, i.e. `i > usize::MAX`, which is ALWAYS
+##   false — so the range branch was unreachable and `tr a-z A-Z` (the single
+##   most common invocation) treated `a-z`/`A-Z` as the three literal bytes
+##   'a','-','z'.  4 unit tests (test_expand_range/digit_range/upper_range/
+##   mixed) were failing and had been left red.  FIX: removed the bogus guard
+##   and the redundant nested conditions; a dash is a range separator iff a
+##   high endpoint follows (`i + 2 < len`), else literal (trailing/leading dash
+##   falls through to the single-byte push).  37/37 tr tests pass; clippy-clean
+##   host + ouros (also cleaned 6 pre-existing pedantic warnings: let-chains,
+##   byte-str literal, RangeInclusive::contains, iter_mut enumerate); builds for
+##   the ouros target.  Found while sweeping interpreter/parser coreutils for
+##   latent failing tests after the jq fix.
+##   STILL OPEN (noticed, not yet fixed) from the same sweep:
+##     * dd test module doesn't compile: `StatusLevel` doesn't implement Debug
+##       (a #[derive(Debug)] is missing on that enum; host `cargo test -p dd`
+##       fails to build the test harness).
+##     * coreutils crate test build fails on host: `cannot find unix in os`
+##       (an ungated std::os::unix use needs #[cfg(unix)] for the windows-gnu
+##       host test build, same class as the service/sftp fixes).
+##
 ## BUG (noticed 2026-05-30): SYSTEMIC — a swathe of userspace tools call
 ##                            WRONG syscall numbers because they hand-roll
 ##                            raw `syscall` wrappers instead of using std.

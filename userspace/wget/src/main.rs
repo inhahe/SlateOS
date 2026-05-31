@@ -1390,8 +1390,12 @@ mod tests {
 
     #[test]
     fn ip_format_loopback() {
-        // 127.0.0.1 in network byte order = 0x7F000001
-        let ip = 0x7F000001_u32.to_be();
+        // ip_to_string interprets its argument big-endian (to_be_bytes): the
+        // most-significant byte is the first octet, matching the kernel's
+        // network-byte-order u32 (from_be_bytes). So 0x7F000001 == 127.0.0.1.
+        // (The earlier spurious `.to_be()` here reversed the octets — the same
+        // test bug that was fixed in curl.)
+        let ip = 0x7F000001_u32;
         assert_eq!(ip_to_string(ip), "127.0.0.1");
     }
 
@@ -1501,7 +1505,10 @@ mod tests {
     fn find_header_end_present() {
         let data = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
         let pos = find_header_end(data);
-        assert_eq!(pos, Some(36));
+        // find_header_end returns the START index of the "\r\n\r\n" separator.
+        // "HTTP/1.1 200 OK\r\n" is 17 bytes (0-16), "Content-Length: 5" is 17
+        // bytes (17-33), so the blank-line "\r\n\r\n" begins at index 34.
+        assert_eq!(pos, Some(34));
     }
 
     #[test]
@@ -1536,7 +1543,10 @@ mod tests {
             get_header(&resp.headers, "content-type"),
             Some("text/plain")
         );
-        assert_eq!(resp.body_offset, 58);
+        // body_offset = (start of "\r\n\r\n") + 4. The headers end with the
+        // blank line beginning at index 60, so the body starts at 64. The
+        // assertion below (&data[body_offset..] == b"hello") only holds at 64.
+        assert_eq!(resp.body_offset, 64);
         assert_eq!(&data[resp.body_offset..], b"hello");
     }
 

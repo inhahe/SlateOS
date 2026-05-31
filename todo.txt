@@ -1,3 +1,18 @@
+## BUG (noticed+FIXED 2026-05-31): wget had 3 failing tests, all WRONG TEST
+##   CONSTANTS (not production bugs — same class as the earlier curl fix).
+##   userspace/wget/src/main.rs production code (ip_to_string, find_header_end,
+##   parse_http_response) is correct; the test expectations were stale:
+##     * ip_format_loopback: `let ip = 0x7F000001_u32.to_be();` — the spurious
+##       `.to_be()` byte-swapped the loopback address so the octets came out
+##       reversed.  ip_to_string interprets its arg big-endian (to_be_bytes),
+##       matching the kernel's network-byte-order u32.  Removed `.to_be()`.
+##     * find_header_end_present: expected Some(36); find_header_end returns the
+##       START index of "\r\n\r\n", which is 34 for that data.  Fixed to 34.
+##     * parse_response_simple: expected body_offset 58; body_offset = (start of
+##       "\r\n\r\n") + 4 = 64, and the test's own `&data[body_offset..]==b"hello"`
+##       assertion only holds at 64.  Fixed to 64.
+##   59/59 wget tests pass; clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): tr range expansion was completely broken.
 ##   userspace/tr/src/main.rs expand_set() guarded the `a-z` range branch with
 ##   `&& i > 0_usize.wrapping_sub(1)`, i.e. `i > usize::MAX`, which is ALWAYS

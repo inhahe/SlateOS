@@ -517,22 +517,112 @@ fn format_human(unix_secs: u64) -> String {
 // System time helpers
 // ---------------------------------------------------------------------------
 
-/// Read the system (kernel) clock as a Unix timestamp via `/proc/time`.
-fn read_system_time() -> Result<u64, String> {
-    let content = fs::read_to_string("/proc/time")
-        .map_err(|e| format!("/proc/time: {e}"))?;
-    let trimmed = content.trim();
-    let secs_str = trimmed.split('.').next().unwrap_or(trimmed);
-    secs_str
-        .parse::<u64>()
-        .map_err(|e| format!("/proc/time parse error: {e}"))
+// Native OurOS clock syscalls (kernel syscall/number.rs is the ABI source of
+// truth).  There is NO combined clock_gettime(clock_id, *ts): SYS_CLOCK_REALTIME
+// takes no arguments and returns wall-clock nanoseconds-since-epoch in rax;
+// SYS_CLOCK_SETTIME takes the absolute target ns as its only argument;
+// SYS_CLOCK_ADJTIME takes a signed ns delta.  (These tools previously used a
+// nonexistent, read-only /proc/time, so they could neither read nor set the
+// clock.)
+const SYS_CLOCK_REALTIME: u64 = 14;
+const SYS_CLOCK_SETTIME: u64 = 15;
+const SYS_CLOCK_ADJTIME: u64 = 16;
+
+const NS_PER_SEC: i64 = 1_000_000_000;
+
+/// Read the wall clock as nanoseconds since the Unix epoch.
+fn read_system_time_ns() -> Result<i64, String> {
+    let ret: i64;
+    // SAFETY: SYS_CLOCK_REALTIME takes no arguments and writes nothing to
+    // userspace; it only reads the kernel clock into rax.  rcx/r11 are
+    // clobbered by the SYSCALL instruction per the x86_64 ABI.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_CLOCK_REALTIME,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack, nomem),
+        );
+    }
+    if ret < 0 {
+        return Err(format!("clock_realtime failed with error {ret}"));
+    }
+    Ok(ret)
 }
 
-/// Set the system clock to a given Unix timestamp.
-fn write_system_time(unix_secs: u64) -> Result<(), String> {
-    let path = "/proc/time";
-    fs::write(path, format!("{unix_secs}").as_bytes())
-        .map_err(|e| format!("{path}: {e}"))
+/// Read the system (kernel) clock as whole Unix seconds.
+fn read_system_time() -> Result<u64, String> {
+    let ns = read_system_time_ns()?;
+    // ns is non-negative on success; whole seconds for the seconds-only callers.
+    Ok((ns / NS_PER_SEC) as u64)
+}
+
+/// Set the wall clock to an absolute nanoseconds-since-epoch value via
+/// `SYS_CLOCK_SETTIME`.  Requires `CAP_SYS_TIME`.
+fn set_system_time_ns(target_ns: i64) -> Result<(), String> {
+    if target_ns < 0 {
+        return Err("refusing to set a negative wall-clock time".into());
+    }
+    let ret: i64;
+    // SAFETY: single scalar argument (target ns); touches no userspace memory.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_CLOCK_SETTIME,
+            in("rdi") target_ns as u64,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack, nomem),
+        );
+    }
+    if ret < 0 {
+        return Err(format!(
+            "clock_settime failed with error {ret} (need CAP_SYS_TIME?)"
+        ));
+    }
+    Ok(())
+}
+
+/// Adjust the wall clock by a signed nanosecond delta via `SYS_CLOCK_ADJTIME`
+/// (a relative, race-free step rather than an absolute write).  Requires
+/// `CAP_SYS_TIME`.
+fn adjust_system_time_ns(delta_ns: i64) -> Result<(), String> {
+    let ret: i64;
+    // SAFETY: single scalar argument (signed delta reinterpreted as u64, the
+    // inverse of the kernel's `as i64`); touches no userspace memory.
+    unsafe {
+        core::arch::asm!(
+            "syscall",
+            in("rax") SYS_CLOCK_ADJTIME,
+            in("rdi") delta_ns as u64,
+            lateout("rax") ret,
+            lateout("rcx") _,
+            lateout("r11") _,
+            options(nostack, nomem),
+        );
+    }
+    if ret < 0 {
+        return Err(format!(
+            "clock_adjtime failed with error {ret} (need CAP_SYS_TIME?)"
+        ));
+    }
+    Ok(())
+}
+
+/// Read the wall clock as `(whole Unix seconds, microsecond remainder)`.
+/// Returns `(0, 0)` if the clock read fails so the caller can degrade
+/// gracefully rather than abort an exchange.
+fn read_unix_secs_micros() -> (u64, u32) {
+    match read_system_time_ns() {
+        Ok(ns) if ns >= 0 => (
+            (ns / NS_PER_SEC) as u64,
+            ((ns % NS_PER_SEC) / 1_000) as u32,
+        ),
+        _ => (0, 0),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -555,9 +645,9 @@ fn ntp_query_one(
         .set_read_timeout(Some(Duration::from_secs(timeout_secs)))
         .map_err(|e| format!("set timeout: {e}"))?;
 
-    // T1: client transmit timestamp.
-    let t1_unix = read_system_time().unwrap_or(0);
-    let t1 = NtpTimestamp::from_unix(t1_unix, 0);
+    // T1: client transmit timestamp (sub-second precision).
+    let (t1_unix, t1_micros) = read_unix_secs_micros();
+    let t1 = NtpTimestamp::from_unix(t1_unix, t1_micros);
 
     let request = NtpPacket::new_client_request(t1);
     let pkt_bytes = request.to_bytes();
@@ -583,9 +673,15 @@ fn ntp_query_one(
         return Err(format!("NTP response too short: {n} bytes"));
     }
 
-    // T4: client receive timestamp.
-    let t4_unix = read_system_time().unwrap_or(t1_unix);
-    let t4 = NtpTimestamp::from_unix(t4_unix, 0);
+    // T4: client receive timestamp (sub-second precision).
+    let (t4_unix, t4_micros) = read_unix_secs_micros();
+    let (t4_unix, t4_micros) = if t4_unix == 0 {
+        // Clock read failed; fall back to T1 so the round-trip math stays sane.
+        (t1_unix, t1_micros)
+    } else {
+        (t4_unix, t4_micros)
+    };
+    let t4 = NtpTimestamp::from_unix(t4_unix, t4_micros);
 
     let response = NtpPacket::from_bytes(&buf);
 
@@ -983,27 +1079,23 @@ fn run_ntpdate(opts: &NtpdateOpts) -> Result<(), String> {
         ));
     }
 
-    let now = read_system_time().unwrap_or(0);
+    // Correction in nanoseconds, preserving full sub-second precision.  The
+    // previous implementation divided the microsecond offset by 1_000_000 and
+    // truncated to whole seconds, throwing away every correction smaller than
+    // one second (i.e. essentially all of them once the clock is roughly set).
+    let offset_ns = (sample.offset_us as i64).saturating_mul(1_000);
 
     if opts.force_step || abs_offset > STEP_THRESHOLD_US {
-        // Step: set the clock immediately.
-        let new_secs = if sample.offset_us >= 0 {
-            now.saturating_add((sample.offset_us / 1_000_000) as u64)
-        } else {
-            now.saturating_sub((sample.offset_us.unsigned_abs() / 1_000_000) as u64)
-        };
-        write_system_time(new_secs)?;
+        // Step: jump the clock by reading the current absolute time and writing
+        // back the corrected absolute value.
+        let now_ns = read_system_time_ns()?;
+        set_system_time_ns(now_ns.saturating_add(offset_ns))?;
         output(&format!(
             "step time server {server} offset {offset_ms:.6} ms",
         ));
     } else {
-        // Slew: adjust gradually (for now, still a step since we lack adjtime).
-        let new_secs = if sample.offset_us >= 0 {
-            now.saturating_add((sample.offset_us / 1_000_000) as u64)
-        } else {
-            now.saturating_sub((sample.offset_us.unsigned_abs() / 1_000_000) as u64)
-        };
-        write_system_time(new_secs)?;
+        // Slew: apply a race-free relative adjustment via SYS_CLOCK_ADJTIME.
+        adjust_system_time_ns(offset_ns)?;
         output(&format!(
             "adjust time server {server} offset {offset_ms:.6} ms",
         ));
@@ -1098,25 +1190,28 @@ fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
         let allow_step = first_update && opts.allow_first_step;
         let (step, correction) = discipline.update(best.offset_us, allow_step);
 
+        // `correction` is in microseconds; convert to nanoseconds and apply at
+        // full precision instead of truncating to whole seconds (which dropped
+        // every sub-second discipline correction the daemon ever computed).
+        let correction_ns = correction.saturating_mul(1_000);
+
         if step {
-            let now = read_system_time().unwrap_or(0);
-            let new_secs = if correction >= 0 {
-                now.saturating_add((correction / 1_000_000) as u64)
-            } else {
-                now.saturating_sub((correction.unsigned_abs() / 1_000_000) as u64)
-            };
-            let _ = write_system_time(new_secs);
+            match read_system_time_ns() {
+                Ok(now_ns) => {
+                    let _ = set_system_time_ns(now_ns.saturating_add(correction_ns));
+                }
+                Err(e) => {
+                    if opts.debug {
+                        eprintln!("ntpd: cannot read clock to step: {e}");
+                    }
+                }
+            }
             if opts.debug {
                 eprintln!("ntpd: stepped clock by {} us", correction);
             }
         } else if correction != 0 {
-            let now = read_system_time().unwrap_or(0);
-            let new_secs = if correction >= 0 {
-                now.saturating_add((correction / 1_000_000) as u64)
-            } else {
-                now.saturating_sub((correction.unsigned_abs() / 1_000_000) as u64)
-            };
-            let _ = write_system_time(new_secs);
+            // Race-free relative slew via SYS_CLOCK_ADJTIME.
+            let _ = adjust_system_time_ns(correction_ns);
             if opts.debug {
                 eprintln!("ntpd: slew correction {} us", correction);
             }

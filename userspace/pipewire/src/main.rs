@@ -247,27 +247,29 @@ impl std::fmt::Display for LinkState {
     }
 }
 
+#[allow(dead_code)] // variant set models all device classes; only some are emitted yet
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DeviceType {
-    _AlsaPcm,
+    AlsaPcm,
     AlsaCard,
-    _V4l2,
-    _Bluetooth,
-    _Virtual,
+    V4l2,
+    Bluetooth,
+    Virtual,
 }
 
 impl std::fmt::Display for DeviceType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::_AlsaPcm => write!(f, "alsa/pcm"),
+            Self::AlsaPcm => write!(f, "alsa/pcm"),
             Self::AlsaCard => write!(f, "alsa/card"),
-            Self::_V4l2 => write!(f, "v4l2"),
-            Self::_Bluetooth => write!(f, "bluetooth"),
-            Self::_Virtual => write!(f, "virtual"),
+            Self::V4l2 => write!(f, "v4l2"),
+            Self::Bluetooth => write!(f, "bluetooth"),
+            Self::Virtual => write!(f, "virtual"),
         }
     }
 }
 
+#[allow(dead_code)] // full PipeWire interface set; only core object types are listed today
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ObjectType {
     Node,
@@ -275,11 +277,11 @@ enum ObjectType {
     Link,
     Device,
     Client,
-    _Module,
-    _Factory,
-    _Core,
-    _Profiler,
-    _Metadata,
+    Module,
+    Factory,
+    Core,
+    Profiler,
+    Metadata,
 }
 
 impl std::fmt::Display for ObjectType {
@@ -290,32 +292,33 @@ impl std::fmt::Display for ObjectType {
             Self::Link => write!(f, "PipeWire:Interface:Link"),
             Self::Device => write!(f, "PipeWire:Interface:Device"),
             Self::Client => write!(f, "PipeWire:Interface:Client"),
-            Self::_Module => write!(f, "PipeWire:Interface:Module"),
-            Self::_Factory => write!(f, "PipeWire:Interface:Factory"),
-            Self::_Core => write!(f, "PipeWire:Interface:Core"),
-            Self::_Profiler => write!(f, "PipeWire:Interface:Profiler"),
-            Self::_Metadata => write!(f, "PipeWire:Interface:Metadata"),
+            Self::Module => write!(f, "PipeWire:Interface:Module"),
+            Self::Factory => write!(f, "PipeWire:Interface:Factory"),
+            Self::Core => write!(f, "PipeWire:Interface:Core"),
+            Self::Profiler => write!(f, "PipeWire:Interface:Profiler"),
+            Self::Metadata => write!(f, "PipeWire:Interface:Metadata"),
         }
     }
 }
 
+#[allow(dead_code)] // full monitor event model; only Added is emitted by the simulated registry
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum MonitorEventType {
     Added,
-    _Removed,
-    _Changed,
-    _Bound,
-    _Permissions,
+    Removed,
+    Changed,
+    Bound,
+    Permissions,
 }
 
 impl std::fmt::Display for MonitorEventType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Added => write!(f, "added"),
-            Self::_Removed => write!(f, "removed"),
-            Self::_Changed => write!(f, "changed"),
-            Self::_Bound => write!(f, "bound"),
-            Self::_Permissions => write!(f, "permissions"),
+            Self::Removed => write!(f, "removed"),
+            Self::Changed => write!(f, "changed"),
+            Self::Bound => write!(f, "bound"),
+            Self::Permissions => write!(f, "permissions"),
         }
     }
 }
@@ -402,6 +405,9 @@ impl std::fmt::Display for _DaemonAction {
     }
 }
 
+// Full metadata-key taxonomy; only a subset is produced by the simulated
+// metadata store today (RouteProfile et al. reserved for device routing).
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum _MetadataKeyType {
     _Default,
@@ -636,7 +642,9 @@ fn build_simulated_state() -> PwState {
             id: 0,
             name: String::from("libpipewire-module-rt"),
             _filename: String::from("/usr/lib/pipewire-0.3/libpipewire-module-rt.so"),
-            _args: String::from("{ nice.level = -11, rt.prio = 88, rt.time.soft = -1, rt.time.hard = -1 }"),
+            _args: String::from(
+                "{ nice.level = -11, rt.prio = 88, rt.time.soft = -1, rt.time.hard = -1 }",
+            ),
         },
         PwModule {
             id: 1,
@@ -659,7 +667,9 @@ fn build_simulated_state() -> PwState {
         PwModule {
             id: 4,
             name: String::from("libpipewire-module-spa-device-factory"),
-            _filename: String::from("/usr/lib/pipewire-0.3/libpipewire-module-spa-device-factory.so"),
+            _filename: String::from(
+                "/usr/lib/pipewire-0.3/libpipewire-module-spa-device-factory.so",
+            ),
             _args: String::new(),
         },
         PwModule {
@@ -684,10 +694,30 @@ fn build_simulated_state() -> PwState {
 
     // Factories
     let factories = vec![
-        PwFactory { _id: 50, name: String::from("support.node.driver"), _factory_type: String::from("PipeWire:Interface:Node"), _module_id: 5 },
-        PwFactory { _id: 51, name: String::from("adapter"), _factory_type: String::from("PipeWire:Interface:Node"), _module_id: 6 },
-        PwFactory { _id: 52, name: String::from("spa-node-factory"), _factory_type: String::from("PipeWire:Interface:Node"), _module_id: 5 },
-        PwFactory { _id: 53, name: String::from("spa-device-factory"), _factory_type: String::from("PipeWire:Interface:Device"), _module_id: 4 },
+        PwFactory {
+            _id: 50,
+            name: String::from("support.node.driver"),
+            _factory_type: String::from("PipeWire:Interface:Node"),
+            _module_id: 5,
+        },
+        PwFactory {
+            _id: 51,
+            name: String::from("adapter"),
+            _factory_type: String::from("PipeWire:Interface:Node"),
+            _module_id: 6,
+        },
+        PwFactory {
+            _id: 52,
+            name: String::from("spa-node-factory"),
+            _factory_type: String::from("PipeWire:Interface:Node"),
+            _module_id: 5,
+        },
+        PwFactory {
+            _id: 53,
+            name: String::from("spa-device-factory"),
+            _factory_type: String::from("PipeWire:Interface:Device"),
+            _module_id: 4,
+        },
     ];
 
     // Devices
@@ -734,16 +764,14 @@ fn build_simulated_state() -> PwState {
             _vendor_id: 0x1038,
             _product_id: 0x12AD,
             _form_factor: String::from("headset"),
-            profiles: vec![
-                DeviceProfile {
-                    _index: 0,
-                    name: String::from("output:analog-stereo+input:mono-fallback"),
-                    _description: String::from("Analog Stereo Output + Mono Input"),
-                    _priority: 6500,
-                    _available: true,
-                    _classes: vec![String::from("Audio/Sink"), String::from("Audio/Source")],
-                },
-            ],
+            profiles: vec![DeviceProfile {
+                _index: 0,
+                name: String::from("output:analog-stereo+input:mono-fallback"),
+                _description: String::from("Analog Stereo Output + Mono Input"),
+                _priority: 6500,
+                _available: true,
+                _classes: vec![String::from("Audio/Sink"), String::from("Audio/Source")],
+            }],
             _active_profile_index: 0,
         },
     ];
@@ -898,47 +926,322 @@ fn build_simulated_state() -> PwState {
 
     // Ports
     let ports = vec![
-        PwPort { id: 200, node_id: 30, name: String::from("playback_FL"), direction: PortDirection::Input, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::S32Le, _channel: ChannelPosition::FrontLeft, _physical: true, _terminal: true, _alias: String::from("Built-in Audio:playback_FL") },
-        PwPort { id: 201, node_id: 30, name: String::from("playback_FR"), direction: PortDirection::Input, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::S32Le, _channel: ChannelPosition::FrontRight, _physical: true, _terminal: true, _alias: String::from("Built-in Audio:playback_FR") },
-        PwPort { id: 202, node_id: 31, name: String::from("capture_FL"), direction: PortDirection::Output, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::S32Le, _channel: ChannelPosition::FrontLeft, _physical: true, _terminal: true, _alias: String::from("Built-in Audio:capture_FL") },
-        PwPort { id: 203, node_id: 31, name: String::from("capture_FR"), direction: PortDirection::Output, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::S32Le, _channel: ChannelPosition::FrontRight, _physical: true, _terminal: true, _alias: String::from("Built-in Audio:capture_FR") },
-        PwPort { id: 204, node_id: 32, name: String::from("playback_FL"), direction: PortDirection::Input, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::S16Le, _channel: ChannelPosition::FrontLeft, _physical: true, _terminal: true, _alias: String::from("Arctis 7:playback_FL") },
-        PwPort { id: 205, node_id: 32, name: String::from("playback_FR"), direction: PortDirection::Input, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::S16Le, _channel: ChannelPosition::FrontRight, _physical: true, _terminal: true, _alias: String::from("Arctis 7:playback_FR") },
-        PwPort { id: 206, node_id: 33, name: String::from("capture_MONO"), direction: PortDirection::Output, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::S16Le, _channel: ChannelPosition::Mono, _physical: true, _terminal: true, _alias: String::from("Arctis 7:capture_MONO") },
-        PwPort { id: 207, node_id: 34, name: String::from("output_FL"), direction: PortDirection::Output, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::F32Le, _channel: ChannelPosition::FrontLeft, _physical: false, _terminal: false, _alias: String::from("Firefox:output_FL") },
-        PwPort { id: 208, node_id: 34, name: String::from("output_FR"), direction: PortDirection::Output, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::F32Le, _channel: ChannelPosition::FrontRight, _physical: false, _terminal: false, _alias: String::from("Firefox:output_FR") },
-        PwPort { id: 209, node_id: 35, name: String::from("input_MONO"), direction: PortDirection::Input, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::F32Le, _channel: ChannelPosition::Mono, _physical: false, _terminal: false, _alias: String::from("WEBRTC:input_MONO") },
-        PwPort { id: 210, node_id: 36, name: String::from("output_FL"), direction: PortDirection::Output, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::F32Le, _channel: ChannelPosition::FrontLeft, _physical: false, _terminal: false, _alias: String::from("Spotify:output_FL") },
-        PwPort { id: 211, node_id: 36, name: String::from("output_FR"), direction: PortDirection::Output, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::F32Le, _channel: ChannelPosition::FrontRight, _physical: false, _terminal: false, _alias: String::from("Spotify:output_FR") },
-        PwPort { id: 212, node_id: 37, name: String::from("video_out"), direction: PortDirection::Output, _media_type: MediaType::Video, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::S16Le, _channel: ChannelPosition::Mono, _physical: true, _terminal: true, _alias: String::from("USB Camera:video_out") },
-        PwPort { id: 213, node_id: 38, name: String::from("midi_in"), direction: PortDirection::Input, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::S16Le, _channel: ChannelPosition::Mono, _physical: false, _terminal: false, _alias: String::from("Midi Through:midi_in") },
-        PwPort { id: 214, node_id: 38, name: String::from("midi_out"), direction: PortDirection::Output, _media_type: MediaType::Audio, _media_subtype: MediaSubtype::Raw, _format: AudioFormat::S16Le, _channel: ChannelPosition::Mono, _physical: false, _terminal: false, _alias: String::from("Midi Through:midi_out") },
+        PwPort {
+            id: 200,
+            node_id: 30,
+            name: String::from("playback_FL"),
+            direction: PortDirection::Input,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::S32Le,
+            _channel: ChannelPosition::FrontLeft,
+            _physical: true,
+            _terminal: true,
+            _alias: String::from("Built-in Audio:playback_FL"),
+        },
+        PwPort {
+            id: 201,
+            node_id: 30,
+            name: String::from("playback_FR"),
+            direction: PortDirection::Input,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::S32Le,
+            _channel: ChannelPosition::FrontRight,
+            _physical: true,
+            _terminal: true,
+            _alias: String::from("Built-in Audio:playback_FR"),
+        },
+        PwPort {
+            id: 202,
+            node_id: 31,
+            name: String::from("capture_FL"),
+            direction: PortDirection::Output,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::S32Le,
+            _channel: ChannelPosition::FrontLeft,
+            _physical: true,
+            _terminal: true,
+            _alias: String::from("Built-in Audio:capture_FL"),
+        },
+        PwPort {
+            id: 203,
+            node_id: 31,
+            name: String::from("capture_FR"),
+            direction: PortDirection::Output,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::S32Le,
+            _channel: ChannelPosition::FrontRight,
+            _physical: true,
+            _terminal: true,
+            _alias: String::from("Built-in Audio:capture_FR"),
+        },
+        PwPort {
+            id: 204,
+            node_id: 32,
+            name: String::from("playback_FL"),
+            direction: PortDirection::Input,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::S16Le,
+            _channel: ChannelPosition::FrontLeft,
+            _physical: true,
+            _terminal: true,
+            _alias: String::from("Arctis 7:playback_FL"),
+        },
+        PwPort {
+            id: 205,
+            node_id: 32,
+            name: String::from("playback_FR"),
+            direction: PortDirection::Input,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::S16Le,
+            _channel: ChannelPosition::FrontRight,
+            _physical: true,
+            _terminal: true,
+            _alias: String::from("Arctis 7:playback_FR"),
+        },
+        PwPort {
+            id: 206,
+            node_id: 33,
+            name: String::from("capture_MONO"),
+            direction: PortDirection::Output,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::S16Le,
+            _channel: ChannelPosition::Mono,
+            _physical: true,
+            _terminal: true,
+            _alias: String::from("Arctis 7:capture_MONO"),
+        },
+        PwPort {
+            id: 207,
+            node_id: 34,
+            name: String::from("output_FL"),
+            direction: PortDirection::Output,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::F32Le,
+            _channel: ChannelPosition::FrontLeft,
+            _physical: false,
+            _terminal: false,
+            _alias: String::from("Firefox:output_FL"),
+        },
+        PwPort {
+            id: 208,
+            node_id: 34,
+            name: String::from("output_FR"),
+            direction: PortDirection::Output,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::F32Le,
+            _channel: ChannelPosition::FrontRight,
+            _physical: false,
+            _terminal: false,
+            _alias: String::from("Firefox:output_FR"),
+        },
+        PwPort {
+            id: 209,
+            node_id: 35,
+            name: String::from("input_MONO"),
+            direction: PortDirection::Input,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::F32Le,
+            _channel: ChannelPosition::Mono,
+            _physical: false,
+            _terminal: false,
+            _alias: String::from("WEBRTC:input_MONO"),
+        },
+        PwPort {
+            id: 210,
+            node_id: 36,
+            name: String::from("output_FL"),
+            direction: PortDirection::Output,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::F32Le,
+            _channel: ChannelPosition::FrontLeft,
+            _physical: false,
+            _terminal: false,
+            _alias: String::from("Spotify:output_FL"),
+        },
+        PwPort {
+            id: 211,
+            node_id: 36,
+            name: String::from("output_FR"),
+            direction: PortDirection::Output,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::F32Le,
+            _channel: ChannelPosition::FrontRight,
+            _physical: false,
+            _terminal: false,
+            _alias: String::from("Spotify:output_FR"),
+        },
+        PwPort {
+            id: 212,
+            node_id: 37,
+            name: String::from("video_out"),
+            direction: PortDirection::Output,
+            _media_type: MediaType::Video,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::S16Le,
+            _channel: ChannelPosition::Mono,
+            _physical: true,
+            _terminal: true,
+            _alias: String::from("USB Camera:video_out"),
+        },
+        PwPort {
+            id: 213,
+            node_id: 38,
+            name: String::from("midi_in"),
+            direction: PortDirection::Input,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::S16Le,
+            _channel: ChannelPosition::Mono,
+            _physical: false,
+            _terminal: false,
+            _alias: String::from("Midi Through:midi_in"),
+        },
+        PwPort {
+            id: 214,
+            node_id: 38,
+            name: String::from("midi_out"),
+            direction: PortDirection::Output,
+            _media_type: MediaType::Audio,
+            _media_subtype: MediaSubtype::Raw,
+            _format: AudioFormat::S16Le,
+            _channel: ChannelPosition::Mono,
+            _physical: false,
+            _terminal: false,
+            _alias: String::from("Midi Through:midi_out"),
+        },
     ];
 
     // Links
     let links = vec![
-        PwLink { id: 300, output_node: 34, output_port: 207, input_node: 30, input_port: 200, state: LinkState::Active, _active: true, _feedback: false },
-        PwLink { id: 301, output_node: 34, output_port: 208, input_node: 30, input_port: 201, state: LinkState::Active, _active: true, _feedback: false },
-        PwLink { id: 302, output_node: 31, output_port: 202, input_node: 35, input_port: 209, state: LinkState::Active, _active: true, _feedback: false },
-        PwLink { id: 303, output_node: 36, output_port: 210, input_node: 30, input_port: 200, state: LinkState::Paused, _active: false, _feedback: false },
-        PwLink { id: 304, output_node: 36, output_port: 211, input_node: 30, input_port: 201, state: LinkState::Paused, _active: false, _feedback: false },
+        PwLink {
+            id: 300,
+            output_node: 34,
+            output_port: 207,
+            input_node: 30,
+            input_port: 200,
+            state: LinkState::Active,
+            _active: true,
+            _feedback: false,
+        },
+        PwLink {
+            id: 301,
+            output_node: 34,
+            output_port: 208,
+            input_node: 30,
+            input_port: 201,
+            state: LinkState::Active,
+            _active: true,
+            _feedback: false,
+        },
+        PwLink {
+            id: 302,
+            output_node: 31,
+            output_port: 202,
+            input_node: 35,
+            input_port: 209,
+            state: LinkState::Active,
+            _active: true,
+            _feedback: false,
+        },
+        PwLink {
+            id: 303,
+            output_node: 36,
+            output_port: 210,
+            input_node: 30,
+            input_port: 200,
+            state: LinkState::Paused,
+            _active: false,
+            _feedback: false,
+        },
+        PwLink {
+            id: 304,
+            output_node: 36,
+            output_port: 211,
+            input_node: 30,
+            input_port: 201,
+            state: LinkState::Paused,
+            _active: false,
+            _feedback: false,
+        },
     ];
 
     // Clients
     let clients = vec![
-        PwClient { id: 40, name: String::from("WirePlumber"), _pid: 1001, _access: ClientAccess::Unrestricted, _protocol: String::from("protocol-native") },
-        PwClient { id: 41, name: String::from("pipewire"), _pid: 1000, _access: ClientAccess::Unrestricted, _protocol: String::from("protocol-native") },
-        PwClient { id: 42, name: String::from("Firefox"), _pid: 2001, _access: ClientAccess::Unrestricted, _protocol: String::from("protocol-native") },
-        PwClient { id: 43, name: String::from("spotify"), _pid: 2002, _access: ClientAccess::Unrestricted, _protocol: String::from("protocol-native") },
-        PwClient { id: 44, name: String::from("xdg-desktop-portal"), _pid: 1500, _access: ClientAccess::Unrestricted, _protocol: String::from("protocol-native") },
+        PwClient {
+            id: 40,
+            name: String::from("WirePlumber"),
+            _pid: 1001,
+            _access: ClientAccess::Unrestricted,
+            _protocol: String::from("protocol-native"),
+        },
+        PwClient {
+            id: 41,
+            name: String::from("pipewire"),
+            _pid: 1000,
+            _access: ClientAccess::Unrestricted,
+            _protocol: String::from("protocol-native"),
+        },
+        PwClient {
+            id: 42,
+            name: String::from("Firefox"),
+            _pid: 2001,
+            _access: ClientAccess::Unrestricted,
+            _protocol: String::from("protocol-native"),
+        },
+        PwClient {
+            id: 43,
+            name: String::from("spotify"),
+            _pid: 2002,
+            _access: ClientAccess::Unrestricted,
+            _protocol: String::from("protocol-native"),
+        },
+        PwClient {
+            id: 44,
+            name: String::from("xdg-desktop-portal"),
+            _pid: 1500,
+            _access: ClientAccess::Unrestricted,
+            _protocol: String::from("protocol-native"),
+        },
     ];
 
     // Metadata
     let metadata = vec![
-        PwMetadataEntry { subject: 0, key: String::from("default.audio.sink"), value: String::from("{\"name\":\"alsa_output.pci-0000_00_1f.3.analog-stereo\"}"), _key_type: String::from("Spa:String:JSON") },
-        PwMetadataEntry { subject: 0, key: String::from("default.audio.source"), value: String::from("{\"name\":\"alsa_input.pci-0000_00_1f.3.analog-stereo\"}"), _key_type: String::from("Spa:String:JSON") },
-        PwMetadataEntry { subject: 30, key: String::from("target.node"), value: String::from("30"), _key_type: String::from("Spa:Int") },
-        PwMetadataEntry { subject: 34, key: String::from("target.node"), value: String::from("30"), _key_type: String::from("Spa:Int") },
+        PwMetadataEntry {
+            subject: 0,
+            key: String::from("default.audio.sink"),
+            value: String::from("{\"name\":\"alsa_output.pci-0000_00_1f.3.analog-stereo\"}"),
+            _key_type: String::from("Spa:String:JSON"),
+        },
+        PwMetadataEntry {
+            subject: 0,
+            key: String::from("default.audio.source"),
+            value: String::from("{\"name\":\"alsa_input.pci-0000_00_1f.3.analog-stereo\"}"),
+            _key_type: String::from("Spa:String:JSON"),
+        },
+        PwMetadataEntry {
+            subject: 30,
+            key: String::from("target.node"),
+            value: String::from("30"),
+            _key_type: String::from("Spa:Int"),
+        },
+        PwMetadataEntry {
+            subject: 34,
+            key: String::from("target.node"),
+            value: String::from("30"),
+            _key_type: String::from("Spa:Int"),
+        },
     ];
 
     PwState {
@@ -979,31 +1282,57 @@ fn find_module_by_id(state: &PwState, id: u32) -> Option<&PwModule> {
 }
 
 fn ports_for_node(state: &PwState, node_id: u32) -> Vec<&PwPort> {
-    state.ports.iter().filter(|p| p.node_id == node_id).collect()
+    state
+        .ports
+        .iter()
+        .filter(|p| p.node_id == node_id)
+        .collect()
 }
 
 fn links_for_node(state: &PwState, node_id: u32) -> Vec<&PwLink> {
-    state.links.iter().filter(|l| l.output_node == node_id || l.input_node == node_id).collect()
+    state
+        .links
+        .iter()
+        .filter(|l| l.output_node == node_id || l.input_node == node_id)
+        .collect()
 }
 
 fn sink_nodes(state: &PwState) -> Vec<&PwNode> {
-    state.nodes.iter().filter(|n| n.media_class == "Audio/Sink").collect()
+    state
+        .nodes
+        .iter()
+        .filter(|n| n.media_class == "Audio/Sink")
+        .collect()
 }
 
 fn source_nodes(state: &PwState) -> Vec<&PwNode> {
-    state.nodes.iter().filter(|n| n.media_class == "Audio/Source").collect()
+    state
+        .nodes
+        .iter()
+        .filter(|n| n.media_class == "Audio/Source")
+        .collect()
 }
 
 fn stream_output_nodes(state: &PwState) -> Vec<&PwNode> {
-    state.nodes.iter().filter(|n| n.media_class == "Stream/Output/Audio").collect()
+    state
+        .nodes
+        .iter()
+        .filter(|n| n.media_class == "Stream/Output/Audio")
+        .collect()
 }
 
 fn stream_input_nodes(state: &PwState) -> Vec<&PwNode> {
-    state.nodes.iter().filter(|n| n.media_class == "Stream/Input/Audio").collect()
+    state
+        .nodes
+        .iter()
+        .filter(|n| n.media_class == "Stream/Input/Audio")
+        .collect()
 }
 
 fn default_sink(state: &PwState) -> Option<&PwNode> {
-    state.metadata.iter()
+    state
+        .metadata
+        .iter()
         .find(|m| m.key == "default.audio.sink")
         .and_then(|m| {
             // Parse name from JSON-like value
@@ -1014,7 +1343,9 @@ fn default_sink(state: &PwState) -> Option<&PwNode> {
 }
 
 fn default_source(state: &PwState) -> Option<&PwNode> {
-    state.metadata.iter()
+    state
+        .metadata
+        .iter()
         .find(|m| m.key == "default.audio.source")
         .and_then(|m| {
             let val = &m.value;
@@ -1066,15 +1397,22 @@ fn parse_volume_spec(spec: &str) -> Option<f64> {
 }
 
 fn parse_id_or_name<'a>(s: &str, state: &'a PwState) -> Option<&'a PwNode> {
-    if let Some(id) = s.parse::<u32>().ok() {
+    if let Ok(id) = s.parse::<u32>() {
         find_node_by_id(state, id)
     } else {
-        state.nodes.iter().find(|n| n.name == s || n.media_class == s)
+        state
+            .nodes
+            .iter()
+            .find(|n| n.name == s || n.media_class == s)
     }
 }
 
-fn _format_node_short(node: &PwNode) -> String {
-    format!("id {}, type {}, name \"{}\"", node.id, node.media_class, node.name)
+#[allow(dead_code)] // compact node renderer reserved for a future short-list view, tested
+fn format_node_short(node: &PwNode) -> String {
+    format!(
+        "id {}, type {}, name \"{}\"",
+        node.id, node.media_class, node.name
+    )
 }
 
 fn format_bytes_display(bytes: u64) -> String {
@@ -1090,7 +1428,9 @@ fn format_bytes_display(bytes: u64) -> String {
 }
 
 fn compute_data_rate(config: &AudioStreamConfig) -> u64 {
-    u64::from(config.rate) * u64::from(config.channels) * u64::from(config.format.bytes_per_sample())
+    u64::from(config.rate)
+        * u64::from(config.channels)
+        * u64::from(config.format.bytes_per_sample())
 }
 
 fn format_duration_hms(total_secs: f64) -> String {
@@ -1115,69 +1455,102 @@ fn parse_stream_args(args: &[String], default_direction: StreamDirection) -> Aud
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--format" | "-f" => {
-                if i + 1 < args.len() {
-                    if let Some(fmt) = AudioFormat::from_str_opt(&args[i + 1]) {
-                        format = fmt;
-                    }
-                    i += 1;
+            "--format" | "-f" if i + 1 < args.len() => {
+                if let Some(fmt) = AudioFormat::from_str_opt(&args[i + 1]) {
+                    format = fmt;
                 }
+                i += 1;
             }
-            "--rate" | "-r" => {
-                if i + 1 < args.len() {
-                    if let Some(r) = args[i + 1].parse().ok() {
-                        rate = r;
-                    }
-                    i += 1;
+            "--rate" | "-r" if i + 1 < args.len() => {
+                if let Ok(r) = args[i + 1].parse() {
+                    rate = r;
                 }
+                i += 1;
             }
-            "--channels" | "-c" => {
-                if i + 1 < args.len() {
-                    if let Some(c) = args[i + 1].parse().ok() {
-                        channels = c;
-                    }
-                    i += 1;
+            "--channels" | "-c" if i + 1 < args.len() => {
+                if let Ok(c) = args[i + 1].parse() {
+                    channels = c;
                 }
+                i += 1;
             }
-            "--volume" => {
-                if i + 1 < args.len() {
-                    if let Some(v) = args[i + 1].parse().ok() {
-                        volume = v;
-                    }
-                    i += 1;
+            "--volume" if i + 1 < args.len() => {
+                if let Ok(v) = args[i + 1].parse() {
+                    volume = v;
                 }
+                i += 1;
             }
-            "--latency" => {
-                if i + 1 < args.len() {
-                    if let Some(slash) = args[i + 1].find('/') {
-                        if let Some(b) = args[i + 1][..slash].parse().ok() {
-                            buffer_size = b;
-                        }
-                    }
-                    i += 1;
+            "--latency" if i + 1 < args.len() => {
+                if let Some(slash) = args[i + 1].find('/')
+                    && let Ok(b) = args[i + 1][..slash].parse()
+                {
+                    buffer_size = b;
                 }
+                i += 1;
             }
             _ => {}
         }
         i += 1;
     }
     let _ = default_direction;
-    AudioStreamConfig { format, rate, channels, _volume: volume, _buffer_size: buffer_size }
+    AudioStreamConfig {
+        format,
+        rate,
+        channels,
+        _volume: volume,
+        _buffer_size: buffer_size,
+    }
 }
 
 fn simulated_volume_for_node(node_id: u32) -> VolumeInfo {
     // Simulated volume data per well-known node
     match node_id {
-        30 => VolumeInfo { _node_id: 30, volume: 0.74, muted: false, _channel_count: 2, _base_volume: 1.0, _step: 0.01 },
-        31 => VolumeInfo { _node_id: 31, volume: 1.0, muted: false, _channel_count: 2, _base_volume: 1.0, _step: 0.01 },
-        32 => VolumeInfo { _node_id: 32, volume: 0.50, muted: true, _channel_count: 2, _base_volume: 1.0, _step: 0.01 },
-        33 => VolumeInfo { _node_id: 33, volume: 0.85, muted: false, _channel_count: 1, _base_volume: 1.0, _step: 0.01 },
-        _ => VolumeInfo { _node_id: node_id, volume: 1.0, muted: false, _channel_count: 2, _base_volume: 1.0, _step: 0.01 },
+        30 => VolumeInfo {
+            _node_id: 30,
+            volume: 0.74,
+            muted: false,
+            _channel_count: 2,
+            _base_volume: 1.0,
+            _step: 0.01,
+        },
+        31 => VolumeInfo {
+            _node_id: 31,
+            volume: 1.0,
+            muted: false,
+            _channel_count: 2,
+            _base_volume: 1.0,
+            _step: 0.01,
+        },
+        32 => VolumeInfo {
+            _node_id: 32,
+            volume: 0.50,
+            muted: true,
+            _channel_count: 2,
+            _base_volume: 1.0,
+            _step: 0.01,
+        },
+        33 => VolumeInfo {
+            _node_id: 33,
+            volume: 0.85,
+            muted: false,
+            _channel_count: 1,
+            _base_volume: 1.0,
+            _step: 0.01,
+        },
+        _ => VolumeInfo {
+            _node_id: node_id,
+            volume: 1.0,
+            muted: false,
+            _channel_count: 2,
+            _base_volume: 1.0,
+            _step: 0.01,
+        },
     }
 }
 
 fn simulated_processing_info(state: &PwState) -> Vec<ProcessingInfo> {
-    state.nodes.iter()
+    state
+        .nodes
+        .iter()
         .filter(|n| n.state == NodeState::Running || n.state == NodeState::Idle)
         .map(|n| ProcessingInfo {
             node_id: n.id,
@@ -1419,7 +1792,10 @@ fn print_node_info(node: &PwNode, state: &PwState) {
     if !node_links.is_empty() {
         println!("\tlinks:");
         for link in &node_links {
-            println!("\t\t{}: {} -> {} [{}]", link.id, link.output_port, link.input_port, link.state);
+            println!(
+                "\t\t{}: {} -> {} [{}]",
+                link.id, link.output_port, link.input_port, link.state
+            );
         }
     }
 }
@@ -1480,22 +1856,39 @@ fn run_pw_cli_list_objects(args: &[String], state: &PwState) -> i32 {
     match type_filter {
         Some("Node") | Some("node") | Some("nodes") => {
             for node in &state.nodes {
-                println!("\t{}: {} state:{} \"{}\"", node.id, node.media_class, node.state, node.name);
+                println!(
+                    "\t{}: {} state:{} \"{}\"",
+                    node.id, node.media_class, node.state, node.name
+                );
             }
         }
         Some("Port") | Some("port") | Some("ports") => {
             for port in &state.ports {
-                println!("\t{}: node:{} {} \"{}\"", port.id, port.node_id, port.direction, port.name);
+                println!(
+                    "\t{}: node:{} {} \"{}\"",
+                    port.id, port.node_id, port.direction, port.name
+                );
             }
         }
         Some("Link") | Some("link") | Some("links") => {
             for link in &state.links {
-                println!("\t{}: {}:{} -> {}:{} [{}]", link.id, link.output_node, link.output_port, link.input_node, link.input_port, link.state);
+                println!(
+                    "\t{}: {}:{} -> {}:{} [{}]",
+                    link.id,
+                    link.output_node,
+                    link.output_port,
+                    link.input_node,
+                    link.input_port,
+                    link.state
+                );
             }
         }
         Some("Device") | Some("device") | Some("devices") => {
             for device in &state.devices {
-                println!("\t{}: {} \"{}\"", device.id, device.device_type, device.name);
+                println!(
+                    "\t{}: {} \"{}\"",
+                    device.id, device.device_type, device.name
+                );
             }
         }
         Some("Client") | Some("client") | Some("clients") => {
@@ -1518,10 +1911,16 @@ fn run_pw_cli_list_objects(args: &[String], state: &PwState) -> i32 {
                 println!("\t{}: Node \"{}\" [{}]", node.id, node.name, node.state);
             }
             for port in &state.ports {
-                println!("\t{}: Port \"{}\" (node {})", port.id, port.name, port.node_id);
+                println!(
+                    "\t{}: Port \"{}\" (node {})",
+                    port.id, port.name, port.node_id
+                );
             }
             for link in &state.links {
-                println!("\t{}: Link {} -> {} [{}]", link.id, link.output_port, link.input_port, link.state);
+                println!(
+                    "\t{}: Link {} -> {} [{}]",
+                    link.id, link.output_port, link.input_port, link.state
+                );
             }
             for device in &state.devices {
                 println!("\t{}: Device \"{}\"", device.id, device.name);
@@ -1568,8 +1967,13 @@ fn run_pw_cli_enum_params(args: &[String], state: &PwState) -> i32 {
                 let vol_info = simulated_volume_for_node(node.id);
                 println!("    volume: {:.6}", vol_info.volume);
                 println!("    mute: {}", vol_info.muted);
-                println!("    channelVolumes: [{}]",
-                    (0..node.channels).map(|_| format!("{:.6}", vol_info.volume)).collect::<Vec<_>>().join(", "));
+                println!(
+                    "    channelVolumes: [{}]",
+                    (0..node.channels)
+                        .map(|_| format!("{:.6}", vol_info.volume))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
             }
             "ProcessLatency" | "process-latency" => {
                 println!("  Object: id {}", node.id);
@@ -1595,7 +1999,10 @@ fn run_pw_cli_permissions(args: &[String], _state: &PwState) -> i32 {
         eprintln!("pw-cli: permissions: usage: permissions <client-id> <object-id>:<permission>");
         return 1;
     }
-    println!("pw-cli: permissions set for client {} -> {}", args[0], args[1]);
+    println!(
+        "pw-cli: permissions set for client {} -> {}",
+        args[0], args[1]
+    );
     0
 }
 
@@ -1646,7 +2053,10 @@ fn run_pw_cli_create_link(args: &[String], state: &PwState) -> i32 {
         eprintln!("pw-cli: create-link: input port {} not found", in_port);
         return 1;
     }
-    println!("pw-cli: link created: {} -> {} (simulated)", out_port, in_port);
+    println!(
+        "pw-cli: link created: {} -> {} (simulated)",
+        out_port, in_port
+    );
     0
 }
 
@@ -1683,19 +2093,23 @@ fn run_pw_cli_destroy(args: &[String], state: &PwState) -> i32 {
 // ── pw-dump ────────────────────────────────────────────────────────────
 
 fn run_pw_dump(args: Vec<String>, state: &PwState) -> i32 {
-    if args.first().map(|s| s.as_str()) == Some("--help") || args.first().map(|s| s.as_str()) == Some("-h") {
+    if args.first().map(|s| s.as_str()) == Some("--help")
+        || args.first().map(|s| s.as_str()) == Some("-h")
+    {
         print_pw_dump_help();
         return 0;
     }
-    if args.first().map(|s| s.as_str()) == Some("--version") || args.first().map(|s| s.as_str()) == Some("-V") {
+    if args.first().map(|s| s.as_str()) == Some("--version")
+        || args.first().map(|s| s.as_str()) == Some("-V")
+    {
         println!("pw-dump: Compiled with libpipewire {}", PW_VERSION);
         return 0;
     }
 
     // Check for --no-colors flag (accept and ignore)
-    let filter_id: Option<u32> = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .next()
+    let filter_id: Option<u32> = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
         .and_then(|s| s.parse().ok());
 
     println!("[");
@@ -1787,15 +2201,30 @@ fn dump_node_json(node: &PwNode, state: &PwState, first: bool) {
     println!("    \"info\": {{");
     println!("      \"name\": \"{}\",", escape_json_string(&node.name));
     println!("      \"state\": \"{}\",", node.state);
-    println!("      \"media.class\": \"{}\",", escape_json_string(&node.media_class));
+    println!(
+        "      \"media.class\": \"{}\",",
+        escape_json_string(&node.media_class)
+    );
     if node.sample_rate > 0 {
         println!("      \"audio.format\": \"{}\",", node.format);
         println!("      \"audio.rate\": {},", node.sample_rate);
         println!("      \"audio.channels\": {},", node.channels);
     }
     let node_ports = ports_for_node(state, node.id);
-    println!("      \"n-input-ports\": {},", node_ports.iter().filter(|p| p.direction == PortDirection::Input).count());
-    println!("      \"n-output-ports\": {}", node_ports.iter().filter(|p| p.direction == PortDirection::Output).count());
+    println!(
+        "      \"n-input-ports\": {},",
+        node_ports
+            .iter()
+            .filter(|p| p.direction == PortDirection::Input)
+            .count()
+    );
+    println!(
+        "      \"n-output-ports\": {}",
+        node_ports
+            .iter()
+            .filter(|p| p.direction == PortDirection::Output)
+            .count()
+    );
     println!("    }}");
     print!("  }}");
 }
@@ -1838,8 +2267,12 @@ fn dump_device_json(device: &PwDevice, first: bool) {
     println!("      \"device.type\": \"{}\",", device.device_type);
     println!("      \"profiles\": [");
     for (i, prof) in device.profiles.iter().enumerate() {
-        let comma = if i + 1 < device.profiles.len() { "," } else { "" };
-        println!("        \"{}\"{}",  escape_json_string(&prof.name), comma);
+        let comma = if i + 1 < device.profiles.len() {
+            ","
+        } else {
+            ""
+        };
+        println!("        \"{}\"{}", escape_json_string(&prof.name), comma);
     }
     println!("      ]");
     println!("    }}");
@@ -1866,7 +2299,10 @@ fn dump_module_json(module: &PwModule, first: bool) {
     println!("    \"type\": \"PipeWire:Interface:Module\",");
     println!("    \"info\": {{");
     println!("      \"name\": \"{}\",", escape_json_string(&module.name));
-    println!("      \"filename\": \"{}\"", escape_json_string(&module._filename));
+    println!(
+        "      \"filename\": \"{}\"",
+        escape_json_string(&module._filename)
+    );
     println!("    }}");
     print!("  }}");
 }
@@ -1906,8 +2342,14 @@ fn print_pw_record_help() {
     println!("  --version, -V        Show version");
     println!("  --target <target>    Target node name or id");
     println!("  --format <fmt>       Audio format (S16LE, S24LE, S32LE, F32LE)");
-    println!("  --rate <rate>        Sample rate (default: {})", DEFAULT_SAMPLE_RATE);
-    println!("  --channels <n>       Number of channels (default: {})", DEFAULT_CHANNELS);
+    println!(
+        "  --rate <rate>        Sample rate (default: {})",
+        DEFAULT_SAMPLE_RATE
+    );
+    println!(
+        "  --channels <n>       Number of channels (default: {})",
+        DEFAULT_CHANNELS
+    );
     println!("  --volume <vol>       Recording volume (0.0-1.0)");
     println!("  --latency <n/rate>   Buffer latency");
 }
@@ -1921,17 +2363,21 @@ fn parse_record_config(args: &[String]) -> Option<RecordConfig> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--target" | "-t" => {
-                if i + 1 < args.len() {
-                    target = Some(args[i + 1].clone());
-                    i += 1;
-                }
+            "--target" | "-t" if i + 1 < args.len() => {
+                target = Some(args[i + 1].clone());
+                i += 1;
             }
-            "--duration" | "-d" => {
-                if i + 1 < args.len() {
-                    duration_secs = args[i + 1].parse().ok();
-                    i += 1;
-                }
+            "--duration" | "-d" if i + 1 < args.len() => {
+                duration_secs = args[i + 1].parse().ok();
+                i += 1;
+            }
+            // Value-taking options consumed by parse_stream_args. Skip their
+            // value here so it is not mistaken for the positional output file.
+            "--format" | "-f" | "--rate" | "-r" | "--channels" | "-c" | "--volume"
+            | "--latency"
+                if i + 1 < args.len() =>
+            {
+                i += 1;
             }
             s if !s.starts_with('-') => {
                 output_file = Some(s.to_string());
@@ -1950,7 +2396,9 @@ fn parse_record_config(args: &[String]) -> Option<RecordConfig> {
 }
 
 fn run_record_simulation(config: &RecordConfig, state: &PwState) {
-    let source = config.target.as_ref()
+    let source = config
+        .target
+        .as_ref()
         .and_then(|t| parse_id_or_name(t, state))
         .or_else(|| default_source(state));
 
@@ -1958,15 +2406,21 @@ fn run_record_simulation(config: &RecordConfig, state: &PwState) {
     let data_rate = compute_data_rate(&config.stream);
 
     println!("Recording from \"{}\"", source_name);
-    println!("  Format: {}, Rate: {}, Channels: {}",
-        config.stream.format, config.stream.rate, config.stream.channels);
+    println!(
+        "  Format: {}, Rate: {}, Channels: {}",
+        config.stream.format, config.stream.rate, config.stream.channels
+    );
     println!("  Output: {}", config.output_file);
     println!("  Data rate: {}/s", format_bytes_display(data_rate));
 
     // Simulate 2 seconds of recording
     let simulated_duration = 2.0;
     let total_bytes = (data_rate as f64 * simulated_duration) as u64;
-    println!("  Recorded: {} ({})", format_bytes_display(total_bytes), format_duration_hms(simulated_duration));
+    println!(
+        "  Recorded: {} ({})",
+        format_bytes_display(total_bytes),
+        format_duration_hms(simulated_duration)
+    );
     println!("Recording complete.");
 }
 
@@ -2005,8 +2459,14 @@ fn print_pw_play_help() {
     println!("  --version, -V        Show version");
     println!("  --target <target>    Target sink name or id");
     println!("  --format <fmt>       Audio format (S16LE, S24LE, S32LE, F32LE)");
-    println!("  --rate <rate>        Sample rate (default: {})", DEFAULT_SAMPLE_RATE);
-    println!("  --channels <n>       Number of channels (default: {})", DEFAULT_CHANNELS);
+    println!(
+        "  --rate <rate>        Sample rate (default: {})",
+        DEFAULT_SAMPLE_RATE
+    );
+    println!(
+        "  --channels <n>       Number of channels (default: {})",
+        DEFAULT_CHANNELS
+    );
     println!("  --volume <vol>       Playback volume (0.0-1.0)");
     println!("  --latency <n/rate>   Buffer latency");
     println!("  --loop               Loop playback");
@@ -2021,14 +2481,21 @@ fn parse_play_config(args: &[String]) -> Option<PlayConfig> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--target" | "-t" => {
-                if i + 1 < args.len() {
-                    target = Some(args[i + 1].clone());
-                    i += 1;
-                }
+            "--target" | "-t" if i + 1 < args.len() => {
+                target = Some(args[i + 1].clone());
+                i += 1;
             }
             "--loop" => {
                 loop_playback = true;
+            }
+            // Value-taking options consumed by parse_stream_args. Skip their
+            // value here so it is not mistaken for the positional input file
+            // (e.g. `pw-play --format S32LE` has no file and must yield None).
+            "--format" | "-f" | "--rate" | "-r" | "--channels" | "-c" | "--volume"
+            | "--latency"
+                if i + 1 < args.len() =>
+            {
+                i += 1;
             }
             s if !s.starts_with('-') => {
                 input_file = Some(s.to_string());
@@ -2047,7 +2514,9 @@ fn parse_play_config(args: &[String]) -> Option<PlayConfig> {
 }
 
 fn run_play_simulation(config: &PlayConfig, state: &PwState) {
-    let sink = config.target.as_ref()
+    let sink = config
+        .target
+        .as_ref()
         .and_then(|t| parse_id_or_name(t, state))
         .or_else(|| default_sink(state));
 
@@ -2055,15 +2524,21 @@ fn run_play_simulation(config: &PlayConfig, state: &PwState) {
     let data_rate = compute_data_rate(&config.stream);
 
     println!("Playing to \"{}\"", sink_name);
-    println!("  Format: {}, Rate: {}, Channels: {}",
-        config.stream.format, config.stream.rate, config.stream.channels);
+    println!(
+        "  Format: {}, Rate: {}, Channels: {}",
+        config.stream.format, config.stream.rate, config.stream.channels
+    );
     println!("  Input: {}", config.input_file);
     println!("  Data rate: {}/s", format_bytes_display(data_rate));
 
     // Simulate 3 seconds of playback
     let simulated_duration = 3.0;
     let total_bytes = (data_rate as f64 * simulated_duration) as u64;
-    println!("  Played: {} ({})", format_bytes_display(total_bytes), format_duration_hms(simulated_duration));
+    println!(
+        "  Played: {} ({})",
+        format_bytes_display(total_bytes),
+        format_duration_hms(simulated_duration)
+    );
     println!("Playback complete.");
 }
 
@@ -2112,20 +2587,24 @@ fn parse_cat_config(args: &[String]) -> CatConfig {
         match arg.as_str() {
             "--record" | "-r" => direction = StreamDirection::Capture,
             "--playback" | "-p" => direction = StreamDirection::Playback,
-            "--target" | "-t" => {
-                if i + 1 < args.len() {
-                    target = Some(args[i + 1].clone());
-                }
+            "--target" | "-t" if i + 1 < args.len() => {
+                target = Some(args[i + 1].clone());
             }
             _ => {}
         }
     }
 
-    CatConfig { direction, target, stream }
+    CatConfig {
+        direction,
+        target,
+        stream,
+    }
 }
 
 fn run_cat_simulation(config: &CatConfig, state: &PwState) {
-    let node = config.target.as_ref()
+    let node = config
+        .target
+        .as_ref()
         .and_then(|t| parse_id_or_name(t, state))
         .or_else(|| match config.direction {
             StreamDirection::Playback => default_sink(state),
@@ -2137,8 +2616,10 @@ fn run_cat_simulation(config: &CatConfig, state: &PwState) {
 
     println!("pw-cat: {} mode", config.direction);
     println!("  Target: \"{}\"", node_name);
-    println!("  Format: {}, Rate: {}, Channels: {}",
-        config.stream.format, config.stream.rate, config.stream.channels);
+    println!(
+        "  Format: {}, Rate: {}, Channels: {}",
+        config.stream.format, config.stream.rate, config.stream.channels
+    );
     println!("  Data rate: {}/s", format_bytes_display(data_rate));
     println!("  Streaming... (simulated)");
     println!("  Transferred: {}", format_bytes_display(data_rate * 2));
@@ -2147,11 +2628,15 @@ fn run_cat_simulation(config: &CatConfig, state: &PwState) {
 // ── pw-mon ─────────────────────────────────────────────────────────────
 
 fn run_pw_mon(args: Vec<String>, state: &PwState) -> i32 {
-    if args.first().map(|s| s.as_str()) == Some("--help") || args.first().map(|s| s.as_str()) == Some("-h") {
+    if args.first().map(|s| s.as_str()) == Some("--help")
+        || args.first().map(|s| s.as_str()) == Some("-h")
+    {
         print_pw_mon_help();
         return 0;
     }
-    if args.first().map(|s| s.as_str()) == Some("--version") || args.first().map(|s| s.as_str()) == Some("-V") {
+    if args.first().map(|s| s.as_str()) == Some("--version")
+        || args.first().map(|s| s.as_str()) == Some("-V")
+    {
         println!("pw-mon: Compiled with libpipewire {}", PW_VERSION);
         return 0;
     }
@@ -2164,11 +2649,17 @@ fn run_pw_mon(args: Vec<String>, state: &PwState) -> i32 {
     println!();
 
     for event in &events {
-        if !show_all && event.event_type == MonitorEventType::Added && matches!(event.object_type, ObjectType::Port) {
+        if !show_all
+            && event.event_type == MonitorEventType::Added
+            && matches!(event.object_type, ObjectType::Port)
+        {
             // In non-all mode, skip port add events for brevity
             continue;
         }
-        println!("event: {} {} {}", event.event_type, event.object_type, event.object_id);
+        println!(
+            "event: {} {} {}",
+            event.event_type, event.object_type, event.object_id
+        );
         if !event._object_name.is_empty() {
             println!("  name: \"{}\"", event._object_name);
         }
@@ -2195,11 +2686,15 @@ fn print_pw_mon_help() {
 // ── pw-metadata ────────────────────────────────────────────────────────
 
 fn run_pw_metadata(args: Vec<String>, state: &PwState) -> i32 {
-    if args.first().map(|s| s.as_str()) == Some("--help") || args.first().map(|s| s.as_str()) == Some("-h") {
+    if args.first().map(|s| s.as_str()) == Some("--help")
+        || args.first().map(|s| s.as_str()) == Some("-h")
+    {
         print_pw_metadata_help();
         return 0;
     }
-    if args.first().map(|s| s.as_str()) == Some("--version") || args.first().map(|s| s.as_str()) == Some("-V") {
+    if args.first().map(|s| s.as_str()) == Some("--version")
+        || args.first().map(|s| s.as_str()) == Some("-V")
+    {
         println!("pw-metadata: Compiled with libpipewire {}", PW_VERSION);
         return 0;
     }
@@ -2246,8 +2741,10 @@ fn run_pw_metadata_list(state: &PwState) -> i32 {
         return 0;
     }
     for entry in &state.metadata {
-        println!("update: id:{} key:'{}' value:'{}' type:'{}'",
-            entry.subject, entry.key, entry.value, entry._key_type);
+        println!(
+            "update: id:{} key:'{}' value:'{}' type:'{}'",
+            entry.subject, entry.key, entry.value, entry._key_type
+        );
     }
     0
 }
@@ -2265,9 +2762,15 @@ fn run_pw_metadata_delete(args: &[String]) -> i32 {
         }
     };
     if args.len() > 1 {
-        println!("pw-metadata: deleted key '{}' for subject {} (simulated)", args[1], subject);
+        println!(
+            "pw-metadata: deleted key '{}' for subject {} (simulated)",
+            args[1], subject
+        );
     } else {
-        println!("pw-metadata: deleted all metadata for subject {} (simulated)", subject);
+        println!(
+            "pw-metadata: deleted all metadata for subject {} (simulated)",
+            subject
+        );
     }
     0
 }
@@ -2275,8 +2778,10 @@ fn run_pw_metadata_delete(args: &[String]) -> i32 {
 fn run_pw_metadata_monitor(state: &PwState) -> i32 {
     println!("Monitoring metadata changes...");
     for entry in &state.metadata {
-        println!("  update: id:{} key:'{}' value:'{}' type:'{}'",
-            entry.subject, entry.key, entry.value, entry._key_type);
+        println!(
+            "  update: id:{} key:'{}' value:'{}' type:'{}'",
+            entry.subject, entry.key, entry.value, entry._key_type
+        );
     }
     println!("(end of simulated events)");
     0
@@ -2293,12 +2798,19 @@ fn run_pw_metadata_set_or_get(args: &[String], state: &PwState) -> i32 {
 
     if args.len() == 1 {
         // Get all metadata for subject
-        let entries: Vec<_> = state.metadata.iter().filter(|m| m.subject == subject).collect();
+        let entries: Vec<_> = state
+            .metadata
+            .iter()
+            .filter(|m| m.subject == subject)
+            .collect();
         if entries.is_empty() {
             println!("(no metadata for subject {})", subject);
         } else {
             for entry in entries {
-                println!("  key:'{}' value:'{}' type:'{}'", entry.key, entry.value, entry._key_type);
+                println!(
+                    "  key:'{}' value:'{}' type:'{}'",
+                    entry.key, entry.value, entry._key_type
+                );
             }
         }
         return 0;
@@ -2307,8 +2819,15 @@ fn run_pw_metadata_set_or_get(args: &[String], state: &PwState) -> i32 {
     if args.len() == 2 {
         // Get specific key
         let key = &args[1];
-        if let Some(entry) = state.metadata.iter().find(|m| m.subject == subject && m.key == *key) {
-            println!("  key:'{}' value:'{}' type:'{}'", entry.key, entry.value, entry._key_type);
+        if let Some(entry) = state
+            .metadata
+            .iter()
+            .find(|m| m.subject == subject && m.key == *key)
+        {
+            println!(
+                "  key:'{}' value:'{}' type:'{}'",
+                entry.key, entry.value, entry._key_type
+            );
         } else {
             println!("(no metadata for subject {} key '{}')", subject, key);
         }
@@ -2318,26 +2837,37 @@ fn run_pw_metadata_set_or_get(args: &[String], state: &PwState) -> i32 {
     // Set metadata
     let key = &args[1];
     let value = &args[2];
-    let key_type = if args.len() > 3 { &args[3] } else { "Spa:String:JSON" };
-    println!("pw-metadata: set subject:{} key:'{}' value:'{}' type:'{}' (simulated)",
-        subject, key, value, key_type);
+    let key_type = if args.len() > 3 {
+        &args[3]
+    } else {
+        "Spa:String:JSON"
+    };
+    println!(
+        "pw-metadata: set subject:{} key:'{}' value:'{}' type:'{}' (simulated)",
+        subject, key, value, key_type
+    );
     0
 }
 
 // ── pw-top ─────────────────────────────────────────────────────────────
 
 fn run_pw_top(args: Vec<String>, state: &PwState) -> i32 {
-    if args.first().map(|s| s.as_str()) == Some("--help") || args.first().map(|s| s.as_str()) == Some("-h") {
+    if args.first().map(|s| s.as_str()) == Some("--help")
+        || args.first().map(|s| s.as_str()) == Some("-h")
+    {
         print_pw_top_help();
         return 0;
     }
-    if args.first().map(|s| s.as_str()) == Some("--version") || args.first().map(|s| s.as_str()) == Some("-V") {
+    if args.first().map(|s| s.as_str()) == Some("--version")
+        || args.first().map(|s| s.as_str()) == Some("-V")
+    {
         println!("pw-top: Compiled with libpipewire {}", PW_VERSION);
         return 0;
     }
 
     let batch_mode = args.iter().any(|a| a == "--batch" || a == "-b");
-    let iterations: u32 = args.iter()
+    let iterations: u32 = args
+        .iter()
         .position(|a| a == "--iterations" || a == "-n")
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse().ok())
@@ -2355,7 +2885,10 @@ fn run_pw_top(args: Vec<String>, state: &PwState) -> i32 {
 }
 
 fn print_pw_top_help() {
-    println!("pw-top - Top-like display of PipeWire processing ({})", PW_VERSION);
+    println!(
+        "pw-top - Top-like display of PipeWire processing ({})",
+        PW_VERSION
+    );
     println!();
     println!("Usage: pw-top [options]");
     println!();
@@ -2391,12 +2924,30 @@ fn print_pw_top_display(processing: &[ProcessingInfo], state: &PwState, _batch_m
         } else {
             0.0
         };
-        let w_q = if quantum_ms > 0.0 { wait_ms / quantum_ms } else { 0.0 };
-        let b_q = if quantum_ms > 0.0 { busy_ms / quantum_ms } else { 0.0 };
+        let w_q = if quantum_ms > 0.0 {
+            wait_ms / quantum_ms
+        } else {
+            0.0
+        };
+        let b_q = if quantum_ms > 0.0 {
+            busy_ms / quantum_ms
+        } else {
+            0.0
+        };
 
-        println!("{} {:4} {:5} {:6} {:7.3} {:7.3} {:5.3} {:5.3} {:4} {}",
-            state_char, info.node_id, info._quantum, info._rate,
-            wait_ms, busy_ms, w_q, b_q, info._xrun_count, name);
+        println!(
+            "{} {:4} {:5} {:6} {:7.3} {:7.3} {:5.3} {:5.3} {:4} {}",
+            state_char,
+            info.node_id,
+            info._quantum,
+            info._rate,
+            wait_ms,
+            busy_ms,
+            w_q,
+            b_q,
+            info._xrun_count,
+            name
+        );
     }
 }
 
@@ -2452,7 +3003,10 @@ fn print_wpctl_help() {
 }
 
 fn run_wpctl_status(state: &PwState) -> i32 {
-    println!("PipeWire '{}' [{}] {}", state.core_info._name, state.core_info._cookie, state.core_info._version);
+    println!(
+        "PipeWire '{}' [{}] {}",
+        state.core_info._name, state.core_info._cookie, state.core_info._version
+    );
     println!();
 
     // Audio section
@@ -2467,7 +3021,14 @@ fn run_wpctl_status(state: &PwState) -> i32 {
         let marker = if is_default { " *" } else { "  " };
         let vol = simulated_volume_for_node(sink.id);
         let mute_str = if vol.muted { " [MUTED]" } else { "" };
-        println!("  {}  {}. {}  [vol: {}{}]", marker, sink.id, sink.name, format_volume_percent(vol.volume), mute_str);
+        println!(
+            "  {}  {}. {}  [vol: {}{}]",
+            marker,
+            sink.id,
+            sink.name,
+            format_volume_percent(vol.volume),
+            mute_str
+        );
     }
     println!();
 
@@ -2480,7 +3041,14 @@ fn run_wpctl_status(state: &PwState) -> i32 {
         let marker = if is_default { " *" } else { "  " };
         let vol = simulated_volume_for_node(source.id);
         let mute_str = if vol.muted { " [MUTED]" } else { "" };
-        println!("  {}  {}. {}  [vol: {}{}]", marker, source.id, source.name, format_volume_percent(vol.volume), mute_str);
+        println!(
+            "  {}  {}. {}  [vol: {}{}]",
+            marker,
+            source.id,
+            source.name,
+            format_volume_percent(vol.volume),
+            mute_str
+        );
     }
     println!();
 
@@ -2489,7 +3057,9 @@ fn run_wpctl_status(state: &PwState) -> i32 {
     if !outputs.is_empty() {
         println!("  Sink endpoints:");
         for stream in &outputs {
-            let linked_to = state.links.iter()
+            let linked_to = state
+                .links
+                .iter()
                 .find(|l| l.output_node == stream.id)
                 .and_then(|l| find_node_by_id(state, l.input_node))
                 .map(|n| n.name.as_str())
@@ -2503,7 +3073,9 @@ fn run_wpctl_status(state: &PwState) -> i32 {
     if !inputs.is_empty() {
         println!("  Source endpoints:");
         for stream in &inputs {
-            let linked_from = state.links.iter()
+            let linked_from = state
+                .links
+                .iter()
                 .find(|l| l.input_node == stream.id)
                 .and_then(|l| find_node_by_id(state, l.output_node))
                 .map(|n| n.name.as_str())
@@ -2514,7 +3086,9 @@ fn run_wpctl_status(state: &PwState) -> i32 {
     }
 
     // Video section
-    let video_nodes: Vec<_> = state.nodes.iter()
+    let video_nodes: Vec<_> = state
+        .nodes
+        .iter()
         .filter(|n| matches!(n.node_type, NodeType::VideoSource))
         .collect();
     if !video_nodes.is_empty() {
@@ -2529,7 +3103,11 @@ fn run_wpctl_status(state: &PwState) -> i32 {
     // Devices section
     println!(" Devices:");
     for device in &state.devices {
-        let profile = device.profiles.first().map(|p| p.name.as_str()).unwrap_or("(none)");
+        let profile = device
+            .profiles
+            .first()
+            .map(|p| p.name.as_str())
+            .unwrap_or("(none)");
         println!("    {}. {} [{}]", device.id, device.name, profile);
     }
     println!();
@@ -2603,7 +3181,10 @@ fn wpctl_inspect_node(node: &PwNode, state: &PwState) {
     let node_ports = ports_for_node(state, node.id);
     println!("  n-ports = {}", node_ports.len());
     for port in &node_ports {
-        println!("    port {}: \"{}\" ({})", port.id, port.name, port.direction);
+        println!(
+            "    port {}: \"{}\" ({})",
+            port.id, port.name, port.direction
+        );
     }
 }
 
@@ -2697,7 +3278,11 @@ fn run_wpctl_set_volume(args: &[String], state: &PwState) -> i32 {
         None => new_vol,
     };
 
-    println!("Volume for node {} set to {} (simulated)", id, format_volume_percent(final_vol));
+    println!(
+        "Volume for node {} set to {} (simulated)",
+        id,
+        format_volume_percent(final_vol)
+    );
     0
 }
 
@@ -2725,7 +3310,10 @@ fn run_wpctl_set_mute(args: &[String], state: &PwState) -> i32 {
         "0" | "false" | "no" => false,
         "toggle" => !current.muted,
         other => {
-            eprintln!("wpctl: set-mute: invalid value: {} (expected 0, 1, or toggle)", other);
+            eprintln!(
+                "wpctl: set-mute: invalid value: {} (expected 0, 1, or toggle)",
+                other
+            );
             return 1;
         }
     };
@@ -2749,7 +3337,11 @@ fn run_wpctl_set_default(args: &[String], state: &PwState) -> i32 {
     };
 
     if let Some(node) = find_node_by_id(state, id) {
-        let kind = if node.media_class.contains("Sink") { "sink" } else { "source" };
+        let kind = if node.media_class.contains("Sink") {
+            "sink"
+        } else {
+            "source"
+        };
         println!("Default {} set to {} ({}) (simulated)", kind, id, node.name);
         0
     } else {
@@ -2813,12 +3405,17 @@ fn run_wpctl_set_profile(args: &[String], state: &PwState) -> i32 {
 
     if let Some(device) = find_device_by_id(state, device_id) {
         if profile_idx < device.profiles.len() {
-            println!("Profile for device {} set to {} ({}) (simulated)",
-                device_id, profile_idx, device.profiles[profile_idx].name);
+            println!(
+                "Profile for device {} set to {} ({}) (simulated)",
+                device_id, profile_idx, device.profiles[profile_idx].name
+            );
             0
         } else {
-            eprintln!("wpctl: set-profile: profile index {} out of range (device has {} profiles)",
-                profile_idx, device.profiles.len());
+            eprintln!(
+                "wpctl: set-profile: profile index {} out of range (device has {} profiles)",
+                profile_idx,
+                device.profiles.len()
+            );
             1
         }
     } else {
@@ -2868,11 +3465,15 @@ fn parse_wpctl_id(s: &str, state: &PwState) -> Option<u32> {
 // ── pipewire (daemon) ──────────────────────────────────────────────────
 
 fn run_pipewire_daemon(args: Vec<String>, state: &PwState) -> i32 {
-    if args.first().map(|s| s.as_str()) == Some("--help") || args.first().map(|s| s.as_str()) == Some("-h") {
+    if args.first().map(|s| s.as_str()) == Some("--help")
+        || args.first().map(|s| s.as_str()) == Some("-h")
+    {
         print_pipewire_daemon_help();
         return 0;
     }
-    if args.first().map(|s| s.as_str()) == Some("--version") || args.first().map(|s| s.as_str()) == Some("-V") {
+    if args.first().map(|s| s.as_str()) == Some("--version")
+        || args.first().map(|s| s.as_str()) == Some("-V")
+    {
         println!("pipewire: Compiled with libpipewire {}", PW_VERSION);
         return 0;
     }
@@ -2906,8 +3507,18 @@ fn run_pipewire_daemon(args: Vec<String>, state: &PwState) -> i32 {
     println!("Connected {} clients", state.clients.len());
     println!();
     println!("PipeWire daemon running (simulated).");
-    println!("Default sink: {}", default_sink(state).map(|n| n.name.as_str()).unwrap_or("(none)"));
-    println!("Default source: {}", default_source(state).map(|n| n.name.as_str()).unwrap_or("(none)"));
+    println!(
+        "Default sink: {}",
+        default_sink(state)
+            .map(|n| n.name.as_str())
+            .unwrap_or("(none)")
+    );
+    println!(
+        "Default source: {}",
+        default_source(state)
+            .map(|n| n.name.as_str())
+            .unwrap_or("(none)")
+    );
 
     0
 }
@@ -2986,7 +3597,10 @@ mod tests {
 
     #[test]
     fn test_personality_pw_cli_unknown() {
-        assert_eq!(Personality::from_name("something-random"), Personality::PwCli);
+        assert_eq!(
+            Personality::from_name("something-random"),
+            Personality::PwCli
+        );
     }
 
     #[test]
@@ -3016,7 +3630,10 @@ mod tests {
 
     #[test]
     fn test_personality_pw_metadata() {
-        assert_eq!(Personality::from_name("pw-metadata"), Personality::PwMetadata);
+        assert_eq!(
+            Personality::from_name("pw-metadata"),
+            Personality::PwMetadata
+        );
     }
 
     #[test]
@@ -3589,7 +4206,14 @@ mod tests {
 
     #[test]
     fn test_parse_stream_args_short_flags() {
-        let args: Vec<String> = vec!["-f".into(), "S24LE".into(), "-r".into(), "96000".into(), "-c".into(), "6".into()];
+        let args: Vec<String> = vec![
+            "-f".into(),
+            "S24LE".into(),
+            "-r".into(),
+            "96000".into(),
+            "-c".into(),
+            "6".into(),
+        ];
         let config = parse_stream_args(&args, StreamDirection::Capture);
         assert_eq!(config.format, AudioFormat::S24Le);
         assert_eq!(config.rate, 96000);
@@ -3654,7 +4278,8 @@ mod tests {
     fn test_monitor_events_contain_nodes() {
         let state = build_simulated_state();
         let events = simulated_monitor_events(&state);
-        let node_events: Vec<_> = events.iter()
+        let node_events: Vec<_> = events
+            .iter()
             .filter(|e| matches!(e.object_type, ObjectType::Node))
             .collect();
         assert!(!node_events.is_empty());
@@ -3864,61 +4489,100 @@ mod tests {
     #[test]
     fn test_pw_cli_list_objects_nodes() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["list-objects".into(), "Node".into()], &state), 0);
+        assert_eq!(
+            run_pw_cli(vec!["list-objects".into(), "Node".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_pw_cli_list_objects_ports() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["list-objects".into(), "Port".into()], &state), 0);
+        assert_eq!(
+            run_pw_cli(vec!["list-objects".into(), "Port".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_pw_cli_list_objects_links() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["list-objects".into(), "Link".into()], &state), 0);
+        assert_eq!(
+            run_pw_cli(vec!["list-objects".into(), "Link".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_pw_cli_list_objects_devices() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["list-objects".into(), "Device".into()], &state), 0);
+        assert_eq!(
+            run_pw_cli(vec!["list-objects".into(), "Device".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_pw_cli_list_objects_clients() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["list-objects".into(), "Client".into()], &state), 0);
+        assert_eq!(
+            run_pw_cli(vec!["list-objects".into(), "Client".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_pw_cli_list_objects_modules() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["list-objects".into(), "Module".into()], &state), 0);
+        assert_eq!(
+            run_pw_cli(vec!["list-objects".into(), "Module".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_pw_cli_list_objects_unknown_type() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["list-objects".into(), "Bogus".into()], &state), 1);
+        assert_eq!(
+            run_pw_cli(vec!["list-objects".into(), "Bogus".into()], &state),
+            1
+        );
     }
 
     #[test]
     fn test_pw_cli_enum_params_format() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["enum-params".into(), "30".into(), "Format".into()], &state), 0);
+        assert_eq!(
+            run_pw_cli(
+                vec!["enum-params".into(), "30".into(), "Format".into()],
+                &state
+            ),
+            0
+        );
     }
 
     #[test]
     fn test_pw_cli_enum_params_props() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["enum-params".into(), "30".into(), "Props".into()], &state), 0);
+        assert_eq!(
+            run_pw_cli(
+                vec!["enum-params".into(), "30".into(), "Props".into()],
+                &state
+            ),
+            0
+        );
     }
 
     #[test]
     fn test_pw_cli_enum_params_latency() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["enum-params".into(), "30".into(), "ProcessLatency".into()], &state), 0);
+        assert_eq!(
+            run_pw_cli(
+                vec!["enum-params".into(), "30".into(), "ProcessLatency".into()],
+                &state
+            ),
+            0
+        );
     }
 
     #[test]
@@ -3942,13 +4606,25 @@ mod tests {
     #[test]
     fn test_pw_cli_create_link_valid() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["create-link".into(), "207".into(), "200".into()], &state), 0);
+        assert_eq!(
+            run_pw_cli(
+                vec!["create-link".into(), "207".into(), "200".into()],
+                &state
+            ),
+            0
+        );
     }
 
     #[test]
     fn test_pw_cli_create_link_invalid_port() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_cli(vec!["create-link".into(), "9999".into(), "200".into()], &state), 1);
+        assert_eq!(
+            run_pw_cli(
+                vec!["create-link".into(), "9999".into(), "200".into()],
+                &state
+            ),
+            1
+        );
     }
 
     #[test]
@@ -4000,7 +4676,19 @@ mod tests {
     #[test]
     fn test_pw_record_with_options() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_record(vec!["--format".into(), "F32LE".into(), "--rate".into(), "44100".into(), "out.wav".into()], &state), 0);
+        assert_eq!(
+            run_pw_record(
+                vec![
+                    "--format".into(),
+                    "F32LE".into(),
+                    "--rate".into(),
+                    "44100".into(),
+                    "out.wav".into()
+                ],
+                &state
+            ),
+            0
+        );
     }
 
     // ── pw-play ────────────────────────────────────────────────────
@@ -4092,19 +4780,31 @@ mod tests {
     #[test]
     fn test_pw_metadata_get_key() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_metadata(vec!["0".into(), "default.audio.sink".into()], &state), 0);
+        assert_eq!(
+            run_pw_metadata(vec!["0".into(), "default.audio.sink".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_pw_metadata_set() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_metadata(vec!["0".into(), "test.key".into(), "test.value".into()], &state), 0);
+        assert_eq!(
+            run_pw_metadata(
+                vec!["0".into(), "test.key".into(), "test.value".into()],
+                &state
+            ),
+            0
+        );
     }
 
     #[test]
     fn test_pw_metadata_delete() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_metadata(vec!["--delete".into(), "0".into()], &state), 0);
+        assert_eq!(
+            run_pw_metadata(vec!["--delete".into(), "0".into()], &state),
+            0
+        );
     }
 
     #[test]
@@ -4136,7 +4836,10 @@ mod tests {
     #[test]
     fn test_pw_top_iterations() {
         let state = build_simulated_state();
-        assert_eq!(run_pw_top(vec!["--iterations".into(), "2".into()], &state), 0);
+        assert_eq!(
+            run_pw_top(vec!["--iterations".into(), "2".into()], &state),
+            0
+        );
     }
 
     // ── wpctl ──────────────────────────────────────────────────────
@@ -4204,73 +4907,128 @@ mod tests {
     #[test]
     fn test_wpctl_set_volume() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-volume".into(), "30".into(), "50%".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(vec!["set-volume".into(), "30".into(), "50%".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_set_volume_relative_up() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-volume".into(), "30".into(), "+10%".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(
+                vec!["set-volume".into(), "30".into(), "+10%".into()],
+                &state
+            ),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_set_volume_relative_down() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-volume".into(), "30".into(), "-10%".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(
+                vec!["set-volume".into(), "30".into(), "-10%".into()],
+                &state
+            ),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_set_volume_default_sink_keyword() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-volume".into(), "@DEFAULT_AUDIO_SINK@".into(), "0.5".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(
+                vec![
+                    "set-volume".into(),
+                    "@DEFAULT_AUDIO_SINK@".into(),
+                    "0.5".into()
+                ],
+                &state
+            ),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_set_volume_not_found() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-volume".into(), "9999".into(), "50%".into()], &state), 1);
+        assert_eq!(
+            run_wpctl(
+                vec!["set-volume".into(), "9999".into(), "50%".into()],
+                &state
+            ),
+            1
+        );
     }
 
     #[test]
     fn test_wpctl_set_volume_invalid() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-volume".into(), "30".into(), "abc".into()], &state), 1);
+        assert_eq!(
+            run_wpctl(vec!["set-volume".into(), "30".into(), "abc".into()], &state),
+            1
+        );
     }
 
     #[test]
     fn test_wpctl_set_mute_on() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-mute".into(), "30".into(), "1".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(vec!["set-mute".into(), "30".into(), "1".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_set_mute_off() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-mute".into(), "30".into(), "0".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(vec!["set-mute".into(), "30".into(), "0".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_set_mute_toggle() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-mute".into(), "30".into(), "toggle".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(
+                vec!["set-mute".into(), "30".into(), "toggle".into()],
+                &state
+            ),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_set_mute_invalid() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-mute".into(), "30".into(), "maybe".into()], &state), 1);
+        assert_eq!(
+            run_wpctl(vec!["set-mute".into(), "30".into(), "maybe".into()], &state),
+            1
+        );
     }
 
     #[test]
     fn test_wpctl_set_default() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-default".into(), "32".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(vec!["set-default".into(), "32".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_set_default_not_found() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-default".into(), "9999".into()], &state), 1);
+        assert_eq!(
+            run_wpctl(vec!["set-default".into(), "9999".into()], &state),
+            1
+        );
     }
 
     #[test]
@@ -4288,31 +5046,52 @@ mod tests {
     #[test]
     fn test_wpctl_get_volume_not_found() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["get-volume".into(), "9999".into()], &state), 1);
+        assert_eq!(
+            run_wpctl(vec!["get-volume".into(), "9999".into()], &state),
+            1
+        );
     }
 
     #[test]
     fn test_wpctl_clear_default() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["clear-default".into(), "30".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(vec!["clear-default".into(), "30".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_set_profile() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-profile".into(), "100".into(), "0".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(vec!["set-profile".into(), "100".into(), "0".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_set_profile_out_of_range() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-profile".into(), "100".into(), "99".into()], &state), 1);
+        assert_eq!(
+            run_wpctl(
+                vec!["set-profile".into(), "100".into(), "99".into()],
+                &state
+            ),
+            1
+        );
     }
 
     #[test]
     fn test_wpctl_set_profile_device_not_found() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["set-profile".into(), "9999".into(), "0".into()], &state), 1);
+        assert_eq!(
+            run_wpctl(
+                vec!["set-profile".into(), "9999".into(), "0".into()],
+                &state
+            ),
+            1
+        );
     }
 
     #[test]
@@ -4324,13 +5103,22 @@ mod tests {
     #[test]
     fn test_wpctl_settings_get() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["settings".into(), "log.level".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(vec!["settings".into(), "log.level".into()], &state),
+            0
+        );
     }
 
     #[test]
     fn test_wpctl_settings_set() {
         let state = build_simulated_state();
-        assert_eq!(run_wpctl(vec!["settings".into(), "log.level".into(), "3".into()], &state), 0);
+        assert_eq!(
+            run_wpctl(
+                vec!["settings".into(), "log.level".into(), "3".into()],
+                &state
+            ),
+            0
+        );
     }
 
     #[test]

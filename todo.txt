@@ -1,3 +1,25 @@
+## BUG (noticed+FIXED 2026-05-31): pipewire had a broken test build, a real
+##   production arg-parsing bug, and ~18 pre-existing clippy errors.
+##   userspace/pipewire/src/main.rs:
+##     * TEST BUILD DIDN'T COMPILE: underscore-prefix anti-pattern on enum
+##       variants (DeviceType::_AlsaPcm, MonitorEventType::_Removed, plus the
+##       rest of those two enums and ObjectType) and on fn _format_node_short,
+##       while tests used the clean names.  Renamed to clean names +
+##       #[allow(dead_code)] on the (now partially-unused) enums/fn.
+##     * REAL PRODUCTION BUG: parse_play_config / parse_record_config did not
+##       consume the values of the value-taking options (--format/-f, --rate/-r,
+##       --channels/-c, --volume, --latency).  Those options are parsed by
+##       parse_stream_args, but this loop fell through to the positional arm, so
+##       e.g. `pw-play --format S32LE` (no file) treated "S32LE" as the input
+##       file and proceeded to "play" it instead of erroring with "no input
+##       file specified".  Added an arm that skips the option's value so it is
+##       not mistaken for the positional file.  (parse_cat_config has no
+##       positional file field, so it was unaffected.)  233/233 tests pass.
+##     * ~18 pre-existing clippy errors (redundant `Some(x) = ....ok()`,
+##       collapsible if/match) auto-fixed; one dead variant (_MetadataKeyType::
+##       RouteProfile) documented #[allow(dead_code)].
+##   Clippy-clean host + ouros; builds for ouros.
+##
 ## BUG (noticed+FIXED 2026-05-31): pulseaudio had a broken test build + 2
 ##   pre-existing clippy errors.  userspace/pulseaudio/src/main.rs:
 ##     * TEST BUILD DIDN'T COMPILE: the same underscore-prefix anti-pattern.

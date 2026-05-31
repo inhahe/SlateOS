@@ -55,7 +55,8 @@ impl Rng {
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         self.state
@@ -93,7 +94,7 @@ impl Direction {
 #[derive(Clone)]
 struct Board {
     size: usize,
-    tiles: Vec<u8>,  // 0 = empty space
+    tiles: Vec<u8>, // 0 = empty space
     empty_pos: usize,
 }
 
@@ -198,7 +199,12 @@ impl Board {
 
     /// Shuffle by making random valid moves (guarantees solvability).
     fn shuffle(&mut self, rng: &mut Rng, move_count: usize) {
-        let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+        let dirs = [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ];
         let mut last_dir: Option<Direction> = None;
 
         for _ in 0..move_count {
@@ -221,7 +227,7 @@ impl Board {
 }
 
 // ── Game state ──
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GameState {
     Playing,
     Won,
@@ -232,11 +238,11 @@ struct SlidingPuzzle {
     board: Board,
     state: GameState,
     moves: u32,
-    size: usize,          // 3, 4, or 5
-    best_moves: [Option<u32>; 3],  // best for 3x3, 4x4, 5x5
+    size: usize,                  // 3, 4, or 5
+    best_moves: [Option<u32>; 3], // best for 3x3, 4x4, 5x5
     rng: Rng,
-    timer_ticks: u64,     // rough frame counter for animation
-    show_numbers: bool,   // show tile numbers
+    timer_ticks: u64,   // rough frame counter for animation
+    show_numbers: bool, // show tile numbers
     show_help: bool,
 }
 
@@ -488,7 +494,13 @@ impl SlidingPuzzle {
                     // Tile number
                     if self.show_numbers {
                         let num_str = format!("{}", value);
-                        let font_size = if self.size <= 3 { 28.0 } else if self.size == 4 { 24.0 } else { 20.0 };
+                        let font_size = if self.size <= 3 {
+                            28.0
+                        } else if self.size == 4 {
+                            24.0
+                        } else {
+                            20.0
+                        };
                         let text_x = tx + tw / 2.0 - if value >= 10 { 12.0 } else { 7.0 };
                         let text_y = ty + th / 2.0 - font_size / 2.0 + 4.0;
                         cmds.push(RenderCommand::Text {
@@ -736,7 +748,7 @@ mod tests {
     fn test_slide_sequence() {
         let mut b = Board::new(3);
         // Start: [1,2,3,4,5,6,7,8,0] empty at 8
-        b.slide(Direction::Down);  // [1,2,3,4,5,0,7,8,6] empty at 5
+        b.slide(Direction::Down); // [1,2,3,4,5,0,7,8,6] empty at 5
         b.slide(Direction::Right); // [1,2,3,4,0,5,7,8,6] empty at 4
         assert_eq!(b.empty_pos, 4);
         assert_eq!(b.tiles[5], 5);
@@ -976,7 +988,12 @@ mod tests {
     #[test]
     fn test_move_increments_counter() {
         let mut app = SlidingPuzzle::new();
-        let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+        let dirs = [
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ];
         let mut moved = false;
         for d in &dirs {
             if app.board.can_move(*d) {
@@ -1238,17 +1255,17 @@ mod tests {
     fn test_4x4_can_move_from_corner() {
         let b = Board::new(4);
         // Empty at (3,3)
-        assert!(b.can_move(Direction::Down));    // row > 0
-        assert!(b.can_move(Direction::Right));   // col > 0
-        assert!(!b.can_move(Direction::Up));     // row == size-1
-        assert!(!b.can_move(Direction::Left));   // col == size-1
+        assert!(b.can_move(Direction::Down)); // row > 0
+        assert!(b.can_move(Direction::Right)); // col > 0
+        assert!(!b.can_move(Direction::Up)); // row == size-1
+        assert!(!b.can_move(Direction::Left)); // col == size-1
     }
 
     #[test]
     fn test_4x4_slide_to_center() {
         let mut b = Board::new(4);
         // Move empty from (3,3) to (2,2) via Down then Right
-        b.slide(Direction::Down);  // empty to (2,3)
+        b.slide(Direction::Down); // empty to (2,3)
         b.slide(Direction::Right); // empty to (2,2)
         assert_eq!(b.empty_row(), 2);
         assert_eq!(b.empty_col(), 2);
@@ -1350,7 +1367,7 @@ mod tests {
         let mut app = SlidingPuzzle::new();
         // Move empty to center first
         app.board = Board::new(3);
-        app.board.slide(Direction::Down);  // empty to (1,2)
+        app.board.slide(Direction::Down); // empty to (1,2)
         app.board.slide(Direction::Right); // empty to (1,1) center
         app.moves = 0;
         // Now Up should work: empty_row=1 < 2

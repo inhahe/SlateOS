@@ -81,7 +81,9 @@ const CASCADE_MULTIPLIER_FP: u32 = 150;
 const FP_BASE: u32 = 100;
 
 // ── Gem symbols for rendering ───────────────────────────────────────
-const GEM_SYMBOLS: [&str; 7] = ["\u{25C6}", "\u{25CF}", "\u{25A0}", "\u{2605}", "\u{25B2}", "\u{2666}", "\u{2764}"];
+const GEM_SYMBOLS: [&str; 7] = [
+    "\u{25C6}", "\u{25CF}", "\u{25A0}", "\u{2605}", "\u{25B2}", "\u{2666}", "\u{2764}",
+];
 
 // ── Gem colors ──────────────────────────────────────────────────────
 const GEM_COLORS: [Color; 7] = [RED, BLUE, GREEN, YELLOW, PEACH, MAUVE, TEAL];
@@ -385,9 +387,8 @@ impl Match3 {
     /// Generate a random gem for (row, col) that does not create a match.
     fn random_gem_no_match(&mut self, row: usize, col: usize) -> Gem {
         loop {
-            let gem_type = GemType::from_index(
-                self.rng.next_bounded(GEM_TYPE_COUNT as usize) as u8,
-            );
+            let gem_type =
+                GemType::from_index(self.rng.next_bounded(GEM_TYPE_COUNT as usize) as u8);
             let gem = Gem::new(gem_type);
             // Check horizontal: if two to the left are the same type, skip.
             if col >= 2 {
@@ -411,9 +412,7 @@ impl Match3 {
 
     /// Generate a random gem type.
     fn random_gem(&mut self) -> Gem {
-        let gem_type = GemType::from_index(
-            self.rng.next_bounded(GEM_TYPE_COUNT as usize) as u8,
-        );
+        let gem_type = GemType::from_index(self.rng.next_bounded(GEM_TYPE_COUNT as usize) as u8);
         Gem::new(gem_type)
     }
 
@@ -443,9 +442,7 @@ impl Match3 {
                     }
                     let length = col - start;
                     if length >= 3 {
-                        let positions: Vec<Pos> = (start..col)
-                            .map(|c| Pos::new(row, c))
-                            .collect();
+                        let positions: Vec<Pos> = (start..col).map(|c| Pos::new(row, c)).collect();
                         matches.push(MatchInfo {
                             positions,
                             horizontal: true,
@@ -478,9 +475,7 @@ impl Match3 {
                     }
                     let length = row - start;
                     if length >= 3 {
-                        let positions: Vec<Pos> = (start..row)
-                            .map(|r| Pos::new(r, col))
-                            .collect();
+                        let positions: Vec<Pos> = (start..row).map(|r| Pos::new(r, col)).collect();
                         matches.push(MatchInfo {
                             positions,
                             horizontal: false,
@@ -1270,7 +1265,8 @@ impl Match3 {
         }
         if let Some((a, b)) = self.hint {
             // Pulsing glow effect on hint gems.
-            let pulse = ((self.pulse_counter % 60) as f32 / 60.0 * std::f32::consts::PI * 2.0).sin();
+            let pulse =
+                ((self.pulse_counter % 60) as f32 / 60.0 * std::f32::consts::PI * 2.0).sin();
             let alpha = (40.0 + pulse * 40.0) as u8;
 
             for pos in &[a, b] {
@@ -1810,9 +1806,9 @@ mod tests {
         game.board[0][1] = Some(make_gem(0));
         // Only 2 in a row: no match.
         let matches = game.find_matches();
-        let has_match_at_row0 = matches.iter().any(|m| {
-            m.positions.iter().any(|p| p.row == 0 && p.col <= 1)
-        });
+        let has_match_at_row0 = matches
+            .iter()
+            .any(|m| m.positions.iter().any(|p| p.row == 0 && p.col <= 1));
         assert!(!has_match_at_row0);
     }
 
@@ -1900,10 +1896,13 @@ mod tests {
 
         let moved = game.apply_gravity();
         assert!(moved);
-        // Both gems should be at the bottom.
-        assert!(game.board[0][0].is_none());
-        assert!(game.board[1][0].is_some());
-        assert!(game.board[2][0].is_some());
+        // Gravity compacts gems to the bottom of the GRID_SIZE-tall column, so the
+        // two gems settle in the last two rows and everything above is empty.
+        for row in 0..GRID_SIZE - 2 {
+            assert!(game.board[row][0].is_none());
+        }
+        assert!(game.board[GRID_SIZE - 2][0].is_some());
+        assert!(game.board[GRID_SIZE - 1][0].is_some());
     }
 
     #[test]
@@ -2148,7 +2147,7 @@ mod tests {
     }
 
     #[test]
-    fn test_new_game_fills_board() {
+    fn test_new_game_refills_board() {
         let mut game = Match3::new();
         game.clear_board();
         game.new_game();
@@ -2543,9 +2542,7 @@ mod tests {
         assert!(had_match);
         // The matched gems should be removed.
         assert!(
-            game.board[0][0].is_none()
-                || game.board[0][1].is_none()
-                || game.board[0][2].is_none()
+            game.board[0][0].is_none() || game.board[0][1].is_none() || game.board[0][2].is_none()
         );
     }
 

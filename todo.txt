@@ -1,3 +1,56 @@
+## BUG (noticed+FIXED 2026-05-31): apps/tictactoe — test build break PLUS two REAL
+##   production bugs. (1) test_mouse_click constructed a MouseEvent with a `modifiers`
+##   field, but MouseEvent has no such field (E0560); removed it. (2) PRODUCTION:
+##   minimax() was not depth-aware — it scored all wins as +10 and losses as -10, so
+##   test_minimax_prefers_win_over_block got a blocking move (0,2) instead of the
+##   immediate winning move (1,2). Made minimax depth-aware (win = 10 - depth, loss =
+##   depth - 10) so it prefers faster wins / slower losses, matching standard tic-tac-toe
+##   AI. (3) PRODUCTION: event()'s mouse hit-testing hardcoded grid_x = 200 while
+##   render() centers the grid at width/2 - 150, so clicks missed the grid on any
+##   non-800px window. Added stored win_width/win_height fields (set in render) and a
+##   shared Self::grid_layout(width) helper used by BOTH render and event so hit-testing
+##   always matches the drawn grid. tictactoe 39/39 tests pass, clippy clean, ouros
+##   build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/systray — test build did not compile. Two tests
+##   (test_double_click_returns_icon_id, test_double_click_outside_returns_none) bound
+##   the tray as `let tray` then called handle_double_click, which takes &mut self
+##   (E0596). Changed both to `let mut tray`. systray 34/34 tests pass, clippy clean,
+##   ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/spades — PRODUCTION build break. Render code at
+##   line 1422 called Color::rgba(bg.r(), bg.g(), bg.b(), 160) but guitk::Color exposes
+##   r/g/b/a as public FIELDS, not methods (E0599). Changed to bg.r/bg.g/bg.b. spades
+##   94/94 tests pass, clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/towers test build did not compile. Tests
+##   assert_eq! on the GameState enum, which requires Debug, but it didn't derive it
+##   (E0277). Added #[derive(Debug)]. towers 57/57 tests pass, clippy clean, ouros
+##   build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/sliding test build did not compile. Tests
+##   assert_eq! on the GameState enum, which requires Debug, but it didn't derive it
+##   (E0277). Added #[derive(Debug)]. sliding 73/73 tests pass, clippy clean, ouros
+##   build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/colorpicker test build did not compile — a test
+##   called .round() on an ambiguously-typed float literal (E0689). Annotated as
+##   0.75_f32 so the multiplication resolves to f32. colorpicker 84/84 tests pass,
+##   clippy clean, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/match3 — test build break PLUS a wrong-expectation
+##   test bug. (1) Two tests were both named test_new_game_fills_board (E0428 duplicate
+##   definition); renamed the second to test_new_game_refills_board. (2) test_gravity_
+##   single_gap asserted gravity left gems in rows 1,2 of the 8-row board, but
+##   apply_gravity compacts gems to the BOTTOM (rows 6,7), so the assertions were
+##   inverted. Fixed to assert the top rows (0..GRID_SIZE-2) are empty and the bottom
+##   two rows are filled. match3 119/119 tests pass, ouros build OK.
+##
+## BUG (noticed+FIXED 2026-05-31): apps/lightsout test build did not compile. Tests
+##   assert_eq! on the GameState enum, which requires Debug, but it didn't derive it
+##   (E0277). Added #[derive(Debug)] (alongside Clone, Copy, PartialEq, Eq). lightsout
+##   56/56 tests pass, clippy clean, ouros build OK.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/game2048 — test build break PLUS one logic
 ##   test bug. Multiple make_key/KeyEvent constructions used a Modifiers { ctrl, alt,
 ##   shift } literal that broke when guitk added super_key (E0063); switched to

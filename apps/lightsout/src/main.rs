@@ -57,7 +57,8 @@ impl Rng {
     }
 
     fn next(&mut self) -> u64 {
-        self.state = self.state
+        self.state = self
+            .state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1_442_695_040_888_963_407);
         self.state
@@ -75,21 +76,21 @@ impl Rng {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GameState {
     Playing,
     Won,
 }
 
 struct LightsOut {
-    grid: Vec<Vec<bool>>,  // true = light on
-    size: usize,            // 3, 5, or 7
+    grid: Vec<Vec<bool>>, // true = light on
+    size: usize,          // 3, 5, or 7
     cursor_row: usize,
     cursor_col: usize,
     moves: u32,
     state: GameState,
     level: u32,
-    best_moves: [Option<u32>; 3],  // best for 3x3, 5x5, 7x7
+    best_moves: [Option<u32>; 3], // best for 3x3, 5x5, 7x7
     show_help: bool,
     rng: Rng,
 }
@@ -208,7 +209,11 @@ impl LightsOut {
     }
 
     fn lights_on_count(&self) -> usize {
-        self.grid.iter().flat_map(|r| r.iter()).filter(|&&c| c).count()
+        self.grid
+            .iter()
+            .flat_map(|r| r.iter())
+            .filter(|&&c| c)
+            .count()
     }
 
     fn event(&mut self, event: &Event) {

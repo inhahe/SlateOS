@@ -401,7 +401,12 @@ impl SystemTray {
     /// Create a new system tray with built-in icons.
     pub fn new(tray_x: f32, tray_y: f32) -> Self {
         let icons = vec![
-            TrayIcon::new(ICON_ID_NOTIFICATIONS, "Notifications", '\u{1F514}', "Notifications"),
+            TrayIcon::new(
+                ICON_ID_NOTIFICATIONS,
+                "Notifications",
+                '\u{1F514}',
+                "Notifications",
+            ),
             TrayIcon::new(ICON_ID_VOLUME, "Volume", '\u{1F50A}', "Volume: 75%"),
             TrayIcon::new(ICON_ID_NETWORK, "Network", '\u{1F4F6}', "Connected"),
             TrayIcon::new(ICON_ID_BATTERY, "Battery", '\u{1F50B}', "72% remaining"),
@@ -430,7 +435,8 @@ impl SystemTray {
     pub fn register_icon(&mut self, app_name: &str, icon_char: char, tooltip: &str) -> TrayIconId {
         let id = self.next_icon_id;
         self.next_icon_id = self.next_icon_id.saturating_add(1);
-        self.icons.push(TrayIcon::new(id, app_name, icon_char, tooltip));
+        self.icons
+            .push(TrayIcon::new(id, app_name, icon_char, tooltip));
         self.recalculate_width();
         id
     }
@@ -480,13 +486,17 @@ impl SystemTray {
     /// Handle a click event. Returns true if the event was consumed.
     pub fn handle_click(&mut self, x: f32, y: f32, button: MouseButton) -> bool {
         // Check if click is within tray bar area
-        if y >= self.tray_y && y <= self.tray_y + TRAY_HEIGHT
-            && x >= self.tray_x && x <= self.tray_x + self.tray_width
+        if y >= self.tray_y
+            && y <= self.tray_y + TRAY_HEIGHT
+            && x >= self.tray_x
+            && x <= self.tray_x + self.tray_width
         {
             let relative_x = x - self.tray_x;
             let icon_index = (relative_x / ICON_CELL_SIZE) as usize;
 
-            let visible_icons: Vec<TrayIconId> = self.icons.iter()
+            let visible_icons: Vec<TrayIconId> = self
+                .icons
+                .iter()
                 .filter(|i| i.visible)
                 .map(|i| i.id)
                 .collect();
@@ -518,13 +528,17 @@ impl SystemTray {
 
     /// Handle a double-click on a tray icon (open associated app).
     pub fn handle_double_click(&mut self, x: f32, y: f32) -> Option<TrayIconId> {
-        if y >= self.tray_y && y <= self.tray_y + TRAY_HEIGHT
-            && x >= self.tray_x && x <= self.tray_x + self.tray_width
+        if y >= self.tray_y
+            && y <= self.tray_y + TRAY_HEIGHT
+            && x >= self.tray_x
+            && x <= self.tray_x + self.tray_width
         {
             let relative_x = x - self.tray_x;
             let icon_index = (relative_x / ICON_CELL_SIZE) as usize;
 
-            let visible_icons: Vec<TrayIconId> = self.icons.iter()
+            let visible_icons: Vec<TrayIconId> = self
+                .icons
+                .iter()
                 .filter(|i| i.visible)
                 .map(|i| i.id)
                 .collect();
@@ -605,7 +619,9 @@ impl SystemTray {
 
     /// Get the X position for a popup aligned to a specific icon.
     fn popup_x_for_icon(&self, icon_id: TrayIconId) -> f32 {
-        let index = self.icons.iter()
+        let index = self
+            .icons
+            .iter()
             .filter(|i| i.visible)
             .position(|i| i.id == icon_id)
             .unwrap_or(0);
@@ -695,43 +711,67 @@ impl SystemTray {
 
         // WiFi toggle
         y = self.render_toggle_row(
-            tree, content_x, y, content_width,
-            "WiFi", &self.quick_settings.wifi_network_name,
+            tree,
+            content_x,
+            y,
+            content_width,
+            "WiFi",
+            &self.quick_settings.wifi_network_name,
             self.quick_settings.wifi_enabled,
         );
 
         // Bluetooth toggle
         y = self.render_toggle_row(
-            tree, content_x, y, content_width,
-            "Bluetooth", "On",
+            tree,
+            content_x,
+            y,
+            content_width,
+            "Bluetooth",
+            "On",
             self.quick_settings.bluetooth_enabled,
         );
 
         // Do Not Disturb
         y = self.render_toggle_row(
-            tree, content_x, y, content_width,
-            "Do Not Disturb", "",
+            tree,
+            content_x,
+            y,
+            content_width,
+            "Do Not Disturb",
+            "",
             self.quick_settings.do_not_disturb,
         );
 
         // Night Light
         y = self.render_toggle_row(
-            tree, content_x, y, content_width,
-            "Night Light", "",
+            tree,
+            content_x,
+            y,
+            content_width,
+            "Night Light",
+            "",
             self.quick_settings.night_light,
         );
 
         // Battery Saver
         y = self.render_toggle_row(
-            tree, content_x, y, content_width,
-            "Battery Saver", "",
+            tree,
+            content_x,
+            y,
+            content_width,
+            "Battery Saver",
+            "",
             self.quick_settings.battery_saver,
         );
 
         // Airplane Mode
         y = self.render_toggle_row(
-            tree, content_x, y, content_width,
-            "Airplane Mode", "",
+            tree,
+            content_x,
+            y,
+            content_width,
+            "Airplane Mode",
+            "",
             self.quick_settings.airplane_mode,
         );
 
@@ -747,7 +787,14 @@ impl SystemTray {
             max_width: Some(content_width),
         });
         y += POPUP_FONT_SIZE + 4.0;
-        self.render_slider(tree, content_x, y, content_width, self.quick_settings.brightness, palette::YELLOW);
+        self.render_slider(
+            tree,
+            content_x,
+            y,
+            content_width,
+            self.quick_settings.brightness,
+            palette::YELLOW,
+        );
         y += SLIDER_THUMB_RADIUS * 2.0 + ITEM_SPACING;
 
         // Volume slider
@@ -761,7 +808,14 @@ impl SystemTray {
             max_width: Some(content_width),
         });
         y += POPUP_FONT_SIZE + 4.0;
-        self.render_slider(tree, content_x, y, content_width, self.volume.master_volume, palette::BLUE);
+        self.render_slider(
+            tree,
+            content_x,
+            y,
+            content_width,
+            self.volume.master_volume,
+            palette::BLUE,
+        );
         let _ = y; // suppress unused warning for last y value
     }
 
@@ -812,7 +866,11 @@ impl SystemTray {
             x: content_x,
             y,
             text: format!("Master: {}%{}", self.volume.master_volume, mute_label),
-            color: if self.volume.muted { palette::OVERLAY0 } else { palette::TEXT },
+            color: if self.volume.muted {
+                palette::OVERLAY0
+            } else {
+                palette::TEXT
+            },
             font_size: POPUP_FONT_SIZE,
             font_weight: FontWeightHint::Regular,
             max_width: Some(content_width),
@@ -820,8 +878,19 @@ impl SystemTray {
         y += POPUP_FONT_SIZE + 4.0;
 
         // Master volume slider
-        let slider_color = if self.volume.muted { palette::SURFACE2 } else { palette::BLUE };
-        self.render_slider(tree, content_x, y, content_width, self.volume.master_volume, slider_color);
+        let slider_color = if self.volume.muted {
+            palette::SURFACE2
+        } else {
+            palette::BLUE
+        };
+        self.render_slider(
+            tree,
+            content_x,
+            y,
+            content_width,
+            self.volume.master_volume,
+            slider_color,
+        );
         y += SLIDER_THUMB_RADIUS * 2.0 + ITEM_SPACING * 2.0;
 
         // Separator
@@ -842,14 +911,22 @@ impl SystemTray {
                 x: content_x,
                 y,
                 text: format!("{}: {}%{}", app_vol.app_name, app_vol.volume, mute_marker),
-                color: if app_vol.muted { palette::OVERLAY0 } else { palette::SUBTEXT1 },
+                color: if app_vol.muted {
+                    palette::OVERLAY0
+                } else {
+                    palette::SUBTEXT1
+                },
                 font_size: POPUP_FONT_SIZE,
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(content_width),
             });
             y += POPUP_FONT_SIZE + 4.0;
 
-            let app_color = if app_vol.muted { palette::SURFACE2 } else { palette::TEAL };
+            let app_color = if app_vol.muted {
+                palette::SURFACE2
+            } else {
+                palette::TEAL
+            };
             self.render_slider(tree, content_x, y, content_width, app_vol.volume, app_color);
             y += SLIDER_THUMB_RADIUS * 2.0 + ITEM_SPACING;
         }
@@ -885,8 +962,16 @@ impl SystemTray {
         y += HEADER_FONT_SIZE + ITEM_SPACING * 2.0;
 
         // Status
-        let status_text = if self.network.connected { "Connected" } else { "Disconnected" };
-        let status_color = if self.network.connected { palette::GREEN } else { palette::RED };
+        let status_text = if self.network.connected {
+            "Connected"
+        } else {
+            "Disconnected"
+        };
+        let status_color = if self.network.connected {
+            palette::GREEN
+        } else {
+            palette::RED
+        };
         tree.push(RenderCommand::Text {
             x: content_x,
             y,
@@ -921,7 +1006,14 @@ impl SystemTray {
             max_width: Some(content_width),
         });
         y += POPUP_FONT_SIZE + 4.0;
-        self.render_slider(tree, content_x, y, content_width, self.network.signal_strength, palette::GREEN);
+        self.render_slider(
+            tree,
+            content_x,
+            y,
+            content_width,
+            self.network.signal_strength,
+            palette::GREEN,
+        );
         y += SLIDER_THUMB_RADIUS * 2.0 + ITEM_SPACING;
 
         // IP address
@@ -1055,14 +1147,22 @@ impl SystemTray {
                 });
             }
 
-            let text_color = if is_today { palette::CRUST } else { palette::TEXT };
+            let text_color = if is_today {
+                palette::CRUST
+            } else {
+                palette::TEXT
+            };
             tree.push(RenderCommand::Text {
                 x: cell_center_x,
                 y: row_y + 4.0,
                 text: format!("{}", day),
                 color: text_color,
                 font_size: POPUP_FONT_SIZE,
-                font_weight: if is_today { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_today {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
 
@@ -1111,7 +1211,9 @@ impl SystemTray {
         let mut y = popup_y + POPUP_PADDING;
 
         // App name as header
-        let app_name = self.icons.iter()
+        let app_name = self
+            .icons
+            .iter()
             .find(|i| i.id == icon_id)
             .map(|i| i.app_name.as_str())
             .unwrap_or("Unknown");
@@ -1348,7 +1450,11 @@ impl SystemTray {
         let toggle_x = x + width - TOGGLE_WIDTH;
         let toggle_y = y + (POPUP_FONT_SIZE - TOGGLE_HEIGHT) / 2.0 + 2.0;
 
-        let pill_color = if enabled { palette::BLUE } else { palette::SURFACE1 };
+        let pill_color = if enabled {
+            palette::BLUE
+        } else {
+            palette::SURFACE1
+        };
         tree.push(RenderCommand::FillRect {
             x: toggle_x,
             y: toggle_y,
@@ -1509,7 +1615,7 @@ mod tests {
 
     #[test]
     fn test_double_click_returns_icon_id() {
-        let tray = SystemTray::new(100.0, 500.0);
+        let mut tray = SystemTray::new(100.0, 500.0);
         let result = tray.handle_double_click(110.0, 520.0);
         assert!(result.is_some());
         assert_eq!(result, Some(ICON_ID_NOTIFICATIONS));
@@ -1517,7 +1623,7 @@ mod tests {
 
     #[test]
     fn test_double_click_outside_returns_none() {
-        let tray = SystemTray::new(100.0, 500.0);
+        let mut tray = SystemTray::new(100.0, 500.0);
         let result = tray.handle_double_click(0.0, 0.0);
         assert!(result.is_none());
     }
@@ -1607,8 +1713,13 @@ mod tests {
     #[test]
     fn test_datetime_time_str() {
         let dt = DateTime {
-            year: 2026, month: 5, day: 17,
-            hour: 9, minute: 5, second: 0, weekday: 0,
+            year: 2026,
+            month: 5,
+            day: 17,
+            hour: 9,
+            minute: 5,
+            second: 0,
+            weekday: 0,
         };
         assert_eq!(dt.time_str(), "09:05");
     }
@@ -1616,8 +1727,13 @@ mod tests {
     #[test]
     fn test_datetime_date_str() {
         let dt = DateTime {
-            year: 2026, month: 12, day: 25,
-            hour: 0, minute: 0, second: 0, weekday: 4,
+            year: 2026,
+            month: 12,
+            day: 25,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            weekday: 4,
         };
         assert_eq!(dt.date_str(), "Dec 25, 2026");
     }
@@ -1654,8 +1770,13 @@ mod tests {
     fn test_first_weekday_of_month() {
         // May 2026 starts on Friday (5)
         let dt = DateTime {
-            year: 2026, month: 5, day: 17,
-            hour: 0, minute: 0, second: 0, weekday: 0,
+            year: 2026,
+            month: 5,
+            day: 17,
+            hour: 0,
+            minute: 0,
+            second: 0,
+            weekday: 0,
         };
         assert_eq!(dt.first_weekday_of_month(), 5); // Friday
     }

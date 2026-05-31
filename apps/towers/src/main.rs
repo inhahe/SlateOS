@@ -47,22 +47,22 @@ const DISK_COLORS: [Color; 8] = [RED, PEACH, YELLOW, GREEN, TEAL, BLUE, MAUVE, L
 const MAX_DISKS: usize = 8;
 const NUM_PEGS: usize = 3;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum GameState {
     Playing,
     Won,
 }
 
 struct TowersOfHanoi {
-    pegs: [Vec<u8>; NUM_PEGS],  // disk sizes, bottom to top, 1 = smallest
+    pegs: [Vec<u8>; NUM_PEGS], // disk sizes, bottom to top, 1 = smallest
     num_disks: usize,
     moves: u32,
-    selected_peg: usize,        // cursor position (0-2)
-    held_disk: Option<(usize, u8)>,  // (from_peg, disk_size)
+    selected_peg: usize,            // cursor position (0-2)
+    held_disk: Option<(usize, u8)>, // (from_peg, disk_size)
     state: GameState,
-    best_moves: [Option<u32>; 6],  // best for 3-8 disks (index = disks - 3)
+    best_moves: [Option<u32>; 6], // best for 3-8 disks (index = disks - 3)
     show_help: bool,
-    undo_stack: Vec<(usize, usize)>,  // (from_peg, to_peg)
+    undo_stack: Vec<(usize, usize)>, // (from_peg, to_peg)
 }
 
 impl TowersOfHanoi {
@@ -287,7 +287,9 @@ impl TowersOfHanoi {
         // Disk count and moves
         let info = format!(
             "Disks: {}   Moves: {} / {} (min)",
-            self.num_disks, self.moves, self.min_moves()
+            self.num_disks,
+            self.moves,
+            self.min_moves()
         );
         cmds.push(RenderCommand::Text {
             x: 50.0,

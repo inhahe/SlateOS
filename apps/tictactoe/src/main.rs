@@ -109,9 +109,14 @@ impl Board {
     /// Check winner. Returns Some(Mark) if there's a winner, None otherwise.
     fn winner(&self) -> Option<Mark> {
         const LINES: [[usize; 3]; 8] = [
-            [0, 1, 2], [3, 4, 5], [6, 7, 8], // rows
-            [0, 3, 6], [1, 4, 7], [2, 5, 8], // cols
-            [0, 4, 8], [2, 4, 6],             // diagonals
+            [0, 1, 2],
+            [3, 4, 5],
+            [6, 7, 8], // rows
+            [0, 3, 6],
+            [1, 4, 7],
+            [2, 5, 8], // cols
+            [0, 4, 8],
+            [2, 4, 6], // diagonals
         ];
 
         for line in &LINES {
@@ -127,9 +132,14 @@ impl Board {
     /// Return the winning line indices, if any
     fn winning_line(&self) -> Option<[usize; 3]> {
         const LINES: [[usize; 3]; 8] = [
-            [0, 1, 2], [3, 4, 5], [6, 7, 8],
-            [0, 3, 6], [1, 4, 7], [2, 5, 8],
-            [0, 4, 8], [2, 4, 6],
+            [0, 1, 2],
+            [3, 4, 5],
+            [6, 7, 8],
+            [0, 3, 6],
+            [1, 4, 7],
+            [2, 5, 8],
+            [0, 4, 8],
+            [2, 4, 6],
         ];
 
         for line in &LINES {
@@ -148,15 +158,28 @@ impl Board {
 }
 
 // ── Minimax AI ──────────────────────────────────────────────────────
-fn minimax(board: &Board, is_maximizing: bool, ai_mark: Mark) -> i32 {
+fn minimax(board: &Board, is_maximizing: bool, ai_mark: Mark, depth: i32) -> i32 {
+    // Depth-aware terminal scoring: a win reached sooner scores higher and a loss
+    // reached later scores higher, so the AI prefers an immediate win over an
+    // equally-winning-but-slower line (and delays an unavoidable loss). Without
+    // this, an immediate win and a delayed win both score 10 and iteration order
+    // could pick a blocking move instead of taking the win.
     if let Some(winner) = board.winner() {
-        return if winner == ai_mark { 10 } else { -10 };
+        return if winner == ai_mark {
+            10 - depth
+        } else {
+            depth - 10
+        };
     }
     if board.is_full() {
         return 0;
     }
 
-    let current_mark = if is_maximizing { ai_mark } else { ai_mark.other() };
+    let current_mark = if is_maximizing {
+        ai_mark
+    } else {
+        ai_mark.other()
+    };
     let moves = board.available_moves();
 
     if is_maximizing {
@@ -164,7 +187,7 @@ fn minimax(board: &Board, is_maximizing: bool, ai_mark: Mark) -> i32 {
         for (r, c) in moves {
             let mut b = *board;
             b.set(r, c, current_mark);
-            let score = minimax(&b, false, ai_mark);
+            let score = minimax(&b, false, ai_mark, depth + 1);
             if score > best {
                 best = score;
             }
@@ -175,7 +198,7 @@ fn minimax(board: &Board, is_maximizing: bool, ai_mark: Mark) -> i32 {
         for (r, c) in moves {
             let mut b = *board;
             b.set(r, c, current_mark);
-            let score = minimax(&b, true, ai_mark);
+            let score = minimax(&b, true, ai_mark, depth + 1);
             if score < best {
                 best = score;
             }
@@ -196,7 +219,7 @@ fn best_move(board: &Board, ai_mark: Mark) -> Option<(usize, usize)> {
     for (r, c) in moves {
         let mut b = *board;
         b.set(r, c, ai_mark);
-        let score = minimax(&b, false, ai_mark);
+        let score = minimax(&b, false, ai_mark, 1);
         if score > best_score {
             best_score = score;
             best = (r, c);
@@ -226,6 +249,11 @@ struct TicTacToeApp {
     draws: u32,
     // Winning line for highlight
     win_line: Option<[usize; 3]>,
+    // Last rendered window dimensions. Stored so mouse hit-testing uses the same
+    // (centered) grid layout that render() draws — otherwise clicks map to the
+    // wrong cells. Defaults to the common 800x600 window before the first render.
+    win_width: f32,
+    win_height: f32,
 }
 
 impl TicTacToeApp {
@@ -240,7 +268,19 @@ impl TicTacToeApp {
             ai_wins: 0,
             draws: 0,
             win_line: None,
+            win_width: 800.0,
+            win_height: 600.0,
         }
+    }
+
+    /// Top-left origin and cell size of the 3x3 grid for a given window width.
+    /// Shared by `render` and mouse hit-testing so clicks map to the cells the
+    /// player actually sees (the grid is horizontally centered).
+    fn grid_layout(width: f32) -> (f32, f32, f32) {
+        let cell_sz = 100.0_f32;
+        let grid_x = width / 2.0 - 150.0;
+        let grid_y = 100.0_f32;
+        (grid_x, grid_y, cell_sz)
     }
 
     fn reset(&mut self) {
@@ -297,28 +337,45 @@ impl TicTacToeApp {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, .. }) => {
-                match key {
-                    Key::Up => { if self.cursor_row > 0 { self.cursor_row -= 1; } }
-                    Key::Down => { if self.cursor_row < 2 { self.cursor_row += 1; } }
-                    Key::Left => { if self.cursor_col > 0 { self.cursor_col -= 1; } }
-                    Key::Right => { if self.cursor_col < 2 { self.cursor_col += 1; } }
-                    Key::Enter | Key::Space => {
-                        if self.state == GameState::Playing {
-                            self.place_mark(self.cursor_row, self.cursor_col);
-                        } else {
-                            self.reset();
-                        }
+            Event::Key(KeyEvent { key, .. }) => match key {
+                Key::Up => {
+                    if self.cursor_row > 0 {
+                        self.cursor_row -= 1;
                     }
-                    Key::N => self.reset(),
-                    _ => {}
                 }
-            }
-            Event::Mouse(MouseEvent { kind: MouseEventKind::Press(MouseButton::Left), x, y, .. }) => {
-                // Map click to grid cell
-                let grid_x = 200.0_f32;
-                let grid_y = 100.0_f32;
-                let cell_sz = 100.0_f32;
+                Key::Down => {
+                    if self.cursor_row < 2 {
+                        self.cursor_row += 1;
+                    }
+                }
+                Key::Left => {
+                    if self.cursor_col > 0 {
+                        self.cursor_col -= 1;
+                    }
+                }
+                Key::Right => {
+                    if self.cursor_col < 2 {
+                        self.cursor_col += 1;
+                    }
+                }
+                Key::Enter | Key::Space => {
+                    if self.state == GameState::Playing {
+                        self.place_mark(self.cursor_row, self.cursor_col);
+                    } else {
+                        self.reset();
+                    }
+                }
+                Key::N => self.reset(),
+                _ => {}
+            },
+            Event::Mouse(MouseEvent {
+                kind: MouseEventKind::Press(MouseButton::Left),
+                x,
+                y,
+                ..
+            }) => {
+                // Map click to grid cell using the same layout render() draws.
+                let (grid_x, grid_y, cell_sz) = Self::grid_layout(self.win_width);
 
                 let col = ((*x - grid_x) / cell_sz) as i32;
                 let row = ((*y - grid_y) / cell_sz) as i32;
@@ -335,19 +392,26 @@ impl TicTacToeApp {
         }
     }
 
-    fn render(&self, width: f32, height: f32) -> Vec<RenderCommand> {
+    fn render(&mut self, width: f32, height: f32) -> Vec<RenderCommand> {
+        // Remember the window size so mouse hit-testing matches this layout.
+        self.win_width = width;
+        self.win_height = height;
         let mut cmds = Vec::new();
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width, height,
+            x: 0.0,
+            y: 0.0,
+            width,
+            height,
             color: COL_BASE,
             corner_radii: CornerRadii::ZERO,
         });
 
         // Title
         cmds.push(RenderCommand::Text {
-            x: width / 2.0 - 70.0, y: 20.0,
+            x: width / 2.0 - 70.0,
+            y: 20.0,
             text: "Tic-Tac-Toe".to_string(),
             font_size: 24.0,
             color: COL_TEXT,
@@ -375,7 +439,8 @@ impl TicTacToeApp {
             GameState::Draw => COL_YELLOW,
         };
         cmds.push(RenderCommand::Text {
-            x: width / 2.0 - 60.0, y: 55.0,
+            x: width / 2.0 - 60.0,
+            y: 55.0,
             text: status,
             font_size: 16.0,
             color: status_color,
@@ -384,9 +449,7 @@ impl TicTacToeApp {
         });
 
         // Grid
-        let grid_x = width / 2.0 - 150.0;
-        let grid_y = 100.0;
-        let cell_sz = 100.0;
+        let (grid_x, grid_y, cell_sz) = Self::grid_layout(width);
 
         // Draw cells
         for row in 0..3 {
@@ -396,9 +459,7 @@ impl TicTacToeApp {
                 let idx = row * 3 + col;
 
                 let is_cursor = row == self.cursor_row && col == self.cursor_col;
-                let is_win_cell = self.win_line.map_or(false, |line| {
-                    line.contains(&idx)
-                });
+                let is_win_cell = self.win_line.map_or(false, |line| line.contains(&idx));
 
                 // Cell background
                 let bg = if is_win_cell {
@@ -410,8 +471,10 @@ impl TicTacToeApp {
                 };
 
                 cmds.push(RenderCommand::FillRect {
-                    x: cx + 2.0, y: cy + 2.0,
-                    width: cell_sz - 4.0, height: cell_sz - 4.0,
+                    x: cx + 2.0,
+                    y: cy + 2.0,
+                    width: cell_sz - 4.0,
+                    height: cell_sz - 4.0,
                     color: bg,
                     corner_radii: CornerRadii::all(8.0),
                 });
@@ -440,8 +503,10 @@ impl TicTacToeApp {
             let cx = grid_x + self.cursor_col as f32 * cell_sz;
             let cy = grid_y + self.cursor_row as f32 * cell_sz;
             cmds.push(RenderCommand::StrokeRect {
-                x: cx + 2.0, y: cy + 2.0,
-                width: cell_sz - 4.0, height: cell_sz - 4.0,
+                x: cx + 2.0,
+                y: cy + 2.0,
+                width: cell_sz - 4.0,
+                height: cell_sz - 4.0,
                 color: COL_LAVENDER,
                 line_width: 3.0,
                 corner_radii: CornerRadii::all(8.0),
@@ -451,7 +516,8 @@ impl TicTacToeApp {
         // Score
         let score_y = grid_y + 3.0 * cell_sz + 30.0;
         cmds.push(RenderCommand::Text {
-            x: grid_x, y: score_y,
+            x: grid_x,
+            y: score_y,
             text: format!("You (X): {}", self.player_wins),
             font_size: 16.0,
             color: COL_BLUE,
@@ -459,7 +525,8 @@ impl TicTacToeApp {
             max_width: None,
         });
         cmds.push(RenderCommand::Text {
-            x: grid_x + 140.0, y: score_y,
+            x: grid_x + 140.0,
+            y: score_y,
             text: format!("AI (O): {}", self.ai_wins),
             font_size: 16.0,
             color: COL_RED,
@@ -467,7 +534,8 @@ impl TicTacToeApp {
             max_width: None,
         });
         cmds.push(RenderCommand::Text {
-            x: grid_x + 260.0, y: score_y,
+            x: grid_x + 260.0,
+            y: score_y,
             text: format!("Draws: {}", self.draws),
             font_size: 16.0,
             color: COL_YELLOW,
@@ -477,7 +545,8 @@ impl TicTacToeApp {
 
         // Help
         cmds.push(RenderCommand::Text {
-            x: 20.0, y: height - 24.0,
+            x: 20.0,
+            y: height - 24.0,
             text: "Arrows=Move  Enter/Space=Place  N=New Game  Click=Place".to_string(),
             font_size: 11.0,
             color: COL_OVERLAY0,
@@ -601,9 +670,15 @@ mod tests {
         // X O X
         // X X O
         // O X O
-        b.set(0, 0, Mark::X); b.set(0, 1, Mark::O); b.set(0, 2, Mark::X);
-        b.set(1, 0, Mark::X); b.set(1, 1, Mark::X); b.set(1, 2, Mark::O);
-        b.set(2, 0, Mark::O); b.set(2, 1, Mark::X); b.set(2, 2, Mark::O);
+        b.set(0, 0, Mark::X);
+        b.set(0, 1, Mark::O);
+        b.set(0, 2, Mark::X);
+        b.set(1, 0, Mark::X);
+        b.set(1, 1, Mark::X);
+        b.set(1, 2, Mark::O);
+        b.set(2, 0, Mark::O);
+        b.set(2, 1, Mark::X);
+        b.set(2, 2, Mark::O);
         assert!(b.is_game_over());
         assert_eq!(b.winner(), None);
     }
@@ -670,9 +745,15 @@ mod tests {
     #[test]
     fn test_minimax_full_board() {
         let mut b = Board::new();
-        b.set(0, 0, Mark::X); b.set(0, 1, Mark::O); b.set(0, 2, Mark::X);
-        b.set(1, 0, Mark::X); b.set(1, 1, Mark::X); b.set(1, 2, Mark::O);
-        b.set(2, 0, Mark::O); b.set(2, 1, Mark::X); b.set(2, 2, Mark::O);
+        b.set(0, 0, Mark::X);
+        b.set(0, 1, Mark::O);
+        b.set(0, 2, Mark::X);
+        b.set(1, 0, Mark::X);
+        b.set(1, 1, Mark::X);
+        b.set(1, 2, Mark::O);
+        b.set(2, 0, Mark::O);
+        b.set(2, 1, Mark::X);
+        b.set(2, 2, Mark::O);
         let mv = best_move(&b, Mark::O);
         assert_eq!(mv, None);
     }
@@ -691,7 +772,8 @@ mod tests {
         app.place_mark(1, 1);
         assert_eq!(app.board.get(1, 1), Some(Mark::X));
         // AI should have moved too
-        let ai_cells = (0..3).flat_map(|r| (0..3).map(move |c| (r, c)))
+        let ai_cells = (0..3)
+            .flat_map(|r| (0..3).map(move |c| (r, c)))
             .filter(|&(r, c)| app.board.get(r, c) == Some(Mark::O))
             .count();
         assert_eq!(ai_cells, 1);
@@ -808,7 +890,7 @@ mod tests {
 
     #[test]
     fn test_render_no_panic() {
-        let app = TicTacToeApp::new();
+        let mut app = TicTacToeApp::new();
         let cmds = app.render(800.0, 600.0);
         assert!(!cmds.is_empty());
     }
@@ -856,8 +938,11 @@ mod tests {
                     }
                 }
                 // AI should never lose
-                assert_ne!(app.state, GameState::Won(Mark::X),
-                    "AI lost when X started at ({r},{c})");
+                assert_ne!(
+                    app.state,
+                    GameState::Won(Mark::X),
+                    "AI lost when X started at ({r},{c})"
+                );
             }
         }
     }
@@ -914,7 +999,6 @@ mod tests {
             kind: MouseEventKind::Press(MouseButton::Left),
             x: grid_x + 150.0,
             y: grid_y + 150.0,
-            modifiers: Modifiers::default(),
         }));
         assert_eq!(app.board.get(1, 1), Some(Mark::X));
     }

@@ -210,7 +210,10 @@ impl Rng {
     }
 
     fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         self.state
     }
 
@@ -576,7 +579,8 @@ impl SpadesGame {
             self.advance_bidder();
         }
         if self.phase == Phase::Bidding && self.current_player.is_human() {
-            self.status_message = "Choose your bid (Up/Down to adjust, Enter to confirm)".to_string();
+            self.status_message =
+                "Choose your bid (Up/Down to adjust, Enter to confirm)".to_string();
         }
     }
 
@@ -797,7 +801,10 @@ impl SpadesGame {
 
     fn pick_lowest_non_winning(&self, hand: &[Card], legal: &[usize], led_suit: Suit) -> usize {
         // For nil bidders: find the lowest card that doesn't currently beat the trick
-        let current_winner_card = self.current_trick.cards.iter()
+        let current_winner_card = self
+            .current_trick
+            .cards
+            .iter()
             .map(|(_, c)| *c)
             .reduce(|best, c| if c.beats(best, led_suit) { c } else { best });
 
@@ -827,15 +834,24 @@ impl SpadesGame {
     }
 
     fn pick_smart(&self, hand: &[Card], legal: &[usize], led_suit: Suit) -> usize {
-        let current_winner = self.current_trick.cards.iter()
+        let current_winner = self
+            .current_trick
+            .cards
+            .iter()
             .map(|(p, c)| (*p, *c))
             .reduce(|(bp, bc), (p, c)| {
-                if c.beats(bc, led_suit) { (p, c) } else { (bp, bc) }
+                if c.beats(bc, led_suit) {
+                    (p, c)
+                } else {
+                    (bp, bc)
+                }
             });
 
         if let Some((winner_pid, winner_card)) = current_winner {
             // If partner is winning, don't waste a high card
-            if winner_pid.team() == self.current_player.team() && self.current_trick.cards.len() == 3 {
+            if winner_pid.team() == self.current_player.team()
+                && self.current_trick.cards.len() == 3
+            {
                 // Partner is winning and we're last to play: dump lowest
                 return self.pick_lowest(hand, legal);
             }
@@ -1012,8 +1028,7 @@ impl SpadesGame {
         } else {
             (PlayerId::EAST, PlayerId::WEST)
         };
-        self.player_rounds[p1.index()].bid_value()
-            + self.player_rounds[p2.index()].bid_value()
+        self.player_rounds[p1.index()].bid_value() + self.player_rounds[p2.index()].bid_value()
     }
 
     fn team_tricks(&self, team: usize) -> u8 {
@@ -1022,8 +1037,7 @@ impl SpadesGame {
         } else {
             (PlayerId::EAST, PlayerId::WEST)
         };
-        self.player_rounds[p1.index()].tricks_won
-            + self.player_rounds[p2.index()].tricks_won
+        self.player_rounds[p1.index()].tricks_won + self.player_rounds[p2.index()].tricks_won
     }
 
     // ── Event handling ──────────────────────────────────────────────
@@ -1196,7 +1210,11 @@ impl SpadesGame {
 
         for i in 0..hand_len {
             let cx = start_x + i as f32 * CARD_SPACING;
-            if event.x >= cx && event.x < cx + CARD_W && event.y >= HAND_Y && event.y < HAND_Y + CARD_H {
+            if event.x >= cx
+                && event.x < cx + CARD_W
+                && event.y >= HAND_Y
+                && event.y < HAND_Y + CARD_H
+            {
                 self.selected_card = i;
                 self.try_play_selected();
                 return;
@@ -1387,10 +1405,16 @@ impl SpadesGame {
 
     fn trick_card_position(&self, player: PlayerId) -> (f32, f32) {
         match player.0 {
-            0 => (TRICK_CENTER_X - CARD_W / 2.0, TRICK_CENTER_Y + 10.0),       // South
-            1 => (TRICK_CENTER_X + 30.0, TRICK_CENTER_Y - CARD_H / 2.0),        // East
-            2 => (TRICK_CENTER_X - CARD_W / 2.0, TRICK_CENTER_Y - CARD_H - 10.0), // North
-            3 => (TRICK_CENTER_X - CARD_W - 30.0, TRICK_CENTER_Y - CARD_H / 2.0), // West
+            0 => (TRICK_CENTER_X - CARD_W / 2.0, TRICK_CENTER_Y + 10.0), // South
+            1 => (TRICK_CENTER_X + 30.0, TRICK_CENTER_Y - CARD_H / 2.0), // East
+            2 => (
+                TRICK_CENTER_X - CARD_W / 2.0,
+                TRICK_CENTER_Y - CARD_H - 10.0,
+            ), // North
+            3 => (
+                TRICK_CENTER_X - CARD_W - 30.0,
+                TRICK_CENTER_Y - CARD_H / 2.0,
+            ), // West
             _ => (0.0, 0.0),
         }
     }
@@ -1404,7 +1428,11 @@ impl SpadesGame {
         selected: bool,
         dimmed: bool,
     ) {
-        let bg = if selected { SURFACE1 } else { Color::from_hex(0xEEEEEE) };
+        let bg = if selected {
+            SURFACE1
+        } else {
+            Color::from_hex(0xEEEEEE)
+        };
         let border_color = if selected { BLUE } else { OVERLAY0 };
 
         // Card border
@@ -1419,7 +1447,7 @@ impl SpadesGame {
 
         // Card background
         let card_bg = if dimmed {
-            Color::rgba(bg.r(), bg.g(), bg.b(), 160)
+            Color::rgba(bg.r, bg.g, bg.b, 160)
         } else {
             bg
         };
@@ -1432,11 +1460,7 @@ impl SpadesGame {
             corner_radii: CornerRadii::all(4.0),
         });
 
-        let suit_color = if dimmed {
-            OVERLAY0
-        } else {
-            card.suit.color()
-        };
+        let suit_color = if dimmed { OVERLAY0 } else { card.suit.color() };
 
         // Rank in top-left
         commands.push(RenderCommand::Text {
@@ -1504,9 +1528,8 @@ impl SpadesGame {
                 && self.phase == Phase::Playing
                 && self.current_player.is_human();
             let is_legal = legal.contains(&i);
-            let dimmed = self.phase == Phase::Playing
-                && self.current_player.is_human()
-                && !is_legal;
+            let dimmed =
+                self.phase == Phase::Playing && self.current_player.is_human() && !is_legal;
 
             let card_y = if is_selected { HAND_Y - 10.0 } else { HAND_Y };
             self.render_card_face(commands, cx, card_y, card, is_selected, dimmed);
@@ -1545,13 +1568,22 @@ impl SpadesGame {
             width: 1.0,
         });
 
-        let player_order = [PlayerId::SOUTH, PlayerId::EAST, PlayerId::NORTH, PlayerId::WEST];
+        let player_order = [
+            PlayerId::SOUTH,
+            PlayerId::EAST,
+            PlayerId::NORTH,
+            PlayerId::WEST,
+        ];
         for (idx, &pid) in player_order.iter().enumerate() {
             let py = 90.0 + idx as f32 * 90.0;
             let pr = &self.player_rounds[pid.index()];
 
             // Player name
-            let name_color = if pid == self.current_player { YELLOW } else { TEXT_COLOR };
+            let name_color = if pid == self.current_player {
+                YELLOW
+            } else {
+                TEXT_COLOR
+            };
             let team_marker = if pid.team() == 0 { " (NS)" } else { " (EW)" };
             commands.push(RenderCommand::Text {
                 x: SIDEBAR_X + 10.0,
@@ -1720,8 +1752,16 @@ impl SpadesGame {
             let bx = grid_start_x + col * (btn_w + btn_gap);
             let by = grid_start_y + row * (btn_h + btn_gap);
 
-            let bg = if bid_val == self.bid_selection { BLUE } else { SURFACE1 };
-            let fg = if bid_val == self.bid_selection { BASE } else { TEXT_COLOR };
+            let bg = if bid_val == self.bid_selection {
+                BLUE
+            } else {
+                SURFACE1
+            };
+            let fg = if bid_val == self.bid_selection {
+                BASE
+            } else {
+                TEXT_COLOR
+            };
 
             commands.push(RenderCommand::FillRect {
                 x: bx,
@@ -2226,7 +2266,8 @@ mod tests {
             Card::new(Suit::Spades, Rank::THREE),
         ];
         game.current_trick = Trick::new(PlayerId::EAST);
-        game.current_trick.add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::FIVE));
+        game.current_trick
+            .add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::FIVE));
 
         let legal = game.legal_plays(PlayerId::SOUTH);
         assert_eq!(legal.len(), 2); // Only hearts
@@ -2246,7 +2287,8 @@ mod tests {
             Card::new(Suit::Diamonds, Rank::THREE),
         ];
         game.current_trick = Trick::new(PlayerId::EAST);
-        game.current_trick.add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::FIVE));
+        game.current_trick
+            .add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::FIVE));
 
         let legal = game.legal_plays(PlayerId::SOUTH);
         assert_eq!(legal.len(), 3); // Can play anything
@@ -2344,7 +2386,8 @@ mod tests {
         }
         game.hands[0] = vec![Card::new(Suit::Spades, Rank::ACE)];
         game.current_trick = Trick::new(PlayerId::EAST);
-        game.current_trick.add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::FIVE));
+        game.current_trick
+            .add(PlayerId::EAST, Card::new(Suit::Hearts, Rank::FIVE));
         game.play_card(PlayerId::SOUTH, 0);
         assert!(game.spades_broken);
     }
@@ -2847,7 +2890,8 @@ mod tests {
             Card::new(Suit::Clubs, Rank::TWO),
         ];
         game.current_trick = Trick::new(PlayerId::SOUTH);
-        game.current_trick.add(PlayerId::SOUTH, Card::new(Suit::Hearts, Rank::FIVE));
+        game.current_trick
+            .add(PlayerId::SOUTH, Card::new(Suit::Hearts, Rank::FIVE));
         let legal = vec![0]; // Only hearts
         let choice = game.ai_choose_card(PlayerId::EAST, &legal);
         assert_eq!(choice, 0);

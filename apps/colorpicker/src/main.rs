@@ -190,10 +190,7 @@ impl PickedColor {
 
     /// Format as `#RRGGBBAA` hex string (includes alpha).
     pub fn to_hex8(self) -> String {
-        format!(
-            "#{:02X}{:02X}{:02X}{:02X}",
-            self.r, self.g, self.b, self.a
-        )
+        format!("#{:02X}{:02X}{:02X}{:02X}", self.r, self.g, self.b, self.a)
     }
 
     /// Format as the selected `ColorFormat`.
@@ -287,11 +284,7 @@ impl PickedColor {
         let l = (max + min) / 2.0;
 
         if delta < f32::EPSILON {
-            return Hsl {
-                h: 0.0,
-                s: 0.0,
-                l,
-            };
+            return Hsl { h: 0.0, s: 0.0, l };
         }
 
         let s = if l <= 0.5 {
@@ -355,18 +348,10 @@ impl PickedColor {
         let delta = max - min;
 
         let v = max;
-        let s = if max < f32::EPSILON {
-            0.0
-        } else {
-            delta / max
-        };
+        let s = if max < f32::EPSILON { 0.0 } else { delta / max };
 
         if delta < f32::EPSILON {
-            return Hsv {
-                h: 0.0,
-                s: 0.0,
-                v,
-            };
+            return Hsv { h: 0.0, s: 0.0, v };
         }
 
         let h = if (max - r).abs() < f32::EPSILON {
@@ -630,10 +615,7 @@ impl ColorPalette {
 
     /// Look up a color by name.
     pub fn get(&self, name: &str) -> Option<PickedColor> {
-        self.colors
-            .iter()
-            .find(|(n, _)| n == name)
-            .map(|(_, c)| *c)
+        self.colors.iter().find(|(n, _)| n == name).map(|(_, c)| *c)
     }
 
     /// Number of colors in the palette.
@@ -1150,11 +1132,7 @@ impl ColorPickerApp {
         });
 
         // Filled portion
-        let fill_frac = if max_val > 0.0 {
-            value / max_val
-        } else {
-            0.0
-        };
+        let fill_frac = if max_val > 0.0 { value / max_val } else { 0.0 };
         let fill_w = track_w * fill_frac;
         if fill_w > 0.5 {
             cmds.push(RenderCommand::FillRect {
@@ -1260,40 +1238,13 @@ impl ColorPickerApp {
         *y += 18.0;
 
         let slider_w = self.width - 2.0 * PADDING;
-        Self::render_slider(
-            cmds,
-            PADDING,
-            *y,
-            slider_w,
-            "H",
-            hsl.h,
-            360.0,
-            mocha::MAUVE,
-        );
+        Self::render_slider(cmds, PADDING, *y, slider_w, "H", hsl.h, 360.0, mocha::MAUVE);
         *y += SLIDER_HEIGHT + 4.0;
 
-        Self::render_slider(
-            cmds,
-            PADDING,
-            *y,
-            slider_w,
-            "S",
-            hsl.s,
-            1.0,
-            mocha::PEACH,
-        );
+        Self::render_slider(cmds, PADDING, *y, slider_w, "S", hsl.s, 1.0, mocha::PEACH);
         *y += SLIDER_HEIGHT + 4.0;
 
-        Self::render_slider(
-            cmds,
-            PADDING,
-            *y,
-            slider_w,
-            "L",
-            hsl.l,
-            1.0,
-            mocha::YELLOW,
-        );
+        Self::render_slider(cmds, PADDING, *y, slider_w, "L", hsl.l, 1.0, mocha::YELLOW);
         *y += SLIDER_HEIGHT + PADDING;
     }
 
@@ -1829,7 +1780,7 @@ mod tests {
             s: 0.0,
             v: 0.75,
         });
-        let expected = (0.75 * 255.0).round() as u8;
+        let expected = (0.75_f32 * 255.0).round() as u8;
         assert_eq!(c.r, expected);
         assert_eq!(c.g, expected);
         assert_eq!(c.b, expected);
@@ -2217,9 +2168,7 @@ mod tests {
     fn render_contains_text_commands() {
         let app = ColorPickerApp::create();
         let cmds = app.render();
-        let has_text = cmds
-            .iter()
-            .any(|c| matches!(c, RenderCommand::Text { .. }));
+        let has_text = cmds.iter().any(|c| matches!(c, RenderCommand::Text { .. }));
         assert!(has_text, "should contain Text commands");
     }
 
@@ -2275,7 +2224,10 @@ mod tests {
         app.current = PickedColor::from_rgb(42, 42, 42);
         assert!(app.save_to_palette("Custom"));
         let palette = &app.palettes[0];
-        assert_eq!(palette.get("Custom"), Some(PickedColor::from_rgb(42, 42, 42)));
+        assert_eq!(
+            palette.get("Custom"),
+            Some(PickedColor::from_rgb(42, 42, 42))
+        );
     }
 
     #[test]

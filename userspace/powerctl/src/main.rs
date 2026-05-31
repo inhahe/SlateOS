@@ -33,34 +33,15 @@ const SYS_CHANNEL_SEND: u64 = 201;
 /// Receive a message from an open IPC channel.
 const SYS_CHANNEL_RECV: u64 = 202;
 /// Close an IPC channel handle.
-const SYS_CHANNEL_CLOSE: u64 = 203;
+const SYS_CHANNEL_CLOSE: u64 = 204;
 
-/// Direct kernel shutdown (ACPI power-off). Used as fallback when the service
-/// manager is unreachable.
-const SYS_SHUTDOWN: u64 = 90;
-/// Direct kernel reboot. Used as fallback when the service manager is
-/// unreachable.
-const SYS_REBOOT: u64 = 91;
-
-// ============================================================================
-// Shutdown/reboot reason codes passed as arg1 to SYS_SHUTDOWN / SYS_REBOOT
-// ============================================================================
-
-/// Normal user-initiated shutdown.
-#[allow(dead_code)]
-const SHUTDOWN_REASON_USER: u64 = 0;
-/// Scheduled (timer-triggered) shutdown.
-#[allow(dead_code)]
-const SHUTDOWN_REASON_SCHEDULED: u64 = 1;
-
-// ============================================================================
-// ACPI sleep-state codes passed as arg1 to SYS_SHUTDOWN for sleep requests
-// ============================================================================
-
-/// ACPI S3 — suspend to RAM.
-const ACPI_S3_SUSPEND: u64 = 3;
-/// ACPI S4 — hibernate (suspend to disk).
-const ACPI_S4_HIBERNATE: u64 = 4;
+// NOTE: OurOS exposes NO userspace power-management syscall (there is no
+// SYS_SHUTDOWN / SYS_REBOOT / suspend syscall in kernel/src/syscall/number.rs).
+// System power state changes go through the service manager over IPC (the
+// orderly_* path below).  The "direct" fallbacks therefore use the only
+// non-IPC mechanism available — ACPI control files exposed via procfs/sysfs,
+// if present — and report a clear error when nothing works.  See the
+// power-management DESIGN GAP note in todo.txt.
 
 // ============================================================================
 // Low-level syscall interface
@@ -129,9 +110,7 @@ fn send_ipc_command(command: &str) -> Result<String, String> {
     // SAFETY: SYS_CHANNEL_SEND takes the channel handle, a pointer to the
     // message buffer, and its length. `msg` lives on the stack and outlives
     // the syscall.
-    let send_ret = unsafe {
-        syscall3(SYS_CHANNEL_SEND, ch, msg.as_ptr() as u64, msg.len() as u64)
-    };
+    let send_ret = unsafe { syscall3(SYS_CHANNEL_SEND, ch, msg.as_ptr() as u64, msg.len() as u64) };
 
     if send_ret < 0 {
         // SAFETY: SYS_CHANNEL_CLOSE takes the handle and two unused args.
@@ -229,16 +208,16 @@ fn read_power_status() -> PowerStatus {
                 }
             }
             "Battery" => {
-                let bat_status = read_file(&format!("{base}/status"))
-                    .unwrap_or_else(|| "Unknown".to_string());
-                let capacity = read_file(&format!("{base}/capacity"))
-                    .and_then(|s| s.parse::<u32>().ok());
-                let energy_now = read_file(&format!("{base}/energy_now"))
-                    .and_then(|s| s.parse::<u64>().ok());
-                let energy_full = read_file(&format!("{base}/energy_full"))
-                    .and_then(|s| s.parse::<u64>().ok());
-                let voltage = read_file(&format!("{base}/voltage_now"))
-                    .and_then(|s| s.parse::<u64>().ok());
+                let bat_status =
+                    read_file(&format!("{base}/status")).unwrap_or_else(|| "Unknown".to_string());
+                let capacity =
+                    read_file(&format!("{base}/capacity")).and_then(|s| s.parse::<u32>().ok());
+                let energy_now =
+                    read_file(&format!("{base}/energy_now")).and_then(|s| s.parse::<u64>().ok());
+                let energy_full =
+                    read_file(&format!("{base}/energy_full")).and_then(|s| s.parse::<u64>().ok());
+                let voltage =
+                    read_file(&format!("{base}/voltage_now")).and_then(|s| s.parse::<u64>().ok());
                 let tech = read_file(&format!("{base}/technology"))
                     .unwrap_or_else(|| "Unknown".to_string());
 
@@ -286,8 +265,7 @@ fn write_schedule(minutes: u64, action: &str) -> Result<(), String> {
     // Ensure the parent directory exists.
     let _ = fs::create_dir_all("/run/powerctl");
 
-    fs::write(SCHEDULE_FILE, content)
-        .map_err(|e| format!("failed to write schedule file: {e}"))
+    fs::write(SCHEDULE_FILE, content).map_err(|e| format!("failed to write schedule file: {e}"))
 }
 
 /// Read back the currently-scheduled operation, if any.
@@ -356,68 +334,68 @@ fn try_sync_filesystems() {
     let _ = fs::write("/sys/kernel/sync", "1");
 }
 
-/// Power off the machine via the SYS_SHUTDOWN syscall.
+/// Power off the machine directly when the service manager is unreachable.
+///
+/// OurOS has no power-off syscall, so the only non-IPC mechanism is the ACPI
+/// control file (if procfs exposes it).  If the machine powers off, this
+/// process never returns; otherwise we report that no mechanism worked.
 fn direct_shutdown() -> ! {
     try_sync_filesystems();
 
-    // SAFETY: SYS_SHUTDOWN with reason SHUTDOWN_REASON_USER, flags 0, pad 0.
-    // This is a one-way operation -- the kernel powers off the machine via
-    // ACPI.  If it returns (error), we fall through.
-    let ret = unsafe { syscall3(SYS_SHUTDOWN, SHUTDOWN_REASON_USER, 0, 0) };
-    eprintln!("SYS_SHUTDOWN failed (error {ret})");
-
-    // Last resort: write to ACPI power control file.
+    // Best-effort: a procfs ACPI knob, if the kernel exposes one, powers off.
     let _ = fs::write("/proc/acpi/power", "off");
 
-    eprintln!("All shutdown methods failed. System may be in inconsistent state.");
+    eprintln!(
+        "powerctl: cannot power off directly — the service manager is \
+         unreachable and OurOS exposes no power-off syscall or ACPI control \
+         file.  System NOT powered off."
+    );
     process::exit(1);
 }
 
-/// Reboot the machine via the SYS_REBOOT syscall.
+/// Reboot the machine directly when the service manager is unreachable.
 fn direct_reboot() -> ! {
     try_sync_filesystems();
 
-    // SAFETY: SYS_REBOOT with reason SHUTDOWN_REASON_USER, flags 0, pad 0.
-    // Same one-way semantics as SYS_SHUTDOWN.
-    let ret = unsafe { syscall3(SYS_REBOOT, SHUTDOWN_REASON_USER, 0, 0) };
-    eprintln!("SYS_REBOOT failed (error {ret})");
-    eprintln!("All reboot methods failed.");
+    // Best-effort: a procfs ACPI knob, if present, reboots.
+    let _ = fs::write("/proc/acpi/power", "reboot");
+
+    eprintln!(
+        "powerctl: cannot reboot directly — the service manager is \
+         unreachable and OurOS exposes no reboot syscall or ACPI control \
+         file.  System NOT rebooted."
+    );
     process::exit(1);
 }
 
-/// Enter ACPI S3 suspend via the SYS_SHUTDOWN syscall with a sleep-state arg.
+/// Enter ACPI S3 suspend directly when the service manager is unreachable.
 fn direct_suspend() {
-    // SAFETY: SYS_SHUTDOWN with arg1=ACPI_S3_SUSPEND tells the kernel to
-    // enter S3 sleep rather than power off.  The machine resumes by returning
-    // from this syscall.
-    let ret = unsafe { syscall3(SYS_SHUTDOWN, ACPI_S3_SUSPEND, 0, 0) };
-    if ret < 0 {
-        eprintln!("SYS_SHUTDOWN(S3) failed (error {ret})");
-
-        // Fallback: write to ACPI sleep-state control.
-        if fs::write("/proc/acpi/sleep", "S3").is_err() {
-            eprintln!("Suspend failed. Is ACPI S3 supported on this hardware?");
-            process::exit(1);
-        }
+    // OurOS has no suspend syscall; the only direct path is an ACPI sleep
+    // control file, if procfs/sysfs exposes one.
+    if fs::write("/proc/acpi/sleep", "S3").is_err() && fs::write("/sys/power/state", "mem").is_err()
+    {
+        eprintln!(
+            "powerctl: cannot suspend — no ACPI sleep control file (is ACPI S3 \
+             supported and exposed by the kernel?)."
+        );
+        process::exit(1);
     }
 }
 
-/// Enter ACPI S4 hibernate via the SYS_SHUTDOWN syscall.
+/// Enter ACPI S4 hibernate directly when the service manager is unreachable.
 fn direct_hibernate() {
     try_sync_filesystems();
 
-    // SAFETY: SYS_SHUTDOWN with arg1=ACPI_S4_HIBERNATE.  The kernel saves
-    // RAM to the swap partition and powers off.  On next boot the kernel
-    // restores from the hibernate image.
-    let ret = unsafe { syscall3(SYS_SHUTDOWN, ACPI_S4_HIBERNATE, 0, 0) };
-    if ret < 0 {
-        eprintln!("SYS_SHUTDOWN(S4) failed (error {ret})");
-
-        // Fallback: write to ACPI sleep-state control.
-        if fs::write("/proc/acpi/sleep", "S4").is_err() {
-            eprintln!("Hibernate failed. Is a swap partition configured?");
-            process::exit(1);
-        }
+    // OurOS has no hibernate syscall; the only direct path is an ACPI sleep
+    // control file, if procfs/sysfs exposes one.
+    if fs::write("/proc/acpi/sleep", "S4").is_err()
+        && fs::write("/sys/power/state", "disk").is_err()
+    {
+        eprintln!(
+            "powerctl: cannot hibernate — no ACPI sleep control file (is a swap \
+             partition configured and hibernate supported?)."
+        );
+        process::exit(1);
     }
 }
 
@@ -502,12 +480,11 @@ fn cmd_status() {
     println!("  ACPI states:   {acpi_state}");
 
     // Uptime.
-    if let Some(uptime_str) = read_file("/proc/uptime") {
-        if let Some(secs_str) = uptime_str.split_whitespace().next() {
-            if let Ok(secs) = secs_str.parse::<f64>() {
-                println!("  Uptime:        {}", format_duration(secs as u64));
-            }
-        }
+    if let Some(uptime_str) = read_file("/proc/uptime")
+        && let Some(secs_str) = uptime_str.split_whitespace().next()
+        && let Ok(secs) = secs_str.parse::<f64>()
+    {
+        println!("  Uptime:        {}", format_duration(secs as u64));
     }
 
     // Scheduled operation.
@@ -542,13 +519,15 @@ fn cmd_status() {
             if let Some(pct) = bat.capacity_pct {
                 let bar = capacity_bar(pct);
                 println!("    Capacity:    {pct}% {bar}");
-            } else if let (Some(now), Some(full)) =
-                (bat.energy_now_uj, bat.energy_full_uj)
-            {
+            } else if let (Some(now), Some(full)) = (bat.energy_now_uj, bat.energy_full_uj) {
                 // Compute percentage from energy readings if the capacity
-                // sysfs node is absent.
-                if full > 0 {
-                    let pct = ((now * 100) / full) as u32;
+                // sysfs node is absent.  checked_mul/checked_div avoid both
+                // overflow on large energy values and division by zero.
+                if let Some(pct) = now
+                    .checked_mul(100)
+                    .and_then(|scaled| scaled.checked_div(full))
+                {
+                    let pct = pct as u32;
                     let bar = capacity_bar(pct.min(100));
                     println!("    Capacity:    {pct}% {bar} (computed)");
                 }
@@ -719,5 +698,59 @@ fn main() {
             eprintln!("Run 'powerctl help' for usage.");
             process::exit(1);
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_duration_seconds() {
+        assert_eq!(format_duration(0), "0s");
+        assert_eq!(format_duration(59), "59s");
+    }
+
+    #[test]
+    fn format_duration_minutes() {
+        assert_eq!(format_duration(60), "1m 0s");
+        assert_eq!(format_duration(125), "2m 5s");
+    }
+
+    #[test]
+    fn format_duration_hours() {
+        assert_eq!(format_duration(3600), "1h 0m");
+        assert_eq!(format_duration(3661), "1h 1m");
+    }
+
+    #[test]
+    fn format_duration_days() {
+        assert_eq!(format_duration(86400), "1d 0h");
+        assert_eq!(format_duration(90000), "1d 1h");
+    }
+
+    #[test]
+    fn capacity_bar_width_is_constant() {
+        // The bar always renders 20 cells (each = 5%), regardless of charge.
+        // Count '#' (filled) + '-' (empty), ignoring ANSI colour escapes.
+        for pct in [0u32, 5, 50, 95, 100] {
+            let bar = capacity_bar(pct);
+            let cells = bar.chars().filter(|&c| c == '#' || c == '-').count();
+            assert_eq!(cells, 20, "pct={pct} produced {cells} cells");
+        }
+    }
+
+    #[test]
+    fn capacity_bar_fill_scales_with_charge() {
+        let full = capacity_bar(100);
+        let empty = capacity_bar(0);
+        assert_eq!(full.chars().filter(|&c| c == '#').count(), 20);
+        assert_eq!(empty.chars().filter(|&c| c == '#').count(), 0);
+        assert_eq!(empty.chars().filter(|&c| c == '-').count(), 20);
     }
 }

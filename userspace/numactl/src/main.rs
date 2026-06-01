@@ -36,6 +36,9 @@ struct NumaTopology {
     total_cpus: u32,
 }
 
+/// A named per-node memory metric: a label plus an accessor returning the value.
+type NodeMetric = (&'static str, fn(&NumaNode) -> u64);
+
 #[derive(Clone, Debug)]
 enum MemPolicy {
     Default,
@@ -423,7 +426,7 @@ fn cmd_numastat(args: &[String]) {
         print!("{:>12}", "Total");
         println!();
 
-        let categories: [(&str, fn(&NumaNode) -> u64); 3] = [
+        let categories: [NodeMetric; 3] = [
             ("MemTotal", |n: &NumaNode| n.mem_total),
             ("MemFree", |n: &NumaNode| n.mem_free),
             ("MemUsed", |n: &NumaNode| n.mem_used),

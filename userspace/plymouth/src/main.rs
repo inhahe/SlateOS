@@ -258,9 +258,8 @@ fn plymouth_main(args: &[String]) -> i32 {
         return 0;
     }
 
-    let i = 0;
-    while i < args.len() {
-        let arg = &args[i];
+    // plymouth dispatches on a single command word; only the first arg is used.
+    if let Some(arg) = args.first() {
         match arg.as_str() {
             "--ping" => {
                 if is_daemon_running() {

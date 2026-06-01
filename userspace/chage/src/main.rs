@@ -257,25 +257,9 @@ fn list_all_aging(out: &mut io::StdoutLock<'_>) {
 fn main() {
     let args: Vec<String> = env::args().collect();
 
-    let prog_name = {
-        let s = args.first().map(|s| s.as_str()).unwrap_or("chage");
-        let bytes = s.as_bytes();
-        let mut last_sep = 0;
-        for (i, &b) in bytes.iter().enumerate() {
-            if b == b'/' || b == b'\\' {
-                last_sep = i + 1;
-            }
-        }
-        let base = &s[last_sep..];
-        let base = base.strip_suffix(".exe").unwrap_or(base);
-        base.to_string()
-    };
-
+    // chage has no alternate command personalities; dispatch directly.
     let rest: Vec<String> = args.into_iter().skip(1).collect();
-
-    match prog_name.as_str() {
-        _ => cmd_chage(&rest),
-    }
+    cmd_chage(&rest);
 }
 
 fn cmd_chage(args: &[String]) {

@@ -520,7 +520,7 @@ fn hci_device_cmd(dev: &str, cmd: &str) -> i32 {
             }
             0
         }
-        "info" | _ => {
+        _ => {
             hci_list()
         }
     }

@@ -625,7 +625,8 @@ fn cmd_hostname(args: &[String]) {
 // ============================================================================
 
 fn cmd_domainname(args: &[String]) {
-    for arg in args {
+    // domainname accepts at most one operand/option; only the first is acted on.
+    if let Some(arg) = args.first() {
         match arg.as_str() {
             "-h" | "--help" => {
                 println!("Usage: domainname [name]");

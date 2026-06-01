@@ -1145,7 +1145,7 @@ fn run_report(args: &[String]) {
 
     // Sort by overhead descending.
     let mut entries: Vec<OverheadEntry> = overhead_map.into_values().collect();
-    entries.sort_by(|a, b| b.count.cmp(&a.count));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.count));
 
     // Print.
     println!(

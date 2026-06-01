@@ -16,7 +16,7 @@ fn personality(argv0: &str) -> &str {
         "sfdp" => "sfdp",
         "circo" => "circo",
         "twopi" => "twopi",
-        "dot" | _ => "dot",
+        _ => "dot",
     }
 }
 

@@ -142,96 +142,82 @@ fn parse_smbios_tables(data: &[u8]) -> Vec<DmiEntry> {
 
 fn generate_default_entries() -> Vec<DmiEntry> {
     // Generate plausible default entries when DMI tables aren't available.
-    let mut entries = Vec::new();
-
-    // BIOS Information.
-    entries.push(DmiEntry {
-        entry_type: TYPE_BIOS,
-        handle: 0,
-        length: 18,
-        data: vec![0; 18],
-        strings: vec![
-            "OurOS".to_string(),
-            "OurOS BIOS".to_string(),
-            "01/01/2026".to_string(),
-        ],
-    });
-
-    // System Information.
-    entries.push(DmiEntry {
-        entry_type: TYPE_SYSTEM,
-        handle: 1,
-        length: 27,
-        data: vec![1; 27],
-        strings: vec![
-            "OurOS Project".to_string(),
-            "OurOS System".to_string(),
-            "1.0".to_string(),
-            "SN-00000001".to_string(),
-        ],
-    });
-
-    // Baseboard.
-    entries.push(DmiEntry {
-        entry_type: TYPE_BASEBOARD,
-        handle: 2,
-        length: 8,
-        data: vec![2; 8],
-        strings: vec![
-            "OurOS Project".to_string(),
-            "OurOS Baseboard".to_string(),
-            "1.0".to_string(),
-            "BSN-00000001".to_string(),
-        ],
-    });
-
-    // Chassis.
-    entries.push(DmiEntry {
-        entry_type: TYPE_CHASSIS,
-        handle: 3,
-        length: 13,
-        data: vec![3; 13],
-        strings: vec![
-            "OurOS Project".to_string(),
-            "Desktop".to_string(),
-        ],
-    });
-
-    // Processor.
-    entries.push(DmiEntry {
-        entry_type: TYPE_PROCESSOR,
-        handle: 4,
-        length: 28,
-        data: vec![4; 28],
-        strings: vec![
-            "CPU0".to_string(),
-            "OurOS Processor".to_string(),
-        ],
-    });
-
-    // Physical Memory Array.
-    entries.push(DmiEntry {
-        entry_type: TYPE_PHYS_MEMORY,
-        handle: 16,
-        length: 15,
-        data: vec![16; 15],
-        strings: Vec::new(),
-    });
-
-    // Memory Device.
-    entries.push(DmiEntry {
-        entry_type: TYPE_MEMORY_DEVICE,
-        handle: 17,
-        length: 28,
-        data: vec![17; 28],
-        strings: vec![
-            "DIMM0".to_string(),
-            "DDR4".to_string(),
-            "Unknown".to_string(),
-        ],
-    });
-
-    entries
+    vec![
+        // BIOS Information.
+        DmiEntry {
+            entry_type: TYPE_BIOS,
+            handle: 0,
+            length: 18,
+            data: vec![0; 18],
+            strings: vec![
+                "OurOS".to_string(),
+                "OurOS BIOS".to_string(),
+                "01/01/2026".to_string(),
+            ],
+        },
+        // System Information.
+        DmiEntry {
+            entry_type: TYPE_SYSTEM,
+            handle: 1,
+            length: 27,
+            data: vec![1; 27],
+            strings: vec![
+                "OurOS Project".to_string(),
+                "OurOS System".to_string(),
+                "1.0".to_string(),
+                "SN-00000001".to_string(),
+            ],
+        },
+        // Baseboard.
+        DmiEntry {
+            entry_type: TYPE_BASEBOARD,
+            handle: 2,
+            length: 8,
+            data: vec![2; 8],
+            strings: vec![
+                "OurOS Project".to_string(),
+                "OurOS Baseboard".to_string(),
+                "1.0".to_string(),
+                "BSN-00000001".to_string(),
+            ],
+        },
+        // Chassis.
+        DmiEntry {
+            entry_type: TYPE_CHASSIS,
+            handle: 3,
+            length: 13,
+            data: vec![3; 13],
+            strings: vec!["OurOS Project".to_string(), "Desktop".to_string()],
+        },
+        // Processor.
+        DmiEntry {
+            entry_type: TYPE_PROCESSOR,
+            handle: 4,
+            length: 28,
+            data: vec![4; 28],
+            strings: vec!["CPU0".to_string(), "OurOS Processor".to_string()],
+        },
+        // Physical Memory Array.
+        DmiEntry {
+            entry_type: TYPE_PHYS_MEMORY,
+            handle: 16,
+            length: 15,
+            data: vec![16; 15],
+            strings: Vec::new(),
+        },
+        // Memory Device.
+        DmiEntry {
+            entry_type: TYPE_MEMORY_DEVICE,
+            handle: 17,
+            length: 28,
+            data: vec![17; 28],
+            strings: vec![
+                "DIMM0".to_string(),
+                "DDR4".to_string(),
+                "Unknown".to_string(),
+            ],
+        },
+    ]
 }
 
 // ============================================================================

@@ -208,12 +208,12 @@ impl fmt::Display for MacAddr {
 enum DnsRecordType {
     A = 1,
     NS = 2,
-    CNAME = 5,
-    SOA = 6,
-    PTR = 12,
+    Cname = 5,
+    Soa = 6,
+    Ptr = 12,
     MX = 15,
-    TXT = 16,
-    AAAA = 28,
+    Txt = 16,
+    Aaaa = 28,
     Unknown = 0,
 }
 
@@ -222,12 +222,12 @@ impl DnsRecordType {
         match v {
             1 => Self::A,
             2 => Self::NS,
-            5 => Self::CNAME,
-            6 => Self::SOA,
-            12 => Self::PTR,
+            5 => Self::Cname,
+            6 => Self::Soa,
+            12 => Self::Ptr,
             15 => Self::MX,
-            16 => Self::TXT,
-            28 => Self::AAAA,
+            16 => Self::Txt,
+            28 => Self::Aaaa,
             _ => Self::Unknown,
         }
     }
@@ -236,12 +236,12 @@ impl DnsRecordType {
         match self {
             Self::A => 1,
             Self::NS => 2,
-            Self::CNAME => 5,
-            Self::SOA => 6,
-            Self::PTR => 12,
+            Self::Cname => 5,
+            Self::Soa => 6,
+            Self::Ptr => 12,
             Self::MX => 15,
-            Self::TXT => 16,
-            Self::AAAA => 28,
+            Self::Txt => 16,
+            Self::Aaaa => 28,
             Self::Unknown => 0,
         }
     }
@@ -250,12 +250,12 @@ impl DnsRecordType {
         match self {
             Self::A => "A",
             Self::NS => "NS",
-            Self::CNAME => "CNAME",
-            Self::SOA => "SOA",
-            Self::PTR => "PTR",
+            Self::Cname => "CNAME",
+            Self::Soa => "SOA",
+            Self::Ptr => "PTR",
             Self::MX => "MX",
-            Self::TXT => "TXT",
-            Self::AAAA => "AAAA",
+            Self::Txt => "TXT",
+            Self::Aaaa => "AAAA",
             Self::Unknown => "UNKNOWN",
         }
     }
@@ -555,6 +555,20 @@ struct DnsRecord {
     rdata: Vec<u8>,
 }
 
+/// SOA record timing/authority fields (RFC 1035 §3.3.13).
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SoaParams<'a> {
+    /// Primary name server (MNAME).
+    mname: &'a str,
+    /// Responsible party mailbox (RNAME).
+    rname: &'a str,
+    serial: u32,
+    refresh: u32,
+    retry: u32,
+    expire: u32,
+    minimum: u32,
+}
+
 impl DnsRecord {
     fn new_a(name: &str, ttl: u32, addr: Ipv4Addr) -> Self {
         Self {
@@ -569,7 +583,7 @@ impl DnsRecord {
     fn new_aaaa(name: &str, ttl: u32, addr: &[u8; 16]) -> Self {
         Self {
             name: name.to_string(),
-            rtype: DnsRecordType::AAAA,
+            rtype: DnsRecordType::Aaaa,
             rclass: DnsClass::IN,
             ttl,
             rdata: addr.to_vec(),
@@ -580,7 +594,7 @@ impl DnsRecord {
         let rdata = dns_encode_name(target)?;
         Some(Self {
             name: name.to_string(),
-            rtype: DnsRecordType::CNAME,
+            rtype: DnsRecordType::Cname,
             rclass: DnsClass::IN,
             ttl,
             rdata,
@@ -614,7 +628,7 @@ impl DnsRecord {
         let rdata = dns_encode_name(ptrdname)?;
         Some(Self {
             name: name.to_string(),
-            rtype: DnsRecordType::PTR,
+            rtype: DnsRecordType::Ptr,
             rclass: DnsClass::IN,
             ttl,
             rdata,
@@ -637,29 +651,24 @@ impl DnsRecord {
         }
         Self {
             name: name.to_string(),
-            rtype: DnsRecordType::TXT,
+            rtype: DnsRecordType::Txt,
             rclass: DnsClass::IN,
             ttl,
             rdata,
         }
     }
 
-    fn new_soa(
-        name: &str, ttl: u32,
-        mname: &str, rname: &str,
-        serial: u32, refresh: u32, retry: u32,
-        expire: u32, minimum: u32,
-    ) -> Option<Self> {
-        let mut rdata = dns_encode_name(mname)?;
-        rdata.extend(dns_encode_name(rname)?);
-        rdata.extend_from_slice(&serial.to_be_bytes());
-        rdata.extend_from_slice(&refresh.to_be_bytes());
-        rdata.extend_from_slice(&retry.to_be_bytes());
-        rdata.extend_from_slice(&expire.to_be_bytes());
-        rdata.extend_from_slice(&minimum.to_be_bytes());
+    fn new_soa(name: &str, ttl: u32, soa: &SoaParams<'_>) -> Option<Self> {
+        let mut rdata = dns_encode_name(soa.mname)?;
+        rdata.extend(dns_encode_name(soa.rname)?);
+        rdata.extend_from_slice(&soa.serial.to_be_bytes());
+        rdata.extend_from_slice(&soa.refresh.to_be_bytes());
+        rdata.extend_from_slice(&soa.retry.to_be_bytes());
+        rdata.extend_from_slice(&soa.expire.to_be_bytes());
+        rdata.extend_from_slice(&soa.minimum.to_be_bytes());
         Some(Self {
             name: name.to_string(),
-            rtype: DnsRecordType::SOA,
+            rtype: DnsRecordType::Soa,
             rclass: DnsClass::IN,
             ttl,
             rdata,
@@ -2636,9 +2645,9 @@ mod tests {
     #[test]
     fn dns_record_type_roundtrip() {
         let types = [
-            DnsRecordType::A, DnsRecordType::NS, DnsRecordType::CNAME,
-            DnsRecordType::SOA, DnsRecordType::PTR, DnsRecordType::MX,
-            DnsRecordType::TXT, DnsRecordType::AAAA,
+            DnsRecordType::A, DnsRecordType::NS, DnsRecordType::Cname,
+            DnsRecordType::Soa, DnsRecordType::Ptr, DnsRecordType::MX,
+            DnsRecordType::Txt, DnsRecordType::Aaaa,
         ];
         for t in &types {
             assert_eq!(DnsRecordType::from_u16(t.to_u16()), *t);
@@ -2653,8 +2662,8 @@ mod tests {
     #[test]
     fn dns_record_type_names() {
         assert_eq!(DnsRecordType::A.name(), "A");
-        assert_eq!(DnsRecordType::AAAA.name(), "AAAA");
-        assert_eq!(DnsRecordType::CNAME.name(), "CNAME");
+        assert_eq!(DnsRecordType::Aaaa.name(), "AAAA");
+        assert_eq!(DnsRecordType::Cname.name(), "CNAME");
         assert_eq!(DnsRecordType::MX.name(), "MX");
     }
 
@@ -2817,12 +2826,12 @@ mod tests {
     fn dns_question_aaaa() {
         let q = DnsQuestion {
             name: "ipv6.example.com".to_string(),
-            qtype: DnsRecordType::AAAA,
+            qtype: DnsRecordType::Aaaa,
             qclass: DnsClass::IN,
         };
         let bytes = q.serialize().unwrap();
         let (parsed, _) = DnsQuestion::parse(&bytes, 0).unwrap();
-        assert_eq!(parsed.qtype, DnsRecordType::AAAA);
+        assert_eq!(parsed.qtype, DnsRecordType::Aaaa);
     }
 
     // ========================================================================
@@ -2846,14 +2855,14 @@ mod tests {
         let rec = DnsRecord::new_aaaa("v6.test.com", 600, &addr);
         let bytes = rec.serialize().unwrap();
         let (parsed, _) = DnsRecord::parse(&bytes, 0).unwrap();
-        assert_eq!(parsed.rtype, DnsRecordType::AAAA);
+        assert_eq!(parsed.rtype, DnsRecordType::Aaaa);
         assert_eq!(parsed.rdata.len(), 16);
     }
 
     #[test]
     fn dns_record_cname() {
         let rec = DnsRecord::new_cname("alias.com", 120, "real.com").unwrap();
-        assert_eq!(rec.rtype, DnsRecordType::CNAME);
+        assert_eq!(rec.rtype, DnsRecordType::Cname);
         let bytes = rec.serialize().unwrap();
         let (parsed, _) = DnsRecord::parse(&bytes, 0).unwrap();
         assert_eq!(parsed.name, "alias.com");
@@ -2884,13 +2893,13 @@ mod tests {
     #[test]
     fn dns_record_ptr() {
         let rec = DnsRecord::new_ptr("1.168.192.in-addr.arpa", 300, "host.local").unwrap();
-        assert_eq!(rec.rtype, DnsRecordType::PTR);
+        assert_eq!(rec.rtype, DnsRecordType::Ptr);
     }
 
     #[test]
     fn dns_record_txt() {
         let rec = DnsRecord::new_txt("info.com", 120, "v=spf1 include:example.com");
-        assert_eq!(rec.rtype, DnsRecordType::TXT);
+        assert_eq!(rec.rtype, DnsRecordType::Txt);
         // TXT rdata starts with length byte
         assert_eq!(rec.rdata[0] as usize, "v=spf1 include:example.com".len());
     }
@@ -2904,11 +2913,20 @@ mod tests {
     #[test]
     fn dns_record_soa() {
         let rec = DnsRecord::new_soa(
-            "example.com", 86400,
-            "ns1.example.com", "admin.example.com",
-            2024010101, 3600, 1800, 604800, 86400,
-        ).unwrap();
-        assert_eq!(rec.rtype, DnsRecordType::SOA);
+            "example.com",
+            86400,
+            &SoaParams {
+                mname: "ns1.example.com",
+                rname: "admin.example.com",
+                serial: 2024010101,
+                refresh: 3600,
+                retry: 1800,
+                expire: 604800,
+                minimum: 86400,
+            },
+        )
+        .unwrap();
+        assert_eq!(rec.rtype, DnsRecordType::Soa);
     }
 
     // ========================================================================
@@ -3044,9 +3062,9 @@ mod tests {
         let aaaa_addr: [u8; 16] = [0; 16];
         let aaaa = vec![DnsRecord::new_aaaa("dual.com", 300, &aaaa_addr)];
         cache.insert("dual.com", DnsRecordType::A, a, 1000);
-        cache.insert("dual.com", DnsRecordType::AAAA, aaaa, 1000);
+        cache.insert("dual.com", DnsRecordType::Aaaa, aaaa, 1000);
         assert!(cache.lookup("dual.com", DnsRecordType::A, 1000).is_some());
-        assert!(cache.lookup("dual.com", DnsRecordType::AAAA, 1000).is_some());
+        assert!(cache.lookup("dual.com", DnsRecordType::Aaaa, 1000).is_some());
     }
 
     #[test]

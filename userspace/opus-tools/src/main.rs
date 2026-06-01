@@ -13,7 +13,7 @@ fn personality(argv0: &str) -> &str {
     match name {
         "opusdec" => "opusdec",
         "opusinfo" => "opusinfo",
-        "opusenc" | _ => "opusenc",
+        _ => "opusenc",
     }
 }
 

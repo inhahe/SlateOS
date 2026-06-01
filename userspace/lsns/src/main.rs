@@ -60,6 +60,11 @@ struct Options {
 
 const NS_TYPES: &[&str] = &["mnt", "uts", "ipc", "pid", "net", "user", "cgroup", "time"];
 
+/// Map key: (namespace type, inode number).
+type NsKey = (String, u64);
+/// Map value: (process count, first pid, uid, user name, command).
+type NsAgg = (u32, u32, u32, String, String);
+
 fn enumerate_pids() -> Vec<u32> {
     let mut pids = Vec::new();
     if let Ok(entries) = fs::read_dir("/proc") {
@@ -132,7 +137,7 @@ fn collect_namespaces(opts: &Options) -> Vec<NsInfo> {
     };
 
     // Map: (ns_type, inode) -> (count, first_pid, uid, user, command)
-    let mut ns_map: HashMap<(String, u64), (u32, u32, u32, String, String)> = HashMap::new();
+    let mut ns_map: HashMap<NsKey, NsAgg> = HashMap::new();
 
     for &pid in &pids {
         for &ns_type in &types {

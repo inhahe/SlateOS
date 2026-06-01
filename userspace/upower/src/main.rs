@@ -925,9 +925,8 @@ fn parse_upower_args(args: &[String]) -> Result<UpowerConfig, String> {
         });
     }
 
-    let mut i = 1;
-    while i < args.len() {
-        let arg = &args[i];
+    // upower acts on a single command option; only the first argument is parsed.
+    if let Some(arg) = args.get(1) {
         match arg.as_str() {
             "-e" | "--enumerate" => {
                 return Ok(UpowerConfig {
@@ -950,8 +949,7 @@ fn parse_upower_args(args: &[String]) -> Result<UpowerConfig, String> {
                 });
             }
             "-i" | "--show-info" => {
-                i += 1;
-                let path = args.get(i).ok_or_else(|| {
+                let path = args.get(2).ok_or_else(|| {
                     "upower: --show-info requires a device path argument".to_string()
                 })?;
                 return Ok(UpowerConfig {

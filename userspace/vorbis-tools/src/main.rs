@@ -14,7 +14,7 @@ fn personality(argv0: &str) -> &str {
         "oggdec" => "oggdec",
         "ogginfo" => "ogginfo",
         "vorbiscomment" => "vorbiscomment",
-        "oggenc" | _ => "oggenc",
+        _ => "oggenc",
     }
 }
 

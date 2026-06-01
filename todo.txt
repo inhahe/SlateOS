@@ -500,6 +500,42 @@
 ##   but the existing escape_unit_name unit tests pin the path-style behaviour, so
 ##   that refactor must update those tests too.
 ##
+## BUG (noticed+FIXED 2026-06-01): latent clippy::all sweep — 31 non-cli userspace crates
+##   with NON-machine-applicable deny errors (clippy --fix could not auto-resolve these).
+##   Same ROOT CAUSE class as the batches above: `#![deny(clippy::all)]` crates were only
+##   `build`-checked, never clippy-checked, so deny errors accumulated unseen. Verified the
+##   whole set clean via one combined `cargo clippy --keep-going` over all 31 -p flags
+##   (build-std shared). Fixes by lint class:
+##     - wildcard_in_or_patterns (`"X" | _` → `_`): opus-tools, vorbis-tools, graphviz, bluez.
+##     - unnecessary_sort_by → sort_by_key(Reverse): perf, audit (5 sites), sudo, snapper.
+##     - upper_case_acronyms (enum variant renames; string literals untouched): mcelog
+##       (TLB→Tlb), dnsmasq (CNAME/SOA/PTR/TXT/AAAA → Cname/Soa/Ptr/Txt/Aaaa).
+##     - manual_clamp (.min().max() → .clamp()): cal.
+##     - lines_filter_map_ok (.filter_map(|l| l.ok()) → .map_while(Result::ok)): sysstat.
+##     - manual_strip (slice math → strip_prefix/strip_suffix): sudo (2), selinux, firejail,
+##       nftables.
+##     - field_reassign_with_default / vec_init_then_push → struct-literal / vec![]:
+##       dmidecode (generate_default_entries), selinux, firejail.
+##     - needless_range_loop → iterators (iter_mut().take/skip().enumerate()): ssh (2),
+##       fio, flock, wpa (2), upower, plymouth, hostnamectl, chage.
+##     - single_match / match_single_binding / never_loop collapsed: nftables, chage, wpa.
+##     - collapsed duplicate if/else branches + combined conditions: netstat, acl.
+##     - type_complexity → type aliases: snapper (BucketKey/BucketVal), lsns (NsKey/NsAgg),
+##       numactl (NodeMetric).
+##     - too_many_arguments → parameter-bundle structs (PROPER fix, not #[allow]):
+##         ssh: ExchangeHashInput<'a> (8 borrowed fields) for compute_exchange_hash.
+##         dnsmasq: SoaParams<'a> for new_soa.
+##         podman: ContainerConfig (#[derive(Default)]) for create_container; ~40 callers
+##           migrated (most to ContainerConfig::default()); also from_image→create_from_image.
+##         mdadm: ArraySpec<'a> for ArrayDescriptor::new + RaidManager::create_array;
+##           ~40 call sites migrated to &ArraySpec { .. } literals.
+##   JUDGMENT CALL / behavioral fix (acl --absolute-names): collapsing the duplicated
+##     display-path branches surfaced that the `absolute` flag belongs at the header level,
+##     so display_path now strips the leading '/' only when !absolute (matches getfacl).
+##     Easy to revert if the human disagrees.
+##   ouros build verified for the two struct-heavy refactors (mdadm, bridge) post-fix;
+##     only pre-existing dead_code warnings remain (no clippy::all denials).
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/wordle — build break PLUS a PRODUCTION borrow bug
 ##   PLUS data bugs. (1) Cargo.toml was missing its [dependencies] section, so `use guitk::*`
 ##   failed (crate not in scope) and the bin/tests would not compile; added

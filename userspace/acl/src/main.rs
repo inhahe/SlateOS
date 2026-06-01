@@ -188,7 +188,14 @@ fn format_acl_tag(tag: &AclTag) -> String {
 
 fn print_file_acl(out: &mut io::StdoutLock<'_>, acl: &FileAcl, omit_header: bool, absolute: bool, tabular: bool) {
     if !omit_header {
-        let _ = writeln!(out, "# file: {}", acl.path);
+        // getfacl strips a single leading '/' from the displayed path unless
+        // --absolute-names was given.
+        let display_path = if absolute {
+            acl.path.as_str()
+        } else {
+            acl.path.strip_prefix('/').unwrap_or(acl.path.as_str())
+        };
+        let _ = writeln!(out, "# file: {display_path}");
         let _ = writeln!(out, "# owner: {}", acl.owner);
         let _ = writeln!(out, "# group: {}", acl.group);
     }
@@ -202,8 +209,6 @@ fn print_file_acl(out: &mut io::StdoutLock<'_>, acl: &FileAcl, omit_header: bool
                 String::new()
             };
             let _ = writeln!(out, "{}{}{effective}", format_acl_tag(&entry.tag), entry.perms.to_rwx());
-        } else if absolute {
-            let _ = writeln!(out, "{}{}", format_acl_tag(&entry.tag), entry.perms.to_rwx());
         } else {
             let _ = writeln!(out, "{}{}", format_acl_tag(&entry.tag), entry.perms.to_rwx());
         }

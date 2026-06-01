@@ -341,8 +341,8 @@ fn parse_lockfile_args(args: &[String]) -> LockfileOpts {
             "-ml" => opts.ml = true,
             "-mu" => {
                 // Remove mode — just delete lockfiles and exit.
-                for j in (i + 1)..args.len() {
-                    let _ = fs::remove_file(&args[j]);
+                for f in args.iter().skip(i + 1) {
+                    let _ = fs::remove_file(f);
                 }
                 process::exit(0);
             }

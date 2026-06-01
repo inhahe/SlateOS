@@ -331,6 +331,17 @@ impl Pod {
 // Container engine state
 // ============================================================================
 
+/// Optional configuration applied to a container at creation time.
+/// Bundled into one struct so `Engine::create_container` stays under the
+/// argument-count limit and so call sites can use `..Default::default()`.
+#[derive(Default)]
+struct ContainerConfig {
+    ports: Vec<PortMapping>,
+    labels: HashMap<String, String>,
+    env_vars: HashMap<String, String>,
+    pod_id: Option<String>,
+}
+
 /// The main state for the container engine.
 struct Engine {
     containers: HashMap<String, Container>,
@@ -403,10 +414,7 @@ impl Engine {
         image: &str,
         name: Option<&str>,
         command: &str,
-        ports: &[PortMapping],
-        labels: &HashMap<String, String>,
-        env_vars: &HashMap<String, String>,
-        pod_id: Option<&str>,
+        config: ContainerConfig,
     ) -> String {
         let id = self.next_id();
         let cname = name.unwrap_or("").to_string();
@@ -416,10 +424,10 @@ impl Engine {
             cname
         };
         let mut c = Container::new(&id, &cname, image, command);
-        c.ports = ports.to_vec();
-        c.labels = labels.clone();
-        c.env_vars = env_vars.clone();
-        c.pod_id = pod_id.map(String::from);
+        c.ports = config.ports;
+        c.labels = config.labels;
+        c.env_vars = config.env_vars;
+        c.pod_id = config.pod_id;
         let ret = id.clone();
         self.containers.insert(id, c);
         ret
@@ -748,7 +756,7 @@ impl BuildahEngine {
         )
     }
 
-    fn from_image(&mut self, image: &str, name: Option<&str>) -> String {
+    fn create_from_image(&mut self, image: &str, name: Option<&str>) -> String {
         let id = self.next_id();
         let cname = name
             .map(String::from)
@@ -1100,10 +1108,10 @@ fn cmd_podman_run(args: &[String]) -> i32 {
         &image,
         name.as_deref(),
         &command,
-        &ports,
-        &HashMap::new(),
-        &HashMap::new(),
-        None,
+        ContainerConfig {
+            ports,
+            ..Default::default()
+        },
     );
     if let Err(e) = engine.start_container(&id) {
         eprintln!("Error starting container: {}", e);
@@ -1346,15 +1354,7 @@ fn cmd_podman_create(args: &[String]) -> i32 {
         eprintln!("Error: image name required");
         return 1;
     }
-    let id = engine.create_container(
-        &image,
-        name.as_deref(),
-        "",
-        &[],
-        &HashMap::new(),
-        &HashMap::new(),
-        None,
-    );
+    let id = engine.create_container(&image, name.as_deref(), "", ContainerConfig::default());
     println!("{}", id);
     0
 }
@@ -1977,7 +1977,7 @@ fn cmd_buildah_from(args: &[String]) -> i32 {
         return 1;
     }
     let mut engine = BuildahEngine::new();
-    let id = engine.from_image(&image, name.as_deref());
+    let id = engine.create_from_image(&image, name.as_deref());
     if let Some(c) = engine.find_container(&id) {
         println!("{}", c.name);
     }
@@ -2031,7 +2031,7 @@ fn cmd_buildah_commit(args: &[String]) -> i32 {
         "committed:latest"
     };
     let mut engine = BuildahEngine::new();
-    let _id = engine.from_image("scratch", Some(container));
+    let _id = engine.create_from_image("scratch", Some(container));
     match engine.commit_container(container, image_name) {
         Ok(id) => {
             println!("Committed {} as {} ({})", container, image_name, &id[..12]);
@@ -2680,7 +2680,7 @@ mod tests {
     #[test]
     fn test_engine_create_container() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("web"), "/bin/sh", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("web"), "/bin/sh", ContainerConfig::default());
         assert!(!id.is_empty());
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.name, "web");
@@ -2691,7 +2691,7 @@ mod tests {
     #[test]
     fn test_engine_create_container_auto_name() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", None, "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", None, "", ContainerConfig::default());
         let c = eng.find_container(&id).unwrap();
         assert!(c.name.starts_with("container_"));
     }
@@ -2699,14 +2699,14 @@ mod tests {
     #[test]
     fn test_engine_find_container_by_name() {
         let mut eng = Engine::new();
-        let _id = eng.create_container("alpine", Some("finder"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let _id = eng.create_container("alpine", Some("finder"), "", ContainerConfig::default());
         assert!(eng.find_container("finder").is_some());
     }
 
     #[test]
     fn test_engine_find_container_by_prefix() {
         let mut eng = Engine::new();
-        let id = eng.create_container("alpine", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("alpine", Some("c1"), "", ContainerConfig::default());
         let prefix = &id[..8];
         assert!(eng.find_container(prefix).is_some());
     }
@@ -2714,7 +2714,7 @@ mod tests {
     #[test]
     fn test_engine_start_container() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         assert!(eng.start_container(&id).is_ok());
         assert_eq!(eng.find_container(&id).unwrap().status, ContainerStatus::Running);
     }
@@ -2722,7 +2722,7 @@ mod tests {
     #[test]
     fn test_engine_start_already_running() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         assert!(eng.start_container(&id).is_err());
     }
@@ -2730,7 +2730,7 @@ mod tests {
     #[test]
     fn test_engine_stop_container() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         assert!(eng.stop_container(&id).is_ok());
         assert_eq!(eng.find_container(&id).unwrap().status, ContainerStatus::Exited);
@@ -2739,14 +2739,14 @@ mod tests {
     #[test]
     fn test_engine_stop_not_running() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         assert!(eng.stop_container(&id).is_err());
     }
 
     #[test]
     fn test_engine_pause_container() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         assert!(eng.pause_container(&id).is_ok());
         assert_eq!(eng.find_container(&id).unwrap().status, ContainerStatus::Paused);
@@ -2755,14 +2755,14 @@ mod tests {
     #[test]
     fn test_engine_pause_not_running() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         assert!(eng.pause_container(&id).is_err());
     }
 
     #[test]
     fn test_engine_unpause_container() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         eng.pause_container(&id).unwrap();
         assert!(eng.unpause_container(&id).is_ok());
@@ -2772,14 +2772,14 @@ mod tests {
     #[test]
     fn test_engine_unpause_not_paused() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         assert!(eng.unpause_container(&id).is_err());
     }
 
     #[test]
     fn test_engine_restart_container() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         assert!(eng.restart_container(&id).is_ok());
         assert_eq!(eng.find_container(&id).unwrap().status, ContainerStatus::Running);
     }
@@ -2787,7 +2787,7 @@ mod tests {
     #[test]
     fn test_engine_remove_container() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         assert!(eng.remove_container(&id, false).is_ok());
         assert!(eng.find_container(&id).is_none());
     }
@@ -2795,7 +2795,7 @@ mod tests {
     #[test]
     fn test_engine_remove_running_without_force() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         assert!(eng.remove_container(&id, false).is_err());
     }
@@ -2803,7 +2803,7 @@ mod tests {
     #[test]
     fn test_engine_remove_running_with_force() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         assert!(eng.remove_container(&id, true).is_ok());
     }
@@ -2811,7 +2811,7 @@ mod tests {
     #[test]
     fn test_engine_rename_container() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("old"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("old"), "", ContainerConfig::default());
         assert!(eng.rename_container(&id, "new").is_ok());
         assert_eq!(eng.find_container(&id).unwrap().name, "new");
     }
@@ -2825,7 +2825,7 @@ mod tests {
     #[test]
     fn test_engine_wait_exited() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         eng.stop_container(&id).unwrap();
         assert_eq!(eng.wait_container(&id).unwrap(), 0);
@@ -2834,7 +2834,7 @@ mod tests {
     #[test]
     fn test_engine_wait_running() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         assert_eq!(eng.wait_container(&id).unwrap(), -1);
     }
@@ -3047,7 +3047,7 @@ mod tests {
     #[test]
     fn test_buildah_from_image() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("ubuntu:22.04", None);
+        let id = eng.create_from_image("ubuntu:22.04", None);
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.base_image, "ubuntu:22.04");
         assert!(c.name.starts_with("buildah-wc-"));
@@ -3056,7 +3056,7 @@ mod tests {
     #[test]
     fn test_buildah_from_image_named() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("ubuntu:22.04", Some("mybuilder"));
+        let id = eng.create_from_image("ubuntu:22.04", Some("mybuilder"));
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.name, "mybuilder");
     }
@@ -3064,7 +3064,7 @@ mod tests {
     #[test]
     fn test_buildah_mount() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         let mp = eng.mount_container(&id).unwrap();
         assert!(mp.contains(&id));
         assert!(eng.find_container(&id).unwrap().mounted);
@@ -3073,7 +3073,7 @@ mod tests {
     #[test]
     fn test_buildah_unmount() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         eng.mount_container(&id).unwrap();
         assert!(eng.unmount_container(&id).is_ok());
         assert!(!eng.find_container(&id).unwrap().mounted);
@@ -3082,14 +3082,14 @@ mod tests {
     #[test]
     fn test_buildah_unmount_not_mounted() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         assert!(eng.unmount_container(&id).is_err());
     }
 
     #[test]
     fn test_buildah_commit() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", Some("wc1"));
+        let id = eng.create_from_image("alpine", Some("wc1"));
         let img_id = eng.commit_container(&id, "myimage:v1").unwrap();
         assert!(!img_id.is_empty());
         let img = eng.images.get(&img_id).unwrap();
@@ -3106,7 +3106,7 @@ mod tests {
     #[test]
     fn test_buildah_config_cmd() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         assert!(eng.config_container(&id, "--cmd", "/bin/sh").is_ok());
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.config.cmd.as_deref(), Some("/bin/sh"));
@@ -3115,7 +3115,7 @@ mod tests {
     #[test]
     fn test_buildah_config_entrypoint() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         assert!(eng.config_container(&id, "--entrypoint", "/app").is_ok());
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.config.entrypoint.as_deref(), Some("/app"));
@@ -3124,7 +3124,7 @@ mod tests {
     #[test]
     fn test_buildah_config_workingdir() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         assert!(eng.config_container(&id, "--workingdir", "/app").is_ok());
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.config.working_dir.as_deref(), Some("/app"));
@@ -3133,7 +3133,7 @@ mod tests {
     #[test]
     fn test_buildah_config_user() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         assert!(eng.config_container(&id, "--user", "nobody").is_ok());
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.config.user.as_deref(), Some("nobody"));
@@ -3142,7 +3142,7 @@ mod tests {
     #[test]
     fn test_buildah_config_port() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         assert!(eng.config_container(&id, "--port", "8080").is_ok());
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.config.ports, vec!["8080"]);
@@ -3151,7 +3151,7 @@ mod tests {
     #[test]
     fn test_buildah_config_volume() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         assert!(eng.config_container(&id, "--volume", "/data").is_ok());
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.config.volumes, vec!["/data"]);
@@ -3160,7 +3160,7 @@ mod tests {
     #[test]
     fn test_buildah_config_unknown_key() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         assert!(eng.config_container(&id, "--unknown", "val").is_err());
     }
 
@@ -3173,7 +3173,7 @@ mod tests {
     #[test]
     fn test_buildah_remove_container() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         assert!(eng.remove_container(&id).is_ok());
         assert!(eng.find_container(&id).is_none());
     }
@@ -3187,14 +3187,14 @@ mod tests {
     #[test]
     fn test_buildah_find_by_name() {
         let mut eng = BuildahEngine::new();
-        let _id = eng.from_image("alpine", Some("byname"));
+        let _id = eng.create_from_image("alpine", Some("byname"));
         assert!(eng.find_container("byname").is_some());
     }
 
     #[test]
     fn test_buildah_find_by_prefix() {
         let mut eng = BuildahEngine::new();
-        let id = eng.from_image("alpine", None);
+        let id = eng.create_from_image("alpine", None);
         let prefix = &id[..6];
         assert!(eng.find_container(prefix).is_some());
     }
@@ -4133,7 +4133,15 @@ mod tests {
             container_port: 80,
             protocol: String::from("tcp"),
         }];
-        let id = eng.create_container("nginx", Some("web"), "", &ports, &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container(
+            "nginx",
+            Some("web"),
+            "",
+            ContainerConfig {
+                ports,
+                ..Default::default()
+            },
+        );
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.ports.len(), 1);
         assert_eq!(c.ports[0].host_port, 8080);
@@ -4144,7 +4152,15 @@ mod tests {
         let mut eng = Engine::new();
         let mut labels = HashMap::new();
         labels.insert(String::from("app"), String::from("web"));
-        let id = eng.create_container("nginx", Some("labeled"), "", &[], &labels, &HashMap::new(), None);
+        let id = eng.create_container(
+            "nginx",
+            Some("labeled"),
+            "",
+            ContainerConfig {
+                labels,
+                ..Default::default()
+            },
+        );
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.labels.get("app").map(|s| s.as_str()), Some("web"));
     }
@@ -4154,7 +4170,15 @@ mod tests {
         let mut eng = Engine::new();
         let mut env_vars = HashMap::new();
         env_vars.insert(String::from("PORT"), String::from("3000"));
-        let id = eng.create_container("node", Some("app"), "", &[], &HashMap::new(), &env_vars, None);
+        let id = eng.create_container(
+            "node",
+            Some("app"),
+            "",
+            ContainerConfig {
+                env_vars,
+                ..Default::default()
+            },
+        );
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.env_vars.get("PORT").map(|s| s.as_str()), Some("3000"));
     }
@@ -4163,7 +4187,15 @@ mod tests {
     fn test_engine_container_with_pod() {
         let mut eng = Engine::new();
         let pod_id = eng.create_pod("mypod");
-        let id = eng.create_container("nginx", Some("in-pod"), "", &[], &HashMap::new(), &HashMap::new(), Some(&pod_id));
+        let id = eng.create_container(
+            "nginx",
+            Some("in-pod"),
+            "",
+            ContainerConfig {
+                pod_id: Some(pod_id.clone()),
+                ..Default::default()
+            },
+        );
         let c = eng.find_container(&id).unwrap();
         assert_eq!(c.pod_id.as_deref(), Some(pod_id.as_str()));
     }
@@ -4206,8 +4238,8 @@ mod tests {
     #[test]
     fn test_engine_multiple_containers() {
         let mut eng = Engine::new();
-        let id1 = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
-        let id2 = eng.create_container("alpine", Some("c2"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id1 = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
+        let id2 = eng.create_container("alpine", Some("c2"), "", ContainerConfig::default());
         assert_ne!(id1, id2);
         assert!(eng.find_container("c1").is_some());
         assert!(eng.find_container("c2").is_some());
@@ -4216,7 +4248,7 @@ mod tests {
     #[test]
     fn test_engine_start_paused_fails() {
         let mut eng = Engine::new();
-        let id = eng.create_container("nginx", Some("c1"), "", &[], &HashMap::new(), &HashMap::new(), None);
+        let id = eng.create_container("nginx", Some("c1"), "", ContainerConfig::default());
         eng.start_container(&id).unwrap();
         eng.pause_container(&id).unwrap();
         assert!(eng.start_container(&id).is_err());

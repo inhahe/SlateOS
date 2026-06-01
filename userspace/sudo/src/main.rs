@@ -342,8 +342,8 @@ fn parse_sudoers(content: &str) -> Result<SudoersConfig, SudoError> {
         }
 
         // Handle line continuation (trailing backslash).
-        if trimmed.ends_with('\\') {
-            continued_line.push_str(&trimmed[..trimmed.len() - 1]);
+        if let Some(stripped) = trimmed.strip_suffix('\\') {
+            continued_line.push_str(stripped);
             continued_line.push(' ');
             continue;
         }
@@ -687,11 +687,11 @@ fn validate_sudoers(content: &str, strict: bool) -> Vec<SyntaxError> {
             continue;
         }
 
-        if trimmed.ends_with('\\') {
+        if let Some(stripped) = trimmed.strip_suffix('\\') {
             if continued_line.is_empty() {
                 start_line_num = line_num;
             }
-            continued_line.push_str(&trimmed[..trimmed.len() - 1]);
+            continued_line.push_str(stripped);
             continued_line.push(' ');
             continue;
         }
@@ -1418,7 +1418,7 @@ fn list_sessions(io_dir: &str) -> Vec<SessionEntry> {
         });
     }
 
-    sessions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+    sessions.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
     sessions
 }
 

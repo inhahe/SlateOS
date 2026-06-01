@@ -57,7 +57,7 @@ enum MceErrorType {
     MemoryController,
     CacheHierarchy,
     Bus,
-    TLB,
+    Tlb,
     InternalParity,
     _InternalTimer,
     _ExternalError,
@@ -71,7 +71,7 @@ impl std::fmt::Display for MceErrorType {
             Self::MemoryController => write!(f, "memory controller"),
             Self::CacheHierarchy => write!(f, "cache hierarchy"),
             Self::Bus => write!(f, "bus/interconnect"),
-            Self::TLB => write!(f, "TLB"),
+            Self::Tlb => write!(f, "TLB"),
             Self::InternalParity => write!(f, "internal parity"),
             Self::_InternalTimer => write!(f, "internal timer"),
             Self::_ExternalError => write!(f, "external"),
@@ -145,7 +145,7 @@ fn decode_mce_status(status: u64) -> (MceErrorType, MceSeverity) {
         // Cache hierarchy error (bits 1:0 = level, bits 3:2 = transaction type)
         MceErrorType::CacheHierarchy
     } else if mca_code & 0x0010 != 0 {
-        MceErrorType::TLB
+        MceErrorType::Tlb
     } else {
         match mca_code & 0x000F {
             0x0001 => MceErrorType::InternalParity,
@@ -522,7 +522,7 @@ mod tests {
     #[test]
     fn test_decode_tlb_error() {
         let (error_type, severity) = decode_mce_status(0x8000004000010010);
-        assert_eq!(error_type, MceErrorType::TLB);
+        assert_eq!(error_type, MceErrorType::Tlb);
         assert_eq!(severity, MceSeverity::Corrected);
     }
 
@@ -596,6 +596,6 @@ mod tests {
     #[test]
     fn test_error_type_display() {
         assert_eq!(format!("{}", MceErrorType::Bus), "bus/interconnect");
-        assert_eq!(format!("{}", MceErrorType::TLB), "TLB");
+        assert_eq!(format!("{}", MceErrorType::Tlb), "TLB");
     }
 }

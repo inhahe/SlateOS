@@ -1057,9 +1057,9 @@ fn parse_set_or_cmp(tokens: &mut Tokens<'_>, field: &str) -> Result<MatchExpr, S
         None => return Err(format!("expected value after {field}")),
     };
 
-    if next.starts_with('@') {
+    if let Some(stripped) = next.strip_prefix('@') {
         tokens.next_token();
-        let set_name = next[1..].to_string();
+        let set_name = stripped.to_string();
         return Ok(MatchExpr::SetLookup {
             field: field.to_string(),
             set_name,
@@ -2767,21 +2767,20 @@ fn run(args: Vec<String>) -> Result<String, String> {
     let mut rs = Ruleset::new();
     let mut flags = Flags::new();
 
-    match prog_name.as_str() {
-        "nft-list" => {
-            // Parse flags from remaining args
-            let cmd_args = if args.len() > 1 { &args[1..] } else { &[] };
-            for a in cmd_args {
-                match a.as_str() {
-                    "-j" => flags.json = true,
-                    "-n" => flags.numeric = true,
-                    "-a" => flags.show_handles = true,
-                    _ => {}
-                }
+    // The "nft-list" personality maps directly to `nft list`; all other
+    // program names fall through to the default "nft" command parsing.
+    if prog_name.as_str() == "nft-list" {
+        // Parse flags from remaining args
+        let cmd_args = if args.len() > 1 { &args[1..] } else { &[] };
+        for a in cmd_args {
+            match a.as_str() {
+                "-j" => flags.json = true,
+                "-n" => flags.numeric = true,
+                "-a" => flags.show_handles = true,
+                _ => {}
             }
-            return run_nft_list(&rs, &flags);
         }
-        _ => {} // default "nft" personality
+        return run_nft_list(&rs, &flags);
     }
 
     // Parse flags and collect command words

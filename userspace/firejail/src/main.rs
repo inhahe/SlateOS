@@ -297,12 +297,15 @@ fn parse_profile(path: &Path) -> Result<ProfileConfig, String> {
 /// Parse profile content from a string. The path is used for error messages
 /// and for resolving `include` directives.
 fn parse_profile_content(content: &str, source: &Path) -> Result<ProfileConfig, String> {
-    let mut profile = ProfileConfig::default();
-    profile.name = source
+    let name = source
         .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("unknown")
         .to_string();
+    let mut profile = ProfileConfig {
+        name,
+        ..Default::default()
+    };
 
     for line in content.lines() {
         let Some((directive, value)) = parse_profile_line(line) else {
@@ -834,11 +837,7 @@ fn list_available_profiles(profile_dir: &Path) -> Vec<String> {
 
 /// Extract a value from an option of the form `--key=value`.
 fn extract_option_value<'a>(arg: &'a str, prefix: &str) -> Option<&'a str> {
-    if arg.starts_with(prefix) {
-        Some(&arg[prefix.len()..])
-    } else {
-        Option::None
-    }
+    arg.strip_prefix(prefix)
 }
 
 /// Format uptime seconds into a human-readable string.

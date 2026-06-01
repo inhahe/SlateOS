@@ -970,10 +970,12 @@ fn write_enforce_mode(mode: EnforceMode) -> Result<(), String> {
 }
 
 fn read_sestatus() -> SeStatus {
-    let mut status = SeStatus::default();
-
     // Check if SELinux fs is mounted
-    status.enabled = Path::new(SELINUX_FS).exists();
+    let enabled = Path::new(SELINUX_FS).exists();
+    let mut status = SeStatus {
+        enabled,
+        ..Default::default()
+    };
     if !status.enabled {
         status.mode = EnforceMode::Disabled;
         status.config_mode = EnforceMode::Disabled;
@@ -994,8 +996,8 @@ fn read_sestatus() -> SeStatus {
                     _ => EnforceMode::Disabled,
                 };
             }
-            if trimmed.starts_with("SELINUXTYPE=") {
-                status.policy_name = trimmed["SELINUXTYPE=".len()..].trim().to_string();
+            if let Some(rest) = trimmed.strip_prefix("SELINUXTYPE=") {
+                status.policy_name = rest.trim().to_string();
             }
         }
     }

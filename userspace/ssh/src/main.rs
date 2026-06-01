@@ -849,9 +849,10 @@ fn sha256(data: &[u8]) -> [u8; 32] {
     // Process each 512-bit (64-byte) block.
     for chunk in msg.chunks_exact(64) {
         let mut w = [0u32; 64];
-        for i in 0..16 {
+        for (i, w_word) in w.iter_mut().enumerate().take(16) {
             let off = i * 4;
-            w[i] = u32::from_be_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
+            *w_word =
+                u32::from_be_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
@@ -1052,11 +1053,11 @@ fn aes128_encrypt_block(block: &[u8; 16], round_keys: &[[u8; 16]; 11]) -> [u8; 1
     xor_block(&mut state, &round_keys[0]);
 
     // Rounds 1..9: SubBytes, ShiftRows, MixColumns, AddRoundKey.
-    for round in 1..10 {
+    for round_key in round_keys.iter().take(10).skip(1) {
         sub_bytes(&mut state);
         shift_rows(&mut state);
         mix_columns(&mut state);
-        xor_block(&mut state, &round_keys[round]);
+        xor_block(&mut state, round_key);
     }
 
     // Final round (no MixColumns).
@@ -1300,25 +1301,36 @@ fn generate_dh_private() -> BigUint {
 /// H = SHA-256(V_C || V_S || I_C || I_S || K_S || e || f || K)
 ///
 /// Where each value is SSH-encoded (string or mpint as appropriate).
-fn compute_exchange_hash(
-    v_c: &str,   // client version string (without CRLF)
-    v_s: &str,   // server version string (without CRLF)
-    i_c: &[u8],  // client KEXINIT payload
-    i_s: &[u8],  // server KEXINIT payload
-    k_s: &[u8],  // server host key blob
-    e: &[u8],    // client DH public value (big-endian)
-    f: &[u8],    // server DH public value (big-endian)
-    k: &[u8],    // shared secret (big-endian)
-) -> [u8; 32] {
+/// Inputs to the SSH key-exchange hash, per RFC 4253 section 8.
+struct ExchangeHashInput<'a> {
+    /// Client version string (without CRLF).
+    v_c: &'a str,
+    /// Server version string (without CRLF).
+    v_s: &'a str,
+    /// Client KEXINIT payload.
+    i_c: &'a [u8],
+    /// Server KEXINIT payload.
+    i_s: &'a [u8],
+    /// Server host key blob.
+    k_s: &'a [u8],
+    /// Client DH public value (big-endian).
+    e: &'a [u8],
+    /// Server DH public value (big-endian).
+    f: &'a [u8],
+    /// Shared secret (big-endian).
+    k: &'a [u8],
+}
+
+fn compute_exchange_hash(input: &ExchangeHashInput<'_>) -> [u8; 32] {
     let mut buf = Vec::new();
-    buf.extend_from_slice(&ssh_string(v_c.as_bytes()));
-    buf.extend_from_slice(&ssh_string(v_s.as_bytes()));
-    buf.extend_from_slice(&ssh_string(i_c));
-    buf.extend_from_slice(&ssh_string(i_s));
-    buf.extend_from_slice(&ssh_string(k_s));
-    buf.extend_from_slice(&encode_mpint(e));
-    buf.extend_from_slice(&encode_mpint(f));
-    buf.extend_from_slice(&encode_mpint(k));
+    buf.extend_from_slice(&ssh_string(input.v_c.as_bytes()));
+    buf.extend_from_slice(&ssh_string(input.v_s.as_bytes()));
+    buf.extend_from_slice(&ssh_string(input.i_c));
+    buf.extend_from_slice(&ssh_string(input.i_s));
+    buf.extend_from_slice(&ssh_string(input.k_s));
+    buf.extend_from_slice(&encode_mpint(input.e));
+    buf.extend_from_slice(&encode_mpint(input.f));
+    buf.extend_from_slice(&encode_mpint(input.k));
     sha256(&buf)
 }
 
@@ -1897,16 +1909,16 @@ impl SshSession {
         self.verbose("computed shared secret");
 
         // Compute exchange hash H.
-        let h = compute_exchange_hash(
-            SSH_VERSION_STRING,
-            &self.server_version,
-            &self.client_kexinit,
-            &self.server_kexinit,
-            &k_s,
-            &e_bytes,
-            &f_bytes,
-            &k_bytes,
-        );
+        let h = compute_exchange_hash(&ExchangeHashInput {
+            v_c: SSH_VERSION_STRING,
+            v_s: &self.server_version,
+            i_c: &self.client_kexinit,
+            i_s: &self.server_kexinit,
+            k_s: &k_s,
+            e: &e_bytes,
+            f: &f_bytes,
+            k: &k_bytes,
+        });
         self.verbose(&format!("exchange hash: {}", bytes_to_hex(&h)));
 
         // The first exchange hash is used as the session ID.

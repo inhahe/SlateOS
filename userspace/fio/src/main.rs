@@ -534,9 +534,10 @@ fn sha256(data: &[u8]) -> [u8; 32] {
 
     for chunk in buf.chunks_exact(64) {
         let mut w = [0u32; 64];
-        for i in 0..16 {
+        for (i, w_word) in w.iter_mut().enumerate().take(16) {
             let off = i * 4;
-            w[i] = u32::from_be_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
+            *w_word =
+                u32::from_be_bytes([chunk[off], chunk[off + 1], chunk[off + 2], chunk[off + 3]]);
         }
         for i in 16..64 {
             let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);

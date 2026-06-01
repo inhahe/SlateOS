@@ -99,7 +99,7 @@ fn format_timestamp() -> String {
 fn read_file_lines(path: &str) -> Option<Vec<String>> {
     let file = std::fs::File::open(path).ok()?;
     let reader = io::BufReader::new(file);
-    let lines: Vec<String> = reader.lines().filter_map(|l| l.ok()).collect();
+    let lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
     if lines.is_empty() {
         None
     } else {

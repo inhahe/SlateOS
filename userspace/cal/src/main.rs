@@ -298,7 +298,7 @@ fn print_full_year(out: &mut io::StdoutLock<'_>, year: i32, opts: &CalOpts, toda
     let _ = writeln!(out, "{:>pad$}{title}", "", pad = padding);
     let _ = writeln!(out);
 
-    let cols = opts.columns.min(4).max(1);
+    let cols = opts.columns.clamp(1, 4);
     let mut month = 1u32;
 
     while month <= 12 {

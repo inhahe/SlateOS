@@ -410,10 +410,7 @@ fn bridge_show_link(ports: &[BridgePort], ctx: &OutputCtx, filter_dev: Option<&s
     }
 }
 
-fn bridge_set_link(
-    ports: &mut Vec<BridgePort>,
-    args: &[String],
-) -> Result<(), String> {
+fn bridge_set_link(ports: &mut [BridgePort], args: &[String]) -> Result<(), String> {
     // bridge link set dev <dev> [learning on/off] [flood on/off] [state <state>]
     // [hairpin on/off] [guard on/off] [mcast_flood on/off] [bcast_flood on/off]
     // [priority <prio>] [cost <cost>]
@@ -2305,7 +2302,7 @@ fn ebt_list_chains(chains: &[EbtablesChain], filter: Option<&str>) {
 }
 
 fn ebt_add_rule(
-    chains: &mut Vec<EbtablesChain>,
+    chains: &mut [EbtablesChain],
     chain_name: &str,
     rule: EbtablesRule,
 ) -> Result<(), String> {
@@ -2318,7 +2315,7 @@ fn ebt_add_rule(
 }
 
 fn ebt_insert_rule(
-    chains: &mut Vec<EbtablesChain>,
+    chains: &mut [EbtablesChain],
     chain_name: &str,
     rule: EbtablesRule,
     pos: usize,
@@ -2333,7 +2330,7 @@ fn ebt_insert_rule(
 }
 
 fn ebt_delete_rule(
-    chains: &mut Vec<EbtablesChain>,
+    chains: &mut [EbtablesChain],
     chain_name: &str,
     rule_num: usize,
 ) -> Result<(), String> {
@@ -2348,7 +2345,7 @@ fn ebt_delete_rule(
     Ok(())
 }
 
-fn ebt_flush(chains: &mut Vec<EbtablesChain>, filter: Option<&str>) {
+fn ebt_flush(chains: &mut [EbtablesChain], filter: Option<&str>) {
     for chain in chains.iter_mut() {
         if let Some(f) = filter
             && chain.name != f {
@@ -2359,7 +2356,7 @@ fn ebt_flush(chains: &mut Vec<EbtablesChain>, filter: Option<&str>) {
 }
 
 fn ebt_set_policy(
-    chains: &mut Vec<EbtablesChain>,
+    chains: &mut [EbtablesChain],
     chain_name: &str,
     policy: &str,
 ) -> Result<(), String> {

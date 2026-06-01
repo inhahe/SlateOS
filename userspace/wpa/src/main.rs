@@ -182,9 +182,9 @@ fn sha1(data: &[u8]) -> [u8; SHA1_DIGEST_SIZE] {
 fn sha1_compress(h: &mut [u32; 5], block: &[u8]) {
     let mut w = [0u32; 80];
     // Load 16 big-endian words.
-    for i in 0..16 {
+    for (i, w_word) in w.iter_mut().enumerate().take(16) {
         let off = i * 4;
-        w[i] = u32::from_be_bytes([
+        *w_word = u32::from_be_bytes([
             block[off],
             block[off + 1],
             block[off + 2],
@@ -202,7 +202,7 @@ fn sha1_compress(h: &mut [u32; 5], block: &[u8]) {
     let mut d = h[3];
     let mut e = h[4];
 
-    for i in 0..80 {
+    for (i, &w_i) in w.iter().enumerate() {
         let (f, k) = match i {
             0..=19 => ((b & c) | ((!b) & d), 0x5A82_7999u32),
             20..=39 => (b ^ c ^ d, 0x6ED9_EBA1u32),
@@ -215,7 +215,7 @@ fn sha1_compress(h: &mut [u32; 5], block: &[u8]) {
             .wrapping_add(f)
             .wrapping_add(e)
             .wrapping_add(k)
-            .wrapping_add(w[i]);
+            .wrapping_add(w_i);
         e = d;
         d = c;
         c = b.rotate_left(30);
@@ -1494,7 +1494,7 @@ fn run_passphrase(args: &[&str], out: &mut dyn Write) -> i32 {
             out,
             "If passphrase is not given, it is read from stdin."
         );
-        return if args.is_empty() { 1 } else { 1 };
+        return 1;
     }
 
     let ssid = args[0].as_bytes();

@@ -1378,7 +1378,7 @@ fn report_summary_overview(records: &[&AuditRecord], failed_only: bool) {
     println!("Events by type:");
 
     let mut sorted: Vec<_> = type_counts.into_iter().collect();
-    sorted.sort_by(|a, b| b.1.cmp(&a.1));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
     for (mtype, count) in &sorted {
         println!("  {:<20} {}", mtype.as_str(), count);
     }
@@ -1409,7 +1409,7 @@ fn report_auth(records: &[&AuditRecord], summary: bool, failed_only: bool) {
         println!("Number  Account");
         println!("======  =======");
         let mut sorted: Vec<_> = user_counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (user, count) in &sorted {
             println!("{:<8}{}", count, user);
         }
@@ -1453,7 +1453,7 @@ fn report_login(records: &[&AuditRecord], summary: bool, failed_only: bool) {
         println!("Number  Account");
         println!("======  =======");
         let mut sorted: Vec<_> = user_counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (user, count) in &sorted {
             println!("{:<8}{}", count, user);
         }
@@ -1497,7 +1497,7 @@ fn report_file(records: &[&AuditRecord], summary: bool, failed_only: bool) {
         println!("Number  File");
         println!("======  ====");
         let mut sorted: Vec<_> = file_counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (name, count) in &sorted {
             println!("{:<8}{}", count, name);
         }
@@ -1544,7 +1544,7 @@ fn report_syscall(records: &[&AuditRecord], summary: bool, failed_only: bool) {
         println!("Number  Syscall");
         println!("======  =======");
         let mut sorted: Vec<_> = sc_counts.into_iter().collect();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         for (sc, count) in &sorted {
             println!("{:<8}{}", count, sc);
         }

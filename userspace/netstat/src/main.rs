@@ -653,9 +653,7 @@ fn format_addr(addr: &str, port: u16, numeric: bool) -> String {
             .unwrap_or_else(|| format!("{port}"))
     };
 
-    let addr_display = if addr == "0.0.0.0" && !numeric {
-        "*".to_string()
-    } else if addr == "::" && !numeric {
+    let addr_display = if (addr == "0.0.0.0" || addr == "::") && !numeric {
         "*".to_string()
     } else {
         addr.to_string()

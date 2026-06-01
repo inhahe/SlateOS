@@ -628,6 +628,11 @@ fn bool_to_yesno(b: bool) -> &'static str {
 // Snapshot store (in-memory model of on-disk snapshot state)
 // ============================================================================
 
+/// Bucket key used by `keep_by_bucket`: (year, month/quarter, day, hour).
+type BucketKey = (i64, i64, i64, i64);
+/// Bucket value: (snapshot number, snapshot date).
+type BucketVal = (u64, u64);
+
 /// In-memory representation of all snapshots for a configuration.
 struct SnapshotStore {
     config: SnapperConfig,
@@ -828,14 +833,14 @@ impl SnapshotStore {
         bucket_fn: F,
     ) -> Vec<u64>
     where
-        F: Fn(u64) -> (i64, i64, i64, i64),
+        F: Fn(u64) -> BucketKey,
     {
         if limit == 0 {
             return Vec::new();
         }
 
         // Collect unique buckets with the most recent snapshot in each.
-        let mut buckets: HashMap<(i64, i64, i64, i64), (u64, u64)> = HashMap::new();
+        let mut buckets: HashMap<BucketKey, BucketVal> = HashMap::new();
         for &(num, date) in snaps {
             let key = bucket_fn(date);
             let entry = buckets.entry(key).or_insert((num, date));
@@ -846,9 +851,9 @@ impl SnapshotStore {
         }
 
         // Sort buckets by key (most recent first) and keep `limit` of them.
-        let mut bucket_list: Vec<((i64, i64, i64, i64), (u64, u64))> =
+        let mut bucket_list: Vec<(BucketKey, BucketVal)> =
             buckets.into_iter().collect();
-        bucket_list.sort_by(|a, b| b.0.cmp(&a.0));
+        bucket_list.sort_by_key(|b| std::cmp::Reverse(b.0));
 
         let keep_count = (limit as usize).min(bucket_list.len());
         bucket_list[..keep_count]

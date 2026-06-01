@@ -531,17 +531,32 @@ struct ArrayDescriptor {
     rebuild_progress: Option<u32>,
 }
 
+/// Parameters describing a RAID array to create, mirroring the `mdadm --create`
+/// command-line inputs. Bundled into one struct so the constructor and the
+/// manager's `create_array` stay under the argument-count limit.
+struct ArraySpec<'a> {
+    md_device: &'a str,
+    level: RaidLevel,
+    raid_disks: u32,
+    device_paths: &'a [&'a str],
+    spare_paths: &'a [&'a str],
+    chunk: u32,
+    name: Option<&'a str>,
+    bitmap_enabled: bool,
+}
+
 impl ArrayDescriptor {
-    fn new(
-        md_device: &str,
-        level: RaidLevel,
-        raid_disks: u32,
-        device_paths: &[&str],
-        spare_paths: &[&str],
-        chunk: u32,
-        name: Option<&str>,
-        bitmap_enabled: bool,
-    ) -> Result<Self, String> {
+    fn new(spec: &ArraySpec<'_>) -> Result<Self, String> {
+        let &ArraySpec {
+            md_device,
+            level,
+            raid_disks,
+            device_paths,
+            spare_paths,
+            chunk,
+            name,
+            bitmap_enabled,
+        } = spec;
         if (device_paths.len() as u32) < raid_disks {
             return Err(format!(
                 "not enough devices: got {}, need {}",
@@ -743,30 +758,11 @@ impl RaidManager {
         self.arrays.iter_mut().find(|a| a.md_device == md_device)
     }
 
-    fn create_array(
-        &mut self,
-        md_device: &str,
-        level: RaidLevel,
-        raid_disks: u32,
-        device_paths: &[&str],
-        spare_paths: &[&str],
-        chunk: u32,
-        name: Option<&str>,
-        bitmap: bool,
-    ) -> Result<&ArrayDescriptor, String> {
-        if self.find_array(md_device).is_some() {
-            return Err(format!("array {} already exists", md_device));
+    fn create_array(&mut self, spec: &ArraySpec<'_>) -> Result<&ArrayDescriptor, String> {
+        if self.find_array(spec.md_device).is_some() {
+            return Err(format!("array {} already exists", spec.md_device));
         }
-        let arr = ArrayDescriptor::new(
-            md_device,
-            level,
-            raid_disks,
-            device_paths,
-            spare_paths,
-            chunk,
-            name,
-            bitmap,
-        )?;
+        let arr = ArrayDescriptor::new(spec)?;
         self.arrays.push(arr);
         // Return reference to newly pushed element.
         Ok(self.arrays.last().expect("just pushed"))
@@ -796,16 +792,16 @@ impl RaidManager {
         // For simulation, create a default RAID1 array with the given devices.
         let n = device_paths.len() as u32;
         let level = if n >= 3 { RaidLevel::Raid5 } else { RaidLevel::Raid1 };
-        let arr = ArrayDescriptor::new(
+        let arr = ArrayDescriptor::new(&ArraySpec {
             md_device,
             level,
-            n,
+            raid_disks: n,
             device_paths,
-            &[],
-            DEFAULT_CHUNK_KIB,
-            None,
-            false,
-        )?;
+            spare_paths: &[],
+            chunk: DEFAULT_CHUNK_KIB,
+            name: None,
+            bitmap_enabled: false,
+        })?;
         self.arrays.push(arr);
         Ok(())
     }
@@ -1325,16 +1321,16 @@ fn run_create(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     let spare_devs: Vec<&str> = device_strs.iter().skip(raid_disks as usize).copied().collect();
 
     let mut mgr = RaidManager::new();
-    match mgr.create_array(
-        &md_device,
-        level,
-        raid_disks,
-        &active_devs,
-        &spare_devs,
-        opts.chunk,
-        opts.name.as_deref(),
-        opts.bitmap,
-    ) {
+    match mgr.create_array(&ArraySpec {
+            md_device: &md_device,
+            level,
+            raid_disks,
+            device_paths: &active_devs,
+            spare_paths: &spare_devs,
+            chunk: opts.chunk,
+            name: opts.name.as_deref(),
+            bitmap_enabled: opts.bitmap,
+        }) {
         Ok(arr) => {
             let _ = writeln!(
                 out,
@@ -1394,16 +1390,16 @@ fn run_manage(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     // Simulate an existing array for manage operations.
     let mut mgr = RaidManager::new();
     let dummy_devs: Vec<&str> = vec!["/dev/sda1", "/dev/sdb1"];
-    let _ = mgr.create_array(
-        &md_device,
-        RaidLevel::Raid1,
-        2,
-        &dummy_devs,
-        &[],
-        DEFAULT_CHUNK_KIB,
-        None,
-        false,
-    );
+    let _ = mgr.create_array(&ArraySpec {
+            md_device: &md_device,
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &dummy_devs,
+            spare_paths: &[],
+            chunk: DEFAULT_CHUNK_KIB,
+            name: None,
+            bitmap_enabled: false,
+        });
 
     let mut exit_code = 0;
 
@@ -1480,16 +1476,16 @@ fn run_detail(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     // Simulate array for detail display.
     let mut mgr = RaidManager::new();
     let dummy_devs: Vec<&str> = vec!["/dev/sda1", "/dev/sdb1"];
-    let _ = mgr.create_array(
-        &md_device,
-        RaidLevel::Raid1,
-        2,
-        &dummy_devs,
-        &[],
-        DEFAULT_CHUNK_KIB,
-        None,
-        false,
-    );
+    let _ = mgr.create_array(&ArraySpec {
+            md_device: &md_device,
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &dummy_devs,
+            spare_paths: &[],
+            chunk: DEFAULT_CHUNK_KIB,
+            name: None,
+            bitmap_enabled: false,
+        });
 
     match mgr.find_array(&md_device) {
         Some(arr) => {
@@ -1543,16 +1539,16 @@ fn run_grow(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     // Simulate existing array.
     let mut mgr = RaidManager::new();
     let dummy_devs: Vec<&str> = vec!["/dev/sda1", "/dev/sdb1", "/dev/sdc1"];
-    let _ = mgr.create_array(
-        &md_device,
-        RaidLevel::Raid5,
-        3,
-        &dummy_devs,
-        &[],
-        DEFAULT_CHUNK_KIB,
-        None,
-        false,
-    );
+    let _ = mgr.create_array(&ArraySpec {
+            md_device: &md_device,
+            level: RaidLevel::Raid5,
+            raid_disks: 3,
+            device_paths: &dummy_devs,
+            spare_paths: &[],
+            chunk: DEFAULT_CHUNK_KIB,
+            name: None,
+            bitmap_enabled: false,
+        });
 
     match mgr
         .find_array_mut(&md_device)
@@ -1610,16 +1606,16 @@ fn run_query(opts: &MdadmArgs, out: &mut Vec<u8>, err: &mut Vec<u8>) -> i32 {
     // Simulate query.
     let mut mgr = RaidManager::new();
     let dummy_devs: Vec<&str> = vec!["/dev/sda1", "/dev/sdb1"];
-    let _ = mgr.create_array(
-        &md_device,
-        RaidLevel::Raid1,
-        2,
-        &dummy_devs,
-        &[],
-        DEFAULT_CHUNK_KIB,
-        None,
-        false,
-    );
+    let _ = mgr.create_array(&ArraySpec {
+            md_device: &md_device,
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &dummy_devs,
+            spare_paths: &[],
+            chunk: DEFAULT_CHUNK_KIB,
+            name: None,
+            bitmap_enabled: false,
+        });
 
     match mgr.find_array(&md_device) {
         Some(arr) => {
@@ -2195,10 +2191,16 @@ mod tests {
 
     #[test]
     fn test_array_descriptor_create_raid1() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .expect("should create");
         assert_eq!(arr.state, ArrayState::Active);
         assert_eq!(arr.devices.len(), 2);
@@ -2207,12 +2209,16 @@ mod tests {
 
     #[test]
     fn test_array_descriptor_create_with_spares() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid5, 3,
-            &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
-            &["/dev/sdd1"],
-            256, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid5,
+            raid_disks: 3,
+            device_paths: &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
+            spare_paths: &["/dev/sdd1"],
+            chunk: 256,
+            name: None,
+            bitmap_enabled: false,
+        })
         .expect("should create");
         assert_eq!(arr.devices.len(), 3);
         assert_eq!(arr.spare_devices.len(), 1);
@@ -2221,62 +2227,94 @@ mod tests {
 
     #[test]
     fn test_array_descriptor_insufficient_devices() {
-        let result = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid5, 3,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        );
+        let result = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid5,
+            raid_disks: 3,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        });
         assert!(result.is_err());
     }
 
     #[test]
     fn test_array_descriptor_raid_disks_too_few() {
-        let result = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid6, 3,
-            &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"], &[], 512, None, false,
-        );
+        let result = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid6,
+            raid_disks: 3,
+            device_paths: &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        });
         assert!(result.is_err());
     }
 
     #[test]
     fn test_array_active_device_count() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert_eq!(arr.active_device_count(), 2);
     }
 
     #[test]
     fn test_array_total_device_count() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid5, 3,
-            &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
-            &["/dev/sdd1"],
-            512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid5,
+            raid_disks: 3,
+            device_paths: &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
+            spare_paths: &["/dev/sdd1"],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert_eq!(arr.total_device_count(), 4);
     }
 
     #[test]
     fn test_array_working_devices() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid5, 3,
-            &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
-            &["/dev/sdd1"],
-            512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid5,
+            raid_disks: 3,
+            device_paths: &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
+            spare_paths: &["/dev/sdd1"],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert_eq!(arr.working_devices(), 4);
     }
 
     #[test]
     fn test_array_usable_size_raid1() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         // RAID1 with 2 devs: usable = 1 dev worth.
         assert_eq!(arr.usable_size_kib(), arr.superblock.size);
@@ -2284,10 +2322,16 @@ mod tests {
 
     #[test]
     fn test_array_mark_device_failed() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.mark_device_failed("/dev/sdb1").is_ok());
         assert_eq!(arr.state, ArrayState::Degraded);
@@ -2296,10 +2340,16 @@ mod tests {
 
     #[test]
     fn test_array_mark_device_failed_already() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         arr.mark_device_failed("/dev/sdb1").unwrap();
         assert!(arr.mark_device_failed("/dev/sdb1").is_err());
@@ -2307,20 +2357,32 @@ mod tests {
 
     #[test]
     fn test_array_mark_device_failed_not_found() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.mark_device_failed("/dev/sdc1").is_err());
     }
 
     #[test]
     fn test_array_remove_failed_device() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         arr.mark_device_failed("/dev/sdb1").unwrap();
         assert!(arr.remove_device("/dev/sdb1").is_ok());
@@ -2328,22 +2390,32 @@ mod tests {
 
     #[test]
     fn test_array_cannot_remove_active_device() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.remove_device("/dev/sdb1").is_err());
     }
 
     #[test]
     fn test_array_remove_spare() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid5, 3,
-            &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
-            &["/dev/sdd1"],
-            512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid5,
+            raid_disks: 3,
+            device_paths: &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
+            spare_paths: &["/dev/sdd1"],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.remove_device("/dev/sdd1").is_ok());
         assert_eq!(arr.spare_devices.len(), 0);
@@ -2351,20 +2423,32 @@ mod tests {
 
     #[test]
     fn test_array_remove_not_found() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.remove_device("/dev/zzz").is_err());
     }
 
     #[test]
     fn test_array_add_device_as_spare() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.add_device("/dev/sdc1").is_ok());
         assert_eq!(arr.spare_devices.len(), 1);
@@ -2373,10 +2457,16 @@ mod tests {
 
     #[test]
     fn test_array_add_device_to_degraded_as_active() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         arr.mark_device_failed("/dev/sdb1").unwrap();
         assert!(arr.add_device("/dev/sdc1").is_ok());
@@ -2385,20 +2475,32 @@ mod tests {
 
     #[test]
     fn test_array_add_duplicate_device() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.add_device("/dev/sda1").is_err());
     }
 
     #[test]
     fn test_array_grow_raid5() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid5, 3,
-            &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid5,
+            raid_disks: 3,
+            device_paths: &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.grow(4).is_ok());
         assert_eq!(arr.superblock.raid_disks, 4);
@@ -2407,40 +2509,64 @@ mod tests {
 
     #[test]
     fn test_array_grow_raid1_unsupported() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.grow(3).is_err());
     }
 
     #[test]
     fn test_array_grow_smaller_fails() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid5, 3,
-            &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid5,
+            raid_disks: 3,
+            device_paths: &["/dev/sda1", "/dev/sdb1", "/dev/sdc1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.grow(2).is_err());
     }
 
     #[test]
     fn test_array_bitmap_enabled() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, true,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: true,
+        })
         .unwrap();
         assert!(arr.bitmap.is_some());
     }
 
     #[test]
     fn test_array_bitmap_disabled() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(arr.bitmap.is_none());
     }
@@ -2450,10 +2576,16 @@ mod tests {
     #[test]
     fn test_manager_create_and_find() {
         let mut mgr = RaidManager::new();
-        mgr.create_array(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        mgr.create_array(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(mgr.find_array("md0").is_some());
         assert!(mgr.find_array("md1").is_none());
@@ -2462,26 +2594,44 @@ mod tests {
     #[test]
     fn test_manager_create_duplicate() {
         let mut mgr = RaidManager::new();
-        mgr.create_array(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        mgr.create_array(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(mgr
-            .create_array(
-                "md0", RaidLevel::Raid1, 2,
-                &["/dev/sdc1", "/dev/sdd1"], &[], 512, None, false,
-            )
+            .create_array(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sdc1", "/dev/sdd1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
             .is_err());
     }
 
     #[test]
     fn test_manager_stop_array() {
         let mut mgr = RaidManager::new();
-        mgr.create_array(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        mgr.create_array(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(mgr.stop_array("md0").is_ok());
         assert_eq!(mgr.find_array("md0").unwrap().state, ArrayState::Stopped);
@@ -2521,10 +2671,16 @@ mod tests {
     #[test]
     fn test_manager_remove_stopped() {
         let mut mgr = RaidManager::new();
-        mgr.create_array(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        mgr.create_array(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         mgr.stop_array("md0").unwrap();
         assert!(mgr.remove_stopped("md0").is_ok());
@@ -2534,10 +2690,16 @@ mod tests {
     #[test]
     fn test_manager_remove_not_stopped() {
         let mut mgr = RaidManager::new();
-        mgr.create_array(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        mgr.create_array(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(mgr.remove_stopped("md0").is_err());
     }
@@ -2563,10 +2725,16 @@ mod tests {
 
     #[test]
     fn test_format_detail_contains_raid_level() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         let mut buf = Vec::new();
         format_detail(&arr, &mut buf);
@@ -2576,10 +2744,16 @@ mod tests {
 
     #[test]
     fn test_format_detail_contains_uuid() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         let mut buf = Vec::new();
         format_detail(&arr, &mut buf);
@@ -2598,10 +2772,16 @@ mod tests {
 
     #[test]
     fn test_format_query_output() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         let mut buf = Vec::new();
         format_query(&arr, &mut buf);
@@ -2612,10 +2792,16 @@ mod tests {
 
     #[test]
     fn test_format_scan_output() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         let mut buf = Vec::new();
         format_scan(&[arr], &mut buf);
@@ -3164,20 +3350,32 @@ mod tests {
 
     #[test]
     fn test_is_degraded_false() {
-        let arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         assert!(!arr.is_degraded());
     }
 
     #[test]
     fn test_is_degraded_true() {
-        let mut arr = ArrayDescriptor::new(
-            "md0", RaidLevel::Raid1, 2,
-            &["/dev/sda1", "/dev/sdb1"], &[], 512, None, false,
-        )
+        let mut arr = ArrayDescriptor::new(&ArraySpec {
+            md_device: "md0",
+            level: RaidLevel::Raid1,
+            raid_disks: 2,
+            device_paths: &["/dev/sda1", "/dev/sdb1"],
+            spare_paths: &[],
+            chunk: 512,
+            name: None,
+            bitmap_enabled: false,
+        })
         .unwrap();
         arr.mark_device_failed("/dev/sdb1").unwrap();
         assert!(arr.is_degraded());

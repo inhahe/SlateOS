@@ -4,14 +4,18 @@
 //!
 //! ## Fork Semantics
 //!
-//! Our OS uses spawn-style process creation (like Windows/Fuchsia),
-//! not fork+exec.  The `fork()` function is provided for compatibility
-//! but it creates a new process via `SYS_PROCESS_SPAWN` and is NOT a
-//! true fork (no address space copy).  Programs that depend on fork's
-//! COW semantics must be adapted.
+//! `fork()` is a true copy-on-write fork backed by the native
+//! `SYS_PROCESS_FORK`: the kernel clones the caller's address space
+//! copy-on-write, refcount-shares its file/handle table, and resumes
+//! the child at the same instruction with a return value of 0.  This
+//! supports the classic fork+exec idiom as well as programs that rely
+//! on CoW sharing between parent and child after fork.
 //!
-//! For `posix_spawn`-style usage (the common case), this works fine
-//! since fork is immediately followed by exec anyway.
+//! `vfork()` is implemented as a plain `fork()` (a correct superset of
+//! vfork's guarantees — see the function docs).  `posix_spawn`-style
+//! creation via `SYS_PROCESS_SPAWN`/`SYS_PROCESS_SPAWN_EX` remains
+//! available and is more efficient when fork is immediately followed by
+//! exec.
 
 use crate::errno;
 use crate::syscall::*;
@@ -376,36 +380,46 @@ pub extern "C" fn waitid(
 // fork / exec
 // ---------------------------------------------------------------------------
 
-/// Create a child process.
+/// Create a child process via copy-on-write `fork()`.
 ///
-/// **WARNING**: This is NOT a true fork.  Our OS uses spawn-style process
-/// creation.  `fork()` here returns -1 with `ENOSYS` because a true fork
-/// (address space copy) is not yet implemented.  Use `posix_spawn()` or
-/// the native `SYS_PROCESS_SPAWN` instead.
+/// Issues the native `SYS_PROCESS_FORK`, which clones the calling
+/// process's address space copy-on-write, duplicates its file/handle
+/// table (refcount-shared), and spawns a child thread that resumes
+/// execution at the same point.  The child observes a return value of
+/// `0`; the parent observes the child's PID.
+///
+/// On failure (parent only) returns `-1` with `errno` set to the
+/// translated kernel error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fork() -> PidT {
-    // True fork requires address space duplication, which is complex
-    // and not yet implemented.  Return ENOSYS for now.
-    //
-    // Programs should use posix_spawn() or vfork()+exec() patterns,
-    // which can be implemented via SYS_PROCESS_SPAWN.
-    errno::set_errno(errno::ENOSYS);
-    -1
+    // SYS_PROCESS_FORK is frame-handled in the kernel: it reads the
+    // caller's saved register frame to build the child's resume state.
+    // The parent returns here with the child PID (> 0); the child
+    // returns here with 0 (the kernel forces RAX=0 on the child's
+    // resume path), so a single syscall site yields both views.
+    let ret = syscall0(SYS_PROCESS_FORK);
+    // `translate` returns the PID/0 unchanged on success, or sets errno
+    // and returns -1 on a negative kernel error code.
+    errno::translate(ret) as PidT
 }
 
 // execve is implemented in spawn.rs with real ELF loading.
 
-/// Equivalent to `fork()` (stub — returns -1 with `ENOSYS`).
+/// Create a child process, sharing the parent's address space until the
+/// child calls `exec*()` or `_exit()`.
 ///
-/// In a proper implementation, `vfork()` would suspend the parent until
-/// the child calls `exec*()` or `_exit()`.  Since we don't have fork at
-/// all, this has the same behavior as our `fork()` stub.
-///
-/// Programs should use `posix_spawn()` instead.
+/// We do not implement the parent-suspension / shared-memory semantics
+/// of a true `vfork()`; doing so safely would require freezing the
+/// parent and is error-prone.  Instead `vfork()` is implemented as a
+/// plain copy-on-write `fork()`, which is a correct (if slightly less
+/// efficient) superset of `vfork()`'s guarantees: the child gets its own
+/// CoW copy of the address space, so the historical "child must not
+/// return or modify memory before exec" constraint is satisfied
+/// automatically.  This matches what modern systems do when `vfork`
+/// degrades to `fork`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn vfork() -> PidT {
-    errno::set_errno(errno::ENOSYS);
-    -1
+    fork()
 }
 
 /// Get the task/thread ID (Linux-specific, but commonly used).

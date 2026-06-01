@@ -74,6 +74,11 @@ pub const SYS_SIGNAL_RETURN: u64 = 524;
 pub const SYS_SIGNAL_MASK: u64 = 525;
 pub const SYS_SIGNAL_PENDING: u64 = 526;
 
+/// Fork the calling process (copy-on-write).  Returns the child PID to
+/// the parent and 0 to the child, or a negative error code to the
+/// parent on failure.
+pub const SYS_PROCESS_FORK: u64 = 527;
+
 // Filesystem
 pub const SYS_FS_READ_FILE: u64 = 600;
 pub const SYS_FS_WRITE_FILE: u64 = 601;
@@ -447,7 +452,7 @@ mod tests {
             SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
             SYS_SCHED_SET_PROFILE,
             SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT, SYS_PROCESS_EXEC,
-            SYS_PROCESS_TRY_WAIT,
+            SYS_PROCESS_TRY_WAIT, SYS_PROCESS_FORK,
             SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
             SYS_PROCESS_SPAWN_EX, SYS_PROCESS_GET_INITIAL_FDS,
             SYS_PROCESS_GET_ARGS,
@@ -493,6 +498,18 @@ mod tests {
         }
     }
 
+    // -- Process-control syscall numbers match the kernel ABI --
+
+    #[test]
+    fn process_syscall_numbers_match_kernel() {
+        // These must equal the values in kernel/src/syscall/number.rs.
+        // A mismatch silently routes a POSIX call to the wrong (or an
+        // unimplemented) kernel syscall.
+        assert_eq!(SYS_PROCESS_FORK, 527, "fork ABI number drifted");
+        assert_eq!(SYS_PROCESS_SPAWN, 500);
+        assert_eq!(SYS_PROCESS_EXEC, 503);
+    }
+
     // -- All syscall numbers are unique --
 
     #[test]
@@ -504,7 +521,7 @@ mod tests {
             SYS_MMAP, SYS_MUNMAP, SYS_MPROTECT,
             SYS_SCHED_SET_PROFILE,
             SYS_PROCESS_SPAWN, SYS_PROCESS_WAIT, SYS_PROCESS_EXEC,
-            SYS_PROCESS_TRY_WAIT,
+            SYS_PROCESS_TRY_WAIT, SYS_PROCESS_FORK,
             SYS_THREAD_CREATE, SYS_THREAD_EXIT, SYS_THREAD_JOIN,
             SYS_PROCESS_SPAWN_EX, SYS_PROCESS_GET_INITIAL_FDS,
             SYS_PROCESS_GET_ARGS,

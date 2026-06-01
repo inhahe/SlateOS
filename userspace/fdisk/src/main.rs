@@ -60,11 +60,10 @@ fn basename(path: &[u8]) -> &[u8] {
     let mut last = 0;
     let mut i = 0;
     while i < path.len() {
-        if path[i] == b'/' || path[i] == b'\\' {
-            if i + 1 < path.len() {
+        if (path[i] == b'/' || path[i] == b'\\')
+            && i + 1 < path.len() {
                 last = i + 1;
             }
-        }
         i += 1;
     }
     if last < path.len() {
@@ -78,7 +77,7 @@ fn basename(path: &[u8]) -> &[u8] {
 fn strip_exe(name: &[u8]) -> &[u8] {
     if name.len() >= 4 {
         let tail = &name[name.len() - 4..];
-        if (tail[0] == b'.' || tail[0] == b'.')
+        if tail[0] == b'.'
             && (tail[1] == b'e' || tail[1] == b'E')
             && (tail[2] == b'x' || tail[2] == b'X')
             && (tail[3] == b'e' || tail[3] == b'E')
@@ -184,7 +183,7 @@ fn parse_u64(s: &[u8]) -> Option<u64> {
     let mut i = 0;
     while i < s.len() {
         let d = s[i];
-        if d < b'0' || d > b'9' {
+        if !(b'0'..=b'9').contains(&d) {
             return None;
         }
         val = val.checked_mul(10)?;
@@ -212,11 +211,11 @@ fn parse_hex_u8(s: &[u8]) -> Option<u8> {
     let mut i = 0;
     while i < s.len() {
         let d = s[i];
-        let nibble = if d >= b'0' && d <= b'9' {
+        let nibble = if (b'0'..=b'9').contains(&d) {
             d - b'0'
-        } else if d >= b'a' && d <= b'f' {
+        } else if (b'a'..=b'f').contains(&d) {
             d - b'a' + 10
-        } else if d >= b'A' && d <= b'F' {
+        } else if (b'A'..=b'F').contains(&d) {
             d - b'A' + 10
         } else {
             return None;
@@ -232,7 +231,7 @@ fn is_all_hex(s: &[u8]) -> bool {
     let mut i = 0;
     while i < s.len() {
         let c = s[i];
-        if !((c >= b'0' && c <= b'9') || (c >= b'a' && c <= b'f') || (c >= b'A' && c <= b'F')) {
+        if !((b'0'..=b'9').contains(&c) || (b'a'..=b'f').contains(&c) || (b'A'..=b'F').contains(&c)) {
             return false;
         }
         i += 1;
@@ -882,7 +881,7 @@ fn parse_gpt_entry(buf: &[u8]) -> GptPartition {
             break;
         }
         // Simple ASCII extraction; non-ASCII becomes '?'
-        if hi == 0 && lo >= 0x20 && lo < 0x7F {
+        if hi == 0 && (0x20..0x7F).contains(&lo) {
             if name_len < 72 {
                 name_buf[name_len] = lo;
                 name_len += 1;
@@ -1166,11 +1165,10 @@ fn parse_type_code(s: &[u8]) -> Option<[u8; 16]> {
     }
 
     // Full GUID (36 bytes with dashes)
-    if s.len() == 36 {
-        if let Some(g) = parse_guid_runtime(s) {
+    if s.len() == 36
+        && let Some(g) = parse_guid_runtime(s) {
             return Some(g);
         }
-    }
 
     // Hex MBR: "0x83" or "83"
     let hex_str = if starts_with(s, b"0x") || starts_with(s, b"0X") {
@@ -1178,13 +1176,12 @@ fn parse_type_code(s: &[u8]) -> Option<[u8; 16]> {
     } else {
         s
     };
-    if hex_str.len() <= 2 && !hex_str.is_empty() && is_all_hex(hex_str) {
-        if let Some(val) = parse_hex_u8(hex_str) {
+    if hex_str.len() <= 2 && !hex_str.is_empty() && is_all_hex(hex_str)
+        && let Some(val) = parse_hex_u8(hex_str) {
             let mut result = [0u8; 16];
             result[0] = val;
             return Some(result);
         }
-    }
 
     // Short names (case-insensitive)
     if bytes_eq_ci(s, b"linux") || bytes_eq_ci(s, b"linux-fs") {
@@ -2649,17 +2646,14 @@ pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     // the actual device. Here we detect the personality and dispatch.
     let dev = opts.device_bytes();
 
-    match opts.personality {
-        Personality::Partprobe => {
-            if dev.is_empty() {
-                out.push(b"partprobe: re-reading all partition tables\n");
-            } else {
-                do_partprobe(&mut out, dev);
-            }
-            out.flush();
-            return 0;
+    if opts.personality == Personality::Partprobe {
+        if dev.is_empty() {
+            out.push(b"partprobe: re-reading all partition tables\n");
+        } else {
+            do_partprobe(&mut out, dev);
         }
-        _ => {}
+        out.flush();
+        return 0;
     }
 
     if dev.is_empty() && (opts.action == Action::List || opts.action == Action::Dump

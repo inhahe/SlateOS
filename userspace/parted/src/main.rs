@@ -134,7 +134,7 @@ impl Guid {
         })
     }
 
-    fn to_bytes_le(&self) -> [u8; 16] {
+    fn to_bytes_le(self) -> [u8; 16] {
         let mut buf = [0u8; 16];
         buf[0..4].copy_from_slice(&self.data1.to_le_bytes());
         buf[4..6].copy_from_slice(&self.data2.to_le_bytes());
@@ -410,8 +410,8 @@ fn mbr_type_name(code: u8) -> &'static str {
 fn mbr_type_code(name: &str) -> Option<u8> {
     let lower = name.to_lowercase();
     // Try hex code first
-    if lower.starts_with("0x") {
-        return u8::from_str_radix(&lower[2..], 16).ok();
+    if let Some(hex) = lower.strip_prefix("0x") {
+        return u8::from_str_radix(hex, 16).ok();
     }
     // Common aliases
     match lower.as_str() {
@@ -585,7 +585,7 @@ fn format_compact(bytes: u64) -> String {
 
 /// Convert bytes to sectors (round up)
 fn bytes_to_sectors_ceil(bytes: u64, sector_size: u64) -> u64 {
-    (bytes + sector_size - 1) / sector_size
+    bytes.div_ceil(sector_size)
 }
 
 /// Convert bytes to sectors (round down)
@@ -736,7 +736,7 @@ struct GptHeader {
 impl GptHeader {
     fn new(disk_sectors: u64) -> GptHeader {
         let entries_sectors =
-            (GPT_MAX_ENTRIES as u64 * GPT_ENTRY_SIZE as u64 + SECTOR_SIZE - 1) / SECTOR_SIZE;
+            (GPT_MAX_ENTRIES as u64 * GPT_ENTRY_SIZE as u64).div_ceil(SECTOR_SIZE);
         let first_usable = 2 + entries_sectors; // LBA 0: PMBR, LBA 1: GPT header, then entries
         let last_usable = disk_sectors - 1 - 1 - entries_sectors; // backup header + backup entries
         GptHeader {
@@ -1043,15 +1043,14 @@ impl GptEntry {
                 }
             }
             _ => {
-                if let Some(bit) = flag.gpt_attribute_bit() {
-                    if bit != 0 {
+                if let Some(bit) = flag.gpt_attribute_bit()
+                    && bit != 0 {
                         if on {
                             self.attributes |= bit;
                         } else {
                             self.attributes &= !bit;
                         }
                     }
-                }
             }
         }
     }
@@ -1394,8 +1393,8 @@ impl DiskInfo {
             if offset + header.partition_entry_size as usize > data.len() {
                 break;
             }
-            if let Some(entry) = GptEntry::parse(&data[offset..]) {
-                if !entry.is_empty() {
+            if let Some(entry) = GptEntry::parse(&data[offset..])
+                && !entry.is_empty() {
                     let type_name = guid_to_name(&entry.type_guid).to_string();
                     let flags: Vec<PartitionFlag> = PartitionFlag::all()
                         .iter()
@@ -1419,7 +1418,6 @@ impl DiskInfo {
                     });
                     part_num += 1;
                 }
-            }
         }
 
         disk.gpt_header = Some(header);
@@ -1815,8 +1813,8 @@ impl DiskEditor {
         self.disk.partitions.push(partition);
 
         // Update MBR if primary/extended
-        if matches!(role, MbrPartRole::Primary | MbrPartRole::Extended) {
-            if let Some(ref mut mbr) = self.disk.mbr {
+        if matches!(role, MbrPartRole::Primary | MbrPartRole::Extended)
+            && let Some(ref mut mbr) = self.disk.mbr {
                 for i in 0..4 {
                     if mbr.partitions[i].is_empty() {
                         mbr.partitions[i] = MbrPartitionEntry {
@@ -1831,7 +1829,6 @@ impl DiskEditor {
                     }
                 }
             }
-        }
 
         self.modified = true;
         Ok(part_num)
@@ -2027,7 +2024,8 @@ impl DiskEditor {
 
         let check_align = match alignment_type {
             "minimal" => 8, // 4096 bytes / 512 byte sectors
-            "optimal" | _ => self.alignment,
+            // "optimal" and any other value use the disk's configured alignment.
+            _ => self.alignment,
         };
 
         Ok(part.first_lba % check_align == 0)
@@ -2059,7 +2057,7 @@ impl DiskEditor {
         ));
 
         if let Some(ref hdr) = disk.gpt_header {
-            output.push_str(&format!("Disk Flags: \n"));
+            output.push_str("Disk Flags: \n");
             output.push_str(&format!("Disk GUID: {}\n", hdr.disk_guid));
         }
 
@@ -2878,24 +2876,25 @@ fn run_partx(args: &[String]) -> i32 {
                 "{}",
                 format_partx_row(
                     &columns,
-                    1,
-                    2048,
-                    1026047,
-                    1024000,
-                    "EFI System",
-                    "",
-                    "C12A7328-...",
-                    "",
-                    "gpt",
+                    &PartxRow {
+                        nr: 1,
+                        start: 2048,
+                        end: 1026047,
+                        sectors: 1024000,
+                        name: "EFI System",
+                        uuid: "",
+                        type_str: "C12A7328-...",
+                        flags: "",
+                        scheme: "gpt",
+                    },
                 )
             );
 
             // Filter by nr range
-            if let (Some(start), Some(end)) = (nr_start, nr_end) {
-                if verbose {
+            if let (Some(start), Some(end)) = (nr_start, nr_end)
+                && verbose {
                     println!("Filtering partitions {} to {}", start, end);
                 }
-            }
             0
         }
         PartxAction::Add => {
@@ -2934,31 +2933,34 @@ fn parse_nr_range(range: &str) -> (Option<u32>, Option<u32>) {
     }
 }
 
-fn format_partx_row(
-    columns: &[String],
+/// Column values for a single `partx` output row.  Grouping the per-row
+/// fields keeps `format_partx_row` to two parameters (columns + row).
+struct PartxRow<'a> {
     nr: u32,
     start: u64,
     end: u64,
     sectors: u64,
-    name: &str,
-    uuid: &str,
-    type_str: &str,
-    flags: &str,
-    scheme: &str,
-) -> String {
+    name: &'a str,
+    uuid: &'a str,
+    type_str: &'a str,
+    flags: &'a str,
+    scheme: &'a str,
+}
+
+fn format_partx_row(columns: &[String], row: &PartxRow) -> String {
     let mut parts = Vec::new();
     for col in columns {
         match col.as_str() {
-            "NR" => parts.push(format!("{:>3}", nr)),
-            "START" => parts.push(format!("{:>10}", start)),
-            "END" => parts.push(format!("{:>10}", end)),
-            "SECTORS" => parts.push(format!("{:>10}", sectors)),
-            "SIZE" => parts.push(format!("{:>8}", format_compact(sectors * SECTOR_SIZE))),
-            "NAME" => parts.push(format!("{:<16}", name)),
-            "UUID" => parts.push(format!("{:<38}", uuid)),
-            "TYPE" => parts.push(format!("{:<16}", type_str)),
-            "FLAGS" => parts.push(format!("{:<10}", flags)),
-            "SCHEME" => parts.push(format!("{:<6}", scheme)),
+            "NR" => parts.push(format!("{:>3}", row.nr)),
+            "START" => parts.push(format!("{:>10}", row.start)),
+            "END" => parts.push(format!("{:>10}", row.end)),
+            "SECTORS" => parts.push(format!("{:>10}", row.sectors)),
+            "SIZE" => parts.push(format!("{:>8}", format_compact(row.sectors * SECTOR_SIZE))),
+            "NAME" => parts.push(format!("{:<16}", row.name)),
+            "UUID" => parts.push(format!("{:<38}", row.uuid)),
+            "TYPE" => parts.push(format!("{:<16}", row.type_str)),
+            "FLAGS" => parts.push(format!("{:<10}", row.flags)),
+            "SCHEME" => parts.push(format!("{:<6}", row.scheme)),
             _ => parts.push("?".to_string()),
         }
     }
@@ -4560,8 +4562,20 @@ mod tests {
             "FLAGS".to_string(),
             "SCHEME".to_string(),
         ];
-        let row =
-            format_partx_row(&cols, 1, 2048, 1026047, 1024000, "test", "uuid1", "83", "", "gpt");
+        let row = format_partx_row(
+            &cols,
+            &PartxRow {
+                nr: 1,
+                start: 2048,
+                end: 1026047,
+                sectors: 1024000,
+                name: "test",
+                uuid: "uuid1",
+                type_str: "83",
+                flags: "",
+                scheme: "gpt",
+            },
+        );
         assert!(row.contains("1"));
         assert!(row.contains("2048"));
         assert!(row.contains("test"));
@@ -4570,7 +4584,20 @@ mod tests {
     #[test]
     fn test_format_partx_row_subset() {
         let cols = vec!["NR".to_string(), "SIZE".to_string()];
-        let row = format_partx_row(&cols, 5, 0, 0, 2048000, "", "", "", "", "");
+        let row = format_partx_row(
+            &cols,
+            &PartxRow {
+                nr: 5,
+                start: 0,
+                end: 0,
+                sectors: 2048000,
+                name: "",
+                uuid: "",
+                type_str: "",
+                flags: "",
+                scheme: "",
+            },
+        );
         assert!(row.contains("5"));
     }
 

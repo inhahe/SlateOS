@@ -110,11 +110,10 @@ fn enumerate_pids() -> Vec<u32> {
     let mut pids = Vec::new();
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Ok(pid) = name.parse::<u32>() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Ok(pid) = name.parse::<u32>() {
                     pids.push(pid);
                 }
-            }
         }
     }
     pids.sort_unstable();
@@ -135,7 +134,7 @@ fn read_uid(pid: u32) -> Option<u32> {
     let content = read_file(&format!("/proc/{pid}/status"))?;
     for line in content.lines() {
         if let Some(val) = line.strip_prefix("Uid:") {
-            return val.trim().split_whitespace().next().and_then(|s| s.parse().ok());
+            return val.split_whitespace().next().and_then(|s| s.parse().ok());
         }
     }
     None
@@ -147,13 +146,11 @@ fn uid_to_name(uid: u32) -> String {
     if let Some(content) = read_file("/etc/passwd") {
         for line in content.lines() {
             let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 3 {
-                if let Ok(file_uid) = fields[2].parse::<u32>() {
-                    if file_uid == uid {
+            if fields.len() >= 3
+                && let Ok(file_uid) = fields[2].parse::<u32>()
+                    && file_uid == uid {
                         return fields[0].to_string();
                     }
-                }
-            }
         }
     }
     uid.to_string()
@@ -530,11 +527,10 @@ fn port_to_service(port: u16) -> Option<&'static str> {
 
 /// Format a port number, optionally resolving to a service name.
 fn format_port(port: u16, resolve: bool) -> String {
-    if resolve {
-        if let Some(name) = port_to_service(port) {
+    if resolve
+        && let Some(name) = port_to_service(port) {
             return name.to_string();
         }
-    }
     port.to_string()
 }
 
@@ -544,17 +540,17 @@ fn format_net_name(entry: &NetEntry, no_hostname: bool, no_portname: bool) -> St
     let local_port_str = format_port(entry.local_port, resolve_port);
     let remote_port_str = format_port(entry.remote_port, resolve_port);
 
-    let local_addr = if !no_hostname && entry.local_addr == "0.0.0.0" {
-        "*".to_string()
-    } else if !no_hostname && entry.local_addr == "::" {
+    let local_addr = if !no_hostname
+        && (entry.local_addr == "0.0.0.0" || entry.local_addr == "::")
+    {
         "*".to_string()
     } else {
         entry.local_addr.clone()
     };
 
-    let remote_addr = if !no_hostname && entry.remote_addr == "0.0.0.0" {
-        "*".to_string()
-    } else if !no_hostname && entry.remote_addr == "::" {
+    let remote_addr = if !no_hostname
+        && (entry.remote_addr == "0.0.0.0" || entry.remote_addr == "::")
+    {
         "*".to_string()
     } else {
         entry.remote_addr.clone()
@@ -590,11 +586,10 @@ fn collect_process_files(
     let user = uid_to_name(uid);
 
     // Apply filters.
-    if let Some(ref filter_cmd) = config.filter_command {
-        if !command.contains(filter_cmd.as_str()) {
+    if let Some(ref filter_cmd) = config.filter_command
+        && !command.contains(filter_cmd.as_str()) {
             return Vec::new();
         }
-    }
 
     if let Some(ref filter_user) = config.filter_user {
         // Try matching by name or numeric UID.
@@ -712,14 +707,13 @@ fn collect_process_files(
         let mut fd_entries: Vec<(u32, String)> = Vec::new();
 
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Ok(fd_num) = name.parse::<u32>() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Ok(fd_num) = name.parse::<u32>() {
                     let link_path = format!("{fd_dir}/{name}");
                     if let Some(target) = read_fd_link(&link_path) {
                         fd_entries.push((fd_num, target));
                     }
                 }
-            }
         }
 
         // Sort by fd number for stable output.
@@ -731,8 +725,8 @@ fn collect_process_files(
             let fd_col = format!("{fd_num}{mode}");
 
             // Check if this is a socket and resolve via net_map.
-            if let Some(inode) = extract_inode_from_target(&target) {
-                if let Some(net_entry) = net_map.get(&inode) {
+            if let Some(inode) = extract_inode_from_target(&target)
+                && let Some(net_entry) = net_map.get(&inode) {
                     let net_type = if net_entry.protocol.contains('6') {
                         "IPv6"
                     } else {
@@ -749,12 +743,11 @@ fn collect_process_files(
                         file_type: net_type.to_string(),
                         device: "0,0".to_string(),
                         size_off: "0t0".to_string(),
-                        node: format!("{proto_upper}"),
+                        node: proto_upper.to_string(),
                         name: net_name,
                     });
                     continue;
                 }
-            }
 
             let (file_type, name) = classify_fd_target(&target);
             let device = if target.starts_with('/') {
@@ -818,11 +811,10 @@ fn apply_net_filter(files: &mut Vec<OpenFile>, filter: &NetFilter) {
         }
 
         // Host filter: check if the name contains the host address.
-        if let Some(ref host) = filter.host {
-            if !f.name.contains(host.as_str()) {
+        if let Some(ref host) = filter.host
+            && !f.name.contains(host.as_str()) {
                 return false;
             }
-        }
 
         // Port filter: check if the name contains :port.
         if let Some(port) = filter.port {
@@ -844,8 +836,8 @@ fn apply_net_filter(files: &mut Vec<OpenFile>, filter: &NetFilter) {
 fn print_header(stdout: &mut io::StdoutLock<'_>) {
     let _ = writeln!(
         stdout,
-        "{:<9} {:>5}  {:<8} {:>4}  {:<6} {:>6} {:>8} {:>5} {}",
-        "COMMAND", "PID", "USER", "FD", "TYPE", "DEVICE", "SIZE/OFF", "NODE", "NAME"
+        "{:<9} {:>5}  {:<8} {:>4}  {:<6} {:>6} {:>8} {:>5} NAME",
+        "COMMAND", "PID", "USER", "FD", "TYPE", "DEVICE", "SIZE/OFF", "NODE"
     );
 }
 

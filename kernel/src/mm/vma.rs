@@ -70,6 +70,7 @@ pub enum VmaKind {
 /// - `end > start`.
 /// - `end` is 16 KiB frame-aligned.
 /// - VMAs within an address space do not overlap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Vma {
     /// Start virtual address (inclusive, frame-aligned).
     pub start: u64,

@@ -280,6 +280,11 @@ extern "C" fn syscall_handler_inner(frame: *mut SyscallFrame) -> i64 {
     if f.syscall_nr == super::number::SYS_PROCESS_EXEC {
         return super::handlers::sys_process_exec_with_frame(f);
     }
+    if f.syscall_nr == super::number::SYS_PROCESS_FORK {
+        // fork only *reads* the parent frame to snapshot the child's
+        // resume state; the parent returns the child PID normally.
+        return super::handlers::sys_process_fork_with_frame(f);
+    }
     if f.syscall_nr == super::number::SYS_EXCEPTION_RETURN {
         return super::handlers::sys_exception_return_with_frame(f);
     }

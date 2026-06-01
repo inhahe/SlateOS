@@ -83,6 +83,13 @@ pub struct CapEntry {
 /// Handles are allocated as sequential u64 values.  The table is
 /// a `BTreeMap` so handles are sparse (removed entries don't leave
 /// gaps that could be confused with valid handles).
+///
+/// `Clone` duplicates the entire table, which is what `fork()` needs:
+/// the child inherits the parent's capabilities (authority), each as an
+/// independent copy keyed by the same handle values so the child's
+/// copy-on-write address space (which references those handle values)
+/// stays valid.
+#[derive(Debug, Clone)]
 pub struct CapTable {
     /// The entries, keyed by handle value.
     entries: BTreeMap<u64, CapEntry>,

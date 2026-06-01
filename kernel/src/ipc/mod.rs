@@ -71,15 +71,22 @@ pub fn cleanup_handles(handles: &[(ResourceType, u64)]) {
             ResourceType::StreamSocket => {
                 stream_socket::close(stream_socket::StreamSocketHandle::from_raw(handle_raw));
             }
+            ResourceType::File => {
+                // Open file handles are refcounted in the open-file table;
+                // closing here drops this process's single reference.  A
+                // forked child holds its own reference (fork dup_shares the
+                // id), so the underlying description survives until the last
+                // owner closes.  `SYS_FS_CLOSE` deregisters the handle, so a
+                // handle reaching this path was still open at exit.
+                let _ = crate::fs::handle::close(handle_raw);
+            }
             // No cleanup needed for these types — they're either
             // permission tokens (PortIo, DeviceIrq, IoScheduler) or
-            // managed by other subsystems (File, Socket, Service,
-            // Namespace).
+            // managed by other subsystems (Socket, Service, Namespace).
             ResourceType::Process
             | ResourceType::Thread
             | ResourceType::PortIo
             | ResourceType::DeviceIrq
-            | ResourceType::File
             | ResourceType::Socket
             | ResourceType::IoScheduler
             | ResourceType::Service

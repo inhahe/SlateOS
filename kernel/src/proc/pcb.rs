@@ -321,6 +321,68 @@ pub fn create(name: &str, parent: ProcessId) -> ProcessId {
     pid
 }
 
+/// Create a child process for `fork()`.
+///
+/// Unlike [`create`], this does **not** allocate a fresh address space —
+/// the caller passes a copy-on-write clone of the parent's PML4 (built by
+/// [`crate::mm::cow::clone_address_space_cow`]).  The child inherits the
+/// parent's capability table, credentials, and VMA list (all cloned),
+/// plus the IPC handles and initial-fd records the caller has already
+/// duplicated/refcount-shared for the child.
+///
+/// The child starts in `Creating` state with no threads; the caller
+/// spawns the child's single (forked) thread next.
+///
+/// # Errors
+///
+/// - [`KernelError::NoSuchProcess`] if the parent no longer exists.
+pub fn fork_create(
+    parent_pid: ProcessId,
+    child_pml4: u64,
+    ipc_handles: Vec<(crate::cap::ResourceType, u64)>,
+    initial_fds: Vec<(i32, u8, u64)>,
+) -> KernelResult<ProcessId> {
+    let mut table = PROCESS_TABLE.lock();
+
+    // Clone the parent-derived state while holding only an immutable
+    // borrow, then release it before inserting the child.
+    let (name, cap_table, credentials, vmas) = {
+        let parent = table.get(&parent_pid).ok_or(KernelError::NoSuchProcess)?;
+        (
+            parent.name.clone(),
+            parent.cap_table.clone(),
+            parent.credentials.clone(),
+            parent.vmas.clone(),
+        )
+    };
+
+    let pid = alloc_pid();
+    let child = Process {
+        pid,
+        name,
+        state: ProcessState::Creating,
+        parent: parent_pid,
+        threads: Vec::new(),
+        cap_table,
+        exit_code: None,
+        credentials,
+        pml4_phys: child_pml4,
+        wait_task: None,
+        ready: false,
+        vmas,
+        ipc_handles,
+        crash_info: None,
+        initial_fds,
+        // argv/envp are not re-read by a forked child — its argument
+        // vector already lives in its copy-on-write userspace memory.
+        initial_argv: Vec::new(),
+        initial_envp: Vec::new(),
+    };
+
+    table.insert(pid, child);
+    Ok(pid)
+}
+
 /// Mark a process as running.
 ///
 /// Called after the binary is loaded and the initial thread is spawned.
@@ -1164,6 +1226,18 @@ pub fn deregister_ipc_handle(pid: ProcessId, resource_type: ResourceType, handle
             proc.ipc_handles.swap_remove(pos);
         }
     }
+}
+
+/// Snapshot a process's tracked IPC handles for `fork()`.
+///
+/// Returns a clone of the `(resource_type, handle_raw)` list so the
+/// caller can refcount-duplicate each one for the child without holding
+/// the process-table lock across the (potentially blocking) dup calls.
+///
+/// Returns `None` if the process no longer exists.
+pub fn ipc_handles_snapshot(pid: ProcessId) -> Option<Vec<(ResourceType, u64)>> {
+    let table = PROCESS_TABLE.lock();
+    table.get(&pid).map(|proc| proc.ipc_handles.clone())
 }
 
 // ---------------------------------------------------------------------------

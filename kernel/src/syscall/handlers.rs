@@ -3917,6 +3917,48 @@ pub fn sys_process_exec_with_frame(
     }
 }
 
+/// Handle `SYS_PROCESS_FORK`.
+///
+/// Reads — but never modifies — the parent's saved syscall frame to
+/// snapshot the register state the child must resume with, then forks
+/// the calling process.  The parent observes the child PID as the
+/// return value; the child's freshly spawned thread resumes at the same
+/// instruction with `RAX = 0` (handled by the fork trampoline in
+/// `crate::proc::fork`).
+///
+/// Returns the child PID (> 0) to the parent, or a negative
+/// `KernelError` code on failure.
+pub fn sys_process_fork_with_frame(frame: &mut super::entry::SyscallFrame) -> i64 {
+    use crate::proc::{fork, thread};
+
+    let task_id = sched::current_task_id();
+    let parent_pid = match thread::owner_process(task_id) {
+        Some(pid) if pid != 0 => pid,
+        _ => {
+            serial_println!("[fork] Task {} has no owning process", task_id);
+            return KernelError::NoSuchProcess.code() as i64;
+        }
+    };
+
+    match fork::fork_process(parent_pid, frame) {
+        Ok(child_pid) => {
+            // PIDs are small monotonic counters that never approach
+            // i64::MAX, so the cast cannot wrap in practice.
+            #[allow(clippy::cast_possible_wrap)]
+            {
+                child_pid as i64
+            }
+        }
+        Err(e) => {
+            serial_println!(
+                "[fork] fork_process failed for pid {}: {:?}",
+                parent_pid, e
+            );
+            e.code() as i64
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Time and sleep handlers (10–19)
 // ---------------------------------------------------------------------------
@@ -4698,6 +4740,15 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
 
     match crate::fs::handle::open(path, flags) {
         Ok(handle) => {
+            // Track the open file handle as a per-process resource so it
+            // is closed when the process exits (cleanup_handles), and so
+            // fork() can enumerate and refcount-share it with the child.
+            // File handles are refcounted in the open-file table, so the
+            // matching deregister-on-close + cleanup-on-exit drop exactly
+            // one reference each.
+            if let Some(pid) = caller_pid() {
+                pcb::register_ipc_handle(pid, ResourceType::File, handle);
+            }
             #[allow(clippy::cast_possible_wrap)]
             SyscallResult::ok(handle as i64)
         }
@@ -4709,7 +4760,16 @@ pub fn sys_fs_open(args: &SyscallArgs) -> SyscallResult {
 pub fn sys_fs_close(args: &SyscallArgs) -> SyscallResult {
     let handle = args.arg0;
     match crate::fs::handle::close(handle) {
-        Ok(()) => SyscallResult::ok(0),
+        Ok(()) => {
+            // Drop the per-process ownership record so the handle is not
+            // double-closed by cleanup_handles on process exit.  The
+            // deregister is keyed on (File, handle); if the handle was
+            // never registered (e.g. a kernel task) this is a no-op.
+            if let Some(pid) = caller_pid() {
+                pcb::deregister_ipc_handle(pid, ResourceType::File, handle);
+            }
+            SyscallResult::ok(0)
+        }
         Err(e) => SyscallResult::err(e),
     }
 }

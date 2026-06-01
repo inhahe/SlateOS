@@ -277,6 +277,41 @@ pub fn on_exec(pid: ProcessId) {
     }
 }
 
+/// Inherit signal state from a parent across `fork()`.
+///
+/// POSIX semantics: the child inherits the parent's blocked-signal mask
+/// and signal dispositions, but the set of pending signals is **empty**
+/// in the child.  Our per-signal dispositions live in userspace (and are
+/// carried over automatically by the copy-on-write address space), so the
+/// kernel's job is to copy the blocked mask and the trampoline address
+/// (the child's CoW-copied trampoline lives at the same user address) and
+/// to start the child with no pending signals.
+///
+/// Overwrites any existing child state (the child is freshly created, so
+/// there should be none, but this is idempotent).
+pub fn inherit_for_fork(parent: ProcessId, child: ProcessId) {
+    let mut states = SIGNAL_STATES.lock();
+    let (blocked, trampoline) = states
+        .get(&parent)
+        .map_or((0, 0), |s| (s.blocked, s.trampoline));
+    // If the child somehow already had pending signals recorded, drop
+    // them from the global counter before overwriting.
+    if let Some(existing) = states.get(&child) {
+        let n = existing.pending.count_ones() as usize;
+        if n != 0 {
+            PENDING_COUNT.fetch_sub(n, Ordering::Relaxed);
+        }
+    }
+    states.insert(
+        child,
+        SignalState {
+            pending: 0,
+            blocked,
+            trampoline,
+        },
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Blocked mask
 // ---------------------------------------------------------------------------

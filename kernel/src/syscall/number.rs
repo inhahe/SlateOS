@@ -1634,6 +1634,24 @@ pub const SYS_SIGNAL_MASK: u64 = 525;
 /// Returns: 0 on success, negative `KernelError` code on failure.
 pub const SYS_SIGNAL_PENDING: u64 = 526;
 
+/// Fork the calling process, creating a copy-on-write child.
+///
+/// Takes no arguments.  The child inherits a copy-on-write clone of the
+/// parent's address space, an independent copy of the parent's
+/// capability table, refcount-shared copies of the parent's inheritable
+/// handles (files, pipes, eventfds, stream sockets), the parent's
+/// signal mask (but not pending signals), and the parent's filesystem
+/// namespace.  The child has a single thread that resumes at the same
+/// instruction the parent returns to.
+///
+/// Like `SYS_PROCESS_EXEC`, this syscall reads the saved register frame
+/// directly: the parent observes the child's PID as the return value,
+/// while the child observes 0.
+///
+/// Returns: child PID (> 0) to the parent, 0 to the child, or a
+///          negative `KernelError` code on failure (parent only).
+pub const SYS_PROCESS_FORK: u64 = 527;
+
 // ---------------------------------------------------------------------------
 // Filesystem syscalls (600–799)
 // ---------------------------------------------------------------------------

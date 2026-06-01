@@ -289,6 +289,14 @@ _Define scheduler trait interface first, implement one scheduler behind it._
   - [x] SYS_THREAD_EXIT (511): thread exit with value, join support
   - [x] SYS_THREAD_JOIN (512): blocking wait for thread completion with exit value retrieval
 - [x] fork equivalent (or better: posix_spawn-style that avoids fork's problems)
+  - [x] posix_spawn-style spawn (SYS_PROCESS_SPAWN) — the preferred path
+  - [x] Real fork() with copy-on-write address spaces (SYS_PROCESS_FORK=527): CoW clone of
+    parent address space (per-frame refcount), PCB clone, refcount-shared handle inheritance
+    (File/Pipe/EventFd/StreamSocket), signal-mask + namespace inheritance, child thread resumes
+    on the parent's syscall frame with RAX=0 via an IRETQ trampoline. POSIX fork()/vfork() wired.
+    Verified by kernel self-tests + QEMU boot (BOOT_OK). Unblocks the gcc/CPython/bash toolchain
+    tier. Limitations tracked in todo.txt (Channel/SHM/CompletionPort/Timer handles not yet
+    inherited; vfork aliases fork).
 - [x] exec equivalent
 - [x] Hardware exception → language-level exception (SEH-style, not Unix signals)
 - [x] Structured shutdown via IPC message, not Unix signals
@@ -1179,7 +1187,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] Errno: 80+ POSIX errno constants (all network, filesystem, and POSIX errors), native→POSIX translation, strerror covers all defined codes
   - [x] Types: LP64 type aliases (pid_t, off_t, size_t, etc.)
   - [x] File I/O: open, close, read, write, lseek, dup, dup2, stat, fstat, lstat, unlink, rename, link, symlink, readlink, mkdir, rmdir, truncate, ftruncate, fsync
-  - [x] Process: _exit, getpid, getppid, waitpid, wait, gettid (fork/execve stubs)
+  - [x] Process: _exit, getpid, getppid, waitpid, wait, gettid, fork, vfork (real CoW fork via SYS_PROCESS_FORK=527; vfork aliases fork) (execve stub)
   - [x] Time: sleep, nanosleep, clock_gettime, gettimeofday, time
   - [x] Wall-clock time (CRITICAL bugfix): clock_gettime(CLOCK_REALTIME)/gettimeofday()/time() all read SYS_CLOCK_MONOTONIC (boot-relative ns), so they returned "seconds since boot" instead of "seconds since 1970" — breaking file mtimes, `date`, logs, `make`, TLS cert validity, cron. The kernel already had timekeeping::clock_realtime() (CMOS RTC + TSC) but no syscall exposed it. Added kernel SYS_CLOCK_REALTIME=14 (handler sys_clock_realtime + dispatch self-test); posix clock_gettime now routes CLOCK_REALTIME/CLOCK_REALTIME_COARSE to it via is_realtime_clock(), and gettimeofday()/time() use it. Monotonic/boottime/cputime clocks and all timeout/uptime callers stay on SYS_CLOCK_MONOTONIC. 17097 posix tests pass; kernel + bare-metal posix build clean. clock_settime/settimeofday now wired via SYS_CLOCK_SETTIME=15 (absolute set), and adjtimex's ADJ_SETOFFSET clock step via SYS_CLOCK_ADJTIME=16 (signed-delta adjust, backed by atomic timekeeping::adjust_realtime).
   - [x] Memory: mmap, munmap, mprotect
@@ -1345,7 +1353,7 @@ _Port ext4 first. Don't write a custom filesystem._
   - [x] daemon: best-effort daemonize (chdir /, close fds, setsid — no fork), getloadavg stub (returns 0.0)
   - [x] inet_pton/inet_ntop: IPv4 + IPv6 text↔binary address conversion (AF_INET and AF_INET6; :: compression, RFC 5952 canonical output)
   - [x] accept4: Linux extension with SOCK_NONBLOCK and SOCK_CLOEXEC flags
-  - [x] execv: exec without environment (delegates to execve), vfork stub (returns ENOSYS like fork)
+  - [x] execv: exec without environment (delegates to execve); fork/vfork now real (CoW fork via SYS_PROCESS_FORK; vfork aliases fork)
   - [x] flockfile/funlockfile/ftrylockfile: thread-safe stdio locking stubs; getc_unlocked/putc_unlocked/getchar_unlocked/putchar_unlocked
   - [x] sigwait/sigtimedwait/sigqueue: signal waiting/queuing stubs (no signal delivery)
   - [x] sync/sethostname/chroot: system stubs (sync no-op, sethostname EPERM, chroot ENOSYS)

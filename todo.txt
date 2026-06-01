@@ -13,6 +13,37 @@
 ##   also refcounts per struct page and adjusts once per broken shared mapping). Verified by the
 ##   new test_clone_address_space_cow self-test (refcounts go 1->2 on fork, child maps same phys).
 
+## BUG (noticed+FIXED 2026-05-31): POSIX getpid() used the WRONG syscall number.
+##   posix/src/syscall.rs defined SYS_PROCESS_ID = 3, but the kernel
+##   (kernel/src/syscall/number.rs) defines SYS_PROCESS_ID = 502 and has NO syscall numbered 3.
+##   The posix file header explicitly says "must match kernel/src/syscall/number.rs". So
+##   getpid() (posix/src/process.rs:159, syscall0(SYS_PROCESS_ID)) was issuing syscall 3, which
+##   the kernel dispatch treats as unimplemented → returns NotSupported (-2): getpid() returned a
+##   bogus/negative PID rather than the real one. An old posix `syscall_ranges_by_zone` test even
+##   asserted SYS_PROCESS_ID <= 199 (kernel-core), encoding the stale assumption that process-id
+##   was a low-numbered core syscall — but the kernel puts it in the kernel-process zone (500-599)
+##   alongside SPAWN/EXEC/FORK. SYS_TASK_ID (2), SYS_PROCESS_SPAWN (500), SYS_PROCESS_PARENT_ID
+##   (520) all already matched, so this was an isolated drift on SYS_PROCESS_ID. FIX: set posix
+##   SYS_PROCESS_ID = 502, move its zone assertion from the 0-199 block to the 500-599 block, and
+##   extend the new `process_syscall_numbers_match_kernel` test to pin EXIT/TASK_ID/PROCESS_ID/
+##   FORK/SPAWN/EXEC/PARENT_ID to their kernel values. Verified: posix host tests pass.
+
+## fork() LIMITATIONS (2026-05-31, documented, not yet implemented):
+##   (a) HANDLE INHERITANCE is limited to refcount-capable same-id types: File, Pipe, EventFd,
+##       StreamSocket (kernel/src/proc/fork.rs::dup_one). Channel, SharedMemory, CompletionPort,
+##       and Timer handles are SKIPPED (child does not inherit them) because they lack a
+##       refcounted same-id dup. A forked child that expected an inherited channel/shm/timer will
+##       find it missing. FIX: add same-id refcounted dup to those subsystems (mirror pipe/eventfd),
+##       then extend dup_one. Until then, programs needing those across fork must re-establish them
+##       after fork (or use posix_spawn with an explicit handle map).
+##   (b) END-TO-END RING-3 RESUME (the fork_child_trampoline IRETQ path) is NOT exercised by a
+##       kernel self-test — only the construction path (CoW clone + refcount + PCB clone) is. A
+##       wrong trampoline would triple-fault at boot, so validation is deferred to the POSIX
+##       integration test / QEMU boot test. If fork misbehaves, suspect the [u64;17] register-image
+##       offsets in fork.rs vs SyscallFrame field order in syscall/entry.rs.
+##   (c) vfork() is implemented as plain fork() (no parent suspension / shared address space).
+##       Correct but less efficient; documented in posix/src/process.rs::vfork.
+
 ## Judgment Calls (fork() implementation, 2026-05-31):
 ##   (a) SWAP-DURING-FORK: rather than add refcounting to swap slots, clone_user_half swaps any
 ##       swapped-out parent page back IN first (swap::swap_in_page with the fault handler's fixed

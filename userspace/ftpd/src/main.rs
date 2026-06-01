@@ -625,11 +625,10 @@ fn lookup_user(username: &str) -> Option<UserEntry> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some(entry) = parse_passwd_line(line) {
-            if entry.username == username {
+        if let Some(entry) = parse_passwd_line(line)
+            && entry.username == username {
                 return Some(entry);
             }
-        }
     }
     None
 }
@@ -735,7 +734,7 @@ struct FtpCommand {
 
 /// Parse a raw FTP command line into verb + argument.
 fn parse_ftp_command(line: &str) -> FtpCommand {
-    let trimmed = line.trim_end_matches(|c| c == '\r' || c == '\n');
+    let trimmed = line.trim_end_matches(['\r', '\n']);
     let trimmed = trimmed.trim();
     if let Some(idx) = trimmed.find(' ') {
         FtpCommand {
@@ -934,7 +933,7 @@ fn unix_secs_to_date(secs: u64) -> (u32, u32, u32, u32, u32) {
 
 /// Check if a year is a leap year.
 fn is_leap_year(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// Format a unix timestamp as "YYYYMMDDHHmmSS" for the MDTM response.
@@ -1697,7 +1696,7 @@ impl FtpSession {
         // Handle REST offset
         if self.rest_offset > 0 {
             use std::io::Seek;
-            if let Err(_) = file.seek(std::io::SeekFrom::Start(self.rest_offset)) {
+            if file.seek(std::io::SeekFrom::Start(self.rest_offset)).is_err() {
                 self.rest_offset = 0;
                 return self.send_response(550, "Cannot seek to restart position.");
             }
@@ -1746,7 +1745,7 @@ impl FtpSession {
                 buf[..n].to_vec()
             };
 
-            if let Err(_) = tcp_send_all(data_handle, &data) {
+            if tcp_send_all(data_handle, &data).is_err() {
                 transfer_ok = false;
                 break;
             }
@@ -1794,7 +1793,7 @@ impl FtpSession {
             {
                 Ok(mut f) => {
                     use std::io::Seek;
-                    if let Err(_) = f.seek(std::io::SeekFrom::Start(self.rest_offset)) {
+                    if f.seek(std::io::SeekFrom::Start(self.rest_offset)).is_err() {
                         self.rest_offset = 0;
                         return self.send_response(550, "Cannot seek to restart position.");
                     }
@@ -1848,7 +1847,7 @@ impl FtpSession {
                 buf[..n].to_vec()
             };
 
-            if let Err(_) = file.write_all(&data) {
+            if file.write_all(&data).is_err() {
                 transfer_ok = false;
                 break;
             }

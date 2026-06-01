@@ -1559,12 +1559,11 @@ fn cmd_connection_down(state: &mut NmState, name: &str, out: &mut dyn Write) -> 
     state.connections[conn_idx].device.clear();
 
     // Disconnect the device
-    if !dev_name.is_empty() {
-        if let Some(di) = state.find_device(&dev_name) {
+    if !dev_name.is_empty()
+        && let Some(di) = state.find_device(&dev_name) {
             state.devices[di].state = DeviceState::Disconnected;
             state.devices[di].connection.clear();
         }
-    }
 
     let _ = writeln!(
         out,
@@ -1759,12 +1758,11 @@ fn cmd_connection_delete(state: &mut NmState, name: &str, out: &mut dyn Write) -
     // Deactivate if active
     if state.connections[conn_idx].active {
         let dev_name = state.connections[conn_idx].device.clone();
-        if !dev_name.is_empty() {
-            if let Some(di) = state.find_device(&dev_name) {
+        if !dev_name.is_empty()
+            && let Some(di) = state.find_device(&dev_name) {
                 state.devices[di].state = DeviceState::Disconnected;
                 state.devices[di].connection.clear();
             }
-        }
     }
 
     let removed = state.connections.remove(conn_idx);

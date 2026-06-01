@@ -152,7 +152,7 @@ impl Location {
         if let Some(colon_pos) = s.find(':') {
             // Windows drive letter: single ASCII letter followed by ':'
             let is_drive_letter = colon_pos == 1
-                && s.as_bytes().first().map_or(false, |b| b.is_ascii_alphabetic());
+                && s.as_bytes().first().is_some_and(|b| b.is_ascii_alphabetic());
 
             if !is_drive_letter && colon_pos > 0 {
                 // Check there is no slash before the colon (that would mean
@@ -375,8 +375,8 @@ fn parse_args(args: &[String]) -> Result<ParseResult, ScpError> {
 
     // Validate: if multiple sources, target must look like a directory
     // (remote target or ends with / or is an existing directory).
-    if sources.len() > 1 {
-        if let Location::Local(ref p) = target {
+    if sources.len() > 1
+        && let Location::Local(ref p) = target {
             let path = Path::new(p);
             if !path.is_dir() && !p.ends_with('/') && !p.ends_with('\\') {
                 return Err(ScpError::Usage(
@@ -385,7 +385,6 @@ fn parse_args(args: &[String]) -> Result<ParseResult, ScpError> {
                 ));
             }
         }
-    }
 
     Ok(ParseResult::Run(Config {
         sources,
@@ -543,20 +542,19 @@ impl Progress {
 
     /// Render and print the progress line to stderr.
     fn print_line(&self, now: u64) {
-        let pct = if self.total_bytes > 0 {
-            self.transferred.saturating_mul(100) / self.total_bytes
-        } else {
-            100
-        };
+        let pct = self
+            .transferred
+            .saturating_mul(100)
+            .checked_div(self.total_bytes)
+            .unwrap_or(100);
 
         let elapsed_ns = now.saturating_sub(self.start_ns);
         let elapsed_sec = elapsed_ns / 1_000_000_000;
 
-        let speed = if elapsed_sec > 0 {
-            self.transferred / elapsed_sec
-        } else {
-            self.transferred
-        };
+        let speed = self
+            .transferred
+            .checked_div(elapsed_sec)
+            .unwrap_or(self.transferred);
 
         let eta = if speed > 0 && self.transferred < self.total_bytes {
             let remaining = self.total_bytes.saturating_sub(self.transferred);
@@ -673,8 +671,8 @@ fn read_preserved_meta(meta: &Metadata) -> PreservedMeta {
 /// syscalls for utimensat and chmod equivalents for higher fidelity.
 fn apply_preserved_meta(path: &Path, meta: &PreservedMeta) {
     // Apply modification time if we have it.
-    if let Some((secs, _nanos)) = meta.modified {
-        if let Some(t) = std::time::UNIX_EPOCH.checked_add(
+    if let Some((secs, _nanos)) = meta.modified
+        && let Some(t) = std::time::UNIX_EPOCH.checked_add(
             std::time::Duration::from_secs(secs as u64),
         ) {
             // std::fs::File::set_modified is not in std, but
@@ -682,7 +680,6 @@ fn apply_preserved_meta(path: &Path, meta: &PreservedMeta) {
             // set_permissions as the only portable metadata we can write.
             let _ = t; // Timestamp application is a stub until utimensat is available.
         }
-    }
 
     // Apply permissions.
     if let Some(mode) = meta.permissions {
@@ -754,8 +751,8 @@ fn copy_file(
     };
 
     // Ensure parent directory exists.
-    if let Some(parent) = dst.parent() {
-        if !parent.exists() {
+    if let Some(parent) = dst.parent()
+        && !parent.exists() {
             fs::create_dir_all(parent).map_err(|e| {
                 ScpError::Io(format!(
                     "cannot create directory {}: {e}",
@@ -763,7 +760,6 @@ fn copy_file(
                 ))
             })?;
         }
-    }
 
     let mut reader = File::open(src).map_err(|e| {
         ScpError::Io(format!("{}: {e}", src.display()))
@@ -832,12 +828,11 @@ fn copy_directory(
     stats.directories = stats.directories.saturating_add(1);
 
     // Preserve metadata on the directory itself.
-    if config.preserve {
-        if let Ok(src_meta) = fs::metadata(src) {
+    if config.preserve
+        && let Ok(src_meta) = fs::metadata(src) {
             let preserved = read_preserved_meta(&src_meta);
             apply_preserved_meta(dst, &preserved);
         }
-    }
 
     // Read directory entries and sort for deterministic output.
     let mut entries: Vec<_> = fs::read_dir(src)

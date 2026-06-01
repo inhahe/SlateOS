@@ -1592,6 +1592,17 @@
 ##      alternative.  Needs a real net-config ABI or a network-manager daemon
 ##      over IPC.  (A future partial win: wire the READ paths — ifconfig with no
 ##      args, `ip addr show`, `route -n` — to NET_IF_INFO=842.)
+##      PRECISE HARM (traced 2026-06-01): sys_udp_bind (handlers.rs:6954) reads
+##      arg0 as a u16 port, requires a Socket WRITE cap, rejects port==0, and
+##      otherwise binds a fresh UDP socket returning a handle.  So today these
+##      tools don't corrupt anything, but if the caller holds a Socket WRITE
+##      cap they silently bind+leak a UDP socket on whatever low port their
+##      first numeric arg maps to (and the "success" misleads the user into
+##      thinking the interface/route/firewall change applied).  Without the cap
+##      they fail with a permission error.  Either way the intended net-config
+##      operation never happens — confirming this is a no-op-at-best design gap,
+##      NOT a quick fix.  Do not neuter autonomously: the right fix (real
+##      net-config syscall family vs. a netmgr IPC daemon) is a human decision.
 ##    * mount/umount: no MOUNT/UMOUNT syscall (the numbers it used, 620/621, are
 ##      FS_TRASH_RESTORE/EMPTY).
 ##    * mkfs/fsck/diskutil: no FS_FORMAT/FS_VERIFY/FS_REPAIR/FS_TRIM syscall

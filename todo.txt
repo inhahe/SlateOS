@@ -147,6 +147,16 @@
 ##       behaviour is ALSO wrong for the POSIX dup()/dup2() syscalls (which share the description);
 ##       that is a separate pre-existing bug, tracked here, not fixed in the fork change to keep
 ##       scope contained — fork uses the new dup_shared path.
+##       >>> FIXED 2026-06-01: the POSIX dup()/dup2()/F_DUPFD bug is now resolved. The userspace
+##       libc (posix crate) no longer calls SYS_FS_DUP for HandleKind::File in dup() (file.rs),
+##       dup2() (file.rs), or F_DUPFD (fcntl_ops.rs::dup_fd_from). Instead File now shares the
+##       source fd's kernel handle id at the fd-table level via alloc_fd_with_flags, exactly like
+##       Pipe/Console/socket kinds. This gives correct POSIX semantics: dup'd file descriptors
+##       share ONE open file description (shared offset + status flags). close() already gates the
+##       kernel SYS_FS_CLOSE behind is_handle_referenced(), so the handle is released only when the
+##       last referencing fd is closed. Kernel handle::dup (independent cursor) is UNCHANGED — it is
+##       still used by spawn.rs fd inheritance and remains available for callers that genuinely need
+##       a separate description. fdtable.rs module doc updated to reflect the shared-id model.
 
 ## Judgment Calls (wait-for-any-child / waitpid(-1) implementation, 2026-05-31):
 ##   (a) NO PROCESS GROUPS YET: POSIX waitpid distinguishes pid==0 (any child in the caller's

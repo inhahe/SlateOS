@@ -21,10 +21,15 @@
 //!
 //! ## Handle Sharing and Refcounting
 //!
-//! File handles have kernel-level duplication (`SYS_FS_DUP`), so
-//! each dup'd fd gets an independent kernel handle.  Pipe and socket
-//! handles do not have kernel-level dup, so `dup()` creates a new fd
-//! entry pointing to the **same** kernel handle.
+//! All handle kinds — including files — share the **same** kernel
+//! handle id across `dup()`/`dup2()`/`F_DUPFD`.  `dup()` simply creates
+//! a new fd entry pointing to the source's kernel handle.  This gives
+//! POSIX-correct semantics: dup'd file descriptors share ONE open file
+//! description (a shared file offset and shared status flags), rather
+//! than getting an independent cursor.  (The kernel's `SYS_FS_DUP`,
+//! which mints a fresh handle with an independent cursor, is reserved
+//! for cases that genuinely need a separate description; the POSIX dup
+//! family does not use it.)
 //!
 //! [`is_handle_referenced()`] scans the table to determine whether
 //! any other fd still uses a given handle.  `close()` calls this

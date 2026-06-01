@@ -1071,18 +1071,18 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
 
     match entry.kind {
         HandleKind::File => {
-            // Kernel-level dup creates a new independent handle.
-            let ret = syscall1(SYS_FS_DUP, entry.handle);
-            if ret < 0 {
-                return errno::translate(ret) as Fd;
-            }
+            // POSIX: dup'd fds must share ONE open file description with
+            // the source — a shared file offset and shared status flags.
+            // We therefore share the same kernel handle id at the fd-table
+            // level (NOT SYS_FS_DUP, which mints a new handle with an
+            // independent cursor).  close() uses is_handle_referenced() to
+            // only issue SYS_FS_CLOSE when the last referencing fd is gone.
             if let Some(fd) = fdtable::alloc_fd_with_flags(
-                HandleKind::File, ret as u64, src_status,
+                HandleKind::File, entry.handle, src_status,
             ) {
                 fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
-                let _ = syscall1(SYS_FS_CLOSE, ret as u64);
                 errno::set_errno(errno::EMFILE);
                 -1
             }
@@ -1222,18 +1222,14 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         return -1;
     }
 
-    // For File handles, create a kernel-level duplicate.
-    // For Console/Pipe/Socket, share the same handle (refcounted
-    // via is_handle_referenced() in close()).
+    // All handle kinds share the same kernel handle id at the fd-table
+    // level (refcounted via is_handle_referenced() in close()).  For File
+    // this gives correct POSIX semantics: the dup2 target shares ONE open
+    // file description with the source (shared offset + status flags),
+    // rather than getting an independent cursor from SYS_FS_DUP.
     let new_handle = match entry.kind {
-        HandleKind::File => {
-            let ret = syscall1(SYS_FS_DUP, entry.handle);
-            if ret < 0 {
-                return errno::translate(ret) as Fd;
-            }
-            ret as u64
-        }
-        HandleKind::Console
+        HandleKind::File
+        | HandleKind::Console
         | HandleKind::Pipe
         | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
         | HandleKind::Eventfd | HandleKind::UnixStream => {

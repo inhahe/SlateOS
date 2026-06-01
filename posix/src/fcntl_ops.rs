@@ -410,18 +410,14 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         return -1;
     };
 
-    // For File handles, create a kernel-level duplicate.
-    // For Console/Pipe/Socket, share the same handle (refcounted
-    // via is_handle_referenced() in close()).
+    // All handle kinds share the same kernel handle id at the fd-table
+    // level (refcounted via is_handle_referenced() in close()).  For File
+    // this gives correct POSIX semantics: the dup'd fd shares ONE open
+    // file description with the source (shared offset + status flags),
+    // rather than getting an independent cursor from SYS_FS_DUP.
     let new_handle = match entry.kind {
-        fdtable::HandleKind::File => {
-            let ret = crate::syscall::syscall1(crate::syscall::SYS_FS_DUP, entry.handle);
-            if ret < 0 {
-                return crate::errno::translate(ret) as i32;
-            }
-            ret as u64
-        }
-        fdtable::HandleKind::Console
+        fdtable::HandleKind::File
+        | fdtable::HandleKind::Console
         | fdtable::HandleKind::Pipe
         | fdtable::HandleKind::TcpStream
         | fdtable::HandleKind::TcpListener
@@ -456,13 +452,10 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         }
         new_fd
     } else {
-        // Clean up the kernel handle if it's a file (has independent handle).
-        if entry.kind == fdtable::HandleKind::File {
-            let _ = crate::syscall::syscall1(crate::syscall::SYS_FS_CLOSE, new_handle);
-        }
-        // Epoll: no refcount to drop — alloc_fd_from_with_flags failed
-        // before installing any new fd, so the existing fd still holds
-        // the only reference to the instance.
+        // No kernel cleanup needed: every handle kind (including File now)
+        // shares the source fd's handle id, so the source still holds the
+        // reference.  alloc_fd_from_with_flags failed before installing any
+        // new fd, so nothing was duplicated.
         errno::set_errno(errno::EMFILE);
         -1
     }

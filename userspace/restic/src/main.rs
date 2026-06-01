@@ -73,7 +73,7 @@ fn run_restic(args: Vec<String>) -> i32 {
                 .and_then(|i| cmd_args.get(i + 1))
                 .map(|s| s.as_str())
                 .unwrap_or("/backup/restic-repo");
-            println!("created restic repository {} at {}", "a1b2c3d4", repo);
+            println!("created restic repository a1b2c3d4 at {}", repo);
             println!("Please note that knowledge of your password is required to access the repository.");
             0
         }

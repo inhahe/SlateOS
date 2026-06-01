@@ -86,7 +86,7 @@ fn read_boot_entry(num: u16) -> Option<BootEntry> {
     }
 
     let attributes = u32::from_le_bytes([
-        data.get(0).copied().unwrap_or(0),
+        data.first().copied().unwrap_or(0),
         data.get(1).copied().unwrap_or(0),
         data.get(2).copied().unwrap_or(0),
         data.get(3).copied().unwrap_or(0),
@@ -141,19 +141,14 @@ fn read_all_boot_entries() -> Vec<BootEntry> {
     if let Ok(dir_entries) = fs::read_dir(EFIVARS_DIR) {
         for entry in dir_entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if let Some(rest) = name.strip_prefix("Boot") {
-                if let Some(hex) = rest.strip_suffix(&format!("-{EFI_GLOBAL_GUID}")) {
-                    if hex.len() == 4 {
-                        if let Ok(num) = u16::from_str_radix(hex, 16) {
-                            if !order.entries.contains(&num) {
-                                if let Some(entry) = read_boot_entry(num) {
+            if let Some(rest) = name.strip_prefix("Boot")
+                && let Some(hex) = rest.strip_suffix(&format!("-{EFI_GLOBAL_GUID}"))
+                    && hex.len() == 4
+                        && let Ok(num) = u16::from_str_radix(hex, 16)
+                            && !order.entries.contains(&num)
+                                && let Some(entry) = read_boot_entry(num) {
                                     entries.push(entry);
                                 }
-                            }
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -383,13 +378,12 @@ fn cmd_efibootmgr(args: &[String]) {
         eprintln!("efibootmgr: created Boot{num:04X}");
     }
 
-    if opts.delete {
-        if let Some(num) = opts.bootnum {
+    if opts.delete
+        && let Some(num) = opts.bootnum {
             entries.retain(|e| e.num != num);
             boot_order.entries.retain(|n| *n != num);
             eprintln!("efibootmgr: deleted Boot{num:04X}");
         }
-    }
 
     if let Some(order) = &opts.boot_order {
         boot_order.entries = order.clone();

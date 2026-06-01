@@ -180,11 +180,11 @@ fn parse_rate(s: &str) -> Option<u64> {
 
 /// Format a rate in human-readable form.
 fn format_rate(bps: u64) -> String {
-    if bps >= 1_000_000_000 && bps % 1_000_000_000 == 0 {
+    if bps >= 1_000_000_000 && bps.is_multiple_of(1_000_000_000) {
         format!("{}Gbit", bps / 1_000_000_000)
-    } else if bps >= 1_000_000 && bps % 1_000_000 == 0 {
+    } else if bps >= 1_000_000 && bps.is_multiple_of(1_000_000) {
         format!("{}Mbit", bps / 1_000_000)
-    } else if bps >= 1000 && bps % 1000 == 0 {
+    } else if bps >= 1000 && bps.is_multiple_of(1000) {
         format!("{}Kbit", bps / 1000)
     } else {
         format!("{bps}bit")
@@ -223,9 +223,9 @@ fn parse_time(s: &str) -> Option<u64> {
 
 /// Format microseconds in human-readable form.
 fn format_time(us: u64) -> String {
-    if us >= 1_000_000 && us % 1_000_000 == 0 {
+    if us >= 1_000_000 && us.is_multiple_of(1_000_000) {
         format!("{}s", us / 1_000_000)
-    } else if us >= 1000 && us % 1000 == 0 {
+    } else if us >= 1000 && us.is_multiple_of(1000) {
         format!("{}ms", us / 1000)
     } else {
         format!("{us}us")
@@ -1538,8 +1538,8 @@ fn tc_parse_netem_params(args: &[String]) -> Result<QdiscKind, String> {
                 i += 1;
                 delay = args.get(i).and_then(|s| parse_time(s)).unwrap_or(0);
                 // Check for jitter (next arg might be a time value)
-                if let Some(next) = args.get(i + 1) {
-                    if let Some(j) = parse_time(next) {
+                if let Some(next) = args.get(i + 1)
+                    && let Some(j) = parse_time(next) {
                         // Only treat as jitter if it looks like a time value
                         // and not a keyword
                         if !is_netem_keyword(next) {
@@ -1547,7 +1547,6 @@ fn tc_parse_netem_params(args: &[String]) -> Result<QdiscKind, String> {
                             i += 1;
                         }
                     }
-                }
             }
             "jitter" => {
                 i += 1;
@@ -1840,7 +1839,7 @@ fn tc_parse_filter(args: &[String]) -> Result<TcFilter, String> {
             }
             "action" => {
                 i += 1;
-                action = args.get(i).map(|s| s.clone());
+                action = args.get(i).cloned();
             }
             _ => {}
         }
@@ -2288,11 +2287,10 @@ fn ebt_format_rule(r: &EbtablesRule) -> String {
 
 fn ebt_list_chains(chains: &[EbtablesChain], filter: Option<&str>) {
     for chain in chains {
-        if let Some(f) = filter {
-            if chain.name != f {
+        if let Some(f) = filter
+            && chain.name != f {
                 continue;
             }
-        }
         write_out(&format!(
             "Bridge chain: {}, entries: {}, policy: {}\n",
             chain.name,
@@ -2352,11 +2350,10 @@ fn ebt_delete_rule(
 
 fn ebt_flush(chains: &mut Vec<EbtablesChain>, filter: Option<&str>) {
     for chain in chains.iter_mut() {
-        if let Some(f) = filter {
-            if chain.name != f {
+        if let Some(f) = filter
+            && chain.name != f {
                 continue;
             }
-        }
         chain.rules.clear();
     }
 }

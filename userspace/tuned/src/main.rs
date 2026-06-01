@@ -245,8 +245,8 @@ fn load_profiles() -> Vec<Profile> {
             let path = entry.path();
             if path.is_dir() {
                 let conf = path.join("tuned.conf");
-                if conf.is_file() {
-                    if let Some(p) = parse_profile_file(&conf, &entry.file_name().to_string_lossy()) {
+                if conf.is_file()
+                    && let Some(p) = parse_profile_file(&conf, &entry.file_name().to_string_lossy()) {
                         // Override builtin if same name
                         if let Some(idx) = profiles.iter().position(|x| x.name == p.name) {
                             profiles[idx] = p;
@@ -254,7 +254,6 @@ fn load_profiles() -> Vec<Profile> {
                             profiles.push(p);
                         }
                     }
-                }
             }
         }
     }

@@ -141,7 +141,7 @@ fn run_fly(args: Vec<String>) -> i32 {
             let sub = args.get(1).map(|s| s.as_str()).unwrap_or("show");
             match sub {
                 "show" => {
-                    println!("VM Resources for {}:", "my-web-app");
+                    println!("VM Resources for my-web-app:");
                     println!("  Groups:");
                     println!("    app:");
                     println!("      Count: 2");

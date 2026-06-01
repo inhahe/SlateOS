@@ -52,9 +52,7 @@ fn run_sops(args: Vec<String>) -> i32 {
     let decrypt = args.iter().any(|a| a == "-d" || a == "--decrypt");
     let rotate = args.iter().any(|a| a == "-r" || a == "--rotate");
 
-    let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+    let file = args.iter().rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("secrets.yaml");
 

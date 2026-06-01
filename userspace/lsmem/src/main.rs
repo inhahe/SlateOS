@@ -118,8 +118,7 @@ fn read_memory_blocks() -> Vec<MemoryBlock> {
 
             let zone = fs::read_to_string(format!("{block_path}/valid_zones"))
                 .map(|s| {
-                    s.trim()
-                        .split_whitespace()
+                    s.split_whitespace()
                         .next()
                         .unwrap_or("Normal")
                         .to_string()
@@ -209,11 +208,10 @@ fn get_meminfo_total() -> u64 {
         for line in content.lines() {
             if let Some(val) = line.strip_prefix("MemTotal:") {
                 let val = val.trim();
-                if let Some(kb_str) = val.strip_suffix("kB").or_else(|| val.strip_suffix("KB")) {
-                    if let Ok(kb) = kb_str.trim().parse::<u64>() {
+                if let Some(kb_str) = val.strip_suffix("kB").or_else(|| val.strip_suffix("KB"))
+                    && let Ok(kb) = kb_str.trim().parse::<u64>() {
                         return kb * 1024;
                     }
-                }
             }
         }
     }

@@ -58,9 +58,7 @@ fn run_pgcli(args: Vec<String>) -> i32 {
         .map(|w| w[1].as_str())
         .unwrap_or("5432");
 
-    let dbname = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+    let dbname = args.iter().rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("postgres");
 

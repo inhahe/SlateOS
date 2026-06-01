@@ -1091,11 +1091,10 @@ fn collect_flag_values<'a>(args: &'a [String], flag: &str) -> Vec<&'a str> {
     let mut values = Vec::new();
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
-        if arg == flag {
-            if let Some(val) = iter.next() {
+        if arg == flag
+            && let Some(val) = iter.next() {
                 values.push(val.as_str());
             }
-        }
     }
     values
 }

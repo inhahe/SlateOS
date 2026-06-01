@@ -289,11 +289,10 @@ fn get_option_value<'a>(args: &'a [String], short: &str, long: &str) -> Option<&
             return iter.next().map(|s| s.as_str());
         }
         // Handle --option=value
-        if let Some(rest) = arg.strip_prefix(long) {
-            if let Some(val) = rest.strip_prefix('=') {
+        if let Some(rest) = arg.strip_prefix(long)
+            && let Some(val) = rest.strip_prefix('=') {
                 return Some(val);
             }
-        }
     }
     None
 }
@@ -516,12 +515,11 @@ fn cmd_install(args: &[String]) -> i32 {
         return 1;
     }
 
-    if let Some(ref a) = arch {
-        if !is_valid_arch(a) {
+    if let Some(ref a) = arch
+        && !is_valid_arch(a) {
             eprintln!("error: unsupported architecture '{}'", a);
             return 1;
         }
-    }
 
     let remote_name = remote.unwrap_or("flathub");
     let branch_name = branch.as_deref().unwrap_or("stable");
@@ -646,13 +644,12 @@ fn cmd_run(args: &[String]) -> i32 {
     // Collect --env=KEY=VALUE
     let mut env_vars: Vec<(String, String)> = Vec::new();
     for arg in args {
-        if let Some(rest) = arg.strip_prefix("--env=") {
-            if let Some(eq_pos) = rest.find('=') {
+        if let Some(rest) = arg.strip_prefix("--env=")
+            && let Some(eq_pos) = rest.find('=') {
                 let key = rest[..eq_pos].to_string();
                 let val = rest[eq_pos + 1..].to_string();
                 env_vars.push((key, val));
             }
-        }
     }
 
     // Collect sandbox modifications
@@ -741,12 +738,11 @@ fn cmd_run(args: &[String]) -> i32 {
                     filesystems.push(args[i].clone());
                 }
             }
-            "--nofilesystem" => {
-                if i + 1 < args.len() {
+            "--nofilesystem"
+                if i + 1 < args.len() => {
                     i += 1;
                     nofilesystems.push(args[i].clone());
                 }
-            }
             _ => {}
         }
         i += 1;
@@ -780,12 +776,11 @@ fn cmd_run(args: &[String]) -> i32 {
         return 1;
     }
 
-    if let Some(a) = arch {
-        if !is_valid_arch(a) {
+    if let Some(a) = arch
+        && !is_valid_arch(a) {
             eprintln!("error: unsupported architecture '{}'", a);
             return 1;
         }
-    }
 
     let branch_name = branch.unwrap_or("stable");
     let arch_name = arch.unwrap_or("x86_64");

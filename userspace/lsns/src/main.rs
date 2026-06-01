@@ -64,11 +64,10 @@ fn enumerate_pids() -> Vec<u32> {
     let mut pids = Vec::new();
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Ok(pid) = name.parse::<u32>() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Ok(pid) = name.parse::<u32>() {
                     pids.push(pid);
                 }
-            }
         }
     }
     pids.sort_unstable();
@@ -95,7 +94,7 @@ fn read_proc_uid(pid: u32) -> u32 {
     if let Ok(content) = fs::read_to_string(format!("/proc/{pid}/status")) {
         for line in content.lines() {
             if let Some(val) = line.strip_prefix("Uid:") {
-                return val.trim().split_whitespace().next()
+                return val.split_whitespace().next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             }
@@ -108,13 +107,11 @@ fn uid_to_name(uid: u32) -> String {
     if let Ok(content) = fs::read_to_string("/etc/passwd") {
         for line in content.lines() {
             let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 3 {
-                if let Ok(file_uid) = fields[2].parse::<u32>() {
-                    if file_uid == uid {
+            if fields.len() >= 3
+                && let Ok(file_uid) = fields[2].parse::<u32>()
+                    && file_uid == uid {
                         return fields[0].to_string();
                     }
-                }
-            }
         }
     }
     uid.to_string()

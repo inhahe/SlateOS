@@ -132,7 +132,7 @@ fn parse_date_to_days(date_str: &str) -> Option<i64> {
         let month: u32 = parts[1].parse().ok()?;
         let day: u32 = parts[2].parse().ok()?;
 
-        if month < 1 || month > 12 || day < 1 || day > days_in_month(year, month) {
+        if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) {
             return None;
         }
 

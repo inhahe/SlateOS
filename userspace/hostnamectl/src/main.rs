@@ -228,11 +228,10 @@ fn detect_virtualization() -> String {
     if std::path::Path::new("/.dockerenv").exists() {
         return "docker".to_string();
     }
-    if let Ok(cgroup) = fs::read_to_string("/proc/1/cgroup") {
-        if cgroup.contains("/docker/") || cgroup.contains("/lxc/") {
+    if let Ok(cgroup) = fs::read_to_string("/proc/1/cgroup")
+        && (cgroup.contains("/docker/") || cgroup.contains("/lxc/")) {
             return "container".to_string();
         }
-    }
 
     "none".to_string()
 }

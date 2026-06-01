@@ -222,8 +222,8 @@ fn zramctl_list(raw: bool) -> i32 {
                 dev.mem_used_total, dev.streams);
         }
     } else {
-        println!("{:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} {}",
-            "NAME", "ALGORITHM", "DISKSIZE", "DATA", "COMPR", "TOTAL", "STREAMS", "MOUNTPOINT");
+        println!("{:<8} {:<10} {:<10} {:<10} {:<10} {:<10} {:<8} MOUNTPOINT",
+            "NAME", "ALGORITHM", "DISKSIZE", "DATA", "COMPR", "TOTAL", "STREAMS");
         for dev in &devices {
             let ratio = if dev.compr_data_size > 0 {
                 format!("{:.1}:1", dev.orig_data_size as f64 / dev.compr_data_size as f64)

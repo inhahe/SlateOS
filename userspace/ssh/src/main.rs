@@ -339,7 +339,7 @@ fn read_packet(
     // Peek/decrypt the first block to get packet_length.
     let first_block = buf.peek(block_size);
     let first_decrypted = if encrypted {
-        decrypt_block_aes_ctr(&first_block, &enc.enc_key_s2c, &enc.iv_s2c, seq, 0)
+        decrypt_block_aes_ctr(first_block, &enc.enc_key_s2c, &enc.iv_s2c, seq, 0)
     } else {
         first_block.to_vec()
     };
@@ -1126,7 +1126,7 @@ fn increment_counter(counter: &mut [u8; 16]) {
 
 /// AES-128-CTR keystream block for a given counter offset from the base IV.
 fn aes_ctr_keystream_block(
-    key: &[u8; 16],
+    _key: &[u8; 16],
     iv: &[u8; 16],
     round_keys: &[[u8; 16]; 11],
     block_offset: usize,
@@ -1154,7 +1154,7 @@ fn encrypt_packet_aes_ctr(packet: &mut [u8], key: &[u8], iv: &[u8], _seq: u32) {
     iv16.copy_from_slice(&iv[..16]);
     let round_keys = aes128_key_expand(&key16);
 
-    let num_blocks = (packet.len() + 15) / 16;
+    let num_blocks = packet.len().div_ceil(16);
     for block_idx in 0..num_blocks {
         let keystream = aes_ctr_keystream_block(&key16, &iv16, &round_keys, block_idx);
         let start = block_idx * 16;
@@ -1392,7 +1392,7 @@ fn base64_encode(data: &[u8]) -> String {
 /// Minimal base64 encoder with padding (for known_hosts storage).
 fn base64_encode_padded(data: &[u8]) -> String {
     let mut s = base64_encode(data);
-    while s.len() % 4 != 0 {
+    while !s.len().is_multiple_of(4) {
         s.push('=');
     }
     s

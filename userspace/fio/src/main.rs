@@ -897,7 +897,7 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
     }
 
     let start = Instant::now();
-    let runtime_limit = job.runtime.map(|s| Duration::from_secs(s));
+    let runtime_limit = job.runtime.map(Duration::from_secs);
 
     // Prepare the file
     let needs_write = job.rw.is_write() || job.rw.is_mixed()
@@ -907,11 +907,10 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
         || job.rw == IoPattern::Read || job.rw == IoPattern::RandRead;
 
     // For read workloads, create the file if it doesn't exist
-    if needs_read && !needs_write {
-        if !std::path::Path::new(&job.filename).exists() {
+    if needs_read && !needs_write
+        && !std::path::Path::new(&job.filename).exists() {
             prepare_file(&job.filename, job.size, job.bs, &mut rng)?;
         }
-    }
 
     // For write/mixed workloads, create or truncate
     if needs_write {
@@ -949,11 +948,10 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
 
     loop {
         // Check runtime limit
-        if let Some(limit) = runtime_limit {
-            if start.elapsed() >= limit {
+        if let Some(limit) = runtime_limit
+            && start.elapsed() >= limit {
                 break;
             }
-        }
 
         // Check if we've done all blocks (non-time_based)
         if !job.time_based && block_idx >= num_blocks {
@@ -1003,14 +1001,13 @@ fn execute_job(job: &JobDef) -> Result<JobStats, String> {
             stats.io_depth_dist[depth_bucket] += 1;
 
             // Verify if we have a checksum stored for this offset
-            if job.verify.is_some() && job.do_verify {
-                if let Some(stored) = verify_map.get(&offset) {
+            if job.verify.is_some() && job.do_verify
+                && let Some(stored) = verify_map.get(&offset) {
                     let computed = compute_verify(&read_buf, job.verify.unwrap_or(VerifyMethod::Crc32));
                     if *stored != computed {
                         stats.verify_errors += 1;
                     }
                 }
-            }
         } else {
             fill_pattern_seeded(&mut write_buf, job.verify_pattern, offset);
             file.seek(SeekFrom::Start(offset))
@@ -1449,7 +1446,7 @@ fn parse_cli_args(args: &[String]) -> Result<CliArgs, String> {
                     "name" => {
                         // Starting a new job? Push current if it has a filename.
                         if have_job && !current_job.filename.is_empty() {
-                            let mut job = std::mem::replace(&mut current_job, JobDef::default());
+                            let mut job = std::mem::take(&mut current_job);
                             apply_preset(&mut job);
                             result.jobs.push(job);
                         }

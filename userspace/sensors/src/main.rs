@@ -101,9 +101,8 @@ fn run_sensors(args: Vec<String>) -> i32 {
     if json_mode {
         println!("{{");
         for (ci, chip) in chips.iter().enumerate() {
-            if let Some(f) = filter {
-                if !chip.name.contains(f) { continue; }
-            }
+            if let Some(f) = filter
+                && !chip.name.contains(f) { continue; }
             println!("  \"{}\": {{", chip.name);
             println!("    \"Adapter\": \"{}\",", chip.adapter);
             for (ri, r) in chip.readings.iter().enumerate() {
@@ -118,9 +117,8 @@ fn run_sensors(args: Vec<String>) -> i32 {
     }
 
     for chip in &chips {
-        if let Some(f) = filter {
-            if !chip.name.contains(f) { continue; }
-        }
+        if let Some(f) = filter
+            && !chip.name.contains(f) { continue; }
         println!("{}", chip.name);
         if !no_adapter {
             println!("Adapter: {}", chip.adapter);

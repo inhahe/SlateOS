@@ -199,11 +199,11 @@ fn cmd_list(args: &[String]) {
 
     if !no_headings {
         if output_all {
-            println!("{:<4} {:>4} {:<12} {:<16} {:<10} {:<10} {}",
-                "ID", "TYPE", "TYPE-DESC", "DEVICE", "SOFT", "HARD", "PERSISTENT");
-        } else {
-            println!("{:<4} {:>4} {:<12} {:<16} {:<10} {}",
+            println!("{:<4} {:>4} {:<12} {:<16} {:<10} {:<10} PERSISTENT",
                 "ID", "TYPE", "TYPE-DESC", "DEVICE", "SOFT", "HARD");
+        } else {
+            println!("{:<4} {:>4} {:<12} {:<16} {:<10} HARD",
+                "ID", "TYPE", "TYPE-DESC", "DEVICE", "SOFT");
         }
     }
 

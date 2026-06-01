@@ -231,11 +231,10 @@ fn parse_node_meminfo(s: &str) -> (u64, u64) {
             if let Some(pos) = line.find("MemTotal:") {
                 total = parse_meminfo_kb(&line[pos + 9..]);
             }
-        } else if line.contains("MemFree:") {
-            if let Some(pos) = line.find("MemFree:") {
+        } else if line.contains("MemFree:")
+            && let Some(pos) = line.find("MemFree:") {
                 free = parse_meminfo_kb(&line[pos + 8..]);
             }
-        }
     }
     (total, free)
 }
@@ -498,11 +497,10 @@ fn read_numa_stat(path: &str, key: &str) -> u64 {
         Err(_) => return 0,
     };
     for line in content.lines() {
-        if let Some((k, v)) = line.split_once(char::is_whitespace) {
-            if k.trim() == key {
+        if let Some((k, v)) = line.split_once(char::is_whitespace)
+            && k.trim() == key {
                 return v.trim().parse().unwrap_or(0);
             }
-        }
     }
     0
 }
@@ -522,11 +520,10 @@ fn cmd_memhog(args: &[String]) {
                     node = args[i].parse().ok();
                 }
             }
-            _ if !args[i].starts_with('-') => {
-                if size_mb == 0 {
+            _ if !args[i].starts_with('-')
+                && size_mb == 0 => {
                     size_mb = parse_memhog_size(&args[i]);
                 }
-            }
             _ => {}
         }
         i += 1;

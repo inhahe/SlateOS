@@ -95,7 +95,7 @@ fn hex_encode_string(src: &[u8]) -> String {
 
 /// Decode a hex string into bytes. Returns None on invalid input.
 fn hex_decode(src: &[u8]) -> Option<Vec<u8>> {
-    if src.len() % 2 != 0 {
+    if !src.len().is_multiple_of(2) {
         return None;
     }
     let mut out = Vec::with_capacity(src.len() / 2);
@@ -273,7 +273,7 @@ fn hmac_sha1(key: &[u8], data: &[u8]) -> [u8; SHA1_DIGEST_SIZE] {
 /// Derive key material using PBKDF2 with HMAC-SHA1.
 fn pbkdf2_sha1(password: &[u8], salt: &[u8], iterations: u32, dk_len: usize) -> Vec<u8> {
     let mut dk = Vec::with_capacity(dk_len);
-    let blocks_needed = (dk_len + SHA1_DIGEST_SIZE - 1) / SHA1_DIGEST_SIZE;
+    let blocks_needed = dk_len.div_ceil(SHA1_DIGEST_SIZE);
 
     for block_idx in 1..=blocks_needed {
         let mut salt_ext = Vec::with_capacity(salt.len() + 4);
@@ -672,13 +672,12 @@ impl WpaConfig {
                 let unq = Self::unquote(val);
                 // If 64 hex chars, it is a raw PSK; otherwise a passphrase.
                 if unq.len() == 64 && unq.chars().all(|c| c.is_ascii_hexdigit()) {
-                    if let Some(bytes) = hex_decode(unq.as_bytes()) {
-                        if bytes.len() == WPA_PSK_LEN {
+                    if let Some(bytes) = hex_decode(unq.as_bytes())
+                        && bytes.len() == WPA_PSK_LEN {
                             let mut psk = [0u8; WPA_PSK_LEN];
                             psk.copy_from_slice(&bytes);
                             net.psk = Some(psk);
                         }
-                    }
                 } else {
                     net.passphrase = Some(unq.as_bytes().to_vec());
                     // Derive PSK from passphrase + SSID.
@@ -974,11 +973,10 @@ impl SupplicantState {
             }
 
             // Match BSSID filter if set.
-            if let Some(ref filter) = net.bssid {
-                if bss.bssid != *filter {
+            if let Some(ref filter) = net.bssid
+                && bss.bssid != *filter {
                     continue;
                 }
-            }
 
             // Prefer strongest signal.
             match best {
@@ -1012,15 +1010,14 @@ impl SupplicantState {
             s.push_str(&format!("bssid={}\n", format_bssid(bssid)));
         }
 
-        if let Some(net_id) = self.selected_network {
-            if let Some(net) = self.config.networks.get(net_id) {
+        if let Some(net_id) = self.selected_network
+            && let Some(net) = self.config.networks.get(net_id) {
                 s.push_str(&format!("ssid={}\n", net.ssid_str()));
                 s.push_str(&format!("id={}\n", net_id));
                 s.push_str(&format!("key_mgmt={}\n", net.key_mgmt.as_str()));
                 s.push_str(&format!("pairwise_cipher={}\n", net.pairwise.as_str()));
                 s.push_str(&format!("group_cipher={}\n", net.group.as_str()));
             }
-        }
 
         if let Some(ref ip) = self.ip_address {
             s.push_str(&format!("ip_address={}\n", ip));
@@ -1138,9 +1135,9 @@ fn run_supplicant(args: &[&str], out: &mut dyn Write) -> i32 {
 
 fn print_supplicant_help(out: &mut dyn Write) {
     let _ = writeln!(out, "wpa_supplicant v{}", VERSION);
-    let _ = writeln!(out, "");
+    let _ = writeln!(out);
     let _ = writeln!(out, "Usage: wpa_supplicant [-BdhvW] [-i<iface>] [-c<config>] [-D<driver>]");
-    let _ = writeln!(out, "");
+    let _ = writeln!(out);
     let _ = writeln!(out, "Options:");
     let _ = writeln!(out, "  -i<iface>   Interface name (default: wlan0)");
     let _ = writeln!(out, "  -c<config>  Configuration file path");
@@ -1215,7 +1212,7 @@ fn process_cli_command(
                 let bssid_str = net
                     .bssid
                     .as_ref()
-                    .map(|b| format_bssid(b))
+                    .map(format_bssid)
                     .unwrap_or_else(|| "any".to_string());
                 let flags = if !net.enabled {
                     "[DISABLED]"
@@ -1282,13 +1279,12 @@ fn process_cli_command(
                 "psk" => {
                     let unq = WpaConfig::unquote(val);
                     if unq.len() == 64 && unq.chars().all(|c| c.is_ascii_hexdigit()) {
-                        if let Some(bytes) = hex_decode(unq.as_bytes()) {
-                            if bytes.len() == WPA_PSK_LEN {
+                        if let Some(bytes) = hex_decode(unq.as_bytes())
+                            && bytes.len() == WPA_PSK_LEN {
                                 let mut psk = [0u8; WPA_PSK_LEN];
                                 psk.copy_from_slice(&bytes);
                                 net.psk = Some(psk);
                             }
-                        }
                     } else {
                         net.passphrase = Some(unq.as_bytes().to_vec());
                         if !net.ssid.is_empty() {
@@ -1399,11 +1395,10 @@ fn process_cli_command(
                 if state.selected_network == Some(id) {
                     state.selected_network = None;
                     state.disconnect();
-                } else if let Some(sel) = state.selected_network {
-                    if sel > id {
+                } else if let Some(sel) = state.selected_network
+                    && sel > id {
                         state.selected_network = Some(sel - 1);
                     }
-                }
             }
             let _ = writeln!(out, "OK");
             Ok(())
@@ -1419,22 +1414,20 @@ fn process_cli_command(
             Ok(())
         }
         "reconnect" => {
-            if let Some(id) = state.selected_network {
-                if id < state.config.networks.len() {
+            if let Some(id) = state.selected_network
+                && id < state.config.networks.len() {
                     state.disconnect();
                     state.do_associate();
                 }
-            }
             let _ = writeln!(out, "OK");
             Ok(())
         }
         "reassociate" => {
             state.disconnect();
-            if let Some(id) = state.selected_network {
-                if id < state.config.networks.len() {
+            if let Some(id) = state.selected_network
+                && id < state.config.networks.len() {
                     state.do_associate();
                 }
-            }
             let _ = writeln!(out, "OK");
             Ok(())
         }
@@ -1457,9 +1450,9 @@ fn process_cli_command(
 
 fn print_cli_help(out: &mut dyn Write) {
     let _ = writeln!(out, "wpa_cli v{}", VERSION);
-    let _ = writeln!(out, "");
+    let _ = writeln!(out);
     let _ = writeln!(out, "Usage: wpa_cli [<command> [<args>]]");
-    let _ = writeln!(out, "");
+    let _ = writeln!(out);
     print_cli_commands(out);
 }
 
@@ -1495,7 +1488,7 @@ fn print_cli_commands(out: &mut dyn Write) {
 fn run_passphrase(args: &[&str], out: &mut dyn Write) -> i32 {
     if args.is_empty() || args.len() > 2 {
         let _ = writeln!(out, "Usage: wpa_passphrase <ssid> [passphrase]");
-        let _ = writeln!(out, "");
+        let _ = writeln!(out);
         let _ = writeln!(out, "Generates a WPA PSK from an SSID and passphrase.");
         let _ = writeln!(
             out,
@@ -1586,13 +1579,13 @@ fn run(args: &[String], out: &mut dyn Write) -> i32 {
         _ => {
             // Default: show usage for all personalities.
             let _ = writeln!(out, "wpa multi-personality binary v{}", VERSION);
-            let _ = writeln!(out, "");
+            let _ = writeln!(out);
             let _ = writeln!(
                 out,
                 "Invoke as wpa_supplicant, wpa_cli, or wpa_passphrase."
             );
             let _ = writeln!(out, "The personality is detected from the program name (argv[0]).");
-            let _ = writeln!(out, "");
+            let _ = writeln!(out);
             let _ = writeln!(out, "Symlink examples:");
             let _ = writeln!(out, "  ln -s wpa wpa_supplicant");
             let _ = writeln!(out, "  ln -s wpa wpa_cli");

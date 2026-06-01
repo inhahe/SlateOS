@@ -53,7 +53,7 @@ fn run_aria2c(args: Vec<String>) -> i32 {
             .and_then(|s| s.parse::<u32>().ok())
             .unwrap_or(5);
         println!("05/22 10:00:00 [NOTICE] Downloading: {}", url);
-        println!("[#{}/{}] {} [{}] CN:{} DL:12.5MiB/s", 1, urls.len(), filename, "========================>", splits);
+        println!("[#{}/{}] {} [========================>] CN:{} DL:12.5MiB/s", 1, urls.len(), filename, splits);
         println!("05/22 10:00:05 [NOTICE] Download complete: ./{}", filename);
     }
     println!();

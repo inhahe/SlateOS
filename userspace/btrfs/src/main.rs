@@ -362,12 +362,12 @@ fn is_device_path(path: &str) -> bool {
 
 /// Validate that a node size is a power of two and within range.
 fn validate_node_size(size: u32) -> bool {
-    size.is_power_of_two() && size >= 4096 && size <= 65536
+    size.is_power_of_two() && (4096..=65536).contains(&size)
 }
 
 /// Validate that a sector size is a power of two and within range.
 fn validate_sector_size(size: u32) -> bool {
-    size.is_power_of_two() && size >= 512 && size <= 65536
+    size.is_power_of_two() && (512..=65536).contains(&size)
 }
 
 // ============================================================================
@@ -2124,13 +2124,12 @@ fn cmd_qgroup_limit(args: &[String]) -> Result<()> {
     };
 
     // Validate the size
-    if size_str != "none" {
-        if parse_size(size_str).is_none() {
+    if size_str != "none"
+        && parse_size(size_str).is_none() {
             return Err(BtrfsError::InvalidArgument(format!(
                 "invalid size '{size_str}'"
             )));
         }
-    }
 
     // Real implementation: BTRFS_IOC_QGROUP_LIMIT
     let _fs = read_mounted_fs_info(&path)?;
@@ -2518,13 +2517,12 @@ fn parse_mkfs_options(args: &[String]) -> Result<MkfsOptions> {
 
     // Validate devices look like block device paths
     for dev in &opts.devices {
-        if !is_device_path(dev) {
-            if !opts.force {
+        if !is_device_path(dev)
+            && !opts.force {
                 return Err(BtrfsError::DeviceError(format!(
                     "'{dev}' does not appear to be a block device (use -f to force)"
                 )));
             }
-        }
     }
 
     Ok(opts)

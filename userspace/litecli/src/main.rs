@@ -33,9 +33,7 @@ fn run_litecli(args: Vec<String>) -> i32 {
         .find(|w| w[0] == "-e" || w[0] == "--execute")
         .map(|w| w[1].as_str());
 
-    let dbfile = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+    let dbfile = args.iter().rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(":memory:");
 

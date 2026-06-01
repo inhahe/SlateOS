@@ -282,8 +282,8 @@ fn read_interfaces() -> Vec<InterfaceInfo> {
     }
 
     // Fallback: parse /proc/net/dev.
-    if interfaces.is_empty() {
-        if let Some(content) = read_file("/proc/net/dev") {
+    if interfaces.is_empty()
+        && let Some(content) = read_file("/proc/net/dev") {
             for line in content.lines().skip(2) {
                 let line = line.trim();
                 if let Some((name, stats)) = line.split_once(':') {
@@ -324,7 +324,6 @@ fn read_interfaces() -> Vec<InterfaceInfo> {
                 }
             }
         }
-    }
 
     interfaces.sort_by(|a, b| {
         // Sort loopback first, then alphabetically.

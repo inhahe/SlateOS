@@ -105,11 +105,10 @@ fn get_process_ids() -> Vec<u32> {
     let mut pids = Vec::new();
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Ok(pid) = name.parse::<u32>() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Ok(pid) = name.parse::<u32>() {
                     pids.push(pid);
                 }
-            }
         }
     }
     pids
@@ -131,8 +130,8 @@ fn find_processes_for_path(search_path: &str) -> FuserResult {
         let comm = read_proc_comm(pid);
 
         // Check cwd.
-        if let Some(cwd) = resolve_link(&format!("/proc/{pid}/cwd")) {
-            if path_matches(&cwd, &canonical) {
+        if let Some(cwd) = resolve_link(&format!("/proc/{pid}/cwd"))
+            && path_matches(&cwd, &canonical) {
                 processes.push(ProcessMatch {
                     pid,
                     uid,
@@ -141,11 +140,10 @@ fn find_processes_for_path(search_path: &str) -> FuserResult {
                     _fd: None,
                 });
             }
-        }
 
         // Check exe.
-        if let Some(exe) = resolve_link(&format!("/proc/{pid}/exe")) {
-            if path_matches(&exe, &canonical) {
+        if let Some(exe) = resolve_link(&format!("/proc/{pid}/exe"))
+            && path_matches(&exe, &canonical) {
                 processes.push(ProcessMatch {
                     pid,
                     uid,
@@ -154,11 +152,10 @@ fn find_processes_for_path(search_path: &str) -> FuserResult {
                     _fd: None,
                 });
             }
-        }
 
         // Check root.
-        if let Some(root) = resolve_link(&format!("/proc/{pid}/root")) {
-            if root != Path::new("/") && path_matches(&root, &canonical) {
+        if let Some(root) = resolve_link(&format!("/proc/{pid}/root"))
+            && root != Path::new("/") && path_matches(&root, &canonical) {
                 processes.push(ProcessMatch {
                     pid,
                     uid,
@@ -167,7 +164,6 @@ fn find_processes_for_path(search_path: &str) -> FuserResult {
                     _fd: None,
                 });
             }
-        }
 
         // Check open fds.
         let fd_dir = format!("/proc/{pid}/fd");
@@ -175,8 +171,8 @@ fn find_processes_for_path(search_path: &str) -> FuserResult {
             for entry in entries.flatten() {
                 if let Some(target) = resolve_link(
                     entry.path().to_str().unwrap_or_default(),
-                ) {
-                    if path_matches(&target, &canonical) {
+                )
+                    && path_matches(&target, &canonical) {
                         let fd_num = entry
                             .file_name()
                             .to_str()
@@ -189,7 +185,6 @@ fn find_processes_for_path(search_path: &str) -> FuserResult {
                             _fd: fd_num,
                         });
                     }
-                }
             }
         }
 
@@ -259,12 +254,11 @@ fn _find_processes_for_port(port: u16, protocol: &str) -> Vec<ProcessMatch> {
                     entry.path().to_str().unwrap_or_default(),
                 ) {
                     let target_str = target.to_string_lossy();
-                    if let Some(rest) = target_str.strip_prefix("socket:[") {
-                        if let Some(inode) = rest.strip_suffix(']') {
+                    if let Some(rest) = target_str.strip_prefix("socket:[")
+                        && let Some(inode) = rest.strip_suffix(']') {
                             let comm = read_proc_comm(pid);
                             inode_pids.insert(inode.to_string(), (pid, comm));
                         }
-                    }
                 }
             }
         }
@@ -280,9 +274,9 @@ fn _find_processes_for_port(port: u16, protocol: &str) -> Vec<ProcessMatch> {
         }
         // Local address is field 1, format: hex_ip:hex_port
         let local_addr = parts[1];
-        if let Some(port_hex) = local_addr.split(':').nth(1) {
-            if let Ok(local_port) = u16::from_str_radix(port_hex, 16) {
-                if local_port == port {
+        if let Some(port_hex) = local_addr.split(':').nth(1)
+            && let Ok(local_port) = u16::from_str_radix(port_hex, 16)
+                && local_port == port {
                     let inode = parts[9];
                     if let Some((pid, comm)) = inode_pids.get(inode) {
                         matches.push(ProcessMatch {
@@ -294,8 +288,6 @@ fn _find_processes_for_port(port: u16, protocol: &str) -> Vec<ProcessMatch> {
                         });
                     }
                 }
-            }
-        }
     }
 
     matches
@@ -309,13 +301,11 @@ fn uid_to_name(uid: u32) -> String {
     let passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
     for line in passwd.lines() {
         let parts: Vec<&str> = line.splitn(7, ':').collect();
-        if parts.len() >= 3 {
-            if let Ok(u) = parts[2].parse::<u32>() {
-                if u == uid {
+        if parts.len() >= 3
+            && let Ok(u) = parts[2].parse::<u32>()
+                && u == uid {
                     return parts[0].to_string();
                 }
-            }
-        }
     }
     uid.to_string()
 }
@@ -514,27 +504,24 @@ fn lsof_main(args: &[String]) -> i32 {
 
     // Print header.
     println!(
-        "{:<12} {:>6} {:<10} {:>4} {:>6} {}",
-        "COMMAND", "PID", "USER", "FD", "TYPE", "NAME"
+        "{:<12} {:>6} {:<10} {:>4} {:>6} NAME",
+        "COMMAND", "PID", "USER", "FD", "TYPE"
     );
 
     for entry in &entries {
         // Apply filters.
-        if let Some(pid) = filter_pid {
-            if entry.pid != pid {
+        if let Some(pid) = filter_pid
+            && entry.pid != pid {
                 continue;
             }
-        }
-        if let Some(ref user) = filter_user {
-            if &entry.user != user {
+        if let Some(ref user) = filter_user
+            && &entry.user != user {
                 continue;
             }
-        }
-        if let Some(ref path) = filter_path {
-            if !entry.name.contains(path.as_str()) {
+        if let Some(ref path) = filter_path
+            && !entry.name.contains(path.as_str()) {
                 continue;
             }
-        }
 
         println!(
             "{:<12} {:>6} {:<10} {:>4} {:>6} {}",

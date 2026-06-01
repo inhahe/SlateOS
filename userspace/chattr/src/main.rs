@@ -142,11 +142,10 @@ fn attr_file_path(file: &str) -> String {
 
 fn read_attrs(file: &str) -> u32 {
     let attr_path = attr_file_path(file);
-    if let Ok(content) = fs::read_to_string(&attr_path) {
-        if let Ok(val) = u32::from_str_radix(content.trim(), 16) {
+    if let Ok(content) = fs::read_to_string(&attr_path)
+        && let Ok(val) = u32::from_str_radix(content.trim(), 16) {
             return val;
         }
-    }
     // Default: extents flag is commonly set on ext4.
     if fs::metadata(file).map(|m| m.is_file()).unwrap_or(false) {
         EXT4_EXTENTS_FL
@@ -264,14 +263,12 @@ fn list_attrs(out: &mut io::StdoutLock<'_>, path: &str, opts: &LsattrOpts, depth
 
             for entry_path in &names {
                 print_file_attrs(out, entry_path, opts);
-                if opts.recursive {
-                    if let Ok(m) = fs::symlink_metadata(entry_path) {
-                        if m.is_dir() {
+                if opts.recursive
+                    && let Ok(m) = fs::symlink_metadata(entry_path)
+                        && m.is_dir() {
                             let _ = writeln!(out);
                             list_attrs(out, entry_path, opts, depth + 1);
                         }
-                    }
-                }
             }
         }
     } else {
@@ -445,14 +442,13 @@ fn apply_attrs(path: &str, add: u32, remove: u32, set: Option<u32>, opts: &Chatt
     }
 
     // Recurse into directories.
-    if opts.recursive && metadata.is_dir() {
-        if let Ok(entries) = fs::read_dir(path) {
+    if opts.recursive && metadata.is_dir()
+        && let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
                 let entry_path = entry.path().to_string_lossy().to_string();
                 apply_attrs(&entry_path, add, remove, set, opts);
             }
         }
-    }
 }
 
 // ============================================================================

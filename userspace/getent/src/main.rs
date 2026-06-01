@@ -286,8 +286,8 @@ fn parse_services() -> Vec<ServiceEntry> {
         let parts: Vec<&str> = line.split_whitespace().collect();
         if parts.len() >= 2 {
             let port_proto: Vec<&str> = parts[1].split('/').collect();
-            if port_proto.len() == 2 {
-                if let Ok(port) = port_proto[0].parse::<u16>() {
+            if port_proto.len() == 2
+                && let Ok(port) = port_proto[0].parse::<u16>() {
                     entries.push(ServiceEntry {
                         name: parts[0].to_string(),
                         port,
@@ -295,7 +295,6 @@ fn parse_services() -> Vec<ServiceEntry> {
                         aliases: parts[2..].iter().map(|s| s.to_string()).collect(),
                     });
                 }
-            }
         }
     }
     entries
@@ -319,15 +318,14 @@ fn parse_protocols() -> Vec<ProtocolEntry> {
             line
         };
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if let Ok(number) = parts[1].parse::<u32>() {
+        if parts.len() >= 2
+            && let Ok(number) = parts[1].parse::<u32>() {
                 entries.push(ProtocolEntry {
                     name: parts[0].to_string(),
                     number,
                     aliases: parts[2..].iter().map(|s| s.to_string()).collect(),
                 });
             }
-        }
     }
     entries
 }

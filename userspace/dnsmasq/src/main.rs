@@ -482,7 +482,7 @@ fn dns_decode_name(data: &[u8], offset: usize) -> Option<(String, usize)> {
             if !jumped {
                 end_pos = pos + 2;
             }
-            let ptr = (((len & 0x3F) as usize) << 8) | (data[pos + 1] as usize);
+            let ptr = ((len & 0x3F) << 8) | (data[pos + 1] as usize);
             if ptr >= data.len() {
                 return None;
             }
@@ -1401,11 +1401,10 @@ impl DhcpPool {
         }
 
         // Check for existing lease for this MAC
-        if let Some(lease) = self.find_lease_by_mac(mac) {
-            if !lease.is_expired(now) {
+        if let Some(lease) = self.find_lease_by_mac(mac)
+            && !lease.is_expired(now) {
                 return Some(lease.ip);
             }
-        }
 
         // Find a free IP in the range
         let start = self.range_start.to_u32();
@@ -1574,11 +1573,10 @@ impl DhcpServer {
         }
 
         // Check if the IP is taken by someone else
-        if let Some(existing) = self.pool.find_lease_by_ip(requested_ip) {
-            if existing.mac != mac && !existing.is_expired(now) {
+        if let Some(existing) = self.pool.find_lease_by_ip(requested_ip)
+            && existing.mac != mac && !existing.is_expired(now) {
                 return self.send_nak(packet, "IP already in use");
             }
-        }
 
         // Create or renew the lease
         self.pool.create_or_renew_lease(mac, requested_ip, now, None);
@@ -2355,22 +2353,20 @@ impl DnsResolver {
         }
 
         // Check address overrides
-        if qtype == DnsRecordType::A {
-            if let Some(ip) = check_address_overrides(&self.address_overrides, name) {
+        if qtype == DnsRecordType::A
+            && let Some(ip) = check_address_overrides(&self.address_overrides, name) {
                 self.log(format!("address override: {} -> {}", name, ip));
                 let record = DnsRecord::new_a(name, 300, ip);
                 return DnsPacket::new_response(packet, DnsRcode::NoError, vec![record]);
             }
-        }
 
         // Check /etc/hosts
-        if qtype == DnsRecordType::A {
-            if let Some(ip) = hosts_lookup(&self.hosts_entries, name) {
+        if qtype == DnsRecordType::A
+            && let Some(ip) = hosts_lookup(&self.hosts_entries, name) {
                 self.log(format!("hosts: {} -> {}", name, ip));
                 let record = DnsRecord::new_a(name, 0, ip);
                 return DnsPacket::new_response(packet, DnsRcode::NoError, vec![record]);
             }
-        }
 
         // Check cache
         if let Some(records) = self.cache.lookup(name, qtype, now) {

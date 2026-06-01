@@ -131,11 +131,10 @@ fn discover_entries(esp: &Path) -> Vec<BootEntry> {
     if let Ok(dir_entries) = fs::read_dir(&entries_dir) {
         for entry in dir_entries.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("conf") {
-                if let Some(boot_entry) = parse_boot_entry(&path) {
+            if path.extension().and_then(|e| e.to_str()) == Some("conf")
+                && let Some(boot_entry) = parse_boot_entry(&path) {
                     entries.push(boot_entry);
                 }
-            }
         }
     }
 
@@ -231,11 +230,10 @@ fn get_firmware_info() -> (String, bool) {
 
 fn get_secure_boot_status() -> &'static str {
     let sb_path = "/sys/firmware/efi/efivars/SecureBoot-8be4df61-93ca-11d2-aa0d-00e098032b8c";
-    if let Ok(data) = fs::read(sb_path) {
-        if data.len() >= 5 && data[4] == 1 {
+    if let Ok(data) = fs::read(sb_path)
+        && data.len() >= 5 && data[4] == 1 {
             return "enabled";
         }
-    }
     "disabled"
 }
 

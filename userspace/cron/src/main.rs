@@ -54,7 +54,7 @@ impl Personality {
 
 fn detect_personality(argv0: &str) -> Personality {
     let name = argv0
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
@@ -148,7 +148,7 @@ fn day_of_week(year: u32, month: u32, day: u32) -> u32 {
     let t = [0u32, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4];
     let y = if month < 3 { year - 1 } else { year };
     let idx = (month as usize).saturating_sub(1).min(11);
-    ((y + y / 4 - y / 100 + y / 400 + t[idx] + day) % 7) as u32
+    (y + y / 4 - y / 100 + y / 400 + t[idx] + day) % 7
 }
 
 fn days_in_month(year: u32, month: u32) -> u32 {
@@ -156,7 +156,7 @@ fn days_in_month(year: u32, month: u32) -> u32 {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
         2 => {
-            if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+            if (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400) {
                 29
             } else {
                 28
@@ -628,13 +628,12 @@ fn parse_crontab(content: &str, system_format: bool) -> Result<CrontabFile, Cron
 }
 
 fn strip_quotes(s: &str) -> String {
-    if s.len() >= 2 {
-        if (s.starts_with('"') && s.ends_with('"'))
-            || (s.starts_with('\'') && s.ends_with('\''))
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"'))
+            || (s.starts_with('\'') && s.ends_with('\'')))
         {
             return s[1..s.len() - 1].to_string();
         }
-    }
     s.to_string()
 }
 
@@ -863,7 +862,7 @@ fn parse_datetime_str(s: &str) -> Result<DateTime, CronError> {
         .parse::<u32>()
         .map_err(|_| CronError::InvalidTimeSpec(s.to_string()))?;
 
-    if month < 1 || month > 12 || day < 1 || day > days_in_month(year, month) || hour > 23 || minute > 59
+    if !(1..=12).contains(&month) || day < 1 || day > days_in_month(year, month) || hour > 23 || minute > 59
     {
         return Err(CronError::InvalidTimeSpec(s.to_string()));
     }
@@ -1055,13 +1054,11 @@ fn next_at_job_id(spool_dir: &Path) -> u32 {
             let name = entry.file_name();
             let name = name.to_string_lossy();
             // Job filename format: queue_char + 5-hex-digit ID + timestamp
-            if name.len() >= 6 {
-                if let Ok(id) = u32::from_str_radix(&name[1..6], 16) {
-                    if id > max_id {
+            if name.len() >= 6
+                && let Ok(id) = u32::from_str_radix(&name[1..6], 16)
+                    && id > max_id {
                         max_id = id;
                     }
-                }
-            }
         }
     }
     max_id + 1
@@ -1303,12 +1300,11 @@ fn run_crontab(args: &[String]) -> i32 {
                 let _ = out.flush();
                 let stdin = io::stdin();
                 let mut line = String::new();
-                if stdin.lock().read_line(&mut line).is_ok() {
-                    if !line.trim().eq_ignore_ascii_case("y") {
+                if stdin.lock().read_line(&mut line).is_ok()
+                    && !line.trim().eq_ignore_ascii_case("y") {
                         let _ = writeln!(out, "crontab: aborted");
                         return 0;
                     }
-                }
             }
             let path = user_crontab_path(&user);
             match fs::remove_file(&path) {
@@ -1681,8 +1677,8 @@ fn list_at_jobs(out: &mut io::StdoutLock<'_>) -> i32 {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(job) = AtJob::deserialize(&content) {
+        if let Ok(content) = fs::read_to_string(&path)
+            && let Ok(job) = AtJob::deserialize(&content) {
                 jobs.insert(
                     job.id,
                     format!(
@@ -1698,10 +1694,9 @@ fn list_at_jobs(out: &mut io::StdoutLock<'_>) -> i32 {
                     ),
                 );
             }
-        }
     }
 
-    for (_, line) in &jobs {
+    for line in jobs.values() {
         let _ = writeln!(out, "{line}");
     }
 
@@ -1734,7 +1729,7 @@ fn remove_at_jobs(ids: &[String], out: &mut io::StdoutLock<'_>) -> i32 {
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
-                if name.len() >= 6 && &name[1..6] == hex_id {
+                if name.len() >= 6 && name[1..6] == hex_id {
                     match fs::remove_file(entry.path()) {
                         Ok(()) => {
                             found = true;
@@ -1815,8 +1810,8 @@ fn run_atd(args: &[String]) -> i32 {
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if let Ok(content) = fs::read_to_string(&path) {
-            if let Ok(job) = AtJob::deserialize(&content) {
+        if let Ok(content) = fs::read_to_string(&path)
+            && let Ok(job) = AtJob::deserialize(&content) {
                 if job.queue == 'b' {
                     batch_pending += 1;
                     let _ = writeln!(
@@ -1837,7 +1832,6 @@ fn run_atd(args: &[String]) -> i32 {
                     );
                 }
             }
-        }
     }
 
     let _ = writeln!(

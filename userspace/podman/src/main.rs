@@ -383,12 +383,7 @@ impl Engine {
             return Some(c);
         }
         // Search by name or id prefix.
-        for c in self.containers.values() {
-            if c.name == id_or_name || c.id.starts_with(id_or_name) {
-                return Some(c);
-            }
-        }
-        None
+        self.containers.values().find(|&c| c.name == id_or_name || c.id.starts_with(id_or_name)).map(|v| v as _)
     }
 
     fn find_container_mut(&mut self, id_or_name: &str) -> Option<&mut Container> {
@@ -501,13 +496,12 @@ impl Engine {
             .map(|(k, _)| k.clone());
         let key = key.ok_or_else(|| format!("no such container: {}", id_or_name))?;
         let status = self.containers.get(&key).map(|c| c.status);
-        if let Some(ContainerStatus::Running) = status {
-            if !force {
+        if let Some(ContainerStatus::Running) = status
+            && !force {
                 return Err(String::from(
                     "container is running, use --force to remove",
                 ));
             }
-        }
         self.containers.remove(&key);
         Ok(())
     }
@@ -538,15 +532,9 @@ impl Engine {
         if let Some(img) = self.images.get(id_or_name) {
             return Some(img);
         }
-        for img in self.images.values() {
-            if img.repository == id_or_name
+        self.images.values().find(|&img| img.repository == id_or_name
                 || img.full_name() == id_or_name
-                || img.id.starts_with(id_or_name)
-            {
-                return Some(img);
-            }
-        }
-        None
+                || img.id.starts_with(id_or_name)).map(|v| v as _)
     }
 
     fn pull_image(&mut self, name: &str) -> String {
@@ -660,12 +648,7 @@ impl Engine {
         if let Some(p) = self.pods.get(id_or_name) {
             return Some(p);
         }
-        for p in self.pods.values() {
-            if p.name == id_or_name || p.id.starts_with(id_or_name) {
-                return Some(p);
-            }
-        }
-        None
+        self.pods.values().find(|&p| p.name == id_or_name || p.id.starts_with(id_or_name)).map(|v| v as _)
     }
 
     fn find_pod_mut(&mut self, id_or_name: &str) -> Option<&mut Pod> {
@@ -786,12 +769,7 @@ impl BuildahEngine {
         if let Some(c) = self.containers.get(id_or_name) {
             return Some(c);
         }
-        for c in self.containers.values() {
-            if c.name == id_or_name || c.id.starts_with(id_or_name) {
-                return Some(c);
-            }
-        }
-        None
+        self.containers.values().find(|&c| c.name == id_or_name || c.id.starts_with(id_or_name)).map(|v| v as _)
     }
 
     fn find_container_mut(&mut self, id_or_name: &str) -> Option<&mut BuildahContainer> {
@@ -1097,11 +1075,10 @@ fn cmd_podman_run(args: &[String]) -> i32 {
             }
             "-p" | "--publish" => {
                 i += 1;
-                if i < args.len() {
-                    if let Some(pm) = PortMapping::parse(&args[i]) {
+                if i < args.len()
+                    && let Some(pm) = PortMapping::parse(&args[i]) {
                         ports.push(pm);
                     }
-                }
             }
             _ => {
                 if image.is_empty() {
@@ -1321,12 +1298,12 @@ fn cmd_podman_top(args: &[String]) -> i32 {
         return 1;
     }
     println!(
-        "{:<10} {:<10} {:<8} {:<8} {:<10} {:<8} {}",
-        "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS", "COMMAND"
+        "{:<10} {:<10} {:<8} {:<8} {:<10} {:<8} COMMAND",
+        "USER", "PID", "%CPU", "%MEM", "VSZ", "RSS"
     );
     println!(
-        "{:<10} {:<10} {:<8} {:<8} {:<10} {:<8} {}",
-        "root", "1", "0.0", "0.1", "4508", "780", "/bin/sh"
+        "{:<10} {:<10} {:<8} {:<8} {:<10} {:<8} /bin/sh",
+        "root", "1", "0.0", "0.1", "4508", "780"
     );
     0
 }
@@ -2075,9 +2052,7 @@ fn cmd_buildah_config(args: &[String]) -> i32 {
     }
     // Find the container name (last non-flag arg).
     let container = args
-        .iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+        .iter().rfind(|a| !a.starts_with('-'))
         .cloned()
         .unwrap_or_default();
     if container.is_empty() {

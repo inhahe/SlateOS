@@ -761,9 +761,8 @@ fn validate_sudoers_line(
     }
 
     // Validate Defaults.
-    if line.starts_with("Defaults") {
+    if let Some(rest) = line.strip_prefix("Defaults") {
         // Just check that there is something after Defaults.
-        let rest = &line["Defaults".len()..];
         if rest.trim().is_empty() && strict {
             errors.push(SyntaxError {
                 line_num,
@@ -854,11 +853,10 @@ fn user_matches(
             return true;
         }
         // %group syntax.
-        if let Some(group) = spec.strip_prefix('%') {
-            if user_groups.iter().any(|g| g == group) {
+        if let Some(group) = spec.strip_prefix('%')
+            && user_groups.iter().any(|g| g == group) {
                 return true;
             }
-        }
         // Alias reference.
         if let Some(members) = aliases.get(spec.as_str()) {
             if members.iter().any(|m| m == username || m == "ALL") {
@@ -866,19 +864,17 @@ fn user_matches(
             }
             // Check group members in alias.
             for m in members {
-                if let Some(group) = m.strip_prefix('%') {
-                    if user_groups.iter().any(|g| g == group) {
+                if let Some(group) = m.strip_prefix('%')
+                    && user_groups.iter().any(|g| g == group) {
                         return true;
                     }
-                }
             }
         }
         // Negation.
-        if let Some(negated) = spec.strip_prefix('!') {
-            if negated == username {
+        if let Some(negated) = spec.strip_prefix('!')
+            && negated == username {
                 return false;
             }
-        }
     }
     false
 }
@@ -896,16 +892,14 @@ fn host_matches(
         if spec == hostname {
             return true;
         }
-        if let Some(members) = aliases.get(spec.as_str()) {
-            if members.iter().any(|m| m == hostname || m == "ALL") {
+        if let Some(members) = aliases.get(spec.as_str())
+            && members.iter().any(|m| m == hostname || m == "ALL") {
                 return true;
             }
-        }
-        if let Some(negated) = spec.strip_prefix('!') {
-            if negated == hostname {
+        if let Some(negated) = spec.strip_prefix('!')
+            && negated == hostname {
                 return false;
             }
-        }
     }
     false
 }
@@ -1003,11 +997,10 @@ fn command_path_matches(spec: &str, actual: &str) -> bool {
         return actual.starts_with(dir);
     }
     // Basename match: if spec has no path separator, match basename of actual.
-    if !spec.contains('/') {
-        if let Some(base) = actual.rsplit('/').next() {
+    if !spec.contains('/')
+        && let Some(base) = actual.rsplit('/').next() {
             return base == spec;
         }
-    }
     false
 }
 
@@ -1096,8 +1089,8 @@ fn check_timestamp(username: &str, timeout: u64) -> bool {
     let path = timestamp_path(username);
     match fs::read_to_string(&path) {
         Ok(content) => {
-            if let Some(ts_str) = content.lines().next() {
-                if let Ok(ts) = ts_str.trim().parse::<u64>() {
+            if let Some(ts_str) = content.lines().next()
+                && let Ok(ts) = ts_str.trim().parse::<u64>() {
                     let now = current_epoch();
                     if timeout == u64::MAX {
                         // Never expires.
@@ -1105,7 +1098,6 @@ fn check_timestamp(username: &str, timeout: u64) -> bool {
                     }
                     return now.saturating_sub(ts) < timeout;
                 }
-            }
             false
         }
         Err(_) => false,
@@ -1190,11 +1182,10 @@ fn build_environment(
         for (key, val) in std::env::vars() {
             if keep_list.iter().any(|k| k == &key) {
                 // Check for dangerous values in env_check vars.
-                if check_list.iter().any(|k| k == &key) {
-                    if val.contains('/') || val.contains('%') {
+                if check_list.iter().any(|k| k == &key)
+                    && (val.contains('/') || val.contains('%')) {
                         continue; // Skip suspicious values.
                     }
-                }
                 if !ENV_BLACKLIST.iter().any(|&b| b == key) {
                     env.push((key, val));
                 }
@@ -1344,7 +1335,7 @@ fn days_to_date(mut days: u64) -> (u64, u64, u64) {
 
 /// Check if a year is a leap year.
 fn is_leap_year(year: u64) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || year % 400 == 0
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 // ============================================================================
@@ -1668,8 +1659,8 @@ fn get_user_groups(username: &str) -> Vec<String> {
             }
             if in_user && trimmed.starts_with("groups:") {
                 // Parse YAML list: groups: [wheel, admin]
-                if let Some(list_start) = trimmed.find('[') {
-                    if let Some(list_end) = trimmed.find(']') {
+                if let Some(list_start) = trimmed.find('[')
+                    && let Some(list_end) = trimmed.find(']') {
                         let list = &trimmed[list_start + 1..list_end];
                         for g in list.split(',') {
                             let g = g.trim().trim_matches('"').trim_matches('\'');
@@ -1678,7 +1669,6 @@ fn get_user_groups(username: &str) -> Vec<String> {
                             }
                         }
                     }
-                }
                 break;
             }
             if in_user && !trimmed.is_empty() && !trimmed.starts_with('-') && !trimmed.starts_with(' ') {
@@ -1742,19 +1732,16 @@ fn acquire_lock(path: &Path) -> Result<PathBuf, SudoError> {
     let lock_path = path.with_extension("lck");
     if lock_path.exists() {
         // Check if the lock is stale (older than 5 minutes).
-        if let Ok(meta) = fs::metadata(&lock_path) {
-            if let Ok(modified) = meta.modified() {
-                if let Ok(elapsed) = modified.elapsed() {
-                    if elapsed.as_secs() < 300 {
+        if let Ok(meta) = fs::metadata(&lock_path)
+            && let Ok(modified) = meta.modified()
+                && let Ok(elapsed) = modified.elapsed()
+                    && elapsed.as_secs() < 300 {
                         return Err(SudoError::LockError(format!(
                             "{} is locked by another process",
                             path.display()
                         )));
                     }
                     // Stale lock — remove it.
-                }
-            }
-        }
     }
 
     // Create the lock file with our PID.
@@ -2731,8 +2718,8 @@ fn run_sudoreplay(args: &[String]) -> i32 {
         }
 
         println!(
-            "{:<12} {:<12} {:<12} {:<20} {}",
-            "SESSION", "USER", "RUNAS", "DATE", "COMMAND"
+            "{:<12} {:<12} {:<12} {:<20} COMMAND",
+            "SESSION", "USER", "RUNAS", "DATE"
         );
         println!("{}", "-".repeat(76));
 
@@ -2792,9 +2779,9 @@ fn main() {
 
     let exit_code = match personality {
         Personality::Sudo => run_sudo(rest),
-        Personality::Sudoedit => run_sudoedit(&rest.iter().map(|s| s.clone()).collect::<Vec<_>>()),
-        Personality::Visudo => run_visudo(&rest.to_vec()),
-        Personality::Sudoreplay => run_sudoreplay(&rest.to_vec()),
+        Personality::Sudoedit => run_sudoedit(rest),
+        Personality::Visudo => run_visudo(rest),
+        Personality::Sudoreplay => run_sudoreplay(rest),
     };
 
     process::exit(exit_code);

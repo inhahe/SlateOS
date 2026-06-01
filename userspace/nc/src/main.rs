@@ -876,12 +876,11 @@ fn relay_loop(handle: u64, timeout_secs: Option<u64>) -> Result<(), String> {
             }
             Err(-11) => {
                 // WouldBlock: no data yet. Check timeout.
-                if let Some(tmo) = timeout_ms {
-                    if idle_start.elapsed().as_millis() as u64 >= tmo {
+                if let Some(tmo) = timeout_ms
+                    && idle_start.elapsed().as_millis() as u64 >= tmo {
                         eprintln!("nc: idle timeout");
                         break;
                     }
-                }
                 // Small sleep to avoid busy-spinning, responsive to Ctrl+C.
                 sleep_interruptible(10);
                 continue;
@@ -950,11 +949,10 @@ fn run_tcp_listen(opts: &Options) -> Result<(), String> {
         tcp_shutdown(conn, 2);
         tcp_close(conn);
 
-        if let Err(e) = result {
-            if opts.verbose {
+        if let Err(e) = result
+            && opts.verbose {
                 eprintln!("nc: session error: {e}");
             }
-        }
 
         if !opts.keep_listening {
             break;
@@ -1063,14 +1061,13 @@ fn run_udp_client(opts: &Options) -> Result<(), String> {
             }
         } else {
             // No data ready. Check timeout.
-            if let Some(tmo) = timeout_ms {
-                if idle_start.elapsed().as_millis() as u64 >= tmo {
+            if let Some(tmo) = timeout_ms
+                && idle_start.elapsed().as_millis() as u64 >= tmo {
                     if opts.verbose {
                         eprintln!("nc: idle timeout");
                     }
                     break;
                 }
-            }
             sys_sleep(10);
         }
     }
@@ -1133,32 +1130,28 @@ fn run_udp_listen(opts: &Options) -> Result<(), String> {
         }
 
         if udp_rx_ready(handle) {
-            match udp_recv(handle, &mut recv_buf) {
-                Ok((n, src_ip, src_port)) => {
-                    last_sender_ip = src_ip;
-                    last_sender_port = src_port;
-                    if opts.verbose {
-                        eprintln!(
-                            "nc: received {} bytes from {} port {}",
-                            n, format_ipv4(src_ip), src_port,
-                        );
-                    }
-                    if stdout_lock.write_all(&recv_buf[..n]).is_err() {
-                        break;
-                    }
-                    let _ = stdout_lock.flush();
+            if let Ok((n, src_ip, src_port)) = udp_recv(handle, &mut recv_buf) {
+                last_sender_ip = src_ip;
+                last_sender_port = src_port;
+                if opts.verbose {
+                    eprintln!(
+                        "nc: received {} bytes from {} port {}",
+                        n, format_ipv4(src_ip), src_port,
+                    );
                 }
-                Err(_) => {}
+                if stdout_lock.write_all(&recv_buf[..n]).is_err() {
+                    break;
+                }
+                let _ = stdout_lock.flush();
             }
         } else {
-            if let Some(tmo) = timeout_ms {
-                if idle_start.elapsed().as_millis() as u64 >= tmo {
+            if let Some(tmo) = timeout_ms
+                && idle_start.elapsed().as_millis() as u64 >= tmo {
                     if opts.verbose {
                         eprintln!("nc: idle timeout");
                     }
                     break;
                 }
-            }
             sys_sleep(10);
         }
     }
@@ -1257,9 +1250,8 @@ fn run_port_scan(opts: &Options) -> Result<(), String> {
                     } else if refused {
                         if opts.verbose {
                             println!(
-                                "{} ({}) {} [tcp] {} -- {}",
-                                opts.host, format_ipv4(ip), current_port,
-                                "refused", err_msg,
+                                "{} ({}) {} [tcp] refused -- {}",
+                                opts.host, format_ipv4(ip), current_port, err_msg,
                             );
                         }
                     } else if opts.verbose {
@@ -1373,8 +1365,7 @@ fn run_exec(handle: u64, cmd: &str) -> Result<(), String> {
     // Thread: socket -> child stdin
     let done_in = done.clone();
     let in_handle = handle;
-    let stdin_thread = if let Some(mut cstdin) = child_stdin {
-        Some(thread::spawn(move || {
+    let stdin_thread = child_stdin.map(|mut cstdin| thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
                 if done_in.load(Ordering::SeqCst) || !RUNNING.load(Ordering::SeqCst) {
@@ -1393,16 +1384,12 @@ fn run_exec(handle: u64, cmd: &str) -> Result<(), String> {
                 }
             }
             done_in.store(true, Ordering::SeqCst);
-        }))
-    } else {
-        None
-    };
+        }));
 
     // Thread: child stdout -> socket
     let done_out = done.clone();
     let out_handle = handle;
-    let stdout_thread = if let Some(mut cstdout) = child_stdout {
-        Some(thread::spawn(move || {
+    let stdout_thread = child_stdout.map(|mut cstdout| thread::spawn(move || {
             let mut buf = [0u8; 4096];
             loop {
                 if done_out.load(Ordering::SeqCst) || !RUNNING.load(Ordering::SeqCst) {
@@ -1419,10 +1406,7 @@ fn run_exec(handle: u64, cmd: &str) -> Result<(), String> {
                 }
             }
             done_out.store(true, Ordering::SeqCst);
-        }))
-    } else {
-        None
-    };
+        }));
 
     // Wait for child to finish.
     let _ = child.wait();

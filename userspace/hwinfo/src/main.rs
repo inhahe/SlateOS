@@ -352,8 +352,8 @@ fn probe_display() -> Vec<HwDevice> {
     }
 
     // Framebuffer fallback.
-    if devices.is_empty() {
-        if let Ok(entries) = fs::read_dir("/sys/class/graphics") {
+    if devices.is_empty()
+        && let Ok(entries) = fs::read_dir("/sys/class/graphics") {
             for entry in entries.flatten() {
                 let name = entry.file_name().to_string_lossy().to_string();
                 if name.starts_with("fb") {
@@ -367,7 +367,6 @@ fn probe_display() -> Vec<HwDevice> {
                 }
             }
         }
-    }
 
     devices
 }

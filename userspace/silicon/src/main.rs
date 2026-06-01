@@ -65,9 +65,7 @@ fn run_silicon(args: Vec<String>) -> i32 {
         .find(|w| w[0] == "-o" || w[0] == "--output")
         .map(|w| w[1].as_str());
     let clipboard = args.iter().any(|a| a == "--to-clipboard");
-    let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+    let file = args.iter().rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
     if let Some(f) = file {

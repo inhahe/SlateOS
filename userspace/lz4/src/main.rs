@@ -171,11 +171,10 @@ fn lz4_compress(opts: &Lz4Options, personality: &str) -> i32 {
             // LZ4 is known for speed with moderate ratios
             println!("Compressed {} into {} (ratio 2.10:1, simulated)", file, out);
 
-            if !opts.keep && !opts.stdout {
-                if opts.verbose {
+            if !opts.keep && !opts.stdout
+                && opts.verbose {
                     eprintln!("{}: removed '{}'", personality, file);
                 }
-            }
         }
     }
     0
@@ -194,11 +193,10 @@ fn lz4_decompress(opts: &Lz4Options, personality: &str) -> i32 {
 
             println!("{}: {} → {} (simulated)", personality, file, out);
 
-            if !opts.keep && !opts.stdout {
-                if opts.verbose {
+            if !opts.keep && !opts.stdout
+                && opts.verbose {
                     eprintln!("{}: removed '{}'", personality, file);
                 }
-            }
         }
     }
     0

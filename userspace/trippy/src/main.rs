@@ -57,9 +57,7 @@ fn run_trip(args: Vec<String>) -> i32 {
         .map(|w| w[1].as_str())
         .unwrap_or("tui");
 
-    let target = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+    let target = args.iter().rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("example.com");
 

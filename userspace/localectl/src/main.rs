@@ -186,22 +186,20 @@ fn list_available_locales() -> Vec<String> {
     if let Ok(content) = fs::read_to_string(SUPPORTED_LOCALES) {
         for line in content.lines() {
             let line = line.trim();
-            if !line.is_empty() && !line.starts_with('#') {
-                if let Some(locale) = line.split_whitespace().next() {
+            if !line.is_empty() && !line.starts_with('#')
+                && let Some(locale) = line.split_whitespace().next() {
                     locales.push(locale.to_string());
                 }
-            }
         }
     }
 
     // Try locale -a style from /usr/lib/locale.
-    if locales.is_empty() {
-        if let Ok(entries) = fs::read_dir("/usr/lib/locale") {
+    if locales.is_empty()
+        && let Ok(entries) = fs::read_dir("/usr/lib/locale") {
             for entry in entries.flatten() {
                 locales.push(entry.file_name().to_string_lossy().to_string());
             }
         }
-    }
 
     // Fallback built-in list.
     if locales.is_empty() {
@@ -283,11 +281,10 @@ fn list_x11_layouts() -> Vec<String> {
                 in_layouts = false;
                 continue;
             }
-            if in_layouts && !line.is_empty() {
-                if let Some(name) = line.split_whitespace().next() {
+            if in_layouts && !line.is_empty()
+                && let Some(name) = line.split_whitespace().next() {
                     layouts.push(name.to_string());
                 }
-            }
         }
     }
 

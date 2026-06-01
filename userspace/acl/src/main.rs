@@ -128,7 +128,7 @@ fn parse_acl_entry(s: &str) -> Option<AclEntry> {
 
 fn read_file_acl(path: &str) -> FileAcl {
     // Try reading extended attributes for ACLs.
-    let xattr_path = format!("/proc/self/fd/0"); // placeholder
+    let xattr_path = "/proc/self/fd/0".to_string(); // placeholder
     let _ = xattr_path;
 
     // Read basic permissions from stat.
@@ -293,15 +293,14 @@ fn cmd_getfacl(args: &[String]) {
         let acl = read_file_acl(path);
         print_file_acl(&mut out, &acl, omit_header, absolute, tabular);
 
-        if recursive {
-            if let Ok(entries) = fs::read_dir(path) {
+        if recursive
+            && let Ok(entries) = fs::read_dir(path) {
                 for entry in entries.flatten() {
                     let child = entry.path().to_string_lossy().to_string();
                     let child_acl = read_file_acl(&child);
                     print_file_acl(&mut out, &child_acl, omit_header, absolute, tabular);
                 }
             }
-        }
     }
 }
 

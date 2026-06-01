@@ -103,7 +103,7 @@ fn run_helm(args: Vec<String>) -> i32 {
             println!("NAME                  CHART VERSION   APP VERSION   DESCRIPTION");
             println!("bitnami/nginx         15.0.0          1.25.0        NGINX web server");
             println!("bitnami/nginx-ingress 10.0.0          1.10.0        NGINX Ingress Controller");
-            println!("({} {} for '{}')", sub, "search", query);
+            println!("({} search for '{}')", sub, query);
             0
         }
         "create" => {

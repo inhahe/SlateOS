@@ -28,7 +28,7 @@
 
 use std::env;
 use std::fs;
-use std::io::{self, Read, Write};
+use std::io::{self};
 use std::net::UdpSocket;
 use std::path::{Path, PathBuf};
 use std::process;
@@ -618,7 +618,7 @@ fn build_release(xid: u32, mac: &[u8; 6], ciaddr: u32, server_id: u32) -> Vec<u8
 
 /// Build a DHCPDECLINE packet.
 fn build_decline(xid: u32, mac: &[u8; 6], requested_ip: u32, server_id: u32) -> Vec<u8> {
-    let mut msg = DhcpMessage::new_request(xid, mac);
+    let msg = DhcpMessage::new_request(xid, mac);
     let mut buf = Vec::with_capacity(DHCP_MAX_LEN);
     msg.serialize_header(&mut buf);
     buf.extend_from_slice(&MAGIC_COOKIE);
@@ -1189,14 +1189,13 @@ fn configure_interface(iface: &str, lease: &LeaseInfo, cfg: &Config) {
     }
 
     // Set default gateway (first router).
-    if !cfg.no_gateway {
-        if let Some(&gw) = lease.routers.first() {
+    if !cfg.no_gateway
+        && let Some(&gw) = lease.routers.first() {
             let ret = net_ioctl(NET_IF_SET_GW, iface, u64::from(gw));
             if cfg.debug {
                 eprintln!("  set gateway {} -> rc={}", ip_to_string(gw), ret);
             }
         }
-    }
 
     // Write resolv.conf.
     if !cfg.no_dns && !lease.dns_servers.is_empty() {
@@ -1534,8 +1533,8 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                 let mut buf = [0u8; DHCP_MAX_LEN];
                 match socket.recv_from(&mut buf) {
                     Ok((len, _)) => {
-                        if let Some(msg) = DhcpMessage::parse(&buf[..len]) {
-                            if msg.op == BOOTREPLY && msg.xid == new_xid {
+                        if let Some(msg) = DhcpMessage::parse(&buf[..len])
+                            && msg.op == BOOTREPLY && msg.xid == new_xid {
                                 if msg.options.msg_type == Some(DHCP_ACK) {
                                     let new_lease = LeaseInfo::from_ack(&msg, now_secs());
                                     info_log(&format!(
@@ -1554,7 +1553,6 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                                     continue;
                                 }
                             }
-                        }
                     }
                     Err(_) => {
                         // Timeout; will retry or transition to REBINDING on next loop.
@@ -1603,32 +1601,27 @@ fn run_dhcp(cfg: &Config) -> Result<(), String> {
                     .set_read_timeout(Some(Duration::from_secs(10)))
                     .ok();
                 let mut buf = [0u8; DHCP_MAX_LEN];
-                match socket.recv_from(&mut buf) {
-                    Ok((len, _)) => {
-                        if let Some(msg) = DhcpMessage::parse(&buf[..len]) {
-                            if msg.op == BOOTREPLY && msg.xid == new_xid {
-                                if msg.options.msg_type == Some(DHCP_ACK) {
-                                    let new_lease = LeaseInfo::from_ack(&msg, now_secs());
-                                    info_log(&format!(
-                                        "lease rebound: {} ({}s)",
-                                        ip_to_string(new_lease.ip_address),
-                                        new_lease.lease_time
-                                    ));
-                                    configure_interface(&cfg.interface, &new_lease, cfg);
-                                    write_lease_file(&cfg.interface, &new_lease);
-                                    state = DhcpState::Bound;
-                                    continue;
-                                }
-                                if msg.options.msg_type == Some(DHCP_NAK) {
-                                    info_log("rebinding NAK; restarting");
-                                    state = DhcpState::Init;
-                                    continue;
-                                }
+                if let Ok((len, _)) = socket.recv_from(&mut buf)
+                    && let Some(msg) = DhcpMessage::parse(&buf[..len])
+                        && msg.op == BOOTREPLY && msg.xid == new_xid {
+                            if msg.options.msg_type == Some(DHCP_ACK) {
+                                let new_lease = LeaseInfo::from_ack(&msg, now_secs());
+                                info_log(&format!(
+                                    "lease rebound: {} ({}s)",
+                                    ip_to_string(new_lease.ip_address),
+                                    new_lease.lease_time
+                                ));
+                                configure_interface(&cfg.interface, &new_lease, cfg);
+                                write_lease_file(&cfg.interface, &new_lease);
+                                state = DhcpState::Bound;
+                                continue;
+                            }
+                            if msg.options.msg_type == Some(DHCP_NAK) {
+                                info_log("rebinding NAK; restarting");
+                                state = DhcpState::Init;
+                                continue;
                             }
                         }
-                    }
-                    Err(_) => {}
-                }
                 socket
                     .set_read_timeout(Some(Duration::from_secs(cfg.timeout)))
                     .ok();
@@ -1738,11 +1731,10 @@ fn main() {
     }
 
     // Auto-detect interface if not specified.
-    if cfg.interface == "eth0" {
-        if let Some(detected) = detect_interface() {
+    if cfg.interface == "eth0"
+        && let Some(detected) = detect_interface() {
             cfg.interface = detected;
         }
-    }
 
     // Handle -k (kill daemon).
     if cfg.kill {

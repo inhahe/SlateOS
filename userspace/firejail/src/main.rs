@@ -34,8 +34,10 @@ const DEFAULT_SYMLINK_DIR: &str = "/usr/local/bin";
 
 /// Network mode for a sandbox.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Default)]
 enum NetMode {
     /// No network restrictions (host networking).
+    #[default]
     Host,
     /// No network access at all.
     None,
@@ -43,11 +45,6 @@ enum NetMode {
     Interface(String),
 }
 
-impl Default for NetMode {
-    fn default() -> Self {
-        Self::Host
-    }
-}
 
 impl fmt::Display for NetMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -130,8 +127,10 @@ struct FsConfig {
 
 /// Capability drop mode.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Default)]
 enum CapsDrop {
     /// Do not drop any capabilities.
+    #[default]
     None,
     /// Drop all capabilities.
     All,
@@ -139,11 +138,6 @@ enum CapsDrop {
     List(Vec<String>),
 }
 
-impl Default for CapsDrop {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 impl fmt::Display for CapsDrop {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -241,11 +235,10 @@ impl SandboxConfig {
         if !self.network.netfilter && profile.netfilter {
             self.network.netfilter = true;
         }
-        if matches!(self.network.mode, NetMode::Host) {
-            if let Some(ref mode) = profile.net_mode {
+        if matches!(self.network.mode, NetMode::Host)
+            && let Some(ref mode) = profile.net_mode {
                 self.network.mode = mode.clone();
             }
-        }
         for r in &profile.restrictions {
             self.filesystem.restrictions.push(r.clone());
         }
@@ -813,15 +806,12 @@ fn list_available_profiles(profile_dir: &Path) -> Vec<String> {
 
     // Disk profiles.
     if let Ok(dir) = fs::read_dir(profile_dir) {
-        for entry in dir {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("profile") {
-                    if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                        names.push(stem.to_string());
-                    }
+        for entry in dir.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("profile")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_string());
                 }
-            }
         }
     }
 
@@ -1117,11 +1107,10 @@ fn run_firejail(args: &[String]) -> i32 {
         seccomp_enabled: config.security.seccomp,
         children: Vec::new(),
     };
-    if let Err(e) = write_sandbox_file(sandbox_dir, &info) {
-        if config.debug {
+    if let Err(e) = write_sandbox_file(sandbox_dir, &info)
+        && config.debug {
             eprintln!("firejail: warning: {e}");
         }
-    }
 
     if !config.quiet {
         println!("Sandbox {sandbox_name} started (PID {our_pid})");

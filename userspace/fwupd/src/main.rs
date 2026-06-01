@@ -120,11 +120,10 @@ fn discover_devices() -> Vec<Device> {
     let mut devices = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_file() {
-            if let Some(dev) = parse_device_file(&path) {
+        if path.is_file()
+            && let Some(dev) = parse_device_file(&path) {
                 devices.push(dev);
             }
-        }
     }
 
     if devices.is_empty() {
@@ -210,8 +209,8 @@ fn read_remotes() -> Vec<Remote> {
     let mut remotes = Vec::new();
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().map(|e| e == "conf").unwrap_or(false) {
-            if let Ok(content) = std::fs::read_to_string(&path) {
+        if path.extension().map(|e| e == "conf").unwrap_or(false)
+            && let Ok(content) = std::fs::read_to_string(&path) {
                 let mut remote = Remote {
                     id: path.file_stem().unwrap_or_default().to_string_lossy().to_string(),
                     enabled: true,
@@ -232,7 +231,6 @@ fn read_remotes() -> Vec<Remote> {
                 }
                 remotes.push(remote);
             }
-        }
     }
 
     if remotes.is_empty() {
@@ -348,11 +346,10 @@ fn cmd_update(args: &[String]) {
     let devices = discover_devices();
 
     for d in &devices {
-        if let Some(ref filter) = device_filter {
-            if !d.id.contains(filter.as_str()) && !d.name.to_lowercase().contains(&filter.to_lowercase()) {
+        if let Some(ref filter) = device_filter
+            && !d.id.contains(filter.as_str()) && !d.name.to_lowercase().contains(&filter.to_lowercase()) {
                 continue;
             }
-        }
 
         if d.name.contains("System Firmware") {
             if !assume_yes {
@@ -465,11 +462,10 @@ fn cmd_verify(args: &[String]) {
     let devices = discover_devices();
 
     for d in &devices {
-        if let Some(filter) = device_filter {
-            if !d.id.contains(filter.as_str()) {
+        if let Some(filter) = device_filter
+            && !d.id.contains(filter.as_str()) {
                 continue;
             }
-        }
         println!("Verifying firmware on {}... OK", d.name);
     }
 }

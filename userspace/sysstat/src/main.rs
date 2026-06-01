@@ -508,8 +508,8 @@ struct LoadAvg {
 }
 
 fn read_loadavg() -> LoadAvg {
-    if let Some(lines) = read_file_lines("/proc/loadavg") {
-        if let Some(line) = lines.first() {
+    if let Some(lines) = read_file_lines("/proc/loadavg")
+        && let Some(line) = lines.first() {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 5 {
                 let (running, total) = if let Some(slash) = parts.get(3) {
@@ -530,7 +530,6 @@ fn read_loadavg() -> LoadAvg {
                 };
             }
         }
-    }
     LoadAvg {
         one: 0.50,
         five: 0.35,
@@ -830,8 +829,8 @@ fn print_system_header(out: &mut impl Write, tool: &str) {
         .unwrap_or_else(|| "0.1.0".to_string());
     let _ = writeln!(
         out,
-        "OurOS {} ({}) \t{}\t\t_{}_",
-        release, hostname, tool, "x86_64"
+        "OurOS {} ({}) \t{}\t\t_x86_64_",
+        release, hostname, tool
     );
 }
 
@@ -1115,11 +1114,10 @@ fn parse_sar_args(args: &[String]) -> SarOptions {
     }
     if has_flag(args, "-n") {
         // Check for -n DEV etc.
-        if let Some(kind) = get_flag_arg(args, "-n") {
-            if kind == "DEV" || kind == "dev" || kind == "ALL" || kind == "all" {
+        if let Some(kind) = get_flag_arg(args, "-n")
+            && (kind == "DEV" || kind == "dev" || kind == "ALL" || kind == "all") {
                 opts.net = true;
             }
-        }
     }
     if has_flag(args, "-d") {
         opts.disk = true;
@@ -1150,11 +1148,10 @@ fn run_sar(args: &[String], out: &mut impl Write) {
     let mut iteration = 0u64;
 
     loop {
-        if let Some(count) = opts.count {
-            if iteration >= count {
+        if let Some(count) = opts.count
+            && iteration >= count {
                 break;
             }
-        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(opts.interval));
@@ -1413,11 +1410,10 @@ fn run_iostat(args: &[String], out: &mut impl Write) {
     let mut iteration = 0u64;
 
     loop {
-        if let Some(count) = opts.count {
-            if iteration >= count {
+        if let Some(count) = opts.count
+            && iteration >= count {
                 break;
             }
-        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(opts.interval));
@@ -1484,11 +1480,10 @@ fn parse_mpstat_args(args: &[String]) -> MpstatOptions {
         }
     }
 
-    if let Some(mode) = get_flag_arg(args, "-I") {
-        if mode == "SUM" || mode == "sum" || mode == "ALL" || mode == "all" {
+    if let Some(mode) = get_flag_arg(args, "-I")
+        && (mode == "SUM" || mode == "sum" || mode == "ALL" || mode == "all") {
             opts.irq_summary = true;
         }
-    }
 
     let (interval, count) = parse_interval_count(args);
     opts.interval = interval;
@@ -1550,11 +1545,10 @@ fn run_mpstat(args: &[String], out: &mut impl Write) {
     let mut iteration = 0u64;
 
     loop {
-        if let Some(count) = opts.count {
-            if iteration >= count {
+        if let Some(count) = opts.count
+            && iteration >= count {
                 break;
             }
-        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(opts.interval));
@@ -1742,11 +1736,10 @@ fn run_pidstat(args: &[String], out: &mut impl Write) {
     let mut iteration = 0u64;
 
     loop {
-        if let Some(count) = opts.count {
-            if iteration >= count {
+        if let Some(count) = opts.count
+            && iteration >= count {
                 break;
             }
-        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(opts.interval));
@@ -1811,11 +1804,10 @@ fn run_cifsiostat(args: &[String], out: &mut impl Write) {
     let mut iteration = 0u64;
 
     loop {
-        if let Some(c) = count {
-            if iteration >= c {
+        if let Some(c) = count
+            && iteration >= c {
                 break;
             }
-        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(interval));
@@ -1873,11 +1865,10 @@ fn run_tapestat(args: &[String], out: &mut impl Write) {
     let mut iteration = 0u64;
 
     loop {
-        if let Some(c) = count {
-            if iteration >= c {
+        if let Some(c) = count
+            && iteration >= c {
                 break;
             }
-        }
 
         if iteration > 0 {
             thread::sleep(Duration::from_secs(interval));

@@ -56,9 +56,7 @@ fn run_miniserve(args: Vec<String>) -> i32 {
         .and_then(|w| w[1].parse::<u16>().ok())
         .unwrap_or(8080);
 
-    let path = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+    let path = args.iter().rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or(".");
 

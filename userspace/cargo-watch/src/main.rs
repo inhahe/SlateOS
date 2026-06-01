@@ -46,11 +46,10 @@ fn run_cargo_watch(args: Vec<String>) -> i32 {
     let mut commands: Vec<String> = Vec::new();
     let mut iter = subargs.iter();
     while let Some(a) = iter.next() {
-        if a == "-x" || a == "--exec" {
-            if let Some(cmd) = iter.next() {
+        if (a == "-x" || a == "--exec")
+            && let Some(cmd) = iter.next() {
                 commands.push(cmd.clone());
             }
-        }
     }
     if commands.is_empty() {
         commands.push("check".to_string());

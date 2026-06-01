@@ -630,7 +630,7 @@ fn parse_time_spec(s: &str) -> Option<f64> {
 
 /// Convert (year, month, day) to days since Unix epoch.
 fn ymd_to_days(year: u64, month: u64, day: u64) -> Option<u64> {
-    if month < 1 || month > 12 || day < 1 || day > 31 {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
         return None;
     }
     // Howard Hinnant's days_from_civil (inverse of days_to_ymd).
@@ -640,7 +640,7 @@ fn ymd_to_days(year: u64, month: u64, day: u64) -> Option<u64> {
     let yoe = (y - era * 400) as u64;
     let doy = (153 * m + 2) / 5 + day - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    let result = (era as i64) * 146097 + doe as i64 - 719468;
+    let result = era * 146097 + doe as i64 - 719468;
     if result < 0 {
         None
     } else {
@@ -652,11 +652,10 @@ fn ymd_to_days(year: u64, month: u64, day: u64) -> Option<u64> {
 fn simulated_now() -> f64 {
     // In a real OS this would use the system clock.
     // For simulation, use a fixed reference or env var.
-    if let Ok(v) = env::var("AUDIT_SIMULATED_NOW") {
-        if let Ok(t) = v.parse::<f64>() {
+    if let Ok(v) = env::var("AUDIT_SIMULATED_NOW")
+        && let Ok(t) = v.parse::<f64>() {
             return t;
         }
-    }
     // Default: 2025-01-01 00:00:00 UTC = 1735689600
     1_735_689_600.0
 }
@@ -694,16 +693,13 @@ impl RuleStore {
                 syscall: sc,
                 ..
             } = r
-            {
-                if *a == action && *f == filter {
-                    if let Some(target_sc) = syscall {
-                        if let Some(rule_sc) = sc {
+                && *a == action && *f == filter {
+                    if let Some(target_sc) = syscall
+                        && let Some(rule_sc) = sc {
                             return rule_sc != target_sc;
                         }
-                    }
                     return false;
                 }
-            }
             true
         });
         self.rules.len() < initial_len
@@ -894,11 +890,10 @@ fn load_audit_log(path: &str) -> Vec<AuditRecord> {
     };
     let reader = io::BufReader::new(file);
     for line in reader.lines() {
-        if let Ok(line) = line {
-            if let Some(record) = AuditRecord::parse(&line) {
+        if let Ok(line) = line
+            && let Some(record) = AuditRecord::parse(&line) {
                 records.push(record);
             }
-        }
     }
     records
 }
@@ -978,21 +973,18 @@ fn record_matches(record: &AuditRecord, criteria: &SearchCriteria) -> bool {
             return false;
         }
     }
-    if let Some(start) = criteria.start_time {
-        if record.timestamp < start {
+    if let Some(start) = criteria.start_time
+        && record.timestamp < start {
             return false;
         }
-    }
-    if let Some(end) = criteria.end_time {
-        if record.timestamp > end {
+    if let Some(end) = criteria.end_time
+        && record.timestamp > end {
             return false;
         }
-    }
-    if let Some(ref mtype) = criteria.message_type {
-        if record.msg_type != *mtype {
+    if let Some(ref mtype) = criteria.message_type
+        && record.msg_type != *mtype {
             return false;
         }
-    }
     true
 }
 
@@ -1337,20 +1329,18 @@ fn run_aureport(args: &[String]) -> i32 {
     0
 }
 
-fn filter_by_time<'a>(records: &'a [AuditRecord], start: Option<f64>, end: Option<f64>) -> Vec<&'a AuditRecord> {
+fn filter_by_time(records: &[AuditRecord], start: Option<f64>, end: Option<f64>) -> Vec<&AuditRecord> {
     records
         .iter()
         .filter(|r| {
-            if let Some(s) = start {
-                if r.timestamp < s {
+            if let Some(s) = start
+                && r.timestamp < s {
                     return false;
                 }
-            }
-            if let Some(e) = end {
-                if r.timestamp > e {
+            if let Some(e) = end
+                && r.timestamp > e {
                     return false;
                 }
-            }
             true
         })
         .collect()
@@ -2032,12 +2022,11 @@ fn run_auditd(args: &[String]) -> i32 {
     let config = AuditdConfig::parse_config_file(&config_file);
 
     // Create log directory
-    if let Some(parent) = Path::new(&config.log_file).parent() {
-        if let Err(e) = fs::create_dir_all(parent) {
+    if let Some(parent) = Path::new(&config.log_file).parent()
+        && let Err(e) = fs::create_dir_all(parent) {
             eprintln!("auditd: cannot create log directory: {e}");
             return 1;
         }
-    }
 
     // Write PID file
     let pid_file = env::var("AUDIT_PID_FILE").unwrap_or_else(|_| DEFAULT_PID_FILE.to_string());
@@ -2058,12 +2047,11 @@ fn run_auditd(args: &[String]) -> i32 {
     if config.write_logs {
         // Ensure log file exists
         let log_path = Path::new(&config.log_file);
-        if !log_path.exists() {
-            if let Err(e) = fs::File::create(log_path) {
+        if !log_path.exists()
+            && let Err(e) = fs::File::create(log_path) {
                 eprintln!("auditd: cannot create log file: {e}");
                 return 1;
             }
-        }
     }
 
     if foreground {

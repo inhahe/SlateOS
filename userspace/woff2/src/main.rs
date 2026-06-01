@@ -33,9 +33,7 @@ fn run_compress(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .next()
+    let file = args.iter().find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("font.ttf");
 
@@ -68,9 +66,7 @@ fn run_decompress(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .next()
+    let file = args.iter().find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("font.woff2");
 
@@ -94,9 +90,7 @@ fn run_info(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .next()
+    let file = args.iter().find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("font.woff2");
 

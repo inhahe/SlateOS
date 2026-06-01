@@ -187,11 +187,10 @@ fn parse_grub_defaults(content: &str) -> GrubDefaults {
     let mut defaults = GrubDefaults::default();
     let map = parse_os_release(content); // Same KEY=VALUE format.
 
-    if let Some(v) = map.get("GRUB_TIMEOUT") {
-        if let Ok(t) = v.parse::<u32>() {
+    if let Some(v) = map.get("GRUB_TIMEOUT")
+        && let Ok(t) = v.parse::<u32>() {
             defaults.timeout = t;
         }
-    }
     if let Some(v) = map.get("GRUB_DEFAULT") {
         defaults.default_entry = v.clone();
     }
@@ -751,7 +750,7 @@ fn generate_linux_entries(
     for (idx, kernel) in kernels.iter().enumerate() {
         // Primary entry.
         let title = if idx == 0 {
-            format!("{os_name}")
+            os_name.to_string()
         } else {
             format!("{os_name}, with Linux {}", kernel.version)
         };
@@ -1321,8 +1320,8 @@ fn resolve_grub_drive(device: &str) -> String {
         .unwrap_or(device);
 
     // Handle common patterns: sdX -> (hdN), nvmeXnYpZ, vdX, etc.
-    if let Some(rest) = dev_name.strip_prefix("sd") {
-        if let Some(first_char) = rest.chars().next() {
+    if let Some(rest) = dev_name.strip_prefix("sd")
+        && let Some(first_char) = rest.chars().next() {
             let disk_num = (first_char as u32).saturating_sub('a' as u32);
             // Check for partition number.
             let part = &rest[1..];
@@ -1333,35 +1332,30 @@ fn resolve_grub_drive(device: &str) -> String {
                 return format!("(hd{disk_num},{part_num})");
             }
         }
-    }
 
     if let Some(rest) = dev_name.strip_prefix("nvme") {
         // nvme0n1p1 -> disk 0, partition 1.
         let mut disk = 0u32;
         let mut part = None;
         let parts_vec: Vec<&str> = rest.split('p').collect();
-        if let Some(np) = parts_vec.first() {
-            if let Some(n_part) = np.strip_suffix("n1").or_else(|| np.strip_suffix("n0")) {
-                if let Ok(d) = n_part.parse::<u32>() {
+        if let Some(np) = parts_vec.first()
+            && let Some(n_part) = np.strip_suffix("n1").or_else(|| np.strip_suffix("n0"))
+                && let Ok(d) = n_part.parse::<u32>() {
                     disk = d;
                 }
-            }
-        }
-        if parts_vec.len() > 1 {
-            if let Some(p) = parts_vec.last() {
-                if let Ok(p) = p.parse::<u32>() {
+        if parts_vec.len() > 1
+            && let Some(p) = parts_vec.last()
+                && let Ok(p) = p.parse::<u32>() {
                     part = Some(p);
                 }
-            }
-        }
         return match part {
             Some(p) => format!("(hd{disk},{p})"),
             None => format!("(hd{disk})"),
         };
     }
 
-    if let Some(rest) = dev_name.strip_prefix("vd") {
-        if let Some(first_char) = rest.chars().next() {
+    if let Some(rest) = dev_name.strip_prefix("vd")
+        && let Some(first_char) = rest.chars().next() {
             let disk_num = (first_char as u32).saturating_sub('a' as u32);
             let part = &rest[1..];
             if part.is_empty() {
@@ -1371,9 +1365,8 @@ fn resolve_grub_drive(device: &str) -> String {
                 return format!("(hd{disk_num},{part_num})");
             }
         }
-    }
 
-    format!("(hd0)")
+    "(hd0)".to_string()
 }
 
 /// Probe partition map type.

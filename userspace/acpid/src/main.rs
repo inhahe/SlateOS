@@ -320,7 +320,7 @@ fn show_rules() -> i32 {
     let rules = default_event_rules();
     println!("ACPI Event Rules ({} loaded):", rules.len());
     println!();
-    println!("{:<20} {:<30} {}", "Name", "Pattern", "Action");
+    println!("{:<20} {:<30} Action", "Name", "Pattern");
     println!("{}", "-".repeat(80));
     for r in &rules {
         println!("{:<20} {:<30} {}", r.name, r.event_pattern, r.action);

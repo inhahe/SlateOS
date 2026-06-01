@@ -57,7 +57,7 @@ fn run_ytdlp(args: Vec<String>) -> i32 {
     }
 
     for url in &urls {
-        println!("[{}] Extracting URL: {}", "youtube", url);
+        println!("[youtube] Extracting URL: {}", url);
         println!("[info] Video123: Downloading webpage");
         println!("[info] Video123: Downloading format metadata");
 

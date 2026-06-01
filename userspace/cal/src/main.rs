@@ -298,7 +298,7 @@ fn print_full_year(out: &mut io::StdoutLock<'_>, year: i32, opts: &CalOpts, toda
     let _ = writeln!(out, "{:>pad$}{title}", "", pad = padding);
     let _ = writeln!(out);
 
-    let cols = opts.columns.min(4).max(1) as u32;
+    let cols = opts.columns.min(4).max(1);
     let mut month = 1u32;
 
     while month <= 12 {
@@ -433,7 +433,7 @@ fn main() {
         }
         1 => {
             let val: i32 = positional[0].parse().unwrap_or(today.0);
-            if val >= 1 && val <= 12 && !opts.full_year {
+            if (1..=12).contains(&val) && !opts.full_year {
                 opts.month = Some(val as u32);
                 opts.year = Some(today.0);
             } else {

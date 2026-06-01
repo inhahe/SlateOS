@@ -398,11 +398,9 @@ fn build_inode_to_pid_map() -> HashMap<u64, (u32, String)> {
             if let Some(inode_str) = link_str
                 .strip_prefix("socket:[")
                 .and_then(|s| s.strip_suffix(']'))
-            {
-                if let Ok(inode) = inode_str.parse::<u64>() {
+                && let Ok(inode) = inode_str.parse::<u64>() {
                     map.insert(inode, (pid, comm.clone()));
                 }
-            }
         }
     }
 
@@ -426,11 +424,10 @@ fn parse_route_table() -> Vec<RouteEntry> {
         if fields.len() < 8 {
             // Also try whitespace-split as a fallback.
             let ws_fields: Vec<&str> = line.split_whitespace().collect();
-            if ws_fields.len() >= 8 {
-                if let Some(entry) = parse_route_fields(&ws_fields) {
+            if ws_fields.len() >= 8
+                && let Some(entry) = parse_route_fields(&ws_fields) {
                     routes.push(entry);
                 }
-            }
             continue;
         }
         if let Some(entry) = parse_route_fields(&fields) {
@@ -525,7 +522,7 @@ fn parse_iface_stats() -> Vec<IfaceEntry> {
 
         ifaces.push(IfaceEntry {
             name,
-            mtu: read_iface_mtu(&trimmed[..colon_pos].trim().to_string()),
+            mtu: read_iface_mtu(trimmed[..colon_pos].trim()),
             rx_bytes: nums[0],
             rx_packets: nums[1],
             rx_errors: nums[2],
@@ -582,7 +579,7 @@ fn parse_protocol_stats() -> HashMap<String, ProtoStats> {
                 if proto_hdr == proto_val {
                     let stats = all_stats
                         .entry(proto_hdr.to_string())
-                        .or_insert_with(ProtoStats::default);
+                        .or_default();
 
                     for j in 1..headers.len() {
                         stats.entries.push((
@@ -847,8 +844,8 @@ fn print_connections(
     if opts.show_pid {
         let _ = writeln!(
             stdout,
-            "{:<6} {:<6} {:<6} {:<25} {:<25} {:<12} {}",
-            "Proto", "Recv-Q", "Send-Q", "Local Address", "Foreign Address", "State", "PID/Program"
+            "{:<6} {:<6} {:<6} {:<25} {:<25} {:<12} PID/Program",
+            "Proto", "Recv-Q", "Send-Q", "Local Address", "Foreign Address", "State"
         );
     } else {
         let _ = writeln!(
@@ -897,8 +894,8 @@ fn print_route_table(stdout: &mut io::StdoutLock<'_>, routes: &[RouteEntry], jso
     let _ = writeln!(stdout, "Kernel IP routing table");
     let _ = writeln!(
         stdout,
-        "{:<18} {:<18} {:<18} {:<6} {:<6} {:<4} {}",
-        "Destination", "Gateway", "Genmask", "Flags", "Metric", "Use", "Iface"
+        "{:<18} {:<18} {:<18} {:<6} {:<6} {:<4} Iface",
+        "Destination", "Gateway", "Genmask", "Flags", "Metric", "Use"
     );
 
     for r in routes {

@@ -734,7 +734,7 @@ fn userdbctl_user(args: &[String]) {
         }
     } else {
         // List all users
-        println!("{:<20} {:>5} {:>5} {}", "NAME", "UID", "GID", "REALNAME");
+        println!("{:<20} {:>5} {:>5} REALNAME", "NAME", "UID", "GID");
         for u in &users {
             println!("{:<20} {:>5} {:>5} {}", u.name, u.uid, u.gid, u.gecos);
         }
@@ -773,7 +773,7 @@ fn userdbctl_group(args: &[String]) {
             }
         }
     } else {
-        println!("{:<20} {:>5} {}", "NAME", "GID", "MEMBERS");
+        println!("{:<20} {:>5} MEMBERS", "NAME", "GID");
         for g in &groups {
             println!("{:<20} {:>5} {}", g.name, g.gid, g.members.join(","));
         }

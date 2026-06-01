@@ -44,9 +44,7 @@ fn run_usql(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let dsn = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+    let dsn = args.iter().rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("postgres://localhost/postgres");
 
@@ -79,7 +77,7 @@ fn run_usql(args: Vec<String>) -> i32 {
 
     println!("Connected to: {} ({})", dsn, db_type);
     println!("Type \\? for help, \\q to quit.");
-    println!("{}=> ", dsn.split('/').last().unwrap_or("db"));
+    println!("{}=> ", dsn.split('/').next_back().unwrap_or("db"));
     0
 }
 

@@ -110,11 +110,10 @@ fn find_mountpoint_for_device(device: &str) -> Option<String> {
 
     for line in mounts.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if parts[0] == device || parts[0] == canonical_str.as_ref() {
+        if parts.len() >= 2
+            && (parts[0] == device || parts[0] == canonical_str.as_ref()) {
                 return Some(parts[1].to_string());
             }
-        }
     }
     None
 }
@@ -262,14 +261,13 @@ fn do_eject(opts: &EjectOptions) -> i32 {
 
     match &opts.action {
         EjectAction::Eject => {
-            if !opts.no_unmount {
-                if !unmount_device(device, opts.verbose) {
+            if !opts.no_unmount
+                && !unmount_device(device, opts.verbose) {
                     eprintln!("eject: unmount of {device} failed");
                     if !opts.force {
                         return 1;
                     }
                 }
-            }
             if opts.verbose {
                 eprintln!("eject: ejecting {device}");
             }

@@ -2138,9 +2138,8 @@ fn list_all_sets(
 ) -> Result<String, String> {
     // Optional family filter
     let family_filter = if let Some(tok) = tokens.peek() {
-        Family::parse(tok).ok().map(|f| {
+        Family::parse(tok).ok().inspect(|_f| {
             tokens.next_token();
-            f
         })
     } else {
         None
@@ -2149,11 +2148,10 @@ fn list_all_sets(
     let _ = flags;
     let mut out = String::new();
     for table in &rs.tables {
-        if let Some(ff) = family_filter {
-            if table.family != ff {
+        if let Some(ff) = family_filter
+            && table.family != ff {
                 continue;
             }
-        }
         for set in &table.sets {
             format_set_nft(&mut out, table, set);
         }
@@ -2183,9 +2181,8 @@ fn list_all_maps(
     tokens: &mut Tokens<'_>,
 ) -> Result<String, String> {
     let family_filter = if let Some(tok) = tokens.peek() {
-        Family::parse(tok).ok().map(|f| {
+        Family::parse(tok).ok().inspect(|_f| {
             tokens.next_token();
-            f
         })
     } else {
         None
@@ -2193,11 +2190,10 @@ fn list_all_maps(
 
     let mut out = String::new();
     for table in &rs.tables {
-        if let Some(ff) = family_filter {
-            if table.family != ff {
+        if let Some(ff) = family_filter
+            && table.family != ff {
                 continue;
             }
-        }
         for map in &table.maps {
             format_map_nft(&mut out, table, map);
         }
@@ -2226,9 +2222,8 @@ fn list_all_counters(
     tokens: &mut Tokens<'_>,
 ) -> Result<String, String> {
     let family_filter = if let Some(tok) = tokens.peek() {
-        Family::parse(tok).ok().map(|f| {
+        Family::parse(tok).ok().inspect(|_f| {
             tokens.next_token();
-            f
         })
     } else {
         None
@@ -2236,11 +2231,10 @@ fn list_all_counters(
 
     let mut out = String::new();
     for table in &rs.tables {
-        if let Some(ff) = family_filter {
-            if table.family != ff {
+        if let Some(ff) = family_filter
+            && table.family != ff {
                 continue;
             }
-        }
         for counter in &table.counters {
             out.push_str(&format!(
                 "table {} {} {{\n\tcounter {} {{\n\t\tpackets {} bytes {}\n\t}}\n}}\n",
@@ -2256,9 +2250,8 @@ fn list_all_quotas(
     tokens: &mut Tokens<'_>,
 ) -> Result<String, String> {
     let family_filter = if let Some(tok) = tokens.peek() {
-        Family::parse(tok).ok().map(|f| {
+        Family::parse(tok).ok().inspect(|_f| {
             tokens.next_token();
-            f
         })
     } else {
         None
@@ -2266,11 +2259,10 @@ fn list_all_quotas(
 
     let mut out = String::new();
     for table in &rs.tables {
-        if let Some(ff) = family_filter {
-            if table.family != ff {
+        if let Some(ff) = family_filter
+            && table.family != ff {
                 continue;
             }
-        }
         for quota in &table.quotas {
             let inv_str = if quota.inv { "over " } else { "" };
             out.push_str(&format!(
@@ -2287,9 +2279,8 @@ fn list_all_limits(
     tokens: &mut Tokens<'_>,
 ) -> Result<String, String> {
     let family_filter = if let Some(tok) = tokens.peek() {
-        Family::parse(tok).ok().map(|f| {
+        Family::parse(tok).ok().inspect(|_f| {
             tokens.next_token();
-            f
         })
     } else {
         None
@@ -2297,11 +2288,10 @@ fn list_all_limits(
 
     let mut out = String::new();
     for table in &rs.tables {
-        if let Some(ff) = family_filter {
-            if table.family != ff {
+        if let Some(ff) = family_filter
+            && table.family != ff {
                 continue;
             }
-        }
         for limit in &table.limits {
             out.push_str(&format!(
                 "table {} {} {{\n\tlimit {} {{\n\t\trate {}/{}\n",

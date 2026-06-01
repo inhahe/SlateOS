@@ -161,11 +161,10 @@ fn scan_directory(dir: &str, opts: &HardlinkOpts, files: &mut Vec<FileInfo>) {
             if size < opts.min_size {
                 continue;
             }
-            if let Some(max) = opts.max_size {
-                if size > max {
+            if let Some(max) = opts.max_size
+                && size > max {
                     continue;
                 }
-            }
 
             // Skip empty files.
             if size == 0 {
@@ -223,7 +222,7 @@ fn deduplicate(opts: &HardlinkOpts) -> Stats {
     }
 
     // For each size group with >1 file, hash and compare.
-    for (_size, indices) in &by_size {
+    for indices in by_size.values() {
         if indices.len() < 2 {
             continue;
         }
@@ -237,7 +236,7 @@ fn deduplicate(opts: &HardlinkOpts) -> Stats {
         }
 
         // For each hash collision group, verify byte-for-byte.
-        for (_, hash_group) in &by_hash {
+        for hash_group in by_hash.values() {
             if hash_group.len() < 2 {
                 continue;
             }

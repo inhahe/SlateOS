@@ -987,8 +987,7 @@ fn read_sestatus() -> SeStatus {
     if let Ok(content) = fs::read_to_string(&config_path) {
         for line in content.lines() {
             let trimmed = line.trim();
-            if trimmed.starts_with("SELINUX=") {
-                let val = &trimmed["SELINUX=".len()..];
+            if let Some(val) = trimmed.strip_prefix("SELINUX=") {
                 status.config_mode = match val.trim().to_lowercase().as_str() {
                     "enforcing" => EnforceMode::Enforcing,
                     "permissive" => EnforceMode::Permissive,
@@ -1027,7 +1026,7 @@ fn read_sebool(name: &str) -> Option<(bool, bool)> {
     let path = format!("{}/{}", BOOLEANS_DIR, name);
     let content = fs::read_to_string(&path).ok()?;
     // Format: "active pending" e.g. "1 0"
-    let parts: Vec<&str> = content.trim().split_whitespace().collect();
+    let parts: Vec<&str> = content.split_whitespace().collect();
     if parts.len() >= 2 {
         let active = parts[0] == "1";
         let pending = parts[1] == "1";
@@ -1578,8 +1577,8 @@ fn semanage_user(args: &[String]) -> i32 {
     if args.is_empty() || args[0] == "-l" {
         let db = PolicyDb::default();
         println!(
-            "{:<20}{:<40}{:<10}{}",
-            "SELinux User", "Roles", "MLS Level", "MLS Range"
+            "{:<20}{:<40}{:<10}MLS Range",
+            "SELinux User", "Roles", "MLS Level"
         );
         println!();
         for u in &db.users {
@@ -1702,12 +1701,11 @@ fn cmd_setsebool(args: &[String]) -> i32 {
     }
 
     // Support "name=value" format
-    if value_str.is_empty() {
-        if let Some(eq_pos) = name.find('=') {
+    if value_str.is_empty()
+        && let Some(eq_pos) = name.find('=') {
             value_str = &name[eq_pos + 1..];
             name = &name[..eq_pos];
         }
-    }
 
     if name.is_empty() || value_str.is_empty() {
         eprintln!("usage: setsebool [-P] boolean value");
@@ -1846,17 +1844,16 @@ fn restorecon_path(
                     path, old_str, fc.context
                 );
             }
-            if !dry_run {
-                if let Err(e) = set_file_context(path, &fc.context) {
+            if !dry_run
+                && let Err(e) = set_file_context(path, &fc.context) {
                     eprintln!("restorecon: {}", e);
                     errors += 1;
                 }
-            }
         }
     }
 
-    if recursive {
-        if let Ok(entries) = fs::read_dir(path) {
+    if recursive
+        && let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
                 let child_path = entry.path();
                 if let Some(child_str) = child_path.to_str() {
@@ -1872,7 +1869,6 @@ fn restorecon_path(
                 }
             }
         }
-    }
 
     errors
 }
@@ -1994,8 +1990,8 @@ fn chcon_apply(path: &str, ctx: &SecurityContext, recursive: bool, verbose: bool
         errors += 1;
     }
 
-    if recursive {
-        if let Ok(entries) = fs::read_dir(path) {
+    if recursive
+        && let Ok(entries) = fs::read_dir(path) {
             for entry in entries.flatten() {
                 let child_path = entry.path();
                 if let Some(child_str) = child_path.to_str() {
@@ -2004,7 +2000,6 @@ fn chcon_apply(path: &str, ctx: &SecurityContext, recursive: bool, verbose: bool
                 }
             }
         }
-    }
 
     errors
 }
@@ -2231,31 +2226,26 @@ fn cmd_sesearch(args: &[String]) -> i32 {
         .rules
         .iter()
         .filter(|r| {
-            if let Some(kind) = rule_kind {
-                if r.kind != kind {
+            if let Some(kind) = rule_kind
+                && r.kind != kind {
                     return false;
                 }
-            }
-            if let Some(src) = source_filter {
-                if r.source != src {
+            if let Some(src) = source_filter
+                && r.source != src {
                     return false;
                 }
-            }
-            if let Some(tgt) = target_filter {
-                if r.target != tgt {
+            if let Some(tgt) = target_filter
+                && r.target != tgt {
                     return false;
                 }
-            }
-            if let Some(cls) = class_filter {
-                if r.class != cls {
+            if let Some(cls) = class_filter
+                && r.class != cls {
                     return false;
                 }
-            }
-            if let Some(perm) = perm_filter {
-                if !r.permissions.iter().any(|p| p == perm) {
+            if let Some(perm) = perm_filter
+                && !r.permissions.iter().any(|p| p == perm) {
                     return false;
                 }
-            }
             true
         })
         .collect();

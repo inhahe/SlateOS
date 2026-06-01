@@ -184,11 +184,10 @@ fn wg_show(args: &[String]) -> i32 {
     let interfaces = simulated_interfaces();
 
     for iface in &interfaces {
-        if let Some(filter) = iface_filter {
-            if filter != "all" && filter != iface.name {
+        if let Some(filter) = iface_filter
+            && filter != "all" && filter != iface.name {
                 continue;
             }
-        }
 
         println!("interface: {}", iface.name);
         println!("  public key: {}", iface.public_key);

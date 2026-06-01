@@ -271,7 +271,7 @@ fn cmd_wipefs(args: &[String]) {
                 }
             } else {
                 if !no_header {
-                    let _ = writeln!(out, "{:<12} {:>10} {:>8} {:<16} {}", "DEVICE", "OFFSET", "TYPE", "UUID", "LABEL");
+                    let _ = writeln!(out, "{:<12} {:>10} {:>8} {:<16} LABEL", "DEVICE", "OFFSET", "TYPE", "UUID");
                 }
                 for sig in &sigs {
                     let _ = writeln!(out, "{:<12} {:#10x} {:>8} {:<16} {}",

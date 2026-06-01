@@ -40,7 +40,7 @@ enum Personality {
 
 fn detect_personality(argv0: &str) -> Personality {
     let name = argv0
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(argv0);
     let name = name.strip_suffix(".exe").unwrap_or(name);
@@ -276,7 +276,7 @@ struct Bitmap {
 
 impl Bitmap {
     fn new(chunk_count: u64) -> Self {
-        let byte_count = ((chunk_count + 7) / 8) as usize;
+        let byte_count = chunk_count.div_ceil(8) as usize;
         Self {
             bits: vec![0u8; byte_count],
             chunk_count,
@@ -311,7 +311,7 @@ impl Bitmap {
         }
         let byte_idx = (chunk / 8) as usize;
         let bit_idx = (chunk % 8) as u8;
-        self.bits.get(byte_idx).map_or(false, |b| (b >> bit_idx) & 1 == 1)
+        self.bits.get(byte_idx).is_some_and(|b| (b >> bit_idx) & 1 == 1)
     }
 
     fn dirty_count(&self) -> u64 {

@@ -372,8 +372,8 @@ fn read_symbols(pid: u32) -> Vec<SymbolEntry> {
     if let Ok(contents) = fs::read_to_string(&path) {
         for line in contents.lines() {
             let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 4 {
-                if let (Ok(start), Ok(end)) = (
+            if parts.len() >= 4
+                && let (Ok(start), Ok(end)) = (
                     u64::from_str_radix(parts[0], 16),
                     u64::from_str_radix(parts[1], 16),
                 ) {
@@ -384,7 +384,6 @@ fn read_symbols(pid: u32) -> Vec<SymbolEntry> {
                         dso: parts[3].to_string(),
                     });
                 }
-            }
         }
     }
     syms
@@ -1341,12 +1340,12 @@ fn run_top(args: &[String]) {
     );
     println!();
     println!(
-        "{:>8}  {:>6}  {:<30}  {}",
-        "Overhead", "PID", "Symbol", "Shared Object",
+        "{:>8}  {:>6}  {:<30}  Shared Object",
+        "Overhead", "PID", "Symbol",
     );
     println!(
-        "{:>8}  {:>6}  {:<30}  {}",
-        "--------", "------", "------------------------------", "-------------",
+        "{:>8}  {:>6}  {:<30}  -------------",
+        "--------", "------", "------------------------------",
     );
 
     if entries.is_empty() {

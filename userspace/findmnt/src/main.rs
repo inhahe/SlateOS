@@ -235,11 +235,10 @@ fn parse_fstab() -> Vec<FstabEntry> {
 fn apply_filters(entries: &[MountEntry], opts: &Options) -> Vec<MountEntry> {
     entries.iter().filter(|e| {
         // Source filter.
-        if let Some(ref src) = opts.source_filter {
-            if e.source != *src {
+        if let Some(ref src) = opts.source_filter
+            && e.source != *src {
                 return false;
             }
-        }
         // Target filter.
         if let Some(ref tgt) = opts.target_filter {
             if opts.submounts {

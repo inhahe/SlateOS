@@ -337,8 +337,8 @@ fn cmd_list(args: &[String]) {
     }
 
     if !no_legend {
-        println!("{:<20} {:>6} {:>6} {:>6} {:<10} {:<8} {}",
-            "TIME", "PID", "UID", "GID", "SIG", "COREFILE", "EXE");
+        println!("{:<20} {:>6} {:>6} {:>6} {:<10} {:<8} EXE",
+            "TIME", "PID", "UID", "GID", "SIG", "COREFILE");
     }
 
     for d in &dumps {
@@ -435,11 +435,10 @@ fn cmd_dump(args: &[String]) {
                     output_path = args[i].clone();
                 }
             }
-            _ if !args[i].starts_with('-') => {
-                if match_arg.is_empty() {
+            _ if !args[i].starts_with('-')
+                && match_arg.is_empty() => {
                     match_arg = args[i].clone();
                 }
-            }
             _ => {}
         }
         i += 1;
@@ -497,11 +496,10 @@ fn cmd_debug(args: &[String]) {
                     debugger = args[i].clone();
                 }
             }
-            _ if !args[i].starts_with('-') => {
-                if match_arg.is_empty() {
+            _ if !args[i].starts_with('-')
+                && match_arg.is_empty() => {
                     match_arg = args[i].clone();
                 }
-            }
             _ => {}
         }
         i += 1;

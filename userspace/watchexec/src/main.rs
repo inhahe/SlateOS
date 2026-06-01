@@ -69,11 +69,10 @@ fn run_watchexec(args: Vec<String>) -> i32 {
         let mut paths = Vec::new();
         let mut iter = args.iter();
         while let Some(a) = iter.next() {
-            if a == "-w" || a == "--watch" {
-                if let Some(p) = iter.next() {
+            if (a == "-w" || a == "--watch")
+                && let Some(p) = iter.next() {
                     paths.push(p.as_str());
                 }
-            }
         }
         if paths.is_empty() {
             paths.push(".");

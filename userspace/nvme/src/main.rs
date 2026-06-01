@@ -483,7 +483,7 @@ fn cmd_fw_log(args: &[String]) -> i32 {
 fn cmd_get_feature(args: &[String]) -> i32 {
     let ctrl_name = get_ctrl_name(args);
     let feature_id = args.get(1)
-        .and_then(|s| s.strip_prefix("--feature-id=").or_else(|| Some(s.as_str())))
+        .and_then(|s| s.strip_prefix("--feature-id=").or(Some(s.as_str())))
         .unwrap_or("0x06");
 
     println!("get-feature:{} feature:{} value:0x00010001", ctrl_name, feature_id);

@@ -293,7 +293,6 @@ fn cmd_swapon(args: &[String]) {
         }
     } else if devices.is_empty() {
         // No devices and no -a: already showed summary above.
-        return;
     } else {
         for device in &devices {
             if is_swap_active(device) {

@@ -226,11 +226,10 @@ fn find_mountpoints(device: &str) -> Vec<String> {
 
     for line in content.lines() {
         let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 2 {
-            if parts[0] == device || parts[0] == canonical_str.as_ref() {
+        if parts.len() >= 2
+            && (parts[0] == device || parts[0] == canonical_str.as_ref()) {
                 mounts.push(parts[1].to_string());
             }
-        }
     }
     mounts
 }

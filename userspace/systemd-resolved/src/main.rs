@@ -509,14 +509,13 @@ fn cmd_query(state: &ResolverState, args: &[String]) {
         }
 
         // Check if it is an IP (reverse lookup).
-        if name.contains(':') || name.chars().all(|c| c.is_ascii_digit() || c == '.') {
-            if let Some(host) = reverse_lookup(name) {
+        if (name.contains(':') || name.chars().all(|c| c.is_ascii_digit() || c == '.'))
+            && let Some(host) = reverse_lookup(name) {
                 let _ = writeln!(out, "{name} -- {host}");
                 let _ = writeln!(out);
                 let _ = writeln!(out, "-- Information acquired via protocol DNS in 0.3ms.");
                 continue;
             }
-        }
 
         let ips = resolve_hostname(name);
         if ips.is_empty() {
@@ -538,8 +537,8 @@ fn cmd_status(state: &ResolverState, args: &[String]) {
     let mut out = stdout.lock();
 
     // If a specific link is requested, show only that link.
-    if let Some(link_id) = args.first() {
-        if !link_id.starts_with('-') {
+    if let Some(link_id) = args.first()
+        && !link_id.starts_with('-') {
             if let Some(link) = state.find_link(link_id) {
                 print_link_status(&mut out, link);
                 return;
@@ -547,7 +546,6 @@ fn cmd_status(state: &ResolverState, args: &[String]) {
             eprintln!("resolvectl status: unknown interface: {link_id}");
             process::exit(1);
         }
-    }
 
     // Global status.
     let _ = writeln!(out, "Global");

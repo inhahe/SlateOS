@@ -280,7 +280,7 @@ const HEX_CHARS: [char; 16] = [
 
 /// Decode a hex string to bytes. Returns None if the string is invalid.
 fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     let mut bytes = Vec::with_capacity(s.len() / 2);
@@ -2071,7 +2071,7 @@ fn cmd_nvdefine(ctx: &mut TpmContext, args: &[String]) -> i32 {
     };
 
     let platform = match find_flag(args, "--hierarchy") {
-        Some(h) => h.to_ascii_lowercase() == "platform",
+        Some(h) => h.eq_ignore_ascii_case("platform"),
         None => false,
     };
 
@@ -2253,11 +2253,7 @@ fn cmd_nvread(ctx: &mut TpmContext, args: &[String]) -> i32 {
         None => {
             match ctx.nv_find(index) {
                 Some(nv) => {
-                    if offset >= nv.size {
-                        0
-                    } else {
-                        nv.size - offset
-                    }
+                    nv.size.saturating_sub(offset)
                 }
                 None => {
                     eprintln!("tpm2_nvread: NV index 0x{index:08X} not found");

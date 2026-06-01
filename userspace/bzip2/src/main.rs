@@ -14,7 +14,7 @@ use std::process;
 
 // ── Constants ──────────────────────────────────────────────────────────
 
-const _BZ_MAGIC: [u8; 3] = [b'B', b'Z', b'h'];
+const _BZ_MAGIC: [u8; 3] = *b"BZh";
 const _BZ_BLOCK_MAGIC: [u8; 6] = [0x31, 0x41, 0x59, 0x26, 0x53, 0x59];
 
 // ── Data structures ────────────────────────────────────────────────────
@@ -146,11 +146,10 @@ fn bz2_compress(opts: &Bz2Options, personality: &str) -> i32 {
             println!("{}: {} → {} (simulated, block size {}00k)",
                 personality, file, out, opts.block_size);
 
-            if !opts.keep && !opts.stdout {
-                if opts.verbose {
+            if !opts.keep && !opts.stdout
+                && opts.verbose {
                     eprintln!("{}: removed '{}'", personality, file);
                 }
-            }
         }
     }
     0
@@ -173,11 +172,10 @@ fn bz2_decompress(opts: &Bz2Options, personality: &str) -> i32 {
 
             println!("{}: {} → {} (simulated)", personality, file, out);
 
-            if !opts.keep && !opts.stdout {
-                if opts.verbose {
+            if !opts.keep && !opts.stdout
+                && opts.verbose {
                     eprintln!("{}: removed '{}'", personality, file);
                 }
-            }
         }
     }
     0

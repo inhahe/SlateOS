@@ -141,13 +141,13 @@ fn parse_ld_so_conf() -> Vec<String> {
             if let Some(include_path) = line.strip_prefix("include ") {
                 // Glob include (e.g., include /etc/ld.so.conf.d/*.conf).
                 let include_path = include_path.trim();
-                if let Some(parent) = Path::new(include_path).parent() {
-                    if let Ok(entries) = fs::read_dir(parent) {
+                if let Some(parent) = Path::new(include_path).parent()
+                    && let Ok(entries) = fs::read_dir(parent) {
                         for entry in entries.flatten() {
                             let entry_path = entry.path();
-                            if let Some(ext) = entry_path.extension() {
-                                if ext == "conf" {
-                                    if let Ok(sub_content) = fs::read_to_string(&entry_path) {
+                            if let Some(ext) = entry_path.extension()
+                                && ext == "conf"
+                                    && let Ok(sub_content) = fs::read_to_string(&entry_path) {
                                         for sub_line in sub_content.lines() {
                                             let sub_line = sub_line.trim();
                                             if !sub_line.is_empty() && !sub_line.starts_with('#') {
@@ -155,11 +155,8 @@ fn parse_ld_so_conf() -> Vec<String> {
                                             }
                                         }
                                     }
-                                }
-                            }
                         }
                     }
-                }
             } else {
                 dirs.push(line.to_string());
             }
@@ -170,8 +167,8 @@ fn parse_ld_so_conf() -> Vec<String> {
     if let Ok(entries) = fs::read_dir(LD_SO_CONF_D) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map(|e| e == "conf").unwrap_or(false) {
-                if let Ok(content) = fs::read_to_string(&path) {
+            if path.extension().map(|e| e == "conf").unwrap_or(false)
+                && let Ok(content) = fs::read_to_string(&path) {
                     for line in content.lines() {
                         let line = line.trim();
                         if !line.is_empty() && !line.starts_with('#') && !dirs.contains(&line.to_string()) {
@@ -179,7 +176,6 @@ fn parse_ld_so_conf() -> Vec<String> {
                         }
                     }
                 }
-            }
         }
     }
 
@@ -396,11 +392,11 @@ fn cmd_ldconfig(args: &[String]) {
             LibType::Unknown => "?",
         };
         let key = (e.soname.clone(), arch_key.to_string());
-        if seen.contains_key(&key) {
-            false
-        } else {
-            seen.insert(key, true);
+        if let std::collections::hash_map::Entry::Vacant(e) = seen.entry(key) {
+            e.insert(true);
             true
+        } else {
+            false
         }
     }).collect();
 

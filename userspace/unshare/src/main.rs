@@ -275,12 +275,11 @@ fn cmd_unshare(args: &[String]) {
     let mut err = stderr.lock();
 
     // User namespace mapping.
-    if opts.namespaces & CLONE_NEWUSER != 0 {
-        if opts.map_root_user {
+    if opts.namespaces & CLONE_NEWUSER != 0
+        && opts.map_root_user {
             // Would write to /proc/self/uid_map and /proc/self/gid_map.
             let _ = writeln!(err, "unshare: mapping current user to root in user namespace");
         }
-    }
 
     // Mount propagation.
     if opts.namespaces & CLONE_NEWNS != 0 {
@@ -289,12 +288,11 @@ fn cmd_unshare(args: &[String]) {
     }
 
     // Time namespace offsets.
-    if opts.namespaces & CLONE_NEWTIME != 0 {
-        if let Some(offset) = opts.monotonic {
+    if opts.namespaces & CLONE_NEWTIME != 0
+        && let Some(offset) = opts.monotonic {
             // Would write to /proc/self/timens_offsets.
             let _ = offset;
         }
-    }
 
     // Build command.
     let command = if opts.command.is_empty() {

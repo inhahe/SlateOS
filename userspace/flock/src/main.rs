@@ -189,26 +189,23 @@ fn acquire_lock(path: &str, opts: &FlockOpts) -> bool {
                     return false;
                 }
 
-                if let Some(dl) = deadline {
-                    if Instant::now() >= dl {
+                if let Some(dl) = deadline
+                    && Instant::now() >= dl {
                         if opts.verbose {
                             eprintln!("flock: timeout waiting for lock");
                         }
                         return false;
                     }
-                }
 
                 // Shared locks can coexist.
-                if opts.lock_type == LockType::Shared {
-                    if let Ok(content) = fs::read_to_string(&lock_path) {
-                        if content.starts_with("shared:") {
+                if opts.lock_type == LockType::Shared
+                    && let Ok(content) = fs::read_to_string(&lock_path)
+                        && content.starts_with("shared:") {
                             if opts.verbose {
                                 eprintln!("flock: shared lock compatible, proceeding");
                             }
                             return true;
                         }
-                    }
-                }
 
                 // Wait and retry.
                 thread::sleep(Duration::from_millis(100));
@@ -401,14 +398,13 @@ fn cmd_lockfile(args: &[String]) {
                         break;
                     }
 
-                    if let Some(dl) = deadline {
-                        if Instant::now() >= dl {
+                    if let Some(dl) = deadline
+                        && Instant::now() >= dl {
                             // Check for stale lock.
                             let _ = fs::remove_file(file);
                             thread::sleep(Duration::from_secs(opts.suspend));
                             continue;
                         }
-                    }
 
                     thread::sleep(Duration::from_secs(opts.sleeptime));
                 }

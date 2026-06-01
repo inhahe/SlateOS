@@ -488,14 +488,13 @@ fn cmd_inotifywait(args: &[String]) {
 
     for event in &events {
         // Check timeout.
-        if let Some(dur) = timeout_dur {
-            if start.elapsed() >= dur {
+        if let Some(dur) = timeout_dur
+            && start.elapsed() >= dur {
                 if !opts.quiet {
                     eprintln!("inotifywait: timeout");
                 }
                 process::exit(2);
             }
-        }
 
         // Apply filters.
         if should_exclude(&event.name, &opts.exclude, &opts.include) {
@@ -518,12 +517,11 @@ fn cmd_inotifywait(args: &[String]) {
         }
     }
 
-    if !opts.monitor && events.is_empty() {
-        if let Some(_dur) = timeout_dur {
+    if !opts.monitor && events.is_empty()
+        && let Some(_dur) = timeout_dur {
             eprintln!("inotifywait: timeout");
             process::exit(2);
         }
-    }
 }
 
 // ============================================================================

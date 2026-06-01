@@ -649,7 +649,7 @@ impl SnapState {
             &format!("Setup snap {} (100) security profiles", name),
         ];
         // Collect to avoid borrow conflict
-        let task_refs: Vec<&str> = task_strs.iter().copied().collect();
+        let task_refs: Vec<&str> = task_strs.to_vec();
         self.add_change("install-snap", &summary_str, &task_refs);
         Ok(msg)
     }
@@ -765,7 +765,7 @@ impl SnapState {
         ));
         for entry in &self.store_catalog {
             let name_match = entry.name.contains(query) || entry.summary.to_lowercase().contains(&query.to_lowercase());
-            let section_match = section.map_or(true, |_s| true);
+            let section_match = section.is_none_or(|_s| true);
             if name_match && section_match {
                 lines.push(format!(
                     "{:<20} {:<12} {:<15} {:<10} {}",
@@ -792,7 +792,7 @@ impl SnapState {
             lines.push(format!("summary:      {}", snap.summary));
             lines.push(format!("publisher:    {}", snap.developer));
             lines.push(format!("store-url:    https://snapcraft.io/{}", snap.name));
-            lines.push(format!("license:      unset"));
+            lines.push("license:      unset".to_string());
             lines.push(format!("description:  {}", if snap.description.is_empty() { &snap.summary } else { &snap.description }));
             lines.push(format!("type:         {}", snap.snap_type.as_str()));
             lines.push(format!("snap-id:      {}", make_snap_id(&snap.name)));
@@ -1180,11 +1180,10 @@ impl SnapState {
     fn known_assertions(&self, assertion_type: Option<&str>) -> Vec<String> {
         let mut lines = Vec::new();
         for a in &self.assertions {
-            if let Some(at) = assertion_type {
-                if a.assertion_type != at {
+            if let Some(at) = assertion_type
+                && a.assertion_type != at {
                     continue;
                 }
-            }
             lines.push(format!("type: {}", a.assertion_type));
             for (k, v) in &a.headers {
                 lines.push(format!("  {}: {}", k, v));

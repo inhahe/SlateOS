@@ -33,13 +33,6 @@ use std::os::fd::IntoRawFd;
 use std::process;
 
 // ============================================================================
-// Syscall numbers
-// ============================================================================
-
-const SYS_IOCTL: u64 = 16;
-const SYS_CLOSE: u64 = 3;
-
-// ============================================================================
 // ioctl request codes
 // ============================================================================
 
@@ -220,47 +213,36 @@ struct Winsize {
 }
 
 // ============================================================================
-// Inline asm syscall helpers
+// libc bindings
 // ============================================================================
+//
+// Terminal settings go through the OurOS posix libc `ioctl()` symbol, which
+// dispatches TCGETS/TCSETS/TIOCGWINSZ/TIOCSWINSZ to the kernel tty path.  We
+// must NOT hand-roll a raw `syscall` here: the native ABI has no SYS_IOCTL —
+// syscall number 16 is SYS_CLOCK_ADJTIME, so a raw `ioctl` would step the
+// system clock with the termios pointer reinterpreted as a signed nanosecond
+// delta.  Likewise fd close goes through the libc `close()` symbol (native
+// syscall 3 is unassigned).  The posix Termios/Winsize structs are
+// `#[repr(C)]` with identical layout to ours (NCCS = 32), so the pointers are
+// ABI-compatible.
 
-/// Three-argument syscall.
-///
-/// # Safety
-/// Caller must ensure the syscall number and arguments are valid.
-unsafe fn syscall3(nr: u64, a1: u64, a2: u64, a3: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+#[cfg(unix)]
+unsafe extern "C" {
+    /// posix libc `ioctl` symbol — dispatches terminal control requests.
+    fn ioctl(fd: i32, request: u64, arg: *mut u8) -> i32;
+    /// posix libc `close` symbol — releases a file descriptor.
+    fn close(fd: i32) -> i32;
 }
 
-/// One-argument syscall (used for SYS_CLOSE).
-///
-/// # Safety
-/// Caller must ensure the syscall number and argument are valid.
-unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
-    let ret: i64;
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+// Host (test-only, non-Unix) stubs so the crate still compiles and unit tests
+// for the pure-logic functions run.  These are never reached on the real OS.
+#[cfg(not(unix))]
+unsafe fn ioctl(_fd: i32, _request: u64, _arg: *mut u8) -> i32 {
+    -1
+}
+#[cfg(not(unix))]
+unsafe fn close(_fd: i32) -> i32 {
+    -1
 }
 
 // ============================================================================
@@ -272,8 +254,9 @@ unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
 /// Returns `Err` with an OS error message on failure.
 fn tcgets(fd: i32) -> Result<Termios, String> {
     let mut t = Termios::default();
-    // SAFETY: TCGETS reads a Termios struct; pointer is valid and sized correctly.
-    let rc = unsafe { syscall3(SYS_IOCTL, fd as u64, TCGETS, &raw mut t as u64) };
+    // SAFETY: TCGETS reads a Termios struct; the pointer is valid, sized
+    // correctly, and ABI-identical to the posix libc Termios.
+    let rc = unsafe { ioctl(fd, TCGETS, (&raw mut t).cast::<u8>()) };
     if rc < 0 {
         Err(format!("TCGETS failed: error {}", -rc))
     } else {
@@ -283,8 +266,9 @@ fn tcgets(fd: i32) -> Result<Termios, String> {
 
 /// Write new termios settings for file descriptor `fd`.
 fn tcsets(fd: i32, t: &Termios) -> Result<(), String> {
-    // SAFETY: TCSETS reads a Termios struct; pointer is valid for the duration of the call.
-    let rc = unsafe { syscall3(SYS_IOCTL, fd as u64, TCSETS, t as *const Termios as u64) };
+    // SAFETY: TCSETS reads a Termios struct; the pointer is valid for the
+    // duration of the call.  The posix ioctl handler does not mutate it.
+    let rc = unsafe { ioctl(fd, TCSETS, core::ptr::from_ref(t).cast::<u8>().cast_mut()) };
     if rc < 0 {
         Err(format!("TCSETS failed: error {}", -rc))
     } else {
@@ -295,8 +279,9 @@ fn tcsets(fd: i32, t: &Termios) -> Result<(), String> {
 /// Read the window size for file descriptor `fd`.
 fn tiocgwinsz(fd: i32) -> Result<Winsize, String> {
     let mut ws = Winsize::default();
-    // SAFETY: TIOCGWINSZ reads a Winsize struct; pointer is valid and sized correctly.
-    let rc = unsafe { syscall3(SYS_IOCTL, fd as u64, TIOCGWINSZ, &raw mut ws as u64) };
+    // SAFETY: TIOCGWINSZ reads a Winsize struct; the pointer is valid, sized
+    // correctly, and ABI-identical to the posix libc Winsize.
+    let rc = unsafe { ioctl(fd, TIOCGWINSZ, (&raw mut ws).cast::<u8>()) };
     if rc < 0 {
         Err(format!("TIOCGWINSZ failed: error {}", -rc))
     } else {
@@ -306,8 +291,9 @@ fn tiocgwinsz(fd: i32) -> Result<Winsize, String> {
 
 /// Write new window size for file descriptor `fd`.
 fn tiocswinsz(fd: i32, ws: &Winsize) -> Result<(), String> {
-    // SAFETY: TIOCSWINSZ reads a Winsize struct; pointer is valid for the call.
-    let rc = unsafe { syscall3(SYS_IOCTL, fd as u64, TIOCSWINSZ, ws as *const Winsize as u64) };
+    // SAFETY: TIOCSWINSZ reads a Winsize struct; the pointer is valid for the
+    // duration of the call.
+    let rc = unsafe { ioctl(fd, TIOCSWINSZ, core::ptr::from_ref(ws).cast::<u8>().cast_mut()) };
     if rc < 0 {
         Err(format!("TIOCSWINSZ failed: error {}", -rc))
     } else {
@@ -1090,8 +1076,10 @@ fn open_device(path: &str) -> Result<i32, String> {
 
 /// Close a raw fd opened by `open_device`.
 fn close_fd(fd: i32) {
-    // SAFETY: fd was obtained from open_device; close is idempotent on valid fds.
-    unsafe { syscall1(SYS_CLOSE, fd as u64) };
+    // SAFETY: fd was obtained from open_device (a live posix fd); close()
+    // releases it via the libc symbol (native syscall 3 is unassigned, so a
+    // raw syscall here would be a no-op error).
+    unsafe { close(fd) };
 }
 
 // ============================================================================

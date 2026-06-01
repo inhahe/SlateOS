@@ -1464,13 +1464,36 @@
 ##           IOCTL=16=CLOCK_ADJTIME) — std stdio + fix TCP + drop/replace ioctl
 ##     screen (CONSOLE_WRITE=0=YIELD CONSOLE_READ_CHAR=1=EXIT) — should be
 ##           100/101, or migrate to std stdio; CLOCK_MONOTONIC=10/SPAWN=500 ok
-##     stty (IOCTL=16=CLOCK_ADJTIME CLOSE=3) — needs a real termios path;
-##           no SYS_IOCTL exists.  Investigate what terminal-attr syscall (if
-##           any) the kernel exposes; may need a new syscall.
+##     [x] stty (was IOCTL=16=CLOCK_ADJTIME CLOSE=3) — FIXED 2026-06-01. The
+##           premise that stty "needs a NEW termios syscall" was wrong: the
+##           posix libc ALREADY exposes a real ioctl() symbol (posix/src/ioctl.rs)
+##           that dispatches TCGETS/TCSETS/TIOCGWINSZ/TIOCSWINSZ to the kernel
+##           tty path, plus a close() symbol. stty is a std binary that links
+##           the sysroot libc, so the proper fix (matching the `stat` pattern)
+##           is to bind those C symbols via `unsafe extern "C"` (cfg(unix), with
+##           inert host stubs for cfg(not(unix)) test builds) and drop the
+##           hand-rolled raw `syscall` wrappers entirely. The posix Termios /
+##           Winsize structs are #[repr(C)] with identical layout to stty's
+##           (NCCS=32), so the pointers are ABI-compatible. This removes the
+##           harmful path where every termios call fired SYS_CLOCK_ADJTIME=16
+##           with the struct pointer reinterpreted as a signed-ns clock delta.
+##           checks clean for x86_64-ouros; my edited region is clippy-clean.
+##           NOTE (pre-existing, out of scope): userspace/stty otherwise has
+##           pervasive clippy::pedantic violations (unreadable_literal on the
+##           flag-bit constants, similar_names, doc_markdown "OurOS",
+##           struct_field_names on Termios/Winsize) across lines 1-932 — the
+##           crate has never passed `#![deny(clippy::pedantic)]`. A dedicated
+##           lint-cleanup pass for stty (and likely sibling userspace tools) is
+##           tracked as future work; not done here to keep the syscall-bug fix
+##           focused.
 ##   WRONG NETWORK NUMBERS (TCP send/recv/close off by one: they use
 ##   SEND=802 RECV=803 CLOSE=804 instead of 801/802/803):
-##     curl, dig (dig ALSO has UDP_BIND=820=DNS_RESOLVE SEND=821 RECV=822 —
-##           should be 810/811/812), whois — one-line const fixes each.
+##     [x] curl, dig, whois — VERIFIED FIXED 2026-06-01 (spot-checked the
+##           SYS_TCP_*/SYS_UDP_* consts: curl/whois use SEND=801 RECV=802
+##           CLOSE=803; dig uses TCP 801/802/803 and UDP_BIND=810 SEND=811
+##           RECV=812). Also verified sftp/telnet TCP consts are now 801/802/803
+##           (the off-by-one flagged earlier is resolved). These were corrected
+##           in an earlier session; the audit verdict above was stale.
 ##   NO SUCH SYSCALL — these assume syscalls that don't exist; needs design
 ##   decision on what the real net/fs-admin ABI is before they can work:
 ##     dhcpcd fw ifconfig ip nft route  (all NET_IOCTL=810 = UDP_BIND — there
@@ -1801,13 +1824,20 @@
 ##   than userspace writing ACPI registers.  TRIGGER: when the service-manager
 ##   shutdown protocol or a dedicated power syscall lands in the roadmap.
 ##
-##  TERMINAL DESIGN GAP — stty needs a termios/terminal-attribute path:
-##   stty currently targets IOCTL=16 (which is CLOCK_ADJTIME) — there is no
-##   SYS_IOCTL on OurOS, so there is no way to get/set terminal attributes
-##   (baud, echo, canonical mode, etc.) from userspace today.  DEFERRED until
-##   the kernel/console exposes a terminal-attribute syscall (or a console
-##   control channel).  Until then stty cannot be fixed correctly; documented
-##   here rather than wired to the wrong syscall.
+##  TERMINAL DESIGN GAP — stty termios path (RESOLVED 2026-06-01):
+##   This entry's premise was WRONG. There is no raw SYS_IOCTL, but the posix
+##   libc provides a real ioctl() SYMBOL (posix/src/ioctl.rs) that dispatches
+##   TCGETS/TCSETS/TIOCGWINSZ/TIOCSWINSZ to the kernel tty path. stty now binds
+##   that symbol via `extern "C"` instead of firing the raw syscall (which hit
+##   CLOCK_ADJTIME=16). See the FIXED stty entry in the userspace-ABI audit
+##   above. REMAINING (genuine, smaller) limitation: the posix ioctl TCGETS
+##   currently returns a default cooked-mode termios for Console fds and TCSETS
+##   is accepted-but-not-enforced (roadmap 1219), so stty can READ a sensible
+##   default and SET without error, but real per-terminal attribute changes
+##   (baud/echo/canonical) won't take effect until the kernel console grows
+##   genuine per-fd termios state. That is a console-driver feature, not an ABI
+##   gap — stty is now wired to the correct interface and will work as soon as
+##   the console honors it.
 ##
 ##  DESIGN GAP — no ARP mutation syscalls (arp -d / -s / -D):
 ##   OurOS exposes SYS_ARP_TABLE=843 (read) and SYS_NET_IF_INFO=842 (interface

@@ -1,3 +1,37 @@
+## BUG (noticed+FIXED 2026-05-31): CoW resolve over-decrement (mm/cow.rs resolve_cow_fault).
+##   The shared-frame branch decremented the old frame's refcount once PER resolved 4 KiB PTE
+##   (up to 4x for a full 16 KiB frame group) instead of once per address-space reference.
+##   The per-frame refcount counts ADDRESS-SPACE references to the 16 KiB frame (set to 1 at
+##   alloc_frame, +1 per fork, -1 per teardown which frees once per frame group via
+##   step_by(HW_PAGES_PER_FRAME)), NOT per-PTE. So a write fault that broke CoW would drop the
+##   count by up to 4 when it should drop by 1 — freeing a frame the forked child still maps
+##   (use-after-free / cross-process data corruption) once fork() started sharing frames.
+##   Latent until now because nothing called clone_address_space_cow yet; the existing
+##   test_cow_resolve_shared self-test masked it by deliberately not asserting the post-resolve
+##   refcount. FIX: decrement exactly once when pages_resolved > 0. Rewrote the comment block to
+##   document the per-address-space convention (cites Linux do_wp_page/copy_page_range, which
+##   also refcounts per struct page and adjusts once per broken shared mapping). Verified by the
+##   new test_clone_address_space_cow self-test (refcounts go 1->2 on fork, child maps same phys).
+
+## Judgment Calls (fork() implementation, 2026-05-31):
+##   (a) SWAP-DURING-FORK: rather than add refcounting to swap slots, clone_user_half swaps any
+##       swapped-out parent page back IN first (swap::swap_in_page with the fault handler's fixed
+##       default flags PRESENT|WRITABLE|USER|NX) before CoW-sharing it. Simpler and avoids a
+##       swap-slot refcount table. Reversible: if swap-slot refcounting is added later, fork can
+##       share slots directly. Affects kernel/src/mm/cow.rs::clone_user_half.
+##   (b) FILE-HANDLE INHERITANCE requires fs::handle refcounting. The child's userspace libc fd
+##       table is CoW-copied, so it references the SAME kernel handle ids; the kernel cannot
+##       rewrite that userspace table, so fork must bump refcounts on the existing ids (shared
+##       open file description, same offset = correct POSIX fork semantics) rather than allocate
+##       new ids. Pipes/sockets/eventfd already do same-id refcounted dup. fs::handle did NOT
+##       refcount OpenFile (each id was a distinct entry, and handle::dup allocated a NEW id with
+##       an independent cursor — that is dup()-of-fd semantics, not fork sharing). FIX in
+##       progress: add refcount to OpenFile + fs::handle::dup_shared(id) (bump refcount, return
+##       same id) + refcount-aware close. NOTE: the existing handle::dup independent-cursor
+##       behaviour is ALSO wrong for the POSIX dup()/dup2() syscalls (which share the description);
+##       that is a separate pre-existing bug, tracked here, not fixed in the fork change to keep
+##       scope contained — fork uses the new dup_shared path.
+
 ## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 6 — stale DOCTESTS.
 ##   libservicebus's module-level doc examples didn't compile (2 failing doctests): they
 ##   imported a non-existent `EventHandler`, called `EventLoop::register` (real method is

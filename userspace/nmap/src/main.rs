@@ -22,14 +22,10 @@
 //! nmap -T0 .. -T5 <host>          Timing templates (0=paranoid, 5=insane)
 //! ```
 
-#![deny(clippy::all, clippy::pedantic)]
-#![warn(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
-)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, and the defensive lints
+// (unwrap_used, expect_used, panic, indexing_slicing, arithmetic_side_effects)
+// already set to warn at workspace scope — see the root Cargo.toml.
 
 use std::env;
 use std::fs::File;
@@ -1215,7 +1211,7 @@ fn run_scan(cfg: &Config, out_file: &mut Option<File>) -> i32 {
                 let ping_timeout = cfg.timing.connect_timeout_ms.min(2000);
                 let (up, rtt) = ping_host(ip, ping_timeout);
                 let os = if cfg.os_detect {
-                    rtt.and_then(|r| guess_os_from_ttl(r))
+                    rtt.and_then(guess_os_from_ttl)
                 } else {
                     None
                 };

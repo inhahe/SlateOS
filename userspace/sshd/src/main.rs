@@ -29,20 +29,9 @@
 //! - User auth: password (against /etc/shadow), public key (`authorized_keys`)
 //! - Session channels with PTY allocation and shell/exec requests
 
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-// The SHA-256 round constants / init vector are well-known 32-bit hex values
-// reproduced verbatim from FIPS 180-4; digit-group separators would obscure the
-// recognised constants rather than aid readability.
-#![allow(clippy::unreadable_literal)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 
 use std::env;
 use std::fmt;

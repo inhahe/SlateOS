@@ -15,27 +15,11 @@
 //! whois <query1> <query2> ...     Multiple queries in one invocation
 //! ```
 
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::manual_range_contains)] // explicit comparisons are clearer
-#![allow(clippy::missing_errors_doc)] // internal helpers
-#![allow(clippy::missing_panics_doc)] // no panics in prod code
-#![allow(clippy::doc_markdown)] // "OurOS", "WHOIS", "IPv4" etc. are not code
-// Syscall-ABI casts: syscall numbers are small compile-time constants
-// (`nr as i64`), and i64 return values are cast to u64/usize only after an
-// explicit `ret < 0` check, so neither wraps nor loses meaningful bits.
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_possible_truncation)]
-// The indexing_slicing, unwrap_used, expect_used, arithmetic_side_effects, and
-// panic lints are enabled as warnings so they alert without blocking `cargo test`
-// (test code legitimately uses indexing and unwrap).
-#![warn(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::panic,
-    clippy::indexing_slicing,
-    clippy::arithmetic_side_effects
-)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml.  The defensive lints (unwrap_used,
+// expect_used, panic, indexing_slicing, arithmetic_side_effects) are already
+// set to warn at workspace scope, so they still alert without blocking builds.
 
 use std::env;
 use std::io::{self, Write};

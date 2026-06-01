@@ -18,27 +18,9 @@
 //! - DEFLATE: LZ77 + fixed Huffman encoding; full decompression including
 //!   stored, fixed, and dynamic Huffman blocks
 
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_possible_wrap,
-    clippy::cast_lossless,
-    // Size/ratio values are only ever shown to the user as rounded
-    // human-readable strings; f64 precision loss is immaterial here.
-    clippy::cast_precision_loss,
-    // star_pi/star_si and similar paired indices are clearer kept parallel.
-    clippy::similar_names,
-    // Table-header rows pass column labels as positional args; inlining the
-    // literals would break alignment with the width-specified data columns.
-    clippy::print_literal,
-    clippy::wildcard_imports,
-    clippy::too_many_lines,
-    clippy::too_many_arguments,
-    clippy::module_name_repetitions,
-    clippy::struct_excessive_bools,
-    clippy::doc_markdown,
-)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 
 use std::env;
 use std::fs::{self, File};
@@ -1874,12 +1856,12 @@ fn list_archive(entries: &[ZipEntry], opts: &UnzipOptions) {
     if !opts.quiet {
         if opts.verbose {
             println!(
-                "{:>10} {:>5} {:>10} {:>10}  {}  {}",
-                "Length", "Method", "Compressed", "Ratio", "Date/Time", "Name"
+                "{:>10} {:>5} {:>10} {:>10}  Date/Time  Name",
+                "Length", "Method", "Compressed", "Ratio"
             );
             println!("{SEP_VERBOSE}");
         } else {
-            println!("{:>10}  {}  {}", "Length", "Date/Time        ", "Name");
+            println!("{:>10}  Date/Time          Name", "Length");
             println!("{SEP_PLAIN}");
         }
     }

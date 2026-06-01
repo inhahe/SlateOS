@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "OurOS gdb - debugger (gdb/gdbserver)"
 [dependencies]
+
+[lints]
+workspace = true

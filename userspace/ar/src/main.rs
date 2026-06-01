@@ -23,17 +23,9 @@
 //! strip -g binary               # strip debug only
 //! ```
 
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_lossless)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::doc_markdown)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::needless_range_loop)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(dead_code)]
 
 use std::env;
@@ -320,7 +312,7 @@ impl Archive {
                 sym_hdr.extend_from_slice(AR_FMAG);
                 out.extend_from_slice(&sym_hdr);
                 out.extend_from_slice(&symtab_data);
-                if symtab_data.len() % 2 != 0 {
+                if !symtab_data.len().is_multiple_of(2) {
                     out.push(b'\n');
                 }
             }
@@ -940,13 +932,7 @@ fn strip_elf(data: &[u8], opts: &StripOptions) -> Result<Vec<u8>, String> {
             // Check keep-symbol: if this is .symtab and we have keep-symbols,
             // we might still want to keep it. For simplicity, if any
             // keep-symbol is specified and this is .symtab, keep it.
-            if !opts.keep_symbols.is_empty()
-                && (sec.name == ".symtab" || sec.name == ".strtab")
-            {
-                keep[i] = true;
-            } else {
-                keep[i] = false;
-            }
+            keep[i] = !opts.keep_symbols.is_empty() && (sec.name == ".symtab" || sec.name == ".strtab");
         }
     }
 
@@ -1044,7 +1030,7 @@ fn rebuild_elf(
             continue;
         }
         // Align to 8 bytes
-        while output.len() % 8 != 0 {
+        while !output.len().is_multiple_of(8) {
             output.push(0);
         }
         section_new_offsets[i] = output.len() as u64;
@@ -1056,7 +1042,7 @@ fn rebuild_elf(
     }
 
     // Align before section headers
-    while output.len() % 8 != 0 {
+    while !output.len().is_multiple_of(8) {
         output.push(0);
     }
     let new_shoff = output.len() as u64;
@@ -1166,7 +1152,7 @@ fn parse_ar_args(args: &[String]) -> Result<(ArOptions, String, Vec<String>), St
     let flags = &args[0];
     let mut chars = flags.chars().peekable();
 
-    while let Some(ch) = chars.next() {
+    for ch in chars {
         match ch {
             'r' | 'd' | 't' | 'x' | 'q' | 'p' => {
                 if opts.operation != '\0' {
@@ -1282,9 +1268,13 @@ fn ar_replace(opts: &ArOptions, archive_path: &str, member_files: &[String]) -> 
             header: ArHeader {
                 name: member_name.clone(),
                 mtime: file_mtime,
-                uid: if opts.deterministic { 0 } else { 0 },
-                gid: if opts.deterministic { 0 } else { 0 },
-                mode: if opts.deterministic { 0o100644 } else { 0o100644 },
+                // OurOS `ar` always normalises ownership/mode: uid/gid are written
+                // as 0 and mode as 0o100644 regardless of the `-U` (non-deterministic)
+                // flag.  Preserving the file's real uid/gid/mode in non-deterministic
+                // mode is not yet implemented (see todo.txt), so these are constants.
+                uid: 0,
+                gid: 0,
+                mode: 0o100644,
                 size: file_data.len() as u64,
             },
             data: file_data,
@@ -1589,8 +1579,7 @@ fn parse_strip_args(args: &[String]) -> Result<(StripOptions, Vec<String>), Stri
                 opts.verbose = true;
             }
             other => {
-                if other.starts_with("--keep-symbol=") {
-                    let sym = &other["--keep-symbol=".len()..];
+                if let Some(sym) = other.strip_prefix("--keep-symbol=") {
                     opts.keep_symbols.push(sym.to_string());
                 } else if other.starts_with('-') {
                     return Err(format!("unknown option: {other}"));

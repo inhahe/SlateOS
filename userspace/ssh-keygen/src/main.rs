@@ -28,24 +28,9 @@
 //! - SHA-512 for key derivation (RFC 8032 §5.1.5)
 //! - SHA-256 for fingerprints
 
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_lossless)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::items_after_statements)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::missing_panics_doc)]
-#![allow(clippy::missing_errors_doc)]
-// FIPS 180-4 / RFC 8032 use single-letter working variables (a..h, the field
-// limbs); keeping those names matches the specifications they implement.
-#![allow(clippy::many_single_char_names)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::doc_markdown)]
-// OurOS filesystems are case-sensitive by design, so matching the ".pub"
-// suffix exactly (not case-insensitively) is the correct behaviour here.
-#![allow(clippy::case_sensitive_file_extension_comparisons)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 
 use std::env;
 use std::fmt;

@@ -44,20 +44,9 @@
 //! - `quit` / `q`                Exit debugger
 
 #![cfg_attr(not(test), no_main)]
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_lossless)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::doc_markdown)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::if_not_else)]
-#![allow(clippy::match_same_arms)]
-#![allow(clippy::needless_range_loop)]
-#![allow(clippy::manual_let_else)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(dead_code)]
 
 use std::io::{self, Write};
@@ -588,12 +577,7 @@ impl ElfInfo {
 
     /// Find section by name.
     fn find_section(&self, name: &[u8]) -> Option<&Section> {
-        for sec in &self.sections {
-            if bytes_eq(sec.name_bytes(), name) {
-                return Some(sec);
-            }
-        }
-        None
+        self.sections.iter().find(|&sec| bytes_eq(sec.name_bytes(), name)).map(|v| v as _)
     }
 
     /// Get bytes at a given virtual address for a given length.
@@ -1101,17 +1085,12 @@ fn tokenize_expr(input: &[u8]) -> Vec<ExprToken> {
 }
 
 fn is_hex_digit(ch: u8) -> bool {
-    matches!(ch, b'0'..=b'9' | b'a'..=b'f' | b'A'..=b'F')
+    ch.is_ascii_hexdigit()
 }
 
 /// Find the index of a register by name.
 fn find_register_index(name: &[u8]) -> Option<usize> {
-    for i in 0..REG_COUNT {
-        if bytes_eq(name, REG_NAMES[i]) {
-            return Some(i);
-        }
-    }
-    None
+    (0..REG_COUNT).find(|&i| bytes_eq(name, REG_NAMES[i]))
 }
 
 /// Recursive descent expression evaluator.
@@ -3126,7 +3105,7 @@ impl Debugger {
             b"set" => {
                 self.cmd_set(rest, out);
             }
-            b"watch" | b"w" if !bytes_eq(cmd, b"w") || rest.len() > 0 => {
+            b"watch" | b"w" if !bytes_eq(cmd, b"w") || !rest.is_empty() => {
                 self.cmd_watch(rest, out);
             }
             b"watch" => {
@@ -3490,6 +3469,11 @@ fn print_version(out: &mut dyn Write) {
 
 #[cfg(not(test))]
 #[unsafe(no_mangle)]
+// `main` is the C ABI entry point: the runtime hands us `argv` as a raw pointer
+// and we must dereference it to read the arguments.  The signature is fixed by
+// the ABI, so the function cannot be marked `unsafe fn`; the dereference is
+// guarded by the `argc > 0` check below.
+#[allow(clippy::not_unsafe_ptr_arg_deref)]
 pub extern "C" fn main(argc: i32, argv: *const *const u8) -> i32 {
     let stdout = io::stdout();
     let mut out = io::BufWriter::new(stdout.lock());

@@ -23,16 +23,9 @@
 //! size -A binary              # section sizes (SysV)
 //! ```
 
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_lossless)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::doc_markdown)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::similar_names)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 #![allow(dead_code)]
 
 use std::env;
@@ -225,7 +218,7 @@ enum Personality {
 fn detect_personality() -> Personality {
     let argv0 = env::args().next().unwrap_or_default();
     let name = argv0
-        .rsplit(|c| c == '/' || c == '\\')
+        .rsplit(['/', '\\'])
         .next()
         .unwrap_or(&argv0);
     // Strip .exe suffix for Windows compatibility
@@ -1849,12 +1842,12 @@ fn display_relocations(
         // For dynamic relocations, check if the associated symtab is DYNSYM
         if dynamic_only {
             let linked = elf.sections.get(sec.sh_link as usize);
-            if linked.map_or(true, |s| s.sh_type != SHT_DYNSYM) {
+            if linked.is_none_or(|s| s.sh_type != SHT_DYNSYM) {
                 continue;
             }
         } else {
             let linked = elf.sections.get(sec.sh_link as usize);
-            if linked.map_or(false, |s| s.sh_type == SHT_DYNSYM) {
+            if linked.is_some_and(|s| s.sh_type == SHT_DYNSYM) {
                 continue;
             }
         }
@@ -2131,7 +2124,7 @@ fn run_nm() -> Result<()> {
             if opts.no_sort {
                 // No sorting
             } else if opts.numeric_sort {
-                syms.sort_by(|a, b| a.st_value.cmp(&b.st_value));
+                syms.sort_by_key(|a| a.st_value);
             } else {
                 // Default: sort by name
                 syms.sort_by(|a, b| a.name.cmp(&b.name));

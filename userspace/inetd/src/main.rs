@@ -42,17 +42,9 @@
 //! ```
 
 #![cfg_attr(not(test), no_main)]
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::must_use_candidate)]
-#![allow(clippy::struct_excessive_bools)]
-#![allow(clippy::too_many_lines)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::similar_names)]
-#![allow(clippy::needless_range_loop)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 
 use std::collections::HashMap;
 use std::env;
@@ -282,7 +274,12 @@ fn process_spawn(path: &str) -> Result<u64, InetdError> {
 fn sys_exit(code: i32) -> ! {
     // SAFETY: SYS_EXIT takes one scalar argument and never returns.
     unsafe { syscall1(SYS_EXIT, code as u64) };
-    loop {}
+    // SYS_EXIT does not return, so this loop is unreachable; it exists only to
+    // satisfy the `!` return type.  Use `spin_loop` rather than a bare `loop {}`
+    // so we hint the CPU instead of burning a tight empty loop if we ever reach it.
+    loop {
+        core::hint::spin_loop();
+    }
 }
 
 // ============================================================================
@@ -1259,11 +1256,7 @@ impl ConnectionTracker {
 /// Handle the "echo" service for a TCP connection: read data and send it back.
 fn handle_tcp_echo(handle: u64) {
     let mut buf = [0u8; 4096];
-    loop {
-        let n = match tcp_recv(handle, &mut buf) {
-            Ok(n) => n,
-            Err(_) => break,
-        };
+    while let Ok(n) = tcp_recv(handle, &mut buf) {
         if n == 0 {
             break; // EOF
         }
@@ -1589,11 +1582,8 @@ fn poll_udp_sockets(slots: &[ListenerSlot]) -> Vec<(usize, Vec<u8>, u32, u16)> {
             continue;
         }
         let mut buf = [0u8; 65535];
-        match udp_recv(slot.handle, &mut buf) {
-            Ok((n, src_ip, src_port)) => {
-                received.push((i, buf[..n].to_vec(), src_ip, src_port));
-            }
-            Err(_) => {}
+        if let Ok((n, src_ip, src_port)) = udp_recv(slot.handle, &mut buf) {
+            received.push((i, buf[..n].to_vec(), src_ip, src_port));
         }
     }
     received
@@ -1818,7 +1808,7 @@ fn run_daemon(cfg: &Config) -> i32 {
         // Periodic housekeeping: garbage-collect the connection tracker
         // every ~100 iterations.
         gc_counter = gc_counter.wrapping_add(1);
-        if gc_counter % 100 == 0 {
+        if gc_counter.is_multiple_of(100) {
             let now_ms = clock_monotonic_ms();
             tracker.garbage_collect(now_ms);
         }

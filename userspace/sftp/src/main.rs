@@ -30,19 +30,9 @@
 //! rm file, rename old new, chmod mode file, stat file, lstat file,
 //! !command, help/?, bye/quit/exit
 
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::module_name_repetitions)]
-#![allow(clippy::missing_errors_doc)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_possible_wrap)]
-// Human-readable size formatting deliberately casts byte counts to f64; the
-// minor precision loss for multi-petabyte files is irrelevant to a display string.
-#![allow(clippy::cast_precision_loss)]
-// Interactive command handlers share a uniform `fn(..) -> Result<(), SftpError>`
-// signature so the dispatcher can treat them uniformly with `?`; a few handlers
-// are trivially infallible, which would otherwise trip `unnecessary_wraps`.
-#![allow(clippy::unnecessary_wraps)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 
 use std::env;
 use std::fmt;
@@ -1026,7 +1016,7 @@ impl RemoteConn {
         self.send_packet(&payload)?;
         match self.recv_packet()? {
             SftpPacket::Status {
-                code, message: _, ..
+                code, ..
             } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to CLOSE".into())),
@@ -1063,7 +1053,7 @@ impl RemoteConn {
         self.send_packet(&payload)?;
         match self.recv_packet()? {
             SftpPacket::Status {
-                code, message: _, ..
+                code, ..
             } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to WRITE".into())),
@@ -1148,7 +1138,7 @@ impl RemoteConn {
         self.send_packet(&payload)?;
         match self.recv_packet()? {
             SftpPacket::Status {
-                code, message: _, ..
+                code, ..
             } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to MKDIR".into())),
@@ -1165,7 +1155,7 @@ impl RemoteConn {
         self.send_packet(&payload)?;
         match self.recv_packet()? {
             SftpPacket::Status {
-                code, message: _, ..
+                code, ..
             } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to RMDIR".into())),
@@ -1182,7 +1172,7 @@ impl RemoteConn {
         self.send_packet(&payload)?;
         match self.recv_packet()? {
             SftpPacket::Status {
-                code, message: _, ..
+                code, ..
             } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to REMOVE".into())),
@@ -1200,7 +1190,7 @@ impl RemoteConn {
         self.send_packet(&payload)?;
         match self.recv_packet()? {
             SftpPacket::Status {
-                code, message: _, ..
+                code, ..
             } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to RENAME".into())),
@@ -1218,7 +1208,7 @@ impl RemoteConn {
         self.send_packet(&payload)?;
         match self.recv_packet()? {
             SftpPacket::Status {
-                code, message: _, ..
+                code, ..
             } if code == status::SSH_FX_OK => Ok(()),
             SftpPacket::Status { code, message, .. } => Err(SftpError::Remote { code, message }),
             _ => Err(SftpError::Protocol("unexpected response to SETSTAT".into())),

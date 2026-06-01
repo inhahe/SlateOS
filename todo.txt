@@ -416,6 +416,45 @@
 ##       Result contract) to `from_code` + updated its 3 test call sites (should_implement_trait).
 ##   All 17 now pass clippy clean; tests all green (1115 across the batch); ouros builds OK.
 ##
+## BUG (noticed+FIXED 2026-06-01): 15 userspace tools carried the SAME divergent
+##   per-file `#![deny(clippy::all, clippy::pedantic)]` + ad-hoc allow-list WITHOUT
+##   workspace lints — ar, ftp, gdb, inetd, ldd, nmap, objdump, readelf, sftp,
+##   ssh-keygen, sshd, telnet, whois, zip, stty. Same ROOT CAUSE as the 17-apps
+##   entry above. These crates were only ever `build`-checked (cargo build does NOT
+##   run clippy), so the per-file deny had been masking latent clippy::all errors.
+##   PROPER FIX (same as the 17-apps precedent): added `[lints] workspace = true` to
+##   each Cargo.toml and replaced the per-file deny+allow block with the standard
+##   explanatory comment. nmap/whois also had a redundant per-file `#![warn(...)]`
+##   for the defensive lints (unwrap_used/expect_used/panic/indexing_slicing/
+##   arithmetic_side_effects) — removed because the root [workspace.lints.clippy]
+##   already sets all five to warn. Preserved non-clippy `#![allow(dead_code)]`
+##   where present (ar, gdb, objdump).
+##   GENUINE clippy::all (deny) issues this exposed were then fixed properly — the
+##   bulk via `clippy --fix` (with pedantic+defensive lints suppressed so only
+##   clippy::all autofixes applied), and these remaining non-autofixable ones by hand:
+##     - inetd: `loop {}` after the non-returning SYS_EXIT (empty_loop) →
+##       `loop { core::hint::spin_loop(); }`; handle_tcp_echo `loop { match recv }`
+##       (while_let_loop) → `while let Ok(n) = tcp_recv(..)`.
+##     - ar: `uid/gid/mode: if opts.deterministic { 0 } else { 0 }` (if_same_then_else)
+##       — both branches were identical because non-deterministic metadata
+##       preservation was never implemented. Collapsed to the constants (uid=0,
+##       gid=0, mode=0o100644) with a comment. SEE LIMITATION below.
+##     - readelf: section-header ES column used `{:#02x}` (unused_format_specs — the
+##       `#` "0x" prefix already exceeds width 2). GNU readelf prints entsize as a
+##       plain 2-digit field under the 2-wide "ES" header → `{:02x}`.
+##     - gdb: `find_register_index` for-loop (manual_find) → `(0..REG_COUNT).find(..)`;
+##       C-ABI `main(argc, argv: *const *const u8)` derefs argv (not_unsafe_ptr_arg_deref)
+##       — signature is fixed by the ABI so it can't be `unsafe fn`; added a justified
+##       `#[allow(clippy::not_unsafe_ptr_arg_deref)]` (deref guarded by `argc > 0`).
+##   nmap/objdump/sftp/zip had only autofixable clippy::all errors. All 15 now pass
+##   clippy with warnings only (pedantic/defensive, per policy); ouros builds OK.
+##   LIMITATION (ar non-deterministic metadata): OurOS `ar` always writes normalised
+##   member metadata (uid=0, gid=0, mode=0o100644) regardless of the `-U`/
+##   non-deterministic flag. GNU ar in non-deterministic mode preserves the file's
+##   real uid/gid/mode. Not yet implemented — std on the ouros target (cfg unix)
+##   exposes mode via MetadataExt, but uid/gid plumbing is pending. Low priority:
+##   determinism is the common/default case and matters more for reproducible builds.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/wordle — build break PLUS a PRODUCTION borrow bug
 ##   PLUS data bugs. (1) Cargo.toml was missing its [dependencies] section, so `use guitk::*`
 ##   failed (crate not in scope) and the bin/tests would not compile; added
@@ -1478,14 +1517,13 @@
 ##           harmful path where every termios call fired SYS_CLOCK_ADJTIME=16
 ##           with the struct pointer reinterpreted as a signed-ns clock delta.
 ##           checks clean for x86_64-ouros; my edited region is clippy-clean.
-##           NOTE (pre-existing, out of scope): userspace/stty otherwise has
-##           pervasive clippy::pedantic violations (unreadable_literal on the
-##           flag-bit constants, similar_names, doc_markdown "OurOS",
-##           struct_field_names on Termios/Winsize) across lines 1-932 — the
-##           crate has never passed `#![deny(clippy::pedantic)]`. A dedicated
-##           lint-cleanup pass for stty (and likely sibling userspace tools) is
-##           tracked as future work; not done here to keep the syscall-bug fix
-##           focused.
+##           NOTE (RESOLVED 2026-06-01): the pre-existing pervasive
+##           clippy::pedantic debt in userspace/stty (unreadable_literal,
+##           similar_names, doc_markdown "OurOS", struct_field_names) is now
+##           handled by adopting the workspace lint policy — stty (and 14
+##           sibling userspace tools) now use `[lints] workspace = true`, which
+##           sets pedantic=warn so the crate is clippy-clean (warnings only).
+##           See the "15 userspace tools" FIXED entry near the top of this file.
 ##   WRONG NETWORK NUMBERS (TCP send/recv/close off by one: they use
 ##   SEND=802 RECV=803 CLOSE=804 instead of 801/802/803):
 ##     [x] curl, dig, whois — VERIFIED FIXED 2026-06-01 (spot-checked the

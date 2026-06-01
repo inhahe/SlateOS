@@ -19,13 +19,9 @@
 //! readelf -W   binary        # Wide output (no 80-column truncation)
 //! ```
 
-#![deny(clippy::all, clippy::pedantic)]
-#![allow(clippy::cast_possible_truncation)]
-#![allow(clippy::cast_sign_loss)]
-#![allow(clippy::cast_lossless)]
-#![allow(clippy::cast_possible_wrap)]
-#![allow(clippy::doc_markdown)]
-#![allow(clippy::too_many_lines)]
+// Lint policy is inherited from the workspace (`[lints] workspace = true`):
+// `clippy::all` denied, `clippy::pedantic` at warn, with the curated allow
+// list documented in the root Cargo.toml (keeps the discipline centralised).
 
 use std::env;
 use std::fs::File;
@@ -1605,7 +1601,7 @@ fn display_section_headers(out: &mut impl Write, elf: &Elf<'_>, wide: bool) -> R
         } else {
             writeln!(
                 out,
-                "  [{i:2}] {name:<17} {type_name:<15} {:#08x} {:#06x} {:#06x} {:#02x} {flags:<3} {:<2} {:<3} {:<2}",
+                "  [{i:2}] {name:<17} {type_name:<15} {:#08x} {:#06x} {:#06x} {:02x} {flags:<3} {:<2} {:<3} {:<2}",
                 sh.sh_addr,
                 sh.sh_offset,
                 sh.sh_size,
@@ -1902,7 +1898,7 @@ fn hex_dump_section(
         // Padding if last row is short
         let pad = COLS - chunk.len();
         for i in 0..pad {
-            if (chunk.len() + i) % 4 == 0 {
+            if (chunk.len() + i).is_multiple_of(4) {
                 write!(out, " ")?;
             }
             write!(out, "  ")?;

@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "OurOS ar/ranlib/strip - archive and object file tools"
 [dependencies]
+
+[lints]
+workspace = true

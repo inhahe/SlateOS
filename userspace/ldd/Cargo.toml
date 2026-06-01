@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 description = "OurOS shared library dependency lister"
 [dependencies]
+
+[lints]
+workspace = true

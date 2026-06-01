@@ -455,6 +455,32 @@
 ##   exposes mode via MetadataExt, but uid/gid plumbing is pending. Low priority:
 ##   determinism is the common/default case and matters more for reproducible builds.
 ##
+## BUG (noticed+FIXED 2026-06-01): latent clippy::all sweep of hand-written + template
+##   userspace tools. Same ROOT CAUSE class as above: crates carrying their own
+##   `#![deny(clippy::all)]` were only ever `build`-checked (cargo build does NOT run
+##   clippy), so deny-level errors had accumulated unseen. Three sub-batches fixed:
+##     (1) scp / ftpd / nmcli — autofix (collapsible let-chains, redundant_pattern_
+##         matching→is_err(), manual is_multiple_of, trim_end_matches array pattern)
+##         + scp hand-fix (saturating_mul/checked_div for pct & speed, avoid overflow).
+##     (2) lsof / fdisk / parted — autofix + hand-fixes: lsof if_same_then_else in
+##         format_net_name; fdisk eq_op typo bug in strip_exe (`tail[0]==b'.' ||
+##         tail[0]==b'.'` was a duplicated condition — a REAL bug, fixed to one check);
+##         parted wrong_self_convention (to_bytes_le took &self on a Copy struct),
+##         manual_strip (0x hex), wildcard_in_or_patterns, unnecessary to_string, and
+##         too_many_arguments (refactored format_partx_row's 10 positional params into
+##         a PartxRow<'a> struct; updated prod + both test call sites).
+##     (3) 94 `-cli` SaaS-integration template tools sharing the basename() helper —
+##         two template-wide deny errors: let_and_return (`let s = ...; s`) and
+##         manual_pattern_char_comparison (`|c| c == '/' || c == '\\'`). Collapsed both
+##         to `p.rsplit(['/', '\\']).next().unwrap_or(p)` uniformly (one occurrence per
+##         file, output-equivalent). The OTHER -cli template variant (no basename helper,
+##         e.g. telnyx/sysdig/qdrant/route53/bunny/apigee/clerk/...) was sampled and is
+##         already clean. Genuine hand-written system tools verified clean this pass:
+##         socat, cryptsetup, fail2ban, logrotate, losetup, cgroup, blockdev, dmsetup,
+##         prlimit, irqbalance, updatedb, useradd, xattr, cpupower, thermald, sbctl,
+##         resolvectl, mkinitramfs, earlyoom, fontconfig, chrony, update-alternatives,
+##         apparmor, avahi, cups, pipewire, pulseaudio, e2fsprogs, openssl-tool, certbot.
+##
 ## BUG (noticed+FIXED 2026-05-31): apps/wordle — build break PLUS a PRODUCTION borrow bug
 ##   PLUS data bugs. (1) Cargo.toml was missing its [dependencies] section, so `use guitk::*`
 ##   failed (crate not in scope) and the bin/tests would not compile; added

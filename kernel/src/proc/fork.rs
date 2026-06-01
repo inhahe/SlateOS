@@ -443,22 +443,53 @@ pub fn self_test() -> KernelResult<()> {
 fn test_fork_clones_pcb() -> KernelResult<()> {
     use crate::mm::frame::{self, PhysFrame};
     use crate::mm::page_table::{self, VirtAddr};
-    use super::spawn::{spawn_process, SpawnOptions};
 
-    // Spawn a parent process from the canonical test ELF (entry at
-    // 0x0000_0040_0000_0000).
-    let elf_data = super::elf::build_test_elf_public();
-    let options = SpawnOptions::new("fork-test-parent");
-    let result = spawn_process(&elf_data, &options)?;
-    let parent_pid = result.pid;
+    // Build a parent process that owns a real user address space but has
+    // NO scheduler thread.  We deliberately avoid `spawn_process` here:
+    // spawn creates a *runnable* ring-3 thread (with a kernel stack and a
+    // stack canary) that this test never runs.  Tearing such a thread
+    // down via `pcb::destroy` (which frees the address space but does NOT
+    // dequeue threads — its SAFETY contract assumes the caller already
+    // killed them) left a dangling Ready run-queue entry that triple-
+    // faulted on the first preemptive context switch (deterministic boot
+    // hang at the APIC-timer self-test).  Worse, boot self-tests run
+    // *before* the per-boot stack canary is randomized (main.rs
+    // `init_canary`), so a never-run thread's stack carried the fixed
+    // fallback canary and tripped a false-positive "stack overflow" halt
+    // when the post-preemption reaper checked it against the now-random
+    // canary.  The CoW-clone construction path only needs an address
+    // space to duplicate, so we create one directly: `pcb::create`
+    // allocates a PML4 (kernel half cloned from boot) and
+    // `elf::load_segments` maps the test binary's code segment — no task,
+    // no kernel stack, no canary, no scheduler involvement, no teardown
+    // hazard.
+    let parent_pid = pcb::create("fork-test-parent", 0);
 
-    let parent_pml4 = match pcb::get_pml4(parent_pid) {
+    let parent_pml4 = match pcb::get_pml4(parent_pid).filter(|&p| p != 0) {
         Some(p) => p,
         None => {
             pcb::destroy(parent_pid);
-            return Err(KernelError::InternalError);
+            return Err(KernelError::OutOfMemory);
         }
     };
+
+    // Map the canonical test ELF's loadable segment (code at entry
+    // 0x0000_0040_0000_0000) into the parent address space.
+    let elf_data = super::elf::build_test_elf_public();
+    let elf_file = match super::elf::ElfFile::parse(&elf_data) {
+        Ok(f) => f,
+        Err(e) => {
+            pcb::destroy(parent_pid);
+            return Err(e);
+        }
+    };
+    // SAFETY: `parent_pml4` is the freshly-created, non-zero PML4 for
+    // `parent_pid`; the process has no threads, so no other CPU is using
+    // this address space — satisfying `load_segments`' safety contract.
+    if let Err(e) = unsafe { super::elf::load_segments(&elf_file, parent_pml4) } {
+        pcb::destroy(parent_pid);
+        return Err(e);
+    }
 
     // The code frame at the entry virtual address is shared CoW after
     // fork, so its refcount must increase by exactly 1.
@@ -526,6 +557,9 @@ fn test_fork_clones_pcb() -> KernelResult<()> {
     }
 
     // Teardown both processes (frees address spaces, drops refcounts).
+    // Neither process has threads — the parent was built without one and
+    // build_fork_child never spawns one — so plain `destroy` is exactly
+    // what `pcb::destroy`'s no-live-threads contract expects.
     pcb::destroy(child_pid);
     pcb::destroy(parent_pid);
 

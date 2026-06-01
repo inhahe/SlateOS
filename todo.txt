@@ -1,3 +1,74 @@
+## BUG (noticed+FIXED 2026-05-31): fork() self-test spawned a real ring-3 thread it never ran,
+##   causing TWO distinct boot crashes (one after the other, as each was fixed). proc/fork.rs::
+##   test_fork_clones_pcb originally used spawn_process to get a parent address space to clone.
+##   spawn_process creates a *runnable* ring-3 thread (kernel stack + stack canary) that the test
+##   never runs and tears down with pcb::destroy.
+##   CRASH 1 (dangling thread → deterministic hang): pcb::destroy/destroy_process_resources frees
+##   the address space (PML4 + mapped frames) but deliberately does NOT dequeue threads — its SAFETY
+##   comment assumes the caller already killed them. So the never-run thread stayed Ready on the
+##   scheduler run queue pointing at a freed address space. Boot ran cooperatively (no preemption)
+##   through all later self-tests until apic::self_test() (main.rs:1124) enabled preemptive
+##   scheduling ("[boot] Interrupts enabled — preemptive scheduling active") and spun; the first
+##   timer tick dispatched the dangling thread → freed CR3 / IRETQ into a torn-down ring-3 address
+##   space → triple-fault → QEMU halts (-no-reboot). Symptom: serial frozen at 1275 lines right after
+##   "[apic] Running APIC timer self-test...", reproduced identically twice (deterministic, not the
+##   flaky timing hangs elsewhere in this file). Note the fork self-test PASSED itself ~450 lines
+##   earlier — the crash was the delayed consequence of its leaked thread.
+##   CRASH 2 (canary false-positive, exposed once CRASH 1 was fixed by killing the thread):
+##   see the dedicated stack-canary bug entry below. Killing the thread made it Dead, the
+##   post-preemption reaper then checked its stack canary against the now-randomized per-boot canary
+##   and FATAL-halted ("Stack canary corrupted for task 63 (fork-test-parent)! ... Found:
+##   0xdeadbeefcafebabe") — 0xdeadbeefcafebabe is the FIXED fallback canary the task was planted with
+##   because boot self-tests run before init_canary() randomizes it.
+##   PROPER FIX (resolves both): the self-test no longer creates a scheduler thread at all. It builds
+##   the parent address space directly — pcb::create allocates a PML4 (kernel half cloned), then
+##   elf::load_segments maps the test binary's code segment — so there is no task, no kernel stack,
+##   no canary, and no scheduler/run-queue/reaper involvement. This is also more faithful to the
+##   construction-path intent (the test only ever needed an address space to clone). The REAL fork
+##   path was never affected — fork_process destroys the child only BEFORE spawning its thread
+##   (rollback) or AFTER a failed spawn (thread never ran), and build_fork_child spawns no thread.
+##   LATENT-FOOTGUN note: pcb::destroy silently assuming no live threads is a sharp edge; any future
+##   caller that destroys a process with live threads hits CRASH 1's class. Consider making destroy
+##   defensively call kill_process_threads itself (idempotent). Not done now to keep the destroy
+##   contract unchanged for the reap path; tracked here.
+
+## BUG (noticed 2026-05-31, UNFIXED latent, pre-existing, NOT fork-specific): stack-canary check
+##   false-positives for any task created before the per-boot canary is randomized. The stack canary
+##   is a single GLOBAL per-boot value (sched::task::stack_canary()), randomized via CSPRNG by
+##   init_canary() at main.rs:714. But several boot self-tests create scheduler tasks much earlier
+##   (sched self-test ~main.rs:439, thread self-test, proc spawn self-test main.rs:637) — i.e. BEFORE
+##   randomization — so those tasks get the FIXED fallback canary 0xDEAD_BEEF_CAFE_BABE planted in
+##   their stacks. check_stack_canary() (called on context-switch-away in sched/mod.rs:3534 and in
+##   the deferred dead-task reaper at sched/mod.rs:2321) compares the planted value against the
+##   CURRENT global canary. If such an early task is still around — specifically Dead-but-not-yet-
+##   reaped — when the reaper runs after randomization, the values mismatch and the kernel FATAL-halts
+##   as if the stack overflowed (it did not). Today this only bites a task killed-but-not-reaped
+##   during the pre-randomization phase; the fork self-test triggered it (now fixed by not creating a
+##   task). The other early self-test tasks happen to be reaped in-phase (before init_canary), so
+##   they dodge it — but that's luck, not design. PROPER FIX options: (1) store the planted canary
+##   per-Task at creation and compare against THAT, not the mutable global (most robust; makes the
+##   canary value stable for a task's lifetime); or (2) randomize the canary before ANY task is
+##   created — blocked today because init_canary needs the CSPRNG, which initializes after the early
+##   self-tests; reordering boot so CSPRNG+canary come first would fix it generally. Recommend (1).
+##   Zone: kernel-core (sched/task canary subsystem).
+
+## BUG (noticed 2026-05-31, UNFIXED, pre-existing, NOT fork-related): gui/toolkit (crate `guitk`)
+##   fails to compile under the default workspace target (x86_64-unknown-none, bare-metal no_std).
+##   `cargo build` from the workspace root (which is what scripts/boot-test.sh runs) builds ALL
+##   default members for x86_64-unknown-none and guitk emits 2187 errors — e.g. "cannot find type
+##   `Vec` in this scope" (gui/toolkit/src/widget.rs:142 and many more), plus E0405/E0408/E0425/
+##   E0433/E0463/E0531. guitk is a USERSPACE crate that needs alloc/std and the x86_64-ouros target
+##   (its zone .cargo/config.toml), so it cannot compile for the bare-metal kernel triple. This
+##   breaks the workspace-wide `cargo build` and therefore the unmodified boot-test.sh.
+##   IMPACT: boot-test.sh's build step (cargo build, no -p) fails before QEMU ever launches.
+##   WORKAROUND used for fork verification: build the kernel alone (`cargo build -p kernel`) then
+##   run `scripts/boot-test.sh --no-build`.
+##   PROPER FIX (one of): (1) exclude guitk (and other ouros-only userspace crates) from the
+##   default workspace members so root `cargo build` only builds bare-metal targets, OR (2) change
+##   boot-test.sh's build step to `cargo build -p kernel`, OR (3) make guitk actually build for
+##   unknown-none (unlikely correct — it's userspace). Likely guitk was added to default members or
+##   regressed recently; needs investigation of why it's compiled for unknown-none at all.
+
 ## BUG (noticed+FIXED 2026-05-31): CoW resolve over-decrement (mm/cow.rs resolve_cow_fault).
 ##   The shared-frame branch decremented the old frame's refcount once PER resolved 4 KiB PTE
 ##   (up to 4x for a full 16 KiB frame group) instead of once per address-space reference.

@@ -19,7 +19,10 @@
 
 pub const SYS_EXIT: u64 = 1;
 pub const SYS_TASK_ID: u64 = 2;
-pub const SYS_PROCESS_ID: u64 = 3;
+// Process ID lives in the kernel-process zone (500–599), not kernel-core.
+// (Previously mis-numbered as 3, which the kernel does not implement —
+// getpid() was hitting an unimplemented syscall.  See number.rs.)
+pub const SYS_PROCESS_ID: u64 = 502;
 pub const SYS_CLOCK_MONOTONIC: u64 = 10;
 pub const SYS_CLOCK_REALTIME: u64 = 14;
 pub const SYS_CLOCK_SETTIME: u64 = 15;
@@ -505,9 +508,13 @@ mod tests {
         // These must equal the values in kernel/src/syscall/number.rs.
         // A mismatch silently routes a POSIX call to the wrong (or an
         // unimplemented) kernel syscall.
+        assert_eq!(SYS_EXIT, 1);
+        assert_eq!(SYS_TASK_ID, 2);
+        assert_eq!(SYS_PROCESS_ID, 502, "getpid ABI number drifted");
         assert_eq!(SYS_PROCESS_FORK, 527, "fork ABI number drifted");
         assert_eq!(SYS_PROCESS_SPAWN, 500);
         assert_eq!(SYS_PROCESS_EXEC, 503);
+        assert_eq!(SYS_PROCESS_PARENT_ID, 520);
     }
 
     // -- All syscall numbers are unique --
@@ -580,7 +587,6 @@ mod tests {
         // kernel-core: 0-199
         assert!(SYS_EXIT <= 199);
         assert!(SYS_TASK_ID <= 199);
-        assert!(SYS_PROCESS_ID <= 199);
         assert!(SYS_CLOCK_MONOTONIC <= 199);
         assert!(SYS_SLEEP <= 199);
         assert!(SYS_CONSOLE_WRITE <= 199);
@@ -602,6 +608,7 @@ mod tests {
         assert!((200..400).contains(&SYS_EVENTFD_CLOSE));
 
         // kernel-process: 500-599
+        assert!((500..600).contains(&SYS_PROCESS_ID));
         assert!((500..600).contains(&SYS_PROCESS_SPAWN));
         assert!((500..600).contains(&SYS_PROCESS_WAIT));
         assert!((500..600).contains(&SYS_PROCESS_EXEC));

@@ -126,6 +126,17 @@ struct OpenFile {
     size: u64,
     /// Flags this file was opened with.
     flags: OpenFlags,
+    /// Number of owners sharing this open file description.
+    ///
+    /// One open file description (this `OpenFile` entry, with its shared
+    /// cursor) can be referenced by several handle owners after `fork()`
+    /// or a shared `dup`/`dup2`.  Each owner contributes one reference;
+    /// `close()` decrements and only removes the entry (and releases the
+    /// advisory lock) when the last reference goes away.  A freshly
+    /// opened handle starts at `1`.  This mirrors POSIX semantics where a
+    /// forked child shares the parent's open file description (and its
+    /// offset), not an independent copy.
+    refcount: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -269,12 +280,23 @@ pub fn open(path: &str, flags: OpenFlags) -> KernelResult<u64> {
 /// this handle ID as owner.  Further operations on this handle
 /// will return `InvalidHandle`.
 pub fn close(handle: u64) -> KernelResult<()> {
+    // Decrement the open file description's refcount.  Only the final
+    // close (refcount → 0) removes the entry and releases advisory
+    // locks — earlier closes by other owners (forked siblings, shared
+    // dups) just drop their reference, leaving the shared cursor intact
+    // for the remaining owners.
     let path = {
         let mut table = OPEN_FILES.lock();
-        match table.remove(&handle) {
-            Some(file) => Some(file.path),
-            None => return Err(KernelError::InvalidHandle),
+        let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+        file.refcount = file.refcount.saturating_sub(1);
+        if file.refcount > 0 {
+            // Other owners still hold this description; nothing to tear
+            // down yet.
+            return Ok(());
         }
+        // Last reference — remove the entry and capture the path so we
+        // can release any advisory lock below.
+        table.remove(&handle).map(|file| file.path)
     };
 
     // Release any advisory lock this handle holds on the file path.
@@ -477,6 +499,33 @@ pub fn dup(handle: u64) -> KernelResult<u64> {
     allocate_handle(path, offset, size, flags)
 }
 
+/// Duplicate a file handle by sharing the *same* open file description.
+///
+/// Unlike [`dup`], this does not allocate a new handle id or a fresh
+/// independent cursor — it bumps the refcount on the existing open file
+/// description and returns the **same** handle id.  Both owners then
+/// share one cursor: a read or write through either id advances the
+/// offset for both.
+///
+/// This is the operation `fork()` needs: the child's userspace fd table
+/// is copy-on-write cloned and therefore references the same kernel
+/// handle ids as the parent, so the kernel must bump the refcount on
+/// those exact ids rather than mint new ones (which the child's table
+/// would never see).  It also matches POSIX `fork()` / `dup()` semantics
+/// where the descriptions — and offsets — are shared.
+///
+/// # Returns
+///
+/// - `Ok(handle)` — refcount incremented; the same handle id is returned.
+/// - `Err(InvalidHandle)` — no such open file, or the refcount would
+///   overflow `u32::MAX`.
+pub fn dup_shared(handle: u64) -> KernelResult<u64> {
+    let mut table = OPEN_FILES.lock();
+    let file = table.get_mut(&handle).ok_or(KernelError::InvalidHandle)?;
+    file.refcount = file.refcount.checked_add(1).ok_or(KernelError::InvalidHandle)?;
+    Ok(handle)
+}
+
 /// Get the VFS path associated with an open handle.
 ///
 /// Useful for diagnostics and `/proc/<pid>/fd` equivalent.
@@ -549,6 +598,7 @@ fn allocate_handle(
             offset,
             size,
             flags,
+            refcount: 1,
         },
     );
 
@@ -742,6 +792,56 @@ pub fn self_test() -> KernelResult<()> {
 
     close(hdup)?;
     close(hw)?;
+
+    // 13b. dup_shared — fork-style shared open file description.
+    //
+    // Both ids share one cursor (a read through either advances both)
+    // and refcounted close keeps the description alive until the last
+    // owner closes it.
+    let hs = open("/handle_write_test.txt", OpenFlags::READ)?;
+    seek(hs, SeekFrom::Start(0))?;
+    let hs2 = dup_shared(hs)?;
+    // dup_shared returns the SAME id (shared description).
+    if hs2 != hs {
+        crate::serial_println!(
+            "[fs::handle]   FAIL: dup_shared returned new id {} (expected same {})",
+            hs2, hs
+        );
+        close(hs).ok();
+        return Err(KernelError::InternalError);
+    }
+    // Read 3 bytes through hs — advances the shared cursor.
+    let s_a = read(hs, &mut buf[..3])?;
+    // Read 3 bytes through hs2 — continues from the SAME (advanced)
+    // offset, since the description is shared.  If cursors were
+    // independent this would re-read the first 3 bytes.
+    let off_after = seek(hs2, SeekFrom::Current(0))?;
+    if s_a != 3 || off_after != 3 {
+        crate::serial_println!(
+            "[fs::handle]   FAIL: shared cursor: read {} bytes, offset now {} (expected 3/3)",
+            s_a, off_after
+        );
+        close(hs).ok();
+        return Err(KernelError::InternalError);
+    }
+    // First close drops one reference; the description must survive.
+    close(hs2)?;
+    let still_open = read(hs, &mut buf[..1]);
+    if still_open.is_err() {
+        crate::serial_println!(
+            "[fs::handle]   FAIL: description freed after first of two closes: {:?}",
+            still_open
+        );
+        close(hs).ok();
+        return Err(KernelError::InternalError);
+    }
+    // Second close drops the last reference; now it must be gone.
+    close(hs)?;
+    if read(hs, &mut buf[..1]) != Err(KernelError::InvalidHandle) {
+        crate::serial_println!("[fs::handle]   FAIL: description not freed after final close");
+        return Err(KernelError::InternalError);
+    }
+    crate::serial_println!("[fs::handle]   dup_shared: shared cursor + refcounted close OK");
 
     // 14. Lock-on-close: verify advisory locks are released when handle closes.
     let lock_path = "/handle_lock_test.txt";

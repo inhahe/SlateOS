@@ -134,6 +134,32 @@
 ##       that is a separate pre-existing bug, tracked here, not fixed in the fork change to keep
 ##       scope contained — fork uses the new dup_shared path.
 
+## Judgment Calls (wait-for-any-child / waitpid(-1) implementation, 2026-05-31):
+##   (a) NO PROCESS GROUPS YET: POSIX waitpid distinguishes pid==0 (any child in the caller's
+##       process group), pid<-1 (children in process group |pid|), and pid==-1 (any child).
+##       We have no process-group subsystem, so the kernel treats ALL pid<=0 cases uniformly as
+##       "wait for any child" (the pid==-1 semantics). This is correct for the common case
+##       (shells/make use -1) and for any single-process-group workload. Reversible: when process
+##       groups land, sys_process_wait's `pid_arg <= 0` branch should subdivide on the exact value.
+##       Affects kernel/src/syscall/handlers.rs::sys_process_wait / sys_process_try_wait.
+##   (b) SINGLE WAITER PER PROCESS for the any-child path: the any-child waiter TaskId is stored in
+##       one slot on the PARENT pcb (Process::wait_any_task), unlike the specific-pid waiter which
+##       lives on the CHILD pcb. If two threads of the same process both call waitpid(-1)
+##       concurrently, the second set_wait_any_task clobbers the first's registration, so only one
+##       thread reliably gets the child-exit wake (the other relies on its own try_reap_any at
+##       block entry / a later wake). This matches typical single-threaded-waiter usage. PROPER fix
+##       if multi-thread concurrent wait(-1) is needed: make wait_any_task a small list/set of
+##       TaskIds and wake all of them. Tracked, not done (no current multi-waiter caller).
+##       The clobber is at least SAFE — clear_wait_any_task only clears if the slot still holds the
+##       caller's own TaskId, so a thread never clears another's registration.
+##   (c) REAPED-PID via arg1 ABI: the any-child path returns the reaped child's pid to userspace by
+##       writing an i32 to the arg1 pointer (posix waitpid passes a real &mut slot via syscall2),
+##       while rax still carries the exit code (preserving the existing specific-pid ABI used by
+##       init/services that call syscall1 with no arg1). The kernel writes arg1 ONLY in the
+##       any-child branch precisely because syscall1 leaves rsi/arg1 holding a stale (possibly
+##       valid, writable) pointer — writing it for specific-pid callers would corrupt their memory.
+##       Affects handlers.rs::write_reaped_pid + posix/src/process.rs::waitpid.
+
 ## BUG (noticed+FIXED 2026-05-31): userspace latent-bug sweep, batch 6 — stale DOCTESTS.
 ##   libservicebus's module-level doc examples didn't compile (2 failing doctests): they
 ##   imported a non-existent `EventHandler`, called `EventLoop::register` (real method is

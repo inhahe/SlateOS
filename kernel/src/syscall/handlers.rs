@@ -2894,76 +2894,165 @@ pub fn sys_process_get_args(args: &SyscallArgs) -> SyscallResult {
     SyscallResult::ok(total_needed as i64)
 }
 
+/// Write the reaped child PID to an optional userspace output pointer.
+///
+/// `out_ptr` is `arg1` from the wait syscalls: a user `*mut i32` where
+/// the kernel stores which child was reaped, or 0 to skip.  This is how
+/// `waitpid(-1)` learns which child it reaped (the exit code goes in
+/// `rax`).  A bad pointer is ignored (best-effort) — the exit status is
+/// still returned, matching the spirit of POSIX where a NULL/bad status
+/// pointer doesn't fail the wait.
+fn write_reaped_pid(out_ptr: u64, child_pid: crate::proc::pcb::ProcessId) {
+    if out_ptr == 0 {
+        return;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    let pid_i32 = child_pid as i32;
+    // SAFETY: write_user validates the pointer is a writable user range
+    // before writing.  We ignore failure (best-effort status report).
+    let _ = unsafe { crate::mm::user::write_user::<i32>(out_ptr, pid_i32) };
+}
+
 /// `SYS_PROCESS_WAIT` — wait for a child process to exit.
 ///
-/// `arg0`: child process ID.
+/// `arg0`: child process ID to wait for, interpreted as a signed value:
+///   - `> 0`: wait for that specific child.
+///   - `<= 0`: wait for *any* child (POSIX `waitpid(-1)`; process groups
+///     are not yet implemented, so `0` and `< -1` also mean "any child").
+/// `arg1`: optional user `*mut i32` that receives the reaped child PID
+///   (0 = don't report).  The exit code is returned in `rax`.
 ///
-/// Returns: exit code on success, negative error on failure.
-///
-/// If the child is still running, blocks the calling task until the
-/// child exits.
+/// If no child is ready, blocks the calling task until one exits.
+/// Returns the exit code on success, or a negative error
+/// (`NoChildProcess`/ECHILD when there are no children).
 pub fn sys_process_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::pcb;
 
-    let child_pid = args.arg0;
+    let pid_arg = args.arg0 as i64;
+    let out_ptr = args.arg1;
     // Resolve the calling process's PID so try_reap can verify the
     // parent–child relationship.  Falls back to 0 (kernel) for bare
     // kernel tasks, which matches processes spawned with parent=0.
     let parent_pid = caller_pid().unwrap_or(0);
 
-    // Try to reap immediately.
-    match pcb::try_reap(parent_pid, child_pid) {
-        Ok(Some(info)) => {
-            #[allow(clippy::cast_possible_wrap)]
-            return SyscallResult::ok(info.exit_code as i64);
-        }
-        Ok(None) => {
-            // Child still running — register wait and block.
-            let task_id = sched::current_task_id();
-            if let Err(e) = pcb::set_wait_task(child_pid, task_id) {
-                return SyscallResult::err(e);
-            }
-            sched::block_current();
+    let task_id = sched::current_task_id();
 
-            // Woken up — try to reap again.
+    if pid_arg > 0 {
+        // --- Wait for a specific child ---
+        #[allow(clippy::cast_sign_loss)]
+        let child_pid = pid_arg as u64;
+
+        // Check-first, then register-and-recheck before blocking.
+        //
+        // We must NOT register the wait task until we've confirmed the
+        // target really is our running child: `try_reap` returns
+        // `PermissionDenied` for a non-child, and registering a waiter on
+        // someone else's process would deliver a stale wake when that
+        // process is later reaped.  Once we know the child is still
+        // running, we register then re-check — if the child zombied in
+        // the gap, `wake()` set `pending_wake` and the second `try_reap`
+        // (or `block_current`) sees it, so there is no lost wakeup.  The
+        // waiter flag lives on the child, which is destroyed when reaped,
+        // so there is nothing stale to clean up on success.
+        //
+        // Specific-pid does NOT write `arg1`: callers using a 1-arg
+        // syscall wrapper leave a stale (possibly valid) pointer in that
+        // register, and writing it would corrupt their memory.  Only the
+        // wait-any path, whose sole caller passes a real pointer, writes.
+        loop {
             match pcb::try_reap(parent_pid, child_pid) {
                 Ok(Some(info)) => {
                     #[allow(clippy::cast_possible_wrap)]
-                    SyscallResult::ok(info.exit_code as i64)
+                    return SyscallResult::ok(info.exit_code as i64);
+                }
+                Ok(None) => {} // Still running — fall through to register.
+                Err(e) => return SyscallResult::err(e),
+            }
+
+            // Register, then re-check to close the lost-wakeup race.
+            if let Err(e) = pcb::set_wait_task(child_pid, task_id) {
+                return SyscallResult::err(e);
+            }
+            match pcb::try_reap(parent_pid, child_pid) {
+                Ok(Some(info)) => {
+                    #[allow(clippy::cast_possible_wrap)]
+                    return SyscallResult::ok(info.exit_code as i64);
                 }
                 Ok(None) => {
-                    // Shouldn't happen — we were woken because it became
-                    // a zombie.  Return WouldBlock defensively.
-                    SyscallResult::err(KernelError::WouldBlock)
+                    sched::block_current();
+                    // Woken (or spurious) — loop and re-check.
                 }
-                Err(e) => SyscallResult::err(e),
+                Err(e) => return SyscallResult::err(e),
             }
         }
-        Err(e) => SyscallResult::err(e),
+    } else {
+        // --- Wait for any child (POSIX waitpid(-1)) ---
+        //
+        // Same register-before-check discipline, but the waiter flag
+        // lives on the *parent* (this process), which survives reaping,
+        // so we must clear it on every exit path to avoid delivering a
+        // stale wake to a later, unrelated `block_current`.
+        loop {
+            if let Err(e) = pcb::set_wait_any_task(parent_pid, task_id) {
+                return SyscallResult::err(e);
+            }
+            match pcb::try_reap_any(parent_pid) {
+                Ok(Some((child_pid, info))) => {
+                    pcb::clear_wait_any_task(parent_pid, task_id);
+                    write_reaped_pid(out_ptr, child_pid);
+                    #[allow(clippy::cast_possible_wrap)]
+                    return SyscallResult::ok(info.exit_code as i64);
+                }
+                Ok(None) => {
+                    // Living children exist but none are zombies — block
+                    // until one exits, then re-scan.
+                    sched::block_current();
+                }
+                Err(e) => {
+                    // No children left (ECHILD) or other error.
+                    pcb::clear_wait_any_task(parent_pid, task_id);
+                    return SyscallResult::err(e);
+                }
+            }
+        }
     }
 }
 
 /// `SYS_PROCESS_TRY_WAIT` — non-blocking wait for a child process.
 ///
-/// Like `SYS_PROCESS_WAIT` but returns `WouldBlock` immediately if
-/// the child is still running, instead of blocking the caller.
+/// Like `SYS_PROCESS_WAIT` but returns `WouldBlock` immediately if no
+/// matching child is ready, instead of blocking the caller.  `arg0` and
+/// `arg1` have the same meaning as in [`sys_process_wait`].
 pub fn sys_process_try_wait(args: &SyscallArgs) -> SyscallResult {
     use crate::proc::pcb;
 
-    let child_pid = args.arg0;
+    let pid_arg = args.arg0 as i64;
+    let out_ptr = args.arg1;
     // Resolve calling process PID for parent–child verification.
     let parent_pid = caller_pid().unwrap_or(0);
 
-    match pcb::try_reap(parent_pid, child_pid) {
-        Ok(Some(info)) => {
-            #[allow(clippy::cast_possible_wrap)]
-            SyscallResult::ok(info.exit_code as i64)
+    if pid_arg > 0 {
+        #[allow(clippy::cast_sign_loss)]
+        let child_pid = pid_arg as u64;
+        match pcb::try_reap(parent_pid, child_pid) {
+            Ok(Some(info)) => {
+                // See sys_process_wait: specific-pid does not write arg1.
+                #[allow(clippy::cast_possible_wrap)]
+                SyscallResult::ok(info.exit_code as i64)
+            }
+            Ok(None) => SyscallResult::err(KernelError::WouldBlock),
+            Err(e) => SyscallResult::err(e),
         }
-        Ok(None) => {
-            // Child still running — return WouldBlock.
-            SyscallResult::err(KernelError::WouldBlock)
+    } else {
+        match pcb::try_reap_any(parent_pid) {
+            Ok(Some((child_pid, info))) => {
+                write_reaped_pid(out_ptr, child_pid);
+                #[allow(clippy::cast_possible_wrap)]
+                SyscallResult::ok(info.exit_code as i64)
+            }
+            Ok(None) => SyscallResult::err(KernelError::WouldBlock),
+            Err(e) => SyscallResult::err(e),
         }
-        Err(e) => SyscallResult::err(e),
     }
 }
 

@@ -50,6 +50,8 @@ pub enum KernelError {
     InvalidExecutable = -201,
     /// The process has exited.
     ProcessExited = -202,
+    /// The calling process has no child processes to wait for (ECHILD).
+    NoChildProcess = -203,
 
     // --- IPC (300 - 399) ---
     /// The channel or pipe has been closed by the other end.
@@ -125,6 +127,7 @@ impl KernelError {
             Self::NoSuchProcess => "no such process",
             Self::InvalidExecutable => "invalid executable",
             Self::ProcessExited => "process has exited",
+            Self::NoChildProcess => "no child processes",
             Self::ChannelClosed => "channel closed",
             Self::ChannelFull => "channel buffer full",
             Self::MessageTooLarge => "message too large",

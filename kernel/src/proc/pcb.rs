@@ -188,8 +188,22 @@ pub struct Process {
     /// 0 means "uses the kernel address space" (for kernel-mode
     /// processes during early development).
     pub pml4_phys: u64,
-    /// Task waiting to reap this process (if any).
+    /// Task waiting to reap this *specific* process (if any).
+    ///
+    /// Set by `set_wait_task` when a parent calls `waitpid(child_pid)`.
+    /// Woken when this process becomes a zombie.
     pub wait_task: Option<TaskId>,
+    /// Task (belonging to *this* process) blocked in `waitpid(-1)` —
+    /// i.e. waiting to reap *any* child.
+    ///
+    /// Unlike [`wait_task`](Self::wait_task), which lives on the child
+    /// being waited for, this lives on the *parent*: when any child of
+    /// this process becomes a zombie, the scheduler wakes this task so
+    /// it can re-scan for a reapable child.  Only one any-child waiter
+    /// per process (a process has a single main thread doing waits in
+    /// the common case; concurrent waiters would race, which POSIX
+    /// permits — one wins the reap, the other sees ECHILD/retries).
+    pub wait_any_task: Option<TaskId>,
     /// Whether the process has signaled it is fully initialized.
     ///
     /// Set via `SYS_NOTIFY_READY` (508).  The init service manager
@@ -260,6 +274,7 @@ impl Process {
             credentials: ProcessCredentials::root(),
             pml4_phys: 0, // Kernel address space for now.
             wait_task: None,
+            wait_any_task: None,
             ready: false,
             vmas: Vec::new(),
             ipc_handles: Vec::new(),
@@ -368,6 +383,7 @@ pub fn fork_create(
         credentials,
         pml4_phys: child_pml4,
         wait_task: None,
+        wait_any_task: None,
         ready: false,
         vmas,
         ipc_handles,
@@ -410,8 +426,14 @@ pub fn add_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
 /// Remove a thread from a process.
 ///
 /// If this was the last thread, the process enters Zombie state.
-/// Returns `(is_zombie, wait_task)` — if zombie, the optional task ID
-/// that should be woken (the parent waiting to reap this process).
+/// Returns `(is_zombie, wait_task, any_waiter)`:
+/// - `wait_task` — a task blocked in `waitpid(pid)` for *this* process,
+///   to be woken now that it's a zombie.
+/// - `any_waiter` — a task in this process's *parent* blocked in
+///   `waitpid(-1)` (wait for any child); it must be woken so it can
+///   re-scan and reap this newly-zombied child.
+///
+/// Both are `None` when the process did not transition to zombie.
 ///
 /// When a process becomes a zombie, all its living children are
 /// reparented to PID 1 (init) and registered as orphans so init
@@ -419,7 +441,7 @@ pub fn add_thread(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
 pub fn remove_thread(
     pid: ProcessId,
     task_id: TaskId,
-) -> KernelResult<(bool, Option<TaskId>)> {
+) -> KernelResult<(bool, Option<TaskId>, Option<TaskId>)> {
     let mut table = PROCESS_TABLE.lock();
     let proc = table
         .get_mut(&pid)
@@ -433,6 +455,9 @@ pub fn remove_thread(
             proc.exit_code = Some(0); // Default exit code.
         }
         let wake = proc.wait_task.take();
+        // Capture the parent before re-borrowing the table so we can
+        // wake any `waitpid(-1)` waiter blocked in the parent.
+        let parent_of_zombie = proc.parent;
 
         // Reparent living children to init (PID 1).
         //
@@ -446,6 +471,19 @@ pub fn remove_thread(
                 orphan_pids.push(child.pid);
             }
         }
+
+        // Wake a parent blocked in `waitpid(-1)`.  Take (clear) it —
+        // the parent re-registers on its next blocking wait if more
+        // children remain.  Guard against a process being its own
+        // parent (kernel pid 0 / pathological cases).
+        let any_waiter = if parent_of_zombie != pid {
+            table
+                .get_mut(&parent_of_zombie)
+                .and_then(|p| p.wait_any_task.take())
+        } else {
+            None
+        };
+
         // Drop the lock before calling initproc to avoid potential
         // lock ordering issues (PROCESS_TABLE → initproc STATE).
         drop(table);
@@ -455,10 +493,10 @@ pub fn remove_thread(
             let _ = crate::initproc::register_orphan(orphan_pid as u32);
         }
 
-        return Ok((true, wake));
+        return Ok((true, wake, any_waiter));
     }
 
-    Ok((false, None))
+    Ok((false, None, None))
 }
 
 /// Grant a capability to a process.
@@ -729,6 +767,90 @@ pub fn try_reap(
         // This avoids ABBA deadlocks with exception handler / DMA / IPC locks.
         destroy_process_resources(child_pid, pml4_phys, &ipc_handles, &initial_fds);
         Ok(Some(info))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Try to reap *any* zombie child of `parent_pid` (POSIX `waitpid(-1)`).
+///
+/// Scans the process table for children of `parent_pid`:
+/// - If a zombie child is found, it is reaped (returns
+///   `Ok(Some((child_pid, ExitInfo)))` and destroys the child).  When
+///   several zombies exist, the lowest PID is chosen for determinism.
+/// - If `parent_pid` has living (non-zombie) children but none are
+///   ready, returns `Ok(None)` — the caller should block and retry.
+/// - If `parent_pid` has no children at all, returns
+///   `Err(NoChildProcess)` (POSIX `ECHILD`).
+///
+/// Mirrors [`try_reap`] but without a known child PID.  Cleanup is done
+/// outside the `PROCESS_TABLE` lock (same two-phase pattern) to avoid
+/// lock-ordering hazards.
+pub fn try_reap_any(
+    parent_pid: ProcessId,
+) -> KernelResult<Option<(ProcessId, ExitInfo)>> {
+    #[allow(clippy::type_complexity)]
+    let reaped: Option<(
+        ProcessId,
+        ExitInfo,
+        u64,
+        Vec<(crate::cap::ResourceType, u64)>,
+        Vec<(i32, u8, u64)>,
+    )>;
+
+    {
+        let mut table = PROCESS_TABLE.lock();
+
+        // First pass: does this process have any children at all, and is
+        // there a zombie among them?  BTreeMap iterates in ascending key
+        // order, so the first zombie found has the lowest PID.
+        let mut has_child = false;
+        let mut zombie_child: Option<ProcessId> = None;
+        for proc in table.values() {
+            if proc.parent == parent_pid && proc.pid != parent_pid {
+                has_child = true;
+                if proc.state == ProcessState::Zombie {
+                    zombie_child = Some(proc.pid);
+                    break;
+                }
+            }
+        }
+
+        if !has_child {
+            return Err(KernelError::NoChildProcess);
+        }
+
+        let Some(child_pid) = zombie_child else {
+            // Children exist but none are zombies yet — caller blocks.
+            return Ok(None);
+        };
+
+        // Extract the zombie's info and remove it from the table.
+        let (exit_code, crash, pml4_phys) = {
+            let proc = table
+                .get(&child_pid)
+                .ok_or(KernelError::NoSuchProcess)?;
+            (proc.exit_code.unwrap_or(0), proc.crash_info, proc.pml4_phys)
+        };
+
+        let mut removed = table.remove(&child_pid);
+        let ipc_handles = removed
+            .as_mut()
+            .map(|p| core::mem::take(&mut p.ipc_handles))
+            .unwrap_or_default();
+        let initial_fds = removed
+            .as_mut()
+            .map(|p| core::mem::take(&mut p.initial_fds))
+            .unwrap_or_default();
+
+        let info = ExitInfo { exit_code, crash };
+        reaped = Some((child_pid, info, pml4_phys, ipc_handles, initial_fds));
+    }
+    // PROCESS_TABLE lock dropped here.
+
+    if let Some((child_pid, info, pml4_phys, ipc_handles, initial_fds)) = reaped {
+        destroy_process_resources(child_pid, pml4_phys, &ipc_handles, &initial_fds);
+        Ok(Some((child_pid, info)))
     } else {
         Ok(None)
     }
@@ -1033,6 +1155,38 @@ pub fn set_wait_task(pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
 
     proc.wait_task = Some(task_id);
     Ok(())
+}
+
+/// Register a task as the "wait for any child" waiter on `parent_pid`.
+///
+/// When any child of `parent_pid` becomes a zombie, the scheduler wakes
+/// this task (see [`remove_thread`]).  Used by the blocking
+/// `waitpid(-1)` path.  Only one any-child waiter per process.
+pub fn set_wait_any_task(parent_pid: ProcessId, task_id: TaskId) -> KernelResult<()> {
+    let mut table = PROCESS_TABLE.lock();
+    let proc = table
+        .get_mut(&parent_pid)
+        .ok_or(KernelError::NoSuchProcess)?;
+
+    proc.wait_any_task = Some(task_id);
+    Ok(())
+}
+
+/// Clear the "wait for any child" waiter on `parent_pid`, but only if it
+/// is still `task_id`.
+///
+/// Called by a `waitpid(-1)` caller when it stops waiting (reaped a
+/// child or hit ECHILD) so a later child exit doesn't deliver a stale
+/// wake to an unrelated `block_current`.  The `task_id` guard avoids
+/// clobbering a different thread's registration.  No-op if the process
+/// is gone or the slot holds a different/no task.
+pub fn clear_wait_any_task(parent_pid: ProcessId, task_id: TaskId) {
+    let mut table = PROCESS_TABLE.lock();
+    if let Some(proc) = table.get_mut(&parent_pid) {
+        if proc.wait_any_task == Some(task_id) {
+            proc.wait_any_task = None;
+        }
+    }
 }
 
 /// Get and clear the wait task for a process.
@@ -1438,6 +1592,7 @@ pub fn self_test() -> KernelResult<()> {
     test_capability_integration()?;
     test_destroy()?;
     test_reap_zombie()?;
+    test_reap_any()?;
 
     Ok(())
 }
@@ -1476,7 +1631,7 @@ fn test_thread_lifecycle() -> KernelResult<()> {
     add_thread(pid, 200)?;
 
     // Remove first — process should still be running.
-    let (zombie, _wake) = remove_thread(pid, 100)?;
+    let (zombie, _wake, _any) = remove_thread(pid, 100)?;
     if zombie {
         serial_println!("[proc]   FAIL: should not be zombie with 1 thread left");
         destroy(pid);
@@ -1484,7 +1639,7 @@ fn test_thread_lifecycle() -> KernelResult<()> {
     }
 
     // Remove last — process becomes zombie.
-    let (zombie, _wake) = remove_thread(pid, 200)?;
+    let (zombie, _wake, _any) = remove_thread(pid, 200)?;
     if !zombie {
         serial_println!("[proc]   FAIL: should be zombie with 0 threads");
         destroy(pid);
@@ -1598,7 +1753,7 @@ fn test_reap_zombie() -> KernelResult<()> {
 
     // Set exit code and make zombie.
     set_exit_code(child_pid, 42)?;
-    let (zombie, _wake) = remove_thread(child_pid, 900)?;
+    let (zombie, _wake, _any) = remove_thread(child_pid, 900)?;
     if !zombie {
         serial_println!("[proc]   FAIL: should be zombie after last thread exits");
         destroy(child_pid);
@@ -1708,7 +1863,7 @@ fn test_reap_zombie() -> KernelResult<()> {
     }
 
     // Make zombie and reap — crash info should be in ExitInfo.
-    let (zombie, _) = remove_thread(crash_child, 950)?;
+    let (zombie, _, _) = remove_thread(crash_child, 950)?;
     if !zombie {
         serial_println!("[proc]   FAIL: crash child should be zombie");
         destroy(crash_child);
@@ -1747,5 +1902,118 @@ fn test_reap_zombie() -> KernelResult<()> {
     destroy(crash_parent);
     serial_println!("[proc]   Crash info: OK");
 
+    Ok(())
+}
+
+/// Test 6: `try_reap_any` — POSIX `waitpid(-1)` semantics.
+///
+/// Covers: no children → `NoChildProcess` (ECHILD); living children but
+/// no zombie → `None`; a zombie child is reaped and reported by PID;
+/// once all children are reaped → `NoChildProcess` again.
+fn test_reap_any() -> KernelResult<()> {
+    let parent_pid = create("reapany-parent", 0);
+
+    // No children yet → ECHILD.
+    match try_reap_any(parent_pid) {
+        Err(KernelError::NoChildProcess) => {} // Expected.
+        other => {
+            serial_println!(
+                "[proc]   FAIL: reap_any with no children should be NoChildProcess, got {:?}",
+                other.map(|o| o.map(|(p, _)| p))
+            );
+            destroy(parent_pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Two running children.
+    let child_a = create("reapany-a", parent_pid);
+    let child_b = create("reapany-b", parent_pid);
+    set_running(child_a)?;
+    set_running(child_b)?;
+    add_thread(child_a, 960)?;
+    add_thread(child_b, 961)?;
+
+    // Children exist but none are zombies → None (would block).
+    match try_reap_any(parent_pid)? {
+        None => {} // Expected.
+        Some((p, _)) => {
+            serial_println!("[proc]   FAIL: reap_any should block (None), reaped {}", p);
+            destroy(child_a);
+            destroy(child_b);
+            destroy(parent_pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Make child_b a zombie with a distinctive exit code.
+    set_exit_code(child_b, 7)?;
+    let (zombie, _wake, _any) = remove_thread(child_b, 961)?;
+    if !zombie {
+        serial_println!("[proc]   FAIL: child_b should be zombie");
+        destroy(child_a);
+        destroy(child_b);
+        destroy(parent_pid);
+        return Err(KernelError::InternalError);
+    }
+
+    // reap_any should reap child_b (the only zombie) and report its PID.
+    match try_reap_any(parent_pid)? {
+        Some((reaped, info)) if reaped == child_b && info.exit_code == 7 => {}
+        other => {
+            serial_println!(
+                "[proc]   FAIL: reap_any should reap child_b(={}) code=7, got {:?}",
+                child_b,
+                other.map(|(p, i)| (p, i.exit_code))
+            );
+            destroy(child_a);
+            destroy(parent_pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // child_a still running → None again.
+    match try_reap_any(parent_pid)? {
+        None => {} // Expected.
+        Some((p, _)) => {
+            serial_println!("[proc]   FAIL: reap_any should still block (child_a alive), reaped {}", p);
+            destroy(child_a);
+            destroy(parent_pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // Reap child_a too.
+    set_exit_code(child_a, 0)?;
+    let (zombie, _wake, _any) = remove_thread(child_a, 960)?;
+    if !zombie {
+        serial_println!("[proc]   FAIL: child_a should be zombie");
+        destroy(child_a);
+        destroy(parent_pid);
+        return Err(KernelError::InternalError);
+    }
+    match try_reap_any(parent_pid)? {
+        Some((reaped, _)) if reaped == child_a => {}
+        other => {
+            serial_println!("[proc]   FAIL: reap_any should reap child_a, got {:?}",
+                other.map(|(p, _)| p));
+            destroy(parent_pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    // All children reaped → ECHILD once more.
+    match try_reap_any(parent_pid) {
+        Err(KernelError::NoChildProcess) => {} // Expected.
+        other => {
+            serial_println!("[proc]   FAIL: reap_any after all reaped should be NoChildProcess, got {:?}",
+                other.map(|o| o.map(|(p, _)| p)));
+            destroy(parent_pid);
+            return Err(KernelError::InternalError);
+        }
+    }
+
+    destroy(parent_pid);
+    serial_println!("[proc]   Reap any (waitpid -1): OK");
     Ok(())
 }

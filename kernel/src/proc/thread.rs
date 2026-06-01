@@ -383,7 +383,7 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
 
     // Remove from the process's thread list.
     match pcb::remove_thread(pid, task_id) {
-        Ok((is_zombie, wake_task)) => {
+        Ok((is_zombie, wake_task, any_waiter)) => {
             if is_zombie {
                 serial_println!(
                     "[thread] Process {} has no threads left — now zombie",
@@ -393,8 +393,14 @@ pub fn on_thread_exit(task_id: TaskId) -> Option<ProcessId> {
                 // Release namespace reference so the namespace can be cleaned up.
                 crate::ipc::namespace::detach(pid);
 
-                // Wake any task waiting to reap this process.
+                // Wake a task blocked in `waitpid(pid)` for this process.
                 if let Some(waiter) = wake_task {
+                    crate::sched::wake(waiter);
+                }
+                // Wake a parent blocked in `waitpid(-1)` (wait for any
+                // child) so it can re-scan and reap this newly-zombied
+                // child.
+                if let Some(waiter) = any_waiter {
                     crate::sched::wake(waiter);
                 }
             }

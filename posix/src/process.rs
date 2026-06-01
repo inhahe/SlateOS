@@ -219,7 +219,15 @@ pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
         SYS_PROCESS_WAIT
     };
 
-    let ret = syscall1(sys_nr, pid as u64);
+    // The kernel writes the reaped child's PID into this slot (arg1).
+    // This is how `waitpid(-1)` learns which child it reaped — the exit
+    // code itself comes back in rax.  Initialised to 0 ("not written").
+    let mut reaped_pid: i32 = 0;
+    let ret = syscall2(
+        sys_nr,
+        pid as u64,
+        core::ptr::addr_of_mut!(reaped_pid) as u64,
+    );
 
     if ret < 0 {
         // POSIX: WNOHANG with no child state change returns 0, not -1.
@@ -242,13 +250,15 @@ pub extern "C" fn waitpid(pid: PidT, status: *mut i32, options: i32) -> PidT {
         }
     }
 
-    // The kernel returns the exit code, not the child PID.  For
-    // positive pid arguments, the caller already knows which child
-    // they waited for.  For pid < 0 (wait-for-any), use the most
-    // recently spawned child PID recorded by posix_spawn, or
-    // fallback to 1 if unknown.
+    // Determine which child PID to return.  For a positive pid argument
+    // the caller already knows the child, but for pid <= 0 (wait-for-any)
+    // we rely on the kernel-reported `reaped_pid`.  Fall back to the
+    // last spawned child / 1 only if the kernel did not report one
+    // (e.g. an older kernel that ignores arg1).
     if pid > 0 {
         pid
+    } else if reaped_pid > 0 {
+        reaped_pid
     } else {
         let child = unsafe { core::ptr::addr_of!(LAST_CHILD_PID).read() };
         if child > 0 { child } else { 1 }

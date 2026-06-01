@@ -238,10 +238,11 @@ pub(crate) mod native {
     // PageFault = -102 (not typically returned to userspace)
     // BadAlignment = -103
 
-    // --- Process (200 range: -200 to -202) ---
+    // --- Process (200 range: -200 to -203) ---
     pub const NO_SUCH_PROCESS: i64 = -200;
     // InvalidExecutable = -201
     // ProcessExited = -202
+    pub const NO_CHILD_PROCESS: i64 = -203;
 
     // --- IPC (300 range: -300 to -304) ---
     pub const CHANNEL_CLOSED: i64 = -300;
@@ -303,6 +304,7 @@ pub fn translate(ret: i64) -> i64 {
 
         // Process errors
         native::NO_SUCH_PROCESS => ESRCH,
+        native::NO_CHILD_PROCESS => ECHILD,
 
         // IPC errors
         native::CHANNEL_CLOSED => ECONNRESET,

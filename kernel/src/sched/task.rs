@@ -296,6 +296,23 @@ pub struct Task {
     /// Virtual address of the bottom of the stack (lowest address).
     /// The stack grows downward from `stack_bottom + TASK_STACK_SIZE`.
     pub stack_bottom: u64,
+    /// The stack-canary value planted at `stack_bottom` when this task
+    /// was created.
+    ///
+    /// Stored per-task (rather than re-reading the global
+    /// [`stack_canary()`]) so the overflow check compares against the
+    /// value that was *actually written* into this stack. The global
+    /// canary is randomized at boot via [`init_canary()`], but several
+    /// early boot self-tests create tasks *before* that randomization —
+    /// those tasks get the fallback constant planted. Comparing such a
+    /// task against the post-randomization global would false-positive as
+    /// a stack overflow. Capturing the planted value makes the check
+    /// stable for the task's whole lifetime regardless of when the global
+    /// is randomized.
+    ///
+    /// `0` for tasks with no allocated stack (idle / AP-idle tasks, where
+    /// `stack_bottom == 0`); their canary is never checked.
+    pub planted_canary: u64,
     /// PML4 physical address for this task's address space.
     ///
     /// 0 = kernel address space (no CR3 switch needed, uses the
@@ -676,6 +693,7 @@ impl Task {
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,
+            planted_canary: 0, // No allocated stack — canary never checked.
             pml4_phys: 0, // Kernel address space.
             burst_ticks: 0,
             avg_burst_x8: 0,
@@ -746,6 +764,7 @@ impl Task {
             context: Context::empty(),
             stack_phys: 0,
             stack_bottom: 0,   // Externally allocated (AP trampoline stack).
+            planted_canary: 0, // No allocated stack — canary never checked.
             pml4_phys: 0,      // Kernel address space.
             burst_ticks: 0,
             avg_burst_x8: 0,
@@ -826,10 +845,17 @@ impl Task {
         // This is the first 8 bytes — furthest from the stack top,
         // so it will be the last thing overwritten on overflow.
         // Retained as defense-in-depth alongside the guard page.
+        //
+        // Snapshot the current global canary into a local so the value
+        // written into the stack and the value stored in `planted_canary`
+        // are guaranteed identical, even if `init_canary()` randomizes the
+        // global concurrently. The overflow check later compares against
+        // this stored value, not the (possibly-since-randomized) global.
+        let planted_canary = stack_canary();
         // SAFETY: stack_bottom is a valid, freshly-allocated address
         // (either HHDM or kstack-mapped).
         unsafe {
-            ptr::write_volatile(stack_bottom as *mut u64, stack_canary());
+            ptr::write_volatile(stack_bottom as *mut u64, planted_canary);
         }
 
         // Paint the stack with a sentinel pattern for watermark tracking.
@@ -864,6 +890,7 @@ impl Task {
             context,
             stack_phys,
             stack_bottom,
+            planted_canary,
             pml4_phys,
             burst_ticks: 0,
             avg_burst_x8: 0,
@@ -1016,7 +1043,10 @@ impl Task {
         let canary = unsafe {
             ptr::read_volatile(self.stack_bottom as *const u64)
         };
-        if canary != stack_canary() {
+        // Compare against the value planted into THIS stack at creation,
+        // not the global canary (which may have been randomized after this
+        // task was created — see `planted_canary` docs).
+        if canary != self.planted_canary {
             // Stack overflow detected.  Print as much info as possible
             // before halting — the stack is corrupted so we might crash
             // trying to print, but it's better than silent corruption.
@@ -1026,7 +1056,7 @@ impl Task {
             );
             serial_println!(
                 "  Expected: {:#018x}, Found: {:#018x}",
-                stack_canary(), canary
+                self.planted_canary, canary
             );
             serial_println!(
                 "  stack_bottom={:#x}, stack_top={:#x}",

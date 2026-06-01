@@ -32,8 +32,22 @@
 ##   defensively call kill_process_threads itself (idempotent). Not done now to keep the destroy
 ##   contract unchanged for the reap path; tracked here.
 
-## BUG (noticed 2026-05-31, UNFIXED latent, pre-existing, NOT fork-specific): stack-canary check
-##   false-positives for any task created before the per-boot canary is randomized. The stack canary
+## BUG (noticed 2026-05-31, FIXED 2026-06-01, was latent/pre-existing, NOT fork-specific): stack-canary check
+##   false-positives for any task created before the per-boot canary is randomized.
+##   FIX APPLIED (option 1, the recommended one): Task now stores a `planted_canary: u64` field set at
+##   creation in new_kernel() to the value actually written into the stack (snapshotted into a local so
+##   the stack write and the field are guaranteed identical). new_idle/new_ap_idle set it to 0 (no
+##   allocated stack, canary never checked). All three comparison sites now compare the read-back stack
+##   value against the per-task planted_canary instead of the mutable global stack_canary():
+##   Task::check_stack_canary() (sched/task.rs, used on context-switch-away and the dead-task reaper),
+##   the canary_scan reaper diagnostic (sched/mod.rs ~2757), and the test_stack_canary self-test
+##   (sched/mod.rs ~3818). This makes the canary stable for a task's whole lifetime regardless of when
+##   the global is randomized, so re-randomization can no longer false-positive a pre-randomization
+##   task. main.rs:2031 still reads the global stack_canary() but only to report "random vs fixed" in
+##   the security banner — correct as-is. Boot test: "Stack canary: OK", StackCanary(random) active,
+##   0 FATALs. (Option 2 — randomize before any task is created — remains blocked by CSPRNG init order;
+##   option 1 is strictly more robust anyway.)
+##   ORIGINAL ANALYSIS (kept for reference): The stack canary
 ##   is a single GLOBAL per-boot value (sched::task::stack_canary()), randomized via CSPRNG by
 ##   init_canary() at main.rs:714. But several boot self-tests create scheduler tasks much earlier
 ##   (sched self-test ~main.rs:439, thread self-test, proc spawn self-test main.rs:637) — i.e. BEFORE

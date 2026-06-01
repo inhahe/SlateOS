@@ -480,6 +480,25 @@
 ##         prlimit, irqbalance, updatedb, useradd, xattr, cpupower, thermald, sbctl,
 ##         resolvectl, mkinitramfs, earlyoom, fontconfig, chrony, update-alternatives,
 ##         apparmor, avahi, cups, pipewire, pulseaudio, e2fsprogs, openssl-tool, certbot.
+##     (4) FULL sweep across all ~355 non-cli deny-carrying userspace crates (single
+##         combined `cargo clippy` over every -p, build-std shared). Found exactly 6
+##         failing crates; all fixed: prometheus & go (print_literal — string literal
+##         as `{}` arg); xz & zstd (collapsible_if + zstd print_literal, autofixed);
+##         flac-tools (wildcard_in_or_patterns `"flac" | _` → `_`); lsirq
+##         (unnecessary_sort_by → sort_by_key(Reverse)); systemctl (if_same_then_else
+##         + autofix batch); pstree (too_many_arguments → TreeCtx struct + autofix).
+##         Re-verified with `--keep-going` to ensure no crate was skipped after errors.
+##   LIMITATION (systemctl systemd-escape modes): `systemd-escape --path` and the
+##   default mode currently produce identical output. `escape_unit_name` already does
+##   path-style escaping (strips the leading `/`, per test_escape_path), so the two
+##   modes are not distinguished. Real systemd default mode keeps a leading `/` as a
+##   leading `-` and does not strip trailing slashes; `--path` strips both. Low
+##   priority (escape is a rarely-used helper); the `path_mode` flag is still parsed
+##   and the discard at the use site is commented as intentional. To implement
+##   properly: split into `escape_unit_name` (default, no leading-slash strip) and
+##   `escape_unit_path` (strip leading+trailing), and route run_escape by path_mode —
+##   but the existing escape_unit_name unit tests pin the path-style behaviour, so
+##   that refactor must update those tests too.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/wordle — build break PLUS a PRODUCTION borrow bug
 ##   PLUS data bugs. (1) Cargo.toml was missing its [dependencies] section, so `use guitk::*`

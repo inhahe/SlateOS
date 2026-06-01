@@ -20,8 +20,7 @@
 use std::env;
 
 fn basename(p: &str) -> &str {
-    let s = p.rsplit(|c| c == '/' || c == '\\').next().unwrap_or(p);
-    s
+    p.rsplit(['/', '\\']).next().unwrap_or(p)
 }
 
 fn strip_ext(s: &str) -> &str {

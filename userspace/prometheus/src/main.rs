@@ -75,7 +75,7 @@ fn run_promtool(args: Vec<String>) -> i32 {
             let query = cmd_args.get(1).map(|s| s.as_str()).unwrap_or("up");
             match sub {
                 "instant" => {
-                    println!("{{metric=\"{}\"}}: 1 @[{}]", query, "1716364800");
+                    println!("{{metric=\"{}\"}}: 1 @[1716364800]", query);
                 }
                 "range" => {
                     println!("{{metric=\"{}\"}}: values over range (simulated)", query);

@@ -141,7 +141,7 @@ fn run_go(args: Vec<String>) -> i32 {
             let pkg = cmd_args.first().map(|s| s.as_str()).unwrap_or("fmt");
             println!("package {}", pkg);
             println!();
-            println!("    import \"{}/{}\"", "std", pkg);
+            println!("    import \"std/{}\"", pkg);
             println!();
             println!("    Package {} provides ... (simulated)", pkg);
             0

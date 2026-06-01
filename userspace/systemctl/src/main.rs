@@ -654,6 +654,7 @@ fn unescape_unit_name(input: &str) -> String {
 
 /// Parsed global flags for systemctl.
 #[derive(Clone, Debug)]
+#[derive(Default)]
 struct SystemctlFlags {
     user_scope: bool,
     no_pager: bool,
@@ -667,22 +668,6 @@ struct SystemctlFlags {
     state_filter: Option<String>,
 }
 
-impl Default for SystemctlFlags {
-    fn default() -> Self {
-        Self {
-            user_scope: false,
-            no_pager: false,
-            no_legend: false,
-            plain: false,
-            all: false,
-            quiet: false,
-            now: false,
-            force: false,
-            type_filter: None,
-            state_filter: None,
-        }
-    }
-}
 
 /// Parse systemctl arguments into flags and remaining positional args.
 fn parse_systemctl_args(args: &[String]) -> (SystemctlFlags, Vec<String>) {
@@ -897,8 +882,8 @@ fn cmd_list_units(
     if !flags.no_legend {
         writeln!(
             out,
-            "{:<40} {:<10} {:<10} {:<10} {}",
-            "UNIT", "LOAD", "ACTIVE", "SUB", "DESCRIPTION"
+            "{:<40} {:<10} {:<10} {:<10} DESCRIPTION",
+            "UNIT", "LOAD", "ACTIVE", "SUB"
         )?;
     }
 
@@ -906,16 +891,15 @@ fn cmd_list_units(
         // Apply type filter.
         if let Some(ref tf) = flags.type_filter {
             let ut = UnitType::from_unit_name(u.name);
-            if ut.map_or(true, |t| t.as_str() != tf.as_str()) {
+            if ut.is_none_or(|t| t.as_str() != tf.as_str()) {
                 continue;
             }
         }
         // Apply state filter.
-        if let Some(ref sf) = flags.state_filter {
-            if u.active.as_str() != sf.as_str() {
+        if let Some(ref sf) = flags.state_filter
+            && u.active.as_str() != sf.as_str() {
                 continue;
             }
-        }
         // Skip inactive unless --all.
         if !flags.all && u.active == ActiveState::Inactive {
             continue;
@@ -937,15 +921,14 @@ fn cmd_list_units(
             .filter(|u| {
                 if let Some(ref tf) = flags.type_filter {
                     let ut = UnitType::from_unit_name(u.name);
-                    if ut.map_or(true, |t| t.as_str() != tf.as_str()) {
+                    if ut.is_none_or(|t| t.as_str() != tf.as_str()) {
                         return false;
                     }
                 }
-                if let Some(ref sf) = flags.state_filter {
-                    if u.active.as_str() != sf.as_str() {
+                if let Some(ref sf) = flags.state_filter
+                    && u.active.as_str() != sf.as_str() {
                         return false;
                     }
-                }
                 flags.all || u.active != ActiveState::Inactive
             })
             .count();
@@ -963,13 +946,13 @@ fn cmd_list_unit_files(
     let files = simulated_unit_files();
 
     if !flags.no_legend {
-        writeln!(out, "{:<40} {:<12} {}", "UNIT FILE", "STATE", "PRESET")?;
+        writeln!(out, "{:<40} {:<12} PRESET", "UNIT FILE", "STATE")?;
     }
 
     for f in &files {
         if let Some(ref tf) = flags.type_filter {
             let ut = UnitType::from_unit_name(f.name);
-            if ut.map_or(true, |t| t.as_str() != tf.as_str()) {
+            if ut.is_none_or(|t| t.as_str() != tf.as_str()) {
                 continue;
             }
         }
@@ -1234,18 +1217,17 @@ fn cmd_list_timers(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i3
     if !flags.no_legend {
         writeln!(
             out,
-            "{:<24} {:<24} {:<24} {:<24} {}",
-            "NEXT", "LEFT", "LAST", "PASSED", "UNIT"
+            "{:<24} {:<24} {:<24} {:<24} UNIT",
+            "NEXT", "LEFT", "LAST", "PASSED"
         )?;
     }
     writeln!(
         out,
-        "{:<24} {:<24} {:<24} {:<24} {}",
+        "{:<24} {:<24} {:<24} {:<24} logwatch.timer",
         "Mon 2026-01-02 00:00:00",
         "23h left",
         "Mon 2026-01-01 00:00:00",
-        "1h ago",
-        "logwatch.timer"
+        "1h ago"
     )?;
     if !flags.no_legend {
         writeln!(out)?;
@@ -1256,12 +1238,12 @@ fn cmd_list_timers(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i3
 
 fn cmd_list_sockets(out: &mut dyn Write, flags: &SystemctlFlags) -> io::Result<i32> {
     if !flags.no_legend {
-        writeln!(out, "{:<40} {:<10} {}", "LISTEN", "TYPE", "UNIT")?;
+        writeln!(out, "{:<40} {:<10} UNIT", "LISTEN", "TYPE")?;
     }
     writeln!(
         out,
-        "{:<40} {:<10} {}",
-        "/run/dbus/system_bus_socket", "Stream", "dbus.socket"
+        "{:<40} {:<10} dbus.socket",
+        "/run/dbus/system_bus_socket", "Stream"
     )?;
     if !flags.no_legend {
         writeln!(out)?;
@@ -1529,11 +1511,13 @@ fn run_escape(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
             let unescaped = unescape_unit_name(s);
             writeln!(out, "{}", unescaped)?;
         } else {
-            let mut escaped = if path_mode {
-                escape_unit_name(s)
-            } else {
-                escape_unit_name(s)
-            };
+            // NOTE: `--path` mode is accepted for CLI compatibility but currently
+            // produces the same output as default mode. `escape_unit_name` already
+            // applies path-style escaping (strips the leading `/`), so the two modes
+            // are not yet distinguished. See todo.txt (systemd-escape modes). The
+            // discard documents that ignoring `path_mode` here is intentional.
+            let _ = path_mode;
+            let mut escaped = escape_unit_name(s);
             if let Some(ref suf) = suffix {
                 escaped.push('.');
                 escaped.push_str(suf);
@@ -1758,14 +1742,12 @@ fn run_tmpfiles(out: &mut dyn Write, args: &[String]) -> io::Result<i32> {
     }
 
     // Simulated default config entries.
-    let default_entries = vec![
-        "d /tmp 1777 root root 10d",
+    let default_entries = ["d /tmp 1777 root root 10d",
         "d /var/tmp 1777 root root 30d",
         "d /run/lock 0755 root root -",
         "d /run/user 0755 root root -",
         "f /run/utmp 0664 root utmp -",
-        "r! /tmp/.X*-lock - - - -",
-    ];
+        "r! /tmp/.X*-lock - - - -"];
 
     let entries: Vec<TmpfilesEntry> = if config_files.is_empty() {
         default_entries

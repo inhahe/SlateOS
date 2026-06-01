@@ -159,14 +159,13 @@ fn zstd_compress(opts: &ZstdOptions, personality: &str) -> i32 {
                     personality, file, out, opts.level,
                     opts.threads, if opts.threads == 1 { "" } else { "s" });
             }
-            println!("{}: {} : 55.00% ({} → {}, simulated)",
-                personality, file, "1048576 B", "576716 B");
+            println!("{}: {} : 55.00% (1048576 B → 576716 B, simulated)",
+                personality, file);
 
-            if !opts.keep && !opts.stdout {
-                if opts.verbose {
+            if !opts.keep && !opts.stdout
+                && opts.verbose {
                     eprintln!("{}: removed '{}'", personality, file);
                 }
-            }
         }
     }
     0
@@ -188,11 +187,10 @@ fn zstd_decompress(opts: &ZstdOptions, personality: &str) -> i32 {
             }
             println!("{}: decompressed {} → {} (simulated)", personality, file, out);
 
-            if !opts.keep && !opts.stdout {
-                if opts.verbose {
+            if !opts.keep && !opts.stdout
+                && opts.verbose {
                     eprintln!("{}: removed '{}'", personality, file);
                 }
-            }
         }
     }
     0

@@ -192,11 +192,10 @@ fn compress(opts: &XzOptions, personality: &str) -> i32 {
             }
             println!("{}: compressed {} → {} (simulated, ratio 0.45)", personality, file, out);
 
-            if !opts.keep && !opts.stdout {
-                if opts.verbose {
+            if !opts.keep && !opts.stdout
+                && opts.verbose {
                     eprintln!("{}: removed '{}'", personality, file);
                 }
-            }
         }
     }
     0
@@ -225,11 +224,10 @@ fn decompress(opts: &XzOptions, personality: &str) -> i32 {
             }
             println!("{}: decompressed {} → {} (simulated)", personality, file, out);
 
-            if !opts.keep && !opts.stdout {
-                if opts.verbose {
+            if !opts.keep && !opts.stdout
+                && opts.verbose {
                     eprintln!("{}: removed '{}'", personality, file);
                 }
-            }
         }
     }
     0

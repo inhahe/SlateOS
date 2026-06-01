@@ -128,7 +128,7 @@ fn read_proc_uid(pid: u32) -> u32 {
     if let Some(content) = read_file(&format!("/proc/{pid}/status")) {
         for line in content.lines() {
             if let Some(val) = line.strip_prefix("Uid:") {
-                return val.trim().split_whitespace().next()
+                return val.split_whitespace().next()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(0);
             }
@@ -153,13 +153,11 @@ fn uid_to_name(uid: u32) -> String {
     if let Some(content) = read_file("/etc/passwd") {
         for line in content.lines() {
             let fields: Vec<&str> = line.split(':').collect();
-            if fields.len() >= 3 {
-                if let Ok(file_uid) = fields[2].parse::<u32>() {
-                    if file_uid == uid {
+            if fields.len() >= 3
+                && let Ok(file_uid) = fields[2].parse::<u32>()
+                    && file_uid == uid {
                         return fields[0].to_string();
                     }
-                }
-            }
         }
     }
     uid.to_string()
@@ -170,11 +168,10 @@ fn enumerate_pids() -> Vec<u32> {
     let mut pids = Vec::new();
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Ok(pid) = name.parse::<u32>() {
+            if let Some(name) = entry.file_name().to_str()
+                && let Ok(pid) = name.parse::<u32>() {
                     pids.push(pid);
                 }
-            }
         }
     }
     pids.sort_unstable();
@@ -247,60 +244,61 @@ fn format_process(info: &ProcessInfo, opts: &Options) -> String {
     parts.join("")
 }
 
-fn render_tree(
-    out: &mut io::StdoutLock<'_>,
-    pid: u32,
-    procs: &HashMap<u32, ProcessInfo>,
-    children: &HashMap<u32, Vec<u32>>,
-    opts: &Options,
-    prefix: &str,
-    is_last: bool,
-    is_root: bool,
-) {
-    let info = match procs.get(&pid) {
+/// Recursion-invariant context for `render_tree`: the output sink and the
+/// process/child maps and options that stay constant across the whole walk.
+/// Bundling these keeps `render_tree`'s per-node argument list small.
+struct TreeCtx<'a, 'o> {
+    out: &'a mut io::StdoutLock<'o>,
+    procs: &'a HashMap<u32, ProcessInfo>,
+    children: &'a HashMap<u32, Vec<u32>>,
+    opts: &'a Options,
+}
+
+fn render_tree(ctx: &mut TreeCtx<'_, '_>, pid: u32, prefix: &str, is_last: bool, is_root: bool) {
+    let info = match ctx.procs.get(&pid) {
         Some(i) => i,
         None => return,
     };
 
     // Skip kernel threads if not requested.
-    if !opts.show_kernel && info.ppid == 2 && pid != 2 {
+    if !ctx.opts.show_kernel && info.ppid == 2 && pid != 2 {
         return;
     }
 
-    let (branch, last, pipe, space) = if opts.ascii {
+    let (branch, last, pipe, space) = if ctx.opts.ascii {
         (ASCII_BRANCH, ASCII_LAST, ASCII_PIPE, ASCII_SPACE)
     } else {
         (TREE_BRANCH, TREE_LAST, TREE_PIPE, TREE_SPACE)
     };
 
     // Print this node.
-    let display = format_process(info, opts);
+    let display = format_process(info, ctx.opts);
 
     if is_root {
-        let _ = writeln!(out, "{display}");
+        let _ = writeln!(ctx.out, "{display}");
     } else {
         let connector = if is_last { last } else { branch };
-        let _ = writeln!(out, "{prefix}{connector}{display}");
+        let _ = writeln!(ctx.out, "{prefix}{connector}{display}");
     }
 
     // Print children.
-    let mut kids = children.get(&pid).cloned().unwrap_or_default();
+    let mut kids = ctx.children.get(&pid).cloned().unwrap_or_default();
 
     // Sort by name if requested.
-    if opts.sort_by_name {
+    if ctx.opts.sort_by_name {
         kids.sort_by(|a, b| {
-            let name_a = procs.get(a).map(|p| &p.name).unwrap_or(&String::new()).clone();
-            let name_b = procs.get(b).map(|p| &p.name).unwrap_or(&String::new()).clone();
+            let name_a = ctx.procs.get(a).map(|p| &p.name).unwrap_or(&String::new()).clone();
+            let name_b = ctx.procs.get(b).map(|p| &p.name).unwrap_or(&String::new()).clone();
             name_a.cmp(&name_b)
         });
     }
 
     // Compact mode: merge children with same name.
-    if opts.compact {
+    if ctx.opts.compact {
         let mut merged: Vec<(u32, u32)> = Vec::new(); // (pid, count)
         let mut prev_name = String::new();
         for &kid_pid in &kids {
-            let kid_name = procs.get(&kid_pid).map(|p| &p.name).cloned().unwrap_or_default();
+            let kid_name = ctx.procs.get(&kid_pid).map(|p| &p.name).cloned().unwrap_or_default();
             if kid_name == prev_name && !merged.is_empty() {
                 if let Some(last_entry) = merged.last_mut() {
                     last_entry.1 += 1;
@@ -322,12 +320,12 @@ fn render_tree(
         for (idx, &(kid_pid, count)) in merged.iter().enumerate() {
             let kid_is_last = idx + 1 == merged.len();
             if count > 1 {
-                let kid_info = procs.get(&kid_pid);
+                let kid_info = ctx.procs.get(&kid_pid);
                 let name = kid_info.map(|p| &p.name).cloned().unwrap_or_default();
                 let connector = if kid_is_last { last } else { branch };
-                let _ = writeln!(out, "{child_prefix}{connector}{count}*[{name}]");
+                let _ = writeln!(ctx.out, "{child_prefix}{connector}{count}*[{name}]");
             } else {
-                render_tree(out, kid_pid, procs, children, opts, &child_prefix, kid_is_last, false);
+                render_tree(ctx, kid_pid, &child_prefix, kid_is_last, false);
             }
         }
     } else {
@@ -341,7 +339,7 @@ fn render_tree(
 
         for (idx, &kid_pid) in kids.iter().enumerate() {
             let kid_is_last = idx + 1 == kids.len();
-            render_tree(out, kid_pid, procs, children, opts, &child_prefix, kid_is_last, false);
+            render_tree(ctx, kid_pid, &child_prefix, kid_is_last, false);
         }
     }
 }
@@ -465,12 +463,7 @@ fn resolve_username(name: &str) -> Option<u32> {
 }
 
 fn find_first_pid_for_uid(uid: u32) -> Option<u32> {
-    for pid in enumerate_pids() {
-        if read_proc_uid(pid) == uid {
-            return Some(pid);
-        }
-    }
-    None
+    enumerate_pids().into_iter().find(|&pid| read_proc_uid(pid) == uid)
 }
 
 // ============================================================================
@@ -488,7 +481,8 @@ fn main() {
     let root = opts.root_pid.unwrap_or(1);
 
     if procs.contains_key(&root) {
-        render_tree(&mut out, root, &procs, &children, &opts, "", true, true);
+        let mut ctx = TreeCtx { out: &mut out, procs: &procs, children: &children, opts: &opts };
+        render_tree(&mut ctx, root, "", true, true);
     } else if procs.is_empty() {
         eprintln!("pstree: no processes found");
     } else {

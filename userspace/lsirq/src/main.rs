@@ -334,7 +334,7 @@ fn main() {
 
     // Sort.
     match opts.sort_by {
-        SortField::Total => irqs.sort_by(|a, b| b.total.cmp(&a.total)),
+        SortField::Total => irqs.sort_by_key(|b| std::cmp::Reverse(b.total)),
         SortField::Name => irqs.sort_by(|a, b| a.name.cmp(&b.name)),
         SortField::Irq => {} // Already in natural order.
     }

@@ -28,175 +28,85 @@ const VERSION: &str = "0.1.0";
 const DEFAULT_SHELL: &str = "/bin/sh";
 
 // ============================================================================
-// Syscall numbers (OurOS ABI)
+// DESIGN GAP -- chroot/chdir/setuid/setgid/setgroups have no kernel ABI yet
 // ============================================================================
+//
+// The OurOS kernel does **not** currently expose syscalls for changing the
+// process root directory, working directory, real/effective UID/GID, or
+// supplementary group set. There is no SYS_CHROOT, SYS_CHDIR, SYS_SETUID,
+// SYS_SETGID, or SYS_SETGROUPS in the kernel's syscall table.
+//
+// An earlier version of this file hardcoded fake syscall numbers
+// (SYS_CHROOT=61, SYS_CHDIR=49, SYS_SETUID=105, SYS_SETGID=106,
+// SYS_SETGROUPS=116) that collided with **destructive** unrelated kernel
+// syscalls. In particular:
+//
+//   * SYS_CHROOT=61 collided with SYS_SYSCTL_SET, so `chroot /tmp` would
+//     fire `sysctl::set(low_16_bits_of_path_ptr, path_length)` -- silently
+//     mutating an arbitrary sysctl to an arbitrary value.
+//   * SYS_CHDIR=49 collided with SYS_DMA_DETACH, so a chdir would release
+//     a random DMA mapping ID.
+//   * SYS_SETUID=105 / SYS_SETGID=106 / SYS_SETGROUPS=116 were unassigned
+//     (only 100..103 in that range are wired up), so those calls hit the
+//     kernel's unknown-syscall path -- benign but undetectable from here.
+//
+// The safe and correct interim behavior is for `chroot` to fail with a
+// clear "not implemented" error rather than execute any syscall. The
+// userland tool stays in the tree so it's ready when the kernel ABI lands;
+// see `todo.txt` for the tracking entry that will trigger reinstating the
+// real syscalls once they exist.
 
-/// Change the root directory of the calling process.
+/// Stub return path for every privilege-changing operation in this tool.
 ///
-/// arg1 = pointer to path bytes
-/// arg2 = path length
-const SYS_CHROOT: u64 = 61;
-
-/// Change working directory.
-///
-/// arg1 = pointer to path bytes
-/// arg2 = path length
-const SYS_CHDIR: u64 = 49;
-
-/// Set real and effective user ID.
-///
-/// arg1 = uid
-const SYS_SETUID: u64 = 105;
-
-/// Set real and effective group ID.
-///
-/// arg1 = gid
-const SYS_SETGID: u64 = 106;
-
-/// Set supplementary group IDs.
-///
-/// arg1 = pointer to array of u32 gids
-/// arg2 = number of groups
-const SYS_SETGROUPS: u64 = 116;
-
-// ============================================================================
-// Low-level syscall interface
-// ============================================================================
-
-/// Issue a two-argument syscall using the x86-64 `syscall` instruction.
-///
-/// Register mapping follows the OurOS syscall ABI:
-///   rax = syscall number, rdi = arg1, rsi = arg2
-///   Return value in rax. rcx and r11 are clobbered by the CPU.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall2(nr: u64, a1: u64, a2: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller ensures arguments are valid for the given syscall number.
-    // The `syscall` instruction is the defined kernel entry point on x86-64.
-    // rcx and r11 are marked as clobbered per the hardware specification.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
-}
-
-/// Issue a one-argument syscall.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall1(nr: u64, a1: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Same as syscall2 -- caller ensures argument validity.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+/// Returns a `Result::Err` carrying the standard ENOSYS message so callers
+/// can surface a clear "not implemented" diagnostic without ever touching
+/// the `syscall` instruction.
+#[inline]
+fn enosys(op: &str) -> Result<(), String> {
+    Err(format!(
+        "{op}: not implemented in this kernel \
+         (no SYS_CHROOT / SYS_CHDIR / SYS_SET*ID ABI yet)"
+    ))
 }
 
 // ============================================================================
-// Errno helpers
+// Privileged-operation stubs (all currently fail safely)
 // ============================================================================
 
-/// Map a negative syscall return code to a human-readable error string.
-fn errno_to_string(errno: i64) -> String {
-    match errno {
-        -1 => "operation not permitted (EPERM)".to_string(),
-        -2 => "no such file or directory (ENOENT)".to_string(),
-        -3 => "no such process (ESRCH)".to_string(),
-        -13 => "permission denied (EACCES)".to_string(),
-        -14 => "bad address (EFAULT)".to_string(),
-        -20 => "not a directory (ENOTDIR)".to_string(),
-        -22 => "invalid argument (EINVAL)".to_string(),
-        -28 => "no space left on device (ENOSPC)".to_string(),
-        -36 => "file name too long (ENAMETOOLONG)".to_string(),
-        -40 => "too many levels of symbolic links (ELOOP)".to_string(),
-        other => format!("error {other}"),
-    }
+/// Change the apparent root directory.
+///
+/// **Currently fails with ENOSYS-equivalent.** See the DESIGN GAP block
+/// above for why the previous implementation was removed.
+fn do_chroot(_path: &str) -> Result<(), String> {
+    enosys("chroot")
 }
 
-// ============================================================================
-// Syscall wrappers
-// ============================================================================
-
-/// Invoke the chroot syscall to change the root directory.
-fn do_chroot(path: &str) -> Result<(), String> {
-    // SAFETY: SYS_CHROOT takes a pointer to path bytes and the path length.
-    // The path slice is valid for the duration of the syscall.
-    let ret = unsafe {
-        syscall2(SYS_CHROOT, path.as_ptr() as u64, path.len() as u64)
-    };
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
-    }
-}
-
-/// Invoke the chdir syscall to change the working directory.
-fn do_chdir(path: &str) -> Result<(), String> {
-    // SAFETY: SYS_CHDIR takes a pointer to path bytes and the path length.
-    // The path slice is valid for the duration of the syscall.
-    let ret = unsafe {
-        syscall2(SYS_CHDIR, path.as_ptr() as u64, path.len() as u64)
-    };
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
-    }
+/// Change the working directory.
+///
+/// **Currently fails with ENOSYS-equivalent.** See the DESIGN GAP block.
+fn do_chdir(_path: &str) -> Result<(), String> {
+    enosys("chdir")
 }
 
 /// Set the real and effective user ID of the calling process.
-fn do_setuid(uid: u32) -> Result<(), String> {
-    // SAFETY: SYS_SETUID takes a single uid argument.
-    let ret = unsafe { syscall1(SYS_SETUID, uid as u64) };
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
-    }
+///
+/// **Currently fails with ENOSYS-equivalent.** See the DESIGN GAP block.
+fn do_setuid(_uid: u32) -> Result<(), String> {
+    enosys("setuid")
 }
 
 /// Set the real and effective group ID of the calling process.
-fn do_setgid(gid: u32) -> Result<(), String> {
-    // SAFETY: SYS_SETGID takes a single gid argument.
-    let ret = unsafe { syscall1(SYS_SETGID, gid as u64) };
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
-    }
+///
+/// **Currently fails with ENOSYS-equivalent.** See the DESIGN GAP block.
+fn do_setgid(_gid: u32) -> Result<(), String> {
+    enosys("setgid")
 }
 
-/// Set the supplementary group IDs for the calling process.
-fn do_setgroups(gids: &[u32]) -> Result<(), String> {
-    // SAFETY: SYS_SETGROUPS takes a pointer to an array of u32 gids and the
-    // count. The slice is valid for the duration of the syscall.
-    let ret = unsafe {
-        syscall2(
-            SYS_SETGROUPS,
-            gids.as_ptr() as u64,
-            gids.len() as u64,
-        )
-    };
-    if ret < 0 {
-        Err(errno_to_string(ret))
-    } else {
-        Ok(())
-    }
+/// Set the supplementary group IDs of the calling process.
+///
+/// **Currently fails with ENOSYS-equivalent.** See the DESIGN GAP block.
+fn do_setgroups(_gids: &[u32]) -> Result<(), String> {
+    enosys("setgroups")
 }
 
 // ============================================================================
@@ -1193,21 +1103,45 @@ mod tests {
         assert_eq!(opts.newroot, "/chroot-dir");
     }
 
-    // ---- errno_to_string ----
+    // ---- ENOSYS stubs for chroot/chdir/setuid/setgid/setgroups ----
+    //
+    // These confirm the privilege-changing wrappers fail safely instead of
+    // firing destructive syscalls (see the DESIGN GAP block near the top
+    // of this file).
 
     #[test]
-    fn test_errno_to_string_known() {
-        assert!(errno_to_string(-1).contains("EPERM"));
-        assert!(errno_to_string(-2).contains("ENOENT"));
-        assert!(errno_to_string(-13).contains("EACCES"));
-        assert!(errno_to_string(-20).contains("ENOTDIR"));
-        assert!(errno_to_string(-22).contains("EINVAL"));
+    fn test_do_chroot_returns_enosys() {
+        let err = do_chroot("/nowhere").unwrap_err();
+        assert!(err.contains("chroot"), "got: {err}");
+        assert!(err.contains("not implemented"), "got: {err}");
     }
 
     #[test]
-    fn test_errno_to_string_unknown() {
-        let msg = errno_to_string(-999);
-        assert!(msg.contains("-999"), "got: {msg}");
+    fn test_do_chdir_returns_enosys() {
+        let err = do_chdir("/").unwrap_err();
+        assert!(err.contains("chdir"), "got: {err}");
+        assert!(err.contains("not implemented"), "got: {err}");
+    }
+
+    #[test]
+    fn test_do_setuid_returns_enosys() {
+        let err = do_setuid(1000).unwrap_err();
+        assert!(err.contains("setuid"), "got: {err}");
+        assert!(err.contains("not implemented"), "got: {err}");
+    }
+
+    #[test]
+    fn test_do_setgid_returns_enosys() {
+        let err = do_setgid(1000).unwrap_err();
+        assert!(err.contains("setgid"), "got: {err}");
+        assert!(err.contains("not implemented"), "got: {err}");
+    }
+
+    #[test]
+    fn test_do_setgroups_returns_enosys() {
+        let err = do_setgroups(&[100, 101]).unwrap_err();
+        assert!(err.contains("setgroups"), "got: {err}");
+        assert!(err.contains("not implemented"), "got: {err}");
     }
 
     // ---- Default command ----

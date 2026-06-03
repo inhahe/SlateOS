@@ -1957,6 +1957,47 @@
 ##           helpers (overflow-safe via u64 intermediates) + a 6-test module.
 ##           Clippy-clean on host and ouros (fixed two collapsible_if via
 ##           let-chains); build-ouros clean.
+##   [x] chroot — DESTRUCTIVE syscalls neutered (2026-06-03).  Old code declared
+##           SYS_CHROOT=61 / SYS_CHDIR=49 / SYS_SETUID=105 / SYS_SETGID=106 /
+##           SYS_SETGROUPS=116 and fired them via raw `syscall` instructions.
+##           NONE of those numbers map to the intended operation on OurOS:
+##             * 61 = SYS_SYSCTL_SET (handlers.rs:8293-8306) — reads arg0 as
+##               u16 sysctl_id and arg1 as the new value, so `chroot /tmp`
+##               called sysctl::set(low16_of_path_ptr, path_length) and
+##               silently mutated whichever sysctl that hash landed on.
+##               This is the ACTIVELY DESTRUCTIVE case — not a leak or no-op
+##               like the net-config tools.
+##             * 49 = SYS_DMA_DETACH — chdir released a random DMA mapping.
+##             * 105 / 106 / 116 = unassigned (only 100..103 wired up in that
+##               range) — benign unknown-syscall errors, but the wrappers
+##               still went through `syscall` for no reason.
+##           FIX (proper, not a band-aid): removed every fake SYS_* constant,
+##           ripped out syscall1/syscall2/errno_to_string entirely (so there
+##           is no `syscall` instruction left in the binary), and replaced
+##           do_chroot/do_chdir/do_setuid/do_setgid/do_setgroups with stubs
+##           that return a clear "not implemented" error string via a shared
+##           enosys() helper.  Argument parsing, user/group lookup, and the
+##           command-runner path are unchanged — the tool now fails safely
+##           with a meaningful diagnostic instead of corrupting kernel
+##           state.  Added 5 unit tests confirming the stubs return ENOSYS
+##           for chroot/chdir/setuid/setgid/setgroups.  Prominent DESIGN GAP
+##           block at the top of main.rs explains the kernel ABI gap and what
+##           it would take to reinstate real behavior.  44/44 tests pass;
+##           cargo build clean.  See DESIGN GAP below.
+##
+##  DESIGN GAP — no process-credential / filesystem-root syscalls (chroot):
+##   OurOS exposes no SYS_CHROOT, SYS_CHDIR, SYS_SETUID, SYS_SETGID, or
+##   SYS_SETGROUPS — the kernel has no notion of a per-process root directory
+##   or a working directory tracked by syscall, and the process credential
+##   layer (real/effective uid/gid, supplementary groups) has no setter
+##   syscalls yet.  The `chroot` userland binary therefore fails safely
+##   instead of executing any syscall (see PROGRESS above).  CORRECT FUTURE
+##   DIRECTION: when the kernel grows process-credential and filesystem-root
+##   ABI, restore the syscall wrappers (the call-site logic in main() is
+##   already correct — Step 1 chroot, Step 2 chdir, Step 3 setgroups, Step 4
+##   setgid, Step 5 setuid, Step 6 exec).  TRIGGER: when SYS_CHROOT,
+##   SYS_CHDIR, SYS_SETUID, SYS_SETGID, and SYS_SETGROUPS (or equivalent
+##   capability-mediated handles) land in kernel/src/syscall/number.rs.
 ##
 ##  DESIGN GAP — no DPMS idle-timeout policy interface (monctl dpms on/off/timers):
 ##   Whether the screen blanks after N seconds idle, and the standby/suspend/off

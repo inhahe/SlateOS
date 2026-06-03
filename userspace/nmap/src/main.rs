@@ -656,8 +656,8 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
     let mut i = 1usize;
     let mut port_spec_set = false;
 
-    while i < args.len() {
-        let arg = args[i].as_str();
+    while let Some(arg_owned) = args.get(i) {
+        let arg = arg_owned.as_str();
         match arg {
             "-sT" => {
                 cfg.scan_type = ScanType::TcpConnect;
@@ -871,8 +871,8 @@ fn grab_banner(ip: u32, port: u16, timeout_ms: u64) -> Option<String> {
     let mut buf = [0u8; 256];
     let banner_deadline = clock_nanos().saturating_add(2_000_000_000); // 2s
     let mut total = 0usize;
-    loop {
-        let n = tcp_recv(handle, &mut buf[total..]);
+    while let Some(tail) = buf.get_mut(total..) {
+        let n = tcp_recv(handle, tail);
         if n > 0 {
             total = total.saturating_add(n as usize).min(256);
             break;
@@ -889,7 +889,7 @@ fn grab_banner(ip: u32, port: u16, timeout_ms: u64) -> Option<String> {
     }
 
     // Convert to printable string, replacing non-ASCII with '.'
-    let raw = &buf[..total];
+    let raw = buf.get(..total).unwrap_or(&[]);
     let banner: String = raw
         .iter()
         .map(|&b| {
@@ -980,27 +980,28 @@ fn scan_ports(
 
         while !all_done && clock_nanos() < deadline {
             all_done = true;
-            for idx in 0..pending.len() {
-                if resolved[idx] {
+            for ((port, handle, state), resolved_flag) in
+                pending.iter_mut().zip(resolved.iter_mut())
+            {
+                if *resolved_flag {
                     continue;
                 }
-                let (port, handle, ref mut state) = pending[idx];
-                let status = tcp_poll_status(handle);
+                let status = tcp_poll_status(*handle);
                 match status {
                     TCP_STATUS_CONNECTED => {
                         *state = PortState::Open;
-                        tcp_close(handle);
-                        resolved[idx] = true;
+                        tcp_close(*handle);
+                        *resolved_flag = true;
                     }
                     TCP_STATUS_REFUSED => {
                         *state = PortState::Closed;
-                        tcp_close(handle);
-                        resolved[idx] = true;
+                        tcp_close(*handle);
+                        *resolved_flag = true;
                     }
                     TCP_STATUS_TIMEOUT => {
                         *state = PortState::Filtered;
-                        tcp_close(handle);
-                        resolved[idx] = true;
+                        tcp_close(*handle);
+                        *resolved_flag = true;
                     }
                     TCP_STATUS_IN_PROGRESS => {
                         all_done = false;
@@ -1008,8 +1009,8 @@ fn scan_ports(
                     }
                     _ => {
                         *state = PortState::Filtered;
-                        tcp_close(handle);
-                        resolved[idx] = true;
+                        tcp_close(*handle);
+                        *resolved_flag = true;
                     }
                 }
             }
@@ -1019,10 +1020,12 @@ fn scan_ports(
         }
 
         // Close any still-pending handles (timeout hit).
-        for (idx, &mut (_, handle, ref mut state)) in pending.iter_mut().enumerate() {
-            if !resolved[idx] {
+        for ((_, handle, state), resolved_flag) in
+            pending.iter_mut().zip(resolved.iter())
+        {
+            if !*resolved_flag {
                 *state = PortState::Filtered;
-                tcp_close(handle);
+                tcp_close(*handle);
             }
         }
 

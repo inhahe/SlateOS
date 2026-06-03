@@ -46,4 +46,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_lighttpd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/lighttpd"), "lighttpd");
+        assert_eq!(basename(r"C:\bin\lighttpd.exe"), "lighttpd.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("lighttpd.exe"), "lighttpd");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_lighttpd(&["--help".to_string()], "lighttpd"), 0);
+        assert_eq!(run_lighttpd(&["-h".to_string()], "lighttpd"), 0);
+        assert_eq!(run_lighttpd(&["--version".to_string()], "lighttpd"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_lighttpd(&[], "lighttpd"), 0);
+    }
+}

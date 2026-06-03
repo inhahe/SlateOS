@@ -52,4 +52,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_juicefs};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/juicefs"), "juicefs");
+        assert_eq!(basename(r"C:\bin\juicefs.exe"), "juicefs.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("juicefs.exe"), "juicefs");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_juicefs(&["--help".to_string()], "juicefs"), 0);
+        assert_eq!(run_juicefs(&["-h".to_string()], "juicefs"), 0);
+        assert_eq!(run_juicefs(&["--version".to_string()], "juicefs"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_juicefs(&[], "juicefs"), 0);
+    }
+}

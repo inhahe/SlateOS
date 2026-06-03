@@ -47,4 +47,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_aide};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/arduinoide"), "arduinoide");
+        assert_eq!(basename(r"C:\bin\arduinoide.exe"), "arduinoide.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("arduinoide.exe"), "arduinoide");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_aide(&["--help".to_string()], "arduinoide"), 0);
+        assert_eq!(run_aide(&["-h".to_string()], "arduinoide"), 0);
+        assert_eq!(run_aide(&["--version".to_string()], "arduinoide"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_aide(&[], "arduinoide"), 0);
+    }
+}

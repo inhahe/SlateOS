@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_m365};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/microsoft365"), "microsoft365");
+        assert_eq!(basename(r"C:\bin\microsoft365.exe"), "microsoft365.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("microsoft365.exe"), "microsoft365");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_m365(&["--help".to_string()], "microsoft365"), 0);
+        assert_eq!(run_m365(&["-h".to_string()], "microsoft365"), 0);
+        assert_eq!(run_m365(&["--version".to_string()], "microsoft365"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_m365(&[], "microsoft365"), 0);
+    }
+}

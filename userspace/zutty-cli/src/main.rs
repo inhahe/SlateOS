@@ -46,4 +46,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_zutty};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/zutty"), "zutty");
+        assert_eq!(basename(r"C:\bin\zutty.exe"), "zutty.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("zutty.exe"), "zutty");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_zutty(&["--help".to_string()], "zutty"), 0);
+        assert_eq!(run_zutty(&["-h".to_string()], "zutty"), 0);
+        assert_eq!(run_zutty(&["--version".to_string()], "zutty"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_zutty(&[], "zutty"), 0);
+    }
+}

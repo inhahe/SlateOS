@@ -113,6 +113,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_xprop};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xprop"), "xprop");
+        assert_eq!(basename(r"C:\bin\xprop.exe"), "xprop.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xprop.exe"), "xprop");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xprop(&["--help".to_string()]), 0);
+        assert_eq!(run_xprop(&["-h".to_string()]), 0);
+        assert_eq!(run_xprop(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xprop(&[]), 0);
+    }
 }

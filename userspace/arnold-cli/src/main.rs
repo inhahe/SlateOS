@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_arnold};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/arnold"), "arnold");
+        assert_eq!(basename(r"C:\bin\arnold.exe"), "arnold.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("arnold.exe"), "arnold");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_arnold(&["--help".to_string()], "arnold"), 0);
+        assert_eq!(run_arnold(&["-h".to_string()], "arnold"), 0);
+        assert_eq!(run_arnold(&["--version".to_string()], "arnold"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_arnold(&[], "arnold"), 0);
+    }
+}

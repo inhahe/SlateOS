@@ -65,4 +65,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_deel};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/deel"), "deel");
+        assert_eq!(basename(r"C:\bin\deel.exe"), "deel.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("deel.exe"), "deel");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_deel(&["--help".to_string()], "deel"), 0);
+        assert_eq!(run_deel(&["-h".to_string()], "deel"), 0);
+        assert_eq!(run_deel(&["--version".to_string()], "deel"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_deel(&[], "deel"), 0);
+    }
+}

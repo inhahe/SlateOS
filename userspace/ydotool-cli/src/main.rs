@@ -79,4 +79,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ydotool};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ydotool"), "ydotool");
+        assert_eq!(basename(r"C:\bin\ydotool.exe"), "ydotool.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ydotool.exe"), "ydotool");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ydotool(&["--help".to_string()], "ydotool"), 0);
+        assert_eq!(run_ydotool(&["-h".to_string()], "ydotool"), 0);
+        assert_eq!(run_ydotool(&["--version".to_string()], "ydotool"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ydotool(&[], "ydotool"), 0);
+    }
+}

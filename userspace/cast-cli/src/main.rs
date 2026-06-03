@@ -83,4 +83,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cast};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cast"), "cast");
+        assert_eq!(basename(r"C:\bin\cast.exe"), "cast.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cast.exe"), "cast");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cast(&["--help".to_string()], "cast"), 0);
+        assert_eq!(run_cast(&["-h".to_string()], "cast"), 0);
+        assert_eq!(run_cast(&["--version".to_string()], "cast"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cast(&[], "cast"), 0);
+    }
+}

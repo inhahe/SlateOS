@@ -62,4 +62,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_timg};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/timg"), "timg");
+        assert_eq!(basename(r"C:\bin\timg.exe"), "timg.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("timg.exe"), "timg");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_timg(&["--help".to_string()], "timg"), 0);
+        assert_eq!(run_timg(&["-h".to_string()], "timg"), 0);
+        assert_eq!(run_timg(&["--version".to_string()], "timg"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_timg(&[], "timg"), 0);
+    }
+}

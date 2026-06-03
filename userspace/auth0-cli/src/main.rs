@@ -71,4 +71,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_a0};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/auth0"), "auth0");
+        assert_eq!(basename(r"C:\bin\auth0.exe"), "auth0.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("auth0.exe"), "auth0");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_a0(&["--help".to_string()], "auth0"), 0);
+        assert_eq!(run_a0(&["-h".to_string()], "auth0"), 0);
+        assert_eq!(run_a0(&["--version".to_string()], "auth0"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_a0(&[], "auth0"), 0);
+    }
+}

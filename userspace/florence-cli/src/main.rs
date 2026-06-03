@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_florence};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/florence"), "florence");
+        assert_eq!(basename(r"C:\bin\florence.exe"), "florence.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("florence.exe"), "florence");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_florence(&["--help".to_string()], "florence"), 0);
+        assert_eq!(run_florence(&["-h".to_string()], "florence"), 0);
+        assert_eq!(run_florence(&["--version".to_string()], "florence"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_florence(&[], "florence"), 0);
+    }
+}

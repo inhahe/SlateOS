@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_oracle};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/oracle"), "oracle");
+        assert_eq!(basename(r"C:\bin\oracle.exe"), "oracle.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("oracle.exe"), "oracle");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_oracle(&["--help".to_string()], "oracle"), 0);
+        assert_eq!(run_oracle(&["-h".to_string()], "oracle"), 0);
+        assert_eq!(run_oracle(&["--version".to_string()], "oracle"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_oracle(&[], "oracle"), 0);
+    }
+}

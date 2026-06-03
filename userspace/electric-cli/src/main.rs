@@ -48,4 +48,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_electric};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/electric"), "electric");
+        assert_eq!(basename(r"C:\bin\electric.exe"), "electric.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("electric.exe"), "electric");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_electric(&["--help".to_string()], "electric"), 0);
+        assert_eq!(run_electric(&["-h".to_string()], "electric"), 0);
+        assert_eq!(run_electric(&["--version".to_string()], "electric"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_electric(&[], "electric"), 0);
+    }
+}

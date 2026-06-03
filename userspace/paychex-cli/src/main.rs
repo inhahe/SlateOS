@@ -66,4 +66,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_px};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/paychex"), "paychex");
+        assert_eq!(basename(r"C:\bin\paychex.exe"), "paychex.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("paychex.exe"), "paychex");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_px(&["--help".to_string()], "paychex"), 0);
+        assert_eq!(run_px(&["-h".to_string()], "paychex"), 0);
+        assert_eq!(run_px(&["--version".to_string()], "paychex"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_px(&[], "paychex"), 0);
+    }
+}

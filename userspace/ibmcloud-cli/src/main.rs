@@ -167,4 +167,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ibmcloud};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ibmcloud"), "ibmcloud");
+        assert_eq!(basename(r"C:\bin\ibmcloud.exe"), "ibmcloud.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ibmcloud.exe"), "ibmcloud");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ibmcloud(&["--help".to_string()], "ibmcloud"), 0);
+        assert_eq!(run_ibmcloud(&["-h".to_string()], "ibmcloud"), 0);
+        assert_eq!(run_ibmcloud(&["--version".to_string()], "ibmcloud"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ibmcloud(&[], "ibmcloud"), 0);
+    }
+}

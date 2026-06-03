@@ -74,4 +74,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_dar};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/dar"), "dar");
+        assert_eq!(basename(r"C:\bin\dar.exe"), "dar.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("dar.exe"), "dar");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_dar(&["--help".to_string()], "dar"), 0);
+        assert_eq!(run_dar(&["-h".to_string()], "dar"), 0);
+        assert_eq!(run_dar(&["--version".to_string()], "dar"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_dar(&[], "dar"), 0);
+    }
+}

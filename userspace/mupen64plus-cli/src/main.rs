@@ -63,4 +63,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_mupen64plus};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/mupen64plus"), "mupen64plus");
+        assert_eq!(basename(r"C:\bin\mupen64plus.exe"), "mupen64plus.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("mupen64plus.exe"), "mupen64plus");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_mupen64plus(&["--help".to_string()], "mupen64plus"), 0);
+        assert_eq!(run_mupen64plus(&["-h".to_string()], "mupen64plus"), 0);
+        assert_eq!(run_mupen64plus(&["--version".to_string()], "mupen64plus"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_mupen64plus(&[], "mupen64plus"), 0);
+    }
+}

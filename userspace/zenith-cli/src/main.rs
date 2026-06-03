@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_zenith};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/zenith"), "zenith");
+        assert_eq!(basename(r"C:\bin\zenith.exe"), "zenith.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("zenith.exe"), "zenith");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_zenith(&["--help".to_string()], "zenith"), 0);
+        assert_eq!(run_zenith(&["-h".to_string()], "zenith"), 0);
+        assert_eq!(run_zenith(&["--version".to_string()], "zenith"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_zenith(&[], "zenith"), 0);
+    }
+}

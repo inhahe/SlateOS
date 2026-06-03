@@ -58,4 +58,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_curlie};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/curlie"), "curlie");
+        assert_eq!(basename(r"C:\bin\curlie.exe"), "curlie.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("curlie.exe"), "curlie");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_curlie(&["--help".to_string()], "curlie"), 0);
+        assert_eq!(run_curlie(&["-h".to_string()], "curlie"), 0);
+        assert_eq!(run_curlie(&["--version".to_string()], "curlie"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_curlie(&[], "curlie"), 0);
+    }
+}

@@ -115,4 +115,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rs};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rudderstack"), "rudderstack");
+        assert_eq!(basename(r"C:\bin\rudderstack.exe"), "rudderstack.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rudderstack.exe"), "rudderstack");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rs(&["--help".to_string()], "rudderstack"), 0);
+        assert_eq!(run_rs(&["-h".to_string()], "rudderstack"), 0);
+        assert_eq!(run_rs(&["--version".to_string()], "rudderstack"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rs(&[], "rudderstack"), 0);
+    }
+}

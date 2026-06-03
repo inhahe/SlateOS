@@ -72,4 +72,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_exp};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/expensify"), "expensify");
+        assert_eq!(basename(r"C:\bin\expensify.exe"), "expensify.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("expensify.exe"), "expensify");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_exp(&["--help".to_string()], "expensify"), 0);
+        assert_eq!(run_exp(&["-h".to_string()], "expensify"), 0);
+        assert_eq!(run_exp(&["--version".to_string()], "expensify"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_exp(&[], "expensify"), 0);
+    }
+}

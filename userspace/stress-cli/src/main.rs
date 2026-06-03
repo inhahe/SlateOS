@@ -72,4 +72,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_stress};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/stress"), "stress");
+        assert_eq!(basename(r"C:\bin\stress.exe"), "stress.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("stress.exe"), "stress");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_stress(&["--help".to_string()], "stress"), 0);
+        assert_eq!(run_stress(&["-h".to_string()], "stress"), 0);
+        assert_eq!(run_stress(&["--version".to_string()], "stress"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_stress(&[], "stress"), 0);
+    }
+}

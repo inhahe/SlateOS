@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_hangul};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/libhangul"), "libhangul");
+        assert_eq!(basename(r"C:\bin\libhangul.exe"), "libhangul.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("libhangul.exe"), "libhangul");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_hangul(&["--help".to_string()], "libhangul"), 0);
+        assert_eq!(run_hangul(&["-h".to_string()], "libhangul"), 0);
+        assert_eq!(run_hangul(&["--version".to_string()], "libhangul"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_hangul(&[], "libhangul"), 0);
+    }
+}

@@ -64,4 +64,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_lkvm};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/kvmtool"), "kvmtool");
+        assert_eq!(basename(r"C:\bin\kvmtool.exe"), "kvmtool.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("kvmtool.exe"), "kvmtool");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_lkvm(&["--help".to_string()], "kvmtool"), 0);
+        assert_eq!(run_lkvm(&["-h".to_string()], "kvmtool"), 0);
+        assert_eq!(run_lkvm(&["--version".to_string()], "kvmtool"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_lkvm(&[], "kvmtool"), 0);
+    }
+}

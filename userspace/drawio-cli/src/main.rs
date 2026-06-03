@@ -47,4 +47,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_drawio};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/drawio"), "drawio");
+        assert_eq!(basename(r"C:\bin\drawio.exe"), "drawio.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("drawio.exe"), "drawio");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_drawio(&["--help".to_string()], "drawio"), 0);
+        assert_eq!(run_drawio(&["-h".to_string()], "drawio"), 0);
+        assert_eq!(run_drawio(&["--version".to_string()], "drawio"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_drawio(&[], "drawio"), 0);
+    }
+}

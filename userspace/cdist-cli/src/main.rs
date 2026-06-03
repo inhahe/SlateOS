@@ -64,4 +64,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cdist};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cdist"), "cdist");
+        assert_eq!(basename(r"C:\bin\cdist.exe"), "cdist.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cdist.exe"), "cdist");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cdist(&["--help".to_string()], "cdist"), 0);
+        assert_eq!(run_cdist(&["-h".to_string()], "cdist"), 0);
+        assert_eq!(run_cdist(&["--version".to_string()], "cdist"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cdist(&[], "cdist"), 0);
+    }
+}

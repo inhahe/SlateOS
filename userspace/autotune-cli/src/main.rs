@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_at};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/autotune"), "autotune");
+        assert_eq!(basename(r"C:\bin\autotune.exe"), "autotune.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("autotune.exe"), "autotune");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_at(&["--help".to_string()], "autotune"), 0);
+        assert_eq!(run_at(&["-h".to_string()], "autotune"), 0);
+        assert_eq!(run_at(&["--version".to_string()], "autotune"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_at(&[], "autotune"), 0);
+    }
+}

@@ -46,4 +46,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ads};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/azuredatastudio"), "azuredatastudio");
+        assert_eq!(basename(r"C:\bin\azuredatastudio.exe"), "azuredatastudio.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("azuredatastudio.exe"), "azuredatastudio");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ads(&["--help".to_string()], "azuredatastudio"), 0);
+        assert_eq!(run_ads(&["-h".to_string()], "azuredatastudio"), 0);
+        assert_eq!(run_ads(&["--version".to_string()], "azuredatastudio"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ads(&[], "azuredatastudio"), 0);
+    }
+}

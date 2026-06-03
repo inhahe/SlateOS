@@ -74,4 +74,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_crun};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/crun"), "crun");
+        assert_eq!(basename(r"C:\bin\crun.exe"), "crun.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("crun.exe"), "crun");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_crun(&["--help".to_string()], "crun"), 0);
+        assert_eq!(run_crun(&["-h".to_string()], "crun"), 0);
+        assert_eq!(run_crun(&["--version".to_string()], "crun"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_crun(&[], "crun"), 0);
+    }
+}

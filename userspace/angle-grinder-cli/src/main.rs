@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_agrind};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/angle-grinder"), "angle-grinder");
+        assert_eq!(basename(r"C:\bin\angle-grinder.exe"), "angle-grinder.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("angle-grinder.exe"), "angle-grinder");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_agrind(&["--help".to_string()], "angle-grinder"), 0);
+        assert_eq!(run_agrind(&["-h".to_string()], "angle-grinder"), 0);
+        assert_eq!(run_agrind(&["--version".to_string()], "angle-grinder"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_agrind(&[], "angle-grinder"), 0);
+    }
+}

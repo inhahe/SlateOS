@@ -46,4 +46,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ns};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/netsuite"), "netsuite");
+        assert_eq!(basename(r"C:\bin\netsuite.exe"), "netsuite.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("netsuite.exe"), "netsuite");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ns(&["--help".to_string()], "netsuite"), 0);
+        assert_eq!(run_ns(&["-h".to_string()], "netsuite"), 0);
+        assert_eq!(run_ns(&["--version".to_string()], "netsuite"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ns(&[], "netsuite"), 0);
+    }
+}

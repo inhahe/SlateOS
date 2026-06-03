@@ -99,4 +99,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_openapi};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/openapi"), "openapi");
+        assert_eq!(basename(r"C:\bin\openapi.exe"), "openapi.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("openapi.exe"), "openapi");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_openapi(&["--help".to_string()], "openapi"), 0);
+        assert_eq!(run_openapi(&["-h".to_string()], "openapi"), 0);
+        assert_eq!(run_openapi(&["--version".to_string()], "openapi"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_openapi(&[], "openapi"), 0);
+    }
+}

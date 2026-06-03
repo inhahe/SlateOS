@@ -41,4 +41,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_hexchat};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/hexchat"), "hexchat");
+        assert_eq!(basename(r"C:\bin\hexchat.exe"), "hexchat.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("hexchat.exe"), "hexchat");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_hexchat(&["--help".to_string()], "hexchat"), 0);
+        assert_eq!(run_hexchat(&["-h".to_string()], "hexchat"), 0);
+        assert_eq!(run_hexchat(&["--version".to_string()], "hexchat"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_hexchat(&[], "hexchat"), 0);
+    }
+}

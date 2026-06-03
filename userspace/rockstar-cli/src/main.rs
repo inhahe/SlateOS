@@ -55,4 +55,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rs};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rockstar"), "rockstar");
+        assert_eq!(basename(r"C:\bin\rockstar.exe"), "rockstar.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rockstar.exe"), "rockstar");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rs(&["--help".to_string()], "rockstar"), 0);
+        assert_eq!(run_rs(&["-h".to_string()], "rockstar"), 0);
+        assert_eq!(run_rs(&["--version".to_string()], "rockstar"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rs(&[], "rockstar"), 0);
+    }
+}

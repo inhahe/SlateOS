@@ -55,4 +55,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_subfinder};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/subfinder"), "subfinder");
+        assert_eq!(basename(r"C:\bin\subfinder.exe"), "subfinder.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("subfinder.exe"), "subfinder");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_subfinder(&["--help".to_string()], "subfinder"), 0);
+        assert_eq!(run_subfinder(&["-h".to_string()], "subfinder"), 0);
+        assert_eq!(run_subfinder(&["--version".to_string()], "subfinder"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_subfinder(&[], "subfinder"), 0);
+    }
+}

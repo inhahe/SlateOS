@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_osm2pgsql};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/osm2pgsql"), "osm2pgsql");
+        assert_eq!(basename(r"C:\bin\osm2pgsql.exe"), "osm2pgsql.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("osm2pgsql.exe"), "osm2pgsql");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_osm2pgsql(&["--help".to_string()], "osm2pgsql"), 0);
+        assert_eq!(run_osm2pgsql(&["-h".to_string()], "osm2pgsql"), 0);
+        assert_eq!(run_osm2pgsql(&["--version".to_string()], "osm2pgsql"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_osm2pgsql(&[], "osm2pgsql"), 0);
+    }
+}

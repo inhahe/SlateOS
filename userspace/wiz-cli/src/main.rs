@@ -123,4 +123,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wiz};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wiz"), "wiz");
+        assert_eq!(basename(r"C:\bin\wiz.exe"), "wiz.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wiz.exe"), "wiz");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wiz(&["--help".to_string()], "wiz"), 0);
+        assert_eq!(run_wiz(&["-h".to_string()], "wiz"), 0);
+        assert_eq!(run_wiz(&["--version".to_string()], "wiz"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wiz(&[], "wiz"), 0);
+    }
+}

@@ -54,4 +54,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_vray};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/vray"), "vray");
+        assert_eq!(basename(r"C:\bin\vray.exe"), "vray.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("vray.exe"), "vray");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_vray(&["--help".to_string()], "vray"), 0);
+        assert_eq!(run_vray(&["-h".to_string()], "vray"), 0);
+        assert_eq!(run_vray(&["--version".to_string()], "vray"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_vray(&[], "vray"), 0);
+    }
+}

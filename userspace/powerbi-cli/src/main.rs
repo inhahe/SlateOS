@@ -46,4 +46,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pbi};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/powerbi"), "powerbi");
+        assert_eq!(basename(r"C:\bin\powerbi.exe"), "powerbi.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("powerbi.exe"), "powerbi");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pbi(&["--help".to_string()], "powerbi"), 0);
+        assert_eq!(run_pbi(&["-h".to_string()], "powerbi"), 0);
+        assert_eq!(run_pbi(&["--version".to_string()], "powerbi"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pbi(&[], "powerbi"), 0);
+    }
+}

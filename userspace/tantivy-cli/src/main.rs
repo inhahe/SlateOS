@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_tantivy};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/tantivy"), "tantivy");
+        assert_eq!(basename(r"C:\bin\tantivy.exe"), "tantivy.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("tantivy.exe"), "tantivy");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_tantivy(&["--help".to_string()], "tantivy"), 0);
+        assert_eq!(run_tantivy(&["-h".to_string()], "tantivy"), 0);
+        assert_eq!(run_tantivy(&["--version".to_string()], "tantivy"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_tantivy(&[], "tantivy"), 0);
+    }
+}

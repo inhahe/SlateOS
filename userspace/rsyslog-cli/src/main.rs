@@ -58,4 +58,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rsyslogd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rsyslog"), "rsyslog");
+        assert_eq!(basename(r"C:\bin\rsyslog.exe"), "rsyslog.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rsyslog.exe"), "rsyslog");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rsyslogd(&["--help".to_string()], "rsyslog"), 0);
+        assert_eq!(run_rsyslogd(&["-h".to_string()], "rsyslog"), 0);
+        assert_eq!(run_rsyslogd(&["--version".to_string()], "rsyslog"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rsyslogd(&[], "rsyslog"), 0);
+    }
+}

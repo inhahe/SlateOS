@@ -40,4 +40,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_geary};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/geary"), "geary");
+        assert_eq!(basename(r"C:\bin\geary.exe"), "geary.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("geary.exe"), "geary");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_geary(&["--help".to_string()], "geary"), 0);
+        assert_eq!(run_geary(&["-h".to_string()], "geary"), 0);
+        assert_eq!(run_geary(&["--version".to_string()], "geary"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_geary(&[], "geary"), 0);
+    }
+}

@@ -159,6 +159,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_postfix};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/postfix"), "postfix");
+        assert_eq!(basename(r"C:\bin\postfix.exe"), "postfix.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("postfix.exe"), "postfix");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_postfix(&["--help".to_string()]), 0);
+        assert_eq!(run_postfix(&["-h".to_string()]), 0);
+        assert_eq!(run_postfix(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_postfix(&[]), 0);
+    }
 }

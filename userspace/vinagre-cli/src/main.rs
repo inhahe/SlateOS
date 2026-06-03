@@ -39,4 +39,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_vinagre};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/vinagre"), "vinagre");
+        assert_eq!(basename(r"C:\bin\vinagre.exe"), "vinagre.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("vinagre.exe"), "vinagre");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_vinagre(&["--help".to_string()], "vinagre"), 0);
+        assert_eq!(run_vinagre(&["-h".to_string()], "vinagre"), 0);
+        assert_eq!(run_vinagre(&["--version".to_string()], "vinagre"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_vinagre(&[], "vinagre"), 0);
+    }
+}

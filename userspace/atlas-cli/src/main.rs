@@ -104,4 +104,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_atlas};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/atlas"), "atlas");
+        assert_eq!(basename(r"C:\bin\atlas.exe"), "atlas.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("atlas.exe"), "atlas");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_atlas(&["--help".to_string()], "atlas"), 0);
+        assert_eq!(run_atlas(&["-h".to_string()], "atlas"), 0);
+        assert_eq!(run_atlas(&["--version".to_string()], "atlas"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_atlas(&[], "atlas"), 0);
+    }
+}

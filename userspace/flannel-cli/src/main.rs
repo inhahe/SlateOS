@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_flannel};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/flannel"), "flannel");
+        assert_eq!(basename(r"C:\bin\flannel.exe"), "flannel.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("flannel.exe"), "flannel");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_flannel(&["--help".to_string()], "flannel"), 0);
+        assert_eq!(run_flannel(&["-h".to_string()], "flannel"), 0);
+        assert_eq!(run_flannel(&["--version".to_string()], "flannel"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_flannel(&[], "flannel"), 0);
+    }
+}

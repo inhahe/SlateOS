@@ -68,4 +68,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_recursor};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/pdns-recursor"), "pdns-recursor");
+        assert_eq!(basename(r"C:\bin\pdns-recursor.exe"), "pdns-recursor.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("pdns-recursor.exe"), "pdns-recursor");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_recursor(&["--help".to_string()], "pdns-recursor"), 0);
+        assert_eq!(run_recursor(&["-h".to_string()], "pdns-recursor"), 0);
+        assert_eq!(run_recursor(&["--version".to_string()], "pdns-recursor"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_recursor(&[], "pdns-recursor"), 0);
+    }
+}

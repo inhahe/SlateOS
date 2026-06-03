@@ -83,4 +83,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_xlsxio_read};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xlsxio"), "xlsxio");
+        assert_eq!(basename(r"C:\bin\xlsxio.exe"), "xlsxio.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xlsxio.exe"), "xlsxio");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xlsxio_read(&["--help".to_string()], "xlsxio"), 0);
+        assert_eq!(run_xlsxio_read(&["-h".to_string()], "xlsxio"), 0);
+        assert_eq!(run_xlsxio_read(&["--version".to_string()], "xlsxio"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xlsxio_read(&[], "xlsxio"), 0);
+    }
+}

@@ -71,4 +71,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ramp};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ramp"), "ramp");
+        assert_eq!(basename(r"C:\bin\ramp.exe"), "ramp.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ramp.exe"), "ramp");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ramp(&["--help".to_string()], "ramp"), 0);
+        assert_eq!(run_ramp(&["-h".to_string()], "ramp"), 0);
+        assert_eq!(run_ramp(&["--version".to_string()], "ramp"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ramp(&[], "ramp"), 0);
+    }
+}

@@ -76,4 +76,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_helix};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/helix"), "helix");
+        assert_eq!(basename(r"C:\bin\helix.exe"), "helix.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("helix.exe"), "helix");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_helix(&["--help".to_string()], "helix"), 0);
+        assert_eq!(run_helix(&["-h".to_string()], "helix"), 0);
+        assert_eq!(run_helix(&["--version".to_string()], "helix"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_helix(&[], "helix"), 0);
+    }
+}

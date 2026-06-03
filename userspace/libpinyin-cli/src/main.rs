@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pinyin};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/libpinyin"), "libpinyin");
+        assert_eq!(basename(r"C:\bin\libpinyin.exe"), "libpinyin.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("libpinyin.exe"), "libpinyin");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pinyin(&["--help".to_string()], "libpinyin"), 0);
+        assert_eq!(run_pinyin(&["-h".to_string()], "libpinyin"), 0);
+        assert_eq!(run_pinyin(&["--version".to_string()], "libpinyin"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pinyin(&[], "libpinyin"), 0);
+    }
+}

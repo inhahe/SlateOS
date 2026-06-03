@@ -75,4 +75,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_gatling};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/gatling"), "gatling");
+        assert_eq!(basename(r"C:\bin\gatling.exe"), "gatling.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("gatling.exe"), "gatling");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_gatling(&["--help".to_string()], "gatling"), 0);
+        assert_eq!(run_gatling(&["-h".to_string()], "gatling"), 0);
+        assert_eq!(run_gatling(&["--version".to_string()], "gatling"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_gatling(&[], "gatling"), 0);
+    }
+}

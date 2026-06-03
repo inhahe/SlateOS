@@ -70,4 +70,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_gforth};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/forth"), "forth");
+        assert_eq!(basename(r"C:\bin\forth.exe"), "forth.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("forth.exe"), "forth");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_gforth(&["--help".to_string()]), 0);
+        assert_eq!(run_gforth(&["-h".to_string()]), 0);
+        assert_eq!(run_gforth(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_gforth(&[]), 0);
+    }
+}

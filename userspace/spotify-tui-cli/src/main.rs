@@ -72,4 +72,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_spt};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/spotify-tui"), "spotify-tui");
+        assert_eq!(basename(r"C:\bin\spotify-tui.exe"), "spotify-tui.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("spotify-tui.exe"), "spotify-tui");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_spt(&["--help".to_string()], "spotify-tui"), 0);
+        assert_eq!(run_spt(&["-h".to_string()], "spotify-tui"), 0);
+        assert_eq!(run_spt(&["--version".to_string()], "spotify-tui"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_spt(&[], "spotify-tui"), 0);
+    }
+}

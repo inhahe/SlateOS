@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_f360};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/fusion360"), "fusion360");
+        assert_eq!(basename(r"C:\bin\fusion360.exe"), "fusion360.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("fusion360.exe"), "fusion360");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_f360(&["--help".to_string()], "fusion360"), 0);
+        assert_eq!(run_f360(&["-h".to_string()], "fusion360"), 0);
+        assert_eq!(run_f360(&["--version".to_string()], "fusion360"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_f360(&[], "fusion360"), 0);
+    }
+}

@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_phpmyadmin};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/phpmyadmin"), "phpmyadmin");
+        assert_eq!(basename(r"C:\bin\phpmyadmin.exe"), "phpmyadmin.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("phpmyadmin.exe"), "phpmyadmin");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_phpmyadmin(&["--help".to_string()], "phpmyadmin"), 0);
+        assert_eq!(run_phpmyadmin(&["-h".to_string()], "phpmyadmin"), 0);
+        assert_eq!(run_phpmyadmin(&["--version".to_string()], "phpmyadmin"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_phpmyadmin(&[], "phpmyadmin"), 0);
+    }
+}

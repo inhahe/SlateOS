@@ -124,6 +124,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_chroot};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/chroot"), "chroot");
+        assert_eq!(basename(r"C:\bin\chroot.exe"), "chroot.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("chroot.exe"), "chroot");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_chroot(&["--help".to_string()]), 0);
+        assert_eq!(run_chroot(&["-h".to_string()]), 0);
+        assert_eq!(run_chroot(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_chroot(&[]), 0);
+    }
 }

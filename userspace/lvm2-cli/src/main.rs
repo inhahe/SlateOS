@@ -67,4 +67,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_lvm};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/lvm2"), "lvm2");
+        assert_eq!(basename(r"C:\bin\lvm2.exe"), "lvm2.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("lvm2.exe"), "lvm2");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_lvm(&["--help".to_string()], "lvm2"), 0);
+        assert_eq!(run_lvm(&["-h".to_string()], "lvm2"), 0);
+        assert_eq!(run_lvm(&["--version".to_string()], "lvm2"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_lvm(&[], "lvm2"), 0);
+    }
+}

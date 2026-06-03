@@ -100,4 +100,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_zfs};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/zfs"), "zfs");
+        assert_eq!(basename(r"C:\bin\zfs.exe"), "zfs.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("zfs.exe"), "zfs");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_zfs(&["--help".to_string()], "zfs"), 0);
+        assert_eq!(run_zfs(&["-h".to_string()], "zfs"), 0);
+        assert_eq!(run_zfs(&["--version".to_string()], "zfs"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_zfs(&[], "zfs"), 0);
+    }
+}

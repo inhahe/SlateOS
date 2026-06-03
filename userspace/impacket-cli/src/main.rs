@@ -83,4 +83,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_impacket};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/impacket"), "impacket");
+        assert_eq!(basename(r"C:\bin\impacket.exe"), "impacket.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("impacket.exe"), "impacket");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_impacket(&["--help".to_string()], "impacket"), 0);
+        assert_eq!(run_impacket(&["-h".to_string()], "impacket"), 0);
+        assert_eq!(run_impacket(&["--version".to_string()], "impacket"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_impacket(&[], "impacket"), 0);
+    }
+}

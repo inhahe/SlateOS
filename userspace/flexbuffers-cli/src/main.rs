@@ -55,4 +55,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_flexbuf};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/flexbuffers"), "flexbuffers");
+        assert_eq!(basename(r"C:\bin\flexbuffers.exe"), "flexbuffers.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("flexbuffers.exe"), "flexbuffers");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_flexbuf(&["--help".to_string()], "flexbuffers"), 0);
+        assert_eq!(run_flexbuf(&["-h".to_string()], "flexbuffers"), 0);
+        assert_eq!(run_flexbuf(&["--version".to_string()], "flexbuffers"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_flexbuf(&[], "flexbuffers"), 0);
+    }
+}

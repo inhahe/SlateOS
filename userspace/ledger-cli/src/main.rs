@@ -54,4 +54,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ledger};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ledger"), "ledger");
+        assert_eq!(basename(r"C:\bin\ledger.exe"), "ledger.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ledger.exe"), "ledger");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ledger(&["--help".to_string()], "ledger"), 0);
+        assert_eq!(run_ledger(&["-h".to_string()], "ledger"), 0);
+        assert_eq!(run_ledger(&["--version".to_string()], "ledger"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ledger(&[], "ledger"), 0);
+    }
+}

@@ -57,4 +57,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_snapraid};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/snapraid"), "snapraid");
+        assert_eq!(basename(r"C:\bin\snapraid.exe"), "snapraid.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("snapraid.exe"), "snapraid");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_snapraid(&["--help".to_string()], "snapraid"), 0);
+        assert_eq!(run_snapraid(&["-h".to_string()], "snapraid"), 0);
+        assert_eq!(run_snapraid(&["--version".to_string()], "snapraid"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_snapraid(&[], "snapraid"), 0);
+    }
+}

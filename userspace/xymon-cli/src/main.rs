@@ -62,4 +62,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_xymon};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xymon"), "xymon");
+        assert_eq!(basename(r"C:\bin\xymon.exe"), "xymon.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xymon.exe"), "xymon");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xymon(&["--help".to_string()], "xymon"), 0);
+        assert_eq!(run_xymon(&["-h".to_string()], "xymon"), 0);
+        assert_eq!(run_xymon(&["--version".to_string()], "xymon"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xymon(&[], "xymon"), 0);
+    }
+}

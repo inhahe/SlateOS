@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_octane};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/octanerender"), "octanerender");
+        assert_eq!(basename(r"C:\bin\octanerender.exe"), "octanerender.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("octanerender.exe"), "octanerender");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_octane(&["--help".to_string()], "octanerender"), 0);
+        assert_eq!(run_octane(&["-h".to_string()], "octanerender"), 0);
+        assert_eq!(run_octane(&["--version".to_string()], "octanerender"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_octane(&[], "octanerender"), 0);
+    }
+}

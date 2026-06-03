@@ -60,4 +60,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_crosvm};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/crosvm"), "crosvm");
+        assert_eq!(basename(r"C:\bin\crosvm.exe"), "crosvm.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("crosvm.exe"), "crosvm");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_crosvm(&["--help".to_string()], "crosvm"), 0);
+        assert_eq!(run_crosvm(&["-h".to_string()], "crosvm"), 0);
+        assert_eq!(run_crosvm(&["--version".to_string()], "crosvm"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_crosvm(&[], "crosvm"), 0);
+    }
+}

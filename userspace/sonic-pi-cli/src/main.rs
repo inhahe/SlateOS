@@ -74,4 +74,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sonic_pi};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sonic-pi"), "sonic-pi");
+        assert_eq!(basename(r"C:\bin\sonic-pi.exe"), "sonic-pi.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sonic-pi.exe"), "sonic-pi");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sonic_pi(&["--help".to_string()], "sonic-pi"), 0);
+        assert_eq!(run_sonic_pi(&["-h".to_string()], "sonic-pi"), 0);
+        assert_eq!(run_sonic_pi(&["--version".to_string()], "sonic-pi"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sonic_pi(&[], "sonic-pi"), 0);
+    }
+}

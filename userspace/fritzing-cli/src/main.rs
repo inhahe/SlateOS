@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_fritzing};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/fritzing"), "fritzing");
+        assert_eq!(basename(r"C:\bin\fritzing.exe"), "fritzing.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("fritzing.exe"), "fritzing");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_fritzing(&["--help".to_string()], "fritzing"), 0);
+        assert_eq!(run_fritzing(&["-h".to_string()], "fritzing"), 0);
+        assert_eq!(run_fritzing(&["--version".to_string()], "fritzing"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_fritzing(&[], "fritzing"), 0);
+    }
+}

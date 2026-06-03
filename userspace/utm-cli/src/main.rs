@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_utm};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/utm"), "utm");
+        assert_eq!(basename(r"C:\bin\utm.exe"), "utm.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("utm.exe"), "utm");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_utm(&["--help".to_string()], "utm"), 0);
+        assert_eq!(run_utm(&["-h".to_string()], "utm"), 0);
+        assert_eq!(run_utm(&["--version".to_string()], "utm"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_utm(&[], "utm"), 0);
+    }
+}

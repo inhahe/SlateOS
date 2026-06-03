@@ -80,4 +80,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_zabbix_agentd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/zabbix"), "zabbix");
+        assert_eq!(basename(r"C:\bin\zabbix.exe"), "zabbix.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("zabbix.exe"), "zabbix");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_zabbix_agentd(&["--help".to_string()], "zabbix"), 0);
+        assert_eq!(run_zabbix_agentd(&["-h".to_string()], "zabbix"), 0);
+        assert_eq!(run_zabbix_agentd(&["--version".to_string()], "zabbix"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_zabbix_agentd(&[], "zabbix"), 0);
+    }
+}

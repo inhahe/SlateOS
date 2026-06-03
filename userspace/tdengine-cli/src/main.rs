@@ -66,4 +66,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_tdengine};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/tdengine"), "tdengine");
+        assert_eq!(basename(r"C:\bin\tdengine.exe"), "tdengine.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("tdengine.exe"), "tdengine");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_tdengine(&["--help".to_string()], "tdengine"), 0);
+        assert_eq!(run_tdengine(&["-h".to_string()], "tdengine"), 0);
+        assert_eq!(run_tdengine(&["--version".to_string()], "tdengine"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_tdengine(&[], "tdengine"), 0);
+    }
+}

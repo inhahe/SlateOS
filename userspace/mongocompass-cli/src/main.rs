@@ -45,4 +45,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_mc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/mongocompass"), "mongocompass");
+        assert_eq!(basename(r"C:\bin\mongocompass.exe"), "mongocompass.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("mongocompass.exe"), "mongocompass");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_mc(&["--help".to_string()], "mongocompass"), 0);
+        assert_eq!(run_mc(&["-h".to_string()], "mongocompass"), 0);
+        assert_eq!(run_mc(&["--version".to_string()], "mongocompass"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_mc(&[], "mongocompass"), 0);
+    }
+}

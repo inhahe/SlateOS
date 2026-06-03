@@ -137,4 +137,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_tenable};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/tenable"), "tenable");
+        assert_eq!(basename(r"C:\bin\tenable.exe"), "tenable.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("tenable.exe"), "tenable");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_tenable(&["--help".to_string()], "tenable"), 0);
+        assert_eq!(run_tenable(&["-h".to_string()], "tenable"), 0);
+        assert_eq!(run_tenable(&["--version".to_string()], "tenable"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_tenable(&[], "tenable"), 0);
+    }
+}

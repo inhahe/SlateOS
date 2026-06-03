@@ -59,4 +59,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_electrum};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/electrum"), "electrum");
+        assert_eq!(basename(r"C:\bin\electrum.exe"), "electrum.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("electrum.exe"), "electrum");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_electrum(&["--help".to_string()], "electrum"), 0);
+        assert_eq!(run_electrum(&["-h".to_string()], "electrum"), 0);
+        assert_eq!(run_electrum(&["--version".to_string()], "electrum"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_electrum(&[], "electrum"), 0);
+    }
+}

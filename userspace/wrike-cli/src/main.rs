@@ -110,4 +110,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wrike};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wrike"), "wrike");
+        assert_eq!(basename(r"C:\bin\wrike.exe"), "wrike.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wrike.exe"), "wrike");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wrike(&["--help".to_string()], "wrike"), 0);
+        assert_eq!(run_wrike(&["-h".to_string()], "wrike"), 0);
+        assert_eq!(run_wrike(&["--version".to_string()], "wrike"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wrike(&[], "wrike"), 0);
+    }
+}

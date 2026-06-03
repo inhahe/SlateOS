@@ -64,4 +64,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_xh};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xh"), "xh");
+        assert_eq!(basename(r"C:\bin\xh.exe"), "xh.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xh.exe"), "xh");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xh(&["--help".to_string()], "xh"), 0);
+        assert_eq!(run_xh(&["-h".to_string()], "xh"), 0);
+        assert_eq!(run_xh(&["--version".to_string()], "xh"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xh(&[], "xh"), 0);
+    }
+}

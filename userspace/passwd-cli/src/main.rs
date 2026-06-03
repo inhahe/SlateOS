@@ -137,6 +137,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_passwd};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/passwd"), "passwd");
+        assert_eq!(basename(r"C:\bin\passwd.exe"), "passwd.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("passwd.exe"), "passwd");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_passwd(&["--help".to_string()]), 0);
+        assert_eq!(run_passwd(&["-h".to_string()]), 0);
+        assert_eq!(run_passwd(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_passwd(&[]), 0);
+    }
 }

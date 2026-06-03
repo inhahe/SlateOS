@@ -67,4 +67,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_desktop};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/bitwarden"), "bitwarden");
+        assert_eq!(basename(r"C:\bin\bitwarden.exe"), "bitwarden.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("bitwarden.exe"), "bitwarden");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_desktop(&["--help".to_string()], "bitwarden"), 0);
+        assert_eq!(run_desktop(&["-h".to_string()], "bitwarden"), 0);
+        assert_eq!(run_desktop(&["--version".to_string()], "bitwarden"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_desktop(&[], "bitwarden"), 0);
+    }
+}

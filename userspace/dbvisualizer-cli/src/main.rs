@@ -45,4 +45,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_dbvis};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/dbvisualizer"), "dbvisualizer");
+        assert_eq!(basename(r"C:\bin\dbvisualizer.exe"), "dbvisualizer.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("dbvisualizer.exe"), "dbvisualizer");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_dbvis(&["--help".to_string()], "dbvisualizer"), 0);
+        assert_eq!(run_dbvis(&["-h".to_string()], "dbvisualizer"), 0);
+        assert_eq!(run_dbvis(&["--version".to_string()], "dbvisualizer"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_dbvis(&[], "dbvisualizer"), 0);
+    }
+}

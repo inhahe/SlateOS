@@ -58,4 +58,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_abduco};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/abduco"), "abduco");
+        assert_eq!(basename(r"C:\bin\abduco.exe"), "abduco.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("abduco.exe"), "abduco");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_abduco(&["--help".to_string()], "abduco"), 0);
+        assert_eq!(run_abduco(&["-h".to_string()], "abduco"), 0);
+        assert_eq!(run_abduco(&["--version".to_string()], "abduco"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_abduco(&[], "abduco"), 0);
+    }
+}

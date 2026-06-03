@@ -67,4 +67,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_seafile};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/seafile"), "seafile");
+        assert_eq!(basename(r"C:\bin\seafile.exe"), "seafile.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("seafile.exe"), "seafile");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_seafile(&["--help".to_string()], "seafile"), 0);
+        assert_eq!(run_seafile(&["-h".to_string()], "seafile"), 0);
+        assert_eq!(run_seafile(&["--version".to_string()], "seafile"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_seafile(&[], "seafile"), 0);
+    }
+}

@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_btmgmt};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/btmgmt"), "btmgmt");
+        assert_eq!(basename(r"C:\bin\btmgmt.exe"), "btmgmt.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("btmgmt.exe"), "btmgmt");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_btmgmt(&["--help".to_string()], "btmgmt"), 0);
+        assert_eq!(run_btmgmt(&["-h".to_string()], "btmgmt"), 0);
+        assert_eq!(run_btmgmt(&["--version".to_string()], "btmgmt"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_btmgmt(&[], "btmgmt"), 0);
+    }
+}

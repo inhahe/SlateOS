@@ -65,4 +65,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_higan};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/higan"), "higan");
+        assert_eq!(basename(r"C:\bin\higan.exe"), "higan.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("higan.exe"), "higan");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_higan(&["--help".to_string()], "higan"), 0);
+        assert_eq!(run_higan(&["-h".to_string()], "higan"), 0);
+        assert_eq!(run_higan(&["--version".to_string()], "higan"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_higan(&[], "higan"), 0);
+    }
+}

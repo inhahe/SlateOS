@@ -100,4 +100,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_memphis};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/memphis"), "memphis");
+        assert_eq!(basename(r"C:\bin\memphis.exe"), "memphis.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("memphis.exe"), "memphis");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_memphis(&["--help".to_string()], "memphis"), 0);
+        assert_eq!(run_memphis(&["-h".to_string()], "memphis"), 0);
+        assert_eq!(run_memphis(&["--version".to_string()], "memphis"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_memphis(&[], "memphis"), 0);
+    }
+}

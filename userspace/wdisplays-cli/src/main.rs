@@ -40,4 +40,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wdisplays};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wdisplays"), "wdisplays");
+        assert_eq!(basename(r"C:\bin\wdisplays.exe"), "wdisplays.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wdisplays.exe"), "wdisplays");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wdisplays(&["--help".to_string()], "wdisplays"), 0);
+        assert_eq!(run_wdisplays(&["-h".to_string()], "wdisplays"), 0);
+        assert_eq!(run_wdisplays(&["--version".to_string()], "wdisplays"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wdisplays(&[], "wdisplays"), 0);
+    }
+}

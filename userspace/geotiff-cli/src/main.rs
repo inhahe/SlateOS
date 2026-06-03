@@ -74,4 +74,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_geotiff};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/geotiff"), "geotiff");
+        assert_eq!(basename(r"C:\bin\geotiff.exe"), "geotiff.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("geotiff.exe"), "geotiff");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_geotiff(&["--help".to_string()], "geotiff"), 0);
+        assert_eq!(run_geotiff(&["-h".to_string()], "geotiff"), 0);
+        assert_eq!(run_geotiff(&["--version".to_string()], "geotiff"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_geotiff(&[], "geotiff"), 0);
+    }
+}

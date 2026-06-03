@@ -52,4 +52,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_inxi};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/inxi"), "inxi");
+        assert_eq!(basename(r"C:\bin\inxi.exe"), "inxi.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("inxi.exe"), "inxi");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_inxi(&["--help".to_string()], "inxi"), 0);
+        assert_eq!(run_inxi(&["-h".to_string()], "inxi"), 0);
+        assert_eq!(run_inxi(&["--version".to_string()], "inxi"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_inxi(&[], "inxi"), 0);
+    }
+}

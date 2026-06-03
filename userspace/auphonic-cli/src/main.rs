@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_au};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/auphonic"), "auphonic");
+        assert_eq!(basename(r"C:\bin\auphonic.exe"), "auphonic.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("auphonic.exe"), "auphonic");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_au(&["--help".to_string()], "auphonic"), 0);
+        assert_eq!(run_au(&["-h".to_string()], "auphonic"), 0);
+        assert_eq!(run_au(&["--version".to_string()], "auphonic"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_au(&[], "auphonic"), 0);
+    }
+}

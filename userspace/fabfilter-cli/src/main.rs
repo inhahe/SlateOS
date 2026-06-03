@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ff};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/fabfilter"), "fabfilter");
+        assert_eq!(basename(r"C:\bin\fabfilter.exe"), "fabfilter.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("fabfilter.exe"), "fabfilter");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ff(&["--help".to_string()], "fabfilter"), 0);
+        assert_eq!(run_ff(&["-h".to_string()], "fabfilter"), 0);
+        assert_eq!(run_ff(&["--version".to_string()], "fabfilter"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ff(&[], "fabfilter"), 0);
+    }
+}

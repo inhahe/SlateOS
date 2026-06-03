@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_live};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ableton"), "ableton");
+        assert_eq!(basename(r"C:\bin\ableton.exe"), "ableton.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ableton.exe"), "ableton");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_live(&["--help".to_string()], "ableton"), 0);
+        assert_eq!(run_live(&["-h".to_string()], "ableton"), 0);
+        assert_eq!(run_live(&["--version".to_string()], "ableton"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_live(&[], "ableton"), 0);
+    }
+}

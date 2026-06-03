@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_apisix};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/apisix"), "apisix");
+        assert_eq!(basename(r"C:\bin\apisix.exe"), "apisix.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("apisix.exe"), "apisix");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_apisix(&["--help".to_string()], "apisix"), 0);
+        assert_eq!(run_apisix(&["-h".to_string()], "apisix"), 0);
+        assert_eq!(run_apisix(&["--version".to_string()], "apisix"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_apisix(&[], "apisix"), 0);
+    }
+}

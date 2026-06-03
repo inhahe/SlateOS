@@ -72,4 +72,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_singer};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/singer"), "singer");
+        assert_eq!(basename(r"C:\bin\singer.exe"), "singer.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("singer.exe"), "singer");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_singer(&["--help".to_string()], "singer"), 0);
+        assert_eq!(run_singer(&["-h".to_string()], "singer"), 0);
+        assert_eq!(run_singer(&["--version".to_string()], "singer"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_singer(&[], "singer"), 0);
+    }
+}

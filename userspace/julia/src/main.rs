@@ -68,6 +68,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_julia};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_julia(vec!["--help".to_string()]), 0);
+        assert_eq!(run_julia(vec!["-h".to_string()]), 0);
+        assert_eq!(run_julia(vec!["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_julia(vec![]), 0);
+    }
 }

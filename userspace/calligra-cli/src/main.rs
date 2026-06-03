@@ -40,4 +40,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_calligra};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/calligra"), "calligra");
+        assert_eq!(basename(r"C:\bin\calligra.exe"), "calligra.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("calligra.exe"), "calligra");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_calligra(&["--help".to_string()], "calligra"), 0);
+        assert_eq!(run_calligra(&["-h".to_string()], "calligra"), 0);
+        assert_eq!(run_calligra(&["--version".to_string()], "calligra"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_calligra(&[], "calligra"), 0);
+    }
+}

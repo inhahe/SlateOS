@@ -97,4 +97,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_helpscout};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/helpscout"), "helpscout");
+        assert_eq!(basename(r"C:\bin\helpscout.exe"), "helpscout.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("helpscout.exe"), "helpscout");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_helpscout(&["--help".to_string()], "helpscout"), 0);
+        assert_eq!(run_helpscout(&["-h".to_string()], "helpscout"), 0);
+        assert_eq!(run_helpscout(&["--version".to_string()], "helpscout"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_helpscout(&[], "helpscout"), 0);
+    }
+}

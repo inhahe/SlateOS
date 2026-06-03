@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sw};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/solidworks"), "solidworks");
+        assert_eq!(basename(r"C:\bin\solidworks.exe"), "solidworks.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("solidworks.exe"), "solidworks");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sw(&["--help".to_string()], "solidworks"), 0);
+        assert_eq!(run_sw(&["-h".to_string()], "solidworks"), 0);
+        assert_eq!(run_sw(&["--version".to_string()], "solidworks"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sw(&[], "solidworks"), 0);
+    }
+}

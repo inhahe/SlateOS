@@ -54,4 +54,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_osv_scanner};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/osv-scanner"), "osv-scanner");
+        assert_eq!(basename(r"C:\bin\osv-scanner.exe"), "osv-scanner.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("osv-scanner.exe"), "osv-scanner");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_osv_scanner(&["--help".to_string()], "osv-scanner"), 0);
+        assert_eq!(run_osv_scanner(&["-h".to_string()], "osv-scanner"), 0);
+        assert_eq!(run_osv_scanner(&["--version".to_string()], "osv-scanner"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_osv_scanner(&[], "osv-scanner"), 0);
+    }
+}

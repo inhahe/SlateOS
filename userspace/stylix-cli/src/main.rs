@@ -57,4 +57,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_stylix};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/stylix"), "stylix");
+        assert_eq!(basename(r"C:\bin\stylix.exe"), "stylix.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("stylix.exe"), "stylix");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_stylix(&["--help".to_string()], "stylix"), 0);
+        assert_eq!(run_stylix(&["-h".to_string()], "stylix"), 0);
+        assert_eq!(run_stylix(&["--version".to_string()], "stylix"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_stylix(&[], "stylix"), 0);
+    }
+}

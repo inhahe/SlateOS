@@ -23,8 +23,8 @@ fn run_lvm(prog: &str, args: &[String]) -> i32 {
 
     match prog {
         "pvcreate" => {
-            let dev = args.iter().filter(|a| !a.starts_with('-'))
-                .next().map(|s| s.as_str()).unwrap_or("/dev/sdb");
+            let dev = args.iter().find(|a| !a.starts_with('-'))
+                .map(|s| s.as_str()).unwrap_or("/dev/sdb");
             println!("  Physical volume \"{}\" successfully created.", dev);
         }
         "vgcreate" => {
@@ -108,6 +108,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_lvm};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/lvm"), "lvm");
+        assert_eq!(basename(r"C:\bin\lvm.exe"), "lvm.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("lvm.exe"), "lvm");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_lvm("lvm", &["--help".to_string()]), 0);
+        assert_eq!(run_lvm("lvm", &["-h".to_string()]), 0);
+        assert_eq!(run_lvm("lvm", &["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_lvm("lvm", &[]), 0);
+    }
 }

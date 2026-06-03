@@ -47,4 +47,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_magic};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/magic"), "magic");
+        assert_eq!(basename(r"C:\bin\magic.exe"), "magic.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("magic.exe"), "magic");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_magic(&["--help".to_string()], "magic"), 0);
+        assert_eq!(run_magic(&["-h".to_string()], "magic"), 0);
+        assert_eq!(run_magic(&["--version".to_string()], "magic"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_magic(&[], "magic"), 0);
+    }
+}

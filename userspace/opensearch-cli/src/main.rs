@@ -45,4 +45,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_opensearch};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/opensearch"), "opensearch");
+        assert_eq!(basename(r"C:\bin\opensearch.exe"), "opensearch.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("opensearch.exe"), "opensearch");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_opensearch(&["--help".to_string()], "opensearch"), 0);
+        assert_eq!(run_opensearch(&["-h".to_string()], "opensearch"), 0);
+        assert_eq!(run_opensearch(&["--version".to_string()], "opensearch"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_opensearch(&[], "opensearch"), 0);
+    }
+}

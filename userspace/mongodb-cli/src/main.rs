@@ -86,4 +86,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_mongosh};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/mongodb"), "mongodb");
+        assert_eq!(basename(r"C:\bin\mongodb.exe"), "mongodb.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("mongodb.exe"), "mongodb");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_mongosh(&["--help".to_string()], "mongodb"), 0);
+        assert_eq!(run_mongosh(&["-h".to_string()], "mongodb"), 0);
+        assert_eq!(run_mongosh(&["--version".to_string()], "mongodb"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_mongosh(&[], "mongodb"), 0);
+    }
+}

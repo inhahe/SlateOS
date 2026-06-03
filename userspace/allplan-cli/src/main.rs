@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_allplan};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/allplan"), "allplan");
+        assert_eq!(basename(r"C:\bin\allplan.exe"), "allplan.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("allplan.exe"), "allplan");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_allplan(&["--help".to_string()], "allplan"), 0);
+        assert_eq!(run_allplan(&["-h".to_string()], "allplan"), 0);
+        assert_eq!(run_allplan(&["--version".to_string()], "allplan"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_allplan(&[], "allplan"), 0);
+    }
+}

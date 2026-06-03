@@ -40,4 +40,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sylenth};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sylenth"), "sylenth");
+        assert_eq!(basename(r"C:\bin\sylenth.exe"), "sylenth.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sylenth.exe"), "sylenth");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sylenth(&["--help".to_string()], "sylenth"), 0);
+        assert_eq!(run_sylenth(&["-h".to_string()], "sylenth"), 0);
+        assert_eq!(run_sylenth(&["--version".to_string()], "sylenth"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sylenth(&[], "sylenth"), 0);
+    }
+}

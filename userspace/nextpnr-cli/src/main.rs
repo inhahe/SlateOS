@@ -55,4 +55,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_nextpnr};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/nextpnr"), "nextpnr");
+        assert_eq!(basename(r"C:\bin\nextpnr.exe"), "nextpnr.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("nextpnr.exe"), "nextpnr");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_nextpnr(&["--help".to_string()], "nextpnr"), 0);
+        assert_eq!(run_nextpnr(&["-h".to_string()], "nextpnr"), 0);
+        assert_eq!(run_nextpnr(&["--version".to_string()], "nextpnr"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_nextpnr(&[], "nextpnr"), 0);
+    }
+}

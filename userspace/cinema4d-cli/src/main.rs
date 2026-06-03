@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_c4d};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cinema4d"), "cinema4d");
+        assert_eq!(basename(r"C:\bin\cinema4d.exe"), "cinema4d.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cinema4d.exe"), "cinema4d");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_c4d(&["--help".to_string()], "cinema4d"), 0);
+        assert_eq!(run_c4d(&["-h".to_string()], "cinema4d"), 0);
+        assert_eq!(run_c4d(&["--version".to_string()], "cinema4d"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_c4d(&[], "cinema4d"), 0);
+    }
+}

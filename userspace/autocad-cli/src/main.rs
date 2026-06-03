@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_acad};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/autocad"), "autocad");
+        assert_eq!(basename(r"C:\bin\autocad.exe"), "autocad.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("autocad.exe"), "autocad");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_acad(&["--help".to_string()], "autocad"), 0);
+        assert_eq!(run_acad(&["-h".to_string()], "autocad"), 0);
+        assert_eq!(run_acad(&["--version".to_string()], "autocad"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_acad(&[], "autocad"), 0);
+    }
+}

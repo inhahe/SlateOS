@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_inspectrum};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/inspectrum"), "inspectrum");
+        assert_eq!(basename(r"C:\bin\inspectrum.exe"), "inspectrum.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("inspectrum.exe"), "inspectrum");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_inspectrum(&["--help".to_string()], "inspectrum"), 0);
+        assert_eq!(run_inspectrum(&["-h".to_string()], "inspectrum"), 0);
+        assert_eq!(run_inspectrum(&["--version".to_string()], "inspectrum"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_inspectrum(&[], "inspectrum"), 0);
+    }
+}

@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_toad};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/toad"), "toad");
+        assert_eq!(basename(r"C:\bin\toad.exe"), "toad.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("toad.exe"), "toad");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_toad(&["--help".to_string()], "toad"), 0);
+        assert_eq!(run_toad(&["-h".to_string()], "toad"), 0);
+        assert_eq!(run_toad(&["--version".to_string()], "toad"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_toad(&[], "toad"), 0);
+    }
+}

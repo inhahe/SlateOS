@@ -57,4 +57,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_star};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/star"), "star");
+        assert_eq!(basename(r"C:\bin\star.exe"), "star.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("star.exe"), "star");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_star(&["--help".to_string()], "star"), 0);
+        assert_eq!(run_star(&["-h".to_string()], "star"), 0);
+        assert_eq!(run_star(&["--version".to_string()], "star"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_star(&[], "star"), 0);
+    }
+}

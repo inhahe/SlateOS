@@ -48,4 +48,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_typesense};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/typesense"), "typesense");
+        assert_eq!(basename(r"C:\bin\typesense.exe"), "typesense.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("typesense.exe"), "typesense");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_typesense(&["--help".to_string()], "typesense"), 0);
+        assert_eq!(run_typesense(&["-h".to_string()], "typesense"), 0);
+        assert_eq!(run_typesense(&["--version".to_string()], "typesense"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_typesense(&[], "typesense"), 0);
+    }
+}

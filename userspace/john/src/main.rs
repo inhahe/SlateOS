@@ -123,6 +123,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_x2john};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_x2john(vec!["--help".to_string()], "john"), 0);
+        assert_eq!(run_x2john(vec!["-h".to_string()], "john"), 0);
+        assert_eq!(run_x2john(vec!["--version".to_string()], "john"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_x2john(vec![], "john"), 0);
+    }
 }

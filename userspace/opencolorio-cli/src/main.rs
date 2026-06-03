@@ -65,4 +65,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ociocheck};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/opencolorio"), "opencolorio");
+        assert_eq!(basename(r"C:\bin\opencolorio.exe"), "opencolorio.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("opencolorio.exe"), "opencolorio");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ociocheck(&["--help".to_string()], "opencolorio"), 0);
+        assert_eq!(run_ociocheck(&["-h".to_string()], "opencolorio"), 0);
+        assert_eq!(run_ociocheck(&["--version".to_string()], "opencolorio"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ociocheck(&[], "opencolorio"), 0);
+    }
+}

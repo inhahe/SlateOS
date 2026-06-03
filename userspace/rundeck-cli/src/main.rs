@@ -52,4 +52,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rundeck};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rundeck"), "rundeck");
+        assert_eq!(basename(r"C:\bin\rundeck.exe"), "rundeck.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rundeck.exe"), "rundeck");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rundeck(&["--help".to_string()], "rundeck"), 0);
+        assert_eq!(run_rundeck(&["-h".to_string()], "rundeck"), 0);
+        assert_eq!(run_rundeck(&["--version".to_string()], "rundeck"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rundeck(&[], "rundeck"), 0);
+    }
+}

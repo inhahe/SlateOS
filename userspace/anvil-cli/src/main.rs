@@ -58,4 +58,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_anvil};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/anvil"), "anvil");
+        assert_eq!(basename(r"C:\bin\anvil.exe"), "anvil.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("anvil.exe"), "anvil");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_anvil(&["--help".to_string()], "anvil"), 0);
+        assert_eq!(run_anvil(&["-h".to_string()], "anvil"), 0);
+        assert_eq!(run_anvil(&["--version".to_string()], "anvil"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_anvil(&[], "anvil"), 0);
+    }
+}

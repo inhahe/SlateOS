@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_xkbcomp};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xkbcomp"), "xkbcomp");
+        assert_eq!(basename(r"C:\bin\xkbcomp.exe"), "xkbcomp.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xkbcomp.exe"), "xkbcomp");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xkbcomp(&["--help".to_string()], "xkbcomp"), 0);
+        assert_eq!(run_xkbcomp(&["-h".to_string()], "xkbcomp"), 0);
+        assert_eq!(run_xkbcomp(&["--version".to_string()], "xkbcomp"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xkbcomp(&[], "xkbcomp"), 0);
+    }
+}

@@ -110,4 +110,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_polkitd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/polkit"), "polkit");
+        assert_eq!(basename(r"C:\bin\polkit.exe"), "polkit.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("polkit.exe"), "polkit");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_polkitd(&["--help".to_string()], "polkit"), 0);
+        assert_eq!(run_polkitd(&["-h".to_string()], "polkit"), 0);
+        assert_eq!(run_polkitd(&["--version".to_string()], "polkit"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_polkitd(&[], "polkit"), 0);
+    }
+}

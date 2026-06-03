@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_oc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/openshift"), "openshift");
+        assert_eq!(basename(r"C:\bin\openshift.exe"), "openshift.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("openshift.exe"), "openshift");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_oc(&["--help".to_string()], "openshift"), 0);
+        assert_eq!(run_oc(&["-h".to_string()], "openshift"), 0);
+        assert_eq!(run_oc(&["--version".to_string()], "openshift"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_oc(&[], "openshift"), 0);
+    }
+}

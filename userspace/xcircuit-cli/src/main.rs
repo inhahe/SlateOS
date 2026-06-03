@@ -48,4 +48,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_xcircuit};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xcircuit"), "xcircuit");
+        assert_eq!(basename(r"C:\bin\xcircuit.exe"), "xcircuit.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xcircuit.exe"), "xcircuit");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xcircuit(&["--help".to_string()], "xcircuit"), 0);
+        assert_eq!(run_xcircuit(&["-h".to_string()], "xcircuit"), 0);
+        assert_eq!(run_xcircuit(&["--version".to_string()], "xcircuit"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xcircuit(&[], "xcircuit"), 0);
+    }
+}

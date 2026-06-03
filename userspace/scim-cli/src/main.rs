@@ -57,4 +57,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_scim};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/scim"), "scim");
+        assert_eq!(basename(r"C:\bin\scim.exe"), "scim.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("scim.exe"), "scim");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_scim(&["--help".to_string()], "scim"), 0);
+        assert_eq!(run_scim(&["-h".to_string()], "scim"), 0);
+        assert_eq!(run_scim(&["--version".to_string()], "scim"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_scim(&[], "scim"), 0);
+    }
+}

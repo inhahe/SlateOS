@@ -81,4 +81,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_apache};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/apache"), "apache");
+        assert_eq!(basename(r"C:\bin\apache.exe"), "apache.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("apache.exe"), "apache");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_apache(&["--help".to_string()], "apache"), 0);
+        assert_eq!(run_apache(&["-h".to_string()], "apache"), 0);
+        assert_eq!(run_apache(&["--version".to_string()], "apache"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_apache(&[], "apache"), 0);
+    }
+}

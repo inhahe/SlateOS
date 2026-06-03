@@ -46,4 +46,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_nessus};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/nessus"), "nessus");
+        assert_eq!(basename(r"C:\bin\nessus.exe"), "nessus.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("nessus.exe"), "nessus");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_nessus(&["--help".to_string()], "nessus"), 0);
+        assert_eq!(run_nessus(&["-h".to_string()], "nessus"), 0);
+        assert_eq!(run_nessus(&["--version".to_string()], "nessus"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_nessus(&[], "nessus"), 0);
+    }
+}

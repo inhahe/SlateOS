@@ -58,4 +58,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_crda};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/crda"), "crda");
+        assert_eq!(basename(r"C:\bin\crda.exe"), "crda.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("crda.exe"), "crda");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_crda(&["--help".to_string()], "crda"), 0);
+        assert_eq!(run_crda(&["-h".to_string()], "crda"), 0);
+        assert_eq!(run_crda(&["--version".to_string()], "crda"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_crda(&[], "crda"), 0);
+    }
+}

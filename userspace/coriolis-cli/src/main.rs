@@ -74,4 +74,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_coriolis};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/coriolis"), "coriolis");
+        assert_eq!(basename(r"C:\bin\coriolis.exe"), "coriolis.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("coriolis.exe"), "coriolis");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_coriolis(&["--help".to_string()], "coriolis"), 0);
+        assert_eq!(run_coriolis(&["-h".to_string()], "coriolis"), 0);
+        assert_eq!(run_coriolis(&["--version".to_string()], "coriolis"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_coriolis(&[], "coriolis"), 0);
+    }
+}

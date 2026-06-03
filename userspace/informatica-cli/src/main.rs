@@ -139,4 +139,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_informatica};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/informatica"), "informatica");
+        assert_eq!(basename(r"C:\bin\informatica.exe"), "informatica.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("informatica.exe"), "informatica");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_informatica(&["--help".to_string()], "informatica"), 0);
+        assert_eq!(run_informatica(&["-h".to_string()], "informatica"), 0);
+        assert_eq!(run_informatica(&["--version".to_string()], "informatica"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_informatica(&[], "informatica"), 0);
+    }
+}

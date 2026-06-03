@@ -147,4 +147,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_signoz};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/signoz"), "signoz");
+        assert_eq!(basename(r"C:\bin\signoz.exe"), "signoz.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("signoz.exe"), "signoz");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_signoz(&["--help".to_string()], "signoz"), 0);
+        assert_eq!(run_signoz(&["-h".to_string()], "signoz"), 0);
+        assert_eq!(run_signoz(&["--version".to_string()], "signoz"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_signoz(&[], "signoz"), 0);
+    }
+}

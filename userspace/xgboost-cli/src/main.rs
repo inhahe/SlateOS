@@ -52,4 +52,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_xgboost};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xgboost"), "xgboost");
+        assert_eq!(basename(r"C:\bin\xgboost.exe"), "xgboost.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xgboost.exe"), "xgboost");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xgboost(&["--help".to_string()], "xgboost"), 0);
+        assert_eq!(run_xgboost(&["-h".to_string()], "xgboost"), 0);
+        assert_eq!(run_xgboost(&["--version".to_string()], "xgboost"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xgboost(&[], "xgboost"), 0);
+    }
+}

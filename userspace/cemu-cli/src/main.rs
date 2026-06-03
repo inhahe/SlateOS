@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cemu};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cemu"), "cemu");
+        assert_eq!(basename(r"C:\bin\cemu.exe"), "cemu.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cemu.exe"), "cemu");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cemu(&["--help".to_string()], "cemu"), 0);
+        assert_eq!(run_cemu(&["-h".to_string()], "cemu"), 0);
+        assert_eq!(run_cemu(&["--version".to_string()], "cemu"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cemu(&[], "cemu"), 0);
+    }
+}

@@ -68,4 +68,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_appd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/appdynamics"), "appdynamics");
+        assert_eq!(basename(r"C:\bin\appdynamics.exe"), "appdynamics.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("appdynamics.exe"), "appdynamics");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_appd(&["--help".to_string()], "appdynamics"), 0);
+        assert_eq!(run_appd(&["-h".to_string()], "appdynamics"), 0);
+        assert_eq!(run_appd(&["--version".to_string()], "appdynamics"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_appd(&[], "appdynamics"), 0);
+    }
+}

@@ -67,4 +67,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_otfccdump};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/otfcc"), "otfcc");
+        assert_eq!(basename(r"C:\bin\otfcc.exe"), "otfcc.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("otfcc.exe"), "otfcc");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_otfccdump(&["--help".to_string()], "otfcc"), 0);
+        assert_eq!(run_otfccdump(&["-h".to_string()], "otfcc"), 0);
+        assert_eq!(run_otfccdump(&["--version".to_string()], "otfcc"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_otfccdump(&[], "otfcc"), 0);
+    }
+}

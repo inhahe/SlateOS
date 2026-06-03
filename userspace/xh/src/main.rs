@@ -154,6 +154,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_xh};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xh(vec!["--help".to_string()], "xh"), 0);
+        assert_eq!(run_xh(vec!["-h".to_string()], "xh"), 0);
+        assert_eq!(run_xh(vec!["--version".to_string()], "xh"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xh(vec![], "xh"), 0);
+    }
 }

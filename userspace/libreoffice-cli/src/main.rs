@@ -56,4 +56,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_libreoffice};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/libreoffice"), "libreoffice");
+        assert_eq!(basename(r"C:\bin\libreoffice.exe"), "libreoffice.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("libreoffice.exe"), "libreoffice");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_libreoffice(&["--help".to_string()], "libreoffice"), 0);
+        assert_eq!(run_libreoffice(&["-h".to_string()], "libreoffice"), 0);
+        assert_eq!(run_libreoffice(&["--version".to_string()], "libreoffice"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_libreoffice(&[], "libreoffice"), 0);
+    }
+}

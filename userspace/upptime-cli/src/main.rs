@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_upptime};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/upptime"), "upptime");
+        assert_eq!(basename(r"C:\bin\upptime.exe"), "upptime.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("upptime.exe"), "upptime");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_upptime(&["--help".to_string()], "upptime"), 0);
+        assert_eq!(run_upptime(&["-h".to_string()], "upptime"), 0);
+        assert_eq!(run_upptime(&["--version".to_string()], "upptime"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_upptime(&[], "upptime"), 0);
+    }
+}

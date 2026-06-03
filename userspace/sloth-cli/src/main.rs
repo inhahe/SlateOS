@@ -66,4 +66,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sloth};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sloth"), "sloth");
+        assert_eq!(basename(r"C:\bin\sloth.exe"), "sloth.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sloth.exe"), "sloth");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sloth(&["--help".to_string()], "sloth"), 0);
+        assert_eq!(run_sloth(&["-h".to_string()], "sloth"), 0);
+        assert_eq!(run_sloth(&["--version".to_string()], "sloth"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sloth(&[], "sloth"), 0);
+    }
+}

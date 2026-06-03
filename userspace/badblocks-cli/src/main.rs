@@ -57,4 +57,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_badblocks};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/badblocks"), "badblocks");
+        assert_eq!(basename(r"C:\bin\badblocks.exe"), "badblocks.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("badblocks.exe"), "badblocks");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_badblocks(&["--help".to_string()], "badblocks"), 0);
+        assert_eq!(run_badblocks(&["-h".to_string()], "badblocks"), 0);
+        assert_eq!(run_badblocks(&["--version".to_string()], "badblocks"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_badblocks(&[], "badblocks"), 0);
+    }
+}

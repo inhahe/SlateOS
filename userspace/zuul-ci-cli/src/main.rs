@@ -82,4 +82,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_zuul};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/zuul-ci"), "zuul-ci");
+        assert_eq!(basename(r"C:\bin\zuul-ci.exe"), "zuul-ci.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("zuul-ci.exe"), "zuul-ci");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_zuul(&["--help".to_string()], "zuul-ci"), 0);
+        assert_eq!(run_zuul(&["-h".to_string()], "zuul-ci"), 0);
+        assert_eq!(run_zuul(&["--version".to_string()], "zuul-ci"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_zuul(&[], "zuul-ci"), 0);
+    }
+}

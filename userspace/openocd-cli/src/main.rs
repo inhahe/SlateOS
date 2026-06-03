@@ -136,6 +136,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_openocd};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/openocd"), "openocd");
+        assert_eq!(basename(r"C:\bin\openocd.exe"), "openocd.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("openocd.exe"), "openocd");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_openocd(&["--help".to_string()]), 0);
+        assert_eq!(run_openocd(&["-h".to_string()]), 0);
+        assert_eq!(run_openocd(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_openocd(&[]), 0);
+    }
 }

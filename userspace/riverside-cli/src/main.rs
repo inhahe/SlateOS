@@ -46,4 +46,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rv};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/riverside"), "riverside");
+        assert_eq!(basename(r"C:\bin\riverside.exe"), "riverside.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("riverside.exe"), "riverside");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rv(&["--help".to_string()], "riverside"), 0);
+        assert_eq!(run_rv(&["-h".to_string()], "riverside"), 0);
+        assert_eq!(run_rv(&["--version".to_string()], "riverside"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rv(&[], "riverside"), 0);
+    }
+}

@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_gephi};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/gephi"), "gephi");
+        assert_eq!(basename(r"C:\bin\gephi.exe"), "gephi.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("gephi.exe"), "gephi");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_gephi(&["--help".to_string()], "gephi"), 0);
+        assert_eq!(run_gephi(&["-h".to_string()], "gephi"), 0);
+        assert_eq!(run_gephi(&["--version".to_string()], "gephi"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_gephi(&[], "gephi"), 0);
+    }
+}

@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_eagle};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/eagle"), "eagle");
+        assert_eq!(basename(r"C:\bin\eagle.exe"), "eagle.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("eagle.exe"), "eagle");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_eagle(&["--help".to_string()], "eagle"), 0);
+        assert_eq!(run_eagle(&["-h".to_string()], "eagle"), 0);
+        assert_eq!(run_eagle(&["--version".to_string()], "eagle"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_eagle(&[], "eagle"), 0);
+    }
+}

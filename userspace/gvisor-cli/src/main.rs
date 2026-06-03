@@ -68,4 +68,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_runsc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/gvisor"), "gvisor");
+        assert_eq!(basename(r"C:\bin\gvisor.exe"), "gvisor.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("gvisor.exe"), "gvisor");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_runsc(&["--help".to_string()], "gvisor"), 0);
+        assert_eq!(run_runsc(&["-h".to_string()], "gvisor"), 0);
+        assert_eq!(run_runsc(&["--version".to_string()], "gvisor"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_runsc(&[], "gvisor"), 0);
+    }
+}

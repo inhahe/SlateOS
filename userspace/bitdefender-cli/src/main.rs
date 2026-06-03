@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_bd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/bitdefender"), "bitdefender");
+        assert_eq!(basename(r"C:\bin\bitdefender.exe"), "bitdefender.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("bitdefender.exe"), "bitdefender");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_bd(&["--help".to_string()], "bitdefender"), 0);
+        assert_eq!(run_bd(&["-h".to_string()], "bitdefender"), 0);
+        assert_eq!(run_bd(&["--version".to_string()], "bitdefender"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_bd(&[], "bitdefender"), 0);
+    }
+}

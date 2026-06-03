@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_mate_notifyd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/mate-notification"), "mate-notification");
+        assert_eq!(basename(r"C:\bin\mate-notification.exe"), "mate-notification.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("mate-notification.exe"), "mate-notification");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_mate_notifyd(&["--help".to_string()], "mate-notification"), 0);
+        assert_eq!(run_mate_notifyd(&["-h".to_string()], "mate-notification"), 0);
+        assert_eq!(run_mate_notifyd(&["--version".to_string()], "mate-notification"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_mate_notifyd(&[], "mate-notification"), 0);
+    }
+}

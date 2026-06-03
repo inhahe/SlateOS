@@ -61,4 +61,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_vsc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/vscode"), "vscode");
+        assert_eq!(basename(r"C:\bin\vscode.exe"), "vscode.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("vscode.exe"), "vscode");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_vsc(&["--help".to_string()], "vscode"), 0);
+        assert_eq!(run_vsc(&["-h".to_string()], "vscode"), 0);
+        assert_eq!(run_vsc(&["--version".to_string()], "vscode"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_vsc(&[], "vscode"), 0);
+    }
+}

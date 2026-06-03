@@ -77,4 +77,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_teller};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/teller"), "teller");
+        assert_eq!(basename(r"C:\bin\teller.exe"), "teller.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("teller.exe"), "teller");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_teller(&["--help".to_string()], "teller"), 0);
+        assert_eq!(run_teller(&["-h".to_string()], "teller"), 0);
+        assert_eq!(run_teller(&["--version".to_string()], "teller"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_teller(&[], "teller"), 0);
+    }
+}

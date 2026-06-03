@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_notify_send};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/libnotify"), "libnotify");
+        assert_eq!(basename(r"C:\bin\libnotify.exe"), "libnotify.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("libnotify.exe"), "libnotify");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_notify_send(&["--help".to_string()], "libnotify"), 0);
+        assert_eq!(run_notify_send(&["-h".to_string()], "libnotify"), 0);
+        assert_eq!(run_notify_send(&["--version".to_string()], "libnotify"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_notify_send(&[], "libnotify"), 0);
+    }
+}

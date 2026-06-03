@@ -76,4 +76,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cortextool};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cortextool"), "cortextool");
+        assert_eq!(basename(r"C:\bin\cortextool.exe"), "cortextool.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cortextool.exe"), "cortextool");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cortextool(&["--help".to_string()], "cortextool"), 0);
+        assert_eq!(run_cortextool(&["-h".to_string()], "cortextool"), 0);
+        assert_eq!(run_cortextool(&["--version".to_string()], "cortextool"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cortextool(&[], "cortextool"), 0);
+    }
+}

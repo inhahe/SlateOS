@@ -79,4 +79,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_tuned};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/tuned"), "tuned");
+        assert_eq!(basename(r"C:\bin\tuned.exe"), "tuned.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("tuned.exe"), "tuned");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_tuned(&["--help".to_string()], "tuned"), 0);
+        assert_eq!(run_tuned(&["-h".to_string()], "tuned"), 0);
+        assert_eq!(run_tuned(&["--version".to_string()], "tuned"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_tuned(&[], "tuned"), 0);
+    }
+}

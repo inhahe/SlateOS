@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ox};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ox"), "ox");
+        assert_eq!(basename(r"C:\bin\ox.exe"), "ox.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ox.exe"), "ox");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ox(&["--help".to_string()], "ox"), 0);
+        assert_eq!(run_ox(&["-h".to_string()], "ox"), 0);
+        assert_eq!(run_ox(&["--version".to_string()], "ox"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ox(&[], "ox"), 0);
+    }
+}

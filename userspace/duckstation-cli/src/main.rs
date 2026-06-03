@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_duckstation};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/duckstation"), "duckstation");
+        assert_eq!(basename(r"C:\bin\duckstation.exe"), "duckstation.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("duckstation.exe"), "duckstation");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_duckstation(&["--help".to_string()], "duckstation"), 0);
+        assert_eq!(run_duckstation(&["-h".to_string()], "duckstation"), 0);
+        assert_eq!(run_duckstation(&["--version".to_string()], "duckstation"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_duckstation(&[], "duckstation"), 0);
+    }
+}

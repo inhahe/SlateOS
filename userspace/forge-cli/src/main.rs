@@ -82,4 +82,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_forge};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/forge"), "forge");
+        assert_eq!(basename(r"C:\bin\forge.exe"), "forge.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("forge.exe"), "forge");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_forge(&["--help".to_string()], "forge"), 0);
+        assert_eq!(run_forge(&["-h".to_string()], "forge"), 0);
+        assert_eq!(run_forge(&["--version".to_string()], "forge"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_forge(&[], "forge"), 0);
+    }
+}

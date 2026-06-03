@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_x86_energy_perf};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/x86-energy-perf"), "x86-energy-perf");
+        assert_eq!(basename(r"C:\bin\x86-energy-perf.exe"), "x86-energy-perf.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("x86-energy-perf.exe"), "x86-energy-perf");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_x86_energy_perf(&["--help".to_string()], "x86-energy-perf"), 0);
+        assert_eq!(run_x86_energy_perf(&["-h".to_string()], "x86-energy-perf"), 0);
+        assert_eq!(run_x86_energy_perf(&["--version".to_string()], "x86-energy-perf"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_x86_energy_perf(&[], "x86-energy-perf"), 0);
+    }
+}

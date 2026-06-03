@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_kp};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/keepass"), "keepass");
+        assert_eq!(basename(r"C:\bin\keepass.exe"), "keepass.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("keepass.exe"), "keepass");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_kp(&["--help".to_string()], "keepass"), 0);
+        assert_eq!(run_kp(&["-h".to_string()], "keepass"), 0);
+        assert_eq!(run_kp(&["--version".to_string()], "keepass"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_kp(&[], "keepass"), 0);
+    }
+}

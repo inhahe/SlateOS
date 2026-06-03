@@ -60,4 +60,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_virt_viewer};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/virt-viewer"), "virt-viewer");
+        assert_eq!(basename(r"C:\bin\virt-viewer.exe"), "virt-viewer.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("virt-viewer.exe"), "virt-viewer");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_virt_viewer(&["--help".to_string()], "virt-viewer"), 0);
+        assert_eq!(run_virt_viewer(&["-h".to_string()], "virt-viewer"), 0);
+        assert_eq!(run_virt_viewer(&["--version".to_string()], "virt-viewer"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_virt_viewer(&[], "virt-viewer"), 0);
+    }
+}

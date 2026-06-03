@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sketchup};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sketchup"), "sketchup");
+        assert_eq!(basename(r"C:\bin\sketchup.exe"), "sketchup.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sketchup.exe"), "sketchup");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sketchup(&["--help".to_string()], "sketchup"), 0);
+        assert_eq!(run_sketchup(&["-h".to_string()], "sketchup"), 0);
+        assert_eq!(run_sketchup(&["--version".to_string()], "sketchup"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sketchup(&[], "sketchup"), 0);
+    }
+}

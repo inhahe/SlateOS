@@ -62,4 +62,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sage};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sagemath"), "sagemath");
+        assert_eq!(basename(r"C:\bin\sagemath.exe"), "sagemath.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sagemath.exe"), "sagemath");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sage(&["--help".to_string()], "sagemath"), 0);
+        assert_eq!(run_sage(&["-h".to_string()], "sagemath"), 0);
+        assert_eq!(run_sage(&["--version".to_string()], "sagemath"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sage(&[], "sagemath"), 0);
+    }
+}

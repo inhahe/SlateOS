@@ -45,4 +45,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_qlik};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/qlik"), "qlik");
+        assert_eq!(basename(r"C:\bin\qlik.exe"), "qlik.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("qlik.exe"), "qlik");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_qlik(&["--help".to_string()], "qlik"), 0);
+        assert_eq!(run_qlik(&["-h".to_string()], "qlik"), 0);
+        assert_eq!(run_qlik(&["--version".to_string()], "qlik"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_qlik(&[], "qlik"), 0);
+    }
+}

@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_uptime_kuma};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/uptime-kuma"), "uptime-kuma");
+        assert_eq!(basename(r"C:\bin\uptime-kuma.exe"), "uptime-kuma.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("uptime-kuma.exe"), "uptime-kuma");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_uptime_kuma(&["--help".to_string()], "uptime-kuma"), 0);
+        assert_eq!(run_uptime_kuma(&["-h".to_string()], "uptime-kuma"), 0);
+        assert_eq!(run_uptime_kuma(&["--version".to_string()], "uptime-kuma"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_uptime_kuma(&[], "uptime-kuma"), 0);
+    }
+}

@@ -45,4 +45,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_kmag};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/kmag"), "kmag");
+        assert_eq!(basename(r"C:\bin\kmag.exe"), "kmag.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("kmag.exe"), "kmag");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_kmag(&["--help".to_string()], "kmag"), 0);
+        assert_eq!(run_kmag(&["-h".to_string()], "kmag"), 0);
+        assert_eq!(run_kmag(&["--version".to_string()], "kmag"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_kmag(&[], "kmag"), 0);
+    }
+}

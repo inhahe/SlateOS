@@ -52,4 +52,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pdfarranger};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/pdfarranger"), "pdfarranger");
+        assert_eq!(basename(r"C:\bin\pdfarranger.exe"), "pdfarranger.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("pdfarranger.exe"), "pdfarranger");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pdfarranger(&["--help".to_string()], "pdfarranger"), 0);
+        assert_eq!(run_pdfarranger(&["-h".to_string()], "pdfarranger"), 0);
+        assert_eq!(run_pdfarranger(&["--version".to_string()], "pdfarranger"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pdfarranger(&[], "pdfarranger"), 0);
+    }
+}

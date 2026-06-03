@@ -40,4 +40,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sfwbar};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sfwbar"), "sfwbar");
+        assert_eq!(basename(r"C:\bin\sfwbar.exe"), "sfwbar.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sfwbar.exe"), "sfwbar");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sfwbar(&["--help".to_string()], "sfwbar"), 0);
+        assert_eq!(run_sfwbar(&["-h".to_string()], "sfwbar"), 0);
+        assert_eq!(run_sfwbar(&["--version".to_string()], "sfwbar"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sfwbar(&[], "sfwbar"), 0);
+    }
+}

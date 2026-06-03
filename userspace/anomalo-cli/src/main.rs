@@ -103,4 +103,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_anomalo};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/anomalo"), "anomalo");
+        assert_eq!(basename(r"C:\bin\anomalo.exe"), "anomalo.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("anomalo.exe"), "anomalo");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_anomalo(&["--help".to_string()], "anomalo"), 0);
+        assert_eq!(run_anomalo(&["-h".to_string()], "anomalo"), 0);
+        assert_eq!(run_anomalo(&["--version".to_string()], "anomalo"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_anomalo(&[], "anomalo"), 0);
+    }
+}

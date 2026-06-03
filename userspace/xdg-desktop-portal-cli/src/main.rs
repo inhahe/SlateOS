@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_portal};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xdg-desktop-portal"), "xdg-desktop-portal");
+        assert_eq!(basename(r"C:\bin\xdg-desktop-portal.exe"), "xdg-desktop-portal.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xdg-desktop-portal.exe"), "xdg-desktop-portal");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_portal(&["--help".to_string()], "xdg-desktop-portal"), 0);
+        assert_eq!(run_portal(&["-h".to_string()], "xdg-desktop-portal"), 0);
+        assert_eq!(run_portal(&["--version".to_string()], "xdg-desktop-portal"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_portal(&[], "xdg-desktop-portal"), 0);
+    }
+}

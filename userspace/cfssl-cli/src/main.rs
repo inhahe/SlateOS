@@ -65,4 +65,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cfssl};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cfssl"), "cfssl");
+        assert_eq!(basename(r"C:\bin\cfssl.exe"), "cfssl.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cfssl.exe"), "cfssl");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cfssl(&["--help".to_string()], "cfssl"), 0);
+        assert_eq!(run_cfssl(&["-h".to_string()], "cfssl"), 0);
+        assert_eq!(run_cfssl(&["--version".to_string()], "cfssl"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cfssl(&[], "cfssl"), 0);
+    }
+}

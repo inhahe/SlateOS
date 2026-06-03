@@ -57,4 +57,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_fastqc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/fastqc"), "fastqc");
+        assert_eq!(basename(r"C:\bin\fastqc.exe"), "fastqc.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("fastqc.exe"), "fastqc");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_fastqc(&["--help".to_string()], "fastqc"), 0);
+        assert_eq!(run_fastqc(&["-h".to_string()], "fastqc"), 0);
+        assert_eq!(run_fastqc(&["--version".to_string()], "fastqc"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_fastqc(&[], "fastqc"), 0);
+    }
+}

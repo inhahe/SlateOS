@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_lite_xl};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/lite-xl"), "lite-xl");
+        assert_eq!(basename(r"C:\bin\lite-xl.exe"), "lite-xl.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("lite-xl.exe"), "lite-xl");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_lite_xl(&["--help".to_string()], "lite-xl"), 0);
+        assert_eq!(run_lite_xl(&["-h".to_string()], "lite-xl"), 0);
+        assert_eq!(run_lite_xl(&["--version".to_string()], "lite-xl"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_lite_xl(&[], "lite-xl"), 0);
+    }
+}

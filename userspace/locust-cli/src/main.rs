@@ -70,4 +70,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_locust};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/locust"), "locust");
+        assert_eq!(basename(r"C:\bin\locust.exe"), "locust.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("locust.exe"), "locust");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_locust(&["--help".to_string()]), 0);
+        assert_eq!(run_locust(&["-h".to_string()]), 0);
+        assert_eq!(run_locust(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_locust(&[]), 0);
+    }
+}

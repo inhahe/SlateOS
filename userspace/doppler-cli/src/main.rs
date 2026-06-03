@@ -89,4 +89,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_doppler};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/doppler"), "doppler");
+        assert_eq!(basename(r"C:\bin\doppler.exe"), "doppler.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("doppler.exe"), "doppler");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_doppler(&["--help".to_string()], "doppler"), 0);
+        assert_eq!(run_doppler(&["-h".to_string()], "doppler"), 0);
+        assert_eq!(run_doppler(&["--version".to_string()], "doppler"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_doppler(&[], "doppler"), 0);
+    }
+}

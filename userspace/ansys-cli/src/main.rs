@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ansys};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ansys"), "ansys");
+        assert_eq!(basename(r"C:\bin\ansys.exe"), "ansys.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ansys.exe"), "ansys");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ansys(&["--help".to_string()], "ansys"), 0);
+        assert_eq!(run_ansys(&["-h".to_string()], "ansys"), 0);
+        assert_eq!(run_ansys(&["--version".to_string()], "ansys"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ansys(&[], "ansys"), 0);
+    }
+}

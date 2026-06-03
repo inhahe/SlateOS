@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_supercluster};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/supercluster"), "supercluster");
+        assert_eq!(basename(r"C:\bin\supercluster.exe"), "supercluster.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("supercluster.exe"), "supercluster");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_supercluster(&["--help".to_string()], "supercluster"), 0);
+        assert_eq!(run_supercluster(&["-h".to_string()], "supercluster"), 0);
+        assert_eq!(run_supercluster(&["--version".to_string()], "supercluster"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_supercluster(&[], "supercluster"), 0);
+    }
+}

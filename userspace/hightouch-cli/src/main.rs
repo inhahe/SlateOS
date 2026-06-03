@@ -121,4 +121,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ht};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/hightouch"), "hightouch");
+        assert_eq!(basename(r"C:\bin\hightouch.exe"), "hightouch.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("hightouch.exe"), "hightouch");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ht(&["--help".to_string()], "hightouch"), 0);
+        assert_eq!(run_ht(&["-h".to_string()], "hightouch"), 0);
+        assert_eq!(run_ht(&["--version".to_string()], "hightouch"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ht(&[], "hightouch"), 0);
+    }
+}

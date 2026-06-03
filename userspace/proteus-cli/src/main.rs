@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_proteus};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/proteus"), "proteus");
+        assert_eq!(basename(r"C:\bin\proteus.exe"), "proteus.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("proteus.exe"), "proteus");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_proteus(&["--help".to_string()], "proteus"), 0);
+        assert_eq!(run_proteus(&["-h".to_string()], "proteus"), 0);
+        assert_eq!(run_proteus(&["--version".to_string()], "proteus"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_proteus(&[], "proteus"), 0);
+    }
+}

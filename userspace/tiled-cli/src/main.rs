@@ -52,4 +52,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_tiled};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/tiled"), "tiled");
+        assert_eq!(basename(r"C:\bin\tiled.exe"), "tiled.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("tiled.exe"), "tiled");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_tiled(&["--help".to_string()], "tiled"), 0);
+        assert_eq!(run_tiled(&["-h".to_string()], "tiled"), 0);
+        assert_eq!(run_tiled(&["--version".to_string()], "tiled"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_tiled(&[], "tiled"), 0);
+    }
+}

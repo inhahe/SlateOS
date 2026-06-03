@@ -68,4 +68,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rclone_backup};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rclone-backup"), "rclone-backup");
+        assert_eq!(basename(r"C:\bin\rclone-backup.exe"), "rclone-backup.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rclone-backup.exe"), "rclone-backup");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rclone_backup(&["--help".to_string()], "rclone-backup"), 0);
+        assert_eq!(run_rclone_backup(&["-h".to_string()], "rclone-backup"), 0);
+        assert_eq!(run_rclone_backup(&["--version".to_string()], "rclone-backup"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rclone_backup(&[], "rclone-backup"), 0);
+    }
+}

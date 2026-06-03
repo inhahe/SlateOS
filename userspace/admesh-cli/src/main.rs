@@ -64,4 +64,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_admesh};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/admesh"), "admesh");
+        assert_eq!(basename(r"C:\bin\admesh.exe"), "admesh.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("admesh.exe"), "admesh");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_admesh(&["--help".to_string()], "admesh"), 0);
+        assert_eq!(run_admesh(&["-h".to_string()], "admesh"), 0);
+        assert_eq!(run_admesh(&["--version".to_string()], "admesh"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_admesh(&[], "admesh"), 0);
+    }
+}

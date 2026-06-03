@@ -58,4 +58,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_deadd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/deadd"), "deadd");
+        assert_eq!(basename(r"C:\bin\deadd.exe"), "deadd.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("deadd.exe"), "deadd");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_deadd(&["--help".to_string()], "deadd"), 0);
+        assert_eq!(run_deadd(&["-h".to_string()], "deadd"), 0);
+        assert_eq!(run_deadd(&["--version".to_string()], "deadd"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_deadd(&[], "deadd"), 0);
+    }
+}

@@ -106,4 +106,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_bc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/bigcommerce"), "bigcommerce");
+        assert_eq!(basename(r"C:\bin\bigcommerce.exe"), "bigcommerce.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("bigcommerce.exe"), "bigcommerce");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_bc(&["--help".to_string()], "bigcommerce"), 0);
+        assert_eq!(run_bc(&["-h".to_string()], "bigcommerce"), 0);
+        assert_eq!(run_bc(&["--version".to_string()], "bigcommerce"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_bc(&[], "bigcommerce"), 0);
+    }
+}

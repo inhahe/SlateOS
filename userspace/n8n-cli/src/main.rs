@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_n8n};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/n8n"), "n8n");
+        assert_eq!(basename(r"C:\bin\n8n.exe"), "n8n.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("n8n.exe"), "n8n");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_n8n(&["--help".to_string()], "n8n"), 0);
+        assert_eq!(run_n8n(&["-h".to_string()], "n8n"), 0);
+        assert_eq!(run_n8n(&["--version".to_string()], "n8n"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_n8n(&[], "n8n"), 0);
+    }
+}

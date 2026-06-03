@@ -206,6 +206,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_ffmpeg};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ffmpeg(&["--help".to_string()]), 0);
+        assert_eq!(run_ffmpeg(&["-h".to_string()]), 0);
+        assert_eq!(run_ffmpeg(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ffmpeg(&[]), 0);
+    }
 }

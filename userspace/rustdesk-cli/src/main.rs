@@ -46,4 +46,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rustdesk};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rustdesk"), "rustdesk");
+        assert_eq!(basename(r"C:\bin\rustdesk.exe"), "rustdesk.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rustdesk.exe"), "rustdesk");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rustdesk(&["--help".to_string()], "rustdesk"), 0);
+        assert_eq!(run_rustdesk(&["-h".to_string()], "rustdesk"), 0);
+        assert_eq!(run_rustdesk(&["--version".to_string()], "rustdesk"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rustdesk(&[], "rustdesk"), 0);
+    }
+}

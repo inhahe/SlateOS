@@ -104,6 +104,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_dosbox};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/dosbox"), "dosbox");
+        assert_eq!(basename(r"C:\bin\dosbox.exe"), "dosbox.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("dosbox.exe"), "dosbox");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_dosbox(&["--help".to_string()], false), 0);
+        assert_eq!(run_dosbox(&["-h".to_string()], false), 0);
+        assert_eq!(run_dosbox(&["--version".to_string()], false), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_dosbox(&[], false), 0);
+    }
 }

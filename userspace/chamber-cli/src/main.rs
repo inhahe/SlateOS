@@ -79,4 +79,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_chamber};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/chamber"), "chamber");
+        assert_eq!(basename(r"C:\bin\chamber.exe"), "chamber.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("chamber.exe"), "chamber");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_chamber(&["--help".to_string()], "chamber"), 0);
+        assert_eq!(run_chamber(&["-h".to_string()], "chamber"), 0);
+        assert_eq!(run_chamber(&["--version".to_string()], "chamber"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_chamber(&[], "chamber"), 0);
+    }
+}

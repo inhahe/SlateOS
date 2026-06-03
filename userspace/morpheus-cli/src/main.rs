@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_morpheus};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/morpheus"), "morpheus");
+        assert_eq!(basename(r"C:\bin\morpheus.exe"), "morpheus.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("morpheus.exe"), "morpheus");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_morpheus(&["--help".to_string()], "morpheus"), 0);
+        assert_eq!(run_morpheus(&["-h".to_string()], "morpheus"), 0);
+        assert_eq!(run_morpheus(&["--version".to_string()], "morpheus"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_morpheus(&[], "morpheus"), 0);
+    }
+}

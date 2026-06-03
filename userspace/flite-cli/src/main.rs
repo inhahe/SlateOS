@@ -57,4 +57,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_flite};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/flite"), "flite");
+        assert_eq!(basename(r"C:\bin\flite.exe"), "flite.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("flite.exe"), "flite");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_flite(&["--help".to_string()], "flite"), 0);
+        assert_eq!(run_flite(&["-h".to_string()], "flite"), 0);
+        assert_eq!(run_flite(&["--version".to_string()], "flite"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_flite(&[], "flite"), 0);
+    }
+}

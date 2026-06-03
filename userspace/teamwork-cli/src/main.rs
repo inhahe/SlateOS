@@ -122,4 +122,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_tw};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/teamwork"), "teamwork");
+        assert_eq!(basename(r"C:\bin\teamwork.exe"), "teamwork.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("teamwork.exe"), "teamwork");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_tw(&["--help".to_string()], "teamwork"), 0);
+        assert_eq!(run_tw(&["-h".to_string()], "teamwork"), 0);
+        assert_eq!(run_tw(&["--version".to_string()], "teamwork"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_tw(&[], "teamwork"), 0);
+    }
+}

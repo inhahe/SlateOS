@@ -62,4 +62,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_vcvrack};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/vcvrack"), "vcvrack");
+        assert_eq!(basename(r"C:\bin\vcvrack.exe"), "vcvrack.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("vcvrack.exe"), "vcvrack");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_vcvrack(&["--help".to_string()], "vcvrack"), 0);
+        assert_eq!(run_vcvrack(&["-h".to_string()], "vcvrack"), 0);
+        assert_eq!(run_vcvrack(&["--version".to_string()], "vcvrack"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_vcvrack(&[], "vcvrack"), 0);
+    }
+}

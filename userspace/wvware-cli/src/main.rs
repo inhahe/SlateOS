@@ -61,4 +61,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wv};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wvware"), "wvware");
+        assert_eq!(basename(r"C:\bin\wvware.exe"), "wvware.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wvware.exe"), "wvware");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wv(&["--help".to_string()], "wvware"), 0);
+        assert_eq!(run_wv(&["-h".to_string()], "wvware"), 0);
+        assert_eq!(run_wv(&["--version".to_string()], "wvware"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wv(&[], "wvware"), 0);
+    }
+}

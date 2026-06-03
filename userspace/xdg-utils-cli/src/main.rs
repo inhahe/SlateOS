@@ -113,4 +113,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_xdg_open};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xdg-utils"), "xdg-utils");
+        assert_eq!(basename(r"C:\bin\xdg-utils.exe"), "xdg-utils.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xdg-utils.exe"), "xdg-utils");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xdg_open(&["--help".to_string()], "xdg-utils"), 0);
+        assert_eq!(run_xdg_open(&["-h".to_string()], "xdg-utils"), 0);
+        assert_eq!(run_xdg_open(&["--version".to_string()], "xdg-utils"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xdg_open(&[], "xdg-utils"), 0);
+    }
+}

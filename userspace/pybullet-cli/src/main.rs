@@ -68,4 +68,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pybullet};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/pybullet"), "pybullet");
+        assert_eq!(basename(r"C:\bin\pybullet.exe"), "pybullet.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("pybullet.exe"), "pybullet");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pybullet(&["--help".to_string()], "pybullet"), 0);
+        assert_eq!(run_pybullet(&["-h".to_string()], "pybullet"), 0);
+        assert_eq!(run_pybullet(&["--version".to_string()], "pybullet"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pybullet(&[], "pybullet"), 0);
+    }
+}

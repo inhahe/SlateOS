@@ -58,4 +58,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_geneanet};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/geneanet"), "geneanet");
+        assert_eq!(basename(r"C:\bin\geneanet.exe"), "geneanet.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("geneanet.exe"), "geneanet");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_geneanet(&["--help".to_string()], "geneanet"), 0);
+        assert_eq!(run_geneanet(&["-h".to_string()], "geneanet"), 0);
+        assert_eq!(run_geneanet(&["--version".to_string()], "geneanet"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_geneanet(&[], "geneanet"), 0);
+    }
+}

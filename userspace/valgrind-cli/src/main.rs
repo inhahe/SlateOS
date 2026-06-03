@@ -213,6 +213,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_valgrind};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/valgrind"), "valgrind");
+        assert_eq!(basename(r"C:\bin\valgrind.exe"), "valgrind.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("valgrind.exe"), "valgrind");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_valgrind(&["--help".to_string()]), 0);
+        assert_eq!(run_valgrind(&["-h".to_string()]), 0);
+        assert_eq!(run_valgrind(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_valgrind(&[]), 0);
+    }
 }

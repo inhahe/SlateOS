@@ -82,6 +82,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_freecad};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/freecad"), "freecad");
+        assert_eq!(basename(r"C:\bin\freecad.exe"), "freecad.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("freecad.exe"), "freecad");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_freecad(&["--help".to_string()], false), 0);
+        assert_eq!(run_freecad(&["-h".to_string()], false), 0);
+        assert_eq!(run_freecad(&["--version".to_string()], false), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_freecad(&[], false), 0);
+    }
 }

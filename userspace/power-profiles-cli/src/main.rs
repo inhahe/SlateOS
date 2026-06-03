@@ -77,4 +77,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_powerprofilesctl};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/power-profiles"), "power-profiles");
+        assert_eq!(basename(r"C:\bin\power-profiles.exe"), "power-profiles.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("power-profiles.exe"), "power-profiles");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_powerprofilesctl(&["--help".to_string()], "power-profiles"), 0);
+        assert_eq!(run_powerprofilesctl(&["-h".to_string()], "power-profiles"), 0);
+        assert_eq!(run_powerprofilesctl(&["--version".to_string()], "power-profiles"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_powerprofilesctl(&[], "power-profiles"), 0);
+    }
+}

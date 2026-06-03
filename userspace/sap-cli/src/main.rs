@@ -47,4 +47,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sap};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sap"), "sap");
+        assert_eq!(basename(r"C:\bin\sap.exe"), "sap.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sap.exe"), "sap");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sap(&["--help".to_string()], "sap"), 0);
+        assert_eq!(run_sap(&["-h".to_string()], "sap"), 0);
+        assert_eq!(run_sap(&["--version".to_string()], "sap"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sap(&[], "sap"), 0);
+    }
+}

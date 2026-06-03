@@ -54,4 +54,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_outline};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/outline"), "outline");
+        assert_eq!(basename(r"C:\bin\outline.exe"), "outline.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("outline.exe"), "outline");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_outline(&["--help".to_string()], "outline"), 0);
+        assert_eq!(run_outline(&["-h".to_string()], "outline"), 0);
+        assert_eq!(run_outline(&["--version".to_string()], "outline"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_outline(&[], "outline"), 0);
+    }
+}

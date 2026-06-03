@@ -64,4 +64,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pytorch};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/pytorch"), "pytorch");
+        assert_eq!(basename(r"C:\bin\pytorch.exe"), "pytorch.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("pytorch.exe"), "pytorch");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pytorch(&["--help".to_string()], "pytorch"), 0);
+        assert_eq!(run_pytorch(&["-h".to_string()], "pytorch"), 0);
+        assert_eq!(run_pytorch(&["--version".to_string()], "pytorch"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pytorch(&[], "pytorch"), 0);
+    }
+}

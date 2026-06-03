@@ -76,4 +76,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cpdf};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cpdf"), "cpdf");
+        assert_eq!(basename(r"C:\bin\cpdf.exe"), "cpdf.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cpdf.exe"), "cpdf");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cpdf(&["--help".to_string()], "cpdf"), 0);
+        assert_eq!(run_cpdf(&["-h".to_string()], "cpdf"), 0);
+        assert_eq!(run_cpdf(&["--version".to_string()], "cpdf"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cpdf(&[], "cpdf"), 0);
+    }
+}

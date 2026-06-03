@@ -63,4 +63,18 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{run_sklearn};
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sklearn(&["--help".to_string()]), 0);
+        assert_eq!(run_sklearn(&["-h".to_string()]), 0);
+        assert_eq!(run_sklearn(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sklearn(&[]), 0);
+    }
+}

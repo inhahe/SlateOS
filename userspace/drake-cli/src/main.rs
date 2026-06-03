@@ -71,4 +71,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_drake};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/drake"), "drake");
+        assert_eq!(basename(r"C:\bin\drake.exe"), "drake.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("drake.exe"), "drake");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_drake(&["--help".to_string()], "drake"), 0);
+        assert_eq!(run_drake(&["-h".to_string()], "drake"), 0);
+        assert_eq!(run_drake(&["--version".to_string()], "drake"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_drake(&[], "drake"), 0);
+    }
+}

@@ -56,4 +56,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_anthy};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/anthy"), "anthy");
+        assert_eq!(basename(r"C:\bin\anthy.exe"), "anthy.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("anthy.exe"), "anthy");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_anthy(&["--help".to_string()], "anthy"), 0);
+        assert_eq!(run_anthy(&["-h".to_string()], "anthy"), 0);
+        assert_eq!(run_anthy(&["--version".to_string()], "anthy"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_anthy(&[], "anthy"), 0);
+    }
+}

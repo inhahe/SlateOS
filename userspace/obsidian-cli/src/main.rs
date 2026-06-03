@@ -39,4 +39,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_obsidian};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/obsidian"), "obsidian");
+        assert_eq!(basename(r"C:\bin\obsidian.exe"), "obsidian.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("obsidian.exe"), "obsidian");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_obsidian(&["--help".to_string()], "obsidian"), 0);
+        assert_eq!(run_obsidian(&["-h".to_string()], "obsidian"), 0);
+        assert_eq!(run_obsidian(&["--version".to_string()], "obsidian"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_obsidian(&[], "obsidian"), 0);
+    }
+}

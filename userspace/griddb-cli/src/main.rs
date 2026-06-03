@@ -66,4 +66,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_griddb};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/griddb"), "griddb");
+        assert_eq!(basename(r"C:\bin\griddb.exe"), "griddb.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("griddb.exe"), "griddb");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_griddb(&["--help".to_string()], "griddb"), 0);
+        assert_eq!(run_griddb(&["-h".to_string()], "griddb"), 0);
+        assert_eq!(run_griddb(&["--version".to_string()], "griddb"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_griddb(&[], "griddb"), 0);
+    }
+}

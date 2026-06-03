@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_valentina};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/valentina"), "valentina");
+        assert_eq!(basename(r"C:\bin\valentina.exe"), "valentina.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("valentina.exe"), "valentina");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_valentina(&["--help".to_string()], "valentina"), 0);
+        assert_eq!(run_valentina(&["-h".to_string()], "valentina"), 0);
+        assert_eq!(run_valentina(&["--version".to_string()], "valentina"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_valentina(&[], "valentina"), 0);
+    }
+}

@@ -91,4 +91,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_bk};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/buildkite"), "buildkite");
+        assert_eq!(basename(r"C:\bin\buildkite.exe"), "buildkite.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("buildkite.exe"), "buildkite");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_bk(&["--help".to_string()]), 0);
+        assert_eq!(run_bk(&["-h".to_string()]), 0);
+        assert_eq!(run_bk(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_bk(&[]), 0);
+    }
+}

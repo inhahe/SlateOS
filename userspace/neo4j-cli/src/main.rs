@@ -112,6 +112,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_cypher_shell};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/neo4j"), "neo4j");
+        assert_eq!(basename(r"C:\bin\neo4j.exe"), "neo4j.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("neo4j.exe"), "neo4j");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cypher_shell(&["--help".to_string()]), 0);
+        assert_eq!(run_cypher_shell(&["-h".to_string()]), 0);
+        assert_eq!(run_cypher_shell(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cypher_shell(&[]), 0);
+    }
 }

@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ecamm};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ecamm"), "ecamm");
+        assert_eq!(basename(r"C:\bin\ecamm.exe"), "ecamm.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ecamm.exe"), "ecamm");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ecamm(&["--help".to_string()], "ecamm"), 0);
+        assert_eq!(run_ecamm(&["-h".to_string()], "ecamm"), 0);
+        assert_eq!(run_ecamm(&["--version".to_string()], "ecamm"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ecamm(&[], "ecamm"), 0);
+    }
+}

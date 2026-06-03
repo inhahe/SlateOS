@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pinot};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/pinot"), "pinot");
+        assert_eq!(basename(r"C:\bin\pinot.exe"), "pinot.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("pinot.exe"), "pinot");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pinot(&["--help".to_string()], "pinot"), 0);
+        assert_eq!(run_pinot(&["-h".to_string()], "pinot"), 0);
+        assert_eq!(run_pinot(&["--version".to_string()], "pinot"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pinot(&[], "pinot"), 0);
+    }
+}

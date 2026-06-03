@@ -55,4 +55,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cellwriter};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cellwriter"), "cellwriter");
+        assert_eq!(basename(r"C:\bin\cellwriter.exe"), "cellwriter.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cellwriter.exe"), "cellwriter");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cellwriter(&["--help".to_string()], "cellwriter"), 0);
+        assert_eq!(run_cellwriter(&["-h".to_string()], "cellwriter"), 0);
+        assert_eq!(run_cellwriter(&["--version".to_string()], "cellwriter"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cellwriter(&[], "cellwriter"), 0);
+    }
+}

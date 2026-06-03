@@ -68,4 +68,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sejda};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sejda"), "sejda");
+        assert_eq!(basename(r"C:\bin\sejda.exe"), "sejda.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sejda.exe"), "sejda");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sejda(&["--help".to_string()], "sejda"), 0);
+        assert_eq!(run_sejda(&["-h".to_string()], "sejda"), 0);
+        assert_eq!(run_sejda(&["--version".to_string()], "sejda"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sejda(&[], "sejda"), 0);
+    }
+}

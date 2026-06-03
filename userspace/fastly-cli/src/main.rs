@@ -148,4 +148,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_fastly};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/fastly"), "fastly");
+        assert_eq!(basename(r"C:\bin\fastly.exe"), "fastly.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("fastly.exe"), "fastly");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_fastly(&["--help".to_string()], "fastly"), 0);
+        assert_eq!(run_fastly(&["-h".to_string()], "fastly"), 0);
+        assert_eq!(run_fastly(&["--version".to_string()], "fastly"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_fastly(&[], "fastly"), 0);
+    }
+}

@@ -55,4 +55,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pmx};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/proxmox"), "proxmox");
+        assert_eq!(basename(r"C:\bin\proxmox.exe"), "proxmox.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("proxmox.exe"), "proxmox");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pmx(&["--help".to_string()], "proxmox"), 0);
+        assert_eq!(run_pmx(&["-h".to_string()], "proxmox"), 0);
+        assert_eq!(run_pmx(&["--version".to_string()], "proxmox"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pmx(&[], "proxmox"), 0);
+    }
+}

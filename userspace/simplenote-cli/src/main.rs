@@ -37,4 +37,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_simplenote};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/simplenote"), "simplenote");
+        assert_eq!(basename(r"C:\bin\simplenote.exe"), "simplenote.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("simplenote.exe"), "simplenote");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_simplenote(&["--help".to_string()], "simplenote"), 0);
+        assert_eq!(run_simplenote(&["-h".to_string()], "simplenote"), 0);
+        assert_eq!(run_simplenote(&["--version".to_string()], "simplenote"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_simplenote(&[], "simplenote"), 0);
+    }
+}

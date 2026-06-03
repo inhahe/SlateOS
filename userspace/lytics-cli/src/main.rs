@@ -109,4 +109,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_lytics};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/lytics"), "lytics");
+        assert_eq!(basename(r"C:\bin\lytics.exe"), "lytics.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("lytics.exe"), "lytics");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_lytics(&["--help".to_string()], "lytics"), 0);
+        assert_eq!(run_lytics(&["-h".to_string()], "lytics"), 0);
+        assert_eq!(run_lytics(&["--version".to_string()], "lytics"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_lytics(&[], "lytics"), 0);
+    }
+}

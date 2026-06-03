@@ -201,6 +201,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_lp};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/lp"), "lp");
+        assert_eq!(basename(r"C:\bin\lp.exe"), "lp.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("lp.exe"), "lp");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_lp(&["--help".to_string()]), 0);
+        assert_eq!(run_lp(&["-h".to_string()]), 0);
+        assert_eq!(run_lp(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_lp(&[]), 0);
+    }
 }

@@ -40,4 +40,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_magnus};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/magnus"), "magnus");
+        assert_eq!(basename(r"C:\bin\magnus.exe"), "magnus.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("magnus.exe"), "magnus");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_magnus(&["--help".to_string()], "magnus"), 0);
+        assert_eq!(run_magnus(&["-h".to_string()], "magnus"), 0);
+        assert_eq!(run_magnus(&["--version".to_string()], "magnus"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_magnus(&[], "magnus"), 0);
+    }
+}

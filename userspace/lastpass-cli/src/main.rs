@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_lp};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/lastpass"), "lastpass");
+        assert_eq!(basename(r"C:\bin\lastpass.exe"), "lastpass.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("lastpass.exe"), "lastpass");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_lp(&["--help".to_string()], "lastpass"), 0);
+        assert_eq!(run_lp(&["-h".to_string()], "lastpass"), 0);
+        assert_eq!(run_lp(&["--version".to_string()], "lastpass"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_lp(&[], "lastpass"), 0);
+    }
+}

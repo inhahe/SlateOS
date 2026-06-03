@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_klayout};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/klayout"), "klayout");
+        assert_eq!(basename(r"C:\bin\klayout.exe"), "klayout.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("klayout.exe"), "klayout");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_klayout(&["--help".to_string()], "klayout"), 0);
+        assert_eq!(run_klayout(&["-h".to_string()], "klayout"), 0);
+        assert_eq!(run_klayout(&["--version".to_string()], "klayout"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_klayout(&[], "klayout"), 0);
+    }
+}

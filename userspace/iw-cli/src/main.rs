@@ -131,4 +131,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_iw};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/iw"), "iw");
+        assert_eq!(basename(r"C:\bin\iw.exe"), "iw.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("iw.exe"), "iw");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_iw(&["--help".to_string()]), 0);
+        assert_eq!(run_iw(&["-h".to_string()]), 0);
+        assert_eq!(run_iw(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_iw(&[]), 0);
+    }
+}

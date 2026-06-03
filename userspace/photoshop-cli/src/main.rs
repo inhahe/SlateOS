@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ps};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/photoshop"), "photoshop");
+        assert_eq!(basename(r"C:\bin\photoshop.exe"), "photoshop.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("photoshop.exe"), "photoshop");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ps(&["--help".to_string()], "photoshop"), 0);
+        assert_eq!(run_ps(&["-h".to_string()], "photoshop"), 0);
+        assert_eq!(run_ps(&["--version".to_string()], "photoshop"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ps(&[], "photoshop"), 0);
+    }
+}

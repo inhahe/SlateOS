@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rebelle};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rebelle"), "rebelle");
+        assert_eq!(basename(r"C:\bin\rebelle.exe"), "rebelle.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rebelle.exe"), "rebelle");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rebelle(&["--help".to_string()], "rebelle"), 0);
+        assert_eq!(run_rebelle(&["-h".to_string()], "rebelle"), 0);
+        assert_eq!(run_rebelle(&["--version".to_string()], "rebelle"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rebelle(&[], "rebelle"), 0);
+    }
+}

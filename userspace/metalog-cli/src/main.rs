@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_metalog};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/metalog"), "metalog");
+        assert_eq!(basename(r"C:\bin\metalog.exe"), "metalog.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("metalog.exe"), "metalog");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_metalog(&["--help".to_string()], "metalog"), 0);
+        assert_eq!(run_metalog(&["-h".to_string()], "metalog"), 0);
+        assert_eq!(run_metalog(&["--version".to_string()], "metalog"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_metalog(&[], "metalog"), 0);
+    }
+}

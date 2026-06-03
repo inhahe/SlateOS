@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_inv};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/inventor"), "inventor");
+        assert_eq!(basename(r"C:\bin\inventor.exe"), "inventor.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("inventor.exe"), "inventor");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_inv(&["--help".to_string()], "inventor"), 0);
+        assert_eq!(run_inv(&["-h".to_string()], "inventor"), 0);
+        assert_eq!(run_inv(&["--version".to_string()], "inventor"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_inv(&[], "inventor"), 0);
+    }
+}

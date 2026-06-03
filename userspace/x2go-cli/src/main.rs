@@ -55,4 +55,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_client};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/x2go"), "x2go");
+        assert_eq!(basename(r"C:\bin\x2go.exe"), "x2go.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("x2go.exe"), "x2go");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_client(&["--help".to_string()], "x2go"), 0);
+        assert_eq!(run_client(&["-h".to_string()], "x2go"), 0);
+        assert_eq!(run_client(&["--version".to_string()], "x2go"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_client(&[], "x2go"), 0);
+    }
+}

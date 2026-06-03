@@ -47,4 +47,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/workday"), "workday");
+        assert_eq!(basename(r"C:\bin\workday.exe"), "workday.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("workday.exe"), "workday");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wd(&["--help".to_string()], "workday"), 0);
+        assert_eq!(run_wd(&["-h".to_string()], "workday"), 0);
+        assert_eq!(run_wd(&["--version".to_string()], "workday"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wd(&[], "workday"), 0);
+    }
+}

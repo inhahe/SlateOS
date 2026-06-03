@@ -66,4 +66,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_crio};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cri-o"), "cri-o");
+        assert_eq!(basename(r"C:\bin\cri-o.exe"), "cri-o.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cri-o.exe"), "cri-o");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_crio(&["--help".to_string()], "cri-o"), 0);
+        assert_eq!(run_crio(&["-h".to_string()], "cri-o"), 0);
+        assert_eq!(run_crio(&["--version".to_string()], "cri-o"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_crio(&[], "cri-o"), 0);
+    }
+}

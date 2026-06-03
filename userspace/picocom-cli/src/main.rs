@@ -94,6 +94,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_picocom};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/picocom"), "picocom");
+        assert_eq!(basename(r"C:\bin\picocom.exe"), "picocom.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("picocom.exe"), "picocom");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_picocom(&["--help".to_string()]), 0);
+        assert_eq!(run_picocom(&["-h".to_string()]), 0);
+        assert_eq!(run_picocom(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_picocom(&[]), 0);
+    }
 }

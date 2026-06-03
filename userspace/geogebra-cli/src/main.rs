@@ -41,4 +41,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_geogebra};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/geogebra"), "geogebra");
+        assert_eq!(basename(r"C:\bin\geogebra.exe"), "geogebra.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("geogebra.exe"), "geogebra");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_geogebra(&["--help".to_string()], "geogebra"), 0);
+        assert_eq!(run_geogebra(&["-h".to_string()], "geogebra"), 0);
+        assert_eq!(run_geogebra(&["--version".to_string()], "geogebra"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_geogebra(&[], "geogebra"), 0);
+    }
+}

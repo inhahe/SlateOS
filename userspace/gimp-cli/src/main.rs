@@ -60,4 +60,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_gimp};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/gimp"), "gimp");
+        assert_eq!(basename(r"C:\bin\gimp.exe"), "gimp.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("gimp.exe"), "gimp");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_gimp(&["--help".to_string()], "gimp"), 0);
+        assert_eq!(run_gimp(&["-h".to_string()], "gimp"), 0);
+        assert_eq!(run_gimp(&["--version".to_string()], "gimp"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_gimp(&[], "gimp"), 0);
+    }
+}

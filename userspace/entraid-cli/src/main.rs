@@ -77,4 +77,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_eid};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/entraid"), "entraid");
+        assert_eq!(basename(r"C:\bin\entraid.exe"), "entraid.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("entraid.exe"), "entraid");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_eid(&["--help".to_string()], "entraid"), 0);
+        assert_eq!(run_eid(&["-h".to_string()], "entraid"), 0);
+        assert_eq!(run_eid(&["--version".to_string()], "entraid"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_eid(&[], "entraid"), 0);
+    }
+}

@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_runner};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/gitlab-runner"), "gitlab-runner");
+        assert_eq!(basename(r"C:\bin\gitlab-runner.exe"), "gitlab-runner.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("gitlab-runner.exe"), "gitlab-runner");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_runner(&["--help".to_string()], "gitlab-runner"), 0);
+        assert_eq!(run_runner(&["-h".to_string()], "gitlab-runner"), 0);
+        assert_eq!(run_runner(&["--version".to_string()], "gitlab-runner"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_runner(&[], "gitlab-runner"), 0);
+    }
+}

@@ -54,4 +54,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_lightgbm};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/lightgbm"), "lightgbm");
+        assert_eq!(basename(r"C:\bin\lightgbm.exe"), "lightgbm.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("lightgbm.exe"), "lightgbm");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_lightgbm(&["--help".to_string()], "lightgbm"), 0);
+        assert_eq!(run_lightgbm(&["-h".to_string()], "lightgbm"), 0);
+        assert_eq!(run_lightgbm(&["--version".to_string()], "lightgbm"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_lightgbm(&[], "lightgbm"), 0);
+    }
+}

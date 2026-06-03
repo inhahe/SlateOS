@@ -117,4 +117,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_census};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/census"), "census");
+        assert_eq!(basename(r"C:\bin\census.exe"), "census.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("census.exe"), "census");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_census(&["--help".to_string()], "census"), 0);
+        assert_eq!(run_census(&["-h".to_string()], "census"), 0);
+        assert_eq!(run_census(&["--version".to_string()], "census"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_census(&[], "census"), 0);
+    }
+}

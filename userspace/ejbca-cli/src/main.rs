@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ejbca};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ejbca"), "ejbca");
+        assert_eq!(basename(r"C:\bin\ejbca.exe"), "ejbca.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ejbca.exe"), "ejbca");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ejbca(&["--help".to_string()], "ejbca"), 0);
+        assert_eq!(run_ejbca(&["-h".to_string()], "ejbca"), 0);
+        assert_eq!(run_ejbca(&["--version".to_string()], "ejbca"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ejbca(&[], "ejbca"), 0);
+    }
+}

@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wireproxy};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wireproxy"), "wireproxy");
+        assert_eq!(basename(r"C:\bin\wireproxy.exe"), "wireproxy.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wireproxy.exe"), "wireproxy");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wireproxy(&["--help".to_string()], "wireproxy"), 0);
+        assert_eq!(run_wireproxy(&["-h".to_string()], "wireproxy"), 0);
+        assert_eq!(run_wireproxy(&["--version".to_string()], "wireproxy"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wireproxy(&[], "wireproxy"), 0);
+    }
+}

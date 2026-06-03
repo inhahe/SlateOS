@@ -56,4 +56,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sklearn};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/scikit-learn"), "scikit-learn");
+        assert_eq!(basename(r"C:\bin\scikit-learn.exe"), "scikit-learn.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("scikit-learn.exe"), "scikit-learn");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sklearn(&["--help".to_string()], "scikit-learn"), 0);
+        assert_eq!(run_sklearn(&["-h".to_string()], "scikit-learn"), 0);
+        assert_eq!(run_sklearn(&["--version".to_string()], "scikit-learn"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sklearn(&[], "scikit-learn"), 0);
+    }
+}

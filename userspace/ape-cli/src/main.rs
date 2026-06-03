@@ -69,4 +69,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ape};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ape"), "ape");
+        assert_eq!(basename(r"C:\bin\ape.exe"), "ape.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ape.exe"), "ape");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ape(&["--help".to_string()], "ape"), 0);
+        assert_eq!(run_ape(&["-h".to_string()], "ape"), 0);
+        assert_eq!(run_ape(&["--version".to_string()], "ape"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ape(&[], "ape"), 0);
+    }
+}

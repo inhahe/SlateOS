@@ -86,4 +86,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cmus};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cmus"), "cmus");
+        assert_eq!(basename(r"C:\bin\cmus.exe"), "cmus.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cmus.exe"), "cmus");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cmus(&["--help".to_string()], "cmus"), 0);
+        assert_eq!(run_cmus(&["-h".to_string()], "cmus"), 0);
+        assert_eq!(run_cmus(&["--version".to_string()], "cmus"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cmus(&[], "cmus"), 0);
+    }
+}

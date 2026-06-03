@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_at};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/airtable"), "airtable");
+        assert_eq!(basename(r"C:\bin\airtable.exe"), "airtable.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("airtable.exe"), "airtable");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_at(&["--help".to_string()], "airtable"), 0);
+        assert_eq!(run_at(&["-h".to_string()], "airtable"), 0);
+        assert_eq!(run_at(&["--version".to_string()], "airtable"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_at(&[], "airtable"), 0);
+    }
+}

@@ -68,4 +68,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_eww};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/eww"), "eww");
+        assert_eq!(basename(r"C:\bin\eww.exe"), "eww.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("eww.exe"), "eww");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_eww(&["--help".to_string()], "eww"), 0);
+        assert_eq!(run_eww(&["-h".to_string()], "eww"), 0);
+        assert_eq!(run_eww(&["--version".to_string()], "eww"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_eww(&[], "eww"), 0);
+    }
+}

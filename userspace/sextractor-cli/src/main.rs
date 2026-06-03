@@ -59,4 +59,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sextractor};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sextractor"), "sextractor");
+        assert_eq!(basename(r"C:\bin\sextractor.exe"), "sextractor.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sextractor.exe"), "sextractor");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sextractor(&["--help".to_string()], "sextractor"), 0);
+        assert_eq!(run_sextractor(&["-h".to_string()], "sextractor"), 0);
+        assert_eq!(run_sextractor(&["--version".to_string()], "sextractor"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sextractor(&[], "sextractor"), 0);
+    }
+}

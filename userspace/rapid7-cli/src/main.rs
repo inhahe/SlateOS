@@ -147,4 +147,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_r7};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rapid7"), "rapid7");
+        assert_eq!(basename(r"C:\bin\rapid7.exe"), "rapid7.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rapid7.exe"), "rapid7");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_r7(&["--help".to_string()], "rapid7"), 0);
+        assert_eq!(run_r7(&["-h".to_string()], "rapid7"), 0);
+        assert_eq!(run_r7(&["--version".to_string()], "rapid7"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_r7(&[], "rapid7"), 0);
+    }
+}

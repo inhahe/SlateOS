@@ -92,4 +92,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_kustomer};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/kustomer"), "kustomer");
+        assert_eq!(basename(r"C:\bin\kustomer.exe"), "kustomer.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("kustomer.exe"), "kustomer");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_kustomer(&["--help".to_string()], "kustomer"), 0);
+        assert_eq!(run_kustomer(&["-h".to_string()], "kustomer"), 0);
+        assert_eq!(run_kustomer(&["--version".to_string()], "kustomer"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_kustomer(&[], "kustomer"), 0);
+    }
+}

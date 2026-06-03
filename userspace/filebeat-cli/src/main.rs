@@ -85,4 +85,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_filebeat};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/filebeat"), "filebeat");
+        assert_eq!(basename(r"C:\bin\filebeat.exe"), "filebeat.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("filebeat.exe"), "filebeat");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_filebeat(&["--help".to_string()], "filebeat"), 0);
+        assert_eq!(run_filebeat(&["-h".to_string()], "filebeat"), 0);
+        assert_eq!(run_filebeat(&["--version".to_string()], "filebeat"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_filebeat(&[], "filebeat"), 0);
+    }
+}

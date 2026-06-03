@@ -52,4 +52,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_questdb};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/questdb"), "questdb");
+        assert_eq!(basename(r"C:\bin\questdb.exe"), "questdb.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("questdb.exe"), "questdb");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_questdb(&["--help".to_string()], "questdb"), 0);
+        assert_eq!(run_questdb(&["-h".to_string()], "questdb"), 0);
+        assert_eq!(run_questdb(&["--version".to_string()], "questdb"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_questdb(&[], "questdb"), 0);
+    }
+}

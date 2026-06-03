@@ -47,4 +47,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wev};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wev"), "wev");
+        assert_eq!(basename(r"C:\bin\wev.exe"), "wev.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wev.exe"), "wev");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wev(&["--help".to_string()], "wev"), 0);
+        assert_eq!(run_wev(&["-h".to_string()], "wev"), 0);
+        assert_eq!(run_wev(&["--version".to_string()], "wev"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wev(&[], "wev"), 0);
+    }
+}

@@ -107,6 +107,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_pandoc};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pandoc(vec!["--help".to_string()]), 0);
+        assert_eq!(run_pandoc(vec!["-h".to_string()]), 0);
+        assert_eq!(run_pandoc(vec!["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pandoc(vec![]), 0);
+    }
 }

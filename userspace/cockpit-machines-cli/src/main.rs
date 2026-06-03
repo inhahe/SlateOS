@@ -41,4 +41,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cockpit_machines};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cockpit-machines"), "cockpit-machines");
+        assert_eq!(basename(r"C:\bin\cockpit-machines.exe"), "cockpit-machines.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cockpit-machines.exe"), "cockpit-machines");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cockpit_machines(&["--help".to_string()], "cockpit-machines"), 0);
+        assert_eq!(run_cockpit_machines(&["-h".to_string()], "cockpit-machines"), 0);
+        assert_eq!(run_cockpit_machines(&["--version".to_string()], "cockpit-machines"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cockpit_machines(&[], "cockpit-machines"), 0);
+    }
+}

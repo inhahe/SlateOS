@@ -129,6 +129,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_scmp_sys_resolver};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/seccomp"), "seccomp");
+        assert_eq!(basename(r"C:\bin\seccomp.exe"), "seccomp.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("seccomp.exe"), "seccomp");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_scmp_sys_resolver(&["--help".to_string()]), 0);
+        assert_eq!(run_scmp_sys_resolver(&["-h".to_string()]), 0);
+        assert_eq!(run_scmp_sys_resolver(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_scmp_sys_resolver(&[]), 0);
+    }
 }

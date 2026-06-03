@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_vv};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/vivaldi"), "vivaldi");
+        assert_eq!(basename(r"C:\bin\vivaldi.exe"), "vivaldi.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("vivaldi.exe"), "vivaldi");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_vv(&["--help".to_string()], "vivaldi"), 0);
+        assert_eq!(run_vv(&["-h".to_string()], "vivaldi"), 0);
+        assert_eq!(run_vv(&["--version".to_string()], "vivaldi"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_vv(&[], "vivaldi"), 0);
+    }
+}

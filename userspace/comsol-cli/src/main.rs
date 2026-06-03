@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_comsol};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/comsol"), "comsol");
+        assert_eq!(basename(r"C:\bin\comsol.exe"), "comsol.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("comsol.exe"), "comsol");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_comsol(&["--help".to_string()], "comsol"), 0);
+        assert_eq!(run_comsol(&["-h".to_string()], "comsol"), 0);
+        assert_eq!(run_comsol(&["--version".to_string()], "comsol"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_comsol(&[], "comsol"), 0);
+    }
+}

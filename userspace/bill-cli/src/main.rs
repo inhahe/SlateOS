@@ -81,4 +81,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_bill};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/bill"), "bill");
+        assert_eq!(basename(r"C:\bin\bill.exe"), "bill.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("bill.exe"), "bill");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_bill(&["--help".to_string()], "bill"), 0);
+        assert_eq!(run_bill(&["-h".to_string()], "bill"), 0);
+        assert_eq!(run_bill(&["--version".to_string()], "bill"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_bill(&[], "bill"), 0);
+    }
+}

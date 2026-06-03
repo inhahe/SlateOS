@@ -125,4 +125,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_tray};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/tray"), "tray");
+        assert_eq!(basename(r"C:\bin\tray.exe"), "tray.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("tray.exe"), "tray");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_tray(&["--help".to_string()], "tray"), 0);
+        assert_eq!(run_tray(&["-h".to_string()], "tray"), 0);
+        assert_eq!(run_tray(&["--version".to_string()], "tray"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_tray(&[], "tray"), 0);
+    }
+}

@@ -56,4 +56,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wl_gammactl};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wl-gammactl"), "wl-gammactl");
+        assert_eq!(basename(r"C:\bin\wl-gammactl.exe"), "wl-gammactl.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wl-gammactl.exe"), "wl-gammactl");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wl_gammactl(&["--help".to_string()], "wl-gammactl"), 0);
+        assert_eq!(run_wl_gammactl(&["-h".to_string()], "wl-gammactl"), 0);
+        assert_eq!(run_wl_gammactl(&["--version".to_string()], "wl-gammactl"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wl_gammactl(&[], "wl-gammactl"), 0);
+    }
+}

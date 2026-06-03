@@ -54,4 +54,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_httping};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/httping"), "httping");
+        assert_eq!(basename(r"C:\bin\httping.exe"), "httping.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("httping.exe"), "httping");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_httping(&["--help".to_string()], "httping"), 0);
+        assert_eq!(run_httping(&["-h".to_string()], "httping"), 0);
+        assert_eq!(run_httping(&["--version".to_string()], "httping"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_httping(&[], "httping"), 0);
+    }
+}

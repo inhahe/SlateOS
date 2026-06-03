@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pygame};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/pygame"), "pygame");
+        assert_eq!(basename(r"C:\bin\pygame.exe"), "pygame.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("pygame.exe"), "pygame");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pygame(&["--help".to_string()], "pygame"), 0);
+        assert_eq!(run_pygame(&["-h".to_string()], "pygame"), 0);
+        assert_eq!(run_pygame(&["--version".to_string()], "pygame"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pygame(&[], "pygame"), 0);
+    }
+}

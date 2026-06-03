@@ -60,4 +60,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_dust};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/dust"), "dust");
+        assert_eq!(basename(r"C:\bin\dust.exe"), "dust.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("dust.exe"), "dust");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_dust(&["--help".to_string()], "dust"), 0);
+        assert_eq!(run_dust(&["-h".to_string()], "dust"), 0);
+        assert_eq!(run_dust(&["--version".to_string()], "dust"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_dust(&[], "dust"), 0);
+    }
+}

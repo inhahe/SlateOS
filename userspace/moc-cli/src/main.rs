@@ -67,4 +67,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_moc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/moc"), "moc");
+        assert_eq!(basename(r"C:\bin\moc.exe"), "moc.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("moc.exe"), "moc");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_moc(&["--help".to_string()], "moc"), 0);
+        assert_eq!(run_moc(&["-h".to_string()], "moc"), 0);
+        assert_eq!(run_moc(&["--version".to_string()], "moc"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_moc(&[], "moc"), 0);
+    }
+}

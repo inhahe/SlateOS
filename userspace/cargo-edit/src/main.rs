@@ -139,6 +139,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_cargo_edit};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cargo_edit(vec!["--help".to_string()], "cargo-edit"), 0);
+        assert_eq!(run_cargo_edit(vec!["-h".to_string()], "cargo-edit"), 0);
+        assert_eq!(run_cargo_edit(vec!["--version".to_string()], "cargo-edit"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cargo_edit(vec![], "cargo-edit"), 0);
+    }
 }

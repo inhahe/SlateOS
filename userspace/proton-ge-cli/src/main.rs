@@ -57,4 +57,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_proton_ge};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/proton-ge"), "proton-ge");
+        assert_eq!(basename(r"C:\bin\proton-ge.exe"), "proton-ge.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("proton-ge.exe"), "proton-ge");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_proton_ge(&["--help".to_string()], "proton-ge"), 0);
+        assert_eq!(run_proton_ge(&["-h".to_string()], "proton-ge"), 0);
+        assert_eq!(run_proton_ge(&["--version".to_string()], "proton-ge"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_proton_ge(&[], "proton-ge"), 0);
+    }
+}

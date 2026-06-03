@@ -41,4 +41,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_os};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/openshot"), "openshot");
+        assert_eq!(basename(r"C:\bin\openshot.exe"), "openshot.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("openshot.exe"), "openshot");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_os(&["--help".to_string()], "openshot"), 0);
+        assert_eq!(run_os(&["-h".to_string()], "openshot"), 0);
+        assert_eq!(run_os(&["--version".to_string()], "openshot"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_os(&[], "openshot"), 0);
+    }
+}

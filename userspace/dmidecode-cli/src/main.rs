@@ -155,6 +155,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_dmidecode};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/dmidecode"), "dmidecode");
+        assert_eq!(basename(r"C:\bin\dmidecode.exe"), "dmidecode.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("dmidecode.exe"), "dmidecode");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_dmidecode(&["--help".to_string()]), 0);
+        assert_eq!(run_dmidecode(&["-h".to_string()]), 0);
+        assert_eq!(run_dmidecode(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_dmidecode(&[]), 0);
+    }
 }

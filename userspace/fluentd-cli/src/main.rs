@@ -47,4 +47,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_fluentd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/fluentd"), "fluentd");
+        assert_eq!(basename(r"C:\bin\fluentd.exe"), "fluentd.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("fluentd.exe"), "fluentd");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_fluentd(&["--help".to_string()], "fluentd"), 0);
+        assert_eq!(run_fluentd(&["-h".to_string()], "fluentd"), 0);
+        assert_eq!(run_fluentd(&["--version".to_string()], "fluentd"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_fluentd(&[], "fluentd"), 0);
+    }
+}

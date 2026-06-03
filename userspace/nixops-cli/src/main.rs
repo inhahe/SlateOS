@@ -70,4 +70,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_nixops};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/nixops"), "nixops");
+        assert_eq!(basename(r"C:\bin\nixops.exe"), "nixops.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("nixops.exe"), "nixops");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_nixops(&["--help".to_string()], "nixops"), 0);
+        assert_eq!(run_nixops(&["-h".to_string()], "nixops"), 0);
+        assert_eq!(run_nixops(&["--version".to_string()], "nixops"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_nixops(&[], "nixops"), 0);
+    }
+}

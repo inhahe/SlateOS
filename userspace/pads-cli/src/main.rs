@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pads};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/pads"), "pads");
+        assert_eq!(basename(r"C:\bin\pads.exe"), "pads.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("pads.exe"), "pads");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pads(&["--help".to_string()], "pads"), 0);
+        assert_eq!(run_pads(&["-h".to_string()], "pads"), 0);
+        assert_eq!(run_pads(&["--version".to_string()], "pads"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pads(&[], "pads"), 0);
+    }
+}

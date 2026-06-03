@@ -38,4 +38,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_bottles};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/bottles"), "bottles");
+        assert_eq!(basename(r"C:\bin\bottles.exe"), "bottles.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("bottles.exe"), "bottles");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_bottles(&["--help".to_string()], "bottles"), 0);
+        assert_eq!(run_bottles(&["-h".to_string()], "bottles"), 0);
+        assert_eq!(run_bottles(&["--version".to_string()], "bottles"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_bottles(&[], "bottles"), 0);
+    }
+}

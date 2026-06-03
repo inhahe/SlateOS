@@ -137,4 +137,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_humio};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/humio"), "humio");
+        assert_eq!(basename(r"C:\bin\humio.exe"), "humio.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("humio.exe"), "humio");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_humio(&["--help".to_string()], "humio"), 0);
+        assert_eq!(run_humio(&["-h".to_string()], "humio"), 0);
+        assert_eq!(run_humio(&["--version".to_string()], "humio"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_humio(&[], "humio"), 0);
+    }
+}

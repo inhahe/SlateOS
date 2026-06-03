@@ -47,4 +47,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_knime};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/knime"), "knime");
+        assert_eq!(basename(r"C:\bin\knime.exe"), "knime.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("knime.exe"), "knime");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_knime(&["--help".to_string()], "knime"), 0);
+        assert_eq!(run_knime(&["-h".to_string()], "knime"), 0);
+        assert_eq!(run_knime(&["--version".to_string()], "knime"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_knime(&[], "knime"), 0);
+    }
+}

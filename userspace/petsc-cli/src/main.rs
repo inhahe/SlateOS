@@ -68,4 +68,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_petsc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/petsc"), "petsc");
+        assert_eq!(basename(r"C:\bin\petsc.exe"), "petsc.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("petsc.exe"), "petsc");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_petsc(&["--help".to_string()], "petsc"), 0);
+        assert_eq!(run_petsc(&["-h".to_string()], "petsc"), 0);
+        assert_eq!(run_petsc(&["--version".to_string()], "petsc"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_petsc(&[], "petsc"), 0);
+    }
+}

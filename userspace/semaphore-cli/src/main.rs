@@ -60,4 +60,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sem};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/semaphore"), "semaphore");
+        assert_eq!(basename(r"C:\bin\semaphore.exe"), "semaphore.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("semaphore.exe"), "semaphore");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sem(&["--help".to_string()], "semaphore"), 0);
+        assert_eq!(run_sem(&["-h".to_string()], "semaphore"), 0);
+        assert_eq!(run_sem(&["--version".to_string()], "semaphore"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sem(&[], "semaphore"), 0);
+    }
+}

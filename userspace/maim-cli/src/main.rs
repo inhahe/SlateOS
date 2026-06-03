@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_maim};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/maim"), "maim");
+        assert_eq!(basename(r"C:\bin\maim.exe"), "maim.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("maim.exe"), "maim");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_maim(&["--help".to_string()], "maim"), 0);
+        assert_eq!(run_maim(&["-h".to_string()], "maim"), 0);
+        assert_eq!(run_maim(&["--version".to_string()], "maim"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_maim(&[], "maim"), 0);
+    }
+}

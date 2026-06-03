@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_chr};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/chrome"), "chrome");
+        assert_eq!(basename(r"C:\bin\chrome.exe"), "chrome.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("chrome.exe"), "chrome");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_chr(&["--help".to_string()], "chrome"), 0);
+        assert_eq!(run_chr(&["-h".to_string()], "chrome"), 0);
+        assert_eq!(run_chr(&["--version".to_string()], "chrome"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_chr(&[], "chrome"), 0);
+    }
+}

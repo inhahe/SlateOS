@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_skipper};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/skipper"), "skipper");
+        assert_eq!(basename(r"C:\bin\skipper.exe"), "skipper.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("skipper.exe"), "skipper");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_skipper(&["--help".to_string()], "skipper"), 0);
+        assert_eq!(run_skipper(&["-h".to_string()], "skipper"), 0);
+        assert_eq!(run_skipper(&["--version".to_string()], "skipper"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_skipper(&[], "skipper"), 0);
+    }
+}

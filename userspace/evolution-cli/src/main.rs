@@ -57,4 +57,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_evolution};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/evolution"), "evolution");
+        assert_eq!(basename(r"C:\bin\evolution.exe"), "evolution.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("evolution.exe"), "evolution");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_evolution(&["--help".to_string()], "evolution"), 0);
+        assert_eq!(run_evolution(&["-h".to_string()], "evolution"), 0);
+        assert_eq!(run_evolution(&["--version".to_string()], "evolution"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_evolution(&[], "evolution"), 0);
+    }
+}

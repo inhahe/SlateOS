@@ -90,4 +90,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pastel};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/pastel"), "pastel");
+        assert_eq!(basename(r"C:\bin\pastel.exe"), "pastel.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("pastel.exe"), "pastel");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pastel(&["--help".to_string()], "pastel"), 0);
+        assert_eq!(run_pastel(&["-h".to_string()], "pastel"), 0);
+        assert_eq!(run_pastel(&["--version".to_string()], "pastel"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pastel(&[], "pastel"), 0);
+    }
+}

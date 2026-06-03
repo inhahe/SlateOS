@@ -83,4 +83,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_kfp};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/kubeflow"), "kubeflow");
+        assert_eq!(basename(r"C:\bin\kubeflow.exe"), "kubeflow.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("kubeflow.exe"), "kubeflow");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_kfp(&["--help".to_string()]), 0);
+        assert_eq!(run_kfp(&["-h".to_string()]), 0);
+        assert_eq!(run_kfp(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_kfp(&[]), 0);
+    }
+}

@@ -73,4 +73,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_hardhat};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/hardhat"), "hardhat");
+        assert_eq!(basename(r"C:\bin\hardhat.exe"), "hardhat.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("hardhat.exe"), "hardhat");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_hardhat(&["--help".to_string()], "hardhat"), 0);
+        assert_eq!(run_hardhat(&["-h".to_string()], "hardhat"), 0);
+        assert_eq!(run_hardhat(&["--version".to_string()], "hardhat"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_hardhat(&[], "hardhat"), 0);
+    }
+}

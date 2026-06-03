@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rx};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rx"), "rx");
+        assert_eq!(basename(r"C:\bin\rx.exe"), "rx.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rx.exe"), "rx");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rx(&["--help".to_string()], "rx"), 0);
+        assert_eq!(run_rx(&["-h".to_string()], "rx"), 0);
+        assert_eq!(run_rx(&["--version".to_string()], "rx"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rx(&[], "rx"), 0);
+    }
+}

@@ -176,4 +176,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sns};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sns"), "sns");
+        assert_eq!(basename(r"C:\bin\sns.exe"), "sns.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sns.exe"), "sns");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sns(&["--help".to_string()], "sns"), 0);
+        assert_eq!(run_sns(&["-h".to_string()], "sns"), 0);
+        assert_eq!(run_sns(&["--version".to_string()], "sns"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sns(&[], "sns"), 0);
+    }
+}

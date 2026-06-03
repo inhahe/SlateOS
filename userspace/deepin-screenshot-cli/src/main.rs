@@ -41,4 +41,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_deepin_screenshot};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/deepin-screenshot"), "deepin-screenshot");
+        assert_eq!(basename(r"C:\bin\deepin-screenshot.exe"), "deepin-screenshot.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("deepin-screenshot.exe"), "deepin-screenshot");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_deepin_screenshot(&["--help".to_string()], "deepin-screenshot"), 0);
+        assert_eq!(run_deepin_screenshot(&["-h".to_string()], "deepin-screenshot"), 0);
+        assert_eq!(run_deepin_screenshot(&["--version".to_string()], "deepin-screenshot"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_deepin_screenshot(&[], "deepin-screenshot"), 0);
+    }
+}

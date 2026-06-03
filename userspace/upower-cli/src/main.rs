@@ -71,4 +71,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_upowerd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/upower"), "upower");
+        assert_eq!(basename(r"C:\bin\upower.exe"), "upower.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("upower.exe"), "upower");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_upowerd(&["--help".to_string()], "upower"), 0);
+        assert_eq!(run_upowerd(&["-h".to_string()], "upower"), 0);
+        assert_eq!(run_upowerd(&["--version".to_string()], "upower"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_upowerd(&[], "upower"), 0);
+    }
+}

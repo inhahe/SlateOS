@@ -152,4 +152,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_do};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/digitalocean"), "digitalocean");
+        assert_eq!(basename(r"C:\bin\digitalocean.exe"), "digitalocean.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("digitalocean.exe"), "digitalocean");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_do(&["--help".to_string()], "digitalocean"), 0);
+        assert_eq!(run_do(&["-h".to_string()], "digitalocean"), 0);
+        assert_eq!(run_do(&["--version".to_string()], "digitalocean"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_do(&[], "digitalocean"), 0);
+    }
+}

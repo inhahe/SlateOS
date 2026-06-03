@@ -118,6 +118,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_swagger};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_swagger(vec!["--help".to_string()]), 0);
+        assert_eq!(run_swagger(vec!["-h".to_string()]), 0);
+        assert_eq!(run_swagger(vec!["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_swagger(vec![]), 0);
+    }
 }

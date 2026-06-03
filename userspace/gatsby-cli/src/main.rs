@@ -92,4 +92,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_gatsby};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/gatsby"), "gatsby");
+        assert_eq!(basename(r"C:\bin\gatsby.exe"), "gatsby.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("gatsby.exe"), "gatsby");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_gatsby(&["--help".to_string()], "gatsby"), 0);
+        assert_eq!(run_gatsby(&["-h".to_string()], "gatsby"), 0);
+        assert_eq!(run_gatsby(&["--version".to_string()], "gatsby"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_gatsby(&[], "gatsby"), 0);
+    }
+}

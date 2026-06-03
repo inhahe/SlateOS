@@ -41,4 +41,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_telegram};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/telegram-desktop"), "telegram-desktop");
+        assert_eq!(basename(r"C:\bin\telegram-desktop.exe"), "telegram-desktop.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("telegram-desktop.exe"), "telegram-desktop");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_telegram(&["--help".to_string()], "telegram-desktop"), 0);
+        assert_eq!(run_telegram(&["-h".to_string()], "telegram-desktop"), 0);
+        assert_eq!(run_telegram(&["--version".to_string()], "telegram-desktop"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_telegram(&[], "telegram-desktop"), 0);
+    }
+}

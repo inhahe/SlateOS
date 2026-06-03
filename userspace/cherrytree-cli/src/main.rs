@@ -41,4 +41,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cherrytree};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cherrytree"), "cherrytree");
+        assert_eq!(basename(r"C:\bin\cherrytree.exe"), "cherrytree.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cherrytree.exe"), "cherrytree");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cherrytree(&["--help".to_string()], "cherrytree"), 0);
+        assert_eq!(run_cherrytree(&["-h".to_string()], "cherrytree"), 0);
+        assert_eq!(run_cherrytree(&["--version".to_string()], "cherrytree"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cherrytree(&[], "cherrytree"), 0);
+    }
+}

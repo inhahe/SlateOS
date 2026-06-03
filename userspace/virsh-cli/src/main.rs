@@ -62,4 +62,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_virsh};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/virsh"), "virsh");
+        assert_eq!(basename(r"C:\bin\virsh.exe"), "virsh.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("virsh.exe"), "virsh");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_virsh(&["--help".to_string()], "virsh"), 0);
+        assert_eq!(run_virsh(&["-h".to_string()], "virsh"), 0);
+        assert_eq!(run_virsh(&["--version".to_string()], "virsh"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_virsh(&[], "virsh"), 0);
+    }
+}

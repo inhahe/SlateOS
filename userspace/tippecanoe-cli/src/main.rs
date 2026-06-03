@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_tippecanoe};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/tippecanoe"), "tippecanoe");
+        assert_eq!(basename(r"C:\bin\tippecanoe.exe"), "tippecanoe.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("tippecanoe.exe"), "tippecanoe");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_tippecanoe(&["--help".to_string()], "tippecanoe"), 0);
+        assert_eq!(run_tippecanoe(&["-h".to_string()], "tippecanoe"), 0);
+        assert_eq!(run_tippecanoe(&["--version".to_string()], "tippecanoe"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_tippecanoe(&[], "tippecanoe"), 0);
+    }
+}

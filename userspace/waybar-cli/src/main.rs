@@ -59,4 +59,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_waybar};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/waybar"), "waybar");
+        assert_eq!(basename(r"C:\bin\waybar.exe"), "waybar.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("waybar.exe"), "waybar");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_waybar(&["--help".to_string()], "waybar"), 0);
+        assert_eq!(run_waybar(&["-h".to_string()], "waybar"), 0);
+        assert_eq!(run_waybar(&["--version".to_string()], "waybar"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_waybar(&[], "waybar"), 0);
+    }
+}

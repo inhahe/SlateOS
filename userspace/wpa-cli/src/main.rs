@@ -95,4 +95,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wpa_cli};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wpa"), "wpa");
+        assert_eq!(basename(r"C:\bin\wpa.exe"), "wpa.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wpa.exe"), "wpa");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wpa_cli(&["--help".to_string()]), 0);
+        assert_eq!(run_wpa_cli(&["-h".to_string()]), 0);
+        assert_eq!(run_wpa_cli(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wpa_cli(&[]), 0);
+    }
+}

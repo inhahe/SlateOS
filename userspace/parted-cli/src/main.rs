@@ -92,6 +92,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_parted};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_parted(vec!["--help".to_string()]), 0);
+        assert_eq!(run_parted(vec!["-h".to_string()]), 0);
+        assert_eq!(run_parted(vec!["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_parted(vec![]), 0);
+    }
 }

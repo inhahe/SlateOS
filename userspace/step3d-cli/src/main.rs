@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_step3d};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/step3d"), "step3d");
+        assert_eq!(basename(r"C:\bin\step3d.exe"), "step3d.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("step3d.exe"), "step3d");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_step3d(&["--help".to_string()], "step3d"), 0);
+        assert_eq!(run_step3d(&["-h".to_string()], "step3d"), 0);
+        assert_eq!(run_step3d(&["--version".to_string()], "step3d"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_step3d(&[], "step3d"), 0);
+    }
+}

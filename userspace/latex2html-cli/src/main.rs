@@ -66,4 +66,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_latex2html};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/latex2html"), "latex2html");
+        assert_eq!(basename(r"C:\bin\latex2html.exe"), "latex2html.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("latex2html.exe"), "latex2html");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_latex2html(&["--help".to_string()], "latex2html"), 0);
+        assert_eq!(run_latex2html(&["-h".to_string()], "latex2html"), 0);
+        assert_eq!(run_latex2html(&["--version".to_string()], "latex2html"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_latex2html(&[], "latex2html"), 0);
+    }
+}

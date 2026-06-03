@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_gatus};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/gatus"), "gatus");
+        assert_eq!(basename(r"C:\bin\gatus.exe"), "gatus.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("gatus.exe"), "gatus");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_gatus(&["--help".to_string()], "gatus"), 0);
+        assert_eq!(run_gatus(&["-h".to_string()], "gatus"), 0);
+        assert_eq!(run_gatus(&["--version".to_string()], "gatus"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_gatus(&[], "gatus"), 0);
+    }
+}

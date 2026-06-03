@@ -97,6 +97,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_jaeger_component};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_jaeger_component(vec!["--help".to_string()], "jaeger"), 0);
+        assert_eq!(run_jaeger_component(vec!["-h".to_string()], "jaeger"), 0);
+        assert_eq!(run_jaeger_component(vec!["--version".to_string()], "jaeger"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_jaeger_component(vec![], "jaeger"), 0);
+    }
 }

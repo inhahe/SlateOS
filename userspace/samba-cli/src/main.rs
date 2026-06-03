@@ -133,4 +133,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_smbclient};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/samba"), "samba");
+        assert_eq!(basename(r"C:\bin\samba.exe"), "samba.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("samba.exe"), "samba");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_smbclient(&["--help".to_string()]), 0);
+        assert_eq!(run_smbclient(&["-h".to_string()]), 0);
+        assert_eq!(run_smbclient(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_smbclient(&[]), 0);
+    }
+}

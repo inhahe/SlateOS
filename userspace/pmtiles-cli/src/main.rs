@@ -74,4 +74,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_pmtiles};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/pmtiles"), "pmtiles");
+        assert_eq!(basename(r"C:\bin\pmtiles.exe"), "pmtiles.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("pmtiles.exe"), "pmtiles");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_pmtiles(&["--help".to_string()], "pmtiles"), 0);
+        assert_eq!(run_pmtiles(&["-h".to_string()], "pmtiles"), 0);
+        assert_eq!(run_pmtiles(&["--version".to_string()], "pmtiles"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_pmtiles(&[], "pmtiles"), 0);
+    }
+}

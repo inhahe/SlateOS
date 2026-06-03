@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_fusion};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/fusion"), "fusion");
+        assert_eq!(basename(r"C:\bin\fusion.exe"), "fusion.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("fusion.exe"), "fusion");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_fusion(&["--help".to_string()], "fusion"), 0);
+        assert_eq!(run_fusion(&["-h".to_string()], "fusion"), 0);
+        assert_eq!(run_fusion(&["--version".to_string()], "fusion"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_fusion(&[], "fusion"), 0);
+    }
+}

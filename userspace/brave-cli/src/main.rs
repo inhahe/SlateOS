@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_br};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/brave"), "brave");
+        assert_eq!(basename(r"C:\bin\brave.exe"), "brave.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("brave.exe"), "brave");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_br(&["--help".to_string()], "brave"), 0);
+        assert_eq!(run_br(&["-h".to_string()], "brave"), 0);
+        assert_eq!(run_br(&["--version".to_string()], "brave"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_br(&[], "brave"), 0);
+    }
+}

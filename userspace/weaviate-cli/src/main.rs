@@ -162,4 +162,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wv};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/weaviate"), "weaviate");
+        assert_eq!(basename(r"C:\bin\weaviate.exe"), "weaviate.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("weaviate.exe"), "weaviate");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wv(&["--help".to_string()], "weaviate"), 0);
+        assert_eq!(run_wv(&["-h".to_string()], "weaviate"), 0);
+        assert_eq!(run_wv(&["--version".to_string()], "weaviate"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wv(&[], "weaviate"), 0);
+    }
+}

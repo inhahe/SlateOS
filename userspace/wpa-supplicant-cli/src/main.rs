@@ -95,4 +95,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wpa_supplicant};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wpa-supplicant"), "wpa-supplicant");
+        assert_eq!(basename(r"C:\bin\wpa-supplicant.exe"), "wpa-supplicant.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wpa-supplicant.exe"), "wpa-supplicant");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wpa_supplicant(&["--help".to_string()], "wpa-supplicant"), 0);
+        assert_eq!(run_wpa_supplicant(&["-h".to_string()], "wpa-supplicant"), 0);
+        assert_eq!(run_wpa_supplicant(&["--version".to_string()], "wpa-supplicant"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wpa_supplicant(&[], "wpa-supplicant"), 0);
+    }
+}

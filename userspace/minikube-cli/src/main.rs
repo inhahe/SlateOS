@@ -110,4 +110,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_minikube};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/minikube"), "minikube");
+        assert_eq!(basename(r"C:\bin\minikube.exe"), "minikube.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("minikube.exe"), "minikube");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_minikube(&["--help".to_string()], "minikube"), 0);
+        assert_eq!(run_minikube(&["-h".to_string()], "minikube"), 0);
+        assert_eq!(run_minikube(&["--version".to_string()], "minikube"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_minikube(&[], "minikube"), 0);
+    }
+}

@@ -63,4 +63,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_odt2txt};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/odt2txt"), "odt2txt");
+        assert_eq!(basename(r"C:\bin\odt2txt.exe"), "odt2txt.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("odt2txt.exe"), "odt2txt");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_odt2txt(&["--help".to_string()], "odt2txt"), 0);
+        assert_eq!(run_odt2txt(&["-h".to_string()], "odt2txt"), 0);
+        assert_eq!(run_odt2txt(&["--version".to_string()], "odt2txt"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_odt2txt(&[], "odt2txt"), 0);
+    }
+}

@@ -66,4 +66,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_premake};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/premake"), "premake");
+        assert_eq!(basename(r"C:\bin\premake.exe"), "premake.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("premake.exe"), "premake");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_premake(&["--help".to_string()], "premake"), 0);
+        assert_eq!(run_premake(&["-h".to_string()], "premake"), 0);
+        assert_eq!(run_premake(&["--version".to_string()], "premake"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_premake(&[], "premake"), 0);
+    }
+}

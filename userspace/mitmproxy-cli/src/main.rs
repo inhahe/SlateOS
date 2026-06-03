@@ -72,4 +72,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_mitmproxy};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/mitmproxy"), "mitmproxy");
+        assert_eq!(basename(r"C:\bin\mitmproxy.exe"), "mitmproxy.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("mitmproxy.exe"), "mitmproxy");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_mitmproxy(&["--help".to_string()], "mitmproxy"), 0);
+        assert_eq!(run_mitmproxy(&["-h".to_string()], "mitmproxy"), 0);
+        assert_eq!(run_mitmproxy(&["--version".to_string()], "mitmproxy"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_mitmproxy(&[], "mitmproxy"), 0);
+    }
+}

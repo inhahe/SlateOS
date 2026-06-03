@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_id};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/indesign"), "indesign");
+        assert_eq!(basename(r"C:\bin\indesign.exe"), "indesign.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("indesign.exe"), "indesign");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_id(&["--help".to_string()], "indesign"), 0);
+        assert_eq!(run_id(&["-h".to_string()], "indesign"), 0);
+        assert_eq!(run_id(&["--version".to_string()], "indesign"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_id(&[], "indesign"), 0);
+    }
+}

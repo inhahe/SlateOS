@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sparrow};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sparrow"), "sparrow");
+        assert_eq!(basename(r"C:\bin\sparrow.exe"), "sparrow.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sparrow.exe"), "sparrow");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sparrow(&["--help".to_string()], "sparrow"), 0);
+        assert_eq!(run_sparrow(&["-h".to_string()], "sparrow"), 0);
+        assert_eq!(run_sparrow(&["--version".to_string()], "sparrow"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sparrow(&[], "sparrow"), 0);
+    }
+}

@@ -111,4 +111,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_presta};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/prestashop"), "prestashop");
+        assert_eq!(basename(r"C:\bin\prestashop.exe"), "prestashop.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("prestashop.exe"), "prestashop");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_presta(&["--help".to_string()], "prestashop"), 0);
+        assert_eq!(run_presta(&["-h".to_string()], "prestashop"), 0);
+        assert_eq!(run_presta(&["--version".to_string()], "prestashop"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_presta(&[], "prestashop"), 0);
+    }
+}

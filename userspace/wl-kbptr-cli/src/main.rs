@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wl_kbptr};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wl-kbptr"), "wl-kbptr");
+        assert_eq!(basename(r"C:\bin\wl-kbptr.exe"), "wl-kbptr.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wl-kbptr.exe"), "wl-kbptr");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wl_kbptr(&["--help".to_string()], "wl-kbptr"), 0);
+        assert_eq!(run_wl_kbptr(&["-h".to_string()], "wl-kbptr"), 0);
+        assert_eq!(run_wl_kbptr(&["--version".to_string()], "wl-kbptr"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wl_kbptr(&[], "wl-kbptr"), 0);
+    }
+}

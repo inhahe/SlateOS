@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_simulide};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/simulide"), "simulide");
+        assert_eq!(basename(r"C:\bin\simulide.exe"), "simulide.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("simulide.exe"), "simulide");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_simulide(&["--help".to_string()], "simulide"), 0);
+        assert_eq!(run_simulide(&["-h".to_string()], "simulide"), 0);
+        assert_eq!(run_simulide(&["--version".to_string()], "simulide"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_simulide(&[], "simulide"), 0);
+    }
+}

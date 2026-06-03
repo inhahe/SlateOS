@@ -191,4 +191,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ibmmq};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ibmmq"), "ibmmq");
+        assert_eq!(basename(r"C:\bin\ibmmq.exe"), "ibmmq.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ibmmq.exe"), "ibmmq");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ibmmq(&["--help".to_string()], "ibmmq"), 0);
+        assert_eq!(run_ibmmq(&["-h".to_string()], "ibmmq"), 0);
+        assert_eq!(run_ibmmq(&["--version".to_string()], "ibmmq"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ibmmq(&[], "ibmmq"), 0);
+    }
+}

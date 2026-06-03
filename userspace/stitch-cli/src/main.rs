@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_stitch};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/stitch"), "stitch");
+        assert_eq!(basename(r"C:\bin\stitch.exe"), "stitch.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("stitch.exe"), "stitch");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_stitch(&["--help".to_string()], "stitch"), 0);
+        assert_eq!(run_stitch(&["-h".to_string()], "stitch"), 0);
+        assert_eq!(run_stitch(&["--version".to_string()], "stitch"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_stitch(&[], "stitch"), 0);
+    }
+}

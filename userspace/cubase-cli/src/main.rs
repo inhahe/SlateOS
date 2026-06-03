@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_cubase};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/cubase"), "cubase");
+        assert_eq!(basename(r"C:\bin\cubase.exe"), "cubase.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("cubase.exe"), "cubase");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_cubase(&["--help".to_string()], "cubase"), 0);
+        assert_eq!(run_cubase(&["-h".to_string()], "cubase"), 0);
+        assert_eq!(run_cubase(&["--version".to_string()], "cubase"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_cubase(&[], "cubase"), 0);
+    }
+}

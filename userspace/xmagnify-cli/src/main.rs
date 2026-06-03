@@ -37,4 +37,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_xmagnify};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xmagnify"), "xmagnify");
+        assert_eq!(basename(r"C:\bin\xmagnify.exe"), "xmagnify.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xmagnify.exe"), "xmagnify");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xmagnify(&["--help".to_string()], "xmagnify"), 0);
+        assert_eq!(run_xmagnify(&["-h".to_string()], "xmagnify"), 0);
+        assert_eq!(run_xmagnify(&["--version".to_string()], "xmagnify"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xmagnify(&[], "xmagnify"), 0);
+    }
+}

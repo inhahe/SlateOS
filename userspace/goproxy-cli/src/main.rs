@@ -45,4 +45,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_goproxy};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/goproxy"), "goproxy");
+        assert_eq!(basename(r"C:\bin\goproxy.exe"), "goproxy.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("goproxy.exe"), "goproxy");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_goproxy(&["--help".to_string()], "goproxy"), 0);
+        assert_eq!(run_goproxy(&["-h".to_string()], "goproxy"), 0);
+        assert_eq!(run_goproxy(&["--version".to_string()], "goproxy"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_goproxy(&[], "goproxy"), 0);
+    }
+}

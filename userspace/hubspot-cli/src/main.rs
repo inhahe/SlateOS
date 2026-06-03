@@ -88,4 +88,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_hubspot};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/hubspot"), "hubspot");
+        assert_eq!(basename(r"C:\bin\hubspot.exe"), "hubspot.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("hubspot.exe"), "hubspot");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_hubspot(&["--help".to_string()], "hubspot"), 0);
+        assert_eq!(run_hubspot(&["-h".to_string()], "hubspot"), 0);
+        assert_eq!(run_hubspot(&["--version".to_string()], "hubspot"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_hubspot(&[], "hubspot"), 0);
+    }
+}

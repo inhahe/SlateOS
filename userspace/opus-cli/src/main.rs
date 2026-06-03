@@ -140,6 +140,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_opusenc};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/opus"), "opus");
+        assert_eq!(basename(r"C:\bin\opus.exe"), "opus.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("opus.exe"), "opus");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_opusenc(&["--help".to_string()]), 0);
+        assert_eq!(run_opusenc(&["-h".to_string()]), 0);
+        assert_eq!(run_opusenc(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_opusenc(&[]), 0);
+    }
 }

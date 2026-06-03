@@ -39,4 +39,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_font_viewer};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/font-viewer"), "font-viewer");
+        assert_eq!(basename(r"C:\bin\font-viewer.exe"), "font-viewer.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("font-viewer.exe"), "font-viewer");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_font_viewer(&["--help".to_string()], "font-viewer"), 0);
+        assert_eq!(run_font_viewer(&["-h".to_string()], "font-viewer"), 0);
+        assert_eq!(run_font_viewer(&["--version".to_string()], "font-viewer"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_font_viewer(&[], "font-viewer"), 0);
+    }
+}

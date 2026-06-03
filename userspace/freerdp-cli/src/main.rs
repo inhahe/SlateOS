@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_freerdp};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/freerdp"), "freerdp");
+        assert_eq!(basename(r"C:\bin\freerdp.exe"), "freerdp.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("freerdp.exe"), "freerdp");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_freerdp(&["--help".to_string()], "freerdp"), 0);
+        assert_eq!(run_freerdp(&["-h".to_string()], "freerdp"), 0);
+        assert_eq!(run_freerdp(&["--version".to_string()], "freerdp"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_freerdp(&[], "freerdp"), 0);
+    }
+}

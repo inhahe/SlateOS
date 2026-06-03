@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_partclone};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/partclone"), "partclone");
+        assert_eq!(basename(r"C:\bin\partclone.exe"), "partclone.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("partclone.exe"), "partclone");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_partclone(&["--help".to_string()], "partclone"), 0);
+        assert_eq!(run_partclone(&["-h".to_string()], "partclone"), 0);
+        assert_eq!(run_partclone(&["--version".to_string()], "partclone"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_partclone(&[], "partclone"), 0);
+    }
+}

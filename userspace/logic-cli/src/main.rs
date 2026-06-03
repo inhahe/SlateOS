@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_logic};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/logic"), "logic");
+        assert_eq!(basename(r"C:\bin\logic.exe"), "logic.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("logic.exe"), "logic");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_logic(&["--help".to_string()], "logic"), 0);
+        assert_eq!(run_logic(&["-h".to_string()], "logic"), 0);
+        assert_eq!(run_logic(&["--version".to_string()], "logic"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_logic(&[], "logic"), 0);
+    }
+}

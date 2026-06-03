@@ -158,4 +158,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ocaml};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/ocaml"), "ocaml");
+        assert_eq!(basename(r"C:\bin\ocaml.exe"), "ocaml.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("ocaml.exe"), "ocaml");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ocaml(&["--help".to_string()]), 0);
+        assert_eq!(run_ocaml(&["-h".to_string()]), 0);
+        assert_eq!(run_ocaml(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ocaml(&[]), 0);
+    }
+}

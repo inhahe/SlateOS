@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_nextcloud};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/nextcloud"), "nextcloud");
+        assert_eq!(basename(r"C:\bin\nextcloud.exe"), "nextcloud.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("nextcloud.exe"), "nextcloud");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_nextcloud(&["--help".to_string()], "nextcloud"), 0);
+        assert_eq!(run_nextcloud(&["-h".to_string()], "nextcloud"), 0);
+        assert_eq!(run_nextcloud(&["--version".to_string()], "nextcloud"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_nextcloud(&[], "nextcloud"), 0);
+    }
+}

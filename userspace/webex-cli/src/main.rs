@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wx};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/webex"), "webex");
+        assert_eq!(basename(r"C:\bin\webex.exe"), "webex.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("webex.exe"), "webex");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wx(&["--help".to_string()], "webex"), 0);
+        assert_eq!(run_wx(&["-h".to_string()], "webex"), 0);
+        assert_eq!(run_wx(&["--version".to_string()], "webex"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wx(&[], "webex"), 0);
+    }
+}

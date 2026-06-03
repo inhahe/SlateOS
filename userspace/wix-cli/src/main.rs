@@ -114,4 +114,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wix};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wix"), "wix");
+        assert_eq!(basename(r"C:\bin\wix.exe"), "wix.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wix.exe"), "wix");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wix(&["--help".to_string()], "wix"), 0);
+        assert_eq!(run_wix(&["-h".to_string()], "wix"), 0);
+        assert_eq!(run_wix(&["--version".to_string()], "wix"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wix(&[], "wix"), 0);
+    }
+}

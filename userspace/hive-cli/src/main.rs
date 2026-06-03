@@ -115,4 +115,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_hive};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/hive"), "hive");
+        assert_eq!(basename(r"C:\bin\hive.exe"), "hive.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("hive.exe"), "hive");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_hive(&["--help".to_string()], "hive"), 0);
+        assert_eq!(run_hive(&["-h".to_string()], "hive"), 0);
+        assert_eq!(run_hive(&["--version".to_string()], "hive"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_hive(&[], "hive"), 0);
+    }
+}

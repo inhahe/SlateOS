@@ -55,4 +55,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rmp};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rmp"), "rmp");
+        assert_eq!(basename(r"C:\bin\rmp.exe"), "rmp.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rmp.exe"), "rmp");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rmp(&["--help".to_string()], "rmp"), 0);
+        assert_eq!(run_rmp(&["-h".to_string()], "rmp"), 0);
+        assert_eq!(run_rmp(&["--version".to_string()], "rmp"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rmp(&[], "rmp"), 0);
+    }
+}

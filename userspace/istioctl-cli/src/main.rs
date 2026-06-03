@@ -88,4 +88,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_istioctl};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/istioctl"), "istioctl");
+        assert_eq!(basename(r"C:\bin\istioctl.exe"), "istioctl.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("istioctl.exe"), "istioctl");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_istioctl(&["--help".to_string()], "istioctl"), 0);
+        assert_eq!(run_istioctl(&["-h".to_string()], "istioctl"), 0);
+        assert_eq!(run_istioctl(&["--version".to_string()], "istioctl"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_istioctl(&[], "istioctl"), 0);
+    }
+}

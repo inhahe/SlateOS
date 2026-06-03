@@ -75,4 +75,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_materialx};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/materialx"), "materialx");
+        assert_eq!(basename(r"C:\bin\materialx.exe"), "materialx.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("materialx.exe"), "materialx");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_materialx(&["--help".to_string()], "materialx"), 0);
+        assert_eq!(run_materialx(&["-h".to_string()], "materialx"), 0);
+        assert_eq!(run_materialx(&["--version".to_string()], "materialx"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_materialx(&[], "materialx"), 0);
+    }
+}

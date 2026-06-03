@@ -75,4 +75,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_smartctl};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/smartmontools"), "smartmontools");
+        assert_eq!(basename(r"C:\bin\smartmontools.exe"), "smartmontools.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("smartmontools.exe"), "smartmontools");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_smartctl(&["--help".to_string()], "smartmontools"), 0);
+        assert_eq!(run_smartctl(&["-h".to_string()], "smartmontools"), 0);
+        assert_eq!(run_smartctl(&["--version".to_string()], "smartmontools"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_smartctl(&[], "smartmontools"), 0);
+    }
+}

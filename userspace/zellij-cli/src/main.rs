@@ -97,4 +97,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_zellij};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/zellij"), "zellij");
+        assert_eq!(basename(r"C:\bin\zellij.exe"), "zellij.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("zellij.exe"), "zellij");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_zellij(&["--help".to_string()], "zellij"), 0);
+        assert_eq!(run_zellij(&["-h".to_string()], "zellij"), 0);
+        assert_eq!(run_zellij(&["--version".to_string()], "zellij"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_zellij(&[], "zellij"), 0);
+    }
+}

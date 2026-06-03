@@ -46,4 +46,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_kmousetool};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/kmousetool"), "kmousetool");
+        assert_eq!(basename(r"C:\bin\kmousetool.exe"), "kmousetool.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("kmousetool.exe"), "kmousetool");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_kmousetool(&["--help".to_string()], "kmousetool"), 0);
+        assert_eq!(run_kmousetool(&["-h".to_string()], "kmousetool"), 0);
+        assert_eq!(run_kmousetool(&["--version".to_string()], "kmousetool"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_kmousetool(&[], "kmousetool"), 0);
+    }
+}

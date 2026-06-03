@@ -78,4 +78,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_gschem};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/geda"), "geda");
+        assert_eq!(basename(r"C:\bin\geda.exe"), "geda.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("geda.exe"), "geda");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_gschem(&["--help".to_string()], "geda"), 0);
+        assert_eq!(run_gschem(&["-h".to_string()], "geda"), 0);
+        assert_eq!(run_gschem(&["--version".to_string()], "geda"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_gschem(&[], "geda"), 0);
+    }
+}

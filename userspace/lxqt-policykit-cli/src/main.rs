@@ -32,4 +32,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_agent};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/lxqt-policykit"), "lxqt-policykit");
+        assert_eq!(basename(r"C:\bin\lxqt-policykit.exe"), "lxqt-policykit.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("lxqt-policykit.exe"), "lxqt-policykit");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_agent(&["--help".to_string()], "lxqt-policykit"), 0);
+        assert_eq!(run_agent(&["-h".to_string()], "lxqt-policykit"), 0);
+        assert_eq!(run_agent(&["--version".to_string()], "lxqt-policykit"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_agent(&[], "lxqt-policykit"), 0);
+    }
+}

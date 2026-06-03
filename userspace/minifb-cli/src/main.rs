@@ -69,4 +69,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_minifb};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/minifb"), "minifb");
+        assert_eq!(basename(r"C:\bin\minifb.exe"), "minifb.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("minifb.exe"), "minifb");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_minifb(&["--help".to_string()], "minifb"), 0);
+        assert_eq!(run_minifb(&["-h".to_string()], "minifb"), 0);
+        assert_eq!(run_minifb(&["--version".to_string()], "minifb"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_minifb(&[], "minifb"), 0);
+    }
+}

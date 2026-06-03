@@ -106,6 +106,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_r};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_r(vec!["--help".to_string()]), 0);
+        assert_eq!(run_r(vec!["-h".to_string()]), 0);
+        assert_eq!(run_r(vec!["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_r(vec![]), 0);
+    }
 }

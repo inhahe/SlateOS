@@ -45,4 +45,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sqlitebrowser};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sqlitebrowser"), "sqlitebrowser");
+        assert_eq!(basename(r"C:\bin\sqlitebrowser.exe"), "sqlitebrowser.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sqlitebrowser.exe"), "sqlitebrowser");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sqlitebrowser(&["--help".to_string()], "sqlitebrowser"), 0);
+        assert_eq!(run_sqlitebrowser(&["-h".to_string()], "sqlitebrowser"), 0);
+        assert_eq!(run_sqlitebrowser(&["--version".to_string()], "sqlitebrowser"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sqlitebrowser(&[], "sqlitebrowser"), 0);
+    }
+}

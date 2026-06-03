@@ -39,4 +39,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_system_log};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/system-log-viewer"), "system-log-viewer");
+        assert_eq!(basename(r"C:\bin\system-log-viewer.exe"), "system-log-viewer.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("system-log-viewer.exe"), "system-log-viewer");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_system_log(&["--help".to_string()], "system-log-viewer"), 0);
+        assert_eq!(run_system_log(&["-h".to_string()], "system-log-viewer"), 0);
+        assert_eq!(run_system_log(&["--version".to_string()], "system-log-viewer"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_system_log(&[], "system-log-viewer"), 0);
+    }
+}

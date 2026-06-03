@@ -53,4 +53,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_headscale};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/headscale"), "headscale");
+        assert_eq!(basename(r"C:\bin\headscale.exe"), "headscale.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("headscale.exe"), "headscale");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_headscale(&["--help".to_string()], "headscale"), 0);
+        assert_eq!(run_headscale(&["-h".to_string()], "headscale"), 0);
+        assert_eq!(run_headscale(&["--version".to_string()], "headscale"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_headscale(&[], "headscale"), 0);
+    }
+}

@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_qt6ct};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/qt6ct"), "qt6ct");
+        assert_eq!(basename(r"C:\bin\qt6ct.exe"), "qt6ct.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("qt6ct.exe"), "qt6ct");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_qt6ct(&["--help".to_string()], "qt6ct"), 0);
+        assert_eq!(run_qt6ct(&["-h".to_string()], "qt6ct"), 0);
+        assert_eq!(run_qt6ct(&["--version".to_string()], "qt6ct"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_qt6ct(&[], "qt6ct"), 0);
+    }
+}

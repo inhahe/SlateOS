@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_naemon};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/naemon"), "naemon");
+        assert_eq!(basename(r"C:\bin\naemon.exe"), "naemon.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("naemon.exe"), "naemon");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_naemon(&["--help".to_string()], "naemon"), 0);
+        assert_eq!(run_naemon(&["-h".to_string()], "naemon"), 0);
+        assert_eq!(run_naemon(&["--version".to_string()], "naemon"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_naemon(&[], "naemon"), 0);
+    }
+}

@@ -68,4 +68,18 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{run_keras};
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_keras(&["--help".to_string()]), 0);
+        assert_eq!(run_keras(&["-h".to_string()]), 0);
+        assert_eq!(run_keras(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_keras(&[]), 0);
+    }
+}

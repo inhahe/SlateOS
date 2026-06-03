@@ -159,6 +159,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_jack_connect};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_jack_connect(vec!["--help".to_string()], "jack2"), 0);
+        assert_eq!(run_jack_connect(vec!["-h".to_string()], "jack2"), 0);
+        assert_eq!(run_jack_connect(vec!["--version".to_string()], "jack2"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_jack_connect(vec![], "jack2"), 0);
+    }
 }

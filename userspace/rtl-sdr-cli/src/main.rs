@@ -107,4 +107,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_rtl};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/rtl-sdr"), "rtl-sdr");
+        assert_eq!(basename(r"C:\bin\rtl-sdr.exe"), "rtl-sdr.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("rtl-sdr.exe"), "rtl-sdr");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_rtl(&["--help".to_string()], "rtl-sdr"), 0);
+        assert_eq!(run_rtl(&["-h".to_string()], "rtl-sdr"), 0);
+        assert_eq!(run_rtl(&["--version".to_string()], "rtl-sdr"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_rtl(&[], "rtl-sdr"), 0);
+    }
+}

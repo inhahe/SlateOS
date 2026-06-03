@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wayst};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wayst"), "wayst");
+        assert_eq!(basename(r"C:\bin\wayst.exe"), "wayst.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wayst.exe"), "wayst");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wayst(&["--help".to_string()], "wayst"), 0);
+        assert_eq!(run_wayst(&["-h".to_string()], "wayst"), 0);
+        assert_eq!(run_wayst(&["--version".to_string()], "wayst"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wayst(&[], "wayst"), 0);
+    }
+}

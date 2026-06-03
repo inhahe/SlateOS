@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_qt5ct};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/qt5ct"), "qt5ct");
+        assert_eq!(basename(r"C:\bin\qt5ct.exe"), "qt5ct.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("qt5ct.exe"), "qt5ct");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_qt5ct(&["--help".to_string()], "qt5ct"), 0);
+        assert_eq!(run_qt5ct(&["-h".to_string()], "qt5ct"), 0);
+        assert_eq!(run_qt5ct(&["--version".to_string()], "qt5ct"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_qt5ct(&[], "qt5ct"), 0);
+    }
+}

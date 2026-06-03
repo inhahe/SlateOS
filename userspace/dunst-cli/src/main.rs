@@ -88,4 +88,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_dunst};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/dunst"), "dunst");
+        assert_eq!(basename(r"C:\bin\dunst.exe"), "dunst.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("dunst.exe"), "dunst");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_dunst(&["--help".to_string()], "dunst"), 0);
+        assert_eq!(run_dunst(&["-h".to_string()], "dunst"), 0);
+        assert_eq!(run_dunst(&["--version".to_string()], "dunst"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_dunst(&[], "dunst"), 0);
+    }
+}

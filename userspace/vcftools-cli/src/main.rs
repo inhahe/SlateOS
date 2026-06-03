@@ -55,4 +55,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_vcftools};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/vcftools"), "vcftools");
+        assert_eq!(basename(r"C:\bin\vcftools.exe"), "vcftools.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("vcftools.exe"), "vcftools");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_vcftools(&["--help".to_string()], "vcftools"), 0);
+        assert_eq!(run_vcftools(&["-h".to_string()], "vcftools"), 0);
+        assert_eq!(run_vcftools(&["--version".to_string()], "vcftools"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_vcftools(&[], "vcftools"), 0);
+    }
+}

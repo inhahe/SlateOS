@@ -67,4 +67,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_macroquad};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/macroquad"), "macroquad");
+        assert_eq!(basename(r"C:\bin\macroquad.exe"), "macroquad.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("macroquad.exe"), "macroquad");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_macroquad(&["--help".to_string()], "macroquad"), 0);
+        assert_eq!(run_macroquad(&["-h".to_string()], "macroquad"), 0);
+        assert_eq!(run_macroquad(&["--version".to_string()], "macroquad"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_macroquad(&[], "macroquad"), 0);
+    }
+}

@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_sl};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/streamlabs"), "streamlabs");
+        assert_eq!(basename(r"C:\bin\streamlabs.exe"), "streamlabs.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("streamlabs.exe"), "streamlabs");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sl(&["--help".to_string()], "streamlabs"), 0);
+        assert_eq!(run_sl(&["-h".to_string()], "streamlabs"), 0);
+        assert_eq!(run_sl(&["--version".to_string()], "streamlabs"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sl(&[], "streamlabs"), 0);
+    }
+}

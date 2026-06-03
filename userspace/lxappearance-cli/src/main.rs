@@ -39,4 +39,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_lxappearance};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/lxappearance"), "lxappearance");
+        assert_eq!(basename(r"C:\bin\lxappearance.exe"), "lxappearance.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("lxappearance.exe"), "lxappearance");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_lxappearance(&["--help".to_string()], "lxappearance"), 0);
+        assert_eq!(run_lxappearance(&["-h".to_string()], "lxappearance"), 0);
+        assert_eq!(run_lxappearance(&["--version".to_string()], "lxappearance"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_lxappearance(&[], "lxappearance"), 0);
+    }
+}

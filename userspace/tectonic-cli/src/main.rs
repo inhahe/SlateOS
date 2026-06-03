@@ -51,4 +51,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_tectonic};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/tectonic"), "tectonic");
+        assert_eq!(basename(r"C:\bin\tectonic.exe"), "tectonic.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("tectonic.exe"), "tectonic");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_tectonic(&["--help".to_string()], "tectonic"), 0);
+        assert_eq!(run_tectonic(&["-h".to_string()], "tectonic"), 0);
+        assert_eq!(run_tectonic(&["--version".to_string()], "tectonic"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_tectonic(&[], "tectonic"), 0);
+    }
+}

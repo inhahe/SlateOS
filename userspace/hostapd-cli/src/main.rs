@@ -104,4 +104,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_hostapd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/hostapd"), "hostapd");
+        assert_eq!(basename(r"C:\bin\hostapd.exe"), "hostapd.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("hostapd.exe"), "hostapd");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_hostapd(&["--help".to_string()]), 0);
+        assert_eq!(run_hostapd(&["-h".to_string()]), 0);
+        assert_eq!(run_hostapd(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_hostapd(&[]), 0);
+    }
+}

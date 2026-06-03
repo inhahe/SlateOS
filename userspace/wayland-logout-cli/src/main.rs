@@ -38,4 +38,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wayland_logout};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wayland-logout"), "wayland-logout");
+        assert_eq!(basename(r"C:\bin\wayland-logout.exe"), "wayland-logout.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wayland-logout.exe"), "wayland-logout");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wayland_logout(&["--help".to_string()], "wayland-logout"), 0);
+        assert_eq!(run_wayland_logout(&["-h".to_string()], "wayland-logout"), 0);
+        assert_eq!(run_wayland_logout(&["--version".to_string()], "wayland-logout"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wayland_logout(&[], "wayland-logout"), 0);
+    }
+}

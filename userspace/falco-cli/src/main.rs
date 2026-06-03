@@ -107,4 +107,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_falco};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/falco"), "falco");
+        assert_eq!(basename(r"C:\bin\falco.exe"), "falco.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("falco.exe"), "falco");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_falco(&["--help".to_string()], "falco"), 0);
+        assert_eq!(run_falco(&["-h".to_string()], "falco"), 0);
+        assert_eq!(run_falco(&["--version".to_string()], "falco"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_falco(&[], "falco"), 0);
+    }
+}

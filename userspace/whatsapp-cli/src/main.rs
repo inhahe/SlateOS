@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wa};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/whatsapp"), "whatsapp");
+        assert_eq!(basename(r"C:\bin\whatsapp.exe"), "whatsapp.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("whatsapp.exe"), "whatsapp");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wa(&["--help".to_string()], "whatsapp"), 0);
+        assert_eq!(run_wa(&["-h".to_string()], "whatsapp"), 0);
+        assert_eq!(run_wa(&["--version".to_string()], "whatsapp"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wa(&[], "whatsapp"), 0);
+    }
+}

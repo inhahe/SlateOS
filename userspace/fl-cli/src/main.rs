@@ -42,4 +42,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_fl};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/fl"), "fl");
+        assert_eq!(basename(r"C:\bin\fl.exe"), "fl.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("fl.exe"), "fl");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_fl(&["--help".to_string()], "fl"), 0);
+        assert_eq!(run_fl(&["-h".to_string()], "fl"), 0);
+        assert_eq!(run_fl(&["--version".to_string()], "fl"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_fl(&[], "fl"), 0);
+    }
+}

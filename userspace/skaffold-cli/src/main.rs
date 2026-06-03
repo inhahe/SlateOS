@@ -80,4 +80,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_skaffold};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/skaffold"), "skaffold");
+        assert_eq!(basename(r"C:\bin\skaffold.exe"), "skaffold.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("skaffold.exe"), "skaffold");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_skaffold(&["--help".to_string()], "skaffold"), 0);
+        assert_eq!(run_skaffold(&["-h".to_string()], "skaffold"), 0);
+        assert_eq!(run_skaffold(&["--version".to_string()], "skaffold"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_skaffold(&[], "skaffold"), 0);
+    }
+}

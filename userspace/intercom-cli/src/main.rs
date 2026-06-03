@@ -98,4 +98,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_intercom};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/intercom"), "intercom");
+        assert_eq!(basename(r"C:\bin\intercom.exe"), "intercom.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("intercom.exe"), "intercom");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_intercom(&["--help".to_string()], "intercom"), 0);
+        assert_eq!(run_intercom(&["-h".to_string()], "intercom"), 0);
+        assert_eq!(run_intercom(&["--version".to_string()], "intercom"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_intercom(&[], "intercom"), 0);
+    }
+}

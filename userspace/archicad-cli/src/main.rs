@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_archicad};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/archicad"), "archicad");
+        assert_eq!(basename(r"C:\bin\archicad.exe"), "archicad.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("archicad.exe"), "archicad");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_archicad(&["--help".to_string()], "archicad"), 0);
+        assert_eq!(run_archicad(&["-h".to_string()], "archicad"), 0);
+        assert_eq!(run_archicad(&["--version".to_string()], "archicad"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_archicad(&[], "archicad"), 0);
+    }
+}

@@ -40,4 +40,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_krdc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/krdc"), "krdc");
+        assert_eq!(basename(r"C:\bin\krdc.exe"), "krdc.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("krdc.exe"), "krdc");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_krdc(&["--help".to_string()], "krdc"), 0);
+        assert_eq!(run_krdc(&["-h".to_string()], "krdc"), 0);
+        assert_eq!(run_krdc(&["--version".to_string()], "krdc"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_krdc(&[], "krdc"), 0);
+    }
+}

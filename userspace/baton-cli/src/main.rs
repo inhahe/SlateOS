@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_baton};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/baton"), "baton");
+        assert_eq!(basename(r"C:\bin\baton.exe"), "baton.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("baton.exe"), "baton");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_baton(&["--help".to_string()], "baton"), 0);
+        assert_eq!(run_baton(&["-h".to_string()], "baton"), 0);
+        assert_eq!(run_baton(&["--version".to_string()], "baton"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_baton(&[], "baton"), 0);
+    }
+}

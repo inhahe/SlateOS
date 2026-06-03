@@ -48,4 +48,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_claws_mail};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/claws-mail"), "claws-mail");
+        assert_eq!(basename(r"C:\bin\claws-mail.exe"), "claws-mail.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("claws-mail.exe"), "claws-mail");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_claws_mail(&["--help".to_string()], "claws-mail"), 0);
+        assert_eq!(run_claws_mail(&["-h".to_string()], "claws-mail"), 0);
+        assert_eq!(run_claws_mail(&["--version".to_string()], "claws-mail"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_claws_mail(&[], "claws-mail"), 0);
+    }
+}

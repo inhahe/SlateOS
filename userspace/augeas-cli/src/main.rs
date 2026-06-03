@@ -66,4 +66,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_augtool};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/augeas"), "augeas");
+        assert_eq!(basename(r"C:\bin\augeas.exe"), "augeas.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("augeas.exe"), "augeas");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_augtool(&["--help".to_string()], "augeas"), 0);
+        assert_eq!(run_augtool(&["-h".to_string()], "augeas"), 0);
+        assert_eq!(run_augtool(&["--version".to_string()], "augeas"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_augtool(&[], "augeas"), 0);
+    }
+}

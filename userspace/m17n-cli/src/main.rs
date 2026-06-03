@@ -67,4 +67,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_m17n_db};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/m17n"), "m17n");
+        assert_eq!(basename(r"C:\bin\m17n.exe"), "m17n.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("m17n.exe"), "m17n");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_m17n_db(&["--help".to_string()], "m17n"), 0);
+        assert_eq!(run_m17n_db(&["-h".to_string()], "m17n"), 0);
+        assert_eq!(run_m17n_db(&["--version".to_string()], "m17n"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_m17n_db(&[], "m17n"), 0);
+    }
+}

@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_instatus};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/instatus"), "instatus");
+        assert_eq!(basename(r"C:\bin\instatus.exe"), "instatus.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("instatus.exe"), "instatus");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_instatus(&["--help".to_string()], "instatus"), 0);
+        assert_eq!(run_instatus(&["-h".to_string()], "instatus"), 0);
+        assert_eq!(run_instatus(&["--version".to_string()], "instatus"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_instatus(&[], "instatus"), 0);
+    }
+}

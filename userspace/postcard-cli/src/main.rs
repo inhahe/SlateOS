@@ -43,4 +43,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_postcard};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/postcard"), "postcard");
+        assert_eq!(basename(r"C:\bin\postcard.exe"), "postcard.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("postcard.exe"), "postcard");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_postcard(&["--help".to_string()], "postcard"), 0);
+        assert_eq!(run_postcard(&["-h".to_string()], "postcard"), 0);
+        assert_eq!(run_postcard(&["--version".to_string()], "postcard"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_postcard(&[], "postcard"), 0);
+    }
+}

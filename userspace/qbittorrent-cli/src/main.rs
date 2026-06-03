@@ -58,4 +58,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_qbittorrent};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/qbittorrent"), "qbittorrent");
+        assert_eq!(basename(r"C:\bin\qbittorrent.exe"), "qbittorrent.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("qbittorrent.exe"), "qbittorrent");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_qbittorrent(&["--help".to_string()], "qbittorrent"), 0);
+        assert_eq!(run_qbittorrent(&["-h".to_string()], "qbittorrent"), 0);
+        assert_eq!(run_qbittorrent(&["--version".to_string()], "qbittorrent"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_qbittorrent(&[], "qbittorrent"), 0);
+    }
+}

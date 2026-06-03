@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_monero};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/monero"), "monero");
+        assert_eq!(basename(r"C:\bin\monero.exe"), "monero.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("monero.exe"), "monero");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_monero(&["--help".to_string()], "monero"), 0);
+        assert_eq!(run_monero(&["-h".to_string()], "monero"), 0);
+        assert_eq!(run_monero(&["--version".to_string()], "monero"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_monero(&[], "monero"), 0);
+    }
+}

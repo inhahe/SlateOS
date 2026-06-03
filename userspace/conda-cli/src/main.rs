@@ -156,4 +156,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_conda};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/conda"), "conda");
+        assert_eq!(basename(r"C:\bin\conda.exe"), "conda.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("conda.exe"), "conda");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_conda(&["--help".to_string()], "conda"), 0);
+        assert_eq!(run_conda(&["-h".to_string()], "conda"), 0);
+        assert_eq!(run_conda(&["--version".to_string()], "conda"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_conda(&[], "conda"), 0);
+    }
+}

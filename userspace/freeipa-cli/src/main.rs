@@ -71,4 +71,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_freeipa};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/freeipa"), "freeipa");
+        assert_eq!(basename(r"C:\bin\freeipa.exe"), "freeipa.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("freeipa.exe"), "freeipa");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_freeipa(&["--help".to_string()], "freeipa"), 0);
+        assert_eq!(run_freeipa(&["-h".to_string()], "freeipa"), 0);
+        assert_eq!(run_freeipa(&["--version".to_string()], "freeipa"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_freeipa(&[], "freeipa"), 0);
+    }
+}

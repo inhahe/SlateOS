@@ -59,4 +59,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_st};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/sublime"), "sublime");
+        assert_eq!(basename(r"C:\bin\sublime.exe"), "sublime.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("sublime.exe"), "sublime");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_st(&["--help".to_string()], "sublime"), 0);
+        assert_eq!(run_st(&["-h".to_string()], "sublime"), 0);
+        assert_eq!(run_st(&["--version".to_string()], "sublime"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_st(&[], "sublime"), 0);
+    }
+}

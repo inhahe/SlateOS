@@ -147,4 +147,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_chronosphere};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/chronosphere"), "chronosphere");
+        assert_eq!(basename(r"C:\bin\chronosphere.exe"), "chronosphere.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("chronosphere.exe"), "chronosphere");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_chronosphere(&["--help".to_string()], "chronosphere"), 0);
+        assert_eq!(run_chronosphere(&["-h".to_string()], "chronosphere"), 0);
+        assert_eq!(run_chronosphere(&["--version".to_string()], "chronosphere"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_chronosphere(&[], "chronosphere"), 0);
+    }
+}

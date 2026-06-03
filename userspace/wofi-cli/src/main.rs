@@ -47,4 +47,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wofi};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wofi"), "wofi");
+        assert_eq!(basename(r"C:\bin\wofi.exe"), "wofi.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wofi.exe"), "wofi");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wofi(&["--help".to_string()], "wofi"), 0);
+        assert_eq!(run_wofi(&["-h".to_string()], "wofi"), 0);
+        assert_eq!(run_wofi(&["--version".to_string()], "wofi"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wofi(&[], "wofi"), 0);
+    }
+}

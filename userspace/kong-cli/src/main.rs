@@ -52,4 +52,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_kong};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/kong"), "kong");
+        assert_eq!(basename(r"C:\bin\kong.exe"), "kong.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("kong.exe"), "kong");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_kong(&["--help".to_string()], "kong"), 0);
+        assert_eq!(run_kong(&["-h".to_string()], "kong"), 0);
+        assert_eq!(run_kong(&["--version".to_string()], "kong"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_kong(&[], "kong"), 0);
+    }
+}

@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_aerc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/aerc"), "aerc");
+        assert_eq!(basename(r"C:\bin\aerc.exe"), "aerc.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("aerc.exe"), "aerc");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_aerc(&["--help".to_string()], "aerc"), 0);
+        assert_eq!(run_aerc(&["-h".to_string()], "aerc"), 0);
+        assert_eq!(run_aerc(&["--version".to_string()], "aerc"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_aerc(&[], "aerc"), 0);
+    }
+}

@@ -88,4 +88,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_yazi};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/yazi"), "yazi");
+        assert_eq!(basename(r"C:\bin\yazi.exe"), "yazi.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("yazi.exe"), "yazi");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_yazi(&["--help".to_string()], "yazi"), 0);
+        assert_eq!(run_yazi(&["-h".to_string()], "yazi"), 0);
+        assert_eq!(run_yazi(&["--version".to_string()], "yazi"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_yazi(&[], "yazi"), 0);
+    }
+}

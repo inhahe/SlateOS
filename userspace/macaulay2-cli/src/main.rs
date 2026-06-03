@@ -64,4 +64,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_m2};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/macaulay2"), "macaulay2");
+        assert_eq!(basename(r"C:\bin\macaulay2.exe"), "macaulay2.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("macaulay2.exe"), "macaulay2");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_m2(&["--help".to_string()], "macaulay2"), 0);
+        assert_eq!(run_m2(&["-h".to_string()], "macaulay2"), 0);
+        assert_eq!(run_m2(&["--version".to_string()], "macaulay2"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_m2(&[], "macaulay2"), 0);
+    }
+}

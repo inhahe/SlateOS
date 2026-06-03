@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_ms};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/microstation"), "microstation");
+        assert_eq!(basename(r"C:\bin\microstation.exe"), "microstation.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("microstation.exe"), "microstation");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_ms(&["--help".to_string()], "microstation"), 0);
+        assert_eq!(run_ms(&["-h".to_string()], "microstation"), 0);
+        assert_eq!(run_ms(&["--version".to_string()], "microstation"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_ms(&[], "microstation"), 0);
+    }
+}

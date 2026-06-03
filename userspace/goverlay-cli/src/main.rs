@@ -37,4 +37,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_goverlay};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/goverlay"), "goverlay");
+        assert_eq!(basename(r"C:\bin\goverlay.exe"), "goverlay.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("goverlay.exe"), "goverlay");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_goverlay(&["--help".to_string()], "goverlay"), 0);
+        assert_eq!(run_goverlay(&["-h".to_string()], "goverlay"), 0);
+        assert_eq!(run_goverlay(&["--version".to_string()], "goverlay"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_goverlay(&[], "goverlay"), 0);
+    }
+}

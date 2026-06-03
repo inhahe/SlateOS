@@ -35,4 +35,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_blueberry};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/blueberry"), "blueberry");
+        assert_eq!(basename(r"C:\bin\blueberry.exe"), "blueberry.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("blueberry.exe"), "blueberry");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_blueberry(&["--help".to_string()], "blueberry"), 0);
+        assert_eq!(run_blueberry(&["-h".to_string()], "blueberry"), 0);
+        assert_eq!(run_blueberry(&["--version".to_string()], "blueberry"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_blueberry(&[], "blueberry"), 0);
+    }
+}

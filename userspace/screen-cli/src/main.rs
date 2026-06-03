@@ -76,6 +76,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_screen};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_screen(vec!["--help".to_string()]), 0);
+        assert_eq!(run_screen(vec!["-h".to_string()]), 0);
+        assert_eq!(run_screen(vec!["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_screen(vec![]), 0);
+    }
 }

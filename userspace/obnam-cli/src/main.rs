@@ -65,4 +65,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_obnam};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/obnam"), "obnam");
+        assert_eq!(basename(r"C:\bin\obnam.exe"), "obnam.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("obnam.exe"), "obnam");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_obnam(&["--help".to_string()], "obnam"), 0);
+        assert_eq!(run_obnam(&["-h".to_string()], "obnam"), 0);
+        assert_eq!(run_obnam(&["--version".to_string()], "obnam"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_obnam(&[], "obnam"), 0);
+    }
+}

@@ -148,6 +148,17 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{run_sg};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_sg(vec!["--help".to_string()]), 0);
+        assert_eq!(run_sg(vec!["-h".to_string()]), 0);
+        assert_eq!(run_sg(vec!["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_sg(vec![]), 0);
+    }
 }

@@ -37,4 +37,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_update_mime};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/shared-mime-info"), "shared-mime-info");
+        assert_eq!(basename(r"C:\bin\shared-mime-info.exe"), "shared-mime-info.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("shared-mime-info.exe"), "shared-mime-info");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_update_mime(&["--help".to_string()], "shared-mime-info"), 0);
+        assert_eq!(run_update_mime(&["-h".to_string()], "shared-mime-info"), 0);
+        assert_eq!(run_update_mime(&["--version".to_string()], "shared-mime-info"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_update_mime(&[], "shared-mime-info"), 0);
+    }
+}

@@ -72,4 +72,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_update};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xdg-user-dirs"), "xdg-user-dirs");
+        assert_eq!(basename(r"C:\bin\xdg-user-dirs.exe"), "xdg-user-dirs.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xdg-user-dirs.exe"), "xdg-user-dirs");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_update(&["--help".to_string()], "xdg-user-dirs"), 0);
+        assert_eq!(run_update(&["-h".to_string()], "xdg-user-dirs"), 0);
+        assert_eq!(run_update(&["--version".to_string()], "xdg-user-dirs"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_update(&[], "xdg-user-dirs"), 0);
+    }
+}

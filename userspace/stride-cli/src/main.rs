@@ -50,4 +50,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_stride};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/stride"), "stride");
+        assert_eq!(basename(r"C:\bin\stride.exe"), "stride.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("stride.exe"), "stride");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_stride(&["--help".to_string()], "stride"), 0);
+        assert_eq!(run_stride(&["-h".to_string()], "stride"), 0);
+        assert_eq!(run_stride(&["--version".to_string()], "stride"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_stride(&[], "stride"), 0);
+    }
+}

@@ -79,4 +79,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_backuppc};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/backuppc"), "backuppc");
+        assert_eq!(basename(r"C:\bin\backuppc.exe"), "backuppc.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("backuppc.exe"), "backuppc");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_backuppc(&["--help".to_string()], "backuppc"), 0);
+        assert_eq!(run_backuppc(&["-h".to_string()], "backuppc"), 0);
+        assert_eq!(run_backuppc(&["--version".to_string()], "backuppc"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_backuppc(&[], "backuppc"), 0);
+    }
+}

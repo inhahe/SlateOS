@@ -85,4 +85,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_wlrctl};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/wlrctl"), "wlrctl");
+        assert_eq!(basename(r"C:\bin\wlrctl.exe"), "wlrctl.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("wlrctl.exe"), "wlrctl");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_wlrctl(&["--help".to_string()], "wlrctl"), 0);
+        assert_eq!(run_wlrctl(&["-h".to_string()], "wlrctl"), 0);
+        assert_eq!(run_wlrctl(&["--version".to_string()], "wlrctl"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_wlrctl(&[], "wlrctl"), 0);
+    }
+}

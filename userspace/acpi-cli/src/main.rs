@@ -107,6 +107,30 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
+    use super::{basename, strip_ext, run_acpi};
+
     #[test]
-    fn test_basic() { assert!(true); }
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/acpi"), "acpi");
+        assert_eq!(basename(r"C:\bin\acpi.exe"), "acpi.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("acpi.exe"), "acpi");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_acpi(&["--help".to_string()]), 0);
+        assert_eq!(run_acpi(&["-h".to_string()]), 0);
+        assert_eq!(run_acpi(&["--version".to_string()]), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_acpi(&[]), 0);
+    }
 }

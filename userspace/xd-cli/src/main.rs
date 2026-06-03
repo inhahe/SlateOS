@@ -52,4 +52,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_xd};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/xd"), "xd");
+        assert_eq!(basename(r"C:\bin\xd.exe"), "xd.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("xd.exe"), "xd");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_xd(&["--help".to_string()], "xd"), 0);
+        assert_eq!(run_xd(&["-h".to_string()], "xd"), 0);
+        assert_eq!(run_xd(&["--version".to_string()], "xd"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_xd(&[], "xd"), 0);
+    }
+}

@@ -67,4 +67,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_mcfly};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/mcfly"), "mcfly");
+        assert_eq!(basename(r"C:\bin\mcfly.exe"), "mcfly.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("mcfly.exe"), "mcfly");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_mcfly(&["--help".to_string()], "mcfly"), 0);
+        assert_eq!(run_mcfly(&["-h".to_string()], "mcfly"), 0);
+        assert_eq!(run_mcfly(&["--version".to_string()], "mcfly"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_mcfly(&[], "mcfly"), 0);
+    }
+}

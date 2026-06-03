@@ -44,4 +44,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_kstars};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/kstars"), "kstars");
+        assert_eq!(basename(r"C:\bin\kstars.exe"), "kstars.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("kstars.exe"), "kstars");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_kstars(&["--help".to_string()], "kstars"), 0);
+        assert_eq!(run_kstars(&["-h".to_string()], "kstars"), 0);
+        assert_eq!(run_kstars(&["--version".to_string()], "kstars"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_kstars(&[], "kstars"), 0);
+    }
+}

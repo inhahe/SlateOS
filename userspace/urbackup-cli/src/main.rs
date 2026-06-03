@@ -89,4 +89,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_urbackup_client};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/urbackup"), "urbackup");
+        assert_eq!(basename(r"C:\bin\urbackup.exe"), "urbackup.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("urbackup.exe"), "urbackup");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_urbackup_client(&["--help".to_string()], "urbackup"), 0);
+        assert_eq!(run_urbackup_client(&["-h".to_string()], "urbackup"), 0);
+        assert_eq!(run_urbackup_client(&["--version".to_string()], "urbackup"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_urbackup_client(&[], "urbackup"), 0);
+    }
+}

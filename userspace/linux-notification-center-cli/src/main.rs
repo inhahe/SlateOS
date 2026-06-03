@@ -49,4 +49,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_notification_center};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/linux-notification-center"), "linux-notification-center");
+        assert_eq!(basename(r"C:\bin\linux-notification-center.exe"), "linux-notification-center.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("linux-notification-center.exe"), "linux-notification-center");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_notification_center(&["--help".to_string()], "linux-notification-center"), 0);
+        assert_eq!(run_notification_center(&["-h".to_string()], "linux-notification-center"), 0);
+        assert_eq!(run_notification_center(&["--version".to_string()], "linux-notification-center"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_notification_center(&[], "linux-notification-center"), 0);
+    }
+}

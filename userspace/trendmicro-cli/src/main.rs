@@ -48,4 +48,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_tm};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/trendmicro"), "trendmicro");
+        assert_eq!(basename(r"C:\bin\trendmicro.exe"), "trendmicro.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("trendmicro.exe"), "trendmicro");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_tm(&["--help".to_string()], "trendmicro"), 0);
+        assert_eq!(run_tm(&["-h".to_string()], "trendmicro"), 0);
+        assert_eq!(run_tm(&["--version".to_string()], "trendmicro"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_tm(&[], "trendmicro"), 0);
+    }
+}

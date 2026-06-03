@@ -80,4 +80,31 @@ fn main() {
 }
 
 #[cfg(test)]
-mod tests { #[test] fn test_basic() { assert!(true); } }
+mod tests {
+    use super::{basename, strip_ext, run_deja_dup};
+
+    #[test]
+    fn basename_strips_path() {
+        assert_eq!(basename("/usr/bin/deja-dup"), "deja-dup");
+        assert_eq!(basename(r"C:\bin\deja-dup.exe"), "deja-dup.exe");
+        assert_eq!(basename("plain"), "plain");
+    }
+
+    #[test]
+    fn strip_ext_removes_extension() {
+        assert_eq!(strip_ext("deja-dup.exe"), "deja-dup");
+        assert_eq!(strip_ext("no-ext"), "no-ext");
+    }
+
+    #[test]
+    fn help_and_version_exit_zero() {
+        assert_eq!(run_deja_dup(&["--help".to_string()], "deja-dup"), 0);
+        assert_eq!(run_deja_dup(&["-h".to_string()], "deja-dup"), 0);
+        assert_eq!(run_deja_dup(&["--version".to_string()], "deja-dup"), 0);
+    }
+
+    #[test]
+    fn default_invocation_exits_zero() {
+        assert_eq!(run_deja_dup(&[], "deja-dup"), 0);
+    }
+}

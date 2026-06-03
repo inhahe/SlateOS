@@ -318,8 +318,8 @@ impl MenuBar {
 
     fn on_mouse_press(&mut self, mx: f32, my: f32) -> EventResult {
         // --- Click on a top-level label? ---
-        if my >= 0.0 && my < BAR_HEIGHT {
-            if let Some(idx) = self.label_index_at_x(mx) {
+        if (0.0..BAR_HEIGHT).contains(&my)
+            && let Some(idx) = self.label_index_at_x(mx) {
                 if self.open_index == Some(idx) {
                     self.close();
                 } else {
@@ -327,7 +327,6 @@ impl MenuBar {
                 }
                 return EventResult::Consumed;
             }
-        }
 
         // --- Click inside an open dropdown? ---
         if let Some(top_idx) = self.open_index {
@@ -391,15 +390,14 @@ impl MenuBar {
 
     fn on_mouse_move(&mut self, mx: f32, my: f32) -> EventResult {
         // --- Hot-tracking across top-level labels. ---
-        if my >= 0.0 && my < BAR_HEIGHT {
-            if self.is_open() {
-                if let Some(idx) = self.label_index_at_x(mx) {
+        if (0.0..BAR_HEIGHT).contains(&my) {
+            if self.is_open()
+                && let Some(idx) = self.label_index_at_x(mx) {
                     if self.open_index != Some(idx) {
                         self.open_menu(idx);
                     }
                     return EventResult::Consumed;
                 }
-            }
             return EventResult::Ignored;
         }
 
@@ -471,8 +469,8 @@ impl MenuBar {
         }
 
         // Alt+mnemonic opens the corresponding top-level menu.
-        if event.modifiers.alt && !event.modifiers.ctrl && !event.modifiers.shift {
-            if let Some(ch) = key_to_lower_char(&event.key) {
+        if event.modifiers.alt && !event.modifiers.ctrl && !event.modifiers.shift
+            && let Some(ch) = key_to_lower_char(&event.key) {
                 for (i, item) in self.items.iter().enumerate() {
                     if mnemonic_char(&item.label) == Some(ch) {
                         self.open_menu(i);
@@ -480,7 +478,6 @@ impl MenuBar {
                     }
                 }
             }
-        }
 
         if !self.is_open() {
             return EventResult::Ignored;
@@ -517,9 +514,9 @@ impl MenuBar {
 
             Key::Right => {
                 // If hover is on a submenu entry in the primary dropdown, open it.
-                if self.open_submenu.is_none() {
-                    if let Some(hi) = self.dropdown_hover {
-                        if let Some(MenuBarEntry::SubMenu { children, .. }) =
+                if self.open_submenu.is_none()
+                    && let Some(hi) = self.dropdown_hover
+                        && let Some(MenuBarEntry::SubMenu { children, .. }) =
                             self.items[top_idx].children.get(hi)
                         {
                             let dd = self.dropdown_rect(top_idx);
@@ -538,8 +535,6 @@ impl MenuBar {
                             }));
                             return EventResult::Consumed;
                         }
-                    }
-                }
 
                 // Otherwise move to the next top-level menu.
                 let new = if top_idx + 1 >= self.items.len() {
@@ -887,12 +882,11 @@ fn hover_in_submenu_chain(
     my: f32,
 ) -> bool {
     // Recurse into child first.
-    if let Some(ref mut child) = sub.child {
-        if hover_in_submenu_chain(root_children, child, mx, my) {
+    if let Some(ref mut child) = sub.child
+        && hover_in_submenu_chain(root_children, child, mx, my) {
             sub.hover_index = None;
             return true;
         }
-    }
 
     let entries = resolve_submenu_entries(root_children, sub);
     let total_h = dropdown_content_height(&entries) + DROPDOWN_VPAD * 2.0;
@@ -990,10 +984,13 @@ fn resolve_submenu_entries(root_children: &[MenuBarEntry], sub: &OpenSubmenu) ->
 
 /// Walk down to the deepest open submenu node (mutable).
 fn deepest_submenu_mut(sub: &mut OpenSubmenu) -> &mut OpenSubmenu {
-    if sub.child.is_some() {
-        deepest_submenu_mut(sub.child.as_mut().expect("checked above"))
-    } else {
-        sub
+    // NOTE: Phrased as `match` rather than `if let ... else` because the
+    // current borrow checker (pre-polonius) doesn't reason about the disjoint
+    // mutable borrow in the else arm. This form returns `sub` only in the
+    // `None` arm, where no prior borrow of `sub.child` is live.
+    match sub.child {
+        Some(ref mut child) => deepest_submenu_mut(child),
+        None => sub,
     }
 }
 
@@ -1144,11 +1141,10 @@ fn jump_to_letter(entries: &[MenuBarEntry], ch: char) -> Option<usize> {
             MenuBarEntry::SubMenu { label, .. } => Some(label.as_str()),
             _ => None,
         };
-        if let Some(l) = label {
-            if l.chars().next().map(|c| c.to_ascii_lowercase()) == Some(ch) {
+        if let Some(l) = label
+            && l.chars().next().map(|c| c.to_ascii_lowercase()) == Some(ch) {
                 return Some(i);
             }
-        }
     }
     None
 }

@@ -301,11 +301,10 @@ impl ModalOverlay {
             return None;
         }
 
-        if let MouseEventKind::Press(MouseButton::Left) = event.kind {
-            if self.dismiss_on_click_outside && !self.point_in_content(event.x, event.y) {
+        if let MouseEventKind::Press(MouseButton::Left) = event.kind
+            && self.dismiss_on_click_outside && !self.point_in_content(event.x, event.y) {
                 return Some(DialogResult::Dismissed);
             }
-        }
         None
     }
 
@@ -543,13 +542,12 @@ impl AlertDialog {
         if let MouseEventKind::Press(MouseButton::Left) = event.kind {
             let layout = self.compute_layout(800.0, 600.0);
             for (i, btn_rect) in layout.button_rects.iter().enumerate() {
-                if point_in_rect(event.x, event.y, btn_rect.0, btn_rect.1, btn_rect.2, btn_rect.3) {
-                    if let Some(btn) = self.buttons.buttons.get(i) {
+                if point_in_rect(event.x, event.y, btn_rect.0, btn_rect.1, btn_rect.2, btn_rect.3)
+                    && let Some(btn) = self.buttons.buttons.get(i) {
                         self.result = Some(btn.to_result());
                         self.overlay.hide();
                         return EventResult::Consumed;
                     }
-                }
             }
         }
 
@@ -985,13 +983,12 @@ impl InputDialog {
                 self.cursor_pos = self.input_text.len();
             }
             _ => {
-                if let Some(ch) = event.text {
-                    if !ch.is_control() {
+                if let Some(ch) = event.text
+                    && !ch.is_control() {
                         self.input_text.insert(self.cursor_pos, ch);
                         self.cursor_pos += 1;
                         self.validation_error = None;
                     }
-                }
             }
         }
         EventResult::Consumed
@@ -1558,8 +1555,8 @@ impl ProgressDialog {
         }
 
         // Detail text.
-        if self.show_detail {
-            if let Some(ref detail) = self.detail_text {
+        if self.show_detail
+            && let Some(ref detail) = self.detail_text {
                 tree.push(RenderCommand::Text {
                     x: x + CONTENT_PADDING,
                     y: content_y,
@@ -1570,7 +1567,6 @@ impl ProgressDialog {
                     max_width: Some(bar_width),
                 });
             }
-        }
 
         // Cancel button.
         if self.cancelable {

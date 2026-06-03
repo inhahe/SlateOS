@@ -1,3 +1,9 @@
+#![deny(clippy::all)]
+// `clippy::pedantic` is intentionally NOT denied yet — guitk is ~50k lines of
+// widget code and a pedantic sweep produces >1200 warnings (most are doc/style
+// items: `missing_panics_doc`, `must_use_candidate`, etc.). Tracked as a
+// separate LIMITATION in `todo.txt`.
+
 //! guitk — OurOS GUI Toolkit Library
 //!
 //! Provides a widget library with a Flexbox/Grid-inspired layout engine,

@@ -619,8 +619,7 @@ pub fn build_context_menu_for_selection(
         result.push(MenuItem::Separator);
     }
 
-    let mut menu_id_counter: u64 = 10_000;
-    for ext in &sorted {
+    for (menu_id_counter, ext) in (10_000_u64..).zip(sorted.iter()) {
         result.push(MenuItem::Action {
             id: menu_id_counter,
             label: ext.label.clone(),
@@ -629,7 +628,6 @@ pub fn build_context_menu_for_selection(
             enabled: true,
             checked: None,
         });
-        menu_id_counter += 1;
     }
 
     result

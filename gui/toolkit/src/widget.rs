@@ -452,8 +452,8 @@ impl Widget {
             left: self.style.border.left.width,
         };
 
-        if let Some(ref flex) = self.flex_layout {
-            if !self.children.is_empty() {
+        if let Some(ref flex) = self.flex_layout
+            && !self.children.is_empty() {
                 // Compute child intrinsic sizes
                 let child_info: Vec<(Size, FlexItem)> = self
                     .children
@@ -512,7 +512,6 @@ impl Widget {
                     self.layout.height = max_y + self.style.padding.bottom;
                 }
             }
-        }
     }
 
     // ======================================================================

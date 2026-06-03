@@ -156,11 +156,10 @@ impl TreeView {
         Self::compute_depths(&mut nodes, 0);
         self.root_nodes = nodes;
         // Clear focus/selection if nodes changed and old focus no longer exists
-        if let Some(fid) = self.focused_id {
-            if Self::find_node(&self.root_nodes, fid).is_none() {
+        if let Some(fid) = self.focused_id
+            && Self::find_node(&self.root_nodes, fid).is_none() {
                 self.focused_id = None;
             }
-        }
     }
 
     /// Get a reference to a node by its ID, searching the entire tree.
@@ -563,7 +562,7 @@ impl TreeView {
         }
     }
 
-    fn find_node<'a>(nodes: &'a [TreeNode], id: TreeNodeId) -> Option<&'a TreeNode> {
+    fn find_node(nodes: &[TreeNode], id: TreeNodeId) -> Option<&TreeNode> {
         for node in nodes {
             if node.id == id {
                 return Some(node);
@@ -575,7 +574,7 @@ impl TreeView {
         None
     }
 
-    fn find_node_mut<'a>(nodes: &'a mut [TreeNode], id: TreeNodeId) -> Option<&'a mut TreeNode> {
+    fn find_node_mut(nodes: &mut [TreeNode], id: TreeNodeId) -> Option<&mut TreeNode> {
         for node in nodes.iter_mut() {
             if node.id == id {
                 return Some(node);

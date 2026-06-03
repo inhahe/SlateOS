@@ -32,8 +32,10 @@ use crate::widget::WidgetId;
 
 /// Per-widget enabled/disabled state.
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub enum DisabledState {
     /// Normal interaction allowed.
+    #[default]
     Enabled,
     /// Grayed out; shows reason on hover.
     Disabled { reason: Option<String> },
@@ -88,11 +90,6 @@ impl DisabledState {
     }
 }
 
-impl Default for DisabledState {
-    fn default() -> Self {
-        Self::Enabled
-    }
-}
 
 // ---------------------------------------------------------------------------
 // DisabledOverlay
@@ -524,11 +521,10 @@ impl GroupManager {
     /// Get the effective reason for a widget being disabled (checks group chain).
     pub fn widget_disabled_reason(&self, widget_id: WidgetId) -> Option<String> {
         for group in &self.groups {
-            if group.members().contains(&widget_id) {
-                if let Some(reason) = self.group_effective_reason(group.id) {
+            if group.members().contains(&widget_id)
+                && let Some(reason) = self.group_effective_reason(group.id) {
                     return Some(reason);
                 }
-            }
         }
         None
     }

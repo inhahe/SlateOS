@@ -104,6 +104,7 @@ impl Selection {
 
 /// Style attributes from ANSI SGR sequences.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub struct AnsiStyle {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
@@ -114,19 +115,6 @@ pub struct AnsiStyle {
     pub reverse: bool,
 }
 
-impl Default for AnsiStyle {
-    fn default() -> Self {
-        Self {
-            fg: None,
-            bg: None,
-            bold: false,
-            dim: false,
-            italic: false,
-            underline: false,
-            reverse: false,
-        }
-    }
-}
 
 /// A span of text with uniform styling (used in SimpleTextView).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -328,19 +316,18 @@ fn apply_sgr_params(params: &[u16], style: &mut AnsiStyle) {
             // Bright background 100-107
             100..=107 => style.bg = Some(ANSI_COLORS[(params[i] - 100 + 8) as usize]),
             // Extended color: 38;5;N or 38;2;R;G;B
-            38 => {
-                if i + 1 < params.len() {
+            38
+                if i + 1 < params.len() => {
                     match params[i + 1] {
-                        5 => {
+                        5
                             // 256-color
-                            if i + 2 < params.len() {
+                            if i + 2 < params.len() => {
                                 style.fg = Some(color_from_256(params[i + 2] as u8));
                                 i += 2;
                             }
-                        }
-                        2 => {
+                        2
                             // True color
-                            if i + 4 < params.len() {
+                            if i + 4 < params.len() => {
                                 style.fg = Some(Color::rgb(
                                     params[i + 2] as u8,
                                     params[i + 3] as u8,
@@ -348,24 +335,21 @@ fn apply_sgr_params(params: &[u16], style: &mut AnsiStyle) {
                                 ));
                                 i += 4;
                             }
-                        }
                         _ => {}
                     }
                     i += 1;
                 }
-            }
             // Extended background: 48;5;N or 48;2;R;G;B
-            48 => {
-                if i + 1 < params.len() {
+            48
+                if i + 1 < params.len() => {
                     match params[i + 1] {
-                        5 => {
-                            if i + 2 < params.len() {
+                        5
+                            if i + 2 < params.len() => {
                                 style.bg = Some(color_from_256(params[i + 2] as u8));
                                 i += 2;
                             }
-                        }
-                        2 => {
-                            if i + 4 < params.len() {
+                        2
+                            if i + 4 < params.len() => {
                                 style.bg = Some(Color::rgb(
                                     params[i + 2] as u8,
                                     params[i + 3] as u8,
@@ -373,12 +357,10 @@ fn apply_sgr_params(params: &[u16], style: &mut AnsiStyle) {
                                 ));
                                 i += 4;
                             }
-                        }
                         _ => {}
                     }
                     i += 1;
                 }
-            }
             _ => {} // Unknown SGR parameter — ignore
         }
         i += 1;
@@ -1013,8 +995,8 @@ impl SimpleTextView {
             }
 
             // Selection highlight for this line
-            if let Some(ref sel) = self.selection {
-                if !sel.is_empty() && line_idx >= sel.start.line && line_idx <= sel.end.line {
+            if let Some(ref sel) = self.selection
+                && !sel.is_empty() && line_idx >= sel.start.line && line_idx <= sel.end.line {
                     let line_len = self.line_char_count(line_idx);
                     let sel_start = if line_idx == sel.start.line {
                         sel.start.col
@@ -1038,7 +1020,6 @@ impl SimpleTextView {
                         );
                     }
                 }
-            }
 
             // Search match highlights for this line
             for (match_idx, &(ml, ms, me)) in self.search.matches.iter().enumerate() {
@@ -1142,35 +1123,31 @@ fn is_word_char(b: u8) -> bool {
 
 /// Font weight for rich text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum RichFontWeight {
+    #[default]
     Normal,
     Bold,
 }
 
-impl Default for RichFontWeight {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 /// Font style for rich text.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum RichFontStyle {
+    #[default]
     Normal,
     Italic,
 }
 
-impl Default for RichFontStyle {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 /// Font size specification.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Default)]
 pub enum FontSize {
     /// Relative sizes.
     Small,
+    #[default]
     Normal,
     Large,
     XLarge,
@@ -1178,11 +1155,6 @@ pub enum FontSize {
     Points(f32),
 }
 
-impl Default for FontSize {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
 
 impl FontSize {
     /// Resolve to concrete points given a base size.
@@ -2004,8 +1976,8 @@ impl RichTextView {
 
     fn scroll_to_match(&mut self, match_idx: usize) {
         self.ensure_layout();
-        if let Some(&(line_idx, _, _)) = self.search.matches.get(match_idx) {
-            if let Some(wl) = self.wrapped_lines.get(line_idx) {
+        if let Some(&(line_idx, _, _)) = self.search.matches.get(match_idx)
+            && let Some(wl) = self.wrapped_lines.get(line_idx) {
                 let line_y = wl.y;
                 if line_y < self.scroll_offset_px
                     || line_y + wl.line_height > self.scroll_offset_px + self.height
@@ -2015,7 +1987,6 @@ impl RichTextView {
                     self.clamp_scroll();
                 }
             }
-        }
     }
 
     // ----- Event handling -----
@@ -2135,11 +2106,10 @@ impl RichTextView {
                 let mut col = 0;
                 for span in &wl.spans {
                     let span_end = col + span.text.len();
-                    if char_idx >= col && char_idx < span_end {
-                        if let Some(ref url) = span.style.link {
+                    if char_idx >= col && char_idx < span_end
+                        && let Some(ref url) = span.style.link {
                             return Some(url.clone());
                         }
-                    }
                     col = span_end;
                 }
                 break;
@@ -2256,8 +2226,8 @@ impl RichTextView {
             }
 
             // List marker
-            if wl.is_block_start {
-                if let Some(RichBlock::ListItem {
+            if wl.is_block_start
+                && let Some(RichBlock::ListItem {
                     kind,
                     index,
                     indent_level,
@@ -2281,11 +2251,10 @@ impl RichTextView {
                         max_width: None,
                     });
                 }
-            }
 
             // Selection highlight
-            if let Some(ref sel) = self.selection {
-                if !sel.is_empty() && vis_idx >= sel.start.line && vis_idx <= sel.end.line {
+            if let Some(ref sel) = self.selection
+                && !sel.is_empty() && vis_idx >= sel.start.line && vis_idx <= sel.end.line {
                     let line_len: usize = wl.spans.iter().map(|s| s.text.len()).sum();
                     let sel_start = if vis_idx == sel.start.line {
                         sel.start.col
@@ -2303,7 +2272,6 @@ impl RichTextView {
                         tree.fill_rect(x1, render_y, x2 - x1, wl.line_height, SELECTION_COLOR);
                     }
                 }
-            }
 
             // Search match highlights
             for (match_idx, &(ml, ms, me)) in self.search.matches.iter().enumerate() {

@@ -1498,26 +1498,23 @@ fn match_ext_3(ext: &str) -> FileExtension {
         FileExtension::Ppt
     } else if eq_ignore_ascii(ext, "odp") {
         FileExtension::Odp
-    } else if eq_ignore_ascii(ext, "ttf") {
-        FileExtension::Unknown // matched by long
-    } else if eq_ignore_ascii(ext, "otf") {
-        FileExtension::Unknown // matched by long
+    } else if eq_ignore_ascii(ext, "ttf")
+        || eq_ignore_ascii(ext, "otf")
+        || eq_ignore_ascii(ext, "lua")
+        || eq_ignore_ascii(ext, "php")
+        || eq_ignore_ascii(ext, "zig")
+        || eq_ignore_ascii(ext, "ada")
+        || eq_ignore_ascii(ext, "zst")
+    {
+        // Recognized 3-char extensions that fall back to Unknown because the
+        // corresponding enum variants are matched by match_ext_long instead.
+        FileExtension::Unknown
     } else if eq_ignore_ascii(ext, "tif") {
         FileExtension::Tiff
     } else if eq_ignore_ascii(ext, "mid") {
         FileExtension::Mp3 // midi, close enough category
-    } else if eq_ignore_ascii(ext, "lua") {
-        FileExtension::Unknown // matched by long
-    } else if eq_ignore_ascii(ext, "php") {
-        FileExtension::Unknown // matched by long
-    } else if eq_ignore_ascii(ext, "zig") {
-        FileExtension::Unknown // matched by long
-    } else if eq_ignore_ascii(ext, "ada") {
-        FileExtension::Unknown // matched by long
     } else if eq_ignore_ascii(ext, "bz2") {
         FileExtension::TarBz2
-    } else if eq_ignore_ascii(ext, "zst") {
-        FileExtension::Unknown // matched by long
     } else if eq_ignore_ascii(ext, "tgz") {
         FileExtension::TarGz
     } else {
@@ -1567,6 +1564,7 @@ fn match_ext_4(ext: &str) -> FileExtension {
     }
 }
 
+#[allow(clippy::if_same_then_else)] // Per-extension arms intentionally identical: each documents a recognized extension that currently maps to Unknown for lack of an enum variant. Future variants slot in here without touching call sites.
 fn match_ext_long(ext: &str) -> FileExtension {
     if eq_ignore_ascii(ext, "swift") {
         FileExtension::Unknown // table has it but no enum variant needed

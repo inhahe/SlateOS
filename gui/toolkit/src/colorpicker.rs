@@ -477,19 +477,17 @@ impl ColorPicker {
                     return Some(ColorPickerEvent::Changed(self.current_color()));
                 }
             }
-            MouseEventKind::Move => {
-                if self.drag.is_some() {
+            MouseEventKind::Move
+                if self.drag.is_some() => {
                     self.apply_drag(local_x, local_y);
                     return Some(ColorPickerEvent::Changed(self.current_color()));
                 }
-            }
-            MouseEventKind::Release(MouseButton::Left) => {
-                if self.drag.is_some() {
+            MouseEventKind::Release(MouseButton::Left)
+                if self.drag.is_some() => {
                     self.drag = None;
                     self.sync_hex_from_hsv();
                     return Some(ColorPickerEvent::Changed(self.current_color()));
                 }
-            }
             _ => {}
         }
         None
@@ -526,13 +524,12 @@ impl ColorPicker {
                     self.sync_hex_from_hsv();
                 }
                 _ => {
-                    if let Some(ch) = event.text {
-                        if ch.is_ascii_hexdigit() && self.hex_input.len() < 8 {
+                    if let Some(ch) = event.text
+                        && ch.is_ascii_hexdigit() && self.hex_input.len() < 8 {
                             self.hex_input.push(ch.to_ascii_uppercase());
                             self.try_apply_hex();
                             return Some(ColorPickerEvent::Changed(self.current_color()));
                         }
-                    }
                 }
             }
         } else {
@@ -1411,6 +1408,7 @@ impl ColorPickerDialog {
         }
     }
 
+    #[allow(clippy::too_many_arguments)] // Rendering helper bundles many UI-layout parameters; grouping them in a struct would obscure intent at the call site.
     fn render_channel_slider(
         &self,
         cmds: &mut Vec<RenderCommand>,
@@ -1848,7 +1846,7 @@ impl ColorPickerDialog {
         let cols = self.preset_columns(
             self.picker.sv_size + HUE_BAR_WIDTH + PADDING * 4.0 + PREVIEW_SIZE,
         );
-        let rows = (PRESET_COLORS.len() + cols - 1) / cols;
+        let rows = PRESET_COLORS.len().div_ceil(cols);
         14.0 + rows as f32 * (SWATCH_SIZE + SWATCH_GAP)
     }
 }

@@ -482,8 +482,12 @@ const MAX_MONITORS: usize = 16;
 /// per-monitor overrides (0 bits = not set, use global).
 static SCALE_TABLE: [AtomicU32; MAX_MONITORS + 1] = {
     // Default 1.0 for global slot, 0 (unset) for monitor slots.
-    const UNSET: AtomicU32 = AtomicU32::new(0);
-    let mut table: [AtomicU32; MAX_MONITORS + 1] = [UNSET; MAX_MONITORS + 1];
+    // Use `[const { ... }; N]` instead of `[CONST; N]` to avoid duplicating
+    // the AtomicU32 (which has interior mutability) — `[CONST; N]` would
+    // copy the same value into every slot, which clippy correctly warns
+    // against for interior-mutable types.
+    let mut table: [AtomicU32; MAX_MONITORS + 1] =
+        [const { AtomicU32::new(0) }; MAX_MONITORS + 1];
     // Slot 0 = global default 1.0
     table[0] = AtomicU32::new(f32_to_bits(1.0));
     table

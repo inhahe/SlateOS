@@ -358,7 +358,7 @@ pub fn flex_layout(
         FlexJustify::Center => remaining / 2.0,
         FlexJustify::SpaceBetween => 0.0,
         FlexJustify::SpaceAround => {
-            if items.len() > 0 {
+            if !items.is_empty() {
                 remaining / (items.len() as f32 * 2.0)
             } else {
                 0.0
@@ -370,20 +370,14 @@ pub fn flex_layout(
     };
 
     let between_space = match flex.justify {
-        FlexJustify::SpaceBetween => {
-            if items.len() > 1 {
+        FlexJustify::SpaceBetween
+            if items.len() > 1 => {
                 remaining / (items.len() - 1) as f32
-            } else {
-                0.0
             }
-        }
-        FlexJustify::SpaceAround => {
-            if items.len() > 0 {
+        FlexJustify::SpaceAround
+            if !items.is_empty() => {
                 remaining / items.len() as f32
-            } else {
-                0.0
             }
-        }
         FlexJustify::SpaceEvenly => remaining / (items.len() as f32 + 1.0),
         _ => 0.0,
     };

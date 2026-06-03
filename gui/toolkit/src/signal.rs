@@ -32,6 +32,12 @@ use std::rc::Rc;
 pub struct ConnectionId(u64);
 
 /// Global monotonically-increasing connection counter.
+//
+// The initializer is already a `const { ... }` block — exactly the form
+// `missing_const_for_thread_local` asks for — but the lint still fires on
+// rust-1.95 because it doesn't recognise the macro-emitted form. Suppress
+// at the function level since `#[allow]` on a macro invocation is ignored.
+#[allow(clippy::missing_const_for_thread_local)]
 fn next_connection_id() -> ConnectionId {
     thread_local! {
         static COUNTER: Cell<u64> = const { Cell::new(1) };
@@ -47,13 +53,18 @@ fn next_connection_id() -> ConnectionId {
 // Slot storage
 // ---------------------------------------------------------------------------
 
+/// Shared `Fn(&T)` slot handler.
+type FnSlot<T> = Rc<dyn Fn(&T)>;
+/// Shared `FnMut(&T)` slot handler — needs `RefCell` for interior mutability.
+type FnMutSlot<T> = Rc<RefCell<dyn FnMut(&T)>>;
+
 /// A callable handler — wraps either Fn or FnMut behind Rc so we can
 /// snapshot the slot list without holding the RefCell borrow during calls.
 enum SlotHandler<T: 'static> {
     /// Immutable handler: `Fn(&T)`.
-    Immutable(Rc<dyn Fn(&T)>),
+    Immutable(FnSlot<T>),
     /// Mutable handler: `FnMut(&T)` behind RefCell for interior mutability.
-    Mutable(Rc<RefCell<dyn FnMut(&T)>>),
+    Mutable(FnMutSlot<T>),
 }
 
 // Manual Clone impl to avoid requiring T: Clone (we only clone the Rc, not T).
@@ -249,10 +260,14 @@ pub fn forward<T: Clone + 'static>(source: &Signal<T>, target: &Signal<T>) -> Co
 // SignalGroup
 // ---------------------------------------------------------------------------
 
+/// A closure that disconnects one specific connection from its owning signal,
+/// returning true if a connection was actually removed.
+type Disconnector = Box<dyn Fn(ConnectionId) -> bool>;
+
 /// Manages multiple signal connections for bulk disconnect.
 /// Useful for widget cleanup — disconnect all handlers at once.
 pub struct SignalGroup {
-    connections: Vec<(Box<dyn Fn(ConnectionId) -> bool>, ConnectionId)>,
+    connections: Vec<(Disconnector, ConnectionId)>,
 }
 
 impl SignalGroup {
@@ -267,7 +282,7 @@ impl SignalGroup {
     /// will be removed from its signal.
     pub fn track<T: 'static>(&mut self, signal: &Signal<T>, id: ConnectionId) {
         let inner = Rc::clone(&signal.inner);
-        let disconnector: Box<dyn Fn(ConnectionId) -> bool> = Box::new(move |conn_id| {
+        let disconnector: Disconnector = Box::new(move |conn_id| {
             let mut state = inner.borrow_mut();
             let len_before = state.slots.len();
             state.slots.retain(|entry| entry.id != conn_id);

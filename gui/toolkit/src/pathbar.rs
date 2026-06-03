@@ -305,8 +305,8 @@ impl PathBar {
 
     fn handle_key_breadcrumb(&mut self, event: &KeyEvent) -> EventResult {
         // Any printable character enters edit mode.
-        if let Some(ch) = event.text {
-            if !ch.is_control() {
+        if let Some(ch) = event.text
+            && !ch.is_control() {
                 self.enter_edit_mode();
                 // Insert the typed character.
                 self.edit_text.clear();
@@ -314,7 +314,6 @@ impl PathBar {
                 self.cursor = self.edit_text.len();
                 return EventResult::Consumed;
             }
-        }
         EventResult::Ignored
     }
 
@@ -384,8 +383,8 @@ impl PathBar {
             }
             _ => {
                 // Insert character.
-                if let Some(ch) = event.text {
-                    if !ch.is_control() {
+                if let Some(ch) = event.text
+                    && !ch.is_control() {
                         self.delete_selection();
                         self.edit_text.insert(self.cursor, ch);
                         self.cursor += ch.len_utf8();
@@ -393,7 +392,6 @@ impl PathBar {
                         self.on_text_changed();
                         return EventResult::Consumed;
                     }
-                }
                 EventResult::Ignored
             }
         }
@@ -979,9 +977,9 @@ fn split_path(path: &str) -> Vec<String> {
 
     let mut segments = Vec::new();
 
-    if path.starts_with('/') {
+    if let Some(rest) = path.strip_prefix('/') {
         segments.push("/".to_string());
-        for part in path[1..].split('/') {
+        for part in rest.split('/') {
             if !part.is_empty() {
                 segments.push(part.to_string());
             }

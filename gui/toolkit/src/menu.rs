@@ -161,12 +161,11 @@ impl ContextMenu {
         }
 
         // Check if click is in open submenu first.
-        if let Some((_, ref mut submenu)) = self.open_submenu {
-            if let Some(id) = submenu.handle_click(mx, my) {
+        if let Some((_, ref mut submenu)) = self.open_submenu
+            && let Some(id) = submenu.handle_click(mx, my) {
                 self.hide();
                 return Some(id);
             }
-        }
 
         // Check if click is within our bounds.
         if !self.point_in_bounds(mx, my) {
@@ -174,10 +173,7 @@ impl ContextMenu {
             return None;
         }
 
-        let index = self.index_at_y(my);
-        let Some(idx) = index else {
-            return None;
-        };
+        let idx = self.index_at_y(my)?;
 
         match self.items.get(idx) {
             Some(MenuItem::Action { id, enabled: true, .. }) => {
@@ -205,12 +201,11 @@ impl ContextMenu {
         }
 
         // Delegate to submenu if mouse is within it.
-        if let Some((_, ref mut submenu)) = self.open_submenu {
-            if submenu.point_in_bounds(mx, my) {
+        if let Some((_, ref mut submenu)) = self.open_submenu
+            && submenu.point_in_bounds(mx, my) {
                 submenu.handle_mouse_move(mx, my);
                 return;
             }
-        }
 
         if !self.point_in_bounds(mx, my) {
             // Don't clear hover if mouse moved to a submenu.
@@ -253,8 +248,8 @@ impl ContextMenu {
         }
 
         // Delegate to open submenu first.
-        if let Some((_, ref mut submenu)) = self.open_submenu {
-            if submenu.is_visible() {
+        if let Some((_, ref mut submenu)) = self.open_submenu
+            && submenu.is_visible() {
                 let result = submenu.handle_key(key);
                 if let Some(MenuAction::Selected(id)) = result {
                     self.hide();
@@ -267,7 +262,6 @@ impl ContextMenu {
                 }
                 return result;
             }
-        }
 
         match key.key {
             Key::Escape => {
@@ -306,15 +300,14 @@ impl ContextMenu {
             }
             Key::Right => {
                 // Open submenu if hover is on a submenu item.
-                if let Some(idx) = self.hover_index {
-                    if let Some(MenuItem::Submenu { enabled: true, children, .. }) = self.items.get(idx) {
+                if let Some(idx) = self.hover_index
+                    && let Some(MenuItem::Submenu { enabled: true, children, .. }) = self.items.get(idx) {
                         let mut sub = ContextMenu::new(children.clone());
                         let sub_x = self.x + self.width;
                         let sub_y = self.y + self.y_offset_for_index(idx);
                         sub.show(sub_x, sub_y);
                         self.open_submenu = Some((idx, Box::new(sub)));
                     }
-                }
                 Some(MenuAction::None)
             }
             Key::Left => {
@@ -605,11 +598,11 @@ impl ContextMenu {
             }
 
             let idx = pos as usize;
-            let selectable = match self.items.get(idx) {
-                Some(MenuItem::Action { enabled: true, .. }) => true,
-                Some(MenuItem::Submenu { enabled: true, .. }) => true,
-                _ => false,
-            };
+            let selectable = matches!(
+                self.items.get(idx),
+                Some(MenuItem::Action { enabled: true, .. })
+                    | Some(MenuItem::Submenu { enabled: true, .. })
+            );
 
             if selectable {
                 self.hover_index = Some(idx);
@@ -707,11 +700,10 @@ impl Tooltip {
 
     /// Call on each frame/tick to check if the hover delay has elapsed.
     pub fn tick(&mut self, timestamp_ms: u64) {
-        if let Some(start) = self.hover_start {
-            if !self.visible && timestamp_ms.saturating_sub(start) >= u64::from(self.delay_ms) {
+        if let Some(start) = self.hover_start
+            && !self.visible && timestamp_ms.saturating_sub(start) >= u64::from(self.delay_ms) {
                 self.visible = true;
             }
-        }
     }
 
     /// Whether the tooltip is currently visible.

@@ -963,14 +963,32 @@
 ##   Eq, so added #[derive(PartialEq, Eq)] to Snapshot. 108/108 tests pass.
 ##   Also ran clippy --fix (8 collapsible-if style fixes). Builds for ouros.
 ##
-## LIMITATION (noticed 2026-05-31): the shared GUI toolkit lib `guitk` carries
-##   ~75 clippy::all warnings (collapsible-if, derivable impls, complex types,
-##   manual Range::contains, elidable lifetimes, etc.). These surface for every
-##   GUI app that depends on it (systemrestore, paint, dbviewer, ...). guitk has
-##   no #![deny(clippy::all, clippy::pedantic)] so they are warn-level and do
-##   not block builds, but per CLAUDE.md every crate should be clippy-clean with
-##   those denies. Cleaning guitk (and adding the deny attribute) is a sizeable
-##   standalone task, intentionally deferred out of the per-tool bug sweep.
+## LIMITATION (noticed 2026-05-31, FIXED 2026-06-03): the shared GUI toolkit
+##   lib `guitk` carried ~76 clippy::all warnings (collapsible-if, derivable
+##   impls, complex types, manual Range::contains, elidable lifetimes, etc.).
+##   Cleaned in two passes: (a) `cargo clippy --fix` removed 59 mechanical
+##   lints; (b) manual fixes for the rest in colorpicker, context_ext,
+##   filetypes, menu, menubar, pathbar, scaling, signal — extracting
+##   `FnSlot<T>`/`FnMutSlot<T>`/`Disconnector` type aliases in signal.rs,
+##   merging seven identical extension-match arms in filetypes.rs via `||`,
+##   replacing a `while ... { break }` loop in context_ext.rs with a
+##   `zip((10_000_u64..))`, and so on. Added `#![deny(clippy::all)]` to
+##   gui/toolkit/src/lib.rs. guitk now compiles with zero clippy warnings on
+##   x86_64-pc-windows-gnu, and `cargo test -p guitk` reports 598/598 pass.
+##
+##   `clippy::pedantic` is NOT denied yet — a pedantic sweep produces
+##   ~1,232 warnings (mostly missing_panics_doc / must_use_candidate / docs
+##   items in 50k LOC of widget code). Tracked separately below.
+##
+## LIMITATION (noticed 2026-06-03): guitk does not yet enable
+##   `#![deny(clippy::pedantic)]`. A pedantic run on the crate emits ~1,232
+##   warnings — overwhelmingly doc-style lints (missing_panics_doc,
+##   missing_errors_doc, must_use_candidate, return_self_not_must_use,
+##   needless_pass_by_value, similar_names, items_after_statements). The crate
+##   is ~50k LOC; cleaning these will be a multi-session sweep. Deferred until
+##   the core OS subsystems (kernel/mm/sched/ipc, fs, drivers) have reached a
+##   stable baseline — there is no value in extensive doc lints on toolkit
+##   code while the underlying syscall ABI is still in flux.
 ##
 ## BUG (noticed+FIXED 2026-05-31): vi search wrap-around landed on the cursor's
 ##   own position instead of the next/previous match. userspace/vi/:

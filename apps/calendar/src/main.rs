@@ -113,7 +113,12 @@ impl Date {
     pub fn week_number(self) -> u32 {
         // Simple approximation: day-of-year / 7 + 1
         let doy = self.day_of_year();
-        let jan1_dow = Date { year: self.year, month: 1, day: 1 }.day_of_week();
+        let jan1_dow = Date {
+            year: self.year,
+            month: 1,
+            day: 1,
+        }
+        .day_of_week();
         // Adjust for weeks starting on Monday
         let adjusted = doy as i32 + jan1_dow as i32 - 1;
         let week = (adjusted as u32) / 7 + 1;
@@ -159,31 +164,59 @@ impl Date {
             d += days_in_month(y, m) as i32;
         }
 
-        Self { year: y, month: m, day: d as u32 }
+        Self {
+            year: y,
+            month: m,
+            day: d as u32,
+        }
     }
 
     /// Next month, same day (clamped to valid).
     pub fn next_month(self) -> Self {
-        let (y, m) = if self.month == 12 { (self.year + 1, 1) } else { (self.year, self.month + 1) };
+        let (y, m) = if self.month == 12 {
+            (self.year + 1, 1)
+        } else {
+            (self.year, self.month + 1)
+        };
         let max_d = days_in_month(y, m);
-        Self { year: y, month: m, day: self.day.min(max_d) }
+        Self {
+            year: y,
+            month: m,
+            day: self.day.min(max_d),
+        }
     }
 
     /// Previous month, same day (clamped).
     pub fn prev_month(self) -> Self {
-        let (y, m) = if self.month == 1 { (self.year - 1, 12) } else { (self.year, self.month - 1) };
+        let (y, m) = if self.month == 1 {
+            (self.year - 1, 12)
+        } else {
+            (self.year, self.month - 1)
+        };
         let max_d = days_in_month(y, m);
-        Self { year: y, month: m, day: self.day.min(max_d) }
+        Self {
+            year: y,
+            month: m,
+            day: self.day.min(max_d),
+        }
     }
 
     pub fn next_year(self) -> Self {
         let max_d = days_in_month(self.year + 1, self.month);
-        Self { year: self.year + 1, month: self.month, day: self.day.min(max_d) }
+        Self {
+            year: self.year + 1,
+            month: self.month,
+            day: self.day.min(max_d),
+        }
     }
 
     pub fn prev_year(self) -> Self {
         let max_d = days_in_month(self.year - 1, self.month);
-        Self { year: self.year - 1, month: self.month, day: self.day.min(max_d) }
+        Self {
+            year: self.year - 1,
+            month: self.month,
+            day: self.day.min(max_d),
+        }
     }
 
     /// Difference in days between two dates (self - other, approximate).
@@ -208,7 +241,13 @@ impl Date {
     }
 
     pub fn format_long(self) -> String {
-        format!("{}, {} {}, {}", self.day_of_week_name(), self.month_name(), self.day, self.year)
+        format!(
+            "{}, {} {}, {}",
+            self.day_of_week_name(),
+            self.month_name(),
+            self.day,
+            self.year
+        )
     }
 
     pub fn format_header(self) -> String {
@@ -232,7 +271,10 @@ impl Time {
     }
 
     pub fn from_minutes(total: u32) -> Self {
-        Self { hour: (total / 60).min(23), minute: total % 60 }
+        Self {
+            hour: (total / 60).min(23),
+            minute: total % 60,
+        }
     }
 
     pub fn to_minutes(self) -> u32 {
@@ -279,9 +321,10 @@ impl DateTime {
     }
 
     pub fn format_ics(self) -> String {
-        format!("{}{:02}{:02}T{:02}{:02}00",
-            self.date.year, self.date.month, self.date.day,
-            self.time.hour, self.time.minute)
+        format!(
+            "{}{:02}{:02}T{:02}{:02}00",
+            self.date.year, self.date.month, self.date.day, self.time.hour, self.time.minute
+        )
     }
 }
 
@@ -297,7 +340,13 @@ pub fn days_in_month(year: i32, month: u32) -> u32 {
     match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
-        2 => if is_leap_year(year) { 29 } else { 28 },
+        2 => {
+            if is_leap_year(year) {
+                29
+            } else {
+                28
+            }
+        }
         _ => 0,
     }
 }
@@ -308,27 +357,48 @@ pub fn days_in_year(year: i32) -> u32 {
 
 pub fn month_name(month: u32) -> &'static str {
     match month {
-        1 => "January", 2 => "February", 3 => "March",
-        4 => "April", 5 => "May", 6 => "June",
-        7 => "July", 8 => "August", 9 => "September",
-        10 => "October", 11 => "November", 12 => "December",
+        1 => "January",
+        2 => "February",
+        3 => "March",
+        4 => "April",
+        5 => "May",
+        6 => "June",
+        7 => "July",
+        8 => "August",
+        9 => "September",
+        10 => "October",
+        11 => "November",
+        12 => "December",
         _ => "Unknown",
     }
 }
 
 pub fn month_short(month: u32) -> &'static str {
     match month {
-        1 => "Jan", 2 => "Feb", 3 => "Mar",
-        4 => "Apr", 5 => "May", 6 => "Jun",
-        7 => "Jul", 8 => "Aug", 9 => "Sep",
-        10 => "Oct", 11 => "Nov", 12 => "Dec",
+        1 => "Jan",
+        2 => "Feb",
+        3 => "Mar",
+        4 => "Apr",
+        5 => "May",
+        6 => "Jun",
+        7 => "Jul",
+        8 => "Aug",
+        9 => "Sep",
+        10 => "Oct",
+        11 => "Nov",
+        12 => "Dec",
         _ => "???",
     }
 }
 
 /// First day-of-week for a given month (0=Sunday).
 pub fn first_dow_of_month(year: i32, month: u32) -> u32 {
-    Date { year, month, day: 1 }.day_of_week()
+    Date {
+        year,
+        month,
+        day: 1,
+    }
+    .day_of_week()
 }
 
 // ============================================================================
@@ -397,9 +467,16 @@ impl EventCategory {
 
     pub fn all() -> &'static [Self] {
         &[
-            Self::Work, Self::Personal, Self::Health, Self::Travel,
-            Self::Birthday, Self::Holiday, Self::Meeting, Self::Deadline,
-            Self::Social, Self::Education,
+            Self::Work,
+            Self::Personal,
+            Self::Health,
+            Self::Travel,
+            Self::Birthday,
+            Self::Holiday,
+            Self::Meeting,
+            Self::Deadline,
+            Self::Social,
+            Self::Education,
         ]
     }
 }
@@ -483,14 +560,14 @@ impl RecurrenceRule {
                 let diff = check.days_since(origin);
                 diff >= 0 && diff % 14 == 0
             }
-            Self::Monthly => {
-                check.day == origin.day && check >= origin
-            }
+            Self::Monthly => check.day == origin.day && check >= origin,
             Self::Yearly => {
                 check.month == origin.month && check.day == origin.day && check >= origin
             }
             Self::Custom { interval_days } => {
-                if *interval_days == 0 { return false; }
+                if *interval_days == 0 {
+                    return false;
+                }
                 let diff = check.days_since(origin);
                 diff >= 0 && diff % (*interval_days as i64) == 0
             }
@@ -586,7 +663,11 @@ impl CalendarEvent {
         if mins >= 60 {
             let h = mins / 60;
             let m = mins % 60;
-            if m == 0 { format!("{h}h") } else { format!("{h}h {m}m") }
+            if m == 0 {
+                format!("{h}h")
+            } else {
+                format!("{h}h {m}m")
+            }
         } else {
             format!("{mins}m")
         }
@@ -596,7 +677,11 @@ impl CalendarEvent {
         if self.all_day {
             "All day".to_string()
         } else {
-            format!("{} - {}", self.start.time.format_12h(), self.end.time.format_12h())
+            format!(
+                "{} - {}",
+                self.start.time.format_12h(),
+                self.end.time.format_12h()
+            )
         }
     }
 
@@ -628,11 +713,19 @@ impl CalendarEvent {
         match &self.recurrence {
             RecurrenceRule::Daily => lines.push("RRULE:FREQ=DAILY".to_string()),
             RecurrenceRule::Weekly { days } => {
-                let day_strs: Vec<&str> = days.iter().filter_map(|d| match d {
-                    0 => Some("SU"), 1 => Some("MO"), 2 => Some("TU"),
-                    3 => Some("WE"), 4 => Some("TH"), 5 => Some("FR"),
-                    6 => Some("SA"), _ => None,
-                }).collect();
+                let day_strs: Vec<&str> = days
+                    .iter()
+                    .filter_map(|d| match d {
+                        0 => Some("SU"),
+                        1 => Some("MO"),
+                        2 => Some("TU"),
+                        3 => Some("WE"),
+                        4 => Some("TH"),
+                        5 => Some("FR"),
+                        6 => Some("SA"),
+                        _ => None,
+                    })
+                    .collect();
                 if day_strs.is_empty() {
                     lines.push("RRULE:FREQ=WEEKLY".to_string());
                 } else {
@@ -642,7 +735,9 @@ impl CalendarEvent {
             RecurrenceRule::Monthly => lines.push("RRULE:FREQ=MONTHLY".to_string()),
             RecurrenceRule::Yearly => lines.push("RRULE:FREQ=YEARLY".to_string()),
             RecurrenceRule::BiWeekly => lines.push("RRULE:FREQ=WEEKLY;INTERVAL=2".to_string()),
-            RecurrenceRule::Custom { interval_days } => lines.push(format!("RRULE:FREQ=DAILY;INTERVAL={interval_days}")),
+            RecurrenceRule::Custom { interval_days } => {
+                lines.push(format!("RRULE:FREQ=DAILY;INTERVAL={interval_days}"))
+            }
             RecurrenceRule::None => {}
         }
         lines.push("END:VEVENT".to_string());
@@ -808,7 +903,10 @@ pub struct EventStore {
 
 impl EventStore {
     pub fn new() -> Self {
-        Self { events: Vec::new(), next_id: 1 }
+        Self {
+            events: Vec::new(),
+            next_id: 1,
+        }
     }
 
     pub fn add(&mut self, mut event: CalendarEvent) -> u64 {
@@ -873,15 +971,20 @@ impl EventStore {
     /// Search events by title/description.
     pub fn search(&self, query: &str) -> Vec<&CalendarEvent> {
         let lower = query.to_ascii_lowercase();
-        self.events.iter().filter(|e| {
-            e.title.to_ascii_lowercase().contains(&lower)
-                || e.description.to_ascii_lowercase().contains(&lower)
-        }).collect()
+        self.events
+            .iter()
+            .filter(|e| {
+                e.title.to_ascii_lowercase().contains(&lower)
+                    || e.description.to_ascii_lowercase().contains(&lower)
+            })
+            .collect()
     }
 
     /// Upcoming events from a date, sorted.
     pub fn upcoming(&self, from: Date, limit: usize) -> Vec<&CalendarEvent> {
-        let mut upcoming: Vec<&CalendarEvent> = self.events.iter()
+        let mut upcoming: Vec<&CalendarEvent> = self
+            .events
+            .iter()
             .filter(|e| e.start.date >= from)
             .collect();
         upcoming.sort_by(|a, b| a.start.cmp(&b.start));
@@ -1054,8 +1157,12 @@ impl CalendarApp {
         if self.search_query.is_empty() {
             self.search_results.clear();
         } else {
-            self.search_results = self.store.search(&self.search_query)
-                .iter().map(|e| e.id).collect();
+            self.search_results = self
+                .store
+                .search(&self.search_query)
+                .iter()
+                .map(|e| e.id)
+                .collect();
         }
     }
 
@@ -1068,8 +1175,12 @@ impl CalendarApp {
 
         // Background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: self.height,
-            color: BASE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: self.height,
+            color: BASE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Top bar
@@ -1087,7 +1198,10 @@ impl CalendarApp {
 
         // Main content area
         cmds.push(RenderCommand::PushClip {
-            x: main_x, y: content_y, width: main_w, height: self.height - content_y,
+            x: main_x,
+            y: content_y,
+            width: main_w,
+            height: self.height - content_y,
         });
 
         match self.view {
@@ -1106,8 +1220,12 @@ impl CalendarApp {
     fn render_top_bar(&self, cmds: &mut Vec<RenderCommand>) {
         // Bar background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: 0.0, width: self.width, height: 48.0,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: 0.0,
+            width: self.width,
+            height: 48.0,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Navigation buttons
@@ -1116,12 +1234,20 @@ impl CalendarApp {
 
         // Today button
         cmds.push(RenderCommand::FillRect {
-            x: 84.0, y: 10.0, width: 60.0, height: 28.0,
-            color: BLUE, corner_radii: CornerRadii::all(4.0),
+            x: 84.0,
+            y: 10.0,
+            width: 60.0,
+            height: 28.0,
+            color: BLUE,
+            corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: 96.0, y: 18.0, text: "Today".to_string(),
-            font_size: 12.0, color: CRUST, font_weight: FontWeightHint::Bold,
+            x: 96.0,
+            y: 18.0,
+            text: "Today".to_string(),
+            font_size: 12.0,
+            color: CRUST,
+            font_weight: FontWeightHint::Bold,
             max_width: Some(52.0),
         });
 
@@ -1132,9 +1258,22 @@ impl CalendarApp {
                 let start = self.week_start(self.view_date);
                 let end = start.add_days(6);
                 if start.month == end.month {
-                    format!("{} {}-{}, {}", start.month_name(), start.day, end.day, start.year)
+                    format!(
+                        "{} {}-{}, {}",
+                        start.month_name(),
+                        start.day,
+                        end.day,
+                        start.year
+                    )
                 } else {
-                    format!("{} {} - {} {}, {}", start.month_short(), start.day, end.month_short(), end.day, start.year)
+                    format!(
+                        "{} {} - {} {}, {}",
+                        start.month_short(),
+                        start.day,
+                        end.month_short(),
+                        end.day,
+                        start.year
+                    )
                 }
             }
             CalendarView::Day => self.view_date.format_long(),
@@ -1142,8 +1281,13 @@ impl CalendarApp {
         };
 
         cmds.push(RenderCommand::Text {
-            x: 160.0, y: 16.0, text: header, font_size: 16.0,
-            color: TEXT, font_weight: FontWeightHint::Bold, max_width: Some(300.0),
+            x: 160.0,
+            y: 16.0,
+            text: header,
+            font_size: 16.0,
+            color: TEXT,
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(300.0),
         });
 
         // View selector buttons
@@ -1156,33 +1300,64 @@ impl CalendarApp {
             let fg = if active { BLUE } else { SUBTEXT0 };
 
             cmds.push(RenderCommand::FillRect {
-                x: bx, y: 10.0, width: 64.0, height: 28.0,
-                color: bg, corner_radii: CornerRadii::all(4.0),
+                x: bx,
+                y: 10.0,
+                width: 64.0,
+                height: 28.0,
+                color: bg,
+                corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: bx + 8.0, y: 18.0, text: v.label().to_string(),
-                font_size: 11.0, color: fg,
-                font_weight: if active { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                x: bx + 8.0,
+                y: 18.0,
+                text: v.label().to_string(),
+                font_size: 11.0,
+                color: fg,
+                font_weight: if active {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(52.0),
             });
         }
 
         // Separator
         cmds.push(RenderCommand::Line {
-            x1: 0.0, y1: 48.0, x2: self.width, y2: 48.0,
-            color: SURFACE0, width: 1.0,
+            x1: 0.0,
+            y1: 48.0,
+            x2: self.width,
+            y2: 48.0,
+            color: SURFACE0,
+            width: 1.0,
         });
     }
 
-    fn render_nav_button(&self, cmds: &mut Vec<RenderCommand>, x: f32, y: f32, w: f32, h: f32, label: &str) {
+    fn render_nav_button(
+        &self,
+        cmds: &mut Vec<RenderCommand>,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        label: &str,
+    ) {
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: h,
-            color: SURFACE0, corner_radii: CornerRadii::all(4.0),
+            x,
+            y,
+            width: w,
+            height: h,
+            color: SURFACE0,
+            corner_radii: CornerRadii::all(4.0),
         });
         cmds.push(RenderCommand::Text {
-            x: x + w / 2.0 - 4.0, y: y + h / 2.0 - 6.0,
-            text: label.to_string(), font_size: 14.0, color: TEXT,
-            font_weight: FontWeightHint::Bold, max_width: None,
+            x: x + w / 2.0 - 4.0,
+            y: y + h / 2.0 - 6.0,
+            text: label.to_string(),
+            font_size: 14.0,
+            color: TEXT,
+            font_weight: FontWeightHint::Bold,
+            max_width: None,
         });
     }
 
@@ -1191,8 +1366,12 @@ impl CalendarApp {
 
         // Sidebar background
         cmds.push(RenderCommand::FillRect {
-            x: 0.0, y: top_y, width: sidebar_w, height: self.height - top_y,
-            color: MANTLE, corner_radii: CornerRadii::ZERO,
+            x: 0.0,
+            y: top_y,
+            width: sidebar_w,
+            height: self.height - top_y,
+            color: MANTLE,
+            corner_radii: CornerRadii::ZERO,
         });
 
         // Mini calendar
@@ -1201,8 +1380,12 @@ impl CalendarApp {
         // Category filters
         let cat_y = top_y + 210.0;
         cmds.push(RenderCommand::Text {
-            x: 12.0, y: cat_y, text: "Categories".to_string(),
-            font_size: 12.0, color: SUBTEXT0, font_weight: FontWeightHint::Bold,
+            x: 12.0,
+            y: cat_y,
+            text: "Categories".to_string(),
+            font_size: 12.0,
+            color: SUBTEXT0,
+            font_weight: FontWeightHint::Bold,
             max_width: Some(200.0),
         });
 
@@ -1211,32 +1394,46 @@ impl CalendarApp {
             let active = self.category_filter.is_none() || self.category_filter == Some(*cat);
 
             cmds.push(RenderCommand::FillRect {
-                x: 12.0, y: cy, width: 12.0, height: 12.0,
+                x: 12.0,
+                y: cy,
+                width: 12.0,
+                height: 12.0,
                 color: if active { cat.color() } else { SURFACE0 },
                 corner_radii: CornerRadii::all(2.0),
             });
             cmds.push(RenderCommand::Text {
-                x: 30.0, y: cy, text: cat.label().to_string(),
+                x: 30.0,
+                y: cy,
+                text: cat.label().to_string(),
                 font_size: 11.0,
                 color: if active { TEXT } else { OVERLAY0 },
-                font_weight: FontWeightHint::Regular, max_width: Some(160.0),
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(160.0),
             });
 
             // Event count
             let count = self.store.events_by_category(*cat).len();
             if count > 0 {
                 cmds.push(RenderCommand::Text {
-                    x: 180.0, y: cy, text: count.to_string(),
-                    font_size: 10.0, color: OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: None,
+                    x: 180.0,
+                    y: cy,
+                    text: count.to_string(),
+                    font_size: 10.0,
+                    color: OVERLAY0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: None,
                 });
             }
         }
 
         // Separator
         cmds.push(RenderCommand::Line {
-            x1: sidebar_w, y1: top_y, x2: sidebar_w, y2: self.height,
-            color: SURFACE0, width: 1.0,
+            x1: sidebar_w,
+            y1: top_y,
+            x2: sidebar_w,
+            y2: self.height,
+            color: SURFACE0,
+            width: 1.0,
         });
     }
 
@@ -1245,10 +1442,18 @@ impl CalendarApp {
         let cell_h = 18.0;
 
         // Month/year header
-        let header = format!("{} {}", month_short(self.mini_cal_month), self.mini_cal_year);
+        let header = format!(
+            "{} {}",
+            month_short(self.mini_cal_month),
+            self.mini_cal_year
+        );
         cmds.push(RenderCommand::Text {
-            x: x + w / 2.0 - 30.0, y, text: header,
-            font_size: 11.0, color: TEXT, font_weight: FontWeightHint::Bold,
+            x: x + w / 2.0 - 30.0,
+            y,
+            text: header,
+            font_size: 11.0,
+            color: TEXT,
+            font_weight: FontWeightHint::Bold,
             max_width: Some(w),
         });
 
@@ -1262,9 +1467,13 @@ impl CalendarApp {
         let header_y = y + 18.0;
         for (i, dh) in day_headers.iter().enumerate() {
             cmds.push(RenderCommand::Text {
-                x: x + i as f32 * cell_w + 2.0, y: header_y,
-                text: dh.to_string(), font_size: 9.0, color: OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: Some(cell_w),
+                x: x + i as f32 * cell_w + 2.0,
+                y: header_y,
+                text: dh.to_string(),
+                font_size: 9.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(cell_w),
             });
         }
 
@@ -1285,38 +1494,68 @@ impl CalendarApp {
             let dx = x + col as f32 * cell_w;
             let dy = grid_y + row as f32 * cell_h;
 
-            let date = Date { year: self.mini_cal_year, month: self.mini_cal_month, day };
+            let date = Date {
+                year: self.mini_cal_year,
+                month: self.mini_cal_month,
+                day,
+            };
             let is_today = date.is_today(self.today);
             let is_selected = date == self.selected_date;
             let has_events = !self.store.events_on(date).is_empty();
 
             if is_today {
                 cmds.push(RenderCommand::FillRect {
-                    x: dx, y: dy - 1.0, width: cell_w - 1.0, height: cell_h - 2.0,
-                    color: BLUE, corner_radii: CornerRadii::all(3.0),
+                    x: dx,
+                    y: dy - 1.0,
+                    width: cell_w - 1.0,
+                    height: cell_h - 2.0,
+                    color: BLUE,
+                    corner_radii: CornerRadii::all(3.0),
                 });
             } else if is_selected {
                 cmds.push(RenderCommand::FillRect {
-                    x: dx, y: dy - 1.0, width: cell_w - 1.0, height: cell_h - 2.0,
-                    color: SURFACE0, corner_radii: CornerRadii::all(3.0),
+                    x: dx,
+                    y: dy - 1.0,
+                    width: cell_w - 1.0,
+                    height: cell_h - 2.0,
+                    color: SURFACE0,
+                    corner_radii: CornerRadii::all(3.0),
                 });
             }
 
-            let fg = if is_today { CRUST } else if is_selected { TEXT } else if date.is_weekend() { SUBTEXT0 } else { TEXT };
+            let fg = if is_today {
+                CRUST
+            } else if is_selected {
+                TEXT
+            } else if date.is_weekend() {
+                SUBTEXT0
+            } else {
+                TEXT
+            };
 
             cmds.push(RenderCommand::Text {
-                x: dx + 4.0, y: dy + 1.0, text: day.to_string(),
-                font_size: 10.0, color: fg,
-                font_weight: if is_today { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                x: dx + 4.0,
+                y: dy + 1.0,
+                text: day.to_string(),
+                font_size: 10.0,
+                color: fg,
+                font_weight: if is_today {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(cell_w - 4.0),
             });
 
             // Event dot
             if has_events && !is_today {
                 cmds.push(RenderCommand::FillRect {
-                    x: dx + cell_w / 2.0 - 2.0, y: dy + cell_h - 5.0,
-                    width: 4.0, height: 3.0,
-                    color: PEACH, corner_radii: CornerRadii::all(1.5),
+                    x: dx + cell_w / 2.0 - 2.0,
+                    y: dy + cell_h - 5.0,
+                    width: 4.0,
+                    height: 3.0,
+                    color: PEACH,
+                    corner_radii: CornerRadii::all(1.5),
                 });
             }
         }
@@ -1338,16 +1577,36 @@ impl CalendarApp {
 
         // Day-of-week headers
         let day_headers = if self.week_starts_monday {
-            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+            [
+                "Monday",
+                "Tuesday",
+                "Wednesday",
+                "Thursday",
+                "Friday",
+                "Saturday",
+                "Sunday",
+            ]
         } else {
-            ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+            [
+                "Sunday",
+                "Monday",
+                "Tuesday",
+                "Wednesday",
+                "Thursday",
+                "Friday",
+                "Saturday",
+            ]
         };
 
         for (i, dh) in day_headers.iter().enumerate() {
             cmds.push(RenderCommand::Text {
-                x: x + i as f32 * col_w + 8.0, y: y + 6.0,
-                text: dh.to_string(), font_size: 11.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(col_w - 12.0),
+                x: x + i as f32 * col_w + 8.0,
+                y: y + 6.0,
+                text: dh.to_string(),
+                font_size: 11.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(col_w - 12.0),
             });
         }
 
@@ -1372,30 +1631,62 @@ impl CalendarApp {
             let cx = x + col as f32 * col_w;
             let cy = grid_y + row as f32 * row_h;
 
-            let date = Date { year: self.view_date.year, month: self.view_date.month, day };
+            let date = Date {
+                year: self.view_date.year,
+                month: self.view_date.month,
+                day,
+            };
             let is_today = date.is_today(self.today);
             let is_selected = date == self.selected_date;
 
             // Cell border
             cmds.push(RenderCommand::StrokeRect {
-                x: cx, y: cy, width: col_w, height: row_h,
-                color: SURFACE0, corner_radii: CornerRadii::ZERO, line_width: 0.5,
+                x: cx,
+                y: cy,
+                width: col_w,
+                height: row_h,
+                color: SURFACE0,
+                corner_radii: CornerRadii::ZERO,
+                line_width: 0.5,
             });
 
             // Day number
-            let day_bg_color = if is_today { BLUE } else if is_selected { SURFACE1 } else { Color::rgba(0, 0, 0, 0) };
+            let day_bg_color = if is_today {
+                BLUE
+            } else if is_selected {
+                SURFACE1
+            } else {
+                Color::rgba(0, 0, 0, 0)
+            };
             if is_today || is_selected {
                 cmds.push(RenderCommand::FillRect {
-                    x: cx + 4.0, y: cy + 2.0, width: 22.0, height: 18.0,
-                    color: day_bg_color, corner_radii: CornerRadii::all(4.0),
+                    x: cx + 4.0,
+                    y: cy + 2.0,
+                    width: 22.0,
+                    height: 18.0,
+                    color: day_bg_color,
+                    corner_radii: CornerRadii::all(4.0),
                 });
             }
 
-            let day_fg = if is_today { CRUST } else if date.is_weekend() { SUBTEXT0 } else { TEXT };
+            let day_fg = if is_today {
+                CRUST
+            } else if date.is_weekend() {
+                SUBTEXT0
+            } else {
+                TEXT
+            };
             cmds.push(RenderCommand::Text {
-                x: cx + 8.0, y: cy + 4.0, text: day.to_string(),
-                font_size: 12.0, color: day_fg,
-                font_weight: if is_today { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                x: cx + 8.0,
+                y: cy + 4.0,
+                text: day.to_string(),
+                font_size: 12.0,
+                color: day_fg,
+                font_weight: if is_today {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(20.0),
             });
 
@@ -1406,8 +1697,12 @@ impl CalendarApp {
                 let ey = cy + 22.0 + ei as f32 * 16.0;
 
                 cmds.push(RenderCommand::FillRect {
-                    x: cx + 4.0, y: ey, width: col_w - 8.0, height: 14.0,
-                    color: ev.effective_color(), corner_radii: CornerRadii::all(2.0),
+                    x: cx + 4.0,
+                    y: ey,
+                    width: col_w - 8.0,
+                    height: 14.0,
+                    color: ev.effective_color(),
+                    corner_radii: CornerRadii::all(2.0),
                 });
 
                 let time_prefix = if ev.all_day {
@@ -1417,19 +1712,25 @@ impl CalendarApp {
                 };
 
                 cmds.push(RenderCommand::Text {
-                    x: cx + 7.0, y: ey + 2.0,
+                    x: cx + 7.0,
+                    y: ey + 2.0,
                     text: format!("{time_prefix}{}", ev.title),
-                    font_size: 9.0, color: CRUST,
-                    font_weight: FontWeightHint::Bold, max_width: Some(col_w - 14.0),
+                    font_size: 9.0,
+                    color: CRUST,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(col_w - 14.0),
                 });
             }
 
             if events.len() > max_visible {
                 cmds.push(RenderCommand::Text {
-                    x: cx + 8.0, y: cy + 22.0 + max_visible as f32 * 16.0,
+                    x: cx + 8.0,
+                    y: cy + 22.0 + max_visible as f32 * 16.0,
                     text: format!("+{} more", events.len() - max_visible),
-                    font_size: 9.0, color: OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: Some(col_w - 16.0),
+                    font_size: 9.0,
+                    color: OVERLAY0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(col_w - 16.0),
                 });
             }
         }
@@ -1449,24 +1750,36 @@ impl CalendarApp {
             let is_today = date.is_today(self.today);
 
             cmds.push(RenderCommand::FillRect {
-                x: dx, y, width: day_w, height: header_h,
+                x: dx,
+                y,
+                width: day_w,
+                height: header_h,
                 color: if is_today { SURFACE0 } else { MANTLE },
                 corner_radii: CornerRadii::ZERO,
             });
 
             cmds.push(RenderCommand::Text {
-                x: dx + 4.0, y: y + 4.0,
+                x: dx + 4.0,
+                y: y + 4.0,
                 text: date.day_of_week_short().to_string(),
-                font_size: 10.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(day_w - 8.0),
+                font_size: 10.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(day_w - 8.0),
             });
 
             let day_color = if is_today { BLUE } else { TEXT };
             cmds.push(RenderCommand::Text {
-                x: dx + 4.0, y: y + 18.0,
+                x: dx + 4.0,
+                y: y + 18.0,
                 text: date.day.to_string(),
-                font_size: 16.0, color: day_color,
-                font_weight: if is_today { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_size: 16.0,
+                color: day_color,
+                font_weight: if is_today {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: Some(day_w - 8.0),
             });
         }
@@ -1479,23 +1792,37 @@ impl CalendarApp {
             // Time label
             let time = Time { hour, minute: 0 };
             cmds.push(RenderCommand::Text {
-                x: x + 4.0, y: hy + 2.0,
-                text: if self.use_24h { time.format_24h() } else { time.format_12h() },
-                font_size: 10.0, color: OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: Some(time_col_w - 8.0),
+                x: x + 4.0,
+                y: hy + 2.0,
+                text: if self.use_24h {
+                    time.format_24h()
+                } else {
+                    time.format_12h()
+                },
+                font_size: 10.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(time_col_w - 8.0),
             });
 
             // Hour line
             cmds.push(RenderCommand::Line {
-                x1: x + time_col_w, y1: hy, x2: x + w, y2: hy,
-                color: SURFACE0, width: 0.5,
+                x1: x + time_col_w,
+                y1: hy,
+                x2: x + w,
+                y2: hy,
+                color: SURFACE0,
+                width: 0.5,
             });
 
             // Half-hour line
             cmds.push(RenderCommand::Line {
-                x1: x + time_col_w, y1: hy + hour_h / 2.0,
-                x2: x + w, y2: hy + hour_h / 2.0,
-                color: Color::rgba(49, 50, 68, 128), width: 0.5,
+                x1: x + time_col_w,
+                y1: hy + hour_h / 2.0,
+                x2: x + w,
+                y2: hy + hour_h / 2.0,
+                color: Color::rgba(49, 50, 68, 128),
+                width: 0.5,
             });
         }
 
@@ -1515,21 +1842,33 @@ impl CalendarApp {
                 let eh = ((end_min - start_min) / 60.0) * hour_h;
 
                 cmds.push(RenderCommand::FillRect {
-                    x: dx + 2.0, y: ey, width: day_w - 4.0, height: eh.max(16.0),
-                    color: ev.effective_color(), corner_radii: CornerRadii::all(3.0),
+                    x: dx + 2.0,
+                    y: ey,
+                    width: day_w - 4.0,
+                    height: eh.max(16.0),
+                    color: ev.effective_color(),
+                    corner_radii: CornerRadii::all(3.0),
                 });
 
                 cmds.push(RenderCommand::Text {
-                    x: dx + 5.0, y: ey + 2.0,
-                    text: ev.title.clone(), font_size: 10.0, color: CRUST,
-                    font_weight: FontWeightHint::Bold, max_width: Some(day_w - 10.0),
+                    x: dx + 5.0,
+                    y: ey + 2.0,
+                    text: ev.title.clone(),
+                    font_size: 10.0,
+                    color: CRUST,
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(day_w - 10.0),
                 });
 
                 if eh > 20.0 {
                     cmds.push(RenderCommand::Text {
-                        x: dx + 5.0, y: ey + 14.0,
-                        text: ev.time_range_label(), font_size: 9.0, color: CRUST,
-                        font_weight: FontWeightHint::Regular, max_width: Some(day_w - 10.0),
+                        x: dx + 5.0,
+                        y: ey + 14.0,
+                        text: ev.time_range_label(),
+                        font_size: 9.0,
+                        color: CRUST,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(day_w - 10.0),
                     });
                 }
             }
@@ -1544,33 +1883,54 @@ impl CalendarApp {
         // Day header
         let is_today = self.view_date.is_today(self.today);
         cmds.push(RenderCommand::FillRect {
-            x, y, width: w, height: header_h,
+            x,
+            y,
+            width: w,
+            height: header_h,
             color: if is_today { SURFACE0 } else { MANTLE },
             corner_radii: CornerRadii::ZERO,
         });
 
         cmds.push(RenderCommand::Text {
-            x: x + 16.0, y: y + 10.0,
+            x: x + 16.0,
+            y: y + 10.0,
             text: self.view_date.format_long(),
-            font_size: 14.0, color: if is_today { BLUE } else { TEXT },
-            font_weight: FontWeightHint::Bold, max_width: Some(w - 32.0),
+            font_size: 14.0,
+            color: if is_today { BLUE } else { TEXT },
+            font_weight: FontWeightHint::Bold,
+            max_width: Some(w - 32.0),
         });
 
         // All-day events
-        let all_day_events: Vec<_> = self.store.events_on(self.view_date)
-            .into_iter().filter(|e| e.all_day).collect();
-        let all_day_h = if all_day_events.is_empty() { 0.0 } else { 28.0 * all_day_events.len() as f32 + 8.0 };
+        let all_day_events: Vec<_> = self
+            .store
+            .events_on(self.view_date)
+            .into_iter()
+            .filter(|e| e.all_day)
+            .collect();
+        let all_day_h = if all_day_events.is_empty() {
+            0.0
+        } else {
+            28.0 * all_day_events.len() as f32 + 8.0
+        };
 
         for (i, ev) in all_day_events.iter().enumerate() {
             let ey = y + header_h + 4.0 + i as f32 * 28.0;
             cmds.push(RenderCommand::FillRect {
-                x: x + time_col_w, y: ey, width: w - time_col_w - 16.0, height: 24.0,
-                color: ev.effective_color(), corner_radii: CornerRadii::all(4.0),
+                x: x + time_col_w,
+                y: ey,
+                width: w - time_col_w - 16.0,
+                height: 24.0,
+                color: ev.effective_color(),
+                corner_radii: CornerRadii::all(4.0),
             });
             cmds.push(RenderCommand::Text {
-                x: x + time_col_w + 8.0, y: ey + 5.0,
+                x: x + time_col_w + 8.0,
+                y: ey + 5.0,
                 text: format!("All day: {}", ev.title),
-                font_size: 11.0, color: CRUST, font_weight: FontWeightHint::Bold,
+                font_size: 11.0,
+                color: CRUST,
+                font_weight: FontWeightHint::Bold,
                 max_width: Some(w - time_col_w - 32.0),
             });
         }
@@ -1582,21 +1942,36 @@ impl CalendarApp {
 
             let time = Time { hour, minute: 0 };
             cmds.push(RenderCommand::Text {
-                x: x + 4.0, y: hy + 2.0,
-                text: if self.use_24h { time.format_24h() } else { time.format_12h() },
-                font_size: 11.0, color: OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: Some(time_col_w - 8.0),
+                x: x + 4.0,
+                y: hy + 2.0,
+                text: if self.use_24h {
+                    time.format_24h()
+                } else {
+                    time.format_12h()
+                },
+                font_size: 11.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(time_col_w - 8.0),
             });
 
             cmds.push(RenderCommand::Line {
-                x1: x + time_col_w, y1: hy, x2: x + w, y2: hy,
-                color: SURFACE0, width: 0.5,
+                x1: x + time_col_w,
+                y1: hy,
+                x2: x + w,
+                y2: hy,
+                color: SURFACE0,
+                width: 0.5,
             });
         }
 
         // Timed events
-        let timed_events: Vec<_> = self.store.events_on(self.view_date)
-            .into_iter().filter(|e| !e.all_day).collect();
+        let timed_events: Vec<_> = self
+            .store
+            .events_on(self.view_date)
+            .into_iter()
+            .filter(|e| !e.all_day)
+            .collect();
         let event_w = w - time_col_w - 16.0;
 
         for ev in &timed_events {
@@ -1606,31 +1981,46 @@ impl CalendarApp {
             let eh = ((end_min - start_min) / 60.0) * hour_h;
 
             cmds.push(RenderCommand::FillRect {
-                x: x + time_col_w + 4.0, y: ey,
-                width: event_w, height: eh.max(20.0),
-                color: ev.effective_color(), corner_radii: CornerRadii::all(4.0),
+                x: x + time_col_w + 4.0,
+                y: ey,
+                width: event_w,
+                height: eh.max(20.0),
+                color: ev.effective_color(),
+                corner_radii: CornerRadii::all(4.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: x + time_col_w + 10.0, y: ey + 4.0,
-                text: ev.title.clone(), font_size: 12.0, color: CRUST,
-                font_weight: FontWeightHint::Bold, max_width: Some(event_w - 16.0),
+                x: x + time_col_w + 10.0,
+                y: ey + 4.0,
+                text: ev.title.clone(),
+                font_size: 12.0,
+                color: CRUST,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(event_w - 16.0),
             });
 
             if eh > 24.0 {
                 cmds.push(RenderCommand::Text {
-                    x: x + time_col_w + 10.0, y: ey + 18.0,
-                    text: ev.time_range_label(), font_size: 10.0, color: CRUST,
-                    font_weight: FontWeightHint::Regular, max_width: Some(event_w - 16.0),
+                    x: x + time_col_w + 10.0,
+                    y: ey + 18.0,
+                    text: ev.time_range_label(),
+                    font_size: 10.0,
+                    color: CRUST,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(event_w - 16.0),
                 });
             }
 
             if eh > 40.0 {
                 if let Some(loc) = &ev.location {
                     cmds.push(RenderCommand::Text {
-                        x: x + time_col_w + 10.0, y: ey + 32.0,
-                        text: loc.clone(), font_size: 10.0, color: CRUST,
-                        font_weight: FontWeightHint::Regular, max_width: Some(event_w - 16.0),
+                        x: x + time_col_w + 10.0,
+                        y: ey + 32.0,
+                        text: loc.clone(),
+                        font_size: 10.0,
+                        color: CRUST,
+                        font_weight: FontWeightHint::Regular,
+                        max_width: Some(event_w - 16.0),
                     });
                 }
             }
@@ -1650,15 +2040,17 @@ impl CalendarApp {
             let my = y + row * month_h;
 
             // Month name
-            let is_current_month = self.view_date.year == self.today.year
-                && month == self.today.month;
+            let is_current_month =
+                self.view_date.year == self.today.year && month == self.today.month;
 
             cmds.push(RenderCommand::Text {
-                x: mx + 8.0, y: my + 4.0,
+                x: mx + 8.0,
+                y: my + 4.0,
                 text: month_name(month).to_string(),
                 font_size: 12.0,
                 color: if is_current_month { BLUE } else { TEXT },
-                font_weight: FontWeightHint::Bold, max_width: Some(month_w - 16.0),
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(month_w - 16.0),
             });
 
             // Mini day grid
@@ -1681,26 +2073,43 @@ impl CalendarApp {
                 let dx = mx + 8.0 + c as f32 * cell_w;
                 let dy = grid_y + r as f32 * cell_h;
 
-                let date = Date { year: self.view_date.year, month, day };
+                let date = Date {
+                    year: self.view_date.year,
+                    month,
+                    day,
+                };
                 let is_today = date.is_today(self.today);
                 let has_events = !self.store.events_on(date).is_empty();
 
                 if is_today {
                     cmds.push(RenderCommand::FillRect {
-                        x: dx - 1.0, y: dy - 1.0, width: cell_w, height: cell_h - 1.0,
-                        color: BLUE, corner_radii: CornerRadii::all(2.0),
+                        x: dx - 1.0,
+                        y: dy - 1.0,
+                        width: cell_w,
+                        height: cell_h - 1.0,
+                        color: BLUE,
+                        corner_radii: CornerRadii::all(2.0),
                     });
                 }
 
-                let fg = if is_today { CRUST }
-                    else if has_events { PEACH }
-                    else if date.is_weekend() { OVERLAY0 }
-                    else { SUBTEXT0 };
+                let fg = if is_today {
+                    CRUST
+                } else if has_events {
+                    PEACH
+                } else if date.is_weekend() {
+                    OVERLAY0
+                } else {
+                    SUBTEXT0
+                };
 
                 cmds.push(RenderCommand::Text {
-                    x: dx, y: dy, text: day.to_string(),
-                    font_size: 8.0, color: fg,
-                    font_weight: FontWeightHint::Regular, max_width: Some(cell_w),
+                    x: dx,
+                    y: dy,
+                    text: day.to_string(),
+                    font_size: 8.0,
+                    color: fg,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(cell_w),
                 });
             }
         }
@@ -1710,9 +2119,12 @@ impl CalendarApp {
         let upcoming = self.store.upcoming(self.view_date, 30);
 
         cmds.push(RenderCommand::Text {
-            x: x + 16.0, y: y + 8.0,
+            x: x + 16.0,
+            y: y + 8.0,
             text: format!("Upcoming Events ({})", upcoming.len()),
-            font_size: 14.0, color: TEXT, font_weight: FontWeightHint::Bold,
+            font_size: 14.0,
+            color: TEXT,
+            font_weight: FontWeightHint::Bold,
             max_width: Some(w - 32.0),
         });
 
@@ -1728,19 +2140,25 @@ impl CalendarApp {
 
                 let is_today = ev.start.date.is_today(self.today);
                 cmds.push(RenderCommand::FillRect {
-                    x: x + 8.0, y: row_y, width: w - 16.0, height: 22.0,
+                    x: x + 8.0,
+                    y: row_y,
+                    width: w - 16.0,
+                    height: 22.0,
                     color: if is_today { SURFACE0 } else { MANTLE },
                     corner_radii: CornerRadii::all(4.0),
                 });
                 cmds.push(RenderCommand::Text {
-                    x: x + 16.0, y: row_y + 4.0,
+                    x: x + 16.0,
+                    y: row_y + 4.0,
                     text: if is_today {
                         format!("Today - {}", ev.start.date.format_long())
                     } else {
                         ev.start.date.format_long()
                     },
-                    font_size: 12.0, color: if is_today { BLUE } else { TEXT },
-                    font_weight: FontWeightHint::Bold, max_width: Some(w - 40.0),
+                    font_size: 12.0,
+                    color: if is_today { BLUE } else { TEXT },
+                    font_weight: FontWeightHint::Bold,
+                    max_width: Some(w - 40.0),
                 });
                 row_y += 26.0;
                 last_date = Some(ev.start.date);
@@ -1748,28 +2166,48 @@ impl CalendarApp {
 
             // Event card
             cmds.push(RenderCommand::FillRect {
-                x: x + 16.0, y: row_y, width: 4.0, height: 40.0,
-                color: ev.effective_color(), corner_radii: CornerRadii::all(2.0),
+                x: x + 16.0,
+                y: row_y,
+                width: 4.0,
+                height: 40.0,
+                color: ev.effective_color(),
+                corner_radii: CornerRadii::all(2.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: x + 28.0, y: row_y + 2.0,
-                text: ev.title.clone(), font_size: 13.0, color: TEXT,
-                font_weight: FontWeightHint::Bold, max_width: Some(w - 100.0),
+                x: x + 28.0,
+                y: row_y + 2.0,
+                text: ev.title.clone(),
+                font_size: 13.0,
+                color: TEXT,
+                font_weight: FontWeightHint::Bold,
+                max_width: Some(w - 100.0),
             });
 
             cmds.push(RenderCommand::Text {
-                x: x + 28.0, y: row_y + 18.0,
-                text: format!("{} | {} | {}", ev.time_range_label(), ev.duration_label(), ev.category.label()),
-                font_size: 10.0, color: SUBTEXT0,
-                font_weight: FontWeightHint::Regular, max_width: Some(w - 60.0),
+                x: x + 28.0,
+                y: row_y + 18.0,
+                text: format!(
+                    "{} | {} | {}",
+                    ev.time_range_label(),
+                    ev.duration_label(),
+                    ev.category.label()
+                ),
+                font_size: 10.0,
+                color: SUBTEXT0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(w - 60.0),
             });
 
             if let Some(loc) = &ev.location {
                 cmds.push(RenderCommand::Text {
-                    x: x + 28.0, y: row_y + 30.0,
-                    text: loc.clone(), font_size: 10.0, color: OVERLAY0,
-                    font_weight: FontWeightHint::Regular, max_width: Some(w - 60.0),
+                    x: x + 28.0,
+                    y: row_y + 30.0,
+                    text: loc.clone(),
+                    font_size: 10.0,
+                    color: OVERLAY0,
+                    font_weight: FontWeightHint::Regular,
+                    max_width: Some(w - 60.0),
                 });
             }
 
@@ -1778,10 +2216,13 @@ impl CalendarApp {
 
         if upcoming.is_empty() {
             cmds.push(RenderCommand::Text {
-                x: x + w / 2.0 - 60.0, y: y + 100.0,
+                x: x + w / 2.0 - 60.0,
+                y: y + 100.0,
                 text: "No upcoming events".to_string(),
-                font_size: 14.0, color: OVERLAY0,
-                font_weight: FontWeightHint::Regular, max_width: Some(200.0),
+                font_size: 14.0,
+                color: OVERLAY0,
+                font_weight: FontWeightHint::Regular,
+                max_width: Some(200.0),
             });
         }
     }
@@ -1793,104 +2234,194 @@ impl CalendarApp {
 
 fn sample_events(store: &mut EventStore, today: Date) {
     store.add(CalendarEvent {
-        id: 0, title: "Team Standup".to_string(),
+        id: 0,
+        title: "Team Standup".to_string(),
         description: "Daily sync meeting".to_string(),
         category: EventCategory::Meeting,
         start: DateTime::new(today, Time { hour: 9, minute: 0 }),
-        end: DateTime::new(today, Time { hour: 9, minute: 30 }),
+        end: DateTime::new(
+            today,
+            Time {
+                hour: 9,
+                minute: 30,
+            },
+        ),
         all_day: false,
-        recurrence: RecurrenceRule::Weekly { days: vec![1, 2, 3, 4, 5] },
+        recurrence: RecurrenceRule::Weekly {
+            days: vec![1, 2, 3, 4, 5],
+        },
         reminder: Reminder::MinutesBefore(5),
         location: Some("Conference Room A".to_string()),
         color_override: None,
     });
 
     store.add(CalendarEvent {
-        id: 0, title: "Lunch with Sarah".to_string(),
+        id: 0,
+        title: "Lunch with Sarah".to_string(),
         description: String::new(),
         category: EventCategory::Social,
-        start: DateTime::new(today, Time { hour: 12, minute: 0 }),
-        end: DateTime::new(today, Time { hour: 13, minute: 0 }),
-        all_day: false, recurrence: RecurrenceRule::None,
+        start: DateTime::new(
+            today,
+            Time {
+                hour: 12,
+                minute: 0,
+            },
+        ),
+        end: DateTime::new(
+            today,
+            Time {
+                hour: 13,
+                minute: 0,
+            },
+        ),
+        all_day: false,
+        recurrence: RecurrenceRule::None,
         reminder: Reminder::MinutesBefore(30),
         location: Some("Downtown Cafe".to_string()),
         color_override: None,
     });
 
     store.add(CalendarEvent {
-        id: 0, title: "Project Deadline".to_string(),
+        id: 0,
+        title: "Project Deadline".to_string(),
         description: "Q2 deliverables due".to_string(),
         category: EventCategory::Deadline,
-        start: DateTime::new(today.add_days(3), Time { hour: 17, minute: 0 }),
-        end: DateTime::new(today.add_days(3), Time { hour: 17, minute: 0 }),
-        all_day: false, recurrence: RecurrenceRule::None,
+        start: DateTime::new(
+            today.add_days(3),
+            Time {
+                hour: 17,
+                minute: 0,
+            },
+        ),
+        end: DateTime::new(
+            today.add_days(3),
+            Time {
+                hour: 17,
+                minute: 0,
+            },
+        ),
+        all_day: false,
+        recurrence: RecurrenceRule::None,
         reminder: Reminder::DayBefore,
-        location: None, color_override: None,
+        location: None,
+        color_override: None,
     });
 
     store.add(CalendarEvent {
-        id: 0, title: "Mom's Birthday".to_string(),
+        id: 0,
+        title: "Mom's Birthday".to_string(),
         description: String::new(),
         category: EventCategory::Birthday,
         start: DateTime::new(today.add_days(7), Time { hour: 0, minute: 0 }),
-        end: DateTime::new(today.add_days(7), Time { hour: 23, minute: 59 }),
+        end: DateTime::new(
+            today.add_days(7),
+            Time {
+                hour: 23,
+                minute: 59,
+            },
+        ),
         all_day: true,
         recurrence: RecurrenceRule::Yearly,
         reminder: Reminder::DayBefore,
-        location: None, color_override: None,
+        location: None,
+        color_override: None,
     });
 
     store.add(CalendarEvent {
-        id: 0, title: "Gym Session".to_string(),
+        id: 0,
+        title: "Gym Session".to_string(),
         description: "Upper body workout".to_string(),
         category: EventCategory::Health,
         start: DateTime::new(today.add_days(1), Time { hour: 7, minute: 0 }),
         end: DateTime::new(today.add_days(1), Time { hour: 8, minute: 0 }),
         all_day: false,
-        recurrence: RecurrenceRule::Weekly { days: vec![1, 3, 5] },
+        recurrence: RecurrenceRule::Weekly {
+            days: vec![1, 3, 5],
+        },
         reminder: Reminder::MinutesBefore(15),
         location: Some("FitLife Gym".to_string()),
         color_override: None,
     });
 
     store.add(CalendarEvent {
-        id: 0, title: "Vacation".to_string(),
+        id: 0,
+        title: "Vacation".to_string(),
         description: "Summer holiday".to_string(),
         category: EventCategory::Travel,
         start: DateTime::new(today.add_days(14), Time { hour: 0, minute: 0 }),
-        end: DateTime::new(today.add_days(21), Time { hour: 23, minute: 59 }),
-        all_day: true, recurrence: RecurrenceRule::None,
+        end: DateTime::new(
+            today.add_days(21),
+            Time {
+                hour: 23,
+                minute: 59,
+            },
+        ),
+        all_day: true,
+        recurrence: RecurrenceRule::None,
         reminder: Reminder::DayBefore,
         location: Some("Barcelona, Spain".to_string()),
         color_override: None,
     });
 
     store.add(CalendarEvent {
-        id: 0, title: "Code Review".to_string(),
+        id: 0,
+        title: "Code Review".to_string(),
         description: "Review PR #42".to_string(),
         category: EventCategory::Work,
-        start: DateTime::new(today, Time { hour: 14, minute: 0 }),
-        end: DateTime::new(today, Time { hour: 15, minute: 30 }),
-        all_day: false, recurrence: RecurrenceRule::None,
+        start: DateTime::new(
+            today,
+            Time {
+                hour: 14,
+                minute: 0,
+            },
+        ),
+        end: DateTime::new(
+            today,
+            Time {
+                hour: 15,
+                minute: 30,
+            },
+        ),
+        all_day: false,
+        recurrence: RecurrenceRule::None,
         reminder: Reminder::MinutesBefore(10),
-        location: None, color_override: None,
+        location: None,
+        color_override: None,
     });
 
     store.add(CalendarEvent {
-        id: 0, title: "Online Course: Rust".to_string(),
+        id: 0,
+        title: "Online Course: Rust".to_string(),
         description: "Advanced async programming".to_string(),
         category: EventCategory::Education,
-        start: DateTime::new(today.add_days(2), Time { hour: 19, minute: 0 }),
-        end: DateTime::new(today.add_days(2), Time { hour: 21, minute: 0 }),
+        start: DateTime::new(
+            today.add_days(2),
+            Time {
+                hour: 19,
+                minute: 0,
+            },
+        ),
+        end: DateTime::new(
+            today.add_days(2),
+            Time {
+                hour: 21,
+                minute: 0,
+            },
+        ),
         all_day: false,
         recurrence: RecurrenceRule::Weekly { days: vec![2, 4] },
         reminder: Reminder::MinutesBefore(15),
-        location: None, color_override: None,
+        location: None,
+        color_override: None,
     });
 }
 
 fn main() {
-    let today = Date { year: 2026, month: 5, day: 18 };
+    let today = Date {
+        year: 2026,
+        month: 5,
+        day: 18,
+    };
     let mut app = CalendarApp::new(1280.0, 720.0, today);
 
     sample_events(&mut app.store, today);
@@ -1955,17 +2486,29 @@ mod tests {
     #[test]
     fn test_day_of_week() {
         // 2024-01-01 is Monday
-        let d = Date { year: 2024, month: 1, day: 1 };
+        let d = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        };
         assert_eq!(d.day_of_week(), 1);
 
         // 2024-01-07 is Sunday
-        let d = Date { year: 2024, month: 1, day: 7 };
+        let d = Date {
+            year: 2024,
+            month: 1,
+            day: 7,
+        };
         assert_eq!(d.day_of_week(), 0);
     }
 
     #[test]
     fn test_date_format() {
-        let d = Date { year: 2024, month: 3, day: 15 };
+        let d = Date {
+            year: 2024,
+            month: 3,
+            day: 15,
+        };
         assert_eq!(d.format_short(), "2024-03-15");
         assert!(d.format_long().contains("March"));
         assert!(d.format_long().contains("15"));
@@ -1973,7 +2516,11 @@ mod tests {
 
     #[test]
     fn test_date_add_days() {
-        let d = Date { year: 2024, month: 1, day: 30 };
+        let d = Date {
+            year: 2024,
+            month: 1,
+            day: 30,
+        };
         let next = d.add_days(3);
         assert_eq!(next.month, 2);
         assert_eq!(next.day, 2);
@@ -1981,7 +2528,11 @@ mod tests {
 
     #[test]
     fn test_date_add_days_negative() {
-        let d = Date { year: 2024, month: 3, day: 1 };
+        let d = Date {
+            year: 2024,
+            month: 3,
+            day: 1,
+        };
         let prev = d.add_days(-1);
         assert_eq!(prev.month, 2);
         assert_eq!(prev.day, 29); // 2024 is leap year
@@ -1989,12 +2540,20 @@ mod tests {
 
     #[test]
     fn test_date_next_prev_month() {
-        let d = Date { year: 2024, month: 1, day: 31 };
+        let d = Date {
+            year: 2024,
+            month: 1,
+            day: 31,
+        };
         let next = d.next_month();
         assert_eq!(next.month, 2);
         assert_eq!(next.day, 29); // Clamped to max day in Feb
 
-        let d2 = Date { year: 2024, month: 1, day: 15 };
+        let d2 = Date {
+            year: 2024,
+            month: 1,
+            day: 15,
+        };
         let prev = d2.prev_month();
         assert_eq!(prev.month, 12);
         assert_eq!(prev.year, 2023);
@@ -2002,24 +2561,48 @@ mod tests {
 
     #[test]
     fn test_date_weekend() {
-        let sat = Date { year: 2024, month: 1, day: 6 };
+        let sat = Date {
+            year: 2024,
+            month: 1,
+            day: 6,
+        };
         assert!(sat.is_weekend());
-        let mon = Date { year: 2024, month: 1, day: 1 };
+        let mon = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        };
         assert!(!mon.is_weekend());
     }
 
     #[test]
     fn test_date_days_since() {
-        let a = Date { year: 2024, month: 1, day: 10 };
-        let b = Date { year: 2024, month: 1, day: 1 };
+        let a = Date {
+            year: 2024,
+            month: 1,
+            day: 10,
+        };
+        let b = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        };
         assert_eq!(a.days_since(b), 9);
     }
 
     #[test]
     fn test_day_of_year() {
-        let d = Date { year: 2024, month: 1, day: 1 };
+        let d = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        };
         assert_eq!(d.day_of_year(), 1);
-        let d2 = Date { year: 2024, month: 12, day: 31 };
+        let d2 = Date {
+            year: 2024,
+            month: 12,
+            day: 31,
+        };
         assert_eq!(d2.day_of_year(), 366); // Leap year
     }
 
@@ -2038,7 +2621,10 @@ mod tests {
 
     #[test]
     fn test_time_format() {
-        let t = Time { hour: 14, minute: 30 };
+        let t = Time {
+            hour: 14,
+            minute: 30,
+        };
         assert_eq!(t.format_24h(), "14:30");
         assert_eq!(t.format_12h(), "2:30 PM");
 
@@ -2048,7 +2634,10 @@ mod tests {
 
     #[test]
     fn test_time_to_minutes() {
-        let t = Time { hour: 2, minute: 30 };
+        let t = Time {
+            hour: 2,
+            minute: 30,
+        };
         assert_eq!(t.to_minutes(), 150);
     }
 
@@ -2063,8 +2652,15 @@ mod tests {
     #[test]
     fn test_datetime_format_ics() {
         let dt = DateTime {
-            date: Date { year: 2024, month: 3, day: 15 },
-            time: Time { hour: 14, minute: 30 },
+            date: Date {
+                year: 2024,
+                month: 3,
+                day: 15,
+            },
+            time: Time {
+                hour: 14,
+                minute: 30,
+            },
         };
         assert_eq!(dt.format_ics(), "20240315T143000");
     }
@@ -2083,51 +2679,137 @@ mod tests {
     #[test]
     fn test_recurrence_daily() {
         let rule = RecurrenceRule::Daily;
-        let origin = Date { year: 2024, month: 1, day: 1 };
-        assert!(rule.matches(origin, Date { year: 2024, month: 1, day: 5 }));
+        let origin = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        };
+        assert!(rule.matches(
+            origin,
+            Date {
+                year: 2024,
+                month: 1,
+                day: 5
+            }
+        ));
         assert!(rule.matches(origin, origin));
     }
 
     #[test]
     fn test_recurrence_weekly() {
-        let rule = RecurrenceRule::Weekly { days: vec![1, 3, 5] }; // Mon, Wed, Fri
-        let origin = Date { year: 2024, month: 1, day: 1 }; // Monday
+        let rule = RecurrenceRule::Weekly {
+            days: vec![1, 3, 5],
+        }; // Mon, Wed, Fri
+        let origin = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        }; // Monday
         // Jan 3 2024 is Wednesday
-        assert!(rule.matches(origin, Date { year: 2024, month: 1, day: 3 }));
+        assert!(rule.matches(
+            origin,
+            Date {
+                year: 2024,
+                month: 1,
+                day: 3
+            }
+        ));
     }
 
     #[test]
     fn test_recurrence_monthly() {
         let rule = RecurrenceRule::Monthly;
-        let origin = Date { year: 2024, month: 1, day: 15 };
-        assert!(rule.matches(origin, Date { year: 2024, month: 3, day: 15 }));
-        assert!(!rule.matches(origin, Date { year: 2024, month: 3, day: 16 }));
+        let origin = Date {
+            year: 2024,
+            month: 1,
+            day: 15,
+        };
+        assert!(rule.matches(
+            origin,
+            Date {
+                year: 2024,
+                month: 3,
+                day: 15
+            }
+        ));
+        assert!(!rule.matches(
+            origin,
+            Date {
+                year: 2024,
+                month: 3,
+                day: 16
+            }
+        ));
     }
 
     #[test]
     fn test_recurrence_yearly() {
         let rule = RecurrenceRule::Yearly;
-        let origin = Date { year: 2024, month: 6, day: 15 };
-        assert!(rule.matches(origin, Date { year: 2025, month: 6, day: 15 }));
-        assert!(!rule.matches(origin, Date { year: 2025, month: 7, day: 15 }));
+        let origin = Date {
+            year: 2024,
+            month: 6,
+            day: 15,
+        };
+        assert!(rule.matches(
+            origin,
+            Date {
+                year: 2025,
+                month: 6,
+                day: 15
+            }
+        ));
+        assert!(!rule.matches(
+            origin,
+            Date {
+                year: 2025,
+                month: 7,
+                day: 15
+            }
+        ));
     }
 
     #[test]
     fn test_recurrence_next_occurrence() {
         let rule = RecurrenceRule::Daily;
-        let from = Date { year: 2024, month: 1, day: 1 };
+        let from = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        };
         let next = rule.next_occurrence(from).unwrap();
-        assert_eq!(next, Date { year: 2024, month: 1, day: 2 });
+        assert_eq!(
+            next,
+            Date {
+                year: 2024,
+                month: 1,
+                day: 2
+            }
+        );
     }
 
     #[test]
     fn test_recurrence_none() {
         let rule = RecurrenceRule::None;
         assert!(!rule.matches(
-            Date { year: 2024, month: 1, day: 1 },
-            Date { year: 2024, month: 1, day: 2 },
+            Date {
+                year: 2024,
+                month: 1,
+                day: 1
+            },
+            Date {
+                year: 2024,
+                month: 1,
+                day: 2
+            },
         ));
-        assert!(rule.next_occurrence(Date { year: 2024, month: 1, day: 1 }).is_none());
+        assert!(
+            rule.next_occurrence(Date {
+                year: 2024,
+                month: 1,
+                day: 1
+            })
+            .is_none()
+        );
     }
 
     // Reminder tests
@@ -2141,12 +2823,34 @@ mod tests {
     #[test]
     fn test_event_duration() {
         let ev = CalendarEvent {
-            id: 1, title: "Test".to_string(), description: String::new(),
+            id: 1,
+            title: "Test".to_string(),
+            description: String::new(),
             category: EventCategory::Work,
-            start: DateTime::new(Date { year: 2024, month: 1, day: 1 }, Time { hour: 9, minute: 0 }),
-            end: DateTime::new(Date { year: 2024, month: 1, day: 1 }, Time { hour: 10, minute: 30 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            start: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                },
+                Time { hour: 9, minute: 0 },
+            ),
+            end: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                },
+                Time {
+                    hour: 10,
+                    minute: 30,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         };
         assert_eq!(ev.duration_minutes(), 90);
         assert_eq!(ev.duration_label(), "1h 30m");
@@ -2155,12 +2859,34 @@ mod tests {
     #[test]
     fn test_event_all_day_duration() {
         let ev = CalendarEvent {
-            id: 1, title: "Holiday".to_string(), description: String::new(),
+            id: 1,
+            title: "Holiday".to_string(),
+            description: String::new(),
             category: EventCategory::Holiday,
-            start: DateTime::new(Date { year: 2024, month: 12, day: 25 }, Time { hour: 0, minute: 0 }),
-            end: DateTime::new(Date { year: 2024, month: 12, day: 25 }, Time { hour: 23, minute: 59 }),
-            all_day: true, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            start: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 12,
+                    day: 25,
+                },
+                Time { hour: 0, minute: 0 },
+            ),
+            end: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 12,
+                    day: 25,
+                },
+                Time {
+                    hour: 23,
+                    minute: 59,
+                },
+            ),
+            all_day: true,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         };
         assert_eq!(ev.duration_label(), "All day");
     }
@@ -2168,30 +2894,85 @@ mod tests {
     #[test]
     fn test_event_occurs_on() {
         let ev = CalendarEvent {
-            id: 1, title: "Test".to_string(), description: String::new(),
+            id: 1,
+            title: "Test".to_string(),
+            description: String::new(),
             category: EventCategory::Work,
-            start: DateTime::new(Date { year: 2024, month: 1, day: 1 }, Time { hour: 9, minute: 0 }),
-            end: DateTime::new(Date { year: 2024, month: 1, day: 1 }, Time { hour: 10, minute: 0 }),
+            start: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                },
+                Time { hour: 9, minute: 0 },
+            ),
+            end: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                },
+                Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
             all_day: false,
             recurrence: RecurrenceRule::Weekly { days: vec![1] }, // Mondays
-            reminder: Reminder::None, location: None, color_override: None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         };
         // Jan 1 2024 is Monday
-        assert!(ev.occurs_on(Date { year: 2024, month: 1, day: 1 }));
-        assert!(ev.occurs_on(Date { year: 2024, month: 1, day: 8 })); // Next Monday
-        assert!(!ev.occurs_on(Date { year: 2024, month: 1, day: 2 })); // Tuesday
+        assert!(ev.occurs_on(Date {
+            year: 2024,
+            month: 1,
+            day: 1
+        }));
+        assert!(ev.occurs_on(Date {
+            year: 2024,
+            month: 1,
+            day: 8
+        })); // Next Monday
+        assert!(!ev.occurs_on(Date {
+            year: 2024,
+            month: 1,
+            day: 2
+        })); // Tuesday
     }
 
     // ICS tests
     #[test]
     fn test_ics_roundtrip() {
         let ev = CalendarEvent {
-            id: 42, title: "Meeting".to_string(),
+            id: 42,
+            title: "Meeting".to_string(),
             description: "Important meeting".to_string(),
             category: EventCategory::Meeting,
-            start: DateTime::new(Date { year: 2024, month: 6, day: 15 }, Time { hour: 10, minute: 0 }),
-            end: DateTime::new(Date { year: 2024, month: 6, day: 15 }, Time { hour: 11, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
+            start: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 6,
+                    day: 15,
+                },
+                Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
+            end: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 6,
+                    day: 15,
+                },
+                Time {
+                    hour: 11,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
             reminder: Reminder::None,
             location: Some("Room 101".to_string()),
             color_override: None,
@@ -2233,12 +3014,34 @@ mod tests {
     fn test_store_add_remove() {
         let mut store = EventStore::new();
         let id = store.add(CalendarEvent {
-            id: 0, title: "Test".to_string(), description: String::new(),
+            id: 0,
+            title: "Test".to_string(),
+            description: String::new(),
             category: EventCategory::Work,
-            start: DateTime::new(Date { year: 2024, month: 1, day: 1 }, Time { hour: 9, minute: 0 }),
-            end: DateTime::new(Date { year: 2024, month: 1, day: 1 }, Time { hour: 10, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            start: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                },
+                Time { hour: 9, minute: 0 },
+            ),
+            end: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                },
+                Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         });
         assert_eq!(store.len(), 1);
         assert!(store.get(id).is_some());
@@ -2249,22 +3052,54 @@ mod tests {
     #[test]
     fn test_store_events_on() {
         let mut store = EventStore::new();
-        let date = Date { year: 2024, month: 3, day: 15 };
+        let date = Date {
+            year: 2024,
+            month: 3,
+            day: 15,
+        };
         store.add(CalendarEvent {
-            id: 0, title: "A".to_string(), description: String::new(),
+            id: 0,
+            title: "A".to_string(),
+            description: String::new(),
             category: EventCategory::Work,
             start: DateTime::new(date, Time { hour: 9, minute: 0 }),
-            end: DateTime::new(date, Time { hour: 10, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            end: DateTime::new(
+                date,
+                Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         });
         store.add(CalendarEvent {
-            id: 0, title: "B".to_string(), description: String::new(),
+            id: 0,
+            title: "B".to_string(),
+            description: String::new(),
             category: EventCategory::Personal,
-            start: DateTime::new(date.add_days(1), Time { hour: 12, minute: 0 }),
-            end: DateTime::new(date.add_days(1), Time { hour: 13, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            start: DateTime::new(
+                date.add_days(1),
+                Time {
+                    hour: 12,
+                    minute: 0,
+                },
+            ),
+            end: DateTime::new(
+                date.add_days(1),
+                Time {
+                    hour: 13,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         });
 
         assert_eq!(store.events_on(date).len(), 1);
@@ -2275,23 +3110,54 @@ mod tests {
     #[test]
     fn test_store_search() {
         let mut store = EventStore::new();
-        let date = Date { year: 2024, month: 1, day: 1 };
+        let date = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        };
         store.add(CalendarEvent {
-            id: 0, title: "Team Meeting".to_string(),
+            id: 0,
+            title: "Team Meeting".to_string(),
             description: "Weekly sync".to_string(),
             category: EventCategory::Meeting,
             start: DateTime::new(date, Time { hour: 9, minute: 0 }),
-            end: DateTime::new(date, Time { hour: 10, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            end: DateTime::new(
+                date,
+                Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         });
         store.add(CalendarEvent {
-            id: 0, title: "Lunch".to_string(), description: String::new(),
+            id: 0,
+            title: "Lunch".to_string(),
+            description: String::new(),
             category: EventCategory::Social,
-            start: DateTime::new(date, Time { hour: 12, minute: 0 }),
-            end: DateTime::new(date, Time { hour: 13, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            start: DateTime::new(
+                date,
+                Time {
+                    hour: 12,
+                    minute: 0,
+                },
+            ),
+            end: DateTime::new(
+                date,
+                Time {
+                    hour: 13,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         });
 
         assert_eq!(store.search("meeting").len(), 1);
@@ -2302,22 +3168,42 @@ mod tests {
     #[test]
     fn test_store_by_category() {
         let mut store = EventStore::new();
-        let date = Date { year: 2024, month: 1, day: 1 };
+        let date = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        };
         store.add(CalendarEvent {
-            id: 0, title: "Work".to_string(), description: String::new(),
+            id: 0,
+            title: "Work".to_string(),
+            description: String::new(),
             category: EventCategory::Work,
             start: DateTime::new(date, Time { hour: 9, minute: 0 }),
-            end: DateTime::new(date, Time { hour: 10, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            end: DateTime::new(
+                date,
+                Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         });
         store.add(CalendarEvent {
-            id: 0, title: "Gym".to_string(), description: String::new(),
+            id: 0,
+            title: "Gym".to_string(),
+            description: String::new(),
             category: EventCategory::Health,
             start: DateTime::new(date, Time { hour: 7, minute: 0 }),
             end: DateTime::new(date, Time { hour: 8, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         });
 
         assert_eq!(store.events_by_category(EventCategory::Work).len(), 1);
@@ -2338,7 +3224,11 @@ mod tests {
     // CalendarApp tests
     #[test]
     fn test_app_navigation() {
-        let today = Date { year: 2024, month: 6, day: 15 };
+        let today = Date {
+            year: 2024,
+            month: 6,
+            day: 15,
+        };
         let mut app = CalendarApp::new(800.0, 600.0, today);
 
         app.view = CalendarView::Month;
@@ -2352,7 +3242,11 @@ mod tests {
 
     #[test]
     fn test_app_navigation_week() {
-        let today = Date { year: 2024, month: 6, day: 15 };
+        let today = Date {
+            year: 2024,
+            month: 6,
+            day: 15,
+        };
         let mut app = CalendarApp::new(800.0, 600.0, today);
         app.view = CalendarView::Week;
         app.navigate_forward();
@@ -2361,7 +3255,11 @@ mod tests {
 
     #[test]
     fn test_app_render_all_views() {
-        let today = Date { year: 2024, month: 6, day: 15 };
+        let today = Date {
+            year: 2024,
+            month: 6,
+            day: 15,
+        };
         let mut app = CalendarApp::new(1280.0, 720.0, today);
         sample_events(&mut app.store, today);
 
@@ -2374,7 +3272,11 @@ mod tests {
 
     #[test]
     fn test_app_render_without_sidebar() {
-        let today = Date { year: 2024, month: 6, day: 15 };
+        let today = Date {
+            year: 2024,
+            month: 6,
+            day: 15,
+        };
         let mut app = CalendarApp::new(800.0, 600.0, today);
         app.sidebar_visible = false;
         let cmds = app.render();
@@ -2383,7 +3285,11 @@ mod tests {
 
     #[test]
     fn test_app_search() {
-        let today = Date { year: 2024, month: 6, day: 15 };
+        let today = Date {
+            year: 2024,
+            month: 6,
+            day: 15,
+        };
         let mut app = CalendarApp::new(800.0, 600.0, today);
         sample_events(&mut app.store, today);
 
@@ -2422,7 +3328,11 @@ mod tests {
     // Week number test
     #[test]
     fn test_week_number() {
-        let d = Date { year: 2024, month: 1, day: 8 };
+        let d = Date {
+            year: 2024,
+            month: 1,
+            day: 8,
+        };
         let wn = d.week_number();
         assert!(wn >= 1 && wn <= 53);
     }
@@ -2431,12 +3341,34 @@ mod tests {
     #[test]
     fn test_time_range_label() {
         let ev = CalendarEvent {
-            id: 1, title: "T".to_string(), description: String::new(),
+            id: 1,
+            title: "T".to_string(),
+            description: String::new(),
             category: EventCategory::Work,
-            start: DateTime::new(Date { year: 2024, month: 1, day: 1 }, Time { hour: 9, minute: 0 }),
-            end: DateTime::new(Date { year: 2024, month: 1, day: 1 }, Time { hour: 10, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            start: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                },
+                Time { hour: 9, minute: 0 },
+            ),
+            end: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                },
+                Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         };
         let label = ev.time_range_label();
         assert!(label.contains("9:00 AM"));
@@ -2447,13 +3379,36 @@ mod tests {
     #[test]
     fn test_ics_weekly_recurrence() {
         let ev = CalendarEvent {
-            id: 1, title: "Weekly".to_string(), description: String::new(),
+            id: 1,
+            title: "Weekly".to_string(),
+            description: String::new(),
             category: EventCategory::Work,
-            start: DateTime::new(Date { year: 2024, month: 1, day: 1 }, Time { hour: 9, minute: 0 }),
-            end: DateTime::new(Date { year: 2024, month: 1, day: 1 }, Time { hour: 10, minute: 0 }),
+            start: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                },
+                Time { hour: 9, minute: 0 },
+            ),
+            end: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 1,
+                    day: 1,
+                },
+                Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
             all_day: false,
-            recurrence: RecurrenceRule::Weekly { days: vec![1, 3, 5] },
-            reminder: Reminder::None, location: None, color_override: None,
+            recurrence: RecurrenceRule::Weekly {
+                days: vec![1, 3, 5],
+            },
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         };
         let ics = ev.to_ics();
         assert!(ics.contains("RRULE:FREQ=WEEKLY;BYDAY=MO,WE,FR"));
@@ -2462,12 +3417,34 @@ mod tests {
     #[test]
     fn test_ics_yearly_recurrence() {
         let ev = CalendarEvent {
-            id: 1, title: "Birthday".to_string(), description: String::new(),
+            id: 1,
+            title: "Birthday".to_string(),
+            description: String::new(),
             category: EventCategory::Birthday,
-            start: DateTime::new(Date { year: 2024, month: 6, day: 15 }, Time { hour: 0, minute: 0 }),
-            end: DateTime::new(Date { year: 2024, month: 6, day: 15 }, Time { hour: 23, minute: 59 }),
-            all_day: true, recurrence: RecurrenceRule::Yearly,
-            reminder: Reminder::None, location: None, color_override: None,
+            start: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 6,
+                    day: 15,
+                },
+                Time { hour: 0, minute: 0 },
+            ),
+            end: DateTime::new(
+                Date {
+                    year: 2024,
+                    month: 6,
+                    day: 15,
+                },
+                Time {
+                    hour: 23,
+                    minute: 59,
+                },
+            ),
+            all_day: true,
+            recurrence: RecurrenceRule::Yearly,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         };
         let ics = ev.to_ics();
         assert!(ics.contains("RRULE:FREQ=YEARLY"));
@@ -2476,7 +3453,11 @@ mod tests {
     // Edge cases
     #[test]
     fn test_date_add_days_year_boundary() {
-        let d = Date { year: 2024, month: 12, day: 30 };
+        let d = Date {
+            year: 2024,
+            month: 12,
+            day: 30,
+        };
         let next = d.add_days(5);
         assert_eq!(next.year, 2025);
         assert_eq!(next.month, 1);
@@ -2486,7 +3467,11 @@ mod tests {
     fn test_empty_store() {
         let store = EventStore::new();
         assert!(store.is_empty());
-        let date = Date { year: 2024, month: 1, day: 1 };
+        let date = Date {
+            year: 2024,
+            month: 1,
+            day: 1,
+        };
         assert!(store.events_on(date).is_empty());
         assert!(store.search("test").is_empty());
     }
@@ -2494,23 +3479,49 @@ mod tests {
     #[test]
     fn test_upcoming_sorted() {
         let mut store = EventStore::new();
-        let base = Date { year: 2024, month: 6, day: 1 };
+        let base = Date {
+            year: 2024,
+            month: 6,
+            day: 1,
+        };
 
         store.add(CalendarEvent {
-            id: 0, title: "Later".to_string(), description: String::new(),
+            id: 0,
+            title: "Later".to_string(),
+            description: String::new(),
             category: EventCategory::Work,
             start: DateTime::new(base.add_days(5), Time { hour: 9, minute: 0 }),
-            end: DateTime::new(base.add_days(5), Time { hour: 10, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            end: DateTime::new(
+                base.add_days(5),
+                Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         });
         store.add(CalendarEvent {
-            id: 0, title: "Sooner".to_string(), description: String::new(),
+            id: 0,
+            title: "Sooner".to_string(),
+            description: String::new(),
             category: EventCategory::Work,
             start: DateTime::new(base.add_days(2), Time { hour: 9, minute: 0 }),
-            end: DateTime::new(base.add_days(2), Time { hour: 10, minute: 0 }),
-            all_day: false, recurrence: RecurrenceRule::None,
-            reminder: Reminder::None, location: None, color_override: None,
+            end: DateTime::new(
+                base.add_days(2),
+                Time {
+                    hour: 10,
+                    minute: 0,
+                },
+            ),
+            all_day: false,
+            recurrence: RecurrenceRule::None,
+            reminder: Reminder::None,
+            location: None,
+            color_override: None,
         });
 
         let upcoming = store.upcoming(base, 10);

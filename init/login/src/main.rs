@@ -19,7 +19,9 @@
 #[allow(unused_imports)]
 use guitk::color::Color;
 #[allow(unused_imports)]
-use guitk::event::{Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
+use guitk::event::{
+    Event, EventResult, Key, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 #[allow(unused_imports)]
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
@@ -119,28 +121,82 @@ const LARGE_FONT_SCALE: f32 = 1.4;
 
 /// SHA-256 initial hash values.
 const SHA256_H0: [u32; 8] = [
-    0x6a09_e667, 0xbb67_ae85, 0x3c6e_f372, 0xa54f_f53a,
-    0x510e_527f, 0x9b05_688c, 0x1f83_d9ab, 0x5be0_cd19,
+    0x6a09_e667,
+    0xbb67_ae85,
+    0x3c6e_f372,
+    0xa54f_f53a,
+    0x510e_527f,
+    0x9b05_688c,
+    0x1f83_d9ab,
+    0x5be0_cd19,
 ];
 
 /// SHA-256 round constants.
 const SHA256_K: [u32; 64] = [
-    0x428a_2f98, 0x7137_4491, 0xb5c0_fbcf, 0xe9b5_dba5,
-    0x3956_c25b, 0x59f1_11f1, 0x923f_82a4, 0xab1c_5ed5,
-    0xd807_aa98, 0x1283_5b01, 0x2431_85be, 0x550c_7dc3,
-    0x72be_5d74, 0x80de_b1fe, 0x9bdc_06a7, 0xc19b_f174,
-    0xe49b_69c1, 0xefbe_4786, 0x0fc1_9dc6, 0x240c_a1cc,
-    0x2de9_2c6f, 0x4a74_84aa, 0x5cb0_a9dc, 0x76f9_88da,
-    0x983e_5152, 0xa831_c66d, 0xb003_27c8, 0xbf59_7fc7,
-    0xc6e0_0bf3, 0xd5a7_9147, 0x06ca_6351, 0x1429_2967,
-    0x27b7_0a85, 0x2e1b_2138, 0x4d2c_6dfc, 0x5338_0d13,
-    0x650a_7354, 0x766a_0abb, 0x81c2_c92e, 0x9272_2c85,
-    0xa2bf_e8a1, 0xa81a_664b, 0xc24b_8b70, 0xc76c_51a3,
-    0xd192_e819, 0xd699_0624, 0xf40e_3585, 0x106a_a070,
-    0x19a4_c116, 0x1e37_6c08, 0x2748_774c, 0x34b0_bcb5,
-    0x391c_0cb3, 0x4ed8_aa4a, 0x5b9c_ca4f, 0x682e_6ff3,
-    0x748f_82ee, 0x78a5_636f, 0x84c8_7814, 0x8cc7_0208,
-    0x90be_fffa, 0xa450_6ceb, 0xbef9_a3f7, 0xc671_78f2,
+    0x428a_2f98,
+    0x7137_4491,
+    0xb5c0_fbcf,
+    0xe9b5_dba5,
+    0x3956_c25b,
+    0x59f1_11f1,
+    0x923f_82a4,
+    0xab1c_5ed5,
+    0xd807_aa98,
+    0x1283_5b01,
+    0x2431_85be,
+    0x550c_7dc3,
+    0x72be_5d74,
+    0x80de_b1fe,
+    0x9bdc_06a7,
+    0xc19b_f174,
+    0xe49b_69c1,
+    0xefbe_4786,
+    0x0fc1_9dc6,
+    0x240c_a1cc,
+    0x2de9_2c6f,
+    0x4a74_84aa,
+    0x5cb0_a9dc,
+    0x76f9_88da,
+    0x983e_5152,
+    0xa831_c66d,
+    0xb003_27c8,
+    0xbf59_7fc7,
+    0xc6e0_0bf3,
+    0xd5a7_9147,
+    0x06ca_6351,
+    0x1429_2967,
+    0x27b7_0a85,
+    0x2e1b_2138,
+    0x4d2c_6dfc,
+    0x5338_0d13,
+    0x650a_7354,
+    0x766a_0abb,
+    0x81c2_c92e,
+    0x9272_2c85,
+    0xa2bf_e8a1,
+    0xa81a_664b,
+    0xc24b_8b70,
+    0xc76c_51a3,
+    0xd192_e819,
+    0xd699_0624,
+    0xf40e_3585,
+    0x106a_a070,
+    0x19a4_c116,
+    0x1e37_6c08,
+    0x2748_774c,
+    0x34b0_bcb5,
+    0x391c_0cb3,
+    0x4ed8_aa4a,
+    0x5b9c_ca4f,
+    0x682e_6ff3,
+    0x748f_82ee,
+    0x78a5_636f,
+    0x84c8_7814,
+    0x8cc7_0208,
+    0x90be_fffa,
+    0xa450_6ceb,
+    0xbef9_a3f7,
+    0xc671_78f2,
 ];
 
 /// SHA-256 compression function.
@@ -150,21 +206,12 @@ fn sha256_compress(state: &mut [u32; 8], block: &[u8; 64]) {
 
     for i in 0..16 {
         let off = i * 4;
-        w[i] = u32::from_be_bytes([
-            block[off],
-            block[off + 1],
-            block[off + 2],
-            block[off + 3],
-        ]);
+        w[i] = u32::from_be_bytes([block[off], block[off + 1], block[off + 2], block[off + 3]]);
     }
 
     for i in 16..64 {
-        let s0 = w[i - 15].rotate_right(7)
-            ^ w[i - 15].rotate_right(18)
-            ^ (w[i - 15] >> 3);
-        let s1 = w[i - 2].rotate_right(17)
-            ^ w[i - 2].rotate_right(19)
-            ^ (w[i - 2] >> 10);
+        let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+        let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
         w[i] = w[i - 16]
             .wrapping_add(s0)
             .wrapping_add(w[i - 7])
@@ -291,8 +338,7 @@ fn bytes_to_hex(data: &[u8]) -> String {
 }
 
 const HEX_CHARS: [char; 16] = [
-    '0', '1', '2', '3', '4', '5', '6', '7',
-    '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
+    '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f',
 ];
 
 /// Parse a hex string into bytes. Returns None on invalid input.
@@ -480,7 +526,10 @@ fn serialize_users_yaml(users: &[UserAccount]) -> String {
         yaml.push_str(&format!("    home_dir: \"{}\"\n", user.home_dir));
         yaml.push_str(&format!("    is_admin: {}\n", user.is_admin));
         yaml.push_str(&format!("    auto_login: {}\n", user.auto_login));
-        yaml.push_str(&format!("    last_login_timestamp: {}\n", user.last_login_timestamp));
+        yaml.push_str(&format!(
+            "    last_login_timestamp: {}\n",
+            user.last_login_timestamp
+        ));
         yaml.push_str(&format!("    login_count: {}\n", user.login_count));
     }
     yaml
@@ -518,7 +567,11 @@ fn parse_users_yaml(yaml: &str) -> Vec<UserAccount> {
             // Parse subsequent indented fields.
             while i < lines.len() {
                 let field = lines[i].trim();
-                if field.starts_with("- uid:") || field.is_empty() && i + 1 < lines.len() && lines[i + 1].trim().starts_with("- uid:") {
+                if field.starts_with("- uid:")
+                    || field.is_empty()
+                        && i + 1 < lines.len()
+                        && lines[i + 1].trim().starts_with("- uid:")
+                {
                     break;
                 }
                 if field.is_empty() || field.starts_with('#') {
@@ -536,7 +589,11 @@ fn parse_users_yaml(yaml: &str) -> Vec<UserAccount> {
                     password_salt = strip_yaml_string(val);
                 } else if let Some(val) = field.strip_prefix("avatar_path:") {
                     let v = strip_yaml_string(val);
-                    avatar_path = if v == "null" || v.is_empty() { None } else { Some(v) };
+                    avatar_path = if v == "null" || v.is_empty() {
+                        None
+                    } else {
+                        Some(v)
+                    };
                 } else if let Some(val) = field.strip_prefix("shell:") {
                     shell = strip_yaml_string(val);
                 } else if let Some(val) = field.strip_prefix("home_dir:") {
@@ -612,10 +669,7 @@ fn save_user_database(users: &[UserAccount]) -> Result<(), std::io::Error> {
 
 /// Default user accounts for a fresh system.
 fn default_accounts() -> Vec<UserAccount> {
-    vec![
-        UserAccount::root_account(),
-        UserAccount::guest_account(),
-    ]
+    vec![UserAccount::root_account(), UserAccount::guest_account()]
 }
 
 // ============================================================================
@@ -647,11 +701,26 @@ impl SessionInfo {
         env.insert("USER".to_string(), user.username.clone());
         env.insert("LOGNAME".to_string(), user.username.clone());
         env.insert("SHELL".to_string(), user.shell.clone());
-        env.insert("PATH".to_string(), "/bin:/usr/bin:/usr/local/bin".to_string());
-        env.insert("XDG_RUNTIME_DIR".to_string(), format!("/run/user/{}", user.uid));
-        env.insert("XDG_DATA_HOME".to_string(), format!("{}/.local/share", user.home_dir));
-        env.insert("XDG_CONFIG_HOME".to_string(), format!("{}/.config", user.home_dir));
-        env.insert("XDG_CACHE_HOME".to_string(), format!("{}/.cache", user.home_dir));
+        env.insert(
+            "PATH".to_string(),
+            "/bin:/usr/bin:/usr/local/bin".to_string(),
+        );
+        env.insert(
+            "XDG_RUNTIME_DIR".to_string(),
+            format!("/run/user/{}", user.uid),
+        );
+        env.insert(
+            "XDG_DATA_HOME".to_string(),
+            format!("{}/.local/share", user.home_dir),
+        );
+        env.insert(
+            "XDG_CONFIG_HOME".to_string(),
+            format!("{}/.config", user.home_dir),
+        );
+        env.insert(
+            "XDG_CACHE_HOME".to_string(),
+            format!("{}/.cache", user.home_dir),
+        );
         env.insert("XDG_SESSION_TYPE".to_string(), "graphical".to_string());
 
         Self {
@@ -917,7 +986,10 @@ impl LoginManager {
         if let Some(lockout) = self.locked_accounts.get(&user.uid) {
             if lockout.is_locked(now) {
                 let remaining = lockout.remaining_lockout_secs(now);
-                return Err(format!("Account locked. Try again in {} seconds.", remaining));
+                return Err(format!(
+                    "Account locked. Try again in {} seconds.",
+                    remaining
+                ));
             }
         }
 
@@ -927,13 +999,14 @@ impl LoginManager {
         }
 
         // Verify password.
-        let salt_bytes = hex_to_bytes(&user.password_salt)
-            .unwrap_or_default();
+        let salt_bytes = hex_to_bytes(&user.password_salt).unwrap_or_default();
         let computed_hash = hash_password(&salt_bytes, password);
 
         if computed_hash == user.password_hash {
             // Success: reset lockout, update login stats.
-            self.locked_accounts.entry(user.uid).and_modify(|l| l.reset());
+            self.locked_accounts
+                .entry(user.uid)
+                .and_modify(|l| l.reset());
             if let Some(u) = self.users.iter_mut().find(|u| u.uid == user.uid) {
                 u.last_login_timestamp = now;
                 u.login_count = u.login_count.saturating_add(1);
@@ -941,7 +1014,8 @@ impl LoginManager {
             Ok(())
         } else {
             // Failure: record attempt.
-            let lockout = self.locked_accounts
+            let lockout = self
+                .locked_accounts
                 .entry(user.uid)
                 .or_insert_with(LockoutState::new);
             let now_locked = lockout.record_failure(now);
@@ -949,7 +1023,10 @@ impl LoginManager {
                 Err("Account locked after too many attempts. Wait 5 minutes.".to_string())
             } else {
                 let remaining = MAX_FAILED_ATTEMPTS.saturating_sub(lockout.failed_attempts);
-                Err(format!("Incorrect password. {} attempts remaining.", remaining))
+                Err(format!(
+                    "Incorrect password. {} attempts remaining.",
+                    remaining
+                ))
             }
         }
     }
@@ -994,7 +1071,8 @@ impl LoginManager {
         self.password_input.clear();
         self.error_message = None;
         self.screen_dimmed = false;
-        self.accessibility.announce("Screen locked. Enter password to unlock.");
+        self.accessibility
+            .announce("Screen locked. Enter password to unlock.");
     }
 
     /// Attempt to unlock the screen with a password.
@@ -1036,12 +1114,8 @@ impl LoginManager {
         self.screen_dimmed = false;
 
         match event {
-            Event::Key(key_event) if key_event.pressed => {
-                self.handle_key(key_event)
-            }
-            Event::Mouse(mouse_event) => {
-                self.handle_mouse(mouse_event)
-            }
+            Event::Key(key_event) if key_event.pressed => self.handle_key(key_event),
+            Event::Mouse(mouse_event) => self.handle_mouse(mouse_event),
             Event::Tick { elapsed_ms } => {
                 self.tick(*elapsed_ms);
                 EventResult::Consumed
@@ -1068,7 +1142,8 @@ impl LoginManager {
                     return EventResult::Consumed;
                 }
                 Key::S => {
-                    self.accessibility.screen_reader_enabled = !self.accessibility.screen_reader_enabled;
+                    self.accessibility.screen_reader_enabled =
+                        !self.accessibility.screen_reader_enabled;
                     return EventResult::Consumed;
                 }
                 _ => {}
@@ -1106,9 +1181,10 @@ impl LoginManager {
                         self.current_view = LoginView::PasswordEntry;
                         self.password_input.clear();
                         self.error_message = None;
-                        self.accessibility.announce(
-                            &format!("Password entry for {}. Type your password.", user.display_name)
-                        );
+                        self.accessibility.announce(&format!(
+                            "Password entry for {}. Type your password.",
+                            user.display_name
+                        ));
                     } else {
                         // Guest or no-password account: log in directly.
                         let uid = user.uid;
@@ -1240,9 +1316,7 @@ impl LoginManager {
     /// Handle mouse events (click detection on UI elements).
     fn handle_mouse(&mut self, mouse: &MouseEvent) -> EventResult {
         match &mouse.kind {
-            MouseEventKind::Press(MouseButton::Left) => {
-                self.handle_click(mouse.x, mouse.y)
-            }
+            MouseEventKind::Press(MouseButton::Left) => self.handle_click(mouse.x, mouse.y),
             _ => EventResult::Ignored,
         }
     }
@@ -1262,8 +1336,10 @@ impl LoginManager {
 
                 for (i, _user) in self.users.iter().enumerate() {
                     let item_y = list_y_start + (i as f32) * item_height;
-                    if x >= box_x && x <= box_x + LOGIN_BOX_WIDTH
-                        && y >= item_y && y <= item_y + item_height
+                    if x >= box_x
+                        && x <= box_x + LOGIN_BOX_WIDTH
+                        && y >= item_y
+                        && y <= item_y + item_height
                     {
                         self.selected_user_index = i;
                         // Double-click or single press both select.
@@ -1274,8 +1350,10 @@ impl LoginManager {
                 // Check power button (bottom-right corner).
                 let power_x = SCREEN_WIDTH - POWER_BUTTON_SIZE - 20.0;
                 let power_y = SCREEN_HEIGHT - POWER_BUTTON_SIZE - 20.0;
-                if x >= power_x && x <= power_x + POWER_BUTTON_SIZE
-                    && y >= power_y && y <= power_y + POWER_BUTTON_SIZE
+                if x >= power_x
+                    && x <= power_x + POWER_BUTTON_SIZE
+                    && y >= power_y
+                    && y <= power_y + POWER_BUTTON_SIZE
                 {
                     self.current_view = LoginView::PowerMenu;
                     self.power_menu_selection = 0;
@@ -1294,7 +1372,8 @@ impl LoginManager {
                         return EventResult::Consumed;
                     }
                     if x >= 120.0 && x <= 160.0 {
-                        self.accessibility.onscreen_keyboard = !self.accessibility.onscreen_keyboard;
+                        self.accessibility.onscreen_keyboard =
+                            !self.accessibility.onscreen_keyboard;
                         return EventResult::Consumed;
                     }
                 }
@@ -1306,8 +1385,10 @@ impl LoginManager {
                 let center_x = SCREEN_WIDTH / 2.0;
                 let btn_x = center_x - BUTTON_WIDTH / 2.0;
                 let btn_y = SCREEN_HEIGHT / 2.0 + 60.0;
-                if x >= btn_x && x <= btn_x + BUTTON_WIDTH
-                    && y >= btn_y && y <= btn_y + BUTTON_HEIGHT
+                if x >= btn_x
+                    && x <= btn_x + BUTTON_WIDTH
+                    && y >= btn_y
+                    && y <= btn_y + BUTTON_HEIGHT
                 {
                     self.attempt_login();
                     return EventResult::Consumed;
@@ -1316,8 +1397,10 @@ impl LoginManager {
                 // Check password visibility toggle.
                 let toggle_x = center_x + INPUT_WIDTH / 2.0 - 40.0;
                 let toggle_y = SCREEN_HEIGHT / 2.0 - 10.0;
-                if x >= toggle_x && x <= toggle_x + 30.0
-                    && y >= toggle_y && y <= toggle_y + INPUT_HEIGHT
+                if x >= toggle_x
+                    && x <= toggle_x + 30.0
+                    && y >= toggle_y
+                    && y <= toggle_y + INPUT_HEIGHT
                 {
                     self.password_visible = !self.password_visible;
                     return EventResult::Consumed;
@@ -1337,8 +1420,10 @@ impl LoginManager {
 
                 for i in 0..3 {
                     let item_y = menu_y + (i as f32) * item_h;
-                    if x >= menu_x && x <= menu_x + POWER_MENU_WIDTH
-                        && y >= item_y && y <= item_y + item_h
+                    if x >= menu_x
+                        && x <= menu_x + POWER_MENU_WIDTH
+                        && y >= item_y
+                        && y <= item_y + item_h
                     {
                         self.power_menu_selection = i;
                         let action = match i {
@@ -1361,7 +1446,8 @@ impl LoginManager {
 
     /// Attempt login with the current password input.
     fn attempt_login(&mut self) {
-        let username = self.users
+        let username = self
+            .users
             .get(self.selected_user_index)
             .map(|u| u.username.clone())
             .unwrap_or_default();
@@ -1369,7 +1455,8 @@ impl LoginManager {
 
         match self.authenticate(&username, &password) {
             Ok(()) => {
-                let uid = self.users
+                let uid = self
+                    .users
                     .get(self.selected_user_index)
                     .map(|u| u.uid)
                     .unwrap_or(0);
@@ -1397,11 +1484,12 @@ impl LoginManager {
         match action {
             PowerAction::Shutdown | PowerAction::Restart => {
                 self.current_view = LoginView::ShuttingDown;
-                self.accessibility.announce(if action == PowerAction::Shutdown {
-                    "Shutting down..."
-                } else {
-                    "Restarting..."
-                });
+                self.accessibility
+                    .announce(if action == PowerAction::Shutdown {
+                        "Shutting down..."
+                    } else {
+                        "Restarting..."
+                    });
                 // In a real system, this would invoke the init system.
             }
             PowerAction::Sleep => {
@@ -1474,13 +1562,20 @@ impl LoginManager {
         self.render_accessibility_buttons(&mut tree);
 
         // Power button (bottom-right, except during power menu / shutdown).
-        if self.current_view != LoginView::PowerMenu && self.current_view != LoginView::ShuttingDown {
+        if self.current_view != LoginView::PowerMenu && self.current_view != LoginView::ShuttingDown
+        {
             self.render_power_button(&mut tree);
         }
 
         // Screen dim overlay (idle warning).
         if self.screen_dimmed {
-            tree.fill_rect(0.0, 0.0, SCREEN_WIDTH, SCREEN_HEIGHT, Color::rgba(0, 0, 0, 128));
+            tree.fill_rect(
+                0.0,
+                0.0,
+                SCREEN_WIDTH,
+                SCREEN_HEIGHT,
+                Color::rgba(0, 0, 0, 128),
+            );
         }
 
         tree
@@ -1496,17 +1591,29 @@ impl LoginManager {
 
         // Render as two halves for a simple gradient approximation.
         tree.fill_rect(0.0, 0.0, SCREEN_WIDTH, SCREEN_HEIGHT / 2.0, bg_top);
-        tree.fill_rect(0.0, SCREEN_HEIGHT / 2.0, SCREEN_WIDTH, SCREEN_HEIGHT / 2.0, bg_bottom);
+        tree.fill_rect(
+            0.0,
+            SCREEN_HEIGHT / 2.0,
+            SCREEN_WIDTH,
+            SCREEN_HEIGHT / 2.0,
+            bg_bottom,
+        );
 
         // Subtle decorative circles in background (disabled in high contrast).
         if !self.accessibility.high_contrast {
             tree.fill_rounded_rect(
-                -100.0, -100.0, 400.0, 400.0,
+                -100.0,
+                -100.0,
+                400.0,
+                400.0,
                 Color::rgba(137, 180, 250, 8),
                 CornerRadii::all(200.0),
             );
             tree.fill_rounded_rect(
-                SCREEN_WIDTH - 200.0, SCREEN_HEIGHT - 200.0, 500.0, 500.0,
+                SCREEN_WIDTH - 200.0,
+                SCREEN_HEIGHT - 200.0,
+                500.0,
+                500.0,
                 Color::rgba(203, 166, 247, 6),
                 CornerRadii::all(250.0),
             );
@@ -1516,7 +1623,11 @@ impl LoginManager {
     /// Render the clock in the top-right corner.
     fn render_clock(&self, tree: &mut RenderTree) {
         let font_size = self.scaled_font(FONT_SIZE_CLOCK);
-        let text_color = if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_TEXT };
+        let text_color = if self.accessibility.high_contrast {
+            COL_HC_TEXT
+        } else {
+            COL_TEXT
+        };
         tree.push(RenderCommand::Text {
             x: SCREEN_WIDTH - 100.0,
             y: 20.0,
@@ -1534,7 +1645,11 @@ impl LoginManager {
         let box_x = center_x - LOGIN_BOX_WIDTH / 2.0;
         let box_y = SCREEN_HEIGHT / 2.0 - LOGIN_BOX_HEIGHT / 2.0;
 
-        let panel_color = if self.accessibility.high_contrast { COL_HC_PANEL } else { COL_PANEL };
+        let panel_color = if self.accessibility.high_contrast {
+            COL_HC_PANEL
+        } else {
+            COL_PANEL
+        };
 
         // Login box shadow.
         if !self.accessibility.high_contrast {
@@ -1554,14 +1669,21 @@ impl LoginManager {
 
         // Login box background.
         tree.fill_rounded_rect(
-            box_x, box_y, LOGIN_BOX_WIDTH, LOGIN_BOX_HEIGHT,
+            box_x,
+            box_y,
+            LOGIN_BOX_WIDTH,
+            LOGIN_BOX_HEIGHT,
             panel_color,
             CornerRadii::all(LOGIN_BOX_RADIUS),
         );
 
         // Title.
         let title_y = box_y + 30.0;
-        let text_color = if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_TEXT };
+        let text_color = if self.accessibility.high_contrast {
+            COL_HC_TEXT
+        } else {
+            COL_TEXT
+        };
         tree.push(RenderCommand::Text {
             x: center_x - 50.0,
             y: title_y,
@@ -1582,15 +1704,25 @@ impl LoginManager {
 
             // Selection highlight.
             if is_selected {
-                let accent = if self.accessibility.high_contrast { COL_HC_ACCENT } else { COL_ACCENT };
+                let accent = if self.accessibility.high_contrast {
+                    COL_HC_ACCENT
+                } else {
+                    COL_ACCENT
+                };
                 tree.fill_rounded_rect(
-                    box_x + 16.0, item_y, LOGIN_BOX_WIDTH - 32.0, item_height - 4.0,
+                    box_x + 16.0,
+                    item_y,
+                    LOGIN_BOX_WIDTH - 32.0,
+                    item_height - 4.0,
                     Color::rgba(accent.r, accent.g, accent.b, 30),
                     CornerRadii::all(8.0),
                 );
                 // Left accent bar.
                 tree.fill_rounded_rect(
-                    box_x + 16.0, item_y + 8.0, 3.0, item_height - 20.0,
+                    box_x + 16.0,
+                    item_y + 8.0,
+                    3.0,
+                    item_height - 20.0,
                     accent,
                     CornerRadii::all(2.0),
                 );
@@ -1601,7 +1733,10 @@ impl LoginManager {
             let avatar_y = item_y + (item_height - 36.0) / 2.0;
             let avatar_radius = 18.0;
             tree.fill_rounded_rect(
-                avatar_x, avatar_y, avatar_radius * 2.0, avatar_radius * 2.0,
+                avatar_x,
+                avatar_y,
+                avatar_radius * 2.0,
+                avatar_radius * 2.0,
                 user.avatar_color(),
                 CornerRadii::all(avatar_radius),
             );
@@ -1630,7 +1765,11 @@ impl LoginManager {
                 max_width: Some(LOGIN_BOX_WIDTH - 120.0),
             });
 
-            let subtext_color = if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_SUBTEXT };
+            let subtext_color = if self.accessibility.high_contrast {
+                COL_HC_TEXT
+            } else {
+                COL_SUBTEXT
+            };
             tree.push(RenderCommand::Text {
                 x: name_x,
                 y: item_y + 34.0,
@@ -1645,7 +1784,10 @@ impl LoginManager {
             if user.is_admin {
                 let badge_x = box_x + LOGIN_BOX_WIDTH - 70.0;
                 tree.fill_rounded_rect(
-                    badge_x, item_y + 18.0, 40.0, 20.0,
+                    badge_x,
+                    item_y + 18.0,
+                    40.0,
+                    20.0,
                     Color::rgba(250, 179, 135, 40),
                     CornerRadii::all(4.0),
                 );
@@ -1663,7 +1805,11 @@ impl LoginManager {
 
         // Hint text at bottom.
         let hint_y = box_y + LOGIN_BOX_HEIGHT - 40.0;
-        let hint_color = if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_SUBTEXT };
+        let hint_color = if self.accessibility.high_contrast {
+            COL_HC_TEXT
+        } else {
+            COL_SUBTEXT
+        };
         tree.push(RenderCommand::Text {
             x: center_x - 100.0,
             y: hint_y,
@@ -1681,9 +1827,21 @@ impl LoginManager {
         let box_x = center_x - LOGIN_BOX_WIDTH / 2.0;
         let box_y = SCREEN_HEIGHT / 2.0 - LOGIN_BOX_HEIGHT / 2.0;
 
-        let panel_color = if self.accessibility.high_contrast { COL_HC_PANEL } else { COL_PANEL };
-        let text_color = if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_TEXT };
-        let accent = if self.accessibility.high_contrast { COL_HC_ACCENT } else { COL_ACCENT };
+        let panel_color = if self.accessibility.high_contrast {
+            COL_HC_PANEL
+        } else {
+            COL_PANEL
+        };
+        let text_color = if self.accessibility.high_contrast {
+            COL_HC_TEXT
+        } else {
+            COL_TEXT
+        };
+        let accent = if self.accessibility.high_contrast {
+            COL_HC_ACCENT
+        } else {
+            COL_ACCENT
+        };
 
         // Box shadow.
         if !self.accessibility.high_contrast {
@@ -1703,7 +1861,10 @@ impl LoginManager {
 
         // Login box.
         tree.fill_rounded_rect(
-            box_x, box_y, LOGIN_BOX_WIDTH, LOGIN_BOX_HEIGHT,
+            box_x,
+            box_y,
+            LOGIN_BOX_WIDTH,
+            LOGIN_BOX_HEIGHT,
             panel_color,
             CornerRadii::all(LOGIN_BOX_RADIUS),
         );
@@ -1714,7 +1875,10 @@ impl LoginManager {
             let avatar_y = box_y + AVATAR_Y_OFFSET;
 
             tree.fill_rounded_rect(
-                avatar_x, avatar_y, AVATAR_SIZE, AVATAR_SIZE,
+                avatar_x,
+                avatar_y,
+                AVATAR_SIZE,
+                AVATAR_SIZE,
                 user.avatar_color(),
                 CornerRadii::all(AVATAR_SIZE / 2.0),
             );
@@ -1748,7 +1912,11 @@ impl LoginManager {
                 x: center_x - 40.0,
                 y: name_y + 30.0,
                 text: format!("@{}", user.username),
-                color: if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_SUBTEXT },
+                color: if self.accessibility.high_contrast {
+                    COL_HC_TEXT
+                } else {
+                    COL_SUBTEXT
+                },
                 font_size: self.scaled_font(FONT_SIZE_SMALL),
                 font_weight: FontWeightHint::Regular,
                 max_width: None,
@@ -1759,14 +1927,21 @@ impl LoginManager {
         let input_x = center_x - INPUT_WIDTH / 2.0;
         let input_y = box_y + 240.0;
         let input_border_color = if self.error_message.is_some() {
-            if self.accessibility.high_contrast { COL_HC_ERROR } else { COL_ERROR }
+            if self.accessibility.high_contrast {
+                COL_HC_ERROR
+            } else {
+                COL_ERROR
+            }
         } else {
             COL_INPUT_FOCUS
         };
 
         // Input background.
         tree.fill_rounded_rect(
-            input_x, input_y, INPUT_WIDTH, INPUT_HEIGHT,
+            input_x,
+            input_y,
+            INPUT_WIDTH,
+            INPUT_HEIGHT,
             COL_INPUT_BG,
             CornerRadii::all(INPUT_RADIUS),
         );
@@ -1795,7 +1970,11 @@ impl LoginManager {
                 x: input_x + 16.0,
                 y: input_y + 13.0,
                 text: "Password".to_string(),
-                color: if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_SUBTEXT },
+                color: if self.accessibility.high_contrast {
+                    COL_HC_TEXT
+                } else {
+                    COL_SUBTEXT
+                },
                 font_size: self.scaled_font(FONT_SIZE_NORMAL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(INPUT_WIDTH - 60.0),
@@ -1814,7 +1993,11 @@ impl LoginManager {
 
         // Show/hide password toggle.
         let toggle_x = input_x + INPUT_WIDTH - 40.0;
-        let toggle_text = if self.password_visible { "Hide" } else { "Show" };
+        let toggle_text = if self.password_visible {
+            "Hide"
+        } else {
+            "Show"
+        };
         tree.push(RenderCommand::Text {
             x: toggle_x,
             y: input_y + 14.0,
@@ -1827,7 +2010,11 @@ impl LoginManager {
 
         // Error message.
         if let Some(ref error) = self.error_message {
-            let err_color = if self.accessibility.high_contrast { COL_HC_ERROR } else { COL_ERROR };
+            let err_color = if self.accessibility.high_contrast {
+                COL_HC_ERROR
+            } else {
+                COL_ERROR
+            };
             tree.push(RenderCommand::Text {
                 x: input_x,
                 y: input_y + INPUT_HEIGHT + 8.0,
@@ -1843,7 +2030,10 @@ impl LoginManager {
         let btn_x = center_x - BUTTON_WIDTH / 2.0;
         let btn_y = input_y + INPUT_HEIGHT + 40.0;
         tree.fill_rounded_rect(
-            btn_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT,
+            btn_x,
+            btn_y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
             accent,
             CornerRadii::all(BUTTON_RADIUS),
         );
@@ -1876,9 +2066,21 @@ impl LoginManager {
         let box_x = center_x - LOGIN_BOX_WIDTH / 2.0;
         let box_y = SCREEN_HEIGHT / 2.0 - LOGIN_BOX_HEIGHT / 2.0;
 
-        let panel_color = if self.accessibility.high_contrast { COL_HC_PANEL } else { COL_PANEL };
-        let text_color = if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_TEXT };
-        let accent = if self.accessibility.high_contrast { COL_HC_ACCENT } else { COL_ACCENT };
+        let panel_color = if self.accessibility.high_contrast {
+            COL_HC_PANEL
+        } else {
+            COL_PANEL
+        };
+        let text_color = if self.accessibility.high_contrast {
+            COL_HC_TEXT
+        } else {
+            COL_TEXT
+        };
+        let accent = if self.accessibility.high_contrast {
+            COL_HC_ACCENT
+        } else {
+            COL_ACCENT
+        };
 
         // Box shadow.
         if !self.accessibility.high_contrast {
@@ -1898,7 +2100,10 @@ impl LoginManager {
 
         // Box.
         tree.fill_rounded_rect(
-            box_x, box_y, LOGIN_BOX_WIDTH, LOGIN_BOX_HEIGHT,
+            box_x,
+            box_y,
+            LOGIN_BOX_WIDTH,
+            LOGIN_BOX_HEIGHT,
             panel_color,
             CornerRadii::all(LOGIN_BOX_RADIUS),
         );
@@ -1906,11 +2111,18 @@ impl LoginManager {
         // "Locked" badge.
         let badge_y = box_y + 20.0;
         tree.fill_rounded_rect(
-            center_x - 40.0, badge_y, 80.0, 28.0,
+            center_x - 40.0,
+            badge_y,
+            80.0,
+            28.0,
             Color::rgba(243, 139, 168, 30),
             CornerRadii::all(14.0),
         );
-        let lock_color = if self.accessibility.high_contrast { COL_HC_ERROR } else { COL_ERROR };
+        let lock_color = if self.accessibility.high_contrast {
+            COL_HC_ERROR
+        } else {
+            COL_ERROR
+        };
         tree.push(RenderCommand::Text {
             x: center_x - 28.0,
             y: badge_y + 6.0,
@@ -1928,7 +2140,10 @@ impl LoginManager {
                 let avatar_y = box_y + 70.0;
 
                 tree.fill_rounded_rect(
-                    avatar_x, avatar_y, AVATAR_SIZE, AVATAR_SIZE,
+                    avatar_x,
+                    avatar_y,
+                    AVATAR_SIZE,
+                    AVATAR_SIZE,
                     user.avatar_color(),
                     CornerRadii::all(AVATAR_SIZE / 2.0),
                 );
@@ -1961,13 +2176,20 @@ impl LoginManager {
         let input_x = center_x - INPUT_WIDTH / 2.0;
         let input_y = box_y + 260.0;
         let input_border = if self.error_message.is_some() {
-            if self.accessibility.high_contrast { COL_HC_ERROR } else { COL_ERROR }
+            if self.accessibility.high_contrast {
+                COL_HC_ERROR
+            } else {
+                COL_ERROR
+            }
         } else {
             COL_INPUT_FOCUS
         };
 
         tree.fill_rounded_rect(
-            input_x, input_y, INPUT_WIDTH, INPUT_HEIGHT,
+            input_x,
+            input_y,
+            INPUT_WIDTH,
+            INPUT_HEIGHT,
             COL_INPUT_BG,
             CornerRadii::all(INPUT_RADIUS),
         );
@@ -1988,7 +2210,11 @@ impl LoginManager {
                 x: input_x + 16.0,
                 y: input_y + 13.0,
                 text: "Enter password to unlock".to_string(),
-                color: if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_SUBTEXT },
+                color: if self.accessibility.high_contrast {
+                    COL_HC_TEXT
+                } else {
+                    COL_SUBTEXT
+                },
                 font_size: self.scaled_font(FONT_SIZE_NORMAL),
                 font_weight: FontWeightHint::Regular,
                 max_width: Some(INPUT_WIDTH - 32.0),
@@ -2007,7 +2233,11 @@ impl LoginManager {
 
         // Error message.
         if let Some(ref error) = self.error_message {
-            let err_color = if self.accessibility.high_contrast { COL_HC_ERROR } else { COL_ERROR };
+            let err_color = if self.accessibility.high_contrast {
+                COL_HC_ERROR
+            } else {
+                COL_ERROR
+            };
             tree.push(RenderCommand::Text {
                 x: input_x,
                 y: input_y + INPUT_HEIGHT + 8.0,
@@ -2023,7 +2253,10 @@ impl LoginManager {
         let btn_y = input_y + INPUT_HEIGHT + 40.0;
         let btn_x = center_x - BUTTON_WIDTH / 2.0;
         tree.fill_rounded_rect(
-            btn_x, btn_y, BUTTON_WIDTH, BUTTON_HEIGHT,
+            btn_x,
+            btn_y,
+            BUTTON_WIDTH,
+            BUTTON_HEIGHT,
             accent,
             CornerRadii::all(BUTTON_RADIUS),
         );
@@ -2048,14 +2281,28 @@ impl LoginManager {
         let menu_y = SCREEN_HEIGHT / 2.0 - 100.0;
         let item_height = 56.0;
 
-        let panel_color = if self.accessibility.high_contrast { COL_HC_PANEL } else { COL_PANEL };
-        let text_color = if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_TEXT };
-        let accent = if self.accessibility.high_contrast { COL_HC_ACCENT } else { COL_ACCENT };
+        let panel_color = if self.accessibility.high_contrast {
+            COL_HC_PANEL
+        } else {
+            COL_PANEL
+        };
+        let text_color = if self.accessibility.high_contrast {
+            COL_HC_TEXT
+        } else {
+            COL_TEXT
+        };
+        let accent = if self.accessibility.high_contrast {
+            COL_HC_ACCENT
+        } else {
+            COL_ACCENT
+        };
 
         // Menu background.
         tree.fill_rounded_rect(
-            menu_x - 16.0, menu_y - 16.0,
-            POWER_MENU_WIDTH + 32.0, item_height * 3.0 + 48.0,
+            menu_x - 16.0,
+            menu_y - 16.0,
+            POWER_MENU_WIDTH + 32.0,
+            item_height * 3.0 + 48.0,
             panel_color,
             CornerRadii::all(12.0),
         );
@@ -2080,7 +2327,10 @@ impl LoginManager {
 
             if is_selected {
                 tree.fill_rounded_rect(
-                    menu_x, item_y, POWER_MENU_WIDTH, item_height - 4.0,
+                    menu_x,
+                    item_y,
+                    POWER_MENU_WIDTH,
+                    item_height - 4.0,
                     Color::rgba(accent.r, accent.g, accent.b, 30),
                     CornerRadii::all(8.0),
                 );
@@ -2104,7 +2354,11 @@ impl LoginManager {
                 text: label.to_string(),
                 color: if is_selected { accent } else { text_color },
                 font_size: self.scaled_font(FONT_SIZE_NORMAL),
-                font_weight: if is_selected { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                font_weight: if is_selected {
+                    FontWeightHint::Bold
+                } else {
+                    FontWeightHint::Regular
+                },
                 max_width: None,
             });
         }
@@ -2115,7 +2369,11 @@ impl LoginManager {
             x: center_x - 50.0,
             y: hint_y,
             text: "Esc to cancel".to_string(),
-            color: if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_SUBTEXT },
+            color: if self.accessibility.high_contrast {
+                COL_HC_TEXT
+            } else {
+                COL_SUBTEXT
+            },
             font_size: self.scaled_font(FONT_SIZE_SMALL),
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2126,7 +2384,11 @@ impl LoginManager {
     fn render_shutdown_screen(&self, tree: &mut RenderTree) {
         let center_x = SCREEN_WIDTH / 2.0;
         let center_y = SCREEN_HEIGHT / 2.0;
-        let text_color = if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_TEXT };
+        let text_color = if self.accessibility.high_contrast {
+            COL_HC_TEXT
+        } else {
+            COL_TEXT
+        };
 
         // Simple centered message.
         tree.push(RenderCommand::Text {
@@ -2144,7 +2406,11 @@ impl LoginManager {
             x: center_x - 10.0,
             y: center_y + 20.0,
             text: "\u{25CF} \u{25CB} \u{25CB}".to_string(),
-            color: if self.accessibility.high_contrast { COL_HC_ACCENT } else { COL_ACCENT },
+            color: if self.accessibility.high_contrast {
+                COL_HC_ACCENT
+            } else {
+                COL_ACCENT
+            },
             font_size: self.scaled_font(FONT_SIZE_NORMAL),
             font_weight: FontWeightHint::Regular,
             max_width: None,
@@ -2156,7 +2422,11 @@ impl LoginManager {
         let y = SCREEN_HEIGHT - 50.0;
         let btn_size = 36.0;
         let spacing = 8.0;
-        let text_color = if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_SUBTEXT };
+        let text_color = if self.accessibility.high_contrast {
+            COL_HC_TEXT
+        } else {
+            COL_SUBTEXT
+        };
 
         let buttons = [
             ("HC", self.accessibility.high_contrast),
@@ -2178,7 +2448,11 @@ impl LoginManager {
                 y: y + 10.0,
                 text: label.to_string(),
                 color: if *active {
-                    if self.accessibility.high_contrast { COL_HC_ACCENT } else { COL_ACCENT }
+                    if self.accessibility.high_contrast {
+                        COL_HC_ACCENT
+                    } else {
+                        COL_ACCENT
+                    }
                 } else {
                     text_color
                 },
@@ -2195,13 +2469,20 @@ impl LoginManager {
         let y = SCREEN_HEIGHT - POWER_BUTTON_SIZE - 20.0;
 
         tree.fill_rounded_rect(
-            x, y, POWER_BUTTON_SIZE, POWER_BUTTON_SIZE,
+            x,
+            y,
+            POWER_BUTTON_SIZE,
+            POWER_BUTTON_SIZE,
             Color::rgba(88, 91, 112, 40),
             CornerRadii::all(POWER_BUTTON_SIZE / 2.0),
         );
 
         // Power icon (Unicode symbol).
-        let text_color = if self.accessibility.high_contrast { COL_HC_TEXT } else { COL_SUBTEXT };
+        let text_color = if self.accessibility.high_contrast {
+            COL_HC_TEXT
+        } else {
+            COL_SUBTEXT
+        };
         tree.push(RenderCommand::Text {
             x: x + POWER_BUTTON_SIZE / 2.0 - 8.0,
             y: y + POWER_BUTTON_SIZE / 2.0 - 8.0,
@@ -2248,12 +2529,18 @@ fn main() {
     // Verify password entry view renders too.
     manager.current_view = LoginView::PasswordEntry;
     let tree2 = manager.render();
-    assert!(!tree2.is_empty(), "Password entry UI must produce render commands");
+    assert!(
+        !tree2.is_empty(),
+        "Password entry UI must produce render commands"
+    );
 
     // Verify lock screen renders.
     manager.lock_screen(0);
     let tree3 = manager.render();
-    assert!(!tree3.is_empty(), "Lock screen UI must produce render commands");
+    assert!(
+        !tree3.is_empty(),
+        "Lock screen UI must produce render commands"
+    );
 }
 
 // ============================================================================
@@ -2282,7 +2569,11 @@ mod tests {
     fn test_authenticate_success() {
         let mut mgr = test_manager();
         let result = mgr.authenticate("alice", "password123");
-        assert!(result.is_ok(), "Valid password should authenticate: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "Valid password should authenticate: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -2417,7 +2708,10 @@ mod tests {
         assert_eq!(session.started_at, 5000);
         assert_eq!(session.home_dir, "/home/alice");
         assert_eq!(session.environment.get("USER"), Some(&"alice".to_string()));
-        assert_eq!(session.environment.get("HOME"), Some(&"/home/alice".to_string()));
+        assert_eq!(
+            session.environment.get("HOME"),
+            Some(&"/home/alice".to_string())
+        );
     }
 
     #[test]
@@ -2531,14 +2825,20 @@ mod tests {
     fn test_sha256_empty() {
         let hash = sha256(b"");
         let hex = bytes_to_hex(&hash);
-        assert_eq!(hex, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 
     #[test]
     fn test_sha256_abc() {
         let hash = sha256(b"abc");
         let hex = bytes_to_hex(&hash);
-        assert_eq!(hex, "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        assert_eq!(
+            hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
     }
 
     #[test]
@@ -2547,7 +2847,10 @@ mod tests {
         let data = vec![b'a'; 1_000_000];
         let hash = sha256(&data);
         let hex = bytes_to_hex(&hash);
-        assert_eq!(hex, "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0");
+        assert_eq!(
+            hex,
+            "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
+        );
     }
 
     // ========================================================================
@@ -2787,7 +3090,12 @@ mod tests {
         let event = Event::Key(KeyEvent {
             key: Key::H,
             pressed: true,
-            modifiers: Modifiers { shift: false, ctrl: true, alt: true, super_key: false },
+            modifiers: Modifiers {
+                shift: false,
+                ctrl: true,
+                alt: true,
+                super_key: false,
+            },
             text: None,
         });
         mgr.handle_event(&event);
@@ -2845,9 +3153,13 @@ mod tests {
 
     #[test]
     fn test_auto_login() {
-        let mut users = vec![
-            UserAccount::new_with_password(1000, "auto", "Auto User", "pass", false),
-        ];
+        let mut users = vec![UserAccount::new_with_password(
+            1000,
+            "auto",
+            "Auto User",
+            "pass",
+            false,
+        )];
         users[0].auto_login = true;
 
         let mut mgr = LoginManager::with_users(users);
@@ -2858,9 +3170,13 @@ mod tests {
 
     #[test]
     fn test_no_auto_login() {
-        let mgr_users = vec![
-            UserAccount::new_with_password(1000, "normal", "Normal User", "pass", false),
-        ];
+        let mgr_users = vec![UserAccount::new_with_password(
+            1000,
+            "normal",
+            "Normal User",
+            "pass",
+            false,
+        )];
         let mut mgr = LoginManager::with_users(mgr_users);
         let session = mgr.check_auto_login();
         assert!(session.is_none());

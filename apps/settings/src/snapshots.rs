@@ -227,9 +227,9 @@ impl SnapshotIncludes {
 
     /// Check whether a given path falls under this snapshot's coverage.
     pub fn covers_path(&self, path: &str) -> bool {
-        self.covered_paths().iter().any(|prefix| {
-            path == *prefix || path.starts_with(&format!("{prefix}/"))
-        })
+        self.covered_paths()
+            .iter()
+            .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
     }
 }
 
@@ -294,7 +294,10 @@ pub struct Snapshot {
 impl Snapshot {
     /// Whether this snapshot was automatically created (pre-update or pre-install).
     pub fn is_automatic(&self) -> bool {
-        matches!(self.snapshot_type, SnapshotType::PreUpdate | SnapshotType::PreInstall)
+        matches!(
+            self.snapshot_type,
+            SnapshotType::PreUpdate | SnapshotType::PreInstall
+        )
     }
 
     /// Short summary for list display.
@@ -437,7 +440,10 @@ impl BlockStore {
 
     /// Total storage consumed by unique blocks.
     pub fn total_storage_bytes(&self) -> u64 {
-        self.stored_blocks.iter().map(|(_, data)| data.len() as u64).sum()
+        self.stored_blocks
+            .iter()
+            .map(|(_, data)| data.len() as u64)
+            .sum()
     }
 
     /// Create a snapshot from file data. Splits each file into 64 KiB blocks,
@@ -818,9 +824,9 @@ impl SnapshotTree {
         };
 
         let status_marker = match snap.status {
-            SnapshotStatus::Complete => "\u{2713}", // checkmark
-            SnapshotStatus::InProgress => "\u{2026}", // ellipsis
-            SnapshotStatus::Failed => "\u{2717}", // cross
+            SnapshotStatus::Complete => "\u{2713}",        // checkmark
+            SnapshotStatus::InProgress => "\u{2026}",      // ellipsis
+            SnapshotStatus::Failed => "\u{2717}",          // cross
             SnapshotStatus::PendingDeletion => "\u{2205}", // empty set
         };
 
@@ -909,7 +915,11 @@ impl RollbackManager {
     /// Mark an update as disabled. On next restore, this update's changes
     /// will be excluded.
     pub fn disable_update(&mut self, update_id: &UpdateId) -> bool {
-        if let Some(entry) = self.tracked_updates.iter_mut().find(|t| t.update_id == *update_id) {
+        if let Some(entry) = self
+            .tracked_updates
+            .iter_mut()
+            .find(|t| t.update_id == *update_id)
+        {
             entry.disposition = UpdateDisposition::Disabled;
             true
         } else {
@@ -920,7 +930,11 @@ impl RollbackManager {
     /// Mark an update for retry. The system will re-apply it from the
     /// pre-update snapshot point.
     pub fn retry_update(&mut self, update_id: &UpdateId) -> bool {
-        if let Some(entry) = self.tracked_updates.iter_mut().find(|t| t.update_id == *update_id) {
+        if let Some(entry) = self
+            .tracked_updates
+            .iter_mut()
+            .find(|t| t.update_id == *update_id)
+        {
             entry.disposition = UpdateDisposition::PendingRetry;
             true
         } else {
@@ -1007,9 +1021,7 @@ impl SnapshotRetention {
         let mut candidates: Vec<&Snapshot> = tree
             .all_snapshots()
             .iter()
-            .filter(|s| {
-                s.status == SnapshotStatus::Complete && !self.protected.contains(&s.id)
-            })
+            .filter(|s| s.status == SnapshotStatus::Complete && !self.protected.contains(&s.id))
             .collect();
 
         // Sort by creation time, oldest first.
@@ -1057,11 +1069,7 @@ pub fn prune_auto_snapshots(tree: &SnapshotTree, keep_count: usize) -> Vec<Snaps
     // Sort newest first.
     auto_snaps.sort_by(|a, b| b.created_at.cmp(&a.created_at));
 
-    auto_snaps
-        .iter()
-        .skip(keep_count)
-        .map(|s| s.id)
-        .collect()
+    auto_snaps.iter().skip(keep_count).map(|s| s.id).collect()
 }
 
 // ============================================================================
@@ -1251,7 +1259,12 @@ fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Colo
 ///
 /// Displays a list of snapshots with metadata, action buttons, a tree
 /// visualization, and retention settings.
-pub fn render_snapshots_page(tree: &mut RenderTree, x: f32, start_y: f32, manager: &SnapshotManager) {
+pub fn render_snapshots_page(
+    tree: &mut RenderTree,
+    x: f32,
+    start_y: f32,
+    manager: &SnapshotManager,
+) {
     let mut y = start_y;
     let right_x = x + 400.0;
 
@@ -1300,7 +1313,13 @@ pub fn render_snapshots_page(tree: &mut RenderTree, x: f32, start_y: f32, manage
 
             // Status.
             let status_color = snap.status.color();
-            tree.text(right_x + 100.0, y + 8.0, snap.status.label(), status_color, 12.0);
+            tree.text(
+                right_x + 100.0,
+                y + 8.0,
+                snap.status.label(),
+                status_color,
+                12.0,
+            );
 
             // Tags.
             if !snap.tags.is_empty() {
@@ -1354,7 +1373,13 @@ pub fn render_snapshots_page(tree: &mut RenderTree, x: f32, start_y: f32, manage
 
     // Max age.
     fill_rounded(tree, x, y, 580.0, 40.0, COL_SURFACE0, 6.0);
-    tree.text(x + 12.0, y + 12.0, "Auto-delete after (days)", COL_TEXT, 13.0);
+    tree.text(
+        x + 12.0,
+        y + 12.0,
+        "Auto-delete after (days)",
+        COL_TEXT,
+        13.0,
+    );
     tree.text(
         right_x + 80.0,
         y + 12.0,
@@ -1570,11 +1595,25 @@ mod tests {
         );
 
         let child = tree
-            .create_branch(root, "child", "", SnapshotType::System, SnapshotIncludes::all(), 2_000)
+            .create_branch(
+                root,
+                "child",
+                "",
+                SnapshotType::System,
+                SnapshotIncludes::all(),
+                2_000,
+            )
             .unwrap();
 
         let grandchild = tree
-            .create_branch(child, "grandchild", "", SnapshotType::System, SnapshotIncludes::all(), 3_000)
+            .create_branch(
+                child,
+                "grandchild",
+                "",
+                SnapshotType::System,
+                SnapshotIncludes::all(),
+                3_000,
+            )
             .unwrap();
 
         let path = tree.path_to_root(grandchild);
@@ -1599,12 +1638,32 @@ mod tests {
     fn tree_remove_reparents_children() {
         let mut tree = SnapshotTree::new();
 
-        let root = tree.create_root("root", "", SnapshotType::System, SnapshotIncludes::all(), 1_000);
+        let root = tree.create_root(
+            "root",
+            "",
+            SnapshotType::System,
+            SnapshotIncludes::all(),
+            1_000,
+        );
         let child = tree
-            .create_branch(root, "child", "", SnapshotType::System, SnapshotIncludes::all(), 2_000)
+            .create_branch(
+                root,
+                "child",
+                "",
+                SnapshotType::System,
+                SnapshotIncludes::all(),
+                2_000,
+            )
             .unwrap();
         let grandchild = tree
-            .create_branch(child, "gc", "", SnapshotType::System, SnapshotIncludes::all(), 3_000)
+            .create_branch(
+                child,
+                "gc",
+                "",
+                SnapshotType::System,
+                SnapshotIncludes::all(),
+                3_000,
+            )
             .unwrap();
 
         // Remove the middle node.
@@ -1620,15 +1679,42 @@ mod tests {
     fn tree_descendants() {
         let mut tree = SnapshotTree::new();
 
-        let root = tree.create_root("root", "", SnapshotType::System, SnapshotIncludes::all(), 1_000);
+        let root = tree.create_root(
+            "root",
+            "",
+            SnapshotType::System,
+            SnapshotIncludes::all(),
+            1_000,
+        );
         let c1 = tree
-            .create_branch(root, "c1", "", SnapshotType::System, SnapshotIncludes::all(), 2_000)
+            .create_branch(
+                root,
+                "c1",
+                "",
+                SnapshotType::System,
+                SnapshotIncludes::all(),
+                2_000,
+            )
             .unwrap();
         let c2 = tree
-            .create_branch(root, "c2", "", SnapshotType::System, SnapshotIncludes::all(), 3_000)
+            .create_branch(
+                root,
+                "c2",
+                "",
+                SnapshotType::System,
+                SnapshotIncludes::all(),
+                3_000,
+            )
             .unwrap();
         let gc1 = tree
-            .create_branch(c1, "gc1", "", SnapshotType::System, SnapshotIncludes::all(), 4_000)
+            .create_branch(
+                c1,
+                "gc1",
+                "",
+                SnapshotType::System,
+                SnapshotIncludes::all(),
+                4_000,
+            )
             .unwrap();
 
         let desc = tree.descendants(root);
@@ -1672,7 +1758,10 @@ mod tests {
         // = ~104 days, which is > 90 days.
         let to_delete = policy.apply(&tree, 10_000_000);
         assert!(to_delete.contains(&old), "old snapshot should be pruned");
-        assert!(!to_delete.contains(&recent), "recent snapshot should be kept");
+        assert!(
+            !to_delete.contains(&recent),
+            "recent snapshot should be kept"
+        );
     }
 
     #[test]
@@ -1697,7 +1786,11 @@ mod tests {
         };
 
         let to_delete = policy.apply(&tree, 1_100_000);
-        assert_eq!(to_delete.len(), 2, "should delete 2 oldest to get down to 3");
+        assert_eq!(
+            to_delete.len(),
+            2,
+            "should delete 2 oldest to get down to 3"
+        );
     }
 
     #[test]
@@ -1895,7 +1988,10 @@ mod tests {
         let file_b = b"content of file B, different from A";
 
         let id = SnapshotId(1);
-        store.snapshot(id, [("/a.txt", file_a as &[u8]), ("/b.txt", file_b as &[u8])]);
+        store.snapshot(
+            id,
+            [("/a.txt", file_a as &[u8]), ("/b.txt", file_b as &[u8])],
+        );
 
         let restored = store.restore(id).expect("restore succeeds");
         assert_eq!(restored.len(), 2);
@@ -1954,11 +2050,31 @@ mod tests {
     fn tree_ascii_rendering() {
         let mut tree = SnapshotTree::new();
 
-        let root = tree.create_root("Initial", "", SnapshotType::System, SnapshotIncludes::all(), 1_000);
-        tree.create_branch(root, "Update-1", "", SnapshotType::PreUpdate, SnapshotIncludes::system_only(), 2_000)
-            .unwrap();
-        tree.create_branch(root, "Branch-A", "", SnapshotType::UserData, SnapshotIncludes::user_only(), 3_000)
-            .unwrap();
+        let root = tree.create_root(
+            "Initial",
+            "",
+            SnapshotType::System,
+            SnapshotIncludes::all(),
+            1_000,
+        );
+        tree.create_branch(
+            root,
+            "Update-1",
+            "",
+            SnapshotType::PreUpdate,
+            SnapshotIncludes::system_only(),
+            2_000,
+        )
+        .unwrap();
+        tree.create_branch(
+            root,
+            "Branch-A",
+            "",
+            SnapshotType::UserData,
+            SnapshotIncludes::user_only(),
+            3_000,
+        )
+        .unwrap();
 
         let lines = tree.render_tree_ascii();
         assert!(!lines.is_empty());
@@ -1987,9 +2103,27 @@ mod tests {
     fn snapshot_is_automatic() {
         let mut tree = SnapshotTree::new();
 
-        let manual = tree.create_root("manual", "", SnapshotType::System, SnapshotIncludes::all(), 1_000);
-        let pre_update = tree.create_root("pre-upd", "", SnapshotType::PreUpdate, SnapshotIncludes::system_only(), 2_000);
-        let pre_install = tree.create_root("pre-inst", "", SnapshotType::PreInstall, SnapshotIncludes::system_only(), 3_000);
+        let manual = tree.create_root(
+            "manual",
+            "",
+            SnapshotType::System,
+            SnapshotIncludes::all(),
+            1_000,
+        );
+        let pre_update = tree.create_root(
+            "pre-upd",
+            "",
+            SnapshotType::PreUpdate,
+            SnapshotIncludes::system_only(),
+            2_000,
+        );
+        let pre_install = tree.create_root(
+            "pre-inst",
+            "",
+            SnapshotType::PreInstall,
+            SnapshotIncludes::system_only(),
+            3_000,
+        );
 
         assert!(!tree.get(manual).unwrap().is_automatic());
         assert!(tree.get(pre_update).unwrap().is_automatic());
@@ -2031,13 +2165,14 @@ mod tests {
         let id1 = SnapshotId(1);
         let id2 = SnapshotId(2);
 
-        store.snapshot(id1, [
-            ("/shared.txt", shared_data as &[u8]),
-            ("/unique.txt", unique_data as &[u8]),
-        ]);
-        store.snapshot(id2, [
-            ("/shared.txt", shared_data as &[u8]),
-        ]);
+        store.snapshot(
+            id1,
+            [
+                ("/shared.txt", shared_data as &[u8]),
+                ("/unique.txt", unique_data as &[u8]),
+            ],
+        );
+        store.snapshot(id2, [("/shared.txt", shared_data as &[u8])]);
 
         let blocks_before = store.unique_block_count();
         store.remove_snapshot(id1);

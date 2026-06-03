@@ -126,31 +126,27 @@ fn categorize_extension(ext: &str) -> FileCategory {
 
     match ext_part {
         // Documents
-        "txt" | "doc" | "docx" | "odt" | "rtf" | "pdf" | "epub" | "md"
-        | "tex" | "csv" | "xls" | "xlsx" | "ods" | "ppt" | "pptx" | "odp" => {
-            FileCategory::Documents
-        }
+        "txt" | "doc" | "docx" | "odt" | "rtf" | "pdf" | "epub" | "md" | "tex" | "csv" | "xls"
+        | "xlsx" | "ods" | "ppt" | "pptx" | "odp" => FileCategory::Documents,
         // Images
-        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" | "webp" | "ico"
-        | "tiff" | "tif" | "psd" | "raw" | "heif" | "heic" | "avif" => {
-            FileCategory::Images
-        }
+        "png" | "jpg" | "jpeg" | "gif" | "bmp" | "svg" | "webp" | "ico" | "tiff" | "tif"
+        | "psd" | "raw" | "heif" | "heic" | "avif" => FileCategory::Images,
         // Audio
-        "mp3" | "wav" | "flac" | "ogg" | "aac" | "wma" | "m4a" | "opus"
-        | "mid" | "midi" | "aiff" => FileCategory::Audio,
+        "mp3" | "wav" | "flac" | "ogg" | "aac" | "wma" | "m4a" | "opus" | "mid" | "midi"
+        | "aiff" => FileCategory::Audio,
         // Video
-        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v"
-        | "mpeg" | "mpg" | "3gp" => FileCategory::Video,
+        "mp4" | "mkv" | "avi" | "mov" | "wmv" | "flv" | "webm" | "m4v" | "mpeg" | "mpg" | "3gp" => {
+            FileCategory::Video
+        }
         // Code
-        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "hpp" | "java"
-        | "go" | "rb" | "swift" | "kt" | "cs" | "php" | "sh" | "bash"
-        | "zsh" | "lua" | "zig" | "asm" | "s" | "toml" | "yaml" | "yml"
-        | "json" | "xml" | "html" | "css" | "sql" | "make" | "cmake" => {
+        "rs" | "py" | "js" | "ts" | "c" | "cpp" | "h" | "hpp" | "java" | "go" | "rb" | "swift"
+        | "kt" | "cs" | "php" | "sh" | "bash" | "zsh" | "lua" | "zig" | "asm" | "s" | "toml"
+        | "yaml" | "yml" | "json" | "xml" | "html" | "css" | "sql" | "make" | "cmake" => {
             FileCategory::Code
         }
         // Archives
-        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst"
-        | "lz4" | "lzma" | "cab" | "iso" | "dmg" => FileCategory::Archives,
+        "zip" | "tar" | "gz" | "bz2" | "xz" | "7z" | "rar" | "zst" | "lz4" | "lzma" | "cab"
+        | "iso" | "dmg" => FileCategory::Archives,
         // Other
         _ => FileCategory::Other,
     }
@@ -181,7 +177,12 @@ impl AssociationManager {
         };
 
         // Find the app in available apps
-        let Some(new_app) = entry.available_apps.iter().find(|a| a.id == app_id).cloned() else {
+        let Some(new_app) = entry
+            .available_apps
+            .iter()
+            .find(|a| a.id == app_id)
+            .cloned()
+        else {
             return false;
         };
 
@@ -283,7 +284,12 @@ impl AssociationManager {
             // Remove uninstalled app from history
             entry.handler_history.retain(|a| a.id != app_id);
             // Remove from fallback if it matches
-            if entry.fallback_app.as_ref().map(|a| a.id == app_id).unwrap_or(false) {
+            if entry
+                .fallback_app
+                .as_ref()
+                .map(|a| a.id == app_id)
+                .unwrap_or(false)
+            {
                 entry.fallback_app = None;
             }
         }
@@ -326,11 +332,7 @@ impl AssociationManager {
     }
 
     /// Get entries filtered by category and search query, sorted alphabetically.
-    pub fn filtered_entries(
-        &self,
-        category: FileCategory,
-        query: &str,
-    ) -> Vec<&AssociationEntry> {
+    pub fn filtered_entries(&self, category: FileCategory, query: &str) -> Vec<&AssociationEntry> {
         let lower_query = query.to_lowercase();
         let mut results: Vec<&AssociationEntry> = self
             .entries
@@ -415,135 +417,483 @@ impl AssociationManager {
 
         vec![
             // Documents
-            Self::entry(".txt", "text/plain", "Text Document", Some(text_editor.clone()),
-                vec![text_editor.clone(), code_editor.clone()], Some("file-text")),
-            Self::entry(".md", "text/markdown", "Markdown Document", Some(text_editor.clone()),
-                vec![text_editor.clone(), code_editor.clone()], Some("file-markdown")),
-            Self::entry(".pdf", "application/pdf", "PDF Document", None,
-                vec![], Some("file-pdf")),
-            Self::entry(".doc", "application/msword", "Word Document", Some(text_editor.clone()),
-                vec![text_editor.clone()], Some("file-doc")),
-            Self::entry(".docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "Word Document (OOXML)", Some(text_editor.clone()),
-                vec![text_editor.clone()], Some("file-doc")),
-            Self::entry(".odt", "application/vnd.oasis.opendocument.text", "OpenDocument Text",
-                Some(text_editor.clone()), vec![text_editor.clone()], Some("file-doc")),
-            Self::entry(".rtf", "application/rtf", "Rich Text Format", Some(text_editor.clone()),
-                vec![text_editor.clone()], Some("file-text")),
-            Self::entry(".csv", "text/csv", "Comma-Separated Values", Some(text_editor.clone()),
-                vec![text_editor.clone(), code_editor.clone()], Some("file-spreadsheet")),
-            Self::entry(".epub", "application/epub+zip", "E-Book (EPUB)", None,
-                vec![], Some("file-book")),
-            Self::entry(".tex", "application/x-tex", "LaTeX Document", Some(code_editor.clone()),
-                vec![text_editor.clone(), code_editor.clone()], Some("file-code")),
-
+            Self::entry(
+                ".txt",
+                "text/plain",
+                "Text Document",
+                Some(text_editor.clone()),
+                vec![text_editor.clone(), code_editor.clone()],
+                Some("file-text"),
+            ),
+            Self::entry(
+                ".md",
+                "text/markdown",
+                "Markdown Document",
+                Some(text_editor.clone()),
+                vec![text_editor.clone(), code_editor.clone()],
+                Some("file-markdown"),
+            ),
+            Self::entry(
+                ".pdf",
+                "application/pdf",
+                "PDF Document",
+                None,
+                vec![],
+                Some("file-pdf"),
+            ),
+            Self::entry(
+                ".doc",
+                "application/msword",
+                "Word Document",
+                Some(text_editor.clone()),
+                vec![text_editor.clone()],
+                Some("file-doc"),
+            ),
+            Self::entry(
+                ".docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "Word Document (OOXML)",
+                Some(text_editor.clone()),
+                vec![text_editor.clone()],
+                Some("file-doc"),
+            ),
+            Self::entry(
+                ".odt",
+                "application/vnd.oasis.opendocument.text",
+                "OpenDocument Text",
+                Some(text_editor.clone()),
+                vec![text_editor.clone()],
+                Some("file-doc"),
+            ),
+            Self::entry(
+                ".rtf",
+                "application/rtf",
+                "Rich Text Format",
+                Some(text_editor.clone()),
+                vec![text_editor.clone()],
+                Some("file-text"),
+            ),
+            Self::entry(
+                ".csv",
+                "text/csv",
+                "Comma-Separated Values",
+                Some(text_editor.clone()),
+                vec![text_editor.clone(), code_editor.clone()],
+                Some("file-spreadsheet"),
+            ),
+            Self::entry(
+                ".epub",
+                "application/epub+zip",
+                "E-Book (EPUB)",
+                None,
+                vec![],
+                Some("file-book"),
+            ),
+            Self::entry(
+                ".tex",
+                "application/x-tex",
+                "LaTeX Document",
+                Some(code_editor.clone()),
+                vec![text_editor.clone(), code_editor.clone()],
+                Some("file-code"),
+            ),
             // Images
-            Self::entry(".png", "image/png", "PNG Image", Some(image_viewer.clone()),
-                vec![image_viewer.clone()], Some("file-image")),
-            Self::entry(".jpg", "image/jpeg", "JPEG Image", Some(image_viewer.clone()),
-                vec![image_viewer.clone()], Some("file-image")),
-            Self::entry(".jpeg", "image/jpeg", "JPEG Image", Some(image_viewer.clone()),
-                vec![image_viewer.clone()], Some("file-image")),
-            Self::entry(".gif", "image/gif", "GIF Image", Some(image_viewer.clone()),
-                vec![image_viewer.clone()], Some("file-image")),
-            Self::entry(".bmp", "image/bmp", "Bitmap Image", Some(image_viewer.clone()),
-                vec![image_viewer.clone()], Some("file-image")),
-            Self::entry(".svg", "image/svg+xml", "SVG Vector Image", Some(image_viewer.clone()),
-                vec![image_viewer.clone(), code_editor.clone()], Some("file-svg")),
-            Self::entry(".webp", "image/webp", "WebP Image", Some(image_viewer.clone()),
-                vec![image_viewer.clone()], Some("file-image")),
-            Self::entry(".ico", "image/x-icon", "Icon File", Some(image_viewer.clone()),
-                vec![image_viewer.clone()], Some("file-image")),
-            Self::entry(".tiff", "image/tiff", "TIFF Image", Some(image_viewer.clone()),
-                vec![image_viewer.clone()], Some("file-image")),
-            Self::entry(".heic", "image/heic", "HEIC Image", Some(image_viewer.clone()),
-                vec![image_viewer.clone()], Some("file-image")),
-            Self::entry(".avif", "image/avif", "AVIF Image", Some(image_viewer.clone()),
-                vec![image_viewer.clone()], Some("file-image")),
-
+            Self::entry(
+                ".png",
+                "image/png",
+                "PNG Image",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone()],
+                Some("file-image"),
+            ),
+            Self::entry(
+                ".jpg",
+                "image/jpeg",
+                "JPEG Image",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone()],
+                Some("file-image"),
+            ),
+            Self::entry(
+                ".jpeg",
+                "image/jpeg",
+                "JPEG Image",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone()],
+                Some("file-image"),
+            ),
+            Self::entry(
+                ".gif",
+                "image/gif",
+                "GIF Image",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone()],
+                Some("file-image"),
+            ),
+            Self::entry(
+                ".bmp",
+                "image/bmp",
+                "Bitmap Image",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone()],
+                Some("file-image"),
+            ),
+            Self::entry(
+                ".svg",
+                "image/svg+xml",
+                "SVG Vector Image",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone(), code_editor.clone()],
+                Some("file-svg"),
+            ),
+            Self::entry(
+                ".webp",
+                "image/webp",
+                "WebP Image",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone()],
+                Some("file-image"),
+            ),
+            Self::entry(
+                ".ico",
+                "image/x-icon",
+                "Icon File",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone()],
+                Some("file-image"),
+            ),
+            Self::entry(
+                ".tiff",
+                "image/tiff",
+                "TIFF Image",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone()],
+                Some("file-image"),
+            ),
+            Self::entry(
+                ".heic",
+                "image/heic",
+                "HEIC Image",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone()],
+                Some("file-image"),
+            ),
+            Self::entry(
+                ".avif",
+                "image/avif",
+                "AVIF Image",
+                Some(image_viewer.clone()),
+                vec![image_viewer.clone()],
+                Some("file-image"),
+            ),
             // Audio
-            Self::entry(".mp3", "audio/mpeg", "MP3 Audio", Some(music_player.clone()),
-                vec![music_player.clone()], Some("file-audio")),
-            Self::entry(".wav", "audio/wav", "WAV Audio", Some(music_player.clone()),
-                vec![music_player.clone()], Some("file-audio")),
-            Self::entry(".flac", "audio/flac", "FLAC Audio", Some(music_player.clone()),
-                vec![music_player.clone()], Some("file-audio")),
-            Self::entry(".ogg", "audio/ogg", "Ogg Vorbis Audio", Some(music_player.clone()),
-                vec![music_player.clone()], Some("file-audio")),
-            Self::entry(".aac", "audio/aac", "AAC Audio", Some(music_player.clone()),
-                vec![music_player.clone()], Some("file-audio")),
-            Self::entry(".m4a", "audio/mp4", "M4A Audio", Some(music_player.clone()),
-                vec![music_player.clone()], Some("file-audio")),
-            Self::entry(".opus", "audio/opus", "Opus Audio", Some(music_player.clone()),
-                vec![music_player.clone()], Some("file-audio")),
-            Self::entry(".mid", "audio/midi", "MIDI Audio", Some(music_player.clone()),
-                vec![music_player.clone()], Some("file-midi")),
-
+            Self::entry(
+                ".mp3",
+                "audio/mpeg",
+                "MP3 Audio",
+                Some(music_player.clone()),
+                vec![music_player.clone()],
+                Some("file-audio"),
+            ),
+            Self::entry(
+                ".wav",
+                "audio/wav",
+                "WAV Audio",
+                Some(music_player.clone()),
+                vec![music_player.clone()],
+                Some("file-audio"),
+            ),
+            Self::entry(
+                ".flac",
+                "audio/flac",
+                "FLAC Audio",
+                Some(music_player.clone()),
+                vec![music_player.clone()],
+                Some("file-audio"),
+            ),
+            Self::entry(
+                ".ogg",
+                "audio/ogg",
+                "Ogg Vorbis Audio",
+                Some(music_player.clone()),
+                vec![music_player.clone()],
+                Some("file-audio"),
+            ),
+            Self::entry(
+                ".aac",
+                "audio/aac",
+                "AAC Audio",
+                Some(music_player.clone()),
+                vec![music_player.clone()],
+                Some("file-audio"),
+            ),
+            Self::entry(
+                ".m4a",
+                "audio/mp4",
+                "M4A Audio",
+                Some(music_player.clone()),
+                vec![music_player.clone()],
+                Some("file-audio"),
+            ),
+            Self::entry(
+                ".opus",
+                "audio/opus",
+                "Opus Audio",
+                Some(music_player.clone()),
+                vec![music_player.clone()],
+                Some("file-audio"),
+            ),
+            Self::entry(
+                ".mid",
+                "audio/midi",
+                "MIDI Audio",
+                Some(music_player.clone()),
+                vec![music_player.clone()],
+                Some("file-midi"),
+            ),
             // Video
-            Self::entry(".mp4", "video/mp4", "MP4 Video", Some(video_player.clone()),
-                vec![video_player.clone()], Some("file-video")),
-            Self::entry(".mkv", "video/x-matroska", "Matroska Video", Some(video_player.clone()),
-                vec![video_player.clone()], Some("file-video")),
-            Self::entry(".avi", "video/x-msvideo", "AVI Video", Some(video_player.clone()),
-                vec![video_player.clone()], Some("file-video")),
-            Self::entry(".mov", "video/quicktime", "QuickTime Video", Some(video_player.clone()),
-                vec![video_player.clone()], Some("file-video")),
-            Self::entry(".webm", "video/webm", "WebM Video", Some(video_player.clone()),
-                vec![video_player.clone()], Some("file-video")),
-            Self::entry(".flv", "video/x-flv", "Flash Video", Some(video_player.clone()),
-                vec![video_player.clone()], Some("file-video")),
-
+            Self::entry(
+                ".mp4",
+                "video/mp4",
+                "MP4 Video",
+                Some(video_player.clone()),
+                vec![video_player.clone()],
+                Some("file-video"),
+            ),
+            Self::entry(
+                ".mkv",
+                "video/x-matroska",
+                "Matroska Video",
+                Some(video_player.clone()),
+                vec![video_player.clone()],
+                Some("file-video"),
+            ),
+            Self::entry(
+                ".avi",
+                "video/x-msvideo",
+                "AVI Video",
+                Some(video_player.clone()),
+                vec![video_player.clone()],
+                Some("file-video"),
+            ),
+            Self::entry(
+                ".mov",
+                "video/quicktime",
+                "QuickTime Video",
+                Some(video_player.clone()),
+                vec![video_player.clone()],
+                Some("file-video"),
+            ),
+            Self::entry(
+                ".webm",
+                "video/webm",
+                "WebM Video",
+                Some(video_player.clone()),
+                vec![video_player.clone()],
+                Some("file-video"),
+            ),
+            Self::entry(
+                ".flv",
+                "video/x-flv",
+                "Flash Video",
+                Some(video_player.clone()),
+                vec![video_player.clone()],
+                Some("file-video"),
+            ),
             // Code
-            Self::entry(".rs", "text/x-rust", "Rust Source File", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-rust")),
-            Self::entry(".py", "text/x-python", "Python Script", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-python")),
-            Self::entry(".js", "text/javascript", "JavaScript File", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-javascript")),
-            Self::entry(".ts", "text/typescript", "TypeScript File", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-typescript")),
-            Self::entry(".c", "text/x-c", "C Source File", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-c")),
-            Self::entry(".cpp", "text/x-c++", "C++ Source File", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-cpp")),
-            Self::entry(".h", "text/x-c-header", "C/C++ Header File", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-header")),
-            Self::entry(".java", "text/x-java", "Java Source File", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-java")),
-            Self::entry(".go", "text/x-go", "Go Source File", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-go")),
-            Self::entry(".html", "text/html", "HTML Document", None,
-                vec![code_editor.clone(), text_editor.clone()], Some("file-html")),
-            Self::entry(".css", "text/css", "CSS Stylesheet", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-css")),
-            Self::entry(".json", "application/json", "JSON File", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-json")),
-            Self::entry(".toml", "application/toml", "TOML Configuration", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-config")),
-            Self::entry(".yaml", "application/x-yaml", "YAML File", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-config")),
-            Self::entry(".xml", "application/xml", "XML Document", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-xml")),
-            Self::entry(".sh", "application/x-sh", "Shell Script", Some(code_editor.clone()),
-                vec![code_editor.clone(), text_editor.clone()], Some("file-script")),
-
+            Self::entry(
+                ".rs",
+                "text/x-rust",
+                "Rust Source File",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-rust"),
+            ),
+            Self::entry(
+                ".py",
+                "text/x-python",
+                "Python Script",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-python"),
+            ),
+            Self::entry(
+                ".js",
+                "text/javascript",
+                "JavaScript File",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-javascript"),
+            ),
+            Self::entry(
+                ".ts",
+                "text/typescript",
+                "TypeScript File",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-typescript"),
+            ),
+            Self::entry(
+                ".c",
+                "text/x-c",
+                "C Source File",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-c"),
+            ),
+            Self::entry(
+                ".cpp",
+                "text/x-c++",
+                "C++ Source File",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-cpp"),
+            ),
+            Self::entry(
+                ".h",
+                "text/x-c-header",
+                "C/C++ Header File",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-header"),
+            ),
+            Self::entry(
+                ".java",
+                "text/x-java",
+                "Java Source File",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-java"),
+            ),
+            Self::entry(
+                ".go",
+                "text/x-go",
+                "Go Source File",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-go"),
+            ),
+            Self::entry(
+                ".html",
+                "text/html",
+                "HTML Document",
+                None,
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-html"),
+            ),
+            Self::entry(
+                ".css",
+                "text/css",
+                "CSS Stylesheet",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-css"),
+            ),
+            Self::entry(
+                ".json",
+                "application/json",
+                "JSON File",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-json"),
+            ),
+            Self::entry(
+                ".toml",
+                "application/toml",
+                "TOML Configuration",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-config"),
+            ),
+            Self::entry(
+                ".yaml",
+                "application/x-yaml",
+                "YAML File",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-config"),
+            ),
+            Self::entry(
+                ".xml",
+                "application/xml",
+                "XML Document",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-xml"),
+            ),
+            Self::entry(
+                ".sh",
+                "application/x-sh",
+                "Shell Script",
+                Some(code_editor.clone()),
+                vec![code_editor.clone(), text_editor.clone()],
+                Some("file-script"),
+            ),
             // Archives
-            Self::entry(".zip", "application/zip", "ZIP Archive", Some(archive_tool.clone()),
-                vec![archive_tool.clone(), file_manager.clone()], Some("file-archive")),
-            Self::entry(".tar", "application/x-tar", "Tar Archive", Some(archive_tool.clone()),
-                vec![archive_tool.clone()], Some("file-archive")),
-            Self::entry(".gz", "application/gzip", "Gzip Archive", Some(archive_tool.clone()),
-                vec![archive_tool.clone()], Some("file-archive")),
-            Self::entry(".7z", "application/x-7z-compressed", "7-Zip Archive", Some(archive_tool.clone()),
-                vec![archive_tool.clone()], Some("file-archive")),
-            Self::entry(".rar", "application/vnd.rar", "RAR Archive", Some(archive_tool.clone()),
-                vec![archive_tool.clone()], Some("file-archive")),
-            Self::entry(".xz", "application/x-xz", "XZ Archive", Some(archive_tool.clone()),
-                vec![archive_tool.clone()], Some("file-archive")),
-            Self::entry(".zst", "application/zstd", "Zstandard Archive", Some(archive_tool.clone()),
-                vec![archive_tool.clone()], Some("file-archive")),
-            Self::entry(".iso", "application/x-iso9660-image", "Disc Image (ISO)", Some(file_manager.clone()),
-                vec![file_manager.clone(), archive_tool.clone()], Some("file-disc")),
+            Self::entry(
+                ".zip",
+                "application/zip",
+                "ZIP Archive",
+                Some(archive_tool.clone()),
+                vec![archive_tool.clone(), file_manager.clone()],
+                Some("file-archive"),
+            ),
+            Self::entry(
+                ".tar",
+                "application/x-tar",
+                "Tar Archive",
+                Some(archive_tool.clone()),
+                vec![archive_tool.clone()],
+                Some("file-archive"),
+            ),
+            Self::entry(
+                ".gz",
+                "application/gzip",
+                "Gzip Archive",
+                Some(archive_tool.clone()),
+                vec![archive_tool.clone()],
+                Some("file-archive"),
+            ),
+            Self::entry(
+                ".7z",
+                "application/x-7z-compressed",
+                "7-Zip Archive",
+                Some(archive_tool.clone()),
+                vec![archive_tool.clone()],
+                Some("file-archive"),
+            ),
+            Self::entry(
+                ".rar",
+                "application/vnd.rar",
+                "RAR Archive",
+                Some(archive_tool.clone()),
+                vec![archive_tool.clone()],
+                Some("file-archive"),
+            ),
+            Self::entry(
+                ".xz",
+                "application/x-xz",
+                "XZ Archive",
+                Some(archive_tool.clone()),
+                vec![archive_tool.clone()],
+                Some("file-archive"),
+            ),
+            Self::entry(
+                ".zst",
+                "application/zstd",
+                "Zstandard Archive",
+                Some(archive_tool.clone()),
+                vec![archive_tool.clone()],
+                Some("file-archive"),
+            ),
+            Self::entry(
+                ".iso",
+                "application/x-iso9660-image",
+                "Disc Image (ISO)",
+                Some(file_manager.clone()),
+                vec![file_manager.clone(), archive_tool.clone()],
+                Some("file-disc"),
+            ),
         ]
     }
 
@@ -597,7 +947,8 @@ impl AssociationsPageState {
 
     /// Get the filtered and sorted entries based on current UI state.
     pub fn visible_entries(&self) -> Vec<&AssociationEntry> {
-        self.manager.filtered_entries(self.active_category, &self.search_query)
+        self.manager
+            .filtered_entries(self.active_category, &self.search_query)
     }
 
     /// Render the full associations page into a RenderTree.
@@ -643,16 +994,17 @@ impl AssociationsPageState {
     }
 
     /// Render the search/filter bar.
-    fn render_search_bar(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        y: f32,
-        content_width: f32,
-    ) -> f32 {
+    fn render_search_bar(&self, tree: &mut RenderTree, x: f32, y: f32, content_width: f32) -> f32 {
         // Search field background
         let bar_width = content_width.min(500.0);
-        tree.fill_rounded_rect(x, y, bar_width, SEARCH_BAR_HEIGHT, COL_SURFACE0, CornerRadii::all(8.0));
+        tree.fill_rounded_rect(
+            x,
+            y,
+            bar_width,
+            SEARCH_BAR_HEIGHT,
+            COL_SURFACE0,
+            CornerRadii::all(8.0),
+        );
         tree.push(RenderCommand::StrokeRect {
             x,
             y,
@@ -711,7 +1063,14 @@ impl AssociationsPageState {
 
             // Tab background
             let bg_color = if is_active { COL_ACCENT } else { COL_SURFACE0 };
-            tree.fill_rounded_rect(tab_x, y, tab_width, TAB_HEIGHT, bg_color, CornerRadii::all(6.0));
+            tree.fill_rounded_rect(
+                tab_x,
+                y,
+                tab_width,
+                TAB_HEIGHT,
+                bg_color,
+                CornerRadii::all(6.0),
+            );
 
             // Tab text
             let text_color = if is_active { COL_BASE } else { COL_SUBTEXT0 };
@@ -736,13 +1095,7 @@ impl AssociationsPageState {
     }
 
     /// Render the scrollable file type list.
-    fn render_file_list(
-        &self,
-        tree: &mut RenderTree,
-        x: f32,
-        start_y: f32,
-        content_width: f32,
-    ) {
+    fn render_file_list(&self, tree: &mut RenderTree, x: f32, start_y: f32, content_width: f32) {
         let entries = self.visible_entries();
         let mut y = start_y - self.scroll_offset;
 
@@ -767,12 +1120,26 @@ impl AssociationsPageState {
             } else {
                 COL_BASE
             };
-            tree.fill_rounded_rect(x, y, content_width, ROW_HEIGHT, row_bg, CornerRadii::all(4.0));
+            tree.fill_rounded_rect(
+                x,
+                y,
+                content_width,
+                ROW_HEIGHT,
+                row_bg,
+                CornerRadii::all(4.0),
+            );
 
             // File type icon area
             let icon_x = x + 12.0;
             let icon_y = y + (ROW_HEIGHT - ICON_SIZE) / 2.0;
-            tree.fill_rounded_rect(icon_x, icon_y, ICON_SIZE, ICON_SIZE, COL_SURFACE1, CornerRadii::all(4.0));
+            tree.fill_rounded_rect(
+                icon_x,
+                icon_y,
+                ICON_SIZE,
+                ICON_SIZE,
+                COL_SURFACE1,
+                CornerRadii::all(4.0),
+            );
 
             // Extension text (bold, prominent)
             let ext_x = x + 48.0;
@@ -881,7 +1248,11 @@ impl AssociationsPageState {
 
             // Radio button circle
             let radio_y = py + 2.0;
-            let radio_color = if is_selected { COL_ACCENT } else { COL_SURFACE2 };
+            let radio_color = if is_selected {
+                COL_ACCENT
+            } else {
+                COL_SURFACE2
+            };
             tree.push(RenderCommand::StrokeRect {
                 x: panel_x,
                 y: radio_y,
@@ -905,7 +1276,11 @@ impl AssociationsPageState {
             }
 
             // App name
-            let name_color = if app.installed { COL_TEXT } else { COL_OVERLAY0 };
+            let name_color = if app.installed {
+                COL_TEXT
+            } else {
+                COL_OVERLAY0
+            };
             tree.push(RenderCommand::Text {
                 x: panel_x + RADIO_SIZE + 10.0,
                 y: py + 2.0,
@@ -937,7 +1312,14 @@ impl AssociationsPageState {
         py += 8.0;
         let btn_width = 180.0;
         let btn_height = 28.0;
-        tree.fill_rounded_rect(panel_x, py, btn_width, btn_height, COL_SURFACE1, CornerRadii::all(6.0));
+        tree.fill_rounded_rect(
+            panel_x,
+            py,
+            btn_width,
+            btn_height,
+            COL_SURFACE1,
+            CornerRadii::all(6.0),
+        );
         tree.push(RenderCommand::Text {
             x: panel_x + 12.0,
             y: py + 7.0,
@@ -950,7 +1332,14 @@ impl AssociationsPageState {
 
         // "Reset to default" button
         let reset_x = panel_x + btn_width + 16.0;
-        tree.fill_rounded_rect(reset_x, py, 140.0, btn_height, COL_SURFACE1, CornerRadii::all(6.0));
+        tree.fill_rounded_rect(
+            reset_x,
+            py,
+            140.0,
+            btn_height,
+            COL_SURFACE1,
+            CornerRadii::all(6.0),
+        );
         tree.push(RenderCommand::Text {
             x: reset_x + 12.0,
             y: py + 7.0,
@@ -977,7 +1366,11 @@ mod tests {
     fn test_default_entries_populated() {
         let mgr = AssociationManager::new();
         // Should have a substantial number of pre-populated file types
-        assert!(mgr.count() >= 40, "Expected at least 40 entries, got {}", mgr.count());
+        assert!(
+            mgr.count() >= 40,
+            "Expected at least 40 entries, got {}",
+            mgr.count()
+        );
     }
 
     #[test]
@@ -1008,7 +1401,10 @@ mod tests {
         // The fallback should now be the text editor
         let entry = mgr.entries.iter().find(|e| e.extension == ".txt").unwrap();
         assert!(entry.fallback_app.is_some());
-        assert_eq!(entry.fallback_app.as_ref().unwrap().id, "com.ouros.texteditor");
+        assert_eq!(
+            entry.fallback_app.as_ref().unwrap().id,
+            "com.ouros.texteditor"
+        );
     }
 
     #[test]
@@ -1258,8 +1654,12 @@ mod tests {
         let results = mgr.filtered_entries(FileCategory::All, "");
         // Verify sorted by extension
         for i in 1..results.len() {
-            assert!(results[i - 1].extension <= results[i].extension,
-                "Entries not sorted: {} > {}", results[i - 1].extension, results[i].extension);
+            assert!(
+                results[i - 1].extension <= results[i].extension,
+                "Entries not sorted: {} > {}",
+                results[i - 1].extension,
+                results[i].extension
+            );
         }
     }
 
@@ -1307,7 +1707,11 @@ mod tests {
         // Code editor is default for many code extensions
         let affected = mgr.handle_uninstall("com.ouros.codeeditor");
         // Should affect multiple code file types
-        assert!(affected.len() > 5, "Expected multiple affected extensions, got {}", affected.len());
+        assert!(
+            affected.len() > 5,
+            "Expected multiple affected extensions, got {}",
+            affected.len()
+        );
 
         // All affected extensions should now have text editor as default
         // (since text editor is the other available app for code files)

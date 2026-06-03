@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use guitk::color::Color;
-use guitk::render::{RenderCommand, RenderTree, FontWeightHint};
+use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::CornerRadii;
 
 // ============================================================================
@@ -191,9 +191,7 @@ impl AviHeader {
         if self.microseconds_per_frame == 0 {
             return 0;
         }
-        (self.total_frames as u64)
-            .saturating_mul(self.microseconds_per_frame as u64)
-            / 1_000
+        (self.total_frames as u64).saturating_mul(self.microseconds_per_frame as u64) / 1_000
     }
 }
 
@@ -220,13 +218,16 @@ pub fn parse_avi_header(data: &[u8]) -> Result<AviHeader, VideoError> {
     //   16..20 dwTotalFrames
     //   32..36 dwWidth
     //   36..40 dwHeight
-    let chunk_data_start = avih_pos.checked_add(8)
+    let chunk_data_start = avih_pos
+        .checked_add(8)
         .ok_or_else(|| VideoError::ParseError("avih offset overflow".into()))?;
 
     let read_u32 = |offset: usize| -> Result<u32, VideoError> {
-        let start = chunk_data_start.checked_add(offset)
+        let start = chunk_data_start
+            .checked_add(offset)
             .ok_or_else(|| VideoError::ParseError("offset overflow".into()))?;
-        let end = start.checked_add(4)
+        let end = start
+            .checked_add(4)
             .ok_or_else(|| VideoError::ParseError("offset overflow".into()))?;
         if end > data.len() {
             return Err(VideoError::ParseError("avih chunk truncated".into()));
@@ -248,9 +249,11 @@ pub fn parse_avi_header(data: &[u8]) -> Result<AviHeader, VideoError> {
     // Try to find `strh` to extract the codec FourCC.
     let codec_fourcc = if let Some(strh_pos) = find_chunk_id(data, b"strh") {
         // strh layout: fccType(4) + fccHandler(4) at start of chunk data.
-        let handler_start = strh_pos.checked_add(8 + 4)
+        let handler_start = strh_pos
+            .checked_add(8 + 4)
             .ok_or_else(|| VideoError::ParseError("strh offset overflow".into()))?;
-        let handler_end = handler_start.checked_add(4)
+        let handler_end = handler_start
+            .checked_add(4)
             .ok_or_else(|| VideoError::ParseError("strh offset overflow".into()))?;
         if handler_end <= data.len() {
             [
@@ -327,20 +330,10 @@ pub fn parse_mp4_boxes(data: &[u8]) -> Result<Vec<Mp4Box>, VideoError> {
     let mut pos: usize = 0;
 
     while pos + 8 <= data.len() {
-        let size_bytes: [u8; 4] = [
-            data[pos],
-            data[pos + 1],
-            data[pos + 2],
-            data[pos + 3],
-        ];
+        let size_bytes: [u8; 4] = [data[pos], data[pos + 1], data[pos + 2], data[pos + 3]];
         let raw_size = u32::from_be_bytes(size_bytes) as u64;
 
-        let box_type: [u8; 4] = [
-            data[pos + 4],
-            data[pos + 5],
-            data[pos + 6],
-            data[pos + 7],
-        ];
+        let box_type: [u8; 4] = [data[pos + 4], data[pos + 5], data[pos + 6], data[pos + 7]];
 
         let (header_len, box_size) = if raw_size == 1 {
             // 64-bit extended size
@@ -394,12 +387,18 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
     let top_boxes = parse_mp4_boxes(data)?;
 
     // Extract major brand from ftyp.
-    let major_brand = top_boxes.iter()
+    let major_brand = top_boxes
+        .iter()
         .find(|b| &b.box_type == b"ftyp")
         .and_then(|b| {
             let start = b.offset as usize + 8;
             if start + 4 <= data.len() {
-                Some([data[start], data[start + 1], data[start + 2], data[start + 3]])
+                Some([
+                    data[start],
+                    data[start + 1],
+                    data[start + 2],
+                    data[start + 3],
+                ])
             } else {
                 None
             }
@@ -407,13 +406,16 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
         .unwrap_or([0; 4]);
 
     // Find moov box.
-    let moov = top_boxes.iter()
+    let moov = top_boxes
+        .iter()
         .find(|b| &b.box_type == b"moov")
         .ok_or(VideoError::ParseError("moov box not found".into()))?;
 
-    let moov_start = (moov.offset as usize).checked_add(8)
+    let moov_start = (moov.offset as usize)
+        .checked_add(8)
         .ok_or_else(|| VideoError::ParseError("moov offset overflow".into()))?;
-    let moov_end = (moov.offset as usize).checked_add(moov.size as usize)
+    let moov_end = (moov.offset as usize)
+        .checked_add(moov.size as usize)
         .ok_or_else(|| VideoError::ParseError("moov size overflow".into()))?
         .min(data.len());
 
@@ -439,7 +441,9 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
     let mut audio_codec: Option<[u8; 4]> = None;
 
     for trak in moov_children.iter().filter(|b| &b.box_type == b"trak") {
-        let trak_start = (trak.offset as usize).checked_add(8).unwrap_or(moov_data.len());
+        let trak_start = (trak.offset as usize)
+            .checked_add(8)
+            .unwrap_or(moov_data.len());
         let trak_end = (trak.offset as usize)
             .checked_add(trak.size as usize)
             .unwrap_or(moov_data.len())
@@ -461,8 +465,10 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
         if let Some(codec) = extract_stsd_codec(trak_data) {
             // Heuristic: video codecs are avc1, hvc1, vp09, av01, mp4v etc.
             // Audio codecs are mp4a, ac-3, ec-3, Opus, etc.
-            let is_video = matches!(&codec, b"avc1" | b"avc3" | b"hvc1" | b"hev1"
-                | b"vp08" | b"vp09" | b"av01" | b"mp4v");
+            let is_video = matches!(
+                &codec,
+                b"avc1" | b"avc3" | b"hvc1" | b"hev1" | b"vp08" | b"vp09" | b"av01" | b"mp4v"
+            );
             if is_video && video_codec.is_none() {
                 video_codec = Some(codec);
             } else if !is_video && audio_codec.is_none() {
@@ -485,11 +491,13 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
 /// Parse the `mvhd` box to extract timescale and duration.
 fn parse_mvhd(moov_data: &[u8]) -> Result<(u32, u64), VideoError> {
     let children = parse_mp4_boxes(moov_data)?;
-    let mvhd = children.iter()
+    let mvhd = children
+        .iter()
         .find(|b| &b.box_type == b"mvhd")
         .ok_or(VideoError::ParseError("mvhd box not found".into()))?;
 
-    let start = (mvhd.offset as usize).checked_add(8)
+    let start = (mvhd.offset as usize)
+        .checked_add(8)
         .ok_or_else(|| VideoError::ParseError("mvhd offset overflow".into()))?;
 
     if start >= moov_data.len() {
@@ -550,22 +558,34 @@ fn extract_stsd_codec(trak_data: &[u8]) -> Option<[u8; 4]> {
     let trak_children = parse_mp4_boxes(trak_data).ok()?;
     let mdia = trak_children.iter().find(|b| &b.box_type == b"mdia")?;
     let mdia_start = (mdia.offset as usize).checked_add(8)?;
-    let mdia_end = (mdia.offset as usize).checked_add(mdia.size as usize)?.min(trak_data.len());
-    if mdia_start >= mdia_end { return None; }
+    let mdia_end = (mdia.offset as usize)
+        .checked_add(mdia.size as usize)?
+        .min(trak_data.len());
+    if mdia_start >= mdia_end {
+        return None;
+    }
     let mdia_data = &trak_data[mdia_start..mdia_end];
 
     let mdia_children = parse_mp4_boxes(mdia_data).ok()?;
     let minf = mdia_children.iter().find(|b| &b.box_type == b"minf")?;
     let minf_start = (minf.offset as usize).checked_add(8)?;
-    let minf_end = (minf.offset as usize).checked_add(minf.size as usize)?.min(mdia_data.len());
-    if minf_start >= minf_end { return None; }
+    let minf_end = (minf.offset as usize)
+        .checked_add(minf.size as usize)?
+        .min(mdia_data.len());
+    if minf_start >= minf_end {
+        return None;
+    }
     let minf_data = &mdia_data[minf_start..minf_end];
 
     let minf_children = parse_mp4_boxes(minf_data).ok()?;
     let stbl = minf_children.iter().find(|b| &b.box_type == b"stbl")?;
     let stbl_start = (stbl.offset as usize).checked_add(8)?;
-    let stbl_end = (stbl.offset as usize).checked_add(stbl.size as usize)?.min(minf_data.len());
-    if stbl_start >= stbl_end { return None; }
+    let stbl_end = (stbl.offset as usize)
+        .checked_add(stbl.size as usize)?
+        .min(minf_data.len());
+    if stbl_start >= stbl_end {
+        return None;
+    }
     let stbl_data = &minf_data[stbl_start..stbl_end];
 
     let stbl_children = parse_mp4_boxes(stbl_data).ok()?;
@@ -573,10 +593,14 @@ fn extract_stsd_codec(trak_data: &[u8]) -> Option<[u8; 4]> {
     // stsd is a full box: 4 bytes version/flags + 4 bytes entry_count, then
     // the first sample entry whose box type is the codec FourCC.
     let stsd_payload_start = (stsd.offset as usize).checked_add(8 + 8)?;
-    if stsd_payload_start + 4 > stbl_data.len() { return None; }
+    if stsd_payload_start + 4 > stbl_data.len() {
+        return None;
+    }
     // The sample entry begins here; its box type (at +4..+8) is the codec.
     let entry_start = stsd_payload_start;
-    if entry_start + 8 > stbl_data.len() { return None; }
+    if entry_start + 8 > stbl_data.len() {
+        return None;
+    }
     Some([
         stbl_data[entry_start + 4],
         stbl_data[entry_start + 5],
@@ -610,8 +634,7 @@ pub fn parse_mkv_info(data: &[u8]) -> Result<MkvInfo, VideoError> {
     }
 
     // Extract DocType from the EBML header.
-    let doc_type = extract_ebml_string(data, 0x4282)
-        .unwrap_or_else(|| String::from("matroska"));
+    let doc_type = extract_ebml_string(data, 0x4282).unwrap_or_else(|| String::from("matroska"));
 
     // Scan for the Segment Info element (ID 0x1549_A966 as 4-byte EBML ID).
     // Inside it, look for Duration (ID 0x4489) and TimecodeScale (ID 0x2AD7B1).
@@ -678,13 +701,22 @@ fn extract_ebml_duration(data: &[u8]) -> Option<u64> {
             if end <= data.len() {
                 let duration_ns = if len == 4 {
                     let bytes: [u8; 4] = [
-                        data[start], data[start + 1], data[start + 2], data[start + 3],
+                        data[start],
+                        data[start + 1],
+                        data[start + 2],
+                        data[start + 3],
                     ];
                     f32::from_be_bytes(bytes) as f64
                 } else if len == 8 {
                     let bytes: [u8; 8] = [
-                        data[start], data[start + 1], data[start + 2], data[start + 3],
-                        data[start + 4], data[start + 5], data[start + 6], data[start + 7],
+                        data[start],
+                        data[start + 1],
+                        data[start + 2],
+                        data[start + 3],
+                        data[start + 4],
+                        data[start + 5],
+                        data[start + 6],
+                        data[start + 7],
                     ];
                     f64::from_be_bytes(bytes)
                 } else {
@@ -797,25 +829,36 @@ fn read_ebml_uint(data: &[u8]) -> u64 {
 // ============================================================================
 
 fn read_be_u32(data: &[u8], offset: usize) -> Result<u32, VideoError> {
-    let end = offset.checked_add(4)
+    let end = offset
+        .checked_add(4)
         .ok_or_else(|| VideoError::ParseError("offset overflow".into()))?;
     if end > data.len() {
         return Err(VideoError::ParseError("data truncated".into()));
     }
     Ok(u32::from_be_bytes([
-        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
     ]))
 }
 
 fn read_be_u64(data: &[u8], offset: usize) -> Result<u64, VideoError> {
-    let end = offset.checked_add(8)
+    let end = offset
+        .checked_add(8)
         .ok_or_else(|| VideoError::ParseError("offset overflow".into()))?;
     if end > data.len() {
         return Err(VideoError::ParseError("data truncated".into()));
     }
     Ok(u64::from_be_bytes([
-        data[offset], data[offset + 1], data[offset + 2], data[offset + 3],
-        data[offset + 4], data[offset + 5], data[offset + 6], data[offset + 7],
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+        data[offset + 4],
+        data[offset + 5],
+        data[offset + 6],
+        data[offset + 7],
     ]))
 }
 
@@ -967,11 +1010,9 @@ impl VideoPlayer {
     ///
     /// On success the player enters `Stopped` state with metadata populated.
     pub fn open(&mut self, path: &str) -> Result<VideoInfo, VideoError> {
-        let data = std::fs::read(path)
-            .map_err(|e| VideoError::IoError(e.to_string()))?;
+        let data = std::fs::read(path).map_err(|e| VideoError::IoError(e.to_string()))?;
 
-        let container = ContainerFormat::detect(&data)
-            .ok_or(VideoError::UnsupportedFormat)?;
+        let container = ContainerFormat::detect(&data).ok_or(VideoError::UnsupportedFormat)?;
 
         let info = match container {
             ContainerFormat::Avi => {
@@ -990,7 +1031,8 @@ impl VideoPlayer {
             }
             ContainerFormat::Mp4 => {
                 let mp4 = parse_mp4_info(&data)?;
-                let codec_str = mp4.video_codec
+                let codec_str = mp4
+                    .video_codec
                     .map(|c| String::from_utf8_lossy(&c).to_string())
                     .unwrap_or_else(|| String::from("unknown"));
                 VideoInfo {
@@ -1474,13 +1516,7 @@ pub fn render_controls(
 }
 
 /// Render the seek bar with progress and buffered region.
-fn render_seek_bar(
-    player: &VideoPlayer,
-    tree: &mut RenderTree,
-    x: f32,
-    bar_y: f32,
-    width: f32,
-) {
+fn render_seek_bar(player: &VideoPlayer, tree: &mut RenderTree, x: f32, bar_y: f32, width: f32) {
     let seek_x = x + 8.0;
     let seek_w = width - 16.0;
     let seek_y = bar_y + (SEEK_BAR_HIT_HEIGHT - SEEK_BAR_HEIGHT) / 2.0;
@@ -1497,8 +1533,8 @@ fn render_seek_bar(
 
     if player.duration_ms > 0 {
         // Buffered region (slightly lighter)
-        let buffered_frac = (player.buffered_ms as f64 / player.duration_ms as f64)
-            .clamp(0.0, 1.0) as f32;
+        let buffered_frac =
+            (player.buffered_ms as f64 / player.duration_ms as f64).clamp(0.0, 1.0) as f32;
         if buffered_frac > 0.0 {
             tree.push(RenderCommand::FillRect {
                 x: seek_x,
@@ -1511,8 +1547,8 @@ fn render_seek_bar(
         }
 
         // Progress bar (accent color)
-        let progress_frac = (player.position_ms as f64 / player.duration_ms as f64)
-            .clamp(0.0, 1.0) as f32;
+        let progress_frac =
+            (player.position_ms as f64 / player.duration_ms as f64).clamp(0.0, 1.0) as f32;
         if progress_frac > 0.0 {
             tree.push(RenderCommand::FillRect {
                 x: seek_x,
@@ -1539,34 +1575,41 @@ fn render_seek_bar(
 }
 
 /// Render the central playback buttons (prev, play/pause, stop, next).
-fn render_playback_buttons(
-    player: &VideoPlayer,
-    tree: &mut RenderTree,
-    center_x: f32,
-    y: f32,
-) {
+fn render_playback_buttons(player: &VideoPlayer, tree: &mut RenderTree, center_x: f32, y: f32) {
     let btn_gap = 8.0;
     let total_width = CONTROL_BUTTON_SIZE * 5.0 + btn_gap * 4.0;
     let start_x = center_x - total_width / 2.0;
 
     let buttons: &[(&str, Color)] = &[
         // Previous
-        ("\u{23EE}", MOCHA_TEXT),    // |<<
+        ("\u{23EE}", MOCHA_TEXT), // |<<
         // Stop
-        ("\u{23F9}", MOCHA_TEXT),    // Stop
+        ("\u{23F9}", MOCHA_TEXT), // Stop
         // Play/Pause
         (
-            if player.state == PlayerState::Playing { "\u{23F8}" } else { "\u{25B6}" },
-            if player.state == PlayerState::Playing { MOCHA_BLUE } else { MOCHA_GREEN },
+            if player.state == PlayerState::Playing {
+                "\u{23F8}"
+            } else {
+                "\u{25B6}"
+            },
+            if player.state == PlayerState::Playing {
+                MOCHA_BLUE
+            } else {
+                MOCHA_GREEN
+            },
         ),
         // stop (second is actually not needed, but we have a nice layout)
         // Actually: Subtitle toggle
         (
             if player.subtitles_enabled { "CC" } else { "cc" },
-            if player.subtitles_enabled { MOCHA_GREEN } else { MOCHA_OVERLAY0 },
+            if player.subtitles_enabled {
+                MOCHA_GREEN
+            } else {
+                MOCHA_OVERLAY0
+            },
         ),
         // Next
-        ("\u{23ED}", MOCHA_TEXT),    // >>|
+        ("\u{23ED}", MOCHA_TEXT), // >>|
     ];
 
     for (i, (label, color)) in buttons.iter().enumerate() {
@@ -1596,13 +1639,7 @@ fn render_playback_buttons(
 }
 
 /// Render the volume slider.
-fn render_volume(
-    player: &VideoPlayer,
-    tree: &mut RenderTree,
-    x: f32,
-    y: f32,
-    width: f32,
-) {
+fn render_volume(player: &VideoPlayer, tree: &mut RenderTree, x: f32, y: f32, width: f32) {
     // Volume icon
     let icon = if player.muted || player.volume < 0.01 {
         "\u{1F507}" // muted speaker
@@ -1749,22 +1786,70 @@ pub fn map_key_to_action(key: &str, shift: bool) -> Option<VideoAction> {
 pub fn execute_action(player: &mut VideoPlayer, action: VideoAction) -> bool {
     player.user_activity();
     match action {
-        VideoAction::PlayPause => { player.toggle_play_pause(); true }
-        VideoAction::Stop => { player.stop(); true }
-        VideoAction::SeekForward => { player.seek_forward(SEEK_SMALL_MS); true }
-        VideoAction::SeekBackward => { player.seek_backward(SEEK_SMALL_MS); true }
-        VideoAction::SeekForwardLarge => { player.seek_forward(SEEK_LARGE_MS); true }
-        VideoAction::SeekBackwardLarge => { player.seek_backward(SEEK_LARGE_MS); true }
-        VideoAction::VolumeUp => { player.volume_up(); true }
-        VideoAction::VolumeDown => { player.volume_down(); true }
-        VideoAction::MuteToggle => { player.toggle_mute(); true }
-        VideoAction::FullscreenToggle => { player.toggle_fullscreen(); true }
-        VideoAction::SubtitleToggle => { player.toggle_subtitles(); true }
-        VideoAction::SpeedUp => { player.speed_up(); true }
-        VideoAction::SpeedDown => { player.speed_down(); true }
-        VideoAction::LoopToggle => { player.toggle_loop(); true }
-        VideoAction::NextTrack => { player.next_in_playlist(); true }
-        VideoAction::PrevTrack => { player.prev_in_playlist(); true }
+        VideoAction::PlayPause => {
+            player.toggle_play_pause();
+            true
+        }
+        VideoAction::Stop => {
+            player.stop();
+            true
+        }
+        VideoAction::SeekForward => {
+            player.seek_forward(SEEK_SMALL_MS);
+            true
+        }
+        VideoAction::SeekBackward => {
+            player.seek_backward(SEEK_SMALL_MS);
+            true
+        }
+        VideoAction::SeekForwardLarge => {
+            player.seek_forward(SEEK_LARGE_MS);
+            true
+        }
+        VideoAction::SeekBackwardLarge => {
+            player.seek_backward(SEEK_LARGE_MS);
+            true
+        }
+        VideoAction::VolumeUp => {
+            player.volume_up();
+            true
+        }
+        VideoAction::VolumeDown => {
+            player.volume_down();
+            true
+        }
+        VideoAction::MuteToggle => {
+            player.toggle_mute();
+            true
+        }
+        VideoAction::FullscreenToggle => {
+            player.toggle_fullscreen();
+            true
+        }
+        VideoAction::SubtitleToggle => {
+            player.toggle_subtitles();
+            true
+        }
+        VideoAction::SpeedUp => {
+            player.speed_up();
+            true
+        }
+        VideoAction::SpeedDown => {
+            player.speed_down();
+            true
+        }
+        VideoAction::LoopToggle => {
+            player.toggle_loop();
+            true
+        }
+        VideoAction::NextTrack => {
+            player.next_in_playlist();
+            true
+        }
+        VideoAction::PrevTrack => {
+            player.prev_in_playlist();
+            true
+        }
     }
 }
 
@@ -2179,21 +2264,39 @@ mod tests {
 
     #[test]
     fn test_key_map_space() {
-        assert_eq!(map_key_to_action("Space", false), Some(VideoAction::PlayPause));
+        assert_eq!(
+            map_key_to_action("Space", false),
+            Some(VideoAction::PlayPause)
+        );
     }
 
     #[test]
     fn test_key_map_seek() {
-        assert_eq!(map_key_to_action("Left", false), Some(VideoAction::SeekBackward));
-        assert_eq!(map_key_to_action("Right", false), Some(VideoAction::SeekForward));
-        assert_eq!(map_key_to_action("Left", true), Some(VideoAction::SeekBackwardLarge));
-        assert_eq!(map_key_to_action("Right", true), Some(VideoAction::SeekForwardLarge));
+        assert_eq!(
+            map_key_to_action("Left", false),
+            Some(VideoAction::SeekBackward)
+        );
+        assert_eq!(
+            map_key_to_action("Right", false),
+            Some(VideoAction::SeekForward)
+        );
+        assert_eq!(
+            map_key_to_action("Left", true),
+            Some(VideoAction::SeekBackwardLarge)
+        );
+        assert_eq!(
+            map_key_to_action("Right", true),
+            Some(VideoAction::SeekForwardLarge)
+        );
     }
 
     #[test]
     fn test_key_map_volume() {
         assert_eq!(map_key_to_action("Up", false), Some(VideoAction::VolumeUp));
-        assert_eq!(map_key_to_action("Down", false), Some(VideoAction::VolumeDown));
+        assert_eq!(
+            map_key_to_action("Down", false),
+            Some(VideoAction::VolumeDown)
+        );
         assert_eq!(map_key_to_action("M", false), Some(VideoAction::MuteToggle));
     }
 
@@ -2231,7 +2334,10 @@ mod tests {
         render_controls(&p, &mut tree, 0.0, 0.0, 800.0, 600.0);
 
         // Should include an Image command for the video frame.
-        let has_image = tree.commands.iter().any(|cmd| matches!(cmd, RenderCommand::Image { .. }));
+        let has_image = tree
+            .commands
+            .iter()
+            .any(|cmd| matches!(cmd, RenderCommand::Image { .. }));
         assert!(has_image);
     }
 

@@ -102,7 +102,9 @@ impl DynDnsProvider {
     pub fn default_update_url(self) -> &'static str {
         match self {
             Self::NoIP => "https://dynupdate.no-ip.com/nic/update?hostname={hostname}&myip={ip}",
-            Self::DuckDNS => "https://www.duckdns.org/update?domains={hostname}&token={token}&ip={ip}",
+            Self::DuckDNS => {
+                "https://www.duckdns.org/update?domains={hostname}&token={token}&ip={ip}"
+            }
             Self::Dynu => "https://api.dynu.com/nic/update?hostname={hostname}&myip={ip}",
             Self::FreeDNS => "https://freedns.afraid.org/dynamic/update.php?{token}&address={ip}",
             Self::Custom => "",
@@ -193,10 +195,7 @@ pub enum ProviderSettings {
         password: String,
     },
     /// DuckDNS: domain + token.
-    DuckDNS {
-        domain: String,
-        token: String,
-    },
+    DuckDNS { domain: String, token: String },
     /// Dynu: hostname + username + password.
     Dynu {
         hostname: String,
@@ -204,10 +203,7 @@ pub enum ProviderSettings {
         password: String,
     },
     /// FreeDNS: domain + auth token.
-    FreeDNS {
-        domain: String,
-        auth_token: String,
-    },
+    FreeDNS { domain: String, auth_token: String },
     /// Custom: arbitrary URL template and HTTP method.
     Custom {
         update_url: String,
@@ -407,13 +403,13 @@ impl DynDnsManager {
     /// Stub: succeeds if credentials are non-empty, errors otherwise.
     pub fn test_connection(&mut self) -> bool {
         let ok = match &self.config.provider_settings {
-            ProviderSettings::NoIP { email, password, .. } => {
-                !email.is_empty() && !password.is_empty()
-            }
+            ProviderSettings::NoIP {
+                email, password, ..
+            } => !email.is_empty() && !password.is_empty(),
             ProviderSettings::DuckDNS { token, .. } => !token.is_empty(),
-            ProviderSettings::Dynu { username, password, .. } => {
-                !username.is_empty() && !password.is_empty()
-            }
+            ProviderSettings::Dynu {
+                username, password, ..
+            } => !username.is_empty() && !password.is_empty(),
             ProviderSettings::FreeDNS { auth_token, .. } => !auth_token.is_empty(),
             ProviderSettings::Custom { update_url, .. } => !update_url.is_empty(),
         };
@@ -421,8 +417,7 @@ impl DynDnsManager {
         if ok {
             self.config.status = DynDnsStatus::Success;
         } else {
-            self.config.status =
-                DynDnsStatus::Error("Credentials are incomplete".to_string());
+            self.config.status = DynDnsStatus::Error("Credentials are incomplete".to_string());
         }
         ok
     }
@@ -634,15 +629,7 @@ impl Default for RemoteAccessSettings {
 // ============================================================================
 
 /// Draw a rounded filled rectangle.
-fn fill_rounded(
-    tree: &mut RenderTree,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-    color: Color,
-    radius: f32,
-) {
+fn fill_rounded(tree: &mut RenderTree, x: f32, y: f32, w: f32, h: f32, color: Color, radius: f32) {
     tree.push(RenderCommand::FillRect {
         x,
         y,
@@ -654,14 +641,7 @@ fn fill_rounded(
 }
 
 /// Draw bold text (uses FontWeightHint::Bold).
-fn text_bold(
-    tree: &mut RenderTree,
-    x: f32,
-    y: f32,
-    content: &str,
-    color: Color,
-    size: f32,
-) {
+fn text_bold(tree: &mut RenderTree, x: f32, y: f32, content: &str, color: Color, size: f32) {
     tree.text(x, y, content, color, size);
     tree.push(RenderCommand::Text {
         x: x + 0.5,
@@ -689,13 +669,7 @@ fn render_section_header(tree: &mut RenderTree, x: f32, y: f32, title: &str) -> 
 }
 
 /// Draw a clickable button.
-fn render_button(
-    tree: &mut RenderTree,
-    x: f32,
-    y: f32,
-    label: &str,
-    color: Color,
-) -> f32 {
+fn render_button(tree: &mut RenderTree, x: f32, y: f32, label: &str, color: Color) -> f32 {
     let width = label.len() as f32 * 7.5 + 24.0;
     fill_rounded(tree, x, y, width, BUTTON_HEIGHT, color, 6.0);
     tree.text(x + 12.0, y + 8.0, label, COL_BASE, 13.0);
@@ -705,7 +679,15 @@ fn render_button(
 /// Draw a toggle switch (on/off).
 fn render_toggle(tree: &mut RenderTree, x: f32, y: f32, enabled: bool) {
     let bg = if enabled { COL_GREEN } else { COL_SURFACE2 };
-    fill_rounded(tree, x, y, TOGGLE_WIDTH, TOGGLE_HEIGHT, bg, TOGGLE_HEIGHT / 2.0);
+    fill_rounded(
+        tree,
+        x,
+        y,
+        TOGGLE_WIDTH,
+        TOGGLE_HEIGHT,
+        bg,
+        TOGGLE_HEIGHT / 2.0,
+    );
 
     // Knob
     let knob_x = if enabled {
@@ -738,7 +720,15 @@ fn render_text_field(
 
     // Input box
     let input_x = x + FIELD_LABEL_WIDTH;
-    fill_rounded(tree, input_x, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT, COL_SURFACE0, 6.0);
+    fill_rounded(
+        tree,
+        input_x,
+        y,
+        FIELD_INPUT_WIDTH,
+        FIELD_HEIGHT,
+        COL_SURFACE0,
+        6.0,
+    );
     tree.push(RenderCommand::StrokeRect {
         x: input_x,
         y,
@@ -757,7 +747,11 @@ fn render_text_field(
     } else {
         value.to_string()
     };
-    let text_color = if value.is_empty() { COL_OVERLAY0 } else { COL_TEXT };
+    let text_color = if value.is_empty() {
+        COL_OVERLAY0
+    } else {
+        COL_TEXT
+    };
     tree.push(RenderCommand::Text {
         x: input_x + 10.0,
         y: y + 10.0,
@@ -772,30 +766,26 @@ fn render_text_field(
 }
 
 /// Draw a label + toggle row.
-fn render_toggle_row(
-    tree: &mut RenderTree,
-    x: f32,
-    y: f32,
-    label: &str,
-    enabled: bool,
-) -> f32 {
+fn render_toggle_row(tree: &mut RenderTree, x: f32, y: f32, label: &str, enabled: bool) -> f32 {
     tree.text(x, y + 2.0, label, COL_SUBTEXT0, 13.0);
     render_toggle(tree, x + FIELD_LABEL_WIDTH, y, enabled);
     y + TOGGLE_HEIGHT + 12.0
 }
 
 /// Draw a label + dropdown-style display.
-fn render_dropdown_row(
-    tree: &mut RenderTree,
-    x: f32,
-    y: f32,
-    label: &str,
-    value: &str,
-) -> f32 {
+fn render_dropdown_row(tree: &mut RenderTree, x: f32, y: f32, label: &str, value: &str) -> f32 {
     tree.text(x, y + 10.0, label, COL_SUBTEXT0, 13.0);
 
     let dd_x = x + FIELD_LABEL_WIDTH;
-    fill_rounded(tree, dd_x, y, FIELD_INPUT_WIDTH, FIELD_HEIGHT, COL_SURFACE0, 6.0);
+    fill_rounded(
+        tree,
+        dd_x,
+        y,
+        FIELD_INPUT_WIDTH,
+        FIELD_HEIGHT,
+        COL_SURFACE0,
+        6.0,
+    );
     tree.push(RenderCommand::StrokeRect {
         x: dd_x,
         y,
@@ -902,7 +892,11 @@ fn render_dyndns_section(
 
     // Provider-specific credential fields
     match &cfg.provider_settings {
-        ProviderSettings::NoIP { hostname, email, password } => {
+        ProviderSettings::NoIP {
+            hostname,
+            email,
+            password,
+        } => {
             y = render_text_field(tree, x, y, "Hostname", hostname, false);
             y = render_text_field(tree, x, y, "Email", email, false);
             y = render_text_field(tree, x, y, "Password", password, true);
@@ -911,7 +905,11 @@ fn render_dyndns_section(
             y = render_text_field(tree, x, y, "Domain", domain, false);
             y = render_text_field(tree, x, y, "Token", token, true);
         }
-        ProviderSettings::Dynu { hostname, username, password } => {
+        ProviderSettings::Dynu {
+            hostname,
+            username,
+            password,
+        } => {
             y = render_text_field(tree, x, y, "Hostname", hostname, false);
             y = render_text_field(tree, x, y, "Username", username, false);
             y = render_text_field(tree, x, y, "Password", password, true);
@@ -936,13 +934,7 @@ fn render_dyndns_section(
     y = render_section_header(tree, x, y, "Status");
 
     // Status indicator
-    y = render_status_indicator(
-        tree,
-        x,
-        y,
-        cfg.status.label(),
-        cfg.status.color(),
-    );
+    y = render_status_indicator(tree, x, y, cfg.status.label(), cfg.status.color());
 
     // Error detail
     if let DynDnsStatus::Error(ref msg) = cfg.status {
@@ -1014,7 +1006,13 @@ fn render_remote_desktop_section(
     y = render_toggle_row(tree, x, y, "Enable Remote Desktop", config.enabled);
 
     if !config.enabled {
-        tree.text(x + 16.0, y, "Remote Desktop is disabled.", COL_OVERLAY0, 12.0);
+        tree.text(
+            x + 16.0,
+            y,
+            "Remote Desktop is disabled.",
+            COL_OVERLAY0,
+            12.0,
+        );
         return y + 24.0;
     }
 
@@ -1095,8 +1093,20 @@ fn render_remote_desktop_section(
     // Firewall settings
     y = render_section_header(tree, x, y, "Firewall & Network");
 
-    y = render_toggle_row(tree, x, y, "Auto-open firewall port", config.firewall.auto_open_port);
-    y = render_toggle_row(tree, x, y, "UPnP port forwarding", config.firewall.upnp_forwarding);
+    y = render_toggle_row(
+        tree,
+        x,
+        y,
+        "Auto-open firewall port",
+        config.firewall.auto_open_port,
+    );
+    y = render_toggle_row(
+        tree,
+        x,
+        y,
+        "UPnP port forwarding",
+        config.firewall.upnp_forwarding,
+    );
 
     // Firewall status indicators
     if config.firewall.port_blocked {
@@ -1104,16 +1114,14 @@ fn render_remote_desktop_section(
             tree,
             x,
             y,
-            &format!("Port {} appears to be blocked by the firewall.", config.port),
+            &format!(
+                "Port {} appears to be blocked by the firewall.",
+                config.port
+            ),
         );
     }
     if config.firewall.upnp_forwarding && !config.firewall.upnp_available {
-        y = render_warning(
-            tree,
-            x,
-            y,
-            "UPnP is not available on this network.",
-        );
+        y = render_warning(tree, x, y, "UPnP is not available on this network.");
     }
 
     y += 8.0;
@@ -1213,7 +1221,10 @@ mod tests {
     fn config_defaults_duckdns() {
         let cfg = DynDnsConfig::new(DynDnsProvider::DuckDNS);
         assert_eq!(cfg.provider, DynDnsProvider::DuckDNS);
-        assert!(matches!(cfg.provider_settings, ProviderSettings::DuckDNS { .. }));
+        assert!(matches!(
+            cfg.provider_settings,
+            ProviderSettings::DuckDNS { .. }
+        ));
     }
 
     #[test]
@@ -1221,7 +1232,10 @@ mod tests {
         let cfg = DynDnsConfig::new(DynDnsProvider::Custom);
         assert!(matches!(
             cfg.provider_settings,
-            ProviderSettings::Custom { method: HttpMethod::Get, .. }
+            ProviderSettings::Custom {
+                method: HttpMethod::Get,
+                ..
+            }
         ));
     }
 
@@ -1242,7 +1256,11 @@ mod tests {
     fn provider_settings_round_trip() {
         for &prov in DynDnsProvider::ALL {
             let settings = ProviderSettings::default_for(prov);
-            assert_eq!(settings.provider(), prov, "provider() must match for {prov:?}");
+            assert_eq!(
+                settings.provider(),
+                prov,
+                "provider() must match for {prov:?}"
+            );
         }
     }
 
@@ -1300,7 +1318,11 @@ mod tests {
     fn manager_force_update_only_when_enabled() {
         let mut mgr = DynDnsManager::new();
         mgr.force_update();
-        assert_eq!(*mgr.status(), DynDnsStatus::Idle, "should not update when disabled");
+        assert_eq!(
+            *mgr.status(),
+            DynDnsStatus::Idle,
+            "should not update when disabled"
+        );
 
         mgr.config_mut().enabled = true;
         mgr.force_update();
@@ -1408,7 +1430,10 @@ mod tests {
     fn set_port_rejects_zero() {
         let mut cfg = RemoteDesktopConfig::new();
         assert!(cfg.set_port(0).is_err());
-        assert_eq!(cfg.port, DEFAULT_RDP_PORT, "port should not change on error");
+        assert_eq!(
+            cfg.port, DEFAULT_RDP_PORT,
+            "port should not change on error"
+        );
     }
 
     #[test]

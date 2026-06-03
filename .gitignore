@@ -26,6 +26,11 @@
 # Limine binary artifacts (downloaded at build time)
 /limine/
 
+# Toolchain sysroot — populated by cargo build of `posix` and
+# `toolchain/stubs` (libc.a, libstubs.a, libunwind.a). Pure build
+# output that must be regenerated per-machine; never commit.
+/toolchain/sysroot/
+
 # Orchestrator history (personal)
 .orchestrator_history
 

@@ -202,7 +202,7 @@ pub fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
 
             // Bonus for word boundary match (start, after space/dash/underscore)
             let at_boundary = ti == 0
-                || target_lower.get(ti.saturating_sub(1)).map_or(false, |&prev| {
+                || target_lower.get(ti.saturating_sub(1)).is_some_and(|&prev| {
                     prev == ' ' || prev == '-' || prev == '_'
                 });
             if at_boundary {
@@ -210,11 +210,10 @@ pub fn fuzzy_score(query: &str, target: &str) -> Option<u32> {
             }
 
             // Bonus for consecutive matches
-            if let Some(prev) = prev_match_idx {
-                if ti == prev + 1 {
+            if let Some(prev) = prev_match_idx
+                && ti == prev + 1 {
                     score = score.saturating_add(5);
                 }
-            }
 
             prev_match_idx = Some(ti);
             qi += 1;
@@ -454,13 +453,12 @@ impl LauncherState {
 
             Key::Tab => {
                 // Autocomplete: fill query with selected item's name
-                if let Some(scored) = self.results.get(self.selected_index) {
-                    if let Some(entry) = self.apps.get(scored.db_index) {
+                if let Some(scored) = self.results.get(self.selected_index)
+                    && let Some(entry) = self.apps.get(scored.db_index) {
                         self.query = entry.name.clone();
                         self.cursor = self.query.len();
                         self.update_results();
                     }
-                }
                 return LauncherAction::None;
             }
 
@@ -553,14 +551,13 @@ impl LauncherState {
         }
 
         // Text input: if the event carries a printable character, insert it
-        if let Some(ch) = event.text {
-            if !ch.is_control() {
+        if let Some(ch) = event.text
+            && !ch.is_control() {
                 self.query.insert(self.cursor, ch);
                 self.cursor += ch.len_utf8();
                 self.selected_index = 0;
                 self.update_results();
             }
-        }
 
         LauncherAction::None
     }
@@ -631,7 +628,7 @@ impl LauncherState {
         }
 
         // Sort descending by score
-        self.results.sort_by(|a, b| b.total_score.cmp(&a.total_score));
+        self.results.sort_by_key(|r| std::cmp::Reverse(r.total_score));
 
         // Truncate to max visible
         self.results.truncate(MAX_RESULTS);

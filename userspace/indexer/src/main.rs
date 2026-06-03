@@ -260,12 +260,11 @@ impl IndexDb {
         let mut lines = content.lines();
 
         // Parse header.
-        if let Some(header) = lines.next() {
-            if !header.starts_with("# indexer-db v") {
+        if let Some(header) = lines.next()
+            && !header.starts_with("# indexer-db v") {
                 eprintln!("warning: index file has unknown format, rebuilding");
                 return db;
             }
-        }
 
         // Parse metadata lines (start with #).
         for line in lines.by_ref() {

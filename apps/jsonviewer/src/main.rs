@@ -35,6 +35,14 @@
 #![allow(clippy::cognitive_complexity)]
 #![allow(clippy::match_wildcard_for_single_variants)]
 #![allow(clippy::single_match_else)]
+// The defensive lints below fire heavily in this crate's hand-written JSON
+// parser/lexer (RFC 8259) where the algorithm itself enforces bounds and
+// non-overflow: every index/slice is gated by the parser's position vs the
+// source length, and arithmetic operates on small parser offsets (well below
+// usize::MAX). Replacing every `+ 1` with `.saturating_add(1)` here would
+// only obscure the parser without changing observable behaviour.
+#![allow(clippy::arithmetic_side_effects)]
+#![allow(clippy::indexing_slicing)]
 #![allow(dead_code)]
 
 use guitk::Color;
@@ -1377,12 +1385,10 @@ fn value_summary(value: &JsonValue) -> String {
 
 /// Mutate a value at a given path.
 fn set_value_at_path(root: &mut JsonValue, path: &[PathSegment], new_value: JsonValue) -> bool {
-    if path.is_empty() {
+    let Some((head, rest)) = path.split_first() else {
         *root = new_value;
         return true;
-    }
-
-    let (head, rest) = path.split_first().expect("path is non-empty");
+    };
     match (root, head) {
         (JsonValue::Object(obj), PathSegment::Key(k)) => {
             if let Some((_, val)) = obj.iter_mut().find(|(key, _)| key == k) {
@@ -1432,7 +1438,9 @@ fn delete_at_path(root: &mut JsonValue, path: &[PathSegment]) -> bool {
         };
     }
 
-    let (head, rest) = path.split_first().expect("path is non-empty");
+    let Some((head, rest)) = path.split_first() else {
+        return false;
+    };
     match (&mut *root, head) {
         (JsonValue::Object(obj), PathSegment::Key(k)) => {
             if let Some((_, val)) = obj.iter_mut().find(|(key, _)| key == k) {
@@ -2129,7 +2137,7 @@ impl App {
                         Key::Up => doc.raw_scroll = (doc.raw_scroll - LINE_HEIGHT).max(0.0),
                         Key::Down => doc.raw_scroll += LINE_HEIGHT,
                         Key::PageUp => {
-                            doc.raw_scroll = (doc.raw_scroll - 10.0 * LINE_HEIGHT).max(0.0)
+                            doc.raw_scroll = (doc.raw_scroll - 10.0 * LINE_HEIGHT).max(0.0);
                         }
                         Key::PageDown => doc.raw_scroll += 10.0 * LINE_HEIGHT,
                         Key::Home => doc.raw_scroll = 0.0,
@@ -2151,7 +2159,7 @@ impl App {
                         Key::Up => doc.diff_scroll = (doc.diff_scroll - LINE_HEIGHT).max(0.0),
                         Key::Down => doc.diff_scroll += LINE_HEIGHT,
                         Key::PageUp => {
-                            doc.diff_scroll = (doc.diff_scroll - 10.0 * LINE_HEIGHT).max(0.0)
+                            doc.diff_scroll = (doc.diff_scroll - 10.0 * LINE_HEIGHT).max(0.0);
                         }
                         Key::PageDown => doc.diff_scroll += 10.0 * LINE_HEIGHT,
                         _ => {}
@@ -2723,7 +2731,7 @@ impl App {
             Some(ViewMode::Raw) => self.render_raw_view(cmds, top, content_width, content_height),
             Some(ViewMode::Yaml) => self.render_yaml_view(cmds, top, content_width, content_height),
             Some(ViewMode::Stats) => {
-                self.render_stats_view(cmds, top, content_width, content_height)
+                self.render_stats_view(cmds, top, content_width, content_height);
             }
             Some(ViewMode::Diff) => self.render_diff_view(cmds, top, content_width, content_height),
             None => {

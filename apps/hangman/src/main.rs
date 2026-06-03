@@ -385,11 +385,10 @@ impl HangmanApp {
         let mut unrevealed: Vec<u8> = Vec::new();
         for &b in &self.word {
             let idx = letter_index(b);
-            if let Some(i) = idx {
-                if !self.guessed[i] && !unrevealed.contains(&b) {
+            if let Some(i) = idx
+                && !self.guessed[i] && !unrevealed.contains(&b) {
                     unrevealed.push(b);
                 }
-            }
         }
 
         // Reveal up to `count` letters.
@@ -446,7 +445,7 @@ impl HangmanApp {
         self.guessed[idx] = true;
 
         let lower = letter.to_ascii_lowercase();
-        let in_word = self.word.iter().any(|&b| b == lower);
+        let in_word = self.word.contains(&lower);
         if !in_word {
             self.wrong_count += 1;
         }
@@ -484,11 +483,10 @@ impl HangmanApp {
         // Find unrevealed letters in the word.
         let mut unrevealed: Vec<u8> = Vec::new();
         for &b in &self.word {
-            if let Some(i) = letter_index(b) {
-                if !self.guessed[i] && !unrevealed.contains(&b) {
+            if let Some(i) = letter_index(b)
+                && !self.guessed[i] && !unrevealed.contains(&b) {
                     unrevealed.push(b);
                 }
-            }
         }
 
         if unrevealed.is_empty() {
@@ -542,7 +540,7 @@ impl HangmanApp {
         for i in 0..26 {
             if self.guessed[i] {
                 let letter = b'a' + i as u8;
-                if self.word.iter().any(|&b| b == letter) {
+                if self.word.contains(&letter) {
                     count += 1;
                 }
             }
@@ -556,7 +554,7 @@ impl HangmanApp {
         for i in 0..26 {
             if self.guessed[i] {
                 let letter = b'a' + i as u8;
-                if !self.word.iter().any(|&b| b == letter) {
+                if !self.word.contains(&letter) {
                     result.push(letter);
                 }
             }
@@ -570,7 +568,7 @@ impl HangmanApp {
         for i in 0..26 {
             if self.guessed[i] {
                 let letter = b'a' + i as u8;
-                if self.word.iter().any(|&b| b == letter) {
+                if self.word.contains(&letter) {
                     result.push(letter);
                 }
             }
@@ -1032,7 +1030,7 @@ impl HangmanApp {
 
                 let (bg, fg) = if let Some(idx) = letter_index(lower) {
                     if self.guessed[idx] {
-                        let in_word = self.word.iter().any(|&b| b == lower);
+                        let in_word = self.word.contains(&lower);
                         if in_word {
                             (GREEN, BASE)
                         } else {
@@ -1354,11 +1352,10 @@ impl HangmanApp {
 
     /// Handle incoming events (called by the framework).
     fn handle_event(&mut self, event: &Event) {
-        if let Event::Key(ke) = event {
-            if ke.pressed {
+        if let Event::Key(ke) = event
+            && ke.pressed {
                 self.handle_key(ke.key);
             }
-        }
     }
 
     fn handle_key(&mut self, key: Key) {
@@ -1444,7 +1441,7 @@ impl HangmanApp {
 /// Convert a byte to its 0-25 index (a=0, z=25). Returns None for non-letters.
 fn letter_index(b: u8) -> Option<usize> {
     let lower = b.to_ascii_lowercase();
-    if lower >= b'a' && lower <= b'z' {
+    if lower.is_ascii_lowercase() {
         Some((lower - b'a') as usize)
     } else {
         None

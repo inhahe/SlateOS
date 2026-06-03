@@ -454,12 +454,11 @@ pub fn parse_mp4_info(data: &[u8]) -> Result<Mp4Info, VideoError> {
         let trak_data = &moov_data[trak_start..trak_end];
 
         // Look for tkhd to get width/height.
-        if let Some((w, h)) = parse_tkhd_dimensions(trak_data) {
-            if w > 0 && h > 0 && width == 0 {
+        if let Some((w, h)) = parse_tkhd_dimensions(trak_data)
+            && w > 0 && h > 0 && width == 0 {
                 width = w;
                 height = h;
             }
-        }
 
         // Recurse into mdia/minf/stbl/stsd for codec info.
         if let Some(codec) = extract_stsd_codec(trak_data) {
@@ -741,27 +740,23 @@ fn extract_ebml_video_track(data: &[u8]) -> (u32, u32, String) {
 
     // CodecID element ID: 0x86 (1 byte)
     for i in 0..scan_limit.saturating_sub(3) {
-        if data[i] == 0x86 {
-            if let Some((len, len_size)) = decode_ebml_vint(&data[i + 1..]) {
+        if data[i] == 0x86
+            && let Some((len, len_size)) = decode_ebml_vint(&data[i + 1..]) {
                 let start = i + 1 + len_size;
                 let end = start + len as usize;
-                if end <= data.len() && len < 64 {
-                    if let Ok(s) = core::str::from_utf8(&data[start..end]) {
-                        if s.starts_with("V_") || s.starts_with("A_") {
-                            if codec_id.is_empty() && s.starts_with("V_") {
-                                codec_id = s.to_string();
-                            }
-                        }
+                if end <= data.len() && len < 64
+                    && let Ok(s) = core::str::from_utf8(&data[start..end])
+                    && (s.starts_with("V_") || s.starts_with("A_"))
+                    && codec_id.is_empty() && s.starts_with("V_") {
+                        codec_id = s.to_string();
                     }
-                }
             }
-        }
     }
 
     // PixelWidth element ID: 0xB0 (1 byte)
     for i in 0..scan_limit.saturating_sub(3) {
-        if data[i] == 0xB0 {
-            if let Some((len, len_size)) = decode_ebml_vint(&data[i + 1..]) {
+        if data[i] == 0xB0
+            && let Some((len, len_size)) = decode_ebml_vint(&data[i + 1..]) {
                 let start = i + 1 + len_size;
                 let end = start + len as usize;
                 if end <= data.len() && len <= 4 {
@@ -771,13 +766,12 @@ fn extract_ebml_video_track(data: &[u8]) -> (u32, u32, String) {
                     }
                 }
             }
-        }
     }
 
     // PixelHeight element ID: 0xBA (1 byte)
     for i in 0..scan_limit.saturating_sub(3) {
-        if data[i] == 0xBA {
-            if let Some((len, len_size)) = decode_ebml_vint(&data[i + 1..]) {
+        if data[i] == 0xBA
+            && let Some((len, len_size)) = decode_ebml_vint(&data[i + 1..]) {
                 let start = i + 1 + len_size;
                 let end = start + len as usize;
                 if end <= data.len() && len <= 4 {
@@ -787,7 +781,6 @@ fn extract_ebml_video_track(data: &[u8]) -> (u32, u32, String) {
                     }
                 }
             }
-        }
     }
 
     (width, height, codec_id)

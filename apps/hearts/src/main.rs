@@ -667,12 +667,7 @@ impl Hearts {
 
     /// Check if any player took all 26 points (shot the moon).
     fn check_shoot_the_moon(&self) -> Option<usize> {
-        for i in 0..4 {
-            if self.round_points[i] == 26 {
-                return Some(i);
-            }
-        }
-        None
+        (0..4).find(|&i| self.round_points[i] == 26)
     }
 
     /// Handle card passing for the human player.
@@ -841,7 +836,7 @@ impl Hearts {
         }
 
         let lead_suit = self.current_trick.lead_suit.unwrap_or(Suit::Clubs);
-        let following_suit = hand.get(valid[0]).map_or(false, |c| c.suit == lead_suit);
+        let following_suit = hand.get(valid[0]).is_some_and(|c| c.suit == lead_suit);
 
         if following_suit {
             // Following suit: try to play just below the current highest
@@ -860,13 +855,12 @@ impl Hearts {
             let mut found_below = false;
             for &i in &valid {
                 let v = hand[i].rank.value();
-                if v < current_high {
-                    if !found_below || v > best_val {
+                if v < current_high
+                    && (!found_below || v > best_val) {
                         best_val = v;
                         best = i;
                         found_below = true;
                     }
-                }
             }
             if found_below {
                 return best;
@@ -967,11 +961,10 @@ impl Hearts {
             Key::N => {
                 self.new_game();
             }
-            Key::Left => {
-                if self.selected_index > 0 {
+            Key::Left
+                if self.selected_index > 0 => {
                     self.selected_index -= 1;
                 }
-            }
             Key::Right => {
                 let max = if self.hands[0].is_empty() {
                     0
@@ -1002,15 +995,14 @@ impl Hearts {
                     }
                 }
             }
-            Key::Escape => {
-                if self.phase == GamePhase::Passing && !self.pass_selections.is_empty() {
+            Key::Escape
+                if self.phase == GamePhase::Passing && !self.pass_selections.is_empty() => {
                     self.pass_selections.clear();
                     self.status = format!(
                         "Select 3 cards to pass ({})",
                         self.pass_direction.label()
                     );
                 }
-            }
             _ => {}
         }
     }
@@ -1027,7 +1019,7 @@ impl Hearts {
             let my = event.y;
 
             // Check card area
-            if my >= HAND_Y && my <= HAND_Y + CARD_HEIGHT {
+            if (HAND_Y..=HAND_Y + CARD_HEIGHT).contains(&my) {
                 for i in (0..hand_len).rev() {
                     let cx = HAND_X_START + i as f32 * CARD_OVERLAP;
                     let cw = if i == hand_len - 1 {
@@ -1172,9 +1164,9 @@ impl Hearts {
         }
 
         // If trick is waiting to be cleared, show last trick dimmed
-        if self.current_trick.cards.is_empty() {
-            if let Some(ref last) = self.last_trick {
-                if self.trick_number > 0 && self.trick_number <= 13 {
+        if self.current_trick.cards.is_empty()
+            && let Some(ref last) = self.last_trick
+                && self.trick_number > 0 && self.trick_number <= 13 {
                     for tc in &last.cards {
                         let (ox, oy) = offsets[tc.player];
                         let cx = TRICK_CENTER_X + ox - CARD_WIDTH / 2.0;
@@ -1190,8 +1182,6 @@ impl Hearts {
                         });
                     }
                 }
-            }
-        }
     }
 
     /// Render the human player's hand at the bottom.
@@ -1469,7 +1459,7 @@ fn render_card(
 
 // -- Sort hand by suit then rank ---------------------------------------------
 
-fn sort_hand(hand: &mut Vec<Card>) {
+fn sort_hand(hand: &mut [Card]) {
     hand.sort();
 }
 

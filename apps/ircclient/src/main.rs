@@ -15,10 +15,12 @@ const BASE: Color = Color::from_hex(0x1E1E2E);
 const MANTLE: Color = Color::from_hex(0x181825);
 const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
+#[allow(dead_code)]
 const SURFACE1: Color = Color::from_hex(0x45475A);
 const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
+#[allow(dead_code)]
 const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
 const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
@@ -47,7 +49,7 @@ pub struct IrcMessage {
 impl IrcMessage {
     /// Parse a raw IRC line into a structured message.
     pub fn parse(line: &str) -> Option<Self> {
-        let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
+        let line = line.trim_end_matches(['\r', '\n']);
         if line.is_empty() {
             return None;
         }
@@ -75,8 +77,8 @@ impl IrcMessage {
         let mut rest = remainder;
         while !rest.is_empty() {
             rest = rest.trim_start();
-            if rest.starts_with(':') {
-                params.push(rest[1..].to_string());
+            if let Some(stripped) = rest.strip_prefix(':') {
+                params.push(stripped.to_string());
                 break;
             }
             if let Some(space) = rest.find(' ') {
@@ -1057,8 +1059,8 @@ impl IrcClientApp {
         let target = msg.target().unwrap_or("").to_string();
         let mode = msg.params.get(1).cloned().unwrap_or_default();
 
-        if target.starts_with('#') || target.starts_with('&') {
-            if let Some(ch) = self.find_channel_mut(&target) {
+        if (target.starts_with('#') || target.starts_with('&'))
+            && let Some(ch) = self.find_channel_mut(&target) {
                 ch.add_message(ChatMessage {
                     timestamp: String::new(),
                     sender: String::new(),
@@ -1067,7 +1069,6 @@ impl IrcClientApp {
                     highlight: false,
                 });
             }
-        }
     }
 
     fn handle_numeric(&mut self, msg: &IrcMessage) {
@@ -1085,7 +1086,7 @@ impl IrcClientApp {
                 // Params: <nick> = <channel> :<names>
                 let channel = msg.params.get(2).cloned().unwrap_or_default();
                 let names: Vec<ChannelUser> = text.split_whitespace()
-                    .map(|n| ChannelUser::from_names_entry(n))
+                    .map(ChannelUser::from_names_entry)
                     .filter(|u| !u.nick.is_empty())
                     .collect();
                 if let Some(ch) = self.find_channel_mut(&channel) {
@@ -1282,8 +1283,8 @@ impl IrcClientApp {
         });
 
         // Topic (if in channel)
-        if let Some(ch) = self.active_channel() {
-            if !ch.topic.is_empty() {
+        if let Some(ch) = self.active_channel()
+            && !ch.topic.is_empty() {
                 cmds.push(RenderCommand::Text {
                     x: 350.0, y: 8.0,
                     text: ch.topic.clone(),
@@ -1291,7 +1292,6 @@ impl IrcClientApp {
                     max_width: Some(self.width - 600.0),
                 });
             }
-        }
 
         cmds.push(RenderCommand::Line {
             x1: 0.0, y1: 30.0, x2: self.width, y2: 30.0,

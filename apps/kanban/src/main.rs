@@ -167,8 +167,8 @@ impl SimpleDate {
     }
 
     fn display(&self) -> String {
-        let m = self.month.min(12).max(1);
-        let d = self.day.min(31).max(1);
+        let m = self.month.clamp(1, 12);
+        let d = self.day.clamp(1, 31);
         format!("{:04}-{:02}-{:02}", self.year, m, d)
     }
 }
@@ -336,7 +336,7 @@ impl Column {
     fn active_card_count(&self, cards: &HashMap<Id, Card>) -> usize {
         self.card_ids
             .iter()
-            .filter(|cid| cards.get(cid).map_or(false, |c| !c.archived))
+            .filter(|cid| cards.get(cid).is_some_and(|c| !c.archived))
             .count()
     }
 }
@@ -539,7 +539,7 @@ impl Board {
                 .filter(|cid| {
                     self.cards
                         .get(cid)
-                        .map_or(false, |c| !c.archived && c.swimlane == swimlane)
+                        .is_some_and(|c| !c.archived && c.swimlane == swimlane)
                 })
                 .copied()
                 .collect()
@@ -580,16 +580,14 @@ impl FilterState {
     }
 
     fn matches(&self, card: &Card) -> bool {
-        if let Some(label_id) = self.label_filter {
-            if !card.has_label(label_id) {
+        if let Some(label_id) = self.label_filter
+            && !card.has_label(label_id) {
                 return false;
             }
-        }
-        if let Some(priority) = self.priority_filter {
-            if card.priority != priority {
+        if let Some(priority) = self.priority_filter
+            && card.priority != priority {
                 return false;
             }
-        }
         if !self.assignee_filter.is_empty()
             && !card
                 .assignee
@@ -719,9 +717,9 @@ impl JsonExporter {
     }
 
     fn export_board(board: &Board) -> String {
-        let cols: Vec<String> = board.columns.iter().map(|c| Self::export_column(c)).collect();
-        let cards: Vec<String> = board.cards.values().map(|c| Self::export_card(c)).collect();
-        let labels: Vec<String> = board.labels.iter().map(|l| Self::export_label(l)).collect();
+        let cols: Vec<String> = board.columns.iter().map(Self::export_column).collect();
+        let cards: Vec<String> = board.cards.values().map(Self::export_card).collect();
+        let labels: Vec<String> = board.labels.iter().map(Self::export_label).collect();
         let swimlanes: Vec<String> = board
             .swimlane_names
             .iter()
@@ -992,7 +990,7 @@ impl KanbanApp {
             col.card_ids
                 .iter()
                 .filter(|cid| {
-                    board.cards.get(cid).map_or(false, |card| {
+                    board.cards.get(cid).is_some_and(|card| {
                         !card.archived && self.filter.matches(card)
                     })
                 })
@@ -1088,6 +1086,9 @@ fn render_toolbar(tree: &mut RenderTree, app: &KanbanApp, width: f32) {
     });
 }
 
+// Toolbar button: rect (x,y,w,h) + label + bg/fg + radii. Same shape as the
+// underlying render command; grouping would only add noise.
+#[allow(clippy::too_many_arguments)]
 fn render_toolbar_button(
     tree: &mut RenderTree,
     x: f32,
@@ -2397,12 +2398,11 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
 
         // Enter on selected card opens detail
         Key::Enter => {
-            if let Some(_card_id) = app.selected_card {
-                if app.view == View::Board {
+            if let Some(_card_id) = app.selected_card
+                && app.view == View::Board {
                     app.view = View::CardDetail;
                     return true;
                 }
-            }
             false
         }
 
@@ -2446,12 +2446,11 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
 
         // P = cycle priority on selected card
         Key::P => {
-            if let Some(card_id) = app.selected_card {
-                if let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
+            if let Some(card_id) = app.selected_card
+                && let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
                     card.priority = card.priority.next();
                     return true;
                 }
-            }
             false
         }
 
@@ -2474,13 +2473,12 @@ fn handle_key_event(app: &mut KanbanApp, key: &KeyEvent) -> bool {
         Key::B => {
             if let Some(card_id) = app.selected_card {
                 let board = app.active_board();
-                if let Some(from_col) = board.find_card_column(card_id) {
-                    if from_col > 0 {
+                if let Some(from_col) = board.find_card_column(card_id)
+                    && from_col > 0 {
                         let to_col = from_col.saturating_sub(1);
                         app.active_board_mut().move_card(card_id, from_col, to_col, 0);
                         return true;
                     }
-                }
             }
             false
         }
@@ -2535,11 +2533,10 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                     app.active_board_mut().add_column(&text);
                 }
                 InputMode::CardDescription => {
-                    if let Some(card_id) = app.selected_card {
-                        if let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
+                    if let Some(card_id) = app.selected_card
+                        && let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
                             card.description = text;
                         }
-                    }
                 }
                 InputMode::AddComment => {
                     if let Some(card_id) = app.selected_card {
@@ -2550,18 +2547,16 @@ fn handle_input_key(app: &mut KanbanApp, key: &KeyEvent) -> bool {
                     }
                 }
                 InputMode::AddChecklistItem => {
-                    if let Some(card_id) = app.selected_card {
-                        if let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
+                    if let Some(card_id) = app.selected_card
+                        && let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
                             card.add_checklist_item(&text);
                         }
-                    }
                 }
                 InputMode::EditCardTitle => {
-                    if let Some(card_id) = app.selected_card {
-                        if let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
+                    if let Some(card_id) = app.selected_card
+                        && let Some(card) = app.active_board_mut().cards.get_mut(&card_id) {
                             card.title = text;
                         }
-                    }
                 }
                 InputMode::RenameColumn => {
                     let col = app.selected_column;

@@ -20,7 +20,6 @@ use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 #[allow(unused_imports)]
 use guitk::style::CornerRadii;
 
-#[allow(dead_code)]
 mod video;
 
 use std::path::{Path, PathBuf};
@@ -76,7 +75,7 @@ impl ImageFormat {
         }
 
         // BMP: starts with "BM"
-        if data.get(0) == Some(&b'B') && data.get(1) == Some(&b'M') {
+        if data.first() == Some(&b'B') && data.get(1) == Some(&b'M') {
             return Self::Bmp;
         }
 
@@ -87,7 +86,7 @@ impl ImageFormat {
         }
 
         // JPEG: starts with FF D8
-        if data.get(0) == Some(&0xFF) && data.get(1) == Some(&0xD8) {
+        if data.first() == Some(&0xFF) && data.get(1) == Some(&0xD8) {
             return Self::Jpeg;
         }
 
@@ -719,7 +718,7 @@ impl ViewerState {
         }
         let zoom_x = available_width / img.width as f32;
         let zoom_y = available_height / img.height as f32;
-        zoom_x.min(zoom_y).min(MAX_ZOOM).max(MIN_ZOOM)
+        zoom_x.min(zoom_y).clamp(MIN_ZOOM, MAX_ZOOM)
     }
 
     /// Apply fit-to-window zoom.
@@ -971,17 +970,14 @@ impl ViewerState {
                 self.dragging = false;
                 true
             }
-            MouseEventKind::Move => {
-                if self.dragging {
+            MouseEventKind::Move
+                if self.dragging => {
                     let dx = event.x - self.drag_start_x;
                     let dy = event.y - self.drag_start_y;
                     self.transform.pan_x = self.drag_start_pan_x + dx;
                     self.transform.pan_y = self.drag_start_pan_y + dy;
                     true
-                } else {
-                    false
                 }
-            }
             MouseEventKind::DoubleClick(MouseButton::Left) => {
                 // Double-click toggles between fit and actual size
                 if (self.transform.zoom - 1.0).abs() < 0.01 {

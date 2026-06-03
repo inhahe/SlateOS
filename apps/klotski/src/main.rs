@@ -418,11 +418,10 @@ impl Klotski {
             for dc_off in 0..block.kind.cols() {
                 let new_r = (block.row as i32 + dr + dr_off as i32) as usize;
                 let new_c = (block.col as i32 + dc + dc_off as i32) as usize;
-                if let Some(occupant) = occupancy[new_r][new_c] {
-                    if occupant != block.id {
+                if let Some(occupant) = occupancy[new_r][new_c]
+                    && occupant != block.id {
                         return false;
                     }
-                }
             }
         }
         true

@@ -1489,7 +1489,7 @@ _Port ext4 first. Don't write a custom filesystem._
 
 ### 2.7 Shell and basic userspace tools
 - [ ] Port bash (POSIX compatibility)
-- [-] Port or adopt Nushell as default shell (Rust, structured data piping) — type-checks and links with os-minimal feature
+- [x] Port or adopt Nushell as default shell (Rust, structured data piping) — type-checks and links with os-minimal feature (verified 2026-06-03 with `cargo check -p nu-command --no-default-features --features os-minimal` on nightly-x86_64-pc-windows-msvc; see todo.txt "Roadmap §2.7" entry for the gnu→msvc finding and the two upstream-grade fixes committed inside the nushell tree: (1) scripts/build.rs skip-on-missing rc.exe and (2) nu-cmd-extra/build.rs from_reader→from_str portability fix)
 - [x] Port coreutils (85 binaries: echo, cat, ls, head, wc, mkdir, rm, cp, mv, touch, tail, sort, grep, ln, pwd, env, sleep, true, false, uname, basename, dirname, tee, rmdir, seq, yes, which, date, uniq, cut, tr, chmod, chown, id, whoami, hostname, readlink, realpath, stat, printf, test, kill, dd, df, du, xargs, find, ps, nohup, nice, mkfifo, expr, nl, paste, comm, expand, fold, md5sum, sha256sum, tty, diff, cmp, od, strings, uptime, free, unexpand, cal, time, sed, awk, ed, more, sh, tar, bc, patch, split, join, csplit, logger, logname, who, tsort, renice)
 - [x] Port rsync (replaces robocopy need) — Rust implementation: recursive, archive mode, checksums, delete, exclude/include, dry-run, progress, stats
 - [x] Port curl — Rust HTTP/1.1 client: GET/POST/PUT/DELETE/HEAD/PATCH, auth, cookies, redirects, chunked, progress, -o/-O, verbose

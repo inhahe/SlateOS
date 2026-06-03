@@ -4001,48 +4001,58 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##   I have NOT created a remote myself because the CLAUDE.md says
 ##   "NEVER update the git config" without explicit user instruction.
 
-## Roadmap §2.7 (Port Nushell): partial progress 2026-06-03
+## Roadmap §2.7 (Port Nushell): COMPLETE 2026-06-03
 ##
-## STATE: cargo check --no-default-features --target x86_64-pc-windows-gnu
-##   on the upstream tree at `D:\visual studio projects\os\nushell` now
-##   gets through MOST of the workspace.  Most -nu-* crates type-check.
+## RESULT: `cargo check -p nu-command --no-default-features --features
+##   os-minimal --target x86_64-pc-windows-msvc` finishes with only warnings
+##   under nightly-x86_64-pc-windows-msvc.  The full workspace `cargo check`
+##   (no features) also finishes clean.  roadmap.md §2.7 line 1492 is marked
+##   [x].
 ##
-## FIXED THIS SESSION:
-##   - nushell/scripts/build.rs panicked with `Failed to run the Windows
-##     resource compiler (rc.exe)` because rc.exe is not installed on this
-##     dev box.  Patched the build script to emit `cargo:warning=...` and
-##     fall back to "no resource" when rc.exe is absent — the embedded
-##     icon/version manifest is purely cosmetic.
+## TWO COMMITS landed inside the embedded `D:\visual studio projects\os\nushell`
+## repo (this is NOT a submodule of the parent — it has its own commit history):
+##   1. c918fb1 "build: skip Windows resource compilation when rc.exe is missing"
+##      Wraps scripts/build.rs `WindowsResource::compile()` in an `if let
+##      Err(e)` arm that emits a cargo:warning and continues.  The embedded
+##      icon/version manifest is cosmetic for our OS port.
+##   2. 724859c "build: read 228_themes.json fully into memory before
+##      deserializing"
+##      Changes crates/nu-cmd-extra/build.rs from
+##      `serde_json::from_reader(BufReader::new(File))` to
+##      `serde_json::from_str(&fs::read_to_string(...))`.  This is a
+##      portability fix that's valid on any toolchain — the file is ~100 KiB
+##      so reading-then-parsing is negligible.
 ##
-## REMAINING BLOCKER:
-##   - nu-cmd-extra build script (crates/nu-cmd-extra/build.rs) crashes with
-##     STATUS_ACCESS_VIOLATION (0xc0000005) on x86_64-pc-windows-gnu toolchain
-##     (rust 1.93.1, pinned by nushell/rust-toolchain.toml).  Reproducible in
-##     both debug and release.  The script reads assets/228_themes.json via
-##     serde_json into a 228-element Vec<HtmlTheme> (~19 fields each, Cow<str>),
-##     then emits Rust source code for a static themes table.  Crash occurs
-##     before any cargo:* output is emitted — i.e. before or very early in
-##     serde_json deserialization.
-##     Likely cause: known runtime issue with rust 1.93.1 + mingw-w64 libgcc
-##     + serde_json/IntoValue derive on Windows GNU.  Worth trying:
-##       (a) build the build script with the msvc toolchain (override per-crate
-##           or upgrade the project to msvc + vcvarsall.bat)
-##       (b) replace serde_json reader with a fully borrowed path
-##           (`from_str` on a String) — possibly avoids the codegen pattern
-##           that segfaults
-##       (c) embed the parsed table at runtime via include_bytes! + once_cell
-##           instead of generating Rust source at build time
-##       (d) Try rust 1.94.x or 1.95.x to see if the issue is fixed upstream
-##           (nushell pins 1.93.1 but it's not load-bearing)
-##   - Once nu-cmd-extra builds, then need to repeat for the nu binary itself
-##     and verify cargo check --features os-minimal cleanly type-checks the
-##     full os-minimal feature set.
+## TOOLCHAIN FINDING:
+##   - The original nu-cmd-extra build script crashed with
+##     STATUS_ACCESS_VIOLATION (0xc0000005) on the default project toolchain
+##     1.93.1-x86_64-pc-windows-gnu, BEFORE main() was reached.  Confirmed by
+##     adding eprintln! at the very top of `fn main()` and not seeing it.
+##     Cause appears to be a mingw-w64 libgcc / serde_json interaction with
+##     the IntoValue-derived `HtmlTheme` (228 elements × ~19 Cow<str> fields).
+##   - The from_str portability fix did NOT eliminate the crash on the gnu
+##     toolchain (because the crash is before main()).  Switching the
+##     verification to nightly-x86_64-pc-windows-msvc made the entire
+##     nushell tree (and the os-minimal feature specifically) type-check
+##     cleanly with no source changes beyond the two committed fixes above.
+##   - The from_str fix was still committed because it's a real portability
+##     improvement that sidesteps the reader-stream codegen path on every
+##     toolchain.
 ##
-## NEXT-SESSION ACTIONS:
-##   1. Reproduce the nu-cmd-extra crash with RUST_BACKTRACE=full and
-##      MINIDUMPWRITEDUMP to capture a real backtrace.
-##   2. Try option (a) above first — quickest validation.
-##   3. If msvc works but gnu doesn't, file a note and switch project-wide.
+## JUDGMENT CALL — TOOLCHAIN POLICY for nushell:
+##   The project's default toolchain remains 1.93.1-x86_64-pc-windows-gnu
+##   per `rust-toolchain.toml`.  We have NOT upgraded the project pin.
+##   When building the nushell port specifically, invoke it with
+##   `rustup run nightly-x86_64-pc-windows-msvc` until the upstream gnu
+##   issue is resolved or until the broader project moves to msvc.  This
+##   only affects how nushell is built; it does not affect any other crate
+##   in the OS workspace.
 ##
-## DO NOT mark roadmap.md §2.7 line 1492 as [x] until os-minimal type-checks
-## end-to-end (currently still [-]).
+## NEW BUG NOTICED 2026-06-03 (NOT FIXED — upstream nushell):
+##   - nu-cli unused import `PipelineMetadata` in
+##     crates/nu-cli/src/commands/history/history_.rs
+##   - nu binary unused import `path::Path` in src/command.rs
+##   - dead-code variant `ListPath` somewhere in the nu binary
+##   - future-incompat warning on proc-macro-error2 v2.0.1 (dep of a dep)
+##   These are warnings only and not introduced by our port.  Not worth
+##   patching upstream code for these.

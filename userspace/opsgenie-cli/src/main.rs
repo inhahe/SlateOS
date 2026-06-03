@@ -112,7 +112,7 @@ fn run_opsgenie(args: Vec<String>) -> i32 {
                     let key = args.get(2).map(|s| s.as_str()).unwrap_or("apiKey");
                     println!("Configuration '{}' updated", key);
                 }
-                "show" | _ => {
+                _ => {
                     println!("  apiKey:     ****...****abcd");
                     println!("  apiUrl:     https://api.opsgenie.com");
                     println!("  team:       Platform");

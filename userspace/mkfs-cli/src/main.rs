@@ -60,8 +60,8 @@ fn run_mkfs(prog: &str, args: &[String]) -> i32 {
         return 0;
     }
 
-    let device = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("/dev/sda1");
+    let device = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("/dev/sda1");
     let label = args.windows(2).find(|w| w[0] == "-L" || w[0] == "-n")
         .map(|w| w[1].as_str());
 

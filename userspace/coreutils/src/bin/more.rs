@@ -87,19 +87,14 @@ fn read_key() -> Key {
     // we fall back to line-buffered if raw mode isn't available).
     let stdin = io::stdin();
     let mut buf = [0u8; 1];
-    loop {
-        match stdin.lock().read(&mut buf) {
-            Ok(0) => return Key::Quit,
-            Ok(_) => {
-                return match buf[0] {
-                    b'q' | b'Q' => Key::Quit,
-                    b' ' => Key::Page,
-                    b'\n' | b'\r' => Key::Line,
-                    _ => Key::Page, // default: next page
-                };
-            }
-            Err(_) => return Key::Quit,
-        }
+    match stdin.lock().read(&mut buf) {
+        Ok(0) | Err(_) => Key::Quit,
+        Ok(_) => match buf[0] {
+            b'q' | b'Q' => Key::Quit,
+            b' ' => Key::Page,
+            b'\n' | b'\r' => Key::Line,
+            _ => Key::Page, // default: next page
+        },
     }
 }
 

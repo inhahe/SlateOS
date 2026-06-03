@@ -72,7 +72,7 @@ fn run_systemctl(args: &[String]) -> i32 {
         "is-active" => println!("active"),
         "is-enabled" => println!("enabled"),
         "daemon-reload" => { /* silent success */ }
-        "list-units" | _ => {
+        _ => {
             println!("UNIT                        LOAD   ACTIVE SUB     DESCRIPTION");
             println!("init.service                loaded active running System and Service Manager");
             println!("dbus.service                loaded active running D-Bus System Message Bus");

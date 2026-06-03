@@ -3975,9 +3975,12 @@ mod tests {
 
     #[test]
     fn parse_float() {
-        let v = parse_json("3.14").unwrap();
+        // Use 3.25 (exactly representable in IEEE-754 binary64) so we
+        // don't trip clippy::approx_constant — any literal close to PI
+        // is flagged regardless of context.
+        let v = parse_json("3.25").unwrap();
         if let JsonValue::Number(n) = v {
-            assert!((n - 3.14).abs() < f64::EPSILON);
+            assert!((n - 3.25).abs() < f64::EPSILON);
         } else {
             panic!("expected number");
         }
@@ -4256,8 +4259,10 @@ mod tests {
 
     #[test]
     fn format_number_float() {
-        let s = format_number(3.14);
-        assert!(s.contains("3.14"));
+        // 3.25 is exactly representable — avoids clippy::approx_constant
+        // (any literal near PI is flagged regardless of context).
+        let s = format_number(3.25);
+        assert!(s.contains("3.25"));
     }
 
     // --- YAML tests ---
@@ -4563,7 +4568,7 @@ mod tests {
         let nodes = build_tree_nodes(&v, &[], &[]);
         // Only root (collapsed, but root is always expanded -- hmm)
         // Actually root is always expanded, so we get 3
-        assert!(nodes.len() >= 1);
+        assert!(!nodes.is_empty());
     }
 
     #[test]

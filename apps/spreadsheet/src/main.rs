@@ -3991,8 +3991,10 @@ mod tests {
 
     #[test]
     fn test_cell_value_text_numeric() {
-        let v = CellValue::Text("3.14".to_string());
-        assert_eq!(v.as_number(), Some(3.14));
+        // Using 3.25 (exactly representable) avoids clippy::approx_constant
+        // which flags any literal close to PI regardless of context.
+        let v = CellValue::Text("3.25".to_string());
+        assert_eq!(v.as_number(), Some(3.25));
     }
 
     #[test]
@@ -4015,8 +4017,9 @@ mod tests {
 
     #[test]
     fn test_cell_value_display_number_decimal() {
-        let v = CellValue::Number(3.14159);
-        assert_eq!(v.display_string(&NumberFormat::Decimal(2)), "3.14");
+        // 3.55 — exactly representable, dodges clippy::approx_constant.
+        let v = CellValue::Number(3.55_f64);
+        assert_eq!(v.display_string(&NumberFormat::Decimal(2)), "3.55");
     }
 
     #[test]
@@ -4034,8 +4037,9 @@ mod tests {
 
     #[test]
     fn test_format_general_float() {
-        let s = NumberFormat::General.format_number(3.14);
-        assert!(s.starts_with("3.14"));
+        // 3.25 dodges clippy::approx_constant (PI proximity flag).
+        let s = NumberFormat::General.format_number(3.25);
+        assert!(s.starts_with("3.25"));
     }
 
     #[test]
@@ -4540,8 +4544,10 @@ mod tests {
 
     #[test]
     fn test_eval_round() {
+        // 3.55678 rounds to 3.56 — both literals avoid the clippy::approx_constant
+        // PI proximity flag while still exercising ROUND().
         let sheet = Sheet::new("Test");
-        assert_eq!(evaluate_formula("=ROUND(3.14159,2)", &sheet), CellValue::Number(3.14));
+        assert_eq!(evaluate_formula("=ROUND(3.55678,2)", &sheet), CellValue::Number(3.56));
     }
 
     #[test]
@@ -5305,7 +5311,8 @@ mod tests {
 
     #[test]
     fn test_value_to_string_number_float() {
-        assert_eq!(value_to_string(&CellValue::Number(3.14)), "3.14");
+        // 3.25 — exactly representable, dodges clippy::approx_constant.
+        assert_eq!(value_to_string(&CellValue::Number(3.25)), "3.25");
     }
 
     #[test]

@@ -2678,7 +2678,7 @@ mod tests {
         assert!(!mgr.can_redo());
 
         // Save state [s1], then mutate to [s1, s2].
-        mgr.save(&[s1.clone()], 0);
+        mgr.save(std::slice::from_ref(&s1), 0);
         let slides_after = vec![s1.clone(), s2];
 
         // Undo: should restore [s1].
@@ -2704,7 +2704,7 @@ mod tests {
         let mut mgr = UndoManager::new(3);
 
         for _ in 0..5 {
-            mgr.save(&[s.clone()], 0);
+            mgr.save(std::slice::from_ref(&s), 0);
         }
         // Only 3 saved (max depth).
         assert_eq!(mgr.undo_stack.len(), 3);
@@ -2716,10 +2716,10 @@ mod tests {
         let mut id_gen = IdGen::new(900);
         let s = Slide::new(1, SlideLayout::Blank, &theme, &mut id_gen);
         let mut mgr = UndoManager::new(10);
-        mgr.save(&[s.clone()], 0);
-        let _ = mgr.undo(&[s.clone()], 0);
+        mgr.save(std::slice::from_ref(&s), 0);
+        let _ = mgr.undo(std::slice::from_ref(&s), 0);
         assert!(mgr.can_redo());
-        mgr.save(&[s.clone()], 0);
+        mgr.save(std::slice::from_ref(&s), 0);
         assert!(!mgr.can_redo());
     }
 

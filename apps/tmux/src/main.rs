@@ -1,4 +1,4 @@
-//! OurOS Terminal Multiplexer (tmux)
+//! `OurOS` Terminal Multiplexer (tmux)
 //!
 //! A graphical terminal multiplexer that allows splitting a terminal window
 //! into multiple panes, creating tabbed windows, and detaching/reattaching
@@ -187,8 +187,8 @@ impl TerminalBuffer {
 
     /// Resize the buffer to new dimensions.
     fn resize(&mut self, new_cols: usize, new_rows: usize) {
-        let new_cols = new_cols.max(1).min(MAX_COLS);
-        let new_rows = new_rows.max(1).min(MAX_ROWS);
+        let new_cols = new_cols.clamp(1, MAX_COLS);
+        let new_rows = new_rows.clamp(1, MAX_ROWS);
 
         // Resize existing rows
         for row in &mut self.cells {
@@ -240,16 +240,16 @@ impl TerminalBuffer {
             self.newline();
         }
 
-        if let Some(row) = self.cells.get_mut(self.cursor_row) {
-            if let Some(cell) = row.get_mut(self.cursor_col) {
-                cell.ch = ch;
-                cell.fg = self.current_fg;
-                cell.bg = self.current_bg;
-                cell.bold = self.current_bold;
-                cell.dim = self.current_dim;
-                cell.underline = self.current_underline;
-                cell.reverse = self.current_reverse;
-            }
+        if let Some(row) = self.cells.get_mut(self.cursor_row)
+            && let Some(cell) = row.get_mut(self.cursor_col)
+        {
+            cell.ch = ch;
+            cell.fg = self.current_fg;
+            cell.bg = self.current_bg;
+            cell.bold = self.current_bold;
+            cell.dim = self.current_dim;
+            cell.underline = self.current_underline;
+            cell.reverse = self.current_reverse;
         }
         self.cursor_col = self.cursor_col.saturating_add(1);
     }
@@ -482,7 +482,7 @@ impl AnsiParser {
         match ch {
             '0'..='9' => {
                 self.current_param = self.current_param.saturating_mul(10)
-                    .saturating_add(ch as u16 - b'0' as u16);
+                    .saturating_add(ch as u16 - u16::from(b'0'));
                 self.has_param = true;
             }
             ';' => {
@@ -572,14 +572,9 @@ impl AnsiParser {
                     self.apply_sgr(p, buf);
                 }
             }
-            'h' | 'l' => {
-                // Set/Reset Mode
-                if self.intermediate == Some('?') {
-                    match p0 {
-                        25 => buf.cursor_visible = final_ch == 'h',
-                        _ => {}
-                    }
-                }
+            'h' | 'l' if self.intermediate == Some('?') && p0 == 25 => {
+                // Set/Reset Mode (DECTCEM cursor visibility)
+                buf.cursor_visible = final_ch == 'h';
             }
             'r' => {
                 // Set scrolling region (simplified — just reset cursor)
@@ -592,6 +587,7 @@ impl AnsiParser {
         }
     }
 
+    #[allow(clippy::unused_self)]  // kept as method for symmetry with other CSI handlers
     fn apply_sgr(&self, params: &[u16], buf: &mut TerminalBuffer) {
         let mut i = 0;
         while i < params.len() {
@@ -661,11 +657,11 @@ impl AnsiParser {
                             buf.current_bg = Color::rgb(r, g_val, b);
                             i = i.saturating_add(4);
                         }
-                    } else if let Some(&5) = params.get(i.saturating_add(1)) {
-                        if let Some(&n) = params.get(i.saturating_add(2)) {
-                            buf.current_bg = color_256(n);
-                            i = i.saturating_add(2);
-                        }
+                    } else if let Some(&5) = params.get(i.saturating_add(1))
+                        && let Some(&n) = params.get(i.saturating_add(2))
+                    {
+                        buf.current_bg = color_256(n);
+                        i = i.saturating_add(2);
                     }
                 }
                 _ => {}
@@ -1362,32 +1358,32 @@ impl Multiplexer {
 
     /// Switch to next window.
     fn next_window(&mut self) {
-        if let Some(session) = self.active_session_mut() {
-            if !session.windows.is_empty() {
-                session.active_window = (session.active_window.saturating_add(1)) % session.windows.len();
-            }
+        if let Some(session) = self.active_session_mut()
+            && !session.windows.is_empty()
+        {
+            session.active_window = (session.active_window.saturating_add(1)) % session.windows.len();
         }
     }
 
     /// Switch to previous window.
     fn prev_window(&mut self) {
-        if let Some(session) = self.active_session_mut() {
-            if !session.windows.is_empty() {
-                if session.active_window == 0 {
-                    session.active_window = session.windows.len().saturating_sub(1);
-                } else {
-                    session.active_window = session.active_window.saturating_sub(1);
-                }
+        if let Some(session) = self.active_session_mut()
+            && !session.windows.is_empty()
+        {
+            if session.active_window == 0 {
+                session.active_window = session.windows.len().saturating_sub(1);
+            } else {
+                session.active_window = session.active_window.saturating_sub(1);
             }
         }
     }
 
     /// Rename current window.
     fn rename_window(&mut self, name: &str) {
-        if let Some(session) = self.active_session_mut() {
-            if let Some(window) = session.active_window_mut() {
-                window.name = name.to_string();
-            }
+        if let Some(session) = self.active_session_mut()
+            && let Some(window) = session.active_window_mut()
+        {
+            window.name = name.to_string();
         }
     }
 
@@ -1401,59 +1397,59 @@ impl Multiplexer {
         let pane = Pane::new(pane_id, 80, 24);
         self.panes.push(pane);
 
-        if let Some(session) = self.active_session_mut() {
-            if let Some(window) = session.active_window_mut() {
-                if window.layout.pane_count() >= MAX_PANES {
-                    return;
-                }
-                let target = window.active_pane;
-                window.layout.split_pane(target, pane_id, direction);
-                window.active_pane = pane_id;
+        if let Some(session) = self.active_session_mut()
+            && let Some(window) = session.active_window_mut()
+        {
+            if window.layout.pane_count() >= MAX_PANES {
+                return;
             }
+            let target = window.active_pane;
+            window.layout.split_pane(target, pane_id, direction);
+            window.active_pane = pane_id;
         }
     }
 
     /// Close the active pane. If it's the last pane, close the window.
     fn close_pane(&mut self) {
-        if let Some(session) = self.active_session_mut() {
-            if let Some(window) = session.active_window_mut() {
-                if window.layout.pane_count() <= 1 {
-                    // Only one pane — close the window instead
-                    if session.windows.len() <= 1 {
-                        session.attached = false;
-                        return;
-                    }
-                    session.windows.remove(session.active_window);
-                    if session.active_window >= session.windows.len() {
-                        session.active_window = session.windows.len().saturating_sub(1);
-                    }
+        if let Some(session) = self.active_session_mut()
+            && let Some(window) = session.active_window_mut()
+        {
+            if window.layout.pane_count() <= 1 {
+                // Only one pane — close the window instead
+                if session.windows.len() <= 1 {
+                    session.attached = false;
                     return;
                 }
-                let target = window.active_pane;
-                window.layout.remove_pane(target);
-                // Select next pane
-                let remaining = window.layout.pane_ids();
-                if let Some(next) = remaining.first() {
-                    window.active_pane = *next;
+                session.windows.remove(session.active_window);
+                if session.active_window >= session.windows.len() {
+                    session.active_window = session.windows.len().saturating_sub(1);
                 }
-                // Mark pane as dead
-                if let Some(pane) = self.find_pane_mut(target) {
-                    pane.alive = false;
-                }
+                return;
+            }
+            let target = window.active_pane;
+            window.layout.remove_pane(target);
+            // Select next pane
+            let remaining = window.layout.pane_ids();
+            if let Some(next) = remaining.first() {
+                window.active_pane = *next;
+            }
+            // Mark pane as dead
+            if let Some(pane) = self.find_pane_mut(target) {
+                pane.alive = false;
             }
         }
     }
 
     /// Navigate to the next pane in the active window.
     fn next_pane(&mut self) {
-        if let Some(session) = self.active_session_mut() {
-            if let Some(window) = session.active_window_mut() {
-                let ids = window.layout.pane_ids();
-                if let Some(pos) = ids.iter().position(|id| *id == window.active_pane) {
-                    let next = (pos.saturating_add(1)) % ids.len();
-                    if let Some(id) = ids.get(next) {
-                        window.active_pane = *id;
-                    }
+        if let Some(session) = self.active_session_mut()
+            && let Some(window) = session.active_window_mut()
+        {
+            let ids = window.layout.pane_ids();
+            if let Some(pos) = ids.iter().position(|id| *id == window.active_pane) {
+                let next = (pos.saturating_add(1)) % ids.len();
+                if let Some(id) = ids.get(next) {
+                    window.active_pane = *id;
                 }
             }
         }
@@ -1461,14 +1457,14 @@ impl Multiplexer {
 
     /// Navigate to the previous pane.
     fn prev_pane(&mut self) {
-        if let Some(session) = self.active_session_mut() {
-            if let Some(window) = session.active_window_mut() {
-                let ids = window.layout.pane_ids();
-                if let Some(pos) = ids.iter().position(|id| *id == window.active_pane) {
-                    let prev = if pos == 0 { ids.len().saturating_sub(1) } else { pos.saturating_sub(1) };
-                    if let Some(id) = ids.get(prev) {
-                        window.active_pane = *id;
-                    }
+        if let Some(session) = self.active_session_mut()
+            && let Some(window) = session.active_window_mut()
+        {
+            let ids = window.layout.pane_ids();
+            if let Some(pos) = ids.iter().position(|id| *id == window.active_pane) {
+                let prev = if pos == 0 { ids.len().saturating_sub(1) } else { pos.saturating_sub(1) };
+                if let Some(id) = ids.get(prev) {
+                    window.active_pane = *id;
                 }
             }
         }
@@ -1476,22 +1472,22 @@ impl Multiplexer {
 
     /// Resize the active pane in a direction.
     fn resize_pane(&mut self, grow: bool) {
-        if let Some(session) = self.active_session_mut() {
-            if let Some(window) = session.active_window_mut() {
-                let delta = if grow { 0.05 } else { -0.05 };
-                window.layout.adjust_ratio(window.active_pane, delta);
-            }
+        if let Some(session) = self.active_session_mut()
+            && let Some(window) = session.active_window_mut()
+        {
+            let delta = if grow { 0.05 } else { -0.05 };
+            window.layout.adjust_ratio(window.active_pane, delta);
         }
     }
 
     /// Apply a layout preset to the current window.
     fn apply_layout(&mut self, preset: LayoutPreset) {
-        if let Some(session) = self.active_session_mut() {
-            if let Some(window) = session.active_window_mut() {
-                let pane_ids = window.layout.pane_ids();
-                window.layout = preset.build(&pane_ids);
-                window.preset = preset;
-            }
+        if let Some(session) = self.active_session_mut()
+            && let Some(window) = session.active_window_mut()
+        {
+            let pane_ids = window.layout.pane_ids();
+            window.layout = preset.build(&pane_ids);
+            window.preset = preset;
         }
     }
 
@@ -1546,28 +1542,28 @@ impl Multiplexer {
             }
             // Copy mode
             '[' => {
-                if let Some(session) = self.active_session() {
-                    if let Some(window) = session.active_window() {
-                        let pane_id = window.active_pane;
-                        if let Some(pane) = self.find_pane_mut(pane_id) {
-                            pane.enter_copy_mode();
-                        }
+                if let Some(session) = self.active_session()
+                    && let Some(window) = session.active_window()
+                {
+                    let pane_id = window.active_pane;
+                    if let Some(pane) = self.find_pane_mut(pane_id) {
+                        pane.enter_copy_mode();
                     }
                 }
             }
             // Layout cycling
             ' ' => {
-                if let Some(session) = self.active_session() {
-                    if let Some(window) = session.active_window() {
-                        let next = match window.preset {
-                            LayoutPreset::EvenHorizontal => LayoutPreset::EvenVertical,
-                            LayoutPreset::EvenVertical => LayoutPreset::MainHorizontal,
-                            LayoutPreset::MainHorizontal => LayoutPreset::MainVertical,
-                            LayoutPreset::MainVertical => LayoutPreset::Tiled,
-                            LayoutPreset::Tiled => LayoutPreset::EvenHorizontal,
-                        };
-                        self.apply_layout(next);
-                    }
+                if let Some(session) = self.active_session()
+                    && let Some(window) = session.active_window()
+                {
+                    let next = match window.preset {
+                        LayoutPreset::EvenHorizontal => LayoutPreset::EvenVertical,
+                        LayoutPreset::EvenVertical => LayoutPreset::MainHorizontal,
+                        LayoutPreset::MainHorizontal => LayoutPreset::MainVertical,
+                        LayoutPreset::MainVertical => LayoutPreset::Tiled,
+                        LayoutPreset::Tiled => LayoutPreset::EvenHorizontal,
+                    };
+                    self.apply_layout(next);
                 }
             }
             // Resize (with arrow keys this would be done differently;
@@ -1578,10 +1574,10 @@ impl Multiplexer {
             // Window selection by number
             '0'..='9' => {
                 let idx = (key as u8 - b'0') as usize;
-                if let Some(session) = self.active_session_mut() {
-                    if idx < session.windows.len() {
-                        session.active_window = idx;
-                    }
+                if let Some(session) = self.active_session_mut()
+                    && idx < session.windows.len()
+                {
+                    session.active_window = idx;
                 }
             }
             // Zoom (toggle full-size for active pane)
@@ -1727,6 +1723,7 @@ impl Multiplexer {
         cmds
     }
 
+    #[allow(clippy::unused_self)]  // kept as method for symmetry with other render_* dispatch
     fn render_tab_bar(&self, cmds: &mut Vec<RenderCommand>, session: &Session) {
         // Tab bar background
         cmds.push(RenderCommand::FillRect {
@@ -1788,6 +1785,7 @@ impl Multiplexer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]  // render_pane needs all of: target, pane id, geometry, focus state
     fn render_pane(&self, cmds: &mut Vec<RenderCommand>, pane_id: PaneId,
                     x: f32, y: f32, width: f32, height: f32, active: bool) {
         // Pane background
@@ -1816,35 +1814,35 @@ impl Multiplexer {
             for row_idx in 0..visible_rows.min(pane.buffer.rows) {
                 if let Some(row) = pane.buffer.cells.get(row_idx) {
                     for col_idx in 0..visible_cols.min(row.len()) {
-                        if let Some(cell) = row.get(col_idx) {
-                            if cell.ch != ' ' || cell.bg != BASE {
-                                let (fg, bg) = TerminalBuffer::effective_colors(cell);
-                                let cx = content_x + col_idx as f32 * CHAR_WIDTH;
-                                let cy = content_y + row_idx as f32 * CHAR_HEIGHT;
+                        if let Some(cell) = row.get(col_idx)
+                            && (cell.ch != ' ' || cell.bg != BASE)
+                        {
+                            let (fg, bg) = TerminalBuffer::effective_colors(cell);
+                            let cx = content_x + col_idx as f32 * CHAR_WIDTH;
+                            let cy = content_y + row_idx as f32 * CHAR_HEIGHT;
 
-                                // Cell background (only if non-default)
-                                if bg != BASE {
-                                    cmds.push(RenderCommand::FillRect {
-                                        x: cx, y: cy,
-                                        width: CHAR_WIDTH,
-                                        height: CHAR_HEIGHT,
-                                        color: bg,
-                                        corner_radii: CornerRadii::ZERO,
-                                    });
-                                }
+                            // Cell background (only if non-default)
+                            if bg != BASE {
+                                cmds.push(RenderCommand::FillRect {
+                                    x: cx, y: cy,
+                                    width: CHAR_WIDTH,
+                                    height: CHAR_HEIGHT,
+                                    color: bg,
+                                    corner_radii: CornerRadii::ZERO,
+                                });
+                            }
 
-                                // Character
-                                if cell.ch != ' ' {
-                                    cmds.push(RenderCommand::Text {
-                                        x: cx,
-                                        y: cy,
-                                        text: cell.ch.to_string(),
-                                        font_size: CHAR_HEIGHT - 2.0,
-                                        color: fg,
-                                        font_weight: if cell.bold { FontWeightHint::Bold } else { FontWeightHint::Regular },
-                                        max_width: Some(CHAR_WIDTH),
-                                    });
-                                }
+                            // Character
+                            if cell.ch != ' ' {
+                                cmds.push(RenderCommand::Text {
+                                    x: cx,
+                                    y: cy,
+                                    text: cell.ch.to_string(),
+                                    font_size: CHAR_HEIGHT - 2.0,
+                                    color: fg,
+                                    font_weight: if cell.bold { FontWeightHint::Bold } else { FontWeightHint::Regular },
+                                    max_width: Some(CHAR_WIDTH),
+                                });
                             }
                         }
                     }
@@ -1978,6 +1976,7 @@ impl Multiplexer {
         });
     }
 
+    #[allow(clippy::unused_self)]  // kept as method for symmetry with other render_* dispatch
     fn render_detached(&self, cmds: &mut Vec<RenderCommand>) {
         cmds.push(RenderCommand::FillRect {
             x: 0.0,
@@ -2171,6 +2170,7 @@ impl Multiplexer {
         });
     }
 
+    #[allow(clippy::unused_self)]  // kept as method for symmetry with other render_* dispatch
     fn render_prefix_indicator(&self, cmds: &mut Vec<RenderCommand>) {
         // Show a small indicator that prefix key was pressed
         let x = WINDOW_WIDTH - 100.0;
@@ -2253,7 +2253,7 @@ mod tests {
     fn test_scroll_up() {
         let mut buf = TerminalBuffer::new(80, 3);
         buf.write_str("A\nB\nC\nD");
-        assert!(buf.scrollback.len() >= 1);
+        assert!(!buf.scrollback.is_empty());
         assert_eq!(buf.cells[2][0].ch, 'D');
     }
 

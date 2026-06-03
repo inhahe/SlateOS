@@ -3248,16 +3248,17 @@ mod tests {
 
     #[test]
     fn test_adjustments_not_default() {
-        let mut adj = ImageAdjustments::default();
-        adj.brightness = 0.5;
+        let adj = ImageAdjustments { brightness: 0.5, ..ImageAdjustments::default() };
         assert!(!adj.is_default());
     }
 
     #[test]
     fn test_adjustments_reset() {
-        let mut adj = ImageAdjustments::default();
-        adj.contrast = 1.0;
-        adj.saturation = -0.5;
+        let mut adj = ImageAdjustments {
+            contrast: 1.0,
+            saturation: -0.5,
+            ..ImageAdjustments::default()
+        };
         adj.reset();
         assert!(adj.is_default());
     }

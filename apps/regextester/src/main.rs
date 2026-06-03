@@ -3283,7 +3283,7 @@ mod tests {
         app.save_to_library(""); // empty name
         assert_eq!(app.library.len(), initial_len);
 
-        app.pattern = "".into();
+        app.pattern = String::new();
         app.save_to_library("Test"); // empty pattern
         assert_eq!(app.library.len(), initial_len);
     }

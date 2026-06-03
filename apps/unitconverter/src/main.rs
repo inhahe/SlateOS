@@ -2432,8 +2432,9 @@ mod tests {
 
     #[test]
     fn test_format_decimal() {
-        let s = format_number(3.14);
-        assert!(s.starts_with("3.14"));
+        // 3.25 — exactly representable, dodges clippy::approx_constant.
+        let s = format_number(3.25);
+        assert!(s.starts_with("3.25"));
     }
 
     #[test]

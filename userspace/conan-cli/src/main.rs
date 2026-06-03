@@ -35,7 +35,7 @@ fn run_conan(args: Vec<String>) -> i32 {
     match cmd {
         "install" => {
             let path = args.get(1).map(|s| s.as_str()).unwrap_or(".");
-            println!("======== Installing ({}): {} ========", path, "conanfile.txt");
+            println!("======== Installing ({path}): conanfile.txt ========");
             println!();
             println!("-------- Installing packages ----------");
             println!("Requirements:");

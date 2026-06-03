@@ -1435,17 +1435,16 @@ fn main() {
 
     // Main loop placeholder — in production this integrates with the
     // compositor's event loop and IPC message dispatch.
-    loop {
-        // In the real implementation:
-        // 1. Poll IPC channel for NotificationRequest messages.
-        // 2. Handle compositor events (mouse, keyboard, tick).
-        // 3. Call daemon.tick(delta_ms) to advance animations.
-        // 4. Call daemon.render() and submit to compositor.
-
-        // For now, break immediately since we cannot actually loop without
-        // the OS service infrastructure.
-        break;
-    }
+    //
+    // In the real implementation we would:
+    // 1. Poll IPC channel for NotificationRequest messages.
+    // 2. Handle compositor events (mouse, keyboard, tick).
+    // 3. Call daemon.tick(delta_ms) to advance animations.
+    // 4. Call daemon.render() and submit to compositor.
+    //
+    // For now we just return: there is no loop to run without the OS
+    // service infrastructure.
+    let _ = daemon;
 }
 
 // ---------------------------------------------------------------------------

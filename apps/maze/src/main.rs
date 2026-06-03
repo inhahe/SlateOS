@@ -1027,9 +1027,15 @@ mod tests {
         let start_col = app.player_col;
         app.try_move(Dir::South);
         app.try_move(Dir::East);
-        // Should have moved at least once (maze is connected)
-        let moved = app.player_row != start_row || app.player_col != start_col;
-        assert!(moved || app.moves > 0 || true); // Maze might have walls in both dirs
+        // The player either stayed put (blocked by walls in both directions) or
+        // moved into a cell within the maze. Either is valid — but the player
+        // position must remain in-bounds and consistent with start_row/start_col
+        // (we can't assert movement because a generated maze may close both
+        // adjacent cells).
+        assert!(app.player_row < app.height);
+        assert!(app.player_col < app.width);
+        // Suppress unused-variable warnings if no move occurred.
+        let _ = (start_row, start_col);
     }
 
     #[test]

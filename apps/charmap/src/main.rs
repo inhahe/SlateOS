@@ -401,7 +401,7 @@ fn classify_codepoint(cp: u32) -> GeneralCategory {
         // CJK ideographs
         0x4E00..=0x9FFF | 0x3400..=0x4DBF => GeneralCategory::OtherLetter,
         // Hiragana, Katakana
-        0x3040..=0x309F | 0x30A0..=0x30FF => GeneralCategory::OtherLetter,
+        0x3040..=0x30FF => GeneralCategory::OtherLetter,
         // Hangul
         0xAC00..=0xD7AF => GeneralCategory::OtherLetter,
         // Greek letters
@@ -535,21 +535,20 @@ fn codepoint_name(cp: u32) -> String {
 
     // Range-based naming
     if let Some(ch) = char::from_u32(cp) {
-        if cp >= 0x0041 && cp <= 0x005A {
+        if (0x0041..=0x005A).contains(&cp) {
             return format!("LATIN CAPITAL LETTER {ch}");
         }
-        if cp >= 0x0061 && cp <= 0x007A {
+        if (0x0061..=0x007A).contains(&cp) {
             return format!("LATIN SMALL LETTER {}", ch.to_uppercase());
         }
-        if cp >= 0x0030 && cp <= 0x0039 {
+        if (0x0030..=0x0039).contains(&cp) {
             let digit_names = [
                 "ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN", "EIGHT", "NINE",
             ];
-            if let Some(idx) = (cp).checked_sub(0x0030) {
-                if let Some(name) = digit_names.get(idx as usize) {
+            if let Some(idx) = (cp).checked_sub(0x0030)
+                && let Some(name) = digit_names.get(idx as usize) {
                     return format!("DIGIT {name}");
                 }
-            }
         }
     }
 
@@ -793,14 +792,13 @@ impl CharMapApp {
             self.grid_chars.get(self.selected_char).copied()
         };
 
-        if let Some(cp) = cp {
-            if let Some(ch) = char::from_u32(cp) {
+        if let Some(cp) = cp
+            && let Some(ch) = char::from_u32(cp) {
                 let s = ch.to_string();
                 self.clipboard = Some(s.clone());
                 self.add_to_recent(cp);
                 self.status_message = format!("Copied '{}' (U+{:04X}) to clipboard", s, cp);
             }
-        }
     }
 
     /// Add a codepoint to recent list (most recent first, no duplicates).
@@ -843,21 +841,19 @@ impl CharMapApp {
 
         // Search by U+XXXX codepoint
         if let Some(hex_str) = query.strip_prefix("u+").or_else(|| query.strip_prefix("0x")) {
-            if let Ok(cp) = u32::from_str_radix(hex_str, 16) {
-                if char::from_u32(cp).is_some() || cp <= 0x10FFFF {
+            if let Ok(cp) = u32::from_str_radix(hex_str, 16)
+                && (char::from_u32(cp).is_some() || cp <= 0x10FFFF) {
                     self.search_results.push(cp);
                 }
-            }
             return;
         }
 
         // Search by literal single character
         let chars: Vec<char> = query.chars().collect();
-        if chars.len() == 1 {
-            if let Some(&ch) = chars.first() {
+        if chars.len() == 1
+            && let Some(&ch) = chars.first() {
                 self.search_results.push(ch as u32);
             }
-        }
 
         // Search by name across all blocks
         let blocks = unicode_blocks();
@@ -865,11 +861,10 @@ impl CharMapApp {
             let mut cp = block.start;
             while cp <= block.end {
                 let name = codepoint_name(cp).to_lowercase();
-                if name.contains(&query) {
-                    if !self.search_results.contains(&cp) {
+                if name.contains(&query)
+                    && !self.search_results.contains(&cp) {
                         self.search_results.push(cp);
                     }
-                }
                 if self.search_results.len() >= 500 {
                     break;
                 }
@@ -984,12 +979,11 @@ impl CharMapApp {
                     Panel::Favorites => Panel::Blocks,
                 };
             }
-            "Escape" => {
-                if self.search_active {
+            "Escape"
+                if self.search_active => {
                     self.search_active = false;
                     self.status_message = "Search closed".into();
                 }
-            }
             // Ctrl+F to search
             "f" if ctrl => {
                 self.search_active = true;
@@ -1272,7 +1266,7 @@ impl CharMapApp {
         let visible_rows = ((grid_h - 4.0) / cell_size) as usize;
 
         // Ensure scroll is valid
-        let row_of_selected = if cols > 0 { selected / cols } else { 0 };
+        let row_of_selected = selected.checked_div(cols).unwrap_or(0);
         let scroll_row = if row_of_selected < self.grid_scroll {
             row_of_selected
         } else if row_of_selected >= self.grid_scroll.saturating_add(visible_rows) {
@@ -1538,8 +1532,8 @@ impl CharMapApp {
             let rx = x + 10.0 + (col as f32) * recent_cell;
             let ry = detail_y + (row as f32) * recent_cell;
 
-            if let Some(ch) = char::from_u32(cp) {
-                if !ch.is_control() {
+            if let Some(ch) = char::from_u32(cp)
+                && !ch.is_control() {
                     cmds.push(RenderCommand::FillRect {
                         x: rx,
                         y: ry,
@@ -1558,7 +1552,6 @@ impl CharMapApp {
                         max_width: Some(recent_cell - 6.0),
                     });
                 }
-            }
             ri = ri.saturating_add(1);
         }
 
@@ -1586,8 +1579,8 @@ impl CharMapApp {
                     break;
                 }
 
-                if let Some(ch) = char::from_u32(cp) {
-                    if !ch.is_control() {
+                if let Some(ch) = char::from_u32(cp)
+                    && !ch.is_control() {
                         cmds.push(RenderCommand::FillRect {
                             x: fx,
                             y: fy,
@@ -1606,7 +1599,6 @@ impl CharMapApp {
                             max_width: Some(recent_cell - 6.0),
                         });
                     }
-                }
                 fi = fi.saturating_add(1);
             }
         }

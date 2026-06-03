@@ -769,16 +769,14 @@ fn simulate_float_benchmark() -> f64 {
 fn simulate_prime_sieve() -> f64 {
     let limit: usize = 10_000;
     let mut sieve = vec![true; limit];
-    if limit > 0 {
-        if let Some(slot) = sieve.get_mut(0) {
+    if limit > 0
+        && let Some(slot) = sieve.get_mut(0) {
             *slot = false;
         }
-    }
-    if limit > 1 {
-        if let Some(slot) = sieve.get_mut(1) {
+    if limit > 1
+        && let Some(slot) = sieve.get_mut(1) {
             *slot = false;
         }
-    }
     let mut p = 2;
     while p * p < limit {
         if sieve.get(p).copied().unwrap_or(false) {
@@ -1289,7 +1287,7 @@ impl BenchmarkApp {
 
     fn handle_click(&mut self, x: f32, y: f32) -> EventResult {
         // Tab bar clicks.
-        if y >= TITLE_BAR_HEIGHT && y <= TITLE_BAR_HEIGHT + TAB_BAR_HEIGHT {
+        if (TITLE_BAR_HEIGHT..=TITLE_BAR_HEIGHT + TAB_BAR_HEIGHT).contains(&y) {
             let tab_width = self.width / Tab::all().len() as f32;
             let idx = (x / tab_width) as usize;
             if let Some(&tab) = Tab::all().get(idx) {
@@ -1302,12 +1300,11 @@ impl BenchmarkApp {
         // Run button (bottom-right area).
         let btn_x = self.width - BUTTON_WIDTH - 20.0;
         let btn_y = self.height - STATUS_BAR_HEIGHT - BUTTON_HEIGHT - 10.0;
-        if x >= btn_x && x <= btn_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT {
-            if !self.progress.phase.is_running() {
+        if x >= btn_x && x <= btn_x + BUTTON_WIDTH && y >= btn_y && y <= btn_y + BUTTON_HEIGHT
+            && !self.progress.phase.is_running() {
                 self.run_benchmark();
                 return EventResult::Consumed;
             }
-        }
 
         // Export button.
         let export_x = btn_x - BUTTON_WIDTH - 10.0;

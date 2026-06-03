@@ -642,6 +642,12 @@ impl GalleryViewMode {
     }
 }
 
+impl Default for PhotoGallery {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PhotoGallery {
     pub fn new() -> Self {
         Self {
@@ -677,8 +683,8 @@ impl PhotoGallery {
     }
 
     pub fn delete_selected(&mut self) {
-        if let Some(idx) = self.selected_idx {
-            if idx < self.photos.len() {
+        if let Some(idx) = self.selected_idx
+            && idx < self.photos.len() {
                 self.photos.remove(idx);
                 if self.photos.is_empty() {
                     self.selected_idx = None;
@@ -686,7 +692,6 @@ impl PhotoGallery {
                     self.selected_idx = Some(self.photos.len().saturating_sub(1));
                 }
             }
-        }
     }
 
     pub fn select_next(&mut self) {
@@ -724,11 +729,10 @@ impl PhotoGallery {
     }
 
     pub fn toggle_favorite_selected(&mut self) {
-        if let Some(idx) = self.selected_idx {
-            if let Some(photo) = self.photos.get_mut(idx) {
+        if let Some(idx) = self.selected_idx
+            && let Some(photo) = self.photos.get_mut(idx) {
                 photo.toggle_favorite();
             }
-        }
     }
 
     pub fn count(&self) -> usize {
@@ -787,6 +791,12 @@ pub struct RecordingSession {
     pub recording_id: u32,
 }
 
+impl Default for RecordingSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl RecordingSession {
     pub fn new() -> Self {
         Self {
@@ -830,7 +840,7 @@ impl RecordingSession {
         if self.state == RecordingState::Recording {
             self.duration_ms = self.duration_ms.saturating_add(delta_ms);
             // Estimate frames for this delta
-            let new_frames = (delta_ms as u64).saturating_mul(framerate as u64) / 1000;
+            let new_frames = delta_ms.saturating_mul(framerate as u64) / 1000;
             self.frame_count = self.frame_count.saturating_add(new_frames);
             // Estimated size = bitrate * duration / 8
             self.estimated_size = self.bitrate
@@ -905,6 +915,12 @@ pub struct TimerCountdown {
     pub active: bool,
     pub remaining_ms: u64,
     pub total_ms: u64,
+}
+
+impl Default for TimerCountdown {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TimerCountdown {
@@ -2336,6 +2352,9 @@ impl CameraApp {
         });
     }
 
+    // 8 args mirror the slider geometry + value pair; grouping into a struct
+    // would add an alloc on every render frame for no readability win.
+    #[allow(clippy::too_many_arguments)]
     fn render_setting_slider(
         &self,
         cmds: &mut Vec<RenderCommand>,

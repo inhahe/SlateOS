@@ -1096,6 +1096,9 @@ impl ColorPickerApp {
         *y += 30.0 + PADDING;
     }
 
+    // Slider geometry + value/max + a track color; grouping these would not
+    // improve readability and would force allocations at the call site.
+    #[allow(clippy::too_many_arguments)]
     fn render_slider(
         cmds: &mut Vec<RenderCommand>,
         x: f32,

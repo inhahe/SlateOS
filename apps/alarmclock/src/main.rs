@@ -106,7 +106,9 @@ const TIMER_PRESETS: [u32; 7] = [1, 3, 5, 10, 15, 30, 60];
 
 /// Which tab is currently selected.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ActiveTab {
+    #[default]
     Alarm,
     Timer,
     Stopwatch,
@@ -126,11 +128,6 @@ impl ActiveTab {
     }
 }
 
-impl Default for ActiveTab {
-    fn default() -> Self {
-        Self::Alarm
-    }
-}
 
 // ============================================================================
 // Days of the week
@@ -217,7 +214,9 @@ impl Weekday {
 
 /// Whether to display time in 12-hour or 24-hour format.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum TimeFormat {
+    #[default]
     TwelveHour,
     TwentyFourHour,
 }
@@ -240,11 +239,6 @@ impl TimeFormat {
     }
 }
 
-impl Default for TimeFormat {
-    fn default() -> Self {
-        Self::TwelveHour
-    }
-}
 
 // ============================================================================
 // Sound selection
@@ -252,7 +246,9 @@ impl Default for TimeFormat {
 
 /// Available alarm/timer sounds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Default)]
 pub enum AlarmSound {
+    #[default]
     Default,
     Chime,
     Bell,
@@ -300,11 +296,6 @@ impl AlarmSound {
     }
 }
 
-impl Default for AlarmSound {
-    fn default() -> Self {
-        Self::Default
-    }
-}
 
 // ============================================================================
 // Snooze duration

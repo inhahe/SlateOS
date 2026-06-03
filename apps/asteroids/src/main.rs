@@ -693,18 +693,16 @@ impl AsteroidsApp {
             Key::Right | Key::D => self.input.right = pressed,
             Key::Up | Key::W => self.input.thrust = pressed,
             Key::Space => self.input.shoot = pressed,
-            Key::P | Key::Escape => {
-                if pressed {
+            Key::P | Key::Escape
+                if pressed => {
                     self.state = GameState::Paused;
                     // Release all input on pause.
                     self.input = InputState::new();
                 }
-            }
-            Key::N => {
-                if pressed {
+            Key::N
+                if pressed => {
                     self.new_game();
                 }
-            }
             _ => {}
         }
     }
@@ -745,7 +743,7 @@ impl AsteroidsApp {
             self.ship.thrusting = self.input.thrust;
 
             // Thrust particles.
-            if self.ship.thrusting && self.frame_counter % 2 == 0 {
+            if self.ship.thrusting && self.frame_counter.is_multiple_of(2) {
                 self.spawn_thrust_particle();
             }
         }

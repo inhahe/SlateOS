@@ -121,7 +121,7 @@ impl Lcg {
 
     /// Returns true with probability 1/n.
     fn one_in(&mut self, n: u64) -> bool {
-        self.next_u64() % n == 0
+        self.next_u64().is_multiple_of(n)
     }
 }
 
@@ -825,7 +825,7 @@ impl BreakoutApp {
             cmds.push(RenderCommand::Text {
                 x: width / 2.0 - 90.0,
                 y: y_pos,
-                text: format!("{key}"),
+                text: key.to_string(),
                 color: BLUE,
                 font_size: OVERLAY_FONT_SIZE,
                 font_weight: FontWeightHint::Bold,

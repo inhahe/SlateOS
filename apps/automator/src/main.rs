@@ -706,7 +706,7 @@ fn substitute_vars(line: &str, vars: &BTreeMap<String, String>) -> String {
                 end = end.saturating_add(1);
             }
             if end > start {
-                let var_name: String = chars[start..end].iter().collect();
+                let var_name: String = chars.get(start..end).map(|s| s.iter().collect()).unwrap_or_default();
                 if let Some(val) = vars.get(&var_name) {
                     result.push_str(val);
                 } else {

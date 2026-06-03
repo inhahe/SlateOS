@@ -627,22 +627,20 @@ impl BattleshipApp {
 
     fn handle_placement_key(&mut self, key: Key) {
         match key {
-            Key::Up => {
-                if self.placement_row > 0 {
+            Key::Up
+                if self.placement_row > 0 => {
                     self.placement_row -= 1;
                 }
-            }
             Key::Down => {
                 if self.placement_row + 1 < GRID_SIZE {
                     self.placement_row += 1;
                 }
                 self.clamp_placement();
             }
-            Key::Left => {
-                if self.placement_col > 0 {
+            Key::Left
+                if self.placement_col > 0 => {
                     self.placement_col -= 1;
                 }
-            }
             Key::Right => {
                 if self.placement_col + 1 < GRID_SIZE {
                     self.placement_col += 1;
@@ -686,26 +684,22 @@ impl BattleshipApp {
 
     fn handle_firing_key(&mut self, key: Key) {
         match key {
-            Key::Up => {
-                if self.cursor_row > 0 {
+            Key::Up
+                if self.cursor_row > 0 => {
                     self.cursor_row -= 1;
                 }
-            }
-            Key::Down => {
-                if self.cursor_row + 1 < GRID_SIZE {
+            Key::Down
+                if self.cursor_row + 1 < GRID_SIZE => {
                     self.cursor_row += 1;
                 }
-            }
-            Key::Left => {
-                if self.cursor_col > 0 {
+            Key::Left
+                if self.cursor_col > 0 => {
                     self.cursor_col -= 1;
                 }
-            }
-            Key::Right => {
-                if self.cursor_col + 1 < GRID_SIZE {
+            Key::Right
+                if self.cursor_col + 1 < GRID_SIZE => {
                     self.cursor_col += 1;
                 }
-            }
             Key::Enter | Key::Space => {
                 self.fire_at_opponent();
             }
@@ -1003,8 +997,8 @@ impl BattleshipApp {
         }
 
         // Placement preview overlay
-        if self.phase == GamePhase::Placement {
-            if let Some(ship) = self.placement_preview_ship() {
+        if self.phase == GamePhase::Placement
+            && let Some(ship) = self.placement_preview_ship() {
                 let valid = self.is_placement_valid();
                 let preview_color = if valid {
                     Color::rgba(166, 227, 161, 120) // Green tint
@@ -1027,7 +1021,6 @@ impl BattleshipApp {
                     }
                 }
             }
-        }
     }
 
     fn render_opponent_grid(&self, cmds: &mut Vec<RenderCommand>) {

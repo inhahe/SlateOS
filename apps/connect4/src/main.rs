@@ -200,6 +200,9 @@ impl Board {
             return None;
         }
         let mut cells = [(row, col); 4];
+        // i is used both as a multiplier on (dr, dc) and as the write index
+        // into `cells`; iter_mut would force a parallel counter.
+        #[allow(clippy::needless_range_loop)]
         for i in 1..4 {
             let nr = row as isize + dr * i as isize;
             let nc = col as isize + dc * i as isize;
@@ -225,29 +228,25 @@ impl Board {
                     continue;
                 }
                 // Right
-                if col + 3 < COLS {
-                    if let Some(line) = self.check_line(row, col, 0, 1) {
+                if col + 3 < COLS
+                    && let Some(line) = self.check_line(row, col, 0, 1) {
                         return Some((self.grid[row][col], line));
                     }
-                }
                 // Up
-                if row + 3 < ROWS {
-                    if let Some(line) = self.check_line(row, col, 1, 0) {
+                if row + 3 < ROWS
+                    && let Some(line) = self.check_line(row, col, 1, 0) {
                         return Some((self.grid[row][col], line));
                     }
-                }
                 // Up-right diagonal
-                if row + 3 < ROWS && col + 3 < COLS {
-                    if let Some(line) = self.check_line(row, col, 1, 1) {
+                if row + 3 < ROWS && col + 3 < COLS
+                    && let Some(line) = self.check_line(row, col, 1, 1) {
                         return Some((self.grid[row][col], line));
                     }
-                }
                 // Up-left diagonal
-                if row + 3 < ROWS && col >= 3 {
-                    if let Some(line) = self.check_line(row, col, 1, -1) {
+                if row + 3 < ROWS && col >= 3
+                    && let Some(line) = self.check_line(row, col, 1, -1) {
                         return Some((self.grid[row][col], line));
                     }
-                }
             }
         }
         None

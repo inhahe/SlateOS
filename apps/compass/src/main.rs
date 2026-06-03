@@ -357,8 +357,8 @@ impl CompassApp {
 
     /// Remove the selected waypoint.
     fn remove_selected_waypoint(&mut self) {
-        if let Some(idx) = self.selected_waypoint {
-            if idx < self.waypoints.len() {
+        if let Some(idx) = self.selected_waypoint
+            && idx < self.waypoints.len() {
                 self.waypoints.remove(idx);
                 if self.waypoints.is_empty() {
                     self.selected_waypoint = None;
@@ -367,7 +367,6 @@ impl CompassApp {
                 }
                 self.status = String::from("Waypoint removed");
             }
-        }
     }
 
     /// Bearing and distance from the current position to the selected waypoint.

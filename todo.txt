@@ -3868,3 +3868,66 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 - (FIXED Phase 218) BUG: `aio::tests::test_aio_fsync_recovery_after_einval`
   Same root cause as the other aio flakes — stale completion records
   at reused stack addresses.  Fixed by reset_aio_table().
+
+## BUG (noticed 2026-06-03, UNFIXED, pre-existing): posix host tests pin
+   obsolete ENOSYS behaviour for fork()/vfork()
+   `cargo test -p posix --target x86_64-pc-windows-gnu --lib` reports 5
+   failures unrelated to current work:
+     - process::tests::test_fork_returns_enosys
+     - process::tests::test_fork_sets_enosys
+     - process::tests::test_vfork_returns_enosys
+     - process::tests::test_vfork_sets_enosys
+     - error::tests::error_impl_increments_count
+   The four fork/vfork tests were written when fork/vfork were ENOSYS
+   stubs.  Per roadmap §2.5 L1190, posix fork/vfork are now real —
+   `vfork()` aliases `fork()`, which issues `SYS_PROCESS_FORK=527`
+   (kernel real-image CoW fork via frame-handled syscall, child resumes
+   with RAX=0).  In the host harness (target_os ≠ "none") the syscall
+   wrapper goes through a host stub that returns 0 for the bare syscall,
+   so `errno::translate(0)` leaves errno untouched and the tests'
+   "left: 0 / right: 38" failure surfaces.  The tests should either be
+   deleted (they pin a behaviour that's intentionally obsolete) or
+   replaced with host-stub-aware assertions ("on host: returns 0, errno
+   unchanged"; "on kernel: forks real child").  Tracked here pending a
+   dedicated cleanup pass.
+
+   error_impl_increments_count: separate root cause — flaky/static-state
+   leakage across test runs.  Needs reproduction with --test-threads=1.
+   Documented for the next clean-up sweep.
+
+## Phase 219 (FIXED 2026-06-03): pidfd_send_signal scope-flag support
+   Per the deferred work tracked at todo.txt L3812: Linux 6.9+ defines
+   PIDFD_SIGNAL_THREAD (1<<0), _THREAD_GROUP (1<<1), _PROCESS_GROUP
+   (1<<2) as scope flags on pidfd_send_signal, plus a hweight32 mutex
+   check (at most one scope bit may be set).  Our stub previously
+   treated any non-zero flag as EINVAL (pre-6.9 behaviour), which
+   diverged from modern Linux: a caller passing
+   `pidfd_send_signal(badfd, sig, NULL, PIDFD_SIGNAL_THREAD)` saw
+   EINVAL where Linux returns EBADF (the flag is valid, the fdget step
+   fails).  Now:
+     - posix/src/process.rs adds PIDFD_SIGNAL_VALID_FLAGS mask constant
+       (THREAD | THREAD_GROUP | PROCESS_GROUP)
+     - Step 1 widened: `(flags & !PIDFD_SIGNAL_VALID_FLAGS) != 0` →
+       EINVAL (any bit outside the mask)
+     - Step 2 (new): `(flags & PIDFD_SIGNAL_VALID_FLAGS).count_ones() >
+       1` → EINVAL (Linux hweight32 mutex)
+     - Steps 3+ (fdget, kind check) unchanged — still EBADF until
+       HandleKind::Pidfd lands in the fdtable
+   Doc comment updated to reflect the 6.9 ordering.  Existing tests
+   that pinned flag=1 → EINVAL re-targeted at flag=(1<<3) (an out-of-
+   mask bit) so the mask-beats-fdget invariant is still tested.  Added
+   8 new tests:
+     - test_pidfd_send_signal_thread_flag_reaches_fdget_phase219
+     - test_pidfd_send_signal_thread_group_flag_reaches_fdget_phase219
+     - test_pidfd_send_signal_process_group_flag_reaches_fdget_phase219
+     - test_pidfd_send_signal_thread_and_thread_group_einval_phase219
+     - test_pidfd_send_signal_all_three_scope_flags_einval_phase219
+     - test_pidfd_send_signal_out_of_mask_bit_einval_phase219
+     - test_pidfd_send_signal_flag_mutex_before_fd_phase219
+     - test_pidfd_send_signal_high_flag_einval (retained, semantics
+       unchanged — MSB outside mask)
+   21 pidfd_send_signal tests pass (8 new + 13 existing rebased).  No
+   change needed yet to the pidfd_getfd / pidfd_open paths — they
+   weren't part of the 6.9 extension.  Remaining deferred work per
+   L3820: re-introduce sig-range + si_signo cross-check at the right
+   depths once HandleKind::Pidfd is introduced.

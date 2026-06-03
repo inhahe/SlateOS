@@ -38,7 +38,9 @@ static mut LAST_CHILD_PID: PidT = 0;
 /// Called from `posix_spawn` / `posix_spawnp` after a successful spawn.
 pub(crate) fn record_child_pid(pid: PidT) {
     // SAFETY: Single-threaded access.
-    unsafe { core::ptr::addr_of_mut!(LAST_CHILD_PID).write(pid); }
+    unsafe {
+        core::ptr::addr_of_mut!(LAST_CHILD_PID).write(pid);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -84,8 +86,7 @@ pub const WAITPID_VALID_OPTIONS: i32 =
 /// `WAITPID_VALID_OPTIONS` (adds `WEXITED`, `WSTOPPED` — which equals
 /// `WUNTRACED` so it's already in the mask — and `WNOWAIT`).
 pub const WAITID_VALID_OPTIONS: i32 =
-    WNOHANG | WUNTRACED | WEXITED | WCONTINUED | WNOWAIT
-        | __WNOTHREAD | __WALL | __WCLONE;
+    WNOHANG | WUNTRACED | WEXITED | WCONTINUED | WNOWAIT | __WNOTHREAD | __WALL | __WCLONE;
 
 // ---------------------------------------------------------------------------
 // Wait status macros
@@ -291,7 +292,9 @@ pub extern "C" fn wait3(
     // Zero the rusage if provided.
     if !rusage.is_null() {
         // SAFETY: Caller guarantees rusage is valid.
-        unsafe { core::ptr::write_bytes(rusage, 0, 1); }
+        unsafe {
+            core::ptr::write_bytes(rusage, 0, 1);
+        }
     }
     waitpid(-1, status, options)
 }
@@ -314,7 +317,9 @@ pub extern "C" fn wait4(
     }
     if !rusage.is_null() {
         // SAFETY: Caller guarantees rusage is valid.
-        unsafe { core::ptr::write_bytes(rusage, 0, 1); }
+        unsafe {
+            core::ptr::write_bytes(rusage, 0, 1);
+        }
     }
     waitpid(pid, status, options)
 }
@@ -536,7 +541,9 @@ pub extern "C" fn setpgid(pid: PidT, pgid: PidT) -> i32 {
     }
     let new_pgid = if pgid == 0 { us } else { pgid };
     // SAFETY: single process.
-    unsafe { core::ptr::addr_of_mut!(OUR_PGID).write(new_pgid); }
+    unsafe {
+        core::ptr::addr_of_mut!(OUR_PGID).write(new_pgid);
+    }
     0
 }
 
@@ -633,7 +640,9 @@ pub extern "C" fn tcsetpgrp(fd: crate::types::Fd, pgrp: PidT) -> i32 {
         return -1;
     }
     // SAFETY: single process.
-    unsafe { core::ptr::addr_of_mut!(FG_PGRP).write(pgrp); }
+    unsafe {
+        core::ptr::addr_of_mut!(FG_PGRP).write(pgrp);
+    }
     0
 }
 
@@ -744,12 +753,7 @@ pub const CLONE_FLAGS_VALID: u64 = crate::linux_clone_args::CLONE_VM
 /// function" / "valid writable stack region" pair, which would only
 /// matter if the syscall actually reached the kernel.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn clone(
-    fn_ptr: *const u8,
-    child_stack: *mut u8,
-    flags: i32,
-    _arg: *mut u8,
-) -> i32 {
+pub extern "C" fn clone(fn_ptr: *const u8, child_stack: *mut u8, flags: i32, _arg: *mut u8) -> i32 {
     // (1) glibc rejects NULL fn before issuing the syscall.
     if fn_ptr.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -842,17 +846,14 @@ pub extern "C" fn clone(
     // a user namespace is always allowed (rootless containers).
     // CLONE_NEWTIME is not in CLONE_FLAGS_VALID for legacy clone() so
     // it's already rejected at step (4).
-    const NS_BITS_REQUIRING_CAP: u64 =
-        crate::linux_clone_args::CLONE_NEWNS
-            | crate::linux_clone_args::CLONE_NEWUTS
-            | crate::linux_clone_args::CLONE_NEWIPC
-            | crate::linux_clone_args::CLONE_NEWPID
-            | crate::linux_clone_args::CLONE_NEWNET
-            | crate::linux_clone_args::CLONE_NEWCGROUP;
+    const NS_BITS_REQUIRING_CAP: u64 = crate::linux_clone_args::CLONE_NEWNS
+        | crate::linux_clone_args::CLONE_NEWUTS
+        | crate::linux_clone_args::CLONE_NEWIPC
+        | crate::linux_clone_args::CLONE_NEWPID
+        | crate::linux_clone_args::CLONE_NEWNET
+        | crate::linux_clone_args::CLONE_NEWCGROUP;
     if (bits & NS_BITS_REQUIRING_CAP) != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_ADMIN,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -957,18 +958,15 @@ pub extern "C" fn unshare(flags: i32) -> i32 {
     // CLONE_NEWUSER is intentionally excluded (rootless containers).
     // Process-resource bits (CLONE_THREAD/FS/SIGHAND/VM/FILES/SYSVSEM)
     // are also excluded — they only touch the caller's own task.
-    const NS_BITS_REQUIRING_CAP: u32 =
-        (crate::linux_clone_args::CLONE_NEWNS
-            | crate::linux_clone_args::CLONE_NEWUTS
-            | crate::linux_clone_args::CLONE_NEWIPC
-            | crate::linux_clone_args::CLONE_NEWPID
-            | crate::linux_clone_args::CLONE_NEWNET
-            | crate::linux_clone_args::CLONE_NEWCGROUP
-            | crate::linux_clone_args::CLONE_NEWTIME) as u32;
+    const NS_BITS_REQUIRING_CAP: u32 = (crate::linux_clone_args::CLONE_NEWNS
+        | crate::linux_clone_args::CLONE_NEWUTS
+        | crate::linux_clone_args::CLONE_NEWIPC
+        | crate::linux_clone_args::CLONE_NEWPID
+        | crate::linux_clone_args::CLONE_NEWNET
+        | crate::linux_clone_args::CLONE_NEWCGROUP
+        | crate::linux_clone_args::CLONE_NEWTIME) as u32;
     if (bits & NS_BITS_REQUIRING_CAP) != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_ADMIN,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -1027,9 +1025,7 @@ pub extern "C" fn setns(fd: i32, nstype: i32) -> i32 {
     }
     // Phase 176: every namespace's install op requires CAP_SYS_ADMIN
     // in the caller's current user namespace.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_ADMIN,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -1239,9 +1235,7 @@ pub extern "C" fn mount(
     //     hook, so an unprivileged caller with bad path or unknown
     //     flag bits still sees the argument errno — only well-formed
     //     calls trip EPERM.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_ADMIN,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -1320,9 +1314,7 @@ pub extern "C" fn umount(target: *const u8) -> i32 {
     // 1. may_mount → EPERM.  Phase 165: Linux performs this before
     //    user_path_at, so an unprivileged caller never learns whether
     //    `target` is mapped or empty.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_ADMIN,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -1398,9 +1390,7 @@ pub extern "C" fn umount2(target: *const u8, flags: i32) -> i32 {
     //    this between the flag mask and user_path_at, so a clean
     //    flag word + unprivileged caller short-circuits to EPERM
     //    before the target pointer is inspected.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_ADMIN,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -1425,10 +1415,7 @@ pub extern "C" fn umount2(target: *const u8, flags: i32) -> i32 {
     // 5. MNT_EXPIRE is mutually exclusive with MNT_FORCE and MNT_DETACH
     //    (Linux's `do_umount`, after path resolution).
     if (flags & crate::sys_mount::MNT_EXPIRE) != 0
-        && (flags
-            & (crate::sys_mount::MNT_FORCE
-                | crate::sys_mount::MNT_DETACH))
-            != 0
+        && (flags & (crate::sys_mount::MNT_FORCE | crate::sys_mount::MNT_DETACH)) != 0
     {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -1618,24 +1605,34 @@ pub extern "C" fn pidfd_open(pid: PidT, flags: u32) -> i32 {
     -1
 }
 
+/// Mask of all PIDFD_SIGNAL_* scope flags accepted by Linux 6.9+
+/// `pidfd_send_signal` (`PIDFD_SIGNAL_THREAD | _THREAD_GROUP |
+/// _PROCESS_GROUP`).  Any bit outside this mask is `EINVAL`.
+const PIDFD_SIGNAL_VALID_FLAGS: u32 = crate::linux_pidfd2_types::PIDFD_SIGNAL_THREAD
+    | crate::linux_pidfd2_types::PIDFD_SIGNAL_THREAD_GROUP
+    | crate::linux_pidfd2_types::PIDFD_SIGNAL_PROCESS_GROUP;
+
 /// Send a signal to a process referred to by a pidfd.
 ///
 /// # Linux behaviour
 ///
-/// `pidfd_send_signal(pidfd, sig, info, flags)` (added in Linux 5.1)
-/// delivers `sig` to the process referenced by `pidfd`.  The kernel
-/// validation order (`kernel/signal.c::sys_pidfd_send_signal`):
+/// `pidfd_send_signal(pidfd, sig, info, flags)` (added in Linux 5.1,
+/// scope-flag extension in Linux 6.9) delivers `sig` to the process,
+/// thread, thread-group, or process-group referenced by `pidfd`.  The
+/// kernel validation order (`kernel/signal.c::sys_pidfd_send_signal`):
 ///
-/// 1. `flags & ~PIDFD_SIGNAL_FLAGS_MASK`        → `EINVAL`
-/// 2. `CLASS(fd, f)(pidfd); if (fd_empty(f))`   → `EBADF`
+/// 1. `flags & ~(PIDFD_SIGNAL_THREAD | _THREAD_GROUP | _PROCESS_GROUP)` → `EINVAL`
+/// 2. `hweight32(flags & PIDFD_SIGNAL_*) > 1`   → `EINVAL`
+///    (the three scope bits are mutually exclusive — at most one set)
+/// 3. `CLASS(fd, f)(pidfd); if (fd_empty(f))`   → `EBADF`
 ///    (covers both `pidfd < 0` and `pidfd` not referring to an open fd)
-/// 3. `pidfd_to_pid(fd_file(f))`                → `EBADF` for files
+/// 4. `pidfd_to_pid(fd_file(f))`                → `EBADF` for files
 ///    whose `f_op != &pidfd_fops`
-/// 4. `access_pidfd_pidns(pid)`                 → `EINVAL`
-/// 5. flags switch for scope flags              → `EINVAL` on bad combo
-/// 6. If `info != NULL`: `copy_siginfo_from_user` → `EFAULT`;
+/// 5. `access_pidfd_pidns(pid)`                 → `EINVAL`
+/// 6. flags switch for scope flags              → `EINVAL` on bad combo
+/// 7. If `info != NULL`: `copy_siginfo_from_user` → `EFAULT`;
 ///    then `sig != kinfo.si_signo`              → `EINVAL`
-/// 7. `kill_pid_info_type` → `valid_signal(sig)` → `EINVAL` if `sig < 0`
+/// 8. `kill_pid_info_type` → `valid_signal(sig)` → `EINVAL` if `sig < 0`
 ///    or `sig > _NSIG` (== 64 on x86-64)
 ///
 /// **Phase 145**: pre-Phase-145 we checked `sig` range and the
@@ -1647,9 +1644,16 @@ pub extern "C" fn pidfd_open(pid: PidT, flags: u32) -> i32 {
 /// Go's `os.FindProcess(...).Signal` path) rely on the Linux ordering
 /// to distinguish "I passed the wrong fd" from "I passed the wrong sig."
 ///
+/// **Phase 219** (2026-06-03): added the Linux 6.9 scope-flag mask
+/// (`PIDFD_SIGNAL_THREAD | _THREAD_GROUP | _PROCESS_GROUP`) and the
+/// hweight32 mutex check.  These two checks live above the fdget step
+/// in Linux, so they remain observable even though every fd downstream
+/// still fails at step 4 with `EBADF`.  Callers passing a valid scope
+/// flag now see `EBADF` instead of a spurious `EINVAL`.
+///
 /// Since we don't yet have a `HandleKind::Pidfd` in the fdtable, every
-/// fd that *is* open fails the kind check at step 3 — so every
-/// non-`EINVAL` (flag-mask) input returns `EBADF`.  The `sig`-range and
+/// fd that *is* open fails the kind check at step 4 — so every
+/// flag-validated input returns `EBADF`.  The `sig`-range and
 /// `si_signo` checks are not reachable from this stub today and have
 /// been removed; they will be reintroduced by the phase that adds real
 /// pidfd state to the fdtable.
@@ -1666,26 +1670,35 @@ pub extern "C" fn pidfd_send_signal(
     _info: *const core::ffi::c_void,
     flags: u32,
 ) -> i32 {
-    // Step 1: PIDFD_SIGNAL_FLAGS_MASK check.  Pre-6.9 Linux defined no
-    // flag bits; modern kernels accept PIDFD_SIGNAL_THREAD /
-    // _THREAD_GROUP / _PROCESS_GROUP scope flags.  We keep the
-    // pre-6.9 strict-zero check for now; adding scope-flag support is a
-    // future phase.  (Listed in `todo.txt`.)
-    if flags != 0 {
+    // Step 1: PIDFD_SIGNAL_FLAGS_MASK check.  Linux 6.9 introduced
+    // PIDFD_SIGNAL_THREAD (1<<0), _THREAD_GROUP (1<<1), and
+    // _PROCESS_GROUP (1<<2) scope flags.  Any bit outside this mask is
+    // EINVAL.  (Pre-6.9 kernels rejected all non-zero flags; we match
+    // 6.9+ here.)
+    if (flags & !PIDFD_SIGNAL_VALID_FLAGS) != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
-    // Step 2: CLASS(fd, f)(pidfd); fd_empty(f) — both pidfd < 0 and
+    // Step 2: at most one scope flag may be set.  Linux's
+    // hweight32(flags) > 1 check; Rust's count_ones() is the same
+    // operation.  This catches e.g. PIDFD_SIGNAL_THREAD |
+    // PIDFD_SIGNAL_THREAD_GROUP, which is ambiguous (we cannot signal
+    // both a thread and its thread-group from one call).
+    if (flags & PIDFD_SIGNAL_VALID_FLAGS).count_ones() > 1 {
+        errno::set_errno(errno::EINVAL);
+        return -1;
+    }
+    // Step 3: CLASS(fd, f)(pidfd); fd_empty(f) — both pidfd < 0 and
     // pidfd not referring to an open fd hit this path with EBADF.
     if pidfd < 0 || crate::fdtable::get_fd(pidfd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
     }
-    // Step 3: pidfd_to_pid(fd_file(f)) — returns ERR_PTR(-EBADF) for any
+    // Step 4: pidfd_to_pid(fd_file(f)) — returns ERR_PTR(-EBADF) for any
     // file whose f_op is not &pidfd_fops.  We have no HandleKind::Pidfd
     // entries in the fdtable, so every open fd (Console, File, Pipe,
     // Tcp*, Udp*, Eventfd, Epoll, Timerfd, Inotify) fails here with
-    // EBADF.  Steps 4–7 (access_pidfd_pidns, scope-flag switch, siginfo
+    // EBADF.  Steps 5–8 (access_pidfd_pidns, scope-flag switch, siginfo
     // copy + si_signo cross-check, valid_signal) are unreachable from
     // this stub today; they will be added when HandleKind::Pidfd is
     // introduced.
@@ -1887,10 +1900,7 @@ pub extern "C" fn arch_prctl(code: i32, addr: u64) -> i32 {
             errno::set_errno(errno::ENOSYS);
             -1
         }
-        ARCH_CET_ENABLE
-        | ARCH_CET_DISABLE
-        | ARCH_CET_LOCK
-        | ARCH_CET_ALLOC_SHSTK => {
+        ARCH_CET_ENABLE | ARCH_CET_DISABLE | ARCH_CET_LOCK | ARCH_CET_ALLOC_SHSTK => {
             errno::set_errno(errno::ENOSYS);
             -1
         }
@@ -2066,11 +2076,9 @@ pub extern "C" fn ioprio_set(which: i32, who: i32, ioprio: i32) -> i32 {
             // detect RT support by submitting any RT priority and
             // checking the errno: EPERM = "no RT for you", EINVAL =
             // "RT exists but priority is wrong, retry with -n7".
-            if !crate::sys_capability::has_capability(
-                crate::sys_capability::CAP_SYS_NICE,
-            ) && !crate::sys_capability::has_capability(
-                crate::sys_capability::CAP_SYS_ADMIN,
-            ) {
+            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
+                && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
+            {
                 errno::set_errno(errno::EPERM);
                 return -1;
             }
@@ -2471,10 +2479,7 @@ pub extern "C" fn clone3(args: *const CloneArgs, size: usize) -> i64 {
     // but is a real flag and must be allowed.  Linux's
     // `clone3_args_valid` (kernel/fork.c) encodes this exact
     // exception as `(CSIGNAL & ~CLONE_NEWTIME)`.  Phase 197.
-    if (a.flags
-        & (crate::linux_clone_args::CSIGNAL
-            & !crate::linux_clone_args::CLONE_NEWTIME))
-        != 0
+    if (a.flags & (crate::linux_clone_args::CSIGNAL & !crate::linux_clone_args::CLONE_NEWTIME)) != 0
     {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -2547,9 +2552,7 @@ pub extern "C" fn clone3(args: *const CloneArgs, size: usize) -> i64 {
 
     // (15)/(16) CLONE_INTO_CGROUP requires V2 struct so the `cgroup`
     // field is actually present in the user-supplied buffer.
-    if (a.flags & crate::linux_clone_args::CLONE_INTO_CGROUP) != 0
-        && size < v2
-    {
+    if (a.flags & crate::linux_clone_args::CLONE_INTO_CGROUP) != 0 && size < v2 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -2593,18 +2596,15 @@ pub extern "C" fn clone3(args: *const CloneArgs, size: usize) -> i64 {
     // identical to a successful clone request.  The gate now mirrors
     // the Phase 176 unshare gate exactly (same flag set, same cap,
     // same CLONE_NEWUSER exclusion for rootless containers).
-    const NS_BITS_REQUIRING_CAP: u64 =
-        crate::linux_clone_args::CLONE_NEWNS
-            | crate::linux_clone_args::CLONE_NEWUTS
-            | crate::linux_clone_args::CLONE_NEWIPC
-            | crate::linux_clone_args::CLONE_NEWPID
-            | crate::linux_clone_args::CLONE_NEWNET
-            | crate::linux_clone_args::CLONE_NEWCGROUP
-            | crate::linux_clone_args::CLONE_NEWTIME;
+    const NS_BITS_REQUIRING_CAP: u64 = crate::linux_clone_args::CLONE_NEWNS
+        | crate::linux_clone_args::CLONE_NEWUTS
+        | crate::linux_clone_args::CLONE_NEWIPC
+        | crate::linux_clone_args::CLONE_NEWPID
+        | crate::linux_clone_args::CLONE_NEWNET
+        | crate::linux_clone_args::CLONE_NEWCGROUP
+        | crate::linux_clone_args::CLONE_NEWTIME;
     if (a.flags & NS_BITS_REQUIRING_CAP) != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_ADMIN,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -2752,9 +2752,7 @@ pub extern "C" fn process_vm_readv(
 ) -> i64 {
     // SAFETY: caller contract — iov pointers cover their respective
     // counts of Iovec entries, or are unread when their count is 0.
-    match unsafe {
-        process_vm_validate(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)
-    } {
+    match unsafe { process_vm_validate(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) } {
         Err(e) => {
             errno::set_errno(e);
             -1
@@ -2762,9 +2760,7 @@ pub extern "C" fn process_vm_readv(
         Ok(()) => {
             // Phase 200: CAP_SYS_PTRACE gate — same check Linux
             // performs inside mm_access() after finding the target.
-            if !crate::sys_capability::has_capability(
-                crate::sys_capability::CAP_SYS_PTRACE,
-            ) {
+            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
                 errno::set_errno(errno::EPERM);
                 return -1;
             }
@@ -2800,18 +2796,14 @@ pub extern "C" fn process_vm_writev(
 ) -> i64 {
     // SAFETY: caller contract — iov pointers cover their respective
     // counts of Iovec entries, or are unread when their count is 0.
-    match unsafe {
-        process_vm_validate(pid, local_iov, liovcnt, remote_iov, riovcnt, flags)
-    } {
+    match unsafe { process_vm_validate(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) } {
         Err(e) => {
             errno::set_errno(e);
             -1
         }
         Ok(()) => {
             // Phase 200: CAP_SYS_PTRACE gate — see process_vm_readv.
-            if !crate::sys_capability::has_capability(
-                crate::sys_capability::CAP_SYS_PTRACE,
-            ) {
+            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
                 errno::set_errno(errno::EPERM);
                 return -1;
             }
@@ -2887,13 +2879,7 @@ pub const KCMP_TYPES: i32 = 8;
 /// interface — process introspection happens via capability handles
 /// with explicit semantics.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn kcmp(
-    pid1: i32,
-    pid2: i32,
-    type_: i32,
-    idx1: u64,
-    idx2: u64,
-) -> i32 {
+pub extern "C" fn kcmp(pid1: i32, pid2: i32, type_: i32, idx1: u64, idx2: u64) -> i32 {
     // (1)/(2) Both pids must name real tasks.  Linux checks pid1
     // first, then pid2 — preserve that order.
     if pid1 <= 0 {
@@ -2929,9 +2915,7 @@ pub extern "C" fn kcmp(
     // ptrace_may_access() twice — once for each target pid.  We
     // check the cap once after all argument validation so callers
     // with bad arguments see the argument error, not EPERM.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_PTRACE,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -3095,17 +3079,22 @@ mod tests {
 
     #[test]
     fn test_clone_returns_enosys() {
-        assert_eq!(clone(core::ptr::null(), core::ptr::null_mut(), 0, core::ptr::null_mut()), -1);
+        assert_eq!(
+            clone(
+                core::ptr::null(),
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null_mut()
+            ),
+            -1
+        );
     }
 
     #[test]
     fn test_unshare_returns_enosys() {
         // unshare(0) is a Linux-faithful no-op; use CLONE_NEWNS to hit
         // the ENOSYS path now that flag validation passes through.
-        assert_eq!(
-            unshare(crate::linux_clone_args::CLONE_NEWNS as i32),
-            -1,
-        );
+        assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWNS as i32), -1,);
     }
 
     #[test]
@@ -3200,9 +3189,7 @@ mod tests {
     /// can use them.  Other tests may have closed them.
     fn ensure_pg_test_fds() {
         for fd in 0..=2 {
-            let _ = crate::fdtable::install_fd(
-                fd, crate::fdtable::HandleKind::Console, fd as u64,
-            );
+            let _ = crate::fdtable::install_fd(fd, crate::fdtable::HandleKind::Console, fd as u64);
         }
     }
 
@@ -3568,13 +3555,27 @@ mod tests {
     #[test]
     fn test_wait3_zeroes_rusage() {
         let mut rusage = crate::resource::Rusage {
-            ru_utime: crate::time::Timeval { tv_sec: 99, tv_usec: 99 },
-            ru_stime: crate::time::Timeval { tv_sec: 99, tv_usec: 99 },
+            ru_utime: crate::time::Timeval {
+                tv_sec: 99,
+                tv_usec: 99,
+            },
+            ru_stime: crate::time::Timeval {
+                tv_sec: 99,
+                tv_usec: 99,
+            },
             ru_maxrss: 99,
-            ru_ixrss: 0, ru_idrss: 0, ru_isrss: 0,
-            ru_minflt: 0, ru_majflt: 0, ru_nswap: 0,
-            ru_inblock: 0, ru_oublock: 0, ru_msgsnd: 0,
-            ru_msgrcv: 0, ru_nsignals: 0, ru_nvcsw: 0,
+            ru_ixrss: 0,
+            ru_idrss: 0,
+            ru_isrss: 0,
+            ru_minflt: 0,
+            ru_majflt: 0,
+            ru_nswap: 0,
+            ru_inblock: 0,
+            ru_oublock: 0,
+            ru_msgsnd: 0,
+            ru_msgrcv: 0,
+            ru_nsignals: 0,
+            ru_nvcsw: 0,
             ru_nivcsw: 0,
         };
         let _ = wait3(core::ptr::null_mut(), WNOHANG, &raw mut rusage);
@@ -3595,13 +3596,27 @@ mod tests {
     #[test]
     fn test_wait4_zeroes_rusage() {
         let mut rusage = crate::resource::Rusage {
-            ru_utime: crate::time::Timeval { tv_sec: 77, tv_usec: 77 },
-            ru_stime: crate::time::Timeval { tv_sec: 77, tv_usec: 77 },
+            ru_utime: crate::time::Timeval {
+                tv_sec: 77,
+                tv_usec: 77,
+            },
+            ru_stime: crate::time::Timeval {
+                tv_sec: 77,
+                tv_usec: 77,
+            },
             ru_maxrss: 77,
-            ru_ixrss: 0, ru_idrss: 0, ru_isrss: 0,
-            ru_minflt: 0, ru_majflt: 0, ru_nswap: 0,
-            ru_inblock: 0, ru_oublock: 0, ru_msgsnd: 0,
-            ru_msgrcv: 0, ru_nsignals: 0, ru_nvcsw: 0,
+            ru_ixrss: 0,
+            ru_idrss: 0,
+            ru_isrss: 0,
+            ru_minflt: 0,
+            ru_majflt: 0,
+            ru_nswap: 0,
+            ru_inblock: 0,
+            ru_oublock: 0,
+            ru_msgsnd: 0,
+            ru_msgrcv: 0,
+            ru_nsignals: 0,
+            ru_nvcsw: 0,
             ru_nivcsw: 0,
         };
         let _ = wait4(1, core::ptr::null_mut(), WNOHANG, &raw mut rusage);
@@ -3678,23 +3693,22 @@ mod tests {
         // Defensive invariants on the constants — match glibc /
         // <linux/wait.h>.  If any of these drift, the mask check would
         // accept the wrong bits.
-        assert_eq!(WNOHANG,    0x0000_0001);
-        assert_eq!(WUNTRACED,  0x0000_0002);
-        assert_eq!(WSTOPPED,   WUNTRACED);
-        assert_eq!(WEXITED,    0x0000_0004);
+        assert_eq!(WNOHANG, 0x0000_0001);
+        assert_eq!(WUNTRACED, 0x0000_0002);
+        assert_eq!(WSTOPPED, WUNTRACED);
+        assert_eq!(WEXITED, 0x0000_0004);
         assert_eq!(WCONTINUED, 0x0000_0008);
-        assert_eq!(WNOWAIT,    0x0100_0000);
+        assert_eq!(WNOWAIT, 0x0100_0000);
         assert_eq!(__WNOTHREAD, 0x2000_0000);
-        assert_eq!(__WALL,      0x4000_0000);
+        assert_eq!(__WALL, 0x4000_0000);
         // __WCLONE is bit 31 (the sign bit on i32).
-        assert_eq!(__WCLONE,    i32::MIN);
+        assert_eq!(__WCLONE, i32::MIN);
     }
 
     #[test]
     fn test_waitpid_valid_options_mask() {
         // The mask is exactly the union of accepted flags.
-        let expected =
-            WNOHANG | WUNTRACED | WCONTINUED | __WNOTHREAD | __WALL | __WCLONE;
+        let expected = WNOHANG | WUNTRACED | WCONTINUED | __WNOTHREAD | __WALL | __WCLONE;
         assert_eq!(WAITPID_VALID_OPTIONS, expected);
     }
 
@@ -3740,11 +3754,22 @@ mod tests {
         // mask.  We can't easily assert success (no children to wait
         // on), but we can assert that the returned errno is not
         // EINVAL when an error occurs.
-        for &opt in &[WNOHANG, WUNTRACED, WCONTINUED, __WNOTHREAD, __WALL, __WCLONE] {
+        for &opt in &[
+            WNOHANG,
+            WUNTRACED,
+            WCONTINUED,
+            __WNOTHREAD,
+            __WALL,
+            __WCLONE,
+        ] {
             errno::set_errno(0);
             let _ = waitpid(99_999, core::ptr::null_mut(), opt);
-            assert_ne!(errno::get_errno(), errno::EINVAL,
-                "valid option {:#x} should not be rejected by waitpid mask", opt);
+            assert_ne!(
+                errno::get_errno(),
+                errno::EINVAL,
+                "valid option {:#x} should not be rejected by waitpid mask",
+                opt
+            );
         }
     }
 
@@ -3753,8 +3778,11 @@ mod tests {
         // The full valid mask combined should pass.
         errno::set_errno(0);
         let _ = waitpid(99_999, core::ptr::null_mut(), WAITPID_VALID_OPTIONS);
-        assert_ne!(errno::get_errno(), errno::EINVAL,
-            "the canonical valid combo must not be rejected");
+        assert_ne!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "the canonical valid combo must not be rejected"
+        );
     }
 
     #[test]
@@ -3763,13 +3791,27 @@ mod tests {
         // even when the call was malformed.  Linux validates options
         // first.
         let mut rusage = crate::resource::Rusage {
-            ru_utime: crate::time::Timeval { tv_sec: 1234, tv_usec: 5678 },
-            ru_stime: crate::time::Timeval { tv_sec: 9, tv_usec: 9 },
+            ru_utime: crate::time::Timeval {
+                tv_sec: 1234,
+                tv_usec: 5678,
+            },
+            ru_stime: crate::time::Timeval {
+                tv_sec: 9,
+                tv_usec: 9,
+            },
             ru_maxrss: 4321,
-            ru_ixrss: 0, ru_idrss: 0, ru_isrss: 0,
-            ru_minflt: 0, ru_majflt: 0, ru_nswap: 0,
-            ru_inblock: 0, ru_oublock: 0, ru_msgsnd: 0,
-            ru_msgrcv: 0, ru_nsignals: 0, ru_nvcsw: 0,
+            ru_ixrss: 0,
+            ru_idrss: 0,
+            ru_isrss: 0,
+            ru_minflt: 0,
+            ru_majflt: 0,
+            ru_nswap: 0,
+            ru_inblock: 0,
+            ru_oublock: 0,
+            ru_msgsnd: 0,
+            ru_msgrcv: 0,
+            ru_nsignals: 0,
+            ru_nvcsw: 0,
             ru_nivcsw: 0,
         };
         errno::set_errno(0);
@@ -3777,21 +3819,37 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         // rusage must NOT have been zeroed.
-        assert_eq!(rusage.ru_utime.tv_sec, 1234,
-            "rusage must be untouched when options are invalid");
+        assert_eq!(
+            rusage.ru_utime.tv_sec, 1234,
+            "rusage must be untouched when options are invalid"
+        );
         assert_eq!(rusage.ru_maxrss, 4321);
     }
 
     #[test]
     fn test_wait4_rejects_bad_options_without_touching_rusage() {
         let mut rusage = crate::resource::Rusage {
-            ru_utime: crate::time::Timeval { tv_sec: 7777, tv_usec: 8888 },
-            ru_stime: crate::time::Timeval { tv_sec: 1, tv_usec: 1 },
+            ru_utime: crate::time::Timeval {
+                tv_sec: 7777,
+                tv_usec: 8888,
+            },
+            ru_stime: crate::time::Timeval {
+                tv_sec: 1,
+                tv_usec: 1,
+            },
             ru_maxrss: 6543,
-            ru_ixrss: 0, ru_idrss: 0, ru_isrss: 0,
-            ru_minflt: 0, ru_majflt: 0, ru_nswap: 0,
-            ru_inblock: 0, ru_oublock: 0, ru_msgsnd: 0,
-            ru_msgrcv: 0, ru_nsignals: 0, ru_nvcsw: 0,
+            ru_ixrss: 0,
+            ru_idrss: 0,
+            ru_isrss: 0,
+            ru_minflt: 0,
+            ru_majflt: 0,
+            ru_nswap: 0,
+            ru_inblock: 0,
+            ru_oublock: 0,
+            ru_msgsnd: 0,
+            ru_msgrcv: 0,
+            ru_nsignals: 0,
+            ru_nvcsw: 0,
             ru_nivcsw: 0,
         };
         errno::set_errno(0);
@@ -3800,8 +3858,7 @@ mod tests {
         // (Avoid using i32::MIN >> 1 here — sign-extending right
         // shift produces __WALL|__WCLONE, both of which are VALID
         // waitpid options, so it would pass the mask.)
-        let ret = wait4(-1, core::ptr::null_mut(), WEXITED,
-                        &raw mut rusage);
+        let ret = wait4(-1, core::ptr::null_mut(), WEXITED, &raw mut rusage);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         assert_eq!(rusage.ru_utime.tv_sec, 7777);
@@ -3832,8 +3889,7 @@ mod tests {
         // A bit not in WAITID_VALID_OPTIONS — bit 4 is just above
         // WCONTINUED (bit 3) and not in the mask.
         errno::set_errno(0);
-        let ret = waitid(P_ALL, 0, core::ptr::null_mut(),
-                         WEXITED | (1 << 4));
+        let ret = waitid(P_ALL, 0, core::ptr::null_mut(), WEXITED | (1 << 4));
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -3845,8 +3901,11 @@ mod tests {
         // fail later for other reasons (e.g. ECHILD).
         errno::set_errno(0);
         let _ = waitid(P_ALL, 0, core::ptr::null_mut(), WEXITED);
-        assert_ne!(errno::get_errno(), errno::EINVAL,
-            "WEXITED alone must pass waitid's prologue");
+        assert_ne!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "WEXITED alone must pass waitid's prologue"
+        );
     }
 
     #[test]
@@ -3989,10 +4048,7 @@ mod tests {
         // PIDFD_THREAD == O_EXCL == octal 0200 on Linux x86-64.
         assert_eq!(PIDFD_THREAD, 0o200);
         // The valid mask is exactly the union of the two.
-        assert_eq!(
-            PIDFD_OPEN_FLAGS_VALID,
-            PIDFD_NONBLOCK | PIDFD_THREAD,
-        );
+        assert_eq!(PIDFD_OPEN_FLAGS_VALID, PIDFD_NONBLOCK | PIDFD_THREAD,);
     }
 
     #[test]
@@ -4010,21 +4066,110 @@ mod tests {
     }
 
     // --- pidfd_send_signal: flags ---
+    //
+    // Phase 219 (2026-06-03): the flag mask was widened from "zero only"
+    // (pre-6.9) to "any subset of PIDFD_SIGNAL_THREAD |
+    // PIDFD_SIGNAL_THREAD_GROUP | PIDFD_SIGNAL_PROCESS_GROUP, at most one
+    // bit set" (Linux 6.9+).  Tests below pin the new precedence.
 
+    /// Phase 219: a single PIDFD_SIGNAL_THREAD bit is now a VALID scope
+    /// flag — it survives step 1+2 and reaches the fdget step, which
+    /// fails with EBADF because fd 3 isn't open.  Was
+    /// `test_pidfd_send_signal_nonzero_flags_einval` (pinned the old
+    /// pre-6.9 strict-zero behaviour).
     #[test]
-    fn test_pidfd_send_signal_nonzero_flags_einval() {
+    fn test_pidfd_send_signal_thread_flag_reaches_fdget_phase219() {
+        use crate::linux_pidfd2_types::PIDFD_SIGNAL_THREAD;
         crate::errno::set_errno(0);
-        assert_eq!(pidfd_send_signal(3, 9, core::ptr::null(), 1), -1);
+        assert_eq!(
+            pidfd_send_signal(3, 9, core::ptr::null(), PIDFD_SIGNAL_THREAD),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Phase 219: PIDFD_SIGNAL_THREAD_GROUP (1<<1) reaches fdget.
+    #[test]
+    fn test_pidfd_send_signal_thread_group_flag_reaches_fdget_phase219() {
+        use crate::linux_pidfd2_types::PIDFD_SIGNAL_THREAD_GROUP;
+        crate::errno::set_errno(0);
+        assert_eq!(
+            pidfd_send_signal(3, 9, core::ptr::null(), PIDFD_SIGNAL_THREAD_GROUP),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Phase 219: PIDFD_SIGNAL_PROCESS_GROUP (1<<2) reaches fdget.
+    #[test]
+    fn test_pidfd_send_signal_process_group_flag_reaches_fdget_phase219() {
+        use crate::linux_pidfd2_types::PIDFD_SIGNAL_PROCESS_GROUP;
+        crate::errno::set_errno(0);
+        assert_eq!(
+            pidfd_send_signal(3, 9, core::ptr::null(), PIDFD_SIGNAL_PROCESS_GROUP),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
+    }
+
+    /// Phase 219: the three scope flags are mutually exclusive — at most
+    /// one bit may be set.  THREAD | THREAD_GROUP (mask-valid but two
+    /// bits set) fails the hweight32 mutex check with EINVAL.
+    #[test]
+    fn test_pidfd_send_signal_thread_and_thread_group_einval_phase219() {
+        use crate::linux_pidfd2_types::{PIDFD_SIGNAL_THREAD, PIDFD_SIGNAL_THREAD_GROUP};
+        crate::errno::set_errno(0);
+        assert_eq!(
+            pidfd_send_signal(
+                3,
+                9,
+                core::ptr::null(),
+                PIDFD_SIGNAL_THREAD | PIDFD_SIGNAL_THREAD_GROUP
+            ),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 219: all three scope flags set together also fails the
+    /// mutex check.
+    #[test]
+    fn test_pidfd_send_signal_all_three_scope_flags_einval_phase219() {
+        use crate::linux_pidfd2_types::{
+            PIDFD_SIGNAL_PROCESS_GROUP, PIDFD_SIGNAL_THREAD, PIDFD_SIGNAL_THREAD_GROUP,
+        };
+        crate::errno::set_errno(0);
+        assert_eq!(
+            pidfd_send_signal(
+                3,
+                9,
+                core::ptr::null(),
+                PIDFD_SIGNAL_THREAD | PIDFD_SIGNAL_THREAD_GROUP | PIDFD_SIGNAL_PROCESS_GROUP
+            ),
+            -1
+        );
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 219: a bit just past PROCESS_GROUP (1<<3) is outside the
+    /// mask and fails step 1 with EINVAL — even when combined with a
+    /// valid scope flag (mask check runs before mutex check).
+    #[test]
+    fn test_pidfd_send_signal_out_of_mask_bit_einval_phase219() {
+        use crate::linux_pidfd2_types::PIDFD_SIGNAL_THREAD;
+        crate::errno::set_errno(0);
+        assert_eq!(
+            pidfd_send_signal(3, 9, core::ptr::null(), PIDFD_SIGNAL_THREAD | (1 << 3)),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_pidfd_send_signal_high_flag_einval() {
+        // The MSB is outside PIDFD_SIGNAL_VALID_FLAGS — always EINVAL.
         crate::errno::set_errno(0);
-        assert_eq!(
-            pidfd_send_signal(3, 9, core::ptr::null(), 0x8000_0000),
-            -1
-        );
+        assert_eq!(pidfd_send_signal(3, 9, core::ptr::null(), 0x8000_0000), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
@@ -4040,10 +4185,7 @@ mod tests {
     #[test]
     fn test_pidfd_send_signal_min_fd_ebadf() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            pidfd_send_signal(i32::MIN, 9, core::ptr::null(), 0),
-            -1
-        );
+        assert_eq!(pidfd_send_signal(i32::MIN, 9, core::ptr::null(), 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
@@ -4111,12 +4253,7 @@ mod tests {
         let mut info: crate::signal::SiginfoT = Default::default();
         info.si_signo = 11; // SIGSEGV — mismatches outer sig 9
         crate::errno::set_errno(0);
-        let ret = pidfd_send_signal(
-            3,
-            9,
-            (&raw const info).cast::<core::ffi::c_void>(),
-            0,
-        );
+        let ret = pidfd_send_signal(3, 9, (&raw const info).cast::<core::ffi::c_void>(), 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -4128,12 +4265,7 @@ mod tests {
         let mut info: crate::signal::SiginfoT = Default::default();
         info.si_signo = 9;
         crate::errno::set_errno(0);
-        let ret = pidfd_send_signal(
-            3,
-            9,
-            (&raw const info).cast::<core::ffi::c_void>(),
-            0,
-        );
+        let ret = pidfd_send_signal(3, 9, (&raw const info).cast::<core::ffi::c_void>(), 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -4145,12 +4277,7 @@ mod tests {
         let mut info: crate::signal::SiginfoT = Default::default();
         info.si_signo = 11;
         crate::errno::set_errno(0);
-        let ret = pidfd_send_signal(
-            3,
-            0,
-            (&raw const info).cast::<core::ffi::c_void>(),
-            0,
-        );
+        let ret = pidfd_send_signal(3, 0, (&raw const info).cast::<core::ffi::c_void>(), 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -4160,8 +4287,28 @@ mod tests {
     #[test]
     fn test_pidfd_send_signal_flags_before_fd() {
         // Both flags and fd are invalid → EINVAL for flags wins.
+        // Phase 219: flag=1 is now PIDFD_SIGNAL_THREAD (valid post-6.9),
+        // so we use a bit outside PIDFD_SIGNAL_VALID_FLAGS (1<<3) to
+        // produce a mask-failure EINVAL.  This still verifies the
+        // mask-check-beats-fdget ordering.
         crate::errno::set_errno(0);
-        let ret = pidfd_send_signal(-1, 9, core::ptr::null(), 1);
+        let ret = pidfd_send_signal(-1, 9, core::ptr::null(), 1 << 3);
+        assert_eq!(ret, -1);
+        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
+    }
+
+    /// Phase 219: the mutex check on the scope flags also runs before
+    /// fdget — bad fd + two-scope-bits set → EINVAL (mutex), not EBADF.
+    #[test]
+    fn test_pidfd_send_signal_flag_mutex_before_fd_phase219() {
+        use crate::linux_pidfd2_types::{PIDFD_SIGNAL_THREAD, PIDFD_SIGNAL_THREAD_GROUP};
+        crate::errno::set_errno(0);
+        let ret = pidfd_send_signal(
+            -1,
+            9,
+            core::ptr::null(),
+            PIDFD_SIGNAL_THREAD | PIDFD_SIGNAL_THREAD_GROUP,
+        );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -4481,10 +4628,14 @@ mod tests {
     // --- ordering matrix: bad flags vs bad fd / bad sig / bad info ---
 
     /// Bad flags + unopened fd → EINVAL (flags step 1, fdget step 2).
+    /// Phase 219: flag=1 is now PIDFD_SIGNAL_THREAD (valid post-6.9), so
+    /// we use a bit outside PIDFD_SIGNAL_VALID_FLAGS (1<<3) to produce
+    /// the mask-failure EINVAL.  Original ordering invariant (flag mask
+    /// check beats fdget) is unchanged.
     #[test]
     fn test_phase145_send_signal_flags_beat_unopened_fd() {
         crate::errno::set_errno(0);
-        let ret = pidfd_send_signal(99, 9, core::ptr::null(), 1);
+        let ret = pidfd_send_signal(99, 9, core::ptr::null(), 1 << 3);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -4525,12 +4676,7 @@ mod tests {
         let mut info: crate::signal::SiginfoT = Default::default();
         info.si_signo = 99;
         crate::errno::set_errno(0);
-        let ret = pidfd_send_signal(
-            99,
-            9,
-            (&raw const info).cast::<core::ffi::c_void>(),
-            0,
-        );
+        let ret = pidfd_send_signal(99, 9, (&raw const info).cast::<core::ffi::c_void>(), 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -4648,8 +4794,10 @@ mod tests {
     #[test]
     fn test_phase145_send_signal_errno_reset_between_calls() {
         crate::errno::set_errno(0);
-        // First call: bad flags → EINVAL.
-        let r1 = pidfd_send_signal(0, 9, core::ptr::null(), 1);
+        // First call: bad flags → EINVAL.  Phase 219: use a bit outside
+        // PIDFD_SIGNAL_VALID_FLAGS (1<<3) to produce the mask-failure
+        // EINVAL since flag=1 is now valid PIDFD_SIGNAL_THREAD.
+        let r1 = pidfd_send_signal(0, 9, core::ptr::null(), 1 << 3);
         assert_eq!(r1, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         // Second call: open fd, valid flags → EBADF.
@@ -4716,80 +4864,56 @@ mod tests {
     #[test]
     fn test_unshare_clone_newns_enosys() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            unshare(crate::linux_clone_args::CLONE_NEWNS as i32),
-            -1,
-        );
+        assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWNS as i32), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_unshare_clone_newuts_enosys() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            unshare(crate::linux_clone_args::CLONE_NEWUTS as i32),
-            -1,
-        );
+        assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWUTS as i32), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_unshare_clone_newipc_enosys() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            unshare(crate::linux_clone_args::CLONE_NEWIPC as i32),
-            -1,
-        );
+        assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWIPC as i32), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_unshare_clone_newpid_enosys() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            unshare(crate::linux_clone_args::CLONE_NEWPID as i32),
-            -1,
-        );
+        assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWPID as i32), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_unshare_clone_newnet_enosys() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            unshare(crate::linux_clone_args::CLONE_NEWNET as i32),
-            -1,
-        );
+        assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWNET as i32), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_unshare_clone_newuser_enosys() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            unshare(crate::linux_clone_args::CLONE_NEWUSER as i32),
-            -1,
-        );
+        assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWUSER as i32), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_unshare_clone_newcgroup_enosys() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            unshare(crate::linux_clone_args::CLONE_NEWCGROUP as i32),
-            -1,
-        );
+        assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWCGROUP as i32), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
     #[test]
     fn test_unshare_clone_newtime_enosys() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            unshare(crate::linux_clone_args::CLONE_NEWTIME as i32),
-            -1,
-        );
+        assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWTIME as i32), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -4831,8 +4955,7 @@ mod tests {
     #[test]
     fn test_unshare_clone_parent_settid_rejected() {
         crate::errno::set_errno(0);
-        let ret =
-            unshare(crate::linux_clone_args::CLONE_PARENT_SETTID as i32);
+        let ret = unshare(crate::linux_clone_args::CLONE_PARENT_SETTID as i32);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -4850,8 +4973,8 @@ mod tests {
     fn test_unshare_valid_mixed_with_invalid_rejected() {
         // Even if CLONE_NEWNS is valid, mixing in CLONE_IO must fail.
         crate::errno::set_errno(0);
-        let bits = (crate::linux_clone_args::CLONE_NEWNS
-            | crate::linux_clone_args::CLONE_IO) as i32;
+        let bits =
+            (crate::linux_clone_args::CLONE_NEWNS | crate::linux_clone_args::CLONE_IO) as i32;
         let ret = unshare(bits);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -4881,8 +5004,7 @@ mod tests {
         assert_eq!(UNSHARE_FLAGS_VALID, expected);
         // CLONE_IO (sign bit) must be absent.
         assert_eq!(
-            UNSHARE_FLAGS_VALID
-                & (crate::linux_clone_args::CLONE_IO as u32),
+            UNSHARE_FLAGS_VALID & (crate::linux_clone_args::CLONE_IO as u32),
             0,
         );
     }
@@ -5009,23 +5131,19 @@ mod tests {
             | crate::linux_clone_args::CLONE_NEWUSER
             | crate::linux_clone_args::CLONE_NEWPID
             | crate::linux_clone_args::CLONE_NEWNET
-            | crate::linux_clone_args::CLONE_NEWTIME)
-            as u32;
+            | crate::linux_clone_args::CLONE_NEWTIME) as u32;
         assert_eq!(SETNS_NSTYPE_VALID, expected);
         // No sharing flags must be in the mask.
         assert_eq!(
-            SETNS_NSTYPE_VALID
-                & (crate::linux_clone_args::CLONE_VM as u32),
+            SETNS_NSTYPE_VALID & (crate::linux_clone_args::CLONE_VM as u32),
             0,
         );
         assert_eq!(
-            SETNS_NSTYPE_VALID
-                & (crate::linux_clone_args::CLONE_FILES as u32),
+            SETNS_NSTYPE_VALID & (crate::linux_clone_args::CLONE_FILES as u32),
             0,
         );
         assert_eq!(
-            SETNS_NSTYPE_VALID
-                & (crate::linux_clone_args::CLONE_FS as u32),
+            SETNS_NSTYPE_VALID & (crate::linux_clone_args::CLONE_FS as u32),
             0,
         );
     }
@@ -5041,8 +5159,8 @@ mod tests {
     #[test]
     fn test_unshare_workflow_util_linux_rootless() {
         crate::errno::set_errno(0);
-        let bits = (crate::linux_clone_args::CLONE_NEWUSER
-            | crate::linux_clone_args::CLONE_NEWNS) as i32;
+        let bits =
+            (crate::linux_clone_args::CLONE_NEWUSER | crate::linux_clone_args::CLONE_NEWNS) as i32;
         let ret = unshare(bits);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
@@ -5132,8 +5250,8 @@ mod tests {
     #[test]
     fn test_unshare_workflow_share_flags_alone_accepted() {
         crate::errno::set_errno(0);
-        let bits = (crate::linux_clone_args::CLONE_VM
-            | crate::linux_clone_args::CLONE_FILES) as i32;
+        let bits =
+            (crate::linux_clone_args::CLONE_VM | crate::linux_clone_args::CLONE_FILES) as i32;
         let ret = unshare(bits);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
@@ -5244,10 +5362,7 @@ mod tests {
     fn test_umount2_mnt_force_passes() {
         crate::errno::set_errno(0);
         let path = b"/mnt/foo\0";
-        assert_eq!(
-            umount2(path.as_ptr(), crate::sys_mount::MNT_FORCE),
-            -1,
-        );
+        assert_eq!(umount2(path.as_ptr(), crate::sys_mount::MNT_FORCE), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -5255,10 +5370,7 @@ mod tests {
     fn test_umount2_mnt_detach_passes() {
         crate::errno::set_errno(0);
         let path = b"/mnt/foo\0";
-        assert_eq!(
-            umount2(path.as_ptr(), crate::sys_mount::MNT_DETACH),
-            -1,
-        );
+        assert_eq!(umount2(path.as_ptr(), crate::sys_mount::MNT_DETACH), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -5266,10 +5378,7 @@ mod tests {
     fn test_umount2_mnt_expire_alone_passes() {
         crate::errno::set_errno(0);
         let path = b"/mnt/foo\0";
-        assert_eq!(
-            umount2(path.as_ptr(), crate::sys_mount::MNT_EXPIRE),
-            -1,
-        );
+        assert_eq!(umount2(path.as_ptr(), crate::sys_mount::MNT_EXPIRE), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -5319,8 +5428,7 @@ mod tests {
         // EXPIRE + NOFOLLOW is allowed (NOFOLLOW is unrelated to expiry).
         crate::errno::set_errno(0);
         let path = b"/mnt/foo\0";
-        let flags = crate::sys_mount::MNT_EXPIRE
-            | crate::sys_mount::UMOUNT_NOFOLLOW;
+        let flags = crate::sys_mount::MNT_EXPIRE | crate::sys_mount::UMOUNT_NOFOLLOW;
         assert_eq!(umount2(path.as_ptr(), flags), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -5352,9 +5460,7 @@ mod tests {
         // Unknown bit + EXPIRE + FORCE: unknown bit fires first.
         crate::errno::set_errno(0);
         let path = b"/mnt/foo\0";
-        let flags = 0x10
-            | crate::sys_mount::MNT_EXPIRE
-            | crate::sys_mount::MNT_FORCE;
+        let flags = 0x10 | crate::sys_mount::MNT_EXPIRE | crate::sys_mount::MNT_FORCE;
         assert_eq!(umount2(path.as_ptr(), flags), -1);
         // Both checks return EINVAL — this test documents that the
         // unknown-bit check runs first (covers more cases).
@@ -5375,10 +5481,7 @@ mod tests {
     #[test]
     fn test_umount2_phase121_null_clean_flags_efault() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            umount2(core::ptr::null(), crate::sys_mount::MNT_EXPIRE),
-            -1,
-        );
+        assert_eq!(umount2(core::ptr::null(), crate::sys_mount::MNT_EXPIRE), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
@@ -5387,10 +5490,7 @@ mod tests {
     #[test]
     fn test_umount2_phase121_null_bad_high_bit_einval() {
         crate::errno::set_errno(0);
-        assert_eq!(
-            umount2(core::ptr::null(), 0x8000_0000_u32 as i32),
-            -1,
-        );
+        assert_eq!(umount2(core::ptr::null(), 0x8000_0000_u32 as i32), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
@@ -5410,8 +5510,7 @@ mod tests {
     #[test]
     fn test_umount2_phase121_null_all_valid_flags_efault() {
         crate::errno::set_errno(0);
-        let flags = crate::sys_mount::MNT_EXPIRE
-            | crate::sys_mount::UMOUNT_NOFOLLOW;
+        let flags = crate::sys_mount::MNT_EXPIRE | crate::sys_mount::UMOUNT_NOFOLLOW;
         assert_eq!(umount2(core::ptr::null(), flags), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
@@ -5446,8 +5545,7 @@ mod tests {
     fn test_umount2_phase121_empty_expire_force_enoent() {
         crate::errno::set_errno(0);
         let empty = b"\0";
-        let flags = crate::sys_mount::MNT_EXPIRE
-            | crate::sys_mount::MNT_FORCE;
+        let flags = crate::sys_mount::MNT_EXPIRE | crate::sys_mount::MNT_FORCE;
         assert_eq!(umount2(empty.as_ptr(), flags), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
     }
@@ -5457,8 +5555,7 @@ mod tests {
     #[test]
     fn test_umount2_phase121_null_expire_detach_efault() {
         crate::errno::set_errno(0);
-        let flags = crate::sys_mount::MNT_EXPIRE
-            | crate::sys_mount::MNT_DETACH;
+        let flags = crate::sys_mount::MNT_EXPIRE | crate::sys_mount::MNT_DETACH;
         assert_eq!(umount2(core::ptr::null(), flags), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
@@ -5469,8 +5566,7 @@ mod tests {
     fn test_umount2_phase121_huge_path_expire_detach_enametoolong() {
         let huge = vec![b'a'; UMOUNT_PATH_MAX + 1];
         crate::errno::set_errno(0);
-        let flags = crate::sys_mount::MNT_EXPIRE
-            | crate::sys_mount::MNT_DETACH;
+        let flags = crate::sys_mount::MNT_EXPIRE | crate::sys_mount::MNT_DETACH;
         assert_eq!(umount2(huge.as_ptr(), flags), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENAMETOOLONG);
     }
@@ -5482,9 +5578,7 @@ mod tests {
     fn test_umount2_phase121_full_chain_flag_wins() {
         let huge = vec![b'a'; UMOUNT_PATH_MAX + 1];
         crate::errno::set_errno(0);
-        let flags = 0x20
-            | crate::sys_mount::MNT_EXPIRE
-            | crate::sys_mount::MNT_FORCE;
+        let flags = 0x20 | crate::sys_mount::MNT_EXPIRE | crate::sys_mount::MNT_FORCE;
         assert_eq!(umount2(huge.as_ptr(), flags), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -5525,8 +5619,7 @@ mod tests {
     fn test_umount2_phase121_buggy_caller_overflowed_flags_einval() {
         crate::errno::set_errno(0);
         let path = b"/mnt/usb\0";
-        let flags = (0x8000_0000_u32 as i32)
-            | crate::sys_mount::MNT_DETACH;
+        let flags = (0x8000_0000_u32 as i32) | crate::sys_mount::MNT_DETACH;
         assert_eq!(umount2(path.as_ptr(), flags), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -5584,10 +5677,7 @@ mod tests {
     fn test_umount2_workflow_util_linux_lazy() {
         crate::errno::set_errno(0);
         let mount = b"/mnt/usb\0";
-        assert_eq!(
-            umount2(mount.as_ptr(), crate::sys_mount::MNT_DETACH),
-            -1,
-        );
+        assert_eq!(umount2(mount.as_ptr(), crate::sys_mount::MNT_DETACH), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -5600,10 +5690,7 @@ mod tests {
     fn test_umount2_workflow_autofs_expire() {
         crate::errno::set_errno(0);
         let mount = b"/net/server-a\0";
-        assert_eq!(
-            umount2(mount.as_ptr(), crate::sys_mount::MNT_EXPIRE),
-            -1,
-        );
+        assert_eq!(umount2(mount.as_ptr(), crate::sys_mount::MNT_EXPIRE), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -5615,12 +5702,8 @@ mod tests {
     #[test]
     fn test_umount2_workflow_docker_overlay_teardown() {
         crate::errno::set_errno(0);
-        let mount =
-            b"/var/lib/docker/overlay2/abc123/merged\0";
-        assert_eq!(
-            umount2(mount.as_ptr(), crate::sys_mount::MNT_DETACH),
-            -1,
-        );
+        let mount = b"/var/lib/docker/overlay2/abc123/merged\0";
+        assert_eq!(umount2(mount.as_ptr(), crate::sys_mount::MNT_DETACH), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -5811,10 +5894,7 @@ mod tests {
     fn test_arch_prctl_cet_status_valid_passes() {
         let mut out: u64 = 0;
         crate::errno::set_errno(0);
-        assert_eq!(
-            arch_prctl(ARCH_CET_STATUS, &raw mut out as u64),
-            -1,
-        );
+        assert_eq!(arch_prctl(ARCH_CET_STATUS, &raw mut out as u64), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -5859,10 +5939,7 @@ mod tests {
     fn test_arch_prctl_get_untag_mask_valid_passes() {
         let mut out: u64 = 0;
         crate::errno::set_errno(0);
-        assert_eq!(
-            arch_prctl(ARCH_GET_UNTAG_MASK, &raw mut out as u64),
-            -1,
-        );
+        assert_eq!(arch_prctl(ARCH_GET_UNTAG_MASK, &raw mut out as u64), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
 
@@ -6165,11 +6242,7 @@ mod tests {
     #[test]
     fn test_membarrier_register_sync_core_succeeds() {
         assert_eq!(
-            membarrier(
-                MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE,
-                0,
-                0,
-            ),
+            membarrier(MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED_SYNC_CORE, 0, 0,),
             0,
         );
     }
@@ -6281,8 +6354,8 @@ mod tests {
         // REGISTER_PRIVATE_EXPEDITED.  Each is supported individually
         // but the OR-combination is not a command.
         crate::errno::set_errno(0);
-        let combined = MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED
-            | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
+        let combined =
+            MEMBARRIER_CMD_REGISTER_GLOBAL_EXPEDITED | MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED;
         let ret = membarrier(combined, 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -6295,11 +6368,7 @@ mod tests {
         // Linux first switch: non-RSEQ command with non-zero flags →
         // EINVAL, regardless of *which* flag bit is set.
         crate::errno::set_errno(0);
-        let ret = membarrier(
-            MEMBARRIER_CMD_GLOBAL,
-            MEMBARRIER_CMD_FLAG_CPU,
-            0,
-        );
+        let ret = membarrier(MEMBARRIER_CMD_GLOBAL, MEMBARRIER_CMD_FLAG_CPU, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -6308,11 +6377,7 @@ mod tests {
     fn test_phase134_private_expedited_with_flag_cpu_einval() {
         // PRIVATE_EXPEDITED (not RSEQ) also rejects FLAG_CPU.
         crate::errno::set_errno(0);
-        let ret = membarrier(
-            MEMBARRIER_CMD_PRIVATE_EXPEDITED,
-            MEMBARRIER_CMD_FLAG_CPU,
-            0,
-        );
+        let ret = membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, MEMBARRIER_CMD_FLAG_CPU, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -6391,15 +6456,11 @@ mod tests {
         // A bad combined cmd is rejected, and a subsequent good cmd
         // still succeeds.
         crate::errno::set_errno(0);
-        let combined =
-            MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_PRIVATE_EXPEDITED;
+        let combined = MEMBARRIER_CMD_GLOBAL | MEMBARRIER_CMD_PRIVATE_EXPEDITED;
         assert_eq!(membarrier(combined, 0, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
-        assert_eq!(
-            membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0),
-            0,
-        );
+        assert_eq!(membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0), 0,);
     }
 
     // -- Workflow ----------------------------------------------------------
@@ -6417,10 +6478,7 @@ mod tests {
         );
 
         // 3. Issue the barrier.
-        assert_eq!(
-            membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0),
-            0,
-        );
+        assert_eq!(membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED, 0, 0), 0,);
     }
 
     // -----------------------------------------------------------------------
@@ -6462,14 +6520,7 @@ mod tests {
     #[test]
     fn test_process_vm_readv_enosys() {
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            1,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            0,
-            0,
-        );
+        let ret = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -6477,14 +6528,7 @@ mod tests {
     #[test]
     fn test_process_vm_writev_enosys() {
         crate::errno::set_errno(0);
-        let ret = process_vm_writev(
-            1,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            0,
-            0,
-        );
+        let ret = process_vm_writev(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -7243,9 +7287,7 @@ mod tests {
             b"proc\0".as_ptr(),
             b"/proc\0".as_ptr(),
             b"proc\0".as_ptr(),
-            crate::sys_mount::MS_NOEXEC
-                | crate::sys_mount::MS_NOSUID
-                | crate::sys_mount::MS_NODEV,
+            crate::sys_mount::MS_NOEXEC | crate::sys_mount::MS_NOSUID | crate::sys_mount::MS_NODEV,
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
@@ -7409,9 +7451,7 @@ mod tests {
             b"/src\0".as_ptr(),
             b"/dst\0".as_ptr(),
             core::ptr::null(),
-            crate::sys_mount::MS_BIND
-                | crate::sys_mount::MS_REMOUNT
-                | crate::sys_mount::MS_NOSUID,
+            crate::sys_mount::MS_BIND | crate::sys_mount::MS_REMOUNT | crate::sys_mount::MS_NOSUID,
             core::ptr::null(),
         );
         assert_eq!(ret, -1);
@@ -7483,16 +7523,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -7507,8 +7545,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -7521,8 +7558,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -7537,10 +7573,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_ADMIN");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_ADMIN");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
         }
 
@@ -7618,10 +7652,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
-            assert_eq!(
-                umount2(b"/mnt\0".as_ptr(), 0x100),
-                -1
-            );
+            assert_eq!(umount2(b"/mnt\0".as_ptr(), 0x100), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         }
 
@@ -7667,10 +7698,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
-            assert_eq!(
-                umount2(b"/mnt\0".as_ptr(), MNT_EXPIRE | MNT_FORCE),
-                -1
-            );
+            assert_eq!(umount2(b"/mnt\0".as_ptr(), MNT_EXPIRE | MNT_FORCE), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
@@ -7756,10 +7784,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
-            assert_eq!(
-                umount2(b"/mnt/usb\0".as_ptr(), MNT_DETACH),
-                -1
-            );
+            assert_eq!(umount2(b"/mnt/usb\0".as_ptr(), MNT_DETACH), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
@@ -7802,17 +7827,11 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
-            assert_eq!(
-                umount2(b"/mnt\0".as_ptr(), MNT_EXPIRE | MNT_FORCE),
-                -1
-            );
+            assert_eq!(umount2(b"/mnt\0".as_ptr(), MNT_EXPIRE | MNT_FORCE), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
             drop(_g);
             crate::errno::set_errno(0);
-            assert_eq!(
-                umount2(b"/mnt\0".as_ptr(), MNT_EXPIRE | MNT_FORCE),
-                -1
-            );
+            assert_eq!(umount2(b"/mnt\0".as_ptr(), MNT_EXPIRE | MNT_FORCE), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         }
 
@@ -7826,9 +7845,12 @@ mod tests {
             drop_cap_sys_admin();
             crate::errno::set_errno(0);
             assert_eq!(umount(b"/mnt\0".as_ptr()), -1);
-            assert_ne!(crate::errno::get_errno(), crate::errno::ENOSYS,
+            assert_ne!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
                 "Pre-Phase-165: unprivileged caller saw ENOSYS — \
-                 may_mount check missing.");
+                 may_mount check missing."
+            );
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
@@ -7847,9 +7869,12 @@ mod tests {
                 core::ptr::null(),
             );
             assert_eq!(ret, -1);
-            assert_ne!(crate::errno::get_errno(), crate::errno::ENOSYS,
+            assert_ne!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
                 "Pre-Phase-165: unprivileged caller saw ENOSYS — \
-                 may_mount check missing.");
+                 may_mount check missing."
+            );
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
@@ -7963,7 +7988,10 @@ mod tests {
             UNSHARE_FLAGS_VALID as u64 & crate::linux_clone_args::CLONE_NEWTIME,
             0
         );
-        assert_eq!(CLONE_FLAGS_VALID & crate::linux_clone_args::CLONE_NEWTIME, 0);
+        assert_eq!(
+            CLONE_FLAGS_VALID & crate::linux_clone_args::CLONE_NEWTIME,
+            0
+        );
     }
 
     #[test]
@@ -8155,8 +8183,7 @@ mod tests {
 
     #[test]
     fn test_clone_newuser_with_fs_einval() {
-        let flags =
-            crate::linux_clone_args::CLONE_NEWUSER | crate::linux_clone_args::CLONE_FS;
+        let flags = crate::linux_clone_args::CLONE_NEWUSER | crate::linux_clone_args::CLONE_FS;
         crate::errno::set_errno(0);
         let ret = clone(
             clone_dummy_fn(),
@@ -8187,8 +8214,7 @@ mod tests {
 
     #[test]
     fn test_clone_pidfd_with_detached_einval() {
-        let flags = crate::linux_clone_args::CLONE_PIDFD
-            | crate::linux_clone_args::CLONE_DETACHED;
+        let flags = crate::linux_clone_args::CLONE_PIDFD | crate::linux_clone_args::CLONE_DETACHED;
         crate::errno::set_errno(0);
         let ret = clone(
             clone_dummy_fn(),
@@ -8202,8 +8228,7 @@ mod tests {
 
     #[test]
     fn test_clone_newns_with_fs_einval() {
-        let flags = crate::linux_clone_args::CLONE_NEWNS
-            | crate::linux_clone_args::CLONE_FS;
+        let flags = crate::linux_clone_args::CLONE_NEWNS | crate::linux_clone_args::CLONE_FS;
         crate::errno::set_errno(0);
         let ret = clone(
             clone_dummy_fn(),
@@ -8273,9 +8298,7 @@ mod tests {
         // glibc's vfork() falls back to clone(CLONE_VM | CLONE_VFORK,
         //                                     SIGCHLD) when the vfork
         // syscall is unavailable.
-        let flags = crate::linux_clone_args::CLONE_VM
-            | crate::linux_clone_args::CLONE_VFORK
-            | 17; // SIGCHLD
+        let flags = crate::linux_clone_args::CLONE_VM | crate::linux_clone_args::CLONE_VFORK | 17; // SIGCHLD
         crate::errno::set_errno(0);
         let ret = clone(
             clone_dummy_fn(),
@@ -8319,9 +8342,7 @@ mod tests {
         // Chromium's zygote spawns renderers via clone with
         //   CLONE_FS | CLONE_FILES | SIGCHLD
         // — shares fd table for the IPC socket, separate addr space.
-        let flags = crate::linux_clone_args::CLONE_FS
-            | crate::linux_clone_args::CLONE_FILES
-            | 17; // SIGCHLD
+        let flags = crate::linux_clone_args::CLONE_FS | crate::linux_clone_args::CLONE_FILES | 17; // SIGCHLD
         crate::errno::set_errno(0);
         let ret = clone(
             clone_dummy_fn(),
@@ -8395,8 +8416,8 @@ mod tests {
         // (0x80 = signal 128) or via the reserved-bit whitelist
         // (CLONE_NEWTIME is not in CLONE_FLAGS_VALID for clone).  Both
         // paths report EINVAL.
-        let flags = crate::linux_clone_args::CLONE_NEWCGROUP
-            | crate::linux_clone_args::CLONE_NEWTIME;
+        let flags =
+            crate::linux_clone_args::CLONE_NEWCGROUP | crate::linux_clone_args::CLONE_NEWTIME;
         crate::errno::set_errno(0);
         let ret = clone(
             clone_dummy_fn(),
@@ -8447,7 +8468,10 @@ mod tests {
 
     #[test]
     fn test_clone3_flags_valid_contains_clone3_only() {
-        assert_ne!(CLONE3_FLAGS_VALID & crate::linux_clone_args::CLONE_NEWTIME, 0);
+        assert_ne!(
+            CLONE3_FLAGS_VALID & crate::linux_clone_args::CLONE_NEWTIME,
+            0
+        );
         assert_ne!(
             CLONE3_FLAGS_VALID & crate::linux_clone_args::CLONE_INTO_CGROUP,
             0
@@ -8683,8 +8707,7 @@ mod tests {
     #[test]
     fn test_clone3_newuser_with_fs_einval() {
         let mut args = clone3_v2_empty();
-        args.flags = crate::linux_clone_args::CLONE_NEWUSER
-            | crate::linux_clone_args::CLONE_FS;
+        args.flags = crate::linux_clone_args::CLONE_NEWUSER | crate::linux_clone_args::CLONE_FS;
         crate::errno::set_errno(0);
         let ret = clone3(
             &args as *const _,
@@ -8713,8 +8736,7 @@ mod tests {
     #[test]
     fn test_clone3_newns_with_fs_einval() {
         let mut args = clone3_v2_empty();
-        args.flags = crate::linux_clone_args::CLONE_NEWNS
-            | crate::linux_clone_args::CLONE_FS;
+        args.flags = crate::linux_clone_args::CLONE_NEWNS | crate::linux_clone_args::CLONE_FS;
         crate::errno::set_errno(0);
         let ret = clone3(
             &args as *const _,
@@ -8926,9 +8948,7 @@ mod tests {
         // SIGCHLD into the flags field (copying clone(2) idiom).
         // Real bug: BZ #28310.  Our validator rejects with EINVAL.
         let mut args = clone3_v2_empty();
-        args.flags = crate::linux_clone_args::CLONE_VM
-            | crate::linux_clone_args::CLONE_FS
-            | 17; // SIGCHLD bleeding into CSIGNAL byte
+        args.flags = crate::linux_clone_args::CLONE_VM | crate::linux_clone_args::CLONE_FS | 17; // SIGCHLD bleeding into CSIGNAL byte
         args.exit_signal = 17;
         crate::errno::set_errno(0);
         let ret = clone3(
@@ -8987,8 +9007,7 @@ mod tests {
     #[test]
     fn test_process_vm_readv_nonzero_flags_einval() {
         crate::errno::set_errno(0);
-        let ret =
-            process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 1);
+        let ret = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 1);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -8996,8 +9015,7 @@ mod tests {
     #[test]
     fn test_process_vm_writev_nonzero_flags_einval() {
         crate::errno::set_errno(0);
-        let ret =
-            process_vm_writev(1, core::ptr::null(), 0, core::ptr::null(), 0, 1);
+        let ret = process_vm_writev(1, core::ptr::null(), 0, core::ptr::null(), 0, 1);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -9005,8 +9023,7 @@ mod tests {
     #[test]
     fn test_process_vm_readv_pid_zero_esrch() {
         crate::errno::set_errno(0);
-        let ret =
-            process_vm_readv(0, core::ptr::null(), 0, core::ptr::null(), 0, 0);
+        let ret = process_vm_readv(0, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
@@ -9014,14 +9031,7 @@ mod tests {
     #[test]
     fn test_process_vm_readv_negative_pid_esrch() {
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            -42,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            0,
-            0,
-        );
+        let ret = process_vm_readv(-42, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
@@ -9105,8 +9115,7 @@ mod tests {
     fn test_process_vm_readv_null_local_with_count_efault() {
         let iov = [pvm_iov(0x1000, 4096)];
         crate::errno::set_errno(0);
-        let ret =
-            process_vm_readv(1, core::ptr::null(), 3, iov.as_ptr(), 1, 0);
+        let ret = process_vm_readv(1, core::ptr::null(), 3, iov.as_ptr(), 1, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
@@ -9115,8 +9124,7 @@ mod tests {
     fn test_process_vm_readv_null_remote_with_count_efault() {
         let iov = [pvm_iov(0x1000, 4096)];
         crate::errno::set_errno(0);
-        let ret =
-            process_vm_readv(1, iov.as_ptr(), 1, core::ptr::null(), 3, 0);
+        let ret = process_vm_readv(1, iov.as_ptr(), 1, core::ptr::null(), 3, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
@@ -9125,14 +9133,7 @@ mod tests {
     fn test_process_vm_readv_null_with_zero_count_passes() {
         // NULL pointer is OK when its count is 0.
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            1,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            0,
-            0,
-        );
+        let ret = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -9146,14 +9147,7 @@ mod tests {
         ];
         let remote = [pvm_iov(0x3000, 4096)];
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            1,
-            iov.as_ptr(),
-            2,
-            remote.as_ptr(),
-            1,
-            0,
-        );
+        let ret = process_vm_readv(1, iov.as_ptr(), 2, remote.as_ptr(), 1, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -9166,14 +9160,7 @@ mod tests {
             pvm_iov(0x2000, i64::MAX as usize),
         ];
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            1,
-            local.as_ptr(),
-            1,
-            iov.as_ptr(),
-            2,
-            0,
-        );
+        let ret = process_vm_readv(1, local.as_ptr(), 1, iov.as_ptr(), 2, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -9184,14 +9171,7 @@ mod tests {
         let iov = [pvm_iov(0x1000, i64::MAX as usize)];
         let remote = [pvm_iov(0x3000, 1)];
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            1,
-            iov.as_ptr(),
-            1,
-            remote.as_ptr(),
-            1,
-            0,
-        );
+        let ret = process_vm_readv(1, iov.as_ptr(), 1, remote.as_ptr(), 1, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -9200,8 +9180,7 @@ mod tests {
     fn test_process_vm_writev_same_validation_as_readv() {
         // writev share validator — verify they behave identically.
         crate::errno::set_errno(0);
-        let ret =
-            process_vm_writev(0, core::ptr::null(), 0, core::ptr::null(), 0, 0);
+        let ret = process_vm_writev(0, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
@@ -9241,14 +9220,7 @@ mod tests {
             pvm_iov(0x7fff_8000_1000, 4096),
         ];
         crate::errno::set_errno(0);
-        let ret = process_vm_writev(
-            54321,
-            local.as_ptr(),
-            2,
-            remote.as_ptr(),
-            2,
-            0,
-        );
+        let ret = process_vm_writev(54321, local.as_ptr(), 2, remote.as_ptr(), 2, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -9261,14 +9233,7 @@ mod tests {
         let local = [pvm_iov(shadow_buf.as_ptr() as usize, 16384)];
         let remote = [pvm_iov(0x7fff_1000_0000, 16384)];
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            99999,
-            local.as_ptr(),
-            1,
-            remote.as_ptr(),
-            1,
-            0,
-        );
+        let ret = process_vm_readv(99999, local.as_ptr(), 1, remote.as_ptr(), 1, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -9281,14 +9246,7 @@ mod tests {
         let local = [pvm_iov(0x1000, 4096)];
         let remote = [pvm_iov(0x2000, 4096)];
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            -2_147_483_647,
-            local.as_ptr(),
-            1,
-            remote.as_ptr(),
-            1,
-            0,
-        );
+        let ret = process_vm_readv(-2_147_483_647, local.as_ptr(), 1, remote.as_ptr(), 1, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
     }
@@ -9329,16 +9287,14 @@ mod tests {
         }
         impl CapGuard {
             pub(super) fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -9353,8 +9309,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -9363,8 +9318,7 @@ mod tests {
             let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << cap);
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -9379,8 +9333,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed dropping cap");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -9396,14 +9349,7 @@ mod tests {
             crate::sys_capability::CAP_SYS_PTRACE,
         ));
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            1,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            0,
-            0,
-        );
+        let ret = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -9416,14 +9362,7 @@ mod tests {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            1,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            0,
-            0,
-        );
+        let ret = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
     }
@@ -9434,14 +9373,7 @@ mod tests {
         let _g = phase200_pvm_cap::CapGuard::snapshot();
         phase200_pvm_cap::drop_cap_sys_ptrace();
         crate::errno::set_errno(0);
-        let ret = process_vm_writev(
-            1,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            0,
-            0,
-        );
+        let ret = process_vm_writev(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
     }
@@ -9523,14 +9455,7 @@ mod tests {
             let _g = phase200_pvm_cap::CapGuard::snapshot();
             phase200_pvm_cap::drop_cap_sys_ptrace();
             crate::errno::set_errno(0);
-            let ret = process_vm_readv(
-                1,
-                core::ptr::null(),
-                0,
-                core::ptr::null(),
-                0,
-                0,
-            );
+            let ret = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
             assert_eq!(ret, -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
@@ -9538,14 +9463,7 @@ mod tests {
             crate::sys_capability::CAP_SYS_PTRACE,
         ));
         crate::errno::set_errno(0);
-        let ret = process_vm_readv(
-            1,
-            core::ptr::null(),
-            0,
-            core::ptr::null(),
-            0,
-            0,
-        );
+        let ret = process_vm_readv(1, core::ptr::null(), 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -10071,8 +9989,7 @@ mod tests {
     /// Phase 124: CLASS_NONE with full data mask (8191) — EINVAL.
     #[test]
     fn test_ioprio_set_phase124_none_data_full_mask_einval() {
-        let prio =
-            (IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT) | IOPRIO_PRIO_MASK;
+        let prio = (IOPRIO_CLASS_NONE << IOPRIO_CLASS_SHIFT) | IOPRIO_PRIO_MASK;
         crate::errno::set_errno(0);
         assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -10099,8 +10016,7 @@ mod tests {
     /// Phase 124: CLASS_IDLE + full data mask still succeeds.
     #[test]
     fn test_ioprio_set_phase124_idle_data_full_mask_succeeds() {
-        let prio =
-            (IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT) | IOPRIO_PRIO_MASK;
+        let prio = (IOPRIO_CLASS_IDLE << IOPRIO_CLASS_SHIFT) | IOPRIO_PRIO_MASK;
         crate::errno::set_errno(0);
         assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, prio), 0);
     }
@@ -10167,12 +10083,9 @@ mod tests {
     /// silently doing nothing.
     #[test]
     fn test_ioprio_set_phase124_workflow_reset_typo_einval() {
-        let truncated_prio = 4;  // intent was BE | 4 = (2 << 13) | 4
+        let truncated_prio = 4; // intent was BE | 4 = (2 << 13) | 4
         crate::errno::set_errno(0);
-        assert_eq!(
-            ioprio_set(IOPRIO_WHO_PROCESS, 0, truncated_prio),
-            -1,
-        );
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, truncated_prio), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
@@ -10183,7 +10096,7 @@ mod tests {
     /// idiom still works under the new rule.
     #[test]
     fn test_ioprio_set_phase124_buggy_caller_no_shift_succeeds() {
-        let prio = IOPRIO_CLASS_NONE | 0;  // accidentally not shifted
+        let prio = IOPRIO_CLASS_NONE | 0; // accidentally not shifted
         // Result: prio == 0, class == 0 (NONE), data == 0 → OK
         assert_eq!(prio, 0);
         crate::errno::set_errno(0);
@@ -10291,10 +10204,7 @@ mod tests {
         // ioprio=2 intending CLASS_BE).  Same NONE+data!=0 → EINVAL
         // surface as the test above.
         crate::errno::set_errno(0);
-        assert_eq!(
-            ioprio_set(IOPRIO_WHO_PROCESS, 0, IOPRIO_CLASS_BE),
-            -1,
-        );
+        assert_eq!(ioprio_set(IOPRIO_WHO_PROCESS, 0, IOPRIO_CLASS_BE), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
@@ -10336,16 +10246,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -10360,8 +10268,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -10375,8 +10282,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -10391,8 +10297,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed when dropping cap");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -10993,16 +10898,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -11017,8 +10920,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -11031,8 +10933,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -11047,44 +10948,26 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(
-                rc, 0,
-                "capset must succeed when dropping CAP_SYS_ADMIN"
-            );
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_ADMIN");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
         }
 
         // Local aliases — keep tests readable.
-        const CLONE_NEWNS_I32: i32 =
-            crate::linux_clone_args::CLONE_NEWNS as i32;
-        const CLONE_NEWUTS_I32: i32 =
-            crate::linux_clone_args::CLONE_NEWUTS as i32;
-        const CLONE_NEWIPC_I32: i32 =
-            crate::linux_clone_args::CLONE_NEWIPC as i32;
-        const CLONE_NEWPID_I32: i32 =
-            crate::linux_clone_args::CLONE_NEWPID as i32;
-        const CLONE_NEWNET_I32: i32 =
-            crate::linux_clone_args::CLONE_NEWNET as i32;
-        const CLONE_NEWCGROUP_I32: i32 =
-            crate::linux_clone_args::CLONE_NEWCGROUP as i32;
-        const CLONE_NEWTIME_I32: i32 =
-            crate::linux_clone_args::CLONE_NEWTIME as i32;
-        const CLONE_NEWUSER_I32: i32 =
-            crate::linux_clone_args::CLONE_NEWUSER as i32;
-        const CLONE_THREAD_I32: i32 =
-            crate::linux_clone_args::CLONE_THREAD as i32;
-        const CLONE_FS_I32: i32 =
-            crate::linux_clone_args::CLONE_FS as i32;
-        const CLONE_SIGHAND_I32: i32 =
-            crate::linux_clone_args::CLONE_SIGHAND as i32;
-        const CLONE_VM_I32: i32 =
-            crate::linux_clone_args::CLONE_VM as i32;
-        const CLONE_FILES_I32: i32 =
-            crate::linux_clone_args::CLONE_FILES as i32;
-        const CLONE_SYSVSEM_I32: i32 =
-            crate::linux_clone_args::CLONE_SYSVSEM as i32;
+        const CLONE_NEWNS_I32: i32 = crate::linux_clone_args::CLONE_NEWNS as i32;
+        const CLONE_NEWUTS_I32: i32 = crate::linux_clone_args::CLONE_NEWUTS as i32;
+        const CLONE_NEWIPC_I32: i32 = crate::linux_clone_args::CLONE_NEWIPC as i32;
+        const CLONE_NEWPID_I32: i32 = crate::linux_clone_args::CLONE_NEWPID as i32;
+        const CLONE_NEWNET_I32: i32 = crate::linux_clone_args::CLONE_NEWNET as i32;
+        const CLONE_NEWCGROUP_I32: i32 = crate::linux_clone_args::CLONE_NEWCGROUP as i32;
+        const CLONE_NEWTIME_I32: i32 = crate::linux_clone_args::CLONE_NEWTIME as i32;
+        const CLONE_NEWUSER_I32: i32 = crate::linux_clone_args::CLONE_NEWUSER as i32;
+        const CLONE_THREAD_I32: i32 = crate::linux_clone_args::CLONE_THREAD as i32;
+        const CLONE_FS_I32: i32 = crate::linux_clone_args::CLONE_FS as i32;
+        const CLONE_SIGHAND_I32: i32 = crate::linux_clone_args::CLONE_SIGHAND as i32;
+        const CLONE_VM_I32: i32 = crate::linux_clone_args::CLONE_VM as i32;
+        const CLONE_FILES_I32: i32 = crate::linux_clone_args::CLONE_FILES as i32;
+        const CLONE_SYSVSEM_I32: i32 = crate::linux_clone_args::CLONE_SYSVSEM as i32;
 
         // -- unshare: per-namespace EPERM without cap ----------------------
 
@@ -11265,10 +11148,7 @@ mod tests {
                 drop_cap_sys_admin();
                 crate::errno::set_errno(0);
                 assert_eq!(unshare(CLONE_NEWNS_I32), -1);
-                assert_eq!(
-                    crate::errno::get_errno(),
-                    crate::errno::EPERM
-                );
+                assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
                 // guard restores caps on drop
             }
             assert!(crate::sys_capability::has_capability(
@@ -11361,10 +11241,7 @@ mod tests {
                 drop_cap_sys_admin();
                 crate::errno::set_errno(0);
                 assert_eq!(setns(3, CLONE_NEWNS_I32), -1);
-                assert_eq!(
-                    crate::errno::get_errno(),
-                    crate::errno::EPERM
-                );
+                assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
             }
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_ADMIN,
@@ -11414,16 +11291,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -11438,8 +11313,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -11452,8 +11326,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -11468,17 +11341,12 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(
-                rc, 0,
-                "capset must succeed when dropping CAP_SYS_ADMIN"
-            );
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_ADMIN");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
         }
 
-        const V2_SIZE: usize =
-            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize;
+        const V2_SIZE: usize = crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize;
 
         fn args_with(flags: u64) -> CloneArgs {
             let mut a = super::clone3_v2_empty();
@@ -11618,10 +11486,8 @@ mod tests {
         fn test_clone3_phase196_arg_einval_beats_cap_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
-            let a = args_with(
-                crate::linux_clone_args::CLONE_NEWNS
-                    | crate::linux_clone_args::CLONE_FS,
-            );
+            let a =
+                args_with(crate::linux_clone_args::CLONE_NEWNS | crate::linux_clone_args::CLONE_FS);
             crate::errno::set_errno(0);
             assert_eq!(call(&a), -1);
             assert_eq!(
@@ -11637,9 +11503,7 @@ mod tests {
         fn test_clone3_phase196_reserved_bit_einval_beats_cap_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
-            let a = args_with(
-                crate::linux_clone_args::CLONE_NEWNS | (1u64 << 50),
-            );
+            let a = args_with(crate::linux_clone_args::CLONE_NEWNS | (1u64 << 50));
             crate::errno::set_errno(0);
             assert_eq!(call(&a), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -11664,8 +11528,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             let a = args_with(
-                crate::linux_clone_args::CLONE_NEWNET
-                    | crate::linux_clone_args::CLONE_NEWUTS,
+                crate::linux_clone_args::CLONE_NEWNET | crate::linux_clone_args::CLONE_NEWUTS,
             );
             crate::errno::set_errno(0);
             assert_eq!(call(&a), -1);
@@ -11682,8 +11545,7 @@ mod tests {
             // because NEWNS still requires no-shared-FS.  Use NEWNET +
             // NEWUSER which has no arg conflict.
             let a = args_with(
-                crate::linux_clone_args::CLONE_NEWNET
-                    | crate::linux_clone_args::CLONE_NEWUSER,
+                crate::linux_clone_args::CLONE_NEWNET | crate::linux_clone_args::CLONE_NEWUSER,
             );
             crate::errno::set_errno(0);
             assert_eq!(call(&a), -1);
@@ -11823,12 +11685,7 @@ mod tests {
             assert_eq!(call(&a), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
             crate::errno::set_errno(0);
-            assert_eq!(
-                unshare(
-                    crate::linux_clone_args::CLONE_NEWUSER as i32
-                ),
-                -1
-            );
+            assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWUSER as i32), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
 
@@ -11879,16 +11736,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -11903,8 +11758,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -11917,8 +11771,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -11933,17 +11786,12 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(
-                rc, 0,
-                "capset must succeed when dropping CAP_SYS_ADMIN"
-            );
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_ADMIN");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
         }
 
-        const V2_SIZE: usize =
-            crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize;
+        const V2_SIZE: usize = crate::linux_clone_args::CLONE_ARGS_SIZE_VER2 as usize;
 
         fn args_with(flags: u64) -> CloneArgs {
             let mut a = super::clone3_v2_empty();
@@ -11964,8 +11812,8 @@ mod tests {
         /// must EINVAL.
         #[test]
         fn test_clone3_phase197_each_csignal_reject_bit_einval() {
-            let reject_mask: u64 = crate::linux_clone_args::CSIGNAL
-                & !crate::linux_clone_args::CLONE_NEWTIME;
+            let reject_mask: u64 =
+                crate::linux_clone_args::CSIGNAL & !crate::linux_clone_args::CLONE_NEWTIME;
             assert_eq!(reject_mask, 0x7f, "carve-out math must give 0x7f");
             for bit in [0x01u64, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40] {
                 let a = args_with(bit);
@@ -12079,8 +11927,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             let a = args_with(
-                crate::linux_clone_args::CLONE_NEWTIME
-                    | crate::linux_clone_args::CLONE_NEWUTS,
+                crate::linux_clone_args::CLONE_NEWTIME | crate::linux_clone_args::CLONE_NEWUTS,
             );
             crate::errno::set_errno(0);
             assert_eq!(call(&a), -1);
@@ -12092,8 +11939,7 @@ mod tests {
         fn test_clone3_phase197_newtime_plus_newuts_with_cap_enosys() {
             let _g = CapGuard::snapshot();
             let a = args_with(
-                crate::linux_clone_args::CLONE_NEWTIME
-                    | crate::linux_clone_args::CLONE_NEWUTS,
+                crate::linux_clone_args::CLONE_NEWTIME | crate::linux_clone_args::CLONE_NEWUTS,
             );
             crate::errno::set_errno(0);
             assert_eq!(call(&a), -1);
@@ -12108,9 +11954,7 @@ mod tests {
         fn test_clone3_phase197_newtime_plus_reserved_bit_einval() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
-            let a = args_with(
-                crate::linux_clone_args::CLONE_NEWTIME | (1u64 << 50),
-            );
+            let a = args_with(crate::linux_clone_args::CLONE_NEWTIME | (1u64 << 50));
             crate::errno::set_errno(0);
             assert_eq!(call(&a), -1);
             assert_eq!(
@@ -12127,8 +11971,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             let a = args_with(
-                crate::linux_clone_args::CLONE_NEWTIME
-                    | crate::linux_clone_args::CLONE_DETACHED,
+                crate::linux_clone_args::CLONE_NEWTIME | crate::linux_clone_args::CLONE_DETACHED,
             );
             crate::errno::set_errno(0);
             assert_eq!(call(&a), -1);
@@ -12148,10 +11991,7 @@ mod tests {
                 let a = args_with(crate::linux_clone_args::CLONE_NEWTIME);
                 crate::errno::set_errno(0);
                 assert_eq!(call(&a), -1);
-                assert_eq!(
-                    crate::errno::get_errno(),
-                    crate::errno::EPERM
-                );
+                assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
             }
             assert!(crate::sys_capability::has_capability(
                 crate::sys_capability::CAP_SYS_ADMIN,
@@ -12172,10 +12012,7 @@ mod tests {
             for _ in 0..8 {
                 crate::errno::set_errno(0);
                 assert_eq!(call(&a), -1);
-                assert_eq!(
-                    crate::errno::get_errno(),
-                    crate::errno::EPERM
-                );
+                assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
             }
         }
 
@@ -12212,8 +12049,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             let a = args_with(
-                crate::linux_clone_args::CLONE_NEWTIME
-                    | crate::linux_clone_args::CLONE_VM,
+                crate::linux_clone_args::CLONE_NEWTIME | crate::linux_clone_args::CLONE_VM,
             );
             crate::errno::set_errno(0);
             assert_eq!(call(&a), -1);
@@ -12257,12 +12093,7 @@ mod tests {
             assert_eq!(call(&a), -1);
             let clone3_errno = crate::errno::get_errno();
             crate::errno::set_errno(0);
-            assert_eq!(
-                unshare(
-                    crate::linux_clone_args::CLONE_NEWTIME as i32
-                ),
-                -1
-            );
+            assert_eq!(unshare(crate::linux_clone_args::CLONE_NEWTIME as i32), -1);
             let unshare_errno = crate::errno::get_errno();
             assert_eq!(clone3_errno, crate::errno::EPERM);
             assert_eq!(unshare_errno, crate::errno::EPERM);
@@ -12300,8 +12131,7 @@ mod tests {
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -12316,10 +12146,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ = crate::sys_capability::capset(
-                    &mut hdr,
-                    data.as_ptr(),
-                );
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -12342,17 +12169,18 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc = crate::sys_capability::capset(
-                &mut hdr,
-                data.as_ptr(),
-            );
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0);
             assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
         }
 
         /// Helper: valid clone args (fn pointer, stack, no namespace bits).
-        fn stub_fn() -> *const u8 { 1usize as *const u8 }
-        fn stub_stack() -> *mut u8 { 0x1000usize as *mut u8 }
+        fn stub_fn() -> *const u8 {
+            1usize as *const u8
+        }
+        fn stub_stack() -> *mut u8 {
+            0x1000usize as *mut u8
+        }
 
         /// clone(CLONE_NEWNS) with cap → ENOSYS (passes gate).
         #[test]
@@ -12444,12 +12272,7 @@ mod tests {
             let flags = (crate::linux_clone_args::CLONE_VM
                 | crate::linux_clone_args::CLONE_SIGHAND
                 | crate::linux_clone_args::CLONE_THREAD) as i32;
-            let r = clone(
-                stub_fn(),
-                stub_stack(),
-                flags,
-                core::ptr::null_mut(),
-            );
+            let r = clone(stub_fn(), stub_stack(), flags, core::ptr::null_mut());
             assert_eq!(r, -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
@@ -12502,12 +12325,9 @@ mod tests {
             {
                 let _g = CapGuard::snapshot();
                 drop_cap_sys_admin();
-                assert!(
-                    !crate::sys_capability::has_capability(CAP_SYS_ADMIN),
-                );
+                assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN),);
             }
             assert!(crate::sys_capability::has_capability(CAP_SYS_ADMIN));
         }
     }
 }
-

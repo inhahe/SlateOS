@@ -217,49 +217,49 @@ impl OsdOverlay {
 
     /// Advance the overlay's animation state given the current time and config.
     /// Returns true if the overlay should be kept, false if dismissed.
+    ///
+    /// Phase transitions inside a single tick re-enter the match loop so
+    /// that zero-duration phases (e.g. `fade_out_ms = 0`) collapse in one
+    /// call instead of needing a second tick to be observed.
     pub fn tick(&mut self, now_ms: u64, config: &OsdConfig) -> bool {
-        let elapsed = now_ms.saturating_sub(self.phase_start);
+        loop {
+            let elapsed = now_ms.saturating_sub(self.phase_start);
+            let prev_phase = self.phase;
 
-        match self.phase {
-            OsdPhase::FadingIn => {
-                if config.fade_in_ms == 0 {
+            match self.phase {
+                OsdPhase::FadingIn => {
+                    if config.fade_in_ms == 0 || elapsed >= config.fade_in_ms {
+                        self.opacity = 1.0;
+                        self.phase = OsdPhase::Visible;
+                        self.phase_start = now_ms;
+                    } else {
+                        self.opacity = elapsed as f32 / config.fade_in_ms as f32;
+                    }
+                }
+                OsdPhase::Visible => {
                     self.opacity = 1.0;
-                    self.phase = OsdPhase::Visible;
-                    self.phase_start = now_ms;
-                } else if elapsed >= config.fade_in_ms {
-                    self.opacity = 1.0;
-                    self.phase = OsdPhase::Visible;
-                    self.phase_start = now_ms;
-                } else {
-                    self.opacity = elapsed as f32 / config.fade_in_ms as f32;
+                    if elapsed >= config.timeout_ms {
+                        self.phase = OsdPhase::FadingOut;
+                        self.phase_start = now_ms;
+                    }
                 }
-                true
+                OsdPhase::FadingOut => {
+                    if config.fade_out_ms == 0 || elapsed >= config.fade_out_ms {
+                        self.opacity = 0.0;
+                        self.phase = OsdPhase::Dismissed;
+                    } else {
+                        self.opacity = 1.0 - (elapsed as f32 / config.fade_out_ms as f32);
+                    }
+                }
+                OsdPhase::Dismissed => {}
             }
-            OsdPhase::Visible => {
-                self.opacity = 1.0;
-                if elapsed >= config.timeout_ms {
-                    self.phase = OsdPhase::FadingOut;
-                    self.phase_start = now_ms;
-                }
-                true
+
+            if self.phase == prev_phase {
+                break;
             }
-            OsdPhase::FadingOut => {
-                if config.fade_out_ms == 0 {
-                    self.opacity = 0.0;
-                    self.phase = OsdPhase::Dismissed;
-                    return false;
-                }
-                if elapsed >= config.fade_out_ms {
-                    self.opacity = 0.0;
-                    self.phase = OsdPhase::Dismissed;
-                    false
-                } else {
-                    self.opacity = 1.0 - (elapsed as f32 / config.fade_out_ms as f32);
-                    true
-                }
-            }
-            OsdPhase::Dismissed => false,
         }
+
+        self.phase != OsdPhase::Dismissed
     }
 
     /// Immediately dismiss (start fading out).

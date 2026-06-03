@@ -863,7 +863,11 @@ mod tests {
     #[test]
     fn test_age_display_days() {
         let e = ClipEntry::text(1, "hi", 1000);
-        assert_eq!(e.age_display(260000), "3d ago");
+        // 260000 - 1000 = 259000s = 2.998 days → "2d ago" (truncated, the
+        // conventional way to express elapsed time, e.g. "2 days ago").
+        assert_eq!(e.age_display(260000), "2d ago");
+        // Bump past the 3-day threshold to verify the "3d ago" path too.
+        assert_eq!(e.age_display(1000 + 3 * 86400), "3d ago");
     }
 
     // -- ClipFormat --

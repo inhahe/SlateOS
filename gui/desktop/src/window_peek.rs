@@ -1483,7 +1483,13 @@ mod tests {
         });
         mgr.popup.tick(1101);
         mgr.popup.tick(1200);
-        mgr.on_button_leave(0.0, 0.0, 1200); // outside popup
+        // Pick a leave point demonstrably outside the popup rectangle.
+        // The popup is positioned above the button (popup_y = 50 - height - 8,
+        // which is negative for any non-trivial popup height), so the point
+        // (0, 0) can actually fall *inside* the popup rectangle. Use a point
+        // far below the popup instead.
+        let outside_y = mgr.popup.popup_y + mgr.popup.popup_height + 100.0;
+        mgr.on_button_leave(mgr.popup.popup_x - 100.0, outside_y, 1200);
         assert_eq!(mgr.popup.phase, PeekPhase::FadingOut);
     }
 

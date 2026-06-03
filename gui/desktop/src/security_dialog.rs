@@ -1343,8 +1343,12 @@ mod tests {
     #[test]
     fn test_remember_decision_auto_approves() {
         let mut dialog = SecurityDialog::new();
-        dialog.remember = true;
+        // `remember` must be set after `push_request` because the
+        // hidden→visible transition resets the checkbox to false (each
+        // dialog session starts fresh).  In production the user clicks
+        // the "Remember" checkbox before clicking Allow.
         dialog.push_request(sample_request(1));
+        dialog.remember = true;
         dialog.allow_current(); // Records remembered allow decision
         let events1 = dialog.drain_events();
         assert!(events1.contains(&SecurityDialogEvent::Approved(1)));
@@ -1369,8 +1373,9 @@ mod tests {
     #[test]
     fn test_remember_decision_auto_denies() {
         let mut dialog = SecurityDialog::new();
-        dialog.remember = true;
+        // See `test_remember_decision_auto_approves` for ordering rationale.
         dialog.push_request(sample_request(1));
+        dialog.remember = true;
         dialog.deny_current(); // Records remembered deny decision
         dialog.drain_events();
 

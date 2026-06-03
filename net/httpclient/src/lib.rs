@@ -463,7 +463,8 @@ impl Request {
 ///
 /// # Example
 ///
-/// ```rust
+/// ```no_run
+/// use httpclient::RequestBuilder;
 /// let req = RequestBuilder::post("http://api.example.com/data")
 ///     .expect("valid URL")
 ///     .header("X-Custom", "value")

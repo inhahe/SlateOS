@@ -1455,15 +1455,19 @@ mod tests {
         state.add_running_window(WindowId(1), "terminal", "Terminal");
         state.add_running_window(WindowId(2), "browser", "Browser");
 
+        // Unpinned running apps are sorted alphabetically by app_id, so
+        // `browser` (WindowId 2) appears at index 0, `terminal`
+        // (WindowId 1) at index 1.
+
         state.set_focused_window(Some(WindowId(1)));
         let buttons = state.buttons();
-        assert_eq!(buttons[0].state, ButtonState::Focused);
-        assert_eq!(buttons[1].state, ButtonState::Running);
+        assert_eq!(buttons[0].state, ButtonState::Running); // browser
+        assert_eq!(buttons[1].state, ButtonState::Focused); // terminal
 
         state.set_focused_window(Some(WindowId(2)));
         let buttons = state.buttons();
-        assert_eq!(buttons[0].state, ButtonState::Running);
-        assert_eq!(buttons[1].state, ButtonState::Focused);
+        assert_eq!(buttons[0].state, ButtonState::Focused); // browser
+        assert_eq!(buttons[1].state, ButtonState::Running); // terminal
 
         state.set_focused_window(None);
         let buttons = state.buttons();

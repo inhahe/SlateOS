@@ -1251,6 +1251,11 @@ fn truncate_string(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         let mut result: String = s.chars().take(max.saturating_sub(3)).collect();
+        // Strip trailing whitespace before appending the ellipsis so we
+        // don't produce ugly "word ..." with a space between word and dots.
+        while result.ends_with(char::is_whitespace) {
+            result.pop();
+        }
         result.push_str("...");
         result
     }

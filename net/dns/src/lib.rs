@@ -13,9 +13,11 @@
 //!
 //! # Example
 //!
-//! ```rust
+//! ```no_run
+//! use dns::Resolver;
 //! let mut resolver = Resolver::system();
 //! let addrs = resolver.resolve("example.com")?;
+//! # Ok::<(), dns::DnsError>(())
 //! ```
 
 #![deny(clippy::all, clippy::pedantic)]

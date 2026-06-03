@@ -1748,7 +1748,12 @@ mod tests {
             .expect("store");
 
         let results = store.search("work");
-        assert_eq!(results.len(), 2); // Matches name "Work Email" and tag "work" + target "mail.work.com"
+        // Only one record ("Work Email") matches "work" — search returns
+        // distinct credentials, not distinct match reasons.  The Work Email
+        // record happens to match three ways (name, tag, target), but it
+        // still appears once in the result.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, "Work Email");
 
         let results = store.search("personal");
         assert_eq!(results.len(), 1);

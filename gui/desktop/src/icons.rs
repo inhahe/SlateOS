@@ -519,10 +519,15 @@ impl DesktopIconLayer {
         let cols = self.grid.columns_in(self.screen_width.saturating_sub(EDGE_PADDING * 2));
         let rows = self.grid.rows_in(self.usable_height().saturating_sub(EDGE_PADDING * 2));
 
+        // Map each icon's stored top-left back to its grid cell.  Icons
+        // placed via `add_icon` are snapped (no padding added), and icons
+        // placed via `auto_arrange` get `EDGE_PADDING` added on top — both
+        // still resolve to the same cell here because `EDGE_PADDING` (8) is
+        // far smaller than the cell size (80x90).
         let occupied: Vec<(i32, i32)> = self
             .icons
             .iter()
-            .map(|i| self.grid.to_cell(i.x - EDGE_PADDING as i32, i.y - EDGE_PADDING as i32))
+            .map(|i| self.grid.to_cell(i.x, i.y))
             .collect();
 
         // Scan columns first (top to bottom within each column, then next column).
@@ -1334,9 +1339,12 @@ mod tests {
         let lines = wrap_label("My Documents Folder", 12, 2);
         assert_eq!(lines.len(), 2);
         // First line should break at a word boundary.
-        assert!(lines[0].len() <= 12);
-        // Second line should end with ellipsis if it overflows.
-        assert!(lines[1].len() <= 13); // max_chars - 1 + ellipsis char
+        assert!(lines[0].chars().count() <= 12);
+        // Second line should end with ellipsis if it overflows.  Length
+        // is measured in chars (display cells), not bytes — the ellipsis
+        // is a single Unicode '…' which occupies multiple UTF-8 bytes.
+        assert!(lines[1].chars().count() <= 12);
+        assert!(lines[1].ends_with('\u{2026}'));
     }
 
     #[test]

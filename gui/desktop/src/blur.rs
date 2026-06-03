@@ -571,11 +571,17 @@ impl BlurRenderer {
 
     /// Pack RGB channels using a pre-computed reciprocal (fixed-point multiply
     /// instead of integer division).
+    ///
+    /// Adds 0x8000 (half the fixed-point unit) before the shift so the division
+    /// rounds to nearest rather than truncating. With pure truncation each box
+    /// blur pass loses ~1 per channel (because `reciprocal_table` rounds the
+    /// reciprocal down), so the 3-pass × 2-direction pipeline drifted uniform
+    /// images by up to 6. Rounding to nearest keeps uniform images stable.
     #[inline]
     fn pack_with_inv(sr: u32, sg: u32, sb: u32, inv: u32) -> u32 {
-        let r = ((sr * inv) >> 16).min(255);
-        let g = ((sg * inv) >> 16).min(255);
-        let b = ((sb * inv) >> 16).min(255);
+        let r = ((sr * inv + 0x8000) >> 16).min(255);
+        let g = ((sg * inv + 0x8000) >> 16).min(255);
+        let b = ((sb * inv + 0x8000) >> 16).min(255);
         0xFF00_0000 | (r << 16) | (g << 8) | b
     }
 

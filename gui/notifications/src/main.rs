@@ -490,13 +490,22 @@ impl NotificationDaemon {
         self.push_history(notif);
 
         if should_show_toast {
-            // Limit visible toasts.
-            while self.toasts.len() >= MAX_VISIBLE_TOASTS {
-                // Dismiss oldest (last in the vec since newest is first).
-                if let Some(oldest) = self.toasts.last_mut() {
+            // Cap the number of non-dismissing toasts. Toasts already in the
+            // dismissing state still occupy `self.toasts` until the exit
+            // animation completes, so they don't count toward the visible cap.
+            //
+            // We need at most MAX_VISIBLE_TOASTS - 1 non-dismissing toasts
+            // before inserting the new one, so the post-insert count stays
+            // within the cap. Mark the oldest non-dismissing toasts (last in
+            // the Vec; newest is at index 0) as dismissing until we're under.
+            let mut non_dismissing = self.toasts.iter().filter(|t| !t.dismissing).count();
+            while non_dismissing >= MAX_VISIBLE_TOASTS {
+                if let Some(oldest) = self.toasts.iter_mut().rev().find(|t| !t.dismissing) {
                     oldest.dismissing = true;
+                    non_dismissing -= 1;
+                } else {
+                    break;
                 }
-                break;
             }
             self.toasts.insert(0, ToastState::new(notif_id));
         }

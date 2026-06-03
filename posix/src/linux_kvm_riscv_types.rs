@@ -118,7 +118,7 @@ mod tests {
             }
             // Class bits live in byte 3 (shift 24..32).
             assert_eq!(c[i] & 0x00ff_ffff, 0);
-            assert!(c[i] >> 32 == 0);
+            assert_eq!(c[i] >> 32, 0);
         }
     }
 

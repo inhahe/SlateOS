@@ -15,13 +15,9 @@
 //!
 //! Uses the guitk library for UI rendering.
 
-#[allow(dead_code)]
 mod columns;
-#[allow(dead_code)]
 mod dropzone;
-#[allow(dead_code)]
 mod fileops;
-#[allow(dead_code)]
 mod thumbs;
 
 use guitk::color::Color;
@@ -291,7 +287,7 @@ impl ExplorerState {
 
                     let path = entry.path();
                     let meta = fs::metadata(&path).ok();
-                    let is_dir = meta.as_ref().map_or(false, |m| m.is_dir());
+                    let is_dir = meta.as_ref().is_some_and(|m| m.is_dir());
                     let size = meta.as_ref().map_or(0, |m| m.len());
                     let modified = meta.as_ref().and_then(|m| m.modified().ok());
 

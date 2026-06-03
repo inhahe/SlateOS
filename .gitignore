@@ -1,6 +1,10 @@
 # Build artifacts
 /target/
 **/target/
+# Some crates use `target-test/` as an alternate cargo build dir for the
+# host test profile (separate from the cross-compile `target/`). Same
+# contents — codegen units, rlibs — that we never want to commit.
+**/target-test/
 **/*.rs.bk
 # Stray rustc codegen-unit objects written to the Windows `nul` device name
 # (these land in the crate root, not target/, when a build/clippy invocation

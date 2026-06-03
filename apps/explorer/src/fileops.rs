@@ -935,13 +935,12 @@ impl OperationExecutor {
         fs::copy(src, &tmp_path)?;
 
         // Attempt to preserve modification timestamp.
-        if let Ok(src_meta) = fs::metadata(src) {
-            if let Ok(mtime) = src_meta.modified() {
+        if let Ok(src_meta) = fs::metadata(src)
+            && let Ok(mtime) = src_meta.modified() {
                 // Best-effort: not all platforms support filetime setting in
                 // std, but our OS will.
                 let _ = set_file_mtime(&tmp_path, mtime);
             }
-        }
 
         // Atomic rename into final position.
         fs::rename(&tmp_path, dest)?;
@@ -1084,7 +1083,7 @@ impl RecycleBin {
         }
 
         // Most recently recycled first.
-        entries.sort_by(|a, b| b.recycled_at.cmp(&a.recycled_at));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.recycled_at));
         Ok(entries)
     }
 
@@ -1216,40 +1215,37 @@ pub fn execute_undo(record: &UndoRecord) -> io::Result<()> {
         FileOperation::Move => {
             // Move files back from destination to source.
             for (src, dest) in &record.entries {
-                if let Some(d) = dest {
-                    if d.exists() {
+                if let Some(d) = dest
+                    && d.exists() {
                         if let Some(parent) = src.parent() {
                             fs::create_dir_all(parent)?;
                         }
                         fs::rename(d, src)?;
                     }
-                }
             }
         }
         FileOperation::Delete | FileOperation::Recycle => {
             // Restore: entries are (original_path, recycle_dest).
             for (src, dest) in &record.entries {
-                if let Some(d) = dest {
-                    if d.exists() {
+                if let Some(d) = dest
+                    && d.exists() {
                         if let Some(parent) = src.parent() {
                             fs::create_dir_all(parent)?;
                         }
                         fs::rename(d, src)?;
                     }
-                }
             }
         }
         FileOperation::Restore => {
             // Undo restore = recycle again: move from original back to bin.
             for (src, dest) in &record.entries {
-                if let Some(d) = dest {
-                    if src.exists() {
+                if let Some(d) = dest
+                    && src.exists() {
                         if let Some(parent) = d.parent() {
                             fs::create_dir_all(parent)?;
                         }
                         fs::rename(src, d)?;
                     }
-                }
             }
         }
     }

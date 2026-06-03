@@ -3572,6 +3572,19 @@ Remaining net improvements (diminishing returns):
 
 ## Judgment Calls
 
+- (2026-06-03) clipmanager: full feature surface (ClipEntry, ClipTemplate,
+  ClipboardStore, AppState, render_entry_row, render_history_panel,
+  render_detail_panel, build_render_tree, build_widget_tree, detect_code_
+  language, format_size, palette constants) is defined but NOT wired into
+  the binary's main loop, so all of it reads as dead code.  Suppressed
+  globally with `#![allow(dead_code)]` at the crate root to unblock the
+  workspace clippy sweep.  Proper fix: wire the feature surface to the
+  clipboard daemon's IPC channel (read history events, render the
+  selected view, dispatch user-input actions back through the daemon
+  syscall).  Until then, the surface stays as a typed sketch — useful
+  as documentation and tested via unit tests (80/80) — without the lint
+  noise blocking nearby work.
+
 - (2026-05-30) socketpair() supports only AF_UNIX + SOCK_STREAM.
   posix/src/socket.rs socketpair() is backed by the kernel stream-socket
   object (kernel/src/ipc/stream_socket.rs, SYS_SOCKETPAIR_* 300-310), a

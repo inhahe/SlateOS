@@ -442,11 +442,10 @@ impl ColumnManager {
             };
         } else {
             // Clear previous column's sort indicator.
-            if let Some(prev) = self.sort_column {
-                if let Some(def) = self.all_columns.get_mut(&prev) {
+            if let Some(prev) = self.sort_column
+                && let Some(def) = self.all_columns.get_mut(&prev) {
                     def.sort_order = SortOrder::None;
                 }
-            }
             self.sort_column = Some(id);
             self.sort_direction = SortOrder::Ascending;
         }
@@ -858,7 +857,7 @@ impl ColumnProvider for AudioColumns {
             ColumnId::TITLE => {
                 // Derive title from filename as a fallback.
                 let name = path.rsplit('/').next().unwrap_or(path);
-                let title = name.rsplit('.').last().unwrap_or(name);
+                let title = name.rsplit('.').next_back().unwrap_or(name);
                 ColumnValue::Text(title.to_string())
             }
             _ => ColumnValue::Empty,
@@ -1350,13 +1349,11 @@ fn resolve_widths(manager: &ColumnManager, total_width: f32) -> Vec<f32> {
         let per_flex = remaining / flex_count as f32;
 
         for (i, &col_id) in active.iter().enumerate() {
-            if let Some(def) = manager.column_def(col_id) {
-                if let ColumnWidth::Flexible { min, max } = def.width {
-                    if let Some(w) = widths.get_mut(i) {
+            if let Some(def) = manager.column_def(col_id)
+                && let ColumnWidth::Flexible { min, max } = def.width
+                    && let Some(w) = widths.get_mut(i) {
                         *w = per_flex.clamp(min, max);
                     }
-                }
-            }
         }
     }
 
@@ -1463,7 +1460,7 @@ fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = if m <= 2 { y + 2000 + 1 } else { y + 2000 };
 
-    (year, m.max(1).min(12), d.max(1).min(31))
+    (year, m.clamp(1, 12), d.clamp(1, 31))
 }
 
 /// Format seconds as "m:ss" or "h:mm:ss".

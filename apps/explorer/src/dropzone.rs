@@ -287,11 +287,10 @@ impl DropZoneManager {
         }
 
         // Empty space inside the list area counts as current directory.
-        if let Some(ref list) = self.list_area {
-            if list.contains(x, y) {
+        if let Some(ref list) = self.list_area
+            && list.contains(x, y) {
                 return DropZone::CurrentDirectory;
             }
-        }
 
         DropZone::None
     }
@@ -312,7 +311,9 @@ impl DropZoneManager {
         let new_zone = self.find_zone(x, y);
         let operation = self.determine_operation(sources, &new_zone, modifiers);
 
-        let event = if new_zone != self.current_hover {
+        
+
+        if new_zone != self.current_hover {
             if new_zone == DropZone::None {
                 self.current_hover = DropZone::None;
                 Some(DropZoneEvent::DragLeave)
@@ -330,9 +331,7 @@ impl DropZoneManager {
             })
         } else {
             Option::None
-        };
-
-        event
+        }
     }
 
     /// Clear the current hover state (call when drag ends or is cancelled).

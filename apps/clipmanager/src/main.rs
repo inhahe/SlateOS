@@ -4,11 +4,16 @@
 //! content type, tagging, pinning, template management with placeholder substitution,
 //! batch operations, statistics, and export/import. Inspired by CopyQ and Ditto.
 
+// The feature surface (entry types, store, render helpers) is defined ahead
+// of the main loop wire-up. Until the loop wires these into the clipboard
+// daemon's IPC channel, the items read as dead. Tracked in todo.txt as
+// "clipmanager: wire feature surface to main loop".
+#![allow(dead_code)]
+
 use std::collections::VecDeque;
 
 use guitk::color::Color;
-use guitk::event::{Event, KeyEvent, Modifiers, MouseButton, MouseEvent, MouseEventKind};
-use guitk::layout::{FlexDirection, FlexItem, FlexJustify, LayoutBox, Size, SizeConstraint};
+use guitk::layout::FlexDirection;
 use guitk::render::{FontWeightHint, RenderCommand, RenderTree};
 use guitk::style::{CornerRadii, Edges};
 use guitk::widget::{Widget, WidgetTree};
@@ -204,8 +209,8 @@ impl ClipTemplate {
         let len = bytes.len();
         let mut i = 0usize;
         while i < len {
-            if bytes.get(i).copied() == Some(b'{') {
-                if let Some(end) = self.body[i..].find('}') {
+            if bytes.get(i).copied() == Some(b'{')
+                && let Some(end) = self.body[i..].find('}') {
                     let name = &self.body[i + 1..i + end];
                     if !name.is_empty() && !out.contains(&name.to_string()) {
                         out.push(name.to_string());
@@ -213,7 +218,6 @@ impl ClipTemplate {
                     i = i + end + 1;
                     continue;
                 }
-            }
             i = i.saturating_add(1);
         }
         out
@@ -252,15 +256,14 @@ impl ClipboardStore {
         source_app: String,
     ) -> u64 {
         // Deduplicate: if identical content exists, move it to front instead.
-        if let Some(pos) = self.entries.iter().position(|e| e.content == content) {
-            if let Some(mut existing) = self.entries.remove(pos) {
+        if let Some(pos) = self.entries.iter().position(|e| e.content == content)
+            && let Some(mut existing) = self.entries.remove(pos) {
                 existing.timestamp = timestamp;
                 existing.source_app = source_app;
                 let id = existing.id;
                 self.entries.push_front(existing);
                 return id;
             }
-        }
 
         // Evict oldest unpinned entries if at capacity.
         while self.entries.len() >= MAX_ENTRIES {
@@ -287,12 +290,11 @@ impl ClipboardStore {
                 break;
             }
         }
-        if let Some(i) = idx {
-            if let Some(removed) = self.entries.remove(i) {
+        if let Some(i) = idx
+            && let Some(removed) = self.entries.remove(i) {
                 self.total_size = self.total_size.saturating_sub(removed.size_bytes);
                 return true;
             }
-        }
         false
     }
 
@@ -308,12 +310,11 @@ impl ClipboardStore {
 
     /// Delete an entry by id.
     fn delete(&mut self, id: u64) -> bool {
-        if let Some(pos) = self.entries.iter().position(|e| e.id == id) {
-            if let Some(removed) = self.entries.remove(pos) {
+        if let Some(pos) = self.entries.iter().position(|e| e.id == id)
+            && let Some(removed) = self.entries.remove(pos) {
                 self.total_size = self.total_size.saturating_sub(removed.size_bytes);
                 return true;
             }
-        }
         false
     }
 
@@ -343,11 +344,10 @@ impl ClipboardStore {
 
     /// Add a tag to an entry (no duplicates).
     fn add_tag(&mut self, id: u64, tag: String) {
-        if let Some(entry) = self.get_mut(id) {
-            if !entry.tags.contains(&tag) {
+        if let Some(entry) = self.get_mut(id)
+            && !entry.tags.contains(&tag) {
                 entry.tags.push(tag);
             }
-        }
     }
 
     /// Remove a tag from an entry.
@@ -394,7 +394,7 @@ impl ClipboardStore {
         self.entries
             .iter()
             .filter(|e| {
-                let type_ok = type_filter.map_or(true, |t| e.clip_type == t);
+                let type_ok = type_filter.is_none_or(|t| e.clip_type == t);
                 let search_ok = q.is_empty() || e.content.to_lowercase().contains(&q);
                 type_ok && search_ok
             })
@@ -750,13 +750,12 @@ impl AppState {
 
     /// Delete the currently selected template.
     fn delete_selected_template(&mut self) {
-        if let Some(idx) = self.selected_template {
-            if let Some(tmpl) = self.store.templates.get(idx) {
+        if let Some(idx) = self.selected_template
+            && let Some(tmpl) = self.store.templates.get(idx) {
                 let name = tmpl.name.clone();
                 self.store.remove_template(&name);
                 self.selected_template = None;
             }
-        }
     }
 
     /// Select a template by index and populate placeholder vars.
@@ -999,12 +998,11 @@ fn render_history_panel(
         .min(state.scroll_offset.saturating_add(state.visible_rows));
     let mut ry = y + 4.0;
     for i in state.scroll_offset..end {
-        if let Some(&id) = state.filtered_ids.get(i) {
-            if let Some(entry) = state.store.get(id) {
+        if let Some(&id) = state.filtered_ids.get(i)
+            && let Some(entry) = state.store.get(id) {
                 let is_selected = state.selected_id == Some(id);
                 render_entry_row(rt, entry, x + 4.0, ry, list_w - 8.0, row_h, is_selected, state.now);
             }
-        }
         ry += row_h + 2.0;
     }
 
@@ -1050,6 +1048,10 @@ fn render_history_panel(
     }
 }
 
+// 8 args mirror the (rt, entry, x, y, w, h, selected, now) row-render
+// signature shared with the other entry painters; bundling into a struct
+// would only shift verbosity to the call site.
+#[allow(clippy::too_many_arguments)]
 fn render_entry_row(
     rt: &mut RenderTree,
     entry: &ClipEntry,
@@ -1255,8 +1257,8 @@ fn render_detail_panel(
     }
 
     // Code detection hint
-    if entry.clip_type == ClipType::Code || entry.clip_type == ClipType::PlainText {
-        if let Some(lang) = detect_code_language(&entry.content) {
+    if (entry.clip_type == ClipType::Code || entry.clip_type == ClipType::PlainText)
+        && let Some(lang) = detect_code_language(&entry.content) {
             rt.push(RenderCommand::FillRect {
                 x: x + pad,
                 y: cy,
@@ -1276,7 +1278,6 @@ fn render_detail_panel(
             });
             cy += 24.0;
         }
-    }
 
     // Separator
     cy += 4.0;

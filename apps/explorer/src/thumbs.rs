@@ -331,7 +331,7 @@ fn parse_jpeg_dimensions(data: &[u8]) -> Option<ImageDimensions> {
     if data.len() < 4 {
         return None;
     }
-    if data.get(0..2)? != &[0xFF, 0xD8] {
+    if data.get(0..2)? != [0xFF, 0xD8] {
         return None;
     }
 
@@ -431,9 +431,9 @@ fn box_filter_downscale(
             // Source region that maps to this destination pixel.
             let sx0 = (dx as u64 * src_w as u64 / dst_w as u64) as u32;
             let sy0 = (dy as u64 * src_h as u64 / dst_h as u64) as u32;
-            let sx1 = (((dx as u64 + 1) * src_w as u64 + dst_w as u64 - 1) / dst_w as u64)
+            let sx1 = ((dx as u64 + 1) * src_w as u64).div_ceil(dst_w as u64)
                 .min(src_w as u64) as u32;
-            let sy1 = (((dy as u64 + 1) * src_h as u64 + dst_h as u64 - 1) / dst_h as u64)
+            let sy1 = ((dy as u64 + 1) * src_h as u64).div_ceil(dst_h as u64)
                 .min(src_h as u64) as u32;
 
             let mut r_acc: u64 = 0;
@@ -454,6 +454,10 @@ fn box_filter_downscale(
                 }
             }
 
+            // Single guard for all four channel divisions — converting each to
+            // `checked_div` separately (per `manual_checked_ops`) would add
+            // four redundant Option unwraps under the same `count > 0` proof.
+            #[allow(clippy::manual_checked_ops)]
             if count > 0 {
                 let dst_idx = (dy as usize * dst_w as usize + dx as usize) * 4;
                 dst[dst_idx] = (a_acc / count) as u8;
@@ -619,11 +623,10 @@ fn generate_image_thumbnail(path: &Path, config: &ThumbConfig, mtime: u64) -> Th
     };
 
     // For BMP we can attempt to read raw pixel data (uncompressed 32-bit).
-    if header.len() >= 2 && header[0] == b'B' && header[1] == b'M' {
-        if let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime) {
+    if header.len() >= 2 && header[0] == b'B' && header[1] == b'M'
+        && let Some(thumb) = try_bmp_thumbnail(path, dims, config, mtime) {
             return thumb;
         }
-    }
 
     // For other formats: create an aspect-ratio-correct color swatch since we
     // don't have a full decoder.  The swatch color is derived from the format.
@@ -677,7 +680,7 @@ fn try_bmp_thumbnail(
     }
 
     let bpp = bits_per_pixel as usize / 8;
-    let row_size = ((dims.width as usize * bpp + 3) / 4) * 4; // rows padded to 4 bytes
+    let row_size = (dims.width as usize * bpp).div_ceil(4) * 4; // rows padded to 4 bytes
     let expected_data = offset + row_size * dims.height as usize;
     if data.len() < expected_data {
         return None;
@@ -1031,13 +1034,13 @@ fn draw_block_text(pixels: &mut [u8], size: u32, text: &str, color: Color, x: u3
     let scale = 2u32;
     let glyph_w = 5 * scale;
     let glyph_h = 7 * scale;
-    let spacing = 1 * scale;
+    let spacing = scale;
 
     let total_w = text.len() as u32 * (glyph_w + spacing);
     // Center horizontally around the given x.
-    let start_x = if x >= total_w / 2 { x - total_w / 2 } else { 0 };
+    let start_x = x.saturating_sub(total_w / 2);
     // Center vertically around the given y.
-    let start_y = if y >= glyph_h / 2 { y - glyph_h / 2 } else { 0 };
+    let start_y = y.saturating_sub(glyph_h / 2);
 
     for (ci, ch) in text.chars().enumerate() {
         let bitmap = glyph_bitmap(ch);

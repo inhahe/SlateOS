@@ -252,7 +252,7 @@ pub fn cooked_process(input: u8, line_buf: &mut Vec<u8>) -> CookedAction {
             if line_buf.is_empty() {
                 CookedAction::Signal(PtySignal::Eof)
             } else {
-                let flushed = line_buf.drain(..).collect();
+                let flushed = std::mem::take(line_buf);
                 CookedAction::FlushLine(flushed)
             }
         }
@@ -274,15 +274,12 @@ pub fn cooked_process(input: u8, line_buf: &mut Vec<u8>) -> CookedAction {
                 CookedAction::Buffer // nothing to erase
             }
         }
-        // Carriage return or newline → flush line
+        // Carriage return or newline → flush line.
+        // (We don't emit a separate Echo(b'\n') because the FlushLine action
+        //  already implies the newline echo at the caller.)
         0x0A | 0x0D => {
             line_buf.push(b'\n');
-            let flushed = line_buf.drain(..).collect();
-            CookedAction::Echo(b'\n')
-                // The caller must handle both the echo and the flush.
-                // We return FlushLine which is the primary action; the
-                // echo of newline is implicit.
-                ;
+            let flushed = std::mem::take(line_buf);
             CookedAction::FlushLine(flushed)
         }
         // Printable or other byte → buffer and echo
@@ -994,11 +991,10 @@ impl ChildProcess {
 
     /// Internal: mark the process as exited with the given status.
     fn mark_exited(&self, status: ExitStatus) {
-        if let Ok(mut guard) = self.exit_status.lock() {
-            if guard.is_none() {
+        if let Ok(mut guard) = self.exit_status.lock()
+            && guard.is_none() {
                 *guard = Some(status);
             }
-        }
         self.exited.store(true, Ordering::Release);
     }
 

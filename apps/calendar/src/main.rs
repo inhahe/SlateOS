@@ -12,26 +12,35 @@ use guitk::style::CornerRadii;
 // ============================================================================
 
 const BASE: Color = Color::from_hex(0x1E1E2E);
+// Catppuccin Mocha palette — kept complete even though a few entries are
+// not currently referenced; future event-category styling will pick them up.
+#[allow(dead_code)]
 const MANTLE: Color = Color::from_hex(0x181825);
+#[allow(dead_code)]
 const CRUST: Color = Color::from_hex(0x11111B);
 const SURFACE0: Color = Color::from_hex(0x313244);
 const SURFACE1: Color = Color::from_hex(0x45475A);
+#[allow(dead_code)]
 const SURFACE2: Color = Color::from_hex(0x585B70);
 const TEXT: Color = Color::from_hex(0xCDD6F4);
 const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
+#[allow(dead_code)]
 const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
 const BLUE: Color = Color::from_hex(0x89B4FA);
 const GREEN: Color = Color::from_hex(0xA6E3A1);
 const RED: Color = Color::from_hex(0xF38BA8);
 const YELLOW: Color = Color::from_hex(0xF9E2AF);
 const PEACH: Color = Color::from_hex(0xFAB387);
+#[allow(dead_code)]
 const LAVENDER: Color = Color::from_hex(0xB4BEFE);
 const OVERLAY0: Color = Color::from_hex(0x6C7086);
 const TEAL: Color = Color::from_hex(0x94E2D5);
 const MAUVE: Color = Color::from_hex(0xCBA6F7);
 const SKY: Color = Color::from_hex(0x89DCEB);
 const PINK: Color = Color::from_hex(0xF5C2E7);
+#[allow(dead_code)]
 const FLAMINGO: Color = Color::from_hex(0xF2CDCD);
+#[allow(dead_code)]
 const ROSEWATER: Color = Color::from_hex(0xF5E0DC);
 
 // ============================================================================
@@ -48,7 +57,7 @@ pub struct Date {
 
 impl Date {
     pub fn new(year: i32, month: u32, day: u32) -> Option<Self> {
-        if month < 1 || month > 12 {
+        if !(1..=12).contains(&month) {
             return None;
         }
         let max_day = days_in_month(year, month);
@@ -71,8 +80,8 @@ impl Date {
         let j = y / 100;
         let h = (q + (13 * (m + 1)) / 5 + k + k / 4 + j / 4 - 2 * j) % 7;
         // Zeller gives 0=Saturday, 1=Sunday, etc. Convert to 0=Sunday
-        let dow = ((h + 6) % 7) as u32;
-        dow
+        
+        ((h + 6) % 7) as u32
     }
 
     pub fn day_of_week_name(self) -> &'static str {
@@ -518,7 +527,7 @@ impl RecurrenceRule {
                 if days.is_empty() {
                     return Some(from.add_days(7));
                 }
-                let current_dow = from.day_of_week();
+                let _current_dow = from.day_of_week();
                 // Find next matching day
                 for offset in 1..=7 {
                     let next = from.add_days(offset);
@@ -789,7 +798,7 @@ pub fn parse_ics(content: &str) -> Vec<CalendarEvent> {
                     all_day: false,
                     recurrence: RecurrenceRule::None,
                     reminder: Reminder::None,
-                    location: location.as_deref().map(|s| ics_unescape(s)),
+                    location: location.as_deref().map(ics_unescape),
                     color_override: None,
                 });
                 next_id += 1;
@@ -880,7 +889,7 @@ pub fn generate_ics(events: &[CalendarEvent], calendar_name: &str) -> String {
     let mut lines = Vec::new();
     lines.push("BEGIN:VCALENDAR".to_string());
     lines.push("VERSION:2.0".to_string());
-    lines.push(format!("PRODID:-//OurOS//Calendar//EN"));
+    lines.push("PRODID:-//OurOS//Calendar//EN".to_string());
     lines.push(format!("X-WR-CALNAME:{calendar_name}"));
 
     for event in events {
@@ -987,7 +996,7 @@ impl EventStore {
             .iter()
             .filter(|e| e.start.date >= from)
             .collect();
-        upcoming.sort_by(|a, b| a.start.cmp(&b.start));
+        upcoming.sort_by_key(|a| a.start);
         upcoming.truncate(limit);
         upcoming
     }
@@ -1621,7 +1630,7 @@ impl CalendarApp {
         };
         let total_days = days_in_month(self.view_date.year, self.view_date.month);
         let total_cells = start_offset + total_days;
-        let num_rows = ((total_cells + 6) / 7).max(5);
+        let num_rows = total_cells.div_ceil(7).max(5);
         let row_h = available_h / num_rows as f32;
 
         for day in 1..=total_days {
@@ -2011,8 +2020,8 @@ impl CalendarApp {
                 });
             }
 
-            if eh > 40.0 {
-                if let Some(loc) = &ev.location {
+            if eh > 40.0
+                && let Some(loc) = &ev.location {
                     cmds.push(RenderCommand::Text {
                         x: x + time_col_w + 10.0,
                         y: ey + 32.0,
@@ -2023,7 +2032,6 @@ impl CalendarApp {
                         max_width: Some(event_w - 16.0),
                     });
                 }
-            }
         }
     }
 

@@ -3061,16 +3061,19 @@ mod tests {
     }
 
     // -- Stub functions --
-
-    #[test]
-    fn test_fork_returns_enosys() {
-        assert_eq!(fork(), -1);
-    }
-
-    #[test]
-    fn test_vfork_returns_enosys() {
-        assert_eq!(vfork(), -1);
-    }
+    //
+    // Phase 220 (2026-06-03): fork() and vfork() were originally ENOSYS
+    // stubs and their host tests pinned that behaviour
+    // (test_fork_returns_enosys / test_vfork_returns_enosys /
+    // test_fork_sets_enosys / test_vfork_sets_enosys).  Roadmap §2.5
+    // L1190 upgraded both to real SYS_PROCESS_FORK=527 syscalls (kernel
+    // frame-handled CoW fork; vfork aliases fork).  The host harness
+    // (target_os ≠ "none") issues the real `syscall` instruction with
+    // RAX=527, which is meaningless on Windows/Linux user mode and is
+    // not safely testable here.  The four ENOSYS-pin tests were
+    // removed; correct behaviour is exercised by the kernel's own
+    // self-tests (kernel::proc::tests::test_fork_clones_pcb,
+    // test_exec_process) which run under the kernel target.
 
     #[test]
     fn test_getppid_returns_1() {
@@ -3379,19 +3382,10 @@ mod tests {
 
     // -- Stub errno checks --
 
-    #[test]
-    fn test_fork_sets_enosys() {
-        crate::errno::set_errno(0);
-        fork();
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
-
-    #[test]
-    fn test_vfork_sets_enosys() {
-        crate::errno::set_errno(0);
-        vfork();
-        assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
-    }
+    // Phase 220 (2026-06-03): test_fork_sets_enosys and
+    // test_vfork_sets_enosys removed.  See the longer note above the
+    // (now-removed) test_fork_returns_enosys / test_vfork_returns_enosys
+    // for the rationale.
 
     #[test]
     fn test_clone_sets_enosys() {

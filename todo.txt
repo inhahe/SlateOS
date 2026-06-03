@@ -3869,31 +3869,42 @@ OBSOLETE NOTE BELOW (pre-relaxation):
   Same root cause as the other aio flakes — stale completion records
   at reused stack addresses.  Fixed by reset_aio_table().
 
-## BUG (noticed 2026-06-03, UNFIXED, pre-existing): posix host tests pin
-   obsolete ENOSYS behaviour for fork()/vfork()
-   `cargo test -p posix --target x86_64-pc-windows-gnu --lib` reports 5
-   failures unrelated to current work:
+## BUG (noticed 2026-06-03, FIXED 2026-06-03 Phase 220): posix host tests
+   pinned obsolete behaviour for fork()/vfork() and raced on shared error
+   bookkeeping
+   `cargo test -p posix --target x86_64-pc-windows-gnu --lib` reported 5
+   failures:
      - process::tests::test_fork_returns_enosys
      - process::tests::test_fork_sets_enosys
      - process::tests::test_vfork_returns_enosys
      - process::tests::test_vfork_sets_enosys
      - error::tests::error_impl_increments_count
-   The four fork/vfork tests were written when fork/vfork were ENOSYS
-   stubs.  Per roadmap §2.5 L1190, posix fork/vfork are now real —
-   `vfork()` aliases `fork()`, which issues `SYS_PROCESS_FORK=527`
-   (kernel real-image CoW fork via frame-handled syscall, child resumes
-   with RAX=0).  In the host harness (target_os ≠ "none") the syscall
-   wrapper goes through a host stub that returns 0 for the bare syscall,
-   so `errno::translate(0)` leaves errno untouched and the tests'
-   "left: 0 / right: 38" failure surfaces.  The tests should either be
-   deleted (they pin a behaviour that's intentionally obsolete) or
-   replaced with host-stub-aware assertions ("on host: returns 0, errno
-   unchanged"; "on kernel: forks real child").  Tracked here pending a
-   dedicated cleanup pass.
 
-   error_impl_increments_count: separate root cause — flaky/static-state
-   leakage across test runs.  Needs reproduction with --test-threads=1.
-   Documented for the next clean-up sweep.
+   FIX (Phase 220):
+   - Fork/vfork: the four ENOSYS pins were written when fork/vfork were
+     pre-implementation stubs.  Per roadmap §2.5 L1190 those are now real
+     SYS_PROCESS_FORK=527 syscalls (kernel real-image CoW fork via
+     frame-handled syscall; vfork aliases fork).  On the host harness
+     (target_os ≠ "none") the syscall0(527) wrapper issues a real
+     `syscall` instruction with RAX=527, which is meaningless on
+     Windows/Linux user mode — `errno::translate` sees the non-negative
+     return, leaves errno untouched, and the tests' "left: 0 / right:
+     38" failure surfaces.  Real fork behaviour is exercised by the
+     kernel's own self-tests (kernel::proc::tests::test_fork_clones_pcb,
+     test_exec_process).  The four host pins were removed with a
+     block comment in posix/src/process.rs explaining the rationale and
+     pointing to the kernel coverage.
+   - error_impl_increments_count: root cause was shared global state
+     (`error_message_count`, `error_one_per_line`, `OLD_FILENAME`,
+     `OLD_LINENUM`, `error_print_progname`) raced by cargo's parallel
+     test runner.  Added a `TEST_LOCK: Mutex<()>` to the error module's
+     #[cfg(test)] block and a `let _guard = TEST_LOCK.lock().unwrap();`
+     line at the top of every test that mutates or observes the shared
+     state (9 tests).  Also reset CALLS atomic at the top of
+     error_print_progname_callback_invoked so re-runs don't carry state
+     across invocations of the same test binary.
+
+   Result: 17141 posix host tests pass; no_std build still clean.
 
 ## Phase 219 (FIXED 2026-06-03): pidfd_send_signal scope-flag support
    Per the deferred work tracked at todo.txt L3812: Linux 6.9+ defines

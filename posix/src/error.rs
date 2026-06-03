@@ -87,18 +87,18 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], rcx",        // int vararg 0
-    "mov [rsp+8], r8",       // int vararg 1
-    "mov [rsp+16], r9",      // int vararg 2
-    "mov rax, [rbp+16]",     // int vararg 3 (stack)
+    "mov [rsp], rcx",    // int vararg 0
+    "mov [rsp+8], r8",   // int vararg 1
+    "mov [rsp+16], r9",  // int vararg 2
+    "mov rax, [rbp+16]", // int vararg 3 (stack)
     "mov [rsp+24], rax",
-    "mov rax, [rbp+24]",     // int vararg 4
+    "mov rax, [rbp+24]", // int vararg 4
     "mov [rsp+32], rax",
-    "mov rax, [rbp+32]",     // int vararg 5
+    "mov rax, [rbp+32]", // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+40]",     // int vararg 6
+    "mov rax, [rbp+40]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+48]",     // int vararg 7
+    "mov rax, [rbp+48]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -109,12 +109,11 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi=status, rsi=errnum, rdx=fmt already set.
-    "mov rcx, rsp",          // args pointer (int0..int7, float0..float7)
+    "mov rcx, rsp", // args pointer (int0..int7, float0..float7)
     "call _error_impl",
     "add rsp, 128",
     "pop rbp",
     "ret",
-
     // error_at_line(status, errnum, file, line, fmt, ...)
     //   → _error_at_line_impl(status, errnum, file, line, fmt, args)
     // Fixed: rdi=status, rsi=errnum, rdx=file, rcx=line, r8=fmt.
@@ -125,20 +124,20 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], r9",         // int vararg 0
-    "mov rax, [rbp+16]",     // int vararg 1 (stack)
+    "mov [rsp], r9",     // int vararg 0
+    "mov rax, [rbp+16]", // int vararg 1 (stack)
     "mov [rsp+8], rax",
-    "mov rax, [rbp+24]",     // int vararg 2
+    "mov rax, [rbp+24]", // int vararg 2
     "mov [rsp+16], rax",
-    "mov rax, [rbp+32]",     // int vararg 3
+    "mov rax, [rbp+32]", // int vararg 3
     "mov [rsp+24], rax",
-    "mov rax, [rbp+40]",     // int vararg 4
+    "mov rax, [rbp+40]", // int vararg 4
     "mov [rsp+32], rax",
-    "mov rax, [rbp+48]",     // int vararg 5
+    "mov rax, [rbp+48]", // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+56]",     // int vararg 6
+    "mov rax, [rbp+56]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+64]",     // int vararg 7
+    "mov rax, [rbp+64]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -149,7 +148,7 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi=status, rsi=errnum, rdx=file, rcx=line, r8=fmt already set.
-    "mov r9, rsp",           // args pointer
+    "mov r9, rsp", // args pointer
     "call _error_at_line_impl",
     "add rsp, 128",
     "pop rbp",
@@ -305,14 +304,18 @@ fn do_error(
 /// `fmt` must be a valid NUL-terminated C string (or null); `args` must point
 /// to at least 16 valid `u64` slots (the trampoline always provides them).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn _error_impl(
-    status: i32,
-    errnum: i32,
-    fmt: *const u8,
-    args: *const u64,
-) {
+pub unsafe extern "C" fn _error_impl(status: i32, errnum: i32, fmt: *const u8, args: *const u64) {
     let (iargs, fargs) = split_args(args);
-    do_error(status, errnum, core::ptr::null(), 0, false, fmt, iargs, fargs);
+    do_error(
+        status,
+        errnum,
+        core::ptr::null(),
+        0,
+        false,
+        fmt,
+        iargs,
+        fargs,
+    );
 }
 
 /// Backing implementation for `error_at_line`.
@@ -357,12 +360,30 @@ fn split_args(args: *const u64) -> (*const u64, *const u64) {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn verror(status: i32, errnum: i32, fmt: *const u8, ap: *mut VaList) {
     if ap.is_null() {
-        do_error(status, errnum, core::ptr::null(), 0, false, fmt, core::ptr::null(), core::ptr::null());
+        do_error(
+            status,
+            errnum,
+            core::ptr::null(),
+            0,
+            false,
+            fmt,
+            core::ptr::null(),
+            core::ptr::null(),
+        );
         return;
     }
     // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
     let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    do_error(status, errnum, core::ptr::null(), 0, false, fmt, iargs.as_ptr(), fargs.as_ptr());
+    do_error(
+        status,
+        errnum,
+        core::ptr::null(),
+        0,
+        false,
+        fmt,
+        iargs.as_ptr(),
+        fargs.as_ptr(),
+    );
 }
 
 /// `verror_at_line(status, errnum, filename, linenum, format, ap)`.
@@ -380,12 +401,30 @@ pub unsafe extern "C" fn verror_at_line(
     ap: *mut VaList,
 ) {
     if ap.is_null() {
-        do_error(status, errnum, filename, linenum, true, fmt, core::ptr::null(), core::ptr::null());
+        do_error(
+            status,
+            errnum,
+            filename,
+            linenum,
+            true,
+            fmt,
+            core::ptr::null(),
+            core::ptr::null(),
+        );
         return;
     }
     // SAFETY: ap is non-null; caller guarantees it is a valid va_list.
     let (iargs, fargs) = unsafe { printf::va_collect(fmt, &mut *ap) };
-    do_error(status, errnum, filename, linenum, true, fmt, iargs.as_ptr(), fargs.as_ptr());
+    do_error(
+        status,
+        errnum,
+        filename,
+        linenum,
+        true,
+        fmt,
+        iargs.as_ptr(),
+        fargs.as_ptr(),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -402,6 +441,17 @@ mod tests {
     // bookkeeping (error_message_count, error_one_per_line dedup) that is
     // observable without capturing stderr.  Calls use status == 0 so they
     // never invoke exit().
+    //
+    // Phase 220 (2026-06-03): every test in this module mutates global
+    // state (`error_message_count`, `error_one_per_line`, `OLD_FILENAME`,
+    // `OLD_LINENUM`, `error_print_progname`).  Without serialization,
+    // cargo's parallel runner can interleave a `read_count()` /
+    // `_error_impl()` / `read_count()` triple, producing flaky
+    // "left: 1 / right: 2" failures when a sibling test slips an
+    // increment in between.  TEST_LOCK serialises every test that
+    // touches the bookkeeping so the assertions remain deterministic.
+    use std::sync::Mutex;
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
 
     /// Build a synthetic SysV `va_list` with up to 6 integer args.
     fn with_valist<R>(ints: &[u64], f: impl FnOnce(*mut VaList) -> R) -> R {
@@ -426,6 +476,7 @@ mod tests {
 
     #[test]
     fn error_impl_increments_count() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let before = read_count();
         unsafe {
             _error_impl(0, 0, b"plain message\0".as_ptr(), core::ptr::null());
@@ -435,15 +486,22 @@ mod tests {
 
     #[test]
     fn error_impl_with_errnum_no_crash() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let before = read_count();
         unsafe {
-            _error_impl(0, errno::ENOENT, b"cannot stat\0".as_ptr(), core::ptr::null());
+            _error_impl(
+                0,
+                errno::ENOENT,
+                b"cannot stat\0".as_ptr(),
+                core::ptr::null(),
+            );
         }
         assert_eq!(read_count(), before.wrapping_add(1));
     }
 
     #[test]
     fn error_impl_with_format_args_no_crash() {
+        let _guard = TEST_LOCK.lock().unwrap();
         // "%s" + a string arg, laid out as the trampoline would: int slot 0.
         let path = b"/tmp/x\0";
         let mut slots = [0u64; 16];
@@ -457,6 +515,7 @@ mod tests {
 
     #[test]
     fn error_impl_null_fmt_no_crash() {
+        let _guard = TEST_LOCK.lock().unwrap();
         unsafe {
             _error_impl(0, errno::EIO, core::ptr::null(), core::ptr::null());
         }
@@ -464,6 +523,7 @@ mod tests {
 
     #[test]
     fn error_at_line_impl_no_crash() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let before = read_count();
         unsafe {
             _error_at_line_impl(
@@ -480,8 +540,11 @@ mod tests {
 
     #[test]
     fn error_one_per_line_suppresses_duplicate() {
+        let _guard = TEST_LOCK.lock().unwrap();
         // Enable dedup, then call twice with identical file/line.
-        unsafe { core::ptr::addr_of_mut!(error_one_per_line).write(1); }
+        unsafe {
+            core::ptr::addr_of_mut!(error_one_per_line).write(1);
+        }
         // Reset the remembered location to something that won't match.
         unsafe {
             core::ptr::addr_of_mut!(OLD_FILENAME).write(core::ptr::null());
@@ -490,26 +553,50 @@ mod tests {
         let before = read_count();
         let file = b"dup.c\0";
         unsafe {
-            _error_at_line_impl(0, 0, file.as_ptr(), 7, b"first\0".as_ptr(), core::ptr::null());
+            _error_at_line_impl(
+                0,
+                0,
+                file.as_ptr(),
+                7,
+                b"first\0".as_ptr(),
+                core::ptr::null(),
+            );
         }
         // First call prints and increments.
         assert_eq!(read_count(), before.wrapping_add(1));
         unsafe {
-            _error_at_line_impl(0, 0, file.as_ptr(), 7, b"second\0".as_ptr(), core::ptr::null());
+            _error_at_line_impl(
+                0,
+                0,
+                file.as_ptr(),
+                7,
+                b"second\0".as_ptr(),
+                core::ptr::null(),
+            );
         }
         // Second identical call is suppressed: count unchanged.
         assert_eq!(read_count(), before.wrapping_add(1));
         // A different line is not suppressed.
         unsafe {
-            _error_at_line_impl(0, 0, file.as_ptr(), 8, b"third\0".as_ptr(), core::ptr::null());
+            _error_at_line_impl(
+                0,
+                0,
+                file.as_ptr(),
+                8,
+                b"third\0".as_ptr(),
+                core::ptr::null(),
+            );
         }
         assert_eq!(read_count(), before.wrapping_add(2));
         // Restore.
-        unsafe { core::ptr::addr_of_mut!(error_one_per_line).write(0); }
+        unsafe {
+            core::ptr::addr_of_mut!(error_one_per_line).write(0);
+        }
     }
 
     #[test]
     fn verror_null_va_no_crash() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let before = read_count();
         unsafe { verror(0, errno::EPERM, b"denied\0".as_ptr(), core::ptr::null_mut()) };
         assert_eq!(read_count(), before.wrapping_add(1));
@@ -517,6 +604,7 @@ mod tests {
 
     #[test]
     fn verror_with_valist_expands_args() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let msg = b"world\0";
         let before = read_count();
         with_valist(&[msg.as_ptr() as u64], |va| {
@@ -528,30 +616,37 @@ mod tests {
 
     #[test]
     fn verror_at_line_with_valist_int_arg() {
+        let _guard = TEST_LOCK.lock().unwrap();
         let before = read_count();
         with_valist(&[99], |va| {
             // SAFETY: va is a valid synthetic va_list with one int arg.
-            unsafe {
-                verror_at_line(0, 0, b"f.c\0".as_ptr(), 3, b"value %d\0".as_ptr(), va)
-            };
+            unsafe { verror_at_line(0, 0, b"f.c\0".as_ptr(), 3, b"value %d\0".as_ptr(), va) };
         });
         assert_eq!(read_count(), before.wrapping_add(1));
     }
 
     #[test]
     fn error_print_progname_callback_invoked() {
+        let _guard = TEST_LOCK.lock().unwrap();
         use core::sync::atomic::{AtomicU32, Ordering};
         static CALLS: AtomicU32 = AtomicU32::new(0);
         extern "C" fn cb() {
             CALLS.fetch_add(1, Ordering::SeqCst);
         }
-        unsafe { core::ptr::addr_of_mut!(error_print_progname).write(Some(cb)); }
+        // Reset CALLS for re-runs (static persists across invocations
+        // within the same test binary).
+        CALLS.store(0, Ordering::SeqCst);
+        unsafe {
+            core::ptr::addr_of_mut!(error_print_progname).write(Some(cb));
+        }
         unsafe {
             _error_impl(0, 0, b"msg\0".as_ptr(), core::ptr::null());
         }
         assert_eq!(CALLS.load(Ordering::SeqCst), 1);
         // Restore default behavior.
-        unsafe { core::ptr::addr_of_mut!(error_print_progname).write(None); }
+        unsafe {
+            core::ptr::addr_of_mut!(error_print_progname).write(None);
+        }
     }
 
     #[test]

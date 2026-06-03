@@ -25,6 +25,13 @@
 //! ```
 
 #![deny(clippy::all)]
+// DHCP_MIN_LEN, DHCP_DECLINE, build_decline, msg_type_name, and the
+// MsgType::name helper are declared up-front because they encode the
+// RFC 2131 / 2132 protocol surface the real implementation must
+// speak. They are kept as documentation for the DORA edge cases the
+// stub doesn't yet exercise (DECLINE on duplicate-address detection,
+// log/trace formatting).
+#![allow(dead_code)]
 
 use std::env;
 use std::fs;

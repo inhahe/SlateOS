@@ -1,6 +1,6 @@
-//! # OurOS HTTP Client Library
+//! # `OurOS` HTTP Client Library
 //!
-//! A native HTTP/1.1 client library for OurOS. Provides URL parsing, request building,
+//! A native HTTP/1.1 client library for `OurOS`. Provides URL parsing, request building,
 //! response parsing, cookie handling, and HTTP protocol serialization/deserialization.
 //!
 //! This library is used by the package manager and other applications for network fetching.
@@ -207,33 +207,6 @@ impl Url {
         (final_path, query, fragment)
     }
 
-    /// Reconstruct the URL as a string.
-    pub fn to_string(&self) -> String {
-        let mut result = format!("{}://{}", self.scheme, self.host);
-
-        let is_default_port = (self.scheme == "http" && self.port == 80)
-            || (self.scheme == "https" && self.port == 443);
-
-        if !is_default_port {
-            result.push(':');
-            result.push_str(&self.port.to_string());
-        }
-
-        result.push_str(&self.path);
-
-        if let Some(ref q) = self.query {
-            result.push('?');
-            result.push_str(q);
-        }
-
-        if let Some(ref f) = self.fragment {
-            result.push('#');
-            result.push_str(f);
-        }
-
-        result
-    }
-
     /// Return the path and query string combined, suitable for the HTTP request line.
     pub fn request_path(&self) -> String {
         match &self.query {
@@ -245,7 +218,26 @@ impl Url {
 
 impl fmt::Display for Url {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(f, "{}://{}", self.scheme, self.host)?;
+
+        let is_default_port = (self.scheme == "http" && self.port == 80)
+            || (self.scheme == "https" && self.port == 443);
+
+        if !is_default_port {
+            write!(f, ":{}", self.port)?;
+        }
+
+        f.write_str(&self.path)?;
+
+        if let Some(ref q) = self.query {
+            write!(f, "?{q}")?;
+        }
+
+        if let Some(ref fragment) = self.fragment {
+            write!(f, "#{fragment}")?;
+        }
+
+        Ok(())
     }
 }
 
@@ -436,11 +428,11 @@ impl Request {
         }
 
         // Content-Length if body is present and not already set
-        if let Some(ref body_data) = self.body {
-            if !self.headers.contains("Content-Length") {
-                let cl = format!("Content-Length: {}\r\n", body_data.len());
-                output.extend_from_slice(cl.as_bytes());
-            }
+        if let Some(ref body_data) = self.body
+            && !self.headers.contains("Content-Length")
+        {
+            let cl = format!("Content-Length: {}\r\n", body_data.len());
+            output.extend_from_slice(cl.as_bytes());
         }
 
         // End of headers
@@ -474,6 +466,7 @@ impl Request {
 ///     .build();
 /// ```
 #[derive(Debug, Clone)]
+#[must_use = "RequestBuilder builds a Request only when `.build()` (or a send method) is called"]
 pub struct RequestBuilder {
     method: Method,
     url: Url,
@@ -743,7 +736,7 @@ pub fn parse_response(data: &[u8], request_url: &Url) -> Result<Response, HttpEr
     // Determine body decoding strategy
     let body = if headers
         .get("Transfer-Encoding")
-        .map_or(false, |te| te.contains("chunked"))
+        .is_some_and(|te| te.contains("chunked"))
     {
         decode_chunked(body_data)?
     } else if let Some(cl) = headers
@@ -927,7 +920,7 @@ impl CookieJar {
         self.cookies.iter().find(|c| {
             c.name == name
                 && c.domain.as_deref() == Some(domain)
-                && c.path.as_deref().map_or(true, |p| path.starts_with(p))
+                && c.path.as_deref().is_none_or(|p| path.starts_with(p))
         })
     }
 
@@ -953,10 +946,10 @@ impl CookieJar {
                 }
 
                 // Check path
-                if let Some(ref cookie_path) = c.path {
-                    if !url.path.starts_with(cookie_path.as_str()) {
-                        return false;
-                    }
+                if let Some(ref cookie_path) = c.path
+                    && !url.path.starts_with(cookie_path.as_str())
+                {
+                    return false;
                 }
 
                 true
@@ -1171,13 +1164,13 @@ const BASE64_ALPHABET: &[u8; 64] =
 ///
 /// Uses the standard base64 alphabet with `=` padding.
 pub fn base64_encode(data: &[u8]) -> String {
-    let mut result = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut result = String::with_capacity(data.len().div_ceil(3) * 4);
     let mut i = 0;
 
     while i + 2 < data.len() {
-        let triple = ((data[i] as u32) << 16)
-            | ((data[i + 1] as u32) << 8)
-            | (data[i + 2] as u32);
+        let triple = (u32::from(data[i]) << 16)
+            | (u32::from(data[i + 1]) << 8)
+            | u32::from(data[i + 2]);
 
         result.push(BASE64_ALPHABET[((triple >> 18) & 0x3F) as usize] as char);
         result.push(BASE64_ALPHABET[((triple >> 12) & 0x3F) as usize] as char);
@@ -1191,14 +1184,14 @@ pub fn base64_encode(data: &[u8]) -> String {
     let remaining = data.len() - i;
     match remaining {
         1 => {
-            let val = (data[i] as u32) << 16;
+            let val = u32::from(data[i]) << 16;
             result.push(BASE64_ALPHABET[((val >> 18) & 0x3F) as usize] as char);
             result.push(BASE64_ALPHABET[((val >> 12) & 0x3F) as usize] as char);
             result.push('=');
             result.push('=');
         }
         2 => {
-            let val = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8);
+            let val = (u32::from(data[i]) << 16) | (u32::from(data[i + 1]) << 8);
             result.push(BASE64_ALPHABET[((val >> 18) & 0x3F) as usize] as char);
             result.push(BASE64_ALPHABET[((val >> 12) & 0x3F) as usize] as char);
             result.push(BASE64_ALPHABET[((val >> 6) & 0x3F) as usize] as char);

@@ -148,21 +148,19 @@ pub fn display_info() -> DisplayInfo {
     conn.send(CompositorRequest::GetDisplayInfo);
 
     // Process the response from the compositor.
-    if let Some(response) = conn.recv() {
-        if let CompositorResponse::DisplayInfo {
+    if let Some(CompositorResponse::DisplayInfo {
+        width,
+        height,
+        refresh_rate,
+        scale_factor,
+    }) = conn.recv()
+    {
+        return DisplayInfo {
             width,
             height,
             refresh_rate,
             scale_factor,
-        } = response
-        {
-            return DisplayInfo {
-                width,
-                height,
-                refresh_rate,
-                scale_factor,
-            };
-        }
+        };
     }
 
     // Fallback to reasonable defaults if the compositor is unreachable.
@@ -734,15 +732,15 @@ impl Window {
     /// Clamp a width value to the configured min/max constraints.
     fn clamp_width(&self, width: u32) -> u32 {
         let mut result = width;
-        if let Some((min_w, _)) = self.min_size {
-            if result < min_w {
-                result = min_w;
-            }
+        if let Some((min_w, _)) = self.min_size
+            && result < min_w
+        {
+            result = min_w;
         }
-        if let Some((max_w, _)) = self.max_size {
-            if result > max_w {
-                result = max_w;
-            }
+        if let Some((max_w, _)) = self.max_size
+            && result > max_w
+        {
+            result = max_w;
         }
         result
     }
@@ -750,15 +748,15 @@ impl Window {
     /// Clamp a height value to the configured min/max constraints.
     fn clamp_height(&self, height: u32) -> u32 {
         let mut result = height;
-        if let Some((_, min_h)) = self.min_size {
-            if result < min_h {
-                result = min_h;
-            }
+        if let Some((_, min_h)) = self.min_size
+            && result < min_h
+        {
+            result = min_h;
         }
-        if let Some((_, max_h)) = self.max_size {
-            if result > max_h {
-                result = max_h;
-            }
+        if let Some((_, max_h)) = self.max_size
+            && result > max_h
+        {
+            result = max_h;
         }
         result
     }

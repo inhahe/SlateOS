@@ -1,4 +1,4 @@
-//! OurOS DNS Resolver Library
+//! `OurOS` DNS Resolver Library
 //!
 //! Provides hostname-to-IP-address resolution via the DNS protocol (RFC 1035).
 //! Includes a caching resolver, hosts file support, and full DNS message
@@ -87,7 +87,11 @@ impl Ipv6Addr {
         let mut i = 0;
         while i < 8 {
             bytes[i * 2] = (segments[i] >> 8) as u8;
-            bytes[i * 2 + 1] = segments[i] as u8;
+            // Truncation is intentional: low byte of the segment.
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                bytes[i * 2 + 1] = segments[i] as u8;
+            }
             i += 1;
         }
         Self(bytes)
@@ -101,8 +105,8 @@ impl Ipv6Addr {
     /// Returns the address as eight 16-bit segments.
     pub fn segments(&self) -> [u16; 8] {
         let mut segs = [0u16; 8];
-        for i in 0..8 {
-            segs[i] = u16::from_be_bytes([self.0[i * 2], self.0[i * 2 + 1]]);
+        for (i, seg) in segs.iter_mut().enumerate() {
+            *seg = u16::from_be_bytes([self.0[i * 2], self.0[i * 2 + 1]]);
         }
         segs
     }
@@ -140,9 +144,8 @@ impl FromStr for Ipv6Addr {
         };
 
         let right_parts: Vec<&str> = match right {
-            Some(r) if r.is_empty() => Vec::new(),
+            Some("") | None => Vec::new(),
             Some(r) => r.split(':').collect(),
-            None => Vec::new(),
         };
 
         let total = left_parts.len() + right_parts.len();
@@ -407,6 +410,11 @@ pub enum RData {
 ///
 /// Each label is preceded by its length byte, terminated by a zero byte.
 /// For example, "example.com" becomes [7, 'e', 'x', 'a', 'm', 'p', 'l', 'e', 3, 'c', 'o', 'm', 0].
+///
+/// # Errors
+///
+/// Returns [`DnsError::InvalidName`] if the name contains an empty label
+/// or any label longer than 63 bytes (the DNS label-length limit).
 pub fn encode_name(name: &str) -> Result<Vec<u8>, DnsError> {
     if name.is_empty() {
         return Ok(vec![0]);
@@ -425,8 +433,11 @@ pub fn encode_name(name: &str) -> Result<Vec<u8>, DnsError> {
                 "label exceeds 63 bytes: {label}"
             )));
         }
-        // Safe: len checked to be <= 63, so fits in u8
-        result.push(len as u8);
+        // Safe: len checked to be <= 63, so fits in u8.
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            result.push(len as u8);
+        }
         result.extend_from_slice(label.as_bytes());
     }
     result.push(0); // Root label terminator
@@ -438,12 +449,18 @@ pub fn encode_name(name: &str) -> Result<Vec<u8>, DnsError> {
 /// DNS name compression uses a two-byte pointer (high bits 11) to reference
 /// a previously-seen name at an offset within the message. This function
 /// follows up to 16 pointers to prevent infinite loops.
+///
+/// # Errors
+///
+/// Returns [`DnsError::InvalidResponse`] if the encoded name runs off the
+/// end of `data`, a compression pointer is truncated, or the chain of
+/// compression pointers exceeds the maximum jump count.
 pub fn decode_name(data: &[u8], offset: &mut usize) -> Result<String, DnsError> {
+    const MAX_JUMPS: usize = 16;
     let mut labels: Vec<String> = Vec::new();
     let mut current = *offset;
     let mut jumped = false;
     let mut jump_count = 0;
-    const MAX_JUMPS: usize = 16;
 
     loop {
         if current >= data.len() {
@@ -507,11 +524,19 @@ pub fn decode_name(data: &[u8], offset: &mut usize) -> Result<String, DnsError> 
 ///
 /// Returns the raw bytes suitable for sending over UDP to a DNS server.
 /// Uses transaction ID 0x1234 (caller should randomize for production use).
+///
+/// # Errors
+///
+/// Propagates [`DnsError::InvalidName`] from [`encode_name`].
 pub fn serialize_query(name: &str, qtype: DnsType) -> Result<Vec<u8>, DnsError> {
     serialize_query_with_id(0x1234, name, qtype)
 }
 
 /// Serializes a DNS query with a specified transaction ID.
+///
+/// # Errors
+///
+/// Propagates [`DnsError::InvalidName`] from [`encode_name`].
 pub fn serialize_query_with_id(id: u16, name: &str, qtype: DnsType) -> Result<Vec<u8>, DnsError> {
     let mut buf = Vec::with_capacity(64);
 
@@ -536,6 +561,14 @@ pub fn serialize_query_with_id(id: u16, name: &str, qtype: DnsType) -> Result<Ve
 ///
 /// Handles all standard sections (question, answer, authority, additional)
 /// and supports name compression pointers throughout.
+///
+/// # Errors
+///
+/// Returns [`DnsError::InvalidResponse`] if `data` is shorter than the
+/// DNS header, is truncated mid-record, or contains malformed names.
+/// Returns [`DnsError::ServerFailure`], [`DnsError::NameNotFound`], or
+/// [`DnsError::Refused`] when the response RCODE indicates a server-side
+/// failure.
 pub fn parse_response(data: &[u8]) -> Result<DnsMessage, DnsError> {
     if data.len() < 12 {
         return Err(DnsError::InvalidResponse(
@@ -816,9 +849,9 @@ pub fn parse_hosts(content: &str) -> Vec<HostEntry> {
             continue;
         }
 
-        let addr = match IpAddr::from_str(parts[0]) {
-            Ok(a) => a,
-            Err(_) => continue, // Skip lines with invalid IPs
+        // Skip lines with invalid IPs.
+        let Ok(addr) = IpAddr::from_str(parts[0]) else {
+            continue;
         };
 
         let hostname = parts[1].to_string();
@@ -840,13 +873,12 @@ pub fn lookup_hosts(entries: &[HostEntry], hostname: &str) -> Vec<IpAddr> {
     let mut results = Vec::new();
 
     for entry in entries {
-        if entry.hostname.to_lowercase() == hostname_lower {
-            results.push(entry.addr);
-        } else if entry
+        let matches_primary = entry.hostname.to_lowercase() == hostname_lower;
+        let matches_alias = entry
             .aliases
             .iter()
-            .any(|a| a.to_lowercase() == hostname_lower)
-        {
+            .any(|a| a.to_lowercase() == hostname_lower);
+        if matches_primary || matches_alias {
             results.push(entry.addr);
         }
     }
@@ -1020,10 +1052,10 @@ pub fn parse_resolv_conf(content: &str) -> ResolverConfig {
 
         match parts[0] {
             "nameserver" => {
-                if let Some(&addr_str) = parts.get(1) {
-                    if let Ok(addr) = IpAddr::from_str(addr_str) {
-                        config.nameservers.push(addr);
-                    }
+                if let Some(&addr_str) = parts.get(1)
+                    && let Ok(addr) = IpAddr::from_str(addr_str)
+                {
+                    config.nameservers.push(addr);
                 }
             }
             "search" | "domain" => {
@@ -1031,14 +1063,14 @@ pub fn parse_resolv_conf(content: &str) -> ResolverConfig {
             }
             "options" => {
                 for &opt in &parts[1..] {
-                    if let Some(val) = opt.strip_prefix("timeout:") {
-                        if let Ok(secs) = val.parse::<u32>() {
-                            config.timeout_ms = secs.saturating_mul(1000);
-                        }
-                    } else if let Some(val) = opt.strip_prefix("attempts:") {
-                        if let Ok(n) = val.parse::<u32>() {
-                            config.attempts = n;
-                        }
+                    if let Some(val) = opt.strip_prefix("timeout:")
+                        && let Ok(secs) = val.parse::<u32>()
+                    {
+                        config.timeout_ms = secs.saturating_mul(1000);
+                    } else if let Some(val) = opt.strip_prefix("attempts:")
+                        && let Ok(n) = val.parse::<u32>()
+                    {
+                        config.attempts = n;
                     }
                 }
             }
@@ -1118,6 +1150,12 @@ impl Resolver {
     ///
     /// Checks sources in order: hosts file, cache, then DNS query.
     /// Both A (IPv4) and AAAA (IPv6) records are returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DnsError::InvalidName`] if `hostname` is empty.
+    /// Returns [`DnsError::NetworkError`] if no hosts/cache entry matches
+    /// and the UDP transport is not yet wired up.
     pub fn resolve(&mut self, hostname: &str) -> Result<Vec<IpAddr>, DnsError> {
         // Validate hostname
         if hostname.is_empty() {
@@ -1162,6 +1200,12 @@ impl Resolver {
     /// Queries for specific DNS record types.
     ///
     /// Returns matching records from cache or by querying nameservers.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DnsError::InvalidName`] if `name` is empty.
+    /// Returns [`DnsError::NetworkError`] if no cache entry matches and
+    /// the UDP transport is not yet wired up.
     pub fn query(&mut self, name: &str, qtype: DnsType) -> Result<Vec<DnsRecord>, DnsError> {
         if name.is_empty() {
             return Err(DnsError::InvalidName("empty name".to_string()));
@@ -1198,7 +1242,10 @@ impl Resolver {
     /// Returns a monotonic timestamp in seconds.
     ///
     /// Stub implementation returns 0; a full implementation would use the
-    /// kernel's monotonic clock.
+    /// kernel's monotonic clock.  Kept as a method (not an associated
+    /// function) so that wiring up `&self.config`/per-resolver state later
+    /// is non-breaking.
+    #[allow(clippy::unused_self)]
     fn current_time(&self) -> u64 {
         // TODO: integrate with OurOS monotonic clock
         0

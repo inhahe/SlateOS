@@ -1444,7 +1444,11 @@ mod tests {
         response.extend_from_slice(&[0x00, 0x00]); // ARCOUNT=0
 
         let result = parse_response(&response);
-        assert_eq!(result, Err(DnsError::NameNotFound));
+        // `DnsMessage` does not implement `Debug`/`PartialEq` (deliberate —
+        // these are large structures and we don't want the cost in production
+        // code), so we can't use `assert_eq!` on `Result<DnsMessage, _>`.
+        // `matches!` checks the error variant without requiring those traits.
+        assert!(matches!(result, Err(DnsError::NameNotFound)));
     }
 
     #[test]

@@ -5,14 +5,34 @@
 //!   -s  show only total for each argument
 //!   -a  show sizes for all files, not just directories
 //!   Default: show each directory's total recursively.
+//!
+//! Built only on unix-family targets (our x86_64-ouros presents as
+//! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
+//! Windows when running `cargo test --workspace`), a stub `main` keeps
+//! the workspace compile-clean.
 
+#![cfg_attr(not(unix), allow(dead_code))]
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("du: unix-only utility; not supported on this platform");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::env;
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::io::{self, Write};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut human = false;
@@ -62,6 +82,7 @@ fn main() {
     process::exit(exit_code);
 }
 
+#[cfg(unix)]
 fn compute_du(
     path: &Path,
     summary: bool,
@@ -118,6 +139,7 @@ fn compute_du(
     Ok(total)
 }
 
+#[cfg(unix)]
 fn print_size(out: &mut impl Write, bytes: u64, path: &str, human: bool) {
     if human {
         let _ = writeln!(out, "{}\t{}", human_size(bytes), path);
@@ -127,6 +149,7 @@ fn print_size(out: &mut impl Write, bytes: u64, path: &str, human: bool) {
     }
 }
 
+#[cfg(unix)]
 fn human_size(bytes: u64) -> String {
     if bytes >= 1_073_741_824 {
         format!("{:.1}G", bytes as f64 / 1_073_741_824.0)

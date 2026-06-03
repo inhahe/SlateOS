@@ -6,3 +6,8 @@ description = "Stub symbols needed by Rust std that our POSIX layer doesn't prov
 
 [lib]
 crate-type = ["staticlib"]
+# ouros-stubs provides its own `panic_handler` for the bare-metal
+# `x86_64-ouros` target.  Host-side `cargo test` cannot link it because
+# `std` already supplies a `panic_impl`.  Tests for the stub symbols
+# must run under the bare-metal target via the kernel boot-test harness.
+test = false

@@ -2501,7 +2501,7 @@ mod tests {
 
     #[test]
     fn luks_add_key_no_device() {
-        let (code, out) = run_cryptsetup(&["luksAddKey"]);
+        let (code, _out) = run_cryptsetup(&["luksAddKey"]);
         assert_eq!(code, 1);
     }
 

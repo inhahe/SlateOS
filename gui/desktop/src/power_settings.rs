@@ -1102,6 +1102,7 @@ mod tests {
 
     #[test]
     fn spatial_audio_labels() {
+        use crate::sound_settings::SpatialAudioMode;
         for m in SpatialAudioMode::ALL {
             let _ = m.label();
         }

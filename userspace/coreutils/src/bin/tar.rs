@@ -6,14 +6,34 @@
 //!
 //! Supports basic POSIX/ustar tar format (uncompressed).
 //! Files > 8GB and paths > 255 chars are not supported.
+//!
+//! Built only on unix-family targets (our x86_64-ouros presents as
+//! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
+//! Windows when running `cargo test --workspace`), a stub `main` keeps
+//! the workspace compile-clean.
 
+#![cfg_attr(not(unix), allow(dead_code))]
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("tar: unix-only utility; not supported on this platform");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::env;
+#[cfg(unix)]
 use std::fs::{self, File};
+#[cfg(unix)]
 use std::io::{self, Read, Write};
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut create = false;
@@ -74,8 +94,10 @@ fn main() {
 // TAR header format (512 bytes, POSIX ustar)
 // ============================================================================
 
+#[cfg(unix)]
 const BLOCK_SIZE: usize = 512;
 
+#[cfg(unix)]
 #[repr(C)]
 struct TarHeader {
     name: [u8; 100],
@@ -97,6 +119,7 @@ struct TarHeader {
     _pad: [u8; 12],
 }
 
+#[cfg(unix)]
 impl TarHeader {
     fn new() -> Self {
         Self {
@@ -155,6 +178,7 @@ impl TarHeader {
     }
 }
 
+#[cfg(unix)]
 fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) {
     let mut out: Box<dyn Write> = match archive_file {
         Some(path) => match File::create(path) {
@@ -182,6 +206,7 @@ fn do_create(archive_file: &Option<String>, files: &[String], verbose: bool) {
     let _ = out.write_all(&zero_block);
 }
 
+#[cfg(unix)]
 fn add_directory_recursive(dir: &Path, prefix: &str, out: &mut dyn Write, verbose: bool) {
     // Add directory entry
     let mut header = TarHeader::new();
@@ -222,6 +247,7 @@ fn add_directory_recursive(dir: &Path, prefix: &str, out: &mut dyn Write, verbos
     }
 }
 
+#[cfg(unix)]
 fn add_file(path: &Path, name: &str, out: &mut dyn Write, verbose: bool) {
     let meta = match fs::metadata(path) {
         Ok(m) => m,
@@ -265,6 +291,7 @@ fn add_file(path: &Path, name: &str, out: &mut dyn Write, verbose: bool) {
     }
 }
 
+#[cfg(unix)]
 fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: bool) {
     let mut input: Box<dyn Read> = match archive_file {
         Some(path) => match File::open(path) {
@@ -346,6 +373,7 @@ fn do_extract(archive_file: &Option<String>, directory: Option<&str>, verbose: b
     }
 }
 
+#[cfg(unix)]
 fn do_list(archive_file: &Option<String>) {
     let mut input: Box<dyn Read> = match archive_file {
         Some(path) => match File::open(path) {
@@ -386,11 +414,13 @@ fn do_list(archive_file: &Option<String>) {
     }
 }
 
+#[cfg(unix)]
 fn extract_string(buf: &[u8]) -> String {
     let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
     String::from_utf8_lossy(&buf[..end]).to_string()
 }
 
+#[cfg(unix)]
 fn parse_octal(buf: &[u8]) -> u64 {
     let s = extract_string(buf);
     u64::from_str_radix(s.trim(), 8).unwrap_or(0)

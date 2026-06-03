@@ -4,18 +4,38 @@
 //!   -R  operate recursively on directories.
 //!
 //! OWNER and GROUP are numeric UIDs/GIDs (name lookup not yet supported).
+//!
+//! Built only on unix-family targets (our x86_64-ouros presents as
+//! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
+//! Windows when running `cargo test --workspace`), a stub `main` keeps
+//! the workspace compile-clean.
 
+#![cfg_attr(not(unix), allow(dead_code))]
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("chown: unix-only utility; not supported on this platform");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::env;
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::process;
 
 // libc-level chown — our POSIX layer provides this.
+#[cfg(unix)]
 unsafe extern "C" {
     fn chown(path: *const u8, owner: u32, group: u32) -> i32;
 }
 
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut recursive = false;
@@ -54,6 +74,7 @@ fn main() {
     process::exit(exit_code);
 }
 
+#[cfg(unix)]
 fn parse_owner_group(spec: &str) -> (Option<u32>, Option<u32>) {
     if let Some((owner_str, group_str)) = spec.split_once(':') {
         let uid = if owner_str.is_empty() {
@@ -82,6 +103,7 @@ fn parse_owner_group(spec: &str) -> (Option<u32>, Option<u32>) {
     }
 }
 
+#[cfg(unix)]
 fn chown_recursive(dir: &Path, uid: Option<u32>, gid: Option<u32>) -> Result<(), String> {
     apply_chown(dir, uid, gid)?;
 
@@ -98,6 +120,7 @@ fn chown_recursive(dir: &Path, uid: Option<u32>, gid: Option<u32>) -> Result<(),
     Ok(())
 }
 
+#[cfg(unix)]
 fn apply_chown(path: &Path, uid: Option<u32>, gid: Option<u32>) -> Result<(), String> {
     let meta = fs::metadata(path).map_err(|e| format!("{e}"))?;
     let actual_uid = uid.unwrap_or_else(|| meta.uid());

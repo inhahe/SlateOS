@@ -3,13 +3,32 @@
 //! Usage: chmod [-R] MODE FILE...
 //!   MODE is an octal number (e.g. 755) or symbolic (e.g. u+x,g-w).
 //!   -R  operate recursively on directories.
+//!
+//! Built only on unix-family targets (our x86_64-ouros presents as
+//! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
+//! Windows when running `cargo test --workspace`), a stub `main` keeps
+//! the workspace compile-clean.
 
+#![cfg_attr(not(unix), allow(dead_code))]
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("chmod: unix-only utility; not supported on this platform");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::env;
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::path::Path;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     let mut recursive = false;
@@ -48,6 +67,7 @@ fn main() {
     process::exit(exit_code);
 }
 
+#[cfg(unix)]
 fn chmod_recursive(dir: &Path, mode_str: &str) -> Result<(), String> {
     apply_chmod(dir, mode_str)?;
 
@@ -64,6 +84,7 @@ fn chmod_recursive(dir: &Path, mode_str: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn apply_chmod(path: &Path, mode_str: &str) -> Result<(), String> {
     // Try octal first
     if let Ok(mode) = u32::from_str_radix(mode_str, 8) {
@@ -81,6 +102,7 @@ fn apply_chmod(path: &Path, mode_str: &str) -> Result<(), String> {
 }
 
 /// Parse symbolic mode like "u+x,g-w,o=r" and apply to current mode.
+#[cfg(unix)]
 fn parse_symbolic(current: u32, spec: &str) -> Result<u32, String> {
     let mut mode = current & 0o7777; // keep only permission bits
 

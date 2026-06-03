@@ -169,7 +169,7 @@ pub struct Credential {
 }
 
 /// Metadata view of a credential (no secret data exposed).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CredentialMetadata {
     pub id: u64,
     pub name: String,

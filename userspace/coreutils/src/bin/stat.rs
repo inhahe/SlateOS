@@ -2,12 +2,30 @@
 //!
 //! Usage: stat FILE...
 //!   Shows file type, permissions, size, timestamps, etc.
+//!
+//! Built only on unix-family targets (our x86_64-ouros presents as
+//! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
+//! Windows when running `cargo test --workspace`), a stub `main` keeps
+//! the workspace compile-clean.
 
+#![cfg_attr(not(unix), allow(dead_code))]
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("stat: unix-only utility; not supported on this platform");
+    std::process::exit(1);
+}
+
+#[cfg(unix)]
 use std::env;
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
 
@@ -33,6 +51,7 @@ fn main() {
     process::exit(exit_code);
 }
 
+#[cfg(unix)]
 fn show_stat(path: &str) -> Result<(), String> {
     let meta = fs::symlink_metadata(path).map_err(|e| format!("{e}"))?;
 
@@ -92,6 +111,7 @@ fn show_stat(path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn format_mode(mode: u32) -> String {
     let file_type = match mode & 0o170000 {
         0o140000 => 's', // socket
@@ -142,6 +162,7 @@ fn format_mode(mode: u32) -> String {
     s
 }
 
+#[cfg(unix)]
 fn format_timestamp(epoch_secs: i64) -> String {
     if epoch_secs <= 0 {
         return "0".to_string();
@@ -182,6 +203,7 @@ fn format_timestamp(epoch_secs: i64) -> String {
     format!("{year}-{month:02}-{day:02} {h:02}:{m:02}:{s:02}")
 }
 
+#[cfg(unix)]
 fn is_leap(y: u64) -> bool {
     (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
 }

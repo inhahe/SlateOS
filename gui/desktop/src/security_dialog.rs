@@ -1479,7 +1479,9 @@ mod tests {
 
         let event = KeyEvent {
             key: Key::Enter,
+            pressed: true,
             modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            text: None,
         };
         assert!(dialog.handle_key_event(&event));
         let events = dialog.drain_events();
@@ -1493,7 +1495,9 @@ mod tests {
 
         let event = KeyEvent {
             key: Key::Escape,
+            pressed: true,
             modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            text: None,
         };
         assert!(dialog.handle_key_event(&event));
         let events = dialog.drain_events();
@@ -1508,7 +1512,9 @@ mod tests {
 
         let event = KeyEvent {
             key: Key::D,
+            pressed: true,
             modifiers: Modifiers { ctrl: true, alt: false, shift: false, super_key: false },
+            text: None,
         };
         assert!(dialog.handle_key_event(&event));
         let events = dialog.drain_events();
@@ -1523,7 +1529,9 @@ mod tests {
 
         let event = KeyEvent {
             key: Key::Space,
+            pressed: true,
             modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            text: None,
         };
         dialog.handle_key_event(&event);
         assert!(dialog.details_expanded);
@@ -1540,7 +1548,9 @@ mod tests {
 
         let event = KeyEvent {
             key: Key::R,
+            pressed: true,
             modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            text: None,
         };
         dialog.handle_key_event(&event);
         assert!(dialog.remember);
@@ -1551,7 +1561,9 @@ mod tests {
         let dialog = SecurityDialog::new();
         let event = KeyEvent {
             key: Key::Enter,
+            pressed: true,
             modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            text: None,
         };
         // Can't call on immutable ref; need mutable
         let mut dialog = dialog;
@@ -1565,7 +1577,9 @@ mod tests {
 
         let tab = KeyEvent {
             key: Key::Tab,
+            pressed: true,
             modifiers: Modifiers { ctrl: false, alt: false, shift: false, super_key: false },
+            text: None,
         };
 
         assert_eq!(dialog.hovered_button, None);

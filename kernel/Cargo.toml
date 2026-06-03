@@ -13,7 +13,13 @@ log = "0.4"
 [lints]
 workspace = true
 
-# Kernel is a bare-metal binary, not a library.
+# Kernel is a bare-metal binary, not a library. Host-side `cargo test`
+# cannot link the kernel because it provides its own `panic_impl` lang
+# item (and other no_std machinery) that conflicts with the host `std`.
+# Kernel tests must run under the bare-metal target via the boot-test
+# harness; disable the host test binary so `cargo test --workspace` is
+# clean on a normal dev host.
 [[bin]]
 name = "kernel"
 path = "src/main.rs"
+test = false

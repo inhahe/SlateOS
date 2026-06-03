@@ -10,12 +10,30 @@
 //!                 STR1 = STR2, STR1 != STR2
 //!   Integer tests: N1 -eq N2, -ne, -lt, -le, -gt, -ge
 //!   Logical: ! EXPR, EXPR -a EXPR, EXPR -o EXPR
+//!
+//! Built only on unix-family targets (our x86_64-ouros presents as
+//! linux-musl, so `cfg(unix)` matches).  On non-unix hosts (e.g.
+//! Windows when running `cargo test --workspace`), a stub `main` keeps
+//! the workspace compile-clean.
 
+#![cfg_attr(not(unix), allow(dead_code))]
+
+#[cfg(not(unix))]
+fn main() {
+    eprintln!("test: unix-only utility; not supported on this platform");
+    std::process::exit(2);
+}
+
+#[cfg(unix)]
 use std::env;
+#[cfg(unix)]
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::process;
 
+#[cfg(unix)]
 fn main() {
     let args: Vec<String> = env::args().collect();
     let prog = &args[0];
@@ -35,6 +53,7 @@ fn main() {
     process::exit(if result { 0 } else { 1 });
 }
 
+#[cfg(unix)]
 fn evaluate(args: &[String]) -> bool {
     if args.is_empty() {
         return false;
@@ -110,6 +129,7 @@ fn evaluate(args: &[String]) -> bool {
     false
 }
 
+#[cfg(unix)]
 fn int_cmp(a: &str, b: &str, cmp: impl Fn(i64, i64) -> bool) -> bool {
     let x = a.parse::<i64>().unwrap_or(0);
     let y = b.parse::<i64>().unwrap_or(0);

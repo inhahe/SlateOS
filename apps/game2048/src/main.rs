@@ -257,8 +257,8 @@ impl GameState {
                         self.grid[3][c],
                     ];
                     let (new_col, pts, moved) = Self::slide_row_left(&col);
-                    for r in 0..GRID_SIZE {
-                        self.grid[r][c] = new_col[r];
+                    for (r, val) in new_col.iter().enumerate() {
+                        self.grid[r][c] = *val;
                     }
                     total_points = total_points.saturating_add(pts);
                     if moved {
@@ -277,8 +277,8 @@ impl GameState {
                     col.reverse();
                     let (mut new_col, pts, moved) = Self::slide_row_left(&col);
                     new_col.reverse();
-                    for r in 0..GRID_SIZE {
-                        self.grid[r][c] = new_col[r];
+                    for (r, val) in new_col.iter().enumerate() {
+                        self.grid[r][c] = *val;
                     }
                     total_points = total_points.saturating_add(pts);
                     if moved {
@@ -501,10 +501,7 @@ impl Game2048App {
     }
 
     fn handle_event(&mut self, event: &Event) {
-        match event {
-            Event::Key(ke) => self.handle_key(ke),
-            _ => {}
-        }
+        if let Event::Key(ke) = event { self.handle_key(ke) }
     }
 
     // -----------------------------------------------------------------------

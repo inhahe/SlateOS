@@ -223,8 +223,8 @@ impl FloodIt {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. }) => {
-                if *modifiers == Modifiers::NONE {
+            Event::Key(KeyEvent { key, modifiers, .. })
+                if *modifiers == Modifiers::NONE => {
                     match key {
                         Key::Num1 => self.choose_color(0),
                         Key::Num2 => self.choose_color(1),
@@ -240,7 +240,6 @@ impl FloodIt {
                         _ => {}
                     }
                 }
-            }
             Event::Mouse(MouseEvent { x, y, kind }) => {
                 if matches!(kind, MouseEventKind::Press(MouseButton::Left)) {
                     self.handle_mouse(*x, *y);
@@ -323,7 +322,7 @@ impl FloodIt {
                 x: bx + 5.0,
                 y: btn_y + 6.0,
                 text: format!("{} {}", i + 1, PALETTE_LABELS[i]),
-                color: if is_current { CRUST } else { CRUST },
+                color: CRUST,
                 font_size: 12.0,
                 font_weight: FontWeightHint::Bold,
                 max_width: None,

@@ -60,7 +60,7 @@ struct Date {
 
 impl Date {
     fn new(year: i32, month: u32, day: u32) -> Option<Self> {
-        if month < 1 || month > 12 {
+        if !(1..=12).contains(&month) {
             return None;
         }
         let max_d = days_in_month(year, month);
@@ -673,11 +673,10 @@ impl HabitTrackerApp {
             if h.archived {
                 continue;
             }
-            if let Some(cat) = self.category_filter {
-                if h.category != cat {
+            if let Some(cat) = self.category_filter
+                && h.category != cat {
                     continue;
                 }
-            }
             indices.push(i);
         }
         indices
@@ -790,11 +789,10 @@ impl HabitTrackerApp {
                 self.show_create_form = true;
                 self.status_msg = String::from("New habit -- fill in details");
             }
-            "Up" => {
-                if self.selected_habit > 0 {
+            "Up"
+                if self.selected_habit > 0 => {
                     self.selected_habit -= 1;
                 }
-            }
             "Down" => {
                 let max = match self.screen {
                     Screen::Dashboard => self.active_habits().len(),
@@ -842,14 +840,13 @@ impl HabitTrackerApp {
                     self.delete_habit(idx);
                 }
             }
-            "a" | "A" if !ctrl => {
-                if self.screen == Screen::Dashboard {
+            "a" | "A" if !ctrl
+                && self.screen == Screen::Dashboard => {
                     let active = self.active_habits();
                     if let Some(&idx) = active.get(self.selected_habit) {
                         self.archive_habit(idx);
                     }
                 }
-            }
             "+" | "=" => self.advance_day(),
             "-" => self.go_back_day(),
             "c" | "C" => {
@@ -918,11 +915,10 @@ impl HabitTrackerApp {
         let total = active.len() as u32;
         let mut done = 0u32;
         for &idx in &active {
-            if let Some(h) = self.habits.get(idx) {
-                if h.is_checked_on(self.today) {
+            if let Some(h) = self.habits.get(idx)
+                && h.is_checked_on(self.today) {
                     done += 1;
                 }
-            }
         }
         (done, total)
     }
@@ -1478,6 +1474,9 @@ impl HabitTrackerApp {
         }
     }
 
+    // Stat-card render takes self + cmds + rect (x,y,w,h) + 2 labels + accent
+    // color. Grouping would not improve clarity.
+    #[allow(clippy::too_many_arguments)]
     fn render_stat_card(
         &self, cmds: &mut Vec<RenderCommand>,
         x: f32, y: f32, w: f32, h: f32,

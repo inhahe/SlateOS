@@ -410,8 +410,8 @@ impl Board {
         // Sort candidates by a quick heuristic: prefer moves closer to center
         let center = BOARD_SIZE as i32 / 2;
         moves.sort_by_key(|&(r, c)| {
-            let dist = (r as i32 - center).abs() + (c as i32 - center).abs();
-            dist
+            
+            (r as i32 - center).abs() + (c as i32 - center).abs()
         });
 
         moves
@@ -717,22 +717,20 @@ impl GomokuApp {
         }
 
         // Undo AI move (White) if the last move was by White
-        if let Some(last) = self.move_history.last() {
-            if last.stone == Cell::White {
+        if let Some(last) = self.move_history.last()
+            && last.stone == Cell::White {
                 let record = self.move_history.pop().expect("just checked non-empty");
                 self.board.set(record.row, record.col, Cell::Empty);
                 self.move_count = self.move_count.saturating_sub(1);
             }
-        }
 
         // Undo player move (Black)
-        if let Some(last) = self.move_history.last() {
-            if last.stone == Cell::Black {
+        if let Some(last) = self.move_history.last()
+            && last.stone == Cell::Black {
                 let record = self.move_history.pop().expect("just checked non-empty");
                 self.board.set(record.row, record.col, Cell::Empty);
                 self.move_count = self.move_count.saturating_sub(1);
             }
-        }
 
         // Update current turn and last_move
         self.current_turn = Cell::Black;
@@ -743,26 +741,22 @@ impl GomokuApp {
     fn handle_key(&mut self, event: &KeyEvent) {
         match event {
             // Arrow key movement
-            KeyEvent { key: Key::Up, .. } => {
-                if self.cursor_row > 0 {
+            KeyEvent { key: Key::Up, .. }
+                if self.cursor_row > 0 => {
                     self.cursor_row -= 1;
                 }
-            }
-            KeyEvent { key: Key::Down, .. } => {
-                if self.cursor_row < BOARD_SIZE as i32 - 1 {
+            KeyEvent { key: Key::Down, .. }
+                if self.cursor_row < BOARD_SIZE as i32 - 1 => {
                     self.cursor_row += 1;
                 }
-            }
-            KeyEvent { key: Key::Left, .. } => {
-                if self.cursor_col > 0 {
+            KeyEvent { key: Key::Left, .. }
+                if self.cursor_col > 0 => {
                     self.cursor_col -= 1;
                 }
-            }
-            KeyEvent { key: Key::Right, .. } => {
-                if self.cursor_col < BOARD_SIZE as i32 - 1 {
+            KeyEvent { key: Key::Right, .. }
+                if self.cursor_col < BOARD_SIZE as i32 - 1 => {
                     self.cursor_col += 1;
                 }
-            }
 
             // Place stone
             KeyEvent { key: Key::Enter, .. } | KeyEvent { key: Key::Space, .. } => {

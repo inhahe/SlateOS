@@ -707,12 +707,11 @@ impl GameState {
                 // Undo auto-moves recursively (they chain).
                 if matches!(action, UndoAction::AutoMove { .. }) {
                     // Keep undoing auto-moves.
-                    if let Some(next) = self.undo_stack.last() {
-                        if matches!(next, UndoAction::AutoMove { .. }) {
+                    if let Some(next) = self.undo_stack.last()
+                        && matches!(next, UndoAction::AutoMove { .. }) {
                             self.undo();
                             return;
                         }
-                    }
                 }
                 if self.move_count > 0 {
                     self.move_count -= 1;
@@ -772,10 +771,7 @@ impl GameState {
     /// Handle a key event.
     fn handle_key(&mut self, key: Key, _modifiers: Modifiers) {
         if self.won {
-            match key {
-                Key::N => self.new_game(),
-                _ => {}
-            }
+            if key == Key::N { self.new_game() }
             return;
         }
 
@@ -1327,16 +1323,13 @@ impl FreeCell {
     }
 
     fn handle_event(&mut self, event: Event) {
-        match event {
-            Event::Key(KeyEvent {
+        if let Event::Key(KeyEvent {
                 key,
                 modifiers,
                 pressed: true,
                 ..
-            }) => {
-                self.state.handle_key(key, modifiers);
-            }
-            _ => {}
+            }) = event {
+            self.state.handle_key(key, modifiers);
         }
     }
 

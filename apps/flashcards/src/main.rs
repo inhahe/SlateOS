@@ -314,7 +314,7 @@ impl Deck {
             .enumerate()
             .filter(|(_, c)| {
                 let search_ok = c.matches_search(query);
-                let tag_ok = tag_filter.map_or(true, |t| c.has_tag(t));
+                let tag_ok = tag_filter.is_none_or(|t| c.has_tag(t));
                 search_ok && tag_ok
             })
             .map(|(i, _)| i)
@@ -666,11 +666,10 @@ impl FlashcardsApp {
         };
 
         // Apply SM-2 to the card in the deck
-        if let Some(deck) = self.decks.get_mut(deck_idx) {
-            if let Some(card) = deck.cards.get_mut(card_idx) {
+        if let Some(deck) = self.decks.get_mut(deck_idx)
+            && let Some(card) = deck.cards.get_mut(card_idx) {
                 card.review.apply_rating(rating, day);
             }
-        }
 
         // Advance to next card
         if let Some(session) = &mut self.study_session {
@@ -729,8 +728,8 @@ impl FlashcardsApp {
 
         if let Some(card_id) = self.editing_card_id {
             // Update existing card
-            if let Some(deck) = self.current_deck_mut() {
-                if let Some(card) = deck.find_card_mut(card_id) {
+            if let Some(deck) = self.current_deck_mut()
+                && let Some(card) = deck.find_card_mut(card_id) {
                     card.front = front;
                     card.back = back;
                     card.tags = tags;
@@ -738,7 +737,6 @@ impl FlashcardsApp {
                     self.view = AppView::DeckDetail;
                     return true;
                 }
-            }
         } else {
             // Create new card
             if let Some(deck) = self.current_deck_mut() {
@@ -757,17 +755,15 @@ impl FlashcardsApp {
 
     fn delete_selected_card(&mut self) {
         let matching = self.matching_card_indices();
-        if let Some(&card_list_idx) = matching.get(self.selected_card) {
-            if let Some(deck) = self.current_deck_mut() {
-                if card_list_idx < deck.cards.len() {
+        if let Some(&card_list_idx) = matching.get(self.selected_card)
+            && let Some(deck) = self.current_deck_mut()
+                && card_list_idx < deck.cards.len() {
                     deck.cards.remove(card_list_idx);
                     self.status_msg = String::from("Card deleted");
                     if self.selected_card > 0 && self.selected_card >= matching.len().saturating_sub(1) {
                         self.selected_card = self.selected_card.saturating_sub(1);
                     }
                 }
-            }
-        }
     }
 
     fn matching_card_indices(&self) -> Vec<usize> {
@@ -791,16 +787,14 @@ impl FlashcardsApp {
 
     fn handle_key_deck_list(&mut self, key: &str, _ctrl: bool) {
         match key {
-            "Up" | "k" => {
-                if self.selected_deck > 0 {
+            "Up" | "k"
+                if self.selected_deck > 0 => {
                     self.selected_deck -= 1;
                 }
-            }
-            "Down" | "j" => {
-                if self.selected_deck + 1 < self.decks.len() {
+            "Down" | "j"
+                if self.selected_deck + 1 < self.decks.len() => {
                     self.selected_deck += 1;
                 }
-            }
             "Enter" => self.select_deck(self.selected_deck),
             "n" => self.add_deck("New Deck", ""),
             "Delete" | "x" => {
@@ -818,12 +812,11 @@ impl FlashcardsApp {
                 self.search_query.clear();
                 self.tag_filter = None;
             }
-            "Up" | "k" => {
-                if self.selected_card > 0 {
+            "Up" | "k"
+                if self.selected_card > 0 => {
                     self.selected_card -= 1;
                     self.ensure_card_visible();
                 }
-            }
             "Down" | "j" => {
                 let count = self.matching_card_indices().len();
                 if self.selected_card + 1 < count {
@@ -836,14 +829,12 @@ impl FlashcardsApp {
             "n" => self.open_new_card_editor(),
             "e" => {
                 let matching = self.matching_card_indices();
-                if let Some(&idx) = matching.get(self.selected_card) {
-                    if let Some(deck) = self.current_deck() {
-                        if let Some(card) = deck.cards.get(idx) {
+                if let Some(&idx) = matching.get(self.selected_card)
+                    && let Some(deck) = self.current_deck()
+                        && let Some(card) = deck.cards.get(idx) {
                             let cid = card.id;
                             self.open_edit_card(cid);
                         }
-                    }
-                }
             }
             "Delete" | "x" => self.delete_selected_card(),
             "d" => self.advance_day(),
@@ -1302,8 +1293,8 @@ impl FlashcardsApp {
 
         let end = (self.scroll_offset + visible_count).min(matching.len());
         for (vis_i, list_i) in (self.scroll_offset..end).enumerate() {
-            if let Some(&card_idx) = matching.get(list_i) {
-                if let Some(card) = deck.cards.get(card_idx) {
+            if let Some(&card_idx) = matching.get(list_i)
+                && let Some(card) = deck.cards.get(card_idx) {
                     let y = rows_top + (vis_i as f32) * Self::CARD_ROW_H;
                     let is_selected = list_i == self.selected_card;
                     let bg = if is_selected { SURFACE1 } else { SURFACE0 };
@@ -1390,7 +1381,6 @@ impl FlashcardsApp {
                         max_width: Some(self.width * 0.45),
                     });
                 }
-            }
         }
 
         // Scroll indicator

@@ -78,11 +78,10 @@ fn glob_match_impl(pattern: &[u8], text: &[u8]) -> bool {
                 // Malformed class, treat as literal
                 if star_pi == usize::MAX {
                     return false;
-                } else {
-                    pi = star_pi.saturating_add(1);
-                    star_ti = star_ti.saturating_add(1);
-                    ti = star_ti;
                 }
+                pi = star_pi.saturating_add(1);
+                star_ti = star_ti.saturating_add(1);
+                ti = star_ti;
             }
         } else if star_pi != usize::MAX {
             pi = star_pi.saturating_add(1);
@@ -521,6 +520,7 @@ impl IndexEntry {
 pub struct FileIndex {
     entries: Vec<IndexEntry>,
     total_size: u64,
+    #[allow(dead_code)]
     last_updated: u64,
 }
 
@@ -624,7 +624,8 @@ impl FileIndex {
         let mut stats = BTreeMap::new();
         for entry in &self.entries {
             if !entry.extension.is_empty() {
-                *stats.entry(entry.extension.clone()).or_insert(0) += 1;
+                let slot = stats.entry(entry.extension.clone()).or_insert(0usize);
+                *slot = slot.saturating_add(1);
             }
         }
         stats
@@ -951,8 +952,10 @@ mod colors {
     pub const SUBTEXT0: Color = Color::from_hex(0xA6ADC8);
     pub const SUBTEXT1: Color = Color::from_hex(0xBAC2DE);
     pub const BLUE: Color = Color::from_hex(0x89B4FA);
+    #[allow(dead_code)]
     pub const GREEN: Color = Color::from_hex(0xA6E3A1);
     pub const _RED: Color = Color::from_hex(0xF38BA8);
+    #[allow(dead_code)]
     pub const YELLOW: Color = Color::from_hex(0xF9E2AF);
     pub const PEACH: Color = Color::from_hex(0xFAB387);
     pub const TEAL: Color = Color::from_hex(0x94E2D5);
@@ -1885,7 +1888,7 @@ fn populate_sample_index(index: &mut FileIndex) {
             name,
             *size,
             *modified,
-            *modified - 86400,
+            modified.saturating_sub(86400),
             false,
         ));
     }

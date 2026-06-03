@@ -6,6 +6,12 @@
 //   wipefs     - wipe filesystem signatures from a device
 
 #![cfg_attr(not(test), no_main)]
+// Filesystem magic numbers (XFS/NTFS/MD/SWAP), their byte offsets, and
+// the `TrimRange` field set are declared up-front because they encode
+// the on-disk and ioctl-ABI contract the real implementation must
+// speak. They are intentionally kept as documentation for the eventual
+// block-device integration; squashing them would erase that contract.
+#![allow(dead_code)]
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -319,9 +325,9 @@ fn parse_size(s: &[u8]) -> Result<u64, ()> {
 
     // Parse the numeric part
     let mut val: u64 = 0;
-    for i in 0..num_end {
+    for &byte in &s[..num_end] {
         val = val.checked_mul(10).ok_or(())?;
-        val = val.checked_add((s[i] - b'0') as u64).ok_or(())?;
+        val = val.checked_add((byte - b'0') as u64).ok_or(())?;
     }
 
     // Parse the suffix
@@ -357,8 +363,8 @@ fn parse_size(s: &[u8]) -> Result<u64, ()> {
 
 fn detect_tool(argv0: &[u8]) -> Tool {
     let mut start = 0;
-    for i in 0..argv0.len() {
-        if argv0[i] == b'/' || argv0[i] == b'\\' {
+    for (i, &b) in argv0.iter().enumerate() {
+        if b == b'/' || b == b'\\' {
             start = i + 1;
         }
     }
@@ -691,8 +697,13 @@ fn show_wipefs_help() {
 // In a real OS, these would issue FITRIM ioctl, BLKDISCARD ioctl, etc.
 // For now, we simulate the logic to demonstrate output formatting.
 
-/// Simulate FITRIM ioctl
-fn do_fstrim(mountpoint: &[u8], range: &TrimRange, verbose: bool, dry_run: bool) -> Result<u64, i32> {
+/// Simulate FITRIM ioctl.
+///
+/// The `_range` parameter documents intent — a real implementation would
+/// pass it down to the kernel as part of the FITRIM ioctl `struct
+/// fstrim_range`. The personality-CLI stub computes a representative
+/// trimmed-byte count without consulting the range.
+fn do_fstrim(mountpoint: &[u8], _range: &TrimRange, verbose: bool, dry_run: bool) -> Result<u64, i32> {
     // In a real implementation:
     // 1. Open the mountpoint
     // 2. Issue FITRIM ioctl with the range
@@ -726,8 +737,14 @@ fn do_fstrim(mountpoint: &[u8], range: &TrimRange, verbose: bool, dry_run: bool)
     Ok(trimmed)
 }
 
+/// One entry in the discard-capable mount table: mountpoint bytes,
+/// mountpoint length, filesystem-type bytes, filesystem-type length.
+/// A real implementation would parse /proc/self/mountinfo into something
+/// like this; the stub fills it from a hard-coded list.
+type DiscardMount = ([u8; MAX_PATH], usize, [u8; 32], usize);
+
 /// Get list of mounted filesystems that support discard
-fn get_discard_mounts() -> ([([u8; MAX_PATH], usize, [u8; 32], usize); 16], usize) {
+fn get_discard_mounts() -> ([DiscardMount; 16], usize) {
     // Simulated mount list
     let mounts: &[(&[u8], &[u8])] = &[
         (b"/", b"ext4"),
@@ -819,8 +836,13 @@ fn do_blkdiscard(device: &[u8], params: &DiscardParams, verbose: bool) -> Result
     Ok(())
 }
 
-/// Detect filesystem signatures on a device
-fn detect_signatures(device: &[u8]) -> ([Signature; MAX_SIGNATURES], usize) {
+/// Detect filesystem signatures on a device.
+///
+/// The `_device` parameter documents intent — a real implementation
+/// would open the block device, read the relevant superblock offsets,
+/// and pattern-match against known magic numbers (see XFS_MAGIC etc.
+/// above). The stub returns a fixed plausible set.
+fn detect_signatures(_device: &[u8]) -> ([Signature; MAX_SIGNATURES], usize) {
     let mut sigs = [Signature::new(); MAX_SIGNATURES];
     let mut count = 0;
 
@@ -875,8 +897,7 @@ fn show_signatures(device: &[u8], sigs: &[Signature], count: usize, opts: &Fstri
 
     if opts.output_parsable {
         // Parsable format: DEVICE OFFSET TYPE LABEL UUID
-        for i in 0..count {
-            let sig = &sigs[i];
+        for sig in sigs.iter().take(count) {
             let mut pos = copy_bytes(&mut buf, 0, device);
             pos = copy_bytes(&mut buf, pos, b" ");
             pos = copy_bytes(&mut buf, pos, b"0x");
@@ -899,8 +920,7 @@ fn show_signatures(device: &[u8], sigs: &[Signature], count: usize, opts: &Fstri
         print_out(b"DEVICE   OFFSET     TYPE   LABEL    UUID\n");
     }
 
-    for i in 0..count {
-        let sig = &sigs[i];
+    for sig in sigs.iter().take(count) {
         let mut pos = 0;
 
         // Device
@@ -947,9 +967,7 @@ fn show_signatures(device: &[u8], sigs: &[Signature], count: usize, opts: &Fstri
 fn wipe_signatures(device: &[u8], sigs: &[Signature], count: usize, opts: &FstrimOpts) -> i32 {
     let mut buf = [0u8; 512];
 
-    for i in 0..count {
-        let sig = &sigs[i];
-
+    for sig in sigs.iter().take(count) {
         // If -o specified, only wipe at that offset
         if opts.offset > 0 && sig.offset != opts.offset {
             continue;
@@ -973,8 +991,8 @@ fn wipe_signatures(device: &[u8], sigs: &[Signature], count: usize, opts: &Fstri
             // Device basename
             let mut dev_start = 0;
             let dev_path = device;
-            for j in 0..dev_path.len() {
-                if dev_path[j] == b'/' {
+            for (j, &b) in dev_path.iter().enumerate() {
+                if b == b'/' {
                     dev_start = j + 1;
                 }
             }
@@ -1053,8 +1071,8 @@ fn cmd_fstrim_all(opts: &FstrimOpts) -> i32 {
     let (mounts, count) = get_discard_mounts();
     let mut errors = 0;
 
-    for i in 0..count {
-        let mountpoint = &mounts[i].0[..mounts[i].1];
+    for mount in mounts.iter().take(count) {
+        let mountpoint = &mount.0[..mount.1];
         let range = TrimRange {
             start: opts.offset,
             len: opts.length,

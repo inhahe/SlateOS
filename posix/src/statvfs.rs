@@ -111,11 +111,17 @@ pub const ST_NOSUID: u64 = 2;
 const KERNEL_STATVFS_LEN: usize = 64;
 
 /// Read a little-endian `u64` at `off` from a kernel statvfs block.
+///
+/// Returns 0 if `off` would push the 8-byte read past the end of the
+/// fixed-size block. All in-tree callers pass static offsets that fit
+/// (0, 8, 16, 24, 32, 40 — see `fill_statvfs_from_raw`), so this is a
+/// defence-in-depth check that also satisfies clippy without panicking.
 #[cfg(any(target_os = "none", test))]
 fn rd_u64(raw: &[u8; KERNEL_STATVFS_LEN], off: usize) -> u64 {
-    let mut b = [0u8; 8];
-    b.copy_from_slice(&raw[off..off + 8]);
-    u64::from_le_bytes(b)
+    raw.get(off..)
+        .and_then(|s| s.get(..8))
+        .and_then(|s| <[u8; 8]>::try_from(s).ok())
+        .map_or(0, u64::from_le_bytes)
 }
 
 /// Translate a kernel statvfs block into a POSIX `struct statvfs`.

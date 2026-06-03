@@ -80,7 +80,7 @@ fn run_pnpm(args: &[String]) -> i32 {
         }
         "run" => {
             let script = args.get(1).map(|s| s.as_str()).unwrap_or("build");
-            println!("> {}@0.1.0 {}", "myapp", script);
+            println!("> myapp@0.1.0 {}", script);
             println!("> vite {}", script);
             println!("vite v5.3.3 building for production...");
             println!("Done.");

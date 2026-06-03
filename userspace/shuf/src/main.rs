@@ -941,7 +941,7 @@ mod tests {
     #[test]
     fn test_parse_number_none() {
         assert_eq!(parse_number_with_suffix("42", NumfmtUnit::None).unwrap(), 42.0);
-        assert_eq!(parse_number_with_suffix("3.14", NumfmtUnit::None).unwrap(), 3.14);
+        assert_eq!(parse_number_with_suffix("3.25", NumfmtUnit::None).unwrap(), 3.25);
         assert_eq!(parse_number_with_suffix("-100", NumfmtUnit::None).unwrap(), -100.0);
     }
 
@@ -969,7 +969,7 @@ mod tests {
     #[test]
     fn test_format_number_none() {
         assert_eq!(format_number(42.0, NumfmtUnit::None, "from-zero", None, None), "42");
-        assert_eq!(format_number(3.14, NumfmtUnit::None, "from-zero", None, None), "3.14");
+        assert_eq!(format_number(3.25, NumfmtUnit::None, "from-zero", None, None), "3.25");
     }
 
     #[test]
@@ -1086,8 +1086,8 @@ mod tests {
 
     #[test]
     fn test_apply_format_fixed() {
-        assert_eq!(apply_format(3.14159, "%.2f"), "3.14");
-        assert_eq!(apply_format(3.14159, "%.4f"), "3.1416");
+        assert_eq!(apply_format(3.252_55, "%.2f"), "3.25");
+        assert_eq!(apply_format(3.252_55, "%.4f"), "3.2526");
     }
 
     #[test]
@@ -1098,8 +1098,8 @@ mod tests {
 
     #[test]
     fn test_apply_format_f() {
-        let result = apply_format(3.14, "%f");
-        assert!(result.starts_with("3.14"));
+        let result = apply_format(3.25, "%f");
+        assert!(result.starts_with("3.25"));
     }
 
     // ── Extract suffix ──

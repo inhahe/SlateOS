@@ -36,7 +36,7 @@ fn run_geotiff(args: &[String], prog: &str) -> i32 {
     }
     if args.iter().any(|a| a == "--version") { println!("libgeotiff v1.7.1 (OurOS)"); return 0; }
     match prog {
-        "listgeo" | _ if prog != "geotifcp" && prog != "applygeo" => {
+        _ if prog != "geotifcp" && prog != "applygeo" => {
             println!("listgeo: GeoTIFF metadata");
             println!("  File: satellite.tif");
             println!("  Version: 1, Key revision: 1.0");

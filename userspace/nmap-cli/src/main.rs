@@ -41,8 +41,7 @@ fn run_nmap(args: Vec<String>) -> i32 {
     }
 
     let target = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("scanme.nmap.org");
 

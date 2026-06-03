@@ -2298,7 +2298,7 @@ mod tests {
     fn test_parse_negative() { assert_eq!(parse_json("-7").unwrap(), Value::Number(-7.0)); }
 
     #[test]
-    fn test_parse_float() { assert_eq!(parse_json("3.14").unwrap(), Value::Number(3.14)); }
+    fn test_parse_float() { assert_eq!(parse_json("3.25").unwrap(), Value::Number(3.25)); }
 
     #[test]
     fn test_parse_string() { assert_eq!(parse_json(r#""hello""#).unwrap(), Value::String("hello".into())); }

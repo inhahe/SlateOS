@@ -2440,8 +2440,8 @@ mod tests {
     #[test]
     fn test_parse_ansi_bold_italic() {
         let lines = parse_ansi("\x1b[1;3mbold italic\x1b[0m");
-        assert_eq!(lines[0][0].style.bold, true);
-        assert_eq!(lines[0][0].style.italic, true);
+        assert!(lines[0][0].style.bold);
+        assert!(lines[0][0].style.italic);
     }
 
     #[test]
@@ -2483,8 +2483,8 @@ mod tests {
     #[test]
     fn test_parse_ansi_underline_reverse() {
         let lines = parse_ansi("\x1b[4;7munderline reversed\x1b[0m");
-        assert_eq!(lines[0][0].style.underline, true);
-        assert_eq!(lines[0][0].style.reverse, true);
+        assert!(lines[0][0].style.underline);
+        assert!(lines[0][0].style.reverse);
     }
 
     // --- SimpleTextView scrolling tests ---

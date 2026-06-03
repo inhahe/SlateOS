@@ -3546,7 +3546,7 @@ mod tests {
             .filter_map(|&i| s.processes.get(i).map(|p| p.pid))
             .collect();
         for window in pids.windows(2) {
-            assert!(window.get(0).copied().unwrap_or(0) <= window.get(1).copied().unwrap_or(0));
+            assert!(window.first().copied().unwrap_or(0) <= window.get(1).copied().unwrap_or(0));
         }
     }
 
@@ -3563,7 +3563,7 @@ mod tests {
             .filter_map(|&i| s.processes.get(i).map(|p| p.cpu_percent))
             .collect();
         for window in cpus.windows(2) {
-            assert!(window.get(0).copied().unwrap_or(0.0) >= window.get(1).copied().unwrap_or(0.0));
+            assert!(window.first().copied().unwrap_or(0.0) >= window.get(1).copied().unwrap_or(0.0));
         }
     }
 
@@ -3594,7 +3594,7 @@ mod tests {
         s.load_demo_data();
         s.selected_index = Some(0);
         s.stop_selected();
-        let proc_idx = s.visible_indices.get(0).copied().unwrap_or(0);
+        let proc_idx = s.visible_indices.first().copied().unwrap_or(0);
         assert_eq!(
             s.processes.get(proc_idx).map(|p| p.status),
             Some(ProcessStatus::Stopped)
@@ -3608,7 +3608,7 @@ mod tests {
         s.selected_index = Some(0);
         s.stop_selected();
         s.continue_selected();
-        let proc_idx = s.visible_indices.get(0).copied().unwrap_or(0);
+        let proc_idx = s.visible_indices.first().copied().unwrap_or(0);
         assert_eq!(
             s.processes.get(proc_idx).map(|p| p.status),
             Some(ProcessStatus::Running)

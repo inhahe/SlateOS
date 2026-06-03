@@ -2618,14 +2618,14 @@ static domain_name_servers=8.8.8.8, 1.1.1.1
 
     #[test]
     fn test_parse_args_interface() {
-        let args: Vec<String> = vec!["-i", "wlan0"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["-i", "wlan0"].iter().map(|s| s.to_string()).collect();
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.interface, "wlan0");
     }
 
     #[test]
     fn test_parse_args_flags() {
-        let args: Vec<String> = vec!["-n", "-d", "-f", "-1"]
+        let args: Vec<String> = ["-n", "-d", "-f", "-1"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -2638,14 +2638,14 @@ static domain_name_servers=8.8.8.8, 1.1.1.1
 
     #[test]
     fn test_parse_args_timeout() {
-        let args: Vec<String> = vec!["-t", "60"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["-t", "60"].iter().map(|s| s.to_string()).collect();
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.timeout, 60);
     }
 
     #[test]
     fn test_parse_args_requested_ip() {
-        let args: Vec<String> = vec!["-r", "10.0.0.50"]
+        let args: Vec<String> = ["-r", "10.0.0.50"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -2655,7 +2655,7 @@ static domain_name_servers=8.8.8.8, 1.1.1.1
 
     #[test]
     fn test_parse_args_client_ip() {
-        let args: Vec<String> = vec!["-s", "10.0.0.51"]
+        let args: Vec<String> = ["-s", "10.0.0.51"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -2665,7 +2665,7 @@ static domain_name_servers=8.8.8.8, 1.1.1.1
 
     #[test]
     fn test_parse_args_hostname() {
-        let args: Vec<String> = vec!["--hostname=mybox"]
+        let args: Vec<String> = ["--hostname=mybox"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -2675,7 +2675,7 @@ static domain_name_servers=8.8.8.8, 1.1.1.1
 
     #[test]
     fn test_parse_args_no_flags() {
-        let args: Vec<String> = vec!["--no-gateway", "--no-dns", "--no-ntp"]
+        let args: Vec<String> = ["--no-gateway", "--no-dns", "--no-ntp"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -2687,27 +2687,27 @@ static domain_name_servers=8.8.8.8, 1.1.1.1
 
     #[test]
     fn test_parse_args_release_kill() {
-        let args_x: Vec<String> = vec!["-x"].iter().map(|s| s.to_string()).collect();
-        let args_k: Vec<String> = vec!["-k"].iter().map(|s| s.to_string()).collect();
+        let args_x: Vec<String> = ["-x"].iter().map(|s| s.to_string()).collect();
+        let args_k: Vec<String> = ["-k"].iter().map(|s| s.to_string()).collect();
         assert!(parse_args(&args_x).unwrap().release);
         assert!(parse_args(&args_k).unwrap().kill);
     }
 
     #[test]
     fn test_parse_args_unknown_option() {
-        let args: Vec<String> = vec!["--bogus"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["--bogus"].iter().map(|s| s.to_string()).collect();
         assert!(parse_args(&args).is_err());
     }
 
     #[test]
     fn test_parse_args_missing_value() {
-        let args: Vec<String> = vec!["-i"].iter().map(|s| s.to_string()).collect();
+        let args: Vec<String> = ["-i"].iter().map(|s| s.to_string()).collect();
         assert!(parse_args(&args).is_err());
     }
 
     #[test]
     fn test_parse_args_invalid_ip() {
-        let args: Vec<String> = vec!["-r", "not.an.ip"]
+        let args: Vec<String> = ["-r", "not.an.ip"]
             .iter()
             .map(|s| s.to_string())
             .collect();

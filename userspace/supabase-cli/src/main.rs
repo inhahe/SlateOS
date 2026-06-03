@@ -106,7 +106,7 @@ fn run_supabase(args: &[String]) -> i32 {
                 }
                 "new" => {
                     let name = args.get(2).map(|s| s.as_str()).unwrap_or("add_column");
-                    println!("Created migration: supabase/migrations/{}_{}.sql", "20240615120000", name);
+                    println!("Created migration: supabase/migrations/20240615120000_{name}.sql");
                 }
                 _ => println!("supabase migration: '{}' completed", sub),
             }

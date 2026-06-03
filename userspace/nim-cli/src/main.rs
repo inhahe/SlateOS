@@ -41,7 +41,8 @@ fn run_nim(args: &[String]) -> i32 {
             println!("Hint: used config file: nim.cfg");
             println!("CC: gcc");
             println!("Hint: {} LOC; compilation: 0.5s", 1500);
-            println!("Hint: {} backend generated: {}/{}.{}", backend, "nimcache", base, if subcmd == "cpp" { "cpp" } else { "c" });
+            let ext = if subcmd == "cpp" { "cpp" } else { "c" };
+            println!("Hint: {backend} backend generated: nimcache/{base}.{ext}");
             if subcmd == "r" || subcmd == "run" {
                 println!("Hint: running {}", base);
             }

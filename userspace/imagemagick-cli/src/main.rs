@@ -15,7 +15,7 @@ fn personality(argv0: &str) -> &str {
         "mogrify" => "mogrify",
         "composite" => "composite",
         "montage" => "montage",
-        "convert" | _ => "convert",
+        _ => "convert",
     }
 }
 

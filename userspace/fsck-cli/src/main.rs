@@ -45,8 +45,8 @@ fn run_fsck(prog: &str, args: &[String]) -> i32 {
         return 0;
     }
 
-    let device = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("/dev/sda2");
+    let device = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("/dev/sda2");
     let verbose = args.iter().any(|a| a == "-v");
 
     match prog {

@@ -3464,6 +3464,7 @@ fn main() {
 // ===========================================================================
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // Tests construct fixtures by mutating defaults; clearer than functional-update across dozens of sites.
 mod tests {
     use super::*;
 

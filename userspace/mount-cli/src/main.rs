@@ -75,8 +75,8 @@ fn run_umount(args: &[String]) -> i32 {
         return 0;
     }
 
-    let target = args.iter().filter(|a| !a.starts_with('-'))
-        .next().map(|s| s.as_str()).unwrap_or("/mnt");
+    let target = args.iter().find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("/mnt");
     println!("umount: {} unmounted", target);
     0
 }

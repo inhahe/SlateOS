@@ -582,15 +582,19 @@ mod tests {
 
     #[test]
     fn test_loader_config_timeout() {
-        let mut config = LoaderConfig::default();
-        config.timeout = Some(10);
+        let config = LoaderConfig {
+            timeout: Some(10),
+            ..LoaderConfig::default()
+        };
         assert_eq!(config.timeout, Some(10));
     }
 
     #[test]
     fn test_loader_config_no_timeout() {
-        let mut config = LoaderConfig::default();
-        config.timeout = None;
+        let config = LoaderConfig {
+            timeout: None,
+            ..LoaderConfig::default()
+        };
         assert!(config.timeout.is_none());
     }
 }

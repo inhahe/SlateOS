@@ -4585,13 +4585,13 @@ mod tests {
 
     #[test]
     fn test_pactl_help_flag() {
-        let rc = run_pactl(&["--help".to_string()].to_vec());
+        let rc = run_pactl(&["--help".to_string()]);
         assert_eq!(rc, 0);
     }
 
     #[test]
     fn test_pactl_version_flag() {
-        let rc = run_pactl(&["--version".to_string()].to_vec());
+        let rc = run_pactl(&["--version".to_string()]);
         assert_eq!(rc, 0);
     }
 
@@ -4603,7 +4603,7 @@ mod tests {
 
     #[test]
     fn test_pactl_unknown_command() {
-        let rc = run_pactl(&["bogus".to_string()].to_vec());
+        let rc = run_pactl(&["bogus".to_string()]);
         assert_eq!(rc, 1);
     }
 
@@ -4641,12 +4641,12 @@ mod tests {
 
     #[test]
     fn test_pacmd_help() {
-        assert_eq!(run_pacmd(&["help".to_string()].to_vec()), 0);
+        assert_eq!(run_pacmd(&["help".to_string()]), 0);
     }
 
     #[test]
     fn test_pacmd_version() {
-        assert_eq!(run_pacmd(&["--version".to_string()].to_vec()), 0);
+        assert_eq!(run_pacmd(&["--version".to_string()]), 0);
     }
 
     #[test]
@@ -4656,49 +4656,49 @@ mod tests {
 
     #[test]
     fn test_pacmd_unknown_command() {
-        assert_eq!(run_pacmd(&["bogus".to_string()].to_vec()), 1);
+        assert_eq!(run_pacmd(&["bogus".to_string()]), 1);
     }
 
     #[test]
     fn test_pacmd_list_sinks() {
-        assert_eq!(run_pacmd(&["list-sinks".to_string()].to_vec()), 0);
+        assert_eq!(run_pacmd(&["list-sinks".to_string()]), 0);
     }
 
     #[test]
     fn test_pacmd_list_sources() {
-        assert_eq!(run_pacmd(&["list-sources".to_string()].to_vec()), 0);
+        assert_eq!(run_pacmd(&["list-sources".to_string()]), 0);
     }
 
     #[test]
     fn test_pacmd_list_modules() {
-        assert_eq!(run_pacmd(&["list-modules".to_string()].to_vec()), 0);
+        assert_eq!(run_pacmd(&["list-modules".to_string()]), 0);
     }
 
     #[test]
     fn test_pacmd_stat() {
-        assert_eq!(run_pacmd(&["stat".to_string()].to_vec()), 0);
+        assert_eq!(run_pacmd(&["stat".to_string()]), 0);
     }
 
     #[test]
     fn test_pacmd_dump() {
-        assert_eq!(run_pacmd(&["dump".to_string()].to_vec()), 0);
+        assert_eq!(run_pacmd(&["dump".to_string()]), 0);
     }
 
     #[test]
     fn test_pacmd_exit() {
-        assert_eq!(run_pacmd(&["exit".to_string()].to_vec()), 0);
+        assert_eq!(run_pacmd(&["exit".to_string()]), 0);
     }
 
     // -- paplay ----------------------------------------------------------------
 
     #[test]
     fn test_paplay_help() {
-        assert_eq!(run_paplay(&["--help".to_string()].to_vec()), 0);
+        assert_eq!(run_paplay(&["--help".to_string()]), 0);
     }
 
     #[test]
     fn test_paplay_version() {
-        assert_eq!(run_paplay(&["--version".to_string()].to_vec()), 0);
+        assert_eq!(run_paplay(&["--version".to_string()]), 0);
     }
 
     #[test]
@@ -4708,44 +4708,41 @@ mod tests {
 
     #[test]
     fn test_paplay_file() {
-        assert_eq!(run_paplay(&["test.wav".to_string()].to_vec()), 0);
+        assert_eq!(run_paplay(&["test.wav".to_string()]), 0);
     }
 
     #[test]
     fn test_paplay_with_device() {
         assert_eq!(
-            run_paplay(
-                &[
-                    "-d".to_string(),
-                    "mysink".to_string(),
-                    "test.wav".to_string()
-                ]
-                .to_vec()
-            ),
+            run_paplay(&[
+                "-d".to_string(),
+                "mysink".to_string(),
+                "test.wav".to_string(),
+            ]),
             0
         );
     }
 
     #[test]
     fn test_paplay_list_file_formats() {
-        assert_eq!(run_paplay(&["--list-file-formats".to_string()].to_vec()), 0);
+        assert_eq!(run_paplay(&["--list-file-formats".to_string()]), 0);
     }
 
     #[test]
     fn test_paplay_unknown_option() {
-        assert_eq!(run_paplay(&["--bogus".to_string()].to_vec()), 1);
+        assert_eq!(run_paplay(&["--bogus".to_string()]), 1);
     }
 
     // -- parecord --------------------------------------------------------------
 
     #[test]
     fn test_parecord_help() {
-        assert_eq!(run_parecord(&["--help".to_string()].to_vec()), 0);
+        assert_eq!(run_parecord(&["--help".to_string()]), 0);
     }
 
     #[test]
     fn test_parecord_version() {
-        assert_eq!(run_parecord(&["--version".to_string()].to_vec()), 0);
+        assert_eq!(run_parecord(&["--version".to_string()]), 0);
     }
 
     #[test]
@@ -4755,39 +4752,36 @@ mod tests {
 
     #[test]
     fn test_parecord_file() {
-        assert_eq!(run_parecord(&["output.wav".to_string()].to_vec()), 0);
+        assert_eq!(run_parecord(&["output.wav".to_string()]), 0);
     }
 
     #[test]
     fn test_parecord_with_device() {
         assert_eq!(
-            run_parecord(
-                &[
-                    "-d".to_string(),
-                    "mysource".to_string(),
-                    "output.wav".to_string()
-                ]
-                .to_vec()
-            ),
+            run_parecord(&[
+                "-d".to_string(),
+                "mysource".to_string(),
+                "output.wav".to_string(),
+            ]),
             0
         );
     }
 
     #[test]
     fn test_parecord_unknown_option() {
-        assert_eq!(run_parecord(&["--bogus".to_string()].to_vec()), 1);
+        assert_eq!(run_parecord(&["--bogus".to_string()]), 1);
     }
 
     // -- pasuspender -----------------------------------------------------------
 
     #[test]
     fn test_pasuspender_help() {
-        assert_eq!(run_pasuspender(&["--help".to_string()].to_vec()), 0);
+        assert_eq!(run_pasuspender(&["--help".to_string()]), 0);
     }
 
     #[test]
     fn test_pasuspender_version() {
-        assert_eq!(run_pasuspender(&["--version".to_string()].to_vec()), 0);
+        assert_eq!(run_pasuspender(&["--version".to_string()]), 0);
     }
 
     #[test]
@@ -4798,7 +4792,7 @@ mod tests {
     #[test]
     fn test_pasuspender_with_command() {
         assert_eq!(
-            run_pasuspender(&["--".to_string(), "aplay".to_string()].to_vec()),
+            run_pasuspender(&["--".to_string(), "aplay".to_string()]),
             0
         );
     }
@@ -4806,15 +4800,12 @@ mod tests {
     #[test]
     fn test_pasuspender_with_server() {
         assert_eq!(
-            run_pasuspender(
-                &[
-                    "-s".to_string(),
-                    "localhost".to_string(),
-                    "--".to_string(),
-                    "cmd".to_string()
-                ]
-                .to_vec()
-            ),
+            run_pasuspender(&[
+                "-s".to_string(),
+                "localhost".to_string(),
+                "--".to_string(),
+                "cmd".to_string(),
+            ]),
             0
         );
     }
@@ -4823,50 +4814,50 @@ mod tests {
 
     #[test]
     fn test_pulseaudio_help() {
-        assert_eq!(run_pulseaudio(&["--help".to_string()].to_vec()), 0);
+        assert_eq!(run_pulseaudio(&["--help".to_string()]), 0);
     }
 
     #[test]
     fn test_pulseaudio_version() {
-        assert_eq!(run_pulseaudio(&["--version".to_string()].to_vec()), 0);
+        assert_eq!(run_pulseaudio(&["--version".to_string()]), 0);
     }
 
     #[test]
     fn test_pulseaudio_check() {
-        assert_eq!(run_pulseaudio(&["--check".to_string()].to_vec()), 0);
+        assert_eq!(run_pulseaudio(&["--check".to_string()]), 0);
     }
 
     #[test]
     fn test_pulseaudio_kill() {
-        assert_eq!(run_pulseaudio(&["-k".to_string()].to_vec()), 0);
+        assert_eq!(run_pulseaudio(&["-k".to_string()]), 0);
     }
 
     #[test]
     fn test_pulseaudio_start() {
-        assert_eq!(run_pulseaudio(&["--start".to_string()].to_vec()), 0);
+        assert_eq!(run_pulseaudio(&["--start".to_string()]), 0);
     }
 
     #[test]
     fn test_pulseaudio_dump_conf() {
-        assert_eq!(run_pulseaudio(&["--dump-conf".to_string()].to_vec()), 0);
+        assert_eq!(run_pulseaudio(&["--dump-conf".to_string()]), 0);
     }
 
     #[test]
     fn test_pulseaudio_dump_modules() {
-        assert_eq!(run_pulseaudio(&["--dump-modules".to_string()].to_vec()), 0);
+        assert_eq!(run_pulseaudio(&["--dump-modules".to_string()]), 0);
     }
 
     #[test]
     fn test_pulseaudio_dump_resample_methods() {
         assert_eq!(
-            run_pulseaudio(&["--dump-resample-methods".to_string()].to_vec()),
+            run_pulseaudio(&["--dump-resample-methods".to_string()]),
             0
         );
     }
 
     #[test]
     fn test_pulseaudio_cleanup_shm() {
-        assert_eq!(run_pulseaudio(&["--cleanup-shm".to_string()].to_vec()), 0);
+        assert_eq!(run_pulseaudio(&["--cleanup-shm".to_string()]), 0);
     }
 
     #[test]
@@ -4876,7 +4867,7 @@ mod tests {
 
     #[test]
     fn test_pulseaudio_unknown_option() {
-        assert_eq!(run_pulseaudio(&["--bogus".to_string()].to_vec()), 1);
+        assert_eq!(run_pulseaudio(&["--bogus".to_string()]), 1);
     }
 
     // -- pactl list variations -------------------------------------------------
@@ -4891,63 +4882,63 @@ mod tests {
     #[test]
     fn test_pactl_list_sinks() {
         let state = PulseState::default_state();
-        let rc = run_pactl_list(&["sinks".to_string()].to_vec(), &state);
+        let rc = run_pactl_list(&["sinks".to_string()], &state);
         assert_eq!(rc, 0);
     }
 
     #[test]
     fn test_pactl_list_sources() {
         let state = PulseState::default_state();
-        let rc = run_pactl_list(&["sources".to_string()].to_vec(), &state);
+        let rc = run_pactl_list(&["sources".to_string()], &state);
         assert_eq!(rc, 0);
     }
 
     #[test]
     fn test_pactl_list_sink_inputs() {
         let state = PulseState::default_state();
-        let rc = run_pactl_list(&["sink-inputs".to_string()].to_vec(), &state);
+        let rc = run_pactl_list(&["sink-inputs".to_string()], &state);
         assert_eq!(rc, 0);
     }
 
     #[test]
     fn test_pactl_list_source_outputs() {
         let state = PulseState::default_state();
-        let rc = run_pactl_list(&["source-outputs".to_string()].to_vec(), &state);
+        let rc = run_pactl_list(&["source-outputs".to_string()], &state);
         assert_eq!(rc, 0);
     }
 
     #[test]
     fn test_pactl_list_cards() {
         let state = PulseState::default_state();
-        let rc = run_pactl_list(&["cards".to_string()].to_vec(), &state);
+        let rc = run_pactl_list(&["cards".to_string()], &state);
         assert_eq!(rc, 0);
     }
 
     #[test]
     fn test_pactl_list_modules() {
         let state = PulseState::default_state();
-        let rc = run_pactl_list(&["modules".to_string()].to_vec(), &state);
+        let rc = run_pactl_list(&["modules".to_string()], &state);
         assert_eq!(rc, 0);
     }
 
     #[test]
     fn test_pactl_list_clients() {
         let state = PulseState::default_state();
-        let rc = run_pactl_list(&["clients".to_string()].to_vec(), &state);
+        let rc = run_pactl_list(&["clients".to_string()], &state);
         assert_eq!(rc, 0);
     }
 
     #[test]
     fn test_pactl_list_short() {
         let state = PulseState::default_state();
-        let rc = run_pactl_list(&["sinks".to_string(), "short".to_string()].to_vec(), &state);
+        let rc = run_pactl_list(&["sinks".to_string(), "short".to_string()], &state);
         assert_eq!(rc, 0);
     }
 
     #[test]
     fn test_pactl_list_invalid_type() {
         let state = PulseState::default_state();
-        let rc = run_pactl_list(&["bogus".to_string()].to_vec(), &state);
+        let rc = run_pactl_list(&["bogus".to_string()], &state);
         assert_eq!(rc, 1);
     }
 

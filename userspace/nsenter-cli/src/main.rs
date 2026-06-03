@@ -40,8 +40,7 @@ fn run_nsenter(args: &[String]) -> i32 {
     let all = args.iter().any(|a| a == "-a" || a == "--all");
 
     let cmd = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .next()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("/bin/sh");
 

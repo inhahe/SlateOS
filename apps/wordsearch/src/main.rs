@@ -1380,14 +1380,14 @@ mod tests {
     #[test]
     fn test_can_place_overlap_matching() {
         let mut grid = vec![0u8; 100];
-        grid[0 * 10 + 2] = b'L'; // Position where the 'L' in HELLO would go
+        grid[2] = b'L'; // Row 0, column 2 — where the 'L' in HELLO would go
         assert!(can_place(&grid, 10, b"HELLO", 0, 0, 0, 1));
     }
 
     #[test]
     fn test_can_place_overlap_conflicting() {
         let mut grid = vec![0u8; 100];
-        grid[0 * 10 + 2] = b'X'; // Conflict with 'L' in HELLO
+        grid[2] = b'X'; // Row 0, column 2 — conflicts with 'L' in HELLO
         assert!(!can_place(&grid, 10, b"HELLO", 0, 0, 0, 1));
     }
 

@@ -1063,8 +1063,10 @@ mod tests {
 
     #[test]
     fn test_generate_init_script_with_modules() {
-        let mut config = InitramfsConfig::default();
-        config.modules = vec!["ext4".to_string(), "ahci".to_string()];
+        let config = InitramfsConfig {
+            modules: vec!["ext4".to_string(), "ahci".to_string()],
+            ..InitramfsConfig::default()
+        };
         let script = generate_init_script(&config);
         assert!(script.contains("modprobe ext4"));
         assert!(script.contains("modprobe ahci"));

@@ -163,13 +163,13 @@ mod tests {
 
     #[test]
     fn help_and_version_exit_zero() {
-        assert_eq!(run_jack_connect(vec!["--help".to_string()], "jack2"), 0);
-        assert_eq!(run_jack_connect(vec!["-h".to_string()], "jack2"), 0);
-        assert_eq!(run_jack_connect(vec!["--version".to_string()], "jack2"), 0);
+        assert_eq!(run_jack_connect(vec!["--help".to_string()], false), 0);
+        assert_eq!(run_jack_connect(vec!["-h".to_string()], false), 0);
+        assert_eq!(run_jack_connect(vec!["--version".to_string()], false), 0);
     }
 
     #[test]
     fn default_invocation_exits_zero() {
-        assert_eq!(run_jack_connect(vec![], "jack2"), 0);
+        assert_eq!(run_jack_connect(vec![], false), 0);
     }
 }

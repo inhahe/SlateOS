@@ -4470,14 +4470,14 @@ mod tests {
 
     #[test]
     fn test_parse_bool_option() {
-        assert_eq!(parse_bool_option("true").unwrap(), true);
-        assert_eq!(parse_bool_option("yes").unwrap(), true);
-        assert_eq!(parse_bool_option("on").unwrap(), true);
-        assert_eq!(parse_bool_option("1").unwrap(), true);
-        assert_eq!(parse_bool_option("false").unwrap(), false);
-        assert_eq!(parse_bool_option("no").unwrap(), false);
-        assert_eq!(parse_bool_option("off").unwrap(), false);
-        assert_eq!(parse_bool_option("0").unwrap(), false);
+        assert!(parse_bool_option("true").unwrap());
+        assert!(parse_bool_option("yes").unwrap());
+        assert!(parse_bool_option("on").unwrap());
+        assert!(parse_bool_option("1").unwrap());
+        assert!(!parse_bool_option("false").unwrap());
+        assert!(!parse_bool_option("no").unwrap());
+        assert!(!parse_bool_option("off").unwrap());
+        assert!(!parse_bool_option("0").unwrap());
         assert!(parse_bool_option("maybe").is_err());
     }
 

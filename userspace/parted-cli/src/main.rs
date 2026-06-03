@@ -57,8 +57,8 @@ fn run_parted(args: Vec<String>) -> i32 {
             println!(" 3      54.2GB  500GB   446GB   ext4");
         }
     } else {
-        let device = args.iter().filter(|a| !a.starts_with('-'))
-            .next().map(|s| s.as_str()).unwrap_or("/dev/sda");
+        let device = args.iter().find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str()).unwrap_or("/dev/sda");
         let cmd = args.iter().filter(|a| !a.starts_with('-'))
             .nth(1).map(|s| s.as_str());
 

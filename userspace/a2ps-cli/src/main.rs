@@ -56,7 +56,7 @@ fn run_a2ps(args: Vec<String>) -> i32 {
         .collect();
 
     let total_pages = if files.is_empty() { 1 } else { files.len() * 2 };
-    let total_sheets = (total_pages + 1) / 2;
+    let total_sheets = total_pages.div_ceil(2);
 
     if let Some(out) = output {
         println!("[{}: {} pages on {} sheets]", out, total_pages, total_sheets);

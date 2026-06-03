@@ -9,10 +9,10 @@
 //! accelerated firewall appliances (the FortiASIC chips) delivering
 //! competitive throughput vs commodity x86 firewalls at a much lower
 //! cost-per-Gbps. IPO 2009 NASDAQ:FTNT. Market cap routinely
-//! >\$60B-80B. Aggressively mid-market + service-provider focused;
-//! the Fortinet Security Fabric integrates FortiGate (firewall) with
-//! FortiAnalyzer, FortiManager, FortiClient, FortiSwitch, FortiAP,
-//! FortiSIEM into a single-vendor stack — a sharply differentiated
+//! upward of \$60B-80B. Aggressively mid-market and service-provider
+//! focused; the Fortinet Security Fabric integrates FortiGate (firewall)
+//! with FortiAnalyzer, FortiManager, FortiClient, FortiSwitch, FortiAP,
+//! and FortiSIEM into a single-vendor stack — a sharply differentiated
 //! position from Palo Alto's premium NGFW + roll-up strategy.
 
 use std::env;

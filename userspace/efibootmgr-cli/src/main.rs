@@ -45,7 +45,7 @@ fn run_efibootmgr(args: &[String]) -> i32 {
 
     if create {
         let label = args.windows(2).find(|w| w[0] == "-L").map(|w| w[1].as_str()).unwrap_or("OurOS");
-        println!("Boot entry {} created: {}", "0005", label);
+        println!("Boot entry 0005 created: {label}");
     }
 
     println!("BootCurrent: 0001");

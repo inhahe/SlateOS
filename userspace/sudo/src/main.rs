@@ -3005,7 +3005,7 @@ mod tests {
     fn parse_privilege_nopasswd() {
         let config =
             parse_sudoers("alice ALL = (root) NOPASSWD: /usr/bin/apt\n").unwrap();
-        assert_eq!(config.privileges[0].commands[0].nopasswd, true);
+        assert!(config.privileges[0].commands[0].nopasswd);
         assert_eq!(config.privileges[0].commands[0].command, "/usr/bin/apt");
     }
 

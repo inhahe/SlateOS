@@ -32,7 +32,7 @@ fn run_salt(args: &[String]) -> i32 {
     let target = args.first().map(|s| s.as_str()).unwrap_or("*");
     let function = args.get(1).map(|s| s.as_str()).unwrap_or("test.ping");
 
-    println!("{}:", "web01");
+    println!("web01:");
     match function {
         "test.ping" => println!("    True"),
         "cmd.run" => {

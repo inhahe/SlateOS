@@ -44,12 +44,12 @@ fn run_phpstan(args: &[String]) -> i32 {
                 .filter(|a| !a.starts_with('-') && a.as_str() != "analyse" && a.as_str() != "analyze")
                 .filter(|a| {
                     let prev = args.iter().position(|x| x == *a);
-                    if let Some(pos) = prev {
-                        if pos > 0 {
-                            let p = args.get(pos - 1).map(|s| s.as_str()).unwrap_or("");
-                            return p != "--level" && p != "-l" && p != "--configuration" && p != "-c"
-                                && p != "--memory-limit" && p != "--error-format";
-                        }
+                    if let Some(pos) = prev
+                        && pos > 0
+                    {
+                        let p = args.get(pos - 1).map(|s| s.as_str()).unwrap_or("");
+                        return p != "--level" && p != "-l" && p != "--configuration" && p != "-c"
+                            && p != "--memory-limit" && p != "--error-format";
                     }
                     true
                 })

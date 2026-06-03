@@ -98,13 +98,13 @@ mod tests {
 
     #[test]
     fn help_and_version_exit_zero() {
-        assert_eq!(run_wrk(vec!["--help".to_string()], "wrk"), 0);
-        assert_eq!(run_wrk(vec!["-h".to_string()], "wrk"), 0);
-        assert_eq!(run_wrk(vec!["--version".to_string()], "wrk"), 0);
+        assert_eq!(run_wrk(vec!["--help".to_string()], false), 0);
+        assert_eq!(run_wrk(vec!["-h".to_string()], false), 0);
+        assert_eq!(run_wrk(vec!["--version".to_string()], false), 0);
     }
 
     #[test]
     fn default_invocation_exits_zero() {
-        assert_eq!(run_wrk(vec![], "wrk"), 0);
+        assert_eq!(run_wrk(vec![], false), 0);
     }
 }

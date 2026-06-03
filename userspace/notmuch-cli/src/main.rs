@@ -50,7 +50,7 @@ fn run_notmuch(args: Vec<String>) -> i32 {
         }
         "search" => {
             let query = if rest.is_empty() { "*" } else { rest[0] };
-            if query == "--output=tags" || rest.iter().any(|a| *a == "--output=tags") {
+            if query == "--output=tags" || rest.contains(&"--output=tags") {
                 println!("inbox");
                 println!("unread");
                 println!("sent");

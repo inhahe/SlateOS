@@ -53,7 +53,7 @@ fn run_hey(args: &[String]) -> i32 {
     println!("  0.038 [34]   |{}", "■".repeat(15));
     println!("  0.050 [18]   |{}", "■".repeat(8));
     println!("  0.063 [8]    |{}", "■".repeat(4));
-    println!("  0.075 [3]    |{}", "■".repeat(1));
+    println!("  0.075 [3]    |■");
     println!("  0.088 [1]    |");
     println!("  0.100 [1]    |");
     println!();

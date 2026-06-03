@@ -55,7 +55,7 @@ fn run_semgrep(args: &[String]) -> i32 {
             println!("Ran 345 rules on 42 files.");
             println!("Findings: 1 (0 blocking, 1 non-blocking)");
         }
-        "scan" | _ => {
+        _ => {
             let config = args.windows(2).find(|w| w[0] == "--config")
                 .map(|w| w[1].as_str()).unwrap_or("auto");
             let json_out = args.iter().any(|a| a == "--json");

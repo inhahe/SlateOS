@@ -2061,56 +2061,52 @@ fn run_daemon(debug: bool, resolve_early: bool) -> i32 {
     // Coldplug: enumerate existing devices and process them.
     coldplug(&mut state);
 
-    // Main event loop: read from uevent source or control socket.
-    loop {
-        // Check for control commands.
-        if let Ok(cmd) = fs::read_to_string(CONTROL_SOCKET) {
-            let _ = fs::write(CONTROL_SOCKET, "");
-            for line in cmd.lines() {
-                let trimmed = line.trim();
-                if trimmed == "reload" {
-                    state.reload_rules();
-                } else if trimmed == "exit" {
-                    if state.log_level >= LogLevel::Info {
-                        eprintln!("udevd: shutting down (processed {} events)", state.event_count);
-                    }
-                    return 0;
-                } else if let Some(level) = trimmed.strip_prefix("log-level=") {
-                    if let Some(ll) = LogLevel::from_str(level) {
-                        state.log_level = ll;
-                        eprintln!("udevd: log level set to {}", ll.as_str());
-                    }
-                } else if trimmed == "stop-exec-queue" {
-                    if state.log_level >= LogLevel::Info {
-                        eprintln!("udevd: exec queue stopped");
-                    }
-                } else if trimmed == "start-exec-queue" {
-                    if state.log_level >= LogLevel::Info {
-                        eprintln!("udevd: exec queue started");
-                    }
+    // Single-pass event handling. In a real daemon this would be a poll() loop
+    // over the netlink and control sockets, but the stub processes whatever's
+    // pending in the control file + uevent source and returns.
+    // Check for control commands.
+    if let Ok(cmd) = fs::read_to_string(CONTROL_SOCKET) {
+        let _ = fs::write(CONTROL_SOCKET, "");
+        for line in cmd.lines() {
+            let trimmed = line.trim();
+            if trimmed == "reload" {
+                state.reload_rules();
+            } else if trimmed == "exit" {
+                if state.log_level >= LogLevel::Info {
+                    eprintln!("udevd: shutting down (processed {} events)", state.event_count);
+                }
+                return 0;
+            } else if let Some(level) = trimmed.strip_prefix("log-level=") {
+                if let Some(ll) = LogLevel::from_str(level) {
+                    state.log_level = ll;
+                    eprintln!("udevd: log level set to {}", ll.as_str());
+                }
+            } else if trimmed == "stop-exec-queue" {
+                if state.log_level >= LogLevel::Info {
+                    eprintln!("udevd: exec queue stopped");
+                }
+            } else if trimmed == "start-exec-queue" {
+                if state.log_level >= LogLevel::Info {
+                    eprintln!("udevd: exec queue started");
                 }
             }
         }
+    }
 
-        // Read uevent source for new events.
-        let uevent_source = "/run/udev/uevent_source";
-        if let Ok(content) = fs::read_to_string(uevent_source) {
-            if !content.trim().is_empty() {
-                let _ = fs::write(uevent_source, "");
-                for block in content.split("\n\n") {
-                    if block.trim().is_empty() {
-                        continue;
-                    }
-                    if let Some(event) = DeviceEvent::parse(block) {
-                        state.process_event(&event);
-                    }
+    // Read uevent source for new events.
+    let uevent_source = "/run/udev/uevent_source";
+    if let Ok(content) = fs::read_to_string(uevent_source) {
+        if !content.trim().is_empty() {
+            let _ = fs::write(uevent_source, "");
+            for block in content.split("\n\n") {
+                if block.trim().is_empty() {
+                    continue;
+                }
+                if let Some(event) = DeviceEvent::parse(block) {
+                    state.process_event(&event);
                 }
             }
         }
-
-        // In a real daemon, we would poll netlink + control socket.
-        // For a single-pass implementation, break after processing.
-        break;
     }
 
     if state.log_level >= LogLevel::Info {

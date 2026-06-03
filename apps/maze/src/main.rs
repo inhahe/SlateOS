@@ -1032,8 +1032,8 @@ mod tests {
         // position must remain in-bounds and consistent with start_row/start_col
         // (we can't assert movement because a generated maze may close both
         // adjacent cells).
-        assert!(app.player_row < app.height);
-        assert!(app.player_col < app.width);
+        assert!(app.player_row < app.maze.rows);
+        assert!(app.player_col < app.maze.cols);
         // Suppress unused-variable warnings if no move occurred.
         let _ = (start_row, start_col);
     }

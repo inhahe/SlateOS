@@ -39,7 +39,7 @@ fn run_restic(args: Vec<String>) -> i32 {
     let cmd = args.first().map(|s| s.as_str()).unwrap_or("");
     match cmd {
         "init" => {
-            println!("created restic repository {} at {}", "abc123de", repo);
+            println!("created restic repository abc123de at {}", repo);
             println!();
             println!("Please note that knowledge of your password is required to access");
             println!("the repository. Losing your password means that your data is");

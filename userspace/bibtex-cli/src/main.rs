@@ -32,8 +32,7 @@ fn run_bibtex(args: &[String]) -> i32 {
     }
 
     let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .next()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("document");
 
@@ -71,8 +70,7 @@ fn run_biber(args: &[String]) -> i32 {
     }
 
     let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .next()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("document");
 

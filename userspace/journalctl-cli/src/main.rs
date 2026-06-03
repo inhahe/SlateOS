@@ -51,8 +51,7 @@ fn run_journalctl(args: Vec<String>) -> i32 {
         .map(|w| w[1].as_str());
     let lines = args.windows(2).find(|w| w[0] == "-n" || w[0] == "--lines")
         .and_then(|w| w[1].parse::<usize>().ok()).unwrap_or(10);
-    let json = args.iter().any(|a| a == "-o" && false) ||
-        args.windows(2).any(|w| (w[0] == "-o" || w[0] == "--output") && w[1] == "json");
+    let json = args.windows(2).any(|w| (w[0] == "-o" || w[0] == "--output") && w[1] == "json");
     let kernel = args.iter().any(|a| a == "-k" || a == "--dmesg");
 
     if kernel {

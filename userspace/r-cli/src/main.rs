@@ -77,8 +77,8 @@ fn run_rscript(args: &[String]) -> i32 {
         println!("[1] 42");
         let _ = e;
     } else {
-        let file = args.iter().filter(|a| !a.starts_with('-'))
-            .next().map(|s| s.as_str());
+        let file = args.iter().find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str());
         if let Some(f) = file {
             println!("Rscript: running {}", f);
             println!("[1] \"Hello from R\"");

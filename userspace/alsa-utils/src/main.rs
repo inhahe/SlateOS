@@ -157,13 +157,13 @@ mod tests {
 
     #[test]
     fn help_and_version_exit_zero() {
-        assert_eq!(run_aplay(vec!["--help".to_string()], "alsa-utils"), 0);
-        assert_eq!(run_aplay(vec!["-h".to_string()], "alsa-utils"), 0);
-        assert_eq!(run_aplay(vec!["--version".to_string()], "alsa-utils"), 0);
+        assert_eq!(run_aplay(vec!["--help".to_string()], false), 0);
+        assert_eq!(run_aplay(vec!["-h".to_string()], false), 0);
+        assert_eq!(run_aplay(vec!["--version".to_string()], false), 0);
     }
 
     #[test]
     fn default_invocation_exits_zero() {
-        assert_eq!(run_aplay(vec![], "alsa-utils"), 0);
+        assert_eq!(run_aplay(vec![], false), 0);
     }
 }

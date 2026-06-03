@@ -5,9 +5,9 @@
 //! Founded 1995 in New York by Robert LoCascio (CEO 1995-2022) — one of
 //! the very first companies to put live chat on websites, predating the
 //! entire SaaS era. Listed on Nasdaq:LPSN since 2000. For most of its
-//! life the largest enterprise live-chat vendor, with deep telco + retail
-//! + bank deployments. Pivoted hard to "Conversational AI" / "Conversational
-//! Cloud" 2017+ — bot-builder, NLU intent engine, agent assist, multi-channel
+//! life the largest enterprise live-chat vendor, with deep telco, retail
+//! and bank deployments. Pivoted hard to "Conversational AI" / "Conversational
+//! Cloud" from 2017 on — bot-builder, NLU intent engine, agent assist, multi-channel
 //! messaging. LoCascio departed Dec 2022 after a turbulent stretch (activist
 //! investors, leadership shakeups). The company has been a turnaround story
 //! since under new CEO John Sabino.

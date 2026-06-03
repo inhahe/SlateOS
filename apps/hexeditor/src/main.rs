@@ -3706,18 +3706,18 @@ mod tests {
 
     #[test]
     fn test_inspect_f32_le() {
-        let val: f32 = 3.14;
+        let val: f32 = 3.25;
         let bytes = val.to_le_bytes();
         let doc = HexDocument::from_data(bytes.to_vec());
         let result = doc.inspect_at(0, DataType::F32Le);
         assert!(result.is_some());
         let parsed: f32 = result.unwrap().parse().unwrap();
-        assert!((parsed - 3.14).abs() < 0.01);
+        assert!((parsed - 3.25).abs() < 0.01);
     }
 
     #[test]
     fn test_inspect_f64_le() {
-        let val: f64 = 2.718281828;
+        let val: f64 = 1.234_567_89;
         let bytes = val.to_le_bytes();
         let doc = HexDocument::from_data(bytes.to_vec());
         let result = doc.inspect_at(0, DataType::F64Le);

@@ -32,8 +32,8 @@ fn run_aerc(args: &[String], _prog: &str) -> i32 {
         return 0;
     }
     let target = args.first().map(|s| s.as_str()).unwrap_or("");
-    if target.starts_with("mailto:") {
-        println!("Composing to: {}", &target[7..]);
+    if let Some(addr) = target.strip_prefix("mailto:") {
+        println!("Composing to: {addr}");
     } else {
         println!("aerc: opening...");
     }

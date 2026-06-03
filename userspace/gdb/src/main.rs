@@ -3819,7 +3819,7 @@ mod tests {
         let out = capture(|out| {
             dbg.set_breakpoint(b"0x400000", out);
         });
-        assert!(out.len() > 0);
+        assert!(!out.is_empty());
         assert_eq!(dbg.breakpoints.len(), 1);
         assert_eq!(dbg.breakpoints[0].address, 0x400000);
     }
@@ -3879,7 +3879,7 @@ mod tests {
     fn test_debugger_set_watchpoint() {
         let mut dbg = Debugger::new();
         let out = capture(|out| { dbg.cmd_watch(b"0x600000", out); });
-        assert!(out.len() > 0);
+        assert!(!out.is_empty());
         assert_eq!(dbg.watchpoints.len(), 1);
     }
 
@@ -4182,7 +4182,7 @@ mod tests {
         let out = capture(|out| {
             format_examine(out, &data, 0x1000, 4, ExamineFormat::Byte);
         });
-        assert!(out.len() > 0);
+        assert!(!out.is_empty());
         // Should contain the address
         assert!(out.windows(4).any(|w| w == b"1000"));
     }
@@ -4193,7 +4193,7 @@ mod tests {
         let out = capture(|out| {
             format_examine(out, &data, 0x2000, 1, ExamineFormat::Word);
         });
-        assert!(out.len() > 0);
+        assert!(!out.is_empty());
     }
 
     #[test]

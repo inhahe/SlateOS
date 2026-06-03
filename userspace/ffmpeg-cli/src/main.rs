@@ -13,7 +13,7 @@ fn personality(argv0: &str) -> &str {
     match name {
         "ffprobe" => "ffprobe",
         "ffplay" => "ffplay",
-        "ffmpeg" | _ => "ffmpeg",
+        _ => "ffmpeg",
     }
 }
 
@@ -70,8 +70,7 @@ fn run_ffmpeg(args: &[String]) -> i32 {
         .unwrap_or("input.mp4");
 
     let output = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("output.mp4");
 
@@ -118,8 +117,7 @@ fn run_ffprobe(args: &[String]) -> i32 {
     let json = args.windows(2).any(|w| w[0] == "-print_format" && w[1] == "json");
 
     let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("input.mp4");
 
@@ -167,8 +165,7 @@ fn run_ffplay(args: &[String]) -> i32 {
     }
 
     let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("input.mp4");
 

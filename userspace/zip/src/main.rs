@@ -2170,7 +2170,7 @@ mod tests {
         // Encode known date 2023-06-15 12:30:00.
         let year_offset: u16 = 2023 - 1980;
         let mod_date: u16 = (year_offset << 9) | (6 << 5) | 15;
-        let mod_time: u16 = (12 << 11) | (30 << 5) | 0;
+        let mod_time: u16 = (12 << 11) | (30 << 5);
         let s = dos_datetime_str(mod_date, mod_time);
         assert_eq!(s, "2023-06-15 12:30:00");
     }

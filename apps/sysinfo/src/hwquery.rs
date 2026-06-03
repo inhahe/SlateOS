@@ -1666,8 +1666,8 @@ mod tests {
 
     #[test]
     fn test_parse_f32_valid() {
-        let val = SyscallProvider::parse_f32("3.14").expect("parse f32");
-        assert!((val - 3.14).abs() < 0.01);
+        let val = SyscallProvider::parse_f32("3.25").expect("parse f32");
+        assert!((val - 3.25).abs() < 0.01);
     }
 
     // -- Multi-record parsing --

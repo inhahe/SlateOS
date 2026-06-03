@@ -699,8 +699,7 @@ mod tests {
 
     #[test]
     fn test_multi_select_preserves_selection() {
-        let mut config = TreeConfig::default();
-        config.multi_select = true;
+        let config = TreeConfig { multi_select: true, ..TreeConfig::default() };
         let mut tree = TreeView::new(config);
         tree.set_nodes(sample_tree());
         tree.expand_all();

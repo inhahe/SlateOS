@@ -1395,7 +1395,7 @@ mod tests {
         // With 3 columns and 10 items: ceil(10/3) = 4 rows.
         let layout = LayoutCache::compute(&config, 400.0, 600.0, 10);
         let cols = layout.columns;
-        let expected_rows = (10 + cols - 1) / cols;
+        let expected_rows = 10_usize.div_ceil(cols);
         assert_eq!(layout.total_rows, expected_rows);
     }
 

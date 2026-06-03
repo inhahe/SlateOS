@@ -81,8 +81,8 @@ fn run_tesseract(args: Vec<String>) -> i32 {
         .map(|w| w[1].as_str())
         .unwrap_or("3");
 
-    let has_pdf = positional.iter().any(|a| *a == "pdf");
-    let has_hocr = positional.iter().any(|a| *a == "hocr");
+    let has_pdf = positional.contains(&"pdf");
+    let has_hocr = positional.contains(&"hocr");
 
     println!("Tesseract Open Source OCR Engine v5.3.4 with Leptonica");
     println!("Processing '{}' (lang={}, psm={})", image, lang, psm);

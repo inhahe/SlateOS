@@ -1852,8 +1852,7 @@ mod tests {
 
     #[test]
     fn test_file_caps_not_empty_with_effective() {
-        let mut f = FileCaps::default();
-        f.effective = true;
+        let f = FileCaps { effective: true, ..FileCaps::default() };
         // effective flag alone does not make it non-empty if masks are empty
         // Actually per our definition it does: effective=true counts.
         assert!(!f.is_empty());
@@ -2283,17 +2282,16 @@ mod tests {
 
     #[test]
     fn test_hex_roundtrip_pairs() {
-        for i in 0..ALL_CAPS.len() {
-            for j in (i + 1)..ALL_CAPS.len() {
+        for (i, &cap_i) in ALL_CAPS.iter().enumerate() {
+            for &cap_j in &ALL_CAPS[i + 1..] {
                 let mut m = CapMask::empty();
-                m.set(ALL_CAPS[i]);
-                m.set(ALL_CAPS[j]);
+                m.set(cap_i);
+                m.set(cap_j);
                 let hex = m.to_hex();
                 let decoded = CapMask::from_hex(&hex).unwrap();
                 assert_eq!(
                     decoded, m,
-                    "hex roundtrip failed for {:?}+{:?}",
-                    ALL_CAPS[i], ALL_CAPS[j]
+                    "hex roundtrip failed for {cap_i:?}+{cap_j:?}",
                 );
             }
         }

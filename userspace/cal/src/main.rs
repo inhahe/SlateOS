@@ -617,8 +617,8 @@ mod tests {
     fn test_current_date() {
         let (y, m, d) = current_date();
         assert!(y >= 2024);
-        assert!(m >= 1 && m <= 12);
-        assert!(d >= 1 && d <= 31);
+        assert!((1..=12).contains(&m));
+        assert!((1..=31).contains(&d));
     }
 
     #[test]

@@ -132,23 +132,23 @@ impl ColorFilter {
             }
             Self::Protanopia => {
                 // Simplified simulation: reduce red sensitivity.
-                let r = ((color.r as u32 * 56) + (color.g as u32 * 43) + (color.b as u32 * 1)) / 100;
-                let g = ((color.r as u32 * 55) + (color.g as u32 * 44) + (color.b as u32 * 1)) / 100;
-                let b = ((color.r as u32 * 0) + (color.g as u32 * 24) + (color.b as u32 * 76)) / 100;
+                let r = ((color.r as u32 * 56) + (color.g as u32 * 43) + color.b as u32) / 100;
+                let g = ((color.r as u32 * 55) + (color.g as u32 * 44) + color.b as u32) / 100;
+                let b = ((color.g as u32 * 24) + (color.b as u32 * 76)) / 100;
                 Color::rgba(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8, color.a)
             }
             Self::Deuteranopia => {
                 // Simplified simulation: reduce green sensitivity.
-                let r = ((color.r as u32 * 63) + (color.g as u32 * 37) + (color.b as u32 * 0)) / 100;
-                let g = ((color.r as u32 * 70) + (color.g as u32 * 30) + (color.b as u32 * 0)) / 100;
-                let b = ((color.r as u32 * 0) + (color.g as u32 * 30) + (color.b as u32 * 70)) / 100;
+                let r = ((color.r as u32 * 63) + (color.g as u32 * 37)) / 100;
+                let g = ((color.r as u32 * 70) + (color.g as u32 * 30)) / 100;
+                let b = ((color.g as u32 * 30) + (color.b as u32 * 70)) / 100;
                 Color::rgba(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8, color.a)
             }
             Self::Tritanopia => {
                 // Simplified simulation: reduce blue sensitivity.
-                let r = ((color.r as u32 * 95) + (color.g as u32 * 5) + (color.b as u32 * 0)) / 100;
-                let g = ((color.r as u32 * 0) + (color.g as u32 * 43) + (color.b as u32 * 57)) / 100;
-                let b = ((color.r as u32 * 0) + (color.g as u32 * 47) + (color.b as u32 * 53)) / 100;
+                let r = ((color.r as u32 * 95) + (color.g as u32 * 5)) / 100;
+                let g = ((color.g as u32 * 43) + (color.b as u32 * 57)) / 100;
+                let b = ((color.g as u32 * 47) + (color.b as u32 * 53)) / 100;
                 Color::rgba(r.min(255) as u8, g.min(255) as u8, b.min(255) as u8, color.a)
             }
         }

@@ -14,7 +14,7 @@ fn personality(argv0: &str) -> &str {
         "editcap" => "editcap",
         "mergecap" => "mergecap",
         "capinfos" => "capinfos",
-        "tshark" | _ => "tshark",
+        _ => "tshark",
     }
 }
 
@@ -69,8 +69,7 @@ fn run_tshark(args: &[String]) -> i32 {
 
 fn run_capinfos(args: &[String]) -> i32 {
     let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .next()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("capture.pcap");
 

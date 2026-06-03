@@ -4000,3 +4000,49 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##         workspace CLAUDE.md: copy to a designated push-from directory).
 ##   I have NOT created a remote myself because the CLAUDE.md says
 ##   "NEVER update the git config" without explicit user instruction.
+
+## Roadmap §2.7 (Port Nushell): partial progress 2026-06-03
+##
+## STATE: cargo check --no-default-features --target x86_64-pc-windows-gnu
+##   on the upstream tree at `D:\visual studio projects\os\nushell` now
+##   gets through MOST of the workspace.  Most -nu-* crates type-check.
+##
+## FIXED THIS SESSION:
+##   - nushell/scripts/build.rs panicked with `Failed to run the Windows
+##     resource compiler (rc.exe)` because rc.exe is not installed on this
+##     dev box.  Patched the build script to emit `cargo:warning=...` and
+##     fall back to "no resource" when rc.exe is absent — the embedded
+##     icon/version manifest is purely cosmetic.
+##
+## REMAINING BLOCKER:
+##   - nu-cmd-extra build script (crates/nu-cmd-extra/build.rs) crashes with
+##     STATUS_ACCESS_VIOLATION (0xc0000005) on x86_64-pc-windows-gnu toolchain
+##     (rust 1.93.1, pinned by nushell/rust-toolchain.toml).  Reproducible in
+##     both debug and release.  The script reads assets/228_themes.json via
+##     serde_json into a 228-element Vec<HtmlTheme> (~19 fields each, Cow<str>),
+##     then emits Rust source code for a static themes table.  Crash occurs
+##     before any cargo:* output is emitted — i.e. before or very early in
+##     serde_json deserialization.
+##     Likely cause: known runtime issue with rust 1.93.1 + mingw-w64 libgcc
+##     + serde_json/IntoValue derive on Windows GNU.  Worth trying:
+##       (a) build the build script with the msvc toolchain (override per-crate
+##           or upgrade the project to msvc + vcvarsall.bat)
+##       (b) replace serde_json reader with a fully borrowed path
+##           (`from_str` on a String) — possibly avoids the codegen pattern
+##           that segfaults
+##       (c) embed the parsed table at runtime via include_bytes! + once_cell
+##           instead of generating Rust source at build time
+##       (d) Try rust 1.94.x or 1.95.x to see if the issue is fixed upstream
+##           (nushell pins 1.93.1 but it's not load-bearing)
+##   - Once nu-cmd-extra builds, then need to repeat for the nu binary itself
+##     and verify cargo check --features os-minimal cleanly type-checks the
+##     full os-minimal feature set.
+##
+## NEXT-SESSION ACTIONS:
+##   1. Reproduce the nu-cmd-extra crash with RUST_BACKTRACE=full and
+##      MINIDUMPWRITEDUMP to capture a real backtrace.
+##   2. Try option (a) above first — quickest validation.
+##   3. If msvc works but gnu doesn't, file a note and switch project-wide.
+##
+## DO NOT mark roadmap.md §2.7 line 1492 as [x] until os-minimal type-checks
+## end-to-end (currently still [-]).

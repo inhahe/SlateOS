@@ -634,7 +634,7 @@ mod tests {
     fn test_attr_removal() {
         let current = EXT4_IMMUTABLE_FL | EXT4_APPEND_FL;
         let remove = EXT4_IMMUTABLE_FL;
-        let new_flags = (current | 0) & !remove;
+        let new_flags = current & !remove;
         assert!(new_flags & EXT4_IMMUTABLE_FL == 0);
         assert!(new_flags & EXT4_APPEND_FL != 0);
     }

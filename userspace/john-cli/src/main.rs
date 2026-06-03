@@ -70,8 +70,8 @@ fn run_john(args: Vec<String>) -> i32 {
     }
 
     if args.iter().any(|a| a == "--show") {
-        let file = args.iter().filter(|a| !a.starts_with('-'))
-            .next().map(|s| s.as_str()).unwrap_or("hashes.txt");
+        let file = args.iter().find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str()).unwrap_or("hashes.txt");
         println!("user1:password123");
         println!("user2:letmein");
         println!("admin:admin2024");

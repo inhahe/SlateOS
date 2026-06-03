@@ -4461,7 +4461,7 @@ mod tests {
 
     #[test]
     fn test_cell_value_display_real() {
-        assert_eq!(CellValue::Real(3.14).display(), "3.140000");
+        assert_eq!(CellValue::Real(3.25).display(), "3.250000");
     }
 
     #[test]
@@ -4494,8 +4494,8 @@ mod tests {
     #[test]
     fn test_cell_value_parse_as_real() {
         assert_eq!(
-            CellValue::parse_as("3.14", &DataType::Real),
-            CellValue::Real(3.14)
+            CellValue::parse_as("3.25", &DataType::Real),
+            CellValue::Real(3.25)
         );
     }
 
@@ -4598,7 +4598,7 @@ mod tests {
         let _ = table.insert_row(vec![CellValue::Null, CellValue::Text("A".to_owned())]);
         let _ = table.insert_row(vec![CellValue::Null, CellValue::Text("B".to_owned())]);
         assert_eq!(
-            table.rows.get(0).and_then(|r| r.first()),
+            table.rows.first().and_then(|r| r.first()),
             Some(&CellValue::Integer(1))
         );
         assert_eq!(
@@ -4646,7 +4646,7 @@ mod tests {
         );
         assert_eq!(updated, 1);
         assert_eq!(
-            table.rows.get(0).and_then(|r| r.first()),
+            table.rows.first().and_then(|r| r.first()),
             Some(&CellValue::Integer(99))
         );
     }

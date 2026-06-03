@@ -12,7 +12,7 @@ fn personality(argv0: &str) -> &str {
     let name = base.strip_suffix(".exe").unwrap_or(base);
     match name {
         "anvil" => "anvil",
-        "cast" | _ => "cast",
+        _ => "cast",
     }
 }
 

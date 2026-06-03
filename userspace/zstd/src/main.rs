@@ -244,9 +244,8 @@ mod tests {
 
     #[test]
     fn test_personality_defaults() {
-        let mut opts = ZstdOptions::default();
         // unzstd defaults to decompress
-        opts.action = Action::Decompress;
+        let opts = ZstdOptions { action: Action::Decompress, ..ZstdOptions::default() };
         assert_eq!(opts.action, Action::Decompress);
     }
 }

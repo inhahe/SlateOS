@@ -4014,7 +4014,7 @@ mod tests {
         for view in ViewFilter::standard_views() {
             app.view = *view;
             let cmds = app.render();
-            assert!(!cmds.is_empty(), "View {:?} produced no commands", view);
+            assert!(!cmds.is_empty(), "View {view:?} produced no commands");
         }
     }
 

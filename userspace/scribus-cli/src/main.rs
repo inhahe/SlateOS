@@ -55,8 +55,7 @@ fn run_scribus(args: Vec<String>) -> i32 {
         .map(|w| w[1].as_str());
 
     let file = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .last()
+        .rfind(|a| !a.starts_with('-'))
         .map(|s| s.as_str());
 
     if batch {

@@ -529,9 +529,11 @@ mod tests {
 
     #[test]
     fn test_locale_to_map_with_values() {
-        let mut settings = LocaleSettings::default();
-        settings.lang = "en_US.UTF-8".to_string();
-        settings.lc_time = "de_DE.UTF-8".to_string();
+        let settings = LocaleSettings {
+            lang: "en_US.UTF-8".to_string(),
+            lc_time: "de_DE.UTF-8".to_string(),
+            ..LocaleSettings::default()
+        };
         let map = settings.to_map();
         assert_eq!(map.get("LANG").unwrap(), "en_US.UTF-8");
         assert_eq!(map.get("LC_TIME").unwrap(), "de_DE.UTF-8");

@@ -31,8 +31,8 @@ fn run_fdisk(args: &[String]) -> i32 {
     }
 
     let list = args.iter().any(|a| a == "-l" || a == "--list");
-    let device = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("/dev/sda");
+    let device = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("/dev/sda");
 
     if list {
         println!("Disk {}: 500 GiB, 536870912000 bytes, 1048576000 sectors", device);
@@ -65,8 +65,8 @@ fn run_sfdisk(args: &[String]) -> i32 {
         return 0;
     }
 
-    let device = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("/dev/sda");
+    let device = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("/dev/sda");
 
     if args.iter().any(|a| a == "-J" || a == "--json") {
         println!("{{\"partitiontable\": {{\"device\": \"{}\", \"label\": \"gpt\", \"partitions\": [", device);

@@ -2991,9 +2991,11 @@ mod tests {
 
     #[test]
     fn test_ftp_session_pasv_port_roundrobin() {
-        let mut config = Config::default();
-        config.pasv_min = 50000;
-        config.pasv_max = 50002;
+        let config = Config {
+            pasv_min: 50000,
+            pasv_max: 50002,
+            ..Config::default()
+        };
         let mut session = FtpSession::new(0, config, 0);
 
         assert_eq!(session.next_pasv_port(), 50000);

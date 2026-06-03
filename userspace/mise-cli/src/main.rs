@@ -66,7 +66,7 @@ fn run_mise(args: &[String], _prog: &str) -> i32 {
             println!("python 3.12.1    ~/.local/share/mise/installs/python/3.12.1");
         }
         "install" | "i" => {
-            let tool = args.iter().skip_while(|a| a.as_str() == cmd).nth(0)
+            let tool = args.iter().find(|a| a.as_str() != cmd)
                 .map(|s| s.as_str()).unwrap_or("(all from config)");
             println!("mise: Installing {}...", tool);
         }

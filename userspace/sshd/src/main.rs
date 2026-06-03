@@ -3303,7 +3303,7 @@ mod tests {
     fn test_build_packet_empty_payload() {
         let enc = EncryptionState::none();
         let pkt = build_packet(b"", false, 0, &enc);
-        assert!(pkt.len() >= 4 + 1);
+        assert!(pkt.len() > 4);
         assert_eq!(pkt.len() % 8, 0);
     }
 
@@ -3313,7 +3313,7 @@ mod tests {
         let data = vec![0xAA; 1024];
         let pkt = build_packet(&data, false, 0, &enc);
         let pkt_len = u32::from_be_bytes([pkt[0], pkt[1], pkt[2], pkt[3]]) as usize;
-        assert!(pkt_len >= 1 + 1024);
+        assert!(pkt_len > 1024);
     }
 
     // ---- SSH encoding helpers ----

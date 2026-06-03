@@ -80,7 +80,7 @@ impl Easing {
                 let t1 = t - 1.0;
                 let pow = 2.0_f32.powf(10.0 * t1);
                 // Use a crude sine approximation to avoid std dependency issues.
-                let angle = (t1 - s) / p * 6.2832; // 2*PI
+                let angle = (t1 - s) / p * core::f32::consts::TAU;
                 let sine = sine_approx(angle);
                 (1.0 - pow * sine).clamp(0.0, 1.2)
             }
@@ -101,8 +101,8 @@ impl Easing {
 /// Bhaskara I sine approximation (avoids pulling in libm for no_std compat).
 fn sine_approx(x: f32) -> f32 {
     // Normalize to [0, 2*PI).
-    let pi = 3.14159265;
-    let two_pi = 2.0 * pi;
+    let pi = core::f32::consts::PI;
+    let two_pi = core::f32::consts::TAU;
     let mut x = x % two_pi;
     if x < 0.0 {
         x += two_pi;
@@ -982,13 +982,13 @@ mod tests {
 
     #[test]
     fn test_sine_approx_pi_half() {
-        let v = sine_approx(3.14159265 / 2.0);
+        let v = sine_approx(core::f32::consts::FRAC_PI_2);
         assert!((v - 1.0).abs() < 0.02);
     }
 
     #[test]
     fn test_sine_approx_pi() {
-        let v = sine_approx(3.14159265);
+        let v = sine_approx(core::f32::consts::PI);
         assert!(v.abs() < 0.02);
     }
 

@@ -78,7 +78,7 @@ fn run_btrfs(args: &[String]) -> i32 {
         }
         ("scrub", "start") => {
             let path = args.get(2).map(|s| s.as_str()).unwrap_or("/");
-            println!("scrub started on {} ({})", path, "fsid aabbccdd-1122-3344-5566-778899001122");
+            println!("scrub started on {path} (fsid aabbccdd-1122-3344-5566-778899001122)");
         }
         ("scrub", "status") => {
             println!("UUID:             aabbccdd-1122-3344-5566-778899001122");

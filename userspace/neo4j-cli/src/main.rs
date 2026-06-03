@@ -31,8 +31,8 @@ fn run_cypher_shell(args: &[String]) -> i32 {
         return 0;
     }
 
-    let query = args.iter().filter(|a| !a.starts_with('-'))
-        .next().map(|s| s.as_str());
+    let query = args.iter().find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
 
     if let Some(q) = query {
         println!("+--------------------------------------------------+");

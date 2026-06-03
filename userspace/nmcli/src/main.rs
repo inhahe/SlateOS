@@ -1991,21 +1991,19 @@ fn parse_daemon_opts(args: &[&str]) -> DaemonOpts {
                 opts.log_level = String::from("DEBUG");
                 i += 1;
             }
+            "--log-level" if i + 1 < args.len() => {
+                opts.log_level = args[i + 1].to_uppercase();
+                i += 2;
+            }
             "--log-level" => {
-                if i + 1 < args.len() {
-                    opts.log_level = args[i + 1].to_uppercase();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+                i += 1;
+            }
+            "--config-dir" if i + 1 < args.len() => {
+                opts.config_dir = args[i + 1].to_string();
+                i += 2;
             }
             "--config-dir" => {
-                if i + 1 < args.len() {
-                    opts.config_dir = args[i + 1].to_string();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+                i += 1;
             }
             "--version" | "-V" => {
                 opts.version = true;

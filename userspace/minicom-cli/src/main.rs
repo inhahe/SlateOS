@@ -66,7 +66,7 @@ fn run_minicom(args: &[String]) -> i32 {
     println!("Welcome to minicom 2.8 (OurOS)");
     println!();
     println!("OPTIONS: I18n");
-    println!("Port {}, {} {}", device, baud, "8N1");
+    println!("Port {device}, {baud} 8N1");
     println!();
     println!("Press CTRL-A Z for help on special keys");
     0

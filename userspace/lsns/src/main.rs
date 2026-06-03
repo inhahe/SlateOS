@@ -415,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_sort_order() {
-        let mut nss = vec![
+        let mut nss = [
             make_ns("pid", 200, 1, 1),
             make_ns("mnt", 100, 1, 1),
             make_ns("mnt", 50, 1, 1),

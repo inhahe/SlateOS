@@ -331,10 +331,8 @@ fn parse_profile_content(content: &str, source: &Path) -> Result<ProfileConfig, 
                 }
             }
             "seccomp" => profile.seccomp = true,
-            "caps.drop" => {
-                if value == Some("all") {
-                    profile.caps_drop_all = true;
-                }
+            "caps.drop" if value == Some("all") => {
+                profile.caps_drop_all = true;
             }
             "noroot" => profile.noroot = true,
             "nosound" => profile.nosound = true,
@@ -1864,6 +1862,7 @@ fn main() {
 // ============================================================================
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // Tests construct sandbox profiles by mutating defaults; clearer than functional-update.
 mod tests {
     use super::*;
 

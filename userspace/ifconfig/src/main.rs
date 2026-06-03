@@ -978,7 +978,7 @@ mod tests {
 
     #[test]
     fn test_print_short_table_no_panic() {
-        let ifaces = vec![
+        let ifaces = [
             InterfaceInfo {
                 name: "lo".to_string(),
                 flags: iff::UP | iff::LOOPBACK | iff::RUNNING,
@@ -1035,7 +1035,7 @@ mod tests {
     #[test]
     fn test_interface_sort_order() {
         // Verifies our sorting: lo first, then alphabetical.
-        let mut ifaces = vec![
+        let mut ifaces = [
             InterfaceInfo {
                 name: "veth0".to_string(),
                 flags: 0,

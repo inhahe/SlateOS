@@ -40,7 +40,7 @@ fn run_sqlite(args: Vec<String>) -> i32 {
         .collect();
 
     let db = positional.first().copied().unwrap_or(":memory:");
-    let sql = positional.get(1).map(|s| *s);
+    let sql = positional.get(1).copied();
 
     if let Some(query) = sql {
         let csv = args.iter().any(|a| a == "-csv");

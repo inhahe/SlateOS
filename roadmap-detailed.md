@@ -753,6 +753,17 @@ _2D library: Vello (Rust-native, GPU compute shaders) + HarfBuzz FFI for complex
 - [ ] Native remote desktop streaming (compositor streams draw commands over network)
 - [ ] Video-encoded screen capture fallback (H.264/VP9 for games/video)
 - [ ] Benchmark: composite full desktop in < 2ms at 4K (for 144Hz vsync)
+- [ ] Surface owner liveness as a precondition for compositing. Every frame, before compositing a surface, the compositor verifies the owning process is alive AND the IPC channel to it is healthy (no broken pipe, no missed heartbeats beyond threshold). Surfaces whose owner is dead or unresponsive are evicted, not drawn. Rationale: the most common cause of stray artifacts that survive every normal redraw mechanism is an *orphan surface* — the owning process died (or its connection broke) while a tooltip / popup / hover label was up, and the compositor kept drawing the last submitted frame because nothing told it to drop the surface. Trusting clients to clean up their own surfaces is fragile; verifying liveness on the compositor side makes the system robust against client crashes, IPC drops, and buggy widget destructors.
+- [ ] Popup / tooltip / hover-label TTL. All transient surfaces (tooltips, hover labels, context menus, dropdowns) require a heartbeat from the owner to stay alive, with a short default TTL (e.g. 10 seconds without heartbeat → auto-dismiss). Prevents the orphan-popup class of artifact at the source: if the owner dies, the popup goes away on its own within the TTL window, no user action required.
+- [ ] Surface tree rebuild from live-client enumeration. Rather than incrementally adding/removing surfaces based on client requests, the compositor must support rebuilding its surface list from scratch by re-enumerating all live clients and asking each "what surfaces do you currently own?" Any surface in the old list not claimed by a live client in the new enumeration is dropped. Runs on the full-redraw trigger; can also run periodically as a sanity sweep.
+- [ ] Hardware overlay / DRM plane reset. The full-redraw path must also flush all hardware planes (DRM overlay planes, cursor planes, direct-scanout buffers) back to compositor-managed state. Some classes of artifact live in hardware planes that bypass the normal compositor buffer; recompositing the main plane doesn't touch them.
+- [ ] Full-screen redraw / artifact-recovery path. User-triggered operation (shortcut: e.g. Ctrl+Super+R) and IPC method that:
+  - Triggers the surface-tree rebuild (above) — drops any surface without a live, responsive owner
+  - Discards all cached surface contents and the damage region cache
+  - Sends every connected client a "repaint full window" request (clients must redraw their entire surface, not just the dirty region they think they have)
+  - Resets all hardware planes (above)
+  - Recomposites the whole screen from scratch
+  - This is recovery, not the common path. Normal compositing stays strictly damage-tracked for performance; the full redraw is opt-in and user-triggered. Also serves as a debugging aid: if the artifact survives a full redraw, the bug is in the compositor's own state; if it disappears, the bug was in client / IPC / popup-lifecycle land.
 
 ### 3.4 Window Manager / Desktop Shell
 

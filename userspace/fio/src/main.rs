@@ -1840,6 +1840,7 @@ fn run_fio(args: &[String]) -> i32 {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // Tests construct JobDef by mutating defaults; clearer than functional-update for one-or-two-field tweaks.
 mod tests {
     use super::*;
     use std::fs;

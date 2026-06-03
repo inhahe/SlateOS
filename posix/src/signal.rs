@@ -1604,6 +1604,7 @@ pub unsafe extern "C" fn psiginfo(info: *const SiginfoT, msg: *const u8) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::field_reassign_with_default)] // Tests build SiginfoT etc. by mutating defaults; clearer than functional-update for single-field tweaks.
 mod tests {
     use super::*;
 

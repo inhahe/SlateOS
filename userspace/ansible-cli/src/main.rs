@@ -14,7 +14,7 @@ fn personality(argv0: &str) -> &str {
         "ansible-playbook" => "playbook",
         "ansible-galaxy" => "galaxy",
         "ansible-vault" => "vault",
-        "ansible" | _ => "ansible",
+        _ => "ansible",
     }
 }
 
@@ -76,8 +76,7 @@ fn run_playbook(args: &[String]) -> i32 {
     }
 
     let playbook = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .next()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("site.yml");
 

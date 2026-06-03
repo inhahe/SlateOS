@@ -3731,8 +3731,8 @@ mod tests {
             0x80000001, KeyType::Rsa2048, Hierarchy::Owner,
             HashAlgorithm::Sha256, 0x80000000, "storage", &mut prng,
         );
-        assert_eq!(key._attributes._decrypt, true);
-        assert_eq!(key._attributes._sign_encrypt, false);
+        assert!(key._attributes._decrypt);
+        assert!(!key._attributes._sign_encrypt);
     }
 
     // === PCR extend chain test ===

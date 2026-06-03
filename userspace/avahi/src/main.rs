@@ -5122,7 +5122,7 @@ publish-hinfo=no\n\
         let end = Ipv4Addr::from_u32(LINK_LOCAL_END);
         assert!(start.is_link_local());
         assert!(end.is_link_local());
-        assert!(LINK_LOCAL_END > LINK_LOCAL_START);
+        const _: () = assert!(LINK_LOCAL_END > LINK_LOCAL_START);
     }
 
     #[test]

@@ -1956,7 +1956,7 @@ logfile /var/log/ntp.log
     #[test]
     fn test_drift_write_read_roundtrip() {
         let path = "/tmp/ntpd_test_drift";
-        let ppm = -3.141_592;
+        let ppm = -3.252_5;
         write_drift(path, ppm).unwrap();
         let read_val = read_drift(path).unwrap();
         assert!((read_val - ppm).abs() < 0.001);

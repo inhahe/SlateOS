@@ -97,7 +97,7 @@ fn run_proximus() {
     println!("  Belgian incumbent telco; Belgian state holds majority stake.");
     println!("  Houses TeleSign and BICS (international wholesale carrier).");
     println!("  Strategy: 'Global Communications' arm separate from Belgian retail.");
-    println!("");
+    println!();
     println!("Abandoned SPAC: 2021 merger with North Atlantic Acquisition Corp");
     println!("  at ~$1.3B equity value was terminated in early 2022.");
     println!("  TeleSign remains private inside Proximus.");

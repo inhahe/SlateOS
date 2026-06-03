@@ -204,6 +204,8 @@ pub extern "C" fn killpg(_pgrp: i32, _sig: i32) -> i32 {
 // Panic handler — required for no_std staticlib
 // -----------------------------------------------------------------------
 
+// Only define a panic handler in non-test builds; the test harness provides its own.
+#[cfg(not(test))]
 #[panic_handler]
 fn panic(_: &core::panic::PanicInfo) -> ! {
     loop {

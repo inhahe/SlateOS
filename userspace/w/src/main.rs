@@ -929,9 +929,8 @@ mod tests {
         let mut buf = Vec::new();
         run_w(&cfg, &mut buf).unwrap();
         // Should produce some output (at least current user)
-        let output = String::from_utf8(buf).unwrap();
-        // Output depends on environment, just check it doesn't crash
-        assert!(output.len() >= 0);
+        // Output depends on environment, just check it's valid UTF-8 (doesn't crash).
+        let _output = String::from_utf8(buf).unwrap();
     }
 
     #[test]

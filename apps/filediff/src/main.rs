@@ -3193,8 +3193,10 @@ mod tests {
         let right = "hello earth\nfoo baz";
         let opts = IgnoreOptions::default();
         let diff = compute_diff(left, right, &opts);
-        let mut search = SearchState::default();
-        search.query = "foo".to_string();
+        let mut search = SearchState {
+            query: "foo".to_string(),
+            ..Default::default()
+        };
         search.search(&diff.edits);
         assert!(!search.matches.is_empty());
     }
@@ -3259,7 +3261,7 @@ mod tests {
         search.search(&diff.edits);
         let count = search.matches.len();
         assert!(count > 0);
-        for _ in 0..count + 1 {
+        for _ in 0..=count {
             search.next_match();
         }
         assert!(search.current_match < count);
@@ -3398,7 +3400,7 @@ mod tests {
         assert!(app.diff.is_none());
         assert!(app.sync_scroll);
         assert_eq!(app.view_mode, ViewMode::SideBySide);
-        assert_eq!(app.scroll_left, 0.0);
+        assert!(app.scroll_left.abs() < f32::EPSILON);
     }
 
     #[test]
@@ -3599,8 +3601,8 @@ mod tests {
             height: 1080,
         });
         assert_eq!(result, EventResult::Consumed);
-        assert_eq!(app.width, 1920.0);
-        assert_eq!(app.height, 1080.0);
+        assert!((app.width - 1920.0).abs() < f32::EPSILON);
+        assert!((app.height - 1080.0).abs() < f32::EPSILON);
     }
 
     #[test]

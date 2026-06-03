@@ -3228,7 +3228,7 @@ mod tests {
 
     #[test]
     fn test_double_signature() {
-        assert_eq!(DbusType::Double(3.14).signature_str(), "d");
+        assert_eq!(DbusType::Double(3.25).signature_str(), "d");
     }
 
     #[test]
@@ -3443,7 +3443,7 @@ mod tests {
 
     #[test]
     fn test_unmarshal_f64() {
-        let val: f64 = 2.718281828;
+        let val: f64 = 1.234_567_89;
         let data = val.to_le_bytes();
         let mut cursor = UnmarshalCursor::new(&data, Endianness::Little);
         let read = cursor.read_f64().unwrap();
@@ -4200,8 +4200,8 @@ mod tests {
 
     #[test]
     fn test_parse_typed_double() {
-        if let DbusType::Double(v) = parse_typed_value("double:3.14").unwrap() {
-            assert!((v - 3.14).abs() < 0.001);
+        if let DbusType::Double(v) = parse_typed_value("double:3.25").unwrap() {
+            assert!((v - 3.25).abs() < 0.001);
         } else {
             panic!("expected double");
         }

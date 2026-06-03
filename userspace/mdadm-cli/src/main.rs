@@ -41,8 +41,8 @@ fn run_mdadm(args: Vec<String>) -> i32 {
     let stop = args.iter().any(|a| a == "--stop" || a == "-S");
     let scan = args.iter().any(|a| a == "--scan");
 
-    let device = args.iter().filter(|a| !a.starts_with('-'))
-        .next().map(|s| s.as_str()).unwrap_or("/dev/md0");
+    let device = args.iter().find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("/dev/md0");
 
     if create {
         let level = args.windows(2).find(|w| w[0] == "--level" || w[0] == "-l")

@@ -169,7 +169,7 @@ fn main() {
     let code = match prog.as_str() {
         "saved_model_cli" => run_saved_model_cli(&rest),
         "tflite" => run_tflite(&rest),
-        "tf" | _ => run_tensorflow(&rest),
+        _ => run_tensorflow(&rest),
     };
     process::exit(code);
 }

@@ -46,7 +46,7 @@ fn run_blender(args: Vec<String>) -> i32 {
     let output = args.windows(2).find(|w| w[0] == "-o" || w[0] == "--render-output").map(|w| w[1].as_str());
     let python = args.windows(2).find(|w| w[0] == "-P" || w[0] == "--python").map(|w| w[1].as_str());
 
-    let file = args.iter().filter(|a| !a.starts_with('-') && a.ends_with(".blend")).last().map(|s| s.as_str());
+    let file = args.iter().rfind(|a| !a.starts_with('-') && a.ends_with(".blend")).map(|s| s.as_str());
 
     if background {
         println!("Blender 4.0.2 (sub 0)");

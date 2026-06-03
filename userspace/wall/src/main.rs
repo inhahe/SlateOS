@@ -517,9 +517,9 @@ mod tests {
     // Terminal listing
     #[test]
     fn test_get_terminals_returns_vec() {
-        let terminals = get_logged_in_terminals();
-        // May or may not have entries depending on test environment
-        assert!(terminals.len() >= 0);
+        // May or may not have entries depending on test environment — just verify it
+        // returns a Vec without panicking.
+        let _terminals = get_logged_in_terminals();
     }
 
     // Check permission (on test systems, may not have /dev/tty)

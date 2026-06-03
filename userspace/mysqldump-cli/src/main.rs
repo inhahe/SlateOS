@@ -37,8 +37,8 @@ fn run_mysqldump(args: Vec<String>) -> i32 {
     let all_db = args.iter().any(|a| a == "--all-databases" || a == "-A");
     let no_data = args.iter().any(|a| a == "--no-data" || a == "-d");
 
-    let db = args.iter().filter(|a| !a.starts_with('-'))
-        .next().map(|s| s.as_str());
+    let db = args.iter().find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
 
     println!("-- MySQL dump 8.0.35 (OurOS)");
     println!("-- Host: localhost    Database: {}", db.unwrap_or("(all)"));

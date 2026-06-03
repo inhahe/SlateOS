@@ -274,8 +274,7 @@ fn install_path(inst: InstallationType) -> String {
 // ============================================================================
 
 fn has_flag(args: &[String], short: &str, long: &str) -> bool {
-    args.iter()
-        .any(|a| a == short || a == long || (!long.is_empty() && a == long))
+    args.iter().any(|a| a == short || a == long)
 }
 
 fn has_long_flag(args: &[String], long: &str) -> bool {
@@ -666,77 +665,63 @@ fn cmd_run(args: &[String]) -> i32 {
     while i < args.len() {
         let arg = &args[i];
         match arg.as_str() {
-            "--share" => {
-                if i + 1 < args.len() {
-                    i += 1;
-                    let val = &args[i];
-                    if !is_valid_shared(val) {
-                        eprintln!("error: unknown share type '{}'", val);
-                        return 1;
-                    }
-                    shares.push(val.clone());
+            "--share" if i + 1 < args.len() => {
+                i += 1;
+                let val = &args[i];
+                if !is_valid_shared(val) {
+                    eprintln!("error: unknown share type '{val}'");
+                    return 1;
                 }
+                shares.push(val.clone());
             }
-            "--unshare" => {
-                if i + 1 < args.len() {
-                    i += 1;
-                    let val = &args[i];
-                    if !is_valid_shared(val) {
-                        eprintln!("error: unknown share type '{}'", val);
-                        return 1;
-                    }
-                    unshares.push(val.clone());
+            "--unshare" if i + 1 < args.len() => {
+                i += 1;
+                let val = &args[i];
+                if !is_valid_shared(val) {
+                    eprintln!("error: unknown share type '{val}'");
+                    return 1;
                 }
+                unshares.push(val.clone());
             }
-            "--socket" => {
-                if i + 1 < args.len() {
-                    i += 1;
-                    let val = &args[i];
-                    if !is_valid_socket(val) {
-                        eprintln!("error: unknown socket type '{}'", val);
-                        return 1;
-                    }
-                    sockets.push(val.clone());
+            "--socket" if i + 1 < args.len() => {
+                i += 1;
+                let val = &args[i];
+                if !is_valid_socket(val) {
+                    eprintln!("error: unknown socket type '{val}'");
+                    return 1;
                 }
+                sockets.push(val.clone());
             }
-            "--nosocket" => {
-                if i + 1 < args.len() {
-                    i += 1;
-                    let val = &args[i];
-                    if !is_valid_socket(val) {
-                        eprintln!("error: unknown socket type '{}'", val);
-                        return 1;
-                    }
-                    nosockets.push(val.clone());
+            "--nosocket" if i + 1 < args.len() => {
+                i += 1;
+                let val = &args[i];
+                if !is_valid_socket(val) {
+                    eprintln!("error: unknown socket type '{val}'");
+                    return 1;
                 }
+                nosockets.push(val.clone());
             }
-            "--device" => {
-                if i + 1 < args.len() {
-                    i += 1;
-                    let val = &args[i];
-                    if !is_valid_device(val) {
-                        eprintln!("error: unknown device type '{}'", val);
-                        return 1;
-                    }
-                    devices.push(val.clone());
+            "--device" if i + 1 < args.len() => {
+                i += 1;
+                let val = &args[i];
+                if !is_valid_device(val) {
+                    eprintln!("error: unknown device type '{val}'");
+                    return 1;
                 }
+                devices.push(val.clone());
             }
-            "--nodevice" => {
-                if i + 1 < args.len() {
-                    i += 1;
-                    let val = &args[i];
-                    if !is_valid_device(val) {
-                        eprintln!("error: unknown device type '{}'", val);
-                        return 1;
-                    }
-                    nodevices.push(val.clone());
+            "--nodevice" if i + 1 < args.len() => {
+                i += 1;
+                let val = &args[i];
+                if !is_valid_device(val) {
+                    eprintln!("error: unknown device type '{val}'");
+                    return 1;
                 }
+                nodevices.push(val.clone());
             }
-            "--filesystem" => {
-                if i + 1 < args.len() {
-                    i += 1;
-                    filesystems.push(args[i].clone());
-                }
+            "--filesystem" if i + 1 < args.len() => {
+                i += 1;
+                filesystems.push(args[i].clone());
             }
             "--nofilesystem"
                 if i + 1 < args.len() => {

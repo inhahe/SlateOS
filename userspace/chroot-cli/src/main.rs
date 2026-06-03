@@ -73,8 +73,7 @@ fn run_unshare(args: &[String]) -> i32 {
     }).collect();
 
     let cmd = args.iter()
-        .filter(|a| !a.starts_with('-'))
-        .next()
+        .find(|a| !a.starts_with('-'))
         .map(|s| s.as_str())
         .unwrap_or("/bin/sh");
 

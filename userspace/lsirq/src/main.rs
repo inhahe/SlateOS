@@ -417,12 +417,12 @@ mod tests {
 
     #[test]
     fn test_sort_by_total() {
-        let mut irqs = vec![
+        let mut irqs = [
             make_irq("0", 100, "a"),
             make_irq("1", 500, "b"),
             make_irq("2", 200, "c"),
         ];
-        irqs.sort_by(|a, b| b.total.cmp(&a.total));
+        irqs.sort_by_key(|irq| std::cmp::Reverse(irq.total));
         assert_eq!(irqs[0].irq, "1");
         assert_eq!(irqs[1].irq, "2");
         assert_eq!(irqs[2].irq, "0");
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn test_sort_by_name() {
-        let mut irqs = vec![
+        let mut irqs = [
             make_irq("0", 0, "timer"),
             make_irq("1", 0, "keyboard"),
             make_irq("2", 0, "mouse"),

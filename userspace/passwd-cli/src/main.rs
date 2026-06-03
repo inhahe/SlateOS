@@ -30,8 +30,8 @@ fn run_passwd(args: &[String]) -> i32 {
         return 0;
     }
 
-    let user = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("root");
+    let user = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("root");
 
     if args.iter().any(|a| a == "-S" || a == "--status") {
         println!("{} P 2024-01-15 0 99999 7 -1", user);
@@ -66,8 +66,8 @@ fn run_chage(args: &[String]) -> i32 {
         return 0;
     }
 
-    let user = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("root");
+    let user = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("root");
 
     if args.iter().any(|a| a == "-l" || a == "--list") {
         println!("Last password change                    : Jan 15, 2024");

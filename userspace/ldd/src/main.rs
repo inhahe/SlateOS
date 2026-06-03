@@ -1598,7 +1598,7 @@ mod tests {
             dynstr.push(0);
         }
         // Pad to 8-byte alignment
-        while dynstr.len() % 8 != 0 {
+        while !dynstr.len().is_multiple_of(8) {
             dynstr.push(0);
         }
 
@@ -1652,10 +1652,8 @@ mod tests {
         let sh_name_dynstr: u32 = 10; // ".dynstr" at offset 10
         let sh_name_shstrtab: u32 = 18; // ".shstrtab" at offset 18
 
-        let mut file: Vec<u8> = Vec::new();
-
         // Placeholder ELF header (fill in below)
-        file.resize(elf_hdr_sz, 0);
+        let mut file: Vec<u8> = vec![0; elf_hdr_sz];
 
         // .dynamic
         file.extend_from_slice(&dynamic);
@@ -1723,7 +1721,7 @@ mod tests {
             h[6] = 1; // EI_VERSION = 1
             h[7] = 0; // ELFOSABI_NONE
             // e_type = ET_EXEC (2)
-            h[16..18].copy_from_slice(&(ET_EXEC as u16).to_le_bytes());
+            h[16..18].copy_from_slice(&ET_EXEC.to_le_bytes());
             // e_machine = EM_X86_64 (62)
             h[18..20].copy_from_slice(&62u16.to_le_bytes());
             // e_version = 1

@@ -34,8 +34,8 @@ fn run_pg_dump(args: &[String]) -> i32 {
         return 0;
     }
 
-    let db = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("mydb");
+    let db = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("mydb");
     let output = args.windows(2).find(|w| w[0] == "-f" || w[0] == "--file")
         .map(|w| w[1].as_str());
     let format = args.windows(2).find(|w| w[0] == "-F" || w[0] == "--format")
@@ -86,8 +86,8 @@ fn run_pg_restore(args: &[String]) -> i32 {
         return 0;
     }
 
-    let file = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("dump.sql");
+    let file = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("dump.sql");
     let db = args.windows(2).find(|w| w[0] == "-d" || w[0] == "--dbname")
         .map(|w| w[1].as_str()).unwrap_or("mydb");
 

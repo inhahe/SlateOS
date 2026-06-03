@@ -34,8 +34,8 @@ fn run_fstrim(args: &[String]) -> i32 {
             println!("/boot/efi: 512 MiB (536870912 bytes) trimmed on /dev/sda1");
         }
     } else {
-        let mp = args.iter().filter(|a| !a.starts_with('-'))
-            .next().map(|s| s.as_str()).unwrap_or("/");
+        let mp = args.iter().find(|a| !a.starts_with('-'))
+            .map(|s| s.as_str()).unwrap_or("/");
         if verbose {
             println!("{}: 12.3 GiB (13209067520 bytes) trimmed", mp);
         }
@@ -89,8 +89,8 @@ fn run_blkid(args: &[String]) -> i32 {
         return 0;
     }
 
-    let device = args.iter().filter(|a| !a.starts_with('-'))
-        .next().map(|s| s.as_str());
+    let device = args.iter().find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str());
 
     if let Some(dev) = device {
         println!("{}: UUID=\"abcdef12-3456-7890-abcd-ef1234567890\" TYPE=\"ext4\"", dev);
@@ -110,8 +110,8 @@ fn run_blkdiscard(args: &[String]) -> i32 {
         println!("  -z, --zeroout  Zero-fill instead");
         return 0;
     }
-    let dev = args.iter().filter(|a| !a.starts_with('-'))
-        .next().map(|s| s.as_str()).unwrap_or("/dev/sdb");
+    let dev = args.iter().find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("/dev/sdb");
     println!("blkdiscard: {}: discarded", dev);
     0
 }

@@ -33,8 +33,8 @@ fn run_pgloader(args: Vec<String>) -> i32 {
         return 0;
     }
 
-    let source = args.iter().filter(|a| !a.starts_with('-'))
-        .next().map(|s| s.as_str()).unwrap_or("data.csv");
+    let source = args.iter().find(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("data.csv");
     let target = args.iter().filter(|a| !a.starts_with('-'))
         .nth(1).map(|s| s.as_str()).unwrap_or("postgresql://localhost/mydb");
 

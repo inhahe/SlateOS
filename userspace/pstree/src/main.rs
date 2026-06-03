@@ -522,7 +522,7 @@ mod tests {
         let children = build_children_map(&procs);
         assert_eq!(children.get(&1).unwrap(), &[2, 3]);
         assert_eq!(children.get(&2).unwrap(), &[4]);
-        assert!(children.get(&3).is_none() || children.get(&3).unwrap().is_empty());
+        assert!(!children.contains_key(&3) || children.get(&3).unwrap().is_empty());
     }
 
     #[test]

@@ -31,8 +31,8 @@ fn run_useradd(args: &[String]) -> i32 {
         println!("  -e, --expiredate DATE  Account expiration date");
         return 0;
     }
-    let user = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("newuser");
+    let user = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("newuser");
     println!("useradd: user '{}' created", user);
     if args.iter().any(|a| a == "-m" || a == "--create-home") {
         println!("useradd: home directory /home/{} created", user);
@@ -47,8 +47,8 @@ fn run_userdel(args: &[String]) -> i32 {
         println!("  -f, --force     Force removal");
         return 0;
     }
-    let user = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("olduser");
+    let user = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("olduser");
     println!("userdel: user '{}' deleted", user);
     if args.iter().any(|a| a == "-r" || a == "--remove") {
         println!("userdel: /home/{} removed", user);
@@ -67,8 +67,8 @@ fn run_usermod(args: &[String]) -> i32 {
         println!("  -U, --unlock           Unlock account");
         return 0;
     }
-    let user = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("user");
+    let user = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("user");
     println!("usermod: user '{}' modified", user);
     0
 }
@@ -80,8 +80,8 @@ fn run_groupadd(args: &[String]) -> i32 {
         println!("  -r, --system     Create system group");
         return 0;
     }
-    let group = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("newgroup");
+    let group = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("newgroup");
     println!("groupadd: group '{}' created", group);
     0
 }
@@ -91,8 +91,8 @@ fn run_groupdel(args: &[String]) -> i32 {
         println!("Usage: groupdel GROUP");
         return 0;
     }
-    let group = args.iter().filter(|a| !a.starts_with('-'))
-        .last().map(|s| s.as_str()).unwrap_or("oldgroup");
+    let group = args.iter().rfind(|a| !a.starts_with('-'))
+        .map(|s| s.as_str()).unwrap_or("oldgroup");
     println!("groupdel: group '{}' deleted", group);
     0
 }

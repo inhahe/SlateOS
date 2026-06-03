@@ -39,8 +39,8 @@ fn run_units(args: Vec<String>) -> i32 {
         if terse {
             println!("* 0.3048");
         } else {
-            println!("    {} = {} * {}", from, to, "0.3048");
-            println!("    {} = {} / {}", to, from, "3.2808399");
+            println!("    {from} = {to} * 0.3048");
+            println!("    {to} = {from} / 3.2808399");
         }
     } else {
         println!("Units version 2.22 (OurOS)");

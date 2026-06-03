@@ -8,7 +8,7 @@
 //! an Airtable base or a Google Sheet into a branded customer portal,
 //! members-only site, marketplace, or internal directory without
 //! writing code. The defining vs-Bubble distinction is template-first
-//! + data-source-bound — Softr customers are typically operators or
+//! and data-source-bound — Softr customers are typically operators or
 //! founders, not engineers. Picked up Series A from FirstMark in 2022.
 
 use std::env;

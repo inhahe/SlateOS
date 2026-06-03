@@ -42,7 +42,7 @@ fn run_locust(args: &[String]) -> i32 {
     let headless = args.iter().any(|a| a == "--headless");
 
     if headless {
-        println!("[INFO] Starting Locust {} (headless mode)", "2.29.0");
+        println!("[INFO] Starting Locust 2.29.0 (headless mode)");
         println!("[INFO] Host: {}", host);
         println!("[INFO] Users: {}, spawn rate: {}/s", users, rate);
         println!();

@@ -53,9 +53,9 @@ fn run_rustdoc(args: &[String]) -> i32 {
         println!("rustdoc: running doc-tests in {}", input);
         println!();
         println!("running 3 tests");
-        println!("test {} ... ok", "src/lib.rs - example_1 (line 15)");
-        println!("test {} ... ok", "src/lib.rs - example_2 (line 32)");
-        println!("test {} ... ok", "src/lib.rs - example_3 (line 48)");
+        println!("test src/lib.rs - example_1 (line 15) ... ok");
+        println!("test src/lib.rs - example_2 (line 32) ... ok");
+        println!("test src/lib.rs - example_3 (line 48) ... ok");
         println!();
         println!("test result: ok. 3 passed; 0 failed; 0 ignored");
     } else {

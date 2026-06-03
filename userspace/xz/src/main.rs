@@ -309,8 +309,7 @@ mod tests {
     #[test]
     fn test_personality_defaults() {
         // unxz should default to decompress
-        let mut opts = XzOptions::default();
-        opts.action = Action::Decompress;
+        let opts = XzOptions { action: Action::Decompress, ..XzOptions::default() };
         assert_eq!(opts.action, Action::Decompress);
     }
 }

@@ -40,9 +40,10 @@ fn run_minitest(args: &[String]) -> i32 {
         println!("TestUser#test_destroy = 0.001 s = .");
         println!("TestAuth#test_login = 0.003 s = .");
         println!("TestAuth#test_logout = 0.001 s = .");
-    } else if pride {
-        println!(".....");
     } else {
+        // Default and the "pride" plugin both print dots in this stub; we
+        // have no color, so we render the same plain progress regardless.
+        let _ = pride;
         println!(".....");
     }
     println!();

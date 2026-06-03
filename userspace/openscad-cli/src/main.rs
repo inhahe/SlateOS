@@ -33,7 +33,7 @@ fn run_openscad(args: Vec<String>) -> i32 {
     }
 
     let output = args.windows(2).find(|w| w[0] == "-o").map(|w| w[1].as_str());
-    let file = args.iter().filter(|a| !a.starts_with('-')).last().map(|s| s.as_str());
+    let file = args.iter().rfind(|a| !a.starts_with('-')).map(|s| s.as_str());
     let quiet = args.iter().any(|a| a == "--quiet");
 
     if let Some(f) = file {

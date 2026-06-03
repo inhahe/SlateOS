@@ -7,10 +7,10 @@
 //! Kaspars Dancis (CTO, ex-Wave). Both founders previously built engineering
 //! at Wave Financial in Toronto. Whimsical positioned itself between Miro
 //! (free-form whiteboard) and Lucidchart (rigorous diagramming) — opinionated,
-//! pretty, fast, with built-in templates for the specific workflows product
-//! + design + engineering teams use most often. Bootstrapped + profitable;
-//! no significant outside funding, no acquisition pressure, no SaaS race-to-
-//! the-bottom pricing. The product is a defining example of the indie-bootstrap-
+//! pretty, fast, with built-in templates for the specific workflows that
+//! product, design and engineering teams use most often. Bootstrapped and
+//! profitable; no significant outside funding, no acquisition pressure,
+//! no SaaS race-to-the-bottom pricing. A defining example of the indie-bootstrap-
 //! profitable SaaS strategy: deep in a narrow surface, charge for it, never
 //! raise a round.
 

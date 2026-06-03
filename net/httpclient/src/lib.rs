@@ -1612,11 +1612,11 @@ mod tests {
             http_only: false,
         });
 
-        let http_url = Url::parse("http://example.com/page").unwrap();
-        let https_url = Url::parse("https://example.com/page").unwrap();
+        let plain_url = Url::parse("http://example.com/page").unwrap();
+        let tls_url = Url::parse("https://example.com/page").unwrap();
 
-        assert_eq!(jar.matching(&http_url).len(), 0);
-        assert_eq!(jar.matching(&https_url).len(), 1);
+        assert_eq!(jar.matching(&plain_url).len(), 0);
+        assert_eq!(jar.matching(&tls_url).len(), 1);
     }
 
     // --- Percent encoding tests ---

@@ -3973,7 +3973,7 @@ mod tests {
         let disk = DiskInfo::new("/dev/sda", 500 * GB);
         let mut editor = DiskEditor::new(disk);
         editor.create_label(TableType::Gpt);
-        let result = editor.mkpart_gpt("root", "linux", 1 * MIB, 100 * GIB);
+        let result = editor.mkpart_gpt("root", "linux", MIB, 100 * GIB);
         assert!(result.is_ok());
         assert_eq!(editor.disk.partitions.len(), 1);
     }
@@ -4655,7 +4655,7 @@ mod tests {
         let mut disk2 = DiskInfo::new("/dev/sda", 500 * GB);
         let parsed = DiskInfo::parse_mbr(&data, &mut disk2);
         assert!(parsed);
-        assert!(disk2.partitions.len() >= 1);
+        assert!(!disk2.partitions.is_empty());
     }
 
     #[test]
@@ -4663,7 +4663,7 @@ mod tests {
         let mbr = Mbr::new_protective(1_000_000);
         let data = mbr.serialize();
         let mut disk = DiskInfo::new("/dev/sda", 500 * GB);
-        assert!(!DiskInfo::parse_mbr(&data.to_vec(), &mut disk));
+        assert!(!DiskInfo::parse_mbr(data.as_ref(), &mut disk));
     }
 
     // ---- Partition Size Tests ----
@@ -4801,7 +4801,7 @@ mod tests {
 
     #[test]
     fn test_disk_info_new() {
-        let disk = DiskInfo::new("/dev/sda", 1 * TB);
+        let disk = DiskInfo::new("/dev/sda", TB);
         assert_eq!(disk.size_bytes, TB);
         assert_eq!(disk.size_sectors, TB / 512);
         assert_eq!(disk.sector_size, 512);

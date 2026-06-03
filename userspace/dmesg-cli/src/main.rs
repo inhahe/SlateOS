@@ -98,9 +98,9 @@ fn run_dmesg(args: &[String]) -> i32 {
             println!("{}", msg);
         } else if ctime {
             println!("[Thu Jan  1 00:00:{:06.3}] {}", time, msg);
-        } else if human {
-            println!("[{:>12.6}] {}", time, msg);
         } else {
+            // Default and `--human` both use the same plain timestamp format in this stub.
+            let _ = human;
             println!("[{:>12.6}] {}", time, msg);
         }
     }

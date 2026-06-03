@@ -1161,10 +1161,14 @@ mod tests {
     fn new_app_different_seeds() {
         let a1 = Game2048App::with_seed(1);
         let a2 = Game2048App::with_seed(2);
-        // Very likely different grids (not guaranteed but probabilistic)
-        let same = a1.state.grid == a2.state.grid;
-        // This is allowed to fail in extremely rare cases
-        assert!(!same || true);
+        // Both grids should be well-formed 4x4 with exactly two non-zero starting tiles.
+        // (We don't assert they differ — that's probabilistic.)
+        assert_eq!(a1.state.grid.len(), 4);
+        assert_eq!(a2.state.grid.len(), 4);
+        let count1 = a1.state.grid.iter().flatten().filter(|&&v| v != 0).count();
+        let count2 = a2.state.grid.iter().flatten().filter(|&&v| v != 0).count();
+        assert_eq!(count1, 2);
+        assert_eq!(count2, 2);
     }
 
     // --- Undo ---
@@ -1254,8 +1258,11 @@ mod tests {
             || app.make_move(Direction::Down);
         if moved {
             let after_count: usize = app.state.grid.iter().flatten().filter(|&&v| v != 0).count();
-            // After move + spawn, count should increase or stay same (merge reduces, spawn adds)
-            assert!(after_count >= before_count || true); // Just verifying it doesn't crash
+            // After move + spawn: a merge reduces by 1, but the spawn adds 1, so the count is
+            // either equal to (no merges) or one less than (some merges) the count plus spawn.
+            // The bounded relation is: before_count - merges + 1 == after_count, with merges >= 0.
+            // So after_count is at most before_count + 1.
+            assert!(after_count <= before_count + 1);
         }
     }
 

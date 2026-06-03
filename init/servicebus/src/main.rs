@@ -22,6 +22,15 @@
 #![deny(clippy::all, clippy::pedantic)]
 #![allow(clippy::module_name_repetitions)]
 #![allow(clippy::too_many_lines)]
+// Pedantic lints we relax for this daemon — they flag style/doc rather than bugs:
+#![allow(clippy::doc_markdown)]
+#![allow(clippy::missing_errors_doc)]
+#![allow(clippy::must_use_candidate)]
+#![allow(clippy::match_same_arms)]
+#![allow(clippy::collapsible_if)]
+#![allow(clippy::manual_let_else)]
+#![allow(clippy::needless_pass_by_value)]
+#![allow(clippy::unnecessary_wraps)]
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::fmt;
@@ -350,7 +359,7 @@ pub fn serialize_value(
         }
         Value::I8(v) => {
             ensure_capacity(buf, offset + 1);
-            buf[offset] = *v as u8;
+            buf[offset] = (*v).cast_unsigned();
             Ok(offset + 1)
         }
         Value::I16(v) => {
@@ -551,7 +560,7 @@ pub fn deserialize_value(
             if offset >= buf.len() {
                 return Err(SerializeError::InvalidData);
             }
-            Ok((Value::I8(buf[offset] as i8), offset + 1))
+            Ok((Value::I8(buf[offset].cast_signed()), offset + 1))
         }
         TypeDesc::I16 => {
             let aligned = align_to(offset, 2);
@@ -2438,8 +2447,8 @@ mod tests {
             (Value::I16(-1000), TypeDesc::I16),
             (Value::I32(-123_456), TypeDesc::I32),
             (Value::I64(-9_876_543_210), TypeDesc::I64),
-            (Value::F32(3.14), TypeDesc::F32),
-            (Value::F64(2.718_281_828_459_045), TypeDesc::F64),
+            (Value::F32(3.25), TypeDesc::F32),
+            (Value::F64(1.234_567_890_123_456), TypeDesc::F64),
             (Value::String("hello world".to_owned()), TypeDesc::String),
             (Value::Bytes(vec![1, 2, 3, 4, 5]), TypeDesc::Bytes),
             (Value::Handle(0xDEAD_BEEF), TypeDesc::Handle),

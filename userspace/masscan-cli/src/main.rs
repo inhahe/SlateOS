@@ -41,8 +41,7 @@ fn run_masscan(args: Vec<String>) -> i32 {
     let ports = args.windows(2).find(|w| w[0] == "-p")
         .map(|w| w[1].as_str()).unwrap_or("80");
     let target = args.iter()
-        .filter(|a| !a.starts_with('-') && (a.contains('.') || a.contains(':')))
-        .next()
+        .find(|a| !a.starts_with('-') && (a.contains('.') || a.contains(':')))
         .map(|s| s.as_str())
         .unwrap_or("10.0.0.0/24");
 
@@ -57,7 +56,7 @@ fn run_masscan(args: Vec<String>) -> i32 {
     println!("Discovered open port 80/tcp on 10.0.0.10");
     println!("Discovered open port 8080/tcp on 10.0.0.10");
     println!();
-    println!("rate: {:>8} pps, {} total hosts, {} open ports", rate, "256", "6");
+    println!("rate: {rate:>8} pps, 256 total hosts, 6 open ports");
     0
 }
 

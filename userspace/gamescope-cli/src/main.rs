@@ -57,10 +57,10 @@ fn run_gamescope(args: &[String]) -> i32 {
     }
 
     let separator = args.iter().position(|a| a == "--");
-    if let Some(pos) = separator {
-        if let Some(cmd) = args.get(pos + 1) {
-            println!("[gamescope] Launching: {}", cmd);
-        }
+    if let Some(pos) = separator
+        && let Some(cmd) = args.get(pos + 1)
+    {
+        println!("[gamescope] Launching: {cmd}");
     }
     println!("[gamescope] Compositor ready");
     0

@@ -746,7 +746,7 @@ mod tests {
         let ts = Rc::clone(&toggle_state);
         toggled_signal.connect(move |t| ts.set(t.0));
         toggled_signal.emit(Toggled(true));
-        assert_eq!(toggle_state.get(), true);
+        assert!(toggle_state.get());
 
         let text_val = Rc::new(RefCell::new(String::new()));
         let tv = Rc::clone(&text_val);
@@ -779,7 +779,7 @@ mod tests {
         let float_val = Rc::new(Cell::new(0.0f64));
         let fv = Rc::clone(&float_val);
         value_signal.connect(move |v| fv.set(v.value));
-        value_signal.emit(ValueChanged { value: 3.14 });
-        assert!((float_val.get() - 3.14).abs() < f64::EPSILON);
+        value_signal.emit(ValueChanged { value: 3.25 });
+        assert!((float_val.get() - 3.25).abs() < f64::EPSILON);
     }
 }

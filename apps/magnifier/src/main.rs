@@ -1229,9 +1229,8 @@ mod tests {
     #[test]
     fn test_all_filters_produce_valid_output() {
         for filter in &ColorFilter::ALL {
-            let (r, g, b) = filter.apply(128, 128, 128);
-            // All outputs should be valid u8 (always true, but ensures no panic)
-            assert!(r <= 255 && g <= 255 && b <= 255);
+            // Apply on a mid-gray input — just verify no panic and result is a (u8, u8, u8).
+            let (_r, _g, _b) = filter.apply(128, 128, 128);
         }
     }
 

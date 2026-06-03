@@ -116,7 +116,7 @@ fn run_nfsstat(args: Vec<String>) -> i32 {
     }
     let server = args.iter().any(|a| a.contains('s'));
     let client = args.iter().any(|a| a.contains('c'));
-    if server || (!server && !client) {
+    if server || !client {
         println!("Server rpc stats:");
         println!("calls      badcalls   badclnt    badauth    xdrcall");
         println!("142890     0          0          0          0");
@@ -125,7 +125,7 @@ fn run_nfsstat(args: Vec<String>) -> i32 {
         println!("null       compound");
         println!("0          142890");
     }
-    if client || (!server && !client) {
+    if client || !server {
         println!();
         println!("Client rpc stats:");
         println!("calls      retrans    authrefrsh");

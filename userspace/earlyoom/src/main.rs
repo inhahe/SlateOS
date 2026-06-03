@@ -434,8 +434,10 @@ mod tests {
 
     #[test]
     fn test_select_victim_with_prefer() {
-        let mut config = EarlyOomConfig::default();
-        config.prefer_regex = Some("java".to_string());
+        let config = EarlyOomConfig {
+            prefer_regex: Some("java".to_string()),
+            ..EarlyOomConfig::default()
+        };
         let victim = select_victim(&config);
         assert!(victim.is_some());
         assert_eq!(victim.unwrap().name, "java");
@@ -443,8 +445,10 @@ mod tests {
 
     #[test]
     fn test_select_victim_with_avoid() {
-        let mut config = EarlyOomConfig::default();
-        config.avoid_regex = Some("chromium".to_string());
+        let config = EarlyOomConfig {
+            avoid_regex: Some("chromium".to_string()),
+            ..EarlyOomConfig::default()
+        };
         let victim = select_victim(&config);
         assert!(victim.is_some());
         // Should be electron-app (next highest oom_score)

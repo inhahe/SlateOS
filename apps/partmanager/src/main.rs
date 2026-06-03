@@ -931,6 +931,12 @@ pub struct PartitionManagerApp {
     pub status_message: String,
 }
 
+impl Default for PartitionManagerApp {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl PartitionManagerApp {
     /// Create a new application with sample data.
     pub fn new() -> Self {
@@ -1779,7 +1785,7 @@ fn render_detail_panel(tree: &mut RenderTree, app: &PartitionManagerApp) {
             )),
             ("Free", part.free_bytes.map_or(
                 String::from("N/A"),
-                |f| format_size(f),
+                format_size,
             )),
             ("Flags", part.flags_string()),
             ("Mount", part.mount_point.clone().unwrap_or_else(|| String::from("Not mounted"))),
@@ -2950,8 +2956,8 @@ fn handle_mouse_move(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
     if y >= map_y_start && y < map_y_end {
         let map_x_start = SIDEBAR_WIDTH + DISK_MAP_PADDING;
         let map_x_end = app.width - DETAIL_PANEL_WIDTH - DISK_MAP_PADDING;
-        if x >= map_x_start && x < map_x_end {
-            if let Some(disk) = app.current_disk() {
+        if x >= map_x_start && x < map_x_end
+            && let Some(disk) = app.current_disk() {
                 let regions = disk.regions();
                 let total_sectors = disk.total_sectors as f64;
                 if total_sectors > 0.0 {
@@ -2971,7 +2977,6 @@ fn handle_mouse_move(app: &mut PartitionManagerApp, x: f32, y: f32) -> EventResu
                     }
                 }
             }
-        }
         return EventResult::Consumed;
     }
 
@@ -3043,8 +3048,8 @@ fn handle_dialog_mouse(
                         }
                     }
                 }
-                MouseEventKind::Press(MouseButton::Left) => {
-                    if y >= btn_y && y < btn_y + DIALOG_BTN_HEIGHT {
+                MouseEventKind::Press(MouseButton::Left)
+                    if y >= btn_y && y < btn_y + DIALOG_BTN_HEIGHT => {
                         if x >= confirm_x && x < confirm_x + DIALOG_BTN_WIDTH {
                             // Confirmed -- perform the action
                             handle_confirm_accepted(app);
@@ -3054,7 +3059,6 @@ fn handle_dialog_mouse(
                             return EventResult::Consumed;
                         }
                     }
-                }
                 _ => {}
             }
         }
@@ -3239,12 +3243,11 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
     }
 
     // Escape closes dialogs
-    if key_ev.key == Key::Escape {
-        if app.dialog.is_open() {
+    if key_ev.key == Key::Escape
+        && app.dialog.is_open() {
             app.dialog = ActiveDialog::None;
             return EventResult::Consumed;
         }
-    }
 
     // If dialog open, handle text input for create-partition label
     if let ActiveDialog::CreatePartition(ref mut dialog) = app.dialog {
@@ -3267,12 +3270,11 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
                 return EventResult::Consumed;
             }
             _ => {
-                if let Some(ch) = key_ev.text {
-                    if ch.is_alphanumeric() || ch == ' ' || ch == '-' || ch == '_' {
+                if let Some(ch) = key_ev.text
+                    && (ch.is_alphanumeric() || ch == ' ' || ch == '-' || ch == '_') {
                         dialog.label.push(ch);
                         return EventResult::Consumed;
                     }
-                }
             }
         }
         return EventResult::Consumed;
@@ -3306,12 +3308,11 @@ fn handle_key(app: &mut PartitionManagerApp, key_ev: &KeyEvent) -> EventResult {
             app.undo_last_operation();
             return EventResult::Consumed;
         }
-        Key::Enter if key_ev.modifiers.ctrl => {
-            if app.has_pending_operations() {
+        Key::Enter if key_ev.modifiers.ctrl
+            && app.has_pending_operations() => {
                 let _ = execute_toolbar_action(app, 9); // Apply
                 return EventResult::Consumed;
             }
-        }
         Key::Up => {
             select_adjacent_region(app, true);
             return EventResult::Consumed;

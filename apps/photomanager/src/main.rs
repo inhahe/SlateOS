@@ -1379,7 +1379,10 @@ impl SlideshowState {
 
     pub fn advance(&mut self) {
         if !self.photo_ids.is_empty() {
-            self.current_index = self.current_index.saturating_add(1) % self.photo_ids.len();
+            self.current_index = self.current_index
+                .saturating_add(1)
+                .checked_rem(self.photo_ids.len())
+                .unwrap_or(0);
         }
     }
 
@@ -1923,7 +1926,10 @@ impl PhotoApp {
 
     /// Cycle thumbnail size.
     pub fn cycle_thumb_size(&mut self) {
-        self.thumb_size_idx = (self.thumb_size_idx.saturating_add(1)) % THUMB_SIZES.len();
+        self.thumb_size_idx = self.thumb_size_idx
+            .saturating_add(1)
+            .checked_rem(THUMB_SIZES.len())
+            .unwrap_or(0);
     }
 
     /// Get current thumbnail size.
@@ -2008,7 +2014,8 @@ impl PhotoApp {
 
         let mut format_counts: HashMap<&str, usize> = HashMap::new();
         for photo in &self.photos {
-            *format_counts.entry(photo.format.label()).or_default() += 1;
+            let slot = format_counts.entry(photo.format.label()).or_insert(0usize);
+            *slot = slot.saturating_add(1);
         }
 
         LibraryStats {
@@ -2755,8 +2762,8 @@ impl PhotoApp {
         }
 
         for (idx, &pid) in visible.iter().enumerate() {
-            let col = idx % cols;
-            let row = idx / cols;
+            let col = idx.checked_rem(cols).unwrap_or(0);
+            let row = idx.checked_div(cols).unwrap_or(0);
             let cx = x + THUMB_PADDING + (col as f32) * cell_size;
             let cy = y + THUMB_PADDING + (row as f32) * cell_size;
 
@@ -2958,8 +2965,8 @@ impl PhotoApp {
 
             // Thumbnails
             for (idx, &pid) in photo_ids.iter().enumerate() {
-                let col = idx % cols;
-                let row = idx / cols;
+                let col = idx.checked_rem(cols).unwrap_or(0);
+                let row = idx.checked_div(cols).unwrap_or(0);
                 let cx = x + THUMB_PADDING + (col as f32) * cell_size;
                 let ty = cy + (row as f32) * cell_size;
 
@@ -2990,8 +2997,7 @@ impl PhotoApp {
                 }
             }
 
-            let rows_needed =
-                (photo_ids.len().saturating_add(cols).saturating_sub(1)) / cols.max(1);
+            let rows_needed = photo_ids.len().div_ceil(cols.max(1));
             cy += (rows_needed as f32) * cell_size + 12.0;
         }
 

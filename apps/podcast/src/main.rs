@@ -286,14 +286,13 @@ impl PlaybackSpeed {
     pub fn next(self) -> Self {
         let all = Self::ALL;
         for i in 0..all.len() {
-            if let Some(s) = all.get(i) {
-                if (s.0 - self.0).abs() < 0.001 {
+            if let Some(s) = all.get(i)
+                && (s.0 - self.0).abs() < 0.001 {
                     let next_idx = (i + 1) % all.len();
                     if let Some(n) = all.get(next_idx) {
                         return *n;
                     }
                 }
-            }
         }
         Self::NORMAL
     }
@@ -947,6 +946,9 @@ impl PodcastApp {
     // ========================================================================
 
     /// Add an episode to a podcast.
+    // Mirrors the RSS enclosure fields one-to-one; introducing a parameter
+    // struct would only duplicate the Episode fields.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_episode(
         &mut self,
         podcast_id: u64,
@@ -990,23 +992,21 @@ impl PodcastApp {
 
     /// Mark an episode as played.
     pub fn mark_played(&mut self, podcast_id: u64, episode_id: u64) -> bool {
-        if let Some(podcast) = self.podcasts.iter_mut().find(|p| p.id == podcast_id) {
-            if let Some(ep) = podcast.episodes.iter_mut().find(|e| e.id == episode_id) {
+        if let Some(podcast) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+            && let Some(ep) = podcast.episodes.iter_mut().find(|e| e.id == episode_id) {
                 ep.status = EpisodeStatus::Played;
                 return true;
             }
-        }
         false
     }
 
     /// Mark an episode as unplayed.
     pub fn mark_unplayed(&mut self, podcast_id: u64, episode_id: u64) -> bool {
-        if let Some(podcast) = self.podcasts.iter_mut().find(|p| p.id == podcast_id) {
-            if let Some(ep) = podcast.episodes.iter_mut().find(|e| e.id == episode_id) {
+        if let Some(podcast) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+            && let Some(ep) = podcast.episodes.iter_mut().find(|e| e.id == episode_id) {
                 ep.status = EpisodeStatus::Unplayed;
                 return true;
             }
-        }
         false
     }
 
@@ -1082,12 +1082,11 @@ impl PodcastApp {
         episode_id: u64,
         text: &str,
     ) -> bool {
-        if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id) {
-            if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
+        if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
                 ep.notes.set_notes(text);
                 return true;
             }
-        }
         false
     }
 
@@ -1099,12 +1098,11 @@ impl PodcastApp {
         timestamp_secs: u32,
         label: &str,
     ) -> bool {
-        if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id) {
-            if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
+        if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
                 ep.notes.add_bookmark(timestamp_secs, label);
                 return true;
             }
-        }
         false
     }
 
@@ -1115,11 +1113,10 @@ impl PodcastApp {
         episode_id: u64,
         bookmark_index: usize,
     ) -> bool {
-        if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id) {
-            if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
+        if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
                 return ep.notes.remove_bookmark(bookmark_index);
             }
-        }
         false
     }
 
@@ -1149,13 +1146,12 @@ impl PodcastApp {
             self.player_state = PlayerState::Playing;
 
             // Mark as in-progress.
-            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id) {
-                if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
+            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
                     ep.status = EpisodeStatus::InProgress {
                         position_secs: position,
                     };
                 }
-            }
             true
         } else {
             false
@@ -1270,15 +1266,13 @@ impl PodcastApp {
         let ep_id = self.current_episode_id;
         let pod_id = self.current_podcast_id;
         let pos = self.playback_position_secs;
-        if let (Some(podcast_id), Some(episode_id)) = (pod_id, ep_id) {
-            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id) {
-                if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
+        if let (Some(podcast_id), Some(episode_id)) = (pod_id, ep_id)
+            && let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
                     ep.status = EpisodeStatus::InProgress {
                         position_secs: pos,
                     };
                 }
-            }
-        }
     }
 
     /// Complete the current episode and optionally auto-play next.
@@ -1289,11 +1283,10 @@ impl PodcastApp {
 
         if let (Some(podcast_id), Some(episode_id)) = (pod_id, ep_id) {
             // Mark as played.
-            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id) {
-                if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
+            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
                     ep.status = EpisodeStatus::Played;
                 }
-            }
 
             // Gather podcast title for stats (immutable borrow).
             let podcast_title = self
@@ -1331,12 +1324,11 @@ impl PodcastApp {
         }
 
         // Auto-play next.
-        if self.auto_play_next {
-            if let Some(next) = self.play_queue.first().cloned() {
+        if self.auto_play_next
+            && let Some(next) = self.play_queue.first().cloned() {
                 self.play_episode(next.podcast_id, next.episode_id);
                 return;
             }
-        }
 
         self.player_state = PlayerState::Stopped;
         self.current_episode_id = None;
@@ -1483,11 +1475,10 @@ impl PodcastApp {
             }
 
             // Mark episode as queued.
-            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id) {
-                if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
+            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
                     ep.download_status = DownloadStatus::Queued;
                 }
-            }
 
             self.download_queue.push(DownloadQueueItem {
                 episode_id,
@@ -1516,11 +1507,9 @@ impl PodcastApp {
                 .podcasts
                 .iter_mut()
                 .find(|p| p.id == item.podcast_id)
-            {
-                if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
                     ep.download_status = DownloadStatus::NotDownloaded;
                 }
-            }
             true
         } else {
             false
@@ -1533,19 +1522,17 @@ impl PodcastApp {
 
         // Start first queued item if nothing is active.
         let has_active = self.download_queue.iter().any(|d| d.active);
-        if !has_active {
-            if let Some(item) = self.download_queue.iter_mut().find(|d| !d.active) {
+        if !has_active
+            && let Some(item) = self.download_queue.iter_mut().find(|d| !d.active) {
                 item.active = true;
                 // Mark episode as downloading.
                 let pod_id = item.podcast_id;
                 let ep_id = item.episode_id;
-                if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == pod_id) {
-                    if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == ep_id) {
+                if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == pod_id)
+                    && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == ep_id) {
                         ep.download_status = DownloadStatus::Downloading { progress: 0.0 };
                     }
-                }
             }
-        }
 
         // Advance active downloads.
         for item in &mut self.download_queue {
@@ -1563,11 +1550,10 @@ impl PodcastApp {
 
         // Mark completed downloads.
         for (pod_id, ep_id, size) in &completed_episodes {
-            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == *pod_id) {
-                if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == *ep_id) {
+            if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == *pod_id)
+                && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == *ep_id) {
                     ep.download_status = DownloadStatus::Downloaded;
                 }
-            }
             self.used_disk_bytes = self.used_disk_bytes.saturating_add(*size);
         }
 
@@ -1577,16 +1563,14 @@ impl PodcastApp {
 
     /// Delete a downloaded episode (free disk space).
     pub fn delete_download(&mut self, podcast_id: u64, episode_id: u64) -> bool {
-        if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id) {
-            if let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id) {
-                if ep.download_status.is_downloaded() {
+        if let Some(p) = self.podcasts.iter_mut().find(|p| p.id == podcast_id)
+            && let Some(ep) = p.episodes.iter_mut().find(|e| e.id == episode_id)
+                && ep.download_status.is_downloaded() {
                     self.used_disk_bytes =
                         self.used_disk_bytes.saturating_sub(ep.file_size_bytes);
                     ep.download_status = DownloadStatus::NotDownloaded;
                     return true;
                 }
-            }
-        }
         false
     }
 
@@ -1773,11 +1757,10 @@ impl PodcastApp {
         );
 
         // Mark news episodes as played.
-        if let Some(podcast) = self.podcasts.iter_mut().find(|p| p.id == p3) {
-            if let Some(ep) = podcast.episodes.get_mut(0) {
+        if let Some(podcast) = self.podcasts.iter_mut().find(|p| p.id == p3)
+            && let Some(ep) = podcast.episodes.get_mut(0) {
                 ep.status = EpisodeStatus::Played;
             }
-        }
 
         // Podcast 4: True Crime
         let p4 = self.subscribe(
@@ -2127,8 +2110,8 @@ impl PodcastApp {
             if ep_y > content_h {
                 break;
             }
-            if let Some(podcast) = self.find_podcast(*pod_id) {
-                if let Some(ep) = podcast.find_episode(*ep_id) {
+            if let Some(podcast) = self.find_podcast(*pod_id)
+                && let Some(ep) = podcast.find_episode(*ep_id) {
                     let selected = self.selected_episode_id == Some(*ep_id);
                     self.render_episode_row(
                         cmds,
@@ -2140,7 +2123,6 @@ impl PodcastApp {
                         selected,
                     );
                 }
-            }
             ep_y += EPISODE_ROW_HEIGHT;
         }
     }
@@ -2233,6 +2215,9 @@ impl PodcastApp {
         }
     }
 
+    // self + cmds + rect (x,y,width) + episode data + parent title + selected
+    // flag; all independent and used in sub-render commands.
+    #[allow(clippy::too_many_arguments)]
     fn render_episode_row(
         &self,
         cmds: &mut Vec<RenderCommand>,
@@ -3072,6 +3057,8 @@ impl PodcastApp {
         }
     }
 
+    // Stat-card render takes self + cmds + rect + label/value + accent.
+    #[allow(clippy::too_many_arguments)]
     fn render_stat_card(
         &self,
         cmds: &mut Vec<RenderCommand>,
@@ -3205,8 +3192,8 @@ impl PodcastApp {
                 if ep_y > content_h {
                     break;
                 }
-                if let Some(podcast) = self.find_podcast(*pod_id) {
-                    if let Some(ep) = podcast.find_episode(*ep_id) {
+                if let Some(podcast) = self.find_podcast(*pod_id)
+                    && let Some(ep) = podcast.find_episode(*ep_id) {
                         self.render_episode_row(
                             cmds,
                             content_x + 8.0,
@@ -3217,7 +3204,6 @@ impl PodcastApp {
                             false,
                         );
                     }
-                }
                 ep_y += EPISODE_ROW_HEIGHT;
             }
         }

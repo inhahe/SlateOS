@@ -1078,14 +1078,13 @@ impl Pinball {
                 }
             }
             // N: new game.
-            Key::N => {
-                if ke.pressed {
+            Key::N
+                if ke.pressed => {
                     self.new_game();
                 }
-            }
             // P: pause/unpause.
-            Key::P => {
-                if ke.pressed {
+            Key::P
+                if ke.pressed => {
                     match self.phase {
                         GamePhase::Paused => {
                             self.phase = self.phase_before_pause;
@@ -1097,7 +1096,6 @@ impl Pinball {
                         }
                     }
                 }
-            }
             _ => {}
         }
     }
@@ -1120,12 +1118,11 @@ impl Pinball {
                     self.physics_step(sub_dt);
                 }
             }
-            GamePhase::BallLost => {
+            GamePhase::BallLost
                 // Wait a moment before preparing the next ball.
-                if self.total_ms.saturating_sub(self.ball_lost_ms) > 1500 {
+                if self.total_ms.saturating_sub(self.ball_lost_ms) > 1500 => {
                     self.prepare_ball();
                 }
-            }
             _ => {}
         }
     }

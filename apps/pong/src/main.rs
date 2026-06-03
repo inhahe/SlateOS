@@ -103,7 +103,7 @@ impl PongApp {
         self.ball_y = FIELD_H / 2.0;
         let dir = if go_right { 1.0 } else { -1.0 };
         self.ball_dx = INITIAL_BALL_SPEED * dir;
-        self.ball_dy = if self.rally_count % 2 == 0 { 1.5 } else { -1.5 };
+        self.ball_dy = if self.rally_count.is_multiple_of(2) { 1.5 } else { -1.5 };
         self.speed_mult = 1.0;
         self.rally_count = 0;
     }
@@ -167,7 +167,7 @@ impl PongApp {
             let hit_pos = (self.ball_y + BALL_SIZE / 2.0 - self.left_y) / PADDLE_H;
             self.ball_dy = (hit_pos - 0.5) * 6.0;
             self.rally_count += 1;
-            if self.rally_count % 5 == 0 {
+            if self.rally_count.is_multiple_of(5) {
                 self.speed_mult += 0.15;
             }
         }
@@ -184,7 +184,7 @@ impl PongApp {
             let hit_pos = (self.ball_y + BALL_SIZE / 2.0 - self.right_y) / PADDLE_H;
             self.ball_dy = (hit_pos - 0.5) * 6.0;
             self.rally_count += 1;
-            if self.rally_count % 5 == 0 {
+            if self.rally_count.is_multiple_of(5) {
                 self.speed_mult += 0.15;
             }
         }

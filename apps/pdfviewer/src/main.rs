@@ -83,7 +83,9 @@ const DEFAULT_PAGE_HEIGHT: f32 = 792.0;
 
 /// PDF page rotation in degrees.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum Rotation {
+    #[default]
     Deg0,
     Deg90,
     Deg180,
@@ -127,11 +129,6 @@ impl Rotation {
     }
 }
 
-impl Default for Rotation {
-    fn default() -> Self {
-        Self::Deg0
-    }
-}
 
 /// A rectangular region on a page (in page-coordinate points).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -435,18 +432,15 @@ pub struct SearchResult {
 
 /// How pages are displayed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ViewMode {
     /// Show one page at a time.
+    #[default]
     SinglePage,
     /// Continuous vertical scroll through all pages.
     ContinuousScroll,
 }
 
-impl Default for ViewMode {
-    fn default() -> Self {
-        Self::SinglePage
-    }
-}
 
 /// Zoom mode.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -520,17 +514,14 @@ impl Default for ZoomMode {
 
 /// Which sidebar panel is active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default)]
 pub enum SidebarPanel {
+    #[default]
     Thumbnails,
     Bookmarks,
     Annotations,
 }
 
-impl Default for SidebarPanel {
-    fn default() -> Self {
-        Self::Thumbnails
-    }
-}
 
 // ============================================================================
 // Print settings
@@ -538,18 +529,15 @@ impl Default for SidebarPanel {
 
 /// Page range for printing.
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub enum PrintPageRange {
+    #[default]
     All,
     CurrentPage,
     /// Specific ranges, e.g., [(0,2), (4,4)] for pages 1-3 and 5.
     Custom(Vec<(usize, usize)>),
 }
 
-impl Default for PrintPageRange {
-    fn default() -> Self {
-        Self::All
-    }
-}
 
 /// Print settings.
 #[derive(Clone, Debug)]
@@ -625,12 +613,11 @@ impl PrintSettings {
                 if s <= e {
                     ranges.push((s, e));
                 }
-            } else if let Ok(n) = part.parse::<usize>() {
-                if n >= 1 {
+            } else if let Ok(n) = part.parse::<usize>()
+                && n >= 1 {
                     let idx = (n - 1).min(page_count.saturating_sub(1));
                     ranges.push((idx, idx));
                 }
-            }
         }
         if ranges.is_empty() {
             PrintPageRange::All
@@ -1071,8 +1058,8 @@ impl PdfViewerApp {
         self.next_annotation_id += 1;
         if let Some(tab) = self.active_tab_mut() {
             let page_idx = tab.current_page;
-            if let Some(doc) = &mut tab.document {
-                if let Some(page) = doc.pages.get_mut(page_idx) {
+            if let Some(doc) = &mut tab.document
+                && let Some(page) = doc.pages.get_mut(page_idx) {
                     page.annotations.push(Annotation {
                         id: ann_id,
                         page_index: page_idx,
@@ -1083,7 +1070,6 @@ impl PdfViewerApp {
                     });
                     return Some(ann_id);
                 }
-            }
         }
         None
     }
@@ -1094,8 +1080,8 @@ impl PdfViewerApp {
         self.next_annotation_id += 1;
         if let Some(tab) = self.active_tab_mut() {
             let page_idx = tab.current_page;
-            if let Some(doc) = &mut tab.document {
-                if let Some(page) = doc.pages.get_mut(page_idx) {
+            if let Some(doc) = &mut tab.document
+                && let Some(page) = doc.pages.get_mut(page_idx) {
                     page.annotations.push(Annotation {
                         id: ann_id,
                         page_index: page_idx,
@@ -1106,7 +1092,6 @@ impl PdfViewerApp {
                     });
                     return Some(ann_id);
                 }
-            }
         }
         None
     }
@@ -1123,8 +1108,8 @@ impl PdfViewerApp {
         self.next_annotation_id += 1;
         if let Some(tab) = self.active_tab_mut() {
             let page_idx = tab.current_page;
-            if let Some(doc) = &mut tab.document {
-                if let Some(page) = doc.pages.get_mut(page_idx) {
+            if let Some(doc) = &mut tab.document
+                && let Some(page) = doc.pages.get_mut(page_idx) {
                     page.annotations.push(Annotation {
                         id: ann_id,
                         page_index: page_idx,
@@ -1135,7 +1120,6 @@ impl PdfViewerApp {
                     });
                     return Some(ann_id);
                 }
-            }
         }
         None
     }
@@ -1144,13 +1128,12 @@ impl PdfViewerApp {
     pub fn remove_annotation(&mut self, annotation_id: u64) -> bool {
         if let Some(tab) = self.active_tab_mut() {
             let page_idx = tab.current_page;
-            if let Some(doc) = &mut tab.document {
-                if let Some(page) = doc.pages.get_mut(page_idx) {
+            if let Some(doc) = &mut tab.document
+                && let Some(page) = doc.pages.get_mut(page_idx) {
                     let before = page.annotations.len();
                     page.annotations.retain(|a| a.id != annotation_id);
                     return page.annotations.len() < before;
                 }
-            }
         }
         false
     }
@@ -1931,6 +1914,9 @@ impl PdfViewerApp {
     }
 
     /// Render a single page in the document area.
+    // self + tree + 2 model refs + 4 area-rect floats; grouping the area into a
+    // struct would not improve clarity at the call site.
+    #[allow(clippy::too_many_arguments)]
     fn render_single_page(
         &self,
         tree: &mut RenderTree,
@@ -1962,6 +1948,8 @@ impl PdfViewerApp {
     }
 
     /// Render continuous scroll mode.
+    // Same shape as render_single_page; both are render driver entry points.
+    #[allow(clippy::too_many_arguments)]
     fn render_continuous_scroll(
         &self,
         tree: &mut RenderTree,
@@ -2001,6 +1989,8 @@ impl PdfViewerApp {
     }
 
     /// Render a page box with shadow, background, and content.
+    // self + tree + page model + page index + rect (x,y,w,h) + zoom; all needed.
+    #[allow(clippy::too_many_arguments)]
     fn render_page_box(
         &self,
         tree: &mut RenderTree,

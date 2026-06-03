@@ -11,7 +11,6 @@
 //! through OurOS syscalls; the structs here define the presentation
 //! layer while the OS provides the actual process/system information.
 
-#[allow(dead_code)]
 mod features;
 
 use guitk::color::Color;
@@ -698,15 +697,14 @@ impl ProcessExplorerState {
         }
 
         // Clamp selection.
-        if let Some(sel) = self.selected_index {
-            if sel >= self.visible_indices.len() {
+        if let Some(sel) = self.selected_index
+            && sel >= self.visible_indices.len() {
                 self.selected_index = if self.visible_indices.is_empty() {
                     None
                 } else {
                     Some(self.visible_indices.len().saturating_sub(1))
                 };
             }
-        }
     }
 
     /// Rearrange `visible_indices` into a depth-first tree based on PPID.
@@ -730,11 +728,10 @@ impl ProcessExplorerState {
         // Find roots: processes whose ppid is 0 or whose parent is not visible.
         let mut root_indices: Vec<usize> = Vec::new();
         for &idx in &self.visible_indices {
-            if let Some(proc) = self.processes.get(idx) {
-                if proc.ppid == 0 || !known_pids.contains(&proc.ppid) {
+            if let Some(proc) = self.processes.get(idx)
+                && (proc.ppid == 0 || !known_pids.contains(&proc.ppid)) {
                     root_indices.push(idx);
                 }
-            }
         }
 
         // Push roots in reverse so the first comes out first.
@@ -745,7 +742,7 @@ impl ProcessExplorerState {
         while let Some((idx, depth)) = stack.pop() {
             // Set tree depth on the process.
             if let Some(proc) = self.processes.get_mut(idx) {
-                proc.tree_depth = depth as u32;
+                proc.tree_depth = depth;
             }
             ordered.push(idx);
 
@@ -797,9 +794,9 @@ impl ProcessExplorerState {
 
     /// Kill the selected process.
     pub fn kill_selected(&mut self) {
-        if let Some(sel) = self.selected_index {
-            if let Some(&proc_idx) = self.visible_indices.get(sel) {
-                if let Some(proc) = self.processes.get(proc_idx) {
+        if let Some(sel) = self.selected_index
+            && let Some(&proc_idx) = self.visible_indices.get(sel)
+                && let Some(proc) = self.processes.get(proc_idx) {
                     let pid = proc.pid;
                     let name = proc.name.clone();
                     // In production: sys_process_kill(pid)
@@ -807,34 +804,28 @@ impl ProcessExplorerState {
                     self.processes.remove(proc_idx);
                     self.rebuild_visible_list();
                 }
-            }
-        }
     }
 
     /// Pause (stop) the selected process.
     pub fn pause_selected(&mut self) {
-        if let Some(sel) = self.selected_index {
-            if let Some(&proc_idx) = self.visible_indices.get(sel) {
-                if let Some(proc) = self.processes.get_mut(proc_idx) {
+        if let Some(sel) = self.selected_index
+            && let Some(&proc_idx) = self.visible_indices.get(sel)
+                && let Some(proc) = self.processes.get_mut(proc_idx) {
                     // In production: sys_process_stop(proc.pid)
                     proc.status = ProcessStatus::Stopped;
                     self.status_message = format!("Paused {} (PID {})", proc.name, proc.pid);
                 }
-            }
-        }
     }
 
     /// Resume the selected process.
     pub fn resume_selected(&mut self) {
-        if let Some(sel) = self.selected_index {
-            if let Some(&proc_idx) = self.visible_indices.get(sel) {
-                if let Some(proc) = self.processes.get_mut(proc_idx) {
+        if let Some(sel) = self.selected_index
+            && let Some(&proc_idx) = self.visible_indices.get(sel)
+                && let Some(proc) = self.processes.get_mut(proc_idx) {
                     // In production: sys_process_continue(proc.pid)
                     proc.status = ProcessStatus::Running;
                     self.status_message = format!("Resumed {} (PID {})", proc.name, proc.pid);
                 }
-            }
-        }
     }
 
     /// Set sort column. If the same column is clicked again, toggle direction.
@@ -1027,12 +1018,11 @@ impl ProcessExplorerState {
                 EventResult::Consumed
             }
             _ => {
-                if let Some(ch) = key.text {
-                    if ch.is_ascii_graphic() || ch == ' ' {
+                if let Some(ch) = key.text
+                    && (ch.is_ascii_graphic() || ch == ' ') {
                         self.filter_text.push(ch);
                         self.rebuild_visible_list();
                     }
-                }
                 EventResult::Consumed
             }
         }
@@ -1044,8 +1034,8 @@ impl ProcessExplorerState {
         let my = mouse.y;
 
         // If context menu is open, handle it first.
-        if let Some(ref menu) = self.context_menu.clone() {
-            if let MouseEventKind::Press(MouseButton::Left) = &mouse.kind {
+        if let Some(ref menu) = self.context_menu.clone()
+            && let MouseEventKind::Press(MouseButton::Left) = &mouse.kind {
                 let menu_w = 180.0;
                 let item_h = 24.0;
                 let item_count = ContextAction::ALL.len() as f32;
@@ -1063,7 +1053,6 @@ impl ProcessExplorerState {
                 self.context_menu = None;
                 return EventResult::Consumed;
             }
-        }
 
         match &mouse.kind {
             // Left click — tab bar, toolbar, column headers, process rows
@@ -1071,7 +1060,7 @@ impl ProcessExplorerState {
                 self.context_menu = None;
 
                 // Tab bar click
-                if my >= TOOLBAR_HEIGHT && my < TOOLBAR_HEIGHT + TAB_BAR_HEIGHT {
+                if (TOOLBAR_HEIGHT..TOOLBAR_HEIGHT + TAB_BAR_HEIGHT).contains(&my) {
                     let mut tab_x = 0.0f32;
                     for tab in &Tab::ALL {
                         let tab_w = (tab.label().len() as f32) * 9.0 + 24.0;
@@ -1232,20 +1221,18 @@ impl ProcessExplorerState {
                 }
             }
             ContextAction::Pause => {
-                if let Some(idx) = proc_idx {
-                    if let Some(proc) = self.processes.get_mut(idx) {
+                if let Some(idx) = proc_idx
+                    && let Some(proc) = self.processes.get_mut(idx) {
                         proc.status = ProcessStatus::Stopped;
                         self.status_message = format!("Paused {} (PID {target_pid})", proc.name);
                     }
-                }
             }
             ContextAction::Resume => {
-                if let Some(idx) = proc_idx {
-                    if let Some(proc) = self.processes.get_mut(idx) {
+                if let Some(idx) = proc_idx
+                    && let Some(proc) = self.processes.get_mut(idx) {
                         proc.status = ProcessStatus::Running;
                         self.status_message = format!("Resumed {} (PID {target_pid})", proc.name);
                     }
-                }
             }
             ContextAction::ChangePriority => {
                 self.status_message = format!("Change priority for PID {target_pid} (dialog NYI)");
@@ -1482,7 +1469,7 @@ impl ProcessExplorerState {
                 COLOR_ROW_SELECTED
             } else if self.hovered_index == Some(row_idx) {
                 COLOR_ROW_HOVER
-            } else if row_idx % 2 == 0 {
+            } else if row_idx.is_multiple_of(2) {
                 COLOR_ROW_EVEN
             } else {
                 COLOR_ROW_ODD
@@ -2006,6 +1993,9 @@ impl ProcessExplorerState {
     /// Render a line graph from a `GraphHistory` into a rectangular area.
     ///
     /// `max_value` is the value that maps to the top of the graph area.
+    // self + tree + area rect + history + color + max_value. Each is
+    // independently needed for the graph render math.
+    #[allow(clippy::too_many_arguments)]
     fn render_line_graph(
         &self,
         tree: &mut RenderTree,
@@ -2225,6 +2215,8 @@ impl Default for ProcessExplorerState {
 // ============================================================================
 
 /// Create a demo `ProcessInfo` with reasonable defaults.
+// 9 args mirror the ProcessInfo fields one-to-one for demo construction.
+#[allow(clippy::too_many_arguments)]
 fn make_demo_process(
     pid: u32,
     ppid: u32,

@@ -297,10 +297,8 @@ impl Rng {
 
     /// Generate a random index in [0, bound).
     pub fn next_usize(&mut self, bound: usize) -> usize {
-        if bound == 0 {
-            return 0;
-        }
-        (self.next_u64() % bound as u64) as usize
+        let bound_u64 = bound as u64;
+        self.next_u64().checked_rem(bound_u64).unwrap_or(0) as usize
     }
 
     /// Pick a random element from a slice.
@@ -710,7 +708,7 @@ fn detect_patterns(password: &str, patterns: &mut Vec<PatternMatch>) {
     for idx in 1..chars.len() {
         let prev = chars.get(idx.saturating_sub(1)).copied().unwrap_or('\0');
         let curr = chars.get(idx).copied().unwrap_or('\0');
-        if curr as u32 == prev as u32 + 1 {
+        if curr as u32 == (prev as u32).saturating_add(1) {
             seq_len = seq_len.saturating_add(1);
         } else {
             if seq_len >= 3 {

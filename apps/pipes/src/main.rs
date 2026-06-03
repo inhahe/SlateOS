@@ -554,26 +554,22 @@ impl PipesApp {
         }
 
         match event.key {
-            Key::Up => {
-                if self.cursor_r > 0 {
+            Key::Up
+                if self.cursor_r > 0 => {
                     self.cursor_r -= 1;
                 }
-            }
-            Key::Down => {
-                if self.cursor_r + 1 < self.board.rows {
+            Key::Down
+                if self.cursor_r + 1 < self.board.rows => {
                     self.cursor_r += 1;
                 }
-            }
-            Key::Left => {
-                if self.cursor_c > 0 {
+            Key::Left
+                if self.cursor_c > 0 => {
                     self.cursor_c -= 1;
                 }
-            }
-            Key::Right => {
-                if self.cursor_c + 1 < self.board.cols {
+            Key::Right
+                if self.cursor_c + 1 < self.board.cols => {
                     self.cursor_c += 1;
                 }
-            }
             Key::Space | Key::Enter => {
                 self.rotate_current_cw();
             }
@@ -681,6 +677,10 @@ impl PipesApp {
             vec![vec![false; self.board.cols]; self.board.rows]
         };
 
+        // r/c double as positions in (cx, cy) math AND as indices into the
+        // flow grid; converting to iter().enumerate() would require nested
+        // zips with little clarity gain.
+        #[allow(clippy::needless_range_loop)]
         for r in 0..self.board.rows {
             for c in 0..self.board.cols {
                 let cx = board_x + c as f32 * cell_size;

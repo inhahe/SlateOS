@@ -234,11 +234,11 @@ mod tests {
 
         // Each field should start with the correct string and not
         // bleed into adjacent fields.
-        assert!(uts.sysname[0] == b'C'); // "CustomOS"
-        assert!(uts.nodename[0] == b'l'); // "localhost"
-        assert!(uts.release[0] == b'0'); // "0.1.0"
-        assert!(uts.version[0] == b'#'); // "#1 SMP"
-        assert!(uts.machine[0] == b'x'); // "x86_64"
+        assert_eq!(uts.sysname[0], b'C'); // "CustomOS"
+        assert_eq!(uts.nodename[0], b'l'); // "localhost"
+        assert_eq!(uts.release[0], b'0'); // "0.1.0"
+        assert_eq!(uts.version[0], b'#'); // "#1 SMP"
+        assert_eq!(uts.machine[0], b'x'); // "x86_64"
     }
 
     // -----------------------------------------------------------------------

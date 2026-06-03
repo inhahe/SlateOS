@@ -234,7 +234,7 @@ mod tests {
     fn test_path_devnull_no_trailing_slash() {
         // Device paths should not have trailing slash.
         let without_null = &_PATH_DEVNULL[.._PATH_DEVNULL.len() - 1];
-        assert!(without_null.last() != Some(&b'/'));
+        assert_ne!(without_null.last(), Some(&b'/'));
     }
 
     #[test]

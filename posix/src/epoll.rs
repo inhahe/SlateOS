@@ -2712,7 +2712,7 @@ mod tests {
         errno::set_errno(0);
         // Use a bit that is not in {EFD_CLOEXEC, EFD_NONBLOCK, EFD_SEMAPHORE}.
         let bad_bit = 0x40;
-        assert!(bad_bit & (EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE) == 0);
+        assert_eq!(bad_bit & (EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE), 0);
         assert_eq!(eventfd(0, bad_bit), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -3190,7 +3190,7 @@ mod tests {
     fn test_eventfd_multiple_unknown_flags_rejected() {
         errno::set_errno(0);
         let bad = 0x40 | 0x80;
-        assert!(bad & (EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE) == 0);
+        assert_eq!(bad & (EFD_CLOEXEC | EFD_NONBLOCK | EFD_SEMAPHORE), 0);
         assert_eq!(eventfd(42, bad), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -3244,7 +3244,7 @@ mod tests {
         // Unknown bits → EINVAL, no fd allocated.
         errno::set_errno(0);
         let bad = 0x4000_0000;
-        assert!(bad & (IN_CLOEXEC | IN_NONBLOCK) == 0);
+        assert_eq!(bad & (IN_CLOEXEC | IN_NONBLOCK), 0);
         assert_eq!(inotify_init1(bad), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }

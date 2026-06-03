@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn test_slp_en_bit() {
         assert_eq!(ACPI_SLP_EN, 0x2000);
-        assert!(ACPI_SLP_EN & ACPI_SLP_TYP_MASK == 0);
+        assert_eq!(ACPI_SLP_EN & ACPI_SLP_TYP_MASK, 0);
     }
 
     #[test]

@@ -13,7 +13,7 @@
 /// ELF magic: 0x7F 'E' 'L' 'F'.
 pub const ELFMAG: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 /// Script magic: '#' '!'.
-pub const SCRIPT_MAG: [u8; 2] = [b'#', b'!'];
+pub const SCRIPT_MAG: [u8; 2] = *b"#!";
 
 // ---------------------------------------------------------------------------
 // binfmt limits

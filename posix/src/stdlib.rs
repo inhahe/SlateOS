@@ -424,7 +424,7 @@ pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 
             if c2 != 0 && (c1 | 0x20) == b'n' && (c2 | 0x20) == b'f' {
                 i = i.wrapping_add(3);
                 // Check for full "infinity" — one byte at a time.
-                let inity: [u8; 5] = [b'i', b'n', b'i', b't', b'y'];
+                let inity: [u8; 5] = *b"inity";
                 let mut j: usize = 0;
                 let mut all_match = true;
                 while j < 5 {

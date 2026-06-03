@@ -180,7 +180,7 @@ mod tests {
             ar_gid: [b' '; AR_GID_SIZE],
             ar_mode: [b' '; AR_MODE_SIZE],
             ar_size: [b' '; AR_SIZE_SIZE],
-            ar_fmag: [b'`', b'\n'],
+            ar_fmag: *b"`\n",
         };
         // Write name "hello.o/"
         let name = b"hello.o/";

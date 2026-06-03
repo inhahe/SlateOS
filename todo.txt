@@ -4121,3 +4121,55 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##   - future-incompat warning on proc-macro-error2 v2.0.1 (dep of a dep)
 ##   These are warnings only and not introduced by our port.  Not worth
 ##   patching upstream code for these.
+
+## BUG (noticed+FIXED 2026-06-03): gui/desktop/src/launcher.rs was a complete
+##   953-line Spotlight-style LauncherState module (fuzzy matching + frecency
+##   scoring + render-command output, 25 built-in app entries) that was NEVER
+##   declared by a `mod launcher;` line in gui/desktop/src/main.rs. The file
+##   sat on disk unused; no cargo build had ever type-checked it. Confirmed by
+##   `grep "launcher" gui/desktop/src/main.rs` returning only a module-doc
+##   mention "Start menu / application launcher" in the crate-level //! block,
+##   no actual `mod` statement.
+##   FIX: added `#[allow(dead_code)] mod launcher;` in main.rs alongside its
+##   neighbours (alphabetically between language_settings and startup_settings,
+##   matching the existing convention of declaring desktop-shell components
+##   even when not yet wired into the runtime). Compile then exposed 5
+##   pre-existing clippy lints in the file (one unused import — Modifiers —
+##   plus three nested-if-collapse warnings and one `sort_by` that should be
+##   `sort_by_key`); all cleaned in the same commit. Added a full
+##   #[cfg(test)] mod tests covering the public API: fuzzy_score happy/error
+##   paths (empty query, longer-than-target, non-matching, case insensitivity,
+##   prefix-beats-substring, boundary scoring), LauncherState lifecycle
+##   (new is hidden, show makes visible, hide clears, re-show resets query),
+##   key handling (Escape dismisses, release ignored, Enter launches top
+##   result, Enter with no matches is no-op, Up/Down clamps without overflow,
+##   Backspace shrinks past-empty safely, Left/Right/Home/End don't panic,
+##   Ctrl+1..8 launches by index, Tab autocompletes, control chars not
+##   inserted), custom register_app round-trips, Category labels <=4 chars,
+##   pathological set_now/set_viewport. 24 tests pass.
+##   Verified via repo-wide sweep that this is an ISOLATED case — two
+##   independent passes over apps/, gui/, userspace/, init/, net/, services/,
+##   kernel/, drivers/, fs/, pkg/, bench/, gui/toolkit/, gui/compositor/
+##   found zero other Rust files sitting next to a main.rs/lib.rs/mod.rs
+##   without a corresponding `mod` declaration. The launcher case is unique.
+
+## PROGRESS (2026-06-03): userspace/openssl-tool fleshed out from 5-line
+##   stub to full personality CLI. Previous content:
+##     fn main() { println!("openssl-tool: stub"); }
+##   was caught by the `userspace/*` workspace glob and compiled cleanly, but
+##   produced no useful output. Replaced with the standard personality-CLI
+##   shape used by the rest of the userspace tree (affirm-cli /
+##   anthropic-cli / ambassador-cli / etc.): basename+strip_ext helpers,
+##   print_help with subcommand list, print_version, and ten run_* handlers
+##   covering OpenSSL history (SSLeay → 3.0), library architecture
+##   (libcrypto + libssl + EVP + providers), CLI cheat sheet (genrsa, req,
+##   x509, s_client, dgst, etc.), TLS protocol coverage (1.0 deprecated →
+##   1.3 + PQ-hybrid), FIPS validation (1.0.2 module + 3.0 provider cert
+##   #4282), Heartbleed (CVE-2014-0160 + fork-aftermath), license history
+##   (dual SSLeay+OpenSSL → Apache-2.0 in 3.0), version stream with EOL
+##   dates, and competing forks (LibreSSL/BoringSSL/AWS-LC/mbedTLS/wolfSSL/
+##   s2n/rustls). 4 tests pass (basename, strip_ext, smoke-runs-all,
+##   help+version). The crate was not previously in `apps/` or wired into
+##   any startup sequence, so the only observable consequence of the old
+##   stub was that `openssl-tool help` printed nothing useful — now it
+##   prints a real help screen.

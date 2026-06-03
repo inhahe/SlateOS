@@ -3989,3 +3989,14 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 ##   Audited all previously-committed batch-C/D/F/G autofix-only crates
 ##   (archivemanager, crossword, hexeditor, terminal, editor) — all pass
 ##   `cargo test`, so the match3 case was isolated.
+
+## BLOCKER (noticed 2026-06-03): no git remote configured for the OS repo.
+##   The CLAUDE.md mandate is "push often / git push after every completed task",
+##   but `git remote -v` returns nothing for D:\visual studio projects\os.
+##   Local commits up to 026e70f0 (the clippy 1.95 workspace sweep) are at risk
+##   of loss until a remote is added. The human operator needs to either
+##     (a) `git remote add origin <url>` and let me push the osb2/shell branch, or
+##     (b) sync this repo to a separate clone (the fastpy convention noted in the
+##         workspace CLAUDE.md: copy to a designated push-from directory).
+##   I have NOT created a remote myself because the CLAUDE.md says
+##   "NEVER update the git config" without explicit user instruction.

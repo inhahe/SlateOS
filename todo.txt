@@ -535,6 +535,26 @@
 ##     Easy to revert if the human disagrees.
 ##   ouros build verified for the two struct-heavy refactors (mdadm, bridge) post-fix;
 ##     only pre-existing dead_code warnings remain (no clippy::all denials).
+##   VERIFICATION (2026-06-03): ran host-target tests (--target x86_64-pc-windows-gnu)
+##     for the refactored/control-flow-touched crates to confirm the sweep preserved
+##     behavior — clippy only checks the bin target, NOT #[cfg(test)] modules, so the
+##     struct-bundle call-site migrations were unverified until now. All green: dnsmasq
+##     197, mdadm 143, podman 240, acl 24, audit 207, chage 19, dmidecode 13, fio 184,
+##     firejail 168, flock 18, hostnamectl 15, netstat 23, nftables 191, perf 172,
+##     plymouth 11, selinux 150, sudo 191, upower 128, wpa 137 (~2490 tests, 0 failures).
+##     acl's --absolute-names judgment call was untested (print_file_acl writes to a
+##     StdoutLock); extracted the pure display_acl_path(path, absolute) helper and added
+##     4 unit tests (acl now 28/28). NOTE: `cargo test` WITHOUT --target builds for the
+##     default ouros target, which has no prebuilt std/test crate → thousands of bogus
+##     "can't find crate for std" errors; always pass --target x86_64-pc-windows-gnu to
+##     run userspace host tests.
+##   GAP (test coverage, ssh): ssh has ZERO unit tests, yet the sweep refactored its KEX
+##     crypto path (ExchangeHashInput<'a> bundling compute_exchange_hash's 8 inputs). The
+##     bin compiles clean and the refactor is mechanically behavior-preserving (same eight
+##     fields, same order), but there is no regression guard. Proper fix when an SSH
+##     handshake harness/known-answer vector is available: add a KAT test for
+##     compute_exchange_hash (and ideally the kex/cipher primitives) so future edits to the
+##     crypto path are caught. Low risk today, but ssh is security-sensitive — flagged.
 ##
 ## BUG (noticed+FIXED 2026-05-31): apps/wordle — build break PLUS a PRODUCTION borrow bug
 ##   PLUS data bugs. (1) Cargo.toml was missing its [dependencies] section, so `use guitk::*`

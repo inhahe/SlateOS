@@ -329,14 +329,8 @@ impl ColumnConstraints {
             parts.push("UQ");
         }
         if let Some(ref def) = self.default_value {
-            parts.push("DEF=");
-            // We just push separate parts; the caller joins them
-            return format!(
-                "{} DEF={def}",
-                parts[..parts.len().saturating_sub(1)].join(" ")
-            )
-            .trim()
-            .to_owned();
+            // Append "DEF={def}" as a final part using the already-built prefix.
+            return format!("{} DEF={def}", parts.join(" ")).trim().to_owned();
         }
         parts.join(" ")
     }
@@ -2141,7 +2135,7 @@ fn execute_grouped_select(
                     } else {
                         table.column_index(column)
                     };
-                    let group_row_refs: Vec<&Vec<CellValue>> = group_rows.to_vec();
+                    let group_row_refs: Vec<&Vec<CellValue>> = group_rows.clone();
                     let value = compute_aggregate(*func, &group_row_refs, col_idx);
                     row_values.push(value);
                 }
@@ -2484,10 +2478,10 @@ pub fn export_json(table: &Table) -> String {
                 CellValue::Integer(n) => out.push_str(&format!("\"{col_name}\": {n}")),
                 CellValue::Real(n) => out.push_str(&format!("\"{col_name}\": {n}")),
                 CellValue::Text(s) => {
-                    out.push_str(&format!("\"{col_name}\": \"{}\"", s.replace('"', "\\\"")))
+                    out.push_str(&format!("\"{col_name}\": \"{}\"", s.replace('"', "\\\"")));
                 }
                 CellValue::Blob(b) => {
-                    out.push_str(&format!("\"{col_name}\": \"<blob:{}>\"", b.len()))
+                    out.push_str(&format!("\"{col_name}\": \"<blob:{}>\"", b.len()));
                 }
                 CellValue::Null => out.push_str(&format!("\"{col_name}\": null")),
             }
@@ -3499,11 +3493,7 @@ impl DbViewerApp {
         let total_rows = all_rows.len();
         let start = tab.page.saturating_mul(PAGE_SIZE);
         let end = (start.saturating_add(PAGE_SIZE)).min(total_rows);
-        let page_rows = if start < all_rows.len() {
-            &all_rows[start..end]
-        } else {
-            &[]
-        };
+        let page_rows = all_rows.get(start..end).unwrap_or(&[]);
 
         let col_count = col_names.len();
         let col_width = if col_count > 0 {
@@ -3649,7 +3639,9 @@ impl DbViewerApp {
         let total_pages = if total_rows == 0 {
             1
         } else {
-            total_rows.saturating_sub(1) / PAGE_SIZE + 1
+            // Ceiling division — guaranteed >= 1 here since total_rows >= 1.
+            // Use div_ceil to avoid the `(x-1)/n + 1` underflow/overflow trap.
+            total_rows.div_ceil(PAGE_SIZE)
         };
         let page_text = format!(
             "Page {} of {} ({} rows)",
@@ -3768,7 +3760,7 @@ impl DbViewerApp {
 
         match self.bottom_panel {
             BottomPanel::SqlEditor => {
-                self.render_sql_editor(cmds, x, content_y, width, content_height)
+                self.render_sql_editor(cmds, x, content_y, width, content_height);
             }
             BottomPanel::Results => self.render_results(cmds, x, content_y, width, content_height),
             BottomPanel::Schema => self.render_schema(cmds, x, content_y, width, content_height),

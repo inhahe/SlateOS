@@ -308,45 +308,66 @@ struct Rel {
 // ============================================================================
 
 fn read_u16(data: &[u8], off: usize, le: bool) -> Result<u16> {
-    let s = data.get(off..off.wrapping_add(2)).ok_or(Error::TruncatedData {
+    let end = off.checked_add(2).ok_or(Error::TruncatedData {
         what: "u16",
         offset: off,
         needed: 2,
         available: data.len().saturating_sub(off),
     })?;
-    Ok(if le {
-        u16::from_le_bytes([s[0], s[1]])
-    } else {
-        u16::from_be_bytes([s[0], s[1]])
-    })
+    let arr: [u8; 2] = data.get(off..end).ok_or(Error::TruncatedData {
+        what: "u16",
+        offset: off,
+        needed: 2,
+        available: data.len().saturating_sub(off),
+    })?.try_into().map_err(|_| Error::TruncatedData {
+        what: "u16",
+        offset: off,
+        needed: 2,
+        available: data.len().saturating_sub(off),
+    })?;
+    Ok(if le { u16::from_le_bytes(arr) } else { u16::from_be_bytes(arr) })
 }
 
 fn read_u32(data: &[u8], off: usize, le: bool) -> Result<u32> {
-    let s = data.get(off..off.wrapping_add(4)).ok_or(Error::TruncatedData {
+    let end = off.checked_add(4).ok_or(Error::TruncatedData {
         what: "u32",
         offset: off,
         needed: 4,
         available: data.len().saturating_sub(off),
     })?;
-    Ok(if le {
-        u32::from_le_bytes([s[0], s[1], s[2], s[3]])
-    } else {
-        u32::from_be_bytes([s[0], s[1], s[2], s[3]])
-    })
+    let arr: [u8; 4] = data.get(off..end).ok_or(Error::TruncatedData {
+        what: "u32",
+        offset: off,
+        needed: 4,
+        available: data.len().saturating_sub(off),
+    })?.try_into().map_err(|_| Error::TruncatedData {
+        what: "u32",
+        offset: off,
+        needed: 4,
+        available: data.len().saturating_sub(off),
+    })?;
+    Ok(if le { u32::from_le_bytes(arr) } else { u32::from_be_bytes(arr) })
 }
 
 fn read_u64(data: &[u8], off: usize, le: bool) -> Result<u64> {
-    let s = data.get(off..off.wrapping_add(8)).ok_or(Error::TruncatedData {
+    let end = off.checked_add(8).ok_or(Error::TruncatedData {
         what: "u64",
         offset: off,
         needed: 8,
         available: data.len().saturating_sub(off),
     })?;
-    Ok(if le {
-        u64::from_le_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
-    } else {
-        u64::from_be_bytes([s[0], s[1], s[2], s[3], s[4], s[5], s[6], s[7]])
-    })
+    let arr: [u8; 8] = data.get(off..end).ok_or(Error::TruncatedData {
+        what: "u64",
+        offset: off,
+        needed: 8,
+        available: data.len().saturating_sub(off),
+    })?.try_into().map_err(|_| Error::TruncatedData {
+        what: "u64",
+        offset: off,
+        needed: 8,
+        available: data.len().saturating_sub(off),
+    })?;
+    Ok(if le { u64::from_le_bytes(arr) } else { u64::from_be_bytes(arr) })
 }
 
 /// Extract a NUL-terminated byte string from `table` starting at `offset`,

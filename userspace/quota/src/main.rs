@@ -8,6 +8,13 @@
 //   quotaoff  - disable disk quotas
 
 #![cfg_attr(not(test), no_main)]
+// QuotaEntry, the unused QuotaInfo helper methods, the QUOTA_BLOCK_SIZE
+// / QUOTA_USR_FILE / QUOTA_GRP_FILE / QUOTA_VERSION constants, and the
+// formatting helpers below are declared up-front because they encode
+// the on-disk quota.user / quota.group file format and the kernel
+// quotactl ABI the real implementation must speak. They are kept as
+// documentation for the eventual ext4 quota integration.
+#![allow(dead_code)]
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -244,8 +251,9 @@ fn cmd_quota(args: &QuotaArgs) -> i32 {
 
     print_out(b"     Filesystem  blocks   quota   limit   grace   files   quota   limit   grace\n");
 
-    // Simulated output
-    let info = QuotaInfo::new();
+    // Simulated output. A real implementation would call quotactl(Q_GETQUOTA)
+    // here and pass the kernel-returned struct into the per-row formatter;
+    // the stub prints fixed zeroes for the active user/group.
     print_out(b"      /dev/sda1       0       0       0               0       0       0        \n");
 
     0
@@ -329,11 +337,6 @@ fn cmd_repquota(args: &QuotaArgs) -> i32 {
         return 1;
     }
 
-    let type_name = match args.quota_type {
-        QuotaType::User => b"User".as_slice(),
-        QuotaType::Group => b"Group",
-    };
-
     // Header
     print_out(b"*** Report for ");
     print_out(match args.quota_type {
@@ -352,14 +355,12 @@ fn cmd_repquota(args: &QuotaArgs) -> i32 {
 
     print_out(b"Block grace time: 7days; Inode grace time: 7days\n");
 
-    // Column headers
-    if args.human_readable {
-        print_out(b"                        Block limits                File limits\n");
-        print_out(b"User            used    soft    hard  grace    used  soft  hard  grace\n");
-    } else {
-        print_out(b"                        Block limits                File limits\n");
-        print_out(b"User            used    soft    hard  grace    used  soft  hard  grace\n");
-    }
+    // Column headers. Real repquota -s (--human-readable) widens the
+    // block-count column to fit "1024M" or "2.0G" style values; the
+    // stub prints the standard header in both modes.
+    print_out(b"                        Block limits                File limits\n");
+    print_out(b"User            used    soft    hard  grace    used  soft  hard  grace\n");
+    let _ = args.human_readable;
 
     print_out(b"----------------------------------------------------------------------\n");
 

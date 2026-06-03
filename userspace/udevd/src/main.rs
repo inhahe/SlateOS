@@ -281,11 +281,10 @@ impl DeviceEvent {
             }
         }
         // Extract kernel_name from devpath if not set via DEVNAME.
-        if ev.kernel_name.is_empty() && !ev.devpath.is_empty() {
-            if let Some(name) = ev.devpath.rsplit('/').next() {
+        if ev.kernel_name.is_empty() && !ev.devpath.is_empty()
+            && let Some(name) = ev.devpath.rsplit('/').next() {
                 ev.kernel_name = name.to_string();
             }
-        }
         Some(ev)
     }
 
@@ -447,8 +446,8 @@ fn parse_rules_file(content: &str, filename: &str, out: &mut Vec<Rule>) {
         }
 
         // Handle line continuation (trailing backslash).
-        if trimmed.ends_with('\\') {
-            continued.push_str(&trimmed[..trimmed.len() - 1]);
+        if let Some(without_continuation) = trimmed.strip_suffix('\\') {
+            continued.push_str(without_continuation);
             continued.push(' ');
             continue;
         }
@@ -671,13 +670,11 @@ fn make_assign_key(key: &str, value: &str, _op: &str) -> Option<AssignKey> {
 /// Extract the argument from `PREFIX{arg}` syntax, e.g. `ATTR{size}` -> `"size"`.
 fn extract_brace_arg(key: &str, prefix: &str) -> Option<String> {
     let trimmed = key.trim();
-    if trimmed.starts_with(prefix) {
-        let rest = &trimmed[prefix.len()..];
-        if rest.starts_with('{') {
-            if let Some(end) = rest.find('}') {
-                return Some(rest[1..end].to_string());
-            }
-        }
+    if let Some(rest) = trimmed.strip_prefix(prefix)
+        && rest.starts_with('{')
+        && let Some(end) = rest.find('}')
+    {
+        return Some(rest[1..end].to_string());
     }
     None
 }
@@ -735,11 +732,10 @@ impl DeviceDatabase {
         let mut props = HashMap::new();
         if let Ok(content) = fs::read_to_string(&path) {
             for line in content.lines() {
-                if let Some(rest) = line.strip_prefix("E:") {
-                    if let Some((k, v)) = rest.split_once('=') {
+                if let Some(rest) = line.strip_prefix("E:")
+                    && let Some((k, v)) = rest.split_once('=') {
                         props.insert(k.to_string(), v.to_string());
                     }
-                }
             }
         }
         props
@@ -830,7 +826,7 @@ fn enumerate_all_devices() -> Vec<String> {
     let mut paths = Vec::new();
 
     // Scan /sys/bus/*/devices/
-    if let Ok(buses) = fs::read_dir(&format!("{SYS_DIR}/bus")) {
+    if let Ok(buses) = fs::read_dir(format!("{SYS_DIR}/bus")) {
         for bus in buses.flatten() {
             let dev_dir = bus.path().join("devices");
             if let Ok(devs) = fs::read_dir(&dev_dir) {
@@ -844,7 +840,7 @@ fn enumerate_all_devices() -> Vec<String> {
     }
 
     // Scan /sys/class/*/
-    if let Ok(classes) = fs::read_dir(&format!("{SYS_DIR}/class")) {
+    if let Ok(classes) = fs::read_dir(format!("{SYS_DIR}/class")) {
         for cls in classes.flatten() {
             if let Ok(devs) = fs::read_dir(cls.path()) {
                 for dev in devs.flatten() {
@@ -1050,8 +1046,7 @@ fn substitute_value(template: &str, event: &DeviceEvent, result: &RuleResult) ->
             } else if rest.starts_with("devpath") {
                 out.push_str(&event.devpath);
                 i += 8;
-            } else if rest.starts_with("env{") {
-                let after = &rest[4..];
+            } else if let Some(after) = rest.strip_prefix("env{") {
                 if let Some(end) = after.find('}') {
                     let key = &after[..end];
                     let val = event.env.get(key)
@@ -1201,25 +1196,22 @@ fn compute_persistent_links(event: &DeviceEvent) -> Vec<String> {
     }
 
     // by-uuid: from partition UUID.
-    if let Some(uuid) = event.env.get("ID_FS_UUID") {
-        if !uuid.is_empty() {
+    if let Some(uuid) = event.env.get("ID_FS_UUID")
+        && !uuid.is_empty() {
             links.push(format!("disk/by-uuid/{uuid}"));
         }
-    }
 
     // by-label: from filesystem label.
-    if let Some(label) = event.env.get("ID_FS_LABEL") {
-        if !label.is_empty() {
+    if let Some(label) = event.env.get("ID_FS_LABEL")
+        && !label.is_empty() {
             links.push(format!("disk/by-label/{label}"));
         }
-    }
 
     // by-partuuid: for GPT partition UUID.
-    if let Some(partuuid) = event.env.get("ID_PART_ENTRY_UUID") {
-        if !partuuid.is_empty() {
+    if let Some(partuuid) = event.env.get("ID_PART_ENTRY_UUID")
+        && !partuuid.is_empty() {
             links.push(format!("disk/by-partuuid/{partuuid}"));
         }
-    }
 
     links
 }
@@ -1298,11 +1290,10 @@ fn apply_device_node(
             let _ = fs::write(&dev_path, &node_info);
 
             // Apply permissions.
-            if let Some(ref mode) = rule_result.mode {
-                if log_level >= LogLevel::Debug {
+            if let Some(ref mode) = rule_result.mode
+                && log_level >= LogLevel::Debug {
                     eprintln!("udevd: chmod {mode} {dev_path}");
                 }
-            }
 
             // Create rule-defined symlinks.
             for link in &rule_result.symlinks {
@@ -1720,7 +1711,7 @@ fn dev_name_to_syspath(name: &str) -> Option<String> {
     }
 
     // Check /sys/class/*/<name>.
-    if let Ok(classes) = fs::read_dir(&format!("{SYS_DIR}/class")) {
+    if let Ok(classes) = fs::read_dir(format!("{SYS_DIR}/class")) {
         for cls in classes.flatten() {
             let candidate = cls.path().join(bare);
             if candidate.exists() {
@@ -1926,11 +1917,10 @@ fn cmd_monitor(args: &[String]) -> i32 {
                     }
                     if let Some(event) = DeviceEvent::parse(block) {
                         // Apply subsystem filter.
-                        if let Some(ref sub) = filter_subsystem {
-                            if !glob_match(sub, &event.subsystem) {
+                        if let Some(ref sub) = filter_subsystem
+                            && !glob_match(sub, &event.subsystem) {
                                 continue;
                             }
-                        }
                         println!("{}", event.format_monitor(show_properties));
                     }
                 }
@@ -2085,18 +2075,17 @@ fn run_daemon(debug: bool, resolve_early: bool) -> i32 {
                 if state.log_level >= LogLevel::Info {
                     eprintln!("udevd: exec queue stopped");
                 }
-            } else if trimmed == "start-exec-queue" {
-                if state.log_level >= LogLevel::Info {
+            } else if trimmed == "start-exec-queue"
+                && state.log_level >= LogLevel::Info {
                     eprintln!("udevd: exec queue started");
                 }
-            }
         }
     }
 
     // Read uevent source for new events.
     let uevent_source = "/run/udev/uevent_source";
-    if let Ok(content) = fs::read_to_string(uevent_source) {
-        if !content.trim().is_empty() {
+    if let Ok(content) = fs::read_to_string(uevent_source)
+        && !content.trim().is_empty() {
             let _ = fs::write(uevent_source, "");
             for block in content.split("\n\n") {
                 if block.trim().is_empty() {
@@ -2107,7 +2096,6 @@ fn run_daemon(debug: bool, resolve_early: bool) -> i32 {
                 }
             }
         }
-    }
 
     if state.log_level >= LogLevel::Info {
         eprintln!(

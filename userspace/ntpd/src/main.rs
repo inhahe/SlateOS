@@ -6,6 +6,14 @@
 //!
 //! Implements the NTP client protocol per RFC 5905 (NTPv4) over UDP port 123.
 
+// `format_human`, `day_of_year`, `datetime_to_unix`, and the DateTime
+// associated items (`new`, `to_unix_secs`, `from_f64`) are declared
+// up-front because they are part of the NTP time-conversion surface
+// the daemon will exercise once it ships with `ntpdate -p` (human-
+// readable status print) and full RFC 5905 server-mode support. Kept
+// as documentation for the continuing daemon implementation.
+#![allow(dead_code)]
+
 use std::env;
 use std::fmt;
 use std::fs;
@@ -345,7 +353,7 @@ fn clock_filter(samples: &mut [NtpSample]) -> Option<NtpSample> {
 
     // Sort by delay ascending -- the sample with the least network asymmetry
     // is most likely to have the most accurate offset.
-    samples.sort_by(|a, b| a.delay_us.cmp(&b.delay_us));
+    samples.sort_by_key(|a| a.delay_us);
 
     // Take the sample with the minimum delay.
     Some(samples[0].clone())
@@ -396,7 +404,7 @@ impl fmt::Display for DateTime {
 
 /// Returns `true` if `year` is a leap year under the Gregorian calendar.
 fn is_leap_year(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// Number of days in a given month (1-based) for a given year.
@@ -420,7 +428,7 @@ fn days_in_month(year: u32, month: u32) -> Option<u32> {
 
 /// Day of year (1-based) for a given date.
 fn day_of_year(year: u32, month: u32, day: u32) -> Option<u32> {
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return None;
     }
     let mut doy: u32 = 0;
@@ -637,7 +645,16 @@ fn ntp_query_one(
     debug: bool,
 ) -> Result<NtpSample, String> {
     let addr = format!("{server}:{NTP_PORT}");
-    let bind_addr = if use_unpriv_port { "0.0.0.0:0" } else { "0.0.0.0:0" };
+    // Real ntp clients can bind to UDP/123 (privileged) or let the
+    // kernel pick an ephemeral port. We always pick an ephemeral port
+    // for the personality CLI: claiming UDP/123 requires CAP_NET_BIND_
+    // SERVICE on Linux and forces single-instance ownership of the NTP
+    // listening port, neither of which is useful for a one-shot query.
+    // Keep `use_unpriv_port` as a no-op for now — it documents the
+    // -u flag's eventual behaviour once the OurOS net layer supports
+    // capability-checked privileged binds.
+    let _ = use_unpriv_port;
+    let bind_addr = "0.0.0.0:0";
 
     let socket =
         UdpSocket::bind(bind_addr).map_err(|e| format!("bind UDP: {e}"))?;
@@ -1083,7 +1100,7 @@ fn run_ntpdate(opts: &NtpdateOpts) -> Result<(), String> {
     // previous implementation divided the microsecond offset by 1_000_000 and
     // truncated to whole seconds, throwing away every correction smaller than
     // one second (i.e. essentially all of them once the clock is roughly set).
-    let offset_ns = (sample.offset_us as i64).saturating_mul(1_000);
+    let offset_ns = sample.offset_us.saturating_mul(1_000);
 
     if opts.force_step || abs_offset > STEP_THRESHOLD_US {
         // Step: jump the clock by reading the current absolute time and writing
@@ -1176,7 +1193,7 @@ fn run_ntpd(opts: &NtpdOpts) -> Result<(), String> {
         let jitter = compute_jitter(&all_samples);
 
         // Use the sample from the best (lowest-delay) server.
-        all_samples.sort_by(|a, b| a.delay_us.cmp(&b.delay_us));
+        all_samples.sort_by_key(|a| a.delay_us);
         let best = &all_samples[0];
 
         if opts.debug {

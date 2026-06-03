@@ -2437,6 +2437,16 @@ Remaining net improvements (diminishing returns):
 
 ## Known Bugs / Limitations
 
+- (NOTED 2026-06-03) userspace/lsusb and userspace/strace have no unit
+  tests at all (`cargo test -p lsusb` / `-p strace` both report
+  "0 passed; 0 failed"). Both are personality-CLI stubs and the test
+  module is missing entirely. Add a #[cfg(test)] mod tests with at
+  least: tool detection from argv[0], basic argument parsing, and
+  output formatting smoke tests. Same pattern as ss/ping/iw/ethtool.
+  Found while sweeping clippy warnings; not blocking but should be
+  filled in to maintain the "every binary gets tests" rule from
+  CLAUDE.md.
+
 - (FIXED) Workqueue worker stack overflow (#DF): Task 61 ("kworker") double-
   faulted during workqueue::self_test() with RSP 0x180 bytes below stack
   bottom (33152/32768 bytes used). Debug builds have unoptimized frames.

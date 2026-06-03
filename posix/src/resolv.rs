@@ -357,10 +357,7 @@ pub extern "C" fn dn_expand(
     let cap = length as usize;
     // SAFETY: caller contract — msg <= eomorig as range bounds.
     let msg_len: usize = unsafe { eomorig.offset_from(msg) } as usize;
-    let start_off = match offset_of(msg, comp_dn, msg_len) {
-        Some(o) => o,
-        None => return -1,
-    };
+    let Some(start_off) = offset_of(msg, comp_dn, msg_len) else { return -1 };
 
     let mut original_bytes: usize = 0; // bytes consumed at the start position
     let mut followed_pointer = false;
@@ -488,10 +485,7 @@ pub extern "C" fn dn_skipname(comp_dn: *const u8, eom: *const u8) -> i32 {
     if comp_dn.is_null() || eom.is_null() {
         return -1;
     }
-    let avail = match offset_of(comp_dn, eom, usize::MAX) {
-        Some(n) => n,
-        None => return -1,
-    };
+    let Some(avail) = offset_of(comp_dn, eom, usize::MAX) else { return -1 };
     let mut off: usize = 0;
     loop {
         if off >= avail {

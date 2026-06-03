@@ -85,7 +85,7 @@ pub extern "C" fn ioperm(from: u64, num: u64, turn_on: i32) -> i32 {
     //   * num == 0 → from + 0 == from → first clause true → EINVAL.
     //   * from + num overflows u64 → first clause true → EINVAL.
     //   * from + num > IO_BITMAP_BITS → second clause true → EINVAL.
-    let end = if let Some(e) = from.checked_add(num) { e } else {
+    let Some(end) = from.checked_add(num) else {
         errno::set_errno(errno::EINVAL);
         return -1;
     };

@@ -459,10 +459,7 @@ fn find_named_sem(name: *const u8, len: usize) -> Option<usize> {
         }
         // SAFETY: caller-provided name has at least `len` bytes.
         let in_name = unsafe { core::slice::from_raw_parts(name, len) };
-        let stored = match slot.name.get(..len) {
-            Some(s) => s,
-            None => continue,
-        };
+        let Some(stored) = slot.name.get(..len) else { continue };
         if stored == in_name {
             return Some(i);
         }

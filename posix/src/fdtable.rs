@@ -625,10 +625,7 @@ pub fn copy_fd_path(src_fd: i32, dst_fd: i32) {
     // SAFETY: Single-threaded access.  Both indices < MAX_FDS.
     unsafe {
         let lens = &mut *path_lens_ptr();
-        let src_len = match lens.get(src_idx) {
-            Some(&l) => l,
-            None => return,
-        };
+        let Some(&src_len) = lens.get(src_idx) else { return };
         if let Some(dst_len) = lens.get_mut(dst_idx) {
             *dst_len = src_len;
         }
@@ -641,10 +638,7 @@ pub fn copy_fd_path(src_fd: i32, dst_fd: i32) {
         let len = src_len as usize;
         let mut i = 0;
         while i < len {
-            let byte = match table.get(src_idx).and_then(|s| s.get(i)) {
-                Some(&b) => b,
-                None => break,
-            };
+            let Some(&byte) = table.get(src_idx).and_then(|s| s.get(i)) else { break };
             if let Some(dst_slot) = table.get_mut(dst_idx).and_then(|s| s.get_mut(i)) {
                 *dst_slot = byte;
             }

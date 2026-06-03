@@ -430,7 +430,7 @@ pub extern "C" fn hcreate(nel: usize) -> i32 {
             };
         }
 
-        let alloc_bytes = if let Some(b) = size.checked_mul(core::mem::size_of::<*mut HashNode>()) { b } else {
+        let Some(alloc_bytes) = size.checked_mul(core::mem::size_of::<*mut HashNode>()) else {
             errno::set_errno(errno::ENOMEM);
             return 0;
         };

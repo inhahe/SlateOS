@@ -1,3 +1,67 @@
+## PROGRESS (2026-06-03): userspace personality-CLI stub flesh-out, batch 2.
+##   Following the openssl-tool flesh-out earlier this session, the four
+##   remaining 5-line personality-CLI stubs were fleshed out into full
+##   personality CLIs in the established shape (basename + strip_ext +
+##   print_help + print_version + run_* subcommands + match dispatcher
+##   + smoke tests). All four follow the openssl-tool template:
+##     - userspace/certbot/src/main.rs (commit 4488feeb, +410 lines)
+##       Covers ACME v2 (RFC 8555), HTTP-01/DNS-01/TLS-ALPN-01, the
+##       authenticator+installer plugin model, /etc/letsencrypt/ layout,
+##       renewal timer/cron and --post-hook/--deploy-hook semantics,
+##       wildcards, Let's Encrypt rate-limit table, ISRG, Boulder
+##       architecture, acme.sh/lego/dehydrated/win-acme/Caddy/Traefik.
+##     - userspace/fail2ban/src/main.rs (commit 32b45526, +393 lines)
+##       Covers Cyril Jaquier 2004 history, fail2ban-server/-client/-regex
+##       architecture, the jail = filter + action + backend + tunables
+##       model, built-in jails (sshd/apache-*/nginx-*/postfix/dovecot/
+##       wordpress/recidive), filter.d <HOST> regex magic, action.d
+##       iptables-*/nftables-*/route/mail-whois/abuseipdb/cloudflare,
+##       backends (polling/pyinotify/systemd-journal), tuning (maxretry/
+##       findtime/bantime/bantime.increment), and CrowdSec/sshguard/
+##       denyhosts alternatives.
+##     - userspace/logrotate/src/main.rs (commit 512c2a1f, +425 lines)
+##       Covers Erik Troan / Red Hat 1996 origin, /etc/logrotate.d/
+##       snippet model, full directive set (schedule/retention/naming/
+##       compression/hygiene), rename-and-reopen vs copytruncate
+##       trade-offs, firstaction/prerotate/postrotate/lastaction/preremove
+##       hooks, fail2ban.status state-file semantics with the common su-
+##       induced double-rotation bug, example nginx/mysql/zstd snippets,
+##       pitfalls (FD reopen, delaycompress race, large-log copy), and
+##       systemd-journald/savelog/rotatelogs/Fluent-Bit alternatives.
+##     - userspace/socat/src/main.rs (commit 2816aa5c, +435 lines)
+##       Covers Gerhard Rieger 2001 origin, 1.7.x stable vs 2.x beta,
+##       'socat ADDR1 ADDR2' grammar, the major address types
+##       (TCP/UDP/SCTP/UNIX/ABSTRACT/OPENSSL/STDIO/FILE/PIPE/EXEC/SYSTEM/
+##       PTY/READLINE/GOPEN/IP4/SOCKS/SOCKS5/PROXY/TUN), the option
+##       language (listening/privilege/PTY/OpenSSL/network/file
+##       categories), recipes (TCP fwd, TLS terminate, TLS client wrap,
+##       serial-over-TCP, virtual null-modem, SOCKS jump), TLS verify-
+##       default asymmetry, PTY null-modem tricks, debug ladder (-d/-v/
+##       -x/-t/-T/-b/-u/-U), pitfalls (reuseaddr/fork max-children/
+##       -t truncation/EXEC ctty/EOF asymmetry/UNIX-LISTEN unlink), and
+##       BSD-nc/ncat/websocat/stunnel/socat2 alternatives.
+##   Verified: cargo build / clippy --all-targets / test all pass for
+##   each crate on x86_64-pc-windows-gnu (4 tests per crate, all
+##   passing). No more <300-byte stub main.rs files exist anywhere in
+##   userspace/, apps/, services/, or init/.
+
+## PROGRESS (2026-06-03): latent clippy regression in posix batch 306 fixed.
+##   `cargo clippy -p posix --target x86_64-pc-windows-gnu` started
+##   failing on commit e0f5da3c with two unusual_byte_groupings errors
+##   in linux_magic_user_types.rs, originally added by batch 306
+##   (2e3ed55b) but not caught because clippy was not re-run on posix
+##   between batches:
+##     - RAMFS_MAGIC = 0x858_458F6 (3+5 split, 8 actual hex digits)
+##       -> 0x8584_58F6 (4+4 split, same value)
+##     - CGROUP_SUPER_MAGIC = 0x27E0_EB (4+2 split, 6 actual hex digits)
+##       -> 0x0027_E0EB (4+4 split with leading-zero pad, same value)
+##   Both edits are cosmetic — the parsed u32 values are unchanged.
+##   The existing magic-number tests still pass (5/5). This was caught
+##   only because batch 312 came in and triggered the workspace-wide
+##   posix rebuild. Adding a CI hook that runs `cargo clippy -p posix`
+##   after every posix-batch commit would prevent this class of latent
+##   regression — tracked as a follow-up if anyone gets to set up CI.
+
 ## BUG (noticed+FIXED 2026-05-31): fork() self-test spawned a real ring-3 thread it never ran,
 ##   causing TWO distinct boot crashes (one after the other, as each was fixed). proc/fork.rs::
 ##   test_fork_clones_pcb originally used spawn_process to get a parent address space to clone.

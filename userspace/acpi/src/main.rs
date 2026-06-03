@@ -9,6 +9,12 @@
 //   acpid [OPTIONS]
 
 #![cfg_attr(not(test), no_main)]
+// BatteryInfo::capacity_now and ::current_now are part of the
+// /sys/class/power_supply/BAT0/{charge_now,current_now} sysfs surface
+// the real acpi tool must consume to compute instantaneous discharge
+// rate and time-to-empty. Dead-code lint cannot see across that future
+// boundary.
+#![allow(dead_code)]
 
 use std::env;
 use std::io::{self, Write};
@@ -206,11 +212,11 @@ fn parse_args(args: &[String]) -> Result<Config, String> {
                 "-l" | "--logevents" => {}
                 "-L" | "--logfile" => {
                     i += 1;
-                    cfg.log_file = args.get(i).map(|s| PathBuf::from(s));
+                    cfg.log_file = args.get(i).map(PathBuf::from);
                 }
                 "-s" | "--socketfile" => {
                     i += 1;
-                    cfg.socket_file = args.get(i).map(|s| PathBuf::from(s));
+                    cfg.socket_file = args.get(i).map(PathBuf::from);
                 }
                 "-h" | "--help" => cfg.show_help = true,
                 "--version" => cfg.show_version = true,

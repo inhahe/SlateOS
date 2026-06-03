@@ -28,6 +28,13 @@
 //! - VSync-aware frame scheduling: target refresh rate, skip frames if behind.
 //! - Stub IPC layer ready for real OurOS channel-based IPC when available.
 
+// Drawing primitives (fill_rect, stroke_rect, draw_text, draw_line) and the
+// renderer execute() pump take 8-9 args (framebuffer + geometry + color +
+// optional clip / font / weight / stroke-width). Grouping into a struct
+// would help marginally but obscures the per-call clarity at the call site
+// — every primitive needs every arg.
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -1027,7 +1034,7 @@ impl BitmapFont {
     ) -> u32 {
         let code = ch as u32;
         // Only render printable ASCII for now.
-        if code < 32 || code > 126 {
+        if !(32..=126).contains(&code) {
             return CHAR_WIDTH;
         }
 
@@ -1043,11 +1050,10 @@ impl BitmapFont {
                     let fy = py + row;
 
                     // Clip check
-                    if let Some(clip_rect) = clip {
-                        if !clip_rect.contains(fx as i32, fy as i32) {
+                    if let Some(clip_rect) = clip
+                        && !clip_rect.contains(fx as i32, fy as i32) {
                             continue;
                         }
-                    }
 
                     fb.blend_pixel(fx, fy, color, opacity);
                 }
@@ -1591,11 +1597,10 @@ impl RenderEngine {
         let max_x = max_width.map(|w| x + w as i32);
 
         for ch in text.chars() {
-            if let Some(mx) = max_x {
-                if cursor_x + CHAR_WIDTH as i32 > mx {
+            if let Some(mx) = max_x
+                && cursor_x + CHAR_WIDTH as i32 > mx {
                     break;
                 }
-            }
 
             if cursor_x >= 0 && y >= 0 {
                 BitmapFont::draw_char(
@@ -2013,8 +2018,8 @@ impl Compositor {
         let old_focused = self.focused_window;
 
         // Unfocus the previously focused window.
-        if let Some(old_id) = old_focused {
-            if old_id != window_id {
+        if let Some(old_id) = old_focused
+            && old_id != window_id {
                 if let Some(win) = self.window_mut(old_id) {
                     win.focused = false;
                     win.dirty = true;
@@ -2023,11 +2028,10 @@ impl Compositor {
                 self.pending_notifications
                     .push_back(EventNotification::FocusLost { window_id: old_id });
             }
-        }
 
         // Focus the new window.
-        if let Some(win) = self.window_mut(window_id) {
-            if !win.minimized {
+        if let Some(win) = self.window_mut(window_id)
+            && !win.minimized {
                 win.focused = true;
                 win.dirty = true;
                 self.focused_window = Some(window_id);
@@ -2041,7 +2045,6 @@ impl Compositor {
                 self.pending_notifications
                     .push_back(EventNotification::FocusGained { window_id });
             }
-        }
     }
 
     /// Set a window's title.
@@ -2176,8 +2179,8 @@ impl Compositor {
         self.update_cursor_shape(x, y);
 
         // Route mouse move to the window under the cursor.
-        if let Some(window_id) = self.window_at(x, y) {
-            if let Some(win) = self.window_ref(window_id) {
+        if let Some(window_id) = self.window_at(x, y)
+            && let Some(win) = self.window_ref(window_id) {
                 let local_x = x - win.x;
                 let local_y = y - win.y;
                 self.pending_notifications
@@ -2188,7 +2191,6 @@ impl Compositor {
                         kind: MouseEventKind::Move,
                     });
             }
-        }
     }
 
     fn handle_mouse_button(&mut self, button: MouseButton, pressed: bool, x: i32, y: i32) {
@@ -2203,8 +2205,8 @@ impl Compositor {
 
         if !pressed {
             // Route release to focused window.
-            if let Some(window_id) = self.focused_window {
-                if let Some(win) = self.window_ref(window_id) {
+            if let Some(window_id) = self.focused_window
+                && let Some(win) = self.window_ref(window_id) {
                     let local_x = x - win.x;
                     let local_y = y - win.y;
                     self.pending_notifications
@@ -2215,7 +2217,6 @@ impl Compositor {
                             kind: MouseEventKind::ButtonRelease(button),
                         });
                 }
-            }
             return;
         }
 
@@ -2286,8 +2287,8 @@ impl Compositor {
             }
         } else {
             // Non-left button: route to window under cursor.
-            if let Some(window_id) = self.window_at(x, y) {
-                if let Some(win) = self.window_ref(window_id) {
+            if let Some(window_id) = self.window_at(x, y)
+                && let Some(win) = self.window_ref(window_id) {
                     let local_x = x - win.x;
                     let local_y = y - win.y;
                     self.pending_notifications
@@ -2298,13 +2299,12 @@ impl Compositor {
                             kind: MouseEventKind::ButtonPress(button),
                         });
                 }
-            }
         }
     }
 
     fn handle_mouse_scroll(&mut self, dx: f32, dy: f32, x: i32, y: i32) {
-        if let Some(window_id) = self.window_at(x, y) {
-            if let Some(win) = self.window_ref(window_id) {
+        if let Some(window_id) = self.window_at(x, y)
+            && let Some(win) = self.window_ref(window_id) {
                 let local_x = x - win.x;
                 let local_y = y - win.y;
                 self.pending_notifications
@@ -2315,7 +2315,6 @@ impl Compositor {
                         kind: MouseEventKind::Scroll { dx, dy },
                     });
             }
-        }
     }
 
     fn handle_key(&mut self, scancode: u32, pressed: bool, character: Option<char>) {
@@ -2344,11 +2343,10 @@ impl Compositor {
     fn window_at(&self, x: i32, y: i32) -> Option<WindowId> {
         // Iterate z_stack from top to bottom.
         for &window_id in self.z_stack.iter().rev() {
-            if let Some(win) = self.window_ref(window_id) {
-                if win.visible && !win.minimized && win.client_rect().contains(x, y) {
+            if let Some(win) = self.window_ref(window_id)
+                && win.visible && !win.minimized && win.client_rect().contains(x, y) {
                     return Some(window_id);
                 }
-            }
         }
         None
     }
@@ -2356,11 +2354,10 @@ impl Compositor {
     /// Find the topmost window whose full area (including decorations) contains the point.
     fn window_at_with_decorations(&self, x: i32, y: i32) -> Option<WindowId> {
         for &window_id in self.z_stack.iter().rev() {
-            if let Some(win) = self.window_ref(window_id) {
-                if win.visible && !win.minimized && win.outer_rect().contains(x, y) {
+            if let Some(win) = self.window_ref(window_id)
+                && win.visible && !win.minimized && win.outer_rect().contains(x, y) {
                     return Some(window_id);
                 }
-            }
         }
         None
     }
@@ -2571,8 +2568,8 @@ impl Compositor {
 
         // Draw shadow layers (progressively more transparent).
         for layer in 0..SHADOW_SIZE {
-            let alpha = (40u32.saturating_sub(layer as u32 * 5)).min(255);
-            let shadow_color = (alpha << 24) | 0x00_00_00_00;
+            let alpha = (40u32.saturating_sub(layer * 5)).min(255);
+            let shadow_color = alpha << 24;
             let expand = layer as i32;
 
             let sx = x - BORDER_WIDTH as i32 - expand + shadow_offset;
@@ -2903,7 +2900,7 @@ impl Compositor {
             .copied()
             .find(|&id| {
                 self.window_ref(id)
-                    .map_or(false, |w| w.visible && !w.minimized)
+                    .is_some_and(|w| w.visible && !w.minimized)
             });
 
         if let Some(id) = topmost {

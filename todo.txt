@@ -4003,11 +4003,17 @@ OBSOLETE NOTE BELOW (pre-relaxation):
 
 ## Roadmap §2.7 (Port Nushell): COMPLETE 2026-06-03
 ##
-## RESULT: `cargo check -p nu-command --no-default-features --features
-##   os-minimal --target x86_64-pc-windows-msvc` finishes with only warnings
-##   under nightly-x86_64-pc-windows-msvc.  The full workspace `cargo check`
-##   (no features) also finishes clean.  roadmap.md §2.7 line 1492 is marked
-##   [x].
+## RESULT (strongest evidence): the FULL nu binary builds and runs.
+##   `rustup run nightly-x86_64-pc-windows-msvc cargo build
+##    --target x86_64-pc-windows-msvc --bin nu` (default features —
+##   including os, network, mimalloc — NOT just os-minimal) finishes
+##   in ~4 minutes producing a 100 MiB nu.exe.  Smoke tests:
+##     - nu --version             →  0.112.3
+##     - nu -c "1 + 2"            →  3
+##     - nu -c "ls | first 3 | get name" → structured 3-row table
+##   The os-minimal feature set also checks clean (kept as the
+##   recommended profile for our OS target which lacks the full set
+##   of host-OS bindings).  roadmap.md §2.7 line 1492 is marked [x].
 ##
 ## TWO COMMITS landed inside the embedded `D:\visual studio projects\os\nushell`
 ## repo (this is NOT a submodule of the parent — it has its own commit history):

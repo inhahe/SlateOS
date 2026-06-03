@@ -14,6 +14,29 @@ members = [
     "posix",
     "toolchain/stubs",
 ]
+# Default members: only the crates that build under the workspace-root
+# target (x86_64-unknown-none). A plain `cargo build` from the project
+# root inherits the root .cargo/config.toml's
+# `target = "x86_64-unknown-none"` setting; building any userspace
+# crate (apps/*, gui/*, init/*, net/*, userspace/*) against that
+# triple fails because those crates need std and use the x86_64-ouros
+# target via their zone .cargo/config.toml.
+#
+# Without this filter, `cargo build` from the workspace root tries to
+# compile every userspace crate for x86_64-unknown-none and fails with
+# thousands of "cannot find type `Vec`" errors. `boot-test.sh` runs
+# exactly that command and was broken until this change (see todo.txt's
+# guitk-doesn't-build-for-unknown-none entry).
+#
+# Userspace crates remain in `members` so they share the workspace
+# target/ directory and so `cargo build -p <crate>` continues to work
+# from anywhere; building them explicitly (or from inside a zone)
+# still picks up the zone's x86_64-ouros target.
+default-members = [
+    "kernel",
+    "posix",
+    "toolchain/stubs",
+]
 exclude = [
     # Bare-metal services (target = x86_64-unknown-none). Living in
     # `services/` keeps them outside the `userspace/.cargo/config.toml`

@@ -66,22 +66,28 @@
 ##   self-tests; reordering boot so CSPRNG+canary come first would fix it generally. Recommend (1).
 ##   Zone: kernel-core (sched/task canary subsystem).
 
-## BUG (noticed 2026-05-31, UNFIXED, pre-existing, NOT fork-related): gui/toolkit (crate `guitk`)
-##   fails to compile under the default workspace target (x86_64-unknown-none, bare-metal no_std).
-##   `cargo build` from the workspace root (which is what scripts/boot-test.sh runs) builds ALL
-##   default members for x86_64-unknown-none and guitk emits 2187 errors — e.g. "cannot find type
-##   `Vec` in this scope" (gui/toolkit/src/widget.rs:142 and many more), plus E0405/E0408/E0425/
-##   E0433/E0463/E0531. guitk is a USERSPACE crate that needs alloc/std and the x86_64-ouros target
-##   (its zone .cargo/config.toml), so it cannot compile for the bare-metal kernel triple. This
-##   breaks the workspace-wide `cargo build` and therefore the unmodified boot-test.sh.
-##   IMPACT: boot-test.sh's build step (cargo build, no -p) fails before QEMU ever launches.
-##   WORKAROUND used for fork verification: build the kernel alone (`cargo build -p kernel`) then
-##   run `scripts/boot-test.sh --no-build`.
-##   PROPER FIX (one of): (1) exclude guitk (and other ouros-only userspace crates) from the
-##   default workspace members so root `cargo build` only builds bare-metal targets, OR (2) change
-##   boot-test.sh's build step to `cargo build -p kernel`, OR (3) make guitk actually build for
-##   unknown-none (unlikely correct — it's userspace). Likely guitk was added to default members or
-##   regressed recently; needs investigation of why it's compiled for unknown-none at all.
+## BUG (noticed 2026-05-31, FIXED 2026-06-03, was pre-existing, NOT fork-related): gui/toolkit
+##   (crate `guitk`) and every other userspace crate failed to compile under the default workspace
+##   target (x86_64-unknown-none, bare-metal no_std). `cargo build` from the workspace root (which
+##   is what scripts/boot-test.sh runs) built ALL members for x86_64-unknown-none and guitk emitted
+##   2187 errors — e.g. "cannot find type `Vec` in this scope" (gui/toolkit/src/widget.rs:142 and
+##   many more), plus E0405/E0408/E0425/E0433/E0463/E0531. guitk is a USERSPACE crate that needs
+##   alloc/std and the x86_64-ouros target (its zone .cargo/config.toml), so it could not compile
+##   for the bare-metal kernel triple. This broke the workspace-wide `cargo build` and therefore
+##   the unmodified boot-test.sh.
+##   FIX APPLIED (option 1, the recommended one): added `default-members` to the workspace
+##   `[workspace]` table in Cargo.toml listing only the crates that build under the workspace-root
+##   x86_64-unknown-none target — `kernel`, `posix`, `toolchain/stubs`. Userspace crates (apps/*,
+##   gui/*, init/*, net/*, userspace/*) remain in `members` so they share target/ and so
+##   `cargo build -p <crate>` continues to work from anywhere, but they no longer participate in
+##   the default `cargo build` from root. Verified: `cargo build` from workspace root now finishes
+##   cleanly (no -p needed). boot-test.sh's plain `cargo build` step now works as designed; the
+##   `cargo build -p kernel` workaround is no longer required.
+##   ORIGINAL ANALYSIS (kept for reference): guitk was added to default members or regressed
+##   recently; investigation showed the workspace had no `default-members` filter at all, so every
+##   crate in `members` was built by default. The proper fix was filter-based (default-members)
+##   rather than excluding guitk from members entirely, because the latter would have broken
+##   `cargo build -p guitk` and removed the crate from workspace target/ sharing.
 
 ## BUG (noticed+FIXED 2026-05-31): CoW resolve over-decrement (mm/cow.rs resolve_cow_fault).
 ##   The shared-frame branch decremented the old frame's refcount once PER resolved 4 KiB PTE

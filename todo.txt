@@ -1957,6 +1957,24 @@
 ##           helpers (overflow-safe via u64 intermediates) + a 6-test module.
 ##           Clippy-clean on host and ouros (fixed two collapsible_if via
 ##           let-chains); build-ouros clean.
+##   [x] mount/umount — DESTRUCTIVE syscalls neutered (2026-06-03).  Old code
+##           declared SYS_MOUNT=620 and SYS_UMOUNT=621 and fired them via raw
+##           `syscall`.  Both numbers collide with destructive fs-trash syscalls:
+##             * 620 = SYS_FS_TRASH_RESTORE — `mount /dev/sda1 /mnt` would call
+##               fs::trash::restore() with src-pointer bytes as a "filename".
+##             * 621 = SYS_FS_TRASH_EMPTY — `umount /mnt` would call
+##               fs::trash::empty(), permanently deleting EVERY file in the
+##               user's recycle bin, gated only by a File-WRITE cap which any
+##               admin tool already holds.  Catastrophic silent data loss.
+##           FIX (proper, not a band-aid): removed SYS_MOUNT/SYS_UMOUNT consts,
+##           ripped out syscall5 entirely (no `syscall` instruction left in
+##           the binary), replaced do_mount and do_umount with stubs returning
+##           a clear "not implemented" error via a shared enosys() helper.
+##           Mount-flag parsing, /proc/mounts reading, /etc/fstab reading, and
+##           list_mounts() are unchanged — the tool can still list mounts but
+##           cannot mutate state.  Added 5 unit tests (mount/umount ENOSYS +
+##           3 option-parser tests).  Prominent DESIGN GAP block explains the
+##           kernel ABI gap.  cargo build clean, all 5 tests pass.
 ##   [x] chroot — DESTRUCTIVE syscalls neutered (2026-06-03).  Old code declared
 ##           SYS_CHROOT=61 / SYS_CHDIR=49 / SYS_SETUID=105 / SYS_SETGID=106 /
 ##           SYS_SETGROUPS=116 and fired them via raw `syscall` instructions.

@@ -22,88 +22,54 @@ use std::fs;
 use std::process;
 
 // ============================================================================
-// Syscall interface
+// DESIGN GAP -- mount/umount have no kernel ABI yet
 // ============================================================================
+//
+// The OurOS kernel does **not** expose mount(2) or umount(2) syscalls. There
+// is no SYS_MOUNT or SYS_UMOUNT in kernel/src/syscall/number.rs.
+//
+// An earlier version of this file hardcoded SYS_MOUNT=620 and SYS_UMOUNT=621
+// and fired them via a raw `syscall` instruction. Both numbers map to
+// **DESTRUCTIVE** unrelated filesystem syscalls on OurOS:
+//
+//   * 620 = SYS_FS_TRASH_RESTORE — "mount /dev/sda1 /mnt" would call
+//     fs::trash::restore(low_bits_of_src_ptr_as_filename_ptr, ...) and
+//     attempt to restore a file from the trash bin using arbitrary
+//     filename bytes.
+//   * 621 = SYS_FS_TRASH_EMPTY — "umount /mnt" would call
+//     fs::trash::empty(), **permanently deleting every file currently
+//     in the user's recycle bin**. This is catastrophic data loss
+//     gated only by a File-WRITE capability, which every admin tool
+//     already holds. A sysadmin running `umount /mnt` to clear a stuck
+//     mount would silently nuke the trash without warning.
+//
+// The safe and correct interim behavior is to fail with a clear "not
+// implemented" error. The tool stays in the tree so it's ready when the
+// kernel ABI lands. See todo.txt for the tracking entry.
 
-// Mount/unmount syscalls (from kernel syscall table, fs range 600-799).
-const SYS_MOUNT: u64 = 620;
-const SYS_UMOUNT: u64 = 621;
-
-/// Invoke a syscall. In our OS, userspace calls the kernel via `syscall`.
-/// For now, we use inline asm on x86_64.
-///
-/// Arguments: rdi=arg1, rsi=arg2, rdx=arg3, r10=arg4, r8=arg5.
-#[cfg(target_arch = "x86_64")]
-unsafe fn syscall5(nr: u64, a1: u64, a2: u64, a3: u64, a4: u64, a5: u64) -> i64 {
-    let ret: i64;
-    // SAFETY: Caller ensures arguments are valid pointers/values for the
-    // given syscall number. The kernel validates all inputs.
-    unsafe {
-        core::arch::asm!(
-            "syscall",
-            inlateout("rax") nr as i64 => ret,
-            in("rdi") a1,
-            in("rsi") a2,
-            in("rdx") a3,
-            in("r10") a4,
-            in("r8") a5,
-            lateout("rcx") _,
-            lateout("r11") _,
-            options(nostack),
-        );
-    }
-    ret
+/// Stub return for every mount/umount operation in this tool.
+#[inline]
+fn enosys(op: &str) -> Result<(), String> {
+    Err(format!(
+        "{op}: not implemented in this kernel \
+         (no SYS_MOUNT / SYS_UMOUNT ABI yet)"
+    ))
 }
 
 /// Mount a filesystem.
 ///
-/// `source`: device path (null-terminated).
-/// `target`: mount point (null-terminated).
-/// `fstype`: filesystem type (null-terminated).
-/// `flags`: mount flags.
-/// `data`: filesystem-specific options (null-terminated, or null for none).
-fn do_mount(source: &str, target: &str, fstype: &str, flags: u64, data: &str) -> Result<(), String> {
-    let src = format!("{source}\0");
-    let tgt = format!("{target}\0");
-    let fst = format!("{fstype}\0");
-    let dat = format!("{data}\0");
-
-    let ret = unsafe {
-        syscall5(
-            SYS_MOUNT,
-            src.as_ptr() as u64,
-            tgt.as_ptr() as u64,
-            fst.as_ptr() as u64,
-            flags,
-            dat.as_ptr() as u64,
-        )
-    };
-
-    if ret < 0 {
-        Err(format!("mount failed: error {ret}"))
-    } else {
-        Ok(())
-    }
+/// **Currently fails with ENOSYS-equivalent.** See the DESIGN GAP block
+/// above for why the previous implementation was removed.
+fn do_mount(_source: &str, _target: &str, _fstype: &str, _flags: u64, _data: &str) -> Result<(), String> {
+    enosys("mount")
 }
 
 /// Unmount a filesystem.
-fn do_umount(target: &str, flags: u64) -> Result<(), String> {
-    let tgt = format!("{target}\0");
-
-    let ret = unsafe {
-        syscall5(
-            SYS_UMOUNT,
-            tgt.as_ptr() as u64,
-            flags,
-            0, 0, 0,
-        )
-    };
-
-    if ret < 0 {
-        Err(format!("umount failed: error {ret}"))
-    } else {
-        Ok(())
-    }
+///
+/// **Currently fails with ENOSYS-equivalent.** See the DESIGN GAP block
+/// above for why the previous implementation was removed.
+fn do_umount(_target: &str, _flags: u64) -> Result<(), String> {
+    enosys("umount")
 }
 
 // ============================================================================
@@ -470,5 +436,53 @@ fn main() {
             eprintln!("{e}");
             process::exit(1);
         }
+    }
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Confirm mount/umount fail safely instead of firing the destructive
+    // SYS_FS_TRASH_RESTORE / SYS_FS_TRASH_EMPTY syscalls that the old code
+    // collided with. See the DESIGN GAP block near the top of this file.
+
+    #[test]
+    fn test_do_mount_returns_enosys() {
+        let err = do_mount("/dev/sda1", "/mnt", "ext4", 0, "").unwrap_err();
+        assert!(err.contains("mount"), "got: {err}");
+        assert!(err.contains("not implemented"), "got: {err}");
+    }
+
+    #[test]
+    fn test_do_umount_returns_enosys() {
+        let err = do_umount("/mnt", 0).unwrap_err();
+        assert!(err.contains("umount"), "got: {err}");
+        assert!(err.contains("not implemented"), "got: {err}");
+    }
+
+    #[test]
+    fn test_parse_mount_options_ro() {
+        let (flags, data) = parse_mount_options("ro,noexec");
+        assert_eq!(flags & MS_RDONLY, MS_RDONLY);
+        assert_eq!(flags & MS_NOEXEC, MS_NOEXEC);
+        assert_eq!(data, "");
+    }
+
+    #[test]
+    fn test_parse_mount_options_bind() {
+        let (flags, _) = parse_mount_options("bind");
+        assert_eq!(flags & MS_BIND, MS_BIND);
+    }
+
+    #[test]
+    fn test_parse_mount_options_pass_through_unknown() {
+        let (_, data) = parse_mount_options("uid=1000,gid=1000");
+        assert!(data.contains("uid=1000"));
+        assert!(data.contains("gid=1000"));
     }
 }

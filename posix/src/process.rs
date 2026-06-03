@@ -1280,7 +1280,8 @@ unsafe fn umount_cstr_len(s: *const u8, max: usize) -> Option<usize> {
         if b == 0 {
             return Some(i);
         }
-        i += 1;
+        // `i <= max < usize::MAX` — increment cannot overflow.
+        i = i.wrapping_add(1);
     }
     None
 }
@@ -2455,7 +2456,8 @@ pub extern "C" fn clone3(args: *const CloneArgs, size: usize) -> i64 {
     if size > v2 {
         // SAFETY: caller contract — `args` covers `size` readable
         // bytes.  We reinterpret as a byte slice for the tail scan.
-        let tail_len = size - v2;
+        // `size > v2` from the if above ensures the subtraction is safe.
+        let tail_len = size.wrapping_sub(v2);
         let tail_ptr = args.cast::<u8>().wrapping_add(v2);
         for i in 0..tail_len {
             // SAFETY: tail_ptr + i is within [args, args+size).

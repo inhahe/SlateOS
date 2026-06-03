@@ -1,3 +1,22 @@
+// Indexing and arithmetic in this file operate on:
+//
+//  - A fixed pool of `MAX_QUEUES` slots, each holding a fixed
+//    `MAX_MSGS_PER_QUEUE` message ring buffer (head/tail/count) reduced
+//    modulo the buffer size immediately after increment.
+//  - Per-message `mtype`/`msz` fields bounded by `MAX_MSG_TEXT` on
+//    insertion.
+//  - Caller-supplied `msgsz` validated against the queue size before
+//    any indexing into the message body.
+//
+// Bounds are established locally but clippy cannot see across the
+// check.  These lints would only be useful here if we accepted
+// attacker-controlled integer indices into the pool/ring, which we
+// do not.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 //! System V message queues — `<sys/msg.h>`.
 //!
 //! A real in-memory implementation of `msgget`, `msgsnd`, `msgrcv`,

@@ -893,6 +893,12 @@ const LINUX_DIRENT64_HEADER: usize = 19;
 ///
 /// Returns `Some(reclen)` on success (number of bytes written, padded to
 /// 8-byte alignment) or `None` if `out` is too small to hold the record.
+// `slot` is taken as `out[..reclen]` after the `reclen > out.len()` check,
+// so `reclen` bytes (>= LINUX_DIRENT64_HEADER = 19) are guaranteed in
+// scope.  `name_len` is bounded by `reclen - LINUX_DIRENT64_HEADER`.
+// `reclen + 7` cannot overflow because the prior `checked_add` chain
+// returned None if it would.
+#[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 fn emit_linux_dirent64(
     out: &mut [u8],
     ino: u64,
@@ -936,6 +942,10 @@ fn emit_linux_dirent64(
 /// caller can emit it directly.
 ///
 /// Returns `None` if the entry has no name (empty NUL-terminated string).
+// Loop guard `name_len < 256` and `entry: &[u8; DIR_ENTRY_SIZE]`
+// (DIR_ENTRY_SIZE == 264) keep `entry[name_len]` in bounds; `entry[260]`
+// is similarly in range.
+#[allow(clippy::indexing_slicing)]
 fn parse_kernel_entry(entry: &[u8; DIR_ENTRY_SIZE]) -> Option<(&[u8], u8)> {
     // Name occupies bytes 0..256; find NUL.
     let mut name_len: usize = 0;

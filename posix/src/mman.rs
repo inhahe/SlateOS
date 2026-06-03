@@ -3783,7 +3783,11 @@ pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
     // Format the counter as decimal into a small buffer.
     let mut num_buf = [0u8; 20];
     let num_len = format_u64(counter, &mut num_buf);
-    if !put(&mut path, &mut pos, &num_buf[..num_len]) {
+    // `format_u64` returns a length within its 20-byte buffer (a u64
+    // is at most 20 decimal digits), so the slice is in bounds.
+    #[allow(clippy::indexing_slicing)]
+    let num_slice = &num_buf[..num_len];
+    if !put(&mut path, &mut pos, num_slice) {
         errno::set_errno(errno::ENAMETOOLONG);
         return -1;
     }

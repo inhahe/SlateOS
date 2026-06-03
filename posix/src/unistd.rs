@@ -3364,6 +3364,8 @@ pub extern "C" fn get_current_dir_name() -> *mut u8 {
 
     // Find length.
     let mut len: usize = 0;
+    // Loop guard `len < PATH_MAX == buf.len()` keeps `buf[len]` in bounds.
+    #[allow(clippy::indexing_slicing)]
     while len < PATH_MAX && buf[len] != 0 {
         len = len.wrapping_add(1);
     }

@@ -1132,7 +1132,12 @@ pub extern "C" fn on_exit(func: OnExitFn, arg: *mut u8) -> i32 {
         return -1;
     }
     unsafe {
-        ON_EXIT_FUNCS[count] = (Some(func), arg);
+        // `count < MAX_ON_EXIT == ON_EXIT_FUNCS.len()` from the
+        // check just above.
+        #[allow(clippy::indexing_slicing)]
+        {
+            ON_EXIT_FUNCS[count] = (Some(func), arg);
+        }
         (&raw mut ON_EXIT_COUNT).write(count.wrapping_add(1));
     }
     0

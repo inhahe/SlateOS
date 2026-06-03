@@ -2177,6 +2177,8 @@ impl Default for CpuSetT {
 
 /// Set a CPU in the CPU set.
 pub fn cpu_set(cpu: usize, set: &mut CpuSetT) {
+    // `cpu < 1024` ⇒ `cpu / 64 < 16 == set.__bits.len()`.
+    #[allow(clippy::indexing_slicing)]
     if cpu < 1024 {
         set.__bits[cpu / 64] |= 1u64 << (cpu % 64);
     }
@@ -2184,6 +2186,8 @@ pub fn cpu_set(cpu: usize, set: &mut CpuSetT) {
 
 /// Clear a CPU in the CPU set.
 pub fn cpu_clr(cpu: usize, set: &mut CpuSetT) {
+    // `cpu < 1024` ⇒ `cpu / 64 < 16 == set.__bits.len()`.
+    #[allow(clippy::indexing_slicing)]
     if cpu < 1024 {
         set.__bits[cpu / 64] &= !(1u64 << (cpu % 64));
     }
@@ -2191,7 +2195,12 @@ pub fn cpu_clr(cpu: usize, set: &mut CpuSetT) {
 
 /// Test whether a CPU is set in the CPU set.
 pub fn cpu_isset(cpu: usize, set: &CpuSetT) -> bool {
-    cpu < 1024 && (set.__bits[cpu / 64] & (1u64 << (cpu % 64))) != 0
+    // `cpu < 1024` short-circuits before the indexing op, so
+    // `cpu / 64 < 16 == set.__bits.len()` whenever we index.
+    #[allow(clippy::indexing_slicing)]
+    {
+        cpu < 1024 && (set.__bits[cpu / 64] & (1u64 << (cpu % 64))) != 0
+    }
 }
 
 /// Zero all CPUs in the set.

@@ -66,7 +66,12 @@ pub extern "C" fn ulimit(cmd: i32, new_limit: i64) -> i64 {
             let limit_bytes = if new_limit > i64::MAX / 512 {
                 crate::resource::RLIM_INFINITY
             } else {
-                (new_limit * 512) as u64
+                // The else branch ensures `new_limit <= i64::MAX / 512`,
+                // so the multiply cannot overflow i64.
+                #[allow(clippy::arithmetic_side_effects)]
+                {
+                    (new_limit * 512) as u64
+                }
             };
             let rl = crate::resource::Rlimit {
                 rlim_cur: limit_bytes,

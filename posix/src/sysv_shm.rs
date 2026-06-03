@@ -249,7 +249,8 @@ fn decode_shmid(shmid: i32) -> Option<(usize, u32)> {
     if s == 0 {
         return None;
     }
-    let slot = s - 1;
+    // `s != 0` from the early return above — subtract cannot underflow.
+    let slot = s.wrapping_sub(1);
     if slot >= MAX_SEGMENTS {
         return None;
     }
@@ -263,7 +264,8 @@ fn decode_shmid(shmid: i32) -> Option<(usize, u32)> {
 /// so callers always see a properly page-aligned mapping — necessary
 /// because Windows COFF caps static alignment below `SHMLBA`.
 fn segment_ptr(slot: usize) -> *mut u8 {
-    // Bounded by caller.
+    // Caller contract: `slot < MAX_SEGMENTS == SHM_STORAGE.len()`.
+    #[allow(clippy::indexing_slicing)]
     let raw = SHM_STORAGE[slot].bytes.get().cast::<u8>() as usize;
     // SHMLBA is a power of two — round up.
     let aligned = raw.wrapping_add(SHMLBA - 1) & !(SHMLBA - 1);

@@ -374,8 +374,8 @@ unsafe fn va_collect_scanf(fmt: *const u8, va: &mut VaList) -> [u64; 8] {
                 if !suppress {
                     // SAFETY: va contract upheld by the caller.
                     let v = unsafe { printf::va_arg_int(va) };
-                    if idx < 8 {
-                        args[idx] = v;
+                    if let Some(slot) = args.get_mut(idx) {
+                        *slot = v;
                     }
                     idx = idx.wrapping_add(1);
                 }

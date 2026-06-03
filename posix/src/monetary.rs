@@ -19,6 +19,23 @@
 // to wire the value into the emitter.
 #![allow(clippy::used_underscore_binding)]
 
+// Indexing and arithmetic in strfmon operate on:
+//
+//  - `int_buf`/`frac_buf` (fixed 32-byte locals) indexed by `i`/`j`
+//    that count down from the digit-count produced by the same buffer.
+//  - `(d - b'0')` after a `d.is_ascii_digit()` match arm.
+//  - `out_pos` writes to a caller-supplied buffer guarded by an
+//    explicit `out_pos < maxsize` check on every iteration.
+//  - `scaled / multiplier` and `scaled % multiplier` where
+//    `multiplier > 0` is a power of ten derived from `precision`.
+//
+// Bounds are established locally but clippy cannot see across the
+// check.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 /// `strfmon` — format monetary value.
 ///
 /// Writes at most `maxsize` bytes (including the null terminator) to

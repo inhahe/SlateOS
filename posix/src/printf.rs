@@ -598,8 +598,8 @@ pub unsafe fn va_collect(fmt: *const u8, va: &mut VaList) -> ([u64; 8], [u64; 8]
         if unsafe { *fmt.add(fpos) } == b'*' {
             // SAFETY: va contract upheld by caller.
             let v = unsafe { va_arg_int(va) };
-            if iidx < 8 {
-                int_args[iidx] = v;
+            if let Some(slot) = int_args.get_mut(iidx) {
+                *slot = v;
             }
             iidx = iidx.wrapping_add(1);
             fpos = fpos.wrapping_add(1);
@@ -615,8 +615,8 @@ pub unsafe fn va_collect(fmt: *const u8, va: &mut VaList) -> ([u64; 8], [u64; 8]
             if unsafe { *fmt.add(fpos) } == b'*' {
                 // SAFETY: va contract upheld by caller.
                 let v = unsafe { va_arg_int(va) };
-                if iidx < 8 {
-                    int_args[iidx] = v;
+                if let Some(slot) = int_args.get_mut(iidx) {
+                    *slot = v;
                 }
                 iidx = iidx.wrapping_add(1);
                 fpos = fpos.wrapping_add(1);
@@ -652,16 +652,16 @@ pub unsafe fn va_collect(fmt: *const u8, va: &mut VaList) -> ([u64; 8], [u64; 8]
             b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b's' | b'c' | b'p' | b'n' => {
                 // SAFETY: va contract upheld by caller.
                 let v = unsafe { va_arg_int(va) };
-                if iidx < 8 {
-                    int_args[iidx] = v;
+                if let Some(slot) = int_args.get_mut(iidx) {
+                    *slot = v;
                 }
                 iidx = iidx.wrapping_add(1);
             }
             b'f' | b'F' | b'e' | b'E' | b'g' | b'G' => {
                 // SAFETY: va contract upheld by caller.
                 let v = unsafe { va_arg_double(va) };
-                if fidx < 8 {
-                    float_args[fidx] = v;
+                if let Some(slot) = float_args.get_mut(fidx) {
+                    *slot = v;
                 }
                 fidx = fidx.wrapping_add(1);
             }

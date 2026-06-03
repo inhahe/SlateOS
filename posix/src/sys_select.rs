@@ -25,7 +25,12 @@ pub fn fd_set(fd: i32, set: &mut FdSet) {
     assert!(fd >= 0 && (fd as usize) < FD_SETSIZE);
     let idx = fd as usize / 64;
     let bit = fd as usize % 64;
-    set.fds_bits[idx] |= 1u64 << bit;
+    // The assert above guarantees `fd < FD_SETSIZE`, so
+    // `idx < FD_SETSIZE / 64`, which is exactly `fds_bits.len()`.
+    #[allow(clippy::indexing_slicing)]
+    {
+        set.fds_bits[idx] |= 1u64 << bit;
+    }
 }
 
 /// Remove a file descriptor from the set.
@@ -37,7 +42,11 @@ pub fn fd_clr(fd: i32, set: &mut FdSet) {
     assert!(fd >= 0 && (fd as usize) < FD_SETSIZE);
     let idx = fd as usize / 64;
     let bit = fd as usize % 64;
-    set.fds_bits[idx] &= !(1u64 << bit);
+    // The assert above guarantees `idx < fds_bits.len()`.
+    #[allow(clippy::indexing_slicing)]
+    {
+        set.fds_bits[idx] &= !(1u64 << bit);
+    }
 }
 
 /// Test whether a file descriptor is in the set.
@@ -49,7 +58,11 @@ pub fn fd_isset(fd: i32, set: &FdSet) -> bool {
     assert!(fd >= 0 && (fd as usize) < FD_SETSIZE);
     let idx = fd as usize / 64;
     let bit = fd as usize % 64;
-    (set.fds_bits[idx] & (1u64 << bit)) != 0
+    // The assert above guarantees `idx < fds_bits.len()`.
+    #[allow(clippy::indexing_slicing)]
+    {
+        (set.fds_bits[idx] & (1u64 << bit)) != 0
+    }
 }
 
 /// Clear all file descriptors from the set.

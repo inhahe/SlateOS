@@ -1,3 +1,15 @@
+// Indexing and arithmetic in this file operate on a fixed pool of
+// `MAX_CTX` AIO contexts, each with a ring buffer of
+// `MAX_EVENTS_PER_CTX` events.  `ctx_id` is validated to be in
+// `1..=MAX_CTX` before any `ctx_id - 1` subtraction.  Head/tail/
+// count arithmetic is taken modulo the ring size on every write.
+// Bounds are established locally but clippy cannot see across the
+// check.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 //! `<linux/aio_abi.h>` — kernel asynchronous I/O (AIO) interface.
 //!
 //! This is the kernel-level AIO interface (via `io_setup`, `io_submit`,

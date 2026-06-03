@@ -79,7 +79,13 @@ pub const MAXBSIZE: usize = 65536;
 /// `align` must be a power of two.
 #[inline]
 pub const fn roundup(x: usize, align: usize) -> usize {
-    (x + align - 1) & !(align - 1)
+    // Power-of-two contract: `align >= 1`, so `align - 1` cannot
+    // underflow.  `x + align - 1` is the canonical "round-up" trick;
+    // it can wrap only when the result would exceed `usize::MAX`,
+    // which would be a caller bug — wrapping_add preserves the bit
+    // pattern so the mask still yields a meaningful (if wrapped)
+    // alignment.
+    (x.wrapping_add(align.wrapping_sub(1))) & !align.wrapping_sub(1)
 }
 
 /// Round `x` down to the previous multiple of `align`.
@@ -87,7 +93,8 @@ pub const fn roundup(x: usize, align: usize) -> usize {
 /// `align` must be a power of two.
 #[inline]
 pub const fn rounddown(x: usize, align: usize) -> usize {
-    x & !(align - 1)
+    // Power-of-two contract: `align >= 1`, so `align - 1` is well-defined.
+    x & !align.wrapping_sub(1)
 }
 
 /// Round `x` up to the next page boundary.
@@ -135,7 +142,10 @@ pub const fn powerof2(x: usize) -> bool {
 /// Number of bits in a type, given its size in bytes.
 #[inline]
 pub const fn nbits(size_bytes: usize) -> usize {
-    size_bytes * 8
+    // Typed-size inputs are tiny (at most a few hundred); wrapping_mul
+    // here is just a notation choice — the multiply cannot realistically
+    // overflow usize.
+    size_bytes.wrapping_mul(8)
 }
 
 // ---------------------------------------------------------------------------

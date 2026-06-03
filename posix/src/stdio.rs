@@ -913,6 +913,9 @@ pub unsafe extern "C" fn __fread_chk(
         return 0;
     }
     // Clamp nmemb so size*nmemb never exceeds the destination object.
+    // `size != 0` from the early return above, so `wrapping_div` has
+    // a non-zero divisor.
+    #[allow(clippy::arithmetic_side_effects)]
     let max_nmemb = ptrlen.wrapping_div(size);
     let safe_nmemb = nmemb.min(max_nmemb);
     // SAFETY: caller guarantees `ptr`/`stream`; safe_nmemb is bounded so the

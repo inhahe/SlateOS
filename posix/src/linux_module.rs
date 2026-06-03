@@ -109,7 +109,8 @@ unsafe fn name_length(name: *const u8, max: usize) -> Option<usize> {
         if b == 0 {
             return Some(i);
         }
-        i += 1;
+        // `i <= max < usize::MAX` — increment cannot overflow.
+        i = i.wrapping_add(1);
     }
     None
 }

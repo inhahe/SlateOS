@@ -1314,6 +1314,8 @@ pub unsafe extern "C" fn mkostemps(template: *mut u8, suffixlen: i32, flags: i32
 
         let mut j: usize = 0;
         while j < 6 {
+            // `j < 6 == rand_bytes.len()`, so the index is in bounds.
+            #[allow(clippy::indexing_slicing)]
             let ch = rand_bytes[j] % 36;
             let c = if ch < 10 {
                 b'0'.wrapping_add(ch)
@@ -1860,6 +1862,10 @@ const BASE64_DIGITS: &[u8; 64] =
 ///
 /// Returns -1 for invalid characters.
 fn base64_decode_digit(c: u8) -> i32 {
+    // Each match arm gates `c - b'X'` with the corresponding range
+    // pattern, so the subtraction is in `0..=25` (or 0..=9).  The
+    // subsequent `+ N` adds tiny constants well within i32 range.
+    #[allow(clippy::arithmetic_side_effects)]
     match c {
         b'.' => 0,
         b'/' => 1,
@@ -1923,6 +1929,10 @@ pub extern "C" fn l64a(n: i64) -> *const u8 {
 
     let mut val = n as u32; // Use low 32 bits.
     let mut i: usize = 0;
+    // Loop bound `i < 6` and `digit = val & 0x3F < 64 == BASE64_DIGITS
+    // .len()` keep both indices in range; final `(*buf)[i]` after the
+    // loop has `i <= 6 < 7 == L64A_BUF.len()`.
+    #[allow(clippy::indexing_slicing)]
     while val != 0 && i < 6 {
         let digit = (val & 0x3F) as usize;
         unsafe {
@@ -1931,6 +1941,7 @@ pub extern "C" fn l64a(n: i64) -> *const u8 {
         val >>= 6;
         i = i.wrapping_add(1);
     }
+    #[allow(clippy::indexing_slicing)]
     unsafe {
         (*buf)[i] = 0;
     } // Null terminate.

@@ -1,3 +1,18 @@
+// Indexing and arithmetic in this file operate on:
+//
+//  - Fixed-size packed argv/envp byte buffers (`EXEC_PACKED_MAX`) with
+//    each write preceded by a `len + needed <= EXEC_PACKED_MAX` check.
+//  - File-action arrays and fd-map slots bounded by `MAX_FD_MAP`.
+//  - Resolved-path buffers of length `PATH_MAX` written by
+//    `resolve_path` which itself returns the validated length.
+//
+// Bounds are established locally but clippy cannot see across the
+// check.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 //! POSIX process spawning functions.
 //!
 //! Implements `posix_spawn`, `posix_spawnp`, `execve`, `execvp`, and

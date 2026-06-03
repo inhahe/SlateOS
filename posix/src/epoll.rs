@@ -1,3 +1,24 @@
+// Indexing and arithmetic in this file operate on:
+//
+//  - Fixed-size kernel-ABI tables (epoll instances, timerfd entries,
+//    inotify watch slots) whose indices are clamped to the table size
+//    before use.
+//  - Ring-buffer head/tail counters reduced modulo MAX_INOTIFY_EVENTS
+//    immediately after increment.
+//  - Byte offsets into a caller-supplied buffer that are validated by
+//    explicit `written + N <= buf.len()` checks before the slice op.
+//  - Time differences (`now - next_expiry_ns`) gated on prior
+//    `now >= next_expiry_ns` checks.
+//
+// In each case the bound is established locally, but clippy cannot see
+// across the check.  The defensive lints would only become useful here
+// if we accepted user-supplied integer indices into these tables, which
+// we do not.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 //! Linux-specific I/O multiplexing and fd-based notification.
 //!
 //! Implements:

@@ -1,3 +1,23 @@
+// Indexing and arithmetic in this file operate on:
+//
+//  - A fixed-size pool of `Fts` instances (`POOL`) indexed by
+//    `inst.idx`, which is range-checked on every entry to the helper.
+//  - A `MAX_FTS_DEPTH`-deep stack of in-progress directory frames
+//    indexed by `inst.depth.wrapping_sub(1)` after `depth > 0` checks.
+//  - Per-frame child cursors counted up to `n_children`, which is the
+//    same field that bounds the iteration.
+//  - A `PATH_MAX`-sized path buffer mutated in place; every write is
+//    preceded by an explicit length budget check.
+//
+// In each case the bound is established locally but clippy cannot see
+// across the check.  These lints would only be meaningful here if we
+// accepted attacker-controlled integer indices into the pool/stack,
+// which we do not.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 //! `<fts.h>` — file tree traversal (FreeBSD-style).
 //!
 //! `fts` is the richer cousin of `ftw`/`nftw`: instead of invoking a

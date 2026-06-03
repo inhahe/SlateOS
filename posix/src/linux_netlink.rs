@@ -164,7 +164,11 @@ pub const NLMSG_ALIGNTO: usize = 4;
 
 /// Align a length to NLMSG_ALIGNTO boundary.
 pub const fn nlmsg_align(len: usize) -> usize {
-    (len + NLMSG_ALIGNTO - 1) & !(NLMSG_ALIGNTO - 1)
+    // NLMSG_ALIGNTO is a small constant power of two, so `- 1` cannot
+    // underflow.  The `+ NLMSG_ALIGNTO - 1` would only wrap for
+    // pathological `len` near `usize::MAX`; use wrapping_add for the
+    // const-context "round-up" trick.
+    len.wrapping_add(NLMSG_ALIGNTO.wrapping_sub(1)) & !NLMSG_ALIGNTO.wrapping_sub(1)
 }
 
 /// Size of the netlink message header.

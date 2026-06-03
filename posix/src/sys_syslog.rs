@@ -43,7 +43,12 @@ pub const fn log_mask(pri: i32) -> i32 {
 /// Create a mask for all priorities up to and including `pri`.
 #[inline]
 pub const fn log_upto(pri: i32) -> i32 {
-    (1 << (pri + 1)) - 1
+    // POSIX `LOG_UPTO`: `pri` is a small priority code (0..=7);
+    // `pri + 1` cannot overflow i32, and `1 << (pri + 1)` fits.
+    #[allow(clippy::arithmetic_side_effects)]
+    {
+        (1 << (pri + 1)) - 1
+    }
 }
 
 // ---------------------------------------------------------------------------

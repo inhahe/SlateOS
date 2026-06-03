@@ -1,3 +1,14 @@
+// Signal-set operations in this file index a fixed-size `bits`
+// array (`SigsetT`'s bit-vector representation) by word and clear/
+// set bits indexed by `(signum - 1) % 64`.  `signum` is validated to
+// be in `1..=NSIG` before these helpers are called.  The arithmetic
+// is `signum - 1` (signum ≥ 1) and `1 << bit` where `bit < 64` — no
+// overflow path exists.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 //! POSIX signal handling layer.
 //!
 //! Our OS uses IPC messages instead of Unix signals for process

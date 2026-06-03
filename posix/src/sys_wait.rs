@@ -44,7 +44,12 @@ pub const fn wexitstatus(status: i32) -> i32 {
 /// True if the child was terminated by a signal.
 #[inline]
 pub const fn wifsignaled(status: i32) -> bool {
-    ((status & 0x7F) + 1) as i8 >= 2
+    // `status & 0x7F` is in 0..=127, so `+ 1` cannot overflow i32.
+    // This matches the canonical glibc `WIFSIGNALED` macro.
+    #[allow(clippy::arithmetic_side_effects)]
+    {
+        ((status & 0x7F) + 1) as i8 >= 2
+    }
 }
 
 /// Signal number that caused the child to terminate.

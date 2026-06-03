@@ -25,6 +25,23 @@
 // the full rationale.
 #![allow(clippy::cast_ptr_alignment)]
 
+// Indexing and arithmetic operate on:
+//
+//  - The stack walk's `walks` counter (bounded by the caller-supplied
+//    `size` argument and an internal `MAX_FRAMES` cap).
+//  - Hex-formatting of 64-bit addresses into a fixed 18-byte buffer
+//    (`(60 - i * 4)` with `i < 16` cannot wrap; `HEX[nibble]` where
+//    `nibble < 16 == HEX.len()`).
+//  - `str_area.add(i * 19)` where `i < n` and `str_area` was sized
+//    `n * 19` bytes earlier in the function.
+//
+// All bounds are established locally but clippy cannot see across the
+// check.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 use crate::file;
 
 // ---------------------------------------------------------------------------

@@ -30,6 +30,10 @@ pub extern "C" fn imaxdiv(numer: i64, denom: i64) -> ImaxdivT {
     // Guard against overflow: i64::MIN / -1 would panic in debug builds.
     // POSIX leaves this undefined, but a C library must not crash.
     // Use wrapping division (same as release-mode behavior).
+    // `denom != 0` from the early return above, and `wrapping_div`/
+    // `wrapping_rem` are precisely the wrapping semantics we want for
+    // `i64::MIN / -1` (panic in debug, wrap in release).
+    #[allow(clippy::arithmetic_side_effects)]
     ImaxdivT {
         quot: numer.wrapping_div(denom),
         rem: numer.wrapping_rem(denom),

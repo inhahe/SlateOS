@@ -3080,6 +3080,13 @@ pub const SPLICE_F_VALID: u32 = SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MOR
 /// is therefore advisory only — `SPLICE_F_MOVE`, `SPLICE_F_MORE`,
 /// and `SPLICE_F_GIFT` have no effect, and `SPLICE_F_NONBLOCK` is
 /// already honored by `read`/`write` via `O_NONBLOCK` on the fd.
+// Byte counters in this routine (`total`, `written`, `cur_in`,
+// `cur_out`, `to_write`, `remaining`) all stay bounded by the
+// caller-supplied `len` and the local stack buffer size; each `+=`
+// follows a `total <= len` check or a `written <= to_write` check.
+// Wrapping behaviour would be a caller-side bug, not a soundness
+// issue, so we suppress the defensive arithmetic lint here.
+#[allow(clippy::arithmetic_side_effects)]
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn splice(
     fd_in: Fd,

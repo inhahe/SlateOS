@@ -1,3 +1,14 @@
+// Indexing and arithmetic in this file operate on fixed-size CPU sets
+// (cpu_set_t is a bitmask of `CPU_SETSIZE` bits indexed by integer
+// CPU numbers validated against the mask size) and on caller-supplied
+// `sched_param`/`sched_attr` fields that are kernel-validated before
+// any further use.  Bounds are established locally but clippy cannot
+// see across the check.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 //! POSIX scheduling functions (`<sched.h>`).
 //!
 //! Provides scheduler policy and parameter functions.  Our OS uses

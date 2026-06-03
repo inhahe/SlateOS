@@ -1,3 +1,15 @@
+// Indexing and arithmetic here operate on a fixed `MAX_NAMED_SEMS`
+// pool of slots indexed by integer indices that we return ourselves
+// from `find_named_sem` / `find_free_sem_slot` / `slot_for_ptr`
+// (all of which range-check before yielding the index), and on
+// caller-supplied name buffers validated against `NAME_MAX` before any
+// indexing.  Bounds are established locally but clippy cannot see
+// across the check.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 //! POSIX semaphore implementation.
 //!
 //! Implements both unnamed semaphores (`sem_init`) and named semaphores

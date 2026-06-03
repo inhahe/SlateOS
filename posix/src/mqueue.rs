@@ -1,3 +1,20 @@
+// Indexing and arithmetic in this file operate on:
+//
+//  - A fixed pool of `MAX_QUEUES` queue slots and `MAX_DESCRIPTORS`
+//    descriptor slots, indexed only via `find_*` helpers that range-
+//    check before yielding the index.
+//  - Per-queue ring buffers of `MAX_MSGS_PER_QUEUE` messages with
+//    head/tail reduced modulo the buffer size.
+//  - Caller-supplied `msg_len` validated against `q.msg_size` before
+//    any byte copy.
+//
+// Bounds are established locally but clippy cannot see across the
+// check.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 //! POSIX message queues (`<mqueue.h>`).
 //!
 //! A real implementation of POSIX message queues backed by an in-memory

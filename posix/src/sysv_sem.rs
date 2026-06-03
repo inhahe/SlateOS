@@ -1,3 +1,22 @@
+// Indexing and arithmetic in this file operate on:
+//
+//  - A fixed pool of `MAX_SETS` semaphore sets, indexed only after
+//    `find_set_idx` (range-checked) or by a kernel-validated `semid`
+//    that the caller-passed.
+//  - A per-set array of up to `MAX_SEMS_PER_SET` `sem_t` slots, with
+//    `sem_num` validated against `nsems` before any indexing.
+//  - A caller-supplied `sembuf` array bounded by `nsops`, copied into
+//    a local fixed-size buffer of length `MAX_SEMS_PER_SET` after the
+//    `nsops <= MAX_SEMS_PER_SET` check.
+//
+// Bounds are established locally but clippy cannot see across the
+// check.  These lints would only be useful here if we accepted
+// attacker-controlled integer indices, which we do not.
+#![allow(
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects,
+)]
+
 //! System V semaphores — `<sys/sem.h>`.
 //!
 //! A real in-memory implementation of `semget`, `semop`, `semtimedop`,

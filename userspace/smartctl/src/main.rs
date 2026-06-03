@@ -4,6 +4,12 @@
 // disk health monitoring for ATA and SCSI devices.
 
 #![cfg_attr(not(test), no_main)]
+// Many ATA SMART attribute IDs, command opcodes, NVMe log page IDs, exit
+// codes, and SelfTestStatus / HealthStatus variants are declared up-front
+// because they encode the protocol the real implementation must speak.
+// They are intentionally kept as documentation for the eventual ATA SAT
+// driver integration; squashing them now would erase that contract.
+#![allow(dead_code)]
 
 // ── Constants ──────────────────────────────────────────────────────────
 
@@ -566,11 +572,11 @@ fn pad_left_num(val: u64, buf: &mut [u8], width: usize) -> usize {
         }
     }
     for j in 0..n {
-        if pos < buf.len() {
-            if let Some(c) = tmp.get(j) {
-                buf[pos] = *c;
-                pos += 1;
-            }
+        if pos < buf.len()
+            && let Some(c) = tmp.get(j)
+        {
+            buf[pos] = *c;
+            pos += 1;
         }
     }
     pos
@@ -1266,9 +1272,11 @@ fn show_attributes(data: &SmartData) {
             buf[pos] = b' ';
             pos += 1;
 
-            // Name (24 chars, left-aligned)
+            // Name (24 chars, left-aligned). The `min(24)` clamp on the
+            // source name length is implicit in the pad_right target —
+            // pad_right is idempotent if pos already equals/exceeds it,
+            // and copy_bytes is itself bounded by buf.len().
             let name = attribute_name(attr.id);
-            let name_end = pos + name.len().min(24);
             let start = pos;
             pos = copy_bytes(&mut buf, pos, name);
             pos = pad_right(&mut buf, pos, start + 24);
@@ -1337,7 +1345,6 @@ fn show_selftest_log(data: &SmartData) {
             pos += 1;
 
             // Test type
-            let type_start = pos;
             let type_name = match test.test_type {
                 TEST_SHORT => b"Short offline       " as &[u8],
                 TEST_EXTENDED => b"Extended offline    " as &[u8],
@@ -1354,7 +1361,10 @@ fn show_selftest_log(data: &SmartData) {
                     pos = copy_bytes(&mut buf, pos, b"Completed without error");
                 }
                 SelfTestStatus::InProgress(pct) => {
-                    pos = copy_bytes(&mut buf, pos, b"Self-test in progress..");
+                    // Real smartctl prints "Self-test routine in progress... NN% remaining".
+                    pos = copy_bytes(&mut buf, pos, b"Self-test routine in progress... ");
+                    pos += format_u64(u64::from(pct), &mut buf[pos..]);
+                    pos = copy_bytes(&mut buf, pos, b"% remaining");
                 }
                 SelfTestStatus::Interrupted => {
                     pos = copy_bytes(&mut buf, pos, b"Interrupted (host reset)");
@@ -1451,11 +1461,9 @@ fn show_nvme_health(log: &NvmeSmartLog) {
     print_out(&buf[..pos]);
 
     // Temperature
-    let temp_c = if log.temperature > 273 {
-        log.temperature - 273
-    } else {
-        0
-    };
+    // Convert Kelvin → Celsius. saturating_sub guards against absurd
+    // sub-zero-K logs (e.g. uninitialised firmware fields).
+    let temp_c = log.temperature.saturating_sub(273);
     pos = copy_bytes(&mut buf, 0, b"Temperature:                        ");
     pos += format_u64(temp_c as u64, &mut buf[pos..]);
     pos = copy_bytes(&mut buf, pos, b" Celsius\n");
@@ -1578,14 +1586,15 @@ fn analyze_health(data: &SmartData) -> i32 {
 
     // Check pre-fail attributes below threshold
     for i in 0..data.attr_count {
-        if let Some(attr) = &data.attributes[i] {
-            if attr.flags & SMART_FLAG_PREFAIL != 0 && attr.threshold > 0 {
-                if attr.current <= attr.threshold {
-                    exit_status |= EXIT_PREFAIL_BELOW;
-                }
-                if attr.worst <= attr.threshold {
-                    exit_status |= EXIT_PAST_PREFAIL;
-                }
+        if let Some(attr) = &data.attributes[i]
+            && attr.flags & SMART_FLAG_PREFAIL != 0
+            && attr.threshold > 0
+        {
+            if attr.current <= attr.threshold {
+                exit_status |= EXIT_PREFAIL_BELOW;
+            }
+            if attr.worst <= attr.threshold {
+                exit_status |= EXIT_PAST_PREFAIL;
             }
         }
     }
@@ -1594,17 +1603,14 @@ fn analyze_health(data: &SmartData) -> i32 {
     for i in 0..data.attr_count {
         if let Some(attr) = &data.attributes[i] {
             match attr.id {
-                ATTR_REALLOC_SECTOR | ATTR_REALLOC_EVENT => {
-                    if attr.raw >= REALLOC_WARN {
-                        if !data.error_log.iter().all(|e| e.is_none()) {
-                            exit_status |= EXIT_ERROR_LOG;
-                        }
-                    }
+                ATTR_REALLOC_SECTOR | ATTR_REALLOC_EVENT
+                    if attr.raw >= REALLOC_WARN
+                        && !data.error_log.iter().all(Option::is_none) =>
+                {
+                    exit_status |= EXIT_ERROR_LOG;
                 }
-                ATTR_CURRENT_PENDING => {
-                    if attr.raw >= PENDING_WARN {
-                        // Flag concern but not necessarily failure
-                    }
+                ATTR_CURRENT_PENDING if attr.raw >= PENDING_WARN => {
+                    // Flag concern but not necessarily failure
                 }
                 _ => {}
             }
@@ -1783,7 +1789,10 @@ fn show_json_health(data: &SmartData) {
 
 // ── Self-Test Initiation ───────────────────────────────────────────────
 
-fn start_selftest(path: &[u8], test_type: u8) {
+// The `_path` parameter documents intent: a real implementation would issue
+// the ATA SMART EXECUTE OFF-LINE IMMEDIATE command against that device path.
+// The personality-CLI stub prints canned output regardless of device.
+fn start_selftest(_path: &[u8], test_type: u8) {
     let mut buf = [0u8; 256];
     let mut pos;
 
@@ -1832,16 +1841,16 @@ fn start_selftest(path: &[u8], test_type: u8) {
     print_out(b"Use smartctl -X to abort test.\n");
 }
 
-fn abort_selftest(path: &[u8]) {
+fn abort_selftest(_path: &[u8]) {
     print_out(b"Sending command: \"Abort SMART off-line mode self-test routine\".\n");
     print_out(b"Self-testing aborted!\n");
 }
 
-fn enable_smart(path: &[u8]) {
+fn enable_smart(_path: &[u8]) {
     print_out(b"SMART Enabled.\n");
 }
 
-fn disable_smart(path: &[u8]) {
+fn disable_smart(_path: &[u8]) {
     print_out(b"SMART Disabled. Use option -s with argument 'on' to enable it.\n");
 }
 

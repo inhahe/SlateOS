@@ -103,13 +103,11 @@ impl AudioFormat {
             return Self::Mp3;
         }
         // Frame sync: first 11 bits set (0xFF followed by 0xE0+)
-        if data.get(0) == Some(&0xFF) {
-            if let Some(&b) = data.get(1) {
-                if b & 0xE0 == 0xE0 {
+        if data.first() == Some(&0xFF)
+            && let Some(&b) = data.get(1)
+                && b & 0xE0 == 0xE0 {
                     return Self::Mp3;
                 }
-            }
-        }
 
         Self::Unknown
     }
@@ -264,7 +262,7 @@ pub fn parse_flac_header(data: &[u8]) -> Option<FlacInfo> {
     let channels = ((*si.get(12)? >> 1) & 0x07) + 1;
     let bps_hi = (*si.get(12)? & 0x01) << 4;
     let bps_lo = *si.get(13)? >> 4;
-    let bits_per_sample = bps_hi | bps_lo + 1;
+    let bits_per_sample = bps_hi | (bps_lo + 1);
 
     let total_hi = ((*si.get(13)? & 0x0F) as u64) << 32;
     let total_lo = ((*si.get(14)? as u64) << 24)
@@ -390,7 +388,7 @@ fn synchsafe_u32(bytes: &[u8]) -> Option<u32> {
         return None;
     }
     Some(
-        ((*bytes.get(0)? as u32) << 21)
+        ((*bytes.first()? as u32) << 21)
             | ((*bytes.get(1)? as u32) << 14)
             | ((*bytes.get(2)? as u32) << 7)
             | (*bytes.get(3)? as u32),
@@ -402,7 +400,7 @@ fn decode_id3_text(data: &[u8]) -> Option<String> {
     if data.is_empty() {
         return None;
     }
-    let encoding = *data.get(0)?;
+    let encoding = *data.first()?;
     let text_bytes = data.get(1..)?;
     match encoding {
         0 | 3 => {
@@ -606,6 +604,12 @@ pub struct PlayerState {
     // Window size
     pub width: f32,
     pub height: f32,
+}
+
+impl Default for PlayerState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl PlayerState {
@@ -1861,13 +1865,12 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
                             state.playing = true;
                         }
                     }
-                    Tab::Playlists => {
-                        if idx < state.playlist.len() {
+                    Tab::Playlists
+                        if idx < state.playlist.len() => {
                             state.current_track_index = Some(idx);
                             state.position_secs = 0.0;
                             state.playing = true;
                         }
-                    }
                     _ => {}
                 }
             }
@@ -1875,8 +1878,8 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
         }
         Key::Delete => {
             // Remove selected track from playlist
-            if state.active_tab == Tab::Playlists {
-                if let Some(idx) = state.selected_index {
+            if state.active_tab == Tab::Playlists
+                && let Some(idx) = state.selected_index {
                     state.remove_track(idx);
                     if state.playlist.is_empty() {
                         state.selected_index = None;
@@ -1884,7 +1887,6 @@ fn handle_key(state: &mut PlayerState, key_event: &KeyEvent) -> bool {
                         state.selected_index = Some(state.playlist.len() - 1);
                     }
                 }
-            }
             true
         }
         Key::Escape => {
@@ -2102,13 +2104,12 @@ fn handle_mouse(state: &mut PlayerState, mouse_event: &MouseEvent) -> bool {
                                 state.playing = true;
                             }
                         }
-                        Tab::Playlists => {
-                            if row_idx < state.playlist.len() {
+                        Tab::Playlists
+                            if row_idx < state.playlist.len() => {
                                 state.current_track_index = Some(row_idx);
                                 state.position_secs = 0.0;
                                 state.playing = true;
                             }
-                        }
                         _ => {}
                     }
                     return true;

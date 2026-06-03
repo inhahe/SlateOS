@@ -267,42 +267,36 @@ impl Nim {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. }) => {
-                if *modifiers == Modifiers::NONE {
+            Event::Key(KeyEvent { key, modifiers, .. })
+                if *modifiers == Modifiers::NONE => {
                     match key {
-                        Key::Left => {
-                            if self.selected_heap > 0 {
+                        Key::Left
+                            if self.selected_heap > 0 => {
                                 self.selected_heap -= 1;
                                 self.take_count = 1;
                             }
-                        }
-                        Key::Right => {
-                            if self.selected_heap + 1 < self.heaps.len() {
+                        Key::Right
+                            if self.selected_heap + 1 < self.heaps.len() => {
                                 self.selected_heap += 1;
                                 self.take_count = 1;
                             }
-                        }
                         Key::Up => {
                             let max = self.heaps.get(self.selected_heap).copied().unwrap_or(0);
                             if self.take_count < max {
                                 self.take_count += 1;
                             }
                         }
-                        Key::Down => {
-                            if self.take_count > 1 {
+                        Key::Down
+                            if self.take_count > 1 => {
                                 self.take_count -= 1;
                             }
-                        }
-                        Key::Enter | Key::Space => {
+                        Key::Enter | Key::Space
                             if self.current_player == Player::Human
                                 && self.state == GameState::Playing
-                            {
-                                if self.take(self.selected_heap, self.take_count) {
+                                && self.take(self.selected_heap, self.take_count) => {
                                     self.take_count = 1;
                                     self.computer_move();
                                 }
-                            }
-                        }
                         Key::N => self.new_game(),
                         Key::H => self.show_help = !self.show_help,
                         Key::V => self.toggle_variant(),
@@ -314,7 +308,6 @@ impl Nim {
                         _ => {}
                     }
                 }
-            }
             _ => {}
         }
     }

@@ -521,8 +521,8 @@ impl VideoResolution {
         if gcd == 0 {
             return "N/A".to_owned();
         }
-        let w = self.width / gcd;
-        let h = self.height / gcd;
+        let w = self.width.checked_div(gcd).unwrap_or(0);
+        let h = self.height.checked_div(gcd).unwrap_or(0);
         format!("{w}:{h}")
     }
 }
@@ -532,7 +532,7 @@ fn gcd_u32(a: u32, b: u32) -> u32 {
     let mut y = b;
     while y != 0 {
         let temp = y;
-        y = x % y;
+        y = x.checked_rem(y).unwrap_or(0);
         x = temp;
     }
     x
@@ -1152,7 +1152,7 @@ impl HistoryEntry {
 
     /// Space saved in bytes.
     pub fn space_saved(&self) -> i64 {
-        self.source_size as i64 - self.output_size as i64
+        (self.source_size as i64).saturating_sub(self.output_size as i64)
     }
 }
 

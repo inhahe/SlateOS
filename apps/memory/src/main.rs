@@ -160,7 +160,7 @@ impl MemoryGame {
     }
 
     fn set_size(&mut self, rows: usize, cols: usize) {
-        if (rows == 4 && cols == 4) || (rows == 4 && cols == 6) || (rows == 6 && cols == 6) {
+        if (rows == 4 && (cols == 4 || cols == 6)) || (rows == 6 && cols == 6) {
             self.rows = rows;
             self.cols = cols;
             self.new_game();
@@ -225,16 +225,14 @@ impl MemoryGame {
     }
 
     fn dismiss_shown(&mut self) {
-        if let Some(f) = self.first_pick {
-            if self.states[f] == CardState::FaceUp {
+        if let Some(f) = self.first_pick
+            && self.states[f] == CardState::FaceUp {
                 self.states[f] = CardState::FaceDown;
             }
-        }
-        if let Some(s) = self.second_pick {
-            if self.states[s] == CardState::FaceUp {
+        if let Some(s) = self.second_pick
+            && self.states[s] == CardState::FaceUp {
                 self.states[s] = CardState::FaceDown;
             }
-        }
         self.first_pick = None;
         self.second_pick = None;
         self.phase = Phase::FirstPick;
@@ -258,29 +256,25 @@ impl MemoryGame {
 
     fn event(&mut self, event: &Event) {
         match event {
-            Event::Key(KeyEvent { key, modifiers, .. }) => {
-                if *modifiers == Modifiers::NONE {
+            Event::Key(KeyEvent { key, modifiers, .. })
+                if *modifiers == Modifiers::NONE => {
                     match key {
-                        Key::Up => {
-                            if self.cursor >= self.cols {
+                        Key::Up
+                            if self.cursor >= self.cols => {
                                 self.cursor -= self.cols;
                             }
-                        }
-                        Key::Down => {
-                            if self.cursor + self.cols < self.rows * self.cols {
+                        Key::Down
+                            if self.cursor + self.cols < self.rows * self.cols => {
                                 self.cursor += self.cols;
                             }
-                        }
-                        Key::Left => {
-                            if self.cursor % self.cols > 0 {
+                        Key::Left
+                            if !self.cursor.is_multiple_of(self.cols) => {
                                 self.cursor -= 1;
                             }
-                        }
-                        Key::Right => {
-                            if self.cursor % self.cols < self.cols - 1 {
+                        Key::Right
+                            if self.cursor % self.cols < self.cols - 1 => {
                                 self.cursor += 1;
                             }
-                        }
                         Key::Enter | Key::Space => {
                             if self.phase == Phase::Showing {
                                 self.dismiss_shown();
@@ -296,7 +290,6 @@ impl MemoryGame {
                         _ => {}
                     }
                 }
-            }
             Event::Mouse(MouseEvent { x, y, kind }) => {
                 if matches!(kind, MouseEventKind::Press(MouseButton::Left)) {
                     self.handle_mouse(*x, *y);

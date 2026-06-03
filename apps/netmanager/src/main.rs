@@ -637,12 +637,11 @@ impl NetManagerApp {
 
         // In a real implementation this would trigger an OS-level connection.
         // For now, update the selected WiFi interface to Connecting state.
-        if let Some(iface) = self.interfaces.get_mut(self.selected_interface) {
-            if iface.interface_type == InterfaceType::WiFi {
+        if let Some(iface) = self.interfaces.get_mut(self.selected_interface)
+            && iface.interface_type == InterfaceType::WiFi {
                 iface.state = ConnectionState::Connecting;
                 self.status_message = format!("Connecting to {ssid}...");
             }
-        }
         Ok(ssid)
     }
 
@@ -731,15 +730,14 @@ impl NetManagerApp {
             return Err("Profile index out of range".into());
         }
         self.profiles.remove(index);
-        if let Some(sel) = self.selected_profile {
-            if sel >= self.profiles.len() {
+        if let Some(sel) = self.selected_profile
+            && sel >= self.profiles.len() {
                 self.selected_profile = if self.profiles.is_empty() {
                     None
                 } else {
                     Some(self.profiles.len() - 1)
                 };
             }
-        }
         Ok(())
     }
 }
@@ -838,7 +836,7 @@ fn render_toolbar(tree: &mut RenderTree, app: &NetManagerApp) {
     }
 
     // Enable/Disable toggle on the right side
-    let toggle_label = if app.selected_iface().map_or(false, |iface| iface.enabled) {
+    let toggle_label = if app.selected_iface().is_some_and(|iface| iface.enabled) {
         "Disable"
     } else {
         "Enable"
@@ -1138,7 +1136,7 @@ fn render_tab_properties(tree: &mut RenderTree, app: &NetManagerApp, px: f32, py
     ];
 
     for (label, value) in ip_fields {
-        render_field_row(tree, label, &value.to_string(), lx, vx, y);
+        render_field_row(tree, label, value, lx, vx, y);
         y += FIELD_HEIGHT + 4.0;
     }
 }
@@ -1940,6 +1938,9 @@ fn render_field_row(tree: &mut RenderTree, label: &str, value: &str, lx: f32, vx
 }
 
 /// Render an editable field row with input box styling.
+// label + value strings + 3 geometry floats + color + editing flag + tree.
+// Grouping would not help.
+#[allow(clippy::too_many_arguments)]
 fn render_editable_field(
     tree: &mut RenderTree,
     label: &str,

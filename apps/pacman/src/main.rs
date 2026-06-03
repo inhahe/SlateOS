@@ -917,10 +917,7 @@ impl PacmanApp {
         }
 
         match self.state {
-            GameState::Menu => match key {
-                Key::N => self.start_new_game(),
-                _ => {}
-            },
+            GameState::Menu => if key == Key::N { self.start_new_game() },
             GameState::Playing => match key {
                 Key::Up => self.queued_dir = Some(Direction::Up),
                 Key::Down => self.queued_dir = Some(Direction::Down),
@@ -936,10 +933,7 @@ impl PacmanApp {
                 Key::N => self.start_new_game(),
                 _ => {}
             },
-            GameState::GameOver => match key {
-                Key::N => self.start_new_game(),
-                _ => {}
-            },
+            GameState::GameOver => if key == Key::N { self.start_new_game() },
         }
     }
 

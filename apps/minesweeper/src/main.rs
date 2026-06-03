@@ -295,7 +295,7 @@ impl MinesweeperApp {
                     .iter()
                     .filter(|&&(nr, nc)| {
                         self.index_of(nr, nc)
-                            .map_or(false, |i| self.cells[i].is_mine)
+                            .is_some_and(|i| self.cells[i].is_mine)
                     })
                     .count() as u8;
                 let idx = row * self.cols + col;
@@ -446,7 +446,7 @@ impl MinesweeperApp {
         let flag_count = nbrs.iter()
             .filter(|&&(nr, nc)| {
                 self.index_of(nr, nc)
-                    .map_or(false, |i| self.cells[i].state == CellState::Flagged)
+                    .is_some_and(|i| self.cells[i].state == CellState::Flagged)
             })
             .count() as u8;
 
@@ -458,7 +458,7 @@ impl MinesweeperApp {
         let to_reveal: Vec<(usize, usize)> = nbrs.iter()
             .filter(|&&(nr, nc)| {
                 self.index_of(nr, nc)
-                    .map_or(false, |i| self.cells[i].state == CellState::Hidden)
+                    .is_some_and(|i| self.cells[i].state == CellState::Hidden)
             })
             .copied()
             .collect();
@@ -555,17 +555,17 @@ impl MinesweeperApp {
 
     /// Check whether a particular cell is a mine.
     fn is_mine(&self, row: usize, col: usize) -> bool {
-        self.cell_at(row, col).map_or(false, |c| c.is_mine)
+        self.cell_at(row, col).is_some_and(|c| c.is_mine)
     }
 
     /// Check whether a particular cell is revealed.
     fn is_revealed(&self, row: usize, col: usize) -> bool {
-        self.cell_at(row, col).map_or(false, |c| c.state == CellState::Revealed)
+        self.cell_at(row, col).is_some_and(|c| c.state == CellState::Revealed)
     }
 
     /// Check whether a particular cell is flagged.
     fn is_flagged(&self, row: usize, col: usize) -> bool {
-        self.cell_at(row, col).map_or(false, |c| c.state == CellState::Flagged)
+        self.cell_at(row, col).is_some_and(|c| c.state == CellState::Flagged)
     }
 
     /// Get the adjacent mine count for a cell.
@@ -624,7 +624,7 @@ impl MinesweeperApp {
         let header_w = self.window_width() - PADDING * 2.0;
 
         // Mine counter (left side)
-        let mine_text = format!("{:03}", self.mines_remaining().max(-99).min(999));
+        let mine_text = format!("{:03}", self.mines_remaining().clamp(-99, 999));
         cmds.push(RenderCommand::Text {
             x: PADDING + 10.0,
             y: header_y,

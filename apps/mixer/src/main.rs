@@ -379,12 +379,11 @@ impl MixerState {
             }
             Selection::Stream(idx) => {
                 let sorted_ids: Vec<u32> = self.sorted_streams().iter().map(|s| s.id).collect();
-                if let Some(&stream_id) = sorted_ids.get(idx) {
-                    if let Some(stream) = self.streams.iter_mut().find(|s| s.id == stream_id) {
+                if let Some(&stream_id) = sorted_ids.get(idx)
+                    && let Some(stream) = self.streams.iter_mut().find(|s| s.id == stream_id) {
                         let new_vol = (stream.volume + delta).clamp(0.0, 1.0);
                         stream.volume = new_vol;
                     }
-                }
             }
         }
     }
@@ -397,11 +396,10 @@ impl MixerState {
             }
             Selection::Stream(idx) => {
                 let sorted_ids: Vec<u32> = self.sorted_streams().iter().map(|s| s.id).collect();
-                if let Some(&stream_id) = sorted_ids.get(idx) {
-                    if let Some(stream) = self.streams.iter_mut().find(|s| s.id == stream_id) {
+                if let Some(&stream_id) = sorted_ids.get(idx)
+                    && let Some(stream) = self.streams.iter_mut().find(|s| s.id == stream_id) {
                         stream.muted = !stream.muted;
                     }
-                }
             }
         }
     }
@@ -1046,11 +1044,10 @@ pub fn handle_slider_click(state: &mut MixerState, column_index: Option<usize>, 
         }
         Some(idx) => {
             let sorted_ids: Vec<u32> = state.sorted_streams().iter().map(|s| s.id).collect();
-            if let Some(&stream_id) = sorted_ids.get(idx) {
-                if let Some(stream) = state.streams.iter_mut().find(|s| s.id == stream_id) {
+            if let Some(&stream_id) = sorted_ids.get(idx)
+                && let Some(stream) = state.streams.iter_mut().find(|s| s.id == stream_id) {
                     stream.volume = volume;
                 }
-            }
             state.selection = Selection::Stream(idx);
         }
     }

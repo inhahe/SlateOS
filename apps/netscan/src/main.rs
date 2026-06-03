@@ -1055,14 +1055,10 @@ pub fn estimate_scan_time(host_count: u32, port_count: u32, timeout_ms: u32, con
 pub fn build_wol_packet(mac: &MacAddr) -> Vec<u8> {
     let mut packet = Vec::with_capacity(102);
     // 6 bytes of 0xFF
-    for _ in 0..6 {
-        packet.push(0xFF);
-    }
+    packet.extend(std::iter::repeat_n(0xFF_u8, 6));
     // 16 repetitions of the MAC address
     for _ in 0..16 {
-        for byte in &mac.bytes {
-            packet.push(*byte);
-        }
+        packet.extend_from_slice(&mac.bytes);
     }
     packet
 }
@@ -1334,7 +1330,7 @@ impl NetScanApp {
         let ports = match self.config.profile {
             ScanProfile::Custom => {
                 parse_port_spec(&self.config.port_input)
-                    .unwrap_or_else(|| quick_scan_ports())
+                    .unwrap_or_else(quick_scan_ports)
             }
             other => other.ports(),
         };
@@ -1455,11 +1451,10 @@ impl NetScanApp {
                 EventResult::Consumed
             }
             Key::Up => {
-                if let Some(ref idx) = self.selected_host_idx {
-                    if *idx > 0 {
+                if let Some(ref idx) = self.selected_host_idx
+                    && *idx > 0 {
                         self.selected_host_idx = Some(idx.saturating_sub(1));
                     }
-                }
                 EventResult::Consumed
             }
             Key::Down => {
@@ -1531,13 +1526,12 @@ impl NetScanApp {
                     let table_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + PADDING + TAB_HEIGHT + PADDING + TABLE_HEADER_HEIGHT;
                     if my >= table_y && mx < WINDOW_WIDTH - SIDEBAR_WIDTH {
                         let row_idx = ((my - table_y) / TABLE_ROW_HEIGHT) as usize;
-                        if let Some(ref result) = self.results {
-                            if row_idx < result.hosts.len() {
+                        if let Some(ref result) = self.results
+                            && row_idx < result.hosts.len() {
                                 self.selected_host_idx = Some(row_idx);
                                 self.detail_port_scroll = 0.0;
                                 return EventResult::Consumed;
                             }
-                        }
                     }
                 }
 
@@ -1557,7 +1551,7 @@ impl NetScanApp {
                 if self.active_tab == ViewTab::Traceroute {
                     let btn_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + TAB_HEIGHT + PADDING * 3.0 + INPUT_HEIGHT;
                     if my >= btn_y && my <= btn_y + BUTTON_HEIGHT
-                        && mx >= PADDING && mx <= PADDING + 120.0
+                        && (PADDING..=PADDING + 120.0).contains(&mx)
                     {
                         self.run_traceroute();
                         return EventResult::Consumed;
@@ -1568,7 +1562,7 @@ impl NetScanApp {
                 if self.active_tab == ViewTab::Whois {
                     let btn_y = TITLE_BAR_HEIGHT + CONFIG_PANEL_HEIGHT + TAB_HEIGHT + PADDING * 3.0 + INPUT_HEIGHT;
                     if my >= btn_y && my <= btn_y + BUTTON_HEIGHT
-                        && mx >= PADDING && mx <= PADDING + 120.0
+                        && (PADDING..=PADDING + 120.0).contains(&mx)
                     {
                         self.run_whois();
                         return EventResult::Consumed;
@@ -2018,12 +2012,15 @@ impl NetScanApp {
         }
     }
 
+    // self + tree + row rect (x,y,width) + host data + selected flag + idx;
+    // each is independent and used in different sub-render commands.
+    #[allow(clippy::too_many_arguments)]
     fn render_host_row(&self, tree: &mut RenderTree, x: f32, y: f32, width: f32,
                        host: &HostResult, selected: bool, idx: usize) {
         // Row background
         let bg = if selected {
             SURFACE1
-        } else if idx % 2 == 0 {
+        } else if idx.is_multiple_of(2) {
             BASE
         } else {
             Color::rgba(49, 50, 68, 80) // Semi-transparent surface

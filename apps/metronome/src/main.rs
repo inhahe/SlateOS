@@ -302,9 +302,8 @@ impl MetronomeApp {
                 .map(|w| w[1].saturating_sub(w[0]))
                 .collect();
             let avg_interval: u64 = intervals.iter().sum::<u64>() / intervals.len() as u64;
-            if avg_interval > 0 {
-                let calculated_bpm = (60_000 / avg_interval) as u32;
-                self.set_bpm(calculated_bpm);
+            if let Some(calculated_bpm) = 60_000u64.checked_div(avg_interval) {
+                self.set_bpm(calculated_bpm as u32);
             }
         }
     }
@@ -455,17 +454,15 @@ impl MetronomeApp {
             Key::Escape | Key::Enter => {
                 self.show_settings = false;
             }
-            Key::Up => {
-                if self.practice_mode {
+            Key::Up
+                if self.practice_mode => {
                     self.practice_target_bpm = (self.practice_target_bpm + 10).min(MAX_BPM);
                 }
-            }
-            Key::Down => {
-                if self.practice_mode {
+            Key::Down
+                if self.practice_mode => {
                     self.practice_target_bpm =
                         self.practice_target_bpm.saturating_sub(10).max(MIN_BPM);
                 }
-            }
             _ => {}
         }
     }

@@ -569,16 +569,14 @@ impl NonogramApp {
 
     fn handle_key_select(&mut self, key_event: &KeyEvent) {
         match key_event.key {
-            Key::Up => {
-                if self.select_cursor > 0 {
+            Key::Up
+                if self.select_cursor > 0 => {
                     self.select_cursor -= 1;
                 }
-            }
-            Key::Down => {
-                if self.select_cursor + 1 < self.puzzles.len() {
+            Key::Down
+                if self.select_cursor + 1 < self.puzzles.len() => {
                     self.select_cursor += 1;
                 }
-            }
             Key::Enter | Key::Space => {
                 self.start_puzzle(self.select_cursor);
             }
@@ -588,26 +586,22 @@ impl NonogramApp {
 
     fn handle_key_playing(&mut self, key_event: &KeyEvent) {
         match key_event.key {
-            Key::Up => {
-                if self.cursor_row > 0 {
+            Key::Up
+                if self.cursor_row > 0 => {
                     self.cursor_row -= 1;
                 }
-            }
-            Key::Down => {
-                if self.cursor_row + 1 < self.grid_side {
+            Key::Down
+                if self.cursor_row + 1 < self.grid_side => {
                     self.cursor_row += 1;
                 }
-            }
-            Key::Left => {
-                if self.cursor_col > 0 {
+            Key::Left
+                if self.cursor_col > 0 => {
                     self.cursor_col -= 1;
                 }
-            }
-            Key::Right => {
-                if self.cursor_col + 1 < self.grid_side {
+            Key::Right
+                if self.cursor_col + 1 < self.grid_side => {
                     self.cursor_col += 1;
                 }
-            }
             Key::Enter | Key::Space => {
                 self.toggle_fill(self.cursor_row, self.cursor_col);
                 if self.check_win() {
@@ -655,7 +649,7 @@ impl NonogramApp {
         let list_y_start = HEADER_HEIGHT + PADDING;
         for i in 0..self.puzzles.len() {
             let entry_y = list_y_start + i as f32 * 40.0;
-            if my >= entry_y && my < entry_y + 36.0 && mx >= PADDING && mx < 500.0 {
+            if my >= entry_y && my < entry_y + 36.0 && (PADDING..500.0).contains(&mx) {
                 self.start_puzzle(i);
                 return;
             }

@@ -225,8 +225,8 @@ fn read_routes() -> Vec<RouteEntry> {
     }
 
     // Try /sys/net/routes as fallback.
-    if routes.is_empty() {
-        if let Ok(content) = fs::read_to_string("/sys/net/routes") {
+    if routes.is_empty()
+        && let Ok(content) = fs::read_to_string("/sys/net/routes") {
             for line in content.lines() {
                 let fields: Vec<&str> = line.split_whitespace().collect();
                 if fields.len() < 5 {
@@ -260,7 +260,6 @@ fn read_routes() -> Vec<RouteEntry> {
                 });
             }
         }
-    }
 
     // If we still have nothing, create a synthetic default.
     if routes.is_empty() {
@@ -317,8 +316,8 @@ fn display_routes(numeric: bool, verbose: bool) {
 
     println!("Kernel IP routing table");
     println!(
-        "{:<16} {:<16} {:<16} {:<6} {:<6} {:<4} {:<6} {}",
-        "Destination", "Gateway", "Genmask", "Flags", "Metric", "Ref", "Use", "Iface"
+        "{:<16} {:<16} {:<16} {:<6} {:<6} {:<4} {:<6} Iface",
+        "Destination", "Gateway", "Genmask", "Flags", "Metric", "Ref", "Use"
     );
 
     if routes.is_empty() {

@@ -1,4 +1,10 @@
 #![deny(clippy::all)]
+// SourceMode::Peer and ::Refclock are part of the chrony source-type
+// vocabulary (peer = symmetric NTP peer association, refclock = local
+// hardware reference clock). The stub only exercises Server mode; the
+// other variants are intentionally kept so the future driver-attached
+// implementation can drop in without reshaping the enum.
+#![allow(dead_code)]
 
 //! chrony — OurOS NTP implementation
 //!

@@ -18,6 +18,14 @@
 //! tcpdump -X                      Hex dump packets
 //! ```
 
+// IPv4Header / TcpHeader / IcmpHeader / ArpHeader unread fields (version,
+// flags, fragment_offset, header_checksum, urgent_ptr, code, hw_type,
+// proto_type, hw_len, proto_len, target_mac) document the on-wire packet
+// layouts the verbose-mode output and pcap export must surface. The stub
+// pretty-printer only renders a subset; the full vocabulary is intentionally
+// preserved so the future driver-attached implementation can drop in.
+#![allow(dead_code)]
+
 use std::env;
 use std::fs;
 use std::io::{Read, Write};
@@ -366,8 +374,8 @@ fn hex_dump(data: &[u8], max_bytes: usize) {
         // Hex bytes (groups of 2).
         let row_end = (offset + 16).min(limit);
         for i in offset..offset + 16 {
-            if i < row_end {
-                print!("{:02x}", data[i]);
+            if let Some(b) = data.get(i).filter(|_| i < row_end) {
+                print!("{:02x}", b);
             } else {
                 print!("  ");
             }
@@ -379,9 +387,8 @@ fn hex_dump(data: &[u8], max_bytes: usize) {
         print!(" ");
 
         // ASCII printable.
-        for i in offset..row_end {
-            let ch = data[i];
-            if ch >= 0x20 && ch <= 0x7E {
+        for &ch in data.get(offset..row_end).unwrap_or(&[]) {
+            if (0x20..=0x7E).contains(&ch) {
                 print!("{}", ch as char);
             } else {
                 print!(".");
@@ -465,23 +472,20 @@ impl Filter {
         }
 
         // Port filter.
-        if let Some(port) = self.port {
-            if sport != port && dport != port {
+        if let Some(port) = self.port
+            && sport != port && dport != port {
                 return false;
             }
-        }
 
-        if let Some(port) = self.src_port {
-            if sport != port {
+        if let Some(port) = self.src_port
+            && sport != port {
                 return false;
             }
-        }
 
-        if let Some(port) = self.dst_port {
-            if dport != port {
+        if let Some(port) = self.dst_port
+            && dport != port {
                 return false;
             }
-        }
 
         true
     }
@@ -628,11 +632,7 @@ struct DisplayOpts {
 
 fn display_packet(data: &[u8], opts: &DisplayOpts, ts_ns: u64, prev_ts_ns: u64) {
     let ts_str = if opts.timestamp == TimestampMode::Delta {
-        let delta = if ts_ns > prev_ts_ns {
-            ts_ns - prev_ts_ns
-        } else {
-            0
-        };
+        let delta = ts_ns.saturating_sub(prev_ts_ns);
         format!(
             "{}.{:06} ",
             delta / 1_000_000_000,
@@ -884,11 +884,10 @@ fn capture_live(
     let mut buf = vec![0u8; opts.snaplen as usize + 4]; // +4 for length prefix
 
     loop {
-        if let Some(max) = count {
-            if captured >= max {
+        if let Some(max) = count
+            && captured >= max {
                 break;
             }
-        }
 
         // Read a packet (format: 4-byte LE length prefix + raw frame).
         let n = match file.read(&mut buf) {
@@ -924,20 +923,14 @@ fn capture_live(
                     let ip_hdr_len = (ip.ihl as usize) * 4;
                     let transport = &pkt_data[14 + ip_hdr_len..];
                     match ip.protocol {
-                        PROTO_TCP => {
-                            if transport.len() >= 4 {
+                        PROTO_TCP
+                            if transport.len() >= 4 => {
                                 (read_u16_be(transport, 0), read_u16_be(transport, 2))
-                            } else {
-                                (0, 0)
                             }
-                        }
-                        PROTO_UDP => {
-                            if transport.len() >= 4 {
+                        PROTO_UDP
+                            if transport.len() >= 4 => {
                                 (read_u16_be(transport, 0), read_u16_be(transport, 2))
-                            } else {
-                                (0, 0)
                             }
-                        }
                         _ => (0, 0),
                     }
                 } else {
@@ -951,11 +944,10 @@ fn capture_live(
             (None, 0, 0)
         };
 
-        if let Some(ref eth_hdr) = eth {
-            if !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport) {
+        if let Some(ref eth_hdr) = eth
+            && !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport) {
                 continue;
             }
-        }
 
         display_packet(pkt_data, opts, ts_ns, prev_ts);
 
@@ -993,11 +985,10 @@ fn capture_from_proc_net(
     let mut displayed = 0u32;
 
     for line in content.lines() {
-        if let Some(max) = count {
-            if displayed >= max {
+        if let Some(max) = count
+            && displayed >= max {
                 break;
             }
-        }
 
         // Parse text-based packet info.
         // Expected format: "PROTO SRC_IP:PORT > DST_IP:PORT FLAGS LEN TS"
@@ -1007,8 +998,8 @@ fn capture_from_proc_net(
         }
 
         let proto = fields[0];
-        let src = fields[1];
-        let dst_raw = if fields.len() > 3 { fields[3] } else { "" };
+        let _src = fields[1];
+        let _dst_raw = if fields.len() > 3 { fields[3] } else { "" };
 
         // Apply protocol filter.
         if let Some(proto_num) = filter.protocol {
@@ -1048,11 +1039,10 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
     let mut prev_ts_ns = 0u64;
 
     while let Some((ts_sec, ts_usec, pkt_data)) = reader.next_packet() {
-        if let Some(max) = count {
-            if displayed >= max {
+        if let Some(max) = count
+            && displayed >= max {
                 break;
             }
-        }
 
         let ts_ns = (ts_sec as u64) * 1_000_000_000 + (ts_usec as u64) * 1000;
 
@@ -1085,11 +1075,10 @@ fn read_pcap(path: &str, count: Option<u32>, filter: &Filter, opts: &DisplayOpts
             (None, 0, 0)
         };
 
-        if let Some(ref eth_hdr) = eth {
-            if !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport) {
+        if let Some(ref eth_hdr) = eth
+            && !filter.matches(eth_hdr, ip_hdr.as_ref(), sport, dport) {
                 continue;
             }
-        }
 
         display_packet(pkt_data, opts, ts_ns, prev_ts_ns);
         prev_ts_ns = ts_ns;
@@ -1185,11 +1174,10 @@ fn parse_filter(args: &[String]) -> Filter {
                     if filter.host.is_none() {
                         filter.host = Some(ip);
                     }
-                } else if let Ok(port) = arg.parse::<u16>() {
-                    if filter.port.is_none() {
+                } else if let Ok(port) = arg.parse::<u16>()
+                    && filter.port.is_none() {
                         filter.port = Some(port);
                     }
-                }
             }
         }
         idx += 1;

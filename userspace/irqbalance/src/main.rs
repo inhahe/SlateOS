@@ -8,6 +8,11 @@
 //! to /proc/irq/<N>/smp_affinity.
 
 #![deny(clippy::all)]
+// IrqStat::affinity_mask is part of the /proc/irq/<N>/smp_affinity
+// vocabulary the real irqbalance must speak when writing migration
+// decisions back to the kernel. Dead-code lint cannot see across
+// that future boundary.
+#![allow(dead_code)]
 
 use std::env;
 use std::fs;

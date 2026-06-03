@@ -574,8 +574,8 @@ fn scan_proc_usb() -> Vec<UsbDevice> {
             }
             "S" => {
                 // String descriptor line.
-                if let Some(ref mut dev) = current {
-                    if let Some(val) = rest.split_once('=').map(|(_, v)| v.trim().to_string()) {
+                if let Some(ref mut dev) = current
+                    && let Some(val) = rest.split_once('=').map(|(_, v)| v.trim().to_string()) {
                         if rest.starts_with("Manufacturer") {
                             dev.manufacturer = val;
                         } else if rest.starts_with("Product") {
@@ -584,7 +584,6 @@ fn scan_proc_usb() -> Vec<UsbDevice> {
                             dev.serial = val;
                         }
                     }
-                }
             }
             _ => {
                 // Ignore C:, I:, E: lines for the summary scan.

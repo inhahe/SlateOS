@@ -9,11 +9,14 @@
 //   sockstat [OPTIONS]
 
 #![cfg_attr(not(test), no_main)]
+// SocketState::long_str and SocketEntry::timer document the netlink
+// NETLINK_SOCK_DIAG / INET_DIAG message vocabulary the real ss
+// implementation must speak. Dead-code lint cannot see across
+// that future boundary.
+#![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
-use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // Personality detection

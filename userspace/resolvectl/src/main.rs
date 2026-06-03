@@ -10,6 +10,10 @@
 //! Manages DNS resolver configuration and performs DNS lookups.
 
 #![deny(clippy::all)]
+// QueryOptions::interface documents the per-link DNS resolution
+// vocabulary (matching systemd-resolved's resolve.dbus.OpenIfindex
+// API) the future driver-attached implementation must speak.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;

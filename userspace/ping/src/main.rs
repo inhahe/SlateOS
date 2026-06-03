@@ -666,11 +666,10 @@ fn run() -> Result<(), String> {
 
     while RUNNING.load(Ordering::SeqCst) {
         // Check count limit.
-        if let Some(max) = opts.count {
-            if stats.transmitted >= max {
+        if let Some(max) = opts.count
+            && stats.transmitted >= max {
                 break;
             }
-        }
 
         // Send ICMP echo request.
         stats.record_sent();
@@ -753,11 +752,10 @@ fn run() -> Result<(), String> {
 
         // Sleep between pings unless flood mode or we have reached the count.
         if opts.interval_ms > 0 {
-            if let Some(max) = opts.count {
-                if stats.transmitted >= max {
+            if let Some(max) = opts.count
+                && stats.transmitted >= max {
                     break;
                 }
-            }
             sleep_interruptible(opts.interval_ms);
         }
     }

@@ -8,6 +8,11 @@
 //! configured directories for shared libraries and building a lookup table.
 
 #![deny(clippy::all)]
+// LibEntry::os_abi and the LibCache struct encode the ELF EI_OSABI
+// byte and the on-disk /etc/ld.so.cache (CACHEMAGIC_NEW) file format
+// the real ldconfig must produce. Dead-code lint cannot see across
+// that future boundary.
+#![allow(dead_code)]
 
 use std::collections::HashMap;
 use std::env;

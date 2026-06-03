@@ -715,7 +715,7 @@ fn print_summary(
 
     // Sort by time (descending).
     let mut entries: Vec<(u32, &SyscallStats)> = stats.iter().map(|(k, v)| (*k, v)).collect();
-    entries.sort_by(|a, b| b.1.total_time_ns.cmp(&a.1.total_time_ns));
+    entries.sort_by_key(|e| std::cmp::Reverse(e.1.total_time_ns));
 
     let _ = writeln!(output,
         "{:>6} {:>11} {:>11} {:>9} {:>9} {:>-16}",

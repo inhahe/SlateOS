@@ -83,8 +83,13 @@ mod tests {
     #[test]
     fn test_note_types_distinct() {
         let types = [
-            NT_PRSTATUS, NT_PRFPREG, NT_PRPSINFO,
-            NT_TASKSTRUCT, NT_AUXV, NT_SIGINFO, NT_FILE,
+            NT_PRSTATUS,
+            NT_PRFPREG,
+            NT_PRPSINFO,
+            NT_TASKSTRUCT,
+            NT_AUXV,
+            NT_SIGINFO,
+            NT_FILE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -96,8 +101,11 @@ mod tests {
     #[test]
     fn test_arch_note_types_distinct() {
         let types = [
-            NT_X86_XSTATE, NT_ARM_VFP, NT_ARM_TLS,
-            NT_ARM_SVE, NT_ARM_PAC_MASK,
+            NT_X86_XSTATE,
+            NT_ARM_VFP,
+            NT_ARM_TLS,
+            NT_ARM_SVE,
+            NT_ARM_PAC_MASK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -109,10 +117,14 @@ mod tests {
     #[test]
     fn test_filter_flags_no_overlap() {
         let flags = [
-            COREDUMP_FILTER_ANON_PRIVATE, COREDUMP_FILTER_ANON_SHARED,
-            COREDUMP_FILTER_MAPPED_PRIVATE, COREDUMP_FILTER_MAPPED_SHARED,
-            COREDUMP_FILTER_ELF_HEADERS, COREDUMP_FILTER_HUGETLB_PRIVATE,
-            COREDUMP_FILTER_HUGETLB_SHARED, COREDUMP_FILTER_DAX_PRIVATE,
+            COREDUMP_FILTER_ANON_PRIVATE,
+            COREDUMP_FILTER_ANON_SHARED,
+            COREDUMP_FILTER_MAPPED_PRIVATE,
+            COREDUMP_FILTER_MAPPED_SHARED,
+            COREDUMP_FILTER_ELF_HEADERS,
+            COREDUMP_FILTER_HUGETLB_PRIVATE,
+            COREDUMP_FILTER_HUGETLB_SHARED,
+            COREDUMP_FILTER_DAX_PRIVATE,
             COREDUMP_FILTER_DAX_SHARED,
         ];
         for i in 0..flags.len() {

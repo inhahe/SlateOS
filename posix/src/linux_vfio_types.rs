@@ -90,8 +90,10 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            VFIO_DEVICE_TYPE_PCI, VFIO_DEVICE_TYPE_PLATFORM,
-            VFIO_DEVICE_TYPE_AMBA, VFIO_DEVICE_TYPE_CDX,
+            VFIO_DEVICE_TYPE_PCI,
+            VFIO_DEVICE_TYPE_PLATFORM,
+            VFIO_DEVICE_TYPE_AMBA,
+            VFIO_DEVICE_TYPE_CDX,
             VFIO_DEVICE_TYPE_AP,
         ];
         for i in 0..types.len() {
@@ -104,11 +106,17 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            VFIO_GET_API_VERSION, VFIO_CHECK_EXTENSION, VFIO_SET_IOMMU,
-            VFIO_GROUP_GET_STATUS, VFIO_GROUP_SET_CONTAINER,
-            VFIO_GROUP_UNSET_CONTAINER, VFIO_GROUP_GET_DEVICE_FD,
-            VFIO_DEVICE_GET_INFO, VFIO_DEVICE_GET_REGION_INFO,
-            VFIO_DEVICE_GET_IRQ_INFO, VFIO_DEVICE_SET_IRQS,
+            VFIO_GET_API_VERSION,
+            VFIO_CHECK_EXTENSION,
+            VFIO_SET_IOMMU,
+            VFIO_GROUP_GET_STATUS,
+            VFIO_GROUP_SET_CONTAINER,
+            VFIO_GROUP_UNSET_CONTAINER,
+            VFIO_GROUP_GET_DEVICE_FD,
+            VFIO_DEVICE_GET_INFO,
+            VFIO_DEVICE_GET_REGION_INFO,
+            VFIO_DEVICE_GET_IRQ_INFO,
+            VFIO_DEVICE_SET_IRQS,
             VFIO_DEVICE_RESET,
         ];
         for i in 0..ioctls.len() {

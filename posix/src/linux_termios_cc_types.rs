@@ -64,8 +64,7 @@ mod tests {
     #[test]
     fn test_cc_indices_distinct() {
         let indices = [
-            VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME,
-            VMIN, VSWTC, VSTART, VSTOP, VSUSP, VEOL,
+            VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSWTC, VSTART, VSTOP, VSUSP, VEOL,
             VREPRINT, VDISCARD, VWERASE, VLNEXT, VEOL2,
         ];
         for i in 0..indices.len() {
@@ -78,8 +77,7 @@ mod tests {
     #[test]
     fn test_all_indices_less_than_nccs() {
         let indices = [
-            VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME,
-            VMIN, VSWTC, VSTART, VSTOP, VSUSP, VEOL,
+            VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSWTC, VSTART, VSTOP, VSUSP, VEOL,
             VREPRINT, VDISCARD, VWERASE, VLNEXT, VEOL2,
         ];
         for idx in &indices {

@@ -85,11 +85,19 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            RUSAGE_OFF_UTIME, RUSAGE_OFF_STIME, RUSAGE_OFF_MAXRSS,
-            RUSAGE_OFF_MINFLT, RUSAGE_OFF_MAJFLT, RUSAGE_OFF_NSWAP,
-            RUSAGE_OFF_INBLOCK, RUSAGE_OFF_OUBLOCK, RUSAGE_OFF_MSGSND,
-            RUSAGE_OFF_MSGRCV, RUSAGE_OFF_NSIGNALS,
-            RUSAGE_OFF_NVCSW, RUSAGE_OFF_NIVCSW,
+            RUSAGE_OFF_UTIME,
+            RUSAGE_OFF_STIME,
+            RUSAGE_OFF_MAXRSS,
+            RUSAGE_OFF_MINFLT,
+            RUSAGE_OFF_MAJFLT,
+            RUSAGE_OFF_NSWAP,
+            RUSAGE_OFF_INBLOCK,
+            RUSAGE_OFF_OUBLOCK,
+            RUSAGE_OFF_MSGSND,
+            RUSAGE_OFF_MSGRCV,
+            RUSAGE_OFF_NSIGNALS,
+            RUSAGE_OFF_NVCSW,
+            RUSAGE_OFF_NIVCSW,
         ];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);

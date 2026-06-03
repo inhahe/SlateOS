@@ -125,7 +125,7 @@ unsafe fn validate_name(name: *const u8) -> Result<(), i32> {
     let len = match unsafe { name_length(name, MODULE_NAME_MAX) } {
         Some(0) => return Err(errno::EINVAL), // empty name
         Some(n) => n,
-        None => return Err(errno::EINVAL),    // too long
+        None => return Err(errno::EINVAL), // too long
     };
     // Reject any slash to forbid path traversal. Linux rejects names
     // containing `/` because they'd alias the on-disk module path.
@@ -195,9 +195,7 @@ pub extern "C" fn init_module(module_image: *const u8, len: usize, params: *cons
     // touches the user pointer or even reads `len`.  Mirror that order
     // so unprivileged callers always observe EPERM regardless of the
     // other arguments.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_MODULE,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_MODULE) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -252,9 +250,7 @@ pub extern "C" fn finit_module(fd: i32, params: *const u8, flags: u32) -> i32 {
     // Phase 174: Linux's `may_init_module` runs at the top of
     // SYSCALL_DEFINE3(finit_module), before the flag check or the
     // fdget.  Unprivileged callers see EPERM regardless of other args.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_MODULE,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_MODULE) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -303,9 +299,7 @@ pub extern "C" fn finit_module(fd: i32, params: *const u8, flags: u32) -> i32 {
 pub extern "C" fn delete_module(name: *const u8, flags: u32) -> i32 {
     // Phase 174: cap check is the very first thing Linux's
     // SYSCALL_DEFINE2(delete_module) does, before reading `name`.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_MODULE,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_MODULE) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -954,16 +948,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -978,8 +970,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -992,8 +983,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_MODULE - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1008,10 +998,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_MODULE");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_MODULE");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_MODULE));
         }
 
@@ -1036,10 +1024,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_module();
             errno::set_errno(0);
-            assert_eq!(
-                init_module(ptr::null(), 0, ptr::null()),
-                -1,
-            );
+            assert_eq!(init_module(ptr::null(), 0, ptr::null()), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -1064,10 +1049,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_module();
             errno::set_errno(0);
-            assert_eq!(
-                init_module(ptr::null(), 128, b"\0".as_ptr()),
-                -1,
-            );
+            assert_eq!(init_module(ptr::null(), 128, b"\0".as_ptr()), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -1142,10 +1124,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_module();
             errno::set_errno(0);
-            assert_eq!(
-                delete_module(b"foo\0".as_ptr(), 0xFFFF_0000),
-                -1,
-            );
+            assert_eq!(delete_module(b"foo\0".as_ptr(), 0xFFFF_0000), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -1173,16 +1152,14 @@ mod tests {
 
             // Restore CAP_SYS_MODULE and re-try.
             use crate::sys_capability::CAP_SYS_MODULE;
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let (new_lo, new_hi) = if CAP_SYS_MODULE < 32 {
                 (lo | (1u32 << CAP_SYS_MODULE), hi)
             } else {
                 (lo, hi | (1u32 << (CAP_SYS_MODULE - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1197,10 +1174,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
             assert_eq!(delete_module(b"snd_hda\0".as_ptr(), 0), -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);

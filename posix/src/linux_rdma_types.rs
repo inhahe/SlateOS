@@ -149,13 +149,20 @@ mod tests {
     #[test]
     fn test_nldev_attrs_distinct() {
         let attrs = [
-            RDMA_NLDEV_ATTR_UNSPEC, RDMA_NLDEV_ATTR_DEV_INDEX,
-            RDMA_NLDEV_ATTR_DEV_NAME, RDMA_NLDEV_ATTR_PORT_INDEX,
-            RDMA_NLDEV_ATTR_CAP_FLAGS, RDMA_NLDEV_ATTR_FW_VERSION,
-            RDMA_NLDEV_ATTR_NODE_GUID, RDMA_NLDEV_ATTR_SYS_IMAGE_GUID,
-            RDMA_NLDEV_ATTR_SUBNET_PREFIX, RDMA_NLDEV_ATTR_LID,
-            RDMA_NLDEV_ATTR_SM_LID, RDMA_NLDEV_ATTR_LMC,
-            RDMA_NLDEV_ATTR_PORT_STATE, RDMA_NLDEV_ATTR_PORT_PHYS_STATE,
+            RDMA_NLDEV_ATTR_UNSPEC,
+            RDMA_NLDEV_ATTR_DEV_INDEX,
+            RDMA_NLDEV_ATTR_DEV_NAME,
+            RDMA_NLDEV_ATTR_PORT_INDEX,
+            RDMA_NLDEV_ATTR_CAP_FLAGS,
+            RDMA_NLDEV_ATTR_FW_VERSION,
+            RDMA_NLDEV_ATTR_NODE_GUID,
+            RDMA_NLDEV_ATTR_SYS_IMAGE_GUID,
+            RDMA_NLDEV_ATTR_SUBNET_PREFIX,
+            RDMA_NLDEV_ATTR_LID,
+            RDMA_NLDEV_ATTR_SM_LID,
+            RDMA_NLDEV_ATTR_LMC,
+            RDMA_NLDEV_ATTR_PORT_STATE,
+            RDMA_NLDEV_ATTR_PORT_PHYS_STATE,
             RDMA_NLDEV_ATTR_DEV_NODE_TYPE,
         ];
         for i in 0..attrs.len() {
@@ -168,13 +175,20 @@ mod tests {
     #[test]
     fn test_nldev_cmds_distinct() {
         let cmds = [
-            RDMA_NLDEV_CMD_GET, RDMA_NLDEV_CMD_SET,
-            RDMA_NLDEV_CMD_NEWLINK, RDMA_NLDEV_CMD_DELLINK,
-            RDMA_NLDEV_CMD_PORT_GET, RDMA_NLDEV_CMD_SYS_GET,
-            RDMA_NLDEV_CMD_SYS_SET, RDMA_NLDEV_CMD_RES_GET,
-            RDMA_NLDEV_CMD_RES_QP_GET, RDMA_NLDEV_CMD_RES_CM_ID_GET,
-            RDMA_NLDEV_CMD_RES_CQ_GET, RDMA_NLDEV_CMD_RES_MR_GET,
-            RDMA_NLDEV_CMD_RES_PD_GET, RDMA_NLDEV_CMD_STAT_GET,
+            RDMA_NLDEV_CMD_GET,
+            RDMA_NLDEV_CMD_SET,
+            RDMA_NLDEV_CMD_NEWLINK,
+            RDMA_NLDEV_CMD_DELLINK,
+            RDMA_NLDEV_CMD_PORT_GET,
+            RDMA_NLDEV_CMD_SYS_GET,
+            RDMA_NLDEV_CMD_SYS_SET,
+            RDMA_NLDEV_CMD_RES_GET,
+            RDMA_NLDEV_CMD_RES_QP_GET,
+            RDMA_NLDEV_CMD_RES_CM_ID_GET,
+            RDMA_NLDEV_CMD_RES_CQ_GET,
+            RDMA_NLDEV_CMD_RES_MR_GET,
+            RDMA_NLDEV_CMD_RES_PD_GET,
+            RDMA_NLDEV_CMD_STAT_GET,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -186,8 +200,10 @@ mod tests {
     #[test]
     fn test_transport_types_distinct() {
         let transports = [
-            RDMA_TRANSPORT_IB, RDMA_TRANSPORT_IWARP,
-            RDMA_TRANSPORT_USNIC, RDMA_TRANSPORT_USNIC_UDP,
+            RDMA_TRANSPORT_IB,
+            RDMA_TRANSPORT_IWARP,
+            RDMA_TRANSPORT_USNIC,
+            RDMA_TRANSPORT_USNIC_UDP,
             RDMA_TRANSPORT_UNSPEC,
         ];
         for i in 0..transports.len() {
@@ -200,7 +216,8 @@ mod tests {
     #[test]
     fn test_link_layers_distinct() {
         let layers = [
-            IB_LINK_LAYER_UNSPECIFIED, IB_LINK_LAYER_INFINIBAND,
+            IB_LINK_LAYER_UNSPECIFIED,
+            IB_LINK_LAYER_INFINIBAND,
             IB_LINK_LAYER_ETHERNET,
         ];
         for i in 0..layers.len() {
@@ -213,8 +230,12 @@ mod tests {
     #[test]
     fn test_port_states_distinct() {
         let states = [
-            IB_PORT_NOP, IB_PORT_DOWN, IB_PORT_INIT,
-            IB_PORT_ARMED, IB_PORT_ACTIVE, IB_PORT_ACTIVE_DEFER,
+            IB_PORT_NOP,
+            IB_PORT_DOWN,
+            IB_PORT_INIT,
+            IB_PORT_ARMED,
+            IB_PORT_ACTIVE,
+            IB_PORT_ACTIVE_DEFER,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

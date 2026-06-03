@@ -81,10 +81,20 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            RTC_RD_TIME, RTC_SET_TIME, RTC_ALM_READ, RTC_ALM_SET,
-            RTC_AIE_ON, RTC_AIE_OFF, RTC_UIE_ON, RTC_UIE_OFF,
-            RTC_PIE_ON, RTC_PIE_OFF, RTC_IRQP_SET, RTC_IRQP_READ,
-            RTC_WKALM_RD, RTC_WKALM_SET,
+            RTC_RD_TIME,
+            RTC_SET_TIME,
+            RTC_ALM_READ,
+            RTC_ALM_SET,
+            RTC_AIE_ON,
+            RTC_AIE_OFF,
+            RTC_UIE_ON,
+            RTC_UIE_OFF,
+            RTC_PIE_ON,
+            RTC_PIE_OFF,
+            RTC_IRQP_SET,
+            RTC_IRQP_READ,
+            RTC_WKALM_RD,
+            RTC_WKALM_SET,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -106,10 +116,14 @@ mod tests {
     #[test]
     fn test_features_power_of_two() {
         let feats = [
-            RTC_FEATURE_ALARM, RTC_FEATURE_ALARM_RES_MINUTE,
-            RTC_FEATURE_NEED_WEEK_DAY, RTC_FEATURE_ALARM_RES_2S,
-            RTC_FEATURE_UPDATE_INTERRUPT, RTC_FEATURE_CORRECTION,
-            RTC_FEATURE_BACKUP_SWITCH_MODE, RTC_FEATURE_ALARM_WAKEUP_ONLY,
+            RTC_FEATURE_ALARM,
+            RTC_FEATURE_ALARM_RES_MINUTE,
+            RTC_FEATURE_NEED_WEEK_DAY,
+            RTC_FEATURE_ALARM_RES_2S,
+            RTC_FEATURE_UPDATE_INTERRUPT,
+            RTC_FEATURE_CORRECTION,
+            RTC_FEATURE_BACKUP_SWITCH_MODE,
+            RTC_FEATURE_ALARM_WAKEUP_ONLY,
         ];
         for f in &feats {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);

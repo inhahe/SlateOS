@@ -85,14 +85,21 @@ mod tests {
 
     #[test]
     fn test_meta_subtypes_distinct() {
-        assert_ne!(WATCH_META_REMOVAL_NOTIFICATION, WATCH_META_LOSS_NOTIFICATION);
+        assert_ne!(
+            WATCH_META_REMOVAL_NOTIFICATION,
+            WATCH_META_LOSS_NOTIFICATION
+        );
     }
 
     #[test]
     fn test_key_subtypes_distinct() {
         let subtypes = [
-            NOTIFY_KEY_UPDATED, NOTIFY_KEY_LINKED, NOTIFY_KEY_UNLINKED,
-            NOTIFY_KEY_CLEARED, NOTIFY_KEY_REVOKED, NOTIFY_KEY_INVALIDATED,
+            NOTIFY_KEY_UPDATED,
+            NOTIFY_KEY_LINKED,
+            NOTIFY_KEY_UNLINKED,
+            NOTIFY_KEY_CLEARED,
+            NOTIFY_KEY_REVOKED,
+            NOTIFY_KEY_INVALIDATED,
             NOTIFY_KEY_SETATTR,
         ];
         for i in 0..subtypes.len() {

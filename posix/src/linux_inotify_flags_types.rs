@@ -66,10 +66,18 @@ pub const IN_CLOSE: u32 = IN_CLOSE_WRITE | IN_CLOSE_NOWRITE;
 /// All move events (MOVED_FROM | MOVED_TO).
 pub const IN_MOVE: u32 = IN_MOVED_FROM | IN_MOVED_TO;
 /// All events.
-pub const IN_ALL_EVENTS: u32 = IN_ACCESS | IN_MODIFY | IN_ATTRIB
-    | IN_CLOSE_WRITE | IN_CLOSE_NOWRITE | IN_OPEN
-    | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE
-    | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF;
+pub const IN_ALL_EVENTS: u32 = IN_ACCESS
+    | IN_MODIFY
+    | IN_ATTRIB
+    | IN_CLOSE_WRITE
+    | IN_CLOSE_NOWRITE
+    | IN_OPEN
+    | IN_MOVED_FROM
+    | IN_MOVED_TO
+    | IN_CREATE
+    | IN_DELETE
+    | IN_DELETE_SELF
+    | IN_MOVE_SELF;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -82,9 +90,18 @@ mod tests {
     #[test]
     fn test_event_flags_power_of_two() {
         let flags = [
-            IN_ACCESS, IN_MODIFY, IN_ATTRIB, IN_CLOSE_WRITE,
-            IN_CLOSE_NOWRITE, IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO,
-            IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF,
+            IN_ACCESS,
+            IN_MODIFY,
+            IN_ATTRIB,
+            IN_CLOSE_WRITE,
+            IN_CLOSE_NOWRITE,
+            IN_OPEN,
+            IN_MOVED_FROM,
+            IN_MOVED_TO,
+            IN_CREATE,
+            IN_DELETE,
+            IN_DELETE_SELF,
+            IN_MOVE_SELF,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -94,9 +111,18 @@ mod tests {
     #[test]
     fn test_event_flags_no_overlap() {
         let flags = [
-            IN_ACCESS, IN_MODIFY, IN_ATTRIB, IN_CLOSE_WRITE,
-            IN_CLOSE_NOWRITE, IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO,
-            IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF,
+            IN_ACCESS,
+            IN_MODIFY,
+            IN_ATTRIB,
+            IN_CLOSE_WRITE,
+            IN_CLOSE_NOWRITE,
+            IN_OPEN,
+            IN_MOVED_FROM,
+            IN_MOVED_TO,
+            IN_CREATE,
+            IN_DELETE,
+            IN_DELETE_SELF,
+            IN_MOVE_SELF,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

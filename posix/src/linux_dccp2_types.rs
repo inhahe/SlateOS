@@ -92,10 +92,17 @@ mod tests {
     #[test]
     fn test_pkt_types_distinct() {
         let pkts = [
-            DCCP_PKT_REQUEST, DCCP_PKT_RESPONSE, DCCP_PKT_DATA,
-            DCCP_PKT_ACK, DCCP_PKT_DATAACK, DCCP_PKT_CLOSEREQ,
-            DCCP_PKT_CLOSE, DCCP_PKT_RESET, DCCP_PKT_SYNC,
-            DCCP_PKT_SYNCACK, DCCP_PKT_INVALID,
+            DCCP_PKT_REQUEST,
+            DCCP_PKT_RESPONSE,
+            DCCP_PKT_DATA,
+            DCCP_PKT_ACK,
+            DCCP_PKT_DATAACK,
+            DCCP_PKT_CLOSEREQ,
+            DCCP_PKT_CLOSE,
+            DCCP_PKT_RESET,
+            DCCP_PKT_SYNC,
+            DCCP_PKT_SYNCACK,
+            DCCP_PKT_INVALID,
         ];
         for i in 0..pkts.len() {
             for j in (i + 1)..pkts.len() {
@@ -107,12 +114,18 @@ mod tests {
     #[test]
     fn test_reset_codes_distinct() {
         let codes = [
-            DCCP_RESET_CODE_UNSPECIFIED, DCCP_RESET_CODE_CLOSED,
-            DCCP_RESET_CODE_ABORTED, DCCP_RESET_CODE_NO_CONNECTION,
-            DCCP_RESET_CODE_PACKET_ERROR, DCCP_RESET_CODE_OPTION_ERROR,
-            DCCP_RESET_CODE_MANDATORY_ERROR, DCCP_RESET_CODE_CONNECTION_REFUSED,
-            DCCP_RESET_CODE_BAD_SERVICE_CODE, DCCP_RESET_CODE_TOO_BUSY,
-            DCCP_RESET_CODE_BAD_INIT_COOKIE, DCCP_RESET_CODE_AGGRESSION_PENALTY,
+            DCCP_RESET_CODE_UNSPECIFIED,
+            DCCP_RESET_CODE_CLOSED,
+            DCCP_RESET_CODE_ABORTED,
+            DCCP_RESET_CODE_NO_CONNECTION,
+            DCCP_RESET_CODE_PACKET_ERROR,
+            DCCP_RESET_CODE_OPTION_ERROR,
+            DCCP_RESET_CODE_MANDATORY_ERROR,
+            DCCP_RESET_CODE_CONNECTION_REFUSED,
+            DCCP_RESET_CODE_BAD_SERVICE_CODE,
+            DCCP_RESET_CODE_TOO_BUSY,
+            DCCP_RESET_CODE_BAD_INIT_COOKIE,
+            DCCP_RESET_CODE_AGGRESSION_PENALTY,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -123,7 +136,12 @@ mod tests {
 
     #[test]
     fn test_feature_options_distinct() {
-        let opts = [DCCPO_CHANGE_L, DCCPO_CONFIRM_L, DCCPO_CHANGE_R, DCCPO_CONFIRM_R];
+        let opts = [
+            DCCPO_CHANGE_L,
+            DCCPO_CONFIRM_L,
+            DCCPO_CHANGE_R,
+            DCCPO_CONFIRM_R,
+        ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
                 assert_ne!(opts[i], opts[j]);

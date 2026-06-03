@@ -63,8 +63,11 @@ mod tests {
     #[test]
     fn test_interface_files_distinct() {
         let files = [
-            MISC_MAX, MISC_CURRENT, MISC_PEAK,
-            MISC_EVENTS, MISC_CAPACITY,
+            MISC_MAX,
+            MISC_CURRENT,
+            MISC_PEAK,
+            MISC_EVENTS,
+            MISC_CAPACITY,
         ];
         for i in 0..files.len() {
             for j in (i + 1)..files.len() {
@@ -76,8 +79,11 @@ mod tests {
     #[test]
     fn test_interface_files_have_prefix() {
         let files = [
-            MISC_MAX, MISC_CURRENT, MISC_PEAK,
-            MISC_EVENTS, MISC_CAPACITY,
+            MISC_MAX,
+            MISC_CURRENT,
+            MISC_PEAK,
+            MISC_EVENTS,
+            MISC_CAPACITY,
         ];
         for file in &files {
             assert!(file.starts_with("misc."), "{}", file);

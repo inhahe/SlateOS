@@ -134,11 +134,25 @@ mod tests {
     #[test]
     fn test_all_positive() {
         let limits = [
-            NAME_MAX, PATH_MAX, NGROUPS_MAX, HOST_NAME_MAX,
-            LOGIN_NAME_MAX, TTY_NAME_MAX, ARG_MAX, LINK_MAX,
-            PIPE_BUF, SYMLOOP_MAX, XATTR_NAME_MAX, XATTR_SIZE_MAX,
-            XATTR_LIST_MAX, RTSIG_MAX, SIGQUEUE_MAX, TIMER_MAX,
-            IOV_MAX, AIO_MAX, AIO_PRIO_DELTA_MAX,
+            NAME_MAX,
+            PATH_MAX,
+            NGROUPS_MAX,
+            HOST_NAME_MAX,
+            LOGIN_NAME_MAX,
+            TTY_NAME_MAX,
+            ARG_MAX,
+            LINK_MAX,
+            PIPE_BUF,
+            SYMLOOP_MAX,
+            XATTR_NAME_MAX,
+            XATTR_SIZE_MAX,
+            XATTR_LIST_MAX,
+            RTSIG_MAX,
+            SIGQUEUE_MAX,
+            TIMER_MAX,
+            IOV_MAX,
+            AIO_MAX,
+            AIO_PRIO_DELTA_MAX,
         ];
         for &l in &limits {
             assert!(l > 0, "limit should be positive");

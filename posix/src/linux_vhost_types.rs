@@ -82,8 +82,11 @@ mod tests {
     #[test]
     fn test_backend_types_distinct() {
         let types = [
-            VHOST_BACKEND_NET, VHOST_BACKEND_SCSI, VHOST_BACKEND_VSOCK,
-            VHOST_BACKEND_USER, VHOST_BACKEND_VDPA,
+            VHOST_BACKEND_NET,
+            VHOST_BACKEND_SCSI,
+            VHOST_BACKEND_VSOCK,
+            VHOST_BACKEND_USER,
+            VHOST_BACKEND_VDPA,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -95,8 +98,10 @@ mod tests {
     #[test]
     fn test_user_features_no_overlap() {
         let feats = [
-            VHOST_USER_F_MQ, VHOST_USER_F_LOG_ALL,
-            VHOST_USER_F_REMAP, VHOST_USER_F_REPLY_ACK,
+            VHOST_USER_F_MQ,
+            VHOST_USER_F_LOG_ALL,
+            VHOST_USER_F_REMAP,
+            VHOST_USER_F_REPLY_ACK,
             VHOST_USER_F_CROSS_ENDIAN,
         ];
         for i in 0..feats.len() {
@@ -109,8 +114,10 @@ mod tests {
     #[test]
     fn test_iotlb_types_distinct() {
         let types = [
-            VHOST_IOTLB_MISS, VHOST_IOTLB_UPDATE,
-            VHOST_IOTLB_INVALIDATE, VHOST_IOTLB_ACCESS_FAIL,
+            VHOST_IOTLB_MISS,
+            VHOST_IOTLB_UPDATE,
+            VHOST_IOTLB_INVALIDATE,
+            VHOST_IOTLB_ACCESS_FAIL,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

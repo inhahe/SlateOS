@@ -68,8 +68,12 @@ mod tests {
     #[test]
     fn test_mount_flags_power_of_two() {
         let flags = [
-            OVL_REDIRECT_DIR, OVL_NFS_EXPORT, OVL_METACOPY,
-            OVL_INDEX, OVL_VOLATILE, OVL_USERXATTR,
+            OVL_REDIRECT_DIR,
+            OVL_NFS_EXPORT,
+            OVL_METACOPY,
+            OVL_INDEX,
+            OVL_VOLATILE,
+            OVL_USERXATTR,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -79,8 +83,12 @@ mod tests {
     #[test]
     fn test_mount_flags_no_overlap() {
         let flags = [
-            OVL_REDIRECT_DIR, OVL_NFS_EXPORT, OVL_METACOPY,
-            OVL_INDEX, OVL_VOLATILE, OVL_USERXATTR,
+            OVL_REDIRECT_DIR,
+            OVL_NFS_EXPORT,
+            OVL_METACOPY,
+            OVL_INDEX,
+            OVL_VOLATILE,
+            OVL_USERXATTR,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -98,8 +106,10 @@ mod tests {
     #[test]
     fn test_copyup_reasons_distinct() {
         let reasons = [
-            OVL_COPYUP_WRITE, OVL_COPYUP_ATTR,
-            OVL_COPYUP_XATTR, OVL_COPYUP_RENAME,
+            OVL_COPYUP_WRITE,
+            OVL_COPYUP_ATTR,
+            OVL_COPYUP_XATTR,
+            OVL_COPYUP_RENAME,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {

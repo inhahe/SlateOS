@@ -87,8 +87,10 @@ mod tests {
     #[test]
     fn test_info_record_types_distinct() {
         let types = [
-            FAN_EVENT_INFO_TYPE_FID, FAN_EVENT_INFO_TYPE_DFID,
-            FAN_EVENT_INFO_TYPE_DFID_NAME, FAN_EVENT_INFO_TYPE_PIDFD,
+            FAN_EVENT_INFO_TYPE_FID,
+            FAN_EVENT_INFO_TYPE_DFID,
+            FAN_EVENT_INFO_TYPE_DFID_NAME,
+            FAN_EVENT_INFO_TYPE_PIDFD,
             FAN_EVENT_INFO_TYPE_ERROR,
             FAN_EVENT_INFO_TYPE_OLD_DFID_NAME,
             FAN_EVENT_INFO_TYPE_NEW_DFID_NAME,
@@ -102,10 +104,7 @@ mod tests {
 
     #[test]
     fn test_class_flags_distinct() {
-        let classes = [
-            FAN_CLASS_PRE_CONTENT, FAN_CLASS_CONTENT,
-            FAN_CLASS_NOTIF,
-        ];
+        let classes = [FAN_CLASS_PRE_CONTENT, FAN_CLASS_CONTENT, FAN_CLASS_NOTIF];
         // NOTIF is 0, so compare all pairwise
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
@@ -117,10 +116,15 @@ mod tests {
     #[test]
     fn test_mark_flags_distinct() {
         let flags = [
-            FAN_MARK_ADD, FAN_MARK_REMOVE, FAN_MARK_DONT_FOLLOW,
-            FAN_MARK_ONLYDIR, FAN_MARK_IGNORED_MASK,
-            FAN_MARK_IGNORED_SURV_MODIFY, FAN_MARK_FLUSH,
-            FAN_MARK_EVICTABLE, FAN_MARK_IGNORE,
+            FAN_MARK_ADD,
+            FAN_MARK_REMOVE,
+            FAN_MARK_DONT_FOLLOW,
+            FAN_MARK_ONLYDIR,
+            FAN_MARK_IGNORED_MASK,
+            FAN_MARK_IGNORED_SURV_MODIFY,
+            FAN_MARK_FLUSH,
+            FAN_MARK_EVICTABLE,
+            FAN_MARK_IGNORE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

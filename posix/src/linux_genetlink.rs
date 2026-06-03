@@ -5,10 +5,10 @@
 //! Netlink socket family. Used by nl80211 (WiFi), taskstats,
 //! devlink, and many other kernel subsystems.
 
-pub use crate::linux_netlink::Nlmsghdr;
-pub use crate::linux_netlink::NLM_F_REQUEST;
-pub use crate::linux_netlink::NLM_F_DUMP;
 pub use crate::linux_netlink::NETLINK_GENERIC;
+pub use crate::linux_netlink::NLM_F_DUMP;
+pub use crate::linux_netlink::NLM_F_REQUEST;
+pub use crate::linux_netlink::Nlmsghdr;
 
 // ---------------------------------------------------------------------------
 // Generic Netlink header
@@ -169,10 +169,17 @@ mod tests {
     #[test]
     fn test_ctrl_attrs_distinct() {
         let attrs = [
-            CTRL_ATTR_UNSPEC, CTRL_ATTR_FAMILY_ID, CTRL_ATTR_FAMILY_NAME,
-            CTRL_ATTR_VERSION, CTRL_ATTR_HDRSIZE, CTRL_ATTR_MAXATTR,
-            CTRL_ATTR_OPS, CTRL_ATTR_MCAST_GROUPS, CTRL_ATTR_POLICY,
-            CTRL_ATTR_OP_POLICY, CTRL_ATTR_OP,
+            CTRL_ATTR_UNSPEC,
+            CTRL_ATTR_FAMILY_ID,
+            CTRL_ATTR_FAMILY_NAME,
+            CTRL_ATTR_VERSION,
+            CTRL_ATTR_HDRSIZE,
+            CTRL_ATTR_MAXATTR,
+            CTRL_ATTR_OPS,
+            CTRL_ATTR_MCAST_GROUPS,
+            CTRL_ATTR_POLICY,
+            CTRL_ATTR_OP_POLICY,
+            CTRL_ATTR_OP,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

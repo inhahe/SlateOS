@@ -112,9 +112,15 @@ mod tests {
     #[test]
     fn test_stats_types_distinct() {
         let types = [
-            TCA_STATS_UNSPEC, TCA_STATS_BASIC, TCA_STATS_RATE_EST,
-            TCA_STATS_QUEUE, TCA_STATS_APP, TCA_STATS_RATE_EST64,
-            TCA_STATS_PAD, TCA_STATS_BASIC_HW, TCA_STATS_PKT64,
+            TCA_STATS_UNSPEC,
+            TCA_STATS_BASIC,
+            TCA_STATS_RATE_EST,
+            TCA_STATS_QUEUE,
+            TCA_STATS_APP,
+            TCA_STATS_RATE_EST64,
+            TCA_STATS_PAD,
+            TCA_STATS_BASIC_HW,
+            TCA_STATS_PKT64,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

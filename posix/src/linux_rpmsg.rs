@@ -112,8 +112,10 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            RPMSG_CREATE_EPT_IOCTL, RPMSG_DESTROY_EPT_IOCTL,
-            RPMSG_CREATE_DEV_IOCTL, RPMSG_RELEASE_DEV_IOCTL,
+            RPMSG_CREATE_EPT_IOCTL,
+            RPMSG_DESTROY_EPT_IOCTL,
+            RPMSG_CREATE_DEV_IOCTL,
+            RPMSG_RELEASE_DEV_IOCTL,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

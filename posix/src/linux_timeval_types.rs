@@ -94,9 +94,17 @@ mod tests {
     #[test]
     fn test_adj_flags_no_overlap() {
         let flags = [
-            ADJ_OFFSET, ADJ_FREQUENCY, ADJ_MAXERROR,
-            ADJ_ESTERROR, ADJ_STATUS, ADJ_TIMECONST,
-            ADJ_TAI, ADJ_SETOFFSET, ADJ_MICRO, ADJ_NANO, ADJ_TICK,
+            ADJ_OFFSET,
+            ADJ_FREQUENCY,
+            ADJ_MAXERROR,
+            ADJ_ESTERROR,
+            ADJ_STATUS,
+            ADJ_TIMECONST,
+            ADJ_TAI,
+            ADJ_SETOFFSET,
+            ADJ_MICRO,
+            ADJ_NANO,
+            ADJ_TICK,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

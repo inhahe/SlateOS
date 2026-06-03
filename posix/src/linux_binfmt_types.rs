@@ -67,8 +67,11 @@ mod tests {
     #[test]
     fn test_format_types_distinct() {
         let types = [
-            BINFMT_ELF, BINFMT_SCRIPT, BINFMT_MISC,
-            BINFMT_FLAT, BINFMT_AOUT,
+            BINFMT_ELF,
+            BINFMT_SCRIPT,
+            BINFMT_MISC,
+            BINFMT_FLAT,
+            BINFMT_AOUT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -87,8 +90,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            BINFMT_FLAG_EXEC_STACK, BINFMT_FLAG_ASLR,
-            BINFMT_FLAG_CREDENTIALS, BINFMT_FLAG_SUID,
+            BINFMT_FLAG_EXEC_STACK,
+            BINFMT_FLAG_ASLR,
+            BINFMT_FLAG_CREDENTIALS,
+            BINFMT_FLAG_SUID,
             BINFMT_FLAG_SECURITY,
         ];
         for i in 0..flags.len() {

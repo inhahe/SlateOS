@@ -137,10 +137,9 @@ mod tests {
     #[test]
     fn test_ioctl_distinct() {
         let cmds = [
-            KDSKBMODE, KDGKBMODE, KDSETLED, KDGETLED,
-            KDSETMODE, KDGETMODE, KDSKBENT, KDGKBENT,
-            KDSKBSENT, KDGKBSENT, KDSKBMETA, KDGKBMETA,
-            KDSKBDIACR, KDGKBDIACR, KDMKTONE, KIOCSOUND,
+            KDSKBMODE, KDGKBMODE, KDSETLED, KDGETLED, KDSETMODE, KDGETMODE, KDSKBENT, KDGKBENT,
+            KDSKBSENT, KDGKBSENT, KDSKBMETA, KDGKBMETA, KDSKBDIACR, KDGKBDIACR, KDMKTONE,
+            KIOCSOUND,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

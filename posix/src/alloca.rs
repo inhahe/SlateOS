@@ -74,10 +74,14 @@ mod tests {
         // (both ultimately call the same mmap path).
         assert_eq!(a.is_null(), m.is_null());
         if !a.is_null() {
-            unsafe { crate::malloc::free(a); }
+            unsafe {
+                crate::malloc::free(a);
+            }
         }
         if !m.is_null() {
-            unsafe { crate::malloc::free(m); }
+            unsafe {
+                crate::malloc::free(m);
+            }
         }
     }
 }

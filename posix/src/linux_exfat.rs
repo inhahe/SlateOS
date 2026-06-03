@@ -95,8 +95,12 @@ mod tests {
     #[test]
     fn test_entry_types_distinct() {
         let types = [
-            EXFAT_ENTRY_BITMAP, EXFAT_ENTRY_UPCASE, EXFAT_ENTRY_LABEL,
-            EXFAT_ENTRY_FILE, EXFAT_ENTRY_STREAM, EXFAT_ENTRY_NAME,
+            EXFAT_ENTRY_BITMAP,
+            EXFAT_ENTRY_UPCASE,
+            EXFAT_ENTRY_LABEL,
+            EXFAT_ENTRY_FILE,
+            EXFAT_ENTRY_STREAM,
+            EXFAT_ENTRY_NAME,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -108,8 +112,11 @@ mod tests {
     #[test]
     fn test_attributes_no_overlap() {
         let attrs = [
-            EXFAT_ATTR_READONLY, EXFAT_ATTR_HIDDEN, EXFAT_ATTR_SYSTEM,
-            EXFAT_ATTR_DIRECTORY, EXFAT_ATTR_ARCHIVE,
+            EXFAT_ATTR_READONLY,
+            EXFAT_ATTR_HIDDEN,
+            EXFAT_ATTR_SYSTEM,
+            EXFAT_ATTR_DIRECTORY,
+            EXFAT_ATTR_ARCHIVE,
         ];
         for i in 0..attrs.len() {
             assert!(attrs[i].is_power_of_two());
@@ -133,7 +140,11 @@ mod tests {
 
     #[test]
     fn test_volume_flags_no_overlap() {
-        let flags = [EXFAT_VOL_ACTIVE_FAT, EXFAT_VOL_DIRTY, EXFAT_VOL_MEDIA_FAILURE];
+        let flags = [
+            EXFAT_VOL_ACTIVE_FAT,
+            EXFAT_VOL_DIRTY,
+            EXFAT_VOL_MEDIA_FAILURE,
+        ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {

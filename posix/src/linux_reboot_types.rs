@@ -56,8 +56,10 @@ mod tests {
     #[test]
     fn test_magic2_values_distinct() {
         let magics = [
-            LINUX_REBOOT_MAGIC2, LINUX_REBOOT_MAGIC2A,
-            LINUX_REBOOT_MAGIC2B, LINUX_REBOOT_MAGIC2C,
+            LINUX_REBOOT_MAGIC2,
+            LINUX_REBOOT_MAGIC2A,
+            LINUX_REBOOT_MAGIC2B,
+            LINUX_REBOOT_MAGIC2C,
         ];
         for i in 0..magics.len() {
             for j in (i + 1)..magics.len() {
@@ -69,10 +71,14 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_CMD_HALT,
-            LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART2,
-            LINUX_REBOOT_CMD_SW_SUSPEND, LINUX_REBOOT_CMD_CAD_ON,
-            LINUX_REBOOT_CMD_CAD_OFF, LINUX_REBOOT_CMD_KEXEC,
+            LINUX_REBOOT_CMD_RESTART,
+            LINUX_REBOOT_CMD_HALT,
+            LINUX_REBOOT_CMD_POWER_OFF,
+            LINUX_REBOOT_CMD_RESTART2,
+            LINUX_REBOOT_CMD_SW_SUSPEND,
+            LINUX_REBOOT_CMD_CAD_ON,
+            LINUX_REBOOT_CMD_CAD_OFF,
+            LINUX_REBOOT_CMD_KEXEC,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

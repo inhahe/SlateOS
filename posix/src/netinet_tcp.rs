@@ -6,23 +6,23 @@
 // TCP socket options (from socket.rs)
 // ---------------------------------------------------------------------------
 
-pub use crate::socket::TCP_NODELAY;
+pub use crate::socket::SOL_TCP;
+pub use crate::socket::TCP_CORK;
+pub use crate::socket::TCP_INFO;
+pub use crate::socket::TCP_KEEPCNT;
 pub use crate::socket::TCP_KEEPIDLE;
 pub use crate::socket::TCP_KEEPINTVL;
-pub use crate::socket::TCP_KEEPCNT;
 pub use crate::socket::TCP_MAXSEG;
-pub use crate::socket::TCP_CORK;
+pub use crate::socket::TCP_NODELAY;
 pub use crate::socket::TCP_USER_TIMEOUT;
-pub use crate::socket::TCP_INFO;
-pub use crate::socket::SOL_TCP;
 
 // ---------------------------------------------------------------------------
 // Additional TCP options (from netinet.rs)
 // ---------------------------------------------------------------------------
 
+pub use crate::netinet::TCP_CONGESTION;
 pub use crate::netinet::TCP_FASTOPEN;
 pub use crate::netinet::TCP_QUICKACK;
-pub use crate::netinet::TCP_CONGESTION;
 pub use crate::netinet::TCP_TIMESTAMP;
 
 // ---------------------------------------------------------------------------
@@ -78,8 +78,12 @@ mod tests {
     #[test]
     fn test_tcp_options_distinct() {
         let opts = [
-            TCP_NODELAY, TCP_MAXSEG, TCP_CORK,
-            TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT,
+            TCP_NODELAY,
+            TCP_MAXSEG,
+            TCP_CORK,
+            TCP_KEEPIDLE,
+            TCP_KEEPINTVL,
+            TCP_KEEPCNT,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -91,10 +95,17 @@ mod tests {
     #[test]
     fn test_tcp_states_distinct() {
         let states = [
-            TCP_ESTABLISHED, TCP_SYN_SENT, TCP_SYN_RECV,
-            TCP_FIN_WAIT1, TCP_FIN_WAIT2, TCP_TIME_WAIT,
-            TCP_CLOSE, TCP_CLOSE_WAIT, TCP_LAST_ACK,
-            TCP_LISTEN, TCP_CLOSING,
+            TCP_ESTABLISHED,
+            TCP_SYN_SENT,
+            TCP_SYN_RECV,
+            TCP_FIN_WAIT1,
+            TCP_FIN_WAIT2,
+            TCP_TIME_WAIT,
+            TCP_CLOSE,
+            TCP_CLOSE_WAIT,
+            TCP_LAST_ACK,
+            TCP_LISTEN,
+            TCP_CLOSING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

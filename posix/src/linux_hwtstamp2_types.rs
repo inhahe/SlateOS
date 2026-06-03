@@ -81,8 +81,10 @@ mod tests {
     #[test]
     fn test_tx_types_distinct() {
         let types = [
-            HWTSTAMP_TX_OFF, HWTSTAMP_TX_ON,
-            HWTSTAMP_TX_ONESTEP_SYNC, HWTSTAMP_TX_ONESTEP_P2P,
+            HWTSTAMP_TX_OFF,
+            HWTSTAMP_TX_ON,
+            HWTSTAMP_TX_ONESTEP_SYNC,
+            HWTSTAMP_TX_ONESTEP_P2P,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -94,7 +96,8 @@ mod tests {
     #[test]
     fn test_rx_filters_distinct() {
         let filters = [
-            HWTSTAMP_FILTER_NONE, HWTSTAMP_FILTER_ALL,
+            HWTSTAMP_FILTER_NONE,
+            HWTSTAMP_FILTER_ALL,
             HWTSTAMP_FILTER_SOME,
             HWTSTAMP_FILTER_PTP_V1_L4_EVENT,
             HWTSTAMP_FILTER_PTP_V1_L4_SYNC,

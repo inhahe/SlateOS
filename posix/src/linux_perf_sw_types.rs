@@ -44,12 +44,18 @@ mod tests {
     #[test]
     fn test_sw_events_distinct() {
         let events = [
-            PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK,
-            PERF_COUNT_SW_PAGE_FAULTS, PERF_COUNT_SW_CONTEXT_SWITCHES,
-            PERF_COUNT_SW_CPU_MIGRATIONS, PERF_COUNT_SW_PAGE_FAULTS_MIN,
-            PERF_COUNT_SW_PAGE_FAULTS_MAJ, PERF_COUNT_SW_ALIGNMENT_FAULTS,
-            PERF_COUNT_SW_EMULATION_FAULTS, PERF_COUNT_SW_DUMMY,
-            PERF_COUNT_SW_BPF_OUTPUT, PERF_COUNT_SW_CGROUP_SWITCHES,
+            PERF_COUNT_SW_CPU_CLOCK,
+            PERF_COUNT_SW_TASK_CLOCK,
+            PERF_COUNT_SW_PAGE_FAULTS,
+            PERF_COUNT_SW_CONTEXT_SWITCHES,
+            PERF_COUNT_SW_CPU_MIGRATIONS,
+            PERF_COUNT_SW_PAGE_FAULTS_MIN,
+            PERF_COUNT_SW_PAGE_FAULTS_MAJ,
+            PERF_COUNT_SW_ALIGNMENT_FAULTS,
+            PERF_COUNT_SW_EMULATION_FAULTS,
+            PERF_COUNT_SW_DUMMY,
+            PERF_COUNT_SW_BPF_OUTPUT,
+            PERF_COUNT_SW_CGROUP_SWITCHES,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

@@ -136,9 +136,16 @@ mod tests {
     #[test]
     fn test_route_types_distinct() {
         let types = [
-            RTN_UNSPEC, RTN_UNICAST, RTN_LOCAL, RTN_BROADCAST,
-            RTN_ANYCAST, RTN_MULTICAST, RTN_BLACKHOLE,
-            RTN_UNREACHABLE, RTN_PROHIBIT, RTN_THROW,
+            RTN_UNSPEC,
+            RTN_UNICAST,
+            RTN_LOCAL,
+            RTN_BROADCAST,
+            RTN_ANYCAST,
+            RTN_MULTICAST,
+            RTN_BLACKHOLE,
+            RTN_UNREACHABLE,
+            RTN_PROHIBIT,
+            RTN_THROW,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -150,8 +157,11 @@ mod tests {
     #[test]
     fn test_scopes_distinct() {
         let scopes = [
-            RT_SCOPE_UNIVERSE, RT_SCOPE_SITE,
-            RT_SCOPE_LINK, RT_SCOPE_HOST, RT_SCOPE_NOWHERE,
+            RT_SCOPE_UNIVERSE,
+            RT_SCOPE_SITE,
+            RT_SCOPE_LINK,
+            RT_SCOPE_HOST,
+            RT_SCOPE_NOWHERE,
         ];
         for i in 0..scopes.len() {
             for j in (i + 1)..scopes.len() {
@@ -163,8 +173,10 @@ mod tests {
     #[test]
     fn test_tables_distinct() {
         let tables = [
-            RT_TABLE_UNSPEC, RT_TABLE_DEFAULT,
-            RT_TABLE_MAIN, RT_TABLE_LOCAL,
+            RT_TABLE_UNSPEC,
+            RT_TABLE_DEFAULT,
+            RT_TABLE_MAIN,
+            RT_TABLE_LOCAL,
         ];
         for i in 0..tables.len() {
             for j in (i + 1)..tables.len() {

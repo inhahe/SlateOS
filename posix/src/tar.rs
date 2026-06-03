@@ -160,8 +160,7 @@ mod tests {
     #[test]
     fn test_type_flags_distinct() {
         let flags = [
-            REGTYPE, AREGTYPE, LNKTYPE, SYMTYPE, CHRTYPE, BLKTYPE,
-            DIRTYPE, FIFOTYPE, CONTTYPE,
+            REGTYPE, AREGTYPE, LNKTYPE, SYMTYPE, CHRTYPE, BLKTYPE, DIRTYPE, FIFOTYPE, CONTTYPE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -227,10 +226,18 @@ mod tests {
     #[test]
     fn test_full_permission_mask() {
         // 0o7777 covers all mode bits.
-        let all = TSUID | TSGID | TSVTX
-            | TUREAD | TUWRITE | TUEXEC
-            | TGREAD | TGWRITE | TGEXEC
-            | TOREAD | TOWRITE | TOEXEC;
+        let all = TSUID
+            | TSGID
+            | TSVTX
+            | TUREAD
+            | TUWRITE
+            | TUEXEC
+            | TGREAD
+            | TGWRITE
+            | TGEXEC
+            | TOREAD
+            | TOWRITE
+            | TOEXEC;
         assert_eq!(all, 0o7777);
     }
 

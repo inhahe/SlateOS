@@ -64,11 +64,16 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            SIOCX25GSUBSCRIP, SIOCX25SSUBSCRIP,
-            SIOCX25GFACILITIES, SIOCX25SFACILITIES,
-            SIOCX25GCALLUSERDATA, SIOCX25SCALLUSERDATA,
-            SIOCX25GCAUSEDIAG, SIOCX25SCUDMATCHLEN,
-            SIOCX25GDTEFACILITIES, SIOCX25SDTEFACILITIES,
+            SIOCX25GSUBSCRIP,
+            SIOCX25SSUBSCRIP,
+            SIOCX25GFACILITIES,
+            SIOCX25SFACILITIES,
+            SIOCX25GCALLUSERDATA,
+            SIOCX25SCALLUSERDATA,
+            SIOCX25GCAUSEDIAG,
+            SIOCX25SCUDMATCHLEN,
+            SIOCX25GDTEFACILITIES,
+            SIOCX25SDTEFACILITIES,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -80,10 +85,15 @@ mod tests {
     #[test]
     fn test_packet_types_distinct() {
         let types = [
-            X25_CALL_REQUEST, X25_CALL_ACCEPTED,
-            X25_CLEAR_REQUEST, X25_CLEAR_CONFIRMATION,
-            X25_DATA, X25_INTERRUPT, X25_INTERRUPT_CONFIRMATION,
-            X25_RESET_REQUEST, X25_RESET_CONFIRMATION,
+            X25_CALL_REQUEST,
+            X25_CALL_ACCEPTED,
+            X25_CLEAR_REQUEST,
+            X25_CLEAR_CONFIRMATION,
+            X25_DATA,
+            X25_INTERRUPT,
+            X25_INTERRUPT_CONFIRMATION,
+            X25_RESET_REQUEST,
+            X25_RESET_CONFIRMATION,
             X25_DIAGNOSTIC,
         ];
         for i in 0..types.len() {

@@ -11,12 +11,12 @@
 // ---------------------------------------------------------------------------
 
 // Core protocols (re-exported from socket for convenience).
-pub use crate::socket::IPPROTO_TCP;
 pub use crate::socket::IPPROTO_ICMP;
-pub use crate::socket::IPPROTO_UDP;
-pub use crate::socket::IPPROTO_IPV6;
 pub use crate::socket::IPPROTO_ICMPV6;
+pub use crate::socket::IPPROTO_IPV6;
 pub use crate::socket::IPPROTO_RAW;
+pub use crate::socket::IPPROTO_TCP;
+pub use crate::socket::IPPROTO_UDP;
 
 /// Internet Group Management Protocol.
 pub const IPPROTO_IGMP: i32 = 2;
@@ -50,10 +50,10 @@ pub const IPPROTO_SCTP: i32 = 132;
 // ---------------------------------------------------------------------------
 
 // Re-exported from socket.
+pub use crate::socket::IP_MULTICAST_LOOP;
+pub use crate::socket::IP_MULTICAST_TTL;
 pub use crate::socket::IP_TOS;
 pub use crate::socket::IP_TTL;
-pub use crate::socket::IP_MULTICAST_TTL;
-pub use crate::socket::IP_MULTICAST_LOOP;
 
 /// Include IP header in data.
 pub const IP_HDRINCL: i32 = 3;
@@ -75,12 +75,12 @@ pub const IP_MULTICAST_IF: i32 = 32;
 // ---------------------------------------------------------------------------
 
 // Re-exported from socket.
-pub use crate::socket::TCP_NODELAY;
 pub use crate::socket::TCP_CORK;
-pub use crate::socket::TCP_MAXSEG;
+pub use crate::socket::TCP_KEEPCNT;
 pub use crate::socket::TCP_KEEPIDLE;
 pub use crate::socket::TCP_KEEPINTVL;
-pub use crate::socket::TCP_KEEPCNT;
+pub use crate::socket::TCP_MAXSEG;
+pub use crate::socket::TCP_NODELAY;
 pub use crate::socket::TCP_USER_TIMEOUT;
 
 /// Enable TCP Fast Open.
@@ -100,20 +100,20 @@ pub const TCP_TIMESTAMP: i32 = 24;
 // ---------------------------------------------------------------------------
 
 // All re-exported from socket.
-pub use crate::socket::IPV6_V6ONLY;
-pub use crate::socket::IPV6_UNICAST_HOPS;
-pub use crate::socket::IPV6_MULTICAST_HOPS;
-pub use crate::socket::IPV6_MULTICAST_LOOP;
 pub use crate::socket::IPV6_JOIN_GROUP;
 pub use crate::socket::IPV6_LEAVE_GROUP;
+pub use crate::socket::IPV6_MULTICAST_HOPS;
+pub use crate::socket::IPV6_MULTICAST_LOOP;
+pub use crate::socket::IPV6_UNICAST_HOPS;
+pub use crate::socket::IPV6_V6ONLY;
 
 // ---------------------------------------------------------------------------
 // INADDR_* constants
 // ---------------------------------------------------------------------------
 
 pub use crate::socket::INADDR_ANY;
-pub use crate::socket::INADDR_LOOPBACK;
 pub use crate::socket::INADDR_BROADCAST;
+pub use crate::socket::INADDR_LOOPBACK;
 
 /// Loopback network (127.0.0.0/8) in host byte order.
 pub const INADDR_LOOPBACK_NET: u32 = 0x7F000000;
@@ -172,17 +172,25 @@ mod tests {
     #[test]
     fn test_ipproto_distinct() {
         let protos = [
-            IPPROTO_ICMP, IPPROTO_IGMP, IPPROTO_IPIP, IPPROTO_TCP,
-            IPPROTO_UDP, IPPROTO_IPV6, IPPROTO_ROUTING,
-            IPPROTO_FRAGMENT, IPPROTO_GRE, IPPROTO_ESP, IPPROTO_AH,
-            IPPROTO_ICMPV6, IPPROTO_NONE, IPPROTO_SCTP, IPPROTO_RAW,
+            IPPROTO_ICMP,
+            IPPROTO_IGMP,
+            IPPROTO_IPIP,
+            IPPROTO_TCP,
+            IPPROTO_UDP,
+            IPPROTO_IPV6,
+            IPPROTO_ROUTING,
+            IPPROTO_FRAGMENT,
+            IPPROTO_GRE,
+            IPPROTO_ESP,
+            IPPROTO_AH,
+            IPPROTO_ICMPV6,
+            IPPROTO_NONE,
+            IPPROTO_SCTP,
+            IPPROTO_RAW,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
-                assert_ne!(
-                    protos[i], protos[j],
-                    "protocol numbers must be distinct"
-                );
+                assert_ne!(protos[i], protos[j], "protocol numbers must be distinct");
             }
         }
     }
@@ -237,8 +245,12 @@ mod tests {
     #[test]
     fn test_tcp_options_distinct() {
         let opts = [
-            TCP_NODELAY, TCP_MAXSEG, TCP_CORK,
-            TCP_KEEPIDLE, TCP_KEEPINTVL, TCP_KEEPCNT,
+            TCP_NODELAY,
+            TCP_MAXSEG,
+            TCP_CORK,
+            TCP_KEEPIDLE,
+            TCP_KEEPINTVL,
+            TCP_KEEPCNT,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -348,8 +360,14 @@ mod tests {
     #[test]
     fn test_ports_distinct() {
         let ports = [
-            IPPORT_FTP_DATA, IPPORT_FTP, IPPORT_SSH, IPPORT_TELNET,
-            IPPORT_SMTP, IPPORT_DNS, IPPORT_HTTP, IPPORT_HTTPS,
+            IPPORT_FTP_DATA,
+            IPPORT_FTP,
+            IPPORT_SSH,
+            IPPORT_TELNET,
+            IPPORT_SMTP,
+            IPPORT_DNS,
+            IPPORT_HTTP,
+            IPPORT_HTTPS,
         ];
         for i in 0..ports.len() {
             for j in (i + 1)..ports.len() {
@@ -362,8 +380,14 @@ mod tests {
     fn test_ports_in_privileged_range() {
         // All these well-known ports are < 1024 (privileged).
         let ports = [
-            IPPORT_FTP_DATA, IPPORT_FTP, IPPORT_SSH, IPPORT_TELNET,
-            IPPORT_SMTP, IPPORT_DNS, IPPORT_HTTP, IPPORT_HTTPS,
+            IPPORT_FTP_DATA,
+            IPPORT_FTP,
+            IPPORT_SSH,
+            IPPORT_TELNET,
+            IPPORT_SMTP,
+            IPPORT_DNS,
+            IPPORT_HTTP,
+            IPPORT_HTTPS,
         ];
         for &p in &ports {
             assert!(p < 1024, "well-known port {} should be < 1024", p);

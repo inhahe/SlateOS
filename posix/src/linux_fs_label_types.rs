@@ -80,8 +80,12 @@ mod tests {
     #[test]
     fn test_label_limits_distinct() {
         let limits = [
-            EXT_LABEL_MAX, XFS_LABEL_MAX, BTRFS_LABEL_MAX,
-            FAT_LABEL_MAX, NTFS_LABEL_MAX, EXFAT_LABEL_MAX,
+            EXT_LABEL_MAX,
+            XFS_LABEL_MAX,
+            BTRFS_LABEL_MAX,
+            FAT_LABEL_MAX,
+            NTFS_LABEL_MAX,
+            EXFAT_LABEL_MAX,
         ];
         for i in 0..limits.len() {
             for j in (i + 1)..limits.len() {
@@ -124,8 +128,11 @@ mod tests {
     #[test]
     fn test_blkid_parts_distinct() {
         let parts = [
-            BLKID_PART_LINUX, BLKID_PART_SWAP,
-            BLKID_PART_LVM, BLKID_PART_RAID, BLKID_PART_EFI,
+            BLKID_PART_LINUX,
+            BLKID_PART_SWAP,
+            BLKID_PART_LVM,
+            BLKID_PART_RAID,
+            BLKID_PART_EFI,
         ];
         for i in 0..parts.len() {
             for j in (i + 1)..parts.len() {

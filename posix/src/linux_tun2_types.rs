@@ -114,14 +114,26 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            TUNSETIFF, TUNSETPERSIST, TUNSETOWNER, TUNSETGROUP,
-            TUNGETFEATURES, TUNSETOFFLOAD, TUNSETTXFILTER,
-            TUNGETIFF, TUNGETSNDBUF, TUNSETSNDBUF,
-            TUNATTACHFILTER, TUNDETACHFILTER,
-            TUNGETVNETLE, TUNSETVNETLE,
-            TUNGETVNETBE, TUNSETVNETBE,
-            TUNSETSTEERINGEBPF, TUNSETFILTEREBPF,
-            TUNSETCARRIER, TUNGETDEVNETNS,
+            TUNSETIFF,
+            TUNSETPERSIST,
+            TUNSETOWNER,
+            TUNSETGROUP,
+            TUNGETFEATURES,
+            TUNSETOFFLOAD,
+            TUNSETTXFILTER,
+            TUNGETIFF,
+            TUNGETSNDBUF,
+            TUNSETSNDBUF,
+            TUNATTACHFILTER,
+            TUNDETACHFILTER,
+            TUNGETVNETLE,
+            TUNSETVNETLE,
+            TUNGETVNETBE,
+            TUNSETVNETBE,
+            TUNSETSTEERINGEBPF,
+            TUNSETFILTEREBPF,
+            TUNSETCARRIER,
+            TUNGETDEVNETNS,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -139,8 +151,13 @@ mod tests {
     #[test]
     fn test_offload_flags_powers_of_two() {
         let flags = [
-            TUN_F_CSUM, TUN_F_TSO4, TUN_F_TSO6,
-            TUN_F_TSO_ECN, TUN_F_UFO, TUN_F_USO4, TUN_F_USO6,
+            TUN_F_CSUM,
+            TUN_F_TSO4,
+            TUN_F_TSO6,
+            TUN_F_TSO_ECN,
+            TUN_F_UFO,
+            TUN_F_USO4,
+            TUN_F_USO6,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -150,8 +167,13 @@ mod tests {
     #[test]
     fn test_offload_flags_no_overlap() {
         let flags = [
-            TUN_F_CSUM, TUN_F_TSO4, TUN_F_TSO6,
-            TUN_F_TSO_ECN, TUN_F_UFO, TUN_F_USO4, TUN_F_USO6,
+            TUN_F_CSUM,
+            TUN_F_TSO4,
+            TUN_F_TSO6,
+            TUN_F_TSO_ECN,
+            TUN_F_UFO,
+            TUN_F_USO4,
+            TUN_F_USO6,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -95,10 +95,20 @@ mod tests {
     #[test]
     fn test_error_codes_distinct() {
         let codes = [
-            REG_OK, REG_NOMATCH, REG_BADPAT, REG_ECOLLATE,
-            REG_ECTYPE, REG_EESCAPE, REG_ESUBREG, REG_EBRACK,
-            REG_EPAREN, REG_EBRACE, REG_BADBR, REG_ERANGE,
-            REG_ESPACE, REG_BADRPT,
+            REG_OK,
+            REG_NOMATCH,
+            REG_BADPAT,
+            REG_ECOLLATE,
+            REG_ECTYPE,
+            REG_EESCAPE,
+            REG_ESUBREG,
+            REG_EBRACK,
+            REG_EPAREN,
+            REG_EBRACE,
+            REG_BADBR,
+            REG_ERANGE,
+            REG_ESPACE,
+            REG_BADRPT,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

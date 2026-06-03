@@ -112,10 +112,22 @@ mod tests {
     #[test]
     fn test_rlimit_resources_distinct() {
         let res = [
-            RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_STACK,
-            RLIMIT_CORE, RLIMIT_RSS, RLIMIT_NPROC, RLIMIT_NOFILE,
-            RLIMIT_MEMLOCK, RLIMIT_AS, RLIMIT_LOCKS, RLIMIT_SIGPENDING,
-            RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME,
+            RLIMIT_CPU,
+            RLIMIT_FSIZE,
+            RLIMIT_DATA,
+            RLIMIT_STACK,
+            RLIMIT_CORE,
+            RLIMIT_RSS,
+            RLIMIT_NPROC,
+            RLIMIT_NOFILE,
+            RLIMIT_MEMLOCK,
+            RLIMIT_AS,
+            RLIMIT_LOCKS,
+            RLIMIT_SIGPENDING,
+            RLIMIT_MSGQUEUE,
+            RLIMIT_NICE,
+            RLIMIT_RTPRIO,
+            RLIMIT_RTTIME,
         ];
         for i in 0..res.len() {
             for j in (i + 1)..res.len() {

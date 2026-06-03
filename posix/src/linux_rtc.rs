@@ -133,9 +133,16 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            RTC_RD_TIME, RTC_SET_TIME, RTC_ALM_READ, RTC_ALM_SET,
-            RTC_AIE_ON, RTC_AIE_OFF, RTC_UIE_ON, RTC_UIE_OFF,
-            RTC_PIE_ON, RTC_PIE_OFF,
+            RTC_RD_TIME,
+            RTC_SET_TIME,
+            RTC_ALM_READ,
+            RTC_ALM_SET,
+            RTC_AIE_ON,
+            RTC_AIE_OFF,
+            RTC_UIE_ON,
+            RTC_UIE_OFF,
+            RTC_PIE_ON,
+            RTC_PIE_OFF,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -151,7 +158,7 @@ mod tests {
             tm_min: 45,
             tm_hour: 14,
             tm_mday: 15,
-            tm_mon: 4,  // May (0-indexed)
+            tm_mon: 4,    // May (0-indexed)
             tm_year: 126, // 2026
             tm_wday: 0,
             tm_yday: 0,

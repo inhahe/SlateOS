@@ -137,19 +137,34 @@ mod tests {
     #[test]
     fn test_states_are_powers_of_two() {
         let states = [
-            NUD_INCOMPLETE, NUD_REACHABLE, NUD_STALE, NUD_DELAY,
-            NUD_PROBE, NUD_FAILED, NUD_NOARP, NUD_PERMANENT,
+            NUD_INCOMPLETE,
+            NUD_REACHABLE,
+            NUD_STALE,
+            NUD_DELAY,
+            NUD_PROBE,
+            NUD_FAILED,
+            NUD_NOARP,
+            NUD_PERMANENT,
         ];
         for s in &states {
-            assert!(s.is_power_of_two(), "NUD state {s:#06x} is not power of two");
+            assert!(
+                s.is_power_of_two(),
+                "NUD state {s:#06x} is not power of two"
+            );
         }
     }
 
     #[test]
     fn test_states_no_overlap() {
         let states = [
-            NUD_INCOMPLETE, NUD_REACHABLE, NUD_STALE, NUD_DELAY,
-            NUD_PROBE, NUD_FAILED, NUD_NOARP, NUD_PERMANENT,
+            NUD_INCOMPLETE,
+            NUD_REACHABLE,
+            NUD_STALE,
+            NUD_DELAY,
+            NUD_PROBE,
+            NUD_FAILED,
+            NUD_NOARP,
+            NUD_PERMANENT,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -166,8 +181,14 @@ mod tests {
     #[test]
     fn test_flags_are_powers_of_two() {
         let flags = [
-            NTF_USE, NTF_SELF, NTF_MASTER, NTF_PROXY,
-            NTF_EXT_LEARNED, NTF_OFFLOADED, NTF_STICKY, NTF_ROUTER,
+            NTF_USE,
+            NTF_SELF,
+            NTF_MASTER,
+            NTF_PROXY,
+            NTF_EXT_LEARNED,
+            NTF_OFFLOADED,
+            NTF_STICKY,
+            NTF_ROUTER,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "NTF flag {f:#04x} is not power of two");
@@ -177,8 +198,14 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            NTF_USE, NTF_SELF, NTF_MASTER, NTF_PROXY,
-            NTF_EXT_LEARNED, NTF_OFFLOADED, NTF_STICKY, NTF_ROUTER,
+            NTF_USE,
+            NTF_SELF,
+            NTF_MASTER,
+            NTF_PROXY,
+            NTF_EXT_LEARNED,
+            NTF_OFFLOADED,
+            NTF_STICKY,
+            NTF_ROUTER,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -190,11 +217,22 @@ mod tests {
     #[test]
     fn test_nda_attrs_distinct() {
         let attrs = [
-            NDA_UNSPEC, NDA_DST, NDA_LLADDR, NDA_CACHEINFO,
-            NDA_PROBES, NDA_VLAN, NDA_PORT, NDA_VNI,
-            NDA_IFINDEX, NDA_MASTER, NDA_LINK_NETNSID,
-            NDA_SRC_VNI, NDA_PROTOCOL, NDA_NH_ID,
-            NDA_FDB_EXT_ATTRS, NDA_FLAGS_EXT,
+            NDA_UNSPEC,
+            NDA_DST,
+            NDA_LLADDR,
+            NDA_CACHEINFO,
+            NDA_PROBES,
+            NDA_VLAN,
+            NDA_PORT,
+            NDA_VNI,
+            NDA_IFINDEX,
+            NDA_MASTER,
+            NDA_LINK_NETNSID,
+            NDA_SRC_VNI,
+            NDA_PROTOCOL,
+            NDA_NH_ID,
+            NDA_FDB_EXT_ATTRS,
+            NDA_FLAGS_EXT,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -206,14 +244,23 @@ mod tests {
     #[test]
     fn test_ndtpa_params_distinct() {
         let params = [
-            NDTPA_UNSPEC, NDTPA_IFINDEX, NDTPA_REFCNT,
-            NDTPA_REACHABLE_TIME, NDTPA_BASE_REACHABLE_TIME,
-            NDTPA_RETRANS_TIME, NDTPA_GC_STALETIME,
-            NDTPA_DELAY_PROBE_TIME, NDTPA_QUEUE_LEN,
-            NDTPA_APP_PROBES, NDTPA_UCAST_PROBES,
-            NDTPA_MCAST_PROBES, NDTPA_ANYCAST_DELAY,
-            NDTPA_PROXY_DELAY, NDTPA_PROXY_QLEN,
-            NDTPA_LOCKTIME, NDTPA_QUEUE_LENBYTES,
+            NDTPA_UNSPEC,
+            NDTPA_IFINDEX,
+            NDTPA_REFCNT,
+            NDTPA_REACHABLE_TIME,
+            NDTPA_BASE_REACHABLE_TIME,
+            NDTPA_RETRANS_TIME,
+            NDTPA_GC_STALETIME,
+            NDTPA_DELAY_PROBE_TIME,
+            NDTPA_QUEUE_LEN,
+            NDTPA_APP_PROBES,
+            NDTPA_UCAST_PROBES,
+            NDTPA_MCAST_PROBES,
+            NDTPA_ANYCAST_DELAY,
+            NDTPA_PROXY_DELAY,
+            NDTPA_PROXY_QLEN,
+            NDTPA_LOCKTIME,
+            NDTPA_QUEUE_LENBYTES,
             NDTPA_MCAST_REPROBES,
         ];
         for i in 0..params.len() {

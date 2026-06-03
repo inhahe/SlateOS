@@ -101,11 +101,16 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            POWER_SUPPLY_TYPE_UNKNOWN, POWER_SUPPLY_TYPE_BATTERY,
-            POWER_SUPPLY_TYPE_UPS, POWER_SUPPLY_TYPE_MAINS,
-            POWER_SUPPLY_TYPE_USB, POWER_SUPPLY_TYPE_USB_DCP,
-            POWER_SUPPLY_TYPE_USB_CDP, POWER_SUPPLY_TYPE_USB_TYPE_C,
-            POWER_SUPPLY_TYPE_USB_PD, POWER_SUPPLY_TYPE_WIRELESS,
+            POWER_SUPPLY_TYPE_UNKNOWN,
+            POWER_SUPPLY_TYPE_BATTERY,
+            POWER_SUPPLY_TYPE_UPS,
+            POWER_SUPPLY_TYPE_MAINS,
+            POWER_SUPPLY_TYPE_USB,
+            POWER_SUPPLY_TYPE_USB_DCP,
+            POWER_SUPPLY_TYPE_USB_CDP,
+            POWER_SUPPLY_TYPE_USB_TYPE_C,
+            POWER_SUPPLY_TYPE_USB_PD,
+            POWER_SUPPLY_TYPE_WIRELESS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -117,8 +122,10 @@ mod tests {
     #[test]
     fn test_status_distinct() {
         let statuses = [
-            POWER_SUPPLY_STATUS_UNKNOWN, POWER_SUPPLY_STATUS_CHARGING,
-            POWER_SUPPLY_STATUS_DISCHARGING, POWER_SUPPLY_STATUS_NOT_CHARGING,
+            POWER_SUPPLY_STATUS_UNKNOWN,
+            POWER_SUPPLY_STATUS_CHARGING,
+            POWER_SUPPLY_STATUS_DISCHARGING,
+            POWER_SUPPLY_STATUS_NOT_CHARGING,
             POWER_SUPPLY_STATUS_FULL,
         ];
         for i in 0..statuses.len() {
@@ -131,9 +138,12 @@ mod tests {
     #[test]
     fn test_health_distinct() {
         let healths = [
-            POWER_SUPPLY_HEALTH_UNKNOWN, POWER_SUPPLY_HEALTH_GOOD,
-            POWER_SUPPLY_HEALTH_OVERHEAT, POWER_SUPPLY_HEALTH_DEAD,
-            POWER_SUPPLY_HEALTH_OVERVOLTAGE, POWER_SUPPLY_HEALTH_COLD,
+            POWER_SUPPLY_HEALTH_UNKNOWN,
+            POWER_SUPPLY_HEALTH_GOOD,
+            POWER_SUPPLY_HEALTH_OVERHEAT,
+            POWER_SUPPLY_HEALTH_DEAD,
+            POWER_SUPPLY_HEALTH_OVERVOLTAGE,
+            POWER_SUPPLY_HEALTH_COLD,
             POWER_SUPPLY_HEALTH_OVERCURRENT,
         ];
         for i in 0..healths.len() {
@@ -146,9 +156,12 @@ mod tests {
     #[test]
     fn test_technology_distinct() {
         let techs = [
-            POWER_SUPPLY_TECHNOLOGY_UNKNOWN, POWER_SUPPLY_TECHNOLOGY_NIMH,
-            POWER_SUPPLY_TECHNOLOGY_LION, POWER_SUPPLY_TECHNOLOGY_LIPO,
-            POWER_SUPPLY_TECHNOLOGY_LIFE, POWER_SUPPLY_TECHNOLOGY_NICD,
+            POWER_SUPPLY_TECHNOLOGY_UNKNOWN,
+            POWER_SUPPLY_TECHNOLOGY_NIMH,
+            POWER_SUPPLY_TECHNOLOGY_LION,
+            POWER_SUPPLY_TECHNOLOGY_LIPO,
+            POWER_SUPPLY_TECHNOLOGY_LIFE,
+            POWER_SUPPLY_TECHNOLOGY_NICD,
             POWER_SUPPLY_TECHNOLOGY_LIMN,
         ];
         for i in 0..techs.len() {

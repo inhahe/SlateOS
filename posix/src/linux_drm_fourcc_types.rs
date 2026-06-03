@@ -82,11 +82,17 @@ mod tests {
     #[test]
     fn test_formats_distinct() {
         let fmts = [
-            DRM_FORMAT_XRGB8888, DRM_FORMAT_ARGB8888,
-            DRM_FORMAT_XBGR8888, DRM_FORMAT_ABGR8888,
-            DRM_FORMAT_RGB888, DRM_FORMAT_BGR888,
-            DRM_FORMAT_RGB565, DRM_FORMAT_NV12,
-            DRM_FORMAT_NV21, DRM_FORMAT_YUV420, DRM_FORMAT_YUYV,
+            DRM_FORMAT_XRGB8888,
+            DRM_FORMAT_ARGB8888,
+            DRM_FORMAT_XBGR8888,
+            DRM_FORMAT_ABGR8888,
+            DRM_FORMAT_RGB888,
+            DRM_FORMAT_BGR888,
+            DRM_FORMAT_RGB565,
+            DRM_FORMAT_NV12,
+            DRM_FORMAT_NV21,
+            DRM_FORMAT_YUV420,
+            DRM_FORMAT_YUYV,
         ];
         for i in 0..fmts.len() {
             for j in (i + 1)..fmts.len() {
@@ -98,9 +104,12 @@ mod tests {
     #[test]
     fn test_modifier_vendors_distinct() {
         let vendors = [
-            DRM_FORMAT_MOD_VENDOR_NONE, DRM_FORMAT_MOD_VENDOR_INTEL,
-            DRM_FORMAT_MOD_VENDOR_AMD, DRM_FORMAT_MOD_VENDOR_NVIDIA,
-            DRM_FORMAT_MOD_VENDOR_SAMSUNG, DRM_FORMAT_MOD_VENDOR_QCOM,
+            DRM_FORMAT_MOD_VENDOR_NONE,
+            DRM_FORMAT_MOD_VENDOR_INTEL,
+            DRM_FORMAT_MOD_VENDOR_AMD,
+            DRM_FORMAT_MOD_VENDOR_NVIDIA,
+            DRM_FORMAT_MOD_VENDOR_SAMSUNG,
+            DRM_FORMAT_MOD_VENDOR_QCOM,
             DRM_FORMAT_MOD_VENDOR_ARM,
         ];
         for i in 0..vendors.len() {

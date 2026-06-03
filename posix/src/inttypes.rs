@@ -44,11 +44,7 @@ pub extern "C" fn imaxdiv(numer: i64, denom: i64) -> ImaxdivT {
 ///
 /// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strtoimax(
-    nptr: *const u8,
-    endptr: *mut *const u8,
-    base: i32,
-) -> i64 {
+pub unsafe extern "C" fn strtoimax(nptr: *const u8, endptr: *mut *const u8, base: i32) -> i64 {
     unsafe { crate::stdlib::strtoll(nptr, endptr, base) }
 }
 
@@ -60,11 +56,7 @@ pub unsafe extern "C" fn strtoimax(
 ///
 /// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strtoumax(
-    nptr: *const u8,
-    endptr: *mut *const u8,
-    base: i32,
-) -> u64 {
+pub unsafe extern "C" fn strtoumax(nptr: *const u8, endptr: *mut *const u8, base: i32) -> u64 {
     unsafe { crate::stdlib::strtoull(nptr, endptr, base) }
 }
 
@@ -109,7 +101,9 @@ pub unsafe extern "C" fn wcstoimax(
 ) -> i64 {
     if nptr.is_null() {
         if !endptr.is_null() {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         }
         return 0;
     }
@@ -123,15 +117,18 @@ pub unsafe extern "C" fn wcstoimax(
 
     // Handle sign.
     let negative = unsafe { *nptr.add(i) } == 0x2d; // '-'
-    if negative || unsafe { *nptr.add(i) } == 0x2b { // '+'
+    if negative || unsafe { *nptr.add(i) } == 0x2b {
+        // '+'
         i = i.wrapping_add(1);
     }
 
     // Auto-detect or skip prefix.
     if base == 0 {
-        if unsafe { *nptr.add(i) } == 0x30 { // '0'
+        if unsafe { *nptr.add(i) } == 0x30 {
+            // '0'
             let next = unsafe { *nptr.add(i.wrapping_add(1)) };
-            if next == 0x78 || next == 0x58 { // 'x' or 'X'
+            if next == 0x78 || next == 0x58 {
+                // 'x' or 'X'
                 // Only commit to hex if a valid hex digit follows "0x".
                 let after_x = unsafe { *nptr.add(i.wrapping_add(2)) };
                 if wc_digit(after_x, 16) >= 0 {
@@ -177,7 +174,10 @@ pub unsafe extern "C" fn wcstoimax(
         if d < 0 {
             break;
         }
-        match acc.checked_mul(base as u64).and_then(|a| a.checked_add(d as u64)) {
+        match acc
+            .checked_mul(base as u64)
+            .and_then(|a| a.checked_add(d as u64))
+        {
             Some(v) => acc = v,
             None => overflowed = true,
         }
@@ -187,9 +187,13 @@ pub unsafe extern "C" fn wcstoimax(
     if !endptr.is_null() {
         // If no digits were consumed, endptr points to nptr (original start).
         if i == start {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         } else {
-            unsafe { *endptr = nptr.add(i); }
+            unsafe {
+                *endptr = nptr.add(i);
+            }
         }
     }
 
@@ -209,13 +213,11 @@ pub unsafe extern "C" fn wcstoimax(
             // acc <= i64::MAX, safe to cast and negate.
             -(acc as i64)
         }
+    } else if acc > i64::MAX as u64 {
+        crate::errno::set_errno(crate::errno::ERANGE);
+        i64::MAX
     } else {
-        if acc > i64::MAX as u64 {
-            crate::errno::set_errno(crate::errno::ERANGE);
-            i64::MAX
-        } else {
-            acc as i64
-        }
+        acc as i64
     }
 }
 
@@ -235,7 +237,9 @@ pub unsafe extern "C" fn wcstoumax(
 ) -> u64 {
     if nptr.is_null() {
         if !endptr.is_null() {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         }
         return 0;
     }
@@ -250,7 +254,8 @@ pub unsafe extern "C" fn wcstoumax(
     // Handle sign.  POSIX: if the subject sequence begins with a
     // minus sign, the resulting value is negated (wrapping).
     let negative = unsafe { *nptr.add(i) } == 0x2d; // '-'
-    if negative || unsafe { *nptr.add(i) } == 0x2b { // '+'
+    if negative || unsafe { *nptr.add(i) } == 0x2b {
+        // '+'
         i = i.wrapping_add(1);
     }
 
@@ -297,7 +302,10 @@ pub unsafe extern "C" fn wcstoumax(
         if d < 0 {
             break;
         }
-        match result.checked_mul(base as u64).and_then(|a| a.checked_add(d as u64)) {
+        match result
+            .checked_mul(base as u64)
+            .and_then(|a| a.checked_add(d as u64))
+        {
             Some(v) => result = v,
             None => overflowed = true,
         }
@@ -306,9 +314,13 @@ pub unsafe extern "C" fn wcstoumax(
 
     if !endptr.is_null() {
         if i == start {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         } else {
-            unsafe { *endptr = nptr.add(i); }
+            unsafe {
+                *endptr = nptr.add(i);
+            }
         }
     }
 
@@ -318,7 +330,11 @@ pub unsafe extern "C" fn wcstoumax(
     }
 
     // POSIX: negative sign means wrapping negation of the unsigned result.
-    if negative { result.wrapping_neg() } else { result }
+    if negative {
+        result.wrapping_neg()
+    } else {
+        result
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -472,9 +488,8 @@ mod tests {
     fn test_wcstoimax_massive_overflow() {
         // "99999999999999999999\0" — way past u64::MAX, digit overflow
         let s: [i32; 21] = [
-            0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39,
-            0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39,
-            0x00,
+            0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x39,
+            0x39, 0x39, 0x39, 0x39, 0x39, 0x39, 0x00,
         ];
         crate::errno::set_errno(0);
         let v = unsafe { wcstoimax(s.as_ptr(), core::ptr::null_mut(), 10) };

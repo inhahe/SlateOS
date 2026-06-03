@@ -90,9 +90,15 @@ mod tests {
     #[test]
     fn test_pkt_types_distinct() {
         let pkts = [
-            DCCP_PKT_REQUEST, DCCP_PKT_RESPONSE, DCCP_PKT_DATA,
-            DCCP_PKT_ACK, DCCP_PKT_DATAACK, DCCP_PKT_CLOSEREQ,
-            DCCP_PKT_CLOSE, DCCP_PKT_RESET, DCCP_PKT_SYNC,
+            DCCP_PKT_REQUEST,
+            DCCP_PKT_RESPONSE,
+            DCCP_PKT_DATA,
+            DCCP_PKT_ACK,
+            DCCP_PKT_DATAACK,
+            DCCP_PKT_CLOSEREQ,
+            DCCP_PKT_CLOSE,
+            DCCP_PKT_RESET,
+            DCCP_PKT_SYNC,
             DCCP_PKT_SYNCACK,
         ];
         for i in 0..pkts.len() {
@@ -105,12 +111,18 @@ mod tests {
     #[test]
     fn test_reset_codes_distinct() {
         let codes = [
-            DCCP_RESET_UNSPECIFIED, DCCP_RESET_CLOSED,
-            DCCP_RESET_ABORTED, DCCP_RESET_NO_CONNECTION,
-            DCCP_RESET_PACKET_ERROR, DCCP_RESET_OPTION_ERROR,
-            DCCP_RESET_MANDATORY_ERROR, DCCP_RESET_CONNECTION_REFUSED,
-            DCCP_RESET_BAD_SERVICE_CODE, DCCP_RESET_TOO_BUSY,
-            DCCP_RESET_BAD_INIT_COOKIE, DCCP_RESET_AGGRESSION_PENALTY,
+            DCCP_RESET_UNSPECIFIED,
+            DCCP_RESET_CLOSED,
+            DCCP_RESET_ABORTED,
+            DCCP_RESET_NO_CONNECTION,
+            DCCP_RESET_PACKET_ERROR,
+            DCCP_RESET_OPTION_ERROR,
+            DCCP_RESET_MANDATORY_ERROR,
+            DCCP_RESET_CONNECTION_REFUSED,
+            DCCP_RESET_BAD_SERVICE_CODE,
+            DCCP_RESET_TOO_BUSY,
+            DCCP_RESET_BAD_INIT_COOKIE,
+            DCCP_RESET_AGGRESSION_PENALTY,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -122,10 +134,14 @@ mod tests {
     #[test]
     fn test_sockopt_distinct() {
         let opts = [
-            DCCP_SOCKOPT_CCID, DCCP_SOCKOPT_AVAILABLE_CCIDS,
-            DCCP_SOCKOPT_SERVICE, DCCP_SOCKOPT_TX_CCID,
-            DCCP_SOCKOPT_RX_CCID, DCCP_SOCKOPT_SERVER_TIMEWAIT,
-            DCCP_SOCKOPT_QPOLICY_ID, DCCP_SOCKOPT_QPOLICY_TXQLEN,
+            DCCP_SOCKOPT_CCID,
+            DCCP_SOCKOPT_AVAILABLE_CCIDS,
+            DCCP_SOCKOPT_SERVICE,
+            DCCP_SOCKOPT_TX_CCID,
+            DCCP_SOCKOPT_RX_CCID,
+            DCCP_SOCKOPT_SERVER_TIMEWAIT,
+            DCCP_SOCKOPT_QPOLICY_ID,
+            DCCP_SOCKOPT_QPOLICY_TXQLEN,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

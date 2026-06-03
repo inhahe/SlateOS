@@ -55,11 +55,23 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            TYPE_DISK, TYPE_TAPE, TYPE_PRINTER, TYPE_PROCESSOR,
-            TYPE_WORM, TYPE_ROM, TYPE_SCANNER, TYPE_MOD,
-            TYPE_MEDIUM_CHANGER, TYPE_RAID, TYPE_ENCLOSURE,
-            TYPE_RBC, TYPE_OCRW, TYPE_OSD, TYPE_ZBC,
-            TYPE_WLUN, TYPE_NO_LUN,
+            TYPE_DISK,
+            TYPE_TAPE,
+            TYPE_PRINTER,
+            TYPE_PROCESSOR,
+            TYPE_WORM,
+            TYPE_ROM,
+            TYPE_SCANNER,
+            TYPE_MOD,
+            TYPE_MEDIUM_CHANGER,
+            TYPE_RAID,
+            TYPE_ENCLOSURE,
+            TYPE_RBC,
+            TYPE_OCRW,
+            TYPE_OSD,
+            TYPE_ZBC,
+            TYPE_WLUN,
+            TYPE_NO_LUN,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -85,10 +97,21 @@ mod tests {
         // Device type is 5 bits in INQUIRY, but TYPE_NO_LUN uses 7 bits
         // as a special sentinel
         let standard_types = [
-            TYPE_DISK, TYPE_TAPE, TYPE_PRINTER, TYPE_PROCESSOR,
-            TYPE_WORM, TYPE_ROM, TYPE_SCANNER, TYPE_MOD,
-            TYPE_MEDIUM_CHANGER, TYPE_RAID, TYPE_ENCLOSURE,
-            TYPE_RBC, TYPE_OCRW, TYPE_OSD, TYPE_ZBC,
+            TYPE_DISK,
+            TYPE_TAPE,
+            TYPE_PRINTER,
+            TYPE_PROCESSOR,
+            TYPE_WORM,
+            TYPE_ROM,
+            TYPE_SCANNER,
+            TYPE_MOD,
+            TYPE_MEDIUM_CHANGER,
+            TYPE_RAID,
+            TYPE_ENCLOSURE,
+            TYPE_RBC,
+            TYPE_OCRW,
+            TYPE_OSD,
+            TYPE_ZBC,
         ];
         for &t in &standard_types {
             assert!(t < 0x20, "type 0x{:02X} doesn't fit in 5 bits", t);

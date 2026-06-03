@@ -7,8 +7,8 @@
 // Re-exports
 // ---------------------------------------------------------------------------
 
-pub use crate::unistd::swapon;
 pub use crate::unistd::swapoff;
+pub use crate::unistd::swapon;
 
 // ---------------------------------------------------------------------------
 // Swap flags
@@ -53,8 +53,10 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            SWAP_FLAG_PREFER, SWAP_FLAG_DISCARD,
-            SWAP_FLAG_DISCARD_ONCE, SWAP_FLAG_DISCARD_PAGES,
+            SWAP_FLAG_PREFER,
+            SWAP_FLAG_DISCARD,
+            SWAP_FLAG_DISCARD_ONCE,
+            SWAP_FLAG_DISCARD_PAGES,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

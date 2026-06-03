@@ -66,9 +66,12 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let types = [
-            PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE,
-            PERF_TYPE_TRACEPOINT, PERF_TYPE_HW_CACHE,
-            PERF_TYPE_RAW, PERF_TYPE_BREAKPOINT,
+            PERF_TYPE_HARDWARE,
+            PERF_TYPE_SOFTWARE,
+            PERF_TYPE_TRACEPOINT,
+            PERF_TYPE_HW_CACHE,
+            PERF_TYPE_RAW,
+            PERF_TYPE_BREAKPOINT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -85,13 +88,20 @@ mod tests {
     #[test]
     fn test_attr_flags_power_of_two() {
         let flags = [
-            PERF_ATTR_FLAG_DISABLED, PERF_ATTR_FLAG_INHERIT,
-            PERF_ATTR_FLAG_PINNED, PERF_ATTR_FLAG_EXCLUSIVE,
-            PERF_ATTR_FLAG_EXCLUDE_USER, PERF_ATTR_FLAG_EXCLUDE_KERNEL,
-            PERF_ATTR_FLAG_EXCLUDE_HV, PERF_ATTR_FLAG_EXCLUDE_IDLE,
-            PERF_ATTR_FLAG_MMAP, PERF_ATTR_FLAG_COMM,
-            PERF_ATTR_FLAG_FREQ, PERF_ATTR_FLAG_INHERIT_STAT,
-            PERF_ATTR_FLAG_ENABLE_ON_EXEC, PERF_ATTR_FLAG_TASK,
+            PERF_ATTR_FLAG_DISABLED,
+            PERF_ATTR_FLAG_INHERIT,
+            PERF_ATTR_FLAG_PINNED,
+            PERF_ATTR_FLAG_EXCLUSIVE,
+            PERF_ATTR_FLAG_EXCLUDE_USER,
+            PERF_ATTR_FLAG_EXCLUDE_KERNEL,
+            PERF_ATTR_FLAG_EXCLUDE_HV,
+            PERF_ATTR_FLAG_EXCLUDE_IDLE,
+            PERF_ATTR_FLAG_MMAP,
+            PERF_ATTR_FLAG_COMM,
+            PERF_ATTR_FLAG_FREQ,
+            PERF_ATTR_FLAG_INHERIT_STAT,
+            PERF_ATTR_FLAG_ENABLE_ON_EXEC,
+            PERF_ATTR_FLAG_TASK,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -101,13 +111,20 @@ mod tests {
     #[test]
     fn test_attr_flags_no_overlap() {
         let flags = [
-            PERF_ATTR_FLAG_DISABLED, PERF_ATTR_FLAG_INHERIT,
-            PERF_ATTR_FLAG_PINNED, PERF_ATTR_FLAG_EXCLUSIVE,
-            PERF_ATTR_FLAG_EXCLUDE_USER, PERF_ATTR_FLAG_EXCLUDE_KERNEL,
-            PERF_ATTR_FLAG_EXCLUDE_HV, PERF_ATTR_FLAG_EXCLUDE_IDLE,
-            PERF_ATTR_FLAG_MMAP, PERF_ATTR_FLAG_COMM,
-            PERF_ATTR_FLAG_FREQ, PERF_ATTR_FLAG_INHERIT_STAT,
-            PERF_ATTR_FLAG_ENABLE_ON_EXEC, PERF_ATTR_FLAG_TASK,
+            PERF_ATTR_FLAG_DISABLED,
+            PERF_ATTR_FLAG_INHERIT,
+            PERF_ATTR_FLAG_PINNED,
+            PERF_ATTR_FLAG_EXCLUSIVE,
+            PERF_ATTR_FLAG_EXCLUDE_USER,
+            PERF_ATTR_FLAG_EXCLUDE_KERNEL,
+            PERF_ATTR_FLAG_EXCLUDE_HV,
+            PERF_ATTR_FLAG_EXCLUDE_IDLE,
+            PERF_ATTR_FLAG_MMAP,
+            PERF_ATTR_FLAG_COMM,
+            PERF_ATTR_FLAG_FREQ,
+            PERF_ATTR_FLAG_INHERIT_STAT,
+            PERF_ATTR_FLAG_ENABLE_ON_EXEC,
+            PERF_ATTR_FLAG_TASK,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

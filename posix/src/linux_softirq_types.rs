@@ -55,9 +55,15 @@ mod tests {
     #[test]
     fn test_softirq_vectors_distinct() {
         let vectors = [
-            HI_SOFTIRQ, TIMER_SOFTIRQ, NET_TX_SOFTIRQ,
-            NET_RX_SOFTIRQ, BLOCK_SOFTIRQ, IRQ_POLL_SOFTIRQ,
-            TASKLET_SOFTIRQ, SCHED_SOFTIRQ, HRTIMER_SOFTIRQ,
+            HI_SOFTIRQ,
+            TIMER_SOFTIRQ,
+            NET_TX_SOFTIRQ,
+            NET_RX_SOFTIRQ,
+            BLOCK_SOFTIRQ,
+            IRQ_POLL_SOFTIRQ,
+            TASKLET_SOFTIRQ,
+            SCHED_SOFTIRQ,
+            HRTIMER_SOFTIRQ,
             RCU_SOFTIRQ,
         ];
         assert_eq!(vectors.len(), NR_SOFTIRQS as usize);

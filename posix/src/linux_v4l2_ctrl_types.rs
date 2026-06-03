@@ -45,7 +45,7 @@ pub const V4L2_CTRL_CLASS_COLORIMETRY: u32 = 0x00A5_0000;
 /// CID base for user controls.
 pub const V4L2_CID_BASE: u32 = V4L2_CTRL_CLASS_USER | 0x900;
 /// Brightness.
-pub const V4L2_CID_BRIGHTNESS: u32 = V4L2_CID_BASE + 0;
+pub const V4L2_CID_BRIGHTNESS: u32 = V4L2_CID_BASE;
 /// Contrast.
 pub const V4L2_CID_CONTRAST: u32 = V4L2_CID_BASE + 1;
 /// Saturation.
@@ -107,12 +107,18 @@ mod tests {
     #[test]
     fn test_ctrl_classes_distinct() {
         let classes = [
-            V4L2_CTRL_CLASS_USER, V4L2_CTRL_CLASS_CAMERA,
-            V4L2_CTRL_CLASS_FM_TX, V4L2_CTRL_CLASS_FLASH,
-            V4L2_CTRL_CLASS_JPEG, V4L2_CTRL_CLASS_IMAGE_SOURCE,
-            V4L2_CTRL_CLASS_IMAGE_PROC, V4L2_CTRL_CLASS_CODEC,
-            V4L2_CTRL_CLASS_FM_RX, V4L2_CTRL_CLASS_RF_TUNER,
-            V4L2_CTRL_CLASS_DETECT, V4L2_CTRL_CLASS_CODEC_STATELESS,
+            V4L2_CTRL_CLASS_USER,
+            V4L2_CTRL_CLASS_CAMERA,
+            V4L2_CTRL_CLASS_FM_TX,
+            V4L2_CTRL_CLASS_FLASH,
+            V4L2_CTRL_CLASS_JPEG,
+            V4L2_CTRL_CLASS_IMAGE_SOURCE,
+            V4L2_CTRL_CLASS_IMAGE_PROC,
+            V4L2_CTRL_CLASS_CODEC,
+            V4L2_CTRL_CLASS_FM_RX,
+            V4L2_CTRL_CLASS_RF_TUNER,
+            V4L2_CTRL_CLASS_DETECT,
+            V4L2_CTRL_CLASS_CODEC_STATELESS,
             V4L2_CTRL_CLASS_COLORIMETRY,
         ];
         for i in 0..classes.len() {
@@ -133,10 +139,14 @@ mod tests {
     #[test]
     fn test_ctrl_types_distinct() {
         let types = [
-            V4L2_CTRL_TYPE_INTEGER, V4L2_CTRL_TYPE_BOOLEAN,
-            V4L2_CTRL_TYPE_MENU, V4L2_CTRL_TYPE_BUTTON,
-            V4L2_CTRL_TYPE_INTEGER64, V4L2_CTRL_TYPE_STRING,
-            V4L2_CTRL_TYPE_BITMASK, V4L2_CTRL_TYPE_INTEGER_MENU,
+            V4L2_CTRL_TYPE_INTEGER,
+            V4L2_CTRL_TYPE_BOOLEAN,
+            V4L2_CTRL_TYPE_MENU,
+            V4L2_CTRL_TYPE_BUTTON,
+            V4L2_CTRL_TYPE_INTEGER64,
+            V4L2_CTRL_TYPE_STRING,
+            V4L2_CTRL_TYPE_BITMASK,
+            V4L2_CTRL_TYPE_INTEGER_MENU,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -149,12 +159,12 @@ mod tests {
     fn test_classes_16bit_aligned() {
         // All classes have lower 16 bits = 0
         let classes = [
-            V4L2_CTRL_CLASS_USER, V4L2_CTRL_CLASS_CAMERA,
+            V4L2_CTRL_CLASS_USER,
+            V4L2_CTRL_CLASS_CAMERA,
             V4L2_CTRL_CLASS_CODEC,
         ];
         for &c in &classes {
-            assert_eq!(c & 0xFFFF, 0,
-                "class 0x{:08X} not 64K-aligned", c);
+            assert_eq!(c & 0xFFFF, 0, "class 0x{:08X} not 64K-aligned", c);
         }
     }
 }

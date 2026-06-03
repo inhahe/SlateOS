@@ -89,8 +89,11 @@ mod tests {
     #[test]
     fn test_spec_values_distinct() {
         let vals = [
-            PR_SPEC_NOT_AFFECTED, PR_SPEC_PRCTL,
-            PR_SPEC_ENABLE, PR_SPEC_DISABLE, PR_SPEC_FORCE_DISABLE,
+            PR_SPEC_NOT_AFFECTED,
+            PR_SPEC_PRCTL,
+            PR_SPEC_ENABLE,
+            PR_SPEC_DISABLE,
+            PR_SPEC_FORCE_DISABLE,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {

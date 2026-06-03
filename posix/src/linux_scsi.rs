@@ -140,12 +140,29 @@ mod tests {
     #[test]
     fn test_common_cmds_distinct() {
         let cmds = [
-            TEST_UNIT_READY, REQUEST_SENSE, READ_6, WRITE_6,
-            INQUIRY, MODE_SELECT, MODE_SENSE, START_STOP,
-            READ_CAPACITY, READ_10, WRITE_10, SYNCHRONIZE_CACHE,
-            WRITE_BUFFER, READ_BUFFER, UNMAP, LOG_SENSE,
-            MODE_SELECT_10, MODE_SENSE_10, REPORT_LUNS,
-            READ_16, WRITE_16, WRITE_SAME_16, SERVICE_ACTION_IN_16,
+            TEST_UNIT_READY,
+            REQUEST_SENSE,
+            READ_6,
+            WRITE_6,
+            INQUIRY,
+            MODE_SELECT,
+            MODE_SENSE,
+            START_STOP,
+            READ_CAPACITY,
+            READ_10,
+            WRITE_10,
+            SYNCHRONIZE_CACHE,
+            WRITE_BUFFER,
+            READ_BUFFER,
+            UNMAP,
+            LOG_SENSE,
+            MODE_SELECT_10,
+            MODE_SENSE_10,
+            REPORT_LUNS,
+            READ_16,
+            WRITE_16,
+            WRITE_SAME_16,
+            SERVICE_ACTION_IN_16,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -157,10 +174,20 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            TYPE_DISK, TYPE_TAPE, TYPE_PRINTER, TYPE_PROCESSOR,
-            TYPE_WORM, TYPE_ROM, TYPE_SCANNER, TYPE_MOD,
-            TYPE_MEDIUM_CHANGER, TYPE_ENCLOSURE, TYPE_RBC,
-            TYPE_OSD, TYPE_ZBC, TYPE_NO_LUN,
+            TYPE_DISK,
+            TYPE_TAPE,
+            TYPE_PRINTER,
+            TYPE_PROCESSOR,
+            TYPE_WORM,
+            TYPE_ROM,
+            TYPE_SCANNER,
+            TYPE_MOD,
+            TYPE_MEDIUM_CHANGER,
+            TYPE_ENCLOSURE,
+            TYPE_RBC,
+            TYPE_OSD,
+            TYPE_ZBC,
+            TYPE_NO_LUN,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -172,9 +199,16 @@ mod tests {
     #[test]
     fn test_sense_keys_distinct() {
         let keys = [
-            NO_SENSE, RECOVERED_ERROR, NOT_READY, MEDIUM_ERROR,
-            HARDWARE_ERROR, ILLEGAL_REQUEST, UNIT_ATTENTION,
-            DATA_PROTECT, BLANK_CHECK, ABORTED_COMMAND,
+            NO_SENSE,
+            RECOVERED_ERROR,
+            NOT_READY,
+            MEDIUM_ERROR,
+            HARDWARE_ERROR,
+            ILLEGAL_REQUEST,
+            UNIT_ATTENTION,
+            DATA_PROTECT,
+            BLANK_CHECK,
+            ABORTED_COMMAND,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {

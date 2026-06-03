@@ -109,8 +109,7 @@ mod tests {
     #[test]
     fn test_quotactl_commands_distinct() {
         let cmds = [
-            Q_QUOTAON, Q_QUOTAOFF, Q_GETQUOTA, Q_SETQUOTA,
-            Q_GETINFO, Q_SETINFO, Q_SYNC,
+            Q_QUOTAON, Q_QUOTAOFF, Q_GETQUOTA, Q_SETQUOTA, Q_GETINFO, Q_SETINFO, Q_SYNC,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

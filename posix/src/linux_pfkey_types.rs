@@ -121,12 +121,24 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            SADB_RESERVED, SADB_GETSPI, SADB_UPDATE, SADB_ADD,
-            SADB_DELETE, SADB_GET, SADB_ACQUIRE, SADB_REGISTER,
-            SADB_EXPIRE, SADB_FLUSH, SADB_DUMP,
-            SADB_X_SPDADD, SADB_X_SPDDELETE, SADB_X_SPDGET,
-            SADB_X_SPDDUMP, SADB_X_SPDFLUSH,
-            SADB_X_NAT_T_NEW_MAPPING, SADB_X_MIGRATE,
+            SADB_RESERVED,
+            SADB_GETSPI,
+            SADB_UPDATE,
+            SADB_ADD,
+            SADB_DELETE,
+            SADB_GET,
+            SADB_ACQUIRE,
+            SADB_REGISTER,
+            SADB_EXPIRE,
+            SADB_FLUSH,
+            SADB_DUMP,
+            SADB_X_SPDADD,
+            SADB_X_SPDDELETE,
+            SADB_X_SPDGET,
+            SADB_X_SPDDUMP,
+            SADB_X_SPDFLUSH,
+            SADB_X_NAT_T_NEW_MAPPING,
+            SADB_X_MIGRATE,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -148,8 +160,10 @@ mod tests {
     #[test]
     fn test_sa_states_distinct() {
         let states = [
-            SADB_SASTATE_LARVAL, SADB_SASTATE_MATURE,
-            SADB_SASTATE_DYING, SADB_SASTATE_DEAD,
+            SADB_SASTATE_LARVAL,
+            SADB_SASTATE_MATURE,
+            SADB_SASTATE_DYING,
+            SADB_SASTATE_DEAD,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -161,14 +175,22 @@ mod tests {
     #[test]
     fn test_extensions_distinct() {
         let exts = [
-            SADB_EXT_SA, SADB_EXT_LIFETIME_CURRENT,
-            SADB_EXT_LIFETIME_HARD, SADB_EXT_LIFETIME_SOFT,
-            SADB_EXT_ADDRESS_SRC, SADB_EXT_ADDRESS_DST,
-            SADB_EXT_KEY_AUTH, SADB_EXT_KEY_ENCRYPT,
-            SADB_EXT_PROPOSAL, SADB_EXT_SUPPORTED_AUTH,
-            SADB_EXT_SUPPORTED_ENCRYPT, SADB_X_EXT_POLICY,
-            SADB_X_EXT_NAT_T_TYPE, SADB_X_EXT_NAT_T_SPORT,
-            SADB_X_EXT_NAT_T_DPORT, SADB_X_EXT_NAT_T_OA,
+            SADB_EXT_SA,
+            SADB_EXT_LIFETIME_CURRENT,
+            SADB_EXT_LIFETIME_HARD,
+            SADB_EXT_LIFETIME_SOFT,
+            SADB_EXT_ADDRESS_SRC,
+            SADB_EXT_ADDRESS_DST,
+            SADB_EXT_KEY_AUTH,
+            SADB_EXT_KEY_ENCRYPT,
+            SADB_EXT_PROPOSAL,
+            SADB_EXT_SUPPORTED_AUTH,
+            SADB_EXT_SUPPORTED_ENCRYPT,
+            SADB_X_EXT_POLICY,
+            SADB_X_EXT_NAT_T_TYPE,
+            SADB_X_EXT_NAT_T_SPORT,
+            SADB_X_EXT_NAT_T_DPORT,
+            SADB_X_EXT_NAT_T_OA,
         ];
         for i in 0..exts.len() {
             for j in (i + 1)..exts.len() {

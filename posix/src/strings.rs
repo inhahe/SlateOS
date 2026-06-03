@@ -10,9 +10,9 @@
 pub use crate::string::bcopy;
 pub use crate::string::bzero;
 pub use crate::string::explicit_bzero;
+pub use crate::string::ffs;
 pub use crate::string::strcasecmp;
 pub use crate::string::strncasecmp;
-pub use crate::string::ffs;
 
 // ---------------------------------------------------------------------------
 // bcmp — compare byte strings (legacy, equivalent to memcmp != 0)

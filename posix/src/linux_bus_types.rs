@@ -73,10 +73,18 @@ mod tests {
     #[test]
     fn test_bus_types_distinct() {
         let types = [
-            BUS_TYPE_PCI, BUS_TYPE_USB, BUS_TYPE_I2C, BUS_TYPE_SPI,
-            BUS_TYPE_PLATFORM, BUS_TYPE_ACPI, BUS_TYPE_OF,
-            BUS_TYPE_AUXILIARY, BUS_TYPE_VIRTUAL, BUS_TYPE_SDIO,
-            BUS_TYPE_MDIO, BUS_TYPE_HID,
+            BUS_TYPE_PCI,
+            BUS_TYPE_USB,
+            BUS_TYPE_I2C,
+            BUS_TYPE_SPI,
+            BUS_TYPE_PLATFORM,
+            BUS_TYPE_ACPI,
+            BUS_TYPE_OF,
+            BUS_TYPE_AUXILIARY,
+            BUS_TYPE_VIRTUAL,
+            BUS_TYPE_SDIO,
+            BUS_TYPE_MDIO,
+            BUS_TYPE_HID,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -98,8 +106,11 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            BUS_FLAG_HOTPLUG, BUS_FLAG_PM_RUNTIME,
-            BUS_FLAG_AUTO_PROBE, BUS_FLAG_DMA, BUS_FLAG_STATIC,
+            BUS_FLAG_HOTPLUG,
+            BUS_FLAG_PM_RUNTIME,
+            BUS_FLAG_AUTO_PROBE,
+            BUS_FLAG_DMA,
+            BUS_FLAG_STATIC,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

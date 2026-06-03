@@ -71,7 +71,8 @@ mod tests {
     #[test]
     fn test_state_strings_distinct() {
         let strings = [
-            FREEZER_STATE_THAWED, FREEZER_STATE_FREEZING,
+            FREEZER_STATE_THAWED,
+            FREEZER_STATE_FREEZING,
             FREEZER_STATE_FROZEN,
         ];
         for i in 0..strings.len() {
@@ -88,9 +89,6 @@ mod tests {
 
     #[test]
     fn test_freezer_flags_no_overlap() {
-        assert_eq!(
-            FREEZER_SELF_FREEZING & FREEZER_KERNEL_FREEZING,
-            0
-        );
+        assert_eq!(FREEZER_SELF_FREEZING & FREEZER_KERNEL_FREEZING, 0);
     }
 }

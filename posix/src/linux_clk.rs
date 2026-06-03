@@ -99,9 +99,15 @@ mod tests {
     #[test]
     fn test_clk_flags_powers_of_two() {
         let flags: [u64; 9] = [
-            CLK_SET_RATE_GATE, CLK_SET_PARENT_GATE, CLK_SET_RATE_PARENT,
-            CLK_IGNORE_UNUSED, CLK_GET_RATE_NOCACHE, CLK_SET_RATE_UNGATE,
-            CLK_IS_CRITICAL, CLK_OPS_PARENT_ENABLE, CLK_DUTY_CYCLE_PARENT,
+            CLK_SET_RATE_GATE,
+            CLK_SET_PARENT_GATE,
+            CLK_SET_RATE_PARENT,
+            CLK_IGNORE_UNUSED,
+            CLK_GET_RATE_NOCACHE,
+            CLK_SET_RATE_UNGATE,
+            CLK_IS_CRITICAL,
+            CLK_OPS_PARENT_ENABLE,
+            CLK_DUTY_CYCLE_PARENT,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -111,9 +117,15 @@ mod tests {
     #[test]
     fn test_clk_flags_no_overlap() {
         let flags: [u64; 9] = [
-            CLK_SET_RATE_GATE, CLK_SET_PARENT_GATE, CLK_SET_RATE_PARENT,
-            CLK_IGNORE_UNUSED, CLK_GET_RATE_NOCACHE, CLK_SET_RATE_UNGATE,
-            CLK_IS_CRITICAL, CLK_OPS_PARENT_ENABLE, CLK_DUTY_CYCLE_PARENT,
+            CLK_SET_RATE_GATE,
+            CLK_SET_PARENT_GATE,
+            CLK_SET_RATE_PARENT,
+            CLK_IGNORE_UNUSED,
+            CLK_GET_RATE_NOCACHE,
+            CLK_SET_RATE_UNGATE,
+            CLK_IS_CRITICAL,
+            CLK_OPS_PARENT_ENABLE,
+            CLK_DUTY_CYCLE_PARENT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -125,9 +137,13 @@ mod tests {
     #[test]
     fn test_notification_events_distinct() {
         let events = [
-            PRE_RATE_CHANGE, POST_RATE_CHANGE, ABORT_RATE_CHANGE,
-            PRE_CLK_ENABLE, POST_CLK_ENABLE,
-            PRE_CLK_DISABLE, POST_CLK_DISABLE,
+            PRE_RATE_CHANGE,
+            POST_RATE_CHANGE,
+            ABORT_RATE_CHANGE,
+            PRE_CLK_ENABLE,
+            POST_CLK_ENABLE,
+            PRE_CLK_DISABLE,
+            POST_CLK_DISABLE,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -139,9 +155,14 @@ mod tests {
     #[test]
     fn test_clock_types_distinct() {
         let types = [
-            CLK_TYPE_FIXED_RATE, CLK_TYPE_GATE, CLK_TYPE_DIVIDER,
-            CLK_TYPE_MUX, CLK_TYPE_FIXED_FACTOR, CLK_TYPE_COMPOSITE,
-            CLK_TYPE_FRACTIONAL_DIVIDER, CLK_TYPE_PLL,
+            CLK_TYPE_FIXED_RATE,
+            CLK_TYPE_GATE,
+            CLK_TYPE_DIVIDER,
+            CLK_TYPE_MUX,
+            CLK_TYPE_FIXED_FACTOR,
+            CLK_TYPE_COMPOSITE,
+            CLK_TYPE_FRACTIONAL_DIVIDER,
+            CLK_TYPE_PLL,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -153,9 +174,12 @@ mod tests {
     #[test]
     fn test_divider_flags_powers_of_two() {
         let flags = [
-            CLK_DIVIDER_ONE_BASED, CLK_DIVIDER_POWER_OF_TWO,
-            CLK_DIVIDER_ALLOW_ZERO, CLK_DIVIDER_HIWORD_MASK,
-            CLK_DIVIDER_ROUND_CLOSEST, CLK_DIVIDER_READ_ONLY,
+            CLK_DIVIDER_ONE_BASED,
+            CLK_DIVIDER_POWER_OF_TWO,
+            CLK_DIVIDER_ALLOW_ZERO,
+            CLK_DIVIDER_HIWORD_MASK,
+            CLK_DIVIDER_ROUND_CLOSEST,
+            CLK_DIVIDER_READ_ONLY,
             CLK_DIVIDER_MAX_AT_ZERO,
         ];
         for flag in &flags {
@@ -166,9 +190,12 @@ mod tests {
     #[test]
     fn test_divider_flags_no_overlap() {
         let flags = [
-            CLK_DIVIDER_ONE_BASED, CLK_DIVIDER_POWER_OF_TWO,
-            CLK_DIVIDER_ALLOW_ZERO, CLK_DIVIDER_HIWORD_MASK,
-            CLK_DIVIDER_ROUND_CLOSEST, CLK_DIVIDER_READ_ONLY,
+            CLK_DIVIDER_ONE_BASED,
+            CLK_DIVIDER_POWER_OF_TWO,
+            CLK_DIVIDER_ALLOW_ZERO,
+            CLK_DIVIDER_HIWORD_MASK,
+            CLK_DIVIDER_ROUND_CLOSEST,
+            CLK_DIVIDER_READ_ONLY,
             CLK_DIVIDER_MAX_AT_ZERO,
         ];
         for i in 0..flags.len() {

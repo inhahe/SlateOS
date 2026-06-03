@@ -91,9 +91,15 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            TUNSETIFF, TUNSETPERSIST, TUNSETOWNER, TUNSETGROUP,
-            TUNGETFEATURES, TUNSETOFFLOAD, TUNSETQUEUE,
-            TUNGETSNDBUF, TUNSETSNDBUF,
+            TUNSETIFF,
+            TUNSETPERSIST,
+            TUNSETOWNER,
+            TUNSETGROUP,
+            TUNGETFEATURES,
+            TUNSETOFFLOAD,
+            TUNSETQUEUE,
+            TUNGETSNDBUF,
+            TUNSETSNDBUF,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -111,12 +117,22 @@ mod tests {
     #[test]
     fn test_iff_flags_no_overlap() {
         let flags = [
-            IFF_TUN, IFF_TAP, IFF_NO_PI,
-            IFF_ONE_QUEUE, IFF_VNET_HDR, IFF_MULTI_QUEUE,
+            IFF_TUN,
+            IFF_TAP,
+            IFF_NO_PI,
+            IFF_ONE_QUEUE,
+            IFF_VNET_HDR,
+            IFF_MULTI_QUEUE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
-                assert_eq!(flags[i] & flags[j], 0, "0x{:x} & 0x{:x}", flags[i], flags[j]);
+                assert_eq!(
+                    flags[i] & flags[j],
+                    0,
+                    "0x{:x} & 0x{:x}",
+                    flags[i],
+                    flags[j]
+                );
             }
         }
     }
@@ -130,8 +146,13 @@ mod tests {
     #[test]
     fn test_offload_flags_powers_of_two() {
         let flags = [
-            TUN_F_TSO4, TUN_F_TSO6, TUN_F_TSO_ECN,
-            TUN_F_UFO, TUN_F_CSUM, TUN_F_USO4, TUN_F_USO6,
+            TUN_F_TSO4,
+            TUN_F_TSO6,
+            TUN_F_TSO_ECN,
+            TUN_F_UFO,
+            TUN_F_CSUM,
+            TUN_F_USO4,
+            TUN_F_USO6,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);

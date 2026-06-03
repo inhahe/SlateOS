@@ -84,10 +84,14 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            COND_OFF_WSEQ, COND_OFF_G1_START,
-            COND_OFF_G_REFS_0, COND_OFF_G_REFS_1,
-            COND_OFF_G_SIZE_0, COND_OFF_G_SIZE_1,
-            COND_OFF_G1_ORIG_SIZE, COND_OFF_WREFS,
+            COND_OFF_WSEQ,
+            COND_OFF_G1_START,
+            COND_OFF_G_REFS_0,
+            COND_OFF_G_REFS_1,
+            COND_OFF_G_SIZE_0,
+            COND_OFF_G_SIZE_1,
+            COND_OFF_G1_ORIG_SIZE,
+            COND_OFF_WREFS,
         ];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);

@@ -89,12 +89,18 @@ mod tests {
     #[test]
     fn test_standard_requests_distinct() {
         let reqs = [
-            USB_REQ_GET_STATUS, USB_REQ_CLEAR_FEATURE,
-            USB_REQ_SET_FEATURE, USB_REQ_SET_ADDRESS,
-            USB_REQ_GET_DESCRIPTOR, USB_REQ_SET_DESCRIPTOR,
-            USB_REQ_GET_CONFIGURATION, USB_REQ_SET_CONFIGURATION,
-            USB_REQ_GET_INTERFACE, USB_REQ_SET_INTERFACE,
-            USB_REQ_SYNCH_FRAME, USB_REQ_SET_SEL,
+            USB_REQ_GET_STATUS,
+            USB_REQ_CLEAR_FEATURE,
+            USB_REQ_SET_FEATURE,
+            USB_REQ_SET_ADDRESS,
+            USB_REQ_GET_DESCRIPTOR,
+            USB_REQ_SET_DESCRIPTOR,
+            USB_REQ_GET_CONFIGURATION,
+            USB_REQ_SET_CONFIGURATION,
+            USB_REQ_GET_INTERFACE,
+            USB_REQ_SET_INTERFACE,
+            USB_REQ_SYNCH_FRAME,
+            USB_REQ_SET_SEL,
             USB_REQ_SET_ISOCH_DELAY,
         ];
         for i in 0..reqs.len() {
@@ -107,10 +113,16 @@ mod tests {
     #[test]
     fn test_descriptor_types_distinct() {
         let dts = [
-            USB_DT_DEVICE, USB_DT_CONFIG, USB_DT_STRING,
-            USB_DT_INTERFACE, USB_DT_ENDPOINT, USB_DT_DEVICE_QUALIFIER,
-            USB_DT_OTHER_SPEED_CONFIG, USB_DT_INTERFACE_POWER,
-            USB_DT_BOS, USB_DT_SS_ENDPOINT_COMP,
+            USB_DT_DEVICE,
+            USB_DT_CONFIG,
+            USB_DT_STRING,
+            USB_DT_INTERFACE,
+            USB_DT_ENDPOINT,
+            USB_DT_DEVICE_QUALIFIER,
+            USB_DT_OTHER_SPEED_CONFIG,
+            USB_DT_INTERFACE_POWER,
+            USB_DT_BOS,
+            USB_DT_SS_ENDPOINT_COMP,
             USB_DT_SSP_ISOC_ENDPOINT_COMP,
         ];
         for i in 0..dts.len() {
@@ -123,8 +135,10 @@ mod tests {
     #[test]
     fn test_feature_selectors_distinct() {
         let feats = [
-            USB_ENDPOINT_HALT, USB_DEVICE_REMOTE_WAKEUP,
-            USB_DEVICE_TEST_MODE, USB_DEVICE_U1_ENABLE,
+            USB_ENDPOINT_HALT,
+            USB_DEVICE_REMOTE_WAKEUP,
+            USB_DEVICE_TEST_MODE,
+            USB_DEVICE_U1_ENABLE,
             USB_DEVICE_U2_ENABLE,
         ];
         for i in 0..feats.len() {

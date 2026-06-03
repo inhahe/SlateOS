@@ -78,7 +78,10 @@ mod tests {
     #[test]
     fn test_gdt_entries() {
         assert!(GDT_ENTRY_TLS_MIN < GDT_ENTRY_TLS_MAX);
-        assert_eq!(GDT_ENTRY_TLS_MAX - GDT_ENTRY_TLS_MIN + 1, GDT_ENTRY_TLS_ENTRIES);
+        assert_eq!(
+            GDT_ENTRY_TLS_MAX - GDT_ENTRY_TLS_MIN + 1,
+            GDT_ENTRY_TLS_ENTRIES
+        );
     }
 
     #[test]

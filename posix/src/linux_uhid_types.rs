@@ -79,10 +79,19 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let events = [
-            UHID_CREATE, UHID_DESTROY, UHID_START, UHID_STOP,
-            UHID_OPEN, UHID_CLOSE, UHID_OUTPUT, UHID_INPUT,
-            UHID_GET_REPORT, UHID_GET_REPORT_REPLY,
-            UHID_CREATE2, UHID_INPUT2, UHID_SET_REPORT,
+            UHID_CREATE,
+            UHID_DESTROY,
+            UHID_START,
+            UHID_STOP,
+            UHID_OPEN,
+            UHID_CLOSE,
+            UHID_OUTPUT,
+            UHID_INPUT,
+            UHID_GET_REPORT,
+            UHID_GET_REPORT_REPLY,
+            UHID_CREATE2,
+            UHID_INPUT2,
+            UHID_SET_REPORT,
             UHID_SET_REPORT_REPLY,
         ];
         for i in 0..events.len() {
@@ -111,7 +120,12 @@ mod tests {
 
     #[test]
     fn test_bus_types_distinct() {
-        let buses = [BUS_USB_UHID, BUS_BLUETOOTH_UHID, BUS_I2C_UHID, BUS_VIRTUAL_UHID];
+        let buses = [
+            BUS_USB_UHID,
+            BUS_BLUETOOTH_UHID,
+            BUS_I2C_UHID,
+            BUS_VIRTUAL_UHID,
+        ];
         for i in 0..buses.len() {
             for j in (i + 1)..buses.len() {
                 assert_ne!(buses[i], buses[j]);

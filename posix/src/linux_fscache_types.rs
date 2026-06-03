@@ -80,8 +80,10 @@ mod tests {
     #[test]
     fn test_cookie_states_distinct() {
         let states = [
-            FSCACHE_COOKIE_LOOKING_UP, FSCACHE_COOKIE_NO_DATA,
-            FSCACHE_COOKIE_CACHED, FSCACHE_COOKIE_INVALIDATING,
+            FSCACHE_COOKIE_LOOKING_UP,
+            FSCACHE_COOKIE_NO_DATA,
+            FSCACHE_COOKIE_CACHED,
+            FSCACHE_COOKIE_INVALIDATING,
             FSCACHE_COOKIE_RETIRING,
         ];
         for i in 0..states.len() {
@@ -106,7 +108,8 @@ mod tests {
     #[test]
     fn test_coherency_distinct() {
         let states = [
-            FSCACHE_COHERENT_OK, FSCACHE_COHERENT_NEEDS_CHECK,
+            FSCACHE_COHERENT_OK,
+            FSCACHE_COHERENT_NEEDS_CHECK,
             FSCACHE_COHERENT_STALE,
         ];
         for i in 0..states.len() {

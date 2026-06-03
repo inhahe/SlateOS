@@ -116,9 +116,13 @@ mod tests {
     #[test]
     fn test_gadget_speeds_distinct() {
         let speeds = [
-            USB_SPEED_UNKNOWN, USB_GADGET_SPEED_LOW, USB_GADGET_SPEED_FULL,
-            USB_GADGET_SPEED_HIGH, USB_GADGET_SPEED_WIRELESS,
-            USB_GADGET_SPEED_SUPER, USB_GADGET_SPEED_SUPER_PLUS,
+            USB_SPEED_UNKNOWN,
+            USB_GADGET_SPEED_LOW,
+            USB_GADGET_SPEED_FULL,
+            USB_GADGET_SPEED_HIGH,
+            USB_GADGET_SPEED_WIRELESS,
+            USB_GADGET_SPEED_SUPER,
+            USB_GADGET_SPEED_SUPER_PLUS,
         ];
         for i in 0..speeds.len() {
             for j in (i + 1)..speeds.len() {
@@ -130,9 +134,12 @@ mod tests {
     #[test]
     fn test_ep_caps_no_overlap() {
         let caps = [
-            USB_EP_CAPS_TYPE_CONTROL, USB_EP_CAPS_TYPE_ISO,
-            USB_EP_CAPS_TYPE_BULK, USB_EP_CAPS_TYPE_INT,
-            USB_EP_CAPS_DIR_IN, USB_EP_CAPS_DIR_OUT,
+            USB_EP_CAPS_TYPE_CONTROL,
+            USB_EP_CAPS_TYPE_ISO,
+            USB_EP_CAPS_TYPE_BULK,
+            USB_EP_CAPS_TYPE_INT,
+            USB_EP_CAPS_DIR_IN,
+            USB_EP_CAPS_DIR_OUT,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
@@ -144,9 +151,12 @@ mod tests {
     #[test]
     fn test_ep_caps_power_of_two() {
         let caps = [
-            USB_EP_CAPS_TYPE_CONTROL, USB_EP_CAPS_TYPE_ISO,
-            USB_EP_CAPS_TYPE_BULK, USB_EP_CAPS_TYPE_INT,
-            USB_EP_CAPS_DIR_IN, USB_EP_CAPS_DIR_OUT,
+            USB_EP_CAPS_TYPE_CONTROL,
+            USB_EP_CAPS_TYPE_ISO,
+            USB_EP_CAPS_TYPE_BULK,
+            USB_EP_CAPS_TYPE_INT,
+            USB_EP_CAPS_DIR_IN,
+            USB_EP_CAPS_DIR_OUT,
         ];
         for c in &caps {
             assert!(c.is_power_of_two());
@@ -156,8 +166,12 @@ mod tests {
     #[test]
     fn test_gadget_states_distinct() {
         let states = [
-            USB_STATE_NOTATTACHED, USB_STATE_ATTACHED, USB_STATE_POWERED,
-            USB_STATE_DEFAULT, USB_STATE_ADDRESS, USB_STATE_CONFIGURED,
+            USB_STATE_NOTATTACHED,
+            USB_STATE_ATTACHED,
+            USB_STATE_POWERED,
+            USB_STATE_DEFAULT,
+            USB_STATE_ADDRESS,
+            USB_STATE_CONFIGURED,
             USB_STATE_SUSPENDED,
         ];
         for i in 0..states.len() {
@@ -170,9 +184,15 @@ mod tests {
     #[test]
     fn test_func_classes_distinct() {
         let funcs = [
-            USB_FUNC_ACM, USB_FUNC_ECM, USB_FUNC_NCM,
-            USB_FUNC_MASS_STORAGE, USB_FUNC_HID, USB_FUNC_RNDIS,
-            USB_FUNC_UAC, USB_FUNC_UVC, USB_FUNC_PRINTER,
+            USB_FUNC_ACM,
+            USB_FUNC_ECM,
+            USB_FUNC_NCM,
+            USB_FUNC_MASS_STORAGE,
+            USB_FUNC_HID,
+            USB_FUNC_RNDIS,
+            USB_FUNC_UAC,
+            USB_FUNC_UVC,
+            USB_FUNC_PRINTER,
         ];
         for i in 0..funcs.len() {
             for j in (i + 1)..funcs.len() {

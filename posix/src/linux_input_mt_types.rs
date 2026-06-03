@@ -56,8 +56,7 @@ mod tests {
         let tools = [MT_TOOL_FINGER, MT_TOOL_PEN, MT_TOOL_PALM, MT_TOOL_DIAL];
         for i in 0..tools.len() {
             for j in (i + 1)..tools.len() {
-                assert_ne!(tools[i], tools[j],
-                    "MT tool types {} and {} collide", i, j);
+                assert_ne!(tools[i], tools[j], "MT tool types {} and {} collide", i, j);
             }
         }
     }
@@ -83,16 +82,26 @@ mod tests {
     #[test]
     fn test_protocol_flags_no_overlap() {
         let flags = [
-            INPUT_MT_POINTER, INPUT_MT_DIRECT,
-            INPUT_MT_DROP_UNUSED, INPUT_MT_TRACK,
+            INPUT_MT_POINTER,
+            INPUT_MT_DIRECT,
+            INPUT_MT_DROP_UNUSED,
+            INPUT_MT_TRACK,
             INPUT_MT_SEMI_MT,
         ];
         for i in 0..flags.len() {
-            assert!(flags[i].is_power_of_two(),
-                "flag 0x{:04X} is not power of two", flags[i]);
+            assert!(
+                flags[i].is_power_of_two(),
+                "flag 0x{:04X} is not power of two",
+                flags[i]
+            );
             for j in (i + 1)..flags.len() {
-                assert_eq!(flags[i] & flags[j], 0,
-                    "flags 0x{:04X} and 0x{:04X} overlap", flags[i], flags[j]);
+                assert_eq!(
+                    flags[i] & flags[j],
+                    0,
+                    "flags 0x{:04X} and 0x{:04X} overlap",
+                    flags[i],
+                    flags[j]
+                );
             }
         }
     }

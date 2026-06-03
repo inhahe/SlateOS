@@ -95,11 +95,24 @@ mod tests {
     #[test]
     fn test_field_ids_distinct() {
         let fields = [
-            AUDIT_PID, AUDIT_UID, AUDIT_EUID, AUDIT_SUID,
-            AUDIT_FSUID, AUDIT_GID, AUDIT_EGID, AUDIT_SGID,
-            AUDIT_FSGID, AUDIT_LOGINUID, AUDIT_ARCH, AUDIT_MSGTYPE,
-            AUDIT_PERS, AUDIT_OBJ_UID, AUDIT_OBJ_GID, AUDIT_PPID,
-            AUDIT_EXIT, AUDIT_EXE,
+            AUDIT_PID,
+            AUDIT_UID,
+            AUDIT_EUID,
+            AUDIT_SUID,
+            AUDIT_FSUID,
+            AUDIT_GID,
+            AUDIT_EGID,
+            AUDIT_SGID,
+            AUDIT_FSGID,
+            AUDIT_LOGINUID,
+            AUDIT_ARCH,
+            AUDIT_MSGTYPE,
+            AUDIT_PERS,
+            AUDIT_OBJ_UID,
+            AUDIT_OBJ_GID,
+            AUDIT_PPID,
+            AUDIT_EXIT,
+            AUDIT_EXE,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {
@@ -111,9 +124,13 @@ mod tests {
     #[test]
     fn test_operators_distinct() {
         let ops = [
-            AUDIT_EQUAL, AUDIT_NOT_EQUAL, AUDIT_LESS_THAN,
-            AUDIT_LESS_THAN_OR_EQUAL, AUDIT_GREATER_THAN,
-            AUDIT_GREATER_THAN_OR_EQUAL, AUDIT_BIT_MASK,
+            AUDIT_EQUAL,
+            AUDIT_NOT_EQUAL,
+            AUDIT_LESS_THAN,
+            AUDIT_LESS_THAN_OR_EQUAL,
+            AUDIT_GREATER_THAN,
+            AUDIT_GREATER_THAN_OR_EQUAL,
+            AUDIT_BIT_MASK,
             AUDIT_BIT_TEST,
         ];
         for i in 0..ops.len() {
@@ -126,8 +143,12 @@ mod tests {
     #[test]
     fn test_filter_lists_distinct() {
         let filters = [
-            AUDIT_FILTER_USER, AUDIT_FILTER_TASK, AUDIT_FILTER_ENTRY,
-            AUDIT_FILTER_WATCH, AUDIT_FILTER_EXIT, AUDIT_FILTER_FS,
+            AUDIT_FILTER_USER,
+            AUDIT_FILTER_TASK,
+            AUDIT_FILTER_ENTRY,
+            AUDIT_FILTER_WATCH,
+            AUDIT_FILTER_EXIT,
+            AUDIT_FILTER_FS,
         ];
         for i in 0..filters.len() {
             for j in (i + 1)..filters.len() {

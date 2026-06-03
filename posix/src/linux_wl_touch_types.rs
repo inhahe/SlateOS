@@ -35,9 +35,13 @@ mod tests {
     #[test]
     fn test_touch_events_distinct() {
         let events = [
-            WL_TOUCH_DOWN, WL_TOUCH_UP, WL_TOUCH_MOTION,
-            WL_TOUCH_FRAME, WL_TOUCH_CANCEL,
-            WL_TOUCH_SHAPE, WL_TOUCH_ORIENTATION,
+            WL_TOUCH_DOWN,
+            WL_TOUCH_UP,
+            WL_TOUCH_MOTION,
+            WL_TOUCH_FRAME,
+            WL_TOUCH_CANCEL,
+            WL_TOUCH_SHAPE,
+            WL_TOUCH_ORIENTATION,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

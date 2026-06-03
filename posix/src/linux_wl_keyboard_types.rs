@@ -50,22 +50,29 @@ mod tests {
 
     #[test]
     fn test_key_states_distinct() {
-        assert_ne!(WL_KEYBOARD_KEY_STATE_RELEASED,
-                   WL_KEYBOARD_KEY_STATE_PRESSED);
+        assert_ne!(
+            WL_KEYBOARD_KEY_STATE_RELEASED,
+            WL_KEYBOARD_KEY_STATE_PRESSED
+        );
     }
 
     #[test]
     fn test_keymap_formats_distinct() {
-        assert_ne!(WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP,
-                   WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1);
+        assert_ne!(
+            WL_KEYBOARD_KEYMAP_FORMAT_NO_KEYMAP,
+            WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1
+        );
     }
 
     #[test]
     fn test_modifier_indices_distinct() {
         let mods = [
-            WL_KEYBOARD_MOD_SHIFT, WL_KEYBOARD_MOD_CAPS,
-            WL_KEYBOARD_MOD_CTRL, WL_KEYBOARD_MOD_ALT,
-            WL_KEYBOARD_MOD_NUM, WL_KEYBOARD_MOD_LOGO,
+            WL_KEYBOARD_MOD_SHIFT,
+            WL_KEYBOARD_MOD_CAPS,
+            WL_KEYBOARD_MOD_CTRL,
+            WL_KEYBOARD_MOD_ALT,
+            WL_KEYBOARD_MOD_NUM,
+            WL_KEYBOARD_MOD_LOGO,
         ];
         for i in 0..mods.len() {
             for j in (i + 1)..mods.len() {

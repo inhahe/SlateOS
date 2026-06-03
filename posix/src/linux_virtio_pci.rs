@@ -83,9 +83,12 @@ mod tests {
     #[test]
     fn test_cap_types_distinct() {
         let caps = [
-            VIRTIO_PCI_CAP_COMMON_CFG, VIRTIO_PCI_CAP_NOTIFY_CFG,
-            VIRTIO_PCI_CAP_ISR_CFG, VIRTIO_PCI_CAP_DEVICE_CFG,
-            VIRTIO_PCI_CAP_PCI_CFG, VIRTIO_PCI_CAP_SHARED_MEMORY_CFG,
+            VIRTIO_PCI_CAP_COMMON_CFG,
+            VIRTIO_PCI_CAP_NOTIFY_CFG,
+            VIRTIO_PCI_CAP_ISR_CFG,
+            VIRTIO_PCI_CAP_DEVICE_CFG,
+            VIRTIO_PCI_CAP_PCI_CFG,
+            VIRTIO_PCI_CAP_SHARED_MEMORY_CFG,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
@@ -97,10 +100,14 @@ mod tests {
     #[test]
     fn test_legacy_offsets_distinct() {
         let offsets = [
-            VIRTIO_PCI_HOST_FEATURES, VIRTIO_PCI_GUEST_FEATURES,
-            VIRTIO_PCI_QUEUE_PFN, VIRTIO_PCI_QUEUE_NUM,
-            VIRTIO_PCI_QUEUE_SEL, VIRTIO_PCI_QUEUE_NOTIFY,
-            VIRTIO_PCI_STATUS, VIRTIO_PCI_ISR,
+            VIRTIO_PCI_HOST_FEATURES,
+            VIRTIO_PCI_GUEST_FEATURES,
+            VIRTIO_PCI_QUEUE_PFN,
+            VIRTIO_PCI_QUEUE_NUM,
+            VIRTIO_PCI_QUEUE_SEL,
+            VIRTIO_PCI_QUEUE_NOTIFY,
+            VIRTIO_PCI_STATUS,
+            VIRTIO_PCI_ISR,
         ];
         for i in 0..offsets.len() {
             for j in (i + 1)..offsets.len() {

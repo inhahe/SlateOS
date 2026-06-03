@@ -84,8 +84,10 @@ mod tests {
     #[test]
     fn test_vdso_modes_distinct() {
         let modes = [
-            VDSO_CLOCKMODE_NONE, VDSO_CLOCKMODE_TSC,
-            VDSO_CLOCKMODE_PVCLOCK, VDSO_CLOCKMODE_HVCLOCK,
+            VDSO_CLOCKMODE_NONE,
+            VDSO_CLOCKMODE_TSC,
+            VDSO_CLOCKMODE_PVCLOCK,
+            VDSO_CLOCKMODE_HVCLOCK,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

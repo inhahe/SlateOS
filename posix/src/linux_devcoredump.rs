@@ -100,8 +100,10 @@ mod tests {
     #[test]
     fn test_source_types_distinct() {
         let srcs = [
-            DEV_COREDUMP_SRC_FW, DEV_COREDUMP_SRC_HW,
-            DEV_COREDUMP_SRC_SW, DEV_COREDUMP_SRC_USER,
+            DEV_COREDUMP_SRC_FW,
+            DEV_COREDUMP_SRC_HW,
+            DEV_COREDUMP_SRC_SW,
+            DEV_COREDUMP_SRC_USER,
         ];
         for i in 0..srcs.len() {
             for j in (i + 1)..srcs.len() {

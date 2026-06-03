@@ -78,8 +78,7 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            DT_UNKNOWN, DT_FIFO, DT_CHR, DT_DIR,
-            DT_BLK, DT_REG, DT_LNK, DT_SOCK, DT_WHT,
+            DT_UNKNOWN, DT_FIFO, DT_CHR, DT_DIR, DT_BLK, DT_REG, DT_LNK, DT_SOCK, DT_WHT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -106,8 +105,10 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            DIRENT64_OFF_INO, DIRENT64_OFF_OFF,
-            DIRENT64_OFF_RECLEN, DIRENT64_OFF_TYPE,
+            DIRENT64_OFF_INO,
+            DIRENT64_OFF_OFF,
+            DIRENT64_OFF_RECLEN,
+            DIRENT64_OFF_TYPE,
             DIRENT64_OFF_NAME,
         ];
         for i in 1..offsets.len() {

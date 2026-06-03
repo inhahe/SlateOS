@@ -58,9 +58,14 @@ mod tests {
     #[test]
     fn test_clone_new_flags_no_overlap() {
         let flags = [
-            CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC,
-            CLONE_NEWUSER, CLONE_NEWPID, CLONE_NEWNET,
-            CLONE_NEWCGROUP, CLONE_NEWTIME,
+            CLONE_NEWNS,
+            CLONE_NEWUTS,
+            CLONE_NEWIPC,
+            CLONE_NEWUSER,
+            CLONE_NEWPID,
+            CLONE_NEWNET,
+            CLONE_NEWCGROUP,
+            CLONE_NEWTIME,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -72,8 +77,14 @@ mod tests {
     #[test]
     fn test_ns_types_distinct() {
         let types = [
-            NSTYPE_MNT, NSTYPE_UTS, NSTYPE_IPC, NSTYPE_NET,
-            NSTYPE_PID, NSTYPE_USER, NSTYPE_CGROUP, NSTYPE_TIME,
+            NSTYPE_MNT,
+            NSTYPE_UTS,
+            NSTYPE_IPC,
+            NSTYPE_NET,
+            NSTYPE_PID,
+            NSTYPE_USER,
+            NSTYPE_CGROUP,
+            NSTYPE_TIME,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

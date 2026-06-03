@@ -23,20 +23,17 @@ pub const IOCTL_MEI_NOTIFY_GET: u32 = 0x8004_4803;
 
 /// AMT HECI client UUID bytes.
 pub const MEI_IAMTHIF_UUID: [u8; 16] = [
-    0x12, 0xf8, 0x00, 0x28, 0xb4, 0xb7, 0x4b, 0x2d,
-    0xac, 0xa8, 0x46, 0xe0, 0xff, 0x65, 0x81, 0x4c,
+    0x12, 0xf8, 0x00, 0x28, 0xb4, 0xb7, 0x4b, 0x2d, 0xac, 0xa8, 0x46, 0xe0, 0xff, 0x65, 0x81, 0x4c,
 ];
 
 /// Watchdog client UUID bytes.
 pub const MEI_WD_UUID: [u8; 16] = [
-    0x05, 0xb7, 0x9a, 0x6f, 0x45, 0x97, 0x4c, 0x62,
-    0xa1, 0x4c, 0x55, 0x41, 0xf1, 0xf0, 0xa6, 0xad,
+    0x05, 0xb7, 0x9a, 0x6f, 0x45, 0x97, 0x4c, 0x62, 0xa1, 0x4c, 0x55, 0x41, 0xf1, 0xf0, 0xa6, 0xad,
 ];
 
 /// MKHI (Management Kernel Host Interface) UUID bytes.
 pub const MEI_MKHI_UUID: [u8; 16] = [
-    0x8e, 0x6a, 0x6e, 0x72, 0x08, 0x86, 0xa4, 0x49,
-    0x9c, 0x5f, 0xb3, 0xb0, 0x5d, 0xee, 0xa9, 0x4e,
+    0x8e, 0x6a, 0x6e, 0x72, 0x08, 0x86, 0xa4, 0x49, 0x9c, 0x5f, 0xb3, 0xb0, 0x5d, 0xee, 0xa9, 0x4e,
 ];
 
 // ---------------------------------------------------------------------------
@@ -116,14 +113,22 @@ mod tests {
     #[test]
     fn test_hbm_types_distinct() {
         let types = [
-            MEI_HBM_HOST_START_REQ, MEI_HBM_HOST_START_RES,
-            MEI_HBM_HOST_STOP_REQ, MEI_HBM_HOST_STOP_RES,
-            MEI_HBM_ME_STOP_REQ, MEI_HBM_HOST_ENUM_REQ,
-            MEI_HBM_HOST_ENUM_RES, MEI_HBM_CLIENT_PROP_REQ,
-            MEI_HBM_CLIENT_PROP_RES, MEI_HBM_CLIENT_CONNECT_REQ,
-            MEI_HBM_CLIENT_CONNECT_RES, MEI_HBM_CLIENT_DISCONNECT_REQ,
-            MEI_HBM_CLIENT_DISCONNECT_RES, MEI_HBM_FLOW_CONTROL,
-            MEI_HBM_NOTIFICATION_REQ, MEI_HBM_NOTIFICATION_RES,
+            MEI_HBM_HOST_START_REQ,
+            MEI_HBM_HOST_START_RES,
+            MEI_HBM_HOST_STOP_REQ,
+            MEI_HBM_HOST_STOP_RES,
+            MEI_HBM_ME_STOP_REQ,
+            MEI_HBM_HOST_ENUM_REQ,
+            MEI_HBM_HOST_ENUM_RES,
+            MEI_HBM_CLIENT_PROP_REQ,
+            MEI_HBM_CLIENT_PROP_RES,
+            MEI_HBM_CLIENT_CONNECT_REQ,
+            MEI_HBM_CLIENT_CONNECT_RES,
+            MEI_HBM_CLIENT_DISCONNECT_REQ,
+            MEI_HBM_CLIENT_DISCONNECT_RES,
+            MEI_HBM_FLOW_CONTROL,
+            MEI_HBM_NOTIFICATION_REQ,
+            MEI_HBM_NOTIFICATION_RES,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -144,8 +149,10 @@ mod tests {
     #[test]
     fn test_conn_status_distinct() {
         let statuses = [
-            MEI_CL_CONN_SUCCESS, MEI_CL_CONN_NOT_FOUND,
-            MEI_CL_CONN_ALREADY_STARTED, MEI_CL_CONN_OUT_OF_RESOURCES,
+            MEI_CL_CONN_SUCCESS,
+            MEI_CL_CONN_NOT_FOUND,
+            MEI_CL_CONN_ALREADY_STARTED,
+            MEI_CL_CONN_OUT_OF_RESOURCES,
             MEI_CL_CONN_MESSAGE_SMALL,
         ];
         for i in 0..statuses.len() {

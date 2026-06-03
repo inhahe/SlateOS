@@ -89,8 +89,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            MODULE_STATE_LIVE, MODULE_STATE_COMING,
-            MODULE_STATE_GOING, MODULE_STATE_UNFORMED,
+            MODULE_STATE_LIVE,
+            MODULE_STATE_COMING,
+            MODULE_STATE_GOING,
+            MODULE_STATE_UNFORMED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -102,9 +104,13 @@ mod tests {
     #[test]
     fn test_taint_flags_no_overlap() {
         let flags = [
-            TAINT_PROPRIETARY_MODULE, TAINT_FORCED_MODULE,
-            TAINT_OOT_MODULE, TAINT_FORCED_RMMOD,
-            TAINT_STAGING, TAINT_UNSIGNED_MODULE, TAINT_TEST,
+            TAINT_PROPRIETARY_MODULE,
+            TAINT_FORCED_MODULE,
+            TAINT_OOT_MODULE,
+            TAINT_FORCED_RMMOD,
+            TAINT_STAGING,
+            TAINT_UNSIGNED_MODULE,
+            TAINT_TEST,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

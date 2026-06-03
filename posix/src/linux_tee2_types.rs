@@ -80,8 +80,10 @@ mod tests {
     #[test]
     fn test_origins_distinct() {
         let origins = [
-            TEEC_ORIGIN_API, TEEC_ORIGIN_COMMS,
-            TEEC_ORIGIN_TEE, TEEC_ORIGIN_TRUSTED_APP,
+            TEEC_ORIGIN_API,
+            TEEC_ORIGIN_COMMS,
+            TEEC_ORIGIN_TEE,
+            TEEC_ORIGIN_TRUSTED_APP,
         ];
         for i in 0..origins.len() {
             for j in (i + 1)..origins.len() {
@@ -93,9 +95,12 @@ mod tests {
     #[test]
     fn test_login_types_distinct() {
         let logins = [
-            TEEC_LOGIN_PUBLIC, TEEC_LOGIN_USER,
-            TEEC_LOGIN_GROUP, TEEC_LOGIN_APPLICATION,
-            TEEC_LOGIN_USER_APPLICATION, TEEC_LOGIN_GROUP_APPLICATION,
+            TEEC_LOGIN_PUBLIC,
+            TEEC_LOGIN_USER,
+            TEEC_LOGIN_GROUP,
+            TEEC_LOGIN_APPLICATION,
+            TEEC_LOGIN_USER_APPLICATION,
+            TEEC_LOGIN_GROUP_APPLICATION,
         ];
         for i in 0..logins.len() {
             for j in (i + 1)..logins.len() {
@@ -107,11 +112,17 @@ mod tests {
     #[test]
     fn test_param_types_distinct() {
         let params = [
-            TEEC_NONE, TEEC_VALUE_INPUT, TEEC_VALUE_OUTPUT,
-            TEEC_VALUE_INOUT, TEEC_MEMREF_TEMP_INPUT,
-            TEEC_MEMREF_TEMP_OUTPUT, TEEC_MEMREF_TEMP_INOUT,
-            TEEC_MEMREF_WHOLE, TEEC_MEMREF_PARTIAL_INPUT,
-            TEEC_MEMREF_PARTIAL_OUTPUT, TEEC_MEMREF_PARTIAL_INOUT,
+            TEEC_NONE,
+            TEEC_VALUE_INPUT,
+            TEEC_VALUE_OUTPUT,
+            TEEC_VALUE_INOUT,
+            TEEC_MEMREF_TEMP_INPUT,
+            TEEC_MEMREF_TEMP_OUTPUT,
+            TEEC_MEMREF_TEMP_INOUT,
+            TEEC_MEMREF_WHOLE,
+            TEEC_MEMREF_PARTIAL_INPUT,
+            TEEC_MEMREF_PARTIAL_OUTPUT,
+            TEEC_MEMREF_PARTIAL_INOUT,
         ];
         for i in 0..params.len() {
             for j in (i + 1)..params.len() {

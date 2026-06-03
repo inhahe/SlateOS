@@ -101,11 +101,21 @@ mod tests {
     #[test]
     fn test_usage_pages_distinct() {
         let pages = [
-            HID_UP_UNDEFINED, HID_UP_GENDESK, HID_UP_SIMULATION,
-            HID_UP_VR, HID_UP_SPORT, HID_UP_GAME,
-            HID_UP_GENDEVCTRLS, HID_UP_KEYBOARD, HID_UP_LED,
-            HID_UP_BUTTON, HID_UP_ORDINAL, HID_UP_TELEPHONY,
-            HID_UP_CONSUMER, HID_UP_DIGITIZER, HID_UP_PID,
+            HID_UP_UNDEFINED,
+            HID_UP_GENDESK,
+            HID_UP_SIMULATION,
+            HID_UP_VR,
+            HID_UP_SPORT,
+            HID_UP_GAME,
+            HID_UP_GENDEVCTRLS,
+            HID_UP_KEYBOARD,
+            HID_UP_LED,
+            HID_UP_BUTTON,
+            HID_UP_ORDINAL,
+            HID_UP_TELEPHONY,
+            HID_UP_CONSUMER,
+            HID_UP_DIGITIZER,
+            HID_UP_PID,
         ];
         for i in 0..pages.len() {
             for j in (i + 1)..pages.len() {
@@ -124,8 +134,10 @@ mod tests {
     #[test]
     fn test_main_items_distinct() {
         let items = [
-            HID_MAIN_ITEM_INPUT, HID_MAIN_ITEM_OUTPUT,
-            HID_MAIN_ITEM_FEATURE, HID_MAIN_ITEM_COLLECTION,
+            HID_MAIN_ITEM_INPUT,
+            HID_MAIN_ITEM_OUTPUT,
+            HID_MAIN_ITEM_FEATURE,
+            HID_MAIN_ITEM_COLLECTION,
             HID_MAIN_ITEM_END_COLLECTION,
         ];
         for i in 0..items.len() {

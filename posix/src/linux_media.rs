@@ -110,12 +110,18 @@ mod tests {
     #[test]
     fn test_entity_types_distinct() {
         let types = [
-            MEDIA_ENT_F_UNKNOWN, MEDIA_ENT_F_IO_V4L,
-            MEDIA_ENT_F_IO_DTV, MEDIA_ENT_F_IO_VBI,
-            MEDIA_ENT_F_IO_SWRADIO, MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN,
-            MEDIA_ENT_F_DTV_DEMOD, MEDIA_ENT_F_CAM_SENSOR,
-            MEDIA_ENT_F_FLASH, MEDIA_ENT_F_LENS,
-            MEDIA_ENT_F_TUNER, MEDIA_ENT_F_PROC_VIDEO_ISP,
+            MEDIA_ENT_F_UNKNOWN,
+            MEDIA_ENT_F_IO_V4L,
+            MEDIA_ENT_F_IO_DTV,
+            MEDIA_ENT_F_IO_VBI,
+            MEDIA_ENT_F_IO_SWRADIO,
+            MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN,
+            MEDIA_ENT_F_DTV_DEMOD,
+            MEDIA_ENT_F_CAM_SENSOR,
+            MEDIA_ENT_F_FLASH,
+            MEDIA_ENT_F_LENS,
+            MEDIA_ENT_F_TUNER,
+            MEDIA_ENT_F_PROC_VIDEO_ISP,
             MEDIA_ENT_F_PROC_VIDEO_PIXEL_FORMATTER,
         ];
         for i in 0..types.len() {
@@ -128,7 +134,8 @@ mod tests {
     #[test]
     fn test_pad_flags_are_powers_of_two() {
         let flags = [
-            MEDIA_PAD_FL_SINK, MEDIA_PAD_FL_SOURCE,
+            MEDIA_PAD_FL_SINK,
+            MEDIA_PAD_FL_SOURCE,
             MEDIA_PAD_FL_MUST_CONNECT,
         ];
         for flag in &flags {
@@ -152,9 +159,12 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            MEDIA_IOC_DEVICE_INFO, MEDIA_IOC_ENUM_ENTITIES,
-            MEDIA_IOC_ENUM_LINKS, MEDIA_IOC_SETUP_LINK,
-            MEDIA_IOC_G_TOPOLOGY, MEDIA_IOC_REQUEST_ALLOC,
+            MEDIA_IOC_DEVICE_INFO,
+            MEDIA_IOC_ENUM_ENTITIES,
+            MEDIA_IOC_ENUM_LINKS,
+            MEDIA_IOC_SETUP_LINK,
+            MEDIA_IOC_G_TOPOLOGY,
+            MEDIA_IOC_REQUEST_ALLOC,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

@@ -7,11 +7,11 @@
 // Re-exports from linux_netfilter
 // ---------------------------------------------------------------------------
 
-pub use crate::linux_netfilter::NF_DROP;
 pub use crate::linux_netfilter::NF_ACCEPT;
-pub use crate::linux_netfilter::NF_STOLEN;
+pub use crate::linux_netfilter::NF_DROP;
 pub use crate::linux_netfilter::NF_QUEUE;
 pub use crate::linux_netfilter::NF_REPEAT;
+pub use crate::linux_netfilter::NF_STOLEN;
 pub use crate::linux_netfilter::NF_STOP;
 pub use crate::linux_netfilter::NFPROTO_IPV4;
 
@@ -82,11 +82,17 @@ mod tests {
 
     #[test]
     fn test_hook_names_match_inet() {
-        assert_eq!(NF_IP_PRE_ROUTING, crate::linux_netfilter::NF_INET_PRE_ROUTING);
+        assert_eq!(
+            NF_IP_PRE_ROUTING,
+            crate::linux_netfilter::NF_INET_PRE_ROUTING
+        );
         assert_eq!(NF_IP_LOCAL_IN, crate::linux_netfilter::NF_INET_LOCAL_IN);
         assert_eq!(NF_IP_FORWARD, crate::linux_netfilter::NF_INET_FORWARD);
         assert_eq!(NF_IP_LOCAL_OUT, crate::linux_netfilter::NF_INET_LOCAL_OUT);
-        assert_eq!(NF_IP_POST_ROUTING, crate::linux_netfilter::NF_INET_POST_ROUTING);
+        assert_eq!(
+            NF_IP_POST_ROUTING,
+            crate::linux_netfilter::NF_INET_POST_ROUTING
+        );
     }
 
     #[test]

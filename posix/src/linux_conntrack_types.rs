@@ -94,8 +94,11 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            IP_CT_ESTABLISHED, IP_CT_RELATED, IP_CT_NEW,
-            IP_CT_ESTABLISHED_REPLY, IP_CT_RELATED_REPLY,
+            IP_CT_ESTABLISHED,
+            IP_CT_RELATED,
+            IP_CT_NEW,
+            IP_CT_ESTABLISHED_REPLY,
+            IP_CT_RELATED_REPLY,
             IP_CT_UNTRACKED,
         ];
         for i in 0..states.len() {
@@ -113,11 +116,21 @@ mod tests {
     #[test]
     fn test_status_flags_powers_of_two() {
         let flags = [
-            IPS_SEEN_REPLY, IPS_ASSURED, IPS_CONFIRMED,
-            IPS_SRC_NAT, IPS_DST_NAT, IPS_SEQ_ADJUST,
-            IPS_SRC_NAT_DONE, IPS_DST_NAT_DONE, IPS_DYING,
-            IPS_FIXED_TIMEOUT, IPS_TEMPLATE, IPS_UNTRACKED,
-            IPS_HELPER, IPS_OFFLOAD, IPS_HW_OFFLOAD,
+            IPS_SEEN_REPLY,
+            IPS_ASSURED,
+            IPS_CONFIRMED,
+            IPS_SRC_NAT,
+            IPS_DST_NAT,
+            IPS_SEQ_ADJUST,
+            IPS_SRC_NAT_DONE,
+            IPS_DST_NAT_DONE,
+            IPS_DYING,
+            IPS_FIXED_TIMEOUT,
+            IPS_TEMPLATE,
+            IPS_UNTRACKED,
+            IPS_HELPER,
+            IPS_OFFLOAD,
+            IPS_HW_OFFLOAD,
         ];
         for f in flags {
             assert!(f.is_power_of_two());
@@ -132,9 +145,16 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            IPCT_NEW, IPCT_RELATED, IPCT_DESTROY, IPCT_REPLY,
-            IPCT_ASSURED, IPCT_PROTOINFO, IPCT_HELPER,
-            IPCT_MARK, IPCT_NATSEQADJ, IPCT_SECMARK,
+            IPCT_NEW,
+            IPCT_RELATED,
+            IPCT_DESTROY,
+            IPCT_REPLY,
+            IPCT_ASSURED,
+            IPCT_PROTOINFO,
+            IPCT_HELPER,
+            IPCT_MARK,
+            IPCT_NATSEQADJ,
+            IPCT_SECMARK,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

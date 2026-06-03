@@ -123,9 +123,12 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            BINDER_WRITE_READ, BINDER_SET_MAX_THREADS,
-            BINDER_SET_CONTEXT_MGR, BINDER_THREAD_EXIT,
-            BINDER_VERSION, BINDER_GET_NODE_INFO_FOR_REF,
+            BINDER_WRITE_READ,
+            BINDER_SET_MAX_THREADS,
+            BINDER_SET_CONTEXT_MGR,
+            BINDER_THREAD_EXIT,
+            BINDER_VERSION,
+            BINDER_GET_NODE_INFO_FOR_REF,
             BINDER_SET_CONTEXT_MGR_EXT,
             BINDER_ENABLE_ONEWAY_SPAM_DETECTION,
         ];
@@ -139,11 +142,19 @@ mod tests {
     #[test]
     fn test_br_commands_distinct() {
         let cmds = [
-            BR_NOOP, BR_TRANSACTION, BR_REPLY,
-            BR_DEAD_REPLY, BR_TRANSACTION_COMPLETE,
-            BR_INCREFS, BR_ACQUIRE, BR_RELEASE, BR_DECREFS,
-            BR_DEAD_BINDER, BR_CLEAR_DEATH_NOTIFICATION_DONE,
-            BR_FAILED_REPLY, BR_SPAWN_LOOPER,
+            BR_NOOP,
+            BR_TRANSACTION,
+            BR_REPLY,
+            BR_DEAD_REPLY,
+            BR_TRANSACTION_COMPLETE,
+            BR_INCREFS,
+            BR_ACQUIRE,
+            BR_RELEASE,
+            BR_DECREFS,
+            BR_DEAD_BINDER,
+            BR_CLEAR_DEATH_NOTIFICATION_DONE,
+            BR_FAILED_REPLY,
+            BR_SPAWN_LOOPER,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -155,12 +166,21 @@ mod tests {
     #[test]
     fn test_bc_commands_distinct() {
         let cmds = [
-            BC_TRANSACTION, BC_REPLY, BC_FREE_BUFFER,
-            BC_INCREFS, BC_ACQUIRE, BC_RELEASE, BC_DECREFS,
-            BC_INCREFS_DONE, BC_ACQUIRE_DONE,
-            BC_REGISTER_LOOPER, BC_ENTER_LOOPER, BC_EXIT_LOOPER,
+            BC_TRANSACTION,
+            BC_REPLY,
+            BC_FREE_BUFFER,
+            BC_INCREFS,
+            BC_ACQUIRE,
+            BC_RELEASE,
+            BC_DECREFS,
+            BC_INCREFS_DONE,
+            BC_ACQUIRE_DONE,
+            BC_REGISTER_LOOPER,
+            BC_ENTER_LOOPER,
+            BC_EXIT_LOOPER,
             BC_REQUEST_DEATH_NOTIFICATION,
-            BC_CLEAR_DEATH_NOTIFICATION, BC_DEAD_BINDER_DONE,
+            BC_CLEAR_DEATH_NOTIFICATION,
+            BC_DEAD_BINDER_DONE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -172,8 +192,11 @@ mod tests {
     #[test]
     fn test_transaction_flags_distinct() {
         let flags = [
-            TF_ONE_WAY, TF_ROOT_OBJECT, TF_STATUS_CODE,
-            TF_ACCEPT_FDS, TF_CLEAR_BUF,
+            TF_ONE_WAY,
+            TF_ROOT_OBJECT,
+            TF_STATUS_CODE,
+            TF_ACCEPT_FDS,
+            TF_CLEAR_BUF,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

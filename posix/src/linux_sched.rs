@@ -4,8 +4,8 @@
 //! POSIX `<sched.h>`.
 
 // Re-export base scheduling from sched.rs
-pub use crate::sched::SCHED_OTHER;
 pub use crate::sched::SCHED_FIFO;
+pub use crate::sched::SCHED_OTHER;
 pub use crate::sched::SCHED_RR;
 
 // ---------------------------------------------------------------------------
@@ -102,8 +102,12 @@ mod tests {
     #[test]
     fn test_sched_policies_distinct() {
         let policies = [
-            SCHED_OTHER, SCHED_FIFO, SCHED_RR,
-            SCHED_BATCH, SCHED_IDLE, SCHED_DEADLINE,
+            SCHED_OTHER,
+            SCHED_FIFO,
+            SCHED_RR,
+            SCHED_BATCH,
+            SCHED_IDLE,
+            SCHED_DEADLINE,
         ];
         for i in 0..policies.len() {
             for j in (i + 1)..policies.len() {
@@ -125,11 +129,20 @@ mod tests {
     #[test]
     fn test_clone_flags_no_overlap() {
         let flags = [
-            CLONE_VM, CLONE_FS, CLONE_FILES, CLONE_SIGHAND,
-            CLONE_THREAD, CLONE_NEWNS, CLONE_SETTLS,
-            CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID,
-            CLONE_DETACHED, CLONE_UNTRACED, CLONE_VFORK,
-            CLONE_PIDFD, CLONE_CHILD_SETTID,
+            CLONE_VM,
+            CLONE_FS,
+            CLONE_FILES,
+            CLONE_SIGHAND,
+            CLONE_THREAD,
+            CLONE_NEWNS,
+            CLONE_SETTLS,
+            CLONE_PARENT_SETTID,
+            CLONE_CHILD_CLEARTID,
+            CLONE_DETACHED,
+            CLONE_UNTRACED,
+            CLONE_VFORK,
+            CLONE_PIDFD,
+            CLONE_CHILD_SETTID,
         ];
         // Each flag should be a single bit (power of two).
         for &f in &flags {
@@ -143,8 +156,12 @@ mod tests {
     #[test]
     fn test_namespace_flags_distinct() {
         let ns = [
-            CLONE_NEWPID, CLONE_NEWNS, CLONE_NEWNET,
-            CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWUSER,
+            CLONE_NEWPID,
+            CLONE_NEWNS,
+            CLONE_NEWNET,
+            CLONE_NEWUTS,
+            CLONE_NEWIPC,
+            CLONE_NEWUSER,
             CLONE_NEWCGROUP,
         ];
         for i in 0..ns.len() {

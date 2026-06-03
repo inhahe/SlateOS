@@ -106,10 +106,22 @@ mod tests {
     #[test]
     fn test_tc_categories_no_overlap() {
         let cats = [
-            BLK_TC_READ, BLK_TC_WRITE, BLK_TC_FLUSH, BLK_TC_SYNC,
-            BLK_TC_QUEUE, BLK_TC_REQUEUE, BLK_TC_ISSUE, BLK_TC_COMPLETE,
-            BLK_TC_FS, BLK_TC_PC, BLK_TC_NOTIFY, BLK_TC_AHEAD,
-            BLK_TC_META, BLK_TC_DISCARD, BLK_TC_DRV_DATA, BLK_TC_FUA,
+            BLK_TC_READ,
+            BLK_TC_WRITE,
+            BLK_TC_FLUSH,
+            BLK_TC_SYNC,
+            BLK_TC_QUEUE,
+            BLK_TC_REQUEUE,
+            BLK_TC_ISSUE,
+            BLK_TC_COMPLETE,
+            BLK_TC_FS,
+            BLK_TC_PC,
+            BLK_TC_NOTIFY,
+            BLK_TC_AHEAD,
+            BLK_TC_META,
+            BLK_TC_DISCARD,
+            BLK_TC_DRV_DATA,
+            BLK_TC_FUA,
         ];
         for i in 0..cats.len() {
             assert!(cats[i].is_power_of_two());
@@ -122,12 +134,23 @@ mod tests {
     #[test]
     fn test_ta_actions_distinct() {
         let actions = [
-            BLK_TA_QUEUE, BLK_TA_BACKMERGE, BLK_TA_FRONTMERGE,
-            BLK_TA_GETRQ, BLK_TA_SLEEPRQ, BLK_TA_REQUEUE,
-            BLK_TA_ISSUE, BLK_TA_COMPLETE, BLK_TA_PLUG,
-            BLK_TA_UNPLUG_IO, BLK_TA_UNPLUG_TIMER, BLK_TA_INSERT,
-            BLK_TA_SPLIT, BLK_TA_BOUNCE, BLK_TA_REMAP,
-            BLK_TA_ABORT, BLK_TA_DRV_DATA,
+            BLK_TA_QUEUE,
+            BLK_TA_BACKMERGE,
+            BLK_TA_FRONTMERGE,
+            BLK_TA_GETRQ,
+            BLK_TA_SLEEPRQ,
+            BLK_TA_REQUEUE,
+            BLK_TA_ISSUE,
+            BLK_TA_COMPLETE,
+            BLK_TA_PLUG,
+            BLK_TA_UNPLUG_IO,
+            BLK_TA_UNPLUG_TIMER,
+            BLK_TA_INSERT,
+            BLK_TA_SPLIT,
+            BLK_TA_BOUNCE,
+            BLK_TA_REMAP,
+            BLK_TA_ABORT,
+            BLK_TA_DRV_DATA,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {

@@ -113,8 +113,12 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            F2FS_FT_REG_FILE, F2FS_FT_DIR, F2FS_FT_CHRDEV,
-            F2FS_FT_BLKDEV, F2FS_FT_FIFO, F2FS_FT_SOCK,
+            F2FS_FT_REG_FILE,
+            F2FS_FT_DIR,
+            F2FS_FT_CHRDEV,
+            F2FS_FT_BLKDEV,
+            F2FS_FT_FIFO,
+            F2FS_FT_SOCK,
             F2FS_FT_SYMLINK,
         ];
         for i in 0..types.len() {
@@ -127,8 +131,12 @@ mod tests {
     #[test]
     fn test_cursegs_distinct() {
         let segs = [
-            CURSEG_HOT_DATA, CURSEG_WARM_DATA, CURSEG_COLD_DATA,
-            CURSEG_HOT_NODE, CURSEG_WARM_NODE, CURSEG_COLD_NODE,
+            CURSEG_HOT_DATA,
+            CURSEG_WARM_DATA,
+            CURSEG_COLD_DATA,
+            CURSEG_HOT_NODE,
+            CURSEG_WARM_NODE,
+            CURSEG_COLD_NODE,
         ];
         for i in 0..segs.len() {
             for j in (i + 1)..segs.len() {
@@ -140,9 +148,12 @@ mod tests {
     #[test]
     fn test_feature_flags_no_overlap() {
         let feats = [
-            F2FS_FEATURE_ENCRYPT, F2FS_FEATURE_FLEXIBLE_INLINE_XATTR,
-            F2FS_FEATURE_QUOTA_INO, F2FS_FEATURE_INODE_CRTIME,
-            F2FS_FEATURE_VERITY, F2FS_FEATURE_CASEFOLD,
+            F2FS_FEATURE_ENCRYPT,
+            F2FS_FEATURE_FLEXIBLE_INLINE_XATTR,
+            F2FS_FEATURE_QUOTA_INO,
+            F2FS_FEATURE_INODE_CRTIME,
+            F2FS_FEATURE_VERITY,
+            F2FS_FEATURE_CASEFOLD,
             F2FS_FEATURE_COMPRESSION,
         ];
         for i in 0..feats.len() {
@@ -156,8 +167,10 @@ mod tests {
     #[test]
     fn test_compression_algos_distinct() {
         let algos = [
-            F2FS_COMPRESS_LZO, F2FS_COMPRESS_LZ4,
-            F2FS_COMPRESS_ZSTD, F2FS_COMPRESS_LZORLE,
+            F2FS_COMPRESS_LZO,
+            F2FS_COMPRESS_LZ4,
+            F2FS_COMPRESS_ZSTD,
+            F2FS_COMPRESS_LZORLE,
         ];
         for i in 0..algos.len() {
             for j in (i + 1)..algos.len() {

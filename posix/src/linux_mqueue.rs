@@ -8,13 +8,13 @@
 // ---------------------------------------------------------------------------
 
 pub use crate::mqueue::MqAttr;
-pub use crate::mqueue::mq_open;
 pub use crate::mqueue::mq_close;
-pub use crate::mqueue::mq_unlink;
-pub use crate::mqueue::mq_send;
-pub use crate::mqueue::mq_receive;
 pub use crate::mqueue::mq_getattr;
+pub use crate::mqueue::mq_open;
+pub use crate::mqueue::mq_receive;
+pub use crate::mqueue::mq_send;
 pub use crate::mqueue::mq_setattr;
+pub use crate::mqueue::mq_unlink;
 
 // ---------------------------------------------------------------------------
 // Default limits (from kernel defaults)

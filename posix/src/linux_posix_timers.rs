@@ -76,11 +76,17 @@ mod tests {
     #[test]
     fn test_clock_ids_distinct() {
         let clocks = [
-            CLOCK_REALTIME, CLOCK_MONOTONIC,
-            CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID,
-            CLOCK_MONOTONIC_RAW, CLOCK_REALTIME_COARSE,
-            CLOCK_MONOTONIC_COARSE, CLOCK_BOOTTIME,
-            CLOCK_REALTIME_ALARM, CLOCK_BOOTTIME_ALARM, CLOCK_TAI,
+            CLOCK_REALTIME,
+            CLOCK_MONOTONIC,
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+            CLOCK_BOOTTIME,
+            CLOCK_REALTIME_ALARM,
+            CLOCK_BOOTTIME_ALARM,
+            CLOCK_TAI,
         ];
         for i in 0..clocks.len() {
             for j in (i + 1)..clocks.len() {

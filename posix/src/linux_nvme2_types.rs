@@ -141,14 +141,22 @@ mod tests {
     #[test]
     fn test_admin_cmds_distinct() {
         let cmds = [
-            NVME_ADM_CMD_DELETE_SQ, NVME_ADM_CMD_CREATE_SQ,
-            NVME_ADM_CMD_GET_LOG_PAGE, NVME_ADM_CMD_DELETE_CQ,
-            NVME_ADM_CMD_CREATE_CQ, NVME_ADM_CMD_IDENTIFY,
-            NVME_ADM_CMD_ABORT, NVME_ADM_CMD_SET_FEATURES,
-            NVME_ADM_CMD_GET_FEATURES, NVME_ADM_CMD_ASYNC_EVENT,
-            NVME_ADM_CMD_NS_MGMT, NVME_ADM_CMD_FW_COMMIT,
-            NVME_ADM_CMD_FW_DOWNLOAD, NVME_ADM_CMD_NS_ATTACH,
-            NVME_ADM_CMD_FORMAT_NVM, NVME_ADM_CMD_SECURITY_SEND,
+            NVME_ADM_CMD_DELETE_SQ,
+            NVME_ADM_CMD_CREATE_SQ,
+            NVME_ADM_CMD_GET_LOG_PAGE,
+            NVME_ADM_CMD_DELETE_CQ,
+            NVME_ADM_CMD_CREATE_CQ,
+            NVME_ADM_CMD_IDENTIFY,
+            NVME_ADM_CMD_ABORT,
+            NVME_ADM_CMD_SET_FEATURES,
+            NVME_ADM_CMD_GET_FEATURES,
+            NVME_ADM_CMD_ASYNC_EVENT,
+            NVME_ADM_CMD_NS_MGMT,
+            NVME_ADM_CMD_FW_COMMIT,
+            NVME_ADM_CMD_FW_DOWNLOAD,
+            NVME_ADM_CMD_NS_ATTACH,
+            NVME_ADM_CMD_FORMAT_NVM,
+            NVME_ADM_CMD_SECURITY_SEND,
             NVME_ADM_CMD_SECURITY_RECV,
         ];
         for i in 0..cmds.len() {
@@ -161,11 +169,17 @@ mod tests {
     #[test]
     fn test_io_cmds_distinct() {
         let cmds = [
-            NVME_CMD_FLUSH, NVME_CMD_WRITE, NVME_CMD_READ,
-            NVME_CMD_WRITE_UNCOR, NVME_CMD_COMPARE,
-            NVME_CMD_WRITE_ZEROES, NVME_CMD_DSM,
-            NVME_CMD_VERIFY, NVME_CMD_RESV_REGISTER,
-            NVME_CMD_RESV_REPORT, NVME_CMD_RESV_ACQUIRE,
+            NVME_CMD_FLUSH,
+            NVME_CMD_WRITE,
+            NVME_CMD_READ,
+            NVME_CMD_WRITE_UNCOR,
+            NVME_CMD_COMPARE,
+            NVME_CMD_WRITE_ZEROES,
+            NVME_CMD_DSM,
+            NVME_CMD_VERIFY,
+            NVME_CMD_RESV_REGISTER,
+            NVME_CMD_RESV_REPORT,
+            NVME_CMD_RESV_ACQUIRE,
             NVME_CMD_RESV_RELEASE,
         ];
         for i in 0..cmds.len() {
@@ -178,12 +192,18 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let codes = [
-            NVME_SC_SUCCESS, NVME_SC_INVALID_OPCODE,
-            NVME_SC_INVALID_FIELD, NVME_SC_CMDID_CONFLICT,
-            NVME_SC_DATA_XFER_ERROR, NVME_SC_POWER_LOSS,
-            NVME_SC_INTERNAL, NVME_SC_ABORT_REQ,
-            NVME_SC_ABORT_QUEUE, NVME_SC_FUSED_FAIL,
-            NVME_SC_FUSED_MISSING, NVME_SC_INVALID_NS,
+            NVME_SC_SUCCESS,
+            NVME_SC_INVALID_OPCODE,
+            NVME_SC_INVALID_FIELD,
+            NVME_SC_CMDID_CONFLICT,
+            NVME_SC_DATA_XFER_ERROR,
+            NVME_SC_POWER_LOSS,
+            NVME_SC_INTERNAL,
+            NVME_SC_ABORT_REQ,
+            NVME_SC_ABORT_QUEUE,
+            NVME_SC_FUSED_FAIL,
+            NVME_SC_FUSED_MISSING,
+            NVME_SC_INVALID_NS,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -195,12 +215,18 @@ mod tests {
     #[test]
     fn test_features_distinct() {
         let feats = [
-            NVME_FEAT_ARBITRATION, NVME_FEAT_POWER_MGMT,
-            NVME_FEAT_LBA_RANGE, NVME_FEAT_TEMP_THRESH,
-            NVME_FEAT_ERR_RECOVERY, NVME_FEAT_VOLATILE_WC,
-            NVME_FEAT_NUM_QUEUES, NVME_FEAT_IRQ_COALESCE,
-            NVME_FEAT_IRQ_CONFIG, NVME_FEAT_WRITE_ATOMIC,
-            NVME_FEAT_ASYNC_EVENT, NVME_FEAT_HOST_MEM_BUF,
+            NVME_FEAT_ARBITRATION,
+            NVME_FEAT_POWER_MGMT,
+            NVME_FEAT_LBA_RANGE,
+            NVME_FEAT_TEMP_THRESH,
+            NVME_FEAT_ERR_RECOVERY,
+            NVME_FEAT_VOLATILE_WC,
+            NVME_FEAT_NUM_QUEUES,
+            NVME_FEAT_IRQ_COALESCE,
+            NVME_FEAT_IRQ_CONFIG,
+            NVME_FEAT_WRITE_ATOMIC,
+            NVME_FEAT_ASYNC_EVENT,
+            NVME_FEAT_HOST_MEM_BUF,
         ];
         for i in 0..feats.len() {
             for j in (i + 1)..feats.len() {

@@ -72,14 +72,17 @@ mod tests {
     #[test]
     fn test_sam_status_distinct() {
         let statuses = [
-            SAM_STAT_GOOD, SAM_STAT_CHECK_CONDITION,
-            SAM_STAT_CONDITION_MET, SAM_STAT_BUSY,
+            SAM_STAT_GOOD,
+            SAM_STAT_CHECK_CONDITION,
+            SAM_STAT_CONDITION_MET,
+            SAM_STAT_BUSY,
             SAM_STAT_INTERMEDIATE,
             SAM_STAT_INTERMEDIATE_CONDITION_MET,
             SAM_STAT_RESERVATION_CONFLICT,
             SAM_STAT_COMMAND_TERMINATED,
             SAM_STAT_TASK_SET_FULL,
-            SAM_STAT_ACA_ACTIVE, SAM_STAT_TASK_ABORTED,
+            SAM_STAT_ACA_ACTIVE,
+            SAM_STAT_TASK_ABORTED,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
@@ -96,10 +99,18 @@ mod tests {
     #[test]
     fn test_host_bytes_distinct() {
         let hosts = [
-            DID_OK, DID_NO_CONNECT, DID_BUS_BUSY,
-            DID_TIME_OUT, DID_BAD_TARGET, DID_ABORT,
-            DID_PARITY, DID_ERROR, DID_RESET, DID_BAD_INTR,
-            DID_ALLOC_FAILURE, DID_TRANSPORT_DISRUPTED,
+            DID_OK,
+            DID_NO_CONNECT,
+            DID_BUS_BUSY,
+            DID_TIME_OUT,
+            DID_BAD_TARGET,
+            DID_ABORT,
+            DID_PARITY,
+            DID_ERROR,
+            DID_RESET,
+            DID_BAD_INTR,
+            DID_ALLOC_FAILURE,
+            DID_TRANSPORT_DISRUPTED,
         ];
         for i in 0..hosts.len() {
             for j in (i + 1)..hosts.len() {

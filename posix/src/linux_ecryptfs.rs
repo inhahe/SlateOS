@@ -90,9 +90,12 @@ mod tests {
     #[test]
     fn test_ciphers_distinct() {
         let ciphers = [
-            ECRYPTFS_CIPHER_AES, ECRYPTFS_CIPHER_BLOWFISH,
-            ECRYPTFS_CIPHER_DES3_EDE, ECRYPTFS_CIPHER_TWOFISH,
-            ECRYPTFS_CIPHER_CAST6, ECRYPTFS_CIPHER_CAST5,
+            ECRYPTFS_CIPHER_AES,
+            ECRYPTFS_CIPHER_BLOWFISH,
+            ECRYPTFS_CIPHER_DES3_EDE,
+            ECRYPTFS_CIPHER_TWOFISH,
+            ECRYPTFS_CIPHER_CAST6,
+            ECRYPTFS_CIPHER_CAST5,
         ];
         for i in 0..ciphers.len() {
             for j in (i + 1)..ciphers.len() {
@@ -104,7 +107,8 @@ mod tests {
     #[test]
     fn test_key_sizes_distinct() {
         let sizes = [
-            ECRYPTFS_AES_KEY_SIZE_128, ECRYPTFS_AES_KEY_SIZE_192,
+            ECRYPTFS_AES_KEY_SIZE_128,
+            ECRYPTFS_AES_KEY_SIZE_192,
             ECRYPTFS_AES_KEY_SIZE_256,
         ];
         for i in 0..sizes.len() {
@@ -122,8 +126,10 @@ mod tests {
     #[test]
     fn test_file_flags_no_overlap() {
         let flags = [
-            ECRYPTFS_FILE_ENCRYPTED, ECRYPTFS_FILENAME_ENCRYPTED,
-            ECRYPTFS_METADATA_IN_XATTR, ECRYPTFS_FILE_HAS_SIGNATURES,
+            ECRYPTFS_FILE_ENCRYPTED,
+            ECRYPTFS_FILENAME_ENCRYPTED,
+            ECRYPTFS_METADATA_IN_XATTR,
+            ECRYPTFS_FILE_HAS_SIGNATURES,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

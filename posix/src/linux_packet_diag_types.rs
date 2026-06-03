@@ -88,9 +88,12 @@ mod tests {
     #[test]
     fn test_show_flags_no_overlap() {
         let flags = [
-            PACKET_SHOW_INFO, PACKET_SHOW_MCLIST,
-            PACKET_SHOW_RING_CFG, PACKET_SHOW_FANOUT,
-            PACKET_SHOW_MEMINFO, PACKET_SHOW_FILTER,
+            PACKET_SHOW_INFO,
+            PACKET_SHOW_MCLIST,
+            PACKET_SHOW_RING_CFG,
+            PACKET_SHOW_FANOUT,
+            PACKET_SHOW_MEMINFO,
+            PACKET_SHOW_FILTER,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -103,10 +106,14 @@ mod tests {
     #[test]
     fn test_response_attrs_distinct() {
         let attrs = [
-            PACKET_DIAG_INFO, PACKET_DIAG_MCLIST,
-            PACKET_DIAG_RX_RING, PACKET_DIAG_TX_RING,
-            PACKET_DIAG_FANOUT, PACKET_DIAG_UID,
-            PACKET_DIAG_MEMINFO, PACKET_DIAG_FILTER,
+            PACKET_DIAG_INFO,
+            PACKET_DIAG_MCLIST,
+            PACKET_DIAG_RX_RING,
+            PACKET_DIAG_TX_RING,
+            PACKET_DIAG_FANOUT,
+            PACKET_DIAG_UID,
+            PACKET_DIAG_MEMINFO,
+            PACKET_DIAG_FILTER,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -118,10 +125,14 @@ mod tests {
     #[test]
     fn test_fanout_types_distinct() {
         let types = [
-            PACKET_FANOUT_HASH, PACKET_FANOUT_LB,
-            PACKET_FANOUT_CPU, PACKET_FANOUT_ROLLOVER,
-            PACKET_FANOUT_RND, PACKET_FANOUT_QM,
-            PACKET_FANOUT_CBPF, PACKET_FANOUT_EBPF,
+            PACKET_FANOUT_HASH,
+            PACKET_FANOUT_LB,
+            PACKET_FANOUT_CPU,
+            PACKET_FANOUT_ROLLOVER,
+            PACKET_FANOUT_RND,
+            PACKET_FANOUT_QM,
+            PACKET_FANOUT_CBPF,
+            PACKET_FANOUT_EBPF,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

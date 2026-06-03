@@ -102,14 +102,22 @@ mod tests {
     #[test]
     fn test_ifla_attrs_distinct() {
         let attrs = [
-            IFLA_CAN_BITTIMING, IFLA_CAN_BITTIMING_CONST,
-            IFLA_CAN_CLOCK, IFLA_CAN_STATE,
-            IFLA_CAN_CTRLMODE, IFLA_CAN_RESTART_MS,
-            IFLA_CAN_RESTART, IFLA_CAN_BERR_COUNTER,
-            IFLA_CAN_DATA_BITTIMING, IFLA_CAN_DATA_BITTIMING_CONST,
-            IFLA_CAN_TERMINATION, IFLA_CAN_TERMINATION_CONST,
-            IFLA_CAN_BITRATE_CONST, IFLA_CAN_DATA_BITRATE_CONST,
-            IFLA_CAN_BITRATE_MAX, IFLA_CAN_TDC,
+            IFLA_CAN_BITTIMING,
+            IFLA_CAN_BITTIMING_CONST,
+            IFLA_CAN_CLOCK,
+            IFLA_CAN_STATE,
+            IFLA_CAN_CTRLMODE,
+            IFLA_CAN_RESTART_MS,
+            IFLA_CAN_RESTART,
+            IFLA_CAN_BERR_COUNTER,
+            IFLA_CAN_DATA_BITTIMING,
+            IFLA_CAN_DATA_BITTIMING_CONST,
+            IFLA_CAN_TERMINATION,
+            IFLA_CAN_TERMINATION_CONST,
+            IFLA_CAN_BITRATE_CONST,
+            IFLA_CAN_DATA_BITRATE_CONST,
+            IFLA_CAN_BITRATE_MAX,
+            IFLA_CAN_TDC,
             IFLA_CAN_CTRLMODE_EXT,
         ];
         for i in 0..attrs.len() {
@@ -122,9 +130,12 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            CAN_STATE_ERROR_ACTIVE, CAN_STATE_ERROR_WARNING,
-            CAN_STATE_ERROR_PASSIVE, CAN_STATE_BUS_OFF,
-            CAN_STATE_STOPPED, CAN_STATE_SLEEPING,
+            CAN_STATE_ERROR_ACTIVE,
+            CAN_STATE_ERROR_WARNING,
+            CAN_STATE_ERROR_PASSIVE,
+            CAN_STATE_BUS_OFF,
+            CAN_STATE_STOPPED,
+            CAN_STATE_SLEEPING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -136,11 +147,16 @@ mod tests {
     #[test]
     fn test_ctrlmode_flags_no_overlap() {
         let flags = [
-            CAN_CTRLMODE_LOOPBACK, CAN_CTRLMODE_LISTENONLY,
-            CAN_CTRLMODE_3_SAMPLES, CAN_CTRLMODE_ONE_SHOT,
-            CAN_CTRLMODE_BERR_REPORTING, CAN_CTRLMODE_FD,
-            CAN_CTRLMODE_PRESUME_ACK, CAN_CTRLMODE_FD_NON_ISO,
-            CAN_CTRLMODE_CC_LEN8_DLC, CAN_CTRLMODE_TDC_AUTO,
+            CAN_CTRLMODE_LOOPBACK,
+            CAN_CTRLMODE_LISTENONLY,
+            CAN_CTRLMODE_3_SAMPLES,
+            CAN_CTRLMODE_ONE_SHOT,
+            CAN_CTRLMODE_BERR_REPORTING,
+            CAN_CTRLMODE_FD,
+            CAN_CTRLMODE_PRESUME_ACK,
+            CAN_CTRLMODE_FD_NON_ISO,
+            CAN_CTRLMODE_CC_LEN8_DLC,
+            CAN_CTRLMODE_TDC_AUTO,
             CAN_CTRLMODE_TDC_MANUAL,
         ];
         for i in 0..flags.len() {

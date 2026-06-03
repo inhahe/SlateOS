@@ -84,9 +84,14 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let devs = [
-            SNDRV_DEV_TOPLEVEL, SNDRV_DEV_CONTROL, SNDRV_DEV_LOWLEVEL,
-            SNDRV_DEV_PCM, SNDRV_DEV_RAWMIDI, SNDRV_DEV_TIMER,
-            SNDRV_DEV_SEQUENCER, SNDRV_DEV_HWDEP,
+            SNDRV_DEV_TOPLEVEL,
+            SNDRV_DEV_CONTROL,
+            SNDRV_DEV_LOWLEVEL,
+            SNDRV_DEV_PCM,
+            SNDRV_DEV_RAWMIDI,
+            SNDRV_DEV_TIMER,
+            SNDRV_DEV_SEQUENCER,
+            SNDRV_DEV_HWDEP,
         ];
         for i in 0..devs.len() {
             for j in (i + 1)..devs.len() {
@@ -103,10 +108,14 @@ mod tests {
     #[test]
     fn test_pcm_states_distinct() {
         let states = [
-            SNDRV_PCM_STATE_OPEN, SNDRV_PCM_STATE_SETUP,
-            SNDRV_PCM_STATE_PREPARED, SNDRV_PCM_STATE_RUNNING,
-            SNDRV_PCM_STATE_XRUN, SNDRV_PCM_STATE_DRAINING,
-            SNDRV_PCM_STATE_PAUSED, SNDRV_PCM_STATE_SUSPENDED,
+            SNDRV_PCM_STATE_OPEN,
+            SNDRV_PCM_STATE_SETUP,
+            SNDRV_PCM_STATE_PREPARED,
+            SNDRV_PCM_STATE_RUNNING,
+            SNDRV_PCM_STATE_XRUN,
+            SNDRV_PCM_STATE_DRAINING,
+            SNDRV_PCM_STATE_PAUSED,
+            SNDRV_PCM_STATE_SUSPENDED,
             SNDRV_PCM_STATE_DISCONNECTED,
         ];
         for i in 0..states.len() {

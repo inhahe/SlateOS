@@ -78,9 +78,12 @@ mod tests {
     #[test]
     fn test_attrs_no_overlap() {
         let attrs = [
-            DMA_ATTR_WRITE_COMBINE, DMA_ATTR_NON_CONSISTENT,
-            DMA_ATTR_SKIP_CPU_SYNC, DMA_ATTR_FORCE_CONTIGUOUS,
-            DMA_ATTR_ALLOC_SINGLE_PAGES, DMA_ATTR_NO_WARN,
+            DMA_ATTR_WRITE_COMBINE,
+            DMA_ATTR_NON_CONSISTENT,
+            DMA_ATTR_SKIP_CPU_SYNC,
+            DMA_ATTR_FORCE_CONTIGUOUS,
+            DMA_ATTR_ALLOC_SINGLE_PAGES,
+            DMA_ATTR_NO_WARN,
             DMA_ATTR_PRIVILEGED,
         ];
         for i in 0..attrs.len() {

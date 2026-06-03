@@ -88,8 +88,10 @@ mod tests {
     #[test]
     fn test_name_types_distinct() {
         let types = [
-            VLAN_NAME_TYPE_PLUS_VID, VLAN_NAME_TYPE_RAW_PLUS_VID,
-            VLAN_NAME_TYPE_PLUS_VID_NO_PAD, VLAN_NAME_TYPE_RAW_PLUS_VID_NO_PAD,
+            VLAN_NAME_TYPE_PLUS_VID,
+            VLAN_NAME_TYPE_RAW_PLUS_VID,
+            VLAN_NAME_TYPE_PLUS_VID_NO_PAD,
+            VLAN_NAME_TYPE_RAW_PLUS_VID_NO_PAD,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -101,8 +103,10 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            VLAN_FLAG_REORDER_HDR, VLAN_FLAG_GVRP,
-            VLAN_FLAG_LOOSE_BINDING, VLAN_FLAG_MVRP,
+            VLAN_FLAG_REORDER_HDR,
+            VLAN_FLAG_GVRP,
+            VLAN_FLAG_LOOSE_BINDING,
+            VLAN_FLAG_MVRP,
             VLAN_FLAG_BRIDGE_BINDING,
         ];
         for f in &flags {

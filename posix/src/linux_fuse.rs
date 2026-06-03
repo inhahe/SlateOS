@@ -212,13 +212,32 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            FUSE_LOOKUP, FUSE_FORGET, FUSE_GETATTR, FUSE_SETATTR,
-            FUSE_READLINK, FUSE_SYMLINK, FUSE_MKNOD, FUSE_MKDIR,
-            FUSE_UNLINK, FUSE_RMDIR, FUSE_RENAME, FUSE_LINK,
-            FUSE_OPEN, FUSE_READ, FUSE_WRITE, FUSE_STATFS,
-            FUSE_RELEASE, FUSE_FSYNC, FUSE_INIT, FUSE_OPENDIR,
-            FUSE_READDIR, FUSE_RELEASEDIR, FUSE_CREATE,
-            FUSE_READDIRPLUS, FUSE_RENAME2, FUSE_LSEEK,
+            FUSE_LOOKUP,
+            FUSE_FORGET,
+            FUSE_GETATTR,
+            FUSE_SETATTR,
+            FUSE_READLINK,
+            FUSE_SYMLINK,
+            FUSE_MKNOD,
+            FUSE_MKDIR,
+            FUSE_UNLINK,
+            FUSE_RMDIR,
+            FUSE_RENAME,
+            FUSE_LINK,
+            FUSE_OPEN,
+            FUSE_READ,
+            FUSE_WRITE,
+            FUSE_STATFS,
+            FUSE_RELEASE,
+            FUSE_FSYNC,
+            FUSE_INIT,
+            FUSE_OPENDIR,
+            FUSE_READDIR,
+            FUSE_RELEASEDIR,
+            FUSE_CREATE,
+            FUSE_READDIRPLUS,
+            FUSE_RENAME2,
+            FUSE_LSEEK,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -236,10 +255,15 @@ mod tests {
     #[test]
     fn test_init_flags_are_powers_of_two() {
         let flags = [
-            FUSE_ASYNC_READ, FUSE_POSIX_LOCKS, FUSE_ATOMIC_O_TRUNC,
-            FUSE_EXPORT_SUPPORT, FUSE_HANDLE_KILLPRIV,
-            FUSE_WRITEBACK_CACHE, FUSE_POSIX_ACL,
-            FUSE_PARALLEL_DIROPS, FUSE_NO_OPEN_SUPPORT,
+            FUSE_ASYNC_READ,
+            FUSE_POSIX_LOCKS,
+            FUSE_ATOMIC_O_TRUNC,
+            FUSE_EXPORT_SUPPORT,
+            FUSE_HANDLE_KILLPRIV,
+            FUSE_WRITEBACK_CACHE,
+            FUSE_POSIX_ACL,
+            FUSE_PARALLEL_DIROPS,
+            FUSE_NO_OPEN_SUPPORT,
             FUSE_NO_OPENDIR_SUPPORT,
         ];
         for f in &flags {

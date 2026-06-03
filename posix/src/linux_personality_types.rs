@@ -75,9 +75,15 @@ mod tests {
     #[test]
     fn test_base_types_fit_mask() {
         let bases = [
-            PER_LINUX, PER_SVR4, PER_SVR3, PER_BSD,
-            PER_LINUX32, PER_IRIX32, PER_SOLARIS,
-            PER_UW7, PER_HPUX,
+            PER_LINUX,
+            PER_SVR4,
+            PER_SVR3,
+            PER_BSD,
+            PER_LINUX32,
+            PER_IRIX32,
+            PER_SOLARIS,
+            PER_UW7,
+            PER_HPUX,
         ];
         for b in bases {
             assert_eq!(b & !PER_MASK, 0);
@@ -87,9 +93,15 @@ mod tests {
     #[test]
     fn test_flags_above_mask() {
         let flags = [
-            ADDR_NO_RANDOMIZE, MMAP_PAGE_ZERO, ADDR_COMPAT_LAYOUT,
-            READ_IMPLIES_EXEC, ADDR_LIMIT_32BIT, SHORT_INODE,
-            WHOLE_SECONDS, STICKY_TIMEOUTS, ADDR_LIMIT_3GB,
+            ADDR_NO_RANDOMIZE,
+            MMAP_PAGE_ZERO,
+            ADDR_COMPAT_LAYOUT,
+            READ_IMPLIES_EXEC,
+            ADDR_LIMIT_32BIT,
+            SHORT_INODE,
+            WHOLE_SECONDS,
+            STICKY_TIMEOUTS,
+            ADDR_LIMIT_3GB,
         ];
         for f in flags {
             assert_eq!(f & PER_MASK, 0);
@@ -100,9 +112,15 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            ADDR_NO_RANDOMIZE, MMAP_PAGE_ZERO, ADDR_COMPAT_LAYOUT,
-            READ_IMPLIES_EXEC, ADDR_LIMIT_32BIT, SHORT_INODE,
-            WHOLE_SECONDS, STICKY_TIMEOUTS, ADDR_LIMIT_3GB,
+            ADDR_NO_RANDOMIZE,
+            MMAP_PAGE_ZERO,
+            ADDR_COMPAT_LAYOUT,
+            READ_IMPLIES_EXEC,
+            ADDR_LIMIT_32BIT,
+            SHORT_INODE,
+            WHOLE_SECONDS,
+            STICKY_TIMEOUTS,
+            ADDR_LIMIT_3GB,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

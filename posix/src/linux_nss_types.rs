@@ -70,8 +70,10 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let statuses = [
-            NSS_STATUS_TRYAGAIN, NSS_STATUS_UNAVAIL,
-            NSS_STATUS_NOTFOUND, NSS_STATUS_SUCCESS,
+            NSS_STATUS_TRYAGAIN,
+            NSS_STATUS_UNAVAIL,
+            NSS_STATUS_NOTFOUND,
+            NSS_STATUS_SUCCESS,
             NSS_STATUS_RETURN,
         ];
         for i in 0..statuses.len() {
@@ -94,10 +96,18 @@ mod tests {
     #[test]
     fn test_databases_distinct() {
         let dbs = [
-            NSS_DB_PASSWD, NSS_DB_GROUP, NSS_DB_SHADOW,
-            NSS_DB_HOSTS, NSS_DB_NETWORKS, NSS_DB_PROTOCOLS,
-            NSS_DB_SERVICES, NSS_DB_ETHERS, NSS_DB_RPC,
-            NSS_DB_ALIASES, NSS_DB_NETGROUP, NSS_DB_GSHADOW,
+            NSS_DB_PASSWD,
+            NSS_DB_GROUP,
+            NSS_DB_SHADOW,
+            NSS_DB_HOSTS,
+            NSS_DB_NETWORKS,
+            NSS_DB_PROTOCOLS,
+            NSS_DB_SERVICES,
+            NSS_DB_ETHERS,
+            NSS_DB_RPC,
+            NSS_DB_ALIASES,
+            NSS_DB_NETGROUP,
+            NSS_DB_GSHADOW,
         ];
         for i in 0..dbs.len() {
             for j in (i + 1)..dbs.len() {

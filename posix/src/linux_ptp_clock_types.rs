@@ -98,10 +98,14 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            PTP_CLOCK_GETCAPS, PTP_EXTTS_REQUEST,
-            PTP_PEROUT_REQUEST, PTP_ENABLE_PPS,
-            PTP_SYS_OFFSET, PTP_PIN_SETFUNC,
-            PTP_PIN_GETFUNC, PTP_SYS_OFFSET_PRECISE,
+            PTP_CLOCK_GETCAPS,
+            PTP_EXTTS_REQUEST,
+            PTP_PEROUT_REQUEST,
+            PTP_ENABLE_PPS,
+            PTP_SYS_OFFSET,
+            PTP_PIN_SETFUNC,
+            PTP_PIN_GETFUNC,
+            PTP_SYS_OFFSET_PRECISE,
             PTP_SYS_OFFSET_EXTENDED,
         ];
         for i in 0..ioctls.len() {
@@ -114,8 +118,10 @@ mod tests {
     #[test]
     fn test_caps_no_overlap() {
         let caps = [
-            PTP_CLOCK_CAP_EXTTS, PTP_CLOCK_CAP_PEROUT,
-            PTP_CLOCK_CAP_PPS, PTP_CLOCK_CAP_CROSS_TS,
+            PTP_CLOCK_CAP_EXTTS,
+            PTP_CLOCK_CAP_PEROUT,
+            PTP_CLOCK_CAP_PPS,
+            PTP_CLOCK_CAP_CROSS_TS,
             PTP_CLOCK_CAP_ADJUST_PHASE,
         ];
         for i in 0..caps.len() {

@@ -64,7 +64,12 @@ mod tests {
 
     #[test]
     fn test_flags_powers_of_two() {
-        let flags = [SPLICE_F_MOVE, SPLICE_F_NONBLOCK, SPLICE_F_MORE, SPLICE_F_GIFT];
+        let flags = [
+            SPLICE_F_MOVE,
+            SPLICE_F_NONBLOCK,
+            SPLICE_F_MORE,
+            SPLICE_F_GIFT,
+        ];
         for f in flags {
             assert!(f.is_power_of_two());
         }
@@ -72,7 +77,12 @@ mod tests {
 
     #[test]
     fn test_flags_no_overlap() {
-        let flags = [SPLICE_F_MOVE, SPLICE_F_NONBLOCK, SPLICE_F_MORE, SPLICE_F_GIFT];
+        let flags = [
+            SPLICE_F_MOVE,
+            SPLICE_F_NONBLOCK,
+            SPLICE_F_MORE,
+            SPLICE_F_GIFT,
+        ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_eq!(flags[i] & flags[j], 0);

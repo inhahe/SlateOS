@@ -108,15 +108,21 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            BATADV_CMD_GET_MESH_INFO, BATADV_CMD_GET_MESH,
-            BATADV_CMD_SET_MESH, BATADV_CMD_GET_ORIGINATORS,
+            BATADV_CMD_GET_MESH_INFO,
+            BATADV_CMD_GET_MESH,
+            BATADV_CMD_SET_MESH,
+            BATADV_CMD_GET_ORIGINATORS,
             BATADV_CMD_GET_NEIGHBORS,
             BATADV_CMD_GET_TRANSTABLE_GLOBAL,
             BATADV_CMD_GET_TRANSTABLE_LOCAL,
-            BATADV_CMD_GET_GATEWAYS, BATADV_CMD_GET_BLA_CLAIM,
-            BATADV_CMD_GET_BLA_BACKBONE, BATADV_CMD_GET_DAT_CACHE,
-            BATADV_CMD_GET_MCAST_FLAGS, BATADV_CMD_GET_HARDIF,
-            BATADV_CMD_SET_HARDIF, BATADV_CMD_GET_VLAN,
+            BATADV_CMD_GET_GATEWAYS,
+            BATADV_CMD_GET_BLA_CLAIM,
+            BATADV_CMD_GET_BLA_BACKBONE,
+            BATADV_CMD_GET_DAT_CACHE,
+            BATADV_CMD_GET_MCAST_FLAGS,
+            BATADV_CMD_GET_HARDIF,
+            BATADV_CMD_SET_HARDIF,
+            BATADV_CMD_GET_VLAN,
             BATADV_CMD_SET_VLAN,
         ];
         for i in 0..cmds.len() {
@@ -129,9 +135,14 @@ mod tests {
     #[test]
     fn test_packet_types_distinct() {
         let pkts = [
-            BATADV_IV_OGM, BATADV_ICMP, BATADV_UNICAST,
-            BATADV_BCAST, BATADV_CODED, BATADV_ELP,
-            BATADV_OGM2, BATADV_UNICAST_TVLV,
+            BATADV_IV_OGM,
+            BATADV_ICMP,
+            BATADV_UNICAST,
+            BATADV_BCAST,
+            BATADV_CODED,
+            BATADV_ELP,
+            BATADV_OGM2,
+            BATADV_UNICAST_TVLV,
         ];
         for i in 0..pkts.len() {
             for j in (i + 1)..pkts.len() {
@@ -142,7 +153,11 @@ mod tests {
 
     #[test]
     fn test_gw_modes_distinct() {
-        let modes = [BATADV_GW_MODE_OFF, BATADV_GW_MODE_CLIENT, BATADV_GW_MODE_SERVER];
+        let modes = [
+            BATADV_GW_MODE_OFF,
+            BATADV_GW_MODE_CLIENT,
+            BATADV_GW_MODE_SERVER,
+        ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
                 assert_ne!(modes[i], modes[j]);
@@ -158,8 +173,10 @@ mod tests {
     #[test]
     fn test_if_states_distinct() {
         let states = [
-            BATADV_IF_NOT_IN_USE, BATADV_IF_ACTIVE,
-            BATADV_IF_INACTIVE, BATADV_IF_TO_BE_REMOVED,
+            BATADV_IF_NOT_IN_USE,
+            BATADV_IF_ACTIVE,
+            BATADV_IF_INACTIVE,
+            BATADV_IF_TO_BE_REMOVED,
             BATADV_IF_TO_BE_ACTIVATED,
         ];
         for i in 0..states.len() {

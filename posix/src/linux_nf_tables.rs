@@ -204,10 +204,18 @@ mod tests {
     #[test]
     fn test_chain_attrs_distinct() {
         let attrs = [
-            NFTA_CHAIN_UNSPEC, NFTA_CHAIN_TABLE, NFTA_CHAIN_HANDLE,
-            NFTA_CHAIN_NAME, NFTA_CHAIN_HOOK, NFTA_CHAIN_POLICY,
-            NFTA_CHAIN_USE, NFTA_CHAIN_TYPE, NFTA_CHAIN_COUNTERS,
-            NFTA_CHAIN_FLAGS, NFTA_CHAIN_ID, NFTA_CHAIN_USERDATA,
+            NFTA_CHAIN_UNSPEC,
+            NFTA_CHAIN_TABLE,
+            NFTA_CHAIN_HANDLE,
+            NFTA_CHAIN_NAME,
+            NFTA_CHAIN_HOOK,
+            NFTA_CHAIN_POLICY,
+            NFTA_CHAIN_USE,
+            NFTA_CHAIN_TYPE,
+            NFTA_CHAIN_COUNTERS,
+            NFTA_CHAIN_FLAGS,
+            NFTA_CHAIN_ID,
+            NFTA_CHAIN_USERDATA,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

@@ -79,10 +79,19 @@ mod tests {
     #[test]
     fn test_tca_types_distinct() {
         let types = [
-            TCA_UNSPEC, TCA_KIND, TCA_OPTIONS, TCA_STATS,
-            TCA_XSTATS, TCA_RATE, TCA_FCNT, TCA_STATS2, TCA_STAB,
-            TCA_CHAIN, TCA_HW_OFFLOAD,
-            TCA_INGRESS_BLOCK, TCA_EGRESS_BLOCK,
+            TCA_UNSPEC,
+            TCA_KIND,
+            TCA_OPTIONS,
+            TCA_STATS,
+            TCA_XSTATS,
+            TCA_RATE,
+            TCA_FCNT,
+            TCA_STATS2,
+            TCA_STAB,
+            TCA_CHAIN,
+            TCA_HW_OFFLOAD,
+            TCA_INGRESS_BLOCK,
+            TCA_EGRESS_BLOCK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

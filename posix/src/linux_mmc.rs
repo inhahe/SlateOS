@@ -148,11 +148,20 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            MMC_GO_IDLE_STATE, MMC_SEND_OP_COND, MMC_ALL_SEND_CID,
-            MMC_SET_RELATIVE_ADDR, MMC_SELECT_CARD, MMC_SEND_EXT_CSD,
-            MMC_SEND_CSD, MMC_STOP_TRANSMISSION, MMC_SEND_STATUS,
-            MMC_READ_SINGLE_BLOCK, MMC_READ_MULTIPLE_BLOCK,
-            MMC_WRITE_BLOCK, MMC_WRITE_MULTIPLE_BLOCK, MMC_APP_CMD,
+            MMC_GO_IDLE_STATE,
+            MMC_SEND_OP_COND,
+            MMC_ALL_SEND_CID,
+            MMC_SET_RELATIVE_ADDR,
+            MMC_SELECT_CARD,
+            MMC_SEND_EXT_CSD,
+            MMC_SEND_CSD,
+            MMC_STOP_TRANSMISSION,
+            MMC_SEND_STATUS,
+            MMC_READ_SINGLE_BLOCK,
+            MMC_READ_MULTIPLE_BLOCK,
+            MMC_WRITE_BLOCK,
+            MMC_WRITE_MULTIPLE_BLOCK,
+            MMC_APP_CMD,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -164,8 +173,14 @@ mod tests {
     #[test]
     fn test_response_types_distinct() {
         let rsps = [
-            MMC_RSP_NONE, MMC_RSP_R1, MMC_RSP_R1B, MMC_RSP_R2,
-            MMC_RSP_R3, MMC_RSP_R4, MMC_RSP_R5, MMC_RSP_R6,
+            MMC_RSP_NONE,
+            MMC_RSP_R1,
+            MMC_RSP_R1B,
+            MMC_RSP_R2,
+            MMC_RSP_R3,
+            MMC_RSP_R4,
+            MMC_RSP_R5,
+            MMC_RSP_R6,
             MMC_RSP_R7,
         ];
         for i in 0..rsps.len() {
@@ -178,9 +193,15 @@ mod tests {
     #[test]
     fn test_vdd_ranges_are_powers_of_two() {
         let vdds = [
-            MMC_VDD_27_28, MMC_VDD_28_29, MMC_VDD_29_30,
-            MMC_VDD_30_31, MMC_VDD_31_32, MMC_VDD_32_33,
-            MMC_VDD_33_34, MMC_VDD_34_35, MMC_VDD_35_36,
+            MMC_VDD_27_28,
+            MMC_VDD_28_29,
+            MMC_VDD_29_30,
+            MMC_VDD_30_31,
+            MMC_VDD_31_32,
+            MMC_VDD_32_33,
+            MMC_VDD_33_34,
+            MMC_VDD_34_35,
+            MMC_VDD_35_36,
         ];
         for vdd in &vdds {
             assert!(vdd.is_power_of_two(), "0x{:x} is not a power of two", vdd);
@@ -190,11 +211,17 @@ mod tests {
     #[test]
     fn test_timing_distinct() {
         let timings = [
-            MMC_TIMING_LEGACY, MMC_TIMING_MMC_HS, MMC_TIMING_SD_HS,
-            MMC_TIMING_UHS_SDR12, MMC_TIMING_UHS_SDR25,
-            MMC_TIMING_UHS_SDR50, MMC_TIMING_UHS_SDR104,
-            MMC_TIMING_UHS_DDR50, MMC_TIMING_MMC_DDR52,
-            MMC_TIMING_MMC_HS200, MMC_TIMING_MMC_HS400,
+            MMC_TIMING_LEGACY,
+            MMC_TIMING_MMC_HS,
+            MMC_TIMING_SD_HS,
+            MMC_TIMING_UHS_SDR12,
+            MMC_TIMING_UHS_SDR25,
+            MMC_TIMING_UHS_SDR50,
+            MMC_TIMING_UHS_SDR104,
+            MMC_TIMING_UHS_DDR50,
+            MMC_TIMING_MMC_DDR52,
+            MMC_TIMING_MMC_HS200,
+            MMC_TIMING_MMC_HS400,
         ];
         for i in 0..timings.len() {
             for j in (i + 1)..timings.len() {

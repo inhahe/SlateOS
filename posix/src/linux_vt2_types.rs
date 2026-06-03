@@ -84,11 +84,22 @@ mod tests {
     #[test]
     fn test_ioctl_distinct() {
         let cmds = [
-            VT_OPENQRY, VT_GETMODE, VT_SETMODE, VT_GETSTATE,
-            VT_SENDSIG, VT_RELDISP, VT_ACTIVATE, VT_WAITACTIVE,
-            VT_DISALLOCATE, VT_RESIZE, VT_RESIZEX,
-            VT_LOCKSWITCH, VT_UNLOCKSWITCH, VT_GETHIFONTMASK,
-            VT_WAITEVENT, VT_SETACTIVATE,
+            VT_OPENQRY,
+            VT_GETMODE,
+            VT_SETMODE,
+            VT_GETSTATE,
+            VT_SENDSIG,
+            VT_RELDISP,
+            VT_ACTIVATE,
+            VT_WAITACTIVE,
+            VT_DISALLOCATE,
+            VT_RESIZE,
+            VT_RESIZEX,
+            VT_LOCKSWITCH,
+            VT_UNLOCKSWITCH,
+            VT_GETHIFONTMASK,
+            VT_WAITEVENT,
+            VT_SETACTIVATE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -110,8 +121,10 @@ mod tests {
     #[test]
     fn test_event_flags_power_of_two() {
         let events = [
-            VT_EVENT_SWITCH, VT_EVENT_BLANK,
-            VT_EVENT_UNBLANK, VT_EVENT_RESIZE,
+            VT_EVENT_SWITCH,
+            VT_EVENT_BLANK,
+            VT_EVENT_UNBLANK,
+            VT_EVENT_RESIZE,
         ];
         for e in &events {
             assert!(e.is_power_of_two(), "0x{:02x} not power of two", e);
@@ -121,8 +134,10 @@ mod tests {
     #[test]
     fn test_event_flags_no_overlap() {
         let events = [
-            VT_EVENT_SWITCH, VT_EVENT_BLANK,
-            VT_EVENT_UNBLANK, VT_EVENT_RESIZE,
+            VT_EVENT_SWITCH,
+            VT_EVENT_BLANK,
+            VT_EVENT_UNBLANK,
+            VT_EVENT_RESIZE,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

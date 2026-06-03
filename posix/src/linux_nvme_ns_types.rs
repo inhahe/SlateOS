@@ -84,8 +84,10 @@ mod tests {
     #[test]
     fn test_nsfeat_flags_no_overlap() {
         let flags = [
-            NVME_NSFEAT_THIN_PROV, NVME_NSFEAT_ATOMICS,
-            NVME_NSFEAT_DEALLOC, NVME_NSFEAT_GUID_REUSE,
+            NVME_NSFEAT_THIN_PROV,
+            NVME_NSFEAT_ATOMICS,
+            NVME_NSFEAT_DEALLOC,
+            NVME_NSFEAT_GUID_REUSE,
             NVME_NSFEAT_IO_OPT,
         ];
         for i in 0..flags.len() {
@@ -105,7 +107,12 @@ mod tests {
 
     #[test]
     fn test_dps_types_distinct() {
-        let dps = [NVME_DPS_NONE, NVME_DPS_TYPE1, NVME_DPS_TYPE2, NVME_DPS_TYPE3];
+        let dps = [
+            NVME_DPS_NONE,
+            NVME_DPS_TYPE1,
+            NVME_DPS_TYPE2,
+            NVME_DPS_TYPE3,
+        ];
         for i in 0..dps.len() {
             for j in (i + 1)..dps.len() {
                 assert_ne!(dps[i], dps[j]);

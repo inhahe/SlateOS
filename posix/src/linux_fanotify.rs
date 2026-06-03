@@ -100,10 +100,8 @@ const FAN_INIT_VALID_FLAGS: u32 = FAN_CLOEXEC
 /// handle, so the combination is meaningless.  `FAN_REPORT_PIDFD`
 /// and `FAN_REPORT_TID` are *not* part of `fid_mode`: they describe
 /// the pid reporting form, not the file reporting form.
-const FAN_FID_MODE_BITS: u32 = FAN_REPORT_FID
-    | FAN_REPORT_DIR_FID
-    | FAN_REPORT_NAME
-    | FAN_REPORT_TARGET_FID;
+const FAN_FID_MODE_BITS: u32 =
+    FAN_REPORT_FID | FAN_REPORT_DIR_FID | FAN_REPORT_NAME | FAN_REPORT_TARGET_FID;
 
 /// Flags that require `CAP_SYS_ADMIN` to request — the union Linux
 /// calls `FANOTIFY_ADMIN_INIT_FLAGS` in
@@ -203,8 +201,7 @@ const FAN_MARK_VALID_MASK: u64 = FAN_ACCESS
 /// real fanotify fds exist yet, so this is currently only used by tests
 /// to assert the constant is consistent with `FAN_MARK_VALID_MASK`).
 #[cfg(test)]
-const FAN_PERMISSION_EVENTS: u64 =
-    FAN_OPEN_PERM | FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM;
+const FAN_PERMISSION_EVENTS: u64 = FAN_OPEN_PERM | FAN_ACCESS_PERM | FAN_OPEN_EXEC_PERM;
 
 // ---------------------------------------------------------------------------
 // fanotify_mark() flags
@@ -378,9 +375,8 @@ pub extern "C" fn fanotify_init(flags: u32, event_f_flags: u32) -> i32 {
     // below, so an unprivileged caller passing class==0xC or an
     // unknown flag bit will see EPERM (the cap denial), not EINVAL.
     // A privileged caller still hits the EINVAL paths as before.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_ADMIN,
-    ) && ((flags & FANOTIFY_ADMIN_INIT_FLAGS) != 0 || fid_mode == 0)
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
+        && ((flags & FANOTIFY_ADMIN_INIT_FLAGS) != 0 || fid_mode == 0)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -388,10 +384,7 @@ pub extern "C" fn fanotify_init(flags: u32, event_f_flags: u32) -> i32 {
 
     // Class bits must encode exactly one of NOTIF/CONTENT/PRE_CONTENT.
     // Linux rejects 0xC (both CONTENT and PRE_CONTENT set) with EINVAL.
-    if class != FAN_CLASS_NOTIF
-        && class != FAN_CLASS_CONTENT
-        && class != FAN_CLASS_PRE_CONTENT
-    {
+    if class != FAN_CLASS_NOTIF && class != FAN_CLASS_CONTENT && class != FAN_CLASS_PRE_CONTENT {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -573,11 +566,21 @@ mod tests {
     #[test]
     fn test_event_masks_distinct() {
         let masks = [
-            FAN_ACCESS, FAN_MODIFY, FAN_ATTRIB,
-            FAN_CLOSE_WRITE, FAN_CLOSE_NOWRITE, FAN_OPEN,
-            FAN_MOVED_FROM, FAN_MOVED_TO, FAN_CREATE,
-            FAN_DELETE, FAN_DELETE_SELF, FAN_MOVE_SELF,
-            FAN_OPEN_EXEC, FAN_OPEN_PERM, FAN_ACCESS_PERM,
+            FAN_ACCESS,
+            FAN_MODIFY,
+            FAN_ATTRIB,
+            FAN_CLOSE_WRITE,
+            FAN_CLOSE_NOWRITE,
+            FAN_OPEN,
+            FAN_MOVED_FROM,
+            FAN_MOVED_TO,
+            FAN_CREATE,
+            FAN_DELETE,
+            FAN_DELETE_SELF,
+            FAN_MOVE_SELF,
+            FAN_OPEN_EXEC,
+            FAN_OPEN_PERM,
+            FAN_ACCESS_PERM,
             FAN_OPEN_EXEC_PERM,
         ];
         for i in 0..masks.len() {
@@ -601,10 +604,16 @@ mod tests {
     #[test]
     fn test_mark_flags_distinct() {
         let flags = [
-            FAN_MARK_ADD, FAN_MARK_REMOVE, FAN_MARK_DONT_FOLLOW,
-            FAN_MARK_ONLYDIR, FAN_MARK_MOUNT, FAN_MARK_FILESYSTEM,
-            FAN_MARK_FLUSH, FAN_MARK_IGNORED_MASK,
-            FAN_MARK_IGNORED_SURV_MODIFY, FAN_MARK_EVICTABLE,
+            FAN_MARK_ADD,
+            FAN_MARK_REMOVE,
+            FAN_MARK_DONT_FOLLOW,
+            FAN_MARK_ONLYDIR,
+            FAN_MARK_MOUNT,
+            FAN_MARK_FILESYSTEM,
+            FAN_MARK_FLUSH,
+            FAN_MARK_IGNORED_MASK,
+            FAN_MARK_IGNORED_SURV_MODIFY,
+            FAN_MARK_EVICTABLE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -622,7 +631,10 @@ mod tests {
 
     #[test]
     fn test_permission_events_are_subset_of_mark_mask() {
-        assert_eq!(FAN_PERMISSION_EVENTS & FAN_MARK_VALID_MASK, FAN_PERMISSION_EVENTS);
+        assert_eq!(
+            FAN_PERMISSION_EVENTS & FAN_MARK_VALID_MASK,
+            FAN_PERMISSION_EVENTS
+        );
     }
 
     #[test]
@@ -663,7 +675,10 @@ mod tests {
     fn test_init_invalid_class_0xc_einval() {
         errno::set_errno(0);
         // Both CONTENT and PRE_CONTENT set — reserved combination.
-        let ret = fanotify_init(FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT, fcntl::O_RDONLY as u32);
+        let ret = fanotify_init(
+            FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT,
+            fcntl::O_RDONLY as u32,
+        );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -799,10 +814,7 @@ mod tests {
         assert_eq!(FAN_REPORT_TID, 0x0000_0100);
         assert_ne!(FAN_REPORT_PIDFD, FAN_REPORT_TID);
         // They must not overlap any pre-existing FAN_REPORT_* bit.
-        let others = FAN_REPORT_FID
-            | FAN_REPORT_DIR_FID
-            | FAN_REPORT_NAME
-            | FAN_REPORT_TARGET_FID;
+        let others = FAN_REPORT_FID | FAN_REPORT_DIR_FID | FAN_REPORT_NAME | FAN_REPORT_TARGET_FID;
         assert_eq!(FAN_REPORT_PIDFD & others, 0);
         assert_eq!(FAN_REPORT_TID & others, 0);
     }
@@ -827,10 +839,7 @@ mod tests {
     fn test_phase141_pidfd_alone_reaches_enosys() {
         // PIDFD on its own is a valid request; no mutex trips.
         errno::set_errno(0);
-        let ret = fanotify_init(
-            FAN_CLASS_NOTIF | FAN_REPORT_PIDFD,
-            fcntl::O_RDONLY as u32,
-        );
+        let ret = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_PIDFD, fcntl::O_RDONLY as u32);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -839,10 +848,7 @@ mod tests {
     fn test_phase141_tid_alone_reaches_enosys() {
         // TID on its own is a valid request; no mutex trips.
         errno::set_errno(0);
-        let ret = fanotify_init(
-            FAN_CLASS_NOTIF | FAN_REPORT_TID,
-            fcntl::O_RDONLY as u32,
-        );
+        let ret = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_TID, fcntl::O_RDONLY as u32);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -910,10 +916,7 @@ mod tests {
         // the call still fails with EINVAL and -1.
         errno::set_errno(0);
         let ret = fanotify_init(
-            FAN_CLASS_CONTENT
-                | FAN_CLASS_PRE_CONTENT
-                | FAN_REPORT_PIDFD
-                | FAN_REPORT_TID,
+            FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT | FAN_REPORT_PIDFD | FAN_REPORT_TID,
             fcntl::O_RDONLY as u32,
         );
         assert_eq!(ret, -1);
@@ -942,10 +945,7 @@ mod tests {
         // Both produce EINVAL; this test pins the negative behavior
         // shape and ensures we do not return EFAULT/ENOSYS by mistake.
         errno::set_errno(0);
-        let ret = fanotify_init(
-            FAN_CLASS_NOTIF | FAN_REPORT_PIDFD | FAN_REPORT_TID,
-            0o3,
-        );
+        let ret = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_PIDFD | FAN_REPORT_TID, 0o3);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -983,10 +983,7 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
         errno::set_errno(0);
-        let ret = fanotify_init(
-            FAN_CLASS_NOTIF | FAN_REPORT_PIDFD,
-            fcntl::O_RDONLY as u32,
-        );
+        let ret = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_PIDFD, fcntl::O_RDONLY as u32);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -1003,10 +1000,7 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
         errno::set_errno(0);
-        let ret = fanotify_init(
-            FAN_CLASS_NOTIF | FAN_REPORT_TID,
-            fcntl::O_RDONLY as u32,
-        );
+        let ret = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_TID, fcntl::O_RDONLY as u32);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -1036,18 +1030,12 @@ mod tests {
         // return ENOSYS (no kernel support) or 0 (group fd created).
         // Both bits must now be valid alone.
         errno::set_errno(0);
-        let ret = fanotify_init(
-            FAN_CLASS_NOTIF | FAN_REPORT_PIDFD,
-            fcntl::O_RDONLY as u32,
-        );
+        let ret = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_PIDFD, fcntl::O_RDONLY as u32);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
 
         errno::set_errno(0);
-        let ret = fanotify_init(
-            FAN_CLASS_NOTIF | FAN_REPORT_TID,
-            fcntl::O_RDONLY as u32,
-        );
+        let ret = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_TID, fcntl::O_RDONLY as u32);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -1072,10 +1060,7 @@ mod tests {
         // FID-report bits, no more, no less.
         assert_eq!(
             FAN_FID_MODE_BITS,
-            FAN_REPORT_FID
-                | FAN_REPORT_DIR_FID
-                | FAN_REPORT_NAME
-                | FAN_REPORT_TARGET_FID,
+            FAN_REPORT_FID | FAN_REPORT_DIR_FID | FAN_REPORT_NAME | FAN_REPORT_TARGET_FID,
         );
         // PIDFD and TID describe pid-form reporting, not FID-form
         // reporting, and must be excluded.
@@ -1097,10 +1082,7 @@ mod tests {
         // ENOSYS, not EINVAL — confirms we didn't accidentally trip
         // the new guard for the legitimate case.
         errno::set_errno(0);
-        let ret = fanotify_init(
-            FAN_CLASS_NOTIF | FAN_REPORT_FID,
-            fcntl::O_RDONLY as u32,
-        );
+        let ret = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_FID, fcntl::O_RDONLY as u32);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -1109,10 +1091,7 @@ mod tests {
     fn test_phase142_report_fid_with_class_content_einval() {
         // Core regression: FID + CONTENT → EINVAL.
         errno::set_errno(0);
-        let ret = fanotify_init(
-            FAN_CLASS_CONTENT | FAN_REPORT_FID,
-            fcntl::O_RDONLY as u32,
-        );
+        let ret = fanotify_init(FAN_CLASS_CONTENT | FAN_REPORT_FID, fcntl::O_RDONLY as u32);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -1145,14 +1124,10 @@ mod tests {
             // TARGET_FID alone would fail the "needs full triple"
             // guard; pair it with the triple to isolate the new
             // check.
-            FAN_REPORT_FID | FAN_REPORT_DIR_FID
-                | FAN_REPORT_NAME | FAN_REPORT_TARGET_FID,
+            FAN_REPORT_FID | FAN_REPORT_DIR_FID | FAN_REPORT_NAME | FAN_REPORT_TARGET_FID,
         ] {
             errno::set_errno(0);
-            let ret = fanotify_init(
-                FAN_CLASS_CONTENT | bit,
-                fcntl::O_RDONLY as u32,
-            );
+            let ret = fanotify_init(FAN_CLASS_CONTENT | bit, fcntl::O_RDONLY as u32);
             assert_eq!(ret, -1, "bits={bit:#x}");
             assert_eq!(errno::get_errno(), errno::EINVAL, "bits={bit:#x}");
         }
@@ -1191,10 +1166,7 @@ mod tests {
         // any class; the fid_mode check filters only the file-handle
         // forms.  Reaches ENOSYS.
         errno::set_errno(0);
-        let ret = fanotify_init(
-            FAN_CLASS_CONTENT | FAN_REPORT_PIDFD,
-            fcntl::O_RDONLY as u32,
-        );
+        let ret = fanotify_init(FAN_CLASS_CONTENT | FAN_REPORT_PIDFD, fcntl::O_RDONLY as u32);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -1219,10 +1191,7 @@ mod tests {
         // ENOSYS — the new guard only fires on FID-mode bits.
         errno::set_errno(0);
         let ret = fanotify_init(
-            FAN_CLASS_CONTENT
-                | FAN_CLOEXEC
-                | FAN_NONBLOCK
-                | FAN_ENABLE_AUDIT,
+            FAN_CLASS_CONTENT | FAN_CLOEXEC | FAN_NONBLOCK | FAN_ENABLE_AUDIT,
             fcntl::O_RDONLY as u32,
         );
         assert_eq!(ret, -1);
@@ -1278,10 +1247,7 @@ mod tests {
         // Workflow: buggy caller hits EINVAL with FID+CONTENT,
         // drops the FID bit, retries, reaches ENOSYS.
         errno::set_errno(0);
-        let bad = fanotify_init(
-            FAN_CLASS_CONTENT | FAN_REPORT_FID,
-            fcntl::O_RDONLY as u32,
-        );
+        let bad = fanotify_init(FAN_CLASS_CONTENT | FAN_REPORT_FID, fcntl::O_RDONLY as u32);
         assert_eq!(bad, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
@@ -1296,18 +1262,12 @@ mod tests {
         // Alternate recovery: keep the FID-mode bit, swap CONTENT
         // for NOTIF.  Real-world libfanotify pattern.
         errno::set_errno(0);
-        let bad = fanotify_init(
-            FAN_CLASS_CONTENT | FAN_REPORT_FID,
-            fcntl::O_RDONLY as u32,
-        );
+        let bad = fanotify_init(FAN_CLASS_CONTENT | FAN_REPORT_FID, fcntl::O_RDONLY as u32);
         assert_eq!(bad, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
         errno::set_errno(0);
-        let ok = fanotify_init(
-            FAN_CLASS_NOTIF | FAN_REPORT_FID,
-            fcntl::O_RDONLY as u32,
-        );
+        let ok = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_FID, fcntl::O_RDONLY as u32);
         assert_eq!(ok, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -1318,10 +1278,7 @@ mod tests {
         // errno must always be EINVAL afterwards, return value -1.
         for _ in 0..16 {
             errno::set_errno(0);
-            let r = fanotify_init(
-                FAN_CLASS_CONTENT | FAN_REPORT_FID,
-                fcntl::O_RDONLY as u32,
-            );
+            let r = fanotify_init(FAN_CLASS_CONTENT | FAN_REPORT_FID, fcntl::O_RDONLY as u32);
             assert_eq!(r, -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
 
@@ -1502,7 +1459,13 @@ mod tests {
     #[test]
     fn test_mark_remove_empty_mask_einval() {
         errno::set_errno(0);
-        let ret = fanotify_mark(0, FAN_MARK_REMOVE, 0, crate::file::AT_FDCWD, core::ptr::null());
+        let ret = fanotify_mark(
+            0,
+            FAN_MARK_REMOVE,
+            0,
+            crate::file::AT_FDCWD,
+            core::ptr::null(),
+        );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -1512,7 +1475,13 @@ mod tests {
         errno::set_errno(0);
         // Linux is lenient (silently ignores mask), but we explicitly
         // require it to be zero so callers can't quietly lose bits.
-        let ret = fanotify_mark(0, FAN_MARK_FLUSH, FAN_OPEN, crate::file::AT_FDCWD, core::ptr::null());
+        let ret = fanotify_mark(
+            0,
+            FAN_MARK_FLUSH,
+            FAN_OPEN,
+            crate::file::AT_FDCWD,
+            core::ptr::null(),
+        );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -1520,7 +1489,13 @@ mod tests {
     #[test]
     fn test_mark_flush_empty_mask_ok_reaches_ebadfd() {
         errno::set_errno(0);
-        let ret = fanotify_mark(0, FAN_MARK_FLUSH, 0, crate::file::AT_FDCWD, core::ptr::null());
+        let ret = fanotify_mark(
+            0,
+            FAN_MARK_FLUSH,
+            0,
+            crate::file::AT_FDCWD,
+            core::ptr::null(),
+        );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EBADFD);
     }
@@ -1532,7 +1507,13 @@ mod tests {
     #[test]
     fn test_mark_negative_fd_ebadf() {
         errno::set_errno(0);
-        let ret = fanotify_mark(-1, FAN_MARK_ADD, FAN_OPEN, crate::file::AT_FDCWD, core::ptr::null());
+        let ret = fanotify_mark(
+            -1,
+            FAN_MARK_ADD,
+            FAN_OPEN,
+            crate::file::AT_FDCWD,
+            core::ptr::null(),
+        );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
@@ -1541,7 +1522,13 @@ mod tests {
     fn test_mark_zero_fd_reaches_ebadfd() {
         // fd=0 is syntactically valid but isn't a fanotify fd.
         errno::set_errno(0);
-        let ret = fanotify_mark(0, FAN_MARK_ADD, FAN_OPEN, crate::file::AT_FDCWD, core::ptr::null());
+        let ret = fanotify_mark(
+            0,
+            FAN_MARK_ADD,
+            FAN_OPEN,
+            crate::file::AT_FDCWD,
+            core::ptr::null(),
+        );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EBADFD);
     }
@@ -1549,7 +1536,13 @@ mod tests {
     #[test]
     fn test_mark_positive_fd_reaches_ebadfd() {
         errno::set_errno(0);
-        let ret = fanotify_mark(42, FAN_MARK_ADD, FAN_OPEN, crate::file::AT_FDCWD, core::ptr::null());
+        let ret = fanotify_mark(
+            42,
+            FAN_MARK_ADD,
+            FAN_OPEN,
+            crate::file::AT_FDCWD,
+            core::ptr::null(),
+        );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EBADFD);
     }
@@ -1619,16 +1612,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -1643,8 +1634,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -1656,8 +1646,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1672,8 +1661,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -1703,10 +1691,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_sys_admin();
             errno::set_errno(0);
-            let ret = fanotify_init(
-                FAN_CLASS_NOTIF | FAN_REPORT_FID,
-                fcntl::O_RDONLY as u32,
-            );
+            let ret = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_FID, fcntl::O_RDONLY as u32);
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
@@ -1717,10 +1702,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_sys_admin();
             errno::set_errno(0);
-            let ret = fanotify_init(
-                FAN_CLASS_NOTIF,
-                fcntl::O_RDONLY as u32,
-            );
+            let ret = fanotify_init(FAN_CLASS_NOTIF, fcntl::O_RDONLY as u32);
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
@@ -1732,10 +1714,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_sys_admin();
             errno::set_errno(0);
-            let ret = fanotify_init(
-                FAN_CLASS_CONTENT | FAN_REPORT_FID,
-                fcntl::O_RDONLY as u32,
-            );
+            let ret = fanotify_init(FAN_CLASS_CONTENT | FAN_REPORT_FID, fcntl::O_RDONLY as u32);
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
@@ -1761,9 +1740,7 @@ mod tests {
             drop_sys_admin();
             errno::set_errno(0);
             let ret = fanotify_init(
-                FAN_CLASS_NOTIF
-                    | FAN_REPORT_FID
-                    | FAN_UNLIMITED_QUEUE,
+                FAN_CLASS_NOTIF | FAN_REPORT_FID | FAN_UNLIMITED_QUEUE,
                 fcntl::O_RDONLY as u32,
             );
             assert_eq!(ret, -1);
@@ -1777,9 +1754,7 @@ mod tests {
             drop_sys_admin();
             errno::set_errno(0);
             let ret = fanotify_init(
-                FAN_CLASS_NOTIF
-                    | FAN_REPORT_FID
-                    | FAN_UNLIMITED_MARKS,
+                FAN_CLASS_NOTIF | FAN_REPORT_FID | FAN_UNLIMITED_MARKS,
                 fcntl::O_RDONLY as u32,
             );
             assert_eq!(ret, -1);
@@ -1793,9 +1768,7 @@ mod tests {
             drop_sys_admin();
             errno::set_errno(0);
             let ret = fanotify_init(
-                FAN_CLASS_NOTIF
-                    | FAN_REPORT_FID
-                    | FAN_ENABLE_AUDIT,
+                FAN_CLASS_NOTIF | FAN_REPORT_FID | FAN_ENABLE_AUDIT,
                 fcntl::O_RDONLY as u32,
             );
             assert_eq!(ret, -1);
@@ -1828,10 +1801,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_sys_admin();
             errno::set_errno(0);
-            let ret = fanotify_init(
-                FAN_CLASS_NOTIF | 0x8000_0000,
-                fcntl::O_RDONLY as u32,
-            );
+            let ret = fanotify_init(FAN_CLASS_NOTIF | 0x8000_0000, fcntl::O_RDONLY as u32);
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
@@ -1858,12 +1828,10 @@ mod tests {
         fn test_fan_phase184_eperm_preserves_other_caps() {
             let _g = CapGuard::snapshot();
             drop_sys_admin();
-            let (lo_before, hi_before) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_before, hi_before) = crate::sys_capability::current_caps_effective();
             errno::set_errno(0);
             let _ = fanotify_init(0, fcntl::O_RDONLY as u32);
-            let (lo_after, hi_after) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_after, hi_after) = crate::sys_capability::current_caps_effective();
             assert_eq!(lo_before, lo_after);
             assert_eq!(hi_before, hi_after);
         }
@@ -1887,10 +1855,7 @@ mod tests {
                 crate::sys_capability::CAP_SYS_ADMIN
             ));
             errno::set_errno(0);
-            let ret = fanotify_init(
-                FAN_CLASS_CONTENT,
-                fcntl::O_RDONLY as u32,
-            );
+            let ret = fanotify_init(FAN_CLASS_CONTENT, fcntl::O_RDONLY as u32);
             // With CAP_SYS_ADMIN we bypass the gate and hit ENOSYS.
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -1950,19 +1915,10 @@ mod tests {
             // And FAN_REPORT_FID / FAN_REPORT_DIR_FID / NAME / TARGET_FID
             // must NOT be in the admin set — they're the unprivileged
             // entry path.
-            assert_eq!(
-                FANOTIFY_ADMIN_INIT_FLAGS & FAN_FID_MODE_BITS,
-                0
-            );
+            assert_eq!(FANOTIFY_ADMIN_INIT_FLAGS & FAN_FID_MODE_BITS, 0);
             // FAN_CLOEXEC / FAN_NONBLOCK are also unprivileged.
-            assert_eq!(
-                FANOTIFY_ADMIN_INIT_FLAGS & FAN_CLOEXEC,
-                0
-            );
-            assert_eq!(
-                FANOTIFY_ADMIN_INIT_FLAGS & FAN_NONBLOCK,
-                0
-            );
+            assert_eq!(FANOTIFY_ADMIN_INIT_FLAGS & FAN_CLOEXEC, 0);
+            assert_eq!(FANOTIFY_ADMIN_INIT_FLAGS & FAN_NONBLOCK, 0);
         }
 
         // -- Cross-checks ------------------------------------------------
@@ -1977,10 +1933,7 @@ mod tests {
                 crate::sys_capability::CAP_SYS_ADMIN
             ));
             errno::set_errno(0);
-            let ret = fanotify_init(
-                FAN_CLASS_NOTIF | FAN_REPORT_FID,
-                fcntl::O_RDONLY as u32,
-            );
+            let ret = fanotify_init(FAN_CLASS_NOTIF | FAN_REPORT_FID, fcntl::O_RDONLY as u32);
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
         }

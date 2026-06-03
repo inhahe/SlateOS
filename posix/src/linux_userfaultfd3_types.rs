@@ -76,14 +76,22 @@ mod tests {
     #[test]
     fn test_feature_flags_power_of_two() {
         let flags: [u64; 16] = [
-            UFFD_FEATURE_PAGEFAULT_FLAG_WP, UFFD_FEATURE_EVENT_FORK,
-            UFFD_FEATURE_EVENT_REMAP, UFFD_FEATURE_EVENT_REMOVE,
-            UFFD_FEATURE_EVENT_UNMAP, UFFD_FEATURE_MISSING_HUGETLBFS,
-            UFFD_FEATURE_MISSING_SHMEM, UFFD_FEATURE_SIGBUS,
-            UFFD_FEATURE_THREAD_ID, UFFD_FEATURE_MINOR_HUGETLBFS,
-            UFFD_FEATURE_MINOR_SHMEM, UFFD_FEATURE_EXACT_ADDRESS,
-            UFFD_FEATURE_WP_HUGETLBFS_SHMEM, UFFD_FEATURE_WP_ASYNC,
-            UFFD_FEATURE_WP_UNPOPULATED, UFFD_FEATURE_POISON,
+            UFFD_FEATURE_PAGEFAULT_FLAG_WP,
+            UFFD_FEATURE_EVENT_FORK,
+            UFFD_FEATURE_EVENT_REMAP,
+            UFFD_FEATURE_EVENT_REMOVE,
+            UFFD_FEATURE_EVENT_UNMAP,
+            UFFD_FEATURE_MISSING_HUGETLBFS,
+            UFFD_FEATURE_MISSING_SHMEM,
+            UFFD_FEATURE_SIGBUS,
+            UFFD_FEATURE_THREAD_ID,
+            UFFD_FEATURE_MINOR_HUGETLBFS,
+            UFFD_FEATURE_MINOR_SHMEM,
+            UFFD_FEATURE_EXACT_ADDRESS,
+            UFFD_FEATURE_WP_HUGETLBFS_SHMEM,
+            UFFD_FEATURE_WP_ASYNC,
+            UFFD_FEATURE_WP_UNPOPULATED,
+            UFFD_FEATURE_POISON,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:016x} not power of two", f);
@@ -93,14 +101,22 @@ mod tests {
     #[test]
     fn test_feature_flags_no_overlap() {
         let flags: [u64; 16] = [
-            UFFD_FEATURE_PAGEFAULT_FLAG_WP, UFFD_FEATURE_EVENT_FORK,
-            UFFD_FEATURE_EVENT_REMAP, UFFD_FEATURE_EVENT_REMOVE,
-            UFFD_FEATURE_EVENT_UNMAP, UFFD_FEATURE_MISSING_HUGETLBFS,
-            UFFD_FEATURE_MISSING_SHMEM, UFFD_FEATURE_SIGBUS,
-            UFFD_FEATURE_THREAD_ID, UFFD_FEATURE_MINOR_HUGETLBFS,
-            UFFD_FEATURE_MINOR_SHMEM, UFFD_FEATURE_EXACT_ADDRESS,
-            UFFD_FEATURE_WP_HUGETLBFS_SHMEM, UFFD_FEATURE_WP_ASYNC,
-            UFFD_FEATURE_WP_UNPOPULATED, UFFD_FEATURE_POISON,
+            UFFD_FEATURE_PAGEFAULT_FLAG_WP,
+            UFFD_FEATURE_EVENT_FORK,
+            UFFD_FEATURE_EVENT_REMAP,
+            UFFD_FEATURE_EVENT_REMOVE,
+            UFFD_FEATURE_EVENT_UNMAP,
+            UFFD_FEATURE_MISSING_HUGETLBFS,
+            UFFD_FEATURE_MISSING_SHMEM,
+            UFFD_FEATURE_SIGBUS,
+            UFFD_FEATURE_THREAD_ID,
+            UFFD_FEATURE_MINOR_HUGETLBFS,
+            UFFD_FEATURE_MINOR_SHMEM,
+            UFFD_FEATURE_EXACT_ADDRESS,
+            UFFD_FEATURE_WP_HUGETLBFS_SHMEM,
+            UFFD_FEATURE_WP_ASYNC,
+            UFFD_FEATURE_WP_UNPOPULATED,
+            UFFD_FEATURE_POISON,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -137,9 +153,6 @@ mod tests {
 
     #[test]
     fn test_continue_modes_no_overlap() {
-        assert_eq!(
-            UFFDIO_CONTINUE_MODE_DONTWAKE & UFFDIO_CONTINUE_MODE_WP,
-            0
-        );
+        assert_eq!(UFFDIO_CONTINUE_MODE_DONTWAKE & UFFDIO_CONTINUE_MODE_WP, 0);
     }
 }

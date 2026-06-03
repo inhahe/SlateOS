@@ -75,8 +75,10 @@ mod tests {
     #[test]
     fn test_cids_distinct() {
         let cids = [
-            VMADDR_CID_HYPERVISOR, VMADDR_CID_LOCAL,
-            VMADDR_CID_HOST, VMADDR_CID_ANY,
+            VMADDR_CID_HYPERVISOR,
+            VMADDR_CID_LOCAL,
+            VMADDR_CID_HOST,
+            VMADDR_CID_ANY,
         ];
         for i in 0..cids.len() {
             for j in (i + 1)..cids.len() {
@@ -124,8 +126,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            VSOCK_FLAG_TRUSTED, VSOCK_FLAG_REQUEST,
-            VSOCK_FLAG_SHUTDOWN, VSOCK_FLAG_RST,
+            VSOCK_FLAG_TRUSTED,
+            VSOCK_FLAG_REQUEST,
+            VSOCK_FLAG_SHUTDOWN,
+            VSOCK_FLAG_RST,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

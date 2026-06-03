@@ -117,13 +117,19 @@ pub const fn min(a: usize, b: usize) -> usize {
 /// Clamp `x` between `lo` and `hi`.
 #[inline]
 pub const fn clamp(x: usize, lo: usize, hi: usize) -> usize {
-    if x < lo { lo } else if x > hi { hi } else { x }
+    if x < lo {
+        lo
+    } else if x > hi {
+        hi
+    } else {
+        x
+    }
 }
 
 /// Check if `x` is a power of two.
 #[inline]
 pub const fn powerof2(x: usize) -> bool {
-    x != 0 && (x & (x - 1)) == 0
+    x != 0 && x.is_power_of_two()
 }
 
 /// Number of bits in a type, given its size in bytes.
@@ -325,11 +331,17 @@ mod tests {
     #[test]
     fn test_page_size_matches_mman() {
         // PAGE_SIZE should agree with the value from sysconf.
-        assert_eq!(PAGE_SIZE as i64, crate::unistd::sysconf(crate::unistd::_SC_PAGESIZE));
+        assert_eq!(
+            PAGE_SIZE as i64,
+            crate::unistd::sysconf(crate::unistd::_SC_PAGESIZE)
+        );
     }
 
     #[test]
     fn test_hz_matches_clk_tck() {
-        assert_eq!(HZ as i64, crate::unistd::sysconf(crate::unistd::_SC_CLK_TCK));
+        assert_eq!(
+            HZ as i64,
+            crate::unistd::sysconf(crate::unistd::_SC_CLK_TCK)
+        );
     }
 }

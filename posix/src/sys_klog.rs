@@ -50,14 +50,23 @@ mod tests {
     #[test]
     fn test_actions_sequential() {
         let actions = [
-            SYSLOG_ACTION_CLOSE, SYSLOG_ACTION_OPEN, SYSLOG_ACTION_READ,
-            SYSLOG_ACTION_READ_ALL, SYSLOG_ACTION_READ_CLEAR,
-            SYSLOG_ACTION_CLEAR, SYSLOG_ACTION_CONSOLE_OFF,
-            SYSLOG_ACTION_CONSOLE_ON, SYSLOG_ACTION_CONSOLE_LEVEL,
-            SYSLOG_ACTION_SIZE_UNREAD, SYSLOG_ACTION_SIZE_BUFFER,
+            SYSLOG_ACTION_CLOSE,
+            SYSLOG_ACTION_OPEN,
+            SYSLOG_ACTION_READ,
+            SYSLOG_ACTION_READ_ALL,
+            SYSLOG_ACTION_READ_CLEAR,
+            SYSLOG_ACTION_CLEAR,
+            SYSLOG_ACTION_CONSOLE_OFF,
+            SYSLOG_ACTION_CONSOLE_ON,
+            SYSLOG_ACTION_CONSOLE_LEVEL,
+            SYSLOG_ACTION_SIZE_UNREAD,
+            SYSLOG_ACTION_SIZE_BUFFER,
         ];
         for i in 0..actions.len() {
-            assert_eq!(actions[i], i as i32, "SYSLOG_ACTION values should be sequential");
+            assert_eq!(
+                actions[i], i as i32,
+                "SYSLOG_ACTION values should be sequential"
+            );
         }
     }
 

@@ -84,9 +84,12 @@ mod tests {
     #[test]
     fn test_fadvise_values_distinct() {
         let vals = [
-            POSIX_FADV_NORMAL, POSIX_FADV_SEQUENTIAL,
-            POSIX_FADV_RANDOM, POSIX_FADV_NOREUSE,
-            POSIX_FADV_WILLNEED, POSIX_FADV_DONTNEED,
+            POSIX_FADV_NORMAL,
+            POSIX_FADV_SEQUENTIAL,
+            POSIX_FADV_RANDOM,
+            POSIX_FADV_NOREUSE,
+            POSIX_FADV_WILLNEED,
+            POSIX_FADV_DONTNEED,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
@@ -98,8 +101,11 @@ mod tests {
     #[test]
     fn test_madvise_values_distinct() {
         let vals = [
-            MADV_NORMAL, MADV_SEQUENTIAL, MADV_RANDOM,
-            MADV_WILLNEED, MADV_DONTNEED,
+            MADV_NORMAL,
+            MADV_SEQUENTIAL,
+            MADV_RANDOM,
+            MADV_WILLNEED,
+            MADV_DONTNEED,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {

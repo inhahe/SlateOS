@@ -150,11 +150,21 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            XFRM_MSG_NEWSA, XFRM_MSG_DELSA, XFRM_MSG_GETSA,
-            XFRM_MSG_NEWPOLICY, XFRM_MSG_DELPOLICY, XFRM_MSG_GETPOLICY,
-            XFRM_MSG_ALLOCSPI, XFRM_MSG_ACQUIRE, XFRM_MSG_EXPIRE,
-            XFRM_MSG_UPDPOLICY, XFRM_MSG_UPDSA, XFRM_MSG_POLEXPIRE,
-            XFRM_MSG_FLUSHSA, XFRM_MSG_FLUSHPOLICY, XFRM_MSG_MIGRATE,
+            XFRM_MSG_NEWSA,
+            XFRM_MSG_DELSA,
+            XFRM_MSG_GETSA,
+            XFRM_MSG_NEWPOLICY,
+            XFRM_MSG_DELPOLICY,
+            XFRM_MSG_GETPOLICY,
+            XFRM_MSG_ALLOCSPI,
+            XFRM_MSG_ACQUIRE,
+            XFRM_MSG_EXPIRE,
+            XFRM_MSG_UPDPOLICY,
+            XFRM_MSG_UPDSA,
+            XFRM_MSG_POLEXPIRE,
+            XFRM_MSG_FLUSHSA,
+            XFRM_MSG_FLUSHPOLICY,
+            XFRM_MSG_MIGRATE,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -187,10 +197,18 @@ mod tests {
     #[test]
     fn test_sa_attrs_distinct() {
         let attrs = [
-            XFRMA_UNSPEC, XFRMA_ALG_AUTH, XFRMA_ALG_CRYPT,
-            XFRMA_ALG_COMP, XFRMA_ENCAP, XFRMA_TMPL,
-            XFRMA_SA, XFRMA_POLICY, XFRMA_REPLAY_VAL,
-            XFRMA_LTIME_VAL, XFRMA_ALG_AEAD, XFRMA_MARK,
+            XFRMA_UNSPEC,
+            XFRMA_ALG_AUTH,
+            XFRMA_ALG_CRYPT,
+            XFRMA_ALG_COMP,
+            XFRMA_ENCAP,
+            XFRMA_TMPL,
+            XFRMA_SA,
+            XFRMA_POLICY,
+            XFRMA_REPLAY_VAL,
+            XFRMA_LTIME_VAL,
+            XFRMA_ALG_AEAD,
+            XFRMA_MARK,
             XFRMA_IF_ID,
         ];
         for i in 0..attrs.len() {

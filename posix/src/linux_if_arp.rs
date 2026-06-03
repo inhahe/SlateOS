@@ -7,24 +7,24 @@
 // Re-exports from net_if_arp
 // ---------------------------------------------------------------------------
 
+pub use crate::net_if_arp::ARPHRD_ARCNET;
 pub use crate::net_if_arp::ARPHRD_ETHER;
 pub use crate::net_if_arp::ARPHRD_IEEE802;
-pub use crate::net_if_arp::ARPHRD_ARCNET;
-pub use crate::net_if_arp::ARPHRD_SLIP;
-pub use crate::net_if_arp::ARPHRD_PPP;
-pub use crate::net_if_arp::ARPHRD_LOOPBACK;
-pub use crate::net_if_arp::ARPHRD_SIT;
 pub use crate::net_if_arp::ARPHRD_IPGRE;
-pub use crate::net_if_arp::ARPHRD_VOID;
+pub use crate::net_if_arp::ARPHRD_LOOPBACK;
 pub use crate::net_if_arp::ARPHRD_NONE;
+pub use crate::net_if_arp::ARPHRD_PPP;
+pub use crate::net_if_arp::ARPHRD_SIT;
+pub use crate::net_if_arp::ARPHRD_SLIP;
+pub use crate::net_if_arp::ARPHRD_VOID;
 
-pub use crate::net_if_arp::ARPOP_REQUEST;
-pub use crate::net_if_arp::ARPOP_REPLY;
-pub use crate::net_if_arp::ARPOP_RREQUEST;
-pub use crate::net_if_arp::ARPOP_RREPLY;
-pub use crate::net_if_arp::ARPOP_InREQUEST;
 pub use crate::net_if_arp::ARPOP_InREPLY;
+pub use crate::net_if_arp::ARPOP_InREQUEST;
 pub use crate::net_if_arp::ARPOP_NAK;
+pub use crate::net_if_arp::ARPOP_REPLY;
+pub use crate::net_if_arp::ARPOP_REQUEST;
+pub use crate::net_if_arp::ARPOP_RREPLY;
+pub use crate::net_if_arp::ARPOP_RREQUEST;
 
 pub use crate::net_if_arp::ArpHdr;
 
@@ -102,9 +102,14 @@ mod tests {
     #[test]
     fn test_linux_arphrd_distinct() {
         let types = [
-            ARPHRD_DLCI, ARPHRD_ATM, ARPHRD_METRICOM,
-            ARPHRD_IEEE1394, ARPHRD_INFINIBAND,
-            ARPHRD_IEEE802154, ARPHRD_6LOWPAN, ARPHRD_NETLINK,
+            ARPHRD_DLCI,
+            ARPHRD_ATM,
+            ARPHRD_METRICOM,
+            ARPHRD_IEEE1394,
+            ARPHRD_INFINIBAND,
+            ARPHRD_IEEE802154,
+            ARPHRD_6LOWPAN,
+            ARPHRD_NETLINK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

@@ -101,9 +101,19 @@ mod tests {
     #[test]
     fn test_block_ioctls_distinct() {
         let cmds = [
-            BLKPG, BLKGETSIZE, BLKFLSBUF, BLKRASET, BLKRAGET,
-            BLKSSZGET, BLKGETSIZE64, BLKBSZSET, BLKBSZGET,
-            BLKDISCARD, BLKSECDISCARD, BLKZEROOUT, BLKRRPART,
+            BLKPG,
+            BLKGETSIZE,
+            BLKFLSBUF,
+            BLKRASET,
+            BLKRAGET,
+            BLKSSZGET,
+            BLKGETSIZE64,
+            BLKBSZSET,
+            BLKBSZGET,
+            BLKDISCARD,
+            BLKSECDISCARD,
+            BLKZEROOUT,
+            BLKRRPART,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

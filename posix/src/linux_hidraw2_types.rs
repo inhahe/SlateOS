@@ -78,8 +78,12 @@ mod tests {
     #[test]
     fn test_bus_types_distinct() {
         let buses = [
-            BUS_USB, BUS_HIL, BUS_BLUETOOTH,
-            BUS_VIRTUAL, BUS_I2C, BUS_SPI,
+            BUS_USB,
+            BUS_HIL,
+            BUS_BLUETOOTH,
+            BUS_VIRTUAL,
+            BUS_I2C,
+            BUS_SPI,
         ];
         for i in 0..buses.len() {
             for j in (i + 1)..buses.len() {
@@ -91,8 +95,12 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            HIDIOCGRAWINFO, HIDIOCGRAWNAME, HIDIOCGRAWPHYS,
-            HIDIOCGFEATURE, HIDIOCSFEATURE, HIDIOCGRAWUNIQ,
+            HIDIOCGRAWINFO,
+            HIDIOCGRAWNAME,
+            HIDIOCGRAWPHYS,
+            HIDIOCGFEATURE,
+            HIDIOCSFEATURE,
+            HIDIOCGRAWUNIQ,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

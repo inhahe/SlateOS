@@ -125,8 +125,11 @@ mod tests {
     #[test]
     fn test_cmd_types_distinct() {
         let cmds: [u8; 6] = [
-            CCISS_CMD_VENDOR, CCISS_CMD_READ, CCISS_CMD_WRITE,
-            CCISS_CMD_READ_CAPACITY, CCISS_CMD_REPORT_LUNS,
+            CCISS_CMD_VENDOR,
+            CCISS_CMD_READ,
+            CCISS_CMD_WRITE,
+            CCISS_CMD_READ_CAPACITY,
+            CCISS_CMD_REPORT_LUNS,
             CCISS_CMD_INQUIRY,
         ];
         for i in 0..cmds.len() {
@@ -149,8 +152,10 @@ mod tests {
     #[test]
     fn test_bus_types_power_of_two() {
         let types = [
-            BUS_TYPE_ULTRA2, BUS_TYPE_ULTRA3,
-            BUS_TYPE_FIBRE4, BUS_TYPE_FIBRE1G,
+            BUS_TYPE_ULTRA2,
+            BUS_TYPE_ULTRA3,
+            BUS_TYPE_FIBRE4,
+            BUS_TYPE_FIBRE1G,
         ];
         for t in &types {
             assert!(t.is_power_of_two(), "0x{:02x} not power of two", t);
@@ -160,11 +165,19 @@ mod tests {
     #[test]
     fn test_error_codes_distinct() {
         let codes = [
-            CMD_SUCCESS, CMD_TARGET_STATUS, CMD_DATA_UNDERRUN,
-            CMD_DATA_OVERRUN, CMD_INVALID, CMD_PROTOCOL_ERR,
-            CMD_HARDWARE_ERR, CMD_CONNECTION_LOST, CMD_ABORTED,
-            CMD_ABORT_FAILED, CMD_UNSOLICITED_ABORT,
-            CMD_TIMEOUT, CMD_UNABORTABLE,
+            CMD_SUCCESS,
+            CMD_TARGET_STATUS,
+            CMD_DATA_UNDERRUN,
+            CMD_DATA_OVERRUN,
+            CMD_INVALID,
+            CMD_PROTOCOL_ERR,
+            CMD_HARDWARE_ERR,
+            CMD_CONNECTION_LOST,
+            CMD_ABORTED,
+            CMD_ABORT_FAILED,
+            CMD_UNSOLICITED_ABORT,
+            CMD_TIMEOUT,
+            CMD_UNABORTABLE,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

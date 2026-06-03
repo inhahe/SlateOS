@@ -74,8 +74,11 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            ILA_CMD_UNSPEC, ILA_CMD_ADD, ILA_CMD_DEL,
-            ILA_CMD_GET, ILA_CMD_FLUSH,
+            ILA_CMD_UNSPEC,
+            ILA_CMD_ADD,
+            ILA_CMD_DEL,
+            ILA_CMD_GET,
+            ILA_CMD_FLUSH,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -87,8 +90,10 @@ mod tests {
     #[test]
     fn test_csum_modes_distinct() {
         let modes = [
-            ILA_CSUM_ADJUST_NONE, ILA_CSUM_ADJUST_TRANSPORT,
-            ILA_CSUM_ADJUST_NEUTRAL_MAP, ILA_CSUM_ADJUST_NEUTRAL_MAP_AUTO,
+            ILA_CSUM_ADJUST_NONE,
+            ILA_CSUM_ADJUST_TRANSPORT,
+            ILA_CSUM_ADJUST_NEUTRAL_MAP,
+            ILA_CSUM_ADJUST_NEUTRAL_MAP_AUTO,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

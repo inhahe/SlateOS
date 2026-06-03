@@ -110,13 +110,20 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            MMC_CMD_GO_IDLE_STATE, MMC_CMD_SEND_OP_COND,
-            MMC_CMD_ALL_SEND_CID, MMC_CMD_SET_RELATIVE_ADDR,
-            MMC_CMD_SELECT_CARD, MMC_CMD_SEND_CSD,
-            MMC_CMD_STOP_TRANSMISSION, MMC_CMD_SEND_STATUS,
-            MMC_CMD_SET_BLOCKLEN, MMC_CMD_READ_SINGLE_BLOCK,
-            MMC_CMD_READ_MULTIPLE_BLOCK, MMC_CMD_WRITE_BLOCK,
-            MMC_CMD_WRITE_MULTIPLE_BLOCK, MMC_CMD_ERASE,
+            MMC_CMD_GO_IDLE_STATE,
+            MMC_CMD_SEND_OP_COND,
+            MMC_CMD_ALL_SEND_CID,
+            MMC_CMD_SET_RELATIVE_ADDR,
+            MMC_CMD_SELECT_CARD,
+            MMC_CMD_SEND_CSD,
+            MMC_CMD_STOP_TRANSMISSION,
+            MMC_CMD_SEND_STATUS,
+            MMC_CMD_SET_BLOCKLEN,
+            MMC_CMD_READ_SINGLE_BLOCK,
+            MMC_CMD_READ_MULTIPLE_BLOCK,
+            MMC_CMD_WRITE_BLOCK,
+            MMC_CMD_WRITE_MULTIPLE_BLOCK,
+            MMC_CMD_ERASE,
             MMC_CMD_APP_CMD,
         ];
         for i in 0..cmds.len() {
@@ -129,9 +136,15 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            MMC_STATE_IDLE, MMC_STATE_READY, MMC_STATE_IDENT,
-            MMC_STATE_STBY, MMC_STATE_TRAN, MMC_STATE_DATA,
-            MMC_STATE_RCV, MMC_STATE_PRG, MMC_STATE_DIS,
+            MMC_STATE_IDLE,
+            MMC_STATE_READY,
+            MMC_STATE_IDENT,
+            MMC_STATE_STBY,
+            MMC_STATE_TRAN,
+            MMC_STATE_DATA,
+            MMC_STATE_RCV,
+            MMC_STATE_PRG,
+            MMC_STATE_DIS,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -143,9 +156,15 @@ mod tests {
     #[test]
     fn test_timings_distinct() {
         let timings = [
-            MMC_TIMING_LEGACY, MMC_TIMING_SD_HS, MMC_TIMING_UHS_SDR12,
-            MMC_TIMING_UHS_SDR25, MMC_TIMING_UHS_SDR50, MMC_TIMING_UHS_SDR104,
-            MMC_TIMING_UHS_DDR50, MMC_TIMING_MMC_HS200, MMC_TIMING_MMC_HS400,
+            MMC_TIMING_LEGACY,
+            MMC_TIMING_SD_HS,
+            MMC_TIMING_UHS_SDR12,
+            MMC_TIMING_UHS_SDR25,
+            MMC_TIMING_UHS_SDR50,
+            MMC_TIMING_UHS_SDR104,
+            MMC_TIMING_UHS_DDR50,
+            MMC_TIMING_MMC_HS200,
+            MMC_TIMING_MMC_HS400,
         ];
         for i in 0..timings.len() {
             for j in (i + 1)..timings.len() {

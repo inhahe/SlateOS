@@ -99,9 +99,12 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            TEE_IOC_VERSION, TEE_IOC_OPEN_SESSION,
-            TEE_IOC_INVOKE, TEE_IOC_CANCEL,
-            TEE_IOC_CLOSE_SESSION, TEE_IOC_SHM_ALLOC,
+            TEE_IOC_VERSION,
+            TEE_IOC_OPEN_SESSION,
+            TEE_IOC_INVOKE,
+            TEE_IOC_CANCEL,
+            TEE_IOC_CLOSE_SESSION,
+            TEE_IOC_SHM_ALLOC,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -119,8 +122,10 @@ mod tests {
     #[test]
     fn test_origins_distinct() {
         let origins = [
-            TEE_ORIGIN_API, TEE_ORIGIN_COMMS,
-            TEE_ORIGIN_TEE, TEE_ORIGIN_TRUSTED_APP,
+            TEE_ORIGIN_API,
+            TEE_ORIGIN_COMMS,
+            TEE_ORIGIN_TEE,
+            TEE_ORIGIN_TRUSTED_APP,
         ];
         for i in 0..origins.len() {
             for j in (i + 1)..origins.len() {
@@ -132,9 +137,12 @@ mod tests {
     #[test]
     fn test_param_types_distinct() {
         let types = [
-            TEE_PARAM_TYPE_NONE, TEE_PARAM_TYPE_VALUE_INPUT,
-            TEE_PARAM_TYPE_VALUE_OUTPUT, TEE_PARAM_TYPE_VALUE_INOUT,
-            TEE_PARAM_TYPE_MEMREF_INPUT, TEE_PARAM_TYPE_MEMREF_OUTPUT,
+            TEE_PARAM_TYPE_NONE,
+            TEE_PARAM_TYPE_VALUE_INPUT,
+            TEE_PARAM_TYPE_VALUE_OUTPUT,
+            TEE_PARAM_TYPE_VALUE_INOUT,
+            TEE_PARAM_TYPE_MEMREF_INPUT,
+            TEE_PARAM_TYPE_MEMREF_OUTPUT,
             TEE_PARAM_TYPE_MEMREF_INOUT,
         ];
         for i in 0..types.len() {
@@ -147,8 +155,11 @@ mod tests {
     #[test]
     fn test_login_types_distinct() {
         let logins = [
-            TEE_LOGIN_PUBLIC, TEE_LOGIN_USER, TEE_LOGIN_GROUP,
-            TEE_LOGIN_APPLICATION, TEE_LOGIN_APPLICATION_USER,
+            TEE_LOGIN_PUBLIC,
+            TEE_LOGIN_USER,
+            TEE_LOGIN_GROUP,
+            TEE_LOGIN_APPLICATION,
+            TEE_LOGIN_APPLICATION_USER,
             TEE_LOGIN_APPLICATION_GROUP,
         ];
         for i in 0..logins.len() {

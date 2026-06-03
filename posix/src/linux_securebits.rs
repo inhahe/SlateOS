@@ -59,10 +59,14 @@ mod tests {
     #[test]
     fn test_secbits_are_powers_of_two() {
         let bits = [
-            SECBIT_NOROOT, SECBIT_NOROOT_LOCKED,
-            SECBIT_NO_SETUID_FIXUP, SECBIT_NO_SETUID_FIXUP_LOCKED,
-            SECBIT_KEEP_CAPS, SECBIT_KEEP_CAPS_LOCKED,
-            SECBIT_NO_CAP_AMBIENT_RAISE, SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
+            SECBIT_NOROOT,
+            SECBIT_NOROOT_LOCKED,
+            SECBIT_NO_SETUID_FIXUP,
+            SECBIT_NO_SETUID_FIXUP_LOCKED,
+            SECBIT_KEEP_CAPS,
+            SECBIT_KEEP_CAPS_LOCKED,
+            SECBIT_NO_CAP_AMBIENT_RAISE,
+            SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
         ];
         for b in &bits {
             assert!(b.is_power_of_two(), "secbit {b:#x} not power of 2");
@@ -72,10 +76,14 @@ mod tests {
     #[test]
     fn test_secbits_distinct() {
         let bits = [
-            SECBIT_NOROOT, SECBIT_NOROOT_LOCKED,
-            SECBIT_NO_SETUID_FIXUP, SECBIT_NO_SETUID_FIXUP_LOCKED,
-            SECBIT_KEEP_CAPS, SECBIT_KEEP_CAPS_LOCKED,
-            SECBIT_NO_CAP_AMBIENT_RAISE, SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
+            SECBIT_NOROOT,
+            SECBIT_NOROOT_LOCKED,
+            SECBIT_NO_SETUID_FIXUP,
+            SECBIT_NO_SETUID_FIXUP_LOCKED,
+            SECBIT_KEEP_CAPS,
+            SECBIT_KEEP_CAPS_LOCKED,
+            SECBIT_NO_CAP_AMBIENT_RAISE,
+            SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -90,7 +98,10 @@ mod tests {
         assert_eq!(SECBIT_NOROOT_LOCKED, SECBIT_NOROOT << 1);
         assert_eq!(SECBIT_NO_SETUID_FIXUP_LOCKED, SECBIT_NO_SETUID_FIXUP << 1);
         assert_eq!(SECBIT_KEEP_CAPS_LOCKED, SECBIT_KEEP_CAPS << 1);
-        assert_eq!(SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED, SECBIT_NO_CAP_AMBIENT_RAISE << 1);
+        assert_eq!(
+            SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
+            SECBIT_NO_CAP_AMBIENT_RAISE << 1
+        );
     }
 
     #[test]

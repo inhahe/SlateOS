@@ -92,8 +92,10 @@ mod tests {
     #[test]
     fn test_dxfer_directions_distinct() {
         let dirs = [
-            SG_DXFER_NONE, SG_DXFER_TO_DEV,
-            SG_DXFER_FROM_DEV, SG_DXFER_TO_FROM_DEV,
+            SG_DXFER_NONE,
+            SG_DXFER_TO_DEV,
+            SG_DXFER_FROM_DEV,
+            SG_DXFER_TO_FROM_DEV,
         ];
         for i in 0..dirs.len() {
             for j in (i + 1)..dirs.len() {
@@ -110,10 +112,14 @@ mod tests {
     #[test]
     fn test_sam_status_distinct() {
         let statuses = [
-            SAM_STAT_GOOD, SAM_STAT_CHECK_CONDITION,
-            SAM_STAT_CONDITION_MET, SAM_STAT_BUSY,
-            SAM_STAT_RESERVATION_CONFLICT, SAM_STAT_TASK_SET_FULL,
-            SAM_STAT_ACA_ACTIVE, SAM_STAT_TASK_ABORTED,
+            SAM_STAT_GOOD,
+            SAM_STAT_CHECK_CONDITION,
+            SAM_STAT_CONDITION_MET,
+            SAM_STAT_BUSY,
+            SAM_STAT_RESERVATION_CONFLICT,
+            SAM_STAT_TASK_SET_FULL,
+            SAM_STAT_ACA_ACTIVE,
+            SAM_STAT_TASK_ABORTED,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {

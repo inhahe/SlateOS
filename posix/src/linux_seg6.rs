@@ -93,9 +93,15 @@ mod tests {
     #[test]
     fn test_local_attrs_distinct() {
         let attrs = [
-            SEG6_LOCAL_UNSPEC, SEG6_LOCAL_ACTION, SEG6_LOCAL_SRH,
-            SEG6_LOCAL_TABLE, SEG6_LOCAL_NH4, SEG6_LOCAL_NH6,
-            SEG6_LOCAL_IIF, SEG6_LOCAL_OIF, SEG6_LOCAL_BPF,
+            SEG6_LOCAL_UNSPEC,
+            SEG6_LOCAL_ACTION,
+            SEG6_LOCAL_SRH,
+            SEG6_LOCAL_TABLE,
+            SEG6_LOCAL_NH4,
+            SEG6_LOCAL_NH6,
+            SEG6_LOCAL_IIF,
+            SEG6_LOCAL_OIF,
+            SEG6_LOCAL_BPF,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -107,11 +113,16 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            SEG6_LOCAL_ACTION_END, SEG6_LOCAL_ACTION_END_X,
-            SEG6_LOCAL_ACTION_END_T, SEG6_LOCAL_ACTION_END_DX2,
-            SEG6_LOCAL_ACTION_END_DX6, SEG6_LOCAL_ACTION_END_DX4,
-            SEG6_LOCAL_ACTION_END_DT6, SEG6_LOCAL_ACTION_END_DT4,
-            SEG6_LOCAL_ACTION_END_B6, SEG6_LOCAL_ACTION_END_B6_ENCAPS,
+            SEG6_LOCAL_ACTION_END,
+            SEG6_LOCAL_ACTION_END_X,
+            SEG6_LOCAL_ACTION_END_T,
+            SEG6_LOCAL_ACTION_END_DX2,
+            SEG6_LOCAL_ACTION_END_DX6,
+            SEG6_LOCAL_ACTION_END_DX4,
+            SEG6_LOCAL_ACTION_END_DT6,
+            SEG6_LOCAL_ACTION_END_DT4,
+            SEG6_LOCAL_ACTION_END_B6,
+            SEG6_LOCAL_ACTION_END_B6_ENCAPS,
             SEG6_LOCAL_ACTION_END_BPF,
         ];
         for i in 0..actions.len() {

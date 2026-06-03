@@ -120,8 +120,13 @@ mod tests {
     #[test]
     fn test_traffic_classes_distinct() {
         let classes = [
-            ATM_NONE, ATM_CBR, ATM_VBR_NRT, ATM_VBR_RT,
-            ATM_ABR, ATM_UBR, ATM_UBR_PLUS,
+            ATM_NONE,
+            ATM_CBR,
+            ATM_VBR_NRT,
+            ATM_VBR_RT,
+            ATM_ABR,
+            ATM_UBR,
+            ATM_UBR_PLUS,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {

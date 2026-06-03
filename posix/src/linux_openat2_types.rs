@@ -71,8 +71,12 @@ mod tests {
     #[test]
     fn test_resolve_flags_no_overlap() {
         let flags = [
-            RESOLVE_NO_XDEV, RESOLVE_NO_MAGICLINKS, RESOLVE_NO_SYMLINKS,
-            RESOLVE_BENEATH, RESOLVE_IN_ROOT, RESOLVE_CACHED,
+            RESOLVE_NO_XDEV,
+            RESOLVE_NO_MAGICLINKS,
+            RESOLVE_NO_SYMLINKS,
+            RESOLVE_BENEATH,
+            RESOLVE_IN_ROOT,
+            RESOLVE_CACHED,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -91,9 +95,15 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            OPENAT2_O_CREAT, OPENAT2_O_EXCL, OPENAT2_O_TRUNC,
-            OPENAT2_O_APPEND, OPENAT2_O_NONBLOCK, OPENAT2_O_CLOEXEC,
-            OPENAT2_O_PATH, OPENAT2_O_DIRECTORY, OPENAT2_O_NOFOLLOW,
+            OPENAT2_O_CREAT,
+            OPENAT2_O_EXCL,
+            OPENAT2_O_TRUNC,
+            OPENAT2_O_APPEND,
+            OPENAT2_O_NONBLOCK,
+            OPENAT2_O_CLOEXEC,
+            OPENAT2_O_PATH,
+            OPENAT2_O_DIRECTORY,
+            OPENAT2_O_NOFOLLOW,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

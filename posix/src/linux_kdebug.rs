@@ -64,9 +64,18 @@ mod tests {
     #[test]
     fn test_die_events_distinct() {
         let events = [
-            DIE_OOPS, DIE_INT3, DIE_DEBUG, DIE_PANIC, DIE_NMI,
-            DIE_DIE, DIE_NMIUNKNOWN, DIE_NMIWATCHDOG,
-            DIE_KERNELDEBUG, DIE_TRAP, DIE_GPF, DIE_CALL,
+            DIE_OOPS,
+            DIE_INT3,
+            DIE_DEBUG,
+            DIE_PANIC,
+            DIE_NMI,
+            DIE_DIE,
+            DIE_NMIUNKNOWN,
+            DIE_NMIWATCHDOG,
+            DIE_KERNELDEBUG,
+            DIE_TRAP,
+            DIE_GPF,
+            DIE_CALL,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -83,8 +92,10 @@ mod tests {
     #[test]
     fn test_dr7_break_types_distinct() {
         let types = [
-            DR7_BREAK_ON_EXEC, DR7_BREAK_ON_WRITE,
-            DR7_BREAK_ON_IO, DR7_BREAK_ON_RW,
+            DR7_BREAK_ON_EXEC,
+            DR7_BREAK_ON_WRITE,
+            DR7_BREAK_ON_IO,
+            DR7_BREAK_ON_RW,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

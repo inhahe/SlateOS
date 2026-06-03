@@ -87,10 +87,20 @@ mod tests {
     #[test]
     fn test_mask_flags_no_overlap() {
         let masks = [
-            STATX_TYPE, STATX_MODE, STATX_NLINK, STATX_UID,
-            STATX_GID, STATX_ATIME, STATX_MTIME, STATX_CTIME,
-            STATX_INO, STATX_SIZE, STATX_BLOCKS, STATX_BTIME,
-            STATX_MNT_ID, STATX_DIOALIGN,
+            STATX_TYPE,
+            STATX_MODE,
+            STATX_NLINK,
+            STATX_UID,
+            STATX_GID,
+            STATX_ATIME,
+            STATX_MTIME,
+            STATX_CTIME,
+            STATX_INO,
+            STATX_SIZE,
+            STATX_BLOCKS,
+            STATX_BTIME,
+            STATX_MNT_ID,
+            STATX_DIOALIGN,
         ];
         for i in 0..masks.len() {
             assert!(masks[i].is_power_of_two());
@@ -102,18 +112,31 @@ mod tests {
 
     #[test]
     fn test_basic_stats_combines() {
-        let expected = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_UID
-            | STATX_GID | STATX_ATIME | STATX_MTIME | STATX_CTIME
-            | STATX_INO | STATX_SIZE | STATX_BLOCKS;
+        let expected = STATX_TYPE
+            | STATX_MODE
+            | STATX_NLINK
+            | STATX_UID
+            | STATX_GID
+            | STATX_ATIME
+            | STATX_MTIME
+            | STATX_CTIME
+            | STATX_INO
+            | STATX_SIZE
+            | STATX_BLOCKS;
         assert_eq!(STATX_BASIC_STATS, expected);
     }
 
     #[test]
     fn test_attr_flags_no_overlap() {
         let attrs = [
-            STATX_ATTR_COMPRESSED, STATX_ATTR_IMMUTABLE, STATX_ATTR_APPEND,
-            STATX_ATTR_NODUMP, STATX_ATTR_ENCRYPTED, STATX_ATTR_VERITY,
-            STATX_ATTR_DAX, STATX_ATTR_MOUNT_ROOT,
+            STATX_ATTR_COMPRESSED,
+            STATX_ATTR_IMMUTABLE,
+            STATX_ATTR_APPEND,
+            STATX_ATTR_NODUMP,
+            STATX_ATTR_ENCRYPTED,
+            STATX_ATTR_VERITY,
+            STATX_ATTR_DAX,
+            STATX_ATTR_MOUNT_ROOT,
         ];
         for i in 0..attrs.len() {
             assert!(attrs[i].is_power_of_two());
@@ -126,8 +149,11 @@ mod tests {
     #[test]
     fn test_at_flags_distinct() {
         let flags = [
-            AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW, AT_NO_AUTOMOUNT,
-            AT_STATX_FORCE_SYNC, AT_STATX_DONT_SYNC,
+            AT_EMPTY_PATH,
+            AT_SYMLINK_NOFOLLOW,
+            AT_NO_AUTOMOUNT,
+            AT_STATX_FORCE_SYNC,
+            AT_STATX_DONT_SYNC,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

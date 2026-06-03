@@ -109,9 +109,8 @@ mod tests {
     #[test]
     fn test_line_disciplines_distinct() {
         let ldiscs = [
-            N_TTY, N_SLIP, N_MOUSE, N_PPP, N_STRIP,
-            N_AX25, N_X25, N_6PACK, N_MASC,
-            N_IRDA, N_HDLC, N_HCI, N_GSM0710,
+            N_TTY, N_SLIP, N_MOUSE, N_PPP, N_STRIP, N_AX25, N_X25, N_6PACK, N_MASC, N_IRDA, N_HDLC,
+            N_HCI, N_GSM0710,
         ];
         for i in 0..ldiscs.len() {
             for j in (i + 1)..ldiscs.len() {
@@ -128,8 +127,7 @@ mod tests {
     #[test]
     fn test_tty_ioctls_distinct() {
         let ioctls = [
-            TIOCGWINSZ, TIOCSWINSZ, TIOCEXCL, TIOCNXCL,
-            TIOCSCTTY, TIOCGPGRP, TIOCSPGRP, TIOCOUTQ,
+            TIOCGWINSZ, TIOCSWINSZ, TIOCEXCL, TIOCNXCL, TIOCSCTTY, TIOCGPGRP, TIOCSPGRP, TIOCOUTQ,
             TIOCSTI, TIOCGETD, TIOCSETD, TIOCGSID,
         ];
         for i in 0..ioctls.len() {

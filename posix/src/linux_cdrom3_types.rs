@@ -89,8 +89,11 @@ mod tests {
     #[test]
     fn test_disc_status_distinct() {
         let statuses = [
-            CDS_NO_INFO, CDS_NO_DISC, CDS_TRAY_OPEN,
-            CDS_DRIVE_NOT_READY, CDS_DISC_OK,
+            CDS_NO_INFO,
+            CDS_NO_DISC,
+            CDS_TRAY_OPEN,
+            CDS_DRIVE_NOT_READY,
+            CDS_DISC_OK,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
@@ -102,8 +105,7 @@ mod tests {
     #[test]
     fn test_disc_types_distinct() {
         let types = [
-            CDS_AUDIO, CDS_DATA_1, CDS_DATA_2,
-            CDS_XA_2_1, CDS_XA_2_2, CDS_MIXED,
+            CDS_AUDIO, CDS_DATA_1, CDS_DATA_2, CDS_XA_2_1, CDS_XA_2_2, CDS_MIXED,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -115,11 +117,25 @@ mod tests {
     #[test]
     fn test_capability_flags_power_of_two() {
         let caps = [
-            CDC_CLOSE_TRAY, CDC_OPEN_TRAY, CDC_LOCK,
-            CDC_SELECT_SPEED, CDC_SELECT_DISC, CDC_MULTI_SESSION,
-            CDC_MCN, CDC_MEDIA_CHANGED, CDC_PLAY_AUDIO, CDC_RESET,
-            CDC_CD_R, CDC_CD_RW, CDC_DVD, CDC_DVD_R,
-            CDC_DVD_RAM, CDC_MO_DRIVE, CDC_MRW, CDC_MRW_W, CDC_RAM,
+            CDC_CLOSE_TRAY,
+            CDC_OPEN_TRAY,
+            CDC_LOCK,
+            CDC_SELECT_SPEED,
+            CDC_SELECT_DISC,
+            CDC_MULTI_SESSION,
+            CDC_MCN,
+            CDC_MEDIA_CHANGED,
+            CDC_PLAY_AUDIO,
+            CDC_RESET,
+            CDC_CD_R,
+            CDC_CD_RW,
+            CDC_DVD,
+            CDC_DVD_R,
+            CDC_DVD_RAM,
+            CDC_MO_DRIVE,
+            CDC_MRW,
+            CDC_MRW_W,
+            CDC_RAM,
         ];
         for c in &caps {
             assert!(c.is_power_of_two());
@@ -129,11 +145,25 @@ mod tests {
     #[test]
     fn test_capability_flags_no_overlap() {
         let caps = [
-            CDC_CLOSE_TRAY, CDC_OPEN_TRAY, CDC_LOCK,
-            CDC_SELECT_SPEED, CDC_SELECT_DISC, CDC_MULTI_SESSION,
-            CDC_MCN, CDC_MEDIA_CHANGED, CDC_PLAY_AUDIO, CDC_RESET,
-            CDC_CD_R, CDC_CD_RW, CDC_DVD, CDC_DVD_R,
-            CDC_DVD_RAM, CDC_MO_DRIVE, CDC_MRW, CDC_MRW_W, CDC_RAM,
+            CDC_CLOSE_TRAY,
+            CDC_OPEN_TRAY,
+            CDC_LOCK,
+            CDC_SELECT_SPEED,
+            CDC_SELECT_DISC,
+            CDC_MULTI_SESSION,
+            CDC_MCN,
+            CDC_MEDIA_CHANGED,
+            CDC_PLAY_AUDIO,
+            CDC_RESET,
+            CDC_CD_R,
+            CDC_CD_RW,
+            CDC_DVD,
+            CDC_DVD_R,
+            CDC_DVD_RAM,
+            CDC_MO_DRIVE,
+            CDC_MRW,
+            CDC_MRW_W,
+            CDC_RAM,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

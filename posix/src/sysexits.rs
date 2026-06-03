@@ -145,16 +145,29 @@ mod tests {
     #[test]
     fn test_all_codes_in_range() {
         let codes = [
-            EX_USAGE, EX_DATAERR, EX_NOINPUT, EX_NOUSER,
-            EX_NOHOST, EX_UNAVAILABLE, EX_SOFTWARE, EX_OSERR,
-            EX_OSFILE, EX_CANTCREAT, EX_IOERR, EX_TEMPFAIL,
-            EX_PROTOCOL, EX_NOPERM, EX_CONFIG,
+            EX_USAGE,
+            EX_DATAERR,
+            EX_NOINPUT,
+            EX_NOUSER,
+            EX_NOHOST,
+            EX_UNAVAILABLE,
+            EX_SOFTWARE,
+            EX_OSERR,
+            EX_OSFILE,
+            EX_CANTCREAT,
+            EX_IOERR,
+            EX_TEMPFAIL,
+            EX_PROTOCOL,
+            EX_NOPERM,
+            EX_CONFIG,
         ];
         for &code in &codes {
             assert!(
                 code >= EX__BASE && code <= EX__MAX,
                 "exit code {} should be in range [{}..{}]",
-                code, EX__BASE, EX__MAX
+                code,
+                EX__BASE,
+                EX__MAX
             );
         }
     }
@@ -162,17 +175,26 @@ mod tests {
     #[test]
     fn test_codes_distinct() {
         let codes = [
-            EX_OK, EX_USAGE, EX_DATAERR, EX_NOINPUT, EX_NOUSER,
-            EX_NOHOST, EX_UNAVAILABLE, EX_SOFTWARE, EX_OSERR,
-            EX_OSFILE, EX_CANTCREAT, EX_IOERR, EX_TEMPFAIL,
-            EX_PROTOCOL, EX_NOPERM, EX_CONFIG,
+            EX_OK,
+            EX_USAGE,
+            EX_DATAERR,
+            EX_NOINPUT,
+            EX_NOUSER,
+            EX_NOHOST,
+            EX_UNAVAILABLE,
+            EX_SOFTWARE,
+            EX_OSERR,
+            EX_OSFILE,
+            EX_CANTCREAT,
+            EX_IOERR,
+            EX_TEMPFAIL,
+            EX_PROTOCOL,
+            EX_NOPERM,
+            EX_CONFIG,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
-                assert_ne!(
-                    codes[i], codes[j],
-                    "exit codes must be distinct"
-                );
+                assert_ne!(codes[i], codes[j], "exit codes must be distinct");
             }
         }
     }

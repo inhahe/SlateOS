@@ -72,8 +72,10 @@ mod tests {
     #[test]
     fn test_cache_modes_distinct() {
         let modes = [
-            BCACHE_MODE_WRITETHROUGH, BCACHE_MODE_WRITEBACK,
-            BCACHE_MODE_WRITEAROUND, BCACHE_MODE_NONE,
+            BCACHE_MODE_WRITETHROUGH,
+            BCACHE_MODE_WRITEBACK,
+            BCACHE_MODE_WRITEAROUND,
+            BCACHE_MODE_NONE,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -85,8 +87,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            BCACHE_STATE_DETACHED, BCACHE_STATE_CLEAN,
-            BCACHE_STATE_DIRTY, BCACHE_STATE_INCONSISTENT,
+            BCACHE_STATE_DETACHED,
+            BCACHE_STATE_CLEAN,
+            BCACHE_STATE_DIRTY,
+            BCACHE_STATE_INCONSISTENT,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

@@ -102,10 +102,19 @@ mod tests {
     #[test]
     fn test_mrt_options_distinct() {
         let opts = [
-            MRT_INIT, MRT_DONE, MRT_ADD_VIF, MRT_DEL_VIF,
-            MRT_ADD_MFC, MRT_DEL_MFC, MRT_VERSION, MRT_ASSERT,
-            MRT_PIM, MRT_TABLE, MRT_ADD_MFC_PROXY,
-            MRT_DEL_MFC_PROXY, MRT_FLUSH,
+            MRT_INIT,
+            MRT_DONE,
+            MRT_ADD_VIF,
+            MRT_DEL_VIF,
+            MRT_ADD_MFC,
+            MRT_DEL_MFC,
+            MRT_VERSION,
+            MRT_ASSERT,
+            MRT_PIM,
+            MRT_TABLE,
+            MRT_ADD_MFC_PROXY,
+            MRT_DEL_MFC_PROXY,
+            MRT_FLUSH,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -155,8 +164,10 @@ mod tests {
     #[test]
     fn test_mfc_stats_distinct() {
         let stats = [
-            RTA_MFC_STATS_UNSPEC, RTA_MFC_STATS_PACKETS,
-            RTA_MFC_STATS_BYTES, RTA_MFC_STATS_WRONG_IF,
+            RTA_MFC_STATS_UNSPEC,
+            RTA_MFC_STATS_PACKETS,
+            RTA_MFC_STATS_BYTES,
+            RTA_MFC_STATS_WRONG_IF,
         ];
         for i in 0..stats.len() {
             for j in (i + 1)..stats.len() {

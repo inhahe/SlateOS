@@ -77,10 +77,14 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            L2TP_CMD_NOOP, L2TP_CMD_TUNNEL_CREATE,
-            L2TP_CMD_TUNNEL_DELETE, L2TP_CMD_TUNNEL_MODIFY,
-            L2TP_CMD_TUNNEL_GET, L2TP_CMD_SESSION_CREATE,
-            L2TP_CMD_SESSION_DELETE, L2TP_CMD_SESSION_MODIFY,
+            L2TP_CMD_NOOP,
+            L2TP_CMD_TUNNEL_CREATE,
+            L2TP_CMD_TUNNEL_DELETE,
+            L2TP_CMD_TUNNEL_MODIFY,
+            L2TP_CMD_TUNNEL_GET,
+            L2TP_CMD_SESSION_CREATE,
+            L2TP_CMD_SESSION_DELETE,
+            L2TP_CMD_SESSION_MODIFY,
             L2TP_CMD_SESSION_GET,
         ];
         for i in 0..cmds.len() {
@@ -93,11 +97,18 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            L2TP_ATTR_NONE, L2TP_ATTR_PW_TYPE, L2TP_ATTR_ENCAP_TYPE,
-            L2TP_ATTR_OFFSET, L2TP_ATTR_DATA_SEQ, L2TP_ATTR_L2SPEC_TYPE,
-            L2TP_ATTR_L2SPEC_LEN, L2TP_ATTR_PROTO_VERSION,
-            L2TP_ATTR_IFNAME, L2TP_ATTR_CONN_ID,
-            L2TP_ATTR_PEER_CONN_ID, L2TP_ATTR_SESSION_ID,
+            L2TP_ATTR_NONE,
+            L2TP_ATTR_PW_TYPE,
+            L2TP_ATTR_ENCAP_TYPE,
+            L2TP_ATTR_OFFSET,
+            L2TP_ATTR_DATA_SEQ,
+            L2TP_ATTR_L2SPEC_TYPE,
+            L2TP_ATTR_L2SPEC_LEN,
+            L2TP_ATTR_PROTO_VERSION,
+            L2TP_ATTR_IFNAME,
+            L2TP_ATTR_CONN_ID,
+            L2TP_ATTR_PEER_CONN_ID,
+            L2TP_ATTR_SESSION_ID,
             L2TP_ATTR_PEER_SESSION_ID,
         ];
         for i in 0..attrs.len() {

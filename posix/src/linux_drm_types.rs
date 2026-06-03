@@ -85,12 +85,18 @@ mod tests {
     #[test]
     fn test_capabilities_distinct() {
         let caps = [
-            DRM_CAP_DUMB_BUFFER, DRM_CAP_VBLANK_HIGH_CRTC,
-            DRM_CAP_DUMB_PREFERRED_DEPTH, DRM_CAP_DUMB_PREFER_SHADOW,
-            DRM_CAP_PRIME, DRM_CAP_TIMESTAMP_MONOTONIC,
-            DRM_CAP_ASYNC_PAGE_FLIP, DRM_CAP_CURSOR_WIDTH,
-            DRM_CAP_CURSOR_HEIGHT, DRM_CAP_ADDFB2_MODIFIERS,
-            DRM_CAP_WRITEBACK_CONNECTORS, DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP,
+            DRM_CAP_DUMB_BUFFER,
+            DRM_CAP_VBLANK_HIGH_CRTC,
+            DRM_CAP_DUMB_PREFERRED_DEPTH,
+            DRM_CAP_DUMB_PREFER_SHADOW,
+            DRM_CAP_PRIME,
+            DRM_CAP_TIMESTAMP_MONOTONIC,
+            DRM_CAP_ASYNC_PAGE_FLIP,
+            DRM_CAP_CURSOR_WIDTH,
+            DRM_CAP_CURSOR_HEIGHT,
+            DRM_CAP_ADDFB2_MODIFIERS,
+            DRM_CAP_WRITEBACK_CONNECTORS,
+            DRM_CAP_ATOMIC_ASYNC_PAGE_FLIP,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
@@ -107,8 +113,10 @@ mod tests {
     #[test]
     fn test_client_caps_distinct() {
         let caps = [
-            DRM_CLIENT_CAP_STEREO_3D, DRM_CLIENT_CAP_UNIVERSAL_PLANES,
-            DRM_CLIENT_CAP_ATOMIC, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
+            DRM_CLIENT_CAP_STEREO_3D,
+            DRM_CLIENT_CAP_UNIVERSAL_PLANES,
+            DRM_CLIENT_CAP_ATOMIC,
+            DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

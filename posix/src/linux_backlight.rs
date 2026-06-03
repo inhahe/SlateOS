@@ -90,7 +90,8 @@ mod tests {
     #[test]
     fn test_power_states_distinct() {
         let states = [
-            BACKLIGHT_POWER_ON, BACKLIGHT_POWER_REDUCED,
+            BACKLIGHT_POWER_ON,
+            BACKLIGHT_POWER_REDUCED,
             BACKLIGHT_POWER_OFF,
         ];
         for i in 0..states.len() {
@@ -103,7 +104,8 @@ mod tests {
     #[test]
     fn test_scales_distinct() {
         let scales = [
-            BACKLIGHT_SCALE_UNKNOWN, BACKLIGHT_SCALE_LINEAR,
+            BACKLIGHT_SCALE_UNKNOWN,
+            BACKLIGHT_SCALE_LINEAR,
             BACKLIGHT_SCALE_NON_LINEAR,
         ];
         for i in 0..scales.len() {
@@ -116,9 +118,12 @@ mod tests {
     #[test]
     fn test_attr_names_distinct() {
         let attrs = [
-            BL_ATTR_BRIGHTNESS, BL_ATTR_MAX_BRIGHTNESS,
-            BL_ATTR_ACTUAL_BRIGHTNESS, BL_ATTR_BL_POWER,
-            BL_ATTR_TYPE, BL_ATTR_SCALE,
+            BL_ATTR_BRIGHTNESS,
+            BL_ATTR_MAX_BRIGHTNESS,
+            BL_ATTR_ACTUAL_BRIGHTNESS,
+            BL_ATTR_BL_POWER,
+            BL_ATTR_TYPE,
+            BL_ATTR_SCALE,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

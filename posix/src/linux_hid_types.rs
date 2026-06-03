@@ -112,9 +112,15 @@ mod tests {
     #[test]
     fn test_usage_pages_distinct() {
         let pages = [
-            HID_UP_GENDESK, HID_UP_SIMULATION, HID_UP_VR,
-            HID_UP_KEYBOARD, HID_UP_LED, HID_UP_BUTTON,
-            HID_UP_CONSUMER, HID_UP_DIGITIZER, HID_UP_SENSOR,
+            HID_UP_GENDESK,
+            HID_UP_SIMULATION,
+            HID_UP_VR,
+            HID_UP_KEYBOARD,
+            HID_UP_LED,
+            HID_UP_BUTTON,
+            HID_UP_CONSUMER,
+            HID_UP_DIGITIZER,
+            HID_UP_SENSOR,
         ];
         for i in 0..pages.len() {
             for j in (i + 1)..pages.len() {
@@ -126,9 +132,16 @@ mod tests {
     #[test]
     fn test_gd_usages_distinct() {
         let usages = [
-            HID_GD_POINTER, HID_GD_MOUSE, HID_GD_JOYSTICK,
-            HID_GD_GAMEPAD, HID_GD_KEYBOARD, HID_GD_KEYPAD,
-            HID_GD_X, HID_GD_Y, HID_GD_Z, HID_GD_WHEEL,
+            HID_GD_POINTER,
+            HID_GD_MOUSE,
+            HID_GD_JOYSTICK,
+            HID_GD_GAMEPAD,
+            HID_GD_KEYBOARD,
+            HID_GD_KEYPAD,
+            HID_GD_X,
+            HID_GD_Y,
+            HID_GD_Z,
+            HID_GD_WHEEL,
         ];
         for i in 0..usages.len() {
             for j in (i + 1)..usages.len() {

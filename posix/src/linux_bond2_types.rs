@@ -83,9 +83,13 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            BOND_MODE_ROUNDROBIN, BOND_MODE_ACTIVEBACKUP,
-            BOND_MODE_XOR, BOND_MODE_BROADCAST,
-            BOND_MODE_8023AD, BOND_MODE_TLB, BOND_MODE_ALB,
+            BOND_MODE_ROUNDROBIN,
+            BOND_MODE_ACTIVEBACKUP,
+            BOND_MODE_XOR,
+            BOND_MODE_BROADCAST,
+            BOND_MODE_8023AD,
+            BOND_MODE_TLB,
+            BOND_MODE_ALB,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -102,7 +106,8 @@ mod tests {
     #[test]
     fn test_pri_reselect_distinct() {
         let policies = [
-            BOND_PRI_RESELECT_ALWAYS, BOND_PRI_RESELECT_BETTER,
+            BOND_PRI_RESELECT_ALWAYS,
+            BOND_PRI_RESELECT_BETTER,
             BOND_PRI_RESELECT_FAILURE,
         ];
         for i in 0..policies.len() {
@@ -115,8 +120,10 @@ mod tests {
     #[test]
     fn test_arp_validate_distinct() {
         let modes = [
-            BOND_ARP_VALIDATE_NONE, BOND_ARP_VALIDATE_ACTIVE,
-            BOND_ARP_VALIDATE_BACKUP, BOND_ARP_VALIDATE_ALL,
+            BOND_ARP_VALIDATE_NONE,
+            BOND_ARP_VALIDATE_ACTIVE,
+            BOND_ARP_VALIDATE_BACKUP,
+            BOND_ARP_VALIDATE_ALL,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -128,9 +135,12 @@ mod tests {
     #[test]
     fn test_xmit_hash_distinct() {
         let hashes = [
-            BOND_XMIT_HASH_LAYER2, BOND_XMIT_HASH_LAYER34,
-            BOND_XMIT_HASH_LAYER23, BOND_XMIT_HASH_ENCAP23,
-            BOND_XMIT_HASH_ENCAP34, BOND_XMIT_HASH_VLAN_SRCMAC,
+            BOND_XMIT_HASH_LAYER2,
+            BOND_XMIT_HASH_LAYER34,
+            BOND_XMIT_HASH_LAYER23,
+            BOND_XMIT_HASH_ENCAP23,
+            BOND_XMIT_HASH_ENCAP34,
+            BOND_XMIT_HASH_VLAN_SRCMAC,
         ];
         for i in 0..hashes.len() {
             for j in (i + 1)..hashes.len() {

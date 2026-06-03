@@ -50,8 +50,10 @@ mod tests {
     #[test]
     fn test_action_cmds_distinct() {
         let cmds = [
-            TCA_MPLS_ACT_POP, TCA_MPLS_ACT_PUSH,
-            TCA_MPLS_ACT_MODIFY, TCA_MPLS_ACT_DEC_TTL,
+            TCA_MPLS_ACT_POP,
+            TCA_MPLS_ACT_PUSH,
+            TCA_MPLS_ACT_MODIFY,
+            TCA_MPLS_ACT_DEC_TTL,
             TCA_MPLS_ACT_MAC_PUSH,
         ];
         for i in 0..cmds.len() {
@@ -64,9 +66,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_MPLS_UNSPEC, TCA_MPLS_TM, TCA_MPLS_PARMS,
-            TCA_MPLS_PROTO, TCA_MPLS_LABEL, TCA_MPLS_TC,
-            TCA_MPLS_TTL, TCA_MPLS_BOS,
+            TCA_MPLS_UNSPEC,
+            TCA_MPLS_TM,
+            TCA_MPLS_PARMS,
+            TCA_MPLS_PROTO,
+            TCA_MPLS_LABEL,
+            TCA_MPLS_TC,
+            TCA_MPLS_TTL,
+            TCA_MPLS_BOS,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

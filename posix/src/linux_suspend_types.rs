@@ -69,8 +69,11 @@ mod tests {
     #[test]
     fn test_sleep_states_distinct() {
         let states = [
-            PM_SUSPEND_ON, PM_SUSPEND_TO_IDLE, PM_SUSPEND_STANDBY,
-            PM_SUSPEND_MEM, PM_SUSPEND_DISK,
+            PM_SUSPEND_ON,
+            PM_SUSPEND_TO_IDLE,
+            PM_SUSPEND_STANDBY,
+            PM_SUSPEND_MEM,
+            PM_SUSPEND_DISK,
         ];
         for i in 0..states.len() {
             assert!(states[i] < PM_SUSPEND_MAX);
@@ -83,9 +86,14 @@ mod tests {
     #[test]
     fn test_phases_distinct() {
         let phases = [
-            PM_PHASE_PREPARE, PM_PHASE_SUSPEND, PM_PHASE_SUSPEND_LATE,
-            PM_PHASE_SUSPEND_NOIRQ, PM_PHASE_RESUME_NOIRQ,
-            PM_PHASE_RESUME_EARLY, PM_PHASE_RESUME, PM_PHASE_COMPLETE,
+            PM_PHASE_PREPARE,
+            PM_PHASE_SUSPEND,
+            PM_PHASE_SUSPEND_LATE,
+            PM_PHASE_SUSPEND_NOIRQ,
+            PM_PHASE_RESUME_NOIRQ,
+            PM_PHASE_RESUME_EARLY,
+            PM_PHASE_RESUME,
+            PM_PHASE_COMPLETE,
         ];
         for i in 0..phases.len() {
             for j in (i + 1)..phases.len() {
@@ -97,8 +105,10 @@ mod tests {
     #[test]
     fn test_hibernate_flags_no_overlap() {
         let flags = [
-            HIBERNATE_PLATFORM, HIBERNATE_COMPRESS,
-            HIBERNATE_ENCRYPT, HIBERNATE_TEST,
+            HIBERNATE_PLATFORM,
+            HIBERNATE_COMPRESS,
+            HIBERNATE_ENCRYPT,
+            HIBERNATE_TEST,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

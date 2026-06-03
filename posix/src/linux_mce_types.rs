@@ -89,9 +89,15 @@ mod tests {
     #[test]
     fn test_status_flags_no_overlap() {
         let flags = [
-            MCE_STATUS_VAL, MCE_STATUS_OVER, MCE_STATUS_UC,
-            MCE_STATUS_EN, MCE_STATUS_MISCV, MCE_STATUS_ADDRV,
-            MCE_STATUS_PCC, MCE_STATUS_S, MCE_STATUS_AR,
+            MCE_STATUS_VAL,
+            MCE_STATUS_OVER,
+            MCE_STATUS_UC,
+            MCE_STATUS_EN,
+            MCE_STATUS_MISCV,
+            MCE_STATUS_ADDRV,
+            MCE_STATUS_PCC,
+            MCE_STATUS_S,
+            MCE_STATUS_AR,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -104,9 +110,12 @@ mod tests {
     #[test]
     fn test_error_codes_distinct() {
         let codes = [
-            MCE_ERROR_NONE, MCE_ERROR_UNCLASSIFIED,
-            MCE_ERROR_UCODE_PARITY, MCE_ERROR_EXTERNAL,
-            MCE_ERROR_FRC, MCE_ERROR_INTERNAL_PARITY,
+            MCE_ERROR_NONE,
+            MCE_ERROR_UNCLASSIFIED,
+            MCE_ERROR_UCODE_PARITY,
+            MCE_ERROR_EXTERNAL,
+            MCE_ERROR_FRC,
+            MCE_ERROR_INTERNAL_PARITY,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -118,8 +127,10 @@ mod tests {
     #[test]
     fn test_severity_distinct() {
         let sevs = [
-            MCE_SEVERITY_NO_ACTION, MCE_SEVERITY_SOME,
-            MCE_SEVERITY_AR, MCE_SEVERITY_UC_NAR,
+            MCE_SEVERITY_NO_ACTION,
+            MCE_SEVERITY_SOME,
+            MCE_SEVERITY_AR,
+            MCE_SEVERITY_UC_NAR,
             MCE_SEVERITY_PANIC,
         ];
         for i in 0..sevs.len() {
@@ -132,8 +143,10 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            MCE_ACTION_KILL, MCE_ACTION_SOFT_OFFLINE,
-            MCE_ACTION_HARD_OFFLINE, MCE_ACTION_PANIC,
+            MCE_ACTION_KILL,
+            MCE_ACTION_SOFT_OFFLINE,
+            MCE_ACTION_HARD_OFFLINE,
+            MCE_ACTION_PANIC,
             MCE_ACTION_CONTINUE,
         ];
         for i in 0..actions.len() {

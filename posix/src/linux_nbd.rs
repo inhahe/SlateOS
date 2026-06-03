@@ -89,10 +89,17 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            NBD_SET_SOCK, NBD_SET_BLKSIZE, NBD_SET_SIZE,
-            NBD_DO_IT, NBD_CLEAR_SOCK, NBD_CLEAR_QUE,
-            NBD_PRINT_DEBUG, NBD_SET_SIZE_BLOCKS,
-            NBD_DISCONNECT, NBD_SET_TIMEOUT, NBD_SET_FLAGS,
+            NBD_SET_SOCK,
+            NBD_SET_BLKSIZE,
+            NBD_SET_SIZE,
+            NBD_DO_IT,
+            NBD_CLEAR_SOCK,
+            NBD_CLEAR_QUE,
+            NBD_PRINT_DEBUG,
+            NBD_SET_SIZE_BLOCKS,
+            NBD_DISCONNECT,
+            NBD_SET_TIMEOUT,
+            NBD_SET_FLAGS,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -104,10 +111,14 @@ mod tests {
     #[test]
     fn test_flags_are_powers_of_two() {
         let flags = [
-            NBD_FLAG_HAS_FLAGS, NBD_FLAG_READ_ONLY,
-            NBD_FLAG_SEND_FLUSH, NBD_FLAG_SEND_FUA,
-            NBD_FLAG_ROTATIONAL, NBD_FLAG_SEND_TRIM,
-            NBD_FLAG_SEND_WRITE_ZEROES, NBD_FLAG_CAN_MULTI_CONN,
+            NBD_FLAG_HAS_FLAGS,
+            NBD_FLAG_READ_ONLY,
+            NBD_FLAG_SEND_FLUSH,
+            NBD_FLAG_SEND_FUA,
+            NBD_FLAG_ROTATIONAL,
+            NBD_FLAG_SEND_TRIM,
+            NBD_FLAG_SEND_WRITE_ZEROES,
+            NBD_FLAG_CAN_MULTI_CONN,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "flag {f:#x} not a power of 2");
@@ -117,8 +128,12 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            NBD_CMD_READ, NBD_CMD_WRITE, NBD_CMD_DISC,
-            NBD_CMD_FLUSH, NBD_CMD_TRIM, NBD_CMD_WRITE_ZEROES,
+            NBD_CMD_READ,
+            NBD_CMD_WRITE,
+            NBD_CMD_DISC,
+            NBD_CMD_FLUSH,
+            NBD_CMD_TRIM,
+            NBD_CMD_WRITE_ZEROES,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

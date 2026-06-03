@@ -108,11 +108,7 @@ pub extern "C" fn sched_getscheduler(pid: i32) -> i32 {
 /// silent accept for an arbitrary policy must now pass a recognised
 /// `SCHED_*` constant.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sched_setscheduler(
-    pid: i32,
-    policy: i32,
-    param: *const SchedParam,
-) -> i32 {
+pub extern "C" fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32 {
     if pid < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -148,9 +144,7 @@ pub extern "C" fn sched_setscheduler(
     let is_rt = matches!(policy, SCHED_FIFO | SCHED_RR);
     let is_deadline = policy == SCHED_DEADLINE;
     if (is_rt || is_deadline)
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_NICE,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -173,7 +167,9 @@ pub extern "C" fn sched_getparam(pid: i32, param: *mut SchedParam) -> i32 {
         return -1;
     }
     // SAFETY: param verified non-null.
-    unsafe { (*param).sched_priority = 0; }
+    unsafe {
+        (*param).sched_priority = 0;
+    }
     0
 }
 
@@ -184,10 +180,7 @@ pub extern "C" fn sched_getparam(pid: i32, param: *mut SchedParam) -> i32 {
 /// priority must be 0 (the only valid value for that policy).
 /// A negative pid is rejected with `EINVAL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sched_setparam(
-    pid: i32,
-    param: *const SchedParam,
-) -> i32 {
+pub extern "C" fn sched_setparam(pid: i32, param: *const SchedParam) -> i32 {
     if pid < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -213,12 +206,9 @@ pub extern "C" fn sched_setparam(
 /// rejected with `-1/EINVAL`, matching Linux behaviour.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_get_priority_min(policy: i32) -> i32 {
-    match priority_range(policy) {
-        Some((lo, _)) => lo,
-        None => {
-            errno::set_errno(errno::EINVAL);
-            -1
-        }
+    if let Some((lo, _)) = priority_range(policy) { lo } else {
+        errno::set_errno(errno::EINVAL);
+        -1
     }
 }
 
@@ -229,12 +219,9 @@ pub extern "C" fn sched_get_priority_min(policy: i32) -> i32 {
 /// policies are rejected with `-1/EINVAL`, matching Linux.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn sched_get_priority_max(policy: i32) -> i32 {
-    match priority_range(policy) {
-        Some((_, hi)) => hi,
-        None => {
-            errno::set_errno(errno::EINVAL);
-            -1
-        }
+    if let Some((_, hi)) = priority_range(policy) { hi } else {
+        errno::set_errno(errno::EINVAL);
+        -1
     }
 }
 
@@ -248,10 +235,7 @@ const RR_QUANTUM_NS: i64 = 100_000_000;
 /// Returns 100ms (a typical default) for all processes.  A negative
 /// pid is rejected with `EINVAL`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sched_rr_get_interval(
-    pid: i32,
-    tp: *mut crate::stat::Timespec,
-) -> i32 {
+pub extern "C" fn sched_rr_get_interval(pid: i32, tp: *mut crate::stat::Timespec) -> i32 {
     if pid < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -318,11 +302,7 @@ fn online_cpu_count() -> usize {
 ///      Our stub checks for NULL up front; a real implementation would
 ///      catch this on the write.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sched_getaffinity(
-    pid: i32,
-    cpusetsize: usize,
-    mask: *mut CpuSetT,
-) -> i32 {
+pub extern "C" fn sched_getaffinity(pid: i32, cpusetsize: usize, mask: *mut CpuSetT) -> i32 {
     if cpusetsize < core::mem::size_of::<CpuSetT>() {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -380,11 +360,7 @@ pub extern "C" fn sched_getaffinity(
 ///   4. Mask has no valid CPU bit → `EINVAL` (Linux: `cpumask_subset`
 ///      against `cpus_allowed` returns false).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sched_setaffinity(
-    pid: i32,
-    cpusetsize: usize,
-    mask: *const CpuSetT,
-) -> i32 {
+pub extern "C" fn sched_setaffinity(pid: i32, cpusetsize: usize, mask: *const CpuSetT) -> i32 {
     if mask.is_null() {
         // Linux: copy_from_user with bad user pointer → -EFAULT.
         errno::set_errno(errno::EFAULT);
@@ -428,11 +404,7 @@ pub extern "C" fn sched_setaffinity(
     // that fails, requires `ns_capable(CAP_SYS_NICE)`.  pid == 0 means
     // "self" (always same-owner), so we only gate pid > 0 (targeting
     // another process we cannot verify ownership of).
-    if pid > 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_NICE,
-        )
-    {
+    if pid > 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -472,7 +444,9 @@ pub extern "C" fn cpu_set(cpu: i32, set: *mut CpuSetT) {
     let word = cpu as usize / 64;
     let bit = cpu as usize % 64;
     // SAFETY: set is non-null, word < 16 (cpu < 1024, 1024/64 = 16).
-    unsafe { (*set).bits[word] |= 1u64 << bit; }
+    unsafe {
+        (*set).bits[word] |= 1u64 << bit;
+    }
 }
 
 /// Remove a CPU from a CPU set.
@@ -484,7 +458,9 @@ pub extern "C" fn cpu_clr(cpu: i32, set: *mut CpuSetT) {
     let word = cpu as usize / 64;
     let bit = cpu as usize % 64;
     // SAFETY: set is non-null, word < 16.
-    unsafe { (*set).bits[word] &= !(1u64 << bit); }
+    unsafe {
+        (*set).bits[word] &= !(1u64 << bit);
+    }
 }
 
 /// Test if a CPU is in a CPU set.
@@ -497,7 +473,7 @@ pub extern "C" fn cpu_isset(cpu: i32, set: *const CpuSetT) -> i32 {
     let bit = cpu as usize % 64;
     // SAFETY: set is non-null, word < 16.
     let val = unsafe { (*set).bits[word] };
-    if val & (1u64 << bit) != 0 { 1 } else { 0 }
+    i32::from(val & (1u64 << bit) != 0)
 }
 
 /// Count the number of CPUs in a CPU set.
@@ -528,7 +504,9 @@ pub extern "C" fn cpu_and(destset: *mut CpuSetT, srcset1: *const CpuSetT, srcset
     // SAFETY: all pointers verified non-null.
     let mut i: usize = 0;
     while i < 16 {
-        unsafe { (*destset).bits[i] = (*srcset1).bits[i] & (*srcset2).bits[i]; }
+        unsafe {
+            (*destset).bits[i] = (*srcset1).bits[i] & (*srcset2).bits[i];
+        }
         i = i.wrapping_add(1);
     }
 }
@@ -543,7 +521,9 @@ pub extern "C" fn cpu_or(destset: *mut CpuSetT, srcset1: *const CpuSetT, srcset2
     }
     let mut i: usize = 0;
     while i < 16 {
-        unsafe { (*destset).bits[i] = (*srcset1).bits[i] | (*srcset2).bits[i]; }
+        unsafe {
+            (*destset).bits[i] = (*srcset1).bits[i] | (*srcset2).bits[i];
+        }
         i = i.wrapping_add(1);
     }
 }
@@ -558,7 +538,9 @@ pub extern "C" fn cpu_xor(destset: *mut CpuSetT, srcset1: *const CpuSetT, srcset
     }
     let mut i: usize = 0;
     while i < 16 {
-        unsafe { (*destset).bits[i] = (*srcset1).bits[i] ^ (*srcset2).bits[i]; }
+        unsafe {
+            (*destset).bits[i] = (*srcset1).bits[i] ^ (*srcset2).bits[i];
+        }
         i = i.wrapping_add(1);
     }
 }
@@ -598,10 +580,14 @@ pub extern "C" fn sched_getcpu() -> i32 {
 pub extern "C" fn getcpu(cpu: *mut u32, node: *mut u32) -> i32 {
     if !cpu.is_null() {
         // SAFETY: Caller guarantees pointer validity.
-        unsafe { *cpu = 0; }
+        unsafe {
+            *cpu = 0;
+        }
     }
     if !node.is_null() {
-        unsafe { *node = 0; }
+        unsafe {
+            *node = 0;
+        }
     }
     0
 }
@@ -713,7 +699,10 @@ mod tests {
 
     #[test]
     fn test_sched_rr_get_interval_100ms() {
-        let mut tp = crate::stat::Timespec { tv_sec: 99, tv_nsec: 99 };
+        let mut tp = crate::stat::Timespec {
+            tv_sec: 99,
+            tv_nsec: 99,
+        };
         let ret = sched_rr_get_interval(0, &raw mut tp);
         assert_eq!(ret, 0);
         assert_eq!(tp.tv_sec, 0);
@@ -742,11 +731,7 @@ mod tests {
     #[test]
     fn test_sched_getaffinity_sets_cpu0() {
         let mut cpuset = CpuSetT { bits: [0xFF; 16] };
-        let ret = sched_getaffinity(
-            0,
-            core::mem::size_of::<CpuSetT>(),
-            &raw mut cpuset,
-        );
+        let ret = sched_getaffinity(0, core::mem::size_of::<CpuSetT>(), &raw mut cpuset);
         assert_eq!(ret, 0);
         assert_eq!(cpuset.bits[0], 1); // Only CPU 0
         for i in 1..16 {
@@ -863,7 +848,9 @@ mod tests {
 
     #[test]
     fn test_cpu_zero_clears_all() {
-        let mut set = CpuSetT { bits: [0xFFFF_FFFF_FFFF_FFFF; 16] };
+        let mut set = CpuSetT {
+            bits: [0xFFFF_FFFF_FFFF_FFFF; 16],
+        };
         cpu_zero(&raw mut set);
         for i in 0..16 {
             assert_eq!(set.bits[i], 0, "bits[{i}] not zeroed");
@@ -1158,7 +1145,9 @@ mod tests {
 
     #[test]
     fn test_cpu_count_all_bits_set() {
-        let set = CpuSetT { bits: [u64::MAX; 16] };
+        let set = CpuSetT {
+            bits: [u64::MAX; 16],
+        };
         assert_eq!(cpu_count(&raw const set), 1024);
     }
 
@@ -1171,9 +1160,9 @@ mod tests {
         let mut dest = CpuSetT { bits: [0; 16] };
 
         // Set bits in different words
-        cpu_set(63, &raw mut a);  // word 0
-        cpu_set(64, &raw mut a);  // word 1
-        cpu_set(64, &raw mut b);  // word 1
+        cpu_set(63, &raw mut a); // word 0
+        cpu_set(64, &raw mut a); // word 1
+        cpu_set(64, &raw mut b); // word 1
         cpu_set(128, &raw mut b); // word 2
 
         cpu_and(&raw mut dest, &raw const a, &raw const b);
@@ -1190,9 +1179,9 @@ mod tests {
         let mut b = CpuSetT { bits: [0; 16] };
         let mut dest = CpuSetT { bits: [0; 16] };
 
-        cpu_set(63, &raw mut a);   // word 0
-        cpu_set(128, &raw mut b);  // word 2
-        cpu_set(511, &raw mut b);  // word 7
+        cpu_set(63, &raw mut a); // word 0
+        cpu_set(128, &raw mut b); // word 2
+        cpu_set(511, &raw mut b); // word 7
 
         cpu_or(&raw mut dest, &raw const a, &raw const b);
         assert_eq!(cpu_isset(63, &raw const dest), 1);
@@ -1208,12 +1197,12 @@ mod tests {
         let mut dest = CpuSetT { bits: [0; 16] };
 
         cpu_set(0, &raw mut a);
-        cpu_set(0, &raw mut b);    // same — cancels
-        cpu_set(64, &raw mut a);   // only in a
-        cpu_set(128, &raw mut b);  // only in b
+        cpu_set(0, &raw mut b); // same — cancels
+        cpu_set(64, &raw mut a); // only in a
+        cpu_set(128, &raw mut b); // only in b
 
         cpu_xor(&raw mut dest, &raw const a, &raw const b);
-        assert_eq!(cpu_isset(0, &raw const dest), 0);   // cancelled
+        assert_eq!(cpu_isset(0, &raw const dest), 0); // cancelled
         assert_eq!(cpu_isset(64, &raw const dest), 1);
         assert_eq!(cpu_isset(128, &raw const dest), 1);
         assert_eq!(cpu_count(&raw const dest), 2);
@@ -1284,7 +1273,9 @@ mod tests {
 
     #[test]
     fn test_cpu_isset_after_clr_out_of_range() {
-        let mut set = CpuSetT { bits: [u64::MAX; 16] };
+        let mut set = CpuSetT {
+            bits: [u64::MAX; 16],
+        };
         // Clear out of range should be no-op
         cpu_clr(-1, &raw mut set);
         cpu_clr(1024, &raw mut set);
@@ -1346,7 +1337,14 @@ mod tests {
     #[test]
     fn test_sched_get_priority_min_max_all_recognised_policies() {
         // No errno write for any recognised policy.
-        for &p in &[SCHED_OTHER, SCHED_FIFO, SCHED_RR, SCHED_BATCH, SCHED_IDLE, SCHED_DEADLINE] {
+        for &p in &[
+            SCHED_OTHER,
+            SCHED_FIFO,
+            SCHED_RR,
+            SCHED_BATCH,
+            SCHED_IDLE,
+            SCHED_DEADLINE,
+        ] {
             errno::set_errno(0);
             let _ = sched_get_priority_min(p);
             // errno may or may not be set, but the return must be ≥ 0.
@@ -1398,7 +1396,9 @@ mod tests {
     #[test]
     fn test_sched_setscheduler_rr_priority_100_einval() {
         // SCHED_RR max is 99 — 100 is above max.
-        let param = SchedParam { sched_priority: 100 };
+        let param = SchedParam {
+            sched_priority: 100,
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1501,7 +1501,10 @@ mod tests {
 
     #[test]
     fn test_sched_rr_get_interval_negative_pid_einval() {
-        let mut tp = crate::stat::Timespec { tv_sec: 7, tv_nsec: 7 };
+        let mut tp = crate::stat::Timespec {
+            tv_sec: 7,
+            tv_nsec: 7,
+        };
         errno::set_errno(0);
         assert_eq!(sched_rr_get_interval(-1, &raw mut tp), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1592,7 +1595,9 @@ mod tests {
         // Caller swaps `policy` and `sched_priority`: calls with
         // policy=50 (intending priority) and priority=SCHED_RR=2.
         // policy=50 is unknown → EINVAL.
-        let param = SchedParam { sched_priority: SCHED_RR };
+        let param = SchedParam {
+            sched_priority: SCHED_RR,
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, 50, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1613,7 +1618,9 @@ mod tests {
     fn test_sched_setscheduler_buggy_priority_at_min_minus_one() {
         // Off-by-one: priority = sched_get_priority_min(SCHED_RR) - 1.
         let lo = sched_get_priority_min(SCHED_RR);
-        let param = SchedParam { sched_priority: lo - 1 };
+        let param = SchedParam {
+            sched_priority: lo - 1,
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1622,7 +1629,9 @@ mod tests {
     #[test]
     fn test_sched_setscheduler_buggy_priority_at_max_plus_one() {
         let hi = sched_get_priority_max(SCHED_RR);
-        let param = SchedParam { sched_priority: hi + 1 };
+        let param = SchedParam {
+            sched_priority: hi + 1,
+        };
         errno::set_errno(0);
         assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const param), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1642,7 +1651,9 @@ mod tests {
         for &p in &[SCHED_FIFO, SCHED_RR] {
             // Range [1, 99] — try both bounds and a midpoint.
             for &pri in &[1, 50, 99] {
-                let param = SchedParam { sched_priority: pri };
+                let param = SchedParam {
+                    sched_priority: pri,
+                };
                 assert_eq!(sched_setscheduler(0, p, &raw const param), 0);
             }
         }
@@ -1697,11 +1708,7 @@ mod tests {
         // (pid=-1, mask=NULL, cpusetsize ok): Linux looks up pid before
         // copy_to_user runs → ESRCH (not EFAULT).
         errno::set_errno(0);
-        let ret = sched_getaffinity(
-            -1,
-            core::mem::size_of::<CpuSetT>(),
-            core::ptr::null_mut(),
-        );
+        let ret = sched_getaffinity(-1, core::mem::size_of::<CpuSetT>(), core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ESRCH);
     }
@@ -1709,13 +1716,11 @@ mod tests {
     #[test]
     fn test_getaffinity_phase118_clean_args_succeed() {
         // After reorder, valid args still succeed and fill the mask.
-        let mut cpuset = CpuSetT { bits: [0xFFu64; 16] };
+        let mut cpuset = CpuSetT {
+            bits: [0xFFu64; 16],
+        };
         errno::set_errno(0);
-        let ret = sched_getaffinity(
-            0,
-            core::mem::size_of::<CpuSetT>(),
-            &raw mut cpuset,
-        );
+        let ret = sched_getaffinity(0, core::mem::size_of::<CpuSetT>(), &raw mut cpuset);
         assert_eq!(ret, 0);
         // In the host test build only CPU 0 is online.
         assert_eq!(cpuset.bits[0] & 1, 1);
@@ -1727,11 +1732,7 @@ mod tests {
         // arithmetic.
         let mut cpuset = CpuSetT { bits: [0; 16] };
         errno::set_errno(0);
-        let ret = sched_getaffinity(
-            i32::MIN,
-            core::mem::size_of::<CpuSetT>(),
-            &raw mut cpuset,
-        );
+        let ret = sched_getaffinity(i32::MIN, core::mem::size_of::<CpuSetT>(), &raw mut cpuset);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ESRCH);
     }
@@ -1742,11 +1743,7 @@ mod tests {
         // here, so there's no buffer; the assertion is that we returned
         // -1/EFAULT cleanly without UB or panic).
         errno::set_errno(0);
-        let ret = sched_getaffinity(
-            0,
-            core::mem::size_of::<CpuSetT>(),
-            core::ptr::null_mut(),
-        );
+        let ret = sched_getaffinity(0, core::mem::size_of::<CpuSetT>(), core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
@@ -1755,11 +1752,7 @@ mod tests {
     fn test_setaffinity_phase118_null_mask_wins_over_negative_pid() {
         // (mask=NULL, pid=-1): Linux copy_from_user fails first → EFAULT.
         errno::set_errno(0);
-        let ret = sched_setaffinity(
-            -1,
-            core::mem::size_of::<CpuSetT>(),
-            core::ptr::null(),
-        );
+        let ret = sched_setaffinity(-1, core::mem::size_of::<CpuSetT>(), core::ptr::null());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
@@ -1791,11 +1784,7 @@ mod tests {
         // cpumask validity → ESRCH (not EINVAL).
         let cpuset = CpuSetT { bits: [0; 16] };
         errno::set_errno(0);
-        let ret = sched_setaffinity(
-            -1,
-            core::mem::size_of::<CpuSetT>(),
-            &raw const cpuset,
-        );
+        let ret = sched_setaffinity(-1, core::mem::size_of::<CpuSetT>(), &raw const cpuset);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ESRCH);
     }
@@ -1806,11 +1795,7 @@ mod tests {
         let mut cpuset = CpuSetT { bits: [0; 16] };
         cpu_set(0, &raw mut cpuset);
         errno::set_errno(0);
-        let ret = sched_setaffinity(
-            0,
-            core::mem::size_of::<CpuSetT>(),
-            &raw const cpuset,
-        );
+        let ret = sched_setaffinity(0, core::mem::size_of::<CpuSetT>(), &raw const cpuset);
         assert_eq!(ret, 0);
     }
 
@@ -1818,11 +1803,7 @@ mod tests {
     fn test_setaffinity_phase118_huge_negative_pid_esrch() {
         let cpuset = CpuSetT { bits: [1; 16] };
         errno::set_errno(0);
-        let ret = sched_setaffinity(
-            i32::MIN,
-            core::mem::size_of::<CpuSetT>(),
-            &raw const cpuset,
-        );
+        let ret = sched_setaffinity(i32::MIN, core::mem::size_of::<CpuSetT>(), &raw const cpuset);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ESRCH);
     }
@@ -1835,11 +1816,7 @@ mod tests {
         // unchanged.
         let mut cpuset = CpuSetT { bits: [0; 16] };
         errno::set_errno(0);
-        let ret = sched_getaffinity(
-            0,
-            core::mem::size_of::<CpuSetT>(),
-            &raw mut cpuset,
-        );
+        let ret = sched_getaffinity(0, core::mem::size_of::<CpuSetT>(), &raw mut cpuset);
         assert_eq!(ret, 0);
         // At least CPU 0 must be set.
         assert!(cpuset.bits[0] & 1 != 0);
@@ -1852,22 +1829,14 @@ mod tests {
         let cpuset = CpuSetT { bits: [1; 16] };
         errno::set_errno(0);
         assert_eq!(
-            sched_setaffinity(
-                -1,
-                core::mem::size_of::<CpuSetT>(),
-                &raw const cpuset,
-            ),
+            sched_setaffinity(-1, core::mem::size_of::<CpuSetT>(), &raw const cpuset,),
             -1
         );
         assert_eq!(errno::get_errno(), errno::ESRCH);
 
         errno::set_errno(0);
         assert_eq!(
-            sched_setaffinity(
-                0,
-                core::mem::size_of::<CpuSetT>(),
-                &raw const cpuset,
-            ),
+            sched_setaffinity(0, core::mem::size_of::<CpuSetT>(), &raw const cpuset,),
             0
         );
     }
@@ -1904,16 +1873,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -1928,8 +1895,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -1942,8 +1908,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_NICE - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1958,10 +1923,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_NICE");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_NICE");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
         }
 
@@ -1975,10 +1938,7 @@ mod tests {
             drop_cap_sys_nice();
             let p = SchedParam { sched_priority: 50 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_FIFO, &raw const p),
-                -1,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -1989,10 +1949,7 @@ mod tests {
             drop_cap_sys_nice();
             let p = SchedParam { sched_priority: 1 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_RR, &raw const p),
-                -1,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -2005,10 +1962,7 @@ mod tests {
             // SCHED_DEADLINE's priority range is (0, 0).
             let p = SchedParam { sched_priority: 0 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_DEADLINE, &raw const p),
-                -1,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -2022,10 +1976,7 @@ mod tests {
             let p = SchedParam { sched_priority: 50 };
             errno::set_errno(0);
             // Negative pid + RT policy + no cap → EINVAL (not EPERM).
-            assert_eq!(
-                sched_setscheduler(-1, SCHED_FIFO, &raw const p),
-                -1,
-            );
+            assert_eq!(sched_setscheduler(-1, SCHED_FIFO, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
@@ -2037,10 +1988,7 @@ mod tests {
             drop_cap_sys_nice();
             let p = SchedParam { sched_priority: 50 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, 99, &raw const p),
-                -1,
-            );
+            assert_eq!(sched_setscheduler(0, 99, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
@@ -2051,10 +1999,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_nice();
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_FIFO, core::ptr::null()),
-                -1,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, core::ptr::null()), -1,);
             assert_eq!(errno::get_errno(), errno::EFAULT);
         }
 
@@ -2067,10 +2012,7 @@ mod tests {
             // SCHED_FIFO range is [1, 99]; 0 is out of range.
             let p = SchedParam { sched_priority: 0 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_FIFO, &raw const p),
-                -1,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
@@ -2082,10 +2024,7 @@ mod tests {
             drop_cap_sys_nice();
             let p = SchedParam { sched_priority: 0 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_OTHER, &raw const p),
-                0,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_OTHER, &raw const p), 0,);
         }
 
         /// SCHED_BATCH / SCHED_IDLE without cap still succeed.
@@ -2095,14 +2034,8 @@ mod tests {
             drop_cap_sys_nice();
             let p = SchedParam { sched_priority: 0 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_BATCH, &raw const p),
-                0,
-            );
-            assert_eq!(
-                sched_setscheduler(0, SCHED_IDLE, &raw const p),
-                0,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_BATCH, &raw const p), 0,);
+            assert_eq!(sched_setscheduler(0, SCHED_IDLE, &raw const p), 0,);
         }
 
         // -- Workflow -----------------------------------------------------
@@ -2112,30 +2045,20 @@ mod tests {
         /// attempt to set SCHED_RR @ 50 (EPERM); falling back to
         /// SCHED_OTHER still works.
         #[test]
-        fn test_sched_setscheduler_phase170_workflow_rt_then_drop_then_fallback()
-        {
+        fn test_sched_setscheduler_phase170_workflow_rt_then_drop_then_fallback() {
             let _g = CapGuard::snapshot();
             let p_rt = SchedParam { sched_priority: 80 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_FIFO, &raw const p_rt),
-                0,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p_rt), 0,);
             drop_cap_sys_nice();
             let p_rr = SchedParam { sched_priority: 50 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_RR, &raw const p_rr),
-                -1,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const p_rr), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Fall back to SCHED_OTHER: no cap needed.
             let p_other = SchedParam { sched_priority: 0 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_OTHER, &raw const p_other),
-                0,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_OTHER, &raw const p_other), 0,);
         }
 
         // -- Buggy caller -------------------------------------------------
@@ -2149,10 +2072,7 @@ mod tests {
             drop_cap_sys_nice();
             let p = SchedParam { sched_priority: 99 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(1234, SCHED_FIFO, &raw const p),
-                -1,
-            );
+            assert_eq!(sched_setscheduler(1234, SCHED_FIFO, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -2166,15 +2086,11 @@ mod tests {
             drop_cap_sys_nice();
             let p = SchedParam { sched_priority: 25 };
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_FIFO, &raw const p),
-                -1,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Restore caps to default-all.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2189,15 +2105,9 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
-            assert_eq!(
-                sched_setscheduler(0, SCHED_FIFO, &raw const p),
-                0,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p), 0,);
         }
 
         // -- Sentinel -----------------------------------------------------
@@ -2211,19 +2121,10 @@ mod tests {
                 crate::sys_capability::CAP_SYS_NICE,
             ));
             let p_rt = SchedParam { sched_priority: 50 };
-            assert_eq!(
-                sched_setscheduler(0, SCHED_FIFO, &raw const p_rt),
-                0,
-            );
-            assert_eq!(
-                sched_setscheduler(0, SCHED_RR, &raw const p_rt),
-                0,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_FIFO, &raw const p_rt), 0,);
+            assert_eq!(sched_setscheduler(0, SCHED_RR, &raw const p_rt), 0,);
             let p_dl = SchedParam { sched_priority: 0 };
-            assert_eq!(
-                sched_setscheduler(0, SCHED_DEADLINE, &raw const p_dl),
-                0,
-            );
+            assert_eq!(sched_setscheduler(0, SCHED_DEADLINE, &raw const p_dl), 0,);
         }
 
         // -- Cross-checks -------------------------------------------------
@@ -2277,8 +2178,7 @@ mod tests {
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -2293,10 +2193,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ = crate::sys_capability::capset(
-                    &mut hdr,
-                    data.as_ptr(),
-                );
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -2319,10 +2216,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc = crate::sys_capability::capset(
-                &mut hdr,
-                data.as_ptr(),
-            );
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0);
             assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
         }
@@ -2341,11 +2235,7 @@ mod tests {
             let m = valid_mask();
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(
-                    0,
-                    core::mem::size_of::<CpuSetT>(),
-                    &m as *const _,
-                ),
+                sched_setaffinity(0, core::mem::size_of::<CpuSetT>(), &m as *const _,),
                 0,
             );
         }
@@ -2358,11 +2248,7 @@ mod tests {
             let m = valid_mask();
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(
-                    0,
-                    core::mem::size_of::<CpuSetT>(),
-                    &m as *const _,
-                ),
+                sched_setaffinity(0, core::mem::size_of::<CpuSetT>(), &m as *const _,),
                 0,
             );
         }
@@ -2374,11 +2260,7 @@ mod tests {
             let m = valid_mask();
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(
-                    1,
-                    core::mem::size_of::<CpuSetT>(),
-                    &m as *const _,
-                ),
+                sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
                 0,
             );
         }
@@ -2391,11 +2273,7 @@ mod tests {
             let m = valid_mask();
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(
-                    1,
-                    core::mem::size_of::<CpuSetT>(),
-                    &m as *const _,
-                ),
+                sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
                 -1,
             );
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
@@ -2408,11 +2286,7 @@ mod tests {
             drop_cap_sys_nice();
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(
-                    1,
-                    core::mem::size_of::<CpuSetT>(),
-                    core::ptr::null(),
-                ),
+                sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), core::ptr::null(),),
                 -1,
             );
             assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
@@ -2426,11 +2300,7 @@ mod tests {
             let m = valid_mask();
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(
-                    -1,
-                    core::mem::size_of::<CpuSetT>(),
-                    &m as *const _,
-                ),
+                sched_setaffinity(-1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
                 -1,
             );
             assert_eq!(crate::errno::get_errno(), crate::errno::ESRCH);
@@ -2445,11 +2315,7 @@ mod tests {
             let m = CpuSetT { bits: [0u64; 16] };
             crate::errno::set_errno(0);
             assert_eq!(
-                sched_setaffinity(
-                    1,
-                    core::mem::size_of::<CpuSetT>(),
-                    &m as *const _,
-                ),
+                sched_setaffinity(1, core::mem::size_of::<CpuSetT>(), &m as *const _,),
                 -1,
             );
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -2462,11 +2328,7 @@ mod tests {
             drop_cap_sys_nice();
             let mut m = CpuSetT { bits: [0u64; 16] };
             assert_eq!(
-                sched_getaffinity(
-                    0,
-                    core::mem::size_of::<CpuSetT>(),
-                    &raw mut m,
-                ),
+                sched_getaffinity(0, core::mem::size_of::<CpuSetT>(), &raw mut m,),
                 0,
             );
         }
@@ -2596,7 +2458,10 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(sched_rr_get_interval(0, core::ptr::null_mut()), -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
-        let mut tp = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut tp = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         errno::set_errno(0);
         assert_eq!(sched_rr_get_interval(0, &raw mut tp), 0);
         assert_eq!(tp.tv_nsec, 100_000_000);

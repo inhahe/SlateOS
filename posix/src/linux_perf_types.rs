@@ -114,8 +114,12 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE, PERF_TYPE_TRACEPOINT,
-            PERF_TYPE_HW_CACHE, PERF_TYPE_RAW, PERF_TYPE_BREAKPOINT,
+            PERF_TYPE_HARDWARE,
+            PERF_TYPE_SOFTWARE,
+            PERF_TYPE_TRACEPOINT,
+            PERF_TYPE_HW_CACHE,
+            PERF_TYPE_RAW,
+            PERF_TYPE_BREAKPOINT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -127,11 +131,16 @@ mod tests {
     #[test]
     fn test_hw_events_distinct() {
         let events = [
-            PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_HW_INSTRUCTIONS,
-            PERF_COUNT_HW_CACHE_REFERENCES, PERF_COUNT_HW_CACHE_MISSES,
-            PERF_COUNT_HW_BRANCH_INSTRUCTIONS, PERF_COUNT_HW_BRANCH_MISSES,
-            PERF_COUNT_HW_BUS_CYCLES, PERF_COUNT_HW_STALLED_CYCLES_FRONTEND,
-            PERF_COUNT_HW_STALLED_CYCLES_BACKEND, PERF_COUNT_HW_REF_CPU_CYCLES,
+            PERF_COUNT_HW_CPU_CYCLES,
+            PERF_COUNT_HW_INSTRUCTIONS,
+            PERF_COUNT_HW_CACHE_REFERENCES,
+            PERF_COUNT_HW_CACHE_MISSES,
+            PERF_COUNT_HW_BRANCH_INSTRUCTIONS,
+            PERF_COUNT_HW_BRANCH_MISSES,
+            PERF_COUNT_HW_BUS_CYCLES,
+            PERF_COUNT_HW_STALLED_CYCLES_FRONTEND,
+            PERF_COUNT_HW_STALLED_CYCLES_BACKEND,
+            PERF_COUNT_HW_REF_CPU_CYCLES,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -143,10 +152,14 @@ mod tests {
     #[test]
     fn test_sw_events_distinct() {
         let events = [
-            PERF_COUNT_SW_CPU_CLOCK, PERF_COUNT_SW_TASK_CLOCK,
-            PERF_COUNT_SW_PAGE_FAULTS, PERF_COUNT_SW_CONTEXT_SWITCHES,
-            PERF_COUNT_SW_CPU_MIGRATIONS, PERF_COUNT_SW_PAGE_FAULTS_MIN,
-            PERF_COUNT_SW_PAGE_FAULTS_MAJ, PERF_COUNT_SW_ALIGNMENT_FAULTS,
+            PERF_COUNT_SW_CPU_CLOCK,
+            PERF_COUNT_SW_TASK_CLOCK,
+            PERF_COUNT_SW_PAGE_FAULTS,
+            PERF_COUNT_SW_CONTEXT_SWITCHES,
+            PERF_COUNT_SW_CPU_MIGRATIONS,
+            PERF_COUNT_SW_PAGE_FAULTS_MIN,
+            PERF_COUNT_SW_PAGE_FAULTS_MAJ,
+            PERF_COUNT_SW_ALIGNMENT_FAULTS,
             PERF_COUNT_SW_EMULATION_FAULTS,
         ];
         for i in 0..events.len() {
@@ -159,10 +172,14 @@ mod tests {
     #[test]
     fn test_attr_flags_no_overlap() {
         let flags = [
-            PERF_ATTR_FLAG_DISABLED, PERF_ATTR_FLAG_INHERIT,
-            PERF_ATTR_FLAG_PINNED, PERF_ATTR_FLAG_EXCLUSIVE,
-            PERF_ATTR_FLAG_EXCLUDE_USER, PERF_ATTR_FLAG_EXCLUDE_KERNEL,
-            PERF_ATTR_FLAG_EXCLUDE_HV, PERF_ATTR_FLAG_EXCLUDE_IDLE,
+            PERF_ATTR_FLAG_DISABLED,
+            PERF_ATTR_FLAG_INHERIT,
+            PERF_ATTR_FLAG_PINNED,
+            PERF_ATTR_FLAG_EXCLUSIVE,
+            PERF_ATTR_FLAG_EXCLUDE_USER,
+            PERF_ATTR_FLAG_EXCLUDE_KERNEL,
+            PERF_ATTR_FLAG_EXCLUDE_HV,
+            PERF_ATTR_FLAG_EXCLUDE_IDLE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -198,7 +215,11 @@ mod tests {
 
     #[test]
     fn test_ioc_commands_distinct() {
-        let cmds = [PERF_EVENT_IOC_ENABLE, PERF_EVENT_IOC_DISABLE, PERF_EVENT_IOC_RESET];
+        let cmds = [
+            PERF_EVENT_IOC_ENABLE,
+            PERF_EVENT_IOC_DISABLE,
+            PERF_EVENT_IOC_RESET,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);

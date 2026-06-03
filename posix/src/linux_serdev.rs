@@ -139,10 +139,18 @@ mod tests {
     #[test]
     fn test_baud_rates_increasing() {
         let bauds = [
-            SERDEV_BAUD_9600, SERDEV_BAUD_19200, SERDEV_BAUD_38400,
-            SERDEV_BAUD_57600, SERDEV_BAUD_115200, SERDEV_BAUD_230400,
-            SERDEV_BAUD_460800, SERDEV_BAUD_921600, SERDEV_BAUD_1000000,
-            SERDEV_BAUD_1500000, SERDEV_BAUD_2000000, SERDEV_BAUD_3000000,
+            SERDEV_BAUD_9600,
+            SERDEV_BAUD_19200,
+            SERDEV_BAUD_38400,
+            SERDEV_BAUD_57600,
+            SERDEV_BAUD_115200,
+            SERDEV_BAUD_230400,
+            SERDEV_BAUD_460800,
+            SERDEV_BAUD_921600,
+            SERDEV_BAUD_1000000,
+            SERDEV_BAUD_1500000,
+            SERDEV_BAUD_2000000,
+            SERDEV_BAUD_3000000,
             SERDEV_BAUD_4000000,
         ];
         for i in 1..bauds.len() {
@@ -153,8 +161,10 @@ mod tests {
     #[test]
     fn test_databits_distinct() {
         let bits = [
-            SERDEV_DATABITS_5, SERDEV_DATABITS_6,
-            SERDEV_DATABITS_7, SERDEV_DATABITS_8,
+            SERDEV_DATABITS_5,
+            SERDEV_DATABITS_6,
+            SERDEV_DATABITS_7,
+            SERDEV_DATABITS_8,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -171,8 +181,12 @@ mod tests {
     #[test]
     fn test_modem_lines_no_overlap() {
         let lines = [
-            SERDEV_TIOCM_DTR, SERDEV_TIOCM_RTS, SERDEV_TIOCM_DSR,
-            SERDEV_TIOCM_CTS, SERDEV_TIOCM_CD, SERDEV_TIOCM_RI,
+            SERDEV_TIOCM_DTR,
+            SERDEV_TIOCM_RTS,
+            SERDEV_TIOCM_DSR,
+            SERDEV_TIOCM_CTS,
+            SERDEV_TIOCM_CD,
+            SERDEV_TIOCM_RI,
         ];
         for i in 0..lines.len() {
             for j in (i + 1)..lines.len() {
@@ -184,8 +198,12 @@ mod tests {
     #[test]
     fn test_modem_lines_power_of_two() {
         let lines = [
-            SERDEV_TIOCM_DTR, SERDEV_TIOCM_RTS, SERDEV_TIOCM_DSR,
-            SERDEV_TIOCM_CTS, SERDEV_TIOCM_CD, SERDEV_TIOCM_RI,
+            SERDEV_TIOCM_DTR,
+            SERDEV_TIOCM_RTS,
+            SERDEV_TIOCM_DSR,
+            SERDEV_TIOCM_CTS,
+            SERDEV_TIOCM_CD,
+            SERDEV_TIOCM_RI,
         ];
         for l in &lines {
             assert!(l.is_power_of_two());

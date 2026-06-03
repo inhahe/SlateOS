@@ -118,8 +118,10 @@ mod tests {
     #[test]
     fn test_item_types_distinct() {
         let types = [
-            REISERFS_TYPE_STAT_DATA, REISERFS_TYPE_INDIRECT,
-            REISERFS_TYPE_DIRECT, REISERFS_TYPE_DIRENTRY,
+            REISERFS_TYPE_STAT_DATA,
+            REISERFS_TYPE_INDIRECT,
+            REISERFS_TYPE_DIRECT,
+            REISERFS_TYPE_DIRENTRY,
             REISERFS_TYPE_ANY,
         ];
         for i in 0..types.len() {
@@ -138,9 +140,12 @@ mod tests {
     #[test]
     fn test_mount_flags_distinct() {
         let flags = [
-            REISERFS_NO_TAIL, REISERFS_DATA_ORDERED,
-            REISERFS_DATA_WRITEBACK, REISERFS_DATA_JOURNAL,
-            REISERFS_NO_BORDER, REISERFS_NO_UNHASHED_RELOCATION,
+            REISERFS_NO_TAIL,
+            REISERFS_DATA_ORDERED,
+            REISERFS_DATA_WRITEBACK,
+            REISERFS_DATA_JOURNAL,
+            REISERFS_NO_BORDER,
+            REISERFS_NO_UNHASHED_RELOCATION,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -152,9 +157,12 @@ mod tests {
     #[test]
     fn test_mount_flags_power_of_two() {
         let flags = [
-            REISERFS_NO_TAIL, REISERFS_DATA_ORDERED,
-            REISERFS_DATA_WRITEBACK, REISERFS_DATA_JOURNAL,
-            REISERFS_NO_BORDER, REISERFS_NO_UNHASHED_RELOCATION,
+            REISERFS_NO_TAIL,
+            REISERFS_DATA_ORDERED,
+            REISERFS_DATA_WRITEBACK,
+            REISERFS_DATA_JOURNAL,
+            REISERFS_NO_BORDER,
+            REISERFS_NO_UNHASHED_RELOCATION,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);

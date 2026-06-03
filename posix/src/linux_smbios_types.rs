@@ -82,11 +82,19 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            SMBIOS_TYPE_BIOS, SMBIOS_TYPE_SYSTEM, SMBIOS_TYPE_BASEBOARD,
-            SMBIOS_TYPE_CHASSIS, SMBIOS_TYPE_PROCESSOR, SMBIOS_TYPE_CACHE,
-            SMBIOS_TYPE_PORT, SMBIOS_TYPE_SLOT, SMBIOS_TYPE_MEMARRAY,
-            SMBIOS_TYPE_MEMDEVICE, SMBIOS_TYPE_MEMMAPPED,
-            SMBIOS_TYPE_BOOT, SMBIOS_TYPE_END,
+            SMBIOS_TYPE_BIOS,
+            SMBIOS_TYPE_SYSTEM,
+            SMBIOS_TYPE_BASEBOARD,
+            SMBIOS_TYPE_CHASSIS,
+            SMBIOS_TYPE_PROCESSOR,
+            SMBIOS_TYPE_CACHE,
+            SMBIOS_TYPE_PORT,
+            SMBIOS_TYPE_SLOT,
+            SMBIOS_TYPE_MEMARRAY,
+            SMBIOS_TYPE_MEMDEVICE,
+            SMBIOS_TYPE_MEMMAPPED,
+            SMBIOS_TYPE_BOOT,
+            SMBIOS_TYPE_END,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -105,7 +113,8 @@ mod tests {
     #[test]
     fn test_form_factors_distinct() {
         let forms = [
-            SMBIOS_MEMFORM_DIMM, SMBIOS_MEMFORM_SODIMM,
+            SMBIOS_MEMFORM_DIMM,
+            SMBIOS_MEMFORM_SODIMM,
             SMBIOS_MEMFORM_NVDIMM,
         ];
         for i in 0..forms.len() {

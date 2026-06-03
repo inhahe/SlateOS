@@ -75,12 +75,24 @@ mod tests {
     #[test]
     fn test_common_types_distinct() {
         let types = [
-            ARPHRD_ETHER, ARPHRD_IEEE802, ARPHRD_ARCNET,
-            ARPHRD_SLIP, ARPHRD_PPP, ARPHRD_LOOPBACK,
-            ARPHRD_FDDI, ARPHRD_IEEE80211, ARPHRD_IEEE80211_RADIOTAP,
-            ARPHRD_IEEE802154, ARPHRD_INFINIBAND,
-            ARPHRD_TUNNEL, ARPHRD_TUNNEL6, ARPHRD_IPGRE,
-            ARPHRD_SIT, ARPHRD_CAN, ARPHRD_NONE, ARPHRD_VOID,
+            ARPHRD_ETHER,
+            ARPHRD_IEEE802,
+            ARPHRD_ARCNET,
+            ARPHRD_SLIP,
+            ARPHRD_PPP,
+            ARPHRD_LOOPBACK,
+            ARPHRD_FDDI,
+            ARPHRD_IEEE80211,
+            ARPHRD_IEEE80211_RADIOTAP,
+            ARPHRD_IEEE802154,
+            ARPHRD_INFINIBAND,
+            ARPHRD_TUNNEL,
+            ARPHRD_TUNNEL6,
+            ARPHRD_IPGRE,
+            ARPHRD_SIT,
+            ARPHRD_CAN,
+            ARPHRD_NONE,
+            ARPHRD_VOID,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -102,8 +114,12 @@ mod tests {
     #[test]
     fn test_arp_ops_distinct() {
         let ops = [
-            ARPOP_REQUEST, ARPOP_REPLY, ARPOP_RREQUEST,
-            ARPOP_RREPLY, ARPOP_InREQUEST, ARPOP_InREPLY,
+            ARPOP_REQUEST,
+            ARPOP_REPLY,
+            ARPOP_RREQUEST,
+            ARPOP_RREPLY,
+            ARPOP_InREQUEST,
+            ARPOP_InREPLY,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

@@ -75,9 +75,12 @@ mod tests {
     #[test]
     fn test_domain_flags_no_overlap() {
         let flags = [
-            IRQ_DOMAIN_FLAG_HIERARCHY, IRQ_DOMAIN_FLAG_MSI,
-            IRQ_DOMAIN_FLAG_MSI_REMAP, IRQ_DOMAIN_FLAG_AUTO_TRANSLATE,
-            IRQ_DOMAIN_FLAG_IPI, IRQ_DOMAIN_FLAG_NONCORE,
+            IRQ_DOMAIN_FLAG_HIERARCHY,
+            IRQ_DOMAIN_FLAG_MSI,
+            IRQ_DOMAIN_FLAG_MSI_REMAP,
+            IRQ_DOMAIN_FLAG_AUTO_TRANSLATE,
+            IRQ_DOMAIN_FLAG_IPI,
+            IRQ_DOMAIN_FLAG_NONCORE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -90,7 +93,8 @@ mod tests {
     #[test]
     fn test_map_types_distinct() {
         let types = [
-            IRQ_DOMAIN_MAP_LINEAR, IRQ_DOMAIN_MAP_TREE,
+            IRQ_DOMAIN_MAP_LINEAR,
+            IRQ_DOMAIN_MAP_TREE,
             IRQ_DOMAIN_MAP_NOMAP,
         ];
         for i in 0..types.len() {
@@ -103,7 +107,10 @@ mod tests {
     #[test]
     fn test_trigger_types() {
         // Edge both is OR of rising and falling
-        assert_eq!(IRQ_TYPE_EDGE_BOTH, IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING);
+        assert_eq!(
+            IRQ_TYPE_EDGE_BOTH,
+            IRQ_TYPE_EDGE_RISING | IRQ_TYPE_EDGE_FALLING
+        );
         // Level high and low don't overlap with edge
         assert_eq!(IRQ_TYPE_LEVEL_HIGH & IRQ_TYPE_EDGE_BOTH, 0);
     }

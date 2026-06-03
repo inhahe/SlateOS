@@ -246,7 +246,10 @@ impl FileActionSlot {
     fn to_action(self) -> Option<FileAction> {
         match self.tag {
             1 => Some(FileAction::Close { fd: self.fd }),
-            2 => Some(FileAction::Dup2 { fd: self.fd, newfd: self.newfd }),
+            2 => Some(FileAction::Dup2 {
+                fd: self.fd,
+                newfd: self.newfd,
+            }),
             3 => Some(FileAction::Open {
                 fd: self.fd,
                 path: self.path,
@@ -261,9 +264,7 @@ impl FileActionSlot {
 
 /// Initialize a file actions object.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_spawn_file_actions_init(
-    acts: *mut PosixSpawnFileActionsT,
-) -> i32 {
+pub extern "C" fn posix_spawn_file_actions_init(acts: *mut PosixSpawnFileActionsT) -> i32 {
     if acts.is_null() {
         return errno::EFAULT;
     }
@@ -286,12 +287,12 @@ pub extern "C" fn posix_spawn_file_actions_init(
 ///
 /// No heap resources to free — just zeroes the count.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_spawn_file_actions_destroy(
-    acts: *mut PosixSpawnFileActionsT,
-) -> i32 {
+pub extern "C" fn posix_spawn_file_actions_destroy(acts: *mut PosixSpawnFileActionsT) -> i32 {
     if !acts.is_null() {
         // SAFETY: acts is non-null (checked above).
-        unsafe { (*acts).count = 0; }
+        unsafe {
+            (*acts).count = 0;
+        }
     }
     0
 }
@@ -316,7 +317,11 @@ pub extern "C" fn posix_spawn_file_actions_addclose(
         return errno::ENOMEM;
     }
     if let Some(slot) = a.actions.get_mut(a.count) {
-        *slot = FileActionSlot { tag: 1, fd, ..FileActionSlot::empty() };
+        *slot = FileActionSlot {
+            tag: 1,
+            fd,
+            ..FileActionSlot::empty()
+        };
     }
     a.count = a.count.wrapping_add(1);
     0
@@ -343,7 +348,12 @@ pub extern "C" fn posix_spawn_file_actions_adddup2(
         return errno::ENOMEM;
     }
     if let Some(slot) = a.actions.get_mut(a.count) {
-        *slot = FileActionSlot { tag: 2, fd, newfd, ..FileActionSlot::empty() };
+        *slot = FileActionSlot {
+            tag: 2,
+            fd,
+            newfd,
+            ..FileActionSlot::empty()
+        };
     }
     a.count = a.count.wrapping_add(1);
     0
@@ -516,15 +526,14 @@ pub const POSIX_SPAWN_SETSID: i16 = 0x80;
 /// `posix_spawnattr_setflags`.  Any bit outside this mask causes
 /// `posix_spawnattr_setflags` to return `EINVAL`, matching glibc's
 /// `__POSIX_SPAWN_MASK` check.
-pub const POSIX_SPAWN_VALID_FLAGS: i16 =
-    POSIX_SPAWN_RESETIDS
-        | POSIX_SPAWN_SETPGROUP
-        | POSIX_SPAWN_SETSIGDEF
-        | POSIX_SPAWN_SETSIGMASK
-        | POSIX_SPAWN_SETSCHEDPARAM
-        | POSIX_SPAWN_SETSCHEDULER
-        | POSIX_SPAWN_USEVFORK
-        | POSIX_SPAWN_SETSID;
+pub const POSIX_SPAWN_VALID_FLAGS: i16 = POSIX_SPAWN_RESETIDS
+    | POSIX_SPAWN_SETPGROUP
+    | POSIX_SPAWN_SETSIGDEF
+    | POSIX_SPAWN_SETSIGMASK
+    | POSIX_SPAWN_SETSCHEDPARAM
+    | POSIX_SPAWN_SETSCHEDULER
+    | POSIX_SPAWN_USEVFORK
+    | POSIX_SPAWN_SETSID;
 
 /// Spawn attributes object.
 ///
@@ -543,9 +552,7 @@ pub struct PosixSpawnattrT {
 
 /// Initialize a spawn attributes object.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_spawnattr_init(
-    attr: *mut PosixSpawnattrT,
-) -> i32 {
+pub extern "C" fn posix_spawnattr_init(attr: *mut PosixSpawnattrT) -> i32 {
     if attr.is_null() {
         return errno::EFAULT;
     }
@@ -559,9 +566,7 @@ pub extern "C" fn posix_spawnattr_init(
 
 /// Destroy a spawn attributes object.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_spawnattr_destroy(
-    _attr: *mut PosixSpawnattrT,
-) -> i32 {
+pub extern "C" fn posix_spawnattr_destroy(_attr: *mut PosixSpawnattrT) -> i32 {
     0 // No resources to free.
 }
 
@@ -578,10 +583,7 @@ pub extern "C" fn posix_spawnattr_destroy(
 /// bogus flag word still gets the more informative `EFAULT` for
 /// `attr` rather than silently storing into garbage memory.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_spawnattr_setflags(
-    attr: *mut PosixSpawnattrT,
-    flags: i16,
-) -> i32 {
+pub extern "C" fn posix_spawnattr_setflags(attr: *mut PosixSpawnattrT, flags: i16) -> i32 {
     if attr.is_null() {
         return errno::EFAULT;
     }
@@ -592,35 +594,35 @@ pub extern "C" fn posix_spawnattr_setflags(
         return errno::EINVAL;
     }
     // SAFETY: attr is non-null (checked above).
-    unsafe { (*attr).flags = flags; }
+    unsafe {
+        (*attr).flags = flags;
+    }
     0
 }
 
 /// Get flags from a spawn attributes object.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_spawnattr_getflags(
-    attr: *const PosixSpawnattrT,
-    flags: *mut i16,
-) -> i32 {
+pub extern "C" fn posix_spawnattr_getflags(attr: *const PosixSpawnattrT, flags: *mut i16) -> i32 {
     if attr.is_null() || flags.is_null() {
         return errno::EFAULT;
     }
     // SAFETY: both pointers are non-null (checked above).
-    unsafe { *flags = (*attr).flags; }
+    unsafe {
+        *flags = (*attr).flags;
+    }
     0
 }
 
 /// Set the process group in a spawn attributes object.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_spawnattr_setpgroup(
-    attr: *mut PosixSpawnattrT,
-    pgroup: PidT,
-) -> i32 {
+pub extern "C" fn posix_spawnattr_setpgroup(attr: *mut PosixSpawnattrT, pgroup: PidT) -> i32 {
     if attr.is_null() {
         return errno::EFAULT;
     }
     // SAFETY: attr is non-null (checked above).
-    unsafe { (*attr).pgroup = pgroup; }
+    unsafe {
+        (*attr).pgroup = pgroup;
+    }
     0
 }
 
@@ -634,7 +636,9 @@ pub extern "C" fn posix_spawnattr_getpgroup(
         return errno::EFAULT;
     }
     // SAFETY: both pointers are non-null (checked above).
-    unsafe { *pgroup = (*attr).pgroup; }
+    unsafe {
+        *pgroup = (*attr).pgroup;
+    }
     0
 }
 
@@ -657,8 +661,7 @@ fn kind_to_handle_type(kind: crate::fdtable::HandleKind) -> u8 {
         // state and cannot be meaningfully transferred to a child.  Map
         // to FILE so the function is total; build_fd_map filters these
         // entries out before they reach this conversion.
-        HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify
-            => fd_handle_type::FILE,
+        HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => fd_handle_type::FILE,
     }
 }
 
@@ -676,7 +679,10 @@ struct OpenedHandles {
 
 impl OpenedHandles {
     const fn new() -> Self {
-        Self { handles: [0; MAX_FILE_ACTIONS], count: 0 }
+        Self {
+            handles: [0; MAX_FILE_ACTIONS],
+            count: 0,
+        }
     }
 
     fn push(&mut self, handle: u64) {
@@ -794,10 +800,7 @@ fn build_fd_map(
                             // Resolve the path against CWD.
                             let mut resolved = [0u8; crate::unistd::PATH_MAX];
                             let resolved_len = unsafe {
-                                crate::unistd::resolve_path(
-                                    slot.path.as_ptr(),
-                                    &mut resolved,
-                                )
+                                crate::unistd::resolve_path(slot.path.as_ptr(), &mut resolved)
                             };
 
                             if let Some(rlen) = resolved_len {
@@ -832,8 +835,8 @@ fn build_fd_map(
     let mut count = 0usize;
     let mut flat_idx = 0usize;
     while flat_idx < MAX_FD_MAP {
-        if let Some((handle_type, handle)) = virt[flat_idx] {
-            if count < MAX_FD_MAP {
+        if let Some((handle_type, handle)) = virt[flat_idx]
+            && count < MAX_FD_MAP {
                 #[allow(clippy::cast_possible_wrap)]
                 let fd = flat_idx as i32;
                 out[count] = FdMapEntry {
@@ -844,7 +847,6 @@ fn build_fd_map(
                 };
                 count = count.wrapping_add(1);
             }
-        }
         flat_idx = flat_idx.wrapping_add(1);
     }
 
@@ -898,7 +900,12 @@ pub extern "C" fn posix_spawn(
     // Open file_actions are executed here — the parent opens the files
     // and the kernel dups the handles into the child.  We track the
     // opened handles so we can close them after the spawn syscall.
-    let mut fd_map = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+    let mut fd_map = [FdMapEntry {
+        fd: 0,
+        handle_type: 0,
+        _pad: [0; 3],
+        handle: 0,
+    }; MAX_FD_MAP];
     let mut opened = OpenedHandles::new();
     let fd_map_count = build_fd_map(file_actions, &mut fd_map, &mut opened);
 
@@ -908,7 +915,11 @@ pub extern "C" fn posix_spawn(
         // POSIX: empty path → ENOENT; too-long → ENAMETOOLONG.
         // SAFETY: path is non-null (checked above) and a valid C string.
         opened.close_all(); // Clean up any handles opened by build_fd_map.
-        return if unsafe { *path } == 0 { errno::ENOENT } else { errno::ENAMETOOLONG };
+        return if unsafe { *path } == 0 {
+            errno::ENOENT
+        } else {
+            errno::ENAMETOOLONG
+        };
     };
 
     // Load the ELF binary using the resolved absolute path.
@@ -936,12 +947,24 @@ pub extern "C" fn posix_spawn(
         elf_len: data_size as u64,
         name_ptr: resolved.as_ptr() as u64,
         name_len: resolved_len as u64,
-        fd_map_ptr: if fd_map_count > 0 { fd_map.as_ptr() as u64 } else { 0 },
+        fd_map_ptr: if fd_map_count > 0 {
+            fd_map.as_ptr() as u64
+        } else {
+            0
+        },
         fd_map_count: fd_map_count as u64,
-        argv_ptr: if argv_packed_len > 0 { argv_buf.as_ptr() as u64 } else { 0 },
+        argv_ptr: if argv_packed_len > 0 {
+            argv_buf.as_ptr() as u64
+        } else {
+            0
+        },
         argv_len: argv_packed_len as u64,
         argc: argc as u64,
-        envp_ptr: if envp_packed_len > 0 { envp_buf.as_ptr() as u64 } else { 0 },
+        envp_ptr: if envp_packed_len > 0 {
+            envp_buf.as_ptr() as u64
+        } else {
+            0
+        },
         envp_len: envp_packed_len as u64,
         envc: envc as u64,
     };
@@ -949,7 +972,7 @@ pub extern "C" fn posix_spawn(
     // Spawn the process with the extended args struct.
     let ret = syscall1(
         SYS_PROCESS_SPAWN_EX,
-        (&spawn_args as *const SpawnExArgs) as u64,
+        (&raw const spawn_args) as u64,
     );
 
     // Free the ELF buffer (must use alloc_size, not data_size, to
@@ -971,7 +994,9 @@ pub extern "C" fn posix_spawn(
 
     // Store child PID if requested.
     if !pid.is_null() {
-        unsafe { *pid = child_pid; }
+        unsafe {
+            *pid = child_pid;
+        }
     }
 
     0
@@ -1029,11 +1054,7 @@ const EXEC_PACKED_MAX: usize = 128 * 1024;
 /// strings.  They are packed into contiguous buffers and passed to the
 /// kernel so the new binary can read them via `SYS_PROCESS_GET_ARGS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn execve(
-    path: *const u8,
-    argv: *const *const u8,
-    envp: *const *const u8,
-) -> i32 {
+pub extern "C" fn execve(path: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32 {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -1044,7 +1065,11 @@ pub extern "C" fn execve(
     let Some(resolved_len) = (unsafe { crate::unistd::resolve_path(path, &mut resolved) }) else {
         // POSIX: empty path → ENOENT; too-long → ENAMETOOLONG.
         // SAFETY: path is non-null (checked above) and a valid C string.
-        errno::set_errno(if unsafe { *path } == 0 { errno::ENOENT } else { errno::ENAMETOOLONG });
+        errno::set_errno(if unsafe { *path } == 0 {
+            errno::ENOENT
+        } else {
+            errno::ENAMETOOLONG
+        });
         return -1;
     };
 
@@ -1070,9 +1095,17 @@ pub extern "C" fn execve(
         SYS_PROCESS_EXEC,
         buf_ptr as u64,
         data_size as u64,
-        if argv_len > 0 { argv_buf.as_ptr() as u64 } else { 0 },
+        if argv_len > 0 {
+            argv_buf.as_ptr() as u64
+        } else {
+            0
+        },
         argv_len as u64,
-        if envp_len > 0 { envp_buf.as_ptr() as u64 } else { 0 },
+        if envp_len > 0 {
+            envp_buf.as_ptr() as u64
+        } else {
+            0
+        },
         envp_len as u64,
     );
 
@@ -1151,10 +1184,7 @@ fn count_cstring_array(array: *const *const u8) -> usize {
 ///
 /// On success, does not return.  On failure, returns -1 with errno set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn execvp(
-    file: *const u8,
-    argv: *const *const u8,
-) -> i32 {
+pub extern "C" fn execvp(file: *const u8, argv: *const *const u8) -> i32 {
     if file.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -1188,10 +1218,7 @@ pub extern "C" fn execvp(
 ///
 /// On success, does not return.  On failure, returns -1 with errno set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn execv(
-    path: *const u8,
-    argv: *const *const u8,
-) -> i32 {
+pub extern "C" fn execv(path: *const u8, argv: *const *const u8) -> i32 {
     execve(path, argv, core::ptr::null())
 }
 
@@ -1207,11 +1234,7 @@ pub extern "C" fn execv(
 ///
 /// On success, does not return.  On failure, returns -1 with errno set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fexecve(
-    fd: i32,
-    argv: *const *const u8,
-    envp: *const *const u8,
-) -> i32 {
+pub extern "C" fn fexecve(fd: i32, argv: *const *const u8, envp: *const *const u8) -> i32 {
     if fd < 0 {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -1339,11 +1362,7 @@ const DEFAULT_PATH: &[u8] = b"/bin:/usr/bin";
 ///
 /// The search checks existence via `SYS_FS_STAT` — it does not check
 /// execute permission (our OS doesn't have a permission system yet).
-fn search_path(
-    file: *const u8,
-    file_len: usize,
-    out: &mut [u8; crate::unistd::PATH_MAX],
-) -> bool {
+fn search_path(file: *const u8, file_len: usize, out: &mut [u8; crate::unistd::PATH_MAX]) -> bool {
     // Get the PATH environment variable.
     // SAFETY: "PATH\0" is a valid C string.
     let path_env = unsafe { crate::environ::getenv(c"PATH".as_ptr().cast::<u8>()) };
@@ -1450,11 +1469,7 @@ fn file_exists(path: *const u8, path_len: usize) -> bool {
 /// If `file` contains `/`, it is used directly.
 /// Otherwise, searches each directory in `PATH`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn execvpe(
-    file: *const u8,
-    argv: *const *const u8,
-    envp: *const *const u8,
-) -> i32 {
+pub extern "C" fn execvpe(file: *const u8, argv: *const *const u8, envp: *const *const u8) -> i32 {
     if file.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -1506,7 +1521,11 @@ mod tests {
 
     #[test]
     fn test_file_action_slot_to_action_close() {
-        let slot = FileActionSlot { tag: 1, fd: 5, ..FileActionSlot::empty() };
+        let slot = FileActionSlot {
+            tag: 1,
+            fd: 5,
+            ..FileActionSlot::empty()
+        };
         let action = slot.to_action();
         assert!(action.is_some());
         match action.unwrap() {
@@ -1517,7 +1536,12 @@ mod tests {
 
     #[test]
     fn test_file_action_slot_to_action_dup2() {
-        let slot = FileActionSlot { tag: 2, fd: 3, newfd: 7, ..FileActionSlot::empty() };
+        let slot = FileActionSlot {
+            tag: 2,
+            fd: 3,
+            newfd: 7,
+            ..FileActionSlot::empty()
+        };
         let action = slot.to_action();
         match action.unwrap() {
             FileAction::Dup2 { fd, newfd } => {
@@ -1536,12 +1560,23 @@ mod tests {
         path[2] = b'o';
         path[3] = b'o';
         let slot = FileActionSlot {
-            tag: 3, fd: 1, oflag: 0x42, mode: 0o644, path, path_len: 4,
+            tag: 3,
+            fd: 1,
+            oflag: 0x42,
+            mode: 0o644,
+            path,
+            path_len: 4,
             ..FileActionSlot::empty()
         };
         let action = slot.to_action();
         match action.unwrap() {
-            FileAction::Open { fd, path: p, path_len, oflag, mode } => {
+            FileAction::Open {
+                fd,
+                path: p,
+                path_len,
+                oflag,
+                mode,
+            } => {
                 assert_eq!(fd, 1);
                 assert_eq!(path_len, 4);
                 assert_eq!(&p[..4], b"/foo");
@@ -1554,7 +1589,10 @@ mod tests {
 
     #[test]
     fn test_file_action_slot_to_action_invalid_tag() {
-        let slot = FileActionSlot { tag: 99, ..FileActionSlot::empty() };
+        let slot = FileActionSlot {
+            tag: 99,
+            ..FileActionSlot::empty()
+        };
         assert!(slot.to_action().is_none());
     }
 
@@ -1675,9 +1713,7 @@ mod tests {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         let path = b"/dev/null\0";
-        let ret = posix_spawn_file_actions_addopen(
-            &raw mut acts, 0, path.as_ptr(), 0, 0o644,
-        );
+        let ret = posix_spawn_file_actions_addopen(&raw mut acts, 0, path.as_ptr(), 0, 0o644);
         assert_eq!(ret, 0);
         assert_eq!(acts.count, 1);
         assert_eq!(acts.actions[0].tag, 3); // Open
@@ -1690,9 +1726,7 @@ mod tests {
     #[test]
     fn test_file_actions_addopen_null_acts() {
         let path = b"/dev/null\0";
-        let ret = posix_spawn_file_actions_addopen(
-            core::ptr::null_mut(), 0, path.as_ptr(), 0, 0,
-        );
+        let ret = posix_spawn_file_actions_addopen(core::ptr::null_mut(), 0, path.as_ptr(), 0, 0);
         assert_eq!(ret, errno::EFAULT);
     }
 
@@ -1700,9 +1734,7 @@ mod tests {
     fn test_file_actions_addopen_null_path() {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
-        let ret = posix_spawn_file_actions_addopen(
-            &raw mut acts, 0, core::ptr::null(), 0, 0,
-        );
+        let ret = posix_spawn_file_actions_addopen(&raw mut acts, 0, core::ptr::null(), 0, 0);
         assert_eq!(ret, errno::EFAULT);
     }
 
@@ -1711,9 +1743,7 @@ mod tests {
         let mut acts = unsafe { core::mem::zeroed::<PosixSpawnFileActionsT>() };
         posix_spawn_file_actions_init(&raw mut acts);
         let path = b"/dev/null\0";
-        let ret = posix_spawn_file_actions_addopen(
-            &raw mut acts, -1, path.as_ptr(), 0, 0,
-        );
+        let ret = posix_spawn_file_actions_addopen(&raw mut acts, -1, path.as_ptr(), 0, 0);
         assert_eq!(ret, errno::EINVAL);
     }
 
@@ -1897,8 +1927,10 @@ mod tests {
 
     #[test]
     fn test_spawn_flags_no_overlap() {
-        let all = POSIX_SPAWN_RESETIDS | POSIX_SPAWN_SETPGROUP
-                 | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
+        let all = POSIX_SPAWN_RESETIDS
+            | POSIX_SPAWN_SETPGROUP
+            | POSIX_SPAWN_SETSIGDEF
+            | POSIX_SPAWN_SETSIGMASK;
         // Each flag should be a distinct bit.
         assert_eq!(all, 0x0F);
     }
@@ -2001,9 +2033,7 @@ mod tests {
         let s1 = b"one\0";
         let s2 = b"two\0";
         let s3 = b"three\0";
-        let ptrs: [*const u8; 4] = [
-            s1.as_ptr(), s2.as_ptr(), s3.as_ptr(), core::ptr::null(),
-        ];
+        let ptrs: [*const u8; 4] = [s1.as_ptr(), s2.as_ptr(), s3.as_ptr(), core::ptr::null()];
         assert_eq!(count_cstring_array(ptrs.as_ptr()), 3);
     }
 
@@ -2043,7 +2073,10 @@ mod tests {
     #[test]
     fn test_fd_map_entry_field_offsets() {
         let entry = FdMapEntry {
-            fd: 0, handle_type: 0, _pad: [0; 3], handle: 0,
+            fd: 0,
+            handle_type: 0,
+            _pad: [0; 3],
+            handle: 0,
         };
         let base = &entry as *const _ as usize;
         assert_eq!(&entry.fd as *const _ as usize - base, 0);
@@ -2097,26 +2130,41 @@ mod tests {
     #[test]
     fn test_kind_to_handle_type_console() {
         use crate::fdtable::HandleKind;
-        assert_eq!(kind_to_handle_type(HandleKind::Console), fd_handle_type::CONSOLE);
+        assert_eq!(
+            kind_to_handle_type(HandleKind::Console),
+            fd_handle_type::CONSOLE
+        );
     }
 
     #[test]
     fn test_kind_to_handle_type_tcp() {
         use crate::fdtable::HandleKind;
-        assert_eq!(kind_to_handle_type(HandleKind::TcpStream), fd_handle_type::TCP_SOCKET);
-        assert_eq!(kind_to_handle_type(HandleKind::TcpListener), fd_handle_type::TCP_SOCKET);
+        assert_eq!(
+            kind_to_handle_type(HandleKind::TcpStream),
+            fd_handle_type::TCP_SOCKET
+        );
+        assert_eq!(
+            kind_to_handle_type(HandleKind::TcpListener),
+            fd_handle_type::TCP_SOCKET
+        );
     }
 
     #[test]
     fn test_kind_to_handle_type_udp() {
         use crate::fdtable::HandleKind;
-        assert_eq!(kind_to_handle_type(HandleKind::UdpSocket), fd_handle_type::UDP_SOCKET);
+        assert_eq!(
+            kind_to_handle_type(HandleKind::UdpSocket),
+            fd_handle_type::UDP_SOCKET
+        );
     }
 
     #[test]
     fn test_kind_to_handle_type_eventfd() {
         use crate::fdtable::HandleKind;
-        assert_eq!(kind_to_handle_type(HandleKind::Eventfd), fd_handle_type::EVENTFD);
+        assert_eq!(
+            kind_to_handle_type(HandleKind::Eventfd),
+            fd_handle_type::EVENTFD
+        );
     }
 
     // -- build_fd_map --
@@ -2126,7 +2174,7 @@ mod tests {
     /// Other tests may close or overwrite them; this restores the
     /// expected state before each build_fd_map test.
     fn ensure_std_fds() {
-        use crate::fdtable::{install_fd, HandleKind};
+        use crate::fdtable::{HandleKind, install_fd};
         let _ = install_fd(0, HandleKind::Console, 0);
         let _ = install_fd(1, HandleKind::Console, 1);
         let _ = install_fd(2, HandleKind::Console, 2);
@@ -2138,7 +2186,12 @@ mod tests {
         // With no file_actions (null), the fd_map should contain
         // the parent's inheritable fds.  In the test environment,
         // fds 0/1/2 are pre-initialized as Console handles.
-        let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+        let mut out = [FdMapEntry {
+            fd: 0,
+            handle_type: 0,
+            _pad: [0; 3],
+            handle: 0,
+        }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
         let count = build_fd_map(core::ptr::null(), &mut out, &mut opened);
 
@@ -2166,7 +2219,12 @@ mod tests {
         posix_spawn_file_actions_init(&raw mut acts);
         posix_spawn_file_actions_addclose(&raw mut acts, 1);
 
-        let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+        let mut out = [FdMapEntry {
+            fd: 0,
+            handle_type: 0,
+            _pad: [0; 3],
+            handle: 0,
+        }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
         let count = build_fd_map(&raw const acts, &mut out, &mut opened);
 
@@ -2192,7 +2250,12 @@ mod tests {
         posix_spawn_file_actions_init(&raw mut acts);
         posix_spawn_file_actions_adddup2(&raw mut acts, 2, 1);
 
-        let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+        let mut out = [FdMapEntry {
+            fd: 0,
+            handle_type: 0,
+            _pad: [0; 3],
+            handle: 0,
+        }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
         let count = build_fd_map(&raw const acts, &mut out, &mut opened);
 
@@ -2222,7 +2285,12 @@ mod tests {
         posix_spawn_file_actions_addclose(&raw mut acts, 1);
         posix_spawn_file_actions_adddup2(&raw mut acts, 2, 1);
 
-        let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+        let mut out = [FdMapEntry {
+            fd: 0,
+            handle_type: 0,
+            _pad: [0; 3],
+            handle: 0,
+        }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
         let count = build_fd_map(&raw const acts, &mut out, &mut opened);
 
@@ -2247,7 +2315,12 @@ mod tests {
         posix_spawn_file_actions_addclose(&raw mut acts, 1);
         posix_spawn_file_actions_addclose(&raw mut acts, 2);
 
-        let mut out = [FdMapEntry { fd: 0, handle_type: 0, _pad: [0; 3], handle: 0 }; MAX_FD_MAP];
+        let mut out = [FdMapEntry {
+            fd: 0,
+            handle_type: 0,
+            _pad: [0; 3],
+            handle: 0,
+        }; MAX_FD_MAP];
         let mut opened = OpenedHandles::new();
         let count = build_fd_map(&raw const acts, &mut out, &mut opened);
 
@@ -2290,10 +2363,7 @@ mod tests {
 
     #[test]
     fn test_addchdir_np_null_acts() {
-        let ret = posix_spawn_file_actions_addchdir_np(
-            core::ptr::null_mut(),
-            b"/tmp\0".as_ptr(),
-        );
+        let ret = posix_spawn_file_actions_addchdir_np(core::ptr::null_mut(), b"/tmp\0".as_ptr());
         assert_eq!(ret, crate::errno::EFAULT);
     }
 
@@ -2317,10 +2387,7 @@ mod tests {
             _pad: [0; 8],
         };
         posix_spawn_file_actions_init(&raw mut acts);
-        let ret = posix_spawn_file_actions_addchdir_np(
-            &raw mut acts,
-            b"/tmp\0".as_ptr(),
-        );
+        let ret = posix_spawn_file_actions_addchdir_np(&raw mut acts, b"/tmp\0".as_ptr());
         assert_eq!(ret, 0);
         assert_eq!(acts.count, 1);
         assert_eq!(acts.actions[0].tag, 4, "chdir action tag should be 4");
@@ -2338,11 +2405,12 @@ mod tests {
         for _ in 0..MAX_FILE_ACTIONS {
             posix_spawn_file_actions_addclose(&raw mut acts, 0);
         }
-        let ret = posix_spawn_file_actions_addchdir_np(
-            &raw mut acts,
-            b"/tmp\0".as_ptr(),
+        let ret = posix_spawn_file_actions_addchdir_np(&raw mut acts, b"/tmp\0".as_ptr());
+        assert_eq!(
+            ret,
+            crate::errno::ENOMEM,
+            "full actions should return ENOMEM"
         );
-        assert_eq!(ret, crate::errno::ENOMEM, "full actions should return ENOMEM");
     }
 
     // -----------------------------------------------------------------------
@@ -2435,7 +2503,11 @@ mod tests {
             posix_spawn_file_actions_addclose(&raw mut acts, 0);
         }
         let ret = posix_spawn_file_actions_addclosefrom_np(&raw mut acts, 3);
-        assert_eq!(ret, crate::errno::ENOMEM, "full actions should return ENOMEM");
+        assert_eq!(
+            ret,
+            crate::errno::ENOMEM,
+            "full actions should return ENOMEM"
+        );
     }
 
     // -----------------------------------------------------------------------

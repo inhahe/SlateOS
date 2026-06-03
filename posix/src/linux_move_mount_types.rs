@@ -50,10 +50,14 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            MOVE_MOUNT_F_SYMLINKS, MOVE_MOUNT_F_AUTOMOUNTS,
-            MOVE_MOUNT_F_EMPTY_PATH, MOVE_MOUNT_T_SYMLINKS,
-            MOVE_MOUNT_T_AUTOMOUNTS, MOVE_MOUNT_T_EMPTY_PATH,
-            MOVE_MOUNT_SET_GROUP, MOVE_MOUNT_BENEATH,
+            MOVE_MOUNT_F_SYMLINKS,
+            MOVE_MOUNT_F_AUTOMOUNTS,
+            MOVE_MOUNT_F_EMPTY_PATH,
+            MOVE_MOUNT_T_SYMLINKS,
+            MOVE_MOUNT_T_AUTOMOUNTS,
+            MOVE_MOUNT_T_EMPTY_PATH,
+            MOVE_MOUNT_SET_GROUP,
+            MOVE_MOUNT_BENEATH,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

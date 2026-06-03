@@ -102,9 +102,14 @@ mod tests {
     #[test]
     fn test_controllers_no_overlap() {
         let ctrls = [
-            CGROUP_CTRL_CPU, CGROUP_CTRL_MEMORY, CGROUP_CTRL_IO,
-            CGROUP_CTRL_PIDS, CGROUP_CTRL_RDMA, CGROUP_CTRL_HUGETLB,
-            CGROUP_CTRL_CPUSET, CGROUP_CTRL_MISC,
+            CGROUP_CTRL_CPU,
+            CGROUP_CTRL_MEMORY,
+            CGROUP_CTRL_IO,
+            CGROUP_CTRL_PIDS,
+            CGROUP_CTRL_RDMA,
+            CGROUP_CTRL_HUGETLB,
+            CGROUP_CTRL_CPUSET,
+            CGROUP_CTRL_MISC,
         ];
         for i in 0..ctrls.len() {
             assert!(ctrls[i].is_power_of_two());
@@ -117,8 +122,10 @@ mod tests {
     #[test]
     fn test_cgroup_types_distinct() {
         let types = [
-            CGROUP_TYPE_DOMAIN, CGROUP_TYPE_THREADED,
-            CGROUP_TYPE_DOMAIN_THREADED, CGROUP_TYPE_DOMAIN_INVALID,
+            CGROUP_TYPE_DOMAIN,
+            CGROUP_TYPE_THREADED,
+            CGROUP_TYPE_DOMAIN_THREADED,
+            CGROUP_TYPE_DOMAIN_INVALID,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -137,8 +144,10 @@ mod tests {
     #[test]
     fn test_mem_events_distinct() {
         let events = [
-            CGROUP_MEM_EVENT_HIGH, CGROUP_MEM_EVENT_MAX,
-            CGROUP_MEM_EVENT_OOM, CGROUP_MEM_EVENT_OOM_KILL,
+            CGROUP_MEM_EVENT_HIGH,
+            CGROUP_MEM_EVENT_MAX,
+            CGROUP_MEM_EVENT_OOM,
+            CGROUP_MEM_EVENT_OOM_KILL,
             CGROUP_MEM_EVENT_OOM_GROUP_KILL,
         ];
         for i in 0..events.len() {
@@ -156,9 +165,12 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let files = [
-            CGROUP_FILE_PROCS, CGROUP_FILE_THREADS,
-            CGROUP_FILE_CONTROLLERS, CGROUP_FILE_SUBTREE_CONTROL,
-            CGROUP_FILE_EVENTS, CGROUP_FILE_STAT,
+            CGROUP_FILE_PROCS,
+            CGROUP_FILE_THREADS,
+            CGROUP_FILE_CONTROLLERS,
+            CGROUP_FILE_SUBTREE_CONTROL,
+            CGROUP_FILE_EVENTS,
+            CGROUP_FILE_STAT,
         ];
         for i in 0..files.len() {
             for j in (i + 1)..files.len() {

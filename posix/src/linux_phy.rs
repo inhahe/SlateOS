@@ -140,15 +140,24 @@ mod tests {
     #[test]
     fn test_interface_modes_distinct() {
         let modes = [
-            PHY_INTERFACE_MODE_NA, PHY_INTERFACE_MODE_INTERNAL,
-            PHY_INTERFACE_MODE_MII, PHY_INTERFACE_MODE_GMII,
-            PHY_INTERFACE_MODE_SGMII, PHY_INTERFACE_MODE_TBI,
-            PHY_INTERFACE_MODE_RMII, PHY_INTERFACE_MODE_RGMII,
-            PHY_INTERFACE_MODE_RGMII_ID, PHY_INTERFACE_MODE_RGMII_RXID,
-            PHY_INTERFACE_MODE_RGMII_TXID, PHY_INTERFACE_MODE_XGMII,
-            PHY_INTERFACE_MODE_QSGMII, PHY_INTERFACE_MODE_1000BASEX,
-            PHY_INTERFACE_MODE_2500BASEX, PHY_INTERFACE_MODE_10GBASER,
-            PHY_INTERFACE_MODE_USXGMII, PHY_INTERFACE_MODE_25GBASER,
+            PHY_INTERFACE_MODE_NA,
+            PHY_INTERFACE_MODE_INTERNAL,
+            PHY_INTERFACE_MODE_MII,
+            PHY_INTERFACE_MODE_GMII,
+            PHY_INTERFACE_MODE_SGMII,
+            PHY_INTERFACE_MODE_TBI,
+            PHY_INTERFACE_MODE_RMII,
+            PHY_INTERFACE_MODE_RGMII,
+            PHY_INTERFACE_MODE_RGMII_ID,
+            PHY_INTERFACE_MODE_RGMII_RXID,
+            PHY_INTERFACE_MODE_RGMII_TXID,
+            PHY_INTERFACE_MODE_XGMII,
+            PHY_INTERFACE_MODE_QSGMII,
+            PHY_INTERFACE_MODE_1000BASEX,
+            PHY_INTERFACE_MODE_2500BASEX,
+            PHY_INTERFACE_MODE_10GBASER,
+            PHY_INTERFACE_MODE_USXGMII,
+            PHY_INTERFACE_MODE_25GBASER,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -160,8 +169,13 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            PHY_DOWN, PHY_READY, PHY_HALTED, PHY_UP,
-            PHY_RUNNING, PHY_NOLINK, PHY_CABLETEST,
+            PHY_DOWN,
+            PHY_READY,
+            PHY_HALTED,
+            PHY_UP,
+            PHY_RUNNING,
+            PHY_NOLINK,
+            PHY_CABLETEST,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -173,9 +187,17 @@ mod tests {
     #[test]
     fn test_speeds_distinct() {
         let speeds = [
-            SPEED_10, SPEED_100, SPEED_1000, SPEED_2500,
-            SPEED_5000, SPEED_10000, SPEED_25000, SPEED_40000,
-            SPEED_50000, SPEED_100000, SPEED_UNKNOWN,
+            SPEED_10,
+            SPEED_100,
+            SPEED_1000,
+            SPEED_2500,
+            SPEED_5000,
+            SPEED_10000,
+            SPEED_25000,
+            SPEED_40000,
+            SPEED_50000,
+            SPEED_100000,
+            SPEED_UNKNOWN,
         ];
         for i in 0..speeds.len() {
             for j in (i + 1)..speeds.len() {

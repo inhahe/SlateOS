@@ -117,10 +117,16 @@ mod tests {
     #[test]
     fn test_platform_commands_distinct() {
         let cmds = [
-            SEV_CMD_INIT, SEV_CMD_SHUTDOWN, SEV_CMD_FACTORY_RESET,
-            SEV_CMD_PLATFORM_STATUS, SEV_CMD_PEK_GEN, SEV_CMD_PEK_CSR,
-            SEV_CMD_PEK_CERT_IMPORT, SEV_CMD_PDH_GEN,
-            SEV_CMD_PDH_CERT_EXPORT, SEV_CMD_GET_ID,
+            SEV_CMD_INIT,
+            SEV_CMD_SHUTDOWN,
+            SEV_CMD_FACTORY_RESET,
+            SEV_CMD_PLATFORM_STATUS,
+            SEV_CMD_PEK_GEN,
+            SEV_CMD_PEK_CSR,
+            SEV_CMD_PEK_CERT_IMPORT,
+            SEV_CMD_PDH_GEN,
+            SEV_CMD_PDH_CERT_EXPORT,
+            SEV_CMD_GET_ID,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -132,9 +138,12 @@ mod tests {
     #[test]
     fn test_guest_commands_distinct() {
         let cmds = [
-            SEV_CMD_LAUNCH_START, SEV_CMD_LAUNCH_UPDATE_DATA,
-            SEV_CMD_LAUNCH_UPDATE_VMSA, SEV_CMD_LAUNCH_MEASURE,
-            SEV_CMD_LAUNCH_SECRET, SEV_CMD_LAUNCH_FINISH,
+            SEV_CMD_LAUNCH_START,
+            SEV_CMD_LAUNCH_UPDATE_DATA,
+            SEV_CMD_LAUNCH_UPDATE_VMSA,
+            SEV_CMD_LAUNCH_MEASURE,
+            SEV_CMD_LAUNCH_SECRET,
+            SEV_CMD_LAUNCH_FINISH,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -146,10 +155,14 @@ mod tests {
     #[test]
     fn test_migration_commands_distinct() {
         let cmds = [
-            SEV_CMD_SEND_START, SEV_CMD_SEND_UPDATE_DATA,
-            SEV_CMD_SEND_UPDATE_VMSA, SEV_CMD_SEND_FINISH,
-            SEV_CMD_RECEIVE_START, SEV_CMD_RECEIVE_UPDATE_DATA,
-            SEV_CMD_RECEIVE_UPDATE_VMSA, SEV_CMD_RECEIVE_FINISH,
+            SEV_CMD_SEND_START,
+            SEV_CMD_SEND_UPDATE_DATA,
+            SEV_CMD_SEND_UPDATE_VMSA,
+            SEV_CMD_SEND_FINISH,
+            SEV_CMD_RECEIVE_START,
+            SEV_CMD_RECEIVE_UPDATE_DATA,
+            SEV_CMD_RECEIVE_UPDATE_VMSA,
+            SEV_CMD_RECEIVE_FINISH,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -171,8 +184,10 @@ mod tests {
     #[test]
     fn test_policy_flags_no_overlap() {
         let flags = [
-            SEV_POLICY_NO_DEBUG, SEV_POLICY_NO_MIGRATE,
-            SEV_POLICY_ES, SEV_POLICY_SNP,
+            SEV_POLICY_NO_DEBUG,
+            SEV_POLICY_NO_MIGRATE,
+            SEV_POLICY_ES,
+            SEV_POLICY_SNP,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

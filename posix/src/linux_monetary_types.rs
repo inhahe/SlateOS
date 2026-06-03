@@ -93,8 +93,10 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            STRFMON_FLAG_LEFT, STRFMON_FLAG_PARENS,
-            STRFMON_FLAG_NOSYM, STRFMON_FLAG_SIGN,
+            STRFMON_FLAG_LEFT,
+            STRFMON_FLAG_PARENS,
+            STRFMON_FLAG_NOSYM,
+            STRFMON_FLAG_SIGN,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -106,8 +108,10 @@ mod tests {
     #[test]
     fn test_sign_positions_distinct() {
         let positions = [
-            LCONV_SIGN_PARENS, LCONV_SIGN_BEFORE_ALL,
-            LCONV_SIGN_AFTER_ALL, LCONV_SIGN_BEFORE_SYM,
+            LCONV_SIGN_PARENS,
+            LCONV_SIGN_BEFORE_ALL,
+            LCONV_SIGN_AFTER_ALL,
+            LCONV_SIGN_BEFORE_SYM,
             LCONV_SIGN_AFTER_SYM,
         ];
         for i in 0..positions.len() {

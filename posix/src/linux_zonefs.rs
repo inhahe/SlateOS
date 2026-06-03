@@ -82,10 +82,14 @@ mod tests {
     #[test]
     fn test_zone_conditions_distinct() {
         let conds = [
-            BLK_ZONE_COND_NOT_WP, BLK_ZONE_COND_EMPTY,
-            BLK_ZONE_COND_IMP_OPEN, BLK_ZONE_COND_EXP_OPEN,
-            BLK_ZONE_COND_CLOSED, BLK_ZONE_COND_FULL,
-            BLK_ZONE_COND_READONLY, BLK_ZONE_COND_OFFLINE,
+            BLK_ZONE_COND_NOT_WP,
+            BLK_ZONE_COND_EMPTY,
+            BLK_ZONE_COND_IMP_OPEN,
+            BLK_ZONE_COND_EXP_OPEN,
+            BLK_ZONE_COND_CLOSED,
+            BLK_ZONE_COND_FULL,
+            BLK_ZONE_COND_READONLY,
+            BLK_ZONE_COND_OFFLINE,
         ];
         for i in 0..conds.len() {
             for j in (i + 1)..conds.len() {
@@ -97,7 +101,8 @@ mod tests {
     #[test]
     fn test_mount_opts_no_overlap() {
         let opts = [
-            ZONEFS_MNTOPT_CNV, ZONEFS_MNTOPT_ERRORS_REPAIR,
+            ZONEFS_MNTOPT_CNV,
+            ZONEFS_MNTOPT_ERRORS_REPAIR,
             ZONEFS_MNTOPT_ERRORS_RO,
         ];
         for i in 0..opts.len() {

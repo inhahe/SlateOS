@@ -126,11 +126,20 @@ mod tests {
     #[test]
     fn test_node_types_distinct() {
         let types = [
-            UBIFS_INO_NODE, UBIFS_DATA_NODE, UBIFS_DENT_NODE,
-            UBIFS_XENT_NODE, UBIFS_TRUN_NODE, UBIFS_PAD_NODE,
-            UBIFS_SB_NODE, UBIFS_MST_NODE, UBIFS_REF_NODE,
-            UBIFS_IDX_NODE, UBIFS_CS_NODE, UBIFS_ORPH_NODE,
-            UBIFS_AUTH_NODE, UBIFS_SIG_NODE,
+            UBIFS_INO_NODE,
+            UBIFS_DATA_NODE,
+            UBIFS_DENT_NODE,
+            UBIFS_XENT_NODE,
+            UBIFS_TRUN_NODE,
+            UBIFS_PAD_NODE,
+            UBIFS_SB_NODE,
+            UBIFS_MST_NODE,
+            UBIFS_REF_NODE,
+            UBIFS_IDX_NODE,
+            UBIFS_CS_NODE,
+            UBIFS_ORPH_NODE,
+            UBIFS_AUTH_NODE,
+            UBIFS_SIG_NODE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -150,8 +159,12 @@ mod tests {
     #[test]
     fn test_inode_flags_power_of_two() {
         let flags = [
-            UBIFS_COMPR_FL, UBIFS_SYNC_FL, UBIFS_IMMUTABLE_FL,
-            UBIFS_APPEND_FL, UBIFS_DIRSYNC_FL, UBIFS_XATTR_FL,
+            UBIFS_COMPR_FL,
+            UBIFS_SYNC_FL,
+            UBIFS_IMMUTABLE_FL,
+            UBIFS_APPEND_FL,
+            UBIFS_DIRSYNC_FL,
+            UBIFS_XATTR_FL,
             UBIFS_CRYPT_FL,
         ];
         for f in &flags {

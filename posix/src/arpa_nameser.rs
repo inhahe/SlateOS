@@ -259,8 +259,8 @@ pub const C_ANY: u16 = NS_C_ANY;
 /// `src` must point to at least 2 readable bytes.
 #[inline]
 pub unsafe fn ns_get16(src: *const u8) -> u16 {
-    let hi = unsafe { *src } as u16;
-    let lo = unsafe { *src.add(1) } as u16;
+    let hi = u16::from(unsafe { *src });
+    let lo = u16::from(unsafe { *src.add(1) });
     (hi << 8) | lo
 }
 
@@ -270,10 +270,10 @@ pub unsafe fn ns_get16(src: *const u8) -> u16 {
 /// `src` must point to at least 4 readable bytes.
 #[inline]
 pub unsafe fn ns_get32(src: *const u8) -> u32 {
-    let b0 = unsafe { *src } as u32;
-    let b1 = unsafe { *src.add(1) } as u32;
-    let b2 = unsafe { *src.add(2) } as u32;
-    let b3 = unsafe { *src.add(3) } as u32;
+    let b0 = u32::from(unsafe { *src });
+    let b1 = u32::from(unsafe { *src.add(1) });
+    let b2 = u32::from(unsafe { *src.add(2) });
+    let b3 = u32::from(unsafe { *src.add(3) });
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 }
 
@@ -366,8 +366,11 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            NS_O_QUERY, NS_O_IQUERY, NS_O_STATUS,
-            NS_O_NOTIFY, NS_O_UPDATE,
+            NS_O_QUERY,
+            NS_O_IQUERY,
+            NS_O_STATUS,
+            NS_O_NOTIFY,
+            NS_O_UPDATE,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -392,16 +395,21 @@ mod tests {
     #[test]
     fn test_rcodes_distinct() {
         let rcodes = [
-            NS_R_NOERROR, NS_R_FORMERR, NS_R_SERVFAIL, NS_R_NXDOMAIN,
-            NS_R_NOTIMPL, NS_R_REFUSED, NS_R_YXDOMAIN, NS_R_YXRRSET,
-            NS_R_NXRRSET, NS_R_NOTAUTH, NS_R_NOTZONE,
+            NS_R_NOERROR,
+            NS_R_FORMERR,
+            NS_R_SERVFAIL,
+            NS_R_NXDOMAIN,
+            NS_R_NOTIMPL,
+            NS_R_REFUSED,
+            NS_R_YXDOMAIN,
+            NS_R_YXRRSET,
+            NS_R_NXRRSET,
+            NS_R_NOTAUTH,
+            NS_R_NOTZONE,
         ];
         for i in 0..rcodes.len() {
             for j in (i + 1)..rcodes.len() {
-                assert_ne!(
-                    rcodes[i], rcodes[j],
-                    "DNS rcodes must be distinct"
-                );
+                assert_ne!(rcodes[i], rcodes[j], "DNS rcodes must be distinct");
             }
         }
     }
@@ -426,19 +434,34 @@ mod tests {
     #[test]
     fn test_record_types_distinct() {
         let types = [
-            NS_T_A, NS_T_NS, NS_T_CNAME, NS_T_SOA, NS_T_WKS,
-            NS_T_PTR, NS_T_HINFO, NS_T_MX, NS_T_TXT,
-            NS_T_RP, NS_T_AFSDB, NS_T_AAAA, NS_T_LOC,
-            NS_T_SRV, NS_T_NAPTR, NS_T_DNAME, NS_T_OPT,
-            NS_T_DS, NS_T_RRSIG, NS_T_NSEC, NS_T_DNSKEY,
-            NS_T_TLSA, NS_T_SVCB, NS_T_HTTPS,
+            NS_T_A,
+            NS_T_NS,
+            NS_T_CNAME,
+            NS_T_SOA,
+            NS_T_WKS,
+            NS_T_PTR,
+            NS_T_HINFO,
+            NS_T_MX,
+            NS_T_TXT,
+            NS_T_RP,
+            NS_T_AFSDB,
+            NS_T_AAAA,
+            NS_T_LOC,
+            NS_T_SRV,
+            NS_T_NAPTR,
+            NS_T_DNAME,
+            NS_T_OPT,
+            NS_T_DS,
+            NS_T_RRSIG,
+            NS_T_NSEC,
+            NS_T_DNSKEY,
+            NS_T_TLSA,
+            NS_T_SVCB,
+            NS_T_HTTPS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
-                assert_ne!(
-                    types[i], types[j],
-                    "DNS record types must be distinct"
-                );
+                assert_ne!(types[i], types[j], "DNS record types must be distinct");
             }
         }
     }

@@ -357,12 +357,19 @@ pub unsafe extern "C" fn ppoll(
         } else {
             // Convert to milliseconds, rounding up so sub-ms timeouts
             // don't collapse to 0 (which poll treats as non-blocking).
-            let ms = ts.tv_sec
+            let ms = ts
+                .tv_sec
                 .saturating_mul(1_000)
                 .saturating_add((ts.tv_nsec.saturating_add(999_999)) / 1_000_000);
-            if ms > i64::from(i32::MAX) { i32::MAX }
-            else if ms <= 0 { 1 } // Ensure non-zero for non-zero input.
-            else { ms as i32 }
+            if ms > i64::from(i32::MAX) {
+                i32::MAX
+            } else if ms <= 0 {
+                1
+            }
+            // Ensure non-zero for non-zero input.
+            else {
+                ms as i32
+            }
         }
     };
 
@@ -584,7 +591,8 @@ pub unsafe extern "C" fn select(
             let now = syscall0(SYS_CLOCK_MONOTONIC) as u64;
             // Convert to nanoseconds, rounding up to ensure we don't
             // treat sub-millisecond timeouts as instant polls.
-            let timeout_ns = (tv.tv_sec.max(0) as u64).saturating_mul(1_000_000_000)
+            let timeout_ns = (tv.tv_sec.max(0) as u64)
+                .saturating_mul(1_000_000_000)
                 .saturating_add((tv.tv_usec.max(0) as u64).saturating_mul(1_000));
             deadline_ns = now.saturating_add(timeout_ns);
         }
@@ -762,7 +770,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_zero() {
-        let mut set = FdSet { fds_bits: [0xFFFF_FFFF_FFFF_FFFF; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0xFFFF_FFFF_FFFF_FFFF; FD_SET_WORDS],
+        };
         fd_set_zero(&raw mut set);
         for word in &set.fds_bits {
             assert_eq!(*word, 0);
@@ -771,7 +781,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_set_and_isset() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_zero(&raw mut set);
 
         // Set some fds.
@@ -797,7 +809,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_clr() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_zero(&raw mut set);
 
         fd_set_set(42, &raw mut set);
@@ -809,7 +823,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_boundary() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_zero(&raw mut set);
 
         // Negative fd — should be silently ignored.
@@ -834,7 +850,9 @@ mod tests {
 
     #[test]
     fn test_is_set_in() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_zero(&raw mut set);
         fd_set_set(5, &raw mut set);
 
@@ -914,7 +932,9 @@ mod tests {
 
     #[test]
     fn test_is_set_in_word_boundaries() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_zero(&raw mut set);
 
         // Test at 64-bit word boundaries.
@@ -937,7 +957,9 @@ mod tests {
 
     #[test]
     fn test_is_set_in_last_valid_fd() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_zero(&raw mut set);
 
         // FD_SETSIZE - 1 should be the last valid fd.
@@ -967,14 +989,18 @@ mod tests {
     #[test]
     fn test_poll_flags_are_disjoint() {
         let flags: [i16; 11] = [
-            POLLIN, POLLPRI, POLLOUT, POLLERR,
-            POLLHUP, POLLNVAL, POLLRDNORM, POLLRDBAND,
+            POLLIN, POLLPRI, POLLOUT, POLLERR, POLLHUP, POLLNVAL, POLLRDNORM, POLLRDBAND,
             POLLWRNORM, POLLWRBAND, POLLRDHUP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
-                assert_eq!(flags[i] & flags[j], 0,
-                    "poll flags {} and {} must be disjoint", flags[i], flags[j]);
+                assert_eq!(
+                    flags[i] & flags[j],
+                    0,
+                    "poll flags {} and {} must be disjoint",
+                    flags[i],
+                    flags[j]
+                );
             }
         }
     }
@@ -984,7 +1010,7 @@ mod tests {
     #[test]
     fn test_fd_setsize() {
         assert_eq!(FD_SETSIZE, 256);
-        assert_eq!(FD_SET_WORDS, 4);  // 256 / 64
+        assert_eq!(FD_SET_WORDS, 4); // 256 / 64
     }
 
     #[test]
@@ -1009,14 +1035,20 @@ mod tests {
 
     #[test]
     fn test_timeval_fields() {
-        let tv = Timeval { tv_sec: 5, tv_usec: 500_000 };
+        let tv = Timeval {
+            tv_sec: 5,
+            tv_usec: 500_000,
+        };
         assert_eq!(tv.tv_sec, 5);
         assert_eq!(tv.tv_usec, 500_000);
     }
 
     #[test]
     fn test_timeval_zero() {
-        let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         assert_eq!(tv.tv_sec, 0);
         assert_eq!(tv.tv_usec, 0);
     }
@@ -1025,7 +1057,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_all_bits_in_first_word() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         // Set every bit in word 0 (fds 0..63).
         for fd in 0..64 {
             fd_set_set(fd, &raw mut set);
@@ -1039,7 +1073,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_clr_preserves_others() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_set(10, &raw mut set);
         fd_set_set(11, &raw mut set);
         fd_set_set(12, &raw mut set);
@@ -1051,7 +1087,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_double_set() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_set(50, &raw mut set);
         fd_set_set(50, &raw mut set); // Idempotent.
         assert_ne!(fd_set_isset(50, &raw const set), 0);
@@ -1059,18 +1097,26 @@ mod tests {
 
     #[test]
     fn test_fd_set_clr_unset_is_noop() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_clr(50, &raw mut set); // Nothing to clear — no crash.
         assert_eq!(fd_set_isset(50, &raw const set), 0);
     }
 
     #[test]
     fn test_fd_set_zero_then_isset() {
-        let mut set = FdSet { fds_bits: [0xFFFF_FFFF_FFFF_FFFF; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0xFFFF_FFFF_FFFF_FFFF; FD_SET_WORDS],
+        };
         fd_set_zero(&raw mut set);
         // Every fd should be unset.
         for fd in [0, 1, 63, 64, 127, 128, 200, 255] {
-            assert_eq!(fd_set_isset(fd, &raw const set), 0, "fd {fd} should be clear");
+            assert_eq!(
+                fd_set_isset(fd, &raw const set),
+                0,
+                "fd {fd} should be clear"
+            );
         }
     }
 
@@ -1078,7 +1124,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_set_negative_is_noop() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_set(-100, &raw mut set); // Should not crash.
         // All bits should still be 0.
         for word in &set.fds_bits {
@@ -1088,7 +1136,9 @@ mod tests {
 
     #[test]
     fn test_fd_set_clr_out_of_range() {
-        let mut set = FdSet { fds_bits: [0xFFFF_FFFF_FFFF_FFFF; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0xFFFF_FFFF_FFFF_FFFF; FD_SET_WORDS],
+        };
         fd_set_clr(300, &raw mut set); // Out of range — no crash.
         // All bits should still be set.
         for word in &set.fds_bits {
@@ -1100,7 +1150,11 @@ mod tests {
 
     #[test]
     fn test_pollfd_fields() {
-        let pfd = Pollfd { fd: 5, events: POLLIN | POLLOUT, revents: 0 };
+        let pfd = Pollfd {
+            fd: 5,
+            events: POLLIN | POLLOUT,
+            revents: 0,
+        };
         assert_eq!(pfd.fd, 5);
         assert_eq!(pfd.events, POLLIN | POLLOUT);
         assert_eq!(pfd.revents, 0);
@@ -1108,7 +1162,11 @@ mod tests {
 
     #[test]
     fn test_pollfd_copy() {
-        let pfd1 = Pollfd { fd: 3, events: POLLIN, revents: POLLHUP };
+        let pfd1 = Pollfd {
+            fd: 3,
+            events: POLLIN,
+            revents: POLLHUP,
+        };
         let pfd2 = pfd1;
         assert_eq!(pfd2.fd, pfd1.fd);
         assert_eq!(pfd2.events, pfd1.events);
@@ -1125,7 +1183,9 @@ mod tests {
 
     #[test]
     fn test_fdset_copy() {
-        let mut set1 = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set1 = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         fd_set_set(10, &raw mut set1);
         fd_set_set(200, &raw mut set1);
         let set2 = set1;
@@ -1158,12 +1218,14 @@ mod tests {
 
     #[test]
     fn test_is_set_in_all_words() {
-        let mut set = FdSet { fds_bits: [0; FD_SET_WORDS] };
+        let mut set = FdSet {
+            fds_bits: [0; FD_SET_WORDS],
+        };
         // Set one bit in each word.
-        fd_set_set(0, &raw mut set);    // word 0
-        fd_set_set(64, &raw mut set);   // word 1
-        fd_set_set(128, &raw mut set);  // word 2
-        fd_set_set(192, &raw mut set);  // word 3
+        fd_set_set(0, &raw mut set); // word 0
+        fd_set_set(64, &raw mut set); // word 1
+        fd_set_set(128, &raw mut set); // word 2
+        fd_set_set(192, &raw mut set); // word 3
 
         assert!(is_set_in(0, &set));
         assert!(is_set_in(64, &set));
@@ -1195,7 +1257,10 @@ mod tests {
     #[test]
     fn test_select_negative_nfds_einval_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 -1,
@@ -1213,7 +1278,10 @@ mod tests {
     #[test]
     fn test_select_nfds_equal_to_setsize_no_longer_einval_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 FD_SETSIZE as i32,
@@ -1231,7 +1299,10 @@ mod tests {
     #[test]
     fn test_select_nfds_one_past_setsize_no_longer_einval_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 (FD_SETSIZE as i32) + 1,
@@ -1250,7 +1321,10 @@ mod tests {
     #[test]
     fn test_select_nfds_i32_max_clamped_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 i32::MAX,
@@ -1271,7 +1345,10 @@ mod tests {
     #[test]
     fn test_select_negative_beats_oversize_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         // `i32::MIN` is both negative and oversized in magnitude.
         let ret = unsafe {
             select(
@@ -1292,7 +1369,10 @@ mod tests {
     #[test]
     fn test_select_oversize_nfds_nonblocking_returns_zero_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 10_000,
@@ -1312,7 +1392,10 @@ mod tests {
     #[test]
     fn test_select_typical_nfds_unchanged_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 32,
@@ -1331,7 +1414,10 @@ mod tests {
     #[test]
     fn test_select_zero_nfds_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 0,
@@ -1353,7 +1439,10 @@ mod tests {
     #[test]
     fn test_select_glibc_size_confusion_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 (FD_SETSIZE * 4) as i32,
@@ -1372,7 +1461,10 @@ mod tests {
     #[test]
     fn test_select_nfds_one_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 1,
@@ -1396,7 +1488,10 @@ mod tests {
         // Seed a sentinel errno that would have been overwritten if the
         // old EINVAL path still fired.
         crate::errno::set_errno(crate::errno::EIO);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 (FD_SETSIZE as i32) + 100,
@@ -1417,7 +1512,10 @@ mod tests {
     #[test]
     fn test_select_recover_after_einval_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let _ = unsafe {
             select(
                 -1,
@@ -1451,7 +1549,10 @@ mod tests {
     #[test]
     fn test_select_oversize_nfds_no_longer_einval_phase155() {
         crate::errno::set_errno(0);
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = unsafe {
             select(
                 (FD_SETSIZE as i32) + 1,
@@ -1478,7 +1579,10 @@ mod tests {
     #[test]
     fn test_pselect_inherits_select_nfds_clamp_phase155() {
         crate::errno::set_errno(0);
-        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let ret = unsafe {
             pselect(
                 (FD_SETSIZE as i32) + 1,
@@ -1497,7 +1601,10 @@ mod tests {
     #[test]
     fn test_pselect_negative_nfds_einval_phase155() {
         crate::errno::set_errno(0);
-        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let ret = unsafe {
             pselect(
                 -1,
@@ -1552,14 +1659,12 @@ mod tests {
         crate::errno::set_errno(0);
         // Use a non-null but unused buffer — the EINVAL fires before any
         // entry is dereferenced.
-        let mut pfd = Pollfd { fd: -1, events: 0, revents: 0 };
-        let ret = unsafe {
-            poll(
-                &raw mut pfd,
-                (fdtable::MAX_FDS as NfdsT) + 1,
-                0,
-            )
+        let mut pfd = Pollfd {
+            fd: -1,
+            events: 0,
+            revents: 0,
         };
+        let ret = unsafe { poll(&raw mut pfd, (fdtable::MAX_FDS as NfdsT) + 1, 0) };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -1582,11 +1687,12 @@ mod tests {
         // Heap is unavailable in our test config; use a stack array of
         // MAX_FDS = 256 entries, each marked `fd: -1` so they are
         // silently skipped by the poll loop.
-        let mut arr = [Pollfd { fd: -1, events: 0, revents: 0 };
-            fdtable::MAX_FDS];
-        let ret = unsafe {
-            poll(arr.as_mut_ptr(), fdtable::MAX_FDS as NfdsT, 0)
-        };
+        let mut arr = [Pollfd {
+            fd: -1,
+            events: 0,
+            revents: 0,
+        }; fdtable::MAX_FDS];
+        let ret = unsafe { poll(arr.as_mut_ptr(), fdtable::MAX_FDS as NfdsT, 0) };
         assert_eq!(ret, 0);
         assert_eq!(crate::errno::get_errno(), 0);
     }
@@ -1600,13 +1706,7 @@ mod tests {
     #[test]
     fn test_poll_einval_beats_efault_phase156() {
         crate::errno::set_errno(0);
-        let ret = unsafe {
-            poll(
-                core::ptr::null_mut(),
-                (fdtable::MAX_FDS as NfdsT) + 1,
-                0,
-            )
-        };
+        let ret = unsafe { poll(core::ptr::null_mut(), (fdtable::MAX_FDS as NfdsT) + 1, 0) };
         assert_eq!(ret, -1);
         assert_eq!(
             crate::errno::get_errno(),
@@ -1640,7 +1740,11 @@ mod tests {
     #[test]
     fn test_poll_single_negative_fd_skipped_phase156() {
         crate::errno::set_errno(0);
-        let mut pfd = Pollfd { fd: -1, events: POLLIN, revents: 0xBEEF_u16 as i16 };
+        let mut pfd = Pollfd {
+            fd: -1,
+            events: POLLIN,
+            revents: 0xBEEF_u16 as i16,
+        };
         let ret = unsafe { poll(&raw mut pfd, 1, 0) };
         assert_eq!(ret, 0);
         assert_eq!(crate::errno::get_errno(), 0);
@@ -1657,7 +1761,11 @@ mod tests {
     fn test_poll_gigabyte_nfds_einval_phase156() {
         crate::errno::set_errno(0);
         // Non-null but never read because EINVAL fires first.
-        let mut pfd = Pollfd { fd: 0, events: 0, revents: 0 };
+        let mut pfd = Pollfd {
+            fd: 0,
+            events: 0,
+            revents: 0,
+        };
         let ret = unsafe {
             poll(
                 &raw mut pfd,
@@ -1691,7 +1799,11 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
         crate::errno::set_errno(0);
-        let mut pfd = Pollfd { fd: -1, events: 0, revents: 0 };
+        let mut pfd = Pollfd {
+            fd: -1,
+            events: 0,
+            revents: 0,
+        };
         let ret = unsafe { poll(&raw mut pfd, 1, 0) };
         assert_eq!(ret, 0);
         assert_eq!(crate::errno::get_errno(), 0);
@@ -1703,14 +1815,12 @@ mod tests {
     #[test]
     fn test_poll_einval_does_not_touch_fds_buffer_phase156() {
         crate::errno::set_errno(0);
-        let mut pfd = Pollfd { fd: 99, events: 0xAAAA_u16 as i16, revents: 0x5555_u16 as i16 };
-        let ret = unsafe {
-            poll(
-                &raw mut pfd,
-                (fdtable::MAX_FDS as NfdsT) + 1,
-                0,
-            )
+        let mut pfd = Pollfd {
+            fd: 99,
+            events: 0xAAAA_u16 as i16,
+            revents: 0x5555_u16 as i16,
         };
+        let ret = unsafe { poll(&raw mut pfd, (fdtable::MAX_FDS as NfdsT) + 1, 0) };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         // Caller's buffer was not touched (no loop iterations ran).
@@ -1727,13 +1837,7 @@ mod tests {
     #[test]
     fn test_poll_oversize_nfds_no_longer_unchecked_phase156() {
         crate::errno::set_errno(0);
-        let ret = unsafe {
-            poll(
-                core::ptr::null_mut(),
-                (fdtable::MAX_FDS as NfdsT) + 1,
-                0,
-            )
-        };
+        let ret = unsafe { poll(core::ptr::null_mut(), (fdtable::MAX_FDS as NfdsT) + 1, 0) };
         assert_eq!(ret, -1, "oversize nfds must be rejected");
         assert_eq!(
             crate::errno::get_errno(),
@@ -1748,7 +1852,10 @@ mod tests {
     #[test]
     fn test_ppoll_inherits_poll_nfds_einval_phase156() {
         crate::errno::set_errno(0);
-        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let ret = unsafe {
             ppoll(
                 core::ptr::null_mut(),
@@ -1765,15 +1872,11 @@ mod tests {
     #[test]
     fn test_ppoll_zero_nfds_ok_phase156() {
         crate::errno::set_errno(0);
-        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
-        let ret = unsafe {
-            ppoll(
-                core::ptr::null_mut(),
-                0,
-                &raw const ts,
-                core::ptr::null(),
-            )
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
         };
+        let ret = unsafe { ppoll(core::ptr::null_mut(), 0, &raw const ts, core::ptr::null()) };
         assert_eq!(ret, 0);
         assert_eq!(crate::errno::get_errno(), 0);
     }

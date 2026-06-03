@@ -81,8 +81,11 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            IMA_ACTION_DONT_MEASURE, IMA_ACTION_MEASURE,
-            IMA_ACTION_APPRAISE, IMA_ACTION_AUDIT, IMA_ACTION_HASH,
+            IMA_ACTION_DONT_MEASURE,
+            IMA_ACTION_MEASURE,
+            IMA_ACTION_APPRAISE,
+            IMA_ACTION_AUDIT,
+            IMA_ACTION_HASH,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -94,8 +97,12 @@ mod tests {
     #[test]
     fn test_conditions_no_overlap() {
         let conds = [
-            IMA_COND_UID, IMA_COND_FOWNER, IMA_COND_FSMAGIC,
-            IMA_COND_FSUUID, IMA_COND_FNAME, IMA_COND_LSM_LABEL,
+            IMA_COND_UID,
+            IMA_COND_FOWNER,
+            IMA_COND_FSMAGIC,
+            IMA_COND_FSUUID,
+            IMA_COND_FNAME,
+            IMA_COND_LSM_LABEL,
         ];
         for i in 0..conds.len() {
             assert!(conds[i].is_power_of_two());
@@ -108,8 +115,11 @@ mod tests {
     #[test]
     fn test_hash_algorithms_distinct() {
         let hashes = [
-            IMA_HASH_SHA1, IMA_HASH_SHA256, IMA_HASH_SHA384,
-            IMA_HASH_SHA512, IMA_HASH_SM3,
+            IMA_HASH_SHA1,
+            IMA_HASH_SHA256,
+            IMA_HASH_SHA384,
+            IMA_HASH_SHA512,
+            IMA_HASH_SM3,
         ];
         for i in 0..hashes.len() {
             for j in (i + 1)..hashes.len() {
@@ -121,8 +131,10 @@ mod tests {
     #[test]
     fn test_templates_distinct() {
         let templates = [
-            IMA_TEMPLATE_IMA, IMA_TEMPLATE_IMA_NG,
-            IMA_TEMPLATE_IMA_SIG, IMA_TEMPLATE_IMA_BUF,
+            IMA_TEMPLATE_IMA,
+            IMA_TEMPLATE_IMA_NG,
+            IMA_TEMPLATE_IMA_SIG,
+            IMA_TEMPLATE_IMA_BUF,
             IMA_TEMPLATE_IMA_MODSIG,
         ];
         for i in 0..templates.len() {

@@ -88,8 +88,10 @@ mod tests {
     #[test]
     fn test_suspend_states_distinct() {
         let states = [
-            PM_SUSPEND_FREEZE, PM_SUSPEND_STANDBY,
-            PM_SUSPEND_MEM, PM_SUSPEND_MAX,
+            PM_SUSPEND_FREEZE,
+            PM_SUSPEND_STANDBY,
+            PM_SUSPEND_MEM,
+            PM_SUSPEND_MAX,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -101,8 +103,10 @@ mod tests {
     #[test]
     fn test_hibernate_modes_distinct() {
         let modes = [
-            HIBERNATION_PLATFORM, HIBERNATION_SHUTDOWN,
-            HIBERNATION_REBOOT, HIBERNATION_SUSPEND,
+            HIBERNATION_PLATFORM,
+            HIBERNATION_SHUTDOWN,
+            HIBERNATION_REBOOT,
+            HIBERNATION_SUSPEND,
             HIBERNATION_TEST_RESUME,
         ];
         for i in 0..modes.len() {
@@ -115,14 +119,24 @@ mod tests {
     #[test]
     fn test_pm_events_no_overlap() {
         let events = [
-            PM_EVENT_FREEZE, PM_EVENT_SUSPEND, PM_EVENT_HIBERNATE,
-            PM_EVENT_QUIESCE, PM_EVENT_RESUME, PM_EVENT_THAW,
-            PM_EVENT_RESTORE, PM_EVENT_RECOVER,
+            PM_EVENT_FREEZE,
+            PM_EVENT_SUSPEND,
+            PM_EVENT_HIBERNATE,
+            PM_EVENT_QUIESCE,
+            PM_EVENT_RESUME,
+            PM_EVENT_THAW,
+            PM_EVENT_RESTORE,
+            PM_EVENT_RECOVER,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
-                assert_eq!(events[i] & events[j], 0,
-                    "overlap: 0x{:x} & 0x{:x}", events[i], events[j]);
+                assert_eq!(
+                    events[i] & events[j],
+                    0,
+                    "overlap: 0x{:x} & 0x{:x}",
+                    events[i],
+                    events[j]
+                );
             }
         }
     }

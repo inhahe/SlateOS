@@ -89,8 +89,10 @@ mod tests {
     #[test]
     fn test_recipients_distinct() {
         let recips = [
-            USB_RECIP_DEVICE, USB_RECIP_INTERFACE,
-            USB_RECIP_ENDPOINT, USB_RECIP_OTHER,
+            USB_RECIP_DEVICE,
+            USB_RECIP_INTERFACE,
+            USB_RECIP_ENDPOINT,
+            USB_RECIP_OTHER,
         ];
         for i in 0..recips.len() {
             for j in (i + 1)..recips.len() {

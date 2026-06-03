@@ -81,9 +81,12 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            HIBERNATE_STATE_FREEZE, HIBERNATE_STATE_SNAPSHOT,
-            HIBERNATE_STATE_WRITE, HIBERNATE_STATE_PLATFORM,
-            HIBERNATE_STATE_ENTER, HIBERNATE_STATE_RESUME,
+            HIBERNATE_STATE_FREEZE,
+            HIBERNATE_STATE_SNAPSHOT,
+            HIBERNATE_STATE_WRITE,
+            HIBERNATE_STATE_PLATFORM,
+            HIBERNATE_STATE_ENTER,
+            HIBERNATE_STATE_RESUME,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -95,8 +98,10 @@ mod tests {
     #[test]
     fn test_compression_modes_distinct() {
         let modes = [
-            HIBERNATE_COMP_NONE, HIBERNATE_COMP_LZO,
-            HIBERNATE_COMP_LZ4, HIBERNATE_COMP_ZSTD,
+            HIBERNATE_COMP_NONE,
+            HIBERNATE_COMP_LZO,
+            HIBERNATE_COMP_LZ4,
+            HIBERNATE_COMP_ZSTD,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -108,8 +113,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            HIBERNATE_F_PLATFORM, HIBERNATE_F_FILE,
-            HIBERNATE_F_ENCRYPT, HIBERNATE_F_COMPRESS,
+            HIBERNATE_F_PLATFORM,
+            HIBERNATE_F_FILE,
+            HIBERNATE_F_ENCRYPT,
+            HIBERNATE_F_COMPRESS,
             HIBERNATE_F_RESUME_FILE,
         ];
         for i in 0..flags.len() {

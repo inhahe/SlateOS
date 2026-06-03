@@ -100,8 +100,12 @@ mod tests {
     #[test]
     fn test_sqe_flags_are_powers_of_two() {
         let flags = [
-            IOSQE_FIXED_FILE, IOSQE_IO_DRAIN, IOSQE_IO_LINK,
-            IOSQE_IO_HARDLINK, IOSQE_ASYNC, IOSQE_BUFFER_SELECT,
+            IOSQE_FIXED_FILE,
+            IOSQE_IO_DRAIN,
+            IOSQE_IO_LINK,
+            IOSQE_IO_HARDLINK,
+            IOSQE_ASYNC,
+            IOSQE_BUFFER_SELECT,
             IOSQE_CQE_SKIP_SUCCESS,
         ];
         for flag in &flags {
@@ -112,8 +116,10 @@ mod tests {
     #[test]
     fn test_cqe_flags_are_powers_of_two() {
         let flags = [
-            IORING_CQE_F_BUFFER, IORING_CQE_F_MORE,
-            IORING_CQE_F_SOCK_NONEMPTY, IORING_CQE_F_NOTIF,
+            IORING_CQE_F_BUFFER,
+            IORING_CQE_F_MORE,
+            IORING_CQE_F_SOCK_NONEMPTY,
+            IORING_CQE_F_NOTIF,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two());
@@ -123,10 +129,14 @@ mod tests {
     #[test]
     fn test_setup_flags_powers_of_two() {
         let flags = [
-            IORING_SETUP_IOPOLL, IORING_SETUP_SQPOLL,
-            IORING_SETUP_ATTACH_WQ, IORING_SETUP_R_DISABLED,
-            IORING_SETUP_SUBMIT_ALL, IORING_SETUP_COOP_TASKRUN,
-            IORING_SETUP_TASKRUN_FLAG, IORING_SETUP_SINGLE_ISSUER,
+            IORING_SETUP_IOPOLL,
+            IORING_SETUP_SQPOLL,
+            IORING_SETUP_ATTACH_WQ,
+            IORING_SETUP_R_DISABLED,
+            IORING_SETUP_SUBMIT_ALL,
+            IORING_SETUP_COOP_TASKRUN,
+            IORING_SETUP_TASKRUN_FLAG,
+            IORING_SETUP_SINGLE_ISSUER,
             IORING_SETUP_DEFER_TASKRUN,
         ];
         for flag in &flags {
@@ -137,12 +147,18 @@ mod tests {
     #[test]
     fn test_register_ops_distinct() {
         let ops = [
-            IORING_REGISTER_BUFFERS, IORING_UNREGISTER_BUFFERS,
-            IORING_REGISTER_FILES, IORING_UNREGISTER_FILES,
-            IORING_REGISTER_EVENTFD, IORING_UNREGISTER_EVENTFD,
-            IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_EVENTFD_ASYNC,
-            IORING_REGISTER_PROBE, IORING_REGISTER_PERSONALITY,
-            IORING_UNREGISTER_PERSONALITY, IORING_REGISTER_RESTRICTIONS,
+            IORING_REGISTER_BUFFERS,
+            IORING_UNREGISTER_BUFFERS,
+            IORING_REGISTER_FILES,
+            IORING_UNREGISTER_FILES,
+            IORING_REGISTER_EVENTFD,
+            IORING_UNREGISTER_EVENTFD,
+            IORING_REGISTER_FILES_UPDATE,
+            IORING_REGISTER_EVENTFD_ASYNC,
+            IORING_REGISTER_PROBE,
+            IORING_REGISTER_PERSONALITY,
+            IORING_UNREGISTER_PERSONALITY,
+            IORING_REGISTER_RESTRICTIONS,
             IORING_REGISTER_ENABLE_RINGS,
         ];
         for i in 0..ops.len() {

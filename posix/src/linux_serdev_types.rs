@@ -78,8 +78,11 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            SERDEV_TYPE_GENERIC, SERDEV_TYPE_BT_HCI,
-            SERDEV_TYPE_GPS, SERDEV_TYPE_TOUCH, SERDEV_TYPE_NFC,
+            SERDEV_TYPE_GENERIC,
+            SERDEV_TYPE_BT_HCI,
+            SERDEV_TYPE_GPS,
+            SERDEV_TYPE_TOUCH,
+            SERDEV_TYPE_NFC,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -110,10 +113,16 @@ mod tests {
     #[test]
     fn test_baud_rates_ordered() {
         let rates = [
-            SERDEV_BAUD_9600, SERDEV_BAUD_19200, SERDEV_BAUD_38400,
-            SERDEV_BAUD_57600, SERDEV_BAUD_115200, SERDEV_BAUD_230400,
-            SERDEV_BAUD_460800, SERDEV_BAUD_921600,
-            SERDEV_BAUD_1000000, SERDEV_BAUD_3000000,
+            SERDEV_BAUD_9600,
+            SERDEV_BAUD_19200,
+            SERDEV_BAUD_38400,
+            SERDEV_BAUD_57600,
+            SERDEV_BAUD_115200,
+            SERDEV_BAUD_230400,
+            SERDEV_BAUD_460800,
+            SERDEV_BAUD_921600,
+            SERDEV_BAUD_1000000,
+            SERDEV_BAUD_3000000,
         ];
         for i in 0..rates.len() - 1 {
             assert!(rates[i] < rates[i + 1]);

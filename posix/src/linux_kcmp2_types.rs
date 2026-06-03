@@ -62,8 +62,14 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            KCMP_FILE, KCMP_VM, KCMP_FILES, KCMP_FS,
-            KCMP_SIGHAND, KCMP_IO, KCMP_SYSVSEM, KCMP_EPOLL_TFD,
+            KCMP_FILE,
+            KCMP_VM,
+            KCMP_FILES,
+            KCMP_FS,
+            KCMP_SIGHAND,
+            KCMP_IO,
+            KCMP_SYSVSEM,
+            KCMP_EPOLL_TFD,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

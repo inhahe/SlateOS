@@ -91,8 +91,10 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            RWLOCK_OFF_READERS, RWLOCK_OFF_WRITERS,
-            RWLOCK_OFF_WRPHASE, RWLOCK_OFF_WRITERS_FUTEX,
+            RWLOCK_OFF_READERS,
+            RWLOCK_OFF_WRITERS,
+            RWLOCK_OFF_WRPHASE,
+            RWLOCK_OFF_WRITERS_FUTEX,
             RWLOCK_OFF_FLAGS,
         ];
         for i in 1..offsets.len() {

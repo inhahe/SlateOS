@@ -102,7 +102,12 @@ mod tests {
 
     #[test]
     fn test_directions_distinct() {
-        let dirs = [DMA_MEM_TO_MEM, DMA_MEM_TO_DEV, DMA_DEV_TO_MEM, DMA_DEV_TO_DEV];
+        let dirs = [
+            DMA_MEM_TO_MEM,
+            DMA_MEM_TO_DEV,
+            DMA_DEV_TO_MEM,
+            DMA_DEV_TO_DEV,
+        ];
         for i in 0..dirs.len() {
             for j in (i + 1)..dirs.len() {
                 assert_ne!(dirs[i], dirs[j]);
@@ -113,9 +118,19 @@ mod tests {
     #[test]
     fn test_tx_types_powers_of_two() {
         let types = [
-            DMA_MEMCPY, DMA_XOR, DMA_PQ, DMA_XOR_VAL, DMA_PQ_VAL,
-            DMA_MEMSET, DMA_SG, DMA_INTERLEAVE, DMA_CYCLIC,
-            DMA_SLAVE, DMA_COMPLETION_NO_ORDER, DMA_REPEAT, DMA_LOAD_EOT,
+            DMA_MEMCPY,
+            DMA_XOR,
+            DMA_PQ,
+            DMA_XOR_VAL,
+            DMA_PQ_VAL,
+            DMA_MEMSET,
+            DMA_SG,
+            DMA_INTERLEAVE,
+            DMA_CYCLIC,
+            DMA_SLAVE,
+            DMA_COMPLETION_NO_ORDER,
+            DMA_REPEAT,
+            DMA_LOAD_EOT,
         ];
         for t in &types {
             assert!(t.is_power_of_two(), "0x{:x}", t);
@@ -125,9 +140,19 @@ mod tests {
     #[test]
     fn test_tx_types_no_overlap() {
         let types = [
-            DMA_MEMCPY, DMA_XOR, DMA_PQ, DMA_XOR_VAL, DMA_PQ_VAL,
-            DMA_MEMSET, DMA_SG, DMA_INTERLEAVE, DMA_CYCLIC,
-            DMA_SLAVE, DMA_COMPLETION_NO_ORDER, DMA_REPEAT, DMA_LOAD_EOT,
+            DMA_MEMCPY,
+            DMA_XOR,
+            DMA_PQ,
+            DMA_XOR_VAL,
+            DMA_PQ_VAL,
+            DMA_MEMSET,
+            DMA_SG,
+            DMA_INTERLEAVE,
+            DMA_CYCLIC,
+            DMA_SLAVE,
+            DMA_COMPLETION_NO_ORDER,
+            DMA_REPEAT,
+            DMA_LOAD_EOT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -159,9 +184,13 @@ mod tests {
     #[test]
     fn test_prep_flags_powers_of_two() {
         let flags = [
-            DMA_PREP_INTERRUPT, DMA_PREP_FENCE,
-            DMA_PREP_PQ_DISABLE_P, DMA_PREP_PQ_DISABLE_Q,
-            DMA_PREP_CONTINUE, DMA_PREP_CMD, DMA_PREP_REPEAT,
+            DMA_PREP_INTERRUPT,
+            DMA_PREP_FENCE,
+            DMA_PREP_PQ_DISABLE_P,
+            DMA_PREP_PQ_DISABLE_Q,
+            DMA_PREP_CONTINUE,
+            DMA_PREP_CMD,
+            DMA_PREP_REPEAT,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);

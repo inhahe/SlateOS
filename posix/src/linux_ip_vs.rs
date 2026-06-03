@@ -100,8 +100,10 @@ mod tests {
     #[test]
     fn test_fwd_methods_distinct() {
         let methods = [
-            IP_VS_CONN_F_MASQ, IP_VS_CONN_F_LOCALNODE,
-            IP_VS_CONN_F_TUNNEL, IP_VS_CONN_F_DROUTE,
+            IP_VS_CONN_F_MASQ,
+            IP_VS_CONN_F_LOCALNODE,
+            IP_VS_CONN_F_TUNNEL,
+            IP_VS_CONN_F_DROUTE,
             IP_VS_CONN_F_BYPASS,
         ];
         for i in 0..methods.len() {
@@ -120,10 +122,15 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            IPVS_CMD_UNSPEC, IPVS_CMD_NEW_SERVICE, IPVS_CMD_SET_SERVICE,
-            IPVS_CMD_DEL_SERVICE, IPVS_CMD_GET_SERVICE,
-            IPVS_CMD_NEW_DEST, IPVS_CMD_SET_DEST,
-            IPVS_CMD_DEL_DEST, IPVS_CMD_GET_DEST,
+            IPVS_CMD_UNSPEC,
+            IPVS_CMD_NEW_SERVICE,
+            IPVS_CMD_SET_SERVICE,
+            IPVS_CMD_DEL_SERVICE,
+            IPVS_CMD_GET_SERVICE,
+            IPVS_CMD_NEW_DEST,
+            IPVS_CMD_SET_DEST,
+            IPVS_CMD_DEL_DEST,
+            IPVS_CMD_GET_DEST,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -136,7 +143,13 @@ mod tests {
     fn test_fwd_mask() {
         // All forwarding methods should be within the mask.
         assert_eq!(IP_VS_CONN_F_MASQ & IP_VS_CONN_F_FWD_MASK, IP_VS_CONN_F_MASQ);
-        assert_eq!(IP_VS_CONN_F_TUNNEL & IP_VS_CONN_F_FWD_MASK, IP_VS_CONN_F_TUNNEL);
-        assert_eq!(IP_VS_CONN_F_DROUTE & IP_VS_CONN_F_FWD_MASK, IP_VS_CONN_F_DROUTE);
+        assert_eq!(
+            IP_VS_CONN_F_TUNNEL & IP_VS_CONN_F_FWD_MASK,
+            IP_VS_CONN_F_TUNNEL
+        );
+        assert_eq!(
+            IP_VS_CONN_F_DROUTE & IP_VS_CONN_F_FWD_MASK,
+            IP_VS_CONN_F_DROUTE
+        );
     }
 }

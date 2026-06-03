@@ -58,10 +58,13 @@ mod tests {
     #[test]
     fn test_request_flags_no_overlap() {
         let flags = [
-            GPIOHANDLE_REQUEST_INPUT, GPIOHANDLE_REQUEST_OUTPUT,
-            GPIOHANDLE_REQUEST_ACTIVE_LOW, GPIOHANDLE_REQUEST_OPEN_DRAIN,
+            GPIOHANDLE_REQUEST_INPUT,
+            GPIOHANDLE_REQUEST_OUTPUT,
+            GPIOHANDLE_REQUEST_ACTIVE_LOW,
+            GPIOHANDLE_REQUEST_OPEN_DRAIN,
             GPIOHANDLE_REQUEST_OPEN_SOURCE,
-            GPIOHANDLE_REQUEST_BIAS_PULL_UP, GPIOHANDLE_REQUEST_BIAS_PULL_DOWN,
+            GPIOHANDLE_REQUEST_BIAS_PULL_UP,
+            GPIOHANDLE_REQUEST_BIAS_PULL_DOWN,
             GPIOHANDLE_REQUEST_BIAS_DISABLE,
         ];
         for i in 0..flags.len() {
@@ -75,10 +78,13 @@ mod tests {
     #[test]
     fn test_info_flags_no_overlap() {
         let flags = [
-            GPIOLINE_FLAG_KERNEL, GPIOLINE_FLAG_IS_OUT,
-            GPIOLINE_FLAG_ACTIVE_LOW, GPIOLINE_FLAG_OPEN_DRAIN,
+            GPIOLINE_FLAG_KERNEL,
+            GPIOLINE_FLAG_IS_OUT,
+            GPIOLINE_FLAG_ACTIVE_LOW,
+            GPIOLINE_FLAG_OPEN_DRAIN,
             GPIOLINE_FLAG_OPEN_SOURCE,
-            GPIOLINE_FLAG_BIAS_PULL_UP, GPIOLINE_FLAG_BIAS_PULL_DOWN,
+            GPIOLINE_FLAG_BIAS_PULL_UP,
+            GPIOLINE_FLAG_BIAS_PULL_DOWN,
             GPIOLINE_FLAG_BIAS_DISABLE,
         ];
         for i in 0..flags.len() {

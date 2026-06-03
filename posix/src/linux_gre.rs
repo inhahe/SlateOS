@@ -139,7 +139,14 @@ mod tests {
 
     #[test]
     fn test_kinds_distinct() {
-        let kinds = [GRE_KIND, GRETAP_KIND, IPIP_KIND, SIT_KIND, IP6GRE_KIND, IP6GRETAP_KIND];
+        let kinds = [
+            GRE_KIND,
+            GRETAP_KIND,
+            IPIP_KIND,
+            SIT_KIND,
+            IP6GRE_KIND,
+            IP6GRETAP_KIND,
+        ];
         for i in 0..kinds.len() {
             for j in (i + 1)..kinds.len() {
                 assert_ne!(kinds[i], kinds[j]);

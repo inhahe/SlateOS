@@ -95,8 +95,7 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            S_IFSOCK, S_IFLNK, S_IFREG, S_IFBLK,
-            S_IFDIR, S_IFCHR, S_IFIFO,
+            S_IFSOCK, S_IFLNK, S_IFREG, S_IFBLK, S_IFDIR, S_IFCHR, S_IFIFO,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -107,7 +106,9 @@ mod tests {
 
     #[test]
     fn test_file_types_within_mask() {
-        let types = [S_IFSOCK, S_IFLNK, S_IFREG, S_IFBLK, S_IFDIR, S_IFCHR, S_IFIFO];
+        let types = [
+            S_IFSOCK, S_IFLNK, S_IFREG, S_IFBLK, S_IFDIR, S_IFCHR, S_IFIFO,
+        ];
         for t in &types {
             assert_eq!(*t & !S_IFMT, 0, "type bits should be within S_IFMT");
         }
@@ -117,9 +118,7 @@ mod tests {
     fn test_permission_bits() {
         // rwx for user, group, others are in distinct bit positions
         let perms = [
-            S_IRUSR, S_IWUSR, S_IXUSR,
-            S_IRGRP, S_IWGRP, S_IXGRP,
-            S_IROTH, S_IWOTH, S_IXOTH,
+            S_IRUSR, S_IWUSR, S_IXUSR, S_IRGRP, S_IWGRP, S_IXGRP, S_IROTH, S_IWOTH, S_IXOTH,
         ];
         for i in 0..perms.len() {
             for j in (i + 1)..perms.len() {
@@ -131,9 +130,17 @@ mod tests {
     #[test]
     fn test_inode_flags_power_of_two() {
         let flags = [
-            FS_SECRM_FL, FS_UNRM_FL, FS_COMPR_FL, FS_SYNC_FL,
-            FS_IMMUTABLE_FL, FS_APPEND_FL, FS_NODUMP_FL,
-            FS_NOATIME_FL, FS_ENCRYPT_FL, FS_VERITY_FL, FS_CASEFOLD_FL,
+            FS_SECRM_FL,
+            FS_UNRM_FL,
+            FS_COMPR_FL,
+            FS_SYNC_FL,
+            FS_IMMUTABLE_FL,
+            FS_APPEND_FL,
+            FS_NODUMP_FL,
+            FS_NOATIME_FL,
+            FS_ENCRYPT_FL,
+            FS_VERITY_FL,
+            FS_CASEFOLD_FL,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());

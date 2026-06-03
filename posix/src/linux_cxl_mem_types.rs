@@ -94,9 +94,12 @@ mod tests {
     #[test]
     fn test_interleave_powers_of_two() {
         let sizes = [
-            CXL_INTERLEAVE_256B, CXL_INTERLEAVE_512B,
-            CXL_INTERLEAVE_1K, CXL_INTERLEAVE_2K,
-            CXL_INTERLEAVE_4K, CXL_INTERLEAVE_8K,
+            CXL_INTERLEAVE_256B,
+            CXL_INTERLEAVE_512B,
+            CXL_INTERLEAVE_1K,
+            CXL_INTERLEAVE_2K,
+            CXL_INTERLEAVE_4K,
+            CXL_INTERLEAVE_8K,
             CXL_INTERLEAVE_16K,
         ];
         for s in sizes {

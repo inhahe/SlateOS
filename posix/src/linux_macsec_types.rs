@@ -67,8 +67,10 @@ mod tests {
     #[test]
     fn test_cipher_ids_distinct() {
         let ciphers = [
-            MACSEC_CIPHER_ID_GCM_AES_128, MACSEC_CIPHER_ID_GCM_AES_256,
-            MACSEC_CIPHER_ID_GCM_AES_XPN_128, MACSEC_CIPHER_ID_GCM_AES_XPN_256,
+            MACSEC_CIPHER_ID_GCM_AES_128,
+            MACSEC_CIPHER_ID_GCM_AES_256,
+            MACSEC_CIPHER_ID_GCM_AES_XPN_128,
+            MACSEC_CIPHER_ID_GCM_AES_XPN_256,
         ];
         for i in 0..ciphers.len() {
             for j in (i + 1)..ciphers.len() {
@@ -80,7 +82,8 @@ mod tests {
     #[test]
     fn test_validation_modes_distinct() {
         let modes = [
-            MACSEC_VALIDATE_DISABLED, MACSEC_VALIDATE_CHECK,
+            MACSEC_VALIDATE_DISABLED,
+            MACSEC_VALIDATE_CHECK,
             MACSEC_VALIDATE_STRICT,
         ];
         for i in 0..modes.len() {

@@ -75,8 +75,10 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            SEQCOUNT_TYPE_PLAIN, SEQCOUNT_TYPE_SPINLOCK,
-            SEQCOUNT_TYPE_RWLOCK, SEQCOUNT_TYPE_MUTEX,
+            SEQCOUNT_TYPE_PLAIN,
+            SEQCOUNT_TYPE_SPINLOCK,
+            SEQCOUNT_TYPE_RWLOCK,
+            SEQCOUNT_TYPE_MUTEX,
             SEQCOUNT_TYPE_WW_MUTEX,
         ];
         for i in 0..types.len() {
@@ -89,8 +91,10 @@ mod tests {
     #[test]
     fn test_ops_distinct() {
         let ops = [
-            SEQOP_READ_BEGIN, SEQOP_READ_RETRY,
-            SEQOP_WRITE_BEGIN, SEQOP_WRITE_END,
+            SEQOP_READ_BEGIN,
+            SEQOP_READ_RETRY,
+            SEQOP_WRITE_BEGIN,
+            SEQOP_WRITE_END,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

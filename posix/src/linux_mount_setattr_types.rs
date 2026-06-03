@@ -66,10 +66,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            MOUNT_SETATTR_RDONLY, MOUNT_SETATTR_NOSUID,
-            MOUNT_SETATTR_NODEV, MOUNT_SETATTR_NOEXEC,
-            MOUNT_SETATTR_NOATIME, MOUNT_SETATTR_STRICTATIME,
-            MOUNT_SETATTR_NODIRATIME, MOUNT_SETATTR_IDMAP,
+            MOUNT_SETATTR_RDONLY,
+            MOUNT_SETATTR_NOSUID,
+            MOUNT_SETATTR_NODEV,
+            MOUNT_SETATTR_NOEXEC,
+            MOUNT_SETATTR_NOATIME,
+            MOUNT_SETATTR_STRICTATIME,
+            MOUNT_SETATTR_NODIRATIME,
+            MOUNT_SETATTR_IDMAP,
             MOUNT_SETATTR_NOSYMFOLLOW,
         ];
         for i in 0..attrs.len() {

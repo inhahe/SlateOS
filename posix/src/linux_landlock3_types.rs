@@ -103,14 +103,22 @@ mod tests {
     #[test]
     fn test_fs_access_power_of_two() {
         let rights: [u64; 16] = [
-            LANDLOCK_ACCESS_FS_EXECUTE, LANDLOCK_ACCESS_FS_WRITE_FILE,
-            LANDLOCK_ACCESS_FS_READ_FILE, LANDLOCK_ACCESS_FS_READ_DIR,
-            LANDLOCK_ACCESS_FS_REMOVE_DIR, LANDLOCK_ACCESS_FS_REMOVE_FILE,
-            LANDLOCK_ACCESS_FS_MAKE_CHAR, LANDLOCK_ACCESS_FS_MAKE_DIR,
-            LANDLOCK_ACCESS_FS_MAKE_REG, LANDLOCK_ACCESS_FS_MAKE_SOCK,
-            LANDLOCK_ACCESS_FS_MAKE_FIFO, LANDLOCK_ACCESS_FS_MAKE_BLOCK,
-            LANDLOCK_ACCESS_FS_MAKE_SYM, LANDLOCK_ACCESS_FS_REFER,
-            LANDLOCK_ACCESS_FS_TRUNCATE, LANDLOCK_ACCESS_FS_IOCTL_DEV,
+            LANDLOCK_ACCESS_FS_EXECUTE,
+            LANDLOCK_ACCESS_FS_WRITE_FILE,
+            LANDLOCK_ACCESS_FS_READ_FILE,
+            LANDLOCK_ACCESS_FS_READ_DIR,
+            LANDLOCK_ACCESS_FS_REMOVE_DIR,
+            LANDLOCK_ACCESS_FS_REMOVE_FILE,
+            LANDLOCK_ACCESS_FS_MAKE_CHAR,
+            LANDLOCK_ACCESS_FS_MAKE_DIR,
+            LANDLOCK_ACCESS_FS_MAKE_REG,
+            LANDLOCK_ACCESS_FS_MAKE_SOCK,
+            LANDLOCK_ACCESS_FS_MAKE_FIFO,
+            LANDLOCK_ACCESS_FS_MAKE_BLOCK,
+            LANDLOCK_ACCESS_FS_MAKE_SYM,
+            LANDLOCK_ACCESS_FS_REFER,
+            LANDLOCK_ACCESS_FS_TRUNCATE,
+            LANDLOCK_ACCESS_FS_IOCTL_DEV,
         ];
         for r in &rights {
             assert!(r.is_power_of_two(), "0x{:016x} not power of two", r);
@@ -125,6 +133,9 @@ mod tests {
 
     #[test]
     fn test_net_access_distinct() {
-        assert_ne!(LANDLOCK_ACCESS_NET_BIND_TCP, LANDLOCK_ACCESS_NET_CONNECT_TCP);
+        assert_ne!(
+            LANDLOCK_ACCESS_NET_BIND_TCP,
+            LANDLOCK_ACCESS_NET_CONNECT_TCP
+        );
     }
 }

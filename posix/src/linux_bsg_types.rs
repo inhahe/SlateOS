@@ -93,8 +93,10 @@ mod tests {
     #[test]
     fn test_sg_directions_distinct() {
         let dirs = [
-            SG_DXFER_NONE, SG_DXFER_TO_DEV,
-            SG_DXFER_FROM_DEV, SG_DXFER_TO_FROM_DEV,
+            SG_DXFER_NONE,
+            SG_DXFER_TO_DEV,
+            SG_DXFER_FROM_DEV,
+            SG_DXFER_TO_FROM_DEV,
         ];
         for i in 0..dirs.len() {
             for j in (i + 1)..dirs.len() {

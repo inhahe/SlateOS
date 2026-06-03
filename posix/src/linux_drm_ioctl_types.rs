@@ -77,11 +77,16 @@ mod tests {
     #[test]
     fn test_ioctl_numbers_distinct() {
         let nrs = [
-            DRM_IOCTL_NR_VERSION, DRM_IOCTL_NR_GET_UNIQUE,
-            DRM_IOCTL_NR_AUTH_MAGIC, DRM_IOCTL_NR_GET_CAP,
-            DRM_IOCTL_NR_SET_CLIENT_CAP, DRM_IOCTL_NR_GEM_OPEN,
-            DRM_IOCTL_NR_GEM_CLOSE, DRM_IOCTL_NR_GEM_FLINK,
-            DRM_IOCTL_NR_PRIME_HANDLE_TO_FD, DRM_IOCTL_NR_PRIME_FD_TO_HANDLE,
+            DRM_IOCTL_NR_VERSION,
+            DRM_IOCTL_NR_GET_UNIQUE,
+            DRM_IOCTL_NR_AUTH_MAGIC,
+            DRM_IOCTL_NR_GET_CAP,
+            DRM_IOCTL_NR_SET_CLIENT_CAP,
+            DRM_IOCTL_NR_GEM_OPEN,
+            DRM_IOCTL_NR_GEM_CLOSE,
+            DRM_IOCTL_NR_GEM_FLINK,
+            DRM_IOCTL_NR_PRIME_HANDLE_TO_FD,
+            DRM_IOCTL_NR_PRIME_FD_TO_HANDLE,
         ];
         for i in 0..nrs.len() {
             for j in (i + 1)..nrs.len() {
@@ -93,11 +98,16 @@ mod tests {
     #[test]
     fn test_capabilities_distinct() {
         let caps = [
-            DRM_CAP_DUMB_BUFFER, DRM_CAP_VBLANK_HIGH_CRTC,
-            DRM_CAP_PRIME, DRM_CAP_TIMESTAMP_MONOTONIC,
-            DRM_CAP_ASYNC_PAGE_FLIP, DRM_CAP_CURSOR_WIDTH,
-            DRM_CAP_CURSOR_HEIGHT, DRM_CAP_ADDFB2_MODIFIERS,
-            DRM_CAP_PAGE_FLIP_TARGET, DRM_CAP_SYNCOBJ,
+            DRM_CAP_DUMB_BUFFER,
+            DRM_CAP_VBLANK_HIGH_CRTC,
+            DRM_CAP_PRIME,
+            DRM_CAP_TIMESTAMP_MONOTONIC,
+            DRM_CAP_ASYNC_PAGE_FLIP,
+            DRM_CAP_CURSOR_WIDTH,
+            DRM_CAP_CURSOR_HEIGHT,
+            DRM_CAP_ADDFB2_MODIFIERS,
+            DRM_CAP_PAGE_FLIP_TARGET,
+            DRM_CAP_SYNCOBJ,
             DRM_CAP_SYNCOBJ_TIMELINE,
         ];
         for i in 0..caps.len() {

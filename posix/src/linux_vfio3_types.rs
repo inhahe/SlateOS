@@ -74,10 +74,14 @@ mod tests {
     #[test]
     fn test_device_flags_no_overlap() {
         let flags = [
-            VFIO_DEVICE_FLAGS_RESET, VFIO_DEVICE_FLAGS_PCI,
-            VFIO_DEVICE_FLAGS_PLATFORM, VFIO_DEVICE_FLAGS_AMBA,
-            VFIO_DEVICE_FLAGS_CCW, VFIO_DEVICE_FLAGS_AP,
-            VFIO_DEVICE_FLAGS_FSL_MC, VFIO_DEVICE_FLAGS_CAPS,
+            VFIO_DEVICE_FLAGS_RESET,
+            VFIO_DEVICE_FLAGS_PCI,
+            VFIO_DEVICE_FLAGS_PLATFORM,
+            VFIO_DEVICE_FLAGS_AMBA,
+            VFIO_DEVICE_FLAGS_CCW,
+            VFIO_DEVICE_FLAGS_AP,
+            VFIO_DEVICE_FLAGS_FSL_MC,
+            VFIO_DEVICE_FLAGS_CAPS,
             VFIO_DEVICE_FLAGS_CDX,
         ];
         for i in 0..flags.len() {
@@ -90,8 +94,10 @@ mod tests {
     #[test]
     fn test_region_flags_no_overlap() {
         let flags = [
-            VFIO_REGION_INFO_FLAG_READ, VFIO_REGION_INFO_FLAG_WRITE,
-            VFIO_REGION_INFO_FLAG_MMAP, VFIO_REGION_INFO_FLAG_CAPS,
+            VFIO_REGION_INFO_FLAG_READ,
+            VFIO_REGION_INFO_FLAG_WRITE,
+            VFIO_REGION_INFO_FLAG_MMAP,
+            VFIO_REGION_INFO_FLAG_CAPS,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -103,8 +109,10 @@ mod tests {
     #[test]
     fn test_irq_info_flags_no_overlap() {
         let flags = [
-            VFIO_IRQ_INFO_EVENTFD, VFIO_IRQ_INFO_MASKABLE,
-            VFIO_IRQ_INFO_AUTOMASKED, VFIO_IRQ_INFO_NORESIZE,
+            VFIO_IRQ_INFO_EVENTFD,
+            VFIO_IRQ_INFO_MASKABLE,
+            VFIO_IRQ_INFO_AUTOMASKED,
+            VFIO_IRQ_INFO_NORESIZE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -116,7 +124,8 @@ mod tests {
     #[test]
     fn test_irq_set_actions_no_overlap() {
         let actions = [
-            VFIO_IRQ_SET_ACTION_MASK, VFIO_IRQ_SET_ACTION_UNMASK,
+            VFIO_IRQ_SET_ACTION_MASK,
+            VFIO_IRQ_SET_ACTION_UNMASK,
             VFIO_IRQ_SET_ACTION_TRIGGER,
         ];
         for i in 0..actions.len() {

@@ -71,8 +71,10 @@ mod tests {
     #[test]
     fn test_ioring_poll_flags_powers_of_two() {
         let flags = [
-            IORING_POLL_ADD_MULTI, IORING_POLL_UPDATE_EVENTS,
-            IORING_POLL_UPDATE_USER_DATA, IORING_POLL_LEVEL,
+            IORING_POLL_ADD_MULTI,
+            IORING_POLL_UPDATE_EVENTS,
+            IORING_POLL_UPDATE_USER_DATA,
+            IORING_POLL_LEVEL,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two());

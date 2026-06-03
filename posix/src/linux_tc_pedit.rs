@@ -93,9 +93,13 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_PEDIT_UNSPEC, TCA_PEDIT_TM, TCA_PEDIT_PARMS,
-            TCA_PEDIT_PAD, TCA_PEDIT_PARMS_EX,
-            TCA_PEDIT_KEYS_EX, TCA_PEDIT_KEY_EX,
+            TCA_PEDIT_UNSPEC,
+            TCA_PEDIT_TM,
+            TCA_PEDIT_PARMS,
+            TCA_PEDIT_PAD,
+            TCA_PEDIT_PARMS_EX,
+            TCA_PEDIT_KEYS_EX,
+            TCA_PEDIT_KEY_EX,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -107,8 +111,10 @@ mod tests {
     #[test]
     fn test_ipv4_offsets_distinct() {
         let offsets = [
-            PEDIT_IP4_SRC_OFFSET, PEDIT_IP4_DST_OFFSET,
-            PEDIT_IP4_TTL_OFFSET, PEDIT_IP4_TOS_OFFSET,
+            PEDIT_IP4_SRC_OFFSET,
+            PEDIT_IP4_DST_OFFSET,
+            PEDIT_IP4_TTL_OFFSET,
+            PEDIT_IP4_TOS_OFFSET,
         ];
         for i in 0..offsets.len() {
             for j in (i + 1)..offsets.len() {

@@ -128,9 +128,15 @@ mod tests {
     #[test]
     fn test_sensor_types_distinct() {
         let types = [
-            HWMON_TYPE_CHIP, HWMON_TYPE_TEMP, HWMON_TYPE_IN,
-            HWMON_TYPE_CURR, HWMON_TYPE_POWER, HWMON_TYPE_ENERGY,
-            HWMON_TYPE_HUMIDITY, HWMON_TYPE_FAN, HWMON_TYPE_PWM,
+            HWMON_TYPE_CHIP,
+            HWMON_TYPE_TEMP,
+            HWMON_TYPE_IN,
+            HWMON_TYPE_CURR,
+            HWMON_TYPE_POWER,
+            HWMON_TYPE_ENERGY,
+            HWMON_TYPE_HUMIDITY,
+            HWMON_TYPE_FAN,
+            HWMON_TYPE_PWM,
             HWMON_TYPE_INTRUSION,
         ];
         for i in 0..types.len() {
@@ -143,10 +149,19 @@ mod tests {
     #[test]
     fn test_temp_attrs_are_powers_of_two() {
         let attrs = [
-            HWMON_T_ENABLE, HWMON_T_INPUT, HWMON_T_MIN, HWMON_T_MAX,
-            HWMON_T_CRIT, HWMON_T_CRIT_HYST, HWMON_T_EMERGENCY,
-            HWMON_T_EMERGENCY_HYST, HWMON_T_LOWEST, HWMON_T_HIGHEST,
-            HWMON_T_MIN_ALARM, HWMON_T_MAX_ALARM, HWMON_T_CRIT_ALARM,
+            HWMON_T_ENABLE,
+            HWMON_T_INPUT,
+            HWMON_T_MIN,
+            HWMON_T_MAX,
+            HWMON_T_CRIT,
+            HWMON_T_CRIT_HYST,
+            HWMON_T_EMERGENCY,
+            HWMON_T_EMERGENCY_HYST,
+            HWMON_T_LOWEST,
+            HWMON_T_HIGHEST,
+            HWMON_T_MIN_ALARM,
+            HWMON_T_MAX_ALARM,
+            HWMON_T_CRIT_ALARM,
             HWMON_T_LABEL,
         ];
         for attr in &attrs {
@@ -157,9 +172,15 @@ mod tests {
     #[test]
     fn test_fan_attrs_are_powers_of_two() {
         let attrs = [
-            HWMON_F_ENABLE, HWMON_F_INPUT, HWMON_F_MIN, HWMON_F_MAX,
-            HWMON_F_TARGET, HWMON_F_FAULT, HWMON_F_MIN_ALARM,
-            HWMON_F_MAX_ALARM, HWMON_F_LABEL,
+            HWMON_F_ENABLE,
+            HWMON_F_INPUT,
+            HWMON_F_MIN,
+            HWMON_F_MAX,
+            HWMON_F_TARGET,
+            HWMON_F_FAULT,
+            HWMON_F_MIN_ALARM,
+            HWMON_F_MAX_ALARM,
+            HWMON_F_LABEL,
         ];
         for attr in &attrs {
             assert!(attr.is_power_of_two());
@@ -169,7 +190,9 @@ mod tests {
     #[test]
     fn test_pwm_attrs_are_powers_of_two() {
         let attrs = [
-            HWMON_PWM_INPUT, HWMON_PWM_ENABLE, HWMON_PWM_FREQ,
+            HWMON_PWM_INPUT,
+            HWMON_PWM_ENABLE,
+            HWMON_PWM_FREQ,
             HWMON_PWM_AUTO_CHANNELS_TEMP,
         ];
         for attr in &attrs {
@@ -180,8 +203,13 @@ mod tests {
     #[test]
     fn test_voltage_attrs_are_powers_of_two() {
         let attrs = [
-            HWMON_I_ENABLE, HWMON_I_INPUT, HWMON_I_MIN, HWMON_I_MAX,
-            HWMON_I_LABEL, HWMON_I_MIN_ALARM, HWMON_I_MAX_ALARM,
+            HWMON_I_ENABLE,
+            HWMON_I_INPUT,
+            HWMON_I_MIN,
+            HWMON_I_MAX,
+            HWMON_I_LABEL,
+            HWMON_I_MIN_ALARM,
+            HWMON_I_MAX_ALARM,
         ];
         for attr in &attrs {
             assert!(attr.is_power_of_two());

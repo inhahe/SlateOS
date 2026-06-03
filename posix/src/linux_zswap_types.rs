@@ -74,9 +74,12 @@ mod tests {
     #[test]
     fn test_compressors_distinct() {
         let compressors = [
-            ZSWAP_COMPRESSOR_LZO, ZSWAP_COMPRESSOR_LZ4,
-            ZSWAP_COMPRESSOR_ZSTD, ZSWAP_COMPRESSOR_LZO_RLE,
-            ZSWAP_COMPRESSOR_DEFLATE, ZSWAP_COMPRESSOR_842,
+            ZSWAP_COMPRESSOR_LZO,
+            ZSWAP_COMPRESSOR_LZ4,
+            ZSWAP_COMPRESSOR_ZSTD,
+            ZSWAP_COMPRESSOR_LZO_RLE,
+            ZSWAP_COMPRESSOR_DEFLATE,
+            ZSWAP_COMPRESSOR_842,
         ];
         for i in 0..compressors.len() {
             for j in (i + 1)..compressors.len() {
@@ -87,10 +90,7 @@ mod tests {
 
     #[test]
     fn test_zpools_distinct() {
-        let pools = [
-            ZSWAP_ZPOOL_ZBUD, ZSWAP_ZPOOL_ZSMALLOC,
-            ZSWAP_ZPOOL_Z3FOLD,
-        ];
+        let pools = [ZSWAP_ZPOOL_ZBUD, ZSWAP_ZPOOL_ZSMALLOC, ZSWAP_ZPOOL_Z3FOLD];
         for i in 0..pools.len() {
             for j in (i + 1)..pools.len() {
                 assert_ne!(pools[i], pools[j]);

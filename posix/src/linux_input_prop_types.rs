@@ -45,15 +45,17 @@ mod tests {
     #[test]
     fn test_props_distinct() {
         let props = [
-            INPUT_PROP_POINTER, INPUT_PROP_DIRECT,
-            INPUT_PROP_BUTTONPAD, INPUT_PROP_SEMI_MT,
-            INPUT_PROP_TOPBUTTONPAD, INPUT_PROP_POINTING_STICK,
+            INPUT_PROP_POINTER,
+            INPUT_PROP_DIRECT,
+            INPUT_PROP_BUTTONPAD,
+            INPUT_PROP_SEMI_MT,
+            INPUT_PROP_TOPBUTTONPAD,
+            INPUT_PROP_POINTING_STICK,
             INPUT_PROP_ACCELEROMETER,
         ];
         for i in 0..props.len() {
             for j in (i + 1)..props.len() {
-                assert_ne!(props[i], props[j],
-                    "props {} and {} collide", i, j);
+                assert_ne!(props[i], props[j], "props {} and {} collide", i, j);
             }
         }
     }
@@ -72,14 +74,20 @@ mod tests {
     #[test]
     fn test_all_within_max() {
         let props = [
-            INPUT_PROP_POINTER, INPUT_PROP_DIRECT,
-            INPUT_PROP_BUTTONPAD, INPUT_PROP_SEMI_MT,
-            INPUT_PROP_TOPBUTTONPAD, INPUT_PROP_POINTING_STICK,
+            INPUT_PROP_POINTER,
+            INPUT_PROP_DIRECT,
+            INPUT_PROP_BUTTONPAD,
+            INPUT_PROP_SEMI_MT,
+            INPUT_PROP_TOPBUTTONPAD,
+            INPUT_PROP_POINTING_STICK,
             INPUT_PROP_ACCELEROMETER,
         ];
         for &p in &props {
-            assert!(p <= INPUT_PROP_MAX,
-                "prop 0x{:02X} exceeds INPUT_PROP_MAX", p);
+            assert!(
+                p <= INPUT_PROP_MAX,
+                "prop 0x{:02X} exceeds INPUT_PROP_MAX",
+                p
+            );
         }
     }
 

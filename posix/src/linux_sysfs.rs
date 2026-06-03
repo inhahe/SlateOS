@@ -72,8 +72,11 @@ mod tests {
     #[test]
     fn test_permissions_distinct() {
         let perms = [
-            SYSFS_PERM_RONLY, SYSFS_PERM_RW, SYSFS_PERM_WONLY,
-            SYSFS_PERM_RONLY_OWNER, SYSFS_PERM_RW_OWNER,
+            SYSFS_PERM_RONLY,
+            SYSFS_PERM_RW,
+            SYSFS_PERM_WONLY,
+            SYSFS_PERM_RONLY_OWNER,
+            SYSFS_PERM_RW_OWNER,
         ];
         for i in 0..perms.len() {
             for j in (i + 1)..perms.len() {
@@ -103,9 +106,16 @@ mod tests {
     #[test]
     fn test_paths_distinct() {
         let paths = [
-            SYSFS_MOUNT, SYSFS_BLOCK, SYSFS_BUS, SYSFS_CLASS,
-            SYSFS_DEVICES, SYSFS_FIRMWARE, SYSFS_KERNEL,
-            SYSFS_MODULE, SYSFS_POWER, SYSFS_FS,
+            SYSFS_MOUNT,
+            SYSFS_BLOCK,
+            SYSFS_BUS,
+            SYSFS_CLASS,
+            SYSFS_DEVICES,
+            SYSFS_FIRMWARE,
+            SYSFS_KERNEL,
+            SYSFS_MODULE,
+            SYSFS_POWER,
+            SYSFS_FS,
         ];
         for i in 0..paths.len() {
             for j in (i + 1)..paths.len() {
@@ -117,9 +127,16 @@ mod tests {
     #[test]
     fn test_all_paths_start_with_sys() {
         let paths = [
-            SYSFS_MOUNT, SYSFS_BLOCK, SYSFS_BUS, SYSFS_CLASS,
-            SYSFS_DEVICES, SYSFS_FIRMWARE, SYSFS_KERNEL,
-            SYSFS_MODULE, SYSFS_POWER, SYSFS_FS,
+            SYSFS_MOUNT,
+            SYSFS_BLOCK,
+            SYSFS_BUS,
+            SYSFS_CLASS,
+            SYSFS_DEVICES,
+            SYSFS_FIRMWARE,
+            SYSFS_KERNEL,
+            SYSFS_MODULE,
+            SYSFS_POWER,
+            SYSFS_FS,
         ];
         for path in &paths {
             assert!(path.starts_with("/sys"), "{}", path);

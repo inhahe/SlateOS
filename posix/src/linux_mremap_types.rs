@@ -69,8 +69,14 @@ mod tests {
     #[test]
     fn test_map_flags_distinct() {
         let flags = [
-            MAP_SHARED, MAP_PRIVATE, MAP_FIXED, MAP_ANONYMOUS,
-            MAP_GROWSDOWN, MAP_LOCKED, MAP_NORESERVE, MAP_POPULATE,
+            MAP_SHARED,
+            MAP_PRIVATE,
+            MAP_FIXED,
+            MAP_ANONYMOUS,
+            MAP_GROWSDOWN,
+            MAP_LOCKED,
+            MAP_NORESERVE,
+            MAP_POPULATE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

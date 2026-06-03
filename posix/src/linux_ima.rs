@@ -90,9 +90,14 @@ mod tests {
     #[test]
     fn test_hooks_distinct() {
         let hooks = [
-            IMA_FILE_CHECK, IMA_MMAP_CHECK, IMA_BPRM_CHECK,
-            IMA_MODULE_CHECK, IMA_FIRMWARE_CHECK, IMA_POLICY_CHECK,
-            IMA_KEXEC_CHECK, IMA_CERT_CHECK,
+            IMA_FILE_CHECK,
+            IMA_MMAP_CHECK,
+            IMA_BPRM_CHECK,
+            IMA_MODULE_CHECK,
+            IMA_FIRMWARE_CHECK,
+            IMA_POLICY_CHECK,
+            IMA_KEXEC_CHECK,
+            IMA_CERT_CHECK,
         ];
         for i in 0..hooks.len() {
             for j in (i + 1)..hooks.len() {
@@ -104,8 +109,12 @@ mod tests {
     #[test]
     fn test_conditions_distinct() {
         let conds = [
-            IMA_COND_UID, IMA_COND_EUID, IMA_COND_FOWNER,
-            IMA_COND_FSMAGIC, IMA_COND_FSUUID, IMA_COND_MASK,
+            IMA_COND_UID,
+            IMA_COND_EUID,
+            IMA_COND_FOWNER,
+            IMA_COND_FSMAGIC,
+            IMA_COND_FSUUID,
+            IMA_COND_MASK,
         ];
         for i in 0..conds.len() {
             for j in (i + 1)..conds.len() {
@@ -117,8 +126,10 @@ mod tests {
     #[test]
     fn test_templates_distinct() {
         let tpls = [
-            IMA_TEMPLATE_IMA, IMA_TEMPLATE_IMA_NG,
-            IMA_TEMPLATE_IMA_SIG, IMA_TEMPLATE_IMA_BUF,
+            IMA_TEMPLATE_IMA,
+            IMA_TEMPLATE_IMA_NG,
+            IMA_TEMPLATE_IMA_SIG,
+            IMA_TEMPLATE_IMA_BUF,
         ];
         for i in 0..tpls.len() {
             for j in (i + 1)..tpls.len() {

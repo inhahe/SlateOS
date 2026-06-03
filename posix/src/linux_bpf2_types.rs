@@ -121,12 +121,19 @@ mod tests {
     #[test]
     fn test_map_types_distinct() {
         let types = [
-            BPF_MAP_TYPE_UNSPEC, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_ARRAY,
-            BPF_MAP_TYPE_PROG_ARRAY, BPF_MAP_TYPE_PERF_EVENT_ARRAY,
-            BPF_MAP_TYPE_PERCPU_HASH, BPF_MAP_TYPE_PERCPU_ARRAY,
-            BPF_MAP_TYPE_STACK_TRACE, BPF_MAP_TYPE_CGROUP_ARRAY,
-            BPF_MAP_TYPE_LRU_HASH, BPF_MAP_TYPE_LPM_TRIE,
-            BPF_MAP_TYPE_RINGBUF, BPF_MAP_TYPE_BLOOM_FILTER,
+            BPF_MAP_TYPE_UNSPEC,
+            BPF_MAP_TYPE_HASH,
+            BPF_MAP_TYPE_ARRAY,
+            BPF_MAP_TYPE_PROG_ARRAY,
+            BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+            BPF_MAP_TYPE_PERCPU_HASH,
+            BPF_MAP_TYPE_PERCPU_ARRAY,
+            BPF_MAP_TYPE_STACK_TRACE,
+            BPF_MAP_TYPE_CGROUP_ARRAY,
+            BPF_MAP_TYPE_LRU_HASH,
+            BPF_MAP_TYPE_LPM_TRIE,
+            BPF_MAP_TYPE_RINGBUF,
+            BPF_MAP_TYPE_BLOOM_FILTER,
             BPF_MAP_TYPE_ARENA,
         ];
         for i in 0..types.len() {

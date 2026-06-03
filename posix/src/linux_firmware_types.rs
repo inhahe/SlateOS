@@ -74,8 +74,11 @@ mod tests {
     #[test]
     fn test_loading_flags_no_overlap() {
         let flags = [
-            FW_OPT_OPTIONAL, FW_OPT_NOCACHE,
-            FW_OPT_UEVENT, FW_OPT_NO_UEVENT, FW_OPT_PARTIAL,
+            FW_OPT_OPTIONAL,
+            FW_OPT_NOCACHE,
+            FW_OPT_UEVENT,
+            FW_OPT_NO_UEVENT,
+            FW_OPT_PARTIAL,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -88,8 +91,10 @@ mod tests {
     #[test]
     fn test_upload_status_distinct() {
         let states = [
-            FW_UPLOAD_STATUS_IDLE, FW_UPLOAD_STATUS_RECEIVING,
-            FW_UPLOAD_STATUS_PREPARING, FW_UPLOAD_STATUS_TRANSFERRING,
+            FW_UPLOAD_STATUS_IDLE,
+            FW_UPLOAD_STATUS_RECEIVING,
+            FW_UPLOAD_STATUS_PREPARING,
+            FW_UPLOAD_STATUS_TRANSFERRING,
             FW_UPLOAD_STATUS_PROGRAMMING,
         ];
         for i in 0..states.len() {
@@ -102,9 +107,12 @@ mod tests {
     #[test]
     fn test_upload_errors_distinct() {
         let errs = [
-            FW_UPLOAD_ERR_NONE, FW_UPLOAD_ERR_HW_ERROR,
-            FW_UPLOAD_ERR_TIMEOUT, FW_UPLOAD_ERR_CANCELED,
-            FW_UPLOAD_ERR_BUSY, FW_UPLOAD_ERR_INVALID_SIZE,
+            FW_UPLOAD_ERR_NONE,
+            FW_UPLOAD_ERR_HW_ERROR,
+            FW_UPLOAD_ERR_TIMEOUT,
+            FW_UPLOAD_ERR_CANCELED,
+            FW_UPLOAD_ERR_BUSY,
+            FW_UPLOAD_ERR_INVALID_SIZE,
             FW_UPLOAD_ERR_RW_ERROR,
         ];
         for i in 0..errs.len() {

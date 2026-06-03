@@ -69,7 +69,8 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            RPMSG_STATE_REGISTERED, RPMSG_STATE_CONNECTED,
+            RPMSG_STATE_REGISTERED,
+            RPMSG_STATE_CONNECTED,
             RPMSG_STATE_DISCONNECTED,
         ];
         for i in 0..states.len() {
@@ -96,7 +97,8 @@ mod tests {
     #[test]
     fn test_transport_types_distinct() {
         let types = [
-            RPMSG_TRANSPORT_VIRTIO, RPMSG_TRANSPORT_GLINK,
+            RPMSG_TRANSPORT_VIRTIO,
+            RPMSG_TRANSPORT_GLINK,
             RPMSG_TRANSPORT_SMD,
         ];
         for i in 0..types.len() {

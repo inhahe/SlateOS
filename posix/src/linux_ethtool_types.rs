@@ -96,9 +96,15 @@ mod tests {
     #[test]
     fn test_speeds_increasing() {
         let speeds = [
-            ETHTOOL_SPEED_10, ETHTOOL_SPEED_100, ETHTOOL_SPEED_1000,
-            ETHTOOL_SPEED_2500, ETHTOOL_SPEED_5000, ETHTOOL_SPEED_10000,
-            ETHTOOL_SPEED_25000, ETHTOOL_SPEED_50000, ETHTOOL_SPEED_100000,
+            ETHTOOL_SPEED_10,
+            ETHTOOL_SPEED_100,
+            ETHTOOL_SPEED_1000,
+            ETHTOOL_SPEED_2500,
+            ETHTOOL_SPEED_5000,
+            ETHTOOL_SPEED_10000,
+            ETHTOOL_SPEED_25000,
+            ETHTOOL_SPEED_50000,
+            ETHTOOL_SPEED_100000,
         ];
         for i in 1..speeds.len() {
             assert!(speeds[i] > speeds[i - 1]);
@@ -108,9 +114,15 @@ mod tests {
     #[test]
     fn test_features_no_overlap() {
         let feats = [
-            ETHTOOL_F_RX_CSUM, ETHTOOL_F_TX_CSUM, ETHTOOL_F_TSO,
-            ETHTOOL_F_GSO, ETHTOOL_F_GRO, ETHTOOL_F_LRO,
-            ETHTOOL_F_SG, ETHTOOL_F_TX_VLAN, ETHTOOL_F_RX_VLAN,
+            ETHTOOL_F_RX_CSUM,
+            ETHTOOL_F_TX_CSUM,
+            ETHTOOL_F_TSO,
+            ETHTOOL_F_GSO,
+            ETHTOOL_F_GRO,
+            ETHTOOL_F_LRO,
+            ETHTOOL_F_SG,
+            ETHTOOL_F_TX_VLAN,
+            ETHTOOL_F_RX_VLAN,
             ETHTOOL_F_RXHASH,
         ];
         for i in 0..feats.len() {
@@ -123,8 +135,13 @@ mod tests {
     #[test]
     fn test_wol_modes_no_overlap() {
         let modes = [
-            WAKE_PHY, WAKE_UCAST, WAKE_MCAST, WAKE_BCAST,
-            WAKE_ARP, WAKE_MAGIC, WAKE_FILTER,
+            WAKE_PHY,
+            WAKE_UCAST,
+            WAKE_MCAST,
+            WAKE_BCAST,
+            WAKE_ARP,
+            WAKE_MAGIC,
+            WAKE_FILTER,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -136,8 +153,10 @@ mod tests {
     #[test]
     fn test_ring_ids_distinct() {
         let rings = [
-            ETHTOOL_RING_RX, ETHTOOL_RING_TX,
-            ETHTOOL_RING_RX_MINI, ETHTOOL_RING_RX_JUMBO,
+            ETHTOOL_RING_RX,
+            ETHTOOL_RING_TX,
+            ETHTOOL_RING_RX_MINI,
+            ETHTOOL_RING_RX_JUMBO,
         ];
         for i in 0..rings.len() {
             for j in (i + 1)..rings.len() {

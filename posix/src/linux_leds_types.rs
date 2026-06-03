@@ -81,10 +81,14 @@ mod tests {
     #[test]
     fn test_trigger_names_distinct() {
         let triggers = [
-            LED_TRIGGER_NONE, LED_TRIGGER_DEFAULT_ON,
-            LED_TRIGGER_HEARTBEAT, LED_TRIGGER_DISK_ACTIVITY,
-            LED_TRIGGER_TIMER, LED_TRIGGER_NETDEV,
-            LED_TRIGGER_PANIC, LED_TRIGGER_CPU,
+            LED_TRIGGER_NONE,
+            LED_TRIGGER_DEFAULT_ON,
+            LED_TRIGGER_HEARTBEAT,
+            LED_TRIGGER_DISK_ACTIVITY,
+            LED_TRIGGER_TIMER,
+            LED_TRIGGER_NETDEV,
+            LED_TRIGGER_PANIC,
+            LED_TRIGGER_CPU,
             LED_TRIGGER_BACKLIGHT,
         ];
         for i in 0..triggers.len() {
@@ -97,8 +101,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            LED_HW_PLUGGABLE, LED_PANIC_INDICATOR,
-            LED_BRIGHT_HW_CHANGED, LED_RETAIN_AT_SHUTDOWN,
+            LED_HW_PLUGGABLE,
+            LED_PANIC_INDICATOR,
+            LED_BRIGHT_HW_CHANGED,
+            LED_RETAIN_AT_SHUTDOWN,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

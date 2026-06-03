@@ -77,10 +77,15 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            SMC_CMD_UNSPEC, SMC_CMD_GET_LGR_SMCR, SMC_CMD_GET_LGR_SMCD,
-            SMC_CMD_GET_CONN_SMCR, SMC_CMD_GET_CONN_SMCD,
-            SMC_CMD_GET_PNET, SMC_CMD_GET_DEV_SMCR,
-            SMC_CMD_GET_DEV_SMCD, SMC_CMD_GET_STATS,
+            SMC_CMD_UNSPEC,
+            SMC_CMD_GET_LGR_SMCR,
+            SMC_CMD_GET_LGR_SMCD,
+            SMC_CMD_GET_CONN_SMCR,
+            SMC_CMD_GET_CONN_SMCD,
+            SMC_CMD_GET_PNET,
+            SMC_CMD_GET_DEV_SMCR,
+            SMC_CMD_GET_DEV_SMCD,
+            SMC_CMD_GET_STATS,
             SMC_CMD_GET_FBACK_STATS,
         ];
         for i in 0..cmds.len() {
@@ -103,8 +108,10 @@ mod tests {
     #[test]
     fn test_clc_types_distinct() {
         let clcs = [
-            SMC_CLC_PROPOSAL, SMC_CLC_ACCEPT,
-            SMC_CLC_CONFIRM, SMC_CLC_DECLINE,
+            SMC_CLC_PROPOSAL,
+            SMC_CLC_ACCEPT,
+            SMC_CLC_CONFIRM,
+            SMC_CLC_DECLINE,
         ];
         for i in 0..clcs.len() {
             for j in (i + 1)..clcs.len() {
@@ -116,8 +123,10 @@ mod tests {
     #[test]
     fn test_fback_reasons_distinct() {
         let reasons = [
-            SMC_FBACK_RSN_NONE, SMC_FBACK_RSN_PEER_DECLINE,
-            SMC_FBACK_RSN_NO_RDMA_DEV, SMC_FBACK_RSN_NO_ISM_DEV,
+            SMC_FBACK_RSN_NONE,
+            SMC_FBACK_RSN_PEER_DECLINE,
+            SMC_FBACK_RSN_NO_RDMA_DEV,
+            SMC_FBACK_RSN_NO_ISM_DEV,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {

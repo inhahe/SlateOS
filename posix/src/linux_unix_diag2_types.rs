@@ -56,9 +56,15 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            UNIX_DIAG_NONE, UNIX_DIAG_NAME, UNIX_DIAG_VFS,
-            UNIX_DIAG_PEER, UNIX_DIAG_ICONS, UNIX_DIAG_RQLEN,
-            UNIX_DIAG_MEMINFO, UNIX_DIAG_SHUTDOWN, UNIX_DIAG_UID,
+            UNIX_DIAG_NONE,
+            UNIX_DIAG_NAME,
+            UNIX_DIAG_VFS,
+            UNIX_DIAG_PEER,
+            UNIX_DIAG_ICONS,
+            UNIX_DIAG_RQLEN,
+            UNIX_DIAG_MEMINFO,
+            UNIX_DIAG_SHUTDOWN,
+            UNIX_DIAG_UID,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -70,8 +76,12 @@ mod tests {
     #[test]
     fn test_show_flags_no_overlap() {
         let flags = [
-            UDIAG_SHOW_NAME, UDIAG_SHOW_VFS, UDIAG_SHOW_PEER,
-            UDIAG_SHOW_ICONS, UDIAG_SHOW_RQLEN, UDIAG_SHOW_MEMINFO,
+            UDIAG_SHOW_NAME,
+            UDIAG_SHOW_VFS,
+            UDIAG_SHOW_PEER,
+            UDIAG_SHOW_ICONS,
+            UDIAG_SHOW_RQLEN,
+            UDIAG_SHOW_MEMINFO,
             UDIAG_SHOW_UID,
         ];
         for i in 0..flags.len() {

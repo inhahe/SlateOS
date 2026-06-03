@@ -69,11 +69,19 @@ mod tests {
     #[test]
     fn test_common_magics_distinct() {
         let magics = [
-            EXT4_SUPER_MAGIC, XFS_SUPER_MAGIC, BTRFS_SUPER_MAGIC,
-            MSDOS_SUPER_MAGIC, NTFS_SUPER_MAGIC, NFS_SUPER_MAGIC,
-            CIFS_SUPER_MAGIC, ISOFS_SUPER_MAGIC, SQUASHFS_SUPER_MAGIC,
-            FUSE_SUPER_MAGIC, OVERLAYFS_SUPER_MAGIC,
-            F2FS_SUPER_MAGIC, ZFS_SUPER_MAGIC,
+            EXT4_SUPER_MAGIC,
+            XFS_SUPER_MAGIC,
+            BTRFS_SUPER_MAGIC,
+            MSDOS_SUPER_MAGIC,
+            NTFS_SUPER_MAGIC,
+            NFS_SUPER_MAGIC,
+            CIFS_SUPER_MAGIC,
+            ISOFS_SUPER_MAGIC,
+            SQUASHFS_SUPER_MAGIC,
+            FUSE_SUPER_MAGIC,
+            OVERLAYFS_SUPER_MAGIC,
+            F2FS_SUPER_MAGIC,
+            ZFS_SUPER_MAGIC,
         ];
         for i in 0..magics.len() {
             for j in (i + 1)..magics.len() {
@@ -85,10 +93,15 @@ mod tests {
     #[test]
     fn test_virtual_magics_distinct() {
         let magics = [
-            PROC_SUPER_MAGIC, SYSFS_MAGIC, DEVPTS_SUPER_MAGIC,
-            CGROUP2_SUPER_MAGIC, CGROUP_SUPER_MAGIC,
-            BPF_FS_MAGIC, SECURITYFS_MAGIC,
-            PIPEFS_MAGIC, SOCKFS_MAGIC,
+            PROC_SUPER_MAGIC,
+            SYSFS_MAGIC,
+            DEVPTS_SUPER_MAGIC,
+            CGROUP2_SUPER_MAGIC,
+            CGROUP_SUPER_MAGIC,
+            BPF_FS_MAGIC,
+            SECURITYFS_MAGIC,
+            PIPEFS_MAGIC,
+            SOCKFS_MAGIC,
         ];
         for i in 0..magics.len() {
             for j in (i + 1)..magics.len() {

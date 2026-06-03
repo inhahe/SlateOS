@@ -91,9 +91,14 @@ mod tests {
     #[test]
     fn test_packet_types_distinct() {
         let types = [
-            PACKET_HOST, PACKET_BROADCAST, PACKET_MULTICAST,
-            PACKET_OTHERHOST, PACKET_OUTGOING, PACKET_LOOPBACK,
-            PACKET_USER, PACKET_KERNEL,
+            PACKET_HOST,
+            PACKET_BROADCAST,
+            PACKET_MULTICAST,
+            PACKET_OTHERHOST,
+            PACKET_OUTGOING,
+            PACKET_LOOPBACK,
+            PACKET_USER,
+            PACKET_KERNEL,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -105,8 +110,10 @@ mod tests {
     #[test]
     fn test_checksum_types_distinct() {
         let types = [
-            CHECKSUM_NONE, CHECKSUM_UNNECESSARY,
-            CHECKSUM_COMPLETE, CHECKSUM_PARTIAL,
+            CHECKSUM_NONE,
+            CHECKSUM_UNNECESSARY,
+            CHECKSUM_COMPLETE,
+            CHECKSUM_PARTIAL,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -118,8 +125,12 @@ mod tests {
     #[test]
     fn test_gso_types_no_overlap() {
         let types = [
-            SKB_GSO_TCPV4, SKB_GSO_UDP, SKB_GSO_TCP_ECN,
-            SKB_GSO_TCPV6, SKB_GSO_UDP_TUNNEL, SKB_GSO_GRE,
+            SKB_GSO_TCPV4,
+            SKB_GSO_UDP,
+            SKB_GSO_TCP_ECN,
+            SKB_GSO_TCPV6,
+            SKB_GSO_UDP_TUNNEL,
+            SKB_GSO_GRE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

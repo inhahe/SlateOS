@@ -198,13 +198,22 @@ mod tests {
     #[test]
     fn test_memory_types_distinct() {
         let types = [
-            EFI_RESERVED_TYPE, EFI_LOADER_CODE, EFI_LOADER_DATA,
-            EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA,
-            EFI_RUNTIME_SERVICES_CODE, EFI_RUNTIME_SERVICES_DATA,
-            EFI_CONVENTIONAL_MEMORY, EFI_UNUSABLE_MEMORY,
-            EFI_ACPI_RECLAIM_MEMORY, EFI_ACPI_MEMORY_NVS,
-            EFI_MEMORY_MAPPED_IO, EFI_MEMORY_MAPPED_IO_PORT_SPACE,
-            EFI_PAL_CODE, EFI_PERSISTENT_MEMORY, EFI_UNACCEPTED_MEMORY,
+            EFI_RESERVED_TYPE,
+            EFI_LOADER_CODE,
+            EFI_LOADER_DATA,
+            EFI_BOOT_SERVICES_CODE,
+            EFI_BOOT_SERVICES_DATA,
+            EFI_RUNTIME_SERVICES_CODE,
+            EFI_RUNTIME_SERVICES_DATA,
+            EFI_CONVENTIONAL_MEMORY,
+            EFI_UNUSABLE_MEMORY,
+            EFI_ACPI_RECLAIM_MEMORY,
+            EFI_ACPI_MEMORY_NVS,
+            EFI_MEMORY_MAPPED_IO,
+            EFI_MEMORY_MAPPED_IO_PORT_SPACE,
+            EFI_PAL_CODE,
+            EFI_PERSISTENT_MEMORY,
+            EFI_UNACCEPTED_MEMORY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -221,8 +230,11 @@ mod tests {
     #[test]
     fn test_memory_cache_attrs_powers_of_two() {
         let attrs: [u64; 5] = [
-            EFI_MEMORY_UC, EFI_MEMORY_WC, EFI_MEMORY_WT,
-            EFI_MEMORY_WB, EFI_MEMORY_UCE,
+            EFI_MEMORY_UC,
+            EFI_MEMORY_WC,
+            EFI_MEMORY_WT,
+            EFI_MEMORY_WB,
+            EFI_MEMORY_UCE,
         ];
         for attr in &attrs {
             assert!(attr.is_power_of_two(), "0x{:x}", attr);
@@ -232,8 +244,11 @@ mod tests {
     #[test]
     fn test_memory_prot_attrs_powers_of_two() {
         let attrs: [u64; 5] = [
-            EFI_MEMORY_WP, EFI_MEMORY_RP, EFI_MEMORY_XP,
-            EFI_MEMORY_NV, EFI_MEMORY_MORE_RELIABLE,
+            EFI_MEMORY_WP,
+            EFI_MEMORY_RP,
+            EFI_MEMORY_XP,
+            EFI_MEMORY_NV,
+            EFI_MEMORY_MORE_RELIABLE,
         ];
         for attr in &attrs {
             assert!(attr.is_power_of_two(), "0x{:x}", attr);
@@ -253,10 +268,14 @@ mod tests {
     #[test]
     fn test_error_codes_have_high_bit() {
         let errors = [
-            EFI_INVALID_PARAMETER, EFI_UNSUPPORTED,
-            EFI_BUFFER_TOO_SMALL, EFI_NOT_READY,
-            EFI_DEVICE_ERROR, EFI_WRITE_PROTECTED,
-            EFI_OUT_OF_RESOURCES, EFI_NOT_FOUND,
+            EFI_INVALID_PARAMETER,
+            EFI_UNSUPPORTED,
+            EFI_BUFFER_TOO_SMALL,
+            EFI_NOT_READY,
+            EFI_DEVICE_ERROR,
+            EFI_WRITE_PROTECTED,
+            EFI_OUT_OF_RESOURCES,
+            EFI_NOT_FOUND,
             EFI_SECURITY_VIOLATION,
         ];
         for err in &errors {
@@ -267,10 +286,14 @@ mod tests {
     #[test]
     fn test_error_codes_distinct() {
         let errors = [
-            EFI_INVALID_PARAMETER, EFI_UNSUPPORTED,
-            EFI_BUFFER_TOO_SMALL, EFI_NOT_READY,
-            EFI_DEVICE_ERROR, EFI_WRITE_PROTECTED,
-            EFI_OUT_OF_RESOURCES, EFI_NOT_FOUND,
+            EFI_INVALID_PARAMETER,
+            EFI_UNSUPPORTED,
+            EFI_BUFFER_TOO_SMALL,
+            EFI_NOT_READY,
+            EFI_DEVICE_ERROR,
+            EFI_WRITE_PROTECTED,
+            EFI_OUT_OF_RESOURCES,
+            EFI_NOT_FOUND,
             EFI_SECURITY_VIOLATION,
         ];
         for i in 0..errors.len() {
@@ -283,8 +306,10 @@ mod tests {
     #[test]
     fn test_reset_types_distinct() {
         let types = [
-            EFI_RESET_COLD, EFI_RESET_WARM,
-            EFI_RESET_SHUTDOWN, EFI_RESET_PLATFORM_SPECIFIC,
+            EFI_RESET_COLD,
+            EFI_RESET_WARM,
+            EFI_RESET_SHUTDOWN,
+            EFI_RESET_PLATFORM_SPECIFIC,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

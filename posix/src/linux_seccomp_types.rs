@@ -75,7 +75,11 @@ mod tests {
 
     #[test]
     fn test_modes_distinct() {
-        let modes = [SECCOMP_MODE_DISABLED, SECCOMP_MODE_STRICT, SECCOMP_MODE_FILTER];
+        let modes = [
+            SECCOMP_MODE_DISABLED,
+            SECCOMP_MODE_STRICT,
+            SECCOMP_MODE_FILTER,
+        ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
                 assert_ne!(modes[i], modes[j]);
@@ -86,9 +90,13 @@ mod tests {
     #[test]
     fn test_ret_actions_distinct() {
         let actions = [
-            SECCOMP_RET_KILL_THREAD, SECCOMP_RET_KILL_PROCESS,
-            SECCOMP_RET_TRAP, SECCOMP_RET_ERRNO,
-            SECCOMP_RET_USER_NOTIF, SECCOMP_RET_LOG, SECCOMP_RET_ALLOW,
+            SECCOMP_RET_KILL_THREAD,
+            SECCOMP_RET_KILL_PROCESS,
+            SECCOMP_RET_TRAP,
+            SECCOMP_RET_ERRNO,
+            SECCOMP_RET_USER_NOTIF,
+            SECCOMP_RET_LOG,
+            SECCOMP_RET_ALLOW,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -100,8 +108,10 @@ mod tests {
     #[test]
     fn test_operations_distinct() {
         let ops = [
-            SECCOMP_SET_MODE_STRICT, SECCOMP_SET_MODE_FILTER,
-            SECCOMP_GET_ACTION_AVAIL, SECCOMP_GET_NOTIF_SIZES,
+            SECCOMP_SET_MODE_STRICT,
+            SECCOMP_SET_MODE_FILTER,
+            SECCOMP_GET_ACTION_AVAIL,
+            SECCOMP_GET_NOTIF_SIZES,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -113,7 +123,8 @@ mod tests {
     #[test]
     fn test_filter_flags_no_overlap() {
         let flags = [
-            SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_FILTER_FLAG_LOG,
+            SECCOMP_FILTER_FLAG_TSYNC,
+            SECCOMP_FILTER_FLAG_LOG,
             SECCOMP_FILTER_FLAG_SPEC_ALLOW,
             SECCOMP_FILTER_FLAG_NEW_LISTENER,
             SECCOMP_FILTER_FLAG_TSYNC_ESRCH,

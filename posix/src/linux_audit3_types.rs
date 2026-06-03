@@ -112,9 +112,12 @@ mod tests {
     #[test]
     fn test_filter_lists_distinct() {
         let lists = [
-            AUDIT_FILTER_USER, AUDIT_FILTER_TASK,
-            AUDIT_FILTER_ENTRY, AUDIT_FILTER_WATCH,
-            AUDIT_FILTER_EXIT, AUDIT_FILTER_FS,
+            AUDIT_FILTER_USER,
+            AUDIT_FILTER_TASK,
+            AUDIT_FILTER_ENTRY,
+            AUDIT_FILTER_WATCH,
+            AUDIT_FILTER_EXIT,
+            AUDIT_FILTER_FS,
         ];
         for i in 0..lists.len() {
             for j in (i + 1)..lists.len() {
@@ -133,9 +136,18 @@ mod tests {
     #[test]
     fn test_fields_distinct() {
         let fields = [
-            AUDIT_PID, AUDIT_UID, AUDIT_EUID, AUDIT_SUID,
-            AUDIT_FSUID, AUDIT_GID, AUDIT_EGID, AUDIT_SGID,
-            AUDIT_FSGID, AUDIT_LOGINUID, AUDIT_PERS, AUDIT_ARCH,
+            AUDIT_PID,
+            AUDIT_UID,
+            AUDIT_EUID,
+            AUDIT_SUID,
+            AUDIT_FSUID,
+            AUDIT_GID,
+            AUDIT_EGID,
+            AUDIT_SGID,
+            AUDIT_FSGID,
+            AUDIT_LOGINUID,
+            AUDIT_PERS,
+            AUDIT_ARCH,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {
@@ -147,9 +159,12 @@ mod tests {
     #[test]
     fn test_operators_distinct() {
         let ops = [
-            AUDIT_LESS_THAN, AUDIT_GREATER_THAN,
-            AUDIT_NOT_EQUAL, AUDIT_EQUAL,
-            AUDIT_BIT_TEST, AUDIT_LESS_THAN_OR_EQUAL,
+            AUDIT_LESS_THAN,
+            AUDIT_GREATER_THAN,
+            AUDIT_NOT_EQUAL,
+            AUDIT_EQUAL,
+            AUDIT_BIT_TEST,
+            AUDIT_LESS_THAN_OR_EQUAL,
             AUDIT_GREATER_THAN_OR_EQUAL,
         ];
         for i in 0..ops.len() {

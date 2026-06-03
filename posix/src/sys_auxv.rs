@@ -112,12 +112,32 @@ mod tests {
     #[test]
     fn test_at_constants_distinct() {
         let consts = [
-            AT_NULL, AT_IGNORE, AT_EXECFD, AT_PHDR, AT_PHENT,
-            AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY,
-            AT_UID, AT_EUID, AT_GID, AT_EGID, AT_PLATFORM,
-            AT_HWCAP, AT_CLKTCK, AT_FPUCW, AT_DCACHEBSIZE,
-            AT_ICACHEBSIZE, AT_UCACHEBSIZE, AT_SECURE,
-            AT_RANDOM, AT_HWCAP2, AT_EXECFN, AT_SYSINFO_EHDR,
+            AT_NULL,
+            AT_IGNORE,
+            AT_EXECFD,
+            AT_PHDR,
+            AT_PHENT,
+            AT_PHNUM,
+            AT_PAGESZ,
+            AT_BASE,
+            AT_FLAGS,
+            AT_ENTRY,
+            AT_UID,
+            AT_EUID,
+            AT_GID,
+            AT_EGID,
+            AT_PLATFORM,
+            AT_HWCAP,
+            AT_CLKTCK,
+            AT_FPUCW,
+            AT_DCACHEBSIZE,
+            AT_ICACHEBSIZE,
+            AT_UCACHEBSIZE,
+            AT_SECURE,
+            AT_RANDOM,
+            AT_HWCAP2,
+            AT_EXECFN,
+            AT_SYSINFO_EHDR,
         ];
         for i in 0..consts.len() {
             for j in (i + 1)..consts.len() {
@@ -163,7 +183,10 @@ mod tests {
         // SAFETY: AT_RANDOM points at a static 16-byte buffer.
         let bytes1: [u8; 16] = unsafe { *(p1 as *const [u8; 16]) };
         let bytes2: [u8; 16] = unsafe { *(p2 as *const [u8; 16]) };
-        assert_eq!(bytes1, bytes2, "AT_RANDOM bytes must not change between calls");
+        assert_eq!(
+            bytes1, bytes2,
+            "AT_RANDOM bytes must not change between calls"
+        );
     }
 
     #[test]

@@ -61,9 +61,12 @@ mod tests {
     #[test]
     fn test_jack_type_bits() {
         let types = [
-            SND_JACK_HEADPHONE, SND_JACK_MICROPHONE,
-            SND_JACK_LINEOUT, SND_JACK_MECHANICAL,
-            SND_JACK_VIDEOOUT, SND_JACK_LINEIN,
+            SND_JACK_HEADPHONE,
+            SND_JACK_MICROPHONE,
+            SND_JACK_LINEOUT,
+            SND_JACK_MECHANICAL,
+            SND_JACK_VIDEOOUT,
+            SND_JACK_LINEIN,
         ];
         for i in 0..types.len() {
             assert!(types[i].is_power_of_two());
@@ -81,8 +84,12 @@ mod tests {
     #[test]
     fn test_button_bits_distinct() {
         let btns = [
-            SND_JACK_BTN_0, SND_JACK_BTN_1, SND_JACK_BTN_2,
-            SND_JACK_BTN_3, SND_JACK_BTN_4, SND_JACK_BTN_5,
+            SND_JACK_BTN_0,
+            SND_JACK_BTN_1,
+            SND_JACK_BTN_2,
+            SND_JACK_BTN_3,
+            SND_JACK_BTN_4,
+            SND_JACK_BTN_5,
         ];
         for i in 0..btns.len() {
             assert!(btns[i].is_power_of_two());
@@ -94,11 +101,18 @@ mod tests {
 
     #[test]
     fn test_buttons_dont_overlap_types() {
-        let type_mask = SND_JACK_HEADPHONE | SND_JACK_MICROPHONE
-            | SND_JACK_LINEOUT | SND_JACK_MECHANICAL
-            | SND_JACK_VIDEOOUT | SND_JACK_LINEIN;
-        let btn_mask = SND_JACK_BTN_0 | SND_JACK_BTN_1 | SND_JACK_BTN_2
-            | SND_JACK_BTN_3 | SND_JACK_BTN_4 | SND_JACK_BTN_5;
+        let type_mask = SND_JACK_HEADPHONE
+            | SND_JACK_MICROPHONE
+            | SND_JACK_LINEOUT
+            | SND_JACK_MECHANICAL
+            | SND_JACK_VIDEOOUT
+            | SND_JACK_LINEIN;
+        let btn_mask = SND_JACK_BTN_0
+            | SND_JACK_BTN_1
+            | SND_JACK_BTN_2
+            | SND_JACK_BTN_3
+            | SND_JACK_BTN_4
+            | SND_JACK_BTN_5;
         assert_eq!(type_mask & btn_mask, 0);
     }
 

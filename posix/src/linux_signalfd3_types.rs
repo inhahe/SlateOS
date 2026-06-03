@@ -68,17 +68,32 @@ mod tests {
     #[test]
     fn test_offsets_increasing() {
         let offsets = [
-            SFD_SIGNO_OFFSET, SFD_ERRNO_OFFSET, SFD_CODE_OFFSET,
-            SFD_PID_OFFSET, SFD_UID_OFFSET, SFD_FD_OFFSET,
-            SFD_TID_OFFSET, SFD_BAND_OFFSET, SFD_OVERRUN_OFFSET,
-            SFD_TRAPNO_OFFSET, SFD_STATUS_OFFSET, SFD_INT_OFFSET,
-            SFD_PTR_OFFSET, SFD_UTIME_OFFSET, SFD_STIME_OFFSET,
+            SFD_SIGNO_OFFSET,
+            SFD_ERRNO_OFFSET,
+            SFD_CODE_OFFSET,
+            SFD_PID_OFFSET,
+            SFD_UID_OFFSET,
+            SFD_FD_OFFSET,
+            SFD_TID_OFFSET,
+            SFD_BAND_OFFSET,
+            SFD_OVERRUN_OFFSET,
+            SFD_TRAPNO_OFFSET,
+            SFD_STATUS_OFFSET,
+            SFD_INT_OFFSET,
+            SFD_PTR_OFFSET,
+            SFD_UTIME_OFFSET,
+            SFD_STIME_OFFSET,
             SFD_ADDR_OFFSET,
         ];
         for i in 1..offsets.len() {
-            assert!(offsets[i] > offsets[i - 1],
+            assert!(
+                offsets[i] > offsets[i - 1],
                 "offset {} ({}) not > offset {} ({})",
-                i, offsets[i], i - 1, offsets[i - 1]);
+                i,
+                offsets[i],
+                i - 1,
+                offsets[i - 1]
+            );
         }
     }
 

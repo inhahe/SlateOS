@@ -103,11 +103,18 @@ mod tests {
     #[test]
     fn test_brctl_commands_distinct() {
         let cmds = [
-            BRCTL_ADD_BRIDGE, BRCTL_DEL_BRIDGE, BRCTL_ADD_IF,
-            BRCTL_DEL_IF, BRCTL_GET_BRIDGE_INFO, BRCTL_GET_PORT_LIST,
-            BRCTL_SET_BRIDGE_FORWARD_DELAY, BRCTL_SET_BRIDGE_HELLO_TIME,
-            BRCTL_SET_BRIDGE_MAX_AGE, BRCTL_SET_AGEING_TIME,
-            BRCTL_SET_BRIDGE_STP_STATE, BRCTL_SET_BRIDGE_PRIORITY,
+            BRCTL_ADD_BRIDGE,
+            BRCTL_DEL_BRIDGE,
+            BRCTL_ADD_IF,
+            BRCTL_DEL_IF,
+            BRCTL_GET_BRIDGE_INFO,
+            BRCTL_GET_PORT_LIST,
+            BRCTL_SET_BRIDGE_FORWARD_DELAY,
+            BRCTL_SET_BRIDGE_HELLO_TIME,
+            BRCTL_SET_BRIDGE_MAX_AGE,
+            BRCTL_SET_AGEING_TIME,
+            BRCTL_SET_BRIDGE_STP_STATE,
+            BRCTL_SET_BRIDGE_PRIORITY,
             BRCTL_GET_FDB_ENTRIES,
         ];
         for i in 0..cmds.len() {

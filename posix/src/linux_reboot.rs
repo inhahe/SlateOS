@@ -14,11 +14,11 @@ pub use crate::process::reboot;
 // Re-exports: commands from sys_reboot
 // ---------------------------------------------------------------------------
 
-pub use crate::sys_reboot::LINUX_REBOOT_CMD_RESTART;
+pub use crate::sys_reboot::LINUX_REBOOT_CMD_CAD_OFF;
+pub use crate::sys_reboot::LINUX_REBOOT_CMD_CAD_ON;
 pub use crate::sys_reboot::LINUX_REBOOT_CMD_HALT;
 pub use crate::sys_reboot::LINUX_REBOOT_CMD_POWER_OFF;
-pub use crate::sys_reboot::LINUX_REBOOT_CMD_CAD_ON;
-pub use crate::sys_reboot::LINUX_REBOOT_CMD_CAD_OFF;
+pub use crate::sys_reboot::LINUX_REBOOT_CMD_RESTART;
 pub use crate::sys_reboot::RB_AUTOBOOT;
 pub use crate::sys_reboot::RB_HALT_SYSTEM;
 pub use crate::sys_reboot::RB_POWER_OFF;
@@ -50,9 +50,12 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_CMD_HALT,
-            LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_RESTART2,
-            LINUX_REBOOT_CMD_SW_SUSPEND, LINUX_REBOOT_CMD_KEXEC,
+            LINUX_REBOOT_CMD_RESTART,
+            LINUX_REBOOT_CMD_HALT,
+            LINUX_REBOOT_CMD_POWER_OFF,
+            LINUX_REBOOT_CMD_RESTART2,
+            LINUX_REBOOT_CMD_SW_SUSPEND,
+            LINUX_REBOOT_CMD_KEXEC,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -71,6 +74,9 @@ mod tests {
     #[test]
     fn test_cross_module() {
         assert_eq!(LINUX_REBOOT_MAGIC1, crate::process::LINUX_REBOOT_MAGIC1);
-        assert_eq!(LINUX_REBOOT_CMD_RESTART, crate::sys_reboot::LINUX_REBOOT_CMD_RESTART);
+        assert_eq!(
+            LINUX_REBOOT_CMD_RESTART,
+            crate::sys_reboot::LINUX_REBOOT_CMD_RESTART
+        );
     }
 }

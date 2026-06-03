@@ -85,9 +85,16 @@ mod tests {
     #[test]
     fn test_watch_flags_distinct() {
         let flags = [
-            IN_ATTRIB, IN_CLOSE_WRITE, IN_CLOSE_NOWRITE,
-            IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO,
-            IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF,
+            IN_ATTRIB,
+            IN_CLOSE_WRITE,
+            IN_CLOSE_NOWRITE,
+            IN_OPEN,
+            IN_MOVED_FROM,
+            IN_MOVED_TO,
+            IN_CREATE,
+            IN_DELETE,
+            IN_DELETE_SELF,
+            IN_MOVE_SELF,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -109,8 +116,12 @@ mod tests {
     #[test]
     fn test_special_flags_distinct() {
         let flags = [
-            IN_ONLYDIR, IN_DONT_FOLLOW, IN_EXCL_UNLINK,
-            IN_MASK_ADD, IN_ONESHOT, IN_MASK_CREATE,
+            IN_ONLYDIR,
+            IN_DONT_FOLLOW,
+            IN_EXCL_UNLINK,
+            IN_MASK_ADD,
+            IN_ONESHOT,
+            IN_MASK_CREATE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -129,9 +140,16 @@ mod tests {
     #[test]
     fn test_watch_flags_are_powers_of_two() {
         let flags = [
-            IN_ATTRIB, IN_CLOSE_WRITE, IN_CLOSE_NOWRITE,
-            IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO,
-            IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF,
+            IN_ATTRIB,
+            IN_CLOSE_WRITE,
+            IN_CLOSE_NOWRITE,
+            IN_OPEN,
+            IN_MOVED_FROM,
+            IN_MOVED_TO,
+            IN_CREATE,
+            IN_DELETE,
+            IN_DELETE_SELF,
+            IN_MOVE_SELF,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);

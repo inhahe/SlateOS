@@ -99,8 +99,12 @@ mod tests {
     #[test]
     fn test_header_types_distinct() {
         let types = [
-            AFFS_ST_ROOT, AFFS_ST_USERDIR, AFFS_ST_FILE,
-            AFFS_ST_SOFTLINK, AFFS_ST_LINKDIR, AFFS_ST_LINKFILE,
+            AFFS_ST_ROOT,
+            AFFS_ST_USERDIR,
+            AFFS_ST_FILE,
+            AFFS_ST_SOFTLINK,
+            AFFS_ST_LINKDIR,
+            AFFS_ST_LINKFILE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -112,8 +116,12 @@ mod tests {
     #[test]
     fn test_dos_types_distinct() {
         let types = [
-            AFFS_DOS_OFS, AFFS_DOS_FFS, AFFS_DOS_OFS_INTL,
-            AFFS_DOS_FFS_INTL, AFFS_DOS_OFS_DC, AFFS_DOS_FFS_DC,
+            AFFS_DOS_OFS,
+            AFFS_DOS_FFS,
+            AFFS_DOS_OFS_INTL,
+            AFFS_DOS_FFS_INTL,
+            AFFS_DOS_OFS_DC,
+            AFFS_DOS_FFS_DC,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

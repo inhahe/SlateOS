@@ -85,8 +85,13 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            ARPOP_REQUEST, ARPOP_REPLY, ARPOP_RREQUEST,
-            ARPOP_RREPLY, ARPOP_INREQUEST, ARPOP_INREPLY, ARPOP_NAK,
+            ARPOP_REQUEST,
+            ARPOP_REPLY,
+            ARPOP_RREQUEST,
+            ARPOP_RREPLY,
+            ARPOP_INREQUEST,
+            ARPOP_INREPLY,
+            ARPOP_NAK,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

@@ -439,9 +439,9 @@ unsafe fn try_apply_batch(slot: usize, sops: &[Sembuf]) -> BatchResult {
             touched[idx] = true;
             continue;
         }
-        let new_val = (cur as i32) + (delta as i32);
+        let new_val = i32::from(cur) + i32::from(delta);
         if delta > 0 {
-            if new_val > SEMVMX as i32 {
+            if new_val > i32::from(SEMVMX) {
                 errno::set_errno(errno::ERANGE);
                 return BatchResult::Error;
             }
@@ -486,12 +486,7 @@ unsafe fn commit_batch(
 ///
 /// `deadline_ns`: `None` for unbounded blocking, `Some` for a
 /// `CLOCK_REALTIME` absolute deadline in nanoseconds.
-fn semop_common(
-    semid: i32,
-    sops: *const Sembuf,
-    nsops: usize,
-    deadline_ns: Option<u64>,
-) -> i32 {
+fn semop_common(semid: i32, sops: *const Sembuf, nsops: usize, deadline_ns: Option<u64>) -> i32 {
     if sops.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -516,7 +511,9 @@ fn semop_common(
     // behaviour: if any sembuf in the array sets IPC_NOWAIT, the
     // entire op is non-blocking (the flag is per-op semantically but
     // any-blocker → fail).
-    let nowait = sops_slice.iter().any(|op| op.sem_flg & IPC_NOWAIT as i16 != 0);
+    let nowait = sops_slice
+        .iter()
+        .any(|op| op.sem_flg & IPC_NOWAIT as i16 != 0);
 
     loop {
         {
@@ -556,11 +553,7 @@ fn semop_common(
 
 /// `semop` — perform semaphore operations (blocking).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn semop(
-    semid: i32,
-    sops: *const Sembuf,
-    nsops: usize,
-) -> i32 {
+pub extern "C" fn semop(semid: i32, sops: *const Sembuf, nsops: usize) -> i32 {
     semop_common(semid, sops, nsops, None)
 }
 
@@ -632,7 +625,7 @@ pub extern "C" fn semctl(semid: i32, semnum: i32, cmd: i32) -> i32 {
                 errno::set_errno(errno::EINVAL);
                 return -1;
             }
-            unsafe { (*s).values[semnum as usize] as i32 }
+            unsafe { i32::from((*s).values[semnum as usize]) }
         }
         GETPID | GETNCNT | GETZCNT => {
             if semnum < 0 || (semnum as usize) >= nsems {
@@ -657,7 +650,7 @@ pub extern "C" fn semctl(semid: i32, semnum: i32, cmd: i32) -> i32 {
 /// stable.  Callers that need POSIX `int semctl(int, int, int, ...)`
 /// can write a tiny C shim.
 pub extern "C" fn semctl_setval(semid: i32, semnum: i32, val: i32) -> i32 {
-    if !(0..=SEMVMX as i32).contains(&val) {
+    if !(0..=i32::from(SEMVMX)).contains(&val) {
         errno::set_errno(errno::ERANGE);
         return -1;
     }
@@ -763,7 +756,10 @@ pub unsafe extern "C" fn semctl_getall(semid: i32, array: *mut u16) -> i32 {
 // ---------------------------------------------------------------------------
 
 fn now_realtime_ns() -> u64 {
-    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let r = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut ts);
     if r != 0 {
         return 0;
@@ -1005,11 +1001,19 @@ mod tests {
             let id = semget(IPC_PRIVATE, 1, IPC_CREAT | 0o600);
             assert_ne!(id, -1);
             // Release (V).
-            let v = [Sembuf { sem_num: 0, sem_op: 3, sem_flg: 0 }];
+            let v = [Sembuf {
+                sem_num: 0,
+                sem_op: 3,
+                sem_flg: 0,
+            }];
             assert_eq!(semop(id, v.as_ptr(), 1), 0);
             assert_eq!(semctl(id, 0, GETVAL), 3);
             // Acquire (P).
-            let p = [Sembuf { sem_num: 0, sem_op: -1, sem_flg: 0 }];
+            let p = [Sembuf {
+                sem_num: 0,
+                sem_op: -1,
+                sem_flg: 0,
+            }];
             assert_eq!(semop(id, p.as_ptr(), 1), 0);
             assert_eq!(semctl(id, 0, GETVAL), 2);
         });
@@ -1034,7 +1038,11 @@ mod tests {
     fn test_semop_zero_op_succeeds_when_zero() {
         with_clean_table(|| {
             let id = semget(IPC_PRIVATE, 1, IPC_CREAT | 0o600);
-            let z = [Sembuf { sem_num: 0, sem_op: 0, sem_flg: 0 }];
+            let z = [Sembuf {
+                sem_num: 0,
+                sem_op: 0,
+                sem_flg: 0,
+            }];
             assert_eq!(semop(id, z.as_ptr(), 1), 0);
         });
     }
@@ -1043,7 +1051,11 @@ mod tests {
     fn test_semop_zero_op_blocks_when_nonzero_nowait() {
         with_clean_table(|| {
             let id = semget(IPC_PRIVATE, 1, IPC_CREAT | 0o600);
-            let v = [Sembuf { sem_num: 0, sem_op: 1, sem_flg: 0 }];
+            let v = [Sembuf {
+                sem_num: 0,
+                sem_op: 1,
+                sem_flg: 0,
+            }];
             let _ = semop(id, v.as_ptr(), 1);
             errno::set_errno(0);
             let z = [Sembuf {
@@ -1061,13 +1073,25 @@ mod tests {
         with_clean_table(|| {
             let id = semget(IPC_PRIVATE, 2, IPC_CREAT | 0o600);
             // Pre-populate: sem0=5, sem1=0.
-            let init = [Sembuf { sem_num: 0, sem_op: 5, sem_flg: 0 }];
+            let init = [Sembuf {
+                sem_num: 0,
+                sem_op: 5,
+                sem_flg: 0,
+            }];
             assert_eq!(semop(id, init.as_ptr(), 1), 0);
             // Batch: acquire on sem0 (succeeds), then acquire on sem1
             // (would block).  Whole batch must roll back.
             let ops = [
-                Sembuf { sem_num: 0, sem_op: -1, sem_flg: IPC_NOWAIT as i16 },
-                Sembuf { sem_num: 1, sem_op: -1, sem_flg: IPC_NOWAIT as i16 },
+                Sembuf {
+                    sem_num: 0,
+                    sem_op: -1,
+                    sem_flg: IPC_NOWAIT as i16,
+                },
+                Sembuf {
+                    sem_num: 1,
+                    sem_op: -1,
+                    sem_flg: IPC_NOWAIT as i16,
+                },
             ];
             assert_eq!(semop(id, ops.as_ptr(), 2), -1);
             assert_eq!(errno::get_errno(), errno::EAGAIN);
@@ -1095,7 +1119,11 @@ mod tests {
         with_clean_table(|| {
             let id = semget(IPC_PRIVATE, 1, IPC_CREAT | 0o600);
             errno::set_errno(0);
-            let v = [Sembuf { sem_num: 0, sem_op: 0, sem_flg: 0 }];
+            let v = [Sembuf {
+                sem_num: 0,
+                sem_op: 0,
+                sem_flg: 0,
+            }];
             assert_eq!(semop(id, v.as_ptr(), 0), -1);
             assert_eq!(errno::get_errno(), errno::E2BIG);
         });
@@ -1105,7 +1133,11 @@ mod tests {
     fn test_semop_too_many_ops_e2big() {
         with_clean_table(|| {
             let id = semget(IPC_PRIVATE, 1, IPC_CREAT | 0o600);
-            let v = [Sembuf { sem_num: 0, sem_op: 0, sem_flg: 0 }];
+            let v = [Sembuf {
+                sem_num: 0,
+                sem_op: 0,
+                sem_flg: 0,
+            }];
             errno::set_errno(0);
             assert_eq!(semop(id, v.as_ptr(), MAX_SEMS_PER_SET + 1), -1);
             assert_eq!(errno::get_errno(), errno::E2BIG);
@@ -1116,7 +1148,11 @@ mod tests {
     fn test_semop_bad_semid_einval() {
         with_clean_table(|| {
             errno::set_errno(0);
-            let v = [Sembuf { sem_num: 0, sem_op: 0, sem_flg: 0 }];
+            let v = [Sembuf {
+                sem_num: 0,
+                sem_op: 0,
+                sem_flg: 0,
+            }];
             assert_eq!(semop(0xDEAD, v.as_ptr(), 1), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         });
@@ -1127,7 +1163,11 @@ mod tests {
         with_clean_table(|| {
             let id = semget(IPC_PRIVATE, 1, IPC_CREAT | 0o600);
             errno::set_errno(0);
-            let v = [Sembuf { sem_num: 5, sem_op: 1, sem_flg: 0 }];
+            let v = [Sembuf {
+                sem_num: 5,
+                sem_op: 1,
+                sem_flg: 0,
+            }];
             assert_eq!(semop(id, v.as_ptr(), 1), -1);
             assert_eq!(errno::get_errno(), errno::EFBIG);
         });
@@ -1140,7 +1180,11 @@ mod tests {
             // Push value to SEMVMX.
             let _ = semctl_setval(id, 0, SEMVMX as i32);
             errno::set_errno(0);
-            let v = [Sembuf { sem_num: 0, sem_op: 1, sem_flg: 0 }];
+            let v = [Sembuf {
+                sem_num: 0,
+                sem_op: 1,
+                sem_flg: 0,
+            }];
             assert_eq!(semop(id, v.as_ptr(), 1), -1);
             assert_eq!(errno::get_errno(), errno::ERANGE);
             // Value unchanged.
@@ -1156,8 +1200,15 @@ mod tests {
     fn test_semtimedop_past_deadline_eagain() {
         with_clean_table(|| {
             let id = semget(IPC_PRIVATE, 1, IPC_CREAT | 0o600);
-            let p = [Sembuf { sem_num: 0, sem_op: -1, sem_flg: 0 }];
-            let past = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let p = [Sembuf {
+                sem_num: 0,
+                sem_op: -1,
+                sem_flg: 0,
+            }];
+            let past = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             errno::set_errno(0);
             assert_eq!(
                 semtimedop(id, p.as_ptr(), 1, &raw const past as *const u8),
@@ -1174,8 +1225,15 @@ mod tests {
         with_clean_table(|| {
             let id = semget(IPC_PRIVATE, 1, IPC_CREAT | 0o600);
             let _ = semctl_setval(id, 0, 5);
-            let p = [Sembuf { sem_num: 0, sem_op: -1, sem_flg: 0 }];
-            let past = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let p = [Sembuf {
+                sem_num: 0,
+                sem_op: -1,
+                sem_flg: 0,
+            }];
+            let past = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             assert_eq!(
                 semtimedop(id, p.as_ptr(), 1, &raw const past as *const u8),
                 0
@@ -1204,15 +1262,25 @@ mod tests {
     fn test_semtimedop_bad_timespec_einval() {
         with_clean_table(|| {
             let id = semget(IPC_PRIVATE, 1, IPC_CREAT | 0o600);
-            let p = [Sembuf { sem_num: 0, sem_op: -1, sem_flg: 0 }];
-            let bad = Timespec { tv_sec: 0, tv_nsec: -1 };
+            let p = [Sembuf {
+                sem_num: 0,
+                sem_op: -1,
+                sem_flg: 0,
+            }];
+            let bad = Timespec {
+                tv_sec: 0,
+                tv_nsec: -1,
+            };
             errno::set_errno(0);
             assert_eq!(
                 semtimedop(id, p.as_ptr(), 1, &raw const bad as *const u8),
                 -1
             );
             assert_eq!(errno::get_errno(), errno::EINVAL);
-            let bad2 = Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
+            let bad2 = Timespec {
+                tv_sec: 0,
+                tv_nsec: 1_000_000_000,
+            };
             errno::set_errno(0);
             assert_eq!(
                 semtimedop(id, p.as_ptr(), 1, &raw const bad2 as *const u8),
@@ -1392,11 +1460,19 @@ mod tests {
             assert_ne!(id, -1);
             assert_eq!(semctl_setval(id, 0, 1), 0);
             // Acquire.
-            let p = [Sembuf { sem_num: 0, sem_op: -1, sem_flg: SEM_UNDO as i16 }];
+            let p = [Sembuf {
+                sem_num: 0,
+                sem_op: -1,
+                sem_flg: SEM_UNDO as i16,
+            }];
             assert_eq!(semop(id, p.as_ptr(), 1), 0);
             assert_eq!(semctl(id, 0, GETVAL), 0);
             // Release.
-            let v = [Sembuf { sem_num: 0, sem_op: 1, sem_flg: SEM_UNDO as i16 }];
+            let v = [Sembuf {
+                sem_num: 0,
+                sem_op: 1,
+                sem_flg: SEM_UNDO as i16,
+            }];
             assert_eq!(semop(id, v.as_ptr(), 1), 0);
             assert_eq!(semctl(id, 0, GETVAL), 1);
             // Remove.

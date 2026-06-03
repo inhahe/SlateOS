@@ -66,9 +66,12 @@ mod tests {
     #[test]
     fn test_topology_levels_distinct() {
         let levels = [
-            TOPOLOGY_SMT_LEVEL, TOPOLOGY_CORE_LEVEL,
-            TOPOLOGY_MODULE_LEVEL, TOPOLOGY_TILE_LEVEL,
-            TOPOLOGY_DIE_LEVEL, TOPOLOGY_PKG_LEVEL,
+            TOPOLOGY_SMT_LEVEL,
+            TOPOLOGY_CORE_LEVEL,
+            TOPOLOGY_MODULE_LEVEL,
+            TOPOLOGY_TILE_LEVEL,
+            TOPOLOGY_DIE_LEVEL,
+            TOPOLOGY_PKG_LEVEL,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -91,8 +94,10 @@ mod tests {
     #[test]
     fn test_cache_levels_distinct() {
         let levels = [
-            CACHE_LEVEL_L1D, CACHE_LEVEL_L1I,
-            CACHE_LEVEL_L2, CACHE_LEVEL_L3,
+            CACHE_LEVEL_L1D,
+            CACHE_LEVEL_L1I,
+            CACHE_LEVEL_L2,
+            CACHE_LEVEL_L3,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {

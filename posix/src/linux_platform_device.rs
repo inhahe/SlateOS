@@ -81,8 +81,11 @@ mod tests {
     #[test]
     fn test_resource_types_distinct() {
         let types = [
-            IORESOURCE_IO, IORESOURCE_MEM, IORESOURCE_IRQ,
-            IORESOURCE_DMA, IORESOURCE_BUS,
+            IORESOURCE_IO,
+            IORESOURCE_MEM,
+            IORESOURCE_IRQ,
+            IORESOURCE_DMA,
+            IORESOURCE_BUS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -94,8 +97,11 @@ mod tests {
     #[test]
     fn test_resource_types_no_overlap() {
         let types = [
-            IORESOURCE_IO, IORESOURCE_MEM, IORESOURCE_IRQ,
-            IORESOURCE_DMA, IORESOURCE_BUS,
+            IORESOURCE_IO,
+            IORESOURCE_MEM,
+            IORESOURCE_IRQ,
+            IORESOURCE_DMA,
+            IORESOURCE_BUS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -114,9 +120,12 @@ mod tests {
     #[test]
     fn test_irq_flags_powers_of_two() {
         let flags = [
-            IORESOURCE_IRQ_HIGHEDGE, IORESOURCE_IRQ_LOWEDGE,
-            IORESOURCE_IRQ_HIGHLEVEL, IORESOURCE_IRQ_LOWLEVEL,
-            IORESOURCE_IRQ_SHAREABLE, IORESOURCE_IRQ_OPTIONAL,
+            IORESOURCE_IRQ_HIGHEDGE,
+            IORESOURCE_IRQ_LOWEDGE,
+            IORESOURCE_IRQ_HIGHLEVEL,
+            IORESOURCE_IRQ_LOWLEVEL,
+            IORESOURCE_IRQ_SHAREABLE,
+            IORESOURCE_IRQ_OPTIONAL,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -126,9 +135,12 @@ mod tests {
     #[test]
     fn test_irq_flags_no_overlap() {
         let flags = [
-            IORESOURCE_IRQ_HIGHEDGE, IORESOURCE_IRQ_LOWEDGE,
-            IORESOURCE_IRQ_HIGHLEVEL, IORESOURCE_IRQ_LOWLEVEL,
-            IORESOURCE_IRQ_SHAREABLE, IORESOURCE_IRQ_OPTIONAL,
+            IORESOURCE_IRQ_HIGHEDGE,
+            IORESOURCE_IRQ_LOWEDGE,
+            IORESOURCE_IRQ_HIGHLEVEL,
+            IORESOURCE_IRQ_LOWLEVEL,
+            IORESOURCE_IRQ_SHAREABLE,
+            IORESOURCE_IRQ_OPTIONAL,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -140,9 +152,12 @@ mod tests {
     #[test]
     fn test_resource_flags_distinct() {
         let flags = [
-            IORESOURCE_DISABLED, IORESOURCE_AUTO,
-            IORESOURCE_BUSY, IORESOURCE_READONLY,
-            IORESOURCE_CACHEABLE, IORESOURCE_PREFETCH,
+            IORESOURCE_DISABLED,
+            IORESOURCE_AUTO,
+            IORESOURCE_BUSY,
+            IORESOURCE_READONLY,
+            IORESOURCE_CACHEABLE,
+            IORESOURCE_PREFETCH,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

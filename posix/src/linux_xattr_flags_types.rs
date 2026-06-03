@@ -71,9 +71,12 @@ mod tests {
     #[test]
     fn test_namespace_indices_distinct() {
         let indices = [
-            XATTR_USER_PREFIX_INDEX, XATTR_POSIX_ACL_ACCESS_INDEX,
-            XATTR_POSIX_ACL_DEFAULT_INDEX, XATTR_TRUSTED_PREFIX_INDEX,
-            XATTR_SECURITY_PREFIX_INDEX, XATTR_SYSTEM_PREFIX_INDEX,
+            XATTR_USER_PREFIX_INDEX,
+            XATTR_POSIX_ACL_ACCESS_INDEX,
+            XATTR_POSIX_ACL_DEFAULT_INDEX,
+            XATTR_TRUSTED_PREFIX_INDEX,
+            XATTR_SECURITY_PREFIX_INDEX,
+            XATTR_SYSTEM_PREFIX_INDEX,
         ];
         for i in 0..indices.len() {
             for j in (i + 1)..indices.len() {

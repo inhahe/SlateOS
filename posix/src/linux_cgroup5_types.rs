@@ -63,9 +63,13 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            CGROUP_FILE_PROCS, CGROUP_FILE_CONTROLLERS,
-            CGROUP_FILE_SUBTREE_CONTROL, CGROUP_FILE_EVENTS,
-            CGROUP_FILE_TYPE, CGROUP_FILE_STAT, CGROUP_FILE_IO_STAT,
+            CGROUP_FILE_PROCS,
+            CGROUP_FILE_CONTROLLERS,
+            CGROUP_FILE_SUBTREE_CONTROL,
+            CGROUP_FILE_EVENTS,
+            CGROUP_FILE_TYPE,
+            CGROUP_FILE_STAT,
+            CGROUP_FILE_IO_STAT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -82,9 +86,14 @@ mod tests {
     #[test]
     fn test_controllers_distinct() {
         let ctrls = [
-            CGROUP_CTRL_CPU, CGROUP_CTRL_MEMORY, CGROUP_CTRL_IO,
-            CGROUP_CTRL_PIDS, CGROUP_CTRL_RDMA, CGROUP_CTRL_MISC,
-            CGROUP_CTRL_HUGETLB, CGROUP_CTRL_CPUSET,
+            CGROUP_CTRL_CPU,
+            CGROUP_CTRL_MEMORY,
+            CGROUP_CTRL_IO,
+            CGROUP_CTRL_PIDS,
+            CGROUP_CTRL_RDMA,
+            CGROUP_CTRL_MISC,
+            CGROUP_CTRL_HUGETLB,
+            CGROUP_CTRL_CPUSET,
         ];
         for i in 0..ctrls.len() {
             for j in (i + 1)..ctrls.len() {

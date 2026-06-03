@@ -70,8 +70,10 @@ mod tests {
     #[test]
     fn test_relations_distinct() {
         let relations = [
-            YAMA_RELATION_NONE, YAMA_RELATION_PARENT,
-            YAMA_RELATION_GRANTED, YAMA_RELATION_PRIVILEGED,
+            YAMA_RELATION_NONE,
+            YAMA_RELATION_PARENT,
+            YAMA_RELATION_GRANTED,
+            YAMA_RELATION_PRIVILEGED,
         ];
         for i in 0..relations.len() {
             for j in (i + 1)..relations.len() {

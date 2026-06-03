@@ -112,10 +112,18 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            NFT_MSG_NEWTABLE, NFT_MSG_GETTABLE, NFT_MSG_DELTABLE,
-            NFT_MSG_NEWCHAIN, NFT_MSG_GETCHAIN, NFT_MSG_DELCHAIN,
-            NFT_MSG_NEWRULE, NFT_MSG_GETRULE, NFT_MSG_DELRULE,
-            NFT_MSG_NEWSET, NFT_MSG_GETSET, NFT_MSG_DELSET,
+            NFT_MSG_NEWTABLE,
+            NFT_MSG_GETTABLE,
+            NFT_MSG_DELTABLE,
+            NFT_MSG_NEWCHAIN,
+            NFT_MSG_GETCHAIN,
+            NFT_MSG_DELCHAIN,
+            NFT_MSG_NEWRULE,
+            NFT_MSG_GETRULE,
+            NFT_MSG_DELRULE,
+            NFT_MSG_NEWSET,
+            NFT_MSG_GETSET,
+            NFT_MSG_DELSET,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -141,8 +149,10 @@ mod tests {
     #[test]
     fn test_hooks_distinct() {
         let hooks = [
-            NF_INET_PRE_ROUTING, NF_INET_LOCAL_IN,
-            NF_INET_FORWARD, NF_INET_LOCAL_OUT,
+            NF_INET_PRE_ROUTING,
+            NF_INET_LOCAL_IN,
+            NF_INET_FORWARD,
+            NF_INET_LOCAL_OUT,
             NF_INET_POST_ROUTING,
         ];
         for i in 0..hooks.len() {
@@ -155,8 +165,12 @@ mod tests {
     #[test]
     fn test_protos_distinct() {
         let protos = [
-            NFPROTO_IPV4, NFPROTO_IPV6, NFPROTO_BRIDGE,
-            NFPROTO_ARP, NFPROTO_NETDEV, NFPROTO_INET,
+            NFPROTO_IPV4,
+            NFPROTO_IPV6,
+            NFPROTO_BRIDGE,
+            NFPROTO_ARP,
+            NFPROTO_NETDEV,
+            NFPROTO_INET,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
@@ -167,7 +181,11 @@ mod tests {
 
     #[test]
     fn test_chain_types_distinct() {
-        let types = [NFT_CHAIN_TYPE_FILTER, NFT_CHAIN_TYPE_NAT, NFT_CHAIN_TYPE_ROUTE];
+        let types = [
+            NFT_CHAIN_TYPE_FILTER,
+            NFT_CHAIN_TYPE_NAT,
+            NFT_CHAIN_TYPE_ROUTE,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);

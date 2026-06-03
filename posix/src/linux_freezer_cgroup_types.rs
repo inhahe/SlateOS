@@ -74,7 +74,8 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            FREEZER_EVENT_FROZEN, FREEZER_EVENT_THAWED,
+            FREEZER_EVENT_FROZEN,
+            FREEZER_EVENT_THAWED,
             FREEZER_EVENT_ERROR,
         ];
         for i in 0..events.len() {

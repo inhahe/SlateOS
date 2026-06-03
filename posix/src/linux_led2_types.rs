@@ -108,8 +108,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            LED_HW_PLUGGABLE, LED_UNREGISTERING,
-            LED_BRIGHTNESS_FAST, LED_BLINK_DISABLE,
+            LED_HW_PLUGGABLE,
+            LED_UNREGISTERING,
+            LED_BRIGHTNESS_FAST,
+            LED_BLINK_DISABLE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -121,14 +123,22 @@ mod tests {
     #[test]
     fn test_functions_distinct() {
         let funcs = [
-            LED_FUNCTION_ACTIVITY, LED_FUNCTION_BACKLIGHT,
-            LED_FUNCTION_BLUETOOTH, LED_FUNCTION_BOOT,
-            LED_FUNCTION_CAPSLOCK, LED_FUNCTION_DISK,
-            LED_FUNCTION_FLASH, LED_FUNCTION_HEARTBEAT,
-            LED_FUNCTION_KBD_BACKLIGHT, LED_FUNCTION_LAN,
-            LED_FUNCTION_MUTE, LED_FUNCTION_NUMLOCK,
-            LED_FUNCTION_POWER, LED_FUNCTION_SCROLLLOCK,
-            LED_FUNCTION_STATUS, LED_FUNCTION_TORCH,
+            LED_FUNCTION_ACTIVITY,
+            LED_FUNCTION_BACKLIGHT,
+            LED_FUNCTION_BLUETOOTH,
+            LED_FUNCTION_BOOT,
+            LED_FUNCTION_CAPSLOCK,
+            LED_FUNCTION_DISK,
+            LED_FUNCTION_FLASH,
+            LED_FUNCTION_HEARTBEAT,
+            LED_FUNCTION_KBD_BACKLIGHT,
+            LED_FUNCTION_LAN,
+            LED_FUNCTION_MUTE,
+            LED_FUNCTION_NUMLOCK,
+            LED_FUNCTION_POWER,
+            LED_FUNCTION_SCROLLLOCK,
+            LED_FUNCTION_STATUS,
+            LED_FUNCTION_TORCH,
         ];
         for i in 0..funcs.len() {
             for j in (i + 1)..funcs.len() {

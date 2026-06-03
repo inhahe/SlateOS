@@ -58,8 +58,10 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            DEBUGFS_MODE_RONLY, DEBUGFS_MODE_RW,
-            DEBUGFS_MODE_RONLY_ALL, DEBUGFS_MODE_RW_GRP,
+            DEBUGFS_MODE_RONLY,
+            DEBUGFS_MODE_RW,
+            DEBUGFS_MODE_RONLY_ALL,
+            DEBUGFS_MODE_RW_GRP,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -81,8 +83,11 @@ mod tests {
     #[test]
     fn test_dir_names_distinct() {
         let dirs = [
-            DEBUGFS_DRM, DEBUGFS_IEEE80211, DEBUGFS_BLOCK,
-            DEBUGFS_TRACING, DEBUGFS_USB,
+            DEBUGFS_DRM,
+            DEBUGFS_IEEE80211,
+            DEBUGFS_BLOCK,
+            DEBUGFS_TRACING,
+            DEBUGFS_USB,
         ];
         for i in 0..dirs.len() {
             for j in (i + 1)..dirs.len() {

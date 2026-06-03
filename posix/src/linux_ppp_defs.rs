@@ -153,8 +153,13 @@ mod tests {
     #[test]
     fn test_protocol_numbers_distinct() {
         let protos = [
-            PPP_IP, PPP_IPV6, PPP_VJC_COMP, PPP_VJC_UNCOMP,
-            PPP_COMP, PPP_IPX, PPP_AT,
+            PPP_IP,
+            PPP_IPV6,
+            PPP_VJC_COMP,
+            PPP_VJC_UNCOMP,
+            PPP_COMP,
+            PPP_IPX,
+            PPP_AT,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
@@ -165,9 +170,7 @@ mod tests {
 
     #[test]
     fn test_control_protocols_distinct() {
-        let cps = [
-            PPP_IPCP, PPP_IPV6CP, PPP_IPXCP, PPP_CCP, PPP_ECP,
-        ];
+        let cps = [PPP_IPCP, PPP_IPV6CP, PPP_IPXCP, PPP_CCP, PPP_ECP];
         for i in 0..cps.len() {
             for j in (i + 1)..cps.len() {
                 assert_ne!(cps[i], cps[j]);

@@ -63,18 +63,26 @@ mod tests {
     #[test]
     fn test_sw_codes_distinct() {
         let sws = [
-            SW_LID, SW_TABLET_MODE, SW_HEADPHONE_INSERT,
-            SW_RFKILL_ALL, SW_MICROPHONE_INSERT, SW_DOCK,
-            SW_LINEOUT_INSERT, SW_JACK_PHYSICAL_INSERT,
-            SW_VIDEOOUT_INSERT, SW_CAMERA_LENS_COVER,
-            SW_KEYPAD_SLIDE, SW_FRONT_PROXIMITY,
-            SW_ROTATE_LOCK, SW_LINEIN_INSERT,
-            SW_MUTE_DEVICE, SW_PEN_INSERTED,
+            SW_LID,
+            SW_TABLET_MODE,
+            SW_HEADPHONE_INSERT,
+            SW_RFKILL_ALL,
+            SW_MICROPHONE_INSERT,
+            SW_DOCK,
+            SW_LINEOUT_INSERT,
+            SW_JACK_PHYSICAL_INSERT,
+            SW_VIDEOOUT_INSERT,
+            SW_CAMERA_LENS_COVER,
+            SW_KEYPAD_SLIDE,
+            SW_FRONT_PROXIMITY,
+            SW_ROTATE_LOCK,
+            SW_LINEIN_INSERT,
+            SW_MUTE_DEVICE,
+            SW_PEN_INSERTED,
         ];
         for i in 0..sws.len() {
             for j in (i + 1)..sws.len() {
-                assert_ne!(sws[i], sws[j],
-                    "switch codes {} and {} collide", i, j);
+                assert_ne!(sws[i], sws[j], "switch codes {} and {} collide", i, j);
             }
         }
     }
@@ -92,13 +100,22 @@ mod tests {
     #[test]
     fn test_all_within_max() {
         let sws = [
-            SW_LID, SW_TABLET_MODE, SW_HEADPHONE_INSERT,
-            SW_RFKILL_ALL, SW_MICROPHONE_INSERT, SW_DOCK,
-            SW_LINEOUT_INSERT, SW_JACK_PHYSICAL_INSERT,
-            SW_VIDEOOUT_INSERT, SW_CAMERA_LENS_COVER,
-            SW_KEYPAD_SLIDE, SW_FRONT_PROXIMITY,
-            SW_ROTATE_LOCK, SW_LINEIN_INSERT,
-            SW_MUTE_DEVICE, SW_PEN_INSERTED,
+            SW_LID,
+            SW_TABLET_MODE,
+            SW_HEADPHONE_INSERT,
+            SW_RFKILL_ALL,
+            SW_MICROPHONE_INSERT,
+            SW_DOCK,
+            SW_LINEOUT_INSERT,
+            SW_JACK_PHYSICAL_INSERT,
+            SW_VIDEOOUT_INSERT,
+            SW_CAMERA_LENS_COVER,
+            SW_KEYPAD_SLIDE,
+            SW_FRONT_PROXIMITY,
+            SW_ROTATE_LOCK,
+            SW_LINEIN_INSERT,
+            SW_MUTE_DEVICE,
+            SW_PEN_INSERTED,
         ];
         for &s in &sws {
             assert!(s <= SW_MAX, "SW code 0x{:02X} exceeds SW_MAX", s);

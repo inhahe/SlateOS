@@ -92,12 +92,23 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            DM_VERSION, DM_REMOVE_ALL, DM_LIST_DEVICES,
-            DM_DEV_CREATE, DM_DEV_REMOVE, DM_DEV_RENAME,
-            DM_DEV_SUSPEND, DM_DEV_STATUS, DM_DEV_WAIT,
-            DM_TABLE_LOAD, DM_TABLE_CLEAR, DM_TABLE_DEPS,
-            DM_TABLE_STATUS, DM_LIST_VERSIONS, DM_TARGET_MSG,
-            DM_DEV_SET_GEOMETRY, DM_DEV_ARM_POLL,
+            DM_VERSION,
+            DM_REMOVE_ALL,
+            DM_LIST_DEVICES,
+            DM_DEV_CREATE,
+            DM_DEV_REMOVE,
+            DM_DEV_RENAME,
+            DM_DEV_SUSPEND,
+            DM_DEV_STATUS,
+            DM_DEV_WAIT,
+            DM_TABLE_LOAD,
+            DM_TABLE_CLEAR,
+            DM_TABLE_DEPS,
+            DM_TABLE_STATUS,
+            DM_LIST_VERSIONS,
+            DM_TARGET_MSG,
+            DM_DEV_SET_GEOMETRY,
+            DM_DEV_ARM_POLL,
             DM_GET_TARGET_VERSION,
         ];
         for i in 0..ioctls.len() {
@@ -111,8 +122,10 @@ mod tests {
     fn test_flags_no_overlap_subset() {
         // Check a subset of single-bit flags
         let flags = [
-            DM_READONLY_FLAG, DM_SUSPEND_FLAG,
-            DM_SKIP_LOCKFS_FLAG, DM_NOFLUSH_FLAG,
+            DM_READONLY_FLAG,
+            DM_SUSPEND_FLAG,
+            DM_SKIP_LOCKFS_FLAG,
+            DM_NOFLUSH_FLAG,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

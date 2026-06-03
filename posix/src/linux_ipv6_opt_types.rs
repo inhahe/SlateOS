@@ -75,13 +75,27 @@ mod tests {
     #[test]
     fn test_ipv6_options_distinct() {
         let opts = [
-            IPV6_UNICAST_HOPS, IPV6_MULTICAST_HOPS, IPV6_MULTICAST_IF,
-            IPV6_MULTICAST_LOOP, IPV6_JOIN_GROUP, IPV6_LEAVE_GROUP,
-            IPV6_V6ONLY, IPV6_RECVPKTINFO, IPV6_RECVHOPLIMIT,
-            IPV6_RECVTCLASS, IPV6_TCLASS, IPV6_FLOWLABEL_MGR,
-            IPV6_FLOWINFO, IPV6_MTU_DISCOVER, IPV6_MTU,
-            IPV6_RTHDR, IPV6_HOPOPTS, IPV6_DSTOPTS,
-            IPV6_ADDR_PREFERENCES, IPV6_TRANSPARENT, IPV6_AUTOFLOWLABEL,
+            IPV6_UNICAST_HOPS,
+            IPV6_MULTICAST_HOPS,
+            IPV6_MULTICAST_IF,
+            IPV6_MULTICAST_LOOP,
+            IPV6_JOIN_GROUP,
+            IPV6_LEAVE_GROUP,
+            IPV6_V6ONLY,
+            IPV6_RECVPKTINFO,
+            IPV6_RECVHOPLIMIT,
+            IPV6_RECVTCLASS,
+            IPV6_TCLASS,
+            IPV6_FLOWLABEL_MGR,
+            IPV6_FLOWINFO,
+            IPV6_MTU_DISCOVER,
+            IPV6_MTU,
+            IPV6_RTHDR,
+            IPV6_HOPOPTS,
+            IPV6_DSTOPTS,
+            IPV6_ADDR_PREFERENCES,
+            IPV6_TRANSPARENT,
+            IPV6_AUTOFLOWLABEL,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -93,8 +107,10 @@ mod tests {
     #[test]
     fn test_addr_prefs_distinct() {
         let prefs = [
-            IPV6_PREFER_SRC_PUBLIC, IPV6_PREFER_SRC_TMP,
-            IPV6_PREFER_SRC_HOME, IPV6_PREFER_SRC_COA,
+            IPV6_PREFER_SRC_PUBLIC,
+            IPV6_PREFER_SRC_TMP,
+            IPV6_PREFER_SRC_HOME,
+            IPV6_PREFER_SRC_COA,
         ];
         for i in 0..prefs.len() {
             for j in (i + 1)..prefs.len() {

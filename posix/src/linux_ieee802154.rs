@@ -124,7 +124,8 @@ mod tests {
     #[test]
     fn test_addr_modes_distinct() {
         let modes = [
-            IEEE802154_ADDR_NONE, IEEE802154_ADDR_SHORT,
+            IEEE802154_ADDR_NONE,
+            IEEE802154_ADDR_SHORT,
             IEEE802154_ADDR_LONG,
         ];
         for i in 0..modes.len() {
@@ -137,8 +138,10 @@ mod tests {
     #[test]
     fn test_frame_types_distinct() {
         let types = [
-            IEEE802154_FC_TYPE_BEACON, IEEE802154_FC_TYPE_DATA,
-            IEEE802154_FC_TYPE_ACK, IEEE802154_FC_TYPE_MAC_CMD,
+            IEEE802154_FC_TYPE_BEACON,
+            IEEE802154_FC_TYPE_DATA,
+            IEEE802154_FC_TYPE_ACK,
+            IEEE802154_FC_TYPE_MAC_CMD,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -150,10 +153,14 @@ mod tests {
     #[test]
     fn test_mac_commands_distinct() {
         let cmds = [
-            IEEE802154_CMD_ASSOC_REQ, IEEE802154_CMD_ASSOC_RESP,
-            IEEE802154_CMD_DISASSOC, IEEE802154_CMD_DATA_REQ,
-            IEEE802154_CMD_PAN_CONFLICT, IEEE802154_CMD_ORPHAN,
-            IEEE802154_CMD_BEACON_REQ, IEEE802154_CMD_COORD_REALIGN,
+            IEEE802154_CMD_ASSOC_REQ,
+            IEEE802154_CMD_ASSOC_RESP,
+            IEEE802154_CMD_DISASSOC,
+            IEEE802154_CMD_DATA_REQ,
+            IEEE802154_CMD_PAN_CONFLICT,
+            IEEE802154_CMD_ORPHAN,
+            IEEE802154_CMD_BEACON_REQ,
+            IEEE802154_CMD_COORD_REALIGN,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

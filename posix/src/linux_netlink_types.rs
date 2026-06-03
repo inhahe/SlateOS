@@ -86,10 +86,17 @@ mod tests {
     #[test]
     fn test_protocol_families_distinct() {
         let families = [
-            NETLINK_ROUTE, NETLINK_UNUSED, NETLINK_SOCK_DIAG,
-            NETLINK_XFRM, NETLINK_SELINUX, NETLINK_AUDIT,
-            NETLINK_CONNECTOR, NETLINK_NETFILTER,
-            NETLINK_KOBJECT_UEVENT, NETLINK_GENERIC, NETLINK_CRYPTO,
+            NETLINK_ROUTE,
+            NETLINK_UNUSED,
+            NETLINK_SOCK_DIAG,
+            NETLINK_XFRM,
+            NETLINK_SELINUX,
+            NETLINK_AUDIT,
+            NETLINK_CONNECTOR,
+            NETLINK_NETFILTER,
+            NETLINK_KOBJECT_UEVENT,
+            NETLINK_GENERIC,
+            NETLINK_CRYPTO,
         ];
         for i in 0..families.len() {
             for j in (i + 1)..families.len() {

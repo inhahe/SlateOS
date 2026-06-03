@@ -86,14 +86,22 @@ mod tests {
     #[test]
     fn test_ev_types_distinct() {
         let types = [
-            EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC,
-            EV_SW, EV_LED, EV_SND, EV_REP, EV_FF,
-            EV_PWR, EV_FF_STATUS,
+            EV_SYN,
+            EV_KEY,
+            EV_REL,
+            EV_ABS,
+            EV_MSC,
+            EV_SW,
+            EV_LED,
+            EV_SND,
+            EV_REP,
+            EV_FF,
+            EV_PWR,
+            EV_FF_STATUS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
-                assert_ne!(types[i], types[j],
-                    "EV types {} and {} collide", i, j);
+                assert_ne!(types[i], types[j], "EV types {} and {} collide", i, j);
             }
         }
     }
@@ -125,8 +133,12 @@ mod tests {
     #[test]
     fn test_msc_codes_distinct() {
         let mscs = [
-            MSC_SERIAL, MSC_PULSELED, MSC_GESTURE,
-            MSC_RAW, MSC_SCAN, MSC_TIMESTAMP,
+            MSC_SERIAL,
+            MSC_PULSELED,
+            MSC_GESTURE,
+            MSC_RAW,
+            MSC_SCAN,
+            MSC_TIMESTAMP,
         ];
         for i in 0..mscs.len() {
             for j in (i + 1)..mscs.len() {
@@ -138,9 +150,18 @@ mod tests {
     #[test]
     fn test_all_within_max() {
         let types = [
-            EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC,
-            EV_SW, EV_LED, EV_SND, EV_REP, EV_FF,
-            EV_PWR, EV_FF_STATUS,
+            EV_SYN,
+            EV_KEY,
+            EV_REL,
+            EV_ABS,
+            EV_MSC,
+            EV_SW,
+            EV_LED,
+            EV_SND,
+            EV_REP,
+            EV_FF,
+            EV_PWR,
+            EV_FF_STATUS,
         ];
         for &t in &types {
             assert!(t <= EV_MAX, "EV type 0x{:02X} exceeds EV_MAX", t);

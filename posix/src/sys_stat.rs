@@ -15,31 +15,31 @@ pub use crate::stat::Timespec;
 // File-type constants (S_IF*)
 // ---------------------------------------------------------------------------
 
-pub use crate::fcntl::S_IFMT;
-pub use crate::fcntl::S_IFDIR;
-pub use crate::fcntl::S_IFCHR;
 pub use crate::fcntl::S_IFBLK;
-pub use crate::fcntl::S_IFREG;
+pub use crate::fcntl::S_IFCHR;
+pub use crate::fcntl::S_IFDIR;
 pub use crate::fcntl::S_IFIFO;
 pub use crate::fcntl::S_IFLNK;
+pub use crate::fcntl::S_IFMT;
+pub use crate::fcntl::S_IFREG;
 pub use crate::fcntl::S_IFSOCK;
 
 // ---------------------------------------------------------------------------
 // Permission bits
 // ---------------------------------------------------------------------------
 
-pub use crate::fcntl::S_ISUID;
-pub use crate::fcntl::S_ISGID;
-pub use crate::fcntl::S_ISVTX;
-pub use crate::fcntl::S_IRUSR;
-pub use crate::fcntl::S_IWUSR;
-pub use crate::fcntl::S_IXUSR;
 pub use crate::fcntl::S_IRGRP;
-pub use crate::fcntl::S_IWGRP;
-pub use crate::fcntl::S_IXGRP;
 pub use crate::fcntl::S_IROTH;
+pub use crate::fcntl::S_IRUSR;
+pub use crate::fcntl::S_ISGID;
+pub use crate::fcntl::S_ISUID;
+pub use crate::fcntl::S_ISVTX;
+pub use crate::fcntl::S_IWGRP;
 pub use crate::fcntl::S_IWOTH;
+pub use crate::fcntl::S_IWUSR;
+pub use crate::fcntl::S_IXGRP;
 pub use crate::fcntl::S_IXOTH;
+pub use crate::fcntl::S_IXUSR;
 
 /// Read, write, execute for owner.
 pub const S_IRWXU: u32 = S_IRUSR | S_IWUSR | S_IXUSR;
@@ -54,23 +54,23 @@ pub const S_IRWXO: u32 = S_IROTH | S_IWOTH | S_IXOTH;
 // stat functions
 // ---------------------------------------------------------------------------
 
-pub use crate::file::stat;
-pub use crate::file::fstat;
-pub use crate::file::lstat;
-pub use crate::file::fstatat;
 pub use crate::file::chmod;
 pub use crate::file::fchmod;
+pub use crate::file::fstat;
+pub use crate::file::fstatat;
+pub use crate::file::lstat;
 pub use crate::file::mkdir;
+pub use crate::file::stat;
 pub use crate::file::umask;
 
 // ---------------------------------------------------------------------------
 // mknod / mkfifo
 // ---------------------------------------------------------------------------
 
-pub use crate::stat::mknod;
-pub use crate::stat::mknodat;
 pub use crate::stat::mkfifo;
 pub use crate::stat::mkfifoat;
+pub use crate::stat::mknod;
+pub use crate::stat::mknodat;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -127,8 +127,7 @@ mod tests {
     #[test]
     fn test_file_type_distinct() {
         let types = [
-            S_IFDIR, S_IFCHR, S_IFBLK, S_IFREG,
-            S_IFIFO, S_IFLNK, S_IFSOCK,
+            S_IFDIR, S_IFCHR, S_IFBLK, S_IFREG, S_IFIFO, S_IFLNK, S_IFSOCK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

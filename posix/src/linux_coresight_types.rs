@@ -80,8 +80,10 @@ mod tests {
     #[test]
     fn test_dev_types_distinct() {
         let types = [
-            CORESIGHT_DEV_TYPE_SINK, CORESIGHT_DEV_TYPE_LINK,
-            CORESIGHT_DEV_TYPE_LINKSINK, CORESIGHT_DEV_TYPE_SOURCE,
+            CORESIGHT_DEV_TYPE_SINK,
+            CORESIGHT_DEV_TYPE_LINK,
+            CORESIGHT_DEV_TYPE_LINKSINK,
+            CORESIGHT_DEV_TYPE_SOURCE,
             CORESIGHT_DEV_TYPE_HELPER,
         ];
         for i in 0..types.len() {

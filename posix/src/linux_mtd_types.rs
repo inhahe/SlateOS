@@ -91,8 +91,13 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            MTD_ABSENT, MTD_RAM, MTD_ROM, MTD_NORFLASH,
-            MTD_NANDFLASH, MTD_DATAFLASH, MTD_UBIVOLUME,
+            MTD_ABSENT,
+            MTD_RAM,
+            MTD_ROM,
+            MTD_NORFLASH,
+            MTD_NANDFLASH,
+            MTD_DATAFLASH,
+            MTD_UBIVOLUME,
             MTD_MLCNANDFLASH,
         ];
         for i in 0..types.len() {
@@ -105,8 +110,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            MTD_WRITEABLE, MTD_BIT_WRITEABLE,
-            MTD_NO_ERASE, MTD_POWERUP_LOCK,
+            MTD_WRITEABLE,
+            MTD_BIT_WRITEABLE,
+            MTD_NO_ERASE,
+            MTD_POWERUP_LOCK,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -118,10 +125,18 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            MEMGETINFO, MEMERASE, MEMWRITEOOB, MEMREADOOB,
-            MEMLOCK, MEMUNLOCK, MEMGETREGIONCOUNT,
-            MEMGETREGIONINFO, MEMISLOCKED, MEMGETBADBLOCK,
-            MEMSETBADBLOCK, MEMERASE64,
+            MEMGETINFO,
+            MEMERASE,
+            MEMWRITEOOB,
+            MEMREADOOB,
+            MEMLOCK,
+            MEMUNLOCK,
+            MEMGETREGIONCOUNT,
+            MEMGETREGIONINFO,
+            MEMISLOCKED,
+            MEMGETBADBLOCK,
+            MEMSETBADBLOCK,
+            MEMERASE64,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

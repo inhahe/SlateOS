@@ -96,8 +96,10 @@ mod tests {
     #[test]
     fn test_config_cmds_distinct() {
         let cmds = [
-            NFULNL_CFG_CMD_BIND, NFULNL_CFG_CMD_UNBIND,
-            NFULNL_CFG_CMD_PF_BIND, NFULNL_CFG_CMD_PF_UNBIND,
+            NFULNL_CFG_CMD_BIND,
+            NFULNL_CFG_CMD_UNBIND,
+            NFULNL_CFG_CMD_PF_BIND,
+            NFULNL_CFG_CMD_PF_UNBIND,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -124,10 +126,17 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            NFULA_PACKET_HDR, NFULA_MARK, NFULA_TIMESTAMP,
-            NFULA_IFINDEX_INDEV, NFULA_IFINDEX_OUTDEV,
-            NFULA_PAYLOAD, NFULA_PREFIX, NFULA_UID,
-            NFULA_SEQ, NFULA_SEQ_GLOBAL, NFULA_GID,
+            NFULA_PACKET_HDR,
+            NFULA_MARK,
+            NFULA_TIMESTAMP,
+            NFULA_IFINDEX_INDEV,
+            NFULA_IFINDEX_OUTDEV,
+            NFULA_PAYLOAD,
+            NFULA_PREFIX,
+            NFULA_UID,
+            NFULA_SEQ,
+            NFULA_SEQ_GLOBAL,
+            NFULA_GID,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

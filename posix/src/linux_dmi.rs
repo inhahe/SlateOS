@@ -146,13 +146,23 @@ mod tests {
     #[test]
     fn test_entry_types_distinct() {
         let entries = [
-            DMI_ENTRY_BIOS, DMI_ENTRY_SYSTEM, DMI_ENTRY_BASEBOARD,
-            DMI_ENTRY_CHASSIS, DMI_ENTRY_PROCESSOR, DMI_ENTRY_MEM_CONTROLLER,
-            DMI_ENTRY_MEM_MODULE, DMI_ENTRY_CACHE, DMI_ENTRY_PORT_CONNECTOR,
-            DMI_ENTRY_SYSTEM_SLOT, DMI_ENTRY_ONBOARD_DEVICE,
-            DMI_ENTRY_OEM_STRINGS, DMI_ENTRY_PHYS_MEM_ARRAY,
-            DMI_ENTRY_MEM_DEVICE, DMI_ENTRY_MEM_ARRAY_MAPPED_ADDR,
-            DMI_ENTRY_MEM_DEV_MAPPED_ADDR, DMI_ENTRY_SYSTEM_BOOT,
+            DMI_ENTRY_BIOS,
+            DMI_ENTRY_SYSTEM,
+            DMI_ENTRY_BASEBOARD,
+            DMI_ENTRY_CHASSIS,
+            DMI_ENTRY_PROCESSOR,
+            DMI_ENTRY_MEM_CONTROLLER,
+            DMI_ENTRY_MEM_MODULE,
+            DMI_ENTRY_CACHE,
+            DMI_ENTRY_PORT_CONNECTOR,
+            DMI_ENTRY_SYSTEM_SLOT,
+            DMI_ENTRY_ONBOARD_DEVICE,
+            DMI_ENTRY_OEM_STRINGS,
+            DMI_ENTRY_PHYS_MEM_ARRAY,
+            DMI_ENTRY_MEM_DEVICE,
+            DMI_ENTRY_MEM_ARRAY_MAPPED_ADDR,
+            DMI_ENTRY_MEM_DEV_MAPPED_ADDR,
+            DMI_ENTRY_SYSTEM_BOOT,
             DMI_ENTRY_END_OF_TABLE,
         ];
         for i in 0..entries.len() {
@@ -168,14 +178,28 @@ mod tests {
         assert_eq!(DMI_STRING_MAX, 22);
         // All IDs should be less than the max.
         let ids = [
-            DMI_BIOS_VENDOR, DMI_BIOS_VERSION, DMI_BIOS_DATE,
-            DMI_BIOS_RELEASE, DMI_EC_FIRMWARE_RELEASE,
-            DMI_SYS_VENDOR, DMI_PRODUCT_NAME, DMI_PRODUCT_VERSION,
-            DMI_PRODUCT_SERIAL, DMI_PRODUCT_UUID, DMI_PRODUCT_SKU,
-            DMI_PRODUCT_FAMILY, DMI_BOARD_VENDOR, DMI_BOARD_NAME,
-            DMI_BOARD_VERSION, DMI_BOARD_SERIAL, DMI_BOARD_ASSET_TAG,
-            DMI_CHASSIS_VENDOR, DMI_CHASSIS_TYPE, DMI_CHASSIS_VERSION,
-            DMI_CHASSIS_SERIAL, DMI_CHASSIS_ASSET_TAG,
+            DMI_BIOS_VENDOR,
+            DMI_BIOS_VERSION,
+            DMI_BIOS_DATE,
+            DMI_BIOS_RELEASE,
+            DMI_EC_FIRMWARE_RELEASE,
+            DMI_SYS_VENDOR,
+            DMI_PRODUCT_NAME,
+            DMI_PRODUCT_VERSION,
+            DMI_PRODUCT_SERIAL,
+            DMI_PRODUCT_UUID,
+            DMI_PRODUCT_SKU,
+            DMI_PRODUCT_FAMILY,
+            DMI_BOARD_VENDOR,
+            DMI_BOARD_NAME,
+            DMI_BOARD_VERSION,
+            DMI_BOARD_SERIAL,
+            DMI_BOARD_ASSET_TAG,
+            DMI_CHASSIS_VENDOR,
+            DMI_CHASSIS_TYPE,
+            DMI_CHASSIS_VERSION,
+            DMI_CHASSIS_SERIAL,
+            DMI_CHASSIS_ASSET_TAG,
         ];
         for id in &ids {
             assert!(*id < DMI_STRING_MAX);
@@ -185,14 +209,28 @@ mod tests {
     #[test]
     fn test_string_ids_distinct() {
         let ids = [
-            DMI_BIOS_VENDOR, DMI_BIOS_VERSION, DMI_BIOS_DATE,
-            DMI_BIOS_RELEASE, DMI_EC_FIRMWARE_RELEASE,
-            DMI_SYS_VENDOR, DMI_PRODUCT_NAME, DMI_PRODUCT_VERSION,
-            DMI_PRODUCT_SERIAL, DMI_PRODUCT_UUID, DMI_PRODUCT_SKU,
-            DMI_PRODUCT_FAMILY, DMI_BOARD_VENDOR, DMI_BOARD_NAME,
-            DMI_BOARD_VERSION, DMI_BOARD_SERIAL, DMI_BOARD_ASSET_TAG,
-            DMI_CHASSIS_VENDOR, DMI_CHASSIS_TYPE, DMI_CHASSIS_VERSION,
-            DMI_CHASSIS_SERIAL, DMI_CHASSIS_ASSET_TAG,
+            DMI_BIOS_VENDOR,
+            DMI_BIOS_VERSION,
+            DMI_BIOS_DATE,
+            DMI_BIOS_RELEASE,
+            DMI_EC_FIRMWARE_RELEASE,
+            DMI_SYS_VENDOR,
+            DMI_PRODUCT_NAME,
+            DMI_PRODUCT_VERSION,
+            DMI_PRODUCT_SERIAL,
+            DMI_PRODUCT_UUID,
+            DMI_PRODUCT_SKU,
+            DMI_PRODUCT_FAMILY,
+            DMI_BOARD_VENDOR,
+            DMI_BOARD_NAME,
+            DMI_BOARD_VERSION,
+            DMI_BOARD_SERIAL,
+            DMI_BOARD_ASSET_TAG,
+            DMI_CHASSIS_VENDOR,
+            DMI_CHASSIS_TYPE,
+            DMI_CHASSIS_VERSION,
+            DMI_CHASSIS_SERIAL,
+            DMI_CHASSIS_ASSET_TAG,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -204,14 +242,22 @@ mod tests {
     #[test]
     fn test_chassis_types_distinct() {
         let types = [
-            DMI_CHASSIS_TYPE_OTHER, DMI_CHASSIS_TYPE_UNKNOWN,
-            DMI_CHASSIS_TYPE_DESKTOP, DMI_CHASSIS_TYPE_LOW_PROFILE_DESKTOP,
-            DMI_CHASSIS_TYPE_PIZZA_BOX, DMI_CHASSIS_TYPE_MINI_TOWER,
-            DMI_CHASSIS_TYPE_TOWER, DMI_CHASSIS_TYPE_PORTABLE,
-            DMI_CHASSIS_TYPE_LAPTOP, DMI_CHASSIS_TYPE_NOTEBOOK,
-            DMI_CHASSIS_TYPE_HAND_HELD, DMI_CHASSIS_TYPE_RACK_MOUNT,
-            DMI_CHASSIS_TYPE_BLADE, DMI_CHASSIS_TYPE_TABLET,
-            DMI_CHASSIS_TYPE_CONVERTIBLE, DMI_CHASSIS_TYPE_DETACHABLE,
+            DMI_CHASSIS_TYPE_OTHER,
+            DMI_CHASSIS_TYPE_UNKNOWN,
+            DMI_CHASSIS_TYPE_DESKTOP,
+            DMI_CHASSIS_TYPE_LOW_PROFILE_DESKTOP,
+            DMI_CHASSIS_TYPE_PIZZA_BOX,
+            DMI_CHASSIS_TYPE_MINI_TOWER,
+            DMI_CHASSIS_TYPE_TOWER,
+            DMI_CHASSIS_TYPE_PORTABLE,
+            DMI_CHASSIS_TYPE_LAPTOP,
+            DMI_CHASSIS_TYPE_NOTEBOOK,
+            DMI_CHASSIS_TYPE_HAND_HELD,
+            DMI_CHASSIS_TYPE_RACK_MOUNT,
+            DMI_CHASSIS_TYPE_BLADE,
+            DMI_CHASSIS_TYPE_TABLET,
+            DMI_CHASSIS_TYPE_CONVERTIBLE,
+            DMI_CHASSIS_TYPE_DETACHABLE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

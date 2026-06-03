@@ -71,13 +71,31 @@ mod tests {
     #[test]
     fn test_inode_flags_no_overlap() {
         let flags = [
-            FS_SECRM_FL, FS_UNRM_FL, FS_COMPR_FL, FS_SYNC_FL,
-            FS_IMMUTABLE_FL, FS_APPEND_FL, FS_NODUMP_FL, FS_NOATIME_FL,
-            FS_DIRTY_FL, FS_COMPRBLK_FL, FS_NOCOMP_FL, FS_ENCRYPT_FL,
-            FS_INDEX_FL, FS_IMAGIC_FL, FS_JOURNAL_DATA_FL, FS_NOTAIL_FL,
-            FS_DIRSYNC_FL, FS_TOPDIR_FL, FS_HUGE_FILE_FL, FS_EXTENT_FL,
-            FS_VERITY_FL, FS_DAX_FL, FS_INLINE_DATA_FL,
-            FS_PROJINHERIT_FL, FS_CASEFOLD_FL,
+            FS_SECRM_FL,
+            FS_UNRM_FL,
+            FS_COMPR_FL,
+            FS_SYNC_FL,
+            FS_IMMUTABLE_FL,
+            FS_APPEND_FL,
+            FS_NODUMP_FL,
+            FS_NOATIME_FL,
+            FS_DIRTY_FL,
+            FS_COMPRBLK_FL,
+            FS_NOCOMP_FL,
+            FS_ENCRYPT_FL,
+            FS_INDEX_FL,
+            FS_IMAGIC_FL,
+            FS_JOURNAL_DATA_FL,
+            FS_NOTAIL_FL,
+            FS_DIRSYNC_FL,
+            FS_TOPDIR_FL,
+            FS_HUGE_FILE_FL,
+            FS_EXTENT_FL,
+            FS_VERITY_FL,
+            FS_DAX_FL,
+            FS_INLINE_DATA_FL,
+            FS_PROJINHERIT_FL,
+            FS_CASEFOLD_FL,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

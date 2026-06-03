@@ -61,8 +61,12 @@ mod tests {
     #[test]
     fn test_page_flags_no_overlap() {
         let flags = [
-            IOMMU_READ, IOMMU_WRITE, IOMMU_CACHE,
-            IOMMU_NOEXEC, IOMMU_PRIV, IOMMU_MMIO,
+            IOMMU_READ,
+            IOMMU_WRITE,
+            IOMMU_CACHE,
+            IOMMU_NOEXEC,
+            IOMMU_PRIV,
+            IOMMU_MMIO,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -74,10 +78,13 @@ mod tests {
     #[test]
     fn test_caps_distinct() {
         let caps = [
-            IOMMU_CAP_CACHE_COHERENCY, IOMMU_CAP_INTR_REMAP,
-            IOMMU_CAP_NOEXEC, IOMMU_CAP_PRE_BOOT_PROTECTION,
+            IOMMU_CAP_CACHE_COHERENCY,
+            IOMMU_CAP_INTR_REMAP,
+            IOMMU_CAP_NOEXEC,
+            IOMMU_CAP_PRE_BOOT_PROTECTION,
             IOMMU_CAP_ENFORCE_CACHE_COHERENCY,
-            IOMMU_CAP_DEFERRED_FLUSH, IOMMU_CAP_DIRTY_TRACKING,
+            IOMMU_CAP_DEFERRED_FLUSH,
+            IOMMU_CAP_DIRTY_TRACKING,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

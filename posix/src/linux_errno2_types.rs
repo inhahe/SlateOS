@@ -107,8 +107,15 @@ mod tests {
     #[test]
     fn test_extended_errnos_distinct() {
         let errs = [
-            EDEADLK, ENAMETOOLONG, ENOLCK, ENOSYS, ENOTEMPTY,
-            ELOOP, ENOMSG, EIDRM, ENOTSUP,
+            EDEADLK,
+            ENAMETOOLONG,
+            ENOLCK,
+            ENOSYS,
+            ENOTEMPTY,
+            ELOOP,
+            ENOMSG,
+            EIDRM,
+            ENOTSUP,
         ];
         for i in 0..errs.len() {
             for j in (i + 1)..errs.len() {
@@ -120,10 +127,20 @@ mod tests {
     #[test]
     fn test_network_errnos_distinct() {
         let errs = [
-            ENETDOWN, ENETUNREACH, ENETRESET, ECONNABORTED,
-            ECONNRESET, ENOBUFS, EISCONN, ENOTCONN,
-            ETIMEDOUT, ECONNREFUSED, EHOSTDOWN, EHOSTUNREACH,
-            EALREADY, EINPROGRESS,
+            ENETDOWN,
+            ENETUNREACH,
+            ENETRESET,
+            ECONNABORTED,
+            ECONNRESET,
+            ENOBUFS,
+            EISCONN,
+            ENOTCONN,
+            ETIMEDOUT,
+            ECONNREFUSED,
+            EHOSTDOWN,
+            EHOSTUNREACH,
+            EALREADY,
+            EINPROGRESS,
         ];
         for i in 0..errs.len() {
             for j in (i + 1)..errs.len() {
@@ -135,8 +152,13 @@ mod tests {
     #[test]
     fn test_socket_errnos_distinct() {
         let errs = [
-            ENOTSOCK, EDESTADDRREQ, EMSGSIZE, ENOPROTOOPT,
-            EPROTONOSUPPORT, EADDRINUSE, EADDRNOTAVAIL,
+            ENOTSOCK,
+            EDESTADDRREQ,
+            EMSGSIZE,
+            ENOPROTOOPT,
+            EPROTONOSUPPORT,
+            EADDRINUSE,
+            EADDRNOTAVAIL,
             EAFNOSUPPORT,
         ];
         for i in 0..errs.len() {

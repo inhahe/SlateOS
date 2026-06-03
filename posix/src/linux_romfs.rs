@@ -72,9 +72,14 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            ROMFS_TYPE_HARDLINK, ROMFS_TYPE_DIRECTORY, ROMFS_TYPE_REGULAR,
-            ROMFS_TYPE_SYMLINK, ROMFS_TYPE_BLKDEV, ROMFS_TYPE_CHRDEV,
-            ROMFS_TYPE_SOCKET, ROMFS_TYPE_FIFO,
+            ROMFS_TYPE_HARDLINK,
+            ROMFS_TYPE_DIRECTORY,
+            ROMFS_TYPE_REGULAR,
+            ROMFS_TYPE_SYMLINK,
+            ROMFS_TYPE_BLKDEV,
+            ROMFS_TYPE_CHRDEV,
+            ROMFS_TYPE_SOCKET,
+            ROMFS_TYPE_FIFO,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

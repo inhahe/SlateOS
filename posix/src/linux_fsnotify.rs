@@ -98,9 +98,18 @@ mod tests {
     #[test]
     fn test_event_types_powers_of_two() {
         let events = [
-            FS_ACCESS, FS_MODIFY, FS_ATTRIB, FS_CLOSE_WRITE,
-            FS_CLOSE_NOWRITE, FS_OPEN, FS_MOVED_FROM, FS_MOVED_TO,
-            FS_CREATE, FS_DELETE, FS_DELETE_SELF, FS_MOVE_SELF,
+            FS_ACCESS,
+            FS_MODIFY,
+            FS_ATTRIB,
+            FS_CLOSE_WRITE,
+            FS_CLOSE_NOWRITE,
+            FS_OPEN,
+            FS_MOVED_FROM,
+            FS_MOVED_TO,
+            FS_CREATE,
+            FS_DELETE,
+            FS_DELETE_SELF,
+            FS_MOVE_SELF,
             FS_OPEN_EXEC,
         ];
         for event in &events {
@@ -111,9 +120,18 @@ mod tests {
     #[test]
     fn test_event_types_no_overlap() {
         let events = [
-            FS_ACCESS, FS_MODIFY, FS_ATTRIB, FS_CLOSE_WRITE,
-            FS_CLOSE_NOWRITE, FS_OPEN, FS_MOVED_FROM, FS_MOVED_TO,
-            FS_CREATE, FS_DELETE, FS_DELETE_SELF, FS_MOVE_SELF,
+            FS_ACCESS,
+            FS_MODIFY,
+            FS_ATTRIB,
+            FS_CLOSE_WRITE,
+            FS_CLOSE_NOWRITE,
+            FS_OPEN,
+            FS_MOVED_FROM,
+            FS_MOVED_TO,
+            FS_CREATE,
+            FS_DELETE,
+            FS_DELETE_SELF,
+            FS_MOVE_SELF,
             FS_OPEN_EXEC,
         ];
         for i in 0..events.len() {
@@ -125,7 +143,11 @@ mod tests {
 
     #[test]
     fn test_event_info_types_distinct() {
-        let types = [FSNOTIFY_EVENT_PATH, FSNOTIFY_EVENT_INODE, FSNOTIFY_EVENT_ERROR];
+        let types = [
+            FSNOTIFY_EVENT_PATH,
+            FSNOTIFY_EVENT_INODE,
+            FSNOTIFY_EVENT_ERROR,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);

@@ -119,8 +119,10 @@ mod tests {
     #[test]
     fn test_module_states_distinct() {
         let states = [
-            MODULE_STATE_LIVE, MODULE_STATE_COMING,
-            MODULE_STATE_GOING, MODULE_STATE_UNFORMED,
+            MODULE_STATE_LIVE,
+            MODULE_STATE_COMING,
+            MODULE_STATE_GOING,
+            MODULE_STATE_UNFORMED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -132,8 +134,11 @@ mod tests {
     #[test]
     fn test_module_files_distinct() {
         let files = [
-            MODULES_DEP, MODULES_ALIAS, MODULES_SYMBOLS,
-            MODULES_BUILTIN, MODULES_ORDER,
+            MODULES_DEP,
+            MODULES_ALIAS,
+            MODULES_SYMBOLS,
+            MODULES_BUILTIN,
+            MODULES_ORDER,
         ];
         for i in 0..files.len() {
             for j in (i + 1)..files.len() {
@@ -145,8 +150,10 @@ mod tests {
     #[test]
     fn test_extensions_distinct() {
         let exts = [
-            MODULE_EXT_KO, MODULE_EXT_KO_GZ,
-            MODULE_EXT_KO_XZ, MODULE_EXT_KO_ZSTD,
+            MODULE_EXT_KO,
+            MODULE_EXT_KO_GZ,
+            MODULE_EXT_KO_XZ,
+            MODULE_EXT_KO_ZSTD,
         ];
         for i in 0..exts.len() {
             for j in (i + 1)..exts.len() {
@@ -158,8 +165,10 @@ mod tests {
     #[test]
     fn test_extensions_start_with_ko() {
         let exts = [
-            MODULE_EXT_KO, MODULE_EXT_KO_GZ,
-            MODULE_EXT_KO_XZ, MODULE_EXT_KO_ZSTD,
+            MODULE_EXT_KO,
+            MODULE_EXT_KO_GZ,
+            MODULE_EXT_KO_XZ,
+            MODULE_EXT_KO_ZSTD,
         ];
         for ext in &exts {
             assert!(ext.starts_with(".ko"), "{}", ext);

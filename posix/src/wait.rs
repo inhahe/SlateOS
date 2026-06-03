@@ -119,7 +119,7 @@ mod tests {
     #[test]
     fn waitid_constants_match_linux() {
         assert_eq!(WEXITED, 4);
-        assert_eq!(WSTOPPED, 2);  // Same value as WUNTRACED
+        assert_eq!(WSTOPPED, 2); // Same value as WUNTRACED
         assert_eq!(WNOWAIT, 0x0100_0000);
     }
 

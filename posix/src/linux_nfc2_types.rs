@@ -86,9 +86,13 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            NFC_PROTO_JEWEL, NFC_PROTO_MIFARE, NFC_PROTO_FELICA,
-            NFC_PROTO_ISO14443, NFC_PROTO_NFC_DEP,
-            NFC_PROTO_ISO14443_B, NFC_PROTO_ISO15693,
+            NFC_PROTO_JEWEL,
+            NFC_PROTO_MIFARE,
+            NFC_PROTO_FELICA,
+            NFC_PROTO_ISO14443,
+            NFC_PROTO_NFC_DEP,
+            NFC_PROTO_ISO14443_B,
+            NFC_PROTO_ISO15693,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
@@ -120,9 +124,12 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            NFC_CMD_UNSPEC, NFC_CMD_GET_DEVICE,
-            NFC_CMD_START_POLL, NFC_CMD_STOP_POLL,
-            NFC_CMD_DEP_LINK_UP, NFC_CMD_DEP_LINK_DOWN,
+            NFC_CMD_UNSPEC,
+            NFC_CMD_GET_DEVICE,
+            NFC_CMD_START_POLL,
+            NFC_CMD_STOP_POLL,
+            NFC_CMD_DEP_LINK_UP,
+            NFC_CMD_DEP_LINK_DOWN,
             NFC_CMD_GET_TARGET,
         ];
         for i in 0..cmds.len() {

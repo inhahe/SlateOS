@@ -160,11 +160,16 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            NL80211_CMD_UNSPEC, NL80211_CMD_GET_WIPHY,
-            NL80211_CMD_SET_WIPHY, NL80211_CMD_GET_INTERFACE,
-            NL80211_CMD_TRIGGER_SCAN, NL80211_CMD_CONNECT,
-            NL80211_CMD_DISCONNECT, NL80211_CMD_START_AP,
-            NL80211_CMD_STOP_AP, NL80211_CMD_GET_STATION,
+            NL80211_CMD_UNSPEC,
+            NL80211_CMD_GET_WIPHY,
+            NL80211_CMD_SET_WIPHY,
+            NL80211_CMD_GET_INTERFACE,
+            NL80211_CMD_TRIGGER_SCAN,
+            NL80211_CMD_CONNECT,
+            NL80211_CMD_DISCONNECT,
+            NL80211_CMD_START_AP,
+            NL80211_CMD_STOP_AP,
+            NL80211_CMD_GET_STATION,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -176,10 +181,14 @@ mod tests {
     #[test]
     fn test_iftypes_distinct() {
         let types = [
-            NL80211_IFTYPE_UNSPECIFIED, NL80211_IFTYPE_ADHOC,
-            NL80211_IFTYPE_STATION, NL80211_IFTYPE_AP,
-            NL80211_IFTYPE_AP_VLAN, NL80211_IFTYPE_MONITOR,
-            NL80211_IFTYPE_MESH_POINT, NL80211_IFTYPE_P2P_CLIENT,
+            NL80211_IFTYPE_UNSPECIFIED,
+            NL80211_IFTYPE_ADHOC,
+            NL80211_IFTYPE_STATION,
+            NL80211_IFTYPE_AP,
+            NL80211_IFTYPE_AP_VLAN,
+            NL80211_IFTYPE_MONITOR,
+            NL80211_IFTYPE_MESH_POINT,
+            NL80211_IFTYPE_P2P_CLIENT,
             NL80211_IFTYPE_P2P_GO,
         ];
         for i in 0..types.len() {
@@ -199,9 +208,12 @@ mod tests {
     #[test]
     fn test_chan_widths_distinct() {
         let widths = [
-            NL80211_CHAN_WIDTH_20_NOHT, NL80211_CHAN_WIDTH_20,
-            NL80211_CHAN_WIDTH_40, NL80211_CHAN_WIDTH_80,
-            NL80211_CHAN_WIDTH_80P80, NL80211_CHAN_WIDTH_160,
+            NL80211_CHAN_WIDTH_20_NOHT,
+            NL80211_CHAN_WIDTH_20,
+            NL80211_CHAN_WIDTH_40,
+            NL80211_CHAN_WIDTH_80,
+            NL80211_CHAN_WIDTH_80P80,
+            NL80211_CHAN_WIDTH_160,
             NL80211_CHAN_WIDTH_320,
         ];
         for i in 0..widths.len() {
@@ -214,10 +226,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            NL80211_ATTR_UNSPEC, NL80211_ATTR_WIPHY,
-            NL80211_ATTR_WIPHY_NAME, NL80211_ATTR_IFINDEX,
-            NL80211_ATTR_IFNAME, NL80211_ATTR_IFTYPE,
-            NL80211_ATTR_MAC, NL80211_ATTR_SSID,
+            NL80211_ATTR_UNSPEC,
+            NL80211_ATTR_WIPHY,
+            NL80211_ATTR_WIPHY_NAME,
+            NL80211_ATTR_IFINDEX,
+            NL80211_ATTR_IFNAME,
+            NL80211_ATTR_IFTYPE,
+            NL80211_ATTR_MAC,
+            NL80211_ATTR_SSID,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

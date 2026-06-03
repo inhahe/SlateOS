@@ -80,8 +80,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            FW_OPT_UEVENT, FW_OPT_NO_WARN, FW_OPT_NOCACHE,
-            FW_OPT_NOWAIT, FW_OPT_FALLBACK_PLATFORM, FW_OPT_FULL_NAME,
+            FW_OPT_UEVENT,
+            FW_OPT_NO_WARN,
+            FW_OPT_NOCACHE,
+            FW_OPT_NOWAIT,
+            FW_OPT_FALLBACK_PLATFORM,
+            FW_OPT_FULL_NAME,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -94,8 +98,11 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            FW_STATE_NONE, FW_STATE_LOADING, FW_STATE_DONE,
-            FW_STATE_FAILED, FW_STATE_ABORTED,
+            FW_STATE_NONE,
+            FW_STATE_LOADING,
+            FW_STATE_DONE,
+            FW_STATE_FAILED,
+            FW_STATE_ABORTED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -107,8 +114,10 @@ mod tests {
     #[test]
     fn test_paths_distinct() {
         let paths = [
-            FW_PATH_PRIMARY, FW_PATH_UPDATES,
-            FW_PATH_VENDOR, FW_PATH_BUILTIN,
+            FW_PATH_PRIMARY,
+            FW_PATH_UPDATES,
+            FW_PATH_VENDOR,
+            FW_PATH_BUILTIN,
         ];
         for i in 0..paths.len() {
             for j in (i + 1)..paths.len() {
@@ -120,8 +129,11 @@ mod tests {
     #[test]
     fn test_upload_states_distinct() {
         let states = [
-            FW_UPLOAD_IDLE, FW_UPLOAD_RECEIVING,
-            FW_UPLOAD_PROGRAMMING, FW_UPLOAD_DONE, FW_UPLOAD_FAILED,
+            FW_UPLOAD_IDLE,
+            FW_UPLOAD_RECEIVING,
+            FW_UPLOAD_PROGRAMMING,
+            FW_UPLOAD_DONE,
+            FW_UPLOAD_FAILED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

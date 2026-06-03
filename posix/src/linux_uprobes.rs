@@ -81,7 +81,11 @@ mod tests {
 
     #[test]
     fn test_status_codes_distinct() {
-        let codes = [UPROBE_STATUS_ACTIVE, UPROBE_STATUS_INACTIVE, UPROBE_STATUS_ERROR];
+        let codes = [
+            UPROBE_STATUS_ACTIVE,
+            UPROBE_STATUS_INACTIVE,
+            UPROBE_STATUS_ERROR,
+        ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
                 assert_ne!(codes[i], codes[j]);

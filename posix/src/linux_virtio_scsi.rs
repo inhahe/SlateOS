@@ -106,7 +106,8 @@ mod tests {
     #[test]
     fn test_features_distinct() {
         let feats = [
-            VIRTIO_SCSI_F_HOTPLUG, VIRTIO_SCSI_F_CHANGE,
+            VIRTIO_SCSI_F_HOTPLUG,
+            VIRTIO_SCSI_F_CHANGE,
             VIRTIO_SCSI_F_T10_PI,
         ];
         for i in 0..feats.len() {
@@ -119,10 +120,14 @@ mod tests {
     #[test]
     fn test_tmf_subtypes_distinct() {
         let tmfs = [
-            VIRTIO_SCSI_T_TMF_ABORT_TASK, VIRTIO_SCSI_T_TMF_ABORT_TASK_SET,
-            VIRTIO_SCSI_T_TMF_CLEAR_ACA, VIRTIO_SCSI_T_TMF_CLEAR_TASK_SET,
-            VIRTIO_SCSI_T_TMF_I_T_NEXUS_RESET, VIRTIO_SCSI_T_TMF_LOGICAL_UNIT_RESET,
-            VIRTIO_SCSI_T_TMF_QUERY_TASK, VIRTIO_SCSI_T_TMF_QUERY_TASK_SET,
+            VIRTIO_SCSI_T_TMF_ABORT_TASK,
+            VIRTIO_SCSI_T_TMF_ABORT_TASK_SET,
+            VIRTIO_SCSI_T_TMF_CLEAR_ACA,
+            VIRTIO_SCSI_T_TMF_CLEAR_TASK_SET,
+            VIRTIO_SCSI_T_TMF_I_T_NEXUS_RESET,
+            VIRTIO_SCSI_T_TMF_LOGICAL_UNIT_RESET,
+            VIRTIO_SCSI_T_TMF_QUERY_TASK,
+            VIRTIO_SCSI_T_TMF_QUERY_TASK_SET,
         ];
         for i in 0..tmfs.len() {
             for j in (i + 1)..tmfs.len() {
@@ -134,10 +139,16 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let codes = [
-            VIRTIO_SCSI_S_OK, VIRTIO_SCSI_S_OVERRUN, VIRTIO_SCSI_S_ABORTED,
-            VIRTIO_SCSI_S_BAD_TARGET, VIRTIO_SCSI_S_RESET, VIRTIO_SCSI_S_BUSY,
-            VIRTIO_SCSI_S_TRANSPORT_FAILURE, VIRTIO_SCSI_S_TARGET_FAILURE,
-            VIRTIO_SCSI_S_NEXUS_FAILURE, VIRTIO_SCSI_S_FAILURE,
+            VIRTIO_SCSI_S_OK,
+            VIRTIO_SCSI_S_OVERRUN,
+            VIRTIO_SCSI_S_ABORTED,
+            VIRTIO_SCSI_S_BAD_TARGET,
+            VIRTIO_SCSI_S_RESET,
+            VIRTIO_SCSI_S_BUSY,
+            VIRTIO_SCSI_S_TRANSPORT_FAILURE,
+            VIRTIO_SCSI_S_TARGET_FAILURE,
+            VIRTIO_SCSI_S_NEXUS_FAILURE,
+            VIRTIO_SCSI_S_FAILURE,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

@@ -85,8 +85,12 @@ mod tests {
     #[test]
     fn test_error_types_distinct() {
         let types = [
-            RAS_TYPE_MEMORY, RAS_TYPE_CPU, RAS_TYPE_PCIE,
-            RAS_TYPE_PLATFORM, RAS_TYPE_CXL, RAS_TYPE_DISK,
+            RAS_TYPE_MEMORY,
+            RAS_TYPE_CPU,
+            RAS_TYPE_PCIE,
+            RAS_TYPE_PLATFORM,
+            RAS_TYPE_CXL,
+            RAS_TYPE_DISK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -105,9 +109,12 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            RAS_ACTION_NONE, RAS_ACTION_OFFLINE_PAGE,
-            RAS_ACTION_ISOLATE_CPU, RAS_ACTION_RESET_DEVICE,
-            RAS_ACTION_PANIC, RAS_ACTION_NOTIFY,
+            RAS_ACTION_NONE,
+            RAS_ACTION_OFFLINE_PAGE,
+            RAS_ACTION_ISOLATE_CPU,
+            RAS_ACTION_RESET_DEVICE,
+            RAS_ACTION_PANIC,
+            RAS_ACTION_NOTIFY,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -119,9 +126,13 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            RAS_EVENT_MC_CE, RAS_EVENT_MC_UE, RAS_EVENT_AER_CE,
-            RAS_EVENT_AER_NONFATAL, RAS_EVENT_AER_FATAL,
-            RAS_EVENT_MCE, RAS_EVENT_CXL,
+            RAS_EVENT_MC_CE,
+            RAS_EVENT_MC_UE,
+            RAS_EVENT_AER_CE,
+            RAS_EVENT_AER_NONFATAL,
+            RAS_EVENT_AER_FATAL,
+            RAS_EVENT_MCE,
+            RAS_EVENT_CXL,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

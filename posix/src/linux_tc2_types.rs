@@ -84,9 +84,14 @@ mod tests {
         // TC_ACT_OK == TCA_ACT_UNSPEC == 0, which is by design.
         // All non-zero actions must be distinct.
         let actions = [
-            TC_ACT_RECLASSIFY, TC_ACT_SHOT, TC_ACT_PIPE,
-            TC_ACT_STOLEN, TC_ACT_QUEUED, TC_ACT_REPEAT,
-            TC_ACT_REDIRECT, TC_ACT_TRAP,
+            TC_ACT_RECLASSIFY,
+            TC_ACT_SHOT,
+            TC_ACT_PIPE,
+            TC_ACT_STOLEN,
+            TC_ACT_QUEUED,
+            TC_ACT_REPEAT,
+            TC_ACT_REDIRECT,
+            TC_ACT_TRAP,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -118,8 +123,11 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            ETH_P_ALL_TC, ETH_P_IP_TC, ETH_P_IPV6_TC,
-            ETH_P_ARP_TC, ETH_P_8021Q_TC,
+            ETH_P_ALL_TC,
+            ETH_P_IP_TC,
+            ETH_P_IPV6_TC,
+            ETH_P_ARP_TC,
+            ETH_P_8021Q_TC,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {

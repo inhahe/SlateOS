@@ -281,10 +281,9 @@ fn normalize_path(input: &[u8], out: &mut [u8]) -> Option<usize> {
         out_len = out_len.wrapping_add(1);
 
         for j in 0..comp_len {
-            if let (Some(dst), Some(&src)) = (
-                out.get_mut(out_len),
-                input.get(start.wrapping_add(j)),
-            ) {
+            if let (Some(dst), Some(&src)) =
+                (out.get_mut(out_len), input.get(start.wrapping_add(j)))
+            {
                 *dst = src;
                 out_len = out_len.wrapping_add(1);
             }
@@ -342,9 +341,7 @@ pub unsafe fn resolve_path(path: *const u8, out: &mut [u8; PATH_MAX]) -> Option<
             return None;
         }
         // SAFETY: cwd_buf_ptr() is valid for PATH_MAX bytes; cwd_len <= PATH_MAX.
-        let cwd = unsafe {
-            core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len)
-        };
+        let cwd = unsafe { core::slice::from_raw_parts(cwd_buf_ptr().cast::<u8>(), cwd_len) };
 
         // Copy CWD into the combined buffer.
         let mut pos: usize = 0;
@@ -356,8 +353,7 @@ pub unsafe fn resolve_path(path: *const u8, out: &mut [u8; PATH_MAX]) -> Option<
         }
 
         // Append separator unless CWD already ends with '/'.
-        let last_is_slash = pos > 0
-            && combined.get(pos.wrapping_sub(1)) == Some(&b'/');
+        let last_is_slash = pos > 0 && combined.get(pos.wrapping_sub(1)) == Some(&b'/');
         if !last_is_slash {
             if pos >= PATH_MAX {
                 return None;
@@ -618,11 +614,7 @@ pub extern "C" fn setuid(uid: UidT) -> i32 {
     // matches the effective or saved uid; in our flat model those
     // are also 0, so the same "uid == 0 always OK" rule covers all
     // three Linux match arms simultaneously.
-    if uid != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SETUID,
-        )
-    {
+    if uid != 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -655,11 +647,7 @@ pub extern "C" fn setuid(uid: UidT) -> i32 {
 pub extern "C" fn seteuid(uid: UidT) -> i32 {
     // Phase 192: same rule as setuid — target == 0 always OK; non-zero
     // requires CAP_SETUID.
-    if uid != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SETUID,
-        )
-    {
+    if uid != 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -692,11 +680,7 @@ pub extern "C" fn setgid(gid: GidT) -> i32 {
     // effective or saved gid; in our flat model those are also 0,
     // so the same "gid == 0 always OK" rule covers all three Linux
     // match arms simultaneously.
-    if gid != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SETGID,
-        )
-    {
+    if gid != 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -728,11 +712,7 @@ pub extern "C" fn setgid(gid: GidT) -> i32 {
 pub extern "C" fn setegid(gid: GidT) -> i32 {
     // Phase 193: same rule as setgid — target == 0 always OK; non-zero
     // requires CAP_SETGID.
-    if gid != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SETGID,
-        )
-    {
+    if gid != 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -771,18 +751,14 @@ pub extern "C" fn setreuid(ruid: UidT, euid: UidT) -> i32 {
     // persisted state to roll back).
     if ruid != UidT::MAX
         && ruid != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SETUID,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID)
     {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
     if euid != UidT::MAX
         && euid != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SETUID,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID)
     {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
@@ -803,18 +779,14 @@ pub extern "C" fn setreuid(ruid: UidT, euid: UidT) -> i32 {
 pub extern "C" fn setregid(rgid: GidT, egid: GidT) -> i32 {
     if rgid != GidT::MAX
         && rgid != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SETGID,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID)
     {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
     if egid != GidT::MAX
         && egid != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SETGID,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID)
     {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
@@ -886,9 +858,7 @@ pub extern "C" fn setgroups(size: usize, list: *const GidT) -> i32 {
     // The previous "we're single-user, no EPERM path" doctring was
     // stale — capabilities have existed since the cred-model phases,
     // and Linux's order is cap-check-then-validate.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SETGID,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -955,9 +925,7 @@ static mut HOSTNAME_LEN: usize = 9; // "localhost".len()
 pub(crate) fn copy_hostname(out: &mut [u8]) -> usize {
     // SAFETY: Single-address-space, no concurrent writes during the read.
     // Same access pattern as `gethostname()` above.
-    let (src_ptr, src_len) = unsafe {
-        (&raw const HOSTNAME_BUF, HOSTNAME_LEN)
-    };
+    let (src_ptr, src_len) = unsafe { (&raw const HOSTNAME_BUF, HOSTNAME_LEN) };
     let n = core::cmp::min(out.len(), src_len);
     let mut i = 0;
     while i < n {
@@ -1009,9 +977,7 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
 
     // SAFETY: single-address-space, no concurrent writes during read.
     // Use raw pointers to comply with Rust 2024 `static_mut_refs` rules.
-    let (hostname_ptr, hlen) = unsafe {
-        (&raw const HOSTNAME_BUF, HOSTNAME_LEN)
-    };
+    let (hostname_ptr, hlen) = unsafe { (&raw const HOSTNAME_BUF, HOSTNAME_LEN) };
     let needed = hlen.wrapping_add(1); // +null
     if len < needed {
         errno::set_errno(errno::ENAMETOOLONG);
@@ -1030,7 +996,9 @@ pub extern "C" fn gethostname(name: *mut u8, len: usize) -> i32 {
     }
     // Null-terminate.
     // SAFETY: idx == hlen < len, so name.add(idx) is valid.
-    unsafe { *name.add(idx) = 0; }
+    unsafe {
+        *name.add(idx) = 0;
+    }
     0
 }
 
@@ -1048,9 +1016,7 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
     }
 
     // SAFETY: single-address-space, no concurrent writes during read.
-    let (domain_ptr, dlen) = unsafe {
-        (&raw const DOMAIN_BUF, DOMAIN_LEN)
-    };
+    let (domain_ptr, dlen) = unsafe { (&raw const DOMAIN_BUF, DOMAIN_LEN) };
     let needed = dlen.wrapping_add(1); // +null
     if len < needed {
         errno::set_errno(errno::EINVAL);
@@ -1068,7 +1034,9 @@ pub extern "C" fn getdomainname(name: *mut u8, len: usize) -> i32 {
         idx = idx.wrapping_add(1);
     }
     // SAFETY: dlen < len (checked above).
-    unsafe { *name.add(dlen) = 0; }
+    unsafe {
+        *name.add(dlen) = 0;
+    }
     0
 }
 
@@ -1093,9 +1061,7 @@ pub extern "C" fn setdomainname(name: *const u8, len: usize) -> i32 {
     //    the domain name" predates the cred model — now that
     //    capabilities exist, Linux's sys_setdomainname ordering
     //    applies.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_ADMIN,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -1186,15 +1152,15 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
         }
         _SC_OPEN_MAX => crate::fdtable::MAX_FDS as i64,
         _SC_LOGIN_NAME_MAX => i64::from(crate::limits::LOGIN_NAME_MAX),
-        _SC_CLK_TCK => 100,            // 100 Hz timer tick (Linux default).
+        _SC_CLK_TCK => 100, // 100 Hz timer tick (Linux default).
         _SC_ARG_MAX => i64::from(crate::limits::ARG_MAX),
-        _SC_CHILD_MAX => 1024,         // Max child processes.
+        _SC_CHILD_MAX => 1024, // Max child processes.
         _SC_IOV_MAX => i64::from(crate::limits::IOV_MAX),
         _SC_NGROUPS_MAX => i64::from(crate::limits::NGROUPS_MAX),
-        _SC_VERSION | _SC_THREADS => 200_809,  // POSIX.1-2008 / threads supported (version).
+        _SC_VERSION | _SC_THREADS => 200_809, // POSIX.1-2008 / threads supported (version).
         _SC_HOST_NAME_MAX => HOST_NAME_MAX as i64,
         _SC_LINE_MAX => i64::from(crate::limits::LINE_MAX),
-        _SC_THREAD_STACK_MIN => 65536,  // 64 KiB minimum thread stack.
+        _SC_THREAD_STACK_MIN => 65536, // 64 KiB minimum thread stack.
         _SC_PHYS_PAGES => {
             // 16 KiB pages — kernel returns the count of 16 KiB frames it manages.
             #[cfg(target_os = "none")]
@@ -1203,7 +1169,9 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
                 if n >= 1 { n } else { 1 }
             }
             #[cfg(not(target_os = "none"))]
-            { 8192 }                    // host test fallback (~128 MiB at 16 KiB pages)
+            {
+                8192
+            } // host test fallback (~128 MiB at 16 KiB pages)
         }
         _SC_AVPHYS_PAGES => {
             #[cfg(target_os = "none")]
@@ -1212,15 +1180,17 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
                 if n >= 0 { n } else { 0 }
             }
             #[cfg(not(target_os = "none"))]
-            { 4096 }                    // host test fallback (~64 MiB at 16 KiB pages)
+            {
+                4096
+            } // host test fallback (~64 MiB at 16 KiB pages)
         }
-        _SC_GETPW_R_SIZE_MAX => 1024,   // Suggested passwd buffer size (glibc default).
-        _SC_GETGR_R_SIZE_MAX => 1024,   // Suggested group buffer size.
-        _SC_SYMLOOP_MAX => 40,          // Max symlink resolution depth (Linux default).
-        _SC_STREAM_MAX => 16,           // Max stdio streams (our FILE_POOL size).
+        _SC_GETPW_R_SIZE_MAX => 1024, // Suggested passwd buffer size (glibc default).
+        _SC_GETGR_R_SIZE_MAX => 1024, // Suggested group buffer size.
+        _SC_SYMLOOP_MAX => 40,        // Max symlink resolution depth (Linux default).
+        _SC_STREAM_MAX => 16,         // Max stdio streams (our FILE_POOL size).
         _SC_TTY_NAME_MAX => i64::from(crate::limits::TTY_NAME_MAX),
-        _SC_RE_DUP_MAX => 255,          // Max RE_DUP count (POSIX minimum 255).
-        _SC_TZNAME_MAX => 6,            // Timezone name max (POSIX minimum 6).
+        _SC_RE_DUP_MAX => 255, // Max RE_DUP count (POSIX minimum 255).
+        _SC_TZNAME_MAX => 6,   // Timezone name max (POSIX minimum 6).
         _SC_MQ_OPEN_MAX => i64::from(crate::limits::MQ_OPEN_MAX),
         _SC_MQ_PRIO_MAX => i64::from(crate::limits::MQ_PRIO_MAX),
         _SC_SEM_VALUE_MAX => i64::from(crate::limits::SEM_VALUE_MAX),
@@ -1231,9 +1201,11 @@ pub extern "C" fn sysconf(name: i32) -> i64 {
         _SC_BC_STRING_MAX => i64::from(crate::limits::BC_STRING_MAX),
         _SC_COLL_WEIGHTS_MAX => i64::from(crate::limits::COLL_WEIGHTS_MAX),
         _SC_EXPR_NEST_MAX => i64::from(crate::limits::EXPR_NEST_MAX),
-        _SC_2_VERSION | _SC_2_C_BIND => 200_809,  // POSIX.1-2008 conformance.
-        _SC_THREAD_DESTRUCTOR_ITERATIONS => i64::from(crate::limits::_POSIX_THREAD_DESTRUCTOR_ITERATIONS),
-        _SC_THREAD_THREADS_MAX => 1024,   // Max threads (no hard kernel limit yet).
+        _SC_2_VERSION | _SC_2_C_BIND => 200_809, // POSIX.1-2008 conformance.
+        _SC_THREAD_DESTRUCTOR_ITERATIONS => {
+            i64::from(crate::limits::_POSIX_THREAD_DESTRUCTOR_ITERATIONS)
+        }
+        _SC_THREAD_THREADS_MAX => 1024, // Max threads (no hard kernel limit yet).
         _SC_THREAD_KEYS_MAX => i64::from(crate::limits::_POSIX_THREAD_KEYS_MAX),
         _ => {
             errno::set_errno(errno::EINVAL);
@@ -1317,15 +1289,15 @@ pub extern "C" fn pathconf(_path: *const u8, name: i32) -> i64 {
     // Return the same values regardless of path — we don't have
     // per-filesystem limits yet.
     match name {
-        _PC_LINK_MAX => 127,                                      // Max hard links.
-        _PC_MAX_CANON | _PC_MAX_INPUT => 255,                     // Terminal line limits.
-        _PC_NAME_MAX => i64::from(crate::limits::NAME_MAX),       // Max filename length.
+        _PC_LINK_MAX => 127,                                // Max hard links.
+        _PC_MAX_CANON | _PC_MAX_INPUT => 255,               // Terminal line limits.
+        _PC_NAME_MAX => i64::from(crate::limits::NAME_MAX), // Max filename length.
         _PC_PATH_MAX => PATH_MAX as i64,
-        _PC_PIPE_BUF => i64::from(crate::limits::PIPE_BUF),      // Atomic pipe write size.
-        _PC_CHOWN_RESTRICTED => 1,                                // chown restricted to root.
-        _PC_NO_TRUNC => 1,                                        // Long names cause error.
-        _PC_VDISABLE => 0,                                        // Characters can be disabled.
-        _PC_FILESIZEBITS => 64,                                   // Max file size bits.
+        _PC_PIPE_BUF => i64::from(crate::limits::PIPE_BUF), // Atomic pipe write size.
+        _PC_CHOWN_RESTRICTED => 1,                          // chown restricted to root.
+        _PC_NO_TRUNC => 1,                                  // Long names cause error.
+        _PC_VDISABLE => 0,                                  // Characters can be disabled.
+        _PC_FILESIZEBITS => 64,                             // Max file size bits.
         _PC_SYMLINK_MAX => i64::from(crate::limits::SYMLINK_MAX), // Max symlink target length.
         _ => {
             errno::set_errno(errno::EINVAL);
@@ -1378,17 +1350,25 @@ pub extern "C" fn confstr(name: i32, buf: *mut u8, len: usize) -> usize {
     let needed = value.len().wrapping_add(1);
 
     if !buf.is_null() && len > 0 {
-        let copy_len = if value.len() < len { value.len() } else { len.wrapping_sub(1) };
+        let copy_len = if value.len() < len {
+            value.len()
+        } else {
+            len.wrapping_sub(1)
+        };
         let mut i: usize = 0;
         while i < copy_len {
             if let Some(&b) = value.get(i) {
                 // SAFETY: i < copy_len <= len, buf is valid for len bytes.
-                unsafe { *buf.add(i) = b; }
+                unsafe {
+                    *buf.add(i) = b;
+                }
             }
             i = i.wrapping_add(1);
         }
         // Null-terminate.
-        unsafe { *buf.add(i) = 0; }
+        unsafe {
+            *buf.add(i) = 0;
+        }
     }
 
     needed
@@ -1521,11 +1501,7 @@ pub extern "C" fn canonicalize_file_name(path: *const u8) -> *mut u8 {
     // Copy the resolved path and null-terminate.
     // SAFETY: buf is valid for resolved_len+1 bytes; resolved is valid.
     unsafe {
-        core::ptr::copy_nonoverlapping(
-            resolved.as_ptr(),
-            buf,
-            resolved_len,
-        );
+        core::ptr::copy_nonoverlapping(resolved.as_ptr(), buf, resolved_len);
         *buf.add(resolved_len) = 0;
     }
 
@@ -1576,9 +1552,7 @@ pub extern "C" fn sethostname(name: *const u8, len: usize) -> i32 {
     //    sys_sethostname checks ns_capable(uts_ns->user_ns,
     //    CAP_SYS_ADMIN) at the top of the syscall prologue,
     //    before any argument validation.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_ADMIN,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -1719,7 +1693,11 @@ pub extern "C" fn sethostid(hostid: i64) -> i32 {
     // the FNV-derived value of the current hostname so the round-trip
     // through 0 is a no-op: gethostid() before sethostid(0) and after
     // both return the same hostname-derived hash.
-    let to_store = if truncated == 0 { gethostid() } else { truncated };
+    let to_store = if truncated == 0 {
+        gethostid()
+    } else {
+        truncated
+    };
     HOSTID.store(to_store, Ordering::Relaxed);
     0
 }
@@ -1762,9 +1740,7 @@ pub extern "C" fn chroot(path: *const u8) -> i32 {
     // user_path_at + inode_permission, so path-domain errors still
     // beat EPERM.  We don't yet do inode_permission, so EPERM
     // immediately follows the path-syntax checks.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_CHROOT,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_CHROOT) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -1843,16 +1819,15 @@ pub extern "C" fn getloadavg(loadavg: *mut f64, nelem: i32) -> i32 {
             {
                 // Kernel FSHIFT — must match crate::loadavg::FSHIFT (11).
                 const FIXED_1_F: f64 = 2048.0;
-                let raw = crate::syscall::syscall1(
-                    crate::syscall::SYS_LOADAVG,
-                    i as u64,
-                );
+                let raw = crate::syscall::syscall1(crate::syscall::SYS_LOADAVG, i as u64);
                 // Negative = kernel error (shouldn't happen for 0..=2);
                 // treat as zero load.
                 if raw < 0 { 0.0 } else { raw as f64 / FIXED_1_F }
             }
             #[cfg(not(target_os = "none"))]
-            { 0.0 }
+            {
+                0.0
+            }
         };
         // SAFETY: loadavg is valid for at least nelem elements (caller
         // contract), and i < count <= nelem.
@@ -2013,7 +1988,9 @@ pub(crate) fn fill_random(buf: *mut u8, len: usize) {
         // Extract byte from upper bits (better quality).
         let byte = (state >> 56) as u8;
         // SAFETY: i < len, buf is valid for len bytes.
-        unsafe { *buf.add(i) = byte; }
+        unsafe {
+            *buf.add(i) = byte;
+        }
         i = i.wrapping_add(1);
     }
 }
@@ -2111,8 +2088,7 @@ pub const TASK_COMM_LEN: usize = 16;
 /// 0), which silently disabled the security semantics that callers
 /// like Chromium's sandbox and Docker's `--security-opt=no-new-privileges`
 /// rely on.
-static NO_NEW_PRIVS: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static NO_NEW_PRIVS: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// Read the current `no_new_privs` bit (Phase 160).
 ///
@@ -2280,9 +2256,7 @@ pub extern "C" fn setresuid(ruid: UidT, euid: UidT, suid: UidT) -> i32 {
     // fields are accepted as-is (matches Linux's outer `if (!cap)`
     // guard).  Otherwise check each non-sentinel field against the
     // current uid (always 0 in our flat model).
-    if crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SETUID,
-    ) {
+    if crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID) {
         return 0;
     }
     if ruid != UidT::MAX && ruid != 0 {
@@ -2311,9 +2285,7 @@ pub extern "C" fn setresuid(ruid: UidT, euid: UidT, suid: UidT) -> i32 {
 /// **Phase 195:** previous stub silently succeeded.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setresgid(rgid: GidT, egid: GidT, sgid: GidT) -> i32 {
-    if crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SETGID,
-    ) {
+    if crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID) {
         return 0;
     }
     if rgid != GidT::MAX && rgid != 0 {
@@ -2422,7 +2394,11 @@ fn read_process_count() -> u16 {
     }
     #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
     let n = raw as u64;
-    if n > u64::from(u16::MAX) { u16::MAX } else { n as u16 }
+    if n > u64::from(u16::MAX) {
+        u16::MAX
+    } else {
+        n as u16
+    }
 }
 
 #[cfg(not(target_os = "none"))]
@@ -2459,7 +2435,11 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
 
     // Get uptime from monotonic clock (nanoseconds → seconds).
     let mono_ns = syscall0(SYS_CLOCK_MONOTONIC);
-    let uptime = if mono_ns > 0 { mono_ns / 1_000_000_000 } else { 0 };
+    let uptime = if mono_ns > 0 {
+        mono_ns / 1_000_000_000
+    } else {
+        0
+    };
 
     // SAFETY: info is verified non-null and points to a valid Sysinfo.
     unsafe {
@@ -2488,7 +2468,11 @@ pub extern "C" fn sysinfo(info: *mut Sysinfo) -> i32 {
             #[allow(clippy::cast_sign_loss)]
             let load_for = |idx: u64| -> u64 {
                 let raw = syscall1(SYS_LOADAVG, idx);
-                if raw < 0 { 0 } else { (raw as u64).saturating_mul(32) }
+                if raw < 0 {
+                    0
+                } else {
+                    (raw as u64).saturating_mul(32)
+                }
             };
             s.loads = [load_for(0), load_for(1), load_for(2)];
 
@@ -2603,8 +2587,7 @@ pub const PERSONALITY_QUERY: u32 = 0xFFFF_FFFF;
 /// process-wide atomic until our process subsystem exposes per-task
 /// credentials.  Initial value `0` is `PER_LINUX` — the standard
 /// Linux execution domain.
-static PERSONALITY_STATE: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(0);
+static PERSONALITY_STATE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Read the current personality without altering it.
 ///
@@ -2801,9 +2784,7 @@ pub extern "C" fn ptrace(request: i32, pid: i32, _addr: u64, _data: u64) -> i64 
     // caller with a valid pid sees EPERM rather than ENOSYS, which is
     // the correct signal for "you don't have permission" vs. "this
     // syscall isn't implemented."
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_PTRACE,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -2869,9 +2850,7 @@ pub extern "C" fn swapon(path: *const u8, swapflags: i32) -> i32 {
     //    (Phase 164).  This must beat the flag-mask check so an
     //    unprivileged caller never learns whether their arguments are
     //    syntactically valid.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_ADMIN,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -2913,9 +2892,7 @@ pub extern "C" fn swapoff(path: *const u8) -> i32 {
     // 1. CAP_SYS_ADMIN check first — Linux's sys_swapoff prologue
     //    (Phase 164).  Must beat the user-pointer fault so an
     //    unprivileged caller never learns whether `path` is mapped.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_ADMIN,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -3064,8 +3041,7 @@ fn klog_drain(start_seq: u64) -> (usize, u64) {
     // The kernel ring holds 256 entries; cap iterations generously so a
     // misbehaving cursor can never spin forever.
     for _ in 0..1024 {
-        let (count, newest) =
-            klog_read_batch(after, scratch.as_mut_ptr(), scratch.len());
+        let (count, newest) = klog_read_batch(after, scratch.as_mut_ptr(), scratch.len());
         if count <= 0 {
             break;
         }
@@ -3177,12 +3153,11 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
                 return 0;
             }
         }
-        SYSLOG_ACTION_CONSOLE_LEVEL => {
-            if !(SYSLOG_LOG_LEVEL_MIN..=SYSLOG_LOG_LEVEL_MAX).contains(&len) {
+        SYSLOG_ACTION_CONSOLE_LEVEL
+            if !(SYSLOG_LOG_LEVEL_MIN..=SYSLOG_LOG_LEVEL_MAX).contains(&len) => {
                 errno::set_errno(errno::EINVAL);
                 return -1;
             }
-        }
         _ => {
             // CLOSE, OPEN, CLEAR, CONSOLE_OFF, CONSOLE_ON,
             // SIZE_UNREAD, SIZE_BUFFER — no buf/len validation needed.
@@ -3204,11 +3179,7 @@ pub extern "C" fn klogctl(cmd: i32, buf: *mut u8, len: i32) -> i32 {
             | SYSLOG_ACTION_READ_ALL
             | SYSLOG_ACTION_SIZE_UNREAD,
     );
-    if cap_required
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYSLOG,
-        )
-    {
+    if cap_required && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYSLOG) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -3339,7 +3310,9 @@ pub extern "C" fn futimesat(
     }
     let mut full = [0u8; PATH_MAX];
     let len = crate::file::resolve_dirfd_path(dirfd, path, &mut full);
-    if len == 0 { return -1; }
+    if len == 0 {
+        return -1;
+    }
     crate::file::utimes(full.as_ptr(), times)
 }
 
@@ -3398,7 +3371,9 @@ pub extern "C" fn get_current_dir_name() -> *mut u8 {
         return core::ptr::null_mut();
     }
     // SAFETY: ptr is valid for alloc_size bytes.
-    unsafe { core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, alloc_size); }
+    unsafe {
+        core::ptr::copy_nonoverlapping(buf.as_ptr(), ptr, alloc_size);
+    }
     ptr
 }
 
@@ -3608,10 +3583,7 @@ mod tests {
     fn test_sysconf_nprocessors_conf_ge_onln() {
         // Configured CPUs should be >= online CPUs.  We don't model offline
         // CPUs, so they're equal.
-        assert_eq!(
-            sysconf(_SC_NPROCESSORS_CONF),
-            sysconf(_SC_NPROCESSORS_ONLN),
-        );
+        assert_eq!(sysconf(_SC_NPROCESSORS_CONF), sysconf(_SC_NPROCESSORS_ONLN),);
     }
 
     #[test]
@@ -3649,7 +3621,10 @@ mod tests {
     #[test]
     fn test_sysconf_re_dup_max() {
         let val = sysconf(_SC_RE_DUP_MAX);
-        assert!(val >= 255, "RE_DUP_MAX should be at least POSIX minimum 255");
+        assert!(
+            val >= 255,
+            "RE_DUP_MAX should be at least POSIX minimum 255"
+        );
     }
 
     #[test]
@@ -3661,12 +3636,21 @@ mod tests {
     fn test_sysconf_new_constants() {
         // Verify all newly added _SC_* constants return positive values.
         let new_names = [
-            _SC_TZNAME_MAX, _SC_MQ_OPEN_MAX, _SC_MQ_PRIO_MAX,
-            _SC_SEM_VALUE_MAX, _SC_TIMER_MAX,
-            _SC_BC_BASE_MAX, _SC_BC_DIM_MAX, _SC_BC_SCALE_MAX,
-            _SC_BC_STRING_MAX, _SC_COLL_WEIGHTS_MAX, _SC_EXPR_NEST_MAX,
-            _SC_2_VERSION, _SC_2_C_BIND,
-            _SC_THREAD_DESTRUCTOR_ITERATIONS, _SC_THREAD_THREADS_MAX,
+            _SC_TZNAME_MAX,
+            _SC_MQ_OPEN_MAX,
+            _SC_MQ_PRIO_MAX,
+            _SC_SEM_VALUE_MAX,
+            _SC_TIMER_MAX,
+            _SC_BC_BASE_MAX,
+            _SC_BC_DIM_MAX,
+            _SC_BC_SCALE_MAX,
+            _SC_BC_STRING_MAX,
+            _SC_COLL_WEIGHTS_MAX,
+            _SC_EXPR_NEST_MAX,
+            _SC_2_VERSION,
+            _SC_2_C_BIND,
+            _SC_THREAD_DESTRUCTOR_ITERATIONS,
+            _SC_THREAD_THREADS_MAX,
             _SC_THREAD_KEYS_MAX,
         ];
         for &name in &new_names {
@@ -3680,8 +3664,14 @@ mod tests {
 
     #[test]
     fn test_sysconf_mq_limits() {
-        assert_eq!(sysconf(_SC_MQ_OPEN_MAX), i64::from(crate::limits::MQ_OPEN_MAX));
-        assert_eq!(sysconf(_SC_MQ_PRIO_MAX), i64::from(crate::limits::MQ_PRIO_MAX));
+        assert_eq!(
+            sysconf(_SC_MQ_OPEN_MAX),
+            i64::from(crate::limits::MQ_OPEN_MAX)
+        );
+        assert_eq!(
+            sysconf(_SC_MQ_PRIO_MAX),
+            i64::from(crate::limits::MQ_PRIO_MAX)
+        );
     }
 
     #[test]
@@ -3696,19 +3686,44 @@ mod tests {
     fn test_sc_constants_unique() {
         // All _SC_* constants must be distinct (except aliases).
         let vals: &[i32] = &[
-            _SC_ARG_MAX, _SC_CHILD_MAX, _SC_CLK_TCK, _SC_NGROUPS_MAX,
-            _SC_OPEN_MAX, _SC_STREAM_MAX, _SC_TZNAME_MAX,
-            _SC_PAGESIZE, _SC_VERSION, _SC_THREADS,
-            _SC_HOST_NAME_MAX, _SC_LOGIN_NAME_MAX, _SC_LINE_MAX,
-            _SC_THREAD_STACK_MIN, _SC_PHYS_PAGES, _SC_AVPHYS_PAGES,
-            _SC_IOV_MAX, _SC_GETPW_R_SIZE_MAX, _SC_GETGR_R_SIZE_MAX,
-            _SC_SYMLOOP_MAX, _SC_TTY_NAME_MAX, _SC_RE_DUP_MAX,
-            _SC_NPROCESSORS_CONF, _SC_NPROCESSORS_ONLN,
-            _SC_MQ_OPEN_MAX, _SC_MQ_PRIO_MAX, _SC_SEM_VALUE_MAX,
-            _SC_TIMER_MAX, _SC_BC_BASE_MAX, _SC_BC_DIM_MAX,
-            _SC_BC_SCALE_MAX, _SC_BC_STRING_MAX, _SC_COLL_WEIGHTS_MAX,
-            _SC_EXPR_NEST_MAX, _SC_2_VERSION, _SC_2_C_BIND,
-            _SC_THREAD_DESTRUCTOR_ITERATIONS, _SC_THREAD_THREADS_MAX,
+            _SC_ARG_MAX,
+            _SC_CHILD_MAX,
+            _SC_CLK_TCK,
+            _SC_NGROUPS_MAX,
+            _SC_OPEN_MAX,
+            _SC_STREAM_MAX,
+            _SC_TZNAME_MAX,
+            _SC_PAGESIZE,
+            _SC_VERSION,
+            _SC_THREADS,
+            _SC_HOST_NAME_MAX,
+            _SC_LOGIN_NAME_MAX,
+            _SC_LINE_MAX,
+            _SC_THREAD_STACK_MIN,
+            _SC_PHYS_PAGES,
+            _SC_AVPHYS_PAGES,
+            _SC_IOV_MAX,
+            _SC_GETPW_R_SIZE_MAX,
+            _SC_GETGR_R_SIZE_MAX,
+            _SC_SYMLOOP_MAX,
+            _SC_TTY_NAME_MAX,
+            _SC_RE_DUP_MAX,
+            _SC_NPROCESSORS_CONF,
+            _SC_NPROCESSORS_ONLN,
+            _SC_MQ_OPEN_MAX,
+            _SC_MQ_PRIO_MAX,
+            _SC_SEM_VALUE_MAX,
+            _SC_TIMER_MAX,
+            _SC_BC_BASE_MAX,
+            _SC_BC_DIM_MAX,
+            _SC_BC_SCALE_MAX,
+            _SC_BC_STRING_MAX,
+            _SC_COLL_WEIGHTS_MAX,
+            _SC_EXPR_NEST_MAX,
+            _SC_2_VERSION,
+            _SC_2_C_BIND,
+            _SC_THREAD_DESTRUCTOR_ITERATIONS,
+            _SC_THREAD_THREADS_MAX,
             _SC_THREAD_KEYS_MAX,
         ];
         for i in 0..vals.len() {
@@ -3788,8 +3803,14 @@ mod tests {
         // depend on fd 0 being open.
         let fd = crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0)
             .expect("alloc_fd File failed");
-        assert_eq!(fpathconf(fd, _PC_PATH_MAX), pathconf(core::ptr::null(), _PC_PATH_MAX));
-        assert_eq!(fpathconf(fd, _PC_NAME_MAX), pathconf(core::ptr::null(), _PC_NAME_MAX));
+        assert_eq!(
+            fpathconf(fd, _PC_PATH_MAX),
+            pathconf(core::ptr::null(), _PC_PATH_MAX)
+        );
+        assert_eq!(
+            fpathconf(fd, _PC_NAME_MAX),
+            pathconf(core::ptr::null(), _PC_NAME_MAX)
+        );
         let _ = crate::fdtable::close_fd(fd);
     }
 
@@ -3913,7 +3934,14 @@ mod tests {
 
     #[test]
     fn test_getresuid_null_fails() {
-        assert_eq!(getresuid(core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut()), -1);
+        assert_eq!(
+            getresuid(
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut()
+            ),
+            -1
+        );
     }
 
     #[test]
@@ -3930,7 +3958,14 @@ mod tests {
 
     #[test]
     fn test_getresgid_null_fails() {
-        assert_eq!(getresgid(core::ptr::null_mut(), core::ptr::null_mut(), core::ptr::null_mut()), -1);
+        assert_eq!(
+            getresgid(
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                core::ptr::null_mut()
+            ),
+            -1
+        );
     }
 
     #[test]
@@ -4241,7 +4276,10 @@ mod tests {
             assert_eq!(storage[i], 0, "byte {i} should be zeroed");
         }
         // Sentinel byte at index 16 must remain.
-        assert_eq!(storage[TASK_COMM_LEN], b'S', "no overrun past TASK_COMM_LEN");
+        assert_eq!(
+            storage[TASK_COMM_LEN], b'S',
+            "no overrun past TASK_COMM_LEN"
+        );
     }
 
     /// Buffer pre-populated with the *previous* name (caller is reusing
@@ -4260,14 +4298,18 @@ mod tests {
     #[test]
     fn test_phase159_get_name_clears_high_entropy_junk() {
         let pattern: [u8; TASK_COMM_LEN] = [
-            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE,
-            0xFE, 0xED, 0xFA, 0xCE, 0xA5, 0x5A, 0x12, 0x34,
+            0xDE, 0xAD, 0xBE, 0xEF, 0xCA, 0xFE, 0xBA, 0xBE, 0xFE, 0xED, 0xFA, 0xCE, 0xA5, 0x5A,
+            0x12, 0x34,
         ];
         let mut buf = pattern;
         let ret = prctl(PR_GET_NAME, buf.as_mut_ptr() as u64, 0, 0, 0);
         assert_eq!(ret, 0);
         for (i, &b) in buf.iter().enumerate() {
-            assert_eq!(b, 0, "byte {i} stayed 0x{:02X} from {:02X?}", pattern[i], pattern);
+            assert_eq!(
+                b, 0,
+                "byte {i} stayed 0x{:02X} from {:02X?}",
+                pattern[i], pattern
+            );
         }
     }
 
@@ -4874,16 +4916,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -4898,8 +4938,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -4912,8 +4951,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -4928,10 +4966,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_ADMIN");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_ADMIN");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
         }
 
@@ -5014,10 +5050,7 @@ mod tests {
                 crate::sys_capability::CAP_SYS_ADMIN
             ));
             errno::set_errno(0);
-            assert_eq!(
-                sethostname(core::ptr::null(), 100_000),
-                -1
-            );
+            assert_eq!(sethostname(core::ptr::null(), 100_000), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
@@ -5132,10 +5165,7 @@ mod tests {
 
             // With caps back, sethostname succeeds.
             let new_name = b"phase167-recover";
-            assert_eq!(
-                sethostname(new_name.as_ptr(), new_name.len()),
-                0
-            );
+            assert_eq!(sethostname(new_name.as_ptr(), new_name.len()), 0);
 
             // Restore the original hostname so later tests see the
             // baseline.
@@ -5152,9 +5182,11 @@ mod tests {
             drop_cap_sys_admin();
             errno::set_errno(0);
             let rc = sethostname(b"x\0".as_ptr(), 1);
-            assert_ne!(rc, 0,
+            assert_ne!(
+                rc, 0,
                 "Pre-Phase-167: unprivileged sethostname returned 0 \
-                 — CAP_SYS_ADMIN gate missing.");
+                 — CAP_SYS_ADMIN gate missing."
+            );
             assert_eq!(rc, -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
@@ -5166,9 +5198,11 @@ mod tests {
             drop_cap_sys_admin();
             errno::set_errno(0);
             let rc = setdomainname(b"x\0".as_ptr(), 1);
-            assert_ne!(rc, 0,
+            assert_ne!(
+                rc, 0,
                 "Pre-Phase-167: unprivileged setdomainname returned 0 \
-                 — CAP_SYS_ADMIN gate missing.");
+                 — CAP_SYS_ADMIN gate missing."
+            );
             assert_eq!(rc, -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
@@ -5208,10 +5242,7 @@ mod tests {
             let orig_len = unsafe { crate::string::strlen(orig.as_ptr()) };
 
             let new_name = b"phase167-default";
-            assert_eq!(
-                sethostname(new_name.as_ptr(), new_name.len()),
-                0
-            );
+            assert_eq!(sethostname(new_name.as_ptr(), new_name.len()), 0);
             let mut buf = [0u8; 256];
             assert_eq!(gethostname(buf.as_mut_ptr(), buf.len()), 0);
             assert_eq!(&buf[..new_name.len()], new_name);
@@ -5534,16 +5565,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -5558,8 +5587,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -5572,8 +5600,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SETGID - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -5588,10 +5615,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SETGID");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SETGID");
             assert!(!crate::sys_capability::has_capability(CAP_SETGID));
         }
 
@@ -5644,8 +5669,11 @@ mod tests {
             errno::set_errno(0);
             let groups: [GidT; 1] = [0];
             assert_eq!(setgroups(65537, groups.as_ptr()), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM,
-                "EPERM must beat EINVAL when cap is missing");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EPERM,
+                "EPERM must beat EINVAL when cap is missing"
+            );
         }
 
         /// Cap missing AND size > 0 with NULL list → cap wins (EPERM,
@@ -5656,8 +5684,11 @@ mod tests {
             drop_cap_setgid();
             errno::set_errno(0);
             assert_eq!(setgroups(5, core::ptr::null()), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM,
-                "EPERM must beat EFAULT when cap is missing");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EPERM,
+                "EPERM must beat EFAULT when cap is missing"
+            );
         }
 
         /// Cap missing AND size = usize::MAX AND list = NULL → cap
@@ -5691,8 +5722,7 @@ mod tests {
             //    verify the in-test restore path by manually replaying
             //    a capset to u32::MAX and re-checking.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -5707,10 +5737,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
             assert_eq!(setgroups(0, core::ptr::null()), 0);
         }
@@ -5725,8 +5752,11 @@ mod tests {
             drop_cap_setgid();
             errno::set_errno(errno::ENOENT);
             assert_eq!(setgroups(2, [1, 2].as_ptr()), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM,
-                "Stale ENOENT must be overwritten with EPERM");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EPERM,
+                "Stale ENOENT must be overwritten with EPERM"
+            );
         }
 
         /// A caller that passes obviously broken arguments still sees
@@ -5739,10 +5769,7 @@ mod tests {
             // Wildly oversized + null pointer + ignore-the-rules
             // values: would normally trip EINVAL then EFAULT, but the
             // cap check beats both.
-            assert_eq!(
-                setgroups(usize::MAX - 1, core::ptr::null()),
-                -1,
-            );
+            assert_eq!(setgroups(usize::MAX - 1, core::ptr::null()), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -5797,8 +5824,11 @@ mod tests {
             errno::set_errno(0);
             let groups: [GidT; 1] = [0];
             assert_eq!(setgroups(65537, groups.as_ptr()), -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL,
-                "With cap held, EINVAL must still surface for bad size");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EINVAL,
+                "With cap held, EINVAL must still surface for bad size"
+            );
         }
 
         /// With CAP_SETGID held, the existing EFAULT path still fires
@@ -5808,8 +5838,11 @@ mod tests {
             let _g = CapGuard::snapshot();
             errno::set_errno(0);
             assert_eq!(setgroups(3, core::ptr::null()), -1);
-            assert_eq!(errno::get_errno(), errno::EFAULT,
-                "With cap held, EFAULT must still surface for null list");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EFAULT,
+                "With cap held, EFAULT must still surface for null list"
+            );
         }
 
         /// With CAP_SETGID held, valid call still succeeds.
@@ -5832,12 +5865,10 @@ mod tests {
             use crate::sys_capability::CAP_SETUID;
             let _g = CapGuard::snapshot();
             // Drop only CAP_SETUID (bit 7), leave CAP_SETGID (bit 6).
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << CAP_SETUID);
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -5852,10 +5883,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             // setgroups still works.
             errno::set_errno(0);
             let groups: [GidT; 2] = [50, 60];
@@ -5875,9 +5903,12 @@ mod tests {
             assert_eq!(setgroups(1, [99].as_ptr()), -1);
             let e = errno::get_errno();
             assert_eq!(e, errno::EPERM);
-            assert_ne!(e, errno::EACCES,
+            assert_ne!(
+                e,
+                errno::EACCES,
                 "may_setgroups uses EPERM (capable convention), \
-                 distinct from seccomp's EACCES");
+                 distinct from seccomp's EACCES"
+            );
         }
     }
 
@@ -5902,16 +5933,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -5926,8 +5955,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -5940,8 +5968,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SETUID - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -5956,10 +5983,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SETUID");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SETUID");
             assert!(!crate::sys_capability::has_capability(CAP_SETUID));
         }
 
@@ -6104,8 +6129,11 @@ mod tests {
             drop_cap_setuid();
             errno::set_errno(errno::ENOENT);
             assert_eq!(setuid(42), -1);
-            assert_eq!(errno::get_errno(), errno::EPERM,
-                "Stale ENOENT must be overwritten with EPERM");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EPERM,
+                "Stale ENOENT must be overwritten with EPERM"
+            );
         }
 
         /// Caller passes the "max minus one" sentinel — still EPERM.
@@ -6174,12 +6202,10 @@ mod tests {
         fn test_setuid_phase192_setgid_drop_does_not_affect_setuid() {
             use crate::sys_capability::CAP_SETGID;
             let _g = CapGuard::snapshot();
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << CAP_SETGID);
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -6194,10 +6220,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             // setuid still works.
             errno::set_errno(0);
             assert_eq!(setuid(1500), 0);
@@ -6231,9 +6254,12 @@ mod tests {
             assert_eq!(setuid(99), -1);
             let e = errno::get_errno();
             assert_eq!(e, errno::EPERM);
-            assert_ne!(e, errno::EACCES,
+            assert_ne!(
+                e,
+                errno::EACCES,
                 "sys_setuid uses EPERM (capable convention), \
-                 distinct from LSM-style EACCES");
+                 distinct from LSM-style EACCES"
+            );
         }
 
         /// `getuid`/`geteuid` are not gated by CAP_SETUID — they
@@ -6267,16 +6293,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -6291,8 +6315,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -6305,8 +6328,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SETGID - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -6321,10 +6343,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SETGID");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SETGID");
             assert!(!crate::sys_capability::has_capability(CAP_SETGID));
         }
 
@@ -6503,12 +6523,10 @@ mod tests {
         fn test_setgid_phase193_setuid_drop_does_not_affect_setgid() {
             use crate::sys_capability::CAP_SETUID;
             let _g = CapGuard::snapshot();
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << CAP_SETUID);
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -6523,10 +6541,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
             assert_eq!(setgid(1500), 0);
             assert_eq!(setegid(1500), 0);
@@ -6553,9 +6568,12 @@ mod tests {
             assert_eq!(setgid(99), -1);
             let e = errno::get_errno();
             assert_eq!(e, errno::EPERM);
-            assert_ne!(e, errno::EACCES,
+            assert_ne!(
+                e,
+                errno::EACCES,
                 "sys_setgid uses EPERM (capable convention), \
-                 distinct from LSM-style EACCES");
+                 distinct from LSM-style EACCES"
+            );
         }
 
         /// getgid/getegid unaffected by CAP_SETGID drop.
@@ -6609,16 +6627,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -6633,8 +6649,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -6646,8 +6661,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -6662,8 +6676,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed when dropping cap {cap}");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -6985,16 +6998,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -7009,8 +7020,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -7022,8 +7032,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -7038,8 +7047,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed when dropping cap {cap}");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -7233,10 +7241,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap(crate::sys_capability::CAP_SETUID);
             errno::set_errno(0);
-            assert_eq!(
-                setresuid(u32::MAX - 1, u32::MAX - 1, u32::MAX - 1),
-                -1
-            );
+            assert_eq!(setresuid(u32::MAX - 1, u32::MAX - 1, u32::MAX - 1), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -7361,10 +7366,7 @@ mod tests {
             let mut rg: GidT = 99;
             let mut eg: GidT = 99;
             let mut sg: GidT = 99;
-            assert_eq!(
-                getresgid(&raw mut rg, &raw mut eg, &raw mut sg),
-                0
-            );
+            assert_eq!(getresgid(&raw mut rg, &raw mut eg, &raw mut sg), 0);
             assert_eq!((rg, eg, sg), (0, 0, 0));
         }
     }
@@ -7648,7 +7650,10 @@ mod tests {
     fn test_getgroups_with_buffer() {
         let mut groups: [GidT; 5] = [99; 5];
         let ret = getgroups(5, groups.as_mut_ptr());
-        assert_eq!(ret, 0, "getgroups should return 0 (no supplementary groups)");
+        assert_eq!(
+            ret, 0,
+            "getgroups should return 0 (no supplementary groups)"
+        );
     }
 
     // -- Phase 94: getgroups size validation --
@@ -7757,7 +7762,10 @@ mod tests {
     fn test_sysinfo_size() {
         // Sysinfo should be reasonably sized.
         let size = core::mem::size_of::<Sysinfo>();
-        assert!(size >= 64, "Sysinfo should be at least 64 bytes, got {size}");
+        assert!(
+            size >= 64,
+            "Sysinfo should be at least 64 bytes, got {size}"
+        );
     }
 
     #[test]
@@ -7778,7 +7786,10 @@ mod tests {
     #[test]
     fn test_setmntent_returns_null() {
         let ret = setmntent(b"/etc/mtab\0".as_ptr(), b"r\0".as_ptr());
-        assert!(ret.is_null(), "setmntent should return null (no mount table)");
+        assert!(
+            ret.is_null(),
+            "setmntent should return null (no mount table)"
+        );
     }
 
     #[test]
@@ -8054,8 +8065,10 @@ mod tests {
         // Online CPUs ≤ configured CPUs.
         let onln = get_nprocs();
         let conf = get_nprocs_conf();
-        assert!(onln <= conf,
-                "online ({onln}) should be ≤ configured ({conf})");
+        assert!(
+            onln <= conf,
+            "online ({onln}) should be ≤ configured ({conf})"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -8079,8 +8092,10 @@ mod tests {
         // Available pages ≤ total physical pages.
         let avail = get_avphys_pages();
         let total = get_phys_pages();
-        assert!(avail <= total,
-                "available ({avail}) should be ≤ total ({total})");
+        assert!(
+            avail <= total,
+            "available ({avail}) should be ≤ total ({total})"
+        );
     }
 
     // ------------------------------------------------------------------
@@ -8090,11 +8105,7 @@ mod tests {
     #[test]
     fn test_futimesat_null_path() {
         // null path → delegates to utimes which handles null.
-        let _ret = futimesat(
-            crate::file::AT_FDCWD,
-            core::ptr::null(),
-            core::ptr::null(),
-        );
+        let _ret = futimesat(crate::file::AT_FDCWD, core::ptr::null(), core::ptr::null());
         // Just verify no crash.
     }
 
@@ -8143,7 +8154,9 @@ mod tests {
             let first = unsafe { *ptr };
             assert_eq!(first, b'/', "CWD should start with '/'");
             // Free the allocation.
-            unsafe { crate::malloc::free(ptr); }
+            unsafe {
+                crate::malloc::free(ptr);
+            }
         }
     }
 
@@ -8208,16 +8221,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -8232,8 +8243,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -8246,8 +8256,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_CHROOT - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -8262,10 +8271,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_CHROOT");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_CHROOT");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_CHROOT));
         }
 
@@ -8338,10 +8345,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_chroot();
             errno::set_errno(0);
-            assert_eq!(
-                chroot(b"/run/containerd/rootfs\0".as_ptr()),
-                -1
-            );
+            assert_eq!(chroot(b"/run/containerd/rootfs\0".as_ptr()), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -8409,9 +8413,12 @@ mod tests {
             drop_cap_sys_chroot();
             errno::set_errno(0);
             assert_eq!(chroot(b"/srv\0".as_ptr()), -1);
-            assert_ne!(errno::get_errno(), errno::ENOSYS,
+            assert_ne!(
+                errno::get_errno(),
+                errno::ENOSYS,
                 "Pre-Phase-166: unprivileged caller saw ENOSYS — \
-                 CAP_SYS_CHROOT check missing.");
+                 CAP_SYS_CHROOT check missing."
+            );
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -8594,8 +8601,10 @@ mod tests {
         // SWAP_FLAG_DISCARD = 0x10000.  Bit 17 (0x20000) is unknown
         // unless DISCARD_ONCE/DISCARD_PAGES cover it — check below.
         let unknown = 0x10_0000_i32;
-        assert!(unknown & SWAP_FLAGS_VALID == 0,
-            "test premise wrong: 0x100000 must be outside SWAP_FLAGS_VALID");
+        assert!(
+            unknown & SWAP_FLAGS_VALID == 0,
+            "test premise wrong: 0x100000 must be outside SWAP_FLAGS_VALID"
+        );
         assert_eq!(swapon(b"/swap\0".as_ptr(), unknown), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -8737,16 +8746,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -8774,8 +8781,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -8790,10 +8796,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_ADMIN");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_ADMIN");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
         }
 
@@ -8971,9 +8975,12 @@ mod tests {
             drop_cap_sys_admin();
             errno::set_errno(0);
             assert_eq!(swapon(b"/swap\0".as_ptr(), 0x80_0000), -1);
-            assert_ne!(errno::get_errno(), errno::EINVAL,
+            assert_ne!(
+                errno::get_errno(),
+                errno::EINVAL,
                 "Pre-Phase-164: unprivileged caller saw EINVAL — \
-                 capability check missing.");
+                 capability check missing."
+            );
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -8985,9 +8992,12 @@ mod tests {
             drop_cap_sys_admin();
             errno::set_errno(0);
             assert_eq!(swapoff(core::ptr::null()), -1);
-            assert_ne!(errno::get_errno(), errno::EFAULT,
+            assert_ne!(
+                errno::get_errno(),
+                errno::EFAULT,
                 "Pre-Phase-164: unprivileged caller saw EFAULT — \
-                 capability check missing.");
+                 capability check missing."
+            );
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -9043,10 +9053,7 @@ mod tests {
                 crate::sys_capability::CAP_SYS_ADMIN
             ));
             errno::set_errno(0);
-            assert_eq!(
-                swapon(b"/dev/sda2\0".as_ptr(), SWAP_FLAGS_VALID),
-                -1
-            );
+            assert_eq!(swapon(b"/dev/sda2\0".as_ptr(), SWAP_FLAGS_VALID), -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
     }
@@ -9102,14 +9109,20 @@ mod tests {
     #[test]
     fn test_klogctl_read_all_null_buf_einval() {
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_READ_ALL, core::ptr::null_mut(), 16), -1);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_READ_ALL, core::ptr::null_mut(), 16),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
     fn test_klogctl_read_clear_null_buf_einval() {
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_READ_CLEAR, core::ptr::null_mut(), 16), -1);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_READ_CLEAR, core::ptr::null_mut(), 16),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
@@ -9125,7 +9138,10 @@ mod tests {
     fn test_klogctl_console_level_zero_einval() {
         // Below SYSLOG_LOG_LEVEL_MIN.
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 0), -1);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 0),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
@@ -9133,14 +9149,20 @@ mod tests {
     fn test_klogctl_console_level_nine_einval() {
         // Above SYSLOG_LOG_LEVEL_MAX.
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 9), -1);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 9),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
     fn test_klogctl_console_level_negative_einval() {
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), -3), -1);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), -3),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
@@ -9164,14 +9186,20 @@ mod tests {
         // SIZE_UNREAD reports bytes available to the next READ.  Empty host
         // log → 0 bytes (no longer the ENOSYS stub).
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_UNREAD, core::ptr::null_mut(), 0), 0);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_SIZE_UNREAD, core::ptr::null_mut(), 0),
+            0
+        );
     }
 
     #[test]
     fn test_klogctl_size_buffer_returns_bytes() {
         // SIZE_BUFFER reports currently-buffered bytes.  Empty host log → 0.
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_SIZE_BUFFER, core::ptr::null_mut(), 0), 0);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_SIZE_BUFFER, core::ptr::null_mut(), 0),
+            0
+        );
     }
 
     #[test]
@@ -9223,8 +9251,7 @@ mod tests {
         // the old ENOSYS stub.  On bare metal it returns the JSON-lines bytes.
         let mut buf = [0u8; 8192];
         errno::set_errno(0);
-        let ret =
-            klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), buf.len() as i32);
+        let ret = klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), buf.len() as i32);
         assert!(ret >= 0, "READ_ALL must not error on a valid buffer");
         assert_eq!(ret, 0, "host build has no kernel log to dump");
     }
@@ -9398,10 +9425,7 @@ mod tests {
         let mut buf = [0u8; 8];
         errno::set_errno(0);
         let ret = klogctl(SYSLOG_ACTION_READ, buf.as_mut_ptr(), 0);
-        assert_ne!(
-            ret, -1,
-            "zero-len read must no longer return -1"
-        );
+        assert_ne!(ret, -1, "zero-len read must no longer return -1");
         assert_ne!(
             errno::get_errno(),
             errno::ENOSYS,
@@ -9462,7 +9486,10 @@ mod tests {
         // klogctl(8, NULL, 4). Validates → ENOSYS; systemd logs the
         // failure and proceeds with default verbosity.
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 4), -1);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 4),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
@@ -9528,14 +9555,20 @@ mod tests {
     #[test]
     fn test_klogctl_phase126_read_all_null_buf_positive_len_einval() {
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_READ_ALL, core::ptr::null_mut(), 4096), -1);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_READ_ALL, core::ptr::null_mut(), 4096),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
     #[test]
     fn test_klogctl_phase126_read_clear_null_buf_positive_len_einval() {
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_READ_CLEAR, core::ptr::null_mut(), 4096), -1);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_READ_CLEAR, core::ptr::null_mut(), 4096),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
@@ -9563,7 +9596,10 @@ mod tests {
     fn test_klogctl_phase126_read_all_negative_len_with_valid_buf_einval() {
         let mut buf = [0u8; 32];
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), i32::MIN), -1);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), i32::MIN),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 
@@ -9613,7 +9649,10 @@ mod tests {
         // level (in `len`) is validated.  Confirms the buf NULL-check
         // only applies to the read family.
         errno::set_errno(0);
-        assert_eq!(klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 4), -1);
+        assert_eq!(
+            klogctl(SYSLOG_ACTION_CONSOLE_LEVEL, core::ptr::null_mut(), 4),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
@@ -9687,13 +9726,26 @@ mod tests {
     #[test]
     fn test_ptrace_request_known_recognizes_all_constants() {
         for r in &[
-            PTRACE_TRACEME, PTRACE_PEEKTEXT, PTRACE_PEEKDATA, PTRACE_PEEKUSER,
-            PTRACE_POKETEXT, PTRACE_POKEDATA, PTRACE_POKEUSER,
-            PTRACE_CONT, PTRACE_KILL, PTRACE_SINGLESTEP,
-            PTRACE_ATTACH, PTRACE_DETACH, PTRACE_SYSCALL,
-            PTRACE_SETOPTIONS, PTRACE_GETEVENTMSG,
-            PTRACE_GETSIGINFO, PTRACE_SETSIGINFO,
-            PTRACE_SEIZE, PTRACE_INTERRUPT, PTRACE_LISTEN,
+            PTRACE_TRACEME,
+            PTRACE_PEEKTEXT,
+            PTRACE_PEEKDATA,
+            PTRACE_PEEKUSER,
+            PTRACE_POKETEXT,
+            PTRACE_POKEDATA,
+            PTRACE_POKEUSER,
+            PTRACE_CONT,
+            PTRACE_KILL,
+            PTRACE_SINGLESTEP,
+            PTRACE_ATTACH,
+            PTRACE_DETACH,
+            PTRACE_SYSCALL,
+            PTRACE_SETOPTIONS,
+            PTRACE_GETEVENTMSG,
+            PTRACE_GETSIGINFO,
+            PTRACE_SETSIGINFO,
+            PTRACE_SEIZE,
+            PTRACE_INTERRUPT,
+            PTRACE_LISTEN,
         ] {
             assert!(ptrace_request_known(*r), "unknown known request {r}");
         }
@@ -9751,10 +9803,7 @@ mod tests {
     #[test]
     fn test_ptrace_traceme_ignores_addr_data() {
         errno::set_errno(0);
-        assert_eq!(
-            ptrace(PTRACE_TRACEME, 0, 0xDEAD_BEEF, 0xCAFE_BABE),
-            -1
-        );
+        assert_eq!(ptrace(PTRACE_TRACEME, 0, 0xDEAD_BEEF, 0xCAFE_BABE), -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
 
@@ -9919,16 +9968,14 @@ mod tests {
         }
         impl CapGuard {
             pub(super) fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -9943,8 +9990,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -9957,8 +10003,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -9973,8 +10018,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed dropping cap");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -10231,16 +10275,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -10255,8 +10297,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -10269,8 +10310,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYSLOG - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -10285,10 +10325,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYSLOG");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYSLOG");
             assert!(!crate::sys_capability::has_capability(CAP_SYSLOG));
         }
 
@@ -10312,10 +10350,7 @@ mod tests {
             drop_cap_syslog();
             let mut buf = [0u8; 64];
             errno::set_errno(0);
-            assert_eq!(
-                klogctl(SYSLOG_ACTION_READ_CLEAR, buf.as_mut_ptr(), 64),
-                -1,
-            );
+            assert_eq!(klogctl(SYSLOG_ACTION_READ_CLEAR, buf.as_mut_ptr(), 64), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -10325,10 +10360,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_syslog();
             errno::set_errno(0);
-            assert_eq!(
-                klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0),
-                -1,
-            );
+            assert_eq!(klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -10380,10 +10412,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_syslog();
             errno::set_errno(0);
-            assert_eq!(
-                klogctl(SYSLOG_ACTION_CLOSE, core::ptr::null_mut(), 0),
-                0,
-            );
+            assert_eq!(klogctl(SYSLOG_ACTION_CLOSE, core::ptr::null_mut(), 0), 0,);
         }
 
         /// OPEN is a no-op on Linux — no cap required → returns 0.
@@ -10392,10 +10421,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_syslog();
             errno::set_errno(0);
-            assert_eq!(
-                klogctl(SYSLOG_ACTION_OPEN, core::ptr::null_mut(), 0),
-                0,
-            );
+            assert_eq!(klogctl(SYSLOG_ACTION_OPEN, core::ptr::null_mut(), 0), 0,);
         }
 
         /// SIZE_BUFFER reports buffered bytes — no cap required.  Empty host
@@ -10419,10 +10445,7 @@ mod tests {
             drop_cap_syslog();
             let mut buf = [0u8; 64];
             errno::set_errno(0);
-            assert_eq!(
-                klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 64),
-                0,
-            );
+            assert_eq!(klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 64), 0,);
         }
 
         /// SIZE_UNREAD is read-only — no cap required.  Empty host log → 0.
@@ -10503,18 +10526,12 @@ mod tests {
             drop_cap_syslog();
             // First: try CLEAR (privileged action) — EPERM.
             errno::set_errno(0);
-            assert_eq!(
-                klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0),
-                -1,
-            );
+            assert_eq!(klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Then fall back to unprivileged READ_ALL — succeeds (empty log).
             let mut buf = [0u8; 32];
             errno::set_errno(0);
-            assert_eq!(
-                klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 32),
-                0,
-            );
+            assert_eq!(klogctl(SYSLOG_ACTION_READ_ALL, buf.as_mut_ptr(), 32), 0,);
         }
 
         // -- Recovery ----------------------------------------------------
@@ -10528,10 +10545,7 @@ mod tests {
             // Drop the cap and observe EPERM.
             drop_cap_syslog();
             errno::set_errno(0);
-            assert_eq!(
-                klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0),
-                -1,
-            );
+            assert_eq!(klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Restore via the outer guard's stored state by dropping a
             // nested guard — simplest: just capset the default high
@@ -10539,16 +10553,14 @@ mod tests {
             // inner CapGuard snapshots the (cap-dropped) state, but to
             // restore we manually set the CAP_SYSLOG bit.
             use crate::sys_capability::CAP_SYSLOG;
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let (new_lo, new_hi) = if CAP_SYSLOG < 32 {
                 (lo | (1u32 << CAP_SYSLOG), hi)
             } else {
                 (lo, hi | (1u32 << (CAP_SYSLOG - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -10563,16 +10575,12 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0);
             assert!(crate::sys_capability::has_capability(CAP_SYSLOG));
             // Now CLEAR passes the cap gate and succeeds (empty host log).
             errno::set_errno(0);
-            assert_eq!(
-                klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0),
-                0,
-            );
+            assert_eq!(klogctl(SYSLOG_ACTION_CLEAR, core::ptr::null_mut(), 0), 0,);
         }
 
         // -- Sentinel: cap-held privileged path still works --------------
@@ -10596,10 +10604,7 @@ mod tests {
                 SYSLOG_ACTION_CLEAR,
             ] {
                 errno::set_errno(0);
-                let (p, l) = if matches!(
-                    cmd,
-                    SYSLOG_ACTION_READ | SYSLOG_ACTION_READ_CLEAR,
-                ) {
+                let (p, l) = if matches!(cmd, SYSLOG_ACTION_READ | SYSLOG_ACTION_READ_CLEAR,) {
                     (buf.as_mut_ptr(), 32i32)
                 } else {
                     (core::ptr::null_mut(), 0i32)
@@ -10609,11 +10614,7 @@ mod tests {
             // CONSOLE level control remains unimplemented.
             for cmd in [SYSLOG_ACTION_CONSOLE_OFF, SYSLOG_ACTION_CONSOLE_ON] {
                 errno::set_errno(0);
-                assert_eq!(
-                    klogctl(cmd, core::ptr::null_mut(), 0),
-                    -1,
-                    "cmd={cmd}",
-                );
+                assert_eq!(klogctl(cmd, core::ptr::null_mut(), 0), -1, "cmd={cmd}",);
                 assert_eq!(
                     errno::get_errno(),
                     errno::ENOSYS,

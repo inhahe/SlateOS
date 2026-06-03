@@ -143,7 +143,7 @@ pub const PTHREAD_ONCE_INIT: PthreadOnceT = PthreadOnceT {
 #[allow(clippy::declare_interior_mutable_const)]
 pub const PTHREAD_MUTEX_INITIALIZER: PthreadMutexT = PthreadMutexT {
     locked: AtomicI32::new(0),
-    kind: AtomicI32::new(0),    // PTHREAD_MUTEX_NORMAL
+    kind: AtomicI32::new(0), // PTHREAD_MUTEX_NORMAL
     owner: AtomicI32::new(0),
     count: AtomicI32::new(0),
     _pad: [0; 24],
@@ -252,13 +252,13 @@ core::arch::global_asm!(
     ".global _pthread_trampoline",
     ".type _pthread_trampoline, @function",
     "_pthread_trampoline:",
-    "    pop rdi",           // rdi = arg
-    "    pop rsi",           // rsi = start_routine
-    "    call rsi",          // rax = start_routine(arg)
-    "    mov rdi, rax",      // exit value = return value
-    "    mov eax, 511",      // SYS_THREAD_EXIT
+    "    pop rdi",      // rdi = arg
+    "    pop rsi",      // rsi = start_routine
+    "    call rsi",     // rax = start_routine(arg)
+    "    mov rdi, rax", // exit value = return value
+    "    mov eax, 511", // SYS_THREAD_EXIT
     "    syscall",
-    "    ud2",               // unreachable
+    "    ud2", // unreachable
 );
 
 #[cfg(target_os = "none")]
@@ -344,7 +344,9 @@ pub extern "C" fn pthread_create(
 
     if !thread.is_null() {
         // SAFETY: caller guarantees thread points to valid PthreadT.
-        unsafe { *thread = task_id; }
+        unsafe {
+            *thread = task_id;
+        }
     }
 
     0
@@ -368,15 +370,14 @@ pub extern "C" fn pthread_join(thread_id: PthreadT, retval: *mut *mut u8) -> i32
     // The kernel returns the exit value from SYS_THREAD_EXIT.
     if !retval.is_null() {
         // SAFETY: caller guarantees retval is a valid pointer.
-        unsafe { *retval = ret as *mut u8; }
+        unsafe {
+            *retval = ret as *mut u8;
+        }
     }
 
     // Free the thread's stack.
     if let Some(info) = take_thread_info(thread_id) {
-        let _ = crate::mman::munmap(
-            info.stack_base as *mut core::ffi::c_void,
-            info.stack_size,
-        );
+        let _ = crate::mman::munmap(info.stack_base as *mut core::ffi::c_void, info.stack_size);
     }
 
     0
@@ -430,7 +431,9 @@ pub extern "C" fn pthread_exit(retval: *mut u8) -> ! {
     let _ = syscall::syscall1(syscall::SYS_THREAD_EXIT, retval as u64);
     // SAFETY: SYS_THREAD_EXIT never returns; this is a safety net.
     loop {
-        unsafe { core::arch::asm!("hlt", options(nostack, nomem)); }
+        unsafe {
+            core::arch::asm!("hlt", options(nostack, nomem));
+        }
     }
 }
 
@@ -621,7 +624,9 @@ pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut PthreadMutexT) -> i32
         return errno::EFAULT;
     }
     // SAFETY: caller guarantees mutex is valid.
-    unsafe { (*mutex).locked.store(0, Ordering::Release); }
+    unsafe {
+        (*mutex).locked.store(0, Ordering::Release);
+    }
     0
 }
 
@@ -638,10 +643,7 @@ pub unsafe extern "C" fn pthread_mutex_destroy(mutex: *mut PthreadMutexT) -> i32
 ///
 /// Threads that arrive while init is running spin-wait until complete.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn pthread_once(
-    once: *mut PthreadOnceT,
-    init: extern "C" fn(),
-) -> i32 {
+pub unsafe extern "C" fn pthread_once(once: *mut PthreadOnceT, init: extern "C" fn()) -> i32 {
     if once.is_null() {
         return errno::EFAULT;
     }
@@ -655,7 +657,10 @@ pub unsafe extern "C" fn pthread_once(
     }
 
     // Try to claim the initialization.
-    if done.compare_exchange(0, -1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+    if done
+        .compare_exchange(0, -1, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
         init();
         done.store(1, Ordering::Release);
     } else {
@@ -711,7 +716,9 @@ pub unsafe extern "C" fn pthread_key_create(
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_getspecific(key: PthreadKeyT) -> *mut u8 {
     let vals = unsafe { core::ptr::addr_of_mut!(TSD_VALUES).as_ref() };
-    let Some(vals) = vals else { return core::ptr::null_mut() };
+    let Some(vals) = vals else {
+        return core::ptr::null_mut();
+    };
     vals.get(key as usize)
         .copied()
         .unwrap_or(core::ptr::null_mut())
@@ -721,7 +728,9 @@ pub unsafe extern "C" fn pthread_getspecific(key: PthreadKeyT) -> *mut u8 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn pthread_setspecific(key: PthreadKeyT, value: *mut u8) -> i32 {
     let vals = unsafe { core::ptr::addr_of_mut!(TSD_VALUES).as_mut() };
-    let Some(vals) = vals else { return errno::EINVAL };
+    let Some(vals) = vals else {
+        return errno::EINVAL;
+    };
     if let Some(slot) = vals.get_mut(key as usize) {
         *slot = value;
         0
@@ -769,10 +778,7 @@ pub extern "C" fn pthread_cond_destroy(_cond: *mut PthreadCondT) -> i32 {
 /// then re-acquires `mutex`.  Uses a spin-yield loop watching the
 /// generation counter — not ideal but correct.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_cond_wait(
-    cond: *mut PthreadCondT,
-    mutex: *mut PthreadMutexT,
-) -> i32 {
+pub extern "C" fn pthread_cond_wait(cond: *mut PthreadCondT, mutex: *mut PthreadMutexT) -> i32 {
     if cond.is_null() || mutex.is_null() {
         return errno::EFAULT;
     }
@@ -783,7 +789,9 @@ pub extern "C" fn pthread_cond_wait(
 
     // Release the mutex while waiting.
     // SAFETY: mutex verified non-null above.
-    unsafe { pthread_mutex_unlock(mutex); }
+    unsafe {
+        pthread_mutex_unlock(mutex);
+    }
 
     // Spin-yield until the generation changes (signal/broadcast happened).
     while c.generation.load(Ordering::Acquire) == current_gen {
@@ -794,7 +802,9 @@ pub extern "C" fn pthread_cond_wait(
 
     // Re-acquire the mutex.
     // SAFETY: mutex verified non-null above.
-    unsafe { pthread_mutex_lock(mutex); }
+    unsafe {
+        pthread_mutex_lock(mutex);
+    }
     0
 }
 
@@ -816,20 +826,23 @@ pub extern "C" fn pthread_cond_timedwait(
     let current_gen = c.generation.load(Ordering::Acquire);
 
     // SAFETY: mutex verified non-null above.
-    unsafe { pthread_mutex_unlock(mutex); }
+    unsafe {
+        pthread_mutex_unlock(mutex);
+    }
 
     // Get current time and compute deadline with full nanosecond precision.
     let abs = unsafe { &*abstime };
     let dl_secs = abs.tv_sec;
     let dl_nanos = abs.tv_nsec;
-    let mut now_ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut now_ts = crate::stat::Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
 
     let mut timed_out = false;
     while c.generation.load(Ordering::Acquire) == current_gen {
         let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now_ts);
-        if now_ts.tv_sec > dl_secs
-            || (now_ts.tv_sec == dl_secs && now_ts.tv_nsec >= dl_nanos)
-        {
+        if now_ts.tv_sec > dl_secs || (now_ts.tv_sec == dl_secs && now_ts.tv_nsec >= dl_nanos) {
             timed_out = true;
             break;
         }
@@ -838,7 +851,9 @@ pub extern "C" fn pthread_cond_timedwait(
     }
 
     // SAFETY: mutex verified non-null above.
-    unsafe { pthread_mutex_lock(mutex); }
+    unsafe {
+        pthread_mutex_lock(mutex);
+    }
     if timed_out { errno::ETIMEDOUT } else { 0 }
 }
 
@@ -898,7 +913,9 @@ pub extern "C" fn pthread_rwlock_init(
     if rwlock.is_null() {
         return errno::EFAULT;
     }
-    unsafe { (*rwlock).state = AtomicI32::new(0); }
+    unsafe {
+        (*rwlock).state = AtomicI32::new(0);
+    }
     0
 }
 
@@ -926,12 +943,16 @@ pub extern "C" fn pthread_rwlock_rdlock(rwlock: *mut PthreadRwlockT) -> i32 {
             continue;
         }
         // Try to add a reader.
-        if rw.state.compare_exchange_weak(
-            current,
-            current.wrapping_add(1),
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ).is_ok() {
+        if rw
+            .state
+            .compare_exchange_weak(
+                current,
+                current.wrapping_add(1),
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            )
+            .is_ok()
+        {
             return 0;
         }
         core::hint::spin_loop();
@@ -949,12 +970,16 @@ pub extern "C" fn pthread_rwlock_tryrdlock(rwlock: *mut PthreadRwlockT) -> i32 {
     if current < 0 {
         return errno::EBUSY;
     }
-    if rw.state.compare_exchange(
-        current,
-        current.wrapping_add(1),
-        Ordering::AcqRel,
-        Ordering::Relaxed,
-    ).is_ok() {
+    if rw
+        .state
+        .compare_exchange(
+            current,
+            current.wrapping_add(1),
+            Ordering::AcqRel,
+            Ordering::Relaxed,
+        )
+        .is_ok()
+    {
         0
     } else {
         errno::EBUSY
@@ -971,12 +996,11 @@ pub extern "C" fn pthread_rwlock_wrlock(rwlock: *mut PthreadRwlockT) -> i32 {
     }
     let rw = unsafe { &*rwlock };
     loop {
-        if rw.state.compare_exchange_weak(
-            0,
-            -1,
-            Ordering::AcqRel,
-            Ordering::Relaxed,
-        ).is_ok() {
+        if rw
+            .state
+            .compare_exchange_weak(0, -1, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+        {
             return 0;
         }
         core::hint::spin_loop();
@@ -991,12 +1015,11 @@ pub extern "C" fn pthread_rwlock_trywrlock(rwlock: *mut PthreadRwlockT) -> i32 {
         return errno::EFAULT;
     }
     let rw = unsafe { &*rwlock };
-    if rw.state.compare_exchange(
-        0,
-        -1,
-        Ordering::AcqRel,
-        Ordering::Relaxed,
-    ).is_ok() {
+    if rw
+        .state
+        .compare_exchange(0, -1, Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+    {
         0
     } else {
         errno::EBUSY
@@ -1127,7 +1150,10 @@ fn encode_attr(buf: &mut PthreadAttrT, attr: StackAttr) {
     // last byte touched is at index ≤ 31 — well within the 56-byte buffer.
     unsafe {
         core::ptr::write_unaligned(p.add(ATTR_OFF_STACKSIZE).cast::<usize>(), attr.size);
-        core::ptr::write_unaligned(p.add(ATTR_OFF_DETACH).cast::<i32>(), i32::from(attr.detached));
+        core::ptr::write_unaligned(
+            p.add(ATTR_OFF_DETACH).cast::<i32>(),
+            i32::from(attr.detached),
+        );
         core::ptr::write_unaligned(p.add(ATTR_OFF_STACKADDR).cast::<usize>(), attr.addr);
         core::ptr::write_unaligned(p.add(ATTR_OFF_GUARDSIZE).cast::<usize>(), attr.guard);
     }
@@ -1216,7 +1242,10 @@ pub extern "C" fn pthread_attr_setstacksize(attr: *mut PthreadAttrT, stacksize: 
 
 /// Get the stack size from a thread attribute object.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_attr_getstacksize(attr: *const PthreadAttrT, stacksize: *mut usize) -> i32 {
+pub extern "C" fn pthread_attr_getstacksize(
+    attr: *const PthreadAttrT,
+    stacksize: *mut usize,
+) -> i32 {
     if attr.is_null() || stacksize.is_null() {
         return errno::EFAULT;
     }
@@ -1224,7 +1253,11 @@ pub extern "C" fn pthread_attr_getstacksize(attr: *const PthreadAttrT, stacksize
     // Use read_unaligned because PthreadAttrT has align(1).
     unsafe {
         let stored = core::ptr::read_unaligned(attr.cast::<usize>());
-        let sz = if stored == 0 { DEFAULT_THREAD_STACK_SIZE } else { stored };
+        let sz = if stored == 0 {
+            DEFAULT_THREAD_STACK_SIZE
+        } else {
+            stored
+        };
         *stacksize = sz;
     }
     0
@@ -1254,7 +1287,10 @@ pub extern "C" fn pthread_attr_setdetachstate(attr: *mut PthreadAttrT, detachsta
 
 /// Get the detach state from a thread attribute object.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_attr_getdetachstate(attr: *const PthreadAttrT, detachstate: *mut i32) -> i32 {
+pub extern "C" fn pthread_attr_getdetachstate(
+    attr: *const PthreadAttrT,
+    detachstate: *mut i32,
+) -> i32 {
     if attr.is_null() || detachstate.is_null() {
         return errno::EFAULT;
     }
@@ -1291,7 +1327,11 @@ pub extern "C" fn pthread_attr_getstack(
     // size was never set, so report the default.
     // SAFETY: attr non-null; reading 8 bytes at offset 0 is in-bounds.
     let stored = unsafe { core::ptr::read_unaligned(attr.cast::<usize>()) };
-    let size = if stored == 0 { DEFAULT_THREAD_STACK_SIZE } else { stored };
+    let size = if stored == 0 {
+        DEFAULT_THREAD_STACK_SIZE
+    } else {
+        stored
+    };
     // SAFETY: both out-pointers verified non-null above.
     unsafe {
         *stackaddr = addr as *mut core::ffi::c_void;
@@ -1320,7 +1360,10 @@ pub extern "C" fn pthread_attr_setstack(
     // index ≤ 23 < 56.  Unaligned because PthreadAttrT has align(1).
     unsafe {
         core::ptr::write_unaligned(p.add(ATTR_OFF_STACKSIZE).cast::<usize>(), stacksize);
-        core::ptr::write_unaligned(p.add(ATTR_OFF_STACKADDR).cast::<usize>(), stackaddr as usize);
+        core::ptr::write_unaligned(
+            p.add(ATTR_OFF_STACKADDR).cast::<usize>(),
+            stackaddr as usize,
+        );
     }
     0
 }
@@ -1355,7 +1398,10 @@ pub extern "C" fn pthread_attr_setguardsize(attr: *mut PthreadAttrT, guardsize: 
     // SAFETY: attr is non-null; writing 8 bytes at offset 24 ends at index
     // 31 < 56.  Unaligned because PthreadAttrT has align(1).
     unsafe {
-        core::ptr::write_unaligned(attr.cast::<u8>().add(ATTR_OFF_GUARDSIZE).cast::<usize>(), guardsize);
+        core::ptr::write_unaligned(
+            attr.cast::<u8>().add(ATTR_OFF_GUARDSIZE).cast::<usize>(),
+            guardsize,
+        );
     }
     0
 }
@@ -1633,7 +1679,9 @@ pub extern "C" fn pthread_setcancelstate(state: i32, oldstate: *mut i32) -> i32 
     let prev = CANCEL_STATE.swap(state, Ordering::Relaxed);
     if !oldstate.is_null() {
         // SAFETY: caller guarantees oldstate is valid if non-null.
-        unsafe { *oldstate = prev; }
+        unsafe {
+            *oldstate = prev;
+        }
     }
     0
 }
@@ -1650,15 +1698,15 @@ pub extern "C" fn pthread_setcancelstate(state: i32, oldstate: *mut i32) -> i32 
 /// Same swap-and-report semantics as `pthread_setcancelstate`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn pthread_setcanceltype(cancel_type: i32, oldtype: *mut i32) -> i32 {
-    if cancel_type != PTHREAD_CANCEL_DEFERRED
-        && cancel_type != PTHREAD_CANCEL_ASYNCHRONOUS
-    {
+    if cancel_type != PTHREAD_CANCEL_DEFERRED && cancel_type != PTHREAD_CANCEL_ASYNCHRONOUS {
         return errno::EINVAL;
     }
     let prev = CANCEL_TYPE.swap(cancel_type, Ordering::Relaxed);
     if !oldtype.is_null() {
         // SAFETY: caller guarantees oldtype is valid if non-null.
-        unsafe { *oldtype = prev; }
+        unsafe {
+            *oldtype = prev;
+        }
     }
     0
 }
@@ -1702,7 +1750,13 @@ pub extern "C" fn pthread_mutexattr_init(attr: *mut PthreadMutexattrT) -> i32 {
         return errno::EFAULT;
     }
     // SAFETY: attr is non-null.
-    unsafe { core::ptr::write_bytes(attr.cast::<u8>(), 0, core::mem::size_of::<PthreadMutexattrT>()); }
+    unsafe {
+        core::ptr::write_bytes(
+            attr.cast::<u8>(),
+            0,
+            core::mem::size_of::<PthreadMutexattrT>(),
+        );
+    }
     0
 }
 
@@ -1727,7 +1781,9 @@ pub extern "C" fn pthread_mutexattr_settype(attr: *mut PthreadMutexattrT, kind: 
     // Store kind in first 4 bytes (all 4 bytes of the attr).
     // SAFETY: attr is non-null and 4 bytes.
     // Use write_unaligned because PthreadMutexattrT is [u8; 4] with align(1).
-    unsafe { core::ptr::write_unaligned(attr.cast::<i32>(), kind); }
+    unsafe {
+        core::ptr::write_unaligned(attr.cast::<i32>(), kind);
+    }
     0
 }
 
@@ -1739,7 +1795,9 @@ pub extern "C" fn pthread_mutexattr_gettype(attr: *const PthreadMutexattrT, kind
     }
     // SAFETY: both pointers verified non-null.
     // Use read_unaligned because PthreadMutexattrT is [u8; 4] with align(1).
-    unsafe { *kind = core::ptr::read_unaligned(attr.cast::<i32>()); }
+    unsafe {
+        *kind = core::ptr::read_unaligned(attr.cast::<i32>());
+    }
     0
 }
 
@@ -1789,7 +1847,10 @@ pub extern "C" fn pthread_mutex_timedlock(
     }
 
     // Fast path: try to acquire immediately.
-    if m.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+    if m.locked
+        .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+        .is_ok()
+    {
         m.owner.store(self_id, Ordering::Relaxed);
         m.count.store(1, Ordering::Relaxed);
         return 0;
@@ -1801,17 +1862,21 @@ pub extern "C" fn pthread_mutex_timedlock(
 
     loop {
         // Check timeout by reading current time.
-        let mut now = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut now = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
 
-        if now.tv_sec > dl_secs
-            || (now.tv_sec == dl_secs && now.tv_nsec >= dl_nanos)
-        {
+        if now.tv_sec > dl_secs || (now.tv_sec == dl_secs && now.tv_nsec >= dl_nanos) {
             return errno::ETIMEDOUT;
         }
 
         // Try to acquire.
-        if m.locked.compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed).is_ok() {
+        if m.locked
+            .compare_exchange_weak(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_ok()
+        {
             m.owner.store(self_id, Ordering::Relaxed);
             m.count.store(1, Ordering::Relaxed);
             return 0;
@@ -1833,7 +1898,13 @@ pub extern "C" fn pthread_condattr_init(attr: *mut PthreadCondattrT) -> i32 {
         return errno::EFAULT;
     }
     // SAFETY: attr verified non-null; zeroing a [u8; 8] is safe.
-    unsafe { core::ptr::write_bytes(attr.cast::<u8>(), 0, core::mem::size_of::<PthreadCondattrT>()); }
+    unsafe {
+        core::ptr::write_bytes(
+            attr.cast::<u8>(),
+            0,
+            core::mem::size_of::<PthreadCondattrT>(),
+        );
+    }
     0
 }
 
@@ -1858,17 +1929,24 @@ pub extern "C" fn pthread_condattr_setclock(attr: *mut PthreadCondattrT, clock_i
         return errno::EINVAL;
     }
     // Store in first 4 bytes.
-    unsafe { core::ptr::write_unaligned(attr.cast::<i32>(), clock_id); }
+    unsafe {
+        core::ptr::write_unaligned(attr.cast::<i32>(), clock_id);
+    }
     0
 }
 
 /// Get the clock for a condition variable attribute.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_condattr_getclock(attr: *const PthreadCondattrT, clock_id: *mut i32) -> i32 {
+pub extern "C" fn pthread_condattr_getclock(
+    attr: *const PthreadCondattrT,
+    clock_id: *mut i32,
+) -> i32 {
     if attr.is_null() || clock_id.is_null() {
         return errno::EFAULT;
     }
-    unsafe { *clock_id = core::ptr::read_unaligned(attr.cast::<i32>()); }
+    unsafe {
+        *clock_id = core::ptr::read_unaligned(attr.cast::<i32>());
+    }
     0
 }
 
@@ -1882,7 +1960,13 @@ pub extern "C" fn pthread_rwlockattr_init(attr: *mut PthreadRwlockattrT) -> i32 
     if attr.is_null() {
         return errno::EFAULT;
     }
-    unsafe { core::ptr::write_bytes(attr.cast::<u8>(), 0, core::mem::size_of::<PthreadRwlockattrT>()); }
+    unsafe {
+        core::ptr::write_bytes(
+            attr.cast::<u8>(),
+            0,
+            core::mem::size_of::<PthreadRwlockattrT>(),
+        );
+    }
     0
 }
 
@@ -1896,7 +1980,10 @@ pub extern "C" fn pthread_rwlockattr_destroy(_attr: *mut PthreadRwlockattrT) -> 
 ///
 /// We only support `PTHREAD_PROCESS_PRIVATE` (0).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_rwlockattr_setpshared(attr: *mut PthreadRwlockattrT, pshared: i32) -> i32 {
+pub extern "C" fn pthread_rwlockattr_setpshared(
+    attr: *mut PthreadRwlockattrT,
+    pshared: i32,
+) -> i32 {
     if attr.is_null() {
         return errno::EFAULT;
     }
@@ -1904,17 +1991,24 @@ pub extern "C" fn pthread_rwlockattr_setpshared(attr: *mut PthreadRwlockattrT, p
         // PTHREAD_PROCESS_SHARED not supported.
         return errno::ENOTSUP;
     }
-    unsafe { core::ptr::write_unaligned(attr.cast::<i32>(), pshared); }
+    unsafe {
+        core::ptr::write_unaligned(attr.cast::<i32>(), pshared);
+    }
     0
 }
 
 /// Get the process-shared attribute for a rwlock.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_rwlockattr_getpshared(attr: *const PthreadRwlockattrT, pshared: *mut i32) -> i32 {
+pub extern "C" fn pthread_rwlockattr_getpshared(
+    attr: *const PthreadRwlockattrT,
+    pshared: *mut i32,
+) -> i32 {
     if attr.is_null() || pshared.is_null() {
         return errno::EFAULT;
     }
-    unsafe { *pshared = core::ptr::read_unaligned(attr.cast::<i32>()); }
+    unsafe {
+        *pshared = core::ptr::read_unaligned(attr.cast::<i32>());
+    }
     0
 }
 
@@ -1962,7 +2056,9 @@ pub unsafe extern "C" fn pthread_setname_np(thread: PthreadT, name: *const u8) -
             .as_mut()
             .and_then(|names| names.get_mut(idx))
     };
-    let Some(slot) = slot else { return errno::EINVAL; };
+    let Some(slot) = slot else {
+        return errno::EINVAL;
+    };
     let mut i: usize = 0;
     while i < name_len {
         if let Some(s) = slot.get_mut(i) {
@@ -2002,7 +2098,9 @@ pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len
             .as_ref()
             .and_then(|names| names.get(idx))
     };
-    let Some(slot) = slot else { return errno::EINVAL; };
+    let Some(slot) = slot else {
+        return errno::EINVAL;
+    };
     let name_len = {
         let mut l: usize = 0;
         while l < PTHREAD_NAME_MAX {
@@ -2020,10 +2118,14 @@ pub unsafe extern "C" fn pthread_getname_np(thread: PthreadT, name: *mut u8, len
 
     let mut i: usize = 0;
     while i < name_len {
-        unsafe { *name.add(i) = slot.get(i).copied().unwrap_or(0); }
+        unsafe {
+            *name.add(i) = slot.get(i).copied().unwrap_or(0);
+        }
         i = i.wrapping_add(1);
     }
-    unsafe { *name.add(i) = 0; }
+    unsafe {
+        *name.add(i) = 0;
+    }
 
     0
 }
@@ -2347,7 +2449,10 @@ mod tests {
 
     #[test]
     fn mutexattr_settype_null_returns_efault() {
-        assert_eq!(pthread_mutexattr_settype(core::ptr::null_mut(), 0), errno::EFAULT);
+        assert_eq!(
+            pthread_mutexattr_settype(core::ptr::null_mut(), 0),
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -2363,13 +2468,19 @@ mod tests {
     #[test]
     fn mutexattr_gettype_null_attr_returns_efault() {
         let mut kind: i32 = 0;
-        assert_eq!(pthread_mutexattr_gettype(core::ptr::null(), &mut kind), errno::EFAULT);
+        assert_eq!(
+            pthread_mutexattr_gettype(core::ptr::null(), &mut kind),
+            errno::EFAULT
+        );
     }
 
     #[test]
     fn mutexattr_gettype_null_kind_returns_efault() {
         let attr: PthreadMutexattrT = [0; 4];
-        assert_eq!(pthread_mutexattr_gettype(&attr, core::ptr::null_mut()), errno::EFAULT);
+        assert_eq!(
+            pthread_mutexattr_gettype(&attr, core::ptr::null_mut()),
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -2518,7 +2629,10 @@ mod tests {
 
     #[test]
     fn attr_setstacksize_null_returns_efault() {
-        assert_eq!(pthread_attr_setstacksize(core::ptr::null_mut(), 8192), errno::EFAULT);
+        assert_eq!(
+            pthread_attr_setstacksize(core::ptr::null_mut(), 8192),
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -2544,13 +2658,19 @@ mod tests {
     #[test]
     fn attr_getstacksize_null_attr_returns_efault() {
         let mut size: usize = 0;
-        assert_eq!(pthread_attr_getstacksize(core::ptr::null(), &mut size), errno::EFAULT);
+        assert_eq!(
+            pthread_attr_getstacksize(core::ptr::null(), &mut size),
+            errno::EFAULT
+        );
     }
 
     #[test]
     fn attr_getstacksize_null_size_returns_efault() {
         let attr: PthreadAttrT = [0; 56];
-        assert_eq!(pthread_attr_getstacksize(&attr, core::ptr::null_mut()), errno::EFAULT);
+        assert_eq!(
+            pthread_attr_getstacksize(&attr, core::ptr::null_mut()),
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -2591,7 +2711,10 @@ mod tests {
 
     #[test]
     fn attr_setdetachstate_null_returns_efault() {
-        assert_eq!(pthread_attr_setdetachstate(core::ptr::null_mut(), 0), errno::EFAULT);
+        assert_eq!(
+            pthread_attr_setdetachstate(core::ptr::null_mut(), 0),
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -2619,13 +2742,19 @@ mod tests {
     #[test]
     fn attr_getdetachstate_null_attr_returns_efault() {
         let mut state: i32 = 0;
-        assert_eq!(pthread_attr_getdetachstate(core::ptr::null(), &mut state), errno::EFAULT);
+        assert_eq!(
+            pthread_attr_getdetachstate(core::ptr::null(), &mut state),
+            errno::EFAULT
+        );
     }
 
     #[test]
     fn attr_getdetachstate_null_state_returns_efault() {
         let attr: PthreadAttrT = [0; 56];
-        assert_eq!(pthread_attr_getdetachstate(&attr, core::ptr::null_mut()), errno::EFAULT);
+        assert_eq!(
+            pthread_attr_getdetachstate(&attr, core::ptr::null_mut()),
+            errno::EFAULT
+        );
     }
 
     // =======================================================================
@@ -2677,7 +2806,12 @@ mod tests {
         let mut buf: PthreadAttrT = [0xFF; 56];
         encode_attr(
             &mut buf,
-            StackAttr { addr: 0, size: 0, guard: 0, detached: false },
+            StackAttr {
+                addr: 0,
+                size: 0,
+                guard: 0,
+                detached: false,
+            },
         );
         // All bytes must be cleared when every field is zero.
         assert!(buf.iter().all(|&b| b == 0));
@@ -2819,7 +2953,10 @@ mod tests {
 
     #[test]
     fn cond_init_null_returns_efault() {
-        assert_eq!(pthread_cond_init(core::ptr::null_mut(), core::ptr::null()), errno::EFAULT);
+        assert_eq!(
+            pthread_cond_init(core::ptr::null_mut(), core::ptr::null()),
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -2883,7 +3020,10 @@ mod tests {
 
     #[test]
     fn condattr_setclock_null_returns_efault() {
-        assert_eq!(pthread_condattr_setclock(core::ptr::null_mut(), 0), errno::EFAULT);
+        assert_eq!(
+            pthread_condattr_setclock(core::ptr::null_mut(), 0),
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -2909,13 +3049,19 @@ mod tests {
     #[test]
     fn condattr_getclock_null_attr_returns_efault() {
         let mut clock_id: i32 = 0;
-        assert_eq!(pthread_condattr_getclock(core::ptr::null(), &mut clock_id), errno::EFAULT);
+        assert_eq!(
+            pthread_condattr_getclock(core::ptr::null(), &mut clock_id),
+            errno::EFAULT
+        );
     }
 
     #[test]
     fn condattr_getclock_null_clockid_returns_efault() {
         let attr: PthreadCondattrT = [0; 4];
-        assert_eq!(pthread_condattr_getclock(&attr, core::ptr::null_mut()), errno::EFAULT);
+        assert_eq!(
+            pthread_condattr_getclock(&attr, core::ptr::null_mut()),
+            errno::EFAULT
+        );
     }
 
     // =======================================================================
@@ -2935,7 +3081,10 @@ mod tests {
 
     #[test]
     fn rwlock_init_null_returns_efault() {
-        assert_eq!(pthread_rwlock_init(core::ptr::null_mut(), core::ptr::null()), errno::EFAULT);
+        assert_eq!(
+            pthread_rwlock_init(core::ptr::null_mut(), core::ptr::null()),
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -2961,7 +3110,10 @@ mod tests {
 
     #[test]
     fn rwlockattr_init_null_returns_efault() {
-        assert_eq!(pthread_rwlockattr_init(core::ptr::null_mut()), errno::EFAULT);
+        assert_eq!(
+            pthread_rwlockattr_init(core::ptr::null_mut()),
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -2983,7 +3135,10 @@ mod tests {
         let mut attr: PthreadRwlockattrT = [0; 8];
         pthread_rwlockattr_init(&mut attr);
         // Not supported -- returns ENOTSUP.
-        assert_eq!(pthread_rwlockattr_setpshared(&mut attr, PTHREAD_PROCESS_SHARED), errno::ENOTSUP);
+        assert_eq!(
+            pthread_rwlockattr_setpshared(&mut attr, PTHREAD_PROCESS_SHARED),
+            errno::ENOTSUP
+        );
     }
 
     #[test]
@@ -2996,7 +3151,10 @@ mod tests {
 
     #[test]
     fn rwlockattr_setpshared_null_returns_efault() {
-        assert_eq!(pthread_rwlockattr_setpshared(core::ptr::null_mut(), 0), errno::EFAULT);
+        assert_eq!(
+            pthread_rwlockattr_setpshared(core::ptr::null_mut(), 0),
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -3013,13 +3171,19 @@ mod tests {
     #[test]
     fn rwlockattr_getpshared_null_attr_returns_efault() {
         let mut val: i32 = 0;
-        assert_eq!(pthread_rwlockattr_getpshared(core::ptr::null(), &mut val), errno::EFAULT);
+        assert_eq!(
+            pthread_rwlockattr_getpshared(core::ptr::null(), &mut val),
+            errno::EFAULT
+        );
     }
 
     #[test]
     fn rwlockattr_getpshared_null_val_returns_efault() {
         let attr: PthreadRwlockattrT = [0; 8];
-        assert_eq!(pthread_rwlockattr_getpshared(&attr, core::ptr::null_mut()), errno::EFAULT);
+        assert_eq!(
+            pthread_rwlockattr_getpshared(&attr, core::ptr::null_mut()),
+            errno::EFAULT
+        );
     }
 
     // =======================================================================
@@ -3222,7 +3386,10 @@ mod tests {
     #[test]
     fn cond_initializer_is_zeroed() {
         // Cannot move out of a static with non-Copy fields; read via reference.
-        assert_eq!(PTHREAD_COND_INITIALIZER.generation.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            PTHREAD_COND_INITIALIZER.generation.load(Ordering::Relaxed),
+            0
+        );
     }
 
     #[test]
@@ -3269,7 +3436,14 @@ mod tests {
 
     #[test]
     fn atfork_with_handlers_returns_zero() {
-        assert_eq!(pthread_atfork(Some(dummy_fork_handler), Some(dummy_fork_handler), Some(dummy_fork_handler)), 0);
+        assert_eq!(
+            pthread_atfork(
+                Some(dummy_fork_handler),
+                Some(dummy_fork_handler),
+                Some(dummy_fork_handler)
+            ),
+            0
+        );
     }
 
     // =======================================================================
@@ -3323,17 +3497,26 @@ mod tests {
 
     #[test]
     fn mutex_lock_null_returns_efault() {
-        assert_eq!(unsafe { pthread_mutex_lock(core::ptr::null_mut()) }, errno::EFAULT);
+        assert_eq!(
+            unsafe { pthread_mutex_lock(core::ptr::null_mut()) },
+            errno::EFAULT
+        );
     }
 
     #[test]
     fn mutex_trylock_null_returns_efault() {
-        assert_eq!(unsafe { pthread_mutex_trylock(core::ptr::null_mut()) }, errno::EFAULT);
+        assert_eq!(
+            unsafe { pthread_mutex_trylock(core::ptr::null_mut()) },
+            errno::EFAULT
+        );
     }
 
     #[test]
     fn mutex_unlock_null_returns_efault() {
-        assert_eq!(unsafe { pthread_mutex_unlock(core::ptr::null_mut()) }, errno::EFAULT);
+        assert_eq!(
+            unsafe { pthread_mutex_unlock(core::ptr::null_mut()) },
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -3383,13 +3566,17 @@ mod tests {
 
     extern "C" fn once_increment() {
         // SAFETY: single-threaded tests.
-        unsafe { *core::ptr::addr_of_mut!(ONCE_COUNTER) += 1; }
+        unsafe {
+            *core::ptr::addr_of_mut!(ONCE_COUNTER) += 1;
+        }
     }
 
     #[test]
     fn once_calls_init_exactly_once() {
         let mut once = PTHREAD_ONCE_INIT;
-        unsafe { *core::ptr::addr_of_mut!(ONCE_COUNTER) = 0; }
+        unsafe {
+            *core::ptr::addr_of_mut!(ONCE_COUNTER) = 0;
+        }
         assert_eq!(unsafe { pthread_once(&mut once, once_increment) }, 0);
         assert_eq!(unsafe { *core::ptr::addr_of!(ONCE_COUNTER) }, 1);
         // Second call should not invoke init again.
@@ -3399,7 +3586,10 @@ mod tests {
 
     #[test]
     fn once_null_returns_efault() {
-        assert_eq!(unsafe { pthread_once(core::ptr::null_mut(), once_increment) }, errno::EFAULT);
+        assert_eq!(
+            unsafe { pthread_once(core::ptr::null_mut(), once_increment) },
+            errno::EFAULT
+        );
     }
 
     // =======================================================================
@@ -3412,7 +3602,10 @@ mod tests {
         assert_eq!(unsafe { pthread_key_create(&mut key, None) }, 0);
 
         let val = 42u8;
-        assert_eq!(unsafe { pthread_setspecific(key, core::ptr::addr_of!(val) as *mut u8) }, 0);
+        assert_eq!(
+            unsafe { pthread_setspecific(key, core::ptr::addr_of!(val) as *mut u8) },
+            0
+        );
 
         let got = unsafe { pthread_getspecific(key) };
         assert_eq!(got, core::ptr::addr_of!(val) as *mut u8);
@@ -3420,7 +3613,10 @@ mod tests {
 
     #[test]
     fn tsd_key_create_null_returns_efault() {
-        assert_eq!(unsafe { pthread_key_create(core::ptr::null_mut(), None) }, errno::EFAULT);
+        assert_eq!(
+            unsafe { pthread_key_create(core::ptr::null_mut(), None) },
+            errno::EFAULT
+        );
     }
 
     #[test]
@@ -3481,7 +3677,10 @@ mod tests {
 
     #[test]
     fn rwlock_rdlock_tryrdlock() {
-        let mut rw = PthreadRwlockT { state: AtomicI32::new(0), _pad: [0; 52] };
+        let mut rw = PthreadRwlockT {
+            state: AtomicI32::new(0),
+            _pad: [0; 52],
+        };
         // Read-lock.
         assert_eq!(pthread_rwlock_rdlock(&mut rw), 0);
         // Another read-lock should succeed (multiple readers).
@@ -3496,7 +3695,10 @@ mod tests {
 
     #[test]
     fn rwlock_wrlock_trywrlock() {
-        let mut rw = PthreadRwlockT { state: AtomicI32::new(0), _pad: [0; 52] };
+        let mut rw = PthreadRwlockT {
+            state: AtomicI32::new(0),
+            _pad: [0; 52],
+        };
         // Write-lock.
         assert_eq!(pthread_rwlock_wrlock(&mut rw), 0);
         assert_eq!(rw.state.load(core::sync::atomic::Ordering::Relaxed), -1);
@@ -3513,8 +3715,14 @@ mod tests {
     fn rwlock_null_returns_efault() {
         assert_eq!(pthread_rwlock_rdlock(core::ptr::null_mut()), errno::EFAULT);
         assert_eq!(pthread_rwlock_wrlock(core::ptr::null_mut()), errno::EFAULT);
-        assert_eq!(pthread_rwlock_tryrdlock(core::ptr::null_mut()), errno::EFAULT);
-        assert_eq!(pthread_rwlock_trywrlock(core::ptr::null_mut()), errno::EFAULT);
+        assert_eq!(
+            pthread_rwlock_tryrdlock(core::ptr::null_mut()),
+            errno::EFAULT
+        );
+        assert_eq!(
+            pthread_rwlock_trywrlock(core::ptr::null_mut()),
+            errno::EFAULT
+        );
     }
 
     // =======================================================================
@@ -3523,7 +3731,10 @@ mod tests {
 
     #[test]
     fn cond_signal_increments_generation() {
-        let mut cond = PthreadCondT { generation: AtomicI32::new(0), _pad: [0; 44] };
+        let mut cond = PthreadCondT {
+            generation: AtomicI32::new(0),
+            _pad: [0; 44],
+        };
         let gen_before = cond.generation.load(core::sync::atomic::Ordering::Relaxed);
         assert_eq!(pthread_cond_signal(&mut cond), 0);
         let gen_after = cond.generation.load(core::sync::atomic::Ordering::Relaxed);
@@ -3532,9 +3743,15 @@ mod tests {
 
     #[test]
     fn cond_broadcast_increments_generation() {
-        let mut cond = PthreadCondT { generation: AtomicI32::new(0), _pad: [0; 44] };
+        let mut cond = PthreadCondT {
+            generation: AtomicI32::new(0),
+            _pad: [0; 44],
+        };
         assert_eq!(pthread_cond_broadcast(&mut cond), 0);
-        assert_eq!(cond.generation.load(core::sync::atomic::Ordering::Relaxed), 1);
+        assert_eq!(
+            cond.generation.load(core::sync::atomic::Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
@@ -3551,23 +3768,47 @@ mod tests {
     fn cond_wait_null_returns_efault() {
         #[allow(clippy::declare_interior_mutable_const)]
         let mut m = PTHREAD_MUTEX_INITIALIZER;
-        assert_eq!(pthread_cond_wait(core::ptr::null_mut(), &mut m), errno::EFAULT);
-        let mut c = PthreadCondT { generation: AtomicI32::new(0), _pad: [0; 44] };
-        assert_eq!(pthread_cond_wait(&mut c, core::ptr::null_mut()), errno::EFAULT);
+        assert_eq!(
+            pthread_cond_wait(core::ptr::null_mut(), &mut m),
+            errno::EFAULT
+        );
+        let mut c = PthreadCondT {
+            generation: AtomicI32::new(0),
+            _pad: [0; 44],
+        };
+        assert_eq!(
+            pthread_cond_wait(&mut c, core::ptr::null_mut()),
+            errno::EFAULT
+        );
     }
 
     #[test]
     fn cond_timedwait_null_returns_efault() {
         #[allow(clippy::declare_interior_mutable_const)]
         let mut m = PTHREAD_MUTEX_INITIALIZER;
-        let mut c = PthreadCondT { generation: AtomicI32::new(0), _pad: [0; 44] };
-        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut c = PthreadCondT {
+            generation: AtomicI32::new(0),
+            _pad: [0; 44],
+        };
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         // Null cond.
-        assert_eq!(pthread_cond_timedwait(core::ptr::null_mut(), &mut m, &ts), errno::EFAULT);
+        assert_eq!(
+            pthread_cond_timedwait(core::ptr::null_mut(), &mut m, &ts),
+            errno::EFAULT
+        );
         // Null mutex.
-        assert_eq!(pthread_cond_timedwait(&mut c, core::ptr::null_mut(), &ts), errno::EFAULT);
+        assert_eq!(
+            pthread_cond_timedwait(&mut c, core::ptr::null_mut(), &ts),
+            errno::EFAULT
+        );
         // Null abstime.
-        assert_eq!(pthread_cond_timedwait(&mut c, &mut m, core::ptr::null()), errno::EFAULT);
+        assert_eq!(
+            pthread_cond_timedwait(&mut c, &mut m, core::ptr::null()),
+            errno::EFAULT
+        );
     }
 
     // =======================================================================
@@ -3674,7 +3915,12 @@ mod tests {
         let mut tid: PthreadT = 0;
         // This will likely fail (EAGAIN) because the kernel syscall
         // is meaningless on Windows, but must not crash.
-        let _ret = pthread_create(&raw mut tid, core::ptr::null(), dummy, core::ptr::null_mut());
+        let _ret = pthread_create(
+            &raw mut tid,
+            core::ptr::null(),
+            dummy,
+            core::ptr::null_mut(),
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3687,8 +3933,10 @@ mod tests {
         // values on test host, so accept either 0 or ESRCH.
         let mut retval: *mut u8 = core::ptr::null_mut();
         let ret = pthread_join(0xDEAD_BEEF, &raw mut retval);
-        assert!(ret == 0 || ret == crate::errno::ESRCH,
-                "expected 0 or ESRCH, got {ret}");
+        assert!(
+            ret == 0 || ret == crate::errno::ESRCH,
+            "expected 0 or ESRCH, got {ret}"
+        );
     }
 
     #[test]
@@ -3696,8 +3944,10 @@ mod tests {
         // Null retval pointer should be fine (just don't store the value).
         // Syscall result is unpredictable on test host.
         let ret = pthread_join(0xDEAD_BEEF, core::ptr::null_mut());
-        assert!(ret == 0 || ret == crate::errno::ESRCH,
-                "expected 0 or ESRCH, got {ret}");
+        assert!(
+            ret == 0 || ret == crate::errno::ESRCH,
+            "expected 0 or ESRCH, got {ret}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -3726,7 +3976,10 @@ mod tests {
 
     #[test]
     fn test_pthread_mutex_timedlock_null_mutex() {
-        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let ret = pthread_mutex_timedlock(core::ptr::null_mut(), &ts);
         assert_eq!(ret, crate::errno::EFAULT);
     }
@@ -3735,7 +3988,9 @@ mod tests {
     fn test_pthread_mutex_timedlock_null_abstime() {
         // SAFETY: zero-init is valid for PthreadMutexT (all-zeros = unlocked).
         let mut m: PthreadMutexT = unsafe { core::mem::zeroed() };
-        unsafe { pthread_mutex_init(&raw mut m, core::ptr::null()); }
+        unsafe {
+            pthread_mutex_init(&raw mut m, core::ptr::null());
+        }
         let ret = pthread_mutex_timedlock(&raw mut m, core::ptr::null());
         assert_eq!(ret, crate::errno::EFAULT);
     }
@@ -3745,12 +4000,19 @@ mod tests {
         // timedlock on an unlocked mutex should succeed immediately.
         // SAFETY: zero-init is valid for PthreadMutexT (all-zeros = unlocked).
         let mut m: PthreadMutexT = unsafe { core::mem::zeroed() };
-        unsafe { pthread_mutex_init(&raw mut m, core::ptr::null()); }
-        let ts = crate::stat::Timespec { tv_sec: 999_999, tv_nsec: 0 };
+        unsafe {
+            pthread_mutex_init(&raw mut m, core::ptr::null());
+        }
+        let ts = crate::stat::Timespec {
+            tv_sec: 999_999,
+            tv_nsec: 0,
+        };
         let ret = pthread_mutex_timedlock(&raw mut m, &ts);
         assert_eq!(ret, 0, "timedlock on unlocked mutex should succeed");
         // Unlock.
-        unsafe { pthread_mutex_unlock(&raw mut m); }
+        unsafe {
+            pthread_mutex_unlock(&raw mut m);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -4005,8 +4267,14 @@ mod tests {
         let _g = CancelGuard::new();
         reset_cancel_state_and_type();
         let mut old: i32 = 99;
-        assert_eq!(pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut old), 0);
-        assert_eq!(pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut old), 0);
+        assert_eq!(
+            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut old),
+            0
+        );
+        assert_eq!(
+            pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &raw mut old),
+            0
+        );
         assert_eq!(old, PTHREAD_CANCEL_DISABLE);
     }
 

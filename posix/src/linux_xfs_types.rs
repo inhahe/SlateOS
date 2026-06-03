@@ -97,7 +97,12 @@ mod tests {
 
     #[test]
     fn test_magic_numbers_distinct() {
-        let magics = [XFS_SUPER_MAGIC, XFS_AGF_MAGIC, XFS_AGI_MAGIC, XFS_DIR3_BLOCK_MAGIC];
+        let magics = [
+            XFS_SUPER_MAGIC,
+            XFS_AGF_MAGIC,
+            XFS_AGI_MAGIC,
+            XFS_DIR3_BLOCK_MAGIC,
+        ];
         for i in 0..magics.len() {
             for j in (i + 1)..magics.len() {
                 assert_ne!(magics[i], magics[j]);
@@ -108,8 +113,10 @@ mod tests {
     #[test]
     fn test_feature_flags_no_overlap() {
         let feats = [
-            XFS_SB_FEAT_INCOMPAT_FTYPE, XFS_SB_FEAT_INCOMPAT_SPINODES,
-            XFS_SB_FEAT_INCOMPAT_META_UUID, XFS_SB_FEAT_INCOMPAT_BIGTIME,
+            XFS_SB_FEAT_INCOMPAT_FTYPE,
+            XFS_SB_FEAT_INCOMPAT_SPINODES,
+            XFS_SB_FEAT_INCOMPAT_META_UUID,
+            XFS_SB_FEAT_INCOMPAT_BIGTIME,
             XFS_SB_FEAT_INCOMPAT_NREXT64,
         ];
         for i in 0..feats.len() {
@@ -123,8 +130,10 @@ mod tests {
     #[test]
     fn test_inode_formats_distinct() {
         let fmts = [
-            XFS_DINODE_FMT_LOCAL, XFS_DINODE_FMT_EXTENTS,
-            XFS_DINODE_FMT_BTREE, XFS_DINODE_FMT_DEV,
+            XFS_DINODE_FMT_LOCAL,
+            XFS_DINODE_FMT_EXTENTS,
+            XFS_DINODE_FMT_BTREE,
+            XFS_DINODE_FMT_DEV,
         ];
         for i in 0..fmts.len() {
             for j in (i + 1)..fmts.len() {
@@ -145,9 +154,14 @@ mod tests {
     #[test]
     fn test_inode_flags_no_overlap() {
         let flags = [
-            XFS_DIFLAG_REALTIME, XFS_DIFLAG_PREALLOC, XFS_DIFLAG_NEWRTBM,
-            XFS_DIFLAG_IMMUTABLE, XFS_DIFLAG_APPEND, XFS_DIFLAG_SYNC,
-            XFS_DIFLAG_NOATIME, XFS_DIFLAG_NODUMP,
+            XFS_DIFLAG_REALTIME,
+            XFS_DIFLAG_PREALLOC,
+            XFS_DIFLAG_NEWRTBM,
+            XFS_DIFLAG_IMMUTABLE,
+            XFS_DIFLAG_APPEND,
+            XFS_DIFLAG_SYNC,
+            XFS_DIFLAG_NOATIME,
+            XFS_DIFLAG_NODUMP,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

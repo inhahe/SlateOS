@@ -85,7 +85,10 @@ mod tests {
 
     #[test]
     fn test_valid_flags_mask() {
-        assert_eq!(PTP_EXTTS_VALID_FLAGS, PTP_RISING_EDGE | PTP_FALLING_EDGE | PTP_STRICT_FLAGS);
+        assert_eq!(
+            PTP_EXTTS_VALID_FLAGS,
+            PTP_RISING_EDGE | PTP_FALLING_EDGE | PTP_STRICT_FLAGS
+        );
     }
 
     #[test]

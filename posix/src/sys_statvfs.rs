@@ -4,11 +4,11 @@
 //! `statvfs`/`fstatvfs` functions from the `statvfs` module.
 
 pub use crate::statvfs::Statvfs;
-pub use crate::statvfs::statvfs;
 pub use crate::statvfs::fstatvfs;
+pub use crate::statvfs::statvfs;
 
-pub use crate::statvfs::ST_RDONLY;
 pub use crate::statvfs::ST_NOSUID;
+pub use crate::statvfs::ST_RDONLY;
 
 /// Disallow access to device special files.
 pub const ST_NODEV: u64 = 4;
@@ -47,9 +47,15 @@ mod tests {
     #[test]
     fn test_st_flags_distinct() {
         let flags = [
-            ST_RDONLY, ST_NOSUID, ST_NODEV, ST_NOEXEC,
-            ST_SYNCHRONOUS, ST_MANDLOCK, ST_NOATIME,
-            ST_NODIRATIME, ST_RELATIME,
+            ST_RDONLY,
+            ST_NOSUID,
+            ST_NODEV,
+            ST_NOEXEC,
+            ST_SYNCHRONOUS,
+            ST_MANDLOCK,
+            ST_NOATIME,
+            ST_NODIRATIME,
+            ST_RELATIME,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

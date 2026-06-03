@@ -71,8 +71,12 @@ mod tests {
     #[test]
     fn test_policies_distinct() {
         let policies = [
-            MPOL_DEFAULT, MPOL_PREFERRED, MPOL_BIND,
-            MPOL_INTERLEAVE, MPOL_LOCAL, MPOL_PREFERRED_MANY,
+            MPOL_DEFAULT,
+            MPOL_PREFERRED,
+            MPOL_BIND,
+            MPOL_INTERLEAVE,
+            MPOL_LOCAL,
+            MPOL_PREFERRED_MANY,
         ];
         for i in 0..policies.len() {
             assert!(policies[i] < MPOL_MAX);
@@ -85,7 +89,8 @@ mod tests {
     #[test]
     fn test_policy_flags_no_overlap() {
         let flags = [
-            MPOL_F_STATIC_NODES, MPOL_F_RELATIVE_NODES,
+            MPOL_F_STATIC_NODES,
+            MPOL_F_RELATIVE_NODES,
             MPOL_F_NUMA_BALANCING,
         ];
         for i in 0..flags.len() {

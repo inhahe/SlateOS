@@ -93,8 +93,11 @@ mod tests {
     #[test]
     fn test_hooks_distinct() {
         let hooks = [
-            NF_INET_PRE_ROUTING, NF_INET_LOCAL_IN, NF_INET_FORWARD,
-            NF_INET_LOCAL_OUT, NF_INET_POST_ROUTING,
+            NF_INET_PRE_ROUTING,
+            NF_INET_LOCAL_IN,
+            NF_INET_FORWARD,
+            NF_INET_LOCAL_OUT,
+            NF_INET_POST_ROUTING,
         ];
         assert_eq!(hooks.len(), NF_INET_NUMHOOKS as usize);
         for i in 0..hooks.len() {
@@ -117,8 +120,12 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            NFPROTO_UNSPEC, NFPROTO_INET, NFPROTO_IPV4,
-            NFPROTO_ARP, NFPROTO_NETDEV, NFPROTO_BRIDGE,
+            NFPROTO_UNSPEC,
+            NFPROTO_INET,
+            NFPROTO_IPV4,
+            NFPROTO_ARP,
+            NFPROTO_NETDEV,
+            NFPROTO_BRIDGE,
             NFPROTO_IPV6,
         ];
         for i in 0..protos.len() {

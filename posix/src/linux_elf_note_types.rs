@@ -79,8 +79,11 @@ mod tests {
     #[test]
     fn test_gnu_note_types_distinct() {
         let types = [
-            NT_GNU_ABI_TAG, NT_GNU_HWCAP, NT_GNU_BUILD_ID,
-            NT_GNU_GOLD_VERSION, NT_GNU_PROPERTY_TYPE_0,
+            NT_GNU_ABI_TAG,
+            NT_GNU_HWCAP,
+            NT_GNU_BUILD_ID,
+            NT_GNU_GOLD_VERSION,
+            NT_GNU_PROPERTY_TYPE_0,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -102,8 +105,10 @@ mod tests {
     #[test]
     fn test_os_values_distinct() {
         let oses = [
-            ELF_NOTE_OS_LINUX, ELF_NOTE_OS_GNU,
-            ELF_NOTE_OS_SOLARIS2, ELF_NOTE_OS_FREEBSD,
+            ELF_NOTE_OS_LINUX,
+            ELF_NOTE_OS_GNU,
+            ELF_NOTE_OS_SOLARIS2,
+            ELF_NOTE_OS_FREEBSD,
         ];
         for i in 0..oses.len() {
             for j in (i + 1)..oses.len() {
@@ -120,10 +125,18 @@ mod tests {
     #[test]
     fn test_core_note_types_distinct() {
         let types = [
-            NT_PRSTATUS, NT_FPREGSET, NT_PRPSINFO,
-            NT_TASKSTRUCT, NT_AUXV, NT_SIGINFO, NT_FILE,
-            NT_X86_XSTATE, NT_ARM_VFP, NT_ARM_TLS,
-            NT_ARM_HW_BREAK, NT_ARM_HW_WATCH,
+            NT_PRSTATUS,
+            NT_FPREGSET,
+            NT_PRPSINFO,
+            NT_TASKSTRUCT,
+            NT_AUXV,
+            NT_SIGINFO,
+            NT_FILE,
+            NT_X86_XSTATE,
+            NT_ARM_VFP,
+            NT_ARM_TLS,
+            NT_ARM_HW_BREAK,
+            NT_ARM_HW_WATCH,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

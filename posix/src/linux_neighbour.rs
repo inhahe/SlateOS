@@ -124,8 +124,14 @@ mod tests {
     #[test]
     fn test_nud_states_powers_of_two() {
         let states = [
-            NUD_INCOMPLETE, NUD_REACHABLE, NUD_STALE, NUD_DELAY,
-            NUD_PROBE, NUD_FAILED, NUD_NOARP, NUD_PERMANENT,
+            NUD_INCOMPLETE,
+            NUD_REACHABLE,
+            NUD_STALE,
+            NUD_DELAY,
+            NUD_PROBE,
+            NUD_FAILED,
+            NUD_NOARP,
+            NUD_PERMANENT,
         ];
         for s in &states {
             assert!(s.is_power_of_two(), "state {s:#x} not power of 2");
@@ -143,8 +149,13 @@ mod tests {
     #[test]
     fn test_ntf_flags_powers_of_two() {
         let flags = [
-            NTF_USE, NTF_SELF, NTF_MASTER, NTF_PROXY,
-            NTF_EXT_LEARNED, NTF_OFFLOADED, NTF_STICKY,
+            NTF_USE,
+            NTF_SELF,
+            NTF_MASTER,
+            NTF_PROXY,
+            NTF_EXT_LEARNED,
+            NTF_OFFLOADED,
+            NTF_STICKY,
             NTF_ROUTER,
         ];
         for f in &flags {

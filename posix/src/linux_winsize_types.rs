@@ -134,9 +134,13 @@ mod tests {
     #[test]
     fn test_pkt_flags_no_overlap() {
         let flags = [
-            TIOCPKT_FLUSHREAD, TIOCPKT_FLUSHWRITE,
-            TIOCPKT_STOP, TIOCPKT_START,
-            TIOCPKT_NOSTOP, TIOCPKT_DOSTOP, TIOCPKT_IOCTL,
+            TIOCPKT_FLUSHREAD,
+            TIOCPKT_FLUSHWRITE,
+            TIOCPKT_STOP,
+            TIOCPKT_START,
+            TIOCPKT_NOSTOP,
+            TIOCPKT_DOSTOP,
+            TIOCPKT_IOCTL,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

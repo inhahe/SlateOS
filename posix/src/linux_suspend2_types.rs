@@ -83,8 +83,10 @@ mod tests {
     #[test]
     fn test_sleep_states_distinct() {
         let states = [
-            PM_SUSPEND_ON, PM_SUSPEND_FREEZE,
-            PM_SUSPEND_STANDBY, PM_SUSPEND_MEM,
+            PM_SUSPEND_ON,
+            PM_SUSPEND_FREEZE,
+            PM_SUSPEND_STANDBY,
+            PM_SUSPEND_MEM,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -103,8 +105,12 @@ mod tests {
     #[test]
     fn test_pm_events_distinct() {
         let events = [
-            PM_EVENT_FREEZE, PM_EVENT_SUSPEND, PM_EVENT_HIBERNATE,
-            PM_EVENT_THAW, PM_EVENT_RESUME, PM_EVENT_RESTORE,
+            PM_EVENT_FREEZE,
+            PM_EVENT_SUSPEND,
+            PM_EVENT_HIBERNATE,
+            PM_EVENT_THAW,
+            PM_EVENT_RESUME,
+            PM_EVENT_RESTORE,
             PM_EVENT_RECOVER,
         ];
         for i in 0..events.len() {
@@ -117,8 +123,12 @@ mod tests {
     #[test]
     fn test_pm_events_power_of_two() {
         let events = [
-            PM_EVENT_FREEZE, PM_EVENT_SUSPEND, PM_EVENT_HIBERNATE,
-            PM_EVENT_THAW, PM_EVENT_RESUME, PM_EVENT_RESTORE,
+            PM_EVENT_FREEZE,
+            PM_EVENT_SUSPEND,
+            PM_EVENT_HIBERNATE,
+            PM_EVENT_THAW,
+            PM_EVENT_RESUME,
+            PM_EVENT_RESTORE,
             PM_EVENT_RECOVER,
         ];
         for e in &events {

@@ -44,17 +44,17 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], rdx",        // int vararg 0
-    "mov [rsp+8], rcx",      // int vararg 1
-    "mov [rsp+16], r8",      // int vararg 2
-    "mov [rsp+24], r9",      // int vararg 3
-    "mov rax, [rbp+16]",     // int vararg 4 (stack)
+    "mov [rsp], rdx",    // int vararg 0
+    "mov [rsp+8], rcx",  // int vararg 1
+    "mov [rsp+16], r8",  // int vararg 2
+    "mov [rsp+24], r9",  // int vararg 3
+    "mov rax, [rbp+16]", // int vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // int vararg 5
+    "mov rax, [rbp+24]", // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // int vararg 6
+    "mov rax, [rbp+32]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // int vararg 7
+    "mov rax, [rbp+40]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -65,13 +65,12 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi = priority, rsi = fmt (already set)
-    "mov rdx, rsp",          // int_args
-    "lea rcx, [rsp+64]",    // float_args
+    "mov rdx, rsp",      // int_args
+    "lea rcx, [rsp+64]", // float_args
     "call _syslog_impl",
     "add rsp, 128",
     "pop rbp",
     "ret",
-
     // __syslog_chk(priority, flag, fmt, ...) → _syslog_impl(priority, fmt, int_args, float_args)
     // The _FORTIFY_SOURCE redirect target for syslog().  Fixed args:
     // rdi=priority, rsi=flag, rdx=fmt; varargs start at rcx (like fprintf).
@@ -82,18 +81,18 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], rcx",        // int vararg 0
-    "mov [rsp+8], r8",       // int vararg 1
-    "mov [rsp+16], r9",      // int vararg 2
-    "mov rax, [rbp+16]",     // int vararg 3 (stack)
+    "mov [rsp], rcx",    // int vararg 0
+    "mov [rsp+8], r8",   // int vararg 1
+    "mov [rsp+16], r9",  // int vararg 2
+    "mov rax, [rbp+16]", // int vararg 3 (stack)
     "mov [rsp+24], rax",
-    "mov rax, [rbp+24]",     // int vararg 4
+    "mov rax, [rbp+24]", // int vararg 4
     "mov [rsp+32], rax",
-    "mov rax, [rbp+32]",     // int vararg 5
+    "mov rax, [rbp+32]", // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+40]",     // int vararg 6
+    "mov rax, [rbp+40]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+48]",     // int vararg 7
+    "mov rax, [rbp+48]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -104,9 +103,9 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi=priority already set; move fmt into rsi.
-    "mov rsi, rdx",          // fmt
-    "mov rdx, rsp",          // int_args
-    "lea rcx, [rsp+64]",    // float_args
+    "mov rsi, rdx",      // fmt
+    "mov rdx, rsp",      // int_args
+    "lea rcx, [rsp+64]", // float_args
     "call _syslog_impl",
     "add rsp, 128",
     "pop rbp",
@@ -283,12 +282,7 @@ pub unsafe extern "C" fn vsyslog(priority: i32, fmt: *const u8, ap: *mut VaList)
 /// As [`vsyslog`]: `fmt` must be a valid NUL-terminated C string (or null)
 /// and `ap` a valid `va_list` matching `fmt`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn __vsyslog_chk(
-    priority: i32,
-    _flag: i32,
-    fmt: *const u8,
-    ap: *mut VaList,
-) {
+pub unsafe extern "C" fn __vsyslog_chk(priority: i32, _flag: i32, fmt: *const u8, ap: *mut VaList) {
     // SAFETY: forwards to vsyslog, which validates `ap`.
     unsafe { vsyslog(priority, fmt, ap) };
 }
@@ -313,8 +307,7 @@ fn do_syslog(priority: i32, fmt: *const u8, iargs: *const u64, fargs: *const u64
     // NUL-terminates; it tolerates null `iargs`/`fargs` when `fmt` has no
     // matching conversions.
     let mut body = [0u8; SYSLOG_MSG_BUF];
-    let written =
-        printf::_snprintf_impl(body.as_mut_ptr(), SYSLOG_MSG_BUF, fmt, iargs, fargs);
+    let written = printf::_snprintf_impl(body.as_mut_ptr(), SYSLOG_MSG_BUF, fmt, iargs, fargs);
     // Clamp to the buffer (snprintf returns the would-be length, which may
     // exceed the buffer when truncated).
     let body_len = if written < 0 {
@@ -387,7 +380,9 @@ pub extern "C" fn closelog() {
 pub extern "C" fn setlogmask(mask: i32) -> i32 {
     let old = unsafe { *core::ptr::addr_of!(SYSLOG_MASK) };
     if mask != 0 {
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(mask); }
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(mask);
+        }
     }
     old
 }
@@ -448,7 +443,7 @@ mod tests {
 
     #[test]
     fn test_log_mask_single_priority() {
-        assert_eq!(log_mask(LOG_EMERG), 1);    // 1 << 0
+        assert_eq!(log_mask(LOG_EMERG), 1); // 1 << 0
         assert_eq!(log_mask(LOG_ERR), 1 << 3); // 1 << 3
         assert_eq!(log_mask(LOG_DEBUG), 1 << 7);
     }
@@ -515,7 +510,9 @@ mod tests {
     #[test]
     fn test_setlogmask_returns_previous() {
         // Reset to known state.
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
+        }
 
         let old = setlogmask(log_upto(LOG_ERR));
         assert_eq!(old, 0xFF);
@@ -527,7 +524,9 @@ mod tests {
     #[test]
     fn test_setlogmask_zero_queries() {
         // setlogmask(0) queries without changing.
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
+        }
         let mask = setlogmask(0);
         assert_eq!(mask, 0xFF);
         // Should still be 0xFF.
@@ -676,8 +675,7 @@ mod tests {
     fn test_facility_values_alignment() {
         // All facility values should be multiples of 8 (shifted by 3).
         let facilities = [
-            LOG_KERN, LOG_USER, LOG_MAIL, LOG_DAEMON, LOG_AUTH,
-            LOG_LOCAL0, LOG_LOCAL7,
+            LOG_KERN, LOG_USER, LOG_MAIL, LOG_DAEMON, LOG_AUTH, LOG_LOCAL0, LOG_LOCAL7,
         ];
         for f in facilities {
             assert_eq!(f & 0x07, 0, "facility {f} should have low 3 bits zero");
@@ -688,7 +686,9 @@ mod tests {
 
     #[test]
     fn test_syslog_no_crash() {
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
+        }
         unsafe {
             _syslog_impl(
                 LOG_INFO,
@@ -702,7 +702,9 @@ mod tests {
     #[test]
     fn test_syslog_filtered_by_mask() {
         // Set mask to only allow ERR and below.
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(log_upto(LOG_ERR) as i32); }
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(log_upto(LOG_ERR) as i32);
+        }
         unsafe {
             // This should be filtered out (LOG_INFO > LOG_ERR).
             _syslog_impl(
@@ -720,21 +722,32 @@ mod tests {
             );
         }
         // Restore.
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
+        }
     }
 
     #[test]
     fn test_syslog_null_message_no_crash() {
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
         unsafe {
-            _syslog_impl(LOG_ERR, core::ptr::null(), core::ptr::null(), core::ptr::null());
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
+        }
+        unsafe {
+            _syslog_impl(
+                LOG_ERR,
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+            );
         }
     }
 
     #[test]
     fn test_syslog_expands_format() {
         // Build a synthetic va_list and verify vsyslog formats without crashing.
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
+        }
         let mut reg = [0u8; 176];
         // First GP arg = 42 (used by %d).
         reg[0..8].copy_from_slice(&42u64.to_le_bytes());
@@ -752,7 +765,9 @@ mod tests {
 
     #[test]
     fn test_vsyslog_null_va_no_crash() {
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
+        }
         unsafe {
             vsyslog(LOG_INFO, b"hi\0".as_ptr(), core::ptr::null_mut());
         }
@@ -761,7 +776,9 @@ mod tests {
     #[test]
     fn test_vsyslog_chk_expands_format() {
         // The _FORTIFY_SOURCE form: extra `flag` arg, otherwise like vsyslog.
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
+        }
         let mut reg = [0u8; 176];
         reg[0..8].copy_from_slice(&7u64.to_le_bytes());
         let mut overflow = [0u8; 128];
@@ -780,7 +797,9 @@ mod tests {
 
     #[test]
     fn test_setlogmask_specific_mask() {
-        unsafe { core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF); }
+        unsafe {
+            core::ptr::addr_of_mut!(SYSLOG_MASK).write(0xFF);
+        }
         // Set to only LOG_ERR.
         let old = setlogmask(log_mask(LOG_ERR) as i32);
         assert_eq!(old, 0xFF);

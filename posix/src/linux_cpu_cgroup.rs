@@ -80,8 +80,13 @@ mod tests {
     #[test]
     fn test_file_names_distinct() {
         let files = [
-            CPU_WEIGHT, CPU_WEIGHT_NICE, CPU_MAX, CPU_MAX_BURST,
-            CPU_STAT, CPU_PRESSURE, CPU_IDLE,
+            CPU_WEIGHT,
+            CPU_WEIGHT_NICE,
+            CPU_MAX,
+            CPU_MAX_BURST,
+            CPU_STAT,
+            CPU_PRESSURE,
+            CPU_IDLE,
         ];
         for i in 0..files.len() {
             for j in (i + 1)..files.len() {
@@ -105,10 +110,14 @@ mod tests {
     #[test]
     fn test_stat_fields_distinct() {
         let fields = [
-            CPU_STAT_USAGE_USEC, CPU_STAT_USER_USEC,
-            CPU_STAT_SYSTEM_USEC, CPU_STAT_NR_PERIODS,
-            CPU_STAT_NR_THROTTLED, CPU_STAT_THROTTLED_USEC,
-            CPU_STAT_NR_BURSTS, CPU_STAT_BURST_USEC,
+            CPU_STAT_USAGE_USEC,
+            CPU_STAT_USER_USEC,
+            CPU_STAT_SYSTEM_USEC,
+            CPU_STAT_NR_PERIODS,
+            CPU_STAT_NR_THROTTLED,
+            CPU_STAT_THROTTLED_USEC,
+            CPU_STAT_NR_BURSTS,
+            CPU_STAT_BURST_USEC,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {

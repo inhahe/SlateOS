@@ -123,12 +123,23 @@ impl MbstateT {
 /// Returns 1..=4 for valid lead bytes, 0 for continuation or invalid bytes.
 #[inline]
 fn utf8_seq_len(lead: u8) -> usize {
-    if lead < 0x80 { 1 }
-    else if lead < 0xC2 { 0 }        // Overlong 2-byte or continuation.
-    else if lead < 0xE0 { 2 }
-    else if lead < 0xF0 { 3 }
-    else if lead < 0xF5 { 4 }        // F5..FF are invalid lead bytes.
-    else { 0 }
+    if lead < 0x80 {
+        1
+    } else if lead < 0xC2 {
+        0
+    }
+    // Overlong 2-byte or continuation.
+    else if lead < 0xE0 {
+        2
+    } else if lead < 0xF0 {
+        3
+    } else if lead < 0xF5 {
+        4
+    }
+    // F5..FF are invalid lead bytes.
+    else {
+        0
+    }
 }
 
 /// Check if a byte is a UTF-8 continuation byte (10xxxxxx).
@@ -277,7 +288,9 @@ pub unsafe extern "C" fn mbtowc(pwc: *mut WcharT, s: *const u8, n: usize) -> i32
     let lead = unsafe { *s };
     if lead == 0 {
         if !pwc.is_null() {
-            unsafe { *pwc = 0; }
+            unsafe {
+                *pwc = 0;
+            }
         }
         return 0;
     }
@@ -302,7 +315,9 @@ pub unsafe extern "C" fn mbtowc(pwc: *mut WcharT, s: *const u8, n: usize) -> i32
     match utf8_decode(&buf, seq_len) {
         Some(cp) => {
             if !pwc.is_null() {
-                unsafe { *pwc = cp as WcharT; }
+                unsafe {
+                    *pwc = cp as WcharT;
+                }
             }
             seq_len as i32
         }
@@ -337,7 +352,9 @@ pub unsafe extern "C" fn wctomb(s: *mut u8, wc: WcharT) -> i32 {
     let mut i = 0;
     while i < n {
         // SAFETY: Caller guarantees s has room for MB_CUR_MAX bytes.
-        unsafe { *s.add(i) = buf[i]; }
+        unsafe {
+            *s.add(i) = buf[i];
+        }
         i += 1;
     }
     n as i32
@@ -364,7 +381,9 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) ->
         let lead = unsafe { *src.add(src_off) };
         if lead == 0 {
             if !dst.is_null() {
-                unsafe { *dst.add(dst_count) = 0; }
+                unsafe {
+                    *dst.add(dst_count) = 0;
+                }
             }
             return dst_count;
         }
@@ -390,7 +409,9 @@ pub unsafe extern "C" fn mbstowcs(dst: *mut WcharT, src: *const u8, n: usize) ->
 
         if let Some(cp) = utf8_decode(&buf, seq_len) {
             if !dst.is_null() {
-                unsafe { *dst.add(dst_count) = cp as WcharT; }
+                unsafe {
+                    *dst.add(dst_count) = cp as WcharT;
+                }
             }
             src_off += seq_len;
             dst_count += 1;
@@ -425,7 +446,9 @@ pub unsafe extern "C" fn wcstombs(dst: *mut u8, src: *const WcharT, n: usize) ->
         if wc == 0 {
             // Null-terminate if room.
             if !dst.is_null() && dst_off < n {
-                unsafe { *dst.add(dst_off) = 0; }
+                unsafe {
+                    *dst.add(dst_off) = 0;
+                }
             }
             return dst_off;
         }
@@ -450,7 +473,9 @@ pub unsafe extern "C" fn wcstombs(dst: *mut u8, src: *const WcharT, n: usize) ->
         if !dst.is_null() {
             let mut i = 0;
             while i < enc_len {
-                unsafe { *dst.add(dst_off + i) = buf[i]; }
+                unsafe {
+                    *dst.add(dst_off + i) = buf[i];
+                }
                 i += 1;
             }
         }
@@ -543,7 +568,9 @@ pub unsafe extern "C" fn mbrtowc(
         let lead = unsafe { *s };
         if lead == 0 {
             if !pwc.is_null() {
-                unsafe { *pwc = 0; }
+                unsafe {
+                    *pwc = 0;
+                }
             }
             return 0;
         }
@@ -583,7 +610,9 @@ pub unsafe extern "C" fn mbrtowc(
 
         if let Some(cp) = utf8_decode(&buf, seq_len) {
             if !pwc.is_null() {
-                unsafe { *pwc = cp as WcharT; }
+                unsafe {
+                    *pwc = cp as WcharT;
+                }
             }
             if cp == 0 { 0 } else { consumed }
         } else {
@@ -614,7 +643,9 @@ pub unsafe extern "C" fn mbrtowc(
 
         if let Some(cp) = utf8_decode(&buf, seq_len) {
             if !pwc.is_null() {
-                unsafe { *pwc = cp as WcharT; }
+                unsafe {
+                    *pwc = cp as WcharT;
+                }
             }
             if cp == 0 { 0 } else { consumed }
         } else {
@@ -633,11 +664,7 @@ pub unsafe extern "C" fn mbrtowc(
 /// Returns the number of bytes written, or `(size_t)-1` on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
-pub unsafe extern "C" fn wcrtomb(
-    s: *mut u8,
-    wc: WcharT,
-    _ps: *mut MbstateT,
-) -> usize {
+pub unsafe extern "C" fn wcrtomb(s: *mut u8, wc: WcharT, _ps: *mut MbstateT) -> usize {
     if s.is_null() {
         // "Reset to initial state" — no-op for UTF-8, returns 1
         // (the number of bytes to encode the null character).
@@ -659,7 +686,9 @@ pub unsafe extern "C" fn wcrtomb(
     let mut i = 0;
     while i < n {
         // SAFETY: Caller guarantees s has room for MB_CUR_MAX bytes.
-        unsafe { *s.add(i) = buf[i]; }
+        unsafe {
+            *s.add(i) = buf[i];
+        }
         i += 1;
     }
     n
@@ -679,7 +708,7 @@ pub extern "C" fn wcwidth(wc: WcharT) -> i32 {
         return 0;
     }
     // C0 and C1 control characters (0x00-0x1F, 0x7F, 0x80-0x9F).
-    if wc < 32 || wc == 0x7f || (wc >= 0x80 && wc <= 0x9f) {
+    if wc < 32 || wc == 0x7f || (0x80..=0x9f).contains(&wc) {
         return -1;
     }
     // Zero-width characters: combining marks, joiners, soft hyphen, BOM, etc.
@@ -725,7 +754,8 @@ pub extern "C" fn wcwidth(wc: WcharT) -> i32 {
         || (wc >= 0x2060 && wc <= 0x2064) // Invisible operators
         || (wc >= 0x2066 && wc <= 0x206f) // Bidi isolates
         || wc == 0xfeff   // BOM / zero-width no-break space
-        || (wc >= 0xe0100 && wc <= 0xe01ef) // Variation Selectors Supplement
+        || (wc >= 0xe0100 && wc <= 0xe01ef)
+    // Variation Selectors Supplement
     {
         return 0;
     }
@@ -765,9 +795,9 @@ pub extern "C" fn wcwidth(wc: WcharT) -> i32 {
         || (wc >= 0xfe30 && wc <= 0xfe6f) // CJK Compatibility Forms + Small Form Variants
         || (wc >= 0xff01 && wc <= 0xff60) // Fullwidth forms
         || (wc >= 0xffe0 && wc <= 0xffe6) // Fullwidth signs
-        || (wc >= 0x1f004 && wc <= 0x1f004) // Mahjong Tile
+        || wc == 0x1f004 // Mahjong Tile
         || wc == 0x1f0cf                 // Playing Card
-        || (wc >= 0x1f18e && wc <= 0x1f18e)
+        || wc == 0x1f18e
         || (wc >= 0x1f191 && wc <= 0x1f19a)
         || (wc >= 0x1f200 && wc <= 0x1f202)
         || (wc >= 0x1f210 && wc <= 0x1f23b)
@@ -779,7 +809,8 @@ pub extern "C" fn wcwidth(wc: WcharT) -> i32 {
         || (wc >= 0x1fa00 && wc <= 0x1fa6f)
         || (wc >= 0x1fa70 && wc <= 0x1faff)
         || (wc >= 0x20000 && wc <= 0x2fffd) // CJK Extension B+
-        || (wc >= 0x30000 && wc <= 0x3fffd) // CJK Extension G+
+        || (wc >= 0x30000 && wc <= 0x3fffd)
+    // CJK Extension G+
     {
         return 2;
     }
@@ -856,7 +887,7 @@ pub extern "C" fn iswblank(wc: WcharT) -> i32 {
 /// C1 control characters (0x80-0x9F) are NOT printable.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswprint(wc: WcharT) -> i32 {
-    i32::from(wc >= 0x20 && wc != 0x7f && !(wc >= 0x80 && wc <= 0x9f))
+    i32::from(wc >= 0x20 && wc != 0x7f && !(0x80..=0x9f).contains(&wc))
 }
 
 /// Check if wide character is a control character.
@@ -865,7 +896,7 @@ pub extern "C" fn iswprint(wc: WcharT) -> i32 {
 /// and C1 controls (0x80-0x9F).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswcntrl(wc: WcharT) -> i32 {
-    i32::from(wc < 0x20 || wc == 0x7f || (wc >= 0x80 && wc <= 0x9f))
+    i32::from(wc < 0x20 || wc == 0x7f || (0x80..=0x9f).contains(&wc))
 }
 
 /// Check if wide character is uppercase.
@@ -917,17 +948,17 @@ pub extern "C" fn towupper(wc: WcharT) -> WcharT {
 pub type WctypeT = u32;
 
 // Class IDs — keep in sync with wctype() and iswctype().
-const WC_ALNUM:  WctypeT = 1;
-const WC_ALPHA:  WctypeT = 2;
-const WC_BLANK:  WctypeT = 3;
-const WC_CNTRL:  WctypeT = 4;
-const WC_DIGIT:  WctypeT = 5;
-const WC_GRAPH:  WctypeT = 6;
-const WC_LOWER:  WctypeT = 7;
-const WC_PRINT:  WctypeT = 8;
-const WC_PUNCT:  WctypeT = 9;
-const WC_SPACE:  WctypeT = 10;
-const WC_UPPER:  WctypeT = 11;
+const WC_ALNUM: WctypeT = 1;
+const WC_ALPHA: WctypeT = 2;
+const WC_BLANK: WctypeT = 3;
+const WC_CNTRL: WctypeT = 4;
+const WC_DIGIT: WctypeT = 5;
+const WC_GRAPH: WctypeT = 6;
+const WC_LOWER: WctypeT = 7;
+const WC_PRINT: WctypeT = 8;
+const WC_PUNCT: WctypeT = 9;
+const WC_SPACE: WctypeT = 10;
+const WC_UPPER: WctypeT = 11;
 const WC_XDIGIT: WctypeT = 12;
 
 /// Look up a character class by name.
@@ -950,26 +981,28 @@ pub unsafe extern "C" fn wctype(name: *const u8) -> WctypeT {
     let mut i: usize = 0;
     while i < 15 {
         let c = unsafe { *name.add(i) };
-        if c == 0 { break; }
+        if c == 0 {
+            break;
+        }
         buf[i] = c;
         i = i.wrapping_add(1);
     }
     let len = i;
 
     match &buf[..len] {
-        b"alnum"  => WC_ALNUM,
-        b"alpha"  => WC_ALPHA,
-        b"blank"  => WC_BLANK,
-        b"cntrl"  => WC_CNTRL,
-        b"digit"  => WC_DIGIT,
-        b"graph"  => WC_GRAPH,
-        b"lower"  => WC_LOWER,
-        b"print"  => WC_PRINT,
-        b"punct"  => WC_PUNCT,
-        b"space"  => WC_SPACE,
-        b"upper"  => WC_UPPER,
+        b"alnum" => WC_ALNUM,
+        b"alpha" => WC_ALPHA,
+        b"blank" => WC_BLANK,
+        b"cntrl" => WC_CNTRL,
+        b"digit" => WC_DIGIT,
+        b"graph" => WC_GRAPH,
+        b"lower" => WC_LOWER,
+        b"print" => WC_PRINT,
+        b"punct" => WC_PUNCT,
+        b"space" => WC_SPACE,
+        b"upper" => WC_UPPER,
         b"xdigit" => WC_XDIGIT,
-        _         => 0,
+        _ => 0,
     }
 }
 
@@ -979,17 +1012,17 @@ pub unsafe extern "C" fn wctype(name: *const u8) -> WctypeT {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn iswctype(wc: WcharT, ct: WctypeT) -> i32 {
     match ct {
-        WC_ALNUM  => iswalnum(wc),
-        WC_ALPHA  => iswalpha(wc),
-        WC_BLANK  => iswblank(wc),
-        WC_CNTRL  => iswcntrl(wc),
-        WC_DIGIT  => iswdigit(wc),
-        WC_GRAPH  => iswgraph(wc),
-        WC_LOWER  => iswlower(wc),
-        WC_PRINT  => iswprint(wc),
-        WC_PUNCT  => iswpunct(wc),
-        WC_SPACE  => iswspace(wc),
-        WC_UPPER  => iswupper(wc),
+        WC_ALNUM => iswalnum(wc),
+        WC_ALPHA => iswalpha(wc),
+        WC_BLANK => iswblank(wc),
+        WC_CNTRL => iswcntrl(wc),
+        WC_DIGIT => iswdigit(wc),
+        WC_GRAPH => iswgraph(wc),
+        WC_LOWER => iswlower(wc),
+        WC_PRINT => iswprint(wc),
+        WC_PUNCT => iswpunct(wc),
+        WC_SPACE => iswspace(wc),
+        WC_UPPER => iswupper(wc),
         WC_XDIGIT => iswxdigit(wc),
         _ => 0,
     }
@@ -1024,7 +1057,9 @@ pub unsafe extern "C" fn wctrans(name: *const u8) -> WctransT {
     let mut i: usize = 0;
     while i < 15 {
         let c = unsafe { *name.add(i) };
-        if c == 0 { break; }
+        if c == 0 {
+            break;
+        }
         buf[i] = c;
         i = i.wrapping_add(1);
     }
@@ -1033,7 +1068,7 @@ pub unsafe extern "C" fn wctrans(name: *const u8) -> WctransT {
     match &buf[..len] {
         b"tolower" => WT_TOLOWER,
         b"toupper" => WT_TOUPPER,
-        _          => 0,
+        _ => 0,
     }
 }
 
@@ -1057,7 +1092,9 @@ pub unsafe extern "C" fn wcscpy(dst: *mut WcharT, src: *const WcharT) -> *mut Wc
     let mut i: usize = 0;
     loop {
         let c = unsafe { *src.add(i) };
-        unsafe { *dst.add(i) = c; }
+        unsafe {
+            *dst.add(i) = c;
+        }
         if c == 0 {
             return dst;
         }
@@ -1067,19 +1104,19 @@ pub unsafe extern "C" fn wcscpy(dst: *mut WcharT, src: *const WcharT) -> *mut Wc
 
 /// Copy at most `n` wide characters.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wcsncpy(
-    dst: *mut WcharT,
-    src: *const WcharT,
-    n: usize,
-) -> *mut WcharT {
+pub unsafe extern "C" fn wcsncpy(dst: *mut WcharT, src: *const WcharT, n: usize) -> *mut WcharT {
     let mut i: usize = 0;
     let mut done = false;
     while i < n {
         if done {
-            unsafe { *dst.add(i) = 0; }
+            unsafe {
+                *dst.add(i) = 0;
+            }
         } else {
             let c = unsafe { *src.add(i) };
-            unsafe { *dst.add(i) = c; }
+            unsafe {
+                *dst.add(i) = c;
+            }
             if c == 0 {
                 done = true;
             }
@@ -1119,11 +1156,7 @@ pub unsafe extern "C" fn wcscmp(s1: *const WcharT, s2: *const WcharT) -> i32 {
 
 /// Compare at most `n` wide characters.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wcsncmp(
-    s1: *const WcharT,
-    s2: *const WcharT,
-    n: usize,
-) -> i32 {
+pub unsafe extern "C" fn wcsncmp(s1: *const WcharT, s2: *const WcharT, n: usize) -> i32 {
     let mut i: usize = 0;
     while i < n {
         let a = unsafe { *s1.add(i) };
@@ -1188,14 +1221,12 @@ pub unsafe extern "C" fn wcsrchr(s: *const WcharT, wc: WcharT) -> *const WcharT 
 
 /// Copy wide characters.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wmemcpy(
-    dst: *mut WcharT,
-    src: *const WcharT,
-    n: usize,
-) -> *mut WcharT {
+pub unsafe extern "C" fn wmemcpy(dst: *mut WcharT, src: *const WcharT, n: usize) -> *mut WcharT {
     let mut i: usize = 0;
     while i < n {
-        unsafe { *dst.add(i) = *src.add(i); }
+        unsafe {
+            *dst.add(i) = *src.add(i);
+        }
         i = i.wrapping_add(1);
     }
     dst
@@ -1206,7 +1237,9 @@ pub unsafe extern "C" fn wmemcpy(
 pub unsafe extern "C" fn wmemset(dst: *mut WcharT, wc: WcharT, n: usize) -> *mut WcharT {
     let mut i: usize = 0;
     while i < n {
-        unsafe { *dst.add(i) = wc; }
+        unsafe {
+            *dst.add(i) = wc;
+        }
         i = i.wrapping_add(1);
     }
     dst
@@ -1308,20 +1341,24 @@ unsafe fn wc_detect_base(nptr: *const WcharT, mut i: usize, mut base: i32) -> (i
 /// `nptr` must point to a valid null-terminated wide string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
-pub unsafe extern "C" fn wcstol(
-    nptr: *const WcharT,
-    endptr: *mut *const WcharT,
-    base: i32,
-) -> i64 {
+pub unsafe extern "C" fn wcstol(nptr: *const WcharT, endptr: *mut *const WcharT, base: i32) -> i64 {
     if nptr.is_null() {
-        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        if !endptr.is_null() {
+            unsafe {
+                *endptr = nptr;
+            }
+        }
         return 0;
     }
 
     // POSIX: base must be 0 or in [2, 36].
     if base != 0 && !(2..=36).contains(&base) {
         crate::errno::set_errno(crate::errno::EINVAL);
-        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        if !endptr.is_null() {
+            unsafe {
+                *endptr = nptr;
+            }
+        }
         return 0;
     }
 
@@ -1339,17 +1376,21 @@ pub unsafe extern "C" fn wcstol(
     // Accumulate in negative space to correctly handle LONG_MIN
     // (whose absolute value exceeds LONG_MAX by one).
     let base64 = i64::from(actual_base);
-    let cutoff = i64::MIN / base64;       // Most-negative safe value before multiply.
-    let cutlim = -(i64::MIN % base64);    // Maximum digit before overflow after multiply.
+    let cutoff = i64::MIN / base64; // Most-negative safe value before multiply.
+    let cutlim = -(i64::MIN % base64); // Maximum digit before overflow after multiply.
     let mut acc: i64 = 0;
     let mut overflow = false;
     let mut any_digits = false;
 
     loop {
         let wc = unsafe { *nptr.add(i) };
-        if wc == 0 { break; }
+        if wc == 0 {
+            break;
+        }
         let d = wc_digit(wc, actual_base);
-        if d < 0 { break; }
+        if d < 0 {
+            break;
+        }
         any_digits = true;
 
         // Check for overflow before accumulating.
@@ -1372,7 +1413,9 @@ pub unsafe extern "C" fn wcstol(
     }
 
     if !endptr.is_null() {
-        unsafe { *endptr = if !any_digits { nptr } else { nptr.add(i) }; }
+        unsafe {
+            *endptr = if any_digits { nptr.add(i) } else { nptr };
+        }
     }
 
     if overflow {
@@ -1399,14 +1442,22 @@ pub unsafe extern "C" fn wcstoul(
     base: i32,
 ) -> u64 {
     if nptr.is_null() {
-        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        if !endptr.is_null() {
+            unsafe {
+                *endptr = nptr;
+            }
+        }
         return 0;
     }
 
     // POSIX: base must be 0 or in [2, 36].
     if base != 0 && !(2..=36).contains(&base) {
         crate::errno::set_errno(crate::errno::EINVAL);
-        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        if !endptr.is_null() {
+            unsafe {
+                *endptr = nptr;
+            }
+        }
         return 0;
     }
 
@@ -1415,7 +1466,8 @@ pub unsafe extern "C" fn wcstoul(
     // POSIX: strtoul/wcstoul accept an optional sign.  A '-' means
     // the result is the unsigned wrapping negation of the parsed value.
     let negative = unsafe { *nptr.add(i) } == 0x2d; // '-'
-    if negative || unsafe { *nptr.add(i) } == 0x2b { // '+'
+    if negative || unsafe { *nptr.add(i) } == 0x2b {
+        // '+'
         i = i.wrapping_add(1);
     }
 
@@ -1431,9 +1483,13 @@ pub unsafe extern "C" fn wcstoul(
 
     loop {
         let wc = unsafe { *nptr.add(i) };
-        if wc == 0 { break; }
+        if wc == 0 {
+            break;
+        }
         let d = wc_digit(wc, actual_base);
-        if d < 0 { break; }
+        if d < 0 {
+            break;
+        }
         any_digits = true;
         let d_u64 = d as u64;
 
@@ -1454,7 +1510,9 @@ pub unsafe extern "C" fn wcstoul(
     }
 
     if !endptr.is_null() {
-        unsafe { *endptr = if !any_digits { nptr } else { nptr.add(i) }; }
+        unsafe {
+            *endptr = if any_digits { nptr.add(i) } else { nptr };
+        }
     }
 
     if overflow {
@@ -1462,7 +1520,11 @@ pub unsafe extern "C" fn wcstoul(
         return u64::MAX;
     }
 
-    if negative { result.wrapping_neg() } else { result }
+    if negative {
+        result.wrapping_neg()
+    } else {
+        result
+    }
 }
 
 /// `wcstoll` — convert a wide string to `long long` (`i64`).
@@ -1508,12 +1570,13 @@ pub unsafe extern "C" fn wcstoull(
 /// `nptr` must point to a valid null-terminated wide string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::indexing_slicing)]
-pub unsafe extern "C" fn wcstod(
-    nptr: *const WcharT,
-    endptr: *mut *const WcharT,
-) -> f64 {
+pub unsafe extern "C" fn wcstod(nptr: *const WcharT, endptr: *mut *const WcharT) -> f64 {
     if nptr.is_null() {
-        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        if !endptr.is_null() {
+            unsafe {
+                *endptr = nptr;
+            }
+        }
         return 0.0;
     }
 
@@ -1526,7 +1589,9 @@ pub unsafe extern "C" fn wcstod(
 
     while bi < 62 {
         let wc = unsafe { *nptr.add(i) };
-        if wc == 0 { break; }
+        if wc == 0 {
+            break;
+        }
         match wc {
             // '+', '-', '.', '0'-'9', 'E', 'e', plus 'i','n','f','a','t','y'
             // for "inf"/"infinity"/"nan" parsing.
@@ -1545,7 +1610,11 @@ pub unsafe extern "C" fn wcstod(
     buf[bi] = 0;
 
     if bi == 0 {
-        if !endptr.is_null() { unsafe { *endptr = nptr; } }
+        if !endptr.is_null() {
+            unsafe {
+                *endptr = nptr;
+            }
+        }
         return 0.0;
     }
 
@@ -1558,7 +1627,9 @@ pub unsafe extern "C" fn wcstod(
         } else {
             unsafe { byte_end.offset_from(buf.as_ptr()) as usize }
         };
-        unsafe { *endptr = nptr.add(start.wrapping_add(bytes_consumed)); }
+        unsafe {
+            *endptr = nptr.add(start.wrapping_add(bytes_consumed));
+        }
     }
 
     val
@@ -1570,10 +1641,7 @@ pub unsafe extern "C" fn wcstod(
 ///
 /// `nptr` must point to a valid null-terminated wide string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wcstof(
-    nptr: *const WcharT,
-    endptr: *mut *const WcharT,
-) -> f32 {
+pub unsafe extern "C" fn wcstof(nptr: *const WcharT, endptr: *mut *const WcharT) -> f32 {
     unsafe { wcstod(nptr, endptr) as f32 }
 }
 
@@ -1601,23 +1669,23 @@ pub unsafe extern "C" fn mbrlen(s: *const u8, n: usize, ps: *mut MbstateT) -> us
 ///
 /// `dst` must have room for the existing string plus `n` + 1 wide chars.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wcsncat(
-    dst: *mut WcharT,
-    src: *const WcharT,
-    n: usize,
-) -> *mut WcharT {
+pub unsafe extern "C" fn wcsncat(dst: *mut WcharT, src: *const WcharT, n: usize) -> *mut WcharT {
     let dlen = unsafe { wcslen(dst) };
     let mut j: usize = 0;
     while j < n {
         let c = unsafe { *src.add(j) };
-        unsafe { *dst.add(dlen.wrapping_add(j)) = c; }
+        unsafe {
+            *dst.add(dlen.wrapping_add(j)) = c;
+        }
         if c == 0 {
             return dst;
         }
         j = j.wrapping_add(1);
     }
     // Null-terminate.
-    unsafe { *dst.add(dlen.wrapping_add(j)) = 0; }
+    unsafe {
+        *dst.add(dlen.wrapping_add(j)) = 0;
+    }
     dst
 }
 
@@ -1627,11 +1695,7 @@ pub unsafe extern "C" fn wcsncat(
 ///
 /// `s` must be valid for `n * sizeof(wchar_t)` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wmemchr(
-    s: *const WcharT,
-    wc: WcharT,
-    n: usize,
-) -> *const WcharT {
+pub unsafe extern "C" fn wmemchr(s: *const WcharT, wc: WcharT, n: usize) -> *const WcharT {
     let mut i: usize = 0;
     while i < n {
         if unsafe { *s.add(i) } == wc {
@@ -1648,22 +1712,22 @@ pub unsafe extern "C" fn wmemchr(
 ///
 /// Both `dst` and `src` must be valid for `n * sizeof(wchar_t)` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wmemmove(
-    dst: *mut WcharT,
-    src: *const WcharT,
-    n: usize,
-) -> *mut WcharT {
+pub unsafe extern "C" fn wmemmove(dst: *mut WcharT, src: *const WcharT, n: usize) -> *mut WcharT {
     if (dst as usize) < (src as usize) {
         let mut i: usize = 0;
         while i < n {
-            unsafe { *dst.add(i) = *src.add(i); }
+            unsafe {
+                *dst.add(i) = *src.add(i);
+            }
             i = i.wrapping_add(1);
         }
     } else if (dst as usize) > (src as usize) {
         let mut i = n;
         while i > 0 {
             i = i.wrapping_sub(1);
-            unsafe { *dst.add(i) = *src.add(i); }
+            unsafe {
+                *dst.add(i) = *src.add(i);
+            }
         }
     }
     dst
@@ -1675,10 +1739,7 @@ pub unsafe extern "C" fn wmemmove(
 ///
 /// Both strings must be valid null-terminated wide strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wcsstr(
-    haystack: *const WcharT,
-    needle: *const WcharT,
-) -> *const WcharT {
+pub unsafe extern "C" fn wcsstr(haystack: *const WcharT, needle: *const WcharT) -> *const WcharT {
     if unsafe { *needle } == 0 {
         return haystack;
     }
@@ -1837,7 +1898,9 @@ pub unsafe extern "C" fn wcstok(
     loop {
         let ch = unsafe { *ptr };
         if ch == 0 {
-            unsafe { *saveptr = core::ptr::null_mut(); }
+            unsafe {
+                *saveptr = core::ptr::null_mut();
+            }
             return core::ptr::null_mut();
         }
         if !wchar_in_set(ch, delim) {
@@ -1853,12 +1916,18 @@ pub unsafe extern "C" fn wcstok(
     loop {
         let ch = unsafe { *ptr };
         if ch == 0 {
-            unsafe { *saveptr = core::ptr::null_mut(); }
+            unsafe {
+                *saveptr = core::ptr::null_mut();
+            }
             break;
         }
         if wchar_in_set(ch, delim) {
-            unsafe { *ptr = 0; }
-            unsafe { *saveptr = ptr.add(1); }
+            unsafe {
+                *ptr = 0;
+            }
+            unsafe {
+                *saveptr = ptr.add(1);
+            }
             break;
         }
         ptr = unsafe { ptr.add(1) };
@@ -1901,7 +1970,9 @@ pub unsafe extern "C" fn wcsdup(s: *const WcharT) -> *mut WcharT {
     }
 
     let len = unsafe { wcslen(s) };
-    let size = len.wrapping_add(1).wrapping_mul(core::mem::size_of::<WcharT>());
+    let size = len
+        .wrapping_add(1)
+        .wrapping_mul(core::mem::size_of::<WcharT>());
 
     let raw_ptr = crate::malloc::malloc(size);
     if raw_ptr.is_null() {
@@ -1916,7 +1987,9 @@ pub unsafe extern "C" fn wcsdup(s: *const WcharT) -> *mut WcharT {
     let out_ptr = raw_ptr.cast::<WcharT>();
     let mut i: usize = 0;
     while i <= len {
-        unsafe { *out_ptr.add(i) = *s.add(i); }
+        unsafe {
+            *out_ptr.add(i) = *s.add(i);
+        }
         i = i.wrapping_add(1);
     }
 
@@ -1959,14 +2032,21 @@ pub unsafe extern "C" fn wcscoll_l(s1: *const WcharT, s2: *const WcharT, _locale
 pub unsafe extern "C" fn wcsxfrm(dest: *mut WcharT, src: *const WcharT, n: usize) -> usize {
     let len = unsafe { wcslen(src) };
     if n > 0 {
-        unsafe { wcsncpy(dest, src, n); }
+        unsafe {
+            wcsncpy(dest, src, n);
+        }
     }
     len
 }
 
 /// Transform a wide string for locale-aware comparison (locale variant).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wcsxfrm_l(dest: *mut WcharT, src: *const WcharT, n: usize, _locale: usize) -> usize {
+pub unsafe extern "C" fn wcsxfrm_l(
+    dest: *mut WcharT,
+    src: *const WcharT,
+    n: usize,
+    _locale: usize,
+) -> usize {
     unsafe { wcsxfrm(dest, src, n) }
 }
 
@@ -2023,7 +2103,11 @@ pub unsafe extern "C" fn mbsnrtowcs(
     while written < len && bytes_consumed < nms {
         let remaining_bytes = nms.saturating_sub(bytes_consumed);
         // Limit n to remaining bytes available.
-        let n = if remaining_bytes > 4 { 4 } else { remaining_bytes };
+        let n = if remaining_bytes > 4 {
+            4
+        } else {
+            remaining_bytes
+        };
         if n == 0 {
             break;
         }
@@ -2040,9 +2124,13 @@ pub unsafe extern "C" fn mbsnrtowcs(
         if ret == 0 {
             // Null terminator encountered.
             if !dst.is_null() {
-                unsafe { *dst.add(written) = 0; }
+                unsafe {
+                    *dst.add(written) = 0;
+                }
             }
-            unsafe { *src = core::ptr::null(); }
+            unsafe {
+                *src = core::ptr::null();
+            }
             return written;
         }
         if ret == usize::MAX {
@@ -2055,14 +2143,18 @@ pub unsafe extern "C" fn mbsnrtowcs(
             break;
         }
         if !dst.is_null() {
-            unsafe { *dst.add(written) = wc; }
+            unsafe {
+                *dst.add(written) = wc;
+            }
         }
         s = unsafe { s.add(ret) };
         bytes_consumed = bytes_consumed.wrapping_add(ret);
         written = written.wrapping_add(1);
     }
 
-    unsafe { *src = s; }
+    unsafe {
+        *src = s;
+    }
     written
 }
 
@@ -2132,7 +2224,9 @@ pub unsafe extern "C" fn wcsnrtombs(
         if !dst.is_null() {
             let mut k: usize = 0;
             while k < ret {
-                unsafe { *dst.add(written.wrapping_add(k)) = buf[k]; }
+                unsafe {
+                    *dst.add(written.wrapping_add(k)) = buf[k];
+                }
                 k = k.wrapping_add(1);
             }
         }
@@ -2142,14 +2236,18 @@ pub unsafe extern "C" fn wcsnrtombs(
 
         if wc == 0 {
             // Null terminator — don't count it in written, set src to null.
-            unsafe { *src = core::ptr::null(); }
+            unsafe {
+                *src = core::ptr::null();
+            }
             return written.wrapping_sub(ret); // Exclude the null byte from count.
         }
 
         s = unsafe { s.add(1) };
     }
 
-    unsafe { *src = s; }
+    unsafe {
+        *src = s;
+    }
     written
 }
 
@@ -2195,11 +2293,7 @@ pub unsafe extern "C" fn wcscasecmp(s1: *const WcharT, s2: *const WcharT) -> i32
 /// Compares at most `n` wide characters from `s1` and `s2`,
 /// converting to lowercase before comparison.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wcsncasecmp(
-    s1: *const WcharT,
-    s2: *const WcharT,
-    n: usize,
-) -> i32 {
+pub unsafe extern "C" fn wcsncasecmp(s1: *const WcharT, s2: *const WcharT, n: usize) -> i32 {
     if n == 0 || s1.is_null() || s2.is_null() {
         return 0;
     }
@@ -2396,11 +2490,7 @@ pub unsafe extern "C" fn fputws(s: *const WcharT, stream: *mut u8) -> i32 {
 /// string is null-terminated.  Returns `ws` on success, null on
 /// error or EOF with no characters read.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn fgetws(
-    ws: *mut WcharT,
-    n: i32,
-    stream: *mut u8,
-) -> *mut WcharT {
+pub unsafe extern "C" fn fgetws(ws: *mut WcharT, n: i32, stream: *mut u8) -> *mut WcharT {
     if ws.is_null() || n <= 0 {
         return core::ptr::null_mut();
     }
@@ -2414,7 +2504,9 @@ pub unsafe extern "C" fn fgetws(
             }
             break;
         }
-        unsafe { *ws.add(count) = wc; }
+        unsafe {
+            *ws.add(count) = wc;
+        }
         count = count.wrapping_add(1);
         // Stop after newline.
         if wc == WcharT::from(b'\n') {
@@ -2422,7 +2514,9 @@ pub unsafe extern "C" fn fgetws(
         }
     }
     // Null-terminate.
-    unsafe { *ws.add(count) = 0; }
+    unsafe {
+        *ws.add(count) = 0;
+    }
     ws
 }
 
@@ -2431,15 +2525,13 @@ pub unsafe extern "C" fn fgetws(
 /// Like `wmemcpy` but returns a pointer to the wide character after
 /// the last one written (i.e., `dest + n`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn wmempcpy(
-    dest: *mut WcharT,
-    src: *const WcharT,
-    n: usize,
-) -> *mut WcharT {
+pub unsafe extern "C" fn wmempcpy(dest: *mut WcharT, src: *const WcharT, n: usize) -> *mut WcharT {
     if !dest.is_null() && !src.is_null() {
         let mut i: usize = 0;
         while i < n {
-            unsafe { *dest.add(i) = *src.add(i); }
+            unsafe {
+                *dest.add(i) = *src.add(i);
+            }
             i = i.wrapping_add(1);
         }
     }
@@ -2495,18 +2587,14 @@ pub unsafe extern "C" fn wcsftime(
     // use up to 4 bytes per character.
     let mut out_buf = [0u8; OUT_BUF_SIZE];
     let narrow_max = maxsize.wrapping_mul(4).min(OUT_BUF_SIZE);
-    let len = unsafe {
-        crate::time::strftime(
-            out_buf.as_mut_ptr(),
-            narrow_max,
-            fmt_buf.as_ptr(),
-            tm,
-        )
-    };
+    let len =
+        unsafe { crate::time::strftime(out_buf.as_mut_ptr(), narrow_max, fmt_buf.as_ptr(), tm) };
 
     if len == 0 {
         // strftime failed or result doesn't fit.
-        unsafe { *wcs = 0; }
+        unsafe {
+            *wcs = 0;
+        }
         return 0;
     }
 
@@ -2518,30 +2606,44 @@ pub unsafe extern "C" fn wcsftime(
     while bi < len && wi < limit {
         let b = out_buf[bi];
         // Determine UTF-8 sequence length from lead byte.
-        let seq_len = if b < 0x80 { 1_usize }
-            else if b & 0xE0 == 0xC0 { 2 }
-            else if b & 0xF0 == 0xE0 { 3 }
-            else if b & 0xF8 == 0xF0 { 4 }
-            else { 1 }; // Invalid lead → treat as single byte.
+        let seq_len = if b < 0x80 {
+            1_usize
+        } else if b & 0xE0 == 0xC0 {
+            2
+        } else if b & 0xF0 == 0xE0 {
+            3
+        } else if b & 0xF8 == 0xF0 {
+            4
+        } else {
+            1
+        }; // Invalid lead → treat as single byte.
 
         if bi.wrapping_add(seq_len) > len {
             break; // Incomplete sequence at end.
         }
 
         if seq_len == 1 {
-            unsafe { *wcs.add(wi) = WcharT::from(b); }
+            unsafe {
+                *wcs.add(wi) = WcharT::from(b);
+            }
         } else if let Some(cp) = utf8_decode(&out_buf[bi..bi.wrapping_add(seq_len)], seq_len) {
-            unsafe { *wcs.add(wi) = cp as WcharT; }
+            unsafe {
+                *wcs.add(wi) = cp as WcharT;
+            }
         } else {
             // Invalid UTF-8 — emit replacement character.
-            unsafe { *wcs.add(wi) = 0xFFFD; }
+            unsafe {
+                *wcs.add(wi) = 0xFFFD;
+            }
         }
         bi = bi.wrapping_add(seq_len);
         wi = wi.wrapping_add(1);
     }
 
     // Null-terminate.
-    unsafe { *wcs.add(wi) = 0; }
+    unsafe {
+        *wcs.add(wi) = 0;
+    }
     wi
 }
 
@@ -2630,8 +2732,9 @@ mod tests {
 
     #[test]
     fn test_utf8_encode_roundtrip() {
-        let test_cps = [0x00, 0x41, 0x7F, 0x80, 0xE9, 0x7FF, 0x800,
-                        0x20AC, 0xFFFF, 0x10000, 0x1F600, 0x10FFFF];
+        let test_cps = [
+            0x00, 0x41, 0x7F, 0x80, 0xE9, 0x7FF, 0x800, 0x20AC, 0xFFFF, 0x10000, 0x1F600, 0x10FFFF,
+        ];
         for &cp in &test_cps {
             let mut buf = [0u8; 4];
             let n = utf8_encode(cp, &mut buf);
@@ -2809,22 +2912,27 @@ mod tests {
     #[test]
     fn test_wctype_known_classes() {
         let names: &[(&[u8], WctypeT)] = &[
-            (b"alnum\0",  WC_ALNUM),
-            (b"alpha\0",  WC_ALPHA),
-            (b"blank\0",  WC_BLANK),
-            (b"cntrl\0",  WC_CNTRL),
-            (b"digit\0",  WC_DIGIT),
-            (b"graph\0",  WC_GRAPH),
-            (b"lower\0",  WC_LOWER),
-            (b"print\0",  WC_PRINT),
-            (b"punct\0",  WC_PUNCT),
-            (b"space\0",  WC_SPACE),
-            (b"upper\0",  WC_UPPER),
+            (b"alnum\0", WC_ALNUM),
+            (b"alpha\0", WC_ALPHA),
+            (b"blank\0", WC_BLANK),
+            (b"cntrl\0", WC_CNTRL),
+            (b"digit\0", WC_DIGIT),
+            (b"graph\0", WC_GRAPH),
+            (b"lower\0", WC_LOWER),
+            (b"print\0", WC_PRINT),
+            (b"punct\0", WC_PUNCT),
+            (b"space\0", WC_SPACE),
+            (b"upper\0", WC_UPPER),
             (b"xdigit\0", WC_XDIGIT),
         ];
         for &(name, expected) in names {
             let ct = unsafe { wctype(name.as_ptr()) };
-            assert_eq!(ct, expected, "wctype({:?}) failed", core::str::from_utf8(&name[..name.len()-1]).unwrap_or("?"));
+            assert_eq!(
+                ct,
+                expected,
+                "wctype({:?}) failed",
+                core::str::from_utf8(&name[..name.len() - 1]).unwrap_or("?")
+            );
         }
     }
 
@@ -2894,7 +3002,9 @@ mod tests {
     fn wcs_from_ascii(s: &[u8]) -> [WcharT; 64] {
         let mut buf = [0i32; 64];
         for (i, &b) in s.iter().enumerate() {
-            if i >= 63 { break; }
+            if i >= 63 {
+                break;
+            }
             buf[i] = b as WcharT;
         }
         buf
@@ -3076,16 +3186,16 @@ mod tests {
 
     #[test]
     fn test_wcwidth_variation_selectors() {
-        assert_eq!(wcwidth(0xfe00), 0);  // VS1
-        assert_eq!(wcwidth(0xfe0f), 0);  // VS16 (emoji presentation)
+        assert_eq!(wcwidth(0xfe00), 0); // VS1
+        assert_eq!(wcwidth(0xfe0f), 0); // VS16 (emoji presentation)
     }
 
     #[test]
     fn test_wcwidth_latin_above_c1() {
         // Latin characters above C1 range should be width 1.
-        assert_eq!(wcwidth(0xa0), 1);  // NBSP
-        assert_eq!(wcwidth(0xc0), 1);  // À
-        assert_eq!(wcwidth(0xff), 1);  // ÿ
+        assert_eq!(wcwidth(0xa0), 1); // NBSP
+        assert_eq!(wcwidth(0xc0), 1); // À
+        assert_eq!(wcwidth(0xff), 1); // ÿ
     }
 
     #[test]
@@ -3110,8 +3220,8 @@ mod tests {
     #[test]
     fn test_iswcntrl_not_above_c1() {
         // Characters at 0xA0 and above are NOT control characters.
-        assert_eq!(iswcntrl(0xa0), 0);  // NBSP
-        assert_eq!(iswcntrl(0xff), 0);  // ÿ
+        assert_eq!(iswcntrl(0xa0), 0); // NBSP
+        assert_eq!(iswcntrl(0xff), 0); // ÿ
     }
 
     #[test]
@@ -3125,8 +3235,8 @@ mod tests {
     #[test]
     fn test_iswprint_above_c1() {
         // Characters at 0xA0 and above should be printable.
-        assert_ne!(iswprint(0xa0), 0);  // NBSP
-        assert_ne!(iswprint(0xc0), 0);  // À
+        assert_ne!(iswprint(0xa0), 0); // NBSP
+        assert_ne!(iswprint(0xc0), 0); // À
     }
 
     // -----------------------------------------------------------------------
@@ -3194,8 +3304,14 @@ mod tests {
     fn test_wcstod_trailing_text() {
         // "12.5xyz" — parse "12.5", endptr at 'x'.
         let s: &[WcharT] = &[
-            b'1' as i32, b'2' as i32, b'.' as i32, b'5' as i32,
-            b'x' as i32, b'y' as i32, b'z' as i32, 0,
+            b'1' as i32,
+            b'2' as i32,
+            b'.' as i32,
+            b'5' as i32,
+            b'x' as i32,
+            b'y' as i32,
+            b'z' as i32,
+            0,
         ];
         let mut end: *const WcharT = core::ptr::null();
         let val = unsafe { wcstod(s.as_ptr(), &raw mut end) };
@@ -3216,7 +3332,14 @@ mod tests {
 
     #[test]
     fn test_wcsstr_found() {
-        let hay: &[WcharT] = &[b'h' as i32, b'e' as i32, b'l' as i32, b'l' as i32, b'o' as i32, 0];
+        let hay: &[WcharT] = &[
+            b'h' as i32,
+            b'e' as i32,
+            b'l' as i32,
+            b'l' as i32,
+            b'o' as i32,
+            0,
+        ];
         let needle: &[WcharT] = &[b'l' as i32, b'l' as i32, 0];
         let ret = unsafe { wcsstr(hay.as_ptr(), needle.as_ptr()) };
         assert!(!ret.is_null());
@@ -3274,7 +3397,14 @@ mod tests {
 
     #[test]
     fn test_wcspbrk_found() {
-        let s: &[WcharT] = &[b'h' as i32, b'e' as i32, b'l' as i32, b'l' as i32, b'o' as i32, 0];
+        let s: &[WcharT] = &[
+            b'h' as i32,
+            b'e' as i32,
+            b'l' as i32,
+            b'l' as i32,
+            b'o' as i32,
+            0,
+        ];
         let accept: &[WcharT] = &[b'l' as i32, b'o' as i32, 0];
         let ret = unsafe { wcspbrk(s.as_ptr(), accept.as_ptr()) };
         assert!(!ret.is_null());
@@ -3296,9 +3426,19 @@ mod tests {
     #[test]
     fn test_wcstok_basic() {
         let mut data: [WcharT; 14] = [
-            b'o' as i32, b'n' as i32, b'e' as i32, b',' as i32,
-            b't' as i32, b'w' as i32, b'o' as i32, b',' as i32,
-            b't' as i32, b'h' as i32, b'r' as i32, b'e' as i32, b'e' as i32,
+            b'o' as i32,
+            b'n' as i32,
+            b'e' as i32,
+            b',' as i32,
+            b't' as i32,
+            b'w' as i32,
+            b'o' as i32,
+            b',' as i32,
+            b't' as i32,
+            b'h' as i32,
+            b'r' as i32,
+            b'e' as i32,
+            b'e' as i32,
             0,
         ];
         let delim: &[WcharT] = &[b',' as i32, 0];
@@ -3336,8 +3476,22 @@ mod tests {
 
     #[test]
     fn test_wcscasecmp_equal() {
-        let s1: &[WcharT] = &[b'H' as i32, b'E' as i32, b'L' as i32, b'L' as i32, b'O' as i32, 0];
-        let s2: &[WcharT] = &[b'h' as i32, b'e' as i32, b'l' as i32, b'l' as i32, b'o' as i32, 0];
+        let s1: &[WcharT] = &[
+            b'H' as i32,
+            b'E' as i32,
+            b'L' as i32,
+            b'L' as i32,
+            b'O' as i32,
+            0,
+        ];
+        let s2: &[WcharT] = &[
+            b'h' as i32,
+            b'e' as i32,
+            b'l' as i32,
+            b'l' as i32,
+            b'o' as i32,
+            0,
+        ];
         assert_eq!(unsafe { wcscasecmp(s1.as_ptr(), s2.as_ptr()) }, 0);
     }
 
@@ -4321,9 +4475,7 @@ mod tests {
 
     #[test]
     fn test_ungetwc_weof_returns_weof() {
-        let ret = unsafe {
-            ungetwc(WEOF, crate::stdio::STDIN_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { ungetwc(WEOF, crate::stdio::STDIN_SENTINEL as *mut u8) };
         assert_eq!(ret, WEOF);
     }
 
@@ -4331,9 +4483,7 @@ mod tests {
     fn test_ungetwc_ascii() {
         // Push back an ASCII character via ungetwc, which internally
         // calls ungetc.  The return value should be the pushed-back char.
-        let ret = unsafe {
-            ungetwc(b'Q' as WcharT, crate::stdio::STDIN_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { ungetwc(b'Q' as WcharT, crate::stdio::STDIN_SENTINEL as *mut u8) };
         // ungetc pushes back onto stdin's ungetc_byte field.
         // It should succeed for ASCII.
         assert_eq!(ret, b'Q' as WcharT);
@@ -4346,9 +4496,7 @@ mod tests {
     fn test_ungetwc_multibyte_returns_weof() {
         // Multi-byte pushback is not supported → WEOF + EILSEQ.
         crate::errno::set_errno(0);
-        let ret = unsafe {
-            ungetwc(0x00E9, crate::stdio::STDIN_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { ungetwc(0x00E9, crate::stdio::STDIN_SENTINEL as *mut u8) };
         assert_eq!(ret, WEOF);
         assert_eq!(crate::errno::get_errno(), crate::errno::EILSEQ);
     }
@@ -4357,9 +4505,7 @@ mod tests {
 
     #[test]
     fn test_fputws_null_returns_error() {
-        let ret = unsafe {
-            fputws(core::ptr::null(), crate::stdio::STDOUT_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { fputws(core::ptr::null(), crate::stdio::STDOUT_SENTINEL as *mut u8) };
         assert_eq!(ret, -1);
     }
 
@@ -4367,18 +4513,14 @@ mod tests {
     fn test_fputws_empty_string_succeeds() {
         // An empty wide string (just null terminator) should succeed.
         let ws: [WcharT; 1] = [0];
-        let ret = unsafe {
-            fputws(ws.as_ptr(), crate::stdio::STDOUT_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { fputws(ws.as_ptr(), crate::stdio::STDOUT_SENTINEL as *mut u8) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fputws_ascii_string() {
         let ws: [WcharT; 4] = [b'H' as WcharT, b'i' as WcharT, b'!' as WcharT, 0];
-        let ret = unsafe {
-            fputws(ws.as_ptr(), crate::stdio::STDOUT_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { fputws(ws.as_ptr(), crate::stdio::STDOUT_SENTINEL as *mut u8) };
         // 0 = success, -1 = write failed on host
         assert!(ret == 0 || ret == -1);
     }
@@ -4388,7 +4530,11 @@ mod tests {
     #[test]
     fn test_fgetws_null_ws_returns_null() {
         let ret = unsafe {
-            fgetws(core::ptr::null_mut(), 10, crate::stdio::STDIN_SENTINEL as *mut u8)
+            fgetws(
+                core::ptr::null_mut(),
+                10,
+                crate::stdio::STDIN_SENTINEL as *mut u8,
+            )
         };
         assert!(ret.is_null());
     }
@@ -4396,9 +4542,7 @@ mod tests {
     #[test]
     fn test_fgetws_zero_n_returns_null() {
         let mut buf: [WcharT; 8] = [0; 8];
-        let ret = unsafe {
-            fgetws(buf.as_mut_ptr(), 0, crate::stdio::STDIN_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { fgetws(buf.as_mut_ptr(), 0, crate::stdio::STDIN_SENTINEL as *mut u8) };
         assert!(ret.is_null());
     }
 
@@ -4406,7 +4550,11 @@ mod tests {
     fn test_fgetws_negative_n_returns_null() {
         let mut buf: [WcharT; 8] = [0; 8];
         let ret = unsafe {
-            fgetws(buf.as_mut_ptr(), -1, crate::stdio::STDIN_SENTINEL as *mut u8)
+            fgetws(
+                buf.as_mut_ptr(),
+                -1,
+                crate::stdio::STDIN_SENTINEL as *mut u8,
+            )
         };
         assert!(ret.is_null());
     }
@@ -4455,9 +4603,15 @@ mod tests {
     #[test]
     fn test_wcsftime_null_wcs_returns_zero() {
         let tm = crate::time::Tm {
-            tm_sec: 0, tm_min: 0, tm_hour: 0,
-            tm_mday: 1, tm_mon: 0, tm_year: 100,
-            tm_wday: 6, tm_yday: 0, tm_isdst: 0,
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 1,
+            tm_mon: 0,
+            tm_year: 100,
+            tm_wday: 6,
+            tm_yday: 0,
+            tm_isdst: 0,
         };
         let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
         let ret = unsafe { wcsftime(core::ptr::null_mut(), 64, fmt.as_ptr(), &tm) };
@@ -4467,9 +4621,15 @@ mod tests {
     #[test]
     fn test_wcsftime_null_format_returns_zero() {
         let tm = crate::time::Tm {
-            tm_sec: 0, tm_min: 0, tm_hour: 0,
-            tm_mday: 1, tm_mon: 0, tm_year: 100,
-            tm_wday: 6, tm_yday: 0, tm_isdst: 0,
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 1,
+            tm_mon: 0,
+            tm_year: 100,
+            tm_wday: 6,
+            tm_yday: 0,
+            tm_isdst: 0,
         };
         let mut buf: [WcharT; 64] = [0; 64];
         let ret = unsafe { wcsftime(buf.as_mut_ptr(), 64, core::ptr::null(), &tm) };
@@ -4487,9 +4647,15 @@ mod tests {
     #[test]
     fn test_wcsftime_zero_maxsize_returns_zero() {
         let tm = crate::time::Tm {
-            tm_sec: 0, tm_min: 0, tm_hour: 0,
-            tm_mday: 1, tm_mon: 0, tm_year: 100,
-            tm_wday: 6, tm_yday: 0, tm_isdst: 0,
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 1,
+            tm_mon: 0,
+            tm_year: 100,
+            tm_wday: 6,
+            tm_yday: 0,
+            tm_isdst: 0,
         };
         let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
         let mut buf: [WcharT; 64] = [0; 64];
@@ -4501,9 +4667,15 @@ mod tests {
     fn test_wcsftime_year_format() {
         // Format "%Y" for year 2000 (tm_year = 100 = 1900+100).
         let tm = crate::time::Tm {
-            tm_sec: 0, tm_min: 0, tm_hour: 0,
-            tm_mday: 1, tm_mon: 0, tm_year: 100,
-            tm_wday: 6, tm_yday: 0, tm_isdst: 0,
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 1,
+            tm_mon: 0,
+            tm_year: 100,
+            tm_wday: 6,
+            tm_yday: 0,
+            tm_isdst: 0,
         };
         let fmt: [WcharT; 3] = [b'%' as WcharT, b'Y' as WcharT, 0];
         let mut buf: [WcharT; 64] = [0; 64];
@@ -4520,9 +4692,15 @@ mod tests {
     fn test_wcsftime_literal_text() {
         // Format "hi" (no % specifiers) should output "hi".
         let tm = crate::time::Tm {
-            tm_sec: 0, tm_min: 0, tm_hour: 0,
-            tm_mday: 1, tm_mon: 0, tm_year: 100,
-            tm_wday: 6, tm_yday: 0, tm_isdst: 0,
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 1,
+            tm_mon: 0,
+            tm_year: 100,
+            tm_wday: 6,
+            tm_yday: 0,
+            tm_isdst: 0,
         };
         let fmt: [WcharT; 3] = [b'h' as WcharT, b'i' as WcharT, 0];
         let mut buf: [WcharT; 64] = [0; 64];
@@ -4531,5 +4709,4 @@ mod tests {
         assert_eq!(buf[0], b'h' as WcharT);
         assert_eq!(buf[1], b'i' as WcharT);
     }
-
 }

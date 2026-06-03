@@ -125,8 +125,12 @@ mod tests {
     #[test]
     fn test_raw_options_distinct() {
         let opts = [
-            CAN_RAW_FILTER, CAN_RAW_ERR_FILTER, CAN_RAW_LOOPBACK,
-            CAN_RAW_RECV_OWN_MSGS, CAN_RAW_FD_FRAMES, CAN_RAW_XL_FRAMES,
+            CAN_RAW_FILTER,
+            CAN_RAW_ERR_FILTER,
+            CAN_RAW_LOOPBACK,
+            CAN_RAW_RECV_OWN_MSGS,
+            CAN_RAW_FD_FRAMES,
+            CAN_RAW_XL_FRAMES,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

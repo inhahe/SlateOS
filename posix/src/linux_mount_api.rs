@@ -108,8 +108,10 @@ mod tests {
     #[test]
     fn test_fspick_flags_no_overlap() {
         let flags = [
-            FSPICK_CLOEXEC, FSPICK_SYMLINK_NOFOLLOW,
-            FSPICK_NO_AUTOMOUNT, FSPICK_EMPTY_PATH,
+            FSPICK_CLOEXEC,
+            FSPICK_SYMLINK_NOFOLLOW,
+            FSPICK_NO_AUTOMOUNT,
+            FSPICK_EMPTY_PATH,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -122,9 +124,14 @@ mod tests {
     #[test]
     fn test_fsconfig_commands_distinct() {
         let cmds = [
-            FSCONFIG_SET_FLAG, FSCONFIG_SET_STRING, FSCONFIG_SET_BINARY,
-            FSCONFIG_SET_PATH, FSCONFIG_SET_PATH_EMPTY, FSCONFIG_SET_FD,
-            FSCONFIG_CMD_CREATE, FSCONFIG_CMD_RECONFIGURE,
+            FSCONFIG_SET_FLAG,
+            FSCONFIG_SET_STRING,
+            FSCONFIG_SET_BINARY,
+            FSCONFIG_SET_PATH,
+            FSCONFIG_SET_PATH_EMPTY,
+            FSCONFIG_SET_FD,
+            FSCONFIG_CMD_CREATE,
+            FSCONFIG_CMD_RECONFIGURE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -136,9 +143,15 @@ mod tests {
     #[test]
     fn test_mount_attr_no_overlap() {
         let attrs = [
-            MOUNT_ATTR_RDONLY, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NODEV,
-            MOUNT_ATTR_NOEXEC, MOUNT_ATTR_NOATIME, MOUNT_ATTR_STRICTATIME,
-            MOUNT_ATTR_NODIRATIME, MOUNT_ATTR_IDMAP, MOUNT_ATTR_NOSYMFOLLOW,
+            MOUNT_ATTR_RDONLY,
+            MOUNT_ATTR_NOSUID,
+            MOUNT_ATTR_NODEV,
+            MOUNT_ATTR_NOEXEC,
+            MOUNT_ATTR_NOATIME,
+            MOUNT_ATTR_STRICTATIME,
+            MOUNT_ATTR_NODIRATIME,
+            MOUNT_ATTR_IDMAP,
+            MOUNT_ATTR_NOSYMFOLLOW,
         ];
         for i in 0..attrs.len() {
             assert!(attrs[i].is_power_of_two());
@@ -151,10 +164,14 @@ mod tests {
     #[test]
     fn test_move_mount_flags_distinct() {
         let flags = [
-            MOVE_MOUNT_F_SYMLINKS, MOVE_MOUNT_F_AUTOMOUNTS,
-            MOVE_MOUNT_F_EMPTY_PATH, MOVE_MOUNT_T_SYMLINKS,
-            MOVE_MOUNT_T_AUTOMOUNTS, MOVE_MOUNT_T_EMPTY_PATH,
-            MOVE_MOUNT_SET_GROUP, MOVE_MOUNT_BENEATH,
+            MOVE_MOUNT_F_SYMLINKS,
+            MOVE_MOUNT_F_AUTOMOUNTS,
+            MOVE_MOUNT_F_EMPTY_PATH,
+            MOVE_MOUNT_T_SYMLINKS,
+            MOVE_MOUNT_T_AUTOMOUNTS,
+            MOVE_MOUNT_T_EMPTY_PATH,
+            MOVE_MOUNT_SET_GROUP,
+            MOVE_MOUNT_BENEATH,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

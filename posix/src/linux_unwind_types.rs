@@ -85,10 +85,14 @@ mod tests {
     #[test]
     fn test_reason_codes_distinct() {
         let codes = [
-            URC_NO_REASON, URC_FOREIGN_EXCEPTION_CAUGHT,
-            URC_FATAL_PHASE2_ERROR, URC_FATAL_PHASE1_ERROR,
-            URC_NORMAL_STOP, URC_END_OF_STACK,
-            URC_HANDLER_FOUND, URC_INSTALL_CONTEXT,
+            URC_NO_REASON,
+            URC_FOREIGN_EXCEPTION_CAUGHT,
+            URC_FATAL_PHASE2_ERROR,
+            URC_FATAL_PHASE1_ERROR,
+            URC_NORMAL_STOP,
+            URC_END_OF_STACK,
+            URC_HANDLER_FOUND,
+            URC_INSTALL_CONTEXT,
             URC_CONTINUE_UNWIND,
         ];
         for i in 0..codes.len() {
@@ -106,8 +110,10 @@ mod tests {
     #[test]
     fn test_action_flags_powers_of_two() {
         let flags = [
-            UA_SEARCH_PHASE, UA_CLEANUP_PHASE,
-            UA_HANDLER_FRAME, UA_FORCE_UNWIND,
+            UA_SEARCH_PHASE,
+            UA_CLEANUP_PHASE,
+            UA_HANDLER_FRAME,
+            UA_FORCE_UNWIND,
             UA_END_OF_STACK,
         ];
         for f in flags {
@@ -118,8 +124,10 @@ mod tests {
     #[test]
     fn test_action_flags_no_overlap() {
         let flags = [
-            UA_SEARCH_PHASE, UA_CLEANUP_PHASE,
-            UA_HANDLER_FRAME, UA_FORCE_UNWIND,
+            UA_SEARCH_PHASE,
+            UA_CLEANUP_PHASE,
+            UA_HANDLER_FRAME,
+            UA_FORCE_UNWIND,
             UA_END_OF_STACK,
         ];
         for i in 0..flags.len() {
@@ -132,8 +140,14 @@ mod tests {
     #[test]
     fn test_dwarf_regs_distinct() {
         let regs = [
-            DW_REG_RAX, DW_REG_RDX, DW_REG_RCX, DW_REG_RBX,
-            DW_REG_RSI, DW_REG_RDI, DW_REG_RBP, DW_REG_RSP,
+            DW_REG_RAX,
+            DW_REG_RDX,
+            DW_REG_RCX,
+            DW_REG_RBX,
+            DW_REG_RSI,
+            DW_REG_RDI,
+            DW_REG_RBP,
+            DW_REG_RSP,
             DW_REG_RETURN_ADDR,
         ];
         for i in 0..regs.len() {

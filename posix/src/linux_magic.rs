@@ -5,16 +5,16 @@
 //! to identify the filesystem type.
 
 // Re-export the ones already defined in sys_vfs.
+pub use crate::sys_vfs::BTRFS_SUPER_MAGIC;
+pub use crate::sys_vfs::DEVTMPFS_MAGIC;
 pub use crate::sys_vfs::EXT2_SUPER_MAGIC;
-pub use crate::sys_vfs::TMPFS_MAGIC;
+pub use crate::sys_vfs::ISOFS_SUPER_MAGIC;
+pub use crate::sys_vfs::MSDOS_SUPER_MAGIC;
+pub use crate::sys_vfs::NFS_SUPER_MAGIC;
 pub use crate::sys_vfs::PROC_SUPER_MAGIC;
 pub use crate::sys_vfs::SYSFS_MAGIC;
-pub use crate::sys_vfs::DEVTMPFS_MAGIC;
-pub use crate::sys_vfs::NFS_SUPER_MAGIC;
-pub use crate::sys_vfs::BTRFS_SUPER_MAGIC;
+pub use crate::sys_vfs::TMPFS_MAGIC;
 pub use crate::sys_vfs::XFS_SUPER_MAGIC;
-pub use crate::sys_vfs::MSDOS_SUPER_MAGIC;
-pub use crate::sys_vfs::ISOFS_SUPER_MAGIC;
 
 // ---------------------------------------------------------------------------
 // Additional magic numbers
@@ -93,12 +93,23 @@ mod tests {
     #[test]
     fn test_new_magics_distinct() {
         let magic = [
-            SQUASHFS_MAGIC, FUSE_SUPER_MAGIC, OVERLAYFS_SUPER_MAGIC,
-            CGROUP_SUPER_MAGIC, CGROUP2_SUPER_MAGIC,
-            DEBUGFS_MAGIC, TRACEFS_MAGIC, SECURITYFS_MAGIC,
-            SOCKFS_MAGIC, PIPEFS_MAGIC, DEVPTS_SUPER_MAGIC,
-            HUGETLBFS_MAGIC, RAMFS_MAGIC, AUTOFS_SUPER_MAGIC,
-            PSTOREFS_MAGIC, EFIVARFS_MAGIC, BPF_FS_MAGIC,
+            SQUASHFS_MAGIC,
+            FUSE_SUPER_MAGIC,
+            OVERLAYFS_SUPER_MAGIC,
+            CGROUP_SUPER_MAGIC,
+            CGROUP2_SUPER_MAGIC,
+            DEBUGFS_MAGIC,
+            TRACEFS_MAGIC,
+            SECURITYFS_MAGIC,
+            SOCKFS_MAGIC,
+            PIPEFS_MAGIC,
+            DEVPTS_SUPER_MAGIC,
+            HUGETLBFS_MAGIC,
+            RAMFS_MAGIC,
+            AUTOFS_SUPER_MAGIC,
+            PSTOREFS_MAGIC,
+            EFIVARFS_MAGIC,
+            BPF_FS_MAGIC,
             NTFS_SB_MAGIC,
         ];
         for i in 0..magic.len() {
@@ -111,9 +122,15 @@ mod tests {
     #[test]
     fn test_all_nonzero() {
         let magic = [
-            EXT2_SUPER_MAGIC, TMPFS_MAGIC, PROC_SUPER_MAGIC,
-            SYSFS_MAGIC, NFS_SUPER_MAGIC, BTRFS_SUPER_MAGIC,
-            XFS_SUPER_MAGIC, SQUASHFS_MAGIC, FUSE_SUPER_MAGIC,
+            EXT2_SUPER_MAGIC,
+            TMPFS_MAGIC,
+            PROC_SUPER_MAGIC,
+            SYSFS_MAGIC,
+            NFS_SUPER_MAGIC,
+            BTRFS_SUPER_MAGIC,
+            XFS_SUPER_MAGIC,
+            SQUASHFS_MAGIC,
+            FUSE_SUPER_MAGIC,
         ];
         for &m in &magic {
             assert_ne!(m, 0, "magic number should not be zero");

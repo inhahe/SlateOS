@@ -227,7 +227,11 @@ pub(crate) fn fill_from_fsstat(buf: &mut Stat, raw: &[u8; KERNEL_STAT_LEN]) {
     buf.st_blksize = 4096;
     // Prefer the filesystem's reported 512-byte block count; fall back to a
     // size-derived estimate (rounded up) — matches `stat`/`du` conventions.
-    let block_count = if blocks != 0 { blocks } else { size.div_ceil(512) };
+    let block_count = if blocks != 0 {
+        blocks
+    } else {
+        size.div_ceil(512)
+    };
     buf.st_blocks = i64::try_from(block_count).unwrap_or(i64::MAX);
     buf.st_atim = ns_to_timespec(accessed_ns);
     buf.st_mtim = ns_to_timespec(modified_ns);
@@ -369,9 +373,7 @@ pub extern "C" fn mknod(pathname: *const u8, mode: u32, _dev: u64) -> i32 {
     // socket, and regular-file creations bypass this check.
     let t = mode & crate::fcntl::S_IFMT;
     if (t == crate::fcntl::S_IFCHR || t == crate::fcntl::S_IFBLK)
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_MKNOD,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_MKNOD)
     {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
@@ -425,9 +427,7 @@ pub extern "C" fn mknodat(dirfd: i32, pathname: *const u8, mode: u32, _dev: u64)
     // Linux's `vfs_mknod` placement deep inside `do_mknodat`.
     let t = mode & crate::fcntl::S_IFMT;
     if (t == crate::fcntl::S_IFCHR || t == crate::fcntl::S_IFBLK)
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_MKNOD,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_MKNOD)
     {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
@@ -635,9 +635,7 @@ mod tests {
     fn test_fill_from_fsstat_real_permissions_used() {
         // When the filesystem reports real permission bits, they take
         // precedence over the synthesized type defaults.
-        let raw = raw_fsstat_full(
-            100, 0, 1, 0o600, 0, 0, 0, 0, 0, 0, 0, 0,
-        );
+        let raw = raw_fsstat_full(100, 0, 1, 0o600, 0, 0, 0, 0, 0, 0, 0, 0);
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
         assert_eq!(st.st_mode, S_IFREG | 0o600);
@@ -646,9 +644,7 @@ mod tests {
     #[test]
     fn test_fill_from_fsstat_setuid_bits_preserved() {
         // Permission field carries the full 12 low bits (setuid/setgid/sticky).
-        let raw = raw_fsstat_full(
-            0, 0, 1, 0o4755, 0, 0, 0, 0, 0, 0, 0, 0,
-        );
+        let raw = raw_fsstat_full(0, 0, 1, 0o4755, 0, 0, 0, 0, 0, 0, 0, 0);
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
         assert_eq!(st.st_mode, S_IFREG | 0o4755);
@@ -656,9 +652,7 @@ mod tests {
 
     #[test]
     fn test_fill_from_fsstat_ownership() {
-        let raw = raw_fsstat_full(
-            0, 0, 1, 0, 1000, 1001, 0, 0, 0, 0, 0, 0,
-        );
+        let raw = raw_fsstat_full(0, 0, 1, 0, 1000, 1001, 0, 0, 0, 0, 0, 0);
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
         assert_eq!(st.st_uid, 1000);
@@ -669,9 +663,7 @@ mod tests {
     fn test_fill_from_fsstat_explicit_block_count() {
         // A non-zero block count from the filesystem is used verbatim,
         // not re-derived from size.
-        let raw = raw_fsstat_full(
-            100, 0, 1, 0, 0, 0, 16, 0, 0, 0, 0, 0,
-        );
+        let raw = raw_fsstat_full(100, 0, 1, 0, 0, 0, 16, 0, 0, 0, 0, 0);
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
         assert_eq!(st.st_blocks, 16);
@@ -683,9 +675,7 @@ mod tests {
         let modified = 1_500_000_000_123_456_789u64;
         let accessed = 1_400_000_000_000_000_001u64;
         let changed = 1_600_000_000_999_999_999u64;
-        let raw = raw_fsstat_full(
-            0, 0, 1, 0, 0, 0, 0, modified, accessed, changed, 42, 0,
-        );
+        let raw = raw_fsstat_full(0, 0, 1, 0, 0, 0, 0, modified, accessed, changed, 42, 0);
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
         assert_eq!(st.st_mtim.tv_sec, 1_500_000_000);
@@ -699,9 +689,7 @@ mod tests {
     #[test]
     fn test_fill_from_fsstat_inode_number() {
         // The kernel-reported inode number flows through to st_ino.
-        let raw = raw_fsstat_full(
-            0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0x0123_4567_89ab_cdef,
-        );
+        let raw = raw_fsstat_full(0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0x0123_4567_89ab_cdef);
         let mut st = Stat::zeroed();
         fill_from_fsstat(&mut st, &raw);
         assert_eq!(st.st_ino, 0x0123_4567_89ab_cdef);
@@ -722,9 +710,7 @@ mod tests {
         // A recorded creation time is split into sec/nsec.  This is the
         // value statx surfaces via stx_btime/STATX_BTIME.
         let created = 1_700_000_000_424_242_424u64;
-        let raw = raw_fsstat_full(
-            0, 0, 1, 0, 0, 0, 0, 0, 0, 0, created, 0,
-        );
+        let raw = raw_fsstat_full(0, 0, 1, 0, 0, 0, 0, 0, 0, 0, created, 0);
         let bt = btime_from_fsstat(&raw).expect("creation time present");
         assert_eq!(bt.tv_sec, 1_700_000_000);
         assert_eq!(bt.tv_nsec, 424_242_424);
@@ -737,9 +723,7 @@ mod tests {
         let raw = raw_fsstat(100, 0, 1);
         assert!(btime_from_fsstat(&raw).is_none());
         // Even a fully-populated buffer with created_ns == 0 yields None.
-        let raw = raw_fsstat_full(
-            512, 0, 1, 0o644, 1000, 1000, 1, 5, 5, 5, 0, 99,
-        );
+        let raw = raw_fsstat_full(512, 0, 1, 0o644, 1000, 1000, 1, 5, 5, 5, 0, 99);
         assert!(btime_from_fsstat(&raw).is_none());
     }
 
@@ -925,13 +909,12 @@ mod tests {
 
     #[test]
     fn test_file_types_disjoint() {
-        let types = [S_IFREG, S_IFDIR, S_IFLNK, S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK];
+        let types = [
+            S_IFREG, S_IFDIR, S_IFLNK, S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
-                assert_ne!(
-                    types[i], types[j],
-                    "file types must be disjoint"
-                );
+                assert_ne!(types[i], types[j], "file types must be disjoint");
             }
         }
     }
@@ -949,7 +932,12 @@ mod tests {
         // EBADF before reaching ENOSYS.  Use AT_FDCWD so the call resolves
         // to the cwd path and reaches the ENOSYS sentinel.
         assert_eq!(
-            mknodat(crate::file::AT_FDCWD, b"node\0".as_ptr(), S_IFCHR | 0o666, 0),
+            mknodat(
+                crate::file::AT_FDCWD,
+                b"node\0".as_ptr(),
+                S_IFCHR | 0o666,
+                0
+            ),
             -1,
         );
     }
@@ -963,7 +951,10 @@ mod tests {
     fn test_mkfifoat_returns_enosys() {
         // Phase 66: mkfifoat now rejects dirfd<0 (other than AT_FDCWD) with
         // EBADF.  Use AT_FDCWD so the call reaches ENOSYS.
-        assert_eq!(mkfifoat(crate::file::AT_FDCWD, b"fifo\0".as_ptr(), 0o644), -1);
+        assert_eq!(
+            mkfifoat(crate::file::AT_FDCWD, b"fifo\0".as_ptr(), 0o644),
+            -1
+        );
     }
 
     // -- S_IS* functions edge cases --
@@ -1094,7 +1085,10 @@ mod tests {
 
     #[test]
     fn test_timespec_field_values() {
-        let ts = Timespec { tv_sec: 1000, tv_nsec: 500_000_000 };
+        let ts = Timespec {
+            tv_sec: 1000,
+            tv_nsec: 500_000_000,
+        };
         assert_eq!(ts.tv_sec, 1000);
         assert_eq!(ts.tv_nsec, 500_000_000);
     }
@@ -1134,9 +1128,7 @@ mod tests {
         assert_eq!(S_IROTH | S_IWOTH | S_IXOTH, 0o007);
         // All rwx = 0o777
         assert_eq!(
-            S_IRUSR | S_IWUSR | S_IXUSR |
-            S_IRGRP | S_IWGRP | S_IXGRP |
-            S_IROTH | S_IWOTH | S_IXOTH,
+            S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IWGRP | S_IXGRP | S_IROTH | S_IWOTH | S_IXOTH,
             0o777,
         );
     }
@@ -1495,10 +1487,7 @@ mod tests {
         // Linux makes this dev with makedev(1,3) → ((1u64) << 8) | 3.
         crate::errno::set_errno(0);
         let dev = (1u64 << 8) | 3;
-        assert_eq!(
-            mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, dev),
-            -1,
-        );
+        assert_eq!(mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, dev), -1,);
         // Properly-formed call reaches ENOSYS (we don't implement nodes).
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }
@@ -1630,16 +1619,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -1654,23 +1641,20 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
         fn drop_cap_mknod() {
             use crate::sys_capability::CAP_MKNOD;
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let (new_lo, new_hi) = if CAP_MKNOD < 32 {
                 (lo & !(1u32 << CAP_MKNOD), hi)
             } else {
                 (lo, hi & !(1u32 << (CAP_MKNOD - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1685,10 +1669,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_MKNOD");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_MKNOD");
             assert!(!crate::sys_capability::has_capability(CAP_MKNOD));
         }
 
@@ -1701,10 +1683,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
-            assert_eq!(
-                mknod(b"/dev/zero\0".as_ptr(), S_IFCHR | 0o666, 0),
-                -1,
-            );
+            assert_eq!(mknod(b"/dev/zero\0".as_ptr(), S_IFCHR | 0o666, 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
@@ -1714,10 +1693,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
-            assert_eq!(
-                mknod(b"/dev/loop0\0".as_ptr(), S_IFBLK | 0o660, 0),
-                -1,
-            );
+            assert_eq!(mknod(b"/dev/loop0\0".as_ptr(), S_IFBLK | 0o660, 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
@@ -1729,12 +1705,12 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
+            assert_eq!(mknod(b"/run/fifo\0".as_ptr(), S_IFIFO | 0o600, 0), -1,);
             assert_eq!(
-                mknod(b"/run/fifo\0".as_ptr(), S_IFIFO | 0o600, 0),
-                -1,
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "FIFO must not require CAP_MKNOD"
             );
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
-                "FIFO must not require CAP_MKNOD");
         }
 
         /// Socket without CAP_MKNOD → still reaches ENOSYS.
@@ -1743,12 +1719,12 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
+            assert_eq!(mknod(b"/run/s\0".as_ptr(), S_IFSOCK | 0o600, 0), -1,);
             assert_eq!(
-                mknod(b"/run/s\0".as_ptr(), S_IFSOCK | 0o600, 0),
-                -1,
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "Socket must not require CAP_MKNOD"
             );
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
-                "Socket must not require CAP_MKNOD");
         }
 
         /// Regular file without CAP_MKNOD → still reaches ENOSYS.
@@ -1757,12 +1733,12 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
+            assert_eq!(mknod(b"/tmp/r\0".as_ptr(), S_IFREG | 0o644, 0), -1,);
             assert_eq!(
-                mknod(b"/tmp/r\0".as_ptr(), S_IFREG | 0o644, 0),
-                -1,
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "Regular file must not require CAP_MKNOD"
             );
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
-                "Regular file must not require CAP_MKNOD");
         }
 
         // -- Ordering matrix --------------------------------------------------
@@ -1795,12 +1771,12 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
+            assert_eq!(mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0), -1,);
             assert_eq!(
-                mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0),
-                -1,
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "Bad-type EINVAL must beat CAP_MKNOD EPERM"
             );
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-                "Bad-type EINVAL must beat CAP_MKNOD EPERM");
         }
 
         /// EPERM beats ENOSYS — the cap gate is the last validation
@@ -1811,13 +1787,13 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
-            assert_eq!(
-                mknod(b"/dev/tty\0".as_ptr(), S_IFCHR | 0o620, 0),
-                -1,
-            );
+            assert_eq!(mknod(b"/dev/tty\0".as_ptr(), S_IFCHR | 0o620, 0), -1,);
             // Without the gate this would return ENOSYS.
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM,
-                "Missing CAP_MKNOD must surface as EPERM, not ENOSYS");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EPERM,
+                "Missing CAP_MKNOD must surface as EPERM, not ENOSYS"
+            );
         }
 
         // -- mknodat ordering --------------------------------------------------
@@ -1829,12 +1805,12 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
+            assert_eq!(mknodat(-1, b"d\0".as_ptr(), S_IFCHR | 0o666, 0), -1,);
             assert_eq!(
-                mknodat(-1, b"d\0".as_ptr(), S_IFCHR | 0o666, 0),
-                -1,
+                crate::errno::get_errno(),
+                crate::errno::EBADF,
+                "Bad dirfd EBADF must beat CAP_MKNOD EPERM"
             );
-            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF,
-                "Bad dirfd EBADF must beat CAP_MKNOD EPERM");
         }
 
         /// mknodat with AT_FDCWD: CHR without cap → EPERM.
@@ -1844,12 +1820,7 @@ mod tests {
             drop_cap_mknod();
             crate::errno::set_errno(0);
             assert_eq!(
-                mknodat(
-                    crate::file::AT_FDCWD,
-                    b"dev\0".as_ptr(),
-                    S_IFCHR | 0o666,
-                    0,
-                ),
+                mknodat(crate::file::AT_FDCWD, b"dev\0".as_ptr(), S_IFCHR | 0o666, 0,),
                 -1,
             );
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
@@ -1862,12 +1833,7 @@ mod tests {
             drop_cap_mknod();
             crate::errno::set_errno(0);
             assert_eq!(
-                mknodat(
-                    crate::file::AT_FDCWD,
-                    b"f\0".as_ptr(),
-                    S_IFIFO | 0o600,
-                    0,
-                ),
+                mknodat(crate::file::AT_FDCWD, b"f\0".as_ptr(), S_IFIFO | 0o600, 0,),
                 -1,
             );
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
@@ -1884,24 +1850,17 @@ mod tests {
             // 1. Cap held — CHR reaches ENOSYS (proper request, stub
             //    can't materialize it).
             crate::errno::set_errno(0);
-            assert_eq!(
-                mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0),
-                -1,
-            );
+            assert_eq!(mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
             // 2. Drop cap — CHR fails with EPERM.
             drop_cap_mknod();
             crate::errno::set_errno(0);
-            assert_eq!(
-                mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0),
-                -1,
-            );
+            assert_eq!(mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
             // 3. Restore cap (via capset to u32::MAX) — CHR reaches
             //    ENOSYS again.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1916,15 +1875,9 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             crate::errno::set_errno(0);
-            assert_eq!(
-                mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0),
-                -1,
-            );
+            assert_eq!(mknod(b"/dev/null\0".as_ptr(), S_IFCHR | 0o666, 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
 
@@ -1937,12 +1890,12 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(crate::errno::ENOENT);
+            assert_eq!(mknod(b"/dev/sda\0".as_ptr(), S_IFBLK | 0o660, 0), -1,);
             assert_eq!(
-                mknod(b"/dev/sda\0".as_ptr(), S_IFBLK | 0o660, 0),
-                -1,
+                crate::errno::get_errno(),
+                crate::errno::EPERM,
+                "Stale ENOENT must be overwritten with EPERM"
             );
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM,
-                "Stale ENOENT must be overwritten with EPERM");
         }
 
         // -- Recovery --------------------------------------------------------
@@ -1955,19 +1908,16 @@ mod tests {
                 let _g = CapGuard::snapshot();
                 drop_cap_mknod();
                 crate::errno::set_errno(0);
-                assert_eq!(
-                    mknod(b"/dev/x\0".as_ptr(), S_IFCHR | 0o666, 0),
-                    -1,
-                );
+                assert_eq!(mknod(b"/dev/x\0".as_ptr(), S_IFCHR | 0o666, 0), -1,);
                 assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
             } // _g dropped here; cap restored.
             crate::errno::set_errno(0);
+            assert_eq!(mknod(b"/dev/x\0".as_ptr(), S_IFCHR | 0o666, 0), -1,);
             assert_eq!(
-                mknod(b"/dev/x\0".as_ptr(), S_IFCHR | 0o666, 0),
-                -1,
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "CapGuard drop must restore cap; CHR reaches ENOSYS"
             );
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
-                "CapGuard drop must restore cap; CHR reaches ENOSYS");
         }
 
         // -- Sentinel --------------------------------------------------------
@@ -1989,17 +1939,11 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOENT);
             // EINVAL.
             crate::errno::set_errno(0);
-            assert_eq!(
-                mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0),
-                -1,
-            );
+            assert_eq!(mknod(b"/tmp/d\0".as_ptr(), S_IFDIR | 0o755, 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
             // ENOSYS for CHR with cap.
             crate::errno::set_errno(0);
-            assert_eq!(
-                mknod(b"/dev/n\0".as_ptr(), S_IFCHR | 0o666, 0),
-                -1,
-            );
+            assert_eq!(mknod(b"/dev/n\0".as_ptr(), S_IFCHR | 0o666, 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
         }
 
@@ -2014,12 +1958,10 @@ mod tests {
             use crate::sys_capability::CAP_SETPCAP;
             let _g = CapGuard::snapshot();
             // Drop only CAP_SETPCAP (bit 8), leave CAP_MKNOD (bit 27).
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << CAP_SETPCAP);
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2034,18 +1976,15 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             // mknod CHR still reaches ENOSYS.
             crate::errno::set_errno(0);
+            assert_eq!(mknod(b"/dev/y\0".as_ptr(), S_IFCHR | 0o666, 0), -1,);
             assert_eq!(
-                mknod(b"/dev/y\0".as_ptr(), S_IFCHR | 0o666, 0),
-                -1,
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "CAP_SETPCAP drop must not affect mknod"
             );
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
-                "CAP_SETPCAP drop must not affect mknod");
         }
 
         /// Phase 188 errno is EPERM (capable convention), matching
@@ -2056,14 +1995,14 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_mknod();
             crate::errno::set_errno(0);
-            assert_eq!(
-                mknod(b"/dev/q\0".as_ptr(), S_IFBLK | 0o660, 0),
-                -1,
-            );
+            assert_eq!(mknod(b"/dev/q\0".as_ptr(), S_IFBLK | 0o660, 0), -1,);
             let e = crate::errno::get_errno();
             assert_eq!(e, crate::errno::EPERM);
-            assert_ne!(e, crate::errno::EACCES,
-                "vfs_mknod uses EPERM (capable convention)");
+            assert_ne!(
+                e,
+                crate::errno::EACCES,
+                "vfs_mknod uses EPERM (capable convention)"
+            );
         }
 
         /// mkfifo (always implicit S_IFIFO) is unaffected by cap drop
@@ -2074,8 +2013,11 @@ mod tests {
             drop_cap_mknod();
             crate::errno::set_errno(0);
             assert_eq!(mkfifo(b"/run/p\0".as_ptr(), 0o644), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
-                "mkfifo does not pass through CAP_MKNOD gate");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "mkfifo does not pass through CAP_MKNOD gate"
+            );
         }
     }
 }

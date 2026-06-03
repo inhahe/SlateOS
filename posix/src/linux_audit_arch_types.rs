@@ -79,10 +79,17 @@ mod tests {
     #[test]
     fn test_architectures_distinct() {
         let archs = [
-            AUDIT_ARCH_I386, AUDIT_ARCH_X86_64, AUDIT_ARCH_ARM,
-            AUDIT_ARCH_AARCH64, AUDIT_ARCH_MIPS, AUDIT_ARCH_MIPS64,
-            AUDIT_ARCH_PPC, AUDIT_ARCH_PPC64, AUDIT_ARCH_PPC64LE,
-            AUDIT_ARCH_RISCV64, AUDIT_ARCH_S390X,
+            AUDIT_ARCH_I386,
+            AUDIT_ARCH_X86_64,
+            AUDIT_ARCH_ARM,
+            AUDIT_ARCH_AARCH64,
+            AUDIT_ARCH_MIPS,
+            AUDIT_ARCH_MIPS64,
+            AUDIT_ARCH_PPC,
+            AUDIT_ARCH_PPC64,
+            AUDIT_ARCH_PPC64LE,
+            AUDIT_ARCH_RISCV64,
+            AUDIT_ARCH_S390X,
         ];
         for i in 0..archs.len() {
             for j in (i + 1)..archs.len() {

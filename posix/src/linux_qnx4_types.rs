@@ -105,8 +105,10 @@ mod tests {
     #[test]
     fn test_file_flags_distinct() {
         let flags = [
-            QNX4_FILE_USED, QNX4_FILE_DIRECTORY,
-            QNX4_FILE_LINK, QNX4_FILE_READONLY,
+            QNX4_FILE_USED,
+            QNX4_FILE_DIRECTORY,
+            QNX4_FILE_LINK,
+            QNX4_FILE_READONLY,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -125,9 +127,15 @@ mod tests {
     #[test]
     fn test_perms_power_of_two() {
         let perms: [u16; 9] = [
-            QNX4_PERM_OREAD, QNX4_PERM_OWRITE, QNX4_PERM_OEXEC,
-            QNX4_PERM_GREAD, QNX4_PERM_GWRITE, QNX4_PERM_GEXEC,
-            QNX4_PERM_WREAD, QNX4_PERM_WWRITE, QNX4_PERM_WEXEC,
+            QNX4_PERM_OREAD,
+            QNX4_PERM_OWRITE,
+            QNX4_PERM_OEXEC,
+            QNX4_PERM_GREAD,
+            QNX4_PERM_GWRITE,
+            QNX4_PERM_GEXEC,
+            QNX4_PERM_WREAD,
+            QNX4_PERM_WWRITE,
+            QNX4_PERM_WEXEC,
         ];
         for p in &perms {
             assert!(p.is_power_of_two(), "0x{:04x} not power of two", p);
@@ -137,9 +145,15 @@ mod tests {
     #[test]
     fn test_perms_distinct() {
         let perms: [u16; 9] = [
-            QNX4_PERM_OREAD, QNX4_PERM_OWRITE, QNX4_PERM_OEXEC,
-            QNX4_PERM_GREAD, QNX4_PERM_GWRITE, QNX4_PERM_GEXEC,
-            QNX4_PERM_WREAD, QNX4_PERM_WWRITE, QNX4_PERM_WEXEC,
+            QNX4_PERM_OREAD,
+            QNX4_PERM_OWRITE,
+            QNX4_PERM_OEXEC,
+            QNX4_PERM_GREAD,
+            QNX4_PERM_GWRITE,
+            QNX4_PERM_GEXEC,
+            QNX4_PERM_WREAD,
+            QNX4_PERM_WWRITE,
+            QNX4_PERM_WEXEC,
         ];
         for i in 0..perms.len() {
             for j in (i + 1)..perms.len() {

@@ -98,15 +98,24 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            ATA_CMD_READ_SECTORS, ATA_CMD_WRITE_SECTORS,
-            ATA_CMD_READ_SECTORS_EXT, ATA_CMD_WRITE_SECTORS_EXT,
-            ATA_CMD_READ_DMA, ATA_CMD_WRITE_DMA,
-            ATA_CMD_READ_DMA_EXT, ATA_CMD_WRITE_DMA_EXT,
-            ATA_CMD_READ_FPDMA, ATA_CMD_WRITE_FPDMA,
-            ATA_CMD_IDENTIFY, ATA_CMD_SET_FEATURES,
-            ATA_CMD_FLUSH_CACHE, ATA_CMD_FLUSH_CACHE_EXT,
-            ATA_CMD_SMART, ATA_CMD_STANDBY_IMMEDIATE,
-            ATA_CMD_IDLE_IMMEDIATE, ATA_CMD_DSM,
+            ATA_CMD_READ_SECTORS,
+            ATA_CMD_WRITE_SECTORS,
+            ATA_CMD_READ_SECTORS_EXT,
+            ATA_CMD_WRITE_SECTORS_EXT,
+            ATA_CMD_READ_DMA,
+            ATA_CMD_WRITE_DMA,
+            ATA_CMD_READ_DMA_EXT,
+            ATA_CMD_WRITE_DMA_EXT,
+            ATA_CMD_READ_FPDMA,
+            ATA_CMD_WRITE_FPDMA,
+            ATA_CMD_IDENTIFY,
+            ATA_CMD_SET_FEATURES,
+            ATA_CMD_FLUSH_CACHE,
+            ATA_CMD_FLUSH_CACHE_EXT,
+            ATA_CMD_SMART,
+            ATA_CMD_STANDBY_IMMEDIATE,
+            ATA_CMD_IDLE_IMMEDIATE,
+            ATA_CMD_DSM,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -117,7 +126,13 @@ mod tests {
 
     #[test]
     fn test_status_bits_selected_no_overlap() {
-        let bits = [ATA_STATUS_BSY, ATA_STATUS_DRDY, ATA_STATUS_DF, ATA_STATUS_DRQ, ATA_STATUS_ERR];
+        let bits = [
+            ATA_STATUS_BSY,
+            ATA_STATUS_DRDY,
+            ATA_STATUS_DF,
+            ATA_STATUS_DRQ,
+            ATA_STATUS_ERR,
+        ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
                 assert_eq!(bits[i] & bits[j], 0);
@@ -127,7 +142,13 @@ mod tests {
 
     #[test]
     fn test_device_types_distinct() {
-        let types = [ATA_DEV_ATA, ATA_DEV_ATAPI, ATA_DEV_PMP, ATA_DEV_SEMB, ATA_DEV_UNKNOWN];
+        let types = [
+            ATA_DEV_ATA,
+            ATA_DEV_ATAPI,
+            ATA_DEV_PMP,
+            ATA_DEV_SEMB,
+            ATA_DEV_UNKNOWN,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);

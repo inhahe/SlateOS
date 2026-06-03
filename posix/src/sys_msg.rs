@@ -4,18 +4,18 @@
 //! from the `sysv_msg` module.
 
 pub use crate::sysv_msg::MsqidDs;
-pub use crate::sysv_msg::msgget;
-pub use crate::sysv_msg::msgsnd;
-pub use crate::sysv_msg::msgrcv;
 pub use crate::sysv_msg::msgctl;
+pub use crate::sysv_msg::msgget;
+pub use crate::sysv_msg::msgrcv;
+pub use crate::sysv_msg::msgsnd;
 
 pub use crate::sysv_msg::IPC_CREAT;
 pub use crate::sysv_msg::IPC_EXCL;
 pub use crate::sysv_msg::IPC_NOWAIT;
+pub use crate::sysv_msg::IPC_PRIVATE;
 pub use crate::sysv_msg::IPC_RMID;
 pub use crate::sysv_msg::IPC_SET;
 pub use crate::sysv_msg::IPC_STAT;
-pub use crate::sysv_msg::IPC_PRIVATE;
 
 // ---------------------------------------------------------------------------
 // Tests

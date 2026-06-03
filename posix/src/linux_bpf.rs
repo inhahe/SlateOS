@@ -602,9 +602,7 @@ fn min_attr_size(cmd: u32) -> u32 {
         | BPF_MAP_LOOKUP_AND_DELETE_ELEM => core::mem::size_of::<BpfMapElemAttr>() as u32,
         BPF_PROG_LOAD => core::mem::size_of::<BpfProgLoadAttr>() as u32,
         BPF_OBJ_PIN | BPF_OBJ_GET => core::mem::size_of::<BpfObjAttr>() as u32,
-        BPF_PROG_ATTACH | BPF_PROG_DETACH => {
-            core::mem::size_of::<BpfProgAttachAttr>() as u32
-        }
+        BPF_PROG_ATTACH | BPF_PROG_DETACH => core::mem::size_of::<BpfProgAttachAttr>() as u32,
         BPF_PROG_TEST_RUN => core::mem::size_of::<BpfProgTestRunAttr>() as u32,
         BPF_PROG_GET_NEXT_ID
         | BPF_MAP_GET_NEXT_ID
@@ -664,20 +662,14 @@ fn validate_map_create(a: &BpfMapCreateAttr) -> Result<(), i32> {
     // QUEUE/STACK/RINGBUF/STACK_TRACE. Every other type requires a key.
     let allows_zero_key = matches!(
         a.map_type,
-        BPF_MAP_TYPE_QUEUE
-            | BPF_MAP_TYPE_STACK
-            | BPF_MAP_TYPE_RINGBUF
-            | BPF_MAP_TYPE_USER_RINGBUF
+        BPF_MAP_TYPE_QUEUE | BPF_MAP_TYPE_STACK | BPF_MAP_TYPE_RINGBUF | BPF_MAP_TYPE_USER_RINGBUF
     );
     if a.key_size == 0 && !allows_zero_key {
         return Err(errno::EINVAL);
     }
     // max_entries==0 is rejected by Linux for every type except struct_ops
     // (which uses the type's pseudo-field count) and arena (size-based).
-    let allows_zero_max = matches!(
-        a.map_type,
-        BPF_MAP_TYPE_STRUCT_OPS | BPF_MAP_TYPE_ARENA
-    );
+    let allows_zero_max = matches!(a.map_type, BPF_MAP_TYPE_STRUCT_OPS | BPF_MAP_TYPE_ARENA);
     if a.max_entries == 0 && !allows_zero_max {
         return Err(errno::EINVAL);
     }
@@ -1011,10 +1003,7 @@ pub extern "C" fn bpf(cmd: u32, attr: *mut u8, size: u32) -> i32 {
             let a: BpfProgTestRunAttr = unsafe { read_attr(attr) };
             validate_prog_test_run(&a)
         }
-        BPF_PROG_GET_NEXT_ID
-        | BPF_MAP_GET_NEXT_ID
-        | BPF_BTF_GET_NEXT_ID
-        | BPF_LINK_GET_NEXT_ID => {
+        BPF_PROG_GET_NEXT_ID | BPF_MAP_GET_NEXT_ID | BPF_BTF_GET_NEXT_ID | BPF_LINK_GET_NEXT_ID => {
             // start_id may be zero (means "start from the beginning"),
             // so we don't validate it here.
             Ok(())
@@ -1099,11 +1088,9 @@ pub extern "C" fn bpf(cmd: u32, attr: *mut u8, size: u32) -> i32 {
     // ENOSYS fall-through — matching Linux's per-handler order: shape
     // check first (so a bug in attr layout surfaces as EINVAL), then
     // cap check, then backend execution.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_BPF,
-    ) && !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_ADMIN,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_BPF)
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
+    {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -1167,13 +1154,27 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            BPF_MAP_CREATE, BPF_MAP_LOOKUP_ELEM, BPF_MAP_UPDATE_ELEM,
-            BPF_MAP_DELETE_ELEM, BPF_MAP_GET_NEXT_KEY, BPF_PROG_LOAD,
-            BPF_OBJ_PIN, BPF_OBJ_GET, BPF_PROG_ATTACH, BPF_PROG_DETACH,
-            BPF_PROG_TEST_RUN, BPF_PROG_GET_NEXT_ID, BPF_MAP_GET_NEXT_ID,
-            BPF_PROG_GET_FD_BY_ID, BPF_MAP_GET_FD_BY_ID,
-            BPF_OBJ_GET_INFO_BY_FD, BPF_LINK_CREATE, BPF_LINK_UPDATE,
-            BPF_LINK_DETACH, BPF_MAP_FREEZE, BPF_RAW_TRACEPOINT_OPEN,
+            BPF_MAP_CREATE,
+            BPF_MAP_LOOKUP_ELEM,
+            BPF_MAP_UPDATE_ELEM,
+            BPF_MAP_DELETE_ELEM,
+            BPF_MAP_GET_NEXT_KEY,
+            BPF_PROG_LOAD,
+            BPF_OBJ_PIN,
+            BPF_OBJ_GET,
+            BPF_PROG_ATTACH,
+            BPF_PROG_DETACH,
+            BPF_PROG_TEST_RUN,
+            BPF_PROG_GET_NEXT_ID,
+            BPF_MAP_GET_NEXT_ID,
+            BPF_PROG_GET_FD_BY_ID,
+            BPF_MAP_GET_FD_BY_ID,
+            BPF_OBJ_GET_INFO_BY_FD,
+            BPF_LINK_CREATE,
+            BPF_LINK_UPDATE,
+            BPF_LINK_DETACH,
+            BPF_MAP_FREEZE,
+            BPF_RAW_TRACEPOINT_OPEN,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -1185,10 +1186,14 @@ mod tests {
     #[test]
     fn test_map_types_distinct() {
         let types = [
-            BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_ARRAY,
-            BPF_MAP_TYPE_PROG_ARRAY, BPF_MAP_TYPE_PERF_EVENT_ARRAY,
-            BPF_MAP_TYPE_PERCPU_HASH, BPF_MAP_TYPE_PERCPU_ARRAY,
-            BPF_MAP_TYPE_RINGBUF, BPF_MAP_TYPE_USER_RINGBUF,
+            BPF_MAP_TYPE_HASH,
+            BPF_MAP_TYPE_ARRAY,
+            BPF_MAP_TYPE_PROG_ARRAY,
+            BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+            BPF_MAP_TYPE_PERCPU_HASH,
+            BPF_MAP_TYPE_PERCPU_ARRAY,
+            BPF_MAP_TYPE_RINGBUF,
+            BPF_MAP_TYPE_USER_RINGBUF,
             BPF_MAP_TYPE_ARENA,
         ];
         for i in 0..types.len() {
@@ -1201,9 +1206,12 @@ mod tests {
     #[test]
     fn test_prog_types_distinct() {
         let types = [
-            BPF_PROG_TYPE_SOCKET_FILTER, BPF_PROG_TYPE_KPROBE,
-            BPF_PROG_TYPE_XDP, BPF_PROG_TYPE_TRACEPOINT,
-            BPF_PROG_TYPE_PERF_EVENT, BPF_PROG_TYPE_NETFILTER,
+            BPF_PROG_TYPE_SOCKET_FILTER,
+            BPF_PROG_TYPE_KPROBE,
+            BPF_PROG_TYPE_XDP,
+            BPF_PROG_TYPE_TRACEPOINT,
+            BPF_PROG_TYPE_PERF_EVENT,
+            BPF_PROG_TYPE_NETFILTER,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -1720,9 +1728,7 @@ mod tests {
 
     #[test]
     fn test_link_detach_negative_link_ebadf() {
-        let a = BpfLinkDetachAttr {
-            link_fd: u32::MAX,
-        };
+        let a = BpfLinkDetachAttr { link_fd: u32::MAX };
         assert_eq!(call_bpf(BPF_LINK_DETACH, &a), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
@@ -2134,16 +2140,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -2158,8 +2162,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -2171,8 +2174,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2187,8 +2189,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed dropping cap");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -2392,8 +2393,7 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
             // 2nd: restore CAP_BPF, expect ENOSYS.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2408,10 +2408,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0);
             fresh_errno();
             assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -2465,8 +2462,7 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Re-grant CAP_BPF only (CAP_SYS_ADMIN stays dropped).
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             // CAP_BPF is cap 39 → bit 7 of the high word.
@@ -2482,10 +2478,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0);
             fresh_errno();
             assert_eq!(call_bpf(BPF_MAP_CREATE, &a), -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -2499,12 +2492,10 @@ mod tests {
         fn test_bpf_phase182_eperm_preserves_other_caps() {
             let _g = CapGuard::snapshot();
             drop_bpf_caps();
-            let (lo_before, hi_before) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_before, hi_before) = crate::sys_capability::current_caps_effective();
             let a = good_map_create();
             let _ = call_bpf(BPF_MAP_CREATE, &a);
-            let (lo_after, hi_after) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_after, hi_after) = crate::sys_capability::current_caps_effective();
             assert_eq!(lo_before, lo_after);
             assert_eq!(hi_before, hi_after);
         }

@@ -116,8 +116,10 @@ mod tests {
     #[test]
     fn test_dev_pm_qos_types_distinct() {
         let types = [
-            DEV_PM_QOS_RESUME_LATENCY, DEV_PM_QOS_LATENCY_TOLERANCE,
-            DEV_PM_QOS_MIN_FREQUENCY, DEV_PM_QOS_MAX_FREQUENCY,
+            DEV_PM_QOS_RESUME_LATENCY,
+            DEV_PM_QOS_LATENCY_TOLERANCE,
+            DEV_PM_QOS_MIN_FREQUENCY,
+            DEV_PM_QOS_MAX_FREQUENCY,
             DEV_PM_QOS_FLAGS,
         ];
         for i in 0..types.len() {
@@ -137,10 +139,7 @@ mod tests {
 
     #[test]
     fn test_flag_bits_no_overlap() {
-        assert_eq!(
-            PM_QOS_FLAG_NO_POWER_OFF & PM_QOS_FLAG_REMOTE_WAKEUP,
-            0
-        );
+        assert_eq!(PM_QOS_FLAG_NO_POWER_OFF & PM_QOS_FLAG_REMOTE_WAKEUP, 0);
     }
 
     #[test]

@@ -88,7 +88,9 @@ fn alloc_node(key: *const u8) -> *mut Node {
 
 fn free_node(node: *mut Node) {
     if !node.is_null() {
-        unsafe { crate::malloc::free(node.cast::<u8>()); }
+        unsafe {
+            crate::malloc::free(node.cast::<u8>());
+        }
     }
 }
 
@@ -104,11 +106,7 @@ fn free_node(node: *mut Node) {
 ///
 /// `rootp` is a pointer to the root pointer (i.e., `void **rootp`).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tsearch(
-    key: *const u8,
-    rootp: *mut *mut u8,
-    compar: ComparFn,
-) -> *mut u8 {
+pub extern "C" fn tsearch(key: *const u8, rootp: *mut *mut u8, compar: ComparFn) -> *mut u8 {
     if rootp.is_null() {
         return core::ptr::null_mut();
     }
@@ -124,7 +122,9 @@ pub extern "C" fn tsearch(
                 errno::set_errno(errno::ENOMEM);
                 return core::ptr::null_mut();
             }
-            unsafe { *slot = new_node; }
+            unsafe {
+                *slot = new_node;
+            }
             return new_node.cast::<u8>();
         }
 
@@ -149,11 +149,7 @@ pub extern "C" fn tsearch(
 /// Returns a pointer to the matching node, or null if not found.
 /// Does not modify the tree.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tfind(
-    key: *const u8,
-    rootp: *const *mut u8,
-    compar: ComparFn,
-) -> *const u8 {
+pub extern "C" fn tfind(key: *const u8, rootp: *const *mut u8, compar: ComparFn) -> *const u8 {
     if rootp.is_null() {
         return core::ptr::null();
     }
@@ -183,11 +179,7 @@ pub extern "C" fn tfind(
 /// parent of the deleted node (or the new root).  Returns null if
 /// the key was not found.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tdelete(
-    key: *const u8,
-    rootp: *mut *mut u8,
-    compar: ComparFn,
-) -> *mut u8 {
+pub extern "C" fn tdelete(key: *const u8, rootp: *mut *mut u8, compar: ComparFn) -> *mut u8 {
     if rootp.is_null() {
         return core::ptr::null_mut();
     }
@@ -215,10 +207,14 @@ pub extern "C" fn tdelete(
 
             if left.is_null() {
                 // Replace with right child.
-                unsafe { *slot = right; }
+                unsafe {
+                    *slot = right;
+                }
             } else if right.is_null() {
                 // Replace with left child.
-                unsafe { *slot = left; }
+                unsafe {
+                    *slot = left;
+                }
             } else {
                 // Two children: find in-order successor (leftmost in right subtree).
                 let mut succ_parent = current;
@@ -228,12 +224,18 @@ pub extern "C" fn tdelete(
                     succ = unsafe { (*succ).left };
                 }
                 // Replace current's key with successor's key.
-                unsafe { (*current).key = (*succ).key; }
+                unsafe {
+                    (*current).key = (*succ).key;
+                }
                 // Remove successor.
                 if succ_parent == current {
-                    unsafe { (*succ_parent).right = (*succ).right; }
+                    unsafe {
+                        (*succ_parent).right = (*succ).right;
+                    }
                 } else {
-                    unsafe { (*succ_parent).left = (*succ).right; }
+                    unsafe {
+                        (*succ_parent).left = (*succ).right;
+                    }
                 }
                 free_node(succ);
                 // Return parent of the deleted node.
@@ -304,7 +306,7 @@ fn tdestroy_recursive(node: *mut Node, free_fn: TdestroyFn) {
     tdestroy_recursive(unsafe { (*node).left }, free_fn);
     tdestroy_recursive(unsafe { (*node).right }, free_fn);
     // Call the user's free function on the key.
-    free_fn(unsafe { (*node).key } as *mut u8);
+    free_fn(unsafe { (*node).key }.cast_mut());
     free_node(node);
 }
 
@@ -365,7 +367,7 @@ fn fnv1a_hash(key: *const u8) -> u64 {
         // SAFETY: key is a valid NUL-terminated string per POSIX contract.
         unsafe {
             while *p != 0 {
-                h ^= *p as u64;
+                h ^= u64::from(*p);
                 h = h.wrapping_mul(FNV_PRIME);
                 p = p.add(1);
             }
@@ -422,21 +424,15 @@ pub extern "C" fn hcreate(nel: usize) -> i32 {
         // good distribution, minimum 16).
         let mut size = 16_usize;
         while size < nel {
-            size = match size.checked_mul(2) {
-                Some(s) => s,
-                None => {
-                    errno::set_errno(errno::ENOMEM);
-                    return 0;
-                }
+            size = if let Some(s) = size.checked_mul(2) { s } else {
+                errno::set_errno(errno::ENOMEM);
+                return 0;
             };
         }
 
-        let alloc_bytes = match size.checked_mul(core::mem::size_of::<*mut HashNode>()) {
-            Some(b) => b,
-            None => {
-                errno::set_errno(errno::ENOMEM);
-                return 0;
-            }
+        let alloc_bytes = if let Some(b) = size.checked_mul(core::mem::size_of::<*mut HashNode>()) { b } else {
+            errno::set_errno(errno::ENOMEM);
+            return 0;
         };
 
         let ptr = crate::malloc::malloc(alloc_bytes);
@@ -596,7 +592,7 @@ pub extern "C" fn lsearch(
     // Search first.
     let found = lfind(key, base, nelp, width, compar);
     if !found.is_null() {
-        return found as *mut u8;
+        return found.cast_mut();
     }
 
     // Not found — append.
@@ -699,7 +695,13 @@ mod tests {
     extern "C" fn int_compar(a: *const u8, b: *const u8) -> i32 {
         let va = a as i64;
         let vb = b as i64;
-        if va < vb { -1 } else if va > vb { 1 } else { 0 }
+        if va < vb {
+            -1
+        } else if va > vb {
+            1
+        } else {
+            0
+        }
     }
 
     // -- Action constants --
@@ -731,7 +733,9 @@ mod tests {
         let mut root: *mut u8 = core::ptr::null_mut();
         let ret = tsearch(42 as *const u8, &raw mut root, int_compar);
         // malloc may fail on test host — skip if so.
-        if ret.is_null() { return; }
+        if ret.is_null() {
+            return;
+        }
         assert!(!root.is_null(), "root should be set after insert");
 
         // Find it.
@@ -749,7 +753,9 @@ mod tests {
     fn test_tsearch_insert_duplicate() {
         let mut root: *mut u8 = core::ptr::null_mut();
         let ret1 = tsearch(10 as *const u8, &raw mut root, int_compar);
-        if ret1.is_null() { return; }
+        if ret1.is_null() {
+            return;
+        }
         let ret2 = tsearch(10 as *const u8, &raw mut root, int_compar);
         assert_eq!(ret1, ret2, "duplicate insert should return same node");
 
@@ -792,9 +798,14 @@ mod tests {
     fn test_tdelete_not_found() {
         let mut root: *mut u8 = core::ptr::null_mut();
         let ret = tsearch(10 as *const u8, &raw mut root, int_compar);
-        if ret.is_null() { return; }
+        if ret.is_null() {
+            return;
+        }
         let ret = tdelete(99 as *const u8, &raw mut root, int_compar);
-        assert!(ret.is_null(), "deleting non-existent key should return null");
+        assert!(
+            ret.is_null(),
+            "deleting non-existent key should return null"
+        );
 
         tdestroy(root, dummy_free);
     }
@@ -821,10 +832,15 @@ mod tests {
     #[test]
     fn test_tdelete_root() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        if tsearch(50 as *const u8, &raw mut root, int_compar).is_null() { return; }
+        if tsearch(50 as *const u8, &raw mut root, int_compar).is_null() {
+            return;
+        }
 
         let ret = tdelete(50 as *const u8, &raw mut root, int_compar);
-        assert!(root.is_null(), "root should be null after deleting only node");
+        assert!(
+            root.is_null(),
+            "root should be null after deleting only node"
+        );
         let _ = ret;
     }
 
@@ -848,11 +864,17 @@ mod tests {
     #[test]
     fn test_twalk_single() {
         let mut root: *mut u8 = core::ptr::null_mut();
-        if tsearch(42 as *const u8, &raw mut root, int_compar).is_null() { return; }
+        if tsearch(42 as *const u8, &raw mut root, int_compar).is_null() {
+            return;
+        }
 
         WALK_COUNT.store(0, Ordering::Relaxed);
         twalk(root, count_walker);
-        assert_eq!(WALK_COUNT.load(Ordering::Relaxed), 1, "single node = 1 leaf");
+        assert_eq!(
+            WALK_COUNT.load(Ordering::Relaxed),
+            1,
+            "single node = 1 leaf"
+        );
 
         tdestroy(root, dummy_free);
     }
@@ -903,8 +925,11 @@ mod tests {
 
         DESTROY_COUNT.store(0, Ordering::Relaxed);
         tdestroy(root, count_destroyer);
-        assert_eq!(DESTROY_COUNT.load(Ordering::Relaxed), 5,
-                   "tdestroy should call free_fn for each node");
+        assert_eq!(
+            DESTROY_COUNT.load(Ordering::Relaxed),
+            5,
+            "tdestroy should call free_fn for each node"
+        );
     }
 
     // -- Node layout --
@@ -999,7 +1024,9 @@ mod tests {
     fn test_hcreate_basic() {
         let ret = hcreate(10);
         // malloc may fail — skip if so.
-        if ret == 0 { return; }
+        if ret == 0 {
+            return;
+        }
         assert_eq!(ret, 1);
         hdestroy();
     }
@@ -1025,7 +1052,9 @@ mod tests {
     #[test]
     fn test_hsearch_enter_and_find() {
         hdestroy(); // ensure clean state
-        if hcreate(32) == 0 { return; } // malloc fail
+        if hcreate(32) == 0 {
+            return;
+        } // malloc fail
 
         let key = b"mykey\0";
         let data = 42usize as *mut u8;
@@ -1056,7 +1085,9 @@ mod tests {
     #[test]
     fn test_hsearch_find_nonexistent() {
         hdestroy();
-        if hcreate(32) == 0 { return; }
+        if hcreate(32) == 0 {
+            return;
+        }
 
         let item = Entry {
             key: b"nosuchkey\0".as_ptr() as *mut u8,
@@ -1071,7 +1102,9 @@ mod tests {
     #[test]
     fn test_hsearch_enter_multiple() {
         hdestroy();
-        if hcreate(64) == 0 { return; }
+        if hcreate(64) == 0 {
+            return;
+        }
 
         let keys: [&[u8]; 4] = [b"alpha\0", b"beta\0", b"gamma\0", b"delta\0"];
         for (i, k) in keys.iter().enumerate() {
@@ -1093,7 +1126,11 @@ mod tests {
                 data: core::ptr::null_mut(),
             };
             let f = hsearch(item, FIND);
-            assert!(!f.is_null(), "should find key {:?}", core::str::from_utf8(&k[..k.len()-1]));
+            assert!(
+                !f.is_null(),
+                "should find key {:?}",
+                core::str::from_utf8(&k[..k.len() - 1])
+            );
             assert_eq!(unsafe { (*f).data }, i as *mut u8);
         }
 
@@ -1103,7 +1140,9 @@ mod tests {
     #[test]
     fn test_hsearch_enter_duplicate_returns_existing() {
         hdestroy();
-        if hcreate(32) == 0 { return; }
+        if hcreate(32) == 0 {
+            return;
+        }
 
         let key = b"dupkey\0";
         let item1 = Entry {
@@ -1111,7 +1150,10 @@ mod tests {
             data: 1 as *mut u8,
         };
         let e1 = hsearch(item1, ENTER);
-        if e1.is_null() { hdestroy(); return; }
+        if e1.is_null() {
+            hdestroy();
+            return;
+        }
 
         // Enter again with different data — should return existing.
         let item2 = Entry {

@@ -93,9 +93,12 @@ mod tests {
     #[test]
     fn test_input_sources_distinct() {
         let sources = [
-            RANDOM_INPUT_KEYBOARD, RANDOM_INPUT_MOUSE,
-            RANDOM_INPUT_DISK, RANDOM_INPUT_NET,
-            RANDOM_INPUT_IRQ, RANDOM_INPUT_TIMER,
+            RANDOM_INPUT_KEYBOARD,
+            RANDOM_INPUT_MOUSE,
+            RANDOM_INPUT_DISK,
+            RANDOM_INPUT_NET,
+            RANDOM_INPUT_IRQ,
+            RANDOM_INPUT_TIMER,
         ];
         for i in 0..sources.len() {
             for j in (i + 1)..sources.len() {

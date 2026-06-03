@@ -51,13 +51,21 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_FQ_UNSPEC, TCA_FQ_PLIMIT, TCA_FQ_FLOW_PLIMIT,
-            TCA_FQ_QUANTUM, TCA_FQ_INITIAL_QUANTUM,
-            TCA_FQ_RATE_ENABLE, TCA_FQ_FLOW_DEFAULT_RATE,
-            TCA_FQ_FLOW_MAX_RATE, TCA_FQ_BUCKETS_LOG,
-            TCA_FQ_FLOW_REFILL_DELAY, TCA_FQ_ORPHAN_MASK,
-            TCA_FQ_LOW_RATE_THRESHOLD, TCA_FQ_CE_THRESHOLD,
-            TCA_FQ_TIMER_SLACK, TCA_FQ_HORIZON,
+            TCA_FQ_UNSPEC,
+            TCA_FQ_PLIMIT,
+            TCA_FQ_FLOW_PLIMIT,
+            TCA_FQ_QUANTUM,
+            TCA_FQ_INITIAL_QUANTUM,
+            TCA_FQ_RATE_ENABLE,
+            TCA_FQ_FLOW_DEFAULT_RATE,
+            TCA_FQ_FLOW_MAX_RATE,
+            TCA_FQ_BUCKETS_LOG,
+            TCA_FQ_FLOW_REFILL_DELAY,
+            TCA_FQ_ORPHAN_MASK,
+            TCA_FQ_LOW_RATE_THRESHOLD,
+            TCA_FQ_CE_THRESHOLD,
+            TCA_FQ_TIMER_SLACK,
+            TCA_FQ_HORIZON,
             TCA_FQ_HORIZON_DROP,
         ];
         for i in 0..attrs.len() {

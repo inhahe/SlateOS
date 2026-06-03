@@ -67,8 +67,11 @@ mod tests {
     #[test]
     fn test_resource_types_distinct() {
         let types = [
-            PLATFORM_RES_MEM, PLATFORM_RES_IRQ, PLATFORM_RES_DMA,
-            PLATFORM_RES_IO, PLATFORM_RES_BUS,
+            PLATFORM_RES_MEM,
+            PLATFORM_RES_IRQ,
+            PLATFORM_RES_DMA,
+            PLATFORM_RES_IO,
+            PLATFORM_RES_BUS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -80,7 +83,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            PLATFORM_DEVFLAG_BOARD, PLATFORM_DEVFLAG_DYNAMIC,
+            PLATFORM_DEVFLAG_BOARD,
+            PLATFORM_DEVFLAG_DYNAMIC,
             PLATFORM_DEVFLAG_IRQ_OVERRIDE,
         ];
         for i in 0..flags.len() {
@@ -94,7 +98,8 @@ mod tests {
     #[test]
     fn test_probe_types_distinct() {
         let types = [
-            PLATFORM_PROBE_NORMAL, PLATFORM_PROBE_DEFERRED,
+            PLATFORM_PROBE_NORMAL,
+            PLATFORM_PROBE_DEFERRED,
             PLATFORM_PROBE_SKIPPED,
         ];
         for i in 0..types.len() {

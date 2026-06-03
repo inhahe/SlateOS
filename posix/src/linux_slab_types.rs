@@ -67,8 +67,12 @@ mod tests {
     fn test_slab_flags_distinct_subset() {
         // Test a subset that should definitely be distinct
         let flags = [
-            SLAB_HWCACHE_ALIGN, SLAB_CACHE_DMA, SLAB_CACHE_DMA32,
-            SLAB_PANIC, SLAB_RECLAIM_ACCOUNT, SLAB_NO_MERGE,
+            SLAB_HWCACHE_ALIGN,
+            SLAB_CACHE_DMA,
+            SLAB_CACHE_DMA32,
+            SLAB_PANIC,
+            SLAB_RECLAIM_ACCOUNT,
+            SLAB_NO_MERGE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

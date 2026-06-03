@@ -56,9 +56,13 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_SFQ_UNSPEC, TCA_SFQ_PERTURB_PERIOD,
-            TCA_SFQ_LIMIT, TCA_SFQ_TOTAL, TCA_SFQ_FLOWS,
-            TCA_SFQ_DEPTH, TCA_SFQ_HEADDROP,
+            TCA_SFQ_UNSPEC,
+            TCA_SFQ_PERTURB_PERIOD,
+            TCA_SFQ_LIMIT,
+            TCA_SFQ_TOTAL,
+            TCA_SFQ_FLOWS,
+            TCA_SFQ_DEPTH,
+            TCA_SFQ_HEADDROP,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -70,10 +74,14 @@ mod tests {
     #[test]
     fn test_hash_types_distinct() {
         let types = [
-            TCA_SFQ_HASH_CLASSIC, TCA_SFQ_HASH_DST,
-            TCA_SFQ_HASH_SRC, TCA_SFQ_HASH_FULL,
-            TCA_SFQ_HASH_CTORIGDST, TCA_SFQ_HASH_CTORIGSRC,
-            TCA_SFQ_HASH_CTREPLDST, TCA_SFQ_HASH_CTREPLSRC,
+            TCA_SFQ_HASH_CLASSIC,
+            TCA_SFQ_HASH_DST,
+            TCA_SFQ_HASH_SRC,
+            TCA_SFQ_HASH_FULL,
+            TCA_SFQ_HASH_CTORIGDST,
+            TCA_SFQ_HASH_CTORIGSRC,
+            TCA_SFQ_HASH_CTREPLDST,
+            TCA_SFQ_HASH_CTREPLSRC,
             TCA_SFQ_HASH_CTNATCHG,
         ];
         for i in 0..types.len() {

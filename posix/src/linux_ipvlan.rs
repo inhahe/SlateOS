@@ -90,7 +90,11 @@ mod tests {
 
     #[test]
     fn test_mode_names_distinct() {
-        let names = [IPVLAN_MODE_NAME_L2, IPVLAN_MODE_NAME_L3, IPVLAN_MODE_NAME_L3S];
+        let names = [
+            IPVLAN_MODE_NAME_L2,
+            IPVLAN_MODE_NAME_L3,
+            IPVLAN_MODE_NAME_L3S,
+        ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {
                 assert_ne!(names[i], names[j]);

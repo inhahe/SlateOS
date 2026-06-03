@@ -86,7 +86,8 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            UPROBE_STATE_REGISTERED, UPROBE_STATE_ACTIVE,
+            UPROBE_STATE_REGISTERED,
+            UPROBE_STATE_ACTIVE,
             UPROBE_STATE_DELETING,
         ];
         for i in 0..states.len() {
@@ -98,9 +99,7 @@ mod tests {
 
     #[test]
     fn test_flags_no_overlap() {
-        let flags = [
-            UPROBE_FLAG_ENTRY, UPROBE_FLAG_RETURN, UPROBE_FLAG_MULTI,
-        ];
+        let flags = [UPROBE_FLAG_ENTRY, UPROBE_FLAG_RETURN, UPROBE_FLAG_MULTI];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {
@@ -122,7 +121,9 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let events = [
-            UPROBE_EVENT_HIT, UPROBE_EVENT_RETURN, UPROBE_EVENT_EXCEPTION,
+            UPROBE_EVENT_HIT,
+            UPROBE_EVENT_RETURN,
+            UPROBE_EVENT_EXCEPTION,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

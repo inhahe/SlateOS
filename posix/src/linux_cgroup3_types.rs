@@ -101,9 +101,14 @@ mod tests {
     #[test]
     fn test_controllers_power_of_two() {
         let ctrls = [
-            CGROUP_CTRL_CPU, CGROUP_CTRL_MEMORY, CGROUP_CTRL_IO,
-            CGROUP_CTRL_PID, CGROUP_CTRL_RDMA, CGROUP_CTRL_HUGETLB,
-            CGROUP_CTRL_CPUSET, CGROUP_CTRL_MISC,
+            CGROUP_CTRL_CPU,
+            CGROUP_CTRL_MEMORY,
+            CGROUP_CTRL_IO,
+            CGROUP_CTRL_PID,
+            CGROUP_CTRL_RDMA,
+            CGROUP_CTRL_HUGETLB,
+            CGROUP_CTRL_CPUSET,
+            CGROUP_CTRL_MISC,
         ];
         for c in &ctrls {
             assert!(c.is_power_of_two(), "0x{:02x} not power of two", c);
@@ -113,9 +118,14 @@ mod tests {
     #[test]
     fn test_controllers_no_overlap() {
         let ctrls = [
-            CGROUP_CTRL_CPU, CGROUP_CTRL_MEMORY, CGROUP_CTRL_IO,
-            CGROUP_CTRL_PID, CGROUP_CTRL_RDMA, CGROUP_CTRL_HUGETLB,
-            CGROUP_CTRL_CPUSET, CGROUP_CTRL_MISC,
+            CGROUP_CTRL_CPU,
+            CGROUP_CTRL_MEMORY,
+            CGROUP_CTRL_IO,
+            CGROUP_CTRL_PID,
+            CGROUP_CTRL_RDMA,
+            CGROUP_CTRL_HUGETLB,
+            CGROUP_CTRL_CPUSET,
+            CGROUP_CTRL_MISC,
         ];
         for i in 0..ctrls.len() {
             for j in (i + 1)..ctrls.len() {
@@ -127,7 +137,8 @@ mod tests {
     #[test]
     fn test_freeze_states_distinct() {
         let states = [
-            CGROUP_FREEZE_NOT_FROZEN, CGROUP_FREEZE_FREEZING,
+            CGROUP_FREEZE_NOT_FROZEN,
+            CGROUP_FREEZE_FREEZING,
             CGROUP_FREEZE_FROZEN,
         ];
         for i in 0..states.len() {
@@ -140,8 +151,10 @@ mod tests {
     #[test]
     fn test_thread_modes_distinct() {
         let modes = [
-            CGROUP_TYPE_DOMAIN, CGROUP_TYPE_THREADED,
-            CGROUP_TYPE_DOMAIN_THREADED, CGROUP_TYPE_DOMAIN_INVALID,
+            CGROUP_TYPE_DOMAIN,
+            CGROUP_TYPE_THREADED,
+            CGROUP_TYPE_DOMAIN_THREADED,
+            CGROUP_TYPE_DOMAIN_INVALID,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

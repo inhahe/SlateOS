@@ -93,12 +93,10 @@ mod tests {
     #[test]
     fn test_signals_distinct() {
         let sigs = [
-            SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT,
-            SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2,
-            SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD,
-            SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU,
-            SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF,
-            SIGWINCH, SIGIO, SIGPWR, SIGSYS,
+            SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1,
+            SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP,
+            SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH,
+            SIGIO, SIGPWR, SIGSYS,
         ];
         for i in 0..sigs.len() {
             for j in (i + 1)..sigs.len() {

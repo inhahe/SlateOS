@@ -131,11 +131,20 @@ mod tests {
     #[test]
     fn test_protocol_numbers_distinct() {
         let protos = [
-            PPP_PROTO_IP, PPP_PROTO_IPV6, PPP_PROTO_IPX,
-            PPP_PROTO_VJC_COMP, PPP_PROTO_VJC_UNCOMP, PPP_PROTO_COMP,
-            PPP_PROTO_IPCP, PPP_PROTO_IPV6CP, PPP_PROTO_CCP,
-            PPP_PROTO_LCP, PPP_PROTO_PAP, PPP_PROTO_CHAP,
-            PPP_PROTO_EAP, PPP_PROTO_MP,
+            PPP_PROTO_IP,
+            PPP_PROTO_IPV6,
+            PPP_PROTO_IPX,
+            PPP_PROTO_VJC_COMP,
+            PPP_PROTO_VJC_UNCOMP,
+            PPP_PROTO_COMP,
+            PPP_PROTO_IPCP,
+            PPP_PROTO_IPV6CP,
+            PPP_PROTO_CCP,
+            PPP_PROTO_LCP,
+            PPP_PROTO_PAP,
+            PPP_PROTO_CHAP,
+            PPP_PROTO_EAP,
+            PPP_PROTO_MP,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
@@ -147,9 +156,17 @@ mod tests {
     #[test]
     fn test_lcp_codes_distinct() {
         let codes = [
-            LCP_CONF_REQ, LCP_CONF_ACK, LCP_CONF_NAK, LCP_CONF_REJ,
-            LCP_TERM_REQ, LCP_TERM_ACK, LCP_CODE_REJ, LCP_PROTO_REJ,
-            LCP_ECHO_REQ, LCP_ECHO_REP, LCP_DISC_REQ,
+            LCP_CONF_REQ,
+            LCP_CONF_ACK,
+            LCP_CONF_NAK,
+            LCP_CONF_REJ,
+            LCP_TERM_REQ,
+            LCP_TERM_ACK,
+            LCP_CODE_REJ,
+            LCP_PROTO_REJ,
+            LCP_ECHO_REQ,
+            LCP_ECHO_REP,
+            LCP_DISC_REQ,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -171,8 +188,11 @@ mod tests {
     #[test]
     fn test_ppp_flags_no_overlap() {
         let flags = [
-            PPP_FLAG_ACCOMP, PPP_FLAG_PCOMP,
-            PPP_FLAG_VJCCOMP, PPP_FLAG_CCP, PPP_FLAG_MP,
+            PPP_FLAG_ACCOMP,
+            PPP_FLAG_PCOMP,
+            PPP_FLAG_VJCCOMP,
+            PPP_FLAG_CCP,
+            PPP_FLAG_MP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

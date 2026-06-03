@@ -142,16 +142,26 @@ mod tests {
     #[test]
     fn test_msg_opcodes_distinct() {
         let msgs = [
-            CEC_MSG_FEATURE_ABORT, CEC_MSG_IMAGE_VIEW_ON,
-            CEC_MSG_TEXT_VIEW_ON, CEC_MSG_ACTIVE_SOURCE,
-            CEC_MSG_INACTIVE_SOURCE, CEC_MSG_REQUEST_ACTIVE_SOURCE,
-            CEC_MSG_STANDBY, CEC_MSG_GIVE_DEVICE_POWER_STATUS,
-            CEC_MSG_REPORT_POWER_STATUS, CEC_MSG_GIVE_PHYSICAL_ADDR,
-            CEC_MSG_REPORT_PHYSICAL_ADDR, CEC_MSG_GIVE_OSD_NAME,
-            CEC_MSG_SET_OSD_NAME, CEC_MSG_USER_CONTROL_PRESSED,
-            CEC_MSG_USER_CONTROL_RELEASED, CEC_MSG_ROUTING_CHANGE,
-            CEC_MSG_SET_STREAM_PATH, CEC_MSG_CEC_VERSION,
-            CEC_MSG_GET_CEC_VERSION, CEC_MSG_ABORT,
+            CEC_MSG_FEATURE_ABORT,
+            CEC_MSG_IMAGE_VIEW_ON,
+            CEC_MSG_TEXT_VIEW_ON,
+            CEC_MSG_ACTIVE_SOURCE,
+            CEC_MSG_INACTIVE_SOURCE,
+            CEC_MSG_REQUEST_ACTIVE_SOURCE,
+            CEC_MSG_STANDBY,
+            CEC_MSG_GIVE_DEVICE_POWER_STATUS,
+            CEC_MSG_REPORT_POWER_STATUS,
+            CEC_MSG_GIVE_PHYSICAL_ADDR,
+            CEC_MSG_REPORT_PHYSICAL_ADDR,
+            CEC_MSG_GIVE_OSD_NAME,
+            CEC_MSG_SET_OSD_NAME,
+            CEC_MSG_USER_CONTROL_PRESSED,
+            CEC_MSG_USER_CONTROL_RELEASED,
+            CEC_MSG_ROUTING_CHANGE,
+            CEC_MSG_SET_STREAM_PATH,
+            CEC_MSG_CEC_VERSION,
+            CEC_MSG_GET_CEC_VERSION,
+            CEC_MSG_ABORT,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -164,13 +174,20 @@ mod tests {
     fn test_log_addrs_distinct() {
         // Addresses 0-14 are distinct; 15 is shared by broadcast/unregistered
         let addrs = [
-            CEC_LOG_ADDR_TV, CEC_LOG_ADDR_RECORD_1,
-            CEC_LOG_ADDR_RECORD_2, CEC_LOG_ADDR_TUNER_1,
-            CEC_LOG_ADDR_PLAYBACK_1, CEC_LOG_ADDR_AUDIOSYSTEM,
-            CEC_LOG_ADDR_TUNER_2, CEC_LOG_ADDR_TUNER_3,
-            CEC_LOG_ADDR_PLAYBACK_2, CEC_LOG_ADDR_RECORD_3,
-            CEC_LOG_ADDR_TUNER_4, CEC_LOG_ADDR_PLAYBACK_3,
-            CEC_LOG_ADDR_BACKUP_1, CEC_LOG_ADDR_BACKUP_2,
+            CEC_LOG_ADDR_TV,
+            CEC_LOG_ADDR_RECORD_1,
+            CEC_LOG_ADDR_RECORD_2,
+            CEC_LOG_ADDR_TUNER_1,
+            CEC_LOG_ADDR_PLAYBACK_1,
+            CEC_LOG_ADDR_AUDIOSYSTEM,
+            CEC_LOG_ADDR_TUNER_2,
+            CEC_LOG_ADDR_TUNER_3,
+            CEC_LOG_ADDR_PLAYBACK_2,
+            CEC_LOG_ADDR_RECORD_3,
+            CEC_LOG_ADDR_TUNER_4,
+            CEC_LOG_ADDR_PLAYBACK_3,
+            CEC_LOG_ADDR_BACKUP_1,
+            CEC_LOG_ADDR_BACKUP_2,
             CEC_LOG_ADDR_SPECIFIC,
         ];
         for i in 0..addrs.len() {
@@ -189,8 +206,10 @@ mod tests {
     #[test]
     fn test_power_status_distinct() {
         let statuses = [
-            CEC_OP_POWER_STATUS_ON, CEC_OP_POWER_STATUS_STANDBY,
-            CEC_OP_POWER_STATUS_TO_ON, CEC_OP_POWER_STATUS_TO_STANDBY,
+            CEC_OP_POWER_STATUS_ON,
+            CEC_OP_POWER_STATUS_STANDBY,
+            CEC_OP_POWER_STATUS_TO_ON,
+            CEC_OP_POWER_STATUS_TO_STANDBY,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
@@ -202,8 +221,12 @@ mod tests {
     #[test]
     fn test_caps_are_powers_of_two() {
         let caps = [
-            CEC_CAP_PHYS_ADDR, CEC_CAP_TRANSMIT, CEC_CAP_PASSTHROUGH,
-            CEC_CAP_RC, CEC_CAP_MONITOR_ALL, CEC_CAP_NEEDS_HPD,
+            CEC_CAP_PHYS_ADDR,
+            CEC_CAP_TRANSMIT,
+            CEC_CAP_PASSTHROUGH,
+            CEC_CAP_RC,
+            CEC_CAP_MONITOR_ALL,
+            CEC_CAP_NEEDS_HPD,
             CEC_CAP_MONITOR_PIN,
         ];
         for cap in &caps {

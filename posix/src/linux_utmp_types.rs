@@ -64,8 +64,12 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            UTMPX_OFF_TYPE, UTMPX_OFF_PID, UTMPX_OFF_LINE,
-            UTMPX_OFF_ID, UTMPX_OFF_USER, UTMPX_OFF_HOST,
+            UTMPX_OFF_TYPE,
+            UTMPX_OFF_PID,
+            UTMPX_OFF_LINE,
+            UTMPX_OFF_ID,
+            UTMPX_OFF_USER,
+            UTMPX_OFF_HOST,
         ];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);

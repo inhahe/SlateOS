@@ -119,11 +119,20 @@ mod tests {
     #[test]
     fn test_ctrl_messages_distinct() {
         let msgs = [
-            PD_CTRL_GOODCRC, PD_CTRL_GOTOMIN, PD_CTRL_ACCEPT,
-            PD_CTRL_REJECT, PD_CTRL_PING, PD_CTRL_PS_RDY,
-            PD_CTRL_GET_SOURCE_CAP, PD_CTRL_GET_SINK_CAP,
-            PD_CTRL_DR_SWAP, PD_CTRL_PR_SWAP, PD_CTRL_VCONN_SWAP,
-            PD_CTRL_WAIT, PD_CTRL_SOFT_RESET, PD_CTRL_NOT_SUPPORTED,
+            PD_CTRL_GOODCRC,
+            PD_CTRL_GOTOMIN,
+            PD_CTRL_ACCEPT,
+            PD_CTRL_REJECT,
+            PD_CTRL_PING,
+            PD_CTRL_PS_RDY,
+            PD_CTRL_GET_SOURCE_CAP,
+            PD_CTRL_GET_SINK_CAP,
+            PD_CTRL_DR_SWAP,
+            PD_CTRL_PR_SWAP,
+            PD_CTRL_VCONN_SWAP,
+            PD_CTRL_WAIT,
+            PD_CTRL_SOFT_RESET,
+            PD_CTRL_NOT_SUPPORTED,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -135,8 +144,11 @@ mod tests {
     #[test]
     fn test_data_messages_distinct() {
         let msgs = [
-            PD_DATA_SOURCE_CAP, PD_DATA_REQUEST, PD_DATA_BIST,
-            PD_DATA_SINK_CAP, PD_DATA_VENDOR_DEF,
+            PD_DATA_SOURCE_CAP,
+            PD_DATA_REQUEST,
+            PD_DATA_BIST,
+            PD_DATA_SINK_CAP,
+            PD_DATA_VENDOR_DEF,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -147,7 +159,12 @@ mod tests {
 
     #[test]
     fn test_pdo_types_distinct() {
-        let types = [PD_PDO_TYPE_FIXED, PD_PDO_TYPE_BATTERY, PD_PDO_TYPE_VARIABLE, PD_PDO_TYPE_APDO];
+        let types = [
+            PD_PDO_TYPE_FIXED,
+            PD_PDO_TYPE_BATTERY,
+            PD_PDO_TYPE_VARIABLE,
+            PD_PDO_TYPE_APDO,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -158,8 +175,12 @@ mod tests {
     #[test]
     fn test_voltages_ascending() {
         let volts = [
-            PD_VOLTAGE_5V, PD_VOLTAGE_9V, PD_VOLTAGE_15V,
-            PD_VOLTAGE_20V, PD_VOLTAGE_28V, PD_VOLTAGE_36V,
+            PD_VOLTAGE_5V,
+            PD_VOLTAGE_9V,
+            PD_VOLTAGE_15V,
+            PD_VOLTAGE_20V,
+            PD_VOLTAGE_28V,
+            PD_VOLTAGE_36V,
             PD_VOLTAGE_48V,
         ];
         for i in 0..(volts.len() - 1) {

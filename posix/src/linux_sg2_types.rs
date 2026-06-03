@@ -127,14 +127,24 @@ mod tests {
     #[test]
     fn test_ioctl_distinct() {
         let cmds = [
-            SG_GET_VERSION_NUM, SG_SET_TIMEOUT, SG_GET_TIMEOUT,
-            SG_SET_COMMAND_Q, SG_GET_COMMAND_Q,
-            SG_SET_RESERVED_SIZE, SG_GET_RESERVED_SIZE,
-            SG_GET_SCSI_ID, SG_SET_FORCE_LOW_DMA, SG_GET_LOW_DMA,
-            SG_SET_FORCE_PACK_ID, SG_GET_PACK_ID,
-            SG_GET_NUM_WAITING, SG_SET_DEBUG,
-            SG_GET_SG_TABLESIZE, SG_EMULATED_HOST,
-            SG_IO, SG_GET_REQUEST_TABLE,
+            SG_GET_VERSION_NUM,
+            SG_SET_TIMEOUT,
+            SG_GET_TIMEOUT,
+            SG_SET_COMMAND_Q,
+            SG_GET_COMMAND_Q,
+            SG_SET_RESERVED_SIZE,
+            SG_GET_RESERVED_SIZE,
+            SG_GET_SCSI_ID,
+            SG_SET_FORCE_LOW_DMA,
+            SG_GET_LOW_DMA,
+            SG_SET_FORCE_PACK_ID,
+            SG_GET_PACK_ID,
+            SG_GET_NUM_WAITING,
+            SG_SET_DEBUG,
+            SG_GET_SG_TABLESIZE,
+            SG_EMULATED_HOST,
+            SG_IO,
+            SG_GET_REQUEST_TABLE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -146,8 +156,10 @@ mod tests {
     #[test]
     fn test_dxfer_distinct() {
         let dirs = [
-            SG_DXFER_NONE, SG_DXFER_TO_DEV,
-            SG_DXFER_FROM_DEV, SG_DXFER_TO_FROM_DEV,
+            SG_DXFER_NONE,
+            SG_DXFER_TO_DEV,
+            SG_DXFER_FROM_DEV,
+            SG_DXFER_TO_FROM_DEV,
             SG_DXFER_UNKNOWN,
         ];
         for i in 0..dirs.len() {
@@ -169,9 +181,15 @@ mod tests {
     #[test]
     fn test_driver_status_distinct() {
         let statuses = [
-            SG_DRIVER_OK, SG_DRIVER_BUSY, SG_DRIVER_SOFT,
-            SG_DRIVER_MEDIA, SG_DRIVER_ERROR, SG_DRIVER_INVALID,
-            SG_DRIVER_TIMEOUT, SG_DRIVER_HARD, SG_DRIVER_SENSE,
+            SG_DRIVER_OK,
+            SG_DRIVER_BUSY,
+            SG_DRIVER_SOFT,
+            SG_DRIVER_MEDIA,
+            SG_DRIVER_ERROR,
+            SG_DRIVER_INVALID,
+            SG_DRIVER_TIMEOUT,
+            SG_DRIVER_HARD,
+            SG_DRIVER_SENSE,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {

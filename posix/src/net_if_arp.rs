@@ -157,19 +157,27 @@ mod tests {
     #[test]
     fn test_arphrd_types_distinct() {
         let types = [
-            ARPHRD_ETHER, ARPHRD_IEEE802, ARPHRD_ARCNET,
-            ARPHRD_DLCI, ARPHRD_ATM, ARPHRD_METRICOM,
-            ARPHRD_IEEE1394, ARPHRD_EUI64, ARPHRD_INFINIBAND,
-            ARPHRD_SLIP, ARPHRD_CSLIP, ARPHRD_PPP,
-            ARPHRD_LOOPBACK, ARPHRD_SIT, ARPHRD_IPGRE,
-            ARPHRD_VOID, ARPHRD_NONE,
+            ARPHRD_ETHER,
+            ARPHRD_IEEE802,
+            ARPHRD_ARCNET,
+            ARPHRD_DLCI,
+            ARPHRD_ATM,
+            ARPHRD_METRICOM,
+            ARPHRD_IEEE1394,
+            ARPHRD_EUI64,
+            ARPHRD_INFINIBAND,
+            ARPHRD_SLIP,
+            ARPHRD_CSLIP,
+            ARPHRD_PPP,
+            ARPHRD_LOOPBACK,
+            ARPHRD_SIT,
+            ARPHRD_IPGRE,
+            ARPHRD_VOID,
+            ARPHRD_NONE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
-                assert_ne!(
-                    types[i], types[j],
-                    "ARPHRD types must be distinct"
-                );
+                assert_ne!(types[i], types[j], "ARPHRD types must be distinct");
             }
         }
     }
@@ -187,8 +195,12 @@ mod tests {
     #[test]
     fn test_arpop_distinct() {
         let ops = [
-            ARPOP_REQUEST, ARPOP_REPLY, ARPOP_RREQUEST,
-            ARPOP_RREPLY, ARPOP_InREQUEST, ARPOP_InREPLY,
+            ARPOP_REQUEST,
+            ARPOP_REPLY,
+            ARPOP_RREQUEST,
+            ARPOP_RREPLY,
+            ARPOP_InREQUEST,
+            ARPOP_InREPLY,
             ARPOP_NAK,
         ];
         for i in 0..ops.len() {
@@ -205,8 +217,12 @@ mod tests {
     #[test]
     fn test_atf_flags_distinct() {
         let flags = [
-            ATF_COM, ATF_PERM, ATF_PUBL, ATF_USETRAILERS,
-            ATF_NETMASK, ATF_DONTPUB,
+            ATF_COM,
+            ATF_PERM,
+            ATF_PUBL,
+            ATF_USETRAILERS,
+            ATF_NETMASK,
+            ATF_DONTPUB,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -229,8 +245,8 @@ mod tests {
         let hdr = ArpHdr {
             ar_hrd: ARPHRD_ETHER.to_be(),
             ar_pro: 0x0800u16.to_be(), // IPv4
-            ar_hln: 6,                  // Ethernet address length
-            ar_pln: 4,                  // IPv4 address length
+            ar_hln: 6,                 // Ethernet address length
+            ar_pln: 4,                 // IPv4 address length
             ar_op: ARPOP_REQUEST.to_be(),
         };
         assert_eq!(hdr.ar_hln, 6);

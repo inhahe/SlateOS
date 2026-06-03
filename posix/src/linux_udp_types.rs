@@ -69,8 +69,12 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            UDP_CORK, UDP_NO_CHECK6_TX, UDP_NO_CHECK6_RX,
-            UDP_SEGMENT, UDP_GRO, UDP_ENCAP,
+            UDP_CORK,
+            UDP_NO_CHECK6_TX,
+            UDP_NO_CHECK6_RX,
+            UDP_SEGMENT,
+            UDP_GRO,
+            UDP_ENCAP,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -82,8 +86,11 @@ mod tests {
     #[test]
     fn test_encap_types_distinct() {
         let types = [
-            UDP_ENCAP_ESPINUDP_NON_IKE, UDP_ENCAP_ESPINUDP,
-            UDP_ENCAP_L2TPINUDP, UDP_ENCAP_GTP0, UDP_ENCAP_GTP1U,
+            UDP_ENCAP_ESPINUDP_NON_IKE,
+            UDP_ENCAP_ESPINUDP,
+            UDP_ENCAP_L2TPINUDP,
+            UDP_ENCAP_GTP0,
+            UDP_ENCAP_GTP1U,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -95,9 +102,14 @@ mod tests {
     #[test]
     fn test_ports_distinct() {
         let ports = [
-            UDP_PORT_DNS, UDP_PORT_DHCP_SERVER, UDP_PORT_DHCP_CLIENT,
-            UDP_PORT_NTP, UDP_PORT_SNMP, UDP_PORT_SYSLOG,
-            UDP_PORT_VXLAN, UDP_PORT_WIREGUARD,
+            UDP_PORT_DNS,
+            UDP_PORT_DHCP_SERVER,
+            UDP_PORT_DHCP_CLIENT,
+            UDP_PORT_NTP,
+            UDP_PORT_SNMP,
+            UDP_PORT_SYSLOG,
+            UDP_PORT_VXLAN,
+            UDP_PORT_WIREGUARD,
         ];
         for i in 0..ports.len() {
             for j in (i + 1)..ports.len() {

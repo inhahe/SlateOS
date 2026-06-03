@@ -113,7 +113,12 @@ mod tests {
 
     #[test]
     fn test_ring_offsets_distinct() {
-        let rings = [XDP_RX_RING, XDP_TX_RING, XDP_UMEM_FILL_RING, XDP_UMEM_COMPLETION_RING];
+        let rings = [
+            XDP_RX_RING,
+            XDP_TX_RING,
+            XDP_UMEM_FILL_RING,
+            XDP_UMEM_COMPLETION_RING,
+        ];
         for i in 0..rings.len() {
             for j in (i + 1)..rings.len() {
                 assert_ne!(rings[i], rings[j]);
@@ -124,9 +129,12 @@ mod tests {
     #[test]
     fn test_statistics_distinct() {
         let stats = [
-            XDP_STATISTICS_RX_DROPPED, XDP_STATISTICS_RX_INVALID_DESCS,
-            XDP_STATISTICS_TX_DROPPED, XDP_STATISTICS_TX_INVALID_DESCS,
-            XDP_STATISTICS_RX_RING_FULL, XDP_STATISTICS_RX_FILL_RING_EMPTY,
+            XDP_STATISTICS_RX_DROPPED,
+            XDP_STATISTICS_RX_INVALID_DESCS,
+            XDP_STATISTICS_TX_DROPPED,
+            XDP_STATISTICS_TX_INVALID_DESCS,
+            XDP_STATISTICS_RX_RING_FULL,
+            XDP_STATISTICS_RX_FILL_RING_EMPTY,
             XDP_STATISTICS_TX_RING_EMPTY,
         ];
         for i in 0..stats.len() {
@@ -154,9 +162,14 @@ mod tests {
     #[test]
     fn test_sockopt_distinct() {
         let opts = [
-            XDP_MMAP_OFFSETS, XDP_RX_RING_SIZE, XDP_TX_RING_SIZE,
-            XDP_UMEM_REG, XDP_UMEM_FILL_SIZE, XDP_UMEM_COMPLETION_SIZE,
-            XDP_STATISTICS, XDP_OPTIONS,
+            XDP_MMAP_OFFSETS,
+            XDP_RX_RING_SIZE,
+            XDP_TX_RING_SIZE,
+            XDP_UMEM_REG,
+            XDP_UMEM_FILL_SIZE,
+            XDP_UMEM_COMPLETION_SIZE,
+            XDP_STATISTICS,
+            XDP_OPTIONS,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

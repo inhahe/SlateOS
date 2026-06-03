@@ -92,13 +92,28 @@ mod tests {
     #[test]
     fn test_options_distinct() {
         let opts = [
-            TCP_NODELAY, TCP_MAXSEG, TCP_CORK, TCP_KEEPIDLE,
-            TCP_KEEPINTVL, TCP_KEEPCNT, TCP_SYNCNT, TCP_LINGER2,
-            TCP_DEFER_ACCEPT, TCP_WINDOW_CLAMP, TCP_INFO,
-            TCP_QUICKACK, TCP_CONGESTION, TCP_MD5SIG,
-            TCP_THIN_LINEAR_TIMEOUTS, TCP_THIN_DUPACK,
-            TCP_USER_TIMEOUT, TCP_FASTOPEN, TCP_FASTOPEN_CONNECT,
-            TCP_TIMESTAMPS, TCP_NOTSENT_LOWAT, TCP_ZEROCOPY_RECEIVE,
+            TCP_NODELAY,
+            TCP_MAXSEG,
+            TCP_CORK,
+            TCP_KEEPIDLE,
+            TCP_KEEPINTVL,
+            TCP_KEEPCNT,
+            TCP_SYNCNT,
+            TCP_LINGER2,
+            TCP_DEFER_ACCEPT,
+            TCP_WINDOW_CLAMP,
+            TCP_INFO,
+            TCP_QUICKACK,
+            TCP_CONGESTION,
+            TCP_MD5SIG,
+            TCP_THIN_LINEAR_TIMEOUTS,
+            TCP_THIN_DUPACK,
+            TCP_USER_TIMEOUT,
+            TCP_FASTOPEN,
+            TCP_FASTOPEN_CONNECT,
+            TCP_TIMESTAMPS,
+            TCP_NOTSENT_LOWAT,
+            TCP_ZEROCOPY_RECEIVE,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -110,10 +125,17 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            TCP_ESTABLISHED, TCP_SYN_SENT, TCP_SYN_RECV,
-            TCP_FIN_WAIT1, TCP_FIN_WAIT2, TCP_TIME_WAIT,
-            TCP_CLOSE, TCP_CLOSE_WAIT, TCP_LAST_ACK,
-            TCP_LISTEN, TCP_CLOSING,
+            TCP_ESTABLISHED,
+            TCP_SYN_SENT,
+            TCP_SYN_RECV,
+            TCP_FIN_WAIT1,
+            TCP_FIN_WAIT2,
+            TCP_TIME_WAIT,
+            TCP_CLOSE,
+            TCP_CLOSE_WAIT,
+            TCP_LAST_ACK,
+            TCP_LISTEN,
+            TCP_CLOSING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

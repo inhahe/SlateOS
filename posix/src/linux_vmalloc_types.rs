@@ -58,8 +58,13 @@ mod tests {
     #[test]
     fn test_vm_flags_distinct() {
         let flags = [
-            VM_ALLOC, VM_MAP, VM_IOREMAP, VM_USERMAP,
-            VM_DMA_COHERENT, VM_ALLOW_HUGE_VMAP, VM_NO_GUARD,
+            VM_ALLOC,
+            VM_MAP,
+            VM_IOREMAP,
+            VM_USERMAP,
+            VM_DMA_COHERENT,
+            VM_ALLOW_HUGE_VMAP,
+            VM_NO_GUARD,
             VM_FLUSH_RESET_PERMS,
         ];
         for i in 0..flags.len() {

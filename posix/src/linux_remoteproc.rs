@@ -72,9 +72,7 @@ mod tests {
 
     #[test]
     fn test_rsc_types_distinct() {
-        let types = [
-            RSC_CARVEOUT, RSC_DEVMEM, RSC_TRACE, RSC_VDEV, RSC_LAST,
-        ];
+        let types = [RSC_CARVEOUT, RSC_DEVMEM, RSC_TRACE, RSC_VDEV, RSC_LAST];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -91,8 +89,12 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            RPROC_OFFLINE, RPROC_SUSPENDED, RPROC_RUNNING,
-            RPROC_CRASHED, RPROC_DELETED, RPROC_ATTACHED,
+            RPROC_OFFLINE,
+            RPROC_SUSPENDED,
+            RPROC_RUNNING,
+            RPROC_CRASHED,
+            RPROC_DELETED,
+            RPROC_ATTACHED,
             RPROC_DETACHED,
         ];
         for i in 0..states.len() {
@@ -104,9 +106,7 @@ mod tests {
 
     #[test]
     fn test_crash_reasons_distinct() {
-        let reasons = [
-            RPROC_HW_ERROR, RPROC_WATCHDOG, RPROC_FATAL_ERROR,
-        ];
+        let reasons = [RPROC_HW_ERROR, RPROC_WATCHDOG, RPROC_FATAL_ERROR];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {
                 assert_ne!(reasons[i], reasons[j]);

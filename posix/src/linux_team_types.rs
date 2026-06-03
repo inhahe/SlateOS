@@ -111,8 +111,10 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            TEAM_CMD_NOOP, TEAM_CMD_OPTIONS_GET,
-            TEAM_CMD_OPTIONS_SET, TEAM_CMD_PORT_LIST_GET,
+            TEAM_CMD_NOOP,
+            TEAM_CMD_OPTIONS_GET,
+            TEAM_CMD_OPTIONS_SET,
+            TEAM_CMD_PORT_LIST_GET,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -124,8 +126,10 @@ mod tests {
     #[test]
     fn test_option_types_distinct() {
         let types = [
-            TEAM_ATTR_OPTION_TYPE_U32, TEAM_ATTR_OPTION_TYPE_STRING,
-            TEAM_ATTR_OPTION_TYPE_BINARY, TEAM_ATTR_OPTION_TYPE_BOOL,
+            TEAM_ATTR_OPTION_TYPE_U32,
+            TEAM_ATTR_OPTION_TYPE_STRING,
+            TEAM_ATTR_OPTION_TYPE_BINARY,
+            TEAM_ATTR_OPTION_TYPE_BOOL,
             TEAM_ATTR_OPTION_TYPE_S32,
         ];
         for i in 0..types.len() {
@@ -152,9 +156,12 @@ mod tests {
     #[test]
     fn test_option_attrs_distinct() {
         let attrs = [
-            TEAM_ATTR_OPTION_NAME, TEAM_ATTR_OPTION_CHANGED,
-            TEAM_ATTR_OPTION_TYPE, TEAM_ATTR_OPTION_DATA,
-            TEAM_ATTR_OPTION_REMOVED, TEAM_ATTR_OPTION_PORT_IFINDEX,
+            TEAM_ATTR_OPTION_NAME,
+            TEAM_ATTR_OPTION_CHANGED,
+            TEAM_ATTR_OPTION_TYPE,
+            TEAM_ATTR_OPTION_DATA,
+            TEAM_ATTR_OPTION_REMOVED,
+            TEAM_ATTR_OPTION_PORT_IFINDEX,
             TEAM_ATTR_OPTION_ARRAY_INDEX,
         ];
         for i in 0..attrs.len() {
@@ -167,9 +174,12 @@ mod tests {
     #[test]
     fn test_port_attrs_distinct() {
         let attrs = [
-            TEAM_ATTR_PORT_IFINDEX, TEAM_ATTR_PORT_CHANGED,
-            TEAM_ATTR_PORT_LINKUP, TEAM_ATTR_PORT_SPEED,
-            TEAM_ATTR_PORT_DUPLEX, TEAM_ATTR_PORT_REMOVED,
+            TEAM_ATTR_PORT_IFINDEX,
+            TEAM_ATTR_PORT_CHANGED,
+            TEAM_ATTR_PORT_LINKUP,
+            TEAM_ATTR_PORT_SPEED,
+            TEAM_ATTR_PORT_DUPLEX,
+            TEAM_ATTR_PORT_REMOVED,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -181,9 +191,12 @@ mod tests {
     #[test]
     fn test_runners_distinct() {
         let runners = [
-            TEAM_RUNNER_ROUNDROBIN, TEAM_RUNNER_ACTIVEBACKUP,
-            TEAM_RUNNER_LACP, TEAM_RUNNER_BROADCAST,
-            TEAM_RUNNER_RANDOM, TEAM_RUNNER_LOADBALANCE,
+            TEAM_RUNNER_ROUNDROBIN,
+            TEAM_RUNNER_ACTIVEBACKUP,
+            TEAM_RUNNER_LACP,
+            TEAM_RUNNER_BROADCAST,
+            TEAM_RUNNER_RANDOM,
+            TEAM_RUNNER_LOADBALANCE,
         ];
         for i in 0..runners.len() {
             for j in (i + 1)..runners.len() {

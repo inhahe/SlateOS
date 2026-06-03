@@ -74,8 +74,12 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            RNDGETENTCNT, RNDADDTOENTCNT, RNDGETPOOL,
-            RNDADDENTROPY, RNDZAPENTCNT, RNDRESEEDCRNG,
+            RNDGETENTCNT,
+            RNDADDTOENTCNT,
+            RNDGETPOOL,
+            RNDADDENTROPY,
+            RNDZAPENTCNT,
+            RNDRESEEDCRNG,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

@@ -85,11 +85,20 @@ mod tests {
     #[test]
     fn test_diag_attrs_distinct() {
         let attrs = [
-            INET_DIAG_NONE, INET_DIAG_MEMINFO, INET_DIAG_INFO,
-            INET_DIAG_VEGASINFO, INET_DIAG_CONG, INET_DIAG_TOS,
-            INET_DIAG_TCLASS, INET_DIAG_SKMEMINFO, INET_DIAG_SHUTDOWN,
-            INET_DIAG_PROTOCOL, INET_DIAG_MARK, INET_DIAG_BBRINFO,
-            INET_DIAG_CLASS_ID, INET_DIAG_SOCKOPT,
+            INET_DIAG_NONE,
+            INET_DIAG_MEMINFO,
+            INET_DIAG_INFO,
+            INET_DIAG_VEGASINFO,
+            INET_DIAG_CONG,
+            INET_DIAG_TOS,
+            INET_DIAG_TCLASS,
+            INET_DIAG_SKMEMINFO,
+            INET_DIAG_SHUTDOWN,
+            INET_DIAG_PROTOCOL,
+            INET_DIAG_MARK,
+            INET_DIAG_BBRINFO,
+            INET_DIAG_CLASS_ID,
+            INET_DIAG_SOCKOPT,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -101,10 +110,17 @@ mod tests {
     #[test]
     fn test_tcpf_state_flags_no_overlap() {
         let flags = [
-            TCPF_ESTABLISHED, TCPF_SYN_SENT, TCPF_SYN_RECV,
-            TCPF_FIN_WAIT1, TCPF_FIN_WAIT2, TCPF_TIME_WAIT,
-            TCPF_CLOSE, TCPF_CLOSE_WAIT, TCPF_LAST_ACK,
-            TCPF_LISTEN, TCPF_CLOSING,
+            TCPF_ESTABLISHED,
+            TCPF_SYN_SENT,
+            TCPF_SYN_RECV,
+            TCPF_FIN_WAIT1,
+            TCPF_FIN_WAIT2,
+            TCPF_TIME_WAIT,
+            TCPF_CLOSE,
+            TCPF_CLOSE_WAIT,
+            TCPF_LAST_ACK,
+            TCPF_LISTEN,
+            TCPF_CLOSING,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

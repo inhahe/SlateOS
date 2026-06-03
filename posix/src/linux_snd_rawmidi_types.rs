@@ -71,8 +71,10 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            SNDRV_RAWMIDI_IOCTL_INFO, SNDRV_RAWMIDI_IOCTL_PARAMS,
-            SNDRV_RAWMIDI_IOCTL_STATUS, SNDRV_RAWMIDI_IOCTL_DROP,
+            SNDRV_RAWMIDI_IOCTL_INFO,
+            SNDRV_RAWMIDI_IOCTL_PARAMS,
+            SNDRV_RAWMIDI_IOCTL_STATUS,
+            SNDRV_RAWMIDI_IOCTL_DROP,
             SNDRV_RAWMIDI_IOCTL_DRAIN,
         ];
         for i in 0..ioctls.len() {
@@ -85,8 +87,10 @@ mod tests {
     #[test]
     fn test_open_flags_no_overlap() {
         let flags = [
-            SNDRV_RAWMIDI_FLAG_OUTPUT, SNDRV_RAWMIDI_FLAG_INPUT,
-            SNDRV_RAWMIDI_FLAG_NONBLOCK, SNDRV_RAWMIDI_FLAG_APPEND,
+            SNDRV_RAWMIDI_FLAG_OUTPUT,
+            SNDRV_RAWMIDI_FLAG_INPUT,
+            SNDRV_RAWMIDI_FLAG_NONBLOCK,
+            SNDRV_RAWMIDI_FLAG_APPEND,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -99,7 +103,8 @@ mod tests {
     #[test]
     fn test_info_flags_no_overlap() {
         let flags = [
-            SNDRV_RAWMIDI_INFO_OUTPUT, SNDRV_RAWMIDI_INFO_INPUT,
+            SNDRV_RAWMIDI_INFO_OUTPUT,
+            SNDRV_RAWMIDI_INFO_INPUT,
             SNDRV_RAWMIDI_INFO_DUPLEX,
         ];
         for i in 0..flags.len() {

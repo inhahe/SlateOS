@@ -18,8 +18,7 @@ pub const DMA_BUF_SYNC_START: u64 = 0 << 2;
 /// End sync.
 pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
 /// Valid flags mask.
-pub const DMA_BUF_SYNC_VALID_FLAGS_MASK: u64 =
-    DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END;
+pub const DMA_BUF_SYNC_VALID_FLAGS_MASK: u64 = DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END;
 
 // ---------------------------------------------------------------------------
 // DMA-BUF ioctl commands
@@ -104,7 +103,10 @@ mod tests {
 
     #[test]
     fn test_valid_flags_mask() {
-        assert_eq!(DMA_BUF_SYNC_VALID_FLAGS_MASK, DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END);
+        assert_eq!(
+            DMA_BUF_SYNC_VALID_FLAGS_MASK,
+            DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END
+        );
     }
 
     #[test]
@@ -120,8 +122,10 @@ mod tests {
     #[test]
     fn test_fence_bits_distinct() {
         let bits = [
-            DMA_FENCE_FLAG_SIGNALED_BIT, DMA_FENCE_FLAG_TIMESTAMP_BIT,
-            DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT, DMA_FENCE_FLAG_USER_BITS,
+            DMA_FENCE_FLAG_SIGNALED_BIT,
+            DMA_FENCE_FLAG_TIMESTAMP_BIT,
+            DMA_FENCE_FLAG_ENABLE_SIGNAL_BIT,
+            DMA_FENCE_FLAG_USER_BITS,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {

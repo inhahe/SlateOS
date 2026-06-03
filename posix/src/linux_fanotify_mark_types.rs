@@ -79,10 +79,15 @@ mod tests {
     #[test]
     fn test_mark_flags_distinct() {
         let flags = [
-            FAN_MARK_ADD, FAN_MARK_REMOVE, FAN_MARK_DONT_FOLLOW,
-            FAN_MARK_ONLYDIR, FAN_MARK_IGNORED_MASK,
-            FAN_MARK_IGNORED_SURV_MODIFY, FAN_MARK_FLUSH,
-            FAN_MARK_EVICTABLE, FAN_MARK_IGNORE,
+            FAN_MARK_ADD,
+            FAN_MARK_REMOVE,
+            FAN_MARK_DONT_FOLLOW,
+            FAN_MARK_ONLYDIR,
+            FAN_MARK_IGNORED_MASK,
+            FAN_MARK_IGNORED_SURV_MODIFY,
+            FAN_MARK_FLUSH,
+            FAN_MARK_EVICTABLE,
+            FAN_MARK_IGNORE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -104,10 +109,18 @@ mod tests {
     #[test]
     fn test_event_flags_distinct() {
         let events = [
-            FAN_ACCESS, FAN_MODIFY, FAN_CLOSE_WRITE,
-            FAN_CLOSE_NOWRITE, FAN_OPEN, FAN_OPEN_PERM,
-            FAN_ACCESS_PERM, FAN_OPEN_EXEC_PERM, FAN_OPEN_EXEC,
-            FAN_CREATE, FAN_DELETE, FAN_RENAME,
+            FAN_ACCESS,
+            FAN_MODIFY,
+            FAN_CLOSE_WRITE,
+            FAN_CLOSE_NOWRITE,
+            FAN_OPEN,
+            FAN_OPEN_PERM,
+            FAN_ACCESS_PERM,
+            FAN_OPEN_EXEC_PERM,
+            FAN_OPEN_EXEC,
+            FAN_CREATE,
+            FAN_DELETE,
+            FAN_RENAME,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

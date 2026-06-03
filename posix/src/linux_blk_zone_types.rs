@@ -80,10 +80,14 @@ mod tests {
     #[test]
     fn test_zone_conditions_distinct() {
         let conds = [
-            BLK_ZONE_COND_NOT_WP, BLK_ZONE_COND_EMPTY,
-            BLK_ZONE_COND_IMP_OPEN, BLK_ZONE_COND_EXP_OPEN,
-            BLK_ZONE_COND_CLOSED, BLK_ZONE_COND_READONLY,
-            BLK_ZONE_COND_FULL, BLK_ZONE_COND_OFFLINE,
+            BLK_ZONE_COND_NOT_WP,
+            BLK_ZONE_COND_EMPTY,
+            BLK_ZONE_COND_IMP_OPEN,
+            BLK_ZONE_COND_EXP_OPEN,
+            BLK_ZONE_COND_CLOSED,
+            BLK_ZONE_COND_READONLY,
+            BLK_ZONE_COND_FULL,
+            BLK_ZONE_COND_OFFLINE,
         ];
         for i in 0..conds.len() {
             for j in (i + 1)..conds.len() {
@@ -95,9 +99,12 @@ mod tests {
     #[test]
     fn test_zone_ops_distinct() {
         let ops = [
-            REQ_OP_ZONE_OPEN, REQ_OP_ZONE_CLOSE,
-            REQ_OP_ZONE_FINISH, REQ_OP_ZONE_RESET,
-            REQ_OP_ZONE_APPEND, REQ_OP_ZONE_RESET_ALL,
+            REQ_OP_ZONE_OPEN,
+            REQ_OP_ZONE_CLOSE,
+            REQ_OP_ZONE_FINISH,
+            REQ_OP_ZONE_RESET,
+            REQ_OP_ZONE_APPEND,
+            REQ_OP_ZONE_RESET_ALL,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

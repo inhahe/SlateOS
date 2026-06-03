@@ -78,9 +78,16 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            JSIOCGVERSION, JSIOCGAXES, JSIOCGBUTTONS, JSIOCGNAME,
-            JSIOCSCORR, JSIOCGCORR, JSIOCSAXMAP, JSIOCGAXMAP,
-            JSIOCSBTNMAP, JSIOCGBTNMAP,
+            JSIOCGVERSION,
+            JSIOCGAXES,
+            JSIOCGBUTTONS,
+            JSIOCGNAME,
+            JSIOCSCORR,
+            JSIOCGCORR,
+            JSIOCSAXMAP,
+            JSIOCGAXMAP,
+            JSIOCSBTNMAP,
+            JSIOCGBTNMAP,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

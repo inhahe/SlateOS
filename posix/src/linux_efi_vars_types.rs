@@ -29,9 +29,8 @@ pub const EFI_VARIABLE_ENHANCED_AUTHENTICATED_ACCESS: u32 = 0x0000_0080;
 // ---------------------------------------------------------------------------
 
 /// Typical NV+BS+RT attributes (most boot variables).
-pub const EFI_VARIABLE_DEFAULT_ATTRS: u32 = EFI_VARIABLE_NON_VOLATILE
-    | EFI_VARIABLE_BOOTSERVICE_ACCESS
-    | EFI_VARIABLE_RUNTIME_ACCESS;
+pub const EFI_VARIABLE_DEFAULT_ATTRS: u32 =
+    EFI_VARIABLE_NON_VOLATILE | EFI_VARIABLE_BOOTSERVICE_ACCESS | EFI_VARIABLE_RUNTIME_ACCESS;
 
 // ---------------------------------------------------------------------------
 // Well-known EFI variable names
@@ -102,8 +101,10 @@ mod tests {
     #[test]
     fn test_var_names_distinct() {
         let names = [
-            EFI_VAR_BOOT_ORDER, EFI_VAR_BOOT_CURRENT,
-            EFI_VAR_BOOT_NEXT, EFI_VAR_SECURE_BOOT,
+            EFI_VAR_BOOT_ORDER,
+            EFI_VAR_BOOT_CURRENT,
+            EFI_VAR_BOOT_NEXT,
+            EFI_VAR_SECURE_BOOT,
             EFI_VAR_SETUP_MODE,
         ];
         for i in 0..names.len() {

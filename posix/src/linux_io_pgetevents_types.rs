@@ -66,9 +66,14 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            IOCB_CMD_PREAD, IOCB_CMD_PWRITE, IOCB_CMD_FSYNC,
-            IOCB_CMD_FDSYNC, IOCB_CMD_POLL, IOCB_CMD_NOOP,
-            IOCB_CMD_PREADV, IOCB_CMD_PWRITEV,
+            IOCB_CMD_PREAD,
+            IOCB_CMD_PWRITE,
+            IOCB_CMD_FSYNC,
+            IOCB_CMD_FDSYNC,
+            IOCB_CMD_POLL,
+            IOCB_CMD_NOOP,
+            IOCB_CMD_PREADV,
+            IOCB_CMD_PWRITEV,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

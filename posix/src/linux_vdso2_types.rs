@@ -66,8 +66,10 @@ mod tests {
     #[test]
     fn test_clock_modes_distinct() {
         let modes = [
-            VDSO_CLOCKMODE_NONE, VDSO_CLOCKMODE_TSC,
-            VDSO_CLOCKMODE_HPET, VDSO_CLOCKMODE_PVCLOCK,
+            VDSO_CLOCKMODE_NONE,
+            VDSO_CLOCKMODE_TSC,
+            VDSO_CLOCKMODE_HPET,
+            VDSO_CLOCKMODE_PVCLOCK,
             VDSO_CLOCKMODE_HVCLOCK,
         ];
         for i in 0..modes.len() {
@@ -90,9 +92,12 @@ mod tests {
     #[test]
     fn test_fn_indices_distinct() {
         let fns = [
-            VDSO_FN_CLOCK_GETTIME, VDSO_FN_GETTIMEOFDAY,
-            VDSO_FN_CLOCK_GETRES, VDSO_FN_TIME,
-            VDSO_FN_GETCPU, VDSO_FN_CLOCK_GETTIME64,
+            VDSO_FN_CLOCK_GETTIME,
+            VDSO_FN_GETTIMEOFDAY,
+            VDSO_FN_CLOCK_GETRES,
+            VDSO_FN_TIME,
+            VDSO_FN_GETCPU,
+            VDSO_FN_CLOCK_GETTIME64,
         ];
         for i in 0..fns.len() {
             for j in (i + 1)..fns.len() {

@@ -80,9 +80,12 @@ mod tests {
     #[test]
     fn test_hw_events_distinct() {
         let events = [
-            PERF_COUNT_HW_CPU_CYCLES, PERF_COUNT_HW_INSTRUCTIONS,
-            PERF_COUNT_HW_CACHE_REFERENCES, PERF_COUNT_HW_CACHE_MISSES,
-            PERF_COUNT_HW_BRANCH_INSTRUCTIONS, PERF_COUNT_HW_BRANCH_MISSES,
+            PERF_COUNT_HW_CPU_CYCLES,
+            PERF_COUNT_HW_INSTRUCTIONS,
+            PERF_COUNT_HW_CACHE_REFERENCES,
+            PERF_COUNT_HW_CACHE_MISSES,
+            PERF_COUNT_HW_BRANCH_INSTRUCTIONS,
+            PERF_COUNT_HW_BRANCH_MISSES,
             PERF_COUNT_HW_BUS_CYCLES,
             PERF_COUNT_HW_STALLED_CYCLES_FRONTEND,
             PERF_COUNT_HW_STALLED_CYCLES_BACKEND,
@@ -103,9 +106,12 @@ mod tests {
     #[test]
     fn test_cache_ids_distinct() {
         let caches = [
-            PERF_COUNT_HW_CACHE_L1D, PERF_COUNT_HW_CACHE_L1I,
-            PERF_COUNT_HW_CACHE_LL, PERF_COUNT_HW_CACHE_DTLB,
-            PERF_COUNT_HW_CACHE_ITLB, PERF_COUNT_HW_CACHE_BPU,
+            PERF_COUNT_HW_CACHE_L1D,
+            PERF_COUNT_HW_CACHE_L1I,
+            PERF_COUNT_HW_CACHE_LL,
+            PERF_COUNT_HW_CACHE_DTLB,
+            PERF_COUNT_HW_CACHE_ITLB,
+            PERF_COUNT_HW_CACHE_BPU,
             PERF_COUNT_HW_CACHE_NODE,
         ];
         for i in 0..caches.len() {
@@ -131,6 +137,9 @@ mod tests {
 
     #[test]
     fn test_cache_results() {
-        assert_ne!(PERF_COUNT_HW_CACHE_RESULT_ACCESS, PERF_COUNT_HW_CACHE_RESULT_MISS);
+        assert_ne!(
+            PERF_COUNT_HW_CACHE_RESULT_ACCESS,
+            PERF_COUNT_HW_CACHE_RESULT_MISS
+        );
     }
 }

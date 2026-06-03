@@ -117,8 +117,10 @@ mod tests {
     #[test]
     fn test_domain_flags_no_overlap() {
         let flags = [
-            MSI_FLAG_USE_DEF_DOMAIN_OPS, MSI_FLAG_USE_DEF_CHIP_OPS,
-            MSI_FLAG_MULTI_PCI_MSI, MSI_FLAG_PCI_MSIX,
+            MSI_FLAG_USE_DEF_DOMAIN_OPS,
+            MSI_FLAG_USE_DEF_CHIP_OPS,
+            MSI_FLAG_MULTI_PCI_MSI,
+            MSI_FLAG_PCI_MSIX,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

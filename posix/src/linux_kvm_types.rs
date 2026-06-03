@@ -90,10 +90,16 @@ mod tests {
     #[test]
     fn test_exit_reasons_distinct() {
         let exits: [u32; 11] = [
-            KVM_EXIT_UNKNOWN, KVM_EXIT_IO, KVM_EXIT_HYPERCALL,
-            KVM_EXIT_DEBUG, KVM_EXIT_HLT, KVM_EXIT_MMIO,
-            KVM_EXIT_IRQ_WINDOW_OPEN, KVM_EXIT_SHUTDOWN,
-            KVM_EXIT_FAIL_ENTRY, KVM_EXIT_INTERNAL_ERROR,
+            KVM_EXIT_UNKNOWN,
+            KVM_EXIT_IO,
+            KVM_EXIT_HYPERCALL,
+            KVM_EXIT_DEBUG,
+            KVM_EXIT_HLT,
+            KVM_EXIT_MMIO,
+            KVM_EXIT_IRQ_WINDOW_OPEN,
+            KVM_EXIT_SHUTDOWN,
+            KVM_EXIT_FAIL_ENTRY,
+            KVM_EXIT_INTERNAL_ERROR,
             KVM_EXIT_SYSTEM_EVENT,
         ];
         for i in 0..exits.len() {
@@ -116,8 +122,10 @@ mod tests {
     #[test]
     fn test_mp_states_distinct() {
         let states = [
-            KVM_MP_STATE_RUNNABLE, KVM_MP_STATE_UNINITIALIZED,
-            KVM_MP_STATE_INIT_RECEIVED, KVM_MP_STATE_HALTED,
+            KVM_MP_STATE_RUNNABLE,
+            KVM_MP_STATE_UNINITIALIZED,
+            KVM_MP_STATE_INIT_RECEIVED,
+            KVM_MP_STATE_HALTED,
             KVM_MP_STATE_SIPI_RECEIVED,
         ];
         for i in 0..states.len() {

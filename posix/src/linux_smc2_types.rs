@@ -95,8 +95,10 @@ mod tests {
     #[test]
     fn test_clc_msgs_distinct() {
         let msgs = [
-            SMC_CLC_PROPOSAL, SMC_CLC_ACCEPT,
-            SMC_CLC_CONFIRM, SMC_CLC_DECLINE,
+            SMC_CLC_PROPOSAL,
+            SMC_CLC_ACCEPT,
+            SMC_CLC_CONFIRM,
+            SMC_CLC_DECLINE,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -108,9 +110,12 @@ mod tests {
     #[test]
     fn test_decline_reasons_distinct() {
         let reasons = [
-            SMC_DECLINE_NO_DEVICE, SMC_DECLINE_NO_ISM_DEV,
-            SMC_DECLINE_MISMATCH, SMC_DECLINE_RESOURCES,
-            SMC_DECLINE_SYNCERR, SMC_DECLINE_PEERDECL,
+            SMC_DECLINE_NO_DEVICE,
+            SMC_DECLINE_NO_ISM_DEV,
+            SMC_DECLINE_MISMATCH,
+            SMC_DECLINE_RESOURCES,
+            SMC_DECLINE_SYNCERR,
+            SMC_DECLINE_PEERDECL,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {
@@ -127,10 +132,14 @@ mod tests {
     #[test]
     fn test_netlink_cmds_distinct() {
         let cmds = [
-            SMC_NETLINK_CMD_UNSPEC, SMC_NETLINK_GET_LGR_SMCR,
-            SMC_NETLINK_GET_LINK_SMCR, SMC_NETLINK_GET_LGR_SMCD,
-            SMC_NETLINK_GET_DEV_SMCD, SMC_NETLINK_GET_DEV_SMCR,
-            SMC_NETLINK_GET_STATS, SMC_NETLINK_GET_FBACK_STATS,
+            SMC_NETLINK_CMD_UNSPEC,
+            SMC_NETLINK_GET_LGR_SMCR,
+            SMC_NETLINK_GET_LINK_SMCR,
+            SMC_NETLINK_GET_LGR_SMCD,
+            SMC_NETLINK_GET_DEV_SMCD,
+            SMC_NETLINK_GET_DEV_SMCR,
+            SMC_NETLINK_GET_STATS,
+            SMC_NETLINK_GET_FBACK_STATS,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

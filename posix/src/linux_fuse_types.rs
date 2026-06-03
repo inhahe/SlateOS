@@ -120,15 +120,42 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            FUSE_LOOKUP, FUSE_FORGET, FUSE_GETATTR, FUSE_SETATTR,
-            FUSE_READLINK, FUSE_SYMLINK, FUSE_MKNOD, FUSE_MKDIR,
-            FUSE_UNLINK, FUSE_RMDIR, FUSE_RENAME, FUSE_LINK,
-            FUSE_OPEN, FUSE_READ, FUSE_WRITE, FUSE_STATFS,
-            FUSE_RELEASE, FUSE_FSYNC, FUSE_SETXATTR, FUSE_GETXATTR,
-            FUSE_LISTXATTR, FUSE_REMOVEXATTR, FUSE_FLUSH, FUSE_INIT,
-            FUSE_OPENDIR, FUSE_READDIR, FUSE_RELEASEDIR, FUSE_FSYNCDIR,
-            FUSE_GETLK, FUSE_SETLK, FUSE_SETLKW, FUSE_ACCESS,
-            FUSE_CREATE, FUSE_INTERRUPT, FUSE_BMAP, FUSE_DESTROY,
+            FUSE_LOOKUP,
+            FUSE_FORGET,
+            FUSE_GETATTR,
+            FUSE_SETATTR,
+            FUSE_READLINK,
+            FUSE_SYMLINK,
+            FUSE_MKNOD,
+            FUSE_MKDIR,
+            FUSE_UNLINK,
+            FUSE_RMDIR,
+            FUSE_RENAME,
+            FUSE_LINK,
+            FUSE_OPEN,
+            FUSE_READ,
+            FUSE_WRITE,
+            FUSE_STATFS,
+            FUSE_RELEASE,
+            FUSE_FSYNC,
+            FUSE_SETXATTR,
+            FUSE_GETXATTR,
+            FUSE_LISTXATTR,
+            FUSE_REMOVEXATTR,
+            FUSE_FLUSH,
+            FUSE_INIT,
+            FUSE_OPENDIR,
+            FUSE_READDIR,
+            FUSE_RELEASEDIR,
+            FUSE_FSYNCDIR,
+            FUSE_GETLK,
+            FUSE_SETLK,
+            FUSE_SETLKW,
+            FUSE_ACCESS,
+            FUSE_CREATE,
+            FUSE_INTERRUPT,
+            FUSE_BMAP,
+            FUSE_DESTROY,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -140,9 +167,12 @@ mod tests {
     #[test]
     fn test_init_flags_no_overlap() {
         let flags = [
-            FUSE_ASYNC_READ, FUSE_POSIX_LOCKS,
-            FUSE_ATOMIC_O_TRUNC, FUSE_BIG_WRITES,
-            FUSE_PARALLEL_DIROPS, FUSE_POSIX_ACL,
+            FUSE_ASYNC_READ,
+            FUSE_POSIX_LOCKS,
+            FUSE_ATOMIC_O_TRUNC,
+            FUSE_BIG_WRITES,
+            FUSE_PARALLEL_DIROPS,
+            FUSE_POSIX_ACL,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

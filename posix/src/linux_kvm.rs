@@ -137,8 +137,10 @@ mod tests {
     #[test]
     fn test_system_ioctls_distinct() {
         let cmds = [
-            KVM_GET_API_VERSION, KVM_CREATE_VM,
-            KVM_CHECK_EXTENSION, KVM_GET_VCPU_MMAP_SIZE,
+            KVM_GET_API_VERSION,
+            KVM_CREATE_VM,
+            KVM_CHECK_EXTENSION,
+            KVM_GET_VCPU_MMAP_SIZE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -150,10 +152,15 @@ mod tests {
     #[test]
     fn test_vcpu_ioctls_distinct() {
         let cmds = [
-            KVM_RUN, KVM_GET_REGS, KVM_SET_REGS,
-            KVM_GET_SREGS, KVM_SET_SREGS,
-            KVM_GET_MSRS, KVM_SET_MSRS,
-            KVM_GET_FPU, KVM_SET_FPU,
+            KVM_RUN,
+            KVM_GET_REGS,
+            KVM_SET_REGS,
+            KVM_GET_SREGS,
+            KVM_SET_SREGS,
+            KVM_GET_MSRS,
+            KVM_SET_MSRS,
+            KVM_GET_FPU,
+            KVM_SET_FPU,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -165,11 +172,18 @@ mod tests {
     #[test]
     fn test_exit_reasons_distinct() {
         let exits = [
-            KVM_EXIT_UNKNOWN, KVM_EXIT_EXCEPTION, KVM_EXIT_IO,
-            KVM_EXIT_HYPERCALL, KVM_EXIT_DEBUG, KVM_EXIT_HLT,
-            KVM_EXIT_MMIO, KVM_EXIT_IRQ_WINDOW_OPEN,
-            KVM_EXIT_SHUTDOWN, KVM_EXIT_FAIL_ENTRY,
-            KVM_EXIT_INTERNAL_ERROR, KVM_EXIT_SYSTEM_EVENT,
+            KVM_EXIT_UNKNOWN,
+            KVM_EXIT_EXCEPTION,
+            KVM_EXIT_IO,
+            KVM_EXIT_HYPERCALL,
+            KVM_EXIT_DEBUG,
+            KVM_EXIT_HLT,
+            KVM_EXIT_MMIO,
+            KVM_EXIT_IRQ_WINDOW_OPEN,
+            KVM_EXIT_SHUTDOWN,
+            KVM_EXIT_FAIL_ENTRY,
+            KVM_EXIT_INTERNAL_ERROR,
+            KVM_EXIT_SYSTEM_EVENT,
         ];
         for i in 0..exits.len() {
             for j in (i + 1)..exits.len() {

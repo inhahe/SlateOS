@@ -15,16 +15,16 @@
 
 // h_errno error codes
 pub use crate::socket::HOST_NOT_FOUND;
-pub use crate::socket::TRY_AGAIN;
-pub use crate::socket::NO_RECOVERY;
 pub use crate::socket::NO_DATA;
+pub use crate::socket::NO_RECOVERY;
+pub use crate::socket::TRY_AGAIN;
 
 /// Alias for `NO_DATA` (POSIX).
 pub const NO_ADDRESS: i32 = NO_DATA;
 
 // AI_* flags for getaddrinfo
-pub use crate::socket::AI_PASSIVE;
 pub use crate::socket::AI_NUMERICHOST;
+pub use crate::socket::AI_PASSIVE;
 
 // NI_* constants for getnameinfo
 /// Maximum hostname length.
@@ -48,8 +48,8 @@ pub use crate::socket::EAI_SYSTEM;
 
 // Struct re-exports
 pub use crate::socket::Addrinfo;
-pub use crate::socket::Servent;
 pub use crate::socket::Protoent;
+pub use crate::socket::Servent;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -132,16 +132,19 @@ mod tests {
     #[test]
     fn test_eai_codes_distinct() {
         let codes = [
-            EAI_AGAIN, EAI_BADFLAGS, EAI_FAIL, EAI_FAMILY,
-            EAI_MEMORY, EAI_NONAME, EAI_SERVICE, EAI_SOCKTYPE,
+            EAI_AGAIN,
+            EAI_BADFLAGS,
+            EAI_FAIL,
+            EAI_FAMILY,
+            EAI_MEMORY,
+            EAI_NONAME,
+            EAI_SERVICE,
+            EAI_SOCKTYPE,
             EAI_SYSTEM,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
-                assert_ne!(
-                    codes[i], codes[j],
-                    "EAI codes must be distinct"
-                );
+                assert_ne!(codes[i], codes[j], "EAI codes must be distinct");
             }
         }
     }
@@ -152,12 +155,7 @@ mod tests {
 
     #[test]
     fn test_getservbyname_known() {
-        let result = unsafe {
-            crate::socket::getservbyname(
-                b"http\0".as_ptr(),
-                b"tcp\0".as_ptr(),
-            )
-        };
+        let result = unsafe { crate::socket::getservbyname(b"http\0".as_ptr(), b"tcp\0".as_ptr()) };
         // "http" / "tcp" is in the built-in service table.
         assert!(!result.is_null());
     }
@@ -165,10 +163,7 @@ mod tests {
     #[test]
     fn test_getservbyname_unknown() {
         let result = unsafe {
-            crate::socket::getservbyname(
-                b"nonexistent_svc_xyz\0".as_ptr(),
-                b"tcp\0".as_ptr(),
-            )
+            crate::socket::getservbyname(b"nonexistent_svc_xyz\0".as_ptr(), b"tcp\0".as_ptr())
         };
         assert!(result.is_null());
     }

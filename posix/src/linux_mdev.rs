@@ -95,8 +95,11 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            MDEV_STATE_NONE, MDEV_STATE_CREATED, MDEV_STATE_OPENED,
-            MDEV_STATE_RUNNING, MDEV_STATE_ERROR,
+            MDEV_STATE_NONE,
+            MDEV_STATE_CREATED,
+            MDEV_STATE_OPENED,
+            MDEV_STATE_RUNNING,
+            MDEV_STATE_ERROR,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -108,8 +111,10 @@ mod tests {
     #[test]
     fn test_caps_no_overlap() {
         let caps = [
-            MDEV_CAP_MIGRATION, MDEV_CAP_DIRTY_TRACKING,
-            MDEV_CAP_RESET, MDEV_CAP_SAVE_RESTORE,
+            MDEV_CAP_MIGRATION,
+            MDEV_CAP_DIRTY_TRACKING,
+            MDEV_CAP_RESET,
+            MDEV_CAP_SAVE_RESTORE,
             MDEV_CAP_MULTI_INSTANCE,
         ];
         for i in 0..caps.len() {
@@ -132,8 +137,10 @@ mod tests {
     #[test]
     fn test_vfio_regions_distinct() {
         let regions = [
-            VFIO_MDEV_REGION_CONFIG, VFIO_MDEV_REGION_BAR,
-            VFIO_MDEV_REGION_VGA, VFIO_MDEV_REGION_VENDOR,
+            VFIO_MDEV_REGION_CONFIG,
+            VFIO_MDEV_REGION_BAR,
+            VFIO_MDEV_REGION_VGA,
+            VFIO_MDEV_REGION_VENDOR,
             VFIO_MDEV_REGION_MIGRATION,
         ];
         for i in 0..regions.len() {

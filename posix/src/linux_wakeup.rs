@@ -74,9 +74,14 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let events = [
-            WAKEUP_EVENT_INPUT, WAKEUP_EVENT_NETWORK, WAKEUP_EVENT_RTC,
-            WAKEUP_EVENT_POWER_BUTTON, WAKEUP_EVENT_LID,
-            WAKEUP_EVENT_USB, WAKEUP_EVENT_BLUETOOTH, WAKEUP_EVENT_TIMER,
+            WAKEUP_EVENT_INPUT,
+            WAKEUP_EVENT_NETWORK,
+            WAKEUP_EVENT_RTC,
+            WAKEUP_EVENT_POWER_BUTTON,
+            WAKEUP_EVENT_LID,
+            WAKEUP_EVENT_USB,
+            WAKEUP_EVENT_BLUETOOTH,
+            WAKEUP_EVENT_TIMER,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -88,7 +93,8 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            WAKEUP_STATE_INACTIVE, WAKEUP_STATE_ACTIVE,
+            WAKEUP_STATE_INACTIVE,
+            WAKEUP_STATE_ACTIVE,
             WAKEUP_STATE_AUTOSLEEP,
         ];
         for i in 0..states.len() {
@@ -101,8 +107,11 @@ mod tests {
     #[test]
     fn test_caps_no_overlap() {
         let caps = [
-            WAKEUP_CAP_S3, WAKEUP_CAP_S4, WAKEUP_CAP_S5,
-            WAKEUP_CAP_RUNTIME, WAKEUP_CAP_ARMED,
+            WAKEUP_CAP_S3,
+            WAKEUP_CAP_S4,
+            WAKEUP_CAP_S5,
+            WAKEUP_CAP_RUNTIME,
+            WAKEUP_CAP_ARMED,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

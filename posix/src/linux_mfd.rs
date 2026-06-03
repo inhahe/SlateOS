@@ -85,8 +85,11 @@ mod tests {
     #[test]
     fn test_cell_caps_no_overlap() {
         let caps = [
-            MFD_CELL_SUSPEND, MFD_CELL_SHARED_IRQ,
-            MFD_CELL_ACPI_MATCH, MFD_CELL_OF_MATCH, MFD_CELL_NO_PD,
+            MFD_CELL_SUSPEND,
+            MFD_CELL_SHARED_IRQ,
+            MFD_CELL_ACPI_MATCH,
+            MFD_CELL_OF_MATCH,
+            MFD_CELL_NO_PD,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
@@ -98,8 +101,11 @@ mod tests {
     #[test]
     fn test_cell_caps_power_of_two() {
         let caps = [
-            MFD_CELL_SUSPEND, MFD_CELL_SHARED_IRQ,
-            MFD_CELL_ACPI_MATCH, MFD_CELL_OF_MATCH, MFD_CELL_NO_PD,
+            MFD_CELL_SUSPEND,
+            MFD_CELL_SHARED_IRQ,
+            MFD_CELL_ACPI_MATCH,
+            MFD_CELL_OF_MATCH,
+            MFD_CELL_NO_PD,
         ];
         for c in &caps {
             assert!(c.is_power_of_two());
@@ -108,7 +114,13 @@ mod tests {
 
     #[test]
     fn test_resource_types_distinct() {
-        let types = [MFD_RES_MEM, MFD_RES_IO, MFD_RES_IRQ, MFD_RES_DMA, MFD_RES_BUS];
+        let types = [
+            MFD_RES_MEM,
+            MFD_RES_IO,
+            MFD_RES_IRQ,
+            MFD_RES_DMA,
+            MFD_RES_BUS,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -119,9 +131,16 @@ mod tests {
     #[test]
     fn test_device_classes_distinct() {
         let classes = [
-            MFD_CLASS_PMIC, MFD_CLASS_CODEC, MFD_CLASS_TOUCH,
-            MFD_CLASS_GPIO, MFD_CLASS_RTC, MFD_CLASS_BACKLIGHT,
-            MFD_CLASS_LED, MFD_CLASS_WDT, MFD_CLASS_ADC, MFD_CLASS_PWM,
+            MFD_CLASS_PMIC,
+            MFD_CLASS_CODEC,
+            MFD_CLASS_TOUCH,
+            MFD_CLASS_GPIO,
+            MFD_CLASS_RTC,
+            MFD_CLASS_BACKLIGHT,
+            MFD_CLASS_LED,
+            MFD_CLASS_WDT,
+            MFD_CLASS_ADC,
+            MFD_CLASS_PWM,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
@@ -133,8 +152,10 @@ mod tests {
     #[test]
     fn test_add_flags_no_overlap() {
         let flags = [
-            MFD_ADD_ON_PROBE, MFD_DEL_ON_REMOVE,
-            MFD_SHARE_IRQ_CHIP, MFD_USE_PARENT_ID,
+            MFD_ADD_ON_PROBE,
+            MFD_DEL_ON_REMOVE,
+            MFD_SHARE_IRQ_CHIP,
+            MFD_USE_PARENT_ID,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

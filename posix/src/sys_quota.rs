@@ -139,8 +139,7 @@ pub const QIF_BTIME: u32 = 16;
 pub const QIF_ITIME: u32 = 32;
 
 /// All fields valid.
-pub const QIF_ALL: u32 = QIF_BLIMITS | QIF_SPACE | QIF_ILIMITS
-    | QIF_INODES | QIF_BTIME | QIF_ITIME;
+pub const QIF_ALL: u32 = QIF_BLIMITS | QIF_SPACE | QIF_ILIMITS | QIF_INODES | QIF_BTIME | QIF_ITIME;
 
 /// All limit fields valid (combination flag used by `Q_SETQUOTA`).
 pub const QIF_LIMITS: u32 = QIF_BLIMITS | QIF_ILIMITS;
@@ -180,8 +179,14 @@ pub const fn qcmd(cmd: i32, qtype: i32) -> i32 {
 const fn is_known_subcmd(subcmd: i32) -> bool {
     matches!(
         subcmd,
-        Q_SYNC | Q_QUOTAON | Q_QUOTAOFF | Q_GETFMT
-            | Q_GETINFO | Q_SETINFO | Q_GETQUOTA | Q_SETQUOTA,
+        Q_SYNC
+            | Q_QUOTAON
+            | Q_QUOTAOFF
+            | Q_GETFMT
+            | Q_GETINFO
+            | Q_SETINFO
+            | Q_GETQUOTA
+            | Q_SETQUOTA,
     )
 }
 
@@ -242,12 +247,7 @@ const fn needs_special(subcmd: i32) -> bool {
 ///
 /// Returns `0` on success or `-1` with `errno` set on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn quotactl(
-    cmd: i32,
-    special: *const u8,
-    _id: i32,
-    addr: *mut u8,
-) -> i32 {
+pub extern "C" fn quotactl(cmd: i32, special: *const u8, _id: i32, addr: *mut u8) -> i32 {
     let (subcmd, qtype) = split_cmd(cmd);
 
     // Unknown subcommand → EINVAL.
@@ -296,9 +296,7 @@ pub extern "C" fn quotactl(
     // is that unprivileged Q_GETQUOTA / Q_GETINFO / Q_GETFMT now
     // surface EPERM instead of leaking ENOSYS.
     if subcmd != Q_SYNC
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_ADMIN,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -331,8 +329,7 @@ mod tests {
     #[test]
     fn test_quota_commands_distinct() {
         let cmds = [
-            Q_QUOTAON, Q_QUOTAOFF, Q_GETQUOTA, Q_SETQUOTA,
-            Q_GETINFO, Q_SETINFO, Q_GETFMT, Q_SYNC,
+            Q_QUOTAON, Q_QUOTAOFF, Q_GETQUOTA, Q_SETQUOTA, Q_GETINFO, Q_SETINFO, Q_GETFMT, Q_SYNC,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -356,7 +353,14 @@ mod tests {
 
     #[test]
     fn test_qif_bits_powers_of_two() {
-        let bits = [QIF_BLIMITS, QIF_SPACE, QIF_ILIMITS, QIF_INODES, QIF_BTIME, QIF_ITIME];
+        let bits = [
+            QIF_BLIMITS,
+            QIF_SPACE,
+            QIF_ILIMITS,
+            QIF_INODES,
+            QIF_BTIME,
+            QIF_ITIME,
+        ];
         for &b in &bits {
             assert!(b.is_power_of_two(), "{b} should be power of 2");
         }
@@ -394,7 +398,12 @@ mod tests {
     fn test_quotactl_unknown_subcmd_einval() {
         // Bogus high bits → not in the Q_* set.
         clear_errno();
-        let ret = quotactl(0x900001, c"/dev/sda1".as_ptr().cast::<u8>(), 0, core::ptr::null_mut());
+        let ret = quotactl(
+            0x900001,
+            c"/dev/sda1".as_ptr().cast::<u8>(),
+            0,
+            core::ptr::null_mut(),
+        );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -404,9 +413,16 @@ mod tests {
         // qtype = 7 is outside USRQUOTA/GRPQUOTA/PRJQUOTA.
         clear_errno();
         let mut dq = Dqblk {
-            dqb_bhardlimit: 0, dqb_bsoftlimit: 0, dqb_curspace: 0,
-            dqb_ihardlimit: 0, dqb_isoftlimit: 0, dqb_curinodes: 0,
-            dqb_btime: 0, dqb_itime: 0, dqb_valid: 0, _pad: 0,
+            dqb_bhardlimit: 0,
+            dqb_bsoftlimit: 0,
+            dqb_curspace: 0,
+            dqb_ihardlimit: 0,
+            dqb_isoftlimit: 0,
+            dqb_curinodes: 0,
+            dqb_btime: 0,
+            dqb_itime: 0,
+            dqb_valid: 0,
+            _pad: 0,
         };
         let ret = quotactl(
             qcmd(Q_GETQUOTA, 7),
@@ -506,9 +522,16 @@ mod tests {
         // returns -EFAULT), not ENODEV.
         clear_errno();
         let mut dq = Dqblk {
-            dqb_bhardlimit: 0, dqb_bsoftlimit: 0, dqb_curspace: 0,
-            dqb_ihardlimit: 0, dqb_isoftlimit: 0, dqb_curinodes: 0,
-            dqb_btime: 0, dqb_itime: 0, dqb_valid: 0, _pad: 0,
+            dqb_bhardlimit: 0,
+            dqb_bsoftlimit: 0,
+            dqb_curspace: 0,
+            dqb_ihardlimit: 0,
+            dqb_isoftlimit: 0,
+            dqb_curinodes: 0,
+            dqb_btime: 0,
+            dqb_itime: 0,
+            dqb_valid: 0,
+            _pad: 0,
         };
         let ret = quotactl(
             qcmd(Q_GETQUOTA, USRQUOTA),
@@ -549,7 +572,12 @@ mod tests {
     fn test_quotactl_sync_ignores_qtype() {
         // Q_SYNC accepts any qtype because the type byte is unused.
         clear_errno();
-        let ret = quotactl(qcmd(Q_SYNC, 99), core::ptr::null(), 0, core::ptr::null_mut());
+        let ret = quotactl(
+            qcmd(Q_SYNC, 99),
+            core::ptr::null(),
+            0,
+            core::ptr::null_mut(),
+        );
         assert_eq!(ret, 0);
     }
 
@@ -557,9 +585,16 @@ mod tests {
     fn test_quotactl_getquota_valid_inputs_enosys() {
         clear_errno();
         let mut dq = Dqblk {
-            dqb_bhardlimit: 0, dqb_bsoftlimit: 0, dqb_curspace: 0,
-            dqb_ihardlimit: 0, dqb_isoftlimit: 0, dqb_curinodes: 0,
-            dqb_btime: 0, dqb_itime: 0, dqb_valid: 0, _pad: 0,
+            dqb_bhardlimit: 0,
+            dqb_bsoftlimit: 0,
+            dqb_curspace: 0,
+            dqb_ihardlimit: 0,
+            dqb_isoftlimit: 0,
+            dqb_curinodes: 0,
+            dqb_btime: 0,
+            dqb_itime: 0,
+            dqb_valid: 0,
+            _pad: 0,
         };
         let ret = quotactl(
             qcmd(Q_GETQUOTA, USRQUOTA),
@@ -575,9 +610,16 @@ mod tests {
     fn test_quotactl_setquota_valid_inputs_enosys() {
         clear_errno();
         let mut dq = Dqblk {
-            dqb_bhardlimit: 100, dqb_bsoftlimit: 80, dqb_curspace: 0,
-            dqb_ihardlimit: 1000, dqb_isoftlimit: 800, dqb_curinodes: 0,
-            dqb_btime: 0, dqb_itime: 0, dqb_valid: QIF_LIMITS, _pad: 0,
+            dqb_bhardlimit: 100,
+            dqb_bsoftlimit: 80,
+            dqb_curspace: 0,
+            dqb_ihardlimit: 1000,
+            dqb_isoftlimit: 800,
+            dqb_curinodes: 0,
+            dqb_btime: 0,
+            dqb_itime: 0,
+            dqb_valid: QIF_LIMITS,
+            _pad: 0,
         };
         let ret = quotactl(
             qcmd(Q_SETQUOTA, GRPQUOTA),
@@ -594,9 +636,16 @@ mod tests {
         // PRJQUOTA (type 2) is valid and should reach ENOSYS, not EINVAL.
         clear_errno();
         let mut dq = Dqblk {
-            dqb_bhardlimit: 0, dqb_bsoftlimit: 0, dqb_curspace: 0,
-            dqb_ihardlimit: 0, dqb_isoftlimit: 0, dqb_curinodes: 0,
-            dqb_btime: 0, dqb_itime: 0, dqb_valid: 0, _pad: 0,
+            dqb_bhardlimit: 0,
+            dqb_bsoftlimit: 0,
+            dqb_curspace: 0,
+            dqb_ihardlimit: 0,
+            dqb_isoftlimit: 0,
+            dqb_curinodes: 0,
+            dqb_btime: 0,
+            dqb_itime: 0,
+            dqb_valid: 0,
+            _pad: 0,
         };
         let ret = quotactl(
             qcmd(Q_GETQUOTA, PRJQUOTA),
@@ -651,9 +700,16 @@ mod tests {
 
     fn zero_dqblk() -> Dqblk {
         Dqblk {
-            dqb_bhardlimit: 0, dqb_bsoftlimit: 0, dqb_curspace: 0,
-            dqb_ihardlimit: 0, dqb_isoftlimit: 0, dqb_curinodes: 0,
-            dqb_btime: 0, dqb_itime: 0, dqb_valid: 0, _pad: 0,
+            dqb_bhardlimit: 0,
+            dqb_bsoftlimit: 0,
+            dqb_curspace: 0,
+            dqb_ihardlimit: 0,
+            dqb_isoftlimit: 0,
+            dqb_curinodes: 0,
+            dqb_btime: 0,
+            dqb_itime: 0,
+            dqb_valid: 0,
+            _pad: 0,
         }
     }
 
@@ -794,12 +850,7 @@ mod tests {
         // Q_SYNC keeps the "sync all" semantics: NULL special is OK
         // (not EFAULT) because Linux's Q_SYNC bypasses user_path_at.
         errno::set_errno(0);
-        let ret = quotactl(
-            qcmd(Q_SYNC, 0),
-            core::ptr::null(),
-            0,
-            core::ptr::null_mut(),
-        );
+        let ret = quotactl(qcmd(Q_SYNC, 0), core::ptr::null(), 0, core::ptr::null_mut());
         assert_eq!(ret, 0);
         assert_eq!(errno::get_errno(), 0);
     }
@@ -891,16 +942,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -915,8 +964,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -929,8 +977,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -945,10 +992,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_ADMIN");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_ADMIN");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
         }
 
@@ -1236,16 +1281,14 @@ mod tests {
 
             // Restore CAP_SYS_ADMIN.
             use crate::sys_capability::CAP_SYS_ADMIN;
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let (new_lo, new_hi) = if CAP_SYS_ADMIN < 32 {
                 (lo | (1u32 << CAP_SYS_ADMIN), hi)
             } else {
                 (lo, hi | (1u32 << (CAP_SYS_ADMIN - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1260,10 +1303,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
             assert_eq!(
                 quotactl(
@@ -1322,12 +1362,7 @@ mod tests {
             ] {
                 errno::set_errno(0);
                 assert_eq!(
-                    quotactl(
-                        qcmd(subcmd, USRQUOTA),
-                        path.as_ptr(),
-                        0,
-                        addr,
-                    ),
+                    quotactl(qcmd(subcmd, USRQUOTA), path.as_ptr(), 0, addr,),
                     -1,
                     "subcmd={subcmd}",
                 );
@@ -1368,4 +1403,3 @@ mod tests {
         }
     }
 }
-

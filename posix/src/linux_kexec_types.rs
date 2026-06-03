@@ -61,7 +61,11 @@ mod tests {
 
     #[test]
     fn test_load_flags_no_overlap() {
-        let flags = [KEXEC_ON_CRASH, KEXEC_PRESERVE_CONTEXT, KEXEC_UPDATE_ELFCOREHDR];
+        let flags = [
+            KEXEC_ON_CRASH,
+            KEXEC_PRESERVE_CONTEXT,
+            KEXEC_UPDATE_ELFCOREHDR,
+        ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {
@@ -73,8 +77,11 @@ mod tests {
     #[test]
     fn test_arch_values_distinct() {
         let archs = [
-            KEXEC_ARCH_DEFAULT, KEXEC_ARCH_X86_64,
-            KEXEC_ARCH_386, KEXEC_ARCH_AARCH64, KEXEC_ARCH_RISCV,
+            KEXEC_ARCH_DEFAULT,
+            KEXEC_ARCH_X86_64,
+            KEXEC_ARCH_386,
+            KEXEC_ARCH_AARCH64,
+            KEXEC_ARCH_RISCV,
         ];
         for i in 0..archs.len() {
             for j in (i + 1)..archs.len() {
@@ -92,7 +99,11 @@ mod tests {
 
     #[test]
     fn test_file_load_flags_distinct() {
-        let flags = [KEXEC_FILE_UNLOAD, KEXEC_FILE_ON_CRASH, KEXEC_FILE_NO_INITRAMFS];
+        let flags = [
+            KEXEC_FILE_UNLOAD,
+            KEXEC_FILE_ON_CRASH,
+            KEXEC_FILE_NO_INITRAMFS,
+        ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(flags[i], flags[j]);

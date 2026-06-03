@@ -60,8 +60,10 @@ mod tests {
     #[test]
     fn test_policies_distinct() {
         let policies = [
-            BLKCG_POLICY_NONE, BLKCG_POLICY_PROP,
-            BLKCG_POLICY_THROTL, BLKCG_POLICY_IOCOST,
+            BLKCG_POLICY_NONE,
+            BLKCG_POLICY_PROP,
+            BLKCG_POLICY_THROTL,
+            BLKCG_POLICY_IOCOST,
             BLKCG_POLICY_IOLATENCY,
         ];
         for i in 0..policies.len() {

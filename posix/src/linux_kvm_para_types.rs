@@ -93,10 +93,15 @@ mod tests {
     #[test]
     fn test_hypercalls_distinct() {
         let hcs = [
-            KVM_HC_VAPIC_POLL_IRQ, KVM_HC_MMU_OP, KVM_HC_FEATURES,
-            KVM_HC_PPC_MAP_MAGIC_PAGE, KVM_HC_KICK_CPU,
-            KVM_HC_CLOCK_PAIRING, KVM_HC_SEND_IPI,
-            KVM_HC_SCHED_YIELD, KVM_HC_MAP_GPA_RANGE,
+            KVM_HC_VAPIC_POLL_IRQ,
+            KVM_HC_MMU_OP,
+            KVM_HC_FEATURES,
+            KVM_HC_PPC_MAP_MAGIC_PAGE,
+            KVM_HC_KICK_CPU,
+            KVM_HC_CLOCK_PAIRING,
+            KVM_HC_SEND_IPI,
+            KVM_HC_SCHED_YIELD,
+            KVM_HC_MAP_GPA_RANGE,
         ];
         for i in 0..hcs.len() {
             for j in (i + 1)..hcs.len() {
@@ -108,12 +113,18 @@ mod tests {
     #[test]
     fn test_features_distinct() {
         let feats = [
-            KVM_FEATURE_CLOCKSOURCE, KVM_FEATURE_NOP_IO_DELAY,
-            KVM_FEATURE_MMU_OP, KVM_FEATURE_CLOCKSOURCE2,
-            KVM_FEATURE_ASYNC_PF, KVM_FEATURE_STEAL_TIME,
-            KVM_FEATURE_PV_EOI, KVM_FEATURE_PV_UNHALT,
-            KVM_FEATURE_PV_TLB_FLUSH, KVM_FEATURE_ASYNC_PF_VMEXIT,
-            KVM_FEATURE_PV_SEND_IPI, KVM_FEATURE_PV_SCHED_YIELD,
+            KVM_FEATURE_CLOCKSOURCE,
+            KVM_FEATURE_NOP_IO_DELAY,
+            KVM_FEATURE_MMU_OP,
+            KVM_FEATURE_CLOCKSOURCE2,
+            KVM_FEATURE_ASYNC_PF,
+            KVM_FEATURE_STEAL_TIME,
+            KVM_FEATURE_PV_EOI,
+            KVM_FEATURE_PV_UNHALT,
+            KVM_FEATURE_PV_TLB_FLUSH,
+            KVM_FEATURE_ASYNC_PF_VMEXIT,
+            KVM_FEATURE_PV_SEND_IPI,
+            KVM_FEATURE_PV_SCHED_YIELD,
             KVM_FEATURE_CLOCKSOURCE_STABLE_BIT,
         ];
         for i in 0..feats.len() {

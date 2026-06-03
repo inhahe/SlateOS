@@ -98,14 +98,22 @@ mod tests {
     #[test]
     fn test_admin_opcodes_distinct() {
         let ops = [
-            NVME_ADMIN_DELETE_SQ, NVME_ADMIN_CREATE_SQ,
-            NVME_ADMIN_GET_LOG_PAGE, NVME_ADMIN_DELETE_CQ,
-            NVME_ADMIN_CREATE_CQ, NVME_ADMIN_IDENTIFY,
-            NVME_ADMIN_ABORT, NVME_ADMIN_SET_FEATURES,
-            NVME_ADMIN_GET_FEATURES, NVME_ADMIN_ASYNC_EVENT,
-            NVME_ADMIN_NS_MGMT, NVME_ADMIN_FW_COMMIT,
-            NVME_ADMIN_FW_DOWNLOAD, NVME_ADMIN_FORMAT_NVM,
-            NVME_ADMIN_SECURITY_SEND, NVME_ADMIN_SECURITY_RECV,
+            NVME_ADMIN_DELETE_SQ,
+            NVME_ADMIN_CREATE_SQ,
+            NVME_ADMIN_GET_LOG_PAGE,
+            NVME_ADMIN_DELETE_CQ,
+            NVME_ADMIN_CREATE_CQ,
+            NVME_ADMIN_IDENTIFY,
+            NVME_ADMIN_ABORT,
+            NVME_ADMIN_SET_FEATURES,
+            NVME_ADMIN_GET_FEATURES,
+            NVME_ADMIN_ASYNC_EVENT,
+            NVME_ADMIN_NS_MGMT,
+            NVME_ADMIN_FW_COMMIT,
+            NVME_ADMIN_FW_DOWNLOAD,
+            NVME_ADMIN_FORMAT_NVM,
+            NVME_ADMIN_SECURITY_SEND,
+            NVME_ADMIN_SECURITY_RECV,
             NVME_ADMIN_SANITIZE,
         ];
         for i in 0..ops.len() {
@@ -118,9 +126,13 @@ mod tests {
     #[test]
     fn test_io_opcodes_distinct() {
         let ops = [
-            NVME_CMD_FLUSH, NVME_CMD_WRITE, NVME_CMD_READ,
-            NVME_CMD_WRITE_UNCOR, NVME_CMD_COMPARE,
-            NVME_CMD_WRITE_ZEROES, NVME_CMD_DSM,
+            NVME_CMD_FLUSH,
+            NVME_CMD_WRITE,
+            NVME_CMD_READ,
+            NVME_CMD_WRITE_UNCOR,
+            NVME_CMD_COMPARE,
+            NVME_CMD_WRITE_ZEROES,
+            NVME_CMD_DSM,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -132,8 +144,10 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let codes = [
-            NVME_SC_SUCCESS, NVME_SC_INVALID_OPCODE,
-            NVME_SC_INVALID_FIELD, NVME_SC_ABORT_REQ,
+            NVME_SC_SUCCESS,
+            NVME_SC_INVALID_OPCODE,
+            NVME_SC_INVALID_FIELD,
+            NVME_SC_ABORT_REQ,
             NVME_SC_NS_NOT_READY,
         ];
         for i in 0..codes.len() {

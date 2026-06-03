@@ -74,8 +74,11 @@ mod tests {
     #[test]
     fn test_iocb_flags_no_overlap() {
         let flags = [
-            IOCB_FLAG_SYNC, IOCB_FLAG_DIRECT, IOCB_FLAG_REGISTERED,
-            IOCB_FLAG_APPEND, IOCB_FLAG_SKIP_CQE,
+            IOCB_FLAG_SYNC,
+            IOCB_FLAG_DIRECT,
+            IOCB_FLAG_REGISTERED,
+            IOCB_FLAG_APPEND,
+            IOCB_FLAG_SKIP_CQE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

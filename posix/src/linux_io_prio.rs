@@ -74,8 +74,10 @@ mod tests {
     #[test]
     fn test_classes_distinct() {
         let classes = [
-            IOPRIO_CLASS_NONE, IOPRIO_CLASS_RT,
-            IOPRIO_CLASS_BE, IOPRIO_CLASS_IDLE,
+            IOPRIO_CLASS_NONE,
+            IOPRIO_CLASS_RT,
+            IOPRIO_CLASS_BE,
+            IOPRIO_CLASS_IDLE,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
@@ -97,7 +99,10 @@ mod tests {
         assert_eq!(IOPRIO_CLASS_SHIFT, 13);
         assert_eq!(IOPRIO_LEVEL_MASK, 0x1FFF);
         // Extract class from default priority
-        assert_eq!((IOPRIO_DEFAULT >> IOPRIO_CLASS_SHIFT) & IOPRIO_CLASS_MASK, IOPRIO_CLASS_BE);
+        assert_eq!(
+            (IOPRIO_DEFAULT >> IOPRIO_CLASS_SHIFT) & IOPRIO_CLASS_MASK,
+            IOPRIO_CLASS_BE
+        );
         // Extract level from default priority
         assert_eq!(IOPRIO_DEFAULT & IOPRIO_LEVEL_MASK, IOPRIO_BE_DEFAULT_LEVEL);
     }

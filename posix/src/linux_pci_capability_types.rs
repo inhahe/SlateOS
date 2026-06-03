@@ -89,9 +89,15 @@ mod tests {
     #[test]
     fn test_cap_ids_distinct() {
         let caps = [
-            PCI_CAP_ID_PM, PCI_CAP_ID_AGP, PCI_CAP_ID_VPD,
-            PCI_CAP_ID_MSI, PCI_CAP_ID_VNDR, PCI_CAP_ID_EXP,
-            PCI_CAP_ID_MSIX, PCI_CAP_ID_SATA, PCI_CAP_ID_AF,
+            PCI_CAP_ID_PM,
+            PCI_CAP_ID_AGP,
+            PCI_CAP_ID_VPD,
+            PCI_CAP_ID_MSI,
+            PCI_CAP_ID_VNDR,
+            PCI_CAP_ID_EXP,
+            PCI_CAP_ID_MSIX,
+            PCI_CAP_ID_SATA,
+            PCI_CAP_ID_AF,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
@@ -103,9 +109,15 @@ mod tests {
     #[test]
     fn test_ext_cap_ids_distinct() {
         let ext = [
-            PCI_EXT_CAP_ID_AER, PCI_EXT_CAP_ID_VC, PCI_EXT_CAP_ID_DSN,
-            PCI_EXT_CAP_ID_ACS, PCI_EXT_CAP_ID_ARI, PCI_EXT_CAP_ID_ATS,
-            PCI_EXT_CAP_ID_SRIOV, PCI_EXT_CAP_ID_LTR, PCI_EXT_CAP_ID_DPC,
+            PCI_EXT_CAP_ID_AER,
+            PCI_EXT_CAP_ID_VC,
+            PCI_EXT_CAP_ID_DSN,
+            PCI_EXT_CAP_ID_ACS,
+            PCI_EXT_CAP_ID_ARI,
+            PCI_EXT_CAP_ID_ATS,
+            PCI_EXT_CAP_ID_SRIOV,
+            PCI_EXT_CAP_ID_LTR,
+            PCI_EXT_CAP_ID_DPC,
             PCI_EXT_CAP_ID_L1SS,
         ];
         for i in 0..ext.len() {

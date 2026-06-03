@@ -123,9 +123,16 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            CDROMPAUSE, CDROMRESUME, CDROMPLAYMSF, CDROMSUBCHNL,
-            CDROMREADTOCHDR, CDROMREADTOCENTRY, CDROMSTOP,
-            CDROMSTART, CDROMEJECT, CDROMRESET,
+            CDROMPAUSE,
+            CDROMRESUME,
+            CDROMPLAYMSF,
+            CDROMSUBCHNL,
+            CDROMREADTOCHDR,
+            CDROMREADTOCENTRY,
+            CDROMSTOP,
+            CDROMSTART,
+            CDROMEJECT,
+            CDROMRESET,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -139,8 +146,11 @@ mod tests {
         assert_eq!(CDS_NO_INFO, 0);
         assert_eq!(CDS_DISC_OK, 4);
         let statuses = [
-            CDS_NO_INFO, CDS_NO_DISC, CDS_TRAY_OPEN,
-            CDS_DRIVE_NOT_READY, CDS_DISC_OK,
+            CDS_NO_INFO,
+            CDS_NO_DISC,
+            CDS_TRAY_OPEN,
+            CDS_DRIVE_NOT_READY,
+            CDS_DISC_OK,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
@@ -158,8 +168,12 @@ mod tests {
     #[test]
     fn test_msf_address() {
         let msf = CdromMsf {
-            cdmsf_min0: 0, cdmsf_sec0: 2, cdmsf_frame0: 0,
-            cdmsf_min1: 5, cdmsf_sec1: 30, cdmsf_frame1: 0,
+            cdmsf_min0: 0,
+            cdmsf_sec0: 2,
+            cdmsf_frame0: 0,
+            cdmsf_min1: 5,
+            cdmsf_sec1: 30,
+            cdmsf_frame1: 0,
         };
         assert_eq!(msf.cdmsf_min1, 5);
     }

@@ -75,7 +75,8 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            PANIC_ACTION_HALT, PANIC_ACTION_REBOOT,
+            PANIC_ACTION_HALT,
+            PANIC_ACTION_REBOOT,
             PANIC_ACTION_POWEROFF,
         ];
         for i in 0..actions.len() {
@@ -93,9 +94,12 @@ mod tests {
     #[test]
     fn test_print_flags_powers_of_two() {
         let flags = [
-            PANIC_PRINT_TASK_INFO, PANIC_PRINT_MEM_INFO,
-            PANIC_PRINT_TIMER_INFO, PANIC_PRINT_LOCK_INFO,
-            PANIC_PRINT_FTRACE_INFO, PANIC_PRINT_ALL_PRINTK_MSG,
+            PANIC_PRINT_TASK_INFO,
+            PANIC_PRINT_MEM_INFO,
+            PANIC_PRINT_TIMER_INFO,
+            PANIC_PRINT_LOCK_INFO,
+            PANIC_PRINT_FTRACE_INFO,
+            PANIC_PRINT_ALL_PRINTK_MSG,
             PANIC_PRINT_ALL_CPU_BT,
         ];
         for flag in &flags {
@@ -106,9 +110,12 @@ mod tests {
     #[test]
     fn test_print_flags_no_overlap() {
         let flags = [
-            PANIC_PRINT_TASK_INFO, PANIC_PRINT_MEM_INFO,
-            PANIC_PRINT_TIMER_INFO, PANIC_PRINT_LOCK_INFO,
-            PANIC_PRINT_FTRACE_INFO, PANIC_PRINT_ALL_PRINTK_MSG,
+            PANIC_PRINT_TASK_INFO,
+            PANIC_PRINT_MEM_INFO,
+            PANIC_PRINT_TIMER_INFO,
+            PANIC_PRINT_LOCK_INFO,
+            PANIC_PRINT_FTRACE_INFO,
+            PANIC_PRINT_ALL_PRINTK_MSG,
             PANIC_PRINT_ALL_CPU_BT,
         ];
         for i in 0..flags.len() {
@@ -121,8 +128,10 @@ mod tests {
     #[test]
     fn test_oops_flags_powers_of_two() {
         let flags = [
-            OOPS_PRINT_REGS, OOPS_PRINT_BACKTRACE,
-            OOPS_PRINT_MODULES, OOPS_PRINT_PROCESS,
+            OOPS_PRINT_REGS,
+            OOPS_PRINT_BACKTRACE,
+            OOPS_PRINT_MODULES,
+            OOPS_PRINT_PROCESS,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);

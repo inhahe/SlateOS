@@ -67,10 +67,14 @@ mod tests {
     #[test]
     fn test_transports_distinct() {
         let transports = [
-            SCSI_TRANSPORT_FCP, SCSI_TRANSPORT_SPI,
-            SCSI_TRANSPORT_SAS, SCSI_TRANSPORT_ISCSI,
-            SCSI_TRANSPORT_SBP, SCSI_TRANSPORT_SRP,
-            SCSI_TRANSPORT_USB, SCSI_TRANSPORT_ATA,
+            SCSI_TRANSPORT_FCP,
+            SCSI_TRANSPORT_SPI,
+            SCSI_TRANSPORT_SAS,
+            SCSI_TRANSPORT_ISCSI,
+            SCSI_TRANSPORT_SBP,
+            SCSI_TRANSPORT_SRP,
+            SCSI_TRANSPORT_USB,
+            SCSI_TRANSPORT_ATA,
         ];
         for i in 0..transports.len() {
             for j in (i + 1)..transports.len() {
@@ -90,8 +94,10 @@ mod tests {
     #[test]
     fn test_iscsi_states_distinct() {
         let states = [
-            ISCSI_SESSION_LOGGED_IN, ISCSI_SESSION_RECOVERY,
-            ISCSI_SESSION_FREE, ISCSI_SESSION_FAILED,
+            ISCSI_SESSION_LOGGED_IN,
+            ISCSI_SESSION_RECOVERY,
+            ISCSI_SESSION_FREE,
+            ISCSI_SESSION_FAILED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

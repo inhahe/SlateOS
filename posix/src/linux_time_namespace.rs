@@ -81,10 +81,7 @@ mod tests {
 
     #[test]
     fn test_proc_paths_distinct() {
-        let paths = [
-            PROC_NS_TIME, PROC_NS_TIME_FOR_CHILDREN,
-            PROC_TIMENS_OFFSETS,
-        ];
+        let paths = [PROC_NS_TIME, PROC_NS_TIME_FOR_CHILDREN, PROC_TIMENS_OFFSETS];
         for i in 0..paths.len() {
             for j in (i + 1)..paths.len() {
                 assert_ne!(paths[i], paths[j]);

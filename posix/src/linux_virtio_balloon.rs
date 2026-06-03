@@ -70,9 +70,12 @@ mod tests {
     #[test]
     fn test_feature_bits_distinct() {
         let features = [
-            VIRTIO_BALLOON_F_MUST_TELL_HOST, VIRTIO_BALLOON_F_STATS_VQ,
-            VIRTIO_BALLOON_F_DEFLATE_ON_OOM, VIRTIO_BALLOON_F_FREE_PAGE_HINT,
-            VIRTIO_BALLOON_F_PAGE_POISON, VIRTIO_BALLOON_F_REPORTING,
+            VIRTIO_BALLOON_F_MUST_TELL_HOST,
+            VIRTIO_BALLOON_F_STATS_VQ,
+            VIRTIO_BALLOON_F_DEFLATE_ON_OOM,
+            VIRTIO_BALLOON_F_FREE_PAGE_HINT,
+            VIRTIO_BALLOON_F_PAGE_POISON,
+            VIRTIO_BALLOON_F_REPORTING,
         ];
         for i in 0..features.len() {
             for j in (i + 1)..features.len() {
@@ -84,11 +87,16 @@ mod tests {
     #[test]
     fn test_stat_tags_distinct() {
         let tags = [
-            VIRTIO_BALLOON_S_SWAP_IN, VIRTIO_BALLOON_S_SWAP_OUT,
-            VIRTIO_BALLOON_S_MAJFLT, VIRTIO_BALLOON_S_MINFLT,
-            VIRTIO_BALLOON_S_MEMFREE, VIRTIO_BALLOON_S_MEMTOT,
-            VIRTIO_BALLOON_S_AVAIL, VIRTIO_BALLOON_S_CACHES,
-            VIRTIO_BALLOON_S_HTLB_PGALLOC, VIRTIO_BALLOON_S_HTLB_PGFAIL,
+            VIRTIO_BALLOON_S_SWAP_IN,
+            VIRTIO_BALLOON_S_SWAP_OUT,
+            VIRTIO_BALLOON_S_MAJFLT,
+            VIRTIO_BALLOON_S_MINFLT,
+            VIRTIO_BALLOON_S_MEMFREE,
+            VIRTIO_BALLOON_S_MEMTOT,
+            VIRTIO_BALLOON_S_AVAIL,
+            VIRTIO_BALLOON_S_CACHES,
+            VIRTIO_BALLOON_S_HTLB_PGALLOC,
+            VIRTIO_BALLOON_S_HTLB_PGFAIL,
         ];
         for i in 0..tags.len() {
             for j in (i + 1)..tags.len() {
@@ -100,11 +108,16 @@ mod tests {
     #[test]
     fn test_stat_tags_in_range() {
         let tags = [
-            VIRTIO_BALLOON_S_SWAP_IN, VIRTIO_BALLOON_S_SWAP_OUT,
-            VIRTIO_BALLOON_S_MAJFLT, VIRTIO_BALLOON_S_MINFLT,
-            VIRTIO_BALLOON_S_MEMFREE, VIRTIO_BALLOON_S_MEMTOT,
-            VIRTIO_BALLOON_S_AVAIL, VIRTIO_BALLOON_S_CACHES,
-            VIRTIO_BALLOON_S_HTLB_PGALLOC, VIRTIO_BALLOON_S_HTLB_PGFAIL,
+            VIRTIO_BALLOON_S_SWAP_IN,
+            VIRTIO_BALLOON_S_SWAP_OUT,
+            VIRTIO_BALLOON_S_MAJFLT,
+            VIRTIO_BALLOON_S_MINFLT,
+            VIRTIO_BALLOON_S_MEMFREE,
+            VIRTIO_BALLOON_S_MEMTOT,
+            VIRTIO_BALLOON_S_AVAIL,
+            VIRTIO_BALLOON_S_CACHES,
+            VIRTIO_BALLOON_S_HTLB_PGALLOC,
+            VIRTIO_BALLOON_S_HTLB_PGFAIL,
         ];
         for tag in &tags {
             assert!(*tag < VIRTIO_BALLOON_S_NR);

@@ -89,8 +89,12 @@ mod tests {
     #[test]
     fn test_algorithms_distinct() {
         let algs = [
-            AKCIPHER_ALG_RSA, AKCIPHER_ALG_ECDSA, AKCIPHER_ALG_EDDSA,
-            AKCIPHER_ALG_SM2, AKCIPHER_ALG_DH, AKCIPHER_ALG_ECDH,
+            AKCIPHER_ALG_RSA,
+            AKCIPHER_ALG_ECDSA,
+            AKCIPHER_ALG_EDDSA,
+            AKCIPHER_ALG_SM2,
+            AKCIPHER_ALG_DH,
+            AKCIPHER_ALG_ECDH,
         ];
         for i in 0..algs.len() {
             for j in (i + 1)..algs.len() {
@@ -102,8 +106,12 @@ mod tests {
     #[test]
     fn test_curves_distinct() {
         let curves = [
-            EC_CURVE_P256, EC_CURVE_P384, EC_CURVE_P521,
-            EC_CURVE_25519, EC_CURVE_448, EC_CURVE_SM2,
+            EC_CURVE_P256,
+            EC_CURVE_P384,
+            EC_CURVE_P521,
+            EC_CURVE_25519,
+            EC_CURVE_448,
+            EC_CURVE_SM2,
         ];
         for i in 0..curves.len() {
             for j in (i + 1)..curves.len() {
@@ -131,8 +139,10 @@ mod tests {
     #[test]
     fn test_operations_distinct() {
         let ops = [
-            AKCIPHER_OP_ENCRYPT, AKCIPHER_OP_DECRYPT,
-            AKCIPHER_OP_SIGN, AKCIPHER_OP_VERIFY,
+            AKCIPHER_OP_ENCRYPT,
+            AKCIPHER_OP_DECRYPT,
+            AKCIPHER_OP_SIGN,
+            AKCIPHER_OP_VERIFY,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

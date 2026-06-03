@@ -4,12 +4,12 @@
 //! constants for `preadv2`/`pwritev2` flags.
 
 pub use crate::file::Iovec;
+pub use crate::file::preadv;
+pub use crate::file::preadv2;
+pub use crate::file::pwritev;
+pub use crate::file::pwritev2;
 pub use crate::file::readv;
 pub use crate::file::writev;
-pub use crate::file::preadv;
-pub use crate::file::pwritev;
-pub use crate::file::preadv2;
-pub use crate::file::pwritev2;
 pub use crate::sys_uio::UIO_MAXIOV;
 
 // ---------------------------------------------------------------------------

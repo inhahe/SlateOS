@@ -395,12 +395,7 @@ mod tests {
     fn test_fmtmsg_all_nulls() {
         // All null strings should not crash.
         let ret = fmtmsg(
-            MM_PRINT,
-            MM_NULLLBL,
-            MM_NOSEV,
-            MM_NULLTXT,
-            MM_NULLACT,
-            MM_NULLTAG,
+            MM_PRINT, MM_NULLLBL, MM_NOSEV, MM_NULLTXT, MM_NULLACT, MM_NULLTAG,
         );
         assert_eq!(ret, MM_OK);
     }

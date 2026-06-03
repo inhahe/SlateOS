@@ -79,9 +79,12 @@ mod tests {
     #[test]
     fn test_speeds_distinct() {
         let speeds = [
-            USB_GADGET_SPEED_UNKNOWN, USB_GADGET_SPEED_LOW,
-            USB_GADGET_SPEED_FULL, USB_GADGET_SPEED_HIGH,
-            USB_GADGET_SPEED_SUPER, USB_GADGET_SPEED_SUPER_PLUS,
+            USB_GADGET_SPEED_UNKNOWN,
+            USB_GADGET_SPEED_LOW,
+            USB_GADGET_SPEED_FULL,
+            USB_GADGET_SPEED_HIGH,
+            USB_GADGET_SPEED_SUPER,
+            USB_GADGET_SPEED_SUPER_PLUS,
         ];
         for i in 0..speeds.len() {
             for j in (i + 1)..speeds.len() {
@@ -93,9 +96,15 @@ mod tests {
     #[test]
     fn test_functions_distinct() {
         let funcs = [
-            USB_FUNC_MASS_STORAGE, USB_FUNC_ACM, USB_FUNC_ECM,
-            USB_FUNC_RNDIS, USB_FUNC_HID, USB_FUNC_MIDI,
-            USB_FUNC_UAC, USB_FUNC_UVC, USB_FUNC_PRINTER,
+            USB_FUNC_MASS_STORAGE,
+            USB_FUNC_ACM,
+            USB_FUNC_ECM,
+            USB_FUNC_RNDIS,
+            USB_FUNC_HID,
+            USB_FUNC_MIDI,
+            USB_FUNC_UAC,
+            USB_FUNC_UVC,
+            USB_FUNC_PRINTER,
             USB_FUNC_FASTBOOT,
         ];
         for i in 0..funcs.len() {
@@ -108,9 +117,12 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            USB_GADGET_STATE_UNBOUND, USB_GADGET_STATE_NOT_ATTACHED,
-            USB_GADGET_STATE_ATTACHED, USB_GADGET_STATE_DEFAULT,
-            USB_GADGET_STATE_ADDRESSED, USB_GADGET_STATE_CONFIGURED,
+            USB_GADGET_STATE_UNBOUND,
+            USB_GADGET_STATE_NOT_ATTACHED,
+            USB_GADGET_STATE_ATTACHED,
+            USB_GADGET_STATE_DEFAULT,
+            USB_GADGET_STATE_ADDRESSED,
+            USB_GADGET_STATE_CONFIGURED,
             USB_GADGET_STATE_SUSPENDED,
         ];
         for i in 0..states.len() {

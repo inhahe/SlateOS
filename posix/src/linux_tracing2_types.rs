@@ -91,12 +91,24 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let types = [
-            TRACE_FN_ENTRY, TRACE_FN_RETURN, TRACE_CTX,
-            TRACE_WAKE, TRACE_STACK, TRACE_PRINT,
-            TRACE_BPRINT, TRACE_MMIO_RW, TRACE_MMIO_MAP,
-            TRACE_BRANCH, TRACE_GRAPH_ENT, TRACE_GRAPH_RET,
-            TRACE_USER_STACK, TRACE_BLK, TRACE_BPUTS,
-            TRACE_HWLAT, TRACE_RAW_DATA, TRACE_OSNOISE,
+            TRACE_FN_ENTRY,
+            TRACE_FN_RETURN,
+            TRACE_CTX,
+            TRACE_WAKE,
+            TRACE_STACK,
+            TRACE_PRINT,
+            TRACE_BPRINT,
+            TRACE_MMIO_RW,
+            TRACE_MMIO_MAP,
+            TRACE_BRANCH,
+            TRACE_GRAPH_ENT,
+            TRACE_GRAPH_RET,
+            TRACE_USER_STACK,
+            TRACE_BLK,
+            TRACE_BPUTS,
+            TRACE_HWLAT,
+            TRACE_RAW_DATA,
+            TRACE_OSNOISE,
             TRACE_TIMERLAT,
         ];
         for i in 0..types.len() {
@@ -109,7 +121,8 @@ mod tests {
     #[test]
     fn test_ringbuf_types_distinct() {
         let types = [
-            RINGBUF_TYPE_PADDING, RINGBUF_TYPE_TIME_EXTEND,
+            RINGBUF_TYPE_PADDING,
+            RINGBUF_TYPE_TIME_EXTEND,
             RINGBUF_TYPE_TIME_STAMP,
         ];
         for i in 0..types.len() {
@@ -122,9 +135,14 @@ mod tests {
     #[test]
     fn test_filter_ops_distinct() {
         let ops = [
-            FILTER_OP_EQ, FILTER_OP_NE, FILTER_OP_LT,
-            FILTER_OP_LE, FILTER_OP_GT, FILTER_OP_GE,
-            FILTER_OP_BAND, FILTER_OP_GLOB,
+            FILTER_OP_EQ,
+            FILTER_OP_NE,
+            FILTER_OP_LT,
+            FILTER_OP_LE,
+            FILTER_OP_GT,
+            FILTER_OP_GE,
+            FILTER_OP_BAND,
+            FILTER_OP_GLOB,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

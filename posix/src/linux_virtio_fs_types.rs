@@ -77,12 +77,23 @@ mod tests {
     #[test]
     fn test_fuse_ops_distinct() {
         let ops = [
-            FUSE_LOOKUP, FUSE_GETATTR, FUSE_SETATTR,
-            FUSE_READLINK, FUSE_MKNOD, FUSE_MKDIR,
-            FUSE_UNLINK, FUSE_RMDIR, FUSE_RENAME,
-            FUSE_OPEN, FUSE_READ, FUSE_WRITE,
-            FUSE_FLUSH, FUSE_READDIR, FUSE_FSYNC,
-            FUSE_INIT, FUSE_DESTROY,
+            FUSE_LOOKUP,
+            FUSE_GETATTR,
+            FUSE_SETATTR,
+            FUSE_READLINK,
+            FUSE_MKNOD,
+            FUSE_MKDIR,
+            FUSE_UNLINK,
+            FUSE_RMDIR,
+            FUSE_RENAME,
+            FUSE_OPEN,
+            FUSE_READ,
+            FUSE_WRITE,
+            FUSE_FLUSH,
+            FUSE_READDIR,
+            FUSE_FSYNC,
+            FUSE_INIT,
+            FUSE_DESTROY,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

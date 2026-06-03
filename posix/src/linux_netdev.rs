@@ -76,11 +76,25 @@ mod tests {
     #[test]
     fn test_iff_flags_are_powers_of_two() {
         let flags = [
-            IFF_UP, IFF_BROADCAST, IFF_DEBUG, IFF_LOOPBACK,
-            IFF_POINTOPOINT, IFF_NOTRAILERS, IFF_RUNNING,
-            IFF_NOARP, IFF_PROMISC, IFF_ALLMULTI, IFF_MASTER,
-            IFF_SLAVE, IFF_MULTICAST, IFF_PORTSEL, IFF_AUTOMEDIA,
-            IFF_DYNAMIC, IFF_LOWER_UP, IFF_DORMANT, IFF_ECHO,
+            IFF_UP,
+            IFF_BROADCAST,
+            IFF_DEBUG,
+            IFF_LOOPBACK,
+            IFF_POINTOPOINT,
+            IFF_NOTRAILERS,
+            IFF_RUNNING,
+            IFF_NOARP,
+            IFF_PROMISC,
+            IFF_ALLMULTI,
+            IFF_MASTER,
+            IFF_SLAVE,
+            IFF_MULTICAST,
+            IFF_PORTSEL,
+            IFF_AUTOMEDIA,
+            IFF_DYNAMIC,
+            IFF_LOWER_UP,
+            IFF_DORMANT,
+            IFF_ECHO,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -90,11 +104,25 @@ mod tests {
     #[test]
     fn test_iff_flags_no_overlap() {
         let flags = [
-            IFF_UP, IFF_BROADCAST, IFF_DEBUG, IFF_LOOPBACK,
-            IFF_POINTOPOINT, IFF_NOTRAILERS, IFF_RUNNING,
-            IFF_NOARP, IFF_PROMISC, IFF_ALLMULTI, IFF_MASTER,
-            IFF_SLAVE, IFF_MULTICAST, IFF_PORTSEL, IFF_AUTOMEDIA,
-            IFF_DYNAMIC, IFF_LOWER_UP, IFF_DORMANT, IFF_ECHO,
+            IFF_UP,
+            IFF_BROADCAST,
+            IFF_DEBUG,
+            IFF_LOOPBACK,
+            IFF_POINTOPOINT,
+            IFF_NOTRAILERS,
+            IFF_RUNNING,
+            IFF_NOARP,
+            IFF_PROMISC,
+            IFF_ALLMULTI,
+            IFF_MASTER,
+            IFF_SLAVE,
+            IFF_MULTICAST,
+            IFF_PORTSEL,
+            IFF_AUTOMEDIA,
+            IFF_DYNAMIC,
+            IFF_LOWER_UP,
+            IFF_DORMANT,
+            IFF_ECHO,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

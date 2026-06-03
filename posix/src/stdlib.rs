@@ -18,7 +18,6 @@
 //! These are not strictly POSIX but are required by virtually every
 //! C program and are part of the C standard library.
 
-
 // ---------------------------------------------------------------------------
 // Integer conversion
 // ---------------------------------------------------------------------------
@@ -71,11 +70,7 @@ pub unsafe extern "C" fn atoll(nptr: *const u8) -> i64 {
 /// `endptr` may be null; if non-null, it receives a pointer to the
 /// first character after the parsed number.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strtol(
-    nptr: *const u8,
-    endptr: *mut *const u8,
-    mut base: i32,
-) -> i64 {
+pub unsafe extern "C" fn strtol(nptr: *const u8, endptr: *mut *const u8, mut base: i32) -> i64 {
     // Check range and apply sign.
     // i64::MIN magnitude as u64 = 2^63 = (i64::MAX as u64) + 1.
     const POS_MAX: u64 = i64::MAX as u64;
@@ -83,7 +78,9 @@ pub unsafe extern "C" fn strtol(
 
     if nptr.is_null() {
         if !endptr.is_null() {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         }
         return 0;
     }
@@ -92,7 +89,9 @@ pub unsafe extern "C" fn strtol(
     if base != 0 && !(2..=36).contains(&base) {
         crate::errno::set_errno(crate::errno::EINVAL);
         if !endptr.is_null() {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         }
         return 0;
     }
@@ -176,9 +175,13 @@ pub unsafe extern "C" fn strtol(
     if !endptr.is_null() {
         // POSIX: if no conversion performed, endptr = nptr.
         if any_digits {
-            unsafe { *endptr = nptr.add(i); }
+            unsafe {
+                *endptr = nptr.add(i);
+            }
         } else {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         }
     }
 
@@ -222,14 +225,12 @@ pub unsafe extern "C" fn strtol(
 ///
 /// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strtoul(
-    nptr: *const u8,
-    endptr: *mut *const u8,
-    mut base: i32,
-) -> u64 {
+pub unsafe extern "C" fn strtoul(nptr: *const u8, endptr: *mut *const u8, mut base: i32) -> u64 {
     if nptr.is_null() {
         if !endptr.is_null() {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         }
         return 0;
     }
@@ -238,7 +239,9 @@ pub unsafe extern "C" fn strtoul(
     if base != 0 && !(2..=36).contains(&base) {
         crate::errno::set_errno(crate::errno::EINVAL);
         if !endptr.is_null() {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         }
         return 0;
     }
@@ -314,9 +317,13 @@ pub unsafe extern "C" fn strtoul(
 
     if !endptr.is_null() {
         if any_digits {
-            unsafe { *endptr = nptr.add(i); }
+            unsafe {
+                *endptr = nptr.add(i);
+            }
         } else {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         }
     }
 
@@ -330,7 +337,11 @@ pub unsafe extern "C" fn strtoul(
     }
 
     // POSIX: negate in the unsigned domain for '-' prefix.
-    if negative { result.wrapping_neg() } else { result }
+    if negative {
+        result.wrapping_neg()
+    } else {
+        result
+    }
 }
 
 /// Convert a C string to a long long integer (`strtoll`).
@@ -342,11 +353,7 @@ pub unsafe extern "C" fn strtoul(
 ///
 /// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strtoll(
-    nptr: *const u8,
-    endptr: *mut *const u8,
-    base: i32,
-) -> i64 {
+pub unsafe extern "C" fn strtoll(nptr: *const u8, endptr: *mut *const u8, base: i32) -> i64 {
     unsafe { strtol(nptr, endptr, base) }
 }
 
@@ -359,11 +366,7 @@ pub unsafe extern "C" fn strtoll(
 ///
 /// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strtoull(
-    nptr: *const u8,
-    endptr: *mut *const u8,
-    base: i32,
-) -> u64 {
+pub unsafe extern "C" fn strtoull(nptr: *const u8, endptr: *mut *const u8, base: i32) -> u64 {
     unsafe { strtoul(nptr, endptr, base) }
 }
 
@@ -384,13 +387,12 @@ pub unsafe extern "C" fn strtoull(
 /// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
-pub unsafe extern "C" fn strtod(
-    nptr: *const u8,
-    endptr: *mut *const u8,
-) -> f64 {
+pub unsafe extern "C" fn strtod(nptr: *const u8, endptr: *mut *const u8) -> f64 {
     if nptr.is_null() {
         if !endptr.is_null() {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         }
         return 0.0;
     }
@@ -438,9 +440,15 @@ pub unsafe extern "C" fn strtod(
                     i = i.wrapping_add(5);
                 }
                 if !endptr.is_null() {
-                    unsafe { *endptr = nptr.add(i); }
+                    unsafe {
+                        *endptr = nptr.add(i);
+                    }
                 }
-                return if negative { f64::NEG_INFINITY } else { f64::INFINITY };
+                return if negative {
+                    f64::NEG_INFINITY
+                } else {
+                    f64::INFINITY
+                };
             }
         }
     } else if (c0 | 0x20) == b'n' {
@@ -460,7 +468,9 @@ pub unsafe extern "C" fn strtod(
                     }
                 }
                 if !endptr.is_null() {
-                    unsafe { *endptr = nptr.add(i); }
+                    unsafe {
+                        *endptr = nptr.add(i);
+                    }
                 }
                 return f64::NAN;
             }
@@ -492,7 +502,9 @@ pub unsafe extern "C" fn strtod(
     // If no digits were parsed, endptr points to nptr (no conversion).
     if !has_digits {
         if !endptr.is_null() {
-            unsafe { *endptr = nptr; }
+            unsafe {
+                *endptr = nptr;
+            }
         }
         return 0.0;
     }
@@ -541,7 +553,9 @@ pub unsafe extern "C" fn strtod(
     }
 
     if !endptr.is_null() {
-        unsafe { *endptr = nptr.add(i); }
+        unsafe {
+            *endptr = nptr.add(i);
+        }
     }
 
     result
@@ -553,10 +567,7 @@ pub unsafe extern "C" fn strtod(
 ///
 /// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strtof(
-    nptr: *const u8,
-    endptr: *mut *const u8,
-) -> f32 {
+pub unsafe extern "C" fn strtof(nptr: *const u8, endptr: *mut *const u8) -> f32 {
     let d = unsafe { strtod(nptr, endptr) };
     let f = d as f32;
     // POSIX: set ERANGE if the f32 result overflows or underflows.
@@ -580,10 +591,7 @@ pub unsafe extern "C" fn strtof(
 ///
 /// `nptr` must be a valid null-terminated string.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strtold(
-    nptr: *const u8,
-    endptr: *mut *const u8,
-) -> f64 {
+pub unsafe extern "C" fn strtold(nptr: *const u8, endptr: *mut *const u8) -> f64 {
     // SAFETY: strtod safety requirements are identical.
     unsafe { strtod(nptr, endptr) }
 }
@@ -612,7 +620,7 @@ fn pow10(exp: i32) -> f64 {
     // which overflows i32), but fits in u32.  Casting through i64 avoids
     // the saturating_neg trap where i32::MIN.saturating_neg() == i32::MIN.
     let abs_exp: u32 = if neg {
-        (-(exp as i64)) as u32
+        (-i64::from(exp)) as u32
     } else {
         exp as u32
     };
@@ -702,7 +710,10 @@ pub extern "C" fn div(numer: i32, denom: i32) -> DivT {
     }
     if numer == i32::MIN && denom == -1 {
         // Overflow: wrapping_div gives MIN (two's complement wrap).
-        return DivT { quot: i32::MIN, rem: 0 };
+        return DivT {
+            quot: i32::MIN,
+            rem: 0,
+        };
     }
     #[allow(clippy::arithmetic_side_effects)]
     DivT {
@@ -718,7 +729,10 @@ pub extern "C" fn ldiv(numer: i64, denom: i64) -> LdivT {
         return LdivT { quot: 0, rem: 0 };
     }
     if numer == i64::MIN && denom == -1 {
-        return LdivT { quot: i64::MIN, rem: 0 };
+        return LdivT {
+            quot: i64::MIN,
+            rem: 0,
+        };
     }
     #[allow(clippy::arithmetic_side_effects)]
     LdivT {
@@ -734,7 +748,10 @@ pub extern "C" fn lldiv(numer: i64, denom: i64) -> LldivT {
         return LldivT { quot: 0, rem: 0 };
     }
     if numer == i64::MIN && denom == -1 {
-        return LldivT { quot: i64::MIN, rem: 0 };
+        return LldivT {
+            quot: i64::MIN,
+            rem: 0,
+        };
     }
     #[allow(clippy::arithmetic_side_effects)]
     LldivT {
@@ -794,7 +811,9 @@ pub unsafe extern "C" fn qsort(
     while i < nmemb {
         // Save element[i] into temp.
         let elem_i = unsafe { base.add(i.wrapping_mul(size)) };
-        unsafe { core::ptr::copy_nonoverlapping(elem_i, temp, size); }
+        unsafe {
+            core::ptr::copy_nonoverlapping(elem_i, temp, size);
+        }
 
         // Shift elements right until we find the insertion point.
         let mut j = i;
@@ -804,13 +823,17 @@ pub unsafe extern "C" fn qsort(
                 break;
             }
             let elem_j = unsafe { base.add(j.wrapping_mul(size)) };
-            unsafe { core::ptr::copy_nonoverlapping(elem_j_minus_1, elem_j, size); }
+            unsafe {
+                core::ptr::copy_nonoverlapping(elem_j_minus_1, elem_j, size);
+            }
             j = j.wrapping_sub(1);
         }
 
         // Insert the saved element at position j.
         let dest = unsafe { base.add(j.wrapping_mul(size)) };
-        unsafe { core::ptr::copy_nonoverlapping(temp, dest, size); }
+        unsafe {
+            core::ptr::copy_nonoverlapping(temp, dest, size);
+        }
 
         i = i.wrapping_add(1);
     }
@@ -854,7 +877,7 @@ pub unsafe extern "C" fn bsearch(
             // POSIX: bsearch returns void* (mutable).  We cast here because
             // the array was received as *const but POSIX semantics permit
             // the caller to write through the returned pointer.
-            core::cmp::Ordering::Equal => return elem as *mut u8,
+            core::cmp::Ordering::Equal => return elem.cast_mut(),
         }
     }
 
@@ -874,7 +897,9 @@ static mut RAND_STATE: u64 = 1;
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn srand(seed: u32) {
     // SAFETY: Single-threaded userspace. Using addr_of_mut for Rust 2024.
-    unsafe { core::ptr::addr_of_mut!(RAND_STATE).write(u64::from(seed)); }
+    unsafe {
+        core::ptr::addr_of_mut!(RAND_STATE).write(u64::from(seed));
+    }
 }
 
 /// Generate a pseudo-random integer in [0, RAND_MAX].
@@ -888,7 +913,9 @@ pub extern "C" fn rand() -> i32 {
     let new_state = state
         .wrapping_mul(6_364_136_223_846_793_005)
         .wrapping_add(1);
-    unsafe { core::ptr::addr_of_mut!(RAND_STATE).write(new_state); }
+    unsafe {
+        core::ptr::addr_of_mut!(RAND_STATE).write(new_state);
+    }
     // Return upper 31 bits as a non-negative i32.
     ((new_state >> 33) & 0x7FFF_FFFF) as i32
 }
@@ -909,7 +936,9 @@ pub unsafe extern "C" fn rand_r(seed: *mut u32) -> i32 {
     // Use a 32-bit LCG: state = state * 1103515245 + 12345 (POSIX spec).
     let state = unsafe { *seed };
     let new_state = state.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-    unsafe { *seed = new_state; }
+    unsafe {
+        *seed = new_state;
+    }
     // Return upper bits as a non-negative i32.
     ((new_state >> 1) & 0x7FFF_FFFF) as i32
 }
@@ -970,7 +999,6 @@ pub unsafe extern "C" fn setstate(statebuf: *mut u8) -> *mut u8 {
 // Temporary files
 // ---------------------------------------------------------------------------
 
-
 /// Create a unique temporary file.
 ///
 /// The `template` string must end with exactly six 'X' characters
@@ -1027,7 +1055,9 @@ pub unsafe extern "C" fn mkstemp(template: *mut u8) -> i32 {
                 b'a'.wrapping_add(idx.wrapping_sub(10))
             };
             // SAFETY: suffix_start + j < len, template is writable.
-            unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
+            unsafe {
+                *template.add(suffix_start.wrapping_add(j)) = ch;
+            }
             j = j.wrapping_add(1);
         }
 
@@ -1074,7 +1104,9 @@ pub unsafe extern "C" fn mktemp(template: *mut u8) -> *mut u8 {
     if len < 6 {
         crate::errno::set_errno(crate::errno::EINVAL);
         // POSIX: mktemp sets template[0] = '\0' on error.
-        unsafe { *template = 0; }
+        unsafe {
+            *template = 0;
+        }
         return core::ptr::null_mut();
     }
 
@@ -1084,7 +1116,9 @@ pub unsafe extern "C" fn mktemp(template: *mut u8) -> *mut u8 {
     while i < 6 {
         if unsafe { *template.add(suffix_start.wrapping_add(i)) } != b'X' {
             crate::errno::set_errno(crate::errno::EINVAL);
-            unsafe { *template = 0; }
+            unsafe {
+                *template = 0;
+            }
             return core::ptr::null_mut();
         }
         i = i.wrapping_add(1);
@@ -1103,7 +1137,9 @@ pub unsafe extern "C" fn mktemp(template: *mut u8) -> *mut u8 {
         } else {
             b'a'.wrapping_add(idx.wrapping_sub(10))
         };
-        unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
+        unsafe {
+            *template.add(suffix_start.wrapping_add(j)) = ch;
+        }
         j = j.wrapping_add(1);
     }
 
@@ -1183,16 +1219,16 @@ pub unsafe extern "C" fn mkostemp(template: *mut u8, flags: i32) -> i32 {
             } else {
                 b'a'.wrapping_add(idx.wrapping_sub(10))
             };
-            unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
+            unsafe {
+                *template.add(suffix_start.wrapping_add(j)) = ch;
+            }
             j = j.wrapping_add(1);
         }
 
         // OR the caller's flags (e.g., O_CLOEXEC, O_APPEND) with the
         // mandatory O_RDWR | O_CREAT | O_EXCL flags.
-        let open_flags = crate::fcntl::O_RDWR
-            | crate::fcntl::O_CREAT
-            | crate::fcntl::O_EXCL
-            | flags;
+        let open_flags =
+            crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | flags;
         let fd = crate::file::open(template, open_flags, 0o600);
         if fd >= 0 {
             return fd;
@@ -1279,8 +1315,14 @@ pub unsafe extern "C" fn mkostemps(template: *mut u8, suffixlen: i32, flags: i32
         let mut j: usize = 0;
         while j < 6 {
             let ch = rand_bytes[j] % 36;
-            let c = if ch < 10 { b'0'.wrapping_add(ch) } else { b'a'.wrapping_add(ch.wrapping_sub(10)) };
-            unsafe { *template.add(x_start.wrapping_add(j)) = c; }
+            let c = if ch < 10 {
+                b'0'.wrapping_add(ch)
+            } else {
+                b'a'.wrapping_add(ch.wrapping_sub(10))
+            };
+            unsafe {
+                *template.add(x_start.wrapping_add(j)) = c;
+            }
             j = j.wrapping_add(1);
         }
 
@@ -1356,7 +1398,9 @@ pub unsafe extern "C" fn mkdtemp(template: *mut u8) -> *mut u8 {
                 b'a'.wrapping_add(idx.wrapping_sub(10))
             };
             // SAFETY: suffix_start + j < len, template is writable.
-            unsafe { *template.add(suffix_start.wrapping_add(j)) = ch; }
+            unsafe {
+                *template.add(suffix_start.wrapping_add(j)) = ch;
+            }
             j = j.wrapping_add(1);
         }
 
@@ -1421,10 +1465,10 @@ pub extern "C" fn system(command: *const u8) -> i32 {
     let ret = crate::spawn::posix_spawn(
         &raw mut pid,
         sh_path,
-        core::ptr::null(),  // file_actions
-        core::ptr::null(),  // attrp
+        core::ptr::null(), // file_actions
+        core::ptr::null(), // attrp
         argv.as_ptr(),
-        core::ptr::null(),  // envp (inherit)
+        core::ptr::null(), // envp (inherit)
     );
 
     if ret != 0 {
@@ -1493,7 +1537,9 @@ fn rand48_step() -> u64 {
     // SAFETY: Single-threaded access.
     let state = unsafe { core::ptr::addr_of_mut!(RAND48_STATE).read() };
     let next = (state.wrapping_mul(RAND48_A).wrapping_add(RAND48_C)) & RAND48_MASK;
-    unsafe { core::ptr::addr_of_mut!(RAND48_STATE).write(next); }
+    unsafe {
+        core::ptr::addr_of_mut!(RAND48_STATE).write(next);
+    }
     next
 }
 
@@ -1531,7 +1577,9 @@ pub extern "C" fn mrand48() -> i64 {
 pub extern "C" fn srand48(seedval: i64) {
     let hi = (seedval as u64) << 16;
     let state = (hi | 0x330E) & RAND48_MASK;
-    unsafe { core::ptr::addr_of_mut!(RAND48_STATE).write(state); }
+    unsafe {
+        core::ptr::addr_of_mut!(RAND48_STATE).write(state);
+    }
 }
 
 /// Seed the 48-bit PRNG with a full 48-bit value.
@@ -1569,7 +1617,9 @@ pub extern "C" fn seed48(seed16v: *const u16) -> *const u16 {
     let s1 = u64::from(unsafe { *seed16v.add(1) });
     let s2 = u64::from(unsafe { *seed16v.add(2) });
     let state = (s2 << 32) | (s1 << 16) | s0;
-    unsafe { core::ptr::addr_of_mut!(RAND48_STATE).write(state & RAND48_MASK); }
+    unsafe {
+        core::ptr::addr_of_mut!(RAND48_STATE).write(state & RAND48_MASK);
+    }
 
     old_seed_ptr.cast::<u16>()
 }
@@ -1737,20 +1787,30 @@ pub unsafe extern "C" fn getsubopt(
             if matched {
                 // Set valuep to the value after '=' (or null).
                 if let Some(ep) = eq_pos {
-                    unsafe { *valuep = opt.add(ep.wrapping_add(1)); }
+                    unsafe {
+                        *valuep = opt.add(ep.wrapping_add(1));
+                    }
                 } else {
-                    unsafe { *valuep = core::ptr::null_mut(); }
+                    unsafe {
+                        *valuep = core::ptr::null_mut();
+                    }
                 }
 
                 // Advance optionp past this suboption.
                 if unsafe { *opt.add(end) } == b',' {
-                    unsafe { *optionp = opt.add(end.wrapping_add(1)); }
+                    unsafe {
+                        *optionp = opt.add(end.wrapping_add(1));
+                    }
                 } else {
-                    unsafe { *optionp = opt.add(end); }
+                    unsafe {
+                        *optionp = opt.add(end);
+                    }
                 }
 
                 // Null-terminate the key portion (write '\0' at '=' or end).
-                unsafe { *opt.add(key_len) = 0; }
+                unsafe {
+                    *opt.add(key_len) = 0;
+                }
 
                 return idx;
             }
@@ -1761,16 +1821,26 @@ pub unsafe extern "C" fn getsubopt(
 
     // No match — still advance past this suboption.
     if let Some(ep) = eq_pos {
-        unsafe { *valuep = opt.add(ep.wrapping_add(1)); }
+        unsafe {
+            *valuep = opt.add(ep.wrapping_add(1));
+        }
     } else {
-        unsafe { *valuep = core::ptr::null_mut(); }
+        unsafe {
+            *valuep = core::ptr::null_mut();
+        }
     }
     if unsafe { *opt.add(end) } == b',' {
-        unsafe { *optionp = opt.add(end.wrapping_add(1)); }
+        unsafe {
+            *optionp = opt.add(end.wrapping_add(1));
+        }
     } else {
-        unsafe { *optionp = opt.add(end); }
+        unsafe {
+            *optionp = opt.add(end);
+        }
     }
-    unsafe { *opt.add(key_len) = 0; }
+    unsafe {
+        *opt.add(key_len) = 0;
+    }
 
     -1
 }
@@ -1793,9 +1863,9 @@ fn base64_decode_digit(c: u8) -> i32 {
     match c {
         b'.' => 0,
         b'/' => 1,
-        b'0'..=b'9' => (c - b'0') as i32 + 2,
-        b'A'..=b'Z' => (c - b'A') as i32 + 12,
-        b'a'..=b'z' => (c - b'a') as i32 + 38,
+        b'0'..=b'9' => i32::from(c - b'0') + 2,
+        b'A'..=b'Z' => i32::from(c - b'A') + 12,
+        b'a'..=b'z' => i32::from(c - b'a') + 38,
         _ => -1,
     }
 }
@@ -1824,7 +1894,7 @@ pub extern "C" fn a64l(s: *const u8) -> i64 {
         if val < 0 {
             break; // Invalid character — stop.
         }
-        result |= (val as i64) << shift;
+        result |= i64::from(val) << shift;
         shift = shift.wrapping_add(6);
         i = i.wrapping_add(1);
     }
@@ -1845,7 +1915,9 @@ pub extern "C" fn l64a(n: i64) -> *const u8 {
     let buf = &raw mut L64A_BUF;
 
     if n == 0 {
-        unsafe { (*buf)[0] = 0; }
+        unsafe {
+            (*buf)[0] = 0;
+        }
         return unsafe { (*buf).as_ptr() };
     }
 
@@ -1853,11 +1925,15 @@ pub extern "C" fn l64a(n: i64) -> *const u8 {
     let mut i: usize = 0;
     while val != 0 && i < 6 {
         let digit = (val & 0x3F) as usize;
-        unsafe { (*buf)[i] = BASE64_DIGITS[digit]; }
+        unsafe {
+            (*buf)[i] = BASE64_DIGITS[digit];
+        }
         val >>= 6;
         i = i.wrapping_add(1);
     }
-    unsafe { (*buf)[i] = 0; } // Null terminate.
+    unsafe {
+        (*buf)[i] = 0;
+    } // Null terminate.
 
     unsafe { (*buf).as_ptr() }
 }
@@ -1923,8 +1999,6 @@ mod tests {
         let val = unsafe { strtol(b"0755\0".as_ptr(), &mut endptr, 0) };
         assert_eq!(val, 493); // 0o755 = 493
     }
-
-
 
     #[test]
     fn test_strtol_empty_string() {
@@ -2170,12 +2244,7 @@ mod tests {
         let tok0: *const u8 = b"ro\0".as_ptr();
         let tok1: *const u8 = b"rw\0".as_ptr();
         let tok2: *const u8 = b"size\0".as_ptr();
-        let tokens: [*const u8; 4] = [
-            tok0,
-            tok1,
-            tok2,
-            core::ptr::null(),
-        ];
+        let tokens: [*const u8; 4] = [tok0, tok1, tok2, core::ptr::null()];
 
         let mut input = *b"rw,size=100\0";
         let mut optionp: *mut u8 = input.as_mut_ptr();
@@ -2405,13 +2474,8 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        let result = unsafe {
-            bsearch(
-                (&key as *const i32).cast(),
-                arr.as_ptr().cast(),
-                6, 4, cmp,
-            )
-        };
+        let result =
+            unsafe { bsearch((&key as *const i32).cast(), arr.as_ptr().cast(), 6, 4, cmp) };
         assert!(!result.is_null());
         assert_eq!(unsafe { *(result as *const i32) }, 7);
     }
@@ -2423,13 +2487,8 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        let result = unsafe {
-            bsearch(
-                (&key as *const i32).cast(),
-                arr.as_ptr().cast(),
-                6, 4, cmp,
-            )
-        };
+        let result =
+            unsafe { bsearch((&key as *const i32).cast(), arr.as_ptr().cast(), 6, 4, cmp) };
         assert!(result.is_null());
     }
 
@@ -2439,13 +2498,7 @@ mod tests {
         unsafe extern "C" fn cmp(a: *const u8, b: *const u8) -> i32 {
             unsafe { *(a as *const i32) - *(b as *const i32) }
         }
-        let result = unsafe {
-            bsearch(
-                (&key as *const i32).cast(),
-                core::ptr::null(),
-                0, 4, cmp,
-            )
-        };
+        let result = unsafe { bsearch((&key as *const i32).cast(), core::ptr::null(), 0, 4, cmp) };
         assert!(result.is_null());
     }
 
@@ -2656,7 +2709,11 @@ mod tests {
     fn test_strtol_i64_min() {
         crate::errno::set_errno(0);
         let v = unsafe {
-            strtol(b"-9223372036854775808\0".as_ptr(), core::ptr::null_mut(), 10)
+            strtol(
+                b"-9223372036854775808\0".as_ptr(),
+                core::ptr::null_mut(),
+                10,
+            )
         };
         assert_eq!(v, i64::MIN);
         assert_eq!(crate::errno::get_errno(), 0); // NOT overflow
@@ -2665,9 +2722,7 @@ mod tests {
     #[test]
     fn test_strtol_i64_max() {
         crate::errno::set_errno(0);
-        let v = unsafe {
-            strtol(b"9223372036854775807\0".as_ptr(), core::ptr::null_mut(), 10)
-        };
+        let v = unsafe { strtol(b"9223372036854775807\0".as_ptr(), core::ptr::null_mut(), 10) };
         assert_eq!(v, i64::MAX);
         assert_eq!(crate::errno::get_errno(), 0);
     }
@@ -2675,9 +2730,7 @@ mod tests {
     #[test]
     fn test_strtol_positive_overflow() {
         crate::errno::set_errno(0);
-        let v = unsafe {
-            strtol(b"9223372036854775808\0".as_ptr(), core::ptr::null_mut(), 10)
-        };
+        let v = unsafe { strtol(b"9223372036854775808\0".as_ptr(), core::ptr::null_mut(), 10) };
         assert_eq!(v, i64::MAX);
         assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
     }
@@ -2686,7 +2739,11 @@ mod tests {
     fn test_strtol_negative_overflow() {
         crate::errno::set_errno(0);
         let v = unsafe {
-            strtol(b"-9223372036854775809\0".as_ptr(), core::ptr::null_mut(), 10)
+            strtol(
+                b"-9223372036854775809\0".as_ptr(),
+                core::ptr::null_mut(),
+                10,
+            )
         };
         assert_eq!(v, i64::MIN);
         assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
@@ -2716,7 +2773,11 @@ mod tests {
     fn test_strtoul_overflow_erange() {
         crate::errno::set_errno(0);
         let v = unsafe {
-            strtoul(b"18446744073709551616\0".as_ptr(), core::ptr::null_mut(), 10)
+            strtoul(
+                b"18446744073709551616\0".as_ptr(),
+                core::ptr::null_mut(),
+                10,
+            )
         };
         assert_eq!(v, u64::MAX);
         assert_eq!(crate::errno::get_errno(), crate::errno::ERANGE);
@@ -2758,8 +2819,12 @@ mod tests {
             let v = mrand48();
             assert!(v >= i64::from(i32::MIN), "mrand48 out of range: {v}");
             assert!(v <= i64::from(i32::MAX), "mrand48 out of range: {v}");
-            if v < 0 { seen_neg = true; }
-            if v > 0 { seen_pos = true; }
+            if v < 0 {
+                seen_neg = true;
+            }
+            if v > 0 {
+                seen_pos = true;
+            }
         }
         assert!(seen_neg, "mrand48 never returned negative");
         assert!(seen_pos, "mrand48 never returned positive");
@@ -2789,7 +2854,11 @@ mod tests {
         let a = drand48();
         srand48(2);
         let b = drand48();
-        assert_ne!(a.to_bits(), b.to_bits(), "different seeds should produce different values");
+        assert_ne!(
+            a.to_bits(),
+            b.to_bits(),
+            "different seeds should produce different values"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2891,7 +2960,11 @@ mod tests {
         let mut valuep: *mut u8 = core::ptr::null_mut();
 
         let idx = unsafe {
-            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
         };
         assert_eq!(idx, 0);
         assert!(valuep.is_null(), "no value expected");
@@ -2910,7 +2983,11 @@ mod tests {
         let mut valuep: *mut u8 = core::ptr::null_mut();
 
         let idx = unsafe {
-            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
         };
         assert_eq!(idx, 2);
         assert!(!valuep.is_null());
@@ -2931,7 +3008,11 @@ mod tests {
         let mut valuep: *mut u8 = core::ptr::null_mut();
 
         let idx = unsafe {
-            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
         };
         assert_eq!(idx, -1);
         assert!(valuep.is_null()); // No '=' → no value.
@@ -2948,7 +3029,11 @@ mod tests {
         let mut valuep: *mut u8 = core::ptr::null_mut();
 
         let idx = unsafe {
-            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
         };
         assert_eq!(idx, -1);
         assert!(!valuep.is_null()); // '=' present → value set.
@@ -2968,17 +3053,29 @@ mod tests {
         let mut valuep: *mut u8 = core::ptr::null_mut();
 
         let idx1 = unsafe {
-            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
         };
         assert_eq!(idx1, 0); // "a"
 
         let idx2 = unsafe {
-            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
         };
         assert_eq!(idx2, 1); // "b"
 
         let idx3 = unsafe {
-            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
         };
         assert_eq!(idx3, 2); // "c"
     }
@@ -2994,7 +3091,11 @@ mod tests {
         let mut valuep: *mut u8 = core::ptr::null_mut();
 
         let idx = unsafe {
-            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
         };
         assert_eq!(idx, 0);
         assert!(!valuep.is_null());
@@ -3009,7 +3110,11 @@ mod tests {
         let mut valuep: *mut u8 = core::ptr::null_mut();
 
         let idx = unsafe {
-            getsubopt(core::ptr::null_mut(), tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+            getsubopt(
+                core::ptr::null_mut(),
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
         };
         assert_eq!(idx, -1);
     }
@@ -3020,9 +3125,7 @@ mod tests {
         let mut optionp: *mut u8 = input.as_mut_ptr();
         let mut valuep: *mut u8 = core::ptr::null_mut();
 
-        let idx = unsafe {
-            getsubopt(&mut optionp, core::ptr::null(), &mut valuep)
-        };
+        let idx = unsafe { getsubopt(&mut optionp, core::ptr::null(), &mut valuep) };
         assert_eq!(idx, -1);
     }
 
@@ -3034,7 +3137,11 @@ mod tests {
         let mut optionp: *mut u8 = input.as_mut_ptr();
 
         let idx = unsafe {
-            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), core::ptr::null_mut())
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                core::ptr::null_mut(),
+            )
         };
         assert_eq!(idx, -1);
     }
@@ -3050,7 +3157,11 @@ mod tests {
         let mut valuep: *mut u8 = core::ptr::null_mut();
 
         let _ = unsafe {
-            getsubopt(&mut optionp, tokens.as_ptr().cast::<*const u8>(), &mut valuep)
+            getsubopt(
+                &mut optionp,
+                tokens.as_ptr().cast::<*const u8>(),
+                &mut valuep,
+            )
         };
         // optionp should now point to "remaining".
         assert_eq!(unsafe { *optionp }, b'r');
@@ -3111,7 +3222,11 @@ mod tests {
     fn test_strtoul_u64_max() {
         crate::errno::set_errno(0);
         let v = unsafe {
-            strtoul(b"18446744073709551615\0".as_ptr(), core::ptr::null_mut(), 10)
+            strtoul(
+                b"18446744073709551615\0".as_ptr(),
+                core::ptr::null_mut(),
+                10,
+            )
         };
         assert_eq!(v, u64::MAX);
         assert_eq!(crate::errno::get_errno(), 0); // NOT overflow
@@ -3304,9 +3419,8 @@ mod tests {
     #[test]
     fn test_qsort_organ_pipe() {
         // "Organ pipe" pattern: ascending then descending.
-        let mut arr: [i32; 50] = core::array::from_fn(|i| {
-            if i < 25 { i as i32 } else { (50 - i) as i32 }
-        });
+        let mut arr: [i32; 50] =
+            core::array::from_fn(|i| if i < 25 { i as i32 } else { (50 - i) as i32 });
         unsafe {
             qsort(
                 arr.as_mut_ptr().cast(),
@@ -3559,13 +3673,31 @@ mod tests {
         let key3: i32 = 7;
 
         let r1 = unsafe {
-            bsearch((&raw const key1).cast(), arr.as_ptr().cast(), 2, 4, cmp_i32_stress)
+            bsearch(
+                (&raw const key1).cast(),
+                arr.as_ptr().cast(),
+                2,
+                4,
+                cmp_i32_stress,
+            )
         };
         let r2 = unsafe {
-            bsearch((&raw const key2).cast(), arr.as_ptr().cast(), 2, 4, cmp_i32_stress)
+            bsearch(
+                (&raw const key2).cast(),
+                arr.as_ptr().cast(),
+                2,
+                4,
+                cmp_i32_stress,
+            )
         };
         let r3 = unsafe {
-            bsearch((&raw const key3).cast(), arr.as_ptr().cast(), 2, 4, cmp_i32_stress)
+            bsearch(
+                (&raw const key3).cast(),
+                arr.as_ptr().cast(),
+                2,
+                4,
+                cmp_i32_stress,
+            )
         };
 
         assert!(!r1.is_null());
@@ -4166,7 +4298,10 @@ mod tests {
     #[test]
     fn test_seed48_null_returns_old_seed() {
         let old = seed48(core::ptr::null());
-        assert!(!old.is_null(), "seed48(NULL) must still return old seed pointer");
+        assert!(
+            !old.is_null(),
+            "seed48(NULL) must still return old seed pointer"
+        );
     }
 
     #[test]
@@ -4178,7 +4313,10 @@ mod tests {
         // Re-seed with the same value.
         seed48(seed.as_ptr());
         let b = drand48();
-        assert_eq!(a, b, "Re-seeding with same values should reproduce sequence");
+        assert_eq!(
+            a, b,
+            "Re-seeding with same values should reproduce sequence"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -4192,10 +4330,7 @@ mod tests {
         assert!(val >= 0, "nrand48 must be non-negative");
         assert!(val < (1_i64 << 31), "nrand48 must be < 2^31");
         // State should have been updated.
-        assert!(
-            xsubi != [1, 2, 3],
-            "nrand48 must update caller state"
-        );
+        assert!(xsubi != [1, 2, 3], "nrand48 must update caller state");
     }
 
     #[test]
@@ -4231,10 +4366,7 @@ mod tests {
         let mut xsubi: [u16; 3] = [5, 10, 15];
         let _val = jrand48(xsubi.as_mut_ptr());
         // jrand48 returns signed values and updates state.
-        assert!(
-            xsubi != [5, 10, 15],
-            "jrand48 must update caller state"
-        );
+        assert!(xsubi != [5, 10, 15], "jrand48 must update caller state");
     }
 
     #[test]

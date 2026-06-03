@@ -115,10 +115,14 @@ mod tests {
     #[test]
     fn test_tmf_types_distinct() {
         let tmfs = [
-            VIRTIO_SCSI_T_TMF_ABORT_TASK, VIRTIO_SCSI_T_TMF_ABORT_TASK_SET,
-            VIRTIO_SCSI_T_TMF_CLEAR_ACA, VIRTIO_SCSI_T_TMF_CLEAR_TASK_SET,
-            VIRTIO_SCSI_T_TMF_I_T_NEXUS_RESET, VIRTIO_SCSI_T_TMF_LOGICAL_UNIT_RESET,
-            VIRTIO_SCSI_T_TMF_QUERY_TASK, VIRTIO_SCSI_T_TMF_QUERY_TASK_SET,
+            VIRTIO_SCSI_T_TMF_ABORT_TASK,
+            VIRTIO_SCSI_T_TMF_ABORT_TASK_SET,
+            VIRTIO_SCSI_T_TMF_CLEAR_ACA,
+            VIRTIO_SCSI_T_TMF_CLEAR_TASK_SET,
+            VIRTIO_SCSI_T_TMF_I_T_NEXUS_RESET,
+            VIRTIO_SCSI_T_TMF_LOGICAL_UNIT_RESET,
+            VIRTIO_SCSI_T_TMF_QUERY_TASK,
+            VIRTIO_SCSI_T_TMF_QUERY_TASK_SET,
         ];
         for i in 0..tmfs.len() {
             for j in (i + 1)..tmfs.len() {
@@ -130,11 +134,16 @@ mod tests {
     #[test]
     fn test_response_codes_distinct() {
         let codes = [
-            VIRTIO_SCSI_S_OK, VIRTIO_SCSI_S_OVERRUN,
-            VIRTIO_SCSI_S_ABORTED, VIRTIO_SCSI_S_BAD_TARGET,
-            VIRTIO_SCSI_S_RESET, VIRTIO_SCSI_S_TRANSPORT_FAILURE,
-            VIRTIO_SCSI_S_TARGET_FAILURE, VIRTIO_SCSI_S_NEXUS_FAILURE,
-            VIRTIO_SCSI_S_FAILURE, VIRTIO_SCSI_S_INCORRECT_LUN,
+            VIRTIO_SCSI_S_OK,
+            VIRTIO_SCSI_S_OVERRUN,
+            VIRTIO_SCSI_S_ABORTED,
+            VIRTIO_SCSI_S_BAD_TARGET,
+            VIRTIO_SCSI_S_RESET,
+            VIRTIO_SCSI_S_TRANSPORT_FAILURE,
+            VIRTIO_SCSI_S_TARGET_FAILURE,
+            VIRTIO_SCSI_S_NEXUS_FAILURE,
+            VIRTIO_SCSI_S_FAILURE,
+            VIRTIO_SCSI_S_INCORRECT_LUN,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -145,7 +154,11 @@ mod tests {
 
     #[test]
     fn test_features_distinct() {
-        let feats = [VIRTIO_SCSI_F_HOTPLUG, VIRTIO_SCSI_F_CHANGE, VIRTIO_SCSI_F_T10_PI];
+        let feats = [
+            VIRTIO_SCSI_F_HOTPLUG,
+            VIRTIO_SCSI_F_CHANGE,
+            VIRTIO_SCSI_F_T10_PI,
+        ];
         for i in 0..feats.len() {
             for j in (i + 1)..feats.len() {
                 assert_ne!(feats[i], feats[j]);
@@ -156,8 +169,10 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            VIRTIO_SCSI_T_NO_EVENT, VIRTIO_SCSI_T_TRANSPORT_RESET,
-            VIRTIO_SCSI_T_ASYNC_NOTIFY, VIRTIO_SCSI_T_PARAM_CHANGE,
+            VIRTIO_SCSI_T_NO_EVENT,
+            VIRTIO_SCSI_T_TRANSPORT_RESET,
+            VIRTIO_SCSI_T_ASYNC_NOTIFY,
+            VIRTIO_SCSI_T_PARAM_CHANGE,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

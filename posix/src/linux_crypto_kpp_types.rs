@@ -84,8 +84,10 @@ mod tests {
     #[test]
     fn test_dh_groups_distinct() {
         let groups = [
-            CRYPTO_DH_GROUP_14, CRYPTO_DH_GROUP_15,
-            CRYPTO_DH_GROUP_16, CRYPTO_DH_GROUP_17,
+            CRYPTO_DH_GROUP_14,
+            CRYPTO_DH_GROUP_15,
+            CRYPTO_DH_GROUP_16,
+            CRYPTO_DH_GROUP_17,
             CRYPTO_DH_GROUP_18,
         ];
         for i in 0..groups.len() {
@@ -98,8 +100,10 @@ mod tests {
     #[test]
     fn test_ecdh_curves_distinct() {
         let curves = [
-            CRYPTO_ECDH_CURVE_P192, CRYPTO_ECDH_CURVE_P256,
-            CRYPTO_ECDH_CURVE_P384, CRYPTO_ECDH_CURVE_P521,
+            CRYPTO_ECDH_CURVE_P192,
+            CRYPTO_ECDH_CURVE_P256,
+            CRYPTO_ECDH_CURVE_P384,
+            CRYPTO_ECDH_CURVE_P521,
         ];
         for i in 0..curves.len() {
             for j in (i + 1)..curves.len() {

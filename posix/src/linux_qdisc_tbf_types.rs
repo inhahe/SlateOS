@@ -35,9 +35,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_TBF_UNSPEC, TCA_TBF_PARMS, TCA_TBF_RTAB,
-            TCA_TBF_PTAB, TCA_TBF_RATE64, TCA_TBF_PRATE64,
-            TCA_TBF_BURST, TCA_TBF_PBURST,
+            TCA_TBF_UNSPEC,
+            TCA_TBF_PARMS,
+            TCA_TBF_RTAB,
+            TCA_TBF_PTAB,
+            TCA_TBF_RATE64,
+            TCA_TBF_PRATE64,
+            TCA_TBF_BURST,
+            TCA_TBF_PBURST,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

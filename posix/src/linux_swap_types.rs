@@ -83,7 +83,10 @@ mod tests {
     fn test_prio_mask() {
         assert_eq!(SWAP_FLAG_PRIO_MASK, 0x7FFF);
         // Max priority fits in mask
-        assert_eq!((SWAP_PRIO_MAX as u32) & SWAP_FLAG_PRIO_MASK, SWAP_PRIO_MAX as u32);
+        assert_eq!(
+            (SWAP_PRIO_MAX as u32) & SWAP_FLAG_PRIO_MASK,
+            SWAP_PRIO_MAX as u32
+        );
     }
 
     #[test]

@@ -167,8 +167,7 @@ impl Descriptor {
 
 static MQ_LOCK: AtomicBool = AtomicBool::new(false);
 static mut MQ_QUEUES: [Queue; MAX_QUEUES] = [const { Queue::EMPTY }; MAX_QUEUES];
-static mut MQ_DESCS: [Descriptor; MAX_DESCRIPTORS] =
-    [const { Descriptor::EMPTY }; MAX_DESCRIPTORS];
+static mut MQ_DESCS: [Descriptor; MAX_DESCRIPTORS] = [const { Descriptor::EMPTY }; MAX_DESCRIPTORS];
 
 fn lock_acquire() {
     while MQ_LOCK
@@ -403,12 +402,7 @@ unsafe fn free_queue(qidx: usize) {
 ///
 /// Returns a positive descriptor on success, -1 with errno on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mq_open(
-    name: *const u8,
-    oflag: i32,
-    _mode: u32,
-    attr: *const MqAttr,
-) -> MqdT {
+pub extern "C" fn mq_open(name: *const u8, oflag: i32, _mode: u32, attr: *const MqAttr) -> MqdT {
     // Validate name outside the lock — it's read-only and bounded.
     // Linux's `getname(u_name)` runs before `do_open`, so name errors
     // (EFAULT/ENOENT/ENAMETOOLONG) surface before access-mode EINVAL.
@@ -443,14 +437,13 @@ pub extern "C" fn mq_open(
         }
         let qs = unsafe { queues_ptr() };
         let q = unsafe { qs.add(qidx) };
-        let didx = match unsafe { alloc_descriptor(qidx, nonblock) } {
-            Some(i) => i,
-            None => {
-                errno::set_errno(errno::EMFILE);
-                return -1;
-            }
+        let didx = if let Some(i) = unsafe { alloc_descriptor(qidx, nonblock) } { i } else {
+            errno::set_errno(errno::EMFILE);
+            return -1;
         };
-        unsafe { (*q).refcount = (*q).refcount.wrapping_add(1); }
+        unsafe {
+            (*q).refcount = (*q).refcount.wrapping_add(1);
+        }
         return (didx as MqdT).wrapping_add(1);
     }
 
@@ -478,24 +471,22 @@ pub extern "C" fn mq_open(
         (mm_usz, ms_usz)
     };
 
-    let qidx = match unsafe { alloc_queue(&name_buf, name_len, max_msgs, msg_size) } {
-        Some(i) => i,
-        None => {
-            errno::set_errno(errno::ENOSPC);
-            return -1;
-        }
+    let qidx = if let Some(i) = unsafe { alloc_queue(&name_buf, name_len, max_msgs, msg_size) } { i } else {
+        errno::set_errno(errno::ENOSPC);
+        return -1;
     };
-    let didx = match unsafe { alloc_descriptor(qidx, nonblock) } {
-        Some(i) => i,
-        None => {
-            // Roll back the freshly-allocated queue.
-            unsafe { free_queue(qidx); }
-            errno::set_errno(errno::EMFILE);
-            return -1;
+    let didx = if let Some(i) = unsafe { alloc_descriptor(qidx, nonblock) } { i } else {
+        // Roll back the freshly-allocated queue.
+        unsafe {
+            free_queue(qidx);
         }
+        errno::set_errno(errno::EMFILE);
+        return -1;
     };
     let qs = unsafe { queues_ptr() };
-    unsafe { (*qs.add(qidx)).refcount = 1; }
+    unsafe {
+        (*qs.add(qidx)).refcount = 1;
+    }
     (didx as MqdT).wrapping_add(1)
 }
 
@@ -544,12 +535,9 @@ pub extern "C" fn mq_unlink(name: *const u8) -> i32 {
     };
     let _g = lock();
     // SAFETY: Lock held.
-    let qidx = match unsafe { find_queue_by_name(&name_buf[..name_len]) } {
-        Some(i) => i,
-        None => {
-            errno::set_errno(errno::ENOENT);
-            return -1;
-        }
+    let qidx = if let Some(i) = unsafe { find_queue_by_name(&name_buf[..name_len]) } { i } else {
+        errno::set_errno(errno::ENOENT);
+        return -1;
     };
     unsafe {
         let q = queues_ptr().add(qidx);
@@ -660,7 +648,9 @@ fn send_common(
                 return -1;
             }
             if unsafe { queue_has_space(qidx) } {
-                unsafe { enqueue(qidx, msg, len, prio); }
+                unsafe {
+                    enqueue(qidx, msg, len, prio);
+                }
                 true
             } else if nonblock {
                 errno::set_errno(errno::EAGAIN);
@@ -685,12 +675,7 @@ fn send_common(
 
 /// Send a message to a queue.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mq_send(
-    mqdes: MqdT,
-    msg_ptr: *const u8,
-    msg_len: usize,
-    msg_prio: u32,
-) -> i32 {
+pub extern "C" fn mq_send(mqdes: MqdT, msg_ptr: *const u8, msg_len: usize, msg_prio: u32) -> i32 {
     send_common(mqdes, msg_ptr, msg_len, msg_prio, None)
 }
 
@@ -735,7 +720,11 @@ unsafe fn dequeue(qidx: usize, out: *mut u8, out_capacity: usize) -> (u32, usize
         (*q).msgs[cur.wrapping_sub(1)].in_use = false;
         (*q).cur_msgs = cur.wrapping_sub(1);
         // Copy out.
-        let n = if head.len < out_capacity { head.len } else { out_capacity };
+        let n = if head.len < out_capacity {
+            head.len
+        } else {
+            out_capacity
+        };
         if n > 0 {
             core::ptr::copy_nonoverlapping(head.data.as_ptr(), out, n);
         }
@@ -792,7 +781,9 @@ fn recv_common(
         if let Some((prio, len)) = result {
             if !prio_out.is_null() {
                 // SAFETY: Caller contract — prio_out is writable if non-null.
-                unsafe { *prio_out = prio; }
+                unsafe {
+                    *prio_out = prio;
+                }
             }
             return len as isize;
         }
@@ -854,7 +845,11 @@ pub extern "C" fn mq_getattr(mqdes: MqdT, attr: *mut MqAttr) -> i32 {
     let q = unsafe { queues_ptr().add(qidx) };
     // SAFETY: attr non-null.
     unsafe {
-        (*attr).mq_flags = if nonblock { crate::fcntl::O_NONBLOCK as i64 } else { 0 };
+        (*attr).mq_flags = if nonblock {
+            i64::from(crate::fcntl::O_NONBLOCK)
+        } else {
+            0
+        };
         (*attr).mq_maxmsg = (*q).max_msgs as i64;
         (*attr).mq_msgsize = (*q).msg_size as i64;
         (*attr).mq_curmsgs = (*q).cur_msgs as i64;
@@ -868,11 +863,7 @@ pub extern "C" fn mq_getattr(mqdes: MqdT, attr: *mut MqAttr) -> i32 {
 /// other fields are ignored.  If `oldattr` is non-null the previous
 /// attributes are written there.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mq_setattr(
-    mqdes: MqdT,
-    newattr: *const MqAttr,
-    oldattr: *mut MqAttr,
-) -> i32 {
+pub extern "C" fn mq_setattr(mqdes: MqdT, newattr: *const MqAttr, oldattr: *mut MqAttr) -> i32 {
     if newattr.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -887,7 +878,11 @@ pub extern "C" fn mq_setattr(
     if !oldattr.is_null() {
         // SAFETY: caller contract.
         unsafe {
-            (*oldattr).mq_flags = if nonblock_old { crate::fcntl::O_NONBLOCK as i64 } else { 0 };
+            (*oldattr).mq_flags = if nonblock_old {
+                i64::from(crate::fcntl::O_NONBLOCK)
+            } else {
+                0
+            };
             (*oldattr).mq_maxmsg = (*q).max_msgs as i64;
             (*oldattr).mq_msgsize = (*q).msg_size as i64;
             (*oldattr).mq_curmsgs = (*q).cur_msgs as i64;
@@ -897,7 +892,9 @@ pub extern "C" fn mq_setattr(
     let flags = unsafe { (*newattr).mq_flags };
     let nonblock_new = (flags & i64::from(crate::fcntl::O_NONBLOCK)) != 0;
     let d = unsafe { descs_ptr().add(didx) };
-    unsafe { (*d).nonblock = nonblock_new; }
+    unsafe {
+        (*d).nonblock = nonblock_new;
+    }
     0
 }
 
@@ -958,7 +955,10 @@ pub extern "C" fn mq_notify(mqdes: MqdT, sevp: *const u8) -> i32 {
 /// Read the current `CLOCK_REALTIME` (which on our system is the same
 /// monotonic clock as `CLOCK_MONOTONIC`) as nanoseconds since boot.
 fn now_realtime_ns() -> u64 {
-    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     let r = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut ts);
     if r != 0 {
         return 0;
@@ -1045,7 +1045,12 @@ mod tests {
     }
 
     fn open_default(name: &[u8], oflag: i32) -> MqdT {
-        mq_open(name.as_ptr(), oflag | O_CREAT | O_RDWR, 0o600, core::ptr::null())
+        mq_open(
+            name.as_ptr(),
+            oflag | O_CREAT | O_RDWR,
+            0o600,
+            core::ptr::null(),
+        )
     }
 
     // -- MqAttr layout --
@@ -1113,7 +1118,12 @@ mod tests {
         let a = open_default(b"/qexist\0", O_NONBLOCK);
         assert!(a > 0);
         // Reopen without O_CREAT.
-        let b = mq_open(b"/qexist\0".as_ptr(), O_RDWR | O_NONBLOCK, 0, core::ptr::null());
+        let b = mq_open(
+            b"/qexist\0".as_ptr(),
+            O_RDWR | O_NONBLOCK,
+            0,
+            core::ptr::null(),
+        );
         assert!(b > 0, "reopen without O_CREAT should succeed (got {b})");
         assert_eq!(mq_close(a), 0);
         assert_eq!(mq_close(b), 0);
@@ -1122,7 +1132,12 @@ mod tests {
     #[test]
     fn test_open_missing_without_o_creat_enoent() {
         let _g = lock_tests();
-        let r = mq_open(b"/no_such\0".as_ptr(), O_RDWR | O_NONBLOCK, 0, core::ptr::null());
+        let r = mq_open(
+            b"/no_such\0".as_ptr(),
+            O_RDWR | O_NONBLOCK,
+            0,
+            core::ptr::null(),
+        );
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOENT);
     }
@@ -1244,7 +1259,12 @@ mod tests {
         assert!(fd > 0);
         assert_eq!(mq_unlink(b"/qun\0".as_ptr()), 0);
         // Reopen without O_CREAT should now fail.
-        let r = mq_open(b"/qun\0".as_ptr(), O_RDWR | O_NONBLOCK, 0, core::ptr::null());
+        let r = mq_open(
+            b"/qun\0".as_ptr(),
+            O_RDWR | O_NONBLOCK,
+            0,
+            core::ptr::null(),
+        );
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOENT);
         // Original descriptor still works until closed.
@@ -1408,7 +1428,11 @@ mod tests {
         let fd = open_default(b"/qa\0", O_NONBLOCK);
         assert!(fd > 0);
         let mut a = MqAttr {
-            mq_flags: 0, mq_maxmsg: 0, mq_msgsize: 0, mq_curmsgs: 0, _pad: [0; 4],
+            mq_flags: 0,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _pad: [0; 4],
         };
         assert_eq!(mq_getattr(fd, &raw mut a), 0);
         assert_eq!(a.mq_maxmsg, DEFAULT_MAXMSG as i64);
@@ -1426,7 +1450,11 @@ mod tests {
         assert_eq!(mq_send(fd, b"a".as_ptr(), 1, 0), 0);
         assert_eq!(mq_send(fd, b"b".as_ptr(), 1, 0), 0);
         let mut a = MqAttr {
-            mq_flags: 0, mq_maxmsg: 0, mq_msgsize: 0, mq_curmsgs: 0, _pad: [0; 4],
+            mq_flags: 0,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _pad: [0; 4],
         };
         assert_eq!(mq_getattr(fd, &raw mut a), 0);
         assert_eq!(a.mq_curmsgs, 2);
@@ -1440,16 +1468,28 @@ mod tests {
         assert!(fd > 0);
         // Clear O_NONBLOCK via setattr.
         let new = MqAttr {
-            mq_flags: 0, mq_maxmsg: 99, mq_msgsize: 99, mq_curmsgs: 0, _pad: [0; 4],
+            mq_flags: 0,
+            mq_maxmsg: 99,
+            mq_msgsize: 99,
+            mq_curmsgs: 0,
+            _pad: [0; 4],
         };
         let mut old = MqAttr {
-            mq_flags: 0, mq_maxmsg: 0, mq_msgsize: 0, mq_curmsgs: 0, _pad: [0; 4],
+            mq_flags: 0,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _pad: [0; 4],
         };
         assert_eq!(mq_setattr(fd, &raw const new, &raw mut old), 0);
         assert_eq!(old.mq_flags, crate::fcntl::O_NONBLOCK as i64);
         // Confirm via getattr (maxmsg/msgsize should NOT have changed).
         let mut now = MqAttr {
-            mq_flags: 0, mq_maxmsg: 0, mq_msgsize: 0, mq_curmsgs: 0, _pad: [0; 4],
+            mq_flags: 0,
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _pad: [0; 4],
         };
         assert_eq!(mq_getattr(fd, &raw mut now), 0);
         assert_eq!(now.mq_flags, 0);
@@ -1465,7 +1505,10 @@ mod tests {
         assert!(fd > 0);
         let new = MqAttr {
             mq_flags: crate::fcntl::O_NONBLOCK as i64,
-            mq_maxmsg: 0, mq_msgsize: 0, mq_curmsgs: 0, _pad: [0; 4],
+            mq_maxmsg: 0,
+            mq_msgsize: 0,
+            mq_curmsgs: 0,
+            _pad: [0; 4],
         };
         assert_eq!(mq_setattr(fd, &raw const new, core::ptr::null_mut()), 0);
         assert_eq!(mq_close(fd), 0);
@@ -1502,9 +1545,18 @@ mod tests {
         // past-deadline timespec.  Expect ETIMEDOUT.
         let fd = open_default(b"/qto\0", 0);
         assert!(fd > 0);
-        let past = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let past = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let mut buf = [0u8; 64];
-        let r = mq_timedreceive(fd, buf.as_mut_ptr(), 64, core::ptr::null_mut(), &raw const past);
+        let r = mq_timedreceive(
+            fd,
+            buf.as_mut_ptr(),
+            64,
+            core::ptr::null_mut(),
+            &raw const past,
+        );
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ETIMEDOUT);
         assert_eq!(mq_close(fd), 0);
@@ -1516,7 +1568,10 @@ mod tests {
         let fd = open_default(b"/qts\0", O_NONBLOCK);
         assert!(fd > 0);
         // Future deadline; queue is empty, so the send happens immediately.
-        let mut now = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut now = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
         let deadline = Timespec {
             tv_sec: now.tv_sec + 60,
@@ -1532,7 +1587,10 @@ mod tests {
         let _g = lock_tests();
         let fd = open_default(b"/qtinv\0", O_NONBLOCK);
         assert!(fd > 0);
-        let bad = Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 };
+        let bad = Timespec {
+            tv_sec: 0,
+            tv_nsec: 2_000_000_000,
+        };
         let r = mq_timedsend(fd, b"x".as_ptr(), 1, 0, &raw const bad);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1545,7 +1603,13 @@ mod tests {
         let fd = open_default(b"/qtnull\0", O_NONBLOCK);
         assert!(fd > 0);
         let mut buf = [0u8; 64];
-        let r = mq_timedreceive(fd, buf.as_mut_ptr(), 64, core::ptr::null_mut(), core::ptr::null());
+        let r = mq_timedreceive(
+            fd,
+            buf.as_mut_ptr(),
+            64,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+        );
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
         assert_eq!(mq_close(fd), 0);
@@ -1583,7 +1647,12 @@ mod tests {
     fn test_two_opens_one_unlink_close_both() {
         let _g = lock_tests();
         let a = open_default(b"/qrc\0", O_NONBLOCK);
-        let b = mq_open(b"/qrc\0".as_ptr(), O_RDWR | O_NONBLOCK, 0, core::ptr::null());
+        let b = mq_open(
+            b"/qrc\0".as_ptr(),
+            O_RDWR | O_NONBLOCK,
+            0,
+            core::ptr::null(),
+        );
         assert!(a > 0 && b > 0);
         assert_ne!(a, b);
         // Send via a, receive via b.
@@ -1597,7 +1666,12 @@ mod tests {
         assert_eq!(mq_close(a), 0);
         assert_eq!(mq_close(b), 0);
         // Reopen without O_CREAT must now fail.
-        let r = mq_open(b"/qrc\0".as_ptr(), O_RDWR | O_NONBLOCK, 0, core::ptr::null());
+        let r = mq_open(
+            b"/qrc\0".as_ptr(),
+            O_RDWR | O_NONBLOCK,
+            0,
+            core::ptr::null(),
+        );
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOENT);
     }
@@ -1611,7 +1685,12 @@ mod tests {
         let a = open_default(b"/qpersist\0", O_NONBLOCK);
         assert!(a > 0);
         assert_eq!(mq_send(a, b"keep".as_ptr(), 4, 0), 0);
-        let b = mq_open(b"/qpersist\0".as_ptr(), O_RDWR | O_NONBLOCK, 0, core::ptr::null());
+        let b = mq_open(
+            b"/qpersist\0".as_ptr(),
+            O_RDWR | O_NONBLOCK,
+            0,
+            core::ptr::null(),
+        );
         assert!(b > 0);
         // Close a; queue stays alive because b holds it open.
         assert_eq!(mq_close(a), 0);
@@ -1674,12 +1753,22 @@ mod tests {
         // consumed one slot).  We'll reach EMFILE on the next.
         let mut extras: Vec<i32> = Vec::new();
         for _ in 1..MAX_DESCRIPTORS {
-            let r = mq_open(b"/qex\0".as_ptr(), O_RDWR | O_NONBLOCK, 0, core::ptr::null());
+            let r = mq_open(
+                b"/qex\0".as_ptr(),
+                O_RDWR | O_NONBLOCK,
+                0,
+                core::ptr::null(),
+            );
             assert!(r > 0);
             extras.push(r);
         }
         // Next open should EMFILE.
-        let over = mq_open(b"/qex\0".as_ptr(), O_RDWR | O_NONBLOCK, 0, core::ptr::null());
+        let over = mq_open(
+            b"/qex\0".as_ptr(),
+            O_RDWR | O_NONBLOCK,
+            0,
+            core::ptr::null(),
+        );
         assert_eq!(over, -1);
         assert_eq!(errno::get_errno(), errno::EMFILE);
         assert_eq!(mq_close(fd0), 0);
@@ -1928,7 +2017,11 @@ mod tests {
             0o600,
             core::ptr::null(),
         );
-        assert!(r > 0, "O_RDONLY must be accepted (errno={})", errno::get_errno());
+        assert!(
+            r > 0,
+            "O_RDONLY must be accepted (errno={})",
+            errno::get_errno()
+        );
         let _ = mq_close(r);
         let _ = mq_unlink(b"/q113_rdonly\0".as_ptr());
     }
@@ -1952,7 +2045,11 @@ mod tests {
             0o600,
             core::ptr::null(),
         );
-        assert!(r > 0, "O_WRONLY must be accepted (errno={})", errno::get_errno());
+        assert!(
+            r > 0,
+            "O_WRONLY must be accepted (errno={})",
+            errno::get_errno()
+        );
         let _ = mq_close(r);
         let _ = mq_unlink(b"/q113_wronly\0".as_ptr());
     }
@@ -1967,7 +2064,11 @@ mod tests {
             0o600,
             core::ptr::null(),
         );
-        assert!(r > 0, "O_RDWR must be accepted (errno={})", errno::get_errno());
+        assert!(
+            r > 0,
+            "O_RDWR must be accepted (errno={})",
+            errno::get_errno()
+        );
         let _ = mq_close(r);
         let _ = mq_unlink(b"/q113_rdwr\0".as_ptr());
     }
@@ -2006,7 +2107,11 @@ mod tests {
             0o600,
             core::ptr::null(),
         );
-        assert!(r > 0, "unknown high bits must not block creation (errno={})", errno::get_errno());
+        assert!(
+            r > 0,
+            "unknown high bits must not block creation (errno={})",
+            errno::get_errno()
+        );
         let _ = mq_close(r);
         let _ = mq_unlink(b"/q113_weird\0".as_ptr());
     }
@@ -2032,7 +2137,11 @@ mod tests {
             0o600,
             core::ptr::null(),
         );
-        assert!(r2 > 0, "recovery call must succeed (errno={})", errno::get_errno());
+        assert!(
+            r2 > 0,
+            "recovery call must succeed (errno={})",
+            errno::get_errno()
+        );
         let _ = mq_close(r2);
         let _ = mq_unlink(b"/q113_rec\0".as_ptr());
     }
@@ -2073,12 +2182,7 @@ mod tests {
         // access-mode check and gets EINVAL, same as on Linux.
         let _g = lock_tests();
         errno::set_errno(0);
-        let r = mq_open(
-            b"/q113_negone\0".as_ptr(),
-            -1,
-            0o600,
-            core::ptr::null(),
-        );
+        let r = mq_open(b"/q113_negone\0".as_ptr(), -1, 0o600, core::ptr::null());
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -2098,7 +2202,10 @@ mod tests {
             0o644,
             core::ptr::null(),
         );
-        assert_eq!(r, -1, "expected mq_open to reject O_RDWR|O_WRONLY (conformance test)");
+        assert_eq!(
+            r, -1,
+            "expected mq_open to reject O_RDWR|O_WRONLY (conformance test)"
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 

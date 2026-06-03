@@ -301,14 +301,10 @@ enum DefaultAction {
 /// out-of-range signal numbers.  Based on `signal(7)`.
 fn default_action(sig: i32) -> Option<DefaultAction> {
     match sig {
-        SIGHUP | SIGINT | SIGPIPE | SIGALRM | SIGTERM | SIGUSR1
-        | SIGUSR2 | SIGVTALRM | SIGPROF | SIGIO | SIGPWR => {
-            Some(DefaultAction::Terminate)
-        }
-        SIGQUIT | SIGILL | SIGTRAP | SIGABRT | SIGBUS | SIGFPE
-        | SIGSEGV | SIGXCPU | SIGXFSZ | SIGSYS => {
-            Some(DefaultAction::Core)
-        }
+        SIGHUP | SIGINT | SIGPIPE | SIGALRM | SIGTERM | SIGUSR1 | SIGUSR2 | SIGVTALRM | SIGPROF
+        | SIGIO | SIGPWR => Some(DefaultAction::Terminate),
+        SIGQUIT | SIGILL | SIGTRAP | SIGABRT | SIGBUS | SIGFPE | SIGSEGV | SIGXCPU | SIGXFSZ
+        | SIGSYS => Some(DefaultAction::Core),
         SIGCHLD | SIGURG | SIGWINCH => Some(DefaultAction::Ignore),
         SIGSTOP | SIGTSTP | SIGTTIN | SIGTTOU => Some(DefaultAction::Stop),
         SIGCONT => Some(DefaultAction::Continue),
@@ -400,11 +396,7 @@ pub extern "C" fn __posix_sigjmp_restore_mask(low: u64) {
 #[cfg(target_os = "none")]
 fn set_pending_self(sig: i32) {
     let self_pid = crate::syscall::syscall0(crate::syscall::SYS_PROCESS_ID) as u64;
-    let _ = crate::syscall::syscall2(
-        crate::syscall::SYS_SIGNAL_SEND,
-        self_pid,
-        sig as u64,
-    );
+    let _ = crate::syscall::syscall2(crate::syscall::SYS_SIGNAL_SEND, self_pid, sig as u64);
 }
 
 #[cfg(not(target_os = "none"))]
@@ -848,10 +840,7 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
         // SYS_PROCESS_IS_READY: returns 1 if ready, 0 if alive but not
         // yet ready, negative error if the PID is unknown.  For an
         // existence check we collapse {0, 1} to success.
-        let ret = crate::syscall::syscall1(
-            crate::syscall::SYS_PROCESS_IS_READY,
-            pid as u64,
-        );
+        let ret = crate::syscall::syscall1(crate::syscall::SYS_PROCESS_IS_READY, pid as u64);
         if ret < 0 {
             errno::set_errno(errno::ESRCH);
             return -1;
@@ -866,9 +855,7 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
     }
 
     // Determine if this is a self-signal.
-    let self_pid = crate::syscall::syscall0(
-        crate::syscall::SYS_PROCESS_ID,
-    ) as i32;
+    let self_pid = crate::syscall::syscall0(crate::syscall::SYS_PROCESS_ID) as i32;
 
     match kill_target(pid, self_pid) {
         KillTarget::Self_ => dispatch_self_signal(sig),
@@ -879,9 +866,7 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
         }
         KillTarget::Other => {
             // Phase 203: CAP_KILL gate for cross-process signals.
-            if !crate::sys_capability::has_capability(
-                crate::sys_capability::CAP_KILL,
-            ) {
+            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_KILL) {
                 errno::set_errno(errno::EPERM);
                 return -1;
             }
@@ -890,11 +875,8 @@ pub extern "C" fn kill(pid: i32, sig: i32) -> i32 {
             // signal pending and either delivers it to the target's
             // trampoline or applies the default action.  We don't
             // classify by disposition here — that is the target's job.
-            let ret = crate::syscall::syscall2(
-                crate::syscall::SYS_SIGNAL_SEND,
-                pid as u64,
-                sig as u64,
-            );
+            let ret =
+                crate::syscall::syscall2(crate::syscall::SYS_SIGNAL_SEND, pid as u64, sig as u64);
             if ret < 0 {
                 errno::set_errno(signal_send_errno(ret));
                 return -1;
@@ -931,18 +913,16 @@ pub extern "C" fn raise(sig: i32) -> i32 {
 /// Signal delivery is not implemented (our OS uses IPC), so the
 /// mask only affects what `sigprocmask` returns, not actual behavior.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sigprocmask(
-    how: i32,
-    set: *const SigsetT,
-    oldset: *mut SigsetT,
-) -> i32 {
+pub extern "C" fn sigprocmask(how: i32, set: *const SigsetT, oldset: *mut SigsetT) -> i32 {
     // SAFETY: single-threaded access to BLOCKED_MASK.
     let current = unsafe { core::ptr::addr_of!(BLOCKED_MASK).read() };
 
     // Return old mask if requested.
     if !oldset.is_null() {
         // SAFETY: oldset verified non-null.
-        unsafe { *oldset = current; }
+        unsafe {
+            *oldset = current;
+        }
     }
 
     // Apply new mask if set is non-null.
@@ -980,7 +960,9 @@ pub extern "C" fn sigprocmask(
             }
         };
         // SAFETY: single-threaded access.
-        unsafe { core::ptr::addr_of_mut!(BLOCKED_MASK).write(new_mask); }
+        unsafe {
+            core::ptr::addr_of_mut!(BLOCKED_MASK).write(new_mask);
+        }
 
         // Mirror the low 64 signals to the kernel so asynchronous
         // delivery honours the blocked set.  (Realtime signals 65+
@@ -1000,11 +982,7 @@ pub extern "C" fn sigprocmask(
 ///
 /// Returns 0 on success, or an error number directly (not via errno).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn pthread_sigmask(
-    how: i32,
-    set: *const SigsetT,
-    oldset: *mut SigsetT,
-) -> i32 {
+pub extern "C" fn pthread_sigmask(how: i32, set: *const SigsetT, oldset: *mut SigsetT) -> i32 {
     // In our single-threaded model, pthread_sigmask is identical to
     // sigprocmask.  The only difference per POSIX is that
     // pthread_sigmask returns the error code directly instead of
@@ -1053,7 +1031,9 @@ pub unsafe extern "C" fn sigpending(set: *mut SigsetT) -> i32 {
     let mut out = SigsetT::EMPTY;
     out.bits[0] = pending_signals_low();
     // SAFETY: set verified non-null above.
-    unsafe { *set = out; }
+    unsafe {
+        *set = out;
+    }
     0
 }
 
@@ -1083,7 +1063,9 @@ pub unsafe extern "C" fn sigemptyset(set: *mut SigsetT) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    unsafe { *set = SigsetT::EMPTY; }
+    unsafe {
+        *set = SigsetT::EMPTY;
+    }
     0
 }
 
@@ -1094,7 +1076,9 @@ pub unsafe extern "C" fn sigfillset(set: *mut SigsetT) -> i32 {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    unsafe { (*set).bits = [u64::MAX; 16]; }
+    unsafe {
+        (*set).bits = [u64::MAX; 16];
+    }
     0
 }
 
@@ -1118,7 +1102,9 @@ pub unsafe extern "C" fn sigaddset(set: *mut SigsetT, signum: i32) -> i32 {
     let word = idx / 64;
     let bit = idx % 64;
     // SAFETY: set is non-null, word < 1 for standard signals (< 65).
-    unsafe { (*set).bits[word] |= 1u64 << bit; }
+    unsafe {
+        (*set).bits[word] |= 1u64 << bit;
+    }
     0
 }
 
@@ -1141,7 +1127,9 @@ pub unsafe extern "C" fn sigdelset(set: *mut SigsetT, signum: i32) -> i32 {
     let word = idx / 64;
     let bit = idx % 64;
     // SAFETY: set is non-null.
-    unsafe { (*set).bits[word] &= !(1u64 << bit); }
+    unsafe {
+        (*set).bits[word] &= !(1u64 << bit);
+    }
     0
 }
 
@@ -1282,38 +1270,38 @@ pub extern "C" fn siginterrupt(sig: i32, _flag: i32) -> i32 {
 ///
 /// Index by signal number.  Covers the standard Linux x86_64 signals.
 static SIGNAL_NAMES: [&[u8]; 32] = [
-    b"Unknown signal 0\0",  // 0
-    b"Hangup\0",            // 1  SIGHUP
-    b"Interrupt\0",         // 2  SIGINT
-    b"Quit\0",              // 3  SIGQUIT
-    b"Illegal instruction\0", // 4  SIGILL
-    b"Trace/breakpoint trap\0", // 5  SIGTRAP
-    b"Aborted\0",           // 6  SIGABRT
-    b"Bus error\0",         // 7  SIGBUS
+    b"Unknown signal 0\0",         // 0
+    b"Hangup\0",                   // 1  SIGHUP
+    b"Interrupt\0",                // 2  SIGINT
+    b"Quit\0",                     // 3  SIGQUIT
+    b"Illegal instruction\0",      // 4  SIGILL
+    b"Trace/breakpoint trap\0",    // 5  SIGTRAP
+    b"Aborted\0",                  // 6  SIGABRT
+    b"Bus error\0",                // 7  SIGBUS
     b"Floating point exception\0", // 8  SIGFPE
-    b"Killed\0",            // 9  SIGKILL
-    b"User defined signal 1\0", // 10 SIGUSR1
-    b"Segmentation fault\0", // 11 SIGSEGV
-    b"User defined signal 2\0", // 12 SIGUSR2
-    b"Broken pipe\0",       // 13 SIGPIPE
-    b"Alarm clock\0",       // 14 SIGALRM
-    b"Terminated\0",        // 15 SIGTERM
-    b"Stack fault\0",       // 16 SIGSTKFLT (unused on modern Linux x86_64)
-    b"Child exited\0",      // 17 SIGCHLD
-    b"Continued\0",         // 18 SIGCONT
-    b"Stopped (signal)\0",  // 19 SIGSTOP
-    b"Stopped\0",           // 20 SIGTSTP
-    b"Stopped (tty input)\0",  // 21 SIGTTIN
-    b"Stopped (tty output)\0", // 22 SIGTTOU
-    b"Urgent I/O condition\0", // 23 SIGURG
-    b"CPU time limit exceeded\0", // 24 SIGXCPU
+    b"Killed\0",                   // 9  SIGKILL
+    b"User defined signal 1\0",    // 10 SIGUSR1
+    b"Segmentation fault\0",       // 11 SIGSEGV
+    b"User defined signal 2\0",    // 12 SIGUSR2
+    b"Broken pipe\0",              // 13 SIGPIPE
+    b"Alarm clock\0",              // 14 SIGALRM
+    b"Terminated\0",               // 15 SIGTERM
+    b"Stack fault\0",              // 16 SIGSTKFLT (unused on modern Linux x86_64)
+    b"Child exited\0",             // 17 SIGCHLD
+    b"Continued\0",                // 18 SIGCONT
+    b"Stopped (signal)\0",         // 19 SIGSTOP
+    b"Stopped\0",                  // 20 SIGTSTP
+    b"Stopped (tty input)\0",      // 21 SIGTTIN
+    b"Stopped (tty output)\0",     // 22 SIGTTOU
+    b"Urgent I/O condition\0",     // 23 SIGURG
+    b"CPU time limit exceeded\0",  // 24 SIGXCPU
     b"File size limit exceeded\0", // 25 SIGXFSZ
-    b"Virtual timer expired\0",   // 26 SIGVTALRM
-    b"Profiling timer expired\0", // 27 SIGPROF
-    b"Window changed\0",    // 28 SIGWINCH
-    b"I/O possible\0",      // 29 SIGIO/SIGPOLL
-    b"Power failure\0",     // 30 SIGPWR
-    b"Bad system call\0",   // 31 SIGSYS
+    b"Virtual timer expired\0",    // 26 SIGVTALRM
+    b"Profiling timer expired\0",  // 27 SIGPROF
+    b"Window changed\0",           // 28 SIGWINCH
+    b"I/O possible\0",             // 29 SIGIO/SIGPOLL
+    b"Power failure\0",            // 30 SIGPWR
+    b"Bad system call\0",          // 31 SIGSYS
 ];
 
 /// Unknown signal message buffer.
@@ -1384,7 +1372,9 @@ pub extern "C" fn sigwait(set: *const SigsetT, sig: *mut i32) -> i32 {
     let _ = crate::syscall::syscall1(crate::syscall::SYS_SLEEP, 1_000_000_000_u64);
     if !sig.is_null() {
         // SAFETY: sig is valid if non-null (caller contract).
-        unsafe { *sig = 0; }
+        unsafe {
+            *sig = 0;
+        }
     }
     crate::errno::EINTR
 }
@@ -1485,9 +1475,7 @@ pub extern "C" fn sigqueue(pid: crate::types::PidT, sig: i32, _value: usize) -> 
     // 3. Phase 204: CAP_KILL gate — same contract as kill() Phase 203.
     //    sigqueue always targets a specific pid (no process-group
     //    forms), so the gate fires for every well-formed call.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_KILL,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_KILL) {
         crate::errno::set_errno(crate::errno::EPERM);
         return -1;
     }
@@ -1586,8 +1574,14 @@ impl Default for SiginfoT {
 /// case "Unknown signal" is printed).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn psiginfo(info: *const SiginfoT, msg: *const u8) {
-    let signum = if info.is_null() { 0 } else { unsafe { (*info).si_signo } };
-    unsafe { psignal(signum, msg); }
+    let signum = if info.is_null() {
+        0
+    } else {
+        unsafe { (*info).si_signo }
+    };
+    unsafe {
+        psignal(signum, msg);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1704,7 +1698,9 @@ mod tests {
 
     #[test]
     fn test_sigemptyset_basic() {
-        let mut set = SigsetT { bits: [0xFFFF_FFFF_FFFF_FFFF; 16] };
+        let mut set = SigsetT {
+            bits: [0xFFFF_FFFF_FFFF_FFFF; 16],
+        };
         let ret = unsafe { sigemptyset(&raw mut set) };
         assert_eq!(ret, 0);
         assert!(set.bits.iter().all(|&w| w == 0));
@@ -1748,13 +1744,13 @@ mod tests {
     fn test_sigaddset_multiple() {
         let mut set = SigsetT::EMPTY;
         unsafe {
-            sigaddset(&raw mut set, SIGHUP);   // bit 0
-            sigaddset(&raw mut set, SIGTERM);   // bit 14
-            sigaddset(&raw mut set, SIGKILL);   // bit 8
+            sigaddset(&raw mut set, SIGHUP); // bit 0
+            sigaddset(&raw mut set, SIGTERM); // bit 14
+            sigaddset(&raw mut set, SIGKILL); // bit 8
         }
-        assert_ne!(set.bits[0] & (1u64 << 0), 0);   // SIGHUP
-        assert_ne!(set.bits[0] & (1u64 << 14), 0);  // SIGTERM
-        assert_ne!(set.bits[0] & (1u64 << 8), 0);   // SIGKILL
+        assert_ne!(set.bits[0] & (1u64 << 0), 0); // SIGHUP
+        assert_ne!(set.bits[0] & (1u64 << 14), 0); // SIGTERM
+        assert_ne!(set.bits[0] & (1u64 << 8), 0); // SIGKILL
         // Only those three bits set in word 0
         assert_eq!(set.bits[0] & !(1u64 << 0 | 1u64 << 14 | 1u64 << 8), 0);
         assert!(set.bits[1..].iter().all(|&w| w == 0));
@@ -1808,7 +1804,9 @@ mod tests {
 
     #[test]
     fn test_sigdelset_basic() {
-        let mut set = SigsetT { bits: [u64::MAX; 16] };
+        let mut set = SigsetT {
+            bits: [u64::MAX; 16],
+        };
         let ret = unsafe { sigdelset(&raw mut set, SIGINT) };
         assert_eq!(ret, 0);
         assert_eq!(set.bits[0] & (1u64 << 1), 0); // SIGINT bit cleared
@@ -1830,7 +1828,9 @@ mod tests {
 
     #[test]
     fn test_sigdelset_invalid() {
-        let mut set = SigsetT { bits: [u64::MAX; 16] };
+        let mut set = SigsetT {
+            bits: [u64::MAX; 16],
+        };
         let ret = unsafe { sigdelset(&raw mut set, 0) };
         assert_eq!(ret, -1);
     }
@@ -1854,7 +1854,9 @@ mod tests {
 
     #[test]
     fn test_sigismember_full_set() {
-        let set = SigsetT { bits: [u64::MAX; 16] };
+        let set = SigsetT {
+            bits: [u64::MAX; 16],
+        };
         for sig in 1..NSIG {
             let ret = unsafe { sigismember(&raw const set, sig) };
             assert_eq!(ret, 1, "signal {sig} should be in full set");
@@ -1869,7 +1871,9 @@ mod tests {
 
     #[test]
     fn test_sigismember_invalid() {
-        let set = SigsetT { bits: [u64::MAX; 16] };
+        let set = SigsetT {
+            bits: [u64::MAX; 16],
+        };
         let ret = unsafe { sigismember(&raw const set, 0) };
         assert_eq!(ret, -1);
     }
@@ -1879,10 +1883,14 @@ mod tests {
     #[test]
     fn test_sigaddset_then_sigismember() {
         let mut set = SigsetT::EMPTY;
-        unsafe { sigemptyset(&raw mut set); }
+        unsafe {
+            sigemptyset(&raw mut set);
+        }
 
         // Add SIGTERM, verify it's there
-        unsafe { sigaddset(&raw mut set, SIGTERM); }
+        unsafe {
+            sigaddset(&raw mut set, SIGTERM);
+        }
         assert_eq!(unsafe { sigismember(&raw const set, SIGTERM) }, 1);
 
         // SIGINT should still be absent
@@ -1901,7 +1909,9 @@ mod tests {
         assert_eq!(unsafe { sigismember(&raw const set, SIGTERM) }, 1);
 
         // Remove SIGINT
-        unsafe { sigdelset(&raw mut set, SIGINT); }
+        unsafe {
+            sigdelset(&raw mut set, SIGINT);
+        }
         assert_eq!(unsafe { sigismember(&raw const set, SIGINT) }, 0);
         assert_eq!(unsafe { sigismember(&raw const set, SIGTERM) }, 1);
     }
@@ -1994,7 +2004,9 @@ mod tests {
         assert_eq!(check_act.sa_mask, mask);
 
         // Restore original
-        unsafe { sigaction(SIGTERM, &raw const old_act, core::ptr::null_mut()); }
+        unsafe {
+            sigaction(SIGTERM, &raw const old_act, core::ptr::null_mut());
+        }
     }
 
     #[test]
@@ -2065,7 +2077,9 @@ mod tests {
         assert_eq!(check.sa_restorer, 0x1234_5678);
 
         // Restore.
-        unsafe { sigaction(SIGUSR1, &raw const old, core::ptr::null_mut()); }
+        unsafe {
+            sigaction(SIGUSR1, &raw const old, core::ptr::null_mut());
+        }
     }
 
     #[test]
@@ -2079,7 +2093,9 @@ mod tests {
             sa_flags: SA_RESTART,
             sa_restorer: 42,
         };
-        unsafe { sigaction(SIGUSR2, &raw const act, core::ptr::null_mut()); }
+        unsafe {
+            sigaction(SIGUSR2, &raw const act, core::ptr::null_mut());
+        }
 
         // Now use signal() to change the handler — it should reset
         // sa_mask/sa_flags/sa_restorer.
@@ -2092,7 +2108,9 @@ mod tests {
             sa_flags: 0,
             sa_restorer: 0,
         };
-        unsafe { sigaction(SIGUSR2, core::ptr::null(), &raw mut check); }
+        unsafe {
+            sigaction(SIGUSR2, core::ptr::null(), &raw mut check);
+        }
         assert_eq!(check.sa_handler, SIG_DFL);
         assert_eq!(check.sa_mask, SigsetT::EMPTY);
         assert_eq!(check.sa_flags, 0);
@@ -2107,7 +2125,9 @@ mod tests {
     /// global BLOCKED_MASK persists between tests.
     fn reset_blocked_mask() {
         // SAFETY: single-threaded, tests run with --test-threads=1.
-        unsafe { core::ptr::addr_of_mut!(BLOCKED_MASK).write(SigsetT::EMPTY); }
+        unsafe {
+            core::ptr::addr_of_mut!(BLOCKED_MASK).write(SigsetT::EMPTY);
+        }
     }
 
     #[test]
@@ -2538,9 +2558,7 @@ mod tests {
                 // Saved + sa_mask + the delivered signal itself.
                 assert_eq!(
                     mask_during,
-                    sigmask_bit(SIGINT)
-                        | sigmask_bit(SIGTERM)
-                        | sigmask_bit(SIGUSR1)
+                    sigmask_bit(SIGINT) | sigmask_bit(SIGTERM) | sigmask_bit(SIGUSR1)
                 );
             }
             other => panic!("expected Handler, got {other:?}"),
@@ -2655,16 +2673,14 @@ mod tests {
         }
         impl CapGuard {
             pub(super) fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -2679,8 +2695,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -2689,8 +2704,7 @@ mod tests {
             let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << cap);
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2705,8 +2719,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed dropping cap");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -3033,14 +3046,20 @@ mod tests {
 
         // Block signal 10.
         let mut block = SigsetT::EMPTY;
-        unsafe { sigaddset(&raw mut block, 10); }
+        unsafe {
+            sigaddset(&raw mut block, 10);
+        }
         let ret = pthread_sigmask(SIG_BLOCK, &raw const block, core::ptr::null_mut());
         assert_eq!(ret, 0);
 
         // Check it's blocked.
         let mut current = SigsetT::EMPTY;
         pthread_sigmask(SIG_SETMASK, core::ptr::null(), &raw mut current);
-        assert_ne!(unsafe { sigismember(&raw const current, 10) }, 0, "Signal 10 should be blocked");
+        assert_ne!(
+            unsafe { sigismember(&raw const current, 10) },
+            0,
+            "Signal 10 should be blocked"
+        );
 
         // Restore.
         pthread_sigmask(SIG_SETMASK, &raw const old, core::ptr::null_mut());
@@ -3061,7 +3080,9 @@ mod tests {
 
         // Block signal 5.
         let mut block = SigsetT::EMPTY;
-        unsafe { sigaddset(&raw mut block, 5); }
+        unsafe {
+            sigaddset(&raw mut block, 5);
+        }
         pthread_sigmask(SIG_BLOCK, &raw const block, core::ptr::null_mut());
 
         // Unblock signal 5.
@@ -3071,7 +3092,11 @@ mod tests {
         // Verify unblocked.
         let mut current = SigsetT::EMPTY;
         pthread_sigmask(SIG_SETMASK, core::ptr::null(), &raw mut current);
-        assert_eq!(unsafe { sigismember(&raw const current, 5) }, 0, "Signal 5 should be unblocked");
+        assert_eq!(
+            unsafe { sigismember(&raw const current, 5) },
+            0,
+            "Signal 5 should be unblocked"
+        );
 
         // Restore.
         pthread_sigmask(SIG_SETMASK, &raw const old, core::ptr::null_mut());
@@ -3084,24 +3109,32 @@ mod tests {
     #[test]
     fn test_psignal_null_prefix() {
         // psignal with null prefix should print just the signal description.
-        unsafe { psignal(crate::signal::SIGTERM, core::ptr::null()); }
+        unsafe {
+            psignal(crate::signal::SIGTERM, core::ptr::null());
+        }
     }
 
     #[test]
     fn test_psignal_empty_prefix() {
         // Empty prefix → no "prefix: " part, just signal description.
-        unsafe { psignal(crate::signal::SIGINT, b"\0".as_ptr()); }
+        unsafe {
+            psignal(crate::signal::SIGINT, b"\0".as_ptr());
+        }
     }
 
     #[test]
     fn test_psignal_with_prefix() {
-        unsafe { psignal(crate::signal::SIGKILL, b"test\0".as_ptr()); }
+        unsafe {
+            psignal(crate::signal::SIGKILL, b"test\0".as_ptr());
+        }
     }
 
     #[test]
     fn test_psignal_invalid_signal() {
         // Invalid signal number should still not crash.
-        unsafe { psignal(9999, b"bad sig\0".as_ptr()); }
+        unsafe {
+            psignal(9999, b"bad sig\0".as_ptr());
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3169,7 +3202,9 @@ mod tests {
     fn test_psiginfo_null_info() {
         // psiginfo with null info → prints "Unknown signal 0".
         // Just verify no crash.
-        unsafe { psiginfo(core::ptr::null(), b"test\0".as_ptr()); }
+        unsafe {
+            psiginfo(core::ptr::null(), b"test\0".as_ptr());
+        }
     }
 
     #[test]
@@ -3177,14 +3212,18 @@ mod tests {
         // psiginfo with a valid signum → prints the signal name.
         let mut si = SiginfoT::default();
         si.si_signo = SIGTERM;
-        unsafe { psiginfo(&si, b"test\0".as_ptr()); }
+        unsafe {
+            psiginfo(&si, b"test\0".as_ptr());
+        }
     }
 
     #[test]
     fn test_psiginfo_null_msg() {
         let mut si = SiginfoT::default();
         si.si_signo = SIGINT;
-        unsafe { psiginfo(&si, core::ptr::null()); }
+        unsafe {
+            psiginfo(&si, core::ptr::null());
+        }
     }
 
     // -----------------------------------------------------------------
@@ -3574,11 +3613,7 @@ mod tests {
     #[test]
     fn test_sigtimedwait_null_set_efault() {
         crate::errno::set_errno(0);
-        let ret = sigtimedwait(
-            core::ptr::null(),
-            core::ptr::null_mut(),
-            core::ptr::null(),
-        );
+        let ret = sigtimedwait(core::ptr::null(), core::ptr::null_mut(), core::ptr::null());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
@@ -3586,7 +3621,10 @@ mod tests {
     #[test]
     fn test_sigtimedwait_negative_tv_sec_einval() {
         let set = SigsetT { bits: [0; 16] };
-        let ts = crate::stat::Timespec { tv_sec: -1, tv_nsec: 0 };
+        let ts = crate::stat::Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
         crate::errno::set_errno(0);
         let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
@@ -3596,7 +3634,10 @@ mod tests {
     #[test]
     fn test_sigtimedwait_nsec_at_billion_einval() {
         let set = SigsetT { bits: [0; 16] };
-        let ts = crate::stat::Timespec { tv_sec: 1, tv_nsec: 1_000_000_000 };
+        let ts = crate::stat::Timespec {
+            tv_sec: 1,
+            tv_nsec: 1_000_000_000,
+        };
         crate::errno::set_errno(0);
         let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
@@ -3606,7 +3647,10 @@ mod tests {
     #[test]
     fn test_sigtimedwait_nsec_way_too_big_einval() {
         let set = SigsetT { bits: [0; 16] };
-        let ts = crate::stat::Timespec { tv_sec: 1, tv_nsec: i64::MAX };
+        let ts = crate::stat::Timespec {
+            tv_sec: 1,
+            tv_nsec: i64::MAX,
+        };
         crate::errno::set_errno(0);
         let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
@@ -3616,7 +3660,10 @@ mod tests {
     #[test]
     fn test_sigtimedwait_negative_nsec_einval() {
         let set = SigsetT { bits: [0; 16] };
-        let ts = crate::stat::Timespec { tv_sec: 1, tv_nsec: -1 };
+        let ts = crate::stat::Timespec {
+            tv_sec: 1,
+            tv_nsec: -1,
+        };
         crate::errno::set_errno(0);
         let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
@@ -3626,7 +3673,10 @@ mod tests {
     #[test]
     fn test_sigtimedwait_set_check_before_timeout() {
         // NULL set + bad timeout → EFAULT (set is checked first).
-        let ts = crate::stat::Timespec { tv_sec: -1, tv_nsec: -1 };
+        let ts = crate::stat::Timespec {
+            tv_sec: -1,
+            tv_nsec: -1,
+        };
         crate::errno::set_errno(0);
         let ret = sigtimedwait(core::ptr::null(), core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
@@ -3651,7 +3701,10 @@ mod tests {
         // POSIX poll-form: timeout = {0, 0} → "return immediately if no
         // signal is pending"; our stub reports EAGAIN.
         let set = SigsetT { bits: [0; 16] };
-        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         crate::errno::set_errno(0);
         let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
@@ -3705,8 +3758,13 @@ mod tests {
     fn test_workflow_sigtimedwait_dbus_poll() {
         // dbus poll: sigtimedwait with a small timeout while servicing
         // incoming messages.  No signals delivered → EAGAIN.
-        let set = SigsetT { bits: [0xFFFF_FFFF_FFFF_FFFF; 16] };
-        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 100_000 };
+        let set = SigsetT {
+            bits: [0xFFFF_FFFF_FFFF_FFFF; 16],
+        };
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 100_000,
+        };
         crate::errno::set_errno(0);
         let ret = sigtimedwait(&raw const set, core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
@@ -3820,11 +3878,20 @@ mod tests {
     #[test]
     fn test_phase75_siginterrupt_accepts_real_signals() {
         // A representative spread of well-known signals all succeed.
-        for sig in [SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGCHLD,
-                    SIGALRM, SIGPIPE, SIGSEGV, SIGWINCH] {
+        for sig in [
+            SIGHUP, SIGINT, SIGTERM, SIGUSR1, SIGUSR2, SIGCHLD, SIGALRM, SIGPIPE, SIGSEGV, SIGWINCH,
+        ] {
             crate::errno::set_errno(0);
-            assert_eq!(siginterrupt(sig, 0), 0, "siginterrupt({sig}, 0) should succeed");
-            assert_eq!(siginterrupt(sig, 1), 0, "siginterrupt({sig}, 1) should succeed");
+            assert_eq!(
+                siginterrupt(sig, 0),
+                0,
+                "siginterrupt({sig}, 0) should succeed"
+            );
+            assert_eq!(
+                siginterrupt(sig, 1),
+                0,
+                "siginterrupt({sig}, 1) should succeed"
+            );
         }
     }
 
@@ -4006,7 +4073,9 @@ mod tests {
 
     #[test]
     fn test_phase75_sigsuspend_full_mask_returns_eintr() {
-        let mask = SigsetT { bits: [u64::MAX; 16] };
+        let mask = SigsetT {
+            bits: [u64::MAX; 16],
+        };
         crate::errno::set_errno(0);
         assert_eq!(sigsuspend(&raw const mask), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINTR);
@@ -4174,9 +4243,10 @@ mod tests {
     #[test]
     fn test_phase211_default_action_classify() {
         // Terminate signals.
-        for sig in [SIGHUP, SIGINT, SIGPIPE, SIGALRM, SIGTERM,
-                    SIGUSR1, SIGUSR2, SIGVTALRM, SIGPROF, SIGIO, SIGPWR]
-        {
+        for sig in [
+            SIGHUP, SIGINT, SIGPIPE, SIGALRM, SIGTERM, SIGUSR1, SIGUSR2, SIGVTALRM, SIGPROF, SIGIO,
+            SIGPWR,
+        ] {
             assert_eq!(
                 default_action(sig),
                 Some(DefaultAction::Terminate),
@@ -4184,9 +4254,9 @@ mod tests {
             );
         }
         // Core-dump signals.
-        for sig in [SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS,
-                    SIGFPE, SIGSEGV, SIGXCPU, SIGXFSZ, SIGSYS]
-        {
+        for sig in [
+            SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGSEGV, SIGXCPU, SIGXFSZ, SIGSYS,
+        ] {
             assert_eq!(
                 default_action(sig),
                 Some(DefaultAction::Core),
@@ -4414,7 +4484,9 @@ mod tests {
     /// sigdelset: bad signum → EINVAL.
     #[test]
     fn test_phase212_sigdelset_bad_signum_einval() {
-        let mut set = SigsetT { bits: [u64::MAX; 16] };
+        let mut set = SigsetT {
+            bits: [u64::MAX; 16],
+        };
         crate::errno::set_errno(0);
         let ret = unsafe { sigdelset(&raw mut set, -1) };
         assert_eq!(ret, -1);
@@ -4433,7 +4505,9 @@ mod tests {
     /// sigismember: bad signum → EINVAL.
     #[test]
     fn test_phase212_sigismember_bad_signum_einval() {
-        let set = SigsetT { bits: [u64::MAX; 16] };
+        let set = SigsetT {
+            bits: [u64::MAX; 16],
+        };
         crate::errno::set_errno(0);
         let ret = unsafe { sigismember(&raw const set, 0) };
         assert_eq!(ret, -1);

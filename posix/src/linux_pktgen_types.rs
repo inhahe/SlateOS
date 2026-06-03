@@ -95,11 +95,24 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            F_IPV6, F_IPSRC_RND, F_IPDST_RND, F_TXSIZE_RND,
-            F_UDPSRC_RND, F_UDPDST_RND, F_MACSRC_RND,
-            F_MACDST_RND, F_MPLS_RND, F_VID_RND, F_SVID_RND,
-            F_FLOW_SEQ, F_QUEUE_MAP_RND, F_QUEUE_MAP_CPU,
-            F_NODE, F_UDPCSUM, F_NO_TIMESTAMP, F_SHARED,
+            F_IPV6,
+            F_IPSRC_RND,
+            F_IPDST_RND,
+            F_TXSIZE_RND,
+            F_UDPSRC_RND,
+            F_UDPDST_RND,
+            F_MACSRC_RND,
+            F_MACDST_RND,
+            F_MPLS_RND,
+            F_VID_RND,
+            F_SVID_RND,
+            F_FLOW_SEQ,
+            F_QUEUE_MAP_RND,
+            F_QUEUE_MAP_CPU,
+            F_NODE,
+            F_UDPCSUM,
+            F_NO_TIMESTAMP,
+            F_SHARED,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "flag {f:#x} not power of two");
@@ -109,11 +122,24 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            F_IPV6, F_IPSRC_RND, F_IPDST_RND, F_TXSIZE_RND,
-            F_UDPSRC_RND, F_UDPDST_RND, F_MACSRC_RND,
-            F_MACDST_RND, F_MPLS_RND, F_VID_RND, F_SVID_RND,
-            F_FLOW_SEQ, F_QUEUE_MAP_RND, F_QUEUE_MAP_CPU,
-            F_NODE, F_UDPCSUM, F_NO_TIMESTAMP, F_SHARED,
+            F_IPV6,
+            F_IPSRC_RND,
+            F_IPDST_RND,
+            F_TXSIZE_RND,
+            F_UDPSRC_RND,
+            F_UDPDST_RND,
+            F_MACSRC_RND,
+            F_MACDST_RND,
+            F_MPLS_RND,
+            F_VID_RND,
+            F_SVID_RND,
+            F_FLOW_SEQ,
+            F_QUEUE_MAP_RND,
+            F_QUEUE_MAP_CPU,
+            F_NODE,
+            F_UDPCSUM,
+            F_NO_TIMESTAMP,
+            F_SHARED,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -125,8 +151,11 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            PKTGEN_CMD_REMOVE, PKTGEN_CMD_ADD,
-            PKTGEN_CMD_START, PKTGEN_CMD_STOP, PKTGEN_CMD_RESET,
+            PKTGEN_CMD_REMOVE,
+            PKTGEN_CMD_ADD,
+            PKTGEN_CMD_START,
+            PKTGEN_CMD_STOP,
+            PKTGEN_CMD_RESET,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

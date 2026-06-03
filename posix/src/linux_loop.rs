@@ -123,8 +123,8 @@ mod tests {
 
     #[test]
     fn test_loop_flags_are_bits() {
-        let combined = LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR
-            | LO_FLAGS_PARTSCAN | LO_FLAGS_DIRECT_IO;
+        let combined =
+            LO_FLAGS_READ_ONLY | LO_FLAGS_AUTOCLEAR | LO_FLAGS_PARTSCAN | LO_FLAGS_DIRECT_IO;
         // No overlap.
         assert_eq!(combined, 1 | 4 | 8 | 16);
     }
@@ -132,9 +132,15 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            LOOP_SET_FD, LOOP_CLR_FD, LOOP_SET_STATUS64,
-            LOOP_GET_STATUS64, LOOP_CHANGE_FD, LOOP_SET_CAPACITY,
-            LOOP_SET_DIRECT_IO, LOOP_SET_BLOCK_SIZE, LOOP_CONFIGURE,
+            LOOP_SET_FD,
+            LOOP_CLR_FD,
+            LOOP_SET_STATUS64,
+            LOOP_GET_STATUS64,
+            LOOP_CHANGE_FD,
+            LOOP_SET_CAPACITY,
+            LOOP_SET_DIRECT_IO,
+            LOOP_SET_BLOCK_SIZE,
+            LOOP_CONFIGURE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

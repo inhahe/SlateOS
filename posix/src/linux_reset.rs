@@ -80,7 +80,8 @@ mod tests {
     #[test]
     fn test_reset_types_distinct() {
         let types = [
-            RESET_TYPE_SELF_DEASSERT, RESET_TYPE_LATCHED,
+            RESET_TYPE_SELF_DEASSERT,
+            RESET_TYPE_LATCHED,
             RESET_TYPE_LEVEL,
         ];
         for i in 0..types.len() {
@@ -93,7 +94,8 @@ mod tests {
     #[test]
     fn test_lookup_flags_distinct() {
         let flags = [
-            RESET_LOOKUP_ACQUIRED, RESET_LOOKUP_SHARED,
+            RESET_LOOKUP_ACQUIRED,
+            RESET_LOOKUP_SHARED,
             RESET_LOOKUP_OPTIONAL,
         ];
         for i in 0..flags.len() {

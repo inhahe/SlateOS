@@ -95,7 +95,8 @@ mod tests {
     #[test]
     fn test_perf_classes_distinct() {
         let classes = [
-            EM_PERF_CLASS_DEFAULT, EM_PERF_CLASS_HIGH,
+            EM_PERF_CLASS_DEFAULT,
+            EM_PERF_CLASS_HIGH,
             EM_PERF_CLASS_EFFICIENT,
         ];
         for i in 0..classes.len() {
@@ -107,10 +108,7 @@ mod tests {
 
     #[test]
     fn test_voltage_domains_distinct() {
-        let domains = [
-            VOLTAGE_DOMAIN_NONE, VOLTAGE_DOMAIN_CPU,
-            VOLTAGE_DOMAIN_GPU,
-        ];
+        let domains = [VOLTAGE_DOMAIN_NONE, VOLTAGE_DOMAIN_CPU, VOLTAGE_DOMAIN_GPU];
         for i in 0..domains.len() {
             for j in (i + 1)..domains.len() {
                 assert_ne!(domains[i], domains[j]);

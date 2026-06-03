@@ -71,10 +71,18 @@ mod tests {
     #[test]
     fn test_tcp_states_distinct() {
         let states = [
-            TCP_ESTABLISHED, TCP_SYN_SENT, TCP_SYN_RECV,
-            TCP_FIN_WAIT1, TCP_FIN_WAIT2, TCP_TIME_WAIT,
-            TCP_CLOSE, TCP_CLOSE_WAIT, TCP_LAST_ACK,
-            TCP_LISTEN, TCP_CLOSING, TCP_NEW_SYN_RECV,
+            TCP_ESTABLISHED,
+            TCP_SYN_SENT,
+            TCP_SYN_RECV,
+            TCP_FIN_WAIT1,
+            TCP_FIN_WAIT2,
+            TCP_TIME_WAIT,
+            TCP_CLOSE,
+            TCP_CLOSE_WAIT,
+            TCP_LAST_ACK,
+            TCP_LISTEN,
+            TCP_CLOSING,
+            TCP_NEW_SYN_RECV,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -96,8 +104,11 @@ mod tests {
     #[test]
     fn test_ca_events_distinct() {
         let events = [
-            CA_EVENT_CWND_RESTART, CA_EVENT_FAST_ACK,
-            CA_EVENT_LOSS, CA_EVENT_ECN_NO_CE, CA_EVENT_ECN_IS_CE,
+            CA_EVENT_CWND_RESTART,
+            CA_EVENT_FAST_ACK,
+            CA_EVENT_LOSS,
+            CA_EVENT_ECN_NO_CE,
+            CA_EVENT_ECN_IS_CE,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

@@ -91,8 +91,10 @@ mod tests {
     #[test]
     fn test_pw_types_distinct() {
         let types = [
-            L2TP_PWTYPE_PPP, L2TP_PWTYPE_PPP_AC,
-            L2TP_PWTYPE_ETH, L2TP_PWTYPE_ETH_VLAN,
+            L2TP_PWTYPE_PPP,
+            L2TP_PWTYPE_PPP_AC,
+            L2TP_PWTYPE_ETH,
+            L2TP_PWTYPE_ETH_VLAN,
             L2TP_PWTYPE_IP,
         ];
         for i in 0..types.len() {
@@ -105,10 +107,14 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            L2TP_CMD_NOOP, L2TP_CMD_TUNNEL_CREATE,
-            L2TP_CMD_TUNNEL_DELETE, L2TP_CMD_TUNNEL_MODIFY,
-            L2TP_CMD_TUNNEL_GET, L2TP_CMD_SESSION_CREATE,
-            L2TP_CMD_SESSION_DELETE, L2TP_CMD_SESSION_MODIFY,
+            L2TP_CMD_NOOP,
+            L2TP_CMD_TUNNEL_CREATE,
+            L2TP_CMD_TUNNEL_DELETE,
+            L2TP_CMD_TUNNEL_MODIFY,
+            L2TP_CMD_TUNNEL_GET,
+            L2TP_CMD_SESSION_CREATE,
+            L2TP_CMD_SESSION_DELETE,
+            L2TP_CMD_SESSION_MODIFY,
             L2TP_CMD_SESSION_GET,
         ];
         for i in 0..cmds.len() {

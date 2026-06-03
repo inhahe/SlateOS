@@ -129,7 +129,12 @@ mod tests {
 
     #[test]
     fn test_dp_commands_distinct() {
-        let cmds = [OVS_DP_CMD_NEW, OVS_DP_CMD_DEL, OVS_DP_CMD_GET, OVS_DP_CMD_SET];
+        let cmds = [
+            OVS_DP_CMD_NEW,
+            OVS_DP_CMD_DEL,
+            OVS_DP_CMD_GET,
+            OVS_DP_CMD_SET,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);
@@ -140,8 +145,10 @@ mod tests {
     #[test]
     fn test_vport_types_distinct() {
         let types = [
-            OVS_VPORT_TYPE_NETDEV, OVS_VPORT_TYPE_INTERNAL,
-            OVS_VPORT_TYPE_GRE, OVS_VPORT_TYPE_VXLAN,
+            OVS_VPORT_TYPE_NETDEV,
+            OVS_VPORT_TYPE_INTERNAL,
+            OVS_VPORT_TYPE_GRE,
+            OVS_VPORT_TYPE_VXLAN,
             OVS_VPORT_TYPE_GENEVE,
         ];
         for i in 0..types.len() {
@@ -154,16 +161,26 @@ mod tests {
     #[test]
     fn test_action_attrs_distinct() {
         let attrs = [
-            OVS_ACTION_ATTR_OUTPUT, OVS_ACTION_ATTR_USERSPACE,
-            OVS_ACTION_ATTR_SET, OVS_ACTION_ATTR_PUSH_VLAN,
-            OVS_ACTION_ATTR_POP_VLAN, OVS_ACTION_ATTR_SAMPLE,
-            OVS_ACTION_ATTR_RECIRC, OVS_ACTION_ATTR_HASH,
-            OVS_ACTION_ATTR_PUSH_MPLS, OVS_ACTION_ATTR_POP_MPLS,
-            OVS_ACTION_ATTR_SET_MASKED, OVS_ACTION_ATTR_CT,
-            OVS_ACTION_ATTR_TRUNC, OVS_ACTION_ATTR_PUSH_ETH,
-            OVS_ACTION_ATTR_POP_ETH, OVS_ACTION_ATTR_CLONE,
-            OVS_ACTION_ATTR_CHECK_PKT_LEN, OVS_ACTION_ATTR_PUSH_NSH,
-            OVS_ACTION_ATTR_POP_NSH, OVS_ACTION_ATTR_METER,
+            OVS_ACTION_ATTR_OUTPUT,
+            OVS_ACTION_ATTR_USERSPACE,
+            OVS_ACTION_ATTR_SET,
+            OVS_ACTION_ATTR_PUSH_VLAN,
+            OVS_ACTION_ATTR_POP_VLAN,
+            OVS_ACTION_ATTR_SAMPLE,
+            OVS_ACTION_ATTR_RECIRC,
+            OVS_ACTION_ATTR_HASH,
+            OVS_ACTION_ATTR_PUSH_MPLS,
+            OVS_ACTION_ATTR_POP_MPLS,
+            OVS_ACTION_ATTR_SET_MASKED,
+            OVS_ACTION_ATTR_CT,
+            OVS_ACTION_ATTR_TRUNC,
+            OVS_ACTION_ATTR_PUSH_ETH,
+            OVS_ACTION_ATTR_POP_ETH,
+            OVS_ACTION_ATTR_CLONE,
+            OVS_ACTION_ATTR_CHECK_PKT_LEN,
+            OVS_ACTION_ATTR_PUSH_NSH,
+            OVS_ACTION_ATTR_POP_NSH,
+            OVS_ACTION_ATTR_METER,
             OVS_ACTION_ATTR_DROP,
         ];
         for i in 0..attrs.len() {
@@ -175,7 +192,11 @@ mod tests {
 
     #[test]
     fn test_packet_commands_distinct() {
-        let cmds = [OVS_PACKET_CMD_MISS, OVS_PACKET_CMD_ACTION, OVS_PACKET_CMD_EXECUTE];
+        let cmds = [
+            OVS_PACKET_CMD_MISS,
+            OVS_PACKET_CMD_ACTION,
+            OVS_PACKET_CMD_EXECUTE,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);

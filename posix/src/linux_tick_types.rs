@@ -92,9 +92,12 @@ mod tests {
     #[test]
     fn test_dep_masks_no_overlap() {
         let masks = [
-            TICK_DEP_MASK_POSIX_TIMER, TICK_DEP_MASK_PERF_EVENTS,
-            TICK_DEP_MASK_SCHED, TICK_DEP_MASK_CLOCK_UNSTABLE,
-            TICK_DEP_MASK_RCU, TICK_DEP_MASK_RCU_EXP,
+            TICK_DEP_MASK_POSIX_TIMER,
+            TICK_DEP_MASK_PERF_EVENTS,
+            TICK_DEP_MASK_SCHED,
+            TICK_DEP_MASK_CLOCK_UNSTABLE,
+            TICK_DEP_MASK_RCU,
+            TICK_DEP_MASK_RCU_EXP,
         ];
         for i in 0..masks.len() {
             assert!(masks[i].is_power_of_two());

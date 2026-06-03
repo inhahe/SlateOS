@@ -117,9 +117,15 @@ mod tests {
     #[test]
     fn test_smb1_commands_distinct() {
         let cmds = [
-            SMB_COM_NEGOTIATE, SMB_COM_SESSION_SETUP, SMB_COM_TREE_CONNECT,
-            SMB_COM_TREE_DISCONNECT, SMB_COM_CREATE, SMB_COM_CLOSE,
-            SMB_COM_READ, SMB_COM_WRITE, SMB_COM_LOGOFF,
+            SMB_COM_NEGOTIATE,
+            SMB_COM_SESSION_SETUP,
+            SMB_COM_TREE_CONNECT,
+            SMB_COM_TREE_DISCONNECT,
+            SMB_COM_CREATE,
+            SMB_COM_CLOSE,
+            SMB_COM_READ,
+            SMB_COM_WRITE,
+            SMB_COM_LOGOFF,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -131,12 +137,25 @@ mod tests {
     #[test]
     fn test_smb2_commands_distinct() {
         let cmds = [
-            SMB2_NEGOTIATE, SMB2_SESSION_SETUP, SMB2_LOGOFF,
-            SMB2_TREE_CONNECT, SMB2_TREE_DISCONNECT, SMB2_CREATE,
-            SMB2_CLOSE, SMB2_FLUSH, SMB2_READ, SMB2_WRITE,
-            SMB2_LOCK, SMB2_IOCTL, SMB2_CANCEL, SMB2_ECHO,
-            SMB2_QUERY_DIRECTORY, SMB2_CHANGE_NOTIFY,
-            SMB2_QUERY_INFO, SMB2_SET_INFO, SMB2_OPLOCK_BREAK,
+            SMB2_NEGOTIATE,
+            SMB2_SESSION_SETUP,
+            SMB2_LOGOFF,
+            SMB2_TREE_CONNECT,
+            SMB2_TREE_DISCONNECT,
+            SMB2_CREATE,
+            SMB2_CLOSE,
+            SMB2_FLUSH,
+            SMB2_READ,
+            SMB2_WRITE,
+            SMB2_LOCK,
+            SMB2_IOCTL,
+            SMB2_CANCEL,
+            SMB2_ECHO,
+            SMB2_QUERY_DIRECTORY,
+            SMB2_CHANGE_NOTIFY,
+            SMB2_QUERY_INFO,
+            SMB2_SET_INFO,
+            SMB2_OPLOCK_BREAK,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -148,8 +167,11 @@ mod tests {
     #[test]
     fn test_dialects_distinct() {
         let dialects = [
-            SMB2_DIALECT_0202, SMB2_DIALECT_0210, SMB2_DIALECT_0300,
-            SMB2_DIALECT_0302, SMB2_DIALECT_0311,
+            SMB2_DIALECT_0202,
+            SMB2_DIALECT_0210,
+            SMB2_DIALECT_0300,
+            SMB2_DIALECT_0302,
+            SMB2_DIALECT_0311,
         ];
         for i in 0..dialects.len() {
             for j in (i + 1)..dialects.len() {

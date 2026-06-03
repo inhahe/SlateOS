@@ -90,7 +90,9 @@ pub extern "C" fn exit(status: i32) -> ! {
     }
 
     // Reset count (in case an atexit handler calls exit again).
-    unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+    unsafe {
+        addr_of_mut!(ATEXIT_COUNT).write(0);
+    }
 
     // POSIX: flush all open output streams before termination.
     // This ensures buffered printf/fputs output is not lost.
@@ -144,7 +146,9 @@ pub extern "C" fn quick_exit(status: i32) -> ! {
         }
     }
 
-    unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+    unsafe {
+        addr_of_mut!(QUICKEXIT_COUNT).write(0);
+    }
 
     // quick_exit calls _Exit (not exit), skipping atexit handlers.
     #[allow(clippy::used_underscore_items, non_snake_case)]
@@ -210,20 +214,16 @@ static mut INIT_FDS_BUF: [crate::spawn::FdMapEntry; MAX_INIT_FDS] = [crate::spaw
 /// Writes to static `INIT_FDS_BUF` and to the fd table.  Must be
 /// called from single-threaded context.
 unsafe fn retrieve_initial_fds() {
-    use crate::spawn::{FdMapEntry, fd_handle_type};
     use crate::fdtable::{self, HandleKind};
-    use crate::syscall::{syscall2, SYS_PROCESS_GET_INITIAL_FDS};
+    use crate::spawn::fd_handle_type;
+    use crate::syscall::{SYS_PROCESS_GET_INITIAL_FDS, syscall2};
 
     let buf_ptr = addr_of_mut!(INIT_FDS_BUF);
     let buf = unsafe { (*buf_ptr).as_mut_ptr() };
 
     // Call SYS_PROCESS_GET_INITIAL_FDS.  Returns the number of entries
     // written, or 0 if no fds were inherited.
-    let ret = syscall2(
-        SYS_PROCESS_GET_INITIAL_FDS,
-        buf as u64,
-        MAX_INIT_FDS as u64,
-    );
+    let ret = syscall2(SYS_PROCESS_GET_INITIAL_FDS, buf as u64, MAX_INIT_FDS as u64);
 
     if ret <= 0 {
         return; // No inherited fds — keep default console setup.
@@ -232,9 +232,8 @@ unsafe fn retrieve_initial_fds() {
     let count = ret as usize;
 
     // Read the entries from the buffer.
-    let entries = unsafe {
-        core::slice::from_raw_parts(buf as *const FdMapEntry, count.min(MAX_INIT_FDS))
-    };
+    let entries =
+        unsafe { core::slice::from_raw_parts(buf.cast_const(), count.min(MAX_INIT_FDS)) };
 
     if entries.is_empty() {
         return;
@@ -280,7 +279,7 @@ unsafe fn retrieve_initial_fds() {
 /// are valid for the entire process lifetime (they point into statics).
 unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
     use crate::spawn::SpawnArgsHeader;
-    use crate::syscall::{syscall2, SYS_PROCESS_GET_ARGS};
+    use crate::syscall::{SYS_PROCESS_GET_ARGS, syscall2};
 
     let buf_ptr = addr_of_mut!(INIT_ARGS_BUF);
     let buf = unsafe { (*buf_ptr).as_mut_ptr() };
@@ -288,11 +287,7 @@ unsafe fn retrieve_initial_args() -> (i32, *const *const u8, *const *const u8) {
     // Call SYS_PROCESS_GET_ARGS.  Returns total bytes written, or
     // the needed size if our buffer is too small (data is preserved
     // in the kernel for retry), or 0 if no args were set.
-    let ret = syscall2(
-        SYS_PROCESS_GET_ARGS,
-        buf as u64,
-        INIT_ARGS_BUF_SIZE as u64,
-    );
+    let ret = syscall2(SYS_PROCESS_GET_ARGS, buf as u64, INIT_ARGS_BUF_SIZE as u64);
 
     if ret <= 0 {
         return (0, core::ptr::null(), core::ptr::null());
@@ -430,8 +425,8 @@ pub unsafe extern "C" fn __libc_start_main(
     main: extern "C" fn(i32, *const *const u8, *const *const u8) -> i32,
     arg_count: i32,
     arg_vec: *const *const u8,
-    _init: usize,  // Unused (glibc compat).
-    _fini: usize,  // Unused (glibc compat).
+    _init: usize,      // Unused (glibc compat).
+    _fini: usize,      // Unused (glibc compat).
     _rtld_fini: usize, // Unused (glibc compat).
     _stack_end: *mut u8,
 ) -> ! {
@@ -440,7 +435,9 @@ pub unsafe extern "C" fn __libc_start_main(
     // kernel; we retrieve it here and reinitialize our fd table.
     // Must happen before any I/O (including arg retrieval, which
     // doesn't use fds but sets the pattern for startup order).
-    unsafe { retrieve_initial_fds(); }
+    unsafe {
+        retrieve_initial_fds();
+    }
 
     // Try to retrieve args from the kernel.  The parent may have
     // passed argv/envp via SYS_PROCESS_SPAWN_EX, which are stored
@@ -449,8 +446,16 @@ pub unsafe extern "C" fn __libc_start_main(
 
     // Use kernel-provided args if available, otherwise fall back to
     // what _start passed (currently argc=0, argv=NULL).
-    let actual_argc = if kernel_argc > 0 { kernel_argc } else { arg_count };
-    let actual_argv = if kernel_argc > 0 { kernel_argv } else { arg_vec };
+    let actual_argc = if kernel_argc > 0 {
+        kernel_argc
+    } else {
+        arg_count
+    };
+    let actual_argv = if kernel_argc > 0 {
+        kernel_argv
+    } else {
+        arg_vec
+    };
 
     // Set program name from argv[0] if available.
     // err/warn/errx/warnx use __progname for the "prog: msg" prefix.
@@ -501,7 +506,9 @@ pub unsafe extern "C" fn __libc_start_main(
     crate::signal::init_signals();
 
     // Call main.
-    let ret = main(actual_argc, actual_argv, unsafe { crate::environ::environ.cast() });
+    let ret = main(actual_argc, actual_argv, unsafe {
+        crate::environ::environ.cast()
+    });
 
     // Exit with main's return value.
     exit(ret);
@@ -561,8 +568,8 @@ global_asm!(
     // 16-aligned — which violates the (RSP+8)%16==0 rule.
     // Insert 8 bytes of padding so the alignment works out:
     //   sub rsp,8 → 8-aligned; push 0 → 16-aligned; call → 8-aligned ✓
-    "    sub rsp, 8",            // alignment padding
-    "    push 0",                // 7th arg: stack_end = NULL (on stack)
+    "    sub rsp, 8", // alignment padding
+    "    push 0",     // 7th arg: stack_end = NULL (on stack)
     "    call __libc_start_main",
     // __libc_start_main should not return, but if it does, halt.
     "    ud2",
@@ -976,7 +983,9 @@ pub extern "C" fn __cxa_guard_release(guard: *mut u64) {
     }
     // SAFETY: guard points to a compiler-generated static.
     let byte0 = guard.cast::<u8>();
-    unsafe { *byte0 = 1; }
+    unsafe {
+        *byte0 = 1;
+    }
 }
 
 /// Abort initialization (exception during construction).
@@ -989,7 +998,9 @@ pub extern "C" fn __cxa_guard_abort(guard: *mut u64) {
     }
     // SAFETY: guard points to a compiler-generated static.
     let byte0 = guard.cast::<u8>();
-    unsafe { *byte0 = 0; }
+    unsafe {
+        *byte0 = 0;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1130,12 +1141,9 @@ pub extern "C" fn gnu_dev_minor(dev: u64) -> u32 {
 /// Construct a dev_t from major and minor numbers.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn gnu_dev_makedev(major: u32, minor: u32) -> u64 {
-    let maj = major as u64;
-    let min = minor as u64;
-    ((maj & 0xFFF) << 8)
-        | ((maj & !0xFFF_u64) << 32)
-        | (min & 0xFF)
-        | ((min & !0xFF_u64) << 12)
+    let maj = u64::from(major);
+    let min = u64::from(minor);
+    ((maj & 0xFFF) << 8) | ((maj & !0xFFF_u64) << 32) | (min & 0xFF) | ((min & !0xFF_u64) << 12)
 }
 
 // ---------------------------------------------------------------------------
@@ -1365,37 +1373,53 @@ mod tests {
     #[test]
     fn test_atexit_returns_zero() {
         // Reset state for this test.
-        unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+        unsafe {
+            addr_of_mut!(ATEXIT_COUNT).write(0);
+        }
         let result = atexit(dummy_atexit_handler);
         assert_eq!(result, 0);
         // Cleanup.
-        unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+        unsafe {
+            addr_of_mut!(ATEXIT_COUNT).write(0);
+        }
     }
 
     #[test]
     fn test_atexit_table_full() {
         // Fill the table, then try one more.
-        unsafe { addr_of_mut!(ATEXIT_COUNT).write(MAX_ATEXIT); }
+        unsafe {
+            addr_of_mut!(ATEXIT_COUNT).write(MAX_ATEXIT);
+        }
         let result = atexit(dummy_atexit_handler);
         assert_eq!(result, -1);
         // Cleanup.
-        unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+        unsafe {
+            addr_of_mut!(ATEXIT_COUNT).write(0);
+        }
     }
 
     #[test]
     fn test_at_quick_exit_returns_zero() {
-        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+        unsafe {
+            addr_of_mut!(QUICKEXIT_COUNT).write(0);
+        }
         let result = at_quick_exit(dummy_atexit_handler);
         assert_eq!(result, 0);
-        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+        unsafe {
+            addr_of_mut!(QUICKEXIT_COUNT).write(0);
+        }
     }
 
     #[test]
     fn test_at_quick_exit_table_full() {
-        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(MAX_ATEXIT); }
+        unsafe {
+            addr_of_mut!(QUICKEXIT_COUNT).write(MAX_ATEXIT);
+        }
         let result = at_quick_exit(dummy_atexit_handler);
         assert_eq!(result, -1);
-        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+        unsafe {
+            addr_of_mut!(QUICKEXIT_COUNT).write(0);
+        }
     }
 
     // -- __cxa_thread_atexit_impl --
@@ -1404,11 +1428,8 @@ mod tests {
 
     #[test]
     fn test_cxa_thread_atexit_impl_accepts() {
-        let result = __cxa_thread_atexit_impl(
-            dummy_dtor,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-        );
+        let result =
+            __cxa_thread_atexit_impl(dummy_dtor, core::ptr::null_mut(), core::ptr::null_mut());
         assert_eq!(result, 0);
     }
 
@@ -1504,7 +1525,10 @@ mod tests {
         let bytes = __stack_chk_guard.to_ne_bytes();
         // At least some non-zero bytes
         let nonzero_count = bytes.iter().filter(|&&b| b != 0).count();
-        assert!(nonzero_count >= 4, "canary should have several non-zero bytes");
+        assert!(
+            nonzero_count >= 4,
+            "canary should have several non-zero bytes"
+        );
     }
 
     // -- __cxa_guard lifecycle: abort then re-acquire --
@@ -1531,23 +1555,31 @@ mod tests {
 
     #[test]
     fn test_atexit_multiple_registrations() {
-        unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+        unsafe {
+            addr_of_mut!(ATEXIT_COUNT).write(0);
+        }
         assert_eq!(atexit(dummy_atexit_handler), 0);
         assert_eq!(atexit(dummy_handler2), 0);
         assert_eq!(atexit(dummy_handler3), 0);
         let count = unsafe { addr_of_mut!(ATEXIT_COUNT).read() };
         assert_eq!(count, 3);
-        unsafe { addr_of_mut!(ATEXIT_COUNT).write(0); }
+        unsafe {
+            addr_of_mut!(ATEXIT_COUNT).write(0);
+        }
     }
 
     #[test]
     fn test_at_quick_exit_multiple_registrations() {
-        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+        unsafe {
+            addr_of_mut!(QUICKEXIT_COUNT).write(0);
+        }
         assert_eq!(at_quick_exit(dummy_atexit_handler), 0);
         assert_eq!(at_quick_exit(dummy_handler2), 0);
         let count = unsafe { addr_of_mut!(QUICKEXIT_COUNT).read() };
         assert_eq!(count, 2);
-        unsafe { addr_of_mut!(QUICKEXIT_COUNT).write(0); }
+        unsafe {
+            addr_of_mut!(QUICKEXIT_COUNT).write(0);
+        }
     }
 
     // -- atexit and quick_exit stacks are separate --
@@ -1632,11 +1664,7 @@ mod tests {
 
     #[test]
     fn test_cxa_thread_atexit_impl_nonzero() {
-        let result = __cxa_thread_atexit_impl(
-            dummy_dtor,
-            0x1000 as *mut u8,
-            0x2000 as *mut u8,
-        );
+        let result = __cxa_thread_atexit_impl(dummy_dtor, 0x1000 as *mut u8, 0x2000 as *mut u8);
         assert_eq!(result, 0);
     }
 

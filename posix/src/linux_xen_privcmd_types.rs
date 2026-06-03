@@ -112,10 +112,14 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            IOCTL_PRIVCMD_HYPERCALL, IOCTL_PRIVCMD_MMAP,
-            IOCTL_PRIVCMD_MMAPBATCH, IOCTL_PRIVCMD_MMAPBATCH_V2,
-            IOCTL_PRIVCMD_DM_OP, IOCTL_PRIVCMD_RESTRICT,
-            IOCTL_PRIVCMD_MMAP_RESOURCE, IOCTL_PRIVCMD_IOEVENTFD,
+            IOCTL_PRIVCMD_HYPERCALL,
+            IOCTL_PRIVCMD_MMAP,
+            IOCTL_PRIVCMD_MMAPBATCH,
+            IOCTL_PRIVCMD_MMAPBATCH_V2,
+            IOCTL_PRIVCMD_DM_OP,
+            IOCTL_PRIVCMD_RESTRICT,
+            IOCTL_PRIVCMD_MMAP_RESOURCE,
+            IOCTL_PRIVCMD_IOEVENTFD,
             IOCTL_PRIVCMD_IRQFD,
         ];
         for i in 0..ioctls.len() {
@@ -128,13 +132,20 @@ mod tests {
     #[test]
     fn test_hypercalls_distinct() {
         let calls = [
-            XEN_HYPERCALL_SET_TRAP_TABLE, XEN_HYPERCALL_MMU_UPDATE,
-            XEN_HYPERCALL_SET_GDT, XEN_HYPERCALL_STACK_SWITCH,
-            XEN_HYPERCALL_SET_CALLBACKS, XEN_HYPERCALL_FPU_TASKSWITCH,
-            XEN_HYPERCALL_PLATFORM_OP, XEN_HYPERCALL_MEMORY_OP,
-            XEN_HYPERCALL_MULTICALL, XEN_HYPERCALL_EVENT_CHANNEL_OP,
-            XEN_HYPERCALL_GRANT_TABLE_OP, XEN_HYPERCALL_DOMCTL,
-            XEN_HYPERCALL_SYSCTL, XEN_HYPERCALL_CONSOLE_IO,
+            XEN_HYPERCALL_SET_TRAP_TABLE,
+            XEN_HYPERCALL_MMU_UPDATE,
+            XEN_HYPERCALL_SET_GDT,
+            XEN_HYPERCALL_STACK_SWITCH,
+            XEN_HYPERCALL_SET_CALLBACKS,
+            XEN_HYPERCALL_FPU_TASKSWITCH,
+            XEN_HYPERCALL_PLATFORM_OP,
+            XEN_HYPERCALL_MEMORY_OP,
+            XEN_HYPERCALL_MULTICALL,
+            XEN_HYPERCALL_EVENT_CHANNEL_OP,
+            XEN_HYPERCALL_GRANT_TABLE_OP,
+            XEN_HYPERCALL_DOMCTL,
+            XEN_HYPERCALL_SYSCTL,
+            XEN_HYPERCALL_CONSOLE_IO,
             XEN_HYPERCALL_HVM_OP,
         ];
         for i in 0..calls.len() {
@@ -147,8 +158,11 @@ mod tests {
     #[test]
     fn test_domain_ids_distinct() {
         let ids = [
-            XEN_DOMID_DOM0, XEN_DOMID_SELF,
-            XEN_DOMID_IO, XEN_DOMID_XEN, XEN_DOMID_INVALID,
+            XEN_DOMID_DOM0,
+            XEN_DOMID_SELF,
+            XEN_DOMID_IO,
+            XEN_DOMID_XEN,
+            XEN_DOMID_INVALID,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -160,10 +174,14 @@ mod tests {
     #[test]
     fn test_memory_ops_distinct() {
         let ops = [
-            XENMEM_ADD_TO_PHYSMAP, XENMEM_REMOVE_FROM_PHYSMAP,
-            XENMEM_MEMORY_MAP, XENMEM_MAXIMUM_RESERVATION,
-            XENMEM_CURRENT_RESERVATION, XENMEM_INCREASE_RESERVATION,
-            XENMEM_DECREASE_RESERVATION, XENMEM_POPULATE_PHYSMAP,
+            XENMEM_ADD_TO_PHYSMAP,
+            XENMEM_REMOVE_FROM_PHYSMAP,
+            XENMEM_MEMORY_MAP,
+            XENMEM_MAXIMUM_RESERVATION,
+            XENMEM_CURRENT_RESERVATION,
+            XENMEM_INCREASE_RESERVATION,
+            XENMEM_DECREASE_RESERVATION,
+            XENMEM_POPULATE_PHYSMAP,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

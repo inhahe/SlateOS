@@ -117,8 +117,10 @@ mod tests {
     #[test]
     fn test_watch_types_distinct() {
         let types = [
-            WATCH_TYPE_META, WATCH_TYPE_KEY_NOTIFY,
-            WATCH_TYPE_MOUNT_NOTIFY, WATCH_TYPE_SB_NOTIFY,
+            WATCH_TYPE_META,
+            WATCH_TYPE_KEY_NOTIFY,
+            WATCH_TYPE_MOUNT_NOTIFY,
+            WATCH_TYPE_SB_NOTIFY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -130,9 +132,12 @@ mod tests {
     #[test]
     fn test_key_subtypes_distinct() {
         let subs = [
-            NOTIFY_KEY_UPDATED, NOTIFY_KEY_LINKED,
-            NOTIFY_KEY_UNLINKED, NOTIFY_KEY_CLEARED,
-            NOTIFY_KEY_REVOKED, NOTIFY_KEY_INVALIDATED,
+            NOTIFY_KEY_UPDATED,
+            NOTIFY_KEY_LINKED,
+            NOTIFY_KEY_UNLINKED,
+            NOTIFY_KEY_CLEARED,
+            NOTIFY_KEY_REVOKED,
+            NOTIFY_KEY_INVALIDATED,
             NOTIFY_KEY_SETATTR,
         ];
         for i in 0..subs.len() {
@@ -145,8 +150,10 @@ mod tests {
     #[test]
     fn test_mount_subtypes_distinct() {
         let subs = [
-            NOTIFY_MOUNT_NEW_MOUNT, NOTIFY_MOUNT_UNMOUNT,
-            NOTIFY_MOUNT_EXPIRY, NOTIFY_MOUNT_MOVE,
+            NOTIFY_MOUNT_NEW_MOUNT,
+            NOTIFY_MOUNT_UNMOUNT,
+            NOTIFY_MOUNT_EXPIRY,
+            NOTIFY_MOUNT_MOVE,
             NOTIFY_MOUNT_SETATTR,
         ];
         for i in 0..subs.len() {
@@ -159,8 +166,10 @@ mod tests {
     #[test]
     fn test_sb_subtypes_distinct() {
         let subs = [
-            NOTIFY_SB_ERROR, NOTIFY_SB_READONLY,
-            NOTIFY_SB_QUOTA, NOTIFY_SB_NETWORK,
+            NOTIFY_SB_ERROR,
+            NOTIFY_SB_READONLY,
+            NOTIFY_SB_QUOTA,
+            NOTIFY_SB_NETWORK,
         ];
         for i in 0..subs.len() {
             for j in (i + 1)..subs.len() {

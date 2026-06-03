@@ -86,9 +86,14 @@ mod tests {
     #[test]
     fn test_clone_new_distinct() {
         let flags = [
-            CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC,
-            CLONE_NEWUSER, CLONE_NEWPID, CLONE_NEWNET,
-            CLONE_NEWCGROUP, CLONE_NEWTIME,
+            CLONE_NEWNS,
+            CLONE_NEWUTS,
+            CLONE_NEWIPC,
+            CLONE_NEWUSER,
+            CLONE_NEWPID,
+            CLONE_NEWNET,
+            CLONE_NEWCGROUP,
+            CLONE_NEWTIME,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -100,13 +105,24 @@ mod tests {
     #[test]
     fn test_clone_new_no_overlap() {
         let flags = [
-            CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC,
-            CLONE_NEWUSER, CLONE_NEWPID, CLONE_NEWNET,
-            CLONE_NEWCGROUP, CLONE_NEWTIME,
+            CLONE_NEWNS,
+            CLONE_NEWUTS,
+            CLONE_NEWIPC,
+            CLONE_NEWUSER,
+            CLONE_NEWPID,
+            CLONE_NEWNET,
+            CLONE_NEWCGROUP,
+            CLONE_NEWTIME,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
-                assert_eq!(flags[i] & flags[j], 0, "0x{:08x} & 0x{:08x}", flags[i], flags[j]);
+                assert_eq!(
+                    flags[i] & flags[j],
+                    0,
+                    "0x{:08x} & 0x{:08x}",
+                    flags[i],
+                    flags[j]
+                );
             }
         }
     }
@@ -114,8 +130,14 @@ mod tests {
     #[test]
     fn test_nstype_distinct() {
         let types = [
-            NSTYPE_MNT, NSTYPE_UTS, NSTYPE_IPC, NSTYPE_USER,
-            NSTYPE_PID, NSTYPE_NET, NSTYPE_CGROUP, NSTYPE_TIME,
+            NSTYPE_MNT,
+            NSTYPE_UTS,
+            NSTYPE_IPC,
+            NSTYPE_USER,
+            NSTYPE_PID,
+            NSTYPE_NET,
+            NSTYPE_CGROUP,
+            NSTYPE_TIME,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -127,8 +149,10 @@ mod tests {
     #[test]
     fn test_ns_ioctls_distinct() {
         let cmds = [
-            NS_GET_NSTYPE, NS_GET_OWNER_UID,
-            NS_GET_PARENT, NS_GET_USERNS,
+            NS_GET_NSTYPE,
+            NS_GET_OWNER_UID,
+            NS_GET_PARENT,
+            NS_GET_USERNS,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -140,8 +164,12 @@ mod tests {
     #[test]
     fn test_unshare_flags_no_overlap() {
         let flags = [
-            CLONE_FILES, CLONE_FS, CLONE_SIGHAND,
-            CLONE_VM, CLONE_THREAD, CLONE_SYSVSEM,
+            CLONE_FILES,
+            CLONE_FS,
+            CLONE_SIGHAND,
+            CLONE_VM,
+            CLONE_THREAD,
+            CLONE_SYSVSEM,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

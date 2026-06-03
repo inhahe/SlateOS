@@ -131,9 +131,18 @@ mod tests {
     #[test]
     fn test_mode_flags_are_bits() {
         let flags = [
-            SPI_CPHA, SPI_CPOL, SPI_CS_HIGH, SPI_LSB_FIRST,
-            SPI_3WIRE, SPI_LOOP, SPI_NO_CS, SPI_READY,
-            SPI_TX_DUAL, SPI_TX_QUAD, SPI_RX_DUAL, SPI_RX_QUAD,
+            SPI_CPHA,
+            SPI_CPOL,
+            SPI_CS_HIGH,
+            SPI_LSB_FIRST,
+            SPI_3WIRE,
+            SPI_LOOP,
+            SPI_NO_CS,
+            SPI_READY,
+            SPI_TX_DUAL,
+            SPI_TX_QUAD,
+            SPI_RX_DUAL,
+            SPI_RX_QUAD,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -44,8 +44,12 @@ mod tests {
     #[test]
     fn test_advice_values_distinct() {
         let vals = [
-            POSIX_FADV_NORMAL, POSIX_FADV_RANDOM, POSIX_FADV_SEQUENTIAL,
-            POSIX_FADV_WILLNEED, POSIX_FADV_DONTNEED, POSIX_FADV_NOREUSE,
+            POSIX_FADV_NORMAL,
+            POSIX_FADV_RANDOM,
+            POSIX_FADV_SEQUENTIAL,
+            POSIX_FADV_WILLNEED,
+            POSIX_FADV_DONTNEED,
+            POSIX_FADV_NOREUSE,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {

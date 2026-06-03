@@ -88,11 +88,22 @@ mod tests {
     #[test]
     fn test_offsets_distinct() {
         let offsets = [
-            PCI_VENDOR_ID, PCI_DEVICE_ID, PCI_COMMAND, PCI_STATUS,
-            PCI_REVISION_ID, PCI_CLASS_PROG, PCI_CLASS_DEVICE,
-            PCI_CACHE_LINE_SIZE, PCI_LATENCY_TIMER, PCI_HEADER_TYPE,
-            PCI_BIST, PCI_BASE_ADDRESS_0, PCI_BASE_ADDRESS_1,
-            PCI_CAPABILITY_LIST, PCI_INTERRUPT_LINE, PCI_INTERRUPT_PIN,
+            PCI_VENDOR_ID,
+            PCI_DEVICE_ID,
+            PCI_COMMAND,
+            PCI_STATUS,
+            PCI_REVISION_ID,
+            PCI_CLASS_PROG,
+            PCI_CLASS_DEVICE,
+            PCI_CACHE_LINE_SIZE,
+            PCI_LATENCY_TIMER,
+            PCI_HEADER_TYPE,
+            PCI_BIST,
+            PCI_BASE_ADDRESS_0,
+            PCI_BASE_ADDRESS_1,
+            PCI_CAPABILITY_LIST,
+            PCI_INTERRUPT_LINE,
+            PCI_INTERRUPT_PIN,
         ];
         for i in 0..offsets.len() {
             for j in (i + 1)..offsets.len() {

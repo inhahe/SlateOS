@@ -108,9 +108,12 @@ mod tests {
     #[test]
     fn test_cmd_flags_no_overlap() {
         let flags = [
-            NBD_CMD_FLAG_FUA, NBD_CMD_FLAG_NO_HOLE,
-            NBD_CMD_FLAG_DF, NBD_CMD_FLAG_REQ_ONE,
-            NBD_CMD_FLAG_FAST_ZERO, NBD_CMD_FLAG_PAYLOAD_LEN,
+            NBD_CMD_FLAG_FUA,
+            NBD_CMD_FLAG_NO_HOLE,
+            NBD_CMD_FLAG_DF,
+            NBD_CMD_FLAG_REQ_ONE,
+            NBD_CMD_FLAG_FAST_ZERO,
+            NBD_CMD_FLAG_PAYLOAD_LEN,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -122,9 +125,14 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            NBD_CMD_READ, NBD_CMD_WRITE, NBD_CMD_DISC,
-            NBD_CMD_FLUSH, NBD_CMD_TRIM, NBD_CMD_CACHE,
-            NBD_CMD_WRITE_ZEROES, NBD_CMD_BLOCK_STATUS,
+            NBD_CMD_READ,
+            NBD_CMD_WRITE,
+            NBD_CMD_DISC,
+            NBD_CMD_FLUSH,
+            NBD_CMD_TRIM,
+            NBD_CMD_CACHE,
+            NBD_CMD_WRITE_ZEROES,
+            NBD_CMD_BLOCK_STATUS,
             NBD_CMD_RESIZE,
         ];
         for i in 0..cmds.len() {
@@ -137,12 +145,18 @@ mod tests {
     #[test]
     fn test_handshake_flags_power_of_two() {
         let flags = [
-            NBD_FLAG_HAS_FLAGS, NBD_FLAG_READ_ONLY,
-            NBD_FLAG_SEND_FLUSH, NBD_FLAG_SEND_FUA,
-            NBD_FLAG_ROTATIONAL, NBD_FLAG_SEND_TRIM,
-            NBD_FLAG_SEND_WRITE_ZEROES, NBD_FLAG_SEND_DF,
-            NBD_FLAG_CAN_MULTI_CONN, NBD_FLAG_SEND_RESIZE,
-            NBD_FLAG_SEND_CACHE, NBD_FLAG_SEND_FAST_ZERO,
+            NBD_FLAG_HAS_FLAGS,
+            NBD_FLAG_READ_ONLY,
+            NBD_FLAG_SEND_FLUSH,
+            NBD_FLAG_SEND_FUA,
+            NBD_FLAG_ROTATIONAL,
+            NBD_FLAG_SEND_TRIM,
+            NBD_FLAG_SEND_WRITE_ZEROES,
+            NBD_FLAG_SEND_DF,
+            NBD_FLAG_CAN_MULTI_CONN,
+            NBD_FLAG_SEND_RESIZE,
+            NBD_FLAG_SEND_CACHE,
+            NBD_FLAG_SEND_FAST_ZERO,
             NBD_FLAG_SEND_BLOCK_STATUS,
         ];
         for f in &flags {
@@ -153,12 +167,18 @@ mod tests {
     #[test]
     fn test_handshake_flags_no_overlap() {
         let flags = [
-            NBD_FLAG_HAS_FLAGS, NBD_FLAG_READ_ONLY,
-            NBD_FLAG_SEND_FLUSH, NBD_FLAG_SEND_FUA,
-            NBD_FLAG_ROTATIONAL, NBD_FLAG_SEND_TRIM,
-            NBD_FLAG_SEND_WRITE_ZEROES, NBD_FLAG_SEND_DF,
-            NBD_FLAG_CAN_MULTI_CONN, NBD_FLAG_SEND_RESIZE,
-            NBD_FLAG_SEND_CACHE, NBD_FLAG_SEND_FAST_ZERO,
+            NBD_FLAG_HAS_FLAGS,
+            NBD_FLAG_READ_ONLY,
+            NBD_FLAG_SEND_FLUSH,
+            NBD_FLAG_SEND_FUA,
+            NBD_FLAG_ROTATIONAL,
+            NBD_FLAG_SEND_TRIM,
+            NBD_FLAG_SEND_WRITE_ZEROES,
+            NBD_FLAG_SEND_DF,
+            NBD_FLAG_CAN_MULTI_CONN,
+            NBD_FLAG_SEND_RESIZE,
+            NBD_FLAG_SEND_CACHE,
+            NBD_FLAG_SEND_FAST_ZERO,
             NBD_FLAG_SEND_BLOCK_STATUS,
         ];
         for i in 0..flags.len() {
@@ -171,8 +191,10 @@ mod tests {
     #[test]
     fn test_info_types_distinct() {
         let infos = [
-            NBD_INFO_EXPORT, NBD_INFO_NAME,
-            NBD_INFO_DESCRIPTION, NBD_INFO_BLOCK_SIZE,
+            NBD_INFO_EXPORT,
+            NBD_INFO_NAME,
+            NBD_INFO_DESCRIPTION,
+            NBD_INFO_BLOCK_SIZE,
         ];
         for i in 0..infos.len() {
             for j in (i + 1)..infos.len() {

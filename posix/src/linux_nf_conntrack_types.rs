@@ -92,8 +92,11 @@ mod tests {
     #[test]
     fn test_ct_states_distinct() {
         let states = [
-            IP_CT_ESTABLISHED, IP_CT_RELATED, IP_CT_NEW,
-            IP_CT_ESTABLISHED_REPLY, IP_CT_RELATED_REPLY,
+            IP_CT_ESTABLISHED,
+            IP_CT_RELATED,
+            IP_CT_NEW,
+            IP_CT_ESTABLISHED_REPLY,
+            IP_CT_RELATED_REPLY,
             IP_CT_NEW_REPLY,
         ];
         for i in 0..states.len() {

@@ -78,8 +78,11 @@ mod tests {
     #[test]
     fn test_requests_distinct() {
         let reqs = [
-            RPM_REQ_NONE, RPM_REQ_IDLE, RPM_REQ_SUSPEND,
-            RPM_REQ_AUTOSUSPEND, RPM_REQ_RESUME,
+            RPM_REQ_NONE,
+            RPM_REQ_IDLE,
+            RPM_REQ_SUSPEND,
+            RPM_REQ_AUTOSUSPEND,
+            RPM_REQ_RESUME,
         ];
         for i in 0..reqs.len() {
             for j in (i + 1)..reqs.len() {
@@ -91,8 +94,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            RPM_FLAG_ENABLED, RPM_FLAG_AUTOSUSPEND,
-            RPM_FLAG_NO_CALLBACKS, RPM_FLAG_IRQ_SAFE,
+            RPM_FLAG_ENABLED,
+            RPM_FLAG_AUTOSUSPEND,
+            RPM_FLAG_NO_CALLBACKS,
+            RPM_FLAG_IRQ_SAFE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

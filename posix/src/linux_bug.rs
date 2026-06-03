@@ -87,8 +87,11 @@ mod tests {
     #[test]
     fn test_bugflags_powers_of_two() {
         let flags = [
-            BUGFLAG_WARNING, BUGFLAG_ONCE, BUGFLAG_DONE,
-            BUGFLAG_NO_CUT_HERE, BUGFLAG_TAINT,
+            BUGFLAG_WARNING,
+            BUGFLAG_ONCE,
+            BUGFLAG_DONE,
+            BUGFLAG_NO_CUT_HERE,
+            BUGFLAG_TAINT,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -98,8 +101,11 @@ mod tests {
     #[test]
     fn test_bugflags_no_overlap() {
         let flags = [
-            BUGFLAG_WARNING, BUGFLAG_ONCE, BUGFLAG_DONE,
-            BUGFLAG_NO_CUT_HERE, BUGFLAG_TAINT,
+            BUGFLAG_WARNING,
+            BUGFLAG_ONCE,
+            BUGFLAG_DONE,
+            BUGFLAG_NO_CUT_HERE,
+            BUGFLAG_TAINT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -111,14 +117,25 @@ mod tests {
     #[test]
     fn test_taint_bits_distinct() {
         let taints = [
-            TAINT_PROPRIETARY_MODULE, TAINT_FORCED_MODULE,
-            TAINT_CPU_OUT_OF_SPEC, TAINT_FORCED_RMMOD,
-            TAINT_MACHINE_CHECK, TAINT_BAD_PAGE, TAINT_USER,
-            TAINT_DIE, TAINT_OVERRIDDEN_ACPI_TABLE, TAINT_WARN,
-            TAINT_CRAP, TAINT_FIRMWARE_WORKAROUND,
-            TAINT_OOT_MODULE, TAINT_UNSIGNED_MODULE,
-            TAINT_SOFTLOCKUP, TAINT_LIVEPATCH, TAINT_AUX,
-            TAINT_RANDSTRUCT, TAINT_TEST,
+            TAINT_PROPRIETARY_MODULE,
+            TAINT_FORCED_MODULE,
+            TAINT_CPU_OUT_OF_SPEC,
+            TAINT_FORCED_RMMOD,
+            TAINT_MACHINE_CHECK,
+            TAINT_BAD_PAGE,
+            TAINT_USER,
+            TAINT_DIE,
+            TAINT_OVERRIDDEN_ACPI_TABLE,
+            TAINT_WARN,
+            TAINT_CRAP,
+            TAINT_FIRMWARE_WORKAROUND,
+            TAINT_OOT_MODULE,
+            TAINT_UNSIGNED_MODULE,
+            TAINT_SOFTLOCKUP,
+            TAINT_LIVEPATCH,
+            TAINT_AUX,
+            TAINT_RANDSTRUCT,
+            TAINT_TEST,
         ];
         for i in 0..taints.len() {
             for j in (i + 1)..taints.len() {
@@ -130,8 +147,10 @@ mod tests {
     #[test]
     fn test_taint_chars_distinct() {
         let chars = [
-            TAINT_CHAR_PROPRIETARY, TAINT_CHAR_FORCED,
-            TAINT_CHAR_CPU, TAINT_CHAR_WARN,
+            TAINT_CHAR_PROPRIETARY,
+            TAINT_CHAR_FORCED,
+            TAINT_CHAR_CPU,
+            TAINT_CHAR_WARN,
         ];
         for i in 0..chars.len() {
             for j in (i + 1)..chars.len() {

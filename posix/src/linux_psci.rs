@@ -106,11 +106,16 @@ mod tests {
     #[test]
     fn test_fn_ids_distinct() {
         let fns = [
-            PSCI_0_2_FN_PSCI_VERSION, PSCI_0_2_FN_CPU_SUSPEND,
-            PSCI_0_2_FN_CPU_OFF, PSCI_0_2_FN_CPU_ON,
-            PSCI_0_2_FN_AFFINITY_INFO, PSCI_0_2_FN_MIGRATE,
-            PSCI_0_2_FN_MIGRATE_INFO_TYPE, PSCI_0_2_FN_MIGRATE_INFO_UP_CPU,
-            PSCI_0_2_FN_SYSTEM_OFF, PSCI_0_2_FN_SYSTEM_RESET,
+            PSCI_0_2_FN_PSCI_VERSION,
+            PSCI_0_2_FN_CPU_SUSPEND,
+            PSCI_0_2_FN_CPU_OFF,
+            PSCI_0_2_FN_CPU_ON,
+            PSCI_0_2_FN_AFFINITY_INFO,
+            PSCI_0_2_FN_MIGRATE,
+            PSCI_0_2_FN_MIGRATE_INFO_TYPE,
+            PSCI_0_2_FN_MIGRATE_INFO_UP_CPU,
+            PSCI_0_2_FN_SYSTEM_OFF,
+            PSCI_0_2_FN_SYSTEM_RESET,
         ];
         for i in 0..fns.len() {
             for j in (i + 1)..fns.len() {
@@ -122,8 +127,10 @@ mod tests {
     #[test]
     fn test_fn64_ids_distinct() {
         let fns = [
-            PSCI_0_2_FN64_CPU_SUSPEND, PSCI_0_2_FN64_CPU_ON,
-            PSCI_0_2_FN64_AFFINITY_INFO, PSCI_0_2_FN64_MIGRATE,
+            PSCI_0_2_FN64_CPU_SUSPEND,
+            PSCI_0_2_FN64_CPU_ON,
+            PSCI_0_2_FN64_AFFINITY_INFO,
+            PSCI_0_2_FN64_MIGRATE,
             PSCI_0_2_FN64_MIGRATE_INFO_UP_CPU,
         ];
         for i in 0..fns.len() {
@@ -143,11 +150,16 @@ mod tests {
     #[test]
     fn test_return_codes_distinct() {
         let codes = [
-            PSCI_RET_SUCCESS, PSCI_RET_NOT_SUPPORTED,
-            PSCI_RET_INVALID_PARAMS, PSCI_RET_DENIED,
-            PSCI_RET_ALREADY_ON, PSCI_RET_ON_PENDING,
-            PSCI_RET_INTERNAL_FAILURE, PSCI_RET_NOT_PRESENT,
-            PSCI_RET_DISABLED, PSCI_RET_INVALID_ADDRESS,
+            PSCI_RET_SUCCESS,
+            PSCI_RET_NOT_SUPPORTED,
+            PSCI_RET_INVALID_PARAMS,
+            PSCI_RET_DENIED,
+            PSCI_RET_ALREADY_ON,
+            PSCI_RET_ON_PENDING,
+            PSCI_RET_INTERNAL_FAILURE,
+            PSCI_RET_NOT_PRESENT,
+            PSCI_RET_DISABLED,
+            PSCI_RET_INVALID_ADDRESS,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -159,7 +171,8 @@ mod tests {
     #[test]
     fn test_affinity_states_distinct() {
         let states = [
-            PSCI_AFFINITY_LEVEL_ON, PSCI_AFFINITY_LEVEL_OFF,
+            PSCI_AFFINITY_LEVEL_ON,
+            PSCI_AFFINITY_LEVEL_OFF,
             PSCI_AFFINITY_LEVEL_ON_PENDING,
         ];
         for i in 0..states.len() {

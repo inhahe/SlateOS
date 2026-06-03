@@ -62,8 +62,11 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            SS_FREE, SS_UNCONNECTED, SS_CONNECTING,
-            SS_CONNECTED, SS_DISCONNECTING,
+            SS_FREE,
+            SS_UNCONNECTED,
+            SS_CONNECTING,
+            SS_CONNECTED,
+            SS_DISCONNECTING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -80,8 +83,10 @@ mod tests {
     #[test]
     fn test_diag_attrs_distinct() {
         let attrs = [
-            SK_DIAG_VSOCK_ATTR_UNSPEC, SK_DIAG_VSOCK_ATTR_SRC_CID,
-            SK_DIAG_VSOCK_ATTR_SRC_PORT, SK_DIAG_VSOCK_ATTR_DST_CID,
+            SK_DIAG_VSOCK_ATTR_UNSPEC,
+            SK_DIAG_VSOCK_ATTR_SRC_CID,
+            SK_DIAG_VSOCK_ATTR_SRC_PORT,
+            SK_DIAG_VSOCK_ATTR_DST_CID,
             SK_DIAG_VSOCK_ATTR_DST_PORT,
         ];
         for i in 0..attrs.len() {

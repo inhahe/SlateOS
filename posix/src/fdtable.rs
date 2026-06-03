@@ -182,9 +182,24 @@ static mut FD_TABLE: [Option<FdEntry>; MAX_FDS] = {
 
     // Pre-initialize stdin/stdout/stderr as console handles.
     // stdin is read-only, stdout/stderr are write-only.
-    table[0] = Some(FdEntry { kind: HandleKind::Console, handle: 0, flags: 0, status_flags: 0 }); // O_RDONLY
-    table[1] = Some(FdEntry { kind: HandleKind::Console, handle: 1, flags: 0, status_flags: 1 }); // O_WRONLY
-    table[2] = Some(FdEntry { kind: HandleKind::Console, handle: 2, flags: 0, status_flags: 1 }); // O_WRONLY
+    table[0] = Some(FdEntry {
+        kind: HandleKind::Console,
+        handle: 0,
+        flags: 0,
+        status_flags: 0,
+    }); // O_RDONLY
+    table[1] = Some(FdEntry {
+        kind: HandleKind::Console,
+        handle: 1,
+        flags: 0,
+        status_flags: 1,
+    }); // O_WRONLY
+    table[2] = Some(FdEntry {
+        kind: HandleKind::Console,
+        handle: 2,
+        flags: 0,
+        status_flags: 1,
+    }); // O_WRONLY
 
     table
 };
@@ -254,7 +269,12 @@ pub fn alloc_fd_from_with_flags(
             if let Some(slot) = table.get_mut(i)
                 && slot.is_none()
             {
-                *slot = Some(FdEntry { kind, handle, flags: 0, status_flags });
+                *slot = Some(FdEntry {
+                    kind,
+                    handle,
+                    flags: 0,
+                    status_flags,
+                });
                 return Some(i as i32);
             }
             i = i.wrapping_add(1);
@@ -292,7 +312,12 @@ pub fn install_fd_with_flags(
         let table = &mut *table_ptr();
         let slot = table.get_mut(idx)?;
         let old = slot.take();
-        *slot = Some(FdEntry { kind, handle, flags: 0, status_flags });
+        *slot = Some(FdEntry {
+            kind,
+            handle,
+            flags: 0,
+            status_flags,
+        });
         old
     }
 }
@@ -440,7 +465,8 @@ pub fn is_handle_referenced(kind: HandleKind, handle: u64) -> bool {
         let mut i = 0;
         while i < MAX_FDS {
             if let Some(Some(entry)) = table.get(i)
-                && entry.kind == kind && entry.handle == handle
+                && entry.kind == kind
+                && entry.handle == handle
             {
                 return true;
             }
@@ -591,9 +617,7 @@ pub fn clear_fd_path(fd: i32) {
 /// Called from `dup()`, `dup2()`, etc. so the duplicate fd also
 /// knows the path of the resource it refers to.
 pub fn copy_fd_path(src_fd: i32, dst_fd: i32) {
-    if src_fd < 0 || src_fd as usize >= MAX_FDS
-        || dst_fd < 0 || dst_fd as usize >= MAX_FDS
-    {
+    if src_fd < 0 || src_fd as usize >= MAX_FDS || dst_fd < 0 || dst_fd as usize >= MAX_FDS {
         return;
     }
     let src_idx = src_fd as usize;

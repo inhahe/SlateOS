@@ -82,8 +82,11 @@ mod tests {
     #[test]
     fn test_messages_distinct() {
         let msgs = [
-            RNBD_MSG_OPEN, RNBD_MSG_CLOSE,
-            RNBD_MSG_READ, RNBD_MSG_WRITE, RNBD_MSG_IDENT,
+            RNBD_MSG_OPEN,
+            RNBD_MSG_CLOSE,
+            RNBD_MSG_READ,
+            RNBD_MSG_WRITE,
+            RNBD_MSG_IDENT,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -105,8 +108,10 @@ mod tests {
     #[test]
     fn test_device_flags_no_overlap() {
         let flags = [
-            RNBD_FLAG_DISCARD, RNBD_FLAG_SECURE_ERASE,
-            RNBD_FLAG_WRITE_ZEROES, RNBD_FLAG_ROTATIONAL,
+            RNBD_FLAG_DISCARD,
+            RNBD_FLAG_SECURE_ERASE,
+            RNBD_FLAG_WRITE_ZEROES,
+            RNBD_FLAG_ROTATIONAL,
             RNBD_FLAG_FUA,
         ];
         for i in 0..flags.len() {
@@ -120,7 +125,8 @@ mod tests {
     #[test]
     fn test_session_states_distinct() {
         let states = [
-            RNBD_SESSION_CONNECTED, RNBD_SESSION_RECONNECTING,
+            RNBD_SESSION_CONNECTED,
+            RNBD_SESSION_RECONNECTING,
             RNBD_SESSION_CLOSED,
         ];
         for i in 0..states.len() {
@@ -132,9 +138,7 @@ mod tests {
 
     #[test]
     fn test_io_flags_no_overlap() {
-        let flags = [
-            RNBD_IO_FLAG_SYNC, RNBD_IO_FLAG_FUA, RNBD_IO_FLAG_DISCARD,
-        ];
+        let flags = [RNBD_IO_FLAG_SYNC, RNBD_IO_FLAG_FUA, RNBD_IO_FLAG_DISCARD];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {

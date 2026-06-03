@@ -29,8 +29,7 @@ pub const COREDUMP_FILTER_DAX_PRIVATE: u32 = 1 << 7;
 pub const COREDUMP_FILTER_DAX_SHARED: u32 = 1 << 8;
 
 /// Default filter (anon private + anon shared).
-pub const COREDUMP_FILTER_DEFAULT: u32 =
-    COREDUMP_FILTER_ANON_PRIVATE | COREDUMP_FILTER_ANON_SHARED;
+pub const COREDUMP_FILTER_DEFAULT: u32 = COREDUMP_FILTER_ANON_PRIVATE | COREDUMP_FILTER_ANON_SHARED;
 
 // ---------------------------------------------------------------------------
 // ELF note types (for core dumps)
@@ -73,10 +72,14 @@ mod tests {
     #[test]
     fn test_filter_bits_powers_of_two() {
         let bits = [
-            COREDUMP_FILTER_ANON_PRIVATE, COREDUMP_FILTER_ANON_SHARED,
-            COREDUMP_FILTER_MAPPED_PRIVATE, COREDUMP_FILTER_MAPPED_SHARED,
-            COREDUMP_FILTER_ELF_HEADERS, COREDUMP_FILTER_HUGETLB_PRIVATE,
-            COREDUMP_FILTER_HUGETLB_SHARED, COREDUMP_FILTER_DAX_PRIVATE,
+            COREDUMP_FILTER_ANON_PRIVATE,
+            COREDUMP_FILTER_ANON_SHARED,
+            COREDUMP_FILTER_MAPPED_PRIVATE,
+            COREDUMP_FILTER_MAPPED_SHARED,
+            COREDUMP_FILTER_ELF_HEADERS,
+            COREDUMP_FILTER_HUGETLB_PRIVATE,
+            COREDUMP_FILTER_HUGETLB_SHARED,
+            COREDUMP_FILTER_DAX_PRIVATE,
             COREDUMP_FILTER_DAX_SHARED,
         ];
         for bit in &bits {
@@ -87,10 +90,14 @@ mod tests {
     #[test]
     fn test_filter_bits_no_overlap() {
         let bits = [
-            COREDUMP_FILTER_ANON_PRIVATE, COREDUMP_FILTER_ANON_SHARED,
-            COREDUMP_FILTER_MAPPED_PRIVATE, COREDUMP_FILTER_MAPPED_SHARED,
-            COREDUMP_FILTER_ELF_HEADERS, COREDUMP_FILTER_HUGETLB_PRIVATE,
-            COREDUMP_FILTER_HUGETLB_SHARED, COREDUMP_FILTER_DAX_PRIVATE,
+            COREDUMP_FILTER_ANON_PRIVATE,
+            COREDUMP_FILTER_ANON_SHARED,
+            COREDUMP_FILTER_MAPPED_PRIVATE,
+            COREDUMP_FILTER_MAPPED_SHARED,
+            COREDUMP_FILTER_ELF_HEADERS,
+            COREDUMP_FILTER_HUGETLB_PRIVATE,
+            COREDUMP_FILTER_HUGETLB_SHARED,
+            COREDUMP_FILTER_DAX_PRIVATE,
             COREDUMP_FILTER_DAX_SHARED,
         ];
         for i in 0..bits.len() {
@@ -108,8 +115,14 @@ mod tests {
     #[test]
     fn test_note_types_distinct() {
         let notes = [
-            NT_PRSTATUS, NT_PRPSINFO, NT_TASKSTRUCT, NT_AUXV,
-            NT_SIGINFO, NT_FILE, NT_PRXFPREG, NT_X86_XSTATE,
+            NT_PRSTATUS,
+            NT_PRPSINFO,
+            NT_TASKSTRUCT,
+            NT_AUXV,
+            NT_SIGINFO,
+            NT_FILE,
+            NT_PRXFPREG,
+            NT_X86_XSTATE,
         ];
         for i in 0..notes.len() {
             for j in (i + 1)..notes.len() {

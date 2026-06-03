@@ -71,8 +71,11 @@ mod tests {
     #[test]
     fn test_skbmod_flags_no_overlap() {
         let flags = [
-            SKBMOD_F_DMAC, SKBMOD_F_SMAC, SKBMOD_F_ETYPE,
-            SKBMOD_F_SWAPMAC, SKBMOD_F_ECN,
+            SKBMOD_F_DMAC,
+            SKBMOD_F_SMAC,
+            SKBMOD_F_ETYPE,
+            SKBMOD_F_SWAPMAC,
+            SKBMOD_F_ECN,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -84,8 +87,11 @@ mod tests {
     #[test]
     fn test_skbmod_flags_power_of_two() {
         let flags = [
-            SKBMOD_F_DMAC, SKBMOD_F_SMAC, SKBMOD_F_ETYPE,
-            SKBMOD_F_SWAPMAC, SKBMOD_F_ECN,
+            SKBMOD_F_DMAC,
+            SKBMOD_F_SMAC,
+            SKBMOD_F_ETYPE,
+            SKBMOD_F_SWAPMAC,
+            SKBMOD_F_ECN,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x} is not power of two", flag);
@@ -95,8 +101,12 @@ mod tests {
     #[test]
     fn test_skbmod_attrs_distinct() {
         let attrs = [
-            TCA_SKBMOD_UNSPEC, TCA_SKBMOD_TM, TCA_SKBMOD_PARMS,
-            TCA_SKBMOD_DMAC, TCA_SKBMOD_SMAC, TCA_SKBMOD_ETYPE,
+            TCA_SKBMOD_UNSPEC,
+            TCA_SKBMOD_TM,
+            TCA_SKBMOD_PARMS,
+            TCA_SKBMOD_DMAC,
+            TCA_SKBMOD_SMAC,
+            TCA_SKBMOD_ETYPE,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -108,10 +118,15 @@ mod tests {
     #[test]
     fn test_skbedit_attrs_distinct() {
         let attrs = [
-            TCA_SKBEDIT_UNSPEC, TCA_SKBEDIT_TM, TCA_SKBEDIT_PARMS,
-            TCA_SKBEDIT_PRIORITY, TCA_SKBEDIT_QUEUE_MAPPING,
-            TCA_SKBEDIT_MARK, TCA_SKBEDIT_PTYPE,
-            TCA_SKBEDIT_MASK, TCA_SKBEDIT_FLAGS,
+            TCA_SKBEDIT_UNSPEC,
+            TCA_SKBEDIT_TM,
+            TCA_SKBEDIT_PARMS,
+            TCA_SKBEDIT_PRIORITY,
+            TCA_SKBEDIT_QUEUE_MAPPING,
+            TCA_SKBEDIT_MARK,
+            TCA_SKBEDIT_PTYPE,
+            TCA_SKBEDIT_MASK,
+            TCA_SKBEDIT_FLAGS,
             TCA_SKBEDIT_QUEUE_MAPPING_MAX,
         ];
         for i in 0..attrs.len() {

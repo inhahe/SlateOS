@@ -99,8 +99,10 @@ mod tests {
     #[test]
     fn test_fence_flags_no_overlap() {
         let flags = [
-            DMA_FENCE_FLAG_SIGNALED, DMA_FENCE_FLAG_TIMESTAMP,
-            DMA_FENCE_FLAG_ENABLE_SIGNAL, DMA_FENCE_FLAG_IMPORTED,
+            DMA_FENCE_FLAG_SIGNALED,
+            DMA_FENCE_FLAG_TIMESTAMP,
+            DMA_FENCE_FLAG_ENABLE_SIGNAL,
+            DMA_FENCE_FLAG_IMPORTED,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -118,8 +120,12 @@ mod tests {
     #[test]
     fn test_syncobj_ops_distinct() {
         let ops = [
-            DRM_SYNCOBJ_CREATE, DRM_SYNCOBJ_DESTROY, DRM_SYNCOBJ_WAIT,
-            DRM_SYNCOBJ_RESET, DRM_SYNCOBJ_SIGNAL, DRM_SYNCOBJ_TRANSFER,
+            DRM_SYNCOBJ_CREATE,
+            DRM_SYNCOBJ_DESTROY,
+            DRM_SYNCOBJ_WAIT,
+            DRM_SYNCOBJ_RESET,
+            DRM_SYNCOBJ_SIGNAL,
+            DRM_SYNCOBJ_TRANSFER,
             DRM_SYNCOBJ_TIMELINE_WAIT,
         ];
         for i in 0..ops.len() {

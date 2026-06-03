@@ -138,8 +138,11 @@ mod tests {
     #[test]
     fn test_versions_distinct() {
         let vers = [
-            NFS_VERSION_2, NFS_VERSION_3, NFS_VERSION_4_0,
-            NFS_VERSION_4_1, NFS_VERSION_4_2,
+            NFS_VERSION_2,
+            NFS_VERSION_3,
+            NFS_VERSION_4_0,
+            NFS_VERSION_4_1,
+            NFS_VERSION_4_2,
         ];
         for i in 0..vers.len() {
             for j in (i + 1)..vers.len() {
@@ -151,13 +154,27 @@ mod tests {
     #[test]
     fn test_nfs3_procs_distinct() {
         let procs = [
-            NFS3_PROC_NULL, NFS3_PROC_GETATTR, NFS3_PROC_SETATTR,
-            NFS3_PROC_LOOKUP, NFS3_PROC_ACCESS, NFS3_PROC_READLINK,
-            NFS3_PROC_READ, NFS3_PROC_WRITE, NFS3_PROC_CREATE,
-            NFS3_PROC_MKDIR, NFS3_PROC_SYMLINK, NFS3_PROC_MKNOD,
-            NFS3_PROC_REMOVE, NFS3_PROC_RMDIR, NFS3_PROC_RENAME,
-            NFS3_PROC_LINK, NFS3_PROC_READDIR, NFS3_PROC_READDIRPLUS,
-            NFS3_PROC_FSSTAT, NFS3_PROC_FSINFO, NFS3_PROC_PATHCONF,
+            NFS3_PROC_NULL,
+            NFS3_PROC_GETATTR,
+            NFS3_PROC_SETATTR,
+            NFS3_PROC_LOOKUP,
+            NFS3_PROC_ACCESS,
+            NFS3_PROC_READLINK,
+            NFS3_PROC_READ,
+            NFS3_PROC_WRITE,
+            NFS3_PROC_CREATE,
+            NFS3_PROC_MKDIR,
+            NFS3_PROC_SYMLINK,
+            NFS3_PROC_MKNOD,
+            NFS3_PROC_REMOVE,
+            NFS3_PROC_RMDIR,
+            NFS3_PROC_RENAME,
+            NFS3_PROC_LINK,
+            NFS3_PROC_READDIR,
+            NFS3_PROC_READDIRPLUS,
+            NFS3_PROC_FSSTAT,
+            NFS3_PROC_FSINFO,
+            NFS3_PROC_PATHCONF,
             NFS3_PROC_COMMIT,
         ];
         for i in 0..procs.len() {
@@ -170,8 +187,12 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            NFS_FTYPE_REG, NFS_FTYPE_DIR, NFS_FTYPE_BLK,
-            NFS_FTYPE_CHR, NFS_FTYPE_LNK, NFS_FTYPE_SOCK,
+            NFS_FTYPE_REG,
+            NFS_FTYPE_DIR,
+            NFS_FTYPE_BLK,
+            NFS_FTYPE_CHR,
+            NFS_FTYPE_LNK,
+            NFS_FTYPE_SOCK,
             NFS_FTYPE_FIFO,
         ];
         for i in 0..types.len() {
@@ -184,10 +205,19 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let codes = [
-            NFS3_OK, NFS3ERR_PERM, NFS3ERR_NOENT, NFS3ERR_IO,
-            NFS3ERR_NXIO, NFS3ERR_ACCES, NFS3ERR_EXIST,
-            NFS3ERR_NOTDIR, NFS3ERR_ISDIR, NFS3ERR_NOSPC,
-            NFS3ERR_ROFS, NFS3ERR_NAMETOOLONG, NFS3ERR_NOTEMPTY,
+            NFS3_OK,
+            NFS3ERR_PERM,
+            NFS3ERR_NOENT,
+            NFS3ERR_IO,
+            NFS3ERR_NXIO,
+            NFS3ERR_ACCES,
+            NFS3ERR_EXIST,
+            NFS3ERR_NOTDIR,
+            NFS3ERR_ISDIR,
+            NFS3ERR_NOSPC,
+            NFS3ERR_ROFS,
+            NFS3ERR_NAMETOOLONG,
+            NFS3ERR_NOTEMPTY,
             NFS3ERR_STALE,
         ];
         for i in 0..codes.len() {

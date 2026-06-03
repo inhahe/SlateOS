@@ -80,11 +80,22 @@ mod tests {
     #[test]
     fn test_status_flags_no_overlap() {
         let flags = [
-            IPS_EXPECTED, IPS_SEEN_REPLY, IPS_ASSURED,
-            IPS_CONFIRMED, IPS_SRC_NAT, IPS_DST_NAT,
-            IPS_SEQ_ADJUST, IPS_SRC_NAT_DONE, IPS_DST_NAT_DONE,
-            IPS_DYING, IPS_FIXED_TIMEOUT, IPS_TEMPLATE,
-            IPS_UNTRACKED, IPS_HELPER, IPS_OFFLOAD, IPS_HW_OFFLOAD,
+            IPS_EXPECTED,
+            IPS_SEEN_REPLY,
+            IPS_ASSURED,
+            IPS_CONFIRMED,
+            IPS_SRC_NAT,
+            IPS_DST_NAT,
+            IPS_SEQ_ADJUST,
+            IPS_SRC_NAT_DONE,
+            IPS_DST_NAT_DONE,
+            IPS_DYING,
+            IPS_FIXED_TIMEOUT,
+            IPS_TEMPLATE,
+            IPS_UNTRACKED,
+            IPS_HELPER,
+            IPS_OFFLOAD,
+            IPS_HW_OFFLOAD,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -96,11 +107,22 @@ mod tests {
     #[test]
     fn test_status_flags_power_of_two() {
         let flags = [
-            IPS_EXPECTED, IPS_SEEN_REPLY, IPS_ASSURED,
-            IPS_CONFIRMED, IPS_SRC_NAT, IPS_DST_NAT,
-            IPS_SEQ_ADJUST, IPS_SRC_NAT_DONE, IPS_DST_NAT_DONE,
-            IPS_DYING, IPS_FIXED_TIMEOUT, IPS_TEMPLATE,
-            IPS_UNTRACKED, IPS_HELPER, IPS_OFFLOAD, IPS_HW_OFFLOAD,
+            IPS_EXPECTED,
+            IPS_SEEN_REPLY,
+            IPS_ASSURED,
+            IPS_CONFIRMED,
+            IPS_SRC_NAT,
+            IPS_DST_NAT,
+            IPS_SEQ_ADJUST,
+            IPS_SRC_NAT_DONE,
+            IPS_DST_NAT_DONE,
+            IPS_DYING,
+            IPS_FIXED_TIMEOUT,
+            IPS_TEMPLATE,
+            IPS_UNTRACKED,
+            IPS_HELPER,
+            IPS_OFFLOAD,
+            IPS_HW_OFFLOAD,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x} is not power of two", flag);
@@ -110,10 +132,17 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            IPCT_NEW, IPCT_RELATED, IPCT_DESTROY,
-            IPCT_REPLY, IPCT_ASSURED, IPCT_PROTOINFO,
-            IPCT_HELPER, IPCT_MARK, IPCT_SEQADJ,
-            IPCT_SECMARK, IPCT_LABEL,
+            IPCT_NEW,
+            IPCT_RELATED,
+            IPCT_DESTROY,
+            IPCT_REPLY,
+            IPCT_ASSURED,
+            IPCT_PROTOINFO,
+            IPCT_HELPER,
+            IPCT_MARK,
+            IPCT_SEQADJ,
+            IPCT_SECMARK,
+            IPCT_LABEL,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

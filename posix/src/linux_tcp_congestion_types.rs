@@ -84,9 +84,16 @@ mod tests {
     #[test]
     fn test_algorithms_distinct() {
         let algs = [
-            TCP_CC_RENO, TCP_CC_CUBIC, TCP_CC_BBR, TCP_CC_BBRV2,
-            TCP_CC_DCTCP, TCP_CC_VEGAS, TCP_CC_WESTWOOD,
-            TCP_CC_HTCP, TCP_CC_ILLINOIS, TCP_CC_CDG,
+            TCP_CC_RENO,
+            TCP_CC_CUBIC,
+            TCP_CC_BBR,
+            TCP_CC_BBRV2,
+            TCP_CC_DCTCP,
+            TCP_CC_VEGAS,
+            TCP_CC_WESTWOOD,
+            TCP_CC_HTCP,
+            TCP_CC_ILLINOIS,
+            TCP_CC_CDG,
         ];
         for i in 0..algs.len() {
             for j in (i + 1)..algs.len() {
@@ -98,8 +105,10 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            TCP_CA_EVENT_LOSS, TCP_CA_EVENT_ECN,
-            TCP_CA_EVENT_FAST_RECOVERY, TCP_CA_EVENT_CWND_RESTART,
+            TCP_CA_EVENT_LOSS,
+            TCP_CA_EVENT_ECN,
+            TCP_CA_EVENT_FAST_RECOVERY,
+            TCP_CA_EVENT_CWND_RESTART,
             TCP_CA_EVENT_SLOW_START_EXIT,
         ];
         for i in 0..events.len() {
@@ -112,8 +121,11 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            TCP_CA_OPEN, TCP_CA_DISORDER, TCP_CA_CWR,
-            TCP_CA_RECOVERY, TCP_CA_LOSS,
+            TCP_CA_OPEN,
+            TCP_CA_DISORDER,
+            TCP_CA_CWR,
+            TCP_CA_RECOVERY,
+            TCP_CA_LOSS,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -125,7 +137,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            TCP_CC_FLAG_ECN, TCP_CC_FLAG_DELAY_BASED,
+            TCP_CC_FLAG_ECN,
+            TCP_CC_FLAG_DELAY_BASED,
             TCP_CC_FLAG_RTT_STAMP,
         ];
         for i in 0..flags.len() {

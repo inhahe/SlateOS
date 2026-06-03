@@ -113,11 +113,16 @@ mod tests {
     #[test]
     fn test_attr_ids_distinct() {
         let attrs = [
-            SWITCHDEV_ATTR_PORT_PARENT_ID, SWITCHDEV_ATTR_PORT_STP_STATE,
-            SWITCHDEV_ATTR_PORT_BRIDGE_FLAGS, SWITCHDEV_ATTR_PORT_LEARNING,
-            SWITCHDEV_ATTR_PORT_MROUTER, SWITCHDEV_ATTR_BRIDGE_AGEING_TIME,
-            SWITCHDEV_ATTR_BRIDGE_VLAN_FILTERING, SWITCHDEV_ATTR_BRIDGE_VLAN_PROTOCOL,
-            SWITCHDEV_ATTR_BRIDGE_MC_DISABLED, SWITCHDEV_ATTR_BRIDGE_MROUTER,
+            SWITCHDEV_ATTR_PORT_PARENT_ID,
+            SWITCHDEV_ATTR_PORT_STP_STATE,
+            SWITCHDEV_ATTR_PORT_BRIDGE_FLAGS,
+            SWITCHDEV_ATTR_PORT_LEARNING,
+            SWITCHDEV_ATTR_PORT_MROUTER,
+            SWITCHDEV_ATTR_BRIDGE_AGEING_TIME,
+            SWITCHDEV_ATTR_BRIDGE_VLAN_FILTERING,
+            SWITCHDEV_ATTR_BRIDGE_VLAN_PROTOCOL,
+            SWITCHDEV_ATTR_BRIDGE_MC_DISABLED,
+            SWITCHDEV_ATTR_BRIDGE_MROUTER,
             SWITCHDEV_ATTR_BRIDGE_MST,
         ];
         for i in 0..attrs.len() {
@@ -130,8 +135,10 @@ mod tests {
     #[test]
     fn test_obj_ids_distinct() {
         let objs = [
-            SWITCHDEV_OBJ_PORT_VLAN, SWITCHDEV_OBJ_PORT_MDB,
-            SWITCHDEV_OBJ_HOST_MDB, SWITCHDEV_OBJ_MIRROR,
+            SWITCHDEV_OBJ_PORT_VLAN,
+            SWITCHDEV_OBJ_PORT_MDB,
+            SWITCHDEV_OBJ_HOST_MDB,
+            SWITCHDEV_OBJ_MIRROR,
             SWITCHDEV_OBJ_RING_ROLE,
         ];
         for i in 0..objs.len() {
@@ -144,9 +151,12 @@ mod tests {
     #[test]
     fn test_fdb_types_distinct() {
         let fdb = [
-            SWITCHDEV_FDB_ADD_TO_BRIDGE, SWITCHDEV_FDB_DEL_TO_BRIDGE,
-            SWITCHDEV_FDB_ADD_TO_DEVICE, SWITCHDEV_FDB_DEL_TO_DEVICE,
-            SWITCHDEV_FDB_OFFLOADED, SWITCHDEV_FDB_FLUSH_TO_BRIDGE,
+            SWITCHDEV_FDB_ADD_TO_BRIDGE,
+            SWITCHDEV_FDB_DEL_TO_BRIDGE,
+            SWITCHDEV_FDB_ADD_TO_DEVICE,
+            SWITCHDEV_FDB_DEL_TO_DEVICE,
+            SWITCHDEV_FDB_OFFLOADED,
+            SWITCHDEV_FDB_FLUSH_TO_BRIDGE,
         ];
         for i in 0..fdb.len() {
             for j in (i + 1)..fdb.len() {
@@ -158,9 +168,14 @@ mod tests {
     #[test]
     fn test_bridge_flags_no_overlap() {
         let flags = [
-            BR_FLOOD, BR_LEARNING, BR_LEARNING_SYNC,
-            BR_MCAST_FLOOD, BR_BCAST_FLOOD, BR_ISOLATED,
-            BR_PORT_LOCKED, BR_PORT_MAB,
+            BR_FLOOD,
+            BR_LEARNING,
+            BR_LEARNING_SYNC,
+            BR_MCAST_FLOOD,
+            BR_BCAST_FLOOD,
+            BR_ISOLATED,
+            BR_PORT_LOCKED,
+            BR_PORT_MAB,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -173,8 +188,10 @@ mod tests {
     #[test]
     fn test_stp_states_distinct() {
         let states = [
-            BR_STATE_DISABLED, BR_STATE_LISTENING,
-            BR_STATE_LEARNING, BR_STATE_FORWARDING,
+            BR_STATE_DISABLED,
+            BR_STATE_LISTENING,
+            BR_STATE_LEARNING,
+            BR_STATE_FORWARDING,
             BR_STATE_BLOCKING,
         ];
         for i in 0..states.len() {

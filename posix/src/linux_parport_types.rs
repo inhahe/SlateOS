@@ -69,9 +69,12 @@ mod tests {
     #[test]
     fn test_modes_no_overlap() {
         let modes = [
-            PARPORT_MODE_COMPAT, PARPORT_MODE_NIBBLE,
-            PARPORT_MODE_BYTE, PARPORT_MODE_EPP,
-            PARPORT_MODE_ECP, PARPORT_MODE_DMA,
+            PARPORT_MODE_COMPAT,
+            PARPORT_MODE_NIBBLE,
+            PARPORT_MODE_BYTE,
+            PARPORT_MODE_EPP,
+            PARPORT_MODE_ECP,
+            PARPORT_MODE_DMA,
         ];
         for i in 0..modes.len() {
             assert!(modes[i].is_power_of_two());
@@ -84,8 +87,10 @@ mod tests {
     #[test]
     fn test_control_bits_no_overlap() {
         let bits = [
-            PARPORT_CONTROL_STROBE, PARPORT_CONTROL_AUTOFD,
-            PARPORT_CONTROL_INIT, PARPORT_CONTROL_SELECT,
+            PARPORT_CONTROL_STROBE,
+            PARPORT_CONTROL_AUTOFD,
+            PARPORT_CONTROL_INIT,
+            PARPORT_CONTROL_SELECT,
         ];
         for i in 0..bits.len() {
             assert!(bits[i].is_power_of_two());
@@ -98,8 +103,10 @@ mod tests {
     #[test]
     fn test_status_bits_no_overlap() {
         let bits = [
-            PARPORT_STATUS_ERROR, PARPORT_STATUS_SELECT,
-            PARPORT_STATUS_PAPEROUT, PARPORT_STATUS_ACK,
+            PARPORT_STATUS_ERROR,
+            PARPORT_STATUS_SELECT,
+            PARPORT_STATUS_PAPEROUT,
+            PARPORT_STATUS_ACK,
             PARPORT_STATUS_BUSY,
         ];
         for i in 0..bits.len() {

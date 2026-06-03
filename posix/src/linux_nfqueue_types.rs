@@ -94,8 +94,10 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let types = [
-            NFQNL_MSG_PACKET, NFQNL_MSG_VERDICT,
-            NFQNL_MSG_CONFIG, NFQNL_MSG_VERDICT_BATCH,
+            NFQNL_MSG_PACKET,
+            NFQNL_MSG_VERDICT,
+            NFQNL_MSG_CONFIG,
+            NFQNL_MSG_VERDICT_BATCH,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -112,8 +114,10 @@ mod tests {
     #[test]
     fn test_config_cmds_distinct() {
         let cmds = [
-            NFQNL_CFG_CMD_NONE, NFQNL_CFG_CMD_BIND,
-            NFQNL_CFG_CMD_UNBIND, NFQNL_CFG_CMD_PF_BIND,
+            NFQNL_CFG_CMD_NONE,
+            NFQNL_CFG_CMD_BIND,
+            NFQNL_CFG_CMD_UNBIND,
+            NFQNL_CFG_CMD_PF_BIND,
             NFQNL_CFG_CMD_PF_UNBIND,
         ];
         for i in 0..cmds.len() {
@@ -136,8 +140,10 @@ mod tests {
     #[test]
     fn test_config_flags_powers_of_two() {
         let flags = [
-            NFQA_CFG_F_FAIL_OPEN, NFQA_CFG_F_CONNTRACK,
-            NFQA_CFG_F_GSO, NFQA_CFG_F_UID_GID,
+            NFQA_CFG_F_FAIL_OPEN,
+            NFQA_CFG_F_CONNTRACK,
+            NFQA_CFG_F_GSO,
+            NFQA_CFG_F_UID_GID,
             NFQA_CFG_F_SECCTX,
         ];
         for f in flags {
@@ -148,8 +154,10 @@ mod tests {
     #[test]
     fn test_config_flags_no_overlap() {
         let flags = [
-            NFQA_CFG_F_FAIL_OPEN, NFQA_CFG_F_CONNTRACK,
-            NFQA_CFG_F_GSO, NFQA_CFG_F_UID_GID,
+            NFQA_CFG_F_FAIL_OPEN,
+            NFQA_CFG_F_CONNTRACK,
+            NFQA_CFG_F_GSO,
+            NFQA_CFG_F_UID_GID,
             NFQA_CFG_F_SECCTX,
         ];
         for i in 0..flags.len() {

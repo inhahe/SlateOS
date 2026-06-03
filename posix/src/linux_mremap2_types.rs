@@ -73,12 +73,18 @@ mod tests {
     #[test]
     fn test_map_flags_distinct() {
         let flags = [
-            MAP_SHARED_MREMAP, MAP_PRIVATE_MREMAP,
-            MAP_FIXED_MREMAP, MAP_ANONYMOUS_MREMAP,
-            MAP_GROWSDOWN_MREMAP, MAP_NORESERVE_MREMAP,
-            MAP_POPULATE_MREMAP, MAP_NONBLOCK_MREMAP,
-            MAP_STACK_MREMAP, MAP_HUGETLB_MREMAP,
-            MAP_LOCKED_MREMAP, MAP_SYNC_MREMAP,
+            MAP_SHARED_MREMAP,
+            MAP_PRIVATE_MREMAP,
+            MAP_FIXED_MREMAP,
+            MAP_ANONYMOUS_MREMAP,
+            MAP_GROWSDOWN_MREMAP,
+            MAP_NORESERVE_MREMAP,
+            MAP_POPULATE_MREMAP,
+            MAP_NONBLOCK_MREMAP,
+            MAP_STACK_MREMAP,
+            MAP_HUGETLB_MREMAP,
+            MAP_LOCKED_MREMAP,
+            MAP_SYNC_MREMAP,
             MAP_FIXED_NOREPLACE_MREMAP,
         ];
         for i in 0..flags.len() {

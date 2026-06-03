@@ -115,8 +115,12 @@ mod tests {
     #[test]
     fn test_sysctl_paths_distinct() {
         let paths = [
-            SYSCTL_SHMMAX, SYSCTL_SHMALL, SYSCTL_SHMMNI,
-            SYSCTL_MSGMNI, SYSCTL_MSGMAX, SYSCTL_SEM,
+            SYSCTL_SHMMAX,
+            SYSCTL_SHMALL,
+            SYSCTL_SHMMNI,
+            SYSCTL_MSGMNI,
+            SYSCTL_MSGMAX,
+            SYSCTL_SEM,
         ];
         for i in 0..paths.len() {
             for j in (i + 1)..paths.len() {

@@ -84,9 +84,12 @@ mod tests {
     #[test]
     fn test_packet_types_distinct() {
         let types = [
-            AUTOFS_PTYPE_MISSING, AUTOFS_PTYPE_EXPIRE,
-            AUTOFS_PTYPE_MISSING_DIRECT, AUTOFS_PTYPE_EXPIRE_DIRECT,
-            AUTOFS_PTYPE_MISSING_INDIRECT, AUTOFS_PTYPE_EXPIRE_INDIRECT,
+            AUTOFS_PTYPE_MISSING,
+            AUTOFS_PTYPE_EXPIRE,
+            AUTOFS_PTYPE_MISSING_DIRECT,
+            AUTOFS_PTYPE_EXPIRE_DIRECT,
+            AUTOFS_PTYPE_MISSING_INDIRECT,
+            AUTOFS_PTYPE_EXPIRE_INDIRECT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -97,10 +100,7 @@ mod tests {
 
     #[test]
     fn test_mount_types_powers_of_two() {
-        let types = [
-            AUTOFS_TYPE_INDIRECT, AUTOFS_TYPE_DIRECT,
-            AUTOFS_TYPE_OFFSET,
-        ];
+        let types = [AUTOFS_TYPE_INDIRECT, AUTOFS_TYPE_DIRECT, AUTOFS_TYPE_OFFSET];
         for t in &types {
             assert!(t.is_power_of_two(), "type {t} not power of 2");
         }
@@ -109,9 +109,12 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            AUTOFS_IOC_READY, AUTOFS_IOC_FAIL,
-            AUTOFS_IOC_SETTIMEOUT, AUTOFS_IOC_PROTOVER,
-            AUTOFS_IOC_EXPIRE, AUTOFS_IOC_ASKUMOUNT,
+            AUTOFS_IOC_READY,
+            AUTOFS_IOC_FAIL,
+            AUTOFS_IOC_SETTIMEOUT,
+            AUTOFS_IOC_PROTOVER,
+            AUTOFS_IOC_EXPIRE,
+            AUTOFS_IOC_ASKUMOUNT,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

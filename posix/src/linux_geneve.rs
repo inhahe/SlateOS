@@ -104,9 +104,13 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            IFLA_GENEVE_ID, IFLA_GENEVE_REMOTE, IFLA_GENEVE_TTL,
-            IFLA_GENEVE_TOS, IFLA_GENEVE_PORT,
-            IFLA_GENEVE_COLLECT_METADATA, IFLA_GENEVE_REMOTE6,
+            IFLA_GENEVE_ID,
+            IFLA_GENEVE_REMOTE,
+            IFLA_GENEVE_TTL,
+            IFLA_GENEVE_TOS,
+            IFLA_GENEVE_PORT,
+            IFLA_GENEVE_COLLECT_METADATA,
+            IFLA_GENEVE_REMOTE6,
             IFLA_GENEVE_UDP_CSUM,
         ];
         for i in 0..attrs.len() {

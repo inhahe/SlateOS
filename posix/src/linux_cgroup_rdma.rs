@@ -84,8 +84,12 @@ mod tests {
     #[test]
     fn test_rdma_resources_distinct() {
         let res = [
-            RDMA_RESOURCE_PD, RDMA_RESOURCE_AH, RDMA_RESOURCE_CQ,
-            RDMA_RESOURCE_MR, RDMA_RESOURCE_QP, RDMA_RESOURCE_SRQ,
+            RDMA_RESOURCE_PD,
+            RDMA_RESOURCE_AH,
+            RDMA_RESOURCE_CQ,
+            RDMA_RESOURCE_MR,
+            RDMA_RESOURCE_QP,
+            RDMA_RESOURCE_SRQ,
             RDMA_RESOURCE_MW,
         ];
         for i in 0..res.len() {
@@ -98,8 +102,12 @@ mod tests {
     #[test]
     fn test_resources_below_max() {
         let res = [
-            RDMA_RESOURCE_PD, RDMA_RESOURCE_AH, RDMA_RESOURCE_CQ,
-            RDMA_RESOURCE_MR, RDMA_RESOURCE_QP, RDMA_RESOURCE_SRQ,
+            RDMA_RESOURCE_PD,
+            RDMA_RESOURCE_AH,
+            RDMA_RESOURCE_CQ,
+            RDMA_RESOURCE_MR,
+            RDMA_RESOURCE_QP,
+            RDMA_RESOURCE_SRQ,
             RDMA_RESOURCE_MW,
         ];
         for r in &res {
@@ -110,9 +118,12 @@ mod tests {
     #[test]
     fn test_resource_names_distinct() {
         let names = [
-            RDMA_RESOURCE_PD_NAME, RDMA_RESOURCE_AH_NAME,
-            RDMA_RESOURCE_CQ_NAME, RDMA_RESOURCE_MR_NAME,
-            RDMA_RESOURCE_QP_NAME, RDMA_RESOURCE_SRQ_NAME,
+            RDMA_RESOURCE_PD_NAME,
+            RDMA_RESOURCE_AH_NAME,
+            RDMA_RESOURCE_CQ_NAME,
+            RDMA_RESOURCE_MR_NAME,
+            RDMA_RESOURCE_QP_NAME,
+            RDMA_RESOURCE_SRQ_NAME,
             RDMA_RESOURCE_MW_NAME,
         ];
         for i in 0..names.len() {

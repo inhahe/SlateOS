@@ -87,10 +87,19 @@ mod tests {
     #[test]
     fn test_major_numbers_distinct() {
         let majors = [
-            MEM_MAJOR, TTY_MAJOR, TTYAUX_MAJOR, LOOP_MAJOR,
-            SCSI_DISK0_MAJOR, MISC_MAJOR, IDE0_MAJOR,
-            FLOPPY_MAJOR, INPUT_MAJOR, SOUND_MAJOR,
-            USB_CHAR_MAJOR, VIRTBLK_MAJOR, NVME_MAJOR,
+            MEM_MAJOR,
+            TTY_MAJOR,
+            TTYAUX_MAJOR,
+            LOOP_MAJOR,
+            SCSI_DISK0_MAJOR,
+            MISC_MAJOR,
+            IDE0_MAJOR,
+            FLOPPY_MAJOR,
+            INPUT_MAJOR,
+            SOUND_MAJOR,
+            USB_CHAR_MAJOR,
+            VIRTBLK_MAJOR,
+            NVME_MAJOR,
         ];
         for i in 0..majors.len() {
             for j in (i + 1)..majors.len() {
@@ -102,8 +111,11 @@ mod tests {
     #[test]
     fn test_mem_device_minors_distinct() {
         let minors = [
-            DEV_NULL_MINOR, DEV_ZERO_MINOR, DEV_FULL_MINOR,
-            DEV_RANDOM_MINOR, DEV_URANDOM_MINOR,
+            DEV_NULL_MINOR,
+            DEV_ZERO_MINOR,
+            DEV_FULL_MINOR,
+            DEV_RANDOM_MINOR,
+            DEV_URANDOM_MINOR,
         ];
         for i in 0..minors.len() {
             for j in (i + 1)..minors.len() {

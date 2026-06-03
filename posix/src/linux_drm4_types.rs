@@ -84,16 +84,26 @@ mod tests {
     #[test]
     fn test_connector_types_distinct() {
         let types = [
-            DRM_MODE_CONNECTOR_Unknown, DRM_MODE_CONNECTOR_VGA,
-            DRM_MODE_CONNECTOR_DVII, DRM_MODE_CONNECTOR_DVID,
-            DRM_MODE_CONNECTOR_DVIA, DRM_MODE_CONNECTOR_Composite,
-            DRM_MODE_CONNECTOR_SVIDEO, DRM_MODE_CONNECTOR_LVDS,
-            DRM_MODE_CONNECTOR_Component, DRM_MODE_CONNECTOR_9PinDIN,
-            DRM_MODE_CONNECTOR_DisplayPort, DRM_MODE_CONNECTOR_HDMIA,
-            DRM_MODE_CONNECTOR_HDMIB, DRM_MODE_CONNECTOR_TV,
-            DRM_MODE_CONNECTOR_eDP, DRM_MODE_CONNECTOR_VIRTUAL,
-            DRM_MODE_CONNECTOR_DSI, DRM_MODE_CONNECTOR_DPI,
-            DRM_MODE_CONNECTOR_WRITEBACK, DRM_MODE_CONNECTOR_SPI,
+            DRM_MODE_CONNECTOR_Unknown,
+            DRM_MODE_CONNECTOR_VGA,
+            DRM_MODE_CONNECTOR_DVII,
+            DRM_MODE_CONNECTOR_DVID,
+            DRM_MODE_CONNECTOR_DVIA,
+            DRM_MODE_CONNECTOR_Composite,
+            DRM_MODE_CONNECTOR_SVIDEO,
+            DRM_MODE_CONNECTOR_LVDS,
+            DRM_MODE_CONNECTOR_Component,
+            DRM_MODE_CONNECTOR_9PinDIN,
+            DRM_MODE_CONNECTOR_DisplayPort,
+            DRM_MODE_CONNECTOR_HDMIA,
+            DRM_MODE_CONNECTOR_HDMIB,
+            DRM_MODE_CONNECTOR_TV,
+            DRM_MODE_CONNECTOR_eDP,
+            DRM_MODE_CONNECTOR_VIRTUAL,
+            DRM_MODE_CONNECTOR_DSI,
+            DRM_MODE_CONNECTOR_DPI,
+            DRM_MODE_CONNECTOR_WRITEBACK,
+            DRM_MODE_CONNECTOR_SPI,
             DRM_MODE_CONNECTOR_USB,
         ];
         for i in 0..types.len() {
@@ -106,10 +116,14 @@ mod tests {
     #[test]
     fn test_encoder_types_distinct() {
         let types = [
-            DRM_MODE_ENCODER_NONE, DRM_MODE_ENCODER_DAC,
-            DRM_MODE_ENCODER_TMDS, DRM_MODE_ENCODER_LVDS,
-            DRM_MODE_ENCODER_TVDAC, DRM_MODE_ENCODER_VIRTUAL,
-            DRM_MODE_ENCODER_DSI, DRM_MODE_ENCODER_DPMST,
+            DRM_MODE_ENCODER_NONE,
+            DRM_MODE_ENCODER_DAC,
+            DRM_MODE_ENCODER_TMDS,
+            DRM_MODE_ENCODER_LVDS,
+            DRM_MODE_ENCODER_TVDAC,
+            DRM_MODE_ENCODER_VIRTUAL,
+            DRM_MODE_ENCODER_DSI,
+            DRM_MODE_ENCODER_DPMST,
             DRM_MODE_ENCODER_DPI,
         ];
         for i in 0..types.len() {

@@ -81,9 +81,14 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            UBI_IOCMKVOL, UBI_IOCRMVOL, UBI_IOCRSVOL,
-            UBI_IOCRNVOL, UBI_IOCVOLUP, UBI_IOCEBCH,
-            UBI_IOCEBMAP, UBI_IOCEBUNMAP,
+            UBI_IOCMKVOL,
+            UBI_IOCRMVOL,
+            UBI_IOCRSVOL,
+            UBI_IOCRNVOL,
+            UBI_IOCVOLUP,
+            UBI_IOCEBCH,
+            UBI_IOCEBMAP,
+            UBI_IOCEBUNMAP,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

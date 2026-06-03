@@ -95,11 +95,20 @@ mod tests {
     #[test]
     fn test_tracer_types_distinct() {
         let types = [
-            TRACER_NOP, TRACER_FUNCTION, TRACER_FUNCTION_GRAPH,
-            TRACER_IRQSOFF, TRACER_PREEMPTOFF, TRACER_PREEMPTIRQSOFF,
-            TRACER_WAKEUP, TRACER_WAKEUP_RT, TRACER_WAKEUP_DL,
-            TRACER_MMIOTRACE, TRACER_BLK, TRACER_HWLAT,
-            TRACER_OSNOISE, TRACER_TIMERLAT,
+            TRACER_NOP,
+            TRACER_FUNCTION,
+            TRACER_FUNCTION_GRAPH,
+            TRACER_IRQSOFF,
+            TRACER_PREEMPTOFF,
+            TRACER_PREEMPTIRQSOFF,
+            TRACER_WAKEUP,
+            TRACER_WAKEUP_RT,
+            TRACER_WAKEUP_DL,
+            TRACER_MMIOTRACE,
+            TRACER_BLK,
+            TRACER_HWLAT,
+            TRACER_OSNOISE,
+            TRACER_TIMERLAT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -111,7 +120,8 @@ mod tests {
     #[test]
     fn test_graph_flags_power_of_two() {
         let flags = [
-            FTRACE_GRAPH_TAIL_CALL, FTRACE_GRAPH_SLEEP,
+            FTRACE_GRAPH_TAIL_CALL,
+            FTRACE_GRAPH_SLEEP,
             FTRACE_GRAPH_NOTRACE,
         ];
         for f in &flags {
@@ -122,7 +132,8 @@ mod tests {
     #[test]
     fn test_graph_flags_no_overlap() {
         let flags = [
-            FTRACE_GRAPH_TAIL_CALL, FTRACE_GRAPH_SLEEP,
+            FTRACE_GRAPH_TAIL_CALL,
+            FTRACE_GRAPH_SLEEP,
             FTRACE_GRAPH_NOTRACE,
         ];
         for i in 0..flags.len() {
@@ -135,14 +146,22 @@ mod tests {
     #[test]
     fn test_options_power_of_two() {
         let opts = [
-            TRACE_OPT_PRINT_PARENT, TRACE_OPT_SYM_OFFSET,
-            TRACE_OPT_SYM_ADDR, TRACE_OPT_VERBOSE,
-            TRACE_OPT_RAW, TRACE_OPT_HEX,
-            TRACE_OPT_BIN, TRACE_OPT_BLOCK,
-            TRACE_OPT_STACKTRACE, TRACE_OPT_TRACE_PRINTK,
-            TRACE_OPT_ANNOTATE, TRACE_OPT_RECORD_CMD,
-            TRACE_OPT_OVERWRITE, TRACE_OPT_DISABLE_ON_FREE,
-            TRACE_OPT_IRQ_INFO, TRACE_OPT_MARKERS,
+            TRACE_OPT_PRINT_PARENT,
+            TRACE_OPT_SYM_OFFSET,
+            TRACE_OPT_SYM_ADDR,
+            TRACE_OPT_VERBOSE,
+            TRACE_OPT_RAW,
+            TRACE_OPT_HEX,
+            TRACE_OPT_BIN,
+            TRACE_OPT_BLOCK,
+            TRACE_OPT_STACKTRACE,
+            TRACE_OPT_TRACE_PRINTK,
+            TRACE_OPT_ANNOTATE,
+            TRACE_OPT_RECORD_CMD,
+            TRACE_OPT_OVERWRITE,
+            TRACE_OPT_DISABLE_ON_FREE,
+            TRACE_OPT_IRQ_INFO,
+            TRACE_OPT_MARKERS,
         ];
         for o in &opts {
             assert!(o.is_power_of_two(), "0x{:08x} not power of two", o);
@@ -152,14 +171,22 @@ mod tests {
     #[test]
     fn test_options_no_overlap() {
         let opts = [
-            TRACE_OPT_PRINT_PARENT, TRACE_OPT_SYM_OFFSET,
-            TRACE_OPT_SYM_ADDR, TRACE_OPT_VERBOSE,
-            TRACE_OPT_RAW, TRACE_OPT_HEX,
-            TRACE_OPT_BIN, TRACE_OPT_BLOCK,
-            TRACE_OPT_STACKTRACE, TRACE_OPT_TRACE_PRINTK,
-            TRACE_OPT_ANNOTATE, TRACE_OPT_RECORD_CMD,
-            TRACE_OPT_OVERWRITE, TRACE_OPT_DISABLE_ON_FREE,
-            TRACE_OPT_IRQ_INFO, TRACE_OPT_MARKERS,
+            TRACE_OPT_PRINT_PARENT,
+            TRACE_OPT_SYM_OFFSET,
+            TRACE_OPT_SYM_ADDR,
+            TRACE_OPT_VERBOSE,
+            TRACE_OPT_RAW,
+            TRACE_OPT_HEX,
+            TRACE_OPT_BIN,
+            TRACE_OPT_BLOCK,
+            TRACE_OPT_STACKTRACE,
+            TRACE_OPT_TRACE_PRINTK,
+            TRACE_OPT_ANNOTATE,
+            TRACE_OPT_RECORD_CMD,
+            TRACE_OPT_OVERWRITE,
+            TRACE_OPT_DISABLE_ON_FREE,
+            TRACE_OPT_IRQ_INFO,
+            TRACE_OPT_MARKERS,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

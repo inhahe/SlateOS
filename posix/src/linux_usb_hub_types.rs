@@ -83,8 +83,10 @@ mod tests {
     fn test_port_status_bits() {
         // Key status bits should be distinct bit positions
         let bits = [
-            USB_PORT_STAT_CONNECTION, USB_PORT_STAT_ENABLE,
-            USB_PORT_STAT_SUSPEND, USB_PORT_STAT_OVERCURRENT,
+            USB_PORT_STAT_CONNECTION,
+            USB_PORT_STAT_ENABLE,
+            USB_PORT_STAT_SUSPEND,
+            USB_PORT_STAT_OVERCURRENT,
             USB_PORT_STAT_RESET,
         ];
         for i in 0..bits.len() {
@@ -98,8 +100,10 @@ mod tests {
     #[test]
     fn test_change_bits() {
         let bits = [
-            USB_PORT_STAT_C_CONNECTION, USB_PORT_STAT_C_ENABLE,
-            USB_PORT_STAT_C_SUSPEND, USB_PORT_STAT_C_OVERCURRENT,
+            USB_PORT_STAT_C_CONNECTION,
+            USB_PORT_STAT_C_ENABLE,
+            USB_PORT_STAT_C_SUSPEND,
+            USB_PORT_STAT_C_OVERCURRENT,
             USB_PORT_STAT_C_RESET,
         ];
         for i in 0..bits.len() {

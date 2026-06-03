@@ -187,7 +187,9 @@ fn collect_matches(
             count = count.wrapping_add(1);
         } else {
             // SAFETY: path was allocated by malloc above.
-            unsafe { malloc::free(path); }
+            unsafe {
+                malloc::free(path);
+            }
         }
     }
 
@@ -242,7 +244,9 @@ fn build_match_path(
         let dir_len = parts.last_slash.wrapping_add(1);
         let mut ci: usize = 0;
         while ci < dir_len {
-            unsafe { *path.add(pos) = *pattern.add(ci); }
+            unsafe {
+                *path.add(pos) = *pattern.add(ci);
+            }
             pos = pos.wrapping_add(1);
             ci = ci.wrapping_add(1);
         }
@@ -251,17 +255,23 @@ fn build_match_path(
     // Copy filename.
     let mut ci: usize = 0;
     while ci < name_len {
-        unsafe { *path.add(pos) = *name.add(ci); }
+        unsafe {
+            *path.add(pos) = *name.add(ci);
+        }
         pos = pos.wrapping_add(1);
         ci = ci.wrapping_add(1);
     }
 
     if needs_slash {
-        unsafe { *path.add(pos) = b'/'; }
+        unsafe {
+            *path.add(pos) = b'/';
+        }
         pos = pos.wrapping_add(1);
     }
 
-    unsafe { *path.add(pos) = 0; }
+    unsafe {
+        *path.add(pos) = 0;
+    }
     path
 }
 
@@ -282,7 +292,9 @@ fn assemble_results(
     let old_count = glob_res.gl_pathc;
     let new_count = old_count.wrapping_add(match_count);
     // Each entry is a pointer (8 bytes on x86_64), plus one null sentinel.
-    let array_bytes = new_count.wrapping_add(1).wrapping_mul(core::mem::size_of::<*mut u8>());
+    let array_bytes = new_count
+        .wrapping_add(1)
+        .wrapping_mul(core::mem::size_of::<*mut u8>());
 
     let new_pathv = if glob_res.gl_pathv.is_null() {
         malloc::malloc(array_bytes)
@@ -303,13 +315,20 @@ fn assemble_results(
 
     let mut idx: usize = 0;
     while idx < match_count {
-        let ptr = match_ptrs.get(idx).copied().unwrap_or(core::ptr::null_mut());
-        unsafe { *pathv.add(old_count.wrapping_add(idx)) = ptr; }
+        let ptr = match_ptrs
+            .get(idx)
+            .copied()
+            .unwrap_or(core::ptr::null_mut());
+        unsafe {
+            *pathv.add(old_count.wrapping_add(idx)) = ptr;
+        }
         idx = idx.wrapping_add(1);
     }
 
     // Null-terminate the array.
-    unsafe { *pathv.add(new_count) = core::ptr::null_mut(); }
+    unsafe {
+        *pathv.add(new_count) = core::ptr::null_mut();
+    }
 
     glob_res.gl_pathv = pathv;
     glob_res.gl_pathc = new_count;
@@ -400,13 +419,17 @@ pub unsafe extern "C" fn globfree(pglob: *mut GlobT) {
             let entry = unsafe { *glob_res.gl_pathv.add(idx) };
             if !entry.is_null() {
                 // SAFETY: each entry was allocated by malloc.
-                unsafe { malloc::free(entry); }
+                unsafe {
+                    malloc::free(entry);
+                }
             }
             idx = idx.wrapping_add(1);
         }
         // SAFETY: gl_pathv was allocated via malloc, cast back to *mut u8.
         #[allow(clippy::cast_ptr_alignment)]
-        unsafe { malloc::free(glob_res.gl_pathv.cast::<u8>()); }
+        unsafe {
+            malloc::free(glob_res.gl_pathv.cast::<u8>());
+        }
     }
 
     glob_res.gl_pathc = 0;
@@ -430,15 +453,21 @@ fn add_single_path(glob_res: &mut GlobT, pattern: *const u8, pat_len: usize) -> 
 
     let mut idx: usize = 0;
     while idx < pat_len {
-        unsafe { *path.add(idx) = *pattern.add(idx); }
+        unsafe {
+            *path.add(idx) = *pattern.add(idx);
+        }
         idx = idx.wrapping_add(1);
     }
-    unsafe { *path.add(pat_len) = 0; }
+    unsafe {
+        *path.add(pat_len) = 0;
+    }
 
     let old_count = glob_res.gl_pathc;
     let new_count = old_count.wrapping_add(1);
     // Allocate space for existing entries + new entry + null sentinel.
-    let array_bytes = new_count.wrapping_add(1).wrapping_mul(core::mem::size_of::<*mut u8>());
+    let array_bytes = new_count
+        .wrapping_add(1)
+        .wrapping_mul(core::mem::size_of::<*mut u8>());
 
     let pathv_raw = if glob_res.gl_pathv.is_null() {
         malloc::malloc(array_bytes)
@@ -449,7 +478,9 @@ fn add_single_path(glob_res: &mut GlobT, pattern: *const u8, pat_len: usize) -> 
 
     if pathv_raw.is_null() {
         // SAFETY: path was allocated by malloc above.
-        unsafe { malloc::free(path); }
+        unsafe {
+            malloc::free(path);
+        }
         return GLOB_NOSPACE;
     }
 
@@ -476,7 +507,9 @@ fn cleanup_matches(ptrs: &mut [*mut u8; MAX_MATCHES], count: usize) {
             && !ptr.is_null()
         {
             // SAFETY: each ptr was allocated by malloc.
-            unsafe { malloc::free(ptr); }
+            unsafe {
+                malloc::free(ptr);
+            }
         }
         idx = idx.wrapping_add(1);
     }
@@ -493,7 +526,10 @@ fn sort_paths(ptrs: &mut [*mut u8; MAX_MATCHES], count: usize) {
         let key = ptrs.get(outer).copied().unwrap_or(core::ptr::null_mut());
         let mut inner = outer;
         while inner > 0 {
-            let prev = ptrs.get(inner.wrapping_sub(1)).copied().unwrap_or(core::ptr::null_mut());
+            let prev = ptrs
+                .get(inner.wrapping_sub(1))
+                .copied()
+                .unwrap_or(core::ptr::null_mut());
             if unsafe { string::strcmp(prev, key) } <= 0 {
                 break;
             }
@@ -521,10 +557,10 @@ mod tests {
 
     #[test]
     fn test_glob_input_flags() {
-        assert_eq!(GLOB_ERR, 1);       // (1 << 0)
-        assert_eq!(GLOB_MARK, 2);      // (1 << 1)
-        assert_eq!(GLOB_NOCHECK, 16);  // (1 << 4)
-        assert_eq!(GLOB_APPEND, 32);   // (1 << 5)
+        assert_eq!(GLOB_ERR, 1); // (1 << 0)
+        assert_eq!(GLOB_MARK, 2); // (1 << 1)
+        assert_eq!(GLOB_NOCHECK, 16); // (1 << 4)
+        assert_eq!(GLOB_APPEND, 32); // (1 << 5)
     }
 
     #[test]
@@ -718,7 +754,9 @@ mod tests {
     #[test]
     fn test_globfree_null() {
         // Should not crash.
-        unsafe { globfree(core::ptr::null_mut()); }
+        unsafe {
+            globfree(core::ptr::null_mut());
+        }
     }
 
     #[test]
@@ -728,7 +766,9 @@ mod tests {
             gl_pathv: core::ptr::null_mut(),
             gl_offs: 0,
         };
-        unsafe { globfree(&raw mut g); }
+        unsafe {
+            globfree(&raw mut g);
+        }
         assert_eq!(g.gl_pathc, 0);
         assert!(g.gl_pathv.is_null());
     }
@@ -838,8 +878,10 @@ mod tests {
         let flags = [GLOB_ERR, GLOB_MARK, GLOB_NOCHECK, GLOB_APPEND];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
-                assert_ne!(flags[i], flags[j],
-                    "flags at indices {i} and {j} must be distinct");
+                assert_ne!(
+                    flags[i], flags[j],
+                    "flags at indices {i} and {j} must be distinct"
+                );
             }
         }
     }

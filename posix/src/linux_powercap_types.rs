@@ -81,8 +81,10 @@ mod tests {
     #[test]
     fn test_zones_distinct() {
         let zones = [
-            POWERCAP_ZONE_PACKAGE, POWERCAP_ZONE_CORE,
-            POWERCAP_ZONE_UNCORE, POWERCAP_ZONE_DRAM,
+            POWERCAP_ZONE_PACKAGE,
+            POWERCAP_ZONE_CORE,
+            POWERCAP_ZONE_UNCORE,
+            POWERCAP_ZONE_DRAM,
             POWERCAP_ZONE_PLATFORM,
         ];
         for i in 0..zones.len() {
@@ -109,9 +111,12 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            POWERCAP_ATTR_ENERGY_UJ, POWERCAP_ATTR_MAX_ENERGY_RANGE_UJ,
-            POWERCAP_ATTR_POWER_UW, POWERCAP_ATTR_MAX_POWER_UW,
-            POWERCAP_ATTR_NAME, POWERCAP_ATTR_ENABLED,
+            POWERCAP_ATTR_ENERGY_UJ,
+            POWERCAP_ATTR_MAX_ENERGY_RANGE_UJ,
+            POWERCAP_ATTR_POWER_UW,
+            POWERCAP_ATTR_MAX_POWER_UW,
+            POWERCAP_ATTR_NAME,
+            POWERCAP_ATTR_ENABLED,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -123,9 +128,12 @@ mod tests {
     #[test]
     fn test_constraint_attrs_distinct() {
         let cattrs = [
-            POWERCAP_CATTR_POWER_LIMIT_UW, POWERCAP_CATTR_TIME_WINDOW_US,
-            POWERCAP_CATTR_MAX_POWER_UW, POWERCAP_CATTR_MIN_POWER_UW,
-            POWERCAP_CATTR_MAX_TIME_WINDOW_US, POWERCAP_CATTR_MIN_TIME_WINDOW_US,
+            POWERCAP_CATTR_POWER_LIMIT_UW,
+            POWERCAP_CATTR_TIME_WINDOW_US,
+            POWERCAP_CATTR_MAX_POWER_UW,
+            POWERCAP_CATTR_MIN_POWER_UW,
+            POWERCAP_CATTR_MAX_TIME_WINDOW_US,
+            POWERCAP_CATTR_MIN_TIME_WINDOW_US,
             POWERCAP_CATTR_NAME,
         ];
         for i in 0..cattrs.len() {

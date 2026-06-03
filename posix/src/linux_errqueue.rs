@@ -82,9 +82,12 @@ mod tests {
     #[test]
     fn test_origins_distinct() {
         let origins = [
-            SO_EE_ORIGIN_NONE, SO_EE_ORIGIN_LOCAL,
-            SO_EE_ORIGIN_ICMP, SO_EE_ORIGIN_ICMP6,
-            SO_EE_ORIGIN_TXSTATUS, SO_EE_ORIGIN_ZEROCOPY,
+            SO_EE_ORIGIN_NONE,
+            SO_EE_ORIGIN_LOCAL,
+            SO_EE_ORIGIN_ICMP,
+            SO_EE_ORIGIN_ICMP6,
+            SO_EE_ORIGIN_TXSTATUS,
+            SO_EE_ORIGIN_ZEROCOPY,
             SO_EE_ORIGIN_TXTIME,
         ];
         for i in 0..origins.len() {

@@ -66,8 +66,10 @@ mod tests {
     #[test]
     fn test_attr_flags_distinct() {
         let flags = [
-            FSMOUNT_ATTR_RDONLY, FSMOUNT_ATTR_NOSUID,
-            FSMOUNT_ATTR_NODEV, FSMOUNT_ATTR_NOEXEC,
+            FSMOUNT_ATTR_RDONLY,
+            FSMOUNT_ATTR_NOSUID,
+            FSMOUNT_ATTR_NODEV,
+            FSMOUNT_ATTR_NOEXEC,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -79,8 +81,10 @@ mod tests {
     #[test]
     fn test_attr_flags_powers_of_two() {
         let flags = [
-            FSMOUNT_ATTR_RDONLY, FSMOUNT_ATTR_NOSUID,
-            FSMOUNT_ATTR_NODEV, FSMOUNT_ATTR_NOEXEC,
+            FSMOUNT_ATTR_RDONLY,
+            FSMOUNT_ATTR_NOSUID,
+            FSMOUNT_ATTR_NODEV,
+            FSMOUNT_ATTR_NOEXEC,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -90,8 +94,10 @@ mod tests {
     #[test]
     fn test_atime_modes_distinct() {
         let modes = [
-            FSMOUNT_ATTR_RELATIME, FSMOUNT_ATTR_NOATIME,
-            FSMOUNT_ATTR_STRICTATIME, FSMOUNT_ATTR_NODIRATIME,
+            FSMOUNT_ATTR_RELATIME,
+            FSMOUNT_ATTR_NOATIME,
+            FSMOUNT_ATTR_STRICTATIME,
+            FSMOUNT_ATTR_NODIRATIME,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -103,8 +109,10 @@ mod tests {
     #[test]
     fn test_at_flags_distinct() {
         let flags = [
-            AT_EMPTY_PATH_FSMOUNT, AT_NO_AUTOMOUNT_FSMOUNT,
-            AT_SYMLINK_NOFOLLOW_FSMOUNT, AT_RECURSIVE_FSMOUNT,
+            AT_EMPTY_PATH_FSMOUNT,
+            AT_NO_AUTOMOUNT_FSMOUNT,
+            AT_SYMLINK_NOFOLLOW_FSMOUNT,
+            AT_RECURSIVE_FSMOUNT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -80,9 +80,12 @@ mod tests {
     #[test]
     fn test_event_classes_distinct() {
         let classes = [
-            ACPI_EVENT_CLASS_POWER, ACPI_EVENT_CLASS_SLEEP,
-            ACPI_EVENT_CLASS_THERMAL, ACPI_EVENT_CLASS_AC,
-            ACPI_EVENT_CLASS_BATTERY, ACPI_EVENT_CLASS_LID,
+            ACPI_EVENT_CLASS_POWER,
+            ACPI_EVENT_CLASS_SLEEP,
+            ACPI_EVENT_CLASS_THERMAL,
+            ACPI_EVENT_CLASS_AC,
+            ACPI_EVENT_CLASS_BATTERY,
+            ACPI_EVENT_CLASS_LID,
             ACPI_EVENT_CLASS_PROCESSOR,
         ];
         for i in 0..classes.len() {
@@ -95,10 +98,14 @@ mod tests {
     #[test]
     fn test_bus_events_distinct() {
         let evts = [
-            ACPI_NOTIFY_BUS_CHECK, ACPI_NOTIFY_DEVICE_CHECK,
-            ACPI_NOTIFY_DEVICE_WAKE, ACPI_NOTIFY_EJECT_REQUEST,
-            ACPI_NOTIFY_DEVICE_CHECK_LIGHT, ACPI_NOTIFY_FREQUENCY_MISMATCH,
-            ACPI_NOTIFY_BUS_MODE_MISMATCH, ACPI_NOTIFY_POWER_FAULT,
+            ACPI_NOTIFY_BUS_CHECK,
+            ACPI_NOTIFY_DEVICE_CHECK,
+            ACPI_NOTIFY_DEVICE_WAKE,
+            ACPI_NOTIFY_EJECT_REQUEST,
+            ACPI_NOTIFY_DEVICE_CHECK_LIGHT,
+            ACPI_NOTIFY_FREQUENCY_MISMATCH,
+            ACPI_NOTIFY_BUS_MODE_MISMATCH,
+            ACPI_NOTIFY_POWER_FAULT,
         ];
         for i in 0..evts.len() {
             for j in (i + 1)..evts.len() {
@@ -117,8 +124,10 @@ mod tests {
     #[test]
     fn test_thermal_notify_distinct() {
         let notifs = [
-            ACPI_THERMAL_NOTIFY_TEMPERATURE, ACPI_THERMAL_NOTIFY_THRESHOLDS,
-            ACPI_THERMAL_NOTIFY_DEVICES, ACPI_THERMAL_NOTIFY_CRITICAL,
+            ACPI_THERMAL_NOTIFY_TEMPERATURE,
+            ACPI_THERMAL_NOTIFY_THRESHOLDS,
+            ACPI_THERMAL_NOTIFY_DEVICES,
+            ACPI_THERMAL_NOTIFY_CRITICAL,
         ];
         for i in 0..notifs.len() {
             for j in (i + 1)..notifs.len() {

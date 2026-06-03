@@ -69,12 +69,18 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            BATADV_CMD_UNSPEC, BATADV_CMD_GET_MESH_INFO,
-            BATADV_CMD_GET_ROUTING_ALGOS, BATADV_CMD_GET_HARDIF,
-            BATADV_CMD_GET_TRANSTABLE_LOCAL, BATADV_CMD_GET_TRANSTABLE_GLOBAL,
-            BATADV_CMD_GET_ORIGINATORS, BATADV_CMD_GET_NEIGHBORS,
-            BATADV_CMD_GET_GATEWAYS, BATADV_CMD_GET_BLA_CLAIM,
-            BATADV_CMD_GET_BLA_BACKBONE, BATADV_CMD_GET_DAT_CACHE,
+            BATADV_CMD_UNSPEC,
+            BATADV_CMD_GET_MESH_INFO,
+            BATADV_CMD_GET_ROUTING_ALGOS,
+            BATADV_CMD_GET_HARDIF,
+            BATADV_CMD_GET_TRANSTABLE_LOCAL,
+            BATADV_CMD_GET_TRANSTABLE_GLOBAL,
+            BATADV_CMD_GET_ORIGINATORS,
+            BATADV_CMD_GET_NEIGHBORS,
+            BATADV_CMD_GET_GATEWAYS,
+            BATADV_CMD_GET_BLA_CLAIM,
+            BATADV_CMD_GET_BLA_BACKBONE,
+            BATADV_CMD_GET_DAT_CACHE,
             BATADV_CMD_GET_MCAST_FLAGS,
         ];
         for i in 0..cmds.len() {
@@ -87,7 +93,8 @@ mod tests {
     #[test]
     fn test_gw_modes_distinct() {
         let modes = [
-            BATADV_GW_MODE_OFF, BATADV_GW_MODE_CLIENT,
+            BATADV_GW_MODE_OFF,
+            BATADV_GW_MODE_CLIENT,
             BATADV_GW_MODE_SERVER,
         ];
         for i in 0..modes.len() {
@@ -100,8 +107,10 @@ mod tests {
     #[test]
     fn test_if_states_distinct() {
         let states = [
-            BATADV_IF_NOT_IN_USE, BATADV_IF_ACTIVE,
-            BATADV_IF_INACTIVE, BATADV_IF_TO_BE_REMOVED,
+            BATADV_IF_NOT_IN_USE,
+            BATADV_IF_ACTIVE,
+            BATADV_IF_INACTIVE,
+            BATADV_IF_TO_BE_REMOVED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

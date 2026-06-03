@@ -125,9 +125,13 @@ mod tests {
     #[test]
     fn test_owners_distinct() {
         let owners = [
-            SMCCC_OWNER_ARCH, SMCCC_OWNER_CPU, SMCCC_OWNER_SIP,
-            SMCCC_OWNER_OEM, SMCCC_OWNER_STANDARD,
-            SMCCC_OWNER_STANDARD_HYP, SMCCC_OWNER_VENDOR_HYP,
+            SMCCC_OWNER_ARCH,
+            SMCCC_OWNER_CPU,
+            SMCCC_OWNER_SIP,
+            SMCCC_OWNER_OEM,
+            SMCCC_OWNER_STANDARD,
+            SMCCC_OWNER_STANDARD_HYP,
+            SMCCC_OWNER_VENDOR_HYP,
         ];
         for i in 0..owners.len() {
             for j in (i + 1)..owners.len() {
@@ -139,8 +143,10 @@ mod tests {
     #[test]
     fn test_smccc_return_codes_distinct() {
         let codes = [
-            SMCCC_RET_SUCCESS, SMCCC_RET_NOT_SUPPORTED,
-            SMCCC_RET_NOT_REQUIRED, SMCCC_RET_INVALID_PARAMETER,
+            SMCCC_RET_SUCCESS,
+            SMCCC_RET_NOT_SUPPORTED,
+            SMCCC_RET_NOT_REQUIRED,
+            SMCCC_RET_INVALID_PARAMETER,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -152,8 +158,12 @@ mod tests {
     #[test]
     fn test_psci_functions_distinct() {
         let fns = [
-            PSCI_FN_VERSION, PSCI_FN_CPU_SUSPEND, PSCI_FN_CPU_OFF,
-            PSCI_FN_CPU_ON, PSCI_FN_SYSTEM_OFF, PSCI_FN_SYSTEM_RESET,
+            PSCI_FN_VERSION,
+            PSCI_FN_CPU_SUSPEND,
+            PSCI_FN_CPU_OFF,
+            PSCI_FN_CPU_ON,
+            PSCI_FN_SYSTEM_OFF,
+            PSCI_FN_SYSTEM_RESET,
         ];
         for i in 0..fns.len() {
             for j in (i + 1)..fns.len() {
@@ -165,9 +175,12 @@ mod tests {
     #[test]
     fn test_psci_return_codes_distinct() {
         let codes = [
-            PSCI_RET_SUCCESS, PSCI_RET_NOT_SUPPORTED,
-            PSCI_RET_INVALID_PARAMS, PSCI_RET_DENIED,
-            PSCI_RET_ALREADY_ON, PSCI_RET_ON_PENDING,
+            PSCI_RET_SUCCESS,
+            PSCI_RET_NOT_SUPPORTED,
+            PSCI_RET_INVALID_PARAMS,
+            PSCI_RET_DENIED,
+            PSCI_RET_ALREADY_ON,
+            PSCI_RET_ON_PENDING,
             PSCI_RET_INTERNAL_FAILURE,
         ];
         for i in 0..codes.len() {

@@ -68,9 +68,13 @@ mod tests {
     #[test]
     fn test_host_states_distinct() {
         let states = [
-            SHOST_CREATED, SHOST_RUNNING, SHOST_CANCEL,
-            SHOST_DEL, SHOST_RECOVERY,
-            SHOST_CANCEL_RECOVERY, SHOST_DEL_RECOVERY,
+            SHOST_CREATED,
+            SHOST_RUNNING,
+            SHOST_CANCEL,
+            SHOST_DEL,
+            SHOST_RECOVERY,
+            SHOST_CANCEL_RECOVERY,
+            SHOST_DEL_RECOVERY,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

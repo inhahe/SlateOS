@@ -74,7 +74,11 @@ mod tests {
 
     #[test]
     fn test_group_types_distinct() {
-        let types = [SYSFS_GROUP_NORMAL, SYSFS_GROUP_BINARY, SYSFS_GROUP_CONDITIONAL];
+        let types = [
+            SYSFS_GROUP_NORMAL,
+            SYSFS_GROUP_BINARY,
+            SYSFS_GROUP_CONDITIONAL,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -85,8 +89,12 @@ mod tests {
     #[test]
     fn test_kobj_types_distinct() {
         let types = [
-            SYSFS_KOBJ_DEVICE, SYSFS_KOBJ_DRIVER, SYSFS_KOBJ_MODULE,
-            SYSFS_KOBJ_BUS, SYSFS_KOBJ_CLASS, SYSFS_KOBJ_FIRMWARE,
+            SYSFS_KOBJ_DEVICE,
+            SYSFS_KOBJ_DRIVER,
+            SYSFS_KOBJ_MODULE,
+            SYSFS_KOBJ_BUS,
+            SYSFS_KOBJ_CLASS,
+            SYSFS_KOBJ_FIRMWARE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

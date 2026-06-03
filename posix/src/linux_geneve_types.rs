@@ -101,13 +101,20 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            IFLA_GENEVE_UNSPEC, IFLA_GENEVE_ID,
-            IFLA_GENEVE_REMOTE, IFLA_GENEVE_TTL,
-            IFLA_GENEVE_TOS, IFLA_GENEVE_PORT,
-            IFLA_GENEVE_COLLECT_METADATA, IFLA_GENEVE_REMOTE6,
-            IFLA_GENEVE_UDP_CSUM, IFLA_GENEVE_UDP_ZERO_CSUM6_TX,
-            IFLA_GENEVE_UDP_ZERO_CSUM6_RX, IFLA_GENEVE_LABEL,
-            IFLA_GENEVE_TTL_INHERIT, IFLA_GENEVE_DF,
+            IFLA_GENEVE_UNSPEC,
+            IFLA_GENEVE_ID,
+            IFLA_GENEVE_REMOTE,
+            IFLA_GENEVE_TTL,
+            IFLA_GENEVE_TOS,
+            IFLA_GENEVE_PORT,
+            IFLA_GENEVE_COLLECT_METADATA,
+            IFLA_GENEVE_REMOTE6,
+            IFLA_GENEVE_UDP_CSUM,
+            IFLA_GENEVE_UDP_ZERO_CSUM6_TX,
+            IFLA_GENEVE_UDP_ZERO_CSUM6_RX,
+            IFLA_GENEVE_LABEL,
+            IFLA_GENEVE_TTL_INHERIT,
+            IFLA_GENEVE_DF,
             IFLA_GENEVE_INNER_PROTO_INHERIT,
         ];
         for i in 0..attrs.len() {
@@ -135,8 +142,10 @@ mod tests {
     #[test]
     fn test_option_classes_distinct() {
         let classes = [
-            GENEVE_CLASS_LINUX, GENEVE_CLASS_OVS,
-            GENEVE_CLASS_VMWARE, GENEVE_CLASS_MICROSOFT,
+            GENEVE_CLASS_LINUX,
+            GENEVE_CLASS_OVS,
+            GENEVE_CLASS_VMWARE,
+            GENEVE_CLASS_MICROSOFT,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {

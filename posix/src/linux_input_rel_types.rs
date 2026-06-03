@@ -57,16 +57,23 @@ mod tests {
     #[test]
     fn test_rel_axes_distinct() {
         let axes = [
-            REL_X, REL_Y, REL_Z,
-            REL_RX, REL_RY, REL_RZ,
-            REL_HWHEEL, REL_DIAL, REL_WHEEL,
-            REL_MISC, REL_RESERVED,
-            REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES,
+            REL_X,
+            REL_Y,
+            REL_Z,
+            REL_RX,
+            REL_RY,
+            REL_RZ,
+            REL_HWHEEL,
+            REL_DIAL,
+            REL_WHEEL,
+            REL_MISC,
+            REL_RESERVED,
+            REL_WHEEL_HI_RES,
+            REL_HWHEEL_HI_RES,
         ];
         for i in 0..axes.len() {
             for j in (i + 1)..axes.len() {
-                assert_ne!(axes[i], axes[j],
-                    "rel axes {} and {} collide", i, j);
+                assert_ne!(axes[i], axes[j], "rel axes {} and {} collide", i, j);
             }
         }
     }
@@ -92,11 +99,19 @@ mod tests {
     #[test]
     fn test_all_within_max() {
         let axes = [
-            REL_X, REL_Y, REL_Z,
-            REL_RX, REL_RY, REL_RZ,
-            REL_HWHEEL, REL_DIAL, REL_WHEEL,
-            REL_MISC, REL_RESERVED,
-            REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES,
+            REL_X,
+            REL_Y,
+            REL_Z,
+            REL_RX,
+            REL_RY,
+            REL_RZ,
+            REL_HWHEEL,
+            REL_DIAL,
+            REL_WHEEL,
+            REL_MISC,
+            REL_RESERVED,
+            REL_WHEEL_HI_RES,
+            REL_HWHEEL_HI_RES,
         ];
         for &a in &axes {
             assert!(a <= REL_MAX, "axis {} exceeds REL_MAX", a);

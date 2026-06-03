@@ -105,23 +105,40 @@ mod tests {
     #[test]
     fn test_map_types_distinct() {
         let types = [
-            BPF_MAP_TYPE_UNSPEC, BPF_MAP_TYPE_HASH, BPF_MAP_TYPE_ARRAY,
-            BPF_MAP_TYPE_PROG_ARRAY, BPF_MAP_TYPE_PERF_EVENT_ARRAY,
-            BPF_MAP_TYPE_PERCPU_HASH, BPF_MAP_TYPE_PERCPU_ARRAY,
-            BPF_MAP_TYPE_STACK_TRACE, BPF_MAP_TYPE_CGROUP_ARRAY,
-            BPF_MAP_TYPE_LRU_HASH, BPF_MAP_TYPE_LRU_PERCPU_HASH,
-            BPF_MAP_TYPE_LPM_TRIE, BPF_MAP_TYPE_ARRAY_OF_MAPS,
-            BPF_MAP_TYPE_HASH_OF_MAPS, BPF_MAP_TYPE_DEVMAP,
-            BPF_MAP_TYPE_SOCKMAP, BPF_MAP_TYPE_CPUMAP,
-            BPF_MAP_TYPE_XSKMAP, BPF_MAP_TYPE_SOCKHASH,
-            BPF_MAP_TYPE_CGROUP_STORAGE, BPF_MAP_TYPE_REUSEPORT_SOCKARRAY,
+            BPF_MAP_TYPE_UNSPEC,
+            BPF_MAP_TYPE_HASH,
+            BPF_MAP_TYPE_ARRAY,
+            BPF_MAP_TYPE_PROG_ARRAY,
+            BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+            BPF_MAP_TYPE_PERCPU_HASH,
+            BPF_MAP_TYPE_PERCPU_ARRAY,
+            BPF_MAP_TYPE_STACK_TRACE,
+            BPF_MAP_TYPE_CGROUP_ARRAY,
+            BPF_MAP_TYPE_LRU_HASH,
+            BPF_MAP_TYPE_LRU_PERCPU_HASH,
+            BPF_MAP_TYPE_LPM_TRIE,
+            BPF_MAP_TYPE_ARRAY_OF_MAPS,
+            BPF_MAP_TYPE_HASH_OF_MAPS,
+            BPF_MAP_TYPE_DEVMAP,
+            BPF_MAP_TYPE_SOCKMAP,
+            BPF_MAP_TYPE_CPUMAP,
+            BPF_MAP_TYPE_XSKMAP,
+            BPF_MAP_TYPE_SOCKHASH,
+            BPF_MAP_TYPE_CGROUP_STORAGE,
+            BPF_MAP_TYPE_REUSEPORT_SOCKARRAY,
             BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE,
-            BPF_MAP_TYPE_QUEUE, BPF_MAP_TYPE_STACK,
-            BPF_MAP_TYPE_SK_STORAGE, BPF_MAP_TYPE_DEVMAP_HASH,
-            BPF_MAP_TYPE_STRUCT_OPS, BPF_MAP_TYPE_RINGBUF,
-            BPF_MAP_TYPE_INODE_STORAGE, BPF_MAP_TYPE_TASK_STORAGE,
-            BPF_MAP_TYPE_BLOOM_FILTER, BPF_MAP_TYPE_USER_RINGBUF,
-            BPF_MAP_TYPE_CGRP_STORAGE, BPF_MAP_TYPE_ARENA,
+            BPF_MAP_TYPE_QUEUE,
+            BPF_MAP_TYPE_STACK,
+            BPF_MAP_TYPE_SK_STORAGE,
+            BPF_MAP_TYPE_DEVMAP_HASH,
+            BPF_MAP_TYPE_STRUCT_OPS,
+            BPF_MAP_TYPE_RINGBUF,
+            BPF_MAP_TYPE_INODE_STORAGE,
+            BPF_MAP_TYPE_TASK_STORAGE,
+            BPF_MAP_TYPE_BLOOM_FILTER,
+            BPF_MAP_TYPE_USER_RINGBUF,
+            BPF_MAP_TYPE_CGRP_STORAGE,
+            BPF_MAP_TYPE_ARENA,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -138,9 +155,12 @@ mod tests {
     #[test]
     fn test_creation_flags_no_overlap() {
         let flags = [
-            BPF_F_NO_PREALLOC, BPF_F_RDONLY_PROG,
-            BPF_F_WRONLY_PROG, BPF_F_NUMA_NODE,
-            BPF_F_MMAPABLE, BPF_F_INNER_MAP,
+            BPF_F_NO_PREALLOC,
+            BPF_F_RDONLY_PROG,
+            BPF_F_WRONLY_PROG,
+            BPF_F_NUMA_NODE,
+            BPF_F_MMAPABLE,
+            BPF_F_INNER_MAP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

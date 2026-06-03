@@ -79,9 +79,12 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            VSOCK_SS_FREE, VSOCK_SS_UNCONNECTED,
-            VSOCK_SS_CONNECTING, VSOCK_SS_CONNECTED,
-            VSOCK_SS_DISCONNECTING, VSOCK_SS_LISTEN,
+            VSOCK_SS_FREE,
+            VSOCK_SS_UNCONNECTED,
+            VSOCK_SS_CONNECTING,
+            VSOCK_SS_CONNECTED,
+            VSOCK_SS_DISCONNECTING,
+            VSOCK_SS_LISTEN,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -93,8 +96,10 @@ mod tests {
     #[test]
     fn test_well_known_cids_distinct() {
         let cids = [
-            VMADDR_CID_HYPERVISOR, VMADDR_CID_LOCAL,
-            VMADDR_CID_HOST, VMADDR_CID_ANY,
+            VMADDR_CID_HYPERVISOR,
+            VMADDR_CID_LOCAL,
+            VMADDR_CID_HOST,
+            VMADDR_CID_ANY,
         ];
         for i in 0..cids.len() {
             for j in (i + 1)..cids.len() {

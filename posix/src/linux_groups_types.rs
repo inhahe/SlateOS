@@ -79,10 +79,7 @@ mod tests {
 
     #[test]
     fn test_well_known_gids_distinct() {
-        let gids = [
-            GID_ROOT, GID_WHEEL, GID_TTY,
-            GID_DISK, GID_AUDIO, GID_VIDEO,
-        ];
+        let gids = [GID_ROOT, GID_WHEEL, GID_TTY, GID_DISK, GID_AUDIO, GID_VIDEO];
         for i in 0..gids.len() {
             for j in (i + 1)..gids.len() {
                 assert_ne!(gids[i], gids[j]);

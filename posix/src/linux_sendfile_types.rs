@@ -78,8 +78,10 @@ mod tests {
     #[test]
     fn test_splice_flags_power_of_two() {
         let flags = [
-            SPLICE_F_MOVE, SPLICE_F_NONBLOCK,
-            SPLICE_F_MORE, SPLICE_F_GIFT,
+            SPLICE_F_MOVE,
+            SPLICE_F_NONBLOCK,
+            SPLICE_F_MORE,
+            SPLICE_F_GIFT,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:02x} not power of two", f);
@@ -89,8 +91,10 @@ mod tests {
     #[test]
     fn test_splice_flags_no_overlap() {
         let flags = [
-            SPLICE_F_MOVE, SPLICE_F_NONBLOCK,
-            SPLICE_F_MORE, SPLICE_F_GIFT,
+            SPLICE_F_MOVE,
+            SPLICE_F_NONBLOCK,
+            SPLICE_F_MORE,
+            SPLICE_F_GIFT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -102,8 +106,10 @@ mod tests {
     #[test]
     fn test_pipe_buf_flags_power_of_two() {
         let flags = [
-            PIPE_BUF_FLAG_GIFT, PIPE_BUF_FLAG_PACKET,
-            PIPE_BUF_FLAG_WHOLE, PIPE_BUF_FLAG_LOSS,
+            PIPE_BUF_FLAG_GIFT,
+            PIPE_BUF_FLAG_PACKET,
+            PIPE_BUF_FLAG_WHOLE,
+            PIPE_BUF_FLAG_LOSS,
             PIPE_BUF_FLAG_CAN_MERGE,
         ];
         for f in &flags {

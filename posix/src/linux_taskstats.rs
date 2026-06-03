@@ -94,8 +94,10 @@ mod tests {
     #[test]
     fn test_cmd_attrs_distinct() {
         let attrs = [
-            TASKSTATS_CMD_ATTR_UNSPEC, TASKSTATS_CMD_ATTR_PID,
-            TASKSTATS_CMD_ATTR_TGID, TASKSTATS_CMD_ATTR_REGISTER_CPUMASK,
+            TASKSTATS_CMD_ATTR_UNSPEC,
+            TASKSTATS_CMD_ATTR_PID,
+            TASKSTATS_CMD_ATTR_TGID,
+            TASKSTATS_CMD_ATTR_REGISTER_CPUMASK,
             TASKSTATS_CMD_ATTR_DEREGISTER_CPUMASK,
         ];
         for i in 0..attrs.len() {
@@ -108,9 +110,12 @@ mod tests {
     #[test]
     fn test_type_attrs_distinct() {
         let types = [
-            TASKSTATS_TYPE_UNSPEC, TASKSTATS_TYPE_PID,
-            TASKSTATS_TYPE_TGID, TASKSTATS_TYPE_STATS,
-            TASKSTATS_TYPE_AGGR_PID, TASKSTATS_TYPE_AGGR_TGID,
+            TASKSTATS_TYPE_UNSPEC,
+            TASKSTATS_TYPE_PID,
+            TASKSTATS_TYPE_TGID,
+            TASKSTATS_TYPE_STATS,
+            TASKSTATS_TYPE_AGGR_PID,
+            TASKSTATS_TYPE_AGGR_TGID,
             TASKSTATS_TYPE_NULL,
         ];
         for i in 0..types.len() {
@@ -123,8 +128,12 @@ mod tests {
     #[test]
     fn test_delay_flags_powers_of_two() {
         let flags = [
-            TASKSTATS_FL_CPU, TASKSTATS_FL_IO, TASKSTATS_FL_SWAPIN,
-            TASKSTATS_FL_RECLAIM, TASKSTATS_FL_THRASHING, TASKSTATS_FL_COMPACT,
+            TASKSTATS_FL_CPU,
+            TASKSTATS_FL_IO,
+            TASKSTATS_FL_SWAPIN,
+            TASKSTATS_FL_RECLAIM,
+            TASKSTATS_FL_THRASHING,
+            TASKSTATS_FL_COMPACT,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "flag {f} not power of 2");

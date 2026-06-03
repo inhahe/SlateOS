@@ -113,9 +113,12 @@ mod tests {
     #[test]
     fn test_audio_status_distinct() {
         let statuses: [u8; 6] = [
-            CDROM_AUDIO_INVALID, CDROM_AUDIO_PLAY,
-            CDROM_AUDIO_PAUSED, CDROM_AUDIO_COMPLETED,
-            CDROM_AUDIO_ERROR, CDROM_AUDIO_NO_STATUS,
+            CDROM_AUDIO_INVALID,
+            CDROM_AUDIO_PLAY,
+            CDROM_AUDIO_PAUSED,
+            CDROM_AUDIO_COMPLETED,
+            CDROM_AUDIO_ERROR,
+            CDROM_AUDIO_NO_STATUS,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {

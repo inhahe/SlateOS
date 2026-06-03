@@ -78,8 +78,10 @@ mod tests {
     #[test]
     fn test_features_powers_of_two() {
         let features = [
-            VETH_FEATURE_GSO, VETH_FEATURE_GRO,
-            VETH_FEATURE_XDP, VETH_FEATURE_XDP_REDIRECT,
+            VETH_FEATURE_GSO,
+            VETH_FEATURE_GRO,
+            VETH_FEATURE_XDP,
+            VETH_FEATURE_XDP_REDIRECT,
         ];
         for f in &features {
             assert!(f.is_power_of_two(), "0x{:x}", f);
@@ -89,8 +91,10 @@ mod tests {
     #[test]
     fn test_features_no_overlap() {
         let features = [
-            VETH_FEATURE_GSO, VETH_FEATURE_GRO,
-            VETH_FEATURE_XDP, VETH_FEATURE_XDP_REDIRECT,
+            VETH_FEATURE_GSO,
+            VETH_FEATURE_GRO,
+            VETH_FEATURE_XDP,
+            VETH_FEATURE_XDP_REDIRECT,
         ];
         for i in 0..features.len() {
             for j in (i + 1)..features.len() {

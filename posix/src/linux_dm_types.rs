@@ -95,11 +95,20 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            DM_VERSION_CMD, DM_REMOVE_ALL_CMD, DM_LIST_DEVICES_CMD,
-            DM_DEV_CREATE_CMD, DM_DEV_REMOVE_CMD, DM_DEV_RENAME_CMD,
-            DM_DEV_SUSPEND_CMD, DM_DEV_STATUS_CMD, DM_DEV_WAIT_CMD,
-            DM_TABLE_LOAD_CMD, DM_TABLE_CLEAR_CMD, DM_TABLE_DEPS_CMD,
-            DM_TABLE_STATUS_CMD, DM_TARGET_MSG_CMD,
+            DM_VERSION_CMD,
+            DM_REMOVE_ALL_CMD,
+            DM_LIST_DEVICES_CMD,
+            DM_DEV_CREATE_CMD,
+            DM_DEV_REMOVE_CMD,
+            DM_DEV_RENAME_CMD,
+            DM_DEV_SUSPEND_CMD,
+            DM_DEV_STATUS_CMD,
+            DM_DEV_WAIT_CMD,
+            DM_TABLE_LOAD_CMD,
+            DM_TABLE_CLEAR_CMD,
+            DM_TABLE_DEPS_CMD,
+            DM_TABLE_STATUS_CMD,
+            DM_TARGET_MSG_CMD,
             DM_DEV_SET_GEOMETRY_CMD,
         ];
         for i in 0..cmds.len() {
@@ -112,8 +121,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            DM_READONLY_FLAG, DM_SUSPEND_FLAG,
-            DM_EXISTS_FLAG, DM_PERSISTENT_DEV_FLAG,
+            DM_READONLY_FLAG,
+            DM_SUSPEND_FLAG,
+            DM_EXISTS_FLAG,
+            DM_PERSISTENT_DEV_FLAG,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -125,11 +136,19 @@ mod tests {
     #[test]
     fn test_target_names_distinct() {
         let targets = [
-            DM_TARGET_LINEAR, DM_TARGET_STRIPED, DM_TARGET_MIRROR,
-            DM_TARGET_SNAPSHOT, DM_TARGET_SNAPSHOT_ORIGIN,
-            DM_TARGET_ERROR, DM_TARGET_ZERO, DM_TARGET_CRYPT,
-            DM_TARGET_VERITY, DM_TARGET_THIN, DM_TARGET_THIN_POOL,
-            DM_TARGET_CACHE, DM_TARGET_INTEGRITY,
+            DM_TARGET_LINEAR,
+            DM_TARGET_STRIPED,
+            DM_TARGET_MIRROR,
+            DM_TARGET_SNAPSHOT,
+            DM_TARGET_SNAPSHOT_ORIGIN,
+            DM_TARGET_ERROR,
+            DM_TARGET_ZERO,
+            DM_TARGET_CRYPT,
+            DM_TARGET_VERITY,
+            DM_TARGET_THIN,
+            DM_TARGET_THIN_POOL,
+            DM_TARGET_CACHE,
+            DM_TARGET_INTEGRITY,
         ];
         for i in 0..targets.len() {
             for j in (i + 1)..targets.len() {

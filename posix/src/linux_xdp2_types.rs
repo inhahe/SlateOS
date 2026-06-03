@@ -86,8 +86,10 @@ mod tests {
     #[test]
     fn test_attachment_flags_powers_of_two() {
         let flags = [
-            XDP_FLAGS_UPDATE_IF_NOEXIST, XDP_FLAGS_SKB_MODE,
-            XDP_FLAGS_DRV_MODE, XDP_FLAGS_HW_MODE,
+            XDP_FLAGS_UPDATE_IF_NOEXIST,
+            XDP_FLAGS_SKB_MODE,
+            XDP_FLAGS_DRV_MODE,
+            XDP_FLAGS_HW_MODE,
             XDP_FLAGS_REPLACE,
         ];
         for f in flags {
@@ -97,7 +99,10 @@ mod tests {
 
     #[test]
     fn test_modes_mask() {
-        assert_eq!(XDP_FLAGS_MODES, XDP_FLAGS_SKB_MODE | XDP_FLAGS_DRV_MODE | XDP_FLAGS_HW_MODE);
+        assert_eq!(
+            XDP_FLAGS_MODES,
+            XDP_FLAGS_SKB_MODE | XDP_FLAGS_DRV_MODE | XDP_FLAGS_HW_MODE
+        );
     }
 
     #[test]

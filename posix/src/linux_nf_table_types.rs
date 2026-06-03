@@ -81,8 +81,12 @@ mod tests {
     #[test]
     fn test_nfproto_distinct() {
         let protos = [
-            NFPROTO_UNSPEC, NFPROTO_INET, NFPROTO_IPV4,
-            NFPROTO_ARP, NFPROTO_NETDEV, NFPROTO_BRIDGE,
+            NFPROTO_UNSPEC,
+            NFPROTO_INET,
+            NFPROTO_IPV4,
+            NFPROTO_ARP,
+            NFPROTO_NETDEV,
+            NFPROTO_BRIDGE,
             NFPROTO_IPV6,
         ];
         for i in 0..protos.len() {
@@ -113,9 +117,14 @@ mod tests {
     #[test]
     fn test_set_flags_no_overlap() {
         let flags = [
-            NFT_SET_ANONYMOUS, NFT_SET_CONSTANT, NFT_SET_INTERVAL,
-            NFT_SET_MAP, NFT_SET_TIMEOUT, NFT_SET_EVAL,
-            NFT_SET_OBJECT, NFT_SET_CONCAT,
+            NFT_SET_ANONYMOUS,
+            NFT_SET_CONSTANT,
+            NFT_SET_INTERVAL,
+            NFT_SET_MAP,
+            NFT_SET_TIMEOUT,
+            NFT_SET_EVAL,
+            NFT_SET_OBJECT,
+            NFT_SET_CONCAT,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

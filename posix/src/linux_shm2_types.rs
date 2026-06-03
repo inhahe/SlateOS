@@ -93,8 +93,13 @@ mod tests {
     #[test]
     fn test_ctl_commands_distinct() {
         let cmds = [
-            IPC_STAT_SHM, IPC_SET_SHM, IPC_RMID_SHM,
-            IPC_INFO_SHM, SHM_INFO, SHM_STAT, SHM_STAT_ANY,
+            IPC_STAT_SHM,
+            IPC_SET_SHM,
+            IPC_RMID_SHM,
+            IPC_INFO_SHM,
+            SHM_INFO,
+            SHM_STAT,
+            SHM_STAT_ANY,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

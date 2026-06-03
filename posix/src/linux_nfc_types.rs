@@ -114,14 +114,25 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            NFC_CMD_GET_DEVICE, NFC_CMD_DEV_UP, NFC_CMD_DEV_DOWN,
-            NFC_CMD_START_POLL, NFC_CMD_STOP_POLL, NFC_CMD_GET_TARGET,
-            NFC_CMD_DEP_LINK_UP, NFC_CMD_DEP_LINK_DOWN,
-            NFC_CMD_TARGETS_FOUND, NFC_CMD_TARGET_LOST,
-            NFC_CMD_LLC_GET_PARAMS, NFC_CMD_LLC_SET_PARAMS,
-            NFC_CMD_ENABLE_SE, NFC_CMD_DISABLE_SE, NFC_CMD_GET_SE,
-            NFC_CMD_SE_IO, NFC_CMD_ACTIVATE_TARGET,
-            NFC_CMD_DEACTIVATE_TARGET, NFC_CMD_VENDOR,
+            NFC_CMD_GET_DEVICE,
+            NFC_CMD_DEV_UP,
+            NFC_CMD_DEV_DOWN,
+            NFC_CMD_START_POLL,
+            NFC_CMD_STOP_POLL,
+            NFC_CMD_GET_TARGET,
+            NFC_CMD_DEP_LINK_UP,
+            NFC_CMD_DEP_LINK_DOWN,
+            NFC_CMD_TARGETS_FOUND,
+            NFC_CMD_TARGET_LOST,
+            NFC_CMD_LLC_GET_PARAMS,
+            NFC_CMD_LLC_SET_PARAMS,
+            NFC_CMD_ENABLE_SE,
+            NFC_CMD_DISABLE_SE,
+            NFC_CMD_GET_SE,
+            NFC_CMD_SE_IO,
+            NFC_CMD_ACTIVATE_TARGET,
+            NFC_CMD_DEACTIVATE_TARGET,
+            NFC_CMD_VENDOR,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -133,9 +144,12 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            NFC_PROTO_MIFARE, NFC_PROTO_ISO14443,
-            NFC_PROTO_ISO14443_B, NFC_PROTO_FELICA,
-            NFC_PROTO_ISO15693, NFC_PROTO_NFC_DEP,
+            NFC_PROTO_MIFARE,
+            NFC_PROTO_ISO14443,
+            NFC_PROTO_ISO14443_B,
+            NFC_PROTO_FELICA,
+            NFC_PROTO_ISO15693,
+            NFC_PROTO_NFC_DEP,
             NFC_PROTO_ISO14443_B2,
         ];
         for i in 0..protos.len() {
@@ -148,8 +162,11 @@ mod tests {
     #[test]
     fn test_poll_modes_no_overlap() {
         let modes = [
-            NFC_POLL_NFC_A, NFC_POLL_NFC_B, NFC_POLL_NFC_F,
-            NFC_POLL_NFC_V, NFC_POLL_NFC_DEP,
+            NFC_POLL_NFC_A,
+            NFC_POLL_NFC_B,
+            NFC_POLL_NFC_F,
+            NFC_POLL_NFC_V,
+            NFC_POLL_NFC_DEP,
         ];
         for i in 0..modes.len() {
             assert!(modes[i].is_power_of_two());

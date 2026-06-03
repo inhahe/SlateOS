@@ -90,9 +90,13 @@ mod tests {
     #[test]
     fn test_subsys_ids_distinct() {
         let ids = [
-            NETNS_SUBSYS_IPV4, NETNS_SUBSYS_IPV6, NETNS_SUBSYS_NFNL,
-            NETNS_SUBSYS_UNIX, NETNS_SUBSYS_PACKET,
-            NETNS_SUBSYS_NETLINK, NETNS_SUBSYS_NETDEV,
+            NETNS_SUBSYS_IPV4,
+            NETNS_SUBSYS_IPV6,
+            NETNS_SUBSYS_NFNL,
+            NETNS_SUBSYS_UNIX,
+            NETNS_SUBSYS_PACKET,
+            NETNS_SUBSYS_NETLINK,
+            NETNS_SUBSYS_NETDEV,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -104,7 +108,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            NETNS_FLAG_LOOPBACK_UP, NETNS_FLAG_IP_FORWARD,
+            NETNS_FLAG_LOOPBACK_UP,
+            NETNS_FLAG_IP_FORWARD,
             NETNS_FLAG_INITIAL,
         ];
         for i in 0..flags.len() {

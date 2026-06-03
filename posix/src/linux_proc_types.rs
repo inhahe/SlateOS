@@ -75,10 +75,14 @@ mod tests {
     #[test]
     fn test_process_states_distinct() {
         let states = [
-            PROC_STATE_RUNNING, PROC_STATE_SLEEPING,
-            PROC_STATE_DISK_SLEEP, PROC_STATE_ZOMBIE,
-            PROC_STATE_STOPPED, PROC_STATE_TRACING_STOP,
-            PROC_STATE_DEAD, PROC_STATE_IDLE,
+            PROC_STATE_RUNNING,
+            PROC_STATE_SLEEPING,
+            PROC_STATE_DISK_SLEEP,
+            PROC_STATE_ZOMBIE,
+            PROC_STATE_STOPPED,
+            PROC_STATE_TRACING_STOP,
+            PROC_STATE_DEAD,
+            PROC_STATE_IDLE,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -95,8 +99,10 @@ mod tests {
     #[test]
     fn test_hidepid_distinct() {
         let modes = [
-            PROC_HIDEPID_OFF, PROC_HIDEPID_NO_ACCESS,
-            PROC_HIDEPID_INVISIBLE, PROC_HIDEPID_NOT_PTRACEABLE,
+            PROC_HIDEPID_OFF,
+            PROC_HIDEPID_NO_ACCESS,
+            PROC_HIDEPID_INVISIBLE,
+            PROC_HIDEPID_NOT_PTRACEABLE,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

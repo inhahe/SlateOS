@@ -89,7 +89,8 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            FS_IOC_ENABLE_VERITY, FS_IOC_MEASURE_VERITY,
+            FS_IOC_ENABLE_VERITY,
+            FS_IOC_MEASURE_VERITY,
             FS_IOC_READ_VERITY_METADATA,
         ];
         for i in 0..ioctls.len() {

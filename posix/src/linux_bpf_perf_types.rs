@@ -78,8 +78,10 @@ mod tests {
     #[test]
     fn test_program_types_distinct() {
         let types = [
-            BPF_PERF_EVENT, BPF_PERF_TRACEPOINT,
-            BPF_PERF_KPROBE, BPF_PERF_UPROBE,
+            BPF_PERF_EVENT,
+            BPF_PERF_TRACEPOINT,
+            BPF_PERF_KPROBE,
+            BPF_PERF_UPROBE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -97,7 +99,8 @@ mod tests {
     #[test]
     fn test_read_flags_distinct() {
         let flags = [
-            BPF_PERF_READ_VALUE, BPF_PERF_READ_RUNNING,
+            BPF_PERF_READ_VALUE,
+            BPF_PERF_READ_RUNNING,
             BPF_PERF_READ_ENABLED,
         ];
         for i in 0..flags.len() {
@@ -119,8 +122,10 @@ mod tests {
     #[test]
     fn test_error_codes_distinct() {
         let codes = [
-            BPF_PERF_OK, BPF_PERF_ERR_FULL,
-            BPF_PERF_ERR_INVAL, BPF_PERF_ERR_NOMEM,
+            BPF_PERF_OK,
+            BPF_PERF_ERR_FULL,
+            BPF_PERF_ERR_INVAL,
+            BPF_PERF_ERR_NOMEM,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

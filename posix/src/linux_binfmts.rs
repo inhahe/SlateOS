@@ -64,8 +64,10 @@ mod tests {
     #[test]
     fn test_misc_flags_powers_of_two() {
         let flags = [
-            MISC_FMT_PRESERVE_ARGV0, MISC_FMT_OPEN_BINARY,
-            MISC_FMT_CREDENTIALS, MISC_FMT_OPEN_FILE,
+            MISC_FMT_PRESERVE_ARGV0,
+            MISC_FMT_OPEN_BINARY,
+            MISC_FMT_CREDENTIALS,
+            MISC_FMT_OPEN_FILE,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "flag {f} not power of 2");

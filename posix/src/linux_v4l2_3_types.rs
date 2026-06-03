@@ -85,15 +85,20 @@ mod tests {
     #[test]
     fn test_buf_types_distinct() {
         let types = [
-            V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-            V4L2_BUF_TYPE_VIDEO_OVERLAY, V4L2_BUF_TYPE_VBI_CAPTURE,
-            V4L2_BUF_TYPE_VBI_OUTPUT, V4L2_BUF_TYPE_SLICED_VBI_CAPTURE,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE,
+            V4L2_BUF_TYPE_VIDEO_OUTPUT,
+            V4L2_BUF_TYPE_VIDEO_OVERLAY,
+            V4L2_BUF_TYPE_VBI_CAPTURE,
+            V4L2_BUF_TYPE_VBI_OUTPUT,
+            V4L2_BUF_TYPE_SLICED_VBI_CAPTURE,
             V4L2_BUF_TYPE_SLICED_VBI_OUTPUT,
             V4L2_BUF_TYPE_VIDEO_OUTPUT_OVERLAY,
             V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-            V4L2_BUF_TYPE_SDR_CAPTURE, V4L2_BUF_TYPE_SDR_OUTPUT,
-            V4L2_BUF_TYPE_META_CAPTURE, V4L2_BUF_TYPE_META_OUTPUT,
+            V4L2_BUF_TYPE_SDR_CAPTURE,
+            V4L2_BUF_TYPE_SDR_OUTPUT,
+            V4L2_BUF_TYPE_META_CAPTURE,
+            V4L2_BUF_TYPE_META_OUTPUT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -105,8 +110,10 @@ mod tests {
     #[test]
     fn test_memory_types_distinct() {
         let types = [
-            V4L2_MEMORY_MMAP, V4L2_MEMORY_USERPTR,
-            V4L2_MEMORY_OVERLAY, V4L2_MEMORY_DMABUF,
+            V4L2_MEMORY_MMAP,
+            V4L2_MEMORY_USERPTR,
+            V4L2_MEMORY_OVERLAY,
+            V4L2_MEMORY_DMABUF,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -118,10 +125,15 @@ mod tests {
     #[test]
     fn test_field_types_distinct() {
         let fields = [
-            V4L2_FIELD_ANY, V4L2_FIELD_NONE, V4L2_FIELD_TOP,
-            V4L2_FIELD_BOTTOM, V4L2_FIELD_INTERLACED,
-            V4L2_FIELD_SEQ_TB, V4L2_FIELD_SEQ_BT,
-            V4L2_FIELD_ALTERNATE, V4L2_FIELD_INTERLACED_TB,
+            V4L2_FIELD_ANY,
+            V4L2_FIELD_NONE,
+            V4L2_FIELD_TOP,
+            V4L2_FIELD_BOTTOM,
+            V4L2_FIELD_INTERLACED,
+            V4L2_FIELD_SEQ_TB,
+            V4L2_FIELD_SEQ_BT,
+            V4L2_FIELD_ALTERNATE,
+            V4L2_FIELD_INTERLACED_TB,
             V4L2_FIELD_INTERLACED_BT,
         ];
         for i in 0..fields.len() {

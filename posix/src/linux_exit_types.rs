@@ -97,10 +97,7 @@ mod tests {
 
     #[test]
     fn test_flags_no_overlap() {
-        let flags = [
-            EXIT_GROUP, EXIT_OOM_KILLED,
-            EXIT_SECCOMP, EXIT_SIGNAL_FATAL,
-        ];
+        let flags = [EXIT_GROUP, EXIT_OOM_KILLED, EXIT_SECCOMP, EXIT_SIGNAL_FATAL];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {

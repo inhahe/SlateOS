@@ -150,7 +150,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Convenience: a small valid buffer to share across success cases.
-    fn small_buf() -> [u8; 16] { [0u8; 16] }
+    fn small_buf() -> [u8; 16] {
+        [0u8; 16]
+    }
 
     // ---- (a) Helper / constant invariants --------------------------------
 
@@ -193,11 +195,7 @@ mod tests {
         // valid bit is present.
         let mut buf = small_buf();
         crate::errno::set_errno(0);
-        let ret = crate::unistd::getrandom(
-            buf.as_mut_ptr(),
-            buf.len(),
-            GRND_NONBLOCK | 0x0008,
-        );
+        let ret = crate::unistd::getrandom(buf.as_mut_ptr(), buf.len(), GRND_NONBLOCK | 0x0008);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -217,11 +215,8 @@ mod tests {
     fn test_getrandom_rejects_random_plus_insecure() {
         let mut buf = small_buf();
         crate::errno::set_errno(0);
-        let ret = crate::unistd::getrandom(
-            buf.as_mut_ptr(),
-            buf.len(),
-            GRND_RANDOM | GRND_INSECURE,
-        );
+        let ret =
+            crate::unistd::getrandom(buf.as_mut_ptr(), buf.len(), GRND_RANDOM | GRND_INSECURE);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -259,11 +254,7 @@ mod tests {
         // Same idea for the GRND_RANDOM|GRND_INSECURE conflict — it must
         // surface as EINVAL before the null-buf EFAULT path runs.
         crate::errno::set_errno(0);
-        let ret = crate::unistd::getrandom(
-            core::ptr::null_mut(),
-            16,
-            GRND_RANDOM | GRND_INSECURE,
-        );
+        let ret = crate::unistd::getrandom(core::ptr::null_mut(), 16, GRND_RANDOM | GRND_INSECURE);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -302,11 +293,8 @@ mod tests {
     fn test_getrandom_nonblock_plus_random_succeeds() {
         let mut buf = small_buf();
         crate::errno::set_errno(0);
-        let ret = crate::unistd::getrandom(
-            buf.as_mut_ptr(),
-            buf.len(),
-            GRND_NONBLOCK | GRND_RANDOM,
-        );
+        let ret =
+            crate::unistd::getrandom(buf.as_mut_ptr(), buf.len(), GRND_NONBLOCK | GRND_RANDOM);
         assert_eq!(ret, buf.len() as isize);
     }
 
@@ -314,11 +302,8 @@ mod tests {
     fn test_getrandom_nonblock_plus_insecure_succeeds() {
         let mut buf = small_buf();
         crate::errno::set_errno(0);
-        let ret = crate::unistd::getrandom(
-            buf.as_mut_ptr(),
-            buf.len(),
-            GRND_NONBLOCK | GRND_INSECURE,
-        );
+        let ret =
+            crate::unistd::getrandom(buf.as_mut_ptr(), buf.len(), GRND_NONBLOCK | GRND_INSECURE);
         assert_eq!(ret, buf.len() as isize);
     }
 

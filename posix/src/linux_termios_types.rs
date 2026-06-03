@@ -100,8 +100,7 @@ mod tests {
     #[test]
     fn test_iflag_distinct() {
         let flags = [
-            IGNBRK, BRKINT, IGNPAR, PARMRK, INPCK, ISTRIP,
-            INLCR, IGNCR, ICRNL, IXON, IXOFF, IXANY,
+            IGNBRK, BRKINT, IGNPAR, PARMRK, INPCK, ISTRIP, INLCR, IGNCR, ICRNL, IXON, IXOFF, IXANY,
             IMAXBEL, IUTF8,
         ];
         for i in 0..flags.len() {
@@ -113,7 +112,9 @@ mod tests {
 
     #[test]
     fn test_lflag_distinct() {
-        let flags = [ISIG, ICANON, ECHO, ECHOE, ECHOK, ECHONL, NOFLSH, TOSTOP, IEXTEN];
+        let flags = [
+            ISIG, ICANON, ECHO, ECHOE, ECHOK, ECHONL, NOFLSH, TOSTOP, IEXTEN,
+        ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(flags[i], flags[j]);

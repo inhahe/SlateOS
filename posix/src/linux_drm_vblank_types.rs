@@ -69,8 +69,10 @@ mod tests {
     #[test]
     fn test_vblank_flags_distinct() {
         let flags = [
-            DRM_VBLANK_EVENT, DRM_VBLANK_FLIP_CRTC,
-            DRM_VBLANK_NEXTONMISS, DRM_VBLANK_SECONDARY,
+            DRM_VBLANK_EVENT,
+            DRM_VBLANK_FLIP_CRTC,
+            DRM_VBLANK_NEXTONMISS,
+            DRM_VBLANK_SECONDARY,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -82,7 +84,8 @@ mod tests {
     #[test]
     fn test_page_flip_flags_distinct() {
         let flags = [
-            DRM_MODE_PAGE_FLIP_EVENT, DRM_MODE_PAGE_FLIP_ASYNC,
+            DRM_MODE_PAGE_FLIP_EVENT,
+            DRM_MODE_PAGE_FLIP_ASYNC,
             DRM_MODE_PAGE_FLIP_TARGET,
         ];
         for i in 0..flags.len() {
@@ -95,7 +98,8 @@ mod tests {
     #[test]
     fn test_atomic_flags_distinct() {
         let flags = [
-            DRM_MODE_ATOMIC_TEST_ONLY, DRM_MODE_ATOMIC_NONBLOCK,
+            DRM_MODE_ATOMIC_TEST_ONLY,
+            DRM_MODE_ATOMIC_NONBLOCK,
             DRM_MODE_ATOMIC_ALLOW_MODESET,
         ];
         for i in 0..flags.len() {

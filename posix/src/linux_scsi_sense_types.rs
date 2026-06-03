@@ -65,11 +65,21 @@ mod tests {
     #[test]
     fn test_sense_keys_distinct() {
         let keys = [
-            NO_SENSE, RECOVERED_ERROR, NOT_READY,
-            MEDIUM_ERROR, HARDWARE_ERROR, ILLEGAL_REQUEST,
-            UNIT_ATTENTION, DATA_PROTECT, BLANK_CHECK,
-            VENDOR_SPECIFIC, COPY_ABORTED, ABORTED_COMMAND,
-            VOLUME_OVERFLOW, MISCOMPARE, COMPLETED,
+            NO_SENSE,
+            RECOVERED_ERROR,
+            NOT_READY,
+            MEDIUM_ERROR,
+            HARDWARE_ERROR,
+            ILLEGAL_REQUEST,
+            UNIT_ATTENTION,
+            DATA_PROTECT,
+            BLANK_CHECK,
+            VENDOR_SPECIFIC,
+            COPY_ABORTED,
+            ABORTED_COMMAND,
+            VOLUME_OVERFLOW,
+            MISCOMPARE,
+            COMPLETED,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -81,11 +91,21 @@ mod tests {
     #[test]
     fn test_sense_keys_fit_4_bits() {
         let keys = [
-            NO_SENSE, RECOVERED_ERROR, NOT_READY,
-            MEDIUM_ERROR, HARDWARE_ERROR, ILLEGAL_REQUEST,
-            UNIT_ATTENTION, DATA_PROTECT, BLANK_CHECK,
-            VENDOR_SPECIFIC, COPY_ABORTED, ABORTED_COMMAND,
-            VOLUME_OVERFLOW, MISCOMPARE, COMPLETED,
+            NO_SENSE,
+            RECOVERED_ERROR,
+            NOT_READY,
+            MEDIUM_ERROR,
+            HARDWARE_ERROR,
+            ILLEGAL_REQUEST,
+            UNIT_ATTENTION,
+            DATA_PROTECT,
+            BLANK_CHECK,
+            VENDOR_SPECIFIC,
+            COPY_ABORTED,
+            ABORTED_COMMAND,
+            VOLUME_OVERFLOW,
+            MISCOMPARE,
+            COMPLETED,
         ];
         for &k in &keys {
             assert!(k <= 0x0F, "sense key 0x{:X} doesn't fit in 4 bits", k);

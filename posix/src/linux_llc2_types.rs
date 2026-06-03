@@ -62,8 +62,14 @@ mod tests {
     #[test]
     fn test_sap_values_distinct() {
         let saps = [
-            LLC_SAP_NULL, LLC_SAP_LLC, LLC_SAP_SNA, LLC_SAP_PNM,
-            LLC_SAP_BSPAN, LLC_SAP_ISO, LLC_SAP_IP, LLC_SAP_SNAP,
+            LLC_SAP_NULL,
+            LLC_SAP_LLC,
+            LLC_SAP_SNA,
+            LLC_SAP_PNM,
+            LLC_SAP_BSPAN,
+            LLC_SAP_ISO,
+            LLC_SAP_IP,
+            LLC_SAP_SNAP,
             LLC_SAP_GLOBAL,
         ];
         for i in 0..saps.len() {
@@ -76,10 +82,16 @@ mod tests {
     #[test]
     fn test_sockopts_distinct() {
         let opts = [
-            LLC_OPT_UNKNOWN, LLC_OPT_RETRY, LLC_OPT_SIZE,
-            LLC_OPT_ACK_TMR_EXP, LLC_OPT_P_TMR_EXP,
-            LLC_OPT_REJ_TMR_EXP, LLC_OPT_BUSY_TMR_EXP,
-            LLC_OPT_TX_WIN, LLC_OPT_RX_WIN, LLC_OPT_PKTINFO,
+            LLC_OPT_UNKNOWN,
+            LLC_OPT_RETRY,
+            LLC_OPT_SIZE,
+            LLC_OPT_ACK_TMR_EXP,
+            LLC_OPT_P_TMR_EXP,
+            LLC_OPT_REJ_TMR_EXP,
+            LLC_OPT_BUSY_TMR_EXP,
+            LLC_OPT_TX_WIN,
+            LLC_OPT_RX_WIN,
+            LLC_OPT_PKTINFO,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

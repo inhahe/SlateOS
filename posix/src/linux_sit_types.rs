@@ -120,14 +120,25 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            IFLA_SIT_UNSPEC, IFLA_SIT_LINK, IFLA_SIT_LOCAL,
-            IFLA_SIT_REMOTE, IFLA_SIT_TTL, IFLA_SIT_TOS,
-            IFLA_SIT_FLAGS, IFLA_SIT_PROTO, IFLA_SIT_PMTUDISC,
-            IFLA_SIT_6RD_PREFIX, IFLA_SIT_6RD_RELAY_PREFIX,
-            IFLA_SIT_6RD_PREFIXLEN, IFLA_SIT_6RD_RELAY_PREFIXLEN,
-            IFLA_SIT_ENCAP_TYPE, IFLA_SIT_ENCAP_FLAGS,
-            IFLA_SIT_ENCAP_SPORT, IFLA_SIT_ENCAP_DPORT,
-            IFLA_SIT_COLLECT_METADATA, IFLA_SIT_FWMARK,
+            IFLA_SIT_UNSPEC,
+            IFLA_SIT_LINK,
+            IFLA_SIT_LOCAL,
+            IFLA_SIT_REMOTE,
+            IFLA_SIT_TTL,
+            IFLA_SIT_TOS,
+            IFLA_SIT_FLAGS,
+            IFLA_SIT_PROTO,
+            IFLA_SIT_PMTUDISC,
+            IFLA_SIT_6RD_PREFIX,
+            IFLA_SIT_6RD_RELAY_PREFIX,
+            IFLA_SIT_6RD_PREFIXLEN,
+            IFLA_SIT_6RD_RELAY_PREFIXLEN,
+            IFLA_SIT_ENCAP_TYPE,
+            IFLA_SIT_ENCAP_FLAGS,
+            IFLA_SIT_ENCAP_SPORT,
+            IFLA_SIT_ENCAP_DPORT,
+            IFLA_SIT_COLLECT_METADATA,
+            IFLA_SIT_FWMARK,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

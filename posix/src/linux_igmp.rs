@@ -113,7 +113,10 @@ mod tests {
             IGMPV2_HOST_MEMBERSHIP_REPORT,
             IGMP_HOST_LEAVE_MESSAGE,
             IGMPV3_HOST_MEMBERSHIP_REPORT,
-            IGMP_DVMRP, IGMP_PIM, IGMP_TRACE, IGMP_MRINFO,
+            IGMP_DVMRP,
+            IGMP_PIM,
+            IGMP_TRACE,
+            IGMP_MRINFO,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

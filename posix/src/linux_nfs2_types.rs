@@ -142,12 +142,28 @@ mod tests {
     #[test]
     fn test_nfs3_procs_distinct() {
         let procs = [
-            NFS3_NULL, NFS3_GETATTR, NFS3_SETATTR, NFS3_LOOKUP,
-            NFS3_ACCESS, NFS3_READLINK, NFS3_READ, NFS3_WRITE,
-            NFS3_CREATE, NFS3_MKDIR, NFS3_SYMLINK, NFS3_MKNOD,
-            NFS3_REMOVE, NFS3_RMDIR, NFS3_RENAME, NFS3_LINK,
-            NFS3_READDIR, NFS3_READDIRPLUS, NFS3_FSSTAT,
-            NFS3_FSINFO, NFS3_PATHCONF, NFS3_COMMIT,
+            NFS3_NULL,
+            NFS3_GETATTR,
+            NFS3_SETATTR,
+            NFS3_LOOKUP,
+            NFS3_ACCESS,
+            NFS3_READLINK,
+            NFS3_READ,
+            NFS3_WRITE,
+            NFS3_CREATE,
+            NFS3_MKDIR,
+            NFS3_SYMLINK,
+            NFS3_MKNOD,
+            NFS3_REMOVE,
+            NFS3_RMDIR,
+            NFS3_RENAME,
+            NFS3_LINK,
+            NFS3_READDIR,
+            NFS3_READDIRPLUS,
+            NFS3_FSSTAT,
+            NFS3_FSINFO,
+            NFS3_PATHCONF,
+            NFS3_COMMIT,
         ];
         for i in 0..procs.len() {
             for j in (i + 1)..procs.len() {
@@ -159,9 +175,12 @@ mod tests {
     #[test]
     fn test_access_bits_power_of_two() {
         let bits = [
-            NFS3_ACCESS_READ, NFS3_ACCESS_LOOKUP,
-            NFS3_ACCESS_MODIFY, NFS3_ACCESS_EXTEND,
-            NFS3_ACCESS_DELETE, NFS3_ACCESS_EXECUTE,
+            NFS3_ACCESS_READ,
+            NFS3_ACCESS_LOOKUP,
+            NFS3_ACCESS_MODIFY,
+            NFS3_ACCESS_EXTEND,
+            NFS3_ACCESS_DELETE,
+            NFS3_ACCESS_EXECUTE,
         ];
         for b in &bits {
             assert!(b.is_power_of_two(), "0x{:04x} not power of two", b);

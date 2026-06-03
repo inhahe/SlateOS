@@ -60,8 +60,10 @@ mod tests {
     #[test]
     fn test_file_names_distinct() {
         let files = [
-            CPUSET_CPUS_EFFECTIVE, CPUSET_CPUS,
-            CPUSET_MEMS_EFFECTIVE, CPUSET_MEMS,
+            CPUSET_CPUS_EFFECTIVE,
+            CPUSET_CPUS,
+            CPUSET_MEMS_EFFECTIVE,
+            CPUSET_MEMS,
             CPUSET_CPUS_PARTITION,
         ];
         for i in 0..files.len() {
@@ -74,7 +76,8 @@ mod tests {
     #[test]
     fn test_partition_types_distinct() {
         let types = [
-            CPUSET_PARTITION_MEMBER, CPUSET_PARTITION_ROOT,
+            CPUSET_PARTITION_MEMBER,
+            CPUSET_PARTITION_ROOT,
             CPUSET_PARTITION_ISOLATED,
         ];
         for i in 0..types.len() {
@@ -87,9 +90,12 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            CPUSET_CPU_EXCLUSIVE, CPUSET_MEM_EXCLUSIVE,
-            CPUSET_MEM_HARDWALL, CPUSET_SPREAD_PAGE,
-            CPUSET_SPREAD_SLAB, CPUSET_MEM_MIGRATE,
+            CPUSET_CPU_EXCLUSIVE,
+            CPUSET_MEM_EXCLUSIVE,
+            CPUSET_MEM_HARDWALL,
+            CPUSET_SPREAD_PAGE,
+            CPUSET_SPREAD_SLAB,
+            CPUSET_MEM_MIGRATE,
             CPUSET_SCHED_LOAD_BALANCE,
         ];
         for flag in &flags {
@@ -100,9 +106,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            CPUSET_CPU_EXCLUSIVE, CPUSET_MEM_EXCLUSIVE,
-            CPUSET_MEM_HARDWALL, CPUSET_SPREAD_PAGE,
-            CPUSET_SPREAD_SLAB, CPUSET_MEM_MIGRATE,
+            CPUSET_CPU_EXCLUSIVE,
+            CPUSET_MEM_EXCLUSIVE,
+            CPUSET_MEM_HARDWALL,
+            CPUSET_SPREAD_PAGE,
+            CPUSET_SPREAD_SLAB,
+            CPUSET_MEM_MIGRATE,
             CPUSET_SCHED_LOAD_BALANCE,
         ];
         for i in 0..flags.len() {

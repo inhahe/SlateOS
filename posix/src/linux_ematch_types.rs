@@ -70,9 +70,16 @@ mod tests {
     #[test]
     fn test_kinds_distinct() {
         let kinds = [
-            TCF_EM_CONTAINER, TCF_EM_CMP, TCF_EM_NBYTE,
-            TCF_EM_U32, TCF_EM_META, TCF_EM_TEXT,
-            TCF_EM_VLAN, TCF_EM_CANID, TCF_EM_IPSET, TCF_EM_IPT,
+            TCF_EM_CONTAINER,
+            TCF_EM_CMP,
+            TCF_EM_NBYTE,
+            TCF_EM_U32,
+            TCF_EM_META,
+            TCF_EM_TEXT,
+            TCF_EM_VLAN,
+            TCF_EM_CANID,
+            TCF_EM_IPSET,
+            TCF_EM_IPT,
         ];
         for i in 0..kinds.len() {
             for j in (i + 1)..kinds.len() {

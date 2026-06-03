@@ -7,8 +7,8 @@
 use crate::errno;
 use crate::stat::Timespec;
 use crate::syscall::{
-    SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT,
-    SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE, syscall1, syscall2, syscall3,
+    SYS_FUTEX_LOCK_PI, SYS_FUTEX_UNLOCK_PI, SYS_FUTEX_WAIT, SYS_FUTEX_WAIT_TIMEOUT, SYS_FUTEX_WAKE,
+    syscall1, syscall2, syscall3,
 };
 
 // ---------------------------------------------------------------------------
@@ -172,12 +172,7 @@ pub extern "C" fn futex(
                     errno::set_errno(errno::EINVAL);
                     return -1;
                 };
-                let ret = syscall3(
-                    SYS_FUTEX_WAIT_TIMEOUT,
-                    uaddr as u64,
-                    u64::from(val),
-                    ns,
-                );
+                let ret = syscall3(SYS_FUTEX_WAIT_TIMEOUT, uaddr as u64, u64::from(val), ns);
                 match ret {
                     1 => 0,
                     0 => {
@@ -194,11 +189,7 @@ pub extern "C" fn futex(
                 return -1;
             }
             let ret = syscall2(SYS_FUTEX_WAKE, uaddr as u64, u64::from(val));
-            if ret < 0 {
-                errno::translate(ret)
-            } else {
-                ret
-            }
+            if ret < 0 { errno::translate(ret) } else { ret }
         }
         FUTEX_LOCK_PI => {
             if uaddr.is_null() {
@@ -242,11 +233,18 @@ mod tests {
     #[test]
     fn test_futex_ops_distinct() {
         let ops = [
-            FUTEX_WAIT, FUTEX_WAKE, FUTEX_REQUEUE,
-            FUTEX_CMP_REQUEUE, FUTEX_WAKE_OP,
-            FUTEX_LOCK_PI, FUTEX_UNLOCK_PI, FUTEX_TRYLOCK_PI,
-            FUTEX_WAIT_BITSET, FUTEX_WAKE_BITSET,
-            FUTEX_WAIT_REQUEUE_PI, FUTEX_CMP_REQUEUE_PI,
+            FUTEX_WAIT,
+            FUTEX_WAKE,
+            FUTEX_REQUEUE,
+            FUTEX_CMP_REQUEUE,
+            FUTEX_WAKE_OP,
+            FUTEX_LOCK_PI,
+            FUTEX_UNLOCK_PI,
+            FUTEX_TRYLOCK_PI,
+            FUTEX_WAIT_BITSET,
+            FUTEX_WAKE_BITSET,
+            FUTEX_WAIT_REQUEUE_PI,
+            FUTEX_CMP_REQUEUE_PI,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -380,7 +378,10 @@ mod tests {
     fn test_futex_wait_invalid_timeout_einval() {
         // Negative tv_nsec is invalid.
         let mut word: u32 = 0;
-        let ts = Timespec { tv_sec: 0, tv_nsec: -1 };
+        let ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: -1,
+        };
         errno::set_errno(0);
         let ret = futex(
             &mut word as *mut u32,
@@ -397,7 +398,10 @@ mod tests {
     #[test]
     fn test_futex_wait_negative_seconds_einval() {
         let mut word: u32 = 0;
-        let ts = Timespec { tv_sec: -1, tv_nsec: 0 };
+        let ts = Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
         errno::set_errno(0);
         let ret = futex(
             &mut word as *mut u32,
@@ -482,19 +486,31 @@ mod tests {
     #[test]
     fn test_timespec_to_ns_basic() {
         assert_eq!(
-            timespec_to_ns(&Timespec { tv_sec: 0, tv_nsec: 0 }),
+            timespec_to_ns(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 0
+            }),
             Some(0),
         );
         assert_eq!(
-            timespec_to_ns(&Timespec { tv_sec: 1, tv_nsec: 0 }),
+            timespec_to_ns(&Timespec {
+                tv_sec: 1,
+                tv_nsec: 0
+            }),
             Some(1_000_000_000),
         );
         assert_eq!(
-            timespec_to_ns(&Timespec { tv_sec: 0, tv_nsec: 500 }),
+            timespec_to_ns(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 500
+            }),
             Some(500),
         );
         assert_eq!(
-            timespec_to_ns(&Timespec { tv_sec: 2, tv_nsec: 250_000_000 }),
+            timespec_to_ns(&Timespec {
+                tv_sec: 2,
+                tv_nsec: 250_000_000
+            }),
             Some(2_250_000_000),
         );
     }
@@ -502,15 +518,24 @@ mod tests {
     #[test]
     fn test_timespec_to_ns_rejects_invalid() {
         assert_eq!(
-            timespec_to_ns(&Timespec { tv_sec: -1, tv_nsec: 0 }),
+            timespec_to_ns(&Timespec {
+                tv_sec: -1,
+                tv_nsec: 0
+            }),
             None,
         );
         assert_eq!(
-            timespec_to_ns(&Timespec { tv_sec: 0, tv_nsec: -1 }),
+            timespec_to_ns(&Timespec {
+                tv_sec: 0,
+                tv_nsec: -1
+            }),
             None,
         );
         assert_eq!(
-            timespec_to_ns(&Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 }),
+            timespec_to_ns(&Timespec {
+                tv_sec: 0,
+                tv_nsec: 1_000_000_000
+            }),
             None,
         );
     }

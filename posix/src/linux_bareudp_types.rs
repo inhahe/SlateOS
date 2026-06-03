@@ -56,8 +56,10 @@ mod tests {
     #[test]
     fn test_ifla_attrs_distinct() {
         let attrs = [
-            IFLA_BAREUDP_PORT, IFLA_BAREUDP_ETHERTYPE,
-            IFLA_BAREUDP_SRCPORT_MIN, IFLA_BAREUDP_MULTIPROTO_MODE,
+            IFLA_BAREUDP_PORT,
+            IFLA_BAREUDP_ETHERTYPE,
+            IFLA_BAREUDP_SRCPORT_MIN,
+            IFLA_BAREUDP_MULTIPROTO_MODE,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -69,8 +71,10 @@ mod tests {
     #[test]
     fn test_ethertypes_distinct() {
         let types = [
-            ETH_P_MPLS_UC, ETH_P_MPLS_MC,
-            ETH_P_IP_BAREUDP, ETH_P_IPV6_BAREUDP,
+            ETH_P_MPLS_UC,
+            ETH_P_MPLS_MC,
+            ETH_P_IP_BAREUDP,
+            ETH_P_IPV6_BAREUDP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

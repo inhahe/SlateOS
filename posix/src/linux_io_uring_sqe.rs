@@ -111,17 +111,32 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            IORING_OP_NOP, IORING_OP_READV, IORING_OP_WRITEV,
-            IORING_OP_FSYNC, IORING_OP_READ_FIXED, IORING_OP_WRITE_FIXED,
-            IORING_OP_POLL_ADD, IORING_OP_POLL_REMOVE,
-            IORING_OP_SYNC_FILE_RANGE, IORING_OP_SENDMSG,
-            IORING_OP_RECVMSG, IORING_OP_TIMEOUT,
-            IORING_OP_TIMEOUT_REMOVE, IORING_OP_ACCEPT,
-            IORING_OP_ASYNC_CANCEL, IORING_OP_LINK_TIMEOUT,
-            IORING_OP_CONNECT, IORING_OP_FALLOCATE,
-            IORING_OP_OPENAT, IORING_OP_CLOSE,
-            IORING_OP_READ, IORING_OP_WRITE, IORING_OP_STATX,
-            IORING_OP_SPLICE, IORING_OP_SEND, IORING_OP_RECV,
+            IORING_OP_NOP,
+            IORING_OP_READV,
+            IORING_OP_WRITEV,
+            IORING_OP_FSYNC,
+            IORING_OP_READ_FIXED,
+            IORING_OP_WRITE_FIXED,
+            IORING_OP_POLL_ADD,
+            IORING_OP_POLL_REMOVE,
+            IORING_OP_SYNC_FILE_RANGE,
+            IORING_OP_SENDMSG,
+            IORING_OP_RECVMSG,
+            IORING_OP_TIMEOUT,
+            IORING_OP_TIMEOUT_REMOVE,
+            IORING_OP_ACCEPT,
+            IORING_OP_ASYNC_CANCEL,
+            IORING_OP_LINK_TIMEOUT,
+            IORING_OP_CONNECT,
+            IORING_OP_FALLOCATE,
+            IORING_OP_OPENAT,
+            IORING_OP_CLOSE,
+            IORING_OP_READ,
+            IORING_OP_WRITE,
+            IORING_OP_STATX,
+            IORING_OP_SPLICE,
+            IORING_OP_SEND,
+            IORING_OP_RECV,
             IORING_OP_ACCEPT_MULTI,
         ];
         for i in 0..ops.len() {
@@ -134,8 +149,12 @@ mod tests {
     #[test]
     fn test_sqe_flags_no_overlap() {
         let flags = [
-            IOSQE_FIXED_FILE, IOSQE_IO_DRAIN, IOSQE_IO_LINK,
-            IOSQE_IO_HARDLINK, IOSQE_ASYNC, IOSQE_BUFFER_SELECT,
+            IOSQE_FIXED_FILE,
+            IOSQE_IO_DRAIN,
+            IOSQE_IO_LINK,
+            IOSQE_IO_HARDLINK,
+            IOSQE_ASYNC,
+            IOSQE_BUFFER_SELECT,
             IOSQE_CQE_SKIP_SUCCESS,
         ];
         for i in 0..flags.len() {
@@ -148,9 +167,12 @@ mod tests {
     #[test]
     fn test_setup_flags_no_overlap() {
         let flags = [
-            IORING_SETUP_IOPOLL, IORING_SETUP_SQPOLL,
-            IORING_SETUP_SQ_AFF, IORING_SETUP_CQSIZE,
-            IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_DEFER_TASKRUN,
+            IORING_SETUP_IOPOLL,
+            IORING_SETUP_SQPOLL,
+            IORING_SETUP_SQ_AFF,
+            IORING_SETUP_CQSIZE,
+            IORING_SETUP_SINGLE_ISSUER,
+            IORING_SETUP_DEFER_TASKRUN,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

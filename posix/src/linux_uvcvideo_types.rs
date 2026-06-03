@@ -90,8 +90,14 @@ mod tests {
     #[test]
     fn test_query_requests_distinct() {
         let reqs = [
-            UVC_SET_CUR, UVC_GET_CUR, UVC_GET_MIN, UVC_GET_MAX,
-            UVC_GET_RES, UVC_GET_LEN, UVC_GET_INFO, UVC_GET_DEF,
+            UVC_SET_CUR,
+            UVC_GET_CUR,
+            UVC_GET_MIN,
+            UVC_GET_MAX,
+            UVC_GET_RES,
+            UVC_GET_LEN,
+            UVC_GET_INFO,
+            UVC_GET_DEF,
         ];
         for i in 0..reqs.len() {
             for j in (i + 1)..reqs.len() {

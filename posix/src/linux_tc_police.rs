@@ -59,8 +59,11 @@ mod tests {
     #[test]
     fn test_results_distinct() {
         let results = [
-            TC_POLICE_UNSPEC, TC_POLICE_OK, TC_POLICE_RECLASSIFY,
-            TC_POLICE_SHOT, TC_POLICE_PIPE,
+            TC_POLICE_UNSPEC,
+            TC_POLICE_OK,
+            TC_POLICE_RECLASSIFY,
+            TC_POLICE_SHOT,
+            TC_POLICE_PIPE,
         ];
         for i in 0..results.len() {
             for j in (i + 1)..results.len() {
@@ -72,10 +75,17 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_POLICE_UNSPEC, TCA_POLICE_TBF, TCA_POLICE_RATE,
-            TCA_POLICE_PEAKRATE, TCA_POLICE_AVRATE, TCA_POLICE_RESULT,
-            TCA_POLICE_TM, TCA_POLICE_PAD, TCA_POLICE_RATE64,
-            TCA_POLICE_PEAKRATE64, TCA_POLICE_PKTRATE64,
+            TCA_POLICE_UNSPEC,
+            TCA_POLICE_TBF,
+            TCA_POLICE_RATE,
+            TCA_POLICE_PEAKRATE,
+            TCA_POLICE_AVRATE,
+            TCA_POLICE_RESULT,
+            TCA_POLICE_TM,
+            TCA_POLICE_PAD,
+            TCA_POLICE_RATE64,
+            TCA_POLICE_PEAKRATE64,
+            TCA_POLICE_PKTRATE64,
             TCA_POLICE_PKTBURST64,
         ];
         for i in 0..attrs.len() {

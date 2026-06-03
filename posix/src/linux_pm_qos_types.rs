@@ -81,8 +81,10 @@ mod tests {
     #[test]
     fn test_classes_distinct() {
         let classes = [
-            PM_QOS_CPU_DMA_LATENCY, PM_QOS_NETWORK_LATENCY,
-            PM_QOS_NETWORK_THROUGHPUT, PM_QOS_MEMORY_BANDWIDTH,
+            PM_QOS_CPU_DMA_LATENCY,
+            PM_QOS_NETWORK_LATENCY,
+            PM_QOS_NETWORK_THROUGHPUT,
+            PM_QOS_MEMORY_BANDWIDTH,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {

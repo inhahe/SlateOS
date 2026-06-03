@@ -103,8 +103,11 @@ mod tests {
     #[test]
     fn test_input_mt_flags_no_overlap() {
         let flags = [
-            INPUT_MT_POINTER, INPUT_MT_DIRECT,
-            INPUT_MT_DROP_UNUSED, INPUT_MT_TRACK, INPUT_MT_SEMI_MT,
+            INPUT_MT_POINTER,
+            INPUT_MT_DIRECT,
+            INPUT_MT_DROP_UNUSED,
+            INPUT_MT_TRACK,
+            INPUT_MT_SEMI_MT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -116,11 +119,21 @@ mod tests {
     #[test]
     fn test_abs_mt_codes_distinct() {
         let codes = [
-            ABS_MT_SLOT, ABS_MT_TOUCH_MAJOR, ABS_MT_TOUCH_MINOR,
-            ABS_MT_WIDTH_MAJOR, ABS_MT_WIDTH_MINOR, ABS_MT_ORIENTATION,
-            ABS_MT_POSITION_X, ABS_MT_POSITION_Y, ABS_MT_TOOL_TYPE,
-            ABS_MT_BLOB_ID, ABS_MT_TRACKING_ID, ABS_MT_PRESSURE,
-            ABS_MT_DISTANCE, ABS_MT_TOOL_X, ABS_MT_TOOL_Y,
+            ABS_MT_SLOT,
+            ABS_MT_TOUCH_MAJOR,
+            ABS_MT_TOUCH_MINOR,
+            ABS_MT_WIDTH_MAJOR,
+            ABS_MT_WIDTH_MINOR,
+            ABS_MT_ORIENTATION,
+            ABS_MT_POSITION_X,
+            ABS_MT_POSITION_Y,
+            ABS_MT_TOOL_TYPE,
+            ABS_MT_BLOB_ID,
+            ABS_MT_TRACKING_ID,
+            ABS_MT_PRESSURE,
+            ABS_MT_DISTANCE,
+            ABS_MT_TOOL_X,
+            ABS_MT_TOOL_Y,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

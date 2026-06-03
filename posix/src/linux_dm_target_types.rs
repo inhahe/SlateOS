@@ -80,13 +80,24 @@ mod tests {
     #[test]
     fn test_targets_distinct() {
         let targets: [&[u8]; 18] = [
-            DM_TARGET_LINEAR, DM_TARGET_STRIPED, DM_TARGET_MIRROR,
-            DM_TARGET_SNAPSHOT, DM_TARGET_SNAPSHOT_ORIGIN,
-            DM_TARGET_ERROR, DM_TARGET_ZERO, DM_TARGET_CRYPT,
-            DM_TARGET_THIN_POOL, DM_TARGET_THIN, DM_TARGET_CACHE,
-            DM_TARGET_WRITECACHE, DM_TARGET_INTEGRITY,
-            DM_TARGET_DELAY, DM_TARGET_FLAKEY, DM_TARGET_DUST,
-            DM_TARGET_RAID, DM_TARGET_VERITY,
+            DM_TARGET_LINEAR,
+            DM_TARGET_STRIPED,
+            DM_TARGET_MIRROR,
+            DM_TARGET_SNAPSHOT,
+            DM_TARGET_SNAPSHOT_ORIGIN,
+            DM_TARGET_ERROR,
+            DM_TARGET_ZERO,
+            DM_TARGET_CRYPT,
+            DM_TARGET_THIN_POOL,
+            DM_TARGET_THIN,
+            DM_TARGET_CACHE,
+            DM_TARGET_WRITECACHE,
+            DM_TARGET_INTEGRITY,
+            DM_TARGET_DELAY,
+            DM_TARGET_FLAKEY,
+            DM_TARGET_DUST,
+            DM_TARGET_RAID,
+            DM_TARGET_VERITY,
         ];
         for i in 0..targets.len() {
             for j in (i + 1)..targets.len() {
@@ -103,8 +114,10 @@ mod tests {
     #[test]
     fn test_crypt_flags_no_overlap() {
         let flags = [
-            DM_CRYPT_ALLOW_DISCARDS, DM_CRYPT_SAME_CPU_CRYPT,
-            DM_CRYPT_NO_OFFLOAD, DM_CRYPT_NO_READ_WORKQUEUE,
+            DM_CRYPT_ALLOW_DISCARDS,
+            DM_CRYPT_SAME_CPU_CRYPT,
+            DM_CRYPT_NO_OFFLOAD,
+            DM_CRYPT_NO_READ_WORKQUEUE,
             DM_CRYPT_NO_WRITE_WORKQUEUE,
         ];
         for i in 0..flags.len() {

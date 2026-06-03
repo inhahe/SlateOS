@@ -113,10 +113,8 @@ pub const PERF_FLAG_PID_CGROUP: u64 = 1 << 2;
 pub const PERF_FLAG_FD_CLOEXEC: u64 = 1 << 3;
 
 /// OR of every flag bit `perf_event_open` accepts.
-const PERF_FLAG_VALID: u64 = PERF_FLAG_FD_NO_GROUP
-    | PERF_FLAG_FD_OUTPUT
-    | PERF_FLAG_PID_CGROUP
-    | PERF_FLAG_FD_CLOEXEC;
+const PERF_FLAG_VALID: u64 =
+    PERF_FLAG_FD_NO_GROUP | PERF_FLAG_FD_OUTPUT | PERF_FLAG_PID_CGROUP | PERF_FLAG_FD_CLOEXEC;
 
 // ---------------------------------------------------------------------------
 // PERF_EVENT_IOC_* ioctl commands
@@ -422,12 +420,8 @@ pub extern "C" fn perf_event_open(
     // so a no-cap caller passing bad pid/cpu sees EACCES first —
     // matching Linux's source-order behaviour.
     if (attr_val.flags & PERF_ATTR_FLAG_EXCLUDE_KERNEL) == 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_PERFMON,
-        )
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_ADMIN,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_PERFMON)
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
     {
         errno::set_errno(errno::EACCES);
         return -1;
@@ -448,7 +442,7 @@ pub extern "C" fn perf_event_open(
     }
 
     // cpu validation: -1 = any cpu, 0..PERF_CPU_MAX = specific cpu.
-    if cpu < PERF_CPU_ANY || cpu >= PERF_CPU_MAX {
+    if !(PERF_CPU_ANY..PERF_CPU_MAX).contains(&cpu) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -456,10 +450,7 @@ pub extern "C" fn perf_event_open(
     // pid == -1 AND cpu == -1 is meaningless (no anchor) — Linux
     // EINVAL. Cgroup mode is excepted because the cgroup itself
     // anchors the event.
-    if pid == PERF_PID_ANY
-        && cpu == PERF_CPU_ANY
-        && (flags & PERF_FLAG_PID_CGROUP) == 0
-    {
+    if pid == PERF_PID_ANY && cpu == PERF_CPU_ANY && (flags & PERF_FLAG_PID_CGROUP) == 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -510,8 +501,12 @@ mod tests {
     #[test]
     fn test_perf_types_distinct() {
         let types = [
-            PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE, PERF_TYPE_TRACEPOINT,
-            PERF_TYPE_HW_CACHE, PERF_TYPE_RAW, PERF_TYPE_BREAKPOINT,
+            PERF_TYPE_HARDWARE,
+            PERF_TYPE_SOFTWARE,
+            PERF_TYPE_TRACEPOINT,
+            PERF_TYPE_HW_CACHE,
+            PERF_TYPE_RAW,
+            PERF_TYPE_BREAKPOINT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -556,17 +551,22 @@ mod tests {
 
     #[test]
     fn test_flags_are_bits() {
-        let combined = PERF_FLAG_FD_NO_GROUP | PERF_FLAG_FD_OUTPUT
-            | PERF_FLAG_PID_CGROUP | PERF_FLAG_FD_CLOEXEC;
+        let combined = PERF_FLAG_FD_NO_GROUP
+            | PERF_FLAG_FD_OUTPUT
+            | PERF_FLAG_PID_CGROUP
+            | PERF_FLAG_FD_CLOEXEC;
         assert_eq!(combined, 0x0F);
     }
 
     #[test]
     fn test_ioc_commands_distinct() {
         let cmds = [
-            PERF_EVENT_IOC_ENABLE, PERF_EVENT_IOC_DISABLE,
-            PERF_EVENT_IOC_REFRESH, PERF_EVENT_IOC_RESET,
-            PERF_EVENT_IOC_SET_OUTPUT, PERF_EVENT_IOC_SET_BPF,
+            PERF_EVENT_IOC_ENABLE,
+            PERF_EVENT_IOC_DISABLE,
+            PERF_EVENT_IOC_REFRESH,
+            PERF_EVENT_IOC_RESET,
+            PERF_EVENT_IOC_SET_OUTPUT,
+            PERF_EVENT_IOC_SET_BPF,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -1076,13 +1076,7 @@ mod tests {
         // Sanity: after the reorder, the NULL-attr case with clean
         // flags still reports EFAULT (we didn't drop that branch).
         errno::set_errno(0);
-        let ret = perf_event_open(
-            core::ptr::null_mut(),
-            0,
-            0,
-            -1,
-            PERF_FLAG_FD_CLOEXEC,
-        );
+        let ret = perf_event_open(core::ptr::null_mut(), 0, 0, -1, PERF_FLAG_FD_CLOEXEC);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
@@ -1188,16 +1182,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -1212,8 +1204,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -1225,8 +1216,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1241,8 +1231,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed when dropping cap");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -1376,8 +1365,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_perfmon_and_sys_admin();
             errno::set_errno(0);
-            let r =
-                perf_event_open(core::ptr::null_mut(), 0, 0, -1, 0);
+            let r = perf_event_open(core::ptr::null_mut(), 0, 0, -1, 0);
             assert_eq!(r, -1);
             assert_eq!(errno::get_errno(), errno::EFAULT);
         }
@@ -1510,8 +1498,7 @@ mod tests {
             // Restore caps via CapGuard drop semantics is end-of-test
             // — for in-test recovery, re-grant CAP_PERFMON manually.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1526,10 +1513,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0);
             errno::set_errno(0);
             assert_eq!(perf_event_open(&mut attr, 0, 0, -1, 0), -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -1544,12 +1528,10 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_perfmon_and_sys_admin();
             // Snapshot the post-drop caps.
-            let (lo_before, hi_before) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_before, hi_before) = crate::sys_capability::current_caps_effective();
             let mut attr = make_valid_hw_attr();
             let _ = perf_event_open(&mut attr, 0, 0, -1, 0);
-            let (lo_after, hi_after) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_after, hi_after) = crate::sys_capability::current_caps_effective();
             assert_eq!(lo_before, lo_after);
             assert_eq!(hi_before, hi_after);
         }
@@ -1589,10 +1571,7 @@ mod tests {
         #[test]
         fn test_perf_phase181_exclude_kernel_distinct_from_exclusive() {
             const PERF_ATTR_FLAG_EXCLUSIVE: u64 = 1 << 3;
-            assert_eq!(
-                PERF_ATTR_FLAG_EXCLUDE_KERNEL & PERF_ATTR_FLAG_EXCLUSIVE,
-                0
-            );
+            assert_eq!(PERF_ATTR_FLAG_EXCLUDE_KERNEL & PERF_ATTR_FLAG_EXCLUSIVE, 0);
         }
     }
 }

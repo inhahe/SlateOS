@@ -140,8 +140,10 @@ mod tests {
     #[test]
     fn test_pattern_types_distinct() {
         let patterns = [
-            LOV_PATTERN_RAID0, LOV_PATTERN_RAID1,
-            LOV_PATTERN_MDT, LOV_PATTERN_OVERSTRIPING,
+            LOV_PATTERN_RAID0,
+            LOV_PATTERN_RAID1,
+            LOV_PATTERN_MDT,
+            LOV_PATTERN_OVERSTRIPING,
             LOV_PATTERN_FOREIGN,
         ];
         for i in 0..patterns.len() {
@@ -154,8 +156,13 @@ mod tests {
     #[test]
     fn test_hsm_states_power_of_two() {
         let states = [
-            HS_EXISTS, HS_DIRTY, HS_RELEASED, HS_ARCHIVED,
-            HS_NORELEASE, HS_NOARCHIVE, HS_LOST,
+            HS_EXISTS,
+            HS_DIRTY,
+            HS_RELEASED,
+            HS_ARCHIVED,
+            HS_NORELEASE,
+            HS_NOARCHIVE,
+            HS_LOST,
         ];
         for s in &states {
             assert!(s.is_power_of_two(), "0x{:08x} not power of two", s);
@@ -165,8 +172,12 @@ mod tests {
     #[test]
     fn test_hsm_actions_distinct() {
         let actions = [
-            HUA_NONE, HUA_ARCHIVE, HUA_RESTORE,
-            HUA_RELEASE, HUA_REMOVE, HUA_CANCEL,
+            HUA_NONE,
+            HUA_ARCHIVE,
+            HUA_RESTORE,
+            HUA_RELEASE,
+            HUA_REMOVE,
+            HUA_CANCEL,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -185,11 +196,24 @@ mod tests {
     #[test]
     fn test_changelog_types_distinct() {
         let types = [
-            CL_MARK, CL_CREATE, CL_MKDIR, CL_HARDLINK,
-            CL_SOFTLINK, CL_MKNOD, CL_UNLINK, CL_RMDIR,
-            CL_RENAME, CL_EXT, CL_OPEN, CL_CLOSE,
-            CL_LAYOUT, CL_TRUNC, CL_SETATTR, CL_SETXATTR,
-            CL_HSM, CL_MIGRATE,
+            CL_MARK,
+            CL_CREATE,
+            CL_MKDIR,
+            CL_HARDLINK,
+            CL_SOFTLINK,
+            CL_MKNOD,
+            CL_UNLINK,
+            CL_RMDIR,
+            CL_RENAME,
+            CL_EXT,
+            CL_OPEN,
+            CL_CLOSE,
+            CL_LAYOUT,
+            CL_TRUNC,
+            CL_SETATTR,
+            CL_SETXATTR,
+            CL_HSM,
+            CL_MIGRATE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

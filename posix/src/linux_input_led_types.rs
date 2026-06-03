@@ -53,14 +53,21 @@ mod tests {
     #[test]
     fn test_led_codes_distinct() {
         let leds = [
-            LED_NUML, LED_CAPSL, LED_SCROLLL, LED_COMPOSE,
-            LED_KANA, LED_SLEEP, LED_SUSPEND, LED_MUTE,
-            LED_MISC, LED_MAIL, LED_CHARGING,
+            LED_NUML,
+            LED_CAPSL,
+            LED_SCROLLL,
+            LED_COMPOSE,
+            LED_KANA,
+            LED_SLEEP,
+            LED_SUSPEND,
+            LED_MUTE,
+            LED_MISC,
+            LED_MAIL,
+            LED_CHARGING,
         ];
         for i in 0..leds.len() {
             for j in (i + 1)..leds.len() {
-                assert_ne!(leds[i], leds[j],
-                    "LED codes {} and {} collide", i, j);
+                assert_ne!(leds[i], leds[j], "LED codes {} and {} collide", i, j);
             }
         }
     }
@@ -85,9 +92,17 @@ mod tests {
     #[test]
     fn test_all_within_max() {
         let leds = [
-            LED_NUML, LED_CAPSL, LED_SCROLLL, LED_COMPOSE,
-            LED_KANA, LED_SLEEP, LED_SUSPEND, LED_MUTE,
-            LED_MISC, LED_MAIL, LED_CHARGING,
+            LED_NUML,
+            LED_CAPSL,
+            LED_SCROLLL,
+            LED_COMPOSE,
+            LED_KANA,
+            LED_SLEEP,
+            LED_SUSPEND,
+            LED_MUTE,
+            LED_MISC,
+            LED_MAIL,
+            LED_CHARGING,
         ];
         for &l in &leds {
             assert!(l <= LED_MAX, "LED 0x{:02X} exceeds LED_MAX", l);

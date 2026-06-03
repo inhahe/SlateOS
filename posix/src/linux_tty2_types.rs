@@ -99,8 +99,7 @@ mod tests {
     #[test]
     fn test_line_disciplines_distinct() {
         let discs = [
-            N_TTY, N_SLIP, N_MOUSE, N_PPP, N_STRIP,
-            N_AX25, N_X25, N_6PACK, N_IRDA, N_HCI,
+            N_TTY, N_SLIP, N_MOUSE, N_PPP, N_STRIP, N_AX25, N_X25, N_6PACK, N_IRDA, N_HCI,
             N_GSM0710, N_NCI,
         ];
         for i in 0..discs.len() {
@@ -113,10 +112,8 @@ mod tests {
     #[test]
     fn test_ioctl_distinct() {
         let cmds = [
-            TIOCGETD, TIOCSETD, TIOCNXCL, TIOCSCTTY,
-            TIOCGPGRP, TIOCSPGRP, TIOCGWINSZ, TIOCSWINSZ,
-            TIOCMGET, TIOCMBIS, TIOCMBIC, TIOCMSET,
-            TIOCDRAIN, TIOCSBRK, TIOCCBRK,
+            TIOCGETD, TIOCSETD, TIOCNXCL, TIOCSCTTY, TIOCGPGRP, TIOCSPGRP, TIOCGWINSZ, TIOCSWINSZ,
+            TIOCMGET, TIOCMBIS, TIOCMBIC, TIOCMSET, TIOCDRAIN, TIOCSBRK, TIOCCBRK,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -129,9 +126,12 @@ mod tests {
     fn test_packet_flags_power_of_two() {
         // TIOCPKT_DATA is 0, so exclude it
         let flags: [u8; 6] = [
-            TIOCPKT_FLUSHREAD, TIOCPKT_FLUSHWRITE,
-            TIOCPKT_STOP, TIOCPKT_START,
-            TIOCPKT_NOSTOP, TIOCPKT_DOSTOP,
+            TIOCPKT_FLUSHREAD,
+            TIOCPKT_FLUSHWRITE,
+            TIOCPKT_STOP,
+            TIOCPKT_START,
+            TIOCPKT_NOSTOP,
+            TIOCPKT_DOSTOP,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:02x} not power of two", f);
@@ -141,9 +141,12 @@ mod tests {
     #[test]
     fn test_packet_flags_no_overlap() {
         let flags: [u8; 6] = [
-            TIOCPKT_FLUSHREAD, TIOCPKT_FLUSHWRITE,
-            TIOCPKT_STOP, TIOCPKT_START,
-            TIOCPKT_NOSTOP, TIOCPKT_DOSTOP,
+            TIOCPKT_FLUSHREAD,
+            TIOCPKT_FLUSHWRITE,
+            TIOCPKT_STOP,
+            TIOCPKT_START,
+            TIOCPKT_NOSTOP,
+            TIOCPKT_DOSTOP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

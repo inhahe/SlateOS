@@ -77,8 +77,11 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            NVMEM_TYPE_UNKNOWN, NVMEM_TYPE_EEPROM, NVMEM_TYPE_OTP,
-            NVMEM_TYPE_BATTERY_BACKED, NVMEM_TYPE_FRAM,
+            NVMEM_TYPE_UNKNOWN,
+            NVMEM_TYPE_EEPROM,
+            NVMEM_TYPE_OTP,
+            NVMEM_TYPE_BATTERY_BACKED,
+            NVMEM_TYPE_FRAM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -90,8 +93,10 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            NVMEM_FLAG_READ_ONLY, NVMEM_FLAG_ROOT_ONLY,
-            NVMEM_FLAG_IN_BAND_ECC, NVMEM_FLAG_KEEP_POWER,
+            NVMEM_FLAG_READ_ONLY,
+            NVMEM_FLAG_ROOT_ONLY,
+            NVMEM_FLAG_IN_BAND_ECC,
+            NVMEM_FLAG_KEEP_POWER,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -101,8 +106,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            NVMEM_FLAG_READ_ONLY, NVMEM_FLAG_ROOT_ONLY,
-            NVMEM_FLAG_IN_BAND_ECC, NVMEM_FLAG_KEEP_POWER,
+            NVMEM_FLAG_READ_ONLY,
+            NVMEM_FLAG_ROOT_ONLY,
+            NVMEM_FLAG_IN_BAND_ECC,
+            NVMEM_FLAG_KEEP_POWER,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -124,7 +131,11 @@ mod tests {
 
     #[test]
     fn test_layout_names_distinct() {
-        let layouts = [NVMEM_LAYOUT_ONIE_TLV, NVMEM_LAYOUT_DT, NVMEM_LAYOUT_SL28_VPD];
+        let layouts = [
+            NVMEM_LAYOUT_ONIE_TLV,
+            NVMEM_LAYOUT_DT,
+            NVMEM_LAYOUT_SL28_VPD,
+        ];
         for i in 0..layouts.len() {
             for j in (i + 1)..layouts.len() {
                 assert_ne!(layouts[i], layouts[j]);
@@ -135,8 +146,10 @@ mod tests {
     #[test]
     fn test_cell_names_distinct() {
         let names = [
-            NVMEM_CELL_MAC_ADDRESS, NVMEM_CELL_SERIAL_NUMBER,
-            NVMEM_CELL_PRODUCT_NAME, NVMEM_CELL_CALIBRATION,
+            NVMEM_CELL_MAC_ADDRESS,
+            NVMEM_CELL_SERIAL_NUMBER,
+            NVMEM_CELL_PRODUCT_NAME,
+            NVMEM_CELL_CALIBRATION,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

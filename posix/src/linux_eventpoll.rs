@@ -86,9 +86,16 @@ mod tests {
     #[test]
     fn test_event_flags_distinct() {
         let flags = [
-            EPOLLIN, EPOLLOUT, EPOLLPRI, EPOLLERR,
-            EPOLLHUP, EPOLLRDHUP, EPOLLET, EPOLLONESHOT,
-            EPOLLEXCLUSIVE, EPOLLNVAL,
+            EPOLLIN,
+            EPOLLOUT,
+            EPOLLPRI,
+            EPOLLERR,
+            EPOLLHUP,
+            EPOLLRDHUP,
+            EPOLLET,
+            EPOLLONESHOT,
+            EPOLLEXCLUSIVE,
+            EPOLLNVAL,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -123,7 +130,13 @@ mod tests {
         let basic = [EPOLLIN, EPOLLOUT, EPOLLPRI, EPOLLERR, EPOLLHUP, EPOLLNVAL];
         for i in 0..basic.len() {
             for j in (i + 1)..basic.len() {
-                assert_eq!(basic[i] & basic[j], 0, "0x{:x} & 0x{:x}", basic[i], basic[j]);
+                assert_eq!(
+                    basic[i] & basic[j],
+                    0,
+                    "0x{:x} & 0x{:x}",
+                    basic[i],
+                    basic[j]
+                );
             }
         }
     }

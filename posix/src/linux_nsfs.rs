@@ -48,7 +48,12 @@ mod tests {
 
     #[test]
     fn test_ns_ioctls_distinct() {
-        let cmds = [NS_GET_NSTYPE, NS_GET_USERNS, NS_GET_PARENT, NS_GET_OWNER_UID];
+        let cmds = [
+            NS_GET_NSTYPE,
+            NS_GET_USERNS,
+            NS_GET_PARENT,
+            NS_GET_OWNER_UID,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);
@@ -59,9 +64,14 @@ mod tests {
     #[test]
     fn test_clone_new_flags_distinct() {
         let flags = [
-            CLONE_NEWNS, CLONE_NEWCGROUP, CLONE_NEWUTS,
-            CLONE_NEWIPC, CLONE_NEWUSER, CLONE_NEWPID,
-            CLONE_NEWNET, CLONE_NEWTIME,
+            CLONE_NEWNS,
+            CLONE_NEWCGROUP,
+            CLONE_NEWUTS,
+            CLONE_NEWIPC,
+            CLONE_NEWUSER,
+            CLONE_NEWPID,
+            CLONE_NEWNET,
+            CLONE_NEWTIME,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -73,9 +83,14 @@ mod tests {
     #[test]
     fn test_clone_flags_no_overlap() {
         // Each CLONE_NEW* should be a distinct bit.
-        let combined = CLONE_NEWNS | CLONE_NEWCGROUP | CLONE_NEWUTS
-            | CLONE_NEWIPC | CLONE_NEWUSER | CLONE_NEWPID
-            | CLONE_NEWNET | CLONE_NEWTIME;
+        let combined = CLONE_NEWNS
+            | CLONE_NEWCGROUP
+            | CLONE_NEWUTS
+            | CLONE_NEWIPC
+            | CLONE_NEWUSER
+            | CLONE_NEWPID
+            | CLONE_NEWNET
+            | CLONE_NEWTIME;
         // Count set bits — should equal number of flags.
         assert_eq!(combined.count_ones(), 8);
     }

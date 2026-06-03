@@ -125,11 +125,22 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            TUNNEL_CSUM, TUNNEL_ROUTING, TUNNEL_KEY, TUNNEL_SEQ,
-            TUNNEL_STRICT, TUNNEL_REC, TUNNEL_VERSION,
-            TUNNEL_NO_KEY, TUNNEL_DONT_FRAGMENT, TUNNEL_OAM,
-            TUNNEL_CRIT_OPT, TUNNEL_GENEVE_OPT, TUNNEL_VXLAN_OPT,
-            TUNNEL_NOCACHE, TUNNEL_ERSPAN_OPT, TUNNEL_GTP_OPT,
+            TUNNEL_CSUM,
+            TUNNEL_ROUTING,
+            TUNNEL_KEY,
+            TUNNEL_SEQ,
+            TUNNEL_STRICT,
+            TUNNEL_REC,
+            TUNNEL_VERSION,
+            TUNNEL_NO_KEY,
+            TUNNEL_DONT_FRAGMENT,
+            TUNNEL_OAM,
+            TUNNEL_CRIT_OPT,
+            TUNNEL_GENEVE_OPT,
+            TUNNEL_VXLAN_OPT,
+            TUNNEL_NOCACHE,
+            TUNNEL_ERSPAN_OPT,
+            TUNNEL_GTP_OPT,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "flag {f:#x} not power of two");
@@ -139,11 +150,22 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            TUNNEL_CSUM, TUNNEL_ROUTING, TUNNEL_KEY, TUNNEL_SEQ,
-            TUNNEL_STRICT, TUNNEL_REC, TUNNEL_VERSION,
-            TUNNEL_NO_KEY, TUNNEL_DONT_FRAGMENT, TUNNEL_OAM,
-            TUNNEL_CRIT_OPT, TUNNEL_GENEVE_OPT, TUNNEL_VXLAN_OPT,
-            TUNNEL_NOCACHE, TUNNEL_ERSPAN_OPT, TUNNEL_GTP_OPT,
+            TUNNEL_CSUM,
+            TUNNEL_ROUTING,
+            TUNNEL_KEY,
+            TUNNEL_SEQ,
+            TUNNEL_STRICT,
+            TUNNEL_REC,
+            TUNNEL_VERSION,
+            TUNNEL_NO_KEY,
+            TUNNEL_DONT_FRAGMENT,
+            TUNNEL_OAM,
+            TUNNEL_CRIT_OPT,
+            TUNNEL_GENEVE_OPT,
+            TUNNEL_VXLAN_OPT,
+            TUNNEL_NOCACHE,
+            TUNNEL_ERSPAN_OPT,
+            TUNNEL_GTP_OPT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -165,16 +187,27 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            IFLA_IPTUN_UNSPEC, IFLA_IPTUN_LINK, IFLA_IPTUN_LOCAL,
-            IFLA_IPTUN_REMOTE, IFLA_IPTUN_TTL, IFLA_IPTUN_TOS,
-            IFLA_IPTUN_ENCAP_LIMIT, IFLA_IPTUN_FLOWINFO,
-            IFLA_IPTUN_FLAGS, IFLA_IPTUN_PROTO,
-            IFLA_IPTUN_PMTUDISC, IFLA_IPTUN_6RD_PREFIX,
-            IFLA_IPTUN_6RD_RELAY_PREFIX, IFLA_IPTUN_6RD_PREFIXLEN,
+            IFLA_IPTUN_UNSPEC,
+            IFLA_IPTUN_LINK,
+            IFLA_IPTUN_LOCAL,
+            IFLA_IPTUN_REMOTE,
+            IFLA_IPTUN_TTL,
+            IFLA_IPTUN_TOS,
+            IFLA_IPTUN_ENCAP_LIMIT,
+            IFLA_IPTUN_FLOWINFO,
+            IFLA_IPTUN_FLAGS,
+            IFLA_IPTUN_PROTO,
+            IFLA_IPTUN_PMTUDISC,
+            IFLA_IPTUN_6RD_PREFIX,
+            IFLA_IPTUN_6RD_RELAY_PREFIX,
+            IFLA_IPTUN_6RD_PREFIXLEN,
             IFLA_IPTUN_6RD_RELAY_PREFIXLEN,
-            IFLA_IPTUN_ENCAP_TYPE, IFLA_IPTUN_ENCAP_FLAGS,
-            IFLA_IPTUN_ENCAP_SPORT, IFLA_IPTUN_ENCAP_DPORT,
-            IFLA_IPTUN_COLLECT_METADATA, IFLA_IPTUN_FWMARK,
+            IFLA_IPTUN_ENCAP_TYPE,
+            IFLA_IPTUN_ENCAP_FLAGS,
+            IFLA_IPTUN_ENCAP_SPORT,
+            IFLA_IPTUN_ENCAP_DPORT,
+            IFLA_IPTUN_COLLECT_METADATA,
+            IFLA_IPTUN_FWMARK,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -186,8 +219,10 @@ mod tests {
     #[test]
     fn test_encap_types_distinct() {
         let types = [
-            TUNNEL_ENCAP_NONE, TUNNEL_ENCAP_FOU,
-            TUNNEL_ENCAP_GUE, TUNNEL_ENCAP_MPLS,
+            TUNNEL_ENCAP_NONE,
+            TUNNEL_ENCAP_FOU,
+            TUNNEL_ENCAP_GUE,
+            TUNNEL_ENCAP_MPLS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

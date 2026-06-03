@@ -86,18 +86,31 @@ mod tests {
     #[test]
     fn test_flower_attrs_distinct() {
         let attrs = [
-            TCA_FLOWER_UNSPEC, TCA_FLOWER_CLASSID, TCA_FLOWER_INDEV,
-            TCA_FLOWER_ACT, TCA_FLOWER_KEY_ETH_DST,
-            TCA_FLOWER_KEY_ETH_DST_MASK, TCA_FLOWER_KEY_ETH_SRC,
-            TCA_FLOWER_KEY_ETH_SRC_MASK, TCA_FLOWER_KEY_ETH_TYPE,
-            TCA_FLOWER_KEY_IP_PROTO, TCA_FLOWER_KEY_IPV4_SRC,
-            TCA_FLOWER_KEY_IPV4_SRC_MASK, TCA_FLOWER_KEY_IPV4_DST,
-            TCA_FLOWER_KEY_IPV4_DST_MASK, TCA_FLOWER_KEY_IPV6_SRC,
-            TCA_FLOWER_KEY_IPV6_SRC_MASK, TCA_FLOWER_KEY_IPV6_DST,
-            TCA_FLOWER_KEY_IPV6_DST_MASK, TCA_FLOWER_KEY_TCP_SRC,
-            TCA_FLOWER_KEY_TCP_DST, TCA_FLOWER_KEY_UDP_SRC,
-            TCA_FLOWER_KEY_UDP_DST, TCA_FLOWER_FLAGS,
-            TCA_FLOWER_KEY_VLAN_ID, TCA_FLOWER_KEY_VLAN_PRIO,
+            TCA_FLOWER_UNSPEC,
+            TCA_FLOWER_CLASSID,
+            TCA_FLOWER_INDEV,
+            TCA_FLOWER_ACT,
+            TCA_FLOWER_KEY_ETH_DST,
+            TCA_FLOWER_KEY_ETH_DST_MASK,
+            TCA_FLOWER_KEY_ETH_SRC,
+            TCA_FLOWER_KEY_ETH_SRC_MASK,
+            TCA_FLOWER_KEY_ETH_TYPE,
+            TCA_FLOWER_KEY_IP_PROTO,
+            TCA_FLOWER_KEY_IPV4_SRC,
+            TCA_FLOWER_KEY_IPV4_SRC_MASK,
+            TCA_FLOWER_KEY_IPV4_DST,
+            TCA_FLOWER_KEY_IPV4_DST_MASK,
+            TCA_FLOWER_KEY_IPV6_SRC,
+            TCA_FLOWER_KEY_IPV6_SRC_MASK,
+            TCA_FLOWER_KEY_IPV6_DST,
+            TCA_FLOWER_KEY_IPV6_DST_MASK,
+            TCA_FLOWER_KEY_TCP_SRC,
+            TCA_FLOWER_KEY_TCP_DST,
+            TCA_FLOWER_KEY_UDP_SRC,
+            TCA_FLOWER_KEY_UDP_DST,
+            TCA_FLOWER_FLAGS,
+            TCA_FLOWER_KEY_VLAN_ID,
+            TCA_FLOWER_KEY_VLAN_PRIO,
             TCA_FLOWER_KEY_VLAN_ETH_TYPE,
         ];
         for i in 0..attrs.len() {
@@ -110,8 +123,10 @@ mod tests {
     #[test]
     fn test_cls_flags_no_overlap() {
         let flags = [
-            TCA_CLS_FLAGS_SKIP_SW, TCA_CLS_FLAGS_SKIP_HW,
-            TCA_CLS_FLAGS_IN_HW, TCA_CLS_FLAGS_NOT_IN_HW,
+            TCA_CLS_FLAGS_SKIP_SW,
+            TCA_CLS_FLAGS_SKIP_HW,
+            TCA_CLS_FLAGS_IN_HW,
+            TCA_CLS_FLAGS_NOT_IN_HW,
             TCA_CLS_FLAGS_VERBOSE,
         ];
         for i in 0..flags.len() {
@@ -124,8 +139,10 @@ mod tests {
     #[test]
     fn test_cls_flags_power_of_two() {
         let flags = [
-            TCA_CLS_FLAGS_SKIP_SW, TCA_CLS_FLAGS_SKIP_HW,
-            TCA_CLS_FLAGS_IN_HW, TCA_CLS_FLAGS_NOT_IN_HW,
+            TCA_CLS_FLAGS_SKIP_SW,
+            TCA_CLS_FLAGS_SKIP_HW,
+            TCA_CLS_FLAGS_IN_HW,
+            TCA_CLS_FLAGS_NOT_IN_HW,
             TCA_CLS_FLAGS_VERBOSE,
         ];
         for flag in &flags {

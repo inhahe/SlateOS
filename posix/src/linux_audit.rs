@@ -167,8 +167,14 @@ mod tests {
     #[test]
     fn test_field_ids_distinct() {
         let fields = [
-            AUDIT_PID, AUDIT_UID, AUDIT_EUID, AUDIT_SUID,
-            AUDIT_FSUID, AUDIT_GID, AUDIT_EGID, AUDIT_LOGINUID,
+            AUDIT_PID,
+            AUDIT_UID,
+            AUDIT_EUID,
+            AUDIT_SUID,
+            AUDIT_FSUID,
+            AUDIT_GID,
+            AUDIT_EGID,
+            AUDIT_LOGINUID,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {
@@ -180,8 +186,12 @@ mod tests {
     #[test]
     fn test_filter_types_distinct() {
         let filters = [
-            AUDIT_FILTER_USER, AUDIT_FILTER_TASK, AUDIT_FILTER_ENTRY,
-            AUDIT_FILTER_EXIT, AUDIT_FILTER_EXCLUDE, AUDIT_FILTER_FS,
+            AUDIT_FILTER_USER,
+            AUDIT_FILTER_TASK,
+            AUDIT_FILTER_ENTRY,
+            AUDIT_FILTER_EXIT,
+            AUDIT_FILTER_EXCLUDE,
+            AUDIT_FILTER_FS,
         ];
         for i in 0..filters.len() {
             for j in (i + 1)..filters.len() {

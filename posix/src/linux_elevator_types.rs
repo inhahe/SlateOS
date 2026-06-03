@@ -79,8 +79,10 @@ mod tests {
     #[test]
     fn test_scheduler_types_distinct() {
         let types = [
-            ELEVATOR_NONE, ELEVATOR_MQ_DEADLINE,
-            ELEVATOR_BFQ, ELEVATOR_KYBER,
+            ELEVATOR_NONE,
+            ELEVATOR_MQ_DEADLINE,
+            ELEVATOR_BFQ,
+            ELEVATOR_KYBER,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -92,8 +94,10 @@ mod tests {
     #[test]
     fn test_ioprio_classes_distinct() {
         let classes = [
-            IOPRIO_CLASS_NONE, IOPRIO_CLASS_RT,
-            IOPRIO_CLASS_BE, IOPRIO_CLASS_IDLE,
+            IOPRIO_CLASS_NONE,
+            IOPRIO_CLASS_RT,
+            IOPRIO_CLASS_BE,
+            IOPRIO_CLASS_IDLE,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {

@@ -82,13 +82,26 @@ mod tests {
     #[test]
     fn test_socketcall_numbers_distinct() {
         let nums = [
-            SYS_SOCKET, SYS_BIND, SYS_CONNECT, SYS_LISTEN,
-            SYS_ACCEPT, SYS_GETSOCKNAME, SYS_GETPEERNAME,
-            SYS_SOCKETPAIR, SYS_SEND, SYS_RECV,
-            SYS_SENDTO, SYS_RECVFROM, SYS_SHUTDOWN,
-            SYS_SETSOCKOPT, SYS_GETSOCKOPT,
-            SYS_SENDMSG, SYS_RECVMSG, SYS_ACCEPT4,
-            SYS_RECVMMSG, SYS_SENDMMSG,
+            SYS_SOCKET,
+            SYS_BIND,
+            SYS_CONNECT,
+            SYS_LISTEN,
+            SYS_ACCEPT,
+            SYS_GETSOCKNAME,
+            SYS_GETPEERNAME,
+            SYS_SOCKETPAIR,
+            SYS_SEND,
+            SYS_RECV,
+            SYS_SENDTO,
+            SYS_RECVFROM,
+            SYS_SHUTDOWN,
+            SYS_SETSOCKOPT,
+            SYS_GETSOCKOPT,
+            SYS_SENDMSG,
+            SYS_RECVMSG,
+            SYS_ACCEPT4,
+            SYS_RECVMMSG,
+            SYS_SENDMMSG,
         ];
         for i in 0..nums.len() {
             for j in (i + 1)..nums.len() {
@@ -101,7 +114,13 @@ mod tests {
     fn test_socket_states() {
         assert_eq!(SS_FREE, 0);
         assert_eq!(SS_CONNECTED, 3);
-        let states = [SS_FREE, SS_UNCONNECTED, SS_CONNECTING, SS_CONNECTED, SS_DISCONNECTING];
+        let states = [
+            SS_FREE,
+            SS_UNCONNECTED,
+            SS_CONNECTING,
+            SS_CONNECTED,
+            SS_DISCONNECTING,
+        ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
                 assert_ne!(states[i], states[j]);

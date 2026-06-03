@@ -68,8 +68,14 @@ mod tests {
     #[test]
     fn test_ns_flags_no_overlap() {
         let flags = [
-            CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWUSER,
-            CLONE_NEWPID, CLONE_NEWNET, CLONE_NEWCGROUP, CLONE_NEWTIME,
+            CLONE_NEWNS,
+            CLONE_NEWUTS,
+            CLONE_NEWIPC,
+            CLONE_NEWUSER,
+            CLONE_NEWPID,
+            CLONE_NEWNET,
+            CLONE_NEWCGROUP,
+            CLONE_NEWTIME,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

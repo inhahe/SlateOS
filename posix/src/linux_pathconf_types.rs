@@ -62,12 +62,26 @@ mod tests {
     #[test]
     fn test_names_distinct() {
         let names = [
-            PC_LINK_MAX, PC_MAX_CANON, PC_MAX_INPUT, PC_NAME_MAX,
-            PC_PATH_MAX, PC_PIPE_BUF, PC_CHOWN_RESTRICTED, PC_NO_TRUNC,
-            PC_VDISABLE, PC_SYNC_IO, PC_ASYNC_IO, PC_PRIO_IO,
-            PC_SOCK_MAXBUF, PC_FILESIZEBITS, PC_REC_INCR_XFER_SIZE,
-            PC_REC_MAX_XFER_SIZE, PC_REC_MIN_XFER_SIZE,
-            PC_REC_XFER_ALIGN, PC_ALLOC_SIZE_MIN, PC_SYMLINK_MAX,
+            PC_LINK_MAX,
+            PC_MAX_CANON,
+            PC_MAX_INPUT,
+            PC_NAME_MAX,
+            PC_PATH_MAX,
+            PC_PIPE_BUF,
+            PC_CHOWN_RESTRICTED,
+            PC_NO_TRUNC,
+            PC_VDISABLE,
+            PC_SYNC_IO,
+            PC_ASYNC_IO,
+            PC_PRIO_IO,
+            PC_SOCK_MAXBUF,
+            PC_FILESIZEBITS,
+            PC_REC_INCR_XFER_SIZE,
+            PC_REC_MAX_XFER_SIZE,
+            PC_REC_MIN_XFER_SIZE,
+            PC_REC_XFER_ALIGN,
+            PC_ALLOC_SIZE_MIN,
+            PC_SYMLINK_MAX,
             PC_2_SYMLINKS,
         ];
         for i in 0..names.len() {

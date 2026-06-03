@@ -106,9 +106,13 @@ mod tests {
     #[test]
     fn test_meminfo_fields_distinct() {
         let fields = [
-            MEMINFO_TOTAL, MEMINFO_FREE, MEMINFO_AVAILABLE,
-            MEMINFO_BUFFERS, MEMINFO_CACHED,
-            MEMINFO_SWAP_TOTAL, MEMINFO_SWAP_FREE,
+            MEMINFO_TOTAL,
+            MEMINFO_FREE,
+            MEMINFO_AVAILABLE,
+            MEMINFO_BUFFERS,
+            MEMINFO_CACHED,
+            MEMINFO_SWAP_TOTAL,
+            MEMINFO_SWAP_FREE,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {

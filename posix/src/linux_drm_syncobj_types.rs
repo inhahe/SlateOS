@@ -87,8 +87,10 @@ mod tests {
     #[test]
     fn test_timeline_ops_distinct() {
         let ops = [
-            DRM_SYNCOBJ_TIMELINE_QUERY, DRM_SYNCOBJ_TIMELINE_SIGNAL,
-            DRM_SYNCOBJ_TIMELINE_WAIT, DRM_SYNCOBJ_TIMELINE_TRANSFER,
+            DRM_SYNCOBJ_TIMELINE_QUERY,
+            DRM_SYNCOBJ_TIMELINE_SIGNAL,
+            DRM_SYNCOBJ_TIMELINE_WAIT,
+            DRM_SYNCOBJ_TIMELINE_TRANSFER,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

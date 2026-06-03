@@ -7,12 +7,12 @@
 // Re-exports from wait module
 // ---------------------------------------------------------------------------
 
-pub use crate::wait::WNOHANG;
-pub use crate::wait::WUNTRACED;
 pub use crate::wait::WCONTINUED;
 pub use crate::wait::WEXITED;
-pub use crate::wait::WSTOPPED;
+pub use crate::wait::WNOHANG;
 pub use crate::wait::WNOWAIT;
+pub use crate::wait::WSTOPPED;
+pub use crate::wait::WUNTRACED;
 
 // ---------------------------------------------------------------------------
 // Linux-specific wait flags
@@ -30,8 +30,8 @@ pub const __WNOTHREAD: i32 = 0x2000_0000;
 // ---------------------------------------------------------------------------
 
 pub use crate::process::P_ALL;
-pub use crate::process::P_PID;
 pub use crate::process::P_PGID;
+pub use crate::process::P_PID;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -57,8 +57,13 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            WNOHANG, WUNTRACED, WCONTINUED, WEXITED,
-            WNOWAIT, __WALL, __WNOTHREAD,
+            WNOHANG,
+            WUNTRACED,
+            WCONTINUED,
+            WEXITED,
+            WNOWAIT,
+            __WALL,
+            __WNOTHREAD,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

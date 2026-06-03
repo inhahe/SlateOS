@@ -54,10 +54,15 @@ mod tests {
     #[test]
     fn test_gate_attrs_distinct() {
         let attrs = [
-            TCA_GATE_UNSPEC, TCA_GATE_TM, TCA_GATE_PARMS,
-            TCA_GATE_PRIORITY, TCA_GATE_ENTRY_LIST,
-            TCA_GATE_BASE_TIME, TCA_GATE_CYCLE_TIME,
-            TCA_GATE_CYCLE_TIME_EXT, TCA_GATE_FLAGS,
+            TCA_GATE_UNSPEC,
+            TCA_GATE_TM,
+            TCA_GATE_PARMS,
+            TCA_GATE_PRIORITY,
+            TCA_GATE_ENTRY_LIST,
+            TCA_GATE_BASE_TIME,
+            TCA_GATE_CYCLE_TIME,
+            TCA_GATE_CYCLE_TIME_EXT,
+            TCA_GATE_FLAGS,
             TCA_GATE_CLOCKID,
         ];
         for i in 0..attrs.len() {
@@ -70,8 +75,10 @@ mod tests {
     #[test]
     fn test_entry_attrs_distinct() {
         let attrs = [
-            TCA_GATE_ENTRY_UNSPEC, TCA_GATE_ENTRY,
-            TCA_GATE_ENTRY_GATE, TCA_GATE_ENTRY_INTERVAL,
+            TCA_GATE_ENTRY_UNSPEC,
+            TCA_GATE_ENTRY,
+            TCA_GATE_ENTRY_GATE,
+            TCA_GATE_ENTRY_INTERVAL,
             TCA_GATE_ENTRY_MAX_OCTETS,
         ];
         for i in 0..attrs.len() {

@@ -83,8 +83,10 @@ mod tests {
     #[test]
     fn test_driver_types_distinct() {
         let types = [
-            TTY_DRIVER_TYPE_SERIAL, TTY_DRIVER_TYPE_CONSOLE,
-            TTY_DRIVER_TYPE_PTY, TTY_DRIVER_TYPE_SYSTEM,
+            TTY_DRIVER_TYPE_SERIAL,
+            TTY_DRIVER_TYPE_CONSOLE,
+            TTY_DRIVER_TYPE_PTY,
+            TTY_DRIVER_TYPE_SYSTEM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -96,9 +98,12 @@ mod tests {
     #[test]
     fn test_driver_flags_no_overlap() {
         let flags = [
-            TTY_DRIVER_INSTALLED, TTY_DRIVER_RESET_TERMIOS,
-            TTY_DRIVER_DEVPTS_MEM, TTY_DRIVER_HARDWARE_BREAK,
-            TTY_DRIVER_DYNAMIC_DEV, TTY_DRIVER_DYNAMIC_ALLOC,
+            TTY_DRIVER_INSTALLED,
+            TTY_DRIVER_RESET_TERMIOS,
+            TTY_DRIVER_DEVPTS_MEM,
+            TTY_DRIVER_HARDWARE_BREAK,
+            TTY_DRIVER_DYNAMIC_DEV,
+            TTY_DRIVER_DYNAMIC_ALLOC,
             TTY_DRIVER_UNNUMBERED_NODE,
         ];
         for i in 0..flags.len() {
@@ -111,8 +116,11 @@ mod tests {
     #[test]
     fn test_port_flags_no_overlap() {
         let flags = [
-            TTY_PORT_ACTIVE, TTY_PORT_INITIALIZED,
-            TTY_PORT_CLOSING, TTY_PORT_CTS_FLOW, TTY_PORT_CONSOLE,
+            TTY_PORT_ACTIVE,
+            TTY_PORT_INITIALIZED,
+            TTY_PORT_CLOSING,
+            TTY_PORT_CTS_FLOW,
+            TTY_PORT_CONSOLE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

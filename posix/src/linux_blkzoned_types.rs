@@ -99,10 +99,14 @@ mod tests {
     #[test]
     fn test_zone_conditions_distinct() {
         let conds = [
-            BLK_ZONE_COND_NOT_WP, BLK_ZONE_COND_EMPTY,
-            BLK_ZONE_COND_IMP_OPEN, BLK_ZONE_COND_EXP_OPEN,
-            BLK_ZONE_COND_CLOSED, BLK_ZONE_COND_FULL,
-            BLK_ZONE_COND_READONLY, BLK_ZONE_COND_OFFLINE,
+            BLK_ZONE_COND_NOT_WP,
+            BLK_ZONE_COND_EMPTY,
+            BLK_ZONE_COND_IMP_OPEN,
+            BLK_ZONE_COND_EXP_OPEN,
+            BLK_ZONE_COND_CLOSED,
+            BLK_ZONE_COND_FULL,
+            BLK_ZONE_COND_READONLY,
+            BLK_ZONE_COND_OFFLINE,
         ];
         for i in 0..conds.len() {
             for j in (i + 1)..conds.len() {
@@ -114,8 +118,11 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            BLKREPORTZONE, BLKRESETZONE, BLKOPENZONE,
-            BLKCLOSEZONE, BLKFINISHZONE,
+            BLKREPORTZONE,
+            BLKRESETZONE,
+            BLKOPENZONE,
+            BLKCLOSEZONE,
+            BLKFINISHZONE,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -127,9 +134,12 @@ mod tests {
     #[test]
     fn test_report_filters_distinct() {
         let filters = [
-            BLK_ZONE_REP_ALL, BLK_ZONE_REP_EMPTY,
-            BLK_ZONE_REP_OPEN, BLK_ZONE_REP_CLOSED,
-            BLK_ZONE_REP_FULL, BLK_ZONE_REP_READONLY,
+            BLK_ZONE_REP_ALL,
+            BLK_ZONE_REP_EMPTY,
+            BLK_ZONE_REP_OPEN,
+            BLK_ZONE_REP_CLOSED,
+            BLK_ZONE_REP_FULL,
+            BLK_ZONE_REP_READONLY,
             BLK_ZONE_REP_OFFLINE,
         ];
         for i in 0..filters.len() {

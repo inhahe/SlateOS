@@ -82,9 +82,18 @@ mod tests {
     #[test]
     fn test_event_bits_no_overlap() {
         let events = [
-            FS_ACCESS, FS_MODIFY, FS_ATTRIB, FS_CLOSE_WRITE,
-            FS_CLOSE_NOWRITE, FS_OPEN, FS_MOVED_FROM, FS_MOVED_TO,
-            FS_CREATE, FS_DELETE, FS_DELETE_SELF, FS_MOVE_SELF,
+            FS_ACCESS,
+            FS_MODIFY,
+            FS_ATTRIB,
+            FS_CLOSE_WRITE,
+            FS_CLOSE_NOWRITE,
+            FS_OPEN,
+            FS_MOVED_FROM,
+            FS_MOVED_TO,
+            FS_CREATE,
+            FS_DELETE,
+            FS_DELETE_SELF,
+            FS_MOVE_SELF,
         ];
         for i in 0..events.len() {
             assert!(events[i].is_power_of_two());
@@ -97,8 +106,10 @@ mod tests {
     #[test]
     fn test_group_types_distinct() {
         let groups = [
-            FSNOTIFY_GROUP_INOTIFY, FSNOTIFY_GROUP_FANOTIFY,
-            FSNOTIFY_GROUP_DNOTIFY, FSNOTIFY_GROUP_AUDIT,
+            FSNOTIFY_GROUP_INOTIFY,
+            FSNOTIFY_GROUP_FANOTIFY,
+            FSNOTIFY_GROUP_DNOTIFY,
+            FSNOTIFY_GROUP_AUDIT,
         ];
         for i in 0..groups.len() {
             for j in (i + 1)..groups.len() {
@@ -109,9 +120,7 @@ mod tests {
 
     #[test]
     fn test_connector_types_distinct() {
-        let types = [
-            FSNOTIFY_OBJ_INODE, FSNOTIFY_OBJ_MOUNT, FSNOTIFY_OBJ_SB,
-        ];
+        let types = [FSNOTIFY_OBJ_INODE, FSNOTIFY_OBJ_MOUNT, FSNOTIFY_OBJ_SB];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);

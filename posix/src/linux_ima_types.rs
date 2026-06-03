@@ -111,8 +111,10 @@ mod tests {
     #[test]
     fn test_policy_actions_no_overlap() {
         let actions = [
-            IMA_ACTION_MEASURE, IMA_ACTION_APPRAISE,
-            IMA_ACTION_AUDIT, IMA_ACTION_HASH,
+            IMA_ACTION_MEASURE,
+            IMA_ACTION_APPRAISE,
+            IMA_ACTION_AUDIT,
+            IMA_ACTION_HASH,
         ];
         for i in 0..actions.len() {
             assert!(actions[i].is_power_of_two());
@@ -125,10 +127,14 @@ mod tests {
     #[test]
     fn test_hooks_distinct() {
         let hooks = [
-            IMA_HOOK_FILE_CHECK, IMA_HOOK_MMAP_CHECK,
-            IMA_HOOK_BPRM_CHECK, IMA_HOOK_MODULE_CHECK,
-            IMA_HOOK_FIRMWARE_CHECK, IMA_HOOK_KEXEC_CHECK,
-            IMA_HOOK_POLICY_CHECK, IMA_HOOK_KEXEC_INITRAMFS_CHECK,
+            IMA_HOOK_FILE_CHECK,
+            IMA_HOOK_MMAP_CHECK,
+            IMA_HOOK_BPRM_CHECK,
+            IMA_HOOK_MODULE_CHECK,
+            IMA_HOOK_FIRMWARE_CHECK,
+            IMA_HOOK_KEXEC_CHECK,
+            IMA_HOOK_POLICY_CHECK,
+            IMA_HOOK_KEXEC_INITRAMFS_CHECK,
             IMA_HOOK_CRITICAL_DATA,
         ];
         for i in 0..hooks.len() {
@@ -141,8 +147,10 @@ mod tests {
     #[test]
     fn test_appraisal_status_distinct() {
         let statuses = [
-            IMA_APPRAISE_NOT_APPRAISED, IMA_APPRAISE_OK,
-            IMA_APPRAISE_BAD, IMA_APPRAISE_SKIP,
+            IMA_APPRAISE_NOT_APPRAISED,
+            IMA_APPRAISE_OK,
+            IMA_APPRAISE_BAD,
+            IMA_APPRAISE_SKIP,
             IMA_APPRAISE_NEEDS_REAPPRAISE,
         ];
         for i in 0..statuses.len() {
@@ -155,8 +163,11 @@ mod tests {
     #[test]
     fn test_hash_algos_distinct() {
         let algos = [
-            IMA_HASH_SHA1, IMA_HASH_SHA256, IMA_HASH_SHA384,
-            IMA_HASH_SHA512, IMA_HASH_SM3,
+            IMA_HASH_SHA1,
+            IMA_HASH_SHA256,
+            IMA_HASH_SHA384,
+            IMA_HASH_SHA512,
+            IMA_HASH_SM3,
         ];
         for i in 0..algos.len() {
             for j in (i + 1)..algos.len() {
@@ -168,8 +179,10 @@ mod tests {
     #[test]
     fn test_xattr_types_distinct() {
         let types = [
-            IMA_XATTR_NONE, IMA_XATTR_DIGEST,
-            IMA_XATTR_SIGNATURE, IMA_XATTR_DIGEST_NG,
+            IMA_XATTR_NONE,
+            IMA_XATTR_DIGEST,
+            IMA_XATTR_SIGNATURE,
+            IMA_XATTR_DIGEST_NG,
             IMA_XATTR_SIGNATURE_V2,
         ];
         for i in 0..types.len() {

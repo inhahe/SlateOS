@@ -117,7 +117,12 @@ mod tests {
 
     #[test]
     fn test_request_types_distinct() {
-        let types = [USB_TYPE_STANDARD, USB_TYPE_CLASS, USB_TYPE_VENDOR, USB_TYPE_RESERVED];
+        let types = [
+            USB_TYPE_STANDARD,
+            USB_TYPE_CLASS,
+            USB_TYPE_VENDOR,
+            USB_TYPE_RESERVED,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -128,8 +133,10 @@ mod tests {
     #[test]
     fn test_recipients_distinct() {
         let recips = [
-            USB_RECIP_DEVICE, USB_RECIP_INTERFACE,
-            USB_RECIP_ENDPOINT, USB_RECIP_OTHER,
+            USB_RECIP_DEVICE,
+            USB_RECIP_INTERFACE,
+            USB_RECIP_ENDPOINT,
+            USB_RECIP_OTHER,
         ];
         for i in 0..recips.len() {
             for j in (i + 1)..recips.len() {
@@ -141,11 +148,16 @@ mod tests {
     #[test]
     fn test_requests_distinct() {
         let reqs = [
-            USB_REQ_GET_STATUS, USB_REQ_CLEAR_FEATURE,
-            USB_REQ_SET_FEATURE, USB_REQ_SET_ADDRESS,
-            USB_REQ_GET_DESCRIPTOR, USB_REQ_SET_DESCRIPTOR,
-            USB_REQ_GET_CONFIGURATION, USB_REQ_SET_CONFIGURATION,
-            USB_REQ_GET_INTERFACE, USB_REQ_SET_INTERFACE,
+            USB_REQ_GET_STATUS,
+            USB_REQ_CLEAR_FEATURE,
+            USB_REQ_SET_FEATURE,
+            USB_REQ_SET_ADDRESS,
+            USB_REQ_GET_DESCRIPTOR,
+            USB_REQ_SET_DESCRIPTOR,
+            USB_REQ_GET_CONFIGURATION,
+            USB_REQ_SET_CONFIGURATION,
+            USB_REQ_GET_INTERFACE,
+            USB_REQ_SET_INTERFACE,
             USB_REQ_SYNCH_FRAME,
         ];
         for i in 0..reqs.len() {
@@ -158,9 +170,14 @@ mod tests {
     #[test]
     fn test_descriptors_distinct() {
         let descs = [
-            USB_DT_DEVICE, USB_DT_CONFIG, USB_DT_STRING,
-            USB_DT_INTERFACE, USB_DT_ENDPOINT, USB_DT_BOS,
-            USB_DT_DEVICE_CAPABILITY, USB_DT_SS_ENDPOINT_COMP,
+            USB_DT_DEVICE,
+            USB_DT_CONFIG,
+            USB_DT_STRING,
+            USB_DT_INTERFACE,
+            USB_DT_ENDPOINT,
+            USB_DT_BOS,
+            USB_DT_DEVICE_CAPABILITY,
+            USB_DT_SS_ENDPOINT_COMP,
             USB_DT_SSP_ISOC_ENDPOINT_COMP,
         ];
         for i in 0..descs.len() {
@@ -173,8 +190,10 @@ mod tests {
     #[test]
     fn test_xfer_types_distinct() {
         let types = [
-            USB_ENDPOINT_XFER_CONTROL, USB_ENDPOINT_XFER_ISOC,
-            USB_ENDPOINT_XFER_BULK, USB_ENDPOINT_XFER_INT,
+            USB_ENDPOINT_XFER_CONTROL,
+            USB_ENDPOINT_XFER_ISOC,
+            USB_ENDPOINT_XFER_BULK,
+            USB_ENDPOINT_XFER_INT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

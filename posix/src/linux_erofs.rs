@@ -117,8 +117,10 @@ mod tests {
     #[test]
     fn test_data_layouts_distinct() {
         let layouts = [
-            EROFS_INODE_FLAT_PLAIN, EROFS_INODE_FLAT_COMPRESSION_LEGACY,
-            EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_COMPRESSION,
+            EROFS_INODE_FLAT_PLAIN,
+            EROFS_INODE_FLAT_COMPRESSION_LEGACY,
+            EROFS_INODE_FLAT_INLINE,
+            EROFS_INODE_FLAT_COMPRESSION,
             EROFS_INODE_CHUNK_BASED,
         ];
         for i in 0..layouts.len() {
@@ -130,7 +132,11 @@ mod tests {
 
     #[test]
     fn test_compression_algos_distinct() {
-        let algos = [EROFS_COMPRESS_LZ4, EROFS_COMPRESS_LZMA, EROFS_COMPRESS_DEFLATE];
+        let algos = [
+            EROFS_COMPRESS_LZ4,
+            EROFS_COMPRESS_LZMA,
+            EROFS_COMPRESS_DEFLATE,
+        ];
         for i in 0..algos.len() {
             for j in (i + 1)..algos.len() {
                 assert_ne!(algos[i], algos[j]);
@@ -157,9 +163,14 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            EROFS_FT_UNKNOWN, EROFS_FT_REG_FILE, EROFS_FT_DIR,
-            EROFS_FT_CHRDEV, EROFS_FT_BLKDEV, EROFS_FT_FIFO,
-            EROFS_FT_SOCK, EROFS_FT_SYMLINK,
+            EROFS_FT_UNKNOWN,
+            EROFS_FT_REG_FILE,
+            EROFS_FT_DIR,
+            EROFS_FT_CHRDEV,
+            EROFS_FT_BLKDEV,
+            EROFS_FT_FIFO,
+            EROFS_FT_SOCK,
+            EROFS_FT_SYMLINK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

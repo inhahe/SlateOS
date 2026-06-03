@@ -76,12 +76,18 @@ mod tests {
     #[test]
     fn test_reasons_distinct() {
         let reasons = [
-            LOCKDOWN_REASON_MODULE, LOCKDOWN_REASON_DEV_MEM,
-            LOCKDOWN_REASON_KEXEC, LOCKDOWN_REASON_HIBERNATION,
-            LOCKDOWN_REASON_PCI_ACCESS, LOCKDOWN_REASON_ACPI_TABLES,
-            LOCKDOWN_REASON_MSR, LOCKDOWN_REASON_BPF_WRITE,
-            LOCKDOWN_REASON_PERF, LOCKDOWN_REASON_TRACEFS,
-            LOCKDOWN_REASON_DEBUGFS, LOCKDOWN_REASON_IOPORT,
+            LOCKDOWN_REASON_MODULE,
+            LOCKDOWN_REASON_DEV_MEM,
+            LOCKDOWN_REASON_KEXEC,
+            LOCKDOWN_REASON_HIBERNATION,
+            LOCKDOWN_REASON_PCI_ACCESS,
+            LOCKDOWN_REASON_ACPI_TABLES,
+            LOCKDOWN_REASON_MSR,
+            LOCKDOWN_REASON_BPF_WRITE,
+            LOCKDOWN_REASON_PERF,
+            LOCKDOWN_REASON_TRACEFS,
+            LOCKDOWN_REASON_DEBUGFS,
+            LOCKDOWN_REASON_IOPORT,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {
@@ -93,7 +99,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            LOCKDOWN_FLAG_CMDLINE, LOCKDOWN_FLAG_SECUREBOOT,
+            LOCKDOWN_FLAG_CMDLINE,
+            LOCKDOWN_FLAG_SECUREBOOT,
             LOCKDOWN_FLAG_LSM,
         ];
         for i in 0..flags.len() {

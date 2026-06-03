@@ -108,10 +108,14 @@ mod tests {
     #[test]
     fn test_func_bits_power_of_two() {
         let funcs = [
-            I2C_FUNC_I2C, I2C_FUNC_10BIT_ADDR,
-            I2C_FUNC_PROTOCOL_MANGLING, I2C_FUNC_SMBUS_PEC,
-            I2C_FUNC_NOSTART, I2C_FUNC_SLAVE,
-            I2C_FUNC_SMBUS_QUICK, I2C_FUNC_SMBUS_READ_BYTE,
+            I2C_FUNC_I2C,
+            I2C_FUNC_10BIT_ADDR,
+            I2C_FUNC_PROTOCOL_MANGLING,
+            I2C_FUNC_SMBUS_PEC,
+            I2C_FUNC_NOSTART,
+            I2C_FUNC_SLAVE,
+            I2C_FUNC_SMBUS_QUICK,
+            I2C_FUNC_SMBUS_READ_BYTE,
             I2C_FUNC_SMBUS_WRITE_BYTE,
         ];
         for f in &funcs {
@@ -129,9 +133,15 @@ mod tests {
     #[test]
     fn test_transfer_flags_distinct() {
         let flags: [u16; 9] = [
-            I2C_M_RD, I2C_M_TEN, I2C_M_DMA_SAFE,
-            I2C_M_RECV_LEN, I2C_M_NO_RD_ACK, I2C_M_IGNORE_NAK,
-            I2C_M_REV_DIR_ADDR, I2C_M_NOSTART, I2C_M_STOP,
+            I2C_M_RD,
+            I2C_M_TEN,
+            I2C_M_DMA_SAFE,
+            I2C_M_RECV_LEN,
+            I2C_M_NO_RD_ACK,
+            I2C_M_IGNORE_NAK,
+            I2C_M_REV_DIR_ADDR,
+            I2C_M_NOSTART,
+            I2C_M_STOP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -65,9 +65,15 @@ mod tests {
     #[test]
     fn test_table_signatures_distinct() {
         let sigs = [
-            ACPI_SIG_MADT, ACPI_SIG_FADT, ACPI_SIG_HPET,
-            ACPI_SIG_MCFG, ACPI_SIG_SSDT, ACPI_SIG_DSDT,
-            ACPI_SIG_BGRT, ACPI_SIG_SRAT, ACPI_SIG_SLIT,
+            ACPI_SIG_MADT,
+            ACPI_SIG_FADT,
+            ACPI_SIG_HPET,
+            ACPI_SIG_MCFG,
+            ACPI_SIG_SSDT,
+            ACPI_SIG_DSDT,
+            ACPI_SIG_BGRT,
+            ACPI_SIG_SRAT,
+            ACPI_SIG_SLIT,
             ACPI_SIG_DMAR,
         ];
         for i in 0..sigs.len() {
@@ -92,8 +98,7 @@ mod tests {
         // "RSD PTR " in ASCII bytes
         let bytes = b"RSD PTR ";
         let val = u64::from_le_bytes([
-            bytes[0], bytes[1], bytes[2], bytes[3],
-            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
         ]);
         assert_eq!(val, ACPI_RSDP_SIGNATURE);
     }

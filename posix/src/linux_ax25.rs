@@ -116,9 +116,17 @@ mod tests {
     #[test]
     fn test_frame_types_distinct() {
         let frames = [
-            AX25_I_FRAME, AX25_RR, AX25_RNR, AX25_REJ,
-            AX25_SABM, AX25_SABME, AX25_DISC, AX25_DM,
-            AX25_UA, AX25_FRMR, AX25_UI,
+            AX25_I_FRAME,
+            AX25_RR,
+            AX25_RNR,
+            AX25_REJ,
+            AX25_SABM,
+            AX25_SABME,
+            AX25_DISC,
+            AX25_DM,
+            AX25_UA,
+            AX25_FRMR,
+            AX25_UI,
         ];
         for i in 0..frames.len() {
             for j in (i + 1)..frames.len() {
@@ -130,9 +138,15 @@ mod tests {
     #[test]
     fn test_pid_values_distinct() {
         let pids = [
-            AX25_PID_X25, AX25_PID_CTCP, AX25_PID_UTCP,
-            AX25_PID_SEG, AX25_PID_TEXNET, AX25_PID_LQP,
-            AX25_PID_ATALK, AX25_PID_IP, AX25_PID_ARP,
+            AX25_PID_X25,
+            AX25_PID_CTCP,
+            AX25_PID_UTCP,
+            AX25_PID_SEG,
+            AX25_PID_TEXNET,
+            AX25_PID_LQP,
+            AX25_PID_ATALK,
+            AX25_PID_IP,
+            AX25_PID_ARP,
             AX25_PID_TEXT,
         ];
         for i in 0..pids.len() {
@@ -150,8 +164,14 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            AX25_WINDOW, AX25_T1, AX25_T2, AX25_T3,
-            AX25_N2, AX25_BACKOFF, AX25_EXTSEQ, AX25_IDLE,
+            AX25_WINDOW,
+            AX25_T1,
+            AX25_T2,
+            AX25_T3,
+            AX25_N2,
+            AX25_BACKOFF,
+            AX25_EXTSEQ,
+            AX25_IDLE,
             AX25_PACLEN,
         ];
         for i in 0..opts.len() {

@@ -96,8 +96,12 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            RNDGETENTCNT, RNDADDTOENTCNT, RNDGETPOOL,
-            RNDADDENTROPY, RNDZAPENTCNT, RNDCLEARPOOL,
+            RNDGETENTCNT,
+            RNDADDTOENTCNT,
+            RNDGETPOOL,
+            RNDADDENTROPY,
+            RNDZAPENTCNT,
+            RNDCLEARPOOL,
             RNDRESEEDCRNG,
         ];
         for i in 0..cmds.len() {
@@ -110,8 +114,10 @@ mod tests {
     #[test]
     fn test_source_types_distinct() {
         let sources = [
-            RANDOM_SOURCE_HW, RANDOM_SOURCE_IRQ,
-            RANDOM_SOURCE_DISK, RANDOM_SOURCE_INPUT,
+            RANDOM_SOURCE_HW,
+            RANDOM_SOURCE_IRQ,
+            RANDOM_SOURCE_DISK,
+            RANDOM_SOURCE_INPUT,
             RANDOM_SOURCE_JITTER,
         ];
         for i in 0..sources.len() {

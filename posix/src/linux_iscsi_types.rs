@@ -91,8 +91,10 @@ mod tests {
     #[test]
     fn test_session_states_distinct() {
         let states = [
-            ISCSI_STATE_LOGGED_IN, ISCSI_STATE_FAILED,
-            ISCSI_STATE_RECOVERY, ISCSI_STATE_TERMINATE,
+            ISCSI_STATE_LOGGED_IN,
+            ISCSI_STATE_FAILED,
+            ISCSI_STATE_RECOVERY,
+            ISCSI_STATE_TERMINATE,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -104,8 +106,10 @@ mod tests {
     #[test]
     fn test_conn_states_distinct() {
         let states = [
-            ISCSI_CONN_UP, ISCSI_CONN_DOWN,
-            ISCSI_CONN_FAILED, ISCSI_CONN_BOUND,
+            ISCSI_CONN_UP,
+            ISCSI_CONN_DOWN,
+            ISCSI_CONN_FAILED,
+            ISCSI_CONN_BOUND,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -117,9 +121,13 @@ mod tests {
     #[test]
     fn test_initiator_opcodes_distinct() {
         let ops = [
-            ISCSI_OP_NOP_OUT, ISCSI_OP_SCSI_CMD, ISCSI_OP_TASK_MGT_REQ,
-            ISCSI_OP_LOGIN_REQ, ISCSI_OP_TEXT_REQ,
-            ISCSI_OP_DATA_OUT, ISCSI_OP_LOGOUT_REQ,
+            ISCSI_OP_NOP_OUT,
+            ISCSI_OP_SCSI_CMD,
+            ISCSI_OP_TASK_MGT_REQ,
+            ISCSI_OP_LOGIN_REQ,
+            ISCSI_OP_TEXT_REQ,
+            ISCSI_OP_DATA_OUT,
+            ISCSI_OP_LOGOUT_REQ,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -131,10 +139,15 @@ mod tests {
     #[test]
     fn test_target_opcodes_distinct() {
         let ops = [
-            ISCSI_OP_NOP_IN, ISCSI_OP_SCSI_RSP, ISCSI_OP_TASK_MGT_RSP,
-            ISCSI_OP_LOGIN_RSP, ISCSI_OP_TEXT_RSP,
-            ISCSI_OP_DATA_IN, ISCSI_OP_LOGOUT_RSP,
-            ISCSI_OP_R2T, ISCSI_OP_REJECT,
+            ISCSI_OP_NOP_IN,
+            ISCSI_OP_SCSI_RSP,
+            ISCSI_OP_TASK_MGT_RSP,
+            ISCSI_OP_LOGIN_RSP,
+            ISCSI_OP_TEXT_RSP,
+            ISCSI_OP_DATA_IN,
+            ISCSI_OP_LOGOUT_RSP,
+            ISCSI_OP_R2T,
+            ISCSI_OP_REJECT,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

@@ -71,7 +71,8 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            PCI_DOE_PROTOCOL_CXL, PCI_DOE_PROTOCOL_SPDM,
+            PCI_DOE_PROTOCOL_CXL,
+            PCI_DOE_PROTOCOL_SPDM,
             PCI_DOE_PROTOCOL_SECURED_SPDM,
         ];
         for i in 0..protos.len() {
@@ -84,7 +85,8 @@ mod tests {
     #[test]
     fn test_status_bits_no_overlap() {
         let bits = [
-            PCI_DOE_STATUS_BUSY, PCI_DOE_STATUS_DATA_READY,
+            PCI_DOE_STATUS_BUSY,
+            PCI_DOE_STATUS_DATA_READY,
             PCI_DOE_STATUS_ERROR,
         ];
         for i in 0..bits.len() {
@@ -97,10 +99,7 @@ mod tests {
 
     #[test]
     fn test_control_bits_no_overlap() {
-        let bits = [
-            PCI_DOE_CTRL_ABORT, PCI_DOE_CTRL_INT_ENABLE,
-            PCI_DOE_CTRL_GO,
-        ];
+        let bits = [PCI_DOE_CTRL_ABORT, PCI_DOE_CTRL_INT_ENABLE, PCI_DOE_CTRL_GO];
         for i in 0..bits.len() {
             assert!(bits[i].is_power_of_two());
             for j in (i + 1)..bits.len() {

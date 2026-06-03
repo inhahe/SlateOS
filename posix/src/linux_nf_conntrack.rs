@@ -109,11 +109,22 @@ mod tests {
     fn test_status_bits_selected_no_overlap() {
         // Check that individual bits don't overlap (excluding NAT_MASK which is composite)
         let bits = [
-            IPS_EXPECTED, IPS_SEEN_REPLY, IPS_ASSURED,
-            IPS_CONFIRMED, IPS_SRC_NAT, IPS_DST_NAT,
-            IPS_SEQ_ADJUST, IPS_SRC_NAT_DONE, IPS_DST_NAT_DONE,
-            IPS_DYING, IPS_FIXED_TIMEOUT, IPS_TEMPLATE,
-            IPS_UNTRACKED, IPS_HELPER, IPS_OFFLOAD, IPS_HW_OFFLOAD,
+            IPS_EXPECTED,
+            IPS_SEEN_REPLY,
+            IPS_ASSURED,
+            IPS_CONFIRMED,
+            IPS_SRC_NAT,
+            IPS_DST_NAT,
+            IPS_SEQ_ADJUST,
+            IPS_SRC_NAT_DONE,
+            IPS_DST_NAT_DONE,
+            IPS_DYING,
+            IPS_FIXED_TIMEOUT,
+            IPS_TEMPLATE,
+            IPS_UNTRACKED,
+            IPS_HELPER,
+            IPS_OFFLOAD,
+            IPS_HW_OFFLOAD,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -130,9 +141,15 @@ mod tests {
     #[test]
     fn test_events_no_overlap() {
         let events = [
-            IPCT_NEW, IPCT_RELATED, IPCT_DESTROY, IPCT_STATUS,
-            IPCT_PROTOINFO, IPCT_HELPER, IPCT_MARK,
-            IPCT_SEQADJ, IPCT_LABEL,
+            IPCT_NEW,
+            IPCT_RELATED,
+            IPCT_DESTROY,
+            IPCT_STATUS,
+            IPCT_PROTOINFO,
+            IPCT_HELPER,
+            IPCT_MARK,
+            IPCT_SEQADJ,
+            IPCT_LABEL,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

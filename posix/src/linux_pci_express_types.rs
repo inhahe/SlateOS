@@ -87,10 +87,14 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            PCI_EXP_TYPE_ENDPOINT, PCI_EXP_TYPE_LEG_END,
-            PCI_EXP_TYPE_ROOT_PORT, PCI_EXP_TYPE_UPSTREAM,
-            PCI_EXP_TYPE_DOWNSTREAM, PCI_EXP_TYPE_PCI_BRIDGE,
-            PCI_EXP_TYPE_PCIE_BRIDGE, PCI_EXP_TYPE_RC_END,
+            PCI_EXP_TYPE_ENDPOINT,
+            PCI_EXP_TYPE_LEG_END,
+            PCI_EXP_TYPE_ROOT_PORT,
+            PCI_EXP_TYPE_UPSTREAM,
+            PCI_EXP_TYPE_DOWNSTREAM,
+            PCI_EXP_TYPE_PCI_BRIDGE,
+            PCI_EXP_TYPE_PCIE_BRIDGE,
+            PCI_EXP_TYPE_RC_END,
             PCI_EXP_TYPE_RC_EC,
         ];
         for i in 0..types.len() {
@@ -111,7 +115,9 @@ mod tests {
 
     #[test]
     fn test_aspm_levels() {
-        assert_eq!(PCI_EXP_LNKCTL_ASPM_L0S_L1,
-            PCI_EXP_LNKCTL_ASPM_L0S | PCI_EXP_LNKCTL_ASPM_L1);
+        assert_eq!(
+            PCI_EXP_LNKCTL_ASPM_L0S_L1,
+            PCI_EXP_LNKCTL_ASPM_L0S | PCI_EXP_LNKCTL_ASPM_L1
+        );
     }
 }

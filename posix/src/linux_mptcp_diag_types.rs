@@ -97,15 +97,24 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            MPTCP_ATTR_TOKEN, MPTCP_ATTR_FAMILY,
-            MPTCP_ATTR_LOC_ID, MPTCP_ATTR_REM_ID,
-            MPTCP_ATTR_SADDR4, MPTCP_ATTR_SADDR6,
-            MPTCP_ATTR_DADDR4, MPTCP_ATTR_DADDR6,
-            MPTCP_ATTR_SPORT, MPTCP_ATTR_DPORT,
-            MPTCP_ATTR_BACKUP, MPTCP_ATTR_ERROR,
-            MPTCP_ATTR_FLAGS, MPTCP_ATTR_TIMEOUT,
-            MPTCP_ATTR_IF_IDX, MPTCP_ATTR_RESET_REASON,
-            MPTCP_ATTR_RESET_TRANSIENT, MPTCP_ATTR_SERVER_SIDE,
+            MPTCP_ATTR_TOKEN,
+            MPTCP_ATTR_FAMILY,
+            MPTCP_ATTR_LOC_ID,
+            MPTCP_ATTR_REM_ID,
+            MPTCP_ATTR_SADDR4,
+            MPTCP_ATTR_SADDR6,
+            MPTCP_ATTR_DADDR4,
+            MPTCP_ATTR_DADDR6,
+            MPTCP_ATTR_SPORT,
+            MPTCP_ATTR_DPORT,
+            MPTCP_ATTR_BACKUP,
+            MPTCP_ATTR_ERROR,
+            MPTCP_ATTR_FLAGS,
+            MPTCP_ATTR_TIMEOUT,
+            MPTCP_ATTR_IF_IDX,
+            MPTCP_ATTR_RESET_REASON,
+            MPTCP_ATTR_RESET_TRANSIENT,
+            MPTCP_ATTR_SERVER_SIDE,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -117,10 +126,13 @@ mod tests {
     #[test]
     fn test_subflow_flags_no_overlap() {
         let flags = [
-            MPTCP_SUBFLOW_FLAG_MCAP_REM, MPTCP_SUBFLOW_FLAG_MCAP_LOC,
-            MPTCP_SUBFLOW_FLAG_JOIN, MPTCP_SUBFLOW_FLAG_BACKUP,
+            MPTCP_SUBFLOW_FLAG_MCAP_REM,
+            MPTCP_SUBFLOW_FLAG_MCAP_LOC,
+            MPTCP_SUBFLOW_FLAG_JOIN,
+            MPTCP_SUBFLOW_FLAG_BACKUP,
             MPTCP_SUBFLOW_FLAG_FULLY_ESTABLISHED,
-            MPTCP_SUBFLOW_FLAG_CONNECTED, MPTCP_SUBFLOW_FLAG_MAPVALID,
+            MPTCP_SUBFLOW_FLAG_CONNECTED,
+            MPTCP_SUBFLOW_FLAG_MAPVALID,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -133,9 +145,12 @@ mod tests {
     #[test]
     fn test_reset_reasons_distinct() {
         let reasons = [
-            MPTCP_RST_EUNSPEC, MPTCP_RST_EMPTCP,
-            MPTCP_RST_ERESOURCE, MPTCP_RST_EPROHIBITED,
-            MPTCP_RST_EWQ2BIG, MPTCP_RST_EBADPERF,
+            MPTCP_RST_EUNSPEC,
+            MPTCP_RST_EMPTCP,
+            MPTCP_RST_ERESOURCE,
+            MPTCP_RST_EPROHIBITED,
+            MPTCP_RST_EWQ2BIG,
+            MPTCP_RST_EBADPERF,
             MPTCP_RST_EMIDDLEBOX,
         ];
         for i in 0..reasons.len() {

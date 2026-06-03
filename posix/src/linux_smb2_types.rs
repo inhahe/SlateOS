@@ -132,9 +132,12 @@ mod tests {
     #[test]
     fn test_protocol_versions_distinct() {
         let versions = [
-            SMB_PROTOCOL_SMB1, SMB_PROTOCOL_SMB2_02,
-            SMB_PROTOCOL_SMB2_10, SMB_PROTOCOL_SMB3_00,
-            SMB_PROTOCOL_SMB3_02, SMB_PROTOCOL_SMB3_11,
+            SMB_PROTOCOL_SMB1,
+            SMB_PROTOCOL_SMB2_02,
+            SMB_PROTOCOL_SMB2_10,
+            SMB_PROTOCOL_SMB3_00,
+            SMB_PROTOCOL_SMB3_02,
+            SMB_PROTOCOL_SMB3_11,
         ];
         for i in 0..versions.len() {
             for j in (i + 1)..versions.len() {
@@ -153,12 +156,25 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds: [u16; 19] = [
-            SMB2_NEGOTIATE, SMB2_SESSION_SETUP, SMB2_LOGOFF,
-            SMB2_TREE_CONNECT, SMB2_TREE_DISCONNECT, SMB2_CREATE,
-            SMB2_CLOSE, SMB2_FLUSH, SMB2_READ, SMB2_WRITE,
-            SMB2_LOCK, SMB2_IOCTL, SMB2_CANCEL, SMB2_ECHO,
-            SMB2_QUERY_DIRECTORY, SMB2_CHANGE_NOTIFY,
-            SMB2_QUERY_INFO, SMB2_SET_INFO, SMB2_OPLOCK_BREAK,
+            SMB2_NEGOTIATE,
+            SMB2_SESSION_SETUP,
+            SMB2_LOGOFF,
+            SMB2_TREE_CONNECT,
+            SMB2_TREE_DISCONNECT,
+            SMB2_CREATE,
+            SMB2_CLOSE,
+            SMB2_FLUSH,
+            SMB2_READ,
+            SMB2_WRITE,
+            SMB2_LOCK,
+            SMB2_IOCTL,
+            SMB2_CANCEL,
+            SMB2_ECHO,
+            SMB2_QUERY_DIRECTORY,
+            SMB2_CHANGE_NOTIFY,
+            SMB2_QUERY_INFO,
+            SMB2_SET_INFO,
+            SMB2_OPLOCK_BREAK,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -170,12 +186,19 @@ mod tests {
     #[test]
     fn test_access_mask_power_of_two() {
         let bits = [
-            SMB2_FILE_READ_DATA, SMB2_FILE_WRITE_DATA,
-            SMB2_FILE_APPEND_DATA, SMB2_FILE_READ_EA,
-            SMB2_FILE_WRITE_EA, SMB2_FILE_EXECUTE,
-            SMB2_FILE_DELETE_CHILD, SMB2_FILE_READ_ATTRIBUTES,
-            SMB2_FILE_WRITE_ATTRIBUTES, SMB2_DELETE,
-            SMB2_READ_CONTROL, SMB2_WRITE_DAC, SMB2_WRITE_OWNER,
+            SMB2_FILE_READ_DATA,
+            SMB2_FILE_WRITE_DATA,
+            SMB2_FILE_APPEND_DATA,
+            SMB2_FILE_READ_EA,
+            SMB2_FILE_WRITE_EA,
+            SMB2_FILE_EXECUTE,
+            SMB2_FILE_DELETE_CHILD,
+            SMB2_FILE_READ_ATTRIBUTES,
+            SMB2_FILE_WRITE_ATTRIBUTES,
+            SMB2_DELETE,
+            SMB2_READ_CONTROL,
+            SMB2_WRITE_DAC,
+            SMB2_WRITE_OWNER,
         ];
         for b in &bits {
             assert!(b.is_power_of_two(), "0x{:08x} not power of two", b);
@@ -185,7 +208,8 @@ mod tests {
     #[test]
     fn test_share_types_distinct() {
         let types: [u8; 3] = [
-            SMB2_SHARE_TYPE_DISK, SMB2_SHARE_TYPE_PIPE,
+            SMB2_SHARE_TYPE_DISK,
+            SMB2_SHARE_TYPE_PIPE,
             SMB2_SHARE_TYPE_PRINT,
         ];
         for i in 0..types.len() {
@@ -198,8 +222,10 @@ mod tests {
     #[test]
     fn test_oplock_levels_distinct() {
         let levels: [u8; 5] = [
-            SMB2_OPLOCK_LEVEL_NONE, SMB2_OPLOCK_LEVEL_II,
-            SMB2_OPLOCK_LEVEL_EXCLUSIVE, SMB2_OPLOCK_LEVEL_BATCH,
+            SMB2_OPLOCK_LEVEL_NONE,
+            SMB2_OPLOCK_LEVEL_II,
+            SMB2_OPLOCK_LEVEL_EXCLUSIVE,
+            SMB2_OPLOCK_LEVEL_BATCH,
             SMB2_OPLOCK_LEVEL_LEASE,
         ];
         for i in 0..levels.len() {

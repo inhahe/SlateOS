@@ -17,20 +17,25 @@ pub const LANDLOCK_SCOPE_SIGNAL: u64 = 1 << 1;
 // ---------------------------------------------------------------------------
 
 /// All filesystem access rights (v1).
-pub const LANDLOCK_ACCESS_FS_ALL_V1: u64 =
-    (1 << 0) | (1 << 1) | (1 << 2) | (1 << 3) |
-    (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) |
-    (1 << 8) | (1 << 9) | (1 << 10) | (1 << 11) |
-    (1 << 12);
+pub const LANDLOCK_ACCESS_FS_ALL_V1: u64 = (1 << 0)
+    | (1 << 1)
+    | (1 << 2)
+    | (1 << 3)
+    | (1 << 4)
+    | (1 << 5)
+    | (1 << 6)
+    | (1 << 7)
+    | (1 << 8)
+    | (1 << 9)
+    | (1 << 10)
+    | (1 << 11)
+    | (1 << 12);
 /// All filesystem access rights (v2: adds REFER).
-pub const LANDLOCK_ACCESS_FS_ALL_V2: u64 =
-    LANDLOCK_ACCESS_FS_ALL_V1 | (1 << 13);
+pub const LANDLOCK_ACCESS_FS_ALL_V2: u64 = LANDLOCK_ACCESS_FS_ALL_V1 | (1 << 13);
 /// All filesystem access rights (v3: adds TRUNCATE).
-pub const LANDLOCK_ACCESS_FS_ALL_V3: u64 =
-    LANDLOCK_ACCESS_FS_ALL_V2 | (1 << 14);
+pub const LANDLOCK_ACCESS_FS_ALL_V3: u64 = LANDLOCK_ACCESS_FS_ALL_V2 | (1 << 14);
 /// All filesystem access rights (v5: adds IOCTL_DEV).
-pub const LANDLOCK_ACCESS_FS_ALL_V5: u64 =
-    LANDLOCK_ACCESS_FS_ALL_V3 | (1 << 15);
+pub const LANDLOCK_ACCESS_FS_ALL_V5: u64 = LANDLOCK_ACCESS_FS_ALL_V3 | (1 << 15);
 
 // ---------------------------------------------------------------------------
 // Landlock network access all

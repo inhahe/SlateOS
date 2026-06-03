@@ -94,8 +94,12 @@ mod tests {
     #[test]
     fn test_security_levels_distinct() {
         let levels = [
-            TB_SECURITY_NONE, TB_SECURITY_USER, TB_SECURITY_SECURE,
-            TB_SECURITY_DPONLY, TB_SECURITY_USB4, TB_SECURITY_NOPCIE,
+            TB_SECURITY_NONE,
+            TB_SECURITY_USER,
+            TB_SECURITY_SECURE,
+            TB_SECURITY_DPONLY,
+            TB_SECURITY_USB4,
+            TB_SECURITY_NOPCIE,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -116,9 +120,7 @@ mod tests {
 
     #[test]
     fn test_tunnel_types_are_powers_of_two() {
-        let tunnels = [
-            TB_TUNNEL_PCI, TB_TUNNEL_DP, TB_TUNNEL_DMA, TB_TUNNEL_USB3,
-        ];
+        let tunnels = [TB_TUNNEL_PCI, TB_TUNNEL_DP, TB_TUNNEL_DMA, TB_TUNNEL_USB3];
         for tunnel in &tunnels {
             assert!(tunnel.is_power_of_two());
         }
@@ -126,9 +128,7 @@ mod tests {
 
     #[test]
     fn test_tunnel_types_no_overlap() {
-        let tunnels = [
-            TB_TUNNEL_PCI, TB_TUNNEL_DP, TB_TUNNEL_DMA, TB_TUNNEL_USB3,
-        ];
+        let tunnels = [TB_TUNNEL_PCI, TB_TUNNEL_DP, TB_TUNNEL_DMA, TB_TUNNEL_USB3];
         for i in 0..tunnels.len() {
             for j in (i + 1)..tunnels.len() {
                 assert_eq!(tunnels[i] & tunnels[j], 0);

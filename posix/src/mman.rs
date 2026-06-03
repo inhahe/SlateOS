@@ -296,11 +296,11 @@ fn range_overflows(addr: *const core::ffi::c_void, len: SizeT) -> bool {
 /// which keeps the gate open — matching "infinity" / "no limit"
 /// semantics.
 fn current_memlock_limit() -> u64 {
-    let mut rl = crate::resource::Rlimit { rlim_cur: 0, rlim_max: 0 };
-    let rc = crate::resource::getrlimit(
-        crate::resource::RLIMIT_MEMLOCK,
-        &mut rl,
-    );
+    let mut rl = crate::resource::Rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    let rc = crate::resource::getrlimit(crate::resource::RLIMIT_MEMLOCK, &raw mut rl);
     if rc == 0 { rl.rlim_cur } else { u64::MAX }
 }
 
@@ -328,9 +328,7 @@ fn current_memlock_limit() -> u64 {
 /// `-1` return.  The check happens *after* argument-domain validation
 /// (page alignment, overflow) — Linux's order.
 fn check_mlock_caps(len: u64) -> Result<(), i32> {
-    let has_cap = crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_IPC_LOCK,
-    );
+    let has_cap = crate::sys_capability::has_capability(crate::sys_capability::CAP_IPC_LOCK);
     if has_cap {
         return Ok(());
     }
@@ -493,7 +491,7 @@ fn is_known_madvise(advice: i32) -> bool {
         | 24       // MADV_DONTNEED_LOCKED
         | 25       // MADV_COLLAPSE
         | 100      // MADV_HWPOISON
-        | 101      // MADV_SOFT_OFFLINE
+        | 101 // MADV_SOFT_OFFLINE
     )
 }
 
@@ -546,9 +544,7 @@ pub extern "C" fn madvise(addr: *mut core::ffi::c_void, length: SizeT, advice: i
     // The cap check fires only for these two; every other recognised
     // advice value falls through to the advisory no-op below.
     if advice == MADV_HWPOISON || advice == MADV_SOFT_OFFLINE {
-        if !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_ADMIN,
-        ) {
+        if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN) {
             errno::set_errno(errno::EPERM);
             return -1;
         }
@@ -740,8 +736,14 @@ mod tests {
 
     #[test]
     fn test_posix_madvise_succeeds() {
-        assert_eq!(posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_NORMAL), 0);
-        assert_eq!(posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_SEQUENTIAL), 0);
+        assert_eq!(
+            posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_NORMAL),
+            0
+        );
+        assert_eq!(
+            posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_SEQUENTIAL),
+            0
+        );
     }
 
     // -- POSIX_MADV_* constants --
@@ -816,9 +818,15 @@ mod tests {
     #[test]
     fn test_extended_map_flags_no_collisions() {
         // All MAP_* flags must be distinct bit positions.
-        let all = MAP_SHARED | MAP_PRIVATE | MAP_FIXED | MAP_ANONYMOUS
-            | MAP_GROWSDOWN | MAP_NORESERVE | MAP_POPULATE
-            | MAP_NONBLOCK | MAP_FIXED_NOREPLACE;
+        let all = MAP_SHARED
+            | MAP_PRIVATE
+            | MAP_FIXED
+            | MAP_ANONYMOUS
+            | MAP_GROWSDOWN
+            | MAP_NORESERVE
+            | MAP_POPULATE
+            | MAP_NONBLOCK
+            | MAP_FIXED_NOREPLACE;
         // If any two flags share a bit, OR-ing them all won't equal the
         // sum of their individual values.  However these are not all
         // single-bit flags (e.g., MAP_FIXED_NOREPLACE = 0x100000 is one
@@ -1104,7 +1112,8 @@ mod tests {
     const ALIGNED_ADDR: *mut core::ffi::c_void = 0x4000_0000_0000_usize as *mut core::ffi::c_void;
 
     /// Same as `ALIGNED_ADDR` but offset by one byte to break alignment.
-    const MISALIGNED_ADDR: *mut core::ffi::c_void = 0x4000_0000_0001_usize as *mut core::ffi::c_void;
+    const MISALIGNED_ADDR: *mut core::ffi::c_void =
+        0x4000_0000_0001_usize as *mut core::ffi::c_void;
 
     #[test]
     fn test_mprotect_unknown_prot_bit() {
@@ -1140,10 +1149,7 @@ mod tests {
         // Linux requires addr to be a multiple of PAGE_SIZE; our
         // PAGE_SIZE is 16 KiB.
         crate::errno::set_errno(0);
-        assert_eq!(
-            mprotect(MISALIGNED_ADDR, 16_384, PROT_READ),
-            -1,
-        );
+        assert_eq!(mprotect(MISALIGNED_ADDR, 16_384, PROT_READ), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
@@ -1255,7 +1261,14 @@ mod tests {
     #[test]
     fn test_mmap64_zero_length_einval() {
         crate::errno::set_errno(0);
-        let ret = mmap64(core::ptr::null_mut(), 0, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        let ret = mmap64(
+            core::ptr::null_mut(),
+            0,
+            PROT_READ,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            -1,
+            0,
+        );
         assert_eq!(ret, MAP_FAILED);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -1376,7 +1389,12 @@ mod tests {
     #[test]
     fn test_mremap_with_maymove() {
         // Use a 16K-page-aligned address (our page size, not Linux's 4K).
-        let ret = mremap(0x4000 as *mut core::ffi::c_void, 16384, 32768, MREMAP_MAYMOVE);
+        let ret = mremap(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            32768,
+            MREMAP_MAYMOVE,
+        );
         assert_eq!(ret, MAP_FAILED);
     }
 
@@ -1429,7 +1447,10 @@ mod tests {
 
     #[test]
     fn test_mlock2_with_addr_onfault() {
-        assert_eq!(mlock2(0x4000 as *const core::ffi::c_void, 16384, MLOCK_ONFAULT), 0);
+        assert_eq!(
+            mlock2(0x4000 as *const core::ffi::c_void, 16384, MLOCK_ONFAULT),
+            0
+        );
     }
 
     #[test]
@@ -1545,7 +1566,10 @@ mod tests {
 
     #[test]
     fn test_msync_ms_invalidate() {
-        assert_eq!(msync(core::ptr::null_mut(), 4096, MS_SYNC | MS_INVALIDATE), 0);
+        assert_eq!(
+            msync(core::ptr::null_mut(), 4096, MS_SYNC | MS_INVALIDATE),
+            0
+        );
     }
 
     #[test]
@@ -1558,9 +1582,18 @@ mod tests {
 
     #[test]
     fn test_posix_madvise_all_values() {
-        assert_eq!(posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_RANDOM), 0);
-        assert_eq!(posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_WILLNEED), 0);
-        assert_eq!(posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_DONTNEED), 0);
+        assert_eq!(
+            posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_RANDOM),
+            0
+        );
+        assert_eq!(
+            posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_WILLNEED),
+            0
+        );
+        assert_eq!(
+            posix_madvise(core::ptr::null_mut(), 4096, POSIX_MADV_DONTNEED),
+            0
+        );
     }
 
     // -- MS_ASYNC and MS_SYNC are distinct --
@@ -1607,7 +1640,11 @@ mod tests {
     #[test]
     fn test_mincore_with_addr() {
         // 0x1000 is not aligned to our 16 KiB page size → EINVAL.
-        let ret = mincore(0x1000 as *mut core::ffi::c_void, 4096, core::ptr::null_mut());
+        let ret = mincore(
+            0x1000 as *mut core::ffi::c_void,
+            4096,
+            core::ptr::null_mut(),
+        );
         assert_eq!(ret, -1);
     }
 
@@ -1618,7 +1655,10 @@ mod tests {
     #[test]
     fn test_mremap_dontunmap_constant() {
         assert_eq!(MREMAP_DONTUNMAP, 4);
-        assert_eq!(MREMAP_FLAGS_VALID, MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP);
+        assert_eq!(
+            MREMAP_FLAGS_VALID,
+            MREMAP_MAYMOVE | MREMAP_FIXED | MREMAP_DONTUNMAP
+        );
     }
 
     // ---- mremap error paths ----
@@ -1901,7 +1941,7 @@ mod tests {
     fn test_mremap_phase125_misaligned_addr_beats_dontunmap_size() {
         crate::errno::set_errno(0);
         let ret = mremap(
-            0x1000 as *mut core::ffi::c_void,  // not 16 KiB aligned
+            0x1000 as *mut core::ffi::c_void, // not 16 KiB aligned
             16384,
             32768,
             MREMAP_MAYMOVE | MREMAP_DONTUNMAP,
@@ -2030,7 +2070,11 @@ mod tests {
     #[test]
     fn test_mincore_null_vec_efault() {
         crate::errno::set_errno(0);
-        let ret = mincore(0x4000 as *mut core::ffi::c_void, 16384, core::ptr::null_mut());
+        let ret = mincore(
+            0x4000 as *mut core::ffi::c_void,
+            16384,
+            core::ptr::null_mut(),
+        );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
@@ -2141,12 +2185,7 @@ mod tests {
         // Buggy `realloc(p, 0)` impl passes new_size=0 to mremap
         // instead of calling free + alloc(0).  Caught by EINVAL.
         crate::errno::set_errno(0);
-        let ret = mremap(
-            0x4000 as *mut core::ffi::c_void,
-            65536,
-            0,
-            MREMAP_MAYMOVE,
-        );
+        let ret = mremap(0x4000 as *mut core::ffi::c_void, 65536, 0, MREMAP_MAYMOVE);
         assert_eq!(ret, MAP_FAILED);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -2481,9 +2520,7 @@ mod tests {
         crate::errno::set_errno(0);
         let with_pair = memfd_create(
             b"x\0".as_ptr(),
-            0x4000_0000
-                | crate::linux_memfd::MFD_EXEC
-                | crate::linux_memfd::MFD_NOEXEC_SEAL,
+            0x4000_0000 | crate::linux_memfd::MFD_EXEC | crate::linux_memfd::MFD_NOEXEC_SEAL,
         );
         assert_eq!(with_pair, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -2662,9 +2699,7 @@ mod tests {
 
     mod mlock_cap_phase171 {
         use super::*;
-        use crate::resource::{
-            Rlimit, RLIMIT_MEMLOCK, RLIM_INFINITY, setrlimit,
-        };
+        use crate::resource::{RLIM_INFINITY, RLIMIT_MEMLOCK, Rlimit, setrlimit};
 
         const PAGE: usize = 16384;
 
@@ -2676,16 +2711,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -2700,8 +2733,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -2713,7 +2745,10 @@ mod tests {
         }
         impl MemlockGuard {
             fn snapshot() -> Self {
-                let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+                let mut rl = Rlimit {
+                    rlim_cur: 0,
+                    rlim_max: 0,
+                };
                 let rc = crate::resource::getrlimit(RLIMIT_MEMLOCK, &mut rl);
                 assert_eq!(rc, 0);
                 Self { saved: rl }
@@ -2738,8 +2773,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_IPC_LOCK - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2754,15 +2788,16 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_IPC_LOCK");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_IPC_LOCK");
             assert!(!crate::sys_capability::has_capability(CAP_IPC_LOCK));
         }
 
         fn set_memlock(cur: u64, max: u64) {
-            let rl = Rlimit { rlim_cur: cur, rlim_max: max };
+            let rl = Rlimit {
+                rlim_cur: cur,
+                rlim_max: max,
+            };
             let rc = setrlimit(RLIMIT_MEMLOCK, &rl as *const _);
             assert_eq!(rc, 0);
         }
@@ -2951,8 +2986,7 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Restore caps to default-all.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2967,10 +3001,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
             assert_eq!(mlock(core::ptr::null(), PAGE), 0);
         }
@@ -3071,16 +3102,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -3095,23 +3124,20 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
         fn drop_cap_sys_admin() {
             use crate::sys_capability::CAP_SYS_ADMIN;
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let (new_lo, new_hi) = if CAP_SYS_ADMIN < 32 {
                 (lo & !(1u32 << CAP_SYS_ADMIN), hi)
             } else {
                 (lo, hi & !(1u32 << (CAP_SYS_ADMIN - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -3126,10 +3152,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_ADMIN");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_ADMIN");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_ADMIN));
         }
 
@@ -3147,10 +3171,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
-                -1,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -3160,10 +3181,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_SOFT_OFFLINE),
-                -1,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_SOFT_OFFLINE), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -3174,10 +3192,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_NORMAL),
-                0,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_NORMAL), 0,);
         }
 
         /// MADV_DONTNEED / FREE / HUGEPAGE / COLLAPSE — all advisory,
@@ -3210,8 +3225,11 @@ mod tests {
                 madvise(0x1 as *mut core::ffi::c_void, 16384, MADV_HWPOISON),
                 -1,
             );
-            assert_eq!(errno::get_errno(), errno::EINVAL,
-                "Unaligned-addr EINVAL must beat CAP_SYS_ADMIN EPERM");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EINVAL,
+                "Unaligned-addr EINVAL must beat CAP_SYS_ADMIN EPERM"
+            );
         }
 
         /// EINVAL (unknown advice) beats EPERM.  Linux's
@@ -3224,10 +3242,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, 9999),
-                -1,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, 9999), -1,);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
@@ -3240,12 +3255,12 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             errno::set_errno(0);
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON), -1,);
             assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
-                -1,
+                errno::get_errno(),
+                errno::EPERM,
+                "Missing CAP_SYS_ADMIN must surface as EPERM, not ENOSYS"
             );
-            assert_eq!(errno::get_errno(), errno::EPERM,
-                "Missing CAP_SYS_ADMIN must surface as EPERM, not ENOSYS");
         }
 
         // -- ENOSYS-with-cap --------------------------------------------------
@@ -3258,10 +3273,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             // Cap held by default.
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
-                -1,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON), -1,);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
@@ -3270,10 +3282,7 @@ mod tests {
         fn test_madvise_phase189_soft_offline_with_cap_returns_enosys() {
             let _g = CapGuard::snapshot();
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_SOFT_OFFLINE),
-                -1,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_SOFT_OFFLINE), -1,);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
@@ -3287,23 +3296,16 @@ mod tests {
             let _g = CapGuard::snapshot();
             // 1. Cap held — ENOSYS (proper request, no backend).
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
-                -1,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON), -1,);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
             // 2. Drop cap — EPERM.
             drop_cap_sys_admin();
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
-                -1,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
             // 3. Restore cap via capset to u32::MAX — ENOSYS again.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -3318,15 +3320,9 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
-                -1,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON), -1,);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
 
@@ -3339,12 +3335,12 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             errno::set_errno(errno::ENOENT);
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON), -1,);
             assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
-                -1,
+                errno::get_errno(),
+                errno::EPERM,
+                "Stale ENOENT must be overwritten with EPERM"
             );
-            assert_eq!(errno::get_errno(), errno::EPERM,
-                "Stale ENOENT must be overwritten with EPERM");
         }
 
         // -- Recovery --------------------------------------------------------
@@ -3357,19 +3353,16 @@ mod tests {
                 let _g = CapGuard::snapshot();
                 drop_cap_sys_admin();
                 errno::set_errno(0);
-                assert_eq!(
-                    madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
-                    -1,
-                );
+                assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON), -1,);
                 assert_eq!(errno::get_errno(), errno::EPERM);
             } // _g dropped here; cap restored.
             errno::set_errno(0);
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON), -1,);
             assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
-                -1,
+                errno::get_errno(),
+                errno::ENOSYS,
+                "CapGuard drop must restore cap; HWPOISON reaches ENOSYS"
             );
-            assert_eq!(errno::get_errno(), errno::ENOSYS,
-                "CapGuard drop must restore cap; HWPOISON reaches ENOSYS");
         }
 
         // -- Sentinel --------------------------------------------------------
@@ -3392,10 +3385,7 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EINVAL);
             // 0 on advisory.
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_NORMAL),
-                0,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_NORMAL), 0,);
         }
 
         // -- Cross-check -----------------------------------------------------
@@ -3409,12 +3399,10 @@ mod tests {
             use crate::sys_capability::CAP_MKNOD;
             let _g = CapGuard::snapshot();
             // Drop only CAP_MKNOD (bit 27).
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << CAP_MKNOD);
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -3429,18 +3417,15 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             // HWPOISON still reaches ENOSYS.
             errno::set_errno(0);
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON), -1,);
             assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_HWPOISON),
-                -1,
+                errno::get_errno(),
+                errno::ENOSYS,
+                "CAP_MKNOD drop must not affect madvise"
             );
-            assert_eq!(errno::get_errno(), errno::ENOSYS,
-                "CAP_MKNOD drop must not affect madvise");
         }
 
         /// Phase 189 errno is EPERM (capable convention), matching
@@ -3451,14 +3436,14 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_admin();
             errno::set_errno(0);
-            assert_eq!(
-                madvise(core::ptr::null_mut(), 16384, MADV_SOFT_OFFLINE),
-                -1,
-            );
+            assert_eq!(madvise(core::ptr::null_mut(), 16384, MADV_SOFT_OFFLINE), -1,);
             let e = errno::get_errno();
             assert_eq!(e, errno::EPERM);
-            assert_ne!(e, errno::EACCES,
-                "madvise_inject_error uses EPERM (capable convention)");
+            assert_ne!(
+                e,
+                errno::EACCES,
+                "madvise_inject_error uses EPERM (capable convention)"
+            );
         }
     }
 }
@@ -3640,17 +3625,16 @@ pub const POSIX_MADV_DONTNEED: i32 = 4;
 /// * `EINVAL` — `addr` not page-aligned, `addr + len` overflows, or
 ///   `advice` not a `POSIX_MADV_*` constant.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn posix_madvise(
-    addr: *mut core::ffi::c_void,
-    len: SizeT,
-    advice: i32,
-) -> i32 {
+pub extern "C" fn posix_madvise(addr: *mut core::ffi::c_void, len: SizeT, advice: i32) -> i32 {
     if !is_page_aligned(addr) || range_overflows(addr, len) {
         return errno::EINVAL;
     }
     match advice {
-        POSIX_MADV_NORMAL | POSIX_MADV_RANDOM | POSIX_MADV_SEQUENTIAL
-        | POSIX_MADV_WILLNEED | POSIX_MADV_DONTNEED => 0,
+        POSIX_MADV_NORMAL
+        | POSIX_MADV_RANDOM
+        | POSIX_MADV_SEQUENTIAL
+        | POSIX_MADV_WILLNEED
+        | POSIX_MADV_DONTNEED => 0,
         _ => errno::EINVAL,
     }
 }
@@ -3672,8 +3656,7 @@ const MEMFD_NAME_MAX: usize = 200;
 /// `/dev/shm` will be reaped by the boot cleanup pass; collisions across
 /// process restarts would only matter if the cleanup pass is skipped,
 /// and the unlink-after-open below makes the file anonymous anyway.
-static MEMFD_COUNTER: core::sync::atomic::AtomicU64 =
-    core::sync::atomic::AtomicU64::new(0);
+static MEMFD_COUNTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Recognised flag bits for `memfd_create`.  Anything outside this set
 /// is rejected with `EINVAL` (matches Linux).
@@ -3744,8 +3727,7 @@ pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
     // `strnlen_user(uname, ...)`, so it precedes the NULL-name
     // EFAULT.  See commit 105ff5339f4988f5 ("memfd: add
     // MFD_NOEXEC_SEAL and MFD_EXEC").
-    const EXEC_BOTH: u32 = crate::linux_memfd::MFD_EXEC
-        | crate::linux_memfd::MFD_NOEXEC_SEAL;
+    const EXEC_BOTH: u32 = crate::linux_memfd::MFD_EXEC | crate::linux_memfd::MFD_NOEXEC_SEAL;
     if flags & EXEC_BOTH == EXEC_BOTH {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -3826,8 +3808,7 @@ pub extern "C" fn memfd_create(name: *const u8, flags: u32) -> i32 {
     }
 
     // Open with O_CREAT | O_RDWR | O_EXCL.  Honor MFD_CLOEXEC.
-    let mut oflag =
-        crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | crate::fcntl::O_RDWR;
+    let mut oflag = crate::fcntl::O_CREAT | crate::fcntl::O_EXCL | crate::fcntl::O_RDWR;
     if flags & crate::linux_memfd::MFD_CLOEXEC != 0 {
         oflag |= crate::fcntl::O_CLOEXEC;
     }
@@ -3948,9 +3929,7 @@ pub extern "C" fn mremap(
     //         return -EINVAL;
     // DONTUNMAP creates a new mapping at the destination while
     // preserving the original — a size change has no defined meaning.
-    if (flags & MREMAP_DONTUNMAP) != 0
-        && ((flags & MREMAP_MAYMOVE) == 0 || old_size != new_size)
-    {
+    if (flags & MREMAP_DONTUNMAP) != 0 && ((flags & MREMAP_MAYMOVE) == 0 || old_size != new_size) {
         errno::set_errno(errno::EINVAL);
         return MAP_FAILED;
     }
@@ -3989,11 +3968,7 @@ pub const MLOCK_ONFAULT: i32 = 1;
 /// callers without `CAP_IPC_LOCK` and a zero or exceeded
 /// `RLIMIT_MEMLOCK` fail with EPERM / ENOMEM matching Linux.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mlock2(
-    addr: *const core::ffi::c_void,
-    len: SizeT,
-    flags: i32,
-) -> i32 {
+pub extern "C" fn mlock2(addr: *const core::ffi::c_void, len: SizeT, flags: i32) -> i32 {
     if !is_page_aligned(addr) || range_overflows(addr, len) {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -4027,11 +4002,7 @@ pub extern "C" fn mlock2(
 /// * `EFAULT` — `vec` is NULL.  The kernel writes one byte per page
 ///   into `vec`; a NULL pointer faults on the first store.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn mincore(
-    addr: *mut core::ffi::c_void,
-    length: SizeT,
-    vec: *mut u8,
-) -> i32 {
+pub extern "C" fn mincore(addr: *mut core::ffi::c_void, length: SizeT, vec: *mut u8) -> i32 {
     if !is_page_aligned(addr) {
         errno::set_errno(errno::EINVAL);
         return -1;

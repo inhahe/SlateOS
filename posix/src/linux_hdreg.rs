@@ -76,10 +76,16 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            HDIO_GET_IDENTITY, HDIO_GET_32BIT, HDIO_SET_32BIT,
-            HDIO_GET_MULTCOUNT, HDIO_SET_MULTCOUNT,
-            HDIO_GET_DMA, HDIO_SET_DMA,
-            HDIO_DRIVE_CMD, HDIO_DRIVE_TASK, HDIO_DRIVE_RESET,
+            HDIO_GET_IDENTITY,
+            HDIO_GET_32BIT,
+            HDIO_SET_32BIT,
+            HDIO_GET_MULTCOUNT,
+            HDIO_SET_MULTCOUNT,
+            HDIO_GET_DMA,
+            HDIO_SET_DMA,
+            HDIO_DRIVE_CMD,
+            HDIO_DRIVE_TASK,
+            HDIO_DRIVE_RESET,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

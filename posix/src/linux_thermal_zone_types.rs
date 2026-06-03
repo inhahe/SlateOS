@@ -71,8 +71,10 @@ mod tests {
     #[test]
     fn test_trip_types_distinct() {
         let trips = [
-            THERMAL_TRIP_ACTIVE, THERMAL_TRIP_PASSIVE,
-            THERMAL_TRIP_HOT, THERMAL_TRIP_CRITICAL,
+            THERMAL_TRIP_ACTIVE,
+            THERMAL_TRIP_PASSIVE,
+            THERMAL_TRIP_HOT,
+            THERMAL_TRIP_CRITICAL,
         ];
         for i in 0..trips.len() {
             for j in (i + 1)..trips.len() {
@@ -90,7 +92,8 @@ mod tests {
     #[test]
     fn test_trends_distinct() {
         let trends = [
-            THERMAL_TREND_RAISING, THERMAL_TREND_DROPPING,
+            THERMAL_TREND_RAISING,
+            THERMAL_TREND_DROPPING,
             THERMAL_TREND_STABLE,
         ];
         for i in 0..trends.len() {
@@ -103,7 +106,8 @@ mod tests {
     #[test]
     fn test_cooling_types_distinct() {
         let types = [
-            THERMAL_COOLING_PROCESSOR, THERMAL_COOLING_FAN,
+            THERMAL_COOLING_PROCESSOR,
+            THERMAL_COOLING_FAN,
             THERMAL_COOLING_POWER,
         ];
         for i in 0..types.len() {
@@ -116,7 +120,8 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            THERMAL_EVENT_TRIP_CROSSED, THERMAL_EVENT_TEMP_SAMPLE,
+            THERMAL_EVENT_TRIP_CROSSED,
+            THERMAL_EVENT_TEMP_SAMPLE,
             THERMAL_EVENT_CDEV_UPDATE,
         ];
         for i in 0..events.len() {

@@ -67,8 +67,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            PWM_FLAG_ENABLED, PWM_FLAG_POLARITY_INVERTED,
-            PWM_FLAG_EXPORTED, PWM_FLAG_REQUESTED,
+            PWM_FLAG_ENABLED,
+            PWM_FLAG_POLARITY_INVERTED,
+            PWM_FLAG_EXPORTED,
+            PWM_FLAG_REQUESTED,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

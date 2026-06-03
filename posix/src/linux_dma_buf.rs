@@ -30,8 +30,7 @@ pub const DMA_BUF_SYNC_START: u64 = 0 << 2;
 /// End sync operation.
 pub const DMA_BUF_SYNC_END: u64 = 1 << 2;
 /// Valid sync flags mask.
-pub const DMA_BUF_SYNC_VALID_FLAGS_MASK: u64 =
-    DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END;
+pub const DMA_BUF_SYNC_VALID_FLAGS_MASK: u64 = DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END;
 
 // ---------------------------------------------------------------------------
 // DMA-BUF sync struct
@@ -112,6 +111,9 @@ mod tests {
 
     #[test]
     fn test_valid_flags_mask() {
-        assert_eq!(DMA_BUF_SYNC_VALID_FLAGS_MASK, DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END);
+        assert_eq!(
+            DMA_BUF_SYNC_VALID_FLAGS_MASK,
+            DMA_BUF_SYNC_RW | DMA_BUF_SYNC_END
+        );
     }
 }

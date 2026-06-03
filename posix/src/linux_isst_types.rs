@@ -93,8 +93,10 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let ioctls = [
-            ISST_IF_GET_PHY_ID, ISST_IF_GET_PLATFORM_INFO,
-            ISST_IF_MBOX_COMMAND, ISST_IF_MMIO_COMMAND,
+            ISST_IF_GET_PHY_ID,
+            ISST_IF_GET_PLATFORM_INFO,
+            ISST_IF_MBOX_COMMAND,
+            ISST_IF_MMIO_COMMAND,
             ISST_IF_COUNT_TPMI_INSTANCES,
         ];
         for i in 0..ioctls.len() {
@@ -107,10 +109,14 @@ mod tests {
     #[test]
     fn test_mbox_commands_distinct() {
         let cmds = [
-            ISST_MBOX_GET_TDP_INFO, ISST_MBOX_SET_TDP_LEVEL,
-            ISST_MBOX_GET_CORE_PRIORITY, ISST_MBOX_SET_CORE_PRIORITY,
-            ISST_MBOX_GET_CLOS_INFO, ISST_MBOX_SET_CLOS_PARAM,
-            ISST_MBOX_GET_TURBO_FREQ, ISST_MBOX_GET_BASE_FREQ,
+            ISST_MBOX_GET_TDP_INFO,
+            ISST_MBOX_SET_TDP_LEVEL,
+            ISST_MBOX_GET_CORE_PRIORITY,
+            ISST_MBOX_SET_CORE_PRIORITY,
+            ISST_MBOX_GET_CLOS_INFO,
+            ISST_MBOX_SET_CLOS_PARAM,
+            ISST_MBOX_GET_TURBO_FREQ,
+            ISST_MBOX_GET_BASE_FREQ,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

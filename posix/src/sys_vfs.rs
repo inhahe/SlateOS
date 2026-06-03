@@ -9,8 +9,8 @@
 // ---------------------------------------------------------------------------
 
 pub use crate::statvfs::Statfs;
-pub use crate::statvfs::statfs;
 pub use crate::statvfs::fstatfs;
+pub use crate::statvfs::statfs;
 
 // ---------------------------------------------------------------------------
 // Filesystem magic numbers
@@ -62,10 +62,16 @@ mod tests {
     #[test]
     fn test_magic_numbers_distinct() {
         let magic = [
-            EXT2_SUPER_MAGIC, TMPFS_MAGIC, PROC_SUPER_MAGIC,
-            SYSFS_MAGIC, DEVTMPFS_MAGIC, NFS_SUPER_MAGIC,
-            BTRFS_SUPER_MAGIC, XFS_SUPER_MAGIC,
-            MSDOS_SUPER_MAGIC, ISOFS_SUPER_MAGIC,
+            EXT2_SUPER_MAGIC,
+            TMPFS_MAGIC,
+            PROC_SUPER_MAGIC,
+            SYSFS_MAGIC,
+            DEVTMPFS_MAGIC,
+            NFS_SUPER_MAGIC,
+            BTRFS_SUPER_MAGIC,
+            XFS_SUPER_MAGIC,
+            MSDOS_SUPER_MAGIC,
+            ISOFS_SUPER_MAGIC,
         ];
         for i in 0..magic.len() {
             for j in (i + 1)..magic.len() {

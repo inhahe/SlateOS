@@ -73,12 +73,31 @@ mod tests {
     #[test]
     fn test_at_values_distinct() {
         let vals = [
-            AT_NULL, AT_IGNORE, AT_EXECFD, AT_PHDR, AT_PHENT,
-            AT_PHNUM, AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY,
-            AT_NOTELF, AT_UID, AT_EUID, AT_GID, AT_EGID,
-            AT_PLATFORM, AT_HWCAP, AT_CLKTCK, AT_SECURE,
-            AT_BASE_PLATFORM, AT_RANDOM, AT_HWCAP2,
-            AT_EXECFN, AT_SYSINFO_EHDR, AT_MINSIGSTKSZ,
+            AT_NULL,
+            AT_IGNORE,
+            AT_EXECFD,
+            AT_PHDR,
+            AT_PHENT,
+            AT_PHNUM,
+            AT_PAGESZ,
+            AT_BASE,
+            AT_FLAGS,
+            AT_ENTRY,
+            AT_NOTELF,
+            AT_UID,
+            AT_EUID,
+            AT_GID,
+            AT_EGID,
+            AT_PLATFORM,
+            AT_HWCAP,
+            AT_CLKTCK,
+            AT_SECURE,
+            AT_BASE_PLATFORM,
+            AT_RANDOM,
+            AT_HWCAP2,
+            AT_EXECFN,
+            AT_SYSINFO_EHDR,
+            AT_MINSIGSTKSZ,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {

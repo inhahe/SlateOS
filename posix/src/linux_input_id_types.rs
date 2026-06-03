@@ -66,17 +66,32 @@ mod tests {
     #[test]
     fn test_bus_types_distinct() {
         let buses = [
-            BUS_PCI, BUS_ISAPNP, BUS_USB, BUS_HIL,
-            BUS_BLUETOOTH, BUS_VIRTUAL,
-            BUS_ISA, BUS_I8042, BUS_XTKBD, BUS_RS232,
-            BUS_GAMEPORT, BUS_PARPORT, BUS_AMIGA, BUS_ADB,
-            BUS_I2C, BUS_HOST, BUS_GSC, BUS_ATARI,
-            BUS_SPI, BUS_RMI, BUS_CEC, BUS_INTEL_ISHTP,
+            BUS_PCI,
+            BUS_ISAPNP,
+            BUS_USB,
+            BUS_HIL,
+            BUS_BLUETOOTH,
+            BUS_VIRTUAL,
+            BUS_ISA,
+            BUS_I8042,
+            BUS_XTKBD,
+            BUS_RS232,
+            BUS_GAMEPORT,
+            BUS_PARPORT,
+            BUS_AMIGA,
+            BUS_ADB,
+            BUS_I2C,
+            BUS_HOST,
+            BUS_GSC,
+            BUS_ATARI,
+            BUS_SPI,
+            BUS_RMI,
+            BUS_CEC,
+            BUS_INTEL_ISHTP,
         ];
         for i in 0..buses.len() {
             for j in (i + 1)..buses.len() {
-                assert_ne!(buses[i], buses[j],
-                    "bus types {} and {} collide", i, j);
+                assert_ne!(buses[i], buses[j], "bus types {} and {} collide", i, j);
             }
         }
     }
@@ -98,12 +113,28 @@ mod tests {
     #[test]
     fn test_all_nonzero() {
         let buses = [
-            BUS_PCI, BUS_ISAPNP, BUS_USB, BUS_HIL,
-            BUS_BLUETOOTH, BUS_VIRTUAL,
-            BUS_ISA, BUS_I8042, BUS_XTKBD, BUS_RS232,
-            BUS_GAMEPORT, BUS_PARPORT, BUS_AMIGA, BUS_ADB,
-            BUS_I2C, BUS_HOST, BUS_GSC, BUS_ATARI,
-            BUS_SPI, BUS_RMI, BUS_CEC, BUS_INTEL_ISHTP,
+            BUS_PCI,
+            BUS_ISAPNP,
+            BUS_USB,
+            BUS_HIL,
+            BUS_BLUETOOTH,
+            BUS_VIRTUAL,
+            BUS_ISA,
+            BUS_I8042,
+            BUS_XTKBD,
+            BUS_RS232,
+            BUS_GAMEPORT,
+            BUS_PARPORT,
+            BUS_AMIGA,
+            BUS_ADB,
+            BUS_I2C,
+            BUS_HOST,
+            BUS_GSC,
+            BUS_ATARI,
+            BUS_SPI,
+            BUS_RMI,
+            BUS_CEC,
+            BUS_INTEL_ISHTP,
         ];
         for &b in &buses {
             assert_ne!(b, 0, "bus type should be nonzero");

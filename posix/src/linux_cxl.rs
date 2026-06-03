@@ -96,12 +96,18 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            CXL_MEM_COMMAND_ID_IDENTIFY, CXL_MEM_COMMAND_ID_GET_HEALTH_INFO,
-            CXL_MEM_COMMAND_ID_GET_ALERT_CONFIG, CXL_MEM_COMMAND_ID_SET_ALERT_CONFIG,
-            CXL_MEM_COMMAND_ID_GET_SHUTDOWN_STATE, CXL_MEM_COMMAND_ID_SET_SHUTDOWN_STATE,
-            CXL_MEM_COMMAND_ID_GET_POISON, CXL_MEM_COMMAND_ID_INJECT_POISON,
-            CXL_MEM_COMMAND_ID_CLEAR_POISON, CXL_MEM_COMMAND_ID_GET_SCAN_MEDIA_CAPS,
-            CXL_MEM_COMMAND_ID_SCAN_MEDIA, CXL_MEM_COMMAND_ID_GET_SCAN_MEDIA_RESULTS,
+            CXL_MEM_COMMAND_ID_IDENTIFY,
+            CXL_MEM_COMMAND_ID_GET_HEALTH_INFO,
+            CXL_MEM_COMMAND_ID_GET_ALERT_CONFIG,
+            CXL_MEM_COMMAND_ID_SET_ALERT_CONFIG,
+            CXL_MEM_COMMAND_ID_GET_SHUTDOWN_STATE,
+            CXL_MEM_COMMAND_ID_SET_SHUTDOWN_STATE,
+            CXL_MEM_COMMAND_ID_GET_POISON,
+            CXL_MEM_COMMAND_ID_INJECT_POISON,
+            CXL_MEM_COMMAND_ID_CLEAR_POISON,
+            CXL_MEM_COMMAND_ID_GET_SCAN_MEDIA_CAPS,
+            CXL_MEM_COMMAND_ID_SCAN_MEDIA,
+            CXL_MEM_COMMAND_ID_GET_SCAN_MEDIA_RESULTS,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -113,7 +119,8 @@ mod tests {
     #[test]
     fn test_dev_types_distinct() {
         let types = [
-            CXL_DEVTYPE_CLASSMEM, CXL_DEVTYPE_ACCEL,
+            CXL_DEVTYPE_CLASSMEM,
+            CXL_DEVTYPE_ACCEL,
             CXL_DEVTYPE_EXPANDER,
         ];
         for i in 0..types.len() {
@@ -126,8 +133,10 @@ mod tests {
     #[test]
     fn test_health_distinct() {
         let healths = [
-            CXL_HEALTH_NORMAL, CXL_HEALTH_NONCRITICAL,
-            CXL_HEALTH_CRITICAL, CXL_HEALTH_FATAL,
+            CXL_HEALTH_NORMAL,
+            CXL_HEALTH_NONCRITICAL,
+            CXL_HEALTH_CRITICAL,
+            CXL_HEALTH_FATAL,
         ];
         for i in 0..healths.len() {
             for j in (i + 1)..healths.len() {
@@ -139,8 +148,10 @@ mod tests {
     #[test]
     fn test_media_distinct() {
         let media = [
-            CXL_MEDIA_NOT_READY, CXL_MEDIA_READY,
-            CXL_MEDIA_ERROR, CXL_MEDIA_DISABLED,
+            CXL_MEDIA_NOT_READY,
+            CXL_MEDIA_READY,
+            CXL_MEDIA_ERROR,
+            CXL_MEDIA_DISABLED,
         ];
         for i in 0..media.len() {
             for j in (i + 1)..media.len() {
@@ -152,8 +163,10 @@ mod tests {
     #[test]
     fn test_poison_sources_distinct() {
         let sources = [
-            CXL_POISON_SOURCE_UNKNOWN, CXL_POISON_SOURCE_EXTERNAL,
-            CXL_POISON_SOURCE_INTERNAL, CXL_POISON_SOURCE_INJECTED,
+            CXL_POISON_SOURCE_UNKNOWN,
+            CXL_POISON_SOURCE_EXTERNAL,
+            CXL_POISON_SOURCE_INTERNAL,
+            CXL_POISON_SOURCE_INJECTED,
             CXL_POISON_SOURCE_VENDOR,
         ];
         for i in 0..sources.len() {

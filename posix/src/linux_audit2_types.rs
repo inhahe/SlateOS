@@ -161,12 +161,24 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            AUDIT_GET, AUDIT_SET, AUDIT_LIST, AUDIT_ADD,
-            AUDIT_DEL, AUDIT_USER, AUDIT_LOGIN,
-            AUDIT_WATCH_INS, AUDIT_WATCH_REM, AUDIT_WATCH_LIST,
-            AUDIT_SIGNAL_INFO, AUDIT_ADD_RULE, AUDIT_DEL_RULE,
-            AUDIT_LIST_RULES, AUDIT_TRIM, AUDIT_MAKE_EQUIV,
-            AUDIT_GET_FEATURE, AUDIT_SET_FEATURE,
+            AUDIT_GET,
+            AUDIT_SET,
+            AUDIT_LIST,
+            AUDIT_ADD,
+            AUDIT_DEL,
+            AUDIT_USER,
+            AUDIT_LOGIN,
+            AUDIT_WATCH_INS,
+            AUDIT_WATCH_REM,
+            AUDIT_WATCH_LIST,
+            AUDIT_SIGNAL_INFO,
+            AUDIT_ADD_RULE,
+            AUDIT_DEL_RULE,
+            AUDIT_LIST_RULES,
+            AUDIT_TRIM,
+            AUDIT_MAKE_EQUIV,
+            AUDIT_GET_FEATURE,
+            AUDIT_SET_FEATURE,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -183,9 +195,14 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let evts = [
-            AUDIT_SYSCALL, AUDIT_PATH, AUDIT_IPC,
-            AUDIT_SOCKADDR, AUDIT_CWD, AUDIT_EXECVE,
-            AUDIT_IPC_SET_PERM, AUDIT_BPF,
+            AUDIT_SYSCALL,
+            AUDIT_PATH,
+            AUDIT_IPC,
+            AUDIT_SOCKADDR,
+            AUDIT_CWD,
+            AUDIT_EXECVE,
+            AUDIT_IPC_SET_PERM,
+            AUDIT_BPF,
         ];
         for i in 0..evts.len() {
             for j in (i + 1)..evts.len() {
@@ -197,9 +214,12 @@ mod tests {
     #[test]
     fn test_filter_flags_no_overlap() {
         let flags = [
-            AUDIT_FILTER_TASK, AUDIT_FILTER_ENTRY,
-            AUDIT_FILTER_EXIT, AUDIT_FILTER_USER,
-            AUDIT_FILTER_EXCLUDE, AUDIT_FILTER_FS,
+            AUDIT_FILTER_TASK,
+            AUDIT_FILTER_ENTRY,
+            AUDIT_FILTER_EXIT,
+            AUDIT_FILTER_USER,
+            AUDIT_FILTER_EXCLUDE,
+            AUDIT_FILTER_FS,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -211,9 +231,12 @@ mod tests {
     #[test]
     fn test_filter_flags_are_powers_of_two() {
         let flags = [
-            AUDIT_FILTER_TASK, AUDIT_FILTER_ENTRY,
-            AUDIT_FILTER_EXIT, AUDIT_FILTER_USER,
-            AUDIT_FILTER_EXCLUDE, AUDIT_FILTER_FS,
+            AUDIT_FILTER_TASK,
+            AUDIT_FILTER_ENTRY,
+            AUDIT_FILTER_EXIT,
+            AUDIT_FILTER_USER,
+            AUDIT_FILTER_EXCLUDE,
+            AUDIT_FILTER_FS,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -233,10 +256,20 @@ mod tests {
     #[test]
     fn test_field_types_distinct() {
         let fields = [
-            AUDIT_PID, AUDIT_UID, AUDIT_EUID, AUDIT_SUID,
-            AUDIT_FSUID, AUDIT_GID, AUDIT_EGID, AUDIT_SGID,
-            AUDIT_FSGID, AUDIT_LOGINUID, AUDIT_ARCH, AUDIT_PERS,
-            AUDIT_EXIT, AUDIT_SUCCESS,
+            AUDIT_PID,
+            AUDIT_UID,
+            AUDIT_EUID,
+            AUDIT_SUID,
+            AUDIT_FSUID,
+            AUDIT_GID,
+            AUDIT_EGID,
+            AUDIT_SGID,
+            AUDIT_FSGID,
+            AUDIT_LOGINUID,
+            AUDIT_ARCH,
+            AUDIT_PERS,
+            AUDIT_EXIT,
+            AUDIT_SUCCESS,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {
@@ -248,9 +281,14 @@ mod tests {
     #[test]
     fn test_operators_distinct() {
         let ops = [
-            AUDIT_BIT_MASK, AUDIT_LESS_THAN, AUDIT_GREATER_THAN,
-            AUDIT_NOT_EQUAL, AUDIT_EQUAL, AUDIT_BIT_TEST,
-            AUDIT_LESS_THAN_OR_EQUAL, AUDIT_GREATER_THAN_OR_EQUAL,
+            AUDIT_BIT_MASK,
+            AUDIT_LESS_THAN,
+            AUDIT_GREATER_THAN,
+            AUDIT_NOT_EQUAL,
+            AUDIT_EQUAL,
+            AUDIT_BIT_TEST,
+            AUDIT_LESS_THAN_OR_EQUAL,
+            AUDIT_GREATER_THAN_OR_EQUAL,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

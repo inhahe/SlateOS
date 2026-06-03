@@ -83,9 +83,8 @@ mod tests {
     #[test]
     fn test_cc_indices_distinct() {
         let indices = [
-            VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN,
-            VSWTC, VSTART, VSTOP, VSUSP, VEOL, VREPRINT,
-            VDISCARD, VWERASE, VLNEXT, VEOL2,
+            VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSWTC, VSTART, VSTOP, VSUSP, VEOL,
+            VREPRINT, VDISCARD, VWERASE, VLNEXT, VEOL2,
         ];
         for i in 0..indices.len() {
             assert!(indices[i] < NCCS);

@@ -97,11 +97,20 @@ mod tests {
     #[test]
     fn test_lsm_ids_distinct() {
         let ids = [
-            LSM_ID_UNDEF, LSM_ID_SELINUX, LSM_ID_SMACK,
-            LSM_ID_TOMOYO, LSM_ID_APPARMOR, LSM_ID_YAMA,
-            LSM_ID_LOADPIN, LSM_ID_SAFESETID, LSM_ID_LOCKDOWN,
-            LSM_ID_BPF, LSM_ID_LANDLOCK, LSM_ID_IMA,
-            LSM_ID_EVM, LSM_ID_IPE,
+            LSM_ID_UNDEF,
+            LSM_ID_SELINUX,
+            LSM_ID_SMACK,
+            LSM_ID_TOMOYO,
+            LSM_ID_APPARMOR,
+            LSM_ID_YAMA,
+            LSM_ID_LOADPIN,
+            LSM_ID_SAFESETID,
+            LSM_ID_LOCKDOWN,
+            LSM_ID_BPF,
+            LSM_ID_LANDLOCK,
+            LSM_ID_IMA,
+            LSM_ID_EVM,
+            LSM_ID_IPE,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -113,8 +122,12 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            LSM_ATTR_CURRENT, LSM_ATTR_EXEC, LSM_ATTR_FSCREATE,
-            LSM_ATTR_KEYCREATE, LSM_ATTR_PREV, LSM_ATTR_SOCKCREATE,
+            LSM_ATTR_CURRENT,
+            LSM_ATTR_EXEC,
+            LSM_ATTR_FSCREATE,
+            LSM_ATTR_KEYCREATE,
+            LSM_ATTR_PREV,
+            LSM_ATTR_SOCKCREATE,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -126,8 +139,12 @@ mod tests {
     #[test]
     fn test_hook_categories_distinct() {
         let cats = [
-            LSM_HOOK_FILE, LSM_HOOK_TASK, LSM_HOOK_IPC,
-            LSM_HOOK_NET, LSM_HOOK_INODE, LSM_HOOK_SUPERBLOCK,
+            LSM_HOOK_FILE,
+            LSM_HOOK_TASK,
+            LSM_HOOK_IPC,
+            LSM_HOOK_NET,
+            LSM_HOOK_INODE,
+            LSM_HOOK_SUPERBLOCK,
         ];
         for i in 0..cats.len() {
             for j in (i + 1)..cats.len() {
@@ -138,9 +155,7 @@ mod tests {
 
     #[test]
     fn test_flags_no_overlap() {
-        let flags = [
-            LSM_FLAG_ENABLED, LSM_FLAG_EXCLUSIVE, LSM_FLAG_LEGACY_MAJOR,
-        ];
+        let flags = [LSM_FLAG_ENABLED, LSM_FLAG_EXCLUSIVE, LSM_FLAG_LEGACY_MAJOR];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {

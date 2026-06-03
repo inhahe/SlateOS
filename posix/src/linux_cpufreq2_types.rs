@@ -100,9 +100,12 @@ mod tests {
     #[test]
     fn test_governors_distinct() {
         let govs = [
-            CPUFREQ_GOV_PERFORMANCE, CPUFREQ_GOV_POWERSAVE,
-            CPUFREQ_GOV_USERSPACE, CPUFREQ_GOV_ONDEMAND,
-            CPUFREQ_GOV_CONSERVATIVE, CPUFREQ_GOV_SCHEDUTIL,
+            CPUFREQ_GOV_PERFORMANCE,
+            CPUFREQ_GOV_POWERSAVE,
+            CPUFREQ_GOV_USERSPACE,
+            CPUFREQ_GOV_ONDEMAND,
+            CPUFREQ_GOV_CONSERVATIVE,
+            CPUFREQ_GOV_SCHEDUTIL,
         ];
         for i in 0..govs.len() {
             for j in (i + 1)..govs.len() {
@@ -114,8 +117,10 @@ mod tests {
     #[test]
     fn test_relations_distinct() {
         let rels = [
-            CPUFREQ_RELATION_L, CPUFREQ_RELATION_H,
-            CPUFREQ_RELATION_C, CPUFREQ_RELATION_E,
+            CPUFREQ_RELATION_L,
+            CPUFREQ_RELATION_H,
+            CPUFREQ_RELATION_C,
+            CPUFREQ_RELATION_E,
         ];
         for i in 0..rels.len() {
             for j in (i + 1)..rels.len() {
@@ -139,7 +144,8 @@ mod tests {
     #[test]
     fn test_flags_power_of_two() {
         let flags = [
-            CPUFREQ_CONST_LOOPS, CPUFREQ_STICKY,
+            CPUFREQ_CONST_LOOPS,
+            CPUFREQ_STICKY,
             CPUFREQ_NEED_INITIAL_FREQ_CHECK,
             CPUFREQ_NEED_UPDATE_LIMITS,
             CPUFREQ_IS_COOLING_DEV,

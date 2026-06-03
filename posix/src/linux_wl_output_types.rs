@@ -63,7 +63,8 @@ mod tests {
     #[test]
     fn test_subpixel_distinct() {
         let subs = [
-            WL_OUTPUT_SUBPIXEL_UNKNOWN, WL_OUTPUT_SUBPIXEL_NONE,
+            WL_OUTPUT_SUBPIXEL_UNKNOWN,
+            WL_OUTPUT_SUBPIXEL_NONE,
             WL_OUTPUT_SUBPIXEL_HORIZONTAL_RGB,
             WL_OUTPUT_SUBPIXEL_HORIZONTAL_BGR,
             WL_OUTPUT_SUBPIXEL_VERTICAL_RGB,
@@ -79,10 +80,14 @@ mod tests {
     #[test]
     fn test_transforms_distinct() {
         let xforms = [
-            WL_OUTPUT_TRANSFORM_NORMAL, WL_OUTPUT_TRANSFORM_90,
-            WL_OUTPUT_TRANSFORM_180, WL_OUTPUT_TRANSFORM_270,
-            WL_OUTPUT_TRANSFORM_FLIPPED, WL_OUTPUT_TRANSFORM_FLIPPED_90,
-            WL_OUTPUT_TRANSFORM_FLIPPED_180, WL_OUTPUT_TRANSFORM_FLIPPED_270,
+            WL_OUTPUT_TRANSFORM_NORMAL,
+            WL_OUTPUT_TRANSFORM_90,
+            WL_OUTPUT_TRANSFORM_180,
+            WL_OUTPUT_TRANSFORM_270,
+            WL_OUTPUT_TRANSFORM_FLIPPED,
+            WL_OUTPUT_TRANSFORM_FLIPPED_90,
+            WL_OUTPUT_TRANSFORM_FLIPPED_180,
+            WL_OUTPUT_TRANSFORM_FLIPPED_270,
         ];
         for i in 0..xforms.len() {
             for j in (i + 1)..xforms.len() {

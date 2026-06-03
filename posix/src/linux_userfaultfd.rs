@@ -51,8 +51,7 @@ pub const O_NONBLOCK_UFFD: u32 = 0o4000; // 0x800 = 2048
 /// been accepted since the syscall was introduced in 4.3. Anything outside
 /// this mask is rejected with `EINVAL` (matching Linux's `if (flags &
 /// ~UFFD_SHARED_FCNTL_FLAGS) return -EINVAL`).
-pub const UFFD_FLAGS_VALID: u32 =
-    O_CLOEXEC_UFFD | O_NONBLOCK_UFFD | UFFD_USER_MODE_ONLY;
+pub const UFFD_FLAGS_VALID: u32 = O_CLOEXEC_UFFD | O_NONBLOCK_UFFD | UFFD_USER_MODE_ONLY;
 
 // ---------------------------------------------------------------------------
 // userfaultfd ioctl commands
@@ -202,9 +201,7 @@ pub extern "C" fn userfaultfd(flags: i32) -> i32 {
     // that sets UFFD_USER_MODE_ONLY bypasses the cap check; everyone
     // else needs CAP_SYS_PTRACE.
     if (flags_u & UFFD_USER_MODE_ONLY) == 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_PTRACE,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -378,9 +375,7 @@ mod tests {
         // first step, then bails with "kernel does not support uffd"
         // on -ENOSYS.
         errno::set_errno(errno::EBADF);
-        let r = userfaultfd(
-            (UFFD_USER_MODE_ONLY | O_CLOEXEC_UFFD | O_NONBLOCK_UFFD) as i32,
-        );
+        let r = userfaultfd((UFFD_USER_MODE_ONLY | O_CLOEXEC_UFFD | O_NONBLOCK_UFFD) as i32);
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::ENOSYS);
     }
@@ -414,9 +409,15 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            UFFDIO_API, UFFDIO_REGISTER, UFFDIO_UNREGISTER,
-            UFFDIO_COPY, UFFDIO_ZEROPAGE, UFFDIO_WAKE,
-            UFFDIO_WRITEPROTECT, UFFDIO_CONTINUE, UFFDIO_POISON,
+            UFFDIO_API,
+            UFFDIO_REGISTER,
+            UFFDIO_UNREGISTER,
+            UFFDIO_COPY,
+            UFFDIO_ZEROPAGE,
+            UFFDIO_WAKE,
+            UFFDIO_WRITEPROTECT,
+            UFFDIO_CONTINUE,
+            UFFDIO_POISON,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -509,16 +510,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -533,8 +532,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -546,8 +544,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -562,8 +559,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -731,8 +727,7 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Restore caps.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -747,10 +742,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0);
             errno::set_errno(0);
             assert_eq!(userfaultfd(0), -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -763,11 +755,9 @@ mod tests {
         fn test_uffd_phase183_eperm_preserves_other_caps() {
             let _g = CapGuard::snapshot();
             drop_sys_ptrace();
-            let (lo_before, hi_before) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_before, hi_before) = crate::sys_capability::current_caps_effective();
             let _ = userfaultfd(0);
-            let (lo_after, hi_after) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_after, hi_after) = crate::sys_capability::current_caps_effective();
             assert_eq!(lo_before, lo_after);
             assert_eq!(hi_before, hi_after);
         }

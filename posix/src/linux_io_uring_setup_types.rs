@@ -79,13 +79,20 @@ mod tests {
     #[test]
     fn test_setup_flags_power_of_two() {
         let flags = [
-            IORING_SETUP_IOPOLL, IORING_SETUP_SQPOLL,
-            IORING_SETUP_SQ_AFF, IORING_SETUP_CQSIZE,
-            IORING_SETUP_CLAMP, IORING_SETUP_ATTACH_WQ,
-            IORING_SETUP_R_DISABLED, IORING_SETUP_SUBMIT_ALL,
-            IORING_SETUP_COOP_TASKRUN, IORING_SETUP_TASKRUN_FLAG,
-            IORING_SETUP_SQE128, IORING_SETUP_CQE32,
-            IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_DEFER_TASKRUN,
+            IORING_SETUP_IOPOLL,
+            IORING_SETUP_SQPOLL,
+            IORING_SETUP_SQ_AFF,
+            IORING_SETUP_CQSIZE,
+            IORING_SETUP_CLAMP,
+            IORING_SETUP_ATTACH_WQ,
+            IORING_SETUP_R_DISABLED,
+            IORING_SETUP_SUBMIT_ALL,
+            IORING_SETUP_COOP_TASKRUN,
+            IORING_SETUP_TASKRUN_FLAG,
+            IORING_SETUP_SQE128,
+            IORING_SETUP_CQE32,
+            IORING_SETUP_SINGLE_ISSUER,
+            IORING_SETUP_DEFER_TASKRUN,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -95,13 +102,20 @@ mod tests {
     #[test]
     fn test_setup_flags_no_overlap() {
         let flags = [
-            IORING_SETUP_IOPOLL, IORING_SETUP_SQPOLL,
-            IORING_SETUP_SQ_AFF, IORING_SETUP_CQSIZE,
-            IORING_SETUP_CLAMP, IORING_SETUP_ATTACH_WQ,
-            IORING_SETUP_R_DISABLED, IORING_SETUP_SUBMIT_ALL,
-            IORING_SETUP_COOP_TASKRUN, IORING_SETUP_TASKRUN_FLAG,
-            IORING_SETUP_SQE128, IORING_SETUP_CQE32,
-            IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_DEFER_TASKRUN,
+            IORING_SETUP_IOPOLL,
+            IORING_SETUP_SQPOLL,
+            IORING_SETUP_SQ_AFF,
+            IORING_SETUP_CQSIZE,
+            IORING_SETUP_CLAMP,
+            IORING_SETUP_ATTACH_WQ,
+            IORING_SETUP_R_DISABLED,
+            IORING_SETUP_SUBMIT_ALL,
+            IORING_SETUP_COOP_TASKRUN,
+            IORING_SETUP_TASKRUN_FLAG,
+            IORING_SETUP_SQE128,
+            IORING_SETUP_CQE32,
+            IORING_SETUP_SINGLE_ISSUER,
+            IORING_SETUP_DEFER_TASKRUN,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -113,12 +127,18 @@ mod tests {
     #[test]
     fn test_feat_flags_power_of_two() {
         let feats = [
-            IORING_FEAT_SINGLE_MMAP, IORING_FEAT_NODROP,
-            IORING_FEAT_SUBMIT_STABLE, IORING_FEAT_RW_CUR_POS,
-            IORING_FEAT_CUR_PERSONALITY, IORING_FEAT_FAST_POLL,
-            IORING_FEAT_POLL_32BITS, IORING_FEAT_SQPOLL_NONFIXED,
-            IORING_FEAT_EXT_ARG, IORING_FEAT_NATIVE_WORKERS,
-            IORING_FEAT_RSRC_TAGS, IORING_FEAT_CQE_SKIP,
+            IORING_FEAT_SINGLE_MMAP,
+            IORING_FEAT_NODROP,
+            IORING_FEAT_SUBMIT_STABLE,
+            IORING_FEAT_RW_CUR_POS,
+            IORING_FEAT_CUR_PERSONALITY,
+            IORING_FEAT_FAST_POLL,
+            IORING_FEAT_POLL_32BITS,
+            IORING_FEAT_SQPOLL_NONFIXED,
+            IORING_FEAT_EXT_ARG,
+            IORING_FEAT_NATIVE_WORKERS,
+            IORING_FEAT_RSRC_TAGS,
+            IORING_FEAT_CQE_SKIP,
             IORING_FEAT_LINKED_FILE,
         ];
         for f in &feats {
@@ -129,12 +149,18 @@ mod tests {
     #[test]
     fn test_feat_flags_no_overlap() {
         let feats = [
-            IORING_FEAT_SINGLE_MMAP, IORING_FEAT_NODROP,
-            IORING_FEAT_SUBMIT_STABLE, IORING_FEAT_RW_CUR_POS,
-            IORING_FEAT_CUR_PERSONALITY, IORING_FEAT_FAST_POLL,
-            IORING_FEAT_POLL_32BITS, IORING_FEAT_SQPOLL_NONFIXED,
-            IORING_FEAT_EXT_ARG, IORING_FEAT_NATIVE_WORKERS,
-            IORING_FEAT_RSRC_TAGS, IORING_FEAT_CQE_SKIP,
+            IORING_FEAT_SINGLE_MMAP,
+            IORING_FEAT_NODROP,
+            IORING_FEAT_SUBMIT_STABLE,
+            IORING_FEAT_RW_CUR_POS,
+            IORING_FEAT_CUR_PERSONALITY,
+            IORING_FEAT_FAST_POLL,
+            IORING_FEAT_POLL_32BITS,
+            IORING_FEAT_SQPOLL_NONFIXED,
+            IORING_FEAT_EXT_ARG,
+            IORING_FEAT_NATIVE_WORKERS,
+            IORING_FEAT_RSRC_TAGS,
+            IORING_FEAT_CQE_SKIP,
             IORING_FEAT_LINKED_FILE,
         ];
         for i in 0..feats.len() {

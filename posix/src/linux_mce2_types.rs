@@ -85,8 +85,10 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            MCE_ACTION_NONE, MCE_ACTION_PAGE_OFFLINE,
-            MCE_ACTION_KILL_PROCESS, MCE_ACTION_SOFT_OFFLINE,
+            MCE_ACTION_NONE,
+            MCE_ACTION_PAGE_OFFLINE,
+            MCE_ACTION_KILL_PROCESS,
+            MCE_ACTION_SOFT_OFFLINE,
             MCE_ACTION_RESET,
         ];
         for i in 0..actions.len() {
@@ -99,8 +101,11 @@ mod tests {
     #[test]
     fn test_sources_distinct() {
         let sources = [
-            MCE_SOURCE_CACHE, MCE_SOURCE_MEMORY, MCE_SOURCE_BUS,
-            MCE_SOURCE_TLB, MCE_SOURCE_INTERNAL,
+            MCE_SOURCE_CACHE,
+            MCE_SOURCE_MEMORY,
+            MCE_SOURCE_BUS,
+            MCE_SOURCE_TLB,
+            MCE_SOURCE_INTERNAL,
         ];
         for i in 0..sources.len() {
             for j in (i + 1)..sources.len() {

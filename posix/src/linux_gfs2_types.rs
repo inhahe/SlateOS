@@ -125,10 +125,18 @@ mod tests {
     #[test]
     fn test_metatypes_distinct() {
         let types = [
-            GFS2_METATYPE_NONE, GFS2_METATYPE_SB, GFS2_METATYPE_RG,
-            GFS2_METATYPE_RB, GFS2_METATYPE_DI, GFS2_METATYPE_IN,
-            GFS2_METATYPE_LF, GFS2_METATYPE_JD, GFS2_METATYPE_LH,
-            GFS2_METATYPE_LB, GFS2_METATYPE_EA, GFS2_METATYPE_ED,
+            GFS2_METATYPE_NONE,
+            GFS2_METATYPE_SB,
+            GFS2_METATYPE_RG,
+            GFS2_METATYPE_RB,
+            GFS2_METATYPE_DI,
+            GFS2_METATYPE_IN,
+            GFS2_METATYPE_LF,
+            GFS2_METATYPE_JD,
+            GFS2_METATYPE_LH,
+            GFS2_METATYPE_LB,
+            GFS2_METATYPE_EA,
+            GFS2_METATYPE_ED,
             GFS2_METATYPE_QC,
         ];
         for i in 0..types.len() {
@@ -141,9 +149,15 @@ mod tests {
     #[test]
     fn test_formats_distinct() {
         let fmts = [
-            GFS2_FORMAT_SB, GFS2_FORMAT_RG, GFS2_FORMAT_RB,
-            GFS2_FORMAT_DI, GFS2_FORMAT_IN, GFS2_FORMAT_LF,
-            GFS2_FORMAT_JD, GFS2_FORMAT_LH, GFS2_FORMAT_LB,
+            GFS2_FORMAT_SB,
+            GFS2_FORMAT_RG,
+            GFS2_FORMAT_RB,
+            GFS2_FORMAT_DI,
+            GFS2_FORMAT_IN,
+            GFS2_FORMAT_LF,
+            GFS2_FORMAT_JD,
+            GFS2_FORMAT_LH,
+            GFS2_FORMAT_LB,
         ];
         for i in 0..fmts.len() {
             for j in (i + 1)..fmts.len() {
@@ -162,9 +176,14 @@ mod tests {
     #[test]
     fn test_dinode_flags_distinct() {
         let flags = [
-            GFS2_DIF_JDATA, GFS2_DIF_EXHASH, GFS2_DIF_EA_INDIRECT,
-            GFS2_DIF_IMMUTABLE, GFS2_DIF_APPENDONLY, GFS2_DIF_NOATIME,
-            GFS2_DIF_SYSTEM, GFS2_DIF_TRUNC_IN_PROG,
+            GFS2_DIF_JDATA,
+            GFS2_DIF_EXHASH,
+            GFS2_DIF_EA_INDIRECT,
+            GFS2_DIF_IMMUTABLE,
+            GFS2_DIF_APPENDONLY,
+            GFS2_DIF_NOATIME,
+            GFS2_DIF_SYSTEM,
+            GFS2_DIF_TRUNC_IN_PROG,
             GFS2_DIF_INHERIT_JDATA,
         ];
         for i in 0..flags.len() {

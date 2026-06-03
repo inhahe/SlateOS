@@ -125,9 +125,15 @@ mod tests {
     #[test]
     fn test_packet_types_distinct() {
         let types = [
-            DCCP_PKT_REQUEST, DCCP_PKT_RESPONSE, DCCP_PKT_DATA,
-            DCCP_PKT_ACK, DCCP_PKT_DATAACK, DCCP_PKT_CLOSEREQ,
-            DCCP_PKT_CLOSE, DCCP_PKT_RESET, DCCP_PKT_SYNC,
+            DCCP_PKT_REQUEST,
+            DCCP_PKT_RESPONSE,
+            DCCP_PKT_DATA,
+            DCCP_PKT_ACK,
+            DCCP_PKT_DATAACK,
+            DCCP_PKT_CLOSEREQ,
+            DCCP_PKT_CLOSE,
+            DCCP_PKT_RESET,
+            DCCP_PKT_SYNC,
             DCCP_PKT_SYNCACK,
         ];
         for i in 0..types.len() {
@@ -140,11 +146,17 @@ mod tests {
     #[test]
     fn test_reset_codes_distinct() {
         let codes = [
-            DCCP_RESET_UNSPECIFIED, DCCP_RESET_CLOSED, DCCP_RESET_ABORTED,
-            DCCP_RESET_NO_CONNECTION, DCCP_RESET_PACKET_ERROR,
-            DCCP_RESET_OPTION_ERROR, DCCP_RESET_MANDATORY_ERROR,
-            DCCP_RESET_CONNECTION_REFUSED, DCCP_RESET_BAD_SERVICE,
-            DCCP_RESET_TOO_BUSY, DCCP_RESET_BAD_INIT_COOKIE,
+            DCCP_RESET_UNSPECIFIED,
+            DCCP_RESET_CLOSED,
+            DCCP_RESET_ABORTED,
+            DCCP_RESET_NO_CONNECTION,
+            DCCP_RESET_PACKET_ERROR,
+            DCCP_RESET_OPTION_ERROR,
+            DCCP_RESET_MANDATORY_ERROR,
+            DCCP_RESET_CONNECTION_REFUSED,
+            DCCP_RESET_BAD_SERVICE,
+            DCCP_RESET_TOO_BUSY,
+            DCCP_RESET_BAD_INIT_COOKIE,
             DCCP_RESET_AGGRESSION,
         ];
         for i in 0..codes.len() {
@@ -162,8 +174,12 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            DCCP_STATE_CLOSED, DCCP_STATE_REQUEST, DCCP_STATE_RESPOND,
-            DCCP_STATE_OPEN, DCCP_STATE_CLOSEREQ, DCCP_STATE_CLOSING,
+            DCCP_STATE_CLOSED,
+            DCCP_STATE_REQUEST,
+            DCCP_STATE_RESPOND,
+            DCCP_STATE_OPEN,
+            DCCP_STATE_CLOSEREQ,
+            DCCP_STATE_CLOSING,
             DCCP_STATE_TIMEWAIT,
         ];
         for i in 0..states.len() {
@@ -176,11 +192,16 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            DCCP_SOCKOPT_SERVICE, DCCP_SOCKOPT_CHANGE_L,
-            DCCP_SOCKOPT_CHANGE_R, DCCP_SOCKOPT_GET_CUR_MPS,
-            DCCP_SOCKOPT_SERVER_TIMEWAIT, DCCP_SOCKOPT_CCID_TX_INFO,
-            DCCP_SOCKOPT_CCID_RX_INFO, DCCP_SOCKOPT_AVAILABLE_CCIDS,
-            DCCP_SOCKOPT_TX_CCID, DCCP_SOCKOPT_RX_CCID,
+            DCCP_SOCKOPT_SERVICE,
+            DCCP_SOCKOPT_CHANGE_L,
+            DCCP_SOCKOPT_CHANGE_R,
+            DCCP_SOCKOPT_GET_CUR_MPS,
+            DCCP_SOCKOPT_SERVER_TIMEWAIT,
+            DCCP_SOCKOPT_CCID_TX_INFO,
+            DCCP_SOCKOPT_CCID_RX_INFO,
+            DCCP_SOCKOPT_AVAILABLE_CCIDS,
+            DCCP_SOCKOPT_TX_CCID,
+            DCCP_SOCKOPT_RX_CCID,
             DCCP_SOCKOPT_QPOLICY_TXQLEN,
         ];
         for i in 0..opts.len() {

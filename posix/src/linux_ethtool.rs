@@ -140,12 +140,21 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            ETHTOOL_GSET, ETHTOOL_SSET, ETHTOOL_GDRVINFO,
-            ETHTOOL_GWOL, ETHTOOL_SWOL, ETHTOOL_GLINK,
-            ETHTOOL_GCOALESCE, ETHTOOL_SCOALESCE,
-            ETHTOOL_GRINGPARAM, ETHTOOL_SRINGPARAM,
-            ETHTOOL_GSTATS, ETHTOOL_GFEATURES, ETHTOOL_SFEATURES,
-            ETHTOOL_GLINKSETTINGS, ETHTOOL_SLINKSETTINGS,
+            ETHTOOL_GSET,
+            ETHTOOL_SSET,
+            ETHTOOL_GDRVINFO,
+            ETHTOOL_GWOL,
+            ETHTOOL_SWOL,
+            ETHTOOL_GLINK,
+            ETHTOOL_GCOALESCE,
+            ETHTOOL_SCOALESCE,
+            ETHTOOL_GRINGPARAM,
+            ETHTOOL_SRINGPARAM,
+            ETHTOOL_GSTATS,
+            ETHTOOL_GFEATURES,
+            ETHTOOL_SFEATURES,
+            ETHTOOL_GLINKSETTINGS,
+            ETHTOOL_SLINKSETTINGS,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -172,8 +181,14 @@ mod tests {
     #[test]
     fn test_wol_flags_are_powers_of_two() {
         let flags = [
-            WAKE_PHY, WAKE_UCAST, WAKE_MCAST, WAKE_BCAST,
-            WAKE_ARP, WAKE_MAGIC, WAKE_MAGICSECURE, WAKE_FILTER,
+            WAKE_PHY,
+            WAKE_UCAST,
+            WAKE_MCAST,
+            WAKE_BCAST,
+            WAKE_ARP,
+            WAKE_MAGIC,
+            WAKE_MAGICSECURE,
+            WAKE_FILTER,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "WOL flag {f:#x} not a power of 2");

@@ -43,10 +43,17 @@ mod tests {
     #[test]
     fn test_unshare_flags_no_overlap() {
         let flags = [
-            UNSHARE_FS, UNSHARE_FILES, UNSHARE_NEWNS,
-            UNSHARE_NEWUTS, UNSHARE_NEWIPC, UNSHARE_NEWUSER,
-            UNSHARE_NEWPID, UNSHARE_NEWNET, UNSHARE_NEWCGROUP,
-            UNSHARE_NEWTIME, UNSHARE_SYSVSEM,
+            UNSHARE_FS,
+            UNSHARE_FILES,
+            UNSHARE_NEWNS,
+            UNSHARE_NEWUTS,
+            UNSHARE_NEWIPC,
+            UNSHARE_NEWUSER,
+            UNSHARE_NEWPID,
+            UNSHARE_NEWNET,
+            UNSHARE_NEWCGROUP,
+            UNSHARE_NEWTIME,
+            UNSHARE_SYSVSEM,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

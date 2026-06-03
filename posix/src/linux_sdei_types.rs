@@ -99,12 +99,21 @@ mod tests {
     #[test]
     fn test_function_ids_distinct() {
         let fns = [
-            SDEI_FN_VERSION, SDEI_FN_REGISTER, SDEI_FN_ENABLE,
-            SDEI_FN_DISABLE, SDEI_FN_CONTEXT, SDEI_FN_COMPLETE,
-            SDEI_FN_COMPLETE_AND_RESUME, SDEI_FN_UNREGISTER,
-            SDEI_FN_STATUS, SDEI_FN_INFO, SDEI_FN_PE_UNMASK,
-            SDEI_FN_PE_MASK, SDEI_FN_INTERRUPT_BIND,
-            SDEI_FN_INTERRUPT_RELEASE, SDEI_FN_RESET,
+            SDEI_FN_VERSION,
+            SDEI_FN_REGISTER,
+            SDEI_FN_ENABLE,
+            SDEI_FN_DISABLE,
+            SDEI_FN_CONTEXT,
+            SDEI_FN_COMPLETE,
+            SDEI_FN_COMPLETE_AND_RESUME,
+            SDEI_FN_UNREGISTER,
+            SDEI_FN_STATUS,
+            SDEI_FN_INFO,
+            SDEI_FN_PE_UNMASK,
+            SDEI_FN_PE_MASK,
+            SDEI_FN_INTERRUPT_BIND,
+            SDEI_FN_INTERRUPT_RELEASE,
+            SDEI_FN_RESET,
         ];
         for i in 0..fns.len() {
             for j in (i + 1)..fns.len() {
@@ -116,9 +125,12 @@ mod tests {
     #[test]
     fn test_return_codes_distinct() {
         let codes = [
-            SDEI_SUCCESS, SDEI_NOT_SUPPORTED,
-            SDEI_INVALID_PARAMETERS, SDEI_DENIED,
-            SDEI_PENDING, SDEI_OUT_OF_RESOURCE,
+            SDEI_SUCCESS,
+            SDEI_NOT_SUPPORTED,
+            SDEI_INVALID_PARAMETERS,
+            SDEI_DENIED,
+            SDEI_PENDING,
+            SDEI_OUT_OF_RESOURCE,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

@@ -85,8 +85,10 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            TC_FILTER_PROTO_ALL, TC_FILTER_PROTO_IP,
-            TC_FILTER_PROTO_IPV6, TC_FILTER_PROTO_ARP,
+            TC_FILTER_PROTO_ALL,
+            TC_FILTER_PROTO_IP,
+            TC_FILTER_PROTO_IPV6,
+            TC_FILTER_PROTO_ARP,
             TC_FILTER_PROTO_VLAN,
         ];
         for i in 0..protos.len() {
@@ -114,10 +116,18 @@ mod tests {
     #[test]
     fn test_u32_attrs_distinct() {
         let attrs = [
-            TCA_U32_UNSPEC, TCA_U32_CLASSID, TCA_U32_HASH,
-            TCA_U32_LINK, TCA_U32_DIVISOR, TCA_U32_SEL,
-            TCA_U32_POLICE, TCA_U32_ACT, TCA_U32_INDEV,
-            TCA_U32_PCNT, TCA_U32_MARK, TCA_U32_FLAGS,
+            TCA_U32_UNSPEC,
+            TCA_U32_CLASSID,
+            TCA_U32_HASH,
+            TCA_U32_LINK,
+            TCA_U32_DIVISOR,
+            TCA_U32_SEL,
+            TCA_U32_POLICE,
+            TCA_U32_ACT,
+            TCA_U32_INDEV,
+            TCA_U32_PCNT,
+            TCA_U32_MARK,
+            TCA_U32_FLAGS,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -129,8 +139,10 @@ mod tests {
     #[test]
     fn test_matchall_attrs_distinct() {
         let attrs = [
-            TCA_MATCHALL_UNSPEC, TCA_MATCHALL_CLASSID,
-            TCA_MATCHALL_ACT, TCA_MATCHALL_FLAGS,
+            TCA_MATCHALL_UNSPEC,
+            TCA_MATCHALL_CLASSID,
+            TCA_MATCHALL_ACT,
+            TCA_MATCHALL_FLAGS,
             TCA_MATCHALL_PCNT,
         ];
         for i in 0..attrs.len() {

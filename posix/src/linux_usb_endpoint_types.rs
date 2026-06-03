@@ -92,8 +92,10 @@ mod tests {
     #[test]
     fn test_xfer_types_distinct() {
         let types = [
-            USB_ENDPOINT_XFER_CONTROL, USB_ENDPOINT_XFER_ISOC,
-            USB_ENDPOINT_XFER_BULK, USB_ENDPOINT_XFER_INT,
+            USB_ENDPOINT_XFER_CONTROL,
+            USB_ENDPOINT_XFER_ISOC,
+            USB_ENDPOINT_XFER_BULK,
+            USB_ENDPOINT_XFER_INT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -105,8 +107,10 @@ mod tests {
     #[test]
     fn test_sync_types_in_mask() {
         let syncs = [
-            USB_ENDPOINT_SYNC_NONE, USB_ENDPOINT_SYNC_ASYNC,
-            USB_ENDPOINT_SYNC_ADAPTIVE, USB_ENDPOINT_SYNC_SYNC,
+            USB_ENDPOINT_SYNC_NONE,
+            USB_ENDPOINT_SYNC_ASYNC,
+            USB_ENDPOINT_SYNC_ADAPTIVE,
+            USB_ENDPOINT_SYNC_SYNC,
         ];
         for s in &syncs {
             assert_eq!(*s & !USB_ENDPOINT_SYNCTYPE_MASK, 0);

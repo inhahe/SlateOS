@@ -75,7 +75,11 @@ mod tests {
 
     #[test]
     fn test_fence_status_distinct() {
-        let statuses = [FENCE_STATUS_ACTIVE, FENCE_STATUS_SIGNALED, FENCE_STATUS_ERROR];
+        let statuses = [
+            FENCE_STATUS_ACTIVE,
+            FENCE_STATUS_SIGNALED,
+            FENCE_STATUS_ERROR,
+        ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
                 assert_ne!(statuses[i], statuses[j]);
@@ -87,7 +91,10 @@ mod tests {
     fn test_sync_fence_flags() {
         assert!(SYNC_FENCE_FLAG_SIGNALED.is_power_of_two());
         assert!(SYNC_FENCE_FLAG_TIMESTAMP_VALID.is_power_of_two());
-        assert_eq!(SYNC_FENCE_FLAG_SIGNALED & SYNC_FENCE_FLAG_TIMESTAMP_VALID, 0);
+        assert_eq!(
+            SYNC_FENCE_FLAG_SIGNALED & SYNC_FENCE_FLAG_TIMESTAMP_VALID,
+            0
+        );
     }
 
     #[test]
@@ -107,11 +114,16 @@ mod tests {
     #[test]
     fn test_syncobj_ioctls_distinct() {
         let cmds = [
-            DRM_IOCTL_SYNCOBJ_CREATE, DRM_IOCTL_SYNCOBJ_DESTROY,
-            DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD, DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE,
-            DRM_IOCTL_SYNCOBJ_WAIT, DRM_IOCTL_SYNCOBJ_RESET,
-            DRM_IOCTL_SYNCOBJ_SIGNAL, DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT,
-            DRM_IOCTL_SYNCOBJ_QUERY, DRM_IOCTL_SYNCOBJ_TRANSFER,
+            DRM_IOCTL_SYNCOBJ_CREATE,
+            DRM_IOCTL_SYNCOBJ_DESTROY,
+            DRM_IOCTL_SYNCOBJ_HANDLE_TO_FD,
+            DRM_IOCTL_SYNCOBJ_FD_TO_HANDLE,
+            DRM_IOCTL_SYNCOBJ_WAIT,
+            DRM_IOCTL_SYNCOBJ_RESET,
+            DRM_IOCTL_SYNCOBJ_SIGNAL,
+            DRM_IOCTL_SYNCOBJ_TIMELINE_WAIT,
+            DRM_IOCTL_SYNCOBJ_QUERY,
+            DRM_IOCTL_SYNCOBJ_TRANSFER,
             DRM_IOCTL_SYNCOBJ_TIMELINE_SIGNAL,
         ];
         for i in 0..cmds.len() {

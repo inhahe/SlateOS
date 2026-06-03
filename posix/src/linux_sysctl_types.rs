@@ -101,9 +101,16 @@ mod tests {
     #[test]
     fn test_kern_subcats_distinct() {
         let subs = [
-            KERN_OSTYPE, KERN_OSRELEASE, KERN_OSREV, KERN_VERSION,
-            KERN_HOSTNAME, KERN_DOMAINNAME, KERN_MAX_THREADS,
-            KERN_PANIC, KERN_RANDOM, KERN_PID_MAX,
+            KERN_OSTYPE,
+            KERN_OSRELEASE,
+            KERN_OSREV,
+            KERN_VERSION,
+            KERN_HOSTNAME,
+            KERN_DOMAINNAME,
+            KERN_MAX_THREADS,
+            KERN_PANIC,
+            KERN_RANDOM,
+            KERN_PID_MAX,
         ];
         for i in 0..subs.len() {
             for j in (i + 1)..subs.len() {
@@ -115,8 +122,12 @@ mod tests {
     #[test]
     fn test_vm_subcats_distinct() {
         let subs = [
-            VM_OVERCOMMIT_MEMORY, VM_SWAPPINESS, VM_DIRTY_RATIO,
-            VM_DIRTY_BACKGROUND, VM_MIN_FREE_KBYTES, VM_OOM_KILL,
+            VM_OVERCOMMIT_MEMORY,
+            VM_SWAPPINESS,
+            VM_DIRTY_RATIO,
+            VM_DIRTY_BACKGROUND,
+            VM_MIN_FREE_KBYTES,
+            VM_OOM_KILL,
             VM_COMPACT_MEMORY,
         ];
         for i in 0..subs.len() {

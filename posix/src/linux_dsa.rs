@@ -92,12 +92,20 @@ mod tests {
     #[test]
     fn test_tag_protocols_distinct() {
         let protos = [
-            DSA_TAG_PROTO_NONE, DSA_TAG_PROTO_DSA, DSA_TAG_PROTO_EDSA,
-            DSA_TAG_PROTO_BRCM, DSA_TAG_PROTO_BRCM_PREPEND,
-            DSA_TAG_PROTO_QCA, DSA_TAG_PROTO_TRAILER,
-            DSA_TAG_PROTO_KSZ, DSA_TAG_PROTO_OCELOT,
-            DSA_TAG_PROTO_SJA1105, DSA_TAG_PROTO_LAN9303,
-            DSA_TAG_PROTO_MTK, DSA_TAG_PROTO_RTL4, DSA_TAG_PROTO_RTL8,
+            DSA_TAG_PROTO_NONE,
+            DSA_TAG_PROTO_DSA,
+            DSA_TAG_PROTO_EDSA,
+            DSA_TAG_PROTO_BRCM,
+            DSA_TAG_PROTO_BRCM_PREPEND,
+            DSA_TAG_PROTO_QCA,
+            DSA_TAG_PROTO_TRAILER,
+            DSA_TAG_PROTO_KSZ,
+            DSA_TAG_PROTO_OCELOT,
+            DSA_TAG_PROTO_SJA1105,
+            DSA_TAG_PROTO_LAN9303,
+            DSA_TAG_PROTO_MTK,
+            DSA_TAG_PROTO_RTL4,
+            DSA_TAG_PROTO_RTL8,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
@@ -109,8 +117,10 @@ mod tests {
     #[test]
     fn test_port_types_distinct() {
         let types = [
-            DSA_PORT_TYPE_USER, DSA_PORT_TYPE_CPU,
-            DSA_PORT_TYPE_DSA, DSA_PORT_TYPE_UNUSED,
+            DSA_PORT_TYPE_USER,
+            DSA_PORT_TYPE_CPU,
+            DSA_PORT_TYPE_DSA,
+            DSA_PORT_TYPE_UNUSED,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -122,9 +132,13 @@ mod tests {
     #[test]
     fn test_switch_flags_no_overlap() {
         let flags = [
-            DSA_SWITCH_VLAN_FILTERING, DSA_SWITCH_BRIDGE,
-            DSA_SWITCH_STP, DSA_SWITCH_MIRROR,
-            DSA_SWITCH_ACL, DSA_SWITCH_ISOLATION, DSA_SWITCH_LAG,
+            DSA_SWITCH_VLAN_FILTERING,
+            DSA_SWITCH_BRIDGE,
+            DSA_SWITCH_STP,
+            DSA_SWITCH_MIRROR,
+            DSA_SWITCH_ACL,
+            DSA_SWITCH_ISOLATION,
+            DSA_SWITCH_LAG,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -136,9 +150,13 @@ mod tests {
     #[test]
     fn test_switch_flags_power_of_two() {
         let flags = [
-            DSA_SWITCH_VLAN_FILTERING, DSA_SWITCH_BRIDGE,
-            DSA_SWITCH_STP, DSA_SWITCH_MIRROR,
-            DSA_SWITCH_ACL, DSA_SWITCH_ISOLATION, DSA_SWITCH_LAG,
+            DSA_SWITCH_VLAN_FILTERING,
+            DSA_SWITCH_BRIDGE,
+            DSA_SWITCH_STP,
+            DSA_SWITCH_MIRROR,
+            DSA_SWITCH_ACL,
+            DSA_SWITCH_ISOLATION,
+            DSA_SWITCH_LAG,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());

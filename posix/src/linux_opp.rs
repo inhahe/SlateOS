@@ -96,8 +96,11 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            OPP_EVENT_ADD, OPP_EVENT_REMOVE, OPP_EVENT_ENABLE,
-            OPP_EVENT_DISABLE, OPP_EVENT_ADJUST_VOLTAGE,
+            OPP_EVENT_ADD,
+            OPP_EVENT_REMOVE,
+            OPP_EVENT_ENABLE,
+            OPP_EVENT_DISABLE,
+            OPP_EVENT_ADJUST_VOLTAGE,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

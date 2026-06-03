@@ -2,26 +2,26 @@
 //!
 //! Re-exports inotify functions and constants from the `epoll` module.
 
+pub use crate::epoll::inotify_add_watch;
 pub use crate::epoll::inotify_init;
 pub use crate::epoll::inotify_init1;
-pub use crate::epoll::inotify_add_watch;
 pub use crate::epoll::inotify_rm_watch;
 
 // Event mask constants
 pub use crate::epoll::IN_ACCESS;
-pub use crate::epoll::IN_MODIFY;
+pub use crate::epoll::IN_ALL_EVENTS;
 pub use crate::epoll::IN_ATTRIB;
-pub use crate::epoll::IN_CLOSE_WRITE;
+pub use crate::epoll::IN_CLOSE;
 pub use crate::epoll::IN_CLOSE_NOWRITE;
-pub use crate::epoll::IN_OPEN;
-pub use crate::epoll::IN_MOVED_FROM;
-pub use crate::epoll::IN_MOVED_TO;
+pub use crate::epoll::IN_CLOSE_WRITE;
 pub use crate::epoll::IN_CREATE;
 pub use crate::epoll::IN_DELETE;
 pub use crate::epoll::IN_DELETE_SELF;
+pub use crate::epoll::IN_MODIFY;
 pub use crate::epoll::IN_MOVE_SELF;
-pub use crate::epoll::IN_CLOSE;
-pub use crate::epoll::IN_ALL_EVENTS;
+pub use crate::epoll::IN_MOVED_FROM;
+pub use crate::epoll::IN_MOVED_TO;
+pub use crate::epoll::IN_OPEN;
 
 // Init flags
 pub use crate::epoll::IN_CLOEXEC;
@@ -109,8 +109,14 @@ mod tests {
     #[test]
     fn test_special_flags_distinct() {
         let flags = [
-            IN_IGNORED, IN_ISDIR, IN_Q_OVERFLOW, IN_DONT_FOLLOW,
-            IN_EXCL_UNLINK, IN_MASK_ADD, IN_ONESHOT, IN_MASK_CREATE,
+            IN_IGNORED,
+            IN_ISDIR,
+            IN_Q_OVERFLOW,
+            IN_DONT_FOLLOW,
+            IN_EXCL_UNLINK,
+            IN_MASK_ADD,
+            IN_ONESHOT,
+            IN_MASK_CREATE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

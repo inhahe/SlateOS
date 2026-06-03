@@ -171,13 +171,22 @@ mod tests {
     #[test]
     fn test_setup_flags_power_of_two() {
         let flags = [
-            IORING_SETUP_IOPOLL, IORING_SETUP_SQPOLL, IORING_SETUP_SQ_AFF,
-            IORING_SETUP_CQSIZE, IORING_SETUP_CLAMP, IORING_SETUP_ATTACH_WQ,
-            IORING_SETUP_R_DISABLED, IORING_SETUP_SUBMIT_ALL,
-            IORING_SETUP_COOP_TASKRUN, IORING_SETUP_TASKRUN_FLAG,
-            IORING_SETUP_SQE128, IORING_SETUP_CQE32,
-            IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_DEFER_TASKRUN,
-            IORING_SETUP_NO_MMAP, IORING_SETUP_REGISTERED_FD_ONLY,
+            IORING_SETUP_IOPOLL,
+            IORING_SETUP_SQPOLL,
+            IORING_SETUP_SQ_AFF,
+            IORING_SETUP_CQSIZE,
+            IORING_SETUP_CLAMP,
+            IORING_SETUP_ATTACH_WQ,
+            IORING_SETUP_R_DISABLED,
+            IORING_SETUP_SUBMIT_ALL,
+            IORING_SETUP_COOP_TASKRUN,
+            IORING_SETUP_TASKRUN_FLAG,
+            IORING_SETUP_SQE128,
+            IORING_SETUP_CQE32,
+            IORING_SETUP_SINGLE_ISSUER,
+            IORING_SETUP_DEFER_TASKRUN,
+            IORING_SETUP_NO_MMAP,
+            IORING_SETUP_REGISTERED_FD_ONLY,
             IORING_SETUP_NO_SQARRAY,
         ];
         for f in &flags {
@@ -188,13 +197,22 @@ mod tests {
     #[test]
     fn test_setup_flags_distinct() {
         let flags = [
-            IORING_SETUP_IOPOLL, IORING_SETUP_SQPOLL, IORING_SETUP_SQ_AFF,
-            IORING_SETUP_CQSIZE, IORING_SETUP_CLAMP, IORING_SETUP_ATTACH_WQ,
-            IORING_SETUP_R_DISABLED, IORING_SETUP_SUBMIT_ALL,
-            IORING_SETUP_COOP_TASKRUN, IORING_SETUP_TASKRUN_FLAG,
-            IORING_SETUP_SQE128, IORING_SETUP_CQE32,
-            IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_DEFER_TASKRUN,
-            IORING_SETUP_NO_MMAP, IORING_SETUP_REGISTERED_FD_ONLY,
+            IORING_SETUP_IOPOLL,
+            IORING_SETUP_SQPOLL,
+            IORING_SETUP_SQ_AFF,
+            IORING_SETUP_CQSIZE,
+            IORING_SETUP_CLAMP,
+            IORING_SETUP_ATTACH_WQ,
+            IORING_SETUP_R_DISABLED,
+            IORING_SETUP_SUBMIT_ALL,
+            IORING_SETUP_COOP_TASKRUN,
+            IORING_SETUP_TASKRUN_FLAG,
+            IORING_SETUP_SQE128,
+            IORING_SETUP_CQE32,
+            IORING_SETUP_SINGLE_ISSUER,
+            IORING_SETUP_DEFER_TASKRUN,
+            IORING_SETUP_NO_MMAP,
+            IORING_SETUP_REGISTERED_FD_ONLY,
             IORING_SETUP_NO_SQARRAY,
         ];
         for i in 0..flags.len() {
@@ -207,13 +225,20 @@ mod tests {
     #[test]
     fn test_feat_flags_power_of_two() {
         let feats = [
-            IORING_FEAT_SINGLE_MMAP, IORING_FEAT_NODROP,
-            IORING_FEAT_SUBMIT_STABLE, IORING_FEAT_RW_CUR_POS,
-            IORING_FEAT_CUR_PERSONALITY, IORING_FEAT_FAST_POLL,
-            IORING_FEAT_POLL_32BITS, IORING_FEAT_SQPOLL_NONFIXED,
-            IORING_FEAT_EXT_ARG, IORING_FEAT_NATIVE_WORKERS,
-            IORING_FEAT_RSRC_TAGS, IORING_FEAT_CQE_SKIP,
-            IORING_FEAT_LINKED_FILE, IORING_FEAT_REG_REG_RING,
+            IORING_FEAT_SINGLE_MMAP,
+            IORING_FEAT_NODROP,
+            IORING_FEAT_SUBMIT_STABLE,
+            IORING_FEAT_RW_CUR_POS,
+            IORING_FEAT_CUR_PERSONALITY,
+            IORING_FEAT_FAST_POLL,
+            IORING_FEAT_POLL_32BITS,
+            IORING_FEAT_SQPOLL_NONFIXED,
+            IORING_FEAT_EXT_ARG,
+            IORING_FEAT_NATIVE_WORKERS,
+            IORING_FEAT_RSRC_TAGS,
+            IORING_FEAT_CQE_SKIP,
+            IORING_FEAT_LINKED_FILE,
+            IORING_FEAT_REG_REG_RING,
             IORING_FEAT_RECVSEND_BUNDLE,
         ];
         for f in &feats {
@@ -223,7 +248,11 @@ mod tests {
 
     #[test]
     fn test_sq_flags_distinct() {
-        let flags = [IORING_SQ_NEED_WAKEUP, IORING_SQ_CQ_OVERFLOW, IORING_SQ_TASKRUN];
+        let flags = [
+            IORING_SQ_NEED_WAKEUP,
+            IORING_SQ_CQ_OVERFLOW,
+            IORING_SQ_TASKRUN,
+        ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(flags[i], flags[j]);
@@ -234,8 +263,10 @@ mod tests {
     #[test]
     fn test_enter_flags_power_of_two() {
         let flags = [
-            IORING_ENTER_GETEVENTS, IORING_ENTER_SQ_WAKEUP,
-            IORING_ENTER_SQ_WAIT, IORING_ENTER_EXT_ARG,
+            IORING_ENTER_GETEVENTS,
+            IORING_ENTER_SQ_WAKEUP,
+            IORING_ENTER_SQ_WAIT,
+            IORING_ENTER_EXT_ARG,
             IORING_ENTER_REGISTERED_RING,
         ];
         for f in &flags {
@@ -245,7 +276,10 @@ mod tests {
 
     #[test]
     fn test_timeout_clock_mask() {
-        assert_eq!(IORING_TIMEOUT_CLOCK_MASK, IORING_TIMEOUT_BOOTTIME | IORING_TIMEOUT_REALTIME);
+        assert_eq!(
+            IORING_TIMEOUT_CLOCK_MASK,
+            IORING_TIMEOUT_BOOTTIME | IORING_TIMEOUT_REALTIME
+        );
     }
 
     #[test]
@@ -259,12 +293,18 @@ mod tests {
     #[test]
     fn test_register_opcodes_distinct() {
         let ops = [
-            IORING_REGISTER_BUFFERS, IORING_UNREGISTER_BUFFERS,
-            IORING_REGISTER_FILES, IORING_UNREGISTER_FILES,
-            IORING_REGISTER_EVENTFD, IORING_UNREGISTER_EVENTFD,
-            IORING_REGISTER_FILES_UPDATE, IORING_REGISTER_EVENTFD_ASYNC,
-            IORING_REGISTER_PROBE, IORING_REGISTER_PERSONALITY,
-            IORING_UNREGISTER_PERSONALITY, IORING_REGISTER_RESTRICTIONS,
+            IORING_REGISTER_BUFFERS,
+            IORING_UNREGISTER_BUFFERS,
+            IORING_REGISTER_FILES,
+            IORING_UNREGISTER_FILES,
+            IORING_REGISTER_EVENTFD,
+            IORING_UNREGISTER_EVENTFD,
+            IORING_REGISTER_FILES_UPDATE,
+            IORING_REGISTER_EVENTFD_ASYNC,
+            IORING_REGISTER_PROBE,
+            IORING_REGISTER_PERSONALITY,
+            IORING_UNREGISTER_PERSONALITY,
+            IORING_REGISTER_RESTRICTIONS,
             IORING_REGISTER_ENABLE_RINGS,
         ];
         for i in 0..ops.len() {

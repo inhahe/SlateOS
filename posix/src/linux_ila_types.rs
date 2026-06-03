@@ -106,10 +106,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            ILA_ATTR_LOCATOR, ILA_ATTR_IDENTIFIER,
-            ILA_ATTR_LOCATOR_MATCH, ILA_ATTR_IFINDEX,
-            ILA_ATTR_DIR, ILA_ATTR_CSUM_MODE,
-            ILA_ATTR_IDENT_TYPE, ILA_ATTR_HOOK_TYPE,
+            ILA_ATTR_LOCATOR,
+            ILA_ATTR_IDENTIFIER,
+            ILA_ATTR_LOCATOR_MATCH,
+            ILA_ATTR_IFINDEX,
+            ILA_ATTR_DIR,
+            ILA_ATTR_CSUM_MODE,
+            ILA_ATTR_IDENT_TYPE,
+            ILA_ATTR_HOOK_TYPE,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -121,8 +125,10 @@ mod tests {
     #[test]
     fn test_csum_modes_distinct() {
         let modes = [
-            ILA_CSUM_NO_ACTION, ILA_CSUM_ADJUST_TRANSPORT,
-            ILA_CSUM_NEUTRAL_MAP, ILA_CSUM_NEUTRAL_MAP_AUTO,
+            ILA_CSUM_NO_ACTION,
+            ILA_CSUM_ADJUST_TRANSPORT,
+            ILA_CSUM_NEUTRAL_MAP,
+            ILA_CSUM_NEUTRAL_MAP_AUTO,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

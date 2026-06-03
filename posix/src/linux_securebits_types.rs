@@ -60,10 +60,14 @@ mod tests {
     #[test]
     fn test_securebits_no_overlap() {
         let bits = [
-            SECBIT_NOROOT, SECBIT_NOROOT_LOCKED,
-            SECBIT_NO_SETUID_FIXUP, SECBIT_NO_SETUID_FIXUP_LOCKED,
-            SECBIT_KEEP_CAPS, SECBIT_KEEP_CAPS_LOCKED,
-            SECBIT_NO_CAP_AMBIENT_RAISE, SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
+            SECBIT_NOROOT,
+            SECBIT_NOROOT_LOCKED,
+            SECBIT_NO_SETUID_FIXUP,
+            SECBIT_NO_SETUID_FIXUP_LOCKED,
+            SECBIT_KEEP_CAPS,
+            SECBIT_KEEP_CAPS_LOCKED,
+            SECBIT_NO_CAP_AMBIENT_RAISE,
+            SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
         ];
         for i in 0..bits.len() {
             assert!(bits[i].is_power_of_two());
@@ -79,7 +83,10 @@ mod tests {
         assert_eq!(SECBIT_NOROOT_LOCKED, SECBIT_NOROOT << 1);
         assert_eq!(SECBIT_NO_SETUID_FIXUP_LOCKED, SECBIT_NO_SETUID_FIXUP << 1);
         assert_eq!(SECBIT_KEEP_CAPS_LOCKED, SECBIT_KEEP_CAPS << 1);
-        assert_eq!(SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED, SECBIT_NO_CAP_AMBIENT_RAISE << 1);
+        assert_eq!(
+            SECBIT_NO_CAP_AMBIENT_RAISE_LOCKED,
+            SECBIT_NO_CAP_AMBIENT_RAISE << 1
+        );
     }
 
     #[test]

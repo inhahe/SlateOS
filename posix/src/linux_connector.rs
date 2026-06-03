@@ -126,10 +126,16 @@ mod tests {
     #[test]
     fn test_proc_events_distinct() {
         let events = [
-            PROC_EVENT_NONE, PROC_EVENT_FORK, PROC_EVENT_EXEC,
-            PROC_EVENT_UID, PROC_EVENT_GID, PROC_EVENT_SID,
-            PROC_EVENT_PTRACE, PROC_EVENT_COMM,
-            PROC_EVENT_COREDUMP, PROC_EVENT_EXIT,
+            PROC_EVENT_NONE,
+            PROC_EVENT_FORK,
+            PROC_EVENT_EXEC,
+            PROC_EVENT_UID,
+            PROC_EVENT_GID,
+            PROC_EVENT_SID,
+            PROC_EVENT_PTRACE,
+            PROC_EVENT_COMM,
+            PROC_EVENT_COREDUMP,
+            PROC_EVENT_EXIT,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -147,8 +153,12 @@ mod tests {
     #[test]
     fn test_idx_values_distinct() {
         let idxs = [
-            CN_IDX_PROC, CN_IDX_CIFS, CN_IDX_W1,
-            CN_IDX_ISCSI, CN_IDX_DRBD, CN_IDX_V86D,
+            CN_IDX_PROC,
+            CN_IDX_CIFS,
+            CN_IDX_W1,
+            CN_IDX_ISCSI,
+            CN_IDX_DRBD,
+            CN_IDX_V86D,
         ];
         for i in 0..idxs.len() {
             for j in (i + 1)..idxs.len() {

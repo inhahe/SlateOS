@@ -78,11 +78,16 @@ mod tests {
     #[test]
     fn test_entity_functions_distinct() {
         let funcs = [
-            MEDIA_ENT_F_UNKNOWN, MEDIA_ENT_F_DTV_DEMOD,
-            MEDIA_ENT_F_TUNER, MEDIA_ENT_F_IO_V4L,
-            MEDIA_ENT_F_IO_DTV, MEDIA_ENT_F_IO_VBI,
-            MEDIA_ENT_F_IO_SWRADIO, MEDIA_ENT_F_CAM_SENSOR,
-            MEDIA_ENT_F_FLASH, MEDIA_ENT_F_LENS,
+            MEDIA_ENT_F_UNKNOWN,
+            MEDIA_ENT_F_DTV_DEMOD,
+            MEDIA_ENT_F_TUNER,
+            MEDIA_ENT_F_IO_V4L,
+            MEDIA_ENT_F_IO_DTV,
+            MEDIA_ENT_F_IO_VBI,
+            MEDIA_ENT_F_IO_SWRADIO,
+            MEDIA_ENT_F_CAM_SENSOR,
+            MEDIA_ENT_F_FLASH,
+            MEDIA_ENT_F_LENS,
             MEDIA_ENT_F_PROC_VIDEO_PIXEL_FORMATTER,
         ];
         for i in 0..funcs.len() {
@@ -95,8 +100,10 @@ mod tests {
     #[test]
     fn test_link_flags_no_overlap() {
         let flags = [
-            MEDIA_LNK_FL_ENABLED, MEDIA_LNK_FL_IMMUTABLE,
-            MEDIA_LNK_FL_DYNAMIC, MEDIA_LNK_FL_INTERFACE_LINK,
+            MEDIA_LNK_FL_ENABLED,
+            MEDIA_LNK_FL_IMMUTABLE,
+            MEDIA_LNK_FL_DYNAMIC,
+            MEDIA_LNK_FL_INTERFACE_LINK,
             MEDIA_LNK_FL_ANCILLARY_LINK,
         ];
         for i in 0..flags.len() {
@@ -109,7 +116,8 @@ mod tests {
     #[test]
     fn test_pad_flags_no_overlap() {
         let flags = [
-            MEDIA_PAD_FL_SINK, MEDIA_PAD_FL_SOURCE,
+            MEDIA_PAD_FL_SINK,
+            MEDIA_PAD_FL_SOURCE,
             MEDIA_PAD_FL_MUST_CONNECT,
         ];
         for i in 0..flags.len() {

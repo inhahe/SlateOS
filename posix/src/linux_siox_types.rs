@@ -55,8 +55,10 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            SIOX_TYPE_DIGITAL_IN, SIOX_TYPE_DIGITAL_OUT,
-            SIOX_TYPE_ANALOG_IN, SIOX_TYPE_ANALOG_OUT,
+            SIOX_TYPE_DIGITAL_IN,
+            SIOX_TYPE_DIGITAL_OUT,
+            SIOX_TYPE_ANALOG_IN,
+            SIOX_TYPE_ANALOG_OUT,
             SIOX_TYPE_COMBO,
         ];
         for i in 0..types.len() {
@@ -79,7 +81,8 @@ mod tests {
     #[test]
     fn test_status_flags_no_overlap() {
         let flags = [
-            SIOX_STATUS_WATCHDOG, SIOX_STATUS_CRC_ERROR,
+            SIOX_STATUS_WATCHDOG,
+            SIOX_STATUS_CRC_ERROR,
             SIOX_STATUS_CONNECTED,
         ];
         for i in 0..flags.len() {

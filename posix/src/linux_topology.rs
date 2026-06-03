@@ -85,9 +85,12 @@ mod tests {
     #[test]
     fn test_topology_levels_distinct() {
         let levels = [
-            TOPOLOGY_SMT_LEVEL, TOPOLOGY_CORE_LEVEL,
-            TOPOLOGY_CLUSTER_LEVEL, TOPOLOGY_PKG_LEVEL,
-            TOPOLOGY_NUMA_LEVEL, TOPOLOGY_SYSTEM_LEVEL,
+            TOPOLOGY_SMT_LEVEL,
+            TOPOLOGY_CORE_LEVEL,
+            TOPOLOGY_CLUSTER_LEVEL,
+            TOPOLOGY_PKG_LEVEL,
+            TOPOLOGY_NUMA_LEVEL,
+            TOPOLOGY_SYSTEM_LEVEL,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -108,13 +111,23 @@ mod tests {
     #[test]
     fn test_sd_flags_powers_of_two() {
         let flags = [
-            SD_LOAD_BALANCE, SD_BALANCE_EXEC, SD_BALANCE_FORK,
-            SD_BALANCE_WAKE, SD_WAKE_AFFINE, SD_ASYM_PACKING,
-            SD_PREFER_SIBLING, SD_OVERLAP, SD_NUMA,
-            SD_ASYM_CPUCAPACITY, SD_ASYM_CPUCAPACITY_FULL,
-            SD_SHARE_CPUCAPACITY, SD_SHARE_POWERDOMAIN,
-            SD_SHARE_L1_CACHE, SD_SHARE_L2_CACHE,
-            SD_SHARE_L3_CACHE, SD_SERIALIZE,
+            SD_LOAD_BALANCE,
+            SD_BALANCE_EXEC,
+            SD_BALANCE_FORK,
+            SD_BALANCE_WAKE,
+            SD_WAKE_AFFINE,
+            SD_ASYM_PACKING,
+            SD_PREFER_SIBLING,
+            SD_OVERLAP,
+            SD_NUMA,
+            SD_ASYM_CPUCAPACITY,
+            SD_ASYM_CPUCAPACITY_FULL,
+            SD_SHARE_CPUCAPACITY,
+            SD_SHARE_POWERDOMAIN,
+            SD_SHARE_L1_CACHE,
+            SD_SHARE_L2_CACHE,
+            SD_SHARE_L3_CACHE,
+            SD_SERIALIZE,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -124,13 +137,23 @@ mod tests {
     #[test]
     fn test_sd_flags_no_overlap() {
         let flags = [
-            SD_LOAD_BALANCE, SD_BALANCE_EXEC, SD_BALANCE_FORK,
-            SD_BALANCE_WAKE, SD_WAKE_AFFINE, SD_ASYM_PACKING,
-            SD_PREFER_SIBLING, SD_OVERLAP, SD_NUMA,
-            SD_ASYM_CPUCAPACITY, SD_ASYM_CPUCAPACITY_FULL,
-            SD_SHARE_CPUCAPACITY, SD_SHARE_POWERDOMAIN,
-            SD_SHARE_L1_CACHE, SD_SHARE_L2_CACHE,
-            SD_SHARE_L3_CACHE, SD_SERIALIZE,
+            SD_LOAD_BALANCE,
+            SD_BALANCE_EXEC,
+            SD_BALANCE_FORK,
+            SD_BALANCE_WAKE,
+            SD_WAKE_AFFINE,
+            SD_ASYM_PACKING,
+            SD_PREFER_SIBLING,
+            SD_OVERLAP,
+            SD_NUMA,
+            SD_ASYM_CPUCAPACITY,
+            SD_ASYM_CPUCAPACITY_FULL,
+            SD_SHARE_CPUCAPACITY,
+            SD_SHARE_POWERDOMAIN,
+            SD_SHARE_L1_CACHE,
+            SD_SHARE_L2_CACHE,
+            SD_SHARE_L3_CACHE,
+            SD_SERIALIZE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

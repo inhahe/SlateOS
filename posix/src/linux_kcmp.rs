@@ -2,15 +2,15 @@
 //!
 //! Re-exports `kcmp()` and `KCMP_*` constants from `process`.
 
-pub use crate::process::kcmp;
+pub use crate::process::KCMP_EPOLL_TFD;
 pub use crate::process::KCMP_FILE;
-pub use crate::process::KCMP_VM;
 pub use crate::process::KCMP_FILES;
 pub use crate::process::KCMP_FS;
-pub use crate::process::KCMP_SIGHAND;
 pub use crate::process::KCMP_IO;
+pub use crate::process::KCMP_SIGHAND;
 pub use crate::process::KCMP_SYSVSEM;
-pub use crate::process::KCMP_EPOLL_TFD;
+pub use crate::process::KCMP_VM;
+pub use crate::process::kcmp;
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -91,9 +91,12 @@ mod tests {
     #[test]
     fn test_iotlb_types_distinct() {
         let types = [
-            VHOST_IOTLB_MISS, VHOST_IOTLB_UPDATE,
-            VHOST_IOTLB_INVALIDATE, VHOST_IOTLB_ACCESS_FAIL,
-            VHOST_IOTLB_BATCH_BEGIN, VHOST_IOTLB_BATCH_END,
+            VHOST_IOTLB_MISS,
+            VHOST_IOTLB_UPDATE,
+            VHOST_IOTLB_INVALIDATE,
+            VHOST_IOTLB_ACCESS_FAIL,
+            VHOST_IOTLB_BATCH_BEGIN,
+            VHOST_IOTLB_BATCH_END,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -115,9 +118,12 @@ mod tests {
     #[test]
     fn test_backend_features_distinct() {
         let feats = [
-            VHOST_BACKEND_F_IOTLB_MSG_V2, VHOST_BACKEND_F_IOTLB_BATCH,
-            VHOST_BACKEND_F_IOTLB_ASID, VHOST_BACKEND_F_SUSPEND,
-            VHOST_BACKEND_F_RESUME, VHOST_BACKEND_F_ENABLE_AFTER_DRIVER_OK,
+            VHOST_BACKEND_F_IOTLB_MSG_V2,
+            VHOST_BACKEND_F_IOTLB_BATCH,
+            VHOST_BACKEND_F_IOTLB_ASID,
+            VHOST_BACKEND_F_SUSPEND,
+            VHOST_BACKEND_F_RESUME,
+            VHOST_BACKEND_F_ENABLE_AFTER_DRIVER_OK,
             VHOST_BACKEND_F_DESC_ASID,
         ];
         for i in 0..feats.len() {

@@ -3,9 +3,9 @@
 //! Re-exports `SockaddrUn` and related constants from the `socket`
 //! module.
 
-pub use crate::socket::SockaddrUn;
-pub use crate::socket::AF_UNIX;
 pub use crate::socket::AF_LOCAL;
+pub use crate::socket::AF_UNIX;
+pub use crate::socket::SockaddrUn;
 
 /// Maximum path length in a Unix domain socket address.
 ///

@@ -88,8 +88,14 @@ mod tests {
     #[test]
     fn test_levels_distinct() {
         let levels = [
-            KERN_EMERG, KERN_ALERT, KERN_CRIT, KERN_ERR,
-            KERN_WARNING, KERN_NOTICE, KERN_INFO, KERN_DEBUG,
+            KERN_EMERG,
+            KERN_ALERT,
+            KERN_CRIT,
+            KERN_ERR,
+            KERN_WARNING,
+            KERN_NOTICE,
+            KERN_INFO,
+            KERN_DEBUG,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -119,9 +125,14 @@ mod tests {
     #[test]
     fn test_level_strings_distinct() {
         let strings = [
-            KERN_EMERG_STR, KERN_ALERT_STR, KERN_CRIT_STR,
-            KERN_ERR_STR, KERN_WARNING_STR, KERN_NOTICE_STR,
-            KERN_INFO_STR, KERN_DEBUG_STR,
+            KERN_EMERG_STR,
+            KERN_ALERT_STR,
+            KERN_CRIT_STR,
+            KERN_ERR_STR,
+            KERN_WARNING_STR,
+            KERN_NOTICE_STR,
+            KERN_INFO_STR,
+            KERN_DEBUG_STR,
         ];
         for i in 0..strings.len() {
             for j in (i + 1)..strings.len() {

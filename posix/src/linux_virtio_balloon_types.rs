@@ -75,9 +75,12 @@ mod tests {
     #[test]
     fn test_features_no_overlap() {
         let feats = [
-            VIRTIO_BALLOON_F_MUST_TELL_HOST, VIRTIO_BALLOON_F_STATS_VQ,
-            VIRTIO_BALLOON_F_DEFLATE_ON_OOM, VIRTIO_BALLOON_F_FREE_PAGE_HINT,
-            VIRTIO_BALLOON_F_PAGE_POISON, VIRTIO_BALLOON_F_REPORTING,
+            VIRTIO_BALLOON_F_MUST_TELL_HOST,
+            VIRTIO_BALLOON_F_STATS_VQ,
+            VIRTIO_BALLOON_F_DEFLATE_ON_OOM,
+            VIRTIO_BALLOON_F_FREE_PAGE_HINT,
+            VIRTIO_BALLOON_F_PAGE_POISON,
+            VIRTIO_BALLOON_F_REPORTING,
         ];
         for i in 0..feats.len() {
             assert!(feats[i].is_power_of_two());
@@ -90,8 +93,10 @@ mod tests {
     #[test]
     fn test_vq_indices_distinct() {
         let vqs = [
-            VIRTIO_BALLOON_VQ_INFLATE, VIRTIO_BALLOON_VQ_DEFLATE,
-            VIRTIO_BALLOON_VQ_STATS, VIRTIO_BALLOON_VQ_FREE_PAGE,
+            VIRTIO_BALLOON_VQ_INFLATE,
+            VIRTIO_BALLOON_VQ_DEFLATE,
+            VIRTIO_BALLOON_VQ_STATS,
+            VIRTIO_BALLOON_VQ_FREE_PAGE,
             VIRTIO_BALLOON_VQ_REPORTING,
         ];
         for i in 0..vqs.len() {

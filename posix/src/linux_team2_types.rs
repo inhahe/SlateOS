@@ -70,8 +70,10 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            TEAM_MODE_ROUNDROBIN, TEAM_MODE_ACTIVEBACKUP,
-            TEAM_MODE_LOADBALANCE, TEAM_MODE_BROADCAST,
+            TEAM_MODE_ROUNDROBIN,
+            TEAM_MODE_ACTIVEBACKUP,
+            TEAM_MODE_LOADBALANCE,
+            TEAM_MODE_BROADCAST,
             TEAM_MODE_RANDOM,
         ];
         for i in 0..modes.len() {
@@ -84,8 +86,10 @@ mod tests {
     #[test]
     fn test_port_changes_distinct() {
         let changes = [
-            TEAM_PORT_CHANGE_ADDED, TEAM_PORT_CHANGE_REMOVED,
-            TEAM_PORT_CHANGE_LINKUP, TEAM_PORT_CHANGE_LINKDOWN,
+            TEAM_PORT_CHANGE_ADDED,
+            TEAM_PORT_CHANGE_REMOVED,
+            TEAM_PORT_CHANGE_LINKUP,
+            TEAM_PORT_CHANGE_LINKDOWN,
         ];
         for i in 0..changes.len() {
             for j in (i + 1)..changes.len() {
@@ -97,8 +101,10 @@ mod tests {
     #[test]
     fn test_option_types_distinct() {
         let types = [
-            TEAM_OPTION_TYPE_U32, TEAM_OPTION_TYPE_STRING,
-            TEAM_OPTION_TYPE_BINARY, TEAM_OPTION_TYPE_BOOL,
+            TEAM_OPTION_TYPE_U32,
+            TEAM_OPTION_TYPE_STRING,
+            TEAM_OPTION_TYPE_BINARY,
+            TEAM_OPTION_TYPE_BOOL,
             TEAM_OPTION_TYPE_S32,
         ];
         for i in 0..types.len() {
@@ -111,8 +117,10 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            TEAM_CMD_NOOP, TEAM_CMD_OPTIONS_GET,
-            TEAM_CMD_OPTIONS_SET, TEAM_CMD_PORT_LIST_GET,
+            TEAM_CMD_NOOP,
+            TEAM_CMD_OPTIONS_GET,
+            TEAM_CMD_OPTIONS_SET,
+            TEAM_CMD_PORT_LIST_GET,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

@@ -98,8 +98,10 @@ mod tests {
     #[test]
     fn test_node_states_distinct() {
         let states = [
-            TIPC_NODE_UP, TIPC_NODE_DOWN,
-            TIPC_NODE_COMING_UP, TIPC_NODE_GOING_DOWN,
+            TIPC_NODE_UP,
+            TIPC_NODE_DOWN,
+            TIPC_NODE_COMING_UP,
+            TIPC_NODE_GOING_DOWN,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -111,8 +113,10 @@ mod tests {
     #[test]
     fn test_link_states_distinct() {
         let states = [
-            TIPC_LINK_WORKING, TIPC_LINK_PROBING,
-            TIPC_LINK_RESET, TIPC_LINK_ACTIVATING,
+            TIPC_LINK_WORKING,
+            TIPC_LINK_PROBING,
+            TIPC_LINK_RESET,
+            TIPC_LINK_ACTIVATING,
             TIPC_LINK_ESTABLISHING,
         ];
         for i in 0..states.len() {
@@ -124,10 +128,7 @@ mod tests {
 
     #[test]
     fn test_media_types_distinct() {
-        let types = [
-            TIPC_MEDIA_TYPE_ETH, TIPC_MEDIA_TYPE_IB,
-            TIPC_MEDIA_TYPE_UDP,
-        ];
+        let types = [TIPC_MEDIA_TYPE_ETH, TIPC_MEDIA_TYPE_IB, TIPC_MEDIA_TYPE_UDP];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -147,10 +148,7 @@ mod tests {
 
     #[test]
     fn test_group_events_distinct() {
-        let events = [
-            TIPC_GRP_JOIN_MSG, TIPC_GRP_LEAVE_MSG,
-            TIPC_GRP_RECLAIM_MSG,
-        ];
+        let events = [TIPC_GRP_JOIN_MSG, TIPC_GRP_LEAVE_MSG, TIPC_GRP_RECLAIM_MSG];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
                 assert_ne!(events[i], events[j]);

@@ -93,9 +93,12 @@ mod tests {
     #[test]
     fn test_port_ioctls_distinct() {
         let cmds = [
-            DFL_FPGA_PORT_GET_INFO, DFL_FPGA_PORT_GET_REGION_INFO,
-            DFL_FPGA_PORT_DMA_MAP, DFL_FPGA_PORT_DMA_UNMAP,
-            DFL_FPGA_PORT_RESET, DFL_FPGA_PORT_ERR_GET_IRQ_NUM,
+            DFL_FPGA_PORT_GET_INFO,
+            DFL_FPGA_PORT_GET_REGION_INFO,
+            DFL_FPGA_PORT_DMA_MAP,
+            DFL_FPGA_PORT_DMA_UNMAP,
+            DFL_FPGA_PORT_RESET,
+            DFL_FPGA_PORT_ERR_GET_IRQ_NUM,
             DFL_FPGA_PORT_ERR_SET_IRQ,
         ];
         for i in 0..cmds.len() {

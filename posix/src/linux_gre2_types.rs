@@ -87,9 +87,7 @@ mod tests {
 
     #[test]
     fn test_gre_flags_distinct() {
-        let flags = [
-            GRE_CSUM, GRE_ROUTING, GRE_KEY, GRE_SEQ, GRE_STRICT,
-        ];
+        let flags = [GRE_CSUM, GRE_ROUTING, GRE_KEY, GRE_SEQ, GRE_STRICT];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(flags[i], flags[j]);
@@ -100,9 +98,13 @@ mod tests {
     #[test]
     fn test_tunnel_types_distinct() {
         let types = [
-            TUNNEL_TYPE_GRE, TUNNEL_TYPE_GRE6,
-            TUNNEL_TYPE_IPIP, TUNNEL_TYPE_IPIP6,
-            TUNNEL_TYPE_SIT, TUNNEL_TYPE_VTI, TUNNEL_TYPE_VTI6,
+            TUNNEL_TYPE_GRE,
+            TUNNEL_TYPE_GRE6,
+            TUNNEL_TYPE_IPIP,
+            TUNNEL_TYPE_IPIP6,
+            TUNNEL_TYPE_SIT,
+            TUNNEL_TYPE_VTI,
+            TUNNEL_TYPE_VTI6,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -119,9 +121,16 @@ mod tests {
     #[test]
     fn test_tunnel_flags_power_of_two() {
         let flags = [
-            TUNNEL_CSUM, TUNNEL_ROUTING, TUNNEL_KEY, TUNNEL_SEQ,
-            TUNNEL_DONT_FRAGMENT, TUNNEL_OAM, TUNNEL_CRIT_OPT,
-            TUNNEL_GENEVE_OPT, TUNNEL_VXLAN_OPT, TUNNEL_ERSPAN_OPT,
+            TUNNEL_CSUM,
+            TUNNEL_ROUTING,
+            TUNNEL_KEY,
+            TUNNEL_SEQ,
+            TUNNEL_DONT_FRAGMENT,
+            TUNNEL_OAM,
+            TUNNEL_CRIT_OPT,
+            TUNNEL_GENEVE_OPT,
+            TUNNEL_VXLAN_OPT,
+            TUNNEL_ERSPAN_OPT,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
@@ -131,9 +140,16 @@ mod tests {
     #[test]
     fn test_tunnel_flags_no_overlap() {
         let flags = [
-            TUNNEL_CSUM, TUNNEL_ROUTING, TUNNEL_KEY, TUNNEL_SEQ,
-            TUNNEL_DONT_FRAGMENT, TUNNEL_OAM, TUNNEL_CRIT_OPT,
-            TUNNEL_GENEVE_OPT, TUNNEL_VXLAN_OPT, TUNNEL_ERSPAN_OPT,
+            TUNNEL_CSUM,
+            TUNNEL_ROUTING,
+            TUNNEL_KEY,
+            TUNNEL_SEQ,
+            TUNNEL_DONT_FRAGMENT,
+            TUNNEL_OAM,
+            TUNNEL_CRIT_OPT,
+            TUNNEL_GENEVE_OPT,
+            TUNNEL_VXLAN_OPT,
+            TUNNEL_ERSPAN_OPT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

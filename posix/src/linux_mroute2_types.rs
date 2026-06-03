@@ -69,9 +69,17 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            MRT_INIT, MRT_DONE, MRT_ADD_VIF, MRT_DEL_VIF,
-            MRT_ADD_MFC, MRT_DEL_MFC, MRT_ASSERT, MRT_PIM,
-            MRT_TABLE, MRT_ADD_MFC_PROXY, MRT_DEL_MFC_PROXY,
+            MRT_INIT,
+            MRT_DONE,
+            MRT_ADD_VIF,
+            MRT_DEL_VIF,
+            MRT_ADD_MFC,
+            MRT_DEL_MFC,
+            MRT_ASSERT,
+            MRT_PIM,
+            MRT_TABLE,
+            MRT_ADD_MFC_PROXY,
+            MRT_DEL_MFC_PROXY,
             MRT_FLUSH,
         ];
         for i in 0..cmds.len() {
@@ -94,8 +102,10 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            IGMPMSG_NOCACHE, IGMPMSG_WRONGVIF,
-            IGMPMSG_WHOLEPKT, IGMPMSG_WRVIFWHOLE,
+            IGMPMSG_NOCACHE,
+            IGMPMSG_WRONGVIF,
+            IGMPMSG_WHOLEPKT,
+            IGMPMSG_WRVIFWHOLE,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {

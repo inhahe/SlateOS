@@ -85,9 +85,12 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            FSCRYPT_MODE_AES_256_XTS, FSCRYPT_MODE_AES_256_CTS,
-            FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS,
-            FSCRYPT_MODE_ADIANTUM, FSCRYPT_MODE_AES_256_HCTR2,
+            FSCRYPT_MODE_AES_256_XTS,
+            FSCRYPT_MODE_AES_256_CTS,
+            FSCRYPT_MODE_AES_128_CBC,
+            FSCRYPT_MODE_AES_128_CTS,
+            FSCRYPT_MODE_ADIANTUM,
+            FSCRYPT_MODE_AES_256_HCTR2,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -118,13 +121,17 @@ mod tests {
 
     #[test]
     fn test_key_spec_types_distinct() {
-        assert_ne!(FSCRYPT_KEY_SPEC_TYPE_DESCRIPTOR, FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER);
+        assert_ne!(
+            FSCRYPT_KEY_SPEC_TYPE_DESCRIPTOR,
+            FSCRYPT_KEY_SPEC_TYPE_IDENTIFIER
+        );
     }
 
     #[test]
     fn test_key_status_distinct() {
         let statuses = [
-            FSCRYPT_KEY_STATUS_ABSENT, FSCRYPT_KEY_STATUS_PRESENT,
+            FSCRYPT_KEY_STATUS_ABSENT,
+            FSCRYPT_KEY_STATUS_PRESENT,
             FSCRYPT_KEY_STATUS_INCOMPLETELY_REMOVED,
         ];
         for i in 0..statuses.len() {

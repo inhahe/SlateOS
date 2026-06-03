@@ -105,8 +105,10 @@ mod tests {
     #[test]
     fn test_item_types_distinct() {
         let types = [
-            HID_ITEM_TYPE_MAIN, HID_ITEM_TYPE_GLOBAL,
-            HID_ITEM_TYPE_LOCAL, HID_ITEM_TYPE_RESERVED,
+            HID_ITEM_TYPE_MAIN,
+            HID_ITEM_TYPE_GLOBAL,
+            HID_ITEM_TYPE_LOCAL,
+            HID_ITEM_TYPE_RESERVED,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -118,8 +120,10 @@ mod tests {
     #[test]
     fn test_main_tags_distinct() {
         let tags = [
-            HID_MAIN_ITEM_TAG_INPUT, HID_MAIN_ITEM_TAG_OUTPUT,
-            HID_MAIN_ITEM_TAG_FEATURE, HID_MAIN_ITEM_TAG_BEGIN_COLLECTION,
+            HID_MAIN_ITEM_TAG_INPUT,
+            HID_MAIN_ITEM_TAG_OUTPUT,
+            HID_MAIN_ITEM_TAG_FEATURE,
+            HID_MAIN_ITEM_TAG_BEGIN_COLLECTION,
             HID_MAIN_ITEM_TAG_END_COLLECTION,
         ];
         for i in 0..tags.len() {
@@ -132,9 +136,12 @@ mod tests {
     #[test]
     fn test_collection_types_distinct() {
         let cols = [
-            HID_COLLECTION_PHYSICAL, HID_COLLECTION_APPLICATION,
-            HID_COLLECTION_LOGICAL, HID_COLLECTION_REPORT,
-            HID_COLLECTION_NAMED_ARRAY, HID_COLLECTION_USAGE_SWITCH,
+            HID_COLLECTION_PHYSICAL,
+            HID_COLLECTION_APPLICATION,
+            HID_COLLECTION_LOGICAL,
+            HID_COLLECTION_REPORT,
+            HID_COLLECTION_NAMED_ARRAY,
+            HID_COLLECTION_USAGE_SWITCH,
             HID_COLLECTION_USAGE_MODIFIER,
         ];
         for i in 0..cols.len() {
@@ -147,9 +154,14 @@ mod tests {
     #[test]
     fn test_iof_flags_no_overlap() {
         let flags = [
-            HID_IOF_CONSTANT, HID_IOF_VARIABLE, HID_IOF_RELATIVE,
-            HID_IOF_WRAP, HID_IOF_NON_LINEAR, HID_IOF_NO_PREFERRED,
-            HID_IOF_NULL_STATE, HID_IOF_BUFFERED_BYTES,
+            HID_IOF_CONSTANT,
+            HID_IOF_VARIABLE,
+            HID_IOF_RELATIVE,
+            HID_IOF_WRAP,
+            HID_IOF_NON_LINEAR,
+            HID_IOF_NO_PREFERRED,
+            HID_IOF_NULL_STATE,
+            HID_IOF_BUFFERED_BYTES,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

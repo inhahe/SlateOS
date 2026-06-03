@@ -66,7 +66,11 @@ mod tests {
 
     #[test]
     fn test_integrity_types_distinct() {
-        let types = [BLK_INTEGRITY_TYPE1, BLK_INTEGRITY_TYPE2, BLK_INTEGRITY_TYPE3];
+        let types = [
+            BLK_INTEGRITY_TYPE1,
+            BLK_INTEGRITY_TYPE2,
+            BLK_INTEGRITY_TYPE3,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -77,7 +81,8 @@ mod tests {
     #[test]
     fn test_guard_types_distinct() {
         let guards = [
-            BLK_INTEGRITY_GUARD_CRC, BLK_INTEGRITY_GUARD_IP,
+            BLK_INTEGRITY_GUARD_CRC,
+            BLK_INTEGRITY_GUARD_IP,
             BLK_INTEGRITY_GUARD_CRC64,
         ];
         for i in 0..guards.len() {
@@ -90,7 +95,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            BLK_INTEGRITY_GENERATE, BLK_INTEGRITY_VERIFY,
+            BLK_INTEGRITY_GENERATE,
+            BLK_INTEGRITY_VERIFY,
             BLK_INTEGRITY_DEVICE_CAPABLE,
         ];
         for i in 0..flags.len() {

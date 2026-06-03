@@ -95,12 +95,17 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            SYSLOG_ACTION_CLOSE, SYSLOG_ACTION_OPEN,
-            SYSLOG_ACTION_READ, SYSLOG_ACTION_READ_ALL,
-            SYSLOG_ACTION_READ_CLEAR, SYSLOG_ACTION_CLEAR,
-            SYSLOG_ACTION_CONSOLE_OFF, SYSLOG_ACTION_CONSOLE_ON,
+            SYSLOG_ACTION_CLOSE,
+            SYSLOG_ACTION_OPEN,
+            SYSLOG_ACTION_READ,
+            SYSLOG_ACTION_READ_ALL,
+            SYSLOG_ACTION_READ_CLEAR,
+            SYSLOG_ACTION_CLEAR,
+            SYSLOG_ACTION_CONSOLE_OFF,
+            SYSLOG_ACTION_CONSOLE_ON,
             SYSLOG_ACTION_CONSOLE_LEVEL,
-            SYSLOG_ACTION_SIZE_UNREAD, SYSLOG_ACTION_SIZE_BUFFER,
+            SYSLOG_ACTION_SIZE_UNREAD,
+            SYSLOG_ACTION_SIZE_BUFFER,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -121,10 +126,20 @@ mod tests {
     #[test]
     fn test_facilities_distinct() {
         let facs = [
-            LOG_KERN, LOG_USER, LOG_MAIL, LOG_DAEMON,
-            LOG_AUTH, LOG_SYSLOG, LOG_LPR, LOG_NEWS,
-            LOG_UUCP, LOG_CRON, LOG_AUTHPRIV, LOG_FTP,
-            LOG_LOCAL0, LOG_LOCAL7,
+            LOG_KERN,
+            LOG_USER,
+            LOG_MAIL,
+            LOG_DAEMON,
+            LOG_AUTH,
+            LOG_SYSLOG,
+            LOG_LPR,
+            LOG_NEWS,
+            LOG_UUCP,
+            LOG_CRON,
+            LOG_AUTHPRIV,
+            LOG_FTP,
+            LOG_LOCAL0,
+            LOG_LOCAL7,
         ];
         for i in 0..facs.len() {
             for j in (i + 1)..facs.len() {

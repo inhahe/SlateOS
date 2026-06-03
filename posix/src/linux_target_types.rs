@@ -93,9 +93,12 @@ mod tests {
     #[test]
     fn test_transports_distinct() {
         let types = [
-            TARGET_TRANSPORT_ISCSI, TARGET_TRANSPORT_FC,
-            TARGET_TRANSPORT_SRP, TARGET_TRANSPORT_LOOP,
-            TARGET_TRANSPORT_USB, TARGET_TRANSPORT_XCOPY,
+            TARGET_TRANSPORT_ISCSI,
+            TARGET_TRANSPORT_FC,
+            TARGET_TRANSPORT_SRP,
+            TARGET_TRANSPORT_LOOP,
+            TARGET_TRANSPORT_USB,
+            TARGET_TRANSPORT_XCOPY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -107,8 +110,10 @@ mod tests {
     #[test]
     fn test_backends_distinct() {
         let backends = [
-            TARGET_BACKEND_IBLOCK, TARGET_BACKEND_FILEIO,
-            TARGET_BACKEND_RAMDISK, TARGET_BACKEND_PSCSI,
+            TARGET_BACKEND_IBLOCK,
+            TARGET_BACKEND_FILEIO,
+            TARGET_BACKEND_RAMDISK,
+            TARGET_BACKEND_PSCSI,
             TARGET_BACKEND_USER,
         ];
         for i in 0..backends.len() {
@@ -121,9 +126,13 @@ mod tests {
     #[test]
     fn test_tmr_functions_distinct() {
         let funcs = [
-            TMR_ABORT_TASK, TMR_ABORT_TASK_SET, TMR_CLEAR_ACA,
-            TMR_CLEAR_TASK_SET, TMR_LUN_RESET,
-            TMR_TARGET_WARM_RESET, TMR_TARGET_COLD_RESET,
+            TMR_ABORT_TASK,
+            TMR_ABORT_TASK_SET,
+            TMR_CLEAR_ACA,
+            TMR_CLEAR_TASK_SET,
+            TMR_LUN_RESET,
+            TMR_TARGET_WARM_RESET,
+            TMR_TARGET_COLD_RESET,
         ];
         for i in 0..funcs.len() {
             for j in (i + 1)..funcs.len() {
@@ -135,8 +144,10 @@ mod tests {
     #[test]
     fn test_alua_states_distinct() {
         let states = [
-            ALUA_ACCESS_ACTIVE_OPT, ALUA_ACCESS_ACTIVE_NON_OPT,
-            ALUA_ACCESS_STANDBY, ALUA_ACCESS_UNAVAILABLE,
+            ALUA_ACCESS_ACTIVE_OPT,
+            ALUA_ACCESS_ACTIVE_NON_OPT,
+            ALUA_ACCESS_STANDBY,
+            ALUA_ACCESS_UNAVAILABLE,
             ALUA_ACCESS_TRANSITION,
         ];
         for i in 0..states.len() {

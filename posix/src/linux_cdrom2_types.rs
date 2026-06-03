@@ -144,12 +144,23 @@ mod tests {
     #[test]
     fn test_ioctl_distinct() {
         let cmds = [
-            CDROMREADTOCHDR, CDROMREADTOCENTRY, CDROMSTOP,
-            CDROMSTART, CDROMEJECT, CDROMVOLCTRL,
-            CDROMSUBCHNL, CDROMREADMODE2, CDROMREADMODE1,
-            CDROMREADRAW, CDROMMULTISESSION, CDROMVOLREAD,
-            CDROMPAUSE, CDROMRESUME, CDROMPLAYMSF,
-            CDROMCLOSETRAY, CDROMRESET,
+            CDROMREADTOCHDR,
+            CDROMREADTOCENTRY,
+            CDROMSTOP,
+            CDROMSTART,
+            CDROMEJECT,
+            CDROMVOLCTRL,
+            CDROMSUBCHNL,
+            CDROMREADMODE2,
+            CDROMREADMODE1,
+            CDROMREADRAW,
+            CDROMMULTISESSION,
+            CDROMVOLREAD,
+            CDROMPAUSE,
+            CDROMRESUME,
+            CDROMPLAYMSF,
+            CDROMCLOSETRAY,
+            CDROMRESET,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -161,10 +172,17 @@ mod tests {
     #[test]
     fn test_disc_status_distinct() {
         let vals = [
-            CDS_NO_INFO, CDS_NO_DISC, CDS_TRAY_OPEN,
-            CDS_DRIVE_NOT_READY, CDS_DISC_OK,
-            CDS_AUDIO, CDS_DATA_1, CDS_DATA_2,
-            CDS_XA_2_1, CDS_XA_2_2, CDS_MIXED,
+            CDS_NO_INFO,
+            CDS_NO_DISC,
+            CDS_TRAY_OPEN,
+            CDS_DRIVE_NOT_READY,
+            CDS_DISC_OK,
+            CDS_AUDIO,
+            CDS_DATA_1,
+            CDS_DATA_2,
+            CDS_XA_2_1,
+            CDS_XA_2_2,
+            CDS_MIXED,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
@@ -175,10 +193,7 @@ mod tests {
 
     #[test]
     fn test_track_modes_distinct() {
-        let modes: [u8; 4] = [
-            CDROM_AUDIO, CDROM_DATA_MODE1,
-            CDROM_DATA_MODE2, CDROM_XA,
-        ];
+        let modes: [u8; 4] = [CDROM_AUDIO, CDROM_DATA_MODE1, CDROM_DATA_MODE2, CDROM_XA];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
                 assert_ne!(modes[i], modes[j]);
@@ -189,12 +204,26 @@ mod tests {
     #[test]
     fn test_capability_flags_power_of_two() {
         let caps = [
-            CDC_CLOSE_TRAY, CDC_OPEN_TRAY, CDC_LOCK,
-            CDC_SELECT_SPEED, CDC_SELECT_DISC, CDC_MULTI_SESSION,
-            CDC_MCN, CDC_PLAY_AUDIO, CDC_RESET,
-            CDC_DRIVE_STATUS, CDC_GENERIC_PACKET,
-            CDC_CD_R, CDC_CD_RW, CDC_DVD, CDC_DVD_R,
-            CDC_DVD_RAM, CDC_MO_DRIVE, CDC_MRW, CDC_MRW_W, CDC_RAM,
+            CDC_CLOSE_TRAY,
+            CDC_OPEN_TRAY,
+            CDC_LOCK,
+            CDC_SELECT_SPEED,
+            CDC_SELECT_DISC,
+            CDC_MULTI_SESSION,
+            CDC_MCN,
+            CDC_PLAY_AUDIO,
+            CDC_RESET,
+            CDC_DRIVE_STATUS,
+            CDC_GENERIC_PACKET,
+            CDC_CD_R,
+            CDC_CD_RW,
+            CDC_DVD,
+            CDC_DVD_R,
+            CDC_DVD_RAM,
+            CDC_MO_DRIVE,
+            CDC_MRW,
+            CDC_MRW_W,
+            CDC_RAM,
         ];
         for c in &caps {
             assert!(c.is_power_of_two(), "0x{:08x} not power of two", c);
@@ -204,12 +233,26 @@ mod tests {
     #[test]
     fn test_capability_flags_no_overlap() {
         let caps = [
-            CDC_CLOSE_TRAY, CDC_OPEN_TRAY, CDC_LOCK,
-            CDC_SELECT_SPEED, CDC_SELECT_DISC, CDC_MULTI_SESSION,
-            CDC_MCN, CDC_PLAY_AUDIO, CDC_RESET,
-            CDC_DRIVE_STATUS, CDC_GENERIC_PACKET,
-            CDC_CD_R, CDC_CD_RW, CDC_DVD, CDC_DVD_R,
-            CDC_DVD_RAM, CDC_MO_DRIVE, CDC_MRW, CDC_MRW_W, CDC_RAM,
+            CDC_CLOSE_TRAY,
+            CDC_OPEN_TRAY,
+            CDC_LOCK,
+            CDC_SELECT_SPEED,
+            CDC_SELECT_DISC,
+            CDC_MULTI_SESSION,
+            CDC_MCN,
+            CDC_PLAY_AUDIO,
+            CDC_RESET,
+            CDC_DRIVE_STATUS,
+            CDC_GENERIC_PACKET,
+            CDC_CD_R,
+            CDC_CD_RW,
+            CDC_DVD,
+            CDC_DVD_R,
+            CDC_DVD_RAM,
+            CDC_MO_DRIVE,
+            CDC_MRW,
+            CDC_MRW_W,
+            CDC_RAM,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

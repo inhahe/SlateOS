@@ -109,10 +109,17 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            SIOCGIWNAME, SIOCSIWMODE, SIOCGIWMODE,
-            SIOCSIWFREQ, SIOCGIWFREQ, SIOCSIWESSID,
-            SIOCGIWESSID, SIOCSIWAP, SIOCGIWAP,
-            SIOCSIWSCAN, SIOCGIWSCAN,
+            SIOCGIWNAME,
+            SIOCSIWMODE,
+            SIOCGIWMODE,
+            SIOCSIWFREQ,
+            SIOCGIWFREQ,
+            SIOCSIWESSID,
+            SIOCGIWESSID,
+            SIOCSIWAP,
+            SIOCGIWAP,
+            SIOCSIWSCAN,
+            SIOCGIWSCAN,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -133,9 +140,14 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            IW_MODE_AUTO, IW_MODE_ADHOC, IW_MODE_INFRA,
-            IW_MODE_MASTER, IW_MODE_REPEAT, IW_MODE_SECOND,
-            IW_MODE_MONITOR, IW_MODE_MESH,
+            IW_MODE_AUTO,
+            IW_MODE_ADHOC,
+            IW_MODE_INFRA,
+            IW_MODE_MASTER,
+            IW_MODE_REPEAT,
+            IW_MODE_SECOND,
+            IW_MODE_MONITOR,
+            IW_MODE_MESH,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

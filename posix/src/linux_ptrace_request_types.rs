@@ -91,11 +91,21 @@ mod tests {
     #[test]
     fn test_basic_requests_distinct() {
         let reqs = [
-            PTRACE_ATTACH, PTRACE_DETACH, PTRACE_CONT,
-            PTRACE_SINGLESTEP, PTRACE_GETREGS, PTRACE_SETREGS,
-            PTRACE_GETFPREGS, PTRACE_SETFPREGS, PTRACE_PEEKDATA,
-            PTRACE_POKEDATA, PTRACE_PEEKUSER, PTRACE_POKEUSER,
-            PTRACE_PEEKTEXT, PTRACE_POKETEXT, PTRACE_KILL,
+            PTRACE_ATTACH,
+            PTRACE_DETACH,
+            PTRACE_CONT,
+            PTRACE_SINGLESTEP,
+            PTRACE_GETREGS,
+            PTRACE_SETREGS,
+            PTRACE_GETFPREGS,
+            PTRACE_SETFPREGS,
+            PTRACE_PEEKDATA,
+            PTRACE_POKEDATA,
+            PTRACE_PEEKUSER,
+            PTRACE_POKEUSER,
+            PTRACE_PEEKTEXT,
+            PTRACE_POKETEXT,
+            PTRACE_KILL,
             PTRACE_SYSCALL,
         ];
         for i in 0..reqs.len() {
@@ -108,9 +118,13 @@ mod tests {
     #[test]
     fn test_modern_requests_distinct() {
         let reqs = [
-            PTRACE_SEIZE, PTRACE_INTERRUPT, PTRACE_LISTEN,
-            PTRACE_GETREGSET, PTRACE_SETREGSET,
-            PTRACE_GETSIGINFO, PTRACE_SETSIGINFO,
+            PTRACE_SEIZE,
+            PTRACE_INTERRUPT,
+            PTRACE_LISTEN,
+            PTRACE_GETREGSET,
+            PTRACE_SETREGSET,
+            PTRACE_GETSIGINFO,
+            PTRACE_SETSIGINFO,
             PTRACE_SETOPTIONS,
         ];
         for i in 0..reqs.len() {
@@ -123,10 +137,14 @@ mod tests {
     #[test]
     fn test_options_no_overlap() {
         let opts = [
-            PTRACE_O_TRACECLONE, PTRACE_O_TRACEEXEC,
-            PTRACE_O_TRACEEXIT, PTRACE_O_TRACEFORK,
-            PTRACE_O_TRACEVFORK, PTRACE_O_TRACEVFORKDONE,
-            PTRACE_O_TRACESECCOMP, PTRACE_O_SUSPEND_SECCOMP,
+            PTRACE_O_TRACECLONE,
+            PTRACE_O_TRACEEXEC,
+            PTRACE_O_TRACEEXIT,
+            PTRACE_O_TRACEFORK,
+            PTRACE_O_TRACEVFORK,
+            PTRACE_O_TRACEVFORKDONE,
+            PTRACE_O_TRACESECCOMP,
+            PTRACE_O_SUSPEND_SECCOMP,
         ];
         for i in 0..opts.len() {
             assert!(opts[i].is_power_of_two());

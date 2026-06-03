@@ -104,10 +104,17 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            ND_CMD_SMART, ND_CMD_SMART_THRESHOLD, ND_CMD_DIMM_FLAGS,
-            ND_CMD_GET_CONFIG_SIZE, ND_CMD_GET_CONFIG_DATA,
-            ND_CMD_SET_CONFIG_DATA, ND_CMD_VENDOR, ND_CMD_ARS_CAP,
-            ND_CMD_ARS_START, ND_CMD_ARS_STATUS, ND_CMD_CLEAR_ERROR,
+            ND_CMD_SMART,
+            ND_CMD_SMART_THRESHOLD,
+            ND_CMD_DIMM_FLAGS,
+            ND_CMD_GET_CONFIG_SIZE,
+            ND_CMD_GET_CONFIG_DATA,
+            ND_CMD_SET_CONFIG_DATA,
+            ND_CMD_VENDOR,
+            ND_CMD_ARS_CAP,
+            ND_CMD_ARS_START,
+            ND_CMD_ARS_STATUS,
+            ND_CMD_CLEAR_ERROR,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -119,8 +126,10 @@ mod tests {
     #[test]
     fn test_ns_types_distinct() {
         let types = [
-            ND_DEVICE_NAMESPACE_IO, ND_DEVICE_NAMESPACE_PMEM,
-            ND_DEVICE_NAMESPACE_BLK, ND_DEVICE_DAX_PMEM,
+            ND_DEVICE_NAMESPACE_IO,
+            ND_DEVICE_NAMESPACE_PMEM,
+            ND_DEVICE_NAMESPACE_BLK,
+            ND_DEVICE_DAX_PMEM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -132,8 +141,10 @@ mod tests {
     #[test]
     fn test_dimm_flags_are_powers_of_two() {
         let flags = [
-            ND_DIMM_FLAG_LOCKED, ND_DIMM_FLAG_SECURE,
-            ND_DIMM_FLAG_FROZEN, ND_DIMM_FLAG_OVERTEMP,
+            ND_DIMM_FLAG_LOCKED,
+            ND_DIMM_FLAG_SECURE,
+            ND_DIMM_FLAG_FROZEN,
+            ND_DIMM_FLAG_OVERTEMP,
             ND_DIMM_FLAG_MEDIA_DISABLED,
         ];
         for flag in &flags {
@@ -144,7 +155,8 @@ mod tests {
     #[test]
     fn test_ars_status_distinct() {
         let statuses = [
-            ND_ARS_STATUS_NONE, ND_ARS_STATUS_INPROGRESS,
+            ND_ARS_STATUS_NONE,
+            ND_ARS_STATUS_INPROGRESS,
             ND_ARS_STATUS_COMPLETE,
         ];
         for i in 0..statuses.len() {
@@ -157,8 +169,10 @@ mod tests {
     #[test]
     fn test_smart_flags_are_powers_of_two() {
         let flags = [
-            ND_SMART_HEALTH_VALID, ND_SMART_SPARES_VALID,
-            ND_SMART_USED_VALID, ND_SMART_TEMP_VALID,
+            ND_SMART_HEALTH_VALID,
+            ND_SMART_SPARES_VALID,
+            ND_SMART_USED_VALID,
+            ND_SMART_TEMP_VALID,
             ND_SMART_CTEMP_VALID,
         ];
         for flag in &flags {

@@ -77,8 +77,10 @@ mod tests {
     #[test]
     fn test_futex2_sizes_distinct() {
         let sizes = [
-            FUTEX2_SIZE_U8, FUTEX2_SIZE_U16,
-            FUTEX2_SIZE_U32, FUTEX2_SIZE_U64,
+            FUTEX2_SIZE_U8,
+            FUTEX2_SIZE_U16,
+            FUTEX2_SIZE_U32,
+            FUTEX2_SIZE_U64,
         ];
         for i in 0..sizes.len() {
             for j in (i + 1)..sizes.len() {

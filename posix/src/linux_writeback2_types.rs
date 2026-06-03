@@ -83,9 +83,13 @@ mod tests {
     #[test]
     fn test_reasons_distinct() {
         let reasons = [
-            WB_REASON_BACKGROUND, WB_REASON_SYNC, WB_REASON_VMSCAN,
-            WB_REASON_PERIODIC, WB_REASON_LAPTOP_TIMER,
-            WB_REASON_FS_FREE_SPACE, WB_REASON_FORKER_THREAD,
+            WB_REASON_BACKGROUND,
+            WB_REASON_SYNC,
+            WB_REASON_VMSCAN,
+            WB_REASON_PERIODIC,
+            WB_REASON_LAPTOP_TIMER,
+            WB_REASON_FS_FREE_SPACE,
+            WB_REASON_FORKER_THREAD,
             WB_REASON_FOREIGN_FLUSH,
         ];
         for i in 0..reasons.len() {
@@ -98,8 +102,10 @@ mod tests {
     #[test]
     fn test_work_flags_no_overlap() {
         let flags = [
-            WB_WORK_SYNC_ALL, WB_WORK_FOR_INODE,
-            WB_WORK_FOR_KUPDATE, WB_WORK_FOR_BACKGROUND,
+            WB_WORK_SYNC_ALL,
+            WB_WORK_FOR_INODE,
+            WB_WORK_FOR_KUPDATE,
+            WB_WORK_FOR_BACKGROUND,
             WB_WORK_NO_START,
         ];
         for i in 0..flags.len() {
@@ -113,8 +119,10 @@ mod tests {
     #[test]
     fn test_bdi_caps_no_overlap() {
         let caps = [
-            BDI_CAP_WRITEBACK, BDI_CAP_READ_AHEAD,
-            BDI_CAP_CONGESTED, BDI_CAP_STABLE_WRITES,
+            BDI_CAP_WRITEBACK,
+            BDI_CAP_READ_AHEAD,
+            BDI_CAP_CONGESTED,
+            BDI_CAP_STABLE_WRITES,
             BDI_CAP_NO_WRITEBACK,
         ];
         for i in 0..caps.len() {

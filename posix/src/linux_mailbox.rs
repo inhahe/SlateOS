@@ -81,8 +81,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            MBOX_STATE_FREE, MBOX_STATE_ACTIVE,
-            MBOX_STATE_PENDING, MBOX_STATE_ERROR,
+            MBOX_STATE_FREE,
+            MBOX_STATE_ACTIVE,
+            MBOX_STATE_PENDING,
+            MBOX_STATE_ERROR,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -114,8 +116,10 @@ mod tests {
     #[test]
     fn test_controller_flags_no_overlap() {
         let flags = [
-            MBOX_F_TXDONE_IRQ, MBOX_F_TXDONE_POLL,
-            MBOX_F_RX_IRQ, MBOX_F_FLUSH,
+            MBOX_F_TXDONE_IRQ,
+            MBOX_F_TXDONE_POLL,
+            MBOX_F_RX_IRQ,
+            MBOX_F_FLUSH,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -127,8 +131,12 @@ mod tests {
     #[test]
     fn test_scmi_protocols_distinct() {
         let protos = [
-            MBOX_SCMI_POWER, MBOX_SCMI_PERF, MBOX_SCMI_CLOCK,
-            MBOX_SCMI_SENSOR, MBOX_SCMI_RESET, MBOX_SCMI_VOLTAGE,
+            MBOX_SCMI_POWER,
+            MBOX_SCMI_PERF,
+            MBOX_SCMI_CLOCK,
+            MBOX_SCMI_SENSOR,
+            MBOX_SCMI_RESET,
+            MBOX_SCMI_VOLTAGE,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {

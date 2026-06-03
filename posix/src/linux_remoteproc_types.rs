@@ -73,9 +73,12 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            RPROC_STATE_OFFLINE, RPROC_STATE_LOADING,
-            RPROC_STATE_RUNNING, RPROC_STATE_CRASHED,
-            RPROC_STATE_STOPPING, RPROC_STATE_SUSPENDED,
+            RPROC_STATE_OFFLINE,
+            RPROC_STATE_LOADING,
+            RPROC_STATE_RUNNING,
+            RPROC_STATE_CRASHED,
+            RPROC_STATE_STOPPING,
+            RPROC_STATE_SUSPENDED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -97,7 +100,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            RPROC_FLAG_AUTO_BOOT, RPROC_FLAG_RECOVERY,
+            RPROC_FLAG_AUTO_BOOT,
+            RPROC_FLAG_RECOVERY,
             RPROC_FLAG_POWER_DOMAIN,
         ];
         for i in 0..flags.len() {
@@ -111,8 +115,10 @@ mod tests {
     #[test]
     fn test_crash_reasons_distinct() {
         let reasons = [
-            RPROC_CRASH_WATCHDOG, RPROC_CRASH_EXCEPTION,
-            RPROC_CRASH_BUS_ERROR, RPROC_CRASH_FATAL,
+            RPROC_CRASH_WATCHDOG,
+            RPROC_CRASH_EXCEPTION,
+            RPROC_CRASH_BUS_ERROR,
+            RPROC_CRASH_FATAL,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {

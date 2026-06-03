@@ -77,8 +77,15 @@ mod tests {
     #[test]
     fn test_event_flags_no_overlap() {
         let flags = [
-            EPOLLIN, EPOLLPRI, EPOLLOUT, EPOLLERR, EPOLLHUP,
-            EPOLLRDHUP, EPOLLET, EPOLLONESHOT, EPOLLEXCLUSIVE,
+            EPOLLIN,
+            EPOLLPRI,
+            EPOLLOUT,
+            EPOLLERR,
+            EPOLLHUP,
+            EPOLLRDHUP,
+            EPOLLET,
+            EPOLLONESHOT,
+            EPOLLEXCLUSIVE,
             EPOLLWAKEUP,
         ];
         for i in 0..flags.len() {

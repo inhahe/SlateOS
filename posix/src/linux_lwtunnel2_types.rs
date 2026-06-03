@@ -79,11 +79,16 @@ mod tests {
     #[test]
     fn test_encap_types_distinct() {
         let types = [
-            LWTUNNEL_ENCAP_NONE, LWTUNNEL_ENCAP_MPLS,
-            LWTUNNEL_ENCAP_IP, LWTUNNEL_ENCAP_ILA,
-            LWTUNNEL_ENCAP_IP6, LWTUNNEL_ENCAP_SEG6,
-            LWTUNNEL_ENCAP_BPF, LWTUNNEL_ENCAP_SEG6_LOCAL,
-            LWTUNNEL_ENCAP_RPL, LWTUNNEL_ENCAP_IOAM6,
+            LWTUNNEL_ENCAP_NONE,
+            LWTUNNEL_ENCAP_MPLS,
+            LWTUNNEL_ENCAP_IP,
+            LWTUNNEL_ENCAP_ILA,
+            LWTUNNEL_ENCAP_IP6,
+            LWTUNNEL_ENCAP_SEG6,
+            LWTUNNEL_ENCAP_BPF,
+            LWTUNNEL_ENCAP_SEG6_LOCAL,
+            LWTUNNEL_ENCAP_RPL,
+            LWTUNNEL_ENCAP_IOAM6,
             LWTUNNEL_ENCAP_XFRM,
         ];
         for i in 0..types.len() {
@@ -96,8 +101,12 @@ mod tests {
     #[test]
     fn test_ip_attrs_distinct() {
         let attrs = [
-            LWTUNNEL_IP_UNSPEC, LWTUNNEL_IP_ID, LWTUNNEL_IP_DST,
-            LWTUNNEL_IP_SRC, LWTUNNEL_IP_TTL, LWTUNNEL_IP_TOS,
+            LWTUNNEL_IP_UNSPEC,
+            LWTUNNEL_IP_ID,
+            LWTUNNEL_IP_DST,
+            LWTUNNEL_IP_SRC,
+            LWTUNNEL_IP_TTL,
+            LWTUNNEL_IP_TOS,
             LWTUNNEL_IP_FLAGS,
         ];
         for i in 0..attrs.len() {
@@ -110,8 +119,12 @@ mod tests {
     #[test]
     fn test_ip6_attrs_distinct() {
         let attrs = [
-            LWTUNNEL_IP6_UNSPEC, LWTUNNEL_IP6_ID, LWTUNNEL_IP6_DST,
-            LWTUNNEL_IP6_SRC, LWTUNNEL_IP6_HOPLIMIT, LWTUNNEL_IP6_TC,
+            LWTUNNEL_IP6_UNSPEC,
+            LWTUNNEL_IP6_ID,
+            LWTUNNEL_IP6_DST,
+            LWTUNNEL_IP6_SRC,
+            LWTUNNEL_IP6_HOPLIMIT,
+            LWTUNNEL_IP6_TC,
             LWTUNNEL_IP6_FLAGS,
         ];
         for i in 0..attrs.len() {

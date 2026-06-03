@@ -117,11 +117,21 @@ mod tests {
     #[test]
     fn test_header_offsets_distinct() {
         let offsets = [
-            PCI_VENDOR_ID, PCI_DEVICE_ID, PCI_COMMAND, PCI_STATUS,
-            PCI_REVISION_ID, PCI_CLASS_PROG, PCI_CLASS_DEVICE,
-            PCI_CACHE_LINE_SIZE, PCI_LATENCY_TIMER, PCI_HEADER_TYPE,
-            PCI_SUBSYSTEM_VENDOR_ID, PCI_SUBSYSTEM_ID,
-            PCI_INTERRUPT_LINE, PCI_INTERRUPT_PIN, PCI_CAPABILITY_LIST,
+            PCI_VENDOR_ID,
+            PCI_DEVICE_ID,
+            PCI_COMMAND,
+            PCI_STATUS,
+            PCI_REVISION_ID,
+            PCI_CLASS_PROG,
+            PCI_CLASS_DEVICE,
+            PCI_CACHE_LINE_SIZE,
+            PCI_LATENCY_TIMER,
+            PCI_HEADER_TYPE,
+            PCI_SUBSYSTEM_VENDOR_ID,
+            PCI_SUBSYSTEM_ID,
+            PCI_INTERRUPT_LINE,
+            PCI_INTERRUPT_PIN,
+            PCI_CAPABILITY_LIST,
         ];
         for i in 0..offsets.len() {
             for j in (i + 1)..offsets.len() {
@@ -142,8 +152,10 @@ mod tests {
     #[test]
     fn test_command_bits_no_overlap() {
         let bits = [
-            PCI_COMMAND_IO, PCI_COMMAND_MEMORY,
-            PCI_COMMAND_MASTER, PCI_COMMAND_INTX_DISABLE,
+            PCI_COMMAND_IO,
+            PCI_COMMAND_MEMORY,
+            PCI_COMMAND_MASTER,
+            PCI_COMMAND_INTX_DISABLE,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -155,8 +167,12 @@ mod tests {
     #[test]
     fn test_cap_ids_distinct() {
         let caps = [
-            PCI_CAP_ID_PM, PCI_CAP_ID_AGP, PCI_CAP_ID_MSI,
-            PCI_CAP_ID_PCIX, PCI_CAP_ID_VNDR, PCI_CAP_ID_EXP,
+            PCI_CAP_ID_PM,
+            PCI_CAP_ID_AGP,
+            PCI_CAP_ID_MSI,
+            PCI_CAP_ID_PCIX,
+            PCI_CAP_ID_VNDR,
+            PCI_CAP_ID_EXP,
             PCI_CAP_ID_MSIX,
         ];
         for i in 0..caps.len() {
@@ -169,8 +185,12 @@ mod tests {
     #[test]
     fn test_ext_cap_ids_distinct() {
         let caps = [
-            PCI_EXT_CAP_ID_AER, PCI_EXT_CAP_ID_VC, PCI_EXT_CAP_ID_DSN,
-            PCI_EXT_CAP_ID_SRIOV, PCI_EXT_CAP_ID_REBAR, PCI_EXT_CAP_ID_L1SS,
+            PCI_EXT_CAP_ID_AER,
+            PCI_EXT_CAP_ID_VC,
+            PCI_EXT_CAP_ID_DSN,
+            PCI_EXT_CAP_ID_SRIOV,
+            PCI_EXT_CAP_ID_REBAR,
+            PCI_EXT_CAP_ID_L1SS,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

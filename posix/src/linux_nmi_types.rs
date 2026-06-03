@@ -69,8 +69,13 @@ mod tests {
     #[test]
     fn test_nmi_types_distinct() {
         let types = [
-            NMI_UNKNOWN, NMI_LOCAL, NMI_PERF, NMI_IO_CHECK,
-            NMI_EXTERNAL, NMI_SOFTWARE, NMI_MCE,
+            NMI_UNKNOWN,
+            NMI_LOCAL,
+            NMI_PERF,
+            NMI_IO_CHECK,
+            NMI_EXTERNAL,
+            NMI_SOFTWARE,
+            NMI_MCE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

@@ -67,7 +67,8 @@ mod tests {
     #[test]
     fn test_affinity_modes_distinct() {
         let modes = [
-            SCHED_AFFINITY_NORMAL, SCHED_AFFINITY_PREFER,
+            SCHED_AFFINITY_NORMAL,
+            SCHED_AFFINITY_PREFER,
             SCHED_AFFINITY_STRICT,
         ];
         for i in 0..modes.len() {
@@ -85,7 +86,11 @@ mod tests {
 
     #[test]
     fn test_isolate_flags_no_overlap() {
-        let flags = [CPU_ISOLATE_DOMAIN, CPU_ISOLATE_MANAGED_IRQ, CPU_ISOLATE_NOHZ];
+        let flags = [
+            CPU_ISOLATE_DOMAIN,
+            CPU_ISOLATE_MANAGED_IRQ,
+            CPU_ISOLATE_NOHZ,
+        ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {

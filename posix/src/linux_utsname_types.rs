@@ -69,9 +69,12 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            UTSNAME_OFF_SYSNAME, UTSNAME_OFF_NODENAME,
-            UTSNAME_OFF_RELEASE, UTSNAME_OFF_VERSION,
-            UTSNAME_OFF_MACHINE, UTSNAME_OFF_DOMAINNAME,
+            UTSNAME_OFF_SYSNAME,
+            UTSNAME_OFF_NODENAME,
+            UTSNAME_OFF_RELEASE,
+            UTSNAME_OFF_VERSION,
+            UTSNAME_OFF_MACHINE,
+            UTSNAME_OFF_DOMAINNAME,
         ];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);

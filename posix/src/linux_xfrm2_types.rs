@@ -121,15 +121,29 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            XFRM_MSG_NEWSA, XFRM_MSG_DELSA, XFRM_MSG_GETSA,
-            XFRM_MSG_NEWPOLICY, XFRM_MSG_DELPOLICY, XFRM_MSG_GETPOLICY,
-            XFRM_MSG_ALLOCSPI, XFRM_MSG_ACQUIRE, XFRM_MSG_EXPIRE,
-            XFRM_MSG_UPDPOLICY, XFRM_MSG_UPDSA, XFRM_MSG_POLEXPIRE,
-            XFRM_MSG_FLUSHSA, XFRM_MSG_FLUSHPOLICY,
-            XFRM_MSG_NEWAE, XFRM_MSG_GETAE,
-            XFRM_MSG_REPORT, XFRM_MSG_MIGRATE,
-            XFRM_MSG_GETSADINFO, XFRM_MSG_GETSPDINFO,
-            XFRM_MSG_MAPPING, XFRM_MSG_SETDEFAULT, XFRM_MSG_GETDEFAULT,
+            XFRM_MSG_NEWSA,
+            XFRM_MSG_DELSA,
+            XFRM_MSG_GETSA,
+            XFRM_MSG_NEWPOLICY,
+            XFRM_MSG_DELPOLICY,
+            XFRM_MSG_GETPOLICY,
+            XFRM_MSG_ALLOCSPI,
+            XFRM_MSG_ACQUIRE,
+            XFRM_MSG_EXPIRE,
+            XFRM_MSG_UPDPOLICY,
+            XFRM_MSG_UPDSA,
+            XFRM_MSG_POLEXPIRE,
+            XFRM_MSG_FLUSHSA,
+            XFRM_MSG_FLUSHPOLICY,
+            XFRM_MSG_NEWAE,
+            XFRM_MSG_GETAE,
+            XFRM_MSG_REPORT,
+            XFRM_MSG_MIGRATE,
+            XFRM_MSG_GETSADINFO,
+            XFRM_MSG_GETSPDINFO,
+            XFRM_MSG_MAPPING,
+            XFRM_MSG_SETDEFAULT,
+            XFRM_MSG_GETDEFAULT,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -141,8 +155,10 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes: [u8; 5] = [
-            XFRM_MODE_TRANSPORT, XFRM_MODE_TUNNEL,
-            XFRM_MODE_ROUTEOPTIMIZATION, XFRM_MODE_IN_TRIGGER,
+            XFRM_MODE_TRANSPORT,
+            XFRM_MODE_TUNNEL,
+            XFRM_MODE_ROUTEOPTIMIZATION,
+            XFRM_MODE_IN_TRIGGER,
             XFRM_MODE_BEET,
         ];
         for i in 0..modes.len() {
@@ -163,9 +179,12 @@ mod tests {
     #[test]
     fn test_sa_flags_power_of_two() {
         let flags: [u8; 7] = [
-            XFRM_STATE_NOECN, XFRM_STATE_DECAP_DSCP,
-            XFRM_STATE_NOPMTUDISC, XFRM_STATE_WILDRECV,
-            XFRM_STATE_ICMP, XFRM_STATE_AF_UNSPEC,
+            XFRM_STATE_NOECN,
+            XFRM_STATE_DECAP_DSCP,
+            XFRM_STATE_NOPMTUDISC,
+            XFRM_STATE_WILDRECV,
+            XFRM_STATE_ICMP,
+            XFRM_STATE_AF_UNSPEC,
             XFRM_STATE_ESN,
         ];
         for f in &flags {
@@ -176,9 +195,12 @@ mod tests {
     #[test]
     fn test_sa_flags_no_overlap() {
         let flags: [u8; 7] = [
-            XFRM_STATE_NOECN, XFRM_STATE_DECAP_DSCP,
-            XFRM_STATE_NOPMTUDISC, XFRM_STATE_WILDRECV,
-            XFRM_STATE_ICMP, XFRM_STATE_AF_UNSPEC,
+            XFRM_STATE_NOECN,
+            XFRM_STATE_DECAP_DSCP,
+            XFRM_STATE_NOPMTUDISC,
+            XFRM_STATE_WILDRECV,
+            XFRM_STATE_ICMP,
+            XFRM_STATE_AF_UNSPEC,
             XFRM_STATE_ESN,
         ];
         for i in 0..flags.len() {

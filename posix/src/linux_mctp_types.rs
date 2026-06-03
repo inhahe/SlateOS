@@ -110,10 +110,17 @@ mod tests {
     #[test]
     fn test_message_types_distinct() {
         let types = [
-            MCTP_TYPE_CONTROL, MCTP_TYPE_PLDM, MCTP_TYPE_NCSI,
-            MCTP_TYPE_ETHERNET, MCTP_TYPE_NVME_MGMT, MCTP_TYPE_SPDM,
-            MCTP_TYPE_SECURED, MCTP_TYPE_CXL_FM, MCTP_TYPE_CXL_CCI,
-            MCTP_TYPE_VENDOR_PCI, MCTP_TYPE_VENDOR_IANA,
+            MCTP_TYPE_CONTROL,
+            MCTP_TYPE_PLDM,
+            MCTP_TYPE_NCSI,
+            MCTP_TYPE_ETHERNET,
+            MCTP_TYPE_NVME_MGMT,
+            MCTP_TYPE_SPDM,
+            MCTP_TYPE_SECURED,
+            MCTP_TYPE_CXL_FM,
+            MCTP_TYPE_CXL_CCI,
+            MCTP_TYPE_VENDOR_PCI,
+            MCTP_TYPE_VENDOR_IANA,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -125,8 +132,10 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            MCTP_ATTR_EID, MCTP_ATTR_NET,
-            MCTP_ATTR_IFINDEX, MCTP_ATTR_PHYS_ADDR,
+            MCTP_ATTR_EID,
+            MCTP_ATTR_NET,
+            MCTP_ATTR_IFINDEX,
+            MCTP_ATTR_PHYS_ADDR,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

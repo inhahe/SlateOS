@@ -3,11 +3,11 @@
 //! Re-exports `select()`, `pselect()`, `FdSet`, and related
 //! definitions from the `poll` module.
 
-pub use crate::poll::select;
-pub use crate::poll::pselect;
-pub use crate::poll::FdSet;
 pub use crate::poll::FD_SETSIZE;
+pub use crate::poll::FdSet;
 pub use crate::poll::Timeval;
+pub use crate::poll::pselect;
+pub use crate::poll::select;
 
 /// Re-export `Timespec` for `pselect()`.
 pub use crate::stat::Timespec;
@@ -71,7 +71,9 @@ mod tests {
 
     #[test]
     fn test_fd_zero_clears() {
-        let mut set = FdSet { fds_bits: [0xFFFF_FFFF_FFFF_FFFF; 4] };
+        let mut set = FdSet {
+            fds_bits: [0xFFFF_FFFF_FFFF_FFFF; 4],
+        };
         fd_zero(&mut set);
         for &slot in &set.fds_bits {
             assert_eq!(slot, 0);

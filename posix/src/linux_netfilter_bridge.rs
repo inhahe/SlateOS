@@ -56,8 +56,11 @@ mod tests {
     #[test]
     fn test_hooks_distinct() {
         let hooks = [
-            NF_BR_PRE_ROUTING, NF_BR_LOCAL_IN, NF_BR_FORWARD,
-            NF_BR_LOCAL_OUT, NF_BR_POST_ROUTING,
+            NF_BR_PRE_ROUTING,
+            NF_BR_LOCAL_IN,
+            NF_BR_FORWARD,
+            NF_BR_LOCAL_OUT,
+            NF_BR_POST_ROUTING,
         ];
         for i in 0..hooks.len() {
             for j in (i + 1)..hooks.len() {
@@ -69,8 +72,10 @@ mod tests {
     #[test]
     fn test_priorities_distinct() {
         let pris = [
-            NF_BR_PRI_FILTER_BRIDGED, NF_BR_PRI_FILTER_OTHER,
-            NF_BR_PRI_NAT_DST_BRIDGED, NF_BR_PRI_NAT_SRC,
+            NF_BR_PRI_FILTER_BRIDGED,
+            NF_BR_PRI_FILTER_OTHER,
+            NF_BR_PRI_NAT_DST_BRIDGED,
+            NF_BR_PRI_NAT_SRC,
             NF_BR_PRI_BRNF,
         ];
         for i in 0..pris.len() {

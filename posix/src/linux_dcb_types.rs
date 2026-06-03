@@ -121,9 +121,14 @@ mod tests {
     #[test]
     fn test_cmd_types_distinct() {
         let cmds = [
-            DCB_CMD_IEEE_GET, DCB_CMD_IEEE_SET, DCB_CMD_IEEE_DEL,
-            DCB_CMD_GDCBX, DCB_CMD_SDCBX, DCB_CMD_GFEATCFG,
-            DCB_CMD_SFEATCFG, DCB_CMD_CEE_GET,
+            DCB_CMD_IEEE_GET,
+            DCB_CMD_IEEE_SET,
+            DCB_CMD_IEEE_DEL,
+            DCB_CMD_GDCBX,
+            DCB_CMD_SDCBX,
+            DCB_CMD_GFEATCFG,
+            DCB_CMD_SFEATCFG,
+            DCB_CMD_CEE_GET,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -135,11 +140,21 @@ mod tests {
     #[test]
     fn test_attr_types_distinct() {
         let attrs = [
-            DCB_ATTR_UNDEFINED, DCB_ATTR_IFNAME, DCB_ATTR_STATE,
-            DCB_ATTR_PFC_CFG, DCB_ATTR_NUM_TC, DCB_ATTR_PG_CFG,
-            DCB_ATTR_SET_ALL, DCB_ATTR_PERM_HWADDR, DCB_ATTR_CAP,
-            DCB_ATTR_NUMTCS, DCB_ATTR_BCN, DCB_ATTR_APP,
-            DCB_ATTR_IEEE, DCB_ATTR_DCBX, DCB_ATTR_FEATCFG,
+            DCB_ATTR_UNDEFINED,
+            DCB_ATTR_IFNAME,
+            DCB_ATTR_STATE,
+            DCB_ATTR_PFC_CFG,
+            DCB_ATTR_NUM_TC,
+            DCB_ATTR_PG_CFG,
+            DCB_ATTR_SET_ALL,
+            DCB_ATTR_PERM_HWADDR,
+            DCB_ATTR_CAP,
+            DCB_ATTR_NUMTCS,
+            DCB_ATTR_BCN,
+            DCB_ATTR_APP,
+            DCB_ATTR_IEEE,
+            DCB_ATTR_DCBX,
+            DCB_ATTR_FEATCFG,
             DCB_ATTR_CEE,
         ];
         for i in 0..attrs.len() {
@@ -152,8 +167,10 @@ mod tests {
     #[test]
     fn test_dcbx_flags_powers_of_two() {
         let flags = [
-            DCB_CAP_DCBX_VER_IEEE, DCB_CAP_DCBX_VER_CEE,
-            DCB_CAP_DCBX_STATIC, DCB_CAP_DCBX_HOST,
+            DCB_CAP_DCBX_VER_IEEE,
+            DCB_CAP_DCBX_VER_CEE,
+            DCB_CAP_DCBX_STATIC,
+            DCB_CAP_DCBX_HOST,
             DCB_CAP_DCBX_LLD_MANAGED,
         ];
         for f in &flags {
@@ -164,8 +181,10 @@ mod tests {
     #[test]
     fn test_dcbx_flags_no_overlap() {
         let flags: [u8; 5] = [
-            DCB_CAP_DCBX_VER_IEEE, DCB_CAP_DCBX_VER_CEE,
-            DCB_CAP_DCBX_STATIC, DCB_CAP_DCBX_HOST,
+            DCB_CAP_DCBX_VER_IEEE,
+            DCB_CAP_DCBX_VER_CEE,
+            DCB_CAP_DCBX_STATIC,
+            DCB_CAP_DCBX_HOST,
             DCB_CAP_DCBX_LLD_MANAGED,
         ];
         for i in 0..flags.len() {
@@ -178,11 +197,16 @@ mod tests {
     #[test]
     fn test_ieee_attrs_distinct() {
         let attrs = [
-            DCB_ATTR_IEEE_UNSPEC, DCB_ATTR_IEEE_ETS,
-            DCB_ATTR_IEEE_PFC, DCB_ATTR_IEEE_APP_TABLE,
-            DCB_ATTR_IEEE_PEER_ETS, DCB_ATTR_IEEE_PEER_PFC,
-            DCB_ATTR_IEEE_PEER_APP, DCB_ATTR_IEEE_MAXRATE,
-            DCB_ATTR_IEEE_QCN, DCB_ATTR_IEEE_QCN_STATS,
+            DCB_ATTR_IEEE_UNSPEC,
+            DCB_ATTR_IEEE_ETS,
+            DCB_ATTR_IEEE_PFC,
+            DCB_ATTR_IEEE_APP_TABLE,
+            DCB_ATTR_IEEE_PEER_ETS,
+            DCB_ATTR_IEEE_PEER_PFC,
+            DCB_ATTR_IEEE_PEER_APP,
+            DCB_ATTR_IEEE_MAXRATE,
+            DCB_ATTR_IEEE_QCN,
+            DCB_ATTR_IEEE_QCN_STATS,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

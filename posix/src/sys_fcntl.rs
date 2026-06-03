@@ -8,17 +8,17 @@
 // Open flags
 // ---------------------------------------------------------------------------
 
-pub use crate::fcntl::O_RDONLY;
-pub use crate::fcntl::O_WRONLY;
-pub use crate::fcntl::O_RDWR;
-pub use crate::fcntl::O_CREAT;
-pub use crate::fcntl::O_EXCL;
-pub use crate::fcntl::O_TRUNC;
 pub use crate::fcntl::O_APPEND;
-pub use crate::fcntl::O_NONBLOCK;
 pub use crate::fcntl::O_CLOEXEC;
+pub use crate::fcntl::O_CREAT;
 pub use crate::fcntl::O_DIRECTORY;
+pub use crate::fcntl::O_EXCL;
 pub use crate::fcntl::O_NOFOLLOW;
+pub use crate::fcntl::O_NONBLOCK;
+pub use crate::fcntl::O_RDONLY;
+pub use crate::fcntl::O_RDWR;
+pub use crate::fcntl::O_TRUNC;
+pub use crate::fcntl::O_WRONLY;
 
 // ---------------------------------------------------------------------------
 // fcntl commands
@@ -26,8 +26,8 @@ pub use crate::fcntl::O_NOFOLLOW;
 
 pub use crate::fcntl_ops::F_DUPFD;
 pub use crate::fcntl_ops::F_GETFD;
-pub use crate::fcntl_ops::F_SETFD;
 pub use crate::fcntl_ops::F_GETFL;
+pub use crate::fcntl_ops::F_SETFD;
 pub use crate::fcntl_ops::F_SETFL;
 pub use crate::fdtable::FD_CLOEXEC;
 
@@ -35,10 +35,10 @@ pub use crate::fdtable::FD_CLOEXEC;
 // File mode constants
 // ---------------------------------------------------------------------------
 
-pub use crate::fcntl::S_IFMT;
-pub use crate::fcntl::S_IFREG;
 pub use crate::fcntl::S_IFDIR;
 pub use crate::fcntl::S_IFLNK;
+pub use crate::fcntl::S_IFMT;
+pub use crate::fcntl::S_IFREG;
 pub use crate::fcntl::S_IRUSR;
 pub use crate::fcntl::S_IWUSR;
 pub use crate::fcntl::S_IXUSR;

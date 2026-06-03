@@ -75,9 +75,12 @@ mod tests {
     #[test]
     fn test_suffixes_distinct() {
         let suffixes = [
-            HUGETLB_MAX_SUFFIX, HUGETLB_CURRENT_SUFFIX,
-            HUGETLB_RSV_MAX_SUFFIX, HUGETLB_RSV_CURRENT_SUFFIX,
-            HUGETLB_EVENTS_SUFFIX, HUGETLB_EVENTS_LOCAL_SUFFIX,
+            HUGETLB_MAX_SUFFIX,
+            HUGETLB_CURRENT_SUFFIX,
+            HUGETLB_RSV_MAX_SUFFIX,
+            HUGETLB_RSV_CURRENT_SUFFIX,
+            HUGETLB_EVENTS_SUFFIX,
+            HUGETLB_EVENTS_LOCAL_SUFFIX,
             HUGETLB_NUMA_STAT_SUFFIX,
         ];
         for i in 0..suffixes.len() {

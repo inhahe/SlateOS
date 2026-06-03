@@ -66,9 +66,15 @@ mod tests {
     #[test]
     fn test_radio_types_distinct() {
         let types = [
-            RFKILL_TYPE_ALL, RFKILL_TYPE_WLAN, RFKILL_TYPE_BLUETOOTH,
-            RFKILL_TYPE_UWB, RFKILL_TYPE_WIMAX, RFKILL_TYPE_WWAN,
-            RFKILL_TYPE_GPS, RFKILL_TYPE_FM, RFKILL_TYPE_NFC,
+            RFKILL_TYPE_ALL,
+            RFKILL_TYPE_WLAN,
+            RFKILL_TYPE_BLUETOOTH,
+            RFKILL_TYPE_UWB,
+            RFKILL_TYPE_WIMAX,
+            RFKILL_TYPE_WWAN,
+            RFKILL_TYPE_GPS,
+            RFKILL_TYPE_FM,
+            RFKILL_TYPE_NFC,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -80,8 +86,10 @@ mod tests {
     #[test]
     fn test_operations_distinct() {
         let ops = [
-            RFKILL_OP_ADD, RFKILL_OP_DEL,
-            RFKILL_OP_CHANGE, RFKILL_OP_CHANGE_ALL,
+            RFKILL_OP_ADD,
+            RFKILL_OP_DEL,
+            RFKILL_OP_CHANGE,
+            RFKILL_OP_CHANGE_ALL,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

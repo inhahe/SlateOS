@@ -92,8 +92,10 @@ mod tests {
     #[test]
     fn test_access_flags_no_overlap() {
         let flags = [
-            REGMAP_ACCESS_READ, REGMAP_ACCESS_WRITE,
-            REGMAP_ACCESS_VOLATILE, REGMAP_ACCESS_PRECIOUS,
+            REGMAP_ACCESS_READ,
+            REGMAP_ACCESS_WRITE,
+            REGMAP_ACCESS_VOLATILE,
+            REGMAP_ACCESS_PRECIOUS,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -105,8 +107,12 @@ mod tests {
     #[test]
     fn test_bus_types_distinct() {
         let buses = [
-            REGMAP_BUS_MMIO, REGMAP_BUS_I2C, REGMAP_BUS_SPI,
-            REGMAP_BUS_AC97, REGMAP_BUS_SPMI, REGMAP_BUS_SLIMBUS,
+            REGMAP_BUS_MMIO,
+            REGMAP_BUS_I2C,
+            REGMAP_BUS_SPI,
+            REGMAP_BUS_AC97,
+            REGMAP_BUS_SPMI,
+            REGMAP_BUS_SLIMBUS,
             REGMAP_BUS_SDIO,
         ];
         for i in 0..buses.len() {
@@ -118,7 +124,11 @@ mod tests {
 
     #[test]
     fn test_endianness_distinct() {
-        let endians = [REGMAP_ENDIAN_NATIVE, REGMAP_ENDIAN_BIG, REGMAP_ENDIAN_LITTLE];
+        let endians = [
+            REGMAP_ENDIAN_NATIVE,
+            REGMAP_ENDIAN_BIG,
+            REGMAP_ENDIAN_LITTLE,
+        ];
         for i in 0..endians.len() {
             for j in (i + 1)..endians.len() {
                 assert_ne!(endians[i], endians[j]);
@@ -129,8 +139,10 @@ mod tests {
     #[test]
     fn test_cache_types_distinct() {
         let caches = [
-            REGMAP_CACHE_NONE, REGMAP_CACHE_FLAT,
-            REGMAP_CACHE_RBTREE, REGMAP_CACHE_MAPLE,
+            REGMAP_CACHE_NONE,
+            REGMAP_CACHE_FLAT,
+            REGMAP_CACHE_RBTREE,
+            REGMAP_CACHE_MAPLE,
         ];
         for i in 0..caches.len() {
             for j in (i + 1)..caches.len() {

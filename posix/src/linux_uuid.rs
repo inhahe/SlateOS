@@ -29,7 +29,9 @@ pub struct Uuid {
 impl Uuid {
     /// Create a nil UUID (all zeros).
     pub const fn nil() -> Self {
-        Self { b: [0u8; UUID_SIZE] }
+        Self {
+            b: [0u8; UUID_SIZE],
+        }
     }
 
     /// Check if this UUID is nil (all zeros).
@@ -55,7 +57,9 @@ pub struct Guid {
 impl Guid {
     /// Create a nil GUID (all zeros).
     pub const fn nil() -> Self {
-        Self { b: [0u8; UUID_SIZE] }
+        Self {
+            b: [0u8; UUID_SIZE],
+        }
     }
 
     /// Check if this GUID is nil (all zeros).
@@ -75,20 +79,17 @@ impl Guid {
 
 /// EFI System Partition GUID bytes (C12A7328-F81F-11D2-BA4B-00A0C93EC93B).
 pub const EFI_SYSTEM_PARTITION_GUID: [u8; 16] = [
-    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11,
-    0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
+    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
 ];
 
 /// Linux filesystem partition GUID (0FC63DAF-8483-4772-8E79-3D69D8477DE4).
 pub const LINUX_FS_GUID: [u8; 16] = [
-    0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47,
-    0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4,
+    0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4,
 ];
 
 /// Linux swap partition GUID (0657FD6D-A4AB-43C4-84E5-0933C84B4F4F).
 pub const LINUX_SWAP_GUID: [u8; 16] = [
-    0x6d, 0xfd, 0x57, 0x06, 0xab, 0xa4, 0xc4, 0x43,
-    0x84, 0xe5, 0x09, 0x33, 0xc8, 0x4b, 0x4f, 0x4f,
+    0x6d, 0xfd, 0x57, 0x06, 0xab, 0xa4, 0xc4, 0x43, 0x84, 0xe5, 0x09, 0x33, 0xc8, 0x4b, 0x4f, 0x4f,
 ];
 
 // ---------------------------------------------------------------------------
@@ -163,7 +164,12 @@ mod tests {
 
     #[test]
     fn test_versions_distinct() {
-        let versions = [UUID_VERSION_1, UUID_VERSION_3, UUID_VERSION_4, UUID_VERSION_5];
+        let versions = [
+            UUID_VERSION_1,
+            UUID_VERSION_3,
+            UUID_VERSION_4,
+            UUID_VERSION_5,
+        ];
         for i in 0..versions.len() {
             for j in (i + 1)..versions.len() {
                 assert_ne!(versions[i], versions[j]);

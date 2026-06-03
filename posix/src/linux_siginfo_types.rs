@@ -99,8 +99,7 @@ mod tests {
     #[test]
     fn test_generic_codes_distinct() {
         let codes = [
-            SI_USER, SI_KERNEL, SI_QUEUE, SI_TIMER,
-            SI_MESGQ, SI_ASYNCIO, SI_TKILL,
+            SI_USER, SI_KERNEL, SI_QUEUE, SI_TIMER, SI_MESGQ, SI_ASYNCIO, SI_TKILL,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -127,8 +126,7 @@ mod tests {
     #[test]
     fn test_fpe_codes_distinct() {
         let codes = [
-            FPE_INTDIV, FPE_INTOVF, FPE_FLTDIV, FPE_FLTOVF,
-            FPE_FLTUND, FPE_FLTRES, FPE_FLTINV,
+            FPE_INTDIV, FPE_INTOVF, FPE_FLTDIV, FPE_FLTOVF, FPE_FLTUND, FPE_FLTRES, FPE_FLTINV,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -140,8 +138,11 @@ mod tests {
     #[test]
     fn test_bus_codes_distinct() {
         let codes = [
-            BUS_ADRALN, BUS_ADRERR, BUS_OBJERR,
-            BUS_MCEERR_AR, BUS_MCEERR_AO,
+            BUS_ADRALN,
+            BUS_ADRERR,
+            BUS_OBJERR,
+            BUS_MCEERR_AR,
+            BUS_MCEERR_AO,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

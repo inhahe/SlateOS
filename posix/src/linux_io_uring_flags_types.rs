@@ -71,8 +71,12 @@ mod tests {
     #[test]
     fn test_sqe_flags_power_of_two() {
         let flags = [
-            IOSQE_FIXED_FILE, IOSQE_IO_DRAIN, IOSQE_IO_LINK,
-            IOSQE_IO_HARDLINK, IOSQE_ASYNC, IOSQE_BUFFER_SELECT,
+            IOSQE_FIXED_FILE,
+            IOSQE_IO_DRAIN,
+            IOSQE_IO_LINK,
+            IOSQE_IO_HARDLINK,
+            IOSQE_ASYNC,
+            IOSQE_BUFFER_SELECT,
             IOSQE_CQE_SKIP_SUCCESS,
         ];
         for f in &flags {
@@ -83,8 +87,12 @@ mod tests {
     #[test]
     fn test_sqe_flags_no_overlap() {
         let flags = [
-            IOSQE_FIXED_FILE, IOSQE_IO_DRAIN, IOSQE_IO_LINK,
-            IOSQE_IO_HARDLINK, IOSQE_ASYNC, IOSQE_BUFFER_SELECT,
+            IOSQE_FIXED_FILE,
+            IOSQE_IO_DRAIN,
+            IOSQE_IO_LINK,
+            IOSQE_IO_HARDLINK,
+            IOSQE_ASYNC,
+            IOSQE_BUFFER_SELECT,
             IOSQE_CQE_SKIP_SUCCESS,
         ];
         for i in 0..flags.len() {
@@ -102,9 +110,12 @@ mod tests {
     #[test]
     fn test_timeout_flags_distinct() {
         let flags = [
-            IORING_TIMEOUT_ABS, IORING_TIMEOUT_UPDATE,
-            IORING_TIMEOUT_BOOTTIME, IORING_TIMEOUT_REALTIME,
-            IORING_TIMEOUT_ETIME_SUCCESS, IORING_TIMEOUT_MULTISHOT,
+            IORING_TIMEOUT_ABS,
+            IORING_TIMEOUT_UPDATE,
+            IORING_TIMEOUT_BOOTTIME,
+            IORING_TIMEOUT_REALTIME,
+            IORING_TIMEOUT_ETIME_SUCCESS,
+            IORING_TIMEOUT_MULTISHOT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

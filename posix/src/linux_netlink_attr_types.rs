@@ -87,10 +87,21 @@ mod tests {
     #[test]
     fn test_nla_data_types_distinct() {
         let types = [
-            NLA_UNSPEC, NLA_U8, NLA_U16, NLA_U32, NLA_U64,
-            NLA_STRING, NLA_FLAG, NLA_MSECS, NLA_NESTED,
-            NLA_NESTED_ARRAY, NLA_BINARY,
-            NLA_S8, NLA_S16, NLA_S32, NLA_S64,
+            NLA_UNSPEC,
+            NLA_U8,
+            NLA_U16,
+            NLA_U32,
+            NLA_U64,
+            NLA_STRING,
+            NLA_FLAG,
+            NLA_MSECS,
+            NLA_NESTED,
+            NLA_NESTED_ARRAY,
+            NLA_BINARY,
+            NLA_S8,
+            NLA_S16,
+            NLA_S32,
+            NLA_S64,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

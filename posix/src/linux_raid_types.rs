@@ -95,8 +95,13 @@ mod tests {
     #[test]
     fn test_levels_distinct() {
         let levels = [
-            RAID_LEVEL_LINEAR, RAID_LEVEL_0, RAID_LEVEL_1,
-            RAID_LEVEL_4, RAID_LEVEL_5, RAID_LEVEL_6, RAID_LEVEL_10,
+            RAID_LEVEL_LINEAR,
+            RAID_LEVEL_0,
+            RAID_LEVEL_1,
+            RAID_LEVEL_4,
+            RAID_LEVEL_5,
+            RAID_LEVEL_6,
+            RAID_LEVEL_10,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -113,8 +118,11 @@ mod tests {
     #[test]
     fn test_array_states_distinct() {
         let states = [
-            MD_STATE_ACTIVE, MD_STATE_CLEAN, MD_STATE_READONLY,
-            MD_STATE_INACTIVE, MD_STATE_SUSPENDED,
+            MD_STATE_ACTIVE,
+            MD_STATE_CLEAN,
+            MD_STATE_READONLY,
+            MD_STATE_INACTIVE,
+            MD_STATE_SUSPENDED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -126,10 +134,15 @@ mod tests {
     #[test]
     fn test_disk_flags_no_overlap() {
         let flags = [
-            MD_DISK_ACTIVE, MD_DISK_SYNC, MD_DISK_REMOVED,
-            MD_DISK_CLUSTER_ADD, MD_DISK_CANDIDATE,
-            MD_DISK_FAULTY, MD_DISK_WRITEMOSTLY,
-            MD_DISK_JOURNAL, MD_DISK_FAILFAST,
+            MD_DISK_ACTIVE,
+            MD_DISK_SYNC,
+            MD_DISK_REMOVED,
+            MD_DISK_CLUSTER_ADD,
+            MD_DISK_CANDIDATE,
+            MD_DISK_FAULTY,
+            MD_DISK_WRITEMOSTLY,
+            MD_DISK_JOURNAL,
+            MD_DISK_FAILFAST,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -141,10 +154,15 @@ mod tests {
     #[test]
     fn test_disk_flags_power_of_two() {
         let flags = [
-            MD_DISK_ACTIVE, MD_DISK_SYNC, MD_DISK_REMOVED,
-            MD_DISK_CLUSTER_ADD, MD_DISK_CANDIDATE,
-            MD_DISK_FAULTY, MD_DISK_WRITEMOSTLY,
-            MD_DISK_JOURNAL, MD_DISK_FAILFAST,
+            MD_DISK_ACTIVE,
+            MD_DISK_SYNC,
+            MD_DISK_REMOVED,
+            MD_DISK_CLUSTER_ADD,
+            MD_DISK_CANDIDATE,
+            MD_DISK_FAULTY,
+            MD_DISK_WRITEMOSTLY,
+            MD_DISK_JOURNAL,
+            MD_DISK_FAILFAST,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -154,9 +172,15 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            GET_ARRAY_INFO, GET_DISK_INFO, SET_ARRAY_INFO,
-            SET_DISK_INFO, RUN_ARRAY, STOP_ARRAY,
-            ADD_NEW_DISK, HOT_ADD_DISK, HOT_REMOVE_DISK,
+            GET_ARRAY_INFO,
+            GET_DISK_INFO,
+            SET_ARRAY_INFO,
+            SET_DISK_INFO,
+            RUN_ARRAY,
+            STOP_ARRAY,
+            ADD_NEW_DISK,
+            HOT_ADD_DISK,
+            HOT_REMOVE_DISK,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

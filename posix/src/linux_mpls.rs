@@ -87,10 +87,14 @@ mod tests {
     #[test]
     fn test_reserved_labels_distinct() {
         let labels = [
-            MPLS_LABEL_IPV4NULL, MPLS_LABEL_RTALERT,
-            MPLS_LABEL_IPV6NULL, MPLS_LABEL_IMPLNULL,
-            MPLS_LABEL_ENTROPY, MPLS_LABEL_GAL,
-            MPLS_LABEL_OAMALERT, MPLS_LABEL_EXTENSION,
+            MPLS_LABEL_IPV4NULL,
+            MPLS_LABEL_RTALERT,
+            MPLS_LABEL_IPV6NULL,
+            MPLS_LABEL_IMPLNULL,
+            MPLS_LABEL_ENTROPY,
+            MPLS_LABEL_GAL,
+            MPLS_LABEL_OAMALERT,
+            MPLS_LABEL_EXTENSION,
         ];
         for i in 0..labels.len() {
             for j in (i + 1)..labels.len() {
@@ -110,8 +114,7 @@ mod tests {
     #[test]
     fn test_full_label_entry() {
         // All masks together should cover 32 bits.
-        let combined = MPLS_LS_LABEL_MASK | MPLS_LS_TC_MASK
-            | MPLS_LS_S_MASK | MPLS_LS_TTL_MASK;
+        let combined = MPLS_LS_LABEL_MASK | MPLS_LS_TC_MASK | MPLS_LS_S_MASK | MPLS_LS_TTL_MASK;
         assert_eq!(combined, 0xFFFFFFFF);
     }
 }

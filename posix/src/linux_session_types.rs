@@ -71,10 +71,7 @@ mod tests {
 
     #[test]
     fn test_ioctls_distinct() {
-        let ioctls = [
-            TIOCSCTTY, TIOCNOTTY, TIOCGSID,
-            TIOCGPGRP, TIOCSPGRP,
-        ];
+        let ioctls = [TIOCSCTTY, TIOCNOTTY, TIOCGSID, TIOCGPGRP, TIOCSPGRP];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
                 assert_ne!(ioctls[i], ioctls[j]);
@@ -101,8 +98,11 @@ mod tests {
     #[test]
     fn test_signals_distinct() {
         let sigs = [
-            SESSION_SIGHUP, SESSION_SIGTTIN, SESSION_SIGTTOU,
-            SESSION_SIGTSTP, SESSION_SIGCONT,
+            SESSION_SIGHUP,
+            SESSION_SIGTTIN,
+            SESSION_SIGTTOU,
+            SESSION_SIGTSTP,
+            SESSION_SIGCONT,
         ];
         for i in 0..sigs.len() {
             for j in (i + 1)..sigs.len() {

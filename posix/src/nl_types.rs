@@ -53,12 +53,7 @@ pub extern "C" fn catopen(_name: *const u8, _oflag: i32) -> NlCatd {
 /// the message is not found, `catgets` returns `s` (the default
 /// string).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn catgets(
-    _catd: NlCatd,
-    _set_id: i32,
-    _msg_id: i32,
-    s: *const u8,
-) -> *const u8 {
+pub extern "C" fn catgets(_catd: NlCatd, _set_id: i32, _msg_id: i32, s: *const u8) -> *const u8 {
     // Always return the default string.
     s
 }
@@ -102,7 +97,10 @@ mod tests {
     #[test]
     fn test_nl_catd_size() {
         // NlCatd is isize — pointer-sized.
-        assert_eq!(core::mem::size_of::<NlCatd>(), core::mem::size_of::<isize>());
+        assert_eq!(
+            core::mem::size_of::<NlCatd>(),
+            core::mem::size_of::<isize>()
+        );
     }
 
     // -----------------------------------------------------------------------

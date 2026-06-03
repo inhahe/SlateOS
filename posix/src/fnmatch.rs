@@ -34,11 +34,7 @@ pub const FNM_PERIOD: i32 = 4;
 ///
 /// Both `pattern` and `string` must be valid null-terminated C strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn fnmatch(
-    pattern: *const u8,
-    string: *const u8,
-    flags: i32,
-) -> i32 {
+pub unsafe extern "C" fn fnmatch(pattern: *const u8, string: *const u8, flags: i32) -> i32 {
     if pattern.is_null() || string.is_null() {
         return FNM_NOMATCH;
     }
@@ -55,12 +51,7 @@ pub unsafe extern "C" fn fnmatch(
 /// `ppos` should point to the character after `[`.
 /// Returns `Some(new_ppos)` (pointing past `]`) on match, `None` on
 /// no-match or malformed bracket.
-fn match_bracket(
-    pat: *const u8,
-    mut ppos: usize,
-    sc: u8,
-    flags: i32,
-) -> Option<usize> {
+fn match_bracket(pat: *const u8, mut ppos: usize, sc: u8, flags: i32) -> Option<usize> {
     let negate = unsafe { *pat.add(ppos) } == b'!' || unsafe { *pat.add(ppos) } == b'^';
     if negate {
         ppos = ppos.wrapping_add(1);
@@ -91,8 +82,7 @@ fn match_bracket(
                 }
                 end = end.wrapping_add(1);
             }
-            if unsafe { *pat.add(end) } == b':'
-                && unsafe { *pat.add(end.wrapping_add(1)) } == b']'
+            if unsafe { *pat.add(end) } == b':' && unsafe { *pat.add(end.wrapping_add(1)) } == b']'
             {
                 if posix_class_matches(pat, name_start, end.wrapping_sub(name_start), sc) {
                     matched = true;
@@ -141,24 +131,14 @@ fn match_bracket(
 
     ppos = ppos.wrapping_add(1); // skip ']'
 
-    if matched == negate {
-        None
-    } else {
-        Some(ppos)
-    }
+    if matched == negate { None } else { Some(ppos) }
 }
 
 /// Handle `*` wildcard matching.
 ///
 /// `ppos` points past all consecutive `*` characters.
 /// Returns true if the rest of the pattern matches.
-fn match_star(
-    pat: *const u8,
-    ppos: usize,
-    str: *const u8,
-    spos: usize,
-    flags: i32,
-) -> bool {
+fn match_star(pat: *const u8, ppos: usize, str: *const u8, spos: usize, flags: i32) -> bool {
     // If pattern is exhausted after *, match rest of string.
     if unsafe { *pat.add(ppos) } == 0 {
         // If FNM_PATHNAME, rest must not contain '/'.
@@ -283,7 +263,9 @@ fn do_match(
 /// `name_len` is the length of the name (between `[:` and `:]`).
 fn posix_class_matches(pat: *const u8, name_start: usize, name_len: usize, c: u8) -> bool {
     let name_eq = |expected: &[u8]| -> bool {
-        if name_len != expected.len() { return false; }
+        if name_len != expected.len() {
+            return false;
+        }
         let mut k = 0;
         while k < name_len {
             let exp_byte = expected.get(k).copied().unwrap_or(0);
@@ -586,8 +568,16 @@ mod tests {
 
     #[test]
     fn posix_class_in_context() {
-        assert!(matches(b"file[[:digit:]][[:digit:]].txt\0", b"file42.txt\0", 0));
-        assert!(!matches(b"file[[:digit:]][[:digit:]].txt\0", b"fileAB.txt\0", 0));
+        assert!(matches(
+            b"file[[:digit:]][[:digit:]].txt\0",
+            b"file42.txt\0",
+            0
+        ));
+        assert!(!matches(
+            b"file[[:digit:]][[:digit:]].txt\0",
+            b"fileAB.txt\0",
+            0
+        ));
     }
 
     #[test]

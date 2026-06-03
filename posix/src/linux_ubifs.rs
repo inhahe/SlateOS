@@ -108,10 +108,18 @@ mod tests {
     #[test]
     fn test_node_types_distinct() {
         let types = [
-            UBIFS_INO_NODE, UBIFS_DATA_NODE, UBIFS_DENT_NODE,
-            UBIFS_XENT_NODE, UBIFS_TRUN_NODE, UBIFS_PAD_NODE,
-            UBIFS_SB_NODE, UBIFS_MST_NODE, UBIFS_REF_NODE,
-            UBIFS_IDX_NODE, UBIFS_CS_NODE, UBIFS_ORPH_NODE,
+            UBIFS_INO_NODE,
+            UBIFS_DATA_NODE,
+            UBIFS_DENT_NODE,
+            UBIFS_XENT_NODE,
+            UBIFS_TRUN_NODE,
+            UBIFS_PAD_NODE,
+            UBIFS_SB_NODE,
+            UBIFS_MST_NODE,
+            UBIFS_REF_NODE,
+            UBIFS_IDX_NODE,
+            UBIFS_CS_NODE,
+            UBIFS_ORPH_NODE,
             UBIFS_AUTH_NODE,
         ];
         for i in 0..types.len() {
@@ -123,7 +131,12 @@ mod tests {
 
     #[test]
     fn test_compression_types_distinct() {
-        let types = [UBIFS_COMPR_NONE, UBIFS_COMPR_LZO, UBIFS_COMPR_ZLIB, UBIFS_COMPR_ZSTD];
+        let types = [
+            UBIFS_COMPR_NONE,
+            UBIFS_COMPR_LZO,
+            UBIFS_COMPR_ZLIB,
+            UBIFS_COMPR_ZSTD,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -134,8 +147,12 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            UBIFS_ITYPE_REG, UBIFS_ITYPE_DIR, UBIFS_ITYPE_LNK,
-            UBIFS_ITYPE_BLK, UBIFS_ITYPE_CHR, UBIFS_ITYPE_FIFO,
+            UBIFS_ITYPE_REG,
+            UBIFS_ITYPE_DIR,
+            UBIFS_ITYPE_LNK,
+            UBIFS_ITYPE_BLK,
+            UBIFS_ITYPE_CHR,
+            UBIFS_ITYPE_FIFO,
             UBIFS_ITYPE_SOCK,
         ];
         for i in 0..types.len() {
@@ -148,8 +165,10 @@ mod tests {
     #[test]
     fn test_feature_flags_no_overlap() {
         let flags = [
-            UBIFS_FLG_BIGLPT, UBIFS_FLG_SPACE_FIXUP,
-            UBIFS_FLG_DOUBLE_HASH, UBIFS_FLG_ENCRYPTION,
+            UBIFS_FLG_BIGLPT,
+            UBIFS_FLG_SPACE_FIXUP,
+            UBIFS_FLG_DOUBLE_HASH,
+            UBIFS_FLG_ENCRYPTION,
             UBIFS_FLG_AUTHENTICATION,
         ];
         for i in 0..flags.len() {

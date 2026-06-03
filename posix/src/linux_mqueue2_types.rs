@@ -82,8 +82,12 @@ mod tests {
     #[test]
     fn test_open_flags_distinct() {
         let flags = [
-            O_RDONLY_MQ, O_WRONLY_MQ, O_RDWR_MQ,
-            O_NONBLOCK_MQ, O_CREAT_MQ, O_EXCL_MQ,
+            O_RDONLY_MQ,
+            O_WRONLY_MQ,
+            O_RDWR_MQ,
+            O_NONBLOCK_MQ,
+            O_CREAT_MQ,
+            O_EXCL_MQ,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

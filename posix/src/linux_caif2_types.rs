@@ -68,8 +68,12 @@ mod tests {
     #[test]
     fn test_ch_types_distinct() {
         let types = [
-            CAIF_CHTYPE_AT, CAIF_CHTYPE_DATA, CAIF_CHTYPE_VIDEO,
-            CAIF_CHTYPE_DEBUG, CAIF_CHTYPE_UTIL, CAIF_CHTYPE_RFM,
+            CAIF_CHTYPE_AT,
+            CAIF_CHTYPE_DATA,
+            CAIF_CHTYPE_VIDEO,
+            CAIF_CHTYPE_DEBUG,
+            CAIF_CHTYPE_UTIL,
+            CAIF_CHTYPE_RFM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -81,8 +85,11 @@ mod tests {
     #[test]
     fn test_conn_types_distinct() {
         let types = [
-            CAIF_AT_TYPE, CAIF_DATAGRAM_TYPE, CAIF_DEBUG_TYPE,
-            CAIF_UTIL_TYPE, CAIF_RFM_TYPE,
+            CAIF_AT_TYPE,
+            CAIF_DATAGRAM_TYPE,
+            CAIF_DEBUG_TYPE,
+            CAIF_UTIL_TYPE,
+            CAIF_RFM_TYPE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -99,8 +106,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            CAIF_DISCONNECTED, CAIF_CONNECTING,
-            CAIF_CONNECTED, CAIF_DISCONNECTING,
+            CAIF_DISCONNECTED,
+            CAIF_CONNECTING,
+            CAIF_CONNECTED,
+            CAIF_DISCONNECTING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

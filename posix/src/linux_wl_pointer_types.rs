@@ -55,14 +55,18 @@ mod tests {
 
     #[test]
     fn test_button_states_distinct() {
-        assert_ne!(WL_POINTER_BUTTON_STATE_RELEASED,
-                   WL_POINTER_BUTTON_STATE_PRESSED);
+        assert_ne!(
+            WL_POINTER_BUTTON_STATE_RELEASED,
+            WL_POINTER_BUTTON_STATE_PRESSED
+        );
     }
 
     #[test]
     fn test_axes_distinct() {
-        assert_ne!(WL_POINTER_AXIS_VERTICAL_SCROLL,
-                   WL_POINTER_AXIS_HORIZONTAL_SCROLL);
+        assert_ne!(
+            WL_POINTER_AXIS_VERTICAL_SCROLL,
+            WL_POINTER_AXIS_HORIZONTAL_SCROLL
+        );
     }
 
     #[test]
@@ -82,8 +86,10 @@ mod tests {
 
     #[test]
     fn test_relative_directions() {
-        assert_ne!(WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL,
-                   WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED);
+        assert_ne!(
+            WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL,
+            WL_POINTER_AXIS_RELATIVE_DIRECTION_INVERTED
+        );
     }
 
     #[test]

@@ -68,8 +68,11 @@ mod tests {
     #[test]
     fn test_port_states_distinct() {
         let states = [
-            BR_STATE_DISABLED, BR_STATE_LISTENING, BR_STATE_LEARNING,
-            BR_STATE_FORWARDING, BR_STATE_BLOCKING,
+            BR_STATE_DISABLED,
+            BR_STATE_LISTENING,
+            BR_STATE_LEARNING,
+            BR_STATE_FORWARDING,
+            BR_STATE_BLOCKING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -81,8 +84,12 @@ mod tests {
     #[test]
     fn test_netlink_attrs_distinct() {
         let attrs = [
-            IFLA_BR_FORWARD_DELAY, IFLA_BR_HELLO_TIME, IFLA_BR_MAX_AGE,
-            IFLA_BR_AGEING_TIME, IFLA_BR_STP_STATE, IFLA_BR_PRIORITY,
+            IFLA_BR_FORWARD_DELAY,
+            IFLA_BR_HELLO_TIME,
+            IFLA_BR_MAX_AGE,
+            IFLA_BR_AGEING_TIME,
+            IFLA_BR_STP_STATE,
+            IFLA_BR_PRIORITY,
             IFLA_BR_VLAN_FILTERING,
         ];
         for i in 0..attrs.len() {
@@ -95,8 +102,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            BR_HAIRPIN_MODE, BR_BPDU_GUARD, BR_ROOT_BLOCK,
-            BR_MULTICAST_FAST_LEAVE, BR_LEARNING, BR_FLOOD,
+            BR_HAIRPIN_MODE,
+            BR_BPDU_GUARD,
+            BR_ROOT_BLOCK,
+            BR_MULTICAST_FAST_LEAVE,
+            BR_LEARNING,
+            BR_FLOOD,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

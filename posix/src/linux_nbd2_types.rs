@@ -125,9 +125,14 @@ mod tests {
     #[test]
     fn test_cmd_types_distinct() {
         let cmds = [
-            NBD_CMD_READ, NBD_CMD_WRITE, NBD_CMD_DISC,
-            NBD_CMD_FLUSH, NBD_CMD_TRIM, NBD_CMD_CACHE,
-            NBD_CMD_WRITE_ZEROES, NBD_CMD_BLOCK_STATUS,
+            NBD_CMD_READ,
+            NBD_CMD_WRITE,
+            NBD_CMD_DISC,
+            NBD_CMD_FLUSH,
+            NBD_CMD_TRIM,
+            NBD_CMD_CACHE,
+            NBD_CMD_WRITE_ZEROES,
+            NBD_CMD_BLOCK_STATUS,
             NBD_CMD_RESIZE,
         ];
         for i in 0..cmds.len() {
@@ -140,9 +145,12 @@ mod tests {
     #[test]
     fn test_cmd_flags_power_of_two() {
         let flags: [u16; 6] = [
-            NBD_CMD_FLAG_FUA, NBD_CMD_FLAG_NO_HOLE,
-            NBD_CMD_FLAG_DF, NBD_CMD_FLAG_REQ_ONE,
-            NBD_CMD_FLAG_FAST_ZERO, NBD_CMD_FLAG_PAYLOAD_LEN,
+            NBD_CMD_FLAG_FUA,
+            NBD_CMD_FLAG_NO_HOLE,
+            NBD_CMD_FLAG_DF,
+            NBD_CMD_FLAG_REQ_ONE,
+            NBD_CMD_FLAG_FAST_ZERO,
+            NBD_CMD_FLAG_PAYLOAD_LEN,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:04x} not power of two", f);
@@ -152,12 +160,18 @@ mod tests {
     #[test]
     fn test_trans_flags_no_overlap() {
         let flags: [u16; 13] = [
-            NBD_FLAG_HAS_FLAGS, NBD_FLAG_READ_ONLY,
-            NBD_FLAG_SEND_FLUSH, NBD_FLAG_SEND_FUA,
-            NBD_FLAG_ROTATIONAL, NBD_FLAG_SEND_TRIM,
-            NBD_FLAG_SEND_WRITE_ZEROES, NBD_FLAG_SEND_DF,
-            NBD_FLAG_CAN_MULTI_CONN, NBD_FLAG_SEND_RESIZE,
-            NBD_FLAG_SEND_CACHE, NBD_FLAG_SEND_FAST_ZERO,
+            NBD_FLAG_HAS_FLAGS,
+            NBD_FLAG_READ_ONLY,
+            NBD_FLAG_SEND_FLUSH,
+            NBD_FLAG_SEND_FUA,
+            NBD_FLAG_ROTATIONAL,
+            NBD_FLAG_SEND_TRIM,
+            NBD_FLAG_SEND_WRITE_ZEROES,
+            NBD_FLAG_SEND_DF,
+            NBD_FLAG_CAN_MULTI_CONN,
+            NBD_FLAG_SEND_RESIZE,
+            NBD_FLAG_SEND_CACHE,
+            NBD_FLAG_SEND_FAST_ZERO,
             NBD_FLAG_BLOCK_STATUS_PAYLOAD,
         ];
         for i in 0..flags.len() {
@@ -175,8 +189,10 @@ mod tests {
     #[test]
     fn test_reply_types_distinct() {
         let types: [u16; 4] = [
-            NBD_REPLY_TYPE_NONE, NBD_REPLY_TYPE_OFFSET_DATA,
-            NBD_REPLY_TYPE_OFFSET_HOLE, NBD_REPLY_TYPE_BLOCK_STATUS,
+            NBD_REPLY_TYPE_NONE,
+            NBD_REPLY_TYPE_OFFSET_DATA,
+            NBD_REPLY_TYPE_OFFSET_HOLE,
+            NBD_REPLY_TYPE_BLOCK_STATUS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -188,9 +204,15 @@ mod tests {
     #[test]
     fn test_errors_distinct() {
         let errs = [
-            NBD_OK, NBD_EPERM, NBD_EIO, NBD_ENOMEM,
-            NBD_EINVAL, NBD_ENOSPC, NBD_EOVERFLOW,
-            NBD_ENOTSUP, NBD_ESHUTDOWN,
+            NBD_OK,
+            NBD_EPERM,
+            NBD_EIO,
+            NBD_ENOMEM,
+            NBD_EINVAL,
+            NBD_ENOSPC,
+            NBD_EOVERFLOW,
+            NBD_ENOTSUP,
+            NBD_ESHUTDOWN,
         ];
         for i in 0..errs.len() {
             for j in (i + 1)..errs.len() {

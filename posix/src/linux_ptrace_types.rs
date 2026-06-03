@@ -106,13 +106,27 @@ mod tests {
     #[test]
     fn test_requests_distinct() {
         let reqs = [
-            PTRACE_TRACEME, PTRACE_PEEKDATA, PTRACE_PEEKUSER,
-            PTRACE_POKEDATA, PTRACE_POKEUSER, PTRACE_CONT,
-            PTRACE_KILL, PTRACE_SINGLESTEP, PTRACE_ATTACH,
-            PTRACE_DETACH, PTRACE_SYSCALL, PTRACE_SETOPTIONS,
-            PTRACE_GETEVENTMSG, PTRACE_GETSIGINFO, PTRACE_SETSIGINFO,
-            PTRACE_GETREGSET, PTRACE_SETREGSET, PTRACE_SEIZE,
-            PTRACE_INTERRUPT, PTRACE_LISTEN, PTRACE_GET_SYSCALL_INFO,
+            PTRACE_TRACEME,
+            PTRACE_PEEKDATA,
+            PTRACE_PEEKUSER,
+            PTRACE_POKEDATA,
+            PTRACE_POKEUSER,
+            PTRACE_CONT,
+            PTRACE_KILL,
+            PTRACE_SINGLESTEP,
+            PTRACE_ATTACH,
+            PTRACE_DETACH,
+            PTRACE_SYSCALL,
+            PTRACE_SETOPTIONS,
+            PTRACE_GETEVENTMSG,
+            PTRACE_GETSIGINFO,
+            PTRACE_SETSIGINFO,
+            PTRACE_GETREGSET,
+            PTRACE_SETREGSET,
+            PTRACE_SEIZE,
+            PTRACE_INTERRUPT,
+            PTRACE_LISTEN,
+            PTRACE_GET_SYSCALL_INFO,
         ];
         for i in 0..reqs.len() {
             for j in (i + 1)..reqs.len() {
@@ -124,9 +138,14 @@ mod tests {
     #[test]
     fn test_options_no_overlap() {
         let opts = [
-            PTRACE_O_TRACEFORK, PTRACE_O_TRACEVFORK, PTRACE_O_TRACECLONE,
-            PTRACE_O_TRACEEXEC, PTRACE_O_TRACEVFORKDONE, PTRACE_O_TRACEEXIT,
-            PTRACE_O_TRACESECCOMP, PTRACE_O_SUSPEND_SECCOMP,
+            PTRACE_O_TRACEFORK,
+            PTRACE_O_TRACEVFORK,
+            PTRACE_O_TRACECLONE,
+            PTRACE_O_TRACEEXEC,
+            PTRACE_O_TRACEVFORKDONE,
+            PTRACE_O_TRACEEXIT,
+            PTRACE_O_TRACESECCOMP,
+            PTRACE_O_SUSPEND_SECCOMP,
         ];
         for i in 0..opts.len() {
             assert!(opts[i].is_power_of_two());
@@ -139,9 +158,14 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            PTRACE_EVENT_FORK, PTRACE_EVENT_VFORK, PTRACE_EVENT_CLONE,
-            PTRACE_EVENT_EXEC, PTRACE_EVENT_VFORK_DONE, PTRACE_EVENT_EXIT,
-            PTRACE_EVENT_SECCOMP, PTRACE_EVENT_STOP,
+            PTRACE_EVENT_FORK,
+            PTRACE_EVENT_VFORK,
+            PTRACE_EVENT_CLONE,
+            PTRACE_EVENT_EXEC,
+            PTRACE_EVENT_VFORK_DONE,
+            PTRACE_EVENT_EXIT,
+            PTRACE_EVENT_SECCOMP,
+            PTRACE_EVENT_STOP,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

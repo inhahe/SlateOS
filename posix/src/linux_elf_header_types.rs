@@ -105,8 +105,7 @@ mod tests {
     #[test]
     fn test_machine_types_distinct() {
         let machines = [
-            EM_386, EM_ARM, EM_X86_64, EM_AARCH64,
-            EM_RISCV, EM_MIPS, EM_PPC64,
+            EM_386, EM_ARM, EM_X86_64, EM_AARCH64, EM_RISCV, EM_MIPS, EM_PPC64,
         ];
         for i in 0..machines.len() {
             for j in (i + 1)..machines.len() {

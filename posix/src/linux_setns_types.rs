@@ -57,9 +57,14 @@ mod tests {
     #[test]
     fn test_setns_types_no_overlap() {
         let types = [
-            SETNS_TYPE_MNT, SETNS_TYPE_UTS, SETNS_TYPE_IPC,
-            SETNS_TYPE_USER, SETNS_TYPE_PID, SETNS_TYPE_NET,
-            SETNS_TYPE_CGROUP, SETNS_TYPE_TIME,
+            SETNS_TYPE_MNT,
+            SETNS_TYPE_UTS,
+            SETNS_TYPE_IPC,
+            SETNS_TYPE_USER,
+            SETNS_TYPE_PID,
+            SETNS_TYPE_NET,
+            SETNS_TYPE_CGROUP,
+            SETNS_TYPE_TIME,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

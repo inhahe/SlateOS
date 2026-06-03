@@ -98,11 +98,16 @@ mod tests {
     #[test]
     fn test_v2_flags_power_of_two() {
         let flags: [u64; 13] = [
-            GPIO_V2_LINE_FLAG_USED, GPIO_V2_LINE_FLAG_ACTIVE_LOW,
-            GPIO_V2_LINE_FLAG_INPUT, GPIO_V2_LINE_FLAG_OUTPUT,
-            GPIO_V2_LINE_FLAG_EDGE_RISING, GPIO_V2_LINE_FLAG_EDGE_FALLING,
-            GPIO_V2_LINE_FLAG_OPEN_DRAIN, GPIO_V2_LINE_FLAG_OPEN_SOURCE,
-            GPIO_V2_LINE_FLAG_BIAS_PULL_UP, GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN,
+            GPIO_V2_LINE_FLAG_USED,
+            GPIO_V2_LINE_FLAG_ACTIVE_LOW,
+            GPIO_V2_LINE_FLAG_INPUT,
+            GPIO_V2_LINE_FLAG_OUTPUT,
+            GPIO_V2_LINE_FLAG_EDGE_RISING,
+            GPIO_V2_LINE_FLAG_EDGE_FALLING,
+            GPIO_V2_LINE_FLAG_OPEN_DRAIN,
+            GPIO_V2_LINE_FLAG_OPEN_SOURCE,
+            GPIO_V2_LINE_FLAG_BIAS_PULL_UP,
+            GPIO_V2_LINE_FLAG_BIAS_PULL_DOWN,
             GPIO_V2_LINE_FLAG_BIAS_DISABLED,
             GPIO_V2_LINE_FLAG_EVENT_CLOCK_REALTIME,
             GPIO_V2_LINE_FLAG_EVENT_CLOCK_HTE,
@@ -134,10 +139,14 @@ mod tests {
     #[test]
     fn test_legacy_flags_power_of_two() {
         let flags = [
-            GPIOLINE_FLAG_KERNEL, GPIOLINE_FLAG_IS_OUT,
-            GPIOLINE_FLAG_ACTIVE_LOW, GPIOLINE_FLAG_OPEN_DRAIN,
-            GPIOLINE_FLAG_OPEN_SOURCE, GPIOLINE_FLAG_BIAS_PULL_UP,
-            GPIOLINE_FLAG_BIAS_PULL_DOWN, GPIOLINE_FLAG_BIAS_DISABLE,
+            GPIOLINE_FLAG_KERNEL,
+            GPIOLINE_FLAG_IS_OUT,
+            GPIOLINE_FLAG_ACTIVE_LOW,
+            GPIOLINE_FLAG_OPEN_DRAIN,
+            GPIOLINE_FLAG_OPEN_SOURCE,
+            GPIOLINE_FLAG_BIAS_PULL_UP,
+            GPIOLINE_FLAG_BIAS_PULL_DOWN,
+            GPIOLINE_FLAG_BIAS_DISABLE,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);

@@ -78,8 +78,10 @@ mod tests {
     #[test]
     fn test_dev_types_distinct() {
         let types = [
-            CORESIGHT_DEV_TYPE_SINK, CORESIGHT_DEV_TYPE_LINK,
-            CORESIGHT_DEV_TYPE_SOURCE, CORESIGHT_DEV_TYPE_HELPER,
+            CORESIGHT_DEV_TYPE_SINK,
+            CORESIGHT_DEV_TYPE_LINK,
+            CORESIGHT_DEV_TYPE_SOURCE,
+            CORESIGHT_DEV_TYPE_HELPER,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -129,8 +131,10 @@ mod tests {
     #[test]
     fn test_etm_opts_powers_of_two() {
         let opts = [
-            ETM_OPT_CYCACC, ETM_OPT_BRANCH_BROADCAST,
-            ETM_OPT_RETURN_STACK, ETM_OPT_TS,
+            ETM_OPT_CYCACC,
+            ETM_OPT_BRANCH_BROADCAST,
+            ETM_OPT_RETURN_STACK,
+            ETM_OPT_TS,
         ];
         for opt in &opts {
             assert!(opt.is_power_of_two(), "0x{:x}", opt);
@@ -140,8 +144,10 @@ mod tests {
     #[test]
     fn test_etm_opts_no_overlap() {
         let opts = [
-            ETM_OPT_CYCACC, ETM_OPT_BRANCH_BROADCAST,
-            ETM_OPT_RETURN_STACK, ETM_OPT_TS,
+            ETM_OPT_CYCACC,
+            ETM_OPT_BRANCH_BROADCAST,
+            ETM_OPT_RETURN_STACK,
+            ETM_OPT_TS,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

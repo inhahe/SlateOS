@@ -85,8 +85,10 @@ mod tests {
     #[test]
     fn test_cap_dcbx_flags_power_of_two() {
         let flags = [
-            DCB_CAP_DCBX_HOST, DCB_CAP_DCBX_LLD_MANAGED,
-            DCB_CAP_DCBX_VER_IEEE, DCB_CAP_DCBX_VER_CEE,
+            DCB_CAP_DCBX_HOST,
+            DCB_CAP_DCBX_LLD_MANAGED,
+            DCB_CAP_DCBX_VER_IEEE,
+            DCB_CAP_DCBX_VER_CEE,
             DCB_CAP_DCBX_STATIC,
         ];
         for f in &flags {
@@ -97,8 +99,10 @@ mod tests {
     #[test]
     fn test_cap_dcbx_flags_no_overlap() {
         let flags = [
-            DCB_CAP_DCBX_HOST, DCB_CAP_DCBX_LLD_MANAGED,
-            DCB_CAP_DCBX_VER_IEEE, DCB_CAP_DCBX_VER_CEE,
+            DCB_CAP_DCBX_HOST,
+            DCB_CAP_DCBX_LLD_MANAGED,
+            DCB_CAP_DCBX_VER_IEEE,
+            DCB_CAP_DCBX_VER_CEE,
             DCB_CAP_DCBX_STATIC,
         ];
         for i in 0..flags.len() {
@@ -111,8 +115,10 @@ mod tests {
     #[test]
     fn test_tsa_values_distinct() {
         let tsas = [
-            IEEE_8021QAZ_TSA_STRICT, IEEE_8021QAZ_TSA_CBS,
-            IEEE_8021QAZ_TSA_ETS, IEEE_8021QAZ_TSA_VENDOR,
+            IEEE_8021QAZ_TSA_STRICT,
+            IEEE_8021QAZ_TSA_CBS,
+            IEEE_8021QAZ_TSA_ETS,
+            IEEE_8021QAZ_TSA_VENDOR,
         ];
         for i in 0..tsas.len() {
             for j in (i + 1)..tsas.len() {

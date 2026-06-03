@@ -132,9 +132,13 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            BOND_MODE_ROUNDROBIN, BOND_MODE_ACTIVEBACKUP,
-            BOND_MODE_XOR, BOND_MODE_BROADCAST,
-            BOND_MODE_8023AD, BOND_MODE_TLB, BOND_MODE_ALB,
+            BOND_MODE_ROUNDROBIN,
+            BOND_MODE_ACTIVEBACKUP,
+            BOND_MODE_XOR,
+            BOND_MODE_BROADCAST,
+            BOND_MODE_8023AD,
+            BOND_MODE_TLB,
+            BOND_MODE_ALB,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -146,9 +150,12 @@ mod tests {
     #[test]
     fn test_xmit_policies_distinct() {
         let pols = [
-            BOND_XMIT_POLICY_LAYER2, BOND_XMIT_POLICY_LAYER34,
-            BOND_XMIT_POLICY_LAYER23, BOND_XMIT_POLICY_ENCAP23,
-            BOND_XMIT_POLICY_ENCAP34, BOND_XMIT_POLICY_VLAN_SRCMAC,
+            BOND_XMIT_POLICY_LAYER2,
+            BOND_XMIT_POLICY_LAYER34,
+            BOND_XMIT_POLICY_LAYER23,
+            BOND_XMIT_POLICY_ENCAP23,
+            BOND_XMIT_POLICY_ENCAP34,
+            BOND_XMIT_POLICY_VLAN_SRCMAC,
         ];
         for i in 0..pols.len() {
             for j in (i + 1)..pols.len() {
@@ -165,9 +172,12 @@ mod tests {
     #[test]
     fn test_arp_validate_distinct() {
         let vals = [
-            BOND_ARP_VALIDATE_NONE, BOND_ARP_VALIDATE_ACTIVE,
-            BOND_ARP_VALIDATE_BACKUP, BOND_ARP_VALIDATE_ALL,
-            BOND_ARP_FILTER_ACTIVE, BOND_ARP_FILTER_BACKUP,
+            BOND_ARP_VALIDATE_NONE,
+            BOND_ARP_VALIDATE_ACTIVE,
+            BOND_ARP_VALIDATE_BACKUP,
+            BOND_ARP_VALIDATE_ALL,
+            BOND_ARP_FILTER_ACTIVE,
+            BOND_ARP_FILTER_BACKUP,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
@@ -209,7 +219,8 @@ mod tests {
     #[test]
     fn test_ad_select_distinct() {
         let sels = [
-            BOND_AD_SELECT_STABLE, BOND_AD_SELECT_BANDWIDTH,
+            BOND_AD_SELECT_STABLE,
+            BOND_AD_SELECT_BANDWIDTH,
             BOND_AD_SELECT_COUNT,
         ];
         for i in 0..sels.len() {

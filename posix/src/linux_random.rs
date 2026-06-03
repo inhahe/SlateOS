@@ -3,9 +3,9 @@
 //! Re-exports GRND_* flags from `sys_random` and adds kernel-internal
 //! RNG ioctl constants for `/dev/random` and `/dev/urandom`.
 
-pub use crate::sys_random::GRND_RANDOM;
-pub use crate::sys_random::GRND_NONBLOCK;
 pub use crate::sys_random::GRND_INSECURE;
+pub use crate::sys_random::GRND_NONBLOCK;
+pub use crate::sys_random::GRND_RANDOM;
 pub use crate::unistd::getrandom;
 
 // ---------------------------------------------------------------------------
@@ -59,8 +59,13 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            RNDGETENTCNT, RNDADDTOENTCNT, RNDGETPOOL,
-            RNDADDENTROPY, RNDZAPENTCNT, RNDCLEARPOOL, RNDRESEEDCRNG,
+            RNDGETENTCNT,
+            RNDADDTOENTCNT,
+            RNDGETPOOL,
+            RNDADDENTROPY,
+            RNDZAPENTCNT,
+            RNDCLEARPOOL,
+            RNDRESEEDCRNG,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

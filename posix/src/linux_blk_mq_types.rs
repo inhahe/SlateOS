@@ -88,10 +88,14 @@ mod tests {
     #[test]
     fn test_req_flags_no_overlap() {
         let flags = [
-            BLK_MQ_REQ_WRITE, BLK_MQ_REQ_SYNC,
-            BLK_MQ_REQ_META, BLK_MQ_REQ_FUA,
-            BLK_MQ_REQ_PREFLUSH, BLK_MQ_REQ_RAHEAD,
-            BLK_MQ_REQ_NOMERGE, BLK_MQ_REQ_IDLE,
+            BLK_MQ_REQ_WRITE,
+            BLK_MQ_REQ_SYNC,
+            BLK_MQ_REQ_META,
+            BLK_MQ_REQ_FUA,
+            BLK_MQ_REQ_PREFLUSH,
+            BLK_MQ_REQ_RAHEAD,
+            BLK_MQ_REQ_NOMERGE,
+            BLK_MQ_REQ_IDLE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -104,8 +108,10 @@ mod tests {
     #[test]
     fn test_schedulers_distinct() {
         let scheds = [
-            BLK_MQ_SCHED_NONE, BLK_MQ_SCHED_DEADLINE,
-            BLK_MQ_SCHED_BFQ, BLK_MQ_SCHED_KYBER,
+            BLK_MQ_SCHED_NONE,
+            BLK_MQ_SCHED_DEADLINE,
+            BLK_MQ_SCHED_BFQ,
+            BLK_MQ_SCHED_KYBER,
         ];
         for i in 0..scheds.len() {
             for j in (i + 1)..scheds.len() {
@@ -122,8 +128,10 @@ mod tests {
     #[test]
     fn test_hw_queue_flags_no_overlap() {
         let flags = [
-            BLK_MQ_F_SHOULD_MERGE, BLK_MQ_F_TAG_QUEUE_SHARED,
-            BLK_MQ_F_MANAGED_IRQ, BLK_MQ_F_POLL,
+            BLK_MQ_F_SHOULD_MERGE,
+            BLK_MQ_F_TAG_QUEUE_SHARED,
+            BLK_MQ_F_MANAGED_IRQ,
+            BLK_MQ_F_POLL,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

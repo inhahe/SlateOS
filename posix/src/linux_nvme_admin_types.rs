@@ -57,15 +57,23 @@ mod tests {
     #[test]
     fn test_admin_opcodes_distinct() {
         let ops = [
-            NVME_ADMIN_DELETE_SQ, NVME_ADMIN_CREATE_SQ,
+            NVME_ADMIN_DELETE_SQ,
+            NVME_ADMIN_CREATE_SQ,
             NVME_ADMIN_GET_LOG_PAGE,
-            NVME_ADMIN_DELETE_CQ, NVME_ADMIN_CREATE_CQ,
-            NVME_ADMIN_IDENTIFY, NVME_ADMIN_ABORT_CMD,
-            NVME_ADMIN_SET_FEATURES, NVME_ADMIN_GET_FEATURES,
-            NVME_ADMIN_ASYNC_EVENT, NVME_ADMIN_NS_MGMT,
-            NVME_ADMIN_FW_COMMIT, NVME_ADMIN_FW_DOWNLOAD,
-            NVME_ADMIN_NS_ATTACH, NVME_ADMIN_FORMAT_NVM,
-            NVME_ADMIN_SECURITY_SEND, NVME_ADMIN_SECURITY_RECV,
+            NVME_ADMIN_DELETE_CQ,
+            NVME_ADMIN_CREATE_CQ,
+            NVME_ADMIN_IDENTIFY,
+            NVME_ADMIN_ABORT_CMD,
+            NVME_ADMIN_SET_FEATURES,
+            NVME_ADMIN_GET_FEATURES,
+            NVME_ADMIN_ASYNC_EVENT,
+            NVME_ADMIN_NS_MGMT,
+            NVME_ADMIN_FW_COMMIT,
+            NVME_ADMIN_FW_DOWNLOAD,
+            NVME_ADMIN_NS_ATTACH,
+            NVME_ADMIN_FORMAT_NVM,
+            NVME_ADMIN_SECURITY_SEND,
+            NVME_ADMIN_SECURITY_RECV,
             NVME_ADMIN_SANITIZE,
         ];
         for i in 0..ops.len() {

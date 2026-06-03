@@ -63,18 +63,18 @@ core::arch::global_asm!(
     "printf:",
     "push rbp",
     "mov rbp, rsp",
-    "sub rsp, 128",          // 64 bytes int args + 64 bytes float args
+    "sub rsp, 128", // 64 bytes int args + 64 bytes float args
     // Save integer varargs (rsi-r9 = 5, plus 3 from stack = 8).
-    "mov [rsp], rsi",        // int vararg 0
-    "mov [rsp+8], rdx",      // int vararg 1
-    "mov [rsp+16], rcx",     // int vararg 2
-    "mov [rsp+24], r8",      // int vararg 3
-    "mov [rsp+32], r9",      // int vararg 4
-    "mov rax, [rbp+16]",     // int vararg 5 (stack)
+    "mov [rsp], rsi",    // int vararg 0
+    "mov [rsp+8], rdx",  // int vararg 1
+    "mov [rsp+16], rcx", // int vararg 2
+    "mov [rsp+24], r8",  // int vararg 3
+    "mov [rsp+32], r9",  // int vararg 4
+    "mov rax, [rbp+16]", // int vararg 5 (stack)
     "mov [rsp+40], rax",
-    "mov rax, [rbp+24]",     // int vararg 6
+    "mov rax, [rbp+24]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+32]",     // int vararg 7
+    "mov rax, [rbp+32]", // int vararg 7
     "mov [rsp+56], rax",
     // Save XMM varargs (xmm0-xmm7 = 8 doubles).
     "movsd [rsp+64], xmm0",
@@ -86,13 +86,12 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi = fmt (already set)
-    "mov rsi, rsp",          // int_args array
-    "lea rdx, [rsp+64]",    // float_args array
+    "mov rsi, rsp",      // int_args array
+    "lea rdx, [rsp+64]", // float_args array
     "call _printf_impl",
     "add rsp, 128",
     "pop rbp",
     "ret",
-
     // fprintf(stream, fmt, ...) → _fprintf_impl(stream, fmt, int_args, float_args)
     ".global fprintf",
     ".type fprintf, @function",
@@ -100,17 +99,17 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], rdx",        // int vararg 0
-    "mov [rsp+8], rcx",      // int vararg 1
-    "mov [rsp+16], r8",      // int vararg 2
-    "mov [rsp+24], r9",      // int vararg 3
-    "mov rax, [rbp+16]",     // int vararg 4 (stack)
+    "mov [rsp], rdx",    // int vararg 0
+    "mov [rsp+8], rcx",  // int vararg 1
+    "mov [rsp+16], r8",  // int vararg 2
+    "mov [rsp+24], r9",  // int vararg 3
+    "mov rax, [rbp+16]", // int vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // int vararg 5
+    "mov rax, [rbp+24]", // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // int vararg 6
+    "mov rax, [rbp+32]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // int vararg 7
+    "mov rax, [rbp+40]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -121,13 +120,12 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi = stream, rsi = fmt (already set)
-    "mov rdx, rsp",          // int_args array
-    "lea rcx, [rsp+64]",    // float_args array
+    "mov rdx, rsp",      // int_args array
+    "lea rcx, [rsp+64]", // float_args array
     "call _fprintf_impl",
     "add rsp, 128",
     "pop rbp",
     "ret",
-
     // dprintf(fd, fmt, ...) → _dprintf_impl(fd, fmt, int_args, float_args)
     ".global dprintf",
     ".type dprintf, @function",
@@ -135,17 +133,17 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], rdx",        // int vararg 0
-    "mov [rsp+8], rcx",      // int vararg 1
-    "mov [rsp+16], r8",      // int vararg 2
-    "mov [rsp+24], r9",      // int vararg 3
-    "mov rax, [rbp+16]",     // int vararg 4 (stack)
+    "mov [rsp], rdx",    // int vararg 0
+    "mov [rsp+8], rcx",  // int vararg 1
+    "mov [rsp+16], r8",  // int vararg 2
+    "mov [rsp+24], r9",  // int vararg 3
+    "mov rax, [rbp+16]", // int vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // int vararg 5
+    "mov rax, [rbp+24]", // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // int vararg 6
+    "mov rax, [rbp+32]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // int vararg 7
+    "mov rax, [rbp+40]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -156,13 +154,12 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi = fd, rsi = fmt (already set)
-    "mov rdx, rsp",          // int_args array
-    "lea rcx, [rsp+64]",    // float_args array
+    "mov rdx, rsp",      // int_args array
+    "lea rcx, [rsp+64]", // float_args array
     "call _dprintf_impl",
     "add rsp, 128",
     "pop rbp",
     "ret",
-
     // snprintf(buf, size, fmt, ...) → _snprintf_impl(buf, size, fmt, int_args, float_args)
     ".global snprintf",
     ".type snprintf, @function",
@@ -170,18 +167,18 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], rcx",        // int vararg 0
-    "mov [rsp+8], r8",       // int vararg 1
-    "mov [rsp+16], r9",      // int vararg 2
-    "mov rax, [rbp+16]",     // int vararg 3 (stack)
+    "mov [rsp], rcx",    // int vararg 0
+    "mov [rsp+8], r8",   // int vararg 1
+    "mov [rsp+16], r9",  // int vararg 2
+    "mov rax, [rbp+16]", // int vararg 3 (stack)
     "mov [rsp+24], rax",
-    "mov rax, [rbp+24]",     // int vararg 4
+    "mov rax, [rbp+24]", // int vararg 4
     "mov [rsp+32], rax",
-    "mov rax, [rbp+32]",     // int vararg 5
+    "mov rax, [rbp+32]", // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+40]",     // int vararg 6
+    "mov rax, [rbp+40]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+48]",     // int vararg 7
+    "mov rax, [rbp+48]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -192,13 +189,12 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi = buf, rsi = size, rdx = fmt (already set)
-    "mov rcx, rsp",          // int_args array
-    "lea r8, [rsp+64]",     // float_args array
+    "mov rcx, rsp",     // int_args array
+    "lea r8, [rsp+64]", // float_args array
     "call _snprintf_impl",
     "add rsp, 128",
     "pop rbp",
     "ret",
-
     // sprintf(buf, fmt, ...) → _sprintf_impl(buf, fmt, int_args, float_args)
     ".global sprintf",
     ".type sprintf, @function",
@@ -206,17 +202,17 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], rdx",        // int vararg 0
-    "mov [rsp+8], rcx",      // int vararg 1
-    "mov [rsp+16], r8",      // int vararg 2
-    "mov [rsp+24], r9",      // int vararg 3
-    "mov rax, [rbp+16]",     // int vararg 4 (stack)
+    "mov [rsp], rdx",    // int vararg 0
+    "mov [rsp+8], rcx",  // int vararg 1
+    "mov [rsp+16], r8",  // int vararg 2
+    "mov [rsp+24], r9",  // int vararg 3
+    "mov rax, [rbp+16]", // int vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // int vararg 5
+    "mov rax, [rbp+24]", // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // int vararg 6
+    "mov rax, [rbp+32]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // int vararg 7
+    "mov rax, [rbp+40]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -227,13 +223,12 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi = buf, rsi = fmt (already set)
-    "mov rdx, rsp",          // int_args array
-    "lea rcx, [rsp+64]",    // float_args array
+    "mov rdx, rsp",      // int_args array
+    "lea rcx, [rsp+64]", // float_args array
     "call _sprintf_impl",
     "add rsp, 128",
     "pop rbp",
     "ret",
-
     // asprintf(strp, fmt, ...) → _asprintf_impl(strp, fmt, int_args, float_args)
     // Same register layout as fprintf: 2 fixed args (strp, fmt), rest varargs.
     ".global asprintf",
@@ -242,17 +237,17 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], rdx",        // int vararg 0
-    "mov [rsp+8], rcx",      // int vararg 1
-    "mov [rsp+16], r8",      // int vararg 2
-    "mov [rsp+24], r9",      // int vararg 3
-    "mov rax, [rbp+16]",     // int vararg 4 (stack)
+    "mov [rsp], rdx",    // int vararg 0
+    "mov [rsp+8], rcx",  // int vararg 1
+    "mov [rsp+16], r8",  // int vararg 2
+    "mov [rsp+24], r9",  // int vararg 3
+    "mov rax, [rbp+16]", // int vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // int vararg 5
+    "mov rax, [rbp+24]", // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // int vararg 6
+    "mov rax, [rbp+32]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // int vararg 7
+    "mov rax, [rbp+40]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -263,8 +258,8 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi = strp, rsi = fmt (already set)
-    "mov rdx, rsp",          // int_args array
-    "lea rcx, [rsp+64]",    // float_args array
+    "mov rdx, rsp",      // int_args array
+    "lea rcx, [rsp+64]", // float_args array
     "call _asprintf_impl",
     "add rsp, 128",
     "pop rbp",
@@ -289,10 +284,18 @@ pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64, fargs: *const u
     if n <= 0 {
         return n;
     }
-    let write_len = if (n as usize) < PRINTF_BUF_SIZE { n as usize } else { PRINTF_BUF_SIZE };
+    let write_len = if (n as usize) < PRINTF_BUF_SIZE {
+        n as usize
+    } else {
+        PRINTF_BUF_SIZE
+    };
     // Use STDOUT_SENTINEL (1) explicitly — dangling_mut::<u8>() happens to
     // return the same value today but is not guaranteed to.
-    let ret = crate::stdio::write_stream(crate::stdio::STDOUT_SENTINEL as *mut u8, buf.as_ptr(), write_len);
+    let ret = crate::stdio::write_stream(
+        crate::stdio::STDOUT_SENTINEL as *mut u8,
+        buf.as_ptr(),
+        write_len,
+    );
     if ret < 0 { ret as i32 } else { n }
 }
 
@@ -301,13 +304,22 @@ pub extern "C" fn _printf_impl(fmt: *const u8, args: *const u64, fargs: *const u
 /// Output goes through the stdio buffer so fprintf output is properly
 /// coalesced with other writes to the same stream.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
+pub extern "C" fn _fprintf_impl(
+    stream: *mut u8,
+    fmt: *const u8,
+    args: *const u64,
+    fargs: *const u64,
+) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
     let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
     if n <= 0 {
         return n;
     }
-    let write_len = if (n as usize) < PRINTF_BUF_SIZE { n as usize } else { PRINTF_BUF_SIZE };
+    let write_len = if (n as usize) < PRINTF_BUF_SIZE {
+        n as usize
+    } else {
+        PRINTF_BUF_SIZE
+    };
     let ret = crate::stdio::write_stream(stream, buf.as_ptr(), write_len);
     if ret < 0 { ret as i32 } else { n }
 }
@@ -317,13 +329,22 @@ pub extern "C" fn _fprintf_impl(stream: *mut u8, fmt: *const u8, args: *const u6
 /// Like `fprintf` but takes a raw fd (int) instead of a `FILE*`.
 /// Writes directly to the fd without stdio buffering.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn _dprintf_impl(fd: i32, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
+pub extern "C" fn _dprintf_impl(
+    fd: i32,
+    fmt: *const u8,
+    args: *const u64,
+    fargs: *const u64,
+) -> i32 {
     let mut buf = [0u8; PRINTF_BUF_SIZE];
     let n = format_core(buf.as_mut_ptr(), PRINTF_BUF_SIZE, fmt, args, fargs);
     if n <= 0 {
         return n;
     }
-    let write_len = if (n as usize) < PRINTF_BUF_SIZE { n as usize } else { PRINTF_BUF_SIZE };
+    let write_len = if (n as usize) < PRINTF_BUF_SIZE {
+        n as usize
+    } else {
+        PRINTF_BUF_SIZE
+    };
     let ret = crate::file::write(fd, buf.as_ptr(), write_len);
     if ret < 0 { ret as i32 } else { n }
 }
@@ -349,20 +370,29 @@ pub extern "C" fn _snprintf_impl(
         size.wrapping_sub(1)
     };
     // SAFETY: term_pos < size.
-    unsafe { *buf.add(term_pos) = 0; }
+    unsafe {
+        *buf.add(term_pos) = 0;
+    }
     n
 }
 
 /// `sprintf(buf, fmt, ...)` — write formatted output to a buffer (no limit).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn _sprintf_impl(buf: *mut u8, fmt: *const u8, args: *const u64, fargs: *const u64) -> i32 {
+pub extern "C" fn _sprintf_impl(
+    buf: *mut u8,
+    fmt: *const u8,
+    args: *const u64,
+    fargs: *const u64,
+) -> i32 {
     // No size limit — dangerous but matches C semantics.
     let n = format_core(buf, usize::MAX, fmt, args, fargs);
     // C99: "A null character is written at the end of the characters written."
     if !buf.is_null() && n >= 0 {
         // SAFETY: format_core wrote n bytes starting at buf; caller must provide
         // a buffer large enough for the output + null terminator.
-        unsafe { *buf.add(n as usize) = 0; }
+        unsafe {
+            *buf.add(n as usize) = 0;
+        }
     }
     n
 }
@@ -387,14 +417,18 @@ pub extern "C" fn _asprintf_impl(
     // First pass: count required bytes (format to null buffer).
     let n = format_core(core::ptr::null_mut(), 0, fmt, args, fargs);
     if n < 0 {
-        unsafe { *strp = core::ptr::null_mut(); }
+        unsafe {
+            *strp = core::ptr::null_mut();
+        }
         return -1;
     }
 
     let alloc_size = (n as usize).wrapping_add(1); // +1 for NUL
     let buf = crate::malloc::malloc(alloc_size);
     if buf.is_null() {
-        unsafe { *strp = core::ptr::null_mut(); }
+        unsafe {
+            *strp = core::ptr::null_mut();
+        }
         return -1;
     }
 
@@ -408,10 +442,14 @@ pub extern "C" fn _asprintf_impl(
         alloc_size.wrapping_sub(1)
     };
     // SAFETY: term_pos < alloc_size, buf is non-null.
-    unsafe { *buf.add(term_pos) = 0; }
+    unsafe {
+        *buf.add(term_pos) = 0;
+    }
 
     // SAFETY: strp verified non-null.
-    unsafe { *strp = buf; }
+    unsafe {
+        *strp = buf;
+    }
     n
 }
 
@@ -716,11 +754,7 @@ pub unsafe extern "C" fn vsprintf(buf: *mut u8, fmt: *const u8, ap: *mut VaList)
 /// As [`vprintf`]; `strp` must be a valid `char**` to receive the malloc'd
 /// result pointer.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn vasprintf(
-    strp: *mut *mut u8,
-    fmt: *const u8,
-    ap: *mut VaList,
-) -> i32 {
+pub unsafe extern "C" fn vasprintf(strp: *mut *mut u8, fmt: *const u8, ap: *mut VaList) -> i32 {
     if ap.is_null() {
         return -1;
     }
@@ -801,9 +835,9 @@ fn parse_spec(
         *fpos = fpos.wrapping_add(1);
     } else {
         while unsafe { *fmt.add(*fpos) }.is_ascii_digit() {
-            width = width.saturating_mul(10).saturating_add(
-                (unsafe { *fmt.add(*fpos) }.wrapping_sub(b'0')) as usize,
-            );
+            width = width
+                .saturating_mul(10)
+                .saturating_add((unsafe { *fmt.add(*fpos) }.wrapping_sub(b'0')) as usize);
             *fpos = fpos.wrapping_add(1);
         }
     }
@@ -821,9 +855,9 @@ fn parse_spec(
         } else {
             let mut p: usize = 0;
             while unsafe { *fmt.add(*fpos) }.is_ascii_digit() {
-                p = p.saturating_mul(10).saturating_add(
-                    (unsafe { *fmt.add(*fpos) }.wrapping_sub(b'0')) as usize,
-                );
+                p = p
+                    .saturating_mul(10)
+                    .saturating_add((unsafe { *fmt.add(*fpos) }.wrapping_sub(b'0')) as usize);
                 *fpos = fpos.wrapping_add(1);
             }
             precision = Some(p);
@@ -850,7 +884,11 @@ fn parse_spec(
         _ => {}
     }
 
-    FormatSpec { flags, width, precision }
+    FormatSpec {
+        flags,
+        width,
+        precision,
+    }
 }
 
 /// Dispatch a single conversion specifier.
@@ -949,7 +987,9 @@ fn dispatch_spec(
             let ptr = consume_arg(args, arg_idx) as *mut i32;
             if !ptr.is_null() {
                 // SAFETY: Caller guarantees ptr is valid.
-                unsafe { *ptr = dst.pos as i32; }
+                unsafe {
+                    *ptr = dst.pos as i32;
+                }
             }
         }
 
@@ -971,7 +1011,11 @@ fn dispatch_spec(
         b'g' | b'G' => {
             let bits = consume_arg(fargs, farg_idx);
             let val = f64::from_bits(bits);
-            let prec = if spec.precision == Some(0) { 1 } else { spec.precision.unwrap_or(6) };
+            let prec = if spec.precision == Some(0) {
+                1
+            } else {
+                spec.precision.unwrap_or(6)
+            };
             format_float_general(dst, val, ch == b'G', &spec.flags, spec.width, prec);
         }
 
@@ -1031,7 +1075,17 @@ fn format_core(
 
         let spec_start = fpos;
         let spec = parse_spec(fmt, &mut fpos, args, &mut arg_idx);
-        fpos = dispatch_spec(&mut dst, fmt, fpos, spec_start, &spec, args, &mut arg_idx, fargs, &mut farg_idx);
+        fpos = dispatch_spec(
+            &mut dst,
+            fmt,
+            fpos,
+            spec_start,
+            &spec,
+            args,
+            &mut arg_idx,
+            fargs,
+            &mut farg_idx,
+        );
     }
 
     dst.pos as i32
@@ -1078,7 +1132,9 @@ fn consume_arg(args: *const u64, idx: &mut usize) -> u64 {
 fn emit_byte(dst: &mut FmtOutput, byte: u8) {
     if !dst.buf.is_null() && dst.pos < dst.size {
         // SAFETY: dst.pos < dst.size, so buf.add(dst.pos) is valid.
-        unsafe { *dst.buf.add(dst.pos) = byte; }
+        unsafe {
+            *dst.buf.add(dst.pos) = byte;
+        }
     }
     dst.pos = dst.pos.wrapping_add(1);
 }
@@ -1108,7 +1164,11 @@ fn format_signed(
     precision: Option<usize>,
 ) {
     let negative = val < 0;
-    let abs_val = if negative { val.wrapping_neg() as u64 } else { val as u64 };
+    let abs_val = if negative {
+        val.wrapping_neg() as u64
+    } else {
+        val as u64
+    };
 
     // Convert to digits.
     let mut num_buf = [0u8; NUM_BUF_SIZE];
@@ -1352,7 +1412,9 @@ fn u64_to_dec(mut val: u64, buf: &mut [u8; NUM_BUF_SIZE]) -> usize {
         pos = pos.wrapping_sub(1);
         if let Some(slot) = buf.get_mut(pos) {
             #[allow(clippy::arithmetic_side_effects)]
-            { *slot = b'0'.wrapping_add((val % 10) as u8); }
+            {
+                *slot = b'0'.wrapping_add((val % 10) as u8);
+            }
         }
         val = val.wrapping_div(10);
     }
@@ -1386,7 +1448,9 @@ fn u64_to_base(mut val: u64, base: u32, upper: bool, buf: &mut [u8; NUM_BUF_SIZE
         }
         #[allow(clippy::arithmetic_side_effects)]
         // base_u64 is always >= 2 (only called with base 8/10/16), so no divide-by-zero.
-        { val = val.wrapping_div(base_u64); }
+        {
+            val = val.wrapping_div(base_u64);
+        }
     }
 
     NUM_BUF_SIZE.wrapping_sub(pos)
@@ -1470,14 +1534,19 @@ fn format_float_sci(
         let mut epos = 0;
         while epos < len {
             if let Some(&b) = buf.get(epos)
-                && (b == b'e' || b == b'E') { break; }
+                && (b == b'e' || b == b'E')
+            {
+                break;
+            }
             epos = epos.wrapping_add(1);
         }
         if epos < len {
             // Shift exponent part right by 1 to make room for '.'.
             let mut j = len;
             while j > epos {
-                if let (Some(src), Some(dst_slot)) = (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j)) {
+                if let (Some(src), Some(dst_slot)) =
+                    (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j))
+                {
                     *dst_slot = src;
                 }
                 j = j.wrapping_sub(1);
@@ -1534,11 +1603,19 @@ fn format_float_general(
 
     if exp < -4 || exp >= p {
         // Use scientific, but with (precision - 1) digits after '.'.
-        let sci_prec = if precision > 0 { precision.wrapping_sub(1) } else { 0 };
+        let sci_prec = if precision > 0 {
+            precision.wrapping_sub(1)
+        } else {
+            0
+        };
         len = fmt_scientific(abs_val, sci_prec, upper, &mut buf);
     } else {
         // Use fixed, with (precision - 1 - exp) digits after '.'.
-        let fix_prec = if (p - 1 - exp) > 0 { (p - 1 - exp) as usize } else { 0 };
+        let fix_prec = if (p - 1 - exp) > 0 {
+            (p - 1 - exp) as usize
+        } else {
+            0
+        };
         len = fmt_fixed(abs_val, fix_prec, &mut buf);
     }
 
@@ -1556,7 +1633,11 @@ fn format_float_general(
             let mut k = 0;
             while k < len {
                 if let Some(&b) = buf.get(k)
-                    && b == b'.' { found = true; break; }
+                    && b == b'.'
+                {
+                    found = true;
+                    break;
+                }
                 k = k.wrapping_add(1);
             }
             found
@@ -1567,13 +1648,19 @@ fn format_float_general(
             let mut k = 0;
             while k < len {
                 if let Some(&b) = buf.get(k)
-                    && (b == b'e' || b == b'E') { insert_at = k; break; }
+                    && (b == b'e' || b == b'E')
+                {
+                    insert_at = k;
+                    break;
+                }
                 k = k.wrapping_add(1);
             }
             // Shift [insert_at..len] right by 1.
             let mut j = len;
             while j > insert_at {
-                if let (Some(src), Some(dst_slot)) = (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j)) {
+                if let (Some(src), Some(dst_slot)) =
+                    (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j))
+                {
                     *dst_slot = src;
                 }
                 j = j.wrapping_sub(1);
@@ -1610,7 +1697,9 @@ fn format_float_special(
     if !flags.left_align && width > total {
         emit_padding(dst, b' ', width.wrapping_sub(total));
     }
-    if let Some(s) = sign { emit_byte(dst, s); }
+    if let Some(s) = sign {
+        emit_byte(dst, s);
+    }
     emit_bytes(dst, text);
     if flags.left_align && width > total {
         emit_padding(dst, b' ', width.wrapping_sub(total));
@@ -1639,12 +1728,18 @@ fn emit_float_padded(
     let sign_len = usize::from(sign.is_some());
     let total = sign_len + len;
 
-    let pad_char = if flags.zero_pad && !flags.left_align { b'0' } else { b' ' };
+    let pad_char = if flags.zero_pad && !flags.left_align {
+        b'0'
+    } else {
+        b' '
+    };
 
     if !flags.left_align && width > total && pad_char == b' ' {
         emit_padding(dst, b' ', width.wrapping_sub(total));
     }
-    if let Some(s) = sign { emit_byte(dst, s); }
+    if let Some(s) = sign {
+        emit_byte(dst, s);
+    }
     if !flags.left_align && width > total && pad_char == b'0' {
         emit_padding(dst, b'0', width.wrapping_sub(total));
     }
@@ -1682,7 +1777,9 @@ fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
 
     // Write integer part.
     if int_part == 0 {
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0';
+        }
         pos = pos.wrapping_add(1);
     } else {
         // Write digits of integer part (reversed).
@@ -1709,7 +1806,9 @@ fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
 
     // Decimal point and fractional part.
     if precision > 0 {
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'.'; }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'.';
+        }
         pos = pos.wrapping_add(1);
 
         let mut f = frac;
@@ -1732,7 +1831,9 @@ fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
             loop {
                 if let Some(slot) = buf.get_mut(rp) {
                     if *slot == b'.' {
-                        if rp == 0 { break; }
+                        if rp == 0 {
+                            break;
+                        }
                         rp = rp.wrapping_sub(1);
                         continue;
                     }
@@ -1746,12 +1847,16 @@ fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
                     // Need to insert a '1' at the front.  Shift everything right.
                     let mut j = pos;
                     while j > 0 {
-                        if let (Some(src), Some(dst_slot)) = (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j)) {
+                        if let (Some(src), Some(dst_slot)) =
+                            (buf.get(j.wrapping_sub(1)).copied(), buf.get_mut(j))
+                        {
                             *dst_slot = src;
                         }
                         j = j.wrapping_sub(1);
                     }
-                    if let Some(slot) = buf.get_mut(0) { *slot = b'1'; }
+                    if let Some(slot) = buf.get_mut(0) {
+                        *slot = b'1';
+                    }
                     pos = pos.wrapping_add(1);
                     break;
                 }
@@ -1769,25 +1874,39 @@ fn fmt_fixed(val: f64, precision: usize, buf: &mut [u8]) -> usize {
 fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> usize {
     if val == 0.0 {
         let mut pos: usize = 0;
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0';
+        }
         pos = pos.wrapping_add(1);
         if precision > 0 {
-            if let Some(slot) = buf.get_mut(pos) { *slot = b'.'; }
+            if let Some(slot) = buf.get_mut(pos) {
+                *slot = b'.';
+            }
             pos = pos.wrapping_add(1);
             let mut p = precision;
             while p > 0 {
-                if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+                if let Some(slot) = buf.get_mut(pos) {
+                    *slot = b'0';
+                }
                 pos = pos.wrapping_add(1);
                 p = p.wrapping_sub(1);
             }
         }
-        if let Some(slot) = buf.get_mut(pos) { *slot = if upper { b'E' } else { b'e' }; }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = if upper { b'E' } else { b'e' };
+        }
         pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'+'; }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'+';
+        }
         pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0';
+        }
         pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0';
+        }
         pos = pos.wrapping_add(1);
         return pos;
     }
@@ -1798,8 +1917,14 @@ fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> us
     let mut exp: i32 = crate::math::floor(crate::math::log10(val)) as i32;
     let mut mantissa = val / crate::math::pow(10.0, f64::from(exp));
     // Normalize: 1 <= mantissa < 10 (handle floating-point imprecision).
-    while mantissa >= 10.0 { mantissa /= 10.0; exp += 1; }
-    while mantissa < 1.0 && mantissa > 0.0 { mantissa *= 10.0; exp -= 1; }
+    while mantissa >= 10.0 {
+        mantissa /= 10.0;
+        exp += 1;
+    }
+    while mantissa < 1.0 && mantissa > 0.0 {
+        mantissa *= 10.0;
+        exp -= 1;
+    }
 
     // Pre-round mantissa to the requested precision and re-normalize.
     // Without this, rounding carry in fmt_fixed can push the integer part
@@ -1816,30 +1941,48 @@ fn fmt_scientific(val: f64, precision: usize, upper: bool, buf: &mut [u8]) -> us
     let mut pos = fmt_fixed(mantissa, precision, buf);
 
     // Exponent.
-    if let Some(slot) = buf.get_mut(pos) { *slot = if upper { b'E' } else { b'e' }; }
+    if let Some(slot) = buf.get_mut(pos) {
+        *slot = if upper { b'E' } else { b'e' };
+    }
     pos = pos.wrapping_add(1);
-    if let Some(slot) = buf.get_mut(pos) { *slot = if exp < 0 { b'-' } else { b'+' }; }
+    if let Some(slot) = buf.get_mut(pos) {
+        *slot = if exp < 0 { b'-' } else { b'+' };
+    }
     pos = pos.wrapping_add(1);
 
     let abs_exp = if exp < 0 { (-exp) as u32 } else { exp as u32 };
     // At least 2 digits for exponent.
     if abs_exp < 10 {
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'; }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0';
+        }
         pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add(abs_exp as u8); }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0'.wrapping_add(abs_exp as u8);
+        }
         pos = pos.wrapping_add(1);
     } else if abs_exp < 100 {
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add((abs_exp / 10) as u8); }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0'.wrapping_add((abs_exp / 10) as u8);
+        }
         pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add((abs_exp % 10) as u8); }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0'.wrapping_add((abs_exp % 10) as u8);
+        }
         pos = pos.wrapping_add(1);
     } else {
         // 3-digit exponent (values > 1e99).
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add((abs_exp / 100) as u8); }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0'.wrapping_add((abs_exp / 100) as u8);
+        }
         pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add(((abs_exp / 10) % 10) as u8); }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0'.wrapping_add(((abs_exp / 10) % 10) as u8);
+        }
         pos = pos.wrapping_add(1);
-        if let Some(slot) = buf.get_mut(pos) { *slot = b'0'.wrapping_add((abs_exp % 10) as u8); }
+        if let Some(slot) = buf.get_mut(pos) {
+            *slot = b'0'.wrapping_add((abs_exp % 10) as u8);
+        }
         pos = pos.wrapping_add(1);
     }
 
@@ -1855,7 +1998,8 @@ fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
     let mut i = 0;
     while i < len {
         if let Some(&b) = buf.get(i)
-            && (b == b'e' || b == b'E') {
+            && (b == b'e' || b == b'E')
+        {
             exp_pos = i;
             break;
         }
@@ -1867,7 +2011,8 @@ fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
     i = 0;
     while i < exp_pos {
         if let Some(&b) = buf.get(i)
-            && b == b'.' {
+            && b == b'.'
+        {
             dot_pos = i;
             break;
         }
@@ -1882,7 +2027,10 @@ fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
     let mut trim_end = exp_pos;
     while trim_end > dot_pos.wrapping_add(1) {
         if let Some(&b) = buf.get(trim_end.wrapping_sub(1))
-            && b != b'0' { break; }
+            && b != b'0'
+        {
+            break;
+        }
         trim_end = trim_end.wrapping_sub(1);
     }
 
@@ -1899,7 +2047,8 @@ fn trim_trailing_zeros(buf: &mut [u8], len: usize) -> usize {
             let src_idx = exp_pos.wrapping_add(k);
             let dst_idx = trim_end.wrapping_add(k);
             if let Some(&src) = buf.get(src_idx)
-                && let Some(dst_slot) = buf.get_mut(dst_idx) {
+                && let Some(dst_slot) = buf.get_mut(dst_idx)
+            {
                 *dst_slot = src;
             }
             k = k.wrapping_add(1);
@@ -1945,7 +2094,9 @@ mod tests {
         } else {
             buf.len().wrapping_sub(1)
         };
-        let s = core::str::from_utf8(&buf[..len]).unwrap_or("<invalid utf8>").to_string();
+        let s = core::str::from_utf8(&buf[..len])
+            .unwrap_or("<invalid utf8>")
+            .to_string();
         (s, n)
     }
 
@@ -1967,7 +2118,9 @@ mod tests {
         } else {
             0
         };
-        let s = core::str::from_utf8(&buf[..len]).unwrap_or("<invalid utf8>").to_string();
+        let s = core::str::from_utf8(&buf[..len])
+            .unwrap_or("<invalid utf8>")
+            .to_string();
         (s, n)
     }
 
@@ -2598,7 +2751,10 @@ mod tests {
         // exponent < -4 → uses scientific notation
         let val = 0.000012345f64;
         let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
-        assert!(s.contains('e'), "%g should use scientific for small values: {s}");
+        assert!(
+            s.contains('e'),
+            "%g should use scientific for small values: {s}"
+        );
     }
 
     #[test]
@@ -2606,7 +2762,10 @@ mod tests {
         // exponent >= precision → uses scientific notation
         let val = 1234567.0f64;
         let (s, _) = snprintf_str(b"%g\0", &[], &[val.to_bits()]);
-        assert!(s.contains('e'), "%g should use scientific for large values: {s}");
+        assert!(
+            s.contains('e'),
+            "%g should use scientific for large values: {s}"
+        );
     }
 
     #[test]
@@ -2717,7 +2876,10 @@ mod tests {
         // Unknown specifier should be emitted raw
         let (s, _) = snprintf_str(b"%q\0", &[42], &[]);
         // Should emit "%q" raw
-        assert!(s.contains("%q"), "unknown specifier should be emitted raw: {s}");
+        assert!(
+            s.contains("%q"),
+            "unknown specifier should be emitted raw: {s}"
+        );
     }
 
     #[test]
@@ -2902,22 +3064,14 @@ mod tests {
     #[test]
     fn stress_multiple_specifiers() {
         let text = b"world\0";
-        let (s, _) = snprintf_str(
-            b"hello %s %d\0",
-            &[text.as_ptr() as u64, 42],
-            &[],
-        );
+        let (s, _) = snprintf_str(b"hello %s %d\0", &[text.as_ptr() as u64, 42], &[]);
         assert_eq!(s, "hello world 42");
     }
 
     #[test]
     fn stress_mixed_int_and_float() {
         let f = 3.14f64;
-        let (s, _) = snprintf_str(
-            b"%d and %.2f\0",
-            &[99],
-            &[f.to_bits()],
-        );
+        let (s, _) = snprintf_str(b"%d and %.2f\0", &[99], &[f.to_bits()]);
         assert_eq!(s, "99 and 3.14");
     }
 
@@ -3125,7 +3279,9 @@ mod tests {
         } else {
             buf.len().wrapping_sub(1)
         };
-        let s = core::str::from_utf8(&buf[..len]).unwrap_or("<invalid utf8>").to_string();
+        let s = core::str::from_utf8(&buf[..len])
+            .unwrap_or("<invalid utf8>")
+            .to_string();
         (s, n)
     }
 
@@ -3195,7 +3351,12 @@ mod tests {
         let mut buf = [0u8; 16];
         // SAFETY: passing a null va_list must be rejected, not dereferenced.
         let n = unsafe {
-            vsnprintf(buf.as_mut_ptr(), buf.len(), b"%d\0".as_ptr(), core::ptr::null_mut())
+            vsnprintf(
+                buf.as_mut_ptr(),
+                buf.len(),
+                b"%d\0".as_ptr(),
+                core::ptr::null_mut(),
+            )
         };
         assert_eq!(n, -1);
     }

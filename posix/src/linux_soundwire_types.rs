@@ -84,9 +84,7 @@ mod tests {
 
     #[test]
     fn test_slave_states_distinct() {
-        let states = [
-            SDW_SLAVE_UNATTACHED, SDW_SLAVE_ATTACHED, SDW_SLAVE_ALERT,
-        ];
+        let states = [SDW_SLAVE_UNATTACHED, SDW_SLAVE_ATTACHED, SDW_SLAVE_ALERT];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
                 assert_ne!(states[i], states[j]);
@@ -112,8 +110,11 @@ mod tests {
     #[test]
     fn test_clock_freqs_distinct_and_ordered() {
         let clks = [
-            SDW_CLK_9600, SDW_CLK_12000, SDW_CLK_12288,
-            SDW_CLK_24000, SDW_CLK_24576,
+            SDW_CLK_9600,
+            SDW_CLK_12000,
+            SDW_CLK_12288,
+            SDW_CLK_24000,
+            SDW_CLK_24576,
         ];
         for i in 0..clks.len() {
             for j in (i + 1)..clks.len() {
@@ -124,9 +125,7 @@ mod tests {
 
     #[test]
     fn test_cmd_status_distinct() {
-        let statuses = [
-            SDW_CMD_OK, SDW_CMD_IGNORED, SDW_CMD_FAIL, SDW_CMD_TIMEOUT,
-        ];
+        let statuses = [SDW_CMD_OK, SDW_CMD_IGNORED, SDW_CMD_FAIL, SDW_CMD_TIMEOUT];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
                 assert_ne!(statuses[i], statuses[j]);

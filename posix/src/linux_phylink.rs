@@ -104,8 +104,16 @@ mod tests {
     #[test]
     fn test_mac_caps_power_of_two() {
         let caps = [
-            MAC_10, MAC_100, MAC_1000, MAC_2500, MAC_5000, MAC_10000,
-            MAC_HALF_DUPLEX, MAC_FULL_DUPLEX, MAC_SYM_PAUSE, MAC_ASYM_PAUSE,
+            MAC_10,
+            MAC_100,
+            MAC_1000,
+            MAC_2500,
+            MAC_5000,
+            MAC_10000,
+            MAC_HALF_DUPLEX,
+            MAC_FULL_DUPLEX,
+            MAC_SYM_PAUSE,
+            MAC_ASYM_PAUSE,
         ];
         for c in &caps {
             assert!(c.is_power_of_two());

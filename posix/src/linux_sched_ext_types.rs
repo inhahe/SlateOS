@@ -81,10 +81,17 @@ mod tests {
     #[test]
     fn test_ops_distinct() {
         let ops = [
-            SCX_OP_ENQUEUE, SCX_OP_DEQUEUE, SCX_OP_DISPATCH,
-            SCX_OP_SELECT_CPU, SCX_OP_CPU_IDLE, SCX_OP_RUNNING,
-            SCX_OP_STOPPING, SCX_OP_INIT_TASK, SCX_OP_EXIT_TASK,
-            SCX_OP_INIT, SCX_OP_EXIT,
+            SCX_OP_ENQUEUE,
+            SCX_OP_DEQUEUE,
+            SCX_OP_DISPATCH,
+            SCX_OP_SELECT_CPU,
+            SCX_OP_CPU_IDLE,
+            SCX_OP_RUNNING,
+            SCX_OP_STOPPING,
+            SCX_OP_INIT_TASK,
+            SCX_OP_EXIT_TASK,
+            SCX_OP_INIT,
+            SCX_OP_EXIT,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -118,8 +125,10 @@ mod tests {
     #[test]
     fn test_exit_reasons_distinct() {
         let exits = [
-            SCX_EXIT_NONE, SCX_EXIT_ERROR,
-            SCX_EXIT_UNREG_BPF, SCX_EXIT_UNREG_KERN,
+            SCX_EXIT_NONE,
+            SCX_EXIT_ERROR,
+            SCX_EXIT_UNREG_BPF,
+            SCX_EXIT_UNREG_KERN,
             SCX_EXIT_SYSRQ,
         ];
         for i in 0..exits.len() {

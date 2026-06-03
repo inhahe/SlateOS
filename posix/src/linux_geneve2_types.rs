@@ -92,9 +92,12 @@ mod tests {
     #[test]
     fn test_tunnel_flags_power_of_two() {
         let flags = [
-            GENEVE_F_IPV6, GENEVE_F_COLLECT_METADATA,
-            GENEVE_F_UDP_CSUM, GENEVE_F_UDP_ZERO_CSUM6_RX,
-            GENEVE_F_UDP_ZERO_CSUM6_TX, GENEVE_F_INNER_PROTO_INHERIT,
+            GENEVE_F_IPV6,
+            GENEVE_F_COLLECT_METADATA,
+            GENEVE_F_UDP_CSUM,
+            GENEVE_F_UDP_ZERO_CSUM6_RX,
+            GENEVE_F_UDP_ZERO_CSUM6_TX,
+            GENEVE_F_INNER_PROTO_INHERIT,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
@@ -104,9 +107,12 @@ mod tests {
     #[test]
     fn test_tunnel_flags_no_overlap() {
         let flags = [
-            GENEVE_F_IPV6, GENEVE_F_COLLECT_METADATA,
-            GENEVE_F_UDP_CSUM, GENEVE_F_UDP_ZERO_CSUM6_RX,
-            GENEVE_F_UDP_ZERO_CSUM6_TX, GENEVE_F_INNER_PROTO_INHERIT,
+            GENEVE_F_IPV6,
+            GENEVE_F_COLLECT_METADATA,
+            GENEVE_F_UDP_CSUM,
+            GENEVE_F_UDP_ZERO_CSUM6_RX,
+            GENEVE_F_UDP_ZERO_CSUM6_TX,
+            GENEVE_F_INNER_PROTO_INHERIT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -191,7 +191,9 @@ pub extern "C" fn getrlimit(resource: i32, rlp: *mut Rlimit) -> i32 {
 
     if let Some(limit) = limits.get(resource as usize) {
         // SAFETY: Caller guarantees rlp is valid.
-        unsafe { *rlp = *limit; }
+        unsafe {
+            *rlp = *limit;
+        }
         0
     } else {
         errno::set_errno(errno::EINVAL);
@@ -270,9 +272,7 @@ pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
     // `do_prlimit` rejects any rlim_max above sysctl_nr_open
     // unconditionally — CAP_SYS_RESOURCE does NOT lift this cap.
     // Our equivalent of sysctl_nr_open is `fdtable::MAX_FDS`.
-    if resource == RLIMIT_NOFILE
-        && new_limit.rlim_max > crate::fdtable::MAX_FDS as u64
-    {
+    if resource == RLIMIT_NOFILE && new_limit.rlim_max > crate::fdtable::MAX_FDS as u64 {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -281,9 +281,7 @@ pub extern "C" fn setrlimit(resource: i32, rlp: *const Rlimit) -> i32 {
     // CAP_SYS_RESOURCE (matches Linux's `do_prlimit`).  Lowering or
     // holding equal — and any soft-only change — is always allowed.
     if new_limit.rlim_max > old.rlim_max
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_RESOURCE,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_RESOURCE)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -391,7 +389,11 @@ fn ns_to_timeval(ns: u64) -> crate::time::Timeval {
     let secs = ns / NS_PER_SEC;
     let usec = (ns % NS_PER_SEC) / NS_PER_USEC;
     crate::time::Timeval {
-        tv_sec: if secs > i64::MAX as u64 { i64::MAX } else { secs as i64 },
+        tv_sec: if secs > i64::MAX as u64 {
+            i64::MAX
+        } else {
+            secs as i64
+        },
         tv_usec: usec as i64,
     }
 }
@@ -434,9 +436,7 @@ pub extern "C" fn nice(inc: i32) -> i32 {
     // computing the clamped target nice and consulting can_nice;
     // with our flat (no per-task rlimit) model the test collapses
     // to a pure cap probe.
-    if inc < 0 && !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_NICE,
-    ) {
+    if inc < 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -444,7 +444,9 @@ pub extern "C" fn nice(inc: i32) -> i32 {
     let current = unsafe { core::ptr::addr_of!(NICE_VALUE).read() };
     // Clamp to [-20, 19] per POSIX.
     let new_val = current.saturating_add(inc).clamp(-20, 19);
-    unsafe { core::ptr::addr_of_mut!(NICE_VALUE).write(new_val); }
+    unsafe {
+        core::ptr::addr_of_mut!(NICE_VALUE).write(new_val);
+    }
     new_val
 }
 
@@ -492,14 +494,15 @@ pub extern "C" fn setpriority(which: i32, _who: u32, prio: i32) -> i32 {
     // Phase 169: priority-raise (new nice < current nice) requires
     // CAP_SYS_NICE.  Linux returns EACCES from set_one_prio in this
     // case (distinct from the cross-uid EPERM path).
-    if val < current && !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_NICE,
-    ) {
+    if val < current && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
+    {
         errno::set_errno(errno::EACCES);
         return -1;
     }
     // SAFETY: Single-threaded access.
-    unsafe { core::ptr::addr_of_mut!(NICE_VALUE).write(val); }
+    unsafe {
+        core::ptr::addr_of_mut!(NICE_VALUE).write(val);
+    }
     0
 }
 
@@ -646,10 +649,22 @@ mod tests {
     #[test]
     fn rlimit_constants_all_distinct() {
         let vals = [
-            RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_STACK,
-            RLIMIT_CORE, RLIMIT_RSS, RLIMIT_NPROC, RLIMIT_NOFILE,
-            RLIMIT_MEMLOCK, RLIMIT_AS, RLIMIT_LOCKS, RLIMIT_SIGPENDING,
-            RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME,
+            RLIMIT_CPU,
+            RLIMIT_FSIZE,
+            RLIMIT_DATA,
+            RLIMIT_STACK,
+            RLIMIT_CORE,
+            RLIMIT_RSS,
+            RLIMIT_NPROC,
+            RLIMIT_NOFILE,
+            RLIMIT_MEMLOCK,
+            RLIMIT_AS,
+            RLIMIT_LOCKS,
+            RLIMIT_SIGPENDING,
+            RLIMIT_MSGQUEUE,
+            RLIMIT_NICE,
+            RLIMIT_RTPRIO,
+            RLIMIT_RTTIME,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
@@ -696,7 +711,10 @@ mod tests {
     #[test]
     fn getrlimit_valid_resource() {
         reset_global_state();
-        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rl = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         let ret = getrlimit(RLIMIT_STACK, &mut rl);
         assert_eq!(ret, 0);
         assert_eq!(rl.rlim_cur, 8 * 1024 * 1024);
@@ -714,7 +732,10 @@ mod tests {
     #[test]
     fn getrlimit_invalid_resource() {
         reset_global_state();
-        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rl = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         let ret = getrlimit(-1, &mut rl);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -731,16 +752,29 @@ mod tests {
     #[test]
     fn default_limits_stack() {
         reset_global_state();
-        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rl = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_STACK, &mut rl), 0);
-        assert_eq!(rl.rlim_cur, 8 * 1024 * 1024, "RLIMIT_STACK soft should be 8 MiB");
-        assert_eq!(rl.rlim_max, RLIM_INFINITY, "RLIMIT_STACK hard should be RLIM_INFINITY");
+        assert_eq!(
+            rl.rlim_cur,
+            8 * 1024 * 1024,
+            "RLIMIT_STACK soft should be 8 MiB"
+        );
+        assert_eq!(
+            rl.rlim_max, RLIM_INFINITY,
+            "RLIMIT_STACK hard should be RLIM_INFINITY"
+        );
     }
 
     #[test]
     fn default_limits_nofile() {
         reset_global_state();
-        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rl = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_NOFILE, &mut rl), 0);
         assert_eq!(rl.rlim_cur, crate::fdtable::MAX_FDS as u64);
         assert_eq!(rl.rlim_max, crate::fdtable::MAX_FDS as u64);
@@ -749,7 +783,10 @@ mod tests {
     #[test]
     fn default_limits_core() {
         reset_global_state();
-        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rl = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_CORE, &mut rl), 0);
         assert_eq!(rl.rlim_cur, 0);
         assert_eq!(rl.rlim_max, 0);
@@ -760,16 +797,38 @@ mod tests {
         reset_global_state();
         // Resources that default to RLIM_INFINITY for both soft and hard.
         let inf_resources = [
-            RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_RSS,
-            RLIMIT_NPROC, RLIMIT_MEMLOCK, RLIMIT_AS, RLIMIT_LOCKS,
-            RLIMIT_SIGPENDING, RLIMIT_MSGQUEUE, RLIMIT_NICE,
-            RLIMIT_RTPRIO, RLIMIT_RTTIME,
+            RLIMIT_CPU,
+            RLIMIT_FSIZE,
+            RLIMIT_DATA,
+            RLIMIT_RSS,
+            RLIMIT_NPROC,
+            RLIMIT_MEMLOCK,
+            RLIMIT_AS,
+            RLIMIT_LOCKS,
+            RLIMIT_SIGPENDING,
+            RLIMIT_MSGQUEUE,
+            RLIMIT_NICE,
+            RLIMIT_RTPRIO,
+            RLIMIT_RTTIME,
         ];
         for &res in &inf_resources {
-            let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
-            assert_eq!(getrlimit(res, &mut rl), 0, "getrlimit failed for resource {res}");
-            assert_eq!(rl.rlim_cur, RLIM_INFINITY, "resource {res} soft should be RLIM_INFINITY");
-            assert_eq!(rl.rlim_max, RLIM_INFINITY, "resource {res} hard should be RLIM_INFINITY");
+            let mut rl = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            assert_eq!(
+                getrlimit(res, &mut rl),
+                0,
+                "getrlimit failed for resource {res}"
+            );
+            assert_eq!(
+                rl.rlim_cur, RLIM_INFINITY,
+                "resource {res} soft should be RLIM_INFINITY"
+            );
+            assert_eq!(
+                rl.rlim_max, RLIM_INFINITY,
+                "resource {res} hard should be RLIM_INFINITY"
+            );
         }
     }
 
@@ -780,11 +839,17 @@ mod tests {
     #[test]
     fn setrlimit_set_and_verify() {
         reset_global_state();
-        let new = Rlimit { rlim_cur: 1024, rlim_max: 4096 };
+        let new = Rlimit {
+            rlim_cur: 1024,
+            rlim_max: 4096,
+        };
         let ret = setrlimit(RLIMIT_CPU, &new);
         assert_eq!(ret, 0);
 
-        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut readback = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_CPU, &mut readback), 0);
         assert_eq!(readback.rlim_cur, 1024);
         assert_eq!(readback.rlim_max, 4096);
@@ -793,7 +858,10 @@ mod tests {
     #[test]
     fn setrlimit_soft_exceeds_hard_rejected() {
         reset_global_state();
-        let bad = Rlimit { rlim_cur: 5000, rlim_max: 1000 };
+        let bad = Rlimit {
+            rlim_cur: 5000,
+            rlim_max: 1000,
+        };
         let ret = setrlimit(RLIMIT_CPU, &bad);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -810,7 +878,10 @@ mod tests {
     #[test]
     fn setrlimit_invalid_resource() {
         reset_global_state();
-        let new = Rlimit { rlim_cur: 100, rlim_max: 200 };
+        let new = Rlimit {
+            rlim_cur: 100,
+            rlim_max: 200,
+        };
         let ret = setrlimit(-1, &new);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -827,16 +898,25 @@ mod tests {
     #[test]
     fn getrlimit_setrlimit_round_trip() {
         reset_global_state();
-        let new = Rlimit { rlim_cur: 42, rlim_max: 1000 };
+        let new = Rlimit {
+            rlim_cur: 42,
+            rlim_max: 1000,
+        };
         assert_eq!(setrlimit(RLIMIT_DATA, &new), 0);
 
-        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut readback = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_DATA, &mut readback), 0);
         assert_eq!(readback.rlim_cur, 42);
         assert_eq!(readback.rlim_max, 1000);
 
         // Update again with different values.
-        let new2 = Rlimit { rlim_cur: 500, rlim_max: 500 };
+        let new2 = Rlimit {
+            rlim_cur: 500,
+            rlim_max: 500,
+        };
         assert_eq!(setrlimit(RLIMIT_DATA, &new2), 0);
 
         assert_eq!(getrlimit(RLIMIT_DATA, &mut readback), 0);
@@ -909,7 +989,10 @@ mod tests {
         nice(3);
         for &which in &[PRIO_PROCESS, PRIO_PGRP, PRIO_USER] {
             let val = getpriority(which, 0);
-            assert_eq!(val, 3, "getpriority with which={which} should return nice value");
+            assert_eq!(
+                val, 3,
+                "getpriority with which={which} should return nice value"
+            );
             assert_eq!(errno::get_errno(), 0);
         }
     }
@@ -1203,7 +1286,10 @@ mod tests {
     #[test]
     fn prlimit_get_only() {
         reset_global_state();
-        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut old = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         let ret = prlimit(0, RLIMIT_STACK, core::ptr::null(), &mut old);
         assert_eq!(ret, 0);
         assert_eq!(old.rlim_cur, 8 * 1024 * 1024);
@@ -1213,12 +1299,18 @@ mod tests {
     #[test]
     fn prlimit_set_only() {
         reset_global_state();
-        let new = Rlimit { rlim_cur: 100, rlim_max: 200 };
+        let new = Rlimit {
+            rlim_cur: 100,
+            rlim_max: 200,
+        };
         let ret = prlimit(0, RLIMIT_CPU, &new, core::ptr::null_mut());
         assert_eq!(ret, 0);
 
         // Verify via getrlimit.
-        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut readback = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_CPU, &mut readback), 0);
         assert_eq!(readback.rlim_cur, 100);
         assert_eq!(readback.rlim_max, 200);
@@ -1228,12 +1320,21 @@ mod tests {
     fn prlimit_get_and_set() {
         reset_global_state();
         // Set an initial value.
-        let init = Rlimit { rlim_cur: 10, rlim_max: 20 };
+        let init = Rlimit {
+            rlim_cur: 10,
+            rlim_max: 20,
+        };
         assert_eq!(setrlimit(RLIMIT_FSIZE, &init), 0);
 
         // prlimit: get old, set new.
-        let new = Rlimit { rlim_cur: 30, rlim_max: 40 };
-        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let new = Rlimit {
+            rlim_cur: 30,
+            rlim_max: 40,
+        };
+        let mut old = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         let ret = prlimit(0, RLIMIT_FSIZE, &new, &mut old);
         assert_eq!(ret, 0);
 
@@ -1242,7 +1343,10 @@ mod tests {
         assert_eq!(old.rlim_max, 20);
 
         // Current should be the new values.
-        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut readback = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_FSIZE, &mut readback), 0);
         assert_eq!(readback.rlim_cur, 30);
         assert_eq!(readback.rlim_max, 40);
@@ -1278,12 +1382,21 @@ mod tests {
     fn prlimit64_get_and_set() {
         reset_global_state();
         // Set an initial value via setrlimit.
-        let init = Rlimit { rlim_cur: 100, rlim_max: 200 };
+        let init = Rlimit {
+            rlim_cur: 100,
+            rlim_max: 200,
+        };
         assert_eq!(setrlimit(RLIMIT_FSIZE, &init), 0);
 
         // Use prlimit64 to get old and set new.
-        let new = Rlimit { rlim_cur: 300, rlim_max: 400 };
-        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let new = Rlimit {
+            rlim_cur: 300,
+            rlim_max: 400,
+        };
+        let mut old = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         let ret = prlimit64(0, RLIMIT_FSIZE, &new, &mut old);
         assert_eq!(ret, 0);
 
@@ -1292,7 +1405,10 @@ mod tests {
         assert_eq!(old.rlim_max, 200);
 
         // Verify prlimit64 set the new values.
-        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut readback = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_FSIZE, &mut readback), 0);
         assert_eq!(readback.rlim_cur, 300);
         assert_eq!(readback.rlim_max, 400);
@@ -1302,7 +1418,10 @@ mod tests {
     fn prlimit64_get_only() {
         reset_global_state();
         // prlimit64 with null new_limit should just get current.
-        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut old = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         let ret = prlimit64(0, RLIMIT_NOFILE, core::ptr::null(), &mut old);
         assert_eq!(ret, 0);
         assert_eq!(old.rlim_cur, crate::fdtable::MAX_FDS as u64);
@@ -1331,7 +1450,12 @@ mod tests {
     fn test_prlimit_phase86_intmin_pid_is_esrch() {
         reset_global_state();
         errno::set_errno(0);
-        let ret = prlimit(i32::MIN, RLIMIT_CPU, core::ptr::null(), core::ptr::null_mut());
+        let ret = prlimit(
+            i32::MIN,
+            RLIMIT_CPU,
+            core::ptr::null(),
+            core::ptr::null_mut(),
+        );
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ESRCH);
     }
@@ -1340,7 +1464,10 @@ mod tests {
     fn test_prlimit_phase86_zero_pid_means_self() {
         // pid == 0 is "self" and must succeed for a valid resource.
         reset_global_state();
-        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut old = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         errno::set_errno(0);
         let ret = prlimit(0, RLIMIT_CPU, core::ptr::null(), &mut old);
         assert_eq!(ret, 0);
@@ -1351,7 +1478,10 @@ mod tests {
         // We don't track other processes, so a positive pid behaves like
         // self.  Just verify it doesn't fall into the ESRCH path.
         reset_global_state();
-        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut old = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         errno::set_errno(0);
         let ret = prlimit(1234, RLIMIT_CPU, core::ptr::null(), &mut old);
         assert_eq!(ret, 0);
@@ -1407,19 +1537,28 @@ mod tests {
         // Bad resource with non-NULL old_limit still EINVAL, and the
         // buffer must not be written.
         reset_global_state();
-        let mut old = Rlimit { rlim_cur: 0xDEAD, rlim_max: 0xBEEF };
+        let mut old = Rlimit {
+            rlim_cur: 0xDEAD,
+            rlim_max: 0xBEEF,
+        };
         errno::set_errno(0);
         let ret = prlimit(0, 100, core::ptr::null(), &mut old);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
-        assert_eq!(old.rlim_cur, 0xDEAD, "old must not be overwritten on EINVAL");
+        assert_eq!(
+            old.rlim_cur, 0xDEAD,
+            "old must not be overwritten on EINVAL"
+        );
         assert_eq!(old.rlim_max, 0xBEEF);
     }
 
     #[test]
     fn test_prlimit_phase86_invalid_resource_with_set_buf_einval() {
         reset_global_state();
-        let new = Rlimit { rlim_cur: 1, rlim_max: 2 };
+        let new = Rlimit {
+            rlim_cur: 1,
+            rlim_max: 2,
+        };
         errno::set_errno(0);
         let ret = prlimit(0, 100, &new, core::ptr::null_mut());
         assert_eq!(ret, -1);
@@ -1430,7 +1569,10 @@ mod tests {
     fn test_prlimit_phase86_set_rlim_cur_above_max_einval() {
         // Inverted rlim_cur/rlim_max via prlimit's setrlimit delegate.
         reset_global_state();
-        let new = Rlimit { rlim_cur: 200, rlim_max: 100 };
+        let new = Rlimit {
+            rlim_cur: 200,
+            rlim_max: 100,
+        };
         errno::set_errno(0);
         let ret = prlimit(0, RLIMIT_CPU, &new, core::ptr::null_mut());
         assert_eq!(ret, -1);
@@ -1470,20 +1612,32 @@ mod tests {
     fn test_prlimit_phase86_does_not_mutate_state_on_einval() {
         // A bad-resource EINVAL must not touch the global RLIMITS array.
         reset_global_state();
-        let original = Rlimit { rlim_cur: 8 * 1024 * 1024, rlim_max: RLIM_INFINITY };
-        let mut sentinel = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let original = Rlimit {
+            rlim_cur: 8 * 1024 * 1024,
+            rlim_max: RLIM_INFINITY,
+        };
+        let mut sentinel = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_STACK, &mut sentinel), 0);
         assert_eq!(sentinel.rlim_cur, original.rlim_cur);
 
         // Bogus call.
-        let new = Rlimit { rlim_cur: 1, rlim_max: 2 };
+        let new = Rlimit {
+            rlim_cur: 1,
+            rlim_max: 2,
+        };
         errno::set_errno(0);
         let ret = prlimit(0, 9999, &new, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
         // Stack limit unchanged.
-        let mut after = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut after = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_STACK, &mut after), 0);
         assert_eq!(after.rlim_cur, original.rlim_cur);
         assert_eq!(after.rlim_max, original.rlim_max);
@@ -1500,7 +1654,10 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::ESRCH);
 
         // Subsequent valid call succeeds and reports no error.
-        let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut old = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         errno::set_errno(0);
         assert_eq!(prlimit(0, RLIMIT_CPU, core::ptr::null(), &mut old), 0);
     }
@@ -1514,11 +1671,17 @@ mod tests {
         reset_global_state();
         // Verify all new constants are accessible via getrlimit.
         let new_resources = [
-            RLIMIT_LOCKS, RLIMIT_SIGPENDING, RLIMIT_NICE,
-            RLIMIT_RTPRIO, RLIMIT_RTTIME,
+            RLIMIT_LOCKS,
+            RLIMIT_SIGPENDING,
+            RLIMIT_NICE,
+            RLIMIT_RTPRIO,
+            RLIMIT_RTTIME,
         ];
         for &res in &new_resources {
-            let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            let mut rl = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
             let ret = getrlimit(res, &mut rl);
             assert_eq!(ret, 0, "getrlimit failed for resource {res}");
             // All default to RLIM_INFINITY.
@@ -1530,10 +1693,16 @@ mod tests {
     #[test]
     fn new_rlimit_constants_setrlimit_round_trip() {
         reset_global_state();
-        let new = Rlimit { rlim_cur: 128, rlim_max: 256 };
+        let new = Rlimit {
+            rlim_cur: 128,
+            rlim_max: 256,
+        };
         assert_eq!(setrlimit(RLIMIT_SIGPENDING, &new), 0);
 
-        let mut readback = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut readback = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_SIGPENDING, &mut readback), 0);
         assert_eq!(readback.rlim_cur, 128);
         assert_eq!(readback.rlim_max, 256);
@@ -1546,7 +1715,10 @@ mod tests {
     #[test]
     fn rlimit_nofile_matches_fdtable_max() {
         reset_global_state();
-        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rl = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_NOFILE, &mut rl), 0);
         assert_eq!(
             rl.rlim_cur,
@@ -1685,7 +1857,10 @@ mod tests {
         assert_eq!(r1, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
-        let mut rl = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut rl = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         let r2 = getrlimit(RLIMIT_CPU, &mut rl);
         assert_eq!(r2, 0);
         // Don't assert errno here — POSIX permits successful calls to
@@ -1698,7 +1873,10 @@ mod tests {
         // Bad resource must not perturb the global RLIMITS array, even
         // when the pointer is also NULL.
         reset_global_state();
-        let mut before = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut before = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_STACK, &mut before), 0);
 
         errno::set_errno(0);
@@ -1706,7 +1884,10 @@ mod tests {
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
-        let mut after = Rlimit { rlim_cur: 0, rlim_max: 0 };
+        let mut after = Rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
         assert_eq!(getrlimit(RLIMIT_STACK, &mut after), 0);
         assert_eq!(after.rlim_cur, before.rlim_cur);
         assert_eq!(after.rlim_max, before.rlim_max);
@@ -1770,16 +1951,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -1794,8 +1973,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -1808,8 +1986,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_NICE - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1824,10 +2001,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_NICE");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_NICE");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
         }
 
@@ -1869,8 +2044,7 @@ mod tests {
             drop_cap_sys_nice();
             errno::set_errno(0);
             assert_eq!(nice(5), 5);
-            assert_eq!(errno::get_errno(), 0,
-                "positive nice must not set errno");
+            assert_eq!(errno::get_errno(), 0, "positive nice must not set errno");
         }
 
         /// `nice(0)` is a query and must succeed without cap (the
@@ -1961,8 +2135,7 @@ mod tests {
             // would happen at scope end — for explicit recovery we
             // reset caps to the default holding-all state via capset.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1977,8 +2150,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0);
             errno::set_errno(0);
             assert_eq!(nice(-5), -5);
@@ -2087,16 +2259,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -2111,8 +2281,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -2125,8 +2294,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_NICE - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2141,10 +2309,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_NICE");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_NICE");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
         }
 
@@ -2241,8 +2407,7 @@ mod tests {
         /// (succeeds), drop CAP_SYS_NICE, then ask for -15 (raise →
         /// EACCES), then ask for -5 (lower → succeeds).
         #[test]
-        fn test_setpriority_phase169_workflow_raise_drop_cap_raise_lower()
-        {
+        fn test_setpriority_phase169_workflow_raise_drop_cap_raise_lower() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             errno::set_errno(0);
@@ -2265,8 +2430,7 @@ mod tests {
         /// clamped target -20 is below the default 0), not crash or
         /// store.
         #[test]
-        fn test_setpriority_phase169_buggy_caller_i32_min_no_cap_eacces()
-        {
+        fn test_setpriority_phase169_buggy_caller_i32_min_no_cap_eacces() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             drop_cap_sys_nice();
@@ -2280,8 +2444,7 @@ mod tests {
         /// i32::MAX clamps to 19 and is a lower-priority request —
         /// must succeed without cap.
         #[test]
-        fn test_setpriority_phase169_i32_max_no_cap_clamps_and_succeeds()
-        {
+        fn test_setpriority_phase169_i32_max_no_cap_clamps_and_succeeds() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             drop_cap_sys_nice();
@@ -2304,8 +2467,7 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EACCES);
             // Restore caps to default-all.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2320,10 +2482,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
             assert_eq!(setpriority(PRIO_PROCESS, 0, -8), 0);
             assert_eq!(getpriority(PRIO_PROCESS, 0), -8);
@@ -2429,16 +2588,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -2453,8 +2610,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -2467,8 +2623,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_RESOURCE - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2483,23 +2638,25 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_RESOURCE");
-            assert!(!crate::sys_capability::has_capability(
-                CAP_SYS_RESOURCE,
-            ));
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_RESOURCE");
+            assert!(!crate::sys_capability::has_capability(CAP_SYS_RESOURCE,));
         }
 
         /// Helper: seed a known starting hard limit on a resource so
         /// tests can then attempt to raise it.  Runs under default
         /// caps so the seed itself isn't blocked.
         fn seed_limit(res: i32, cur: u64, max: u64) {
-            let rl = Rlimit { rlim_cur: cur, rlim_max: max };
-            assert_eq!(setrlimit(res, &rl), 0,
+            let rl = Rlimit {
+                rlim_cur: cur,
+                rlim_max: max,
+            };
+            assert_eq!(
+                setrlimit(res, &rl),
+                0,
                 "seed setrlimit for resource {res} must succeed under \
-                 default caps");
+                 default caps"
+            );
         }
 
         // -- Per-error-class ----------------------------------------------
@@ -2517,7 +2674,10 @@ mod tests {
             seed_limit(RLIMIT_CPU, 100, 200);
             drop_cap_sys_resource();
             errno::set_errno(0);
-            let new = Rlimit { rlim_cur: 100, rlim_max: 500 };
+            let new = Rlimit {
+                rlim_cur: 100,
+                rlim_max: 500,
+            };
             assert_eq!(setrlimit(RLIMIT_CPU, &new), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
@@ -2532,7 +2692,10 @@ mod tests {
             seed_limit(RLIMIT_CPU, 0, 10);
             drop_cap_sys_resource();
             errno::set_errno(0);
-            let new = Rlimit { rlim_cur: 0, rlim_max: 20 };
+            let new = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 20,
+            };
             assert_eq!(setrlimit(RLIMIT_CPU, &new), -1);
             assert_ne!(errno::get_errno(), errno::EACCES);
             assert_ne!(errno::get_errno(), errno::EINVAL);
@@ -2543,8 +2706,7 @@ mod tests {
         /// EVEN when CAP_SYS_RESOURCE is held.  Linux makes the
         /// sysctl_nr_open ceiling absolute.
         #[test]
-        fn test_setrlimit_phase179_nofile_above_max_fds_eperm_with_cap()
-        {
+        fn test_setrlimit_phase179_nofile_above_max_fds_eperm_with_cap() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             // Default RLIMIT_NOFILE is (MAX_FDS, MAX_FDS).
@@ -2599,7 +2761,10 @@ mod tests {
             reset_global_state();
             drop_cap_sys_resource();
             errno::set_errno(0);
-            let new = Rlimit { rlim_cur: 1, rlim_max: u64::MAX };
+            let new = Rlimit {
+                rlim_cur: 1,
+                rlim_max: u64::MAX,
+            };
             assert_eq!(setrlimit(9999, &new), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
@@ -2613,7 +2778,10 @@ mod tests {
             drop_cap_sys_resource();
             errno::set_errno(0);
             // Inverted soft/hard AND a hard-raise intent.  EINVAL wins.
-            let new = Rlimit { rlim_cur: 50, rlim_max: 20 };
+            let new = Rlimit {
+                rlim_cur: 50,
+                rlim_max: 20,
+            };
             assert_eq!(setrlimit(RLIMIT_CPU, &new), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
@@ -2627,7 +2795,10 @@ mod tests {
             seed_limit(RLIMIT_CPU, 100, 1000);
             drop_cap_sys_resource();
             errno::set_errno(0);
-            let new = Rlimit { rlim_cur: 50, rlim_max: 500 };
+            let new = Rlimit {
+                rlim_cur: 50,
+                rlim_max: 500,
+            };
             assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
         }
 
@@ -2640,7 +2811,10 @@ mod tests {
             seed_limit(RLIMIT_CPU, 100, 200);
             drop_cap_sys_resource();
             errno::set_errno(0);
-            let new = Rlimit { rlim_cur: 50, rlim_max: 200 };
+            let new = Rlimit {
+                rlim_cur: 50,
+                rlim_max: 200,
+            };
             assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
         }
 
@@ -2653,9 +2827,15 @@ mod tests {
             seed_limit(RLIMIT_CPU, 10, 1000);
             drop_cap_sys_resource();
             errno::set_errno(0);
-            let new = Rlimit { rlim_cur: 900, rlim_max: 1000 };
+            let new = Rlimit {
+                rlim_cur: 900,
+                rlim_max: 1000,
+            };
             assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
-            let mut rb = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            let mut rb = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
             assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
             assert_eq!(rb.rlim_cur, 900);
             assert_eq!(rb.rlim_max, 1000);
@@ -2669,20 +2849,21 @@ mod tests {
         /// hard limit — must be EPERM.  After re-acquiring caps (via
         /// the CapGuard's drop or explicit restore) the raise works.
         #[test]
-        fn test_setrlimit_phase179_workflow_seed_drop_raise_then_restore()
-        {
+        fn test_setrlimit_phase179_workflow_seed_drop_raise_then_restore() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             seed_limit(RLIMIT_CPU, 100, 200);
             drop_cap_sys_resource();
             errno::set_errno(0);
-            let raise = Rlimit { rlim_cur: 100, rlim_max: 400 };
+            let raise = Rlimit {
+                rlim_cur: 100,
+                rlim_max: 400,
+            };
             assert_eq!(setrlimit(RLIMIT_CPU, &raise), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Restore caps and try again.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2697,10 +2878,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
             assert_eq!(setrlimit(RLIMIT_CPU, &raise), 0);
         }
@@ -2714,11 +2892,11 @@ mod tests {
             seed_limit(RLIMIT_FSIZE, 0, 100);
             drop_cap_sys_resource();
             errno::set_errno(0);
-            let new = Rlimit { rlim_cur: 0, rlim_max: 200 };
-            assert_eq!(
-                prlimit(0, RLIMIT_FSIZE, &new, core::ptr::null_mut()),
-                -1,
-            );
+            let new = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 200,
+            };
+            assert_eq!(prlimit(0, RLIMIT_FSIZE, &new, core::ptr::null_mut()), -1,);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -2728,8 +2906,7 @@ mod tests {
         /// after a lowered seed must hit EPERM, not silently raise
         /// back to unlimited.
         #[test]
-        fn test_setrlimit_phase179_buggy_caller_raise_to_infinity_eperm()
-        {
+        fn test_setrlimit_phase179_buggy_caller_raise_to_infinity_eperm() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             seed_limit(RLIMIT_AS, 0, 1 << 20);
@@ -2769,14 +2946,16 @@ mod tests {
             reset_global_state();
             seed_limit(RLIMIT_CPU, 0, 50);
             drop_cap_sys_resource();
-            let raise = Rlimit { rlim_cur: 0, rlim_max: 75 };
+            let raise = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 75,
+            };
             errno::set_errno(0);
             assert_eq!(setrlimit(RLIMIT_CPU, &raise), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Restore caps.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2791,10 +2970,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
             assert_eq!(setrlimit(RLIMIT_CPU, &raise), 0);
         }
@@ -2810,11 +2986,17 @@ mod tests {
             seed_limit(RLIMIT_CPU, 100, 200);
             drop_cap_sys_resource();
             errno::set_errno(0);
-            let raise = Rlimit { rlim_cur: 100, rlim_max: 500 };
+            let raise = Rlimit {
+                rlim_cur: 100,
+                rlim_max: 500,
+            };
             assert_eq!(setrlimit(RLIMIT_CPU, &raise), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Read back: still (100, 200).
-            let mut rb = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            let mut rb = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
             assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
             assert_eq!(rb.rlim_cur, 100);
             assert_eq!(rb.rlim_max, 200);
@@ -2835,7 +3017,10 @@ mod tests {
             };
             assert_eq!(setrlimit(RLIMIT_NOFILE, &new), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
-            let mut rb = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            let mut rb = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
             assert_eq!(getrlimit(RLIMIT_NOFILE, &mut rb), 0);
             assert_eq!(rb.rlim_cur, before_cur);
             assert_eq!(rb.rlim_max, before_max);
@@ -2854,9 +3039,15 @@ mod tests {
                 crate::sys_capability::CAP_SYS_RESOURCE,
             ));
             errno::set_errno(0);
-            let new = Rlimit { rlim_cur: 0, rlim_max: 1000 };
+            let new = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 1000,
+            };
             assert_eq!(setrlimit(RLIMIT_CPU, &new), 0);
-            let mut rb = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            let mut rb = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
             assert_eq!(getrlimit(RLIMIT_CPU, &mut rb), 0);
             assert_eq!(rb.rlim_max, 1000);
         }
@@ -2890,8 +3081,7 @@ mod tests {
         /// the NOFILE branch accidentally applying to other
         /// resources.
         #[test]
-        fn test_setrlimit_phase179_non_nofile_above_max_fds_ok_with_cap()
-        {
+        fn test_setrlimit_phase179_non_nofile_above_max_fds_ok_with_cap() {
             let _g = CapGuard::snapshot();
             reset_global_state();
             seed_limit(RLIMIT_CPU, 0, 100);
@@ -2912,8 +3102,14 @@ mod tests {
             reset_global_state();
             seed_limit(RLIMIT_FSIZE, 50, 100);
             drop_cap_sys_resource();
-            let new = Rlimit { rlim_cur: 50, rlim_max: 999 };
-            let mut old = Rlimit { rlim_cur: 0, rlim_max: 0 };
+            let new = Rlimit {
+                rlim_cur: 50,
+                rlim_max: 999,
+            };
+            let mut old = Rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
             errno::set_errno(0);
             assert_eq!(prlimit(0, RLIMIT_FSIZE, &new, &mut old), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);

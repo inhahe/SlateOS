@@ -82,12 +82,18 @@ mod tests {
     #[test]
     fn test_snapshot_ioctls_distinct() {
         let cmds = [
-            SNAPSHOT_FREEZE, SNAPSHOT_UNFREEZE,
-            SNAPSHOT_ATOMIC_RESTORE, SNAPSHOT_FREE,
-            SNAPSHOT_FREE_SWAP_PAGES, SNAPSHOT_SET_SWAP_AREA,
-            SNAPSHOT_GET_IMAGE_SIZE, SNAPSHOT_PLATFORM_SUPPORT,
-            SNAPSHOT_POWER_OFF, SNAPSHOT_CREATE_IMAGE,
-            SNAPSHOT_PREF_IMAGE_SIZE, SNAPSHOT_ALLOC_SWAP_PAGE,
+            SNAPSHOT_FREEZE,
+            SNAPSHOT_UNFREEZE,
+            SNAPSHOT_ATOMIC_RESTORE,
+            SNAPSHOT_FREE,
+            SNAPSHOT_FREE_SWAP_PAGES,
+            SNAPSHOT_SET_SWAP_AREA,
+            SNAPSHOT_GET_IMAGE_SIZE,
+            SNAPSHOT_PLATFORM_SUPPORT,
+            SNAPSHOT_POWER_OFF,
+            SNAPSHOT_CREATE_IMAGE,
+            SNAPSHOT_PREF_IMAGE_SIZE,
+            SNAPSHOT_ALLOC_SWAP_PAGE,
             SNAPSHOT_AVAIL_SWAP_SIZE,
         ];
         for i in 0..cmds.len() {
@@ -105,8 +111,10 @@ mod tests {
     #[test]
     fn test_hibernation_flags_power_of_two() {
         let flags = [
-            HIBERNATION_TEST, HIBERNATION_TESTPROC,
-            HIBERNATION_PLATFORM, HIBERNATION_SHUTDOWN,
+            HIBERNATION_TEST,
+            HIBERNATION_TESTPROC,
+            HIBERNATION_PLATFORM,
+            HIBERNATION_SHUTDOWN,
             HIBERNATION_REBOOT,
         ];
         for f in &flags {
@@ -117,8 +125,10 @@ mod tests {
     #[test]
     fn test_hibernation_flags_no_overlap() {
         let flags = [
-            HIBERNATION_TEST, HIBERNATION_TESTPROC,
-            HIBERNATION_PLATFORM, HIBERNATION_SHUTDOWN,
+            HIBERNATION_TEST,
+            HIBERNATION_TESTPROC,
+            HIBERNATION_PLATFORM,
+            HIBERNATION_SHUTDOWN,
             HIBERNATION_REBOOT,
         ];
         for i in 0..flags.len() {
@@ -130,9 +140,7 @@ mod tests {
 
     #[test]
     fn test_compress_distinct() {
-        let modes = [
-            SWAP_COMPRESS_NONE, SWAP_COMPRESS_LZO, SWAP_COMPRESS_LZ4,
-        ];
+        let modes = [SWAP_COMPRESS_NONE, SWAP_COMPRESS_LZO, SWAP_COMPRESS_LZ4];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
                 assert_ne!(modes[i], modes[j]);

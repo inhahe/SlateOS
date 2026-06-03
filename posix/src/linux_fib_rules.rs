@@ -86,9 +86,13 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            FR_ACT_UNSPEC, FR_ACT_TO_TBL, FR_ACT_GOTO,
-            FR_ACT_NOP, FR_ACT_BLACKHOLE,
-            FR_ACT_UNREACHABLE, FR_ACT_PROHIBIT,
+            FR_ACT_UNSPEC,
+            FR_ACT_TO_TBL,
+            FR_ACT_GOTO,
+            FR_ACT_NOP,
+            FR_ACT_BLACKHOLE,
+            FR_ACT_UNREACHABLE,
+            FR_ACT_PROHIBIT,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -100,10 +104,19 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            FRA_UNSPEC, FRA_DST, FRA_SRC, FRA_IIFNAME,
-            FRA_GOTO, FRA_PRIORITY, FRA_FWMARK, FRA_FWMASK,
-            FRA_TABLE, FRA_OIFNAME, FRA_L3MDEV,
-            FRA_UID_RANGE, FRA_PROTOCOL,
+            FRA_UNSPEC,
+            FRA_DST,
+            FRA_SRC,
+            FRA_IIFNAME,
+            FRA_GOTO,
+            FRA_PRIORITY,
+            FRA_FWMARK,
+            FRA_FWMASK,
+            FRA_TABLE,
+            FRA_OIFNAME,
+            FRA_L3MDEV,
+            FRA_UID_RANGE,
+            FRA_PROTOCOL,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

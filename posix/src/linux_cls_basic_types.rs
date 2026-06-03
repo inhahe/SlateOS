@@ -67,8 +67,12 @@ mod tests {
     #[test]
     fn test_basic_attrs_distinct() {
         let attrs = [
-            TCA_BASIC_UNSPEC, TCA_BASIC_CLASSID, TCA_BASIC_EMATCHES,
-            TCA_BASIC_ACT, TCA_BASIC_POLICE, TCA_BASIC_PCNT,
+            TCA_BASIC_UNSPEC,
+            TCA_BASIC_CLASSID,
+            TCA_BASIC_EMATCHES,
+            TCA_BASIC_ACT,
+            TCA_BASIC_POLICE,
+            TCA_BASIC_PCNT,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -80,8 +84,12 @@ mod tests {
     #[test]
     fn test_route4_attrs_distinct() {
         let attrs = [
-            TCA_ROUTE4_UNSPEC, TCA_ROUTE4_CLASSID, TCA_ROUTE4_TO,
-            TCA_ROUTE4_FROM, TCA_ROUTE4_IIF, TCA_ROUTE4_POLICE,
+            TCA_ROUTE4_UNSPEC,
+            TCA_ROUTE4_CLASSID,
+            TCA_ROUTE4_TO,
+            TCA_ROUTE4_FROM,
+            TCA_ROUTE4_IIF,
+            TCA_ROUTE4_POLICE,
             TCA_ROUTE4_ACT,
         ];
         for i in 0..attrs.len() {
@@ -94,8 +102,12 @@ mod tests {
     #[test]
     fn test_fw_attrs_distinct() {
         let attrs = [
-            TCA_FW_UNSPEC, TCA_FW_CLASSID, TCA_FW_POLICE,
-            TCA_FW_INDEV, TCA_FW_ACT, TCA_FW_MASK,
+            TCA_FW_UNSPEC,
+            TCA_FW_CLASSID,
+            TCA_FW_POLICE,
+            TCA_FW_INDEV,
+            TCA_FW_ACT,
+            TCA_FW_MASK,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

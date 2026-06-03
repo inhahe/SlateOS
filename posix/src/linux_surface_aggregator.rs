@@ -78,9 +78,14 @@ mod tests {
     #[test]
     fn test_target_categories_distinct() {
         let tcs = [
-            SSAM_SSH_TC_SAM, SSAM_SSH_TC_BAT, SSAM_SSH_TC_TMP,
-            SSAM_SSH_TC_PMC, SSAM_SSH_TC_FAN, SSAM_SSH_TC_HID,
-            SSAM_SSH_TC_BAS, SSAM_SSH_TC_KIP,
+            SSAM_SSH_TC_SAM,
+            SSAM_SSH_TC_BAT,
+            SSAM_SSH_TC_TMP,
+            SSAM_SSH_TC_PMC,
+            SSAM_SSH_TC_FAN,
+            SSAM_SSH_TC_HID,
+            SSAM_SSH_TC_BAS,
+            SSAM_SSH_TC_KIP,
         ];
         for i in 0..tcs.len() {
             for j in (i + 1)..tcs.len() {
@@ -92,7 +97,8 @@ mod tests {
     #[test]
     fn test_frame_types_distinct() {
         let types = [
-            SSAM_SSH_FRAME_TYPE_DATA, SSAM_SSH_FRAME_TYPE_ACK,
+            SSAM_SSH_FRAME_TYPE_DATA,
+            SSAM_SSH_FRAME_TYPE_ACK,
             SSAM_SSH_FRAME_TYPE_NAK,
         ];
         for i in 0..types.len() {
@@ -105,7 +111,8 @@ mod tests {
     #[test]
     fn test_dtx_states_distinct() {
         let states = [
-            SSAM_BAS_STATE_ATTACHED, SSAM_BAS_STATE_DETACH_READY,
+            SSAM_BAS_STATE_ATTACHED,
+            SSAM_BAS_STATE_DETACH_READY,
             SSAM_BAS_STATE_DETACHED,
         ];
         for i in 0..states.len() {
@@ -118,8 +125,10 @@ mod tests {
     #[test]
     fn test_perf_modes_distinct() {
         let modes = [
-            SSAM_PERF_MODE_NORMAL, SSAM_PERF_MODE_BATTERY_SAVER,
-            SSAM_PERF_MODE_BETTER_PERF, SSAM_PERF_MODE_BEST_PERF,
+            SSAM_PERF_MODE_NORMAL,
+            SSAM_PERF_MODE_BATTERY_SAVER,
+            SSAM_PERF_MODE_BETTER_PERF,
+            SSAM_PERF_MODE_BEST_PERF,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

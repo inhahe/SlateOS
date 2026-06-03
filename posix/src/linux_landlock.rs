@@ -88,23 +88,22 @@ pub const LANDLOCK_ACCESS_FS_TRUNCATE: u64 = 1 << 14;
 pub const LANDLOCK_ACCESS_FS_IOCTL_DEV: u64 = 1 << 15;
 
 /// Bitmask of every defined filesystem access right.
-pub const LANDLOCK_ACCESS_FS_ALL: u64 =
-    LANDLOCK_ACCESS_FS_EXECUTE
-        | LANDLOCK_ACCESS_FS_WRITE_FILE
-        | LANDLOCK_ACCESS_FS_READ_FILE
-        | LANDLOCK_ACCESS_FS_READ_DIR
-        | LANDLOCK_ACCESS_FS_REMOVE_DIR
-        | LANDLOCK_ACCESS_FS_REMOVE_FILE
-        | LANDLOCK_ACCESS_FS_MAKE_CHAR
-        | LANDLOCK_ACCESS_FS_MAKE_DIR
-        | LANDLOCK_ACCESS_FS_MAKE_REG
-        | LANDLOCK_ACCESS_FS_MAKE_SOCK
-        | LANDLOCK_ACCESS_FS_MAKE_FIFO
-        | LANDLOCK_ACCESS_FS_MAKE_BLOCK
-        | LANDLOCK_ACCESS_FS_MAKE_SYM
-        | LANDLOCK_ACCESS_FS_REFER
-        | LANDLOCK_ACCESS_FS_TRUNCATE
-        | LANDLOCK_ACCESS_FS_IOCTL_DEV;
+pub const LANDLOCK_ACCESS_FS_ALL: u64 = LANDLOCK_ACCESS_FS_EXECUTE
+    | LANDLOCK_ACCESS_FS_WRITE_FILE
+    | LANDLOCK_ACCESS_FS_READ_FILE
+    | LANDLOCK_ACCESS_FS_READ_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_DIR
+    | LANDLOCK_ACCESS_FS_REMOVE_FILE
+    | LANDLOCK_ACCESS_FS_MAKE_CHAR
+    | LANDLOCK_ACCESS_FS_MAKE_DIR
+    | LANDLOCK_ACCESS_FS_MAKE_REG
+    | LANDLOCK_ACCESS_FS_MAKE_SOCK
+    | LANDLOCK_ACCESS_FS_MAKE_FIFO
+    | LANDLOCK_ACCESS_FS_MAKE_BLOCK
+    | LANDLOCK_ACCESS_FS_MAKE_SYM
+    | LANDLOCK_ACCESS_FS_REFER
+    | LANDLOCK_ACCESS_FS_TRUNCATE
+    | LANDLOCK_ACCESS_FS_IOCTL_DEV;
 
 // ---------------------------------------------------------------------------
 // Network access rights (for LANDLOCK_RULE_NET_PORT)
@@ -376,9 +375,8 @@ pub extern "C" fn landlock_add_rule(
             // SAFETY: caller passes a `LandlockPathBeneathAttr` here.
             // We use `read_unaligned` so the caller may use any
             // alignment.
-            let attr = unsafe {
-                core::ptr::read_unaligned(rule_attr.cast::<LandlockPathBeneathAttr>())
-            };
+            let attr =
+                unsafe { core::ptr::read_unaligned(rule_attr.cast::<LandlockPathBeneathAttr>()) };
             if !is_valid_fs_access(attr.allowed_access) {
                 errno::set_errno(errno::EINVAL);
                 return -1;
@@ -395,9 +393,8 @@ pub extern "C" fn landlock_add_rule(
         }
         LANDLOCK_RULE_NET_PORT => {
             // SAFETY: caller passes a `LandlockNetPortAttr` here.
-            let attr = unsafe {
-                core::ptr::read_unaligned(rule_attr.cast::<LandlockNetPortAttr>())
-            };
+            let attr =
+                unsafe { core::ptr::read_unaligned(rule_attr.cast::<LandlockNetPortAttr>()) };
             if !is_valid_net_access(attr.allowed_access) {
                 errno::set_errno(errno::EINVAL);
                 return -1;
@@ -470,9 +467,7 @@ pub extern "C" fn landlock_restrict_self(ruleset_fd: i32, flags: u32) -> i32 {
     // check, matching the kernel's source order — so EPERM takes
     // precedence over EINVAL for unprivileged callers.
     if !crate::unistd::no_new_privs_set()
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_ADMIN,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -530,7 +525,10 @@ mod tests {
     fn test_net_access_rights() {
         assert_eq!(LANDLOCK_ACCESS_NET_BIND_TCP, 1);
         assert_eq!(LANDLOCK_ACCESS_NET_CONNECT_TCP, 2);
-        assert_ne!(LANDLOCK_ACCESS_NET_BIND_TCP, LANDLOCK_ACCESS_NET_CONNECT_TCP);
+        assert_ne!(
+            LANDLOCK_ACCESS_NET_BIND_TCP,
+            LANDLOCK_ACCESS_NET_CONNECT_TCP
+        );
     }
 
     #[test]
@@ -566,11 +564,7 @@ mod tests {
     #[test]
     fn test_create_ruleset_probe_returns_abi_version() {
         clear_errno();
-        let v = landlock_create_ruleset(
-            core::ptr::null(),
-            0,
-            LANDLOCK_CREATE_RULESET_VERSION,
-        );
+        let v = landlock_create_ruleset(core::ptr::null(), 0, LANDLOCK_CREATE_RULESET_VERSION);
         assert_eq!(v, LANDLOCK_ABI_VERSION);
         // Probe success doesn't touch errno.
         assert_eq!(errno::get_errno(), 0);
@@ -589,11 +583,8 @@ mod tests {
     fn test_create_ruleset_probe_extra_bits_einval() {
         // Probe form must use *only* LANDLOCK_CREATE_RULESET_VERSION.
         clear_errno();
-        let v = landlock_create_ruleset(
-            core::ptr::null(),
-            0,
-            LANDLOCK_CREATE_RULESET_VERSION | 0x10,
-        );
+        let v =
+            landlock_create_ruleset(core::ptr::null(), 0, LANDLOCK_CREATE_RULESET_VERSION | 0x10);
         assert_eq!(v, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -697,8 +688,7 @@ mod tests {
     #[test]
     fn test_create_ruleset_valid_inputs_enosys() {
         let attr = LandlockRulesetAttr {
-            handled_access_fs: LANDLOCK_ACCESS_FS_READ_FILE
-                | LANDLOCK_ACCESS_FS_WRITE_FILE,
+            handled_access_fs: LANDLOCK_ACCESS_FS_READ_FILE | LANDLOCK_ACCESS_FS_WRITE_FILE,
             handled_access_net: LANDLOCK_ACCESS_NET_BIND_TCP,
         };
         clear_errno();
@@ -739,12 +729,7 @@ mod tests {
     #[test]
     fn test_add_rule_null_attr_efault() {
         clear_errno();
-        let ret = landlock_add_rule(
-            3,
-            LANDLOCK_RULE_PATH_BENEATH,
-            core::ptr::null(),
-            0,
-        );
+        let ret = landlock_add_rule(3, LANDLOCK_RULE_PATH_BENEATH, core::ptr::null(), 0);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
@@ -810,12 +795,7 @@ mod tests {
             allowed_access: LANDLOCK_ACCESS_NET_BIND_TCP,
             port: 1_000_000,
         };
-        let ret = landlock_add_rule(
-            3,
-            LANDLOCK_RULE_NET_PORT,
-            (&raw const attr).cast::<u8>(),
-            0,
-        );
+        let ret = landlock_add_rule(3, LANDLOCK_RULE_NET_PORT, (&raw const attr).cast::<u8>(), 0);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -827,12 +807,7 @@ mod tests {
             allowed_access: 0,
             port: 80,
         };
-        let ret = landlock_add_rule(
-            3,
-            LANDLOCK_RULE_NET_PORT,
-            (&raw const attr).cast::<u8>(),
-            0,
-        );
+        let ret = landlock_add_rule(3, LANDLOCK_RULE_NET_PORT, (&raw const attr).cast::<u8>(), 0);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::ENOMSG);
     }
@@ -906,11 +881,7 @@ mod tests {
     #[test]
     fn test_typical_probe_then_create_then_fallback_workflow() {
         // 1. Probe.
-        let ver = landlock_create_ruleset(
-            core::ptr::null(),
-            0,
-            LANDLOCK_CREATE_RULESET_VERSION,
-        );
+        let ver = landlock_create_ruleset(core::ptr::null(), 0, LANDLOCK_CREATE_RULESET_VERSION);
         assert!(ver >= 1);
 
         // 2. Try to create — fails with ENOSYS because we have no backend.
@@ -971,11 +942,7 @@ mod tests {
     #[test]
     fn test_phase133_errata_probe_returns_errata_bitfield() {
         clear_errno();
-        let v = landlock_create_ruleset(
-            core::ptr::null(),
-            0,
-            LANDLOCK_CREATE_RULESET_ERRATA,
-        );
+        let v = landlock_create_ruleset(core::ptr::null(), 0, LANDLOCK_CREATE_RULESET_ERRATA);
         assert_eq!(v, LANDLOCK_ERRATA);
         // Probe success must NOT touch errno (even though we return 0,
         // 0 means "no errata", not an error).
@@ -989,11 +956,7 @@ mod tests {
         // anything about errno on success — clear it first and verify
         // the call doesn't disturb it.
         errno::set_errno(123);
-        let v = landlock_create_ruleset(
-            core::ptr::null(),
-            0,
-            LANDLOCK_CREATE_RULESET_ERRATA,
-        );
+        let v = landlock_create_ruleset(core::ptr::null(), 0, LANDLOCK_CREATE_RULESET_ERRATA);
         assert_eq!(v, 0);
         // Caller can still rely on errno being whatever they last set.
         assert_eq!(errno::get_errno(), 123);
@@ -1007,11 +970,7 @@ mod tests {
         // the probe path).
         let attr = LandlockRulesetAttr::zeroed();
         clear_errno();
-        let v = landlock_create_ruleset(
-            &raw const attr,
-            0,
-            LANDLOCK_CREATE_RULESET_ERRATA,
-        );
+        let v = landlock_create_ruleset(&raw const attr, 0, LANDLOCK_CREATE_RULESET_ERRATA);
         assert_eq!(v, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -1019,11 +978,7 @@ mod tests {
     #[test]
     fn test_phase133_errata_probe_with_non_zero_size_einval() {
         clear_errno();
-        let v = landlock_create_ruleset(
-            core::ptr::null(),
-            16,
-            LANDLOCK_CREATE_RULESET_ERRATA,
-        );
+        let v = landlock_create_ruleset(core::ptr::null(), 16, LANDLOCK_CREATE_RULESET_ERRATA);
         assert_eq!(v, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -1151,20 +1106,12 @@ mod tests {
         // 2. Probe errata → uses the result to apply quirk workarounds.
         // 3. Try to create with the chosen access set.
         clear_errno();
-        let ver = landlock_create_ruleset(
-            core::ptr::null(),
-            0,
-            LANDLOCK_CREATE_RULESET_VERSION,
-        );
+        let ver = landlock_create_ruleset(core::ptr::null(), 0, LANDLOCK_CREATE_RULESET_VERSION);
         assert!(ver >= 1);
         assert_eq!(errno::get_errno(), 0);
 
         // After step 1, errno is still clean; step 2 must not disturb it.
-        let errata = landlock_create_ruleset(
-            core::ptr::null(),
-            0,
-            LANDLOCK_CREATE_RULESET_ERRATA,
-        );
+        let errata = landlock_create_ruleset(core::ptr::null(), 0, LANDLOCK_CREATE_RULESET_ERRATA);
         // We advertise no errata, but the call succeeded with value 0.
         assert_eq!(errata, LANDLOCK_ERRATA);
         assert_eq!(errno::get_errno(), 0);
@@ -1188,20 +1135,12 @@ mod tests {
         // A buggy first call shouldn't poison subsequent good calls.
         clear_errno();
         // Bad: probe with non-zero size.
-        let bad = landlock_create_ruleset(
-            core::ptr::null(),
-            16,
-            LANDLOCK_CREATE_RULESET_ERRATA,
-        );
+        let bad = landlock_create_ruleset(core::ptr::null(), 16, LANDLOCK_CREATE_RULESET_ERRATA);
         assert_eq!(bad, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
         // Good: same flag, valid arguments.
-        let good = landlock_create_ruleset(
-            core::ptr::null(),
-            0,
-            LANDLOCK_CREATE_RULESET_ERRATA,
-        );
+        let good = landlock_create_ruleset(core::ptr::null(), 0, LANDLOCK_CREATE_RULESET_ERRATA);
         assert_eq!(good, LANDLOCK_ERRATA);
     }
 
@@ -1239,16 +1178,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -1263,8 +1200,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -1292,8 +1228,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1308,8 +1243,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -1429,13 +1363,11 @@ mod tests {
             let _g = CapGuard::snapshot();
             let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
-            let (lo_before, hi_before) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_before, hi_before) = crate::sys_capability::current_caps_effective();
             let nnp_before = crate::unistd::no_new_privs_set();
             errno::set_errno(0);
             let _ = landlock_restrict_self(0, 0);
-            let (lo_after, hi_after) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_after, hi_after) = crate::sys_capability::current_caps_effective();
             let nnp_after = crate::unistd::no_new_privs_set();
             assert_eq!(lo_before, lo_after);
             assert_eq!(hi_before, hi_after);

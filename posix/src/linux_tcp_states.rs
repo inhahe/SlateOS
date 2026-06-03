@@ -74,10 +74,18 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            TCP_ESTABLISHED, TCP_SYN_SENT, TCP_SYN_RECV,
-            TCP_FIN_WAIT1, TCP_FIN_WAIT2, TCP_TIME_WAIT,
-            TCP_CLOSE, TCP_CLOSE_WAIT, TCP_LAST_ACK,
-            TCP_LISTEN, TCP_CLOSING, TCP_NEW_SYN_RECV,
+            TCP_ESTABLISHED,
+            TCP_SYN_SENT,
+            TCP_SYN_RECV,
+            TCP_FIN_WAIT1,
+            TCP_FIN_WAIT2,
+            TCP_TIME_WAIT,
+            TCP_CLOSE,
+            TCP_CLOSE_WAIT,
+            TCP_LAST_ACK,
+            TCP_LISTEN,
+            TCP_CLOSING,
+            TCP_NEW_SYN_RECV,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -89,10 +97,18 @@ mod tests {
     #[test]
     fn test_states_in_range() {
         let states = [
-            TCP_ESTABLISHED, TCP_SYN_SENT, TCP_SYN_RECV,
-            TCP_FIN_WAIT1, TCP_FIN_WAIT2, TCP_TIME_WAIT,
-            TCP_CLOSE, TCP_CLOSE_WAIT, TCP_LAST_ACK,
-            TCP_LISTEN, TCP_CLOSING, TCP_NEW_SYN_RECV,
+            TCP_ESTABLISHED,
+            TCP_SYN_SENT,
+            TCP_SYN_RECV,
+            TCP_FIN_WAIT1,
+            TCP_FIN_WAIT2,
+            TCP_TIME_WAIT,
+            TCP_CLOSE,
+            TCP_CLOSE_WAIT,
+            TCP_LAST_ACK,
+            TCP_LISTEN,
+            TCP_CLOSING,
+            TCP_NEW_SYN_RECV,
         ];
         for state in &states {
             assert!(*state > 0);
@@ -103,11 +119,16 @@ mod tests {
     #[test]
     fn test_state_names_distinct() {
         let names = [
-            TCP_STATE_NAME_ESTABLISHED, TCP_STATE_NAME_SYN_SENT,
-            TCP_STATE_NAME_SYN_RECV, TCP_STATE_NAME_FIN_WAIT1,
-            TCP_STATE_NAME_FIN_WAIT2, TCP_STATE_NAME_TIME_WAIT,
-            TCP_STATE_NAME_CLOSE, TCP_STATE_NAME_CLOSE_WAIT,
-            TCP_STATE_NAME_LAST_ACK, TCP_STATE_NAME_LISTEN,
+            TCP_STATE_NAME_ESTABLISHED,
+            TCP_STATE_NAME_SYN_SENT,
+            TCP_STATE_NAME_SYN_RECV,
+            TCP_STATE_NAME_FIN_WAIT1,
+            TCP_STATE_NAME_FIN_WAIT2,
+            TCP_STATE_NAME_TIME_WAIT,
+            TCP_STATE_NAME_CLOSE,
+            TCP_STATE_NAME_CLOSE_WAIT,
+            TCP_STATE_NAME_LAST_ACK,
+            TCP_STATE_NAME_LISTEN,
             TCP_STATE_NAME_CLOSING,
         ];
         for i in 0..names.len() {

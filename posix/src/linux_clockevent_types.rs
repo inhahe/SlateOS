@@ -70,9 +70,12 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            CLOCK_EVT_MODE_UNUSED, CLOCK_EVT_MODE_SHUTDOWN,
-            CLOCK_EVT_MODE_PERIODIC, CLOCK_EVT_MODE_ONESHOT,
-            CLOCK_EVT_MODE_ONESHOT_STOPPED, CLOCK_EVT_MODE_RESUME,
+            CLOCK_EVT_MODE_UNUSED,
+            CLOCK_EVT_MODE_SHUTDOWN,
+            CLOCK_EVT_MODE_PERIODIC,
+            CLOCK_EVT_MODE_ONESHOT,
+            CLOCK_EVT_MODE_ONESHOT_STOPPED,
+            CLOCK_EVT_MODE_RESUME,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -84,10 +87,14 @@ mod tests {
     #[test]
     fn test_features_no_overlap() {
         let feats = [
-            CLOCK_EVT_FEAT_PERIODIC, CLOCK_EVT_FEAT_ONESHOT,
-            CLOCK_EVT_FEAT_KTIME, CLOCK_EVT_FEAT_C3STOP,
-            CLOCK_EVT_FEAT_ONESHOT_STOPPED, CLOCK_EVT_FEAT_PERCPU,
-            CLOCK_EVT_FEAT_DYNIRQ, CLOCK_EVT_FEAT_DUMMY,
+            CLOCK_EVT_FEAT_PERIODIC,
+            CLOCK_EVT_FEAT_ONESHOT,
+            CLOCK_EVT_FEAT_KTIME,
+            CLOCK_EVT_FEAT_C3STOP,
+            CLOCK_EVT_FEAT_ONESHOT_STOPPED,
+            CLOCK_EVT_FEAT_PERCPU,
+            CLOCK_EVT_FEAT_DYNIRQ,
+            CLOCK_EVT_FEAT_DUMMY,
         ];
         for i in 0..feats.len() {
             assert!(feats[i].is_power_of_two());

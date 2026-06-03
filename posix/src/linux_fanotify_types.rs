@@ -108,9 +108,18 @@ mod tests {
     #[test]
     fn test_event_flags_no_overlap() {
         let events = [
-            FAN_ACCESS, FAN_MODIFY, FAN_ATTRIB, FAN_CLOSE_WRITE,
-            FAN_CLOSE_NOWRITE, FAN_OPEN, FAN_MOVED_FROM, FAN_MOVED_TO,
-            FAN_CREATE, FAN_DELETE, FAN_DELETE_SELF, FAN_MOVE_SELF,
+            FAN_ACCESS,
+            FAN_MODIFY,
+            FAN_ATTRIB,
+            FAN_CLOSE_WRITE,
+            FAN_CLOSE_NOWRITE,
+            FAN_OPEN,
+            FAN_MOVED_FROM,
+            FAN_MOVED_TO,
+            FAN_CREATE,
+            FAN_DELETE,
+            FAN_DELETE_SELF,
+            FAN_MOVE_SELF,
             FAN_OPEN_EXEC,
         ];
         for i in 0..events.len() {
@@ -145,8 +154,11 @@ mod tests {
     #[test]
     fn test_report_flags_no_overlap() {
         let flags = [
-            FAN_REPORT_TID, FAN_REPORT_FID, FAN_REPORT_DIR_FID,
-            FAN_REPORT_NAME, FAN_REPORT_TARGET_FID,
+            FAN_REPORT_TID,
+            FAN_REPORT_FID,
+            FAN_REPORT_DIR_FID,
+            FAN_REPORT_NAME,
+            FAN_REPORT_TARGET_FID,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

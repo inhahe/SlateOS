@@ -84,8 +84,11 @@ mod tests {
     #[test]
     fn test_console_types_distinct() {
         let types = [
-            CONSOLE_TYPE_VGA, CONSOLE_TYPE_FB, CONSOLE_TYPE_SERIAL,
-            CONSOLE_TYPE_NET, CONSOLE_TYPE_DUMMY,
+            CONSOLE_TYPE_VGA,
+            CONSOLE_TYPE_FB,
+            CONSOLE_TYPE_SERIAL,
+            CONSOLE_TYPE_NET,
+            CONSOLE_TYPE_DUMMY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -97,8 +100,13 @@ mod tests {
     #[test]
     fn test_console_flags_no_overlap() {
         let flags = [
-            CON_ENABLED, CON_BOOT, CON_CONSDEV, CON_ANSI,
-            CON_NBCON, CON_BRL, CON_REGISTERED,
+            CON_ENABLED,
+            CON_BOOT,
+            CON_CONSDEV,
+            CON_ANSI,
+            CON_NBCON,
+            CON_BRL,
+            CON_REGISTERED,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

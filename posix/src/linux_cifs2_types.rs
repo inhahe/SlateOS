@@ -77,13 +77,20 @@ mod tests {
     #[test]
     fn test_mount_flags_power_of_two() {
         let flags = [
-            CIFS_MOUNT_NO_PERM, CIFS_MOUNT_SET_UID,
-            CIFS_MOUNT_MAP_SPECIAL_CHR, CIFS_MOUNT_DIRECT_IO,
-            CIFS_MOUNT_NO_XATTR, CIFS_MOUNT_POSIX_PATHS,
-            CIFS_MOUNT_NO_BRL, CIFS_MOUNT_CIFS_ACL,
-            CIFS_MOUNT_OVERR_SNAME, CIFS_MOUNT_SERVER_INUM,
-            CIFS_MOUNT_STRICT_IO, CIFS_MOUNT_MULTIUSER,
-            CIFS_MOUNT_FSCACHE, CIFS_MOUNT_RO,
+            CIFS_MOUNT_NO_PERM,
+            CIFS_MOUNT_SET_UID,
+            CIFS_MOUNT_MAP_SPECIAL_CHR,
+            CIFS_MOUNT_DIRECT_IO,
+            CIFS_MOUNT_NO_XATTR,
+            CIFS_MOUNT_POSIX_PATHS,
+            CIFS_MOUNT_NO_BRL,
+            CIFS_MOUNT_CIFS_ACL,
+            CIFS_MOUNT_OVERR_SNAME,
+            CIFS_MOUNT_SERVER_INUM,
+            CIFS_MOUNT_STRICT_IO,
+            CIFS_MOUNT_MULTIUSER,
+            CIFS_MOUNT_FSCACHE,
+            CIFS_MOUNT_RO,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -93,13 +100,20 @@ mod tests {
     #[test]
     fn test_mount_flags_no_overlap() {
         let flags = [
-            CIFS_MOUNT_NO_PERM, CIFS_MOUNT_SET_UID,
-            CIFS_MOUNT_MAP_SPECIAL_CHR, CIFS_MOUNT_DIRECT_IO,
-            CIFS_MOUNT_NO_XATTR, CIFS_MOUNT_POSIX_PATHS,
-            CIFS_MOUNT_NO_BRL, CIFS_MOUNT_CIFS_ACL,
-            CIFS_MOUNT_OVERR_SNAME, CIFS_MOUNT_SERVER_INUM,
-            CIFS_MOUNT_STRICT_IO, CIFS_MOUNT_MULTIUSER,
-            CIFS_MOUNT_FSCACHE, CIFS_MOUNT_RO,
+            CIFS_MOUNT_NO_PERM,
+            CIFS_MOUNT_SET_UID,
+            CIFS_MOUNT_MAP_SPECIAL_CHR,
+            CIFS_MOUNT_DIRECT_IO,
+            CIFS_MOUNT_NO_XATTR,
+            CIFS_MOUNT_POSIX_PATHS,
+            CIFS_MOUNT_NO_BRL,
+            CIFS_MOUNT_CIFS_ACL,
+            CIFS_MOUNT_OVERR_SNAME,
+            CIFS_MOUNT_SERVER_INUM,
+            CIFS_MOUNT_STRICT_IO,
+            CIFS_MOUNT_MULTIUSER,
+            CIFS_MOUNT_FSCACHE,
+            CIFS_MOUNT_RO,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -111,8 +125,10 @@ mod tests {
     #[test]
     fn test_sec_modes_distinct() {
         let modes = [
-            CIFS_SECMODE_NTLM, CIFS_SECMODE_NTLMV2,
-            CIFS_SECMODE_KRB5, CIFS_SECMODE_NTLMSSP,
+            CIFS_SECMODE_NTLM,
+            CIFS_SECMODE_NTLMV2,
+            CIFS_SECMODE_KRB5,
+            CIFS_SECMODE_NTLMSSP,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -124,9 +140,12 @@ mod tests {
     #[test]
     fn test_protocol_versions_distinct() {
         let vers = [
-            SMB_PROTOCOL_SMB1, SMB_PROTOCOL_SMB2,
-            SMB_PROTOCOL_SMB21, SMB_PROTOCOL_SMB30,
-            SMB_PROTOCOL_SMB302, SMB_PROTOCOL_SMB311,
+            SMB_PROTOCOL_SMB1,
+            SMB_PROTOCOL_SMB2,
+            SMB_PROTOCOL_SMB21,
+            SMB_PROTOCOL_SMB30,
+            SMB_PROTOCOL_SMB302,
+            SMB_PROTOCOL_SMB311,
         ];
         for i in 0..vers.len() {
             for j in (i + 1)..vers.len() {

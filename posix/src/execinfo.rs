@@ -146,10 +146,7 @@ fn format_hex_addr(addr: u64, buf: &mut [u8; 18]) {
 /// On x86_64 walks the saved-rbp chain (requires frame pointers, which
 /// our build flags enforce).  On other targets returns 0.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn backtrace(
-    buffer: *mut *mut u8,
-    size: i32,
-) -> i32 {
+pub extern "C" fn backtrace(buffer: *mut *mut u8, size: i32) -> i32 {
     #[cfg(target_arch = "x86_64")]
     {
         walk_x86_64(buffer, size)
@@ -179,17 +176,13 @@ pub extern "C" fn backtrace(
 ///
 /// Returns null on allocation failure or invalid inputs.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn backtrace_symbols(
-    buffer: *const *mut u8,
-    size: i32,
-) -> *mut *mut u8 {
+pub extern "C" fn backtrace_symbols(buffer: *const *mut u8, size: i32) -> *mut *mut u8 {
     if buffer.is_null() || size <= 0 {
         return core::ptr::null_mut();
     }
     let n = size as usize;
     // Layout: n pointers, then n × 19 bytes (18 hex + 1 NUL terminator).
-    let ptrs_bytes = n.checked_mul(core::mem::size_of::<*mut u8>())
-        .unwrap_or(0);
+    let ptrs_bytes = n.checked_mul(core::mem::size_of::<*mut u8>()).unwrap_or(0);
     let strs_bytes = n.checked_mul(19).unwrap_or(0);
     let total = match ptrs_bytes.checked_add(strs_bytes) {
         Some(v) if v > 0 => v,
@@ -214,12 +207,18 @@ pub extern "C" fn backtrace_symbols(
         // Write the 18 hex bytes plus a trailing NUL.
         for j in 0..18 {
             // SAFETY: same — bounds-checked above.
-            unsafe { *str_ptr.add(j) = hex_buf[j]; }
+            unsafe {
+                *str_ptr.add(j) = hex_buf[j];
+            }
         }
         // SAFETY: 18 bytes written into a 19-byte slot; final byte is NUL.
-        unsafe { *str_ptr.add(18) = 0; }
+        unsafe {
+            *str_ptr.add(18) = 0;
+        }
         // SAFETY: pointer array has `n` slots; `i < n`.
-        unsafe { *ptr_array.add(i) = str_ptr; }
+        unsafe {
+            *ptr_array.add(i) = str_ptr;
+        }
     }
     ptr_array
 }
@@ -235,11 +234,7 @@ pub extern "C" fn backtrace_symbols(
 /// for signal handlers and other contexts where calling `malloc` is
 /// unsafe.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn backtrace_symbols_fd(
-    buffer: *const *mut u8,
-    size: i32,
-    fd: i32,
-) {
+pub extern "C" fn backtrace_symbols_fd(buffer: *const *mut u8, size: i32, fd: i32) {
     if buffer.is_null() || size <= 0 {
         return;
     }
@@ -345,15 +340,19 @@ mod tests {
         assert_eq!(&hex_bytes, b"123456789abcdef0");
         // Cleanup.
         // SAFETY: `result` is a non-null pointer returned by malloc above.
-        unsafe { crate::malloc::free(result.cast::<u8>()); }
+        unsafe {
+            crate::malloc::free(result.cast::<u8>());
+        }
     }
 
     #[test]
     fn test_backtrace_symbols_zero_returns_null() {
         let buf = [core::ptr::null_mut(); 1];
         let ret = backtrace_symbols(buf.as_ptr(), 0);
-        assert!(ret.is_null(),
-            "backtrace_symbols(_, 0) returns null per glibc convention");
+        assert!(
+            ret.is_null(),
+            "backtrace_symbols(_, 0) returns null per glibc convention"
+        );
     }
 
     #[test]
@@ -433,7 +432,9 @@ mod tests {
             let symbols = backtrace_symbols(addrs.as_ptr(), nframes);
             if !symbols.is_null() {
                 // SAFETY: malloc'd pointer from above.
-                unsafe { crate::malloc::free(symbols.cast::<u8>()); }
+                unsafe {
+                    crate::malloc::free(symbols.cast::<u8>());
+                }
             }
         }
 

@@ -101,13 +101,20 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let events = [
-            SND_SEQ_EVENT_NOTEON, SND_SEQ_EVENT_NOTEOFF,
-            SND_SEQ_EVENT_KEYPRESS, SND_SEQ_EVENT_CONTROLLER,
-            SND_SEQ_EVENT_PGMCHANGE, SND_SEQ_EVENT_CHANPRESS,
-            SND_SEQ_EVENT_PITCHBEND, SND_SEQ_EVENT_SYSEX,
-            SND_SEQ_EVENT_TEMPO, SND_SEQ_EVENT_CLOCK,
-            SND_SEQ_EVENT_START, SND_SEQ_EVENT_CONTINUE,
-            SND_SEQ_EVENT_STOP, SND_SEQ_EVENT_PORT_SUBSCRIBED,
+            SND_SEQ_EVENT_NOTEON,
+            SND_SEQ_EVENT_NOTEOFF,
+            SND_SEQ_EVENT_KEYPRESS,
+            SND_SEQ_EVENT_CONTROLLER,
+            SND_SEQ_EVENT_PGMCHANGE,
+            SND_SEQ_EVENT_CHANPRESS,
+            SND_SEQ_EVENT_PITCHBEND,
+            SND_SEQ_EVENT_SYSEX,
+            SND_SEQ_EVENT_TEMPO,
+            SND_SEQ_EVENT_CLOCK,
+            SND_SEQ_EVENT_START,
+            SND_SEQ_EVENT_CONTINUE,
+            SND_SEQ_EVENT_STOP,
+            SND_SEQ_EVENT_PORT_SUBSCRIBED,
             SND_SEQ_EVENT_PORT_UNSUBSCRIBED,
         ];
         for i in 0..events.len() {
@@ -125,8 +132,10 @@ mod tests {
     #[test]
     fn test_port_caps_no_overlap() {
         let caps = [
-            SND_SEQ_PORT_CAP_WRITE, SND_SEQ_PORT_CAP_READ,
-            SND_SEQ_PORT_CAP_SUBS_WRITE, SND_SEQ_PORT_CAP_SUBS_READ,
+            SND_SEQ_PORT_CAP_WRITE,
+            SND_SEQ_PORT_CAP_READ,
+            SND_SEQ_PORT_CAP_SUBS_WRITE,
+            SND_SEQ_PORT_CAP_SUBS_READ,
             SND_SEQ_PORT_CAP_NO_EXPORT,
         ];
         for i in 0..caps.len() {

@@ -119,10 +119,14 @@ mod tests {
     #[test]
     fn test_features_distinct() {
         let feats = [
-            VIRTIO_NET_F_CSUM, VIRTIO_NET_F_GUEST_CSUM,
-            VIRTIO_NET_F_MAC, VIRTIO_NET_F_GUEST_TSO4,
-            VIRTIO_NET_F_GUEST_TSO6, VIRTIO_NET_F_MRG_RXBUF,
-            VIRTIO_NET_F_STATUS, VIRTIO_NET_F_CTRL_VQ,
+            VIRTIO_NET_F_CSUM,
+            VIRTIO_NET_F_GUEST_CSUM,
+            VIRTIO_NET_F_MAC,
+            VIRTIO_NET_F_GUEST_TSO4,
+            VIRTIO_NET_F_GUEST_TSO6,
+            VIRTIO_NET_F_MRG_RXBUF,
+            VIRTIO_NET_F_STATUS,
+            VIRTIO_NET_F_CTRL_VQ,
             VIRTIO_NET_F_MQ,
         ];
         for i in 0..feats.len() {
@@ -135,8 +139,10 @@ mod tests {
     #[test]
     fn test_gso_types_distinct() {
         let types = [
-            VIRTIO_NET_HDR_GSO_NONE, VIRTIO_NET_HDR_GSO_TCPV4,
-            VIRTIO_NET_HDR_GSO_UDP, VIRTIO_NET_HDR_GSO_TCPV6,
+            VIRTIO_NET_HDR_GSO_NONE,
+            VIRTIO_NET_HDR_GSO_TCPV4,
+            VIRTIO_NET_HDR_GSO_UDP,
+            VIRTIO_NET_HDR_GSO_TCPV6,
             VIRTIO_NET_HDR_GSO_UDP_L4,
         ];
         for i in 0..types.len() {

@@ -90,7 +90,8 @@ mod tests {
     #[test]
     fn test_freezer_states_distinct() {
         let states = [
-            CGROUP_FREEZER_THAWED, CGROUP_FREEZER_FREEZING,
+            CGROUP_FREEZER_THAWED,
+            CGROUP_FREEZER_FREEZING,
             CGROUP_FREEZER_FROZEN,
         ];
         for i in 0..states.len() {
@@ -103,9 +104,14 @@ mod tests {
     #[test]
     fn test_ctrl_ids_distinct() {
         let ids = [
-            CGROUP_CTRL_CPU, CGROUP_CTRL_MEMORY, CGROUP_CTRL_IO,
-            CGROUP_CTRL_PID, CGROUP_CTRL_RDMA, CGROUP_CTRL_HUGETLB,
-            CGROUP_CTRL_CPUSET, CGROUP_CTRL_MISC,
+            CGROUP_CTRL_CPU,
+            CGROUP_CTRL_MEMORY,
+            CGROUP_CTRL_IO,
+            CGROUP_CTRL_PID,
+            CGROUP_CTRL_RDMA,
+            CGROUP_CTRL_HUGETLB,
+            CGROUP_CTRL_CPUSET,
+            CGROUP_CTRL_MISC,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -117,10 +123,14 @@ mod tests {
     #[test]
     fn test_ctrl_bits_powers_of_two() {
         let bits = [
-            CGRP_CTRL_CPU_BIT, CGRP_CTRL_MEMORY_BIT,
-            CGRP_CTRL_IO_BIT, CGRP_CTRL_PID_BIT,
-            CGRP_CTRL_RDMA_BIT, CGRP_CTRL_HUGETLB_BIT,
-            CGRP_CTRL_CPUSET_BIT, CGRP_CTRL_MISC_BIT,
+            CGRP_CTRL_CPU_BIT,
+            CGRP_CTRL_MEMORY_BIT,
+            CGRP_CTRL_IO_BIT,
+            CGRP_CTRL_PID_BIT,
+            CGRP_CTRL_RDMA_BIT,
+            CGRP_CTRL_HUGETLB_BIT,
+            CGRP_CTRL_CPUSET_BIT,
+            CGRP_CTRL_MISC_BIT,
         ];
         for b in &bits {
             assert!(b.is_power_of_two());
@@ -130,10 +140,14 @@ mod tests {
     #[test]
     fn test_ctrl_bits_no_overlap() {
         let bits = [
-            CGRP_CTRL_CPU_BIT, CGRP_CTRL_MEMORY_BIT,
-            CGRP_CTRL_IO_BIT, CGRP_CTRL_PID_BIT,
-            CGRP_CTRL_RDMA_BIT, CGRP_CTRL_HUGETLB_BIT,
-            CGRP_CTRL_CPUSET_BIT, CGRP_CTRL_MISC_BIT,
+            CGRP_CTRL_CPU_BIT,
+            CGRP_CTRL_MEMORY_BIT,
+            CGRP_CTRL_IO_BIT,
+            CGRP_CTRL_PID_BIT,
+            CGRP_CTRL_RDMA_BIT,
+            CGRP_CTRL_HUGETLB_BIT,
+            CGRP_CTRL_CPUSET_BIT,
+            CGRP_CTRL_MISC_BIT,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -145,8 +159,10 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            CGROUP_TYPE_DOMAIN, CGROUP_TYPE_THREADED,
-            CGROUP_TYPE_DOMAIN_THREADED, CGROUP_TYPE_DOMAIN_INVALID,
+            CGROUP_TYPE_DOMAIN,
+            CGROUP_TYPE_THREADED,
+            CGROUP_TYPE_DOMAIN_THREADED,
+            CGROUP_TYPE_DOMAIN_INVALID,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

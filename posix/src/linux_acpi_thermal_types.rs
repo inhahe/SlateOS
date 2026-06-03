@@ -84,8 +84,10 @@ mod tests {
     #[test]
     fn test_trip_types_distinct() {
         let trips = [
-            THERMAL_TRIP_ACTIVE, THERMAL_TRIP_PASSIVE,
-            THERMAL_TRIP_HOT, THERMAL_TRIP_CRITICAL,
+            THERMAL_TRIP_ACTIVE,
+            THERMAL_TRIP_PASSIVE,
+            THERMAL_TRIP_HOT,
+            THERMAL_TRIP_CRITICAL,
         ];
         for i in 0..trips.len() {
             for j in (i + 1)..trips.len() {
@@ -109,8 +111,10 @@ mod tests {
     #[test]
     fn test_governor_types_distinct() {
         let govs = [
-            THERMAL_GOV_STEP_WISE, THERMAL_GOV_FAIR_SHARE,
-            THERMAL_GOV_BANG_BANG, THERMAL_GOV_USER_SPACE,
+            THERMAL_GOV_STEP_WISE,
+            THERMAL_GOV_FAIR_SHARE,
+            THERMAL_GOV_BANG_BANG,
+            THERMAL_GOV_USER_SPACE,
             THERMAL_GOV_POWER_ALLOCATOR,
         ];
         for i in 0..govs.len() {
@@ -123,8 +127,10 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let evts = [
-            THERMAL_EVENT_TRIP_CROSSED_UP, THERMAL_EVENT_TRIP_CROSSED_DOWN,
-            THERMAL_EVENT_ZONE_CREATED, THERMAL_EVENT_ZONE_REMOVED,
+            THERMAL_EVENT_TRIP_CROSSED_UP,
+            THERMAL_EVENT_TRIP_CROSSED_DOWN,
+            THERMAL_EVENT_ZONE_CREATED,
+            THERMAL_EVENT_ZONE_REMOVED,
         ];
         for i in 0..evts.len() {
             for j in (i + 1)..evts.len() {

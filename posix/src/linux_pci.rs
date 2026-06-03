@@ -173,10 +173,15 @@ mod tests {
     #[test]
     fn test_command_bits_powers_of_two() {
         let bits = [
-            PCI_COMMAND_IO, PCI_COMMAND_MEMORY, PCI_COMMAND_MASTER,
-            PCI_COMMAND_SPECIAL, PCI_COMMAND_INVALIDATE,
-            PCI_COMMAND_VGA_PALETTE, PCI_COMMAND_PARITY,
-            PCI_COMMAND_SERR, PCI_COMMAND_FAST_BACK,
+            PCI_COMMAND_IO,
+            PCI_COMMAND_MEMORY,
+            PCI_COMMAND_MASTER,
+            PCI_COMMAND_SPECIAL,
+            PCI_COMMAND_INVALIDATE,
+            PCI_COMMAND_VGA_PALETTE,
+            PCI_COMMAND_PARITY,
+            PCI_COMMAND_SERR,
+            PCI_COMMAND_FAST_BACK,
             PCI_COMMAND_INTX_DISABLE,
         ];
         for b in &bits {
@@ -187,9 +192,15 @@ mod tests {
     #[test]
     fn test_class_codes_distinct() {
         let classes = [
-            PCI_CLASS_NOT_DEFINED, PCI_CLASS_STORAGE, PCI_CLASS_NETWORK,
-            PCI_CLASS_DISPLAY, PCI_CLASS_MULTIMEDIA, PCI_CLASS_MEMORY,
-            PCI_CLASS_BRIDGE, PCI_CLASS_SERIAL, PCI_CLASS_WIRELESS,
+            PCI_CLASS_NOT_DEFINED,
+            PCI_CLASS_STORAGE,
+            PCI_CLASS_NETWORK,
+            PCI_CLASS_DISPLAY,
+            PCI_CLASS_MULTIMEDIA,
+            PCI_CLASS_MEMORY,
+            PCI_CLASS_BRIDGE,
+            PCI_CLASS_SERIAL,
+            PCI_CLASS_WIRELESS,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
@@ -201,8 +212,12 @@ mod tests {
     #[test]
     fn test_cap_ids_distinct() {
         let caps = [
-            PCI_CAP_ID_PM, PCI_CAP_ID_AGP, PCI_CAP_ID_MSI,
-            PCI_CAP_ID_PCIX, PCI_CAP_ID_VNDR, PCI_CAP_ID_MSIX,
+            PCI_CAP_ID_PM,
+            PCI_CAP_ID_AGP,
+            PCI_CAP_ID_MSI,
+            PCI_CAP_ID_PCIX,
+            PCI_CAP_ID_VNDR,
+            PCI_CAP_ID_MSIX,
             PCI_CAP_ID_EXP,
         ];
         for i in 0..caps.len() {

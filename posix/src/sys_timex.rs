@@ -352,7 +352,7 @@ pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
     if (modes & ADJ_TICK) != 0 {
         // SAFETY: caller contract — `tx` points to a readable Timex.
         let tick = unsafe { (*tx).tick };
-        if tick < MIN_TICK || tick > MAX_TICK {
+        if !(MIN_TICK..=MAX_TICK).contains(&tick) {
             errno::set_errno(errno::EINVAL);
             return -1;
         }
@@ -386,11 +386,7 @@ pub extern "C" fn adjtimex(tx: *mut Timex) -> i32 {
     // unprivileged callers — only writes need the cap.  The probe runs
     // after `ntp_validate_timex` (our EINVAL guards above), matching the
     // kernel's `validate then capable` ordering.
-    if modes != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_TIME,
-        )
-    {
+    if modes != 0 && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_TIME) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -639,9 +635,17 @@ mod tests {
     #[test]
     fn test_adj_bits_distinct() {
         let bits = [
-            ADJ_OFFSET, ADJ_FREQUENCY, ADJ_MAXERROR, ADJ_ESTERROR,
-            ADJ_STATUS, ADJ_TIMECONST, ADJ_TAI, ADJ_MICRO, ADJ_NANO,
-            ADJ_SETOFFSET, ADJ_TICK,
+            ADJ_OFFSET,
+            ADJ_FREQUENCY,
+            ADJ_MAXERROR,
+            ADJ_ESTERROR,
+            ADJ_STATUS,
+            ADJ_TIMECONST,
+            ADJ_TAI,
+            ADJ_MICRO,
+            ADJ_NANO,
+            ADJ_SETOFFSET,
+            ADJ_TICK,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -1069,7 +1073,10 @@ mod tests {
         // Read back: neither offset nor tick was applied.
         let mut tx2 = Timex::zeroed();
         let _ = adjtimex(&mut tx2);
-        assert_eq!(tx2.offset, 0, "offset must NOT be applied when tick is invalid");
+        assert_eq!(
+            tx2.offset, 0,
+            "offset must NOT be applied when tick is invalid"
+        );
         assert_eq!(tx2.tick, 10_000, "tick must remain at default");
     }
 
@@ -1420,7 +1427,10 @@ mod tests {
         assert_eq!(errno::get_errno(), errno::EINVAL);
         let mut tx2 = Timex::zeroed();
         let _ = adjtimex(&mut tx2);
-        assert_eq!(tx2.offset, 0, "offset must NOT be applied on SETOFFSET failure");
+        assert_eq!(
+            tx2.offset, 0,
+            "offset must NOT be applied on SETOFFSET failure"
+        );
     }
 
     // ---- Workflow ----
@@ -1806,7 +1816,10 @@ mod tests {
         // State must still be at boot defaults.
         let mut tx2 = Timex::zeroed();
         let _ = adjtimex(&mut tx2);
-        assert_eq!(tx2.offset, 0, "EOPNOTSUPP rejection must not apply ADJ_OFFSET");
+        assert_eq!(
+            tx2.offset, 0,
+            "EOPNOTSUPP rejection must not apply ADJ_OFFSET"
+        );
     }
 
     // ---- Sentinel ----
@@ -1894,16 +1907,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -1918,8 +1929,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -1932,8 +1942,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_TIME - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1948,10 +1957,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_TIME");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_TIME");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_TIME));
         }
 
@@ -2037,8 +2044,10 @@ mod tests {
             let rc = adjtimex(&mut tx);
             // Read-only queries return a TIME_* code (non-negative);
             // errno must not be touched (success path).
-            assert!(rc >= 0,
-                "modes==0 should succeed without CAP_SYS_TIME, got rc={rc}");
+            assert!(
+                rc >= 0,
+                "modes==0 should succeed without CAP_SYS_TIME, got rc={rc}"
+            );
         }
 
         // -- Ordering matrix (EFAULT/EINVAL beat EPERM) ------------------
@@ -2117,16 +2126,14 @@ mod tests {
             assert!(adjtimex(&mut probe) >= 0);
             // 3. Restore CAP_SYS_TIME and write succeeds.
             use crate::sys_capability::CAP_SYS_TIME;
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let (new_lo, new_hi) = if CAP_SYS_TIME < 32 {
                 (lo | (1u32 << CAP_SYS_TIME), hi)
             } else {
                 (lo, hi | (1u32 << (CAP_SYS_TIME - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2141,8 +2148,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0);
             assert!(crate::sys_capability::has_capability(CAP_SYS_TIME));
             tx.modes = ADJ_OFFSET;
@@ -2178,16 +2184,14 @@ mod tests {
             // path — but we want to assert *before* the guard drops, so
             // manually restore CAP_SYS_TIME and read again.
             use crate::sys_capability::CAP_SYS_TIME;
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let (new_lo, new_hi) = if CAP_SYS_TIME < 32 {
                 (lo | (1u32 << CAP_SYS_TIME), hi)
             } else {
                 (lo, hi | (1u32 << (CAP_SYS_TIME - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -2202,15 +2206,14 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             let mut after = Timex::zeroed();
             after.modes = 0;
             assert!(adjtimex(&mut after) >= 0);
-            assert_eq!(after.offset, baseline_offset,
-                "EPERM must not change state.offset");
+            assert_eq!(
+                after.offset, baseline_offset,
+                "EPERM must not change state.offset"
+            );
         }
 
         // -- ntp_adjtime forwards the gate ------------------------------
@@ -2295,8 +2298,7 @@ mod tests {
             tx.offset = 100;
             tx.freq = 200;
             errno::set_errno(0);
-            assert!(adjtimex(&mut tx) >= 0,
-                "cap-held write should succeed");
+            assert!(adjtimex(&mut tx) >= 0, "cap-held write should succeed");
         }
 
         // -- Cross-check: dropping CAP_SYS_TIME isolates other caps ----

@@ -4,18 +4,18 @@
 //! from the `sysv_shm` module.
 
 pub use crate::sysv_shm::ShmidDs;
-pub use crate::sysv_shm::shmget;
 pub use crate::sysv_shm::shmat;
-pub use crate::sysv_shm::shmdt;
 pub use crate::sysv_shm::shmctl;
+pub use crate::sysv_shm::shmdt;
+pub use crate::sysv_shm::shmget;
 
 // Re-use IPC constants from sysv_msg (they are shared across SysV IPC).
 pub use crate::sysv_msg::IPC_CREAT;
 pub use crate::sysv_msg::IPC_EXCL;
+pub use crate::sysv_msg::IPC_PRIVATE;
 pub use crate::sysv_msg::IPC_RMID;
 pub use crate::sysv_msg::IPC_SET;
 pub use crate::sysv_msg::IPC_STAT;
-pub use crate::sysv_msg::IPC_PRIVATE;
 
 /// Attach read-only.
 pub const SHM_RDONLY: i32 = 0o10000;

@@ -130,10 +130,14 @@ mod tests {
     #[test]
     fn test_feat_flags_powers_of_two() {
         let flags = [
-            BLK_FEAT_ROTATIONAL, BLK_FEAT_WRITE_SAME,
-            BLK_FEAT_DISCARD, BLK_FEAT_SECURE_DISCARD,
-            BLK_FEAT_WRITE_ZEROES, BLK_FEAT_DAX,
-            BLK_FEAT_ZONED, BLK_FEAT_POLL,
+            BLK_FEAT_ROTATIONAL,
+            BLK_FEAT_WRITE_SAME,
+            BLK_FEAT_DISCARD,
+            BLK_FEAT_SECURE_DISCARD,
+            BLK_FEAT_WRITE_ZEROES,
+            BLK_FEAT_DAX,
+            BLK_FEAT_ZONED,
+            BLK_FEAT_POLL,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -143,10 +147,14 @@ mod tests {
     #[test]
     fn test_feat_flags_no_overlap() {
         let flags = [
-            BLK_FEAT_ROTATIONAL, BLK_FEAT_WRITE_SAME,
-            BLK_FEAT_DISCARD, BLK_FEAT_SECURE_DISCARD,
-            BLK_FEAT_WRITE_ZEROES, BLK_FEAT_DAX,
-            BLK_FEAT_ZONED, BLK_FEAT_POLL,
+            BLK_FEAT_ROTATIONAL,
+            BLK_FEAT_WRITE_SAME,
+            BLK_FEAT_DISCARD,
+            BLK_FEAT_SECURE_DISCARD,
+            BLK_FEAT_WRITE_ZEROES,
+            BLK_FEAT_DAX,
+            BLK_FEAT_ZONED,
+            BLK_FEAT_POLL,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

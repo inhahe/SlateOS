@@ -100,13 +100,20 @@ mod tests {
     #[test]
     fn test_interface_modes_distinct() {
         let modes = [
-            PHY_INTERFACE_MODE_INTERNAL, PHY_INTERFACE_MODE_MII,
-            PHY_INTERFACE_MODE_GMII, PHY_INTERFACE_MODE_SGMII,
-            PHY_INTERFACE_MODE_RGMII, PHY_INTERFACE_MODE_RGMII_TXID,
-            PHY_INTERFACE_MODE_RGMII_RXID, PHY_INTERFACE_MODE_RGMII_ID,
-            PHY_INTERFACE_MODE_RMII, PHY_INTERFACE_MODE_QSGMII,
-            PHY_INTERFACE_MODE_XGMII, PHY_INTERFACE_MODE_USXGMII,
-            PHY_INTERFACE_MODE_10GBASER, PHY_INTERFACE_MODE_25GBASER,
+            PHY_INTERFACE_MODE_INTERNAL,
+            PHY_INTERFACE_MODE_MII,
+            PHY_INTERFACE_MODE_GMII,
+            PHY_INTERFACE_MODE_SGMII,
+            PHY_INTERFACE_MODE_RGMII,
+            PHY_INTERFACE_MODE_RGMII_TXID,
+            PHY_INTERFACE_MODE_RGMII_RXID,
+            PHY_INTERFACE_MODE_RGMII_ID,
+            PHY_INTERFACE_MODE_RMII,
+            PHY_INTERFACE_MODE_QSGMII,
+            PHY_INTERFACE_MODE_XGMII,
+            PHY_INTERFACE_MODE_USXGMII,
+            PHY_INTERFACE_MODE_10GBASER,
+            PHY_INTERFACE_MODE_25GBASER,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -118,8 +125,14 @@ mod tests {
     #[test]
     fn test_speeds_increasing() {
         let speeds = [
-            SPEED_10, SPEED_100, SPEED_1000, SPEED_2500,
-            SPEED_5000, SPEED_10000, SPEED_25000, SPEED_40000,
+            SPEED_10,
+            SPEED_100,
+            SPEED_1000,
+            SPEED_2500,
+            SPEED_5000,
+            SPEED_10000,
+            SPEED_25000,
+            SPEED_40000,
             SPEED_100000,
         ];
         for i in 1..speeds.len() {

@@ -91,8 +91,10 @@ mod tests {
     #[test]
     fn test_dpms_modes_distinct() {
         let modes = [
-            DRM_MODE_DPMS_ON, DRM_MODE_DPMS_STANDBY,
-            DRM_MODE_DPMS_SUSPEND, DRM_MODE_DPMS_OFF,
+            DRM_MODE_DPMS_ON,
+            DRM_MODE_DPMS_STANDBY,
+            DRM_MODE_DPMS_SUSPEND,
+            DRM_MODE_DPMS_OFF,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -104,8 +106,10 @@ mod tests {
     #[test]
     fn test_content_types_distinct() {
         let types = [
-            DRM_MODE_CONTENT_TYPE_NO_DATA, DRM_MODE_CONTENT_TYPE_GRAPHICS,
-            DRM_MODE_CONTENT_TYPE_PHOTO, DRM_MODE_CONTENT_TYPE_CINEMA,
+            DRM_MODE_CONTENT_TYPE_NO_DATA,
+            DRM_MODE_CONTENT_TYPE_GRAPHICS,
+            DRM_MODE_CONTENT_TYPE_PHOTO,
+            DRM_MODE_CONTENT_TYPE_CINEMA,
             DRM_MODE_CONTENT_TYPE_GAME,
         ];
         for i in 0..types.len() {
@@ -118,10 +122,14 @@ mod tests {
     #[test]
     fn test_encoder_types_distinct() {
         let types = [
-            DRM_MODE_ENCODER_NONE, DRM_MODE_ENCODER_DAC,
-            DRM_MODE_ENCODER_TMDS, DRM_MODE_ENCODER_LVDS,
-            DRM_MODE_ENCODER_TVDAC, DRM_MODE_ENCODER_VIRTUAL,
-            DRM_MODE_ENCODER_DSI, DRM_MODE_ENCODER_DPMST,
+            DRM_MODE_ENCODER_NONE,
+            DRM_MODE_ENCODER_DAC,
+            DRM_MODE_ENCODER_TMDS,
+            DRM_MODE_ENCODER_LVDS,
+            DRM_MODE_ENCODER_TVDAC,
+            DRM_MODE_ENCODER_VIRTUAL,
+            DRM_MODE_ENCODER_DSI,
+            DRM_MODE_ENCODER_DPMST,
             DRM_MODE_ENCODER_DPI,
         ];
         for i in 0..types.len() {
@@ -134,9 +142,12 @@ mod tests {
     #[test]
     fn test_colorspace_distinct() {
         let colors = [
-            DRM_MODE_COLORIMETRY_DEFAULT, DRM_MODE_COLORIMETRY_SRGB,
-            DRM_MODE_COLORIMETRY_BT709_YCC, DRM_MODE_COLORIMETRY_BT2020_RGB,
-            DRM_MODE_COLORIMETRY_BT2020_YCC, DRM_MODE_COLORIMETRY_DCI_P3_RGB,
+            DRM_MODE_COLORIMETRY_DEFAULT,
+            DRM_MODE_COLORIMETRY_SRGB,
+            DRM_MODE_COLORIMETRY_BT709_YCC,
+            DRM_MODE_COLORIMETRY_BT2020_RGB,
+            DRM_MODE_COLORIMETRY_BT2020_YCC,
+            DRM_MODE_COLORIMETRY_DCI_P3_RGB,
         ];
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {

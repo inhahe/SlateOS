@@ -57,9 +57,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            CPUSET_CPU_EXCLUSIVE, CPUSET_MEM_EXCLUSIVE,
-            CPUSET_MEM_HARDWALL, CPUSET_SCHED_LOAD_BALANCE,
-            CPUSET_MEMORY_SPREAD_PAGE, CPUSET_MEMORY_SPREAD_SLAB,
+            CPUSET_CPU_EXCLUSIVE,
+            CPUSET_MEM_EXCLUSIVE,
+            CPUSET_MEM_HARDWALL,
+            CPUSET_SCHED_LOAD_BALANCE,
+            CPUSET_MEMORY_SPREAD_PAGE,
+            CPUSET_MEMORY_SPREAD_SLAB,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

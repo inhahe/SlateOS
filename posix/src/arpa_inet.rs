@@ -7,35 +7,35 @@
 // Byte-order conversion
 // ---------------------------------------------------------------------------
 
-pub use crate::socket::htons;
 pub use crate::socket::htonl;
-pub use crate::socket::ntohs;
+pub use crate::socket::htons;
 pub use crate::socket::ntohl;
+pub use crate::socket::ntohs;
 
 // ---------------------------------------------------------------------------
 // Address conversion
 // ---------------------------------------------------------------------------
 
 pub use crate::socket::inet_addr;
-pub use crate::socket::inet_ntoa;
 pub use crate::socket::inet_aton;
-pub use crate::socket::inet_pton;
+pub use crate::socket::inet_ntoa;
 pub use crate::socket::inet_ntop;
+pub use crate::socket::inet_pton;
 
 // ---------------------------------------------------------------------------
 // Types and constants
 // ---------------------------------------------------------------------------
 
-pub use crate::socket::InAddr;
-pub use crate::socket::In6Addr;
-pub use crate::socket::INET_ADDRSTRLEN;
-pub use crate::socket::INET6_ADDRSTRLEN;
 pub use crate::socket::AF_INET;
 pub use crate::socket::AF_INET6;
 pub use crate::socket::INADDR_ANY;
 pub use crate::socket::INADDR_BROADCAST;
 pub use crate::socket::INADDR_LOOPBACK;
 pub use crate::socket::INADDR_NONE;
+pub use crate::socket::INET_ADDRSTRLEN;
+pub use crate::socket::INET6_ADDRSTRLEN;
+pub use crate::socket::In6Addr;
+pub use crate::socket::InAddr;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -72,9 +72,7 @@ mod tests {
     #[test]
     fn test_inet_pton_ipv4() {
         let mut buf = [0u8; 4];
-        let ret = unsafe {
-            inet_pton(AF_INET, b"192.168.1.1\0".as_ptr(), buf.as_mut_ptr())
-        };
+        let ret = unsafe { inet_pton(AF_INET, b"192.168.1.1\0".as_ptr(), buf.as_mut_ptr()) };
         assert_eq!(ret, 1);
         assert_eq!(buf, [192, 168, 1, 1]);
     }
@@ -99,9 +97,7 @@ mod tests {
     #[test]
     fn test_inet_aton_valid() {
         let mut addr: u32 = 0;
-        let ret = unsafe {
-            inet_aton(b"1.2.3.4\0".as_ptr(), &mut addr as *mut u32)
-        };
+        let ret = unsafe { inet_aton(b"1.2.3.4\0".as_ptr(), &mut addr as *mut u32) };
         assert_eq!(ret, 1);
     }
 

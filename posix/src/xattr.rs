@@ -86,12 +86,7 @@ fn do_getxattr(
 
 /// Issue `SYS_FS_LIST_XATTRS` for an already-resolved path.
 #[cfg(target_os = "none")]
-fn do_listxattr(
-    path_ptr: *const u8,
-    path_len: usize,
-    list: *mut u8,
-    size: usize,
-) -> SsizeT {
+fn do_listxattr(path_ptr: *const u8, path_len: usize, list: *mut u8, size: usize) -> SsizeT {
     let ret = crate::syscall::syscall4(
         crate::syscall::SYS_FS_LIST_XATTRS,
         path_ptr as u64,
@@ -176,10 +171,7 @@ fn do_removexattr(path_ptr: *const u8, path_len: usize, name: *const u8) -> i32 
 /// extended attributes, so we report `ENOTSUP` — matching how Linux reports
 /// xattr operations on filesystems/objects without xattr support.
 #[cfg(target_os = "none")]
-fn fd_to_path(
-    fd: i32,
-    buf: &mut [u8; crate::unistd::PATH_MAX],
-) -> Option<usize> {
+fn fd_to_path(fd: i32, buf: &mut [u8; crate::unistd::PATH_MAX]) -> Option<usize> {
     let len = crate::fdtable::get_fd_path(fd, buf);
     if len == 0 {
         errno::set_errno(errno::ENOTSUP);
@@ -233,12 +225,7 @@ pub extern "C" fn lgetxattr(
 
 /// Get an extended attribute value by file descriptor.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fgetxattr(
-    fd: i32,
-    name: *const u8,
-    value: *mut u8,
-    size: usize,
-) -> SsizeT {
+pub extern "C" fn fgetxattr(fd: i32, name: *const u8, value: *mut u8, size: usize) -> SsizeT {
     if fd < 0 || crate::fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -350,11 +337,7 @@ pub extern "C" fn fsetxattr(
 
 /// List extended attribute names.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn listxattr(
-    path: *const u8,
-    list: *mut u8,
-    size: usize,
-) -> SsizeT {
+pub extern "C" fn listxattr(path: *const u8, list: *mut u8, size: usize) -> SsizeT {
     if path.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -376,21 +359,13 @@ pub extern "C" fn listxattr(
 
 /// List extended attribute names (don't follow symlinks — see LIMITATIONS).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn llistxattr(
-    path: *const u8,
-    list: *mut u8,
-    size: usize,
-) -> SsizeT {
+pub extern "C" fn llistxattr(path: *const u8, list: *mut u8, size: usize) -> SsizeT {
     listxattr(path, list, size)
 }
 
 /// List extended attribute names by file descriptor.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn flistxattr(
-    fd: i32,
-    list: *mut u8,
-    size: usize,
-) -> SsizeT {
+pub extern "C" fn flistxattr(fd: i32, list: *mut u8, size: usize) -> SsizeT {
     if fd < 0 || crate::fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -511,7 +486,12 @@ mod tests {
     fn test_getxattr_null_path_efault() {
         errno::set_errno(0);
         assert_eq!(
-            getxattr(core::ptr::null(), b"user.test\0".as_ptr(), core::ptr::null_mut(), 0),
+            getxattr(
+                core::ptr::null(),
+                b"user.test\0".as_ptr(),
+                core::ptr::null_mut(),
+                0
+            ),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -521,7 +501,12 @@ mod tests {
     fn test_getxattr_null_name_efault() {
         errno::set_errno(0);
         assert_eq!(
-            getxattr(b"/tmp/test\0".as_ptr(), core::ptr::null(), core::ptr::null_mut(), 0),
+            getxattr(
+                b"/tmp/test\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null_mut(),
+                0
+            ),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -531,7 +516,13 @@ mod tests {
     fn test_setxattr_null_path_efault() {
         errno::set_errno(0);
         assert_eq!(
-            setxattr(core::ptr::null(), b"user.test\0".as_ptr(), core::ptr::null(), 0, 0),
+            setxattr(
+                core::ptr::null(),
+                b"user.test\0".as_ptr(),
+                core::ptr::null(),
+                0,
+                0
+            ),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -562,7 +553,12 @@ mod tests {
     fn test_lgetxattr_null_name_efault() {
         errno::set_errno(0);
         assert_eq!(
-            lgetxattr(b"/tmp\0".as_ptr(), core::ptr::null(), core::ptr::null_mut(), 0),
+            lgetxattr(
+                b"/tmp\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null_mut(),
+                0
+            ),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -572,7 +568,13 @@ mod tests {
     fn test_lsetxattr_null_name_efault() {
         errno::set_errno(0);
         assert_eq!(
-            lsetxattr(b"/tmp\0".as_ptr(), core::ptr::null(), core::ptr::null(), 0, 0),
+            lsetxattr(
+                b"/tmp\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+                0,
+                0
+            ),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -607,7 +609,13 @@ mod tests {
     fn test_setxattr_unknown_flag_einval() {
         errno::set_errno(0);
         assert_eq!(
-            setxattr(b"/tmp/test\0".as_ptr(), b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, 0x40),
+            setxattr(
+                b"/tmp/test\0".as_ptr(),
+                b"user.test\0".as_ptr(),
+                b"v\0".as_ptr(),
+                1,
+                0x40
+            ),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -618,14 +626,20 @@ mod tests {
     #[test]
     fn test_fgetxattr_negative_fd_ebadf() {
         errno::set_errno(0);
-        assert_eq!(fgetxattr(-1, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0), -1);
+        assert_eq!(
+            fgetxattr(-1, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
     #[test]
     fn test_fsetxattr_negative_fd_ebadf() {
         errno::set_errno(0);
-        assert_eq!(fsetxattr(-1, b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, 0), -1);
+        assert_eq!(
+            fsetxattr(-1, b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, 0),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
@@ -650,7 +664,10 @@ mod tests {
             let _ = fdtable::close_fd(probe);
         }
         errno::set_errno(0);
-        assert_eq!(fgetxattr(probe, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0), -1);
+        assert_eq!(
+            fgetxattr(probe, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
 
@@ -660,7 +677,13 @@ mod tests {
         // Linux uses (the fd is checked first).
         errno::set_errno(0);
         assert_eq!(
-            fsetxattr(-1, b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, XATTR_CREATE | XATTR_REPLACE),
+            fsetxattr(
+                -1,
+                b"user.test\0".as_ptr(),
+                b"v\0".as_ptr(),
+                1,
+                XATTR_CREATE | XATTR_REPLACE
+            ),
             -1
         );
         assert_eq!(errno::get_errno(), errno::EBADF);
@@ -670,10 +693,12 @@ mod tests {
 
     #[test]
     fn test_fgetxattr_open_fd_null_name_efault() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         errno::set_errno(0);
-        assert_eq!(fgetxattr(fd, core::ptr::null(), core::ptr::null_mut(), 0), -1);
+        assert_eq!(
+            fgetxattr(fd, core::ptr::null(), core::ptr::null_mut(), 0),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EFAULT);
         let _ = fdtable::close_fd(fd);
     }
@@ -686,7 +711,12 @@ mod tests {
         // returns 0 (zero-length result) after validation.
         let mut buf = [0u8; 64];
         assert_eq!(
-            getxattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr(), buf.as_mut_ptr(), buf.len()),
+            getxattr(
+                b"/etc/passwd\0".as_ptr(),
+                b"user.test\0".as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len()
+            ),
             0
         );
     }
@@ -694,7 +724,13 @@ mod tests {
     #[test]
     fn test_setxattr_valid_returns_zero_on_host() {
         assert_eq!(
-            setxattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr(), b"value\0".as_ptr(), 5, 0),
+            setxattr(
+                b"/etc/passwd\0".as_ptr(),
+                b"user.test\0".as_ptr(),
+                b"value\0".as_ptr(),
+                5,
+                0
+            ),
             0
         );
     }
@@ -702,7 +738,13 @@ mod tests {
     #[test]
     fn test_setxattr_create_flag_valid_on_host() {
         assert_eq!(
-            setxattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, XATTR_CREATE),
+            setxattr(
+                b"/etc/passwd\0".as_ptr(),
+                b"user.test\0".as_ptr(),
+                b"v\0".as_ptr(),
+                1,
+                XATTR_CREATE
+            ),
             0
         );
     }
@@ -710,7 +752,13 @@ mod tests {
     #[test]
     fn test_setxattr_replace_flag_valid_on_host() {
         assert_eq!(
-            setxattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr(), b"v\0".as_ptr(), 1, XATTR_REPLACE),
+            setxattr(
+                b"/etc/passwd\0".as_ptr(),
+                b"user.test\0".as_ptr(),
+                b"v\0".as_ptr(),
+                1,
+                XATTR_REPLACE
+            ),
             0
         );
     }
@@ -718,19 +766,27 @@ mod tests {
     #[test]
     fn test_listxattr_valid_returns_zero_on_host() {
         let mut buf = [0u8; 64];
-        assert_eq!(listxattr(b"/etc/passwd\0".as_ptr(), buf.as_mut_ptr(), buf.len()), 0);
+        assert_eq!(
+            listxattr(b"/etc/passwd\0".as_ptr(), buf.as_mut_ptr(), buf.len()),
+            0
+        );
     }
 
     #[test]
     fn test_removexattr_valid_returns_zero_on_host() {
-        assert_eq!(removexattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr()), 0);
+        assert_eq!(
+            removexattr(b"/etc/passwd\0".as_ptr(), b"user.test\0".as_ptr()),
+            0
+        );
     }
 
     #[test]
     fn test_fgetxattr_open_fd_returns_zero_on_host() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
-        assert_eq!(fgetxattr(fd, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0), 0);
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
+        assert_eq!(
+            fgetxattr(fd, b"user.test\0".as_ptr(), core::ptr::null_mut(), 0),
+            0
+        );
         let _ = fdtable::close_fd(fd);
     }
 }

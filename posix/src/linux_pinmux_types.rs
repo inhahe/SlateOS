@@ -75,8 +75,12 @@ mod tests {
     #[test]
     fn test_pinmux_funcs_distinct() {
         let funcs = [
-            PINMUX_FUNC_GPIO, PINMUX_FUNC_ALT1, PINMUX_FUNC_ALT2,
-            PINMUX_FUNC_ALT3, PINMUX_FUNC_ALT4, PINMUX_FUNC_ALT5,
+            PINMUX_FUNC_GPIO,
+            PINMUX_FUNC_ALT1,
+            PINMUX_FUNC_ALT2,
+            PINMUX_FUNC_ALT3,
+            PINMUX_FUNC_ALT4,
+            PINMUX_FUNC_ALT5,
             PINMUX_FUNC_ANALOG,
         ];
         for i in 0..funcs.len() {
@@ -89,12 +93,18 @@ mod tests {
     #[test]
     fn test_pin_configs_distinct() {
         let cfgs = [
-            PIN_CONFIG_INPUT_ENABLE, PIN_CONFIG_OUTPUT_ENABLE,
-            PIN_CONFIG_BIAS_PULL_UP, PIN_CONFIG_BIAS_PULL_DOWN,
-            PIN_CONFIG_BIAS_DISABLE, PIN_CONFIG_DRIVE_STRENGTH,
-            PIN_CONFIG_DRIVE_OPEN_DRAIN, PIN_CONFIG_DRIVE_PUSH_PULL,
-            PIN_CONFIG_DRIVE_OPEN_SOURCE, PIN_CONFIG_SLEW_RATE,
-            PIN_CONFIG_INPUT_SCHMITT_ENABLE, PIN_CONFIG_POWER_SOURCE,
+            PIN_CONFIG_INPUT_ENABLE,
+            PIN_CONFIG_OUTPUT_ENABLE,
+            PIN_CONFIG_BIAS_PULL_UP,
+            PIN_CONFIG_BIAS_PULL_DOWN,
+            PIN_CONFIG_BIAS_DISABLE,
+            PIN_CONFIG_DRIVE_STRENGTH,
+            PIN_CONFIG_DRIVE_OPEN_DRAIN,
+            PIN_CONFIG_DRIVE_PUSH_PULL,
+            PIN_CONFIG_DRIVE_OPEN_SOURCE,
+            PIN_CONFIG_SLEW_RATE,
+            PIN_CONFIG_INPUT_SCHMITT_ENABLE,
+            PIN_CONFIG_POWER_SOURCE,
         ];
         for i in 0..cfgs.len() {
             for j in (i + 1)..cfgs.len() {

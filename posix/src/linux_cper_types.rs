@@ -107,8 +107,10 @@ mod tests {
     #[test]
     fn test_severity_distinct() {
         let sevs = [
-            CPER_SEV_RECOVERABLE, CPER_SEV_FATAL,
-            CPER_SEV_CORRECTED, CPER_SEV_INFORMATIONAL,
+            CPER_SEV_RECOVERABLE,
+            CPER_SEV_FATAL,
+            CPER_SEV_CORRECTED,
+            CPER_SEV_INFORMATIONAL,
         ];
         for i in 0..sevs.len() {
             for j in (i + 1)..sevs.len() {
@@ -120,12 +122,18 @@ mod tests {
     #[test]
     fn test_sections_distinct() {
         let sections = [
-            CPER_SECTION_PROC_GENERIC, CPER_SECTION_PROC_IA32X64,
-            CPER_SECTION_PROC_ARM, CPER_SECTION_MEMORY,
-            CPER_SECTION_MEMORY2, CPER_SECTION_PCIE,
-            CPER_SECTION_FW_ERROR, CPER_SECTION_PCI_BUS,
-            CPER_SECTION_PCI_DEV, CPER_SECTION_DMAR,
-            CPER_SECTION_CXL_PROTOCOL, CPER_SECTION_CXL_EVENT,
+            CPER_SECTION_PROC_GENERIC,
+            CPER_SECTION_PROC_IA32X64,
+            CPER_SECTION_PROC_ARM,
+            CPER_SECTION_MEMORY,
+            CPER_SECTION_MEMORY2,
+            CPER_SECTION_PCIE,
+            CPER_SECTION_FW_ERROR,
+            CPER_SECTION_PCI_BUS,
+            CPER_SECTION_PCI_DEV,
+            CPER_SECTION_DMAR,
+            CPER_SECTION_CXL_PROTOCOL,
+            CPER_SECTION_CXL_EVENT,
         ];
         for i in 0..sections.len() {
             for j in (i + 1)..sections.len() {
@@ -137,11 +145,16 @@ mod tests {
     #[test]
     fn test_mem_error_types_distinct() {
         let types = [
-            CPER_MEM_ERROR_UNKNOWN, CPER_MEM_ERROR_NONE,
-            CPER_MEM_ERROR_SINGLEBIT, CPER_MEM_ERROR_MULTIBIT,
-            CPER_MEM_ERROR_SINGLESYM, CPER_MEM_ERROR_MULTISYM,
-            CPER_MEM_ERROR_MASTER_ABORT, CPER_MEM_ERROR_TARGET_ABORT,
-            CPER_MEM_ERROR_PARITY, CPER_MEM_ERROR_SCRUB_CORRECTED,
+            CPER_MEM_ERROR_UNKNOWN,
+            CPER_MEM_ERROR_NONE,
+            CPER_MEM_ERROR_SINGLEBIT,
+            CPER_MEM_ERROR_MULTIBIT,
+            CPER_MEM_ERROR_SINGLESYM,
+            CPER_MEM_ERROR_MULTISYM,
+            CPER_MEM_ERROR_MASTER_ABORT,
+            CPER_MEM_ERROR_TARGET_ABORT,
+            CPER_MEM_ERROR_PARITY,
+            CPER_MEM_ERROR_SCRUB_CORRECTED,
             CPER_MEM_ERROR_SCRUB_UNCORRECTED,
         ];
         for i in 0..types.len() {
@@ -154,9 +167,12 @@ mod tests {
     #[test]
     fn test_validation_bits_no_overlap() {
         let bits = [
-            CPER_MEM_VALID_PHYS_ADDR, CPER_MEM_VALID_NODE,
-            CPER_MEM_VALID_CARD, CPER_MEM_VALID_MODULE,
-            CPER_MEM_VALID_BANK, CPER_MEM_VALID_ROW,
+            CPER_MEM_VALID_PHYS_ADDR,
+            CPER_MEM_VALID_NODE,
+            CPER_MEM_VALID_CARD,
+            CPER_MEM_VALID_MODULE,
+            CPER_MEM_VALID_BANK,
+            CPER_MEM_VALID_ROW,
             CPER_MEM_VALID_COLUMN,
         ];
         for i in 0..bits.len() {

@@ -80,7 +80,8 @@ mod tests {
     #[test]
     fn test_page_flip_flags_no_overlap() {
         let flags = [
-            DRM_MODE_PAGE_FLIP_EVENT, DRM_MODE_PAGE_FLIP_ASYNC,
+            DRM_MODE_PAGE_FLIP_EVENT,
+            DRM_MODE_PAGE_FLIP_ASYNC,
             DRM_MODE_PAGE_FLIP_TARGET,
         ];
         for i in 0..flags.len() {
@@ -94,7 +95,8 @@ mod tests {
     #[test]
     fn test_atomic_flags_no_overlap() {
         let flags = [
-            DRM_MODE_ATOMIC_TEST_ONLY, DRM_MODE_ATOMIC_NONBLOCK,
+            DRM_MODE_ATOMIC_TEST_ONLY,
+            DRM_MODE_ATOMIC_NONBLOCK,
             DRM_MODE_ATOMIC_ALLOW_MODESET,
         ];
         for i in 0..flags.len() {
@@ -107,7 +109,8 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            DRM_EVENT_VBLANK, DRM_EVENT_FLIP_COMPLETE,
+            DRM_EVENT_VBLANK,
+            DRM_EVENT_FLIP_COMPLETE,
             DRM_EVENT_CRTC_SEQUENCE,
         ];
         for i in 0..events.len() {

@@ -90,10 +90,14 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            TEE_IOC_VERSION, TEE_IOC_OPEN_SESSION,
-            TEE_IOC_INVOKE, TEE_IOC_CANCEL,
-            TEE_IOC_CLOSE_SESSION, TEE_IOC_SHM_ALLOC,
-            TEE_IOC_SHM_REGISTER, TEE_IOC_SUPPL_RECV,
+            TEE_IOC_VERSION,
+            TEE_IOC_OPEN_SESSION,
+            TEE_IOC_INVOKE,
+            TEE_IOC_CANCEL,
+            TEE_IOC_CLOSE_SESSION,
+            TEE_IOC_SHM_ALLOC,
+            TEE_IOC_SHM_REGISTER,
+            TEE_IOC_SUPPL_RECV,
             TEE_IOC_SUPPL_SEND,
         ];
         for i in 0..cmds.len() {
@@ -111,8 +115,10 @@ mod tests {
     #[test]
     fn test_origins_distinct() {
         let origins = [
-            TEE_ORIGIN_API, TEE_ORIGIN_COMMS,
-            TEE_ORIGIN_TEE, TEE_ORIGIN_TRUSTED_APP,
+            TEE_ORIGIN_API,
+            TEE_ORIGIN_COMMS,
+            TEE_ORIGIN_TEE,
+            TEE_ORIGIN_TRUSTED_APP,
         ];
         for i in 0..origins.len() {
             for j in (i + 1)..origins.len() {
@@ -131,9 +137,12 @@ mod tests {
     #[test]
     fn test_param_types_distinct() {
         let params = [
-            TEE_PARAM_TYPE_NONE, TEE_PARAM_TYPE_VALUE_INPUT,
-            TEE_PARAM_TYPE_VALUE_OUTPUT, TEE_PARAM_TYPE_VALUE_INOUT,
-            TEE_PARAM_TYPE_MEMREF_INPUT, TEE_PARAM_TYPE_MEMREF_OUTPUT,
+            TEE_PARAM_TYPE_NONE,
+            TEE_PARAM_TYPE_VALUE_INPUT,
+            TEE_PARAM_TYPE_VALUE_OUTPUT,
+            TEE_PARAM_TYPE_VALUE_INOUT,
+            TEE_PARAM_TYPE_MEMREF_INPUT,
+            TEE_PARAM_TYPE_MEMREF_OUTPUT,
             TEE_PARAM_TYPE_MEMREF_INOUT,
         ];
         for i in 0..params.len() {

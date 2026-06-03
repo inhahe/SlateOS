@@ -97,11 +97,17 @@ mod tests {
     #[test]
     fn test_vendor_ids_distinct() {
         let vendors = [
-            PCI_VENDOR_ID_INTEL, PCI_VENDOR_ID_AMD, PCI_VENDOR_ID_NVIDIA,
-            PCI_VENDOR_ID_REALTEK, PCI_VENDOR_ID_BROADCOM,
-            PCI_VENDOR_ID_ATHEROS, PCI_VENDOR_ID_REDHAT,
-            PCI_VENDOR_ID_SAMSUNG, PCI_VENDOR_ID_TI,
-            PCI_VENDOR_ID_VIA, PCI_VENDOR_ID_MARVELL,
+            PCI_VENDOR_ID_INTEL,
+            PCI_VENDOR_ID_AMD,
+            PCI_VENDOR_ID_NVIDIA,
+            PCI_VENDOR_ID_REALTEK,
+            PCI_VENDOR_ID_BROADCOM,
+            PCI_VENDOR_ID_ATHEROS,
+            PCI_VENDOR_ID_REDHAT,
+            PCI_VENDOR_ID_SAMSUNG,
+            PCI_VENDOR_ID_TI,
+            PCI_VENDOR_ID_VIA,
+            PCI_VENDOR_ID_MARVELL,
             PCI_VENDOR_ID_MEDIATEK,
         ];
         for i in 0..vendors.len() {
@@ -114,11 +120,20 @@ mod tests {
     #[test]
     fn test_class_codes_distinct() {
         let classes = [
-            PCI_CLASS_NOT_DEFINED, PCI_CLASS_STORAGE, PCI_CLASS_NETWORK,
-            PCI_CLASS_DISPLAY, PCI_CLASS_MULTIMEDIA, PCI_CLASS_MEMORY,
-            PCI_CLASS_BRIDGE, PCI_CLASS_COMMUNICATION, PCI_CLASS_SYSTEM,
-            PCI_CLASS_INPUT, PCI_CLASS_SERIAL, PCI_CLASS_WIRELESS,
-            PCI_CLASS_CRYPT, PCI_CLASS_SIGNAL_PROC,
+            PCI_CLASS_NOT_DEFINED,
+            PCI_CLASS_STORAGE,
+            PCI_CLASS_NETWORK,
+            PCI_CLASS_DISPLAY,
+            PCI_CLASS_MULTIMEDIA,
+            PCI_CLASS_MEMORY,
+            PCI_CLASS_BRIDGE,
+            PCI_CLASS_COMMUNICATION,
+            PCI_CLASS_SYSTEM,
+            PCI_CLASS_INPUT,
+            PCI_CLASS_SERIAL,
+            PCI_CLASS_WIRELESS,
+            PCI_CLASS_CRYPT,
+            PCI_CLASS_SIGNAL_PROC,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
@@ -130,8 +145,10 @@ mod tests {
     #[test]
     fn test_storage_subclasses_distinct() {
         let subs = [
-            PCI_SUBCLASS_STORAGE_SCSI, PCI_SUBCLASS_STORAGE_IDE,
-            PCI_SUBCLASS_STORAGE_SATA, PCI_SUBCLASS_STORAGE_NVM,
+            PCI_SUBCLASS_STORAGE_SCSI,
+            PCI_SUBCLASS_STORAGE_IDE,
+            PCI_SUBCLASS_STORAGE_SATA,
+            PCI_SUBCLASS_STORAGE_NVM,
         ];
         for i in 0..subs.len() {
             for j in (i + 1)..subs.len() {

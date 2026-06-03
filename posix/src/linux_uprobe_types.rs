@@ -76,10 +76,7 @@ mod tests {
 
     #[test]
     fn test_filter_types_distinct() {
-        let filters = [
-            UPROBE_FILTER_ALL, UPROBE_FILTER_TASK,
-            UPROBE_FILTER_MMAP,
-        ];
+        let filters = [UPROBE_FILTER_ALL, UPROBE_FILTER_TASK, UPROBE_FILTER_MMAP];
         for i in 0..filters.len() {
             for j in (i + 1)..filters.len() {
                 assert_ne!(filters[i], filters[j]);

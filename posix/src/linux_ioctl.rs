@@ -56,10 +56,7 @@ pub const IOC_DIRMASK: u32 = (1 << IOC_DIRBITS) - 1;
 
 /// Encode an ioctl command number.
 pub const fn ioc(dir: u32, ty: u32, nr: u32, size: u32) -> u32 {
-    (dir << IOC_DIRSHIFT)
-        | (ty << IOC_TYPESHIFT)
-        | (nr << IOC_NRSHIFT)
-        | (size << IOC_SIZESHIFT)
+    (dir << IOC_DIRSHIFT) | (ty << IOC_TYPESHIFT) | (nr << IOC_NRSHIFT) | (size << IOC_SIZESHIFT)
 }
 
 /// Encode an ioctl with no data (_IO).

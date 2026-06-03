@@ -74,7 +74,9 @@ pub unsafe extern "C" fn getenv(name: *const u8) -> *const u8 {
 
     // SAFETY: Single-threaded access to ENV_STORE.
     let store = unsafe { core::ptr::addr_of_mut!(ENV_STORE).as_mut() };
-    let Some(store) = store else { return core::ptr::null() };
+    let Some(store) = store else {
+        return core::ptr::null();
+    };
 
     for entry in store.iter() {
         if entry[0] == 0 {
@@ -127,7 +129,10 @@ pub unsafe extern "C" fn setenv(name: *const u8, value: *const u8, overwrite: i3
     }
 
     // Total length: name + '=' + value + '\0'
-    let total = name_len.wrapping_add(1).wrapping_add(value_len).wrapping_add(1);
+    let total = name_len
+        .wrapping_add(1)
+        .wrapping_add(value_len)
+        .wrapping_add(1);
     if total > MAX_ENTRY_LEN {
         crate::errno::set_errno(crate::errno::ENOMEM);
         return -1;
@@ -276,7 +281,10 @@ pub unsafe extern "C" fn putenv(string: *mut u8) -> i32 {
     let value_ptr = unsafe { string.add(eq_pos.wrapping_add(1)) };
     let value_len = total_len.wrapping_sub(eq_pos).wrapping_sub(1);
 
-    let total = name_len.wrapping_add(1).wrapping_add(value_len).wrapping_add(1);
+    let total = name_len
+        .wrapping_add(1)
+        .wrapping_add(value_len)
+        .wrapping_add(1);
     if total > MAX_ENTRY_LEN {
         crate::errno::set_errno(crate::errno::ENOMEM);
         return -1;
@@ -943,7 +951,10 @@ mod tests {
         unsafe { load_packed_envp(data.as_ptr(), data.len(), 1) };
 
         // Both should exist.
-        assert_eq!(unsafe { cstr_bytes(getenv(b"EXISTING\0".as_ptr())) }, b"yes");
+        assert_eq!(
+            unsafe { cstr_bytes(getenv(b"EXISTING\0".as_ptr())) },
+            b"yes"
+        );
         assert_eq!(unsafe { cstr_bytes(getenv(b"NEW\0".as_ptr())) }, b"added");
     }
 }

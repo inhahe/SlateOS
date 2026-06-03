@@ -84,9 +84,14 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            PTP_CLOCK_GETCAPS, PTP_EXTTS_REQUEST, PTP_PEROUT_REQUEST,
-            PTP_ENABLE_PPS, PTP_SYS_OFFSET, PTP_PIN_GETFUNC,
-            PTP_PIN_SETFUNC, PTP_SYS_OFFSET_PRECISE,
+            PTP_CLOCK_GETCAPS,
+            PTP_EXTTS_REQUEST,
+            PTP_PEROUT_REQUEST,
+            PTP_ENABLE_PPS,
+            PTP_SYS_OFFSET,
+            PTP_PIN_GETFUNC,
+            PTP_PIN_SETFUNC,
+            PTP_SYS_OFFSET_PRECISE,
             PTP_SYS_OFFSET_EXTENDED,
         ];
         for i in 0..cmds.len() {
@@ -99,8 +104,11 @@ mod tests {
     #[test]
     fn test_flags_are_powers_of_two() {
         let flags = [
-            PTP_ENABLE_FEATURE, PTP_RISING_EDGE,
-            PTP_FALLING_EDGE, PTP_STRICT_FLAGS, PTP_EXT_OFFSET,
+            PTP_ENABLE_FEATURE,
+            PTP_RISING_EDGE,
+            PTP_FALLING_EDGE,
+            PTP_STRICT_FLAGS,
+            PTP_EXT_OFFSET,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two());
@@ -109,9 +117,7 @@ mod tests {
 
     #[test]
     fn test_pin_funcs_distinct() {
-        let funcs = [
-            PTP_PF_NONE, PTP_PF_EXTTS, PTP_PF_PEROUT, PTP_PF_PHYSYNC,
-        ];
+        let funcs = [PTP_PF_NONE, PTP_PF_EXTTS, PTP_PF_PEROUT, PTP_PF_PHYSYNC];
         for i in 0..funcs.len() {
             for j in (i + 1)..funcs.len() {
                 assert_ne!(funcs[i], funcs[j]);

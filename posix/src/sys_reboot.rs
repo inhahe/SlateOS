@@ -7,21 +7,21 @@
 // Re-exports
 // ---------------------------------------------------------------------------
 
-pub use crate::process::reboot;
-pub use crate::process::reboot_cmd_known;
+pub use crate::process::LINUX_REBOOT_CMD_CAD_OFF;
+pub use crate::process::LINUX_REBOOT_CMD_CAD_ON;
+pub use crate::process::LINUX_REBOOT_CMD_HALT;
+pub use crate::process::LINUX_REBOOT_CMD_KEXEC;
+pub use crate::process::LINUX_REBOOT_CMD_POWER_OFF;
+pub use crate::process::LINUX_REBOOT_CMD_RESTART;
+pub use crate::process::LINUX_REBOOT_CMD_RESTART2;
+pub use crate::process::LINUX_REBOOT_CMD_SW_SUSPEND;
 pub use crate::process::LINUX_REBOOT_MAGIC1;
 pub use crate::process::LINUX_REBOOT_MAGIC2;
 pub use crate::process::LINUX_REBOOT_MAGIC2A;
 pub use crate::process::LINUX_REBOOT_MAGIC2B;
 pub use crate::process::LINUX_REBOOT_MAGIC2C;
-pub use crate::process::LINUX_REBOOT_CMD_RESTART;
-pub use crate::process::LINUX_REBOOT_CMD_HALT;
-pub use crate::process::LINUX_REBOOT_CMD_POWER_OFF;
-pub use crate::process::LINUX_REBOOT_CMD_CAD_ON;
-pub use crate::process::LINUX_REBOOT_CMD_CAD_OFF;
-pub use crate::process::LINUX_REBOOT_CMD_RESTART2;
-pub use crate::process::LINUX_REBOOT_CMD_SW_SUSPEND;
-pub use crate::process::LINUX_REBOOT_CMD_KEXEC;
+pub use crate::process::reboot;
+pub use crate::process::reboot_cmd_known;
 
 // ---------------------------------------------------------------------------
 // BSD-style aliases
@@ -67,8 +67,10 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            LINUX_REBOOT_CMD_RESTART, LINUX_REBOOT_CMD_HALT,
-            LINUX_REBOOT_CMD_POWER_OFF, LINUX_REBOOT_CMD_CAD_ON,
+            LINUX_REBOOT_CMD_RESTART,
+            LINUX_REBOOT_CMD_HALT,
+            LINUX_REBOOT_CMD_POWER_OFF,
+            LINUX_REBOOT_CMD_CAD_ON,
             LINUX_REBOOT_CMD_CAD_OFF,
         ];
         for i in 0..cmds.len() {
@@ -96,9 +98,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use crate::errno;
-    use crate::sys_capability::{
-        has_capability, CAP_SYS_BOOT,
-    };
+    use crate::sys_capability::{CAP_SYS_BOOT, has_capability};
 
     /// Save the current effective-cap state and restore it on drop so
     /// EPERM tests don't bleed into the cooperating-default tests.
@@ -419,8 +419,8 @@ mod tests {
         // back to platform-specific shutdown.
         let _g = CapGuard::snapshot();
         for &cmd in &[
-            LINUX_REBOOT_CMD_CAD_OFF,    // disable Ctrl-Alt-Del first
-            LINUX_REBOOT_CMD_POWER_OFF,  // request power-off
+            LINUX_REBOOT_CMD_CAD_OFF,   // disable Ctrl-Alt-Del first
+            LINUX_REBOOT_CMD_POWER_OFF, // request power-off
         ] {
             let ret = reboot(cmd as i32);
             assert_eq!(ret, -1);

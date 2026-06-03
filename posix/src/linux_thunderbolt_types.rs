@@ -101,8 +101,12 @@ mod tests {
     #[test]
     fn test_security_levels_distinct() {
         let levels = [
-            TB_SECURITY_NONE, TB_SECURITY_USER, TB_SECURITY_SECURE,
-            TB_SECURITY_DPONLY, TB_SECURITY_USBONLY, TB_SECURITY_NOPCIE,
+            TB_SECURITY_NONE,
+            TB_SECURITY_USER,
+            TB_SECURITY_SECURE,
+            TB_SECURITY_DPONLY,
+            TB_SECURITY_USBONLY,
+            TB_SECURITY_NOPCIE,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -121,7 +125,12 @@ mod tests {
 
     #[test]
     fn test_port_types_distinct() {
-        let ports = [TB_PORT_INACTIVE, TB_PORT_DOWNSTREAM, TB_PORT_UPSTREAM, TB_PORT_NHI];
+        let ports = [
+            TB_PORT_INACTIVE,
+            TB_PORT_DOWNSTREAM,
+            TB_PORT_UPSTREAM,
+            TB_PORT_NHI,
+        ];
         for i in 0..ports.len() {
             for j in (i + 1)..ports.len() {
                 assert_ne!(ports[i], ports[j]);

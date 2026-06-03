@@ -67,8 +67,10 @@ mod tests {
     #[test]
     fn test_prefixes_distinct() {
         let prefixes = [
-            XATTR_USER_PREFIX, XATTR_SYSTEM_PREFIX,
-            XATTR_SECURITY_PREFIX, XATTR_TRUSTED_PREFIX,
+            XATTR_USER_PREFIX,
+            XATTR_SYSTEM_PREFIX,
+            XATTR_SECURITY_PREFIX,
+            XATTR_TRUSTED_PREFIX,
         ];
         for i in 0..prefixes.len() {
             for j in (i + 1)..prefixes.len() {

@@ -74,8 +74,11 @@ mod tests {
     #[test]
     fn test_rng_types_distinct() {
         let types = [
-            RNG_TYPE_CRNG, RNG_TYPE_DRBG_HMAC, RNG_TYPE_DRBG_CTR,
-            RNG_TYPE_DRBG_HASH, RNG_TYPE_JITTER,
+            RNG_TYPE_CRNG,
+            RNG_TYPE_DRBG_HMAC,
+            RNG_TYPE_DRBG_CTR,
+            RNG_TYPE_DRBG_HASH,
+            RNG_TYPE_JITTER,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -87,8 +90,12 @@ mod tests {
     #[test]
     fn test_entropy_sources_distinct() {
         let sources = [
-            ENTROPY_SRC_HWRNG, ENTROPY_SRC_IRQ, ENTROPY_SRC_DISK,
-            ENTROPY_SRC_INPUT, ENTROPY_SRC_JITTER, ENTROPY_SRC_ARCH,
+            ENTROPY_SRC_HWRNG,
+            ENTROPY_SRC_IRQ,
+            ENTROPY_SRC_DISK,
+            ENTROPY_SRC_INPUT,
+            ENTROPY_SRC_JITTER,
+            ENTROPY_SRC_ARCH,
         ];
         for i in 0..sources.len() {
             for j in (i + 1)..sources.len() {

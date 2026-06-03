@@ -73,8 +73,10 @@ mod tests {
     #[test]
     fn test_huge_page_modes_distinct() {
         let modes = [
-            SHMEM_HUGE_NEVER, SHMEM_HUGE_ALWAYS,
-            SHMEM_HUGE_WITHIN_SIZE, SHMEM_HUGE_ADVISE,
+            SHMEM_HUGE_NEVER,
+            SHMEM_HUGE_ALWAYS,
+            SHMEM_HUGE_WITHIN_SIZE,
+            SHMEM_HUGE_ADVISE,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -85,7 +87,14 @@ mod tests {
 
     #[test]
     fn test_shm_flags_distinct() {
-        let flags = [SHM_CREAT, SHM_EXCL, SHM_DEST, SHM_LOCKED, SHM_HUGETLB, SHM_NORESERVE];
+        let flags = [
+            SHM_CREAT,
+            SHM_EXCL,
+            SHM_DEST,
+            SHM_LOCKED,
+            SHM_HUGETLB,
+            SHM_NORESERVE,
+        ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(flags[i], flags[j]);

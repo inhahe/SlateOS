@@ -90,9 +90,18 @@ mod tests {
     #[test]
     fn test_mode_bits_distinct() {
         let bits = [
-            SPI_CPHA, SPI_CPOL, SPI_CS_HIGH, SPI_LSB_FIRST,
-            SPI_3WIRE, SPI_LOOP, SPI_NO_CS, SPI_READY,
-            SPI_TX_DUAL, SPI_TX_QUAD, SPI_RX_DUAL, SPI_RX_QUAD,
+            SPI_CPHA,
+            SPI_CPOL,
+            SPI_CS_HIGH,
+            SPI_LSB_FIRST,
+            SPI_3WIRE,
+            SPI_LOOP,
+            SPI_NO_CS,
+            SPI_READY,
+            SPI_TX_DUAL,
+            SPI_TX_QUAD,
+            SPI_RX_DUAL,
+            SPI_RX_QUAD,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -110,11 +119,16 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            SPI_IOC_RD_MODE, SPI_IOC_WR_MODE,
-            SPI_IOC_RD_LSB_FIRST, SPI_IOC_WR_LSB_FIRST,
-            SPI_IOC_RD_BITS_PER_WORD, SPI_IOC_WR_BITS_PER_WORD,
-            SPI_IOC_RD_MAX_SPEED_HZ, SPI_IOC_WR_MAX_SPEED_HZ,
-            SPI_IOC_RD_MODE32, SPI_IOC_WR_MODE32,
+            SPI_IOC_RD_MODE,
+            SPI_IOC_WR_MODE,
+            SPI_IOC_RD_LSB_FIRST,
+            SPI_IOC_WR_LSB_FIRST,
+            SPI_IOC_RD_BITS_PER_WORD,
+            SPI_IOC_WR_BITS_PER_WORD,
+            SPI_IOC_RD_MAX_SPEED_HZ,
+            SPI_IOC_WR_MAX_SPEED_HZ,
+            SPI_IOC_RD_MODE32,
+            SPI_IOC_WR_MODE32,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

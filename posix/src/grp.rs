@@ -4,15 +4,15 @@
 //! implements both password and group databases.
 
 pub use crate::pwd::Group;
-pub use crate::pwd::getgrnam;
-pub use crate::pwd::getgrgid;
-pub use crate::pwd::getgrnam_r;
-pub use crate::pwd::getgrgid_r;
-pub use crate::pwd::setgrent;
-pub use crate::pwd::getgrent;
 pub use crate::pwd::endgrent;
+pub use crate::pwd::getgrent;
+pub use crate::pwd::getgrgid;
+pub use crate::pwd::getgrgid_r;
+pub use crate::pwd::getgrnam;
+pub use crate::pwd::getgrnam_r;
 pub use crate::pwd::getgrouplist;
 pub use crate::pwd::initgroups;
+pub use crate::pwd::setgrent;
 
 // ---------------------------------------------------------------------------
 // Tests

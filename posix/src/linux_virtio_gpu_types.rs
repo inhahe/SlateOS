@@ -114,12 +114,16 @@ mod tests {
     #[test]
     fn test_2d_commands_distinct() {
         let cmds = [
-            VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
-            VIRTIO_GPU_CMD_RESOURCE_UNREF, VIRTIO_GPU_CMD_SET_SCANOUT,
-            VIRTIO_GPU_CMD_RESOURCE_FLUSH, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
+            VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
+            VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
+            VIRTIO_GPU_CMD_RESOURCE_UNREF,
+            VIRTIO_GPU_CMD_SET_SCANOUT,
+            VIRTIO_GPU_CMD_RESOURCE_FLUSH,
+            VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
             VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
             VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING,
-            VIRTIO_GPU_CMD_GET_CAPSET_INFO, VIRTIO_GPU_CMD_GET_CAPSET,
+            VIRTIO_GPU_CMD_GET_CAPSET_INFO,
+            VIRTIO_GPU_CMD_GET_CAPSET,
             VIRTIO_GPU_CMD_GET_EDID,
         ];
         for i in 0..cmds.len() {
@@ -132,10 +136,12 @@ mod tests {
     #[test]
     fn test_3d_commands_distinct() {
         let cmds = [
-            VIRTIO_GPU_CMD_SUBMIT_3D, VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
+            VIRTIO_GPU_CMD_SUBMIT_3D,
+            VIRTIO_GPU_CMD_RESOURCE_CREATE_3D,
             VIRTIO_GPU_CMD_TRANSFER_TO_HOST_3D,
             VIRTIO_GPU_CMD_TRANSFER_FROM_HOST_3D,
-            VIRTIO_GPU_CMD_CTX_CREATE, VIRTIO_GPU_CMD_CTX_DESTROY,
+            VIRTIO_GPU_CMD_CTX_CREATE,
+            VIRTIO_GPU_CMD_CTX_DESTROY,
             VIRTIO_GPU_CMD_CTX_ATTACH_RESOURCE,
             VIRTIO_GPU_CMD_CTX_DETACH_RESOURCE,
             VIRTIO_GPU_CMD_RESOURCE_CREATE_BLOB,
@@ -151,10 +157,13 @@ mod tests {
     #[test]
     fn test_responses_distinct() {
         let resps = [
-            VIRTIO_GPU_RESP_OK_NODATA, VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
-            VIRTIO_GPU_RESP_OK_CAPSET_INFO, VIRTIO_GPU_RESP_OK_CAPSET,
+            VIRTIO_GPU_RESP_OK_NODATA,
+            VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
+            VIRTIO_GPU_RESP_OK_CAPSET_INFO,
+            VIRTIO_GPU_RESP_OK_CAPSET,
             VIRTIO_GPU_RESP_OK_EDID,
-            VIRTIO_GPU_RESP_ERR_UNSPEC, VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY,
+            VIRTIO_GPU_RESP_ERR_UNSPEC,
+            VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY,
             VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID,
             VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID,
             VIRTIO_GPU_RESP_ERR_INVALID_CONTEXT_ID,
@@ -170,8 +179,10 @@ mod tests {
     #[test]
     fn test_features_distinct() {
         let feats = [
-            VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_EDID,
-            VIRTIO_GPU_F_RESOURCE_BLOB, VIRTIO_GPU_F_CONTEXT_INIT,
+            VIRTIO_GPU_F_VIRGL,
+            VIRTIO_GPU_F_EDID,
+            VIRTIO_GPU_F_RESOURCE_BLOB,
+            VIRTIO_GPU_F_CONTEXT_INIT,
         ];
         for i in 0..feats.len() {
             for j in (i + 1)..feats.len() {

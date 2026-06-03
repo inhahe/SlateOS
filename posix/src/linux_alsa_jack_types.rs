@@ -82,8 +82,12 @@ mod tests {
     #[test]
     fn test_button_bits_no_overlap() {
         let buttons = [
-            SND_JACK_BTN_0, SND_JACK_BTN_1, SND_JACK_BTN_2,
-            SND_JACK_BTN_3, SND_JACK_BTN_4, SND_JACK_BTN_5,
+            SND_JACK_BTN_0,
+            SND_JACK_BTN_1,
+            SND_JACK_BTN_2,
+            SND_JACK_BTN_3,
+            SND_JACK_BTN_4,
+            SND_JACK_BTN_5,
         ];
         for i in 0..buttons.len() {
             assert!(buttons[i].is_power_of_two());
@@ -101,7 +105,8 @@ mod tests {
     #[test]
     fn test_detect_methods_distinct() {
         let methods = [
-            SND_JACK_DETECT_GPIO, SND_JACK_DETECT_CODEC,
+            SND_JACK_DETECT_GPIO,
+            SND_JACK_DETECT_CODEC,
             SND_JACK_DETECT_EXTERNAL,
         ];
         for i in 0..methods.len() {

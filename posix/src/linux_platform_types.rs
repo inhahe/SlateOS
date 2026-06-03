@@ -70,8 +70,11 @@ mod tests {
     #[test]
     fn test_resource_types_no_overlap() {
         let types = [
-            IORESOURCE_IO, IORESOURCE_MEM, IORESOURCE_IRQ,
-            IORESOURCE_DMA, IORESOURCE_BUS,
+            IORESOURCE_IO,
+            IORESOURCE_MEM,
+            IORESOURCE_IRQ,
+            IORESOURCE_DMA,
+            IORESOURCE_BUS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -83,9 +86,13 @@ mod tests {
     #[test]
     fn test_resource_flags_distinct() {
         let flags = [
-            IORESOURCE_PREFETCH, IORESOURCE_READONLY,
-            IORESOURCE_CACHEABLE, IORESOURCE_BUSY,
-            IORESOURCE_DISABLED, IORESOURCE_UNSET, IORESOURCE_AUTO,
+            IORESOURCE_PREFETCH,
+            IORESOURCE_READONLY,
+            IORESOURCE_CACHEABLE,
+            IORESOURCE_BUSY,
+            IORESOURCE_DISABLED,
+            IORESOURCE_UNSET,
+            IORESOURCE_AUTO,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

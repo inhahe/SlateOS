@@ -82,7 +82,8 @@ mod tests {
     #[test]
     fn test_sections_distinct() {
         let secs = [
-            PERCPU_SECTION_FIRST, PERCPU_SECTION_RESERVED,
+            PERCPU_SECTION_FIRST,
+            PERCPU_SECTION_RESERVED,
             PERCPU_SECTION_DYNAMIC,
         ];
         assert_eq!(secs.len(), PERCPU_NR_SECTIONS as usize);

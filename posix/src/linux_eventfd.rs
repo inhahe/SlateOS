@@ -6,12 +6,12 @@
 // Re-exports
 // ---------------------------------------------------------------------------
 
-pub use crate::epoll::eventfd;
-pub use crate::epoll::eventfd_read;
-pub use crate::epoll::eventfd_write;
 pub use crate::epoll::EFD_CLOEXEC;
 pub use crate::epoll::EFD_NONBLOCK;
 pub use crate::epoll::EFD_SEMAPHORE;
+pub use crate::epoll::eventfd;
+pub use crate::epoll::eventfd_read;
+pub use crate::epoll::eventfd_write;
 
 // ---------------------------------------------------------------------------
 // Tests

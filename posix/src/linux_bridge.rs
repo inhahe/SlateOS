@@ -101,9 +101,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            IFLA_BR_UNSPEC, IFLA_BR_FORWARD_DELAY, IFLA_BR_HELLO_TIME,
-            IFLA_BR_MAX_AGE, IFLA_BR_AGEING_TIME, IFLA_BR_STP_STATE,
-            IFLA_BR_PRIORITY, IFLA_BR_VLAN_FILTERING,
+            IFLA_BR_UNSPEC,
+            IFLA_BR_FORWARD_DELAY,
+            IFLA_BR_HELLO_TIME,
+            IFLA_BR_MAX_AGE,
+            IFLA_BR_AGEING_TIME,
+            IFLA_BR_STP_STATE,
+            IFLA_BR_PRIORITY,
+            IFLA_BR_VLAN_FILTERING,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -115,8 +120,10 @@ mod tests {
     #[test]
     fn test_port_states_distinct() {
         let states = [
-            BR_STATE_DISABLED, BR_STATE_LISTENING,
-            BR_STATE_LEARNING, BR_STATE_FORWARDING,
+            BR_STATE_DISABLED,
+            BR_STATE_LISTENING,
+            BR_STATE_LEARNING,
+            BR_STATE_FORWARDING,
             BR_STATE_BLOCKING,
         ];
         for i in 0..states.len() {
@@ -129,9 +136,15 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            BR_HAIRPIN_MODE, BR_BPDU_GUARD, BR_ROOT_BLOCK,
-            BR_MULTICAST_FAST_LEAVE, BR_LEARNING, BR_FLOOD,
-            BR_PROXYARP, BR_BCAST_FLOOD, BR_MCAST_FLOOD,
+            BR_HAIRPIN_MODE,
+            BR_BPDU_GUARD,
+            BR_ROOT_BLOCK,
+            BR_MULTICAST_FAST_LEAVE,
+            BR_LEARNING,
+            BR_FLOOD,
+            BR_PROXYARP,
+            BR_BCAST_FLOOD,
+            BR_MCAST_FLOOD,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -141,9 +154,15 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            BR_HAIRPIN_MODE, BR_BPDU_GUARD, BR_ROOT_BLOCK,
-            BR_MULTICAST_FAST_LEAVE, BR_LEARNING, BR_FLOOD,
-            BR_PROXYARP, BR_BCAST_FLOOD, BR_MCAST_FLOOD,
+            BR_HAIRPIN_MODE,
+            BR_BPDU_GUARD,
+            BR_ROOT_BLOCK,
+            BR_MULTICAST_FAST_LEAVE,
+            BR_LEARNING,
+            BR_FLOOD,
+            BR_PROXYARP,
+            BR_BCAST_FLOOD,
+            BR_MCAST_FLOOD,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

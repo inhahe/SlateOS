@@ -78,12 +78,20 @@ mod tests {
     #[test]
     fn test_descriptor_types_distinct() {
         let types = [
-            USB_DT_DEVICE, USB_DT_CONFIG, USB_DT_STRING,
-            USB_DT_INTERFACE, USB_DT_ENDPOINT, USB_DT_DEVICE_QUALIFIER,
-            USB_DT_OTHER_SPEED_CONFIG, USB_DT_INTERFACE_POWER,
-            USB_DT_OTG, USB_DT_INTERFACE_ASSOCIATION,
-            USB_DT_BOS, USB_DT_DEVICE_CAPABILITY,
-            USB_DT_SS_ENDPOINT_COMP, USB_DT_SSP_ISOC_ENDPOINT_COMP,
+            USB_DT_DEVICE,
+            USB_DT_CONFIG,
+            USB_DT_STRING,
+            USB_DT_INTERFACE,
+            USB_DT_ENDPOINT,
+            USB_DT_DEVICE_QUALIFIER,
+            USB_DT_OTHER_SPEED_CONFIG,
+            USB_DT_INTERFACE_POWER,
+            USB_DT_OTG,
+            USB_DT_INTERFACE_ASSOCIATION,
+            USB_DT_BOS,
+            USB_DT_DEVICE_CAPABILITY,
+            USB_DT_SS_ENDPOINT_COMP,
+            USB_DT_SSP_ISOC_ENDPOINT_COMP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

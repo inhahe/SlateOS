@@ -75,8 +75,10 @@ mod tests {
     #[test]
     fn test_page_states_distinct() {
         let states = [
-            KSM_PAGE_NONE, KSM_PAGE_CANDIDATE,
-            KSM_PAGE_SHARED, KSM_PAGE_UNSHARED,
+            KSM_PAGE_NONE,
+            KSM_PAGE_CANDIDATE,
+            KSM_PAGE_SHARED,
+            KSM_PAGE_UNSHARED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

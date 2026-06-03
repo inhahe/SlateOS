@@ -18,8 +18,7 @@ pub const VGA_RSRC_NORMAL_IO: u32 = 1 << 2;
 pub const VGA_RSRC_NORMAL_MEM: u32 = 1 << 3;
 
 /// All legacy resources.
-pub const VGA_RSRC_LEGACY_MASK: u32 =
-    VGA_RSRC_LEGACY_IO | VGA_RSRC_LEGACY_MEM;
+pub const VGA_RSRC_LEGACY_MASK: u32 = VGA_RSRC_LEGACY_IO | VGA_RSRC_LEGACY_MEM;
 
 // ---------------------------------------------------------------------------
 // VGA decode flags
@@ -48,8 +47,10 @@ mod tests {
     #[test]
     fn test_rsrc_flags_powers_of_two() {
         let flags = [
-            VGA_RSRC_LEGACY_IO, VGA_RSRC_LEGACY_MEM,
-            VGA_RSRC_NORMAL_IO, VGA_RSRC_NORMAL_MEM,
+            VGA_RSRC_LEGACY_IO,
+            VGA_RSRC_LEGACY_MEM,
+            VGA_RSRC_NORMAL_IO,
+            VGA_RSRC_NORMAL_MEM,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -59,8 +60,10 @@ mod tests {
     #[test]
     fn test_rsrc_flags_no_overlap() {
         let flags = [
-            VGA_RSRC_LEGACY_IO, VGA_RSRC_LEGACY_MEM,
-            VGA_RSRC_NORMAL_IO, VGA_RSRC_NORMAL_MEM,
+            VGA_RSRC_LEGACY_IO,
+            VGA_RSRC_LEGACY_MEM,
+            VGA_RSRC_NORMAL_IO,
+            VGA_RSRC_NORMAL_MEM,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

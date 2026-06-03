@@ -91,8 +91,10 @@ mod tests {
     #[test]
     fn test_attach_flags_no_overlap() {
         let flags = [
-            XDP_FLAGS_SKB_MODE, XDP_FLAGS_DRV_MODE,
-            XDP_FLAGS_HW_MODE, XDP_FLAGS_REPLACE,
+            XDP_FLAGS_SKB_MODE,
+            XDP_FLAGS_DRV_MODE,
+            XDP_FLAGS_HW_MODE,
+            XDP_FLAGS_REPLACE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -116,9 +118,14 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            XDP_RX_RING, XDP_TX_RING, XDP_UMEM_REG,
-            XDP_MMAP_OFFSETS, XDP_UMEM_FILL_RING,
-            XDP_UMEM_COMPLETION_RING, XDP_STATISTICS, XDP_OPTIONS,
+            XDP_RX_RING,
+            XDP_TX_RING,
+            XDP_UMEM_REG,
+            XDP_MMAP_OFFSETS,
+            XDP_UMEM_FILL_RING,
+            XDP_UMEM_COMPLETION_RING,
+            XDP_STATISTICS,
+            XDP_OPTIONS,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

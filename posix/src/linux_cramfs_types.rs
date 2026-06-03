@@ -103,9 +103,12 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            CRAMFS_FLAG_FSID_VERSION_2, CRAMFS_FLAG_SORTED_DIRS,
-            CRAMFS_FLAG_HOLES, CRAMFS_FLAG_WRONG_SIGNATURE,
-            CRAMFS_FLAG_SHIFTED_ROOT_OFFSET, CRAMFS_FLAG_EXT_BLOCK_POINTERS,
+            CRAMFS_FLAG_FSID_VERSION_2,
+            CRAMFS_FLAG_SORTED_DIRS,
+            CRAMFS_FLAG_HOLES,
+            CRAMFS_FLAG_WRONG_SIGNATURE,
+            CRAMFS_FLAG_SHIFTED_ROOT_OFFSET,
+            CRAMFS_FLAG_EXT_BLOCK_POINTERS,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

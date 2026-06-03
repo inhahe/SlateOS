@@ -94,9 +94,16 @@ mod tests {
     #[test]
     fn test_verdicts_distinct() {
         let verdicts = [
-            TC_ACT_UNSPEC, TC_ACT_OK, TC_ACT_RECLASSIFY, TC_ACT_SHOT,
-            TC_ACT_PIPE, TC_ACT_STOLEN, TC_ACT_QUEUED, TC_ACT_REPEAT,
-            TC_ACT_REDIRECT, TC_ACT_TRAP,
+            TC_ACT_UNSPEC,
+            TC_ACT_OK,
+            TC_ACT_RECLASSIFY,
+            TC_ACT_SHOT,
+            TC_ACT_PIPE,
+            TC_ACT_STOLEN,
+            TC_ACT_QUEUED,
+            TC_ACT_REPEAT,
+            TC_ACT_REDIRECT,
+            TC_ACT_TRAP,
         ];
         for i in 0..verdicts.len() {
             for j in (i + 1)..verdicts.len() {
@@ -108,10 +115,17 @@ mod tests {
     #[test]
     fn test_action_types_distinct() {
         let types = [
-            TCA_ACT_GACT, TCA_ACT_MIRRED, TCA_ACT_PEDIT,
-            TCA_ACT_POLICE, TCA_ACT_NAT, TCA_ACT_VLAN,
-            TCA_ACT_TUNNEL_KEY, TCA_ACT_CT, TCA_ACT_SKBEDIT,
-            TCA_ACT_MPLS, TCA_ACT_CSUM,
+            TCA_ACT_GACT,
+            TCA_ACT_MIRRED,
+            TCA_ACT_PEDIT,
+            TCA_ACT_POLICE,
+            TCA_ACT_NAT,
+            TCA_ACT_VLAN,
+            TCA_ACT_TUNNEL_KEY,
+            TCA_ACT_CT,
+            TCA_ACT_SKBEDIT,
+            TCA_ACT_MPLS,
+            TCA_ACT_CSUM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -123,8 +137,10 @@ mod tests {
     #[test]
     fn test_gact_prob_distinct() {
         let probs = [
-            GACT_PROB_DROP, GACT_PROB_PASS,
-            GACT_PROB_RECLASSIFY, GACT_PROB_NONE,
+            GACT_PROB_DROP,
+            GACT_PROB_PASS,
+            GACT_PROB_RECLASSIFY,
+            GACT_PROB_NONE,
         ];
         for i in 0..probs.len() {
             for j in (i + 1)..probs.len() {

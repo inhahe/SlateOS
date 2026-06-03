@@ -148,14 +148,22 @@ mod tests {
     #[test]
     fn test_attr_types_distinct() {
         let types = [
-            ATTR_TYPE_STANDARD_INFORMATION, ATTR_TYPE_ATTRIBUTE_LIST,
-            ATTR_TYPE_FILE_NAME, ATTR_TYPE_OBJECT_ID,
-            ATTR_TYPE_SECURITY_DESCRIPTOR, ATTR_TYPE_VOLUME_NAME,
-            ATTR_TYPE_VOLUME_INFORMATION, ATTR_TYPE_DATA,
-            ATTR_TYPE_INDEX_ROOT, ATTR_TYPE_INDEX_ALLOCATION,
-            ATTR_TYPE_BITMAP, ATTR_TYPE_REPARSE_POINT,
-            ATTR_TYPE_EA_INFORMATION, ATTR_TYPE_EA,
-            ATTR_TYPE_LOGGED_UTILITY_STREAM, ATTR_TYPE_END,
+            ATTR_TYPE_STANDARD_INFORMATION,
+            ATTR_TYPE_ATTRIBUTE_LIST,
+            ATTR_TYPE_FILE_NAME,
+            ATTR_TYPE_OBJECT_ID,
+            ATTR_TYPE_SECURITY_DESCRIPTOR,
+            ATTR_TYPE_VOLUME_NAME,
+            ATTR_TYPE_VOLUME_INFORMATION,
+            ATTR_TYPE_DATA,
+            ATTR_TYPE_INDEX_ROOT,
+            ATTR_TYPE_INDEX_ALLOCATION,
+            ATTR_TYPE_BITMAP,
+            ATTR_TYPE_REPARSE_POINT,
+            ATTR_TYPE_EA_INFORMATION,
+            ATTR_TYPE_EA,
+            ATTR_TYPE_LOGGED_UTILITY_STREAM,
+            ATTR_TYPE_END,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -177,11 +185,19 @@ mod tests {
     #[test]
     fn test_file_attrs_distinct() {
         let attrs = [
-            FILE_ATTR_READONLY, FILE_ATTR_HIDDEN, FILE_ATTR_SYSTEM,
-            FILE_ATTR_DIRECTORY, FILE_ATTR_ARCHIVE, FILE_ATTR_DEVICE,
-            FILE_ATTR_NORMAL, FILE_ATTR_TEMPORARY, FILE_ATTR_SPARSE_FILE,
-            FILE_ATTR_REPARSE_POINT, FILE_ATTR_COMPRESSED,
-            FILE_ATTR_OFFLINE, FILE_ATTR_NOT_CONTENT_INDEXED,
+            FILE_ATTR_READONLY,
+            FILE_ATTR_HIDDEN,
+            FILE_ATTR_SYSTEM,
+            FILE_ATTR_DIRECTORY,
+            FILE_ATTR_ARCHIVE,
+            FILE_ATTR_DEVICE,
+            FILE_ATTR_NORMAL,
+            FILE_ATTR_TEMPORARY,
+            FILE_ATTR_SPARSE_FILE,
+            FILE_ATTR_REPARSE_POINT,
+            FILE_ATTR_COMPRESSED,
+            FILE_ATTR_OFFLINE,
+            FILE_ATTR_NOT_CONTENT_INDEXED,
             FILE_ATTR_ENCRYPTED,
         ];
         for i in 0..attrs.len() {
@@ -194,11 +210,19 @@ mod tests {
     #[test]
     fn test_file_attrs_power_of_two() {
         let attrs = [
-            FILE_ATTR_READONLY, FILE_ATTR_HIDDEN, FILE_ATTR_SYSTEM,
-            FILE_ATTR_DIRECTORY, FILE_ATTR_ARCHIVE, FILE_ATTR_DEVICE,
-            FILE_ATTR_NORMAL, FILE_ATTR_TEMPORARY, FILE_ATTR_SPARSE_FILE,
-            FILE_ATTR_REPARSE_POINT, FILE_ATTR_COMPRESSED,
-            FILE_ATTR_OFFLINE, FILE_ATTR_NOT_CONTENT_INDEXED,
+            FILE_ATTR_READONLY,
+            FILE_ATTR_HIDDEN,
+            FILE_ATTR_SYSTEM,
+            FILE_ATTR_DIRECTORY,
+            FILE_ATTR_ARCHIVE,
+            FILE_ATTR_DEVICE,
+            FILE_ATTR_NORMAL,
+            FILE_ATTR_TEMPORARY,
+            FILE_ATTR_SPARSE_FILE,
+            FILE_ATTR_REPARSE_POINT,
+            FILE_ATTR_COMPRESSED,
+            FILE_ATTR_OFFLINE,
+            FILE_ATTR_NOT_CONTENT_INDEXED,
             FILE_ATTR_ENCRYPTED,
         ];
         for a in &attrs {
@@ -231,8 +255,10 @@ mod tests {
     #[test]
     fn test_record_magic_values() {
         let magics = [
-            NTFS_RECORD_MAGIC_FILE, NTFS_RECORD_MAGIC_INDX,
-            NTFS_RECORD_MAGIC_RSTR, NTFS_RECORD_MAGIC_RCRD,
+            NTFS_RECORD_MAGIC_FILE,
+            NTFS_RECORD_MAGIC_INDX,
+            NTFS_RECORD_MAGIC_RSTR,
+            NTFS_RECORD_MAGIC_RCRD,
         ];
         for i in 0..magics.len() {
             for j in (i + 1)..magics.len() {

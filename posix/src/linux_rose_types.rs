@@ -96,8 +96,13 @@ mod tests {
     #[test]
     fn test_sockopts_distinct() {
         let opts = [
-            ROSE_DEFER, ROSE_T1, ROSE_T2, ROSE_T3,
-            ROSE_IDLE, ROSE_QBITINCL, ROSE_HOLDBACK,
+            ROSE_DEFER,
+            ROSE_T1,
+            ROSE_T2,
+            ROSE_T3,
+            ROSE_IDLE,
+            ROSE_QBITINCL,
+            ROSE_HOLDBACK,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -119,11 +124,16 @@ mod tests {
     #[test]
     fn test_causes_distinct() {
         let causes = [
-            ROSE_DTE_ORIGINATED, ROSE_NUMBER_BUSY,
-            ROSE_INVALID_FACILITY, ROSE_NETWORK_CONGESTION,
-            ROSE_OUT_OF_ORDER, ROSE_ACCESS_BARRED,
-            ROSE_NOT_OBTAINABLE, ROSE_REMOTE_PROCEDURE,
-            ROSE_LOCAL_PROCEDURE, ROSE_SHIP_ABSENT,
+            ROSE_DTE_ORIGINATED,
+            ROSE_NUMBER_BUSY,
+            ROSE_INVALID_FACILITY,
+            ROSE_NETWORK_CONGESTION,
+            ROSE_OUT_OF_ORDER,
+            ROSE_ACCESS_BARRED,
+            ROSE_NOT_OBTAINABLE,
+            ROSE_REMOTE_PROCEDURE,
+            ROSE_LOCAL_PROCEDURE,
+            ROSE_SHIP_ABSENT,
         ];
         for i in 0..causes.len() {
             for j in (i + 1)..causes.len() {

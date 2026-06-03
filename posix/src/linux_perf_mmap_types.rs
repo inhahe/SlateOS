@@ -72,16 +72,27 @@ mod tests {
     #[test]
     fn test_record_types_distinct() {
         let types = [
-            PERF_RECORD_MMAP, PERF_RECORD_LOST, PERF_RECORD_COMM,
-            PERF_RECORD_EXIT, PERF_RECORD_THROTTLE,
-            PERF_RECORD_UNTHROTTLE, PERF_RECORD_FORK,
-            PERF_RECORD_READ, PERF_RECORD_SAMPLE,
-            PERF_RECORD_MMAP2, PERF_RECORD_AUX,
-            PERF_RECORD_ITRACE_START, PERF_RECORD_LOST_SAMPLES,
-            PERF_RECORD_SWITCH, PERF_RECORD_SWITCH_CPU_WIDE,
-            PERF_RECORD_NAMESPACES, PERF_RECORD_KSYMBOL,
-            PERF_RECORD_BPF_EVENT, PERF_RECORD_CGROUP,
-            PERF_RECORD_TEXT_POKE, PERF_RECORD_AUX_OUTPUT_HW_ID,
+            PERF_RECORD_MMAP,
+            PERF_RECORD_LOST,
+            PERF_RECORD_COMM,
+            PERF_RECORD_EXIT,
+            PERF_RECORD_THROTTLE,
+            PERF_RECORD_UNTHROTTLE,
+            PERF_RECORD_FORK,
+            PERF_RECORD_READ,
+            PERF_RECORD_SAMPLE,
+            PERF_RECORD_MMAP2,
+            PERF_RECORD_AUX,
+            PERF_RECORD_ITRACE_START,
+            PERF_RECORD_LOST_SAMPLES,
+            PERF_RECORD_SWITCH,
+            PERF_RECORD_SWITCH_CPU_WIDE,
+            PERF_RECORD_NAMESPACES,
+            PERF_RECORD_KSYMBOL,
+            PERF_RECORD_BPF_EVENT,
+            PERF_RECORD_CGROUP,
+            PERF_RECORD_TEXT_POKE,
+            PERF_RECORD_AUX_OUTPUT_HW_ID,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

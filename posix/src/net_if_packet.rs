@@ -84,8 +84,11 @@ mod tests {
     #[test]
     fn test_packet_types_distinct() {
         let types = [
-            PACKET_HOST, PACKET_BROADCAST, PACKET_MULTICAST,
-            PACKET_OTHERHOST, PACKET_OUTGOING,
+            PACKET_HOST,
+            PACKET_BROADCAST,
+            PACKET_MULTICAST,
+            PACKET_OTHERHOST,
+            PACKET_OUTGOING,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

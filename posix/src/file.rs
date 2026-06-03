@@ -77,14 +77,16 @@ pub extern "C" fn open(path: *const u8, flags: i32, mode: ModeT) -> Fd {
     // fcntl(F_GETFL) can return them.  Strip creation-only flags
     // (O_CREAT, O_EXCL, O_TRUNC, O_NOCTTY, O_DIRECTORY) that don't
     // survive past open().
-    let stored_flags = flags & (fcntl::O_ACCMODE | fcntl::O_APPEND
-        | fcntl::O_NONBLOCK | fcntl::O_SYNC | fcntl::O_NOFOLLOW);
+    let stored_flags = flags
+        & (fcntl::O_ACCMODE
+            | fcntl::O_APPEND
+            | fcntl::O_NONBLOCK
+            | fcntl::O_SYNC
+            | fcntl::O_NOFOLLOW);
     let kernel_handle = ret as u64;
-    if let Some(fd_num) = fdtable::alloc_fd_with_flags(
-        HandleKind::File,
-        kernel_handle,
-        stored_flags,
-    ) {
+    if let Some(fd_num) =
+        fdtable::alloc_fd_with_flags(HandleKind::File, kernel_handle, stored_flags)
+    {
         // Set FD_CLOEXEC if O_CLOEXEC was requested.
         if flags & fcntl::O_CLOEXEC != 0 {
             let _ = fdtable::set_fd_flags(fd_num, fdtable::FD_CLOEXEC);
@@ -139,9 +141,11 @@ pub extern "C" fn close(fd: Fd) -> i32 {
         HandleKind::UnixStream => syscall1(SYS_SOCKETPAIR_CLOSE, entry.handle),
         HandleKind::Console => return 0, // Console fds don't need kernel close.
         HandleKind::TcpStream => {
-            if entry.handle == 0 { return 0; } // Unconnected socket, nothing to close.
-            let (linger_on, linger_secs) = socket_meta
-                .map_or((false, 0i32), |m| (m.linger_onoff, m.linger_secs));
+            if entry.handle == 0 {
+                return 0;
+            } // Unconnected socket, nothing to close.
+            let (linger_on, linger_secs) =
+                socket_meta.map_or((false, 0i32), |m| (m.linger_onoff, m.linger_secs));
             if linger_on && linger_secs == 0 {
                 // SO_LINGER with timeout 0: send RST (abortive close).
                 syscall1(SYS_TCP_ABORT, entry.handle)
@@ -176,16 +180,14 @@ pub extern "C" fn close(fd: Fd) -> i32 {
                 syscall1(SYS_TCP_CLOSE, entry.handle)
             }
         }
-        HandleKind::TcpListener => {
-            syscall1(SYS_TCP_CLOSE_LISTENER, entry.handle)
-        }
+        HandleKind::TcpListener => syscall1(SYS_TCP_CLOSE_LISTENER, entry.handle),
         HandleKind::UdpSocket => {
-            if entry.handle == 0 { return 0; } // Unbound socket, nothing to close.
+            if entry.handle == 0 {
+                return 0;
+            } // Unbound socket, nothing to close.
             syscall1(SYS_UDP_CLOSE, entry.handle)
         }
-        HandleKind::Eventfd => {
-            syscall1(SYS_EVENTFD_CLOSE, entry.handle)
-        }
+        HandleKind::Eventfd => syscall1(SYS_EVENTFD_CLOSE, entry.handle),
         HandleKind::Epoll => {
             // Userspace-managed: free the instance slot.  No kernel
             // resource to release.
@@ -232,16 +234,15 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
         return 0;
     }
 
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
 
     let ret = match entry.kind {
-        HandleKind::File => {
-            syscall3(SYS_FS_READ, entry.handle, buf as u64, count as u64)
-        }
+        HandleKind::File => syscall3(SYS_FS_READ, entry.handle, buf as u64, count as u64),
         HandleKind::Pipe => {
             // Use non-blocking read when O_NONBLOCK is set on the fd.
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0;
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             if is_nb {
                 syscall3(SYS_PIPE_TRY_READ, entry.handle, buf as u64, count as u64)
             } else {
@@ -252,10 +253,14 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             // Stream socket: blocking recv unless O_NONBLOCK is set.
             // A return of 0 is EOF (peer's write side closed), which
             // read() reports as 0 — matching pipe/socket semantics.
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0;
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             if is_nb {
-                syscall3(SYS_SOCKETPAIR_TRY_RECV, entry.handle, buf as u64, count as u64)
+                syscall3(
+                    SYS_SOCKETPAIR_TRY_RECV,
+                    entry.handle,
+                    buf as u64,
+                    count as u64,
+                )
             } else {
                 syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, count as u64)
             }
@@ -267,7 +272,9 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                 return errno::translate(ch) as SsizeT;
             }
             // SAFETY: buf is valid for at least `count` bytes (checked above).
-            unsafe { *buf = ch as u8; }
+            unsafe {
+                *buf = ch as u8;
+            }
             1
         }
         HandleKind::TcpStream => {
@@ -275,14 +282,16 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                 errno::set_errno(errno::ENOTCONN);
                 return -1;
             }
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0;
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
 
             // Always try non-blocking first — we implement blocking
             // and SO_RCVTIMEO in the POSIX layer via tcp_recv_wait.
             let ret = syscall4(
-                SYS_TCP_RECV, entry.handle, buf as u64, count as u64,
+                SYS_TCP_RECV,
+                entry.handle,
+                buf as u64,
+                count as u64,
                 0x40, // MSG_DONTWAIT
             );
             if ret >= 0 {
@@ -292,9 +301,7 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             if (posix_err == errno::EAGAIN || posix_err == errno::EWOULDBLOCK) && !is_nb {
                 // Blocking socket — poll-wait with SO_RCVTIMEO.
                 // timeout_ms == 0 means wait indefinitely.
-                return crate::socket::tcp_recv_wait(
-                    entry.handle, buf, count, 0, timeout_ms,
-                );
+                return crate::socket::tcp_recv_wait(entry.handle, buf, count, 0, timeout_ms);
             }
             errno::set_errno(posix_err);
             return -1;
@@ -305,9 +312,7 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             // If unbound (handle==0), recv() will return EINVAL.
             // Unlike write(), read() does NOT require connect() — the
             // source address is simply discarded (use recvfrom() to get it).
-            return unsafe {
-                crate::socket::recv(fd, buf, count, 0)
-            } as SsizeT;
+            return unsafe { crate::socket::recv(fd, buf, count, 0) } as SsizeT;
         }
         HandleKind::TcpListener => {
             // Listeners are not readable via read(); use accept().
@@ -329,8 +334,7 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                 errno::set_errno(errno::EINVAL);
                 return -1;
             }
-            let fd_nb = fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0;
+            let fd_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             let is_nb = fd_nb || crate::epoll::timerfd_is_nonblock(entry.handle);
             // SAFETY: `buf` is valid for `count >= 8` bytes (checked above).
             let dst = unsafe { core::slice::from_raw_parts_mut(buf, 8) };
@@ -362,9 +366,12 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
                 errno::set_errno(errno::EINVAL);
                 return -1;
             }
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0;
-            let nr = if is_nb { SYS_EVENTFD_TRY_READ } else { SYS_EVENTFD_READ };
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
+            let nr = if is_nb {
+                SYS_EVENTFD_TRY_READ
+            } else {
+                SYS_EVENTFD_READ
+            };
             let r = syscall1(nr, entry.handle);
             if r < 0 {
                 return errno::translate(r) as SsizeT;
@@ -385,8 +392,7 @@ pub extern "C" fn read(fd: Fd, buf: *mut u8, count: SizeT) -> SsizeT {
             //   - O_NONBLOCK (or IN_NONBLOCK): EAGAIN.
             //   - Otherwise: sleep 10ms and retry (matches poll/timerfd
             //     pattern).
-            let fd_nb = fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0;
+            let fd_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             let is_nb = fd_nb || crate::epoll::inotify_is_nonblock(entry.handle);
             // SAFETY: `buf` is valid for `count` bytes (checked above).
             let dst = unsafe { core::slice::from_raw_parts_mut(buf, count) };
@@ -434,7 +440,9 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         return 0;
     }
 
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
 
     let ret = match entry.kind {
         HandleKind::File => {
@@ -455,8 +463,7 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         }
         HandleKind::Pipe => {
             // Use non-blocking write when O_NONBLOCK is set on the fd.
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0;
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             let ret = if is_nb {
                 syscall3(SYS_PIPE_TRY_WRITE, entry.handle, buf as u64, count as u64)
             } else {
@@ -471,10 +478,14 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
         }
         HandleKind::UnixStream => {
             // Stream socket: blocking send unless O_NONBLOCK is set.
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0;
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             let ret = if is_nb {
-                syscall3(SYS_SOCKETPAIR_TRY_SEND, entry.handle, buf as u64, count as u64)
+                syscall3(
+                    SYS_SOCKETPAIR_TRY_SEND,
+                    entry.handle,
+                    buf as u64,
+                    count as u64,
+                )
             } else {
                 syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, count as u64)
             };
@@ -487,26 +498,20 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             }
             ret
         }
-        HandleKind::Console => {
-            syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64)
-        }
+        HandleKind::Console => syscall2(SYS_CONSOLE_WRITE, buf as u64, count as u64),
         HandleKind::TcpStream => {
             if entry.handle == 0 {
                 errno::set_errno(errno::ENOTCONN);
                 return -1;
             }
-            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
-                & crate::fcntl::O_NONBLOCK != 0;
+            let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             if !is_nb {
                 // Blocking socket: use tcp_send_wait for full-write
                 // semantics.  Linux's blocking write() loops until ALL
                 // bytes are accepted; programs depend on this (same
                 // behavior as send() on a blocking socket).
-                let timeout_ms = crate::socket::get_meta(fd)
-                    .map_or(0u64, |m| m.sndtimeo_ms);
-                return crate::socket::tcp_send_wait(
-                    entry.handle, buf, count, timeout_ms,
-                );
+                let timeout_ms = crate::socket::get_meta(fd).map_or(0u64, |m| m.sndtimeo_ms);
+                return crate::socket::tcp_send_wait(entry.handle, buf, count, timeout_ms);
             }
             // Non-blocking: try once.
             let ret = syscall3(SYS_TCP_SEND, entry.handle, buf as u64, count as u64);
@@ -516,10 +521,12 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
             // ChannelClosed (-300) needs EPIPE/ECONNRESET distinction:
             // RST from peer → ECONNRESET; local shutdown/graceful close → EPIPE.
             if ret == errno::native::CHANNEL_CLOSED {
-                let last = syscall1(
-                    crate::syscall::SYS_TCP_LAST_ERROR, entry.handle,
-                ) as u8;
-                errno::set_errno(if last == 2 { errno::ECONNRESET } else { errno::EPIPE });
+                let last = syscall1(crate::syscall::SYS_TCP_LAST_ERROR, entry.handle) as u8;
+                errno::set_errno(if last == 2 {
+                    errno::ECONNRESET
+                } else {
+                    errno::EPIPE
+                });
                 return -1;
             }
             return errno::translate(ret) as SsizeT;
@@ -532,9 +539,7 @@ pub extern "C" fn write(fd: Fd, buf: *const u8, count: SizeT) -> SsizeT {
                 errno::set_errno(errno::EDESTADDRREQ);
                 return -1;
             }
-            return unsafe {
-                crate::socket::send(fd, buf, count, 0)
-            } as SsizeT;
+            return unsafe { crate::socket::send(fd, buf, count, 0) } as SsizeT;
         }
         HandleKind::TcpListener => {
             // Listeners are not writable via write(); use accept().
@@ -617,14 +622,14 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
     // value is meaningless (the kernel would treat the cast u64 as a huge
     // positive position).  POSIX/Linux return EINVAL for a negative offset
     // here, mirroring pread/pwrite.
-    if (whence == crate::fcntl::SEEK_DATA || whence == crate::fcntl::SEEK_HOLE)
-        && offset < 0
-    {
+    if (whence == crate::fcntl::SEEK_DATA || whence == crate::fcntl::SEEK_HOLE) && offset < 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
 
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
 
     match entry.kind {
         HandleKind::File => {
@@ -637,10 +642,16 @@ pub extern "C" fn lseek(fd: Fd, offset: OffT, whence: i32) -> OffT {
             };
             errno::translate(ret) as OffT
         }
-        HandleKind::Pipe | HandleKind::Console
-        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd
-        | HandleKind::Inotify | HandleKind::UnixStream => {
+        HandleKind::Pipe
+        | HandleKind::Console
+        | HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::Eventfd
+        | HandleKind::Epoll
+        | HandleKind::Timerfd
+        | HandleKind::Inotify
+        | HandleKind::UnixStream => {
             errno::set_errno(errno::ESPIPE);
             -1
         }
@@ -674,7 +685,9 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
         return -1;
     }
 
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
 
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
@@ -688,7 +701,12 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
     }
 
     // Seek to the requested offset.
-    let seek_ret = syscall3(SYS_FS_SEEK, entry.handle, offset as u64, crate::fcntl::SEEK_SET as u64);
+    let seek_ret = syscall3(
+        SYS_FS_SEEK,
+        entry.handle,
+        offset as u64,
+        crate::fcntl::SEEK_SET as u64,
+    );
     if seek_ret < 0 {
         return errno::translate(seek_ret) as SsizeT;
     }
@@ -698,7 +716,12 @@ pub extern "C" fn pread(fd: Fd, buf: *mut u8, count: SizeT, offset: OffT) -> Ssi
 
     // Restore original position (best effort — if this fails, the file
     // position is lost, but the alternative is leaking the error).
-    let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+    let _ = syscall3(
+        SYS_FS_SEEK,
+        entry.handle,
+        saved as u64,
+        crate::fcntl::SEEK_SET as u64,
+    );
 
     if read_ret < 0 {
         return errno::translate(read_ret) as SsizeT;
@@ -726,7 +749,9 @@ pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> 
         return -1;
     }
 
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
 
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
@@ -740,7 +765,12 @@ pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> 
     }
 
     // Seek to the requested offset.
-    let seek_ret = syscall3(SYS_FS_SEEK, entry.handle, offset as u64, crate::fcntl::SEEK_SET as u64);
+    let seek_ret = syscall3(
+        SYS_FS_SEEK,
+        entry.handle,
+        offset as u64,
+        crate::fcntl::SEEK_SET as u64,
+    );
     if seek_ret < 0 {
         return errno::translate(seek_ret) as SsizeT;
     }
@@ -749,7 +779,12 @@ pub extern "C" fn pwrite(fd: Fd, buf: *const u8, count: SizeT, offset: OffT) -> 
     let write_ret = syscall3(SYS_FS_WRITE, entry.handle, buf as u64, count as u64);
 
     // Restore original position.
-    let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+    let _ = syscall3(
+        SYS_FS_SEEK,
+        entry.handle,
+        saved as u64,
+        crate::fcntl::SEEK_SET as u64,
+    );
 
     if write_ret < 0 {
         return errno::translate(write_ret) as SsizeT;
@@ -866,7 +901,9 @@ pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -
         return -1;
     }
 
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
 
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
@@ -880,7 +917,12 @@ pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -
     }
 
     // Seek to the requested offset.
-    let sr = syscall3(SYS_FS_SEEK, entry.handle, offset as u64, crate::fcntl::SEEK_SET as u64);
+    let sr = syscall3(
+        SYS_FS_SEEK,
+        entry.handle,
+        offset as u64,
+        crate::fcntl::SEEK_SET as u64,
+    );
     if sr < 0 {
         return errno::translate(sr) as SsizeT;
     }
@@ -895,7 +937,12 @@ pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -
             let n = read(fd, vec.iov_base, vec.iov_len);
             if n < 0 {
                 // Restore position before returning error.
-                let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+                let _ = syscall3(
+                    SYS_FS_SEEK,
+                    entry.handle,
+                    saved as u64,
+                    crate::fcntl::SEEK_SET as u64,
+                );
                 if total > 0 {
                     return total;
                 }
@@ -910,7 +957,12 @@ pub extern "C" fn preadv(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) -
     }
 
     // Restore original position.
-    let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+    let _ = syscall3(
+        SYS_FS_SEEK,
+        entry.handle,
+        saved as u64,
+        crate::fcntl::SEEK_SET as u64,
+    );
 
     total
 }
@@ -932,7 +984,9 @@ pub extern "C" fn pwritev(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) 
         return -1;
     }
 
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
 
     if entry.kind != HandleKind::File {
         errno::set_errno(errno::ESPIPE);
@@ -946,7 +1000,12 @@ pub extern "C" fn pwritev(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) 
     }
 
     // Seek to the requested offset.
-    let sr = syscall3(SYS_FS_SEEK, entry.handle, offset as u64, crate::fcntl::SEEK_SET as u64);
+    let sr = syscall3(
+        SYS_FS_SEEK,
+        entry.handle,
+        offset as u64,
+        crate::fcntl::SEEK_SET as u64,
+    );
     if sr < 0 {
         return errno::translate(sr) as SsizeT;
     }
@@ -960,7 +1019,12 @@ pub extern "C" fn pwritev(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) 
         if vec.iov_len > 0 {
             let n = write(fd, vec.iov_base.cast_const(), vec.iov_len);
             if n < 0 {
-                let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+                let _ = syscall3(
+                    SYS_FS_SEEK,
+                    entry.handle,
+                    saved as u64,
+                    crate::fcntl::SEEK_SET as u64,
+                );
                 if total > 0 {
                     return total;
                 }
@@ -975,7 +1039,12 @@ pub extern "C" fn pwritev(fd: Fd, iov: *const Iovec, iovcnt: i32, offset: OffT) 
     }
 
     // Restore original position.
-    let _ = syscall3(SYS_FS_SEEK, entry.handle, saved as u64, crate::fcntl::SEEK_SET as u64);
+    let _ = syscall3(
+        SYS_FS_SEEK,
+        entry.handle,
+        saved as u64,
+        crate::fcntl::SEEK_SET as u64,
+    );
 
     total
 }
@@ -1063,7 +1132,9 @@ pub extern "C" fn fadvise64(fd: Fd, offset: OffT, len: OffT, advice: i32) -> i32
 /// or -1 on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn dup(oldfd: Fd) -> Fd {
-    let Some(entry) = lookup_fd(oldfd) else { return -1; };
+    let Some(entry) = lookup_fd(oldfd) else {
+        return -1;
+    };
 
     // dup'd fds inherit the source fd's status flags (O_APPEND, etc.)
     // but NOT the fd-level flags (FD_CLOEXEC is cleared on the new fd).
@@ -1077,9 +1148,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             // level (NOT SYS_FS_DUP, which mints a new handle with an
             // independent cursor).  close() uses is_handle_referenced() to
             // only issue SYS_FS_CLOSE when the last referencing fd is gone.
-            if let Some(fd) = fdtable::alloc_fd_with_flags(
-                HandleKind::File, entry.handle, src_status,
-            ) {
+            if let Some(fd) =
+                fdtable::alloc_fd_with_flags(HandleKind::File, entry.handle, src_status)
+            {
                 fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
@@ -1089,9 +1160,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
         }
         HandleKind::Console => {
             // Console handles are shared — just allocate a new fd entry.
-            if let Some(fd) = fdtable::alloc_fd_with_flags(
-                HandleKind::Console, entry.handle, src_status,
-            ) {
+            if let Some(fd) =
+                fdtable::alloc_fd_with_flags(HandleKind::Console, entry.handle, src_status)
+            {
                 fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
@@ -1103,9 +1174,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             // No kernel-level dup for pipes.  Share the handle;
             // close() uses is_handle_referenced() to only close the
             // kernel handle when the last fd referencing it is closed.
-            if let Some(fd) = fdtable::alloc_fd_with_flags(
-                HandleKind::Pipe, entry.handle, src_status,
-            ) {
+            if let Some(fd) =
+                fdtable::alloc_fd_with_flags(HandleKind::Pipe, entry.handle, src_status)
+            {
                 fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
@@ -1118,9 +1189,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             // endpoint handle; close() uses is_handle_referenced() so the
             // kernel SYS_SOCKETPAIR_CLOSE (which drops the endpoint
             // refcount) fires exactly once, when the last fd is closed.
-            if let Some(fd) = fdtable::alloc_fd_with_flags(
-                HandleKind::UnixStream, entry.handle, src_status,
-            ) {
+            if let Some(fd) =
+                fdtable::alloc_fd_with_flags(HandleKind::UnixStream, entry.handle, src_status)
+            {
                 fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
@@ -1130,9 +1201,8 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
         }
         HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket => {
             // Share the handle (same refcounting as pipes).
-            if let Some(new_fd) = fdtable::alloc_fd_with_flags(
-                entry.kind, entry.handle, src_status,
-            ) {
+            if let Some(new_fd) = fdtable::alloc_fd_with_flags(entry.kind, entry.handle, src_status)
+            {
                 // Copy socket metadata so getpeername/getsockname
                 // works on the dup'd fd too.
                 crate::socket::copy_meta(oldfd, new_fd);
@@ -1147,9 +1217,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             // No kernel-level dup for eventfds.  Share the handle;
             // close() uses is_handle_referenced() to only close the
             // kernel handle when the last fd referencing it is closed.
-            if let Some(fd) = fdtable::alloc_fd_with_flags(
-                HandleKind::Eventfd, entry.handle, src_status,
-            ) {
+            if let Some(fd) =
+                fdtable::alloc_fd_with_flags(HandleKind::Eventfd, entry.handle, src_status)
+            {
                 fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
@@ -1161,9 +1231,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
             // Share the epoll instance.  No addref needed: the close
             // path uses is_handle_referenced() to skip the instance
             // teardown until the last fd referencing it goes away.
-            if let Some(fd) = fdtable::alloc_fd_with_flags(
-                HandleKind::Epoll, entry.handle, src_status,
-            ) {
+            if let Some(fd) =
+                fdtable::alloc_fd_with_flags(HandleKind::Epoll, entry.handle, src_status)
+            {
                 fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
@@ -1174,9 +1244,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
         HandleKind::Timerfd => {
             // Share the timerfd instance.  Same refcount-by-fd-scan
             // pattern as Eventfd/Epoll.
-            if let Some(fd) = fdtable::alloc_fd_with_flags(
-                HandleKind::Timerfd, entry.handle, src_status,
-            ) {
+            if let Some(fd) =
+                fdtable::alloc_fd_with_flags(HandleKind::Timerfd, entry.handle, src_status)
+            {
                 fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
@@ -1187,9 +1257,9 @@ pub extern "C" fn dup(oldfd: Fd) -> Fd {
         HandleKind::Inotify => {
             // Share the inotify instance.  Same refcount-by-fd-scan
             // pattern as Epoll/Timerfd.
-            if let Some(fd) = fdtable::alloc_fd_with_flags(
-                HandleKind::Inotify, entry.handle, src_status,
-            ) {
+            if let Some(fd) =
+                fdtable::alloc_fd_with_flags(HandleKind::Inotify, entry.handle, src_status)
+            {
                 fdtable::copy_fd_path(oldfd, fd);
                 fd
             } else {
@@ -1215,7 +1285,9 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         return -1;
     }
 
-    let Some(entry) = lookup_fd(oldfd) else { return -1; };
+    let Some(entry) = lookup_fd(oldfd) else {
+        return -1;
+    };
 
     if newfd < 0 || newfd as usize >= fdtable::MAX_FDS {
         errno::set_errno(errno::EBADF);
@@ -1231,10 +1303,11 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
         HandleKind::File
         | HandleKind::Console
         | HandleKind::Pipe
-        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd | HandleKind::UnixStream => {
-            entry.handle
-        }
+        | HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::Eventfd
+        | HandleKind::UnixStream => entry.handle,
         HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
             // Share the epoll/timerfd/inotify instance.  No addref
             // needed: dup2 calls is_handle_referenced() before tearing
@@ -1248,9 +1321,9 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
 
     // Install at newfd, closing whatever was there.
     // dup2 inherits the source's status flags (O_APPEND, O_NONBLOCK, etc.).
-    if let Some(old) = fdtable::install_fd_with_flags(
-        newfd, entry.kind, new_handle, entry.status_flags,
-    ) {
+    if let Some(old) =
+        fdtable::install_fd_with_flags(newfd, entry.kind, new_handle, entry.status_flags)
+    {
         // Read socket metadata BEFORE clearing — SO_LINGER settings
         // must be respected when closing the evicted handle, just like
         // close() does.
@@ -1267,8 +1340,8 @@ pub extern "C" fn dup2(oldfd: Fd, newfd: Fd) -> Fd {
             // For TCP streams: respect SO_LINGER on the evicted socket,
             // matching close() behavior per POSIX dup2 spec ("closed first").
             if old.kind == HandleKind::TcpStream && old.handle != 0 {
-                let (linger_on, linger_secs) = evicted_meta
-                    .map_or((false, 0i32), |m| (m.linger_onoff, m.linger_secs));
+                let (linger_on, linger_secs) =
+                    evicted_meta.map_or((false, 0i32), |m| (m.linger_onoff, m.linger_secs));
                 if linger_on && linger_secs == 0 {
                     // Abortive close: send RST.
                     let _ = syscall1(SYS_TCP_ABORT, old.handle);
@@ -1393,7 +1466,11 @@ pub extern "C" fn close_range(first: u32, last: u32, flags: u32) -> i32 {
     // due to wrapping.  Programs commonly pass UINT_MAX as `last`
     // to close "everything from first upward."
     let max = fdtable::MAX_FDS as u32;
-    let effective_last = if last >= max { max.wrapping_sub(1) } else { last };
+    let effective_last = if last >= max {
+        max.wrapping_sub(1)
+    } else {
+        last
+    };
     let mut fd = first;
     while fd <= effective_last {
         if cloexec {
@@ -1501,7 +1578,9 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
         return -1;
     }
 
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
 
     match entry.kind {
         HandleKind::File => {
@@ -1531,7 +1610,9 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             }
             0
         }
-        HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
+        HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
         | HandleKind::UnixStream => {
             // Return minimal stat for a socket.
             unsafe {
@@ -1540,8 +1621,7 @@ pub extern "C" fn fstat(fd: Fd, buf: *mut Stat) -> i32 {
             }
             0
         }
-        HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd
-        | HandleKind::Inotify => {
+        HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
             // Linux fstat on an eventfd / epollfd / timerfd / inotifyfd
             // returns a character device.  Zero the struct and set
             // S_IFCHR so callers that branch on file type get a sensible
@@ -1789,17 +1869,25 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
         return -1;
     }
 
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
 
     match entry.kind {
         HandleKind::File => {
             let ret = syscall2(SYS_FS_FTRUNCATE, entry.handle, length as u64);
             errno::translate(ret) as i32
         }
-        HandleKind::Pipe | HandleKind::Console
-        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd
-        | HandleKind::Inotify | HandleKind::UnixStream => {
+        HandleKind::Pipe
+        | HandleKind::Console
+        | HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::Eventfd
+        | HandleKind::Epoll
+        | HandleKind::Timerfd
+        | HandleKind::Inotify
+        | HandleKind::UnixStream => {
             errno::set_errno(errno::EINVAL);
             -1
         }
@@ -1815,7 +1903,9 @@ pub extern "C" fn ftruncate(fd: Fd, length: OffT) -> i32 {
 /// Only meaningful for File handles.  Returns 0 for pipes/console.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fsync(fd: Fd) -> i32 {
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
 
     match entry.kind {
         HandleKind::File => {
@@ -1823,10 +1913,16 @@ pub extern "C" fn fsync(fd: Fd) -> i32 {
             let ret = syscall0(SYS_FS_SYNC);
             errno::translate(ret) as i32
         }
-        HandleKind::Pipe | HandleKind::Console
-        | HandleKind::TcpStream | HandleKind::TcpListener | HandleKind::UdpSocket
-        | HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd
-        | HandleKind::Inotify | HandleKind::UnixStream => 0,
+        HandleKind::Pipe
+        | HandleKind::Console
+        | HandleKind::TcpStream
+        | HandleKind::TcpListener
+        | HandleKind::UdpSocket
+        | HandleKind::Eventfd
+        | HandleKind::Epoll
+        | HandleKind::Timerfd
+        | HandleKind::Inotify
+        | HandleKind::UnixStream => 0,
     }
 }
 
@@ -2021,7 +2117,9 @@ pub extern "C" fn faccessat(dirfd: i32, path: *const u8, mode: i32, flags: i32) 
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
-    if len == 0 { return -1; }
+    if len == 0 {
+        return -1;
+    }
     access(full.as_ptr(), mode)
 }
 
@@ -2088,8 +2186,7 @@ fn build_at_path(
     }
 
     // Append separator (skip if dir_path already ends with '/').
-    let needs_slash = dir_len > 0
-        && dir_path.get(dir_len.wrapping_sub(1)).copied() != Some(b'/');
+    let needs_slash = dir_len > 0 && dir_path.get(dir_len.wrapping_sub(1)).copied() != Some(b'/');
     if needs_slash {
         if let Some(dst) = out.get_mut(pos) {
             *dst = b'/';
@@ -2176,7 +2273,9 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
-    if len == 0 { return -1; }
+    if len == 0 {
+        return -1;
+    }
     open(full.as_ptr(), flags, mode)
 }
 
@@ -2188,12 +2287,22 @@ pub extern "C" fn openat(dirfd: i32, path: *const u8, flags: i32, mode: ModeT) -
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i32) -> i32 {
     if dirfd == AT_FDCWD || is_absolute_path(path) {
-        return if flags & AT_SYMLINK_NOFOLLOW != 0 { lstat(path, buf) } else { stat(path, buf) };
+        return if flags & AT_SYMLINK_NOFOLLOW != 0 {
+            lstat(path, buf)
+        } else {
+            stat(path, buf)
+        };
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
-    if len == 0 { return -1; }
-    if flags & AT_SYMLINK_NOFOLLOW != 0 { lstat(full.as_ptr(), buf) } else { stat(full.as_ptr(), buf) }
+    if len == 0 {
+        return -1;
+    }
+    if flags & AT_SYMLINK_NOFOLLOW != 0 {
+        lstat(full.as_ptr(), buf)
+    } else {
+        stat(full.as_ptr(), buf)
+    }
 }
 
 /// Remove a file or directory relative to a directory fd.
@@ -2205,12 +2314,22 @@ pub extern "C" fn fstatat(dirfd: i32, path: *const u8, buf: *mut Stat, flags: i3
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn unlinkat(dirfd: i32, path: *const u8, flags: i32) -> i32 {
     if dirfd == AT_FDCWD || is_absolute_path(path) {
-        return if flags & AT_REMOVEDIR != 0 { rmdir(path) } else { unlink(path) };
+        return if flags & AT_REMOVEDIR != 0 {
+            rmdir(path)
+        } else {
+            unlink(path)
+        };
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
-    if len == 0 { return -1; }
-    if flags & AT_REMOVEDIR != 0 { rmdir(full.as_ptr()) } else { unlink(full.as_ptr()) }
+    if len == 0 {
+        return -1;
+    }
+    if flags & AT_REMOVEDIR != 0 {
+        rmdir(full.as_ptr())
+    } else {
+        unlink(full.as_ptr())
+    }
 }
 
 /// Rename a file relative to directory fds.
@@ -2232,7 +2351,9 @@ pub extern "C" fn renameat(
     let mut old_full = [0u8; crate::unistd::PATH_MAX];
     if old_needs_resolve {
         let len = resolve_dirfd_path(olddirfd, oldpath, &mut old_full);
-        if len == 0 { return -1; }
+        if len == 0 {
+            return -1;
+        }
         old_ptr = old_full.as_ptr();
     } else {
         old_ptr = oldpath;
@@ -2242,7 +2363,9 @@ pub extern "C" fn renameat(
     let mut new_full = [0u8; crate::unistd::PATH_MAX];
     if new_needs_resolve {
         let len = resolve_dirfd_path(newdirfd, newpath, &mut new_full);
-        if len == 0 { return -1; }
+        if len == 0 {
+            return -1;
+        }
         new_ptr = new_full.as_ptr();
     } else {
         new_ptr = newpath;
@@ -2282,7 +2405,9 @@ pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
-    if len == 0 { return -1; }
+    if len == 0 {
+        return -1;
+    }
     mkdir(full.as_ptr(), mode)
 }
 
@@ -2290,18 +2415,15 @@ pub extern "C" fn mkdirat(dirfd: i32, path: *const u8, mode: ModeT) -> i32 {
 ///
 /// POSIX: if `path` is absolute, `dirfd` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn readlinkat(
-    dirfd: i32,
-    path: *const u8,
-    buf: *mut u8,
-    bufsiz: SizeT,
-) -> SsizeT {
+pub extern "C" fn readlinkat(dirfd: i32, path: *const u8, buf: *mut u8, bufsiz: SizeT) -> SsizeT {
     if dirfd == AT_FDCWD || is_absolute_path(path) {
         return readlink(path, buf, bufsiz);
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
-    if len == 0 { return -1; }
+    if len == 0 {
+        return -1;
+    }
     readlink(full.as_ptr(), buf, bufsiz)
 }
 
@@ -2317,7 +2439,9 @@ pub extern "C" fn symlinkat(target: *const u8, newdirfd: i32, linkpath: *const u
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(newdirfd, linkpath, &mut full);
-    if len == 0 { return -1; }
+    if len == 0 {
+        return -1;
+    }
     symlink(target, full.as_ptr())
 }
 
@@ -2339,7 +2463,9 @@ pub extern "C" fn linkat(
     let mut old_full = [0u8; crate::unistd::PATH_MAX];
     if old_needs_resolve {
         let len = resolve_dirfd_path(olddirfd, oldpath, &mut old_full);
-        if len == 0 { return -1; }
+        if len == 0 {
+            return -1;
+        }
         old_ptr = old_full.as_ptr();
     } else {
         old_ptr = oldpath;
@@ -2349,7 +2475,9 @@ pub extern "C" fn linkat(
     let mut new_full = [0u8; crate::unistd::PATH_MAX];
     if new_needs_resolve {
         let len = resolve_dirfd_path(newdirfd, newpath, &mut new_full);
-        if len == 0 { return -1; }
+        if len == 0 {
+            return -1;
+        }
         new_ptr = new_full.as_ptr();
     } else {
         new_ptr = newpath;
@@ -2377,7 +2505,9 @@ pub extern "C" fn fchmodat(dirfd: i32, path: *const u8, mode: ModeT, flags: i32)
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
-    if len == 0 { return -1; }
+    if len == 0 {
+        return -1;
+    }
     chmod(full.as_ptr(), mode)
 }
 
@@ -2404,7 +2534,9 @@ pub extern "C" fn fchownat(
     }
     let mut full = [0u8; crate::unistd::PATH_MAX];
     let len = resolve_dirfd_path(dirfd, path, &mut full);
-    if len == 0 { return -1; }
+    if len == 0 {
+        return -1;
+    }
     chown(full.as_ptr(), owner, group)
 }
 
@@ -2508,8 +2640,7 @@ pub extern "C" fn chown(path: *const u8, owner: UidT, group: GidT) -> i32 {
         // Nothing to change — succeed without touching ctime.
         return 0;
     }
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN)
-    {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -2549,8 +2680,7 @@ pub extern "C" fn fchown(fd: Fd, owner: UidT, group: GidT) -> i32 {
     if owner == u32::MAX && group == u32::MAX {
         return 0;
     }
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN)
-    {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -2595,8 +2725,7 @@ pub extern "C" fn lchown(path: *const u8, owner: UidT, group: GidT) -> i32 {
     if owner == u32::MAX && group == u32::MAX {
         return 0;
     }
-    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN)
-    {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_CHOWN) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -2626,7 +2755,9 @@ pub extern "C" fn umask(cmask: ModeT) -> ModeT {
     // SAFETY: Single-threaded access to UMASK_VALUE.
     let previous = unsafe { core::ptr::addr_of!(UMASK_VALUE).read() };
     // Only the low 9 bits (rwxrwxrwx) are meaningful for the mask.
-    unsafe { core::ptr::addr_of_mut!(UMASK_VALUE).write(cmask & 0o777); }
+    unsafe {
+        core::ptr::addr_of_mut!(UMASK_VALUE).write(cmask & 0o777);
+    }
     previous
 }
 
@@ -2686,8 +2817,12 @@ pub extern "C" fn posix_fadvise(fd: Fd, _offset: OffT, len: OffT, advice: i32) -
     }
     // EINVAL for unknown advice values.
     match advice {
-        POSIX_FADV_NORMAL | POSIX_FADV_SEQUENTIAL | POSIX_FADV_RANDOM
-        | POSIX_FADV_NOREUSE | POSIX_FADV_WILLNEED | POSIX_FADV_DONTNEED => {}
+        POSIX_FADV_NORMAL
+        | POSIX_FADV_SEQUENTIAL
+        | POSIX_FADV_RANDOM
+        | POSIX_FADV_NOREUSE
+        | POSIX_FADV_WILLNEED
+        | POSIX_FADV_DONTNEED => {}
         _ => return errno::EINVAL,
     }
     // EBADF if the fd isn't open.
@@ -2770,10 +2905,13 @@ pub const FALLOC_FL_UNSHARE_RANGE: i32 = 0x40;
 /// `FALLOC_FL_SUPPORTED_MASK` in `include/uapi/linux/falloc.h`.  Mode
 /// bits outside this mask are rejected with `EOPNOTSUPP` to match
 /// `fs/open.c::vfs_fallocate`.
-pub const FALLOC_FL_VALID_MASK: i32 =
-    FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE | FALLOC_FL_NO_HIDE_STALE
-    | FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_ZERO_RANGE
-    | FALLOC_FL_INSERT_RANGE | FALLOC_FL_UNSHARE_RANGE;
+pub const FALLOC_FL_VALID_MASK: i32 = FALLOC_FL_KEEP_SIZE
+    | FALLOC_FL_PUNCH_HOLE
+    | FALLOC_FL_NO_HIDE_STALE
+    | FALLOC_FL_COLLAPSE_RANGE
+    | FALLOC_FL_ZERO_RANGE
+    | FALLOC_FL_INSERT_RANGE
+    | FALLOC_FL_UNSHARE_RANGE;
 
 /// Manipulate file space.
 ///
@@ -2843,9 +2981,7 @@ pub extern "C" fn fallocate(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
 
     // (4) PUNCH_HOLE requires KEEP_SIZE: a hole-punch cannot extend
     // the file, so omitting KEEP_SIZE has no coherent meaning.
-    if (mode & FALLOC_FL_PUNCH_HOLE) != 0
-        && (mode & FALLOC_FL_KEEP_SIZE) == 0
-    {
+    if (mode & FALLOC_FL_PUNCH_HOLE) != 0 && (mode & FALLOC_FL_KEEP_SIZE) == 0 {
         errno::set_errno(errno::EOPNOTSUPP);
         return -1;
     }
@@ -2860,17 +2996,13 @@ pub extern "C" fn fallocate(fd: Fd, mode: i32, offset: OffT, len: OffT) -> i32 {
     }
 
     // (6) COLLAPSE_RANGE must appear alone — no other mode bits.
-    if (mode & FALLOC_FL_COLLAPSE_RANGE) != 0
-        && (mode & !FALLOC_FL_COLLAPSE_RANGE) != 0
-    {
+    if (mode & FALLOC_FL_COLLAPSE_RANGE) != 0 && (mode & !FALLOC_FL_COLLAPSE_RANGE) != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
 
     // (7) INSERT_RANGE must appear alone — no other mode bits.
-    if (mode & FALLOC_FL_INSERT_RANGE) != 0
-        && (mode & !FALLOC_FL_INSERT_RANGE) != 0
-    {
+    if (mode & FALLOC_FL_INSERT_RANGE) != 0 && (mode & !FALLOC_FL_INSERT_RANGE) != 0 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -2933,8 +3065,7 @@ pub const SPLICE_F_GIFT: u32 = 8;
 /// Mask of all defined `splice`/`tee`/`vmsplice` flag bits.  Any bit
 /// outside this mask is rejected with EINVAL — matches Linux's
 /// `SPLICE_F_ALL` check in `fs/splice.c`.
-pub const SPLICE_F_VALID: u32 =
-    SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+pub const SPLICE_F_VALID: u32 = SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
 
 /// Move data between two file descriptors via a pipe.
 ///
@@ -2976,8 +3107,12 @@ pub extern "C" fn splice(
     }
 
     // Both fds must be valid.
-    let Some(in_entry) = lookup_fd(fd_in) else { return -1; };
-    let Some(out_entry) = lookup_fd(fd_out) else { return -1; };
+    let Some(in_entry) = lookup_fd(fd_in) else {
+        return -1;
+    };
+    let Some(out_entry) = lookup_fd(fd_out) else {
+        return -1;
+    };
 
     let in_is_pipe = in_entry.kind == HandleKind::Pipe;
     let out_is_pipe = out_entry.kind == HandleKind::Pipe;
@@ -3066,11 +3201,15 @@ pub extern "C" fn splice(
                     cur_out += written as i64;
                     if !off_in.is_null() {
                         // SAFETY: validated above.
-                        unsafe { *off_in = cur_in; }
+                        unsafe {
+                            *off_in = cur_in;
+                        }
                     }
                     if !off_out.is_null() {
                         // SAFETY: validated above.
-                        unsafe { *off_out = cur_out; }
+                        unsafe {
+                            *off_out = cur_out;
+                        }
                     }
                     return total as isize;
                 }
@@ -3098,11 +3237,15 @@ pub extern "C" fn splice(
     // Publish updated offsets to caller.
     if !off_in.is_null() {
         // SAFETY: validated above.
-        unsafe { *off_in = cur_in; }
+        unsafe {
+            *off_in = cur_in;
+        }
     }
     if !off_out.is_null() {
         // SAFETY: validated above.
-        unsafe { *off_out = cur_out; }
+        unsafe {
+            *off_out = cur_out;
+        }
     }
 
     total as isize
@@ -3129,12 +3272,7 @@ pub extern "C" fn splice(
 ///    then returns `0` (Linux short-circuits before fd checks; we keep
 ///    that behavior because zero-length tee is unobservable).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tee(
-    fd_in: Fd,
-    fd_out: Fd,
-    len: usize,
-    flags: u32,
-) -> isize {
+pub extern "C" fn tee(fd_in: Fd, fd_out: Fd, len: usize, flags: u32) -> isize {
     // 1. Unknown flag bits.  Checked first so callers that pass garbage
     //    flags learn about it regardless of fd state.
     if flags & !SPLICE_F_VALID != 0 {
@@ -3151,8 +3289,12 @@ pub extern "C" fn tee(
     }
 
     // 3. Both fds must be open.  lookup_fd sets EBADF on miss.
-    let Some(in_entry) = lookup_fd(fd_in) else { return -1; };
-    let Some(out_entry) = lookup_fd(fd_out) else { return -1; };
+    let Some(in_entry) = lookup_fd(fd_in) else {
+        return -1;
+    };
+    let Some(out_entry) = lookup_fd(fd_out) else {
+        return -1;
+    };
 
     // 4. Both ends must be pipes — Linux's `do_tee` returns EINVAL
     //    when either side is a regular file, socket, etc.
@@ -3185,12 +3327,7 @@ pub extern "C" fn tee(
 /// available without VFS-level pipe page sharing.  Read-end use
 /// returns -1/EINVAL — callers should use `readv()` instead.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn vmsplice(
-    fd: Fd,
-    iov: *const Iovec,
-    nr_segs: u64,
-    flags: u32,
-) -> isize {
+pub extern "C" fn vmsplice(fd: Fd, iov: *const Iovec, nr_segs: u64, flags: u32) -> isize {
     // Linux's `do_vmsplice` rejects unknown flag bits with EINVAL
     // before any other validation.  Match that — a caller with bad
     // flag bits learns immediately, regardless of fd / iov state.
@@ -3213,7 +3350,9 @@ pub extern "C" fn vmsplice(
         return -1;
     }
 
-    let Some(entry) = lookup_fd(fd) else { return -1; };
+    let Some(entry) = lookup_fd(fd) else {
+        return -1;
+    };
     if entry.kind != HandleKind::Pipe {
         // Linux returns EBADF for non-pipe fds.
         errno::set_errno(errno::EBADF);
@@ -3317,12 +3456,7 @@ fn do_flock(fd: Fd, operation: i32) -> i32 {
     let mode = operation & (LOCK_SH | LOCK_EX | LOCK_UN);
 
     if mode == LOCK_UN {
-        let ret = syscall3(
-            SYS_FS_FUNLOCK,
-            buf.as_ptr() as u64,
-            path_len as u64,
-            owner,
-        );
+        let ret = syscall3(SYS_FS_FUNLOCK, buf.as_ptr() as u64, path_len as u64, owner);
         return errno::translate(ret) as i32;
     }
 
@@ -3411,12 +3545,7 @@ pub extern "C" fn lockf(fd: Fd, cmd: i32, _len: OffT) -> i32 {
 ///
 /// Stub: performs the copy in userspace via pread/read + write loop.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sendfile(
-    out_fd: Fd,
-    in_fd: Fd,
-    offset: *mut i64,
-    count: usize,
-) -> isize {
+pub extern "C" fn sendfile(out_fd: Fd, in_fd: Fd, offset: *mut i64, count: usize) -> isize {
     let mut buf = [0u8; 4096];
     let mut total: usize = 0;
 
@@ -3429,14 +3558,22 @@ pub extern "C" fn sendfile(
         // them and we can't seek back on non-seekable fds like pipes).
         while total < count {
             let remaining = count.wrapping_sub(total);
-            let chunk = if remaining < buf.len() { remaining } else { buf.len() };
+            let chunk = if remaining < buf.len() {
+                remaining
+            } else {
+                buf.len()
+            };
 
             let nr = read(in_fd, buf.as_mut_ptr(), chunk);
             if nr < 0 {
-                if total > 0 { break; }
+                if total > 0 {
+                    break;
+                }
                 return -1;
             }
-            if nr == 0 { break; }
+            if nr == 0 {
+                break;
+            }
 
             // Write all bytes that were read, retrying on short writes.
             let mut written: usize = 0;
@@ -3454,7 +3591,9 @@ pub extern "C" fn sendfile(
                     }
                     return -1;
                 }
-                if nw == 0 { break; } // Avoid infinite loop.
+                if nw == 0 {
+                    break;
+                } // Avoid infinite loop.
                 written = written.wrapping_add(nw as usize);
             }
 
@@ -3467,14 +3606,22 @@ pub extern "C" fn sendfile(
 
         while total < count {
             let remaining = count.wrapping_sub(total);
-            let chunk = if remaining < buf.len() { remaining } else { buf.len() };
+            let chunk = if remaining < buf.len() {
+                remaining
+            } else {
+                buf.len()
+            };
 
             let nr = pread(in_fd, buf.as_mut_ptr(), chunk, cur_off);
             if nr < 0 {
-                if total > 0 { break; }
+                if total > 0 {
+                    break;
+                }
                 return -1;
             }
-            if nr == 0 { break; }
+            if nr == 0 {
+                break;
+            }
 
             // Write all bytes that were read, retrying on short writes.
             // Without this loop, a short write discards the unwritten
@@ -3492,12 +3639,16 @@ pub extern "C" fn sendfile(
                     if total > 0 || written > 0 {
                         total = total.wrapping_add(written);
                         cur_off = cur_off.wrapping_add(written as i64);
-                        unsafe { *offset = cur_off; }
+                        unsafe {
+                            *offset = cur_off;
+                        }
                         return total as isize;
                     }
                     return -1;
                 }
-                if nw == 0 { break; } // Avoid infinite loop.
+                if nw == 0 {
+                    break;
+                } // Avoid infinite loop.
                 written = written.wrapping_add(nw as usize);
             }
 
@@ -3507,7 +3658,9 @@ pub extern "C" fn sendfile(
 
         // Update caller's offset to reflect bytes transferred.
         // SAFETY: offset is valid.
-        unsafe { *offset = cur_off; }
+        unsafe {
+            *offset = cur_off;
+        }
     }
 
     total as isize
@@ -3518,12 +3671,7 @@ pub extern "C" fn sendfile(
 /// On 64-bit systems (LP64), `off_t` is already 64-bit, so `sendfile64`
 /// is identical to `sendfile`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sendfile64(
-    out_fd: Fd,
-    in_fd: Fd,
-    offset: *mut i64,
-    count: usize,
-) -> isize {
+pub extern "C" fn sendfile64(out_fd: Fd, in_fd: Fd, offset: *mut i64, count: usize) -> isize {
     sendfile(out_fd, in_fd, offset, count)
 }
 
@@ -3591,12 +3739,24 @@ pub extern "C" fn copy_file_range(
     let mut buf = [0u8; 4096];
     let mut total: usize = 0;
 
-    let mut in_pos = if off_in.is_null() { 0 } else { unsafe { *off_in } };
-    let mut out_pos = if off_out.is_null() { 0 } else { unsafe { *off_out } };
+    let mut in_pos = if off_in.is_null() {
+        0
+    } else {
+        unsafe { *off_in }
+    };
+    let mut out_pos = if off_out.is_null() {
+        0
+    } else {
+        unsafe { *off_out }
+    };
 
     while total < len {
         let remaining = len.wrapping_sub(total);
-        let chunk = if remaining < buf.len() { remaining } else { buf.len() };
+        let chunk = if remaining < buf.len() {
+            remaining
+        } else {
+            buf.len()
+        };
 
         // Read: use pread when off_in is provided, else normal read.
         let nr = if off_in.is_null() {
@@ -3604,7 +3764,9 @@ pub extern "C" fn copy_file_range(
         } else {
             pread(fd_in, buf.as_mut_ptr(), chunk, in_pos)
         };
-        if nr <= 0 { break; }
+        if nr <= 0 {
+            break;
+        }
 
         // Write all bytes that were read, retrying on short writes.
         // When off_in is null, read() has already advanced fd_in's
@@ -3633,13 +3795,23 @@ pub extern "C" fn copy_file_range(
                     // Update offsets for partial progress before returning.
                     in_pos = in_pos.wrapping_add(written as i64);
                     out_pos = out_pos.wrapping_add(written as i64);
-                    if !off_in.is_null() { unsafe { *off_in = in_pos; } }
-                    if !off_out.is_null() { unsafe { *off_out = out_pos; } }
+                    if !off_in.is_null() {
+                        unsafe {
+                            *off_in = in_pos;
+                        }
+                    }
+                    if !off_out.is_null() {
+                        unsafe {
+                            *off_out = out_pos;
+                        }
+                    }
                     return total as isize;
                 }
                 return -1;
             }
-            if nw == 0 { break; }
+            if nw == 0 {
+                break;
+            }
             written = written.wrapping_add(nw as usize);
         }
 
@@ -3651,11 +3823,15 @@ pub extern "C" fn copy_file_range(
     // Update caller's offsets to reflect bytes transferred.
     if !off_in.is_null() {
         // SAFETY: off_in is valid.
-        unsafe { *off_in = in_pos; }
+        unsafe {
+            *off_in = in_pos;
+        }
     }
     if !off_out.is_null() {
         // SAFETY: off_out is valid.
-        unsafe { *off_out = out_pos; }
+        unsafe {
+            *off_out = out_pos;
+        }
     }
 
     total as isize
@@ -3738,10 +3914,7 @@ fn timeval_to_kernel_ns(tv: &Timeval) -> u64 {
 /// # Safety
 /// When `times` is non-null it must point to two readable `Timespec`s.
 #[cfg(any(target_os = "none", test))]
-unsafe fn utimens_pair_to_kernel(
-    times: *const crate::stat::Timespec,
-    now_ns: u64,
-) -> (u64, u64) {
+unsafe fn utimens_pair_to_kernel(times: *const crate::stat::Timespec, now_ns: u64) -> (u64, u64) {
     if times.is_null() {
         return (now_ns, now_ns);
     }
@@ -4097,7 +4270,11 @@ pub(crate) fn translate_open_flags(posix_flags: i32) -> u64 {
 /// use `open()` directly.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn creat(path: *const u8, mode: ModeT) -> Fd {
-    open(path, fcntl::O_CREAT | fcntl::O_WRONLY | fcntl::O_TRUNC, mode)
+    open(
+        path,
+        fcntl::O_CREAT | fcntl::O_WRONLY | fcntl::O_TRUNC,
+        mode,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -4222,11 +4399,7 @@ pub extern "C" fn __pread64_chk(
 
 /// `__getcwd_chk` — fortified `getcwd`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn __getcwd_chk(
-    buf: *mut u8,
-    size: SizeT,
-    _buflen: SizeT,
-) -> *mut u8 {
+pub extern "C" fn __getcwd_chk(buf: *mut u8, size: SizeT, _buflen: SizeT) -> *mut u8 {
     crate::unistd::getcwd(buf, size)
 }
 
@@ -4447,11 +4620,7 @@ pub extern "C" fn name_to_handle_at(
 ///    unprivileged caller should see EPERM, not ENOSYS.
 /// 4. All validated → `ENOSYS`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn open_by_handle_at(
-    mount_fd: Fd,
-    handle: *mut FileHandle,
-    _flags: i32,
-) -> i32 {
+pub extern "C" fn open_by_handle_at(mount_fd: Fd, handle: *mut FileHandle, _flags: i32) -> i32 {
     if handle.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -4471,9 +4640,7 @@ pub extern "C" fn open_by_handle_at(
     // would need a privileged export-fd path we don't expose.  Surface
     // EPERM here so unprivileged file-handle probes (CRIU's quick
     // capability probe, libnfs handle helpers) read us correctly.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_DAC_READ_SEARCH,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_DAC_READ_SEARCH) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -4661,8 +4828,7 @@ pub extern "C" fn openat2(dirfd: i32, path: *const u8, how: *const OpenHow, size
     // passing mode without one of those flags is asking for an
     // inconsistent open; we reject so they notice the bug.
     let creates_a_file =
-        (h.flags & crate::fcntl::O_CREAT as u64) != 0
-            || (h.flags & RAW_O_TMPFILE) != 0;
+        (h.flags & crate::fcntl::O_CREAT as u64) != 0 || (h.flags & RAW_O_TMPFILE) != 0;
     if h.mode != 0 && !creates_a_file {
         errno::set_errno(errno::EINVAL);
         return -1;
@@ -4838,12 +5004,16 @@ pub extern "C" fn statx(
 
     if mask & STATX_TYPE != 0 || mask & STATX_MODE != 0 {
         #[allow(clippy::cast_possible_truncation)]
-        { sx.stx_mode = st.st_mode as u16; }
+        {
+            sx.stx_mode = st.st_mode as u16;
+        }
         filled |= STATX_TYPE | STATX_MODE;
     }
     if mask & STATX_NLINK != 0 {
         #[allow(clippy::cast_possible_truncation)]
-        { sx.stx_nlink = st.st_nlink as u32; }
+        {
+            sx.stx_nlink = st.st_nlink as u32;
+        }
         filled |= STATX_NLINK;
     }
     if mask & STATX_UID != 0 {
@@ -4882,12 +5052,11 @@ pub extern "C" fn statx(
     // field for it).  Only report it — and set the filled bit — when the
     // filesystem actually recorded a creation time; otherwise leave the
     // STATX_BTIME bit clear so callers know it is unavailable.
-    if mask & STATX_BTIME != 0 {
-        if let Some(btime) = crate::stat::btime_from_fsstat(&raw) {
+    if mask & STATX_BTIME != 0
+        && let Some(btime) = crate::stat::btime_from_fsstat(&raw) {
             sx.stx_btime = timespec_to_statx_ts(&btime);
             filled |= STATX_BTIME;
         }
-    }
 
     sx.stx_blksize = st.st_blksize as u32;
     // Device numbers: split st_dev/st_rdev into major/minor.
@@ -4931,11 +5100,9 @@ mod tests {
 
     #[test]
     fn translate_creat_trunc() {
-        let flags = translate_open_flags(
-            fcntl::O_WRONLY | fcntl::O_CREAT | fcntl::O_TRUNC,
-        );
-        assert_ne!(flags & 0x40, 0, "O_CREAT bit");   // Bit 6.
-        assert_ne!(flags & 0x200, 0, "O_TRUNC bit");  // Bit 9.
+        let flags = translate_open_flags(fcntl::O_WRONLY | fcntl::O_CREAT | fcntl::O_TRUNC);
+        assert_ne!(flags & 0x40, 0, "O_CREAT bit"); // Bit 6.
+        assert_ne!(flags & 0x200, 0, "O_TRUNC bit"); // Bit 9.
     }
 
     #[test]
@@ -4954,14 +5121,13 @@ mod tests {
     #[test]
     fn translate_all_flags() {
         let flags = translate_open_flags(
-            fcntl::O_RDWR | fcntl::O_CREAT | fcntl::O_TRUNC
-            | fcntl::O_APPEND | fcntl::O_EXCL,
+            fcntl::O_RDWR | fcntl::O_CREAT | fcntl::O_TRUNC | fcntl::O_APPEND | fcntl::O_EXCL,
         );
-        assert_eq!(flags & 0x3, 2);     // O_RDWR.
-        assert_ne!(flags & 0x40, 0);    // O_CREAT.
-        assert_ne!(flags & 0x80, 0);    // O_EXCL.
-        assert_ne!(flags & 0x200, 0);   // O_TRUNC.
-        assert_ne!(flags & 0x400, 0);   // O_APPEND.
+        assert_eq!(flags & 0x3, 2); // O_RDWR.
+        assert_ne!(flags & 0x40, 0); // O_CREAT.
+        assert_ne!(flags & 0x80, 0); // O_EXCL.
+        assert_ne!(flags & 0x200, 0); // O_TRUNC.
+        assert_ne!(flags & 0x400, 0); // O_APPEND.
     }
 
     #[test]
@@ -4981,8 +5147,7 @@ mod tests {
     fn test_fchmod_succeeds() {
         // Use a freshly-allocated fd rather than relying on fd 0 being open
         // (other tests may have closed it).
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(fchmod(fd, 0o644), 0);
         let _ = fdtable::close_fd(fd);
     }
@@ -4994,8 +5159,7 @@ mod tests {
 
     #[test]
     fn test_fchown_succeeds() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(fchown(fd, 0, 0), 0);
         let _ = fdtable::close_fd(fd);
     }
@@ -5043,8 +5207,7 @@ mod tests {
     fn test_posix_fadvise_succeeds() {
         // Open our own fd so we don't depend on whether some other
         // test in the suite has closed stdin/stdout.
-        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0)
-            .expect("fd available");
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0).expect("fd available");
         assert_eq!(posix_fadvise(fd, 0, 0, POSIX_FADV_NORMAL), 0);
         assert_eq!(posix_fadvise(fd, 0, 0, POSIX_FADV_SEQUENTIAL), 0);
         assert_eq!(posix_fadvise(fd, 0, 0, POSIX_FADV_RANDOM), 0);
@@ -5077,7 +5240,10 @@ mod tests {
         // Negative len is the only length constraint (offset may be any value).
         // Use an invalid fd to demonstrate len validation runs first.
         assert_eq!(posix_fadvise(-1, 0, -1, POSIX_FADV_NORMAL), errno::EINVAL);
-        assert_eq!(posix_fadvise(-1, 100, -100, POSIX_FADV_SEQUENTIAL), errno::EINVAL);
+        assert_eq!(
+            posix_fadvise(-1, 100, -100, POSIX_FADV_SEQUENTIAL),
+            errno::EINVAL
+        );
     }
 
     #[test]
@@ -5099,8 +5265,14 @@ mod tests {
         assert_eq!(ret, 0, "pipe() must succeed for this test");
         let read_end = pipefd[0];
         let write_end = pipefd[1];
-        assert_eq!(posix_fadvise(read_end, 0, 0, POSIX_FADV_NORMAL), errno::ESPIPE);
-        assert_eq!(posix_fadvise(write_end, 0, 0, POSIX_FADV_NORMAL), errno::ESPIPE);
+        assert_eq!(
+            posix_fadvise(read_end, 0, 0, POSIX_FADV_NORMAL),
+            errno::ESPIPE
+        );
+        assert_eq!(
+            posix_fadvise(write_end, 0, 0, POSIX_FADV_NORMAL),
+            errno::ESPIPE
+        );
         // Cleanup.
         let _ = close(read_end);
         let _ = close(write_end);
@@ -5111,8 +5283,7 @@ mod tests {
         // fadvise64 must validate the same way as posix_fadvise.
         assert_eq!(fadvise64(-1, 0, 0, POSIX_FADV_NORMAL), errno::EBADF);
         assert_eq!(fadvise64(-1, 0, 0, 99), errno::EINVAL);
-        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0)
-            .expect("fd available");
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0).expect("fd available");
         assert_eq!(fadvise64(fd, 0, 0, POSIX_FADV_NORMAL), 0);
         let _ = close(fd);
     }
@@ -5138,10 +5309,7 @@ mod tests {
     #[test]
     fn test_posix_fallocate_overflow() {
         // offset + len overflows i64 → EFBIG.
-        assert_eq!(
-            posix_fallocate(0, i64::MAX, 1),
-            crate::errno::EFBIG,
-        );
+        assert_eq!(posix_fallocate(0, i64::MAX, 1), crate::errno::EFBIG,);
     }
 
     // -- fallocate (Linux) --
@@ -5205,7 +5373,10 @@ mod tests {
     fn test_fallocate_punch_hole_eopnotsupp() {
         let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
-        assert_eq!(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096), -1);
+        assert_eq!(
+            fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, 0, 4096),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EOPNOTSUPP);
         let _ = fdtable::close_fd(fd);
     }
@@ -5277,10 +5448,7 @@ mod tests {
     fn test_fallocate_phase109_ebadf_wins_over_eopnotsupp_mode() {
         // Bad fd + advanced/unknown mode bits: EBADF still wins.
         crate::errno::set_errno(0);
-        assert_eq!(
-            fallocate(99999, FALLOC_FL_COLLAPSE_RANGE, 0, 4096),
-            -1,
-        );
+        assert_eq!(fallocate(99999, FALLOC_FL_COLLAPSE_RANGE, 0, 4096), -1,);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
@@ -5375,7 +5543,12 @@ mod tests {
         let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
         assert_eq!(
-            fallocate(fd, FALLOC_FL_UNSHARE_RANGE | FALLOC_FL_COLLAPSE_RANGE, 0, 4096),
+            fallocate(
+                fd,
+                FALLOC_FL_UNSHARE_RANGE | FALLOC_FL_COLLAPSE_RANGE,
+                0,
+                4096
+            ),
             -1,
         );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -5388,7 +5561,12 @@ mod tests {
         let fd = fallocate_test_fd();
         crate::errno::set_errno(0);
         assert_eq!(
-            fallocate(fd, FALLOC_FL_UNSHARE_RANGE | FALLOC_FL_INSERT_RANGE, 0, 4096),
+            fallocate(
+                fd,
+                FALLOC_FL_UNSHARE_RANGE | FALLOC_FL_INSERT_RANGE,
+                0,
+                4096
+            ),
             -1,
         );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -5436,16 +5614,14 @@ mod tests {
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
-                assert_eq!(all[i] & all[j], 0,
-                    "FALLOC_FL flags {i} and {j} collide");
+                assert_eq!(all[i] & all[j], 0, "FALLOC_FL flags {i} and {j} collide");
             }
         }
     }
 
     #[test]
     fn test_flock_succeeds() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(flock(fd, LOCK_SH), 0);
         assert_eq!(flock(fd, LOCK_EX), 0);
         assert_eq!(flock(fd, LOCK_UN), 0);
@@ -5510,8 +5686,7 @@ mod tests {
         // Reserve an fd, ensure CLOEXEC starts clear, run close_range
         // with CLOSE_RANGE_CLOEXEC across a range containing it, and
         // verify the flag flipped on without the fd being closed.
-        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0)
-            .expect("fd available");
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0).expect("fd available");
         assert!(fdtable::set_fd_flags(fd, 0));
         let ret = close_range(fd as u32, fd as u32, CLOSE_RANGE_CLOEXEC);
         assert_eq!(ret, 0);
@@ -5531,8 +5706,10 @@ mod tests {
         let ret = close_range(900, 910, CLOSE_RANGE_CLOEXEC);
         assert_eq!(ret, 0);
         for fd in 900..=910 {
-            assert!(fdtable::get_fd_flags(fd).is_none(),
-                "unopened fd {fd} must not have flags set");
+            assert!(
+                fdtable::get_fd_flags(fd).is_none(),
+                "unopened fd {fd} must not have flags set"
+            );
         }
     }
 
@@ -5627,7 +5804,7 @@ mod tests {
     fn test_is_absolute_path_no() {
         assert!(!is_absolute_path(b"foo\0".as_ptr()));
         assert!(!is_absolute_path(b".\0".as_ptr()));
-        assert!(!is_absolute_path(b"\0".as_ptr()));  // Empty string.
+        assert!(!is_absolute_path(b"\0".as_ptr())); // Empty string.
     }
 
     #[test]
@@ -5711,15 +5888,18 @@ mod tests {
         // Sanity: the only known/valid flag bit is O_CLOEXEC.
         // O_CLOEXEC must be non-zero and a single bit.
         assert_ne!(fcntl::O_CLOEXEC, 0);
-        assert_eq!(fcntl::O_CLOEXEC & (fcntl::O_CLOEXEC - 1), 0,
-            "O_CLOEXEC must be a single bit, got {:#x}", fcntl::O_CLOEXEC);
+        assert_eq!(
+            fcntl::O_CLOEXEC & (fcntl::O_CLOEXEC - 1),
+            0,
+            "O_CLOEXEC must be a single bit, got {:#x}",
+            fcntl::O_CLOEXEC
+        );
     }
 
     #[test]
     fn test_dup3_unknown_flag_bit_rejected() {
         // An arbitrary high bit not in the valid mask must yield EINVAL.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let bad_flag = 1 << 20; // far above any real open flag
         let result = dup3(fd, fd + 1, bad_flag);
         assert_eq!(result, -1);
@@ -5731,8 +5911,7 @@ mod tests {
     fn test_dup3_high_bit_rejected() {
         // i32::MIN has the sign bit set, which is not in the mask.
         // Per Linux this must EINVAL even when oldfd/newfd are sane.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let result = dup3(fd, fd + 1, i32::MIN);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -5742,8 +5921,7 @@ mod tests {
     #[test]
     fn test_dup3_o_rdwr_rejected() {
         // O_RDWR is an open-mode bit, not a dup3 flag.  Must EINVAL.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let result = dup3(fd, fd + 1, fcntl::O_RDWR);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -5753,8 +5931,7 @@ mod tests {
     #[test]
     fn test_dup3_o_append_rejected() {
         // O_APPEND is also not a dup3 flag.  Must EINVAL.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let result = dup3(fd, fd + 1, fcntl::O_APPEND);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -5779,8 +5956,7 @@ mod tests {
     fn test_dup3_zero_flags_accepted_for_real_fd() {
         // Zero flags is valid; dup3 should behave like dup2 (without
         // CLOEXEC) on a real fd pair.  Must not return EINVAL.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         // Pick a newfd well outside any plausible existing range.
         let newfd = 200;
         let _ = fdtable::close_fd(newfd); // ensure it's free
@@ -5790,8 +5966,11 @@ mod tests {
         // require that if it failed, it wasn't with EINVAL — i.e. the
         // flag-mask path didn't reject a valid zero-flags call.
         if result < 0 {
-            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL,
-                "zero flags must not be rejected by the dup3 mask");
+            assert_ne!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "zero flags must not be rejected by the dup3 mask"
+            );
         }
         let _ = fdtable::close_fd(fd);
         let _ = fdtable::close_fd(newfd);
@@ -5800,14 +5979,16 @@ mod tests {
     #[test]
     fn test_dup3_cloexec_alone_accepted() {
         // O_CLOEXEC alone is the canonical use case; must not EINVAL.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let newfd = 201;
         let _ = fdtable::close_fd(newfd);
         let result = dup3(fd, newfd, fcntl::O_CLOEXEC);
         if result < 0 {
-            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL,
-                "O_CLOEXEC must not be rejected by the dup3 mask");
+            assert_ne!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "O_CLOEXEC must not be rejected by the dup3 mask"
+            );
         }
         let _ = fdtable::close_fd(fd);
         let _ = fdtable::close_fd(newfd);
@@ -5817,8 +5998,7 @@ mod tests {
     fn test_dup3_cloexec_plus_unknown_rejected() {
         // Mixing O_CLOEXEC with an unknown bit must still EINVAL —
         // no partial acceptance.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let bad = fcntl::O_CLOEXEC | (1 << 22);
         let result = dup3(fd, fd + 1, bad);
         assert_eq!(result, -1);
@@ -5830,8 +6010,7 @@ mod tests {
     fn test_dup3_recovery_after_einval() {
         // A rejected call must not corrupt state — a subsequent
         // valid call should still work.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let bad = 1 << 21;
         let r1 = dup3(fd, fd + 1, bad);
         assert_eq!(r1, -1);
@@ -5867,10 +6046,13 @@ mod tests {
             }
             // Each non-CLOEXEC single-bit value must be rejected.
             let result = dup3(10, 11, bit);
-            assert_eq!(result, -1,
-                "bit {:#x} should be rejected by dup3 mask", bit);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-                "bit {:#x} should set EINVAL", bit);
+            assert_eq!(result, -1, "bit {:#x} should be rejected by dup3 mask", bit);
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "bit {:#x} should set EINVAL",
+                bit
+            );
         }
     }
 
@@ -5904,8 +6086,7 @@ mod tests {
 
     #[test]
     fn test_lockf_stub_succeeds() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(lockf(fd, F_LOCK, 0), 0);
         assert_eq!(lockf(fd, F_TLOCK, 0), 0);
         assert_eq!(lockf(fd, F_ULOCK, 0), 0);
@@ -5932,7 +6113,10 @@ mod tests {
 
     #[test]
     fn test_timeval_fields() {
-        let tv = Timeval { tv_sec: 1234, tv_usec: 5678 };
+        let tv = Timeval {
+            tv_sec: 1234,
+            tv_usec: 5678,
+        };
         assert_eq!(tv.tv_sec, 1234);
         assert_eq!(tv.tv_usec, 5678);
     }
@@ -5946,21 +6130,22 @@ mod tests {
 
     #[test]
     fn test_futimes_stub_succeeds() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(futimes(fd, core::ptr::null()), 0);
         let _ = fdtable::close_fd(fd);
     }
 
     #[test]
     fn test_utimensat_stub_succeeds() {
-        assert_eq!(utimensat(AT_FDCWD, b"/tmp\0".as_ptr(), core::ptr::null(), 0), 0);
+        assert_eq!(
+            utimensat(AT_FDCWD, b"/tmp\0".as_ptr(), core::ptr::null(), 0),
+            0
+        );
     }
 
     #[test]
     fn test_futimens_stub_succeeds() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(futimens(fd, core::ptr::null()), 0);
         let _ = fdtable::close_fd(fd);
     }
@@ -6058,7 +6243,10 @@ mod tests {
 
     #[test]
     fn test_readv_zero_iovcnt() {
-        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let iov = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         let result = readv(0, &raw const iov, 0);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -6066,7 +6254,10 @@ mod tests {
 
     #[test]
     fn test_readv_negative_iovcnt() {
-        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let iov = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         let result = readv(0, &raw const iov, -1);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -6074,7 +6265,10 @@ mod tests {
 
     #[test]
     fn test_readv_too_many_iovcnt() {
-        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let iov = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         let result = readv(0, &raw const iov, 1025);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -6089,7 +6283,10 @@ mod tests {
 
     #[test]
     fn test_writev_zero_iovcnt() {
-        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let iov = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         let result = writev(0, &raw const iov, 0);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -6282,7 +6479,10 @@ mod tests {
         let mut buf = [0u8; 64];
         // len > buflen: the wrapper clamps to buflen, then delegates. A null
         // path still yields the readlink error path (-1), proving delegation.
-        assert_eq!(__readlink_chk(core::ptr::null(), buf.as_mut_ptr(), 1000, 64), -1);
+        assert_eq!(
+            __readlink_chk(core::ptr::null(), buf.as_mut_ptr(), 1000, 64),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
@@ -6629,7 +6829,10 @@ mod tests {
 
     #[test]
     fn test_fstatat_atfdcwd_null_buf() {
-        assert_eq!(fstatat(AT_FDCWD, b"/tmp\0".as_ptr(), core::ptr::null_mut(), 0), -1);
+        assert_eq!(
+            fstatat(AT_FDCWD, b"/tmp\0".as_ptr(), core::ptr::null_mut(), 0),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
@@ -6638,7 +6841,15 @@ mod tests {
         // With AT_SYMLINK_NOFOLLOW and AT_FDCWD, should delegate to lstat.
         // Verify it hits the same null-check as lstat.
         let mut buf = crate::stat::Stat::zeroed();
-        assert_eq!(fstatat(AT_FDCWD, core::ptr::null(), &raw mut buf, AT_SYMLINK_NOFOLLOW), -1);
+        assert_eq!(
+            fstatat(
+                AT_FDCWD,
+                core::ptr::null(),
+                &raw mut buf,
+                AT_SYMLINK_NOFOLLOW
+            ),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
@@ -6657,13 +6868,19 @@ mod tests {
 
     #[test]
     fn test_renameat_atfdcwd_null_old() {
-        assert_eq!(renameat(AT_FDCWD, core::ptr::null(), AT_FDCWD, b"/b\0".as_ptr()), -1);
+        assert_eq!(
+            renameat(AT_FDCWD, core::ptr::null(), AT_FDCWD, b"/b\0".as_ptr()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
     fn test_renameat_atfdcwd_null_new() {
-        assert_eq!(renameat(AT_FDCWD, b"/a\0".as_ptr(), AT_FDCWD, core::ptr::null()), -1);
+        assert_eq!(
+            renameat(AT_FDCWD, b"/a\0".as_ptr(), AT_FDCWD, core::ptr::null()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
@@ -6676,37 +6893,55 @@ mod tests {
     #[test]
     fn test_readlinkat_atfdcwd_null_path() {
         let mut buf = [0u8; 64];
-        assert_eq!(readlinkat(AT_FDCWD, core::ptr::null(), buf.as_mut_ptr(), 64), -1);
+        assert_eq!(
+            readlinkat(AT_FDCWD, core::ptr::null(), buf.as_mut_ptr(), 64),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
     fn test_readlinkat_atfdcwd_null_buf() {
-        assert_eq!(readlinkat(AT_FDCWD, b"/link\0".as_ptr(), core::ptr::null_mut(), 64), -1);
+        assert_eq!(
+            readlinkat(AT_FDCWD, b"/link\0".as_ptr(), core::ptr::null_mut(), 64),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
     fn test_symlinkat_atfdcwd_null_target() {
-        assert_eq!(symlinkat(core::ptr::null(), AT_FDCWD, b"/link\0".as_ptr()), -1);
+        assert_eq!(
+            symlinkat(core::ptr::null(), AT_FDCWD, b"/link\0".as_ptr()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
     fn test_symlinkat_atfdcwd_null_linkpath() {
-        assert_eq!(symlinkat(b"/target\0".as_ptr(), AT_FDCWD, core::ptr::null()), -1);
+        assert_eq!(
+            symlinkat(b"/target\0".as_ptr(), AT_FDCWD, core::ptr::null()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
     fn test_linkat_atfdcwd_null_old() {
-        assert_eq!(linkat(AT_FDCWD, core::ptr::null(), AT_FDCWD, b"/b\0".as_ptr(), 0), -1);
+        assert_eq!(
+            linkat(AT_FDCWD, core::ptr::null(), AT_FDCWD, b"/b\0".as_ptr(), 0),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
     #[test]
     fn test_linkat_atfdcwd_null_new() {
-        assert_eq!(linkat(AT_FDCWD, b"/a\0".as_ptr(), AT_FDCWD, core::ptr::null(), 0), -1);
+        assert_eq!(
+            linkat(AT_FDCWD, b"/a\0".as_ptr(), AT_FDCWD, core::ptr::null(), 0),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
@@ -6759,19 +6994,28 @@ mod tests {
     #[test]
     fn test_readlinkat_invalid_dirfd() {
         let mut buf = [0u8; 64];
-        assert_eq!(readlinkat(9999, b"link\0".as_ptr(), buf.as_mut_ptr(), 64), -1);
+        assert_eq!(
+            readlinkat(9999, b"link\0".as_ptr(), buf.as_mut_ptr(), 64),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]
     fn test_symlinkat_invalid_dirfd() {
-        assert_eq!(symlinkat(b"/target\0".as_ptr(), 9999, b"link\0".as_ptr()), -1);
+        assert_eq!(
+            symlinkat(b"/target\0".as_ptr(), 9999, b"link\0".as_ptr()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]
     fn test_linkat_invalid_dirfd() {
-        assert_eq!(linkat(9999, b"a\0".as_ptr(), AT_FDCWD, b"/b\0".as_ptr(), 0), -1);
+        assert_eq!(
+            linkat(9999, b"a\0".as_ptr(), AT_FDCWD, b"/b\0".as_ptr(), 0),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
@@ -6831,9 +7075,12 @@ mod tests {
         let mut pipefd = [0i32; 2];
         assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
         let result = copy_file_range(
-            pipefd[0], core::ptr::null_mut(),
-            pipefd[1], core::ptr::null_mut(),
-            0, 0,
+            pipefd[0],
+            core::ptr::null_mut(),
+            pipefd[1],
+            core::ptr::null_mut(),
+            0,
+            0,
         );
         assert_eq!(result, 0);
         let _ = close(pipefd[0]);
@@ -6853,11 +7100,7 @@ mod tests {
     #[test]
     fn test_copy_file_range_phase89_nonzero_flag_einval() {
         crate::errno::set_errno(0);
-        let r = copy_file_range(
-            0, core::ptr::null_mut(),
-            1, core::ptr::null_mut(),
-            8, 1,
-        );
+        let r = copy_file_range(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 8, 1);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -6866,9 +7109,12 @@ mod tests {
     fn test_copy_file_range_phase89_high_bit_flag_einval() {
         crate::errno::set_errno(0);
         let r = copy_file_range(
-            0, core::ptr::null_mut(),
-            1, core::ptr::null_mut(),
-            8, 0x8000_0000,
+            0,
+            core::ptr::null_mut(),
+            1,
+            core::ptr::null_mut(),
+            8,
+            0x8000_0000,
         );
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -6879,11 +7125,7 @@ mod tests {
         // The bug being fixed: bad flags + len==0 used to return 0
         // silently (skipping validation entirely).
         crate::errno::set_errno(0);
-        let r = copy_file_range(
-            0, core::ptr::null_mut(),
-            1, core::ptr::null_mut(),
-            0, 4,
-        );
+        let r = copy_file_range(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 0, 4);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -6891,11 +7133,7 @@ mod tests {
     #[test]
     fn test_copy_file_range_phase89_neg_fd_in_ebadf() {
         crate::errno::set_errno(0);
-        let r = copy_file_range(
-            -1, core::ptr::null_mut(),
-            1, core::ptr::null_mut(),
-            8, 0,
-        );
+        let r = copy_file_range(-1, core::ptr::null_mut(), 1, core::ptr::null_mut(), 8, 0);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -6903,11 +7141,7 @@ mod tests {
     #[test]
     fn test_copy_file_range_phase89_neg_fd_out_ebadf() {
         crate::errno::set_errno(0);
-        let r = copy_file_range(
-            0, core::ptr::null_mut(),
-            -1, core::ptr::null_mut(),
-            8, 0,
-        );
+        let r = copy_file_range(0, core::ptr::null_mut(), -1, core::ptr::null_mut(), 8, 0);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -6915,11 +7149,7 @@ mod tests {
     #[test]
     fn test_copy_file_range_phase89_both_neg_fds_ebadf() {
         crate::errno::set_errno(0);
-        let r = copy_file_range(
-            -5, core::ptr::null_mut(),
-            -6, core::ptr::null_mut(),
-            8, 0,
-        );
+        let r = copy_file_range(-5, core::ptr::null_mut(), -6, core::ptr::null_mut(), 8, 0);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -6927,11 +7157,7 @@ mod tests {
     #[test]
     fn test_copy_file_range_phase89_nonexistent_fd_in_ebadf() {
         crate::errno::set_errno(0);
-        let r = copy_file_range(
-            9999, core::ptr::null_mut(),
-            1, core::ptr::null_mut(),
-            8, 0,
-        );
+        let r = copy_file_range(9999, core::ptr::null_mut(), 1, core::ptr::null_mut(), 8, 0);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -6939,11 +7165,7 @@ mod tests {
     #[test]
     fn test_copy_file_range_phase89_nonexistent_fd_out_ebadf() {
         crate::errno::set_errno(0);
-        let r = copy_file_range(
-            0, core::ptr::null_mut(),
-            9999, core::ptr::null_mut(),
-            8, 0,
-        );
+        let r = copy_file_range(0, core::ptr::null_mut(), 9999, core::ptr::null_mut(), 8, 0);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -6952,11 +7174,7 @@ mod tests {
     fn test_copy_file_range_phase89_flag_check_beats_ebadf() {
         // Bad flags + bogus fds → EINVAL, not EBADF (flag check first).
         crate::errno::set_errno(0);
-        let r = copy_file_range(
-            -1, core::ptr::null_mut(),
-            -1, core::ptr::null_mut(),
-            8, 1,
-        );
+        let r = copy_file_range(-1, core::ptr::null_mut(), -1, core::ptr::null_mut(), 8, 1);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -6965,11 +7183,7 @@ mod tests {
     fn test_copy_file_range_phase89_neg_fd_check_beats_lookup() {
         // -1 fd + non-existent positive fd → EBADF from negative check.
         crate::errno::set_errno(0);
-        let r = copy_file_range(
-            -1, core::ptr::null_mut(),
-            9999, core::ptr::null_mut(),
-            8, 0,
-        );
+        let r = copy_file_range(-1, core::ptr::null_mut(), 9999, core::ptr::null_mut(), 8, 0);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -6983,9 +7197,12 @@ mod tests {
         assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
         crate::errno::set_errno(0);
         let r = copy_file_range(
-            pipefd[0], core::ptr::null_mut(),
-            pipefd[1], core::ptr::null_mut(),
-            0, 0,
+            pipefd[0],
+            core::ptr::null_mut(),
+            pipefd[1],
+            core::ptr::null_mut(),
+            0,
+            0,
         );
         assert_eq!(r, 0);
         let _ = close(pipefd[0]);
@@ -6998,9 +7215,12 @@ mod tests {
         assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
         crate::errno::set_errno(0);
         let r = copy_file_range(
-            pipefd[0], core::ptr::null_mut(),
-            pipefd[1], core::ptr::null_mut(),
-            8, 1,
+            pipefd[0],
+            core::ptr::null_mut(),
+            pipefd[1],
+            core::ptr::null_mut(),
+            8,
+            1,
         );
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -7008,9 +7228,12 @@ mod tests {
         // Subsequent valid call succeeds (len==0 no-op).
         crate::errno::set_errno(0);
         let r = copy_file_range(
-            pipefd[0], core::ptr::null_mut(),
-            pipefd[1], core::ptr::null_mut(),
-            0, 0,
+            pipefd[0],
+            core::ptr::null_mut(),
+            pipefd[1],
+            core::ptr::null_mut(),
+            0,
+            0,
         );
         assert_eq!(r, 0);
         let _ = close(pipefd[0]);
@@ -7023,18 +7246,24 @@ mod tests {
         assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
         crate::errno::set_errno(0);
         let r = copy_file_range(
-            9999, core::ptr::null_mut(),
-            pipefd[1], core::ptr::null_mut(),
-            8, 0,
+            9999,
+            core::ptr::null_mut(),
+            pipefd[1],
+            core::ptr::null_mut(),
+            8,
+            0,
         );
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
 
         crate::errno::set_errno(0);
         let r = copy_file_range(
-            pipefd[0], core::ptr::null_mut(),
-            pipefd[1], core::ptr::null_mut(),
-            0, 0,
+            pipefd[0],
+            core::ptr::null_mut(),
+            pipefd[1],
+            core::ptr::null_mut(),
+            0,
+            0,
         );
         assert_eq!(r, 0);
         let _ = close(pipefd[0]);
@@ -7142,8 +7371,7 @@ mod tests {
 
     #[test]
     fn test_fadvise64_succeeds() {
-        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0)
-            .expect("fd available");
+        let fd = fdtable::alloc_fd(fdtable::HandleKind::Console, 0).expect("fd available");
         assert_eq!(fadvise64(fd, 0, 0, 0), 0);
         let _ = close(fd);
     }
@@ -7162,7 +7390,14 @@ mod tests {
     fn test_splice_invalid_fd_in() {
         crate::errno::set_errno(0);
         // fd 9999 is out of range → EBADF before any kind checks.
-        let result = splice(9999, core::ptr::null_mut(), 1, core::ptr::null_mut(), 4096, 0);
+        let result = splice(
+            9999,
+            core::ptr::null_mut(),
+            1,
+            core::ptr::null_mut(),
+            4096,
+            0,
+        );
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -7171,7 +7406,14 @@ mod tests {
     fn test_splice_invalid_fd_out() {
         crate::errno::set_errno(0);
         // fd 0 (stdin) is valid, fd 9999 isn't → EBADF.
-        let result = splice(0, core::ptr::null_mut(), 9999, core::ptr::null_mut(), 4096, 0);
+        let result = splice(
+            0,
+            core::ptr::null_mut(),
+            9999,
+            core::ptr::null_mut(),
+            4096,
+            0,
+        );
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -7181,16 +7423,17 @@ mod tests {
         // Fabricate two non-pipe fds.  We can't rely on fds 0/1 being
         // present in the full suite because other tests may have closed
         // them — using alloc_fd guarantees fresh slots in known states.
-        let in_fd = fdtable::alloc_fd(HandleKind::File, 3)
-            .expect("alloc_fd File failed");
-        let out_fd = fdtable::alloc_fd(HandleKind::File, 4)
-            .expect("alloc_fd File failed");
+        let in_fd = fdtable::alloc_fd(HandleKind::File, 3).expect("alloc_fd File failed");
+        let out_fd = fdtable::alloc_fd(HandleKind::File, 4).expect("alloc_fd File failed");
 
         crate::errno::set_errno(0);
         let result = splice(
-            in_fd, core::ptr::null_mut(),
-            out_fd, core::ptr::null_mut(),
-            4096, 0,
+            in_fd,
+            core::ptr::null_mut(),
+            out_fd,
+            core::ptr::null_mut(),
+            4096,
+            0,
         );
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -7204,17 +7447,18 @@ mod tests {
         // Fabricate a pipe-kind fd and a regular-file-kind fd.  Asking
         // for an offset on the pipe side must fail with ESPIPE before
         // any I/O is attempted.
-        let pipe_fd = fdtable::alloc_fd(HandleKind::Pipe, 1)
-            .expect("alloc_fd Pipe failed");
-        let file_fd = fdtable::alloc_fd(HandleKind::File, 1)
-            .expect("alloc_fd File failed");
+        let pipe_fd = fdtable::alloc_fd(HandleKind::Pipe, 1).expect("alloc_fd Pipe failed");
+        let file_fd = fdtable::alloc_fd(HandleKind::File, 1).expect("alloc_fd File failed");
 
         crate::errno::set_errno(0);
         let mut off: i64 = 0;
         let result = splice(
-            pipe_fd, &raw mut off,
-            file_fd, core::ptr::null_mut(),
-            4096, 0,
+            pipe_fd,
+            &raw mut off,
+            file_fd,
+            core::ptr::null_mut(),
+            4096,
+            0,
         );
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE);
@@ -7225,17 +7469,18 @@ mod tests {
 
     #[test]
     fn test_splice_offset_on_pipe_out_espipe() {
-        let pipe_fd = fdtable::alloc_fd(HandleKind::Pipe, 2)
-            .expect("alloc_fd Pipe failed");
-        let file_fd = fdtable::alloc_fd(HandleKind::File, 2)
-            .expect("alloc_fd File failed");
+        let pipe_fd = fdtable::alloc_fd(HandleKind::Pipe, 2).expect("alloc_fd Pipe failed");
+        let file_fd = fdtable::alloc_fd(HandleKind::File, 2).expect("alloc_fd File failed");
 
         crate::errno::set_errno(0);
         let mut off: i64 = 0;
         let result = splice(
-            file_fd, core::ptr::null_mut(),
-            pipe_fd, &raw mut off,
-            4096, 0,
+            file_fd,
+            core::ptr::null_mut(),
+            pipe_fd,
+            &raw mut off,
+            4096,
+            0,
         );
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ESPIPE);
@@ -7251,9 +7496,7 @@ mod tests {
         // after argument validation passes.  Need two real pipe fds.
         let mut pf1 = [0i32; 2];
         let mut pf2 = [0i32; 2];
-        if crate::pipe::pipe(pf1.as_mut_ptr()) != 0
-            || crate::pipe::pipe(pf2.as_mut_ptr()) != 0
-        {
+        if crate::pipe::pipe(pf1.as_mut_ptr()) != 0 || crate::pipe::pipe(pf2.as_mut_ptr()) != 0 {
             return;
         }
         crate::errno::set_errno(0);
@@ -7285,7 +7528,10 @@ mod tests {
     fn test_vmsplice_too_many_segs_einval() {
         crate::errno::set_errno(0);
         // u64 above i32::MAX → EINVAL.
-        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let dummy = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         let result = vmsplice(0, &raw const dummy, (i32::MAX as u64) + 1, 0);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -7294,7 +7540,10 @@ mod tests {
     #[test]
     fn test_vmsplice_invalid_fd_ebadf() {
         crate::errno::set_errno(0);
-        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let dummy = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         let result = vmsplice(9999, &raw const dummy, 1, 0);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
@@ -7304,7 +7553,10 @@ mod tests {
     fn test_vmsplice_non_pipe_fd_ebadf() {
         // fd 1 is Console, not Pipe — Linux returns EBADF.
         crate::errno::set_errno(0);
-        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let dummy = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         let result = vmsplice(1, &raw const dummy, 1, 0);
         assert_eq!(result, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
@@ -7332,7 +7584,14 @@ mod tests {
     #[test]
     fn test_splice_phase88_high_garbage_flag_einval() {
         crate::errno::set_errno(0);
-        let r = splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 8, 0x8000_0000);
+        let r = splice(
+            0,
+            core::ptr::null_mut(),
+            1,
+            core::ptr::null_mut(),
+            8,
+            0x8000_0000,
+        );
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7340,7 +7599,14 @@ mod tests {
     #[test]
     fn test_splice_phase88_all_unknown_bits_einval() {
         crate::errno::set_errno(0);
-        let r = splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 8, !SPLICE_F_VALID);
+        let r = splice(
+            0,
+            core::ptr::null_mut(),
+            1,
+            core::ptr::null_mut(),
+            8,
+            !SPLICE_F_VALID,
+        );
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7382,14 +7648,7 @@ mod tests {
     fn test_splice_phase88_zero_flags_still_accepted() {
         // The classic call form with flags=0 must still pass validation
         // and reach the len==0 short-circuit.
-        let r = splice(
-            0,
-            core::ptr::null_mut(),
-            1,
-            core::ptr::null_mut(),
-            0,
-            0,
-        );
+        let r = splice(0, core::ptr::null_mut(), 1, core::ptr::null_mut(), 0, 0);
         assert_eq!(r, 0);
     }
 
@@ -7411,7 +7670,10 @@ mod tests {
     #[test]
     fn test_vmsplice_phase88_unknown_flag_bit_einval() {
         crate::errno::set_errno(0);
-        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let dummy = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         let r = vmsplice(0, &raw const dummy, 1, 0x10);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -7420,7 +7682,10 @@ mod tests {
     #[test]
     fn test_vmsplice_phase88_high_garbage_flag_einval() {
         crate::errno::set_errno(0);
-        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let dummy = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         let r = vmsplice(0, &raw const dummy, 1, 0x8000_0000);
         assert_eq!(r, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -7440,7 +7705,10 @@ mod tests {
         // Bad flags + too-many segs → EINVAL from flag check, not from
         // the segs validation (both would set EINVAL, but the order
         // matters for ordering parity).
-        let dummy = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let dummy = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         crate::errno::set_errno(0);
         let r = vmsplice(0, &raw const dummy, (i32::MAX as u64) + 1, 0x10);
         assert_eq!(r, -1);
@@ -7497,11 +7765,15 @@ mod tests {
 
     #[test]
     fn test_splice_flags_no_collision() {
-        let all = [SPLICE_F_MOVE, SPLICE_F_NONBLOCK, SPLICE_F_MORE, SPLICE_F_GIFT];
+        let all = [
+            SPLICE_F_MOVE,
+            SPLICE_F_NONBLOCK,
+            SPLICE_F_MORE,
+            SPLICE_F_GIFT,
+        ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {
-                assert_eq!(all[i] & all[j], 0,
-                    "SPLICE_F flags {i} and {j} collide");
+                assert_eq!(all[i] & all[j], 0, "SPLICE_F flags {i} and {j} collide");
             }
         }
     }
@@ -7555,7 +7827,10 @@ mod tests {
 
     #[test]
     fn test_preadv_zero_iovcnt() {
-        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let iov = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         crate::errno::set_errno(0);
         let ret = preadv(0, &iov, 0, 0);
         assert_eq!(ret, -1);
@@ -7564,7 +7839,10 @@ mod tests {
 
     #[test]
     fn test_preadv_negative_iovcnt() {
-        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let iov = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         crate::errno::set_errno(0);
         let ret = preadv(0, &iov, -1, 0);
         assert_eq!(ret, -1);
@@ -7573,7 +7851,10 @@ mod tests {
 
     #[test]
     fn test_preadv_over_max_iovcnt() {
-        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let iov = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         crate::errno::set_errno(0);
         let ret = preadv(0, &iov, 1025, 0);
         assert_eq!(ret, -1);
@@ -7583,7 +7864,10 @@ mod tests {
     #[test]
     fn test_preadv_negative_offset() {
         let mut buf = [0u8; 16];
-        let iov = Iovec { iov_base: buf.as_mut_ptr(), iov_len: 16 };
+        let iov = Iovec {
+            iov_base: buf.as_mut_ptr(),
+            iov_len: 16,
+        };
         crate::errno::set_errno(0);
         let ret = preadv(0, &iov, 1, -1);
         assert_eq!(ret, -1);
@@ -7600,7 +7884,10 @@ mod tests {
 
     #[test]
     fn test_pwritev_zero_iovcnt() {
-        let iov = Iovec { iov_base: core::ptr::null_mut(), iov_len: 0 };
+        let iov = Iovec {
+            iov_base: core::ptr::null_mut(),
+            iov_len: 0,
+        };
         crate::errno::set_errno(0);
         let ret = pwritev(0, &iov, 0, 0);
         assert_eq!(ret, -1);
@@ -7610,7 +7897,10 @@ mod tests {
     #[test]
     fn test_pwritev_negative_offset() {
         let buf = [0u8; 16];
-        let iov = Iovec { iov_base: buf.as_ptr().cast_mut(), iov_len: 16 };
+        let iov = Iovec {
+            iov_base: buf.as_ptr().cast_mut(),
+            iov_len: 16,
+        };
         crate::errno::set_errno(0);
         let ret = pwritev(0, &iov, 1, -1);
         assert_eq!(ret, -1);
@@ -7707,9 +7997,7 @@ mod tests {
         // SYNC_FILE_RANGE_VALID covers exactly the three defined bits.
         assert_eq!(
             SYNC_FILE_RANGE_VALID,
-            SYNC_FILE_RANGE_WAIT_BEFORE
-                | SYNC_FILE_RANGE_WRITE
-                | SYNC_FILE_RANGE_WAIT_AFTER,
+            SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER,
         );
         assert_eq!(SYNC_FILE_RANGE_VALID, 7);
     }
@@ -7746,10 +8034,10 @@ mod tests {
         assert_eq!(crate::pipe::pipe(pipefd.as_mut_ptr()), 0);
         crate::errno::set_errno(0);
         let _ret = sync_file_range(
-            pipefd[0], 0, 0,
-            SYNC_FILE_RANGE_WAIT_BEFORE
-                | SYNC_FILE_RANGE_WRITE
-                | SYNC_FILE_RANGE_WAIT_AFTER,
+            pipefd[0],
+            0,
+            0,
+            SYNC_FILE_RANGE_WAIT_BEFORE | SYNC_FILE_RANGE_WRITE | SYNC_FILE_RANGE_WAIT_AFTER,
         );
         // The flag prologue must not produce EINVAL.
         assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -7915,7 +8203,10 @@ mod tests {
     fn test_name_to_handle_at_returns_enosys() {
         // Valid inputs must reach the ENOSYS sentinel — all earlier
         // error classes are exercised in dedicated tests below.
-        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 128,
+            handle_type: 0,
+        };
         let mut mount_id: i32 = 0;
         crate::errno::set_errno(0);
         let ret = name_to_handle_at(
@@ -7933,7 +8224,10 @@ mod tests {
     fn test_open_by_handle_at_returns_enosys() {
         // Valid pointer + AT_FDCWD must pass validation and surface
         // ENOSYS rather than EFAULT/EBADF.
-        let mut fh = FileHandle { handle_bytes: 0, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 0,
+            handle_type: 0,
+        };
         crate::errno::set_errno(0);
         let ret = open_by_handle_at(AT_FDCWD, &raw mut fh, 0);
         assert_eq!(ret, -1);
@@ -7995,7 +8289,12 @@ mod tests {
     #[test]
     fn test_faccessat2_nonexistent() {
         // Syscall result is unpredictable on test host — just verify no crash.
-        let _ret = faccessat2(AT_FDCWD, b"/nonexistent_file_xyz\0".as_ptr(), crate::fcntl::F_OK, 0);
+        let _ret = faccessat2(
+            AT_FDCWD,
+            b"/nonexistent_file_xyz\0".as_ptr(),
+            crate::fcntl::F_OK,
+            0,
+        );
     }
 
     #[test]
@@ -8020,7 +8319,10 @@ mod tests {
         assert_eq!(crate::fcntl::W_OK, 2);
         assert_eq!(crate::fcntl::X_OK, 1);
         // R_OK | W_OK | X_OK == 7 (S_IRWXO equivalent for mode check).
-        assert_eq!(crate::fcntl::R_OK | crate::fcntl::W_OK | crate::fcntl::X_OK, 7);
+        assert_eq!(
+            crate::fcntl::R_OK | crate::fcntl::W_OK | crate::fcntl::X_OK,
+            7
+        );
     }
 
     #[test]
@@ -8219,7 +8521,11 @@ mod tests {
     #[test]
     fn test_openat2_short_size() {
         crate::errno::set_errno(0);
-        let how = OpenHow { flags: 0, mode: 0, resolve: 0 };
+        let how = OpenHow {
+            flags: 0,
+            mode: 0,
+            resolve: 0,
+        };
         let ret = openat2(AT_FDCWD, b"/tmp\0".as_ptr(), &how, 1); // too small
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -8253,7 +8559,11 @@ mod tests {
     fn test_openat2_valid_how() {
         // Valid OpenHow — delegates to openat.  Syscall result is
         // unpredictable on the test host; just verify no crash.
-        let how = OpenHow { flags: crate::fcntl::O_RDONLY as u64, mode: 0, resolve: 0 };
+        let how = OpenHow {
+            flags: crate::fcntl::O_RDONLY as u64,
+            mode: 0,
+            resolve: 0,
+        };
         let _ret = openat2(
             AT_FDCWD,
             b"/nonexistent_openat2_test\0".as_ptr(),
@@ -8314,7 +8624,11 @@ mod tests {
         // and rejects anything larger with E2BIG so userspace gets a
         // clear signal that the kernel doesn't know about that struct
         // version.
-        let how = OpenHow { flags: 0, mode: 0, resolve: 0 };
+        let how = OpenHow {
+            flags: 0,
+            mode: 0,
+            resolve: 0,
+        };
         crate::errno::set_errno(0);
         let ret = openat2(
             AT_FDCWD,
@@ -8333,12 +8647,7 @@ mod tests {
         // (the caller's size argument is wrong; their pointer is a
         // red herring).
         crate::errno::set_errno(0);
-        let ret = openat2(
-            AT_FDCWD,
-            b"/tmp\0".as_ptr(),
-            core::ptr::null(),
-            10_000,
-        );
+        let ret = openat2(AT_FDCWD, b"/tmp\0".as_ptr(), core::ptr::null(), 10_000);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::E2BIG);
     }
@@ -8355,12 +8664,7 @@ mod tests {
         // SAFETY: 4096 > sizeof::<OpenHow>(), and OpenHow's all-zero
         // value (every field 0) is a valid bit pattern.
         crate::errno::set_errno(0);
-        let _ret = openat2(
-            AT_FDCWD,
-            b"/nonexistent_phase135\0".as_ptr(),
-            how_ptr,
-            4096,
-        );
+        let _ret = openat2(AT_FDCWD, b"/nonexistent_phase135\0".as_ptr(), how_ptr, 4096);
         // We don't care about the actual return; just that it isn't
         // E2BIG-from-our-size-check.
         assert_ne!(crate::errno::get_errno(), crate::errno::E2BIG);
@@ -8717,7 +9021,7 @@ mod tests {
         // resolve → mode-bits → mode-vs-flags.
         let how = OpenHow {
             flags: crate::fcntl::O_RDONLY as u64,
-            mode: 0o644, // also bad (no O_CREAT)
+            mode: 0o644,         // also bad (no O_CREAT)
             resolve: 1u64 << 40, // bad resolve bit
         };
         crate::errno::set_errno(0);
@@ -8888,7 +9192,13 @@ mod tests {
     #[test]
     fn test_statx_null_buf() {
         crate::errno::set_errno(0);
-        let ret = statx(AT_FDCWD, b"/tmp\0".as_ptr(), 0, STATX_ALL, core::ptr::null_mut());
+        let ret = statx(
+            AT_FDCWD,
+            b"/tmp\0".as_ptr(),
+            0,
+            STATX_ALL,
+            core::ptr::null_mut(),
+        );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
@@ -8945,9 +9255,17 @@ mod tests {
     #[test]
     fn test_statx_basic_stats_mask() {
         // STATX_BASIC_STATS should be all basic bits ORed.
-        let expected = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_UID
-            | STATX_GID | STATX_ATIME | STATX_MTIME | STATX_CTIME
-            | STATX_INO | STATX_SIZE | STATX_BLOCKS;
+        let expected = STATX_TYPE
+            | STATX_MODE
+            | STATX_NLINK
+            | STATX_UID
+            | STATX_GID
+            | STATX_ATIME
+            | STATX_MTIME
+            | STATX_CTIME
+            | STATX_INO
+            | STATX_SIZE
+            | STATX_BLOCKS;
         assert_eq!(STATX_BASIC_STATS, expected);
     }
 
@@ -9064,7 +9382,11 @@ mod tests {
         // returns EINVAL because tee requires both ends to be pipes.
         use crate::fdtable;
         let path = "tee_nonpipe_in.tmp\0";
-        let fd_file = open(path.as_ptr(), crate::fcntl::O_CREAT | crate::fcntl::O_RDWR, 0o644);
+        let fd_file = open(
+            path.as_ptr(),
+            crate::fcntl::O_CREAT | crate::fcntl::O_RDWR,
+            0o644,
+        );
         if fd_file < 0 {
             return;
         }
@@ -9088,7 +9410,11 @@ mod tests {
     fn test_tee_non_pipe_fd_out_einval() {
         use crate::fdtable;
         let path = "tee_nonpipe_out.tmp\0";
-        let fd_file = open(path.as_ptr(), crate::fcntl::O_CREAT | crate::fcntl::O_RDWR, 0o644);
+        let fd_file = open(
+            path.as_ptr(),
+            crate::fcntl::O_CREAT | crate::fcntl::O_RDWR,
+            0o644,
+        );
         if fd_file < 0 {
             return;
         }
@@ -9115,9 +9441,7 @@ mod tests {
         use crate::fdtable;
         let mut pf1 = [0i32; 2];
         let mut pf2 = [0i32; 2];
-        if crate::pipe::pipe(pf1.as_mut_ptr()) != 0
-            || crate::pipe::pipe(pf2.as_mut_ptr()) != 0
-        {
+        if crate::pipe::pipe(pf1.as_mut_ptr()) != 0 || crate::pipe::pipe(pf2.as_mut_ptr()) != 0 {
             return;
         }
         crate::errno::set_errno(0);
@@ -9163,7 +9487,10 @@ mod tests {
 
     #[test]
     fn test_name_to_handle_at_flags_valid_mask() {
-        assert_eq!(NAME_TO_HANDLE_AT_FLAGS_VALID, AT_SYMLINK_FOLLOW | AT_EMPTY_PATH);
+        assert_eq!(
+            NAME_TO_HANDLE_AT_FLAGS_VALID,
+            AT_SYMLINK_FOLLOW | AT_EMPTY_PATH
+        );
         // 0x800 is between FOLLOW(0x400) and EMPTY_PATH(0x1000) and
         // must not be in the accepted set.
         assert_eq!(0x800 & !NAME_TO_HANDLE_AT_FLAGS_VALID, 0x800);
@@ -9171,7 +9498,10 @@ mod tests {
 
     #[test]
     fn test_name_to_handle_at_unknown_flag_einval() {
-        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 128,
+            handle_type: 0,
+        };
         let mut mid: i32 = 0;
         crate::errno::set_errno(0);
         let ret = name_to_handle_at(
@@ -9187,7 +9517,10 @@ mod tests {
 
     #[test]
     fn test_name_to_handle_at_accepts_at_symlink_follow() {
-        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 128,
+            handle_type: 0,
+        };
         let mut mid: i32 = 0;
         crate::errno::set_errno(0);
         let ret = name_to_handle_at(
@@ -9205,7 +9538,10 @@ mod tests {
 
     #[test]
     fn test_name_to_handle_at_accepts_at_empty_path() {
-        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 128,
+            handle_type: 0,
+        };
         let mut mid: i32 = 0;
         crate::errno::set_errno(0);
         let ret = name_to_handle_at(
@@ -9223,16 +9559,13 @@ mod tests {
 
     #[test]
     fn test_name_to_handle_at_null_pathname_efault() {
-        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 128,
+            handle_type: 0,
+        };
         let mut mid: i32 = 0;
         crate::errno::set_errno(0);
-        let ret = name_to_handle_at(
-            AT_FDCWD,
-            core::ptr::null(),
-            &raw mut fh,
-            &raw mut mid,
-            0,
-        );
+        let ret = name_to_handle_at(AT_FDCWD, core::ptr::null(), &raw mut fh, &raw mut mid, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
@@ -9254,7 +9587,10 @@ mod tests {
 
     #[test]
     fn test_name_to_handle_at_null_mount_id_efault() {
-        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 128,
+            handle_type: 0,
+        };
         crate::errno::set_errno(0);
         let ret = name_to_handle_at(
             AT_FDCWD,
@@ -9271,33 +9607,27 @@ mod tests {
 
     #[test]
     fn test_name_to_handle_at_negative_dirfd_ebadf() {
-        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 128,
+            handle_type: 0,
+        };
         let mut mid: i32 = 0;
         crate::errno::set_errno(0);
         // -5 is not AT_FDCWD (-100), so it must be a valid open fd.
-        let ret = name_to_handle_at(
-            -5,
-            b"foo\0".as_ptr(),
-            &raw mut fh,
-            &raw mut mid,
-            0,
-        );
+        let ret = name_to_handle_at(-5, b"foo\0".as_ptr(), &raw mut fh, &raw mut mid, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
 
     #[test]
     fn test_name_to_handle_at_nonexistent_dirfd_ebadf() {
-        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 128,
+            handle_type: 0,
+        };
         let mut mid: i32 = 0;
         crate::errno::set_errno(0);
-        let ret = name_to_handle_at(
-            100_000,
-            b"foo\0".as_ptr(),
-            &raw mut fh,
-            &raw mut mid,
-            0,
-        );
+        let ret = name_to_handle_at(100_000, b"foo\0".as_ptr(), &raw mut fh, &raw mut mid, 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -9346,7 +9676,10 @@ mod tests {
 
     #[test]
     fn test_open_by_handle_at_negative_mountfd_ebadf() {
-        let mut fh = FileHandle { handle_bytes: 0, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 0,
+            handle_type: 0,
+        };
         crate::errno::set_errno(0);
         let ret = open_by_handle_at(-5, &raw mut fh, 0);
         assert_eq!(ret, -1);
@@ -9355,7 +9688,10 @@ mod tests {
 
     #[test]
     fn test_open_by_handle_at_nonexistent_mountfd_ebadf() {
-        let mut fh = FileHandle { handle_bytes: 0, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 0,
+            handle_type: 0,
+        };
         crate::errno::set_errno(0);
         let ret = open_by_handle_at(100_000, &raw mut fh, 0);
         assert_eq!(ret, -1);
@@ -9381,9 +9717,7 @@ mod tests {
         use crate::fdtable;
         let mut a = [0i32; 2];
         let mut b = [0i32; 2];
-        if crate::pipe::pipe(a.as_mut_ptr()) != 0
-            || crate::pipe::pipe(b.as_mut_ptr()) != 0
-        {
+        if crate::pipe::pipe(a.as_mut_ptr()) != 0 || crate::pipe::pipe(b.as_mut_ptr()) != 0 {
             return;
         }
         assert_eq!(tee(a[0], b[1], 0, SPLICE_F_NONBLOCK), 0);
@@ -9412,7 +9746,10 @@ mod tests {
         // Caller confuses AT_SYMLINK_NOFOLLOW (which is for stat-family)
         // with AT_SYMLINK_FOLLOW (which is what name_to_handle_at wants).
         // AT_SYMLINK_NOFOLLOW is 0x100 — outside our valid mask.
-        let mut fh = FileHandle { handle_bytes: 128, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 128,
+            handle_type: 0,
+        };
         let mut mid: i32 = 0;
         crate::errno::set_errno(0);
         let ret = name_to_handle_at(
@@ -9433,7 +9770,10 @@ mod tests {
         // surface ENOSYS — the caller's bug is observable through the
         // syscall *succeeding* validation, not through a misleading
         // EFAULT.
-        let mut fh = FileHandle { handle_bytes: 0, handle_type: 0 };
+        let mut fh = FileHandle {
+            handle_bytes: 0,
+            handle_type: 0,
+        };
         crate::errno::set_errno(0);
         let ret = open_by_handle_at(AT_FDCWD, &raw mut fh, 0);
         assert_eq!(ret, -1);
@@ -9505,8 +9845,7 @@ mod tests {
 
     #[test]
     fn test_fchmod_open_fd_returns_zero() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(fchmod(fd, 0o600), 0);
         let _ = fdtable::close_fd(fd);
     }
@@ -9515,8 +9854,7 @@ mod tests {
     fn test_fchmod_pipe_fd_still_returns_zero() {
         // fchmod on a pipe is permitted on Linux (EBADF only on closed fds,
         // not on non-file kinds), so accept the call.
-        let fd = fdtable::alloc_fd(HandleKind::Pipe, 1)
-            .expect("alloc_fd Pipe failed");
+        let fd = fdtable::alloc_fd(HandleKind::Pipe, 1).expect("alloc_fd Pipe failed");
         assert_eq!(fchmod(fd, 0o400), 0);
         let _ = fdtable::close_fd(fd);
     }
@@ -9539,10 +9877,7 @@ mod tests {
     fn test_chown_minus_one_owner_returns_zero() {
         // (uid_t)-1 in both fields means "change nothing" in POSIX, so the
         // call short-circuits to success without issuing SYS_FS_SET_OWNER.
-        assert_eq!(
-            chown(b"/etc/passwd\0".as_ptr(), UidT::MAX, UidT::MAX),
-            0
-        );
+        assert_eq!(chown(b"/etc/passwd\0".as_ptr(), UidT::MAX, UidT::MAX), 0);
     }
 
     // ---- fchown ----
@@ -9574,8 +9909,7 @@ mod tests {
 
     #[test]
     fn test_fchown_open_fd_returns_zero() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(fchown(fd, 1000, 1000), 0);
         let _ = fdtable::close_fd(fd);
     }
@@ -9629,8 +9963,7 @@ mod tests {
     #[test]
     fn test_buggy_caller_fchown_with_stale_fd() {
         // Caller stored an fd, closed it, then tried to fchown it.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let _ = fdtable::close_fd(fd);
         crate::errno::set_errno(0);
         assert_eq!(fchown(fd, 0, 0), -1);
@@ -9695,24 +10028,14 @@ mod tests {
         // AT_SYMLINK_NOFOLLOW is a valid fchmodat flag.  Must clear
         // the flag check (other errors are unrelated).
         crate::errno::set_errno(0);
-        let _ret = fchmodat(
-            AT_FDCWD,
-            b"/tmp\0".as_ptr(),
-            0o644,
-            AT_SYMLINK_NOFOLLOW,
-        );
+        let _ret = fchmodat(AT_FDCWD, b"/tmp\0".as_ptr(), 0o644, AT_SYMLINK_NOFOLLOW);
         assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_fchmodat_phase92_empty_path_accepted() {
         crate::errno::set_errno(0);
-        let _ret = fchmodat(
-            AT_FDCWD,
-            b"/tmp\0".as_ptr(),
-            0o644,
-            AT_EMPTY_PATH,
-        );
+        let _ret = fchmodat(AT_FDCWD, b"/tmp\0".as_ptr(), 0o644, AT_EMPTY_PATH);
         assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
@@ -9764,24 +10087,14 @@ mod tests {
     #[test]
     fn test_fchownat_phase92_symlink_nofollow_accepted() {
         crate::errno::set_errno(0);
-        let _ret = fchownat(
-            AT_FDCWD,
-            b"/tmp\0".as_ptr(),
-            0, 0,
-            AT_SYMLINK_NOFOLLOW,
-        );
+        let _ret = fchownat(AT_FDCWD, b"/tmp\0".as_ptr(), 0, 0, AT_SYMLINK_NOFOLLOW);
         assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
     #[test]
     fn test_fchownat_phase92_empty_path_accepted() {
         crate::errno::set_errno(0);
-        let _ret = fchownat(
-            AT_FDCWD,
-            b"/tmp\0".as_ptr(),
-            0, 0,
-            AT_EMPTY_PATH,
-        );
+        let _ret = fchownat(AT_FDCWD, b"/tmp\0".as_ptr(), 0, 0, AT_EMPTY_PATH);
         assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
 
@@ -9791,7 +10104,8 @@ mod tests {
         let _ret = fchownat(
             AT_FDCWD,
             b"/tmp\0".as_ptr(),
-            0, 0,
+            0,
+            0,
             AT_SYMLINK_NOFOLLOW | AT_EMPTY_PATH,
         );
         assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -9882,8 +10196,14 @@ mod tests {
     #[test]
     fn test_utimes_valid_times_returns_zero() {
         let tv = [
-            Timeval { tv_sec: 1, tv_usec: 0 },
-            Timeval { tv_sec: 2, tv_usec: USEC_MAX },
+            Timeval {
+                tv_sec: 1,
+                tv_usec: 0,
+            },
+            Timeval {
+                tv_sec: 2,
+                tv_usec: USEC_MAX,
+            },
         ];
         assert_eq!(utimes(b"/tmp/f\0".as_ptr(), tv.as_ptr()), 0);
     }
@@ -9891,8 +10211,14 @@ mod tests {
     #[test]
     fn test_utimes_negative_usec_einval() {
         let tv = [
-            Timeval { tv_sec: 0, tv_usec: -1 },
-            Timeval { tv_sec: 0, tv_usec: 0 },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: -1,
+            },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
         ];
         crate::errno::set_errno(0);
         assert_eq!(utimes(b"/tmp/f\0".as_ptr(), tv.as_ptr()), -1);
@@ -9902,8 +10228,14 @@ mod tests {
     #[test]
     fn test_utimes_overflow_usec_einval() {
         let tv = [
-            Timeval { tv_sec: 0, tv_usec: 0 },
-            Timeval { tv_sec: 0, tv_usec: 1_000_000 },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: 1_000_000,
+            },
         ];
         crate::errno::set_errno(0);
         assert_eq!(utimes(b"/tmp/f\0".as_ptr(), tv.as_ptr()), -1);
@@ -9914,8 +10246,14 @@ mod tests {
     fn test_utimes_null_path_beats_bad_times() {
         // NULL path is checked before times[].tv_usec range.
         let tv = [
-            Timeval { tv_sec: 0, tv_usec: -1 },
-            Timeval { tv_sec: 0, tv_usec: -1 },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: -1,
+            },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: -1,
+            },
         ];
         crate::errno::set_errno(0);
         assert_eq!(utimes(core::ptr::null(), tv.as_ptr()), -1);
@@ -9944,11 +10282,16 @@ mod tests {
 
     #[test]
     fn test_futimes_valid_returns_zero() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let tv = [
-            Timeval { tv_sec: 0, tv_usec: 0 },
-            Timeval { tv_sec: 0, tv_usec: 0 },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
         ];
         assert_eq!(futimes(fd, tv.as_ptr()), 0);
         let _ = fdtable::close_fd(fd);
@@ -9956,11 +10299,16 @@ mod tests {
 
     #[test]
     fn test_futimes_bad_times_einval() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let tv = [
-            Timeval { tv_sec: 0, tv_usec: 0 },
-            Timeval { tv_sec: 0, tv_usec: 2_000_000 },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: 2_000_000,
+            },
         ];
         crate::errno::set_errno(0);
         assert_eq!(futimes(fd, tv.as_ptr()), -1);
@@ -9971,8 +10319,14 @@ mod tests {
     #[test]
     fn test_futimes_bad_fd_beats_bad_times() {
         let tv = [
-            Timeval { tv_sec: 0, tv_usec: -1 },
-            Timeval { tv_sec: 0, tv_usec: -1 },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: -1,
+            },
+            Timeval {
+                tv_sec: 0,
+                tv_usec: -1,
+            },
         ];
         crate::errno::set_errno(0);
         assert_eq!(futimes(-1, tv.as_ptr()), -1);
@@ -10018,20 +10372,29 @@ mod tests {
     #[test]
     fn test_utimensat_utime_now_sentinel_accepted() {
         let ts = [
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_NOW },
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_OMIT },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_NOW,
+            },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            },
         ];
-        assert_eq!(
-            utimensat(AT_FDCWD, b"/tmp/f\0".as_ptr(), ts.as_ptr(), 0),
-            0
-        );
+        assert_eq!(utimensat(AT_FDCWD, b"/tmp/f\0".as_ptr(), ts.as_ptr(), 0), 0);
     }
 
     #[test]
     fn test_utimensat_negative_nsec_einval() {
         let ts = [
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: -1 },
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: -1,
+            },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         ];
         crate::errno::set_errno(0);
         assert_eq!(
@@ -10044,8 +10407,14 @@ mod tests {
     #[test]
     fn test_utimensat_overflow_nsec_einval() {
         let ts = [
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 1_000_000_000,
+            },
         ];
         crate::errno::set_errno(0);
         assert_eq!(
@@ -10095,16 +10464,12 @@ mod tests {
     #[test]
     fn test_utimensat_absolute_path_ignores_dirfd() {
         // Absolute path: bad dirfd is fine.
-        assert_eq!(
-            utimensat(-2, b"/tmp/f\0".as_ptr(), core::ptr::null(), 0),
-            0
-        );
+        assert_eq!(utimensat(-2, b"/tmp/f\0".as_ptr(), core::ptr::null(), 0), 0);
     }
 
     #[test]
     fn test_utimensat_relative_path_open_dirfd_returns_zero() {
-        let dirfd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let dirfd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(
             utimensat(dirfd, b"relative\0".as_ptr(), core::ptr::null(), 0),
             0
@@ -10134,11 +10499,16 @@ mod tests {
 
     #[test]
     fn test_futimens_bad_nsec_einval() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let ts = [
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 2_000_000_000,
+            },
         ];
         crate::errno::set_errno(0);
         assert_eq!(futimens(fd, ts.as_ptr()), -1);
@@ -10148,11 +10518,16 @@ mod tests {
 
     #[test]
     fn test_futimens_utime_sentinels_accepted() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let ts = [
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_NOW },
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_OMIT },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_NOW,
+            },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            },
         ];
         assert_eq!(futimens(fd, ts.as_ptr()), 0);
         let _ = fdtable::close_fd(fd);
@@ -10161,8 +10536,14 @@ mod tests {
     #[test]
     fn test_futimens_bad_fd_beats_bad_times() {
         let ts = [
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: -1 },
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: -1 },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: -1,
+            },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: -1,
+            },
         ];
         crate::errno::set_errno(0);
         assert_eq!(futimens(-1, ts.as_ptr()), -1);
@@ -10175,28 +10556,40 @@ mod tests {
 
     #[test]
     fn test_timespec_to_kernel_ns_normal_value() {
-        let ts = crate::stat::Timespec { tv_sec: 5, tv_nsec: 123 };
+        let ts = crate::stat::Timespec {
+            tv_sec: 5,
+            tv_nsec: 123,
+        };
         assert_eq!(timespec_to_kernel_ns(&ts, NOW_NS), 5_000_000_123);
     }
 
     #[test]
     fn test_timespec_to_kernel_ns_omit_is_zero() {
         // UTIME_OMIT maps to 0 = "leave unchanged" (kernel convention).
-        let ts = crate::stat::Timespec { tv_sec: 999, tv_nsec: UTIME_OMIT };
+        let ts = crate::stat::Timespec {
+            tv_sec: 999,
+            tv_nsec: UTIME_OMIT,
+        };
         assert_eq!(timespec_to_kernel_ns(&ts, NOW_NS), 0);
     }
 
     #[test]
     fn test_timespec_to_kernel_ns_now_uses_wall_clock() {
         // UTIME_NOW ignores tv_sec and uses the supplied wall clock.
-        let ts = crate::stat::Timespec { tv_sec: 999, tv_nsec: UTIME_NOW };
+        let ts = crate::stat::Timespec {
+            tv_sec: 999,
+            tv_nsec: UTIME_NOW,
+        };
         assert_eq!(timespec_to_kernel_ns(&ts, NOW_NS), NOW_NS);
     }
 
     #[test]
     fn test_timeval_to_kernel_ns_microsecond_scale() {
         // 2 seconds + 250_000 us = 2.25 s = 2_250_000_000 ns.
-        let tv = Timeval { tv_sec: 2, tv_usec: 250_000 };
+        let tv = Timeval {
+            tv_sec: 2,
+            tv_usec: 250_000,
+        };
         assert_eq!(timeval_to_kernel_ns(&tv), 2_250_000_000);
     }
 
@@ -10211,8 +10604,14 @@ mod tests {
     fn test_utimens_pair_omit_now_mix() {
         // atime=UTIME_OMIT (unchanged → 0), mtime=UTIME_NOW (→ wall clock).
         let ts = [
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_OMIT },
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_NOW },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_NOW,
+            },
         ];
         // SAFETY: `ts` is a valid two-element array.
         let pair = unsafe { utimens_pair_to_kernel(ts.as_ptr(), NOW_NS) };
@@ -10222,8 +10621,14 @@ mod tests {
     #[test]
     fn test_utimens_pair_explicit_values() {
         let ts = [
-            crate::stat::Timespec { tv_sec: 10, tv_nsec: 0 },
-            crate::stat::Timespec { tv_sec: 20, tv_nsec: 500 },
+            crate::stat::Timespec {
+                tv_sec: 10,
+                tv_nsec: 0,
+            },
+            crate::stat::Timespec {
+                tv_sec: 20,
+                tv_nsec: 500,
+            },
         ];
         // SAFETY: `ts` is a valid two-element array.
         let pair = unsafe { utimens_pair_to_kernel(ts.as_ptr(), NOW_NS) };
@@ -10240,8 +10645,14 @@ mod tests {
     #[test]
     fn test_utimes_pair_explicit_values() {
         let tv = [
-            Timeval { tv_sec: 1, tv_usec: 0 },
-            Timeval { tv_sec: 3, tv_usec: 1 },
+            Timeval {
+                tv_sec: 1,
+                tv_usec: 0,
+            },
+            Timeval {
+                tv_sec: 3,
+                tv_usec: 1,
+            },
         ];
         // SAFETY: `tv` is a valid two-element array.
         let pair = unsafe { utimes_pair_to_kernel(tv.as_ptr(), NOW_NS) };
@@ -10260,8 +10671,7 @@ mod tests {
 
     #[test]
     fn test_buggy_caller_futimens_stale_fd() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let _ = fdtable::close_fd(fd);
         crate::errno::set_errno(0);
         assert_eq!(futimens(fd, core::ptr::null()), -1);
@@ -10284,8 +10694,14 @@ mod tests {
     fn test_workflow_touch_via_utimensat_now() {
         // What `touch` does: set both times to now via UTIME_NOW sentinels.
         let ts = [
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_NOW },
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_NOW },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_NOW,
+            },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_NOW,
+            },
         ];
         assert_eq!(
             utimensat(AT_FDCWD, b"/tmp/new\0".as_ptr(), ts.as_ptr(), 0),
@@ -10297,13 +10713,16 @@ mod tests {
     fn test_workflow_preserve_atime_via_utime_omit() {
         // `cp --preserve=mtime` style: only change mtime, leave atime.
         let ts = [
-            crate::stat::Timespec { tv_sec: 0, tv_nsec: UTIME_OMIT },
-            crate::stat::Timespec { tv_sec: 1_700_000_000, tv_nsec: 0 },
+            crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: UTIME_OMIT,
+            },
+            crate::stat::Timespec {
+                tv_sec: 1_700_000_000,
+                tv_nsec: 0,
+            },
         ];
-        assert_eq!(
-            utimensat(AT_FDCWD, b"/tmp/x\0".as_ptr(), ts.as_ptr(), 0),
-            0
-        );
+        assert_eq!(utimensat(AT_FDCWD, b"/tmp/x\0".as_ptr(), ts.as_ptr(), 0), 0);
     }
 
     // -----------------------------------------------------------------
@@ -10338,8 +10757,7 @@ mod tests {
     #[test]
     fn test_flock_zero_op_einval() {
         // Must specify one of LOCK_SH / LOCK_EX / LOCK_UN.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
         assert_eq!(flock(fd, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -10348,8 +10766,7 @@ mod tests {
 
     #[test]
     fn test_flock_unknown_bit_einval() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
         // 0x40 isn't in FLOCK_OP_MASK.
         assert_eq!(flock(fd, LOCK_SH | 0x40), -1);
@@ -10359,8 +10776,7 @@ mod tests {
 
     #[test]
     fn test_flock_two_modes_einval() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
         assert_eq!(flock(fd, LOCK_SH | LOCK_EX), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -10378,8 +10794,7 @@ mod tests {
     #[test]
     fn test_flock_nb_only_einval() {
         // LOCK_NB alone (without LOCK_SH/EX/UN) isn't a valid op.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
         assert_eq!(flock(fd, LOCK_NB), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -10388,8 +10803,7 @@ mod tests {
 
     #[test]
     fn test_flock_all_modes_with_nb_accepted() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         for &mode in &[LOCK_SH, LOCK_EX, LOCK_UN] {
             assert_eq!(flock(fd, mode), 0);
             assert_eq!(flock(fd, mode | LOCK_NB), 0);
@@ -10419,8 +10833,7 @@ mod tests {
 
     #[test]
     fn test_lockf_unknown_cmd_einval() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
         assert_eq!(lockf(fd, 99, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -10429,8 +10842,7 @@ mod tests {
 
     #[test]
     fn test_lockf_negative_cmd_einval() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
         assert_eq!(lockf(fd, -1, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -10448,8 +10860,7 @@ mod tests {
     fn test_lockf_negative_len_accepted() {
         // POSIX lockf accepts negative len (means "lock backwards from
         // current offset").  Our stub passes a non-zero len through.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(lockf(fd, F_LOCK, -100), 0);
         let _ = fdtable::close_fd(fd);
     }
@@ -10458,8 +10869,7 @@ mod tests {
 
     #[test]
     fn test_buggy_caller_flock_stale_fd() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         let _ = fdtable::close_fd(fd);
         crate::errno::set_errno(0);
         assert_eq!(flock(fd, LOCK_EX), -1);
@@ -10468,8 +10878,7 @@ mod tests {
 
     #[test]
     fn test_buggy_caller_lockf_with_garbage_cmd() {
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
         assert_eq!(lockf(fd, 0x7FFF_FFFF, 0), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -10482,8 +10891,7 @@ mod tests {
     fn test_workflow_lockfile_acquire_release() {
         // What e.g. `mkdir`'s -p flag does when racing with another
         // process: take an exclusive non-blocking lock, do work, release.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         assert_eq!(flock(fd, LOCK_EX | LOCK_NB), 0);
         assert_eq!(flock(fd, LOCK_UN), 0);
         let _ = fdtable::close_fd(fd);
@@ -10609,8 +11017,7 @@ mod tests {
         // modify any fd state in the [first, last] range.  Open an fd,
         // call close_range with an unknown flag bit covering that fd,
         // verify the fd is still open afterwards.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
         let ret = close_range(fd as u32, fd as u32, 0x8000_0000);
         assert_eq!(ret, -1);
@@ -10624,8 +11031,7 @@ mod tests {
     fn test_close_range_phase115_no_side_effect_on_einval_with_inverted_range() {
         // Same as above but for the range-ordering failure path.  An
         // inverted range with valid flags must still not modify any fd.
-        let fd = fdtable::alloc_fd(HandleKind::File, 0)
-            .expect("alloc_fd File failed");
+        let fd = fdtable::alloc_fd(HandleKind::File, 0).expect("alloc_fd File failed");
         crate::errno::set_errno(0);
         // Note: first > last but the supplied range doesn't actually
         // cover `fd`; the test is: regardless of whether fd is in or
@@ -10688,16 +11094,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -10712,23 +11116,20 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
         fn drop_cap_dac_read_search() {
             use crate::sys_capability::CAP_DAC_READ_SEARCH;
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let (new_lo, new_hi) = if CAP_DAC_READ_SEARCH < 32 {
                 (lo & !(1u32 << CAP_DAC_READ_SEARCH), hi)
             } else {
                 (lo, hi & !(1u32 << (CAP_DAC_READ_SEARCH - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -10743,17 +11144,19 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_DAC_READ_SEARCH");
-            assert!(!crate::sys_capability::has_capability(
-                CAP_DAC_READ_SEARCH,
-            ));
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(
+                rc, 0,
+                "capset must succeed when dropping CAP_DAC_READ_SEARCH"
+            );
+            assert!(!crate::sys_capability::has_capability(CAP_DAC_READ_SEARCH,));
         }
 
         fn fresh_handle() -> FileHandle {
-            FileHandle { handle_bytes: 0, handle_type: 0 }
+            FileHandle {
+                handle_bytes: 0,
+                handle_type: 0,
+            }
         }
 
         // -- Per-error-class --------------------------------------------------
@@ -10790,10 +11193,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_dac_read_search();
             crate::errno::set_errno(0);
-            assert_eq!(
-                open_by_handle_at(AT_FDCWD, core::ptr::null_mut(), 0),
-                -1,
-            );
+            assert_eq!(open_by_handle_at(AT_FDCWD, core::ptr::null_mut(), 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
         }
 
@@ -10816,10 +11216,7 @@ mod tests {
             drop_cap_dac_read_search();
             let mut fh = fresh_handle();
             crate::errno::set_errno(0);
-            assert_eq!(
-                open_by_handle_at(100_000, &raw mut fh, 0),
-                -1,
-            );
+            assert_eq!(open_by_handle_at(100_000, &raw mut fh, 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
         }
 
@@ -10833,8 +11230,11 @@ mod tests {
             let mut fh = fresh_handle();
             crate::errno::set_errno(0);
             assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EPERM,
-                "Missing CAP_DAC_READ_SEARCH must surface as EPERM");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EPERM,
+                "Missing CAP_DAC_READ_SEARCH must surface as EPERM"
+            );
         }
 
         // -- Workflow --------------------------------------------------------
@@ -10857,8 +11257,7 @@ mod tests {
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
             // 3. Restore via capset to u32::MAX → ENOSYS again.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -10873,10 +11272,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             crate::errno::set_errno(0);
             assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
@@ -10905,10 +11301,7 @@ mod tests {
                 drop_cap_dac_read_search();
                 let mut fh = fresh_handle();
                 crate::errno::set_errno(0);
-                assert_eq!(
-                    open_by_handle_at(AT_FDCWD, &raw mut fh, 0),
-                    -1,
-                );
+                assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1,);
                 assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
             } // _g dropped here; cap restored.
             let mut fh = fresh_handle();
@@ -10926,10 +11319,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             // EFAULT.
             crate::errno::set_errno(0);
-            assert_eq!(
-                open_by_handle_at(AT_FDCWD, core::ptr::null_mut(), 0),
-                -1,
-            );
+            assert_eq!(open_by_handle_at(AT_FDCWD, core::ptr::null_mut(), 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
             // EBADF negative.
             let mut fh = fresh_handle();
@@ -10952,12 +11342,10 @@ mod tests {
             use crate::sys_capability::CAP_SYS_ADMIN;
             let _g = CapGuard::snapshot();
             // Drop only CAP_SYS_ADMIN (bit 21).
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << CAP_SYS_ADMIN);
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -10972,16 +11360,16 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             // Still reaches ENOSYS.
             let mut fh = fresh_handle();
             crate::errno::set_errno(0);
             assert_eq!(open_by_handle_at(AT_FDCWD, &raw mut fh, 0), -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
-                "CAP_SYS_ADMIN drop must not affect open_by_handle_at");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "CAP_SYS_ADMIN drop must not affect open_by_handle_at"
+            );
         }
 
         /// Phase 190 errno is EPERM (capable convention), matching
@@ -11009,16 +11397,14 @@ mod tests {
             let mut fh = fresh_handle();
             let mut mount_id: i32 = 0;
             crate::errno::set_errno(0);
-            let ret = name_to_handle_at(
-                AT_FDCWD,
-                b"x\0".as_ptr(),
-                &raw mut fh,
-                &raw mut mount_id,
-                0,
-            );
+            let ret =
+                name_to_handle_at(AT_FDCWD, b"x\0".as_ptr(), &raw mut fh, &raw mut mount_id, 0);
             assert_eq!(ret, -1);
-            assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS,
-                "name_to_handle_at must not pass through the obha cap gate");
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::ENOSYS,
+                "name_to_handle_at must not pass through the obha cap gate"
+            );
         }
     }
 
@@ -11050,8 +11436,7 @@ mod tests {
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -11066,10 +11451,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ = crate::sys_capability::capset(
-                    &mut hdr,
-                    data.as_ptr(),
-                );
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -11092,10 +11474,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc = crate::sys_capability::capset(
-                &mut hdr,
-                data.as_ptr(),
-            );
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0);
             assert!(!crate::sys_capability::has_capability(CAP_CHOWN));
         }
@@ -11166,11 +11545,8 @@ mod tests {
         #[test]
         fn test_fchown_cap_held_succeeds() {
             assert!(crate::sys_capability::has_capability(CAP_CHOWN));
-            let fd = crate::fdtable::alloc_fd(
-                crate::fdtable::HandleKind::File,
-                999,
-            )
-            .expect("alloc fd");
+            let fd =
+                crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 999).expect("alloc fd");
             crate::errno::set_errno(0);
             assert_eq!(fchown(fd, 1000, 1000), 0);
             let _ = crate::fdtable::close_fd(fd);
@@ -11180,11 +11556,8 @@ mod tests {
         #[test]
         fn test_fchown_no_cap_eperm() {
             let _g = CapGuard::snapshot();
-            let fd = crate::fdtable::alloc_fd(
-                crate::fdtable::HandleKind::File,
-                998,
-            )
-            .expect("alloc fd");
+            let fd =
+                crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 998).expect("alloc fd");
             drop_cap_chown();
             crate::errno::set_errno(0);
             assert_eq!(fchown(fd, 1000, 1000), -1);
@@ -11196,11 +11569,8 @@ mod tests {
         #[test]
         fn test_fchown_noop_bypasses_gate() {
             let _g = CapGuard::snapshot();
-            let fd = crate::fdtable::alloc_fd(
-                crate::fdtable::HandleKind::File,
-                997,
-            )
-            .expect("alloc fd");
+            let fd =
+                crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 997).expect("alloc fd");
             drop_cap_chown();
             crate::errno::set_errno(0);
             assert_eq!(fchown(fd, u32::MAX, u32::MAX), 0);
@@ -11256,10 +11626,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
-            assert_eq!(
-                fchownat(AT_FDCWD, b"/x\0".as_ptr(), 0, 0, 0),
-                -1,
-            );
+            assert_eq!(fchownat(AT_FDCWD, b"/x\0".as_ptr(), 0, 0, 0), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::EPERM);
         }
 
@@ -11269,10 +11636,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_chown();
             crate::errno::set_errno(0);
-            assert_eq!(
-                fchownat(AT_FDCWD, b"/x\0".as_ptr(), 0, 0, 0x8000),
-                -1,
-            );
+            assert_eq!(fchownat(AT_FDCWD, b"/x\0".as_ptr(), 0, 0, 0x8000), -1,);
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         }
 

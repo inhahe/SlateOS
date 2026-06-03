@@ -92,10 +92,14 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            SCTP_STATE_CLOSED, SCTP_STATE_COOKIE_WAIT,
-            SCTP_STATE_COOKIE_ECHOED, SCTP_STATE_ESTABLISHED,
-            SCTP_STATE_SHUTDOWN_PENDING, SCTP_STATE_SHUTDOWN_SENT,
-            SCTP_STATE_SHUTDOWN_RECEIVED, SCTP_STATE_SHUTDOWN_ACK_SENT,
+            SCTP_STATE_CLOSED,
+            SCTP_STATE_COOKIE_WAIT,
+            SCTP_STATE_COOKIE_ECHOED,
+            SCTP_STATE_ESTABLISHED,
+            SCTP_STATE_SHUTDOWN_PENDING,
+            SCTP_STATE_SHUTDOWN_SENT,
+            SCTP_STATE_SHUTDOWN_RECEIVED,
+            SCTP_STATE_SHUTDOWN_ACK_SENT,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -107,9 +111,12 @@ mod tests {
     #[test]
     fn test_diag_attrs_distinct() {
         let attrs = [
-            SCTP_DIAG_ASSOC_INFO, SCTP_DIAG_VTAG,
-            SCTP_DIAG_PEER_ADDR, SCTP_DIAG_LOCAL_ADDRS,
-            SCTP_DIAG_PEER_ADDRS, SCTP_DIAG_COUNTERS,
+            SCTP_DIAG_ASSOC_INFO,
+            SCTP_DIAG_VTAG,
+            SCTP_DIAG_PEER_ADDR,
+            SCTP_DIAG_LOCAL_ADDRS,
+            SCTP_DIAG_PEER_ADDRS,
+            SCTP_DIAG_COUNTERS,
             SCTP_DIAG_MEMINFO,
         ];
         for i in 0..attrs.len() {
@@ -122,10 +129,15 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            SCTP_ASSOCINFO, SCTP_INITMSG, SCTP_NODELAY,
-            SCTP_AUTOCLOSE, SCTP_PRIMARY_ADDR,
-            SCTP_PEER_ADDR_PARAMS, SCTP_DEFAULT_SEND_PARAM,
-            SCTP_EVENTS, SCTP_MAXSEG,
+            SCTP_ASSOCINFO,
+            SCTP_INITMSG,
+            SCTP_NODELAY,
+            SCTP_AUTOCLOSE,
+            SCTP_PRIMARY_ADDR,
+            SCTP_PEER_ADDR_PARAMS,
+            SCTP_DEFAULT_SEND_PARAM,
+            SCTP_EVENTS,
+            SCTP_MAXSEG,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

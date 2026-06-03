@@ -87,8 +87,12 @@ mod tests {
     #[test]
     fn test_access_flags_no_overlap() {
         let flags = [
-            SMACK_ACCESS_READ, SMACK_ACCESS_WRITE, SMACK_ACCESS_EXEC,
-            SMACK_ACCESS_APPEND, SMACK_ACCESS_TRANSMUTE, SMACK_ACCESS_LOCK,
+            SMACK_ACCESS_READ,
+            SMACK_ACCESS_WRITE,
+            SMACK_ACCESS_EXEC,
+            SMACK_ACCESS_APPEND,
+            SMACK_ACCESS_TRANSMUTE,
+            SMACK_ACCESS_LOCK,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -101,8 +105,10 @@ mod tests {
     #[test]
     fn test_special_labels_distinct() {
         let labels = [
-            SMACK_LABEL_FLOOR, SMACK_LABEL_HAT,
-            SMACK_LABEL_STAR, SMACK_LABEL_WEB,
+            SMACK_LABEL_FLOOR,
+            SMACK_LABEL_HAT,
+            SMACK_LABEL_STAR,
+            SMACK_LABEL_WEB,
         ];
         for i in 0..labels.len() {
             for j in (i + 1)..labels.len() {
@@ -114,10 +120,18 @@ mod tests {
     #[test]
     fn test_sysfs_interfaces_distinct() {
         let ifaces = [
-            SMACKFS_LOAD, SMACKFS_LOAD2, SMACKFS_CHANGE_RULE,
-            SMACKFS_ACCESS, SMACKFS_ACCESS2, SMACKFS_CIPSO,
-            SMACKFS_CIPSO2, SMACKFS_NETLABEL, SMACKFS_AMBIENT,
-            SMACKFS_ONLYCAP, SMACKFS_UNCONFINED, SMACKFS_REVOKE,
+            SMACKFS_LOAD,
+            SMACKFS_LOAD2,
+            SMACKFS_CHANGE_RULE,
+            SMACKFS_ACCESS,
+            SMACKFS_ACCESS2,
+            SMACKFS_CIPSO,
+            SMACKFS_CIPSO2,
+            SMACKFS_NETLABEL,
+            SMACKFS_AMBIENT,
+            SMACKFS_ONLYCAP,
+            SMACKFS_UNCONFINED,
+            SMACKFS_REVOKE,
         ];
         for i in 0..ifaces.len() {
             for j in (i + 1)..ifaces.len() {

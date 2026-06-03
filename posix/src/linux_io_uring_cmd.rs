@@ -91,8 +91,10 @@ mod tests {
     #[test]
     fn test_nvme_cmd_types_distinct() {
         let types = [
-            NVME_URING_CMD_ADMIN, NVME_URING_CMD_IO,
-            NVME_URING_CMD_ADMIN_VEC, NVME_URING_CMD_IO_VEC,
+            NVME_URING_CMD_ADMIN,
+            NVME_URING_CMD_IO,
+            NVME_URING_CMD_ADMIN_VEC,
+            NVME_URING_CMD_IO_VEC,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -104,8 +106,10 @@ mod tests {
     #[test]
     fn test_socket_ops_distinct() {
         let ops = [
-            SOCKET_URING_OP_SIOCINQ, SOCKET_URING_OP_SIOCOUTQ,
-            SOCKET_URING_OP_GETSOCKOPT, SOCKET_URING_OP_SETSOCKOPT,
+            SOCKET_URING_OP_SIOCINQ,
+            SOCKET_URING_OP_SIOCOUTQ,
+            SOCKET_URING_OP_GETSOCKOPT,
+            SOCKET_URING_OP_SETSOCKOPT,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

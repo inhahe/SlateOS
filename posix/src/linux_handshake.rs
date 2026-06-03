@@ -87,8 +87,10 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            HANDSHAKE_CMD_UNSPEC, HANDSHAKE_CMD_READY,
-            HANDSHAKE_CMD_ACCEPT, HANDSHAKE_CMD_DONE,
+            HANDSHAKE_CMD_UNSPEC,
+            HANDSHAKE_CMD_READY,
+            HANDSHAKE_CMD_ACCEPT,
+            HANDSHAKE_CMD_DONE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -100,7 +102,8 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let types = [
-            HANDSHAKE_MSG_TYPE_UNSPEC, HANDSHAKE_MSG_TYPE_CLIENTHELLO,
+            HANDSHAKE_MSG_TYPE_UNSPEC,
+            HANDSHAKE_MSG_TYPE_CLIENTHELLO,
             HANDSHAKE_MSG_TYPE_SERVERHELLO,
         ];
         for i in 0..types.len() {
@@ -113,8 +116,10 @@ mod tests {
     #[test]
     fn test_auth_modes_distinct() {
         let modes = [
-            HANDSHAKE_AUTH_UNSPEC, HANDSHAKE_AUTH_UNAUTH,
-            HANDSHAKE_AUTH_PSK, HANDSHAKE_AUTH_X509,
+            HANDSHAKE_AUTH_UNSPEC,
+            HANDSHAKE_AUTH_UNAUTH,
+            HANDSHAKE_AUTH_PSK,
+            HANDSHAKE_AUTH_X509,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -126,10 +131,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            HANDSHAKE_A_ACCEPT_UNSPEC, HANDSHAKE_A_ACCEPT_SOCKFD,
-            HANDSHAKE_A_ACCEPT_HANDLER_CLASS, HANDSHAKE_A_ACCEPT_MESSAGE_TYPE,
-            HANDSHAKE_A_ACCEPT_TIMEOUT, HANDSHAKE_A_ACCEPT_AUTH_MODE,
-            HANDSHAKE_A_ACCEPT_PEER_IDENTITY, HANDSHAKE_A_ACCEPT_CERTIFICATE,
+            HANDSHAKE_A_ACCEPT_UNSPEC,
+            HANDSHAKE_A_ACCEPT_SOCKFD,
+            HANDSHAKE_A_ACCEPT_HANDLER_CLASS,
+            HANDSHAKE_A_ACCEPT_MESSAGE_TYPE,
+            HANDSHAKE_A_ACCEPT_TIMEOUT,
+            HANDSHAKE_A_ACCEPT_AUTH_MODE,
+            HANDSHAKE_A_ACCEPT_PEER_IDENTITY,
+            HANDSHAKE_A_ACCEPT_CERTIFICATE,
             HANDSHAKE_A_ACCEPT_PEERNAME,
         ];
         for i in 0..attrs.len() {

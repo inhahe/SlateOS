@@ -126,8 +126,12 @@ mod tests {
     #[test]
     fn test_validity_flags_no_overlap() {
         let flags = [
-            QIF_BLIMITS, QIF_SPACE, QIF_ILIMITS,
-            QIF_INODES, QIF_BTIME, QIF_ITIME,
+            QIF_BLIMITS,
+            QIF_SPACE,
+            QIF_ILIMITS,
+            QIF_INODES,
+            QIF_BTIME,
+            QIF_ITIME,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -139,8 +143,12 @@ mod tests {
     #[test]
     fn test_validity_flags_powers_of_two() {
         let flags = [
-            QIF_BLIMITS, QIF_SPACE, QIF_ILIMITS,
-            QIF_INODES, QIF_BTIME, QIF_ITIME,
+            QIF_BLIMITS,
+            QIF_SPACE,
+            QIF_ILIMITS,
+            QIF_INODES,
+            QIF_BTIME,
+            QIF_ITIME,
         ];
         for f in flags {
             assert!(f.is_power_of_two());
@@ -149,7 +157,10 @@ mod tests {
 
     #[test]
     fn test_all_covers_all() {
-        assert_eq!(QIF_ALL, QIF_BLIMITS | QIF_SPACE | QIF_ILIMITS | QIF_INODES | QIF_BTIME | QIF_ITIME);
+        assert_eq!(
+            QIF_ALL,
+            QIF_BLIMITS | QIF_SPACE | QIF_ILIMITS | QIF_INODES | QIF_BTIME | QIF_ITIME
+        );
     }
 
     #[test]

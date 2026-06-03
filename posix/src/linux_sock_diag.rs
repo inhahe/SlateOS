@@ -104,8 +104,11 @@ mod tests {
     #[test]
     fn test_af_diag_distinct() {
         let afs = [
-            AF_UNIX_DIAG, AF_INET_DIAG, AF_INET6_DIAG,
-            AF_NETLINK_DIAG, AF_PACKET_DIAG,
+            AF_UNIX_DIAG,
+            AF_INET_DIAG,
+            AF_INET6_DIAG,
+            AF_NETLINK_DIAG,
+            AF_PACKET_DIAG,
         ];
         for i in 0..afs.len() {
             for j in (i + 1)..afs.len() {
@@ -117,9 +120,15 @@ mod tests {
     #[test]
     fn test_extensions_distinct() {
         let exts = [
-            INET_DIAG_NONE, INET_DIAG_MEMINFO, INET_DIAG_INFO,
-            INET_DIAG_VEGASINFO, INET_DIAG_CONG, INET_DIAG_TOS,
-            INET_DIAG_TCLASS, INET_DIAG_SKMEMINFO, INET_DIAG_SHUTDOWN,
+            INET_DIAG_NONE,
+            INET_DIAG_MEMINFO,
+            INET_DIAG_INFO,
+            INET_DIAG_VEGASINFO,
+            INET_DIAG_CONG,
+            INET_DIAG_TOS,
+            INET_DIAG_TCLASS,
+            INET_DIAG_SKMEMINFO,
+            INET_DIAG_SHUTDOWN,
             INET_DIAG_CLASS_ID,
         ];
         for i in 0..exts.len() {
@@ -132,10 +141,17 @@ mod tests {
     #[test]
     fn test_state_filters_powers_of_two() {
         let states = [
-            TCPF_ESTABLISHED, TCPF_SYN_SENT, TCPF_SYN_RECV,
-            TCPF_FIN_WAIT1, TCPF_FIN_WAIT2, TCPF_TIME_WAIT,
-            TCPF_CLOSE, TCPF_CLOSE_WAIT, TCPF_LAST_ACK,
-            TCPF_LISTEN, TCPF_CLOSING,
+            TCPF_ESTABLISHED,
+            TCPF_SYN_SENT,
+            TCPF_SYN_RECV,
+            TCPF_FIN_WAIT1,
+            TCPF_FIN_WAIT2,
+            TCPF_TIME_WAIT,
+            TCPF_CLOSE,
+            TCPF_CLOSE_WAIT,
+            TCPF_LAST_ACK,
+            TCPF_LISTEN,
+            TCPF_CLOSING,
         ];
         for state in &states {
             assert!(state.is_power_of_two(), "0x{:x}", state);
@@ -145,10 +161,17 @@ mod tests {
     #[test]
     fn test_state_filters_no_overlap() {
         let states = [
-            TCPF_ESTABLISHED, TCPF_SYN_SENT, TCPF_SYN_RECV,
-            TCPF_FIN_WAIT1, TCPF_FIN_WAIT2, TCPF_TIME_WAIT,
-            TCPF_CLOSE, TCPF_CLOSE_WAIT, TCPF_LAST_ACK,
-            TCPF_LISTEN, TCPF_CLOSING,
+            TCPF_ESTABLISHED,
+            TCPF_SYN_SENT,
+            TCPF_SYN_RECV,
+            TCPF_FIN_WAIT1,
+            TCPF_FIN_WAIT2,
+            TCPF_TIME_WAIT,
+            TCPF_CLOSE,
+            TCPF_CLOSE_WAIT,
+            TCPF_LAST_ACK,
+            TCPF_LISTEN,
+            TCPF_CLOSING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

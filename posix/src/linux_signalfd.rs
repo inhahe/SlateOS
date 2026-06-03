@@ -6,11 +6,11 @@
 // Re-exports
 // ---------------------------------------------------------------------------
 
+pub use crate::epoll::signalfd;
+pub use crate::epoll::signalfd4;
 pub use crate::sys_signalfd::SFD_CLOEXEC;
 pub use crate::sys_signalfd::SFD_NONBLOCK;
 pub use crate::sys_signalfd::SignalfdSiginfo;
-pub use crate::epoll::signalfd;
-pub use crate::epoll::signalfd4;
 
 // ---------------------------------------------------------------------------
 // Tests

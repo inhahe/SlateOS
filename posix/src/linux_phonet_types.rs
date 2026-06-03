@@ -104,8 +104,13 @@ mod tests {
     #[test]
     fn test_resources_distinct() {
         let res = [
-            PN_CALL, PN_SMS, PN_SS, PN_SIM,
-            PN_NETWORK, PN_GPRS, PN_NAMESERVICE,
+            PN_CALL,
+            PN_SMS,
+            PN_SS,
+            PN_SIM,
+            PN_NETWORK,
+            PN_GPRS,
+            PN_NAMESERVICE,
         ];
         for i in 0..res.len() {
             for j in (i + 1)..res.len() {
@@ -127,10 +132,13 @@ mod tests {
     #[test]
     fn test_pipe_msgs_distinct() {
         let msgs = [
-            PNS_PIPE_CREATE_REQ, PNS_PIPE_CREATE_RESP,
-            PNS_PIPE_ENABLE_REQ, PNS_PIPE_ENABLE_RESP,
+            PNS_PIPE_CREATE_REQ,
+            PNS_PIPE_CREATE_RESP,
+            PNS_PIPE_ENABLE_REQ,
+            PNS_PIPE_ENABLE_RESP,
             PNS_PIPE_DATA,
-            PNS_PIPE_DISCONNECT_REQ, PNS_PIPE_DISCONNECT_RESP,
+            PNS_PIPE_DISCONNECT_REQ,
+            PNS_PIPE_DISCONNECT_RESP,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {

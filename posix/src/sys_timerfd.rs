@@ -2,13 +2,13 @@
 //!
 //! Re-exports from the `epoll` module.
 
-pub use crate::epoll::timerfd_create;
-pub use crate::epoll::timerfd_settime;
-pub use crate::epoll::timerfd_gettime;
 pub use crate::epoll::Itimerspec;
 pub use crate::epoll::TFD_CLOEXEC;
 pub use crate::epoll::TFD_NONBLOCK;
 pub use crate::epoll::TFD_TIMER_ABSTIME;
+pub use crate::epoll::timerfd_create;
+pub use crate::epoll::timerfd_gettime;
+pub use crate::epoll::timerfd_settime;
 
 // ---------------------------------------------------------------------------
 // Tests

@@ -141,12 +141,23 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            MMC_GO_IDLE_STATE, MMC_SEND_OP_COND, MMC_ALL_SEND_CID,
-            MMC_SET_RELATIVE_ADDR, MMC_SWITCH, MMC_SELECT_CARD,
-            MMC_SEND_EXT_CSD, MMC_SEND_CSD, MMC_SEND_CID,
-            MMC_STOP_TRANSMISSION, MMC_SEND_STATUS, MMC_SET_BLOCKLEN,
-            MMC_READ_SINGLE_BLOCK, MMC_READ_MULTIPLE_BLOCK,
-            MMC_WRITE_BLOCK, MMC_WRITE_MULTIPLE_BLOCK, MMC_APP_CMD,
+            MMC_GO_IDLE_STATE,
+            MMC_SEND_OP_COND,
+            MMC_ALL_SEND_CID,
+            MMC_SET_RELATIVE_ADDR,
+            MMC_SWITCH,
+            MMC_SELECT_CARD,
+            MMC_SEND_EXT_CSD,
+            MMC_SEND_CSD,
+            MMC_SEND_CID,
+            MMC_STOP_TRANSMISSION,
+            MMC_SEND_STATUS,
+            MMC_SET_BLOCKLEN,
+            MMC_READ_SINGLE_BLOCK,
+            MMC_READ_MULTIPLE_BLOCK,
+            MMC_WRITE_BLOCK,
+            MMC_WRITE_MULTIPLE_BLOCK,
+            MMC_APP_CMD,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -158,9 +169,15 @@ mod tests {
     #[test]
     fn test_response_types_distinct() {
         let rsps = [
-            MMC_RSP_NONE, MMC_RSP_R1, MMC_RSP_R1B,
-            MMC_RSP_R2, MMC_RSP_R3, MMC_RSP_R4,
-            MMC_RSP_R5, MMC_RSP_R6, MMC_RSP_R7,
+            MMC_RSP_NONE,
+            MMC_RSP_R1,
+            MMC_RSP_R1B,
+            MMC_RSP_R2,
+            MMC_RSP_R3,
+            MMC_RSP_R4,
+            MMC_RSP_R5,
+            MMC_RSP_R6,
+            MMC_RSP_R7,
         ];
         for i in 0..rsps.len() {
             for j in (i + 1)..rsps.len() {
@@ -172,10 +189,17 @@ mod tests {
     #[test]
     fn test_card_states_distinct() {
         let states = [
-            MMC_STATE_IDLE, MMC_STATE_READY, MMC_STATE_IDENT,
-            MMC_STATE_STBY, MMC_STATE_TRAN, MMC_STATE_DATA,
-            MMC_STATE_RCV, MMC_STATE_PRG, MMC_STATE_DIS,
-            MMC_STATE_BTST, MMC_STATE_SLP,
+            MMC_STATE_IDLE,
+            MMC_STATE_READY,
+            MMC_STATE_IDENT,
+            MMC_STATE_STBY,
+            MMC_STATE_TRAN,
+            MMC_STATE_DATA,
+            MMC_STATE_RCV,
+            MMC_STATE_PRG,
+            MMC_STATE_DIS,
+            MMC_STATE_BTST,
+            MMC_STATE_SLP,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -197,11 +221,17 @@ mod tests {
     #[test]
     fn test_timing_modes_distinct() {
         let modes = [
-            MMC_TIMING_LEGACY, MMC_TIMING_MMC_HS, MMC_TIMING_SD_HS,
-            MMC_TIMING_UHS_SDR12, MMC_TIMING_UHS_SDR25,
-            MMC_TIMING_UHS_SDR50, MMC_TIMING_UHS_SDR104,
-            MMC_TIMING_UHS_DDR50, MMC_TIMING_MMC_DDR52,
-            MMC_TIMING_MMC_HS200, MMC_TIMING_MMC_HS400,
+            MMC_TIMING_LEGACY,
+            MMC_TIMING_MMC_HS,
+            MMC_TIMING_SD_HS,
+            MMC_TIMING_UHS_SDR12,
+            MMC_TIMING_UHS_SDR25,
+            MMC_TIMING_UHS_SDR50,
+            MMC_TIMING_UHS_SDR104,
+            MMC_TIMING_UHS_DDR50,
+            MMC_TIMING_MMC_DDR52,
+            MMC_TIMING_MMC_HS200,
+            MMC_TIMING_MMC_HS400,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

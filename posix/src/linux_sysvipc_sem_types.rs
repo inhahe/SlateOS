@@ -75,8 +75,16 @@ mod tests {
     #[test]
     fn test_semctl_commands_distinct() {
         let cmds = [
-            GETVAL, GETALL, GETNCNT, GETPID, GETZCNT,
-            SETVAL, SETALL, SEM_INFO, SEM_STAT, SEM_STAT_ANY,
+            GETVAL,
+            GETALL,
+            GETNCNT,
+            GETPID,
+            GETZCNT,
+            SETVAL,
+            SETALL,
+            SEM_INFO,
+            SEM_STAT,
+            SEM_STAT_ANY,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

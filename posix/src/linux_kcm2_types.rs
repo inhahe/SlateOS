@@ -60,8 +60,10 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            KCM_CMD_UNSPEC, KCM_CMD_ATTACH,
-            KCM_CMD_DETACH, KCM_CMD_CLONE,
+            KCM_CMD_UNSPEC,
+            KCM_CMD_ATTACH,
+            KCM_CMD_DETACH,
+            KCM_CMD_CLONE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -73,8 +75,10 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            KCM_ATTR_UNSPEC, KCM_ATTR_KCMFD,
-            KCM_ATTR_CSOCKFD, KCM_ATTR_SOCK_INDEX,
+            KCM_ATTR_UNSPEC,
+            KCM_ATTR_KCMFD,
+            KCM_ATTR_CSOCKFD,
+            KCM_ATTR_SOCK_INDEX,
             KCM_ATTR_SOCK_BPF_PROG,
         ];
         for i in 0..attrs.len() {
@@ -86,10 +90,7 @@ mod tests {
 
     #[test]
     fn test_status_flags_distinct() {
-        let flags = [
-            KCM_STATUS_CONNECTED, KCM_STATUS_TX_DATA,
-            KCM_STATUS_WAITING,
-        ];
+        let flags = [KCM_STATUS_CONNECTED, KCM_STATUS_TX_DATA, KCM_STATUS_WAITING];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(flags[i], flags[j]);

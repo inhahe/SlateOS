@@ -58,17 +58,28 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            TEST_UNIT_READY, REQUEST_SENSE, INQUIRY,
-            MODE_SELECT, MODE_SENSE, START_STOP,
-            READ_CAPACITY, READ_10, WRITE_10,
-            SYNCHRONIZE_CACHE, READ_6, WRITE_6,
-            REPORT_LUNS, READ_16, WRITE_16,
-            SERVICE_ACTION_IN_16, UNMAP, WRITE_SAME_16,
+            TEST_UNIT_READY,
+            REQUEST_SENSE,
+            INQUIRY,
+            MODE_SELECT,
+            MODE_SENSE,
+            START_STOP,
+            READ_CAPACITY,
+            READ_10,
+            WRITE_10,
+            SYNCHRONIZE_CACHE,
+            READ_6,
+            WRITE_6,
+            REPORT_LUNS,
+            READ_16,
+            WRITE_16,
+            SERVICE_ACTION_IN_16,
+            UNMAP,
+            WRITE_SAME_16,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
-                assert_ne!(ops[i], ops[j],
-                    "opcodes {} and {} collide", i, j);
+                assert_ne!(ops[i], ops[j], "opcodes {} and {} collide", i, j);
             }
         }
     }

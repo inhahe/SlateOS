@@ -108,10 +108,18 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            SCTP_RTOINFO, SCTP_ASSOCINFO, SCTP_INITMSG,
-            SCTP_NODELAY, SCTP_AUTOCLOSE, SCTP_DEFAULT_SEND_PARAM,
-            SCTP_EVENTS, SCTP_PRIMARY_ADDR, SCTP_DISABLE_FRAGMENTS,
-            SCTP_PEER_ADDR_PARAMS, SCTP_MAXSEG, SCTP_STATUS,
+            SCTP_RTOINFO,
+            SCTP_ASSOCINFO,
+            SCTP_INITMSG,
+            SCTP_NODELAY,
+            SCTP_AUTOCLOSE,
+            SCTP_DEFAULT_SEND_PARAM,
+            SCTP_EVENTS,
+            SCTP_PRIMARY_ADDR,
+            SCTP_DISABLE_FRAGMENTS,
+            SCTP_PEER_ADDR_PARAMS,
+            SCTP_MAXSEG,
+            SCTP_STATUS,
             SCTP_MAX_BURST,
         ];
         for i in 0..opts.len() {
@@ -124,10 +132,18 @@ mod tests {
     #[test]
     fn test_chunk_types_distinct() {
         let chunks = [
-            SCTP_CID_DATA, SCTP_CID_INIT, SCTP_CID_INIT_ACK,
-            SCTP_CID_SACK, SCTP_CID_HEARTBEAT, SCTP_CID_HEARTBEAT_ACK,
-            SCTP_CID_ABORT, SCTP_CID_SHUTDOWN, SCTP_CID_SHUTDOWN_ACK,
-            SCTP_CID_ERROR, SCTP_CID_COOKIE_ECHO, SCTP_CID_COOKIE_ACK,
+            SCTP_CID_DATA,
+            SCTP_CID_INIT,
+            SCTP_CID_INIT_ACK,
+            SCTP_CID_SACK,
+            SCTP_CID_HEARTBEAT,
+            SCTP_CID_HEARTBEAT_ACK,
+            SCTP_CID_ABORT,
+            SCTP_CID_SHUTDOWN,
+            SCTP_CID_SHUTDOWN_ACK,
+            SCTP_CID_ERROR,
+            SCTP_CID_COOKIE_ECHO,
+            SCTP_CID_COOKIE_ACK,
             SCTP_CID_FWD_TSN,
         ];
         for i in 0..chunks.len() {

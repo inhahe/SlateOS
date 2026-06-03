@@ -70,7 +70,12 @@ mod tests {
 
     #[test]
     fn test_flags_no_overlap() {
-        let flags = [MUTEX_FLAG_PI, MUTEX_FLAG_WW, MUTEX_FLAG_SPIN, MUTEX_FLAG_HANDOFF];
+        let flags = [
+            MUTEX_FLAG_PI,
+            MUTEX_FLAG_WW,
+            MUTEX_FLAG_SPIN,
+            MUTEX_FLAG_HANDOFF,
+        ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {

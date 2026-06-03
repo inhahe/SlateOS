@@ -88,8 +88,14 @@ mod tests {
     #[test]
     fn test_ff_types_distinct() {
         let types = [
-            FF_RUMBLE, FF_PERIODIC, FF_CONSTANT, FF_SPRING,
-            FF_FRICTION, FF_DAMPER, FF_INERTIA, FF_RAMP,
+            FF_RUMBLE,
+            FF_PERIODIC,
+            FF_CONSTANT,
+            FF_SPRING,
+            FF_FRICTION,
+            FF_DAMPER,
+            FF_INERTIA,
+            FF_RAMP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -101,8 +107,12 @@ mod tests {
     #[test]
     fn test_ff_waveforms_distinct() {
         let waveforms = [
-            FF_SQUARE, FF_TRIANGLE, FF_SINE,
-            FF_SAW_UP, FF_SAW_DOWN, FF_CUSTOM,
+            FF_SQUARE,
+            FF_TRIANGLE,
+            FF_SINE,
+            FF_SAW_UP,
+            FF_SAW_DOWN,
+            FF_CUSTOM,
         ];
         for i in 0..waveforms.len() {
             for j in (i + 1)..waveforms.len() {
@@ -114,9 +124,12 @@ mod tests {
     #[test]
     fn test_input_props_distinct() {
         let props = [
-            INPUT_PROP_POINTER, INPUT_PROP_DIRECT,
-            INPUT_PROP_BUTTONPAD, INPUT_PROP_SEMI_MT,
-            INPUT_PROP_TOPBUTTONPAD, INPUT_PROP_POINTING_STICK,
+            INPUT_PROP_POINTER,
+            INPUT_PROP_DIRECT,
+            INPUT_PROP_BUTTONPAD,
+            INPUT_PROP_SEMI_MT,
+            INPUT_PROP_TOPBUTTONPAD,
+            INPUT_PROP_POINTING_STICK,
             INPUT_PROP_ACCELEROMETER,
         ];
         for i in 0..props.len() {
@@ -129,8 +142,12 @@ mod tests {
     #[test]
     fn test_msc_events_distinct() {
         let events = [
-            MSC_SERIAL, MSC_PULSELED, MSC_GESTURE,
-            MSC_RAW, MSC_SCAN, MSC_TIMESTAMP,
+            MSC_SERIAL,
+            MSC_PULSELED,
+            MSC_GESTURE,
+            MSC_RAW,
+            MSC_SCAN,
+            MSC_TIMESTAMP,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

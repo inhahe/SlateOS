@@ -73,8 +73,10 @@ mod tests {
     #[test]
     fn test_task_states_distinct() {
         let states = [
-            CGROUP_TASK_RUNNING, CGROUP_TASK_SLEEPING,
-            CGROUP_TASK_UNINTERRUPTIBLE, CGROUP_TASK_STOPPED,
+            CGROUP_TASK_RUNNING,
+            CGROUP_TASK_SLEEPING,
+            CGROUP_TASK_UNINTERRUPTIBLE,
+            CGROUP_TASK_STOPPED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

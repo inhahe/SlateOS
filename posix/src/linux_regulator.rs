@@ -100,8 +100,10 @@ mod tests {
     #[test]
     fn test_modes_are_powers_of_two() {
         let modes = [
-            REGULATOR_MODE_FAST, REGULATOR_MODE_NORMAL,
-            REGULATOR_MODE_IDLE, REGULATOR_MODE_STANDBY,
+            REGULATOR_MODE_FAST,
+            REGULATOR_MODE_NORMAL,
+            REGULATOR_MODE_IDLE,
+            REGULATOR_MODE_STANDBY,
         ];
         for mode in &modes {
             assert!(mode.is_power_of_two(), "0x{:x} is not a power of two", mode);
@@ -111,8 +113,10 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            REGULATOR_MODE_FAST, REGULATOR_MODE_NORMAL,
-            REGULATOR_MODE_IDLE, REGULATOR_MODE_STANDBY,
+            REGULATOR_MODE_FAST,
+            REGULATOR_MODE_NORMAL,
+            REGULATOR_MODE_IDLE,
+            REGULATOR_MODE_STANDBY,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -124,26 +128,40 @@ mod tests {
     #[test]
     fn test_events_are_powers_of_two() {
         let events = [
-            REGULATOR_EVENT_UNDER_VOLTAGE, REGULATOR_EVENT_OVER_CURRENT,
-            REGULATOR_EVENT_REGULATION_OUT, REGULATOR_EVENT_FAIL,
-            REGULATOR_EVENT_OVER_TEMP, REGULATOR_EVENT_FORCE_DISABLE,
-            REGULATOR_EVENT_VOLTAGE_CHANGE, REGULATOR_EVENT_DISABLE,
-            REGULATOR_EVENT_PRE_VOLTAGE_CHANGE, REGULATOR_EVENT_ABORT_VOLTAGE_CHANGE,
-            REGULATOR_EVENT_PRE_DISABLE, REGULATOR_EVENT_ABORT_DISABLE,
+            REGULATOR_EVENT_UNDER_VOLTAGE,
+            REGULATOR_EVENT_OVER_CURRENT,
+            REGULATOR_EVENT_REGULATION_OUT,
+            REGULATOR_EVENT_FAIL,
+            REGULATOR_EVENT_OVER_TEMP,
+            REGULATOR_EVENT_FORCE_DISABLE,
+            REGULATOR_EVENT_VOLTAGE_CHANGE,
+            REGULATOR_EVENT_DISABLE,
+            REGULATOR_EVENT_PRE_VOLTAGE_CHANGE,
+            REGULATOR_EVENT_ABORT_VOLTAGE_CHANGE,
+            REGULATOR_EVENT_PRE_DISABLE,
+            REGULATOR_EVENT_ABORT_DISABLE,
             REGULATOR_EVENT_ENABLE,
         ];
         for event in &events {
-            assert!(event.is_power_of_two(), "0x{:x} is not a power of two", event);
+            assert!(
+                event.is_power_of_two(),
+                "0x{:x} is not a power of two",
+                event
+            );
         }
     }
 
     #[test]
     fn test_status_distinct() {
         let statuses = [
-            REGULATOR_STATUS_OFF, REGULATOR_STATUS_ON,
-            REGULATOR_STATUS_ERROR, REGULATOR_STATUS_FAST,
-            REGULATOR_STATUS_NORMAL, REGULATOR_STATUS_IDLE,
-            REGULATOR_STATUS_STANDBY, REGULATOR_STATUS_BYPASS,
+            REGULATOR_STATUS_OFF,
+            REGULATOR_STATUS_ON,
+            REGULATOR_STATUS_ERROR,
+            REGULATOR_STATUS_FAST,
+            REGULATOR_STATUS_NORMAL,
+            REGULATOR_STATUS_IDLE,
+            REGULATOR_STATUS_STANDBY,
+            REGULATOR_STATUS_BYPASS,
             REGULATOR_STATUS_UNDEFINED,
         ];
         for i in 0..statuses.len() {
@@ -156,9 +174,12 @@ mod tests {
     #[test]
     fn test_change_flags_are_powers_of_two() {
         let flags = [
-            REGULATOR_CHANGE_VOLTAGE, REGULATOR_CHANGE_CURRENT,
-            REGULATOR_CHANGE_STATUS, REGULATOR_CHANGE_MODE,
-            REGULATOR_CHANGE_DRMS, REGULATOR_CHANGE_BYPASS,
+            REGULATOR_CHANGE_VOLTAGE,
+            REGULATOR_CHANGE_CURRENT,
+            REGULATOR_CHANGE_STATUS,
+            REGULATOR_CHANGE_MODE,
+            REGULATOR_CHANGE_DRMS,
+            REGULATOR_CHANGE_BYPASS,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two());

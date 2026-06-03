@@ -77,8 +77,10 @@ mod tests {
     #[test]
     fn test_encode_flags_distinct() {
         let flags = [
-            HUGETLB_FLAG_ENCODE_2MB, HUGETLB_FLAG_ENCODE_1GB,
-            HUGETLB_FLAG_ENCODE_64KB, HUGETLB_FLAG_ENCODE_512MB,
+            HUGETLB_FLAG_ENCODE_2MB,
+            HUGETLB_FLAG_ENCODE_1GB,
+            HUGETLB_FLAG_ENCODE_64KB,
+            HUGETLB_FLAG_ENCODE_512MB,
             HUGETLB_FLAG_ENCODE_16MB,
         ];
         for i in 0..flags.len() {

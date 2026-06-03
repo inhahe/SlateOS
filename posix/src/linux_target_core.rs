@@ -88,9 +88,15 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            SCSI_PROTOCOL_FCP, SCSI_PROTOCOL_SPI, SCSI_PROTOCOL_SSA,
-            SCSI_PROTOCOL_SBP, SCSI_PROTOCOL_SRP, SCSI_PROTOCOL_ISCSI,
-            SCSI_PROTOCOL_SAS, SCSI_PROTOCOL_ADT, SCSI_PROTOCOL_ATA,
+            SCSI_PROTOCOL_FCP,
+            SCSI_PROTOCOL_SPI,
+            SCSI_PROTOCOL_SSA,
+            SCSI_PROTOCOL_SBP,
+            SCSI_PROTOCOL_SRP,
+            SCSI_PROTOCOL_ISCSI,
+            SCSI_PROTOCOL_SAS,
+            SCSI_PROTOCOL_ADT,
+            SCSI_PROTOCOL_ATA,
             SCSI_PROTOCOL_UAS,
         ];
         for i in 0..protos.len() {
@@ -113,8 +119,10 @@ mod tests {
     #[test]
     fn test_backends_distinct() {
         let backends = [
-            TRANSPORT_PLUGIN_PHBA_IBLOCK, TRANSPORT_PLUGIN_PHBA_FILEIO,
-            TRANSPORT_PLUGIN_PHBA_RAMDISK, TRANSPORT_PLUGIN_PHBA_USER,
+            TRANSPORT_PLUGIN_PHBA_IBLOCK,
+            TRANSPORT_PLUGIN_PHBA_FILEIO,
+            TRANSPORT_PLUGIN_PHBA_RAMDISK,
+            TRANSPORT_PLUGIN_PHBA_USER,
             TRANSPORT_PLUGIN_PHBA_PSCSI,
         ];
         for i in 0..backends.len() {

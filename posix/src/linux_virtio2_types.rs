@@ -117,9 +117,12 @@ mod tests {
     #[test]
     fn test_status_bits_distinct() {
         let bits = [
-            VIRTIO_STATUS_ACKNOWLEDGE, VIRTIO_STATUS_DRIVER,
-            VIRTIO_STATUS_DRIVER_OK, VIRTIO_STATUS_FEATURES_OK,
-            VIRTIO_STATUS_DEVICE_NEEDS_RESET, VIRTIO_STATUS_FAILED,
+            VIRTIO_STATUS_ACKNOWLEDGE,
+            VIRTIO_STATUS_DRIVER,
+            VIRTIO_STATUS_DRIVER_OK,
+            VIRTIO_STATUS_FEATURES_OK,
+            VIRTIO_STATUS_DEVICE_NEEDS_RESET,
+            VIRTIO_STATUS_FAILED,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -136,10 +139,14 @@ mod tests {
     #[test]
     fn test_transport_features_distinct() {
         let feats = [
-            VIRTIO_F_INDIRECT_DESC, VIRTIO_F_EVENT_IDX,
-            VIRTIO_F_VERSION_1, VIRTIO_F_ACCESS_PLATFORM,
-            VIRTIO_F_RING_PACKED, VIRTIO_F_IN_ORDER,
-            VIRTIO_F_ORDER_PLATFORM, VIRTIO_F_SR_IOV,
+            VIRTIO_F_INDIRECT_DESC,
+            VIRTIO_F_EVENT_IDX,
+            VIRTIO_F_VERSION_1,
+            VIRTIO_F_ACCESS_PLATFORM,
+            VIRTIO_F_RING_PACKED,
+            VIRTIO_F_IN_ORDER,
+            VIRTIO_F_ORDER_PLATFORM,
+            VIRTIO_F_SR_IOV,
             VIRTIO_F_NOTIFICATION_DATA,
         ];
         for i in 0..feats.len() {
@@ -152,10 +159,18 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            VIRTIO_ID_NET, VIRTIO_ID_BLOCK, VIRTIO_ID_CONSOLE,
-            VIRTIO_ID_RNG, VIRTIO_ID_BALLOON, VIRTIO_ID_SCSI,
-            VIRTIO_ID_9P, VIRTIO_ID_INPUT, VIRTIO_ID_VSOCK,
-            VIRTIO_ID_CRYPTO, VIRTIO_ID_GPU, VIRTIO_ID_FS,
+            VIRTIO_ID_NET,
+            VIRTIO_ID_BLOCK,
+            VIRTIO_ID_CONSOLE,
+            VIRTIO_ID_RNG,
+            VIRTIO_ID_BALLOON,
+            VIRTIO_ID_SCSI,
+            VIRTIO_ID_9P,
+            VIRTIO_ID_INPUT,
+            VIRTIO_ID_VSOCK,
+            VIRTIO_ID_CRYPTO,
+            VIRTIO_ID_GPU,
+            VIRTIO_ID_FS,
             VIRTIO_ID_PMEM,
         ];
         for i in 0..types.len() {

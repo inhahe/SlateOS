@@ -81,9 +81,12 @@ mod tests {
     #[test]
     fn test_alg_flags_power_of_two() {
         let flags = [
-            CRYPTO_ALG_NEED_FALLBACK, CRYPTO_ALG_INTERNAL,
-            CRYPTO_ALG_OPTIONAL_KEY, CRYPTO_ALG_DEAD,
-            CRYPTO_ALG_DYING, CRYPTO_ALG_ASYNC,
+            CRYPTO_ALG_NEED_FALLBACK,
+            CRYPTO_ALG_INTERNAL,
+            CRYPTO_ALG_OPTIONAL_KEY,
+            CRYPTO_ALG_DEAD,
+            CRYPTO_ALG_DYING,
+            CRYPTO_ALG_ASYNC,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
@@ -93,9 +96,12 @@ mod tests {
     #[test]
     fn test_alg_flags_no_overlap() {
         let flags = [
-            CRYPTO_ALG_NEED_FALLBACK, CRYPTO_ALG_INTERNAL,
-            CRYPTO_ALG_OPTIONAL_KEY, CRYPTO_ALG_DEAD,
-            CRYPTO_ALG_DYING, CRYPTO_ALG_ASYNC,
+            CRYPTO_ALG_NEED_FALLBACK,
+            CRYPTO_ALG_INTERNAL,
+            CRYPTO_ALG_OPTIONAL_KEY,
+            CRYPTO_ALG_DEAD,
+            CRYPTO_ALG_DYING,
+            CRYPTO_ALG_ASYNC,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -107,7 +113,8 @@ mod tests {
     #[test]
     fn test_tfm_flags_power_of_two() {
         let flags = [
-            CRYPTO_TFM_NEED_KEY, CRYPTO_TFM_REQ_MAY_SLEEP,
+            CRYPTO_TFM_NEED_KEY,
+            CRYPTO_TFM_REQ_MAY_SLEEP,
             CRYPTO_TFM_REQ_MAY_BACKLOG,
         ];
         for f in &flags {
@@ -118,7 +125,8 @@ mod tests {
     #[test]
     fn test_tfm_flags_no_overlap() {
         let flags = [
-            CRYPTO_TFM_NEED_KEY, CRYPTO_TFM_REQ_MAY_SLEEP,
+            CRYPTO_TFM_NEED_KEY,
+            CRYPTO_TFM_REQ_MAY_SLEEP,
             CRYPTO_TFM_REQ_MAY_BACKLOG,
         ];
         for i in 0..flags.len() {

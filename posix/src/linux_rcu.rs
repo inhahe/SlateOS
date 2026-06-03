@@ -75,9 +75,13 @@ mod tests {
     #[test]
     fn test_flavors_distinct() {
         let flavors = [
-            RCU_FLAVOR_DEFAULT, RCU_FLAVOR_BH, RCU_FLAVOR_SCHED,
-            RCU_FLAVOR_SRCU, RCU_FLAVOR_TASKS,
-            RCU_FLAVOR_TASKS_RUDE, RCU_FLAVOR_TASKS_TRACE,
+            RCU_FLAVOR_DEFAULT,
+            RCU_FLAVOR_BH,
+            RCU_FLAVOR_SCHED,
+            RCU_FLAVOR_SRCU,
+            RCU_FLAVOR_TASKS,
+            RCU_FLAVOR_TASKS_RUDE,
+            RCU_FLAVOR_TASKS_TRACE,
         ];
         for i in 0..flavors.len() {
             for j in (i + 1)..flavors.len() {
@@ -89,8 +93,10 @@ mod tests {
     #[test]
     fn test_gp_states_distinct() {
         let states = [
-            RCU_GP_IDLE, RCU_GP_WAIT_GPS,
-            RCU_GP_WAIT_FQS, RCU_GP_CLEANUP,
+            RCU_GP_IDLE,
+            RCU_GP_WAIT_GPS,
+            RCU_GP_WAIT_FQS,
+            RCU_GP_CLEANUP,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

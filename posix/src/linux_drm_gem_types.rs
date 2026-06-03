@@ -88,8 +88,10 @@ mod tests {
     #[test]
     fn test_create_flags_no_overlap() {
         let flags = [
-            GEM_CREATE_MAPPABLE, GEM_CREATE_VOLATILE,
-            GEM_CREATE_CONTIGUOUS, GEM_CREATE_PROTECTED,
+            GEM_CREATE_MAPPABLE,
+            GEM_CREATE_VOLATILE,
+            GEM_CREATE_CONTIGUOUS,
+            GEM_CREATE_PROTECTED,
             GEM_CREATE_SCANOUT,
         ];
         for i in 0..flags.len() {

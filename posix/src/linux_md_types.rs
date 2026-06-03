@@ -88,9 +88,14 @@ mod tests {
     #[test]
     fn test_raid_levels_distinct() {
         let levels = [
-            MD_LEVEL_RAID0, MD_LEVEL_RAID1, MD_LEVEL_RAID4,
-            MD_LEVEL_RAID5, MD_LEVEL_RAID6, MD_LEVEL_RAID10,
-            MD_LEVEL_LINEAR, MD_LEVEL_MULTIPATH,
+            MD_LEVEL_RAID0,
+            MD_LEVEL_RAID1,
+            MD_LEVEL_RAID4,
+            MD_LEVEL_RAID5,
+            MD_LEVEL_RAID6,
+            MD_LEVEL_RAID10,
+            MD_LEVEL_LINEAR,
+            MD_LEVEL_MULTIPATH,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -102,9 +107,13 @@ mod tests {
     #[test]
     fn test_disk_state_flags_no_overlap() {
         let flags = [
-            MD_DISK_FAULTY, MD_DISK_ACTIVE, MD_DISK_SYNC,
-            MD_DISK_REMOVED, MD_DISK_WRITEMOSTLY,
-            MD_DISK_JOURNAL, MD_DISK_FAILFAST,
+            MD_DISK_FAULTY,
+            MD_DISK_ACTIVE,
+            MD_DISK_SYNC,
+            MD_DISK_REMOVED,
+            MD_DISK_WRITEMOSTLY,
+            MD_DISK_JOURNAL,
+            MD_DISK_FAILFAST,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -116,8 +125,10 @@ mod tests {
     #[test]
     fn test_parity_layouts_distinct() {
         let layouts = [
-            MD_PARITY_LEFT_SYMMETRIC, MD_PARITY_RIGHT_SYMMETRIC,
-            MD_PARITY_LEFT_ASYMMETRIC, MD_PARITY_RIGHT_ASYMMETRIC,
+            MD_PARITY_LEFT_SYMMETRIC,
+            MD_PARITY_RIGHT_SYMMETRIC,
+            MD_PARITY_LEFT_ASYMMETRIC,
+            MD_PARITY_RIGHT_ASYMMETRIC,
         ];
         for i in 0..layouts.len() {
             for j in (i + 1)..layouts.len() {
@@ -129,9 +140,13 @@ mod tests {
     #[test]
     fn test_array_states_distinct() {
         let states = [
-            MD_STATE_CLEAN, MD_STATE_ACTIVE, MD_STATE_BITMAP,
-            MD_STATE_DEGRADED, MD_STATE_RESHAPE,
-            MD_STATE_RECOVER, MD_STATE_READONLY,
+            MD_STATE_CLEAN,
+            MD_STATE_ACTIVE,
+            MD_STATE_BITMAP,
+            MD_STATE_DEGRADED,
+            MD_STATE_RESHAPE,
+            MD_STATE_RECOVER,
+            MD_STATE_READONLY,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

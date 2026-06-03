@@ -7,18 +7,18 @@
 pub use crate::linux_connector::CN_IDX_PROC;
 pub use crate::linux_connector::CN_VAL_PROC;
 pub use crate::linux_connector::CnMsg;
-pub use crate::linux_connector::PROC_EVENT_FORK;
-pub use crate::linux_connector::PROC_EVENT_EXEC;
-pub use crate::linux_connector::PROC_EVENT_EXIT;
-pub use crate::linux_connector::PROC_EVENT_UID;
-pub use crate::linux_connector::PROC_EVENT_GID;
-pub use crate::linux_connector::PROC_EVENT_SID;
-pub use crate::linux_connector::PROC_EVENT_PTRACE;
+pub use crate::linux_connector::PROC_CN_MCAST_IGNORE;
+pub use crate::linux_connector::PROC_CN_MCAST_LISTEN;
 pub use crate::linux_connector::PROC_EVENT_COMM;
 pub use crate::linux_connector::PROC_EVENT_COREDUMP;
+pub use crate::linux_connector::PROC_EVENT_EXEC;
+pub use crate::linux_connector::PROC_EVENT_EXIT;
+pub use crate::linux_connector::PROC_EVENT_FORK;
+pub use crate::linux_connector::PROC_EVENT_GID;
 pub use crate::linux_connector::PROC_EVENT_NONE;
-pub use crate::linux_connector::PROC_CN_MCAST_LISTEN;
-pub use crate::linux_connector::PROC_CN_MCAST_IGNORE;
+pub use crate::linux_connector::PROC_EVENT_PTRACE;
+pub use crate::linux_connector::PROC_EVENT_SID;
+pub use crate::linux_connector::PROC_EVENT_UID;
 
 // ---------------------------------------------------------------------------
 // Process event header
@@ -138,6 +138,9 @@ mod tests {
     #[test]
     fn test_cross_module() {
         assert_eq!(CN_IDX_PROC, crate::linux_connector::CN_IDX_PROC);
-        assert_eq!(PROC_CN_MCAST_LISTEN, crate::linux_connector::PROC_CN_MCAST_LISTEN);
+        assert_eq!(
+            PROC_CN_MCAST_LISTEN,
+            crate::linux_connector::PROC_CN_MCAST_LISTEN
+        );
     }
 }

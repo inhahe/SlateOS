@@ -91,11 +91,24 @@ mod tests {
     #[test]
     fn test_chan_types_distinct() {
         let types = [
-            IIO_VOLTAGE, IIO_CURRENT, IIO_POWER, IIO_ACCEL,
-            IIO_ANGL_VEL, IIO_MAGN, IIO_LIGHT, IIO_INTENSITY,
-            IIO_PROXIMITY, IIO_TEMP, IIO_CAPACITANCE,
-            IIO_PRESSURE, IIO_HUMIDITYRELATIVE, IIO_STEPS,
-            IIO_ACTIVITY, IIO_ROT, IIO_ANGL, IIO_TIMESTAMP,
+            IIO_VOLTAGE,
+            IIO_CURRENT,
+            IIO_POWER,
+            IIO_ACCEL,
+            IIO_ANGL_VEL,
+            IIO_MAGN,
+            IIO_LIGHT,
+            IIO_INTENSITY,
+            IIO_PROXIMITY,
+            IIO_TEMP,
+            IIO_CAPACITANCE,
+            IIO_PRESSURE,
+            IIO_HUMIDITYRELATIVE,
+            IIO_STEPS,
+            IIO_ACTIVITY,
+            IIO_ROT,
+            IIO_ANGL,
+            IIO_TIMESTAMP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -107,9 +120,12 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let types = [
-            IIO_EV_TYPE_THRESH, IIO_EV_TYPE_MAG,
-            IIO_EV_TYPE_ROC, IIO_EV_TYPE_THRESH_ADAPTIVE,
-            IIO_EV_TYPE_MAG_ADAPTIVE, IIO_EV_TYPE_CHANGE,
+            IIO_EV_TYPE_THRESH,
+            IIO_EV_TYPE_MAG,
+            IIO_EV_TYPE_ROC,
+            IIO_EV_TYPE_THRESH_ADAPTIVE,
+            IIO_EV_TYPE_MAG_ADAPTIVE,
+            IIO_EV_TYPE_CHANGE,
             IIO_EV_TYPE_GESTURE,
         ];
         for i in 0..types.len() {
@@ -122,9 +138,12 @@ mod tests {
     #[test]
     fn test_event_dirs_distinct() {
         let dirs = [
-            IIO_EV_DIR_EITHER, IIO_EV_DIR_RISING,
-            IIO_EV_DIR_FALLING, IIO_EV_DIR_NONE,
-            IIO_EV_DIR_SINGLETAP, IIO_EV_DIR_DOUBLETAP,
+            IIO_EV_DIR_EITHER,
+            IIO_EV_DIR_RISING,
+            IIO_EV_DIR_FALLING,
+            IIO_EV_DIR_NONE,
+            IIO_EV_DIR_SINGLETAP,
+            IIO_EV_DIR_DOUBLETAP,
         ];
         for i in 0..dirs.len() {
             for j in (i + 1)..dirs.len() {

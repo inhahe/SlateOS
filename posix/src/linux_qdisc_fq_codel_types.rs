@@ -48,11 +48,16 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_FQ_CODEL_UNSPEC, TCA_FQ_CODEL_TARGET,
-            TCA_FQ_CODEL_LIMIT, TCA_FQ_CODEL_INTERVAL,
-            TCA_FQ_CODEL_ECN, TCA_FQ_CODEL_FLOWS,
-            TCA_FQ_CODEL_QUANTUM, TCA_FQ_CODEL_CE_THRESHOLD,
-            TCA_FQ_CODEL_DROP_BATCH_SIZE, TCA_FQ_CODEL_MEMORY_LIMIT,
+            TCA_FQ_CODEL_UNSPEC,
+            TCA_FQ_CODEL_TARGET,
+            TCA_FQ_CODEL_LIMIT,
+            TCA_FQ_CODEL_INTERVAL,
+            TCA_FQ_CODEL_ECN,
+            TCA_FQ_CODEL_FLOWS,
+            TCA_FQ_CODEL_QUANTUM,
+            TCA_FQ_CODEL_CE_THRESHOLD,
+            TCA_FQ_CODEL_DROP_BATCH_SIZE,
+            TCA_FQ_CODEL_MEMORY_LIMIT,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

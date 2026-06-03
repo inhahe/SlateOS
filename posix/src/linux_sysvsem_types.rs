@@ -87,10 +87,20 @@ mod tests {
     #[test]
     fn test_ctl_commands_distinct() {
         let cmds = [
-            GETVAL, SETVAL, GETALL, SETALL,
-            IPC_STAT_SEM, IPC_SET_SEM, IPC_RMID_SEM,
-            IPC_INFO_SEM, SEM_INFO, SEM_STAT, SEM_STAT_ANY,
-            GETNCNT, GETPID, GETZCNT,
+            GETVAL,
+            SETVAL,
+            GETALL,
+            SETALL,
+            IPC_STAT_SEM,
+            IPC_SET_SEM,
+            IPC_RMID_SEM,
+            IPC_INFO_SEM,
+            SEM_INFO,
+            SEM_STAT,
+            SEM_STAT_ANY,
+            GETNCNT,
+            GETPID,
+            GETZCNT,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

@@ -3,32 +3,32 @@
 //! Re-exports the syslog API from the `syslog` module.  Programs
 //! that include `<sys/syslog.h>` find everything here.
 
-pub use crate::syslog::LOG_EMERG;
 pub use crate::syslog::LOG_ALERT;
 pub use crate::syslog::LOG_CRIT;
-pub use crate::syslog::LOG_ERR;
-pub use crate::syslog::LOG_WARNING;
-pub use crate::syslog::LOG_NOTICE;
-pub use crate::syslog::LOG_INFO;
 pub use crate::syslog::LOG_DEBUG;
+pub use crate::syslog::LOG_EMERG;
+pub use crate::syslog::LOG_ERR;
+pub use crate::syslog::LOG_INFO;
+pub use crate::syslog::LOG_NOTICE;
+pub use crate::syslog::LOG_WARNING;
 
-pub use crate::syslog::LOG_KERN;
-pub use crate::syslog::LOG_USER;
-pub use crate::syslog::LOG_DAEMON;
 pub use crate::syslog::LOG_AUTH;
-pub use crate::syslog::LOG_SYSLOG;
+pub use crate::syslog::LOG_DAEMON;
+pub use crate::syslog::LOG_KERN;
 pub use crate::syslog::LOG_LOCAL0;
+pub use crate::syslog::LOG_SYSLOG;
+pub use crate::syslog::LOG_USER;
 
-pub use crate::syslog::LOG_PID;
 pub use crate::syslog::LOG_NDELAY;
 pub use crate::syslog::LOG_PERROR;
+pub use crate::syslog::LOG_PID;
 
 pub use crate::syslog::openlog;
 // `syslog` itself is an assembly trampoline (variadic) defined only on the
 // bare-metal target; the Rust-callable forms are `_syslog_impl` and `vsyslog`.
-pub use crate::syslog::vsyslog;
 pub use crate::syslog::closelog;
 pub use crate::syslog::setlogmask;
+pub use crate::syslog::vsyslog;
 
 // ---------------------------------------------------------------------------
 // LOG_MASK / LOG_UPTO macros as functions

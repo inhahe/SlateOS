@@ -81,11 +81,19 @@ mod tests {
     #[test]
     fn test_algorithms_distinct() {
         let algs = [
-            HASH_ALG_MD5, HASH_ALG_SHA1, HASH_ALG_SHA224,
-            HASH_ALG_SHA256, HASH_ALG_SHA384, HASH_ALG_SHA512,
-            HASH_ALG_SHA3_256, HASH_ALG_SHA3_512,
-            HASH_ALG_BLAKE2B_256, HASH_ALG_BLAKE2B_512,
-            HASH_ALG_SM3, HASH_ALG_CRC32, HASH_ALG_CRC32C,
+            HASH_ALG_MD5,
+            HASH_ALG_SHA1,
+            HASH_ALG_SHA224,
+            HASH_ALG_SHA256,
+            HASH_ALG_SHA384,
+            HASH_ALG_SHA512,
+            HASH_ALG_SHA3_256,
+            HASH_ALG_SHA3_512,
+            HASH_ALG_BLAKE2B_256,
+            HASH_ALG_BLAKE2B_512,
+            HASH_ALG_SM3,
+            HASH_ALG_CRC32,
+            HASH_ALG_CRC32C,
             HASH_ALG_XXHASH,
         ];
         for i in 0..algs.len() {

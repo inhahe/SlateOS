@@ -14,30 +14,30 @@ pub use crate::resource::Rusage;
 // Resource limit constants
 // ---------------------------------------------------------------------------
 
+pub use crate::resource::RLIM_INFINITY;
 pub use crate::resource::RLIMIT_AS;
 pub use crate::resource::RLIMIT_CORE;
 pub use crate::resource::RLIMIT_CPU;
 pub use crate::resource::RLIMIT_DATA;
 pub use crate::resource::RLIMIT_FSIZE;
+pub use crate::resource::RLIMIT_LOCKS;
+pub use crate::resource::RLIMIT_MEMLOCK;
+pub use crate::resource::RLIMIT_MSGQUEUE;
+pub use crate::resource::RLIMIT_NICE;
 pub use crate::resource::RLIMIT_NOFILE;
-pub use crate::resource::RLIMIT_STACK;
 pub use crate::resource::RLIMIT_NPROC;
 pub use crate::resource::RLIMIT_RSS;
-pub use crate::resource::RLIMIT_MSGQUEUE;
-pub use crate::resource::RLIMIT_MEMLOCK;
-pub use crate::resource::RLIMIT_LOCKS;
-pub use crate::resource::RLIMIT_SIGPENDING;
-pub use crate::resource::RLIMIT_NICE;
 pub use crate::resource::RLIMIT_RTPRIO;
 pub use crate::resource::RLIMIT_RTTIME;
-pub use crate::resource::RLIM_INFINITY;
+pub use crate::resource::RLIMIT_SIGPENDING;
+pub use crate::resource::RLIMIT_STACK;
 
 // ---------------------------------------------------------------------------
 // Usage constants
 // ---------------------------------------------------------------------------
 
-pub use crate::resource::RUSAGE_SELF;
 pub use crate::resource::RUSAGE_CHILDREN;
+pub use crate::resource::RUSAGE_SELF;
 pub use crate::resource::RUSAGE_THREAD;
 
 // ---------------------------------------------------------------------------
@@ -45,10 +45,10 @@ pub use crate::resource::RUSAGE_THREAD;
 // ---------------------------------------------------------------------------
 
 pub use crate::resource::getrlimit;
-pub use crate::resource::setrlimit;
 pub use crate::resource::getrusage;
 pub use crate::resource::prlimit;
 pub use crate::resource::prlimit64;
+pub use crate::resource::setrlimit;
 
 // ---------------------------------------------------------------------------
 // Priority functions
@@ -85,10 +85,22 @@ mod tests {
     #[test]
     fn test_rlimit_constants_distinct() {
         let limits = [
-            RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_STACK,
-            RLIMIT_CORE, RLIMIT_RSS, RLIMIT_NPROC, RLIMIT_NOFILE,
-            RLIMIT_MEMLOCK, RLIMIT_AS, RLIMIT_LOCKS, RLIMIT_SIGPENDING,
-            RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME,
+            RLIMIT_CPU,
+            RLIMIT_FSIZE,
+            RLIMIT_DATA,
+            RLIMIT_STACK,
+            RLIMIT_CORE,
+            RLIMIT_RSS,
+            RLIMIT_NPROC,
+            RLIMIT_NOFILE,
+            RLIMIT_MEMLOCK,
+            RLIMIT_AS,
+            RLIMIT_LOCKS,
+            RLIMIT_SIGPENDING,
+            RLIMIT_MSGQUEUE,
+            RLIMIT_NICE,
+            RLIMIT_RTPRIO,
+            RLIMIT_RTTIME,
         ];
         for i in 0..limits.len() {
             for j in (i + 1)..limits.len() {

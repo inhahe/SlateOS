@@ -104,8 +104,10 @@ mod tests {
     #[test]
     fn test_balance_flags_no_overlap() {
         let flags = [
-            BTRFS_BALANCE_DATA, BTRFS_BALANCE_SYSTEM,
-            BTRFS_BALANCE_METADATA, BTRFS_BALANCE_FORCE,
+            BTRFS_BALANCE_DATA,
+            BTRFS_BALANCE_SYSTEM,
+            BTRFS_BALANCE_METADATA,
+            BTRFS_BALANCE_FORCE,
             BTRFS_BALANCE_RESUME,
         ];
         for i in 0..flags.len() {
@@ -118,10 +120,14 @@ mod tests {
     #[test]
     fn test_balance_args_no_overlap() {
         let args = [
-            BTRFS_BALANCE_ARGS_PROFILES, BTRFS_BALANCE_ARGS_USAGE,
-            BTRFS_BALANCE_ARGS_DEVID, BTRFS_BALANCE_ARGS_DRANGE,
-            BTRFS_BALANCE_ARGS_VRANGE, BTRFS_BALANCE_ARGS_LIMIT,
-            BTRFS_BALANCE_ARGS_CONVERT, BTRFS_BALANCE_ARGS_SOFT,
+            BTRFS_BALANCE_ARGS_PROFILES,
+            BTRFS_BALANCE_ARGS_USAGE,
+            BTRFS_BALANCE_ARGS_DEVID,
+            BTRFS_BALANCE_ARGS_DRANGE,
+            BTRFS_BALANCE_ARGS_VRANGE,
+            BTRFS_BALANCE_ARGS_LIMIT,
+            BTRFS_BALANCE_ARGS_CONVERT,
+            BTRFS_BALANCE_ARGS_SOFT,
             BTRFS_BALANCE_ARGS_USAGE_RANGE,
         ];
         for i in 0..args.len() {
@@ -144,11 +150,16 @@ mod tests {
     #[test]
     fn test_block_group_types_no_overlap() {
         let types = [
-            BTRFS_BLOCK_GROUP_DATA, BTRFS_BLOCK_GROUP_SYSTEM,
-            BTRFS_BLOCK_GROUP_METADATA, BTRFS_BLOCK_GROUP_RAID0,
-            BTRFS_BLOCK_GROUP_RAID1, BTRFS_BLOCK_GROUP_DUP,
-            BTRFS_BLOCK_GROUP_RAID10, BTRFS_BLOCK_GROUP_RAID5,
-            BTRFS_BLOCK_GROUP_RAID6, BTRFS_BLOCK_GROUP_RAID1C3,
+            BTRFS_BLOCK_GROUP_DATA,
+            BTRFS_BLOCK_GROUP_SYSTEM,
+            BTRFS_BLOCK_GROUP_METADATA,
+            BTRFS_BLOCK_GROUP_RAID0,
+            BTRFS_BLOCK_GROUP_RAID1,
+            BTRFS_BLOCK_GROUP_DUP,
+            BTRFS_BLOCK_GROUP_RAID10,
+            BTRFS_BLOCK_GROUP_RAID5,
+            BTRFS_BLOCK_GROUP_RAID6,
+            BTRFS_BLOCK_GROUP_RAID1C3,
             BTRFS_BLOCK_GROUP_RAID1C4,
         ];
         for i in 0..types.len() {

@@ -75,10 +75,17 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            STATFS_OFF_TYPE, STATFS_OFF_BSIZE, STATFS_OFF_BLOCKS,
-            STATFS_OFF_BFREE, STATFS_OFF_BAVAIL, STATFS_OFF_FILES,
-            STATFS_OFF_FFREE, STATFS_OFF_FSID, STATFS_OFF_NAMELEN,
-            STATFS_OFF_FRSIZE, STATFS_OFF_FLAGS,
+            STATFS_OFF_TYPE,
+            STATFS_OFF_BSIZE,
+            STATFS_OFF_BLOCKS,
+            STATFS_OFF_BFREE,
+            STATFS_OFF_BAVAIL,
+            STATFS_OFF_FILES,
+            STATFS_OFF_FFREE,
+            STATFS_OFF_FSID,
+            STATFS_OFF_NAMELEN,
+            STATFS_OFF_FRSIZE,
+            STATFS_OFF_FLAGS,
         ];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);
@@ -103,10 +110,15 @@ mod tests {
     #[test]
     fn test_magic_numbers_distinct() {
         let magics = [
-            TMPFS_MAGIC, RAMFS_MAGIC, SECURITYFS_MAGIC,
-            CGROUP_SUPER_MAGIC, CGROUP2_SUPER_MAGIC,
-            DEBUGFS_MAGIC, BINFMTFS_MAGIC,
-            PIPEFS_MAGIC, SOCKFS_MAGIC,
+            TMPFS_MAGIC,
+            RAMFS_MAGIC,
+            SECURITYFS_MAGIC,
+            CGROUP_SUPER_MAGIC,
+            CGROUP2_SUPER_MAGIC,
+            DEBUGFS_MAGIC,
+            BINFMTFS_MAGIC,
+            PIPEFS_MAGIC,
+            SOCKFS_MAGIC,
         ];
         for i in 0..magics.len() {
             for j in (i + 1)..magics.len() {

@@ -58,7 +58,8 @@ mod tests {
     #[test]
     fn test_mon_ids_distinct() {
         let ids = [
-            RESCTRL_MON_L3_OCCUPANCY, RESCTRL_MON_TOTAL_MBM,
+            RESCTRL_MON_L3_OCCUPANCY,
+            RESCTRL_MON_TOTAL_MBM,
             RESCTRL_MON_LOCAL_MBM,
         ];
         for i in 0..ids.len() {
@@ -71,8 +72,10 @@ mod tests {
     #[test]
     fn test_resource_types_distinct() {
         let types = [
-            RESCTRL_RESOURCE_L3, RESCTRL_RESOURCE_L2,
-            RESCTRL_RESOURCE_MBA, RESCTRL_RESOURCE_SMBA,
+            RESCTRL_RESOURCE_L3,
+            RESCTRL_RESOURCE_L2,
+            RESCTRL_RESOURCE_MBA,
+            RESCTRL_RESOURCE_SMBA,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -84,8 +87,10 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            RESCTRL_MON_EVENT_UNSPEC, RESCTRL_MON_EVENT_L3_OCCUPANCY,
-            RESCTRL_MON_EVENT_TOTAL_BYTES, RESCTRL_MON_EVENT_LOCAL_BYTES,
+            RESCTRL_MON_EVENT_UNSPEC,
+            RESCTRL_MON_EVENT_L3_OCCUPANCY,
+            RESCTRL_MON_EVENT_TOTAL_BYTES,
+            RESCTRL_MON_EVENT_LOCAL_BYTES,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

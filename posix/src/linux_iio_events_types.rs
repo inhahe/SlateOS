@@ -83,8 +83,11 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let types = [
-            IIO_EV_TYPE_THRESH, IIO_EV_TYPE_MAG, IIO_EV_TYPE_ROC,
-            IIO_EV_TYPE_THRESH_ADAPTIVE, IIO_EV_TYPE_MAG_ADAPTIVE,
+            IIO_EV_TYPE_THRESH,
+            IIO_EV_TYPE_MAG,
+            IIO_EV_TYPE_ROC,
+            IIO_EV_TYPE_THRESH_ADAPTIVE,
+            IIO_EV_TYPE_MAG_ADAPTIVE,
             IIO_EV_TYPE_CHANGE,
         ];
         for i in 0..types.len() {
@@ -97,8 +100,10 @@ mod tests {
     #[test]
     fn test_directions_distinct() {
         let dirs = [
-            IIO_EV_DIR_EITHER, IIO_EV_DIR_RISING,
-            IIO_EV_DIR_FALLING, IIO_EV_DIR_NONE,
+            IIO_EV_DIR_EITHER,
+            IIO_EV_DIR_RISING,
+            IIO_EV_DIR_FALLING,
+            IIO_EV_DIR_NONE,
         ];
         for i in 0..dirs.len() {
             for j in (i + 1)..dirs.len() {
@@ -110,8 +115,14 @@ mod tests {
     #[test]
     fn test_channel_types_distinct() {
         let chans = [
-            IIO_VOLTAGE, IIO_CURRENT, IIO_ACCEL, IIO_ANGL_VEL,
-            IIO_LIGHT, IIO_TEMP, IIO_PROXIMITY, IIO_PRESSURE,
+            IIO_VOLTAGE,
+            IIO_CURRENT,
+            IIO_ACCEL,
+            IIO_ANGL_VEL,
+            IIO_LIGHT,
+            IIO_TEMP,
+            IIO_PROXIMITY,
+            IIO_PRESSURE,
             IIO_HUMIDITYRELATIVE,
         ];
         for i in 0..chans.len() {

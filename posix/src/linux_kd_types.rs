@@ -85,8 +85,14 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            KDGKBMODE, KDSKBMODE, KDGKBTYPE, KDGETLED,
-            KDSETLED, KDSETMODE, KDGETMODE, KDSIGACCEPT,
+            KDGKBMODE,
+            KDSKBMODE,
+            KDGKBTYPE,
+            KDGETLED,
+            KDSETLED,
+            KDSETMODE,
+            KDGETMODE,
+            KDSIGACCEPT,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

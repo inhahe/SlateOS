@@ -9,26 +9,26 @@
 // ---------------------------------------------------------------------------
 
 pub use crate::fcntl_ops::F_DUPFD;
+pub use crate::fcntl_ops::F_DUPFD_CLOEXEC;
 pub use crate::fcntl_ops::F_GETFD;
-pub use crate::fcntl_ops::F_SETFD;
 pub use crate::fcntl_ops::F_GETFL;
-pub use crate::fcntl_ops::F_SETFL;
 pub use crate::fcntl_ops::F_GETLK;
+pub use crate::fcntl_ops::F_SETFD;
+pub use crate::fcntl_ops::F_SETFL;
 pub use crate::fcntl_ops::F_SETLK;
 pub use crate::fcntl_ops::F_SETLKW;
-pub use crate::fcntl_ops::F_DUPFD_CLOEXEC;
 
 // ---------------------------------------------------------------------------
 // Re-exports from fcntl (O_* flags)
 // ---------------------------------------------------------------------------
 
-pub use crate::fcntl::O_RDONLY;
-pub use crate::fcntl::O_WRONLY;
-pub use crate::fcntl::O_RDWR;
+pub use crate::fcntl::O_APPEND;
 pub use crate::fcntl::O_CREAT;
 pub use crate::fcntl::O_EXCL;
+pub use crate::fcntl::O_RDONLY;
+pub use crate::fcntl::O_RDWR;
 pub use crate::fcntl::O_TRUNC;
-pub use crate::fcntl::O_APPEND;
+pub use crate::fcntl::O_WRONLY;
 
 // ---------------------------------------------------------------------------
 // Re-exports from fdtable (FD_CLOEXEC)
@@ -140,8 +140,12 @@ mod tests {
     #[test]
     fn test_seals_powers_of_two() {
         let seals = [
-            F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW,
-            F_SEAL_WRITE, F_SEAL_FUTURE_WRITE, F_SEAL_EXEC,
+            F_SEAL_SEAL,
+            F_SEAL_SHRINK,
+            F_SEAL_GROW,
+            F_SEAL_WRITE,
+            F_SEAL_FUTURE_WRITE,
+            F_SEAL_EXEC,
         ];
         for s in &seals {
             assert!(s.is_power_of_two(), "seal {s:#x} not power of 2");
@@ -151,8 +155,12 @@ mod tests {
     #[test]
     fn test_seals_distinct() {
         let seals = [
-            F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW,
-            F_SEAL_WRITE, F_SEAL_FUTURE_WRITE, F_SEAL_EXEC,
+            F_SEAL_SEAL,
+            F_SEAL_SHRINK,
+            F_SEAL_GROW,
+            F_SEAL_WRITE,
+            F_SEAL_FUTURE_WRITE,
+            F_SEAL_EXEC,
         ];
         for i in 0..seals.len() {
             for j in (i + 1)..seals.len() {
@@ -169,8 +177,7 @@ mod tests {
     #[test]
     fn test_dnotify_flags_powers_of_two() {
         let flags = [
-            DN_ACCESS, DN_MODIFY, DN_CREATE,
-            DN_DELETE, DN_RENAME, DN_ATTRIB,
+            DN_ACCESS, DN_MODIFY, DN_CREATE, DN_DELETE, DN_RENAME, DN_ATTRIB,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "DN flag {f:#x} not power of 2");

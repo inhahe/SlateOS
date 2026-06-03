@@ -41,11 +41,17 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_POLICE_UNSPEC, TCA_POLICE_TBF, TCA_POLICE_RATE,
-            TCA_POLICE_PEAKRATE, TCA_POLICE_AVRATE,
-            TCA_POLICE_RESULT, TCA_POLICE_TM,
-            TCA_POLICE_RATE64, TCA_POLICE_PEAKRATE64,
-            TCA_POLICE_PKTRATE64, TCA_POLICE_PKTBURST64,
+            TCA_POLICE_UNSPEC,
+            TCA_POLICE_TBF,
+            TCA_POLICE_RATE,
+            TCA_POLICE_PEAKRATE,
+            TCA_POLICE_AVRATE,
+            TCA_POLICE_RESULT,
+            TCA_POLICE_TM,
+            TCA_POLICE_RATE64,
+            TCA_POLICE_PEAKRATE64,
+            TCA_POLICE_PKTRATE64,
+            TCA_POLICE_PKTBURST64,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

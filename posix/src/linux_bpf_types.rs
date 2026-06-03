@@ -129,10 +129,18 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            BPF_MAP_CREATE, BPF_MAP_LOOKUP_ELEM, BPF_MAP_UPDATE_ELEM,
-            BPF_MAP_DELETE_ELEM, BPF_MAP_GET_NEXT_KEY, BPF_PROG_LOAD,
-            BPF_PROG_ATTACH, BPF_PROG_DETACH, BPF_OBJ_PIN, BPF_OBJ_GET,
-            BPF_PROG_QUERY, BPF_LINK_CREATE,
+            BPF_MAP_CREATE,
+            BPF_MAP_LOOKUP_ELEM,
+            BPF_MAP_UPDATE_ELEM,
+            BPF_MAP_DELETE_ELEM,
+            BPF_MAP_GET_NEXT_KEY,
+            BPF_PROG_LOAD,
+            BPF_PROG_ATTACH,
+            BPF_PROG_DETACH,
+            BPF_OBJ_PIN,
+            BPF_OBJ_GET,
+            BPF_PROG_QUERY,
+            BPF_LINK_CREATE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -144,13 +152,20 @@ mod tests {
     #[test]
     fn test_prog_types_distinct() {
         let types = [
-            BPF_PROG_TYPE_UNSPEC, BPF_PROG_TYPE_SOCKET_FILTER,
-            BPF_PROG_TYPE_KPROBE, BPF_PROG_TYPE_SCHED_CLS,
-            BPF_PROG_TYPE_SCHED_ACT, BPF_PROG_TYPE_TRACEPOINT,
-            BPF_PROG_TYPE_XDP, BPF_PROG_TYPE_PERF_EVENT,
-            BPF_PROG_TYPE_CGROUP_SKB, BPF_PROG_TYPE_CGROUP_SOCK,
-            BPF_PROG_TYPE_LWT_IN, BPF_PROG_TYPE_RAW_TRACEPOINT,
-            BPF_PROG_TYPE_LSM, BPF_PROG_TYPE_STRUCT_OPS,
+            BPF_PROG_TYPE_UNSPEC,
+            BPF_PROG_TYPE_SOCKET_FILTER,
+            BPF_PROG_TYPE_KPROBE,
+            BPF_PROG_TYPE_SCHED_CLS,
+            BPF_PROG_TYPE_SCHED_ACT,
+            BPF_PROG_TYPE_TRACEPOINT,
+            BPF_PROG_TYPE_XDP,
+            BPF_PROG_TYPE_PERF_EVENT,
+            BPF_PROG_TYPE_CGROUP_SKB,
+            BPF_PROG_TYPE_CGROUP_SOCK,
+            BPF_PROG_TYPE_LWT_IN,
+            BPF_PROG_TYPE_RAW_TRACEPOINT,
+            BPF_PROG_TYPE_LSM,
+            BPF_PROG_TYPE_STRUCT_OPS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -162,12 +177,18 @@ mod tests {
     #[test]
     fn test_map_types_distinct() {
         let types = [
-            BPF_MAP_TYPE_UNSPEC, BPF_MAP_TYPE_HASH,
-            BPF_MAP_TYPE_ARRAY, BPF_MAP_TYPE_PROG_ARRAY,
-            BPF_MAP_TYPE_PERF_EVENT_ARRAY, BPF_MAP_TYPE_PERCPU_HASH,
-            BPF_MAP_TYPE_PERCPU_ARRAY, BPF_MAP_TYPE_STACK_TRACE,
-            BPF_MAP_TYPE_LRU_HASH, BPF_MAP_TYPE_LRU_PERCPU_HASH,
-            BPF_MAP_TYPE_LPM_TRIE, BPF_MAP_TYPE_RINGBUF,
+            BPF_MAP_TYPE_UNSPEC,
+            BPF_MAP_TYPE_HASH,
+            BPF_MAP_TYPE_ARRAY,
+            BPF_MAP_TYPE_PROG_ARRAY,
+            BPF_MAP_TYPE_PERF_EVENT_ARRAY,
+            BPF_MAP_TYPE_PERCPU_HASH,
+            BPF_MAP_TYPE_PERCPU_ARRAY,
+            BPF_MAP_TYPE_STACK_TRACE,
+            BPF_MAP_TYPE_LRU_HASH,
+            BPF_MAP_TYPE_LRU_PERCPU_HASH,
+            BPF_MAP_TYPE_LPM_TRIE,
+            BPF_MAP_TYPE_RINGBUF,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

@@ -61,7 +61,8 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            AUXILIARY_STATE_REGISTERED, AUXILIARY_STATE_BOUND,
+            AUXILIARY_STATE_REGISTERED,
+            AUXILIARY_STATE_BOUND,
             AUXILIARY_STATE_REMOVING,
         ];
         for i in 0..states.len() {
@@ -88,8 +89,10 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            AUXILIARY_EVENT_ADD, AUXILIARY_EVENT_REMOVE,
-            AUXILIARY_EVENT_BIND, AUXILIARY_EVENT_UNBIND,
+            AUXILIARY_EVENT_ADD,
+            AUXILIARY_EVENT_REMOVE,
+            AUXILIARY_EVENT_BIND,
+            AUXILIARY_EVENT_UNBIND,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

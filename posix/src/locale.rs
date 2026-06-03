@@ -110,11 +110,7 @@ const C_LOCALE_TAG: LocaleT = 1;
 /// Always returns a handle for the C locale regardless of the
 /// `locale` string.  `base` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn newlocale(
-    _category_mask: i32,
-    _locale: *const u8,
-    _base: LocaleT,
-) -> LocaleT {
+pub extern "C" fn newlocale(_category_mask: i32, _locale: *const u8, _base: LocaleT) -> LocaleT {
     C_LOCALE_TAG
 }
 
@@ -189,7 +185,15 @@ mod tests {
 
     #[test]
     fn test_setlocale_all_categories() {
-        for cat in [LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE, LC_MONETARY, LC_MESSAGES, LC_ALL] {
+        for cat in [
+            LC_CTYPE,
+            LC_NUMERIC,
+            LC_TIME,
+            LC_COLLATE,
+            LC_MONETARY,
+            LC_MESSAGES,
+            LC_ALL,
+        ] {
             let result = setlocale(cat, core::ptr::null());
             assert!(!result.is_null());
             assert_eq!(unsafe { *result }, b'C');
@@ -263,14 +267,14 @@ mod tests {
 
     #[test]
     fn test_category_masks() {
-        assert_eq!(LC_CTYPE_MASK, 1);    // 1 << 0
-        assert_eq!(LC_NUMERIC_MASK, 2);  // 1 << 1
-        assert_eq!(LC_TIME_MASK, 4);     // 1 << 2
-        assert_eq!(LC_COLLATE_MASK, 8);  // 1 << 3
+        assert_eq!(LC_CTYPE_MASK, 1); // 1 << 0
+        assert_eq!(LC_NUMERIC_MASK, 2); // 1 << 1
+        assert_eq!(LC_TIME_MASK, 4); // 1 << 2
+        assert_eq!(LC_COLLATE_MASK, 8); // 1 << 3
         assert_eq!(LC_MONETARY_MASK, 16); // 1 << 4
         assert_eq!(LC_MESSAGES_MASK, 32); // 1 << 5
         // LC_ALL_MASK should cover all categories.
-        assert_eq!(LC_ALL_MASK, 63);     // (1 << 6) - 1 = 63
+        assert_eq!(LC_ALL_MASK, 63); // (1 << 6) - 1 = 63
     }
 
     #[test]

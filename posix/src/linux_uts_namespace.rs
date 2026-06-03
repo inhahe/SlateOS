@@ -104,7 +104,12 @@ mod tests {
 
     #[test]
     fn test_sysctl_paths_distinct() {
-        let paths = [SYSCTL_HOSTNAME, SYSCTL_DOMAINNAME, SYSCTL_OSTYPE, SYSCTL_OSRELEASE];
+        let paths = [
+            SYSCTL_HOSTNAME,
+            SYSCTL_DOMAINNAME,
+            SYSCTL_OSTYPE,
+            SYSCTL_OSRELEASE,
+        ];
         for i in 0..paths.len() {
             for j in (i + 1)..paths.len() {
                 assert_ne!(paths[i], paths[j]);
@@ -114,7 +119,12 @@ mod tests {
 
     #[test]
     fn test_sysctl_paths_have_kernel_prefix() {
-        let paths = [SYSCTL_HOSTNAME, SYSCTL_DOMAINNAME, SYSCTL_OSTYPE, SYSCTL_OSRELEASE];
+        let paths = [
+            SYSCTL_HOSTNAME,
+            SYSCTL_DOMAINNAME,
+            SYSCTL_OSTYPE,
+            SYSCTL_OSRELEASE,
+        ];
         for path in &paths {
             assert!(path.starts_with("kernel."), "{}", path);
         }

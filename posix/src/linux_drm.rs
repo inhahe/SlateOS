@@ -123,8 +123,10 @@ mod tests {
     #[test]
     fn test_core_ioctls_distinct() {
         let cmds = [
-            DRM_IOCTL_VERSION, DRM_IOCTL_GET_UNIQUE,
-            DRM_IOCTL_GET_MAGIC, DRM_IOCTL_SET_CLIENT_CAP,
+            DRM_IOCTL_VERSION,
+            DRM_IOCTL_GET_UNIQUE,
+            DRM_IOCTL_GET_MAGIC,
+            DRM_IOCTL_SET_CLIENT_CAP,
             DRM_IOCTL_GET_CAP,
         ];
         for i in 0..cmds.len() {
@@ -137,11 +139,16 @@ mod tests {
     #[test]
     fn test_modeset_ioctls_distinct() {
         let cmds = [
-            DRM_IOCTL_MODE_GETRESOURCES, DRM_IOCTL_MODE_GETCONNECTOR,
-            DRM_IOCTL_MODE_GETCRTC, DRM_IOCTL_MODE_SETCRTC,
-            DRM_IOCTL_MODE_ADDFB, DRM_IOCTL_MODE_ADDFB2,
-            DRM_IOCTL_MODE_RMFB, DRM_IOCTL_MODE_PAGE_FLIP,
-            DRM_IOCTL_MODE_ATOMIC, DRM_IOCTL_MODE_CREATE_DUMB,
+            DRM_IOCTL_MODE_GETRESOURCES,
+            DRM_IOCTL_MODE_GETCONNECTOR,
+            DRM_IOCTL_MODE_GETCRTC,
+            DRM_IOCTL_MODE_SETCRTC,
+            DRM_IOCTL_MODE_ADDFB,
+            DRM_IOCTL_MODE_ADDFB2,
+            DRM_IOCTL_MODE_RMFB,
+            DRM_IOCTL_MODE_PAGE_FLIP,
+            DRM_IOCTL_MODE_ATOMIC,
+            DRM_IOCTL_MODE_CREATE_DUMB,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -173,9 +180,12 @@ mod tests {
     #[test]
     fn test_drm_caps_distinct() {
         let caps = [
-            DRM_CAP_DUMB_BUFFER, DRM_CAP_PRIME,
-            DRM_CAP_TIMESTAMP_MONOTONIC, DRM_CAP_ASYNC_PAGE_FLIP,
-            DRM_CAP_ADDFB2_MODIFIERS, DRM_CAP_CRTC_IN_VBLANK_EVENT,
+            DRM_CAP_DUMB_BUFFER,
+            DRM_CAP_PRIME,
+            DRM_CAP_TIMESTAMP_MONOTONIC,
+            DRM_CAP_ASYNC_PAGE_FLIP,
+            DRM_CAP_ADDFB2_MODIFIERS,
+            DRM_CAP_CRTC_IN_VBLANK_EVENT,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

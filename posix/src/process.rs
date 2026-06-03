@@ -771,7 +771,7 @@ pub extern "C" fn clone(fn_ptr: *const u8, child_stack: *mut u8, flags: i32, _ar
     // negative-flag attack (e.g. `flags = i32::MIN` = CLONE_IO) is
     // detected by the whitelist below rather than sign-extended into
     // every high bit.
-    let bits = (flags as u32) as u64;
+    let bits = u64::from(flags as u32);
 
     // (3) Exit signal in the low byte must be a valid signal number.
     let exit_signal = bits & crate::linux_clone_args::CSIGNAL;
@@ -2456,7 +2456,7 @@ pub extern "C" fn clone3(args: *const CloneArgs, size: usize) -> i64 {
         // SAFETY: caller contract — `args` covers `size` readable
         // bytes.  We reinterpret as a byte slice for the tail scan.
         let tail_len = size - v2;
-        let tail_ptr = (args as *const u8).wrapping_add(v2);
+        let tail_ptr = args.cast::<u8>().wrapping_add(v2);
         for i in 0..tail_len {
             // SAFETY: tail_ptr + i is within [args, args+size).
             let byte = unsafe { *tail_ptr.add(i) };
@@ -2752,21 +2752,18 @@ pub extern "C" fn process_vm_readv(
 ) -> i64 {
     // SAFETY: caller contract — iov pointers cover their respective
     // counts of Iovec entries, or are unread when their count is 0.
-    match unsafe { process_vm_validate(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) } {
-        Err(e) => {
-            errno::set_errno(e);
-            -1
+    if let Err(e) = unsafe { process_vm_validate(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) } {
+        errno::set_errno(e);
+        -1
+    } else {
+        // Phase 200: CAP_SYS_PTRACE gate — same check Linux
+        // performs inside mm_access() after finding the target.
+        if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
+            errno::set_errno(errno::EPERM);
+            return -1;
         }
-        Ok(()) => {
-            // Phase 200: CAP_SYS_PTRACE gate — same check Linux
-            // performs inside mm_access() after finding the target.
-            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
-                errno::set_errno(errno::EPERM);
-                return -1;
-            }
-            errno::set_errno(errno::ENOSYS);
-            -1
-        }
+        errno::set_errno(errno::ENOSYS);
+        -1
     }
 }
 
@@ -2796,20 +2793,17 @@ pub extern "C" fn process_vm_writev(
 ) -> i64 {
     // SAFETY: caller contract — iov pointers cover their respective
     // counts of Iovec entries, or are unread when their count is 0.
-    match unsafe { process_vm_validate(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) } {
-        Err(e) => {
-            errno::set_errno(e);
-            -1
+    if let Err(e) = unsafe { process_vm_validate(pid, local_iov, liovcnt, remote_iov, riovcnt, flags) } {
+        errno::set_errno(e);
+        -1
+    } else {
+        // Phase 200: CAP_SYS_PTRACE gate — see process_vm_readv.
+        if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
+            errno::set_errno(errno::EPERM);
+            return -1;
         }
-        Ok(()) => {
-            // Phase 200: CAP_SYS_PTRACE gate — see process_vm_readv.
-            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_PTRACE) {
-                errno::set_errno(errno::EPERM);
-                return -1;
-            }
-            errno::set_errno(errno::ENOSYS);
-            -1
-        }
+        errno::set_errno(errno::ENOSYS);
+        -1
     }
 }
 
@@ -2892,18 +2886,17 @@ pub extern "C" fn kcmp(pid1: i32, pid2: i32, type_: i32, idx1: u64, idx2: u64) -
     }
 
     // (3) Type must be in the documented range.
-    if type_ < 0 || type_ >= KCMP_TYPES {
+    if !(0..KCMP_TYPES).contains(&type_) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
 
     // (4) KCMP_FILE: idx1/idx2 are fd numbers — must fit in c_int.
-    if type_ == KCMP_FILE {
-        if idx1 > i32::MAX as u64 || idx2 > i32::MAX as u64 {
+    if type_ == KCMP_FILE
+        && (idx1 > i32::MAX as u64 || idx2 > i32::MAX as u64) {
             errno::set_errno(errno::EBADF);
             return -1;
         }
-    }
 
     // (5) KCMP_EPOLL_TFD: idx2 must point to a kcmp_epoll_slot.
     if type_ == KCMP_EPOLL_TFD && idx2 == 0 {

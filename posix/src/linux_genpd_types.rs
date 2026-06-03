@@ -77,9 +77,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            GENPD_FLAG_ALWAYS_ON, GENPD_FLAG_ACTIVE_WAKEUP,
-            GENPD_FLAG_RPM_ALWAYS_ON, GENPD_FLAG_IRQ_SAFE,
-            GENPD_FLAG_CPU_DOMAIN, GENPD_FLAG_MIN_RESIDENCY,
+            GENPD_FLAG_ALWAYS_ON,
+            GENPD_FLAG_ACTIVE_WAKEUP,
+            GENPD_FLAG_RPM_ALWAYS_ON,
+            GENPD_FLAG_IRQ_SAFE,
+            GENPD_FLAG_CPU_DOMAIN,
+            GENPD_FLAG_MIN_RESIDENCY,
             GENPD_FLAG_OPP_TABLE,
         ];
         for i in 0..flags.len() {
@@ -93,8 +96,10 @@ mod tests {
     #[test]
     fn test_perf_states_distinct() {
         let states = [
-            GENPD_PERF_STATE_NONE, GENPD_PERF_STATE_LOW,
-            GENPD_PERF_STATE_MEDIUM, GENPD_PERF_STATE_HIGH,
+            GENPD_PERF_STATE_NONE,
+            GENPD_PERF_STATE_LOW,
+            GENPD_PERF_STATE_MEDIUM,
+            GENPD_PERF_STATE_HIGH,
             GENPD_PERF_STATE_MAX,
         ];
         for i in 0..states.len() {
@@ -107,7 +112,8 @@ mod tests {
     #[test]
     fn test_suspend_modes_distinct() {
         let modes = [
-            GENPD_SUSPEND_DEEP, GENPD_SUSPEND_RETENTION,
+            GENPD_SUSPEND_DEEP,
+            GENPD_SUSPEND_RETENTION,
             GENPD_SUSPEND_STANDBY,
         ];
         for i in 0..modes.len() {

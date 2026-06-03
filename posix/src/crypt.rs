@@ -49,8 +49,7 @@ static mut CRYPT_BUF: [u8; CRYPT_OUTPUT_LEN] = [0u8; CRYPT_OUTPUT_LEN];
 
 /// The crypt base-64 alphabet (note: NOT standard base64 — `.` and `/`
 /// lead, and the digit/letter order differs).
-const B64_ALPHABET: &[u8; 64] =
-    b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const B64_ALPHABET: &[u8; 64] = b"./0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
 /// Default SHA-crypt rounds when no `rounds=` field is given.
 const ROUNDS_DEFAULT: u32 = 5000;
@@ -620,7 +619,10 @@ mod tests {
     fn sha256_known_vector() {
         let _g = CRYPT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let r = crypt_str(b"Hello world!\0", b"$5$saltstring\0").unwrap();
-        assert_eq!(r, "$5$saltstring$5B8vYYiY.CVt1RlTTf8KbXBH3hsxY/GNooZaBBGWEc5");
+        assert_eq!(
+            r,
+            "$5$saltstring$5B8vYYiY.CVt1RlTTf8KbXBH3hsxY/GNooZaBBGWEc5"
+        );
     }
 
     #[test]
@@ -767,7 +769,11 @@ mod tests {
         let via_crypt = crypt_str(b"Hello world!\0", b"$6$saltstring\0").unwrap();
 
         let mut buf = [0u8; CRYPT_OUTPUT_LEN];
-        let r = crypt_r(b"Hello world!\0".as_ptr(), b"$6$saltstring\0".as_ptr(), buf.as_mut_ptr());
+        let r = crypt_r(
+            b"Hello world!\0".as_ptr(),
+            b"$6$saltstring\0".as_ptr(),
+            buf.as_mut_ptr(),
+        );
         assert!(!r.is_null());
         let via_r = unsafe { core::ffi::CStr::from_ptr(r.cast()) }
             .to_string_lossy()
@@ -791,7 +797,11 @@ mod tests {
     #[test]
     fn crypt_r_null_data_efault() {
         crate::errno::set_errno(0);
-        let r = crypt_r(b"key\0".as_ptr(), b"$6$salt\0".as_ptr(), core::ptr::null_mut());
+        let r = crypt_r(
+            b"key\0".as_ptr(),
+            b"$6$salt\0".as_ptr(),
+            core::ptr::null_mut(),
+        );
         assert!(r.is_null());
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }

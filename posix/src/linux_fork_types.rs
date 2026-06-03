@@ -100,10 +100,14 @@ mod tests {
     #[test]
     fn test_clone_args_offsets_ascending() {
         let offsets = [
-            CLONE_ARGS_OFF_FLAGS, CLONE_ARGS_OFF_PIDFD,
-            CLONE_ARGS_OFF_CHILD_TID, CLONE_ARGS_OFF_PARENT_TID,
-            CLONE_ARGS_OFF_EXIT_SIGNAL, CLONE_ARGS_OFF_STACK,
-            CLONE_ARGS_OFF_STACK_SIZE, CLONE_ARGS_OFF_TLS,
+            CLONE_ARGS_OFF_FLAGS,
+            CLONE_ARGS_OFF_PIDFD,
+            CLONE_ARGS_OFF_CHILD_TID,
+            CLONE_ARGS_OFF_PARENT_TID,
+            CLONE_ARGS_OFF_EXIT_SIGNAL,
+            CLONE_ARGS_OFF_STACK,
+            CLONE_ARGS_OFF_STACK_SIZE,
+            CLONE_ARGS_OFF_TLS,
         ];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);

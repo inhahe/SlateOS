@@ -84,10 +84,7 @@ mod tests {
 
     #[test]
     fn test_bit_widths_sum() {
-        assert_eq!(
-            IOC_NRBITS + IOC_TYPEBITS + IOC_SIZEBITS + IOC_DIRBITS,
-            32
-        );
+        assert_eq!(IOC_NRBITS + IOC_TYPEBITS + IOC_SIZEBITS + IOC_DIRBITS, 32);
     }
 
     #[test]

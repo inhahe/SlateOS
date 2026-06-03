@@ -88,9 +88,12 @@ mod tests {
     #[test]
     fn test_protocol_types_distinct() {
         let protos = [
-            CAIFPROTO_AT, CAIFPROTO_DATAGRAM,
-            CAIFPROTO_DATAGRAM_LOOP, CAIFPROTO_UTIL,
-            CAIFPROTO_RFM, CAIFPROTO_DEBUG,
+            CAIFPROTO_AT,
+            CAIFPROTO_DATAGRAM,
+            CAIFPROTO_DATAGRAM_LOOP,
+            CAIFPROTO_UTIL,
+            CAIFPROTO_RFM,
+            CAIFPROTO_DEBUG,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
@@ -102,8 +105,12 @@ mod tests {
     #[test]
     fn test_link_types_distinct() {
         let links = [
-            CAIF_LINK_SERIAL, CAIF_LINK_SPI, CAIF_LINK_SHM,
-            CAIF_LINK_HSI, CAIF_LINK_USB, CAIF_LINK_LOOP,
+            CAIF_LINK_SERIAL,
+            CAIF_LINK_SPI,
+            CAIF_LINK_SHM,
+            CAIF_LINK_HSI,
+            CAIF_LINK_USB,
+            CAIF_LINK_LOOP,
         ];
         for i in 0..links.len() {
             for j in (i + 1)..links.len() {

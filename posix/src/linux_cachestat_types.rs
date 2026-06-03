@@ -64,8 +64,10 @@ mod tests {
     #[test]
     fn test_result_fields_distinct() {
         let fields = [
-            CACHESTAT_NR_CACHE, CACHESTAT_NR_DIRTY,
-            CACHESTAT_NR_WRITEBACK, CACHESTAT_NR_EVICTED,
+            CACHESTAT_NR_CACHE,
+            CACHESTAT_NR_DIRTY,
+            CACHESTAT_NR_WRITEBACK,
+            CACHESTAT_NR_EVICTED,
             CACHESTAT_NR_RECENTLY_EVICTED,
         ];
         for i in 0..fields.len() {
@@ -84,9 +86,12 @@ mod tests {
     #[test]
     fn test_page_cache_states_distinct() {
         let states = [
-            PAGE_CACHE_CLEAN, PAGE_CACHE_DIRTY,
-            PAGE_CACHE_WRITEBACK, PAGE_CACHE_LOCKED,
-            PAGE_CACHE_UPTODATE, PAGE_CACHE_REFERENCED,
+            PAGE_CACHE_CLEAN,
+            PAGE_CACHE_DIRTY,
+            PAGE_CACHE_WRITEBACK,
+            PAGE_CACHE_LOCKED,
+            PAGE_CACHE_UPTODATE,
+            PAGE_CACHE_REFERENCED,
             PAGE_CACHE_ACTIVE,
         ];
         for i in 0..states.len() {

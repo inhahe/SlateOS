@@ -101,13 +101,20 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            IOC_OPAL_SAVE, IOC_OPAL_LOCK_UNLOCK,
-            IOC_OPAL_TAKE_OWNERSHIP, IOC_OPAL_ACTIVATE_LSP,
-            IOC_OPAL_SET_LR, IOC_OPAL_ADD_USR_TO_LR,
-            IOC_OPAL_SET_PW, IOC_OPAL_ACTIVATE_USR,
-            IOC_OPAL_REVERT_TPR, IOC_OPAL_MBR_CTRL,
-            IOC_OPAL_WRITE_SHADOW_MBR, IOC_OPAL_ERASE_LR,
-            IOC_OPAL_SECURE_ERASE_LR, IOC_OPAL_STATUS,
+            IOC_OPAL_SAVE,
+            IOC_OPAL_LOCK_UNLOCK,
+            IOC_OPAL_TAKE_OWNERSHIP,
+            IOC_OPAL_ACTIVATE_LSP,
+            IOC_OPAL_SET_LR,
+            IOC_OPAL_ADD_USR_TO_LR,
+            IOC_OPAL_SET_PW,
+            IOC_OPAL_ACTIVATE_USR,
+            IOC_OPAL_REVERT_TPR,
+            IOC_OPAL_MBR_CTRL,
+            IOC_OPAL_WRITE_SHADOW_MBR,
+            IOC_OPAL_ERASE_LR,
+            IOC_OPAL_SECURE_ERASE_LR,
+            IOC_OPAL_STATUS,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -149,8 +156,10 @@ mod tests {
     #[test]
     fn test_feature_flags_no_overlap() {
         let flags = [
-            OPAL_FEATURE_V1, OPAL_FEATURE_V2,
-            OPAL_FEATURE_SINGLE_USER, OPAL_FEATURE_DATA_STORE,
+            OPAL_FEATURE_V1,
+            OPAL_FEATURE_V2,
+            OPAL_FEATURE_SINGLE_USER,
+            OPAL_FEATURE_DATA_STORE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

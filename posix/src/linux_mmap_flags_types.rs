@@ -119,10 +119,17 @@ mod tests {
     #[test]
     fn test_modifier_flags_distinct() {
         let flags = [
-            MAP_FIXED, MAP_ANONYMOUS, MAP_GROWSDOWN,
-            MAP_DENYWRITE, MAP_LOCKED, MAP_NORESERVE,
-            MAP_POPULATE, MAP_NONBLOCK, MAP_STACK,
-            MAP_HUGETLB, MAP_FIXED_NOREPLACE,
+            MAP_FIXED,
+            MAP_ANONYMOUS,
+            MAP_GROWSDOWN,
+            MAP_DENYWRITE,
+            MAP_LOCKED,
+            MAP_NORESERVE,
+            MAP_POPULATE,
+            MAP_NONBLOCK,
+            MAP_STACK,
+            MAP_HUGETLB,
+            MAP_FIXED_NOREPLACE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

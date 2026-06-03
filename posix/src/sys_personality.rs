@@ -8,9 +8,9 @@
 // Re-export the function from unistd
 // ---------------------------------------------------------------------------
 
-pub use crate::unistd::personality;
-pub use crate::unistd::current_personality;
 pub use crate::unistd::PERSONALITY_QUERY;
+pub use crate::unistd::current_personality;
+pub use crate::unistd::personality;
 
 // ---------------------------------------------------------------------------
 // Personality flags
@@ -126,16 +126,17 @@ mod tests {
     #[test]
     fn test_modification_bits_distinct() {
         let bits = [
-            SHORT_INODE, STICKY_TIMEOUTS, ADDR_NO_RANDOMIZE,
-            MMAP_PAGE_ZERO, ADDR_COMPAT_LAYOUT, READ_IMPLIES_EXEC,
+            SHORT_INODE,
+            STICKY_TIMEOUTS,
+            ADDR_NO_RANDOMIZE,
+            MMAP_PAGE_ZERO,
+            ADDR_COMPAT_LAYOUT,
+            READ_IMPLIES_EXEC,
             ADDR_LIMIT_32BIT,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
-                assert_ne!(
-                    bits[i], bits[j],
-                    "personality bits must be distinct"
-                );
+                assert_ne!(bits[i], bits[j], "personality bits must be distinct");
             }
         }
     }
@@ -143,8 +144,12 @@ mod tests {
     #[test]
     fn test_modification_bits_are_flags() {
         let bits = [
-            SHORT_INODE, STICKY_TIMEOUTS, ADDR_NO_RANDOMIZE,
-            MMAP_PAGE_ZERO, ADDR_COMPAT_LAYOUT, READ_IMPLIES_EXEC,
+            SHORT_INODE,
+            STICKY_TIMEOUTS,
+            ADDR_NO_RANDOMIZE,
+            MMAP_PAGE_ZERO,
+            ADDR_COMPAT_LAYOUT,
+            READ_IMPLIES_EXEC,
             ADDR_LIMIT_32BIT,
         ];
         for &b in &bits {
@@ -170,7 +175,9 @@ mod tests {
     }
     impl PersonalityGuard {
         fn snapshot() -> Self {
-            Self { saved: current_personality() }
+            Self {
+                saved: current_personality(),
+            }
         }
     }
     impl Drop for PersonalityGuard {
@@ -286,10 +293,7 @@ mod tests {
     fn test_phase78_combined_flags_round_trip() {
         let _g = PersonalityGuard::snapshot();
         reset_personality();
-        let combined = PER_LINUX
-            | ADDR_NO_RANDOMIZE
-            | MMAP_PAGE_ZERO
-            | READ_IMPLIES_EXEC;
+        let combined = PER_LINUX | ADDR_NO_RANDOMIZE | MMAP_PAGE_ZERO | READ_IMPLIES_EXEC;
         let _ = personality(combined as u64);
         assert_eq!(current_personality(), combined);
     }
@@ -314,11 +318,11 @@ mod tests {
         let _g = PersonalityGuard::snapshot();
         reset_personality();
         // After each `personality(new)` the *previous* is returned.
-        let a = personality(PER_LINUX as u64);  // prev: whatever, now 0
+        let a = personality(PER_LINUX as u64); // prev: whatever, now 0
         let _ = a;
         let b = personality(PER_LINUX32 as u64); // prev: 0 → expect 0
         assert_eq!(b, PER_LINUX as i32);
-        let c = personality(PER_BSD as u64);     // prev: PER_LINUX32 → 8
+        let c = personality(PER_BSD as u64); // prev: PER_LINUX32 → 8
         assert_eq!(c, PER_LINUX32 as i32);
         let d = personality(PERSONALITY_QUERY as u64); // query → PER_BSD
         assert_eq!(d, PER_BSD as i32);

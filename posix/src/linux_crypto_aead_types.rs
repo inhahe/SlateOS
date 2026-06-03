@@ -69,9 +69,12 @@ mod tests {
     #[test]
     fn test_algorithms_distinct() {
         let algs = [
-            AEAD_ALG_AES_GCM, AEAD_ALG_AES_CCM,
-            AEAD_ALG_CHACHA20_POLY1305, AEAD_ALG_AES_GCM_SIV,
-            AEAD_ALG_XCHACHA20_POLY1305, AEAD_ALG_AES_SIV,
+            AEAD_ALG_AES_GCM,
+            AEAD_ALG_AES_CCM,
+            AEAD_ALG_CHACHA20_POLY1305,
+            AEAD_ALG_AES_GCM_SIV,
+            AEAD_ALG_XCHACHA20_POLY1305,
+            AEAD_ALG_AES_SIV,
             AEAD_ALG_RFC7539,
         ];
         for i in 0..algs.len() {
@@ -98,7 +101,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            AEAD_FLAG_INPLACE, AEAD_FLAG_SG,
+            AEAD_FLAG_INPLACE,
+            AEAD_FLAG_SG,
             AEAD_FLAG_NONCE_MISUSE_RESIST,
         ];
         for i in 0..flags.len() {

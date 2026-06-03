@@ -101,8 +101,10 @@ mod tests {
     #[test]
     fn test_misc_flags_power_of_two() {
         let flags = [
-            MISC_FMT_PRESERVE_ARGV0, MISC_FMT_OPEN_BINARY,
-            MISC_FMT_CREDENTIALS, MISC_FMT_OPEN_FILE,
+            MISC_FMT_PRESERVE_ARGV0,
+            MISC_FMT_OPEN_BINARY,
+            MISC_FMT_CREDENTIALS,
+            MISC_FMT_OPEN_FILE,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:02x} not power of two", f);
@@ -128,9 +130,18 @@ mod tests {
     #[test]
     fn test_pt_types_distinct() {
         let types = [
-            PT_NULL, PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE,
-            PT_SHLIB, PT_PHDR, PT_TLS, PT_GNU_EH_FRAME,
-            PT_GNU_STACK, PT_GNU_RELRO, PT_GNU_PROPERTY,
+            PT_NULL,
+            PT_LOAD,
+            PT_DYNAMIC,
+            PT_INTERP,
+            PT_NOTE,
+            PT_SHLIB,
+            PT_PHDR,
+            PT_TLS,
+            PT_GNU_EH_FRAME,
+            PT_GNU_STACK,
+            PT_GNU_RELRO,
+            PT_GNU_PROPERTY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

@@ -66,12 +66,21 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_CT_UNSPEC, TCA_CT_PARMS, TCA_CT_TM,
-            TCA_CT_ACTION, TCA_CT_ZONE, TCA_CT_MARK,
-            TCA_CT_MARK_MASK, TCA_CT_LABELS, TCA_CT_LABELS_MASK,
-            TCA_CT_NAT_IPV4_MIN, TCA_CT_NAT_IPV4_MAX,
-            TCA_CT_NAT_IPV6_MIN, TCA_CT_NAT_IPV6_MAX,
-            TCA_CT_NAT_PORT_MIN, TCA_CT_NAT_PORT_MAX,
+            TCA_CT_UNSPEC,
+            TCA_CT_PARMS,
+            TCA_CT_TM,
+            TCA_CT_ACTION,
+            TCA_CT_ZONE,
+            TCA_CT_MARK,
+            TCA_CT_MARK_MASK,
+            TCA_CT_LABELS,
+            TCA_CT_LABELS_MASK,
+            TCA_CT_NAT_IPV4_MIN,
+            TCA_CT_NAT_IPV4_MAX,
+            TCA_CT_NAT_IPV6_MIN,
+            TCA_CT_NAT_IPV6_MAX,
+            TCA_CT_NAT_PORT_MIN,
+            TCA_CT_NAT_PORT_MAX,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -83,8 +92,12 @@ mod tests {
     #[test]
     fn test_action_flags_no_overlap() {
         let flags = [
-            TCA_CT_ACT_COMMIT, TCA_CT_ACT_FORCE, TCA_CT_ACT_CLEAR,
-            TCA_CT_ACT_NAT, TCA_CT_ACT_NAT_SRC, TCA_CT_ACT_NAT_DST,
+            TCA_CT_ACT_COMMIT,
+            TCA_CT_ACT_FORCE,
+            TCA_CT_ACT_CLEAR,
+            TCA_CT_ACT_NAT,
+            TCA_CT_ACT_NAT_SRC,
+            TCA_CT_ACT_NAT_DST,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -96,8 +109,12 @@ mod tests {
     #[test]
     fn test_action_flags_power_of_two() {
         let flags = [
-            TCA_CT_ACT_COMMIT, TCA_CT_ACT_FORCE, TCA_CT_ACT_CLEAR,
-            TCA_CT_ACT_NAT, TCA_CT_ACT_NAT_SRC, TCA_CT_ACT_NAT_DST,
+            TCA_CT_ACT_COMMIT,
+            TCA_CT_ACT_FORCE,
+            TCA_CT_ACT_CLEAR,
+            TCA_CT_ACT_NAT,
+            TCA_CT_ACT_NAT_SRC,
+            TCA_CT_ACT_NAT_DST,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x} is not power of two", flag);

@@ -88,10 +88,14 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            PPS_CAPTUREASSERT, PPS_CAPTURECLEAR,
-            PPS_OFFSETASSERT, PPS_OFFSETCLEAR,
-            PPS_ECHOASSERT, PPS_ECHOCLEAR,
-            PPS_CANWAIT, PPS_CANPOLL,
+            PPS_CAPTUREASSERT,
+            PPS_CAPTURECLEAR,
+            PPS_OFFSETASSERT,
+            PPS_OFFSETCLEAR,
+            PPS_ECHOASSERT,
+            PPS_ECHOCLEAR,
+            PPS_CANWAIT,
+            PPS_CANPOLL,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -103,8 +107,11 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            PPS_GETPARAMS, PPS_SETPARAMS, PPS_GETCAP,
-            PPS_FETCH, PPS_KC_BIND,
+            PPS_GETPARAMS,
+            PPS_SETPARAMS,
+            PPS_GETCAP,
+            PPS_FETCH,
+            PPS_KC_BIND,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

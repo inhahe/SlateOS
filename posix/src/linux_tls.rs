@@ -107,9 +107,12 @@ mod tests {
     #[test]
     fn test_cipher_types_distinct() {
         let ciphers = [
-            TLS_CIPHER_AES_GCM_128, TLS_CIPHER_AES_GCM_256,
-            TLS_CIPHER_AES_CCM_128, TLS_CIPHER_CHACHA20_POLY1305,
-            TLS_CIPHER_SM4_GCM, TLS_CIPHER_SM4_CCM,
+            TLS_CIPHER_AES_GCM_128,
+            TLS_CIPHER_AES_GCM_256,
+            TLS_CIPHER_AES_CCM_128,
+            TLS_CIPHER_CHACHA20_POLY1305,
+            TLS_CIPHER_SM4_GCM,
+            TLS_CIPHER_SM4_CCM,
         ];
         for i in 0..ciphers.len() {
             for j in (i + 1)..ciphers.len() {

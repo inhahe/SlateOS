@@ -105,14 +105,31 @@ mod tests {
     #[test]
     fn test_tags_distinct() {
         let tags = [
-            DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT,
-            DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA,
-            DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT,
-            DT_INIT, DT_FINI, DT_SONAME, DT_RPATH,
-            DT_PLTREL, DT_JMPREL, DT_BIND_NOW,
-            DT_INIT_ARRAY, DT_FINI_ARRAY,
-            DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ,
-            DT_RUNPATH, DT_FLAGS,
+            DT_NULL,
+            DT_NEEDED,
+            DT_PLTRELSZ,
+            DT_PLTGOT,
+            DT_HASH,
+            DT_STRTAB,
+            DT_SYMTAB,
+            DT_RELA,
+            DT_RELASZ,
+            DT_RELAENT,
+            DT_STRSZ,
+            DT_SYMENT,
+            DT_INIT,
+            DT_FINI,
+            DT_SONAME,
+            DT_RPATH,
+            DT_PLTREL,
+            DT_JMPREL,
+            DT_BIND_NOW,
+            DT_INIT_ARRAY,
+            DT_FINI_ARRAY,
+            DT_INIT_ARRAYSZ,
+            DT_FINI_ARRAYSZ,
+            DT_RUNPATH,
+            DT_FLAGS,
         ];
         for i in 0..tags.len() {
             for j in (i + 1)..tags.len() {
@@ -124,8 +141,11 @@ mod tests {
     #[test]
     fn test_df_flags_no_overlap() {
         let flags = [
-            DF_ORIGIN, DF_SYMBOLIC, DF_TEXTREL,
-            DF_BIND_NOW, DF_STATIC_TLS,
+            DF_ORIGIN,
+            DF_SYMBOLIC,
+            DF_TEXTREL,
+            DF_BIND_NOW,
+            DF_STATIC_TLS,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

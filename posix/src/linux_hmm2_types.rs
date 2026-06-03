@@ -72,8 +72,11 @@ mod tests {
     #[test]
     fn test_pfn_flags_no_overlap() {
         let flags: [u64; 5] = [
-            HMM_PFN_VALID, HMM_PFN_WRITE, HMM_PFN_DEVICE_PRIVATE,
-            HMM_PFN_ERROR, HMM_PFN_SPECIAL,
+            HMM_PFN_VALID,
+            HMM_PFN_WRITE,
+            HMM_PFN_DEVICE_PRIVATE,
+            HMM_PFN_ERROR,
+            HMM_PFN_SPECIAL,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

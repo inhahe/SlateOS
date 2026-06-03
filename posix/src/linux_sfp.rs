@@ -82,9 +82,13 @@ mod tests {
     #[test]
     fn test_connector_types_distinct() {
         let types = [
-            SFP_CONNECTOR_UNKNOWN, SFP_CONNECTOR_SC, SFP_CONNECTOR_LC,
-            SFP_CONNECTOR_OPTICAL, SFP_CONNECTOR_COPPER,
-            SFP_CONNECTOR_RJ45, SFP_CONNECTOR_NOSEP,
+            SFP_CONNECTOR_UNKNOWN,
+            SFP_CONNECTOR_SC,
+            SFP_CONNECTOR_LC,
+            SFP_CONNECTOR_OPTICAL,
+            SFP_CONNECTOR_COPPER,
+            SFP_CONNECTOR_RJ45,
+            SFP_CONNECTOR_NOSEP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -96,9 +100,15 @@ mod tests {
     #[test]
     fn test_interface_types_distinct() {
         let ifs = [
-            SFP_IF_1000BASE_SX, SFP_IF_1000BASE_LX, SFP_IF_1000BASE_T,
-            SFP_IF_10GBASE_SR, SFP_IF_10GBASE_LR, SFP_IF_10GBASE_ER,
-            SFP_IF_10G_DAC, SFP_IF_25GBASE_SR, SFP_IF_25GBASE_CR,
+            SFP_IF_1000BASE_SX,
+            SFP_IF_1000BASE_LX,
+            SFP_IF_1000BASE_T,
+            SFP_IF_10GBASE_SR,
+            SFP_IF_10GBASE_LR,
+            SFP_IF_10GBASE_ER,
+            SFP_IF_10G_DAC,
+            SFP_IF_25GBASE_SR,
+            SFP_IF_25GBASE_CR,
         ];
         for i in 0..ifs.len() {
             for j in (i + 1)..ifs.len() {
@@ -110,8 +120,11 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            SFP_EVENT_INSERT, SFP_EVENT_REMOVE, SFP_EVENT_READY,
-            SFP_EVENT_TX_FAULT, SFP_EVENT_LOS,
+            SFP_EVENT_INSERT,
+            SFP_EVENT_REMOVE,
+            SFP_EVENT_READY,
+            SFP_EVENT_TX_FAULT,
+            SFP_EVENT_LOS,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

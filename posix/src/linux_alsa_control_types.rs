@@ -90,9 +90,12 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            SNDRV_CTL_ELEM_TYPE_BOOLEAN, SNDRV_CTL_ELEM_TYPE_INTEGER,
-            SNDRV_CTL_ELEM_TYPE_ENUMERATED, SNDRV_CTL_ELEM_TYPE_BYTES,
-            SNDRV_CTL_ELEM_TYPE_IEC958, SNDRV_CTL_ELEM_TYPE_INTEGER64,
+            SNDRV_CTL_ELEM_TYPE_BOOLEAN,
+            SNDRV_CTL_ELEM_TYPE_INTEGER,
+            SNDRV_CTL_ELEM_TYPE_ENUMERATED,
+            SNDRV_CTL_ELEM_TYPE_BYTES,
+            SNDRV_CTL_ELEM_TYPE_IEC958,
+            SNDRV_CTL_ELEM_TYPE_INTEGER64,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -104,9 +107,12 @@ mod tests {
     #[test]
     fn test_ifaces_distinct() {
         let ifaces = [
-            SNDRV_CTL_ELEM_IFACE_CARD, SNDRV_CTL_ELEM_IFACE_HWDEP,
-            SNDRV_CTL_ELEM_IFACE_MIXER, SNDRV_CTL_ELEM_IFACE_PCM,
-            SNDRV_CTL_ELEM_IFACE_RAWMIDI, SNDRV_CTL_ELEM_IFACE_TIMER,
+            SNDRV_CTL_ELEM_IFACE_CARD,
+            SNDRV_CTL_ELEM_IFACE_HWDEP,
+            SNDRV_CTL_ELEM_IFACE_MIXER,
+            SNDRV_CTL_ELEM_IFACE_PCM,
+            SNDRV_CTL_ELEM_IFACE_RAWMIDI,
+            SNDRV_CTL_ELEM_IFACE_TIMER,
             SNDRV_CTL_ELEM_IFACE_SEQUENCER,
         ];
         for i in 0..ifaces.len() {

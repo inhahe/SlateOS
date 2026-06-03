@@ -113,9 +113,13 @@ mod tests {
     #[test]
     fn test_mgmt_commands_distinct() {
         let cmds = [
-            NLBL_MGMT_C_ADD, NLBL_MGMT_C_REMOVE, NLBL_MGMT_C_LISTALL,
-            NLBL_MGMT_C_ADDDEF, NLBL_MGMT_C_REMOVEDEF,
-            NLBL_MGMT_C_LISTDEF, NLBL_MGMT_C_PROTOCOLS,
+            NLBL_MGMT_C_ADD,
+            NLBL_MGMT_C_REMOVE,
+            NLBL_MGMT_C_LISTALL,
+            NLBL_MGMT_C_ADDDEF,
+            NLBL_MGMT_C_REMOVEDEF,
+            NLBL_MGMT_C_LISTDEF,
+            NLBL_MGMT_C_PROTOCOLS,
             NLBL_MGMT_C_VERSION,
         ];
         for i in 0..cmds.len() {
@@ -128,8 +132,10 @@ mod tests {
     #[test]
     fn test_cipso_commands_distinct() {
         let cmds = [
-            NLBL_CIPSOV4_C_ADD, NLBL_CIPSOV4_C_REMOVE,
-            NLBL_CIPSOV4_C_LIST, NLBL_CIPSOV4_C_LISTALL,
+            NLBL_CIPSOV4_C_ADD,
+            NLBL_CIPSOV4_C_REMOVE,
+            NLBL_CIPSOV4_C_LIST,
+            NLBL_CIPSOV4_C_LISTALL,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -141,8 +147,10 @@ mod tests {
     #[test]
     fn test_nltype_distinct() {
         let types = [
-            NETLBL_NLTYPE_NONE, NETLBL_NLTYPE_CIPSOV4,
-            NETLBL_NLTYPE_UNLABELED, NETLBL_NLTYPE_CALIPSO,
+            NETLBL_NLTYPE_NONE,
+            NETLBL_NLTYPE_CIPSOV4,
+            NETLBL_NLTYPE_UNLABELED,
+            NETLBL_NLTYPE_CALIPSO,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -154,9 +162,12 @@ mod tests {
     #[test]
     fn test_cipso_tags_distinct() {
         let tags: [u8; 6] = [
-            CIPSO_V4_TAG_STANDARD, CIPSO_V4_TAG_ENUM,
-            CIPSO_V4_TAG_RANGE, CIPSO_V4_TAG_PERM,
-            CIPSO_V4_TAG_LOCAL, CIPSO_V4_TAG_INVALID,
+            CIPSO_V4_TAG_STANDARD,
+            CIPSO_V4_TAG_ENUM,
+            CIPSO_V4_TAG_RANGE,
+            CIPSO_V4_TAG_PERM,
+            CIPSO_V4_TAG_LOCAL,
+            CIPSO_V4_TAG_INVALID,
         ];
         for i in 0..tags.len() {
             for j in (i + 1)..tags.len() {
@@ -167,9 +178,7 @@ mod tests {
 
     #[test]
     fn test_doi_types_distinct() {
-        let types = [
-            CIPSO_V4_MAP_TRANS, CIPSO_V4_MAP_PASS, CIPSO_V4_MAP_LOCAL,
-        ];
+        let types = [CIPSO_V4_MAP_TRANS, CIPSO_V4_MAP_PASS, CIPSO_V4_MAP_LOCAL];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);

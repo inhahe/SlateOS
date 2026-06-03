@@ -68,9 +68,7 @@ mod tests {
 
     #[test]
     fn test_prime_fd_flags_distinct() {
-        let flags = [
-            DRM_PRIME_FD_CLOEXEC, DRM_PRIME_FD_READ, DRM_PRIME_FD_WRITE,
-        ];
+        let flags = [DRM_PRIME_FD_CLOEXEC, DRM_PRIME_FD_READ, DRM_PRIME_FD_WRITE];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(flags[i], flags[j]);
@@ -97,8 +95,10 @@ mod tests {
     #[test]
     fn test_bo_flags_no_overlap() {
         let flags = [
-            DRM_BO_FLAG_CPU_ACCESSIBLE, DRM_BO_FLAG_SCANOUT,
-            DRM_BO_FLAG_CURSOR, DRM_BO_FLAG_RENDER,
+            DRM_BO_FLAG_CPU_ACCESSIBLE,
+            DRM_BO_FLAG_SCANOUT,
+            DRM_BO_FLAG_CURSOR,
+            DRM_BO_FLAG_RENDER,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

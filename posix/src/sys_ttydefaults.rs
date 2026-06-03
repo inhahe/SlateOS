@@ -52,13 +52,10 @@ pub const CTIME: u8 = 0;
 pub const TTYDEF_SPEED: u32 = crate::termios::B9600;
 
 /// Default input flags.
-pub const TTYDEF_IFLAG: u32 = crate::termios::BRKINT
-    | crate::termios::ICRNL
-    | crate::termios::IXON;
+pub const TTYDEF_IFLAG: u32 = crate::termios::BRKINT | crate::termios::ICRNL | crate::termios::IXON;
 
 /// Default output flags.
-pub const TTYDEF_OFLAG: u32 = crate::termios::OPOST
-    | crate::termios::ONLCR;
+pub const TTYDEF_OFLAG: u32 = crate::termios::OPOST | crate::termios::ONLCR;
 
 /// Default local flags.
 pub const TTYDEF_LFLAG: u32 = crate::termios::ECHO
@@ -68,9 +65,7 @@ pub const TTYDEF_LFLAG: u32 = crate::termios::ECHO
     | crate::termios::ECHOE;
 
 /// Default control flags.
-pub const TTYDEF_CFLAG: u32 = crate::termios::CS8
-    | crate::termios::CREAD
-    | crate::termios::HUPCL;
+pub const TTYDEF_CFLAG: u32 = crate::termios::CS8 | crate::termios::CREAD | crate::termios::HUPCL;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -83,16 +78,12 @@ mod tests {
     #[test]
     fn test_ctrl_chars_distinct() {
         let chars = [
-            CINTR, CQUIT, CERASE, CKILL, CEOF,
-            CSTART, CSTOP, CSUSP, CREPRINT, CDISCARD,
-            CWERASE, CLNEXT,
+            CINTR, CQUIT, CERASE, CKILL, CEOF, CSTART, CSTOP, CSUSP, CREPRINT, CDISCARD, CWERASE,
+            CLNEXT,
         ];
         for i in 0..chars.len() {
             for j in (i + 1)..chars.len() {
-                assert_ne!(
-                    chars[i], chars[j],
-                    "default cc values must be distinct"
-                );
+                assert_ne!(chars[i], chars[j], "default cc values must be distinct");
             }
         }
     }

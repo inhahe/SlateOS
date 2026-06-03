@@ -191,10 +191,18 @@ impl Segment {
 static SHM_TABLE_LOCK: AtomicBool = AtomicBool::new(false);
 static mut SHM_META: [Segment; MAX_SEGMENTS] = [const { Segment::EMPTY }; MAX_SEGMENTS];
 static SHM_STORAGE: [SegmentStorage; MAX_SEGMENTS] = [
-    SegmentStorage { bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]) },
-    SegmentStorage { bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]) },
-    SegmentStorage { bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]) },
-    SegmentStorage { bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]) },
+    SegmentStorage {
+        bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]),
+    },
+    SegmentStorage {
+        bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]),
+    },
+    SegmentStorage {
+        bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]),
+    },
+    SegmentStorage {
+        bytes: UnsafeCell::new([0u8; SEGMENT_SIZE + SHMLBA]),
+    },
 ];
 
 fn lock_acquire() {
@@ -281,9 +289,7 @@ unsafe fn find_by_key(key: i32) -> Option<usize> {
     while i < MAX_SEGMENTS {
         let m = unsafe { meta.add(i) };
         // Only match segments that haven't been marked for deletion.
-        if unsafe { (*m).in_use }
-            && !unsafe { (*m).marked_for_rmid }
-            && unsafe { (*m).key } == key
+        if unsafe { (*m).in_use } && !unsafe { (*m).marked_for_rmid } && unsafe { (*m).key } == key
         {
             return Some(i);
         }
@@ -354,7 +360,7 @@ unsafe fn free_segment(slot: usize) {
 fn slot_for_ptr(ptr: *const u8) -> Option<usize> {
     let mut i: usize = 0;
     while i < MAX_SEGMENTS {
-        if ptr == segment_ptr(i) as *const u8 {
+        if ptr == segment_ptr(i).cast_const() {
             return Some(i);
         }
         i = i.wrapping_add(1);
@@ -445,11 +451,7 @@ pub extern "C" fn shmget(key: i32, size: usize, shmflg: i32) -> i32 {
 /// Returns the segment's address on success, or `(void *)-1` with
 /// errno set on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn shmat(
-    shmid: i32,
-    _shmaddr: *const u8,
-    _shmflg: i32,
-) -> *mut u8 {
+pub extern "C" fn shmat(shmid: i32, _shmaddr: *const u8, _shmflg: i32) -> *mut u8 {
     let _g = lock();
     let Some(slot) = (unsafe { resolve_shmid(shmid) }) else {
         errno::set_errno(errno::EINVAL);

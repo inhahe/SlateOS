@@ -63,8 +63,14 @@ mod tests {
     #[test]
     fn test_levels_distinct() {
         let levels = [
-            LOG_EMERG, LOG_ALERT, LOG_CRIT, LOG_ERR,
-            LOG_WARNING, LOG_NOTICE, LOG_INFO, LOG_DEBUG,
+            LOG_EMERG,
+            LOG_ALERT,
+            LOG_CRIT,
+            LOG_ERR,
+            LOG_WARNING,
+            LOG_NOTICE,
+            LOG_INFO,
+            LOG_DEBUG,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -86,8 +92,7 @@ mod tests {
     #[test]
     fn test_option_flags_no_overlap() {
         let flags = [
-            LOG_PID, LOG_CONS, LOG_ODELAY,
-            LOG_NDELAY, LOG_NOWAIT, LOG_PERROR,
+            LOG_PID, LOG_CONS, LOG_ODELAY, LOG_NDELAY, LOG_NOWAIT, LOG_PERROR,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

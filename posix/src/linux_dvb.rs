@@ -98,11 +98,25 @@ mod tests {
     #[test]
     fn test_delivery_systems_distinct() {
         let systems = [
-            SYS_UNDEFINED, SYS_DVBC_ANNEX_A, SYS_DVBC_ANNEX_B,
-            SYS_DVBT, SYS_DSS, SYS_DVBS, SYS_DVBS2, SYS_DVBH,
-            SYS_ISDBT, SYS_ISDBS, SYS_ISDBC, SYS_ATSC,
-            SYS_ATSCMH, SYS_DTMB, SYS_CMMB, SYS_DAB,
-            SYS_DVBT2, SYS_TURBO, SYS_DVBC_ANNEX_C,
+            SYS_UNDEFINED,
+            SYS_DVBC_ANNEX_A,
+            SYS_DVBC_ANNEX_B,
+            SYS_DVBT,
+            SYS_DSS,
+            SYS_DVBS,
+            SYS_DVBS2,
+            SYS_DVBH,
+            SYS_ISDBT,
+            SYS_ISDBS,
+            SYS_ISDBC,
+            SYS_ATSC,
+            SYS_ATSCMH,
+            SYS_DTMB,
+            SYS_CMMB,
+            SYS_DAB,
+            SYS_DVBT2,
+            SYS_TURBO,
+            SYS_DVBC_ANNEX_C,
         ];
         for i in 0..systems.len() {
             for j in (i + 1)..systems.len() {
@@ -114,8 +128,13 @@ mod tests {
     #[test]
     fn test_status_flags_are_powers_of_two() {
         let flags = [
-            FE_HAS_SIGNAL, FE_HAS_CARRIER, FE_HAS_VITERBI,
-            FE_HAS_SYNC, FE_HAS_LOCK, FE_TIMEDOUT, FE_REINIT,
+            FE_HAS_SIGNAL,
+            FE_HAS_CARRIER,
+            FE_HAS_VITERBI,
+            FE_HAS_SYNC,
+            FE_HAS_LOCK,
+            FE_TIMEDOUT,
+            FE_REINIT,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -125,7 +144,9 @@ mod tests {
     #[test]
     fn test_dmx_output_distinct() {
         let outs = [
-            DMX_OUT_DECODER, DMX_OUT_TAP, DMX_OUT_TS_TAP,
+            DMX_OUT_DECODER,
+            DMX_OUT_TAP,
+            DMX_OUT_TS_TAP,
             DMX_OUT_TSDEMUX_TAP,
         ];
         for i in 0..outs.len() {

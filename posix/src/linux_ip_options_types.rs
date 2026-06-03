@@ -89,8 +89,7 @@ mod tests {
     #[test]
     fn test_option_types_distinct() {
         let opts = [
-            IPOPT_END, IPOPT_NOP, IPOPT_RR, IPOPT_TS,
-            IPOPT_LSRR, IPOPT_SSRR, IPOPT_RA,
+            IPOPT_END, IPOPT_NOP, IPOPT_RR, IPOPT_TS, IPOPT_LSRR, IPOPT_SSRR, IPOPT_RA,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -120,8 +119,12 @@ mod tests {
     #[test]
     fn test_dscp_values_distinct() {
         let dscp = [
-            DSCP_DEFAULT, DSCP_EF, DSCP_AF11,
-            DSCP_AF21, DSCP_AF31, DSCP_AF41,
+            DSCP_DEFAULT,
+            DSCP_EF,
+            DSCP_AF11,
+            DSCP_AF21,
+            DSCP_AF31,
+            DSCP_AF41,
         ];
         for i in 0..dscp.len() {
             for j in (i + 1)..dscp.len() {

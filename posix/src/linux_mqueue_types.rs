@@ -90,7 +90,12 @@ mod tests {
 
     #[test]
     fn test_open_flags_distinct() {
-        let flags = [MQ_OFLAG_CREAT, MQ_OFLAG_EXCL, MQ_OFLAG_NONBLOCK, MQ_OFLAG_CLOEXEC];
+        let flags = [
+            MQ_OFLAG_CREAT,
+            MQ_OFLAG_EXCL,
+            MQ_OFLAG_NONBLOCK,
+            MQ_OFLAG_CLOEXEC,
+        ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(flags[i], flags[j]);

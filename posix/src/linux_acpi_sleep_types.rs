@@ -110,8 +110,11 @@ mod tests {
     #[test]
     fn test_wake_caps_no_overlap() {
         let caps = [
-            ACPI_WAKE_S1, ACPI_WAKE_S2, ACPI_WAKE_S3,
-            ACPI_WAKE_S4, ACPI_WAKE_S5,
+            ACPI_WAKE_S1,
+            ACPI_WAKE_S2,
+            ACPI_WAKE_S3,
+            ACPI_WAKE_S4,
+            ACPI_WAKE_S5,
         ];
         for i in 0..caps.len() {
             assert!(caps[i].is_power_of_two());

@@ -105,8 +105,13 @@ mod tests {
     #[test]
     fn test_action_verdicts_distinct() {
         let verdicts = [
-            TC_ACT_UNSPEC, TC_ACT_OK, TC_ACT_RECLASSIFY,
-            TC_ACT_SHOT, TC_ACT_PIPE, TC_ACT_STOLEN, TC_ACT_REDIRECT,
+            TC_ACT_UNSPEC,
+            TC_ACT_OK,
+            TC_ACT_RECLASSIFY,
+            TC_ACT_SHOT,
+            TC_ACT_PIPE,
+            TC_ACT_STOLEN,
+            TC_ACT_REDIRECT,
         ];
         for i in 0..verdicts.len() {
             for j in (i + 1)..verdicts.len() {

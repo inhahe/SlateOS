@@ -43,12 +43,16 @@ mod tests {
     #[test]
     fn test_field_codes_distinct() {
         let fields = [
-            V4L2_FIELD_ANY, V4L2_FIELD_NONE,
-            V4L2_FIELD_TOP, V4L2_FIELD_BOTTOM,
+            V4L2_FIELD_ANY,
+            V4L2_FIELD_NONE,
+            V4L2_FIELD_TOP,
+            V4L2_FIELD_BOTTOM,
             V4L2_FIELD_INTERLACED,
-            V4L2_FIELD_SEQ_TB, V4L2_FIELD_SEQ_BT,
+            V4L2_FIELD_SEQ_TB,
+            V4L2_FIELD_SEQ_BT,
             V4L2_FIELD_ALTERNATE,
-            V4L2_FIELD_INTERLACED_TB, V4L2_FIELD_INTERLACED_BT,
+            V4L2_FIELD_INTERLACED_TB,
+            V4L2_FIELD_INTERLACED_BT,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {

@@ -359,9 +359,7 @@ pub extern "C" fn clock_settime(clk_id: ClockidT, tp: *const Timespec) -> i32 {
     //    accept CAP_SYS_NICE — but the abrupt set path is strictly
     //    CAP_SYS_TIME).  An unprivileged caller sees EPERM; a
     //    privileged caller proceeds to the kernel backend.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_TIME,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_TIME) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -482,7 +480,10 @@ pub extern "C" fn clock_nanosleep(
 
     if flags & TIMER_ABSTIME != 0 {
         // Absolute time: compute the relative duration.
-        let mut now = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut now = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         if clock_gettime(clk_id, &raw mut now) < 0 {
             return errno::EINVAL;
         }
@@ -605,10 +606,7 @@ pub extern "C" fn gettimeofday(tv: *mut Timeval, _tz: *mut core::ffi::c_void) ->
 ///     non-NULL `tz` along with a NULL `tv` is treated as a no-op success
 ///     here to match the "set timezone only" path Linux still tolerates).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn settimeofday(
-    tv: *const Timeval,
-    tz: *const core::ffi::c_void,
-) -> i32 {
+pub extern "C" fn settimeofday(tv: *const Timeval, tz: *const core::ffi::c_void) -> i32 {
     // Both NULL: well-formed no-op.
     if tv.is_null() && tz.is_null() {
         return 0;
@@ -638,9 +636,7 @@ pub extern "C" fn settimeofday(
     // via security_settime64() → capable(CAP_SYS_TIME) before
     // delegating to do_sys_settimeofday64() / do_settimeofday64().
     // An unprivileged caller sees EPERM; a privileged caller proceeds.
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_TIME,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_TIME) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -680,7 +676,9 @@ pub extern "C" fn time(tloc: *mut TimeT) -> TimeT {
 
     if !tloc.is_null() {
         // SAFETY: Caller guarantees tloc is valid or null (checked above).
-        unsafe { *tloc = secs; }
+        unsafe {
+            *tloc = secs;
+        }
     }
 
     secs
@@ -770,8 +768,14 @@ pub struct Tm {
 
 /// Static storage for gmtime/localtime (not thread-safe per POSIX).
 static mut TM_RESULT: Tm = Tm {
-    tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0,
-    tm_mon: 0, tm_year: 0, tm_wday: 0, tm_yday: 0,
+    tm_sec: 0,
+    tm_min: 0,
+    tm_hour: 0,
+    tm_mday: 0,
+    tm_mon: 0,
+    tm_year: 0,
+    tm_wday: 0,
+    tm_yday: 0,
     tm_isdst: 0,
 };
 
@@ -920,11 +924,15 @@ pub unsafe extern "C" fn asctime_r(tm: *const Tm, buf: *mut u8) -> *mut u8 {
     while i < copy_len {
         // SAFETY: i < copy_len <= 25 < 32 = tmp.len(), so this is in-bounds.
         let byte = *tmp.get(i).unwrap_or(&0);
-        unsafe { *buf.add(i) = byte; }
+        unsafe {
+            *buf.add(i) = byte;
+        }
         i = i.wrapping_add(1);
     }
     // Null-terminate (at most at index 25 = 26th byte).
-    unsafe { *buf.add(i) = 0; }
+    unsafe {
+        *buf.add(i) = 0;
+    }
     buf
 }
 
@@ -941,8 +949,14 @@ pub unsafe extern "C" fn ctime_r(timep: *const TimeT, buf: *mut u8) -> *mut u8 {
         return core::ptr::null_mut();
     }
     let mut result = Tm {
-        tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0,
-        tm_mon: 0, tm_year: 0, tm_wday: 0, tm_yday: 0,
+        tm_sec: 0,
+        tm_min: 0,
+        tm_hour: 0,
+        tm_mday: 0,
+        tm_mon: 0,
+        tm_year: 0,
+        tm_wday: 0,
+        tm_yday: 0,
         tm_isdst: 0,
     };
     if unsafe { gmtime_r(timep, &raw mut result) }.is_null() {
@@ -1001,7 +1015,9 @@ pub unsafe extern "C" fn strftime(
 
         if ch != b'%' {
             if pos < limit {
-                unsafe { *buf.add(pos) = ch; }
+                unsafe {
+                    *buf.add(pos) = ch;
+                }
             }
             pos = pos.wrapping_add(1);
             fpos = fpos.wrapping_add(1);
@@ -1018,16 +1034,27 @@ pub unsafe extern "C" fn strftime(
         match spec {
             // --- Date components ---
             b'Y' => pos = write_dec4(buf, limit, pos, t.tm_year.wrapping_add(1900)),
-            b'C' => pos = write_dec2(buf, limit, pos,
-                t.tm_year.wrapping_add(1900).wrapping_div(100)),
-            b'y' => pos = write_dec2(buf, limit, pos,
-                t.tm_year.wrapping_add(1900).wrapping_rem(100)),
+            b'C' => {
+                pos = write_dec2(
+                    buf,
+                    limit,
+                    pos,
+                    t.tm_year.wrapping_add(1900).wrapping_div(100),
+                );
+            }
+            b'y' => {
+                pos = write_dec2(
+                    buf,
+                    limit,
+                    pos,
+                    t.tm_year.wrapping_add(1900).wrapping_rem(100),
+                );
+            }
             b'm' => pos = write_dec2(buf, limit, pos, t.tm_mon.wrapping_add(1)),
             b'd' => pos = write_dec2(buf, limit, pos, t.tm_mday),
             b'e' => pos = write_space_dec2(buf, limit, pos, t.tm_mday),
             b'j' => pos = write_dec3(buf, limit, pos, t.tm_yday.wrapping_add(1)),
-            b'w' => pos = write_char(buf, limit, pos,
-                b'0'.wrapping_add((t.tm_wday % 7) as u8)),
+            b'w' => pos = write_char(buf, limit, pos, b'0'.wrapping_add((t.tm_wday % 7) as u8)),
             b'u' => {
                 // ISO 8601: Monday=1 .. Sunday=7.
                 let iso = if t.tm_wday == 0 { 7 } else { t.tm_wday };
@@ -1041,7 +1068,11 @@ pub unsafe extern "C" fn strftime(
             }
             b'W' => {
                 // Week number, Monday as first day (00-53).
-                let mon_wday = if t.tm_wday == 0 { 6 } else { t.tm_wday.wrapping_sub(1) };
+                let mon_wday = if t.tm_wday == 0 {
+                    6
+                } else {
+                    t.tm_wday.wrapping_sub(1)
+                };
                 #[allow(clippy::arithmetic_side_effects)]
                 let wn = (t.tm_yday.wrapping_add(7).wrapping_sub(mon_wday)) / 7;
                 pos = write_dec2(buf, limit, pos, wn);
@@ -1096,8 +1127,12 @@ pub unsafe extern "C" fn strftime(
                 pos = write_char(buf, limit, pos, b'/');
                 pos = write_dec2(buf, limit, pos, t.tm_mday);
                 pos = write_char(buf, limit, pos, b'/');
-                pos = write_dec2(buf, limit, pos,
-                    t.tm_year.wrapping_add(1900).wrapping_rem(100));
+                pos = write_dec2(
+                    buf,
+                    limit,
+                    pos,
+                    t.tm_year.wrapping_add(1900).wrapping_rem(100),
+                );
             }
             b'F' => {
                 // %Y-%m-%d (ISO 8601 date).
@@ -1138,8 +1173,12 @@ pub unsafe extern "C" fn strftime(
                 pos = write_char(buf, limit, pos, b'/');
                 pos = write_dec2(buf, limit, pos, t.tm_mday);
                 pos = write_char(buf, limit, pos, b'/');
-                pos = write_dec2(buf, limit, pos,
-                    t.tm_year.wrapping_add(1900).wrapping_rem(100));
+                pos = write_dec2(
+                    buf,
+                    limit,
+                    pos,
+                    t.tm_year.wrapping_add(1900).wrapping_rem(100),
+                );
             }
             b'X' => {
                 // Locale time (C locale: %H:%M:%S).
@@ -1205,7 +1244,9 @@ pub unsafe extern "C" fn strftime(
 
     // Null-terminate.
     let term = if pos < maxsize { pos } else { limit };
-    unsafe { *buf.add(term) = 0; }
+    unsafe {
+        *buf.add(term) = 0;
+    }
 
     if pos > limit { 0 } else { pos }
 }
@@ -1510,34 +1551,62 @@ fn format_asctime(tm: &Tm, buf: &mut [u8; 32]) -> usize {
 
 fn wday_abbr(wday: i32) -> &'static [u8] {
     match wday {
-        0 => b"Sun", 1 => b"Mon", 2 => b"Tue", 3 => b"Wed",
-        4 => b"Thu", 5 => b"Fri", 6 => b"Sat", _ => b"???",
+        0 => b"Sun",
+        1 => b"Mon",
+        2 => b"Tue",
+        3 => b"Wed",
+        4 => b"Thu",
+        5 => b"Fri",
+        6 => b"Sat",
+        _ => b"???",
     }
 }
 
 fn wday_full(wday: i32) -> &'static [u8] {
     match wday {
-        0 => b"Sunday", 1 => b"Monday", 2 => b"Tuesday",
-        3 => b"Wednesday", 4 => b"Thursday", 5 => b"Friday",
-        6 => b"Saturday", _ => b"???",
+        0 => b"Sunday",
+        1 => b"Monday",
+        2 => b"Tuesday",
+        3 => b"Wednesday",
+        4 => b"Thursday",
+        5 => b"Friday",
+        6 => b"Saturday",
+        _ => b"???",
     }
 }
 
 fn mon_abbr(mon: i32) -> &'static [u8] {
     match mon {
-        0 => b"Jan", 1 => b"Feb", 2 => b"Mar", 3 => b"Apr",
-        4 => b"May", 5 => b"Jun", 6 => b"Jul", 7 => b"Aug",
-        8 => b"Sep", 9 => b"Oct", 10 => b"Nov", 11 => b"Dec",
+        0 => b"Jan",
+        1 => b"Feb",
+        2 => b"Mar",
+        3 => b"Apr",
+        4 => b"May",
+        5 => b"Jun",
+        6 => b"Jul",
+        7 => b"Aug",
+        8 => b"Sep",
+        9 => b"Oct",
+        10 => b"Nov",
+        11 => b"Dec",
         _ => b"???",
     }
 }
 
 fn mon_full(mon: i32) -> &'static [u8] {
     match mon {
-        0 => b"January", 1 => b"February", 2 => b"March",
-        3 => b"April", 4 => b"May", 5 => b"June",
-        6 => b"July", 7 => b"August", 8 => b"September",
-        9 => b"October", 10 => b"November", 11 => b"December",
+        0 => b"January",
+        1 => b"February",
+        2 => b"March",
+        3 => b"April",
+        4 => b"May",
+        5 => b"June",
+        6 => b"July",
+        7 => b"August",
+        8 => b"September",
+        9 => b"October",
+        10 => b"November",
+        11 => b"December",
         _ => b"???",
     }
 }
@@ -1549,7 +1618,9 @@ fn mon_full(mon: i32) -> &'static [u8] {
 /// Write a single character to a buffer.
 fn write_char(buf: *mut u8, limit: usize, pos: usize, ch: u8) -> usize {
     if pos < limit {
-        unsafe { *buf.add(pos) = ch; }
+        unsafe {
+            *buf.add(pos) = ch;
+        }
     }
     pos.wrapping_add(1)
 }
@@ -1558,7 +1629,9 @@ fn write_char(buf: *mut u8, limit: usize, pos: usize, ch: u8) -> usize {
 fn write_str(buf: *mut u8, limit: usize, mut pos: usize, data: &[u8]) -> usize {
     for &byte in data {
         if pos < limit {
-            unsafe { *buf.add(pos) = byte; }
+            unsafe {
+                *buf.add(pos) = byte;
+            }
         }
         pos = pos.wrapping_add(1);
     }
@@ -1590,7 +1663,11 @@ fn write_space_dec2(buf: *mut u8, limit: usize, pos: usize, val: i32) -> usize {
     let v = if val < 0 { 0 } else { val as u32 };
     let tens = v.wrapping_div(10) % 10;
     let ones = v % 10;
-    let d1 = if tens == 0 { b' ' } else { b'0'.wrapping_add(tens as u8) };
+    let d1 = if tens == 0 {
+        b' '
+    } else {
+        b'0'.wrapping_add(tens as u8)
+    };
     let d0 = b'0'.wrapping_add(ones as u8);
     let p1 = write_char(buf, limit, pos, d1);
     write_char(buf, limit, p1, d0)
@@ -1673,7 +1750,10 @@ pub static CLOCKS_PER_SEC: i64 = 1_000_000;
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
 pub extern "C" fn clock() -> i64 {
-    let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+    let mut ts = Timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
     if clock_gettime(CLOCK_MONOTONIC, &raw mut ts) != 0 {
         return -1;
     }
@@ -1700,11 +1780,7 @@ pub extern "C" fn clock() -> i64 {
 /// `tm` must point to a valid `Tm`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects, clippy::too_many_lines)]
-pub unsafe extern "C" fn strptime(
-    buf: *const u8,
-    format: *const u8,
-    tm: *mut Tm,
-) -> *const u8 {
+pub unsafe extern "C" fn strptime(buf: *const u8, format: *const u8, tm: *mut Tm) -> *const u8 {
     if buf.is_null() || format.is_null() || tm.is_null() {
         return core::ptr::null();
     }
@@ -1731,34 +1807,54 @@ pub unsafe extern "C" fn strptime(
                 b'Y' => {
                     // 4-digit year.
                     let (val, consumed) = parse_int(buf, bi, 4);
-                    if consumed == 0 { return core::ptr::null(); }
-                    unsafe { (*tm).tm_year = val - 1900; }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        (*tm).tm_year = val - 1900;
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'C' => {
                     // Century (2 digits).  Sets year = century*100 + (year%100).
                     let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 { return core::ptr::null(); }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
                     unsafe {
                         let cur_y2 = ((*tm).tm_year.wrapping_add(1900)) % 100;
-                        (*tm).tm_year = val.wrapping_mul(100).wrapping_add(cur_y2).wrapping_sub(1900);
+                        (*tm).tm_year = val
+                            .wrapping_mul(100)
+                            .wrapping_add(cur_y2)
+                            .wrapping_sub(1900);
                     }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'y' => {
                     // 2-digit year. 69-99 → 1969-1999, 00-68 → 2000-2068.
                     let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 { return core::ptr::null(); }
-                    let full_year = if val >= 69 { val.wrapping_add(1900) }
-                                    else { val.wrapping_add(2000) };
-                    unsafe { (*tm).tm_year = full_year.wrapping_sub(1900); }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    let full_year = if val >= 69 {
+                        val.wrapping_add(1900)
+                    } else {
+                        val.wrapping_add(2000)
+                    };
+                    unsafe {
+                        (*tm).tm_year = full_year.wrapping_sub(1900);
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'm' => {
                     // Month 01-12.
                     let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 { return core::ptr::null(); }
-                    unsafe { (*tm).tm_mon = val - 1; }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        (*tm).tm_mon = val - 1;
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'd' | b'e' => {
@@ -1770,8 +1866,12 @@ pub unsafe extern "C" fn strptime(
                         }
                     }
                     let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 { return core::ptr::null(); }
-                    unsafe { (*tm).tm_mday = val; }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        (*tm).tm_mday = val;
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'H' | b'k' => {
@@ -1782,8 +1882,12 @@ pub unsafe extern "C" fn strptime(
                         }
                     }
                     let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 { return core::ptr::null(); }
-                    unsafe { (*tm).tm_hour = val; }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        (*tm).tm_hour = val;
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'I' | b'l' => {
@@ -1794,54 +1898,76 @@ pub unsafe extern "C" fn strptime(
                         }
                     }
                     let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 { return core::ptr::null(); }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
                     // Store as-is; %p adjusts for AM/PM later.
-                    unsafe { (*tm).tm_hour = val; }
+                    unsafe {
+                        (*tm).tm_hour = val;
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'M' => {
                     // Minute 00-59.
                     let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 { return core::ptr::null(); }
-                    unsafe { (*tm).tm_min = val; }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        (*tm).tm_min = val;
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'S' => {
                     // Second 00-60.
                     let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 { return core::ptr::null(); }
-                    unsafe { (*tm).tm_sec = val; }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        (*tm).tm_sec = val;
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'j' => {
                     // Day of year 001-366.
                     let (val, consumed) = parse_int(buf, bi, 3);
-                    if consumed == 0 { return core::ptr::null(); }
-                    unsafe { (*tm).tm_yday = val - 1; }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        (*tm).tm_yday = val - 1;
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'w' => {
                     // Weekday 0-6 (Sunday=0).
                     let (val, consumed) = parse_int(buf, bi, 1);
-                    if consumed == 0 { return core::ptr::null(); }
-                    unsafe { (*tm).tm_wday = val; }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        (*tm).tm_wday = val;
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'u' => {
                     // ISO weekday 1-7 (Monday=1).
                     let (val, consumed) = parse_int(buf, bi, 1);
-                    if consumed == 0 { return core::ptr::null(); }
-                    unsafe { (*tm).tm_wday = if val == 7 { 0 } else { val }; }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        (*tm).tm_wday = if val == 7 { 0 } else { val };
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'p' | b'P' => {
                     // AM/PM (or am/pm). Adjusts tm_hour for 12-hour input.
                     let c1 = unsafe { *buf.add(bi) };
                     let c2 = unsafe { *buf.add(bi.wrapping_add(1)) };
-                    let afternoon = (c1 == b'P' || c1 == b'p')
-                        && (c2 == b'M' || c2 == b'm');
-                    let morning = (c1 == b'A' || c1 == b'a')
-                        && (c2 == b'M' || c2 == b'm');
+                    let afternoon = (c1 == b'P' || c1 == b'p') && (c2 == b'M' || c2 == b'm');
+                    let morning = (c1 == b'A' || c1 == b'a') && (c2 == b'M' || c2 == b'm');
                     if !afternoon && !morning {
                         return core::ptr::null();
                     }
@@ -1857,7 +1983,9 @@ pub unsafe extern "C" fn strptime(
                 b'b' | b'B' | b'h' => {
                     // Month name (abbreviated or full).
                     if let Some((mon, consumed)) = match_month_name(buf, bi) {
-                        unsafe { (*tm).tm_mon = mon; }
+                        unsafe {
+                            (*tm).tm_mon = mon;
+                        }
                         bi = bi.wrapping_add(consumed);
                     } else {
                         return core::ptr::null();
@@ -1866,7 +1994,9 @@ pub unsafe extern "C" fn strptime(
                 b'a' | b'A' => {
                     // Weekday name (abbreviated or full).
                     if let Some((wday, consumed)) = match_wday_name(buf, bi) {
-                        unsafe { (*tm).tm_wday = wday; }
+                        unsafe {
+                            (*tm).tm_wday = wday;
+                        }
                         bi = bi.wrapping_add(consumed);
                     } else {
                         return core::ptr::null();
@@ -1877,23 +2007,36 @@ pub unsafe extern "C" fn strptime(
                     // we parse the digits but don't derive date fields from
                     // the week number alone (would need %G too).
                     let (_, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 { return core::ptr::null(); }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'G' => {
                     // ISO 8601 week-based year — treat as regular year.
                     let (val, consumed) = parse_int(buf, bi, 4);
-                    if consumed == 0 { return core::ptr::null(); }
-                    unsafe { (*tm).tm_year = val - 1900; }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    unsafe {
+                        (*tm).tm_year = val - 1900;
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'g' => {
                     // ISO 8601 week-based year (2-digit).
                     let (val, consumed) = parse_int(buf, bi, 2);
-                    if consumed == 0 { return core::ptr::null(); }
-                    let full_year = if val >= 69 { val.wrapping_add(1900) }
-                                    else { val.wrapping_add(2000) };
-                    unsafe { (*tm).tm_year = full_year.wrapping_sub(1900); }
+                    if consumed == 0 {
+                        return core::ptr::null();
+                    }
+                    let full_year = if val >= 69 {
+                        val.wrapping_add(1900)
+                    } else {
+                        val.wrapping_add(2000)
+                    };
+                    unsafe {
+                        (*tm).tm_year = full_year.wrapping_sub(1900);
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'z' => {
@@ -1905,7 +2048,9 @@ pub unsafe extern "C" fn strptime(
                     }
                     bi = bi.wrapping_add(1);
                     let (_, consumed) = parse_int(buf, bi, 4);
-                    if consumed < 2 { return core::ptr::null(); }
+                    if consumed < 2 {
+                        return core::ptr::null();
+                    }
                     bi = bi.wrapping_add(consumed);
                 }
                 b'Z' => {
@@ -1916,9 +2061,7 @@ pub unsafe extern "C" fn strptime(
                 }
                 b'n' | b't' => {
                     // Skip any whitespace.
-                    while (unsafe { *buf.add(bi) }) == b' '
-                        || (unsafe { *buf.add(bi) }) == b'\t'
-                    {
+                    while (unsafe { *buf.add(bi) }) == b' ' || (unsafe { *buf.add(bi) }) == b'\t' {
                         bi = bi.wrapping_add(1);
                     }
                 }
@@ -1936,9 +2079,7 @@ pub unsafe extern "C" fn strptime(
             }
         } else if fc == b' ' || fc == b'\t' {
             // Whitespace in format matches any amount of whitespace in buf.
-            while (unsafe { *buf.add(bi) }) == b' '
-                || (unsafe { *buf.add(bi) }) == b'\t'
-            {
+            while (unsafe { *buf.add(bi) }) == b' ' || (unsafe { *buf.add(bi) }) == b'\t' {
                 bi = bi.wrapping_add(1);
             }
             fi = fi.wrapping_add(1);
@@ -1981,12 +2122,18 @@ fn parse_int(buf: *const u8, off: usize, max_digits: usize) -> (i32, usize) {
 fn match_month_name(buf: *const u8, off: usize) -> Option<(i32, usize)> {
     // Try full names first (longer match wins), then abbreviated.
     static MONTHS: [(&[u8], &[u8]); 12] = [
-        (b"January", b"Jan"),   (b"February", b"Feb"),
-        (b"March", b"Mar"),     (b"April", b"Apr"),
-        (b"May", b"May"),       (b"June", b"Jun"),
-        (b"July", b"Jul"),      (b"August", b"Aug"),
-        (b"September", b"Sep"), (b"October", b"Oct"),
-        (b"November", b"Nov"),  (b"December", b"Dec"),
+        (b"January", b"Jan"),
+        (b"February", b"Feb"),
+        (b"March", b"Mar"),
+        (b"April", b"Apr"),
+        (b"May", b"May"),
+        (b"June", b"Jun"),
+        (b"July", b"Jul"),
+        (b"August", b"Aug"),
+        (b"September", b"Sep"),
+        (b"October", b"Oct"),
+        (b"November", b"Nov"),
+        (b"December", b"Dec"),
     ];
 
     for (i, (full, abbr)) in MONTHS.iter().enumerate() {
@@ -2011,9 +2158,12 @@ fn match_month_name(buf: *const u8, off: usize) -> Option<(i32, usize)> {
 /// `buf` must be valid for at least `off + 9` bytes (longest weekday name).
 fn match_wday_name(buf: *const u8, off: usize) -> Option<(i32, usize)> {
     static WDAYS: [(&[u8], &[u8]); 7] = [
-        (b"Sunday", b"Sun"),    (b"Monday", b"Mon"),
-        (b"Tuesday", b"Tue"),   (b"Wednesday", b"Wed"),
-        (b"Thursday", b"Thu"),  (b"Friday", b"Fri"),
+        (b"Sunday", b"Sun"),
+        (b"Monday", b"Mon"),
+        (b"Tuesday", b"Tue"),
+        (b"Wednesday", b"Wed"),
+        (b"Thursday", b"Thu"),
+        (b"Friday", b"Fri"),
         (b"Saturday", b"Sat"),
     ];
 
@@ -2182,11 +2332,19 @@ pub extern "C" fn timer_create(
     for (idx, slot) in table.iter_mut().enumerate() {
         if slot.is_none() {
             *slot = Some(Itimerspec {
-                it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-                it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+                it_interval: Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                it_value: Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
             });
             // SAFETY: timerid verified non-null above; idx fits in i32.
-            unsafe { *timerid = idx as TimerT; }
+            unsafe {
+                *timerid = idx as TimerT;
+            }
             return 0;
         }
     }
@@ -2258,10 +2416,7 @@ pub extern "C" fn timer_settime(
     // Step 3: !timespec64_valid(&new_spec.it_value) → EINVAL.  ONLY
     // it_value is validated; it_interval is not (Phase 146 fix —
     // matches `do_timer_settime` exactly).
-    if nv.it_value.tv_sec < 0
-        || nv.it_value.tv_nsec < 0
-        || nv.it_value.tv_nsec > 999_999_999
-    {
+    if nv.it_value.tv_sec < 0 || nv.it_value.tv_nsec < 0 || nv.it_value.tv_nsec > 999_999_999 {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -2291,7 +2446,9 @@ pub extern "C" fn timer_settime(
     // Return old value if requested.
     if !old_value.is_null() {
         // SAFETY: old_value verified non-null.
-        unsafe { *old_value = *current; }
+        unsafe {
+            *old_value = *current;
+        }
     }
 
     // Store new value (it_value validated above; it_interval stored as
@@ -2368,7 +2525,9 @@ pub extern "C" fn timer_gettime(timerid: TimerT, curr_value: *mut Itimerspec) ->
 
     // SAFETY: curr_value verified non-null above; caller asserts it
     // points to a valid Itimerspec.
-    unsafe { *curr_value = *its; }
+    unsafe {
+        *curr_value = *its;
+    }
     0
 }
 
@@ -2478,8 +2637,14 @@ const ITIMER_COUNT: usize = 3;
 /// values so `getitimer` returns what `setitimer` set.  This makes
 /// programs that read back their own timer settings work correctly.
 static mut ITIMER_STATE: [Itimerval; ITIMER_COUNT] = [Itimerval {
-    it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
-    it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+    it_interval: Timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    },
+    it_value: Timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    },
 }; ITIMER_COUNT];
 
 /// Check that a `Timeval` is well-formed for itimer use.
@@ -2603,8 +2768,14 @@ mod tests {
     /// Create a zeroed Tm.
     fn zero_tm() -> Tm {
         Tm {
-            tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0,
-            tm_mon: 0, tm_year: 0, tm_wday: 0, tm_yday: 0,
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 0,
+            tm_mon: 0,
+            tm_year: 0,
+            tm_wday: 0,
+            tm_yday: 0,
             tm_isdst: 0,
         }
     }
@@ -2618,13 +2789,13 @@ mod tests {
         let tm = gmtime(&t);
         assert!(!tm.is_null());
         let tm = unsafe { &*tm };
-        assert_eq!(tm.tm_year, 70);   // 1970 - 1900
-        assert_eq!(tm.tm_mon, 0);     // January
+        assert_eq!(tm.tm_year, 70); // 1970 - 1900
+        assert_eq!(tm.tm_mon, 0); // January
         assert_eq!(tm.tm_mday, 1);
         assert_eq!(tm.tm_hour, 0);
         assert_eq!(tm.tm_min, 0);
         assert_eq!(tm.tm_sec, 0);
-        assert_eq!(tm.tm_wday, 4);    // Thursday
+        assert_eq!(tm.tm_wday, 4); // Thursday
         assert_eq!(tm.tm_yday, 0);
     }
 
@@ -2634,10 +2805,10 @@ mod tests {
         let t: TimeT = 946_684_800;
         let tm = gmtime(&t);
         let tm = unsafe { &*tm };
-        assert_eq!(tm.tm_year, 100);  // 2000 - 1900
-        assert_eq!(tm.tm_mon, 0);     // January
+        assert_eq!(tm.tm_year, 100); // 2000 - 1900
+        assert_eq!(tm.tm_mon, 0); // January
         assert_eq!(tm.tm_mday, 1);
-        assert_eq!(tm.tm_wday, 6);    // Saturday
+        assert_eq!(tm.tm_wday, 6); // Saturday
     }
 
     #[test]
@@ -2647,7 +2818,7 @@ mod tests {
         let tm = gmtime(&t);
         let tm = unsafe { &*tm };
         assert_eq!(tm.tm_year, 100);
-        assert_eq!(tm.tm_mon, 1);     // February (0-indexed)
+        assert_eq!(tm.tm_mon, 1); // February (0-indexed)
         assert_eq!(tm.tm_mday, 29);
         assert_eq!(tm.tm_hour, 12);
     }
@@ -2658,8 +2829,8 @@ mod tests {
         let t: TimeT = 1_704_067_199;
         let tm = gmtime(&t);
         let tm = unsafe { &*tm };
-        assert_eq!(tm.tm_year, 123);  // 2023 - 1900
-        assert_eq!(tm.tm_mon, 11);    // December
+        assert_eq!(tm.tm_year, 123); // 2023 - 1900
+        assert_eq!(tm.tm_mon, 11); // December
         assert_eq!(tm.tm_mday, 31);
         assert_eq!(tm.tm_hour, 23);
         assert_eq!(tm.tm_min, 59);
@@ -2673,8 +2844,8 @@ mod tests {
         let t: TimeT = -1;
         let tm = gmtime(&t);
         let tm = unsafe { &*tm };
-        assert_eq!(tm.tm_year, 69);   // 1969 - 1900
-        assert_eq!(tm.tm_mon, 11);    // December
+        assert_eq!(tm.tm_year, 69); // 1969 - 1900
+        assert_eq!(tm.tm_mon, 11); // December
         assert_eq!(tm.tm_mday, 31);
         assert_eq!(tm.tm_hour, 23);
         assert_eq!(tm.tm_min, 59);
@@ -2703,7 +2874,7 @@ mod tests {
     fn test_mktime_known_date() {
         let mut tm = zero_tm();
         tm.tm_year = 100; // 2000
-        tm.tm_mon = 0;    // January
+        tm.tm_mon = 0; // January
         tm.tm_mday = 1;
         let t = mktime(&mut tm);
         assert_eq!(t, 946_684_800);
@@ -2727,11 +2898,11 @@ mod tests {
         // Month 12 (January of next year) should normalize.
         let mut tm = zero_tm();
         tm.tm_year = 100; // 2000
-        tm.tm_mon = 12;   // 13th month → January 2001
+        tm.tm_mon = 12; // 13th month → January 2001
         tm.tm_mday = 1;
         let _ = mktime(&mut tm);
         assert_eq!(tm.tm_year, 101); // 2001
-        assert_eq!(tm.tm_mon, 0);    // January
+        assert_eq!(tm.tm_mon, 0); // January
     }
 
     #[test]
@@ -2739,7 +2910,7 @@ mod tests {
         // 2024-03-15 should be a Friday (wday=5).
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024
-        tm.tm_mon = 2;    // March
+        tm.tm_mon = 2; // March
         tm.tm_mday = 15;
         let _ = mktime(&mut tm);
         assert_eq!(tm.tm_wday, 5); // Friday
@@ -2749,9 +2920,7 @@ mod tests {
 
     #[test]
     fn test_gmtime_mktime_roundtrip() {
-        let timestamps: &[TimeT] = &[
-            0, 1, 86400, 946_684_800, 1_704_067_199, -1, -86400,
-        ];
+        let timestamps: &[TimeT] = &[0, 1, 86400, 946_684_800, 1_704_067_199, -1, -86400];
         for &t in timestamps {
             let tm = gmtime(&t);
             let tm = unsafe { &mut *tm };
@@ -2777,13 +2946,13 @@ mod tests {
     #[test]
     fn test_asctime_format() {
         let mut tm = zero_tm();
-        tm.tm_year = 93;  // 1993
-        tm.tm_mon = 5;    // June (0-indexed)
+        tm.tm_year = 93; // 1993
+        tm.tm_mon = 5; // June (0-indexed)
         tm.tm_mday = 30;
         tm.tm_hour = 21;
         tm.tm_min = 49;
         tm.tm_sec = 8;
-        tm.tm_wday = 3;   // Wednesday
+        tm.tm_wday = 3; // Wednesday
 
         let s = asctime(&tm);
         assert!(!s.is_null());
@@ -2801,16 +2970,14 @@ mod tests {
     #[test]
     fn test_strftime_year_month_day() {
         let mut tm = zero_tm();
-        tm.tm_year = 124;  // 2024
-        tm.tm_mon = 2;     // March
+        tm.tm_year = 124; // 2024
+        tm.tm_mon = 2; // March
         tm.tm_mday = 15;
-        tm.tm_wday = 5;    // Friday
+        tm.tm_wday = 5; // Friday
 
         let mut buf = [0u8; 64];
         let fmt = b"%Y-%m-%d\0";
-        let n = unsafe {
-            strftime(buf.as_mut_ptr(), 64, fmt.as_ptr(), &tm)
-        };
+        let n = unsafe { strftime(buf.as_mut_ptr(), 64, fmt.as_ptr(), &tm) };
         assert!(n > 0);
         assert_eq!(&buf[..10], b"2024-03-15");
     }
@@ -2824,9 +2991,7 @@ mod tests {
 
         let mut buf = [0u8; 64];
         let fmt = b"%H:%M:%S\0";
-        let n = unsafe {
-            strftime(buf.as_mut_ptr(), 64, fmt.as_ptr(), &tm)
-        };
+        let n = unsafe { strftime(buf.as_mut_ptr(), 64, fmt.as_ptr(), &tm) };
         assert!(n > 0);
         assert_eq!(&buf[..8], b"14:30:45");
     }
@@ -2836,9 +3001,7 @@ mod tests {
         let tm = zero_tm();
         let mut buf = [0u8; 16];
         let fmt = b"100%%\0";
-        let n = unsafe {
-            strftime(buf.as_mut_ptr(), 16, fmt.as_ptr(), &tm)
-        };
+        let n = unsafe { strftime(buf.as_mut_ptr(), 16, fmt.as_ptr(), &tm) };
         assert!(n > 0);
         assert_eq!(&buf[..4], b"100%");
     }
@@ -2848,9 +3011,7 @@ mod tests {
         let tm = zero_tm();
         let mut buf = [0u8; 4];
         let fmt = b"%Y-%m-%d\0";
-        let n = unsafe {
-            strftime(buf.as_mut_ptr(), 4, fmt.as_ptr(), &tm)
-        };
+        let n = unsafe { strftime(buf.as_mut_ptr(), 4, fmt.as_ptr(), &tm) };
         // Not enough space for "1900-01-00" (10 chars + null).
         // strftime returns 0 when buffer is insufficient.
         assert_eq!(n, 0);
@@ -2863,12 +3024,10 @@ mod tests {
         let mut tm = zero_tm();
         let input = b"2024-03-15\0";
         let fmt = b"%Y-%m-%d\0";
-        let result = unsafe {
-            strptime(input.as_ptr(), fmt.as_ptr(), &mut tm)
-        };
+        let result = unsafe { strptime(input.as_ptr(), fmt.as_ptr(), &mut tm) };
         assert!(!result.is_null());
-        assert_eq!(tm.tm_year, 124);  // 2024 - 1900
-        assert_eq!(tm.tm_mon, 2);     // March (0-indexed)
+        assert_eq!(tm.tm_year, 124); // 2024 - 1900
+        assert_eq!(tm.tm_mon, 2); // March (0-indexed)
         assert_eq!(tm.tm_mday, 15);
     }
 
@@ -2877,9 +3036,7 @@ mod tests {
         let mut tm = zero_tm();
         let input = b"14:30:45\0";
         let fmt = b"%H:%M:%S\0";
-        let result = unsafe {
-            strptime(input.as_ptr(), fmt.as_ptr(), &mut tm)
-        };
+        let result = unsafe { strptime(input.as_ptr(), fmt.as_ptr(), &mut tm) };
         assert!(!result.is_null());
         assert_eq!(tm.tm_hour, 14);
         assert_eq!(tm.tm_min, 30);
@@ -2898,10 +3055,10 @@ mod tests {
 
     #[test]
     fn test_days_in_month_values() {
-        assert_eq!(days_in_month(0, 2023), 31);  // January
-        assert_eq!(days_in_month(1, 2023), 28);  // February (non-leap)
-        assert_eq!(days_in_month(1, 2024), 29);  // February (leap)
-        assert_eq!(days_in_month(3, 2023), 30);  // April
+        assert_eq!(days_in_month(0, 2023), 31); // January
+        assert_eq!(days_in_month(1, 2023), 28); // February (non-leap)
+        assert_eq!(days_in_month(1, 2024), 29); // February (leap)
+        assert_eq!(days_in_month(3, 2023), 30); // April
         assert_eq!(days_in_month(11, 2023), 31); // December
     }
 
@@ -2940,14 +3097,7 @@ mod tests {
     /// Helper: run strftime on a Tm and return the result as a byte vector.
     fn run_strftime(fmt: &[u8], tm: &Tm) -> Vec<u8> {
         let mut buf = [0u8; 128];
-        let n = unsafe {
-            strftime(
-                buf.as_mut_ptr(),
-                buf.len(),
-                fmt.as_ptr(),
-                &raw const *tm,
-            )
-        };
+        let n = unsafe { strftime(buf.as_mut_ptr(), buf.len(), fmt.as_ptr(), &raw const *tm) };
         buf[..n].to_vec()
     }
 
@@ -3005,7 +3155,7 @@ mod tests {
     fn test_strftime_iso_date() {
         let mut tm = zero_tm();
         tm.tm_year = 123; // 2023
-        tm.tm_mon = 5;    // June
+        tm.tm_mon = 5; // June
         tm.tm_mday = 15;
         assert_eq!(run_strftime(b"%F\0", &tm), b"2023-06-15");
     }
@@ -3038,7 +3188,7 @@ mod tests {
         tm.tm_year = 123;
         tm.tm_mon = 0;
         tm.tm_mday = 1;
-        tm.tm_yday = 0;  // Jan 1 = day 1
+        tm.tm_yday = 0; // Jan 1 = day 1
         assert_eq!(run_strftime(b"%j\0", &tm), b"001");
 
         tm.tm_yday = 364; // Day 365 of a non-leap year (Dec 31)
@@ -3130,7 +3280,7 @@ mod tests {
     fn test_strftime_date_composite() {
         let mut tm = zero_tm();
         tm.tm_year = 123; // 2023
-        tm.tm_mon = 5;    // June
+        tm.tm_mon = 5; // June
         tm.tm_mday = 15;
         // %D = %m/%d/%y
         assert_eq!(run_strftime(b"%D\0", &tm), b"06/15/23");
@@ -3141,13 +3291,7 @@ mod tests {
     #[test]
     fn test_strptime_ampm() {
         let mut tm = zero_tm();
-        let rem = unsafe {
-            strptime(
-                b"02:30 PM\0".as_ptr(),
-                b"%I:%M %p\0".as_ptr(),
-                &raw mut tm,
-            )
-        };
+        let rem = unsafe { strptime(b"02:30 PM\0".as_ptr(), b"%I:%M %p\0".as_ptr(), &raw mut tm) };
         assert!(!rem.is_null());
         assert_eq!(tm.tm_hour, 14); // 2 PM = 14
         assert_eq!(tm.tm_min, 30);
@@ -3157,11 +3301,7 @@ mod tests {
     fn test_strptime_noon_pm() {
         let mut tm = zero_tm();
         unsafe {
-            strptime(
-                b"12:00 PM\0".as_ptr(),
-                b"%I:%M %p\0".as_ptr(),
-                &raw mut tm,
-            );
+            strptime(b"12:00 PM\0".as_ptr(), b"%I:%M %p\0".as_ptr(), &raw mut tm);
         }
         assert_eq!(tm.tm_hour, 12); // 12 PM = noon = 12
     }
@@ -3170,11 +3310,7 @@ mod tests {
     fn test_strptime_midnight_am() {
         let mut tm = zero_tm();
         unsafe {
-            strptime(
-                b"12:00 AM\0".as_ptr(),
-                b"%I:%M %p\0".as_ptr(),
-                &raw mut tm,
-            );
+            strptime(b"12:00 AM\0".as_ptr(), b"%I:%M %p\0".as_ptr(), &raw mut tm);
         }
         assert_eq!(tm.tm_hour, 0); // 12 AM = midnight = 0
     }
@@ -3182,13 +3318,7 @@ mod tests {
     #[test]
     fn test_strptime_month_name() {
         let mut tm = zero_tm();
-        let rem = unsafe {
-            strptime(
-                b"January\0".as_ptr(),
-                b"%B\0".as_ptr(),
-                &raw mut tm,
-            )
-        };
+        let rem = unsafe { strptime(b"January\0".as_ptr(), b"%B\0".as_ptr(), &raw mut tm) };
         assert!(!rem.is_null());
         assert_eq!(tm.tm_mon, 0); // January = 0
     }
@@ -3196,13 +3326,7 @@ mod tests {
     #[test]
     fn test_strptime_month_abbr() {
         let mut tm = zero_tm();
-        let rem = unsafe {
-            strptime(
-                b"Dec\0".as_ptr(),
-                b"%b\0".as_ptr(),
-                &raw mut tm,
-            )
-        };
+        let rem = unsafe { strptime(b"Dec\0".as_ptr(), b"%b\0".as_ptr(), &raw mut tm) };
         assert!(!rem.is_null());
         assert_eq!(tm.tm_mon, 11); // December = 11
     }
@@ -3210,13 +3334,7 @@ mod tests {
     #[test]
     fn test_strptime_weekday_name() {
         let mut tm = zero_tm();
-        let rem = unsafe {
-            strptime(
-                b"Wednesday\0".as_ptr(),
-                b"%A\0".as_ptr(),
-                &raw mut tm,
-            )
-        };
+        let rem = unsafe { strptime(b"Wednesday\0".as_ptr(), b"%A\0".as_ptr(), &raw mut tm) };
         assert!(!rem.is_null());
         assert_eq!(tm.tm_wday, 3); // Wednesday = 3
     }
@@ -3226,12 +3344,10 @@ mod tests {
         let mut tm = zero_tm();
         let input = b"2023-06-15\0";
         let fmt = b"%Y-%m-%d\0";
-        let rem = unsafe {
-            strptime(input.as_ptr(), fmt.as_ptr(), &raw mut tm)
-        };
+        let rem = unsafe { strptime(input.as_ptr(), fmt.as_ptr(), &raw mut tm) };
         assert!(!rem.is_null());
         assert_eq!(tm.tm_year, 123); // 2023-1900
-        assert_eq!(tm.tm_mon, 5);    // June = 5
+        assert_eq!(tm.tm_mon, 5); // June = 5
         assert_eq!(tm.tm_mday, 15);
     }
 
@@ -3253,13 +3369,7 @@ mod tests {
     #[test]
     fn test_strptime_timezone_offset() {
         let mut tm = zero_tm();
-        let rem = unsafe {
-            strptime(
-                b"+0530\0".as_ptr(),
-                b"%z\0".as_ptr(),
-                &raw mut tm,
-            )
-        };
+        let rem = unsafe { strptime(b"+0530\0".as_ptr(), b"%z\0".as_ptr(), &raw mut tm) };
         // Should succeed (parse but ignore timezone)
         assert!(!rem.is_null());
     }
@@ -3267,13 +3377,7 @@ mod tests {
     #[test]
     fn test_strptime_literal_percent() {
         let mut tm = zero_tm();
-        let rem = unsafe {
-            strptime(
-                b"100%\0".as_ptr(),
-                b"100%%\0".as_ptr(),
-                &raw mut tm,
-            )
-        };
+        let rem = unsafe { strptime(b"100%\0".as_ptr(), b"100%%\0".as_ptr(), &raw mut tm) };
         assert!(!rem.is_null());
     }
 
@@ -3281,9 +3385,7 @@ mod tests {
     fn test_strptime_returns_remaining() {
         let mut tm = zero_tm();
         let input = b"2023 extra stuff\0";
-        let rem = unsafe {
-            strptime(input.as_ptr(), b"%Y\0".as_ptr(), &raw mut tm)
-        };
+        let rem = unsafe { strptime(input.as_ptr(), b"%Y\0".as_ptr(), &raw mut tm) };
         assert!(!rem.is_null());
         // rem should point to " extra stuff"
         assert_eq!(unsafe { *rem }, b' ');
@@ -3292,9 +3394,7 @@ mod tests {
     #[test]
     fn test_strptime_bad_input() {
         let mut tm = zero_tm();
-        let rem = unsafe {
-            strptime(b"abc\0".as_ptr(), b"%Y\0".as_ptr(), &raw mut tm)
-        };
+        let rem = unsafe { strptime(b"abc\0".as_ptr(), b"%Y\0".as_ptr(), &raw mut tm) };
         assert!(rem.is_null()); // No digits for %Y
     }
 
@@ -3307,7 +3407,7 @@ mod tests {
         tm.tm_year = 115; // 2015
         tm.tm_mon = 0;
         tm.tm_mday = 1;
-        tm.tm_wday = 4;   // Thursday
+        tm.tm_wday = 4; // Thursday
         tm.tm_yday = 0;
         let (year, week) = iso_week_date(&tm);
         assert_eq!(year, 2015);
@@ -3319,9 +3419,9 @@ mod tests {
         // 2014-12-29 is Monday → ISO week 01 of 2015
         let mut tm = zero_tm();
         tm.tm_year = 114; // 2014
-        tm.tm_mon = 11;   // December
+        tm.tm_mon = 11; // December
         tm.tm_mday = 29;
-        tm.tm_wday = 1;   // Monday
+        tm.tm_wday = 1; // Monday
         tm.tm_yday = 362; // 0-indexed
         let (year, week) = iso_week_date(&tm);
         assert_eq!(year, 2015);
@@ -3335,7 +3435,7 @@ mod tests {
         tm.tm_year = 116; // 2016
         tm.tm_mon = 0;
         tm.tm_mday = 1;
-        tm.tm_wday = 5;   // Friday
+        tm.tm_wday = 5; // Friday
         tm.tm_yday = 0;
         let (year, week) = iso_week_date(&tm);
         assert_eq!(year, 2015);
@@ -3349,11 +3449,11 @@ mod tests {
         // tm_mon = -1 should borrow from year (December of previous year)
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024
-        tm.tm_mon = -1;   // Should normalize to December 2023
+        tm.tm_mon = -1; // Should normalize to December 2023
         tm.tm_mday = 15;
         let _ = mktime(&mut tm);
-        assert_eq!(tm.tm_mon, 11);      // December
-        assert_eq!(tm.tm_year, 123);     // 2023
+        assert_eq!(tm.tm_mon, 11); // December
+        assert_eq!(tm.tm_year, 123); // 2023
         assert_eq!(tm.tm_mday, 15);
     }
 
@@ -3362,10 +3462,10 @@ mod tests {
         // Jan 32 should become Feb 1
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024
-        tm.tm_mon = 0;    // January
+        tm.tm_mon = 0; // January
         tm.tm_mday = 32;
         let _ = mktime(&mut tm);
-        assert_eq!(tm.tm_mon, 1);   // February
+        assert_eq!(tm.tm_mon, 1); // February
         assert_eq!(tm.tm_mday, 1);
     }
 
@@ -3474,10 +3574,10 @@ mod tests {
         // Feb 29 in a non-leap year should normalize to March 1.
         let mut tm = zero_tm();
         tm.tm_year = 123; // 2023 (not a leap year)
-        tm.tm_mon = 1;    // February
+        tm.tm_mon = 1; // February
         tm.tm_mday = 29;
         let _ = mktime(&mut tm);
-        assert_eq!(tm.tm_mon, 2);   // March
+        assert_eq!(tm.tm_mon, 2); // March
         assert_eq!(tm.tm_mday, 1);
     }
 
@@ -3486,10 +3586,10 @@ mod tests {
         // mday=0 should be last day of previous month.
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024 (leap year)
-        tm.tm_mon = 2;    // March
-        tm.tm_mday = 0;   // → Feb 29 (leap year)
+        tm.tm_mon = 2; // March
+        tm.tm_mday = 0; // → Feb 29 (leap year)
         let _ = mktime(&mut tm);
-        assert_eq!(tm.tm_mon, 1);   // February
+        assert_eq!(tm.tm_mon, 1); // February
         assert_eq!(tm.tm_mday, 29); // Leap day
     }
 
@@ -3515,11 +3615,11 @@ mod tests {
         let t: TimeT = -2_208_988_800;
         let tm = gmtime(&t);
         let tm = unsafe { &*tm };
-        assert_eq!(tm.tm_year, 0);    // 1900 - 1900
-        assert_eq!(tm.tm_mon, 0);     // January
+        assert_eq!(tm.tm_year, 0); // 1900 - 1900
+        assert_eq!(tm.tm_mon, 0); // January
         assert_eq!(tm.tm_mday, 1);
         assert_eq!(tm.tm_hour, 0);
-        assert_eq!(tm.tm_wday, 1);    // Monday
+        assert_eq!(tm.tm_wday, 1); // Monday
         assert_eq!(tm.tm_yday, 0);
     }
 
@@ -3529,8 +3629,8 @@ mod tests {
         let t: TimeT = 2_147_483_647;
         let tm = gmtime(&t);
         let tm = unsafe { &*tm };
-        assert_eq!(tm.tm_year, 138);  // 2038 - 1900
-        assert_eq!(tm.tm_mon, 0);     // January
+        assert_eq!(tm.tm_year, 138); // 2038 - 1900
+        assert_eq!(tm.tm_mon, 0); // January
         assert_eq!(tm.tm_mday, 19);
         assert_eq!(tm.tm_hour, 3);
         assert_eq!(tm.tm_min, 14);
@@ -3541,9 +3641,9 @@ mod tests {
     fn test_gmtime_mktime_roundtrip_leap_years() {
         // Test roundtrip for several leap-year Feb 29 timestamps.
         let leap_feb29_timestamps: &[TimeT] = &[
-            68169600,    // 1972-02-29 00:00:00 UTC
-            951782400,   // 2000-02-29 00:00:00 UTC (century leap)
-            1709164800,  // 2024-02-29 00:00:00 UTC
+            68169600,   // 1972-02-29 00:00:00 UTC
+            951782400,  // 2000-02-29 00:00:00 UTC (century leap)
+            1709164800, // 2024-02-29 00:00:00 UTC
         ];
         for &t in leap_feb29_timestamps {
             let tm = gmtime(&t);
@@ -3611,17 +3711,17 @@ mod tests {
         let mut tm = zero_tm();
         tm.tm_year = 70;
         tm.tm_mon = 0;
-        tm.tm_mday = 2;   // 86400 seconds from epoch
+        tm.tm_mday = 2; // 86400 seconds from epoch
         let result = run_strftime(b"%s\0", &tm);
         assert_eq!(result, b"86400");
     }
 
     #[test]
     fn test_hour_12_all_values() {
-        assert_eq!(hour_12(0), 12);   // midnight
+        assert_eq!(hour_12(0), 12); // midnight
         assert_eq!(hour_12(1), 1);
         assert_eq!(hour_12(11), 11);
-        assert_eq!(hour_12(12), 12);  // noon
+        assert_eq!(hour_12(12), 12); // noon
         assert_eq!(hour_12(13), 1);
         assert_eq!(hour_12(23), 11);
     }
@@ -3666,8 +3766,8 @@ mod tests {
         let t: TimeT = -315_619_200;
         let tm = gmtime(&t);
         let tm = unsafe { &*tm };
-        assert_eq!(tm.tm_year, 60);    // 1960
-        assert_eq!(tm.tm_mon, 0);      // January
+        assert_eq!(tm.tm_year, 60); // 1960
+        assert_eq!(tm.tm_mon, 0); // January
         assert_eq!(tm.tm_mday, 1);
         assert_eq!(tm.tm_hour, 0);
         assert_eq!(tm.tm_min, 0);
@@ -3694,8 +3794,8 @@ mod tests {
         let t: TimeT = 4_107_542_400;
         let tm = gmtime(&t);
         let tm = unsafe { &*tm };
-        assert_eq!(tm.tm_year, 200);   // 2100
-        assert_eq!(tm.tm_mon, 2);      // March (2100 is NOT a leap year)
+        assert_eq!(tm.tm_year, 200); // 2100
+        assert_eq!(tm.tm_mon, 2); // March (2100 is NOT a leap year)
         assert_eq!(tm.tm_mday, 1);
     }
 
@@ -3725,7 +3825,7 @@ mod tests {
         let _ = mktime(&mut tm);
         assert_eq!(tm.tm_hour, 23);
         assert_eq!(tm.tm_mday, 31);
-        assert_eq!(tm.tm_mon, 11);  // December
+        assert_eq!(tm.tm_mon, 11); // December
         assert_eq!(tm.tm_year, 123); // 2023
     }
 
@@ -3749,11 +3849,11 @@ mod tests {
         // Month -13 should go back a full year + 1 month.
         let mut tm = zero_tm();
         tm.tm_year = 124; // 2024
-        tm.tm_mon = -13;  // Should normalize to November 2022.
+        tm.tm_mon = -13; // Should normalize to November 2022.
         tm.tm_mday = 1;
         let _ = mktime(&mut tm);
         assert_eq!(tm.tm_year, 122); // 2022
-        assert_eq!(tm.tm_mon, 11);   // December
+        assert_eq!(tm.tm_mon, 11); // December
     }
 
     #[test]
@@ -3761,7 +3861,7 @@ mod tests {
         // Month 24 = 2 years forward.
         let mut tm = zero_tm();
         tm.tm_year = 70; // 1970
-        tm.tm_mon = 24;  // 2 years = 1972 January
+        tm.tm_mon = 24; // 2 years = 1972 January
         tm.tm_mday = 1;
         let _ = mktime(&mut tm);
         assert_eq!(tm.tm_year, 72);
@@ -3841,8 +3941,8 @@ mod tests {
     #[test]
     fn test_roundtrip_post_2038_timestamps() {
         let timestamps: &[TimeT] = &[
-            2_147_483_648,  // 2038-01-19 03:14:08
-            4_107_542_400,  // 2100-03-01
+            2_147_483_648, // 2038-01-19 03:14:08
+            4_107_542_400, // 2100-03-01
         ];
         for &t in timestamps {
             let tm = gmtime(&t);
@@ -3877,7 +3977,7 @@ mod tests {
         let tm = gmtime(&t);
         let tm = unsafe { &*tm };
         assert_eq!(tm.tm_year, 70);
-        assert_eq!(tm.tm_mon, 11);  // December
+        assert_eq!(tm.tm_mon, 11); // December
         assert_eq!(tm.tm_mday, 31);
         assert_eq!(tm.tm_hour, 23);
         assert_eq!(tm.tm_min, 59);
@@ -3960,8 +4060,8 @@ mod tests {
         let result = unsafe { strptime(input.as_ptr(), fmt.as_ptr(), &mut tm) };
         assert!(!result.is_null());
         assert_eq!(tm.tm_mday, 15);
-        assert_eq!(tm.tm_mon, 2);     // March
-        assert_eq!(tm.tm_year, 124);  // 2024 - 1900
+        assert_eq!(tm.tm_mon, 2); // March
+        assert_eq!(tm.tm_year, 124); // 2024 - 1900
     }
 
     #[test]
@@ -3993,13 +4093,13 @@ mod tests {
         // -1 = 1969-12-31 23:59:59
         let mut tm = zero_tm();
         secs_to_tm(-1, &mut tm);
-        assert_eq!(tm.tm_year, 69);   // 1969
-        assert_eq!(tm.tm_mon, 11);    // December
+        assert_eq!(tm.tm_year, 69); // 1969
+        assert_eq!(tm.tm_mon, 11); // December
         assert_eq!(tm.tm_mday, 31);
         assert_eq!(tm.tm_hour, 23);
         assert_eq!(tm.tm_min, 59);
         assert_eq!(tm.tm_sec, 59);
-        assert_eq!(tm.tm_wday, 3);    // Wednesday
+        assert_eq!(tm.tm_wday, 3); // Wednesday
     }
 
     #[test]
@@ -4026,20 +4126,20 @@ mod tests {
         assert_eq!(tm.tm_mday, 2);
         assert_eq!(tm.tm_mon, 0);
         assert_eq!(tm.tm_year, 70);
-        assert_eq!(tm.tm_wday, 5);    // Friday
+        assert_eq!(tm.tm_wday, 5); // Friday
     }
 
     #[test]
     fn test_mktime_dec31_to_jan1() {
         // Dec 32 should normalize to Jan 1 of next year.
         let mut tm = zero_tm();
-        tm.tm_year = 70;  // 1970
-        tm.tm_mon = 11;   // December
-        tm.tm_mday = 32;  // Dec 32 = Jan 1 next year
+        tm.tm_year = 70; // 1970
+        tm.tm_mon = 11; // December
+        tm.tm_mday = 32; // Dec 32 = Jan 1 next year
         let secs = tm_to_secs(&mut tm);
 
-        assert_eq!(tm.tm_year, 71);   // Normalized to 1971
-        assert_eq!(tm.tm_mon, 0);     // January
+        assert_eq!(tm.tm_year, 71); // Normalized to 1971
+        assert_eq!(tm.tm_mon, 0); // January
         assert_eq!(tm.tm_mday, 1);
 
         // Verify via round-trip
@@ -4054,11 +4154,11 @@ mod tests {
     fn test_mktime_feb30_normalizes() {
         // Feb 30 in a non-leap year should normalize to March 2.
         let mut tm = zero_tm();
-        tm.tm_year = 123;  // 2023 (non-leap)
-        tm.tm_mon = 1;     // February
+        tm.tm_year = 123; // 2023 (non-leap)
+        tm.tm_mon = 1; // February
         tm.tm_mday = 30;
         tm_to_secs(&mut tm);
-        assert_eq!(tm.tm_mon, 2);     // March
+        assert_eq!(tm.tm_mon, 2); // March
         assert_eq!(tm.tm_mday, 2);
     }
 
@@ -4066,11 +4166,11 @@ mod tests {
     fn test_mktime_feb30_leap_normalizes() {
         // Feb 30 in a leap year should normalize to March 1.
         let mut tm = zero_tm();
-        tm.tm_year = 124;  // 2024 (leap year)
-        tm.tm_mon = 1;     // February
+        tm.tm_year = 124; // 2024 (leap year)
+        tm.tm_mon = 1; // February
         tm.tm_mday = 30;
         tm_to_secs(&mut tm);
-        assert_eq!(tm.tm_mon, 2);     // March
+        assert_eq!(tm.tm_mon, 2); // March
         assert_eq!(tm.tm_mday, 1);
     }
 
@@ -4078,12 +4178,12 @@ mod tests {
     fn test_mktime_negative_mday() {
         // mday = 0 should borrow from previous month (Dec 31).
         let mut tm = zero_tm();
-        tm.tm_year = 71;  // 1971
-        tm.tm_mon = 0;    // January
-        tm.tm_mday = 0;   // Jan 0 = Dec 31 of prev year
+        tm.tm_year = 71; // 1971
+        tm.tm_mon = 0; // January
+        tm.tm_mday = 0; // Jan 0 = Dec 31 of prev year
         tm_to_secs(&mut tm);
-        assert_eq!(tm.tm_year, 70);   // 1970
-        assert_eq!(tm.tm_mon, 11);    // December
+        assert_eq!(tm.tm_year, 70); // 1970
+        assert_eq!(tm.tm_mon, 11); // December
         assert_eq!(tm.tm_mday, 31);
     }
 
@@ -4091,12 +4191,12 @@ mod tests {
     fn test_mktime_deeply_negative_mday() {
         // mday = -30 in January: Jan 0 = Dec 31, Jan -30 = Dec 1.
         let mut tm = zero_tm();
-        tm.tm_year = 71;  // 1971
-        tm.tm_mon = 0;    // January
+        tm.tm_year = 71; // 1971
+        tm.tm_mon = 0; // January
         tm.tm_mday = -30;
         tm_to_secs(&mut tm);
-        assert_eq!(tm.tm_year, 70);   // 1970
-        assert_eq!(tm.tm_mon, 11);    // December
+        assert_eq!(tm.tm_year, 70); // 1970
+        assert_eq!(tm.tm_mon, 11); // December
         assert_eq!(tm.tm_mday, 1);
     }
 
@@ -4151,9 +4251,9 @@ mod tests {
         //   = 951782400 + 86399 = 951868799
         // But let's just verify the roundtrip.
         let mut tm = zero_tm();
-        tm.tm_year = 100;  // 2000
-        tm.tm_mon = 1;     // February
-        tm.tm_mday = 29;   // Feb 29 (leap day)
+        tm.tm_year = 100; // 2000
+        tm.tm_mon = 1; // February
+        tm.tm_mday = 29; // Feb 29 (leap day)
         tm.tm_hour = 23;
         tm.tm_min = 59;
         tm.tm_sec = 59;
@@ -4174,7 +4274,7 @@ mod tests {
         // First second after leap day: 2000-03-01 00:00:00
         let mut tm = zero_tm();
         tm.tm_year = 100;
-        tm.tm_mon = 2;     // March
+        tm.tm_mon = 2; // March
         tm.tm_mday = 1;
         let secs = tm_to_secs(&mut tm);
 
@@ -4217,7 +4317,7 @@ mod tests {
     fn test_mktime_yday_leap_year() {
         // Dec 31 in leap year should have yday=365.
         let mut tm = zero_tm();
-        tm.tm_year = 100;  // 2000 (leap)
+        tm.tm_year = 100; // 2000 (leap)
         tm.tm_mon = 11;
         tm.tm_mday = 31;
         tm_to_secs(&mut tm);
@@ -4231,9 +4331,11 @@ mod tests {
         for (i, &expected_wday) in days.iter().enumerate() {
             let mut tm = zero_tm();
             secs_to_tm((i as i64) * 86400, &mut tm);
-            assert_eq!(tm.tm_wday, expected_wday,
+            assert_eq!(
+                tm.tm_wday, expected_wday,
                 "day {i} should be wday {expected_wday}, got {}",
-                tm.tm_wday);
+                tm.tm_wday
+            );
         }
     }
 
@@ -4354,7 +4456,10 @@ mod tests {
         // boundary that proves the args passed all validation.
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
@@ -4368,7 +4473,10 @@ mod tests {
         // syscall not executable on the host).
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
@@ -4393,7 +4501,10 @@ mod tests {
 
     #[test]
     fn test_clock_getres_monotonic() {
-        let mut ts = Timespec { tv_sec: 99, tv_nsec: 99 };
+        let mut ts = Timespec {
+            tv_sec: 99,
+            tv_nsec: 99,
+        };
         let ret = clock_getres(CLOCK_MONOTONIC, &raw mut ts);
         assert_eq!(ret, 0);
         assert_eq!(ts.tv_sec, 0);
@@ -4417,7 +4528,10 @@ mod tests {
 
     #[test]
     fn test_clock_getres_realtime() {
-        let mut ts = Timespec { tv_sec: 99, tv_nsec: 99 };
+        let mut ts = Timespec {
+            tv_sec: 99,
+            tv_nsec: 99,
+        };
         let ret = clock_getres(CLOCK_REALTIME, &raw mut ts);
         assert_eq!(ret, 0);
         assert_eq!(ts.tv_sec, 0);
@@ -4433,7 +4547,10 @@ mod tests {
 
     #[test]
     fn test_clock_getres_invalid_clock() {
-        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         crate::errno::set_errno(0);
         let ret = clock_getres(999, &raw mut ts);
         assert_eq!(ret, -1);
@@ -4450,7 +4567,10 @@ mod tests {
 
     #[test]
     fn test_clock_gettime_invalid_clock() {
-        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         crate::errno::set_errno(0);
         let ret = clock_gettime(999, &raw mut ts);
         assert_eq!(ret, -1);
@@ -4475,7 +4595,10 @@ mod tests {
     /// Per-error-class: bad clock with valid tp → EINVAL.
     #[test]
     fn test_clock_gettime_bad_clock_einval_phase150() {
-        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         crate::errno::set_errno(0);
         let ret = clock_gettime(0x4242, &raw mut ts);
         assert_eq!(ret, -1);
@@ -4494,7 +4617,10 @@ mod tests {
     /// Per-error-class: negative clock_id → EINVAL.
     #[test]
     fn test_clock_gettime_negative_clock_einval_phase150() {
-        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         crate::errno::set_errno(0);
         let ret = clock_gettime(-7, &raw mut ts);
         assert_eq!(ret, -1);
@@ -4511,8 +4637,11 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = clock_gettime(999, core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-            "bad clock (EINVAL) must beat NULL tp (EFAULT)");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "bad clock (EINVAL) must beat NULL tp (EFAULT)"
+        );
     }
 
     /// Ordering: negative clock BEATS NULL tp.
@@ -4554,14 +4683,20 @@ mod tests {
             CLOCK_BOOTTIME,
         ] {
             crate::errno::set_errno(0);
-            let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let mut ts = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             // We don't assert ret == 0 because the test environment
             // has no working SYS_CLOCK_MONOTONIC; we DO assert that
             // errno wasn't set to EINVAL (the clock-validation
             // failure errno).
             let _ = clock_gettime(clk, &raw mut ts);
-            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL,
-                "clock {clk} must pass the EINVAL check");
+            assert_ne!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "clock {clk} must pass the EINVAL check"
+            );
         }
     }
 
@@ -4576,8 +4711,11 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = clock_gettime(65, core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-            "caller probing for clock support must see EINVAL, not EFAULT");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "caller probing for clock support must see EINVAL, not EFAULT"
+        );
     }
 
     // -- recovery --
@@ -4588,14 +4726,20 @@ mod tests {
     #[test]
     fn test_clock_gettime_recovery_after_einval_phase150() {
         crate::errno::set_errno(0);
-        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         assert_eq!(clock_gettime(999, &raw mut ts), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
         crate::errno::set_errno(0);
         let _ = clock_gettime(CLOCK_MONOTONIC, &raw mut ts);
-        assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL,
-            "valid clock must clear the EINVAL state");
+        assert_ne!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "valid clock must clear the EINVAL state"
+        );
     }
 
     /// Recovery: after EFAULT from NULL tp, providing a buffer
@@ -4607,10 +4751,16 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
         crate::errno::set_errno(0);
-        let mut ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let _ = clock_gettime(CLOCK_MONOTONIC, &raw mut ts);
-        assert_ne!(crate::errno::get_errno(), crate::errno::EFAULT,
-            "valid tp must clear the EFAULT state");
+        assert_ne!(
+            crate::errno::get_errno(),
+            crate::errno::EFAULT,
+            "valid tp must clear the EFAULT state"
+        );
     }
 
     // -- no-side-effect loop --
@@ -4643,8 +4793,14 @@ mod tests {
             let state = core::ptr::addr_of_mut!(ITIMER_STATE).as_mut().unwrap();
             for entry in state.iter_mut() {
                 *entry = Itimerval {
-                    it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
-                    it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+                    it_interval: Timeval {
+                        tv_sec: 0,
+                        tv_usec: 0,
+                    },
+                    it_value: Timeval {
+                        tv_sec: 0,
+                        tv_usec: 0,
+                    },
                 };
             }
         }
@@ -4666,8 +4822,14 @@ mod tests {
         reset_timers();
         let mut id1: TimerT = 0;
         let mut id2: TimerT = 0;
-        assert_eq!(timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id1), 0);
-        assert_eq!(timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id2), 0);
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id1),
+            0
+        );
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id2),
+            0
+        );
         assert_ne!(id1, id2, "two timers should get distinct IDs");
         timer_delete(id1);
         timer_delete(id2);
@@ -4690,12 +4852,18 @@ mod tests {
     fn test_timer_create_reuse_deleted_slot() {
         reset_timers();
         let mut id: TimerT = 0;
-        assert_eq!(timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id), 0);
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id),
+            0
+        );
         let first_id = id;
         assert_eq!(timer_delete(id), 0);
 
         // Create again — should reuse slot 0.
-        assert_eq!(timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id), 0);
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id),
+            0
+        );
         assert_eq!(id, first_id, "deleted slot should be reused");
         timer_delete(id);
     }
@@ -4714,7 +4882,10 @@ mod tests {
     fn test_timer_delete_double_delete() {
         reset_timers();
         let mut id: TimerT = 0;
-        assert_eq!(timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id), 0);
+        assert_eq!(
+            timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id),
+            0
+        );
         assert_eq!(timer_delete(id), 0);
         // Second delete should fail.
         crate::errno::set_errno(0);
@@ -4729,8 +4900,14 @@ mod tests {
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
 
         let new_val = Itimerspec {
-            it_interval: Timespec { tv_sec: 1, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 5, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 5,
+                tv_nsec: 0,
+            },
         };
         let ret = timer_settime(id, 0, &raw const new_val, core::ptr::null_mut());
         assert_eq!(ret, 0);
@@ -4745,19 +4922,37 @@ mod tests {
 
         // Set initial value.
         let val1 = Itimerspec {
-            it_interval: Timespec { tv_sec: 2, tv_nsec: 100 },
-            it_value: Timespec { tv_sec: 10, tv_nsec: 200 },
+            it_interval: Timespec {
+                tv_sec: 2,
+                tv_nsec: 100,
+            },
+            it_value: Timespec {
+                tv_sec: 10,
+                tv_nsec: 200,
+            },
         };
         timer_settime(id, 0, &raw const val1, core::ptr::null_mut());
 
         // Set new value and retrieve old.
         let val2 = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         let mut old = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         let ret = timer_settime(id, 0, &raw const val2, &raw mut old);
         assert_eq!(ret, 0);
@@ -4785,8 +4980,14 @@ mod tests {
     fn test_timer_settime_invalid_timer() {
         reset_timers();
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(0, 0, &raw const val, core::ptr::null_mut());
@@ -4801,14 +5002,26 @@ mod tests {
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
 
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 3, tv_nsec: 500 },
-            it_value: Timespec { tv_sec: 7, tv_nsec: 999 },
+            it_interval: Timespec {
+                tv_sec: 3,
+                tv_nsec: 500,
+            },
+            it_value: Timespec {
+                tv_sec: 7,
+                tv_nsec: 999,
+            },
         };
         timer_settime(id, 0, &raw const val, core::ptr::null_mut());
 
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         let ret = timer_gettime(id, &raw mut out);
         assert_eq!(ret, 0);
@@ -4838,8 +5051,14 @@ mod tests {
     fn test_timer_gettime_invalid_timer() {
         reset_timers();
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_gettime(0, &raw mut out);
@@ -4924,10 +5143,19 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 100 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 100 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 100,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 100,
+            },
         };
-        assert_eq!(timer_settime(id, 0, &raw const val, core::ptr::null_mut()), 0);
+        assert_eq!(
+            timer_settime(id, 0, &raw const val, core::ptr::null_mut()),
+            0
+        );
         // Stub never fires, so overrun count stays at 0.
         assert_eq!(timer_getoverrun(id), 0);
         timer_delete(id);
@@ -4960,8 +5188,11 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = timer_getoverrun(id);
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-            "use-after-delete must be diagnosed, not silently 0'd");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "use-after-delete must be diagnosed, not silently 0'd"
+        );
     }
 
     /// Buggy caller: queries overrun before any timer_create.  ID 0
@@ -5069,8 +5300,11 @@ mod tests {
         crate::errno::set_errno(13579);
         let ret = timer_getoverrun(id);
         assert_eq!(ret, 0);
-        assert_eq!(crate::errno::get_errno(), 13579,
-            "success path must not touch errno");
+        assert_eq!(
+            crate::errno::get_errno(),
+            13579,
+            "success path must not touch errno"
+        );
         timer_delete(id);
     }
 
@@ -5094,8 +5328,14 @@ mod tests {
     fn test_timer_gettime_bad_timer_id_einval_phase148() {
         reset_timers();
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_gettime(99, &raw mut out);
@@ -5109,8 +5349,14 @@ mod tests {
     fn test_timer_gettime_unused_timer_id_einval_phase148() {
         reset_timers();
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         // ID 0 is in-range but no timer is created.
@@ -5145,8 +5391,11 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = timer_gettime(99, core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-            "bad timer_id (EINVAL) must beat NULL curr_value (EFAULT)");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "bad timer_id (EINVAL) must beat NULL curr_value (EFAULT)"
+        );
     }
 
     /// Ordering: unused (in-range) timer_id BEATS NULL curr_value.
@@ -5156,8 +5405,11 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = timer_gettime(0, core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-            "unused timer_id (EINVAL) must beat NULL curr_value (EFAULT)");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "unused timer_id (EINVAL) must beat NULL curr_value (EFAULT)"
+        );
     }
 
     /// Ordering: negative timer_id BEATS NULL curr_value.
@@ -5180,18 +5432,33 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 2, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 4, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 2,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 4,
+                tv_nsec: 0,
+            },
         };
-        assert_eq!(timer_settime(id, 0, &raw const val, core::ptr::null_mut()), 0);
+        assert_eq!(
+            timer_settime(id, 0, &raw const val, core::ptr::null_mut()),
+            0
+        );
 
         crate::errno::set_errno(0);
         assert_eq!(timer_gettime(id, core::ptr::null_mut()), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
 
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         let ret = timer_gettime(id, &raw mut out);
         assert_eq!(ret, 0);
@@ -5230,8 +5497,11 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = timer_gettime(id, core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-            "deleted timer must produce EINVAL even with NULL curr_value");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "deleted timer must produce EINVAL even with NULL curr_value"
+        );
     }
 
     // -- recovery --
@@ -5244,10 +5514,19 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 1, tv_nsec: 1 },
-            it_value: Timespec { tv_sec: 2, tv_nsec: 2 },
+            it_interval: Timespec {
+                tv_sec: 1,
+                tv_nsec: 1,
+            },
+            it_value: Timespec {
+                tv_sec: 2,
+                tv_nsec: 2,
+            },
         };
-        assert_eq!(timer_settime(id, 0, &raw const val, core::ptr::null_mut()), 0);
+        assert_eq!(
+            timer_settime(id, 0, &raw const val, core::ptr::null_mut()),
+            0
+        );
 
         // EFAULT.
         crate::errno::set_errno(0);
@@ -5256,8 +5535,14 @@ mod tests {
 
         // Retry.
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         assert_eq!(timer_gettime(id, &raw mut out), 0);
         assert_eq!(out.it_interval.tv_nsec, 1);
@@ -5272,8 +5557,14 @@ mod tests {
         reset_timers();
         crate::errno::set_errno(0);
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         assert_eq!(timer_gettime(99, &raw mut out), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -5295,10 +5586,19 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 9, tv_nsec: 9 },
-            it_value: Timespec { tv_sec: 11, tv_nsec: 11 },
+            it_interval: Timespec {
+                tv_sec: 9,
+                tv_nsec: 9,
+            },
+            it_value: Timespec {
+                tv_sec: 11,
+                tv_nsec: 11,
+            },
         };
-        assert_eq!(timer_settime(id, 0, &raw const val, core::ptr::null_mut()), 0);
+        assert_eq!(
+            timer_settime(id, 0, &raw const val, core::ptr::null_mut()),
+            0
+        );
 
         for _ in 0..32 {
             crate::errno::set_errno(0);
@@ -5307,8 +5607,14 @@ mod tests {
         }
 
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         assert_eq!(timer_gettime(id, &raw mut out), 0);
         assert_eq!(out.it_interval.tv_sec, 9);
@@ -5324,12 +5630,21 @@ mod tests {
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         crate::errno::set_errno(98765);
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         assert_eq!(timer_gettime(id, &raw mut out), 0);
-        assert_eq!(crate::errno::get_errno(), 98765,
-            "success path must not touch errno");
+        assert_eq!(
+            crate::errno::get_errno(),
+            98765,
+            "success path must not touch errno"
+        );
         timer_delete(id);
     }
 
@@ -5456,7 +5771,10 @@ mod tests {
         crate::errno::set_errno(0);
         let ret2 = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret2, 0);
-        assert_eq!(id, 0, "no allocation should have happened on the rejected call");
+        assert_eq!(
+            id, 0,
+            "no allocation should have happened on the rejected call"
+        );
         timer_delete(id);
     }
 
@@ -5542,8 +5860,11 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = timer_create(0xDEAD, core::ptr::null(), core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-            "clock check must fire before timerid check");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "clock check must fire before timerid check"
+        );
     }
 
     /// Ordering: bad sigev_notify beats NULL timerid (EINVAL, not
@@ -5560,8 +5881,11 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = timer_create(CLOCK_REALTIME, &raw const sev, core::ptr::null_mut());
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-            "sigev_notify check must fire before timerid check");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EINVAL,
+            "sigev_notify check must fire before timerid check"
+        );
     }
 
     /// Ordering: bad clock beats bad sigev_notify beats NULL
@@ -5744,8 +6068,11 @@ mod tests {
         let mut id: TimerT = -1;
         let ret = timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         assert_eq!(ret, 0);
-        assert_eq!(crate::errno::get_errno(), 54321,
-            "success path must not touch errno");
+        assert_eq!(
+            crate::errno::get_errno(),
+            54321,
+            "success path must not touch errno"
+        );
         timer_delete(id);
     }
 
@@ -5756,8 +6083,14 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         // Bit 1 is not TIMER_ABSTIME (which is bit 0).
@@ -5779,8 +6112,14 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         let ret = timer_settime(id, TIMER_ABSTIME, &raw const val, core::ptr::null_mut());
         assert_eq!(ret, 0);
@@ -5800,8 +6139,14 @@ mod tests {
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         // tv_nsec too large in it_value → EINVAL (still rejected).
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 1_000_000_000,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
@@ -5810,8 +6155,14 @@ mod tests {
 
         // tv_sec negative in it_value → EINVAL (still rejected).
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: -1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
@@ -5820,8 +6171,14 @@ mod tests {
 
         // tv_nsec negative in it_value → EINVAL (still rejected).
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: -1 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: -1,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
@@ -5861,25 +6218,49 @@ mod tests {
 
         // Install a known-good baseline.
         let good = Itimerspec {
-            it_interval: Timespec { tv_sec: 7, tv_nsec: 7 },
-            it_value: Timespec { tv_sec: 8, tv_nsec: 8 },
+            it_interval: Timespec {
+                tv_sec: 7,
+                tv_nsec: 7,
+            },
+            it_value: Timespec {
+                tv_sec: 8,
+                tv_nsec: 8,
+            },
         };
-        assert_eq!(timer_settime(id, 0, &raw const good, core::ptr::null_mut()), 0);
+        assert_eq!(
+            timer_settime(id, 0, &raw const good, core::ptr::null_mut()),
+            0
+        );
 
         // A subsequent bad call (it_value.tv_nsec out of range) must
         // not clobber the stored value.
         let bad = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 2_000_000_000,
+            },
         };
         crate::errno::set_errno(0);
-        assert_eq!(timer_settime(id, 0, &raw const bad, core::ptr::null_mut()), -1);
+        assert_eq!(
+            timer_settime(id, 0, &raw const bad, core::ptr::null_mut()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
         // Read back via timer_gettime — should still be the good value.
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         assert_eq!(timer_gettime(id, &raw mut out), 0);
         assert_eq!(out.it_interval.tv_sec, 7);
@@ -5897,8 +6278,14 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 999_999_999 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 999_999_999 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 999_999_999,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 999_999_999,
+            },
         };
         let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
         assert_eq!(ret, 0);
@@ -5916,11 +6303,20 @@ mod tests {
 
         // First attempt: bogus flags → EINVAL.
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 1, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 2, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 2,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
-        assert_eq!(timer_settime(id, 0xF, &raw const val, core::ptr::null_mut()), -1);
+        assert_eq!(
+            timer_settime(id, 0xF, &raw const val, core::ptr::null_mut()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
         // Retry with valid flags.
@@ -5929,8 +6325,14 @@ mod tests {
 
         // timer_gettime confirms the second call landed.
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         assert_eq!(timer_gettime(id, &raw mut out), 0);
         assert_eq!(out.it_interval.tv_sec, 1);
@@ -5976,8 +6378,14 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: -1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
@@ -5994,8 +6402,14 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         // Bit 1 (TIMER_ABSTIME=bit 0) is bogus.
@@ -6011,8 +6425,14 @@ mod tests {
     fn test_timer_settime_bad_timer_id_einval_phase146() {
         reset_timers();
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         // MAX_TIMERS = 32, so timer_id 99 is out of range.
@@ -6047,8 +6467,14 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 2_000_000_000,
+            },
         };
         crate::errno::set_errno(0);
         // Bad it_value.tv_nsec AND bad flags — both errno-equal but
@@ -6068,8 +6494,14 @@ mod tests {
     fn test_timer_settime_bad_it_value_beats_bad_timer_id_phase146() {
         reset_timers();
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: -1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(99, 0, &raw const val, core::ptr::null_mut());
@@ -6083,8 +6515,14 @@ mod tests {
     fn test_timer_settime_bad_flags_beats_bad_timer_id_phase146() {
         reset_timers();
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(99, 0x8, &raw const val, core::ptr::null_mut());
@@ -6104,8 +6542,14 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 },
-            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 2_000_000_000,
+            },
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
@@ -6120,8 +6564,14 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: -1 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: -1,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
@@ -6137,8 +6587,14 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: -1, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
@@ -6161,8 +6617,14 @@ mod tests {
         let val = Itimerspec {
             // 2500ms expressed (wrongly) as nsec without normalising
             // into tv_sec — Linux's arm code normalises silently.
-            it_interval: Timespec { tv_sec: 0, tv_nsec: ms * 1_000_000 },
-            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: ms * 1_000_000,
+            },
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
@@ -6179,8 +6641,14 @@ mod tests {
         let mut id: TimerT = 0;
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
         let val = Itimerspec {
-            it_interval: Timespec { tv_sec: i64::MAX / 2, tv_nsec: 999_999_999 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 1 },
+            it_interval: Timespec {
+                tv_sec: i64::MAX / 2,
+                tv_nsec: 999_999_999,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 1,
+            },
         };
         crate::errno::set_errno(0);
         let ret = timer_settime(id, 0, &raw const val, core::ptr::null_mut());
@@ -6200,25 +6668,46 @@ mod tests {
 
         // First attempt: bad it_value.tv_nsec → EINVAL.
         let bad = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 1_000_000_000,
+            },
         };
         crate::errno::set_errno(0);
-        assert_eq!(timer_settime(id, 0, &raw const bad, core::ptr::null_mut()), -1);
+        assert_eq!(
+            timer_settime(id, 0, &raw const bad, core::ptr::null_mut()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
         // Retry with valid it_value.
         let good = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 999_999_999 },
-            it_value: Timespec { tv_sec: 3, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 999_999_999,
+            },
+            it_value: Timespec {
+                tv_sec: 3,
+                tv_nsec: 0,
+            },
         };
         let ret = timer_settime(id, 0, &raw const good, core::ptr::null_mut());
         assert_eq!(ret, 0);
 
         // gettime confirms.
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         assert_eq!(timer_gettime(id, &raw mut out), 0);
         assert_eq!(out.it_value.tv_sec, 3);
@@ -6236,20 +6725,38 @@ mod tests {
         timer_create(CLOCK_REALTIME, core::ptr::null(), &raw mut id);
 
         let good_val = Itimerspec {
-            it_interval: Timespec { tv_sec: 1, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 5, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 5,
+                tv_nsec: 0,
+            },
         };
         let bad_val = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: -1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            },
         };
 
         crate::errno::set_errno(0);
-        assert_eq!(timer_settime(id, 0x10, &raw const good_val, core::ptr::null_mut()), -1);
+        assert_eq!(
+            timer_settime(id, 0x10, &raw const good_val, core::ptr::null_mut()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
         crate::errno::set_errno(0);
-        assert_eq!(timer_settime(id, 0, &raw const bad_val, core::ptr::null_mut()), -1);
+        assert_eq!(
+            timer_settime(id, 0, &raw const bad_val, core::ptr::null_mut()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
         // Final valid call must succeed.
@@ -6270,37 +6777,67 @@ mod tests {
 
         // Set a known-good value first.
         let good = Itimerspec {
-            it_interval: Timespec { tv_sec: 7, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 11, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 7,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 11,
+                tv_nsec: 0,
+            },
         };
-        assert_eq!(timer_settime(id, 0, &raw const good, core::ptr::null_mut()), 0);
+        assert_eq!(
+            timer_settime(id, 0, &raw const good, core::ptr::null_mut()),
+            0
+        );
 
         // Now hammer with assorted bad calls.
         for _ in 0..16 {
             // NULL pointer.
             crate::errno::set_errno(0);
-            assert_eq!(timer_settime(id, 0, core::ptr::null(), core::ptr::null_mut()), -1);
+            assert_eq!(
+                timer_settime(id, 0, core::ptr::null(), core::ptr::null_mut()),
+                -1
+            );
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
             // Bad it_value.
             let bad1 = Itimerspec {
-                it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-                it_value: Timespec { tv_sec: 0, tv_nsec: -1 },
+                it_interval: Timespec {
+                    tv_sec: 0,
+                    tv_nsec: 0,
+                },
+                it_value: Timespec {
+                    tv_sec: 0,
+                    tv_nsec: -1,
+                },
             };
             crate::errno::set_errno(0);
-            assert_eq!(timer_settime(id, 0, &raw const bad1, core::ptr::null_mut()), -1);
+            assert_eq!(
+                timer_settime(id, 0, &raw const bad1, core::ptr::null_mut()),
+                -1
+            );
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
 
             // Bad flags.
             crate::errno::set_errno(0);
-            assert_eq!(timer_settime(id, 0xF0, &raw const good, core::ptr::null_mut()), -1);
+            assert_eq!(
+                timer_settime(id, 0xF0, &raw const good, core::ptr::null_mut()),
+                -1
+            );
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         }
 
         // Stored value must be the original good one.
         let mut out = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         assert_eq!(timer_gettime(id, &raw mut out), 0);
         assert_eq!(out.it_interval.tv_sec, 7);
@@ -6319,7 +6856,10 @@ mod tests {
 
         for _ in 0..32 {
             crate::errno::set_errno(0);
-            assert_eq!(timer_settime(id, 0x80, core::ptr::null(), core::ptr::null_mut()), -1);
+            assert_eq!(
+                timer_settime(id, 0x80, core::ptr::null(), core::ptr::null_mut()),
+                -1
+            );
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         }
 
@@ -6327,13 +6867,22 @@ mod tests {
         // success path does not touch errno.
         crate::errno::set_errno(12345);
         let good = Itimerspec {
-            it_interval: Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         let ret = timer_settime(id, 0, &raw const good, core::ptr::null_mut());
         assert_eq!(ret, 0);
-        assert_eq!(crate::errno::get_errno(), 12345,
-            "success path must not touch errno");
+        assert_eq!(
+            crate::errno::get_errno(),
+            12345,
+            "success path must not touch errno"
+        );
         timer_delete(id);
     }
 
@@ -6343,20 +6892,41 @@ mod tests {
     fn test_setitimer_valid_which() {
         reset_timers();
         let val = Itimerval {
-            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
-            it_value: Timeval { tv_sec: 1, tv_usec: 0 },
+            it_interval: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: Timeval {
+                tv_sec: 1,
+                tv_usec: 0,
+            },
         };
-        assert_eq!(setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()), 0);
-        assert_eq!(setitimer(ITIMER_VIRTUAL, &raw const val, core::ptr::null_mut()), 0);
-        assert_eq!(setitimer(ITIMER_PROF, &raw const val, core::ptr::null_mut()), 0);
+        assert_eq!(
+            setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            setitimer(ITIMER_VIRTUAL, &raw const val, core::ptr::null_mut()),
+            0
+        );
+        assert_eq!(
+            setitimer(ITIMER_PROF, &raw const val, core::ptr::null_mut()),
+            0
+        );
     }
 
     #[test]
     fn test_setitimer_invalid_which() {
         reset_timers();
         let val = Itimerval {
-            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
-            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_interval: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
         };
         crate::errno::set_errno(0);
         assert_eq!(setitimer(99, &raw const val, core::ptr::null_mut()), -1);
@@ -6366,7 +6936,10 @@ mod tests {
     #[test]
     fn test_setitimer_null_new_value() {
         crate::errno::set_errno(0);
-        assert_eq!(setitimer(ITIMER_REAL, core::ptr::null(), core::ptr::null_mut()), -1);
+        assert_eq!(
+            setitimer(ITIMER_REAL, core::ptr::null(), core::ptr::null_mut()),
+            -1
+        );
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);
     }
 
@@ -6375,12 +6948,24 @@ mod tests {
         reset_timers();
         // First set: old should be zeros (fresh state).
         let val1 = Itimerval {
-            it_interval: Timeval { tv_sec: 1, tv_usec: 100 },
-            it_value: Timeval { tv_sec: 5, tv_usec: 200 },
+            it_interval: Timeval {
+                tv_sec: 1,
+                tv_usec: 100,
+            },
+            it_value: Timeval {
+                tv_sec: 5,
+                tv_usec: 200,
+            },
         };
         let mut old = Itimerval {
-            it_interval: Timeval { tv_sec: 99, tv_usec: 99 },
-            it_value: Timeval { tv_sec: 99, tv_usec: 99 },
+            it_interval: Timeval {
+                tv_sec: 99,
+                tv_usec: 99,
+            },
+            it_value: Timeval {
+                tv_sec: 99,
+                tv_usec: 99,
+            },
         };
         assert_eq!(setitimer(ITIMER_REAL, &raw const val1, &raw mut old), 0);
         assert_eq!(old.it_interval.tv_sec, 0);
@@ -6390,8 +6975,14 @@ mod tests {
 
         // Second set: old should be val1.
         let val2 = Itimerval {
-            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
-            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_interval: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
         };
         assert_eq!(setitimer(ITIMER_REAL, &raw const val2, &raw mut old), 0);
         assert_eq!(old.it_interval.tv_sec, 1);
@@ -6404,14 +6995,26 @@ mod tests {
     fn test_getitimer_returns_set_value() {
         reset_timers();
         let val = Itimerval {
-            it_interval: Timeval { tv_sec: 3, tv_usec: 500 },
-            it_value: Timeval { tv_sec: 7, tv_usec: 999 },
+            it_interval: Timeval {
+                tv_sec: 3,
+                tv_usec: 500,
+            },
+            it_value: Timeval {
+                tv_sec: 7,
+                tv_usec: 999,
+            },
         };
         setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
 
         let mut out = Itimerval {
-            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
-            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_interval: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
         };
         assert_eq!(getitimer(ITIMER_REAL, &raw mut out), 0);
         assert_eq!(out.it_interval.tv_sec, 3);
@@ -6424,8 +7027,14 @@ mod tests {
     fn test_getitimer_fresh_returns_zeros() {
         reset_timers();
         let mut val = Itimerval {
-            it_interval: Timeval { tv_sec: 99, tv_usec: 99 },
-            it_value: Timeval { tv_sec: 99, tv_usec: 99 },
+            it_interval: Timeval {
+                tv_sec: 99,
+                tv_usec: 99,
+            },
+            it_value: Timeval {
+                tv_sec: 99,
+                tv_usec: 99,
+            },
         };
         assert_eq!(getitimer(ITIMER_REAL, &raw mut val), 0);
         assert_eq!(val.it_interval.tv_sec, 0);
@@ -6437,14 +7046,26 @@ mod tests {
         reset_timers();
         // Set ITIMER_REAL, verify ITIMER_VIRTUAL is still zeros.
         let val = Itimerval {
-            it_interval: Timeval { tv_sec: 10, tv_usec: 0 },
-            it_value: Timeval { tv_sec: 20, tv_usec: 0 },
+            it_interval: Timeval {
+                tv_sec: 10,
+                tv_usec: 0,
+            },
+            it_value: Timeval {
+                tv_sec: 20,
+                tv_usec: 0,
+            },
         };
         setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut());
 
         let mut out = Itimerval {
-            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
-            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_interval: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
         };
         assert_eq!(getitimer(ITIMER_VIRTUAL, &raw mut out), 0);
         assert_eq!(out.it_interval.tv_sec, 0);
@@ -6454,8 +7075,14 @@ mod tests {
     #[test]
     fn test_getitimer_invalid_which() {
         let mut val = Itimerval {
-            it_interval: Timeval { tv_sec: 0, tv_usec: 0 },
-            it_value: Timeval { tv_sec: 0, tv_usec: 0 },
+            it_interval: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
+            it_value: Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            },
         };
         crate::errno::set_errno(0);
         assert_eq!(getitimer(-1, &raw mut val), -1);
@@ -6482,8 +7109,14 @@ mod tests {
 
     fn itimerval(s1: i64, u1: SusecondsT, s2: i64, u2: SusecondsT) -> Itimerval {
         Itimerval {
-            it_interval: Timeval { tv_sec: s1, tv_usec: u1 },
-            it_value: Timeval { tv_sec: s2, tv_usec: u2 },
+            it_interval: Timeval {
+                tv_sec: s1,
+                tv_usec: u1,
+            },
+            it_value: Timeval {
+                tv_sec: s2,
+                tv_usec: u2,
+            },
         }
     }
 
@@ -6601,7 +7234,10 @@ mod tests {
         // Now a bogus call must fail without overwriting it.
         let bad = itimerval(0, 0, 0, 2_000_000);
         errno::set_errno(0);
-        assert_eq!(setitimer(ITIMER_REAL, &raw const bad, core::ptr::null_mut()), -1);
+        assert_eq!(
+            setitimer(ITIMER_REAL, &raw const bad, core::ptr::null_mut()),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
         // Verify the previous good value is still in place.
@@ -6635,7 +7271,10 @@ mod tests {
         reset_timers();
         let val = itimerval(0, 0, 0, 0);
         errno::set_errno(0);
-        assert_eq!(setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()), 0);
+        assert_eq!(
+            setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()),
+            0
+        );
     }
 
     #[test]
@@ -6657,7 +7296,10 @@ mod tests {
         reset_timers();
         let val = itimerval(1_000_000, 0, 2_000_000, 0);
         errno::set_errno(0);
-        assert_eq!(setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()), 0);
+        assert_eq!(
+            setitimer(ITIMER_REAL, &raw const val, core::ptr::null_mut()),
+            0
+        );
     }
 
     #[test]
@@ -6665,12 +7307,18 @@ mod tests {
         reset_timers();
         let bad = itimerval(0, -1, 0, 0);
         errno::set_errno(0);
-        assert_eq!(setitimer(ITIMER_REAL, &raw const bad, core::ptr::null_mut()), -1);
+        assert_eq!(
+            setitimer(ITIMER_REAL, &raw const bad, core::ptr::null_mut()),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
         let good = itimerval(1, 1, 1, 1);
         errno::set_errno(0);
-        assert_eq!(setitimer(ITIMER_REAL, &raw const good, core::ptr::null_mut()), 0);
+        assert_eq!(
+            setitimer(ITIMER_REAL, &raw const good, core::ptr::null_mut()),
+            0
+        );
     }
 
     // -- Itimerval / Itimerspec constants --
@@ -6693,7 +7341,10 @@ mod tests {
 
     #[test]
     fn test_nanosleep_negative_sec() {
-        let req = Timespec { tv_sec: -1, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
         crate::errno::set_errno(0);
         assert_eq!(nanosleep(&req, core::ptr::null_mut()), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -6701,7 +7352,10 @@ mod tests {
 
     #[test]
     fn test_nanosleep_nsec_too_large() {
-        let req = Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
+        };
         crate::errno::set_errno(0);
         assert_eq!(nanosleep(&req, core::ptr::null_mut()), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -6709,7 +7363,10 @@ mod tests {
 
     #[test]
     fn test_nanosleep_negative_nsec() {
-        let req = Timespec { tv_sec: 0, tv_nsec: -1 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: -1,
+        };
         crate::errno::set_errno(0);
         assert_eq!(nanosleep(&req, core::ptr::null_mut()), -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -6732,14 +7389,26 @@ mod tests {
 
     #[test]
     fn test_clock_nanosleep_invalid_clock() {
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
-        assert_eq!(clock_nanosleep(999, 0, &req, core::ptr::null_mut()), crate::errno::EINVAL);
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        assert_eq!(
+            clock_nanosleep(999, 0, &req, core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
     }
 
     #[test]
     fn test_clock_nanosleep_invalid_nsec() {
-        let req = Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 };
-        assert_eq!(clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut()), crate::errno::EINVAL);
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 2_000_000_000,
+        };
+        assert_eq!(
+            clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut()),
+            crate::errno::EINVAL
+        );
     }
 
     // -- Phase 102: clock_nanosleep flag-mask validation --
@@ -6759,8 +7428,11 @@ mod tests {
         // ever drifts, the mask check below would silently accept
         // bit 0 set with any other shape — break loudly here instead.
         assert_eq!(TIMER_ABSTIME, 1);
-        assert_eq!(TIMER_ABSTIME & (TIMER_ABSTIME - 1), 0,
-            "TIMER_ABSTIME must be a single bit");
+        assert_eq!(
+            TIMER_ABSTIME & (TIMER_ABSTIME - 1),
+            0,
+            "TIMER_ABSTIME must be a single bit"
+        );
     }
 
     #[test]
@@ -6775,7 +7447,12 @@ mod tests {
         // hit BEFORE the null-request dereference.
         let bad = 1 << 4;
         assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, bad, core::ptr::null(), core::ptr::null_mut()),
+            clock_nanosleep(
+                CLOCK_REALTIME,
+                bad,
+                core::ptr::null(),
+                core::ptr::null_mut()
+            ),
             crate::errno::EINVAL
         );
     }
@@ -6783,7 +7460,10 @@ mod tests {
     #[test]
     fn test_clock_nanosleep_high_bit_einval() {
         // i32::MIN sets the sign bit — far outside the valid mask.
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         assert_eq!(
             clock_nanosleep(CLOCK_REALTIME, i32::MIN, &req, core::ptr::null_mut()),
             crate::errno::EINVAL
@@ -6797,7 +7477,10 @@ mod tests {
         // check fires first, before the null check or clock check.
         // We verify the path is reachable with otherwise-valid
         // inputs except the stray flag bit.
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         assert_eq!(
             clock_nanosleep(CLOCK_REALTIME, 1 << 5, &req, core::ptr::null_mut()),
             crate::errno::EINVAL
@@ -6810,10 +7493,16 @@ mod tests {
         // succeed (0 nanoseconds → immediate return).  Must NOT
         // return EINVAL (which would indicate the mask wrongly
         // rejected zero).
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let ret = clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut());
-        assert_ne!(ret, crate::errno::EINVAL,
-            "zero flags must not be rejected by the mask");
+        assert_ne!(
+            ret,
+            crate::errno::EINVAL,
+            "zero flags must not be rejected by the mask"
+        );
     }
 
     #[test]
@@ -6821,17 +7510,26 @@ mod tests {
         // TIMER_ABSTIME alone is the canonical valid call; it must
         // not be rejected by the mask.  Path goes to the abs-time
         // branch which, with a zero/past target, returns 0 immediately.
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let ret = clock_nanosleep(CLOCK_REALTIME, TIMER_ABSTIME, &req, core::ptr::null_mut());
-        assert_ne!(ret, crate::errno::EINVAL,
-            "TIMER_ABSTIME alone must not be rejected by the mask");
+        assert_ne!(
+            ret,
+            crate::errno::EINVAL,
+            "TIMER_ABSTIME alone must not be rejected by the mask"
+        );
     }
 
     #[test]
     fn test_clock_nanosleep_abstime_plus_unknown_einval() {
         // Mixing TIMER_ABSTIME with a stray bit must still EINVAL —
         // no partial acceptance.
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let mixed = TIMER_ABSTIME | (1 << 8);
         assert_eq!(
             clock_nanosleep(CLOCK_REALTIME, mixed, &req, core::ptr::null_mut()),
@@ -6844,9 +7542,17 @@ mod tests {
         // O_APPEND (a file flag) has no meaning here.  In our
         // numbering it's 0o2000 == 1<<10, which is not TIMER_ABSTIME
         // (1<<0).  Must EINVAL.
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, crate::fcntl::O_APPEND, &req, core::ptr::null_mut()),
+            clock_nanosleep(
+                CLOCK_REALTIME,
+                crate::fcntl::O_APPEND,
+                &req,
+                core::ptr::null_mut()
+            ),
             crate::errno::EINVAL
         );
     }
@@ -6855,12 +7561,18 @@ mod tests {
     fn test_clock_nanosleep_recovery_after_einval() {
         // A rejected call must not corrupt state — a subsequent
         // valid-flags call still behaves correctly.
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let r1 = clock_nanosleep(CLOCK_REALTIME, 1 << 7, &req, core::ptr::null_mut());
         assert_eq!(r1, crate::errno::EINVAL);
         let r2 = clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut());
-        assert_ne!(r2, crate::errno::EINVAL,
-            "valid call after rejected one must still succeed");
+        assert_ne!(
+            r2,
+            crate::errno::EINVAL,
+            "valid call after rejected one must still succeed"
+        );
     }
 
     #[test]
@@ -6869,13 +7581,17 @@ mod tests {
         // rejected (1<<0 is TIMER_ABSTIME itself and is valid).
         // Guards against a future TIMER_ABSTIME change silently
         // widening the accepted mask.
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         for shift in 1..31 {
             let bit = 1i32 << shift;
             assert_eq!(
                 clock_nanosleep(CLOCK_REALTIME, bit, &req, core::ptr::null_mut()),
                 crate::errno::EINVAL,
-                "bit {:#x} should be rejected by clock_nanosleep mask", bit
+                "bit {:#x} should be rejected by clock_nanosleep mask",
+                bit
             );
         }
     }
@@ -6887,7 +7603,10 @@ mod tests {
         // (matches Linux ordering).  We can't differentiate the
         // value, but the test exercises the path with valid clock
         // checks unreachable.
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         assert_eq!(
             clock_nanosleep(99_999, 1 << 9, &req, core::ptr::null_mut()),
             crate::errno::EINVAL
@@ -6897,7 +7616,10 @@ mod tests {
     #[test]
     fn test_clock_nanosleep_bad_flags_before_invalid_nsec() {
         // Bad flags must fire before the nsec validation.
-        let req = Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 2_000_000_000,
+        };
         assert_eq!(
             clock_nanosleep(CLOCK_REALTIME, 1 << 6, &req, core::ptr::null_mut()),
             crate::errno::EINVAL
@@ -6995,7 +7717,12 @@ mod tests {
         // check.  Bad flag + valid clock + NULL must give EINVAL
         // (from flag mask), not EFAULT (from NULL).
         assert_eq!(
-            clock_nanosleep(CLOCK_REALTIME, 1 << 4, core::ptr::null(), core::ptr::null_mut()),
+            clock_nanosleep(
+                CLOCK_REALTIME,
+                1 << 4,
+                core::ptr::null(),
+                core::ptr::null_mut()
+            ),
             crate::errno::EINVAL,
             "flag mask must still fire before clock/NULL checks"
         );
@@ -7027,7 +7754,10 @@ mod tests {
     fn test_clock_nanosleep_clock_check_beats_invalid_nsec_phase153() {
         // BAD clock + valid pointer + invalid nsec: clock check
         // fires first → EINVAL (clock reason).  Linux ordering.
-        let req = Timespec { tv_sec: 0, tv_nsec: 2_000_000_000 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 2_000_000_000,
+        };
         assert_eq!(
             clock_nanosleep(99_999, 0, &req, core::ptr::null_mut()),
             crate::errno::EINVAL
@@ -7044,12 +7774,21 @@ mod tests {
             clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut()),
             crate::errno::EFAULT
         );
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let ret = clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut());
-        assert_ne!(ret, crate::errno::EFAULT,
-            "real call after probe must not return EFAULT");
-        assert_ne!(ret, crate::errno::EINVAL,
-            "zero timespec is valid — must not return EINVAL");
+        assert_ne!(
+            ret,
+            crate::errno::EFAULT,
+            "real call after probe must not return EFAULT"
+        );
+        assert_ne!(
+            ret,
+            crate::errno::EINVAL,
+            "zero timespec is valid — must not return EINVAL"
+        );
     }
 
     #[test]
@@ -7058,7 +7797,10 @@ mod tests {
         // the errno discriminates between the two failure modes,
         // letting a caller tell which thing was wrong.
         let r1 = clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut());
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let r2 = clock_nanosleep(99_999, 0, &req, core::ptr::null_mut());
         assert_eq!(r1, crate::errno::EFAULT);
         assert_eq!(r2, crate::errno::EINVAL);
@@ -7073,12 +7815,10 @@ mod tests {
         // Linux returns EFAULT — telling them "the pointer was bad"
         // instead of EINVAL ("some argument was invalid", which is
         // less informative).
-        let ret = clock_nanosleep(
-            CLOCK_REALTIME, 0,
-            core::ptr::null(), core::ptr::null_mut(),
-        );
+        let ret = clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut());
         assert_eq!(
-            ret, crate::errno::EFAULT,
+            ret,
+            crate::errno::EFAULT,
             "buggy NULL pointer must give the specific EFAULT diagnostic"
         );
     }
@@ -7095,7 +7835,10 @@ mod tests {
                 crate::errno::EFAULT
             );
         }
-        let req = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let req = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let ret = clock_nanosleep(CLOCK_REALTIME, 0, &req, core::ptr::null_mut());
         assert_ne!(ret, crate::errno::EFAULT);
         assert_ne!(ret, crate::errno::EINVAL);
@@ -7112,7 +7855,8 @@ mod tests {
             assert_eq!(
                 clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut()),
                 crate::errno::EFAULT,
-                "iteration {} must return EFAULT", i
+                "iteration {} must return EFAULT",
+                i
             );
         }
     }
@@ -7124,9 +7868,7 @@ mod tests {
         // POSIX: clock_nanosleep returns the error number directly
         // and does NOT set errno.  Verify the NULL path respects this.
         crate::errno::set_errno(crate::errno::ENOENT);
-        let ret = clock_nanosleep(
-            CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut(),
-        );
+        let ret = clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut());
         assert_eq!(ret, crate::errno::EFAULT);
         assert_eq!(
             crate::errno::get_errno(),
@@ -7142,11 +7884,10 @@ mod tests {
         // Regression guard: explicitly assert NULL + valid clock no
         // longer collapses to EINVAL.  If a future refactor restores
         // the old behaviour, this test breaks loudly.
-        let ret = clock_nanosleep(
-            CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut(),
-        );
+        let ret = clock_nanosleep(CLOCK_REALTIME, 0, core::ptr::null(), core::ptr::null_mut());
         assert_ne!(
-            ret, crate::errno::EINVAL,
+            ret,
+            crate::errno::EINVAL,
             "Phase 153: valid clock + NULL must NOT collapse to EINVAL"
         );
         assert_eq!(ret, crate::errno::EFAULT);
@@ -7160,8 +7901,10 @@ mod tests {
         // the next check is clock (OK) then NULL → EFAULT.
         assert_eq!(
             clock_nanosleep(
-                CLOCK_REALTIME, TIMER_ABSTIME,
-                core::ptr::null(), core::ptr::null_mut(),
+                CLOCK_REALTIME,
+                TIMER_ABSTIME,
+                core::ptr::null(),
+                core::ptr::null_mut(),
             ),
             crate::errno::EFAULT
         );
@@ -7181,18 +7924,17 @@ mod tests {
             0,
             "NULL tv must return 0, not -1 — Linux semantics"
         );
-        assert_eq!(
-            crate::errno::get_errno(),
-            0,
-            "NULL tv must not set errno"
-        );
+        assert_eq!(crate::errno::get_errno(), 0, "NULL tv must not set errno");
     }
 
     #[test]
     fn test_gettimeofday_returns_value() {
         // On the host, this executes a real syscall. Just verify it
         // doesn't crash and tv gets some value.
-        let mut tv = Timeval { tv_sec: -1, tv_usec: -1 };
+        let mut tv = Timeval {
+            tv_sec: -1,
+            tv_usec: -1,
+        };
         let _ = gettimeofday(&raw mut tv, core::ptr::null_mut());
         // Don't assert exact values — syscall may return error on host.
     }
@@ -7258,7 +8000,10 @@ mod tests {
     fn test_gettimeofday_non_null_tv_unaffected_phase152() {
         // The non-NULL tv path must still populate the timeval as
         // before — Phase 152 only touches the NULL branch.
-        let mut tv = Timeval { tv_sec: -1, tv_usec: -1 };
+        let mut tv = Timeval {
+            tv_sec: -1,
+            tv_usec: -1,
+        };
         let ret = gettimeofday(&raw mut tv, core::ptr::null_mut());
         // On the host the underlying syscall may fail; just verify
         // we didn't take the NULL-shortcut and that ret is sane.
@@ -7283,7 +8028,10 @@ mod tests {
         assert_eq!(probe, 0, "probe with NULL must succeed");
         assert_eq!(crate::errno::get_errno(), 0);
 
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let _ = gettimeofday(&raw mut tv, core::ptr::null_mut());
         // We don't assert the value — host syscall may fail — but
         // the probe must not have poisoned the subsequent call.
@@ -7300,10 +8048,7 @@ mod tests {
             gettimeofday(core::ptr::null_mut(), core::ptr::null_mut()),
             0
         );
-        assert_eq!(
-            settimeofday(core::ptr::null(), core::ptr::null()),
-            0
-        );
+        assert_eq!(settimeofday(core::ptr::null(), core::ptr::null()), 0);
         assert_eq!(crate::errno::get_errno(), 0);
     }
 
@@ -7336,7 +8081,10 @@ mod tests {
             gettimeofday(core::ptr::null_mut(), core::ptr::null_mut()),
             0
         );
-        let mut tv = Timeval { tv_sec: -42, tv_usec: -42 };
+        let mut tv = Timeval {
+            tv_sec: -42,
+            tv_usec: -42,
+        };
         let ret = gettimeofday(&raw mut tv, core::ptr::null_mut());
         if ret == 0 {
             assert!(
@@ -7376,10 +8124,7 @@ mod tests {
         // perturbed.
         crate::errno::set_errno(0);
         let _ = gettimeofday(core::ptr::null_mut(), core::ptr::null_mut());
-        assert_eq!(
-            settimeofday(core::ptr::null(), core::ptr::null()),
-            0
-        );
+        assert_eq!(settimeofday(core::ptr::null(), core::ptr::null()), 0);
         assert_eq!(crate::errno::get_errno(), 0);
     }
 
@@ -7416,7 +8161,10 @@ mod tests {
     fn test_gettimeofday_alternating_null_and_valid_phase152() {
         // Alternate NULL and non-NULL tv calls.  The NULL calls
         // must not affect the non-NULL ones and vice versa.
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         for i in 0..20 {
             crate::errno::set_errno(0);
             if i % 2 == 0 {
@@ -7471,10 +8219,7 @@ mod tests {
         // the EFAULT-on-NULL behaviour, this test breaks loudly.
         crate::errno::set_errno(0);
         let ret = gettimeofday(core::ptr::null_mut(), core::ptr::null_mut());
-        assert_ne!(
-            ret, -1,
-            "Phase 152: NULL tv must NOT return -1"
-        );
+        assert_ne!(ret, -1, "Phase 152: NULL tv must NOT return -1");
         assert_ne!(
             crate::errno::get_errno(),
             crate::errno::EFAULT,
@@ -7498,7 +8243,7 @@ mod tests {
         if !ptr.is_null() {
             let tm = unsafe { &*ptr };
             assert_eq!(tm.tm_year, 70); // 1970
-            assert_eq!(tm.tm_mon, 0);   // January
+            assert_eq!(tm.tm_mon, 0); // January
             assert_eq!(tm.tm_mday, 1);
         }
     }
@@ -7551,7 +8296,10 @@ mod tests {
         // CLOCK_MONOTONIC is recognised but not settable: Phase 83
         // moved this from EPERM to EINVAL so that callers can
         // distinguish "no permission" from "wrong clock kind".
-        let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_MONOTONIC, &raw const ts);
         assert_eq!(ret, -1);
@@ -7581,7 +8329,12 @@ mod tests {
     // ------------------------------------------------------------------
 
     /// Convenience: a valid Timespec for the EPERM path tests.
-    fn valid_ts() -> Timespec { Timespec { tv_sec: 1, tv_nsec: 0 } }
+    fn valid_ts() -> Timespec {
+        Timespec {
+            tv_sec: 1,
+            tv_nsec: 0,
+        }
+    }
 
     /// RAII guard that restores the effective capability set on drop.
     ///
@@ -7687,8 +8440,11 @@ mod tests {
         errno::set_errno(0);
         let ret = clock_settime(0x7FFF_FFFF, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL,
-            "Linux dispatches the clock before reaching get_timespec64");
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "Linux dispatches the clock before reaching get_timespec64"
+        );
     }
 
     #[test]
@@ -7724,14 +8480,20 @@ mod tests {
             errno::set_errno(0);
             let ret = clock_settime(c, &raw const ts);
             assert_eq!(ret, -1, "clock {c} should be -1");
-            assert_eq!(errno::get_errno(), errno::EINVAL,
-                "clock {c} should report EINVAL");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EINVAL,
+                "clock {c} should report EINVAL"
+            );
         }
     }
 
     #[test]
     fn test_clock_settime_negative_tv_sec_einval() {
-        let ts = Timespec { tv_sec: -1, tv_nsec: 0 };
+        let ts = Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
+        };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
@@ -7740,7 +8502,10 @@ mod tests {
 
     #[test]
     fn test_clock_settime_negative_tv_nsec_einval() {
-        let ts = Timespec { tv_sec: 0, tv_nsec: -1 };
+        let ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: -1,
+        };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
@@ -7750,7 +8515,10 @@ mod tests {
     #[test]
     fn test_clock_settime_tv_nsec_billion_einval() {
         // exactly 1e9 is out of range (valid range is 0..=999_999_999)
-        let ts = Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
+        let ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
+        };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
@@ -7764,7 +8532,10 @@ mod tests {
         // that surfaces as EPERM (the cap-held path issues a real syscall).
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let ts = Timespec { tv_sec: 0, tv_nsec: 999_999_999 };
+        let ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 999_999_999,
+        };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
@@ -7789,7 +8560,10 @@ mod tests {
         // Bad timespec on an unsettable clock must still surface the
         // EINVAL-for-clock-kind path (it's the same errno, so we
         // really just verify no crash and a sensible code).
-        let ts = Timespec { tv_sec: -1, tv_nsec: -1 };
+        let ts = Timespec {
+            tv_sec: -1,
+            tv_nsec: -1,
+        };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_MONOTONIC, &raw const ts);
         assert_eq!(ret, -1);
@@ -7803,7 +8577,10 @@ mod tests {
         // cap gate (EPERM with the cap dropped here).
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ts = Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
@@ -7816,7 +8593,10 @@ mod tests {
         // argument check and reach the cap gate (EPERM, cap dropped).
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let ts = Timespec { tv_sec: 9_223_372_036, tv_nsec: 500 };
+        let ts = Timespec {
+            tv_sec: 9_223_372_036,
+            tv_nsec: 500,
+        };
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, &raw const ts);
         assert_eq!(ret, -1);
@@ -7878,8 +8658,11 @@ mod tests {
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_MONOTONIC, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL,
-            "read-only clock check (EINVAL) must beat NULL tp (EFAULT)");
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "read-only clock check (EINVAL) must beat NULL tp (EFAULT)"
+        );
     }
 
     /// Ordering: negative clock id BEATS NULL tp.
@@ -7919,8 +8702,11 @@ mod tests {
             errno::set_errno(0);
             let ret = clock_settime(c, core::ptr::null());
             assert_eq!(ret, -1, "clock {c}");
-            assert_eq!(errno::get_errno(), errno::EINVAL,
-                "clock {c} unsettable check must fire before NULL tp");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EINVAL,
+                "clock {c} unsettable check must fire before NULL tp"
+            );
         }
     }
 
@@ -7934,8 +8720,11 @@ mod tests {
         errno::set_errno(0);
         let ret = clock_settime(CLOCK_REALTIME, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EFAULT,
-            "CLOCK_REALTIME with NULL tp must reach the user-pointer step");
+        assert_eq!(
+            errno::get_errno(),
+            errno::EFAULT,
+            "CLOCK_REALTIME with NULL tp must reach the user-pointer step"
+        );
     }
 
     /// Workflow: a libc probe-then-set sequence sees EINVAL for
@@ -7969,8 +8758,11 @@ mod tests {
         errno::set_errno(0);
         let ret = clock_settime(0xBAD, core::ptr::null());
         assert_eq!(ret, -1);
-        assert_eq!(errno::get_errno(), errno::EINVAL,
-            "buggy clock+pointer combo must diagnose the clock first");
+        assert_eq!(
+            errno::get_errno(),
+            errno::EINVAL,
+            "buggy clock+pointer combo must diagnose the clock first"
+        );
     }
 
     // -- recovery --
@@ -8025,7 +8817,10 @@ mod tests {
         drop_cap_sys_time();
 
         let valid = valid_ts();
-        let bad_ns = Timespec { tv_sec: 0, tv_nsec: -1 };
+        let bad_ns = Timespec {
+            tv_sec: 0,
+            tv_nsec: -1,
+        };
 
         errno::set_errno(0);
         assert_eq!(clock_settime(CLOCK_REALTIME, core::ptr::null()), -1);
@@ -8093,7 +8888,10 @@ mod tests {
 
     #[test]
     fn test_settimeofday_phase84_negative_tv_sec_is_einval() {
-        let tv = Timeval { tv_sec: -1, tv_usec: 0 };
+        let tv = Timeval {
+            tv_sec: -1,
+            tv_usec: 0,
+        };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
@@ -8102,7 +8900,10 @@ mod tests {
 
     #[test]
     fn test_settimeofday_phase84_negative_tv_usec_is_einval() {
-        let tv = Timeval { tv_sec: 0, tv_usec: -1 };
+        let tv = Timeval {
+            tv_sec: 0,
+            tv_usec: -1,
+        };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
@@ -8112,7 +8913,10 @@ mod tests {
     #[test]
     fn test_settimeofday_phase84_tv_usec_equal_to_million_is_einval() {
         // The valid range is [0, 999_999]; exactly 1_000_000 must be rejected.
-        let tv = Timeval { tv_sec: 0, tv_usec: 1_000_000 };
+        let tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 1_000_000,
+        };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
@@ -8121,7 +8925,10 @@ mod tests {
 
     #[test]
     fn test_settimeofday_phase84_tv_usec_above_million_is_einval() {
-        let tv = Timeval { tv_sec: 0, tv_usec: 9_999_999 };
+        let tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 9_999_999,
+        };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
@@ -8135,7 +8942,10 @@ mod tests {
         // EINVAL.
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let tv = Timeval { tv_sec: 0, tv_usec: 999_999 };
+        let tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 999_999,
+        };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
@@ -8146,7 +8956,10 @@ mod tests {
     fn test_settimeofday_phase84_zero_tv_reaches_cap_gate() {
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
@@ -8158,7 +8971,10 @@ mod tests {
         // Reasonably distant future timestamp — still valid argument-wise.
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let tv = Timeval { tv_sec: 2_000_000_000, tv_usec: 500_000 };
+        let tv = Timeval {
+            tv_sec: 2_000_000_000,
+            tv_usec: 500_000,
+        };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
@@ -8171,7 +8987,10 @@ mod tests {
         // (EPERM, cap dropped).
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let tv = Timeval { tv_sec: 1, tv_usec: 1 };
+        let tv = Timeval {
+            tv_sec: 1,
+            tv_usec: 1,
+        };
         let sentinel: u8 = 0;
         let tz = &raw const sentinel as *const core::ffi::c_void;
         errno::set_errno(0);
@@ -8185,7 +9004,10 @@ mod tests {
         // A bad tv_usec must be detected as EINVAL even when tz is
         // also non-NULL — validation order is "tv-field-shape" first,
         // cap-gate / syscall last.
-        let tv = Timeval { tv_sec: 0, tv_usec: -42 };
+        let tv = Timeval {
+            tv_sec: 0,
+            tv_usec: -42,
+        };
         let sentinel: u8 = 0;
         let tz = &raw const sentinel as *const core::ffi::c_void;
         errno::set_errno(0);
@@ -8197,7 +9019,10 @@ mod tests {
     #[test]
     fn test_settimeofday_phase84_negative_sec_takes_precedence_over_bad_usec() {
         // When both fields are out of range, we still report EINVAL.
-        let tv = Timeval { tv_sec: -5, tv_usec: 9_999_999 };
+        let tv = Timeval {
+            tv_sec: -5,
+            tv_usec: 9_999_999,
+        };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
@@ -8211,7 +9036,10 @@ mod tests {
         // With the cap dropped it reaches the cap gate (EPERM).
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let tv = Timeval { tv_sec: i64::MAX, tv_usec: 0 };
+        let tv = Timeval {
+            tv_sec: i64::MAX,
+            tv_usec: 0,
+        };
         errno::set_errno(0);
         let ret = settimeofday(&raw const tv, core::ptr::null());
         assert_eq!(ret, -1);
@@ -8224,7 +9052,10 @@ mod tests {
         // produce identical results — no hidden global state.
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let tv = Timeval { tv_sec: 1000, tv_usec: 1000 };
+        let tv = Timeval {
+            tv_sec: 1000,
+            tv_usec: 1000,
+        };
         for _ in 0..5 {
             errno::set_errno(0);
             let ret = settimeofday(&raw const tv, core::ptr::null());
@@ -8239,12 +9070,18 @@ mod tests {
         // subsequent valid call's errno.
         let _g = CapGuard::snapshot();
         drop_cap_sys_time();
-        let bad = Timeval { tv_sec: 0, tv_usec: -1 };
+        let bad = Timeval {
+            tv_sec: 0,
+            tv_usec: -1,
+        };
         errno::set_errno(0);
         assert_eq!(settimeofday(&raw const bad, core::ptr::null()), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
-        let good = Timeval { tv_sec: 0, tv_usec: 0 };
+        let good = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         errno::set_errno(0);
         assert_eq!(settimeofday(&raw const good, core::ptr::null()), -1);
         // Valid args reach the cap gate (EPERM, cap dropped above).
@@ -8260,7 +9097,10 @@ mod tests {
         errno::set_errno(0);
         assert_eq!(settimeofday(core::ptr::null(), core::ptr::null()), 0);
 
-        let tv = Timeval { tv_sec: 1, tv_usec: 1 };
+        let tv = Timeval {
+            tv_sec: 1,
+            tv_usec: 1,
+        };
         errno::set_errno(0);
         assert_eq!(settimeofday(&raw const tv, core::ptr::null()), -1);
         assert_eq!(errno::get_errno(), errno::EPERM);
@@ -8372,7 +9212,10 @@ mod tests {
         fn test_clock_settime_phase177_realtime_no_cap_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let ts = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             errno::set_errno(0);
             assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
@@ -8382,7 +9225,10 @@ mod tests {
         fn test_clock_settime_phase177_max_valid_nsec_no_cap_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let ts = Timespec { tv_sec: 1, tv_nsec: 999_999_999 };
+            let ts = Timespec {
+                tv_sec: 1,
+                tv_nsec: 999_999_999,
+            };
             errno::set_errno(0);
             assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
@@ -8394,7 +9240,10 @@ mod tests {
         fn test_clock_settime_phase177_unknown_clock_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let ts = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             errno::set_errno(0);
             assert_eq!(clock_settime(0xDEAD, &raw const ts), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -8404,7 +9253,10 @@ mod tests {
         fn test_clock_settime_phase177_unsettable_clock_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let ts = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             errno::set_errno(0);
             assert_eq!(clock_settime(CLOCK_MONOTONIC, &raw const ts), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -8415,10 +9267,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
             errno::set_errno(0);
-            assert_eq!(
-                clock_settime(CLOCK_REALTIME, core::ptr::null()),
-                -1
-            );
+            assert_eq!(clock_settime(CLOCK_REALTIME, core::ptr::null()), -1);
             assert_eq!(errno::get_errno(), errno::EFAULT);
         }
 
@@ -8426,7 +9275,10 @@ mod tests {
         fn test_clock_settime_phase177_bad_nsec_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let ts = Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
+            let ts = Timespec {
+                tv_sec: 0,
+                tv_nsec: 1_000_000_000,
+            };
             errno::set_errno(0);
             assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -8442,15 +9294,15 @@ mod tests {
         /// half just confirms the cap is back, not the syscall result.
         #[test]
         fn test_clock_settime_phase177_drop_then_restore_workflow() {
-            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let ts = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             {
                 let _g = CapGuard::snapshot();
                 drop_cap_sys_time();
                 errno::set_errno(0);
-                assert_eq!(
-                    clock_settime(CLOCK_REALTIME, &raw const ts),
-                    -1
-                );
+                assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
                 assert_eq!(errno::get_errno(), errno::EPERM);
             }
             assert!(crate::sys_capability::has_capability(
@@ -8464,12 +9316,12 @@ mod tests {
         fn test_settimeofday_phase177_valid_no_cap_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+            let tv = Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
             errno::set_errno(0);
-            assert_eq!(
-                settimeofday(&raw const tv, core::ptr::null()),
-                -1
-            );
+            assert_eq!(settimeofday(&raw const tv, core::ptr::null()), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -8477,12 +9329,12 @@ mod tests {
         fn test_settimeofday_phase177_max_valid_no_cap_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let tv = Timeval { tv_sec: 2_000_000_000, tv_usec: 999_999 };
+            let tv = Timeval {
+                tv_sec: 2_000_000_000,
+                tv_usec: 999_999,
+            };
             errno::set_errno(0);
-            assert_eq!(
-                settimeofday(&raw const tv, core::ptr::null()),
-                -1
-            );
+            assert_eq!(settimeofday(&raw const tv, core::ptr::null()), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -8492,12 +9344,12 @@ mod tests {
         fn test_settimeofday_phase177_negative_sec_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let tv = Timeval { tv_sec: -1, tv_usec: 0 };
+            let tv = Timeval {
+                tv_sec: -1,
+                tv_usec: 0,
+            };
             errno::set_errno(0);
-            assert_eq!(
-                settimeofday(&raw const tv, core::ptr::null()),
-                -1
-            );
+            assert_eq!(settimeofday(&raw const tv, core::ptr::null()), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
@@ -8505,12 +9357,12 @@ mod tests {
         fn test_settimeofday_phase177_bad_usec_beats_eperm() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let tv = Timeval { tv_sec: 0, tv_usec: 1_000_000 };
+            let tv = Timeval {
+                tv_sec: 0,
+                tv_usec: 1_000_000,
+            };
             errno::set_errno(0);
-            assert_eq!(
-                settimeofday(&raw const tv, core::ptr::null()),
-                -1
-            );
+            assert_eq!(settimeofday(&raw const tv, core::ptr::null()), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
 
@@ -8523,10 +9375,7 @@ mod tests {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
             errno::set_errno(0);
-            assert_eq!(
-                settimeofday(core::ptr::null(), core::ptr::null()),
-                0
-            );
+            assert_eq!(settimeofday(core::ptr::null(), core::ptr::null()), 0);
         }
 
         /// tz-only update (tv NULL, tz non-NULL) also short-circuits
@@ -8548,15 +9397,15 @@ mod tests {
         /// the cap-held path issues a real syscall we can't run on host.
         #[test]
         fn test_settimeofday_phase177_drop_then_restore_workflow() {
-            let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+            let tv = Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
             {
                 let _g = CapGuard::snapshot();
                 drop_cap_sys_time();
                 errno::set_errno(0);
-                assert_eq!(
-                    settimeofday(&raw const tv, core::ptr::null()),
-                    -1
-                );
+                assert_eq!(settimeofday(&raw const tv, core::ptr::null()), -1);
                 assert_eq!(errno::get_errno(), errno::EPERM);
             }
             assert!(crate::sys_capability::has_capability(
@@ -8573,16 +9422,19 @@ mod tests {
         fn test_phase177_clock_settime_and_settimeofday_agree_on_cap_gate() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
-            let tv = Timeval { tv_sec: 0, tv_usec: 0 };
+            let ts = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
+            let tv = Timeval {
+                tv_sec: 0,
+                tv_usec: 0,
+            };
             errno::set_errno(0);
             assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
             errno::set_errno(0);
-            assert_eq!(
-                settimeofday(&raw const tv, core::ptr::null()),
-                -1
-            );
+            assert_eq!(settimeofday(&raw const tv, core::ptr::null()), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
         }
 
@@ -8592,17 +9444,20 @@ mod tests {
         fn test_phase177_eperm_then_einval_isolation() {
             let _g = CapGuard::snapshot();
             drop_cap_sys_time();
-            let ts = Timespec { tv_sec: 0, tv_nsec: 0 };
+            let ts = Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            };
             errno::set_errno(0);
             assert_eq!(clock_settime(CLOCK_REALTIME, &raw const ts), -1);
             assert_eq!(errno::get_errno(), errno::EPERM);
 
             errno::set_errno(0);
-            let bad = Timeval { tv_sec: -1, tv_usec: 0 };
-            assert_eq!(
-                settimeofday(&raw const bad, core::ptr::null()),
-                -1
-            );
+            let bad = Timeval {
+                tv_sec: -1,
+                tv_usec: 0,
+            };
+            assert_eq!(settimeofday(&raw const bad, core::ptr::null()), -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
     }

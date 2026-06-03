@@ -112,12 +112,23 @@ mod tests {
     #[test]
     fn test_mds_ops_distinct() {
         let ops = [
-            CEPH_MDS_OP_LOOKUP, CEPH_MDS_OP_GETATTR, CEPH_MDS_OP_LOOKUPHASH,
-            CEPH_MDS_OP_LOOKUPPARENT, CEPH_MDS_OP_LOOKUPNAME,
-            CEPH_MDS_OP_SETATTR, CEPH_MDS_OP_SETLAYOUT, CEPH_MDS_OP_SETDIRLAYOUT,
-            CEPH_MDS_OP_CREATE, CEPH_MDS_OP_OPEN, CEPH_MDS_OP_READDIR,
-            CEPH_MDS_OP_MKDIR, CEPH_MDS_OP_UNLINK, CEPH_MDS_OP_RMDIR,
-            CEPH_MDS_OP_RENAME, CEPH_MDS_OP_SYMLINK, CEPH_MDS_OP_LINK,
+            CEPH_MDS_OP_LOOKUP,
+            CEPH_MDS_OP_GETATTR,
+            CEPH_MDS_OP_LOOKUPHASH,
+            CEPH_MDS_OP_LOOKUPPARENT,
+            CEPH_MDS_OP_LOOKUPNAME,
+            CEPH_MDS_OP_SETATTR,
+            CEPH_MDS_OP_SETLAYOUT,
+            CEPH_MDS_OP_SETDIRLAYOUT,
+            CEPH_MDS_OP_CREATE,
+            CEPH_MDS_OP_OPEN,
+            CEPH_MDS_OP_READDIR,
+            CEPH_MDS_OP_MKDIR,
+            CEPH_MDS_OP_UNLINK,
+            CEPH_MDS_OP_RMDIR,
+            CEPH_MDS_OP_RENAME,
+            CEPH_MDS_OP_SYMLINK,
+            CEPH_MDS_OP_LINK,
             CEPH_MDS_OP_MKNOD,
         ];
         for i in 0..ops.len() {
@@ -130,9 +141,15 @@ mod tests {
     #[test]
     fn test_cap_bits_no_overlap() {
         let caps = [
-            CEPH_CAP_FILE_RD, CEPH_CAP_FILE_WR, CEPH_CAP_FILE_BUFFER,
-            CEPH_CAP_FILE_SHARED, CEPH_CAP_FILE_EXCL, CEPH_CAP_FILE_LAZYIO,
-            CEPH_CAP_PIN, CEPH_CAP_AUTH_SHARED, CEPH_CAP_LINK_SHARED,
+            CEPH_CAP_FILE_RD,
+            CEPH_CAP_FILE_WR,
+            CEPH_CAP_FILE_BUFFER,
+            CEPH_CAP_FILE_SHARED,
+            CEPH_CAP_FILE_EXCL,
+            CEPH_CAP_FILE_LAZYIO,
+            CEPH_CAP_PIN,
+            CEPH_CAP_AUTH_SHARED,
+            CEPH_CAP_LINK_SHARED,
             CEPH_CAP_XATTR_SHARED,
         ];
         for i in 0..caps.len() {
@@ -146,8 +163,12 @@ mod tests {
     #[test]
     fn test_osd_ops_distinct() {
         let ops = [
-            CEPH_OSD_OP_READ, CEPH_OSD_OP_WRITE, CEPH_OSD_OP_WRITEFULL,
-            CEPH_OSD_OP_TRUNCATE, CEPH_OSD_OP_DELETE, CEPH_OSD_OP_STAT,
+            CEPH_OSD_OP_READ,
+            CEPH_OSD_OP_WRITE,
+            CEPH_OSD_OP_WRITEFULL,
+            CEPH_OSD_OP_TRUNCATE,
+            CEPH_OSD_OP_DELETE,
+            CEPH_OSD_OP_STAT,
             CEPH_OSD_OP_APPEND,
         ];
         for i in 0..ops.len() {

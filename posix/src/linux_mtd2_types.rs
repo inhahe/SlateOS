@@ -101,8 +101,13 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types: [u8; 8] = [
-            MTD_ABSENT, MTD_RAM, MTD_ROM, MTD_NORFLASH,
-            MTD_NANDFLASH, MTD_DATAFLASH, MTD_UBIVOLUME,
+            MTD_ABSENT,
+            MTD_RAM,
+            MTD_ROM,
+            MTD_NORFLASH,
+            MTD_NANDFLASH,
+            MTD_DATAFLASH,
+            MTD_UBIVOLUME,
             MTD_MLCNANDFLASH,
         ];
         for i in 0..types.len() {
@@ -115,8 +120,10 @@ mod tests {
     #[test]
     fn test_flags_power_of_two() {
         let flags = [
-            MTD_WRITEABLE, MTD_BIT_WRITEABLE,
-            MTD_NO_ERASE, MTD_POWERUP_LOCK,
+            MTD_WRITEABLE,
+            MTD_BIT_WRITEABLE,
+            MTD_NO_ERASE,
+            MTD_POWERUP_LOCK,
             MTD_SLC_ON_MLC_EMULATION,
         ];
         for f in &flags {
@@ -146,9 +153,16 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            MEMGETINFO, MEMERASE, MEMWRITEOOB, MEMREADOOB,
-            MEMLOCK, MEMUNLOCK, MEMGETREGIONCOUNT,
-            MEMGETBADBLOCK, MEMSETBADBLOCK, MEMISLOCKED,
+            MEMGETINFO,
+            MEMERASE,
+            MEMWRITEOOB,
+            MEMREADOOB,
+            MEMLOCK,
+            MEMUNLOCK,
+            MEMGETREGIONCOUNT,
+            MEMGETBADBLOCK,
+            MEMSETBADBLOCK,
+            MEMISLOCKED,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

@@ -148,12 +148,27 @@ mod tests {
     #[test]
     fn test_section_types_distinct() {
         let types = [
-            SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB,
-            SHT_RELA, SHT_HASH, SHT_DYNAMIC, SHT_NOTE,
-            SHT_NOBITS, SHT_REL, SHT_SHLIB, SHT_DYNSYM,
-            SHT_INIT_ARRAY, SHT_FINI_ARRAY, SHT_PREINIT_ARRAY,
-            SHT_GROUP, SHT_SYMTAB_SHNDX, SHT_GNU_HASH,
-            SHT_GNU_VERDEF, SHT_GNU_VERNEED, SHT_GNU_VERSYM,
+            SHT_NULL,
+            SHT_PROGBITS,
+            SHT_SYMTAB,
+            SHT_STRTAB,
+            SHT_RELA,
+            SHT_HASH,
+            SHT_DYNAMIC,
+            SHT_NOTE,
+            SHT_NOBITS,
+            SHT_REL,
+            SHT_SHLIB,
+            SHT_DYNSYM,
+            SHT_INIT_ARRAY,
+            SHT_FINI_ARRAY,
+            SHT_PREINIT_ARRAY,
+            SHT_GROUP,
+            SHT_SYMTAB_SHNDX,
+            SHT_GNU_HASH,
+            SHT_GNU_VERDEF,
+            SHT_GNU_VERNEED,
+            SHT_GNU_VERSYM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -165,10 +180,17 @@ mod tests {
     #[test]
     fn test_section_flags_power_of_two() {
         let flags = [
-            SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR,
-            SHF_MERGE, SHF_STRINGS, SHF_INFO_LINK,
-            SHF_LINK_ORDER, SHF_OS_NONCONFORMING,
-            SHF_GROUP, SHF_TLS, SHF_COMPRESSED,
+            SHF_WRITE,
+            SHF_ALLOC,
+            SHF_EXECINSTR,
+            SHF_MERGE,
+            SHF_STRINGS,
+            SHF_INFO_LINK,
+            SHF_LINK_ORDER,
+            SHF_OS_NONCONFORMING,
+            SHF_GROUP,
+            SHF_TLS,
+            SHF_COMPRESSED,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:04x} not power of two", f);
@@ -178,10 +200,22 @@ mod tests {
     #[test]
     fn test_dynamic_tags_distinct() {
         let tags = [
-            DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT,
-            DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA,
-            DT_RELASZ, DT_RELAENT, DT_STRSZ, DT_SYMENT,
-            DT_INIT, DT_FINI, DT_SONAME, DT_RPATH,
+            DT_NULL,
+            DT_NEEDED,
+            DT_PLTRELSZ,
+            DT_PLTGOT,
+            DT_HASH,
+            DT_STRTAB,
+            DT_SYMTAB,
+            DT_RELA,
+            DT_RELASZ,
+            DT_RELAENT,
+            DT_STRSZ,
+            DT_SYMENT,
+            DT_INIT,
+            DT_FINI,
+            DT_SONAME,
+            DT_RPATH,
         ];
         for i in 0..tags.len() {
             for j in (i + 1)..tags.len() {
@@ -193,8 +227,12 @@ mod tests {
     #[test]
     fn test_note_types_distinct() {
         let notes = [
-            NT_PRSTATUS, NT_PRFPREG, NT_PRPSINFO,
-            NT_TASKSTRUCT, NT_AUXV, NT_X86_XSTATE,
+            NT_PRSTATUS,
+            NT_PRFPREG,
+            NT_PRPSINFO,
+            NT_TASKSTRUCT,
+            NT_AUXV,
+            NT_X86_XSTATE,
             NT_ARM_VFP,
         ];
         for i in 0..notes.len() {

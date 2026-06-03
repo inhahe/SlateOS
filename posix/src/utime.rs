@@ -40,12 +40,7 @@ pub extern "C" fn utime(path: *const u8, times: *const Utimbuf) -> i32 {
     if times.is_null() {
         // Pass NULL through — utimensat treats it as "set both
         // timestamps to the current time".
-        return crate::file::utimensat(
-            crate::file::AT_FDCWD,
-            path,
-            core::ptr::null(),
-            0,
-        );
+        return crate::file::utimensat(crate::file::AT_FDCWD, path, core::ptr::null(), 0);
     }
     // SAFETY: caller contract — `times` points to a valid Utimbuf.
     let buf = unsafe { *times };

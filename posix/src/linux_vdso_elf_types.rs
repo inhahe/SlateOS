@@ -80,8 +80,12 @@ mod tests {
     #[test]
     fn test_sections_distinct() {
         let secs = [
-            VDSO_SEC_TEXT, VDSO_SEC_DATA, VDSO_SEC_DYNAMIC,
-            VDSO_SEC_DYNSYM, VDSO_SEC_DYNSTR, VDSO_SEC_NOTE,
+            VDSO_SEC_TEXT,
+            VDSO_SEC_DATA,
+            VDSO_SEC_DYNAMIC,
+            VDSO_SEC_DYNSYM,
+            VDSO_SEC_DYNSTR,
+            VDSO_SEC_NOTE,
         ];
         for i in 0..secs.len() {
             for j in (i + 1)..secs.len() {

@@ -153,8 +153,10 @@ mod tests {
     #[test]
     fn test_balance_types_power_of_two() {
         let types = [
-            BTRFS_BALANCE_DATA, BTRFS_BALANCE_SYSTEM,
-            BTRFS_BALANCE_METADATA, BTRFS_BALANCE_FORCE,
+            BTRFS_BALANCE_DATA,
+            BTRFS_BALANCE_SYSTEM,
+            BTRFS_BALANCE_METADATA,
+            BTRFS_BALANCE_FORCE,
             BTRFS_BALANCE_RESUME,
         ];
         for t in &types {
@@ -165,11 +167,16 @@ mod tests {
     #[test]
     fn test_balance_args_distinct() {
         let args: [u64; 11] = [
-            BTRFS_BALANCE_ARGS_PROFILES, BTRFS_BALANCE_ARGS_USAGE,
-            BTRFS_BALANCE_ARGS_DEVID, BTRFS_BALANCE_ARGS_DRANGE,
-            BTRFS_BALANCE_ARGS_VRANGE, BTRFS_BALANCE_ARGS_CONVERT,
-            BTRFS_BALANCE_ARGS_SOFT, BTRFS_BALANCE_ARGS_USAGE_RANGE,
-            BTRFS_BALANCE_ARGS_LIMIT, BTRFS_BALANCE_ARGS_LIMIT_RANGE,
+            BTRFS_BALANCE_ARGS_PROFILES,
+            BTRFS_BALANCE_ARGS_USAGE,
+            BTRFS_BALANCE_ARGS_DEVID,
+            BTRFS_BALANCE_ARGS_DRANGE,
+            BTRFS_BALANCE_ARGS_VRANGE,
+            BTRFS_BALANCE_ARGS_CONVERT,
+            BTRFS_BALANCE_ARGS_SOFT,
+            BTRFS_BALANCE_ARGS_USAGE_RANGE,
+            BTRFS_BALANCE_ARGS_LIMIT,
+            BTRFS_BALANCE_ARGS_LIMIT_RANGE,
             BTRFS_BALANCE_ARGS_STRIPES_RANGE,
         ];
         for i in 0..args.len() {

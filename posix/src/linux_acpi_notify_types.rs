@@ -87,8 +87,10 @@ mod tests {
     #[test]
     fn test_system_notify_distinct() {
         let notifs = [
-            ACPI_SYSTEM_NOTIFY_POWER, ACPI_SYSTEM_NOTIFY_THERMAL,
-            ACPI_SYSTEM_NOTIFY_MEMORY, ACPI_SYSTEM_NOTIFY_PROCESSOR,
+            ACPI_SYSTEM_NOTIFY_POWER,
+            ACPI_SYSTEM_NOTIFY_THERMAL,
+            ACPI_SYSTEM_NOTIFY_MEMORY,
+            ACPI_SYSTEM_NOTIFY_PROCESSOR,
             ACPI_SYSTEM_NOTIFY_DOCK,
         ];
         for i in 0..notifs.len() {
@@ -106,8 +108,10 @@ mod tests {
     #[test]
     fn test_gpe_dispatch_distinct() {
         let disps = [
-            ACPI_GPE_DISPATCH_NONE, ACPI_GPE_DISPATCH_HANDLER,
-            ACPI_GPE_DISPATCH_METHOD, ACPI_GPE_DISPATCH_NOTIFY,
+            ACPI_GPE_DISPATCH_NONE,
+            ACPI_GPE_DISPATCH_HANDLER,
+            ACPI_GPE_DISPATCH_METHOD,
+            ACPI_GPE_DISPATCH_NOTIFY,
         ];
         for i in 0..disps.len() {
             for j in (i + 1)..disps.len() {
@@ -132,11 +136,16 @@ mod tests {
     #[test]
     fn test_address_space_ids_distinct() {
         let spaces: [u8; 11] = [
-            ACPI_ADR_SPACE_SYSTEM_MEMORY, ACPI_ADR_SPACE_SYSTEM_IO,
-            ACPI_ADR_SPACE_PCI_CONFIG, ACPI_ADR_SPACE_EC,
-            ACPI_ADR_SPACE_SMBUS, ACPI_ADR_SPACE_CMOS,
-            ACPI_ADR_SPACE_PCI_BAR_TARGET, ACPI_ADR_SPACE_IPMI,
-            ACPI_ADR_SPACE_GPIO, ACPI_ADR_SPACE_GSBUS,
+            ACPI_ADR_SPACE_SYSTEM_MEMORY,
+            ACPI_ADR_SPACE_SYSTEM_IO,
+            ACPI_ADR_SPACE_PCI_CONFIG,
+            ACPI_ADR_SPACE_EC,
+            ACPI_ADR_SPACE_SMBUS,
+            ACPI_ADR_SPACE_CMOS,
+            ACPI_ADR_SPACE_PCI_BAR_TARGET,
+            ACPI_ADR_SPACE_IPMI,
+            ACPI_ADR_SPACE_GPIO,
+            ACPI_ADR_SPACE_GSBUS,
             ACPI_ADR_SPACE_PCC,
         ];
         for i in 0..spaces.len() {

@@ -70,8 +70,12 @@ mod tests {
     #[test]
     fn test_udp_options_distinct() {
         let opts = [
-            UDP_CORK, UDP_ENCAP, UDP_NO_CHECK6_TX,
-            UDP_NO_CHECK6_RX, UDP_SEGMENT, UDP_GRO,
+            UDP_CORK,
+            UDP_ENCAP,
+            UDP_NO_CHECK6_TX,
+            UDP_NO_CHECK6_RX,
+            UDP_SEGMENT,
+            UDP_GRO,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -83,8 +87,11 @@ mod tests {
     #[test]
     fn test_encap_types_distinct() {
         let types = [
-            UDP_ENCAP_ESPINUDP_NON_IKE, UDP_ENCAP_ESPINUDP,
-            UDP_ENCAP_L2TPINUDP, UDP_ENCAP_GTP0, UDP_ENCAP_GTP1U,
+            UDP_ENCAP_ESPINUDP_NON_IKE,
+            UDP_ENCAP_ESPINUDP,
+            UDP_ENCAP_L2TPINUDP,
+            UDP_ENCAP_GTP0,
+            UDP_ENCAP_GTP1U,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

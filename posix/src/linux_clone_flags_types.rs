@@ -82,11 +82,22 @@ mod tests {
     #[test]
     fn test_classic_flags_no_overlap() {
         let flags = [
-            CLONE_VM, CLONE_FS, CLONE_FILES, CLONE_SIGHAND,
-            CLONE_PTRACE, CLONE_VFORK, CLONE_PARENT, CLONE_THREAD,
-            CLONE_NEWNS, CLONE_SYSVSEM, CLONE_SETTLS,
-            CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID,
-            CLONE_DETACHED, CLONE_UNTRACED, CLONE_CHILD_SETTID,
+            CLONE_VM,
+            CLONE_FS,
+            CLONE_FILES,
+            CLONE_SIGHAND,
+            CLONE_PTRACE,
+            CLONE_VFORK,
+            CLONE_PARENT,
+            CLONE_THREAD,
+            CLONE_NEWNS,
+            CLONE_SYSVSEM,
+            CLONE_SETTLS,
+            CLONE_PARENT_SETTID,
+            CLONE_CHILD_CLEARTID,
+            CLONE_DETACHED,
+            CLONE_UNTRACED,
+            CLONE_CHILD_SETTID,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -98,8 +109,13 @@ mod tests {
     #[test]
     fn test_ns_flags_no_overlap() {
         let flags = [
-            CLONE_NEWCGROUP, CLONE_NEWUTS, CLONE_NEWIPC,
-            CLONE_NEWUSER, CLONE_NEWPID, CLONE_NEWNET, CLONE_IO,
+            CLONE_NEWCGROUP,
+            CLONE_NEWUTS,
+            CLONE_NEWIPC,
+            CLONE_NEWUSER,
+            CLONE_NEWPID,
+            CLONE_NEWNET,
+            CLONE_IO,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -127,11 +143,22 @@ mod tests {
     #[test]
     fn test_classic_flags_power_of_two() {
         let flags = [
-            CLONE_VM, CLONE_FS, CLONE_FILES, CLONE_SIGHAND,
-            CLONE_PTRACE, CLONE_VFORK, CLONE_PARENT, CLONE_THREAD,
-            CLONE_NEWNS, CLONE_SYSVSEM, CLONE_SETTLS,
-            CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID,
-            CLONE_DETACHED, CLONE_UNTRACED, CLONE_CHILD_SETTID,
+            CLONE_VM,
+            CLONE_FS,
+            CLONE_FILES,
+            CLONE_SIGHAND,
+            CLONE_PTRACE,
+            CLONE_VFORK,
+            CLONE_PARENT,
+            CLONE_THREAD,
+            CLONE_NEWNS,
+            CLONE_SYSVSEM,
+            CLONE_SETTLS,
+            CLONE_PARENT_SETTID,
+            CLONE_CHILD_CLEARTID,
+            CLONE_DETACHED,
+            CLONE_UNTRACED,
+            CLONE_CHILD_SETTID,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());

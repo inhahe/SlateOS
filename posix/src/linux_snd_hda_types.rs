@@ -108,11 +108,16 @@ mod tests {
     #[test]
     fn test_get_verbs_distinct() {
         let verbs = [
-            HDA_VERB_GET_CONNECT_SEL, HDA_VERB_GET_CONNECT_LIST,
-            HDA_VERB_GET_CONV_FORMAT, HDA_VERB_GET_AMP_GAIN_MUTE,
-            HDA_VERB_GET_PROC_COEF, HDA_VERB_GET_COEF_INDEX,
-            HDA_VERB_GET_PIN_WIDGET_CONTROL, HDA_VERB_GET_PIN_SENSE,
-            HDA_VERB_GET_EAPD_BTL, HDA_VERB_GET_POWER_STATE,
+            HDA_VERB_GET_CONNECT_SEL,
+            HDA_VERB_GET_CONNECT_LIST,
+            HDA_VERB_GET_CONV_FORMAT,
+            HDA_VERB_GET_AMP_GAIN_MUTE,
+            HDA_VERB_GET_PROC_COEF,
+            HDA_VERB_GET_COEF_INDEX,
+            HDA_VERB_GET_PIN_WIDGET_CONTROL,
+            HDA_VERB_GET_PIN_SENSE,
+            HDA_VERB_GET_EAPD_BTL,
+            HDA_VERB_GET_POWER_STATE,
             HDA_VERB_GET_CONFIG_DEFAULT,
         ];
         for i in 0..verbs.len() {
@@ -125,10 +130,14 @@ mod tests {
     #[test]
     fn test_widget_types_distinct() {
         let types = [
-            HDA_WIDGET_AUDIO_OUTPUT, HDA_WIDGET_AUDIO_INPUT,
-            HDA_WIDGET_AUDIO_MIXER, HDA_WIDGET_AUDIO_SELECTOR,
-            HDA_WIDGET_PIN_COMPLEX, HDA_WIDGET_POWER,
-            HDA_WIDGET_VOLUME_KNOB, HDA_WIDGET_BEEP,
+            HDA_WIDGET_AUDIO_OUTPUT,
+            HDA_WIDGET_AUDIO_INPUT,
+            HDA_WIDGET_AUDIO_MIXER,
+            HDA_WIDGET_AUDIO_SELECTOR,
+            HDA_WIDGET_PIN_COMPLEX,
+            HDA_WIDGET_POWER,
+            HDA_WIDGET_VOLUME_KNOB,
+            HDA_WIDGET_BEEP,
             HDA_WIDGET_VENDOR,
         ];
         for i in 0..types.len() {

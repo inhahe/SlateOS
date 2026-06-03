@@ -116,9 +116,15 @@ mod tests {
     #[test]
     fn test_verdicts_distinct() {
         let verdicts = [
-            TC_ACT_OK, TC_ACT_RECLASSIFY, TC_ACT_SHOT,
-            TC_ACT_PIPE, TC_ACT_STOLEN, TC_ACT_QUEUED,
-            TC_ACT_REPEAT, TC_ACT_REDIRECT, TC_ACT_TRAP,
+            TC_ACT_OK,
+            TC_ACT_RECLASSIFY,
+            TC_ACT_SHOT,
+            TC_ACT_PIPE,
+            TC_ACT_STOLEN,
+            TC_ACT_QUEUED,
+            TC_ACT_REPEAT,
+            TC_ACT_REDIRECT,
+            TC_ACT_TRAP,
             TC_ACT_UNSPEC,
         ];
         for i in 0..verdicts.len() {
@@ -131,10 +137,17 @@ mod tests {
     #[test]
     fn test_action_types_distinct() {
         let acts = [
-            TCA_ACT_POLICE, TCA_ACT_PEDIT, TCA_ACT_MIRRED,
-            TCA_ACT_NAT, TCA_ACT_SKBEDIT, TCA_ACT_CSUM,
-            TCA_ACT_TUNNEL_KEY, TCA_ACT_VLAN, TCA_ACT_SAMPLE,
-            TCA_ACT_CT, TCA_ACT_GATE,
+            TCA_ACT_POLICE,
+            TCA_ACT_PEDIT,
+            TCA_ACT_MIRRED,
+            TCA_ACT_NAT,
+            TCA_ACT_SKBEDIT,
+            TCA_ACT_CSUM,
+            TCA_ACT_TUNNEL_KEY,
+            TCA_ACT_VLAN,
+            TCA_ACT_SAMPLE,
+            TCA_ACT_CT,
+            TCA_ACT_GATE,
         ];
         for i in 0..acts.len() {
             for j in (i + 1)..acts.len() {
@@ -146,8 +159,10 @@ mod tests {
     #[test]
     fn test_mirred_subtypes_distinct() {
         let mirred = [
-            TCA_EGRESS_REDIR, TCA_EGRESS_MIRROR,
-            TCA_INGRESS_REDIR, TCA_INGRESS_MIRROR,
+            TCA_EGRESS_REDIR,
+            TCA_EGRESS_MIRROR,
+            TCA_INGRESS_REDIR,
+            TCA_INGRESS_MIRROR,
         ];
         for i in 0..mirred.len() {
             for j in (i + 1)..mirred.len() {
@@ -159,8 +174,10 @@ mod tests {
     #[test]
     fn test_vlan_modes_distinct() {
         let modes = [
-            TCA_VLAN_ACT_POP, TCA_VLAN_ACT_PUSH,
-            TCA_VLAN_ACT_MODIFY, TCA_VLAN_ACT_POP_ETH,
+            TCA_VLAN_ACT_POP,
+            TCA_VLAN_ACT_PUSH,
+            TCA_VLAN_ACT_MODIFY,
+            TCA_VLAN_ACT_POP_ETH,
             TCA_VLAN_ACT_PUSH_ETH,
         ];
         for i in 0..modes.len() {
@@ -173,8 +190,12 @@ mod tests {
     #[test]
     fn test_ct_flags_no_overlap() {
         let flags = [
-            TCA_CT_ACT_COMMIT, TCA_CT_ACT_FORCE, TCA_CT_ACT_CLEAR,
-            TCA_CT_ACT_NAT, TCA_CT_ACT_NAT_SRC, TCA_CT_ACT_NAT_DST,
+            TCA_CT_ACT_COMMIT,
+            TCA_CT_ACT_FORCE,
+            TCA_CT_ACT_CLEAR,
+            TCA_CT_ACT_NAT,
+            TCA_CT_ACT_NAT_SRC,
+            TCA_CT_ACT_NAT_DST,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

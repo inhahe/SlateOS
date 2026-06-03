@@ -30,10 +30,7 @@ pub extern "C" fn gettext(msgid: *const u8) -> *const u8 {
 ///
 /// Stub: returns `msgid` unchanged.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn dgettext(
-    _domainname: *const u8,
-    msgid: *const u8,
-) -> *const u8 {
+pub extern "C" fn dgettext(_domainname: *const u8, msgid: *const u8) -> *const u8 {
     msgid
 }
 
@@ -41,11 +38,7 @@ pub extern "C" fn dgettext(
 ///
 /// Stub: returns `msgid` unchanged.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn dcgettext(
-    _domainname: *const u8,
-    msgid: *const u8,
-    _category: i32,
-) -> *const u8 {
+pub extern "C" fn dcgettext(_domainname: *const u8, msgid: *const u8, _category: i32) -> *const u8 {
     msgid
 }
 
@@ -58,11 +51,7 @@ pub extern "C" fn dcgettext(
 /// Returns `msgid1` when `n == 1`, `msgid2` otherwise (English/C
 /// locale plural rule).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ngettext(
-    msgid1: *const u8,
-    msgid2: *const u8,
-    n: u64,
-) -> *const u8 {
+pub extern "C" fn ngettext(msgid1: *const u8, msgid2: *const u8, n: u64) -> *const u8 {
     if n == 1 { msgid1 } else { msgid2 }
 }
 
@@ -153,10 +142,7 @@ pub extern "C" fn textdomain(domainname: *const u8) -> *const u8 {
 ///
 /// Stub: records nothing (no catalogs), returns `dirname`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn bindtextdomain(
-    _domainname: *const u8,
-    dirname: *const u8,
-) -> *const u8 {
+pub extern "C" fn bindtextdomain(_domainname: *const u8, dirname: *const u8) -> *const u8 {
     dirname
 }
 
@@ -387,10 +373,7 @@ mod tests {
 
     #[test]
     fn test_bind_textdomain_codeset_returns_null() {
-        let result = bind_textdomain_codeset(
-            b"myapp\0".as_ptr(),
-            b"UTF-8\0".as_ptr(),
-        );
+        let result = bind_textdomain_codeset(b"myapp\0".as_ptr(), b"UTF-8\0".as_ptr());
         assert!(result.is_null());
     }
 

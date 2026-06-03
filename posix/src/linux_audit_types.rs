@@ -103,9 +103,16 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let types = [
-            AUDIT_SYSCALL, AUDIT_PATH, AUDIT_IPC, AUDIT_SOCKADDR,
-            AUDIT_CWD, AUDIT_EXECVE, AUDIT_USER_LOGIN,
-            AUDIT_USER_LOGOUT, AUDIT_USER_AUTH, AUDIT_CONFIG_CHANGE,
+            AUDIT_SYSCALL,
+            AUDIT_PATH,
+            AUDIT_IPC,
+            AUDIT_SOCKADDR,
+            AUDIT_CWD,
+            AUDIT_EXECVE,
+            AUDIT_USER_LOGIN,
+            AUDIT_USER_LOGOUT,
+            AUDIT_USER_AUTH,
+            AUDIT_CONFIG_CHANGE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -117,8 +124,11 @@ mod tests {
     #[test]
     fn test_arch_values_distinct() {
         let arches = [
-            AUDIT_ARCH_X86_64, AUDIT_ARCH_I386, AUDIT_ARCH_ARM,
-            AUDIT_ARCH_AARCH64, AUDIT_ARCH_RISCV64,
+            AUDIT_ARCH_X86_64,
+            AUDIT_ARCH_I386,
+            AUDIT_ARCH_ARM,
+            AUDIT_ARCH_AARCH64,
+            AUDIT_ARCH_RISCV64,
         ];
         for i in 0..arches.len() {
             for j in (i + 1)..arches.len() {
@@ -130,8 +140,11 @@ mod tests {
     #[test]
     fn test_filter_types_distinct() {
         let filters = [
-            AUDIT_FILTER_TASK, AUDIT_FILTER_ENTRY,
-            AUDIT_FILTER_EXIT, AUDIT_FILTER_USER, AUDIT_FILTER_FS,
+            AUDIT_FILTER_TASK,
+            AUDIT_FILTER_ENTRY,
+            AUDIT_FILTER_EXIT,
+            AUDIT_FILTER_USER,
+            AUDIT_FILTER_FS,
         ];
         for i in 0..filters.len() {
             for j in (i + 1)..filters.len() {

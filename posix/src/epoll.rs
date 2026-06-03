@@ -40,9 +40,8 @@
 use crate::errno;
 use crate::fdtable::{self, HandleKind};
 use crate::syscall::{
-    SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_READ, SYS_EVENTFD_TRY_READ,
-    SYS_EVENTFD_WRITE, SYS_CLOCK_MONOTONIC, SYS_SLEEP,
-    syscall0, syscall1, syscall2, syscall3,
+    SYS_CLOCK_MONOTONIC, SYS_EVENTFD_CLOSE, SYS_EVENTFD_CREATE, SYS_EVENTFD_READ,
+    SYS_EVENTFD_TRY_READ, SYS_EVENTFD_WRITE, SYS_SLEEP, syscall0, syscall1, syscall2, syscall3,
 };
 
 /// Events for `epoll_ctl`.
@@ -64,8 +63,7 @@ pub const EPOLLET: u32 = 1 << 31;
 
 /// Mask of all event bits we recognize in `events` (input).
 const EPOLL_INPUT_MASK: u32 =
-    EPOLLIN | EPOLLPRI | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLRDHUP
-        | EPOLLONESHOT | EPOLLET;
+    EPOLLIN | EPOLLPRI | EPOLLOUT | EPOLLERR | EPOLLHUP | EPOLLRDHUP | EPOLLONESHOT | EPOLLET;
 
 /// `epoll_create1` flag: set `FD_CLOEXEC` on the new fd.
 pub const EPOLL_CLOEXEC: i32 = 0o2_000_000;
@@ -108,8 +106,7 @@ pub const MAX_EPOLL_ENTRIES: usize = 128;
 /// integer-overflow / DoS-via-huge-array-sizing attacks in
 /// `ep_check_params`; we mirror the bound exactly so any caller that
 /// happens to probe the edge sees the same EINVAL behaviour.
-pub const EP_MAX_EVENTS: i32 =
-    i32::MAX / (core::mem::size_of::<EpollEvent>() as i32);
+pub const EP_MAX_EVENTS: i32 = i32::MAX / (core::mem::size_of::<EpollEvent>() as i32);
 
 /// One entry in an epoll instance's interest list.
 #[derive(Clone, Copy)]
@@ -304,12 +301,7 @@ fn create_internal(flags: i32) -> i32 {
 ///
 /// Returns 0 on success, -1 with `errno` on failure.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn epoll_ctl(
-    epfd: i32,
-    op: i32,
-    fd: i32,
-    event: *mut EpollEvent,
-) -> i32 {
+pub extern "C" fn epoll_ctl(epfd: i32, op: i32, fd: i32, event: *mut EpollEvent) -> i32 {
     // Linux validation order (fs/eventpoll.c::do_epoll_ctl, paraphrased):
     //   1. EFAULT: `ep_op_has_event(op) && copy_from_user(event)` fails.
     //   2. EBADF:  `fdget(epfd)`  — epfd must be open.
@@ -410,15 +402,14 @@ pub extern "C" fn epoll_ctl(
             let data_val = ev.data;
             let res = with_instance_mut(idx, |inst| {
                 for slot in &mut inst.entries {
-                    if let Some(entry) = slot.as_mut() {
-                        if entry.fd == fd {
+                    if let Some(entry) = slot.as_mut()
+                        && entry.fd == fd {
                             entry.events = events_val;
                             entry.data = data_val;
                             // Re-arm oneshot per Linux semantics.
                             entry.oneshot_fired = false;
                             return Ok(());
                         }
-                    }
                 }
                 Err(errno::ENOENT)
             });
@@ -437,12 +428,11 @@ pub extern "C" fn epoll_ctl(
         EPOLL_CTL_DEL => {
             let res = with_instance_mut(idx, |inst| {
                 for slot in &mut inst.entries {
-                    if let Some(entry) = slot.as_ref() {
-                        if entry.fd == fd {
+                    if let Some(entry) = slot.as_ref()
+                        && entry.fd == fd {
                             *slot = None;
                             return Ok(());
                         }
-                    }
                 }
                 Err(errno::ENOENT)
             });
@@ -536,18 +526,16 @@ pub unsafe extern "C" fn epoll_wait(
             let limit = maxevents;
             let mut i = 0usize;
             while i < MAX_EPOLL_ENTRIES && count < limit {
-                if let Some(entry) = inst.entries.get_mut(i) {
-                    if let Some(watched) = entry.as_mut() {
-                        if !watched.oneshot_fired {
+                if let Some(entry) = inst.entries.get_mut(i)
+                    && let Some(watched) = entry.as_mut()
+                        && !watched.oneshot_fired {
                             let revents = compute_revents(watched.fd, watched.events);
                             if revents != 0 {
                                 // Write event into the caller's buffer.
                                 // SAFETY: caller asserts events is valid
                                 // for maxevents entries; count < limit.
                                 #[allow(clippy::cast_sign_loss)]
-                                let slot_ptr = unsafe {
-                                    events.add(count as usize)
-                                };
+                                let slot_ptr = unsafe { events.add(count as usize) };
                                 let out = EpollEvent {
                                     events: revents,
                                     data: watched.data,
@@ -563,8 +551,6 @@ pub unsafe extern "C" fn epoll_wait(
                                 count = count.wrapping_add(1);
                             }
                         }
-                    }
-                }
                 i = i.wrapping_add(1);
             }
             count
@@ -655,7 +641,8 @@ pub unsafe extern "C" fn epoll_pwait2(
             // sub-millisecond timeout doesn't collapse to 0.  Both
             // operands are non-negative now (validated above), so the
             // saturating math can only saturate upward.
-            let ms = ts.tv_sec
+            let ms = ts
+                .tv_sec
                 .saturating_mul(1_000)
                 .saturating_add(ts.tv_nsec.saturating_add(999_999) / 1_000_000);
             if ms > i64::from(i32::MAX) {
@@ -779,7 +766,11 @@ pub extern "C" fn eventfd_read(fd: i32, value: *mut u64) -> i32 {
     }
 
     let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
-    let nr = if is_nb { SYS_EVENTFD_TRY_READ } else { SYS_EVENTFD_READ };
+    let nr = if is_nb {
+        SYS_EVENTFD_TRY_READ
+    } else {
+        SYS_EVENTFD_READ
+    };
     let r = syscall1(nr, entry.handle);
     if r < 0 {
         let _ = errno::translate(r);
@@ -1031,8 +1022,8 @@ pub fn timerfd_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
         return Err(errno::EINVAL);
     }
     let now = now_ns();
-    let count = with_timerfd_mut(idx, |inst| timerfd_consume_expirations(inst, now))
-        .ok_or(errno::EBADF)?;
+    let count =
+        with_timerfd_mut(idx, |inst| timerfd_consume_expirations(inst, now)).ok_or(errno::EBADF)?;
     if count == 0 {
         return Ok(0);
     }
@@ -1095,9 +1086,7 @@ pub extern "C" fn timerfd_create(clockid: i32, flags: i32) -> i32 {
     const CLOCK_BOOTTIME_ALARM_I32: i32 = 9;
     let clockid_ok = matches!(
         clockid,
-        crate::time::CLOCK_REALTIME
-            | crate::time::CLOCK_MONOTONIC
-            | crate::time::CLOCK_BOOTTIME
+        crate::time::CLOCK_REALTIME | crate::time::CLOCK_MONOTONIC | crate::time::CLOCK_BOOTTIME
     ) || clockid == CLOCK_REALTIME_ALARM_I32
         || clockid == CLOCK_BOOTTIME_ALARM_I32;
     if !clockid_ok {
@@ -1111,12 +1100,9 @@ pub extern "C" fn timerfd_create(clockid: i32, flags: i32) -> i32 {
     // of privilege, but a caller holding a valid alarm clockid without
     // the cap is told it lacks privilege (EPERM), not asked to retry
     // with a different flag value.
-    let is_alarm_clock = clockid == CLOCK_REALTIME_ALARM_I32
-        || clockid == CLOCK_BOOTTIME_ALARM_I32;
+    let is_alarm_clock = clockid == CLOCK_REALTIME_ALARM_I32 || clockid == CLOCK_BOOTTIME_ALARM_I32;
     if is_alarm_clock
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_WAKE_ALARM,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_WAKE_ALARM)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -1129,9 +1115,7 @@ pub extern "C" fn timerfd_create(clockid: i32, flags: i32) -> i32 {
     let _ = with_timerfd_mut(idx as u64, |inst| {
         inst.nonblock = flags & TFD_NONBLOCK != 0;
     });
-    let Some(fd) =
-        fdtable::alloc_fd_with_flags(HandleKind::Timerfd, idx as u64, 0)
-    else {
+    let Some(fd) = fdtable::alloc_fd_with_flags(HandleKind::Timerfd, idx as u64, 0) else {
         timerfd_instance_close(idx as u64);
         errno::set_errno(errno::EMFILE);
         return -1;
@@ -1253,7 +1237,11 @@ pub unsafe extern "C" fn timerfd_settime(
 
     if !old_value.is_null() {
         let (next, ival) = old.unwrap_or((0, 0));
-        let remaining_ns = if next == 0 || now >= next { 0 } else { next - now };
+        let remaining_ns = if next == 0 || now >= next {
+            0
+        } else {
+            next - now
+        };
         let out = Itimerspec {
             it_interval: ns_to_timespec(ival),
             it_value: ns_to_timespec(remaining_ns),
@@ -1292,10 +1280,7 @@ pub unsafe extern "C" fn timerfd_settime(
 /// # Safety
 /// `curr_value` must be a valid writable pointer to an `Itimerspec`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn timerfd_gettime(
-    fd: i32,
-    curr_value: *mut Itimerspec,
-) -> i32 {
+pub unsafe extern "C" fn timerfd_gettime(fd: i32, curr_value: *mut Itimerspec) -> i32 {
     // Phase 143: fd resolution precedes the user-pointer check to
     // match Linux's `do_timerfd_gettime` flow.  A buggy caller
     // passing both a bad fd and a NULL pointer learns about the fd
@@ -1314,9 +1299,13 @@ pub unsafe extern "C" fn timerfd_gettime(
     }
     let idx = entry.handle;
     let now = now_ns();
-    let (next, ival) = with_timerfd(idx, |inst| (inst.next_expiry_ns, inst.interval_ns))
-        .unwrap_or((0, 0));
-    let remaining_ns = if next == 0 || now >= next { 0 } else { next - now };
+    let (next, ival) =
+        with_timerfd(idx, |inst| (inst.next_expiry_ns, inst.interval_ns)).unwrap_or((0, 0));
+    let remaining_ns = if next == 0 || now >= next {
+        0
+    } else {
+        next - now
+    };
     let out = Itimerspec {
         it_interval: ns_to_timespec(ival),
         it_value: ns_to_timespec(remaining_ns),
@@ -1650,11 +1639,10 @@ pub fn inotify_instance_close(idx: u64) {
     let mut to_close = [0u64; MAX_INOTIFY_WATCHES];
     let _ = with_inotify_mut(idx, |inst| {
         for (i, w) in inst.watches.iter().enumerate() {
-            if w.in_use && w.kernel_id != 0 {
-                if let Some(slot) = to_close.get_mut(i) {
+            if w.in_use && w.kernel_id != 0
+                && let Some(slot) = to_close.get_mut(i) {
                     *slot = w.kernel_id;
                 }
-            }
         }
         *inst = INOTIFY_INSTANCE_INIT;
     });
@@ -1698,19 +1686,16 @@ const KWATCH_READ_BATCH: usize = 16;
 
 /// Scratch buffer for draining kernel watch events.  Reused across all
 /// watches — the single-threaded posix layer makes this safe.
-static mut INOTIFY_EVENT_SCRATCH:
-    [u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE] =
+static mut INOTIFY_EVENT_SCRATCH: [u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE] =
     [0u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE];
 
-fn event_scratch_ptr()
-    -> *mut [u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE] {
+fn event_scratch_ptr() -> *mut [u8; KWATCH_READ_BATCH * crate::syscall::FS_WATCH_EVENT_SIZE] {
     core::ptr::addr_of_mut!(INOTIFY_EVENT_SCRATCH)
 }
 
 /// Monotonic cookie source for pairing `IN_MOVED_FROM`/`IN_MOVED_TO`.
 /// Cookies must be non-zero (zero means "no cookie" in inotify usage).
-static INOTIFY_COOKIE: core::sync::atomic::AtomicU32 =
-    core::sync::atomic::AtomicU32::new(1);
+static INOTIFY_COOKIE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(1);
 
 fn next_cookie() -> u32 {
     use core::sync::atomic::Ordering;
@@ -1827,11 +1812,10 @@ fn make_event(wd: i32, mask: u32, name: &[u8]) -> InotifyPending {
     ev.wd = wd;
     ev.mask = mask;
     let n = core::cmp::min(name.len(), INOTIFY_NAME_MAX - 1);
-    if let Some(dst) = ev.name.get_mut(..n) {
-        if let Some(src) = name.get(..n) {
+    if let Some(dst) = ev.name.get_mut(..n)
+        && let Some(src) = name.get(..n) {
             dst.copy_from_slice(src);
         }
-    }
     ev.name_len = n as u8;
     ev
 }
@@ -2081,12 +2065,13 @@ fn pump_one_watch(idx: u64, wd: i32, kernel_id: u64, mask: u32, watched: &[u8]) 
             };
             let affected = strip_nul(affected_raw);
             let new_path = strip_nul(new_raw);
-            let etype =
-                u32::from_le_bytes(<[u8; 4]>::try_from(type_raw).unwrap_or([0u8; 4]));
-            let cookie = if etype == KEV_RENAMED { next_cookie() } else { 0 };
-            let tr = translate_kernel_event(
-                watched, mask, wd, etype, affected, new_path, cookie,
-            );
+            let etype = u32::from_le_bytes(<[u8; 4]>::try_from(type_raw).unwrap_or([0u8; 4]));
+            let cookie = if etype == KEV_RENAMED {
+                next_cookie()
+            } else {
+                0
+            };
+            let tr = translate_kernel_event(watched, mask, wd, etype, affected, new_path, cookie);
             let _ = with_inotify_mut(idx, |inst| {
                 for k in 0..tr.count {
                     if let Some(ev) = tr.events.get(k) {
@@ -2128,8 +2113,7 @@ fn pump_instance(idx: u64) {
     };
     // Snapshot the active watches by value so we don't hold a borrow on
     // the instance table across `pump_one_watch` (which re-borrows it).
-    let mut snap: [(bool, i32, u64, u32, [u8; INOTIFY_PATH_MAX], usize);
-        MAX_INOTIFY_WATCHES] =
+    let mut snap: [(bool, i32, u64, u32, [u8; INOTIFY_PATH_MAX], usize); MAX_INOTIFY_WATCHES] =
         [(false, 0, 0, 0, [0u8; INOTIFY_PATH_MAX], 0); MAX_INOTIFY_WATCHES];
     // SAFETY: single-threaded.
     unsafe {
@@ -2205,13 +2189,22 @@ pub fn inotify_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
         if inst.overflow_pending && written + 16 <= buf.len() {
             // wd=-1, mask=IN_Q_OVERFLOW, cookie=0, len=0.
             let header = [
-                0xFF, 0xFF, 0xFF, 0xFF, // wd = -1
+                0xFF,
+                0xFF,
+                0xFF,
+                0xFF, // wd = -1
                 (IN_Q_OVERFLOW & 0xFF) as u8,
                 ((IN_Q_OVERFLOW >> 8) & 0xFF) as u8,
                 ((IN_Q_OVERFLOW >> 16) & 0xFF) as u8,
                 ((IN_Q_OVERFLOW >> 24) & 0xFF) as u8,
-                0, 0, 0, 0,
-                0, 0, 0, 0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
             ];
             if let Some(dst) = buf.get_mut(written..written + 16) {
                 dst.copy_from_slice(&header);
@@ -2257,19 +2250,17 @@ pub fn inotify_read(idx: u64, buf: &mut [u8]) -> Result<usize, i32> {
                 dst.copy_from_slice(&(name_field as u32).to_ne_bytes());
             }
             // Name (NUL-padded).
-            if name_field > 0 {
-                if let Some(dst) = buf.get_mut(written + 16..written + 16 + name_field) {
+            if name_field > 0
+                && let Some(dst) = buf.get_mut(written + 16..written + 16 + name_field) {
                     for b in dst.iter_mut() {
                         *b = 0;
                     }
                     let copy_n = core::cmp::min(raw_name, name_field - 1);
-                    if let Some(src) = ev.name.get(..copy_n) {
-                        if let Some(dst2) = buf.get_mut(written + 16..written + 16 + copy_n) {
+                    if let Some(src) = ev.name.get(..copy_n)
+                        && let Some(dst2) = buf.get_mut(written + 16..written + 16 + copy_n) {
                             dst2.copy_from_slice(src);
                         }
-                    }
                 }
-            }
             written += record_size;
         }
     });
@@ -2316,8 +2307,7 @@ pub extern "C" fn inotify_init1(flags: i32) -> i32 {
     } else {
         0
     };
-    let Some(fd) = fdtable::alloc_fd(HandleKind::Inotify, idx as u64)
-    else {
+    let Some(fd) = fdtable::alloc_fd(HandleKind::Inotify, idx as u64) else {
         inotify_instance_close(idx as u64);
         errno::set_errno(errno::EMFILE);
         return -1;
@@ -2359,11 +2349,7 @@ pub extern "C" fn inotify_init1(flags: i32) -> i32 {
 /// rely on the Linux ordering to bisect "is my mask wrong" from "is
 /// my pathname wrong."
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn inotify_add_watch(
-    fd: i32,
-    pathname: *const u8,
-    mask: u32,
-) -> i32 {
+pub extern "C" fn inotify_add_watch(fd: i32, pathname: *const u8, mask: u32) -> i32 {
     // Step 1: mask validation — Linux's first check, before any user
     // pointer or fd is touched.
     if mask & IN_KNOWN_EVENTS == 0 {
@@ -2391,9 +2377,8 @@ pub extern "C" fn inotify_add_watch(
     // Resolve the path against CWD into a normalized absolute path.
     let mut resolved = [0u8; crate::unistd::PATH_MAX];
     // SAFETY: `pathname` was checked non-null above.
-    let Some(resolved_len) = (unsafe {
-        crate::unistd::resolve_path(pathname, &mut resolved)
-    }) else {
+    let Some(resolved_len) = (unsafe { crate::unistd::resolve_path(pathname, &mut resolved) })
+    else {
         // SAFETY: pathname is non-null and a valid C-string.
         if unsafe { *pathname } == 0 {
             errno::set_errno(errno::ENOENT);
@@ -2624,7 +2609,10 @@ mod tests {
         // FD 250 is unlikely to be allocated in the default test table.
         // Pass a non-null `event` so we test the EBADF path on the epfd
         // and don't trip the upfront EFAULT check (Phase 106 ordering).
-        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0,
+        };
         assert_eq!(epoll_ctl(250, EPOLL_CTL_ADD, 4, &raw mut ev), -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
     }
@@ -2797,12 +2785,16 @@ mod tests {
         // EBADF (depending on whether fd 3 exists in this test process).
         errno::set_errno(0);
         let new = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
-        let ret = unsafe {
-            timerfd_settime(3, 0, &new, core::ptr::null_mut())
-        };
+        let ret = unsafe { timerfd_settime(3, 0, &new, core::ptr::null_mut()) };
         assert_eq!(ret, -1);
         let e = errno::get_errno();
         assert!(
@@ -2816,8 +2808,14 @@ mod tests {
         // timerfd_gettime on a non-timerfd should fail.
         errno::set_errno(0);
         let mut out = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         let ret = unsafe { timerfd_gettime(3, &mut out) };
         assert_eq!(ret, -1);
@@ -2908,10 +2906,7 @@ mod tests {
             return;
         }
         errno::set_errno(0);
-        assert_eq!(
-            inotify_add_watch(fd, core::ptr::null(), IN_MODIFY),
-            -1
-        );
+        assert_eq!(inotify_add_watch(fd, core::ptr::null(), IN_MODIFY), -1);
         // The fd table is global across tests, so a concurrent test
         // could close+reuse our fd between init() and add_watch().  In
         // that case the kind-mismatch path triggers EINVAL instead of
@@ -2943,7 +2938,10 @@ mod tests {
 
     #[test]
     fn test_epoll_event_fields() {
-        let ev = EpollEvent { events: EPOLLIN | EPOLLOUT, data: 42 };
+        let ev = EpollEvent {
+            events: EPOLLIN | EPOLLOUT,
+            data: 42,
+        };
         // EpollEvent is #[repr(packed)] so direct field references would
         // be UB on platforms where the fields need higher alignment.
         // Copy through locals.
@@ -2957,7 +2955,10 @@ mod tests {
     fn test_epoll_event_data_holds_pointer() {
         // data field is often used to hold a pointer cast to u64.
         let val: u64 = 0x7FFE_0000_1234;
-        let ev = EpollEvent { events: EPOLLIN, data: val };
+        let ev = EpollEvent {
+            events: EPOLLIN,
+            data: val,
+        };
         let data_val: u64 = ev.data;
         assert_eq!(data_val, val);
     }
@@ -2973,8 +2974,14 @@ mod tests {
     #[test]
     fn test_itimerspec_fields() {
         let its = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 1, tv_nsec: 500_000_000 },
-            it_value: crate::stat::Timespec { tv_sec: 5, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 500_000_000,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 5,
+                tv_nsec: 0,
+            },
         };
         assert_eq!(its.it_interval.tv_sec, 1);
         assert_eq!(its.it_interval.tv_nsec, 500_000_000);
@@ -3001,9 +3008,7 @@ mod tests {
         errno::set_errno(0);
         // SAFETY: events pointer is intentionally null; the wrapper
         // checks for null before any dereference.
-        let ret = unsafe {
-            epoll_pwait(3, core::ptr::null_mut(), 10, 0, core::ptr::null())
-        };
+        let ret = unsafe { epoll_pwait(3, core::ptr::null_mut(), 10, 0, core::ptr::null()) };
         // Either EBADF (if fd 3 isn't an epoll fd) or EFAULT (if it
         // were, since the events pointer is null).  In the unit-test
         // environment fd 3 isn't an epoll fd, so EBADF.
@@ -3037,7 +3042,12 @@ mod tests {
         // settime with null new_value pointer returns EFAULT.
         errno::set_errno(0);
         let ret = unsafe {
-            timerfd_settime(0, TFD_TIMER_ABSTIME, core::ptr::null(), core::ptr::null_mut())
+            timerfd_settime(
+                0,
+                TFD_TIMER_ABSTIME,
+                core::ptr::null(),
+                core::ptr::null_mut(),
+            )
         };
         assert_eq!(ret, -1);
         let e = errno::get_errno();
@@ -3124,8 +3134,7 @@ mod tests {
         assert_eq!(ret, -1);
         let e = errno::get_errno();
         assert!(
-            e == errno::EBADF || e == errno::EFAULT || e == errno::EINVAL
-                || e == errno::ENOENT,
+            e == errno::EBADF || e == errno::EFAULT || e == errno::EINVAL || e == errno::ENOENT,
             "unexpected errno {e}"
         );
     }
@@ -3220,10 +3229,7 @@ mod tests {
         }
         errno::set_errno(0);
         // Only IN_MASK_ADD-style flag bits, no event bits.
-        assert_eq!(
-            inotify_add_watch(fd, b"/tmp\0".as_ptr(), 0),
-            -1
-        );
+        assert_eq!(inotify_add_watch(fd, b"/tmp\0".as_ptr(), 0), -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         crate::file::close(fd);
     }
@@ -3236,10 +3242,7 @@ mod tests {
             return;
         }
         errno::set_errno(0);
-        assert_eq!(
-            inotify_add_watch(efd, b"/tmp\0".as_ptr(), IN_MODIFY),
-            -1,
-        );
+        assert_eq!(inotify_add_watch(efd, b"/tmp\0".as_ptr(), IN_MODIFY), -1,);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         crate::file::close(efd);
     }
@@ -3511,9 +3514,18 @@ mod tests {
     #[test]
     fn test_inotify_event_flags_single_bits() {
         let flags = [
-            IN_ACCESS, IN_MODIFY, IN_ATTRIB, IN_CLOSE_WRITE,
-            IN_CLOSE_NOWRITE, IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO,
-            IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF,
+            IN_ACCESS,
+            IN_MODIFY,
+            IN_ATTRIB,
+            IN_CLOSE_WRITE,
+            IN_CLOSE_NOWRITE,
+            IN_OPEN,
+            IN_MOVED_FROM,
+            IN_MOVED_TO,
+            IN_CREATE,
+            IN_DELETE,
+            IN_DELETE_SELF,
+            IN_MOVE_SELF,
         ];
         for f in flags {
             assert_eq!(f.count_ones(), 1, "flag 0x{f:x} is not a single bit");
@@ -3562,16 +3574,17 @@ mod tests {
             Rel::Child(name) => assert_eq!(name, b"etc"),
             _ => panic!("expected Child"),
         }
-        assert!(matches!(relative_name(b"/", b"/etc/passwd"), Rel::NotMatched));
+        assert!(matches!(
+            relative_name(b"/", b"/etc/passwd"),
+            Rel::NotMatched
+        ));
     }
 
     // -- translate_kernel_event (pure kernel→inotify mapping) --
 
     #[test]
     fn test_translate_created_child() {
-        let t = translate_kernel_event(
-            b"/w", IN_CREATE, 7, KEV_CREATED, b"/w/new", b"", 0,
-        );
+        let t = translate_kernel_event(b"/w", IN_CREATE, 7, KEV_CREATED, b"/w/new", b"", 0);
         assert_eq!(t.count, 1);
         assert!(!t.disarm);
         let ev = t.events[0];
@@ -3583,17 +3596,13 @@ mod tests {
     #[test]
     fn test_translate_created_masked_off() {
         // Mask doesn't request IN_CREATE → no event.
-        let t = translate_kernel_event(
-            b"/w", IN_DELETE, 7, KEV_CREATED, b"/w/new", b"", 0,
-        );
+        let t = translate_kernel_event(b"/w", IN_DELETE, 7, KEV_CREATED, b"/w/new", b"", 0);
         assert_eq!(t.count, 0);
     }
 
     #[test]
     fn test_translate_delete_self_disarms() {
-        let t = translate_kernel_event(
-            b"/w", IN_DELETE_SELF, 3, KEV_DELETED, b"/w", b"", 0,
-        );
+        let t = translate_kernel_event(b"/w", IN_DELETE_SELF, 3, KEV_DELETED, b"/w", b"", 0);
         assert!(t.disarm);
         // IN_DELETE_SELF then IN_IGNORED.
         assert_eq!(t.count, 2);
@@ -3605,9 +3614,7 @@ mod tests {
     fn test_translate_delete_self_ignored_only_when_unmasked() {
         // Even if IN_DELETE_SELF wasn't requested, IN_IGNORED still fires
         // and the watch is disarmed.
-        let t = translate_kernel_event(
-            b"/w", IN_CREATE, 3, KEV_DELETED, b"/w", b"", 0,
-        );
+        let t = translate_kernel_event(b"/w", IN_CREATE, 3, KEV_DELETED, b"/w", b"", 0);
         assert!(t.disarm);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_IGNORED);
@@ -3615,9 +3622,7 @@ mod tests {
 
     #[test]
     fn test_translate_delete_child() {
-        let t = translate_kernel_event(
-            b"/w", IN_DELETE, 3, KEV_DELETED, b"/w/gone", b"", 0,
-        );
+        let t = translate_kernel_event(b"/w", IN_DELETE, 3, KEV_DELETED, b"/w/gone", b"", 0);
         assert!(!t.disarm);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_DELETE);
@@ -3626,9 +3631,7 @@ mod tests {
 
     #[test]
     fn test_translate_modify_self_empty_name() {
-        let t = translate_kernel_event(
-            b"/w/f", IN_MODIFY, 5, KEV_MODIFIED, b"/w/f", b"", 0,
-        );
+        let t = translate_kernel_event(b"/w/f", IN_MODIFY, 5, KEV_MODIFIED, b"/w/f", b"", 0);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_MODIFY);
         assert_eq!(t.events[0].name_len, 0);
@@ -3657,7 +3660,13 @@ mod tests {
     #[test]
     fn test_translate_rename_self_is_move_self() {
         let t = translate_kernel_event(
-            b"/w", IN_MOVE_SELF, 9, KEV_RENAMED, b"/w", b"/elsewhere", 0x55,
+            b"/w",
+            IN_MOVE_SELF,
+            9,
+            KEV_RENAMED,
+            b"/w",
+            b"/elsewhere",
+            0x55,
         );
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_MOVE_SELF);
@@ -3665,15 +3674,11 @@ mod tests {
 
     #[test]
     fn test_translate_metadata_and_access() {
-        let t = translate_kernel_event(
-            b"/w/f", IN_ATTRIB, 2, KEV_METADATA, b"/w/f", b"", 0,
-        );
+        let t = translate_kernel_event(b"/w/f", IN_ATTRIB, 2, KEV_METADATA, b"/w/f", b"", 0);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_ATTRIB);
 
-        let t = translate_kernel_event(
-            b"/w/f", IN_ACCESS, 2, KEV_ACCESSED, b"/w/f", b"", 0,
-        );
+        let t = translate_kernel_event(b"/w/f", IN_ACCESS, 2, KEV_ACCESSED, b"/w/f", b"", 0);
         assert_eq!(t.count, 1);
         assert_eq!(t.events[0].mask, IN_ACCESS);
     }
@@ -3689,9 +3694,7 @@ mod tests {
     #[test]
     fn test_translate_grandchild_ignored() {
         // A create deep under the watch must not surface (non-recursive).
-        let t = translate_kernel_event(
-            b"/w", IN_CREATE, 1, KEV_CREATED, b"/w/sub/deep", b"", 0,
-        );
+        let t = translate_kernel_event(b"/w", IN_CREATE, 1, KEV_CREATED, b"/w/sub/deep", b"", 0);
         assert_eq!(t.count, 0);
     }
 
@@ -3759,16 +3762,28 @@ mod tests {
 
         // Arm: 1 second initial, no interval (one-shot).
         let new = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         let r = unsafe { timerfd_settime(fd, 0, &new, core::ptr::null_mut()) };
         assert_eq!(r, 0);
 
         // gettime should report a value <= 1 second remaining.
         let mut cur = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         let r2 = unsafe { timerfd_gettime(fd, &mut cur) };
         assert_eq!(r2, 0);
@@ -3788,25 +3803,47 @@ mod tests {
 
         // Arm.
         let armed = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 5, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 5,
+                tv_nsec: 0,
+            },
         };
-        unsafe { timerfd_settime(fd, 0, &armed, core::ptr::null_mut()); }
+        unsafe {
+            timerfd_settime(fd, 0, &armed, core::ptr::null_mut());
+        }
 
         // Disarm (it_value = 0).
         let disarm = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         let r = unsafe { timerfd_settime(fd, 0, &disarm, core::ptr::null_mut()) };
         assert_eq!(r, 0);
 
         // gettime should report 0 remaining (disarmed).
         let mut cur = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
-        unsafe { timerfd_gettime(fd, &mut cur); }
+        unsafe {
+            timerfd_gettime(fd, &mut cur);
+        }
         let sec = cur.it_value.tv_sec;
         let nsec = cur.it_value.tv_nsec;
         assert_eq!(sec, 0);
@@ -3821,8 +3858,14 @@ mod tests {
         assert!(fd >= 0);
 
         let bad = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: -1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
         let r = unsafe { timerfd_settime(fd, 0, &bad, core::ptr::null_mut()) };
@@ -4076,7 +4119,13 @@ mod tests {
         // epoll_pwait2 with an invalid epfd returns EBADF.
         crate::errno::set_errno(0);
         let ret = unsafe {
-            epoll_pwait2(-1, core::ptr::null_mut(), 0, core::ptr::null(), core::ptr::null())
+            epoll_pwait2(
+                -1,
+                core::ptr::null_mut(),
+                0,
+                core::ptr::null(),
+                core::ptr::null(),
+            )
         };
         assert_eq!(ret, -1);
         assert!(
@@ -4090,10 +4139,11 @@ mod tests {
     fn test_epoll_pwait2_with_timeout() {
         // Same invalid-fd path but with a non-null timespec.
         crate::errno::set_errno(0);
-        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 100_000 };
-        let ret = unsafe {
-            epoll_pwait2(-1, core::ptr::null_mut(), 1, &ts, core::ptr::null())
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 100_000,
         };
+        let ret = unsafe { epoll_pwait2(-1, core::ptr::null_mut(), 1, &ts, core::ptr::null()) };
         assert_eq!(ret, -1);
         assert!(
             crate::errno::get_errno() == crate::errno::EBADF
@@ -4150,7 +4200,10 @@ mod tests {
         let target = epoll_create1(0);
         assert!(target >= 0);
 
-        let mut ev = EpollEvent { events: EPOLLIN, data: 0xAABB_CCDDu64 };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0xAABB_CCDDu64,
+        };
         let r = epoll_ctl(ep, EPOLL_CTL_ADD, target, &mut ev as *mut _);
         assert_eq!(r, 0, "EPOLL_CTL_ADD should succeed");
 
@@ -4205,7 +4258,10 @@ mod tests {
         // minimum it must not crash.
         let ep = epoll_create1(0);
         assert!(ep >= 0);
-        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0,
+        };
         let r = epoll_ctl(ep, EPOLL_CTL_ADD, ep, &mut ev as *mut _);
         // Accept either EINVAL (cycle detection) or success (we don't
         // enforce it yet — the resulting wait just won't fire).
@@ -4688,14 +4744,24 @@ mod tests {
         let fd = timerfd_create(1, 0);
         assert!(fd >= 0);
         let new = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
-        let r = unsafe {
-            timerfd_settime(fd, TFD_TIMER_CANCEL_ON_SET, &new, core::ptr::null_mut())
-        };
-        assert_eq!(r, 0, "CANCEL_ON_SET must be accepted, errno={}", errno::get_errno());
+        let r =
+            unsafe { timerfd_settime(fd, TFD_TIMER_CANCEL_ON_SET, &new, core::ptr::null_mut()) };
+        assert_eq!(
+            r,
+            0,
+            "CANCEL_ON_SET must be accepted, errno={}",
+            errno::get_errno()
+        );
         crate::file::close(fd);
     }
 
@@ -4708,8 +4774,14 @@ mod tests {
         // tv_sec by 1e9 and will overflow, producing a spurious EINVAL
         // that has nothing to do with the flag mask under test.
         let new = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 1_000_000, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1_000_000,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
         let r = unsafe {
@@ -4720,7 +4792,12 @@ mod tests {
                 core::ptr::null_mut(),
             )
         };
-        assert_eq!(r, 0, "ABSTIME|CANCEL_ON_SET must be accepted, errno={}", errno::get_errno());
+        assert_eq!(
+            r,
+            0,
+            "ABSTIME|CANCEL_ON_SET must be accepted, errno={}",
+            errno::get_errno()
+        );
         crate::file::close(fd);
     }
 
@@ -4729,8 +4806,14 @@ mod tests {
         let fd = timerfd_create(1, 0);
         assert!(fd >= 0);
         let new = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
         // bit 2 is not in the valid mask.
@@ -4745,13 +4828,17 @@ mod tests {
         let fd = timerfd_create(1, 0);
         assert!(fd >= 0);
         let new = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
-        let r = unsafe {
-            timerfd_settime(fd, i32::MIN, &new, core::ptr::null_mut())
-        };
+        let r = unsafe { timerfd_settime(fd, i32::MIN, &new, core::ptr::null_mut()) };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         crate::file::close(fd);
@@ -4763,12 +4850,23 @@ mod tests {
         let fd = timerfd_create(1, 0);
         assert!(fd >= 0);
         let new = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
         let r = unsafe {
-            timerfd_settime(fd, TFD_TIMER_ABSTIME | (1 << 5), &new, core::ptr::null_mut())
+            timerfd_settime(
+                fd,
+                TFD_TIMER_ABSTIME | (1 << 5),
+                &new,
+                core::ptr::null_mut(),
+            )
         };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -4780,9 +4878,7 @@ mod tests {
         // Null new_value with bad flags: Linux's copy_from_user fires
         // FIRST, so EFAULT wins over EINVAL.
         errno::set_errno(0);
-        let r = unsafe {
-            timerfd_settime(0, 1 << 7, core::ptr::null(), core::ptr::null_mut())
-        };
+        let r = unsafe { timerfd_settime(0, 1 << 7, core::ptr::null(), core::ptr::null_mut()) };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
@@ -4792,8 +4888,14 @@ mod tests {
         // Bad flags + missing fd: Linux checks flags BEFORE the fd
         // lookup, so EINVAL wins over EBADF.
         let new = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
         // fd 99999 almost certainly isn't allocated.
@@ -4808,8 +4910,14 @@ mod tests {
         // BEFORE the fd lookup (both in `do_timerfd_settime` prior to
         // `timerfd_fget`), so EINVAL wins over EBADF.
         let bad = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: -1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: -1,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
         let r = unsafe { timerfd_settime(99999, 0, &bad, core::ptr::null_mut()) };
@@ -4821,8 +4929,14 @@ mod tests {
     fn test_timerfd_settime_phase105_einval_wins_over_ebadf_for_interval() {
         // Bad it_interval + missing fd: same ordering invariant.
         let bad = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 },
-            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 1_000_000_000,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
         let r = unsafe { timerfd_settime(99999, 0, &bad, core::ptr::null_mut()) };
@@ -4835,9 +4949,7 @@ mod tests {
         // Null new_value + missing fd: EFAULT wins over EBADF
         // (copy_from_user fires before timerfd_fget).
         errno::set_errno(0);
-        let r = unsafe {
-            timerfd_settime(99999, 0, core::ptr::null(), core::ptr::null_mut())
-        };
+        let r = unsafe { timerfd_settime(99999, 0, core::ptr::null(), core::ptr::null_mut()) };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
@@ -4849,20 +4961,28 @@ mod tests {
         let fd = timerfd_create(1, 0);
         assert!(fd >= 0);
         let new = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
-        let bad = unsafe {
-            timerfd_settime(fd, 1 << 9, &new, core::ptr::null_mut())
-        };
+        let bad = unsafe { timerfd_settime(fd, 1 << 9, &new, core::ptr::null_mut()) };
         assert_eq!(bad, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         errno::set_errno(0);
-        let good = unsafe {
-            timerfd_settime(fd, TFD_TIMER_CANCEL_ON_SET, &new, core::ptr::null_mut())
-        };
-        assert_eq!(good, 0, "recovery call must succeed, errno={}", errno::get_errno());
+        let good =
+            unsafe { timerfd_settime(fd, TFD_TIMER_CANCEL_ON_SET, &new, core::ptr::null_mut()) };
+        assert_eq!(
+            good,
+            0,
+            "recovery call must succeed, errno={}",
+            errno::get_errno()
+        );
         crate::file::close(fd);
     }
 
@@ -4873,8 +4993,14 @@ mod tests {
         let fd = timerfd_create(1, 0);
         assert!(fd >= 0);
         let new = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value: crate::stat::Timespec { tv_sec: 1, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 1,
+                tv_nsec: 0,
+            },
         };
         for shift in 0..32 {
             #[allow(clippy::cast_possible_wrap)]
@@ -4939,7 +5065,10 @@ mod tests {
 
     #[test]
     fn test_epoll_ctl_phase106_bad_epfd_then_good_event_is_ebadf() {
-        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0,
+        };
         errno::set_errno(0);
         let ret = epoll_ctl(99999, EPOLL_CTL_ADD, 4, &raw mut ev);
         assert_eq!(ret, -1);
@@ -4951,7 +5080,10 @@ mod tests {
         // Real epoll fd, target fd is not allocated → EBADF.
         let epfd = epoll_create1(0);
         assert!(epfd >= 0);
-        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0,
+        };
         errno::set_errno(0);
         let ret = epoll_ctl(epfd, EPOLL_CTL_ADD, 99999, &raw mut ev);
         assert_eq!(ret, -1);
@@ -4966,7 +5098,10 @@ mod tests {
         // Linux: EBADF (target fd lookup before kind check).
         let not_epoll = eventfd(0, 0);
         assert!(not_epoll >= 0);
-        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0,
+        };
         errno::set_errno(0);
         let ret = epoll_ctl(not_epoll, EPOLL_CTL_ADD, 99999, &raw mut ev);
         assert_eq!(ret, -1);
@@ -4984,7 +5119,10 @@ mod tests {
         let target = eventfd(0, 0);
         assert!(target >= 0);
         assert_ne!(not_epoll, target);
-        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0,
+        };
         errno::set_errno(0);
         let ret = epoll_ctl(not_epoll, EPOLL_CTL_ADD, target, &raw mut ev);
         assert_eq!(ret, -1);
@@ -4999,7 +5137,10 @@ mod tests {
         // passes).
         let epfd = epoll_create1(0);
         assert!(epfd >= 0);
-        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0,
+        };
         errno::set_errno(0);
         let ret = epoll_ctl(epfd, EPOLL_CTL_ADD, epfd, &raw mut ev);
         assert_eq!(ret, -1);
@@ -5015,7 +5156,10 @@ mod tests {
         assert!(epfd >= 0);
         let target = eventfd(0, 0);
         assert!(target >= 0);
-        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0,
+        };
         errno::set_errno(0);
         let ret = epoll_ctl(epfd, 99, target, &raw mut ev);
         assert_eq!(ret, -1);
@@ -5072,10 +5216,18 @@ mod tests {
         // Now a valid ADD with a real target fd.
         let target = eventfd(0, 0);
         assert!(target >= 0);
-        let mut ev = EpollEvent { events: EPOLLIN, data: 0 };
+        let mut ev = EpollEvent {
+            events: EPOLLIN,
+            data: 0,
+        };
         errno::set_errno(0);
         let good = epoll_ctl(epfd, EPOLL_CTL_ADD, target, &raw mut ev);
-        assert_eq!(good, 0, "recovery ADD must succeed, errno={}", errno::get_errno());
+        assert_eq!(
+            good,
+            0,
+            "recovery ADD must succeed, errno={}",
+            errno::get_errno()
+        );
         crate::file::close(target);
         crate::file::close(epfd);
     }
@@ -5115,14 +5267,15 @@ mod tests {
         // maxevents=EP_MAX_EVENTS we'll write at most 1 event because
         // we only have 1 entry, but the bound check must not reject.
         errno::set_errno(0);
-        let r = unsafe {
-            epoll_wait(epfd, ev.as_mut_ptr(), EP_MAX_EVENTS, 0)
-        };
+        let r = unsafe { epoll_wait(epfd, ev.as_mut_ptr(), EP_MAX_EVENTS, 0) };
         // Either 0 (nothing ready) or an error other than EINVAL is OK;
         // we just need to confirm the bound itself didn't reject.
         if r < 0 {
-            assert_ne!(errno::get_errno(), errno::EINVAL,
-                "EP_MAX_EVENTS at the bound must not trip the bound check");
+            assert_ne!(
+                errno::get_errno(),
+                errno::EINVAL,
+                "EP_MAX_EVENTS at the bound must not trip the bound check"
+            );
         }
         crate::file::close(epfd);
     }
@@ -5134,9 +5287,7 @@ mod tests {
         assert!(epfd >= 0);
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
         errno::set_errno(0);
-        let r = unsafe {
-            epoll_wait(epfd, ev.as_mut_ptr(), EP_MAX_EVENTS.wrapping_add(1), 0)
-        };
+        let r = unsafe { epoll_wait(epfd, ev.as_mut_ptr(), EP_MAX_EVENTS.wrapping_add(1), 0) };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         crate::file::close(epfd);
@@ -5267,7 +5418,12 @@ mod tests {
         errno::set_errno(0);
         let good = unsafe { epoll_wait(epfd, ev.as_mut_ptr(), 1, 0) };
         // No events armed → returns 0.  Must not be an error.
-        assert_eq!(good, 0, "recovery wait must succeed, errno={}", errno::get_errno());
+        assert_eq!(
+            good,
+            0,
+            "recovery wait must succeed, errno={}",
+            errno::get_errno()
+        );
         crate::file::close(epfd);
     }
 
@@ -5299,11 +5455,25 @@ mod tests {
         // We don't actually invoke null-timeout here (that would block
         // indefinitely if any event hooks ever stuck).  Instead this
         // test pins that a zero timespec returns 0 promptly.
-        let zero_ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
-        let r = unsafe {
-            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const zero_ts, core::ptr::null())
+        let zero_ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
         };
-        assert_eq!(r, 0, "zero timespec must poll once and return, errno={}", errno::get_errno());
+        let r = unsafe {
+            epoll_pwait2(
+                epfd,
+                ev.as_mut_ptr(),
+                1,
+                &raw const zero_ts,
+                core::ptr::null(),
+            )
+        };
+        assert_eq!(
+            r,
+            0,
+            "zero timespec must poll once and return, errno={}",
+            errno::get_errno()
+        );
         crate::file::close(epfd);
     }
 
@@ -5312,11 +5482,13 @@ mod tests {
         let epfd = epoll_create1(0);
         assert!(epfd >= 0);
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
-        let bad = crate::stat::Timespec { tv_sec: -1, tv_nsec: 0 };
-        errno::set_errno(0);
-        let r = unsafe {
-            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null())
+        let bad = crate::stat::Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
         };
+        errno::set_errno(0);
+        let r =
+            unsafe { epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null()) };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         crate::file::close(epfd);
@@ -5327,11 +5499,13 @@ mod tests {
         let epfd = epoll_create1(0);
         assert!(epfd >= 0);
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
-        let bad = crate::stat::Timespec { tv_sec: 0, tv_nsec: -1 };
-        errno::set_errno(0);
-        let r = unsafe {
-            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null())
+        let bad = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: -1,
         };
+        errno::set_errno(0);
+        let r =
+            unsafe { epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null()) };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         crate::file::close(epfd);
@@ -5342,11 +5516,13 @@ mod tests {
         let epfd = epoll_create1(0);
         assert!(epfd >= 0);
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
-        let bad = crate::stat::Timespec { tv_sec: 0, tv_nsec: 1_000_000_000 };
-        errno::set_errno(0);
-        let r = unsafe {
-            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null())
+        let bad = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 1_000_000_000,
         };
+        errno::set_errno(0);
+        let r =
+            unsafe { epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null()) };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         crate::file::close(epfd);
@@ -5362,14 +5538,19 @@ mod tests {
         // ~1-second poll loop.  If the timespec check spuriously
         // rejected the boundary value, we'd see EINVAL instead.
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
-        let ok = crate::stat::Timespec { tv_sec: 0, tv_nsec: 999_999_999 };
-        errno::set_errno(0);
-        let r = unsafe {
-            epoll_pwait2(99999, ev.as_mut_ptr(), 1, &raw const ok, core::ptr::null())
+        let ok = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 999_999_999,
         };
+        errno::set_errno(0);
+        let r =
+            unsafe { epoll_pwait2(99999, ev.as_mut_ptr(), 1, &raw const ok, core::ptr::null()) };
         assert_eq!(r, -1);
-        assert_eq!(errno::get_errno(), errno::EBADF,
-            "tv_nsec=999_999_999 must reach the EBADF path, not be rejected with EINVAL");
+        assert_eq!(
+            errno::get_errno(),
+            errno::EBADF,
+            "tv_nsec=999_999_999 must reach the EBADF path, not be rejected with EINVAL"
+        );
     }
 
     #[test]
@@ -5377,11 +5558,13 @@ mod tests {
         // Bad timespec + bad epfd: Linux validates the timespec FIRST
         // (poll_select_set_timeout fires before fdget), so EINVAL wins.
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
-        let bad = crate::stat::Timespec { tv_sec: -10, tv_nsec: 0 };
-        errno::set_errno(0);
-        let r = unsafe {
-            epoll_pwait2(99999, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null())
+        let bad = crate::stat::Timespec {
+            tv_sec: -10,
+            tv_nsec: 0,
         };
+        errno::set_errno(0);
+        let r =
+            unsafe { epoll_pwait2(99999, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null()) };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -5395,11 +5578,13 @@ mod tests {
         let epfd = epoll_create1(0);
         assert!(epfd >= 0);
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
-        let bad = crate::stat::Timespec { tv_sec: 0, tv_nsec: i64::MAX };
-        errno::set_errno(0);
-        let r = unsafe {
-            epoll_pwait2(epfd, ev.as_mut_ptr(), 0, &raw const bad, core::ptr::null())
+        let bad = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: i64::MAX,
         };
+        errno::set_errno(0);
+        let r =
+            unsafe { epoll_pwait2(epfd, ev.as_mut_ptr(), 0, &raw const bad, core::ptr::null()) };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
         crate::file::close(epfd);
@@ -5411,10 +5596,19 @@ mod tests {
         // happens before access_ok, so EINVAL wins over EFAULT.
         let epfd = epoll_create1(0);
         assert!(epfd >= 0);
-        let bad = crate::stat::Timespec { tv_sec: 0, tv_nsec: -42 };
+        let bad = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: -42,
+        };
         errno::set_errno(0);
         let r = unsafe {
-            epoll_pwait2(epfd, core::ptr::null_mut(), 1, &raw const bad, core::ptr::null())
+            epoll_pwait2(
+                epfd,
+                core::ptr::null_mut(),
+                1,
+                &raw const bad,
+                core::ptr::null(),
+            )
         };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -5428,16 +5622,18 @@ mod tests {
         let epfd = epoll_create1(0);
         assert!(epfd >= 0);
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
-        let huge = crate::stat::Timespec { tv_sec: i64::MAX, tv_nsec: 0 };
+        let huge = crate::stat::Timespec {
+            tv_sec: i64::MAX,
+            tv_nsec: 0,
+        };
         errno::set_errno(0);
         // Don't call this — it would wait indefinitely.  Just verify
         // the validation pass: pass a bad maxevents alongside so the
         // outer epoll_wait short-circuits before sleeping, and check
         // that the inner errno is the maxevents EINVAL (not a
         // timespec EINVAL that wrongly fired).
-        let r = unsafe {
-            epoll_pwait2(epfd, ev.as_mut_ptr(), 0, &raw const huge, core::ptr::null())
-        };
+        let r =
+            unsafe { epoll_pwait2(epfd, ev.as_mut_ptr(), 0, &raw const huge, core::ptr::null()) };
         assert_eq!(r, -1);
         // Either path (timespec EINVAL or maxevents EINVAL) surfaces
         // as EINVAL; the point is no other errno (no EBADF, no
@@ -5451,11 +5647,13 @@ mod tests {
         let epfd = epoll_create1(0);
         assert!(epfd >= 0);
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
-        let zero = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
-        errno::set_errno(0);
-        let r = unsafe {
-            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const zero, core::ptr::null())
+        let zero = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
         };
+        errno::set_errno(0);
+        let r =
+            unsafe { epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const zero, core::ptr::null()) };
         assert_eq!(r, 0);
         crate::file::close(epfd);
     }
@@ -5467,20 +5665,29 @@ mod tests {
         let epfd = epoll_create1(0);
         assert!(epfd >= 0);
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
-        let bad = crate::stat::Timespec { tv_sec: -1, tv_nsec: 0 };
-        errno::set_errno(0);
-        let r = unsafe {
-            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null())
+        let bad = crate::stat::Timespec {
+            tv_sec: -1,
+            tv_nsec: 0,
         };
+        errno::set_errno(0);
+        let r =
+            unsafe { epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const bad, core::ptr::null()) };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
 
-        let zero = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
-        errno::set_errno(0);
-        let r = unsafe {
-            epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const zero, core::ptr::null())
+        let zero = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
         };
-        assert_eq!(r, 0, "recovery call must succeed, errno={}", errno::get_errno());
+        errno::set_errno(0);
+        let r =
+            unsafe { epoll_pwait2(epfd, ev.as_mut_ptr(), 1, &raw const zero, core::ptr::null()) };
+        assert_eq!(
+            r,
+            0,
+            "recovery call must succeed, errno={}",
+            errno::get_errno()
+        );
         crate::file::close(epfd);
     }
 
@@ -5492,7 +5699,13 @@ mod tests {
         let mut ev = [EpollEvent { events: 0, data: 0 }; 1];
         errno::set_errno(0);
         let r = unsafe {
-            epoll_pwait2(99999, ev.as_mut_ptr(), 1, core::ptr::null(), core::ptr::null())
+            epoll_pwait2(
+                99999,
+                ev.as_mut_ptr(),
+                1,
+                core::ptr::null(),
+                core::ptr::null(),
+            )
         };
         assert_eq!(r, -1);
         assert_eq!(errno::get_errno(), errno::EBADF);
@@ -5555,8 +5768,14 @@ mod tests {
         // works on its own (valid pointer, bad fd → EBADF).  Pins the
         // baseline so we notice if EBADF ever regresses to EINVAL.
         let mut buf = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value:    crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
         let ret = unsafe { timerfd_gettime(-1, &mut buf) };
@@ -5570,7 +5789,11 @@ mod tests {
         // type) BEFORE the NULL-pointer EFAULT.  Use eventfd(2) which
         // creates a real Eventfd-kind fd we own.
         let efd = eventfd(0, 0);
-        assert!(efd >= 0, "eventfd setup failed; errno={}", errno::get_errno());
+        assert!(
+            efd >= 0,
+            "eventfd setup failed; errno={}",
+            errno::get_errno()
+        );
 
         errno::set_errno(0);
         let ret = unsafe { timerfd_gettime(efd, core::ptr::null_mut()) };
@@ -5590,7 +5813,11 @@ mod tests {
         // NULL-pointer path is reached and yields EFAULT.  This pins
         // the post-Phase-143 ordering's third stage.
         let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
-        assert!(tfd >= 0, "timerfd_create setup failed; errno={}", errno::get_errno());
+        assert!(
+            tfd >= 0,
+            "timerfd_create setup failed; errno={}",
+            errno::get_errno()
+        );
 
         errno::set_errno(0);
         let ret = unsafe { timerfd_gettime(tfd, core::ptr::null_mut()) };
@@ -5608,8 +5835,14 @@ mod tests {
         assert!(tfd >= 0);
 
         let mut buf = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value:    crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
         let ret = unsafe { timerfd_gettime(tfd, &mut buf) };
@@ -5633,8 +5866,14 @@ mod tests {
         let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
         assert!(tfd >= 0);
         let mut buf = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value:    crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
         errno::set_errno(0);
         let r = unsafe { timerfd_gettime(tfd, &mut buf) };
@@ -5680,8 +5919,14 @@ mod tests {
         // A naive ordering that wrote to the buffer before the fd
         // check would corrupt caller memory.
         let mut buf = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0xDEAD, tv_nsec: 0xBEEF },
-            it_value:    crate::stat::Timespec { tv_sec: 0xCAFE, tv_nsec: 0xF00D },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0xDEAD,
+                tv_nsec: 0xBEEF,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0xCAFE,
+                tv_nsec: 0xF00D,
+            },
         };
         errno::set_errno(0);
         let r = unsafe { timerfd_gettime(-1, &mut buf) };
@@ -5701,8 +5946,14 @@ mod tests {
         assert!(efd >= 0);
 
         let mut buf = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 1234, tv_nsec: 5678 },
-            it_value:    crate::stat::Timespec { tv_sec: 9012, tv_nsec: 3456 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 1234,
+                tv_nsec: 5678,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 9012,
+                tv_nsec: 3456,
+            },
         };
         errno::set_errno(0);
         let r = unsafe { timerfd_gettime(efd, &mut buf) };
@@ -5856,7 +6107,12 @@ mod tests {
         assert!(efd >= 0);
         errno::set_errno(0);
         let ret = eventfd_write(efd, u64::MAX - 1);
-        assert_eq!(ret, 0, "u64::MAX-1 must succeed; errno={}", errno::get_errno());
+        assert_eq!(
+            ret,
+            0,
+            "u64::MAX-1 must succeed; errno={}",
+            errno::get_errno()
+        );
         crate::file::close(efd);
     }
 
@@ -5913,7 +6169,12 @@ mod tests {
         assert!(efd >= 0);
         errno::set_errno(0);
         let r = eventfd_write(efd, 42);
-        assert_eq!(r, 0, "write of 42 must succeed; errno={}", errno::get_errno());
+        assert_eq!(
+            r,
+            0,
+            "write of 42 must succeed; errno={}",
+            errno::get_errno()
+        );
         crate::file::close(efd);
     }
 
@@ -6022,8 +6283,14 @@ mod tests {
         let tfd = timerfd_create(crate::time::CLOCK_MONOTONIC, 0);
         assert!(tfd >= 0);
         let mut buf = Itimerspec {
-            it_interval: crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
-            it_value:    crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 },
+            it_interval: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
+            it_value: crate::stat::Timespec {
+                tv_sec: 0,
+                tv_nsec: 0,
+            },
         };
 
         // bad fd + NULL → EBADF
@@ -6061,16 +6328,14 @@ mod tests {
     }
     impl CapGuard {
         fn snapshot() -> Self {
-            let (lo, hi) =
-                crate::sys_capability::current_caps_effective();
+            let (lo, hi) = crate::sys_capability::current_caps_effective();
             Self { lo, hi }
         }
     }
     impl Drop for CapGuard {
         fn drop(&mut self) {
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -6085,8 +6350,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let _ =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
         }
     }
 
@@ -6098,8 +6362,7 @@ mod tests {
             (lo, hi & !(1u32 << (cap - 32)))
         };
         let mut hdr = crate::sys_capability::CapUserHeader {
-            version:
-                crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+            version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
             pid: 0,
         };
         let data = [
@@ -6114,8 +6377,7 @@ mod tests {
                 inheritable: 0,
             },
         ];
-        let rc =
-            crate::sys_capability::capset(&mut hdr, data.as_ptr());
+        let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
         assert_eq!(rc, 0, "capset must succeed dropping cap");
         assert!(!crate::sys_capability::has_capability(cap));
     }

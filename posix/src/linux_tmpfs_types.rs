@@ -55,9 +55,12 @@ mod tests {
     #[test]
     fn test_huge_policies_distinct() {
         let policies = [
-            SHMEM_HUGE_NEVER, SHMEM_HUGE_ALWAYS,
-            SHMEM_HUGE_WITHIN_SIZE, SHMEM_HUGE_ADVISE,
-            SHMEM_HUGE_DENY, SHMEM_HUGE_FORCE,
+            SHMEM_HUGE_NEVER,
+            SHMEM_HUGE_ALWAYS,
+            SHMEM_HUGE_WITHIN_SIZE,
+            SHMEM_HUGE_ADVISE,
+            SHMEM_HUGE_DENY,
+            SHMEM_HUGE_FORCE,
         ];
         for i in 0..policies.len() {
             for j in (i + 1)..policies.len() {

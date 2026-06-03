@@ -73,8 +73,10 @@ mod tests {
     #[test]
     fn test_cids_distinct() {
         let cids = [
-            VMADDR_CID_HYPERVISOR, VMADDR_CID_LOCAL,
-            VMADDR_CID_HOST, VMADDR_CID_ANY,
+            VMADDR_CID_HYPERVISOR,
+            VMADDR_CID_LOCAL,
+            VMADDR_CID_HOST,
+            VMADDR_CID_ANY,
         ];
         for i in 0..cids.len() {
             for j in (i + 1)..cids.len() {

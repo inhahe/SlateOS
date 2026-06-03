@@ -82,8 +82,12 @@ mod tests {
     #[test]
     fn test_bus_types_distinct() {
         let buses = [
-            BUS_USB, BUS_BLUETOOTH, BUS_I2C,
-            BUS_SPI, BUS_VIRTUAL, BUS_INTEL_ISHTP,
+            BUS_USB,
+            BUS_BLUETOOTH,
+            BUS_I2C,
+            BUS_SPI,
+            BUS_VIRTUAL,
+            BUS_INTEL_ISHTP,
         ];
         for i in 0..buses.len() {
             for j in (i + 1)..buses.len() {
@@ -95,12 +99,15 @@ mod tests {
     #[test]
     fn test_quirk_flags_are_bits() {
         let quirks = [
-            HID_QUIRK_BADPAD, HID_QUIRK_MULTI_INPUT,
-            HID_QUIRK_NOGET, HID_QUIRK_INVERT,
+            HID_QUIRK_BADPAD,
+            HID_QUIRK_MULTI_INPUT,
+            HID_QUIRK_NOGET,
+            HID_QUIRK_INVERT,
             HID_QUIRK_SKIP_OUTPUT_REPORTS,
             HID_QUIRK_SKIP_OUTPUT_REPORT_ID,
             HID_QUIRK_NO_OUTPUT_REPORTS_ON_INTR_EP,
-            HID_QUIRK_NO_INIT_REPORTS, HID_QUIRK_ALWAYS_POLL,
+            HID_QUIRK_NO_INIT_REPORTS,
+            HID_QUIRK_ALWAYS_POLL,
         ];
         for i in 0..quirks.len() {
             assert!(quirks[i].is_power_of_two());
@@ -120,14 +127,16 @@ mod tests {
     #[test]
     fn test_connect_flags() {
         let flags = [
-            HID_CONNECT_HIDINPUT, HID_CONNECT_HIDDEV,
-            HID_CONNECT_HIDRAW, HID_CONNECT_FF,
+            HID_CONNECT_HIDINPUT,
+            HID_CONNECT_HIDDEV,
+            HID_CONNECT_HIDRAW,
+            HID_CONNECT_FF,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
         }
-        let combined = HID_CONNECT_HIDINPUT | HID_CONNECT_HIDDEV
-            | HID_CONNECT_HIDRAW | HID_CONNECT_FF;
+        let combined =
+            HID_CONNECT_HIDINPUT | HID_CONNECT_HIDDEV | HID_CONNECT_HIDRAW | HID_CONNECT_FF;
         assert_eq!(HID_CONNECT_DEFAULT, combined);
     }
 }

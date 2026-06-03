@@ -99,11 +99,21 @@ mod tests {
     #[test]
     fn test_chunk_types_distinct() {
         let chunks = [
-            SCTP_CID_DATA, SCTP_CID_INIT, SCTP_CID_INIT_ACK,
-            SCTP_CID_SACK, SCTP_CID_HEARTBEAT, SCTP_CID_HEARTBEAT_ACK,
-            SCTP_CID_ABORT, SCTP_CID_SHUTDOWN, SCTP_CID_SHUTDOWN_ACK,
-            SCTP_CID_ERROR, SCTP_CID_COOKIE_ECHO, SCTP_CID_COOKIE_ACK,
-            SCTP_CID_FWD_TSN, SCTP_CID_AUTH, SCTP_CID_RECONF,
+            SCTP_CID_DATA,
+            SCTP_CID_INIT,
+            SCTP_CID_INIT_ACK,
+            SCTP_CID_SACK,
+            SCTP_CID_HEARTBEAT,
+            SCTP_CID_HEARTBEAT_ACK,
+            SCTP_CID_ABORT,
+            SCTP_CID_SHUTDOWN,
+            SCTP_CID_SHUTDOWN_ACK,
+            SCTP_CID_ERROR,
+            SCTP_CID_COOKIE_ECHO,
+            SCTP_CID_COOKIE_ACK,
+            SCTP_CID_FWD_TSN,
+            SCTP_CID_AUTH,
+            SCTP_CID_RECONF,
         ];
         for i in 0..chunks.len() {
             for j in (i + 1)..chunks.len() {
@@ -115,12 +125,18 @@ mod tests {
     #[test]
     fn test_error_causes_distinct() {
         let errors = [
-            SCTP_ERROR_INV_STRM, SCTP_ERROR_MISS_PARAM,
-            SCTP_ERROR_STALE_COOKIE, SCTP_ERROR_NO_RESOURCE,
-            SCTP_ERROR_DNS_FAILED, SCTP_ERROR_UNKNOWN_CHUNK,
-            SCTP_ERROR_INV_PARAM, SCTP_ERROR_UNKNOWN_PARAM,
-            SCTP_ERROR_NO_DATA, SCTP_ERROR_COOKIE_IN_SHUTDOWN,
-            SCTP_ERROR_RESTART, SCTP_ERROR_USER_ABORT,
+            SCTP_ERROR_INV_STRM,
+            SCTP_ERROR_MISS_PARAM,
+            SCTP_ERROR_STALE_COOKIE,
+            SCTP_ERROR_NO_RESOURCE,
+            SCTP_ERROR_DNS_FAILED,
+            SCTP_ERROR_UNKNOWN_CHUNK,
+            SCTP_ERROR_INV_PARAM,
+            SCTP_ERROR_UNKNOWN_PARAM,
+            SCTP_ERROR_NO_DATA,
+            SCTP_ERROR_COOKIE_IN_SHUTDOWN,
+            SCTP_ERROR_RESTART,
+            SCTP_ERROR_USER_ABORT,
             SCTP_ERROR_PROTO_VIOLATION,
         ];
         for i in 0..errors.len() {
@@ -133,9 +149,12 @@ mod tests {
     #[test]
     fn test_socket_opts_distinct() {
         let opts = [
-            SCTP_RECVRCVINFO, SCTP_RECVNXTINFO,
-            SCTP_DEFAULT_SNDINFO, SCTP_INTERLEAVING_SUPPORTED,
-            SCTP_RECONFIG_SUPPORTED, SCTP_STREAM_SCHEDULER,
+            SCTP_RECVRCVINFO,
+            SCTP_RECVNXTINFO,
+            SCTP_DEFAULT_SNDINFO,
+            SCTP_INTERLEAVING_SUPPORTED,
+            SCTP_RECONFIG_SUPPORTED,
+            SCTP_STREAM_SCHEDULER,
             SCTP_STREAM_SCHEDULER_VALUE,
         ];
         for i in 0..opts.len() {

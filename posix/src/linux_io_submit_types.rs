@@ -77,9 +77,13 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            IOCB_CMD_PREAD, IOCB_CMD_PWRITE, IOCB_CMD_FSYNC,
-            IOCB_CMD_FDSYNC, IOCB_CMD_NOOP,
-            IOCB_CMD_PREADV, IOCB_CMD_PWRITEV,
+            IOCB_CMD_PREAD,
+            IOCB_CMD_PWRITE,
+            IOCB_CMD_FSYNC,
+            IOCB_CMD_FDSYNC,
+            IOCB_CMD_NOOP,
+            IOCB_CMD_PREADV,
+            IOCB_CMD_PWRITEV,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -107,9 +111,15 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            IOCB_OFF_DATA, IOCB_OFF_KEY, IOCB_OFF_RW_FLAGS,
-            IOCB_OFF_OPCODE, IOCB_OFF_REQPRIO, IOCB_OFF_FD,
-            IOCB_OFF_BUF, IOCB_OFF_NBYTES, IOCB_OFF_OFFSET,
+            IOCB_OFF_DATA,
+            IOCB_OFF_KEY,
+            IOCB_OFF_RW_FLAGS,
+            IOCB_OFF_OPCODE,
+            IOCB_OFF_REQPRIO,
+            IOCB_OFF_FD,
+            IOCB_OFF_BUF,
+            IOCB_OFF_NBYTES,
+            IOCB_OFF_OFFSET,
         ];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);

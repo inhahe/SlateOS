@@ -66,9 +66,18 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            GLOB_ERR, GLOB_MARK, GLOB_NOSORT, GLOB_DOOFFS,
-            GLOB_NOCHECK, GLOB_APPEND, GLOB_NOESCAPE, GLOB_PERIOD,
-            GLOB_BRACE, GLOB_NOMAGIC, GLOB_TILDE, GLOB_ONLYDIR,
+            GLOB_ERR,
+            GLOB_MARK,
+            GLOB_NOSORT,
+            GLOB_DOOFFS,
+            GLOB_NOCHECK,
+            GLOB_APPEND,
+            GLOB_NOESCAPE,
+            GLOB_PERIOD,
+            GLOB_BRACE,
+            GLOB_NOMAGIC,
+            GLOB_TILDE,
+            GLOB_ONLYDIR,
             GLOB_TILDE_CHECK,
         ];
         for f in flags {
@@ -79,9 +88,18 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            GLOB_ERR, GLOB_MARK, GLOB_NOSORT, GLOB_DOOFFS,
-            GLOB_NOCHECK, GLOB_APPEND, GLOB_NOESCAPE, GLOB_PERIOD,
-            GLOB_BRACE, GLOB_NOMAGIC, GLOB_TILDE, GLOB_ONLYDIR,
+            GLOB_ERR,
+            GLOB_MARK,
+            GLOB_NOSORT,
+            GLOB_DOOFFS,
+            GLOB_NOCHECK,
+            GLOB_APPEND,
+            GLOB_NOESCAPE,
+            GLOB_PERIOD,
+            GLOB_BRACE,
+            GLOB_NOMAGIC,
+            GLOB_TILDE,
+            GLOB_ONLYDIR,
             GLOB_TILDE_CHECK,
         ];
         for i in 0..flags.len() {
@@ -104,8 +122,11 @@ mod tests {
     #[test]
     fn test_error_codes_distinct() {
         let codes = [
-            GLOB_OK, GLOB_NOSPACE, GLOB_ABORTED,
-            GLOB_NOMATCH, GLOB_NOSYS,
+            GLOB_OK,
+            GLOB_NOSPACE,
+            GLOB_ABORTED,
+            GLOB_NOMATCH,
+            GLOB_NOSYS,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

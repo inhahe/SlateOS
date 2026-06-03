@@ -158,9 +158,17 @@ mod tests {
     #[test]
     fn test_audio_formats_distinct() {
         let fmts = [
-            AFMT_MU_LAW, AFMT_A_LAW, AFMT_IMA_ADPCM, AFMT_U8,
-            AFMT_S16_LE, AFMT_S16_BE, AFMT_S8, AFMT_U16_LE,
-            AFMT_U16_BE, AFMT_MPEG, AFMT_AC3,
+            AFMT_MU_LAW,
+            AFMT_A_LAW,
+            AFMT_IMA_ADPCM,
+            AFMT_U8,
+            AFMT_S16_LE,
+            AFMT_S16_BE,
+            AFMT_S8,
+            AFMT_U16_LE,
+            AFMT_U16_BE,
+            AFMT_MPEG,
+            AFMT_AC3,
         ];
         for i in 0..fmts.len() {
             for j in (i + 1)..fmts.len() {
@@ -172,9 +180,17 @@ mod tests {
     #[test]
     fn test_oss_formats_powers_of_two() {
         let fmts = [
-            AFMT_MU_LAW, AFMT_A_LAW, AFMT_IMA_ADPCM, AFMT_U8,
-            AFMT_S16_LE, AFMT_S16_BE, AFMT_S8, AFMT_U16_LE,
-            AFMT_U16_BE, AFMT_MPEG, AFMT_AC3,
+            AFMT_MU_LAW,
+            AFMT_A_LAW,
+            AFMT_IMA_ADPCM,
+            AFMT_U8,
+            AFMT_S16_LE,
+            AFMT_S16_BE,
+            AFMT_S8,
+            AFMT_U16_LE,
+            AFMT_U16_BE,
+            AFMT_MPEG,
+            AFMT_AC3,
         ];
         for f in &fmts {
             assert!(f.is_power_of_two(), "format {f:#x} not power of 2");
@@ -192,9 +208,12 @@ mod tests {
     #[test]
     fn test_dev_types_distinct() {
         let types = [
-            SNDRV_DEV_TYPE_PCM, SNDRV_DEV_TYPE_CONTROL,
-            SNDRV_DEV_TYPE_RAWMIDI, SNDRV_DEV_TYPE_TIMER,
-            SNDRV_DEV_TYPE_SEQUENCER, SNDRV_DEV_TYPE_HWDEP,
+            SNDRV_DEV_TYPE_PCM,
+            SNDRV_DEV_TYPE_CONTROL,
+            SNDRV_DEV_TYPE_RAWMIDI,
+            SNDRV_DEV_TYPE_TIMER,
+            SNDRV_DEV_TYPE_SEQUENCER,
+            SNDRV_DEV_TYPE_HWDEP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -212,9 +231,12 @@ mod tests {
     #[test]
     fn test_mixer_ioctls_distinct() {
         let ioctls = [
-            SOUND_MIXER_READ_VOLUME, SOUND_MIXER_WRITE_VOLUME,
-            SOUND_MIXER_READ_PCM, SOUND_MIXER_WRITE_PCM,
-            SOUND_MIXER_READ_DEVMASK, SOUND_MIXER_READ_RECMASK,
+            SOUND_MIXER_READ_VOLUME,
+            SOUND_MIXER_WRITE_VOLUME,
+            SOUND_MIXER_READ_PCM,
+            SOUND_MIXER_WRITE_PCM,
+            SOUND_MIXER_READ_DEVMASK,
+            SOUND_MIXER_READ_RECMASK,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

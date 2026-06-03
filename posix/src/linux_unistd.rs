@@ -7,33 +7,33 @@
 // Re-exports from unistd (uid/gid operations)
 // ---------------------------------------------------------------------------
 
-pub use crate::unistd::getuid;
+pub use crate::unistd::getegid;
 pub use crate::unistd::geteuid;
 pub use crate::unistd::getgid;
-pub use crate::unistd::getegid;
-pub use crate::unistd::setuid;
-pub use crate::unistd::setgid;
-pub use crate::unistd::seteuid;
-pub use crate::unistd::setegid;
-pub use crate::unistd::setreuid;
-pub use crate::unistd::setregid;
 pub use crate::unistd::getrandom;
+pub use crate::unistd::getuid;
 pub use crate::unistd::klogctl;
 pub use crate::unistd::prctl;
+pub use crate::unistd::setegid;
+pub use crate::unistd::seteuid;
+pub use crate::unistd::setgid;
+pub use crate::unistd::setregid;
+pub use crate::unistd::setreuid;
+pub use crate::unistd::setuid;
 
 // ---------------------------------------------------------------------------
 // Re-exports from process
 // ---------------------------------------------------------------------------
 
 pub use crate::process::_exit;
+pub use crate::process::clone3;
+pub use crate::process::fork;
 pub use crate::process::getpid;
 pub use crate::process::getppid;
-pub use crate::process::fork;
 pub use crate::process::gettid;
+pub use crate::process::pidfd_getfd;
 pub use crate::process::pidfd_open;
 pub use crate::process::pidfd_send_signal;
-pub use crate::process::pidfd_getfd;
-pub use crate::process::clone3;
 
 // ---------------------------------------------------------------------------
 // Re-exports from file (I/O)

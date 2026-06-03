@@ -81,9 +81,12 @@ mod tests {
     #[test]
     fn test_pmu_types_distinct() {
         let types = [
-            PERF_TYPE_HARDWARE, PERF_TYPE_SOFTWARE,
-            PERF_TYPE_TRACEPOINT, PERF_TYPE_HW_CACHE,
-            PERF_TYPE_RAW, PERF_TYPE_BREAKPOINT,
+            PERF_TYPE_HARDWARE,
+            PERF_TYPE_SOFTWARE,
+            PERF_TYPE_TRACEPOINT,
+            PERF_TYPE_HW_CACHE,
+            PERF_TYPE_RAW,
+            PERF_TYPE_BREAKPOINT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -95,9 +98,12 @@ mod tests {
     #[test]
     fn test_cache_ids_distinct() {
         let ids = [
-            PERF_COUNT_HW_CACHE_L1D, PERF_COUNT_HW_CACHE_L1I,
-            PERF_COUNT_HW_CACHE_LL, PERF_COUNT_HW_CACHE_DTLB,
-            PERF_COUNT_HW_CACHE_ITLB, PERF_COUNT_HW_CACHE_BPU,
+            PERF_COUNT_HW_CACHE_L1D,
+            PERF_COUNT_HW_CACHE_L1I,
+            PERF_COUNT_HW_CACHE_LL,
+            PERF_COUNT_HW_CACHE_DTLB,
+            PERF_COUNT_HW_CACHE_ITLB,
+            PERF_COUNT_HW_CACHE_BPU,
             PERF_COUNT_HW_CACHE_NODE,
         ];
         for i in 0..ids.len() {
@@ -132,9 +138,12 @@ mod tests {
     #[test]
     fn test_cap_flags_power_of_two() {
         let flags = [
-            PERF_PMU_CAP_NO_INTERRUPT, PERF_PMU_CAP_EXCLUSIVE,
-            PERF_PMU_CAP_ITRACE, PERF_PMU_CAP_HETEROGENEOUS,
-            PERF_PMU_CAP_NO_NMI, PERF_PMU_CAP_AUX_OUTPUT,
+            PERF_PMU_CAP_NO_INTERRUPT,
+            PERF_PMU_CAP_EXCLUSIVE,
+            PERF_PMU_CAP_ITRACE,
+            PERF_PMU_CAP_HETEROGENEOUS,
+            PERF_PMU_CAP_NO_NMI,
+            PERF_PMU_CAP_AUX_OUTPUT,
             PERF_PMU_CAP_EXTENDED_HW_TYPE,
         ];
         for f in &flags {
@@ -145,9 +154,12 @@ mod tests {
     #[test]
     fn test_cap_flags_no_overlap() {
         let flags = [
-            PERF_PMU_CAP_NO_INTERRUPT, PERF_PMU_CAP_EXCLUSIVE,
-            PERF_PMU_CAP_ITRACE, PERF_PMU_CAP_HETEROGENEOUS,
-            PERF_PMU_CAP_NO_NMI, PERF_PMU_CAP_AUX_OUTPUT,
+            PERF_PMU_CAP_NO_INTERRUPT,
+            PERF_PMU_CAP_EXCLUSIVE,
+            PERF_PMU_CAP_ITRACE,
+            PERF_PMU_CAP_HETEROGENEOUS,
+            PERF_PMU_CAP_NO_NMI,
+            PERF_PMU_CAP_AUX_OUTPUT,
             PERF_PMU_CAP_EXTENDED_HW_TYPE,
         ];
         for i in 0..flags.len() {

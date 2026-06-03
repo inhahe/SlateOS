@@ -114,14 +114,30 @@ mod tests {
     #[test]
     fn test_ifla_attrs_distinct() {
         let attrs = [
-            IFLA_UNSPEC, IFLA_ADDRESS, IFLA_BROADCAST,
-            IFLA_IFNAME, IFLA_MTU, IFLA_LINK,
-            IFLA_QDISC, IFLA_STATS, IFLA_COST,
-            IFLA_PRIORITY, IFLA_MASTER, IFLA_WIRELESS,
-            IFLA_PROTINFO, IFLA_TXQLEN, IFLA_MAP,
-            IFLA_WEIGHT, IFLA_OPERSTATE, IFLA_LINKMODE,
-            IFLA_LINKINFO, IFLA_NET_NS_PID, IFLA_IFALIAS,
-            IFLA_NUM_VF, IFLA_GROUP, IFLA_NET_NS_FD,
+            IFLA_UNSPEC,
+            IFLA_ADDRESS,
+            IFLA_BROADCAST,
+            IFLA_IFNAME,
+            IFLA_MTU,
+            IFLA_LINK,
+            IFLA_QDISC,
+            IFLA_STATS,
+            IFLA_COST,
+            IFLA_PRIORITY,
+            IFLA_MASTER,
+            IFLA_WIRELESS,
+            IFLA_PROTINFO,
+            IFLA_TXQLEN,
+            IFLA_MAP,
+            IFLA_WEIGHT,
+            IFLA_OPERSTATE,
+            IFLA_LINKMODE,
+            IFLA_LINKINFO,
+            IFLA_NET_NS_PID,
+            IFLA_IFALIAS,
+            IFLA_NUM_VF,
+            IFLA_GROUP,
+            IFLA_NET_NS_FD,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -133,9 +149,13 @@ mod tests {
     #[test]
     fn test_oper_states_distinct() {
         let states = [
-            IF_OPER_UNKNOWN, IF_OPER_NOTPRESENT, IF_OPER_DOWN,
-            IF_OPER_LOWERLAYERDOWN, IF_OPER_TESTING,
-            IF_OPER_DORMANT, IF_OPER_UP,
+            IF_OPER_UNKNOWN,
+            IF_OPER_NOTPRESENT,
+            IF_OPER_DOWN,
+            IF_OPER_LOWERLAYERDOWN,
+            IF_OPER_TESTING,
+            IF_OPER_DORMANT,
+            IF_OPER_UP,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -147,8 +167,10 @@ mod tests {
     #[test]
     fn test_ifla_info_distinct() {
         let infos = [
-            IFLA_INFO_KIND, IFLA_INFO_DATA,
-            IFLA_INFO_SLAVE_KIND, IFLA_INFO_SLAVE_DATA,
+            IFLA_INFO_KIND,
+            IFLA_INFO_DATA,
+            IFLA_INFO_SLAVE_KIND,
+            IFLA_INFO_SLAVE_DATA,
         ];
         for i in 0..infos.len() {
             for j in (i + 1)..infos.len() {

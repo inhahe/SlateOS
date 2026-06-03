@@ -74,9 +74,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            TCA_SKBEDIT_F_PRIORITY, TCA_SKBEDIT_F_QUEUE_MAPPING,
-            TCA_SKBEDIT_F_MARK, TCA_SKBEDIT_F_PTYPE,
-            TCA_SKBEDIT_F_HASH, TCA_SKBEDIT_F_INHERITDSFIELD,
+            TCA_SKBEDIT_F_PRIORITY,
+            TCA_SKBEDIT_F_QUEUE_MAPPING,
+            TCA_SKBEDIT_F_MARK,
+            TCA_SKBEDIT_F_PTYPE,
+            TCA_SKBEDIT_F_HASH,
+            TCA_SKBEDIT_F_INHERITDSFIELD,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -88,9 +91,12 @@ mod tests {
     #[test]
     fn test_flags_power_of_two() {
         let flags = [
-            TCA_SKBEDIT_F_PRIORITY, TCA_SKBEDIT_F_QUEUE_MAPPING,
-            TCA_SKBEDIT_F_MARK, TCA_SKBEDIT_F_PTYPE,
-            TCA_SKBEDIT_F_HASH, TCA_SKBEDIT_F_INHERITDSFIELD,
+            TCA_SKBEDIT_F_PRIORITY,
+            TCA_SKBEDIT_F_QUEUE_MAPPING,
+            TCA_SKBEDIT_F_MARK,
+            TCA_SKBEDIT_F_PTYPE,
+            TCA_SKBEDIT_F_HASH,
+            TCA_SKBEDIT_F_INHERITDSFIELD,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -100,10 +106,16 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_SKBEDIT_UNSPEC, TCA_SKBEDIT_TM, TCA_SKBEDIT_PARMS,
-            TCA_SKBEDIT_PRIORITY, TCA_SKBEDIT_QUEUE_MAPPING,
-            TCA_SKBEDIT_MARK, TCA_SKBEDIT_PAD, TCA_SKBEDIT_PTYPE,
-            TCA_SKBEDIT_MASK, TCA_SKBEDIT_FLAGS,
+            TCA_SKBEDIT_UNSPEC,
+            TCA_SKBEDIT_TM,
+            TCA_SKBEDIT_PARMS,
+            TCA_SKBEDIT_PRIORITY,
+            TCA_SKBEDIT_QUEUE_MAPPING,
+            TCA_SKBEDIT_MARK,
+            TCA_SKBEDIT_PAD,
+            TCA_SKBEDIT_PTYPE,
+            TCA_SKBEDIT_MASK,
+            TCA_SKBEDIT_FLAGS,
             TCA_SKBEDIT_QUEUE_MAPPING_MAX,
         ];
         for i in 0..attrs.len() {
@@ -116,8 +128,11 @@ mod tests {
     #[test]
     fn test_packet_types_distinct() {
         let types = [
-            PACKET_HOST, PACKET_BROADCAST, PACKET_MULTICAST,
-            PACKET_OTHERHOST, PACKET_OUTGOING,
+            PACKET_HOST,
+            PACKET_BROADCAST,
+            PACKET_MULTICAST,
+            PACKET_OTHERHOST,
+            PACKET_OUTGOING,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

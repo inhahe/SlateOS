@@ -62,8 +62,10 @@ mod tests {
     #[test]
     fn test_hooks_distinct() {
         let hooks = [
-            NF_INET_PRE_ROUTING, NF_INET_LOCAL_IN,
-            NF_INET_FORWARD, NF_INET_LOCAL_OUT,
+            NF_INET_PRE_ROUTING,
+            NF_INET_LOCAL_IN,
+            NF_INET_FORWARD,
+            NF_INET_LOCAL_OUT,
             NF_INET_POST_ROUTING,
         ];
         for i in 0..hooks.len() {

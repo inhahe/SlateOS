@@ -104,7 +104,12 @@ mod tests {
 
     #[test]
     fn test_cmds_distinct() {
-        let cmds = [GTP_CMD_NEWPDP, GTP_CMD_DELPDP, GTP_CMD_GETPDP, GTP_CMD_ECHOREQ];
+        let cmds = [
+            GTP_CMD_NEWPDP,
+            GTP_CMD_DELPDP,
+            GTP_CMD_GETPDP,
+            GTP_CMD_ECHOREQ,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);
@@ -115,10 +120,19 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            GTPA_UNSPEC, GTPA_LINK, GTPA_VERSION, GTPA_TID,
-            GTPA_PEER_ADDRESS, GTPA_MS_ADDRESS, GTPA_FLOW,
-            GTPA_NET_NS_FD, GTPA_I_TEI, GTPA_O_TEI,
-            GTPA_PEER_ADDR6, GTPA_MS_ADDR6, GTPA_FAMILY,
+            GTPA_UNSPEC,
+            GTPA_LINK,
+            GTPA_VERSION,
+            GTPA_TID,
+            GTPA_PEER_ADDRESS,
+            GTPA_MS_ADDRESS,
+            GTPA_FLOW,
+            GTPA_NET_NS_FD,
+            GTPA_I_TEI,
+            GTPA_O_TEI,
+            GTPA_PEER_ADDR6,
+            GTPA_MS_ADDR6,
+            GTPA_FAMILY,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -155,8 +169,11 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            GTP_MSG_ECHO_REQ, GTP_MSG_ECHO_RESP,
-            GTP_MSG_ERROR_IND, GTP_MSG_END_MARKER, GTP_MSG_TPDU,
+            GTP_MSG_ECHO_REQ,
+            GTP_MSG_ECHO_RESP,
+            GTP_MSG_ERROR_IND,
+            GTP_MSG_END_MARKER,
+            GTP_MSG_TPDU,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {

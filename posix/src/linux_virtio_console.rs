@@ -90,7 +90,8 @@ mod tests {
     #[test]
     fn test_features_distinct() {
         let feats = [
-            VIRTIO_CONSOLE_F_SIZE, VIRTIO_CONSOLE_F_MULTIPORT,
+            VIRTIO_CONSOLE_F_SIZE,
+            VIRTIO_CONSOLE_F_MULTIPORT,
             VIRTIO_CONSOLE_F_EMERG_WRITE,
         ];
         for i in 0..feats.len() {
@@ -103,10 +104,14 @@ mod tests {
     #[test]
     fn test_ctrl_events_distinct() {
         let events = [
-            VIRTIO_CONSOLE_DEVICE_READY, VIRTIO_CONSOLE_DEVICE_ADD,
-            VIRTIO_CONSOLE_DEVICE_REMOVE, VIRTIO_CONSOLE_PORT_READY,
-            VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_RESIZE,
-            VIRTIO_CONSOLE_PORT_OPEN, VIRTIO_CONSOLE_PORT_NAME,
+            VIRTIO_CONSOLE_DEVICE_READY,
+            VIRTIO_CONSOLE_DEVICE_ADD,
+            VIRTIO_CONSOLE_DEVICE_REMOVE,
+            VIRTIO_CONSOLE_PORT_READY,
+            VIRTIO_CONSOLE_CONSOLE_PORT,
+            VIRTIO_CONSOLE_RESIZE,
+            VIRTIO_CONSOLE_PORT_OPEN,
+            VIRTIO_CONSOLE_PORT_NAME,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

@@ -73,9 +73,12 @@ mod tests {
     #[test]
     fn test_core_ioctls_distinct() {
         let cmds = [
-            VHOST_GET_FEATURES, VHOST_SET_FEATURES,
-            VHOST_SET_OWNER, VHOST_RESET_OWNER,
-            VHOST_SET_MEM_TABLE, VHOST_SET_LOG_BASE,
+            VHOST_GET_FEATURES,
+            VHOST_SET_FEATURES,
+            VHOST_SET_OWNER,
+            VHOST_RESET_OWNER,
+            VHOST_SET_MEM_TABLE,
+            VHOST_SET_LOG_BASE,
             VHOST_SET_LOG_FD,
         ];
         for i in 0..cmds.len() {
@@ -88,9 +91,12 @@ mod tests {
     #[test]
     fn test_vring_ioctls_distinct() {
         let cmds = [
-            VHOST_SET_VRING_NUM, VHOST_SET_VRING_ADDR,
-            VHOST_SET_VRING_BASE, VHOST_SET_VRING_KICK,
-            VHOST_SET_VRING_CALL, VHOST_SET_VRING_ERR,
+            VHOST_SET_VRING_NUM,
+            VHOST_SET_VRING_ADDR,
+            VHOST_SET_VRING_BASE,
+            VHOST_SET_VRING_KICK,
+            VHOST_SET_VRING_CALL,
+            VHOST_SET_VRING_ERR,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

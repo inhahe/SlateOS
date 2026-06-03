@@ -59,7 +59,11 @@ mod tests {
 
     #[test]
     fn test_class_codes_distinct() {
-        let classes = [CDX_DEV_CLASS_NET, CDX_DEV_CLASS_PROCESSING, CDX_DEV_CLASS_CRYPTO];
+        let classes = [
+            CDX_DEV_CLASS_NET,
+            CDX_DEV_CLASS_PROCESSING,
+            CDX_DEV_CLASS_CRYPTO,
+        ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
                 assert_ne!(classes[i], classes[j]);
@@ -69,7 +73,11 @@ mod tests {
 
     #[test]
     fn test_flags_no_overlap() {
-        let flags = [CDX_DEV_FLAG_BUS_MASTER, CDX_DEV_FLAG_MSI, CDX_DEV_FLAG_RESET];
+        let flags = [
+            CDX_DEV_FLAG_BUS_MASTER,
+            CDX_DEV_FLAG_MSI,
+            CDX_DEV_FLAG_RESET,
+        ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {
@@ -80,7 +88,12 @@ mod tests {
 
     #[test]
     fn test_commands_distinct() {
-        let cmds = [CDX_BUS_ENABLE, CDX_BUS_DISABLE, CDX_BUS_RESET, CDX_BUS_RESCAN];
+        let cmds = [
+            CDX_BUS_ENABLE,
+            CDX_BUS_DISABLE,
+            CDX_BUS_RESET,
+            CDX_BUS_RESCAN,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);

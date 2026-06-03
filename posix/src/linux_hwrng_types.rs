@@ -70,8 +70,11 @@ mod tests {
     #[test]
     fn test_quality_levels_distinct() {
         let levels = [
-            RNG_QUALITY_NONE, RNG_QUALITY_LOW, RNG_QUALITY_MEDIUM,
-            RNG_QUALITY_HIGH, RNG_QUALITY_PERFECT,
+            RNG_QUALITY_NONE,
+            RNG_QUALITY_LOW,
+            RNG_QUALITY_MEDIUM,
+            RNG_QUALITY_HIGH,
+            RNG_QUALITY_PERFECT,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -91,7 +94,8 @@ mod tests {
     #[test]
     fn test_device_flags_power_of_two() {
         let flags = [
-            HWRNG_FLAG_SEED_BOOT, HWRNG_FLAG_BEST_AVAILABLE,
+            HWRNG_FLAG_SEED_BOOT,
+            HWRNG_FLAG_BEST_AVAILABLE,
             HWRNG_FLAG_SUPPLEMENT,
         ];
         for f in &flags {
@@ -102,7 +106,8 @@ mod tests {
     #[test]
     fn test_device_flags_no_overlap() {
         let flags = [
-            HWRNG_FLAG_SEED_BOOT, HWRNG_FLAG_BEST_AVAILABLE,
+            HWRNG_FLAG_SEED_BOOT,
+            HWRNG_FLAG_BEST_AVAILABLE,
             HWRNG_FLAG_SUPPLEMENT,
         ];
         for i in 0..flags.len() {
@@ -122,8 +127,12 @@ mod tests {
     #[test]
     fn test_ioctl_distinct() {
         let cmds = [
-            RNDGETENTCNT, RNDADDTOENTCNT, RNDGETPOOL,
-            RNDADDENTROPY, RNDZAPENTCNT, RNDCLEARPOOL,
+            RNDGETENTCNT,
+            RNDADDTOENTCNT,
+            RNDGETPOOL,
+            RNDADDENTROPY,
+            RNDZAPENTCNT,
+            RNDCLEARPOOL,
             RNDRESEEDCRNG,
         ];
         for i in 0..cmds.len() {

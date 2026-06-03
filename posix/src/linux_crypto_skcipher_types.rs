@@ -96,8 +96,12 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            CRYPTO_MODE_ECB, CRYPTO_MODE_CBC, CRYPTO_MODE_CTR,
-            CRYPTO_MODE_XTS, CRYPTO_MODE_CTS, CRYPTO_MODE_OFB,
+            CRYPTO_MODE_ECB,
+            CRYPTO_MODE_CBC,
+            CRYPTO_MODE_CTR,
+            CRYPTO_MODE_XTS,
+            CRYPTO_MODE_CTS,
+            CRYPTO_MODE_OFB,
             CRYPTO_MODE_CFB,
         ];
         for i in 0..modes.len() {

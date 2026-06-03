@@ -71,9 +71,13 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            WAKEUP_TYPE_POWER_BUTTON, WAKEUP_TYPE_INPUT,
-            WAKEUP_TYPE_NETWORK, WAKEUP_TYPE_RTC,
-            WAKEUP_TYPE_USB, WAKEUP_TYPE_TIMER, WAKEUP_TYPE_PLATFORM,
+            WAKEUP_TYPE_POWER_BUTTON,
+            WAKEUP_TYPE_INPUT,
+            WAKEUP_TYPE_NETWORK,
+            WAKEUP_TYPE_RTC,
+            WAKEUP_TYPE_USB,
+            WAKEUP_TYPE_TIMER,
+            WAKEUP_TYPE_PLATFORM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -85,7 +89,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            WAKEUP_FLAG_PREVENT_SUSPEND, WAKEUP_FLAG_HARD,
+            WAKEUP_FLAG_PREVENT_SUSPEND,
+            WAKEUP_FLAG_HARD,
             WAKEUP_FLAG_AUTOSLEEP,
         ];
         for i in 0..flags.len() {

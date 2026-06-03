@@ -78,14 +78,28 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            INET_DIAG_NONE, INET_DIAG_MEMINFO, INET_DIAG_INFO,
-            INET_DIAG_VEGASINFO, INET_DIAG_CONG, INET_DIAG_TOS,
-            INET_DIAG_TCLASS, INET_DIAG_SKMEMINFO, INET_DIAG_SHUTDOWN,
-            INET_DIAG_DCTCPINFO, INET_DIAG_PROTOCOL, INET_DIAG_SKV6ONLY,
-            INET_DIAG_LOCALS, INET_DIAG_PEERS, INET_DIAG_PAD,
-            INET_DIAG_MARK, INET_DIAG_BBRINFO, INET_DIAG_CLASS_ID,
-            INET_DIAG_MD5SIG, INET_DIAG_ULP_INFO,
-            INET_DIAG_SK_BPF_STORAGES, INET_DIAG_CGROUP_ID,
+            INET_DIAG_NONE,
+            INET_DIAG_MEMINFO,
+            INET_DIAG_INFO,
+            INET_DIAG_VEGASINFO,
+            INET_DIAG_CONG,
+            INET_DIAG_TOS,
+            INET_DIAG_TCLASS,
+            INET_DIAG_SKMEMINFO,
+            INET_DIAG_SHUTDOWN,
+            INET_DIAG_DCTCPINFO,
+            INET_DIAG_PROTOCOL,
+            INET_DIAG_SKV6ONLY,
+            INET_DIAG_LOCALS,
+            INET_DIAG_PEERS,
+            INET_DIAG_PAD,
+            INET_DIAG_MARK,
+            INET_DIAG_BBRINFO,
+            INET_DIAG_CLASS_ID,
+            INET_DIAG_MD5SIG,
+            INET_DIAG_ULP_INFO,
+            INET_DIAG_SK_BPF_STORAGES,
+            INET_DIAG_CGROUP_ID,
             INET_DIAG_SOCKOPT,
         ];
         for i in 0..attrs.len() {
@@ -98,8 +112,10 @@ mod tests {
     #[test]
     fn test_bytecode_ops_distinct() {
         let ops = [
-            INET_DIAG_BC_NOP, INET_DIAG_BC_JMP,
-            INET_DIAG_BC_S_COND, INET_DIAG_BC_D_COND,
+            INET_DIAG_BC_NOP,
+            INET_DIAG_BC_JMP,
+            INET_DIAG_BC_S_COND,
+            INET_DIAG_BC_D_COND,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

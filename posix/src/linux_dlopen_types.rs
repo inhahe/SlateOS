@@ -104,8 +104,12 @@ mod tests {
     #[test]
     fn test_dlinfo_requests_distinct() {
         let reqs = [
-            RTLD_DI_LINKMAP, RTLD_DI_ORIGIN, RTLD_DI_SERINFO,
-            RTLD_DI_SERINFOSIZE, RTLD_DI_TLS_MODID, RTLD_DI_TLS_DATA,
+            RTLD_DI_LINKMAP,
+            RTLD_DI_ORIGIN,
+            RTLD_DI_SERINFO,
+            RTLD_DI_SERINFOSIZE,
+            RTLD_DI_TLS_MODID,
+            RTLD_DI_TLS_DATA,
         ];
         for i in 0..reqs.len() {
             for j in (i + 1)..reqs.len() {

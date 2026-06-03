@@ -97,8 +97,10 @@ mod tests {
     #[test]
     fn test_clc_types_distinct() {
         let types = [
-            SMC_CLC_PROPOSAL, SMC_CLC_ACCEPT,
-            SMC_CLC_CONFIRM, SMC_CLC_DECLINE,
+            SMC_CLC_PROPOSAL,
+            SMC_CLC_ACCEPT,
+            SMC_CLC_CONFIRM,
+            SMC_CLC_DECLINE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -110,8 +112,10 @@ mod tests {
     #[test]
     fn test_decline_reasons_distinct() {
         let reasons = [
-            SMC_CLC_DECL_NOSMC, SMC_CLC_DECL_NOISM,
-            SMC_CLC_DECL_NOLNK, SMC_CLC_DECL_DIFFPREFIX,
+            SMC_CLC_DECL_NOSMC,
+            SMC_CLC_DECL_NOISM,
+            SMC_CLC_DECL_NOLNK,
+            SMC_CLC_DECL_DIFFPREFIX,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {

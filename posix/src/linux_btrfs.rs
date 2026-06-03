@@ -153,10 +153,17 @@ mod tests {
     #[test]
     fn test_ioc_cmds_distinct() {
         let cmds = [
-            BTRFS_IOC_SNAP_CREATE, BTRFS_IOC_DEFRAG, BTRFS_IOC_RESIZE,
-            BTRFS_IOC_SCAN_DEV, BTRFS_IOC_SYNC, BTRFS_IOC_CLONE,
-            BTRFS_IOC_ADD_DEV, BTRFS_IOC_RM_DEV, BTRFS_IOC_BALANCE,
-            BTRFS_IOC_SUBVOL_CREATE, BTRFS_IOC_SNAP_DESTROY,
+            BTRFS_IOC_SNAP_CREATE,
+            BTRFS_IOC_DEFRAG,
+            BTRFS_IOC_RESIZE,
+            BTRFS_IOC_SCAN_DEV,
+            BTRFS_IOC_SYNC,
+            BTRFS_IOC_CLONE,
+            BTRFS_IOC_ADD_DEV,
+            BTRFS_IOC_RM_DEV,
+            BTRFS_IOC_BALANCE,
+            BTRFS_IOC_SUBVOL_CREATE,
+            BTRFS_IOC_SNAP_DESTROY,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -168,8 +175,10 @@ mod tests {
     #[test]
     fn test_compress_types_distinct() {
         let types = [
-            BTRFS_COMPRESS_NONE, BTRFS_COMPRESS_ZLIB,
-            BTRFS_COMPRESS_LZO, BTRFS_COMPRESS_ZSTD,
+            BTRFS_COMPRESS_NONE,
+            BTRFS_COMPRESS_ZLIB,
+            BTRFS_COMPRESS_LZO,
+            BTRFS_COMPRESS_ZSTD,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -181,11 +190,16 @@ mod tests {
     #[test]
     fn test_key_types_distinct() {
         let keys = [
-            BTRFS_INODE_ITEM_KEY, BTRFS_INODE_REF_KEY,
-            BTRFS_DIR_ITEM_KEY, BTRFS_DIR_INDEX_KEY,
-            BTRFS_EXTENT_DATA_KEY, BTRFS_ROOT_ITEM_KEY,
-            BTRFS_ROOT_REF_KEY, BTRFS_EXTENT_ITEM_KEY,
-            BTRFS_CHUNK_ITEM_KEY, BTRFS_DEV_ITEM_KEY,
+            BTRFS_INODE_ITEM_KEY,
+            BTRFS_INODE_REF_KEY,
+            BTRFS_DIR_ITEM_KEY,
+            BTRFS_DIR_INDEX_KEY,
+            BTRFS_EXTENT_DATA_KEY,
+            BTRFS_ROOT_ITEM_KEY,
+            BTRFS_ROOT_REF_KEY,
+            BTRFS_EXTENT_ITEM_KEY,
+            BTRFS_CHUNK_ITEM_KEY,
+            BTRFS_DEV_ITEM_KEY,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -197,9 +211,12 @@ mod tests {
     #[test]
     fn test_tree_ids_distinct() {
         let ids = [
-            BTRFS_ROOT_TREE_OBJECTID, BTRFS_EXTENT_TREE_OBJECTID,
-            BTRFS_CHUNK_TREE_OBJECTID, BTRFS_DEV_TREE_OBJECTID,
-            BTRFS_FS_TREE_OBJECTID, BTRFS_CSUM_TREE_OBJECTID,
+            BTRFS_ROOT_TREE_OBJECTID,
+            BTRFS_EXTENT_TREE_OBJECTID,
+            BTRFS_CHUNK_TREE_OBJECTID,
+            BTRFS_DEV_TREE_OBJECTID,
+            BTRFS_FS_TREE_OBJECTID,
+            BTRFS_CSUM_TREE_OBJECTID,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -211,10 +228,14 @@ mod tests {
     #[test]
     fn test_raid_profiles_no_overlap() {
         let raids = [
-            BTRFS_BLOCK_GROUP_RAID0, BTRFS_BLOCK_GROUP_RAID1,
-            BTRFS_BLOCK_GROUP_DUP, BTRFS_BLOCK_GROUP_RAID10,
-            BTRFS_BLOCK_GROUP_RAID5, BTRFS_BLOCK_GROUP_RAID6,
-            BTRFS_BLOCK_GROUP_RAID1C3, BTRFS_BLOCK_GROUP_RAID1C4,
+            BTRFS_BLOCK_GROUP_RAID0,
+            BTRFS_BLOCK_GROUP_RAID1,
+            BTRFS_BLOCK_GROUP_DUP,
+            BTRFS_BLOCK_GROUP_RAID10,
+            BTRFS_BLOCK_GROUP_RAID5,
+            BTRFS_BLOCK_GROUP_RAID6,
+            BTRFS_BLOCK_GROUP_RAID1C3,
+            BTRFS_BLOCK_GROUP_RAID1C4,
         ];
         for i in 0..raids.len() {
             for j in (i + 1)..raids.len() {

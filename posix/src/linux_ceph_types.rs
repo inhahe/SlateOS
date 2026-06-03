@@ -131,9 +131,12 @@ mod tests {
     #[test]
     fn test_read_ops_distinct() {
         let ops = [
-            CEPH_OSD_OP_READ, CEPH_OSD_OP_STAT,
-            CEPH_OSD_OP_MAPEXT, CEPH_OSD_OP_SPARSE_READ,
-            CEPH_OSD_OP_NOTIFY, CEPH_OSD_OP_NOTIFY_ACK,
+            CEPH_OSD_OP_READ,
+            CEPH_OSD_OP_STAT,
+            CEPH_OSD_OP_MAPEXT,
+            CEPH_OSD_OP_SPARSE_READ,
+            CEPH_OSD_OP_NOTIFY,
+            CEPH_OSD_OP_NOTIFY_ACK,
             CEPH_OSD_OP_ASSERT_EXISTS,
         ];
         for i in 0..ops.len() {
@@ -146,10 +149,14 @@ mod tests {
     #[test]
     fn test_write_ops_distinct() {
         let ops = [
-            CEPH_OSD_OP_WRITE, CEPH_OSD_OP_WRITEFULL,
-            CEPH_OSD_OP_TRUNCATE, CEPH_OSD_OP_ZERO,
-            CEPH_OSD_OP_DELETE, CEPH_OSD_OP_APPEND,
-            CEPH_OSD_OP_SETTRUNC, CEPH_OSD_OP_CREATE,
+            CEPH_OSD_OP_WRITE,
+            CEPH_OSD_OP_WRITEFULL,
+            CEPH_OSD_OP_TRUNCATE,
+            CEPH_OSD_OP_ZERO,
+            CEPH_OSD_OP_DELETE,
+            CEPH_OSD_OP_APPEND,
+            CEPH_OSD_OP_SETTRUNC,
+            CEPH_OSD_OP_CREATE,
             CEPH_OSD_OP_ROLLBACK,
         ];
         for i in 0..ops.len() {
@@ -162,9 +169,12 @@ mod tests {
     #[test]
     fn test_xattr_ops_distinct() {
         let ops = [
-            CEPH_OSD_OP_GETXATTR, CEPH_OSD_OP_GETXATTRS,
-            CEPH_OSD_OP_CMPXATTR, CEPH_OSD_OP_SETXATTR,
-            CEPH_OSD_OP_SETXATTRS, CEPH_OSD_OP_RMXATTR,
+            CEPH_OSD_OP_GETXATTR,
+            CEPH_OSD_OP_GETXATTRS,
+            CEPH_OSD_OP_CMPXATTR,
+            CEPH_OSD_OP_SETXATTR,
+            CEPH_OSD_OP_SETXATTRS,
+            CEPH_OSD_OP_RMXATTR,
             CEPH_OSD_OP_RESETXATTRS,
         ];
         for i in 0..ops.len() {
@@ -177,9 +187,12 @@ mod tests {
     #[test]
     fn test_crush_rules_distinct() {
         let rules = [
-            CRUSH_RULE_NOOP, CRUSH_RULE_TAKE,
-            CRUSH_RULE_CHOOSE_FIRSTN, CRUSH_RULE_CHOOSELEAF_FIRSTN,
-            CRUSH_RULE_EMIT, CRUSH_RULE_CHOOSE_INDEP,
+            CRUSH_RULE_NOOP,
+            CRUSH_RULE_TAKE,
+            CRUSH_RULE_CHOOSE_FIRSTN,
+            CRUSH_RULE_CHOOSELEAF_FIRSTN,
+            CRUSH_RULE_EMIT,
+            CRUSH_RULE_CHOOSE_INDEP,
             CRUSH_RULE_CHOOSELEAF_INDEP,
             CRUSH_RULE_SET_CHOOSE_TRIES,
             CRUSH_RULE_SET_CHOOSELEAF_TRIES,
@@ -194,11 +207,14 @@ mod tests {
     #[test]
     fn test_pool_flags_powers_of_two() {
         let flags = [
-            CEPH_POOL_FLAG_HASHPSPOOL, CEPH_POOL_FLAG_FULL,
+            CEPH_POOL_FLAG_HASHPSPOOL,
+            CEPH_POOL_FLAG_FULL,
             CEPH_POOL_FLAG_EC_OVERWRITES,
             CEPH_POOL_FLAG_INCOMPLETE_CLONES,
-            CEPH_POOL_FLAG_NODELETE, CEPH_POOL_FLAG_NOPGCHANGE,
-            CEPH_POOL_FLAG_NOSCRUB, CEPH_POOL_FLAG_NODEEP_SCRUB,
+            CEPH_POOL_FLAG_NODELETE,
+            CEPH_POOL_FLAG_NOPGCHANGE,
+            CEPH_POOL_FLAG_NOSCRUB,
+            CEPH_POOL_FLAG_NODEEP_SCRUB,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -208,11 +224,14 @@ mod tests {
     #[test]
     fn test_pool_flags_no_overlap() {
         let flags = [
-            CEPH_POOL_FLAG_HASHPSPOOL, CEPH_POOL_FLAG_FULL,
+            CEPH_POOL_FLAG_HASHPSPOOL,
+            CEPH_POOL_FLAG_FULL,
             CEPH_POOL_FLAG_EC_OVERWRITES,
             CEPH_POOL_FLAG_INCOMPLETE_CLONES,
-            CEPH_POOL_FLAG_NODELETE, CEPH_POOL_FLAG_NOPGCHANGE,
-            CEPH_POOL_FLAG_NOSCRUB, CEPH_POOL_FLAG_NODEEP_SCRUB,
+            CEPH_POOL_FLAG_NODELETE,
+            CEPH_POOL_FLAG_NOPGCHANGE,
+            CEPH_POOL_FLAG_NOSCRUB,
+            CEPH_POOL_FLAG_NODEEP_SCRUB,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -224,8 +243,10 @@ mod tests {
     #[test]
     fn test_entity_types_distinct() {
         let types = [
-            CEPH_ENTITY_TYPE_CLIENT, CEPH_ENTITY_TYPE_MON,
-            CEPH_ENTITY_TYPE_MDS, CEPH_ENTITY_TYPE_OSD,
+            CEPH_ENTITY_TYPE_CLIENT,
+            CEPH_ENTITY_TYPE_MON,
+            CEPH_ENTITY_TYPE_MDS,
+            CEPH_ENTITY_TYPE_OSD,
             CEPH_ENTITY_TYPE_ANY,
         ];
         for i in 0..types.len() {

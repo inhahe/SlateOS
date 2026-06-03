@@ -85,9 +85,7 @@ mod tests {
 
     #[test]
     fn test_basic_flags_no_overlap() {
-        let flags = [
-            EPOLLIN, EPOLLPRI, EPOLLOUT, EPOLLERR, EPOLLHUP,
-        ];
+        let flags = [EPOLLIN, EPOLLPRI, EPOLLOUT, EPOLLERR, EPOLLHUP];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_eq!(flags[i] & flags[j], 0);
@@ -116,8 +114,12 @@ mod tests {
     #[test]
     fn test_rw_flags_distinct() {
         let flags = [
-            EPOLLRDNORM, EPOLLRDBAND, EPOLLWRNORM,
-            EPOLLWRBAND, EPOLLMSG, EPOLLRDHUP,
+            EPOLLRDNORM,
+            EPOLLRDBAND,
+            EPOLLWRNORM,
+            EPOLLWRBAND,
+            EPOLLMSG,
+            EPOLLRDHUP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

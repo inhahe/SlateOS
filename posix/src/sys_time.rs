@@ -7,16 +7,16 @@
 // Structures
 // ---------------------------------------------------------------------------
 
-pub use crate::time::Timeval;
 pub use crate::time::Itimerval;
+pub use crate::time::Timeval;
 
 // ---------------------------------------------------------------------------
 // Timer types
 // ---------------------------------------------------------------------------
 
+pub use crate::time::ITIMER_PROF;
 pub use crate::time::ITIMER_REAL;
 pub use crate::time::ITIMER_VIRTUAL;
-pub use crate::time::ITIMER_PROF;
 
 // ---------------------------------------------------------------------------
 // Functions
@@ -69,7 +69,10 @@ mod tests {
 
     #[test]
     fn test_gettimeofday() {
-        let mut tv = Timeval { tv_sec: 0, tv_usec: 0 };
+        let mut tv = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         let ret = gettimeofday(&mut tv, core::ptr::null_mut());
         // On the bare-metal / test stub, returns -1; on a real system, 0.
         if ret == 0 {
@@ -81,7 +84,10 @@ mod tests {
 
     #[test]
     fn test_timerclear() {
-        let mut tv = Timeval { tv_sec: 42, tv_usec: 100 };
+        let mut tv = Timeval {
+            tv_sec: 42,
+            tv_usec: 100,
+        };
         timerclear(&mut tv);
         assert_eq!(tv.tv_sec, 0);
         assert_eq!(tv.tv_usec, 0);
@@ -89,13 +95,22 @@ mod tests {
 
     #[test]
     fn test_timerisset() {
-        let zero = Timeval { tv_sec: 0, tv_usec: 0 };
+        let zero = Timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
         assert!(!timerisset(&zero));
 
-        let nonzero = Timeval { tv_sec: 1, tv_usec: 0 };
+        let nonzero = Timeval {
+            tv_sec: 1,
+            tv_usec: 0,
+        };
         assert!(timerisset(&nonzero));
 
-        let usec_only = Timeval { tv_sec: 0, tv_usec: 500 };
+        let usec_only = Timeval {
+            tv_sec: 0,
+            tv_usec: 500,
+        };
         assert!(timerisset(&usec_only));
     }
 

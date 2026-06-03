@@ -88,10 +88,17 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            WDIOC_GETSUPPORT, WDIOC_GETSTATUS, WDIOC_GETBOOTSTATUS,
-            WDIOC_GETTEMP, WDIOC_SETOPTIONS, WDIOC_KEEPALIVE,
-            WDIOC_SETTIMEOUT, WDIOC_GETTIMEOUT, WDIOC_SETPRETIMEOUT,
-            WDIOC_GETPRETIMEOUT, WDIOC_GETTIMELEFT,
+            WDIOC_GETSUPPORT,
+            WDIOC_GETSTATUS,
+            WDIOC_GETBOOTSTATUS,
+            WDIOC_GETTEMP,
+            WDIOC_SETOPTIONS,
+            WDIOC_KEEPALIVE,
+            WDIOC_SETTIMEOUT,
+            WDIOC_GETTIMEOUT,
+            WDIOC_SETPRETIMEOUT,
+            WDIOC_GETPRETIMEOUT,
+            WDIOC_GETTIMELEFT,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -113,9 +120,15 @@ mod tests {
     #[test]
     fn test_info_flags_no_overlap() {
         let flags = [
-            WDIOF_OVERHEAT, WDIOF_FANFAULT, WDIOF_EXTERN1,
-            WDIOF_EXTERN2, WDIOF_POWERUNDER, WDIOF_CARDRESET,
-            WDIOF_POWEROVER, WDIOF_SETTIMEOUT, WDIOF_MAGICCLOSE,
+            WDIOF_OVERHEAT,
+            WDIOF_FANFAULT,
+            WDIOF_EXTERN1,
+            WDIOF_EXTERN2,
+            WDIOF_POWERUNDER,
+            WDIOF_CARDRESET,
+            WDIOF_POWEROVER,
+            WDIOF_SETTIMEOUT,
+            WDIOF_MAGICCLOSE,
             WDIOF_PRETIMEOUT,
         ];
         for i in 0..flags.len() {

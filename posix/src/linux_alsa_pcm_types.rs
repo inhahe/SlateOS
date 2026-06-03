@@ -99,10 +99,14 @@ mod tests {
     #[test]
     fn test_formats_distinct() {
         let fmts = [
-            SNDRV_PCM_FORMAT_S8, SNDRV_PCM_FORMAT_U8,
-            SNDRV_PCM_FORMAT_S16_LE, SNDRV_PCM_FORMAT_S16_BE,
-            SNDRV_PCM_FORMAT_U16_LE, SNDRV_PCM_FORMAT_S24_LE,
-            SNDRV_PCM_FORMAT_S32_LE, SNDRV_PCM_FORMAT_FLOAT_LE,
+            SNDRV_PCM_FORMAT_S8,
+            SNDRV_PCM_FORMAT_U8,
+            SNDRV_PCM_FORMAT_S16_LE,
+            SNDRV_PCM_FORMAT_S16_BE,
+            SNDRV_PCM_FORMAT_U16_LE,
+            SNDRV_PCM_FORMAT_S24_LE,
+            SNDRV_PCM_FORMAT_S32_LE,
+            SNDRV_PCM_FORMAT_FLOAT_LE,
             SNDRV_PCM_FORMAT_FLOAT64_LE,
         ];
         for i in 0..fmts.len() {
@@ -115,10 +119,14 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            SNDRV_PCM_STATE_OPEN, SNDRV_PCM_STATE_SETUP,
-            SNDRV_PCM_STATE_PREPARED, SNDRV_PCM_STATE_RUNNING,
-            SNDRV_PCM_STATE_XRUN, SNDRV_PCM_STATE_DRAINING,
-            SNDRV_PCM_STATE_PAUSED, SNDRV_PCM_STATE_SUSPENDED,
+            SNDRV_PCM_STATE_OPEN,
+            SNDRV_PCM_STATE_SETUP,
+            SNDRV_PCM_STATE_PREPARED,
+            SNDRV_PCM_STATE_RUNNING,
+            SNDRV_PCM_STATE_XRUN,
+            SNDRV_PCM_STATE_DRAINING,
+            SNDRV_PCM_STATE_PAUSED,
+            SNDRV_PCM_STATE_SUSPENDED,
             SNDRV_PCM_STATE_DISCONNECTED,
         ];
         for i in 0..states.len() {

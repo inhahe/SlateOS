@@ -104,9 +104,12 @@ mod tests {
     #[test]
     fn test_governor_names_distinct() {
         let govs = [
-            CPUFREQ_GOV_PERFORMANCE, CPUFREQ_GOV_POWERSAVE,
-            CPUFREQ_GOV_USERSPACE, CPUFREQ_GOV_ONDEMAND,
-            CPUFREQ_GOV_CONSERVATIVE, CPUFREQ_GOV_SCHEDUTIL,
+            CPUFREQ_GOV_PERFORMANCE,
+            CPUFREQ_GOV_POWERSAVE,
+            CPUFREQ_GOV_USERSPACE,
+            CPUFREQ_GOV_ONDEMAND,
+            CPUFREQ_GOV_CONSERVATIVE,
+            CPUFREQ_GOV_SCHEDUTIL,
         ];
         for i in 0..govs.len() {
             for j in (i + 1)..govs.len() {

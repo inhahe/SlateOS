@@ -148,7 +148,12 @@ pub struct SockFprog {
 /// Construct a `SockFilter` BPF statement (no jump offsets).
 #[inline]
 pub const fn bpf_stmt(code: u16, k: u32) -> SockFilter {
-    SockFilter { code, jt: 0, jf: 0, k }
+    SockFilter {
+        code,
+        jt: 0,
+        jf: 0,
+        k,
+    }
 }
 
 /// Construct a `SockFilter` BPF jump instruction.
@@ -197,8 +202,7 @@ mod tests {
     #[test]
     fn test_instruction_classes_distinct() {
         let classes = [
-            BPF_LD, BPF_LDX, BPF_ST, BPF_STX,
-            BPF_ALU, BPF_JMP, BPF_RET, BPF_MISC,
+            BPF_LD, BPF_LDX, BPF_ST, BPF_STX, BPF_ALU, BPF_JMP, BPF_RET, BPF_MISC,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {

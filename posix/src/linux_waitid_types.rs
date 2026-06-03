@@ -87,7 +87,9 @@ mod tests {
     #[test]
     fn test_options_no_overlap() {
         // The core options that are bitwise
-        let opts = [WNOHANG, WSTOPPED, WEXITED, WCONTINUED, WNOWAIT, __WCLONE, __WALL];
+        let opts = [
+            WNOHANG, WSTOPPED, WEXITED, WCONTINUED, WNOWAIT, __WCLONE, __WALL,
+        ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
                 assert_eq!(opts[i] & opts[j], 0);
@@ -98,8 +100,12 @@ mod tests {
     #[test]
     fn test_cld_codes_distinct() {
         let codes = [
-            CLD_EXITED, CLD_KILLED, CLD_DUMPED,
-            CLD_TRAPPED, CLD_STOPPED, CLD_CONTINUED,
+            CLD_EXITED,
+            CLD_KILLED,
+            CLD_DUMPED,
+            CLD_TRAPPED,
+            CLD_STOPPED,
+            CLD_CONTINUED,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

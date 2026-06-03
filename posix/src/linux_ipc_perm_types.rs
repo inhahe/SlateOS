@@ -122,8 +122,12 @@ mod tests {
     #[test]
     fn test_perm_offsets_ascending() {
         let offsets = [
-            IPC_PERM_OFF_KEY, IPC_PERM_OFF_UID, IPC_PERM_OFF_GID,
-            IPC_PERM_OFF_CUID, IPC_PERM_OFF_CGID, IPC_PERM_OFF_MODE,
+            IPC_PERM_OFF_KEY,
+            IPC_PERM_OFF_UID,
+            IPC_PERM_OFF_GID,
+            IPC_PERM_OFF_CUID,
+            IPC_PERM_OFF_CGID,
+            IPC_PERM_OFF_MODE,
             IPC_PERM_OFF_SEQ,
         ];
         for i in 1..offsets.len() {
@@ -139,9 +143,12 @@ mod tests {
     #[test]
     fn test_permission_bits_no_overlap() {
         let bits = [
-            IPC_PERM_UREAD, IPC_PERM_UWRITE,
-            IPC_PERM_GREAD, IPC_PERM_GWRITE,
-            IPC_PERM_OREAD, IPC_PERM_OWRITE,
+            IPC_PERM_UREAD,
+            IPC_PERM_UWRITE,
+            IPC_PERM_GREAD,
+            IPC_PERM_GWRITE,
+            IPC_PERM_OREAD,
+            IPC_PERM_OWRITE,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {

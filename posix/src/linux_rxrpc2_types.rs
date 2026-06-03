@@ -84,10 +84,14 @@ mod tests {
     #[test]
     fn test_packet_types_distinct() {
         let types = [
-            RXRPC_PACKET_TYPE_DATA, RXRPC_PACKET_TYPE_ACK,
-            RXRPC_PACKET_TYPE_BUSY, RXRPC_PACKET_TYPE_ABORT,
-            RXRPC_PACKET_TYPE_ACKALL, RXRPC_PACKET_TYPE_CHALLENGE,
-            RXRPC_PACKET_TYPE_RESPONSE, RXRPC_PACKET_TYPE_DEBUG,
+            RXRPC_PACKET_TYPE_DATA,
+            RXRPC_PACKET_TYPE_ACK,
+            RXRPC_PACKET_TYPE_BUSY,
+            RXRPC_PACKET_TYPE_ABORT,
+            RXRPC_PACKET_TYPE_ACKALL,
+            RXRPC_PACKET_TYPE_CHALLENGE,
+            RXRPC_PACKET_TYPE_RESPONSE,
+            RXRPC_PACKET_TYPE_DEBUG,
             RXRPC_PACKET_TYPE_VERSION,
         ];
         for i in 0..types.len() {
@@ -100,10 +104,14 @@ mod tests {
     #[test]
     fn test_ack_reasons_distinct() {
         let reasons = [
-            RXRPC_ACK_REQUESTED, RXRPC_ACK_DUPLICATE,
-            RXRPC_ACK_OUT_OF_SEQUENCE, RXRPC_ACK_EXCEEDS_WINDOW,
-            RXRPC_ACK_NOSPACE, RXRPC_ACK_PING,
-            RXRPC_ACK_PING_RESPONSE, RXRPC_ACK_DELAY,
+            RXRPC_ACK_REQUESTED,
+            RXRPC_ACK_DUPLICATE,
+            RXRPC_ACK_OUT_OF_SEQUENCE,
+            RXRPC_ACK_EXCEEDS_WINDOW,
+            RXRPC_ACK_NOSPACE,
+            RXRPC_ACK_PING,
+            RXRPC_ACK_PING_RESPONSE,
+            RXRPC_ACK_DELAY,
             RXRPC_ACK_IDLE,
         ];
         for i in 0..reasons.len() {
@@ -116,7 +124,8 @@ mod tests {
     #[test]
     fn test_security_levels_distinct() {
         let levels = [
-            RXRPC_SECURITY_PLAIN, RXRPC_SECURITY_AUTH,
+            RXRPC_SECURITY_PLAIN,
+            RXRPC_SECURITY_AUTH,
             RXRPC_SECURITY_ENCRYPT,
         ];
         for i in 0..levels.len() {
@@ -129,8 +138,10 @@ mod tests {
     #[test]
     fn test_security_types_distinct() {
         let types = [
-            RXRPC_SECURITY_NONE, RXRPC_SECURITY_RXKAD,
-            RXRPC_SECURITY_RXGK, RXRPC_SECURITY_YFS_RXGK,
+            RXRPC_SECURITY_NONE,
+            RXRPC_SECURITY_RXKAD,
+            RXRPC_SECURITY_RXGK,
+            RXRPC_SECURITY_YFS_RXGK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

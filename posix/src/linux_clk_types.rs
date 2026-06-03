@@ -83,9 +83,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            CLK_SET_RATE_PARENT, CLK_IGNORE_UNUSED,
-            CLK_IS_CRITICAL, CLK_GET_RATE_NOCACHE,
-            CLK_SET_RATE_NO_REPARENT, CLK_DUTY_CYCLE_PARENT,
+            CLK_SET_RATE_PARENT,
+            CLK_IGNORE_UNUSED,
+            CLK_IS_CRITICAL,
+            CLK_GET_RATE_NOCACHE,
+            CLK_SET_RATE_NO_REPARENT,
+            CLK_DUTY_CYCLE_PARENT,
             CLK_OPS_PARENT_ENABLE,
         ];
         for i in 0..flags.len() {
@@ -99,8 +102,12 @@ mod tests {
     #[test]
     fn test_clock_types_distinct() {
         let types = [
-            CLK_TYPE_FIXED, CLK_TYPE_GATE, CLK_TYPE_DIVIDER,
-            CLK_TYPE_MUX, CLK_TYPE_PLL, CLK_TYPE_FRAC_DIV,
+            CLK_TYPE_FIXED,
+            CLK_TYPE_GATE,
+            CLK_TYPE_DIVIDER,
+            CLK_TYPE_MUX,
+            CLK_TYPE_PLL,
+            CLK_TYPE_FRAC_DIV,
             CLK_TYPE_COMPOSITE,
         ];
         for i in 0..types.len() {
@@ -113,8 +120,11 @@ mod tests {
     #[test]
     fn test_notifier_events_distinct() {
         let events = [
-            CLK_PRE_RATE_CHANGE, CLK_POST_RATE_CHANGE,
-            CLK_ABORT_RATE_CHANGE, CLK_PRE_ENABLE, CLK_POST_ENABLE,
+            CLK_PRE_RATE_CHANGE,
+            CLK_POST_RATE_CHANGE,
+            CLK_ABORT_RATE_CHANGE,
+            CLK_PRE_ENABLE,
+            CLK_POST_ENABLE,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

@@ -91,10 +91,17 @@ mod tests {
     #[test]
     fn test_set_ioctls_distinct() {
         let ioctls = [
-            UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_RELBIT,
-            UI_SET_ABSBIT, UI_SET_MSCBIT, UI_SET_LEDBIT,
-            UI_SET_SNDBIT, UI_SET_FFBIT, UI_SET_PHYS,
-            UI_SET_SWBIT, UI_SET_PROPBIT,
+            UI_SET_EVBIT,
+            UI_SET_KEYBIT,
+            UI_SET_RELBIT,
+            UI_SET_ABSBIT,
+            UI_SET_MSCBIT,
+            UI_SET_LEDBIT,
+            UI_SET_SNDBIT,
+            UI_SET_FFBIT,
+            UI_SET_PHYS,
+            UI_SET_SWBIT,
+            UI_SET_PROPBIT,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -106,8 +113,10 @@ mod tests {
     #[test]
     fn test_ff_ioctls_distinct() {
         let ioctls = [
-            UI_BEGIN_FF_UPLOAD, UI_END_FF_UPLOAD,
-            UI_BEGIN_FF_ERASE, UI_END_FF_ERASE,
+            UI_BEGIN_FF_UPLOAD,
+            UI_END_FF_UPLOAD,
+            UI_BEGIN_FF_ERASE,
+            UI_END_FF_ERASE,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

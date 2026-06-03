@@ -67,10 +67,18 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            TCP_ESTABLISHED, TCP_SYN_SENT, TCP_SYN_RECV,
-            TCP_FIN_WAIT1, TCP_FIN_WAIT2, TCP_TIME_WAIT,
-            TCP_CLOSE, TCP_CLOSE_WAIT, TCP_LAST_ACK,
-            TCP_LISTEN, TCP_CLOSING, TCP_NEW_SYN_RECV,
+            TCP_ESTABLISHED,
+            TCP_SYN_SENT,
+            TCP_SYN_RECV,
+            TCP_FIN_WAIT1,
+            TCP_FIN_WAIT2,
+            TCP_TIME_WAIT,
+            TCP_CLOSE,
+            TCP_CLOSE_WAIT,
+            TCP_LAST_ACK,
+            TCP_LISTEN,
+            TCP_CLOSING,
+            TCP_NEW_SYN_RECV,
             TCP_BOUND_INACTIVE,
         ];
         for i in 0..states.len() {
@@ -84,8 +92,11 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            TCP_FLAG_TIMESTAMPS, TCP_FLAG_WSCALE, TCP_FLAG_SACK,
-            TCP_FLAG_ECN, TCP_FLAG_FASTOPEN,
+            TCP_FLAG_TIMESTAMPS,
+            TCP_FLAG_WSCALE,
+            TCP_FLAG_SACK,
+            TCP_FLAG_ECN,
+            TCP_FLAG_FASTOPEN,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

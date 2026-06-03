@@ -67,9 +67,15 @@ mod tests {
     #[test]
     fn test_clone3_flags_distinct() {
         let flags = [
-            CLONE3_VM, CLONE3_FS, CLONE3_FILES, CLONE3_SIGHAND,
-            CLONE3_PARENT_SETTID, CLONE3_CHILD_CLEARTID,
-            CLONE3_CHILD_SETTID, CLONE3_THREAD, CLONE3_VFORK,
+            CLONE3_VM,
+            CLONE3_FS,
+            CLONE3_FILES,
+            CLONE3_SIGHAND,
+            CLONE3_PARENT_SETTID,
+            CLONE3_CHILD_CLEARTID,
+            CLONE3_CHILD_SETTID,
+            CLONE3_THREAD,
+            CLONE3_VFORK,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

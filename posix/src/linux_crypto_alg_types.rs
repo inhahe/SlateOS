@@ -77,10 +77,14 @@ mod tests {
     #[test]
     fn test_type_values_fit_mask() {
         let types = [
-            CRYPTO_ALG_TYPE_CIPHER, CRYPTO_ALG_TYPE_COMPRESS,
-            CRYPTO_ALG_TYPE_AEAD, CRYPTO_ALG_TYPE_BLKCIPHER,
-            CRYPTO_ALG_TYPE_KPP, CRYPTO_ALG_TYPE_HASH,
-            CRYPTO_ALG_TYPE_AHASH, CRYPTO_ALG_TYPE_RNG,
+            CRYPTO_ALG_TYPE_CIPHER,
+            CRYPTO_ALG_TYPE_COMPRESS,
+            CRYPTO_ALG_TYPE_AEAD,
+            CRYPTO_ALG_TYPE_BLKCIPHER,
+            CRYPTO_ALG_TYPE_KPP,
+            CRYPTO_ALG_TYPE_HASH,
+            CRYPTO_ALG_TYPE_AHASH,
+            CRYPTO_ALG_TYPE_RNG,
             CRYPTO_ALG_TYPE_AKCIPHER,
         ];
         for t in types {
@@ -91,9 +95,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap_with_type() {
         let flags = [
-            CRYPTO_ALG_ASYNC, CRYPTO_ALG_NEED_FALLBACK,
-            CRYPTO_ALG_TESTED, CRYPTO_ALG_INTERNAL,
-            CRYPTO_ALG_OPTIONAL_KEY, CRYPTO_ALG_ALLOCATES_MEMORY,
+            CRYPTO_ALG_ASYNC,
+            CRYPTO_ALG_NEED_FALLBACK,
+            CRYPTO_ALG_TESTED,
+            CRYPTO_ALG_INTERNAL,
+            CRYPTO_ALG_OPTIONAL_KEY,
+            CRYPTO_ALG_ALLOCATES_MEMORY,
         ];
         for f in flags {
             assert_eq!(f & CRYPTO_ALG_TYPE_MASK, 0);
@@ -103,9 +110,12 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            CRYPTO_ALG_ASYNC, CRYPTO_ALG_NEED_FALLBACK,
-            CRYPTO_ALG_TESTED, CRYPTO_ALG_INTERNAL,
-            CRYPTO_ALG_OPTIONAL_KEY, CRYPTO_ALG_ALLOCATES_MEMORY,
+            CRYPTO_ALG_ASYNC,
+            CRYPTO_ALG_NEED_FALLBACK,
+            CRYPTO_ALG_TESTED,
+            CRYPTO_ALG_INTERNAL,
+            CRYPTO_ALG_OPTIONAL_KEY,
+            CRYPTO_ALG_ALLOCATES_MEMORY,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -67,8 +67,7 @@ mod tests {
     #[test]
     fn test_modem_lines_no_overlap() {
         let lines = [
-            TIOCM_DTR, TIOCM_RTS, TIOCM_ST, TIOCM_SR,
-            TIOCM_CTS, TIOCM_CAR, TIOCM_RNG, TIOCM_DSR,
+            TIOCM_DTR, TIOCM_RTS, TIOCM_ST, TIOCM_SR, TIOCM_CTS, TIOCM_CAR, TIOCM_RNG, TIOCM_DSR,
         ];
         for i in 0..lines.len() {
             for j in (i + 1)..lines.len() {
@@ -80,8 +79,7 @@ mod tests {
     #[test]
     fn test_modem_lines_power_of_two() {
         let lines = [
-            TIOCM_DTR, TIOCM_RTS, TIOCM_ST, TIOCM_SR,
-            TIOCM_CTS, TIOCM_CAR, TIOCM_RNG, TIOCM_DSR,
+            TIOCM_DTR, TIOCM_RTS, TIOCM_ST, TIOCM_SR, TIOCM_CTS, TIOCM_CAR, TIOCM_RNG, TIOCM_DSR,
         ];
         for l in &lines {
             assert!(l.is_power_of_two());

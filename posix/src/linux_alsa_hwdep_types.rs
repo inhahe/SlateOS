@@ -65,14 +65,22 @@ mod tests {
     #[test]
     fn test_ifaces_distinct() {
         let ifaces = [
-            SNDRV_HWDEP_IFACE_OPL2, SNDRV_HWDEP_IFACE_OPL3,
-            SNDRV_HWDEP_IFACE_OPL4, SNDRV_HWDEP_IFACE_SB16CSP,
-            SNDRV_HWDEP_IFACE_EMU10K1, SNDRV_HWDEP_IFACE_YSS225,
-            SNDRV_HWDEP_IFACE_ICS2115, SNDRV_HWDEP_IFACE_SSCAPE,
-            SNDRV_HWDEP_IFACE_VX, SNDRV_HWDEP_IFACE_MIXART,
-            SNDRV_HWDEP_IFACE_USX2Y, SNDRV_HWDEP_IFACE_ECHOAUDIO,
-            SNDRV_HWDEP_IFACE_PCXHR, SNDRV_HWDEP_IFACE_FW_LOADER,
-            SNDRV_HWDEP_IFACE_HDA, SNDRV_HWDEP_IFACE_USB_STREAM,
+            SNDRV_HWDEP_IFACE_OPL2,
+            SNDRV_HWDEP_IFACE_OPL3,
+            SNDRV_HWDEP_IFACE_OPL4,
+            SNDRV_HWDEP_IFACE_SB16CSP,
+            SNDRV_HWDEP_IFACE_EMU10K1,
+            SNDRV_HWDEP_IFACE_YSS225,
+            SNDRV_HWDEP_IFACE_ICS2115,
+            SNDRV_HWDEP_IFACE_SSCAPE,
+            SNDRV_HWDEP_IFACE_VX,
+            SNDRV_HWDEP_IFACE_MIXART,
+            SNDRV_HWDEP_IFACE_USX2Y,
+            SNDRV_HWDEP_IFACE_ECHOAUDIO,
+            SNDRV_HWDEP_IFACE_PCXHR,
+            SNDRV_HWDEP_IFACE_FW_LOADER,
+            SNDRV_HWDEP_IFACE_HDA,
+            SNDRV_HWDEP_IFACE_USB_STREAM,
         ];
         for i in 0..ifaces.len() {
             for j in (i + 1)..ifaces.len() {
@@ -84,7 +92,8 @@ mod tests {
     #[test]
     fn test_open_flags_no_overlap() {
         let flags = [
-            SNDRV_HWDEP_OPEN_READ, SNDRV_HWDEP_OPEN_WRITE,
+            SNDRV_HWDEP_OPEN_READ,
+            SNDRV_HWDEP_OPEN_WRITE,
             SNDRV_HWDEP_OPEN_NONBLOCK,
         ];
         for i in 0..flags.len() {

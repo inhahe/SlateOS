@@ -113,9 +113,12 @@ mod tests {
     #[test]
     fn test_delegation_files_distinct() {
         let files = [
-            CGROUP_CONTROLLERS, CGROUP_SUBTREE_CONTROL,
-            CGROUP_EVENTS, CGROUP_PROCS,
-            CGROUP_THREADS, CGROUP_TYPE,
+            CGROUP_CONTROLLERS,
+            CGROUP_SUBTREE_CONTROL,
+            CGROUP_EVENTS,
+            CGROUP_PROCS,
+            CGROUP_THREADS,
+            CGROUP_TYPE,
         ];
         for i in 0..files.len() {
             for j in (i + 1)..files.len() {
@@ -127,9 +130,12 @@ mod tests {
     #[test]
     fn test_delegation_files_have_prefix() {
         let files = [
-            CGROUP_CONTROLLERS, CGROUP_SUBTREE_CONTROL,
-            CGROUP_EVENTS, CGROUP_PROCS,
-            CGROUP_THREADS, CGROUP_TYPE,
+            CGROUP_CONTROLLERS,
+            CGROUP_SUBTREE_CONTROL,
+            CGROUP_EVENTS,
+            CGROUP_PROCS,
+            CGROUP_THREADS,
+            CGROUP_TYPE,
         ];
         for file in &files {
             assert!(file.starts_with("cgroup."), "{}", file);
@@ -139,8 +145,10 @@ mod tests {
     #[test]
     fn test_cgroup_types_distinct() {
         let types = [
-            CGROUP_TYPE_DOMAIN, CGROUP_TYPE_THREADED,
-            CGROUP_TYPE_DOMAIN_INVALID, CGROUP_TYPE_DOMAIN_THREADED,
+            CGROUP_TYPE_DOMAIN,
+            CGROUP_TYPE_THREADED,
+            CGROUP_TYPE_DOMAIN_INVALID,
+            CGROUP_TYPE_DOMAIN_THREADED,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

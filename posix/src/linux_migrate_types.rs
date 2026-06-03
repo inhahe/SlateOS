@@ -77,8 +77,10 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            MIGRATE_ASYNC, MIGRATE_SYNC_LIGHT,
-            MIGRATE_SYNC, MIGRATE_SYNC_NO_COPY,
+            MIGRATE_ASYNC,
+            MIGRATE_SYNC_LIGHT,
+            MIGRATE_SYNC,
+            MIGRATE_SYNC_NO_COPY,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -95,10 +97,16 @@ mod tests {
     #[test]
     fn test_reasons_distinct() {
         let reasons = [
-            MR_COMPACTION, MR_NUMA_MISPLACED, MR_MEMPOLICY_MBIND,
-            MR_SYSCALL, MR_CMA, MR_MEMORY_HOTPLUG,
-            MR_MEMORY_FAILURE, MR_LONGTERM_PIN,
-            MR_DEMOTION, MR_PROMOTION,
+            MR_COMPACTION,
+            MR_NUMA_MISPLACED,
+            MR_MEMPOLICY_MBIND,
+            MR_SYSCALL,
+            MR_CMA,
+            MR_MEMORY_HOTPLUG,
+            MR_MEMORY_FAILURE,
+            MR_LONGTERM_PIN,
+            MR_DEMOTION,
+            MR_PROMOTION,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {

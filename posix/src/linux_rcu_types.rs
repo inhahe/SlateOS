@@ -72,8 +72,10 @@ mod tests {
     #[test]
     fn test_flavors_distinct() {
         let flavors = [
-            RCU_FLAVOR_PREEMPT, RCU_FLAVOR_BH,
-            RCU_FLAVOR_SCHED, RCU_FLAVOR_EXPEDITED,
+            RCU_FLAVOR_PREEMPT,
+            RCU_FLAVOR_BH,
+            RCU_FLAVOR_SCHED,
+            RCU_FLAVOR_EXPEDITED,
         ];
         for i in 0..flavors.len() {
             for j in (i + 1)..flavors.len() {

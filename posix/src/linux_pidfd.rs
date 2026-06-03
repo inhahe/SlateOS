@@ -3,10 +3,10 @@
 //! Re-exports `pidfd_open()`, `pidfd_send_signal()`, and
 //! `pidfd_getfd()` from the `process` module.
 
+pub use crate::process::PIDFD_NONBLOCK;
+pub use crate::process::pidfd_getfd;
 pub use crate::process::pidfd_open;
 pub use crate::process::pidfd_send_signal;
-pub use crate::process::pidfd_getfd;
-pub use crate::process::PIDFD_NONBLOCK;
 
 // ---------------------------------------------------------------------------
 // Tests

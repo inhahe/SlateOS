@@ -83,8 +83,10 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let types = [
-            WG_MSG_HANDSHAKE_INITIATION, WG_MSG_HANDSHAKE_RESPONSE,
-            WG_MSG_HANDSHAKE_COOKIE, WG_MSG_TRANSPORT_DATA,
+            WG_MSG_HANDSHAKE_INITIATION,
+            WG_MSG_HANDSHAKE_RESPONSE,
+            WG_MSG_HANDSHAKE_COOKIE,
+            WG_MSG_TRANSPORT_DATA,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

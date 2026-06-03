@@ -501,9 +501,15 @@ mod tests {
     #[test]
     fn test_kern_constants_distinct() {
         let kerns = [
-            KERN_OSTYPE, KERN_OSRELEASE, KERN_OSREV,
-            KERN_VERSION, KERN_MAXVNODES, KERN_MAXPROC,
-            KERN_MAXFILES, KERN_HOSTNAME, KERN_DOMAINNAME,
+            KERN_OSTYPE,
+            KERN_OSRELEASE,
+            KERN_OSREV,
+            KERN_VERSION,
+            KERN_MAXVNODES,
+            KERN_MAXPROC,
+            KERN_MAXFILES,
+            KERN_HOSTNAME,
+            KERN_DOMAINNAME,
         ];
         for i in 0..kerns.len() {
             for j in (i + 1)..kerns.len() {

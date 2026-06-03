@@ -79,10 +79,16 @@ mod tests {
     #[test]
     fn test_tlv_types_distinct() {
         let types = [
-            LLDP_TLV_END, LLDP_TLV_CHASSIS_ID, LLDP_TLV_PORT_ID,
-            LLDP_TLV_TTL, LLDP_TLV_PORT_DESC, LLDP_TLV_SYSTEM_NAME,
-            LLDP_TLV_SYSTEM_DESC, LLDP_TLV_SYSTEM_CAP,
-            LLDP_TLV_MGMT_ADDR, LLDP_TLV_ORG_SPECIFIC,
+            LLDP_TLV_END,
+            LLDP_TLV_CHASSIS_ID,
+            LLDP_TLV_PORT_ID,
+            LLDP_TLV_TTL,
+            LLDP_TLV_PORT_DESC,
+            LLDP_TLV_SYSTEM_NAME,
+            LLDP_TLV_SYSTEM_DESC,
+            LLDP_TLV_SYSTEM_CAP,
+            LLDP_TLV_MGMT_ADDR,
+            LLDP_TLV_ORG_SPECIFIC,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -94,9 +100,12 @@ mod tests {
     #[test]
     fn test_chassis_subtypes_distinct() {
         let subs = [
-            LLDP_CHASSIS_COMPONENT, LLDP_CHASSIS_IFACE_ALIAS,
-            LLDP_CHASSIS_PORT_COMPONENT, LLDP_CHASSIS_MAC_ADDR,
-            LLDP_CHASSIS_NET_ADDR, LLDP_CHASSIS_IFACE_NAME,
+            LLDP_CHASSIS_COMPONENT,
+            LLDP_CHASSIS_IFACE_ALIAS,
+            LLDP_CHASSIS_PORT_COMPONENT,
+            LLDP_CHASSIS_MAC_ADDR,
+            LLDP_CHASSIS_NET_ADDR,
+            LLDP_CHASSIS_IFACE_NAME,
             LLDP_CHASSIS_LOCAL,
         ];
         for i in 0..subs.len() {
@@ -109,9 +118,14 @@ mod tests {
     #[test]
     fn test_caps_power_of_two() {
         let caps = [
-            LLDP_CAP_OTHER, LLDP_CAP_REPEATER, LLDP_CAP_BRIDGE,
-            LLDP_CAP_WLAN_AP, LLDP_CAP_ROUTER, LLDP_CAP_TELEPHONE,
-            LLDP_CAP_DOCSIS, LLDP_CAP_STATION,
+            LLDP_CAP_OTHER,
+            LLDP_CAP_REPEATER,
+            LLDP_CAP_BRIDGE,
+            LLDP_CAP_WLAN_AP,
+            LLDP_CAP_ROUTER,
+            LLDP_CAP_TELEPHONE,
+            LLDP_CAP_DOCSIS,
+            LLDP_CAP_STATION,
         ];
         for c in &caps {
             assert!(c.is_power_of_two(), "0x{:04x} not power of two", c);
@@ -121,9 +135,14 @@ mod tests {
     #[test]
     fn test_caps_no_overlap() {
         let caps = [
-            LLDP_CAP_OTHER, LLDP_CAP_REPEATER, LLDP_CAP_BRIDGE,
-            LLDP_CAP_WLAN_AP, LLDP_CAP_ROUTER, LLDP_CAP_TELEPHONE,
-            LLDP_CAP_DOCSIS, LLDP_CAP_STATION,
+            LLDP_CAP_OTHER,
+            LLDP_CAP_REPEATER,
+            LLDP_CAP_BRIDGE,
+            LLDP_CAP_WLAN_AP,
+            LLDP_CAP_ROUTER,
+            LLDP_CAP_TELEPHONE,
+            LLDP_CAP_DOCSIS,
+            LLDP_CAP_STATION,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

@@ -86,11 +86,21 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            UI_DEV_CREATE, UI_DEV_DESTROY, UI_DEV_SETUP,
-            UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_RELBIT,
-            UI_SET_ABSBIT, UI_SET_MSCBIT, UI_SET_LEDBIT,
-            UI_SET_SNDBIT, UI_SET_FFBIT, UI_SET_SWBIT,
-            UI_SET_PROPBIT, UI_GET_SYSNAME, UI_GET_VERSION,
+            UI_DEV_CREATE,
+            UI_DEV_DESTROY,
+            UI_DEV_SETUP,
+            UI_SET_EVBIT,
+            UI_SET_KEYBIT,
+            UI_SET_RELBIT,
+            UI_SET_ABSBIT,
+            UI_SET_MSCBIT,
+            UI_SET_LEDBIT,
+            UI_SET_SNDBIT,
+            UI_SET_FFBIT,
+            UI_SET_SWBIT,
+            UI_SET_PROPBIT,
+            UI_GET_SYSNAME,
+            UI_GET_VERSION,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -102,8 +112,7 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let evs = [
-            EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC,
-            EV_SW, EV_LED, EV_SND, EV_FF,
+            EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC, EV_SW, EV_LED, EV_SND, EV_FF,
         ];
         for i in 0..evs.len() {
             for j in (i + 1)..evs.len() {

@@ -107,8 +107,12 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let acts = [
-            FR_ACT_UNSPEC, FR_ACT_TO_TBL, FR_ACT_GOTO,
-            FR_ACT_NOP, FR_ACT_UNREACHABLE, FR_ACT_BLACKHOLE,
+            FR_ACT_UNSPEC,
+            FR_ACT_TO_TBL,
+            FR_ACT_GOTO,
+            FR_ACT_NOP,
+            FR_ACT_UNREACHABLE,
+            FR_ACT_BLACKHOLE,
             FR_ACT_PROHIBIT,
         ];
         for i in 0..acts.len() {
@@ -121,12 +125,23 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            FRA_DST, FRA_SRC, FRA_IIFNAME, FRA_GOTO,
-            FRA_PRIORITY, FRA_FWMARK, FRA_FWMASK,
-            FRA_SUPPRESS_PREFIXLEN, FRA_SUPPRESS_IFGROUP,
-            FRA_TABLE, FRA_OIFNAME, FRA_L3MDEV,
-            FRA_UID_RANGE, FRA_IP_PROTO,
-            FRA_SPORT_RANGE, FRA_DPORT_RANGE, FRA_TUN_ID,
+            FRA_DST,
+            FRA_SRC,
+            FRA_IIFNAME,
+            FRA_GOTO,
+            FRA_PRIORITY,
+            FRA_FWMARK,
+            FRA_FWMASK,
+            FRA_SUPPRESS_PREFIXLEN,
+            FRA_SUPPRESS_IFGROUP,
+            FRA_TABLE,
+            FRA_OIFNAME,
+            FRA_L3MDEV,
+            FRA_UID_RANGE,
+            FRA_IP_PROTO,
+            FRA_SPORT_RANGE,
+            FRA_DPORT_RANGE,
+            FRA_TUN_ID,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -138,9 +153,12 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            FIB_RULE_PERMANENT, FIB_RULE_INVERT,
-            FIB_RULE_UNRESOLVED, FIB_RULE_IIF_DETACHED,
-            FIB_RULE_OIF_DETACHED, FIB_RULE_FIND_SADDR,
+            FIB_RULE_PERMANENT,
+            FIB_RULE_INVERT,
+            FIB_RULE_UNRESOLVED,
+            FIB_RULE_IIF_DETACHED,
+            FIB_RULE_OIF_DETACHED,
+            FIB_RULE_FIND_SADDR,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -152,8 +170,10 @@ mod tests {
     #[test]
     fn test_tables_distinct() {
         let tables = [
-            RT_TABLE_UNSPEC, RT_TABLE_DEFAULT,
-            RT_TABLE_MAIN, RT_TABLE_LOCAL,
+            RT_TABLE_UNSPEC,
+            RT_TABLE_DEFAULT,
+            RT_TABLE_MAIN,
+            RT_TABLE_LOCAL,
         ];
         for i in 0..tables.len() {
             for j in (i + 1)..tables.len() {

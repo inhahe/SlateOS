@@ -47,9 +47,12 @@ mod tests {
     #[test]
     fn test_update_flags_no_overlap() {
         let flags = [
-            TCA_CSUM_UPDATE_FLAG_IPV4HDR, TCA_CSUM_UPDATE_FLAG_ICMP,
-            TCA_CSUM_UPDATE_FLAG_IGMP, TCA_CSUM_UPDATE_FLAG_TCP,
-            TCA_CSUM_UPDATE_FLAG_UDP, TCA_CSUM_UPDATE_FLAG_UDPLITE,
+            TCA_CSUM_UPDATE_FLAG_IPV4HDR,
+            TCA_CSUM_UPDATE_FLAG_ICMP,
+            TCA_CSUM_UPDATE_FLAG_IGMP,
+            TCA_CSUM_UPDATE_FLAG_TCP,
+            TCA_CSUM_UPDATE_FLAG_UDP,
+            TCA_CSUM_UPDATE_FLAG_UDPLITE,
             TCA_CSUM_UPDATE_FLAG_SCTP,
         ];
         for i in 0..flags.len() {
@@ -62,9 +65,12 @@ mod tests {
     #[test]
     fn test_update_flags_power_of_two() {
         let flags = [
-            TCA_CSUM_UPDATE_FLAG_IPV4HDR, TCA_CSUM_UPDATE_FLAG_ICMP,
-            TCA_CSUM_UPDATE_FLAG_IGMP, TCA_CSUM_UPDATE_FLAG_TCP,
-            TCA_CSUM_UPDATE_FLAG_UDP, TCA_CSUM_UPDATE_FLAG_UDPLITE,
+            TCA_CSUM_UPDATE_FLAG_IPV4HDR,
+            TCA_CSUM_UPDATE_FLAG_ICMP,
+            TCA_CSUM_UPDATE_FLAG_IGMP,
+            TCA_CSUM_UPDATE_FLAG_TCP,
+            TCA_CSUM_UPDATE_FLAG_UDP,
+            TCA_CSUM_UPDATE_FLAG_UDPLITE,
             TCA_CSUM_UPDATE_FLAG_SCTP,
         ];
         for f in &flags {

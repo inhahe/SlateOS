@@ -69,10 +69,14 @@ mod tests {
     #[test]
     fn test_reasons_distinct() {
         let reasons = [
-            CRASH_REASON_PANIC, CRASH_REASON_WATCHDOG,
-            CRASH_REASON_OOM, CRASH_REASON_OOPS,
-            CRASH_REASON_SOFT_LOCKUP, CRASH_REASON_HARD_LOCKUP,
-            CRASH_REASON_RCU_STALL, CRASH_REASON_USER,
+            CRASH_REASON_PANIC,
+            CRASH_REASON_WATCHDOG,
+            CRASH_REASON_OOM,
+            CRASH_REASON_OOPS,
+            CRASH_REASON_SOFT_LOCKUP,
+            CRASH_REASON_HARD_LOCKUP,
+            CRASH_REASON_RCU_STALL,
+            CRASH_REASON_USER,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {

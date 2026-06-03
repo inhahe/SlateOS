@@ -100,9 +100,15 @@ mod tests {
     #[test]
     fn test_verdicts_distinct() {
         let acts = [
-            TC_ACT_UNSPEC, TC_ACT_OK, TC_ACT_RECLASSIFY,
-            TC_ACT_SHOT, TC_ACT_PIPE, TC_ACT_STOLEN,
-            TC_ACT_QUEUED, TC_ACT_REPEAT, TC_ACT_REDIRECT,
+            TC_ACT_UNSPEC,
+            TC_ACT_OK,
+            TC_ACT_RECLASSIFY,
+            TC_ACT_SHOT,
+            TC_ACT_PIPE,
+            TC_ACT_STOLEN,
+            TC_ACT_QUEUED,
+            TC_ACT_REPEAT,
+            TC_ACT_REDIRECT,
             TC_ACT_TRAP,
         ];
         for i in 0..acts.len() {
@@ -115,8 +121,10 @@ mod tests {
     #[test]
     fn test_mirred_types_distinct() {
         let types = [
-            TCA_EGRESS_REDIR, TCA_EGRESS_MIRROR,
-            TCA_INGRESS_REDIR, TCA_INGRESS_MIRROR,
+            TCA_EGRESS_REDIR,
+            TCA_EGRESS_MIRROR,
+            TCA_INGRESS_REDIR,
+            TCA_INGRESS_MIRROR,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -128,9 +136,15 @@ mod tests {
     #[test]
     fn test_act_attrs_distinct() {
         let attrs = [
-            TCA_ACT_UNSPEC, TCA_ACT_KIND, TCA_ACT_OPTIONS,
-            TCA_ACT_INDEX, TCA_ACT_STATS, TCA_ACT_PAD,
-            TCA_ACT_COOKIE, TCA_ACT_FLAGS, TCA_ACT_HW_STATS,
+            TCA_ACT_UNSPEC,
+            TCA_ACT_KIND,
+            TCA_ACT_OPTIONS,
+            TCA_ACT_INDEX,
+            TCA_ACT_STATS,
+            TCA_ACT_PAD,
+            TCA_ACT_COOKIE,
+            TCA_ACT_FLAGS,
+            TCA_ACT_HW_STATS,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

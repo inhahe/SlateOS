@@ -60,13 +60,26 @@ mod tests {
     #[test]
     fn test_names_distinct() {
         let names = [
-            SC_ARG_MAX, SC_CHILD_MAX, SC_CLK_TCK, SC_OPEN_MAX,
-            SC_PAGESIZE, SC_NPROCESSORS_CONF, SC_NPROCESSORS_ONLN,
-            SC_PHYS_PAGES, SC_AVPHYS_PAGES, SC_HOST_NAME_MAX,
-            SC_LOGIN_NAME_MAX, SC_NGROUPS_MAX, SC_TTY_NAME_MAX,
-            SC_TZNAME_MAX, SC_VERSION, SC_LINE_MAX,
-            SC_SEM_NSEMS_MAX, SC_SEM_VALUE_MAX,
-            SC_THREAD_STACK_MIN, SC_THREAD_THREADS_MAX,
+            SC_ARG_MAX,
+            SC_CHILD_MAX,
+            SC_CLK_TCK,
+            SC_OPEN_MAX,
+            SC_PAGESIZE,
+            SC_NPROCESSORS_CONF,
+            SC_NPROCESSORS_ONLN,
+            SC_PHYS_PAGES,
+            SC_AVPHYS_PAGES,
+            SC_HOST_NAME_MAX,
+            SC_LOGIN_NAME_MAX,
+            SC_NGROUPS_MAX,
+            SC_TTY_NAME_MAX,
+            SC_TZNAME_MAX,
+            SC_VERSION,
+            SC_LINE_MAX,
+            SC_SEM_NSEMS_MAX,
+            SC_SEM_VALUE_MAX,
+            SC_THREAD_STACK_MIN,
+            SC_THREAD_THREADS_MAX,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

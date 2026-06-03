@@ -262,7 +262,7 @@ pub extern "C" fn res_mkquery(
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    if (buflen as i64) < (HFIXEDSZ as i64) {
+    if i64::from(buflen) < (HFIXEDSZ as i64) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -286,17 +286,12 @@ pub extern "C" fn res_mkquery(
 /// 4. `answer == NULL`           -> `EFAULT`  (anslen > 0 by step 3)
 /// 5. otherwise                  -> `ENOSYS`
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn res_send(
-    msg: *const u8,
-    msglen: i32,
-    answer: *mut u8,
-    anslen: i32,
-) -> i32 {
+pub extern "C" fn res_send(msg: *const u8, msglen: i32, answer: *mut u8, anslen: i32) -> i32 {
     if msg.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
     }
-    if (msglen as i64) < (HFIXEDSZ as i64) {
+    if i64::from(msglen) < (HFIXEDSZ as i64) {
         errno::set_errno(errno::EINVAL);
         return -1;
     }
@@ -417,7 +412,9 @@ pub extern "C" fn dn_expand(
                 return -1;
             }
             // SAFETY: out_pos < cap and exp_dn covers cap bytes.
-            unsafe { *exp_dn.add(out_pos) = 0; }
+            unsafe {
+                *exp_dn.add(out_pos) = 0;
+            }
             // If we emitted no labels (root name "."), still null-terminate.
             return original_bytes as i32;
         }
@@ -434,7 +431,9 @@ pub extern "C" fn dn_expand(
                 return -1;
             }
             // SAFETY: index in bounds.
-            unsafe { *exp_dn.add(out_pos) = b'.'; }
+            unsafe {
+                *exp_dn.add(out_pos) = b'.';
+            }
             out_pos = out_pos.wrapping_add(1);
         }
         // Emit label bytes.  Need room for label + later null terminator
@@ -447,7 +446,9 @@ pub extern "C" fn dn_expand(
         while k < label_len {
             // SAFETY: both pointers are within their respective buffers.
             let c = unsafe { *msg.add(off.wrapping_add(1).wrapping_add(k)) };
-            unsafe { *exp_dn.add(out_pos.wrapping_add(k)) = c; }
+            unsafe {
+                *exp_dn.add(out_pos.wrapping_add(k)) = c;
+            }
             k = k.wrapping_add(1);
         }
         out_pos = out_pos.wrapping_add(label_len);
@@ -559,7 +560,9 @@ pub extern "C" fn dn_comp(
     // SAFETY: caller contract — exp_dn is null-terminated.
     let first = unsafe { *exp_dn };
     if first == 0 {
-        unsafe { *comp_dn = 0; }
+        unsafe {
+            *comp_dn = 0;
+        }
         return 1;
     }
     if first == b'.' {
@@ -567,7 +570,9 @@ pub extern "C" fn dn_comp(
         // byte is bounded by the caller's null terminator at some point.
         let second = unsafe { *exp_dn.add(1) };
         if second == 0 {
-            unsafe { *comp_dn = 0; }
+            unsafe {
+                *comp_dn = 0;
+            }
             return 1;
         }
         // Otherwise it's a leading dot followed by more text — invalid.
@@ -598,21 +603,27 @@ pub extern "C" fn dn_comp(
                 // we now have to undo).  We must back off out_pos by 1.
                 out_pos = out_pos.wrapping_sub(1);
                 // SAFETY: out_pos < cap (we checked before reserving).
-                unsafe { *comp_dn.add(out_pos) = 0; }
+                unsafe {
+                    *comp_dn.add(out_pos) = 0;
+                }
                 return out_pos.wrapping_add(1) as i32;
             }
             if label_len > 63 {
                 return -1;
             }
             // SAFETY: label_len_pos < cap because we reserved it.
-            unsafe { *comp_dn.add(label_len_pos) = label_len as u8; }
+            unsafe {
+                *comp_dn.add(label_len_pos) = label_len as u8;
+            }
             if b == 0 {
                 // Final terminator.
                 if out_pos.wrapping_add(1) > cap {
                     return -1;
                 }
                 // SAFETY: out_pos < cap.
-                unsafe { *comp_dn.add(out_pos) = 0; }
+                unsafe {
+                    *comp_dn.add(out_pos) = 0;
+                }
                 return out_pos.wrapping_add(1) as i32;
             }
             // b == '.': advance to next label; reserve its length byte.
@@ -630,7 +641,9 @@ pub extern "C" fn dn_comp(
             return -1;
         }
         // SAFETY: out_pos < cap by the check above.
-        unsafe { *comp_dn.add(out_pos) = b; }
+        unsafe {
+            *comp_dn.add(out_pos) = b;
+        }
         out_pos = out_pos.wrapping_add(1);
         in_pos = in_pos.wrapping_add(1);
     }
@@ -649,8 +662,8 @@ pub extern "C" fn ns_get16(src: *const u8) -> u16 {
         return 0;
     }
     // SAFETY: caller guarantees at least 2 bytes.
-    let b0 = unsafe { *src } as u16;
-    let b1 = unsafe { *src.add(1) } as u16;
+    let b0 = u16::from(unsafe { *src });
+    let b1 = u16::from(unsafe { *src.add(1) });
     (b0 << 8) | b1
 }
 
@@ -663,10 +676,10 @@ pub extern "C" fn ns_get32(src: *const u8) -> u32 {
         return 0;
     }
     // SAFETY: caller guarantees at least 4 bytes.
-    let b0 = unsafe { *src } as u32;
-    let b1 = unsafe { *src.add(1) } as u32;
-    let b2 = unsafe { *src.add(2) } as u32;
-    let b3 = unsafe { *src.add(3) } as u32;
+    let b0 = u32::from(unsafe { *src });
+    let b1 = u32::from(unsafe { *src.add(1) });
+    let b2 = u32::from(unsafe { *src.add(2) });
+    let b3 = u32::from(unsafe { *src.add(3) });
     (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
 }
 
@@ -968,7 +981,10 @@ mod tests {
         assert_eq!(n, 17);
         assert_eq!(
             &out[..17],
-            &[3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o', b'm', 0]
+            &[
+                3, b'w', b'w', b'w', 7, b'e', b'x', b'a', b'm', b'p', b'l', b'e', 3, b'c', b'o',
+                b'm', 0
+            ]
         );
     }
 
@@ -1444,13 +1460,7 @@ mod tests {
         name[MAXDNAME + 1] = 0;
         crate::errno::set_errno(0);
         let mut buf = [0u8; 512];
-        let ret = res_query(
-            name.as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            buf.len() as i32,
-        );
+        let ret = res_query(name.as_ptr(), C_IN, T_A, buf.as_mut_ptr(), buf.len() as i32);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -1459,13 +1469,7 @@ mod tests {
     fn test_res_query_zero_anslen_einval() {
         crate::errno::set_errno(0);
         let mut buf = [0u8; 512];
-        let ret = res_query(
-            b"example.com\0".as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            0,
-        );
+        let ret = res_query(b"example.com\0".as_ptr(), C_IN, T_A, buf.as_mut_ptr(), 0);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -1474,13 +1478,7 @@ mod tests {
     fn test_res_query_negative_anslen_einval() {
         crate::errno::set_errno(0);
         let mut buf = [0u8; 512];
-        let ret = res_query(
-            b"example.com\0".as_ptr(),
-            C_IN,
-            T_A,
-            buf.as_mut_ptr(),
-            -1,
-        );
+        let ret = res_query(b"example.com\0".as_ptr(), C_IN, T_A, buf.as_mut_ptr(), -1);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -1801,7 +1799,12 @@ mod tests {
         crate::errno::set_errno(0);
         let msg = [0u8; 32];
         let mut buf = [0u8; 512];
-        let ret = res_send(msg.as_ptr(), msg.len() as i32, buf.as_mut_ptr(), buf.len() as i32);
+        let ret = res_send(
+            msg.as_ptr(),
+            msg.len() as i32,
+            buf.as_mut_ptr(),
+            buf.len() as i32,
+        );
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOSYS);
     }

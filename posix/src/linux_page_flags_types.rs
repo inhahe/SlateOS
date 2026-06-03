@@ -55,10 +55,8 @@ pub const PG_MLOCKED: u32 = 18;
 // ---------------------------------------------------------------------------
 
 /// All flags that prevent page from being freed.
-pub const PG_NONFREE_MASK: u32 = (1 << PG_LOCKED)
-    | (1 << PG_RESERVED)
-    | (1 << PG_SLAB)
-    | (1 << PG_MLOCKED);
+pub const PG_NONFREE_MASK: u32 =
+    (1 << PG_LOCKED) | (1 << PG_RESERVED) | (1 << PG_SLAB) | (1 << PG_MLOCKED);
 
 // ---------------------------------------------------------------------------
 // Page zone IDs (stored in upper bits of page->flags)
@@ -84,11 +82,25 @@ mod tests {
     #[test]
     fn test_page_flags_distinct() {
         let flags = [
-            PG_LOCKED, PG_REFERENCED, PG_UPTODATE, PG_DIRTY,
-            PG_LRU, PG_ACTIVE, PG_SLAB, PG_OWNER_PRIV_1,
-            PG_ARCH_1, PG_RESERVED, PG_PRIVATE, PG_PRIVATE_2,
-            PG_WRITEBACK, PG_HEAD, PG_MAPPEDTODISK, PG_RECLAIM,
-            PG_SWAPBACKED, PG_UNEVICTABLE, PG_MLOCKED,
+            PG_LOCKED,
+            PG_REFERENCED,
+            PG_UPTODATE,
+            PG_DIRTY,
+            PG_LRU,
+            PG_ACTIVE,
+            PG_SLAB,
+            PG_OWNER_PRIV_1,
+            PG_ARCH_1,
+            PG_RESERVED,
+            PG_PRIVATE,
+            PG_PRIVATE_2,
+            PG_WRITEBACK,
+            PG_HEAD,
+            PG_MAPPEDTODISK,
+            PG_RECLAIM,
+            PG_SWAPBACKED,
+            PG_UNEVICTABLE,
+            PG_MLOCKED,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

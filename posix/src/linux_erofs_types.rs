@@ -143,8 +143,10 @@ mod tests {
     #[test]
     fn test_flat_types_distinct() {
         let types = [
-            EROFS_INODE_FLAT_PLAIN, EROFS_INODE_FLAT_COMPRESSION_LEGACY,
-            EROFS_INODE_FLAT_INLINE, EROFS_INODE_FLAT_COMPRESSION,
+            EROFS_INODE_FLAT_PLAIN,
+            EROFS_INODE_FLAT_COMPRESSION_LEGACY,
+            EROFS_INODE_FLAT_INLINE,
+            EROFS_INODE_FLAT_COMPRESSION,
             EROFS_INODE_CHUNK_BASED,
         ];
         for i in 0..types.len() {
@@ -166,8 +168,10 @@ mod tests {
     #[test]
     fn test_xattr_indices_distinct() {
         let indices = [
-            EROFS_XATTR_INDEX_USER, EROFS_XATTR_INDEX_POSIX_ACL_ACCESS,
-            EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT, EROFS_XATTR_INDEX_TRUSTED,
+            EROFS_XATTR_INDEX_USER,
+            EROFS_XATTR_INDEX_POSIX_ACL_ACCESS,
+            EROFS_XATTR_INDEX_POSIX_ACL_DEFAULT,
+            EROFS_XATTR_INDEX_TRUSTED,
             EROFS_XATTR_INDEX_SECURITY,
         ];
         for i in 0..indices.len() {

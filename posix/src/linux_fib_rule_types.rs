@@ -79,8 +79,12 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            FR_ACT_TO_TBL, FR_ACT_GOTO, FR_ACT_NOP,
-            FR_ACT_UNREACHABLE, FR_ACT_BLACKHOLE, FR_ACT_PROHIBIT,
+            FR_ACT_TO_TBL,
+            FR_ACT_GOTO,
+            FR_ACT_NOP,
+            FR_ACT_UNREACHABLE,
+            FR_ACT_BLACKHOLE,
+            FR_ACT_PROHIBIT,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -92,10 +96,20 @@ mod tests {
     #[test]
     fn test_attributes_distinct() {
         let attrs = [
-            FRA_UNSPEC, FRA_DST, FRA_SRC, FRA_IIFNAME,
-            FRA_GOTO, FRA_PRIORITY, FRA_FWMARK, FRA_FWMASK,
-            FRA_TABLE, FRA_OIFNAME, FRA_UID_RANGE,
-            FRA_PROTOCOL, FRA_SPORT_RANGE, FRA_DPORT_RANGE,
+            FRA_UNSPEC,
+            FRA_DST,
+            FRA_SRC,
+            FRA_IIFNAME,
+            FRA_GOTO,
+            FRA_PRIORITY,
+            FRA_FWMARK,
+            FRA_FWMASK,
+            FRA_TABLE,
+            FRA_OIFNAME,
+            FRA_UID_RANGE,
+            FRA_PROTOCOL,
+            FRA_SPORT_RANGE,
+            FRA_DPORT_RANGE,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -107,8 +121,10 @@ mod tests {
     #[test]
     fn test_table_ids_distinct() {
         let tables = [
-            RT_TABLE_UNSPEC, RT_TABLE_DEFAULT,
-            RT_TABLE_MAIN, RT_TABLE_LOCAL,
+            RT_TABLE_UNSPEC,
+            RT_TABLE_DEFAULT,
+            RT_TABLE_MAIN,
+            RT_TABLE_LOCAL,
         ];
         for i in 0..tables.len() {
             for j in (i + 1)..tables.len() {

@@ -79,43 +79,66 @@ mod tests {
     #[test]
     fn test_cap_flags_are_power_of_two() {
         let caps = [
-            V4L2_CAP_VIDEO_CAPTURE, V4L2_CAP_VIDEO_OUTPUT,
+            V4L2_CAP_VIDEO_CAPTURE,
+            V4L2_CAP_VIDEO_OUTPUT,
             V4L2_CAP_VIDEO_OVERLAY,
-            V4L2_CAP_VBI_CAPTURE, V4L2_CAP_VBI_OUTPUT,
-            V4L2_CAP_SLICED_VBI_CAPTURE, V4L2_CAP_SLICED_VBI_OUTPUT,
-            V4L2_CAP_RDS_CAPTURE, V4L2_CAP_VIDEO_OUTPUT_OVERLAY,
-            V4L2_CAP_HW_FREQ_SEEK, V4L2_CAP_RDS_OUTPUT,
-            V4L2_CAP_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_OUTPUT_MPLANE,
-            V4L2_CAP_VIDEO_M2M_MPLANE, V4L2_CAP_VIDEO_M2M,
-            V4L2_CAP_TUNER, V4L2_CAP_AUDIO, V4L2_CAP_RADIO,
-            V4L2_CAP_MODULATOR, V4L2_CAP_SDR_CAPTURE,
-            V4L2_CAP_EXT_PIX_FORMAT, V4L2_CAP_SDR_OUTPUT,
-            V4L2_CAP_META_CAPTURE, V4L2_CAP_READWRITE,
-            V4L2_CAP_STREAMING, V4L2_CAP_META_OUTPUT,
-            V4L2_CAP_TOUCH, V4L2_CAP_IO_MC,
+            V4L2_CAP_VBI_CAPTURE,
+            V4L2_CAP_VBI_OUTPUT,
+            V4L2_CAP_SLICED_VBI_CAPTURE,
+            V4L2_CAP_SLICED_VBI_OUTPUT,
+            V4L2_CAP_RDS_CAPTURE,
+            V4L2_CAP_VIDEO_OUTPUT_OVERLAY,
+            V4L2_CAP_HW_FREQ_SEEK,
+            V4L2_CAP_RDS_OUTPUT,
+            V4L2_CAP_VIDEO_CAPTURE_MPLANE,
+            V4L2_CAP_VIDEO_OUTPUT_MPLANE,
+            V4L2_CAP_VIDEO_M2M_MPLANE,
+            V4L2_CAP_VIDEO_M2M,
+            V4L2_CAP_TUNER,
+            V4L2_CAP_AUDIO,
+            V4L2_CAP_RADIO,
+            V4L2_CAP_MODULATOR,
+            V4L2_CAP_SDR_CAPTURE,
+            V4L2_CAP_EXT_PIX_FORMAT,
+            V4L2_CAP_SDR_OUTPUT,
+            V4L2_CAP_META_CAPTURE,
+            V4L2_CAP_READWRITE,
+            V4L2_CAP_STREAMING,
+            V4L2_CAP_META_OUTPUT,
+            V4L2_CAP_TOUCH,
+            V4L2_CAP_IO_MC,
             V4L2_CAP_DEVICE_CAPS,
         ];
         for &c in &caps {
-            assert!(c.is_power_of_two(),
-                "cap 0x{:08X} is not power of two", c);
+            assert!(c.is_power_of_two(), "cap 0x{:08X} is not power of two", c);
         }
     }
 
     #[test]
     fn test_cap_flags_no_overlap() {
         let caps = [
-            V4L2_CAP_VIDEO_CAPTURE, V4L2_CAP_VIDEO_OUTPUT,
+            V4L2_CAP_VIDEO_CAPTURE,
+            V4L2_CAP_VIDEO_OUTPUT,
             V4L2_CAP_VIDEO_OVERLAY,
-            V4L2_CAP_VBI_CAPTURE, V4L2_CAP_VBI_OUTPUT,
-            V4L2_CAP_SLICED_VBI_CAPTURE, V4L2_CAP_SLICED_VBI_OUTPUT,
-            V4L2_CAP_RDS_CAPTURE, V4L2_CAP_VIDEO_OUTPUT_OVERLAY,
-            V4L2_CAP_READWRITE, V4L2_CAP_STREAMING,
+            V4L2_CAP_VBI_CAPTURE,
+            V4L2_CAP_VBI_OUTPUT,
+            V4L2_CAP_SLICED_VBI_CAPTURE,
+            V4L2_CAP_SLICED_VBI_OUTPUT,
+            V4L2_CAP_RDS_CAPTURE,
+            V4L2_CAP_VIDEO_OUTPUT_OVERLAY,
+            V4L2_CAP_READWRITE,
+            V4L2_CAP_STREAMING,
             V4L2_CAP_DEVICE_CAPS,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
-                assert_eq!(caps[i] & caps[j], 0,
-                    "caps 0x{:08X} and 0x{:08X} overlap", caps[i], caps[j]);
+                assert_eq!(
+                    caps[i] & caps[j],
+                    0,
+                    "caps 0x{:08X} and 0x{:08X} overlap",
+                    caps[i],
+                    caps[j]
+                );
             }
         }
     }

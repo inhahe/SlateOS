@@ -82,8 +82,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            RESET_FLAG_ACQUIRED, RESET_FLAG_SHARED,
-            RESET_FLAG_ASSERTED, RESET_FLAG_DEFERRED,
+            RESET_FLAG_ACQUIRED,
+            RESET_FLAG_SHARED,
+            RESET_FLAG_ASSERTED,
+            RESET_FLAG_DEFERRED,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -96,8 +98,10 @@ mod tests {
     #[test]
     fn test_operations_distinct() {
         let ops = [
-            RESET_OP_ASSERT, RESET_OP_DEASSERT,
-            RESET_OP_RESET, RESET_OP_STATUS,
+            RESET_OP_ASSERT,
+            RESET_OP_DEASSERT,
+            RESET_OP_RESET,
+            RESET_OP_STATUS,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

@@ -117,14 +117,22 @@ mod tests {
     #[test]
     fn test_connector_types_distinct() {
         let types = [
-            DRM_MODE_CONNECTOR_Unknown, DRM_MODE_CONNECTOR_VGA,
-            DRM_MODE_CONNECTOR_DVII, DRM_MODE_CONNECTOR_DVID,
-            DRM_MODE_CONNECTOR_DVIA, DRM_MODE_CONNECTOR_Composite,
-            DRM_MODE_CONNECTOR_SVIDEO, DRM_MODE_CONNECTOR_LVDS,
-            DRM_MODE_CONNECTOR_Component, DRM_MODE_CONNECTOR_DisplayPort,
-            DRM_MODE_CONNECTOR_HDMIA, DRM_MODE_CONNECTOR_HDMIB,
-            DRM_MODE_CONNECTOR_eDP, DRM_MODE_CONNECTOR_VIRTUAL,
-            DRM_MODE_CONNECTOR_DSI, DRM_MODE_CONNECTOR_USB,
+            DRM_MODE_CONNECTOR_Unknown,
+            DRM_MODE_CONNECTOR_VGA,
+            DRM_MODE_CONNECTOR_DVII,
+            DRM_MODE_CONNECTOR_DVID,
+            DRM_MODE_CONNECTOR_DVIA,
+            DRM_MODE_CONNECTOR_Composite,
+            DRM_MODE_CONNECTOR_SVIDEO,
+            DRM_MODE_CONNECTOR_LVDS,
+            DRM_MODE_CONNECTOR_Component,
+            DRM_MODE_CONNECTOR_DisplayPort,
+            DRM_MODE_CONNECTOR_HDMIA,
+            DRM_MODE_CONNECTOR_HDMIB,
+            DRM_MODE_CONNECTOR_eDP,
+            DRM_MODE_CONNECTOR_VIRTUAL,
+            DRM_MODE_CONNECTOR_DSI,
+            DRM_MODE_CONNECTOR_USB,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -135,7 +143,11 @@ mod tests {
 
     #[test]
     fn test_connector_status_distinct() {
-        let statuses = [DRM_MODE_CONNECTED, DRM_MODE_DISCONNECTED, DRM_MODE_UNKNOWNCONNECTION];
+        let statuses = [
+            DRM_MODE_CONNECTED,
+            DRM_MODE_DISCONNECTED,
+            DRM_MODE_UNKNOWNCONNECTION,
+        ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
                 assert_ne!(statuses[i], statuses[j]);
@@ -145,7 +157,11 @@ mod tests {
 
     #[test]
     fn test_plane_types_distinct() {
-        let types = [DRM_PLANE_TYPE_OVERLAY, DRM_PLANE_TYPE_PRIMARY, DRM_PLANE_TYPE_CURSOR];
+        let types = [
+            DRM_PLANE_TYPE_OVERLAY,
+            DRM_PLANE_TYPE_PRIMARY,
+            DRM_PLANE_TYPE_CURSOR,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -156,9 +172,12 @@ mod tests {
     #[test]
     fn test_mode_flags_powers_of_two() {
         let flags = [
-            DRM_MODE_FLAG_PHSYNC, DRM_MODE_FLAG_NHSYNC,
-            DRM_MODE_FLAG_PVSYNC, DRM_MODE_FLAG_NVSYNC,
-            DRM_MODE_FLAG_INTERLACE, DRM_MODE_FLAG_DBLSCAN,
+            DRM_MODE_FLAG_PHSYNC,
+            DRM_MODE_FLAG_NHSYNC,
+            DRM_MODE_FLAG_PVSYNC,
+            DRM_MODE_FLAG_NVSYNC,
+            DRM_MODE_FLAG_INTERLACE,
+            DRM_MODE_FLAG_DBLSCAN,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);

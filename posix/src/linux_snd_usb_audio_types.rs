@@ -91,12 +91,18 @@ mod tests {
     #[test]
     fn test_subtypes_distinct() {
         let types = [
-            UAC_SUBTYPE_HEADER, UAC_SUBTYPE_INPUT_TERMINAL,
-            UAC_SUBTYPE_OUTPUT_TERMINAL, UAC_SUBTYPE_MIXER_UNIT,
-            UAC_SUBTYPE_SELECTOR_UNIT, UAC_SUBTYPE_FEATURE_UNIT,
-            UAC_SUBTYPE_EFFECT_UNIT, UAC_SUBTYPE_PROCESSING_UNIT,
-            UAC_SUBTYPE_EXTENSION_UNIT, UAC_SUBTYPE_CLOCK_SOURCE,
-            UAC_SUBTYPE_CLOCK_SELECTOR, UAC_SUBTYPE_CLOCK_MULTIPLIER,
+            UAC_SUBTYPE_HEADER,
+            UAC_SUBTYPE_INPUT_TERMINAL,
+            UAC_SUBTYPE_OUTPUT_TERMINAL,
+            UAC_SUBTYPE_MIXER_UNIT,
+            UAC_SUBTYPE_SELECTOR_UNIT,
+            UAC_SUBTYPE_FEATURE_UNIT,
+            UAC_SUBTYPE_EFFECT_UNIT,
+            UAC_SUBTYPE_PROCESSING_UNIT,
+            UAC_SUBTYPE_EXTENSION_UNIT,
+            UAC_SUBTYPE_CLOCK_SOURCE,
+            UAC_SUBTYPE_CLOCK_SELECTOR,
+            UAC_SUBTYPE_CLOCK_MULTIPLIER,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -108,8 +114,11 @@ mod tests {
     #[test]
     fn test_feature_controls_distinct() {
         let ctrls = [
-            UAC_FU_MUTE, UAC_FU_VOLUME, UAC_FU_BASS,
-            UAC_FU_TREBLE, UAC_FU_AGC,
+            UAC_FU_MUTE,
+            UAC_FU_VOLUME,
+            UAC_FU_BASS,
+            UAC_FU_TREBLE,
+            UAC_FU_AGC,
         ];
         for i in 0..ctrls.len() {
             for j in (i + 1)..ctrls.len() {

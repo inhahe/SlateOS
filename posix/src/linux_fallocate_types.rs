@@ -37,9 +37,12 @@ mod tests {
     #[test]
     fn test_mode_flags_distinct() {
         let flags = [
-            FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE,
-            FALLOC_FL_COLLAPSE_RANGE, FALLOC_FL_ZERO_RANGE,
-            FALLOC_FL_INSERT_RANGE, FALLOC_FL_UNSHARE_RANGE,
+            FALLOC_FL_KEEP_SIZE,
+            FALLOC_FL_PUNCH_HOLE,
+            FALLOC_FL_COLLAPSE_RANGE,
+            FALLOC_FL_ZERO_RANGE,
+            FALLOC_FL_INSERT_RANGE,
+            FALLOC_FL_UNSHARE_RANGE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -51,9 +54,12 @@ mod tests {
     #[test]
     fn test_nonzero_flags_no_overlap() {
         let flags = [
-            FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE,
-            FALLOC_FL_COLLAPSE_RANGE, FALLOC_FL_ZERO_RANGE,
-            FALLOC_FL_INSERT_RANGE, FALLOC_FL_UNSHARE_RANGE,
+            FALLOC_FL_KEEP_SIZE,
+            FALLOC_FL_PUNCH_HOLE,
+            FALLOC_FL_COLLAPSE_RANGE,
+            FALLOC_FL_ZERO_RANGE,
+            FALLOC_FL_INSERT_RANGE,
+            FALLOC_FL_UNSHARE_RANGE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

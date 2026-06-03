@@ -65,8 +65,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            NETPOLL_STATE_UNCONFIGURED, NETPOLL_STATE_READY,
-            NETPOLL_STATE_BUSY, NETPOLL_STATE_ERROR,
+            NETPOLL_STATE_UNCONFIGURED,
+            NETPOLL_STATE_READY,
+            NETPOLL_STATE_BUSY,
+            NETPOLL_STATE_ERROR,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

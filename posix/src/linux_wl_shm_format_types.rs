@@ -72,12 +72,17 @@ mod tests {
     #[test]
     fn test_extended_formats_distinct() {
         let fmts = [
-            WL_SHM_FORMAT_RGB565, WL_SHM_FORMAT_BGR565,
-            WL_SHM_FORMAT_ARGB1555, WL_SHM_FORMAT_XRGB1555,
+            WL_SHM_FORMAT_RGB565,
+            WL_SHM_FORMAT_BGR565,
+            WL_SHM_FORMAT_ARGB1555,
+            WL_SHM_FORMAT_XRGB1555,
             WL_SHM_FORMAT_ARGB4444,
-            WL_SHM_FORMAT_ABGR8888, WL_SHM_FORMAT_XBGR8888,
-            WL_SHM_FORMAT_RGBA8888, WL_SHM_FORMAT_RGBX8888,
-            WL_SHM_FORMAT_BGRA8888, WL_SHM_FORMAT_BGRX8888,
+            WL_SHM_FORMAT_ABGR8888,
+            WL_SHM_FORMAT_XBGR8888,
+            WL_SHM_FORMAT_RGBA8888,
+            WL_SHM_FORMAT_RGBX8888,
+            WL_SHM_FORMAT_BGRA8888,
+            WL_SHM_FORMAT_BGRX8888,
         ];
         for i in 0..fmts.len() {
             for j in (i + 1)..fmts.len() {

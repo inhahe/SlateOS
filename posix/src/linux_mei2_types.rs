@@ -55,9 +55,12 @@ mod tests {
     #[test]
     fn test_connect_results_distinct() {
         let results = [
-            MEI_CL_CONNECT_SUCCESS, MEI_CL_NOT_FOUND,
-            MEI_CL_ALREADY_STARTED, MEI_CL_OUT_OF_RESOURCES,
-            MEI_CL_MESSAGE_SMALL, MEI_CL_NOT_ALLOWED,
+            MEI_CL_CONNECT_SUCCESS,
+            MEI_CL_NOT_FOUND,
+            MEI_CL_ALREADY_STARTED,
+            MEI_CL_OUT_OF_RESOURCES,
+            MEI_CL_MESSAGE_SMALL,
+            MEI_CL_NOT_ALLOWED,
         ];
         for i in 0..results.len() {
             for j in (i + 1)..results.len() {
@@ -83,8 +86,10 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            MEI_CONNECT_CLIENT_IOCTL, MEI_CONNECT_CLIENT_VTAG_IOCTL,
-            MEI_NOTIFY_SET, MEI_NOTIFY_GET,
+            MEI_CONNECT_CLIENT_IOCTL,
+            MEI_CONNECT_CLIENT_VTAG_IOCTL,
+            MEI_NOTIFY_SET,
+            MEI_NOTIFY_GET,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

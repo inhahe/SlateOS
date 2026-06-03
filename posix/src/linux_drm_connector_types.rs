@@ -84,15 +84,24 @@ mod tests {
     #[test]
     fn test_connector_types_distinct() {
         let types = [
-            DRM_MODE_CONNECTOR_UNKNOWN, DRM_MODE_CONNECTOR_VGA,
-            DRM_MODE_CONNECTOR_DVII, DRM_MODE_CONNECTOR_DVID,
-            DRM_MODE_CONNECTOR_DVIA, DRM_MODE_CONNECTOR_COMPOSITE,
-            DRM_MODE_CONNECTOR_SVIDEO, DRM_MODE_CONNECTOR_LVDS,
-            DRM_MODE_CONNECTOR_COMPONENT, DRM_MODE_CONNECTOR_9PINDIN,
-            DRM_MODE_CONNECTOR_DISPLAYPORT, DRM_MODE_CONNECTOR_HDMIA,
-            DRM_MODE_CONNECTOR_HDMIB, DRM_MODE_CONNECTOR_TV,
-            DRM_MODE_CONNECTOR_EDP, DRM_MODE_CONNECTOR_VIRTUAL,
-            DRM_MODE_CONNECTOR_DSI, DRM_MODE_CONNECTOR_DPI,
+            DRM_MODE_CONNECTOR_UNKNOWN,
+            DRM_MODE_CONNECTOR_VGA,
+            DRM_MODE_CONNECTOR_DVII,
+            DRM_MODE_CONNECTOR_DVID,
+            DRM_MODE_CONNECTOR_DVIA,
+            DRM_MODE_CONNECTOR_COMPOSITE,
+            DRM_MODE_CONNECTOR_SVIDEO,
+            DRM_MODE_CONNECTOR_LVDS,
+            DRM_MODE_CONNECTOR_COMPONENT,
+            DRM_MODE_CONNECTOR_9PINDIN,
+            DRM_MODE_CONNECTOR_DISPLAYPORT,
+            DRM_MODE_CONNECTOR_HDMIA,
+            DRM_MODE_CONNECTOR_HDMIB,
+            DRM_MODE_CONNECTOR_TV,
+            DRM_MODE_CONNECTOR_EDP,
+            DRM_MODE_CONNECTOR_VIRTUAL,
+            DRM_MODE_CONNECTOR_DSI,
+            DRM_MODE_CONNECTOR_DPI,
             DRM_MODE_CONNECTOR_USB,
         ];
         for i in 0..types.len() {
@@ -105,7 +114,8 @@ mod tests {
     #[test]
     fn test_connection_status_distinct() {
         let states = [
-            DRM_MODE_CONNECTED, DRM_MODE_DISCONNECTED,
+            DRM_MODE_CONNECTED,
+            DRM_MODE_DISCONNECTED,
             DRM_MODE_UNKNOWNCONNECTION,
         ];
         for i in 0..states.len() {

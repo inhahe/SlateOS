@@ -70,10 +70,22 @@ mod tests {
     #[test]
     fn test_rlimits_distinct() {
         let rlimits = [
-            RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_STACK,
-            RLIMIT_CORE, RLIMIT_RSS, RLIMIT_NPROC, RLIMIT_NOFILE,
-            RLIMIT_MEMLOCK, RLIMIT_AS, RLIMIT_LOCKS, RLIMIT_SIGPENDING,
-            RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME,
+            RLIMIT_CPU,
+            RLIMIT_FSIZE,
+            RLIMIT_DATA,
+            RLIMIT_STACK,
+            RLIMIT_CORE,
+            RLIMIT_RSS,
+            RLIMIT_NPROC,
+            RLIMIT_NOFILE,
+            RLIMIT_MEMLOCK,
+            RLIMIT_AS,
+            RLIMIT_LOCKS,
+            RLIMIT_SIGPENDING,
+            RLIMIT_MSGQUEUE,
+            RLIMIT_NICE,
+            RLIMIT_RTPRIO,
+            RLIMIT_RTTIME,
         ];
         for i in 0..rlimits.len() {
             for j in (i + 1)..rlimits.len() {
@@ -110,10 +122,22 @@ mod tests {
     #[test]
     fn test_all_rlimits_below_nlimits() {
         let rlimits = [
-            RLIMIT_CPU, RLIMIT_FSIZE, RLIMIT_DATA, RLIMIT_STACK,
-            RLIMIT_CORE, RLIMIT_RSS, RLIMIT_NPROC, RLIMIT_NOFILE,
-            RLIMIT_MEMLOCK, RLIMIT_AS, RLIMIT_LOCKS, RLIMIT_SIGPENDING,
-            RLIMIT_MSGQUEUE, RLIMIT_NICE, RLIMIT_RTPRIO, RLIMIT_RTTIME,
+            RLIMIT_CPU,
+            RLIMIT_FSIZE,
+            RLIMIT_DATA,
+            RLIMIT_STACK,
+            RLIMIT_CORE,
+            RLIMIT_RSS,
+            RLIMIT_NPROC,
+            RLIMIT_NOFILE,
+            RLIMIT_MEMLOCK,
+            RLIMIT_AS,
+            RLIMIT_LOCKS,
+            RLIMIT_SIGPENDING,
+            RLIMIT_MSGQUEUE,
+            RLIMIT_NICE,
+            RLIMIT_RTPRIO,
+            RLIMIT_RTTIME,
         ];
         for r in &rlimits {
             assert!(*r < RLIM_NLIMITS);

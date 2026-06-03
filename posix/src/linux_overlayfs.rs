@@ -72,8 +72,12 @@ mod tests {
     #[test]
     fn test_xattr_names_distinct() {
         let names = [
-            OVL_XATTR_OPAQUE, OVL_XATTR_REDIRECT, OVL_XATTR_METACOPY,
-            OVL_XATTR_ORIGIN, OVL_XATTR_IMPURE, OVL_XATTR_NLINK,
+            OVL_XATTR_OPAQUE,
+            OVL_XATTR_REDIRECT,
+            OVL_XATTR_METACOPY,
+            OVL_XATTR_ORIGIN,
+            OVL_XATTR_IMPURE,
+            OVL_XATTR_NLINK,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {
@@ -94,7 +98,13 @@ mod tests {
 
     #[test]
     fn test_inode_flags_no_overlap() {
-        let flags = [OVL_UPPER, OVL_WHITEOUTS, OVL_OPAQUE, OVL_IMPURE, OVL_COPY_UP];
+        let flags = [
+            OVL_UPPER,
+            OVL_WHITEOUTS,
+            OVL_OPAQUE,
+            OVL_IMPURE,
+            OVL_COPY_UP,
+        ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {

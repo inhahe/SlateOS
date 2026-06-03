@@ -130,23 +130,29 @@ static DAY_STRS: [&[u8]; 7] = [
 
 // Abbreviated day names.
 static ABDAY_STRS: [&[u8]; 7] = [
-    b"Sun\0", b"Mon\0", b"Tue\0", b"Wed\0",
-    b"Thu\0", b"Fri\0", b"Sat\0",
+    b"Sun\0", b"Mon\0", b"Tue\0", b"Wed\0", b"Thu\0", b"Fri\0", b"Sat\0",
 ];
 
 // Full month names.
 static MON_STRS: [&[u8]; 12] = [
-    b"January\0", b"February\0", b"March\0",
-    b"April\0", b"May\0", b"June\0",
-    b"July\0", b"August\0", b"September\0",
-    b"October\0", b"November\0", b"December\0",
+    b"January\0",
+    b"February\0",
+    b"March\0",
+    b"April\0",
+    b"May\0",
+    b"June\0",
+    b"July\0",
+    b"August\0",
+    b"September\0",
+    b"October\0",
+    b"November\0",
+    b"December\0",
 ];
 
 // Abbreviated month names.
 static ABMON_STRS: [&[u8]; 12] = [
-    b"Jan\0", b"Feb\0", b"Mar\0", b"Apr\0",
-    b"May\0", b"Jun\0", b"Jul\0", b"Aug\0",
-    b"Sep\0", b"Oct\0", b"Nov\0", b"Dec\0",
+    b"Jan\0", b"Feb\0", b"Mar\0", b"Apr\0", b"May\0", b"Jun\0", b"Jul\0", b"Aug\0", b"Sep\0",
+    b"Oct\0", b"Nov\0", b"Dec\0",
 ];
 
 /// Empty string for unsupported items.
@@ -330,8 +336,13 @@ mod tests {
     #[test]
     fn test_day_names() {
         let expected = [
-            "Sunday", "Monday", "Tuesday", "Wednesday",
-            "Thursday", "Friday", "Saturday",
+            "Sunday",
+            "Monday",
+            "Tuesday",
+            "Wednesday",
+            "Thursday",
+            "Friday",
+            "Saturday",
         ];
         for (i, name) in expected.iter().enumerate() {
             let item = DAY_1 + i as i32;
@@ -365,9 +376,18 @@ mod tests {
     #[test]
     fn test_month_names() {
         let expected = [
-            "January", "February", "March", "April",
-            "May", "June", "July", "August",
-            "September", "October", "November", "December",
+            "January",
+            "February",
+            "March",
+            "April",
+            "May",
+            "June",
+            "July",
+            "August",
+            "September",
+            "October",
+            "November",
+            "December",
         ];
         for (i, name) in expected.iter().enumerate() {
             let item = MON_1 + i as i32;
@@ -383,8 +403,7 @@ mod tests {
     #[test]
     fn test_abmonth_names() {
         let expected = [
-            "Jan", "Feb", "Mar", "Apr", "May", "Jun",
-            "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+            "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
         ];
         for (i, name) in expected.iter().enumerate() {
             let item = ABMON_1 + i as i32;
@@ -477,18 +496,12 @@ mod tests {
 
     #[test]
     fn test_nl_langinfo_l_basic() {
-        assert_eq!(
-            cstr_bytes(nl_langinfo_l(CODESET, 0)),
-            b"ANSI_X3.4-1968"
-        );
+        assert_eq!(cstr_bytes(nl_langinfo_l(CODESET, 0)), b"ANSI_X3.4-1968");
     }
 
     #[test]
     fn test_nl_langinfo_l_day() {
-        assert_eq!(
-            cstr_bytes(nl_langinfo_l(DAY_1, 0)),
-            b"Sunday"
-        );
+        assert_eq!(cstr_bytes(nl_langinfo_l(DAY_1, 0)), b"Sunday");
     }
 
     // -----------------------------------------------------------------------
@@ -499,9 +512,8 @@ mod tests {
     fn test_item_constants_unique() {
         // Verify key constants don't alias each other (except documented aliases).
         let items = [
-            RADIXCHAR, D_T_FMT, D_FMT, T_FMT, T_FMT_AMPM,
-            AM_STR, PM_STR, DAY_1, ABDAY_1, MON_1, ABMON_1,
-            ERA, YESEXPR, NOEXPR, CODESET,
+            RADIXCHAR, D_T_FMT, D_FMT, T_FMT, T_FMT_AMPM, AM_STR, PM_STR, DAY_1, ABDAY_1, MON_1,
+            ABMON_1, ERA, YESEXPR, NOEXPR, CODESET,
         ];
         for i in 0..items.len() {
             for j in (i + 1)..items.len() {

@@ -3,10 +3,10 @@
 //! Extends the VT ioctl constants from `linux_vt` with kernel-internal
 //! virtual terminal state definitions used by the console subsystem.
 
-pub use crate::linux_vt::VT_OPENQRY;
-pub use crate::linux_vt::VT_GETMODE;
-pub use crate::linux_vt::VT_SETMODE;
 pub use crate::linux_vt::VT_ACTIVATE;
+pub use crate::linux_vt::VT_GETMODE;
+pub use crate::linux_vt::VT_OPENQRY;
+pub use crate::linux_vt::VT_SETMODE;
 pub use crate::linux_vt::VT_WAITACTIVE;
 
 // ---------------------------------------------------------------------------

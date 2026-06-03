@@ -100,12 +100,23 @@ mod tests {
     #[test]
     fn test_basic_features_distinct() {
         let feats = [
-            X86_FEATURE_FPU, X86_FEATURE_VME, X86_FEATURE_DE,
-            X86_FEATURE_PSE, X86_FEATURE_TSC, X86_FEATURE_MSR,
-            X86_FEATURE_PAE, X86_FEATURE_CX8, X86_FEATURE_APIC,
-            X86_FEATURE_SEP, X86_FEATURE_PGE, X86_FEATURE_CLFLUSH,
-            X86_FEATURE_MMX, X86_FEATURE_FXSR,
-            X86_FEATURE_SSE, X86_FEATURE_SSE2, X86_FEATURE_HTT,
+            X86_FEATURE_FPU,
+            X86_FEATURE_VME,
+            X86_FEATURE_DE,
+            X86_FEATURE_PSE,
+            X86_FEATURE_TSC,
+            X86_FEATURE_MSR,
+            X86_FEATURE_PAE,
+            X86_FEATURE_CX8,
+            X86_FEATURE_APIC,
+            X86_FEATURE_SEP,
+            X86_FEATURE_PGE,
+            X86_FEATURE_CLFLUSH,
+            X86_FEATURE_MMX,
+            X86_FEATURE_FXSR,
+            X86_FEATURE_SSE,
+            X86_FEATURE_SSE2,
+            X86_FEATURE_HTT,
         ];
         for i in 0..feats.len() {
             for j in (i + 1)..feats.len() {
@@ -117,11 +128,17 @@ mod tests {
     #[test]
     fn test_extended_features_distinct() {
         let feats = [
-            X86_FEATURE_SSE3, X86_FEATURE_PCLMULQDQ,
-            X86_FEATURE_SSSE3, X86_FEATURE_FMA,
-            X86_FEATURE_CX16, X86_FEATURE_SSE4_1,
-            X86_FEATURE_SSE4_2, X86_FEATURE_POPCNT,
-            X86_FEATURE_AES, X86_FEATURE_AVX, X86_FEATURE_RDRAND,
+            X86_FEATURE_SSE3,
+            X86_FEATURE_PCLMULQDQ,
+            X86_FEATURE_SSSE3,
+            X86_FEATURE_FMA,
+            X86_FEATURE_CX16,
+            X86_FEATURE_SSE4_1,
+            X86_FEATURE_SSE4_2,
+            X86_FEATURE_POPCNT,
+            X86_FEATURE_AES,
+            X86_FEATURE_AVX,
+            X86_FEATURE_RDRAND,
         ];
         for i in 0..feats.len() {
             for j in (i + 1)..feats.len() {

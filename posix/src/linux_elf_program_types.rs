@@ -67,9 +67,17 @@ mod tests {
     #[test]
     fn test_segment_types_distinct() {
         let types = [
-            PT_NULL, PT_LOAD, PT_DYNAMIC, PT_INTERP,
-            PT_NOTE, PT_SHLIB, PT_PHDR, PT_TLS,
-            PT_GNU_EH_FRAME, PT_GNU_STACK, PT_GNU_RELRO,
+            PT_NULL,
+            PT_LOAD,
+            PT_DYNAMIC,
+            PT_INTERP,
+            PT_NOTE,
+            PT_SHLIB,
+            PT_PHDR,
+            PT_TLS,
+            PT_GNU_EH_FRAME,
+            PT_GNU_STACK,
+            PT_GNU_RELRO,
             PT_GNU_PROPERTY,
         ];
         for i in 0..types.len() {

@@ -126,8 +126,12 @@ mod tests {
     #[test]
     fn test_ace_rights_power_of_two() {
         let rights = [
-            AFS_ACE_READ, AFS_ACE_WRITE, AFS_ACE_INSERT,
-            AFS_ACE_LOOKUP, AFS_ACE_DELETE, AFS_ACE_LOCK,
+            AFS_ACE_READ,
+            AFS_ACE_WRITE,
+            AFS_ACE_INSERT,
+            AFS_ACE_LOOKUP,
+            AFS_ACE_DELETE,
+            AFS_ACE_LOCK,
             AFS_ACE_ADMINISTER,
         ];
         for r in &rights {
@@ -138,8 +142,12 @@ mod tests {
     #[test]
     fn test_ace_rights_distinct() {
         let rights = [
-            AFS_ACE_READ, AFS_ACE_WRITE, AFS_ACE_INSERT,
-            AFS_ACE_LOOKUP, AFS_ACE_DELETE, AFS_ACE_LOCK,
+            AFS_ACE_READ,
+            AFS_ACE_WRITE,
+            AFS_ACE_INSERT,
+            AFS_ACE_LOOKUP,
+            AFS_ACE_DELETE,
+            AFS_ACE_LOCK,
             AFS_ACE_ADMINISTER,
         ];
         for i in 0..rights.len() {

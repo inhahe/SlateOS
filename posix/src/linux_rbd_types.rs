@@ -105,11 +105,16 @@ mod tests {
     #[test]
     fn test_features_power_of_two() {
         let features = [
-            RBD_FEATURE_LAYERING, RBD_FEATURE_STRIPINGV2,
-            RBD_FEATURE_EXCLUSIVE_LOCK, RBD_FEATURE_OBJECT_MAP,
-            RBD_FEATURE_FAST_DIFF, RBD_FEATURE_DEEP_FLATTEN,
-            RBD_FEATURE_JOURNALING, RBD_FEATURE_DATA_POOL,
-            RBD_FEATURE_OPERATIONS, RBD_FEATURE_MIGRATING,
+            RBD_FEATURE_LAYERING,
+            RBD_FEATURE_STRIPINGV2,
+            RBD_FEATURE_EXCLUSIVE_LOCK,
+            RBD_FEATURE_OBJECT_MAP,
+            RBD_FEATURE_FAST_DIFF,
+            RBD_FEATURE_DEEP_FLATTEN,
+            RBD_FEATURE_JOURNALING,
+            RBD_FEATURE_DATA_POOL,
+            RBD_FEATURE_OPERATIONS,
+            RBD_FEATURE_MIGRATING,
             RBD_FEATURE_NON_PRIMARY,
         ];
         for f in &features {
@@ -120,11 +125,16 @@ mod tests {
     #[test]
     fn test_features_no_overlap() {
         let features = [
-            RBD_FEATURE_LAYERING, RBD_FEATURE_STRIPINGV2,
-            RBD_FEATURE_EXCLUSIVE_LOCK, RBD_FEATURE_OBJECT_MAP,
-            RBD_FEATURE_FAST_DIFF, RBD_FEATURE_DEEP_FLATTEN,
-            RBD_FEATURE_JOURNALING, RBD_FEATURE_DATA_POOL,
-            RBD_FEATURE_OPERATIONS, RBD_FEATURE_MIGRATING,
+            RBD_FEATURE_LAYERING,
+            RBD_FEATURE_STRIPINGV2,
+            RBD_FEATURE_EXCLUSIVE_LOCK,
+            RBD_FEATURE_OBJECT_MAP,
+            RBD_FEATURE_FAST_DIFF,
+            RBD_FEATURE_DEEP_FLATTEN,
+            RBD_FEATURE_JOURNALING,
+            RBD_FEATURE_DATA_POOL,
+            RBD_FEATURE_OPERATIONS,
+            RBD_FEATURE_MIGRATING,
             RBD_FEATURE_NON_PRIMARY,
         ];
         for i in 0..features.len() {
@@ -137,12 +147,18 @@ mod tests {
     #[test]
     fn test_operations_distinct() {
         let ops = [
-            RBD_OPERATION_FLATTEN, RBD_OPERATION_RESIZE,
-            RBD_OPERATION_SNAP_CREATE, RBD_OPERATION_SNAP_REMOVE,
-            RBD_OPERATION_SNAP_RENAME, RBD_OPERATION_SNAP_ROLLBACK,
-            RBD_OPERATION_SNAP_PROTECT, RBD_OPERATION_SNAP_UNPROTECT,
-            RBD_OPERATION_CLONE, RBD_OPERATION_RENAME,
-            RBD_OPERATION_MIRROR_ENABLE, RBD_OPERATION_MIRROR_DISABLE,
+            RBD_OPERATION_FLATTEN,
+            RBD_OPERATION_RESIZE,
+            RBD_OPERATION_SNAP_CREATE,
+            RBD_OPERATION_SNAP_REMOVE,
+            RBD_OPERATION_SNAP_RENAME,
+            RBD_OPERATION_SNAP_ROLLBACK,
+            RBD_OPERATION_SNAP_PROTECT,
+            RBD_OPERATION_SNAP_UNPROTECT,
+            RBD_OPERATION_CLONE,
+            RBD_OPERATION_RENAME,
+            RBD_OPERATION_MIRROR_ENABLE,
+            RBD_OPERATION_MIRROR_DISABLE,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

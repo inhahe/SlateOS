@@ -79,7 +79,13 @@ mod tests {
 
     #[test]
     fn test_connector_indices_distinct() {
-        let idxs = [CN_IDX_PROC, CN_IDX_CIFS, CN_IDX_W1, CN_IDX_V86D, CN_IDX_DRBD];
+        let idxs = [
+            CN_IDX_PROC,
+            CN_IDX_CIFS,
+            CN_IDX_W1,
+            CN_IDX_V86D,
+            CN_IDX_DRBD,
+        ];
         for i in 0..idxs.len() {
             for j in (i + 1)..idxs.len() {
                 assert_ne!(idxs[i], idxs[j]);
@@ -90,9 +96,15 @@ mod tests {
     #[test]
     fn test_proc_events_no_overlap() {
         let events = [
-            PROC_EVENT_FORK, PROC_EVENT_EXEC, PROC_EVENT_UID,
-            PROC_EVENT_GID, PROC_EVENT_SID, PROC_EVENT_PTRACE,
-            PROC_EVENT_COMM, PROC_EVENT_COREDUMP, PROC_EVENT_EXIT,
+            PROC_EVENT_FORK,
+            PROC_EVENT_EXEC,
+            PROC_EVENT_UID,
+            PROC_EVENT_GID,
+            PROC_EVENT_SID,
+            PROC_EVENT_PTRACE,
+            PROC_EVENT_COMM,
+            PROC_EVENT_COREDUMP,
+            PROC_EVENT_EXIT,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

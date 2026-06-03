@@ -118,10 +118,15 @@ mod tests {
     #[test]
     fn test_device_attrs_distinct() {
         let attrs = [
-            WGDEVICE_A_UNSPEC, WGDEVICE_A_IFINDEX, WGDEVICE_A_IFNAME,
-            WGDEVICE_A_PRIVATE_KEY, WGDEVICE_A_PUBLIC_KEY,
-            WGDEVICE_A_FLAGS, WGDEVICE_A_LISTEN_PORT,
-            WGDEVICE_A_FWMARK, WGDEVICE_A_PEERS,
+            WGDEVICE_A_UNSPEC,
+            WGDEVICE_A_IFINDEX,
+            WGDEVICE_A_IFNAME,
+            WGDEVICE_A_PRIVATE_KEY,
+            WGDEVICE_A_PUBLIC_KEY,
+            WGDEVICE_A_FLAGS,
+            WGDEVICE_A_LISTEN_PORT,
+            WGDEVICE_A_FWMARK,
+            WGDEVICE_A_PEERS,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -133,11 +138,16 @@ mod tests {
     #[test]
     fn test_peer_attrs_distinct() {
         let attrs = [
-            WGPEER_A_UNSPEC, WGPEER_A_PUBLIC_KEY, WGPEER_A_PRESHARED_KEY,
-            WGPEER_A_FLAGS, WGPEER_A_ENDPOINT,
+            WGPEER_A_UNSPEC,
+            WGPEER_A_PUBLIC_KEY,
+            WGPEER_A_PRESHARED_KEY,
+            WGPEER_A_FLAGS,
+            WGPEER_A_ENDPOINT,
             WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL,
-            WGPEER_A_LAST_HANDSHAKE_TIME, WGPEER_A_RX_BYTES,
-            WGPEER_A_TX_BYTES, WGPEER_A_ALLOWEDIPS,
+            WGPEER_A_LAST_HANDSHAKE_TIME,
+            WGPEER_A_RX_BYTES,
+            WGPEER_A_TX_BYTES,
+            WGPEER_A_ALLOWEDIPS,
             WGPEER_A_PROTOCOL_VERSION,
         ];
         for i in 0..attrs.len() {
@@ -150,7 +160,8 @@ mod tests {
     #[test]
     fn test_peer_flags_powers_of_two() {
         let flags = [
-            WGPEER_F_REMOVE_ME, WGPEER_F_REPLACE_ALLOWEDIPS,
+            WGPEER_F_REMOVE_ME,
+            WGPEER_F_REPLACE_ALLOWEDIPS,
             WGPEER_F_UPDATE_ONLY,
         ];
         for flag in &flags {

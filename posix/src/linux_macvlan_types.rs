@@ -73,10 +73,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            IFLA_MACVLAN_UNSPEC, IFLA_MACVLAN_MODE,
-            IFLA_MACVLAN_FLAGS, IFLA_MACVLAN_MACADDR_MODE,
-            IFLA_MACVLAN_MACADDR, IFLA_MACVLAN_MACADDR_DATA,
-            IFLA_MACVLAN_MACADDR_COUNT, IFLA_MACVLAN_BC_CUTOFF,
+            IFLA_MACVLAN_UNSPEC,
+            IFLA_MACVLAN_MODE,
+            IFLA_MACVLAN_FLAGS,
+            IFLA_MACVLAN_MACADDR_MODE,
+            IFLA_MACVLAN_MACADDR,
+            IFLA_MACVLAN_MACADDR_DATA,
+            IFLA_MACVLAN_MACADDR_COUNT,
+            IFLA_MACVLAN_BC_CUTOFF,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -88,8 +92,10 @@ mod tests {
     #[test]
     fn test_modes_powers_of_two() {
         let modes = [
-            MACVLAN_MODE_PRIVATE, MACVLAN_MODE_VEPA,
-            MACVLAN_MODE_BRIDGE, MACVLAN_MODE_PASSTHRU,
+            MACVLAN_MODE_PRIVATE,
+            MACVLAN_MODE_VEPA,
+            MACVLAN_MODE_BRIDGE,
+            MACVLAN_MODE_PASSTHRU,
             MACVLAN_MODE_SOURCE,
         ];
         for m in &modes {
@@ -100,8 +106,10 @@ mod tests {
     #[test]
     fn test_modes_no_overlap() {
         let modes = [
-            MACVLAN_MODE_PRIVATE, MACVLAN_MODE_VEPA,
-            MACVLAN_MODE_BRIDGE, MACVLAN_MODE_PASSTHRU,
+            MACVLAN_MODE_PRIVATE,
+            MACVLAN_MODE_VEPA,
+            MACVLAN_MODE_BRIDGE,
+            MACVLAN_MODE_PASSTHRU,
             MACVLAN_MODE_SOURCE,
         ];
         for i in 0..modes.len() {
@@ -114,8 +122,10 @@ mod tests {
     #[test]
     fn test_macaddr_ops_distinct() {
         let ops = [
-            MACVLAN_MACADDR_ADD, MACVLAN_MACADDR_DEL,
-            MACVLAN_MACADDR_FLUSH, MACVLAN_MACADDR_SET,
+            MACVLAN_MACADDR_ADD,
+            MACVLAN_MACADDR_DEL,
+            MACVLAN_MACADDR_FLUSH,
+            MACVLAN_MACADDR_SET,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

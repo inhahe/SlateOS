@@ -97,8 +97,11 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let ioctls = [
-            NE_CREATE_VM, NE_ADD_VCPU, NE_GET_IMAGE_LOAD_INFO,
-            NE_SET_USER_MEMORY_REGION, NE_START_ENCLAVE,
+            NE_CREATE_VM,
+            NE_ADD_VCPU,
+            NE_GET_IMAGE_LOAD_INFO,
+            NE_SET_USER_MEMORY_REGION,
+            NE_START_ENCLAVE,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

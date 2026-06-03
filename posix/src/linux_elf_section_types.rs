@@ -80,11 +80,24 @@ mod tests {
     #[test]
     fn test_section_types_distinct() {
         let types = [
-            SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB,
-            SHT_RELA, SHT_HASH, SHT_DYNAMIC, SHT_NOTE,
-            SHT_NOBITS, SHT_REL, SHT_DYNSYM,
-            SHT_INIT_ARRAY, SHT_FINI_ARRAY, SHT_PREINIT_ARRAY,
-            SHT_GROUP, SHT_GNU_HASH, SHT_GNU_VERNEED, SHT_GNU_VERSYM,
+            SHT_NULL,
+            SHT_PROGBITS,
+            SHT_SYMTAB,
+            SHT_STRTAB,
+            SHT_RELA,
+            SHT_HASH,
+            SHT_DYNAMIC,
+            SHT_NOTE,
+            SHT_NOBITS,
+            SHT_REL,
+            SHT_DYNSYM,
+            SHT_INIT_ARRAY,
+            SHT_FINI_ARRAY,
+            SHT_PREINIT_ARRAY,
+            SHT_GROUP,
+            SHT_GNU_HASH,
+            SHT_GNU_VERNEED,
+            SHT_GNU_VERSYM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -96,9 +109,15 @@ mod tests {
     #[test]
     fn test_section_flags_no_overlap() {
         let flags = [
-            SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR, SHF_MERGE,
-            SHF_STRINGS, SHF_INFO_LINK, SHF_LINK_ORDER,
-            SHF_TLS, SHF_COMPRESSED,
+            SHF_WRITE,
+            SHF_ALLOC,
+            SHF_EXECINSTR,
+            SHF_MERGE,
+            SHF_STRINGS,
+            SHF_INFO_LINK,
+            SHF_LINK_ORDER,
+            SHF_TLS,
+            SHF_COMPRESSED,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

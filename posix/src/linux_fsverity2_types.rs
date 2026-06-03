@@ -59,7 +59,8 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            FS_IOC_ENABLE_VERITY, FS_IOC_MEASURE_VERITY,
+            FS_IOC_ENABLE_VERITY,
+            FS_IOC_MEASURE_VERITY,
             FS_IOC_READ_VERITY_METADATA,
         ];
         for i in 0..cmds.len() {

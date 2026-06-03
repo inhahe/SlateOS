@@ -74,9 +74,14 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            UFFDIO_REGISTER, UFFDIO_UNREGISTER, UFFDIO_COPY,
-            UFFDIO_ZEROPAGE, UFFDIO_WAKE, UFFDIO_WRITEPROTECT,
-            UFFDIO_CONTINUE, UFFDIO_POISON,
+            UFFDIO_REGISTER,
+            UFFDIO_UNREGISTER,
+            UFFDIO_COPY,
+            UFFDIO_ZEROPAGE,
+            UFFDIO_WAKE,
+            UFFDIO_WRITEPROTECT,
+            UFFDIO_CONTINUE,
+            UFFDIO_POISON,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -88,11 +93,16 @@ mod tests {
     #[test]
     fn test_features_no_overlap() {
         let feats = [
-            UFFD_FEATURE_PAGEFAULT_FLAG_WP, UFFD_FEATURE_EVENT_FORK,
-            UFFD_FEATURE_EVENT_REMAP, UFFD_FEATURE_EVENT_REMOVE,
-            UFFD_FEATURE_EVENT_UNMAP, UFFD_FEATURE_MINOR_HUGETLBFS,
-            UFFD_FEATURE_MINOR_SHMEM, UFFD_FEATURE_EXACT_ADDRESS,
-            UFFD_FEATURE_WP_HUGETLBFS_SHMEM, UFFD_FEATURE_WP_UNPOPULATED,
+            UFFD_FEATURE_PAGEFAULT_FLAG_WP,
+            UFFD_FEATURE_EVENT_FORK,
+            UFFD_FEATURE_EVENT_REMAP,
+            UFFD_FEATURE_EVENT_REMOVE,
+            UFFD_FEATURE_EVENT_UNMAP,
+            UFFD_FEATURE_MINOR_HUGETLBFS,
+            UFFD_FEATURE_MINOR_SHMEM,
+            UFFD_FEATURE_EXACT_ADDRESS,
+            UFFD_FEATURE_WP_HUGETLBFS_SHMEM,
+            UFFD_FEATURE_WP_UNPOPULATED,
             UFFD_FEATURE_POISON,
         ];
         for i in 0..feats.len() {
@@ -105,11 +115,16 @@ mod tests {
     #[test]
     fn test_features_power_of_two() {
         let feats = [
-            UFFD_FEATURE_PAGEFAULT_FLAG_WP, UFFD_FEATURE_EVENT_FORK,
-            UFFD_FEATURE_EVENT_REMAP, UFFD_FEATURE_EVENT_REMOVE,
-            UFFD_FEATURE_EVENT_UNMAP, UFFD_FEATURE_MINOR_HUGETLBFS,
-            UFFD_FEATURE_MINOR_SHMEM, UFFD_FEATURE_EXACT_ADDRESS,
-            UFFD_FEATURE_WP_HUGETLBFS_SHMEM, UFFD_FEATURE_WP_UNPOPULATED,
+            UFFD_FEATURE_PAGEFAULT_FLAG_WP,
+            UFFD_FEATURE_EVENT_FORK,
+            UFFD_FEATURE_EVENT_REMAP,
+            UFFD_FEATURE_EVENT_REMOVE,
+            UFFD_FEATURE_EVENT_UNMAP,
+            UFFD_FEATURE_MINOR_HUGETLBFS,
+            UFFD_FEATURE_MINOR_SHMEM,
+            UFFD_FEATURE_EXACT_ADDRESS,
+            UFFD_FEATURE_WP_HUGETLBFS_SHMEM,
+            UFFD_FEATURE_WP_UNPOPULATED,
             UFFD_FEATURE_POISON,
         ];
         for f in &feats {

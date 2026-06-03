@@ -83,10 +83,15 @@ mod tests {
     #[test]
     fn test_entity_functions_distinct() {
         let funcs = [
-            MEDIA_ENT_F_IO_V4L, MEDIA_ENT_F_IO_DTV, MEDIA_ENT_F_IO_VBI,
-            MEDIA_ENT_F_DTV_DEMOD, MEDIA_ENT_F_TUNER,
-            MEDIA_ENT_F_CAM_SENSOR, MEDIA_ENT_F_FLASH,
-            MEDIA_ENT_F_LENS, MEDIA_ENT_F_PROC_VIDEO_ISP,
+            MEDIA_ENT_F_IO_V4L,
+            MEDIA_ENT_F_IO_DTV,
+            MEDIA_ENT_F_IO_VBI,
+            MEDIA_ENT_F_DTV_DEMOD,
+            MEDIA_ENT_F_TUNER,
+            MEDIA_ENT_F_CAM_SENSOR,
+            MEDIA_ENT_F_FLASH,
+            MEDIA_ENT_F_LENS,
+            MEDIA_ENT_F_PROC_VIDEO_ISP,
         ];
         for i in 0..funcs.len() {
             for j in (i + 1)..funcs.len() {
@@ -98,7 +103,8 @@ mod tests {
     #[test]
     fn test_link_flags_no_overlap() {
         let flags = [
-            MEDIA_LNK_FL_ENABLED, MEDIA_LNK_FL_IMMUTABLE,
+            MEDIA_LNK_FL_ENABLED,
+            MEDIA_LNK_FL_IMMUTABLE,
             MEDIA_LNK_FL_DYNAMIC,
         ];
         for i in 0..flags.len() {
@@ -112,7 +118,8 @@ mod tests {
     #[test]
     fn test_pad_flags_no_overlap() {
         let flags = [
-            MEDIA_PAD_FL_SINK, MEDIA_PAD_FL_SOURCE,
+            MEDIA_PAD_FL_SINK,
+            MEDIA_PAD_FL_SOURCE,
             MEDIA_PAD_FL_MUST_CONNECT,
         ];
         for i in 0..flags.len() {
@@ -126,8 +133,10 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let cmds = [
-            MEDIA_IOC_DEVICE_INFO, MEDIA_IOC_ENUM_ENTITIES,
-            MEDIA_IOC_ENUM_LINKS, MEDIA_IOC_SETUP_LINK,
+            MEDIA_IOC_DEVICE_INFO,
+            MEDIA_IOC_ENUM_ENTITIES,
+            MEDIA_IOC_ENUM_LINKS,
+            MEDIA_IOC_SETUP_LINK,
             MEDIA_IOC_G_TOPOLOGY,
         ];
         for i in 0..cmds.len() {

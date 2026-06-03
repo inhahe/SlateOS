@@ -87,10 +87,20 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let types = [
-            TRACE_FN, TRACE_CTX, TRACE_WAKE, TRACE_STACK,
-            TRACE_PRINT, TRACE_BPRINT, TRACE_BRANCH,
-            TRACE_GRAPH_ENT, TRACE_GRAPH_RET, TRACE_USER_STACK,
-            TRACE_HWLAT, TRACE_IRQ, TRACE_OSNOISE, TRACE_TIMERLAT,
+            TRACE_FN,
+            TRACE_CTX,
+            TRACE_WAKE,
+            TRACE_STACK,
+            TRACE_PRINT,
+            TRACE_BPRINT,
+            TRACE_BRANCH,
+            TRACE_GRAPH_ENT,
+            TRACE_GRAPH_RET,
+            TRACE_USER_STACK,
+            TRACE_HWLAT,
+            TRACE_IRQ,
+            TRACE_OSNOISE,
+            TRACE_TIMERLAT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -102,11 +112,17 @@ mod tests {
     #[test]
     fn test_iter_flags_powers_of_two() {
         let flags = [
-            TRACE_ITER_PRINT_PARENT, TRACE_ITER_SYM_OFFSET,
-            TRACE_ITER_SYM_ADDR, TRACE_ITER_VERBOSE,
-            TRACE_ITER_RAW, TRACE_ITER_HEX, TRACE_ITER_BIN,
-            TRACE_ITER_BLOCK, TRACE_ITER_STACKTRACE,
-            TRACE_ITER_PRINTK, TRACE_ITER_IRQ_INFO,
+            TRACE_ITER_PRINT_PARENT,
+            TRACE_ITER_SYM_OFFSET,
+            TRACE_ITER_SYM_ADDR,
+            TRACE_ITER_VERBOSE,
+            TRACE_ITER_RAW,
+            TRACE_ITER_HEX,
+            TRACE_ITER_BIN,
+            TRACE_ITER_BLOCK,
+            TRACE_ITER_STACKTRACE,
+            TRACE_ITER_PRINTK,
+            TRACE_ITER_IRQ_INFO,
             TRACE_ITER_GRAPH_TIME,
         ];
         for flag in &flags {
@@ -117,11 +133,17 @@ mod tests {
     #[test]
     fn test_iter_flags_no_overlap() {
         let flags = [
-            TRACE_ITER_PRINT_PARENT, TRACE_ITER_SYM_OFFSET,
-            TRACE_ITER_SYM_ADDR, TRACE_ITER_VERBOSE,
-            TRACE_ITER_RAW, TRACE_ITER_HEX, TRACE_ITER_BIN,
-            TRACE_ITER_BLOCK, TRACE_ITER_STACKTRACE,
-            TRACE_ITER_PRINTK, TRACE_ITER_IRQ_INFO,
+            TRACE_ITER_PRINT_PARENT,
+            TRACE_ITER_SYM_OFFSET,
+            TRACE_ITER_SYM_ADDR,
+            TRACE_ITER_VERBOSE,
+            TRACE_ITER_RAW,
+            TRACE_ITER_HEX,
+            TRACE_ITER_BIN,
+            TRACE_ITER_BLOCK,
+            TRACE_ITER_STACKTRACE,
+            TRACE_ITER_PRINTK,
+            TRACE_ITER_IRQ_INFO,
             TRACE_ITER_GRAPH_TIME,
         ];
         for i in 0..flags.len() {

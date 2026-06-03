@@ -133,11 +133,26 @@ mod tests {
     #[test]
     fn test_delivery_systems_distinct() {
         let systems = [
-            SYS_UNDEFINED, SYS_DVBC_ANNEX_A, SYS_DVBC_ANNEX_B,
-            SYS_DVBT, SYS_DSS, SYS_DVBS, SYS_DVBS2, SYS_DVBH,
-            SYS_ISDBT, SYS_ISDBS, SYS_ISDBC, SYS_ATSC,
-            SYS_ATSCMH, SYS_DTMB, SYS_CMMB, SYS_DAB,
-            SYS_DVBT2, SYS_TURBO, SYS_DVBC_ANNEX_C, SYS_DVBS2X,
+            SYS_UNDEFINED,
+            SYS_DVBC_ANNEX_A,
+            SYS_DVBC_ANNEX_B,
+            SYS_DVBT,
+            SYS_DSS,
+            SYS_DVBS,
+            SYS_DVBS2,
+            SYS_DVBH,
+            SYS_ISDBT,
+            SYS_ISDBS,
+            SYS_ISDBC,
+            SYS_ATSC,
+            SYS_ATSCMH,
+            SYS_DTMB,
+            SYS_CMMB,
+            SYS_DAB,
+            SYS_DVBT2,
+            SYS_TURBO,
+            SYS_DVBC_ANNEX_C,
+            SYS_DVBS2X,
         ];
         for i in 0..systems.len() {
             for j in (i + 1)..systems.len() {
@@ -155,7 +170,12 @@ mod tests {
 
     #[test]
     fn test_capabilities_distinct() {
-        let caps = [FE_CAN_FEC_AUTO, FE_CAN_QPSK, FE_CAN_QAM_AUTO, FE_CAN_MUTE_TS];
+        let caps = [
+            FE_CAN_FEC_AUTO,
+            FE_CAN_QPSK,
+            FE_CAN_QAM_AUTO,
+            FE_CAN_MUTE_TS,
+        ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
                 assert_ne!(caps[i], caps[j]);

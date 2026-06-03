@@ -77,11 +77,17 @@ mod tests {
     #[test]
     fn test_command_bits_no_overlap() {
         let bits = [
-            PCI_COMMAND_IO, PCI_COMMAND_MEMORY, PCI_COMMAND_MASTER,
-            PCI_COMMAND_SPECIAL, PCI_COMMAND_INVALIDATE,
-            PCI_COMMAND_VGA_PALETTE, PCI_COMMAND_PARITY,
-            PCI_COMMAND_WAIT, PCI_COMMAND_SERR,
-            PCI_COMMAND_FAST_BACK, PCI_COMMAND_INTX_DISABLE,
+            PCI_COMMAND_IO,
+            PCI_COMMAND_MEMORY,
+            PCI_COMMAND_MASTER,
+            PCI_COMMAND_SPECIAL,
+            PCI_COMMAND_INVALIDATE,
+            PCI_COMMAND_VGA_PALETTE,
+            PCI_COMMAND_PARITY,
+            PCI_COMMAND_WAIT,
+            PCI_COMMAND_SERR,
+            PCI_COMMAND_FAST_BACK,
+            PCI_COMMAND_INTX_DISABLE,
         ];
         for i in 0..bits.len() {
             assert!(bits[i].is_power_of_two());
@@ -94,11 +100,16 @@ mod tests {
     #[test]
     fn test_status_bits_distinct() {
         let bits = [
-            PCI_STATUS_INTERRUPT, PCI_STATUS_CAP_LIST,
-            PCI_STATUS_66MHZ, PCI_STATUS_FAST_BACK,
-            PCI_STATUS_PARITY, PCI_STATUS_SIG_TARGET_ABORT,
-            PCI_STATUS_REC_TARGET_ABORT, PCI_STATUS_REC_MASTER_ABORT,
-            PCI_STATUS_SIG_SYSTEM_ERROR, PCI_STATUS_DETECTED_PARITY,
+            PCI_STATUS_INTERRUPT,
+            PCI_STATUS_CAP_LIST,
+            PCI_STATUS_66MHZ,
+            PCI_STATUS_FAST_BACK,
+            PCI_STATUS_PARITY,
+            PCI_STATUS_SIG_TARGET_ABORT,
+            PCI_STATUS_REC_TARGET_ABORT,
+            PCI_STATUS_REC_MASTER_ABORT,
+            PCI_STATUS_SIG_SYSTEM_ERROR,
+            PCI_STATUS_DETECTED_PARITY,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -109,7 +120,10 @@ mod tests {
 
     #[test]
     fn test_dma_enable_combination() {
-        assert_eq!(PCI_COMMAND_DMA_ENABLE, PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER);
+        assert_eq!(
+            PCI_COMMAND_DMA_ENABLE,
+            PCI_COMMAND_MEMORY | PCI_COMMAND_MASTER
+        );
         assert_ne!(PCI_COMMAND_DMA_ENABLE & PCI_COMMAND_MEMORY, 0);
         assert_ne!(PCI_COMMAND_DMA_ENABLE & PCI_COMMAND_MASTER, 0);
     }

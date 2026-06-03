@@ -57,12 +57,24 @@ mod tests {
     #[test]
     fn test_device_ids_distinct() {
         let ids = [
-            VIRTIO_ID_NET, VIRTIO_ID_BLOCK, VIRTIO_ID_CONSOLE,
-            VIRTIO_ID_RNG, VIRTIO_ID_BALLOON, VIRTIO_ID_SCSI,
-            VIRTIO_ID_9P, VIRTIO_ID_GPU, VIRTIO_ID_INPUT,
-            VIRTIO_ID_VSOCK, VIRTIO_ID_CRYPTO, VIRTIO_ID_IOMMU,
-            VIRTIO_ID_MEM, VIRTIO_ID_SOUND, VIRTIO_ID_FS,
-            VIRTIO_ID_PMEM, VIRTIO_ID_BT, VIRTIO_ID_GPIO,
+            VIRTIO_ID_NET,
+            VIRTIO_ID_BLOCK,
+            VIRTIO_ID_CONSOLE,
+            VIRTIO_ID_RNG,
+            VIRTIO_ID_BALLOON,
+            VIRTIO_ID_SCSI,
+            VIRTIO_ID_9P,
+            VIRTIO_ID_GPU,
+            VIRTIO_ID_INPUT,
+            VIRTIO_ID_VSOCK,
+            VIRTIO_ID_CRYPTO,
+            VIRTIO_ID_IOMMU,
+            VIRTIO_ID_MEM,
+            VIRTIO_ID_SOUND,
+            VIRTIO_ID_FS,
+            VIRTIO_ID_PMEM,
+            VIRTIO_ID_BT,
+            VIRTIO_ID_GPIO,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -81,8 +93,11 @@ mod tests {
     #[test]
     fn test_all_nonzero() {
         let ids = [
-            VIRTIO_ID_NET, VIRTIO_ID_BLOCK, VIRTIO_ID_CONSOLE,
-            VIRTIO_ID_RNG, VIRTIO_ID_FS,
+            VIRTIO_ID_NET,
+            VIRTIO_ID_BLOCK,
+            VIRTIO_ID_CONSOLE,
+            VIRTIO_ID_RNG,
+            VIRTIO_ID_FS,
         ];
         for &id in &ids {
             assert_ne!(id, 0);

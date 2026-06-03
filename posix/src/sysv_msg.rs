@@ -366,11 +366,7 @@ unsafe fn select_msg(q: *mut Queue, msgtyp: i64, except: bool) -> Option<usize> 
             let matches = if msgtyp == 0 {
                 true
             } else if msgtyp > 0 {
-                if except {
-                    mt != msgtyp
-                } else {
-                    mt == msgtyp
-                }
+                if except { mt != msgtyp } else { mt == msgtyp }
             } else {
                 // msgtyp < 0: any message with 1 <= type <= |msgtyp|.
                 // Linux additionally requires returning the lowest type
@@ -468,12 +464,7 @@ pub extern "C" fn msgget(key: i32, msgflg: i32) -> i32 {
 /// `mtype` (an `i64`, must be > 0) and whose next `msgsz` bytes are
 /// the message body.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn msgsnd(
-    msqid: i32,
-    msgp: *const u8,
-    msgsz: usize,
-    msgflg: i32,
-) -> i32 {
+pub extern "C" fn msgsnd(msqid: i32, msgp: *const u8, msgsz: usize, msgflg: i32) -> i32 {
     if msgp.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;

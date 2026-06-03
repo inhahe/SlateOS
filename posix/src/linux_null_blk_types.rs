@@ -95,7 +95,9 @@ mod tests {
     #[test]
     fn test_completion_modes_distinct() {
         let modes = [
-            NULL_BLK_COMP_NONE, NULL_BLK_COMP_SOFTIRQ, NULL_BLK_COMP_TIMER,
+            NULL_BLK_COMP_NONE,
+            NULL_BLK_COMP_SOFTIRQ,
+            NULL_BLK_COMP_TIMER,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -122,8 +124,10 @@ mod tests {
     #[test]
     fn test_fault_types_distinct() {
         let faults = [
-            NULL_BLK_FAULT_NONE, NULL_BLK_FAULT_TIMEOUT,
-            NULL_BLK_FAULT_IO_ERROR, NULL_BLK_FAULT_REQUEUE,
+            NULL_BLK_FAULT_NONE,
+            NULL_BLK_FAULT_TIMEOUT,
+            NULL_BLK_FAULT_IO_ERROR,
+            NULL_BLK_FAULT_REQUEUE,
         ];
         for i in 0..faults.len() {
             for j in (i + 1)..faults.len() {
@@ -149,10 +153,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            NULL_BLK_ATTR_BLOCKSIZE, NULL_BLK_ATTR_SIZE,
-            NULL_BLK_ATTR_QUEUE_DEPTH, NULL_BLK_ATTR_HW_QUEUES,
-            NULL_BLK_ATTR_COMPLETION_NSEC, NULL_BLK_ATTR_IRQ_MODE,
-            NULL_BLK_ATTR_MEMORY_BACKED, NULL_BLK_ATTR_DISCARD,
+            NULL_BLK_ATTR_BLOCKSIZE,
+            NULL_BLK_ATTR_SIZE,
+            NULL_BLK_ATTR_QUEUE_DEPTH,
+            NULL_BLK_ATTR_HW_QUEUES,
+            NULL_BLK_ATTR_COMPLETION_NSEC,
+            NULL_BLK_ATTR_IRQ_MODE,
+            NULL_BLK_ATTR_MEMORY_BACKED,
+            NULL_BLK_ATTR_DISCARD,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

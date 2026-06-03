@@ -158,11 +158,18 @@ mod tests {
     #[test]
     fn test_descriptor_types_distinct() {
         let types = [
-            USB_DT_DEVICE, USB_DT_CONFIG, USB_DT_STRING,
-            USB_DT_INTERFACE, USB_DT_ENDPOINT, USB_DT_DEVICE_QUALIFIER,
-            USB_DT_OTHER_SPEED_CONFIG, USB_DT_INTERFACE_POWER,
-            USB_DT_OTG, USB_DT_INTERFACE_ASSOCIATION,
-            USB_DT_BOS, USB_DT_SS_ENDPOINT_COMP,
+            USB_DT_DEVICE,
+            USB_DT_CONFIG,
+            USB_DT_STRING,
+            USB_DT_INTERFACE,
+            USB_DT_ENDPOINT,
+            USB_DT_DEVICE_QUALIFIER,
+            USB_DT_OTHER_SPEED_CONFIG,
+            USB_DT_INTERFACE_POWER,
+            USB_DT_OTG,
+            USB_DT_INTERFACE_ASSOCIATION,
+            USB_DT_BOS,
+            USB_DT_SS_ENDPOINT_COMP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -174,9 +181,14 @@ mod tests {
     #[test]
     fn test_class_codes_distinct() {
         let classes = [
-            USB_CLASS_PER_INTERFACE, USB_CLASS_AUDIO, USB_CLASS_COMM,
-            USB_CLASS_HID, USB_CLASS_MASS_STORAGE, USB_CLASS_HUB,
-            USB_CLASS_VIDEO, USB_CLASS_VENDOR_SPEC,
+            USB_CLASS_PER_INTERFACE,
+            USB_CLASS_AUDIO,
+            USB_CLASS_COMM,
+            USB_CLASS_HID,
+            USB_CLASS_MASS_STORAGE,
+            USB_CLASS_HUB,
+            USB_CLASS_VIDEO,
+            USB_CLASS_VENDOR_SPEC,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
@@ -202,8 +214,12 @@ mod tests {
     #[test]
     fn test_speeds_distinct() {
         let speeds = [
-            USB_SPEED_UNKNOWN, USB_SPEED_LOW, USB_SPEED_FULL,
-            USB_SPEED_HIGH, USB_SPEED_SUPER, USB_SPEED_SUPER_PLUS,
+            USB_SPEED_UNKNOWN,
+            USB_SPEED_LOW,
+            USB_SPEED_FULL,
+            USB_SPEED_HIGH,
+            USB_SPEED_SUPER,
+            USB_SPEED_SUPER_PLUS,
         ];
         for i in 0..speeds.len() {
             for j in (i + 1)..speeds.len() {
@@ -215,10 +231,14 @@ mod tests {
     #[test]
     fn test_request_codes_distinct() {
         let reqs = [
-            USB_REQ_GET_STATUS, USB_REQ_CLEAR_FEATURE,
-            USB_REQ_SET_FEATURE, USB_REQ_SET_ADDRESS,
-            USB_REQ_GET_DESCRIPTOR, USB_REQ_SET_DESCRIPTOR,
-            USB_REQ_GET_CONFIGURATION, USB_REQ_SET_CONFIGURATION,
+            USB_REQ_GET_STATUS,
+            USB_REQ_CLEAR_FEATURE,
+            USB_REQ_SET_FEATURE,
+            USB_REQ_SET_ADDRESS,
+            USB_REQ_GET_DESCRIPTOR,
+            USB_REQ_SET_DESCRIPTOR,
+            USB_REQ_GET_CONFIGURATION,
+            USB_REQ_SET_CONFIGURATION,
         ];
         for i in 0..reqs.len() {
             for j in (i + 1)..reqs.len() {

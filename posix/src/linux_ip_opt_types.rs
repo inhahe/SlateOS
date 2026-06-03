@@ -79,11 +79,21 @@ mod tests {
     #[test]
     fn test_ip_options_distinct() {
         let opts = [
-            IP_TOS, IP_TTL, IP_HDRINCL, IP_OPTIONS,
-            IP_MULTICAST_IF, IP_MULTICAST_TTL, IP_MULTICAST_LOOP,
-            IP_ADD_MEMBERSHIP, IP_DROP_MEMBERSHIP,
-            IP_PKTINFO, IP_RECVTOS, IP_RECVTTL,
-            IP_MTU_DISCOVER, IP_RECVORIGDSTADDR, IP_TRANSPARENT,
+            IP_TOS,
+            IP_TTL,
+            IP_HDRINCL,
+            IP_OPTIONS,
+            IP_MULTICAST_IF,
+            IP_MULTICAST_TTL,
+            IP_MULTICAST_LOOP,
+            IP_ADD_MEMBERSHIP,
+            IP_DROP_MEMBERSHIP,
+            IP_PKTINFO,
+            IP_RECVTOS,
+            IP_RECVTTL,
+            IP_MTU_DISCOVER,
+            IP_RECVORIGDSTADDR,
+            IP_TRANSPARENT,
             IP_FREEBIND,
         ];
         for i in 0..opts.len() {
@@ -96,8 +106,12 @@ mod tests {
     #[test]
     fn test_pmtu_disc_distinct() {
         let disc = [
-            IP_PMTUDISC_DONT, IP_PMTUDISC_WANT, IP_PMTUDISC_DO,
-            IP_PMTUDISC_PROBE, IP_PMTUDISC_INTERFACE, IP_PMTUDISC_OMIT,
+            IP_PMTUDISC_DONT,
+            IP_PMTUDISC_WANT,
+            IP_PMTUDISC_DO,
+            IP_PMTUDISC_PROBE,
+            IP_PMTUDISC_INTERFACE,
+            IP_PMTUDISC_OMIT,
         ];
         for i in 0..disc.len() {
             for j in (i + 1)..disc.len() {

@@ -99,8 +99,11 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            IPPROTO_ESP, IPPROTO_AH, IPPROTO_COMP,
-            IPPROTO_ROUTING, IPPROTO_DSTOPTS,
+            IPPROTO_ESP,
+            IPPROTO_AH,
+            IPPROTO_COMP,
+            IPPROTO_ROUTING,
+            IPPROTO_DSTOPTS,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
@@ -112,8 +115,10 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            XFRM_MODE_TRANSPORT, XFRM_MODE_TUNNEL,
-            XFRM_MODE_ROUTEOPTIMIZATION, XFRM_MODE_IN_TRIGGER,
+            XFRM_MODE_TRANSPORT,
+            XFRM_MODE_TUNNEL,
+            XFRM_MODE_ROUTEOPTIMIZATION,
+            XFRM_MODE_IN_TRIGGER,
             XFRM_MODE_BEET,
         ];
         for i in 0..modes.len() {
@@ -133,9 +138,12 @@ mod tests {
     #[test]
     fn test_sa_flags_no_overlap() {
         let flags = [
-            XFRM_STATE_NOECN, XFRM_STATE_DECAP_DSCP,
-            XFRM_STATE_NOPMTUDISC, XFRM_STATE_WILDRECV,
-            XFRM_STATE_ICMP, XFRM_STATE_AF_UNSPEC,
+            XFRM_STATE_NOECN,
+            XFRM_STATE_DECAP_DSCP,
+            XFRM_STATE_NOPMTUDISC,
+            XFRM_STATE_WILDRECV,
+            XFRM_STATE_ICMP,
+            XFRM_STATE_AF_UNSPEC,
             XFRM_STATE_ESN,
         ];
         for i in 0..flags.len() {
@@ -148,10 +156,15 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            XFRM_MSG_NEWSA, XFRM_MSG_DELSA, XFRM_MSG_GETSA,
-            XFRM_MSG_NEWPOLICY, XFRM_MSG_DELPOLICY,
-            XFRM_MSG_GETPOLICY, XFRM_MSG_EXPIRE,
-            XFRM_MSG_FLUSHSA, XFRM_MSG_FLUSHPOLICY,
+            XFRM_MSG_NEWSA,
+            XFRM_MSG_DELSA,
+            XFRM_MSG_GETSA,
+            XFRM_MSG_NEWPOLICY,
+            XFRM_MSG_DELPOLICY,
+            XFRM_MSG_GETPOLICY,
+            XFRM_MSG_EXPIRE,
+            XFRM_MSG_FLUSHSA,
+            XFRM_MSG_FLUSHPOLICY,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {

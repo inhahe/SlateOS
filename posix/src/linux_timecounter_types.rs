@@ -82,8 +82,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            CLOCKSOURCE_FLAG_CONTINUOUS, CLOCKSOURCE_FLAG_UNSTABLE,
-            CLOCKSOURCE_FLAG_SUSPEND_NONSTOP, CLOCKSOURCE_FLAG_VDSO,
+            CLOCKSOURCE_FLAG_CONTINUOUS,
+            CLOCKSOURCE_FLAG_UNSTABLE,
+            CLOCKSOURCE_FLAG_SUSPEND_NONSTOP,
+            CLOCKSOURCE_FLAG_VDSO,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

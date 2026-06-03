@@ -79,8 +79,12 @@ mod tests {
     #[test]
     fn test_comp_algorithms_distinct() {
         let algs = [
-            ZRAM_COMP_LZO, ZRAM_COMP_LZ4, ZRAM_COMP_ZSTD,
-            ZRAM_COMP_LZO_RLE, ZRAM_COMP_DEFLATE, ZRAM_COMP_842,
+            ZRAM_COMP_LZO,
+            ZRAM_COMP_LZ4,
+            ZRAM_COMP_ZSTD,
+            ZRAM_COMP_LZO_RLE,
+            ZRAM_COMP_DEFLATE,
+            ZRAM_COMP_842,
         ];
         for i in 0..algs.len() {
             for j in (i + 1)..algs.len() {
@@ -102,8 +106,11 @@ mod tests {
     #[test]
     fn test_page_flags_no_overlap() {
         let flags = [
-            ZRAM_FLAG_COMPRESSED, ZRAM_FLAG_SAME,
-            ZRAM_FLAG_WB, ZRAM_FLAG_HUGE, ZRAM_FLAG_IDLE,
+            ZRAM_FLAG_COMPRESSED,
+            ZRAM_FLAG_SAME,
+            ZRAM_FLAG_WB,
+            ZRAM_FLAG_HUGE,
+            ZRAM_FLAG_IDLE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

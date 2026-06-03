@@ -67,12 +67,23 @@ mod tests {
     #[test]
     fn test_well_known_minors_distinct() {
         let minors = [
-            PSMOUSE_MINOR, MS_BUSMOUSE_MINOR, ATIXL_BUSMOUSE_MINOR,
-            WATCHDOG_MINOR, TEMP_MINOR, HWRNG_MINOR,
-            MICROCODE_MINOR, VGAARB_MINOR, MAPPER_CTRL_MINOR,
-            LOOP_CTRL_MINOR, TUN_MINOR, FUSE_MINOR,
-            KVM_MINOR, SNAPSHOT_MINOR, XEN_MINOR,
-            UINPUT_MINOR, HPET_MINOR,
+            PSMOUSE_MINOR,
+            MS_BUSMOUSE_MINOR,
+            ATIXL_BUSMOUSE_MINOR,
+            WATCHDOG_MINOR,
+            TEMP_MINOR,
+            HWRNG_MINOR,
+            MICROCODE_MINOR,
+            VGAARB_MINOR,
+            MAPPER_CTRL_MINOR,
+            LOOP_CTRL_MINOR,
+            TUN_MINOR,
+            FUSE_MINOR,
+            KVM_MINOR,
+            SNAPSHOT_MINOR,
+            XEN_MINOR,
+            UINPUT_MINOR,
+            HPET_MINOR,
         ];
         for i in 0..minors.len() {
             for j in (i + 1)..minors.len() {
@@ -95,12 +106,24 @@ mod tests {
     fn test_minors_in_range() {
         // Minor numbers are 0-255 (8-bit field)
         let minors = [
-            PSMOUSE_MINOR, MS_BUSMOUSE_MINOR, ATIXL_BUSMOUSE_MINOR,
-            WATCHDOG_MINOR, TEMP_MINOR, HWRNG_MINOR,
-            MICROCODE_MINOR, VGAARB_MINOR, MAPPER_CTRL_MINOR,
-            LOOP_CTRL_MINOR, TUN_MINOR, FUSE_MINOR,
-            KVM_MINOR, SNAPSHOT_MINOR, XEN_MINOR,
-            UINPUT_MINOR, HPET_MINOR, MISC_DYNAMIC_MINOR,
+            PSMOUSE_MINOR,
+            MS_BUSMOUSE_MINOR,
+            ATIXL_BUSMOUSE_MINOR,
+            WATCHDOG_MINOR,
+            TEMP_MINOR,
+            HWRNG_MINOR,
+            MICROCODE_MINOR,
+            VGAARB_MINOR,
+            MAPPER_CTRL_MINOR,
+            LOOP_CTRL_MINOR,
+            TUN_MINOR,
+            FUSE_MINOR,
+            KVM_MINOR,
+            SNAPSHOT_MINOR,
+            XEN_MINOR,
+            UINPUT_MINOR,
+            HPET_MINOR,
+            MISC_DYNAMIC_MINOR,
         ];
         for m in minors {
             assert!(m <= 255);

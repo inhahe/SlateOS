@@ -107,8 +107,10 @@ mod tests {
     #[test]
     fn test_magic_values_distinct() {
         let magics = [
-            MINIX_SUPER_MAGIC, MINIX_SUPER_MAGIC2,
-            MINIX2_SUPER_MAGIC, MINIX2_SUPER_MAGIC2,
+            MINIX_SUPER_MAGIC,
+            MINIX_SUPER_MAGIC2,
+            MINIX2_SUPER_MAGIC,
+            MINIX2_SUPER_MAGIC2,
             MINIX3_SUPER_MAGIC,
         ];
         for i in 0..magics.len() {

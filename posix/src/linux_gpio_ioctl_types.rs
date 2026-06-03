@@ -100,9 +100,13 @@ mod tests {
 
     #[test]
     fn test_handle_ioctls_distinct() {
-        assert_ne!(GPIOHANDLE_GET_LINE_VALUES_IOCTL_NR,
-                   GPIOHANDLE_SET_LINE_VALUES_IOCTL_NR);
-        assert_ne!(GPIOHANDLE_SET_LINE_VALUES_IOCTL_NR,
-                   GPIOHANDLE_SET_CONFIG_IOCTL_NR);
+        assert_ne!(
+            GPIOHANDLE_GET_LINE_VALUES_IOCTL_NR,
+            GPIOHANDLE_SET_LINE_VALUES_IOCTL_NR
+        );
+        assert_ne!(
+            GPIOHANDLE_SET_LINE_VALUES_IOCTL_NR,
+            GPIOHANDLE_SET_CONFIG_IOCTL_NR
+        );
     }
 }

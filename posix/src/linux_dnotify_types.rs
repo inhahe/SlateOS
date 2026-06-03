@@ -44,8 +44,7 @@ mod tests {
     #[test]
     fn test_event_flags_no_overlap() {
         let flags = [
-            DN_ACCESS, DN_MODIFY, DN_CREATE,
-            DN_DELETE, DN_RENAME, DN_ATTRIB,
+            DN_ACCESS, DN_MODIFY, DN_CREATE, DN_DELETE, DN_RENAME, DN_ATTRIB,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

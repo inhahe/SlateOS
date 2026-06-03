@@ -77,8 +77,10 @@ mod tests {
     #[test]
     fn test_port_types_distinct() {
         let types = [
-            DEVLINK_PORT_TYPE_NOTSET, DEVLINK_PORT_TYPE_AUTO,
-            DEVLINK_PORT_TYPE_ETH, DEVLINK_PORT_TYPE_IB,
+            DEVLINK_PORT_TYPE_NOTSET,
+            DEVLINK_PORT_TYPE_AUTO,
+            DEVLINK_PORT_TYPE_ETH,
+            DEVLINK_PORT_TYPE_IB,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -90,10 +92,14 @@ mod tests {
     #[test]
     fn test_port_flavours_distinct() {
         let flavours = [
-            DEVLINK_PORT_FLAVOUR_PHYSICAL, DEVLINK_PORT_FLAVOUR_CPU,
-            DEVLINK_PORT_FLAVOUR_DSA, DEVLINK_PORT_FLAVOUR_PCI_PF,
-            DEVLINK_PORT_FLAVOUR_PCI_VF, DEVLINK_PORT_FLAVOUR_VIRTUAL,
-            DEVLINK_PORT_FLAVOUR_UNUSED, DEVLINK_PORT_FLAVOUR_PCI_SF,
+            DEVLINK_PORT_FLAVOUR_PHYSICAL,
+            DEVLINK_PORT_FLAVOUR_CPU,
+            DEVLINK_PORT_FLAVOUR_DSA,
+            DEVLINK_PORT_FLAVOUR_PCI_PF,
+            DEVLINK_PORT_FLAVOUR_PCI_VF,
+            DEVLINK_PORT_FLAVOUR_VIRTUAL,
+            DEVLINK_PORT_FLAVOUR_UNUSED,
+            DEVLINK_PORT_FLAVOUR_PCI_SF,
         ];
         for i in 0..flavours.len() {
             for j in (i + 1)..flavours.len() {
@@ -126,9 +132,6 @@ mod tests {
 
     #[test]
     fn test_eswitch_modes_distinct() {
-        assert_ne!(
-            DEVLINK_ESWITCH_MODE_LEGACY,
-            DEVLINK_ESWITCH_MODE_SWITCHDEV
-        );
+        assert_ne!(DEVLINK_ESWITCH_MODE_LEGACY, DEVLINK_ESWITCH_MODE_SWITCHDEV);
     }
 }

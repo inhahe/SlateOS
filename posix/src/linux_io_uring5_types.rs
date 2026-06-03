@@ -94,8 +94,10 @@ mod tests {
     #[test]
     fn test_cqe_flags_no_overlap() {
         let flags = [
-            IORING_CQE_F_BUFFER, IORING_CQE_F_MORE,
-            IORING_CQE_F_SOCK_NONEMPTY, IORING_CQE_F_NOTIF,
+            IORING_CQE_F_BUFFER,
+            IORING_CQE_F_MORE,
+            IORING_CQE_F_SOCK_NONEMPTY,
+            IORING_CQE_F_NOTIF,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -107,8 +109,12 @@ mod tests {
     #[test]
     fn test_sqe_flags_no_overlap() {
         let flags = [
-            IOSQE_FIXED_FILE, IOSQE_IO_DRAIN, IOSQE_IO_LINK,
-            IOSQE_IO_HARDLINK, IOSQE_ASYNC, IOSQE_BUFFER_SELECT,
+            IOSQE_FIXED_FILE,
+            IOSQE_IO_DRAIN,
+            IOSQE_IO_LINK,
+            IOSQE_IO_HARDLINK,
+            IOSQE_ASYNC,
+            IOSQE_BUFFER_SELECT,
             IOSQE_CQE_SKIP_SUCCESS,
         ];
         for i in 0..flags.len() {
@@ -121,8 +127,10 @@ mod tests {
     #[test]
     fn test_setup_flags_no_overlap() {
         let flags = [
-            IORING_SETUP_SINGLE_ISSUER, IORING_SETUP_DEFER_TASKRUN,
-            IORING_SETUP_NO_MMAP, IORING_SETUP_REGISTERED_FD_ONLY,
+            IORING_SETUP_SINGLE_ISSUER,
+            IORING_SETUP_DEFER_TASKRUN,
+            IORING_SETUP_NO_MMAP,
+            IORING_SETUP_REGISTERED_FD_ONLY,
             IORING_SETUP_NO_SQARRAY,
         ];
         for i in 0..flags.len() {
@@ -135,13 +143,20 @@ mod tests {
     #[test]
     fn test_feat_flags_no_overlap() {
         let flags = [
-            IORING_FEAT_SINGLE_MMAP, IORING_FEAT_NODROP,
-            IORING_FEAT_SUBMIT_STABLE, IORING_FEAT_RW_CUR_POS,
-            IORING_FEAT_CUR_PERSONALITY, IORING_FEAT_FAST_POLL,
-            IORING_FEAT_POLL_32BITS, IORING_FEAT_SQPOLL_NONFIXED,
-            IORING_FEAT_EXT_ARG, IORING_FEAT_NATIVE_WORKERS,
-            IORING_FEAT_RSRC_TAGS, IORING_FEAT_CQE_SKIP,
-            IORING_FEAT_LINKED_FILE, IORING_FEAT_REG_REG_RING,
+            IORING_FEAT_SINGLE_MMAP,
+            IORING_FEAT_NODROP,
+            IORING_FEAT_SUBMIT_STABLE,
+            IORING_FEAT_RW_CUR_POS,
+            IORING_FEAT_CUR_PERSONALITY,
+            IORING_FEAT_FAST_POLL,
+            IORING_FEAT_POLL_32BITS,
+            IORING_FEAT_SQPOLL_NONFIXED,
+            IORING_FEAT_EXT_ARG,
+            IORING_FEAT_NATIVE_WORKERS,
+            IORING_FEAT_RSRC_TAGS,
+            IORING_FEAT_CQE_SKIP,
+            IORING_FEAT_LINKED_FILE,
+            IORING_FEAT_REG_REG_RING,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

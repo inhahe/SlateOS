@@ -105,8 +105,12 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            SIOCSLMODE, SIOCGLMODE, SIOCSKEEPALIVE,
-            SIOCGKEEPALIVE, SIOCSOUTFILL, SIOCGOUTFILL,
+            SIOCSLMODE,
+            SIOCGLMODE,
+            SIOCSKEEPALIVE,
+            SIOCGKEEPALIVE,
+            SIOCSOUTFILL,
+            SIOCGOUTFILL,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

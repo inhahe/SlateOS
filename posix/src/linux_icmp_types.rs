@@ -86,10 +86,17 @@ mod tests {
     #[test]
     fn test_icmpv4_types_distinct() {
         let types = [
-            ICMP_ECHOREPLY, ICMP_DEST_UNREACH, ICMP_SOURCE_QUENCH,
-            ICMP_REDIRECT, ICMP_ECHO, ICMP_TIME_EXCEEDED,
-            ICMP_PARAMETERPROB, ICMP_TIMESTAMP, ICMP_TIMESTAMPREPLY,
-            ICMP_ADDRESS, ICMP_ADDRESSREPLY,
+            ICMP_ECHOREPLY,
+            ICMP_DEST_UNREACH,
+            ICMP_SOURCE_QUENCH,
+            ICMP_REDIRECT,
+            ICMP_ECHO,
+            ICMP_TIME_EXCEEDED,
+            ICMP_PARAMETERPROB,
+            ICMP_TIMESTAMP,
+            ICMP_TIMESTAMPREPLY,
+            ICMP_ADDRESS,
+            ICMP_ADDRESSREPLY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -101,8 +108,12 @@ mod tests {
     #[test]
     fn test_unreach_codes_distinct() {
         let codes = [
-            ICMP_NET_UNREACH, ICMP_HOST_UNREACH, ICMP_PROT_UNREACH,
-            ICMP_PORT_UNREACH, ICMP_FRAG_NEEDED, ICMP_SR_FAILED,
+            ICMP_NET_UNREACH,
+            ICMP_HOST_UNREACH,
+            ICMP_PROT_UNREACH,
+            ICMP_PORT_UNREACH,
+            ICMP_FRAG_NEEDED,
+            ICMP_SR_FAILED,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -114,10 +125,16 @@ mod tests {
     #[test]
     fn test_icmpv6_types_distinct() {
         let types = [
-            ICMPV6_DEST_UNREACH, ICMPV6_PKT_TOOBIG, ICMPV6_TIME_EXCEED,
-            ICMPV6_PARAMPROB, ICMPV6_ECHO_REQUEST, ICMPV6_ECHO_REPLY,
-            ICMPV6_ROUTER_SOLICIT, ICMPV6_ROUTER_ADVERT,
-            ICMPV6_NEIGHBOR_SOLICIT, ICMPV6_NEIGHBOR_ADVERT,
+            ICMPV6_DEST_UNREACH,
+            ICMPV6_PKT_TOOBIG,
+            ICMPV6_TIME_EXCEED,
+            ICMPV6_PARAMPROB,
+            ICMPV6_ECHO_REQUEST,
+            ICMPV6_ECHO_REPLY,
+            ICMPV6_ROUTER_SOLICIT,
+            ICMPV6_ROUTER_ADVERT,
+            ICMPV6_NEIGHBOR_SOLICIT,
+            ICMPV6_NEIGHBOR_ADVERT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

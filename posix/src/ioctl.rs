@@ -228,21 +228,41 @@ fn default_termios() -> Termios {
     let mut cc = [0u8; NCCS];
 
     // Standard control character defaults (same as Linux).
-    if let Some(slot) = cc.get_mut(VINTR) { *slot = 0x03; }   // Ctrl-C
-    if let Some(slot) = cc.get_mut(VQUIT) { *slot = 0x1C; }   // Ctrl-backslash
-    if let Some(slot) = cc.get_mut(VERASE) { *slot = 0x7F; }  // DEL
-    if let Some(slot) = cc.get_mut(VKILL) { *slot = 0x15; }   // Ctrl-U
-    if let Some(slot) = cc.get_mut(VEOF) { *slot = 0x04; }    // Ctrl-D
-    if let Some(slot) = cc.get_mut(VSTART) { *slot = 0x11; }  // Ctrl-Q
-    if let Some(slot) = cc.get_mut(VSTOP) { *slot = 0x13; }   // Ctrl-S
-    if let Some(slot) = cc.get_mut(VSUSP) { *slot = 0x1A; }   // Ctrl-Z
-    if let Some(slot) = cc.get_mut(VMIN) { *slot = 1; }       // min chars for read
-    if let Some(slot) = cc.get_mut(VTIME) { *slot = 0; }      // no timeout
+    if let Some(slot) = cc.get_mut(VINTR) {
+        *slot = 0x03;
+    } // Ctrl-C
+    if let Some(slot) = cc.get_mut(VQUIT) {
+        *slot = 0x1C;
+    } // Ctrl-backslash
+    if let Some(slot) = cc.get_mut(VERASE) {
+        *slot = 0x7F;
+    } // DEL
+    if let Some(slot) = cc.get_mut(VKILL) {
+        *slot = 0x15;
+    } // Ctrl-U
+    if let Some(slot) = cc.get_mut(VEOF) {
+        *slot = 0x04;
+    } // Ctrl-D
+    if let Some(slot) = cc.get_mut(VSTART) {
+        *slot = 0x11;
+    } // Ctrl-Q
+    if let Some(slot) = cc.get_mut(VSTOP) {
+        *slot = 0x13;
+    } // Ctrl-S
+    if let Some(slot) = cc.get_mut(VSUSP) {
+        *slot = 0x1A;
+    } // Ctrl-Z
+    if let Some(slot) = cc.get_mut(VMIN) {
+        *slot = 1;
+    } // min chars for read
+    if let Some(slot) = cc.get_mut(VTIME) {
+        *slot = 0;
+    } // no timeout
 
     Termios {
-        c_iflag: ICRNL,                            // CR→NL on input
-        c_oflag: OPOST | ONLCR,                    // post-process, NL→CRNL
-        c_cflag: CS8 | CREAD | HUPCL | CLOCAL,     // 8-bit, receiver on
+        c_iflag: ICRNL,                                  // CR→NL on input
+        c_oflag: OPOST | ONLCR,                          // post-process, NL→CRNL
+        c_cflag: CS8 | CREAD | HUPCL | CLOCAL,           // 8-bit, receiver on
         c_lflag: ISIG | ICANON | ECHO | ECHONL | IEXTEN, // cooked mode + echo
         c_line: 0,
         c_cc: cc,
@@ -355,7 +375,7 @@ fn handle_fionbio(fd: i32, arg: *mut u8) -> i32 {
 /// non-terminal fds (files don't support FIONREAD via ioctl; use
 /// stat + seek instead).
 fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
-    use crate::syscall::{syscall3, SYS_TCP_INFO};
+    use crate::syscall::{SYS_TCP_INFO, syscall3};
 
     if arg.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -372,7 +392,7 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
         }
         HandleKind::Pipe => {
             // Query actual buffered byte count from the kernel.
-            use crate::syscall::{syscall1, SYS_PIPE_READABLE_BYTES};
+            use crate::syscall::{SYS_PIPE_READABLE_BYTES, syscall1};
             let bytes = syscall1(SYS_PIPE_READABLE_BYTES, handle) as i32;
             // SAFETY: arg must be at least sizeof(i32).
             unsafe {
@@ -389,7 +409,7 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             let bytes = if handle == 0 {
                 0
             } else {
-                use crate::syscall::{syscall1, SYS_SOCKETPAIR_READABLE_BYTES};
+                use crate::syscall::{SYS_SOCKETPAIR_READABLE_BYTES, syscall1};
                 syscall1(SYS_SOCKETPAIR_READABLE_BYTES, handle) as i32
             };
             // SAFETY: arg must be at least sizeof(i32).
@@ -401,17 +421,14 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
         HandleKind::TcpStream => {
             if handle == 0 {
                 // SAFETY: arg must be at least sizeof(i32).
-                unsafe { core::ptr::write_unaligned(arg.cast::<i32>(), 0); }
+                unsafe {
+                    core::ptr::write_unaligned(arg.cast::<i32>(), 0);
+                }
                 return 0;
             }
             // Query TCP_INFO to get rx_buffered (bytes 24..28).
             let mut info_buf = [0u8; 48];
-            let ret = syscall3(
-                SYS_TCP_INFO,
-                handle,
-                info_buf.as_mut_ptr() as u64,
-                48,
-            );
+            let ret = syscall3(SYS_TCP_INFO, handle, info_buf.as_mut_ptr() as u64, 48);
             let available = if ret == 0 {
                 // rx_buffered is at offset 24, 4 bytes LE.
                 u32::from_le_bytes([info_buf[24], info_buf[25], info_buf[26], info_buf[27]])
@@ -436,7 +453,7 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
         HandleKind::UdpSocket => {
             // FIONREAD on UDP returns byte size of the first deliverable
             // datagram (POSIX semantics), not total queued bytes.
-            use crate::syscall::{syscall1, SYS_UDP_RX_FRONT_BYTES};
+            use crate::syscall::{SYS_UDP_RX_FRONT_BYTES, syscall1};
             let bytes = if handle == 0 {
                 0
             } else {
@@ -448,8 +465,7 @@ fn handle_fionread(kind: HandleKind, handle: u64, arg: *mut u8) -> i32 {
             }
             0
         }
-        HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd
-        | HandleKind::Inotify => {
+        HandleKind::Eventfd | HandleKind::Epoll | HandleKind::Timerfd | HandleKind::Inotify => {
             // Linux's eventfd / epoll / timerfd / inotify have no .ioctl
             // handler, so ioctl() returns ENOTTY on them.  Match that
             // behavior.
@@ -596,7 +612,9 @@ pub extern "C" fn ctermid(s: *mut u8) -> *const u8 {
     while i < bytes.len() {
         if let Some(&b) = bytes.get(i) {
             // SAFETY: i < bytes.len() = 13 <= L_ctermid (typically 20).
-            unsafe { *s.add(i) = b; }
+            unsafe {
+                *s.add(i) = b;
+            }
         }
         i = i.wrapping_add(1);
     }
@@ -696,7 +714,9 @@ pub unsafe extern "C" fn cfsetispeed(termios_p: *mut Termios, speed: u32) -> i32
         return -1;
     }
     // SAFETY: Caller guarantees termios_p is valid.
-    unsafe { (*termios_p).c_ispeed = speed; }
+    unsafe {
+        (*termios_p).c_ispeed = speed;
+    }
     0
 }
 
@@ -714,7 +734,9 @@ pub unsafe extern "C" fn cfsetospeed(termios_p: *mut Termios, speed: u32) -> i32
         return -1;
     }
     // SAFETY: Caller guarantees termios_p is valid.
-    unsafe { (*termios_p).c_ospeed = speed; }
+    unsafe {
+        (*termios_p).c_ospeed = speed;
+    }
     0
 }
 
@@ -1039,7 +1061,9 @@ mod tests {
         assert_ne!(t.c_iflag & ICRNL, 0);
         assert_ne!(t.c_oflag & OPOST, 0);
 
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
 
         // After raw: no canonical, no echo, no input/output processing.
         assert_eq!(t.c_lflag & ICANON, 0, "ICANON should be cleared");
@@ -1053,7 +1077,9 @@ mod tests {
     #[test]
     fn test_cfmakeraw_vmin_vtime() {
         let mut t = default_termios();
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
         assert_eq!(t.c_cc[VMIN], 1, "VMIN should be 1");
         assert_eq!(t.c_cc[VTIME], 0, "VTIME should be 0");
     }
@@ -1305,7 +1331,9 @@ mod tests {
     #[test]
     fn test_cfmakeraw_null() {
         // Should silently return without crashing.
-        unsafe { cfmakeraw(core::ptr::null_mut()); }
+        unsafe {
+            cfmakeraw(core::ptr::null_mut());
+        }
     }
 
     // -- cfmakeraw clears parity --
@@ -1314,8 +1342,14 @@ mod tests {
     fn test_cfmakeraw_clears_parity() {
         let mut t = default_termios();
         t.c_cflag |= PARENB;
-        unsafe { cfmakeraw(&raw mut t); }
-        assert_eq!(t.c_cflag & PARENB, 0, "PARENB should be cleared in raw mode");
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
+        assert_eq!(
+            t.c_cflag & PARENB,
+            0,
+            "PARENB should be cleared in raw mode"
+        );
     }
 
     // -- tcsendbreak / tcdrain --
@@ -1337,7 +1371,12 @@ mod tests {
     #[test]
     fn test_ioctl_tiocgwinsz_console() {
         ensure_std_fds();
-        let mut ws = Winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        let mut ws = Winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         let ret = ioctl(0, TIOCGWINSZ, (&raw mut ws).cast::<u8>());
         assert_eq!(ret, 0);
         assert_eq!(ws.ws_row, 25);
@@ -1355,7 +1394,12 @@ mod tests {
     #[test]
     fn test_ioctl_tiocswinsz_console() {
         ensure_std_fds();
-        let ws = Winsize { ws_row: 50, ws_col: 120, ws_xpixel: 0, ws_ypixel: 0 };
+        let ws = Winsize {
+            ws_row: 50,
+            ws_col: 120,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         let ret = ioctl(0, TIOCSWINSZ, (&raw const ws).cast::<u8>().cast_mut());
         assert_eq!(ret, 0, "TIOCSWINSZ on console should succeed (no-op)");
     }
@@ -1372,7 +1416,12 @@ mod tests {
     #[test]
     fn test_ioctl_tiocgwinsz_non_console() {
         let fd = fdtable::alloc_fd(HandleKind::Pipe, 301).unwrap();
-        let mut ws = Winsize { ws_row: 0, ws_col: 0, ws_xpixel: 0, ws_ypixel: 0 };
+        let mut ws = Winsize {
+            ws_row: 0,
+            ws_col: 0,
+            ws_xpixel: 0,
+            ws_ypixel: 0,
+        };
         let ret = ioctl(fd, TIOCGWINSZ, (&raw mut ws).cast::<u8>());
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::ENOTTY);
@@ -1387,7 +1436,11 @@ mod tests {
         assert_eq!(ret, 0);
         // Check that O_NONBLOCK is now set.
         let flags = fdtable::get_status_flags(0).unwrap_or(0);
-        assert_ne!(flags & crate::fcntl::O_NONBLOCK, 0, "O_NONBLOCK should be set");
+        assert_ne!(
+            flags & crate::fcntl::O_NONBLOCK,
+            0,
+            "O_NONBLOCK should be set"
+        );
         // Restore: disable nonblock.
         let disable: i32 = 0;
         let _ = ioctl(0, FIONBIO, (&raw const disable).cast::<u8>().cast_mut());
@@ -1404,7 +1457,11 @@ mod tests {
         let ret = ioctl(0, FIONBIO, (&raw const disable).cast::<u8>().cast_mut());
         assert_eq!(ret, 0);
         let flags = fdtable::get_status_flags(0).unwrap_or(crate::fcntl::O_NONBLOCK);
-        assert_eq!(flags & crate::fcntl::O_NONBLOCK, 0, "O_NONBLOCK should be clear");
+        assert_eq!(
+            flags & crate::fcntl::O_NONBLOCK,
+            0,
+            "O_NONBLOCK should be clear"
+        );
     }
 
     #[test]
@@ -1757,9 +1814,15 @@ mod tests {
     #[test]
     fn test_cfmakeraw_preserves_baud() {
         let mut t = default_termios();
-        unsafe { cfsetispeed(&raw mut t, B115200); }
-        unsafe { cfsetospeed(&raw mut t, B9600); }
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfsetispeed(&raw mut t, B115200);
+        }
+        unsafe {
+            cfsetospeed(&raw mut t, B9600);
+        }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
         assert_eq!(t.c_ispeed, B115200, "cfmakeraw should not change c_ispeed");
         assert_eq!(t.c_ospeed, B9600, "cfmakeraw should not change c_ospeed");
     }
@@ -1768,16 +1831,22 @@ mod tests {
     fn test_cfmakeraw_preserves_c_line() {
         let mut t = default_termios();
         t.c_line = 5;
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
         assert_eq!(t.c_line, 5, "cfmakeraw should not change c_line");
     }
 
     #[test]
     fn test_cfmakeraw_idempotent() {
         let mut t1 = default_termios();
-        unsafe { cfmakeraw(&raw mut t1); }
+        unsafe {
+            cfmakeraw(&raw mut t1);
+        }
         let mut t2 = t1;
-        unsafe { cfmakeraw(&raw mut t2); }
+        unsafe {
+            cfmakeraw(&raw mut t2);
+        }
         // All fields should be identical after double application.
         assert_eq!(t1.c_iflag, t2.c_iflag);
         assert_eq!(t1.c_oflag, t2.c_oflag);
@@ -1790,7 +1859,9 @@ mod tests {
     fn test_cfmakeraw_clears_echonl() {
         let mut t = default_termios();
         assert_ne!(t.c_lflag & ECHONL, 0, "ECHONL should be set in default");
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
         assert_eq!(t.c_lflag & ECHONL, 0, "ECHONL should be cleared in raw");
     }
 
@@ -1798,7 +1869,9 @@ mod tests {
     fn test_cfmakeraw_clears_iexten() {
         let mut t = default_termios();
         assert_ne!(t.c_lflag & IEXTEN, 0, "IEXTEN should be set in default");
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
         assert_eq!(t.c_lflag & IEXTEN, 0, "IEXTEN should be cleared in raw");
     }
 
@@ -1806,7 +1879,9 @@ mod tests {
     fn test_cfmakeraw_clears_brkint() {
         let mut t = default_termios();
         t.c_iflag |= BRKINT;
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
         assert_eq!(t.c_iflag & BRKINT, 0, "BRKINT should be cleared in raw");
     }
 
@@ -1814,7 +1889,9 @@ mod tests {
     fn test_cfmakeraw_clears_ixon() {
         let mut t = default_termios();
         t.c_iflag |= IXON;
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
         assert_eq!(t.c_iflag & IXON, 0, "IXON should be cleared in raw");
     }
 
@@ -1822,7 +1899,9 @@ mod tests {
     fn test_cfmakeraw_clears_istrip() {
         let mut t = default_termios();
         t.c_iflag |= ISTRIP;
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
         assert_eq!(t.c_iflag & ISTRIP, 0, "ISTRIP should be cleared in raw");
     }
 
@@ -1830,7 +1909,9 @@ mod tests {
     fn test_cfmakeraw_clears_inpck() {
         let mut t = default_termios();
         t.c_iflag |= INPCK;
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
         assert_eq!(t.c_iflag & INPCK, 0, "INPCK should be cleared in raw");
     }
 
@@ -1838,7 +1919,9 @@ mod tests {
     fn test_cfmakeraw_clears_onlcr() {
         let mut t = default_termios();
         assert_ne!(t.c_oflag & ONLCR, 0, "ONLCR should be set in default");
-        unsafe { cfmakeraw(&raw mut t); }
+        unsafe {
+            cfmakeraw(&raw mut t);
+        }
         // ONLCR is implicitly cleared because OPOST is cleared; ONLCR only
         // matters when OPOST is on, but let's verify OPOST is cleared.
         assert_eq!(t.c_oflag & OPOST, 0, "OPOST should be cleared in raw");
@@ -1867,7 +1950,11 @@ mod tests {
     #[test]
     fn test_default_termios_no_parenb() {
         let t = default_termios();
-        assert_eq!(t.c_cflag & PARENB, 0, "Parity should not be enabled by default");
+        assert_eq!(
+            t.c_cflag & PARENB,
+            0,
+            "Parity should not be enabled by default"
+        );
     }
 
     #[test]
@@ -1894,14 +1981,18 @@ mod tests {
 
     #[test]
     fn test_termios_alignment() {
-        assert!(core::mem::align_of::<Termios>() >= 4,
-            "Termios should be aligned to at least 4 bytes");
+        assert!(
+            core::mem::align_of::<Termios>() >= 4,
+            "Termios should be aligned to at least 4 bytes"
+        );
     }
 
     #[test]
     fn test_winsize_alignment() {
-        assert!(core::mem::align_of::<Winsize>() >= 2,
-            "Winsize should be aligned to at least 2 bytes");
+        assert!(
+            core::mem::align_of::<Winsize>() >= 2,
+            "Winsize should be aligned to at least 2 bytes"
+        );
     }
 
     // -- Flag bit distinctness --
@@ -1911,8 +2002,11 @@ mod tests {
         let flags = [BRKINT, INPCK, ISTRIP, INLCR, IGNCR, ICRNL, IXON];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
-                assert_eq!(flags[i] & flags[j], 0,
-                    "iflag bits at {i} and {j} should not overlap");
+                assert_eq!(
+                    flags[i] & flags[j],
+                    0,
+                    "iflag bits at {i} and {j} should not overlap"
+                );
             }
         }
     }
@@ -1922,8 +2016,11 @@ mod tests {
         let flags = [ISIG, ICANON, ECHO, ECHONL, IEXTEN];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
-                assert_eq!(flags[i] & flags[j], 0,
-                    "lflag bits at {i} and {j} should not overlap");
+                assert_eq!(
+                    flags[i] & flags[j],
+                    0,
+                    "lflag bits at {i} and {j} should not overlap"
+                );
             }
         }
     }
@@ -1941,11 +2038,17 @@ mod tests {
         // other and from CSIZE.
         let flags = [CREAD, PARENB, HUPCL, CLOCAL];
         for i in 0..flags.len() {
-            assert_eq!(flags[i] & CSIZE, 0,
-                "cflag bit {i} should not overlap with CSIZE");
+            assert_eq!(
+                flags[i] & CSIZE,
+                0,
+                "cflag bit {i} should not overlap with CSIZE"
+            );
             for j in (i + 1)..flags.len() {
-                assert_eq!(flags[i] & flags[j], 0,
-                    "cflag bits at {i} and {j} should not overlap");
+                assert_eq!(
+                    flags[i] & flags[j],
+                    0,
+                    "cflag bits at {i} and {j} should not overlap"
+                );
             }
         }
     }

@@ -104,8 +104,10 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            ADFS_FILETYPE_TEXT, ADFS_FILETYPE_DATA,
-            ADFS_FILETYPE_COMMAND, ADFS_FILETYPE_BASIC,
+            ADFS_FILETYPE_TEXT,
+            ADFS_FILETYPE_DATA,
+            ADFS_FILETYPE_COMMAND,
+            ADFS_FILETYPE_BASIC,
             ADFS_FILETYPE_UTILITY,
         ];
         for i in 0..types.len() {
@@ -124,8 +126,11 @@ mod tests {
     #[test]
     fn test_permissions_power_of_two() {
         let perms = [
-            ADFS_OWNER_READ, ADFS_OWNER_WRITE, ADFS_OWNER_LOCK,
-            ADFS_PUBLIC_READ, ADFS_PUBLIC_WRITE,
+            ADFS_OWNER_READ,
+            ADFS_OWNER_WRITE,
+            ADFS_OWNER_LOCK,
+            ADFS_PUBLIC_READ,
+            ADFS_PUBLIC_WRITE,
         ];
         for p in &perms {
             assert!(p.is_power_of_two(), "0x{:02x} not power of two", p);

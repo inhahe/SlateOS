@@ -153,9 +153,14 @@ mod tests {
     #[test]
     fn test_async_flags_are_bits() {
         let flags = [
-            ASYNC_HUP_NOTIFY, ASYNC_FOURPORT, ASYNC_SAK,
-            ASYNC_SPLIT_TERMIOS, ASYNC_SPD_HI, ASYNC_SPD_VHI,
-            ASYNC_SKIP_TEST, ASYNC_AUTO_IRQ,
+            ASYNC_HUP_NOTIFY,
+            ASYNC_FOURPORT,
+            ASYNC_SAK,
+            ASYNC_SPLIT_TERMIOS,
+            ASYNC_SPD_HI,
+            ASYNC_SPD_VHI,
+            ASYNC_SKIP_TEST,
+            ASYNC_AUTO_IRQ,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -167,8 +172,11 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            TIOCGSERIAL, TIOCSSERIAL, TIOCSERGETLSR,
-            TIOCSERGETMULTI, TIOCSERSETMULTI,
+            TIOCGSERIAL,
+            TIOCSSERIAL,
+            TIOCSERGETLSR,
+            TIOCSERGETMULTI,
+            TIOCSERSETMULTI,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

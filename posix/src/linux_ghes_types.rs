@@ -85,9 +85,14 @@ mod tests {
     #[test]
     fn test_notify_types_distinct() {
         let types = [
-            GHES_NOTIFY_POLLED, GHES_NOTIFY_SCI, GHES_NOTIFY_NMI,
-            GHES_NOTIFY_LOCAL, GHES_NOTIFY_SEA, GHES_NOTIFY_SEI,
-            GHES_NOTIFY_GPIO, GHES_NOTIFY_SOFTWARE_DELEGATED,
+            GHES_NOTIFY_POLLED,
+            GHES_NOTIFY_SCI,
+            GHES_NOTIFY_NMI,
+            GHES_NOTIFY_LOCAL,
+            GHES_NOTIFY_SEA,
+            GHES_NOTIFY_SEI,
+            GHES_NOTIFY_GPIO,
+            GHES_NOTIFY_SOFTWARE_DELEGATED,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -99,9 +104,12 @@ mod tests {
     #[test]
     fn test_source_types_distinct() {
         let sources = [
-            GHES_SOURCE_IA32_MCE, GHES_SOURCE_IA32_CMC,
-            GHES_SOURCE_IA32_NMI, GHES_SOURCE_GENERIC,
-            GHES_SOURCE_GENERIC_V2, GHES_SOURCE_IA32_DEFERRED_MCE,
+            GHES_SOURCE_IA32_MCE,
+            GHES_SOURCE_IA32_CMC,
+            GHES_SOURCE_IA32_NMI,
+            GHES_SOURCE_GENERIC,
+            GHES_SOURCE_GENERIC_V2,
+            GHES_SOURCE_IA32_DEFERRED_MCE,
         ];
         for i in 0..sources.len() {
             for j in (i + 1)..sources.len() {
@@ -127,7 +135,8 @@ mod tests {
     #[test]
     fn test_severity_distinct() {
         let sevs = [
-            GHES_BLOCK_SEV_CORRECTED, GHES_BLOCK_SEV_RECOVERABLE,
+            GHES_BLOCK_SEV_CORRECTED,
+            GHES_BLOCK_SEV_RECOVERABLE,
             GHES_BLOCK_SEV_FATAL,
         ];
         for i in 0..sevs.len() {

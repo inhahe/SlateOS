@@ -104,8 +104,12 @@ mod tests {
     #[test]
     fn test_widths_distinct() {
         let widths = [
-            PCIE_LNK_WIDTH_X1, PCIE_LNK_WIDTH_X2, PCIE_LNK_WIDTH_X4,
-            PCIE_LNK_WIDTH_X8, PCIE_LNK_WIDTH_X12, PCIE_LNK_WIDTH_X16,
+            PCIE_LNK_WIDTH_X1,
+            PCIE_LNK_WIDTH_X2,
+            PCIE_LNK_WIDTH_X4,
+            PCIE_LNK_WIDTH_X8,
+            PCIE_LNK_WIDTH_X12,
+            PCIE_LNK_WIDTH_X16,
             PCIE_LNK_WIDTH_X32,
         ];
         for i in 0..widths.len() {
@@ -118,10 +122,14 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            PCI_EXP_TYPE_ENDPOINT, PCI_EXP_TYPE_LEG_END,
-            PCI_EXP_TYPE_ROOT_PORT, PCI_EXP_TYPE_UPSTREAM,
-            PCI_EXP_TYPE_DOWNSTREAM, PCI_EXP_TYPE_PCI_BRIDGE,
-            PCI_EXP_TYPE_PCIE_BRIDGE, PCI_EXP_TYPE_RC_END,
+            PCI_EXP_TYPE_ENDPOINT,
+            PCI_EXP_TYPE_LEG_END,
+            PCI_EXP_TYPE_ROOT_PORT,
+            PCI_EXP_TYPE_UPSTREAM,
+            PCI_EXP_TYPE_DOWNSTREAM,
+            PCI_EXP_TYPE_PCI_BRIDGE,
+            PCI_EXP_TYPE_PCIE_BRIDGE,
+            PCI_EXP_TYPE_RC_END,
             PCI_EXP_TYPE_RC_EC,
         ];
         for i in 0..types.len() {
@@ -134,9 +142,15 @@ mod tests {
     #[test]
     fn test_ext_cap_ids_distinct() {
         let caps = [
-            PCI_EXT_CAP_ID_AER, PCI_EXT_CAP_ID_VC, PCI_EXT_CAP_ID_DSN,
-            PCI_EXT_CAP_ID_PWR, PCI_EXT_CAP_ID_ACS, PCI_EXT_CAP_ID_ATS,
-            PCI_EXT_CAP_ID_SRIOV, PCI_EXT_CAP_ID_LTR, PCI_EXT_CAP_ID_L1SS,
+            PCI_EXT_CAP_ID_AER,
+            PCI_EXT_CAP_ID_VC,
+            PCI_EXT_CAP_ID_DSN,
+            PCI_EXT_CAP_ID_PWR,
+            PCI_EXT_CAP_ID_ACS,
+            PCI_EXT_CAP_ID_ATS,
+            PCI_EXT_CAP_ID_SRIOV,
+            PCI_EXT_CAP_ID_LTR,
+            PCI_EXT_CAP_ID_L1SS,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

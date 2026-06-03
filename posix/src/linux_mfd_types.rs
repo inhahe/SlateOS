@@ -79,8 +79,10 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            MFD_TYPE_PMIC, MFD_TYPE_AUDIO_CODEC,
-            MFD_TYPE_TOUCHSCREEN, MFD_TYPE_RTC_COMBO,
+            MFD_TYPE_PMIC,
+            MFD_TYPE_AUDIO_CODEC,
+            MFD_TYPE_TOUCHSCREEN,
+            MFD_TYPE_RTC_COMBO,
             MFD_TYPE_CONNECTIVITY,
         ];
         for i in 0..types.len() {
@@ -103,8 +105,10 @@ mod tests {
     #[test]
     fn test_add_flags_distinct() {
         let flags = [
-            MFD_ADD_NO_PDATA, MFD_ADD_PARENT_IRQ,
-            MFD_ADD_OF_NODE, MFD_ADD_ACPI,
+            MFD_ADD_NO_PDATA,
+            MFD_ADD_PARENT_IRQ,
+            MFD_ADD_OF_NODE,
+            MFD_ADD_ACPI,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

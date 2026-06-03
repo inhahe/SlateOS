@@ -75,14 +75,22 @@ mod tests {
     #[test]
     fn test_effect_types_distinct() {
         let effects = [
-            FF_RUMBLE, FF_PERIODIC, FF_CONSTANT,
-            FF_SPRING, FF_FRICTION, FF_DAMPER,
-            FF_INERTIA, FF_RAMP,
+            FF_RUMBLE,
+            FF_PERIODIC,
+            FF_CONSTANT,
+            FF_SPRING,
+            FF_FRICTION,
+            FF_DAMPER,
+            FF_INERTIA,
+            FF_RAMP,
         ];
         for i in 0..effects.len() {
             for j in (i + 1)..effects.len() {
-                assert_ne!(effects[i], effects[j],
-                    "effect types {} and {} collide", i, j);
+                assert_ne!(
+                    effects[i], effects[j],
+                    "effect types {} and {} collide",
+                    i, j
+                );
             }
         }
     }
@@ -90,13 +98,16 @@ mod tests {
     #[test]
     fn test_waveforms_distinct() {
         let waves = [
-            FF_SQUARE, FF_TRIANGLE, FF_SINE,
-            FF_SAW_UP, FF_SAW_DOWN, FF_CUSTOM,
+            FF_SQUARE,
+            FF_TRIANGLE,
+            FF_SINE,
+            FF_SAW_UP,
+            FF_SAW_DOWN,
+            FF_CUSTOM,
         ];
         for i in 0..waves.len() {
             for j in (i + 1)..waves.len() {
-                assert_ne!(waves[i], waves[j],
-                    "waveforms {} and {} collide", i, j);
+                assert_ne!(waves[i], waves[j], "waveforms {} and {} collide", i, j);
             }
         }
     }
@@ -131,12 +142,22 @@ mod tests {
     #[test]
     fn test_all_within_max() {
         let all = [
-            FF_RUMBLE, FF_PERIODIC, FF_CONSTANT,
-            FF_SPRING, FF_FRICTION, FF_DAMPER,
-            FF_INERTIA, FF_RAMP,
-            FF_SQUARE, FF_TRIANGLE, FF_SINE,
-            FF_SAW_UP, FF_SAW_DOWN, FF_CUSTOM,
-            FF_GAIN, FF_AUTOCENTER,
+            FF_RUMBLE,
+            FF_PERIODIC,
+            FF_CONSTANT,
+            FF_SPRING,
+            FF_FRICTION,
+            FF_DAMPER,
+            FF_INERTIA,
+            FF_RAMP,
+            FF_SQUARE,
+            FF_TRIANGLE,
+            FF_SINE,
+            FF_SAW_UP,
+            FF_SAW_DOWN,
+            FF_CUSTOM,
+            FF_GAIN,
+            FF_AUTOCENTER,
         ];
         for &f in &all {
             assert!(f <= FF_MAX, "FF code 0x{:02X} exceeds FF_MAX", f);

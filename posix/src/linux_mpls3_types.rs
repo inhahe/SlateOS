@@ -65,10 +65,7 @@ mod tests {
 
     #[test]
     fn test_iptunnel_attrs_distinct() {
-        let attrs = [
-            MPLS_IPTUNNEL_UNSPEC, MPLS_IPTUNNEL_DST,
-            MPLS_IPTUNNEL_TTL,
-        ];
+        let attrs = [MPLS_IPTUNNEL_UNSPEC, MPLS_IPTUNNEL_DST, MPLS_IPTUNNEL_TTL];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
                 assert_ne!(attrs[i], attrs[j]);
@@ -79,10 +76,14 @@ mod tests {
     #[test]
     fn test_labels_distinct() {
         let labels = [
-            MPLS_LABEL_IPV4NULL, MPLS_LABEL_RTALERT,
-            MPLS_LABEL_IPV6NULL, MPLS_LABEL_IMPLNULL,
-            MPLS_LABEL_ENTROPY, MPLS_LABEL_GAL,
-            MPLS_LABEL_OAMALERT, MPLS_LABEL_EXTENSION,
+            MPLS_LABEL_IPV4NULL,
+            MPLS_LABEL_RTALERT,
+            MPLS_LABEL_IPV6NULL,
+            MPLS_LABEL_IMPLNULL,
+            MPLS_LABEL_ENTROPY,
+            MPLS_LABEL_GAL,
+            MPLS_LABEL_OAMALERT,
+            MPLS_LABEL_EXTENSION,
             MPLS_LABEL_FIRST_UNRESERVED,
         ];
         for i in 0..labels.len() {

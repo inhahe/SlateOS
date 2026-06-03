@@ -116,10 +116,7 @@ mod tests {
 
     #[test]
     fn test_rwf_flags_power_of_two() {
-        let flags = [
-            RWF_HIPRI, RWF_DSYNC, RWF_SYNC,
-            RWF_NOWAIT, RWF_APPEND,
-        ];
+        let flags = [RWF_HIPRI, RWF_DSYNC, RWF_SYNC, RWF_NOWAIT, RWF_APPEND];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
         }
@@ -127,10 +124,7 @@ mod tests {
 
     #[test]
     fn test_rwf_flags_no_overlap() {
-        let flags = [
-            RWF_HIPRI, RWF_DSYNC, RWF_SYNC,
-            RWF_NOWAIT, RWF_APPEND,
-        ];
+        let flags = [RWF_HIPRI, RWF_DSYNC, RWF_SYNC, RWF_NOWAIT, RWF_APPEND];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_eq!(flags[i] & flags[j], 0);
@@ -153,15 +147,27 @@ mod tests {
     #[test]
     fn test_madvise_distinct() {
         let hints = [
-            MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL,
-            MADV_WILLNEED, MADV_DONTNEED, MADV_FREE,
-            MADV_REMOVE, MADV_DONTFORK, MADV_DOFORK,
-            MADV_MERGEABLE, MADV_UNMERGEABLE,
-            MADV_HUGEPAGE, MADV_NOHUGEPAGE,
-            MADV_DONTDUMP, MADV_DODUMP,
-            MADV_COLD, MADV_PAGEOUT,
-            MADV_POPULATE_READ, MADV_POPULATE_WRITE,
-            MADV_DONTNEED_LOCKED, MADV_COLLAPSE,
+            MADV_NORMAL,
+            MADV_RANDOM,
+            MADV_SEQUENTIAL,
+            MADV_WILLNEED,
+            MADV_DONTNEED,
+            MADV_FREE,
+            MADV_REMOVE,
+            MADV_DONTFORK,
+            MADV_DOFORK,
+            MADV_MERGEABLE,
+            MADV_UNMERGEABLE,
+            MADV_HUGEPAGE,
+            MADV_NOHUGEPAGE,
+            MADV_DONTDUMP,
+            MADV_DODUMP,
+            MADV_COLD,
+            MADV_PAGEOUT,
+            MADV_POPULATE_READ,
+            MADV_POPULATE_WRITE,
+            MADV_DONTNEED_LOCKED,
+            MADV_COLLAPSE,
         ];
         for i in 0..hints.len() {
             for j in (i + 1)..hints.len() {

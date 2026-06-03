@@ -76,7 +76,11 @@ mod tests {
 
     #[test]
     fn test_policies_distinct() {
-        let policies = [BLKIO_POLICY_NONE, BLKIO_POLICY_WEIGHT, BLKIO_POLICY_THROTTLE];
+        let policies = [
+            BLKIO_POLICY_NONE,
+            BLKIO_POLICY_WEIGHT,
+            BLKIO_POLICY_THROTTLE,
+        ];
         for i in 0..policies.len() {
             for j in (i + 1)..policies.len() {
                 assert_ne!(policies[i], policies[j]);
@@ -93,8 +97,11 @@ mod tests {
     #[test]
     fn test_op_types_distinct() {
         let ops = [
-            BLKIO_OP_READ, BLKIO_OP_WRITE, BLKIO_OP_SYNC,
-            BLKIO_OP_ASYNC, BLKIO_OP_DISCARD,
+            BLKIO_OP_READ,
+            BLKIO_OP_WRITE,
+            BLKIO_OP_SYNC,
+            BLKIO_OP_ASYNC,
+            BLKIO_OP_DISCARD,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -106,8 +113,10 @@ mod tests {
     #[test]
     fn test_throttle_types_distinct() {
         let types = [
-            BLKIO_THROTL_READ_BPS, BLKIO_THROTL_WRITE_BPS,
-            BLKIO_THROTL_READ_IOPS, BLKIO_THROTL_WRITE_IOPS,
+            BLKIO_THROTL_READ_BPS,
+            BLKIO_THROTL_WRITE_BPS,
+            BLKIO_THROTL_READ_IOPS,
+            BLKIO_THROTL_WRITE_IOPS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

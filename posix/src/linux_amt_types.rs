@@ -88,9 +88,12 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            AMT_MSG_RELAY_DISCOVERY, AMT_MSG_RELAY_ADVERTISEMENT,
-            AMT_MSG_REQUEST, AMT_MSG_MEMBERSHIP_QUERY,
-            AMT_MSG_MEMBERSHIP_UPDATE, AMT_MSG_MULTICAST_DATA,
+            AMT_MSG_RELAY_DISCOVERY,
+            AMT_MSG_RELAY_ADVERTISEMENT,
+            AMT_MSG_REQUEST,
+            AMT_MSG_MEMBERSHIP_QUERY,
+            AMT_MSG_MEMBERSHIP_UPDATE,
+            AMT_MSG_MULTICAST_DATA,
             AMT_MSG_TEARDOWN,
         ];
         for i in 0..msgs.len() {
@@ -103,10 +106,14 @@ mod tests {
     #[test]
     fn test_ifla_attrs_distinct() {
         let attrs = [
-            IFLA_AMT_MODE, IFLA_AMT_RELAY_PORT,
-            IFLA_AMT_GATEWAY_PORT, IFLA_AMT_MAX_TUNNELS,
-            IFLA_AMT_LOCAL_IP, IFLA_AMT_REMOTE_IP,
-            IFLA_AMT_DISCOVERY_IP, IFLA_AMT_DEV,
+            IFLA_AMT_MODE,
+            IFLA_AMT_RELAY_PORT,
+            IFLA_AMT_GATEWAY_PORT,
+            IFLA_AMT_MAX_TUNNELS,
+            IFLA_AMT_LOCAL_IP,
+            IFLA_AMT_REMOTE_IP,
+            IFLA_AMT_DISCOVERY_IP,
+            IFLA_AMT_DEV,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

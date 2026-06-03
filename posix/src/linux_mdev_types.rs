@@ -81,8 +81,10 @@ mod tests {
     #[test]
     fn test_type_attrs_distinct() {
         let attrs = [
-            MDEV_TYPE_ATTR_AVAILABLE, MDEV_TYPE_ATTR_DEVICE_API,
-            MDEV_TYPE_ATTR_NAME, MDEV_TYPE_ATTR_DESCRIPTION,
+            MDEV_TYPE_ATTR_AVAILABLE,
+            MDEV_TYPE_ATTR_DEVICE_API,
+            MDEV_TYPE_ATTR_NAME,
+            MDEV_TYPE_ATTR_DESCRIPTION,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -104,8 +106,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            MDEV_STATE_AVAILABLE, MDEV_STATE_RUNNING,
-            MDEV_STATE_STOPPED, MDEV_STATE_ERROR,
+            MDEV_STATE_AVAILABLE,
+            MDEV_STATE_RUNNING,
+            MDEV_STATE_STOPPED,
+            MDEV_STATE_ERROR,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

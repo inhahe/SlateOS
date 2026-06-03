@@ -96,10 +96,14 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            NVME_IOCTL_ADMIN_CMD, NVME_IOCTL_IO_CMD,
-            NVME_IOCTL_ADMIN64_CMD, NVME_IOCTL_IO64_CMD,
-            NVME_IOCTL_RESET, NVME_IOCTL_SUBSYS_RESET,
-            NVME_IOCTL_RESCAN, NVME_IOCTL_ID,
+            NVME_IOCTL_ADMIN_CMD,
+            NVME_IOCTL_IO_CMD,
+            NVME_IOCTL_ADMIN64_CMD,
+            NVME_IOCTL_IO64_CMD,
+            NVME_IOCTL_RESET,
+            NVME_IOCTL_SUBSYS_RESET,
+            NVME_IOCTL_RESCAN,
+            NVME_IOCTL_ID,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -111,12 +115,18 @@ mod tests {
     #[test]
     fn test_admin_opcodes_distinct() {
         let ops = [
-            NVME_ADMIN_DELETE_SQ, NVME_ADMIN_CREATE_SQ,
-            NVME_ADMIN_GET_LOG_PAGE, NVME_ADMIN_DELETE_CQ,
-            NVME_ADMIN_CREATE_CQ, NVME_ADMIN_IDENTIFY,
-            NVME_ADMIN_ABORT, NVME_ADMIN_SET_FEATURES,
-            NVME_ADMIN_GET_FEATURES, NVME_ADMIN_ASYNC_EVENT,
-            NVME_ADMIN_FORMAT_NVM, NVME_ADMIN_SANITIZE,
+            NVME_ADMIN_DELETE_SQ,
+            NVME_ADMIN_CREATE_SQ,
+            NVME_ADMIN_GET_LOG_PAGE,
+            NVME_ADMIN_DELETE_CQ,
+            NVME_ADMIN_CREATE_CQ,
+            NVME_ADMIN_IDENTIFY,
+            NVME_ADMIN_ABORT,
+            NVME_ADMIN_SET_FEATURES,
+            NVME_ADMIN_GET_FEATURES,
+            NVME_ADMIN_ASYNC_EVENT,
+            NVME_ADMIN_FORMAT_NVM,
+            NVME_ADMIN_SANITIZE,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -128,9 +138,13 @@ mod tests {
     #[test]
     fn test_io_opcodes_distinct() {
         let ops = [
-            NVME_CMD_FLUSH, NVME_CMD_WRITE, NVME_CMD_READ,
-            NVME_CMD_WRITE_UNCOR, NVME_CMD_COMPARE,
-            NVME_CMD_WRITE_ZEROES, NVME_CMD_DSM,
+            NVME_CMD_FLUSH,
+            NVME_CMD_WRITE,
+            NVME_CMD_READ,
+            NVME_CMD_WRITE_UNCOR,
+            NVME_CMD_COMPARE,
+            NVME_CMD_WRITE_ZEROES,
+            NVME_CMD_DSM,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

@@ -71,8 +71,10 @@ mod tests {
     #[test]
     fn test_obj_ids_distinct() {
         let ids = [
-            SWITCHDEV_OBJ_ID_FDB, SWITCHDEV_OBJ_ID_PORT_VLAN,
-            SWITCHDEV_OBJ_ID_MDB, SWITCHDEV_OBJ_ID_HOST_MDB,
+            SWITCHDEV_OBJ_ID_FDB,
+            SWITCHDEV_OBJ_ID_PORT_VLAN,
+            SWITCHDEV_OBJ_ID_MDB,
+            SWITCHDEV_OBJ_ID_HOST_MDB,
             SWITCHDEV_OBJ_ID_MIRROR,
         ];
         for i in 0..ids.len() {
@@ -85,7 +87,8 @@ mod tests {
     #[test]
     fn test_attr_types_distinct() {
         let attrs = [
-            SWITCHDEV_ATTR_PORT_STP_STATE, SWITCHDEV_ATTR_PORT_BRIDGE_FLAGS,
+            SWITCHDEV_ATTR_PORT_STP_STATE,
+            SWITCHDEV_ATTR_PORT_BRIDGE_FLAGS,
             SWITCHDEV_ATTR_PORT_PRE_BRIDGE_FLAGS,
             SWITCHDEV_ATTR_BRIDGE_VLAN_FILTERING,
             SWITCHDEV_ATTR_BRIDGE_AGEING_TIME,
@@ -101,7 +104,11 @@ mod tests {
 
     #[test]
     fn test_fdb_notifications_distinct() {
-        let notifs = [SWITCHDEV_FDB_ADD, SWITCHDEV_FDB_DEL, SWITCHDEV_FDB_OFFLOADED];
+        let notifs = [
+            SWITCHDEV_FDB_ADD,
+            SWITCHDEV_FDB_DEL,
+            SWITCHDEV_FDB_OFFLOADED,
+        ];
         for i in 0..notifs.len() {
             for j in (i + 1)..notifs.len() {
                 assert_ne!(notifs[i], notifs[j]);

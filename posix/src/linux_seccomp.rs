@@ -30,8 +30,8 @@ use crate::errno;
 // ---------------------------------------------------------------------------
 
 pub use crate::sys_prctl::SECCOMP_MODE_DISABLED;
-pub use crate::sys_prctl::SECCOMP_MODE_STRICT;
 pub use crate::sys_prctl::SECCOMP_MODE_FILTER;
+pub use crate::sys_prctl::SECCOMP_MODE_STRICT;
 
 // ---------------------------------------------------------------------------
 // seccomp() operations
@@ -301,9 +301,7 @@ pub extern "C" fn seccomp(operation: u32, flags: u32, args: *mut u8) -> i32 {
             // lives inside the prepare step, which copy_from_user
             // runs first).
             if !crate::unistd::no_new_privs_set()
-                && !crate::sys_capability::has_capability(
-                    crate::sys_capability::CAP_SYS_ADMIN,
-                )
+                && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_ADMIN)
             {
                 errno::set_errno(errno::EACCES);
                 return -1;
@@ -643,11 +641,9 @@ mod tests {
         buf[3] = 0xFF;
         buf[4] = 0x7F;
         // Read starting at offset 1 (guaranteed misaligned for u32).
-        let ret = seccomp(
-            SECCOMP_GET_ACTION_AVAIL,
-            0,
-            unsafe { buf.as_mut_ptr().add(1) },
-        );
+        let ret = seccomp(SECCOMP_GET_ACTION_AVAIL, 0, unsafe {
+            buf.as_mut_ptr().add(1)
+        });
         assert_eq!(ret, 0);
     }
 
@@ -797,11 +793,7 @@ mod tests {
         // that the existing mask check still runs before the NULL
         // check now that they are no longer adjacent).
         errno::set_errno(0);
-        let ret = seccomp(
-            SECCOMP_SET_MODE_FILTER,
-            1 << 20,
-            core::ptr::null_mut(),
-        );
+        let ret = seccomp(SECCOMP_SET_MODE_FILTER, 1 << 20, core::ptr::null_mut());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
@@ -845,8 +837,7 @@ mod tests {
         errno::set_errno(0);
         let ret = seccomp(
             SECCOMP_SET_MODE_FILTER,
-            SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
-                | SECCOMP_FILTER_FLAG_NEW_LISTENER,
+            SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV | SECCOMP_FILTER_FLAG_NEW_LISTENER,
             scratch.as_mut_ptr(),
         );
         assert_eq!(ret, -1);
@@ -915,8 +906,7 @@ mod tests {
         errno::set_errno(0);
         let probe_ok = seccomp(
             SECCOMP_SET_MODE_FILTER,
-            SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV
-                | SECCOMP_FILTER_FLAG_NEW_LISTENER,
+            SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV | SECCOMP_FILTER_FLAG_NEW_LISTENER,
             scratch.as_mut_ptr(),
         );
         assert_eq!(probe_ok, -1);
@@ -1031,16 +1021,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -1055,8 +1043,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -1082,8 +1069,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1098,8 +1084,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -1184,11 +1169,7 @@ mod tests {
             let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
-            let ret = seccomp(
-                SECCOMP_SET_MODE_STRICT,
-                0,
-                core::ptr::null_mut(),
-            );
+            let ret = seccomp(SECCOMP_SET_MODE_STRICT, 0, core::ptr::null_mut());
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
         }
@@ -1202,11 +1183,7 @@ mod tests {
             drop_sys_admin();
             errno::set_errno(0);
             let mut action: u32 = SECCOMP_RET_ALLOW;
-            let ret = seccomp(
-                SECCOMP_GET_ACTION_AVAIL,
-                0,
-                (&raw mut action).cast::<u8>(),
-            );
+            let ret = seccomp(SECCOMP_GET_ACTION_AVAIL, 0, (&raw mut action).cast::<u8>());
             assert_eq!(ret, 0);
         }
 
@@ -1220,11 +1197,7 @@ mod tests {
             drop_sys_admin();
             errno::set_errno(0);
             let mut sizes = [0u8; 32];
-            let ret = seccomp(
-                SECCOMP_GET_NOTIF_SIZES,
-                0,
-                sizes.as_mut_ptr(),
-            );
+            let ret = seccomp(SECCOMP_GET_NOTIF_SIZES, 0, sizes.as_mut_ptr());
             assert_eq!(ret, -1);
             assert_ne!(errno::get_errno(), errno::EACCES);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
@@ -1242,11 +1215,7 @@ mod tests {
             let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
-            let ret = seccomp(
-                SECCOMP_SET_MODE_FILTER,
-                0x8000_0000,
-                nonnull_args(),
-            );
+            let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0x8000_0000, nonnull_args());
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::EINVAL);
         }
@@ -1261,8 +1230,7 @@ mod tests {
             errno::set_errno(0);
             let ret = seccomp(
                 SECCOMP_SET_MODE_FILTER,
-                SECCOMP_FILTER_FLAG_TSYNC
-                    | SECCOMP_FILTER_FLAG_NEW_LISTENER,
+                SECCOMP_FILTER_FLAG_TSYNC | SECCOMP_FILTER_FLAG_NEW_LISTENER,
                 nonnull_args(),
             );
             assert_eq!(ret, -1);
@@ -1277,11 +1245,7 @@ mod tests {
             let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
-            let ret = seccomp(
-                SECCOMP_SET_MODE_FILTER,
-                0,
-                core::ptr::null_mut(),
-            );
+            let ret = seccomp(SECCOMP_SET_MODE_FILTER, 0, core::ptr::null_mut());
             assert_eq!(ret, -1);
             assert_eq!(errno::get_errno(), errno::EFAULT);
         }
@@ -1294,13 +1258,11 @@ mod tests {
             let _g = CapGuard::snapshot();
             let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
-            let (lo_before, hi_before) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_before, hi_before) = crate::sys_capability::current_caps_effective();
             let nnp_before = crate::unistd::no_new_privs_set();
             errno::set_errno(0);
             let _ = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
-            let (lo_after, hi_after) =
-                crate::sys_capability::current_caps_effective();
+            let (lo_after, hi_after) = crate::sys_capability::current_caps_effective();
             let nnp_after = crate::unistd::no_new_privs_set();
             assert_eq!(lo_before, lo_after);
             assert_eq!(hi_before, hi_after);
@@ -1317,14 +1279,12 @@ mod tests {
             let _n = NnpGuard::snapshot_and_clear();
             drop_sys_admin();
             errno::set_errno(0);
-            let denied =
-                seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            let denied = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
             assert_eq!(denied, -1);
             assert_eq!(errno::get_errno(), errno::EACCES);
             crate::unistd::_test_reset_no_new_privs(true);
             errno::set_errno(0);
-            let reached =
-                seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
+            let reached = seccomp(SECCOMP_SET_MODE_FILTER, 0, nonnull_args());
             assert_eq!(reached, -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);
         }

@@ -75,8 +75,13 @@ mod tests {
     #[test]
     fn test_access_modes_power_of_two() {
         let modes = [
-            MAY_READ, MAY_WRITE, MAY_EXEC, MAY_APPEND,
-            MAY_TRANSMUTE, MAY_LOCK, MAY_BRINGUP,
+            MAY_READ,
+            MAY_WRITE,
+            MAY_EXEC,
+            MAY_APPEND,
+            MAY_TRANSMUTE,
+            MAY_LOCK,
+            MAY_BRINGUP,
         ];
         for m in &modes {
             assert!(m.is_power_of_two(), "0x{:02x} not power of two", m);
@@ -86,8 +91,13 @@ mod tests {
     #[test]
     fn test_access_modes_no_overlap() {
         let modes = [
-            MAY_READ, MAY_WRITE, MAY_EXEC, MAY_APPEND,
-            MAY_TRANSMUTE, MAY_LOCK, MAY_BRINGUP,
+            MAY_READ,
+            MAY_WRITE,
+            MAY_EXEC,
+            MAY_APPEND,
+            MAY_TRANSMUTE,
+            MAY_LOCK,
+            MAY_BRINGUP,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -106,8 +116,10 @@ mod tests {
     #[test]
     fn test_special_labels_distinct() {
         let labels = [
-            SMACK_LABEL_FLOOR, SMACK_LABEL_STAR,
-            SMACK_LABEL_HAT, SMACK_LABEL_WEB,
+            SMACK_LABEL_FLOOR,
+            SMACK_LABEL_STAR,
+            SMACK_LABEL_HAT,
+            SMACK_LABEL_WEB,
         ];
         for i in 0..labels.len() {
             for j in (i + 1)..labels.len() {

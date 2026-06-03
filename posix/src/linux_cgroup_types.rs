@@ -83,9 +83,14 @@ mod tests {
     #[test]
     fn test_controller_flags_no_overlap() {
         let ctrls = [
-            CGROUP_CTRL_CPU, CGROUP_CTRL_MEMORY, CGROUP_CTRL_IO,
-            CGROUP_CTRL_PIDS, CGROUP_CTRL_RDMA, CGROUP_CTRL_HUGETLB,
-            CGROUP_CTRL_CPUSET, CGROUP_CTRL_MISC,
+            CGROUP_CTRL_CPU,
+            CGROUP_CTRL_MEMORY,
+            CGROUP_CTRL_IO,
+            CGROUP_CTRL_PIDS,
+            CGROUP_CTRL_RDMA,
+            CGROUP_CTRL_HUGETLB,
+            CGROUP_CTRL_CPUSET,
+            CGROUP_CTRL_MISC,
         ];
         for i in 0..ctrls.len() {
             assert!(ctrls[i].is_power_of_two());

@@ -107,11 +107,7 @@ fn sem_block(atomic: &core::sync::atomic::AtomicI32, expected: i32) {
     // SYS_FUTEX_WAIT returns 1 (woken), 0 (value mismatch), or a negative
     // error.  In every case we simply re-loop and re-evaluate the counter,
     // so the return value is intentionally ignored.
-    let _ = crate::syscall::syscall2(
-        crate::syscall::SYS_FUTEX_WAIT,
-        addr,
-        futex_word(expected),
-    );
+    let _ = crate::syscall::syscall2(crate::syscall::SYS_FUTEX_WAIT, addr, futex_word(expected));
 }
 
 /// Host fallback: no kernel futex in the unit-test environment.  The test
@@ -136,11 +132,7 @@ fn sem_block_timeout(atomic: &core::sync::atomic::AtomicI32, expected: i32, time
 
 /// Host fallback for the bounded wait.
 #[cfg(not(target_os = "none"))]
-fn sem_block_timeout(
-    _atomic: &core::sync::atomic::AtomicI32,
-    _expected: i32,
-    _timeout_ns: u64,
-) {
+fn sem_block_timeout(_atomic: &core::sync::atomic::AtomicI32, _expected: i32, _timeout_ns: u64) {
     core::hint::spin_loop();
 }
 
@@ -299,7 +291,10 @@ pub extern "C" fn sem_timedwait(sem: *mut SemT, abstime: *const crate::stat::Tim
         }
 
         // Count exhausted: compute the time remaining until the deadline.
-        let mut now = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut now = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let _ = crate::time::clock_gettime(crate::time::CLOCK_REALTIME, &raw mut now);
         let deadline = unsafe { &*abstime };
         if now.tv_sec > deadline.tv_sec
@@ -335,7 +330,9 @@ pub extern "C" fn sem_getvalue(sem: *mut SemT, sval: *mut i32) -> i32 {
 
     let atomic = unsafe { &(*sem).value };
     let val = atomic.load(core::sync::atomic::Ordering::Relaxed);
-    unsafe { *sval = val; }
+    unsafe {
+        *sval = val;
+    }
     0
 }
 
@@ -373,8 +370,7 @@ struct NamedSem {
 // SAFETY: the table is only mutated under `SEM_LOCK`; readers also hold
 // the lock.  `NamedSem` itself contains `AtomicI32` for the value, so
 // once the lock is dropped concurrent `sem_wait`/`sem_post` are safe.
-static SEM_LOCK: core::sync::atomic::AtomicBool =
-    core::sync::atomic::AtomicBool::new(false);
+static SEM_LOCK: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 static mut NAMED_SEMS: [NamedSem; MAX_NAMED_SEMS] = [const {
     NamedSem {
@@ -492,7 +488,7 @@ fn find_free_sem_slot() -> Option<usize> {
 fn slot_for_ptr(sem: *mut SemT) -> Option<usize> {
     for i in 0..MAX_NAMED_SEMS {
         // SAFETY: SEM_LOCK is held; stable addresses in `static mut`.
-        let p = unsafe { core::ptr::addr_of!(NAMED_SEMS[i].sem) } as *mut SemT;
+        let p = unsafe { core::ptr::addr_of!(NAMED_SEMS[i].sem) }.cast_mut();
         if p == sem {
             return Some(i);
         }
@@ -524,12 +520,7 @@ fn slot_for_ptr(sem: *mut SemT) -> Option<usize> {
 /// - `ENOENT` — name doesn't exist and `O_CREAT` is not set.
 /// - `ENOSPC` — the named-sem pool is exhausted.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn sem_open(
-    name: *const u8,
-    oflag: i32,
-    mode: u32,
-    value: u32,
-) -> *mut SemT {
+pub extern "C" fn sem_open(name: *const u8, oflag: i32, mode: u32, value: u32) -> *mut SemT {
     let _ = mode;
     let name_len = match validate_sem_name(name) {
         Ok(n) => n,
@@ -578,7 +569,7 @@ pub extern "C" fn sem_open(
         (*slot).unlinked = false;
         (*slot).name_len = name_len;
         (*slot).refcount = 1;
-        let name_dst: *mut u8 = core::ptr::addr_of_mut!((*slot).name) as *mut u8;
+        let name_dst: *mut u8 = core::ptr::addr_of_mut!((*slot).name).cast::<u8>();
         // Copy name bytes.
         for j in 0..name_len {
             *name_dst.add(j) = *name.add(j);
@@ -587,10 +578,10 @@ pub extern "C" fn sem_open(
         for j in name_len..MAX_SEM_NAME {
             *name_dst.add(j) = 0;
         }
-        (*slot).sem.value.store(
-            value as i32,
-            core::sync::atomic::Ordering::Relaxed,
-        );
+        (*slot)
+            .sem
+            .value
+            .store(value as i32, core::sync::atomic::Ordering::Relaxed);
         core::ptr::addr_of_mut!((*slot).sem)
     }
 }
@@ -918,7 +909,9 @@ mod tests {
     static NAMED_SEM_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn with_named_sem_lock<F: FnOnce()>(f: F) {
-        let _guard = NAMED_SEM_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = NAMED_SEM_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         reset_named_sems();
         f();
         reset_named_sems();
@@ -1031,10 +1024,9 @@ mod tests {
         with_named_sem_lock(|| {
             // Open MAX_NAMED_SEMS distinct semaphores.
             let names: [&[u8]; 16] = [
-                b"/s00\0", b"/s01\0", b"/s02\0", b"/s03\0",
-                b"/s04\0", b"/s05\0", b"/s06\0", b"/s07\0",
-                b"/s08\0", b"/s09\0", b"/s10\0", b"/s11\0",
-                b"/s12\0", b"/s13\0", b"/s14\0", b"/s15\0",
+                b"/s00\0", b"/s01\0", b"/s02\0", b"/s03\0", b"/s04\0", b"/s05\0", b"/s06\0",
+                b"/s07\0", b"/s08\0", b"/s09\0", b"/s10\0", b"/s11\0", b"/s12\0", b"/s13\0",
+                b"/s14\0", b"/s15\0",
             ];
             let mut ptrs = [SEM_FAILED; 16];
             for (i, n) in names.iter().enumerate() {
@@ -1115,7 +1107,9 @@ mod tests {
         // semaphore slot; closing it should EINVAL rather than corrupt
         // anything.
         with_named_sem_lock(|| {
-            let mut sem = SemT { value: core::sync::atomic::AtomicI32::new(0) };
+            let mut sem = SemT {
+                value: core::sync::atomic::AtomicI32::new(0),
+            };
             crate::errno::set_errno(0);
             assert_eq!(sem_close(&raw mut sem), -1);
             assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -1251,7 +1245,10 @@ mod tests {
     #[test]
     fn test_sem_timedwait_null_sem() {
         crate::errno::set_errno(0);
-        let ts = crate::stat::Timespec { tv_sec: 0, tv_nsec: 0 };
+        let ts = crate::stat::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         let ret = sem_timedwait(core::ptr::null_mut(), &raw const ts);
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EFAULT);

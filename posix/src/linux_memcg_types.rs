@@ -95,8 +95,11 @@ mod tests {
     #[test]
     fn test_stat_fields_distinct() {
         let fields = [
-            MEMCG_STAT_CURRENT, MEMCG_STAT_MIN,
-            MEMCG_STAT_LOW, MEMCG_STAT_HIGH, MEMCG_STAT_MAX,
+            MEMCG_STAT_CURRENT,
+            MEMCG_STAT_MIN,
+            MEMCG_STAT_LOW,
+            MEMCG_STAT_HIGH,
+            MEMCG_STAT_MAX,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {
@@ -108,8 +111,12 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            MEMCG_OOM_KILL, MEMCG_MAX, MEMCG_HIGH,
-            MEMCG_LOW, MEMCG_SWAP_MAX, MEMCG_SWAP_HIGH,
+            MEMCG_OOM_KILL,
+            MEMCG_MAX,
+            MEMCG_HIGH,
+            MEMCG_LOW,
+            MEMCG_SWAP_MAX,
+            MEMCG_SWAP_HIGH,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -135,9 +142,12 @@ mod tests {
     #[test]
     fn test_charge_types_distinct() {
         let types = [
-            MEMCG_CHARGE_ANON, MEMCG_CHARGE_FILE,
-            MEMCG_CHARGE_SLAB, MEMCG_CHARGE_STACK,
-            MEMCG_CHARGE_PAGETABLE, MEMCG_CHARGE_KMEM_MISC,
+            MEMCG_CHARGE_ANON,
+            MEMCG_CHARGE_FILE,
+            MEMCG_CHARGE_SLAB,
+            MEMCG_CHARGE_STACK,
+            MEMCG_CHARGE_PAGETABLE,
+            MEMCG_CHARGE_KMEM_MISC,
             MEMCG_CHARGE_SOCK,
         ];
         for i in 0..types.len() {

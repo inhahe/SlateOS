@@ -349,14 +349,19 @@ const INSTANCE_INIT: Instance = Instance {
     pending_again: false,
 };
 
-static mut FTS_INSTANCES: [Instance; MAX_FTS_INSTANCES] =
-    [INSTANCE_INIT, INSTANCE_INIT];
+static mut FTS_INSTANCES: [Instance; MAX_FTS_INSTANCES] = [INSTANCE_INIT, INSTANCE_INIT];
 
 /// Static `Fts` handle bodies — one per instance — that we hand out
 /// to the caller.  Lives forever.
 static mut FTS_HANDLES: [Fts; MAX_FTS_INSTANCES] = [
-    Fts { handle: 1, fts_options: 0 },
-    Fts { handle: 2, fts_options: 0 },
+    Fts {
+        handle: 1,
+        fts_options: 0,
+    },
+    Fts {
+        handle: 2,
+        fts_options: 0,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -449,11 +454,7 @@ fn copy_cstr_into(src: *const u8, dst: &mut [u8]) -> Option<usize> {
 /// Append "/name" to `path` of length `len`, NUL-terminating.
 /// Returns the new length, or `None` on overflow.  `name` must be a
 /// NUL-free byte slice (already validated by readdir).
-fn append_component(
-    path: &mut [u8; PATH_MAX],
-    len: usize,
-    name: &[u8],
-) -> Option<usize> {
+fn append_component(path: &mut [u8; PATH_MAX], len: usize, name: &[u8]) -> Option<usize> {
     if len >= PATH_MAX {
         return None;
     }
@@ -513,9 +514,7 @@ fn snapshot_dir(path: *const u8, frame: &mut DirFrame) -> Result<(), i32> {
             break;
         }
         // SAFETY: readdir returned a valid entry pointer.
-        let name_ptr = unsafe {
-            core::ptr::addr_of!((*entry).d_name).cast::<u8>()
-        };
+        let name_ptr = unsafe { core::ptr::addr_of!((*entry).d_name).cast::<u8>() };
         // SAFETY: dirent name is NUL-terminated within 256 bytes.
         let nlen = unsafe { crate::string::strlen(name_ptr) };
         // Skip "." and ".." regardless of FTS_SEEDOT (not supported).
@@ -608,12 +607,7 @@ fn stat_to_info(sb: &Stat) -> i32 {
 pub extern "C" fn fts_open(
     path_argv: *const *const u8,
     options: i32,
-    _compar: Option<
-        unsafe extern "C" fn(
-            *const *const FtsEnt,
-            *const *const FtsEnt,
-        ) -> i32,
-    >,
+    _compar: Option<unsafe extern "C" fn(*const *const FtsEnt, *const *const FtsEnt) -> i32>,
 ) -> *mut Fts {
     if path_argv.is_null() {
         errno::set_errno(errno::EFAULT);
@@ -660,12 +654,12 @@ pub extern "C" fn fts_open(
 
     // SAFETY: indexing into the static handle pool with a bounded
     // index from `allocate_instance`.
-    let handle_ptr = unsafe {
+    
+    unsafe {
         let table = core::ptr::addr_of_mut!(FTS_HANDLES);
         (*table)[idx].fts_options = options;
         core::ptr::addr_of_mut!((*table)[idx])
-    };
-    handle_ptr
+    }
 }
 
 /// Read the next entry from an FTS stream.
@@ -782,8 +776,7 @@ fn step(inst: &mut Instance) -> *mut FtsEnt {
         let cursor = inst.stack[frame_idx].cursor as usize;
         let n = inst.stack[frame_idx].n_children as usize;
         if cursor < n {
-            inst.stack[frame_idx].cursor =
-                (cursor as u16).wrapping_add(1);
+            inst.stack[frame_idx].cursor = (cursor as u16).wrapping_add(1);
             return yield_child(inst, frame_idx, cursor);
         }
         // Frame exhausted — pop and yield FTS_DP.
@@ -805,9 +798,7 @@ fn yield_root(inst: &mut Instance) -> *mut FtsEnt {
     inst.path[rlen] = 0;
     inst.path_len = rlen;
 
-    let stat_rc = if inst.options & FTS_PHYSICAL != 0
-        && inst.options & FTS_COMFOLLOW == 0
-    {
+    let stat_rc = if inst.options & FTS_PHYSICAL != 0 && inst.options & FTS_COMFOLLOW == 0 {
         crate::file::lstat(inst.path.as_ptr(), &raw mut inst.statbuf)
     } else {
         crate::file::stat(inst.path.as_ptr(), &raw mut inst.statbuf)
@@ -833,7 +824,7 @@ fn yield_root(inst: &mut Instance) -> *mut FtsEnt {
         return core::ptr::addr_of_mut!(inst.current);
     }
     inst.current.fts_errno = 0;
-    inst.current.fts_nlink = inst.statbuf.st_nlink as u64;
+    inst.current.fts_nlink = inst.statbuf.st_nlink;
     inst.current.fts_info = stat_to_info(&inst.statbuf);
     core::ptr::addr_of_mut!(inst.current)
 }
@@ -841,11 +832,7 @@ fn yield_root(inst: &mut Instance) -> *mut FtsEnt {
 /// Yield the `child_idx`-th child of the directory at stack depth
 /// `frame_idx`.  Builds `path = parent_path + "/" + child_name`,
 /// stats it (unless FTS_NOSTAT), and populates `current`.
-fn yield_child(
-    inst: &mut Instance,
-    frame_idx: usize,
-    child_idx: usize,
-) -> *mut FtsEnt {
+fn yield_child(inst: &mut Instance, frame_idx: usize, child_idx: usize) -> *mut FtsEnt {
     // Restore path to the parent's prefix before appending.
     let parent_len = inst.stack[frame_idx].parent_path_len as usize;
     inst.path_len = parent_len;
@@ -856,14 +843,11 @@ fn yield_child(
         (c.name, c.name_len as usize, c.d_type)
     };
 
-    let Some(new_len) =
-        append_component(&mut inst.path, parent_len, &name_buf[..name_len])
-    else {
+    let Some(new_len) = append_component(&mut inst.path, parent_len, &name_buf[..name_len]) else {
         // Path overflow — yield ERR.
         inst.current.fts_path = inst.path.as_ptr();
         inst.current.fts_pathlen = parent_len;
-        inst.current.fts_name =
-            unsafe { inst.path.as_ptr().add(parent_len) };
+        inst.current.fts_name = unsafe { inst.path.as_ptr().add(parent_len) };
         inst.current.fts_namelen = 0;
         inst.current.fts_statp = core::ptr::addr_of!(inst.statbuf);
         inst.current.fts_level = frame_idx.wrapping_add(1) as i32;
@@ -894,7 +878,13 @@ fn yield_child(
         // (so we can descend).  d_type is authoritative for that on
         // our filesystem; if it's UNKNOWN we treat as FTS_NSOK and
         // skip descent.
-        inst.current.fts_info = if info == FTS_D { FTS_D } else if info == FTS_DEFAULT { FTS_NSOK } else { info };
+        inst.current.fts_info = if info == FTS_D {
+            FTS_D
+        } else if info == FTS_DEFAULT {
+            FTS_NSOK
+        } else {
+            info
+        };
         return core::ptr::addr_of_mut!(inst.current);
     }
 
@@ -919,7 +909,7 @@ fn yield_child(
         return core::ptr::addr_of_mut!(inst.current);
     }
 
-    inst.current.fts_nlink = inst.statbuf.st_nlink as u64;
+    inst.current.fts_nlink = inst.statbuf.st_nlink;
     inst.current.fts_info = stat_to_info(&inst.statbuf);
     core::ptr::addr_of_mut!(inst.current)
 }
@@ -933,7 +923,7 @@ fn pop_and_yield_dp(inst: &mut Instance) -> *mut FtsEnt {
 
     // Restore statbuf to the snapshot taken at descent.
     inst.statbuf = saved;
-    inst.current.fts_nlink = saved.st_nlink as u64;
+    inst.current.fts_nlink = saved.st_nlink;
     inst.current.fts_statp = core::ptr::addr_of!(inst.statbuf);
 
     // `path` currently still has the last child appended; rewind it
@@ -991,10 +981,7 @@ fn pop_and_yield_dp(inst: &mut Instance) -> *mut FtsEnt {
 /// does — but exposing it would require a separate FtsEnt-per-child
 /// pool that we don't allocate.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fts_children(
-    _ftsp: *mut Fts,
-    _instr: i32,
-) -> *mut FtsEnt {
+pub extern "C" fn fts_children(_ftsp: *mut Fts, _instr: i32) -> *mut FtsEnt {
     errno::set_errno(errno::ENOSYS);
     core::ptr::null_mut()
 }
@@ -1004,11 +991,7 @@ pub extern "C" fn fts_children(
 ///
 /// Returns 0 on success, -1 with errno=EINVAL on bad instruction.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn fts_set(
-    ftsp: *mut Fts,
-    f: *mut FtsEnt,
-    instr: i32,
-) -> i32 {
+pub extern "C" fn fts_set(ftsp: *mut Fts, f: *mut FtsEnt, instr: i32) -> i32 {
     let Some(idx) = handle_to_idx(ftsp) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -1093,8 +1076,13 @@ mod tests {
     #[test]
     fn test_options_powers_of_two() {
         let opts = [
-            FTS_COMFOLLOW, FTS_LOGICAL, FTS_NOCHDIR, FTS_NOSTAT,
-            FTS_PHYSICAL, FTS_SEEDOT, FTS_XDEV,
+            FTS_COMFOLLOW,
+            FTS_LOGICAL,
+            FTS_NOCHDIR,
+            FTS_NOSTAT,
+            FTS_PHYSICAL,
+            FTS_SEEDOT,
+            FTS_XDEV,
         ];
         for &o in &opts {
             assert!(o > 0);
@@ -1125,9 +1113,20 @@ mod tests {
     #[test]
     fn test_info_constants_distinct() {
         let infos = [
-            FTS_D, FTS_DC, FTS_DEFAULT, FTS_DNR, FTS_DOT, FTS_DP,
-            FTS_ERR, FTS_F, FTS_INIT, FTS_NS, FTS_NSOK, FTS_SL,
-            FTS_SLNONE, FTS_W,
+            FTS_D,
+            FTS_DC,
+            FTS_DEFAULT,
+            FTS_DNR,
+            FTS_DOT,
+            FTS_DP,
+            FTS_ERR,
+            FTS_F,
+            FTS_INIT,
+            FTS_NS,
+            FTS_NSOK,
+            FTS_SL,
+            FTS_SLNONE,
+            FTS_W,
         ];
         for i in 0..infos.len() {
             for j in (i + 1)..infos.len() {
@@ -1266,13 +1265,20 @@ mod tests {
         // exercising; with a non-null pointer + bad instr we get
         // EINVAL.
         let mut dummy = FtsEnt {
-            fts_info: 0, fts_level: 0, fts_pathlen: 0, fts_namelen: 0,
-            fts_nlink: 0, fts_errno: 0, fts_instr: 0,
-            fts_statp: core::ptr::null(), fts_name: core::ptr::null(),
+            fts_info: 0,
+            fts_level: 0,
+            fts_pathlen: 0,
+            fts_namelen: 0,
+            fts_nlink: 0,
+            fts_errno: 0,
+            fts_instr: 0,
+            fts_statp: core::ptr::null(),
+            fts_name: core::ptr::null(),
             fts_path: core::ptr::null(),
             fts_parent: core::ptr::null_mut(),
             fts_link: core::ptr::null_mut(),
-            fts_number: 0, fts_pointer: core::ptr::null_mut(),
+            fts_number: 0,
+            fts_pointer: core::ptr::null_mut(),
         };
         errno::set_errno(0);
         assert_eq!(fts_set(r, &raw mut dummy, 9999), -1);
@@ -1297,8 +1303,7 @@ mod tests {
         // Open as many as we can in this thread, then close them all.
         let path = b"/\0".as_ptr();
         let argv: [*const u8; 2] = [path, core::ptr::null()];
-        let mut handles: [*mut Fts; MAX_FTS_INSTANCES] =
-            [core::ptr::null_mut(); MAX_FTS_INSTANCES];
+        let mut handles: [*mut Fts; MAX_FTS_INSTANCES] = [core::ptr::null_mut(); MAX_FTS_INSTANCES];
         for i in 0..MAX_FTS_INSTANCES {
             handles[i] = fts_open(argv.as_ptr(), FTS_PHYSICAL, None);
             // Each could fail if parallel tests are using slots; just

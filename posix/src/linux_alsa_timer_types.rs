@@ -75,7 +75,8 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            SNDRV_TIMER_TYPE_SYSTEM, SNDRV_TIMER_TYPE_PCM,
+            SNDRV_TIMER_TYPE_SYSTEM,
+            SNDRV_TIMER_TYPE_PCM,
             SNDRV_TIMER_TYPE_SEQ,
         ];
         for i in 0..types.len() {
@@ -88,8 +89,10 @@ mod tests {
     #[test]
     fn test_globals_distinct() {
         let globals = [
-            SNDRV_TIMER_GLOBAL_SYSTEM, SNDRV_TIMER_GLOBAL_RTC,
-            SNDRV_TIMER_GLOBAL_HPET, SNDRV_TIMER_GLOBAL_HRTIMER,
+            SNDRV_TIMER_GLOBAL_SYSTEM,
+            SNDRV_TIMER_GLOBAL_RTC,
+            SNDRV_TIMER_GLOBAL_HPET,
+            SNDRV_TIMER_GLOBAL_HRTIMER,
         ];
         for i in 0..globals.len() {
             for j in (i + 1)..globals.len() {
@@ -101,7 +104,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            SNDRV_TIMER_FLAG_SLAVE, SNDRV_TIMER_FLAG_AUTO,
+            SNDRV_TIMER_FLAG_SLAVE,
+            SNDRV_TIMER_FLAG_AUTO,
             SNDRV_TIMER_FLAG_EARLY_EVENT,
         ];
         for i in 0..flags.len() {
@@ -115,10 +119,14 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            SNDRV_TIMER_EVENT_TICK, SNDRV_TIMER_EVENT_RESOLUTION,
-            SNDRV_TIMER_EVENT_START, SNDRV_TIMER_EVENT_STOP,
-            SNDRV_TIMER_EVENT_PAUSE, SNDRV_TIMER_EVENT_CONTINUE,
-            SNDRV_TIMER_EVENT_EARLY, SNDRV_TIMER_EVENT_SUSPEND,
+            SNDRV_TIMER_EVENT_TICK,
+            SNDRV_TIMER_EVENT_RESOLUTION,
+            SNDRV_TIMER_EVENT_START,
+            SNDRV_TIMER_EVENT_STOP,
+            SNDRV_TIMER_EVENT_PAUSE,
+            SNDRV_TIMER_EVENT_CONTINUE,
+            SNDRV_TIMER_EVENT_EARLY,
+            SNDRV_TIMER_EVENT_SUSPEND,
             SNDRV_TIMER_EVENT_RESUME,
         ];
         for i in 0..events.len() {

@@ -74,10 +74,7 @@ mod tests {
 
     #[test]
     fn test_statx_sync_mask() {
-        assert_eq!(
-            AT_STATX_SYNC_TYPE,
-            AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC
-        );
+        assert_eq!(AT_STATX_SYNC_TYPE, AT_STATX_FORCE_SYNC | AT_STATX_DONT_SYNC);
     }
 
     #[test]

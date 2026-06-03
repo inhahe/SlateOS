@@ -113,11 +113,26 @@ mod tests {
     #[test]
     fn test_vm_flags_powers_of_two() {
         let flags: [u64; 20] = [
-            VM_READ, VM_WRITE, VM_EXEC, VM_SHARED,
-            VM_MAYREAD, VM_MAYWRITE, VM_MAYEXEC, VM_MAYSHARE,
-            VM_GROWSDOWN, VM_GROWSUP, VM_PFNMAP, VM_LOCKED,
-            VM_IO, VM_SEQ_READ, VM_RAND_READ, VM_DONTCOPY,
-            VM_DONTEXPAND, VM_DONTDUMP, VM_ACCOUNT, VM_NORESERVE,
+            VM_READ,
+            VM_WRITE,
+            VM_EXEC,
+            VM_SHARED,
+            VM_MAYREAD,
+            VM_MAYWRITE,
+            VM_MAYEXEC,
+            VM_MAYSHARE,
+            VM_GROWSDOWN,
+            VM_GROWSUP,
+            VM_PFNMAP,
+            VM_LOCKED,
+            VM_IO,
+            VM_SEQ_READ,
+            VM_RAND_READ,
+            VM_DONTCOPY,
+            VM_DONTEXPAND,
+            VM_DONTDUMP,
+            VM_ACCOUNT,
+            VM_NORESERVE,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -127,11 +142,26 @@ mod tests {
     #[test]
     fn test_vm_flags_no_overlap() {
         let flags: [u64; 20] = [
-            VM_READ, VM_WRITE, VM_EXEC, VM_SHARED,
-            VM_MAYREAD, VM_MAYWRITE, VM_MAYEXEC, VM_MAYSHARE,
-            VM_GROWSDOWN, VM_GROWSUP, VM_PFNMAP, VM_LOCKED,
-            VM_IO, VM_SEQ_READ, VM_RAND_READ, VM_DONTCOPY,
-            VM_DONTEXPAND, VM_DONTDUMP, VM_ACCOUNT, VM_NORESERVE,
+            VM_READ,
+            VM_WRITE,
+            VM_EXEC,
+            VM_SHARED,
+            VM_MAYREAD,
+            VM_MAYWRITE,
+            VM_MAYEXEC,
+            VM_MAYSHARE,
+            VM_GROWSDOWN,
+            VM_GROWSUP,
+            VM_PFNMAP,
+            VM_LOCKED,
+            VM_IO,
+            VM_SEQ_READ,
+            VM_RAND_READ,
+            VM_DONTCOPY,
+            VM_DONTEXPAND,
+            VM_DONTDUMP,
+            VM_ACCOUNT,
+            VM_NORESERVE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -143,9 +173,15 @@ mod tests {
     #[test]
     fn test_fault_codes_distinct() {
         let codes = [
-            VM_FAULT_NOPAGE, VM_FAULT_MINOR, VM_FAULT_MAJOR,
-            VM_FAULT_OOM, VM_FAULT_SIGBUS, VM_FAULT_RETRY,
-            VM_FAULT_FALLBACK, VM_FAULT_DONE_COW, VM_FAULT_NEEDDSYNC,
+            VM_FAULT_NOPAGE,
+            VM_FAULT_MINOR,
+            VM_FAULT_MAJOR,
+            VM_FAULT_OOM,
+            VM_FAULT_SIGBUS,
+            VM_FAULT_RETRY,
+            VM_FAULT_FALLBACK,
+            VM_FAULT_DONE_COW,
+            VM_FAULT_NEEDDSYNC,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

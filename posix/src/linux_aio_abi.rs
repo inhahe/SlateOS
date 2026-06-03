@@ -164,8 +164,7 @@ const EMPTY_CONTEXT: AioContext = AioContext {
 };
 
 static AIO_LOCK: AtomicBool = AtomicBool::new(false);
-static mut AIO_CONTEXTS: [AioContext; MAX_AIO_CONTEXTS] =
-    [EMPTY_CONTEXT; MAX_AIO_CONTEXTS];
+static mut AIO_CONTEXTS: [AioContext; MAX_AIO_CONTEXTS] = [EMPTY_CONTEXT; MAX_AIO_CONTEXTS];
 
 /// RAII guard for the AIO spinlock.
 struct AioLockGuard;
@@ -563,8 +562,12 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            IOCB_CMD_PREAD, IOCB_CMD_PWRITE, IOCB_CMD_FSYNC,
-            IOCB_CMD_FDSYNC, IOCB_CMD_NOOP, IOCB_CMD_PREADV,
+            IOCB_CMD_PREAD,
+            IOCB_CMD_PWRITE,
+            IOCB_CMD_FSYNC,
+            IOCB_CMD_FDSYNC,
+            IOCB_CMD_NOOP,
+            IOCB_CMD_PREADV,
             IOCB_CMD_PWRITEV,
         ];
         for i in 0..cmds.len() {
@@ -610,7 +613,10 @@ mod tests {
         reset_aio_state();
         let mut ctx: u64 = 0;
         errno::set_errno(0);
-        assert_eq!(io_setup((MAX_EVENTS_PER_CTX + 1) as u32, &mut ctx as *mut u64), -1);
+        assert_eq!(
+            io_setup((MAX_EVENTS_PER_CTX + 1) as u32, &mut ctx as *mut u64),
+            -1
+        );
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 

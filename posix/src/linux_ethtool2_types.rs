@@ -180,9 +180,12 @@ mod tests {
     #[test]
     fn test_rss_cmds_distinct() {
         let cmds = [
-            ETHTOOL_GRXFH, ETHTOOL_SRXFH,
-            ETHTOOL_GRXFHINDIR, ETHTOOL_SRXFHINDIR,
-            ETHTOOL_GRSSH, ETHTOOL_SRSSH,
+            ETHTOOL_GRXFH,
+            ETHTOOL_SRXFH,
+            ETHTOOL_GRXFHINDIR,
+            ETHTOOL_SRXFHINDIR,
+            ETHTOOL_GRSSH,
+            ETHTOOL_SRSSH,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -194,9 +197,14 @@ mod tests {
     #[test]
     fn test_rxh_flags_powers_of_two() {
         let flags = [
-            RXH_L2DA, RXH_VLAN, RXH_L3_PROTO,
-            RXH_IP_SRC, RXH_IP_DST, RXH_L4_B_0_1,
-            RXH_L4_B_2_3, RXH_DISCARD,
+            RXH_L2DA,
+            RXH_VLAN,
+            RXH_L3_PROTO,
+            RXH_IP_SRC,
+            RXH_IP_DST,
+            RXH_L4_B_0_1,
+            RXH_L4_B_2_3,
+            RXH_DISCARD,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "rxh flag {f:#x} not power of two");
@@ -206,9 +214,14 @@ mod tests {
     #[test]
     fn test_rxh_flags_no_overlap() {
         let flags = [
-            RXH_L2DA, RXH_VLAN, RXH_L3_PROTO,
-            RXH_IP_SRC, RXH_IP_DST, RXH_L4_B_0_1,
-            RXH_L4_B_2_3, RXH_DISCARD,
+            RXH_L2DA,
+            RXH_VLAN,
+            RXH_L3_PROTO,
+            RXH_IP_SRC,
+            RXH_IP_DST,
+            RXH_L4_B_0_1,
+            RXH_L4_B_2_3,
+            RXH_DISCARD,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

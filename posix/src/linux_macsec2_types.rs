@@ -81,7 +81,8 @@ mod tests {
     #[test]
     fn test_validation_modes_distinct() {
         let modes = [
-            MACSEC_VALIDATE_DISABLED, MACSEC_VALIDATE_CHECK,
+            MACSEC_VALIDATE_DISABLED,
+            MACSEC_VALIDATE_CHECK,
             MACSEC_VALIDATE_STRICT,
         ];
         for i in 0..modes.len() {
@@ -93,10 +94,7 @@ mod tests {
 
     #[test]
     fn test_offload_types_distinct() {
-        let types = [
-            MACSEC_OFFLOAD_OFF, MACSEC_OFFLOAD_PHY,
-            MACSEC_OFFLOAD_MAC,
-        ];
+        let types = [MACSEC_OFFLOAD_OFF, MACSEC_OFFLOAD_PHY, MACSEC_OFFLOAD_MAC];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);

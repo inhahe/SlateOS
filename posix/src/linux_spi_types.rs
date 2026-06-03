@@ -87,10 +87,20 @@ mod tests {
     #[test]
     fn test_mode_flags_no_overlap() {
         let flags = [
-            SPI_CPHA, SPI_CPOL, SPI_CS_HIGH, SPI_LSB_FIRST,
-            SPI_3WIRE, SPI_LOOP, SPI_NO_CS, SPI_READY,
-            SPI_TX_DUAL, SPI_TX_QUAD, SPI_TX_OCTAL,
-            SPI_RX_DUAL, SPI_RX_QUAD, SPI_RX_OCTAL,
+            SPI_CPHA,
+            SPI_CPOL,
+            SPI_CS_HIGH,
+            SPI_LSB_FIRST,
+            SPI_3WIRE,
+            SPI_LOOP,
+            SPI_NO_CS,
+            SPI_READY,
+            SPI_TX_DUAL,
+            SPI_TX_QUAD,
+            SPI_TX_OCTAL,
+            SPI_RX_DUAL,
+            SPI_RX_QUAD,
+            SPI_RX_OCTAL,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -102,7 +112,11 @@ mod tests {
 
     #[test]
     fn test_bits_per_word_distinct() {
-        let bpw = [SPI_TRANS_BITS_PER_WORD_8, SPI_TRANS_BITS_PER_WORD_16, SPI_TRANS_BITS_PER_WORD_32];
+        let bpw = [
+            SPI_TRANS_BITS_PER_WORD_8,
+            SPI_TRANS_BITS_PER_WORD_16,
+            SPI_TRANS_BITS_PER_WORD_32,
+        ];
         for i in 0..bpw.len() {
             for j in (i + 1)..bpw.len() {
                 assert_ne!(bpw[i], bpw[j]);

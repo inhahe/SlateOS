@@ -86,12 +86,22 @@ mod tests {
     #[test]
     fn test_return_codes_distinct() {
         let codes = [
-            PAM_SUCCESS, PAM_SYSTEM_ERR, PAM_BUF_ERR,
-            PAM_PERM_DENIED, PAM_AUTH_ERR, PAM_CRED_INSUFFICIENT,
-            PAM_AUTHINFO_UNAVAIL, PAM_USER_UNKNOWN,
-            PAM_MAXTRIES, PAM_ACCT_EXPIRED, PAM_SESSION_ERR,
-            PAM_CRED_ERR, PAM_CONV_ERR, PAM_AUTHTOK_ERR,
-            PAM_ABORT, PAM_MODULE_UNKNOWN,
+            PAM_SUCCESS,
+            PAM_SYSTEM_ERR,
+            PAM_BUF_ERR,
+            PAM_PERM_DENIED,
+            PAM_AUTH_ERR,
+            PAM_CRED_INSUFFICIENT,
+            PAM_AUTHINFO_UNAVAIL,
+            PAM_USER_UNKNOWN,
+            PAM_MAXTRIES,
+            PAM_ACCT_EXPIRED,
+            PAM_SESSION_ERR,
+            PAM_CRED_ERR,
+            PAM_CONV_ERR,
+            PAM_AUTHTOK_ERR,
+            PAM_ABORT,
+            PAM_MODULE_UNKNOWN,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -108,8 +118,10 @@ mod tests {
     #[test]
     fn test_msg_styles_distinct() {
         let styles = [
-            PAM_PROMPT_ECHO_OFF, PAM_PROMPT_ECHO_ON,
-            PAM_ERROR_MSG, PAM_TEXT_INFO,
+            PAM_PROMPT_ECHO_OFF,
+            PAM_PROMPT_ECHO_ON,
+            PAM_ERROR_MSG,
+            PAM_TEXT_INFO,
         ];
         for i in 0..styles.len() {
             for j in (i + 1)..styles.len() {
@@ -121,8 +133,14 @@ mod tests {
     #[test]
     fn test_items_distinct() {
         let items = [
-            PAM_SERVICE, PAM_USER_ITEM, PAM_TTY, PAM_RHOST,
-            PAM_CONV_ITEM, PAM_AUTHTOK, PAM_OLDAUTHTOK, PAM_RUSER,
+            PAM_SERVICE,
+            PAM_USER_ITEM,
+            PAM_TTY,
+            PAM_RHOST,
+            PAM_CONV_ITEM,
+            PAM_AUTHTOK,
+            PAM_OLDAUTHTOK,
+            PAM_RUSER,
         ];
         for i in 0..items.len() {
             for j in (i + 1)..items.len() {

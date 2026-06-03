@@ -66,8 +66,12 @@ mod tests {
     #[test]
     fn test_policies_distinct() {
         let pols = [
-            SCHED_NORMAL, SCHED_FIFO, SCHED_RR,
-            SCHED_BATCH, SCHED_IDLE, SCHED_DEADLINE,
+            SCHED_NORMAL,
+            SCHED_FIFO,
+            SCHED_RR,
+            SCHED_BATCH,
+            SCHED_IDLE,
+            SCHED_DEADLINE,
         ];
         for i in 0..pols.len() {
             for j in (i + 1)..pols.len() {
@@ -79,9 +83,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            SCHED_FLAG_RESET_ON_FORK, SCHED_FLAG_RECLAIM,
-            SCHED_FLAG_DL_OVERRUN, SCHED_FLAG_KEEP_ALL,
-            SCHED_FLAG_KEEP_PARAMS, SCHED_FLAG_UTIL_CLAMP_MIN,
+            SCHED_FLAG_RESET_ON_FORK,
+            SCHED_FLAG_RECLAIM,
+            SCHED_FLAG_DL_OVERRUN,
+            SCHED_FLAG_KEEP_ALL,
+            SCHED_FLAG_KEEP_PARAMS,
+            SCHED_FLAG_UTIL_CLAMP_MIN,
             SCHED_FLAG_UTIL_CLAMP_MAX,
         ];
         for i in 0..flags.len() {

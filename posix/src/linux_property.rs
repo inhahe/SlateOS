@@ -78,8 +78,12 @@ mod tests {
     #[test]
     fn test_prop_types_distinct() {
         let types = [
-            DEV_PROP_BOOL, DEV_PROP_U8, DEV_PROP_U16,
-            DEV_PROP_U32, DEV_PROP_U64, DEV_PROP_STRING,
+            DEV_PROP_BOOL,
+            DEV_PROP_U8,
+            DEV_PROP_U16,
+            DEV_PROP_U32,
+            DEV_PROP_U64,
+            DEV_PROP_STRING,
             DEV_PROP_REF,
         ];
         for i in 0..types.len() {
@@ -92,8 +96,10 @@ mod tests {
     #[test]
     fn test_conn_types_distinct() {
         let types = [
-            FWNODE_CONN_GPIO, FWNODE_CONN_CLK,
-            FWNODE_CONN_REGULATOR, FWNODE_CONN_PHY,
+            FWNODE_CONN_GPIO,
+            FWNODE_CONN_CLK,
+            FWNODE_CONN_REGULATOR,
+            FWNODE_CONN_PHY,
             FWNODE_CONN_PWM,
         ];
         for i in 0..types.len() {
@@ -106,8 +112,10 @@ mod tests {
     #[test]
     fn test_fwnode_types_distinct() {
         let types = [
-            FWNODE_TYPE_OF, FWNODE_TYPE_ACPI,
-            FWNODE_TYPE_SWNODE, FWNODE_TYPE_PDATA,
+            FWNODE_TYPE_OF,
+            FWNODE_TYPE_ACPI,
+            FWNODE_TYPE_SWNODE,
+            FWNODE_TYPE_PDATA,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -119,8 +127,11 @@ mod tests {
     #[test]
     fn test_prop_names_distinct() {
         let names = [
-            PROP_ROTATION, PROP_LABEL, PROP_GPIO_CONTROLLER,
-            PROP_GPIO_LINE_NAMES, PROP_WAKEUP_SOURCE,
+            PROP_ROTATION,
+            PROP_LABEL,
+            PROP_GPIO_CONTROLLER,
+            PROP_GPIO_LINE_NAMES,
+            PROP_WAKEUP_SOURCE,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

@@ -6,10 +6,10 @@
 pub use crate::sysv_msg::IPC_CREAT;
 pub use crate::sysv_msg::IPC_EXCL;
 pub use crate::sysv_msg::IPC_NOWAIT;
+pub use crate::sysv_msg::IPC_PRIVATE;
 pub use crate::sysv_msg::IPC_RMID;
 pub use crate::sysv_msg::IPC_SET;
 pub use crate::sysv_msg::IPC_STAT;
-pub use crate::sysv_msg::IPC_PRIVATE;
 
 // ---------------------------------------------------------------------------
 // Linux-specific IPC constants

@@ -75,8 +75,10 @@ mod tests {
     #[test]
     fn test_cids_distinct() {
         let cids = [
-            VMADDR_CID_HYPERVISOR, VMADDR_CID_LOCAL,
-            VMADDR_CID_HOST, VMADDR_CID_ANY,
+            VMADDR_CID_HYPERVISOR,
+            VMADDR_CID_LOCAL,
+            VMADDR_CID_HOST,
+            VMADDR_CID_ANY,
         ];
         for i in 0..cids.len() {
             for j in (i + 1)..cids.len() {
@@ -88,10 +90,14 @@ mod tests {
     #[test]
     fn test_operations_distinct() {
         let ops = [
-            VIRTIO_VSOCK_OP_INVALID, VIRTIO_VSOCK_OP_REQUEST,
-            VIRTIO_VSOCK_OP_RESPONSE, VIRTIO_VSOCK_OP_RST,
-            VIRTIO_VSOCK_OP_SHUTDOWN, VIRTIO_VSOCK_OP_RW,
-            VIRTIO_VSOCK_OP_CREDIT_UPDATE, VIRTIO_VSOCK_OP_CREDIT_REQUEST,
+            VIRTIO_VSOCK_OP_INVALID,
+            VIRTIO_VSOCK_OP_REQUEST,
+            VIRTIO_VSOCK_OP_RESPONSE,
+            VIRTIO_VSOCK_OP_RST,
+            VIRTIO_VSOCK_OP_SHUTDOWN,
+            VIRTIO_VSOCK_OP_RW,
+            VIRTIO_VSOCK_OP_CREDIT_UPDATE,
+            VIRTIO_VSOCK_OP_CREDIT_REQUEST,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

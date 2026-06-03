@@ -74,8 +74,10 @@ mod tests {
     #[test]
     fn test_message_types_distinct() {
         let types = [
-            IGMP_MEMBERSHIP_QUERY, IGMPV1_MEMBERSHIP_REPORT,
-            IGMPV2_MEMBERSHIP_REPORT, IGMP_LEAVE_GROUP,
+            IGMP_MEMBERSHIP_QUERY,
+            IGMPV1_MEMBERSHIP_REPORT,
+            IGMPV2_MEMBERSHIP_REPORT,
+            IGMP_LEAVE_GROUP,
             IGMPV3_MEMBERSHIP_REPORT,
         ];
         for i in 0..types.len() {
@@ -88,9 +90,12 @@ mod tests {
     #[test]
     fn test_record_types_distinct() {
         let records = [
-            IGMPV3_MODE_IS_INCLUDE, IGMPV3_MODE_IS_EXCLUDE,
-            IGMPV3_CHANGE_TO_INCLUDE, IGMPV3_CHANGE_TO_EXCLUDE,
-            IGMPV3_ALLOW_NEW_SOURCES, IGMPV3_BLOCK_OLD_SOURCES,
+            IGMPV3_MODE_IS_INCLUDE,
+            IGMPV3_MODE_IS_EXCLUDE,
+            IGMPV3_CHANGE_TO_INCLUDE,
+            IGMPV3_CHANGE_TO_EXCLUDE,
+            IGMPV3_ALLOW_NEW_SOURCES,
+            IGMPV3_BLOCK_OLD_SOURCES,
         ];
         for i in 0..records.len() {
             for j in (i + 1)..records.len() {

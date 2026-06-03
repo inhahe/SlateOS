@@ -80,8 +80,12 @@ mod tests {
     #[test]
     fn test_fec_modes_power_of_two() {
         let modes = [
-            ETHTOOL_FEC_NONE, ETHTOOL_FEC_AUTO, ETHTOOL_FEC_OFF,
-            ETHTOOL_FEC_RS, ETHTOOL_FEC_BASER, ETHTOOL_FEC_LLRS,
+            ETHTOOL_FEC_NONE,
+            ETHTOOL_FEC_AUTO,
+            ETHTOOL_FEC_OFF,
+            ETHTOOL_FEC_RS,
+            ETHTOOL_FEC_BASER,
+            ETHTOOL_FEC_LLRS,
         ];
         for m in &modes {
             assert!(m.is_power_of_two(), "0x{:08x} not power of two", m);
@@ -91,8 +95,12 @@ mod tests {
     #[test]
     fn test_fec_modes_no_overlap() {
         let modes = [
-            ETHTOOL_FEC_NONE, ETHTOOL_FEC_AUTO, ETHTOOL_FEC_OFF,
-            ETHTOOL_FEC_RS, ETHTOOL_FEC_BASER, ETHTOOL_FEC_LLRS,
+            ETHTOOL_FEC_NONE,
+            ETHTOOL_FEC_AUTO,
+            ETHTOOL_FEC_OFF,
+            ETHTOOL_FEC_RS,
+            ETHTOOL_FEC_BASER,
+            ETHTOOL_FEC_LLRS,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -126,13 +134,17 @@ mod tests {
 
     #[test]
     fn test_module_power_modes_distinct() {
-        assert_ne!(ETHTOOL_MODULE_POWER_MODE_LOW, ETHTOOL_MODULE_POWER_MODE_HIGH);
+        assert_ne!(
+            ETHTOOL_MODULE_POWER_MODE_LOW,
+            ETHTOOL_MODULE_POWER_MODE_HIGH
+        );
     }
 
     #[test]
     fn test_phy_tunables_distinct() {
         let tunables = [
-            ETHTOOL_PHY_DOWNSHIFT, ETHTOOL_PHY_FAST_LINK_DOWN,
+            ETHTOOL_PHY_DOWNSHIFT,
+            ETHTOOL_PHY_FAST_LINK_DOWN,
             ETHTOOL_PHY_EDPD,
         ];
         for i in 0..tunables.len() {

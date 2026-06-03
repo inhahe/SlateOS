@@ -56,12 +56,17 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            SYSLOG_ACTION_CLOSE, SYSLOG_ACTION_OPEN,
-            SYSLOG_ACTION_READ, SYSLOG_ACTION_READ_ALL,
-            SYSLOG_ACTION_READ_CLEAR, SYSLOG_ACTION_CLEAR,
-            SYSLOG_ACTION_CONSOLE_OFF, SYSLOG_ACTION_CONSOLE_ON,
+            SYSLOG_ACTION_CLOSE,
+            SYSLOG_ACTION_OPEN,
+            SYSLOG_ACTION_READ,
+            SYSLOG_ACTION_READ_ALL,
+            SYSLOG_ACTION_READ_CLEAR,
+            SYSLOG_ACTION_CLEAR,
+            SYSLOG_ACTION_CONSOLE_OFF,
+            SYSLOG_ACTION_CONSOLE_ON,
             SYSLOG_ACTION_CONSOLE_LEVEL,
-            SYSLOG_ACTION_SIZE_UNREAD, SYSLOG_ACTION_SIZE_BUFFER,
+            SYSLOG_ACTION_SIZE_UNREAD,
+            SYSLOG_ACTION_SIZE_BUFFER,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

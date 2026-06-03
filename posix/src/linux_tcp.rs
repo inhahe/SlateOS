@@ -8,36 +8,36 @@
 // Re-exports: socket options
 // ---------------------------------------------------------------------------
 
-pub use crate::socket::TCP_NODELAY;
+pub use crate::socket::SOL_TCP;
+pub use crate::socket::TCP_CORK;
+pub use crate::socket::TCP_INFO;
+pub use crate::socket::TCP_KEEPCNT;
 pub use crate::socket::TCP_KEEPIDLE;
 pub use crate::socket::TCP_KEEPINTVL;
-pub use crate::socket::TCP_KEEPCNT;
 pub use crate::socket::TCP_MAXSEG;
-pub use crate::socket::TCP_CORK;
+pub use crate::socket::TCP_NODELAY;
 pub use crate::socket::TCP_USER_TIMEOUT;
-pub use crate::socket::TCP_INFO;
-pub use crate::socket::SOL_TCP;
 
+pub use crate::netinet::TCP_CONGESTION;
 pub use crate::netinet::TCP_FASTOPEN;
 pub use crate::netinet::TCP_QUICKACK;
-pub use crate::netinet::TCP_CONGESTION;
 pub use crate::netinet::TCP_TIMESTAMP;
 
 // ---------------------------------------------------------------------------
 // Re-exports: TCP states
 // ---------------------------------------------------------------------------
 
-pub use crate::netinet_tcp::TCP_ESTABLISHED;
-pub use crate::netinet_tcp::TCP_SYN_SENT;
-pub use crate::netinet_tcp::TCP_SYN_RECV;
-pub use crate::netinet_tcp::TCP_FIN_WAIT1;
-pub use crate::netinet_tcp::TCP_FIN_WAIT2;
-pub use crate::netinet_tcp::TCP_TIME_WAIT;
 pub use crate::netinet_tcp::TCP_CLOSE;
 pub use crate::netinet_tcp::TCP_CLOSE_WAIT;
+pub use crate::netinet_tcp::TCP_CLOSING;
+pub use crate::netinet_tcp::TCP_ESTABLISHED;
+pub use crate::netinet_tcp::TCP_FIN_WAIT1;
+pub use crate::netinet_tcp::TCP_FIN_WAIT2;
 pub use crate::netinet_tcp::TCP_LAST_ACK;
 pub use crate::netinet_tcp::TCP_LISTEN;
-pub use crate::netinet_tcp::TCP_CLOSING;
+pub use crate::netinet_tcp::TCP_SYN_RECV;
+pub use crate::netinet_tcp::TCP_SYN_SENT;
+pub use crate::netinet_tcp::TCP_TIME_WAIT;
 
 // ---------------------------------------------------------------------------
 // Additional Linux-specific TCP options
@@ -168,7 +168,9 @@ mod tests {
 
     #[test]
     fn test_tcp_flags_distinct() {
-        let flags = [TH_FIN, TH_SYN, TH_RST, TH_PUSH, TH_ACK, TH_URG, TH_ECE, TH_CWR];
+        let flags = [
+            TH_FIN, TH_SYN, TH_RST, TH_PUSH, TH_ACK, TH_URG, TH_ECE, TH_CWR,
+        ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(flags[i], flags[j]);
@@ -178,7 +180,9 @@ mod tests {
 
     #[test]
     fn test_tcp_flags_are_powers_of_two() {
-        let flags = [TH_FIN, TH_SYN, TH_RST, TH_PUSH, TH_ACK, TH_URG, TH_ECE, TH_CWR];
+        let flags = [
+            TH_FIN, TH_SYN, TH_RST, TH_PUSH, TH_ACK, TH_URG, TH_ECE, TH_CWR,
+        ];
         for f in &flags {
             assert!(f.is_power_of_two(), "flag {f:#x} is not a power of two");
         }
@@ -187,10 +191,18 @@ mod tests {
     #[test]
     fn test_linux_tcp_options_distinct() {
         let opts = [
-            TCP_DEFER_ACCEPT, TCP_WINDOW_CLAMP, TCP_LINGER2,
-            TCP_SYNCNT, TCP_THIN_LINEAR_TIMEOUTS, TCP_THIN_DUPACK,
-            TCP_REPAIR, TCP_REPAIR_QUEUE, TCP_QUEUE_SEQ,
-            TCP_REPAIR_OPTIONS, TCP_SAVED_SYN, TCP_ZEROCOPY_RECEIVE,
+            TCP_DEFER_ACCEPT,
+            TCP_WINDOW_CLAMP,
+            TCP_LINGER2,
+            TCP_SYNCNT,
+            TCP_THIN_LINEAR_TIMEOUTS,
+            TCP_THIN_DUPACK,
+            TCP_REPAIR,
+            TCP_REPAIR_QUEUE,
+            TCP_QUEUE_SEQ,
+            TCP_REPAIR_OPTIONS,
+            TCP_SAVED_SYN,
+            TCP_ZEROCOPY_RECEIVE,
             TCP_NOTSENT_LOWAT,
         ];
         for i in 0..opts.len() {

@@ -73,9 +73,16 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            ARC_P_IP, ARC_P_IPV6, ARC_P_ARP, ARC_P_RARP,
-            ARC_P_IPX, ARC_P_NOVELL_EC, ARC_P_DATAPOINT_BOOT,
-            ARC_P_DATAPOINT_MOUNT, ARC_P_ATALK, ARC_P_LANSOFT,
+            ARC_P_IP,
+            ARC_P_IPV6,
+            ARC_P_ARP,
+            ARC_P_RARP,
+            ARC_P_IPX,
+            ARC_P_NOVELL_EC,
+            ARC_P_DATAPOINT_BOOT,
+            ARC_P_DATAPOINT_MOUNT,
+            ARC_P_ATALK,
+            ARC_P_LANSOFT,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {

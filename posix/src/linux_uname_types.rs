@@ -60,8 +60,10 @@ mod tests {
     #[test]
     fn test_machine_strings_distinct() {
         let machines = [
-            UTS_MACHINE_X86_64, UTS_MACHINE_AARCH64,
-            UTS_MACHINE_RISCV64, UTS_MACHINE_I686,
+            UTS_MACHINE_X86_64,
+            UTS_MACHINE_AARCH64,
+            UTS_MACHINE_RISCV64,
+            UTS_MACHINE_I686,
         ];
         for i in 0..machines.len() {
             for j in (i + 1)..machines.len() {

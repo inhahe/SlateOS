@@ -122,12 +122,15 @@ mod tests {
     #[test]
     fn test_hypercalls_distinct() {
         let calls = [
-            HVCALL_NOTIFY_LONG_SPIN_WAIT, HVCALL_POST_MESSAGE,
-            HVCALL_SIGNAL_EVENT, HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE,
+            HVCALL_NOTIFY_LONG_SPIN_WAIT,
+            HVCALL_POST_MESSAGE,
+            HVCALL_SIGNAL_EVENT,
+            HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE,
             HVCALL_FLUSH_VIRTUAL_ADDRESS_LIST,
             HVCALL_FLUSH_VIRTUAL_ADDRESS_SPACE_EX,
             HVCALL_FLUSH_VIRTUAL_ADDRESS_LIST_EX,
-            HVCALL_SEND_IPI, HVCALL_SEND_IPI_EX,
+            HVCALL_SEND_IPI,
+            HVCALL_SEND_IPI_EX,
         ];
         for i in 0..calls.len() {
             for j in (i + 1)..calls.len() {
@@ -139,10 +142,14 @@ mod tests {
     #[test]
     fn test_msrs_distinct() {
         let msrs = [
-            HV_X64_MSR_GUEST_OS_ID, HV_X64_MSR_HYPERCALL,
-            HV_X64_MSR_VP_INDEX, HV_X64_MSR_RESET,
-            HV_X64_MSR_REFERENCE_TSC, HV_X64_MSR_TIME_REF_COUNT,
-            HV_X64_MSR_SCONTROL, HV_X64_MSR_STIMER0_CONFIG,
+            HV_X64_MSR_GUEST_OS_ID,
+            HV_X64_MSR_HYPERCALL,
+            HV_X64_MSR_VP_INDEX,
+            HV_X64_MSR_RESET,
+            HV_X64_MSR_REFERENCE_TSC,
+            HV_X64_MSR_TIME_REF_COUNT,
+            HV_X64_MSR_SCONTROL,
+            HV_X64_MSR_STIMER0_CONFIG,
             HV_X64_MSR_STIMER0_COUNT,
         ];
         for i in 0..msrs.len() {
@@ -155,8 +162,10 @@ mod tests {
     #[test]
     fn test_channel_states_distinct() {
         let states = [
-            VMBUS_CHANNEL_OFFER_STATE, VMBUS_CHANNEL_OPENED_STATE,
-            VMBUS_CHANNEL_CLOSING_STATE, VMBUS_CHANNEL_CLOSED_STATE,
+            VMBUS_CHANNEL_OFFER_STATE,
+            VMBUS_CHANNEL_OPENED_STATE,
+            VMBUS_CHANNEL_CLOSING_STATE,
+            VMBUS_CHANNEL_CLOSED_STATE,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -168,11 +177,16 @@ mod tests {
     #[test]
     fn test_vmbus_messages_distinct() {
         let msgs = [
-            VMBUS_MSG_OFFERCHANNEL, VMBUS_MSG_RESCIND_CHANNELOFFER,
-            VMBUS_MSG_REQUESTOFFERS, VMBUS_MSG_ALLOFFERS_DELIVERED,
-            VMBUS_MSG_OPENCHANNEL, VMBUS_MSG_OPENCHANNEL_RESULT,
-            VMBUS_MSG_CLOSECHANNEL, VMBUS_MSG_GPADL_HEADER,
-            VMBUS_MSG_GPADL_CREATED, VMBUS_MSG_GPADL_TEARDOWN,
+            VMBUS_MSG_OFFERCHANNEL,
+            VMBUS_MSG_RESCIND_CHANNELOFFER,
+            VMBUS_MSG_REQUESTOFFERS,
+            VMBUS_MSG_ALLOFFERS_DELIVERED,
+            VMBUS_MSG_OPENCHANNEL,
+            VMBUS_MSG_OPENCHANNEL_RESULT,
+            VMBUS_MSG_CLOSECHANNEL,
+            VMBUS_MSG_GPADL_HEADER,
+            VMBUS_MSG_GPADL_CREATED,
+            VMBUS_MSG_GPADL_TEARDOWN,
             VMBUS_MSG_GPADL_TORNDOWN,
         ];
         for i in 0..msgs.len() {
@@ -187,8 +201,10 @@ mod tests {
         let flags = [
             HV_ACCESS_VP_RUNTIME,
             HV_ACCESS_PARTITION_REFERENCE_COUNTER,
-            HV_ACCESS_SYNIC_TIMERS, HV_ACCESS_APIC_MSRS,
-            HV_ACCESS_HYPERCALL_MSRS, HV_ACCESS_VP_INDEX,
+            HV_ACCESS_SYNIC_TIMERS,
+            HV_ACCESS_APIC_MSRS,
+            HV_ACCESS_HYPERCALL_MSRS,
+            HV_ACCESS_VP_INDEX,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

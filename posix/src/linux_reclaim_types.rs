@@ -83,8 +83,11 @@ mod tests {
     #[test]
     fn test_lru_lists_distinct() {
         let lrus = [
-            LRU_INACTIVE_ANON, LRU_ACTIVE_ANON,
-            LRU_INACTIVE_FILE, LRU_ACTIVE_FILE, LRU_UNEVICTABLE,
+            LRU_INACTIVE_ANON,
+            LRU_ACTIVE_ANON,
+            LRU_INACTIVE_FILE,
+            LRU_ACTIVE_FILE,
+            LRU_UNEVICTABLE,
         ];
         assert_eq!(lrus.len(), NR_LRU_LISTS as usize);
         for i in 0..lrus.len() {
@@ -97,8 +100,11 @@ mod tests {
     #[test]
     fn test_reclaim_flags_no_overlap() {
         let flags = [
-            RECLAIM_FILE_ONLY, RECLAIM_ANON_ONLY,
-            RECLAIM_NO_WRITEBACK, RECLAIM_MEMCG, RECLAIM_COMPACTION,
+            RECLAIM_FILE_ONLY,
+            RECLAIM_ANON_ONLY,
+            RECLAIM_NO_WRITEBACK,
+            RECLAIM_MEMCG,
+            RECLAIM_COMPACTION,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

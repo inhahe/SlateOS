@@ -68,8 +68,11 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            RA_STATE_INITIAL, RA_STATE_SEQUENTIAL,
-            RA_STATE_INTERLEAVED, RA_STATE_MMAP, RA_STATE_DISABLED,
+            RA_STATE_INITIAL,
+            RA_STATE_SEQUENTIAL,
+            RA_STATE_INTERLEAVED,
+            RA_STATE_MMAP,
+            RA_STATE_DISABLED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -81,8 +84,11 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            RA_FLAG_MARK, RA_FLAG_ASYNC, RA_FLAG_MMAP,
-            RA_FLAG_MISS, RA_FLAG_EXPLICIT,
+            RA_FLAG_MARK,
+            RA_FLAG_ASYNC,
+            RA_FLAG_MMAP,
+            RA_FLAG_MISS,
+            RA_FLAG_EXPLICIT,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

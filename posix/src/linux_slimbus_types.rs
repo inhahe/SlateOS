@@ -87,8 +87,10 @@ mod tests {
     #[test]
     fn test_device_states_distinct() {
         let states = [
-            SLIM_DEVICE_ABSENT, SLIM_DEVICE_PRESENT,
-            SLIM_DEVICE_ACTIVE, SLIM_DEVICE_SLEEPING,
+            SLIM_DEVICE_ABSENT,
+            SLIM_DEVICE_PRESENT,
+            SLIM_DEVICE_ACTIVE,
+            SLIM_DEVICE_SLEEPING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -110,8 +112,10 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            SLIM_PROTO_ISO, SLIM_PROTO_PUSH,
-            SLIM_PROTO_PULL, SLIM_PROTO_ASYNC,
+            SLIM_PROTO_ISO,
+            SLIM_PROTO_PUSH,
+            SLIM_PROTO_PULL,
+            SLIM_PROTO_ASYNC,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {

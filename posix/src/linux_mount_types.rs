@@ -128,10 +128,14 @@ mod tests {
     #[test]
     fn test_mount_attr_no_overlap() {
         let attrs = [
-            MOUNT_ATTR_RDONLY, MOUNT_ATTR_NOSUID,
-            MOUNT_ATTR_NODEV, MOUNT_ATTR_NOEXEC,
-            MOUNT_ATTR_NOATIME, MOUNT_ATTR_STRICTATIME,
-            MOUNT_ATTR_NODIRATIME, MOUNT_ATTR_IDMAP,
+            MOUNT_ATTR_RDONLY,
+            MOUNT_ATTR_NOSUID,
+            MOUNT_ATTR_NODEV,
+            MOUNT_ATTR_NOEXEC,
+            MOUNT_ATTR_NOATIME,
+            MOUNT_ATTR_STRICTATIME,
+            MOUNT_ATTR_NODIRATIME,
+            MOUNT_ATTR_IDMAP,
             MOUNT_ATTR_NOSYMFOLLOW,
         ];
         for i in 0..attrs.len() {
@@ -144,10 +148,14 @@ mod tests {
     #[test]
     fn test_fsconfig_cmds_distinct() {
         let cmds = [
-            FSCONFIG_SET_FLAG, FSCONFIG_SET_STRING,
-            FSCONFIG_SET_BINARY, FSCONFIG_SET_PATH,
-            FSCONFIG_SET_PATH_EMPTY, FSCONFIG_SET_FD,
-            FSCONFIG_CMD_CREATE, FSCONFIG_CMD_RECONFIGURE,
+            FSCONFIG_SET_FLAG,
+            FSCONFIG_SET_STRING,
+            FSCONFIG_SET_BINARY,
+            FSCONFIG_SET_PATH,
+            FSCONFIG_SET_PATH_EMPTY,
+            FSCONFIG_SET_FD,
+            FSCONFIG_CMD_CREATE,
+            FSCONFIG_CMD_RECONFIGURE,
             FSCONFIG_CMD_CREATE_EXCL,
         ];
         for i in 0..cmds.len() {

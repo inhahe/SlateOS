@@ -53,11 +53,7 @@ static mut OPTPOS: usize = 0;
 /// null-terminated strings.  `optstring` must be null-terminated.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::similar_names)] // argc/argv are standard POSIX names.
-pub unsafe extern "C" fn getopt(
-    argc: i32,
-    argv: *const *const u8,
-    optstring: *const u8,
-) -> i32 {
+pub unsafe extern "C" fn getopt(argc: i32, argv: *const *const u8, optstring: *const u8) -> i32 {
     if argv.is_null() || optstring.is_null() {
         return -1;
     }
@@ -68,7 +64,9 @@ pub unsafe extern "C" fn getopt(
     let pos = unsafe { *core::ptr::addr_of!(OPTPOS) };
 
     // Reset optarg.
-    unsafe { core::ptr::addr_of_mut!(optarg).write(core::ptr::null()); }
+    unsafe {
+        core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
+    }
 
     if ind >= argc || ind < 1 {
         return -1;
@@ -94,13 +92,19 @@ pub unsafe extern "C" fn getopt(
         }
         if second == b'-' && unsafe { *arg.add(2) } == 0 {
             // "--" — skip it and stop.
-            unsafe { core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1)); }
-            unsafe { core::ptr::addr_of_mut!(OPTPOS).write(0); }
+            unsafe {
+                core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
+            }
+            unsafe {
+                core::ptr::addr_of_mut!(OPTPOS).write(0);
+            }
             return -1;
         }
 
         // Start scanning at position 1 (after '-').
-        unsafe { core::ptr::addr_of_mut!(OPTPOS).write(1); }
+        unsafe {
+            core::ptr::addr_of_mut!(OPTPOS).write(1);
+        }
     }
 
     let cur_pos = unsafe { *core::ptr::addr_of!(OPTPOS) };
@@ -109,8 +113,12 @@ pub unsafe extern "C" fn getopt(
 
     if opt_char == 0 {
         // End of this argument — move to next.
-        unsafe { core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1)); }
-        unsafe { core::ptr::addr_of_mut!(OPTPOS).write(0); }
+        unsafe {
+            core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
+        }
+        unsafe {
+            core::ptr::addr_of_mut!(OPTPOS).write(0);
+        }
         // Recursively try the next argument.
         return unsafe { getopt(argc, argv, optstring) };
     }
@@ -120,13 +128,21 @@ pub unsafe extern "C" fn getopt(
 
     if found_pos < 0 {
         // Unknown option.
-        unsafe { core::ptr::addr_of_mut!(optopt).write(i32::from(opt_char)); }
+        unsafe {
+            core::ptr::addr_of_mut!(optopt).write(i32::from(opt_char));
+        }
 
         // Advance past this character.
-        unsafe { core::ptr::addr_of_mut!(OPTPOS).write(cur_pos.wrapping_add(1)); }
+        unsafe {
+            core::ptr::addr_of_mut!(OPTPOS).write(cur_pos.wrapping_add(1));
+        }
         if unsafe { *arg.add(cur_pos.wrapping_add(1)) } == 0 {
-            unsafe { core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1)); }
-            unsafe { core::ptr::addr_of_mut!(OPTPOS).write(0); }
+            unsafe {
+                core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
+            }
+            unsafe {
+                core::ptr::addr_of_mut!(OPTPOS).write(0);
+            }
         }
 
         return i32::from(b'?');
@@ -169,10 +185,16 @@ pub unsafe extern "C" fn getopt(
         }
     } else {
         // No argument — advance within the current argv element.
-        unsafe { core::ptr::addr_of_mut!(OPTPOS).write(cur_pos.wrapping_add(1)); }
+        unsafe {
+            core::ptr::addr_of_mut!(OPTPOS).write(cur_pos.wrapping_add(1));
+        }
         if unsafe { *arg.add(cur_pos.wrapping_add(1)) } == 0 {
-            unsafe { core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1)); }
-            unsafe { core::ptr::addr_of_mut!(OPTPOS).write(0); }
+            unsafe {
+                core::ptr::addr_of_mut!(optind).write(ind.wrapping_add(1));
+            }
+            unsafe {
+                core::ptr::addr_of_mut!(OPTPOS).write(0);
+            }
         }
     }
 
@@ -406,14 +428,18 @@ fn try_match_long(
         // Compare names.
         if names_match(arg, name_start, name_len, opt.name) {
             if !longindex.is_null() {
-                unsafe { *longindex = idx as i32; }
+                unsafe {
+                    *longindex = idx as i32;
+                }
             }
 
             // Return value based on flag.
             if opt.flag.is_null() {
                 return Some(opt.val);
             }
-            unsafe { *opt.flag = opt.val; }
+            unsafe {
+                *opt.flag = opt.val;
+            }
             return Some(0);
         }
 
@@ -424,12 +450,7 @@ fn try_match_long(
 }
 
 /// Check if the name in argv matches a long option name.
-fn names_match(
-    arg: *const u8,
-    name_start: usize,
-    name_len: usize,
-    opt_name: *const u8,
-) -> bool {
+fn names_match(arg: *const u8, name_start: usize, name_len: usize, opt_name: *const u8) -> bool {
     let opt_len = unsafe { crate::string::strlen(opt_name) };
     if name_len != opt_len {
         return false;
@@ -494,25 +515,35 @@ fn handle_long_opt_arg(
     if has_eq {
         if opt.has_arg == NO_ARGUMENT {
             // "--foo=bar" when foo takes no argument — error.
-            unsafe { core::ptr::addr_of_mut!(optarg).write(core::ptr::null()); }
+            unsafe {
+                core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
+            }
             return -1;
         }
         // Argument is after the '='.
         let arg_ptr = unsafe { arg.add(i.wrapping_add(1)) };
-        unsafe { core::ptr::addr_of_mut!(optarg).write(arg_ptr); }
+        unsafe {
+            core::ptr::addr_of_mut!(optarg).write(arg_ptr);
+        }
     } else if opt.has_arg == REQUIRED_ARGUMENT {
         // Argument is the next argv element.
         if *next_ind < argc {
             let next_arg = unsafe { *argv.add(*next_ind as usize) };
-            unsafe { core::ptr::addr_of_mut!(optarg).write(next_arg); }
+            unsafe {
+                core::ptr::addr_of_mut!(optarg).write(next_arg);
+            }
             *next_ind = next_ind.wrapping_add(1);
         } else {
             // Missing required argument.
-            unsafe { core::ptr::addr_of_mut!(optarg).write(core::ptr::null()); }
+            unsafe {
+                core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
+            }
             return -1;
         }
     } else {
-        unsafe { core::ptr::addr_of_mut!(optarg).write(core::ptr::null()); }
+        unsafe {
+            core::ptr::addr_of_mut!(optarg).write(core::ptr::null());
+        }
     }
     0
 }
@@ -551,7 +582,9 @@ mod tests {
 
     #[test]
     fn test_short_options_abc() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "-a", "-b", "-c"]);
         let opts = cstr("abc");
 
@@ -570,14 +603,25 @@ mod tests {
 
     #[test]
     fn test_grouped_short_options() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         // "-abc" is equivalent to "-a -b -c"
         let (argc, argv, _b) = make_argv(&["prog", "-abc"]);
         let opts = cstr("abc");
 
-        assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, i32::from(b'a'));
-        assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, i32::from(b'b'));
-        assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, i32::from(b'c'));
+        assert_eq!(
+            unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) },
+            i32::from(b'a')
+        );
+        assert_eq!(
+            unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) },
+            i32::from(b'b')
+        );
+        assert_eq!(
+            unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) },
+            i32::from(b'c')
+        );
         assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, -1);
     }
 
@@ -588,7 +632,9 @@ mod tests {
     #[test]
     fn test_option_with_arg_separate() {
         // "-o value" — argument in the next argv element.
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "-o", "myfile"]);
         let opts = cstr("o:");
 
@@ -607,7 +653,9 @@ mod tests {
     #[test]
     fn test_option_with_arg_attached() {
         // "-omyfile" — argument attached to the option.
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "-omyfile"]);
         let opts = cstr("o:");
 
@@ -628,7 +676,9 @@ mod tests {
 
     #[test]
     fn test_unknown_option_returns_question() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "-z"]);
         let opts = cstr("abc");
 
@@ -642,16 +692,27 @@ mod tests {
 
     #[test]
     fn test_unknown_among_known() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         // "-axb" — 'a' is known, 'x' is unknown, 'b' is known.
         let (argc, argv, _b) = make_argv(&["prog", "-axb"]);
         let opts = cstr("ab");
 
-        assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, i32::from(b'a'));
-        assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, i32::from(b'?'));
+        assert_eq!(
+            unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) },
+            i32::from(b'a')
+        );
+        assert_eq!(
+            unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) },
+            i32::from(b'?')
+        );
         let oo = unsafe { core::ptr::addr_of!(optopt).read() };
         assert_eq!(oo, i32::from(b'x'));
-        assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, i32::from(b'b'));
+        assert_eq!(
+            unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) },
+            i32::from(b'b')
+        );
         assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, -1);
     }
 
@@ -661,29 +722,45 @@ mod tests {
 
     #[test]
     fn test_optind_advances() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "-a", "-b"]);
         let opts = cstr("ab");
 
         assert_eq!(unsafe { core::ptr::addr_of!(optind).read() }, 1);
-        unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()); }
+        unsafe {
+            getopt(argc, argv.as_ptr(), opts.as_ptr());
+        }
         assert_eq!(unsafe { core::ptr::addr_of!(optind).read() }, 2);
-        unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()); }
+        unsafe {
+            getopt(argc, argv.as_ptr(), opts.as_ptr());
+        }
         assert_eq!(unsafe { core::ptr::addr_of!(optind).read() }, 3);
     }
 
     #[test]
     fn test_reset_allows_reparse() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "-a"]);
         let opts = cstr("a");
 
-        assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, i32::from(b'a'));
+        assert_eq!(
+            unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) },
+            i32::from(b'a')
+        );
         assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, -1);
 
         // Reset and parse again.
-        unsafe { reset_getopt_state(); }
-        assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, i32::from(b'a'));
+        unsafe {
+            reset_getopt_state();
+        }
+        assert_eq!(
+            unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) },
+            i32::from(b'a')
+        );
         assert_eq!(unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) }, -1);
     }
 
@@ -693,7 +770,9 @@ mod tests {
 
     #[test]
     fn test_double_dash_stops_parsing() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "--", "-a"]);
         let opts = cstr("a");
 
@@ -707,7 +786,9 @@ mod tests {
 
     #[test]
     fn test_bare_dash_stops_parsing() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "-"]);
         let opts = cstr("a");
 
@@ -721,7 +802,9 @@ mod tests {
 
     #[test]
     fn test_null_optstring() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "-a"]);
 
         let r = unsafe { getopt(argc, argv.as_ptr(), core::ptr::null()) };
@@ -730,7 +813,9 @@ mod tests {
 
     #[test]
     fn test_null_argv() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let opts = cstr("a");
 
         let r = unsafe { getopt(3, core::ptr::null(), opts.as_ptr()) };
@@ -739,12 +824,18 @@ mod tests {
 
     #[test]
     fn test_empty_optstring_returns_unknown() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "-a"]);
         let opts = cstr("");
 
         let r = unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) };
-        assert_eq!(r, i32::from(b'?'), "all options unknown with empty optstring");
+        assert_eq!(
+            r,
+            i32::from(b'?'),
+            "all options unknown with empty optstring"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -753,7 +844,9 @@ mod tests {
 
     #[test]
     fn test_missing_required_arg() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         // "-o" without a following argument.
         let (argc, argv, _b) = make_argv(&["prog", "-o"]);
         let opts = cstr("o:");
@@ -767,13 +860,19 @@ mod tests {
 
     #[test]
     fn test_missing_required_arg_colon_mode() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         // Leading ':' in optstring changes missing-arg return to ':'.
         let (argc, argv, _b) = make_argv(&["prog", "-o"]);
         let opts = cstr(":o:");
 
         let r = unsafe { getopt(argc, argv.as_ptr(), opts.as_ptr()) };
-        assert_eq!(r, i32::from(b':'), "missing arg with ':'-prefix should return ':'");
+        assert_eq!(
+            r,
+            i32::from(b':'),
+            "missing arg with ':'-prefix should return ':'"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -813,41 +912,50 @@ mod tests {
 
     #[test]
     fn test_long_option_verbose() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "--verbose"]);
         let opts = cstr(""); // no short options
-        let (longopts, _lb) = make_longopts(&[
-            (b"verbose", NO_ARGUMENT, i32::from(b'v')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'v'))]);
         let mut longindex: i32 = -1;
 
         let r = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r, i32::from(b'v'));
         assert_eq!(longindex, 0);
 
         let r2 = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r2, -1);
     }
 
     #[test]
     fn test_long_option_with_equals_arg() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "--output=myfile"]);
         let opts = cstr("");
-        let (longopts, _lb) = make_longopts(&[
-            (b"output", REQUIRED_ARGUMENT, i32::from(b'o')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"output", REQUIRED_ARGUMENT, i32::from(b'o'))]);
         let mut longindex: i32 = -1;
 
         let r = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r, i32::from(b'o'));
         assert_eq!(longindex, 0);
@@ -860,17 +968,20 @@ mod tests {
 
     #[test]
     fn test_long_option_with_separate_arg() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "--output", "myfile"]);
         let opts = cstr("");
-        let (longopts, _lb) = make_longopts(&[
-            (b"output", REQUIRED_ARGUMENT, i32::from(b'o')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"output", REQUIRED_ARGUMENT, i32::from(b'o'))]);
         let mut longindex: i32 = -1;
 
         let r = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r, i32::from(b'o'));
 
@@ -885,7 +996,9 @@ mod tests {
 
     #[test]
     fn test_long_option_flag_mode() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "--debug"]);
         let opts = cstr("");
 
@@ -908,8 +1021,11 @@ mod tests {
         ];
 
         let r = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), core::ptr::null_mut(),
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            core::ptr::null_mut(),
         );
         // When flag is non-null, getopt_long should return 0 and set *flag.
         assert_eq!(r, 0);
@@ -918,94 +1034,125 @@ mod tests {
 
     #[test]
     fn test_long_option_unknown() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "--nonexistent"]);
         let opts = cstr("");
-        let (longopts, _lb) = make_longopts(&[
-            (b"verbose", NO_ARGUMENT, i32::from(b'v')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'v'))]);
 
         let r = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), core::ptr::null_mut(),
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            core::ptr::null_mut(),
         );
         assert_eq!(r, i32::from(b'?'), "unknown long option should return '?'");
     }
 
     #[test]
     fn test_long_option_missing_required_arg() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "--output"]);
         let opts = cstr("");
-        let (longopts, _lb) = make_longopts(&[
-            (b"output", REQUIRED_ARGUMENT, i32::from(b'o')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"output", REQUIRED_ARGUMENT, i32::from(b'o'))]);
         let mut longindex: i32 = -1;
 
         let r = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
-        assert_eq!(r, i32::from(b'?'), "missing required arg for long opt should return '?'");
+        assert_eq!(
+            r,
+            i32::from(b'?'),
+            "missing required arg for long opt should return '?'"
+        );
     }
 
     #[test]
     fn test_long_and_short_mixed() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "-a", "--verbose", "-b"]);
         let opts = cstr("ab");
-        let (longopts, _lb) = make_longopts(&[
-            (b"verbose", NO_ARGUMENT, i32::from(b'v')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'v'))]);
         let mut longindex: i32 = -1;
 
         let r1 = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r1, i32::from(b'a'));
 
         let r2 = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r2, i32::from(b'v'));
         assert_eq!(longindex, 0);
 
         let r3 = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r3, i32::from(b'b'));
 
         let r4 = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r4, -1);
     }
 
     #[test]
     fn test_long_option_no_arg_with_equals_is_error() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         // "--verbose=foo" when verbose takes no argument.
         let (argc, argv, _b) = make_argv(&["prog", "--verbose=foo"]);
         let opts = cstr("");
-        let (longopts, _lb) = make_longopts(&[
-            (b"verbose", NO_ARGUMENT, i32::from(b'v')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'v'))]);
         let mut longindex: i32 = -1;
 
         let r = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
-        assert_eq!(r, i32::from(b'?'), "=value on no_argument option is an error");
+        assert_eq!(
+            r,
+            i32::from(b'?'),
+            "=value on no_argument option is an error"
+        );
     }
 
     #[test]
     fn test_long_option_multiple_defined() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         let (argc, argv, _b) = make_argv(&["prog", "--beta"]);
         let opts = cstr("");
         let (longopts, _lb) = make_longopts(&[
@@ -1016,8 +1163,11 @@ mod tests {
         let mut longindex: i32 = -1;
 
         let r = getopt_long(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r, 2);
         assert_eq!(longindex, 1, "longindex should point to the matched entry");
@@ -1053,18 +1203,21 @@ mod tests {
 
     #[test]
     fn test_long_only_single_dash() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         // "-verbose" should match long option "verbose" with long_only.
         let (argc, argv, _b) = make_argv(&["prog", "-verbose"]);
         let opts = cstr("v");
-        let (longopts, _lb) = make_longopts(&[
-            (b"verbose", NO_ARGUMENT, i32::from(b'V')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'V'))]);
         let mut longindex: i32 = -1;
 
         let r = getopt_long_only(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         // Should match the long option, not the short 'v'.
         assert_eq!(r, i32::from(b'V'));
@@ -1073,18 +1226,21 @@ mod tests {
 
     #[test]
     fn test_long_only_with_arg() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         // "-output=file.txt" should match long option with =arg.
         let (argc, argv, _b) = make_argv(&["prog", "-output=file.txt"]);
         let opts = cstr("");
-        let (longopts, _lb) = make_longopts(&[
-            (b"output", REQUIRED_ARGUMENT, i32::from(b'o')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"output", REQUIRED_ARGUMENT, i32::from(b'o'))]);
         let mut longindex: i32 = -1;
 
         let r = getopt_long_only(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r, i32::from(b'o'));
         assert_eq!(longindex, 0);
@@ -1097,18 +1253,21 @@ mod tests {
 
     #[test]
     fn test_long_only_double_dash_still_works() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         // "--verbose" should still work with getopt_long_only.
         let (argc, argv, _b) = make_argv(&["prog", "--verbose"]);
         let opts = cstr("");
-        let (longopts, _lb) = make_longopts(&[
-            (b"verbose", NO_ARGUMENT, i32::from(b'V')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'V'))]);
         let mut longindex: i32 = -1;
 
         let r = getopt_long_only(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), &mut longindex,
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            &mut longindex,
         );
         assert_eq!(r, i32::from(b'V'));
         assert_eq!(longindex, 0);
@@ -1116,34 +1275,40 @@ mod tests {
 
     #[test]
     fn test_long_only_no_match_falls_to_short() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         // "-a" should still work as short option when no long option matches.
         let (argc, argv, _b) = make_argv(&["prog", "-a"]);
         let opts = cstr("ab");
-        let (longopts, _lb) = make_longopts(&[
-            (b"verbose", NO_ARGUMENT, i32::from(b'V')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'V'))]);
 
         let r = getopt_long_only(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), core::ptr::null_mut(),
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            core::ptr::null_mut(),
         );
         assert_eq!(r, i32::from(b'a'));
     }
 
     #[test]
     fn test_long_only_unknown_option() {
-        unsafe { reset_getopt_state(); }
+        unsafe {
+            reset_getopt_state();
+        }
         // "-nonexistent" with no matching long option and not a valid short.
         let (argc, argv, _b) = make_argv(&["prog", "-nonexistent"]);
         let opts = cstr("ab");
-        let (longopts, _lb) = make_longopts(&[
-            (b"verbose", NO_ARGUMENT, i32::from(b'V')),
-        ]);
+        let (longopts, _lb) = make_longopts(&[(b"verbose", NO_ARGUMENT, i32::from(b'V'))]);
 
         let r = getopt_long_only(
-            argc, argv.as_ptr(), opts.as_ptr(),
-            longopts.as_ptr(), core::ptr::null_mut(),
+            argc,
+            argv.as_ptr(),
+            opts.as_ptr(),
+            longopts.as_ptr(),
+            core::ptr::null_mut(),
         );
         // Should return '?' for unrecognized option.
         assert_eq!(r, i32::from(b'?'));

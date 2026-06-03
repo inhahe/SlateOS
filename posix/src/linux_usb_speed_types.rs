@@ -89,10 +89,14 @@ mod tests {
     #[test]
     fn test_ss_link_states_distinct() {
         let states = [
-            USB_SS_LINK_STATE_U0, USB_SS_LINK_STATE_U1,
-            USB_SS_LINK_STATE_U2, USB_SS_LINK_STATE_U3,
-            USB_SS_LINK_STATE_SS_DISABLED, USB_SS_LINK_STATE_RX_DETECT,
-            USB_SS_LINK_STATE_SS_INACTIVE, USB_SS_LINK_STATE_COMPLIANCE,
+            USB_SS_LINK_STATE_U0,
+            USB_SS_LINK_STATE_U1,
+            USB_SS_LINK_STATE_U2,
+            USB_SS_LINK_STATE_U3,
+            USB_SS_LINK_STATE_SS_DISABLED,
+            USB_SS_LINK_STATE_RX_DETECT,
+            USB_SS_LINK_STATE_SS_INACTIVE,
+            USB_SS_LINK_STATE_COMPLIANCE,
             USB_SS_LINK_STATE_LOOPBACK,
         ];
         for i in 0..states.len() {

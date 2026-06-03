@@ -127,8 +127,11 @@ mod tests {
     #[test]
     fn test_alg_set_distinct() {
         let sets = [
-            ALG_SET_KEY, ALG_SET_IV, ALG_SET_OP,
-            ALG_SET_AEAD_ASSOCLEN, ALG_SET_AEAD_AUTHSIZE,
+            ALG_SET_KEY,
+            ALG_SET_IV,
+            ALG_SET_OP,
+            ALG_SET_AEAD_ASSOCLEN,
+            ALG_SET_AEAD_AUTHSIZE,
             ALG_SET_DRBG_ENTROPY,
         ];
         for i in 0..sets.len() {
@@ -147,8 +150,12 @@ mod tests {
     #[test]
     fn test_msg_cmds_distinct() {
         let cmds = [
-            CRYPTO_MSG_NEWALG, CRYPTO_MSG_DELALG, CRYPTO_MSG_UPDATEALG,
-            CRYPTO_MSG_GETALG, CRYPTO_MSG_DELRNG, CRYPTO_MSG_GETSTAT,
+            CRYPTO_MSG_NEWALG,
+            CRYPTO_MSG_DELALG,
+            CRYPTO_MSG_UPDATEALG,
+            CRYPTO_MSG_GETALG,
+            CRYPTO_MSG_DELRNG,
+            CRYPTO_MSG_GETSTAT,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -178,8 +185,17 @@ mod tests {
 
     #[test]
     fn test_type_mask_extracts_type() {
-        assert_eq!(CRYPTO_ALG_TYPE_CIPHER & CRYPTO_ALG_TYPE_MASK, CRYPTO_ALG_TYPE_CIPHER);
-        assert_eq!(CRYPTO_ALG_TYPE_AEAD & CRYPTO_ALG_TYPE_MASK, CRYPTO_ALG_TYPE_AEAD);
-        assert_eq!(CRYPTO_ALG_TYPE_HASH & CRYPTO_ALG_TYPE_MASK, CRYPTO_ALG_TYPE_HASH);
+        assert_eq!(
+            CRYPTO_ALG_TYPE_CIPHER & CRYPTO_ALG_TYPE_MASK,
+            CRYPTO_ALG_TYPE_CIPHER
+        );
+        assert_eq!(
+            CRYPTO_ALG_TYPE_AEAD & CRYPTO_ALG_TYPE_MASK,
+            CRYPTO_ALG_TYPE_AEAD
+        );
+        assert_eq!(
+            CRYPTO_ALG_TYPE_HASH & CRYPTO_ALG_TYPE_MASK,
+            CRYPTO_ALG_TYPE_HASH
+        );
     }
 }

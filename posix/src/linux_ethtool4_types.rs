@@ -85,8 +85,10 @@ mod tests {
     #[test]
     fn test_phy_tunables_distinct() {
         let tunables = [
-            ETHTOOL_PHY_TUNABLE_UNSPEC, ETHTOOL_PHY_DOWNSHIFT,
-            ETHTOOL_PHY_FAST_LINK_DOWN, ETHTOOL_PHY_EDPD,
+            ETHTOOL_PHY_TUNABLE_UNSPEC,
+            ETHTOOL_PHY_DOWNSHIFT,
+            ETHTOOL_PHY_FAST_LINK_DOWN,
+            ETHTOOL_PHY_EDPD,
         ];
         for i in 0..tunables.len() {
             for j in (i + 1)..tunables.len() {
@@ -98,8 +100,12 @@ mod tests {
     #[test]
     fn test_fec_types_no_overlap() {
         let types = [
-            ETHTOOL_FEC_NONE, ETHTOOL_FEC_AUTO, ETHTOOL_FEC_OFF,
-            ETHTOOL_FEC_RS, ETHTOOL_FEC_BASER, ETHTOOL_FEC_LLRS,
+            ETHTOOL_FEC_NONE,
+            ETHTOOL_FEC_AUTO,
+            ETHTOOL_FEC_OFF,
+            ETHTOOL_FEC_RS,
+            ETHTOOL_FEC_BASER,
+            ETHTOOL_FEC_LLRS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -110,15 +116,24 @@ mod tests {
 
     #[test]
     fn test_power_modes_distinct() {
-        assert_ne!(ETHTOOL_MODULE_POWER_MODE_LOW, ETHTOOL_MODULE_POWER_MODE_HIGH);
+        assert_ne!(
+            ETHTOOL_MODULE_POWER_MODE_LOW,
+            ETHTOOL_MODULE_POWER_MODE_HIGH
+        );
     }
 
     #[test]
     fn test_reset_flags_no_overlap() {
         let flags = [
-            ETH_RESET_MGMT, ETH_RESET_IRQ, ETH_RESET_DMA,
-            ETH_RESET_FILTER, ETH_RESET_OFFLOAD, ETH_RESET_MAC,
-            ETH_RESET_PHY, ETH_RESET_RAM, ETH_RESET_AP,
+            ETH_RESET_MGMT,
+            ETH_RESET_IRQ,
+            ETH_RESET_DMA,
+            ETH_RESET_FILTER,
+            ETH_RESET_OFFLOAD,
+            ETH_RESET_MAC,
+            ETH_RESET_PHY,
+            ETH_RESET_RAM,
+            ETH_RESET_AP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

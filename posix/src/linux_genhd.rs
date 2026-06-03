@@ -87,10 +87,20 @@ mod tests {
     #[test]
     fn test_mbr_types_distinct() {
         let types = [
-            MBR_EMPTY, MBR_FAT12, MBR_FAT16_SMALL, MBR_EXTENDED,
-            MBR_FAT16, MBR_NTFS, MBR_FAT32, MBR_FAT32_LBA,
-            MBR_FAT16_LBA, MBR_EXTENDED_LBA, MBR_LINUX_SWAP,
-            MBR_LINUX, MBR_LINUX_LVM, MBR_GPT_PROTECTIVE,
+            MBR_EMPTY,
+            MBR_FAT12,
+            MBR_FAT16_SMALL,
+            MBR_EXTENDED,
+            MBR_FAT16,
+            MBR_NTFS,
+            MBR_FAT32,
+            MBR_FAT32_LBA,
+            MBR_FAT16_LBA,
+            MBR_EXTENDED_LBA,
+            MBR_LINUX_SWAP,
+            MBR_LINUX,
+            MBR_LINUX_LVM,
+            MBR_GPT_PROTECTIVE,
             MBR_EFI_SYSTEM,
         ];
         for i in 0..types.len() {

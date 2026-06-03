@@ -108,8 +108,13 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            MTD_ABSENT, MTD_RAM, MTD_ROM, MTD_NORFLASH,
-            MTD_NANDFLASH, MTD_DATAFLASH, MTD_UBIVOLUME,
+            MTD_ABSENT,
+            MTD_RAM,
+            MTD_ROM,
+            MTD_NORFLASH,
+            MTD_NANDFLASH,
+            MTD_DATAFLASH,
+            MTD_UBIVOLUME,
             MTD_MLCNANDFLASH,
         ];
         for i in 0..types.len() {
@@ -122,21 +127,28 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            MTD_WRITEABLE, MTD_BIT_WRITEABLE, MTD_NO_ERASE,
-            MTD_POWERUP_LOCK, MTD_SLC_ON_MLC_EMULATION,
+            MTD_WRITEABLE,
+            MTD_BIT_WRITEABLE,
+            MTD_NO_ERASE,
+            MTD_POWERUP_LOCK,
+            MTD_SLC_ON_MLC_EMULATION,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
-                assert_eq!(flags[i] & flags[j], 0, "overlap: 0x{:x} & 0x{:x}", flags[i], flags[j]);
+                assert_eq!(
+                    flags[i] & flags[j],
+                    0,
+                    "overlap: 0x{:x} & 0x{:x}",
+                    flags[i],
+                    flags[j]
+                );
             }
         }
     }
 
     #[test]
     fn test_oob_modes_distinct() {
-        let modes = [
-            MTD_OPS_PLACE_OOB, MTD_OPS_AUTO_OOB, MTD_OPS_RAW,
-        ];
+        let modes = [MTD_OPS_PLACE_OOB, MTD_OPS_AUTO_OOB, MTD_OPS_RAW];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
                 assert_ne!(modes[i], modes[j]);
@@ -164,9 +176,17 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            MEMGETINFO, MEMERASE, MEMWRITEOOB, MEMREADOOB,
-            MEMLOCK, MEMUNLOCK, MEMGETREGIONCOUNT, MEMGETREGIONINFO,
-            MEMGETOOBSEL, MEMGETBADBLOCK, MEMSETBADBLOCK,
+            MEMGETINFO,
+            MEMERASE,
+            MEMWRITEOOB,
+            MEMREADOOB,
+            MEMLOCK,
+            MEMUNLOCK,
+            MEMGETREGIONCOUNT,
+            MEMGETREGIONINFO,
+            MEMGETOOBSEL,
+            MEMGETBADBLOCK,
+            MEMSETBADBLOCK,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

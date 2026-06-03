@@ -98,13 +98,20 @@ mod tests {
     #[test]
     fn test_logical_addrs_distinct() {
         let addrs = [
-            CEC_LOG_ADDR_TV, CEC_LOG_ADDR_RECORD_1,
-            CEC_LOG_ADDR_RECORD_2, CEC_LOG_ADDR_TUNER_1,
-            CEC_LOG_ADDR_PLAYBACK_1, CEC_LOG_ADDR_AUDIOSYSTEM,
-            CEC_LOG_ADDR_TUNER_2, CEC_LOG_ADDR_TUNER_3,
-            CEC_LOG_ADDR_PLAYBACK_2, CEC_LOG_ADDR_RECORD_3,
-            CEC_LOG_ADDR_PLAYBACK_3, CEC_LOG_ADDR_BACKUP_1,
-            CEC_LOG_ADDR_BACKUP_2, CEC_LOG_ADDR_FREEUSE,
+            CEC_LOG_ADDR_TV,
+            CEC_LOG_ADDR_RECORD_1,
+            CEC_LOG_ADDR_RECORD_2,
+            CEC_LOG_ADDR_TUNER_1,
+            CEC_LOG_ADDR_PLAYBACK_1,
+            CEC_LOG_ADDR_AUDIOSYSTEM,
+            CEC_LOG_ADDR_TUNER_2,
+            CEC_LOG_ADDR_TUNER_3,
+            CEC_LOG_ADDR_PLAYBACK_2,
+            CEC_LOG_ADDR_RECORD_3,
+            CEC_LOG_ADDR_PLAYBACK_3,
+            CEC_LOG_ADDR_BACKUP_1,
+            CEC_LOG_ADDR_BACKUP_2,
+            CEC_LOG_ADDR_FREEUSE,
             CEC_LOG_ADDR_BROADCAST,
         ];
         for i in 0..addrs.len() {
@@ -117,12 +124,18 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            CEC_MSG_REPORT_PHYSICAL_ADDR, CEC_MSG_ACTIVE_SOURCE,
-            CEC_MSG_REQUEST_ACTIVE_SOURCE, CEC_MSG_STANDBY,
-            CEC_MSG_IMAGE_VIEW_ON, CEC_MSG_TEXT_VIEW_ON,
-            CEC_MSG_GIVE_DEVICE_POWER_STATUS, CEC_MSG_REPORT_POWER_STATUS,
-            CEC_MSG_USER_CONTROL_PRESSED, CEC_MSG_USER_CONTROL_RELEASED,
-            CEC_MSG_GIVE_OSD_NAME, CEC_MSG_SET_OSD_NAME,
+            CEC_MSG_REPORT_PHYSICAL_ADDR,
+            CEC_MSG_ACTIVE_SOURCE,
+            CEC_MSG_REQUEST_ACTIVE_SOURCE,
+            CEC_MSG_STANDBY,
+            CEC_MSG_IMAGE_VIEW_ON,
+            CEC_MSG_TEXT_VIEW_ON,
+            CEC_MSG_GIVE_DEVICE_POWER_STATUS,
+            CEC_MSG_REPORT_POWER_STATUS,
+            CEC_MSG_USER_CONTROL_PRESSED,
+            CEC_MSG_USER_CONTROL_RELEASED,
+            CEC_MSG_GIVE_OSD_NAME,
+            CEC_MSG_SET_OSD_NAME,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -134,8 +147,11 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let cmds = [
-            CEC_ADAP_G_CAPS, CEC_ADAP_G_LOG_ADDRS,
-            CEC_ADAP_S_LOG_ADDRS, CEC_TRANSMIT, CEC_RECEIVE,
+            CEC_ADAP_G_CAPS,
+            CEC_ADAP_G_LOG_ADDRS,
+            CEC_ADAP_S_LOG_ADDRS,
+            CEC_TRANSMIT,
+            CEC_RECEIVE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

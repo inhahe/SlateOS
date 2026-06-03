@@ -125,8 +125,12 @@ mod tests {
     #[test]
     fn test_sbi_flags_distinct() {
         let flags = [
-            JFS_SBI_CASE_INSENSITIVE, JFS_SBI_ACL, JFS_SBI_UNICODE,
-            JFS_SBI_OS2_EA, JFS_SBI_POSIX_EA, JFS_SBI_LARGEFILE,
+            JFS_SBI_CASE_INSENSITIVE,
+            JFS_SBI_ACL,
+            JFS_SBI_UNICODE,
+            JFS_SBI_OS2_EA,
+            JFS_SBI_POSIX_EA,
+            JFS_SBI_LARGEFILE,
             JFS_SBI_INLINELOG,
         ];
         for i in 0..flags.len() {
@@ -139,9 +143,15 @@ mod tests {
     #[test]
     fn test_inode_flags_distinct() {
         let flags = [
-            JFS_DIR_FL, JFS_FILE_FL, JFS_SYMLINK_FL,
-            JFS_SECRM_FL, JFS_IMMUTABLE_FL, JFS_APPEND_FL,
-            JFS_NODUMP_FL, JFS_NOATIME_FL, JFS_SYNC_FL,
+            JFS_DIR_FL,
+            JFS_FILE_FL,
+            JFS_SYMLINK_FL,
+            JFS_SECRM_FL,
+            JFS_IMMUTABLE_FL,
+            JFS_APPEND_FL,
+            JFS_NODUMP_FL,
+            JFS_NOATIME_FL,
+            JFS_SYNC_FL,
             JFS_DIRSYNC_FL,
         ];
         for i in 0..flags.len() {
@@ -191,7 +201,12 @@ mod tests {
 
     #[test]
     fn test_special_inodes_distinct() {
-        let inodes = [JFS_AGGREGATE_I, JFS_BADBLOCK_I, JFS_ROOT_I, JFS_FILESYSTEM_I];
+        let inodes = [
+            JFS_AGGREGATE_I,
+            JFS_BADBLOCK_I,
+            JFS_ROOT_I,
+            JFS_FILESYSTEM_I,
+        ];
         for i in 0..inodes.len() {
             for j in (i + 1)..inodes.len() {
                 assert_ne!(inodes[i], inodes[j]);

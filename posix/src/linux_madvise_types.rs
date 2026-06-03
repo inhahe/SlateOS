@@ -77,8 +77,12 @@ mod tests {
     #[test]
     fn test_conventional_values_distinct() {
         let vals = [
-            MADV_NORMAL, MADV_RANDOM, MADV_SEQUENTIAL,
-            MADV_WILLNEED, MADV_DONTNEED, MADV_FREE,
+            MADV_NORMAL,
+            MADV_RANDOM,
+            MADV_SEQUENTIAL,
+            MADV_WILLNEED,
+            MADV_DONTNEED,
+            MADV_FREE,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
@@ -90,13 +94,25 @@ mod tests {
     #[test]
     fn test_linux_specific_distinct() {
         let vals = [
-            MADV_REMOVE, MADV_DONTFORK, MADV_DOFORK,
-            MADV_MERGEABLE, MADV_UNMERGEABLE, MADV_HUGEPAGE,
-            MADV_NOHUGEPAGE, MADV_DONTDUMP, MADV_DODUMP,
-            MADV_WIPEONFORK, MADV_KEEPONFORK, MADV_COLD,
-            MADV_PAGEOUT, MADV_POPULATE_READ, MADV_POPULATE_WRITE,
-            MADV_DONTNEED_LOCKED, MADV_COLLAPSE,
-            MADV_HWPOISON, MADV_SOFT_OFFLINE,
+            MADV_REMOVE,
+            MADV_DONTFORK,
+            MADV_DOFORK,
+            MADV_MERGEABLE,
+            MADV_UNMERGEABLE,
+            MADV_HUGEPAGE,
+            MADV_NOHUGEPAGE,
+            MADV_DONTDUMP,
+            MADV_DODUMP,
+            MADV_WIPEONFORK,
+            MADV_KEEPONFORK,
+            MADV_COLD,
+            MADV_PAGEOUT,
+            MADV_POPULATE_READ,
+            MADV_POPULATE_WRITE,
+            MADV_DONTNEED_LOCKED,
+            MADV_COLLAPSE,
+            MADV_HWPOISON,
+            MADV_SOFT_OFFLINE,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {

@@ -52,8 +52,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            KPROBE_FLAG_GONE, KPROBE_FLAG_DISABLED,
-            KPROBE_FLAG_OPTIMIZED, KPROBE_FLAG_FTRACE,
+            KPROBE_FLAG_GONE,
+            KPROBE_FLAG_DISABLED,
+            KPROBE_FLAG_OPTIMIZED,
+            KPROBE_FLAG_FTRACE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -66,8 +68,10 @@ mod tests {
     #[test]
     fn test_hit_actions_distinct() {
         let actions = [
-            KPROBE_HIT_ACTIVE, KPROBE_HIT_SS,
-            KPROBE_REENTER, KPROBE_HIT_SSDONE,
+            KPROBE_HIT_ACTIVE,
+            KPROBE_HIT_SS,
+            KPROBE_REENTER,
+            KPROBE_HIT_SSDONE,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {

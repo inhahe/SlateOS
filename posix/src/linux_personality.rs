@@ -6,21 +6,21 @@
 // Re-exports
 // ---------------------------------------------------------------------------
 
+pub use crate::sys_personality::PER_BSD;
 pub use crate::sys_personality::PER_LINUX;
 pub use crate::sys_personality::PER_LINUX32;
-pub use crate::sys_personality::PER_SVR4;
-pub use crate::sys_personality::PER_BSD;
 pub use crate::sys_personality::PER_LINUX32_3GB;
+pub use crate::sys_personality::PER_SVR4;
 
+pub use crate::sys_personality::ADDR_COMPAT_LAYOUT;
+pub use crate::sys_personality::ADDR_LIMIT_3GB;
+pub use crate::sys_personality::ADDR_LIMIT_32BIT;
 pub use crate::sys_personality::ADDR_NO_RANDOMIZE;
 pub use crate::sys_personality::MMAP_PAGE_ZERO;
-pub use crate::sys_personality::ADDR_COMPAT_LAYOUT;
 pub use crate::sys_personality::READ_IMPLIES_EXEC;
-pub use crate::sys_personality::ADDR_LIMIT_32BIT;
 pub use crate::sys_personality::SHORT_INODE;
-pub use crate::sys_personality::WHOLE_SECONDS;
 pub use crate::sys_personality::STICKY_TIMEOUTS;
-pub use crate::sys_personality::ADDR_LIMIT_3GB;
+pub use crate::sys_personality::WHOLE_SECONDS;
 
 pub use crate::unistd::personality;
 
@@ -46,9 +46,15 @@ mod tests {
     #[test]
     fn test_addr_flags_distinct() {
         let flags = [
-            ADDR_NO_RANDOMIZE, MMAP_PAGE_ZERO, ADDR_COMPAT_LAYOUT,
-            READ_IMPLIES_EXEC, ADDR_LIMIT_32BIT, SHORT_INODE,
-            WHOLE_SECONDS, STICKY_TIMEOUTS, ADDR_LIMIT_3GB,
+            ADDR_NO_RANDOMIZE,
+            MMAP_PAGE_ZERO,
+            ADDR_COMPAT_LAYOUT,
+            READ_IMPLIES_EXEC,
+            ADDR_LIMIT_32BIT,
+            SHORT_INODE,
+            WHOLE_SECONDS,
+            STICKY_TIMEOUTS,
+            ADDR_LIMIT_3GB,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -88,10 +88,18 @@ mod tests {
     #[test]
     fn test_cap_ids_distinct() {
         let caps = [
-            PCI_CAP_ID_PM, PCI_CAP_ID_AGP, PCI_CAP_ID_VPD,
-            PCI_CAP_ID_SLOTID, PCI_CAP_ID_MSI, PCI_CAP_ID_CHSWP,
-            PCI_CAP_ID_PCIX, PCI_CAP_ID_HT, PCI_CAP_ID_VNDR,
-            PCI_CAP_ID_EXP, PCI_CAP_ID_MSIX, PCI_CAP_ID_SATA,
+            PCI_CAP_ID_PM,
+            PCI_CAP_ID_AGP,
+            PCI_CAP_ID_VPD,
+            PCI_CAP_ID_SLOTID,
+            PCI_CAP_ID_MSI,
+            PCI_CAP_ID_CHSWP,
+            PCI_CAP_ID_PCIX,
+            PCI_CAP_ID_HT,
+            PCI_CAP_ID_VNDR,
+            PCI_CAP_ID_EXP,
+            PCI_CAP_ID_MSIX,
+            PCI_CAP_ID_SATA,
             PCI_CAP_ID_AF,
         ];
         for i in 0..caps.len() {

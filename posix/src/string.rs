@@ -27,15 +27,13 @@ use crate::types::SizeT;
 ///
 /// `dest` and `src` must be valid for `n` bytes and must not overlap.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn memcpy(
-    dest: *mut u8,
-    src: *const u8,
-    n: SizeT,
-) -> *mut u8 {
+pub unsafe extern "C" fn memcpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
     // SAFETY: Caller guarantees no overlap and valid pointers.
     let mut i: usize = 0;
     while i < n {
-        unsafe { *dest.add(i) = *src.add(i); }
+        unsafe {
+            *dest.add(i) = *src.add(i);
+        }
         i = i.wrapping_add(1);
     }
     dest
@@ -49,16 +47,14 @@ pub unsafe extern "C" fn memcpy(
 ///
 /// `dest` and `src` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn memmove(
-    dest: *mut u8,
-    src: *const u8,
-    n: SizeT,
-) -> *mut u8 {
+pub unsafe extern "C" fn memmove(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
     if (dest as usize) < (src as usize) {
         // Copy forward.
         let mut i: usize = 0;
         while i < n {
-            unsafe { *dest.add(i) = *src.add(i); }
+            unsafe {
+                *dest.add(i) = *src.add(i);
+            }
             i = i.wrapping_add(1);
         }
     } else if (dest as usize) > (src as usize) {
@@ -66,7 +62,9 @@ pub unsafe extern "C" fn memmove(
         let mut i = n;
         while i > 0 {
             i = i.wrapping_sub(1);
-            unsafe { *dest.add(i) = *src.add(i); }
+            unsafe {
+                *dest.add(i) = *src.add(i);
+            }
         }
     }
     // If dest == src, no copy needed.
@@ -81,15 +79,13 @@ pub unsafe extern "C" fn memmove(
 ///
 /// `dest` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn memset(
-    dest: *mut u8,
-    c: i32,
-    n: SizeT,
-) -> *mut u8 {
+pub unsafe extern "C" fn memset(dest: *mut u8, c: i32, n: SizeT) -> *mut u8 {
     let val = c as u8;
     let mut i: usize = 0;
     while i < n {
-        unsafe { *dest.add(i) = val; }
+        unsafe {
+            *dest.add(i) = val;
+        }
         i = i.wrapping_add(1);
     }
     dest
@@ -103,11 +99,7 @@ pub unsafe extern "C" fn memset(
 ///
 /// `s1` and `s2` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn memcmp(
-    s1: *const u8,
-    s2: *const u8,
-    n: SizeT,
-) -> i32 {
+pub unsafe extern "C" fn memcmp(s1: *const u8, s2: *const u8, n: SizeT) -> i32 {
     let mut i: usize = 0;
     while i < n {
         let a = unsafe { *s1.add(i) };
@@ -128,11 +120,7 @@ pub unsafe extern "C" fn memcmp(
 ///
 /// `s` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn memchr(
-    s: *const u8,
-    c: i32,
-    n: SizeT,
-) -> *const u8 {
+pub unsafe extern "C" fn memchr(s: *const u8, c: i32, n: SizeT) -> *const u8 {
     let val = c as u8;
     let mut i: usize = 0;
     while i < n {
@@ -224,7 +212,9 @@ pub unsafe extern "C" fn strcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
     let mut i: usize = 0;
     loop {
         let c = unsafe { *src.add(i) };
-        unsafe { *dest.add(i) = c; }
+        unsafe {
+            *dest.add(i) = c;
+        }
         if c == 0 {
             break;
         }
@@ -245,12 +235,16 @@ pub unsafe extern "C" fn strncpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mu
     // Copy up to null or n bytes.
     while i < n {
         let c = unsafe { *src.add(i) };
-        unsafe { *dest.add(i) = c; }
+        unsafe {
+            *dest.add(i) = c;
+        }
         if c == 0 {
             // Pad remainder with nulls.
             i = i.wrapping_add(1);
             while i < n {
-                unsafe { *dest.add(i) = 0; }
+                unsafe {
+                    *dest.add(i) = 0;
+                }
                 i = i.wrapping_add(1);
             }
             return dest;
@@ -346,7 +340,9 @@ pub unsafe extern "C" fn strcat(dest: *mut u8, src: *const u8) -> *mut u8 {
     let mut j: usize = 0;
     loop {
         let c = unsafe { *src.add(j) };
-        unsafe { *dest.add(i) = c; }
+        unsafe {
+            *dest.add(i) = c;
+        }
         if c == 0 {
             break;
         }
@@ -373,7 +369,9 @@ pub unsafe extern "C" fn strncat(dest: *mut u8, src: *const u8, n: SizeT) -> *mu
     let mut j: usize = 0;
     while j < n {
         let c = unsafe { *src.add(j) };
-        unsafe { *dest.add(i) = c; }
+        unsafe {
+            *dest.add(i) = c;
+        }
         if c == 0 {
             return dest;
         }
@@ -381,7 +379,9 @@ pub unsafe extern "C" fn strncat(dest: *mut u8, src: *const u8, n: SizeT) -> *mu
         j = j.wrapping_add(1);
     }
     // Null-terminate.
-    unsafe { *dest.add(i) = 0; }
+    unsafe {
+        *dest.add(i) = 0;
+    }
     dest
 }
 
@@ -546,7 +546,9 @@ pub unsafe extern "C" fn strtok(s: *mut u8, delim: *const u8) -> *mut u8 {
         let c = unsafe { *start.add(i) };
         if c == 0 {
             // All delimiters, no token.
-            unsafe { core::ptr::addr_of_mut!(SAVED).write(core::ptr::null_mut()); }
+            unsafe {
+                core::ptr::addr_of_mut!(SAVED).write(core::ptr::null_mut());
+            }
             return core::ptr::null_mut();
         }
         if !unsafe { is_delim(c, delim) } {
@@ -562,12 +564,18 @@ pub unsafe extern "C" fn strtok(s: *mut u8, delim: *const u8) -> *mut u8 {
     loop {
         let c = unsafe { *token.add(k) };
         if c == 0 {
-            unsafe { core::ptr::addr_of_mut!(SAVED).write(core::ptr::null_mut()); }
+            unsafe {
+                core::ptr::addr_of_mut!(SAVED).write(core::ptr::null_mut());
+            }
             return token;
         }
         if unsafe { is_delim(c, delim) } {
-            unsafe { *token.add(k) = 0; }
-            unsafe { core::ptr::addr_of_mut!(SAVED).write(token.add(k.wrapping_add(1))); }
+            unsafe {
+                *token.add(k) = 0;
+            }
+            unsafe {
+                core::ptr::addr_of_mut!(SAVED).write(token.add(k.wrapping_add(1)));
+            }
             return token;
         }
         k = k.wrapping_add(1);
@@ -672,17 +680,31 @@ pub extern "C" fn strerror(errnum: i32) -> *const u8 {
         72 => c"Multihop attempted".as_ptr().cast::<u8>(),
         73 => c"RFS specific error".as_ptr().cast::<u8>(),
         74 => c"Bad message".as_ptr().cast::<u8>(),
-        75 => c"Value too large for defined data type".as_ptr().cast::<u8>(),
+        75 => c"Value too large for defined data type"
+            .as_ptr()
+            .cast::<u8>(),
         76 => c"Name not unique on network".as_ptr().cast::<u8>(),
         77 => c"File descriptor in bad state".as_ptr().cast::<u8>(),
         78 => c"Remote address changed".as_ptr().cast::<u8>(),
-        79 => c"Can not access a needed shared library".as_ptr().cast::<u8>(),
-        80 => c"Accessing a corrupted shared library".as_ptr().cast::<u8>(),
+        79 => c"Can not access a needed shared library"
+            .as_ptr()
+            .cast::<u8>(),
+        80 => c"Accessing a corrupted shared library"
+            .as_ptr()
+            .cast::<u8>(),
         81 => c".lib section in a.out corrupted".as_ptr().cast::<u8>(),
-        82 => c"Attempting to link in too many shared libraries".as_ptr().cast::<u8>(),
-        83 => c"Cannot exec a shared library directly".as_ptr().cast::<u8>(),
-        84 => c"Invalid or incomplete multibyte or wide character".as_ptr().cast::<u8>(),
-        85 => c"Interrupted system call should be restarted".as_ptr().cast::<u8>(),
+        82 => c"Attempting to link in too many shared libraries"
+            .as_ptr()
+            .cast::<u8>(),
+        83 => c"Cannot exec a shared library directly"
+            .as_ptr()
+            .cast::<u8>(),
+        84 => c"Invalid or incomplete multibyte or wide character"
+            .as_ptr()
+            .cast::<u8>(),
+        85 => c"Interrupted system call should be restarted"
+            .as_ptr()
+            .cast::<u8>(),
         86 => c"Streams pipe error".as_ptr().cast::<u8>(),
         87 => c"Too many users".as_ptr().cast::<u8>(),
         88 => c"Socket operation on non-socket".as_ptr().cast::<u8>(),
@@ -694,7 +716,9 @@ pub extern "C" fn strerror(errnum: i32) -> *const u8 {
         94 => c"Socket type not supported".as_ptr().cast::<u8>(),
         95 => c"Operation not supported".as_ptr().cast::<u8>(),
         96 => c"Protocol family not supported".as_ptr().cast::<u8>(),
-        97 => c"Address family not supported by protocol".as_ptr().cast::<u8>(),
+        97 => c"Address family not supported by protocol"
+            .as_ptr()
+            .cast::<u8>(),
         98 => c"Address already in use".as_ptr().cast::<u8>(),
         99 => c"Cannot assign requested address".as_ptr().cast::<u8>(),
         100 => c"Network is down".as_ptr().cast::<u8>(),
@@ -703,9 +727,13 @@ pub extern "C" fn strerror(errnum: i32) -> *const u8 {
         103 => c"Software caused connection abort".as_ptr().cast::<u8>(),
         104 => c"Connection reset by peer".as_ptr().cast::<u8>(),
         105 => c"No buffer space available".as_ptr().cast::<u8>(),
-        106 => c"Transport endpoint is already connected".as_ptr().cast::<u8>(),
+        106 => c"Transport endpoint is already connected"
+            .as_ptr()
+            .cast::<u8>(),
         107 => c"Transport endpoint is not connected".as_ptr().cast::<u8>(),
-        108 => c"Cannot send after transport endpoint shutdown".as_ptr().cast::<u8>(),
+        108 => c"Cannot send after transport endpoint shutdown"
+            .as_ptr()
+            .cast::<u8>(),
         109 => c"Too many references: cannot splice".as_ptr().cast::<u8>(),
         110 => c"Connection timed out".as_ptr().cast::<u8>(),
         111 => c"Connection refused".as_ptr().cast::<u8>(),
@@ -723,10 +751,10 @@ pub extern "C" fn strerror(errnum: i32) -> *const u8 {
         123 => c"No medium found".as_ptr().cast::<u8>(),
         124 => c"Wrong medium type".as_ptr().cast::<u8>(),
         125 => c"Operation canceled".as_ptr().cast::<u8>(),
-        126 => c"Required key not available".as_ptr().cast::<u8>(),   // ENOKEY
-        127 => c"Key has expired".as_ptr().cast::<u8>(),              // EKEYEXPIRED
-        128 => c"Key has been revoked".as_ptr().cast::<u8>(),         // EKEYREVOKED
-        129 => c"Key was rejected by service".as_ptr().cast::<u8>(),  // EKEYREJECTED
+        126 => c"Required key not available".as_ptr().cast::<u8>(), // ENOKEY
+        127 => c"Key has expired".as_ptr().cast::<u8>(),            // EKEYEXPIRED
+        128 => c"Key has been revoked".as_ptr().cast::<u8>(),       // EKEYREVOKED
+        129 => c"Key was rejected by service".as_ptr().cast::<u8>(), // EKEYREJECTED
         130 => c"Owner died".as_ptr().cast::<u8>(),
         131 => c"State not recoverable".as_ptr().cast::<u8>(),
         _ => c"Unknown error".as_ptr().cast::<u8>(),
@@ -760,7 +788,9 @@ pub unsafe extern "C" fn strdup(s: *const u8) -> *mut u8 {
     }
 
     // SAFETY: malloc returned valid memory of at least `size` bytes.
-    unsafe { memcpy(dest, s, size); }
+    unsafe {
+        memcpy(dest, s, size);
+    }
     dest
 }
 
@@ -790,8 +820,12 @@ pub unsafe extern "C" fn strndup(s: *const u8, n: usize) -> *mut u8 {
     }
 
     // SAFETY: malloc returned valid memory of at least `size` bytes.
-    unsafe { memcpy(dest, s, len); }
-    unsafe { *dest.add(len) = 0; }
+    unsafe {
+        memcpy(dest, s, len);
+    }
+    unsafe {
+        *dest.add(len) = 0;
+    }
     dest
 }
 
@@ -825,7 +859,9 @@ pub unsafe extern "C" fn memrchr(s: *const u8, c: i32, n: usize) -> *const u8 {
 /// `src` and `dest` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn bcopy(src: *const u8, dest: *mut u8, n: usize) {
-    unsafe { memmove(dest, src, n); }
+    unsafe {
+        memmove(dest, src, n);
+    }
 }
 
 /// Set `n` bytes to zero.
@@ -835,7 +871,9 @@ pub unsafe extern "C" fn bcopy(src: *const u8, dest: *mut u8, n: usize) {
 /// `s` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn bzero(s: *mut u8, n: usize) {
-    unsafe { memset(s, 0, n); }
+    unsafe {
+        memset(s, 0, n);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -930,7 +968,9 @@ pub unsafe extern "C" fn stpcpy(dest: *mut u8, src: *const u8) -> *mut u8 {
     let mut i: usize = 0;
     loop {
         let c = unsafe { *src.add(i) };
-        unsafe { *dest.add(i) = c; }
+        unsafe {
+            *dest.add(i) = c;
+        }
         if c == 0 {
             return unsafe { dest.add(i) };
         }
@@ -953,13 +993,17 @@ pub unsafe extern "C" fn stpncpy(dest: *mut u8, src: *const u8, n: usize) -> *mu
     // Copy up to n chars from src.
     while i < n {
         let c = unsafe { *src.add(i) };
-        unsafe { *dest.add(i) = c; }
+        unsafe {
+            *dest.add(i) = c;
+        }
         if c == 0 {
             let result = unsafe { dest.add(i) };
             // Fill remainder with nulls.
             i = i.wrapping_add(1);
             while i < n {
-                unsafe { *dest.add(i) = 0; }
+                unsafe {
+                    *dest.add(i) = 0;
+                }
                 i = i.wrapping_add(1);
             }
             return result;
@@ -1001,7 +1045,9 @@ pub unsafe extern "C" fn strsep(stringp: *mut *mut u8, delim: *const u8) -> *mut
         let c = unsafe { *s.add(i) };
         if c == 0 {
             // Reached end of string — no more tokens.
-            unsafe { *stringp = core::ptr::null_mut(); }
+            unsafe {
+                *stringp = core::ptr::null_mut();
+            }
             return begin;
         }
 
@@ -1014,8 +1060,12 @@ pub unsafe extern "C" fn strsep(stringp: *mut *mut u8, delim: *const u8) -> *mut
             }
             if c == d {
                 // Replace delimiter with null and advance past it.
-                unsafe { *s.add(i) = 0; }
-                unsafe { *stringp = s.add(i.wrapping_add(1)); }
+                unsafe {
+                    *s.add(i) = 0;
+                }
+                unsafe {
+                    *stringp = s.add(i.wrapping_add(1));
+                }
                 return begin;
             }
             j = j.wrapping_add(1);
@@ -1172,11 +1222,7 @@ fn strverscmp_int(s1: *const u8, s2: *const u8, start: usize) -> i32 {
 /// `s` (if non-null) and `delim` must be valid null-terminated strings.
 /// `saveptr` must point to a valid `*mut u8`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strtok_r(
-    s: *mut u8,
-    delim: *const u8,
-    saveptr: *mut *mut u8,
-) -> *mut u8 {
+pub unsafe extern "C" fn strtok_r(s: *mut u8, delim: *const u8, saveptr: *mut *mut u8) -> *mut u8 {
     if saveptr.is_null() {
         return core::ptr::null_mut();
     }
@@ -1196,7 +1242,9 @@ pub unsafe extern "C" fn strtok_r(
     loop {
         let c = unsafe { *start.add(i) };
         if c == 0 {
-            unsafe { *saveptr = core::ptr::null_mut(); }
+            unsafe {
+                *saveptr = core::ptr::null_mut();
+            }
             return core::ptr::null_mut();
         }
         if !unsafe { is_delim(c, delim) } {
@@ -1212,12 +1260,18 @@ pub unsafe extern "C" fn strtok_r(
     loop {
         let c = unsafe { *token.add(k) };
         if c == 0 {
-            unsafe { *saveptr = core::ptr::null_mut(); }
+            unsafe {
+                *saveptr = core::ptr::null_mut();
+            }
             return token;
         }
         if unsafe { is_delim(c, delim) } {
-            unsafe { *token.add(k) = 0; }
-            unsafe { *saveptr = token.add(k.wrapping_add(1)); }
+            unsafe {
+                *token.add(k) = 0;
+            }
+            unsafe {
+                *saveptr = token.add(k.wrapping_add(1));
+            }
             return token;
         }
         k = k.wrapping_add(1);
@@ -1235,17 +1289,14 @@ pub unsafe extern "C" fn strtok_r(
 ///
 /// `dest` must be valid for `n` bytes.  `src` must be valid for `n` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn memccpy(
-    dest: *mut u8,
-    src: *const u8,
-    c: i32,
-    n: usize,
-) -> *mut u8 {
+pub unsafe extern "C" fn memccpy(dest: *mut u8, src: *const u8, c: i32, n: usize) -> *mut u8 {
     let val = c as u8;
     let mut i: usize = 0;
     while i < n {
         let byte = unsafe { *src.add(i) };
-        unsafe { *dest.add(i) = byte; }
+        unsafe {
+            *dest.add(i) = byte;
+        }
         if byte == val {
             return unsafe { dest.add(i.wrapping_add(1)) };
         }
@@ -1281,7 +1332,9 @@ pub unsafe extern "C" fn strcoll(s1: *const u8, s2: *const u8) -> i32 {
 pub unsafe extern "C" fn strxfrm(dest: *mut u8, src: *const u8, n: usize) -> usize {
     let len = unsafe { strlen(src) };
     if n > 0 {
-        unsafe { strncpy(dest, src, n); }
+        unsafe {
+            strncpy(dest, src, n);
+        }
     }
     len
 }
@@ -1302,10 +1355,18 @@ pub unsafe extern "C" fn strerror_r(errnum: i32, buf: *mut u8, buflen: usize) ->
 
     let msg = strerror(errnum);
     let msg_len = unsafe { strlen(msg) };
-    let copy_len = if msg_len < buflen { msg_len } else { buflen.wrapping_sub(1) };
+    let copy_len = if msg_len < buflen {
+        msg_len
+    } else {
+        buflen.wrapping_sub(1)
+    };
 
-    unsafe { memcpy(buf, msg, copy_len); }
-    unsafe { *buf.add(copy_len) = 0; }
+    unsafe {
+        memcpy(buf, msg, copy_len);
+    }
+    unsafe {
+        *buf.add(copy_len) = 0;
+    }
 
     if msg_len >= buflen {
         crate::errno::ERANGE
@@ -1326,7 +1387,12 @@ pub unsafe extern "C" fn strcoll_l(s1: *const u8, s2: *const u8, _locale: usize)
 ///
 /// Since we only support the C locale, delegates to `strxfrm`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strxfrm_l(dest: *mut u8, src: *const u8, n: usize, _locale: usize) -> usize {
+pub unsafe extern "C" fn strxfrm_l(
+    dest: *mut u8,
+    src: *const u8,
+    n: usize,
+    _locale: usize,
+) -> usize {
     unsafe { strxfrm(dest, src, n) }
 }
 
@@ -1370,10 +1436,18 @@ pub unsafe extern "C" fn strlcpy(dst: *mut u8, src: *const u8, size: SizeT) -> S
     let src_len = unsafe { strlen(src) };
 
     if size > 0 {
-        let copy_len = if src_len < size { src_len } else { size.wrapping_sub(1) };
+        let copy_len = if src_len < size {
+            src_len
+        } else {
+            size.wrapping_sub(1)
+        };
         // SAFETY: dst valid for `size` bytes, src valid for src_len.
-        unsafe { core::ptr::copy_nonoverlapping(src, dst, copy_len); }
-        unsafe { *dst.add(copy_len) = 0; }
+        unsafe {
+            core::ptr::copy_nonoverlapping(src, dst, copy_len);
+        }
+        unsafe {
+            *dst.add(copy_len) = 0;
+        }
     }
 
     src_len
@@ -1403,7 +1477,11 @@ pub unsafe extern "C" fn strlcat(dst: *mut u8, src: *const u8, size: SizeT) -> S
     }
 
     let remaining = size.wrapping_sub(dst_len).wrapping_sub(1);
-    let copy_len = if src_len < remaining { src_len } else { remaining };
+    let copy_len = if src_len < remaining {
+        src_len
+    } else {
+        remaining
+    };
 
     // SAFETY: dst_len < size, so dst.add(dst_len) is within bounds.
     unsafe {
@@ -1428,10 +1506,7 @@ pub unsafe extern "C" fn strlcat(dst: *mut u8, src: *const u8, size: SizeT) -> S
 ///
 /// Both `haystack` and `needle` must be valid null-terminated strings.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn strcasestr(
-    haystack: *const u8,
-    needle: *const u8,
-) -> *mut u8 {
+pub unsafe extern "C" fn strcasestr(haystack: *const u8, needle: *const u8) -> *mut u8 {
     if haystack.is_null() || needle.is_null() {
         return core::ptr::null_mut();
     }
@@ -1532,15 +1607,13 @@ pub unsafe extern "C" fn explicit_bzero(s: *mut u8, n: usize) {
 ///
 /// `dest` and `src` must be valid for `n` bytes and must not overlap.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn mempcpy(
-    dest: *mut u8,
-    src: *const u8,
-    n: SizeT,
-) -> *mut u8 {
+pub unsafe extern "C" fn mempcpy(dest: *mut u8, src: *const u8, n: SizeT) -> *mut u8 {
     let mut i: usize = 0;
     while i < n {
         // SAFETY: Caller guarantees both pointers valid for n bytes.
-        unsafe { *dest.add(i) = *src.add(i); }
+        unsafe {
+            *dest.add(i) = *src.add(i);
+        }
         i = i.wrapping_add(1);
     }
     // SAFETY: dest + n is one-past-end, valid for pointer arithmetic.
@@ -1740,9 +1813,17 @@ pub static sys_errlist: [SyncPtr; 132] = {
     table[72] = SyncPtr(c"Multihop attempted".as_ptr().cast::<u8>());
     // 73: unused
     table[74] = SyncPtr(c"Bad message".as_ptr().cast::<u8>());
-    table[75] = SyncPtr(c"Value too large for defined data type".as_ptr().cast::<u8>());
+    table[75] = SyncPtr(
+        c"Value too large for defined data type"
+            .as_ptr()
+            .cast::<u8>(),
+    );
     // 76-83: unused in our set
-    table[84] = SyncPtr(c"Invalid or incomplete multibyte or wide character".as_ptr().cast::<u8>());
+    table[84] = SyncPtr(
+        c"Invalid or incomplete multibyte or wide character"
+            .as_ptr()
+            .cast::<u8>(),
+    );
     // 85-87: unused
     table[88] = SyncPtr(c"Socket operation on non-socket".as_ptr().cast::<u8>());
     table[89] = SyncPtr(c"Destination address required".as_ptr().cast::<u8>());
@@ -1753,7 +1834,11 @@ pub static sys_errlist: [SyncPtr; 132] = {
     // 94: ESOCKTNOSUPPORT
     table[95] = SyncPtr(c"Operation not supported".as_ptr().cast::<u8>());
     // 96: EPFNOSUPPORT
-    table[97] = SyncPtr(c"Address family not supported by protocol".as_ptr().cast::<u8>());
+    table[97] = SyncPtr(
+        c"Address family not supported by protocol"
+            .as_ptr()
+            .cast::<u8>(),
+    );
     table[98] = SyncPtr(c"Address already in use".as_ptr().cast::<u8>());
     table[99] = SyncPtr(c"Cannot assign requested address".as_ptr().cast::<u8>());
     table[100] = SyncPtr(c"Network is down".as_ptr().cast::<u8>());
@@ -1762,9 +1847,17 @@ pub static sys_errlist: [SyncPtr; 132] = {
     table[103] = SyncPtr(c"Software caused connection abort".as_ptr().cast::<u8>());
     table[104] = SyncPtr(c"Connection reset by peer".as_ptr().cast::<u8>());
     table[105] = SyncPtr(c"No buffer space available".as_ptr().cast::<u8>());
-    table[106] = SyncPtr(c"Transport endpoint is already connected".as_ptr().cast::<u8>());
+    table[106] = SyncPtr(
+        c"Transport endpoint is already connected"
+            .as_ptr()
+            .cast::<u8>(),
+    );
     table[107] = SyncPtr(c"Transport endpoint is not connected".as_ptr().cast::<u8>());
-    table[108] = SyncPtr(c"Cannot send after transport endpoint shutdown".as_ptr().cast::<u8>());
+    table[108] = SyncPtr(
+        c"Cannot send after transport endpoint shutdown"
+            .as_ptr()
+            .cast::<u8>(),
+    );
     // 109: ETOOMANYREFS
     table[110] = SyncPtr(c"Connection timed out".as_ptr().cast::<u8>());
     table[111] = SyncPtr(c"Connection refused".as_ptr().cast::<u8>());
@@ -2083,14 +2176,7 @@ mod tests {
     fn test_memmem_found() {
         let hay = b"hello world";
         let needle = b"world";
-        let p = unsafe {
-            memmem(
-                hay.as_ptr().cast(),
-                11,
-                needle.as_ptr().cast(),
-                5,
-            )
-        };
+        let p = unsafe { memmem(hay.as_ptr().cast(), 11, needle.as_ptr().cast(), 5) };
         assert!(!p.is_null());
         let offset = (p as usize).wrapping_sub(hay.as_ptr() as usize);
         assert_eq!(offset, 6);
@@ -2099,9 +2185,7 @@ mod tests {
     #[test]
     fn test_memmem_empty_needle() {
         let hay = b"hello";
-        let p = unsafe {
-            memmem(hay.as_ptr().cast(), 5, hay.as_ptr().cast(), 0)
-        };
+        let p = unsafe { memmem(hay.as_ptr().cast(), 5, hay.as_ptr().cast(), 0) };
         // Empty needle returns haystack start.
         assert_eq!(p, hay.as_ptr().cast());
     }
@@ -2114,27 +2198,19 @@ mod tests {
         let delim = b",\0";
         let mut saveptr: *mut u8 = core::ptr::null_mut();
 
-        let tok1 = unsafe {
-            strtok_r(buf.as_mut_ptr(), delim.as_ptr(), &mut saveptr)
-        };
+        let tok1 = unsafe { strtok_r(buf.as_mut_ptr(), delim.as_ptr(), &mut saveptr) };
         assert!(!tok1.is_null());
         assert_eq!(unsafe { strlen(tok1) }, 5); // "hello"
 
-        let tok2 = unsafe {
-            strtok_r(core::ptr::null_mut(), delim.as_ptr(), &mut saveptr)
-        };
+        let tok2 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &mut saveptr) };
         assert!(!tok2.is_null());
         assert_eq!(unsafe { strlen(tok2) }, 5); // "world"
 
-        let tok3 = unsafe {
-            strtok_r(core::ptr::null_mut(), delim.as_ptr(), &mut saveptr)
-        };
+        let tok3 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &mut saveptr) };
         assert!(!tok3.is_null());
         assert_eq!(unsafe { strlen(tok3) }, 3); // "foo"
 
-        let tok4 = unsafe {
-            strtok_r(core::ptr::null_mut(), delim.as_ptr(), &mut saveptr)
-        };
+        let tok4 = unsafe { strtok_r(core::ptr::null_mut(), delim.as_ptr(), &mut saveptr) };
         assert!(tok4.is_null()); // No more tokens.
     }
 
@@ -2143,11 +2219,11 @@ mod tests {
     #[test]
     fn test_ffs_basic() {
         assert_eq!(ffs(0), 0);
-        assert_eq!(ffs(1), 1);    // bit 0 set
-        assert_eq!(ffs(2), 2);    // bit 1 set
-        assert_eq!(ffs(4), 3);    // bit 2 set
-        assert_eq!(ffs(6), 2);    // bits 1 and 2 set, first is bit 1
-        assert_eq!(ffs(-1), 1);   // all bits set, first is bit 0
+        assert_eq!(ffs(1), 1); // bit 0 set
+        assert_eq!(ffs(2), 2); // bit 1 set
+        assert_eq!(ffs(4), 3); // bit 2 set
+        assert_eq!(ffs(6), 2); // bits 1 and 2 set, first is bit 1
+        assert_eq!(ffs(-1), 1); // all bits set, first is bit 0
     }
 
     // -- strlcpy / strlcat tests --
@@ -2647,9 +2723,7 @@ mod tests {
     fn test_memccpy_byte_found() {
         let src = b"hello world";
         let mut dst = [0u8; 11];
-        let ret = unsafe {
-            memccpy(dst.as_mut_ptr(), src.as_ptr(), b' ' as i32, 11)
-        };
+        let ret = unsafe { memccpy(dst.as_mut_ptr(), src.as_ptr(), b' ' as i32, 11) };
         // Should find ' ' at index 5, copy through it, return dst+6.
         assert!(!ret.is_null());
         assert_eq!(ret, unsafe { dst.as_mut_ptr().add(6) });
@@ -2660,9 +2734,7 @@ mod tests {
     fn test_memccpy_byte_not_found() {
         let src = b"hello";
         let mut dst = [0u8; 5];
-        let ret = unsafe {
-            memccpy(dst.as_mut_ptr(), src.as_ptr(), b'x' as i32, 5)
-        };
+        let ret = unsafe { memccpy(dst.as_mut_ptr(), src.as_ptr(), b'x' as i32, 5) };
         assert!(ret.is_null());
         assert_eq!(&dst[..5], b"hello");
     }
@@ -2671,9 +2743,7 @@ mod tests {
     fn test_memccpy_first_byte() {
         let src = b"abcd";
         let mut dst = [0u8; 4];
-        let ret = unsafe {
-            memccpy(dst.as_mut_ptr(), src.as_ptr(), b'a' as i32, 4)
-        };
+        let ret = unsafe { memccpy(dst.as_mut_ptr(), src.as_ptr(), b'a' as i32, 4) };
         assert!(!ret.is_null());
         assert_eq!(ret, unsafe { dst.as_mut_ptr().add(1) });
         assert_eq!(dst[0], b'a');
@@ -2771,8 +2841,14 @@ mod tests {
 
     #[test]
     fn test_strcasecmp_case_insensitive() {
-        assert_eq!(unsafe { strcasecmp(b"Hello\0".as_ptr(), b"hello\0".as_ptr()) }, 0);
-        assert_eq!(unsafe { strcasecmp(b"ABC\0".as_ptr(), b"abc\0".as_ptr()) }, 0);
+        assert_eq!(
+            unsafe { strcasecmp(b"Hello\0".as_ptr(), b"hello\0".as_ptr()) },
+            0
+        );
+        assert_eq!(
+            unsafe { strcasecmp(b"ABC\0".as_ptr(), b"abc\0".as_ptr()) },
+            0
+        );
     }
 
     #[test]
@@ -2788,9 +2864,7 @@ mod tests {
             unsafe { strncasecmp(b"ABCx\0".as_ptr(), b"abcy\0".as_ptr(), 3) },
             0
         );
-        assert!(
-            unsafe { strncasecmp(b"ABCx\0".as_ptr(), b"abcy\0".as_ptr(), 4) } < 0
-        );
+        assert!(unsafe { strncasecmp(b"ABCx\0".as_ptr(), b"abcy\0".as_ptr(), 4) } < 0);
     }
 
     #[test]
@@ -2909,9 +2983,7 @@ mod tests {
         // String is all delimiters — should return NULL immediately.
         let mut data = *b",,,,\0";
         let mut save: *mut u8 = core::ptr::null_mut();
-        let tok = unsafe {
-            strtok_r(data.as_mut_ptr(), b",\0".as_ptr(), &raw mut save)
-        };
+        let tok = unsafe { strtok_r(data.as_mut_ptr(), b",\0".as_ptr(), &raw mut save) };
         assert!(tok.is_null());
     }
 
@@ -2919,15 +2991,11 @@ mod tests {
     fn test_strtok_r_single_token() {
         let mut data = *b"hello\0";
         let mut save: *mut u8 = core::ptr::null_mut();
-        let tok = unsafe {
-            strtok_r(data.as_mut_ptr(), b",\0".as_ptr(), &raw mut save)
-        };
+        let tok = unsafe { strtok_r(data.as_mut_ptr(), b",\0".as_ptr(), &raw mut save) };
         assert!(!tok.is_null());
         assert_eq!(unsafe { strlen(tok) }, 5);
 
-        let tok2 = unsafe {
-            strtok_r(core::ptr::null_mut(), b",\0".as_ptr(), &raw mut save)
-        };
+        let tok2 = unsafe { strtok_r(core::ptr::null_mut(), b",\0".as_ptr(), &raw mut save) };
         assert!(tok2.is_null());
     }
 
@@ -2936,21 +3004,15 @@ mod tests {
         // Multiple delimiter characters.
         let mut data = *b"one;two,three\0";
         let mut save: *mut u8 = core::ptr::null_mut();
-        let tok1 = unsafe {
-            strtok_r(data.as_mut_ptr(), b",;\0".as_ptr(), &raw mut save)
-        };
+        let tok1 = unsafe { strtok_r(data.as_mut_ptr(), b",;\0".as_ptr(), &raw mut save) };
         assert!(!tok1.is_null());
         assert_eq!(unsafe { strlen(tok1) }, 3);
 
-        let tok2 = unsafe {
-            strtok_r(core::ptr::null_mut(), b",;\0".as_ptr(), &raw mut save)
-        };
+        let tok2 = unsafe { strtok_r(core::ptr::null_mut(), b",;\0".as_ptr(), &raw mut save) };
         assert!(!tok2.is_null());
         assert_eq!(unsafe { strlen(tok2) }, 3);
 
-        let tok3 = unsafe {
-            strtok_r(core::ptr::null_mut(), b",;\0".as_ptr(), &raw mut save)
-        };
+        let tok3 = unsafe { strtok_r(core::ptr::null_mut(), b",;\0".as_ptr(), &raw mut save) };
         assert!(!tok3.is_null());
         assert_eq!(unsafe { strlen(tok3) }, 5);
     }
@@ -2990,14 +3052,14 @@ mod tests {
             unsafe { core::slice::from_raw_parts(p, len) }
         };
         assert_eq!(msg(0), b"Success");
-        assert_eq!(msg(1), b"Operation not permitted");     // EPERM
-        assert_eq!(msg(2), b"No such file or directory");   // ENOENT
-        assert_eq!(msg(9), b"Bad file descriptor");         // EBADF
-        assert_eq!(msg(12), b"Cannot allocate memory");     // ENOMEM
-        assert_eq!(msg(13), b"Permission denied");          // EACCES
-        assert_eq!(msg(22), b"Invalid argument");           // EINVAL
-        assert_eq!(msg(32), b"Broken pipe");                // EPIPE
-        assert_eq!(msg(111), b"Connection refused");        // ECONNREFUSED
+        assert_eq!(msg(1), b"Operation not permitted"); // EPERM
+        assert_eq!(msg(2), b"No such file or directory"); // ENOENT
+        assert_eq!(msg(9), b"Bad file descriptor"); // EBADF
+        assert_eq!(msg(12), b"Cannot allocate memory"); // ENOMEM
+        assert_eq!(msg(13), b"Permission denied"); // EACCES
+        assert_eq!(msg(22), b"Invalid argument"); // EINVAL
+        assert_eq!(msg(32), b"Broken pipe"); // EPIPE
+        assert_eq!(msg(111), b"Connection refused"); // ECONNREFUSED
     }
 
     #[test]
@@ -3705,7 +3767,9 @@ mod tests {
     fn test_memmove_no_overlap() {
         let src = [1u8, 2, 3, 4, 5];
         let mut dest = [0u8; 5];
-        unsafe { memmove(dest.as_mut_ptr(), src.as_ptr(), 5); }
+        unsafe {
+            memmove(dest.as_mut_ptr(), src.as_ptr(), 5);
+        }
         assert_eq!(dest, [1, 2, 3, 4, 5]);
     }
 
@@ -3713,7 +3777,9 @@ mod tests {
     fn test_memmove_overlap_one_byte_forward() {
         // [1,2,3,4,5] — copy [0..4] to [1..5].
         let mut buf = [1u8, 2, 3, 4, 5];
-        unsafe { memmove(buf.as_mut_ptr().add(1), buf.as_ptr(), 4); }
+        unsafe {
+            memmove(buf.as_mut_ptr().add(1), buf.as_ptr(), 4);
+        }
         assert_eq!(buf, [1, 1, 2, 3, 4]);
     }
 
@@ -3721,7 +3787,9 @@ mod tests {
     fn test_memmove_overlap_one_byte_backward() {
         // [1,2,3,4,5] — copy [1..5] to [0..4].
         let mut buf = [1u8, 2, 3, 4, 5];
-        unsafe { memmove(buf.as_mut_ptr(), buf.as_ptr().add(1), 4); }
+        unsafe {
+            memmove(buf.as_mut_ptr(), buf.as_ptr().add(1), 4);
+        }
         assert_eq!(buf, [2, 3, 4, 5, 5]);
     }
 
@@ -3729,7 +3797,9 @@ mod tests {
     fn test_memmove_complete_overlap() {
         // Copy region onto itself — should be no-op.
         let mut buf = [10u8, 20, 30, 40, 50];
-        unsafe { memmove(buf.as_mut_ptr(), buf.as_ptr(), 5); }
+        unsafe {
+            memmove(buf.as_mut_ptr(), buf.as_ptr(), 5);
+        }
         assert_eq!(buf, [10, 20, 30, 40, 50]);
     }
 
@@ -3741,7 +3811,9 @@ mod tests {
             buf[i] = (i & 0xFF) as u8;
         }
         // Copy first 512 bytes to offset 256 (overlap of 256 bytes).
-        unsafe { memmove(buf.as_mut_ptr().add(256), buf.as_ptr(), 512); }
+        unsafe {
+            memmove(buf.as_mut_ptr().add(256), buf.as_ptr(), 512);
+        }
         // Verify: buf[256..768] should equal original [0..512].
         for i in 0..512 {
             assert_eq!(buf[256 + i], (i & 0xFF) as u8);
@@ -3813,7 +3885,9 @@ mod tests {
     fn test_swab_stress_six_bytes() {
         let src = [1u8, 2, 3, 4, 5, 6];
         let mut dest = [0u8; 6];
-        unsafe { swab(src.as_ptr(), dest.as_mut_ptr(), 6); }
+        unsafe {
+            swab(src.as_ptr(), dest.as_mut_ptr(), 6);
+        }
         assert_eq!(dest, [2, 1, 4, 3, 6, 5]);
     }
 
@@ -3822,7 +3896,9 @@ mod tests {
         // Odd nbytes: last byte ignored.
         let src = [1u8, 2, 3, 4, 5];
         let mut dest = [0u8; 5];
-        unsafe { swab(src.as_ptr(), dest.as_mut_ptr(), 5); }
+        unsafe {
+            swab(src.as_ptr(), dest.as_mut_ptr(), 5);
+        }
         // Only first 4 bytes swapped, 5th untouched.
         assert_eq!(dest[0], 2);
         assert_eq!(dest[1], 1);
@@ -3835,7 +3911,9 @@ mod tests {
     fn test_swab_stress_empty() {
         let src = [1u8, 2];
         let mut dest = [0u8; 2];
-        unsafe { swab(src.as_ptr(), dest.as_mut_ptr(), 0); }
+        unsafe {
+            swab(src.as_ptr(), dest.as_mut_ptr(), 0);
+        }
         assert_eq!(dest, [0, 0]); // untouched
     }
 
@@ -3843,7 +3921,9 @@ mod tests {
     fn test_swab_stress_single_pair() {
         let src = [0xAB_u8, 0xCD];
         let mut dest = [0u8; 2];
-        unsafe { swab(src.as_ptr(), dest.as_mut_ptr(), 2); }
+        unsafe {
+            swab(src.as_ptr(), dest.as_mut_ptr(), 2);
+        }
         assert_eq!(dest, [0xCD, 0xAB]);
     }
 
@@ -4132,12 +4212,7 @@ pub unsafe extern "C" fn __memmove_chk(
 ///
 /// Same as `memset`.  `destlen` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn __memset_chk(
-    dest: *mut u8,
-    c: i32,
-    n: usize,
-    _destlen: usize,
-) -> *mut u8 {
+pub unsafe extern "C" fn __memset_chk(dest: *mut u8, c: i32, n: usize, _destlen: usize) -> *mut u8 {
     unsafe { memset(dest, c, n) }
 }
 
@@ -4147,11 +4222,7 @@ pub unsafe extern "C" fn __memset_chk(
 ///
 /// Same as `strcpy`.  `destlen` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn __strcpy_chk(
-    dest: *mut u8,
-    src: *const u8,
-    _destlen: usize,
-) -> *mut u8 {
+pub unsafe extern "C" fn __strcpy_chk(dest: *mut u8, src: *const u8, _destlen: usize) -> *mut u8 {
     unsafe { strcpy(dest, src) }
 }
 
@@ -4176,11 +4247,7 @@ pub unsafe extern "C" fn __strncpy_chk(
 ///
 /// Same as `strcat`.  `destlen` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn __strcat_chk(
-    dest: *mut u8,
-    src: *const u8,
-    _destlen: usize,
-) -> *mut u8 {
+pub unsafe extern "C" fn __strcat_chk(dest: *mut u8, src: *const u8, _destlen: usize) -> *mut u8 {
     unsafe { strcat(dest, src) }
 }
 
@@ -4205,11 +4272,7 @@ pub unsafe extern "C" fn __strncat_chk(
 ///
 /// Same as `stpcpy`.  `destlen` is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn __stpcpy_chk(
-    dest: *mut u8,
-    src: *const u8,
-    _destlen: usize,
-) -> *mut u8 {
+pub unsafe extern "C" fn __stpcpy_chk(dest: *mut u8, src: *const u8, _destlen: usize) -> *mut u8 {
     unsafe { stpcpy(dest, src) }
 }
 
@@ -4257,11 +4320,7 @@ pub unsafe extern "C" fn __mempcpy_chk(
 /// `src` and `dest` must point to valid memory of at least `nbytes`
 /// bytes.  The regions must not overlap.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn swab(
-    src: *const u8,
-    dest: *mut u8,
-    nbytes: isize,
-) {
+pub unsafe extern "C" fn swab(src: *const u8, dest: *mut u8, nbytes: isize) {
     if src.is_null() || dest.is_null() || nbytes <= 1 {
         return;
     }
@@ -4273,8 +4332,12 @@ pub unsafe extern "C" fn swab(
         // SAFETY: off < nbytes (since i < pairs = nbytes/2, off = 2*i < nbytes).
         let a = unsafe { *src.add(off) };
         let b = unsafe { *src.add(off.wrapping_add(1)) };
-        unsafe { *dest.add(off) = b; }
-        unsafe { *dest.add(off.wrapping_add(1)) = a; }
+        unsafe {
+            *dest.add(off) = b;
+        }
+        unsafe {
+            *dest.add(off.wrapping_add(1)) = a;
+        }
         i = i.wrapping_add(1);
     }
 }

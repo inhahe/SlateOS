@@ -103,9 +103,13 @@ mod tests {
     #[test]
     fn test_rx_status_flags_no_overlap() {
         let flags = [
-            TP_STATUS_USER, TP_STATUS_COPY, TP_STATUS_LOSING,
-            TP_STATUS_CSUMNOTREADY, TP_STATUS_VLAN_VALID,
-            TP_STATUS_BLK_TMO, TP_STATUS_VLAN_TPID_VALID,
+            TP_STATUS_USER,
+            TP_STATUS_COPY,
+            TP_STATUS_LOSING,
+            TP_STATUS_CSUMNOTREADY,
+            TP_STATUS_VLAN_VALID,
+            TP_STATUS_BLK_TMO,
+            TP_STATUS_VLAN_TPID_VALID,
             TP_STATUS_CSUM_VALID,
         ];
         for i in 0..flags.len() {
@@ -118,7 +122,8 @@ mod tests {
     #[test]
     fn test_tx_status_flags_no_overlap() {
         let flags = [
-            TP_STATUS_SEND_REQUEST, TP_STATUS_SENDING,
+            TP_STATUS_SEND_REQUEST,
+            TP_STATUS_SENDING,
             TP_STATUS_WRONG_FORMAT,
         ];
         for i in 0..flags.len() {
@@ -131,10 +136,14 @@ mod tests {
     #[test]
     fn test_fanout_modes_distinct() {
         let modes = [
-            PACKET_FANOUT_HASH, PACKET_FANOUT_LB,
-            PACKET_FANOUT_CPU, PACKET_FANOUT_ROLLOVER,
-            PACKET_FANOUT_RND, PACKET_FANOUT_QM,
-            PACKET_FANOUT_CBPF, PACKET_FANOUT_EBPF,
+            PACKET_FANOUT_HASH,
+            PACKET_FANOUT_LB,
+            PACKET_FANOUT_CPU,
+            PACKET_FANOUT_ROLLOVER,
+            PACKET_FANOUT_RND,
+            PACKET_FANOUT_QM,
+            PACKET_FANOUT_CBPF,
+            PACKET_FANOUT_EBPF,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

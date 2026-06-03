@@ -8,50 +8,50 @@
 // Re-exports from sys_capability
 // ---------------------------------------------------------------------------
 
-pub use crate::sys_capability::_LINUX_CAPABILITY_VERSION_3;
 pub use crate::sys_capability::_LINUX_CAPABILITY_U32S_3;
-pub use crate::sys_capability::CapUserHeader;
+pub use crate::sys_capability::_LINUX_CAPABILITY_VERSION_3;
 pub use crate::sys_capability::CapUserData;
+pub use crate::sys_capability::CapUserHeader;
 
+pub use crate::sys_capability::CAP_AUDIT_CONTROL;
+pub use crate::sys_capability::CAP_AUDIT_READ;
+pub use crate::sys_capability::CAP_AUDIT_WRITE;
+pub use crate::sys_capability::CAP_BLOCK_SUSPEND;
+pub use crate::sys_capability::CAP_BPF;
+pub use crate::sys_capability::CAP_CHECKPOINT_RESTORE;
 pub use crate::sys_capability::CAP_CHOWN;
 pub use crate::sys_capability::CAP_DAC_OVERRIDE;
 pub use crate::sys_capability::CAP_DAC_READ_SEARCH;
 pub use crate::sys_capability::CAP_FOWNER;
 pub use crate::sys_capability::CAP_FSETID;
-pub use crate::sys_capability::CAP_KILL;
-pub use crate::sys_capability::CAP_SETUID;
-pub use crate::sys_capability::CAP_SETGID;
-pub use crate::sys_capability::CAP_SETPCAP;
-pub use crate::sys_capability::CAP_NET_BIND_SERVICE;
-pub use crate::sys_capability::CAP_NET_ADMIN;
-pub use crate::sys_capability::CAP_NET_RAW;
 pub use crate::sys_capability::CAP_IPC_LOCK;
 pub use crate::sys_capability::CAP_IPC_OWNER;
-pub use crate::sys_capability::CAP_SYS_MODULE;
-pub use crate::sys_capability::CAP_SYS_RAWIO;
-pub use crate::sys_capability::CAP_SYS_CHROOT;
-pub use crate::sys_capability::CAP_SYS_PTRACE;
-pub use crate::sys_capability::CAP_SYS_PACCT;
+pub use crate::sys_capability::CAP_KILL;
+pub use crate::sys_capability::CAP_LAST_CAP;
+pub use crate::sys_capability::CAP_MAC_ADMIN;
+pub use crate::sys_capability::CAP_MAC_OVERRIDE;
+pub use crate::sys_capability::CAP_MKNOD;
+pub use crate::sys_capability::CAP_NET_ADMIN;
+pub use crate::sys_capability::CAP_NET_BIND_SERVICE;
+pub use crate::sys_capability::CAP_NET_RAW;
+pub use crate::sys_capability::CAP_PERFMON;
+pub use crate::sys_capability::CAP_SETFCAP;
+pub use crate::sys_capability::CAP_SETGID;
+pub use crate::sys_capability::CAP_SETPCAP;
+pub use crate::sys_capability::CAP_SETUID;
 pub use crate::sys_capability::CAP_SYS_ADMIN;
 pub use crate::sys_capability::CAP_SYS_BOOT;
+pub use crate::sys_capability::CAP_SYS_CHROOT;
+pub use crate::sys_capability::CAP_SYS_MODULE;
 pub use crate::sys_capability::CAP_SYS_NICE;
+pub use crate::sys_capability::CAP_SYS_PACCT;
+pub use crate::sys_capability::CAP_SYS_PTRACE;
+pub use crate::sys_capability::CAP_SYS_RAWIO;
 pub use crate::sys_capability::CAP_SYS_RESOURCE;
 pub use crate::sys_capability::CAP_SYS_TIME;
 pub use crate::sys_capability::CAP_SYS_TTY_CONFIG;
-pub use crate::sys_capability::CAP_MKNOD;
-pub use crate::sys_capability::CAP_SETFCAP;
-pub use crate::sys_capability::CAP_AUDIT_CONTROL;
-pub use crate::sys_capability::CAP_AUDIT_WRITE;
-pub use crate::sys_capability::CAP_MAC_ADMIN;
-pub use crate::sys_capability::CAP_MAC_OVERRIDE;
 pub use crate::sys_capability::CAP_SYSLOG;
 pub use crate::sys_capability::CAP_WAKE_ALARM;
-pub use crate::sys_capability::CAP_BLOCK_SUSPEND;
-pub use crate::sys_capability::CAP_AUDIT_READ;
-pub use crate::sys_capability::CAP_PERFMON;
-pub use crate::sys_capability::CAP_BPF;
-pub use crate::sys_capability::CAP_CHECKPOINT_RESTORE;
-pub use crate::sys_capability::CAP_LAST_CAP;
 
 // ---------------------------------------------------------------------------
 // Capability bit conversion helpers

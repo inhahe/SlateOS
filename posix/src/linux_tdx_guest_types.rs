@@ -88,8 +88,10 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            TDX_CMD_GET_REPORT0, TDX_CMD_GET_QUOTE,
-            TDX_CMD_EXTEND_RTMR, TDX_CMD_GET_QUOTE_SIZE,
+            TDX_CMD_GET_REPORT0,
+            TDX_CMD_GET_QUOTE,
+            TDX_CMD_EXTEND_RTMR,
+            TDX_CMD_GET_QUOTE_SIZE,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -109,8 +111,11 @@ mod tests {
     #[test]
     fn test_attributes_no_overlap() {
         let attrs = [
-            TDX_ATTR_DEBUG, TDX_ATTR_SEPT_VE_DISABLE,
-            TDX_ATTR_PKS, TDX_ATTR_KL, TDX_ATTR_PERFMON,
+            TDX_ATTR_DEBUG,
+            TDX_ATTR_SEPT_VE_DISABLE,
+            TDX_ATTR_PKS,
+            TDX_ATTR_KL,
+            TDX_ATTR_PERFMON,
         ];
         for i in 0..attrs.len() {
             assert!(attrs[i].is_power_of_two());
@@ -123,8 +128,11 @@ mod tests {
     #[test]
     fn test_tdcall_leaves_distinct() {
         let leaves = [
-            TDCALL_TDINFO, TDCALL_TDEXTEND, TDCALL_TDREPORT,
-            TDCALL_TDACCEPTPAGE, TDCALL_TDVMCALL,
+            TDCALL_TDINFO,
+            TDCALL_TDEXTEND,
+            TDCALL_TDREPORT,
+            TDCALL_TDACCEPTPAGE,
+            TDCALL_TDVMCALL,
         ];
         for i in 0..leaves.len() {
             for j in (i + 1)..leaves.len() {
@@ -136,8 +144,10 @@ mod tests {
     #[test]
     fn test_error_codes_distinct() {
         let errs = [
-            TDX_SUCCESS, TDX_OPERAND_INVALID,
-            TDX_OPERAND_BUSY, TDX_PAGE_ALREADY_ACCEPTED,
+            TDX_SUCCESS,
+            TDX_OPERAND_INVALID,
+            TDX_OPERAND_BUSY,
+            TDX_PAGE_ALREADY_ACCEPTED,
         ];
         for i in 0..errs.len() {
             for j in (i + 1)..errs.len() {

@@ -78,13 +78,20 @@ mod tests {
     #[test]
     fn test_link_types_distinct() {
         let types = [
-            BPF_LINK_TYPE_UNSPEC, BPF_LINK_TYPE_RAW_TRACEPOINT,
-            BPF_LINK_TYPE_TRACING, BPF_LINK_TYPE_CGROUP,
-            BPF_LINK_TYPE_ITER, BPF_LINK_TYPE_NETNS,
-            BPF_LINK_TYPE_XDP, BPF_LINK_TYPE_PERF_EVENT,
-            BPF_LINK_TYPE_KPROBE_MULTI, BPF_LINK_TYPE_STRUCT_OPS,
-            BPF_LINK_TYPE_NETFILTER, BPF_LINK_TYPE_TCX,
-            BPF_LINK_TYPE_UPROBE_MULTI, BPF_LINK_TYPE_NETKIT,
+            BPF_LINK_TYPE_UNSPEC,
+            BPF_LINK_TYPE_RAW_TRACEPOINT,
+            BPF_LINK_TYPE_TRACING,
+            BPF_LINK_TYPE_CGROUP,
+            BPF_LINK_TYPE_ITER,
+            BPF_LINK_TYPE_NETNS,
+            BPF_LINK_TYPE_XDP,
+            BPF_LINK_TYPE_PERF_EVENT,
+            BPF_LINK_TYPE_KPROBE_MULTI,
+            BPF_LINK_TYPE_STRUCT_OPS,
+            BPF_LINK_TYPE_NETFILTER,
+            BPF_LINK_TYPE_TCX,
+            BPF_LINK_TYPE_UPROBE_MULTI,
+            BPF_LINK_TYPE_NETKIT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -102,9 +109,12 @@ mod tests {
     #[test]
     fn test_iter_types_distinct() {
         let types = [
-            BPF_ITER_MAP_ELEM, BPF_ITER_TASK,
-            BPF_ITER_TASK_FILE, BPF_ITER_TASK_VMA,
-            BPF_ITER_BPROG, BPF_ITER_BMAP,
+            BPF_ITER_MAP_ELEM,
+            BPF_ITER_TASK,
+            BPF_ITER_TASK_FILE,
+            BPF_ITER_TASK_VMA,
+            BPF_ITER_BPROG,
+            BPF_ITER_BMAP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

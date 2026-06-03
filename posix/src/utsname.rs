@@ -234,11 +234,11 @@ mod tests {
 
         // Each field should start with the correct string and not
         // bleed into adjacent fields.
-        assert!(uts.sysname[0] == b'C');  // "CustomOS"
+        assert!(uts.sysname[0] == b'C'); // "CustomOS"
         assert!(uts.nodename[0] == b'l'); // "localhost"
-        assert!(uts.release[0] == b'0');  // "0.1.0"
-        assert!(uts.version[0] == b'#');  // "#1 SMP"
-        assert!(uts.machine[0] == b'x');  // "x86_64"
+        assert!(uts.release[0] == b'0'); // "0.1.0"
+        assert!(uts.version[0] == b'#'); // "#1 SMP"
+        assert!(uts.machine[0] == b'x'); // "x86_64"
     }
 
     // -----------------------------------------------------------------------
@@ -277,14 +277,19 @@ mod tests {
         let mut uts: Utsname = unsafe { mem::zeroed() };
         // Fill with 0xFF.
         let ptr = &mut uts as *mut Utsname as *mut u8;
-        unsafe { core::ptr::write_bytes(ptr, 0xFF, mem::size_of::<Utsname>()); }
+        unsafe {
+            core::ptr::write_bytes(ptr, 0xFF, mem::size_of::<Utsname>());
+        }
 
         uname(&mut uts as *mut Utsname);
 
         // After "CustomOS" (8 bytes) + null at [8], bytes [9..65] should
         // be zero because uname zeroes the struct before filling.
         for &byte in &uts.sysname[9..] {
-            assert_eq!(byte, 0, "sysname should be zeroed after the null terminator");
+            assert_eq!(
+                byte, 0,
+                "sysname should be zeroed after the null terminator"
+            );
         }
     }
 }

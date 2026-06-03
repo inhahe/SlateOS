@@ -92,8 +92,11 @@ mod tests {
     #[test]
     fn test_pkt_types_distinct() {
         let types = [
-            PACKET_HOST, PACKET_BROADCAST, PACKET_MULTICAST,
-            PACKET_OTHERHOST, PACKET_OUTGOING,
+            PACKET_HOST,
+            PACKET_BROADCAST,
+            PACKET_MULTICAST,
+            PACKET_OTHERHOST,
+            PACKET_OUTGOING,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -115,9 +118,13 @@ mod tests {
     #[test]
     fn test_fanout_modes_distinct() {
         let modes = [
-            PACKET_FANOUT_HASH, PACKET_FANOUT_LB, PACKET_FANOUT_CPU,
-            PACKET_FANOUT_ROLLOVER, PACKET_FANOUT_RND,
-            PACKET_FANOUT_CBPF, PACKET_FANOUT_EBPF,
+            PACKET_FANOUT_HASH,
+            PACKET_FANOUT_LB,
+            PACKET_FANOUT_CPU,
+            PACKET_FANOUT_ROLLOVER,
+            PACKET_FANOUT_RND,
+            PACKET_FANOUT_CBPF,
+            PACKET_FANOUT_EBPF,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -129,9 +136,14 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            PACKET_ADD_MEMBERSHIP, PACKET_DROP_MEMBERSHIP,
-            PACKET_RX_RING, PACKET_TX_RING, PACKET_VERSION,
-            PACKET_STATISTICS, PACKET_FANOUT, PACKET_AUXDATA,
+            PACKET_ADD_MEMBERSHIP,
+            PACKET_DROP_MEMBERSHIP,
+            PACKET_RX_RING,
+            PACKET_TX_RING,
+            PACKET_VERSION,
+            PACKET_STATISTICS,
+            PACKET_FANOUT,
+            PACKET_AUXDATA,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

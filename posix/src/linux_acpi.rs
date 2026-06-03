@@ -137,9 +137,12 @@ mod tests {
     #[test]
     fn test_address_spaces_distinct() {
         let spaces = [
-            ACPI_ADR_SPACE_SYSTEM_MEMORY, ACPI_ADR_SPACE_SYSTEM_IO,
-            ACPI_ADR_SPACE_PCI_CONFIG, ACPI_ADR_SPACE_EC,
-            ACPI_ADR_SPACE_SMBUS, ACPI_ADR_SPACE_FIXED_HARDWARE,
+            ACPI_ADR_SPACE_SYSTEM_MEMORY,
+            ACPI_ADR_SPACE_SYSTEM_IO,
+            ACPI_ADR_SPACE_PCI_CONFIG,
+            ACPI_ADR_SPACE_EC,
+            ACPI_ADR_SPACE_SMBUS,
+            ACPI_ADR_SPACE_FIXED_HARDWARE,
         ];
         for i in 0..spaces.len() {
             for j in (i + 1)..spaces.len() {
@@ -151,10 +154,14 @@ mod tests {
     #[test]
     fn test_madt_types_distinct() {
         let types = [
-            ACPI_MADT_TYPE_LOCAL_APIC, ACPI_MADT_TYPE_IO_APIC,
-            ACPI_MADT_TYPE_INTERRUPT_OVERRIDE, ACPI_MADT_TYPE_NMI_SOURCE,
-            ACPI_MADT_TYPE_LOCAL_APIC_NMI, ACPI_MADT_TYPE_LOCAL_APIC_OVERRIDE,
-            ACPI_MADT_TYPE_LOCAL_X2APIC, ACPI_MADT_TYPE_LOCAL_X2APIC_NMI,
+            ACPI_MADT_TYPE_LOCAL_APIC,
+            ACPI_MADT_TYPE_IO_APIC,
+            ACPI_MADT_TYPE_INTERRUPT_OVERRIDE,
+            ACPI_MADT_TYPE_NMI_SOURCE,
+            ACPI_MADT_TYPE_LOCAL_APIC_NMI,
+            ACPI_MADT_TYPE_LOCAL_APIC_OVERRIDE,
+            ACPI_MADT_TYPE_LOCAL_X2APIC,
+            ACPI_MADT_TYPE_LOCAL_X2APIC_NMI,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

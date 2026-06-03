@@ -127,8 +127,10 @@ mod tests {
     #[test]
     fn test_features_distinct() {
         let feats = [
-            VIRTIO_GPU_F_VIRGL, VIRTIO_GPU_F_EDID,
-            VIRTIO_GPU_F_RESOURCE_UUID, VIRTIO_GPU_F_RESOURCE_BLOB,
+            VIRTIO_GPU_F_VIRGL,
+            VIRTIO_GPU_F_EDID,
+            VIRTIO_GPU_F_RESOURCE_UUID,
+            VIRTIO_GPU_F_RESOURCE_BLOB,
             VIRTIO_GPU_F_CONTEXT_INIT,
         ];
         for i in 0..feats.len() {
@@ -141,10 +143,14 @@ mod tests {
     #[test]
     fn test_2d_cmds_distinct() {
         let cmds = [
-            VIRTIO_GPU_CMD_GET_DISPLAY_INFO, VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
-            VIRTIO_GPU_CMD_RESOURCE_UNREF, VIRTIO_GPU_CMD_SET_SCANOUT,
-            VIRTIO_GPU_CMD_RESOURCE_FLUSH, VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
-            VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING, VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING,
+            VIRTIO_GPU_CMD_GET_DISPLAY_INFO,
+            VIRTIO_GPU_CMD_RESOURCE_CREATE_2D,
+            VIRTIO_GPU_CMD_RESOURCE_UNREF,
+            VIRTIO_GPU_CMD_SET_SCANOUT,
+            VIRTIO_GPU_CMD_RESOURCE_FLUSH,
+            VIRTIO_GPU_CMD_TRANSFER_TO_HOST_2D,
+            VIRTIO_GPU_CMD_RESOURCE_ATTACH_BACKING,
+            VIRTIO_GPU_CMD_RESOURCE_DETACH_BACKING,
             VIRTIO_GPU_CMD_GET_EDID,
         ];
         for i in 0..cmds.len() {
@@ -157,8 +163,10 @@ mod tests {
     #[test]
     fn test_resp_types_distinct() {
         let resps = [
-            VIRTIO_GPU_RESP_OK_NODATA, VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
-            VIRTIO_GPU_RESP_OK_EDID, VIRTIO_GPU_RESP_ERR_UNSPEC,
+            VIRTIO_GPU_RESP_OK_NODATA,
+            VIRTIO_GPU_RESP_OK_DISPLAY_INFO,
+            VIRTIO_GPU_RESP_OK_EDID,
+            VIRTIO_GPU_RESP_ERR_UNSPEC,
             VIRTIO_GPU_RESP_ERR_OUT_OF_MEMORY,
             VIRTIO_GPU_RESP_ERR_INVALID_SCANOUT_ID,
             VIRTIO_GPU_RESP_ERR_INVALID_RESOURCE_ID,
@@ -173,9 +181,12 @@ mod tests {
     #[test]
     fn test_formats_distinct() {
         let fmts = [
-            VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM, VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
-            VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM, VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM,
-            VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM, VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM,
+            VIRTIO_GPU_FORMAT_B8G8R8A8_UNORM,
+            VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM,
+            VIRTIO_GPU_FORMAT_A8R8G8B8_UNORM,
+            VIRTIO_GPU_FORMAT_X8R8G8B8_UNORM,
+            VIRTIO_GPU_FORMAT_R8G8B8A8_UNORM,
+            VIRTIO_GPU_FORMAT_X8B8G8R8_UNORM,
             VIRTIO_GPU_FORMAT_A8B8G8R8_UNORM,
         ];
         for i in 0..fmts.len() {

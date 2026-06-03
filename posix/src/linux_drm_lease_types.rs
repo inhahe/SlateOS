@@ -75,8 +75,10 @@ mod tests {
     #[test]
     fn test_client_caps_distinct() {
         let caps = [
-            DRM_CLIENT_CAP_ATOMIC, DRM_CLIENT_CAP_UNIVERSAL_PLANES,
-            DRM_CLIENT_CAP_ASPECT_RATIO, DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
+            DRM_CLIENT_CAP_ATOMIC,
+            DRM_CLIENT_CAP_UNIVERSAL_PLANES,
+            DRM_CLIENT_CAP_ASPECT_RATIO,
+            DRM_CLIENT_CAP_WRITEBACK_CONNECTORS,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

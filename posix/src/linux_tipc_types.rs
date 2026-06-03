@@ -109,11 +109,16 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            TIPC_IMPORTANCE, TIPC_SRC_DROPPABLE,
-            TIPC_DEST_DROPPABLE, TIPC_CONN_TIMEOUT,
-            TIPC_NODE_RECVQ_DEPTH, TIPC_SOCK_RECVQ_DEPTH,
-            TIPC_MCAST_BROADCAST, TIPC_GROUP_JOIN,
-            TIPC_GROUP_LEAVE, TIPC_SOCK_RECVQ_USED,
+            TIPC_IMPORTANCE,
+            TIPC_SRC_DROPPABLE,
+            TIPC_DEST_DROPPABLE,
+            TIPC_CONN_TIMEOUT,
+            TIPC_NODE_RECVQ_DEPTH,
+            TIPC_SOCK_RECVQ_DEPTH,
+            TIPC_MCAST_BROADCAST,
+            TIPC_GROUP_JOIN,
+            TIPC_GROUP_LEAVE,
+            TIPC_SOCK_RECVQ_USED,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

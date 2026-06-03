@@ -57,9 +57,12 @@ mod tests {
     #[test]
     fn test_fadvise_values_distinct() {
         let vals = [
-            POSIX_FADV_NORMAL, POSIX_FADV_RANDOM,
-            POSIX_FADV_SEQUENTIAL, POSIX_FADV_WILLNEED,
-            POSIX_FADV_DONTNEED, POSIX_FADV_NOREUSE,
+            POSIX_FADV_NORMAL,
+            POSIX_FADV_RANDOM,
+            POSIX_FADV_SEQUENTIAL,
+            POSIX_FADV_WILLNEED,
+            POSIX_FADV_DONTNEED,
+            POSIX_FADV_NOREUSE,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
@@ -81,10 +84,7 @@ mod tests {
 
     #[test]
     fn test_rwf_flags_power_of_two() {
-        let flags = [
-            RWF_HIPRI, RWF_DSYNC, RWF_SYNC,
-            RWF_NOWAIT, RWF_APPEND,
-        ];
+        let flags = [RWF_HIPRI, RWF_DSYNC, RWF_SYNC, RWF_NOWAIT, RWF_APPEND];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
         }
@@ -92,10 +92,7 @@ mod tests {
 
     #[test]
     fn test_rwf_flags_no_overlap() {
-        let flags = [
-            RWF_HIPRI, RWF_DSYNC, RWF_SYNC,
-            RWF_NOWAIT, RWF_APPEND,
-        ];
+        let flags = [RWF_HIPRI, RWF_DSYNC, RWF_SYNC, RWF_NOWAIT, RWF_APPEND];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_eq!(flags[i] & flags[j], 0);

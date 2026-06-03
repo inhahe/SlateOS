@@ -75,8 +75,10 @@ mod tests {
     #[test]
     fn test_ringbuf_types_distinct() {
         let types = [
-            RINGBUF_TYPE_DATA, RINGBUF_TYPE_PADDING,
-            RINGBUF_TYPE_TIME_EXTEND, RINGBUF_TYPE_TIMESTAMP,
+            RINGBUF_TYPE_DATA,
+            RINGBUF_TYPE_PADDING,
+            RINGBUF_TYPE_TIME_EXTEND,
+            RINGBUF_TYPE_TIMESTAMP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -88,9 +90,12 @@ mod tests {
     #[test]
     fn test_trace_flags_no_overlap() {
         let flags = [
-            TRACE_FLAG_IRQS_OFF, TRACE_FLAG_NEED_RESCHED,
-            TRACE_FLAG_PREEMPT_RESCHED, TRACE_FLAG_HARDIRQ,
-            TRACE_FLAG_SOFTIRQ, TRACE_FLAG_NMI,
+            TRACE_FLAG_IRQS_OFF,
+            TRACE_FLAG_NEED_RESCHED,
+            TRACE_FLAG_PREEMPT_RESCHED,
+            TRACE_FLAG_HARDIRQ,
+            TRACE_FLAG_SOFTIRQ,
+            TRACE_FLAG_NMI,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -103,9 +108,12 @@ mod tests {
     #[test]
     fn test_ftrace_ops_flags_no_overlap() {
         let flags = [
-            FTRACE_OPS_FL_ENABLED, FTRACE_OPS_FL_DYNAMIC,
-            FTRACE_OPS_FL_SAVE_REGS, FTRACE_OPS_FL_RECURSION,
-            FTRACE_OPS_FL_STUB, FTRACE_OPS_FL_INITIALIZED,
+            FTRACE_OPS_FL_ENABLED,
+            FTRACE_OPS_FL_DYNAMIC,
+            FTRACE_OPS_FL_SAVE_REGS,
+            FTRACE_OPS_FL_RECURSION,
+            FTRACE_OPS_FL_STUB,
+            FTRACE_OPS_FL_INITIALIZED,
             FTRACE_OPS_FL_IPMODIFY,
         ];
         for i in 0..flags.len() {

@@ -77,8 +77,10 @@ mod tests {
     #[test]
     fn test_node_types_distinct() {
         let types = [
-            ICC_NODE_MASTER, ICC_NODE_SLAVE,
-            ICC_NODE_FABRIC, ICC_NODE_GATEWAY,
+            ICC_NODE_MASTER,
+            ICC_NODE_SLAVE,
+            ICC_NODE_FABRIC,
+            ICC_NODE_GATEWAY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -90,7 +92,8 @@ mod tests {
     #[test]
     fn test_provider_flags_no_overlap() {
         let flags = [
-            ICC_PROVIDER_QOS, ICC_PROVIDER_PRIORITY,
+            ICC_PROVIDER_QOS,
+            ICC_PROVIDER_PRIORITY,
             ICC_PROVIDER_PRECONFIGURED,
         ];
         for i in 0..flags.len() {

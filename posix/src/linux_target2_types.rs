@@ -114,10 +114,14 @@ mod tests {
     #[test]
     fn test_tmr_types_distinct() {
         let tmrs = [
-            TCMU_TMR_ABORT_TASK, TCMU_TMR_ABORT_TASK_SET,
-            TCMU_TMR_CLEAR_ACA, TCMU_TMR_CLEAR_TASK_SET,
-            TCMU_TMR_LUN_RESET, TCMU_TMR_TARGET_WARM_RESET,
-            TCMU_TMR_TARGET_COLD_RESET, TCMU_TMR_LUN_RESET_PRO,
+            TCMU_TMR_ABORT_TASK,
+            TCMU_TMR_ABORT_TASK_SET,
+            TCMU_TMR_CLEAR_ACA,
+            TCMU_TMR_CLEAR_TASK_SET,
+            TCMU_TMR_LUN_RESET,
+            TCMU_TMR_TARGET_WARM_RESET,
+            TCMU_TMR_TARGET_COLD_RESET,
+            TCMU_TMR_LUN_RESET_PRO,
         ];
         for i in 0..tmrs.len() {
             for j in (i + 1)..tmrs.len() {
@@ -129,9 +133,12 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let codes = [
-            TCMU_STATUS_NO_STATUS, TCMU_STATUS_CHECK_CONDITION,
-            TCMU_STATUS_RESERVATION_CONFLICT, TCMU_STATUS_TASK_SET_FULL,
-            TCMU_STATUS_ACA_ACTIVE, TCMU_STATUS_TASK_ABORTED,
+            TCMU_STATUS_NO_STATUS,
+            TCMU_STATUS_CHECK_CONDITION,
+            TCMU_STATUS_RESERVATION_CONFLICT,
+            TCMU_STATUS_TASK_SET_FULL,
+            TCMU_STATUS_ACA_ACTIVE,
+            TCMU_STATUS_TASK_ABORTED,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

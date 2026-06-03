@@ -75,10 +75,16 @@ mod tests {
     #[test]
     fn test_clone_ns_flags_distinct() {
         let flags = [
-            CLONE_NEWCGROUP_S3, CLONE_NEWUTS_S3, CLONE_NEWIPC_S3,
-            CLONE_NEWUSER_S3, CLONE_NEWPID_S3, CLONE_NEWNET_S3,
-            CLONE_NEWTIME_S3, CLONE_CHILD_CLEARTID_S3,
-            CLONE_CHILD_SETTID_S3, CLONE_INTO_CGROUP_S3,
+            CLONE_NEWCGROUP_S3,
+            CLONE_NEWUTS_S3,
+            CLONE_NEWIPC_S3,
+            CLONE_NEWUSER_S3,
+            CLONE_NEWPID_S3,
+            CLONE_NEWNET_S3,
+            CLONE_NEWTIME_S3,
+            CLONE_CHILD_CLEARTID_S3,
+            CLONE_CHILD_SETTID_S3,
+            CLONE_INTO_CGROUP_S3,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

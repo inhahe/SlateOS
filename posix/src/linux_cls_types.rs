@@ -88,10 +88,18 @@ mod tests {
     #[test]
     fn test_bpf_attrs_distinct() {
         let attrs = [
-            TCA_BPF_UNSPEC, TCA_BPF_ACT, TCA_BPF_POLICE,
-            TCA_BPF_CLASSID, TCA_BPF_OPS_LEN, TCA_BPF_OPS,
-            TCA_BPF_FD, TCA_BPF_NAME, TCA_BPF_FLAGS,
-            TCA_BPF_FLAGS_GEN, TCA_BPF_TAG, TCA_BPF_ID,
+            TCA_BPF_UNSPEC,
+            TCA_BPF_ACT,
+            TCA_BPF_POLICE,
+            TCA_BPF_CLASSID,
+            TCA_BPF_OPS_LEN,
+            TCA_BPF_OPS,
+            TCA_BPF_FD,
+            TCA_BPF_NAME,
+            TCA_BPF_FLAGS,
+            TCA_BPF_FLAGS_GEN,
+            TCA_BPF_TAG,
+            TCA_BPF_ID,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -113,15 +121,22 @@ mod tests {
     #[test]
     fn test_flower_keys_distinct() {
         let keys = [
-            TCA_FLOWER_UNSPEC, TCA_FLOWER_CLASSID,
-            TCA_FLOWER_INDEV, TCA_FLOWER_ACT,
-            TCA_FLOWER_KEY_ETH_DST, TCA_FLOWER_KEY_ETH_SRC,
+            TCA_FLOWER_UNSPEC,
+            TCA_FLOWER_CLASSID,
+            TCA_FLOWER_INDEV,
+            TCA_FLOWER_ACT,
+            TCA_FLOWER_KEY_ETH_DST,
+            TCA_FLOWER_KEY_ETH_SRC,
             TCA_FLOWER_KEY_ETH_TYPE,
-            TCA_FLOWER_KEY_IPV4_SRC, TCA_FLOWER_KEY_IPV4_DST,
-            TCA_FLOWER_KEY_IPV6_SRC, TCA_FLOWER_KEY_IPV6_DST,
+            TCA_FLOWER_KEY_IPV4_SRC,
+            TCA_FLOWER_KEY_IPV4_DST,
+            TCA_FLOWER_KEY_IPV6_SRC,
+            TCA_FLOWER_KEY_IPV6_DST,
             TCA_FLOWER_KEY_IP_PROTO,
-            TCA_FLOWER_KEY_TCP_SRC, TCA_FLOWER_KEY_TCP_DST,
-            TCA_FLOWER_KEY_UDP_SRC, TCA_FLOWER_KEY_UDP_DST,
+            TCA_FLOWER_KEY_TCP_SRC,
+            TCA_FLOWER_KEY_TCP_DST,
+            TCA_FLOWER_KEY_UDP_SRC,
+            TCA_FLOWER_KEY_UDP_DST,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {

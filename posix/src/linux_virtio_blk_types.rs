@@ -84,9 +84,13 @@ mod tests {
     #[test]
     fn test_request_types_distinct() {
         let types = [
-            VIRTIO_BLK_T_IN, VIRTIO_BLK_T_OUT, VIRTIO_BLK_T_FLUSH,
-            VIRTIO_BLK_T_GET_ID, VIRTIO_BLK_T_DISCARD,
-            VIRTIO_BLK_T_WRITE_ZEROES, VIRTIO_BLK_T_SECURE_ERASE,
+            VIRTIO_BLK_T_IN,
+            VIRTIO_BLK_T_OUT,
+            VIRTIO_BLK_T_FLUSH,
+            VIRTIO_BLK_T_GET_ID,
+            VIRTIO_BLK_T_DISCARD,
+            VIRTIO_BLK_T_WRITE_ZEROES,
+            VIRTIO_BLK_T_SECURE_ERASE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -108,12 +112,18 @@ mod tests {
     #[test]
     fn test_features_distinct() {
         let feats = [
-            VIRTIO_BLK_F_SIZE_MAX, VIRTIO_BLK_F_SEG_MAX,
-            VIRTIO_BLK_F_GEOMETRY, VIRTIO_BLK_F_RO,
-            VIRTIO_BLK_F_BLK_SIZE, VIRTIO_BLK_F_FLUSH,
-            VIRTIO_BLK_F_TOPOLOGY, VIRTIO_BLK_F_MQ,
-            VIRTIO_BLK_F_DISCARD, VIRTIO_BLK_F_WRITE_ZEROES,
-            VIRTIO_BLK_F_SECURE_ERASE, VIRTIO_BLK_F_ZONED,
+            VIRTIO_BLK_F_SIZE_MAX,
+            VIRTIO_BLK_F_SEG_MAX,
+            VIRTIO_BLK_F_GEOMETRY,
+            VIRTIO_BLK_F_RO,
+            VIRTIO_BLK_F_BLK_SIZE,
+            VIRTIO_BLK_F_FLUSH,
+            VIRTIO_BLK_F_TOPOLOGY,
+            VIRTIO_BLK_F_MQ,
+            VIRTIO_BLK_F_DISCARD,
+            VIRTIO_BLK_F_WRITE_ZEROES,
+            VIRTIO_BLK_F_SECURE_ERASE,
+            VIRTIO_BLK_F_ZONED,
         ];
         for i in 0..feats.len() {
             for j in (i + 1)..feats.len() {

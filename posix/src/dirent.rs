@@ -247,7 +247,9 @@ pub extern "C" fn rewinddir(dirp: *mut Dir) {
         return;
     }
     // SAFETY: dirp is valid (caller contract).
-    unsafe { (*dirp).pos = 0; }
+    unsafe {
+        (*dirp).pos = 0;
+    }
 }
 
 /// Return the current position in the directory stream.
@@ -273,7 +275,11 @@ pub extern "C" fn seekdir(dirp: *mut Dir, loc: i64) {
     // SAFETY: dirp is valid.
     unsafe {
         let max = (*dirp).count;
-        (*dirp).pos = if (loc as usize) > max { max } else { loc as usize };
+        (*dirp).pos = if (loc as usize) > max {
+            max
+        } else {
+            loc as usize
+        };
     }
 }
 
@@ -346,7 +352,9 @@ unsafe fn scandir_sort(
             let b = unsafe { arr_typed.add(j) };
             if cmp(a.cast::<*const Dirent>(), b.cast::<*const Dirent>()) > 0 {
                 // SAFETY: a and b are valid, non-overlapping, aligned pointers.
-                unsafe { core::ptr::swap(a, b); }
+                unsafe {
+                    core::ptr::swap(a, b);
+                }
                 j = j.wrapping_sub(1);
             } else {
                 break;
@@ -401,7 +409,9 @@ pub extern "C" fn scandir(
     // over-allocating when a filter rejects many entries.
     let total = unsafe { (*dirp).count };
     let mut count: usize = 0;
-    unsafe { (*dirp).pos = 0; }
+    unsafe {
+        (*dirp).pos = 0;
+    }
     for _ in 0..total {
         let entry = readdir(dirp);
         if entry.is_null() {
@@ -422,7 +432,9 @@ pub extern "C" fn scandir(
             return -1;
         }
         // SAFETY: arr is page-aligned (mmap), so align ≥ 8.
-        unsafe { *namelist = arr.cast::<*mut Dirent>(); }
+        unsafe {
+            *namelist = arr.cast::<*mut Dirent>();
+        }
         return 0;
     }
 
@@ -438,7 +450,9 @@ pub extern "C" fn scandir(
     let arr_typed = arr.cast::<*mut Dirent>();
 
     // Second pass: collect matching entries into the array.
-    unsafe { (*dirp).pos = 0; }
+    unsafe {
+        (*dirp).pos = 0;
+    }
     let mut idx: usize = 0;
     for _ in 0..total {
         let entry = readdir(dirp);
@@ -452,11 +466,15 @@ pub extern "C" fn scandir(
                 let mut j: usize = 0;
                 while j < idx {
                     // SAFETY: valid pointers written at indices < idx.
-                    unsafe { crate::malloc::free((*arr_typed.add(j)).cast::<u8>()); }
+                    unsafe {
+                        crate::malloc::free((*arr_typed.add(j)).cast::<u8>());
+                    }
                     j = j.wrapping_add(1);
                 }
                 // SAFETY: arr allocated by malloc above.
-                unsafe { crate::malloc::free(arr); }
+                unsafe {
+                    crate::malloc::free(arr);
+                }
                 closedir(dirp);
                 errno::set_errno(errno::ENOMEM);
                 return -1;
@@ -480,11 +498,15 @@ pub extern "C" fn scandir(
     // Sort if a comparator was provided.
     if let Some(cmp) = compar {
         // SAFETY: arr is page-aligned; idx entries have been written.
-        unsafe { scandir_sort(arr, idx, cmp); }
+        unsafe {
+            scandir_sort(arr, idx, cmp);
+        }
     }
 
     // SAFETY: arr is page-aligned (align ≥ 8).
-    unsafe { *namelist = arr_typed; }
+    unsafe {
+        *namelist = arr_typed;
+    }
     idx as i32
 }
 
@@ -528,11 +550,7 @@ pub extern "C" fn versionsort(a: *const *const Dirent, b: *const *const Dirent) 
 ///
 /// `dirp`, `entry`, and `result` must all be valid, non-null pointers.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn readdir_r(
-    dirp: *mut Dir,
-    entry: *mut Dirent,
-    result: *mut *mut Dirent,
-) -> i32 {
+pub extern "C" fn readdir_r(dirp: *mut Dir, entry: *mut Dirent, result: *mut *mut Dirent) -> i32 {
     if dirp.is_null() || entry.is_null() || result.is_null() {
         return errno::EFAULT;
     }
@@ -541,7 +559,9 @@ pub extern "C" fn readdir_r(
     if ent.is_null() {
         // End of directory — not an error.
         // SAFETY: result verified non-null.
-        unsafe { *result = core::ptr::null_mut(); }
+        unsafe {
+            *result = core::ptr::null_mut();
+        }
         return 0;
     }
 
@@ -1038,9 +1058,8 @@ pub extern "C" fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
             break;
         }
         // SAFETY: we computed bounds against the fixed-size buf above.
-        let entry_slice = unsafe {
-            core::slice::from_raw_parts(buf_ptr_const.add(entry_off), DIR_ENTRY_SIZE)
-        };
+        let entry_slice =
+            unsafe { core::slice::from_raw_parts(buf_ptr_const.add(entry_off), DIR_ENTRY_SIZE) };
         // The slice is exactly DIR_ENTRY_SIZE long, so `try_into` always
         // succeeds; the match is purely to satisfy the borrow checker.
         let Ok(entry_arr) = <&[u8; DIR_ENTRY_SIZE]>::try_from(entry_slice) else {
@@ -1055,7 +1074,13 @@ pub extern "C" fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
         let Some(remaining) = out.get_mut(written..) else {
             break;
         };
-        match emit_linux_dirent64(remaining, pos as u64, (pos as i64).wrapping_add(1), dtype, name) {
+        match emit_linux_dirent64(
+            remaining,
+            pos as u64,
+            (pos as i64).wrapping_add(1),
+            dtype,
+            name,
+        ) {
             Some(reclen) => {
                 written = written.wrapping_add(reclen);
                 emitted_any = true;
@@ -1076,7 +1101,9 @@ pub extern "C" fn getdents64(fd: i32, dirp: *mut u8, count: usize) -> i64 {
 
     // Persist updated position.
     // SAFETY: slot_ptr still owned by this call.
-    unsafe { (*slot_ptr).pos = pos; }
+    unsafe {
+        (*slot_ptr).pos = pos;
+    }
 
     written as i64
 }
@@ -1215,7 +1242,9 @@ mod tests {
 
     #[test]
     fn test_dt_types_distinct() {
-        let types = [DT_UNKNOWN, DT_REG, DT_DIR, DT_LNK, DT_CHR, DT_BLK, DT_FIFO, DT_SOCK];
+        let types = [
+            DT_UNKNOWN, DT_REG, DT_DIR, DT_LNK, DT_CHR, DT_BLK, DT_FIFO, DT_SOCK,
+        ];
         for (i, &a) in types.iter().enumerate() {
             for &b in &types[i + 1..] {
                 assert_ne!(a, b);
@@ -1271,15 +1300,25 @@ mod tests {
     #[test]
     fn test_alphasort_equal() {
         let mut a = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let mut b = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
-        a.d_name[0] = b'f'; a.d_name[1] = b'o'; a.d_name[2] = b'o';
-        b.d_name[0] = b'f'; b.d_name[1] = b'o'; b.d_name[2] = b'o';
+        a.d_name[0] = b'f';
+        a.d_name[1] = b'o';
+        a.d_name[2] = b'o';
+        b.d_name[0] = b'f';
+        b.d_name[1] = b'o';
+        b.d_name[2] = b'o';
         let pa: *const Dirent = &a;
         let pb: *const Dirent = &b;
         assert_eq!(alphasort(&pa, &pb), 0);
@@ -1288,15 +1327,25 @@ mod tests {
     #[test]
     fn test_alphasort_less() {
         let mut a = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let mut b = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
-        a.d_name[0] = b'a'; a.d_name[1] = b'b'; a.d_name[2] = b'c';
-        b.d_name[0] = b'x'; b.d_name[1] = b'y'; b.d_name[2] = b'z';
+        a.d_name[0] = b'a';
+        a.d_name[1] = b'b';
+        a.d_name[2] = b'c';
+        b.d_name[0] = b'x';
+        b.d_name[1] = b'y';
+        b.d_name[2] = b'z';
         let pa: *const Dirent = &a;
         let pb: *const Dirent = &b;
         assert!(alphasort(&pa, &pb) < 0);
@@ -1305,11 +1354,17 @@ mod tests {
     #[test]
     fn test_alphasort_greater() {
         let mut a = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let mut b = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         a.d_name[0] = b'z';
@@ -1323,7 +1378,10 @@ mod tests {
     fn test_alphasort_null_outer() {
         // Null outer pointer (the *const *const Dirent itself).
         let d = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let pd: *const Dirent = &d;
@@ -1336,15 +1394,24 @@ mod tests {
     fn test_alphasort_prefix() {
         // "ab" < "abc"
         let mut a = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let mut b = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
-        a.d_name[0] = b'a'; a.d_name[1] = b'b';
-        b.d_name[0] = b'a'; b.d_name[1] = b'b'; b.d_name[2] = b'c';
+        a.d_name[0] = b'a';
+        a.d_name[1] = b'b';
+        b.d_name[0] = b'a';
+        b.d_name[1] = b'b';
+        b.d_name[2] = b'c';
         let pa: *const Dirent = &a;
         let pb: *const Dirent = &b;
         assert!(alphasort(&pa, &pb) < 0); // "ab\0" < "abc\0"
@@ -1371,11 +1438,17 @@ mod tests {
     fn test_versionsort_numeric_ordering() {
         // "file2" < "file10" under version sorting.
         let mut a = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let mut b = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let name_a = b"file2\0";
@@ -1391,15 +1464,23 @@ mod tests {
     #[test]
     fn test_versionsort_equal() {
         let mut a = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let mut b = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
-        a.d_name[0] = b'x'; a.d_name[1] = b'1';
-        b.d_name[0] = b'x'; b.d_name[1] = b'1';
+        a.d_name[0] = b'x';
+        a.d_name[1] = b'1';
+        b.d_name[0] = b'x';
+        b.d_name[1] = b'1';
         let pa: *const Dirent = &a;
         let pb: *const Dirent = &b;
         assert_eq!(versionsort(&pa, &pb), 0);
@@ -1408,7 +1489,10 @@ mod tests {
     #[test]
     fn test_versionsort_null_outer() {
         let d = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let pd: *const Dirent = &d;
@@ -1422,11 +1506,17 @@ mod tests {
         // versionsort("file10", "file2") > 0 (numeric: 10 > 2)
         // Both agree on ordering direction here, but the reason differs.
         let mut a = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let mut b = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let name_a = b"file10\0";
@@ -1440,7 +1530,10 @@ mod tests {
         assert!(versionsort(&pa, &pb) > 0, "versionsort: file10 > file2");
 
         // alphasort: "file10" < "file2" (lexicographic: '1' < '2')
-        assert!(alphasort(&pa, &pb) < 0, "alphasort: file10 < file2 (lexicographic)");
+        assert!(
+            alphasort(&pa, &pb) < 0,
+            "alphasort: file10 < file2 (lexicographic)"
+        );
     }
 
     // -- Dir pool constants --
@@ -1509,7 +1602,10 @@ mod tests {
     #[test]
     fn test_readdir_r_null_dirp() {
         let mut entry = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let mut result: *mut Dirent = core::ptr::null_mut();
@@ -1530,7 +1626,10 @@ mod tests {
     fn test_readdir_r_null_result() {
         let fake_dirp = 0x1000 as *mut Dir;
         let mut entry = Dirent {
-            d_ino: 0, d_off: 0, d_reclen: 0, d_type: 0,
+            d_ino: 0,
+            d_off: 0,
+            d_reclen: 0,
+            d_type: 0,
             d_name: [0u8; 256],
         };
         let ret = readdir_r(fake_dirp, &raw mut entry, core::ptr::null_mut());
@@ -1542,24 +1641,14 @@ mod tests {
     #[test]
     fn test_scandir_null_dirname() {
         let mut list: *mut *mut Dirent = core::ptr::null_mut();
-        let ret = scandir(
-            core::ptr::null(),
-            &raw mut list,
-            None,
-            None,
-        );
+        let ret = scandir(core::ptr::null(), &raw mut list, None, None);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
 
     #[test]
     fn test_scandir_null_namelist() {
-        let ret = scandir(
-            b"/tmp\0".as_ptr(),
-            core::ptr::null_mut(),
-            None,
-            None,
-        );
+        let ret = scandir(b"/tmp\0".as_ptr(), core::ptr::null_mut(), None, None);
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
     }
@@ -1643,12 +1732,7 @@ mod tests {
 
     #[test]
     fn test_scandir64_null_namelist() {
-        let ret = scandir64(
-            b"/tmp\0".as_ptr(),
-            core::ptr::null_mut(),
-            None,
-            None,
-        );
+        let ret = scandir64(b"/tmp\0".as_ptr(), core::ptr::null_mut(), None, None);
         assert_eq!(ret, -1);
     }
 
@@ -1684,7 +1768,10 @@ mod tests {
     fn test_linux_dirent64_size() {
         let size = core::mem::size_of::<LinuxDirent64>();
         // d_ino(8) + d_off(8) + d_reclen(2) + d_type(1) + d_name(256) + padding
-        assert!(size >= 275, "LinuxDirent64 should be at least 275 bytes, got {size}");
+        assert!(
+            size >= 275,
+            "LinuxDirent64 should be at least 275 bytes, got {size}"
+        );
     }
 
     #[test]
@@ -1832,8 +1919,7 @@ mod tests {
         // records keep their u64 fields aligned.
         let mut out = [0u8; 128];
         for name in [&b"a"[..], &b"abc"[..], &b"longer"[..], &b"exactly7"[..]] {
-            let r = emit_linux_dirent64(&mut out, 0, 0, DT_REG, name)
-                .expect("emit should succeed");
+            let r = emit_linux_dirent64(&mut out, 0, 0, DT_REG, name).expect("emit should succeed");
             assert_eq!(r % 8, 0, "reclen {r} not 8-aligned for name {name:?}");
         }
     }

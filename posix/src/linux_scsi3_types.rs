@@ -87,11 +87,21 @@ mod tests {
     #[test]
     fn test_sense_keys_distinct() {
         let keys = [
-            NO_SENSE, RECOVERED_ERROR, NOT_READY, MEDIUM_ERROR,
-            HARDWARE_ERROR, ILLEGAL_REQUEST, UNIT_ATTENTION,
-            DATA_PROTECT, BLANK_CHECK, VENDOR_SPECIFIC,
-            COPY_ABORTED, ABORTED_COMMAND, VOLUME_OVERFLOW,
-            MISCOMPARE, SCSI_COMPLETED,
+            NO_SENSE,
+            RECOVERED_ERROR,
+            NOT_READY,
+            MEDIUM_ERROR,
+            HARDWARE_ERROR,
+            ILLEGAL_REQUEST,
+            UNIT_ATTENTION,
+            DATA_PROTECT,
+            BLANK_CHECK,
+            VENDOR_SPECIFIC,
+            COPY_ABORTED,
+            ABORTED_COMMAND,
+            VOLUME_OVERFLOW,
+            MISCOMPARE,
+            SCSI_COMPLETED,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -103,9 +113,14 @@ mod tests {
     #[test]
     fn test_tmf_values_distinct() {
         let tmfs = [
-            TMF_ABORT_TASK, TMF_ABORT_TASK_SET, TMF_CLEAR_ACA,
-            TMF_CLEAR_TASK_SET, TMF_LUN_RESET, TMF_TARGET_RESET,
-            TMF_LOGICAL_UNIT_RESET, TMF_QUERY_TASK,
+            TMF_ABORT_TASK,
+            TMF_ABORT_TASK_SET,
+            TMF_CLEAR_ACA,
+            TMF_CLEAR_TASK_SET,
+            TMF_LUN_RESET,
+            TMF_TARGET_RESET,
+            TMF_LOGICAL_UNIT_RESET,
+            TMF_QUERY_TASK,
         ];
         for i in 0..tmfs.len() {
             for j in (i + 1)..tmfs.len() {
@@ -117,9 +132,12 @@ mod tests {
     #[test]
     fn test_tmf_responses_distinct() {
         let resps = [
-            TMF_RESP_FUNC_COMPLETE, TMF_RESP_INVALID_FRAME,
-            TMF_RESP_FUNC_ESUPP, TMF_RESP_FUNC_FAILED,
-            TMF_RESP_FUNC_SUCC, TMF_RESP_INCORRECT_LUN,
+            TMF_RESP_FUNC_COMPLETE,
+            TMF_RESP_INVALID_FRAME,
+            TMF_RESP_FUNC_ESUPP,
+            TMF_RESP_FUNC_FAILED,
+            TMF_RESP_FUNC_SUCC,
+            TMF_RESP_INCORRECT_LUN,
         ];
         for i in 0..resps.len() {
             for j in (i + 1)..resps.len() {

@@ -108,8 +108,10 @@ mod tests {
     #[test]
     fn test_inode_flags_distinct() {
         let flags = [
-            BEFS_INODE_IN_USE, BEFS_INODE_ATTR_INODE,
-            BEFS_INODE_LOGGED, BEFS_INODE_DELETED,
+            BEFS_INODE_IN_USE,
+            BEFS_INODE_ATTR_INODE,
+            BEFS_INODE_LOGGED,
+            BEFS_INODE_DELETED,
             BEFS_INODE_LONG_SYMLINK,
         ];
         for i in 0..flags.len() {

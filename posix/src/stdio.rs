@@ -510,7 +510,9 @@ fn file_read(f: *mut File, dst: *mut u8, len: usize) -> i64 {
     // Handle ungetc'd byte first.
     if file.ungetc_byte >= 0 {
         // SAFETY: dst is valid for len bytes, total == 0 < len.
-        unsafe { *dst = file.ungetc_byte as u8; }
+        unsafe {
+            *dst = file.ungetc_byte as u8;
+        }
         file.ungetc_byte = -1;
         file.flags &= !FLAG_EOF;
         total = 1;
@@ -547,7 +549,11 @@ fn file_read(f: *mut File, dst: *mut u8, len: usize) -> i64 {
     if file.buf_pos < file.buf_len {
         let available = file.buf_len.wrapping_sub(file.buf_pos);
         let needed = len.wrapping_sub(total);
-        let to_copy = if available < needed { available } else { needed };
+        let to_copy = if available < needed {
+            available
+        } else {
+            needed
+        };
         // SAFETY: buf_pos + to_copy <= buf_len <= BUF_SIZE;
         //         dst + total + to_copy <= dst + len (caller guarantee).
         unsafe {
@@ -594,14 +600,14 @@ fn file_read(f: *mut File, dst: *mut u8, len: usize) -> i64 {
         file.buf_pos = 0;
 
         let available = file.buf_len;
-        let to_copy = if available < remaining { available } else { remaining };
+        let to_copy = if available < remaining {
+            available
+        } else {
+            remaining
+        };
         // SAFETY: to_copy <= buf_len <= BUF_SIZE; dst+total valid.
         unsafe {
-            core::ptr::copy_nonoverlapping(
-                file.buf.as_ptr(),
-                dst.add(total),
-                to_copy,
-            );
+            core::ptr::copy_nonoverlapping(file.buf.as_ptr(), dst.add(total), to_copy);
         }
         file.buf_pos = to_copy;
         total = total.wrapping_add(to_copy);
@@ -721,7 +727,9 @@ pub unsafe extern "C" fn fwrite(
     } else {
         // size > 0 guaranteed by early return above.
         #[allow(clippy::arithmetic_side_effects)]
-        { (ret as usize) / size }
+        {
+            (ret as usize) / size
+        }
     }
 }
 
@@ -769,12 +777,7 @@ pub extern "C" fn getc(stream: *mut u8) -> i32 {
 ///
 /// `ptr` must be valid for `size * nmemb` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn fread(
-    ptr: *mut u8,
-    size: usize,
-    nmemb: usize,
-    stream: *mut u8,
-) -> usize {
+pub unsafe extern "C" fn fread(ptr: *mut u8, size: usize, nmemb: usize, stream: *mut u8) -> usize {
     if ptr.is_null() || size == 0 || nmemb == 0 {
         return 0;
     }
@@ -786,7 +789,9 @@ pub unsafe extern "C" fn fread(
     } else {
         // size > 0 guaranteed by early return above.
         #[allow(clippy::arithmetic_side_effects)]
-        { (ret as usize) / size }
+        {
+            (ret as usize) / size
+        }
     }
 }
 
@@ -806,7 +811,9 @@ pub extern "C" fn fgets(buf: *mut u8, size: i32, stream: *mut u8) -> *mut u8 {
     // POSIX: if size is 1, write NUL and return buf (empty string, no read).
     if size == 1 {
         // SAFETY: buf verified non-null, size >= 1.
-        unsafe { *buf = 0; }
+        unsafe {
+            *buf = 0;
+        }
         return buf;
     }
 
@@ -829,7 +836,9 @@ pub extern "C" fn fgets(buf: *mut u8, size: i32, stream: *mut u8) -> *mut u8 {
             break;
         }
         // SAFETY: pos < max < size, so buf.add(pos) is valid.
-        unsafe { *buf.add(pos) = ch as u8; }
+        unsafe {
+            *buf.add(pos) = ch as u8;
+        }
         pos = pos.wrapping_add(1);
         if ch as u8 == b'\n' {
             break;
@@ -842,7 +851,9 @@ pub extern "C" fn fgets(buf: *mut u8, size: i32, stream: *mut u8) -> *mut u8 {
 
     // Null-terminate.
     // SAFETY: pos <= max = size-1, so buf.add(pos) is within bounds.
-    unsafe { *buf.add(pos) = 0; }
+    unsafe {
+        *buf.add(pos) = 0;
+    }
 
     buf
 }
@@ -987,11 +998,7 @@ pub extern "C" fn fdopen(fd: i32, _mode: *const u8) -> *mut u8 {
 /// the subsequent open succeeds."  On failure, the stream is closed
 /// and NULL is returned.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn freopen(
-    path: *const u8,
-    mode: *const u8,
-    stream: *mut u8,
-) -> *mut u8 {
+pub unsafe extern "C" fn freopen(path: *const u8, mode: *const u8, stream: *mut u8) -> *mut u8 {
     if mode.is_null() {
         return core::ptr::null_mut();
     }
@@ -1089,7 +1096,11 @@ pub extern "C" fn fclose(stream: *mut u8) -> i32 {
     // Release the pool slot.
     free_file(file);
 
-    if flush_result == EOF || close_result < 0 { EOF } else { 0 }
+    if flush_result == EOF || close_result < 0 {
+        EOF
+    } else {
+        0
+    }
 }
 
 /// Flush a stream's write buffer.
@@ -1201,7 +1212,9 @@ pub extern "C" fn rewind(stream: *mut u8) {
     let _ = fseek(stream, 0, SEEK_SET);
     // Also clear error indicator (POSIX requirement beyond fseek).
     let file = stream_to_file(stream);
-    unsafe { (*file).flags &= !FLAG_ERR; }
+    unsafe {
+        (*file).flags &= !FLAG_ERR;
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1262,7 +1275,9 @@ pub extern "C" fn fgetpos(stream: *mut u8, pos: *mut FposT) -> i32 {
         return -1;
     }
     // SAFETY: pos verified non-null.
-    unsafe { *pos = offset; }
+    unsafe {
+        *pos = offset;
+    }
     0
 }
 
@@ -1325,7 +1340,9 @@ pub extern "C" fn ferror(stream: *mut u8) -> i32 {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn clearerr(stream: *mut u8) {
     let file = stream_to_file(stream);
-    unsafe { (*file).flags &= !(FLAG_EOF | FLAG_ERR); }
+    unsafe {
+        (*file).flags &= !(FLAG_EOF | FLAG_ERR);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1360,12 +1377,7 @@ pub extern "C" fn ungetc(ch: i32, stream: *mut u8) -> i32 {
 ///
 /// Returns 0 on success, non-zero on error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn setvbuf(
-    stream: *mut u8,
-    _buf: *mut u8,
-    mode: i32,
-    _size: usize,
-) -> i32 {
+pub extern "C" fn setvbuf(stream: *mut u8, _buf: *mut u8, mode: i32, _size: usize) -> i32 {
     let file = stream_to_file(stream);
     let f = unsafe { &mut *file };
 
@@ -1628,7 +1640,7 @@ fn popen_register(stream: *mut u8, child_pid: i32) -> bool {
     // SAFETY: Single-threaded access.
     unsafe {
         let table = core::ptr::addr_of_mut!(POPEN_TABLE);
-        for slot in (*table).iter_mut() {
+        for slot in &mut (*table) {
             if slot.is_none() {
                 *slot = Some(PopenEntry { stream, child_pid });
                 return true;
@@ -1643,14 +1655,13 @@ fn popen_unregister(stream: *mut u8) -> Option<i32> {
     // SAFETY: Single-threaded access.
     unsafe {
         let table = core::ptr::addr_of_mut!(POPEN_TABLE);
-        for slot in (*table).iter_mut() {
-            if let Some(entry) = slot {
-                if core::ptr::eq(entry.stream, stream) {
+        for slot in &mut (*table) {
+            if let Some(entry) = slot
+                && core::ptr::eq(entry.stream, stream) {
                     let pid = entry.child_pid;
                     *slot = None;
                     return Some(pid);
                 }
-            }
         }
     }
     None
@@ -1673,9 +1684,8 @@ fn popen_unregister(stream: *mut u8) -> Option<i32> {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut u8 {
     use crate::spawn::{
-        PosixSpawnFileActionsT, posix_spawn_file_actions_init,
-        posix_spawn_file_actions_addclose, posix_spawn_file_actions_adddup2,
-        posix_spawnp,
+        PosixSpawnFileActionsT, posix_spawn_file_actions_addclose,
+        posix_spawn_file_actions_adddup2, posix_spawn_file_actions_init, posix_spawnp,
     };
     use crate::types::PidT;
 
@@ -1724,12 +1734,7 @@ pub extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut u8 {
     // Build argv: ["/bin/sh", "-c", command, NULL].
     let sh = b"/bin/sh\0";
     let dash_c = b"-c\0";
-    let argv: [*const u8; 4] = [
-        sh.as_ptr(),
-        dash_c.as_ptr(),
-        command,
-        core::ptr::null(),
-    ];
+    let argv: [*const u8; 4] = [sh.as_ptr(), dash_c.as_ptr(), command, core::ptr::null()];
 
     // Spawn the child.
     let mut child_pid: PidT = 0;
@@ -1754,7 +1759,14 @@ pub extern "C" fn popen(command: *const u8, mode: *const u8) -> *mut u8 {
     }
 
     // Wrap the parent's end in a FILE*.
-    let stream = fdopen(parent_fd, if is_read { b"r\0".as_ptr() } else { b"w\0".as_ptr() });
+    let stream = fdopen(
+        parent_fd,
+        if is_read {
+            b"r\0".as_ptr()
+        } else {
+            b"w\0".as_ptr()
+        },
+    );
     if stream.is_null() {
         crate::file::close(parent_fd);
         // Can't easily kill the child here, but it will get a broken pipe.
@@ -1938,9 +1950,7 @@ pub unsafe extern "C" fn getdelim(
                 return -1;
             };
             // SAFETY: realloc is unsafe extern "C".
-            let new_buf = unsafe {
-                crate::malloc::realloc(buf.cast::<u8>(), new_cap)
-            };
+            let new_buf = unsafe { crate::malloc::realloc(buf.cast::<u8>(), new_cap) };
             if new_buf.is_null() {
                 crate::errno::set_errno(crate::errno::ENOMEM);
                 return -1;
@@ -1954,7 +1964,9 @@ pub unsafe extern "C" fn getdelim(
         }
 
         // SAFETY: pos < cap-1, buf is valid for cap bytes.
-        unsafe { *buf.add(pos) = c as u8; }
+        unsafe {
+            *buf.add(pos) = c as u8;
+        }
         pos = pos.wrapping_add(1);
 
         if c == delimiter {
@@ -1963,7 +1975,9 @@ pub unsafe extern "C" fn getdelim(
     }
 
     // Null-terminate.
-    unsafe { *buf.add(pos) = 0; }
+    unsafe {
+        *buf.add(pos) = 0;
+    }
     pos as isize
 }
 
@@ -1975,11 +1989,7 @@ pub unsafe extern "C" fn getdelim(
 ///
 /// `lineptr`, `n`, and `stream` must be valid pointers.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getline(
-    lineptr: *mut *mut u8,
-    n: *mut usize,
-    stream: *mut u8,
-) -> isize {
+pub unsafe extern "C" fn getline(lineptr: *mut *mut u8, n: *mut usize, stream: *mut u8) -> isize {
     unsafe { getdelim(lineptr, n, i32::from(b'\n'), stream) }
 }
 
@@ -2039,11 +2049,7 @@ pub unsafe extern "C" fn fopen64(path: *const u8, mode: *const u8) -> *mut u8 {
 ///
 /// Same requirements as `freopen`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn freopen64(
-    path: *const u8,
-    mode: *const u8,
-    stream: *mut u8,
-) -> *mut u8 {
+pub unsafe extern "C" fn freopen64(path: *const u8, mode: *const u8, stream: *mut u8) -> *mut u8 {
     unsafe { freopen(path, mode, stream) }
 }
 
@@ -2060,7 +2066,8 @@ fn mode_to_flags(mode: *const u8) -> i32 {
     let m1 = unsafe { *mode.add(1) };
 
     // Check for '+' in position 1 or 2 (after optional 'b').
-    let has_plus = m1 == b'+' || (m1 == b'b' && unsafe { *mode.add(2) } == b'+')
+    let has_plus = m1 == b'+'
+        || (m1 == b'b' && unsafe { *mode.add(2) } == b'+')
         || (m1 != 0 && unsafe { *mode.add(2) } == b'+');
 
     match (m0, has_plus) {
@@ -2170,10 +2177,7 @@ mod tests {
 
     #[test]
     fn test_mode_to_flags_read_plus() {
-        assert_eq!(
-            mode_to_flags(b"r+\0".as_ptr()),
-            crate::fcntl::O_RDWR
-        );
+        assert_eq!(mode_to_flags(b"r+\0".as_ptr()), crate::fcntl::O_RDWR);
     }
 
     #[test]
@@ -2211,14 +2215,8 @@ mod tests {
     #[test]
     fn test_mode_to_flags_binary_plus() {
         // "rb+" and "r+b" should both yield O_RDWR.
-        assert_eq!(
-            mode_to_flags(b"rb+\0".as_ptr()),
-            crate::fcntl::O_RDWR
-        );
-        assert_eq!(
-            mode_to_flags(b"r+b\0".as_ptr()),
-            crate::fcntl::O_RDWR
-        );
+        assert_eq!(mode_to_flags(b"rb+\0".as_ptr()), crate::fcntl::O_RDWR);
+        assert_eq!(mode_to_flags(b"r+b\0".as_ptr()), crate::fcntl::O_RDWR);
         // "wb+" and "w+b" should both yield O_RDWR|O_CREAT|O_TRUNC.
         let expected_w = crate::fcntl::O_RDWR | crate::fcntl::O_CREAT | crate::fcntl::O_TRUNC;
         assert_eq!(mode_to_flags(b"wb+\0".as_ptr()), expected_w);
@@ -2523,14 +2521,18 @@ mod tests {
         // stdout starts with no EOF flag.
         // Reset flag state first to avoid interference from prior tests.
         let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
-        unsafe { (*file).flags &= !FLAG_EOF; }
+        unsafe {
+            (*file).flags &= !FLAG_EOF;
+        }
         assert_eq!(feof(STDOUT_SENTINEL as *mut u8), 0);
     }
 
     #[test]
     fn test_ferror_initially_zero() {
         let file = stream_to_file(STDOUT_SENTINEL as *mut u8);
-        unsafe { (*file).flags &= !FLAG_ERR; }
+        unsafe {
+            (*file).flags &= !FLAG_ERR;
+        }
         assert_eq!(ferror(STDOUT_SENTINEL as *mut u8), 0);
     }
 
@@ -2538,32 +2540,44 @@ mod tests {
     fn test_feof_after_setting_flag() {
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_flags = unsafe { (*file).flags };
-        unsafe { (*file).flags |= FLAG_EOF; }
+        unsafe {
+            (*file).flags |= FLAG_EOF;
+        }
         assert_ne!(feof(STDERR_SENTINEL as *mut u8), 0);
         // Restore.
-        unsafe { (*file).flags = old_flags; }
+        unsafe {
+            (*file).flags = old_flags;
+        }
     }
 
     #[test]
     fn test_ferror_after_setting_flag() {
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_flags = unsafe { (*file).flags };
-        unsafe { (*file).flags |= FLAG_ERR; }
+        unsafe {
+            (*file).flags |= FLAG_ERR;
+        }
         assert_ne!(ferror(STDERR_SENTINEL as *mut u8), 0);
         // Restore.
-        unsafe { (*file).flags = old_flags; }
+        unsafe {
+            (*file).flags = old_flags;
+        }
     }
 
     #[test]
     fn test_clearerr_clears_both_flags() {
         let file = stream_to_file(STDERR_SENTINEL as *mut u8);
         let old_flags = unsafe { (*file).flags };
-        unsafe { (*file).flags |= FLAG_EOF | FLAG_ERR; }
+        unsafe {
+            (*file).flags |= FLAG_EOF | FLAG_ERR;
+        }
         clearerr(STDERR_SENTINEL as *mut u8);
         assert_eq!(feof(STDERR_SENTINEL as *mut u8), 0);
         assert_eq!(ferror(STDERR_SENTINEL as *mut u8), 0);
         // Restore.
-        unsafe { (*file).flags = old_flags; }
+        unsafe {
+            (*file).flags = old_flags;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2600,7 +2614,9 @@ mod tests {
         let old_byte = unsafe { (*file).ungetc_byte };
 
         // Set EOF flag.
-        unsafe { (*file).flags |= FLAG_EOF; }
+        unsafe {
+            (*file).flags |= FLAG_EOF;
+        }
         // Push back a byte — should clear EOF.
         ungetc(b'A' as i32, STDIN_SENTINEL as *mut u8);
         assert_eq!(feof(STDIN_SENTINEL as *mut u8), 0, "ungetc must clear EOF");
@@ -2623,7 +2639,9 @@ mod tests {
         assert_eq!(unsafe { (*file).ungetc_byte }, 0xFF);
 
         // Restore.
-        unsafe { (*file).ungetc_byte = old_byte; }
+        unsafe {
+            (*file).ungetc_byte = old_byte;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2715,7 +2733,9 @@ mod tests {
         }
 
         // Restore stderr's original mode (unbuffered).
-        unsafe { (*file).buf_mode = old_mode; }
+        unsafe {
+            (*file).buf_mode = old_mode;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2813,27 +2833,21 @@ mod tests {
 
     #[test]
     fn test_fwrite_null_ptr() {
-        let ret = unsafe {
-            fwrite(core::ptr::null(), 1, 10, STDOUT_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { fwrite(core::ptr::null(), 1, 10, STDOUT_SENTINEL as *mut u8) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fwrite_zero_size() {
         let data = [1u8; 10];
-        let ret = unsafe {
-            fwrite(data.as_ptr(), 0, 10, STDOUT_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { fwrite(data.as_ptr(), 0, 10, STDOUT_SENTINEL as *mut u8) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fwrite_zero_nmemb() {
         let data = [1u8; 10];
-        let ret = unsafe {
-            fwrite(data.as_ptr(), 1, 0, STDOUT_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { fwrite(data.as_ptr(), 1, 0, STDOUT_SENTINEL as *mut u8) };
         assert_eq!(ret, 0);
     }
 
@@ -2843,27 +2857,21 @@ mod tests {
 
     #[test]
     fn test_fread_null_ptr() {
-        let ret = unsafe {
-            fread(core::ptr::null_mut(), 1, 10, STDIN_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { fread(core::ptr::null_mut(), 1, 10, STDIN_SENTINEL as *mut u8) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fread_zero_size() {
         let mut buf = [0u8; 10];
-        let ret = unsafe {
-            fread(buf.as_mut_ptr(), 0, 10, STDIN_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { fread(buf.as_mut_ptr(), 0, 10, STDIN_SENTINEL as *mut u8) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fread_zero_nmemb() {
         let mut buf = [0u8; 10];
-        let ret = unsafe {
-            fread(buf.as_mut_ptr(), 1, 0, STDIN_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { fread(buf.as_mut_ptr(), 1, 0, STDIN_SENTINEL as *mut u8) };
         assert_eq!(ret, 0);
     }
 
@@ -2924,9 +2932,7 @@ mod tests {
     #[test]
     fn test_fread_chk_zero_size() {
         let mut buf = [0u8; 10];
-        let ret = unsafe {
-            __fread_chk(buf.as_mut_ptr(), 10, 0, 10, STDIN_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { __fread_chk(buf.as_mut_ptr(), 10, 0, 10, STDIN_SENTINEL as *mut u8) };
         assert_eq!(ret, 0);
     }
 
@@ -2935,17 +2941,14 @@ mod tests {
         // ptrlen too small for size*nmemb: nmemb clamps to ptrlen/size = 0,
         // so nothing is read regardless of the requested 10 elements.
         let mut buf = [0u8; 2];
-        let ret = unsafe {
-            __fread_chk(buf.as_mut_ptr(), 2, 4, 10, STDIN_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { __fread_chk(buf.as_mut_ptr(), 2, 4, 10, STDIN_SENTINEL as *mut u8) };
         assert_eq!(ret, 0);
     }
 
     #[test]
     fn test_fread_chk_null_ptr() {
-        let ret = unsafe {
-            __fread_chk(core::ptr::null_mut(), 10, 1, 10, STDIN_SENTINEL as *mut u8)
-        };
+        let ret =
+            unsafe { __fread_chk(core::ptr::null_mut(), 10, 1, 10, STDIN_SENTINEL as *mut u8) };
         assert_eq!(ret, 0);
     }
 
@@ -3097,7 +3100,9 @@ mod tests {
         let old_mode = unsafe { (*file).buf_mode };
         setbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut());
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_NONE);
-        unsafe { (*file).buf_mode = old_mode; }
+        unsafe {
+            (*file).buf_mode = old_mode;
+        }
     }
 
     #[test]
@@ -3107,7 +3112,9 @@ mod tests {
         let mut dummy = [0u8; 1];
         setbuf(STDERR_SENTINEL as *mut u8, dummy.as_mut_ptr());
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_FULL);
-        unsafe { (*file).buf_mode = old_mode; }
+        unsafe {
+            (*file).buf_mode = old_mode;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3120,7 +3127,9 @@ mod tests {
         let old_mode = unsafe { (*file).buf_mode };
         setlinebuf(STDERR_SENTINEL as *mut u8);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_LINE);
-        unsafe { (*file).buf_mode = old_mode; }
+        unsafe {
+            (*file).buf_mode = old_mode;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3133,7 +3142,9 @@ mod tests {
         let old_mode = unsafe { (*file).buf_mode };
         setbuffer(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 0);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_NONE);
-        unsafe { (*file).buf_mode = old_mode; }
+        unsafe {
+            (*file).buf_mode = old_mode;
+        }
     }
 
     #[test]
@@ -3143,7 +3154,9 @@ mod tests {
         let mut dummy = [0u8; 1];
         setbuffer(STDERR_SENTINEL as *mut u8, dummy.as_mut_ptr(), 4096);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_FULL);
-        unsafe { (*file).buf_mode = old_mode; }
+        unsafe {
+            (*file).buf_mode = old_mode;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3163,7 +3176,9 @@ mod tests {
         setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 1, 0);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_LINE);
 
-        unsafe { (*file).buf_mode = old_mode; }
+        unsafe {
+            (*file).buf_mode = old_mode;
+        }
     }
 
     #[test]
@@ -3177,7 +3192,9 @@ mod tests {
         setvbuf(STDERR_SENTINEL as *mut u8, core::ptr::null_mut(), 2, 0);
         assert_eq!(unsafe { (*file).buf_mode }, BUF_MODE_NONE);
 
-        unsafe { (*file).buf_mode = old_mode; }
+        unsafe {
+            (*file).buf_mode = old_mode;
+        }
     }
 
     #[test]
@@ -3267,7 +3284,11 @@ mod tests {
     #[test]
     fn test_freopen_null_mode() {
         let ret = unsafe {
-            freopen(b"/tmp/x\0".as_ptr(), core::ptr::null(), STDOUT_SENTINEL as *mut u8)
+            freopen(
+                b"/tmp/x\0".as_ptr(),
+                core::ptr::null(),
+                STDOUT_SENTINEL as *mut u8,
+            )
         };
         assert!(ret.is_null());
     }
@@ -3351,12 +3372,20 @@ mod tests {
         let old_flags = unsafe { (*file).flags };
 
         // Set error flag.
-        unsafe { (*file).flags |= FLAG_ERR; }
+        unsafe {
+            (*file).flags |= FLAG_ERR;
+        }
 
         rewind(STDERR_SENTINEL as *mut u8);
-        assert_eq!(unsafe { (*file).flags } & FLAG_ERR, 0, "rewind must clear error");
+        assert_eq!(
+            unsafe { (*file).flags } & FLAG_ERR,
+            0,
+            "rewind must clear error"
+        );
 
-        unsafe { (*file).flags = old_flags; }
+        unsafe {
+            (*file).flags = old_flags;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3590,9 +3619,13 @@ mod tests {
         let old_byte = unsafe { (*file).ungetc_byte };
         let old_flags = unsafe { (*file).flags };
 
-        unsafe { (*file).ungetc_byte = b'Z' as i16; }
+        unsafe {
+            (*file).ungetc_byte = b'Z' as i16;
+        }
         // Clear EOF so fgetc checks the pushback buffer.
-        unsafe { (*file).flags &= !FLAG_EOF; }
+        unsafe {
+            (*file).flags &= !FLAG_EOF;
+        }
 
         let c = fgetc(STDIN_SENTINEL as *mut u8);
         assert_eq!(c, b'Z' as i32, "fgetc should return the pushed-back byte");
@@ -3621,7 +3654,11 @@ mod tests {
     #[test]
     fn test_freopen64_null_mode() {
         let ret = unsafe {
-            freopen64(b"/tmp/x\0".as_ptr(), core::ptr::null(), STDOUT_SENTINEL as *mut u8)
+            freopen64(
+                b"/tmp/x\0".as_ptr(),
+                core::ptr::null(),
+                STDOUT_SENTINEL as *mut u8,
+            )
         };
         assert!(ret.is_null(), "freopen64 with null mode should fail");
     }
@@ -3631,7 +3668,11 @@ mod tests {
         // With null path and valid mode, freopen returns the same stream
         // (mode-change-only path, which is "not supported" → returns stream).
         let ret = unsafe {
-            freopen64(core::ptr::null(), b"r\0".as_ptr(), STDOUT_SENTINEL as *mut u8)
+            freopen64(
+                core::ptr::null(),
+                b"r\0".as_ptr(),
+                STDOUT_SENTINEL as *mut u8,
+            )
         };
         assert_eq!(ret as usize, STDOUT_SENTINEL);
     }
@@ -3643,9 +3684,7 @@ mod tests {
     #[test]
     fn test_getline_null_lineptr() {
         let mut n: usize = 0;
-        let ret = unsafe {
-            getline(core::ptr::null_mut(), &raw mut n, STDIN_SENTINEL as *mut u8)
-        };
+        let ret = unsafe { getline(core::ptr::null_mut(), &raw mut n, STDIN_SENTINEL as *mut u8) };
         assert_eq!(ret, -1);
     }
 
@@ -3653,7 +3692,11 @@ mod tests {
     fn test_getline_null_n() {
         let mut ptr: *mut u8 = core::ptr::null_mut();
         let ret = unsafe {
-            getline(&raw mut ptr, core::ptr::null_mut(), STDIN_SENTINEL as *mut u8)
+            getline(
+                &raw mut ptr,
+                core::ptr::null_mut(),
+                STDIN_SENTINEL as *mut u8,
+            )
         };
         assert_eq!(ret, -1);
     }
@@ -3664,7 +3707,12 @@ mod tests {
         let mut n: usize = 0;
         crate::errno::set_errno(0);
         let ret = unsafe {
-            getdelim(core::ptr::null_mut(), &raw mut n, b';' as i32, STDIN_SENTINEL as *mut u8)
+            getdelim(
+                core::ptr::null_mut(),
+                &raw mut n,
+                b';' as i32,
+                STDIN_SENTINEL as *mut u8,
+            )
         };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -3678,7 +3726,12 @@ mod tests {
         let mut ptr: *mut u8 = core::ptr::null_mut();
         let mut n: usize = 0;
         let ret = unsafe {
-            getdelim(&raw mut ptr, &raw mut n, b'\n' as i32, STDIN_SENTINEL as *mut u8)
+            getdelim(
+                &raw mut ptr,
+                &raw mut n,
+                b'\n' as i32,
+                STDIN_SENTINEL as *mut u8,
+            )
         };
         // Either -1 (EOF) or some positive value depending on host stdin.
         // The point: if allocation succeeded, n and ptr were updated.
@@ -3688,7 +3741,9 @@ mod tests {
         }
         // Clean up if a buffer was allocated.
         if !ptr.is_null() {
-            unsafe { crate::malloc::free(ptr); }
+            unsafe {
+                crate::malloc::free(ptr);
+            }
         }
     }
 
@@ -3700,7 +3755,9 @@ mod tests {
     fn test_perror_null_prefix() {
         // perror(NULL) should print just "strerror(errno)\n".
         crate::errno::set_errno(crate::errno::ENOENT);
-        unsafe { perror(core::ptr::null()); }
+        unsafe {
+            perror(core::ptr::null());
+        }
     }
 
     #[test]
@@ -3708,20 +3765,26 @@ mod tests {
         // perror("") should print just "strerror(errno)\n" (empty prefix
         // is treated as no prefix because *s == 0).
         crate::errno::set_errno(crate::errno::EACCES);
-        unsafe { perror(b"\0".as_ptr()); }
+        unsafe {
+            perror(b"\0".as_ptr());
+        }
     }
 
     #[test]
     fn test_perror_with_prefix() {
         crate::errno::set_errno(crate::errno::EIO);
-        unsafe { perror(b"test_perror\0".as_ptr()); }
+        unsafe {
+            perror(b"test_perror\0".as_ptr());
+        }
         // Should print "test_perror: Input/output error\n" to stderr.
     }
 
     #[test]
     fn test_perror_zero_errno() {
         crate::errno::set_errno(0);
-        unsafe { perror(b"no error\0".as_ptr()); }
+        unsafe {
+            perror(b"no error\0".as_ptr());
+        }
     }
 
     #[test]
@@ -3733,7 +3796,9 @@ mod tests {
             crate::errno::ENOSYS,
         ] {
             crate::errno::set_errno(e);
-            unsafe { perror(b"loop\0".as_ptr()); }
+            unsafe {
+                perror(b"loop\0".as_ptr());
+            }
         }
     }
 }

@@ -85,12 +85,9 @@ pub extern "C" fn ioperm(from: u64, num: u64, turn_on: i32) -> i32 {
     //   * num == 0 → from + 0 == from → first clause true → EINVAL.
     //   * from + num overflows u64 → first clause true → EINVAL.
     //   * from + num > IO_BITMAP_BITS → second clause true → EINVAL.
-    let end = match from.checked_add(num) {
-        Some(e) => e,
-        None => {
-            errno::set_errno(errno::EINVAL);
-            return -1;
-        }
+    let end = if let Some(e) = from.checked_add(num) { e } else {
+        errno::set_errno(errno::EINVAL);
+        return -1;
     };
     if end <= from || end > IO_BITMAP_BITS {
         errno::set_errno(errno::EINVAL);
@@ -109,9 +106,7 @@ pub extern "C" fn ioperm(from: u64, num: u64, turn_on: i32) -> i32 {
     // Phase 178: gate the grant path on CAP_SYS_RAWIO.  Linux:
     //   if (turn_on && !capable(CAP_SYS_RAWIO))
     //       return -EPERM;
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_RAWIO,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_RAWIO) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -193,9 +188,7 @@ pub extern "C" fn iopl(level: i32) -> i32 {
     // mirror it so unprivileged callers get EPERM (matching what
     // dosemu2 / X servers / DOS emulators see on real Linux when
     // they're missing the cap).
-    if !crate::sys_capability::has_capability(
-        crate::sys_capability::CAP_SYS_RAWIO,
-    ) {
+    if !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_RAWIO) {
         errno::set_errno(errno::EPERM);
         return -1;
     }
@@ -689,16 +682,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -713,8 +704,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -727,8 +717,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_RAWIO - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -743,12 +732,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(
-                rc, 0,
-                "capset must succeed when dropping CAP_SYS_RAWIO"
-            );
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_RAWIO");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_RAWIO));
         }
 
@@ -925,8 +910,11 @@ mod tests {
             errno::set_errno(0);
             let r = ioperm(u64::MAX, 1, 1);
             assert_eq!(r, -1);
-            assert_eq!(errno::get_errno(), errno::EINVAL,
-                "range bug must be diagnosed before cap-lack");
+            assert_eq!(
+                errno::get_errno(),
+                errno::EINVAL,
+                "range bug must be diagnosed before cap-lack"
+            );
         }
 
         // -- errno-preserved-on-success ------------------------------------
@@ -985,16 +973,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -1009,8 +995,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -1023,8 +1008,7 @@ mod tests {
                 (lo, hi & !(1u32 << (CAP_SYS_RAWIO - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1039,10 +1023,8 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
-            assert_eq!(rc, 0,
-                "capset must succeed when dropping CAP_SYS_RAWIO");
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            assert_eq!(rc, 0, "capset must succeed when dropping CAP_SYS_RAWIO");
             assert!(!crate::sys_capability::has_capability(CAP_SYS_RAWIO));
         }
 
@@ -1215,8 +1197,7 @@ mod tests {
             assert_eq!(errno::get_errno(), errno::EPERM);
             // Restore caps.
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -1231,10 +1212,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            assert_eq!(
-                crate::sys_capability::capset(&mut hdr, data.as_ptr()),
-                0,
-            );
+            assert_eq!(crate::sys_capability::capset(&mut hdr, data.as_ptr()), 0,);
             errno::set_errno(0);
             assert_eq!(iopl(3), -1);
             assert_eq!(errno::get_errno(), errno::ENOSYS);

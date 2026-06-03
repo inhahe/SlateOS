@@ -85,14 +85,27 @@ mod tests {
     #[test]
     fn test_classes_distinct() {
         let classes = [
-            USB_CLASS_PER_INTERFACE, USB_CLASS_AUDIO, USB_CLASS_COMM,
-            USB_CLASS_HID, USB_CLASS_PHYSICAL, USB_CLASS_STILL_IMAGE,
-            USB_CLASS_PRINTER, USB_CLASS_MASS_STORAGE, USB_CLASS_HUB,
-            USB_CLASS_CDC_DATA, USB_CLASS_CSCID, USB_CLASS_CONTENT_SEC,
-            USB_CLASS_VIDEO, USB_CLASS_PERSONAL_HEALTHCARE,
-            USB_CLASS_AV, USB_CLASS_BILLBOARD, USB_CLASS_TYPE_C_BRIDGE,
-            USB_CLASS_WIRELESS, USB_CLASS_MISC,
-            USB_CLASS_APP_SPEC, USB_CLASS_VENDOR_SPEC,
+            USB_CLASS_PER_INTERFACE,
+            USB_CLASS_AUDIO,
+            USB_CLASS_COMM,
+            USB_CLASS_HID,
+            USB_CLASS_PHYSICAL,
+            USB_CLASS_STILL_IMAGE,
+            USB_CLASS_PRINTER,
+            USB_CLASS_MASS_STORAGE,
+            USB_CLASS_HUB,
+            USB_CLASS_CDC_DATA,
+            USB_CLASS_CSCID,
+            USB_CLASS_CONTENT_SEC,
+            USB_CLASS_VIDEO,
+            USB_CLASS_PERSONAL_HEALTHCARE,
+            USB_CLASS_AV,
+            USB_CLASS_BILLBOARD,
+            USB_CLASS_TYPE_C_BRIDGE,
+            USB_CLASS_WIRELESS,
+            USB_CLASS_MISC,
+            USB_CLASS_APP_SPEC,
+            USB_CLASS_VENDOR_SPEC,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {

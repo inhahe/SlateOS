@@ -121,9 +121,7 @@ mod tests {
 
     #[test]
     fn test_region_states_distinct() {
-        let states = [
-            DAX_REGION_OFFLINE, DAX_REGION_ONLINE, DAX_REGION_ONLINING,
-        ];
+        let states = [DAX_REGION_OFFLINE, DAX_REGION_ONLINE, DAX_REGION_ONLINING];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
                 assert_ne!(states[i], states[j]);

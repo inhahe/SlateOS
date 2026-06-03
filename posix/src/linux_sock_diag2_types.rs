@@ -64,8 +64,10 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            SK_DIAG_ATTR_UNSPEC, SK_DIAG_ATTR_MEMINFO,
-            SK_DIAG_ATTR_SHUTDOWN, SK_DIAG_ATTR_PROTOCOL,
+            SK_DIAG_ATTR_UNSPEC,
+            SK_DIAG_ATTR_MEMINFO,
+            SK_DIAG_ATTR_SHUTDOWN,
+            SK_DIAG_ATTR_PROTOCOL,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -77,10 +79,14 @@ mod tests {
     #[test]
     fn test_meminfo_fields_distinct() {
         let fields = [
-            SK_MEMINFO_RMEM_ALLOC, SK_MEMINFO_RCVBUF,
-            SK_MEMINFO_WMEM_ALLOC, SK_MEMINFO_SNDBUF,
-            SK_MEMINFO_FWD_ALLOC, SK_MEMINFO_WMEM_QUEUED,
-            SK_MEMINFO_OPTMEM, SK_MEMINFO_BACKLOG,
+            SK_MEMINFO_RMEM_ALLOC,
+            SK_MEMINFO_RCVBUF,
+            SK_MEMINFO_WMEM_ALLOC,
+            SK_MEMINFO_SNDBUF,
+            SK_MEMINFO_FWD_ALLOC,
+            SK_MEMINFO_WMEM_QUEUED,
+            SK_MEMINFO_OPTMEM,
+            SK_MEMINFO_BACKLOG,
             SK_MEMINFO_DROPS,
         ];
         for i in 0..fields.len() {

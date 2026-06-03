@@ -71,8 +71,11 @@ mod tests {
     #[test]
     fn test_hash_ids_distinct() {
         let ids = [
-            SHADOW_MD5, SHADOW_BLOWFISH,
-            SHADOW_SHA256, SHADOW_SHA512, SHADOW_YESCRYPT,
+            SHADOW_MD5,
+            SHADOW_BLOWFISH,
+            SHADOW_SHA256,
+            SHADOW_SHA512,
+            SHADOW_YESCRYPT,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

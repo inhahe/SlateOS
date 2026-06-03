@@ -47,15 +47,20 @@ mod tests {
 
     #[test]
     fn test_request_flags_composable() {
-        assert_eq!(GPIOEVENT_REQUEST_BOTH_EDGES,
-            GPIOEVENT_REQUEST_RISING_EDGE | GPIOEVENT_REQUEST_FALLING_EDGE);
+        assert_eq!(
+            GPIOEVENT_REQUEST_BOTH_EDGES,
+            GPIOEVENT_REQUEST_RISING_EDGE | GPIOEVENT_REQUEST_FALLING_EDGE
+        );
     }
 
     #[test]
     fn test_request_flags_no_overlap() {
         assert!(GPIOEVENT_REQUEST_RISING_EDGE.is_power_of_two());
         assert!(GPIOEVENT_REQUEST_FALLING_EDGE.is_power_of_two());
-        assert_eq!(GPIOEVENT_REQUEST_RISING_EDGE & GPIOEVENT_REQUEST_FALLING_EDGE, 0);
+        assert_eq!(
+            GPIOEVENT_REQUEST_RISING_EDGE & GPIOEVENT_REQUEST_FALLING_EDGE,
+            0
+        );
     }
 
     #[test]

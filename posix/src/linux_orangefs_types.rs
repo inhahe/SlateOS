@@ -117,9 +117,12 @@ mod tests {
     #[test]
     fn test_object_types_power_of_two() {
         let types = [
-            ORANGEFS_TYPE_METAFILE, ORANGEFS_TYPE_DATAFILE,
-            ORANGEFS_TYPE_DIRECTORY, ORANGEFS_TYPE_SYMLINK,
-            ORANGEFS_TYPE_DIRDATA, ORANGEFS_TYPE_INTERNAL,
+            ORANGEFS_TYPE_METAFILE,
+            ORANGEFS_TYPE_DATAFILE,
+            ORANGEFS_TYPE_DIRECTORY,
+            ORANGEFS_TYPE_SYMLINK,
+            ORANGEFS_TYPE_DIRDATA,
+            ORANGEFS_TYPE_INTERNAL,
         ];
         for t in &types {
             assert!(t.is_power_of_two(), "{} not power of two", t);
@@ -129,9 +132,12 @@ mod tests {
     #[test]
     fn test_object_types_distinct() {
         let types = [
-            ORANGEFS_TYPE_NONE, ORANGEFS_TYPE_METAFILE,
-            ORANGEFS_TYPE_DATAFILE, ORANGEFS_TYPE_DIRECTORY,
-            ORANGEFS_TYPE_SYMLINK, ORANGEFS_TYPE_DIRDATA,
+            ORANGEFS_TYPE_NONE,
+            ORANGEFS_TYPE_METAFILE,
+            ORANGEFS_TYPE_DATAFILE,
+            ORANGEFS_TYPE_DIRECTORY,
+            ORANGEFS_TYPE_SYMLINK,
+            ORANGEFS_TYPE_DIRDATA,
             ORANGEFS_TYPE_INTERNAL,
         ];
         for i in 0..types.len() {

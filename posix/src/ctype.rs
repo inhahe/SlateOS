@@ -39,7 +39,7 @@ pub extern "C" fn isspace(c: i32) -> i32 {
     // Rust's is_ascii_whitespace() omits \v (vertical tab), so we
     // check manually.
     let b = c as u8;
-    i32::from(b == b' ' || (b >= 0x09 && b <= 0x0D))
+    i32::from(b == b' ' || (0x09..=0x0D).contains(&b))
 }
 
 /// Test for an uppercase letter.
@@ -151,59 +151,87 @@ type LocaleT = usize;
 
 /// isalpha_l — locale-aware isalpha.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isalpha_l(c: i32, _locale: LocaleT) -> i32 { isalpha(c) }
+pub extern "C" fn isalpha_l(c: i32, _locale: LocaleT) -> i32 {
+    isalpha(c)
+}
 
 /// isdigit_l — locale-aware isdigit.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isdigit_l(c: i32, _locale: LocaleT) -> i32 { isdigit(c) }
+pub extern "C" fn isdigit_l(c: i32, _locale: LocaleT) -> i32 {
+    isdigit(c)
+}
 
 /// isalnum_l — locale-aware isalnum.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isalnum_l(c: i32, _locale: LocaleT) -> i32 { isalnum(c) }
+pub extern "C" fn isalnum_l(c: i32, _locale: LocaleT) -> i32 {
+    isalnum(c)
+}
 
 /// isspace_l — locale-aware isspace.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isspace_l(c: i32, _locale: LocaleT) -> i32 { isspace(c) }
+pub extern "C" fn isspace_l(c: i32, _locale: LocaleT) -> i32 {
+    isspace(c)
+}
 
 /// isupper_l — locale-aware isupper.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isupper_l(c: i32, _locale: LocaleT) -> i32 { isupper(c) }
+pub extern "C" fn isupper_l(c: i32, _locale: LocaleT) -> i32 {
+    isupper(c)
+}
 
 /// islower_l — locale-aware islower.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn islower_l(c: i32, _locale: LocaleT) -> i32 { islower(c) }
+pub extern "C" fn islower_l(c: i32, _locale: LocaleT) -> i32 {
+    islower(c)
+}
 
 /// isprint_l — locale-aware isprint.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isprint_l(c: i32, _locale: LocaleT) -> i32 { isprint(c) }
+pub extern "C" fn isprint_l(c: i32, _locale: LocaleT) -> i32 {
+    isprint(c)
+}
 
 /// iscntrl_l — locale-aware iscntrl.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn iscntrl_l(c: i32, _locale: LocaleT) -> i32 { iscntrl(c) }
+pub extern "C" fn iscntrl_l(c: i32, _locale: LocaleT) -> i32 {
+    iscntrl(c)
+}
 
 /// ispunct_l — locale-aware ispunct.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ispunct_l(c: i32, _locale: LocaleT) -> i32 { ispunct(c) }
+pub extern "C" fn ispunct_l(c: i32, _locale: LocaleT) -> i32 {
+    ispunct(c)
+}
 
 /// isxdigit_l — locale-aware isxdigit.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isxdigit_l(c: i32, _locale: LocaleT) -> i32 { isxdigit(c) }
+pub extern "C" fn isxdigit_l(c: i32, _locale: LocaleT) -> i32 {
+    isxdigit(c)
+}
 
 /// isgraph_l — locale-aware isgraph.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isgraph_l(c: i32, _locale: LocaleT) -> i32 { isgraph(c) }
+pub extern "C" fn isgraph_l(c: i32, _locale: LocaleT) -> i32 {
+    isgraph(c)
+}
 
 /// isblank_l — locale-aware isblank.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn isblank_l(c: i32, _locale: LocaleT) -> i32 { isblank(c) }
+pub extern "C" fn isblank_l(c: i32, _locale: LocaleT) -> i32 {
+    isblank(c)
+}
 
 /// toupper_l — locale-aware toupper.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn toupper_l(c: i32, _locale: LocaleT) -> i32 { toupper(c) }
+pub extern "C" fn toupper_l(c: i32, _locale: LocaleT) -> i32 {
+    toupper(c)
+}
 
 /// tolower_l — locale-aware tolower.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn tolower_l(c: i32, _locale: LocaleT) -> i32 { tolower(c) }
+pub extern "C" fn tolower_l(c: i32, _locale: LocaleT) -> i32 {
+    tolower(c)
+}
 
 // ---------------------------------------------------------------------------
 // glibc-compatible ctype lookup tables
@@ -233,21 +261,45 @@ const _ISALNUM: u16 = 0x0008; // alnum = alpha | digit
 /// Generate the classification flags for a single byte value.
 const fn classify(c: u8) -> u16 {
     let mut f: u16 = 0;
-    if c >= b'A' && c <= b'Z' { f |= _ISU | _ISA | _ISG | _ISP | _ISALNUM; }
-    if c >= b'a' && c <= b'z' { f |= _ISL | _ISA | _ISG | _ISP | _ISALNUM; }
-    if c >= b'0' && c <= b'9' { f |= _ISD | _ISG | _ISP | _ISALNUM; }
-    if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r'
-        || c == 0x0b || c == 0x0c { f |= _ISS; }
-    if c == b' ' || c == b'\t' { f |= _ISB; }
-    if c < 0x20 || c == 0x7f { f |= _ISC; }
-    if c >= 0x20 && c <= 0x7e { f |= _ISP; }
-    if c >= 0x21 && c <= 0x7e { f |= _ISG; }
+    if c >= b'A' && c <= b'Z' {
+        f |= _ISU | _ISA | _ISG | _ISP | _ISALNUM;
+    }
+    if c >= b'a' && c <= b'z' {
+        f |= _ISL | _ISA | _ISG | _ISP | _ISALNUM;
+    }
+    if c >= b'0' && c <= b'9' {
+        f |= _ISD | _ISG | _ISP | _ISALNUM;
+    }
+    if c == b' ' || c == b'\t' || c == b'\n' || c == b'\r' || c == 0x0b || c == 0x0c {
+        f |= _ISS;
+    }
+    if c == b' ' || c == b'\t' {
+        f |= _ISB;
+    }
+    if c < 0x20 || c == 0x7f {
+        f |= _ISC;
+    }
+    if c >= 0x20 && c <= 0x7e {
+        f |= _ISP;
+    }
+    if c >= 0x21 && c <= 0x7e {
+        f |= _ISG;
+    }
     // Punct: printable + not alnum + not space
-    if (c >= 0x21 && c <= 0x2f) || (c >= 0x3a && c <= 0x40)
-        || (c >= 0x5b && c <= 0x60) || (c >= 0x7b && c <= 0x7e) { f |= _ISN; }
+    if (c >= 0x21 && c <= 0x2f)
+        || (c >= 0x3a && c <= 0x40)
+        || (c >= 0x5b && c <= 0x60)
+        || (c >= 0x7b && c <= 0x7e)
+    {
+        f |= _ISN;
+    }
     // Hex digits.
-    if (c >= b'a' && c <= b'f') || (c >= b'A' && c <= b'F') { f |= _ISX; }
-    if c >= b'0' && c <= b'9' { f |= _ISX; }
+    if (c >= b'a' && c <= b'f') || (c >= b'A' && c <= b'F') {
+        f |= _ISX;
+    }
+    if c >= b'0' && c <= b'9' {
+        f |= _ISX;
+    }
     f
 }
 
@@ -387,21 +439,36 @@ mod tests {
     #[test]
     fn test_isalpha_lowercase() {
         for c in b'a'..=b'z' {
-            assert_ne!(isalpha(i32::from(c)), 0, "isalpha({}) should be true", c as char);
+            assert_ne!(
+                isalpha(i32::from(c)),
+                0,
+                "isalpha({}) should be true",
+                c as char
+            );
         }
     }
 
     #[test]
     fn test_isalpha_uppercase() {
         for c in b'A'..=b'Z' {
-            assert_ne!(isalpha(i32::from(c)), 0, "isalpha({}) should be true", c as char);
+            assert_ne!(
+                isalpha(i32::from(c)),
+                0,
+                "isalpha({}) should be true",
+                c as char
+            );
         }
     }
 
     #[test]
     fn test_isalpha_digits() {
         for c in b'0'..=b'9' {
-            assert_eq!(isalpha(i32::from(c)), 0, "isalpha({}) should be false", c as char);
+            assert_eq!(
+                isalpha(i32::from(c)),
+                0,
+                "isalpha({}) should be false",
+                c as char
+            );
         }
     }
 
@@ -419,7 +486,12 @@ mod tests {
     #[test]
     fn test_isdigit_digits() {
         for c in b'0'..=b'9' {
-            assert_ne!(isdigit(i32::from(c)), 0, "isdigit({}) should be true", c as char);
+            assert_ne!(
+                isdigit(i32::from(c)),
+                0,
+                "isdigit({}) should be true",
+                c as char
+            );
         }
     }
 
@@ -464,12 +536,12 @@ mod tests {
 
     #[test]
     fn test_isspace_whitespace_chars() {
-        assert_ne!(isspace(i32::from(b' ')), 0);   // space
-        assert_ne!(isspace(i32::from(b'\t')), 0);  // tab
-        assert_ne!(isspace(i32::from(b'\n')), 0);  // newline
-        assert_ne!(isspace(i32::from(b'\r')), 0);  // carriage return
-        assert_ne!(isspace(0x0b), 0);               // vertical tab
-        assert_ne!(isspace(0x0c), 0);               // form feed
+        assert_ne!(isspace(i32::from(b' ')), 0); // space
+        assert_ne!(isspace(i32::from(b'\t')), 0); // tab
+        assert_ne!(isspace(i32::from(b'\n')), 0); // newline
+        assert_ne!(isspace(i32::from(b'\r')), 0); // carriage return
+        assert_ne!(isspace(0x0b), 0); // vertical tab
+        assert_ne!(isspace(0x0c), 0); // form feed
     }
 
     #[test]
@@ -553,7 +625,12 @@ mod tests {
     fn test_ispunct_punctuation() {
         let punct_chars = b"!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~";
         for &c in punct_chars {
-            assert_ne!(ispunct(i32::from(c)), 0, "ispunct({}) should be true", c as char);
+            assert_ne!(
+                ispunct(i32::from(c)),
+                0,
+                "ispunct({}) should be true",
+                c as char
+            );
         }
     }
 
@@ -654,7 +731,7 @@ mod tests {
 
     #[test]
     fn test_isascii_negative() {
-        assert_eq!(isascii(-1), 0);  // EOF
+        assert_eq!(isascii(-1), 0); // EOF
         assert_eq!(isascii(-128), 0);
     }
 
@@ -838,9 +915,15 @@ mod tests {
         assert_eq!(isprint_l(i32::from(b'!'), locale), isprint(i32::from(b'!')));
         assert_eq!(iscntrl_l(0x01, locale), iscntrl(0x01));
         assert_eq!(ispunct_l(i32::from(b'.'), locale), ispunct(i32::from(b'.')));
-        assert_eq!(isxdigit_l(i32::from(b'f'), locale), isxdigit(i32::from(b'f')));
+        assert_eq!(
+            isxdigit_l(i32::from(b'f'), locale),
+            isxdigit(i32::from(b'f'))
+        );
         assert_eq!(isgraph_l(i32::from(b'G'), locale), isgraph(i32::from(b'G')));
-        assert_eq!(isblank_l(i32::from(b'\t'), locale), isblank(i32::from(b'\t')));
+        assert_eq!(
+            isblank_l(i32::from(b'\t'), locale),
+            isblank(i32::from(b'\t'))
+        );
         assert_eq!(toupper_l(i32::from(b'a'), locale), toupper(i32::from(b'a')));
         assert_eq!(tolower_l(i32::from(b'A'), locale), tolower(i32::from(b'A')));
     }
@@ -866,7 +949,11 @@ mod tests {
         assert_ne!(flags & _ISA, 0, "ctype table should have alpha bit for 'A'");
         // Index '0' should NOT have the alpha bit.
         let flags = unsafe { *p.offset(i32::from(b'0') as isize) };
-        assert_eq!(flags & _ISA, 0, "ctype table should not have alpha bit for '0'");
+        assert_eq!(
+            flags & _ISA,
+            0,
+            "ctype table should not have alpha bit for '0'"
+        );
     }
 
     #[test]
@@ -976,10 +1063,10 @@ mod tests {
 
     #[test]
     fn test_isprint_l_boundaries() {
-        assert_ne!(isprint_l(0x20, 0), 0);  // space
-        assert_ne!(isprint_l(0x7e, 0), 0);  // '~'
-        assert_eq!(isprint_l(0x1f, 0), 0);  // US
-        assert_eq!(isprint_l(0x7f, 0), 0);  // DEL
+        assert_ne!(isprint_l(0x20, 0), 0); // space
+        assert_ne!(isprint_l(0x7e, 0), 0); // '~'
+        assert_eq!(isprint_l(0x1f, 0), 0); // US
+        assert_eq!(isprint_l(0x7f, 0), 0); // DEL
     }
 
     #[test]

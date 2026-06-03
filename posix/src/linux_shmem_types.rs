@@ -85,8 +85,12 @@ mod tests {
     #[test]
     fn test_shm_flags_distinct() {
         let flags = [
-            SHM_RDONLY, SHM_RND, SHM_REMAP,
-            SHM_EXEC, SHM_HUGETLB, SHM_NORESERVE,
+            SHM_RDONLY,
+            SHM_RND,
+            SHM_REMAP,
+            SHM_EXEC,
+            SHM_HUGETLB,
+            SHM_NORESERVE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -99,11 +99,16 @@ mod tests {
     #[test]
     fn test_field_types_distinct() {
         let types = [
-            USER_EVENT_FIELD_U8, USER_EVENT_FIELD_S8,
-            USER_EVENT_FIELD_U16, USER_EVENT_FIELD_S16,
-            USER_EVENT_FIELD_U32, USER_EVENT_FIELD_S32,
-            USER_EVENT_FIELD_U64, USER_EVENT_FIELD_S64,
-            USER_EVENT_FIELD_STRING, USER_EVENT_FIELD_DYN_ARRAY,
+            USER_EVENT_FIELD_U8,
+            USER_EVENT_FIELD_S8,
+            USER_EVENT_FIELD_U16,
+            USER_EVENT_FIELD_S16,
+            USER_EVENT_FIELD_U32,
+            USER_EVENT_FIELD_S32,
+            USER_EVENT_FIELD_U64,
+            USER_EVENT_FIELD_S64,
+            USER_EVENT_FIELD_STRING,
+            USER_EVENT_FIELD_DYN_ARRAY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

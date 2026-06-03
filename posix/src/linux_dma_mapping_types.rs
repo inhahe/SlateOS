@@ -44,29 +44,41 @@ mod tests {
     #[test]
     fn test_attrs_are_power_of_two() {
         let attrs = [
-            DMA_ATTR_WEAK_ORDERING, DMA_ATTR_WRITE_COMBINE,
-            DMA_ATTR_NO_KERNEL_MAPPING, DMA_ATTR_SKIP_CPU_SYNC,
-            DMA_ATTR_FORCE_CONTIGUOUS, DMA_ATTR_ALLOC_SINGLE_PAGES,
-            DMA_ATTR_NO_WARN, DMA_ATTR_PRIVILEGED,
+            DMA_ATTR_WEAK_ORDERING,
+            DMA_ATTR_WRITE_COMBINE,
+            DMA_ATTR_NO_KERNEL_MAPPING,
+            DMA_ATTR_SKIP_CPU_SYNC,
+            DMA_ATTR_FORCE_CONTIGUOUS,
+            DMA_ATTR_ALLOC_SINGLE_PAGES,
+            DMA_ATTR_NO_WARN,
+            DMA_ATTR_PRIVILEGED,
         ];
         for &a in &attrs {
-            assert!(a.is_power_of_two(),
-                "attr 0x{:X} is not power of two", a);
+            assert!(a.is_power_of_two(), "attr 0x{:X} is not power of two", a);
         }
     }
 
     #[test]
     fn test_attrs_no_overlap() {
         let attrs = [
-            DMA_ATTR_WEAK_ORDERING, DMA_ATTR_WRITE_COMBINE,
-            DMA_ATTR_NO_KERNEL_MAPPING, DMA_ATTR_SKIP_CPU_SYNC,
-            DMA_ATTR_FORCE_CONTIGUOUS, DMA_ATTR_ALLOC_SINGLE_PAGES,
-            DMA_ATTR_NO_WARN, DMA_ATTR_PRIVILEGED,
+            DMA_ATTR_WEAK_ORDERING,
+            DMA_ATTR_WRITE_COMBINE,
+            DMA_ATTR_NO_KERNEL_MAPPING,
+            DMA_ATTR_SKIP_CPU_SYNC,
+            DMA_ATTR_FORCE_CONTIGUOUS,
+            DMA_ATTR_ALLOC_SINGLE_PAGES,
+            DMA_ATTR_NO_WARN,
+            DMA_ATTR_PRIVILEGED,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
-                assert_eq!(attrs[i] & attrs[j], 0,
-                    "attrs 0x{:X} and 0x{:X} overlap", attrs[i], attrs[j]);
+                assert_eq!(
+                    attrs[i] & attrs[j],
+                    0,
+                    "attrs 0x{:X} and 0x{:X} overlap",
+                    attrs[i],
+                    attrs[j]
+                );
             }
         }
     }

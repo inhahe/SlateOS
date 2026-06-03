@@ -109,11 +109,17 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            FOU_ATTR_PORT, FOU_ATTR_AF, FOU_ATTR_IPPROTO,
-            FOU_ATTR_TYPE, FOU_ATTR_REMCSUM_NOPARTIAL,
-            FOU_ATTR_LOCAL_V4, FOU_ATTR_LOCAL_V6,
-            FOU_ATTR_PEER_V4, FOU_ATTR_PEER_V6,
-            FOU_ATTR_PEER_PORT, FOU_ATTR_IFINDEX,
+            FOU_ATTR_PORT,
+            FOU_ATTR_AF,
+            FOU_ATTR_IPPROTO,
+            FOU_ATTR_TYPE,
+            FOU_ATTR_REMCSUM_NOPARTIAL,
+            FOU_ATTR_LOCAL_V4,
+            FOU_ATTR_LOCAL_V6,
+            FOU_ATTR_PEER_V4,
+            FOU_ATTR_PEER_V6,
+            FOU_ATTR_PEER_PORT,
+            FOU_ATTR_IFINDEX,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -146,8 +152,10 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            FOU_IPPROTO_IPIP, FOU_IPPROTO_IPV6,
-            FOU_IPPROTO_GRE, FOU_IPPROTO_UDP,
+            FOU_IPPROTO_IPIP,
+            FOU_IPPROTO_IPV6,
+            FOU_IPPROTO_GRE,
+            FOU_IPPROTO_UDP,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {

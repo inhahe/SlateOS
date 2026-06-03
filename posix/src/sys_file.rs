@@ -3,11 +3,11 @@
 //! Re-exports `flock()` and its operation constants from the `file`
 //! module.
 
-pub use crate::file::flock;
-pub use crate::file::LOCK_SH;
 pub use crate::file::LOCK_EX;
-pub use crate::file::LOCK_UN;
 pub use crate::file::LOCK_NB;
+pub use crate::file::LOCK_SH;
+pub use crate::file::LOCK_UN;
+pub use crate::file::flock;
 
 // ---------------------------------------------------------------------------
 // Tests

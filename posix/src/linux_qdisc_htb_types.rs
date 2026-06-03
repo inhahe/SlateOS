@@ -37,9 +37,15 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_HTB_UNSPEC, TCA_HTB_PARMS, TCA_HTB_INIT,
-            TCA_HTB_CTAB, TCA_HTB_RTAB, TCA_HTB_DIRECT_QLEN,
-            TCA_HTB_RATE64, TCA_HTB_CEIL64, TCA_HTB_OFFLOAD,
+            TCA_HTB_UNSPEC,
+            TCA_HTB_PARMS,
+            TCA_HTB_INIT,
+            TCA_HTB_CTAB,
+            TCA_HTB_RTAB,
+            TCA_HTB_DIRECT_QLEN,
+            TCA_HTB_RATE64,
+            TCA_HTB_CEIL64,
+            TCA_HTB_OFFLOAD,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

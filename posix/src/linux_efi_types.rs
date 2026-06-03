@@ -89,13 +89,21 @@ mod tests {
     #[test]
     fn test_memory_types_distinct() {
         let types = [
-            EFI_RESERVED_TYPE, EFI_LOADER_CODE, EFI_LOADER_DATA,
-            EFI_BOOT_SERVICES_CODE, EFI_BOOT_SERVICES_DATA,
-            EFI_RUNTIME_SERVICES_CODE, EFI_RUNTIME_SERVICES_DATA,
-            EFI_CONVENTIONAL_MEMORY, EFI_UNUSABLE_MEMORY,
-            EFI_ACPI_RECLAIM_MEMORY, EFI_ACPI_MEMORY_NVS,
-            EFI_MEMORY_MAPPED_IO, EFI_MEMORY_MAPPED_IO_PORT_SPACE,
-            EFI_PAL_CODE, EFI_PERSISTENT_MEMORY,
+            EFI_RESERVED_TYPE,
+            EFI_LOADER_CODE,
+            EFI_LOADER_DATA,
+            EFI_BOOT_SERVICES_CODE,
+            EFI_BOOT_SERVICES_DATA,
+            EFI_RUNTIME_SERVICES_CODE,
+            EFI_RUNTIME_SERVICES_DATA,
+            EFI_CONVENTIONAL_MEMORY,
+            EFI_UNUSABLE_MEMORY,
+            EFI_ACPI_RECLAIM_MEMORY,
+            EFI_ACPI_MEMORY_NVS,
+            EFI_MEMORY_MAPPED_IO,
+            EFI_MEMORY_MAPPED_IO_PORT_SPACE,
+            EFI_PAL_CODE,
+            EFI_PERSISTENT_MEMORY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -107,8 +115,11 @@ mod tests {
     #[test]
     fn test_memory_attrs_no_overlap() {
         let attrs: [u64; 5] = [
-            EFI_MEMORY_UC, EFI_MEMORY_WC, EFI_MEMORY_WT,
-            EFI_MEMORY_WB, EFI_MEMORY_UCE,
+            EFI_MEMORY_UC,
+            EFI_MEMORY_WC,
+            EFI_MEMORY_WT,
+            EFI_MEMORY_WB,
+            EFI_MEMORY_UCE,
         ];
         for i in 0..attrs.len() {
             assert!(attrs[i].is_power_of_two());
@@ -121,7 +132,8 @@ mod tests {
     #[test]
     fn test_variable_attrs_no_overlap() {
         let attrs = [
-            EFI_VARIABLE_NON_VOLATILE, EFI_VARIABLE_BOOTSERVICE_ACCESS,
+            EFI_VARIABLE_NON_VOLATILE,
+            EFI_VARIABLE_BOOTSERVICE_ACCESS,
             EFI_VARIABLE_RUNTIME_ACCESS,
         ];
         for i in 0..attrs.len() {

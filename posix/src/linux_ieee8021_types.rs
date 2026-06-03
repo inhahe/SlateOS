@@ -68,8 +68,10 @@ mod tests {
     #[test]
     fn test_stp_states_distinct() {
         let states = [
-            STP_STATE_DISABLED, STP_STATE_LISTENING,
-            STP_STATE_LEARNING, STP_STATE_FORWARDING,
+            STP_STATE_DISABLED,
+            STP_STATE_LISTENING,
+            STP_STATE_LEARNING,
+            STP_STATE_FORWARDING,
             STP_STATE_BLOCKING,
         ];
         for i in 0..states.len() {
@@ -87,7 +89,8 @@ mod tests {
     #[test]
     fn test_mrp_port_roles_distinct() {
         let roles = [
-            MRP_PORT_ROLE_PRIMARY, MRP_PORT_ROLE_SECONDARY,
+            MRP_PORT_ROLE_PRIMARY,
+            MRP_PORT_ROLE_SECONDARY,
             MRP_PORT_ROLE_NONE,
         ];
         for i in 0..roles.len() {
@@ -100,8 +103,13 @@ mod tests {
     #[test]
     fn test_ethertypes_distinct() {
         let types = [
-            ETH_P_STP, ETH_P_PAE, ETH_P_8021Q,
-            ETH_P_8021AD, ETH_P_LLDP, ETH_P_MRP, ETH_P_CFM,
+            ETH_P_STP,
+            ETH_P_PAE,
+            ETH_P_8021Q,
+            ETH_P_8021AD,
+            ETH_P_LLDP,
+            ETH_P_MRP,
+            ETH_P_CFM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

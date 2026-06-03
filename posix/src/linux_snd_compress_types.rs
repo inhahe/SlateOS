@@ -92,13 +92,20 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            SNDRV_COMPRESS_GET_CAPS, SNDRV_COMPRESS_GET_CODEC_CAPS,
-            SNDRV_COMPRESS_SET_PARAMS, SNDRV_COMPRESS_GET_PARAMS,
-            SNDRV_COMPRESS_SET_METADATA, SNDRV_COMPRESS_GET_METADATA,
-            SNDRV_COMPRESS_START, SNDRV_COMPRESS_STOP,
-            SNDRV_COMPRESS_PAUSE, SNDRV_COMPRESS_RESUME,
-            SNDRV_COMPRESS_DRAIN, SNDRV_COMPRESS_PARTIAL_DRAIN,
-            SNDRV_COMPRESS_TSTAMP, SNDRV_COMPRESS_AVAIL,
+            SNDRV_COMPRESS_GET_CAPS,
+            SNDRV_COMPRESS_GET_CODEC_CAPS,
+            SNDRV_COMPRESS_SET_PARAMS,
+            SNDRV_COMPRESS_GET_PARAMS,
+            SNDRV_COMPRESS_SET_METADATA,
+            SNDRV_COMPRESS_GET_METADATA,
+            SNDRV_COMPRESS_START,
+            SNDRV_COMPRESS_STOP,
+            SNDRV_COMPRESS_PAUSE,
+            SNDRV_COMPRESS_RESUME,
+            SNDRV_COMPRESS_DRAIN,
+            SNDRV_COMPRESS_PARTIAL_DRAIN,
+            SNDRV_COMPRESS_TSTAMP,
+            SNDRV_COMPRESS_AVAIL,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -110,9 +117,12 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            SNDRV_COMPRESS_STATE_OPEN, SNDRV_COMPRESS_STATE_SETUP,
-            SNDRV_COMPRESS_STATE_PREPARED, SNDRV_COMPRESS_STATE_RUNNING,
-            SNDRV_COMPRESS_STATE_PAUSED, SNDRV_COMPRESS_STATE_DRAINING,
+            SNDRV_COMPRESS_STATE_OPEN,
+            SNDRV_COMPRESS_STATE_SETUP,
+            SNDRV_COMPRESS_STATE_PREPARED,
+            SNDRV_COMPRESS_STATE_RUNNING,
+            SNDRV_COMPRESS_STATE_PAUSED,
+            SNDRV_COMPRESS_STATE_DRAINING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -124,10 +134,14 @@ mod tests {
     #[test]
     fn test_codecs_distinct() {
         let codecs = [
-            SND_AUDIOCODEC_PCM, SND_AUDIOCODEC_MP3,
-            SND_AUDIOCODEC_AAC, SND_AUDIOCODEC_WMA,
-            SND_AUDIOCODEC_VORBIS, SND_AUDIOCODEC_FLAC,
-            SND_AUDIOCODEC_ALAC, SND_AUDIOCODEC_APE,
+            SND_AUDIOCODEC_PCM,
+            SND_AUDIOCODEC_MP3,
+            SND_AUDIOCODEC_AAC,
+            SND_AUDIOCODEC_WMA,
+            SND_AUDIOCODEC_VORBIS,
+            SND_AUDIOCODEC_FLAC,
+            SND_AUDIOCODEC_ALAC,
+            SND_AUDIOCODEC_APE,
             SND_AUDIOCODEC_OPUS,
         ];
         for i in 0..codecs.len() {

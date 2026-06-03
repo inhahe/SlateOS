@@ -80,8 +80,11 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            ALG_SET_KEY, ALG_SET_IV, ALG_SET_OP,
-            ALG_SET_AEAD_ASSOCLEN, ALG_SET_AEAD_AUTHSIZE,
+            ALG_SET_KEY,
+            ALG_SET_IV,
+            ALG_SET_OP,
+            ALG_SET_AEAD_ASSOCLEN,
+            ALG_SET_AEAD_AUTHSIZE,
             ALG_SET_DH_PARAMETERS,
         ];
         for i in 0..opts.len() {
@@ -93,10 +96,7 @@ mod tests {
 
     #[test]
     fn test_operations_distinct() {
-        let ops = [
-            ALG_OP_ENCRYPT, ALG_OP_DECRYPT,
-            ALG_OP_SIGN, ALG_OP_VERIFY,
-        ];
+        let ops = [ALG_OP_ENCRYPT, ALG_OP_DECRYPT, ALG_OP_SIGN, ALG_OP_VERIFY];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
                 assert_ne!(ops[i], ops[j]);

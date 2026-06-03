@@ -74,8 +74,12 @@ mod tests {
     #[test]
     fn test_region_types_distinct() {
         let types = [
-            DEVMEM_TYPE_RAM, DEVMEM_TYPE_MMIO, DEVMEM_TYPE_PCI_BAR,
-            DEVMEM_TYPE_ACPI, DEVMEM_TYPE_RESERVED, DEVMEM_TYPE_PMEM,
+            DEVMEM_TYPE_RAM,
+            DEVMEM_TYPE_MMIO,
+            DEVMEM_TYPE_PCI_BAR,
+            DEVMEM_TYPE_ACPI,
+            DEVMEM_TYPE_RESERVED,
+            DEVMEM_TYPE_PMEM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -87,8 +91,11 @@ mod tests {
     #[test]
     fn test_perms_no_overlap() {
         let perms = [
-            DEVMEM_PERM_READ, DEVMEM_PERM_WRITE, DEVMEM_PERM_EXEC,
-            DEVMEM_PERM_CACHED, DEVMEM_PERM_WC,
+            DEVMEM_PERM_READ,
+            DEVMEM_PERM_WRITE,
+            DEVMEM_PERM_EXEC,
+            DEVMEM_PERM_CACHED,
+            DEVMEM_PERM_WC,
         ];
         for i in 0..perms.len() {
             for j in (i + 1)..perms.len() {
@@ -110,8 +117,11 @@ mod tests {
     #[test]
     fn test_cache_modes_distinct() {
         let caches = [
-            DEVMEM_CACHE_UC, DEVMEM_CACHE_WC, DEVMEM_CACHE_WT,
-            DEVMEM_CACHE_WB, DEVMEM_CACHE_UC_MINUS,
+            DEVMEM_CACHE_UC,
+            DEVMEM_CACHE_WC,
+            DEVMEM_CACHE_WT,
+            DEVMEM_CACHE_WB,
+            DEVMEM_CACHE_UC_MINUS,
         ];
         for i in 0..caches.len() {
             for j in (i + 1)..caches.len() {

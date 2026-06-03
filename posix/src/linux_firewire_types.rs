@@ -114,11 +114,16 @@ mod tests {
     #[test]
     fn test_tcodes_distinct() {
         let tcodes = [
-            TCODE_WRITE_QUADLET_REQUEST, TCODE_WRITE_BLOCK_REQUEST,
-            TCODE_WRITE_RESPONSE, TCODE_READ_QUADLET_REQUEST,
-            TCODE_READ_BLOCK_REQUEST, TCODE_READ_QUADLET_RESPONSE,
-            TCODE_READ_BLOCK_RESPONSE, TCODE_LOCK_REQUEST,
-            TCODE_STREAM_DATA, TCODE_LOCK_RESPONSE,
+            TCODE_WRITE_QUADLET_REQUEST,
+            TCODE_WRITE_BLOCK_REQUEST,
+            TCODE_WRITE_RESPONSE,
+            TCODE_READ_QUADLET_REQUEST,
+            TCODE_READ_BLOCK_REQUEST,
+            TCODE_READ_QUADLET_RESPONSE,
+            TCODE_READ_BLOCK_RESPONSE,
+            TCODE_LOCK_REQUEST,
+            TCODE_STREAM_DATA,
+            TCODE_LOCK_RESPONSE,
         ];
         for i in 0..tcodes.len() {
             for j in (i + 1)..tcodes.len() {
@@ -130,8 +135,10 @@ mod tests {
     #[test]
     fn test_rcodes_distinct() {
         let rcodes = [
-            RCODE_COMPLETE, RCODE_CONFLICT_ERROR,
-            RCODE_DATA_ERROR, RCODE_TYPE_ERROR,
+            RCODE_COMPLETE,
+            RCODE_CONFLICT_ERROR,
+            RCODE_DATA_ERROR,
+            RCODE_TYPE_ERROR,
             RCODE_ADDRESS_ERROR,
         ];
         for i in 0..rcodes.len() {
@@ -144,8 +151,10 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            FW_CDEV_EVENT_BUS_RESET, FW_CDEV_EVENT_RESPONSE,
-            FW_CDEV_EVENT_REQUEST, FW_CDEV_EVENT_ISO_INTERRUPT,
+            FW_CDEV_EVENT_BUS_RESET,
+            FW_CDEV_EVENT_RESPONSE,
+            FW_CDEV_EVENT_REQUEST,
+            FW_CDEV_EVENT_ISO_INTERRUPT,
             FW_CDEV_EVENT_ISO_INTERRUPT_MULTICHANNEL,
             FW_CDEV_EVENT_PHY_PACKET_SENT,
             FW_CDEV_EVENT_PHY_PACKET_RECEIVED,

@@ -77,8 +77,10 @@ mod tests {
     #[test]
     fn test_event_offsets_ascending() {
         let offsets = [
-            IO_EVENT_OFF_DATA, IO_EVENT_OFF_OBJ,
-            IO_EVENT_OFF_RES, IO_EVENT_OFF_RES2,
+            IO_EVENT_OFF_DATA,
+            IO_EVENT_OFF_OBJ,
+            IO_EVENT_OFF_RES,
+            IO_EVENT_OFF_RES2,
         ];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);

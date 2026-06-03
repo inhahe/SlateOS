@@ -80,8 +80,11 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            VDPA_CMD_DEV_GET, VDPA_CMD_DEV_NEW, VDPA_CMD_DEV_DEL,
-            VDPA_CMD_MGMTDEV_GET, VDPA_CMD_DEV_CONFIG_GET,
+            VDPA_CMD_DEV_GET,
+            VDPA_CMD_DEV_NEW,
+            VDPA_CMD_DEV_DEL,
+            VDPA_CMD_MGMTDEV_GET,
+            VDPA_CMD_DEV_CONFIG_GET,
             VDPA_CMD_DEV_VSTATS_GET,
         ];
         for i in 0..cmds.len() {
@@ -94,14 +97,20 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            VDPA_ATTR_BUS_NAME, VDPA_ATTR_DEV_NAME,
-            VDPA_ATTR_MGMTDEV_BUS_NAME, VDPA_ATTR_MGMTDEV_DEV_NAME,
+            VDPA_ATTR_BUS_NAME,
+            VDPA_ATTR_DEV_NAME,
+            VDPA_ATTR_MGMTDEV_BUS_NAME,
+            VDPA_ATTR_MGMTDEV_DEV_NAME,
             VDPA_ATTR_DEV_SUPPORTED_FEATURES,
             VDPA_ATTR_DEV_NEGOTIATED_FEATURES,
-            VDPA_ATTR_DEV_MAX_VQS, VDPA_ATTR_DEV_MAX_VQ_SIZE,
-            VDPA_ATTR_DEV_ID, VDPA_ATTR_DEV_MIN_VQ_SIZE,
-            VDPA_ATTR_DEV_NET_CFG_MACADDR, VDPA_ATTR_DEV_NET_STATUS,
-            VDPA_ATTR_DEV_NET_CFG_MTU, VDPA_ATTR_DEV_NET_CFG_MAX_VQP,
+            VDPA_ATTR_DEV_MAX_VQS,
+            VDPA_ATTR_DEV_MAX_VQ_SIZE,
+            VDPA_ATTR_DEV_ID,
+            VDPA_ATTR_DEV_MIN_VQ_SIZE,
+            VDPA_ATTR_DEV_NET_CFG_MACADDR,
+            VDPA_ATTR_DEV_NET_STATUS,
+            VDPA_ATTR_DEV_NET_CFG_MTU,
+            VDPA_ATTR_DEV_NET_CFG_MAX_VQP,
             VDPA_ATTR_DEV_QUEUE_INDEX,
         ];
         for i in 0..attrs.len() {

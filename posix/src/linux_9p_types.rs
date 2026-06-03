@@ -120,13 +120,33 @@ mod tests {
     #[test]
     fn test_message_types_distinct() {
         let msgs = [
-            P9_TVERSION, P9_RVERSION, P9_TAUTH, P9_RAUTH,
-            P9_TATTACH, P9_RATTACH, P9_RERROR,
-            P9_TFLUSH, P9_RFLUSH, P9_TWALK, P9_RWALK,
-            P9_TOPEN, P9_ROPEN, P9_TCREATE, P9_RCREATE,
-            P9_TREAD, P9_RREAD, P9_TWRITE, P9_RWRITE,
-            P9_TCLUNK, P9_RCLUNK, P9_TREMOVE, P9_RREMOVE,
-            P9_TSTAT, P9_RSTAT, P9_TWSTAT, P9_RWSTAT,
+            P9_TVERSION,
+            P9_RVERSION,
+            P9_TAUTH,
+            P9_RAUTH,
+            P9_TATTACH,
+            P9_RATTACH,
+            P9_RERROR,
+            P9_TFLUSH,
+            P9_RFLUSH,
+            P9_TWALK,
+            P9_RWALK,
+            P9_TOPEN,
+            P9_ROPEN,
+            P9_TCREATE,
+            P9_RCREATE,
+            P9_TREAD,
+            P9_RREAD,
+            P9_TWRITE,
+            P9_RWRITE,
+            P9_TCLUNK,
+            P9_RCLUNK,
+            P9_TREMOVE,
+            P9_RREMOVE,
+            P9_TSTAT,
+            P9_RSTAT,
+            P9_TWSTAT,
+            P9_RWSTAT,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -147,7 +167,14 @@ mod tests {
 
     #[test]
     fn test_qid_types_distinct() {
-        let types = [P9_QTDIR, P9_QTAPPEND, P9_QTEXCL, P9_QTAUTH, P9_QTTMP, P9_QTFILE];
+        let types = [
+            P9_QTDIR,
+            P9_QTAPPEND,
+            P9_QTEXCL,
+            P9_QTAUTH,
+            P9_QTTMP,
+            P9_QTFILE,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);

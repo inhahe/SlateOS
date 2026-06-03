@@ -67,9 +67,12 @@ mod tests {
     #[test]
     fn test_fadvise_values_distinct() {
         let vals = [
-            POSIX_FADV_NORMAL, POSIX_FADV_RANDOM,
-            POSIX_FADV_SEQUENTIAL, POSIX_FADV_WILLNEED,
-            POSIX_FADV_DONTNEED, POSIX_FADV_NOREUSE,
+            POSIX_FADV_NORMAL,
+            POSIX_FADV_RANDOM,
+            POSIX_FADV_SEQUENTIAL,
+            POSIX_FADV_WILLNEED,
+            POSIX_FADV_DONTNEED,
+            POSIX_FADV_NOREUSE,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {
@@ -96,9 +99,12 @@ mod tests {
     #[test]
     fn test_falloc_flags_distinct() {
         let flags = [
-            FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE,
-            FALLOC_FL_COLLAPSE_RANGE, FALLOC_FL_ZERO_RANGE,
-            FALLOC_FL_INSERT_RANGE, FALLOC_FL_UNSHARE_RANGE,
+            FALLOC_FL_KEEP_SIZE,
+            FALLOC_FL_PUNCH_HOLE,
+            FALLOC_FL_COLLAPSE_RANGE,
+            FALLOC_FL_ZERO_RANGE,
+            FALLOC_FL_INSERT_RANGE,
+            FALLOC_FL_UNSHARE_RANGE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -110,9 +116,12 @@ mod tests {
     #[test]
     fn test_falloc_flags_no_overlap() {
         let flags = [
-            FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE,
-            FALLOC_FL_COLLAPSE_RANGE, FALLOC_FL_ZERO_RANGE,
-            FALLOC_FL_INSERT_RANGE, FALLOC_FL_UNSHARE_RANGE,
+            FALLOC_FL_KEEP_SIZE,
+            FALLOC_FL_PUNCH_HOLE,
+            FALLOC_FL_COLLAPSE_RANGE,
+            FALLOC_FL_ZERO_RANGE,
+            FALLOC_FL_INSERT_RANGE,
+            FALLOC_FL_UNSHARE_RANGE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -124,8 +133,10 @@ mod tests {
     #[test]
     fn test_madvise_values_distinct() {
         let vals = [
-            POSIX_MADV_NORMAL, POSIX_MADV_RANDOM,
-            POSIX_MADV_SEQUENTIAL, POSIX_MADV_WILLNEED,
+            POSIX_MADV_NORMAL,
+            POSIX_MADV_RANDOM,
+            POSIX_MADV_SEQUENTIAL,
+            POSIX_MADV_WILLNEED,
             POSIX_MADV_DONTNEED,
         ];
         for i in 0..vals.len() {

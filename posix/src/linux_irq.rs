@@ -51,10 +51,8 @@ pub const IRQF_TRIGGER_HIGH: u32 = 0x0000_0004;
 /// Active low level triggered.
 pub const IRQF_TRIGGER_LOW: u32 = 0x0000_0008;
 /// Mask of all trigger bits.
-pub const IRQF_TRIGGER_MASK: u32 = IRQF_TRIGGER_RISING
-    | IRQF_TRIGGER_FALLING
-    | IRQF_TRIGGER_HIGH
-    | IRQF_TRIGGER_LOW;
+pub const IRQF_TRIGGER_MASK: u32 =
+    IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING | IRQF_TRIGGER_HIGH | IRQF_TRIGGER_LOW;
 
 // ---------------------------------------------------------------------------
 // IRQ return values
@@ -105,8 +103,10 @@ mod tests {
     #[test]
     fn test_trigger_types_powers_of_two() {
         let triggers = [
-            IRQF_TRIGGER_RISING, IRQF_TRIGGER_FALLING,
-            IRQF_TRIGGER_HIGH, IRQF_TRIGGER_LOW,
+            IRQF_TRIGGER_RISING,
+            IRQF_TRIGGER_FALLING,
+            IRQF_TRIGGER_HIGH,
+            IRQF_TRIGGER_LOW,
         ];
         for t in &triggers {
             assert!(t.is_power_of_two(), "0x{:x}", t);
@@ -116,8 +116,10 @@ mod tests {
     #[test]
     fn test_trigger_types_no_overlap() {
         let triggers = [
-            IRQF_TRIGGER_RISING, IRQF_TRIGGER_FALLING,
-            IRQF_TRIGGER_HIGH, IRQF_TRIGGER_LOW,
+            IRQF_TRIGGER_RISING,
+            IRQF_TRIGGER_FALLING,
+            IRQF_TRIGGER_HIGH,
+            IRQF_TRIGGER_LOW,
         ];
         for i in 0..triggers.len() {
             for j in (i + 1)..triggers.len() {
@@ -144,9 +146,15 @@ mod tests {
     #[test]
     fn test_softirq_vectors_distinct() {
         let vectors = [
-            HI_SOFTIRQ, TIMER_SOFTIRQ, NET_TX_SOFTIRQ,
-            NET_RX_SOFTIRQ, BLOCK_SOFTIRQ, IRQ_POLL_SOFTIRQ,
-            TASKLET_SOFTIRQ, SCHED_SOFTIRQ, HRTIMER_SOFTIRQ,
+            HI_SOFTIRQ,
+            TIMER_SOFTIRQ,
+            NET_TX_SOFTIRQ,
+            NET_RX_SOFTIRQ,
+            BLOCK_SOFTIRQ,
+            IRQ_POLL_SOFTIRQ,
+            TASKLET_SOFTIRQ,
+            SCHED_SOFTIRQ,
+            HRTIMER_SOFTIRQ,
             RCU_SOFTIRQ,
         ];
         for i in 0..vectors.len() {
@@ -164,9 +172,15 @@ mod tests {
     #[test]
     fn test_all_softirqs_below_nr() {
         let vectors = [
-            HI_SOFTIRQ, TIMER_SOFTIRQ, NET_TX_SOFTIRQ,
-            NET_RX_SOFTIRQ, BLOCK_SOFTIRQ, IRQ_POLL_SOFTIRQ,
-            TASKLET_SOFTIRQ, SCHED_SOFTIRQ, HRTIMER_SOFTIRQ,
+            HI_SOFTIRQ,
+            TIMER_SOFTIRQ,
+            NET_TX_SOFTIRQ,
+            NET_RX_SOFTIRQ,
+            BLOCK_SOFTIRQ,
+            IRQ_POLL_SOFTIRQ,
+            TASKLET_SOFTIRQ,
+            SCHED_SOFTIRQ,
+            HRTIMER_SOFTIRQ,
             RCU_SOFTIRQ,
         ];
         for v in &vectors {
@@ -177,11 +191,19 @@ mod tests {
     #[test]
     fn test_request_flags_distinct() {
         let flags = [
-            IRQF_SHARED, IRQF_PROBE_SHARED, IRQF_TIMER,
-            IRQF_PERCPU, IRQF_NOBALANCING, IRQF_IRQPOLL,
-            IRQF_ONESHOT, IRQF_NO_SUSPEND, IRQF_FORCE_RESUME,
-            IRQF_NO_THREAD, IRQF_EARLY_RESUME,
-            IRQF_COND_SUSPEND, IRQF_COND_ONESHOT,
+            IRQF_SHARED,
+            IRQF_PROBE_SHARED,
+            IRQF_TIMER,
+            IRQF_PERCPU,
+            IRQF_NOBALANCING,
+            IRQF_IRQPOLL,
+            IRQF_ONESHOT,
+            IRQF_NO_SUSPEND,
+            IRQF_FORCE_RESUME,
+            IRQF_NO_THREAD,
+            IRQF_EARLY_RESUME,
+            IRQF_COND_SUSPEND,
+            IRQF_COND_ONESHOT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

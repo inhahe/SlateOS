@@ -109,8 +109,10 @@ mod tests {
     #[test]
     fn test_batch_ops_distinct() {
         let batch = [
-            BPF_MAP_LOOKUP_BATCH, BPF_MAP_LOOKUP_AND_DELETE_BATCH,
-            BPF_MAP_UPDATE_BATCH, BPF_MAP_DELETE_BATCH,
+            BPF_MAP_LOOKUP_BATCH,
+            BPF_MAP_LOOKUP_AND_DELETE_BATCH,
+            BPF_MAP_UPDATE_BATCH,
+            BPF_MAP_DELETE_BATCH,
         ];
         for i in 0..batch.len() {
             for j in (i + 1)..batch.len() {

@@ -68,12 +68,24 @@ mod tests {
     #[test]
     fn test_clone_flags_power_of_two() {
         let flags: [u64; 18] = [
-            CLONE_VM, CLONE_FS, CLONE_FILES, CLONE_SIGHAND,
-            CLONE_NEWPID, CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID,
-            CLONE_CHILD_SETTID, CLONE_THREAD, CLONE_NEWNS,
-            CLONE_SYSVSEM, CLONE_SETTLS, CLONE_NEWUSER,
-            CLONE_NEWNET, CLONE_NEWIPC, CLONE_NEWUTS,
-            CLONE_VFORK, CLONE_NEWCGROUP,
+            CLONE_VM,
+            CLONE_FS,
+            CLONE_FILES,
+            CLONE_SIGHAND,
+            CLONE_NEWPID,
+            CLONE_PARENT_SETTID,
+            CLONE_CHILD_CLEARTID,
+            CLONE_CHILD_SETTID,
+            CLONE_THREAD,
+            CLONE_NEWNS,
+            CLONE_SYSVSEM,
+            CLONE_SETTLS,
+            CLONE_NEWUSER,
+            CLONE_NEWNET,
+            CLONE_NEWIPC,
+            CLONE_NEWUTS,
+            CLONE_VFORK,
+            CLONE_NEWCGROUP,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "flag {:#x} is not power of two", f);
@@ -83,17 +95,34 @@ mod tests {
     #[test]
     fn test_clone_flags_no_overlap() {
         let flags: [u64; 18] = [
-            CLONE_VM, CLONE_FS, CLONE_FILES, CLONE_SIGHAND,
-            CLONE_NEWPID, CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID,
-            CLONE_CHILD_SETTID, CLONE_THREAD, CLONE_NEWNS,
-            CLONE_SYSVSEM, CLONE_SETTLS, CLONE_NEWUSER,
-            CLONE_NEWNET, CLONE_NEWIPC, CLONE_NEWUTS,
-            CLONE_VFORK, CLONE_NEWCGROUP,
+            CLONE_VM,
+            CLONE_FS,
+            CLONE_FILES,
+            CLONE_SIGHAND,
+            CLONE_NEWPID,
+            CLONE_PARENT_SETTID,
+            CLONE_CHILD_CLEARTID,
+            CLONE_CHILD_SETTID,
+            CLONE_THREAD,
+            CLONE_NEWNS,
+            CLONE_SYSVSEM,
+            CLONE_SETTLS,
+            CLONE_NEWUSER,
+            CLONE_NEWNET,
+            CLONE_NEWIPC,
+            CLONE_NEWUTS,
+            CLONE_VFORK,
+            CLONE_NEWCGROUP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
-                assert_eq!(flags[i] & flags[j], 0,
-                    "flags {:#x} and {:#x} overlap", flags[i], flags[j]);
+                assert_eq!(
+                    flags[i] & flags[j],
+                    0,
+                    "flags {:#x} and {:#x} overlap",
+                    flags[i],
+                    flags[j]
+                );
             }
         }
     }

@@ -89,9 +89,12 @@ mod tests {
     #[test]
     fn test_type_attrs_distinct() {
         let types = [
-            TASKSTATS_TYPE_UNSPEC, TASKSTATS_TYPE_PID,
-            TASKSTATS_TYPE_TGID, TASKSTATS_TYPE_STATS,
-            TASKSTATS_TYPE_AGGR_PID, TASKSTATS_TYPE_AGGR_TGID,
+            TASKSTATS_TYPE_UNSPEC,
+            TASKSTATS_TYPE_PID,
+            TASKSTATS_TYPE_TGID,
+            TASKSTATS_TYPE_STATS,
+            TASKSTATS_TYPE_AGGR_PID,
+            TASKSTATS_TYPE_AGGR_TGID,
             TASKSTATS_TYPE_NULL,
         ];
         for i in 0..types.len() {
@@ -104,7 +107,8 @@ mod tests {
     #[test]
     fn test_cmd_attrs_distinct() {
         let attrs = [
-            TASKSTATS_CMD_ATTR_PID, TASKSTATS_CMD_ATTR_TGID,
+            TASKSTATS_CMD_ATTR_PID,
+            TASKSTATS_CMD_ATTR_TGID,
             TASKSTATS_CMD_ATTR_REGISTER_CPUMASK,
             TASKSTATS_CMD_ATTR_DEREGISTER_CPUMASK,
         ];

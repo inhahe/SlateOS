@@ -69,10 +69,19 @@ mod tests {
     #[test]
     fn test_trace_types_distinct() {
         let types = [
-            TRACE_FN, TRACE_CTX, TRACE_WAKE, TRACE_STACK,
-            TRACE_PRINT, TRACE_BPRINT, TRACE_MMIO_RW,
-            TRACE_MMIO_MAP, TRACE_BRANCH, TRACE_GRAPH_ENT,
-            TRACE_GRAPH_RET, TRACE_USER_STACK, TRACE_HWLAT,
+            TRACE_FN,
+            TRACE_CTX,
+            TRACE_WAKE,
+            TRACE_STACK,
+            TRACE_PRINT,
+            TRACE_BPRINT,
+            TRACE_MMIO_RW,
+            TRACE_MMIO_MAP,
+            TRACE_BRANCH,
+            TRACE_GRAPH_ENT,
+            TRACE_GRAPH_RET,
+            TRACE_USER_STACK,
+            TRACE_HWLAT,
             TRACE_RAW_DATA,
         ];
         for i in 0..types.len() {
@@ -85,9 +94,12 @@ mod tests {
     #[test]
     fn test_event_flags_no_overlap() {
         let flags = [
-            EVENT_FILE_FL_ENABLED, EVENT_FILE_FL_RECORDED_CMD,
-            EVENT_FILE_FL_RECORDED_TGID, EVENT_FILE_FL_TRIGGER_MODE,
-            EVENT_FILE_FL_TRIGGER_COND, EVENT_FILE_FL_PID_FILTER,
+            EVENT_FILE_FL_ENABLED,
+            EVENT_FILE_FL_RECORDED_CMD,
+            EVENT_FILE_FL_RECORDED_TGID,
+            EVENT_FILE_FL_TRIGGER_MODE,
+            EVENT_FILE_FL_TRIGGER_COND,
+            EVENT_FILE_FL_PID_FILTER,
             EVENT_FILE_FL_SOFT_DISABLED,
         ];
         for i in 0..flags.len() {

@@ -91,10 +91,14 @@ mod tests {
     #[test]
     fn test_return_codes_distinct() {
         let codes = [
-            CXL_MBOX_SUCCESS, CXL_MBOX_BG_STARTED,
-            CXL_MBOX_INVALID_INPUT, CXL_MBOX_UNSUPPORTED,
-            CXL_MBOX_INTERNAL_ERROR, CXL_MBOX_RETRY,
-            CXL_MBOX_BUSY, CXL_MBOX_MEDIA_DISABLED,
+            CXL_MBOX_SUCCESS,
+            CXL_MBOX_BG_STARTED,
+            CXL_MBOX_INVALID_INPUT,
+            CXL_MBOX_UNSUPPORTED,
+            CXL_MBOX_INTERNAL_ERROR,
+            CXL_MBOX_RETRY,
+            CXL_MBOX_BUSY,
+            CXL_MBOX_MEDIA_DISABLED,
             CXL_MBOX_FW_XFER_IN_PROGRESS,
         ];
         for i in 0..codes.len() {
@@ -107,8 +111,10 @@ mod tests {
     #[test]
     fn test_event_logs_distinct() {
         let logs = [
-            CXL_EVENT_LOG_INFO, CXL_EVENT_LOG_WARN,
-            CXL_EVENT_LOG_FAILURE, CXL_EVENT_LOG_FATAL,
+            CXL_EVENT_LOG_INFO,
+            CXL_EVENT_LOG_WARN,
+            CXL_EVENT_LOG_FAILURE,
+            CXL_EVENT_LOG_FATAL,
         ];
         for i in 0..logs.len() {
             for j in (i + 1)..logs.len() {

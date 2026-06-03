@@ -65,11 +65,17 @@ mod tests {
     #[test]
     fn test_vendor_ids_distinct() {
         let vendors = [
-            PCI_VENDOR_ID_INTEL, PCI_VENDOR_ID_AMD, PCI_VENDOR_ID_NVIDIA,
-            PCI_VENDOR_ID_REALTEK, PCI_VENDOR_ID_BROADCOM,
-            PCI_VENDOR_ID_ATHEROS, PCI_VENDOR_ID_REDHAT,
-            PCI_VENDOR_ID_SAMSUNG, PCI_VENDOR_ID_TI,
-            PCI_VENDOR_ID_VIA, PCI_VENDOR_ID_MARVELL,
+            PCI_VENDOR_ID_INTEL,
+            PCI_VENDOR_ID_AMD,
+            PCI_VENDOR_ID_NVIDIA,
+            PCI_VENDOR_ID_REALTEK,
+            PCI_VENDOR_ID_BROADCOM,
+            PCI_VENDOR_ID_ATHEROS,
+            PCI_VENDOR_ID_REDHAT,
+            PCI_VENDOR_ID_SAMSUNG,
+            PCI_VENDOR_ID_TI,
+            PCI_VENDOR_ID_VIA,
+            PCI_VENDOR_ID_MARVELL,
             PCI_VENDOR_ID_MELLANOX,
         ];
         for i in 0..vendors.len() {
@@ -92,8 +98,10 @@ mod tests {
     #[test]
     fn test_device_ids_distinct() {
         let devs = [
-            PCI_DEVICE_ID_INTEL_82574L, PCI_DEVICE_ID_INTEL_I210,
-            PCI_DEVICE_ID_INTEL_I350, PCI_DEVICE_ID_INTEL_ICH9_AHCI,
+            PCI_DEVICE_ID_INTEL_82574L,
+            PCI_DEVICE_ID_INTEL_I210,
+            PCI_DEVICE_ID_INTEL_I350,
+            PCI_DEVICE_ID_INTEL_ICH9_AHCI,
         ];
         for i in 0..devs.len() {
             for j in (i + 1)..devs.len() {

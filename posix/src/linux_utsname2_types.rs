@@ -86,8 +86,12 @@ mod tests {
     #[test]
     fn test_machine_types_distinct() {
         let types = [
-            MACH_X86_64, MACH_AARCH64, MACH_RISCV64,
-            MACH_S390X, MACH_PPC64LE, MACH_LOONGARCH64,
+            MACH_X86_64,
+            MACH_AARCH64,
+            MACH_RISCV64,
+            MACH_S390X,
+            MACH_PPC64LE,
+            MACH_LOONGARCH64,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -99,9 +103,7 @@ mod tests {
     #[test]
     fn test_version_encoding() {
         // Linux 6.1.0 = (6 << 16) | (1 << 8) | 0 = 0x060100
-        let version = (6 << KERNEL_VERSION_SHIFT_MAJOR)
-            | (1 << KERNEL_VERSION_SHIFT_MINOR)
-            | 0;
+        let version = (6 << KERNEL_VERSION_SHIFT_MAJOR) | (1 << KERNEL_VERSION_SHIFT_MINOR) | 0;
         assert_eq!(version, 0x060100);
     }
 }

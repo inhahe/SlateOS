@@ -166,7 +166,7 @@ pub const V4L2_PIX_FMT_YUV420: u32 = v4l2_fourcc(b'Y', b'U', b'1', b'2');
 /// Control class: user controls.
 pub const V4L2_CID_USER_CLASS: u32 = 0x00980000;
 /// Brightness.
-pub const V4L2_CID_BRIGHTNESS: u32 = V4L2_CID_USER_CLASS + 0;
+pub const V4L2_CID_BRIGHTNESS: u32 = V4L2_CID_USER_CLASS;
 /// Contrast.
 pub const V4L2_CID_CONTRAST: u32 = V4L2_CID_USER_CLASS + 1;
 /// Saturation.
@@ -185,10 +185,14 @@ mod tests {
     #[test]
     fn test_buf_types_distinct() {
         let types = [
-            V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-            V4L2_BUF_TYPE_VIDEO_OVERLAY, V4L2_BUF_TYPE_VBI_CAPTURE,
-            V4L2_BUF_TYPE_VBI_OUTPUT, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
-            V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE, V4L2_BUF_TYPE_META_CAPTURE,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE,
+            V4L2_BUF_TYPE_VIDEO_OUTPUT,
+            V4L2_BUF_TYPE_VIDEO_OVERLAY,
+            V4L2_BUF_TYPE_VBI_CAPTURE,
+            V4L2_BUF_TYPE_VBI_OUTPUT,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+            V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+            V4L2_BUF_TYPE_META_CAPTURE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -207,12 +211,18 @@ mod tests {
     #[test]
     fn test_capabilities_powers_of_two() {
         let caps = [
-            V4L2_CAP_VIDEO_CAPTURE, V4L2_CAP_VIDEO_OUTPUT,
-            V4L2_CAP_VIDEO_OVERLAY, V4L2_CAP_VBI_CAPTURE,
-            V4L2_CAP_VBI_OUTPUT, V4L2_CAP_READWRITE,
-            V4L2_CAP_ASYNCIO, V4L2_CAP_STREAMING,
-            V4L2_CAP_VIDEO_CAPTURE_MPLANE, V4L2_CAP_VIDEO_OUTPUT_MPLANE,
-            V4L2_CAP_META_CAPTURE, V4L2_CAP_DEVICE_CAPS,
+            V4L2_CAP_VIDEO_CAPTURE,
+            V4L2_CAP_VIDEO_OUTPUT,
+            V4L2_CAP_VIDEO_OVERLAY,
+            V4L2_CAP_VBI_CAPTURE,
+            V4L2_CAP_VBI_OUTPUT,
+            V4L2_CAP_READWRITE,
+            V4L2_CAP_ASYNCIO,
+            V4L2_CAP_STREAMING,
+            V4L2_CAP_VIDEO_CAPTURE_MPLANE,
+            V4L2_CAP_VIDEO_OUTPUT_MPLANE,
+            V4L2_CAP_META_CAPTURE,
+            V4L2_CAP_DEVICE_CAPS,
         ];
         for c in &caps {
             assert!(c.is_power_of_two(), "cap {c:#x} not power of 2");
@@ -222,20 +232,22 @@ mod tests {
     #[test]
     fn test_fourcc() {
         // V4L2_PIX_FMT_YUYV = 'Y' | 'U'<<8 | 'Y'<<16 | 'V'<<24
-        let expected = (b'Y' as u32)
-            | ((b'U' as u32) << 8)
-            | ((b'Y' as u32) << 16)
-            | ((b'V' as u32) << 24);
+        let expected =
+            (b'Y' as u32) | ((b'U' as u32) << 8) | ((b'Y' as u32) << 16) | ((b'V' as u32) << 24);
         assert_eq!(V4L2_PIX_FMT_YUYV, expected);
     }
 
     #[test]
     fn test_pixel_formats_distinct() {
         let fmts = [
-            V4L2_PIX_FMT_RGB24, V4L2_PIX_FMT_BGR24,
-            V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_MJPEG,
-            V4L2_PIX_FMT_JPEG, V4L2_PIX_FMT_H264,
-            V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_NV21,
+            V4L2_PIX_FMT_RGB24,
+            V4L2_PIX_FMT_BGR24,
+            V4L2_PIX_FMT_YUYV,
+            V4L2_PIX_FMT_MJPEG,
+            V4L2_PIX_FMT_JPEG,
+            V4L2_PIX_FMT_H264,
+            V4L2_PIX_FMT_NV12,
+            V4L2_PIX_FMT_NV21,
             V4L2_PIX_FMT_YUV420,
         ];
         for i in 0..fmts.len() {
@@ -255,9 +267,15 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            VIDIOC_QUERYCAP, VIDIOC_ENUM_FMT, VIDIOC_G_FMT,
-            VIDIOC_S_FMT, VIDIOC_REQBUFS, VIDIOC_QUERYBUF,
-            VIDIOC_QBUF, VIDIOC_DQBUF, VIDIOC_STREAMON,
+            VIDIOC_QUERYCAP,
+            VIDIOC_ENUM_FMT,
+            VIDIOC_G_FMT,
+            VIDIOC_S_FMT,
+            VIDIOC_REQBUFS,
+            VIDIOC_QUERYBUF,
+            VIDIOC_QBUF,
+            VIDIOC_DQBUF,
+            VIDIOC_STREAMON,
             VIDIOC_STREAMOFF,
         ];
         for i in 0..ioctls.len() {

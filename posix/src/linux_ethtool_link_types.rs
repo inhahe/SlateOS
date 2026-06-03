@@ -94,10 +94,22 @@ mod tests {
     #[test]
     fn test_speeds_distinct() {
         let speeds = [
-            SPEED_10, SPEED_100, SPEED_1000, SPEED_2500,
-            SPEED_5000, SPEED_10000, SPEED_14000, SPEED_20000,
-            SPEED_25000, SPEED_40000, SPEED_50000, SPEED_56000,
-            SPEED_100000, SPEED_200000, SPEED_400000, SPEED_800000,
+            SPEED_10,
+            SPEED_100,
+            SPEED_1000,
+            SPEED_2500,
+            SPEED_5000,
+            SPEED_10000,
+            SPEED_14000,
+            SPEED_20000,
+            SPEED_25000,
+            SPEED_40000,
+            SPEED_50000,
+            SPEED_56000,
+            SPEED_100000,
+            SPEED_200000,
+            SPEED_400000,
+            SPEED_800000,
             SPEED_UNKNOWN,
         ];
         for i in 0..speeds.len() {
@@ -130,8 +142,7 @@ mod tests {
     #[test]
     fn test_port_types_distinct() {
         let ports = [
-            PORT_TP, PORT_AUI, PORT_MII, PORT_FIBRE,
-            PORT_BNC, PORT_DA, PORT_NONE, PORT_OTHER,
+            PORT_TP, PORT_AUI, PORT_MII, PORT_FIBRE, PORT_BNC, PORT_DA, PORT_NONE, PORT_OTHER,
         ];
         for i in 0..ports.len() {
             for j in (i + 1)..ports.len() {

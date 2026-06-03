@@ -77,8 +77,11 @@ mod tests {
     #[test]
     fn test_function_ids_distinct() {
         let ids = [
-            VDSO_CLOCK_GETTIME, VDSO_GETTIMEOFDAY,
-            VDSO_TIME, VDSO_GETCPU, VDSO_CLOCK_GETRES,
+            VDSO_CLOCK_GETTIME,
+            VDSO_GETTIMEOFDAY,
+            VDSO_TIME,
+            VDSO_GETCPU,
+            VDSO_CLOCK_GETRES,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -90,9 +93,12 @@ mod tests {
     #[test]
     fn test_data_fields_distinct() {
         let fields = [
-            VDSO_DATA_SEQ_COUNT, VDSO_DATA_CLOCK_MODE,
-            VDSO_DATA_CYCLE_LAST, VDSO_DATA_MASK,
-            VDSO_DATA_MULT, VDSO_DATA_SHIFT,
+            VDSO_DATA_SEQ_COUNT,
+            VDSO_DATA_CLOCK_MODE,
+            VDSO_DATA_CYCLE_LAST,
+            VDSO_DATA_MASK,
+            VDSO_DATA_MULT,
+            VDSO_DATA_SHIFT,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {
@@ -104,8 +110,10 @@ mod tests {
     #[test]
     fn test_clock_modes_distinct() {
         let modes = [
-            VDSO_CLOCKMODE_NONE, VDSO_CLOCKMODE_TSC,
-            VDSO_CLOCKMODE_HPET, VDSO_CLOCKMODE_PVCLOCK,
+            VDSO_CLOCKMODE_NONE,
+            VDSO_CLOCKMODE_TSC,
+            VDSO_CLOCKMODE_HPET,
+            VDSO_CLOCKMODE_PVCLOCK,
             VDSO_CLOCKMODE_HYPERV,
         ];
         for i in 0..modes.len() {

@@ -65,10 +65,9 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            PPDATADIR, PPRSTATUS, PPRCONTROL, PPWCONTROL,
-            PPRDATA, PPWDATA, PPCLAIM, PPRELEASE,
-            PPSETMODE, PPGETMODE, PPSETTIME, PPGETTIME,
-            PPFCONTROL, PPYIELD, PPNEGOT, PPSETFLAGS, PPCLRIRQ,
+            PPDATADIR, PPRSTATUS, PPRCONTROL, PPWCONTROL, PPRDATA, PPWDATA, PPCLAIM, PPRELEASE,
+            PPSETMODE, PPGETMODE, PPSETTIME, PPGETTIME, PPFCONTROL, PPYIELD, PPNEGOT, PPSETFLAGS,
+            PPCLRIRQ,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

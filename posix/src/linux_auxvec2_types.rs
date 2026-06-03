@@ -65,13 +65,29 @@ mod tests {
     #[test]
     fn test_entries_distinct() {
         let entries = [
-            AT_NULL, AT_PHDR, AT_PHENT, AT_PHNUM,
-            AT_PAGESZ, AT_BASE, AT_FLAGS, AT_ENTRY,
-            AT_UID, AT_EUID, AT_GID, AT_EGID,
-            AT_PLATFORM, AT_HWCAP, AT_CLKTCK,
-            AT_SECURE, AT_BASE_PLATFORM, AT_RANDOM,
-            AT_HWCAP2, AT_EXECFN, AT_SYSINFO,
-            AT_SYSINFO_EHDR, AT_MINSIGSTKSZ,
+            AT_NULL,
+            AT_PHDR,
+            AT_PHENT,
+            AT_PHNUM,
+            AT_PAGESZ,
+            AT_BASE,
+            AT_FLAGS,
+            AT_ENTRY,
+            AT_UID,
+            AT_EUID,
+            AT_GID,
+            AT_EGID,
+            AT_PLATFORM,
+            AT_HWCAP,
+            AT_CLKTCK,
+            AT_SECURE,
+            AT_BASE_PLATFORM,
+            AT_RANDOM,
+            AT_HWCAP2,
+            AT_EXECFN,
+            AT_SYSINFO,
+            AT_SYSINFO_EHDR,
+            AT_MINSIGSTKSZ,
         ];
         for i in 0..entries.len() {
             for j in (i + 1)..entries.len() {

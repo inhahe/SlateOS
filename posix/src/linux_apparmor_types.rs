@@ -103,8 +103,10 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            AA_MODE_ENFORCE, AA_MODE_COMPLAIN,
-            AA_MODE_KILL, AA_MODE_UNCONFINED,
+            AA_MODE_ENFORCE,
+            AA_MODE_COMPLAIN,
+            AA_MODE_KILL,
+            AA_MODE_UNCONFINED,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -116,10 +118,18 @@ mod tests {
     #[test]
     fn test_file_perms_no_overlap() {
         let perms = [
-            AA_PERM_EXEC, AA_PERM_WRITE, AA_PERM_READ,
-            AA_PERM_APPEND, AA_PERM_CREATE, AA_PERM_DELETE,
-            AA_PERM_RENAME, AA_PERM_SETATTR, AA_PERM_GETATTR,
-            AA_PERM_LINK, AA_PERM_LOCK, AA_PERM_MMAP_EXEC,
+            AA_PERM_EXEC,
+            AA_PERM_WRITE,
+            AA_PERM_READ,
+            AA_PERM_APPEND,
+            AA_PERM_CREATE,
+            AA_PERM_DELETE,
+            AA_PERM_RENAME,
+            AA_PERM_SETATTR,
+            AA_PERM_GETATTR,
+            AA_PERM_LINK,
+            AA_PERM_LOCK,
+            AA_PERM_MMAP_EXEC,
         ];
         for i in 0..perms.len() {
             assert!(perms[i].is_power_of_two());
@@ -132,8 +142,10 @@ mod tests {
     #[test]
     fn test_exec_transitions_distinct() {
         let trans = [
-            AA_EXEC_INHERIT, AA_EXEC_PROFILE,
-            AA_EXEC_UNCONFINED, AA_EXEC_CHILD,
+            AA_EXEC_INHERIT,
+            AA_EXEC_PROFILE,
+            AA_EXEC_UNCONFINED,
+            AA_EXEC_CHILD,
         ];
         for i in 0..trans.len() {
             for j in (i + 1)..trans.len() {
@@ -145,8 +157,12 @@ mod tests {
     #[test]
     fn test_net_perms_no_overlap() {
         let perms = [
-            AA_NET_CREATE, AA_NET_BIND, AA_NET_CONNECT,
-            AA_NET_LISTEN, AA_NET_ACCEPT, AA_NET_SEND,
+            AA_NET_CREATE,
+            AA_NET_BIND,
+            AA_NET_CONNECT,
+            AA_NET_LISTEN,
+            AA_NET_ACCEPT,
+            AA_NET_SEND,
             AA_NET_RECEIVE,
         ];
         for i in 0..perms.len() {

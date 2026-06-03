@@ -92,10 +92,14 @@ mod tests {
     #[test]
     fn test_reserved_labels_distinct() {
         let labels = [
-            MPLS_LABEL_IPV4NULL, MPLS_LABEL_RTALERT,
-            MPLS_LABEL_IPV6NULL, MPLS_LABEL_IMPLNULL,
-            MPLS_LABEL_ENTROPY, MPLS_LABEL_GAL,
-            MPLS_LABEL_OAM, MPLS_LABEL_EXTENSION,
+            MPLS_LABEL_IPV4NULL,
+            MPLS_LABEL_RTALERT,
+            MPLS_LABEL_IPV6NULL,
+            MPLS_LABEL_IMPLNULL,
+            MPLS_LABEL_ENTROPY,
+            MPLS_LABEL_GAL,
+            MPLS_LABEL_OAM,
+            MPLS_LABEL_EXTENSION,
         ];
         for i in 0..labels.len() {
             for j in (i + 1)..labels.len() {
@@ -127,16 +131,17 @@ mod tests {
 
     #[test]
     fn test_header_masks_cover_all_bits() {
-        let combined = MPLS_LS_LABEL_MASK | MPLS_LS_TC_MASK
-            | MPLS_LS_S_MASK | MPLS_LS_TTL_MASK;
+        let combined = MPLS_LS_LABEL_MASK | MPLS_LS_TC_MASK | MPLS_LS_S_MASK | MPLS_LS_TTL_MASK;
         assert_eq!(combined, 0xFFFF_FFFF);
     }
 
     #[test]
     fn test_rta_attrs_distinct() {
         let attrs = [
-            MPLS_RTA_DST, MPLS_RTA_NEWDST,
-            MPLS_RTA_VIA, MPLS_RTA_TTL_PROPAGATE,
+            MPLS_RTA_DST,
+            MPLS_RTA_NEWDST,
+            MPLS_RTA_VIA,
+            MPLS_RTA_TTL_PROPAGATE,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

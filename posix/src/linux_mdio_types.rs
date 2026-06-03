@@ -81,9 +81,16 @@ mod tests {
     #[test]
     fn test_mii_regs_distinct() {
         let regs = [
-            MII_BMCR, MII_BMSR, MII_PHYSID1, MII_PHYSID2,
-            MII_ADVERTISE, MII_LPA, MII_EXPANSION,
-            MII_CTRL1000, MII_STAT1000, MII_ESTATUS,
+            MII_BMCR,
+            MII_BMSR,
+            MII_PHYSID1,
+            MII_PHYSID2,
+            MII_ADVERTISE,
+            MII_LPA,
+            MII_EXPANSION,
+            MII_CTRL1000,
+            MII_STAT1000,
+            MII_ESTATUS,
         ];
         for i in 0..regs.len() {
             for j in (i + 1)..regs.len() {
@@ -95,9 +102,15 @@ mod tests {
     #[test]
     fn test_bmcr_bits_distinct() {
         let bits = [
-            BMCR_RESET, BMCR_LOOPBACK, BMCR_SPEED100,
-            BMCR_ANENABLE, BMCR_PDOWN, BMCR_ISOLATE,
-            BMCR_ANRESTART, BMCR_FULLDPLX, BMCR_SPEED1000,
+            BMCR_RESET,
+            BMCR_LOOPBACK,
+            BMCR_SPEED100,
+            BMCR_ANENABLE,
+            BMCR_PDOWN,
+            BMCR_ISOLATE,
+            BMCR_ANRESTART,
+            BMCR_FULLDPLX,
+            BMCR_SPEED1000,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {

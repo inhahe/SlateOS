@@ -113,7 +113,8 @@ mod tests {
     #[test]
     fn test_sb_versions_distinct() {
         let versions = [
-            BCACHE_SB_VERSION_BDEV, BCACHE_SB_VERSION_CDEV,
+            BCACHE_SB_VERSION_BDEV,
+            BCACHE_SB_VERSION_CDEV,
             BCACHE_SB_VERSION_BDEV_WITH_OFFSET,
             BCACHE_SB_VERSION_BDEV_WITH_FEATURES,
             BCACHE_SB_VERSION_CDEV_WITH_FEATURES,

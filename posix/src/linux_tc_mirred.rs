@@ -44,8 +44,10 @@ mod tests {
     #[test]
     fn test_mirred_actions_distinct() {
         let actions = [
-            TCA_EGRESS_REDIR, TCA_EGRESS_MIRROR,
-            TCA_INGRESS_REDIR, TCA_INGRESS_MIRROR,
+            TCA_EGRESS_REDIR,
+            TCA_EGRESS_MIRROR,
+            TCA_INGRESS_REDIR,
+            TCA_INGRESS_MIRROR,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -57,8 +59,11 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_MIRRED_UNSPEC, TCA_MIRRED_TM,
-            TCA_MIRRED_PARMS, TCA_MIRRED_PAD, TCA_MIRRED_BLOCKID,
+            TCA_MIRRED_UNSPEC,
+            TCA_MIRRED_TM,
+            TCA_MIRRED_PARMS,
+            TCA_MIRRED_PAD,
+            TCA_MIRRED_BLOCKID,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

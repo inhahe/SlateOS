@@ -58,8 +58,12 @@ mod tests {
     #[test]
     fn test_seal_flags_no_overlap() {
         let seals = [
-            F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW,
-            F_SEAL_WRITE, F_SEAL_FUTURE_WRITE, F_SEAL_EXEC,
+            F_SEAL_SEAL,
+            F_SEAL_SHRINK,
+            F_SEAL_GROW,
+            F_SEAL_WRITE,
+            F_SEAL_FUTURE_WRITE,
+            F_SEAL_EXEC,
         ];
         for i in 0..seals.len() {
             assert!(seals[i].is_power_of_two());
@@ -77,8 +81,11 @@ mod tests {
     #[test]
     fn test_memfd_flags_no_overlap() {
         let flags = [
-            MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_HUGETLB,
-            MFD_NOEXEC_SEAL, MFD_EXEC,
+            MFD_CLOEXEC,
+            MFD_ALLOW_SEALING,
+            MFD_HUGETLB,
+            MFD_NOEXEC_SEAL,
+            MFD_EXEC,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

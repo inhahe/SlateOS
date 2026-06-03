@@ -66,9 +66,16 @@ mod tests {
     #[test]
     fn test_record_types_distinct() {
         let types = [
-            EMPTY, RUN_LVL, BOOT_TIME, NEW_TIME, OLD_TIME,
-            INIT_PROCESS, LOGIN_PROCESS, USER_PROCESS,
-            DEAD_PROCESS, ACCOUNTING,
+            EMPTY,
+            RUN_LVL,
+            BOOT_TIME,
+            NEW_TIME,
+            OLD_TIME,
+            INIT_PROCESS,
+            LOGIN_PROCESS,
+            USER_PROCESS,
+            DEAD_PROCESS,
+            ACCOUNTING,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

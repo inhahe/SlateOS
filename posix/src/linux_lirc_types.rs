@@ -102,8 +102,11 @@ mod tests {
     #[test]
     fn test_modes_no_overlap() {
         let modes = [
-            LIRC_MODE_RAW, LIRC_MODE_PULSE, LIRC_MODE_MODE2,
-            LIRC_MODE_SCANCODE, LIRC_MODE_LIRCCODE,
+            LIRC_MODE_RAW,
+            LIRC_MODE_PULSE,
+            LIRC_MODE_MODE2,
+            LIRC_MODE_SCANCODE,
+            LIRC_MODE_LIRCCODE,
         ];
         for i in 0..modes.len() {
             assert!(modes[i].is_power_of_two());
@@ -116,11 +119,17 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let cmds = [
-            LIRC_GET_FEATURES, LIRC_SET_SEND_MODE, LIRC_SET_REC_MODE,
-            LIRC_GET_SEND_MODE, LIRC_GET_REC_MODE,
-            LIRC_SET_SEND_CARRIER, LIRC_SET_REC_CARRIER,
-            LIRC_SET_SEND_DUTY_CYCLE, LIRC_SET_REC_TIMEOUT,
-            LIRC_GET_MIN_TIMEOUT, LIRC_GET_MAX_TIMEOUT,
+            LIRC_GET_FEATURES,
+            LIRC_SET_SEND_MODE,
+            LIRC_SET_REC_MODE,
+            LIRC_GET_SEND_MODE,
+            LIRC_GET_REC_MODE,
+            LIRC_SET_SEND_CARRIER,
+            LIRC_SET_REC_CARRIER,
+            LIRC_SET_SEND_DUTY_CYCLE,
+            LIRC_SET_REC_TIMEOUT,
+            LIRC_GET_MIN_TIMEOUT,
+            LIRC_GET_MAX_TIMEOUT,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -132,8 +141,10 @@ mod tests {
     #[test]
     fn test_send_features_no_overlap() {
         let feats = [
-            LIRC_CAN_SEND_RAW, LIRC_CAN_SEND_PULSE,
-            LIRC_CAN_SEND_MODE2, LIRC_CAN_SEND_SCANCODE,
+            LIRC_CAN_SEND_RAW,
+            LIRC_CAN_SEND_PULSE,
+            LIRC_CAN_SEND_MODE2,
+            LIRC_CAN_SEND_SCANCODE,
         ];
         for i in 0..feats.len() {
             assert!(feats[i].is_power_of_two());

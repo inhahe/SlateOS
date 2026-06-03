@@ -78,9 +78,13 @@ mod tests {
     #[test]
     fn test_socket_opts_distinct() {
         let opts = [
-            XDP_RX_RING, XDP_TX_RING, XDP_UMEM_REG,
-            XDP_UMEM_FILL_RING, XDP_UMEM_COMPLETION_RING,
-            XDP_STATISTICS, XDP_OPTIONS,
+            XDP_RX_RING,
+            XDP_TX_RING,
+            XDP_UMEM_REG,
+            XDP_UMEM_FILL_RING,
+            XDP_UMEM_COMPLETION_RING,
+            XDP_STATISTICS,
+            XDP_OPTIONS,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -92,8 +96,11 @@ mod tests {
     #[test]
     fn test_bind_flags_power_of_two() {
         let flags = [
-            XDP_SHARED_UMEM, XDP_COPY, XDP_ZEROCOPY,
-            XDP_USE_NEED_WAKEUP, XDP_USE_SG,
+            XDP_SHARED_UMEM,
+            XDP_COPY,
+            XDP_ZEROCOPY,
+            XDP_USE_NEED_WAKEUP,
+            XDP_USE_SG,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:04x} not power of two", f);
@@ -103,8 +110,11 @@ mod tests {
     #[test]
     fn test_bind_flags_no_overlap() {
         let flags = [
-            XDP_SHARED_UMEM, XDP_COPY, XDP_ZEROCOPY,
-            XDP_USE_NEED_WAKEUP, XDP_USE_SG,
+            XDP_SHARED_UMEM,
+            XDP_COPY,
+            XDP_ZEROCOPY,
+            XDP_USE_NEED_WAKEUP,
+            XDP_USE_SG,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

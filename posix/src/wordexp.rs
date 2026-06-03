@@ -85,11 +85,7 @@ struct WordBound {
 ///
 /// Returns 0 on success, or a `WRDE_*` error code.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn wordexp(
-    words: *const u8,
-    pwordexp: *mut WordexpT,
-    flags: i32,
-) -> i32 {
+pub extern "C" fn wordexp(words: *const u8, pwordexp: *mut WordexpT, flags: i32) -> i32 {
     if words.is_null() || pwordexp.is_null() {
         return WRDE_BADCHAR;
     }
@@ -109,7 +105,9 @@ pub extern "C" fn wordexp(
     }
 
     // Allocate word pointer array.
-    let array_size = word_count.wrapping_add(1).wrapping_mul(core::mem::size_of::<*mut u8>());
+    let array_size = word_count
+        .wrapping_add(1)
+        .wrapping_mul(core::mem::size_of::<*mut u8>());
     // malloc returns memory aligned to at least 16 bytes, so casting to
     // *mut *mut u8 (align 8) is safe.
     #[allow(clippy::cast_ptr_alignment)]
@@ -119,15 +117,15 @@ pub extern "C" fn wordexp(
     }
 
     // Expand each word.
-    let result = expand_all_words(
-        &input.buf, &bounds, word_count, flags, array_ptr,
-    );
+    let result = expand_all_words(&input.buf, &bounds, word_count, flags, array_ptr);
 
     match result {
         Ok(actual_count) => {
             // Null-terminate the array.
             // SAFETY: array_ptr has word_count+1 slots; actual_count <= word_count.
-            unsafe { *array_ptr.add(actual_count) = core::ptr::null_mut(); }
+            unsafe {
+                *array_ptr.add(actual_count) = core::ptr::null_mut();
+            }
             let we = unsafe { &mut *pwordexp };
             we.we_wordc = actual_count;
             we.we_wordv = array_ptr;
@@ -152,11 +150,15 @@ pub extern "C" fn wordfree(pwordexp: *mut WordexpT) {
             let word = unsafe { *we.we_wordv.add(i) };
             if !word.is_null() {
                 // SAFETY: word was allocated by malloc in wordexp.
-                unsafe { crate::malloc::free(word.cast()); }
+                unsafe {
+                    crate::malloc::free(word.cast());
+                }
             }
         }
         // SAFETY: we_wordv was allocated by malloc in wordexp.
-        unsafe { crate::malloc::free(we.we_wordv.cast()); }
+        unsafe {
+            crate::malloc::free(we.we_wordv.cast());
+        }
     }
 
     we.we_wordc = 0;
@@ -293,7 +295,9 @@ fn expand_all_words(
                     return Err(WRDE_NOSPACE);
                 }
                 // SAFETY: actual_count < word_count <= MAX_WORDS.
-                unsafe { *array_ptr.add(actual_count) = word_ptr; }
+                unsafe {
+                    *array_ptr.add(actual_count) = word_ptr;
+                }
                 actual_count = actual_count.wrapping_add(1);
             }
             Err(code) => {
@@ -339,7 +343,10 @@ fn expand_single_word(
         if next == 0 || next == b'/' || rp.wrapping_add(1) >= end {
             // SAFETY: "HOME\0" is a valid C string on the stack.
             let home = unsafe { crate::environ::getenv(b"HOME\0".as_ptr()) };
-            if !home.is_null() {
+            if home.is_null() {
+                // HOME not set — emit literal ~.
+                emit_byte(&mut exp, b'~');
+            } else {
                 // Append HOME value.
                 let mut hi: usize = 0;
                 loop {
@@ -351,9 +358,6 @@ fn expand_single_word(
                     emit_byte(&mut exp, hc);
                     hi = hi.wrapping_add(1);
                 }
-            } else {
-                // HOME not set — emit literal ~.
-                emit_byte(&mut exp, b'~');
             }
             rp = rp.wrapping_add(1); // Skip the ~
         }
@@ -396,12 +400,7 @@ fn emit_byte(exp: &mut ExpandedWord, byte: u8) {
 }
 
 /// Expand a single-quoted region: copy literally until closing `'`.
-fn expand_single_quoted(
-    input: &[u8],
-    pos: usize,
-    end: usize,
-    exp: &mut ExpandedWord,
-) -> usize {
+fn expand_single_quoted(input: &[u8], pos: usize, end: usize, exp: &mut ExpandedWord) -> usize {
     let mut rp = pos.wrapping_add(1); // Skip opening quote.
     while rp < end && input.get(rp).copied().unwrap_or(0) != b'\'' {
         emit_byte(exp, input.get(rp).copied().unwrap_or(0));
@@ -483,12 +482,7 @@ fn expand_dollar(
 }
 
 /// Expand a backtick command substitution.
-fn expand_backtick(
-    input: &[u8],
-    pos: usize,
-    end: usize,
-    flags: i32,
-) -> Result<usize, i32> {
+fn expand_backtick(input: &[u8], pos: usize, end: usize, flags: i32) -> Result<usize, i32> {
     if flags & WRDE_NOCMD != 0 {
         return Err(WRDE_CMDSUB);
     }
@@ -512,10 +506,14 @@ fn alloc_word(buf: &[u8], len: usize) -> *mut u8 {
     let mut ci: usize = 0;
     while ci < len {
         let byte = buf.get(ci).copied().unwrap_or(0);
-        unsafe { *word_ptr.add(ci) = byte; }
+        unsafe {
+            *word_ptr.add(ci) = byte;
+        }
         ci = ci.wrapping_add(1);
     }
-    unsafe { *word_ptr.add(len) = 0; } // NUL terminator.
+    unsafe {
+        *word_ptr.add(len) = 0;
+    } // NUL terminator.
     word_ptr
 }
 
@@ -525,10 +523,14 @@ fn free_words(array_ptr: *mut *mut u8, count: usize) {
         // SAFETY: array_ptr has count valid entries.
         let word = unsafe { *array_ptr.add(i) };
         if !word.is_null() {
-            unsafe { crate::malloc::free(word.cast()); }
+            unsafe {
+                crate::malloc::free(word.cast());
+            }
         }
     }
-    unsafe { crate::malloc::free(array_ptr.cast()); }
+    unsafe {
+        crate::malloc::free(array_ptr.cast());
+    }
 }
 
 /// Extract a variable name from `input[pos..]`, returning
@@ -660,7 +662,13 @@ mod tests {
     #[test]
     fn flags_are_distinct_powers_of_two() {
         // Each flag should be a distinct bit so they can be OR'd.
-        let flags = [WRDE_APPEND, WRDE_NOCMD, WRDE_REUSE, WRDE_SHOWERR, WRDE_UNDEF];
+        let flags = [
+            WRDE_APPEND,
+            WRDE_NOCMD,
+            WRDE_REUSE,
+            WRDE_SHOWERR,
+            WRDE_UNDEF,
+        ];
         for (i, &a) in flags.iter().enumerate() {
             assert!(a.count_ones() == 1, "flag {a} is not a power of two");
             for &b in &flags[i + 1..] {
@@ -701,8 +709,14 @@ mod tests {
 
     #[test]
     fn max_word_len_is_reasonable() {
-        assert!(MAX_WORD_LEN >= 1024, "MAX_WORD_LEN too small for practical use");
-        assert!(MAX_WORD_LEN <= 65536, "MAX_WORD_LEN wastefully large for stack");
+        assert!(
+            MAX_WORD_LEN >= 1024,
+            "MAX_WORD_LEN too small for practical use"
+        );
+        assert!(
+            MAX_WORD_LEN <= 65536,
+            "MAX_WORD_LEN wastefully large for stack"
+        );
     }
 
     #[test]
@@ -752,7 +766,9 @@ mod tests {
         let len = input.len().min(MAX_WORD_LEN);
         buf[..len].copy_from_slice(&input[..len]);
         let (bounds, count) = split_words(&buf, len);
-        (0..count).map(|i| (bounds[i].start, bounds[i].end)).collect()
+        (0..count)
+            .map(|i| (bounds[i].start, bounds[i].end))
+            .collect()
     }
 
     /// Helper: extract the word text from a split result.
@@ -797,10 +813,7 @@ mod tests {
     #[test]
     fn split_tabs_and_newlines() {
         let words = split_texts(b"a\tb\nc");
-        assert_eq!(
-            words,
-            vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],
-        );
+        assert_eq!(words, vec![b"a".to_vec(), b"b".to_vec(), b"c".to_vec()],);
     }
 
     #[test]
@@ -825,10 +838,7 @@ mod tests {
     #[test]
     fn split_mixed_quoted_and_unquoted() {
         let words = split_texts(b"a 'b c' d");
-        assert_eq!(
-            words,
-            vec![b"a".to_vec(), b"'b c'".to_vec(), b"d".to_vec()],
-        );
+        assert_eq!(words, vec![b"a".to_vec(), b"'b c'".to_vec(), b"d".to_vec()],);
     }
 
     #[test]
@@ -1173,11 +1183,7 @@ mod tests {
     fn setup_home(home: &[u8]) {
         crate::environ::clearenv();
         unsafe {
-            crate::environ::setenv(
-                b"HOME\0".as_ptr(),
-                home.as_ptr(),
-                1,
-            );
+            crate::environ::setenv(b"HOME\0".as_ptr(), home.as_ptr(), 1);
         }
     }
 

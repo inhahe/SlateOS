@@ -113,12 +113,21 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            MMC_GO_IDLE_STATE, MMC_SEND_OP_COND, MMC_ALL_SEND_CID,
-            MMC_SET_RELATIVE_ADDR, MMC_SELECT_CARD, MMC_SEND_CSD,
-            MMC_STOP_TRANSMISSION, MMC_READ_SINGLE_BLOCK,
-            MMC_READ_MULTIPLE_BLOCK, MMC_WRITE_BLOCK,
-            MMC_WRITE_MULTIPLE_BLOCK, MMC_ERASE_GROUP_START,
-            MMC_ERASE_GROUP_END, MMC_ERASE, MMC_APP_CMD,
+            MMC_GO_IDLE_STATE,
+            MMC_SEND_OP_COND,
+            MMC_ALL_SEND_CID,
+            MMC_SET_RELATIVE_ADDR,
+            MMC_SELECT_CARD,
+            MMC_SEND_CSD,
+            MMC_STOP_TRANSMISSION,
+            MMC_READ_SINGLE_BLOCK,
+            MMC_READ_MULTIPLE_BLOCK,
+            MMC_WRITE_BLOCK,
+            MMC_WRITE_MULTIPLE_BLOCK,
+            MMC_ERASE_GROUP_START,
+            MMC_ERASE_GROUP_END,
+            MMC_ERASE,
+            MMC_APP_CMD,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -130,8 +139,13 @@ mod tests {
     #[test]
     fn test_rsp_types_distinct() {
         let rsps = [
-            MMC_RSP_NONE, MMC_RSP_R1, MMC_RSP_R1B,
-            MMC_RSP_R2, MMC_RSP_R3, MMC_RSP_R6, MMC_RSP_R7,
+            MMC_RSP_NONE,
+            MMC_RSP_R1,
+            MMC_RSP_R1B,
+            MMC_RSP_R2,
+            MMC_RSP_R3,
+            MMC_RSP_R6,
+            MMC_RSP_R7,
         ];
         for i in 0..rsps.len() {
             for j in (i + 1)..rsps.len() {
@@ -153,8 +167,10 @@ mod tests {
     #[test]
     fn test_sd_acmds_distinct() {
         let acmds = [
-            SD_APP_SET_BUS_WIDTH, SD_APP_SD_STATUS,
-            SD_APP_SEND_OP_COND, SD_APP_SEND_SCR,
+            SD_APP_SET_BUS_WIDTH,
+            SD_APP_SD_STATUS,
+            SD_APP_SEND_OP_COND,
+            SD_APP_SEND_SCR,
         ];
         for i in 0..acmds.len() {
             for j in (i + 1)..acmds.len() {

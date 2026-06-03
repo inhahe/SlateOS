@@ -118,9 +118,12 @@ mod tests {
     #[test]
     fn test_tunnel_flags_no_overlap() {
         let flags = [
-            IP6_TNL_F_IGN_ENCAP_LIMIT, IP6_TNL_F_USE_ORIG_TCLASS,
-            IP6_TNL_F_USE_ORIG_FLOWLABEL, IP6_TNL_F_MIP6_DEV,
-            IP6_TNL_F_RCV_DSCP_COPY, IP6_TNL_F_USE_ORIG_FWMARK,
+            IP6_TNL_F_IGN_ENCAP_LIMIT,
+            IP6_TNL_F_USE_ORIG_TCLASS,
+            IP6_TNL_F_USE_ORIG_FLOWLABEL,
+            IP6_TNL_F_MIP6_DEV,
+            IP6_TNL_F_RCV_DSCP_COPY,
+            IP6_TNL_F_USE_ORIG_FWMARK,
             IP6_TNL_F_ALLOW_LOCAL_REMOTE,
         ];
         for i in 0..flags.len() {
@@ -133,14 +136,21 @@ mod tests {
     #[test]
     fn test_ip6tnl_attrs_distinct() {
         let attrs = [
-            IFLA_IP6TNL_UNSPEC, IFLA_IP6TNL_LINK,
-            IFLA_IP6TNL_LOCAL, IFLA_IP6TNL_REMOTE,
-            IFLA_IP6TNL_TTL, IFLA_IP6TNL_ENCAP_LIMIT,
-            IFLA_IP6TNL_FLOWINFO, IFLA_IP6TNL_FLAGS,
-            IFLA_IP6TNL_PROTO, IFLA_IP6TNL_ENCAP_TYPE,
-            IFLA_IP6TNL_ENCAP_FLAGS, IFLA_IP6TNL_ENCAP_SPORT,
+            IFLA_IP6TNL_UNSPEC,
+            IFLA_IP6TNL_LINK,
+            IFLA_IP6TNL_LOCAL,
+            IFLA_IP6TNL_REMOTE,
+            IFLA_IP6TNL_TTL,
+            IFLA_IP6TNL_ENCAP_LIMIT,
+            IFLA_IP6TNL_FLOWINFO,
+            IFLA_IP6TNL_FLAGS,
+            IFLA_IP6TNL_PROTO,
+            IFLA_IP6TNL_ENCAP_TYPE,
+            IFLA_IP6TNL_ENCAP_FLAGS,
+            IFLA_IP6TNL_ENCAP_SPORT,
             IFLA_IP6TNL_ENCAP_DPORT,
-            IFLA_IP6TNL_COLLECT_METADATA, IFLA_IP6TNL_FWMARK,
+            IFLA_IP6TNL_COLLECT_METADATA,
+            IFLA_IP6TNL_FWMARK,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -152,17 +162,28 @@ mod tests {
     #[test]
     fn test_ip6gre_attrs_distinct() {
         let attrs = [
-            IFLA_IP6GRE_UNSPEC, IFLA_IP6GRE_LINK,
-            IFLA_IP6GRE_IFLAGS, IFLA_IP6GRE_OFLAGS,
-            IFLA_IP6GRE_IKEY, IFLA_IP6GRE_OKEY,
-            IFLA_IP6GRE_LOCAL, IFLA_IP6GRE_REMOTE,
-            IFLA_IP6GRE_TTL, IFLA_IP6GRE_ENCAP_LIMIT,
-            IFLA_IP6GRE_FLOWINFO, IFLA_IP6GRE_FLAGS,
-            IFLA_IP6GRE_ENCAP_TYPE, IFLA_IP6GRE_ENCAP_FLAGS,
-            IFLA_IP6GRE_ENCAP_SPORT, IFLA_IP6GRE_ENCAP_DPORT,
-            IFLA_IP6GRE_COLLECT_METADATA, IFLA_IP6GRE_FWMARK,
-            IFLA_IP6GRE_ERSPAN_VER, IFLA_IP6GRE_ERSPAN_INDEX,
-            IFLA_IP6GRE_ERSPAN_DIR, IFLA_IP6GRE_ERSPAN_HWID,
+            IFLA_IP6GRE_UNSPEC,
+            IFLA_IP6GRE_LINK,
+            IFLA_IP6GRE_IFLAGS,
+            IFLA_IP6GRE_OFLAGS,
+            IFLA_IP6GRE_IKEY,
+            IFLA_IP6GRE_OKEY,
+            IFLA_IP6GRE_LOCAL,
+            IFLA_IP6GRE_REMOTE,
+            IFLA_IP6GRE_TTL,
+            IFLA_IP6GRE_ENCAP_LIMIT,
+            IFLA_IP6GRE_FLOWINFO,
+            IFLA_IP6GRE_FLAGS,
+            IFLA_IP6GRE_ENCAP_TYPE,
+            IFLA_IP6GRE_ENCAP_FLAGS,
+            IFLA_IP6GRE_ENCAP_SPORT,
+            IFLA_IP6GRE_ENCAP_DPORT,
+            IFLA_IP6GRE_COLLECT_METADATA,
+            IFLA_IP6GRE_FWMARK,
+            IFLA_IP6GRE_ERSPAN_VER,
+            IFLA_IP6GRE_ERSPAN_INDEX,
+            IFLA_IP6GRE_ERSPAN_DIR,
+            IFLA_IP6GRE_ERSPAN_HWID,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

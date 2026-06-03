@@ -75,8 +75,12 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            KOBJ_TYPE_REGULAR, KOBJ_TYPE_DEVICE, KOBJ_TYPE_DRIVER,
-            KOBJ_TYPE_BUS, KOBJ_TYPE_CLASS, KOBJ_TYPE_FIRMWARE,
+            KOBJ_TYPE_REGULAR,
+            KOBJ_TYPE_DEVICE,
+            KOBJ_TYPE_DRIVER,
+            KOBJ_TYPE_BUS,
+            KOBJ_TYPE_CLASS,
+            KOBJ_TYPE_FIRMWARE,
             KOBJ_TYPE_MODULE,
         ];
         for i in 0..types.len() {
@@ -89,8 +93,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            KOBJ_STATE_INITIALIZED, KOBJ_STATE_IN_SYSFS,
-            KOBJ_STATE_UEVENT_SENT, KOBJ_STATE_REMOVING,
+            KOBJ_STATE_INITIALIZED,
+            KOBJ_STATE_IN_SYSFS,
+            KOBJ_STATE_UEVENT_SENT,
+            KOBJ_STATE_REMOVING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

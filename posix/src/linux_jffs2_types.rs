@@ -121,9 +121,12 @@ mod tests {
     #[test]
     fn test_node_types_distinct() {
         let types: [u16; 7] = [
-            JFFS2_NODETYPE_DIRENT, JFFS2_NODETYPE_INODE,
-            JFFS2_NODETYPE_CLEANMARKER, JFFS2_NODETYPE_PADDING,
-            JFFS2_NODETYPE_SUMMARY, JFFS2_NODETYPE_XATTR,
+            JFFS2_NODETYPE_DIRENT,
+            JFFS2_NODETYPE_INODE,
+            JFFS2_NODETYPE_CLEANMARKER,
+            JFFS2_NODETYPE_PADDING,
+            JFFS2_NODETYPE_SUMMARY,
+            JFFS2_NODETYPE_XATTR,
             JFFS2_NODETYPE_XREF,
         ];
         for i in 0..types.len() {
@@ -143,9 +146,14 @@ mod tests {
     #[test]
     fn test_dirent_types_distinct() {
         let types: [u8; 8] = [
-            JFFS2_DT_UNKNOWN, JFFS2_DT_FIFO, JFFS2_DT_CHR,
-            JFFS2_DT_DIR, JFFS2_DT_BLK, JFFS2_DT_REG,
-            JFFS2_DT_LNK, JFFS2_DT_SOCK,
+            JFFS2_DT_UNKNOWN,
+            JFFS2_DT_FIFO,
+            JFFS2_DT_CHR,
+            JFFS2_DT_DIR,
+            JFFS2_DT_BLK,
+            JFFS2_DT_REG,
+            JFFS2_DT_LNK,
+            JFFS2_DT_SOCK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -157,8 +165,10 @@ mod tests {
     #[test]
     fn test_xprefix_distinct() {
         let prefixes: [u8; 5] = [
-            JFFS2_XPREFIX_USER, JFFS2_XPREFIX_SECURITY,
-            JFFS2_XPREFIX_ACL_ACCESS, JFFS2_XPREFIX_ACL_DEFAULT,
+            JFFS2_XPREFIX_USER,
+            JFFS2_XPREFIX_SECURITY,
+            JFFS2_XPREFIX_ACL_ACCESS,
+            JFFS2_XPREFIX_ACL_DEFAULT,
             JFFS2_XPREFIX_TRUSTED,
         ];
         for i in 0..prefixes.len() {

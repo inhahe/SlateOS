@@ -70,8 +70,10 @@ mod tests {
     #[test]
     fn test_ambient_subcommands_distinct() {
         let cmds = [
-            PR_CAP_AMBIENT_IS_SET, PR_CAP_AMBIENT_RAISE,
-            PR_CAP_AMBIENT_LOWER, PR_CAP_AMBIENT_CLEAR_ALL,
+            PR_CAP_AMBIENT_IS_SET,
+            PR_CAP_AMBIENT_RAISE,
+            PR_CAP_AMBIENT_LOWER,
+            PR_CAP_AMBIENT_CLEAR_ALL,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

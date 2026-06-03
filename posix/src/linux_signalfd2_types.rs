@@ -76,10 +76,14 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            SFD_SIGINFO_OFF_SIGNO, SFD_SIGINFO_OFF_ERRNO,
-            SFD_SIGINFO_OFF_CODE, SFD_SIGINFO_OFF_PID,
-            SFD_SIGINFO_OFF_UID, SFD_SIGINFO_OFF_FD,
-            SFD_SIGINFO_OFF_TID, SFD_SIGINFO_OFF_BAND,
+            SFD_SIGINFO_OFF_SIGNO,
+            SFD_SIGINFO_OFF_ERRNO,
+            SFD_SIGINFO_OFF_CODE,
+            SFD_SIGINFO_OFF_PID,
+            SFD_SIGINFO_OFF_UID,
+            SFD_SIGINFO_OFF_FD,
+            SFD_SIGINFO_OFF_TID,
+            SFD_SIGINFO_OFF_BAND,
             SFD_SIGINFO_OFF_OVERRUN,
         ];
         for i in 1..offsets.len() {

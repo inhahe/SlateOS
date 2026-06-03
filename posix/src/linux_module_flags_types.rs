@@ -80,8 +80,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            MODULE_STATE_COMING, MODULE_STATE_LIVE,
-            MODULE_STATE_GOING, MODULE_STATE_UNFORMED,
+            MODULE_STATE_COMING,
+            MODULE_STATE_LIVE,
+            MODULE_STATE_GOING,
+            MODULE_STATE_UNFORMED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -93,9 +95,12 @@ mod tests {
     #[test]
     fn test_taint_flags_no_overlap() {
         let flags = [
-            MODULE_TAINT_PROPRIETARY, MODULE_TAINT_FORCED,
-            MODULE_TAINT_OOT, MODULE_TAINT_STAGING,
-            MODULE_TAINT_UNSIGNED, MODULE_TAINT_TEST,
+            MODULE_TAINT_PROPRIETARY,
+            MODULE_TAINT_FORCED,
+            MODULE_TAINT_OOT,
+            MODULE_TAINT_STAGING,
+            MODULE_TAINT_UNSIGNED,
+            MODULE_TAINT_TEST,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

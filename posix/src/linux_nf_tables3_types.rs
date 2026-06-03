@@ -105,9 +105,15 @@ mod tests {
     #[test]
     fn test_object_types_distinct() {
         let types = [
-            NFT_OBJECT_UNSPEC, NFT_OBJECT_COUNTER, NFT_OBJECT_QUOTA,
-            NFT_OBJECT_CT_HELPER, NFT_OBJECT_LIMIT, NFT_OBJECT_CT_TIMEOUT,
-            NFT_OBJECT_SECMARK, NFT_OBJECT_CT_EXPECT, NFT_OBJECT_SYNPROXY,
+            NFT_OBJECT_UNSPEC,
+            NFT_OBJECT_COUNTER,
+            NFT_OBJECT_QUOTA,
+            NFT_OBJECT_CT_HELPER,
+            NFT_OBJECT_LIMIT,
+            NFT_OBJECT_CT_TIMEOUT,
+            NFT_OBJECT_SECMARK,
+            NFT_OBJECT_CT_EXPECT,
+            NFT_OBJECT_SYNPROXY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -145,12 +151,23 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            NFT_MSG_NEWTABLE, NFT_MSG_GETTABLE, NFT_MSG_DELTABLE,
-            NFT_MSG_NEWCHAIN, NFT_MSG_GETCHAIN, NFT_MSG_DELCHAIN,
-            NFT_MSG_NEWRULE, NFT_MSG_GETRULE, NFT_MSG_DELRULE,
-            NFT_MSG_NEWSET, NFT_MSG_GETSET, NFT_MSG_DELSET,
-            NFT_MSG_NEWSETELEM, NFT_MSG_GETSETELEM, NFT_MSG_DELSETELEM,
-            NFT_MSG_NEWGEN, NFT_MSG_GETGEN,
+            NFT_MSG_NEWTABLE,
+            NFT_MSG_GETTABLE,
+            NFT_MSG_DELTABLE,
+            NFT_MSG_NEWCHAIN,
+            NFT_MSG_GETCHAIN,
+            NFT_MSG_DELCHAIN,
+            NFT_MSG_NEWRULE,
+            NFT_MSG_GETRULE,
+            NFT_MSG_DELRULE,
+            NFT_MSG_NEWSET,
+            NFT_MSG_GETSET,
+            NFT_MSG_DELSET,
+            NFT_MSG_NEWSETELEM,
+            NFT_MSG_GETSETELEM,
+            NFT_MSG_DELSETELEM,
+            NFT_MSG_NEWGEN,
+            NFT_MSG_GETGEN,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {

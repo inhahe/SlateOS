@@ -45,10 +45,7 @@ pub extern "C" fn ulimit(cmd: i32, new_limit: i64) -> i64 {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            let ret = crate::resource::getrlimit(
-                crate::resource::RLIMIT_FSIZE,
-                &mut rl,
-            );
+            let ret = crate::resource::getrlimit(crate::resource::RLIMIT_FSIZE, &raw mut rl);
             if ret != 0 {
                 return -1;
             }
@@ -75,10 +72,7 @@ pub extern "C" fn ulimit(cmd: i32, new_limit: i64) -> i64 {
                 rlim_cur: limit_bytes,
                 rlim_max: limit_bytes,
             };
-            let ret = crate::resource::setrlimit(
-                crate::resource::RLIMIT_FSIZE,
-                &rl,
-            );
+            let ret = crate::resource::setrlimit(crate::resource::RLIMIT_FSIZE, &raw const rl);
             if ret != 0 {
                 return -1;
             }
@@ -89,10 +83,7 @@ pub extern "C" fn ulimit(cmd: i32, new_limit: i64) -> i64 {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            let ret = crate::resource::getrlimit(
-                crate::resource::RLIMIT_DATA,
-                &mut rl,
-            );
+            let ret = crate::resource::getrlimit(crate::resource::RLIMIT_DATA, &raw mut rl);
             if ret != 0 {
                 return -1;
             }
@@ -106,10 +97,7 @@ pub extern "C" fn ulimit(cmd: i32, new_limit: i64) -> i64 {
                 rlim_cur: 0,
                 rlim_max: 0,
             };
-            let ret = crate::resource::getrlimit(
-                crate::resource::RLIMIT_NOFILE,
-                &mut rl,
-            );
+            let ret = crate::resource::getrlimit(crate::resource::RLIMIT_NOFILE, &raw mut rl);
             if ret != 0 {
                 return -1;
             }
@@ -174,7 +162,10 @@ mod tests {
     #[test]
     fn test_getfsize_returns_positive() {
         let result = ulimit(UL_GETFSIZE, 0);
-        assert!(result > 0, "file size limit should be positive, got {result}");
+        assert!(
+            result > 0,
+            "file size limit should be positive, got {result}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -212,7 +203,10 @@ mod tests {
     #[test]
     fn test_getmaxbrk_returns_positive() {
         let result = ulimit(UL_GETMAXBRK, 0);
-        assert!(result > 0, "data segment limit should be positive, got {result}");
+        assert!(
+            result > 0,
+            "data segment limit should be positive, got {result}"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -222,7 +216,10 @@ mod tests {
     #[test]
     fn test_getopenmax_returns_positive() {
         let result = ulimit(UL_GETOPENMAX, 0);
-        assert!(result > 0, "open file limit should be positive, got {result}");
+        assert!(
+            result > 0,
+            "open file limit should be positive, got {result}"
+        );
     }
 
     #[test]
@@ -264,10 +261,7 @@ mod tests {
             rlim_cur: 0,
             rlim_max: 0,
         };
-        let ret = crate::resource::getrlimit(
-            crate::resource::RLIMIT_FSIZE,
-            &mut rl,
-        );
+        let ret = crate::resource::getrlimit(crate::resource::RLIMIT_FSIZE, &mut rl);
         assert_eq!(ret, 0);
 
         let ul_val = ulimit(UL_GETFSIZE, 0);
@@ -284,10 +278,7 @@ mod tests {
             rlim_cur: 0,
             rlim_max: 0,
         };
-        let ret = crate::resource::getrlimit(
-            crate::resource::RLIMIT_NOFILE,
-            &mut rl,
-        );
+        let ret = crate::resource::getrlimit(crate::resource::RLIMIT_NOFILE, &mut rl);
         assert_eq!(ret, 0);
 
         let ul_val = ulimit(UL_GETOPENMAX, 0);

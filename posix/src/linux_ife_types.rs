@@ -59,8 +59,12 @@ mod tests {
     #[test]
     fn test_meta_types_distinct() {
         let types = [
-            IFE_META_UNSPEC, IFE_META_SKBMARK, IFE_META_HASHID,
-            IFE_META_PRIO, IFE_META_QMAP, IFE_META_TCINDEX,
+            IFE_META_UNSPEC,
+            IFE_META_SKBMARK,
+            IFE_META_HASHID,
+            IFE_META_PRIO,
+            IFE_META_QMAP,
+            IFE_META_TCINDEX,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -72,8 +76,12 @@ mod tests {
     #[test]
     fn test_action_attrs_distinct() {
         let attrs = [
-            TCA_IFE_UNSPEC, TCA_IFE_PARMS, TCA_IFE_TM,
-            TCA_IFE_DMAC, TCA_IFE_SMAC, TCA_IFE_TYPE,
+            TCA_IFE_UNSPEC,
+            TCA_IFE_PARMS,
+            TCA_IFE_TM,
+            TCA_IFE_DMAC,
+            TCA_IFE_SMAC,
+            TCA_IFE_TYPE,
             TCA_IFE_METALST,
         ];
         for i in 0..attrs.len() {

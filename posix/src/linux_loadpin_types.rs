@@ -65,9 +65,12 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            LOADPIN_TYPE_MODULE, LOADPIN_TYPE_FIRMWARE,
-            LOADPIN_TYPE_IMA_POLICY, LOADPIN_TYPE_KEXEC_IMAGE,
-            LOADPIN_TYPE_KEXEC_INITRAMFS, LOADPIN_TYPE_SECURITY_POLICY,
+            LOADPIN_TYPE_MODULE,
+            LOADPIN_TYPE_FIRMWARE,
+            LOADPIN_TYPE_IMA_POLICY,
+            LOADPIN_TYPE_KEXEC_IMAGE,
+            LOADPIN_TYPE_KEXEC_INITRAMFS,
+            LOADPIN_TYPE_SECURITY_POLICY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -89,7 +92,8 @@ mod tests {
     #[test]
     fn test_results_distinct() {
         let results = [
-            LOADPIN_RESULT_ALLOW, LOADPIN_RESULT_DENY,
+            LOADPIN_RESULT_ALLOW,
+            LOADPIN_RESULT_DENY,
             LOADPIN_RESULT_UNKNOWN,
         ];
         for i in 0..results.len() {

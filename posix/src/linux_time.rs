@@ -7,17 +7,17 @@
 // Re-exports from time module
 // ---------------------------------------------------------------------------
 
-pub use crate::time::CLOCK_REALTIME;
-pub use crate::time::CLOCK_MONOTONIC;
-pub use crate::time::CLOCK_PROCESS_CPUTIME_ID;
-pub use crate::time::CLOCK_THREAD_CPUTIME_ID;
-pub use crate::time::CLOCK_MONOTONIC_RAW;
-pub use crate::time::CLOCK_REALTIME_COARSE;
-pub use crate::time::CLOCK_MONOTONIC_COARSE;
 pub use crate::time::CLOCK_BOOTTIME;
+pub use crate::time::CLOCK_MONOTONIC;
+pub use crate::time::CLOCK_MONOTONIC_COARSE;
+pub use crate::time::CLOCK_MONOTONIC_RAW;
+pub use crate::time::CLOCK_PROCESS_CPUTIME_ID;
+pub use crate::time::CLOCK_REALTIME;
+pub use crate::time::CLOCK_REALTIME_COARSE;
+pub use crate::time::CLOCK_THREAD_CPUTIME_ID;
 
-pub use crate::time::Timeval;
 pub use crate::time::Itimerspec;
+pub use crate::time::Timeval;
 
 pub use crate::stat::Timespec;
 pub use crate::types::ClockidT;
@@ -84,11 +84,16 @@ mod tests {
     #[test]
     fn test_clock_ids_distinct() {
         let clocks: [ClockidT; 11] = [
-            CLOCK_REALTIME, CLOCK_MONOTONIC,
-            CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID,
-            CLOCK_MONOTONIC_RAW, CLOCK_REALTIME_COARSE,
-            CLOCK_MONOTONIC_COARSE, CLOCK_BOOTTIME,
-            CLOCK_REALTIME_ALARM, CLOCK_BOOTTIME_ALARM,
+            CLOCK_REALTIME,
+            CLOCK_MONOTONIC,
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+            CLOCK_BOOTTIME,
+            CLOCK_REALTIME_ALARM,
+            CLOCK_BOOTTIME_ALARM,
             CLOCK_TAI,
         ];
         for i in 0..clocks.len() {

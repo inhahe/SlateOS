@@ -26,10 +26,7 @@ mod tests {
 
     #[test]
     fn test_attrs_distinct() {
-        let attrs = [
-            TCA_HFSC_UNSPEC, TCA_HFSC_RSC,
-            TCA_HFSC_FSC, TCA_HFSC_USC,
-        ];
+        let attrs = [TCA_HFSC_UNSPEC, TCA_HFSC_RSC, TCA_HFSC_FSC, TCA_HFSC_USC];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
                 assert_ne!(attrs[i], attrs[j]);

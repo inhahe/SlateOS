@@ -135,10 +135,14 @@ mod tests {
     #[test]
     fn test_object_states_distinct() {
         let states = [
-            FSCACHE_OBJECT_LOOKING_UP, FSCACHE_OBJECT_CREATING,
-            FSCACHE_OBJECT_AVAILABLE, FSCACHE_OBJECT_ACTIVE,
-            FSCACHE_OBJECT_INVALIDATING, FSCACHE_OBJECT_UPDATING,
-            FSCACHE_OBJECT_DYING, FSCACHE_OBJECT_DEAD,
+            FSCACHE_OBJECT_LOOKING_UP,
+            FSCACHE_OBJECT_CREATING,
+            FSCACHE_OBJECT_AVAILABLE,
+            FSCACHE_OBJECT_ACTIVE,
+            FSCACHE_OBJECT_INVALIDATING,
+            FSCACHE_OBJECT_UPDATING,
+            FSCACHE_OBJECT_DYING,
+            FSCACHE_OBJECT_DEAD,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

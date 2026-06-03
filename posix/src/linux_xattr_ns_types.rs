@@ -72,7 +72,10 @@ mod tests {
     fn test_prefix_lengths_match() {
         assert_eq!(XATTR_USER_PREFIX.len() as u32, XATTR_USER_PREFIX_LEN);
         assert_eq!(XATTR_TRUSTED_PREFIX.len() as u32, XATTR_TRUSTED_PREFIX_LEN);
-        assert_eq!(XATTR_SECURITY_PREFIX.len() as u32, XATTR_SECURITY_PREFIX_LEN);
+        assert_eq!(
+            XATTR_SECURITY_PREFIX.len() as u32,
+            XATTR_SECURITY_PREFIX_LEN
+        );
         assert_eq!(XATTR_SYSTEM_PREFIX.len() as u32, XATTR_SYSTEM_PREFIX_LEN);
     }
 

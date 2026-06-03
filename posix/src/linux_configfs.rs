@@ -94,8 +94,11 @@ mod tests {
     #[test]
     fn test_subsystem_names_distinct() {
         let names = [
-            CONFIGFS_USB_GADGET, CONFIGFS_TARGET, CONFIGFS_NVMET,
-            CONFIGFS_FPGA, CONFIGFS_PCI_EP,
+            CONFIGFS_USB_GADGET,
+            CONFIGFS_TARGET,
+            CONFIGFS_NVMET,
+            CONFIGFS_FPGA,
+            CONFIGFS_PCI_EP,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

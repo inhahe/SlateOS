@@ -106,8 +106,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            UNIX_STATE_UNCONNECTED, UNIX_STATE_CONNECTING,
-            UNIX_STATE_CONNECTED, UNIX_STATE_DISCONNECTING,
+            UNIX_STATE_UNCONNECTED,
+            UNIX_STATE_CONNECTING,
+            UNIX_STATE_CONNECTED,
+            UNIX_STATE_DISCONNECTING,
             UNIX_STATE_LISTENING,
         ];
         for i in 0..states.len() {
@@ -120,8 +122,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            UNIX_FLAG_ABSTRACT, UNIX_FLAG_BOUND,
-            UNIX_FLAG_PASSCRED, UNIX_FLAG_PASSSEC,
+            UNIX_FLAG_ABSTRACT,
+            UNIX_FLAG_BOUND,
+            UNIX_FLAG_PASSCRED,
+            UNIX_FLAG_PASSSEC,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

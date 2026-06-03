@@ -99,10 +99,18 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            TUNSETIFF, TUNSETPERSIST, TUNSETOWNER, TUNSETGROUP,
-            TUNGETFEATURES, TUNSETOFFLOAD, TUNSETQUEUE,
-            TUNGETSNDBUF, TUNSETSNDBUF, TUNGETIFF,
-            TUNSETVNETHDRSZ, TUNGETVNETHDRSZ,
+            TUNSETIFF,
+            TUNSETPERSIST,
+            TUNSETOWNER,
+            TUNSETGROUP,
+            TUNGETFEATURES,
+            TUNSETOFFLOAD,
+            TUNSETQUEUE,
+            TUNGETSNDBUF,
+            TUNSETSNDBUF,
+            TUNGETIFF,
+            TUNSETVNETHDRSZ,
+            TUNGETVNETHDRSZ,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -120,8 +128,13 @@ mod tests {
     #[test]
     fn test_offload_flags_no_overlap() {
         let flags = [
-            TUN_F_CSUM, TUN_F_TSO4, TUN_F_TSO6,
-            TUN_F_TSO_ECN, TUN_F_UFO, TUN_F_USO4, TUN_F_USO6,
+            TUN_F_CSUM,
+            TUN_F_TSO4,
+            TUN_F_TSO6,
+            TUN_F_TSO_ECN,
+            TUN_F_UFO,
+            TUN_F_USO4,
+            TUN_F_USO6,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

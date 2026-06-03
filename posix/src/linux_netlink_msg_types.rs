@@ -100,11 +100,18 @@ mod tests {
     #[test]
     fn test_protocol_families_distinct() {
         let protos = [
-            NETLINK_ROUTE, NETLINK_UNUSED, NETLINK_FIREWALL,
-            NETLINK_SOCK_DIAG, NETLINK_ISCSI, NETLINK_AUDIT,
-            NETLINK_CONNECTOR, NETLINK_NETFILTER,
-            NETLINK_KOBJECT_UEVENT, NETLINK_GENERIC,
-            NETLINK_SCSITRANSPORT, NETLINK_CRYPTO,
+            NETLINK_ROUTE,
+            NETLINK_UNUSED,
+            NETLINK_FIREWALL,
+            NETLINK_SOCK_DIAG,
+            NETLINK_ISCSI,
+            NETLINK_AUDIT,
+            NETLINK_CONNECTOR,
+            NETLINK_NETFILTER,
+            NETLINK_KOBJECT_UEVENT,
+            NETLINK_GENERIC,
+            NETLINK_SCSITRANSPORT,
+            NETLINK_CRYPTO,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
@@ -121,8 +128,12 @@ mod tests {
     #[test]
     fn test_header_flags_lower() {
         let flags = [
-            NLM_F_REQUEST, NLM_F_MULTI, NLM_F_ACK,
-            NLM_F_ECHO, NLM_F_DUMP_INTR, NLM_F_DUMP_FILTERED,
+            NLM_F_REQUEST,
+            NLM_F_MULTI,
+            NLM_F_ACK,
+            NLM_F_ECHO,
+            NLM_F_DUMP_INTR,
+            NLM_F_DUMP_FILTERED,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

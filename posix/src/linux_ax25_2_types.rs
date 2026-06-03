@@ -72,9 +72,17 @@ mod tests {
     #[test]
     fn test_sockopts_distinct() {
         let opts = [
-            AX25_WINDOW, AX25_T1, AX25_N2, AX25_T3, AX25_T2,
-            AX25_BACKOFF, AX25_EXTSEQ, AX25_PIDINCL, AX25_IDLE,
-            AX25_PACLEN, AX25_IAMDIGI,
+            AX25_WINDOW,
+            AX25_T1,
+            AX25_N2,
+            AX25_T3,
+            AX25_T2,
+            AX25_BACKOFF,
+            AX25_EXTSEQ,
+            AX25_PIDINCL,
+            AX25_IDLE,
+            AX25_PACLEN,
+            AX25_IAMDIGI,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -86,10 +94,18 @@ mod tests {
     #[test]
     fn test_protocol_ids_distinct() {
         let pids = [
-            AX25_P_ROSE, AX25_P_VJCOMP, AX25_P_VJUNCOMP,
-            AX25_P_SEGMENT, AX25_P_TEXNET, AX25_P_LQ,
-            AX25_P_ATALK, AX25_P_ATALK_ARP, AX25_P_IP,
-            AX25_P_ARP, AX25_P_FLEXNET, AX25_P_NETROM,
+            AX25_P_ROSE,
+            AX25_P_VJCOMP,
+            AX25_P_VJUNCOMP,
+            AX25_P_SEGMENT,
+            AX25_P_TEXNET,
+            AX25_P_LQ,
+            AX25_P_ATALK,
+            AX25_P_ATALK_ARP,
+            AX25_P_IP,
+            AX25_P_ARP,
+            AX25_P_FLEXNET,
+            AX25_P_NETROM,
             AX25_P_TEXT,
         ];
         for i in 0..pids.len() {

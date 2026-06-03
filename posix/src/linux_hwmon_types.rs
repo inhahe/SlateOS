@@ -79,9 +79,15 @@ mod tests {
     #[test]
     fn test_sensor_types_distinct() {
         let types = [
-            HWMON_T_TEMP, HWMON_T_IN, HWMON_T_CURR, HWMON_T_POWER,
-            HWMON_T_ENERGY, HWMON_T_HUMIDITY, HWMON_T_FAN,
-            HWMON_T_PWM, HWMON_T_INTRUSION,
+            HWMON_T_TEMP,
+            HWMON_T_IN,
+            HWMON_T_CURR,
+            HWMON_T_POWER,
+            HWMON_T_ENERGY,
+            HWMON_T_HUMIDITY,
+            HWMON_T_FAN,
+            HWMON_T_PWM,
+            HWMON_T_INTRUSION,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -93,9 +99,15 @@ mod tests {
     #[test]
     fn test_temp_attrs_no_overlap() {
         let attrs = [
-            HWMON_TEMP_INPUT, HWMON_TEMP_MAX, HWMON_TEMP_MAX_HYST,
-            HWMON_TEMP_MIN, HWMON_TEMP_CRIT, HWMON_TEMP_CRIT_HYST,
-            HWMON_TEMP_EMERGENCY, HWMON_TEMP_LABEL, HWMON_TEMP_ALARM,
+            HWMON_TEMP_INPUT,
+            HWMON_TEMP_MAX,
+            HWMON_TEMP_MAX_HYST,
+            HWMON_TEMP_MIN,
+            HWMON_TEMP_CRIT,
+            HWMON_TEMP_CRIT_HYST,
+            HWMON_TEMP_EMERGENCY,
+            HWMON_TEMP_LABEL,
+            HWMON_TEMP_ALARM,
         ];
         for i in 0..attrs.len() {
             assert!(attrs[i].is_power_of_two());
@@ -108,8 +120,12 @@ mod tests {
     #[test]
     fn test_fan_attrs_no_overlap() {
         let attrs = [
-            HWMON_FAN_INPUT, HWMON_FAN_MIN, HWMON_FAN_MAX,
-            HWMON_FAN_TARGET, HWMON_FAN_ALARM, HWMON_FAN_LABEL,
+            HWMON_FAN_INPUT,
+            HWMON_FAN_MIN,
+            HWMON_FAN_MAX,
+            HWMON_FAN_TARGET,
+            HWMON_FAN_ALARM,
+            HWMON_FAN_LABEL,
         ];
         for i in 0..attrs.len() {
             assert!(attrs[i].is_power_of_two());

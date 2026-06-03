@@ -82,8 +82,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            CPUIDLE_FLAG_COUPLED, CPUIDLE_FLAG_TIMER_STOP,
-            CPUIDLE_FLAG_POLLING, CPUIDLE_FLAG_RCU_IDLE,
+            CPUIDLE_FLAG_COUPLED,
+            CPUIDLE_FLAG_TIMER_STOP,
+            CPUIDLE_FLAG_POLLING,
+            CPUIDLE_FLAG_RCU_IDLE,
             CPUIDLE_FLAG_TLB_FLUSHED,
         ];
         for i in 0..flags.len() {
@@ -97,8 +99,10 @@ mod tests {
     #[test]
     fn test_governors_distinct() {
         let govs = [
-            CPUIDLE_GOV_MENU, CPUIDLE_GOV_LADDER,
-            CPUIDLE_GOV_TEO, CPUIDLE_GOV_HALTPOLL,
+            CPUIDLE_GOV_MENU,
+            CPUIDLE_GOV_LADDER,
+            CPUIDLE_GOV_TEO,
+            CPUIDLE_GOV_HALTPOLL,
         ];
         for i in 0..govs.len() {
             for j in (i + 1)..govs.len() {

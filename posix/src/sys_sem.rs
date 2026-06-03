@@ -4,19 +4,19 @@
 //! the `sysv_sem` module.
 
 pub use crate::sysv_sem::Sembuf;
+pub use crate::sysv_sem::semctl;
 pub use crate::sysv_sem::semget;
 pub use crate::sysv_sem::semop;
 pub use crate::sysv_sem::semtimedop;
-pub use crate::sysv_sem::semctl;
 
 // Re-use IPC constants from sysv_msg (they are shared across SysV IPC).
 pub use crate::sysv_msg::IPC_CREAT;
 pub use crate::sysv_msg::IPC_EXCL;
 pub use crate::sysv_msg::IPC_NOWAIT;
+pub use crate::sysv_msg::IPC_PRIVATE;
 pub use crate::sysv_msg::IPC_RMID;
 pub use crate::sysv_msg::IPC_SET;
 pub use crate::sysv_msg::IPC_STAT;
-pub use crate::sysv_msg::IPC_PRIVATE;
 
 /// Get value of semaphore.
 pub const GETVAL: i32 = 12;

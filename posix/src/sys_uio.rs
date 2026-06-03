@@ -13,12 +13,12 @@ pub use crate::file::Iovec;
 // Functions
 // ---------------------------------------------------------------------------
 
+pub use crate::file::preadv;
+pub use crate::file::preadv2;
+pub use crate::file::pwritev;
+pub use crate::file::pwritev2;
 pub use crate::file::readv;
 pub use crate::file::writev;
-pub use crate::file::preadv;
-pub use crate::file::pwritev;
-pub use crate::file::preadv2;
-pub use crate::file::pwritev2;
 
 // ---------------------------------------------------------------------------
 // Constants

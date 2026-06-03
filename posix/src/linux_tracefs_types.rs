@@ -85,11 +85,16 @@ mod tests {
     #[test]
     fn test_files_distinct() {
         let files = [
-            TRACEFS_FILE_TRACE, TRACEFS_FILE_TRACE_PIPE,
-            TRACEFS_FILE_CURRENT_TRACER, TRACEFS_FILE_AVAILABLE_TRACERS,
-            TRACEFS_FILE_TRACING_ON, TRACEFS_FILE_TRACE_MARKER,
-            TRACEFS_FILE_TRACE_MARKER_RAW, TRACEFS_FILE_TRACE_CLOCK,
-            TRACEFS_FILE_BUFFER_SIZE, TRACEFS_FILE_SET_FTRACE_FILTER,
+            TRACEFS_FILE_TRACE,
+            TRACEFS_FILE_TRACE_PIPE,
+            TRACEFS_FILE_CURRENT_TRACER,
+            TRACEFS_FILE_AVAILABLE_TRACERS,
+            TRACEFS_FILE_TRACING_ON,
+            TRACEFS_FILE_TRACE_MARKER,
+            TRACEFS_FILE_TRACE_MARKER_RAW,
+            TRACEFS_FILE_TRACE_CLOCK,
+            TRACEFS_FILE_BUFFER_SIZE,
+            TRACEFS_FILE_SET_FTRACE_FILTER,
             TRACEFS_FILE_SET_FTRACE_NOTRACE,
             TRACEFS_FILE_SET_GRAPH_FUNCTION,
         ];
@@ -103,9 +108,13 @@ mod tests {
     #[test]
     fn test_clocks_distinct() {
         let clocks = [
-            TRACEFS_CLOCK_LOCAL, TRACEFS_CLOCK_GLOBAL,
-            TRACEFS_CLOCK_MONOTONIC, TRACEFS_CLOCK_MONOTONIC_RAW,
-            TRACEFS_CLOCK_BOOT, TRACEFS_CLOCK_PERF, TRACEFS_CLOCK_TAI,
+            TRACEFS_CLOCK_LOCAL,
+            TRACEFS_CLOCK_GLOBAL,
+            TRACEFS_CLOCK_MONOTONIC,
+            TRACEFS_CLOCK_MONOTONIC_RAW,
+            TRACEFS_CLOCK_BOOT,
+            TRACEFS_CLOCK_PERF,
+            TRACEFS_CLOCK_TAI,
         ];
         for i in 0..clocks.len() {
             for j in (i + 1)..clocks.len() {

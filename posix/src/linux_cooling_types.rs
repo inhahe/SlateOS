@@ -73,8 +73,12 @@ mod tests {
     #[test]
     fn test_cooling_types_distinct() {
         let types = [
-            COOLING_TYPE_PROCESSOR, COOLING_TYPE_FAN, COOLING_TYPE_GPU,
-            COOLING_TYPE_MEMORY, COOLING_TYPE_POWER, COOLING_TYPE_BACKLIGHT,
+            COOLING_TYPE_PROCESSOR,
+            COOLING_TYPE_FAN,
+            COOLING_TYPE_GPU,
+            COOLING_TYPE_MEMORY,
+            COOLING_TYPE_POWER,
+            COOLING_TYPE_BACKLIGHT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

@@ -73,9 +73,12 @@ mod tests {
     #[test]
     fn test_extack_attrs_distinct() {
         let attrs = [
-            NLMSGERR_ATTR_UNUSED, NLMSGERR_ATTR_MSG,
-            NLMSGERR_ATTR_OFFS, NLMSGERR_ATTR_COOKIE,
-            NLMSGERR_ATTR_POLICY, NLMSGERR_ATTR_MISS_TYPE,
+            NLMSGERR_ATTR_UNUSED,
+            NLMSGERR_ATTR_MSG,
+            NLMSGERR_ATTR_OFFS,
+            NLMSGERR_ATTR_COOKIE,
+            NLMSGERR_ATTR_POLICY,
+            NLMSGERR_ATTR_MISS_TYPE,
             NLMSGERR_ATTR_MISS_NEST,
         ];
         for i in 0..attrs.len() {
@@ -88,8 +91,11 @@ mod tests {
     #[test]
     fn test_ctrl_msg_types_distinct() {
         let types = [
-            NLMSG_NOOP, NLMSG_ERROR, NLMSG_DONE,
-            NLMSG_OVERRUN, NLMSG_MIN_TYPE,
+            NLMSG_NOOP,
+            NLMSG_ERROR,
+            NLMSG_DONE,
+            NLMSG_OVERRUN,
+            NLMSG_MIN_TYPE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

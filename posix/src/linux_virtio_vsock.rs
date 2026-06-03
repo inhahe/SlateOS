@@ -84,10 +84,14 @@ mod tests {
     #[test]
     fn test_ops_distinct() {
         let ops = [
-            VIRTIO_VSOCK_OP_INVALID, VIRTIO_VSOCK_OP_REQUEST,
-            VIRTIO_VSOCK_OP_RESPONSE, VIRTIO_VSOCK_OP_RST,
-            VIRTIO_VSOCK_OP_SHUTDOWN, VIRTIO_VSOCK_OP_RW,
-            VIRTIO_VSOCK_OP_CREDIT_UPDATE, VIRTIO_VSOCK_OP_CREDIT_REQUEST,
+            VIRTIO_VSOCK_OP_INVALID,
+            VIRTIO_VSOCK_OP_REQUEST,
+            VIRTIO_VSOCK_OP_RESPONSE,
+            VIRTIO_VSOCK_OP_RST,
+            VIRTIO_VSOCK_OP_SHUTDOWN,
+            VIRTIO_VSOCK_OP_RW,
+            VIRTIO_VSOCK_OP_CREDIT_UPDATE,
+            VIRTIO_VSOCK_OP_CREDIT_REQUEST,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -98,7 +102,10 @@ mod tests {
 
     #[test]
     fn test_shutdown_flags() {
-        assert_eq!(VIRTIO_VSOCK_SHUTDOWN_BOTH, VIRTIO_VSOCK_SHUTDOWN_RCV | VIRTIO_VSOCK_SHUTDOWN_SEND);
+        assert_eq!(
+            VIRTIO_VSOCK_SHUTDOWN_BOTH,
+            VIRTIO_VSOCK_SHUTDOWN_RCV | VIRTIO_VSOCK_SHUTDOWN_SEND
+        );
     }
 
     #[test]
@@ -113,7 +120,11 @@ mod tests {
 
     #[test]
     fn test_vq_indices_distinct() {
-        let vqs = [VIRTIO_VSOCK_VQ_RX, VIRTIO_VSOCK_VQ_TX, VIRTIO_VSOCK_VQ_EVENT];
+        let vqs = [
+            VIRTIO_VSOCK_VQ_RX,
+            VIRTIO_VSOCK_VQ_TX,
+            VIRTIO_VSOCK_VQ_EVENT,
+        ];
         for i in 0..vqs.len() {
             for j in (i + 1)..vqs.len() {
                 assert_ne!(vqs[i], vqs[j]);

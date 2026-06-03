@@ -83,8 +83,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            DRIVER_STATE_UNBOUND, DRIVER_STATE_PROBING,
-            DRIVER_STATE_BOUND, DRIVER_STATE_UNBINDING,
+            DRIVER_STATE_UNBOUND,
+            DRIVER_STATE_PROBING,
+            DRIVER_STATE_BOUND,
+            DRIVER_STATE_UNBINDING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -96,9 +98,14 @@ mod tests {
     #[test]
     fn test_match_types_distinct() {
         let types = [
-            MATCH_TYPE_NAME, MATCH_TYPE_PCI_ID, MATCH_TYPE_USB_ID,
-            MATCH_TYPE_ACPI_ID, MATCH_TYPE_OF_COMPATIBLE,
-            MATCH_TYPE_PLATFORM, MATCH_TYPE_I2C, MATCH_TYPE_SPI,
+            MATCH_TYPE_NAME,
+            MATCH_TYPE_PCI_ID,
+            MATCH_TYPE_USB_ID,
+            MATCH_TYPE_ACPI_ID,
+            MATCH_TYPE_OF_COMPATIBLE,
+            MATCH_TYPE_PLATFORM,
+            MATCH_TYPE_I2C,
+            MATCH_TYPE_SPI,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -110,8 +117,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            DRIVER_FLAG_PM_RUNTIME, DRIVER_FLAG_ALLOW_UNBIND,
-            DRIVER_FLAG_NO_PM, DRIVER_FLAG_PROBE_DEFER,
+            DRIVER_FLAG_PM_RUNTIME,
+            DRIVER_FLAG_ALLOW_UNBIND,
+            DRIVER_FLAG_NO_PM,
+            DRIVER_FLAG_PROBE_DEFER,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

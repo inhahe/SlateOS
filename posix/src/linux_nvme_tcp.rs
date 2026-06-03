@@ -97,10 +97,14 @@ mod tests {
     #[test]
     fn test_pdu_types_distinct() {
         let types = [
-            NVME_TCP_PDU_ICREQ, NVME_TCP_PDU_ICRESP,
-            NVME_TCP_PDU_H2C_TERM, NVME_TCP_PDU_C2H_TERM,
-            NVME_TCP_PDU_CMD, NVME_TCP_PDU_RSP,
-            NVME_TCP_PDU_H2C_DATA, NVME_TCP_PDU_C2H_DATA,
+            NVME_TCP_PDU_ICREQ,
+            NVME_TCP_PDU_ICRESP,
+            NVME_TCP_PDU_H2C_TERM,
+            NVME_TCP_PDU_C2H_TERM,
+            NVME_TCP_PDU_CMD,
+            NVME_TCP_PDU_RSP,
+            NVME_TCP_PDU_H2C_DATA,
+            NVME_TCP_PDU_C2H_DATA,
             NVME_TCP_PDU_R2T,
         ];
         for i in 0..types.len() {
@@ -113,8 +117,10 @@ mod tests {
     #[test]
     fn test_pdu_flags_no_overlap() {
         let flags = [
-            NVME_TCP_F_HDGST, NVME_TCP_F_DDGST,
-            NVME_TCP_F_DATA_LAST, NVME_TCP_F_DATA_SUCCESS,
+            NVME_TCP_F_HDGST,
+            NVME_TCP_F_DDGST,
+            NVME_TCP_F_DATA_LAST,
+            NVME_TCP_F_DATA_SUCCESS,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -131,8 +137,10 @@ mod tests {
     #[test]
     fn test_term_reasons_distinct() {
         let reasons = [
-            NVME_TCP_TERM_HDGST_ERR, NVME_TCP_TERM_DDGST_ERR,
-            NVME_TCP_TERM_UNSUPPORTED, NVME_TCP_TERM_DATA_OFFSET,
+            NVME_TCP_TERM_HDGST_ERR,
+            NVME_TCP_TERM_DDGST_ERR,
+            NVME_TCP_TERM_UNSUPPORTED,
+            NVME_TCP_TERM_DATA_OFFSET,
             NVME_TCP_TERM_R2T_LIMIT,
         ];
         for i in 0..reasons.len() {

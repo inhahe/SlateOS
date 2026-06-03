@@ -79,10 +79,17 @@ mod tests {
     #[test]
     fn test_table_sigs_distinct() {
         let sigs = [
-            ACPI_SIG_RSDT, ACPI_SIG_XSDT, ACPI_SIG_FADT,
-            ACPI_SIG_MADT, ACPI_SIG_DSDT, ACPI_SIG_SSDT,
-            ACPI_SIG_HPET, ACPI_SIG_MCFG, ACPI_SIG_SRAT,
-            ACPI_SIG_SLIT, ACPI_SIG_BGRT,
+            ACPI_SIG_RSDT,
+            ACPI_SIG_XSDT,
+            ACPI_SIG_FADT,
+            ACPI_SIG_MADT,
+            ACPI_SIG_DSDT,
+            ACPI_SIG_SSDT,
+            ACPI_SIG_HPET,
+            ACPI_SIG_MCFG,
+            ACPI_SIG_SRAT,
+            ACPI_SIG_SLIT,
+            ACPI_SIG_BGRT,
         ];
         for i in 0..sigs.len() {
             for j in (i + 1)..sigs.len() {
@@ -94,10 +101,14 @@ mod tests {
     #[test]
     fn test_madt_types_distinct() {
         let types = [
-            MADT_TYPE_LOCAL_APIC, MADT_TYPE_IO_APIC,
-            MADT_TYPE_INT_SRC_OVERRIDE, MADT_TYPE_NMI_SOURCE,
-            MADT_TYPE_LOCAL_APIC_NMI, MADT_TYPE_LOCAL_APIC_OVERRIDE,
-            MADT_TYPE_IO_SAPIC, MADT_TYPE_LOCAL_X2APIC,
+            MADT_TYPE_LOCAL_APIC,
+            MADT_TYPE_IO_APIC,
+            MADT_TYPE_INT_SRC_OVERRIDE,
+            MADT_TYPE_NMI_SOURCE,
+            MADT_TYPE_LOCAL_APIC_NMI,
+            MADT_TYPE_LOCAL_APIC_OVERRIDE,
+            MADT_TYPE_IO_SAPIC,
+            MADT_TYPE_LOCAL_X2APIC,
             MADT_TYPE_LOCAL_X2APIC_NMI,
         ];
         for i in 0..types.len() {

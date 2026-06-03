@@ -99,12 +99,18 @@ mod tests {
     #[test]
     fn test_chassis_types_distinct() {
         let types = [
-            DMI_CHASSIS_DESKTOP, DMI_CHASSIS_LOW_PROFILE,
-            DMI_CHASSIS_PIZZA_BOX, DMI_CHASSIS_MINI_TOWER,
-            DMI_CHASSIS_TOWER, DMI_CHASSIS_PORTABLE,
-            DMI_CHASSIS_LAPTOP, DMI_CHASSIS_NOTEBOOK,
-            DMI_CHASSIS_HANDHELD, DMI_CHASSIS_RACK_MOUNT,
-            DMI_CHASSIS_TABLET, DMI_CHASSIS_CONVERTIBLE,
+            DMI_CHASSIS_DESKTOP,
+            DMI_CHASSIS_LOW_PROFILE,
+            DMI_CHASSIS_PIZZA_BOX,
+            DMI_CHASSIS_MINI_TOWER,
+            DMI_CHASSIS_TOWER,
+            DMI_CHASSIS_PORTABLE,
+            DMI_CHASSIS_LAPTOP,
+            DMI_CHASSIS_NOTEBOOK,
+            DMI_CHASSIS_HANDHELD,
+            DMI_CHASSIS_RACK_MOUNT,
+            DMI_CHASSIS_TABLET,
+            DMI_CHASSIS_CONVERTIBLE,
             DMI_CHASSIS_DETACHABLE,
         ];
         for i in 0..types.len() {

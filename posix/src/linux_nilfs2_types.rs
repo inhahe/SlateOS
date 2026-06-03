@@ -142,9 +142,15 @@ mod tests {
     #[test]
     fn test_special_inodes_distinct() {
         let inodes = [
-            NILFS_ROOT_INO, NILFS_DAT_INO, NILFS_CPFILE_INO,
-            NILFS_SUFILE_INO, NILFS_IFILE_INO, NILFS_ATIME_INO,
-            NILFS_XATTR_INO, NILFS_SKETCH_INO, NILFS_USER_INO,
+            NILFS_ROOT_INO,
+            NILFS_DAT_INO,
+            NILFS_CPFILE_INO,
+            NILFS_SUFILE_INO,
+            NILFS_IFILE_INO,
+            NILFS_ATIME_INO,
+            NILFS_XATTR_INO,
+            NILFS_SKETCH_INO,
+            NILFS_USER_INO,
         ];
         for i in 0..inodes.len() {
             for j in (i + 1)..inodes.len() {
@@ -161,10 +167,14 @@ mod tests {
     #[test]
     fn test_inode_flags_power_of_two() {
         let flags = [
-            NILFS_INODE_SECRM_FL, NILFS_INODE_UNRM_FL,
-            NILFS_INODE_COMPR_FL, NILFS_INODE_SYNC_FL,
-            NILFS_INODE_IMMUTABLE_FL, NILFS_INODE_APPEND_FL,
-            NILFS_INODE_NODUMP_FL, NILFS_INODE_NOATIME_FL,
+            NILFS_INODE_SECRM_FL,
+            NILFS_INODE_UNRM_FL,
+            NILFS_INODE_COMPR_FL,
+            NILFS_INODE_SYNC_FL,
+            NILFS_INODE_IMMUTABLE_FL,
+            NILFS_INODE_APPEND_FL,
+            NILFS_INODE_NODUMP_FL,
+            NILFS_INODE_NOATIME_FL,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
@@ -174,8 +184,10 @@ mod tests {
     #[test]
     fn test_checkpoint_flags_power_of_two() {
         let flags = [
-            NILFS_CHECKPOINT_SNAPSHOT, NILFS_CHECKPOINT_INVALID,
-            NILFS_CHECKPOINT_SKETCH, NILFS_CHECKPOINT_MINOR,
+            NILFS_CHECKPOINT_SNAPSHOT,
+            NILFS_CHECKPOINT_INVALID,
+            NILFS_CHECKPOINT_SKETCH,
+            NILFS_CHECKPOINT_MINOR,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "{} not power of two", f);
@@ -197,11 +209,16 @@ mod tests {
     #[test]
     fn test_ioctl_numbers_distinct() {
         let ioctls = [
-            NILFS_IOCTL_GET_SUINFO, NILFS_IOCTL_SET_SUINFO,
-            NILFS_IOCTL_GET_CPINFO, NILFS_IOCTL_GET_CPSTAT,
-            NILFS_IOCTL_CHANGE_CPMODE, NILFS_IOCTL_DELETE_CHECKPOINT,
-            NILFS_IOCTL_GET_SUSTAT, NILFS_IOCTL_CLEAN_SEGMENTS,
-            NILFS_IOCTL_RESIZE, NILFS_IOCTL_SET_ALLOC_RANGE,
+            NILFS_IOCTL_GET_SUINFO,
+            NILFS_IOCTL_SET_SUINFO,
+            NILFS_IOCTL_GET_CPINFO,
+            NILFS_IOCTL_GET_CPSTAT,
+            NILFS_IOCTL_CHANGE_CPMODE,
+            NILFS_IOCTL_DELETE_CHECKPOINT,
+            NILFS_IOCTL_GET_SUSTAT,
+            NILFS_IOCTL_CLEAN_SEGMENTS,
+            NILFS_IOCTL_RESIZE,
+            NILFS_IOCTL_SET_ALLOC_RANGE,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

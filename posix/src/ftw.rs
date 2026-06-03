@@ -82,11 +82,7 @@ pub type FtwFn = extern "C" fn(*const u8, *const Stat, i32) -> i32;
 /// Returns 0 on success, -1 on error, or the non-zero value
 /// returned by `callback`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ftw(
-    dirpath: *const u8,
-    callback: FtwFn,
-    nopenfd: i32,
-) -> i32 {
+pub extern "C" fn ftw(dirpath: *const u8, callback: FtwFn, nopenfd: i32) -> i32 {
     if dirpath.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -97,12 +93,7 @@ pub extern "C" fn ftw(
 }
 
 /// Internal recursive tree walk for `ftw`.
-fn ftw_recurse(
-    path: *const u8,
-    callback: FtwFn,
-    depth_limit: i32,
-    current_depth: i32,
-) -> i32 {
+fn ftw_recurse(path: *const u8, callback: FtwFn, depth_limit: i32, current_depth: i32) -> i32 {
     // Stat the path.
     let mut sb: Stat = unsafe { core::mem::zeroed() };
     let stat_result = crate::file::stat(path, &raw mut sb);
@@ -136,12 +127,7 @@ fn ftw_recurse(
 }
 
 /// Open a directory and walk its children.
-fn walk_directory(
-    path: *const u8,
-    callback: FtwFn,
-    depth_limit: i32,
-    current_depth: i32,
-) -> i32 {
+fn walk_directory(path: *const u8, callback: FtwFn, depth_limit: i32, current_depth: i32) -> i32 {
     let dir = crate::dirent::opendir(path);
     if dir.is_null() {
         return 0; // Can't open — skip (already called FTW_D above).
@@ -199,12 +185,7 @@ pub type NftwFn = extern "C" fn(*const u8, *const Stat, i32, *mut FTW) -> i32;
 /// Like `ftw` but supports flags (`FTW_DEPTH`, `FTW_PHYS`, etc.)
 /// and provides an `FTW` struct with base offset and depth level.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn nftw(
-    dirpath: *const u8,
-    callback: NftwFn,
-    nopenfd: i32,
-    flags: i32,
-) -> i32 {
+pub extern "C" fn nftw(dirpath: *const u8, callback: NftwFn, nopenfd: i32, flags: i32) -> i32 {
     if dirpath.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -253,9 +234,7 @@ fn nftw_recurse(
 
     // Recurse into children (if within depth limit).
     if current_depth < depth_limit {
-        let ret = nftw_walk_directory(
-            path, callback, depth_limit, current_depth, depth_first,
-        );
+        let ret = nftw_walk_directory(path, callback, depth_limit, current_depth, depth_first);
         if ret != 0 {
             return ret;
         }
@@ -357,7 +336,10 @@ fn build_child_path(parent: *const u8, name: *const u8, buf: &mut [u8; PATH_MAX]
     let needs_sep = parent_len > 0 && unsafe { *parent.add(parent_len.wrapping_sub(1)) } != b'/';
     let sep_len: usize = usize::from(needs_sep);
     // Use checked_add to prevent usize overflow on adversarially long paths.
-    let Some(total) = parent_len.checked_add(sep_len).and_then(|s| s.checked_add(name_len)) else {
+    let Some(total) = parent_len
+        .checked_add(sep_len)
+        .and_then(|s| s.checked_add(name_len))
+    else {
         return 0;
     };
 
@@ -433,22 +415,13 @@ fn find_basename_offset(path: *const u8) -> i32 {
 /// On our OS, `off_t` is always 64-bit (LP64 data model), so
 /// `struct stat` and `ftw` already handle large files.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn ftw64(
-    path: *const u8,
-    callback: FtwFn,
-    maxfds: i32,
-) -> i32 {
+pub extern "C" fn ftw64(path: *const u8, callback: FtwFn, maxfds: i32) -> i32 {
     ftw(path, callback, maxfds)
 }
 
 /// `nftw64` — Large File Support alias for `nftw`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn nftw64(
-    path: *const u8,
-    callback: NftwFn,
-    maxfds: i32,
-    flags: i32,
-) -> i32 {
+pub extern "C" fn nftw64(path: *const u8, callback: NftwFn, maxfds: i32, flags: i32) -> i32 {
     nftw(path, callback, maxfds, flags)
 }
 
@@ -565,11 +538,7 @@ mod tests {
     #[test]
     fn test_build_child_path_simple() {
         let mut buf = [0u8; PATH_MAX];
-        let len = build_child_path(
-            b"/foo\0".as_ptr(),
-            b"bar\0".as_ptr(),
-            &mut buf,
-        );
+        let len = build_child_path(b"/foo\0".as_ptr(), b"bar\0".as_ptr(), &mut buf);
         assert_eq!(len, 8); // "/foo/bar"
         assert_eq!(&buf[..8], b"/foo/bar");
         assert_eq!(buf[8], 0);
@@ -578,11 +547,7 @@ mod tests {
     #[test]
     fn test_build_child_path_trailing_slash() {
         let mut buf = [0u8; PATH_MAX];
-        let len = build_child_path(
-            b"/foo/\0".as_ptr(),
-            b"bar\0".as_ptr(),
-            &mut buf,
-        );
+        let len = build_child_path(b"/foo/\0".as_ptr(), b"bar\0".as_ptr(), &mut buf);
         // Parent already ends with '/', so no extra separator.
         assert_eq!(len, 8); // "/foo/bar"
         assert_eq!(&buf[..8], b"/foo/bar");
@@ -591,11 +556,7 @@ mod tests {
     #[test]
     fn test_build_child_path_root() {
         let mut buf = [0u8; PATH_MAX];
-        let len = build_child_path(
-            b"/\0".as_ptr(),
-            b"etc\0".as_ptr(),
-            &mut buf,
-        );
+        let len = build_child_path(b"/\0".as_ptr(), b"etc\0".as_ptr(), &mut buf);
         assert_eq!(len, 4); // "/etc"
         assert_eq!(&buf[..4], b"/etc");
     }
@@ -603,11 +564,7 @@ mod tests {
     #[test]
     fn test_build_child_path_empty_parent() {
         let mut buf = [0u8; PATH_MAX];
-        let len = build_child_path(
-            b"\0".as_ptr(),
-            b"file\0".as_ptr(),
-            &mut buf,
-        );
+        let len = build_child_path(b"\0".as_ptr(), b"file\0".as_ptr(), &mut buf);
         // Empty parent, no separator needed (parent_len == 0).
         assert_eq!(len, 4);
         assert_eq!(&buf[..4], b"file");
@@ -702,8 +659,10 @@ mod tests {
         let types = [FTW_F, FTW_D, FTW_DNR, FTW_NS, FTW_SL, FTW_DP, FTW_SLN];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
-                assert_ne!(types[i], types[j],
-                    "FTW types at indices {i} and {j} must be distinct");
+                assert_ne!(
+                    types[i], types[j],
+                    "FTW types at indices {i} and {j} must be distinct"
+                );
             }
         }
     }

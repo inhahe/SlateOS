@@ -81,7 +81,11 @@ mod tests {
 
     #[test]
     fn test_sig_types_distinct() {
-        let types = [EVM_XATTR_HMAC, EVM_XATTR_PORTABLE_DIGSIG, EVM_IMA_XATTR_DIGSIG];
+        let types = [
+            EVM_XATTR_HMAC,
+            EVM_XATTR_PORTABLE_DIGSIG,
+            EVM_IMA_XATTR_DIGSIG,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -92,8 +96,11 @@ mod tests {
     #[test]
     fn test_integrity_status_distinct() {
         let statuses = [
-            INTEGRITY_PASS, INTEGRITY_FAIL, INTEGRITY_NOLABEL,
-            INTEGRITY_NOXATTR, INTEGRITY_UNKNOWN,
+            INTEGRITY_PASS,
+            INTEGRITY_FAIL,
+            INTEGRITY_NOLABEL,
+            INTEGRITY_NOXATTR,
+            INTEGRITY_UNKNOWN,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
@@ -105,8 +112,12 @@ mod tests {
     #[test]
     fn test_xattr_names_distinct() {
         let names = [
-            EVM_XATTR_IMA, EVM_XATTR_SELINUX, EVM_XATTR_SMACK,
-            EVM_XATTR_APPARMOR, EVM_XATTR_CAPS, EVM_XATTR_EVM,
+            EVM_XATTR_IMA,
+            EVM_XATTR_SELINUX,
+            EVM_XATTR_SMACK,
+            EVM_XATTR_APPARMOR,
+            EVM_XATTR_CAPS,
+            EVM_XATTR_EVM,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

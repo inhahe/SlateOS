@@ -32,8 +32,7 @@ pub const COREDUMP_FILTER_DAX_SHARED: u32 = 1 << 8;
 // ---------------------------------------------------------------------------
 
 /// Default coredump filter: anon private + anon shared (bits 0,1).
-pub const COREDUMP_FILTER_DEFAULT: u32 =
-    COREDUMP_FILTER_ANON_PRIVATE | COREDUMP_FILTER_ANON_SHARED;
+pub const COREDUMP_FILTER_DEFAULT: u32 = COREDUMP_FILTER_ANON_PRIVATE | COREDUMP_FILTER_ANON_SHARED;
 
 // ---------------------------------------------------------------------------
 // Core dump signal constants
@@ -112,7 +111,14 @@ mod tests {
 
     #[test]
     fn test_note_types_distinct() {
-        let notes = [NT_PRSTATUS, NT_PRFPREG, NT_PRPSINFO, NT_X86_XSTATE, NT_SIGINFO, NT_FILE];
+        let notes = [
+            NT_PRSTATUS,
+            NT_PRFPREG,
+            NT_PRPSINFO,
+            NT_X86_XSTATE,
+            NT_SIGINFO,
+            NT_FILE,
+        ];
         for i in 0..notes.len() {
             for j in (i + 1)..notes.len() {
                 assert_ne!(notes[i], notes[j]);

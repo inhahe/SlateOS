@@ -117,9 +117,16 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let types: [u8; 10] = [
-            SADB_RESERVED, SADB_GET, SADB_ADD, SADB_DELETE,
-            SADB_UPDATE, SADB_DUMP, SADB_FLUSH, SADB_ACQUIRE,
-            SADB_REGISTER, SADB_EXPIRE,
+            SADB_RESERVED,
+            SADB_GET,
+            SADB_ADD,
+            SADB_DELETE,
+            SADB_UPDATE,
+            SADB_DUMP,
+            SADB_FLUSH,
+            SADB_ACQUIRE,
+            SADB_REGISTER,
+            SADB_EXPIRE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -136,14 +143,22 @@ mod tests {
     #[test]
     fn test_ext_types_distinct() {
         let exts: [u16; 16] = [
-            SADB_EXT_RESERVED, SADB_EXT_SA,
-            SADB_EXT_LIFETIME_CURRENT, SADB_EXT_LIFETIME_HARD,
-            SADB_EXT_LIFETIME_SOFT, SADB_EXT_ADDRESS_SRC,
-            SADB_EXT_ADDRESS_DST, SADB_EXT_ADDRESS_PROXY,
-            SADB_EXT_KEY_AUTH, SADB_EXT_KEY_ENCRYPT,
-            SADB_EXT_IDENTITY_SRC, SADB_EXT_IDENTITY_DST,
-            SADB_EXT_SENSITIVITY, SADB_EXT_PROPOSAL,
-            SADB_EXT_SUPPORTED_AUTH, SADB_EXT_SUPPORTED_ENCRYPT,
+            SADB_EXT_RESERVED,
+            SADB_EXT_SA,
+            SADB_EXT_LIFETIME_CURRENT,
+            SADB_EXT_LIFETIME_HARD,
+            SADB_EXT_LIFETIME_SOFT,
+            SADB_EXT_ADDRESS_SRC,
+            SADB_EXT_ADDRESS_DST,
+            SADB_EXT_ADDRESS_PROXY,
+            SADB_EXT_KEY_AUTH,
+            SADB_EXT_KEY_ENCRYPT,
+            SADB_EXT_IDENTITY_SRC,
+            SADB_EXT_IDENTITY_DST,
+            SADB_EXT_SENSITIVITY,
+            SADB_EXT_PROPOSAL,
+            SADB_EXT_SUPPORTED_AUTH,
+            SADB_EXT_SUPPORTED_ENCRYPT,
         ];
         for i in 0..exts.len() {
             for j in (i + 1)..exts.len() {
@@ -155,8 +170,10 @@ mod tests {
     #[test]
     fn test_sa_types_distinct() {
         let types: [u8; 4] = [
-            SADB_SATYPE_UNSPEC, SADB_SATYPE_AH,
-            SADB_SATYPE_ESP, SADB_X_SATYPE_IPCOMP,
+            SADB_SATYPE_UNSPEC,
+            SADB_SATYPE_AH,
+            SADB_SATYPE_ESP,
+            SADB_X_SATYPE_IPCOMP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

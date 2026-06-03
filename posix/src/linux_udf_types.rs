@@ -96,11 +96,16 @@ mod tests {
     #[test]
     fn test_tag_identifiers_distinct() {
         let tags = [
-            UDF_TAG_PRIMARY_VOL_DESC, UDF_TAG_ANCHOR_VOL_DESC_PTR,
-            UDF_TAG_VOL_DESC_PTR, UDF_TAG_PARTITION_DESC,
-            UDF_TAG_LOGICAL_VOL_DESC, UDF_TAG_UNALLOC_SPACE_DESC,
-            UDF_TAG_TERMINATING_DESC, UDF_TAG_FILE_SET_DESC,
-            UDF_TAG_FILE_IDENT_DESC, UDF_TAG_FILE_ENTRY,
+            UDF_TAG_PRIMARY_VOL_DESC,
+            UDF_TAG_ANCHOR_VOL_DESC_PTR,
+            UDF_TAG_VOL_DESC_PTR,
+            UDF_TAG_PARTITION_DESC,
+            UDF_TAG_LOGICAL_VOL_DESC,
+            UDF_TAG_UNALLOC_SPACE_DESC,
+            UDF_TAG_TERMINATING_DESC,
+            UDF_TAG_FILE_SET_DESC,
+            UDF_TAG_FILE_IDENT_DESC,
+            UDF_TAG_FILE_ENTRY,
             UDF_TAG_EXT_FILE_ENTRY,
         ];
         for i in 0..tags.len() {
@@ -113,10 +118,14 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            UDF_ICBTAG_FILE_TYPE_UNALLOC, UDF_ICBTAG_FILE_TYPE_DIR,
-            UDF_ICBTAG_FILE_TYPE_REGULAR, UDF_ICBTAG_FILE_TYPE_BLOCK,
-            UDF_ICBTAG_FILE_TYPE_CHAR, UDF_ICBTAG_FILE_TYPE_FIFO,
-            UDF_ICBTAG_FILE_TYPE_SOCKET, UDF_ICBTAG_FILE_TYPE_SYMLINK,
+            UDF_ICBTAG_FILE_TYPE_UNALLOC,
+            UDF_ICBTAG_FILE_TYPE_DIR,
+            UDF_ICBTAG_FILE_TYPE_REGULAR,
+            UDF_ICBTAG_FILE_TYPE_BLOCK,
+            UDF_ICBTAG_FILE_TYPE_CHAR,
+            UDF_ICBTAG_FILE_TYPE_FIFO,
+            UDF_ICBTAG_FILE_TYPE_SOCKET,
+            UDF_ICBTAG_FILE_TYPE_SYMLINK,
             UDF_ICBTAG_FILE_TYPE_STREAMDIR,
         ];
         for i in 0..types.len() {

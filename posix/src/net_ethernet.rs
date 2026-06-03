@@ -180,16 +180,18 @@ mod tests {
     #[test]
     fn test_ethertypes_distinct() {
         let types = [
-            ETH_P_IP, ETH_P_ARP, ETH_P_RARP, ETH_P_8021Q,
-            ETH_P_IPV6, ETH_P_PPP_DISC, ETH_P_PPP_SES,
+            ETH_P_IP,
+            ETH_P_ARP,
+            ETH_P_RARP,
+            ETH_P_8021Q,
+            ETH_P_IPV6,
+            ETH_P_PPP_DISC,
+            ETH_P_PPP_SES,
             ETH_P_LLDP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
-                assert_ne!(
-                    types[i], types[j],
-                    "EtherTypes must be distinct"
-                );
+                assert_ne!(types[i], types[j], "EtherTypes must be distinct");
             }
         }
     }
@@ -199,8 +201,14 @@ mod tests {
         // EtherType values ≥ 0x0600 (1536) are protocol identifiers;
         // values < 1536 are IEEE 802.3 length fields.
         let protocol_types = [
-            ETH_P_IP, ETH_P_ARP, ETH_P_RARP, ETH_P_8021Q,
-            ETH_P_IPV6, ETH_P_PPP_DISC, ETH_P_PPP_SES, ETH_P_LLDP,
+            ETH_P_IP,
+            ETH_P_ARP,
+            ETH_P_RARP,
+            ETH_P_8021Q,
+            ETH_P_IPV6,
+            ETH_P_PPP_DISC,
+            ETH_P_PPP_SES,
+            ETH_P_LLDP,
         ];
         for &t in &protocol_types {
             assert!(
@@ -249,9 +257,15 @@ mod tests {
 
     #[test]
     fn test_ether_addr_eq() {
-        let a = EtherAddr { ether_addr_octet: [1, 2, 3, 4, 5, 6] };
-        let b = EtherAddr { ether_addr_octet: [1, 2, 3, 4, 5, 6] };
-        let c = EtherAddr { ether_addr_octet: [1, 2, 3, 4, 5, 7] };
+        let a = EtherAddr {
+            ether_addr_octet: [1, 2, 3, 4, 5, 6],
+        };
+        let b = EtherAddr {
+            ether_addr_octet: [1, 2, 3, 4, 5, 6],
+        };
+        let c = EtherAddr {
+            ether_addr_octet: [1, 2, 3, 4, 5, 7],
+        };
         assert_eq!(a, b);
         assert_ne!(a, c);
     }

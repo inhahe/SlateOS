@@ -109,8 +109,12 @@ mod tests {
     #[test]
     fn test_rtm_commands_distinct() {
         let cmds = [
-            RTM_NEWNEXTHOP, RTM_DELNEXTHOP, RTM_GETNEXTHOP,
-            RTM_NEWNEXTHOPBUCKET, RTM_DELNEXTHOPBUCKET, RTM_GETNEXTHOPBUCKET,
+            RTM_NEWNEXTHOP,
+            RTM_DELNEXTHOP,
+            RTM_GETNEXTHOP,
+            RTM_NEWNEXTHOPBUCKET,
+            RTM_DELNEXTHOPBUCKET,
+            RTM_GETNEXTHOPBUCKET,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -122,10 +126,20 @@ mod tests {
     #[test]
     fn test_nha_attrs_distinct() {
         let attrs = [
-            NHA_ID, NHA_GROUP, NHA_GROUP_TYPE, NHA_BLACKHOLE,
-            NHA_OIF, NHA_GATEWAY, NHA_ENCAP_TYPE, NHA_ENCAP,
-            NHA_GROUPS, NHA_MASTER, NHA_FDB,
-            NHA_RES_GROUP, NHA_RES_BUCKET, NHA_HW_STATS,
+            NHA_ID,
+            NHA_GROUP,
+            NHA_GROUP_TYPE,
+            NHA_BLACKHOLE,
+            NHA_OIF,
+            NHA_GATEWAY,
+            NHA_ENCAP_TYPE,
+            NHA_ENCAP,
+            NHA_GROUPS,
+            NHA_MASTER,
+            NHA_FDB,
+            NHA_RES_GROUP,
+            NHA_RES_BUCKET,
+            NHA_HW_STATS,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -142,8 +156,10 @@ mod tests {
     #[test]
     fn test_res_group_attrs_distinct() {
         let attrs = [
-            NHA_RES_GROUP_BUCKETS, NHA_RES_GROUP_IDLE_TIMER,
-            NHA_RES_GROUP_UNBALANCED_TIMER, NHA_RES_GROUP_UNBALANCED_TIME,
+            NHA_RES_GROUP_BUCKETS,
+            NHA_RES_GROUP_IDLE_TIMER,
+            NHA_RES_GROUP_UNBALANCED_TIMER,
+            NHA_RES_GROUP_UNBALANCED_TIME,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -155,7 +171,8 @@ mod tests {
     #[test]
     fn test_res_bucket_attrs_distinct() {
         let attrs = [
-            NHA_RES_BUCKET_INDEX, NHA_RES_BUCKET_IDLE_TIME,
+            NHA_RES_BUCKET_INDEX,
+            NHA_RES_BUCKET_IDLE_TIME,
             NHA_RES_BUCKET_NH_ID,
         ];
         for i in 0..attrs.len() {

@@ -3,28 +3,28 @@
 //! Re-exports all POSIX type definitions from the `types` module.
 //! Programs that include `<sys/types.h>` can find everything here.
 
-pub use crate::types::PidT;
-pub use crate::types::UidT;
-pub use crate::types::GidT;
-pub use crate::types::ModeT;
+pub use crate::types::BlkcntT;
+pub use crate::types::BlksizeT;
+pub use crate::types::ClockidT;
 pub use crate::types::DevT;
+pub use crate::types::Fd;
+pub use crate::types::GidT;
+pub use crate::types::IdT;
 pub use crate::types::InoT;
+pub use crate::types::IntptrT;
+pub use crate::types::KeyT;
+pub use crate::types::ModeT;
 pub use crate::types::NlinkT;
 pub use crate::types::OffT;
-pub use crate::types::SsizeT;
-pub use crate::types::SizeT;
-pub use crate::types::BlksizeT;
-pub use crate::types::BlkcntT;
-pub use crate::types::TimeT;
-pub use crate::types::SusecondsT;
-pub use crate::types::ClockidT;
-pub use crate::types::Fd;
-pub use crate::types::IdT;
-pub use crate::types::KeyT;
-pub use crate::types::UsecT;
-pub use crate::types::IntptrT;
-pub use crate::types::UintptrT;
+pub use crate::types::PidT;
 pub use crate::types::PtrdiffT;
+pub use crate::types::SizeT;
+pub use crate::types::SsizeT;
+pub use crate::types::SusecondsT;
+pub use crate::types::TimeT;
+pub use crate::types::UidT;
+pub use crate::types::UintptrT;
+pub use crate::types::UsecT;
 
 // ---------------------------------------------------------------------------
 // Tests

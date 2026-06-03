@@ -65,9 +65,13 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            HSR_C_UNSPEC, HSR_C_RING_ERROR, HSR_C_NODE_DOWN,
-            HSR_C_GET_NODE_LIST, HSR_C_SET_NODE_LIST,
-            HSR_C_GET_NODE_STATUS, HSR_C_SET_NODE_STATUS,
+            HSR_C_UNSPEC,
+            HSR_C_RING_ERROR,
+            HSR_C_NODE_DOWN,
+            HSR_C_GET_NODE_LIST,
+            HSR_C_SET_NODE_LIST,
+            HSR_C_GET_NODE_STATUS,
+            HSR_C_SET_NODE_STATUS,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -79,9 +83,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            HSR_A_UNSPEC, HSR_A_NODE_ADDR, HSR_A_IFINDEX,
-            HSR_A_IF1_AGE, HSR_A_IF2_AGE, HSR_A_NODE_ADDR_B,
-            HSR_A_IF1_SEQ, HSR_A_IF2_SEQ,
+            HSR_A_UNSPEC,
+            HSR_A_NODE_ADDR,
+            HSR_A_IFINDEX,
+            HSR_A_IF1_AGE,
+            HSR_A_IF2_AGE,
+            HSR_A_NODE_ADDR_B,
+            HSR_A_IF1_SEQ,
+            HSR_A_IF2_SEQ,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

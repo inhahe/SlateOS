@@ -138,8 +138,15 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            NF4REG, NF4DIR, NF4BLK, NF4CHR,
-            NF4LNK, NF4SOCK, NF4FIFO, NF4ATTRDIR, NF4NAMEDATTR,
+            NF4REG,
+            NF4DIR,
+            NF4BLK,
+            NF4CHR,
+            NF4LNK,
+            NF4SOCK,
+            NF4FIFO,
+            NF4ATTRDIR,
+            NF4NAMEDATTR,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -151,8 +158,10 @@ mod tests {
     #[test]
     fn test_delegation_types_distinct() {
         let deleg = [
-            NFS4_OPEN_DELEGATE_NONE, NFS4_OPEN_DELEGATE_READ,
-            NFS4_OPEN_DELEGATE_WRITE, NFS4_OPEN_DELEGATE_NONE_EXT,
+            NFS4_OPEN_DELEGATE_NONE,
+            NFS4_OPEN_DELEGATE_READ,
+            NFS4_OPEN_DELEGATE_WRITE,
+            NFS4_OPEN_DELEGATE_NONE_EXT,
         ];
         for i in 0..deleg.len() {
             for j in (i + 1)..deleg.len() {
@@ -172,9 +181,13 @@ mod tests {
     #[test]
     fn test_export_flags_distinct() {
         let flags = [
-            NFSEXP_READONLY, NFSEXP_INSECURE_PORT,
-            NFSEXP_ROOTSQUASH, NFSEXP_ALLSQUASH,
-            NFSEXP_ASYNC, NFSEXP_NOHIDE, NFSEXP_CROSSMOUNT,
+            NFSEXP_READONLY,
+            NFSEXP_INSECURE_PORT,
+            NFSEXP_ROOTSQUASH,
+            NFSEXP_ALLSQUASH,
+            NFSEXP_ASYNC,
+            NFSEXP_NOHIDE,
+            NFSEXP_CROSSMOUNT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

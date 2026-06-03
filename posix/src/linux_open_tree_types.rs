@@ -66,8 +66,10 @@ mod tests {
     #[test]
     fn test_at_flags_distinct() {
         let flags = [
-            AT_EMPTY_PATH_OT, AT_NO_AUTOMOUNT_OT,
-            AT_SYMLINK_NOFOLLOW_OT, AT_RECURSIVE_OT,
+            AT_EMPTY_PATH_OT,
+            AT_NO_AUTOMOUNT_OT,
+            AT_SYMLINK_NOFOLLOW_OT,
+            AT_RECURSIVE_OT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -96,7 +96,14 @@ mod tests {
 
     #[test]
     fn test_fcntl_commands_distinct() {
-        let cmds = [F_GETLK, F_SETLK, F_SETLKW, F_OFD_GETLK, F_OFD_SETLK, F_OFD_SETLKW];
+        let cmds = [
+            F_GETLK,
+            F_SETLK,
+            F_SETLKW,
+            F_OFD_GETLK,
+            F_OFD_SETLK,
+            F_OFD_SETLKW,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);

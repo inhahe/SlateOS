@@ -3,15 +3,15 @@
 //! Re-exports scheduling functions and constants from the `sched`
 //! module.  This maps to the `<sched.h>` header in a `<sys/>` path.
 
-pub use crate::sched::SCHED_OTHER;
-pub use crate::sched::SCHED_FIFO;
-pub use crate::sched::SCHED_RR;
 pub use crate::pthread::sched_yield;
-pub use crate::sched::sched_getscheduler;
-pub use crate::sched::sched_setscheduler;
+pub use crate::sched::SCHED_FIFO;
+pub use crate::sched::SCHED_OTHER;
+pub use crate::sched::SCHED_RR;
+pub use crate::sched::SchedParam;
 pub use crate::sched::sched_get_priority_max;
 pub use crate::sched::sched_get_priority_min;
-pub use crate::sched::SchedParam;
+pub use crate::sched::sched_getscheduler;
+pub use crate::sched::sched_setscheduler;
 
 // ---------------------------------------------------------------------------
 // Tests

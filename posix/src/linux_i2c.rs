@@ -159,8 +159,13 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            I2C_SLAVE, I2C_SLAVE_FORCE, I2C_TENBIT,
-            I2C_FUNCS, I2C_RDWR, I2C_PEC, I2C_SMBUS,
+            I2C_SLAVE,
+            I2C_SLAVE_FORCE,
+            I2C_TENBIT,
+            I2C_FUNCS,
+            I2C_RDWR,
+            I2C_PEC,
+            I2C_SMBUS,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -172,9 +177,14 @@ mod tests {
     #[test]
     fn test_msg_flags_are_bits() {
         let flags = [
-            I2C_M_RD, I2C_M_TEN, I2C_M_DMA_SAFE,
-            I2C_M_RECV_LEN, I2C_M_NO_RD_ACK, I2C_M_NOSTART,
-            I2C_M_IGNORE_NAK, I2C_M_STOP,
+            I2C_M_RD,
+            I2C_M_TEN,
+            I2C_M_DMA_SAFE,
+            I2C_M_RECV_LEN,
+            I2C_M_NO_RD_ACK,
+            I2C_M_NOSTART,
+            I2C_M_IGNORE_NAK,
+            I2C_M_STOP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

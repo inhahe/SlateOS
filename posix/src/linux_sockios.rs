@@ -101,10 +101,18 @@ mod tests {
     #[test]
     fn test_sioc_if_distinct() {
         let codes = [
-            SIOCGIFNAME, SIOCGIFFLAGS, SIOCSIFFLAGS,
-            SIOCGIFADDR, SIOCSIFADDR, SIOCGIFNETMASK,
-            SIOCSIFNETMASK, SIOCGIFHWADDR, SIOCSIFHWADDR,
-            SIOCGIFMTU, SIOCSIFMTU, SIOCGIFINDEX,
+            SIOCGIFNAME,
+            SIOCGIFFLAGS,
+            SIOCSIFFLAGS,
+            SIOCGIFADDR,
+            SIOCSIFADDR,
+            SIOCGIFNETMASK,
+            SIOCSIFNETMASK,
+            SIOCGIFHWADDR,
+            SIOCSIFHWADDR,
+            SIOCGIFMTU,
+            SIOCSIFMTU,
+            SIOCGIFINDEX,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

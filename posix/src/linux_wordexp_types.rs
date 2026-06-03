@@ -50,8 +50,12 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            WRDE_APPEND, WRDE_DOOFFS, WRDE_NOCMD,
-            WRDE_REUSE, WRDE_SHOWERR, WRDE_UNDEF,
+            WRDE_APPEND,
+            WRDE_DOOFFS,
+            WRDE_NOCMD,
+            WRDE_REUSE,
+            WRDE_SHOWERR,
+            WRDE_UNDEF,
         ];
         for f in flags {
             assert!(f.is_power_of_two());
@@ -61,8 +65,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            WRDE_APPEND, WRDE_DOOFFS, WRDE_NOCMD,
-            WRDE_REUSE, WRDE_SHOWERR, WRDE_UNDEF,
+            WRDE_APPEND,
+            WRDE_DOOFFS,
+            WRDE_NOCMD,
+            WRDE_REUSE,
+            WRDE_SHOWERR,
+            WRDE_UNDEF,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -79,8 +87,12 @@ mod tests {
     #[test]
     fn test_error_codes_distinct() {
         let codes = [
-            WRDE_OK, WRDE_BADCHAR, WRDE_BADVAL,
-            WRDE_CMDSUB, WRDE_NOSPACE, WRDE_SYNTAX,
+            WRDE_OK,
+            WRDE_BADCHAR,
+            WRDE_BADVAL,
+            WRDE_CMDSUB,
+            WRDE_NOSPACE,
+            WRDE_SYNTAX,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

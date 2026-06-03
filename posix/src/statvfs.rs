@@ -127,7 +127,11 @@ fn fill_statvfs_from_raw(buf: &mut Statvfs, raw: &[u8; KERNEL_STATVFS_LEN]) {
 
     // Guard against a zero block size from virtual filesystems: callers
     // such as df divide by it.
-    buf.f_bsize = if block_size == 0 { DEFAULT_BLOCK_SIZE } else { block_size };
+    buf.f_bsize = if block_size == 0 {
+        DEFAULT_BLOCK_SIZE
+    } else {
+        block_size
+    };
     buf.f_frsize = buf.f_bsize;
     buf.f_blocks = rd_u64(raw, 8);
     buf.f_bfree = rd_u64(raw, 16);
@@ -137,7 +141,11 @@ fn fill_statvfs_from_raw(buf: &mut Statvfs, raw: &[u8; KERNEL_STATVFS_LEN]) {
     buf.f_favail = buf.f_ffree;
     buf.f_fsid = 1;
     buf.f_flag = if read_only { ST_RDONLY } else { 0 };
-    buf.f_namemax = if max_name_len == 0 { DEFAULT_NAMEMAX } else { max_name_len };
+    buf.f_namemax = if max_name_len == 0 {
+        DEFAULT_NAMEMAX
+    } else {
+        max_name_len
+    };
 }
 
 /// Translate a kernel statvfs block into a Linux `struct statfs`.
@@ -146,8 +154,16 @@ fn fill_statfs_from_raw(buf: &mut Statfs, raw: &[u8; KERNEL_STATVFS_LEN]) {
     let block_size = rd_u64(raw, 0);
     let read_only = raw[48] != 0;
     let max_name_len = rd_u64(raw, 40);
-    let bsize = if block_size == 0 { DEFAULT_BLOCK_SIZE } else { block_size };
-    let namelen = if max_name_len == 0 { DEFAULT_NAMEMAX } else { max_name_len };
+    let bsize = if block_size == 0 {
+        DEFAULT_BLOCK_SIZE
+    } else {
+        block_size
+    };
+    let namelen = if max_name_len == 0 {
+        DEFAULT_NAMEMAX
+    } else {
+        max_name_len
+    };
 
     // The kernel ABI doesn't convey the filesystem type magic; report
     // ext4 (the primary on-disk filesystem) as before.
@@ -469,8 +485,7 @@ mod tests {
     /// number and hope.  Allocate via `fdtable::alloc_fd` to guarantee the
     /// kernel sees an open File handle, then `close_test_fd` to release it.
     fn alloc_test_fd() -> i32 {
-        crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0)
-            .expect("alloc_fd File failed")
+        crate::fdtable::alloc_fd(crate::fdtable::HandleKind::File, 0).expect("alloc_fd File failed")
     }
 
     fn close_test_fd(fd: i32) {
@@ -509,7 +524,7 @@ mod tests {
             + 5 * 8            // f_blocks..f_ffree (u64)
             + 8                // f_fsid ([i32; 2])
             + 3 * 8            // f_namelen, f_frsize, f_flags (i64)
-            + 4 * 8;           // f_spare ([i64; 4])
+            + 4 * 8; // f_spare ([i64; 4])
         assert_eq!(mem::size_of::<Statfs>(), expected);
     }
 
@@ -550,12 +565,21 @@ mod tests {
 
         // 10 GiB total in 16 KiB blocks.
         let expected_total = 10 * 1024 * 1024 * 1024_u64 / 16384;
-        assert_eq!(buf.f_blocks, expected_total, "total blocks should represent 10 GiB");
+        assert_eq!(
+            buf.f_blocks, expected_total,
+            "total blocks should represent 10 GiB"
+        );
 
         // 1 GiB free in 16 KiB blocks.
         let expected_free = 1024 * 1024 * 1024_u64 / 16384;
-        assert_eq!(buf.f_bfree, expected_free, "free blocks should represent 1 GiB");
-        assert_eq!(buf.f_bavail, expected_free, "available blocks should equal free blocks");
+        assert_eq!(
+            buf.f_bfree, expected_free,
+            "free blocks should represent 1 GiB"
+        );
+        assert_eq!(
+            buf.f_bavail, expected_free,
+            "available blocks should equal free blocks"
+        );
     }
 
     #[test]

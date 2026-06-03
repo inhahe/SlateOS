@@ -67,10 +67,14 @@ mod tests {
     #[test]
     fn test_special_labels_distinct() {
         let labels = [
-            MPLS_LABEL_IPV4_NULL, MPLS_LABEL_ROUTER_ALERT,
-            MPLS_LABEL_IPV6_NULL, MPLS_LABEL_IMPLICIT_NULL,
-            MPLS_LABEL_ENTROPY_INDICATOR, MPLS_LABEL_GAL,
-            MPLS_LABEL_OAM_ALERT, MPLS_LABEL_EXTENSION,
+            MPLS_LABEL_IPV4_NULL,
+            MPLS_LABEL_ROUTER_ALERT,
+            MPLS_LABEL_IPV6_NULL,
+            MPLS_LABEL_IMPLICIT_NULL,
+            MPLS_LABEL_ENTROPY_INDICATOR,
+            MPLS_LABEL_GAL,
+            MPLS_LABEL_OAM_ALERT,
+            MPLS_LABEL_EXTENSION,
             MPLS_LABEL_FIRST_UNRESERVED,
         ];
         for i in 0..labels.len() {
@@ -94,8 +98,7 @@ mod tests {
 
     #[test]
     fn test_header_fields_cover_32_bits() {
-        let all = MPLS_LS_LABEL_MASK | MPLS_LS_TC_MASK
-            | MPLS_LS_S_MASK | MPLS_LS_TTL_MASK;
+        let all = MPLS_LS_LABEL_MASK | MPLS_LS_TC_MASK | MPLS_LS_S_MASK | MPLS_LS_TTL_MASK;
         assert_eq!(all, 0xFFFFFFFF);
     }
 

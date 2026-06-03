@@ -101,7 +101,11 @@ mod tests {
 
     #[test]
     fn test_commands_distinct() {
-        let cmds = [HANDSHAKE_CMD_READY, HANDSHAKE_CMD_DONE, HANDSHAKE_CMD_ACCEPT];
+        let cmds = [
+            HANDSHAKE_CMD_READY,
+            HANDSHAKE_CMD_DONE,
+            HANDSHAKE_CMD_ACCEPT,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);
@@ -116,12 +120,19 @@ mod tests {
 
     #[test]
     fn test_tls_types_distinct() {
-        assert_ne!(HANDSHAKE_TLS_TYPE_CLIENTHELLO, HANDSHAKE_TLS_TYPE_SERVERHELLO);
+        assert_ne!(
+            HANDSHAKE_TLS_TYPE_CLIENTHELLO,
+            HANDSHAKE_TLS_TYPE_SERVERHELLO
+        );
     }
 
     #[test]
     fn test_auth_modes_distinct() {
-        let auths = [HANDSHAKE_AUTH_UNSPEC, HANDSHAKE_AUTH_PSK, HANDSHAKE_AUTH_X509];
+        let auths = [
+            HANDSHAKE_AUTH_UNSPEC,
+            HANDSHAKE_AUTH_PSK,
+            HANDSHAKE_AUTH_X509,
+        ];
         for i in 0..auths.len() {
             for j in (i + 1)..auths.len() {
                 assert_ne!(auths[i], auths[j]);
@@ -132,10 +143,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            HANDSHAKE_A_ACCEPT_SOCKFD, HANDSHAKE_A_ACCEPT_HANDLER_CLASS,
-            HANDSHAKE_A_ACCEPT_MESSAGE_TYPE, HANDSHAKE_A_ACCEPT_TIMEOUT,
-            HANDSHAKE_A_ACCEPT_AUTH_MODE, HANDSHAKE_A_ACCEPT_PEER_IDENTITY,
-            HANDSHAKE_A_ACCEPT_CERTIFICATE, HANDSHAKE_A_ACCEPT_PEERNAME,
+            HANDSHAKE_A_ACCEPT_SOCKFD,
+            HANDSHAKE_A_ACCEPT_HANDLER_CLASS,
+            HANDSHAKE_A_ACCEPT_MESSAGE_TYPE,
+            HANDSHAKE_A_ACCEPT_TIMEOUT,
+            HANDSHAKE_A_ACCEPT_AUTH_MODE,
+            HANDSHAKE_A_ACCEPT_PEER_IDENTITY,
+            HANDSHAKE_A_ACCEPT_CERTIFICATE,
+            HANDSHAKE_A_ACCEPT_PEERNAME,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -147,8 +162,10 @@ mod tests {
     #[test]
     fn test_done_statuses_distinct() {
         let statuses = [
-            HANDSHAKE_DONE_SUCCESS, HANDSHAKE_DONE_TIMEOUT,
-            HANDSHAKE_DONE_AUTH_FAIL, HANDSHAKE_DONE_ABORTED,
+            HANDSHAKE_DONE_SUCCESS,
+            HANDSHAKE_DONE_TIMEOUT,
+            HANDSHAKE_DONE_AUTH_FAIL,
+            HANDSHAKE_DONE_ABORTED,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {

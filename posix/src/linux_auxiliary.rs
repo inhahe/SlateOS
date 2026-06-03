@@ -62,8 +62,11 @@ mod tests {
     #[test]
     fn test_ids_distinct() {
         let ids = [
-            AUXILIARY_ID_RDMA, AUXILIARY_ID_DEVLINK, AUXILIARY_ID_ETH,
-            AUXILIARY_ID_CRYPTO, AUXILIARY_ID_COMPRESS,
+            AUXILIARY_ID_RDMA,
+            AUXILIARY_ID_DEVLINK,
+            AUXILIARY_ID_ETH,
+            AUXILIARY_ID_CRYPTO,
+            AUXILIARY_ID_COMPRESS,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -75,7 +78,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            AUXILIARY_FLAG_INITIALIZED, AUXILIARY_FLAG_PROBE_DEFERRED,
+            AUXILIARY_FLAG_INITIALIZED,
+            AUXILIARY_FLAG_PROBE_DEFERRED,
             AUXILIARY_FLAG_ERROR,
         ];
         for i in 0..flags.len() {

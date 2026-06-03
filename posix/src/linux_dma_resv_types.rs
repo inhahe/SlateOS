@@ -41,8 +41,10 @@ mod tests {
     #[test]
     fn test_usage_types_distinct() {
         let usages = [
-            DMA_RESV_USAGE_KERNEL, DMA_RESV_USAGE_WRITE,
-            DMA_RESV_USAGE_READ, DMA_RESV_USAGE_BOOKKEEP,
+            DMA_RESV_USAGE_KERNEL,
+            DMA_RESV_USAGE_WRITE,
+            DMA_RESV_USAGE_READ,
+            DMA_RESV_USAGE_BOOKKEEP,
         ];
         for i in 0..usages.len() {
             for j in (i + 1)..usages.len() {

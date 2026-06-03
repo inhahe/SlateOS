@@ -78,10 +78,14 @@ mod tests {
     #[test]
     fn test_object_types_distinct() {
         let types = [
-            NFT_OBJECT_UNSPEC, NFT_OBJECT_COUNTER,
-            NFT_OBJECT_QUOTA, NFT_OBJECT_CT_HELPER,
-            NFT_OBJECT_LIMIT, NFT_OBJECT_CT_TIMEOUT,
-            NFT_OBJECT_SECMARK, NFT_OBJECT_CT_EXPECT,
+            NFT_OBJECT_UNSPEC,
+            NFT_OBJECT_COUNTER,
+            NFT_OBJECT_QUOTA,
+            NFT_OBJECT_CT_HELPER,
+            NFT_OBJECT_LIMIT,
+            NFT_OBJECT_CT_TIMEOUT,
+            NFT_OBJECT_SECMARK,
+            NFT_OBJECT_CT_EXPECT,
             NFT_OBJECT_SYNPROXY,
         ];
         for i in 0..types.len() {
@@ -115,9 +119,14 @@ mod tests {
     #[test]
     fn test_set_flags_power_of_two() {
         let flags = [
-            NFT_SET_ANONYMOUS, NFT_SET_CONSTANT, NFT_SET_INTERVAL,
-            NFT_SET_MAP, NFT_SET_TIMEOUT, NFT_SET_EVAL,
-            NFT_SET_OBJECT, NFT_SET_CONCAT,
+            NFT_SET_ANONYMOUS,
+            NFT_SET_CONSTANT,
+            NFT_SET_INTERVAL,
+            NFT_SET_MAP,
+            NFT_SET_TIMEOUT,
+            NFT_SET_EVAL,
+            NFT_SET_OBJECT,
+            NFT_SET_CONCAT,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:02x} not power of two", f);
@@ -127,9 +136,14 @@ mod tests {
     #[test]
     fn test_set_flags_no_overlap() {
         let flags = [
-            NFT_SET_ANONYMOUS, NFT_SET_CONSTANT, NFT_SET_INTERVAL,
-            NFT_SET_MAP, NFT_SET_TIMEOUT, NFT_SET_EVAL,
-            NFT_SET_OBJECT, NFT_SET_CONCAT,
+            NFT_SET_ANONYMOUS,
+            NFT_SET_CONSTANT,
+            NFT_SET_INTERVAL,
+            NFT_SET_MAP,
+            NFT_SET_TIMEOUT,
+            NFT_SET_EVAL,
+            NFT_SET_OBJECT,
+            NFT_SET_CONCAT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

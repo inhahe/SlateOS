@@ -72,8 +72,11 @@ mod tests {
     #[test]
     fn test_mqprio_attrs_distinct() {
         let attrs = [
-            TCA_MQPRIO_UNSPEC, TCA_MQPRIO_MODE, TCA_MQPRIO_SHAPER,
-            TCA_MQPRIO_MIN_RATE64, TCA_MQPRIO_MAX_RATE64,
+            TCA_MQPRIO_UNSPEC,
+            TCA_MQPRIO_MODE,
+            TCA_MQPRIO_SHAPER,
+            TCA_MQPRIO_MIN_RATE64,
+            TCA_MQPRIO_MAX_RATE64,
             TCA_MQPRIO_TC_ENTRY,
         ];
         for i in 0..attrs.len() {

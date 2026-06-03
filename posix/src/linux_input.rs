@@ -215,8 +215,18 @@ mod tests {
     #[test]
     fn test_ev_types_distinct() {
         let types = [
-            EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC, EV_SW,
-            EV_LED, EV_SND, EV_REP, EV_FF, EV_PWR, EV_FF_STATUS,
+            EV_SYN,
+            EV_KEY,
+            EV_REL,
+            EV_ABS,
+            EV_MSC,
+            EV_SW,
+            EV_LED,
+            EV_SND,
+            EV_REP,
+            EV_FF,
+            EV_PWR,
+            EV_FF_STATUS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -228,10 +238,25 @@ mod tests {
     #[test]
     fn test_key_codes_distinct() {
         let keys = [
-            KEY_ESC, KEY_ENTER, KEY_BACKSPACE, KEY_TAB, KEY_SPACE,
-            KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_RIGHTSHIFT, KEY_LEFTALT,
-            KEY_CAPSLOCK, KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT,
-            KEY_DELETE, KEY_HOME, KEY_END, KEY_PAGEUP, KEY_PAGEDOWN,
+            KEY_ESC,
+            KEY_ENTER,
+            KEY_BACKSPACE,
+            KEY_TAB,
+            KEY_SPACE,
+            KEY_LEFTCTRL,
+            KEY_LEFTSHIFT,
+            KEY_RIGHTSHIFT,
+            KEY_LEFTALT,
+            KEY_CAPSLOCK,
+            KEY_UP,
+            KEY_DOWN,
+            KEY_LEFT,
+            KEY_RIGHT,
+            KEY_DELETE,
+            KEY_HOME,
+            KEY_END,
+            KEY_PAGEUP,
+            KEY_PAGEDOWN,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -277,8 +302,10 @@ mod tests {
     #[test]
     fn test_abs_mt_codes_distinct() {
         let codes = [
-            ABS_MT_SLOT, ABS_MT_TOUCH_MAJOR,
-            ABS_MT_POSITION_X, ABS_MT_POSITION_Y,
+            ABS_MT_SLOT,
+            ABS_MT_TOUCH_MAJOR,
+            ABS_MT_POSITION_X,
+            ABS_MT_POSITION_Y,
             ABS_MT_TRACKING_ID,
         ];
         for i in 0..codes.len() {

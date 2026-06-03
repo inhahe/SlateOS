@@ -8,11 +8,11 @@
 // ---------------------------------------------------------------------------
 
 pub use crate::unistd::Mntent;
-pub use crate::unistd::setmntent;
+pub use crate::unistd::endmntent;
 pub use crate::unistd::getmntent;
 pub use crate::unistd::getmntent_r;
-pub use crate::unistd::endmntent;
 pub use crate::unistd::hasmntopt;
+pub use crate::unistd::setmntent;
 
 // ---------------------------------------------------------------------------
 // Standard mount table paths
@@ -79,9 +79,16 @@ mod tests {
     #[test]
     fn test_mount_options_null_terminated() {
         let opts: &[&[u8]] = &[
-            MNTOPT_RO, MNTOPT_RW, MNTOPT_SUID, MNTOPT_NOSUID,
-            MNTOPT_NODEV, MNTOPT_NOEXEC, MNTOPT_SYNC,
-            MNTOPT_NOAUTO, MNTOPT_USER, MNTOPT_DEFAULTS,
+            MNTOPT_RO,
+            MNTOPT_RW,
+            MNTOPT_SUID,
+            MNTOPT_NOSUID,
+            MNTOPT_NODEV,
+            MNTOPT_NOEXEC,
+            MNTOPT_SYNC,
+            MNTOPT_NOAUTO,
+            MNTOPT_USER,
+            MNTOPT_DEFAULTS,
         ];
         for opt in opts {
             assert!(

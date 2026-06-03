@@ -115,8 +115,10 @@ mod tests {
     #[test]
     fn test_fwd_methods_distinct() {
         let methods = [
-            IP_VS_CONN_F_MASQ, IP_VS_CONN_F_LOCALNODE,
-            IP_VS_CONN_F_TUNNEL, IP_VS_CONN_F_DROUTE,
+            IP_VS_CONN_F_MASQ,
+            IP_VS_CONN_F_LOCALNODE,
+            IP_VS_CONN_F_TUNNEL,
+            IP_VS_CONN_F_DROUTE,
             IP_VS_CONN_F_BYPASS,
         ];
         for i in 0..methods.len() {
@@ -129,11 +131,20 @@ mod tests {
     #[test]
     fn test_schedulers_distinct() {
         let scheds = [
-            IP_VS_SCHED_RR, IP_VS_SCHED_WRR, IP_VS_SCHED_LC,
-            IP_VS_SCHED_WLC, IP_VS_SCHED_LBLC, IP_VS_SCHED_LBLCR,
-            IP_VS_SCHED_DH, IP_VS_SCHED_SH, IP_VS_SCHED_SED,
-            IP_VS_SCHED_NQ, IP_VS_SCHED_OVF, IP_VS_SCHED_MH,
-            IP_VS_SCHED_FO, IP_VS_SCHED_TWOS,
+            IP_VS_SCHED_RR,
+            IP_VS_SCHED_WRR,
+            IP_VS_SCHED_LC,
+            IP_VS_SCHED_WLC,
+            IP_VS_SCHED_LBLC,
+            IP_VS_SCHED_LBLCR,
+            IP_VS_SCHED_DH,
+            IP_VS_SCHED_SH,
+            IP_VS_SCHED_SED,
+            IP_VS_SCHED_NQ,
+            IP_VS_SCHED_OVF,
+            IP_VS_SCHED_MH,
+            IP_VS_SCHED_FO,
+            IP_VS_SCHED_TWOS,
         ];
         for i in 0..scheds.len() {
             for j in (i + 1)..scheds.len() {
@@ -145,13 +156,20 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            IPVS_CMD_NEW_SERVICE, IPVS_CMD_SET_SERVICE,
-            IPVS_CMD_DEL_SERVICE, IPVS_CMD_GET_SERVICE,
-            IPVS_CMD_NEW_DEST, IPVS_CMD_SET_DEST,
-            IPVS_CMD_DEL_DEST, IPVS_CMD_GET_DEST,
-            IPVS_CMD_NEW_DAEMON, IPVS_CMD_DEL_DAEMON,
-            IPVS_CMD_GET_DAEMON, IPVS_CMD_FLUSH,
-            IPVS_CMD_GET_INFO, IPVS_CMD_ZERO,
+            IPVS_CMD_NEW_SERVICE,
+            IPVS_CMD_SET_SERVICE,
+            IPVS_CMD_DEL_SERVICE,
+            IPVS_CMD_GET_SERVICE,
+            IPVS_CMD_NEW_DEST,
+            IPVS_CMD_SET_DEST,
+            IPVS_CMD_DEL_DEST,
+            IPVS_CMD_GET_DEST,
+            IPVS_CMD_NEW_DAEMON,
+            IPVS_CMD_DEL_DAEMON,
+            IPVS_CMD_GET_DAEMON,
+            IPVS_CMD_FLUSH,
+            IPVS_CMD_GET_INFO,
+            IPVS_CMD_ZERO,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

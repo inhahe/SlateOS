@@ -107,9 +107,12 @@ mod tests {
     #[test]
     fn test_key_specs_distinct() {
         let specs = [
-            KEY_SPEC_THREAD_KEYRING, KEY_SPEC_PROCESS_KEYRING,
-            KEY_SPEC_SESSION_KEYRING, KEY_SPEC_USER_KEYRING,
-            KEY_SPEC_USER_SESSION_KEYRING, KEY_SPEC_GROUP_KEYRING,
+            KEY_SPEC_THREAD_KEYRING,
+            KEY_SPEC_PROCESS_KEYRING,
+            KEY_SPEC_SESSION_KEYRING,
+            KEY_SPEC_USER_KEYRING,
+            KEY_SPEC_USER_SESSION_KEYRING,
+            KEY_SPEC_GROUP_KEYRING,
             KEY_SPEC_REQKEY_AUTH_KEY,
         ];
         for i in 0..specs.len() {
@@ -122,11 +125,20 @@ mod tests {
     #[test]
     fn test_keyctl_cmds_distinct() {
         let cmds = [
-            KEYCTL_GET_KEYRING_ID, KEYCTL_JOIN_SESSION_KEYRING,
-            KEYCTL_UPDATE, KEYCTL_REVOKE, KEYCTL_CHOWN,
-            KEYCTL_SETPERM, KEYCTL_DESCRIBE, KEYCTL_CLEAR,
-            KEYCTL_LINK, KEYCTL_UNLINK, KEYCTL_SEARCH,
-            KEYCTL_READ, KEYCTL_INSTANTIATE, KEYCTL_NEGATE,
+            KEYCTL_GET_KEYRING_ID,
+            KEYCTL_JOIN_SESSION_KEYRING,
+            KEYCTL_UPDATE,
+            KEYCTL_REVOKE,
+            KEYCTL_CHOWN,
+            KEYCTL_SETPERM,
+            KEYCTL_DESCRIBE,
+            KEYCTL_CLEAR,
+            KEYCTL_LINK,
+            KEYCTL_UNLINK,
+            KEYCTL_SEARCH,
+            KEYCTL_READ,
+            KEYCTL_INSTANTIATE,
+            KEYCTL_NEGATE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -138,8 +150,12 @@ mod tests {
     #[test]
     fn test_permissions_powers_of_two() {
         let perms = [
-            KEY_POS_VIEW, KEY_POS_READ, KEY_POS_WRITE,
-            KEY_POS_SEARCH, KEY_POS_LINK, KEY_POS_SETATTR,
+            KEY_POS_VIEW,
+            KEY_POS_READ,
+            KEY_POS_WRITE,
+            KEY_POS_SEARCH,
+            KEY_POS_LINK,
+            KEY_POS_SETATTR,
         ];
         for p in &perms {
             assert!(p.is_power_of_two(), "perm {p:#x} not power of 2");
@@ -150,8 +166,12 @@ mod tests {
     fn test_pos_all_mask() {
         assert_eq!(
             KEY_POS_ALL,
-            KEY_POS_VIEW | KEY_POS_READ | KEY_POS_WRITE
-                | KEY_POS_SEARCH | KEY_POS_LINK | KEY_POS_SETATTR
+            KEY_POS_VIEW
+                | KEY_POS_READ
+                | KEY_POS_WRITE
+                | KEY_POS_SEARCH
+                | KEY_POS_LINK
+                | KEY_POS_SETATTR
         );
     }
 }

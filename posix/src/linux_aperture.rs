@@ -58,8 +58,10 @@ mod tests {
     #[test]
     fn test_fb_names_distinct() {
         let names = [
-            APERTURE_EFIFB, APERTURE_SIMPLEFB,
-            APERTURE_VESAFB, APERTURE_OFFB,
+            APERTURE_EFIFB,
+            APERTURE_SIMPLEFB,
+            APERTURE_VESAFB,
+            APERTURE_OFFB,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

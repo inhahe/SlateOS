@@ -97,19 +97,20 @@ mod tests {
     #[test]
     fn test_fourcc_encoding() {
         // YUYV should be 'Y' | ('U' << 8) | ('Y' << 16) | ('V' << 24)
-        let expected = b'Y' as u32
-            | ((b'U' as u32) << 8)
-            | ((b'Y' as u32) << 16)
-            | ((b'V' as u32) << 24);
+        let expected =
+            b'Y' as u32 | ((b'U' as u32) << 8) | ((b'Y' as u32) << 16) | ((b'V' as u32) << 24);
         assert_eq!(V4L2_PIX_FMT_YUYV, expected);
     }
 
     #[test]
     fn test_rgb_formats_distinct() {
         let fmts = [
-            V4L2_PIX_FMT_RGB565, V4L2_PIX_FMT_RGB24,
-            V4L2_PIX_FMT_BGR24, V4L2_PIX_FMT_ARGB32,
-            V4L2_PIX_FMT_XRGB32, V4L2_PIX_FMT_ABGR32,
+            V4L2_PIX_FMT_RGB565,
+            V4L2_PIX_FMT_RGB24,
+            V4L2_PIX_FMT_BGR24,
+            V4L2_PIX_FMT_ARGB32,
+            V4L2_PIX_FMT_XRGB32,
+            V4L2_PIX_FMT_ABGR32,
         ];
         for i in 0..fmts.len() {
             for j in (i + 1)..fmts.len() {
@@ -121,10 +122,14 @@ mod tests {
     #[test]
     fn test_yuv_formats_distinct() {
         let fmts = [
-            V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_UYVY,
-            V4L2_PIX_FMT_YVYU, V4L2_PIX_FMT_VYUY,
-            V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_NV21,
-            V4L2_PIX_FMT_YUV420, V4L2_PIX_FMT_YVU420,
+            V4L2_PIX_FMT_YUYV,
+            V4L2_PIX_FMT_UYVY,
+            V4L2_PIX_FMT_YVYU,
+            V4L2_PIX_FMT_VYUY,
+            V4L2_PIX_FMT_NV12,
+            V4L2_PIX_FMT_NV21,
+            V4L2_PIX_FMT_YUV420,
+            V4L2_PIX_FMT_YVU420,
             V4L2_PIX_FMT_YUV422P,
         ];
         for i in 0..fmts.len() {
@@ -137,9 +142,12 @@ mod tests {
     #[test]
     fn test_compressed_formats_distinct() {
         let fmts = [
-            V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_JPEG,
-            V4L2_PIX_FMT_H264, V4L2_PIX_FMT_HEVC,
-            V4L2_PIX_FMT_VP8, V4L2_PIX_FMT_VP9,
+            V4L2_PIX_FMT_MJPEG,
+            V4L2_PIX_FMT_JPEG,
+            V4L2_PIX_FMT_H264,
+            V4L2_PIX_FMT_HEVC,
+            V4L2_PIX_FMT_VP8,
+            V4L2_PIX_FMT_VP9,
         ];
         for i in 0..fmts.len() {
             for j in (i + 1)..fmts.len() {
@@ -157,8 +165,10 @@ mod tests {
     fn test_all_nonzero() {
         // FourCC codes built from ASCII always produce nonzero values
         let fmts = [
-            V4L2_PIX_FMT_RGB565, V4L2_PIX_FMT_YUYV,
-            V4L2_PIX_FMT_NV12, V4L2_PIX_FMT_MJPEG,
+            V4L2_PIX_FMT_RGB565,
+            V4L2_PIX_FMT_YUYV,
+            V4L2_PIX_FMT_NV12,
+            V4L2_PIX_FMT_MJPEG,
             V4L2_PIX_FMT_GREY,
         ];
         for &f in &fmts {

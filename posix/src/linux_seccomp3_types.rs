@@ -85,8 +85,10 @@ mod tests {
     #[test]
     fn test_filter_flags_power_of_two() {
         let flags = [
-            SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_FILTER_FLAG_LOG,
-            SECCOMP_FILTER_FLAG_SPEC_ALLOW, SECCOMP_FILTER_FLAG_NEW_LISTENER,
+            SECCOMP_FILTER_FLAG_TSYNC,
+            SECCOMP_FILTER_FLAG_LOG,
+            SECCOMP_FILTER_FLAG_SPEC_ALLOW,
+            SECCOMP_FILTER_FLAG_NEW_LISTENER,
             SECCOMP_FILTER_FLAG_TSYNC_ESRCH,
             SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV,
         ];
@@ -98,8 +100,10 @@ mod tests {
     #[test]
     fn test_filter_flags_no_overlap() {
         let flags = [
-            SECCOMP_FILTER_FLAG_TSYNC, SECCOMP_FILTER_FLAG_LOG,
-            SECCOMP_FILTER_FLAG_SPEC_ALLOW, SECCOMP_FILTER_FLAG_NEW_LISTENER,
+            SECCOMP_FILTER_FLAG_TSYNC,
+            SECCOMP_FILTER_FLAG_LOG,
+            SECCOMP_FILTER_FLAG_SPEC_ALLOW,
+            SECCOMP_FILTER_FLAG_NEW_LISTENER,
             SECCOMP_FILTER_FLAG_TSYNC_ESRCH,
             SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV,
         ];

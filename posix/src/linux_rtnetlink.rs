@@ -4,12 +4,12 @@
 //! network interfaces, addresses, and neighbors on Linux. Used by
 //! iproute2 (ip command), NetworkManager, and systemd-networkd.
 
-pub use crate::linux_netlink::Nlmsghdr;
-pub use crate::linux_netlink::NLM_F_REQUEST;
-pub use crate::linux_netlink::NLM_F_DUMP;
 pub use crate::linux_netlink::NLM_F_CREATE;
+pub use crate::linux_netlink::NLM_F_DUMP;
 pub use crate::linux_netlink::NLM_F_EXCL;
+pub use crate::linux_netlink::NLM_F_REQUEST;
 pub use crate::linux_netlink::NLMSG_DONE;
+pub use crate::linux_netlink::Nlmsghdr;
 
 // ---------------------------------------------------------------------------
 // RTM_* message types

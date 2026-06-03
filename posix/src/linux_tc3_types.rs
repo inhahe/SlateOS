@@ -69,10 +69,17 @@ mod tests {
     #[test]
     fn test_qdisc_types_distinct() {
         let types = [
-            TC_QDISC_PFIFO, TC_QDISC_BFIFO, TC_QDISC_SFQ,
-            TC_QDISC_RED, TC_QDISC_TBF, TC_QDISC_HTB,
-            TC_QDISC_HFSC, TC_QDISC_FQ, TC_QDISC_FQ_CODEL,
-            TC_QDISC_CAKE, TC_QDISC_ETS,
+            TC_QDISC_PFIFO,
+            TC_QDISC_BFIFO,
+            TC_QDISC_SFQ,
+            TC_QDISC_RED,
+            TC_QDISC_TBF,
+            TC_QDISC_HTB,
+            TC_QDISC_HFSC,
+            TC_QDISC_FQ,
+            TC_QDISC_FQ_CODEL,
+            TC_QDISC_CAKE,
+            TC_QDISC_ETS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

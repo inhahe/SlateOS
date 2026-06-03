@@ -107,10 +107,21 @@ mod tests {
     #[test]
     fn test_per_process_files_distinct() {
         let files = [
-            PROC_STATUS, PROC_MAPS, PROC_CMDLINE, PROC_ENVIRON,
-            PROC_FD, PROC_STAT, PROC_STATM, PROC_IO,
-            PROC_CWD, PROC_EXE, PROC_ROOT, PROC_MOUNTINFO,
-            PROC_CGROUP, PROC_OOM_SCORE, PROC_OOM_SCORE_ADJ,
+            PROC_STATUS,
+            PROC_MAPS,
+            PROC_CMDLINE,
+            PROC_ENVIRON,
+            PROC_FD,
+            PROC_STAT,
+            PROC_STATM,
+            PROC_IO,
+            PROC_CWD,
+            PROC_EXE,
+            PROC_ROOT,
+            PROC_MOUNTINFO,
+            PROC_CGROUP,
+            PROC_OOM_SCORE,
+            PROC_OOM_SCORE_ADJ,
         ];
         for i in 0..files.len() {
             for j in (i + 1)..files.len() {
@@ -122,10 +133,18 @@ mod tests {
     #[test]
     fn test_system_files_distinct() {
         let files = [
-            PROC_MEMINFO, PROC_CPUINFO, PROC_LOADAVG, PROC_UPTIME,
-            PROC_VERSION, PROC_FILESYSTEMS, PROC_PARTITIONS,
-            PROC_MOUNTS, PROC_DISKSTATS, PROC_SWAPS,
-            PROC_VMSTAT, PROC_KERNEL_CMDLINE,
+            PROC_MEMINFO,
+            PROC_CPUINFO,
+            PROC_LOADAVG,
+            PROC_UPTIME,
+            PROC_VERSION,
+            PROC_FILESYSTEMS,
+            PROC_PARTITIONS,
+            PROC_MOUNTS,
+            PROC_DISKSTATS,
+            PROC_SWAPS,
+            PROC_VMSTAT,
+            PROC_KERNEL_CMDLINE,
         ];
         for i in 0..files.len() {
             for j in (i + 1)..files.len() {
@@ -137,8 +156,11 @@ mod tests {
     #[test]
     fn test_dirs_distinct() {
         let dirs = [
-            PROC_SYS, PROC_NET, PROC_INTERRUPTS,
-            PROC_SELF, PROC_THREAD_SELF,
+            PROC_SYS,
+            PROC_NET,
+            PROC_INTERRUPTS,
+            PROC_SELF,
+            PROC_THREAD_SELF,
         ];
         for i in 0..dirs.len() {
             for j in (i + 1)..dirs.len() {

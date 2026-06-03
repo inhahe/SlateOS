@@ -122,16 +122,30 @@ mod tests {
     #[test]
     fn test_keyctl_ops_distinct() {
         let ops = [
-            KEYCTL_GET_KEYRING_ID, KEYCTL_JOIN_SESSION_KEYRING,
-            KEYCTL_UPDATE, KEYCTL_REVOKE, KEYCTL_CHOWN,
-            KEYCTL_SETPERM, KEYCTL_DESCRIBE, KEYCTL_CLEAR,
-            KEYCTL_LINK, KEYCTL_UNLINK, KEYCTL_SEARCH,
-            KEYCTL_READ, KEYCTL_INSTANTIATE, KEYCTL_NEGATE,
-            KEYCTL_SET_TIMEOUT, KEYCTL_ASSUME_AUTHORITY,
-            KEYCTL_GET_SECURITY, KEYCTL_SESSION_TO_PARENT,
-            KEYCTL_REJECT, KEYCTL_INSTANTIATE_IOV,
-            KEYCTL_INVALIDATE, KEYCTL_GET_PERSISTENT,
-            KEYCTL_DH_COMPUTE, KEYCTL_RESTRICT_KEYRING,
+            KEYCTL_GET_KEYRING_ID,
+            KEYCTL_JOIN_SESSION_KEYRING,
+            KEYCTL_UPDATE,
+            KEYCTL_REVOKE,
+            KEYCTL_CHOWN,
+            KEYCTL_SETPERM,
+            KEYCTL_DESCRIBE,
+            KEYCTL_CLEAR,
+            KEYCTL_LINK,
+            KEYCTL_UNLINK,
+            KEYCTL_SEARCH,
+            KEYCTL_READ,
+            KEYCTL_INSTANTIATE,
+            KEYCTL_NEGATE,
+            KEYCTL_SET_TIMEOUT,
+            KEYCTL_ASSUME_AUTHORITY,
+            KEYCTL_GET_SECURITY,
+            KEYCTL_SESSION_TO_PARENT,
+            KEYCTL_REJECT,
+            KEYCTL_INSTANTIATE_IOV,
+            KEYCTL_INVALIDATE,
+            KEYCTL_GET_PERSISTENT,
+            KEYCTL_DH_COMPUTE,
+            KEYCTL_RESTRICT_KEYRING,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -143,9 +157,12 @@ mod tests {
     #[test]
     fn test_special_keyrings_distinct() {
         let rings = [
-            KEY_SPEC_THREAD_KEYRING, KEY_SPEC_PROCESS_KEYRING,
-            KEY_SPEC_SESSION_KEYRING, KEY_SPEC_USER_KEYRING,
-            KEY_SPEC_USER_SESSION_KEYRING, KEY_SPEC_GROUP_KEYRING,
+            KEY_SPEC_THREAD_KEYRING,
+            KEY_SPEC_PROCESS_KEYRING,
+            KEY_SPEC_SESSION_KEYRING,
+            KEY_SPEC_USER_KEYRING,
+            KEY_SPEC_USER_SESSION_KEYRING,
+            KEY_SPEC_GROUP_KEYRING,
             KEY_SPEC_REQKEY_AUTH_KEY,
         ];
         for i in 0..rings.len() {
@@ -159,8 +176,12 @@ mod tests {
     #[test]
     fn test_pos_perms_no_overlap() {
         let perms = [
-            KEY_POS_VIEW, KEY_POS_READ, KEY_POS_WRITE,
-            KEY_POS_SEARCH, KEY_POS_LINK, KEY_POS_SETATTR,
+            KEY_POS_VIEW,
+            KEY_POS_READ,
+            KEY_POS_WRITE,
+            KEY_POS_SEARCH,
+            KEY_POS_LINK,
+            KEY_POS_SETATTR,
         ];
         for i in 0..perms.len() {
             assert!(perms[i].is_power_of_two());
@@ -172,15 +193,23 @@ mod tests {
 
     #[test]
     fn test_pos_all_covers_all_pos() {
-        let combined = KEY_POS_VIEW | KEY_POS_READ | KEY_POS_WRITE
-            | KEY_POS_SEARCH | KEY_POS_LINK | KEY_POS_SETATTR;
+        let combined = KEY_POS_VIEW
+            | KEY_POS_READ
+            | KEY_POS_WRITE
+            | KEY_POS_SEARCH
+            | KEY_POS_LINK
+            | KEY_POS_SETATTR;
         assert_eq!(KEY_POS_ALL, combined);
     }
 
     #[test]
     fn test_usr_all_covers_all_usr() {
-        let combined = KEY_USR_VIEW | KEY_USR_READ | KEY_USR_WRITE
-            | KEY_USR_SEARCH | KEY_USR_LINK | KEY_USR_SETATTR;
+        let combined = KEY_USR_VIEW
+            | KEY_USR_READ
+            | KEY_USR_WRITE
+            | KEY_USR_SEARCH
+            | KEY_USR_LINK
+            | KEY_USR_SETATTR;
         assert_eq!(KEY_USR_ALL, combined);
     }
 }

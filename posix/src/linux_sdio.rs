@@ -93,7 +93,11 @@ mod tests {
 
     #[test]
     fn test_commands_distinct() {
-        let cmds = [SDIO_CMD_IO_RW_DIRECT, SDIO_CMD_IO_RW_EXTENDED, SDIO_CMD_SEND_OP_COND];
+        let cmds = [
+            SDIO_CMD_IO_RW_DIRECT,
+            SDIO_CMD_IO_RW_EXTENDED,
+            SDIO_CMD_SEND_OP_COND,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);
@@ -104,11 +108,20 @@ mod tests {
     #[test]
     fn test_cccr_addresses_distinct() {
         let addrs = [
-            SDIO_CCCR_REV, SDIO_CCCR_SD_REV, SDIO_CCCR_IO_EN,
-            SDIO_CCCR_IO_RDY, SDIO_CCCR_INT_EN, SDIO_CCCR_INT_PENDING,
-            SDIO_CCCR_ABORT, SDIO_CCCR_BUS_IF, SDIO_CCCR_CAPS,
-            SDIO_CCCR_CIS_PTR, SDIO_CCCR_BUS_SUSPEND, SDIO_CCCR_FN_SEL,
-            SDIO_CCCR_POWER, SDIO_CCCR_SPEED,
+            SDIO_CCCR_REV,
+            SDIO_CCCR_SD_REV,
+            SDIO_CCCR_IO_EN,
+            SDIO_CCCR_IO_RDY,
+            SDIO_CCCR_INT_EN,
+            SDIO_CCCR_INT_PENDING,
+            SDIO_CCCR_ABORT,
+            SDIO_CCCR_BUS_IF,
+            SDIO_CCCR_CAPS,
+            SDIO_CCCR_CIS_PTR,
+            SDIO_CCCR_BUS_SUSPEND,
+            SDIO_CCCR_FN_SEL,
+            SDIO_CCCR_POWER,
+            SDIO_CCCR_SPEED,
         ];
         for i in 0..addrs.len() {
             for j in (i + 1)..addrs.len() {
@@ -119,7 +132,11 @@ mod tests {
 
     #[test]
     fn test_bus_widths_distinct() {
-        let widths = [SDIO_BUS_WIDTH_1BIT, SDIO_BUS_WIDTH_4BIT, SDIO_BUS_WIDTH_8BIT];
+        let widths = [
+            SDIO_BUS_WIDTH_1BIT,
+            SDIO_BUS_WIDTH_4BIT,
+            SDIO_BUS_WIDTH_8BIT,
+        ];
         for i in 0..widths.len() {
             for j in (i + 1)..widths.len() {
                 assert_ne!(widths[i], widths[j]);
@@ -130,9 +147,15 @@ mod tests {
     #[test]
     fn test_class_codes_distinct() {
         let classes = [
-            SDIO_CLASS_NONE, SDIO_CLASS_UART, SDIO_CLASS_BT_A,
-            SDIO_CLASS_BT_B, SDIO_CLASS_GPS, SDIO_CLASS_CAMERA,
-            SDIO_CLASS_PHS, SDIO_CLASS_WLAN, SDIO_CLASS_ATA,
+            SDIO_CLASS_NONE,
+            SDIO_CLASS_UART,
+            SDIO_CLASS_BT_A,
+            SDIO_CLASS_BT_B,
+            SDIO_CLASS_GPS,
+            SDIO_CLASS_CAMERA,
+            SDIO_CLASS_PHS,
+            SDIO_CLASS_WLAN,
+            SDIO_CLASS_ATA,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {

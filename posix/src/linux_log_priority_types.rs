@@ -91,13 +91,26 @@ mod tests {
     #[test]
     fn test_facility_indices_distinct() {
         let facs = [
-            LOG_FAC_KERN, LOG_FAC_USER, LOG_FAC_MAIL,
-            LOG_FAC_DAEMON, LOG_FAC_AUTH, LOG_FAC_SYSLOG,
-            LOG_FAC_LPR, LOG_FAC_NEWS, LOG_FAC_UUCP,
-            LOG_FAC_CRON, LOG_FAC_AUTHPRIV, LOG_FAC_FTP,
-            LOG_FAC_LOCAL0, LOG_FAC_LOCAL1, LOG_FAC_LOCAL2,
-            LOG_FAC_LOCAL3, LOG_FAC_LOCAL4, LOG_FAC_LOCAL5,
-            LOG_FAC_LOCAL6, LOG_FAC_LOCAL7,
+            LOG_FAC_KERN,
+            LOG_FAC_USER,
+            LOG_FAC_MAIL,
+            LOG_FAC_DAEMON,
+            LOG_FAC_AUTH,
+            LOG_FAC_SYSLOG,
+            LOG_FAC_LPR,
+            LOG_FAC_NEWS,
+            LOG_FAC_UUCP,
+            LOG_FAC_CRON,
+            LOG_FAC_AUTHPRIV,
+            LOG_FAC_FTP,
+            LOG_FAC_LOCAL0,
+            LOG_FAC_LOCAL1,
+            LOG_FAC_LOCAL2,
+            LOG_FAC_LOCAL3,
+            LOG_FAC_LOCAL4,
+            LOG_FAC_LOCAL5,
+            LOG_FAC_LOCAL6,
+            LOG_FAC_LOCAL7,
         ];
         for i in 0..facs.len() {
             for j in (i + 1)..facs.len() {

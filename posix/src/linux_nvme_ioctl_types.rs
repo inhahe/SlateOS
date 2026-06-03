@@ -81,9 +81,12 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            NVME_IOCTL_ADMIN_CMD, NVME_IOCTL_IO_CMD,
-            NVME_IOCTL_ADMIN64_CMD, NVME_IOCTL_IO64_CMD,
-            NVME_IOCTL_RESET, NVME_IOCTL_RESCAN,
+            NVME_IOCTL_ADMIN_CMD,
+            NVME_IOCTL_IO_CMD,
+            NVME_IOCTL_ADMIN64_CMD,
+            NVME_IOCTL_IO64_CMD,
+            NVME_IOCTL_RESET,
+            NVME_IOCTL_RESCAN,
             NVME_IOCTL_SUBSYS_RESET,
         ];
         for i in 0..ioctls.len() {
@@ -96,11 +99,16 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let codes = [
-            NVME_SC_SUCCESS, NVME_SC_INVALID_OPCODE,
-            NVME_SC_INVALID_FIELD, NVME_SC_CMDID_CONFLICT,
-            NVME_SC_DATA_XFER_ERROR, NVME_SC_POWER_LOSS,
-            NVME_SC_INTERNAL, NVME_SC_ABORT_REQ,
-            NVME_SC_ABORT_QUEUE, NVME_SC_NS_NOT_READY,
+            NVME_SC_SUCCESS,
+            NVME_SC_INVALID_OPCODE,
+            NVME_SC_INVALID_FIELD,
+            NVME_SC_CMDID_CONFLICT,
+            NVME_SC_DATA_XFER_ERROR,
+            NVME_SC_POWER_LOSS,
+            NVME_SC_INTERNAL,
+            NVME_SC_ABORT_REQ,
+            NVME_SC_ABORT_QUEUE,
+            NVME_SC_NS_NOT_READY,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

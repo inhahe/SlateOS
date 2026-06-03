@@ -105,9 +105,15 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            UFFDIO_API, UFFDIO_REGISTER, UFFDIO_UNREGISTER,
-            UFFDIO_COPY, UFFDIO_ZEROPAGE, UFFDIO_WAKE,
-            UFFDIO_WRITEPROTECT, UFFDIO_CONTINUE, UFFDIO_POISON,
+            UFFDIO_API,
+            UFFDIO_REGISTER,
+            UFFDIO_UNREGISTER,
+            UFFDIO_COPY,
+            UFFDIO_ZEROPAGE,
+            UFFDIO_WAKE,
+            UFFDIO_WRITEPROTECT,
+            UFFDIO_CONTINUE,
+            UFFDIO_POISON,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

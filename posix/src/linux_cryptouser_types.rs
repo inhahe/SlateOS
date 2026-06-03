@@ -81,9 +81,12 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let msgs = [
-            CRYPTO_MSG_NEWALG, CRYPTO_MSG_DELALG,
-            CRYPTO_MSG_GETALG, CRYPTO_MSG_UPDATEALG,
-            CRYPTO_MSG_DELRNG, CRYPTO_MSG_GETSTAT,
+            CRYPTO_MSG_NEWALG,
+            CRYPTO_MSG_DELALG,
+            CRYPTO_MSG_GETALG,
+            CRYPTO_MSG_UPDATEALG,
+            CRYPTO_MSG_DELRNG,
+            CRYPTO_MSG_GETSTAT,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -95,10 +98,14 @@ mod tests {
     #[test]
     fn test_alg_types_within_mask() {
         let types = [
-            CRYPTO_ALG_TYPE_CIPHER, CRYPTO_ALG_TYPE_COMPRESS,
-            CRYPTO_ALG_TYPE_AEAD, CRYPTO_ALG_TYPE_SKCIPHER,
-            CRYPTO_ALG_TYPE_KPP, CRYPTO_ALG_TYPE_RNG,
-            CRYPTO_ALG_TYPE_AKCIPHER, CRYPTO_ALG_TYPE_HASH,
+            CRYPTO_ALG_TYPE_CIPHER,
+            CRYPTO_ALG_TYPE_COMPRESS,
+            CRYPTO_ALG_TYPE_AEAD,
+            CRYPTO_ALG_TYPE_SKCIPHER,
+            CRYPTO_ALG_TYPE_KPP,
+            CRYPTO_ALG_TYPE_RNG,
+            CRYPTO_ALG_TYPE_AKCIPHER,
+            CRYPTO_ALG_TYPE_HASH,
             CRYPTO_ALG_TYPE_AHASH,
         ];
         for t in types {
@@ -114,8 +121,10 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            CRYPTO_ALG_NEED_FALLBACK, CRYPTO_ALG_ASYNC,
-            CRYPTO_ALG_TESTED, CRYPTO_ALG_INTERNAL,
+            CRYPTO_ALG_NEED_FALLBACK,
+            CRYPTO_ALG_ASYNC,
+            CRYPTO_ALG_TESTED,
+            CRYPTO_ALG_INTERNAL,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

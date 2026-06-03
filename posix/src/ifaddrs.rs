@@ -4,14 +4,14 @@
 //! struct from the `socket` module.
 
 pub use crate::socket::Ifaddrs;
-pub use crate::socket::getifaddrs;
 pub use crate::socket::freeifaddrs;
+pub use crate::socket::getifaddrs;
 
 // Re-export address family constants commonly used with ifaddrs.
+pub use crate::net_if_packet::AF_PACKET;
 pub use crate::socket::AF_INET;
 pub use crate::socket::AF_INET6;
 pub use crate::socket::AF_UNIX;
-pub use crate::net_if_packet::AF_PACKET;
 
 // ---------------------------------------------------------------------------
 // Tests

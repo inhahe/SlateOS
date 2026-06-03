@@ -80,9 +80,13 @@ mod tests {
     #[test]
     fn test_op_types_distinct() {
         let ops = [
-            REQ_OP_READ, REQ_OP_WRITE, REQ_OP_FLUSH,
-            REQ_OP_DISCARD, REQ_OP_WRITE_SAME,
-            REQ_OP_WRITE_ZEROES, REQ_OP_ZONE_RESET,
+            REQ_OP_READ,
+            REQ_OP_WRITE,
+            REQ_OP_FLUSH,
+            REQ_OP_DISCARD,
+            REQ_OP_WRITE_SAME,
+            REQ_OP_WRITE_ZEROES,
+            REQ_OP_ZONE_RESET,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -94,8 +98,14 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            REQ_SYNC, REQ_META, REQ_PREFLUSH, REQ_NOMERGE,
-            REQ_IDLE, REQ_FUA, REQ_NOWAIT, REQ_RAHEAD,
+            REQ_SYNC,
+            REQ_META,
+            REQ_PREFLUSH,
+            REQ_NOMERGE,
+            REQ_IDLE,
+            REQ_FUA,
+            REQ_NOWAIT,
+            REQ_RAHEAD,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -107,9 +117,14 @@ mod tests {
     #[test]
     fn test_status_values_distinct() {
         let statuses = [
-            BLK_STS_OK, BLK_STS_IOERR, BLK_STS_NOTSUPP,
-            BLK_STS_TIMEOUT, BLK_STS_NOSPC, BLK_STS_TRANSPORT,
-            BLK_STS_TARGET, BLK_STS_AGAIN,
+            BLK_STS_OK,
+            BLK_STS_IOERR,
+            BLK_STS_NOTSUPP,
+            BLK_STS_TIMEOUT,
+            BLK_STS_NOSPC,
+            BLK_STS_TRANSPORT,
+            BLK_STS_TARGET,
+            BLK_STS_AGAIN,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {

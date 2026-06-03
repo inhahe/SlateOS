@@ -97,10 +97,14 @@ mod tests {
     #[test]
     fn test_gpio_flags_selective_no_overlap() {
         let flags = [
-            GPIO_FLAG_OPEN_DRAIN, GPIO_FLAG_OPEN_SOURCE,
-            GPIO_FLAG_PULL_UP, GPIO_FLAG_PULL_DOWN,
-            GPIO_FLAG_IRQ, GPIO_FLAG_INIT_LOW,
-            GPIO_FLAG_INIT_HIGH, GPIO_FLAG_TRANSITORY,
+            GPIO_FLAG_OPEN_DRAIN,
+            GPIO_FLAG_OPEN_SOURCE,
+            GPIO_FLAG_PULL_UP,
+            GPIO_FLAG_PULL_DOWN,
+            GPIO_FLAG_IRQ,
+            GPIO_FLAG_INIT_LOW,
+            GPIO_FLAG_INIT_HIGH,
+            GPIO_FLAG_TRANSITORY,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -113,8 +117,10 @@ mod tests {
     #[test]
     fn test_lookup_flags_distinct() {
         let flags = [
-            GPIOD_FLAGS_DEFAULT, GPIOD_FLAGS_IN,
-            GPIOD_FLAGS_OUT_LOW, GPIOD_FLAGS_OUT_HIGH,
+            GPIOD_FLAGS_DEFAULT,
+            GPIOD_FLAGS_IN,
+            GPIOD_FLAGS_OUT_LOW,
+            GPIOD_FLAGS_OUT_HIGH,
             GPIOD_FLAGS_OUT_LOW_OPEN_DRAIN,
         ];
         for i in 0..flags.len() {

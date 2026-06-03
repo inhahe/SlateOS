@@ -114,8 +114,10 @@ mod tests {
     #[test]
     fn test_attr_offsets_ascending() {
         let offsets = [
-            MQ_ATTR_OFF_FLAGS, MQ_ATTR_OFF_MAXMSG,
-            MQ_ATTR_OFF_MSGSIZE, MQ_ATTR_OFF_CURMSGS,
+            MQ_ATTR_OFF_FLAGS,
+            MQ_ATTR_OFF_MAXMSG,
+            MQ_ATTR_OFF_MSGSIZE,
+            MQ_ATTR_OFF_CURMSGS,
         ];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);

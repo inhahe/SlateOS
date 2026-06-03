@@ -72,9 +72,15 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let types = [
-            TRACE_FN, TRACE_CTX, TRACE_WAKE, TRACE_STACK,
-            TRACE_PRINT, TRACE_BPRINT, TRACE_BPUTS,
-            TRACE_HWLAT, TRACE_RAW_DATA,
+            TRACE_FN,
+            TRACE_CTX,
+            TRACE_WAKE,
+            TRACE_STACK,
+            TRACE_PRINT,
+            TRACE_BPRINT,
+            TRACE_BPUTS,
+            TRACE_HWLAT,
+            TRACE_RAW_DATA,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -91,9 +97,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            TRACE_FLAG_ENABLED, TRACE_FLAG_IRQS_OFF,
-            TRACE_FLAG_NEED_RESCHED, TRACE_FLAG_HARDIRQ,
-            TRACE_FLAG_SOFTIRQ, TRACE_FLAG_PREEMPT_RESCHED,
+            TRACE_FLAG_ENABLED,
+            TRACE_FLAG_IRQS_OFF,
+            TRACE_FLAG_NEED_RESCHED,
+            TRACE_FLAG_HARDIRQ,
+            TRACE_FLAG_SOFTIRQ,
+            TRACE_FLAG_PREEMPT_RESCHED,
             TRACE_FLAG_NMI,
         ];
         for i in 0..flags.len() {
@@ -106,9 +115,12 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            TRACE_FLAG_ENABLED, TRACE_FLAG_IRQS_OFF,
-            TRACE_FLAG_NEED_RESCHED, TRACE_FLAG_HARDIRQ,
-            TRACE_FLAG_SOFTIRQ, TRACE_FLAG_PREEMPT_RESCHED,
+            TRACE_FLAG_ENABLED,
+            TRACE_FLAG_IRQS_OFF,
+            TRACE_FLAG_NEED_RESCHED,
+            TRACE_FLAG_HARDIRQ,
+            TRACE_FLAG_SOFTIRQ,
+            TRACE_FLAG_PREEMPT_RESCHED,
             TRACE_FLAG_NMI,
         ];
         for f in flags {

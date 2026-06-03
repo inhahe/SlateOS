@@ -85,7 +85,10 @@ fn format_u32(mut val: u32, buf: &mut [u8; 10]) -> usize {
     // Reverse into buf.
     let mut i: usize = 0;
     while i < len {
-        if let (Some(dst), Some(src)) = (buf.get_mut(i), digits.get(len.wrapping_sub(1).wrapping_sub(i))) {
+        if let (Some(dst), Some(src)) = (
+            buf.get_mut(i),
+            digits.get(len.wrapping_sub(1).wrapping_sub(i)),
+        ) {
             *dst = *src;
         }
         i = i.wrapping_add(1);

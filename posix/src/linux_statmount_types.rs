@@ -90,11 +90,16 @@ mod tests {
     #[test]
     fn test_statmount_masks_powers_of_two() {
         let masks = [
-            STATMOUNT_SB_BASIC, STATMOUNT_MNT_BASIC,
-            STATMOUNT_PROPAGATE_FROM, STATMOUNT_MNT_POINT,
-            STATMOUNT_MNT_ROOT, STATMOUNT_FS_TYPE,
-            STATMOUNT_MNT_NS_ID, STATMOUNT_MNT_OPTS,
-            STATMOUNT_FS_SUBTYPE, STATMOUNT_SB_SOURCE,
+            STATMOUNT_SB_BASIC,
+            STATMOUNT_MNT_BASIC,
+            STATMOUNT_PROPAGATE_FROM,
+            STATMOUNT_MNT_POINT,
+            STATMOUNT_MNT_ROOT,
+            STATMOUNT_FS_TYPE,
+            STATMOUNT_MNT_NS_ID,
+            STATMOUNT_MNT_OPTS,
+            STATMOUNT_FS_SUBTYPE,
+            STATMOUNT_SB_SOURCE,
         ];
         for m in &masks {
             assert!(m.is_power_of_two(), "mask {m:#x} not power of two");
@@ -104,11 +109,16 @@ mod tests {
     #[test]
     fn test_statmount_masks_no_overlap() {
         let masks = [
-            STATMOUNT_SB_BASIC, STATMOUNT_MNT_BASIC,
-            STATMOUNT_PROPAGATE_FROM, STATMOUNT_MNT_POINT,
-            STATMOUNT_MNT_ROOT, STATMOUNT_FS_TYPE,
-            STATMOUNT_MNT_NS_ID, STATMOUNT_MNT_OPTS,
-            STATMOUNT_FS_SUBTYPE, STATMOUNT_SB_SOURCE,
+            STATMOUNT_SB_BASIC,
+            STATMOUNT_MNT_BASIC,
+            STATMOUNT_PROPAGATE_FROM,
+            STATMOUNT_MNT_POINT,
+            STATMOUNT_MNT_ROOT,
+            STATMOUNT_FS_TYPE,
+            STATMOUNT_MNT_NS_ID,
+            STATMOUNT_MNT_OPTS,
+            STATMOUNT_FS_SUBTYPE,
+            STATMOUNT_SB_SOURCE,
         ];
         for i in 0..masks.len() {
             for j in (i + 1)..masks.len() {
@@ -130,10 +140,15 @@ mod tests {
     #[test]
     fn test_mount_attrs_distinct() {
         let attrs = [
-            MOUNT_ATTR_RDONLY, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NODEV,
-            MOUNT_ATTR_NOEXEC, MOUNT_ATTR_NOATIME,
-            MOUNT_ATTR_STRICTATIME, MOUNT_ATTR_NODIRATIME,
-            MOUNT_ATTR_IDMAP, MOUNT_ATTR_NOSYMFOLLOW,
+            MOUNT_ATTR_RDONLY,
+            MOUNT_ATTR_NOSUID,
+            MOUNT_ATTR_NODEV,
+            MOUNT_ATTR_NOEXEC,
+            MOUNT_ATTR_NOATIME,
+            MOUNT_ATTR_STRICTATIME,
+            MOUNT_ATTR_NODIRATIME,
+            MOUNT_ATTR_IDMAP,
+            MOUNT_ATTR_NOSYMFOLLOW,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

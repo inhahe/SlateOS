@@ -49,16 +49,16 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], rsi",        // int vararg 0
-    "mov [rsp+8], rdx",      // int vararg 1
-    "mov [rsp+16], rcx",     // int vararg 2
-    "mov [rsp+24], r8",      // int vararg 3
-    "mov [rsp+32], r9",      // int vararg 4
-    "mov rax, [rbp+16]",     // int vararg 5 (stack)
+    "mov [rsp], rsi",    // int vararg 0
+    "mov [rsp+8], rdx",  // int vararg 1
+    "mov [rsp+16], rcx", // int vararg 2
+    "mov [rsp+24], r8",  // int vararg 3
+    "mov [rsp+32], r9",  // int vararg 4
+    "mov rax, [rbp+16]", // int vararg 5 (stack)
     "mov [rsp+40], rax",
-    "mov rax, [rbp+24]",     // int vararg 6
+    "mov rax, [rbp+24]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+32]",     // int vararg 7
+    "mov rax, [rbp+32]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -69,13 +69,12 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi = fmt (already set)
-    "mov rsi, rsp",          // int_args
-    "lea rdx, [rsp+64]",    // float_args
+    "mov rsi, rsp",      // int_args
+    "lea rdx, [rsp+64]", // float_args
     "call _warn_impl",
     "add rsp, 128",
     "pop rbp",
     "ret",
-
     // warnx(fmt, ...) → _warnx_impl(fmt, int_args, float_args)
     ".global warnx",
     ".type warnx, @function",
@@ -108,7 +107,6 @@ core::arch::global_asm!(
     "add rsp, 128",
     "pop rbp",
     "ret",
-
     // err(eval, fmt, ...) → _err_impl(eval, fmt, int_args, float_args)
     ".global err",
     ".type err, @function",
@@ -116,17 +114,17 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 128",
-    "mov [rsp], rdx",        // int vararg 0
-    "mov [rsp+8], rcx",      // int vararg 1
-    "mov [rsp+16], r8",      // int vararg 2
-    "mov [rsp+24], r9",      // int vararg 3
-    "mov rax, [rbp+16]",     // int vararg 4 (stack)
+    "mov [rsp], rdx",    // int vararg 0
+    "mov [rsp+8], rcx",  // int vararg 1
+    "mov [rsp+16], r8",  // int vararg 2
+    "mov [rsp+24], r9",  // int vararg 3
+    "mov rax, [rbp+16]", // int vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // int vararg 5
+    "mov rax, [rbp+24]", // int vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // int vararg 6
+    "mov rax, [rbp+32]", // int vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // int vararg 7
+    "mov rax, [rbp+40]", // int vararg 7
     "mov [rsp+56], rax",
     "movsd [rsp+64], xmm0",
     "movsd [rsp+72], xmm1",
@@ -137,13 +135,12 @@ core::arch::global_asm!(
     "movsd [rsp+112], xmm6",
     "movsd [rsp+120], xmm7",
     // rdi = eval, rsi = fmt (already set)
-    "mov rdx, rsp",          // int_args
-    "lea rcx, [rsp+64]",    // float_args
+    "mov rdx, rsp",      // int_args
+    "lea rcx, [rsp+64]", // float_args
     "call _err_impl",
     "add rsp, 128",
     "pop rbp",
     "ret",
-
     // errx(eval, fmt, ...) → _errx_impl(eval, fmt, int_args, float_args)
     ".global errx",
     ".type errx, @function",
@@ -393,7 +390,11 @@ mod tests {
     #[test]
     fn warn_impl_plain_message_no_crash() {
         crate::errno::set_errno(crate::errno::ENOENT);
-        _warn_impl(b"test warning\0".as_ptr(), core::ptr::null(), core::ptr::null());
+        _warn_impl(
+            b"test warning\0".as_ptr(),
+            core::ptr::null(),
+            core::ptr::null(),
+        );
     }
 
     #[test]
@@ -402,7 +403,11 @@ mod tests {
         crate::errno::set_errno(crate::errno::ENOENT);
         let path = b"/etc/passwd\0";
         let iargs = [path.as_ptr() as u64];
-        _warn_impl(b"cannot open %s\0".as_ptr(), iargs.as_ptr(), core::ptr::null());
+        _warn_impl(
+            b"cannot open %s\0".as_ptr(),
+            iargs.as_ptr(),
+            core::ptr::null(),
+        );
     }
 
     #[test]
@@ -466,10 +471,25 @@ mod tests {
 
     #[test]
     fn emit_various_errno_no_crash() {
-        for e in [0, crate::errno::EACCES, crate::errno::EIO, crate::errno::ENOMEM] {
+        for e in [
+            0,
+            crate::errno::EACCES,
+            crate::errno::EIO,
+            crate::errno::ENOMEM,
+        ] {
             crate::errno::set_errno(e);
-            emit(b"testing\0".as_ptr(), core::ptr::null(), core::ptr::null(), true);
-            emit(b"testing\0".as_ptr(), core::ptr::null(), core::ptr::null(), false);
+            emit(
+                b"testing\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+                true,
+            );
+            emit(
+                b"testing\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+                false,
+            );
         }
     }
 }

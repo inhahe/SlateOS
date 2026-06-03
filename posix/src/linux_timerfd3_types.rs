@@ -77,8 +77,10 @@ mod tests {
     #[test]
     fn test_clock_sources_distinct() {
         let clocks = [
-            TFD_CLOCK_REALTIME, TFD_CLOCK_MONOTONIC,
-            TFD_CLOCK_BOOTTIME, TFD_CLOCK_REALTIME_ALARM,
+            TFD_CLOCK_REALTIME,
+            TFD_CLOCK_MONOTONIC,
+            TFD_CLOCK_BOOTTIME,
+            TFD_CLOCK_REALTIME_ALARM,
             TFD_CLOCK_BOOTTIME_ALARM,
         ];
         for i in 0..clocks.len() {

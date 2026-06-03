@@ -111,8 +111,10 @@ mod tests {
     #[test]
     fn test_grain_distinct() {
         let grains = [
-            EDAC_GRAIN_UNKNOWN, EDAC_GRAIN_CACHELINE,
-            EDAC_GRAIN_PAGE, EDAC_GRAIN_DIMM,
+            EDAC_GRAIN_UNKNOWN,
+            EDAC_GRAIN_CACHELINE,
+            EDAC_GRAIN_PAGE,
+            EDAC_GRAIN_DIMM,
         ];
         for i in 0..grains.len() {
             for j in (i + 1)..grains.len() {
@@ -124,9 +126,14 @@ mod tests {
     #[test]
     fn test_dimm_types_distinct() {
         let dimms = [
-            EDAC_DIMM_UNKNOWN, EDAC_DIMM_DDR2, EDAC_DIMM_DDR3,
-            EDAC_DIMM_DDR4, EDAC_DIMM_DDR5, EDAC_DIMM_LPDDR4,
-            EDAC_DIMM_LPDDR5, EDAC_DIMM_HBM,
+            EDAC_DIMM_UNKNOWN,
+            EDAC_DIMM_DDR2,
+            EDAC_DIMM_DDR3,
+            EDAC_DIMM_DDR4,
+            EDAC_DIMM_DDR5,
+            EDAC_DIMM_LPDDR4,
+            EDAC_DIMM_LPDDR5,
+            EDAC_DIMM_HBM,
         ];
         for i in 0..dimms.len() {
             for j in (i + 1)..dimms.len() {
@@ -138,8 +145,10 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let devs = [
-            EDAC_DEVICE_L1_CACHE, EDAC_DEVICE_L2_CACHE,
-            EDAC_DEVICE_L3_CACHE, EDAC_DEVICE_CPU_BUS,
+            EDAC_DEVICE_L1_CACHE,
+            EDAC_DEVICE_L2_CACHE,
+            EDAC_DEVICE_L3_CACHE,
+            EDAC_DEVICE_CPU_BUS,
         ];
         for i in 0..devs.len() {
             for j in (i + 1)..devs.len() {
@@ -151,9 +160,12 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            EDAC_ATTR_CE_COUNT, EDAC_ATTR_UE_COUNT,
-            EDAC_ATTR_CE_NOINFO, EDAC_ATTR_UE_NOINFO,
-            EDAC_ATTR_RESET, EDAC_ATTR_POLL_MSEC,
+            EDAC_ATTR_CE_COUNT,
+            EDAC_ATTR_UE_COUNT,
+            EDAC_ATTR_CE_NOINFO,
+            EDAC_ATTR_UE_NOINFO,
+            EDAC_ATTR_RESET,
+            EDAC_ATTR_POLL_MSEC,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

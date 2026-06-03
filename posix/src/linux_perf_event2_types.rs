@@ -84,16 +84,29 @@ mod tests {
     #[test]
     fn test_sample_types_no_overlap() {
         let samples = [
-            PERF_SAMPLE_IP, PERF_SAMPLE_TID, PERF_SAMPLE_TIME,
-            PERF_SAMPLE_ADDR, PERF_SAMPLE_READ, PERF_SAMPLE_CALLCHAIN,
-            PERF_SAMPLE_ID, PERF_SAMPLE_CPU, PERF_SAMPLE_PERIOD,
-            PERF_SAMPLE_STREAM_ID, PERF_SAMPLE_RAW,
-            PERF_SAMPLE_BRANCH_STACK, PERF_SAMPLE_REGS_USER,
-            PERF_SAMPLE_STACK_USER, PERF_SAMPLE_WEIGHT,
-            PERF_SAMPLE_DATA_SRC, PERF_SAMPLE_IDENTIFIER,
-            PERF_SAMPLE_TRANSACTION, PERF_SAMPLE_REGS_INTR,
-            PERF_SAMPLE_PHYS_ADDR, PERF_SAMPLE_CGROUP,
-            PERF_SAMPLE_DATA_PAGE_SIZE, PERF_SAMPLE_CODE_PAGE_SIZE,
+            PERF_SAMPLE_IP,
+            PERF_SAMPLE_TID,
+            PERF_SAMPLE_TIME,
+            PERF_SAMPLE_ADDR,
+            PERF_SAMPLE_READ,
+            PERF_SAMPLE_CALLCHAIN,
+            PERF_SAMPLE_ID,
+            PERF_SAMPLE_CPU,
+            PERF_SAMPLE_PERIOD,
+            PERF_SAMPLE_STREAM_ID,
+            PERF_SAMPLE_RAW,
+            PERF_SAMPLE_BRANCH_STACK,
+            PERF_SAMPLE_REGS_USER,
+            PERF_SAMPLE_STACK_USER,
+            PERF_SAMPLE_WEIGHT,
+            PERF_SAMPLE_DATA_SRC,
+            PERF_SAMPLE_IDENTIFIER,
+            PERF_SAMPLE_TRANSACTION,
+            PERF_SAMPLE_REGS_INTR,
+            PERF_SAMPLE_PHYS_ADDR,
+            PERF_SAMPLE_CGROUP,
+            PERF_SAMPLE_DATA_PAGE_SIZE,
+            PERF_SAMPLE_CODE_PAGE_SIZE,
             PERF_SAMPLE_WEIGHT_STRUCT,
         ];
         for i in 0..samples.len() {
@@ -109,7 +122,8 @@ mod tests {
         let fmts = [
             PERF_FORMAT_TOTAL_TIME_ENABLED,
             PERF_FORMAT_TOTAL_TIME_RUNNING,
-            PERF_FORMAT_ID, PERF_FORMAT_GROUP,
+            PERF_FORMAT_ID,
+            PERF_FORMAT_GROUP,
             PERF_FORMAT_LOST,
         ];
         for i in 0..fmts.len() {

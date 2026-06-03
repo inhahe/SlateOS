@@ -77,8 +77,12 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            IOC_PR_REGISTER, IOC_PR_RESERVE, IOC_PR_RELEASE,
-            IOC_PR_PREEMPT, IOC_PR_PREEMPT_ABORT, IOC_PR_CLEAR,
+            IOC_PR_REGISTER,
+            IOC_PR_RESERVE,
+            IOC_PR_RELEASE,
+            IOC_PR_PREEMPT,
+            IOC_PR_PREEMPT_ABORT,
+            IOC_PR_CLEAR,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -90,7 +94,8 @@ mod tests {
     #[test]
     fn test_reservation_types_distinct() {
         let types = [
-            PR_TYPE_WRITE_EXCLUSIVE, PR_TYPE_EXCLUSIVE_ACCESS,
+            PR_TYPE_WRITE_EXCLUSIVE,
+            PR_TYPE_EXCLUSIVE_ACCESS,
             PR_TYPE_WRITE_EXCLUSIVE_REG_ONLY,
             PR_TYPE_EXCLUSIVE_ACCESS_REG_ONLY,
             PR_TYPE_WRITE_EXCLUSIVE_ALL_REGS,

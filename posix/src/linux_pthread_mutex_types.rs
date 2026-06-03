@@ -76,7 +76,8 @@ mod tests {
     #[test]
     fn test_mutex_types_distinct() {
         let types = [
-            PTHREAD_MUTEX_NORMAL, PTHREAD_MUTEX_RECURSIVE,
+            PTHREAD_MUTEX_NORMAL,
+            PTHREAD_MUTEX_RECURSIVE,
             PTHREAD_MUTEX_ERRORCHECK,
         ];
         for i in 0..types.len() {
@@ -98,7 +99,11 @@ mod tests {
 
     #[test]
     fn test_protocols_distinct() {
-        let protos = [PTHREAD_PRIO_NONE, PTHREAD_PRIO_INHERIT, PTHREAD_PRIO_PROTECT];
+        let protos = [
+            PTHREAD_PRIO_NONE,
+            PTHREAD_PRIO_INHERIT,
+            PTHREAD_PRIO_PROTECT,
+        ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
                 assert_ne!(protos[i], protos[j]);

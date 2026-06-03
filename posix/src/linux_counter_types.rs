@@ -95,7 +95,8 @@ mod tests {
     #[test]
     fn test_scopes_distinct() {
         let scopes = [
-            COUNTER_SCOPE_DEVICE, COUNTER_SCOPE_SIGNAL,
+            COUNTER_SCOPE_DEVICE,
+            COUNTER_SCOPE_SIGNAL,
             COUNTER_SCOPE_COUNT,
         ];
         for i in 0..scopes.len() {
@@ -116,8 +117,10 @@ mod tests {
     #[test]
     fn test_count_modes_distinct() {
         let modes = [
-            COUNTER_COUNT_MODE_NORMAL, COUNTER_COUNT_MODE_RANGE_LIMIT,
-            COUNTER_COUNT_MODE_NON_RECYCLE, COUNTER_COUNT_MODE_MODULO_N,
+            COUNTER_COUNT_MODE_NORMAL,
+            COUNTER_COUNT_MODE_RANGE_LIMIT,
+            COUNTER_COUNT_MODE_NON_RECYCLE,
+            COUNTER_COUNT_MODE_MODULO_N,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -129,10 +132,14 @@ mod tests {
     #[test]
     fn test_functions_distinct() {
         let funcs = [
-            COUNTER_FUNCTION_INCREASE, COUNTER_FUNCTION_DECREASE,
-            COUNTER_FUNCTION_QUADRATURE_X1_A, COUNTER_FUNCTION_QUADRATURE_X1_B,
-            COUNTER_FUNCTION_QUADRATURE_X2_A, COUNTER_FUNCTION_QUADRATURE_X2_B,
-            COUNTER_FUNCTION_QUADRATURE_X4, COUNTER_FUNCTION_PULSE_DIRECTION,
+            COUNTER_FUNCTION_INCREASE,
+            COUNTER_FUNCTION_DECREASE,
+            COUNTER_FUNCTION_QUADRATURE_X1_A,
+            COUNTER_FUNCTION_QUADRATURE_X1_B,
+            COUNTER_FUNCTION_QUADRATURE_X2_A,
+            COUNTER_FUNCTION_QUADRATURE_X2_B,
+            COUNTER_FUNCTION_QUADRATURE_X4,
+            COUNTER_FUNCTION_PULSE_DIRECTION,
         ];
         for i in 0..funcs.len() {
             for j in (i + 1)..funcs.len() {
@@ -144,8 +151,10 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            COUNTER_EVENT_OVERFLOW, COUNTER_EVENT_UNDERFLOW,
-            COUNTER_EVENT_THRESHOLD, COUNTER_EVENT_INDEX,
+            COUNTER_EVENT_OVERFLOW,
+            COUNTER_EVENT_UNDERFLOW,
+            COUNTER_EVENT_THRESHOLD,
+            COUNTER_EVENT_INDEX,
             COUNTER_EVENT_CHANGE_OF_STATE,
         ];
         for i in 0..events.len() {

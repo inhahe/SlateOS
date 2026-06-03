@@ -8,17 +8,17 @@
 // Re-exports from unistd
 // ---------------------------------------------------------------------------
 
-pub use crate::unistd::ptrace;
-pub use crate::unistd::PTRACE_TRACEME;
-pub use crate::unistd::PTRACE_PEEKTEXT;
-pub use crate::unistd::PTRACE_PEEKDATA;
-pub use crate::unistd::PTRACE_POKETEXT;
-pub use crate::unistd::PTRACE_POKEDATA;
-pub use crate::unistd::PTRACE_CONT;
-pub use crate::unistd::PTRACE_KILL;
-pub use crate::unistd::PTRACE_SINGLESTEP;
 pub use crate::unistd::PTRACE_ATTACH;
+pub use crate::unistd::PTRACE_CONT;
 pub use crate::unistd::PTRACE_DETACH;
+pub use crate::unistd::PTRACE_KILL;
+pub use crate::unistd::PTRACE_PEEKDATA;
+pub use crate::unistd::PTRACE_PEEKTEXT;
+pub use crate::unistd::PTRACE_POKEDATA;
+pub use crate::unistd::PTRACE_POKETEXT;
+pub use crate::unistd::PTRACE_SINGLESTEP;
+pub use crate::unistd::PTRACE_TRACEME;
+pub use crate::unistd::ptrace;
 
 // ---------------------------------------------------------------------------
 // Additional PTRACE_* request codes
@@ -169,19 +169,27 @@ mod tests {
     #[test]
     fn test_core_requests_distinct() {
         let reqs = [
-            PTRACE_TRACEME, PTRACE_PEEKTEXT, PTRACE_PEEKDATA,
-            PTRACE_PEEKUSER, PTRACE_POKETEXT, PTRACE_POKEDATA,
-            PTRACE_POKEUSER, PTRACE_CONT, PTRACE_KILL,
-            PTRACE_SINGLESTEP, PTRACE_GETREGS, PTRACE_SETREGS,
-            PTRACE_GETFPREGS, PTRACE_SETFPREGS, PTRACE_ATTACH,
-            PTRACE_DETACH, PTRACE_SYSCALL,
+            PTRACE_TRACEME,
+            PTRACE_PEEKTEXT,
+            PTRACE_PEEKDATA,
+            PTRACE_PEEKUSER,
+            PTRACE_POKETEXT,
+            PTRACE_POKEDATA,
+            PTRACE_POKEUSER,
+            PTRACE_CONT,
+            PTRACE_KILL,
+            PTRACE_SINGLESTEP,
+            PTRACE_GETREGS,
+            PTRACE_SETREGS,
+            PTRACE_GETFPREGS,
+            PTRACE_SETFPREGS,
+            PTRACE_ATTACH,
+            PTRACE_DETACH,
+            PTRACE_SYSCALL,
         ];
         for i in 0..reqs.len() {
             for j in (i + 1)..reqs.len() {
-                assert_ne!(
-                    reqs[i], reqs[j],
-                    "PTRACE request codes must be distinct"
-                );
+                assert_ne!(reqs[i], reqs[j], "PTRACE request codes must be distinct");
             }
         }
     }
@@ -201,10 +209,15 @@ mod tests {
     #[test]
     fn test_extended_requests_distinct() {
         let ext = [
-            PTRACE_SETOPTIONS, PTRACE_GETEVENTMSG,
-            PTRACE_GETSIGINFO, PTRACE_SETSIGINFO,
-            PTRACE_GETREGSET, PTRACE_SETREGSET,
-            PTRACE_SEIZE, PTRACE_INTERRUPT, PTRACE_LISTEN,
+            PTRACE_SETOPTIONS,
+            PTRACE_GETEVENTMSG,
+            PTRACE_GETSIGINFO,
+            PTRACE_SETSIGINFO,
+            PTRACE_GETREGSET,
+            PTRACE_SETREGSET,
+            PTRACE_SEIZE,
+            PTRACE_INTERRUPT,
+            PTRACE_LISTEN,
         ];
         for i in 0..ext.len() {
             for j in (i + 1)..ext.len() {
@@ -220,9 +233,12 @@ mod tests {
     #[test]
     fn test_options_are_bitmask() {
         let opts = [
-            PTRACE_O_TRACEFORK, PTRACE_O_TRACEVFORK,
-            PTRACE_O_TRACECLONE, PTRACE_O_TRACEEXEC,
-            PTRACE_O_TRACEVFORKDONE, PTRACE_O_TRACEEXIT,
+            PTRACE_O_TRACEFORK,
+            PTRACE_O_TRACEVFORK,
+            PTRACE_O_TRACECLONE,
+            PTRACE_O_TRACEEXEC,
+            PTRACE_O_TRACEVFORKDONE,
+            PTRACE_O_TRACEEXIT,
             PTRACE_O_TRACESECCOMP,
         ];
         for &o in &opts {
@@ -234,10 +250,14 @@ mod tests {
     #[test]
     fn test_options_distinct() {
         let opts = [
-            PTRACE_O_TRACEFORK, PTRACE_O_TRACEVFORK,
-            PTRACE_O_TRACECLONE, PTRACE_O_TRACEEXEC,
-            PTRACE_O_TRACEVFORKDONE, PTRACE_O_TRACEEXIT,
-            PTRACE_O_TRACESECCOMP, PTRACE_O_EXITKILL,
+            PTRACE_O_TRACEFORK,
+            PTRACE_O_TRACEVFORK,
+            PTRACE_O_TRACECLONE,
+            PTRACE_O_TRACEEXEC,
+            PTRACE_O_TRACEVFORKDONE,
+            PTRACE_O_TRACEEXIT,
+            PTRACE_O_TRACESECCOMP,
+            PTRACE_O_EXITKILL,
             PTRACE_O_SUSPEND_SECCOMP,
         ];
         for i in 0..opts.len() {
@@ -265,10 +285,14 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let evts = [
-            PTRACE_EVENT_FORK, PTRACE_EVENT_VFORK,
-            PTRACE_EVENT_CLONE, PTRACE_EVENT_EXEC,
-            PTRACE_EVENT_VFORK_DONE, PTRACE_EVENT_EXIT,
-            PTRACE_EVENT_SECCOMP, PTRACE_EVENT_STOP,
+            PTRACE_EVENT_FORK,
+            PTRACE_EVENT_VFORK,
+            PTRACE_EVENT_CLONE,
+            PTRACE_EVENT_EXEC,
+            PTRACE_EVENT_VFORK_DONE,
+            PTRACE_EVENT_EXIT,
+            PTRACE_EVENT_SECCOMP,
+            PTRACE_EVENT_STOP,
         ];
         for i in 0..evts.len() {
             for j in (i + 1)..evts.len() {

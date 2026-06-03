@@ -183,12 +183,7 @@ pub const GETPMSG_FLAGS_VALID: i32 = MSG_HIPRI | MSG_ANY | MSG_BAND;
 /// - `flags & ~PUTMSG_FLAGS_VALID != 0` → EINVAL.
 /// - All other inputs → ENOSYS (STREAMS not supported).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn putmsg(
-    fd: i32,
-    ctlptr: *const u8,
-    dataptr: *const u8,
-    flags: i32,
-) -> i32 {
+pub extern "C" fn putmsg(fd: i32, ctlptr: *const u8, dataptr: *const u8, flags: i32) -> i32 {
     if fd < 0 {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -256,12 +251,7 @@ pub extern "C" fn putpmsg(
 ///   request).
 /// - All other inputs → ENOSYS.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn getmsg(
-    fd: i32,
-    _ctlptr: *mut u8,
-    _dataptr: *mut u8,
-    flagsp: *mut i32,
-) -> i32 {
+pub extern "C" fn getmsg(fd: i32, _ctlptr: *mut u8, _dataptr: *mut u8, flagsp: *mut i32) -> i32 {
     if fd < 0 {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -387,17 +377,13 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            I_PUSH, I_POP, I_LOOK, I_FLUSH, I_STR, I_SRDOPT,
-            I_GRDOPT, I_SENDFD, I_RECVFD, I_FIND, I_LINK, I_UNLINK,
-            I_NREAD, I_PEEK, I_FDINSERT, I_SETSIG, I_GETSIG,
-            I_CANPUT, I_PLINK, I_PUNLINK,
+            I_PUSH, I_POP, I_LOOK, I_FLUSH, I_STR, I_SRDOPT, I_GRDOPT, I_SENDFD, I_RECVFD, I_FIND,
+            I_LINK, I_UNLINK, I_NREAD, I_PEEK, I_FDINSERT, I_SETSIG, I_GETSIG, I_CANPUT, I_PLINK,
+            I_PUNLINK,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
-                assert_ne!(
-                    cmds[i], cmds[j],
-                    "STREAMS ioctl commands must be distinct"
-                );
+                assert_ne!(cmds[i], cmds[j], "STREAMS ioctl commands must be distinct");
             }
         }
     }

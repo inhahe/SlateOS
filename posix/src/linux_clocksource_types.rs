@@ -77,9 +77,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            CLOCKSOURCE_VDSO_CAPABLE, CLOCKSOURCE_CONTINUOUS,
-            CLOCKSOURCE_STABLE, CLOCKSOURCE_SELECTED,
-            CLOCKSOURCE_WATCHDOG, CLOCKSOURCE_UNSTABLE,
+            CLOCKSOURCE_VDSO_CAPABLE,
+            CLOCKSOURCE_CONTINUOUS,
+            CLOCKSOURCE_STABLE,
+            CLOCKSOURCE_SELECTED,
+            CLOCKSOURCE_WATCHDOG,
+            CLOCKSOURCE_UNSTABLE,
             CLOCKSOURCE_SUSPEND_OK,
         ];
         for i in 0..flags.len() {
@@ -93,9 +96,12 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            CLOCKSOURCE_TYPE_TSC, CLOCKSOURCE_TYPE_HPET,
-            CLOCKSOURCE_TYPE_ACPI_PM, CLOCKSOURCE_TYPE_PIT,
-            CLOCKSOURCE_TYPE_ARCH_TIMER, CLOCKSOURCE_TYPE_JIFFIES,
+            CLOCKSOURCE_TYPE_TSC,
+            CLOCKSOURCE_TYPE_HPET,
+            CLOCKSOURCE_TYPE_ACPI_PM,
+            CLOCKSOURCE_TYPE_PIT,
+            CLOCKSOURCE_TYPE_ARCH_TIMER,
+            CLOCKSOURCE_TYPE_JIFFIES,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

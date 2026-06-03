@@ -4,9 +4,9 @@
 //! (type of service) constants.
 
 // Re-export IP protocol numbers and address types.
+pub use crate::socket::IPPROTO_ICMP;
 pub use crate::socket::IPPROTO_TCP;
 pub use crate::socket::IPPROTO_UDP;
-pub use crate::socket::IPPROTO_ICMP;
 
 // ---------------------------------------------------------------------------
 // IP header

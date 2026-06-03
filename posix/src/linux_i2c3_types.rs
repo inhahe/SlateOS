@@ -87,15 +87,24 @@ mod tests {
     #[test]
     fn test_func_bits_power_of_two() {
         let funcs = [
-            I2C_FUNC_I2C, I2C_FUNC_10BIT_ADDR,
-            I2C_FUNC_PROTOCOL_MANGLING, I2C_FUNC_SMBUS_PEC,
-            I2C_FUNC_NOSTART, I2C_FUNC_SLAVE,
-            I2C_FUNC_SMBUS_QUICK, I2C_FUNC_SMBUS_READ_BYTE,
-            I2C_FUNC_SMBUS_WRITE_BYTE, I2C_FUNC_SMBUS_READ_BYTE_DATA,
-            I2C_FUNC_SMBUS_WRITE_BYTE_DATA, I2C_FUNC_SMBUS_READ_WORD_DATA,
-            I2C_FUNC_SMBUS_WRITE_WORD_DATA, I2C_FUNC_SMBUS_PROC_CALL,
-            I2C_FUNC_SMBUS_READ_BLOCK_DATA, I2C_FUNC_SMBUS_WRITE_BLOCK_DATA,
-            I2C_FUNC_SMBUS_READ_I2C_BLOCK, I2C_FUNC_SMBUS_WRITE_I2C_BLOCK,
+            I2C_FUNC_I2C,
+            I2C_FUNC_10BIT_ADDR,
+            I2C_FUNC_PROTOCOL_MANGLING,
+            I2C_FUNC_SMBUS_PEC,
+            I2C_FUNC_NOSTART,
+            I2C_FUNC_SLAVE,
+            I2C_FUNC_SMBUS_QUICK,
+            I2C_FUNC_SMBUS_READ_BYTE,
+            I2C_FUNC_SMBUS_WRITE_BYTE,
+            I2C_FUNC_SMBUS_READ_BYTE_DATA,
+            I2C_FUNC_SMBUS_WRITE_BYTE_DATA,
+            I2C_FUNC_SMBUS_READ_WORD_DATA,
+            I2C_FUNC_SMBUS_WRITE_WORD_DATA,
+            I2C_FUNC_SMBUS_PROC_CALL,
+            I2C_FUNC_SMBUS_READ_BLOCK_DATA,
+            I2C_FUNC_SMBUS_WRITE_BLOCK_DATA,
+            I2C_FUNC_SMBUS_READ_I2C_BLOCK,
+            I2C_FUNC_SMBUS_WRITE_I2C_BLOCK,
             I2C_FUNC_SMBUS_HOST_NOTIFY,
         ];
         for f in &funcs {
@@ -106,9 +115,15 @@ mod tests {
     #[test]
     fn test_msg_flags_no_overlap() {
         let flags = [
-            I2C_M_RD, I2C_M_TEN, I2C_M_DMA_SAFE,
-            I2C_M_RECV_LEN, I2C_M_NO_RD_ACK, I2C_M_IGNORE_NAK,
-            I2C_M_REV_DIR_ADDR, I2C_M_NOSTART, I2C_M_STOP,
+            I2C_M_RD,
+            I2C_M_TEN,
+            I2C_M_DMA_SAFE,
+            I2C_M_RECV_LEN,
+            I2C_M_NO_RD_ACK,
+            I2C_M_IGNORE_NAK,
+            I2C_M_REV_DIR_ADDR,
+            I2C_M_NOSTART,
+            I2C_M_STOP,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

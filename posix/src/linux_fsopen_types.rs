@@ -58,10 +58,14 @@ mod tests {
     #[test]
     fn test_fsconfig_cmds_distinct() {
         let cmds = [
-            FSCONFIG_SET_FLAG, FSCONFIG_SET_STRING,
-            FSCONFIG_SET_BINARY, FSCONFIG_SET_PATH,
-            FSCONFIG_SET_PATH_EMPTY, FSCONFIG_SET_FD,
-            FSCONFIG_CMD_CREATE, FSCONFIG_CMD_RECONFIGURE,
+            FSCONFIG_SET_FLAG,
+            FSCONFIG_SET_STRING,
+            FSCONFIG_SET_BINARY,
+            FSCONFIG_SET_PATH,
+            FSCONFIG_SET_PATH_EMPTY,
+            FSCONFIG_SET_FD,
+            FSCONFIG_CMD_CREATE,
+            FSCONFIG_CMD_RECONFIGURE,
             FSCONFIG_CMD_CREATE_EXCL,
         ];
         for i in 0..cmds.len() {
@@ -84,8 +88,10 @@ mod tests {
     #[test]
     fn test_fspick_flags_no_overlap() {
         let flags = [
-            FSPICK_CLOEXEC, FSPICK_SYMLINK_NOFOLLOW,
-            FSPICK_NO_AUTOMOUNT, FSPICK_EMPTY_PATH,
+            FSPICK_CLOEXEC,
+            FSPICK_SYMLINK_NOFOLLOW,
+            FSPICK_NO_AUTOMOUNT,
+            FSPICK_EMPTY_PATH,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -97,8 +103,10 @@ mod tests {
     #[test]
     fn test_fspick_flags_powers_of_two() {
         let flags = [
-            FSPICK_CLOEXEC, FSPICK_SYMLINK_NOFOLLOW,
-            FSPICK_NO_AUTOMOUNT, FSPICK_EMPTY_PATH,
+            FSPICK_CLOEXEC,
+            FSPICK_SYMLINK_NOFOLLOW,
+            FSPICK_NO_AUTOMOUNT,
+            FSPICK_EMPTY_PATH,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());

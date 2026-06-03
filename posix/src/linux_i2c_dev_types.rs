@@ -81,8 +81,15 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            I2C_SLAVE, I2C_SLAVE_FORCE, I2C_TENBIT, I2C_FUNCS,
-            I2C_RDWR, I2C_PEC, I2C_SMBUS, I2C_TIMEOUT, I2C_RETRIES,
+            I2C_SLAVE,
+            I2C_SLAVE_FORCE,
+            I2C_TENBIT,
+            I2C_FUNCS,
+            I2C_RDWR,
+            I2C_PEC,
+            I2C_SMBUS,
+            I2C_TIMEOUT,
+            I2C_RETRIES,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -94,11 +101,17 @@ mod tests {
     #[test]
     fn test_func_bits_distinct() {
         let funcs = [
-            I2C_FUNC_I2C, I2C_FUNC_10BIT_ADDR, I2C_FUNC_SMBUS_PEC,
-            I2C_FUNC_SMBUS_QUICK, I2C_FUNC_SMBUS_READ_BYTE,
-            I2C_FUNC_SMBUS_WRITE_BYTE, I2C_FUNC_SMBUS_READ_BYTE_DATA,
-            I2C_FUNC_SMBUS_WRITE_BYTE_DATA, I2C_FUNC_SMBUS_READ_WORD_DATA,
-            I2C_FUNC_SMBUS_WRITE_WORD_DATA, I2C_FUNC_SMBUS_BLOCK_DATA,
+            I2C_FUNC_I2C,
+            I2C_FUNC_10BIT_ADDR,
+            I2C_FUNC_SMBUS_PEC,
+            I2C_FUNC_SMBUS_QUICK,
+            I2C_FUNC_SMBUS_READ_BYTE,
+            I2C_FUNC_SMBUS_WRITE_BYTE,
+            I2C_FUNC_SMBUS_READ_BYTE_DATA,
+            I2C_FUNC_SMBUS_WRITE_BYTE_DATA,
+            I2C_FUNC_SMBUS_READ_WORD_DATA,
+            I2C_FUNC_SMBUS_WRITE_WORD_DATA,
+            I2C_FUNC_SMBUS_BLOCK_DATA,
         ];
         for i in 0..funcs.len() {
             for j in (i + 1)..funcs.len() {
@@ -110,8 +123,11 @@ mod tests {
     #[test]
     fn test_msg_flags_distinct() {
         let flags = [
-            I2C_M_RD, I2C_M_TEN, I2C_M_NOSTART,
-            I2C_M_REV_DIR_ADDR, I2C_M_RECV_LEN,
+            I2C_M_RD,
+            I2C_M_TEN,
+            I2C_M_NOSTART,
+            I2C_M_REV_DIR_ADDR,
+            I2C_M_RECV_LEN,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

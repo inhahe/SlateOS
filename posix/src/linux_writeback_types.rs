@@ -77,9 +77,13 @@ mod tests {
     #[test]
     fn test_reasons_distinct() {
         let reasons = [
-            WB_REASON_BACKGROUND, WB_REASON_VMSCAN, WB_REASON_SYNC,
-            WB_REASON_PERIODIC, WB_REASON_LAPTOP_TIMER,
-            WB_REASON_FS_FREE_SPACE, WB_REASON_FORKER_THREAD,
+            WB_REASON_BACKGROUND,
+            WB_REASON_VMSCAN,
+            WB_REASON_SYNC,
+            WB_REASON_PERIODIC,
+            WB_REASON_LAPTOP_TIMER,
+            WB_REASON_FS_FREE_SPACE,
+            WB_REASON_FORKER_THREAD,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {
@@ -97,8 +101,11 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            WB_FLAG_WHOLE_PAGE, WB_FLAG_SYNC, WB_FLAG_KILLABLE,
-            WB_FLAG_RANGE, WB_FLAG_FOR_RECLAIM,
+            WB_FLAG_WHOLE_PAGE,
+            WB_FLAG_SYNC,
+            WB_FLAG_KILLABLE,
+            WB_FLAG_RANGE,
+            WB_FLAG_FOR_RECLAIM,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

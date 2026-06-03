@@ -73,10 +73,16 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            DCACHE_ENTRY_HASHED, DCACHE_DISCONNECTED, DCACHE_REFERENCED,
-            DCACHE_CANT_MOUNT, DCACHE_MOUNTED, DCACHE_NEED_AUTOMOUNT,
-            DCACHE_MANAGE_TRANSIT, DCACHE_SHRINK_LIST,
-            DCACHE_FSNOTIFY_PARENT, DCACHE_CASEFOLD,
+            DCACHE_ENTRY_HASHED,
+            DCACHE_DISCONNECTED,
+            DCACHE_REFERENCED,
+            DCACHE_CANT_MOUNT,
+            DCACHE_MOUNTED,
+            DCACHE_NEED_AUTOMOUNT,
+            DCACHE_MANAGE_TRANSIT,
+            DCACHE_SHRINK_LIST,
+            DCACHE_FSNOTIFY_PARENT,
+            DCACHE_CASEFOLD,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -89,7 +95,8 @@ mod tests {
     #[test]
     fn test_dentry_types_distinct() {
         let types = [
-            DENTRY_TYPE_POSITIVE, DENTRY_TYPE_NEGATIVE,
+            DENTRY_TYPE_POSITIVE,
+            DENTRY_TYPE_NEGATIVE,
             DENTRY_TYPE_WHITEOUT,
         ];
         for i in 0..types.len() {

@@ -19,8 +19,7 @@ pub const SPLICE_F_MORE: u32 = 0x04;
 pub const SPLICE_F_GIFT: u32 = 0x08;
 
 /// All valid splice flags.
-pub const SPLICE_F_ALL: u32 =
-    SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
+pub const SPLICE_F_ALL: u32 = SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT;
 
 // ---------------------------------------------------------------------------
 // Pipe buffer constants
@@ -66,8 +65,10 @@ mod tests {
     #[test]
     fn test_splice_flags_powers_of_two() {
         let flags = [
-            SPLICE_F_MOVE, SPLICE_F_NONBLOCK,
-            SPLICE_F_MORE, SPLICE_F_GIFT,
+            SPLICE_F_MOVE,
+            SPLICE_F_NONBLOCK,
+            SPLICE_F_MORE,
+            SPLICE_F_GIFT,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -77,8 +78,10 @@ mod tests {
     #[test]
     fn test_splice_flags_no_overlap() {
         let flags = [
-            SPLICE_F_MOVE, SPLICE_F_NONBLOCK,
-            SPLICE_F_MORE, SPLICE_F_GIFT,
+            SPLICE_F_MOVE,
+            SPLICE_F_NONBLOCK,
+            SPLICE_F_MORE,
+            SPLICE_F_GIFT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

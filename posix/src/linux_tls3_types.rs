@@ -98,8 +98,10 @@ mod tests {
     #[test]
     fn test_versions_distinct() {
         let versions = [
-            TLS_1_0_VERSION, TLS_1_1_VERSION,
-            TLS_1_2_VERSION, TLS_1_3_VERSION,
+            TLS_1_0_VERSION,
+            TLS_1_1_VERSION,
+            TLS_1_2_VERSION,
+            TLS_1_3_VERSION,
         ];
         for i in 0..versions.len() {
             for j in (i + 1)..versions.len() {
@@ -118,9 +120,12 @@ mod tests {
     #[test]
     fn test_ciphers_distinct() {
         let ciphers = [
-            TLS_CIPHER_AES_GCM_128, TLS_CIPHER_AES_GCM_256,
-            TLS_CIPHER_AES_CCM_128, TLS_CIPHER_CHACHA20_POLY1305,
-            TLS_CIPHER_SM4_GCM, TLS_CIPHER_SM4_CCM,
+            TLS_CIPHER_AES_GCM_128,
+            TLS_CIPHER_AES_GCM_256,
+            TLS_CIPHER_AES_CCM_128,
+            TLS_CIPHER_CHACHA20_POLY1305,
+            TLS_CIPHER_SM4_GCM,
+            TLS_CIPHER_SM4_CCM,
         ];
         for i in 0..ciphers.len() {
             for j in (i + 1)..ciphers.len() {

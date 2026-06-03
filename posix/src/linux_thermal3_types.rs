@@ -72,9 +72,12 @@ mod tests {
     #[test]
     fn test_genl_cmds_distinct() {
         let cmds = [
-            THERMAL_GENL_CMD_UNSPEC, THERMAL_GENL_CMD_TZ_GET_ID,
-            THERMAL_GENL_CMD_TZ_GET_TRIP, THERMAL_GENL_CMD_TZ_GET_TEMP,
-            THERMAL_GENL_CMD_TZ_GET_GOV, THERMAL_GENL_CMD_CDEV_GET,
+            THERMAL_GENL_CMD_UNSPEC,
+            THERMAL_GENL_CMD_TZ_GET_ID,
+            THERMAL_GENL_CMD_TZ_GET_TRIP,
+            THERMAL_GENL_CMD_TZ_GET_TEMP,
+            THERMAL_GENL_CMD_TZ_GET_GOV,
+            THERMAL_GENL_CMD_CDEV_GET,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -86,8 +89,10 @@ mod tests {
     #[test]
     fn test_trip_types_distinct() {
         let trips = [
-            THERMAL_TRIP_ACTIVE, THERMAL_TRIP_PASSIVE,
-            THERMAL_TRIP_HOT, THERMAL_TRIP_CRITICAL,
+            THERMAL_TRIP_ACTIVE,
+            THERMAL_TRIP_PASSIVE,
+            THERMAL_TRIP_HOT,
+            THERMAL_TRIP_CRITICAL,
         ];
         for i in 0..trips.len() {
             for j in (i + 1)..trips.len() {
@@ -99,9 +104,12 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            THERMAL_EVENT_UNSPECIFIED, THERMAL_EVENT_TEMP_UP,
-            THERMAL_EVENT_TEMP_DOWN, THERMAL_EVENT_TRIP_VIOLATED,
-            THERMAL_EVENT_TRIP_CHANGED, THERMAL_EVENT_KEEP_ALIVE,
+            THERMAL_EVENT_UNSPECIFIED,
+            THERMAL_EVENT_TEMP_UP,
+            THERMAL_EVENT_TEMP_DOWN,
+            THERMAL_EVENT_TRIP_VIOLATED,
+            THERMAL_EVENT_TRIP_CHANGED,
+            THERMAL_EVENT_KEEP_ALIVE,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -113,7 +121,8 @@ mod tests {
     #[test]
     fn test_trends_distinct() {
         let trends = [
-            THERMAL_TREND_RAISING, THERMAL_TREND_DROPPING,
+            THERMAL_TREND_RAISING,
+            THERMAL_TREND_DROPPING,
             THERMAL_TREND_STABLE,
         ];
         for i in 0..trends.len() {

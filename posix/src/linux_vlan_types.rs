@@ -97,7 +97,12 @@ mod tests {
 
     #[test]
     fn test_commands_distinct() {
-        let cmds = [ADD_VLAN_CMD, DEL_VLAN_CMD, SET_VLAN_NAME_TYPE_CMD, SET_VLAN_FLAG_CMD];
+        let cmds = [
+            ADD_VLAN_CMD,
+            DEL_VLAN_CMD,
+            SET_VLAN_NAME_TYPE_CMD,
+            SET_VLAN_FLAG_CMD,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);
@@ -108,8 +113,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            VLAN_FLAG_REORDER_HDR, VLAN_FLAG_GVRP,
-            VLAN_FLAG_LOOSE_BINDING, VLAN_FLAG_MVRP,
+            VLAN_FLAG_REORDER_HDR,
+            VLAN_FLAG_GVRP,
+            VLAN_FLAG_LOOSE_BINDING,
+            VLAN_FLAG_MVRP,
             VLAN_FLAG_BRIDGE_BINDING,
         ];
         for i in 0..flags.len() {

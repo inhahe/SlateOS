@@ -94,11 +94,18 @@ mod tests {
     #[test]
     fn test_ops_distinct() {
         let ops = [
-            FUTEX_WAIT, FUTEX_WAKE, FUTEX_REQUEUE,
-            FUTEX_CMP_REQUEUE, FUTEX_WAKE_OP,
-            FUTEX_LOCK_PI, FUTEX_UNLOCK_PI, FUTEX_TRYLOCK_PI,
-            FUTEX_WAIT_BITSET, FUTEX_WAKE_BITSET,
-            FUTEX_WAIT_REQUEUE_PI, FUTEX_CMP_REQUEUE_PI,
+            FUTEX_WAIT,
+            FUTEX_WAKE,
+            FUTEX_REQUEUE,
+            FUTEX_CMP_REQUEUE,
+            FUTEX_WAKE_OP,
+            FUTEX_LOCK_PI,
+            FUTEX_UNLOCK_PI,
+            FUTEX_TRYLOCK_PI,
+            FUTEX_WAIT_BITSET,
+            FUTEX_WAKE_BITSET,
+            FUTEX_WAIT_REQUEUE_PI,
+            FUTEX_CMP_REQUEUE_PI,
             FUTEX_LOCK_PI2,
         ];
         for i in 0..ops.len() {
@@ -126,8 +133,11 @@ mod tests {
     #[test]
     fn test_wake_ops_distinct() {
         let ops = [
-            FUTEX_OP_SET, FUTEX_OP_ADD, FUTEX_OP_OR,
-            FUTEX_OP_ANDN, FUTEX_OP_XOR,
+            FUTEX_OP_SET,
+            FUTEX_OP_ADD,
+            FUTEX_OP_OR,
+            FUTEX_OP_ANDN,
+            FUTEX_OP_XOR,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -139,9 +149,12 @@ mod tests {
     #[test]
     fn test_cmp_ops_distinct() {
         let cmps = [
-            FUTEX_OP_CMP_EQ, FUTEX_OP_CMP_NE,
-            FUTEX_OP_CMP_LT, FUTEX_OP_CMP_LE,
-            FUTEX_OP_CMP_GT, FUTEX_OP_CMP_GE,
+            FUTEX_OP_CMP_EQ,
+            FUTEX_OP_CMP_NE,
+            FUTEX_OP_CMP_LT,
+            FUTEX_OP_CMP_LE,
+            FUTEX_OP_CMP_GT,
+            FUTEX_OP_CMP_GE,
         ];
         for i in 0..cmps.len() {
             for j in (i + 1)..cmps.len() {

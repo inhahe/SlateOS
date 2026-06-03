@@ -128,7 +128,12 @@ mod tests {
 
     #[test]
     fn test_magic_values_distinct() {
-        let magics = [HFS_SUPER_MAGIC, HFSPLUS_SUPER_MAGIC, HFSX_SUPER_MAGIC, HFS_WRAPPER_MAGIC];
+        let magics = [
+            HFS_SUPER_MAGIC,
+            HFSPLUS_SUPER_MAGIC,
+            HFSX_SUPER_MAGIC,
+            HFS_WRAPPER_MAGIC,
+        ];
         for i in 0..magics.len() {
             for j in (i + 1)..magics.len() {
                 assert_ne!(magics[i], magics[j]);
@@ -165,9 +170,15 @@ mod tests {
     #[test]
     fn test_cnid_values_distinct() {
         let cnids = [
-            HFS_ROOT_PARENT_CNID, HFS_ROOT_CNID, HFS_EXT_CNID,
-            HFS_CAT_CNID, HFS_BAD_CNID, HFSPLUS_ALLOC_CNID,
-            HFSPLUS_START_CNID, HFSPLUS_ATTR_CNID, HFS_FIRST_USER_CNID,
+            HFS_ROOT_PARENT_CNID,
+            HFS_ROOT_CNID,
+            HFS_EXT_CNID,
+            HFS_CAT_CNID,
+            HFS_BAD_CNID,
+            HFSPLUS_ALLOC_CNID,
+            HFSPLUS_START_CNID,
+            HFSPLUS_ATTR_CNID,
+            HFS_FIRST_USER_CNID,
         ];
         for i in 0..cnids.len() {
             for j in (i + 1)..cnids.len() {
@@ -186,9 +197,12 @@ mod tests {
     #[test]
     fn test_vol_attrs_distinct() {
         let attrs = [
-            HFSPLUS_VOL_UNMNT, HFSPLUS_VOL_SPARE_BLK,
-            HFSPLUS_VOL_NOCACHE, HFSPLUS_VOL_HWLOCK,
-            HFSPLUS_VOL_SWLOCK, HFSPLUS_VOL_JOURNALED,
+            HFSPLUS_VOL_UNMNT,
+            HFSPLUS_VOL_SPARE_BLK,
+            HFSPLUS_VOL_NOCACHE,
+            HFSPLUS_VOL_HWLOCK,
+            HFSPLUS_VOL_SWLOCK,
+            HFSPLUS_VOL_JOURNALED,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -200,9 +214,12 @@ mod tests {
     #[test]
     fn test_vol_attrs_power_of_two() {
         let attrs = [
-            HFSPLUS_VOL_UNMNT, HFSPLUS_VOL_SPARE_BLK,
-            HFSPLUS_VOL_NOCACHE, HFSPLUS_VOL_HWLOCK,
-            HFSPLUS_VOL_SWLOCK, HFSPLUS_VOL_JOURNALED,
+            HFSPLUS_VOL_UNMNT,
+            HFSPLUS_VOL_SPARE_BLK,
+            HFSPLUS_VOL_NOCACHE,
+            HFSPLUS_VOL_HWLOCK,
+            HFSPLUS_VOL_SWLOCK,
+            HFSPLUS_VOL_JOURNALED,
         ];
         for a in &attrs {
             assert!(a.is_power_of_two(), "0x{:08x} not power of two", a);

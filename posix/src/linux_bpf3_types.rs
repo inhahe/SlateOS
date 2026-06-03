@@ -111,17 +111,28 @@ mod tests {
     #[test]
     fn test_attach_types_distinct() {
         let types = [
-            BPF_CGROUP_INET_INGRESS, BPF_CGROUP_INET_EGRESS,
-            BPF_CGROUP_INET_SOCK_CREATE, BPF_CGROUP_SOCK_OPS,
-            BPF_SK_SKB_STREAM_PARSER, BPF_SK_SKB_STREAM_VERDICT,
-            BPF_CGROUP_DEVICE, BPF_SK_MSG_VERDICT,
-            BPF_CGROUP_INET4_BIND, BPF_CGROUP_INET6_BIND,
-            BPF_CGROUP_INET4_CONNECT, BPF_CGROUP_INET6_CONNECT,
-            BPF_CGROUP_INET4_POST_BIND, BPF_CGROUP_INET6_POST_BIND,
-            BPF_CGROUP_UDP4_SENDMSG, BPF_CGROUP_UDP6_SENDMSG,
-            BPF_LIRC_MODE2, BPF_FLOW_DISSECTOR,
-            BPF_CGROUP_SYSCTL, BPF_CGROUP_UDP4_RECVMSG,
-            BPF_CGROUP_UDP6_RECVMSG, BPF_CGROUP_GETSOCKOPT,
+            BPF_CGROUP_INET_INGRESS,
+            BPF_CGROUP_INET_EGRESS,
+            BPF_CGROUP_INET_SOCK_CREATE,
+            BPF_CGROUP_SOCK_OPS,
+            BPF_SK_SKB_STREAM_PARSER,
+            BPF_SK_SKB_STREAM_VERDICT,
+            BPF_CGROUP_DEVICE,
+            BPF_SK_MSG_VERDICT,
+            BPF_CGROUP_INET4_BIND,
+            BPF_CGROUP_INET6_BIND,
+            BPF_CGROUP_INET4_CONNECT,
+            BPF_CGROUP_INET6_CONNECT,
+            BPF_CGROUP_INET4_POST_BIND,
+            BPF_CGROUP_INET6_POST_BIND,
+            BPF_CGROUP_UDP4_SENDMSG,
+            BPF_CGROUP_UDP6_SENDMSG,
+            BPF_LIRC_MODE2,
+            BPF_FLOW_DISSECTOR,
+            BPF_CGROUP_SYSCTL,
+            BPF_CGROUP_UDP4_RECVMSG,
+            BPF_CGROUP_UDP6_RECVMSG,
+            BPF_CGROUP_GETSOCKOPT,
             BPF_CGROUP_SETSOCKOPT,
         ];
         for i in 0..types.len() {
@@ -134,13 +145,20 @@ mod tests {
     #[test]
     fn test_link_types_distinct() {
         let types = [
-            BPF_LINK_TYPE_UNSPEC, BPF_LINK_TYPE_RAW_TRACEPOINT,
-            BPF_LINK_TYPE_TRACING, BPF_LINK_TYPE_CGROUP,
-            BPF_LINK_TYPE_ITER, BPF_LINK_TYPE_NETNS,
-            BPF_LINK_TYPE_XDP, BPF_LINK_TYPE_PERF_EVENT,
-            BPF_LINK_TYPE_KPROBE_MULTI, BPF_LINK_TYPE_STRUCT_OPS,
-            BPF_LINK_TYPE_NETFILTER, BPF_LINK_TYPE_TCX,
-            BPF_LINK_TYPE_UPROBE_MULTI, BPF_LINK_TYPE_NETKIT,
+            BPF_LINK_TYPE_UNSPEC,
+            BPF_LINK_TYPE_RAW_TRACEPOINT,
+            BPF_LINK_TYPE_TRACING,
+            BPF_LINK_TYPE_CGROUP,
+            BPF_LINK_TYPE_ITER,
+            BPF_LINK_TYPE_NETNS,
+            BPF_LINK_TYPE_XDP,
+            BPF_LINK_TYPE_PERF_EVENT,
+            BPF_LINK_TYPE_KPROBE_MULTI,
+            BPF_LINK_TYPE_STRUCT_OPS,
+            BPF_LINK_TYPE_NETFILTER,
+            BPF_LINK_TYPE_TCX,
+            BPF_LINK_TYPE_UPROBE_MULTI,
+            BPF_LINK_TYPE_NETKIT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

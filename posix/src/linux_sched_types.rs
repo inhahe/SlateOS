@@ -7,12 +7,12 @@
 // Re-exports
 // ---------------------------------------------------------------------------
 
-pub use crate::sched::SCHED_OTHER;
-pub use crate::sched::SCHED_FIFO;
-pub use crate::sched::SCHED_RR;
 pub use crate::sched::SCHED_BATCH;
-pub use crate::sched::SCHED_IDLE;
 pub use crate::sched::SCHED_DEADLINE;
+pub use crate::sched::SCHED_FIFO;
+pub use crate::sched::SCHED_IDLE;
+pub use crate::sched::SCHED_OTHER;
+pub use crate::sched::SCHED_RR;
 
 // ---------------------------------------------------------------------------
 // sched_attr struct (for sched_setattr / sched_getattr)
@@ -112,9 +112,12 @@ mod tests {
     #[test]
     fn test_flags_are_powers_of_two() {
         let flags = [
-            SCHED_FLAG_RESET_ON_FORK, SCHED_FLAG_RECLAIM,
-            SCHED_FLAG_DL_OVERRUN, SCHED_FLAG_KEEP_ALL,
-            SCHED_FLAG_KEEP_PARAMS, SCHED_FLAG_UTIL_CLAMP_MIN,
+            SCHED_FLAG_RESET_ON_FORK,
+            SCHED_FLAG_RECLAIM,
+            SCHED_FLAG_DL_OVERRUN,
+            SCHED_FLAG_KEEP_ALL,
+            SCHED_FLAG_KEEP_PARAMS,
+            SCHED_FLAG_UTIL_CLAMP_MIN,
             SCHED_FLAG_UTIL_CLAMP_MAX,
         ];
         for f in &flags {

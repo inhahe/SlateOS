@@ -82,8 +82,10 @@ mod tests {
     #[test]
     fn test_stat_types_distinct() {
         let stats = [
-            HUGETLB_STAT_CURRENT, HUGETLB_STAT_RSVD,
-            HUGETLB_STAT_MAX_USAGE, HUGETLB_STAT_FAILCNT,
+            HUGETLB_STAT_CURRENT,
+            HUGETLB_STAT_RSVD,
+            HUGETLB_STAT_MAX_USAGE,
+            HUGETLB_STAT_FAILCNT,
         ];
         for i in 0..stats.len() {
             for j in (i + 1)..stats.len() {

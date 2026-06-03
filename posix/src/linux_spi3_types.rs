@@ -78,10 +78,22 @@ mod tests {
     #[test]
     fn test_mode_bits_distinct() {
         let bits = [
-            SPI_CPHA, SPI_CPOL, SPI_CS_HIGH, SPI_LSB_FIRST,
-            SPI_3WIRE, SPI_LOOP, SPI_NO_CS, SPI_READY,
-            SPI_TX_DUAL, SPI_TX_QUAD, SPI_RX_DUAL, SPI_RX_QUAD,
-            SPI_CS_WORD, SPI_TX_OCTAL, SPI_RX_OCTAL, SPI_3WIRE_HIZ,
+            SPI_CPHA,
+            SPI_CPOL,
+            SPI_CS_HIGH,
+            SPI_LSB_FIRST,
+            SPI_3WIRE,
+            SPI_LOOP,
+            SPI_NO_CS,
+            SPI_READY,
+            SPI_TX_DUAL,
+            SPI_TX_QUAD,
+            SPI_RX_DUAL,
+            SPI_RX_QUAD,
+            SPI_CS_WORD,
+            SPI_TX_OCTAL,
+            SPI_RX_OCTAL,
+            SPI_3WIRE_HIZ,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {

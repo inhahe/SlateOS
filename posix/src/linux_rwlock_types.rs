@@ -66,8 +66,10 @@ mod tests {
     #[test]
     fn test_rwlock_types_distinct() {
         let types = [
-            RWLOCK_TYPE_NORMAL, RWLOCK_TYPE_READER_PREF,
-            RWLOCK_TYPE_WRITER_PREF, RWLOCK_TYPE_FAIR,
+            RWLOCK_TYPE_NORMAL,
+            RWLOCK_TYPE_READER_PREF,
+            RWLOCK_TYPE_WRITER_PREF,
+            RWLOCK_TYPE_FAIR,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

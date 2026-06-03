@@ -88,7 +88,8 @@ mod tests {
     #[test]
     fn test_shadow_stack_flags_no_overlap() {
         let flags = [
-            PR_SHADOW_STACK_ENABLE, PR_SHADOW_STACK_WRITE,
+            PR_SHADOW_STACK_ENABLE,
+            PR_SHADOW_STACK_WRITE,
             PR_SHADOW_STACK_PUSH,
         ];
         for i in 0..flags.len() {
@@ -106,7 +107,8 @@ mod tests {
     #[test]
     fn test_spec_types_distinct() {
         let types = [
-            PR_SPEC_STORE_BYPASS, PR_SPEC_INDIRECT_BRANCH,
+            PR_SPEC_STORE_BYPASS,
+            PR_SPEC_INDIRECT_BRANCH,
             PR_SPEC_L1D_FLUSH,
         ];
         for i in 0..types.len() {
@@ -119,8 +121,11 @@ mod tests {
     #[test]
     fn test_spec_ctrl_flags_power_of_two() {
         let flags = [
-            PR_SPEC_PRCTL, PR_SPEC_ENABLE, PR_SPEC_DISABLE,
-            PR_SPEC_FORCE_DISABLE, PR_SPEC_DISABLE_NOEXEC,
+            PR_SPEC_PRCTL,
+            PR_SPEC_ENABLE,
+            PR_SPEC_DISABLE,
+            PR_SPEC_FORCE_DISABLE,
+            PR_SPEC_DISABLE_NOEXEC,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
@@ -130,8 +135,10 @@ mod tests {
     #[test]
     fn test_pac_keys_power_of_two() {
         let keys = [
-            PR_PAC_RESET_KEYS_APIA, PR_PAC_RESET_KEYS_APIB,
-            PR_PAC_RESET_KEYS_APDA, PR_PAC_RESET_KEYS_APDB,
+            PR_PAC_RESET_KEYS_APIA,
+            PR_PAC_RESET_KEYS_APIB,
+            PR_PAC_RESET_KEYS_APDA,
+            PR_PAC_RESET_KEYS_APDB,
             PR_PAC_RESET_KEYS_APGA,
         ];
         for k in &keys {
@@ -142,8 +149,10 @@ mod tests {
     #[test]
     fn test_pac_keys_no_overlap() {
         let keys = [
-            PR_PAC_RESET_KEYS_APIA, PR_PAC_RESET_KEYS_APIB,
-            PR_PAC_RESET_KEYS_APDA, PR_PAC_RESET_KEYS_APDB,
+            PR_PAC_RESET_KEYS_APIA,
+            PR_PAC_RESET_KEYS_APIB,
+            PR_PAC_RESET_KEYS_APDA,
+            PR_PAC_RESET_KEYS_APDB,
             PR_PAC_RESET_KEYS_APGA,
         ];
         for i in 0..keys.len() {

@@ -89,10 +89,21 @@ mod tests {
     #[test]
     fn test_mask_power_of_two() {
         let masks = [
-            STATX_TYPE, STATX_MODE, STATX_NLINK, STATX_UID,
-            STATX_GID, STATX_ATIME, STATX_MTIME, STATX_CTIME,
-            STATX_INO, STATX_SIZE, STATX_BLOCKS, STATX_BTIME,
-            STATX_MNT_ID, STATX_DIOALIGN, STATX_MNT_ID_UNIQUE,
+            STATX_TYPE,
+            STATX_MODE,
+            STATX_NLINK,
+            STATX_UID,
+            STATX_GID,
+            STATX_ATIME,
+            STATX_MTIME,
+            STATX_CTIME,
+            STATX_INO,
+            STATX_SIZE,
+            STATX_BLOCKS,
+            STATX_BTIME,
+            STATX_MNT_ID,
+            STATX_DIOALIGN,
+            STATX_MNT_ID_UNIQUE,
             STATX_SUBVOL,
         ];
         for m in &masks {
@@ -106,19 +117,31 @@ mod tests {
         assert_eq!(STATX_BASIC_STATS, 0x7FF);
         assert_eq!(
             STATX_BASIC_STATS,
-            STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_UID
-                | STATX_GID | STATX_ATIME | STATX_MTIME | STATX_CTIME
-                | STATX_INO | STATX_SIZE | STATX_BLOCKS
+            STATX_TYPE
+                | STATX_MODE
+                | STATX_NLINK
+                | STATX_UID
+                | STATX_GID
+                | STATX_ATIME
+                | STATX_MTIME
+                | STATX_CTIME
+                | STATX_INO
+                | STATX_SIZE
+                | STATX_BLOCKS
         );
     }
 
     #[test]
     fn test_attr_distinct() {
         let attrs = [
-            STATX_ATTR_COMPRESSED, STATX_ATTR_IMMUTABLE,
-            STATX_ATTR_APPEND, STATX_ATTR_NODUMP,
-            STATX_ATTR_ENCRYPTED, STATX_ATTR_AUTOMOUNT,
-            STATX_ATTR_MOUNT_ROOT, STATX_ATTR_VERITY,
+            STATX_ATTR_COMPRESSED,
+            STATX_ATTR_IMMUTABLE,
+            STATX_ATTR_APPEND,
+            STATX_ATTR_NODUMP,
+            STATX_ATTR_ENCRYPTED,
+            STATX_ATTR_AUTOMOUNT,
+            STATX_ATTR_MOUNT_ROOT,
+            STATX_ATTR_VERITY,
             STATX_ATTR_DAX,
         ];
         for i in 0..attrs.len() {
@@ -131,7 +154,8 @@ mod tests {
     #[test]
     fn test_sync_flags_distinct() {
         let flags = [
-            AT_STATX_SYNC_AS_STAT, AT_STATX_FORCE_SYNC,
+            AT_STATX_SYNC_AS_STAT,
+            AT_STATX_FORCE_SYNC,
             AT_STATX_DONT_SYNC,
         ];
         for i in 0..flags.len() {

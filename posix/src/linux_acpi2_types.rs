@@ -98,8 +98,11 @@ mod tests {
     #[test]
     fn test_d_states_distinct() {
         let states = [
-            ACPI_STATE_D0, ACPI_STATE_D1, ACPI_STATE_D2,
-            ACPI_STATE_D3_HOT, ACPI_STATE_D3_COLD,
+            ACPI_STATE_D0,
+            ACPI_STATE_D1,
+            ACPI_STATE_D2,
+            ACPI_STATE_D3_HOT,
+            ACPI_STATE_D3_COLD,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -111,8 +114,12 @@ mod tests {
     #[test]
     fn test_s_states_distinct() {
         let states = [
-            ACPI_STATE_S0, ACPI_STATE_S1, ACPI_STATE_S2,
-            ACPI_STATE_S3, ACPI_STATE_S4, ACPI_STATE_S5,
+            ACPI_STATE_S0,
+            ACPI_STATE_S1,
+            ACPI_STATE_S2,
+            ACPI_STATE_S3,
+            ACPI_STATE_S4,
+            ACPI_STATE_S5,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -124,8 +131,12 @@ mod tests {
     #[test]
     fn test_table_sigs_distinct() {
         let sigs = [
-            ACPI_SIG_DSDT, ACPI_SIG_FADT, ACPI_SIG_MADT,
-            ACPI_SIG_SSDT, ACPI_SIG_HPET, ACPI_SIG_MCFG,
+            ACPI_SIG_DSDT,
+            ACPI_SIG_FADT,
+            ACPI_SIG_MADT,
+            ACPI_SIG_SSDT,
+            ACPI_SIG_HPET,
+            ACPI_SIG_MCFG,
             ACPI_SIG_BGRT,
         ];
         for i in 0..sigs.len() {
@@ -138,12 +149,18 @@ mod tests {
     #[test]
     fn test_addr_spaces_distinct() {
         let spaces = [
-            ACPI_ADR_SPACE_SYSTEM_MEMORY, ACPI_ADR_SPACE_SYSTEM_IO,
-            ACPI_ADR_SPACE_PCI_CONFIG, ACPI_ADR_SPACE_EC,
-            ACPI_ADR_SPACE_SMBUS, ACPI_ADR_SPACE_CMOS,
-            ACPI_ADR_SPACE_PCI_BAR_TARGET, ACPI_ADR_SPACE_IPMI,
-            ACPI_ADR_SPACE_GPIO, ACPI_ADR_SPACE_GSBUS,
-            ACPI_ADR_SPACE_PCC, ACPI_ADR_SPACE_PRM,
+            ACPI_ADR_SPACE_SYSTEM_MEMORY,
+            ACPI_ADR_SPACE_SYSTEM_IO,
+            ACPI_ADR_SPACE_PCI_CONFIG,
+            ACPI_ADR_SPACE_EC,
+            ACPI_ADR_SPACE_SMBUS,
+            ACPI_ADR_SPACE_CMOS,
+            ACPI_ADR_SPACE_PCI_BAR_TARGET,
+            ACPI_ADR_SPACE_IPMI,
+            ACPI_ADR_SPACE_GPIO,
+            ACPI_ADR_SPACE_GSBUS,
+            ACPI_ADR_SPACE_PCC,
+            ACPI_ADR_SPACE_PRM,
             ACPI_ADR_SPACE_FIXED_HARDWARE,
         ];
         for i in 0..spaces.len() {

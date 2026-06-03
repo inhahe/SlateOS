@@ -97,10 +97,17 @@ mod tests {
     #[test]
     fn test_register_offsets_distinct() {
         let regs = [
-            PCI_VENDOR_ID, PCI_DEVICE_ID, PCI_COMMAND, PCI_STATUS,
-            PCI_REVISION_ID, PCI_CLASS_PROG, PCI_CLASS_DEVICE,
-            PCI_HEADER_TYPE, PCI_BASE_ADDRESS_0,
-            PCI_INTERRUPT_LINE, PCI_INTERRUPT_PIN,
+            PCI_VENDOR_ID,
+            PCI_DEVICE_ID,
+            PCI_COMMAND,
+            PCI_STATUS,
+            PCI_REVISION_ID,
+            PCI_CLASS_PROG,
+            PCI_CLASS_DEVICE,
+            PCI_HEADER_TYPE,
+            PCI_BASE_ADDRESS_0,
+            PCI_INTERRUPT_LINE,
+            PCI_INTERRUPT_PIN,
         ];
         for i in 0..regs.len() {
             for j in (i + 1)..regs.len() {
@@ -112,8 +119,10 @@ mod tests {
     #[test]
     fn test_command_bits_no_overlap() {
         let bits = [
-            PCI_COMMAND_IO, PCI_COMMAND_MEMORY,
-            PCI_COMMAND_MASTER, PCI_COMMAND_INTX_DISABLE,
+            PCI_COMMAND_IO,
+            PCI_COMMAND_MEMORY,
+            PCI_COMMAND_MASTER,
+            PCI_COMMAND_INTX_DISABLE,
         ];
         for i in 0..bits.len() {
             assert!(bits[i].is_power_of_two());
@@ -125,7 +134,12 @@ mod tests {
 
     #[test]
     fn test_cap_ids_distinct() {
-        let caps = [PCI_CAP_ID_PM, PCI_CAP_ID_MSI, PCI_CAP_ID_MSIX, PCI_CAP_ID_EXP];
+        let caps = [
+            PCI_CAP_ID_PM,
+            PCI_CAP_ID_MSI,
+            PCI_CAP_ID_MSIX,
+            PCI_CAP_ID_EXP,
+        ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
                 assert_ne!(caps[i], caps[j]);

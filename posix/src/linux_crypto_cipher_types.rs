@@ -84,9 +84,15 @@ mod tests {
     #[test]
     fn test_algorithms_distinct() {
         let algs = [
-            CIPHER_ALG_AES, CIPHER_ALG_CHACHA20, CIPHER_ALG_CAMELLIA,
-            CIPHER_ALG_SERPENT, CIPHER_ALG_TWOFISH, CIPHER_ALG_SM4,
-            CIPHER_ALG_ARIA, CIPHER_ALG_DES, CIPHER_ALG_DES3,
+            CIPHER_ALG_AES,
+            CIPHER_ALG_CHACHA20,
+            CIPHER_ALG_CAMELLIA,
+            CIPHER_ALG_SERPENT,
+            CIPHER_ALG_TWOFISH,
+            CIPHER_ALG_SM4,
+            CIPHER_ALG_ARIA,
+            CIPHER_ALG_DES,
+            CIPHER_ALG_DES3,
         ];
         for i in 0..algs.len() {
             for j in (i + 1)..algs.len() {
@@ -98,8 +104,12 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            CIPHER_MODE_ECB, CIPHER_MODE_CBC, CIPHER_MODE_CTR,
-            CIPHER_MODE_XTS, CIPHER_MODE_CTS, CIPHER_MODE_OFB,
+            CIPHER_MODE_ECB,
+            CIPHER_MODE_CBC,
+            CIPHER_MODE_CTR,
+            CIPHER_MODE_XTS,
+            CIPHER_MODE_CTS,
+            CIPHER_MODE_OFB,
             CIPHER_MODE_CFB,
         ];
         for i in 0..modes.len() {

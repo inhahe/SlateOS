@@ -23,7 +23,8 @@ pub const SYSCTL_PERF_EVENT_MAX_SAMPLE_RATE: &str = "kernel.perf_event_max_sampl
 /// Maximum stack depth for perf.
 pub const SYSCTL_PERF_EVENT_MAX_STACK: &str = "kernel.perf_event_max_stack";
 /// Maximum number of perf events per context.
-pub const SYSCTL_PERF_EVENT_MAX_CONTEXTS_PER_STACK: &str = "kernel.perf_event_max_contexts_per_stack";
+pub const SYSCTL_PERF_EVENT_MAX_CONTEXTS_PER_STACK: &str =
+    "kernel.perf_event_max_contexts_per_stack";
 
 // ---------------------------------------------------------------------------
 // perf_event_paranoid levels

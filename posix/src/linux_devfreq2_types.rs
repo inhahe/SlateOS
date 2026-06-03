@@ -54,8 +54,10 @@ mod tests {
     #[test]
     fn test_governors_distinct() {
         let govs = [
-            DEVFREQ_GOV_SIMPLE_ONDEMAND, DEVFREQ_GOV_PERFORMANCE,
-            DEVFREQ_GOV_POWERSAVE, DEVFREQ_GOV_USERSPACE,
+            DEVFREQ_GOV_SIMPLE_ONDEMAND,
+            DEVFREQ_GOV_PERFORMANCE,
+            DEVFREQ_GOV_POWERSAVE,
+            DEVFREQ_GOV_USERSPACE,
             DEVFREQ_GOV_PASSIVE,
         ];
         for i in 0..govs.len() {

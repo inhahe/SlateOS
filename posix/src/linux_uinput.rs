@@ -4,11 +4,11 @@
 //! input devices (keyboards, mice, gamepads, etc.) via
 //! `/dev/uinput`. Used by xdotool, Steam Input, and remote desktop.
 
-pub use crate::linux_input::InputEvent;
-pub use crate::linux_input::EV_SYN;
+pub use crate::linux_input::EV_ABS;
 pub use crate::linux_input::EV_KEY;
 pub use crate::linux_input::EV_REL;
-pub use crate::linux_input::EV_ABS;
+pub use crate::linux_input::EV_SYN;
+pub use crate::linux_input::InputEvent;
 
 // ---------------------------------------------------------------------------
 // uinput ioctl commands
@@ -154,9 +154,15 @@ mod tests {
     #[test]
     fn test_ioctl_set_commands_distinct() {
         let cmds = [
-            UI_SET_EVBIT, UI_SET_KEYBIT, UI_SET_RELBIT,
-            UI_SET_ABSBIT, UI_SET_MSCBIT, UI_SET_LEDBIT,
-            UI_SET_SNDBIT, UI_SET_FFBIT, UI_SET_SWBIT,
+            UI_SET_EVBIT,
+            UI_SET_KEYBIT,
+            UI_SET_RELBIT,
+            UI_SET_ABSBIT,
+            UI_SET_MSCBIT,
+            UI_SET_LEDBIT,
+            UI_SET_SNDBIT,
+            UI_SET_FFBIT,
+            UI_SET_SWBIT,
             UI_SET_PROPBIT,
         ];
         for i in 0..cmds.len() {

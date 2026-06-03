@@ -86,8 +86,10 @@ mod tests {
     #[test]
     fn test_cache_modes_distinct() {
         let modes = [
-            CACHE_MODE_WRITETHROUGH, CACHE_MODE_WRITEBACK,
-            CACHE_MODE_WRITEAROUND, CACHE_MODE_NONE,
+            CACHE_MODE_WRITETHROUGH,
+            CACHE_MODE_WRITEBACK,
+            CACHE_MODE_WRITEAROUND,
+            CACHE_MODE_NONE,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -99,8 +101,10 @@ mod tests {
     #[test]
     fn test_bdev_states_distinct() {
         let states = [
-            BDEV_STATE_NONE, BDEV_STATE_CLEAN,
-            BDEV_STATE_DIRTY, BDEV_STATE_STALE,
+            BDEV_STATE_NONE,
+            BDEV_STATE_CLEAN,
+            BDEV_STATE_DIRTY,
+            BDEV_STATE_STALE,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -129,7 +133,8 @@ mod tests {
     #[test]
     fn test_replacement_policies_distinct() {
         let policies = [
-            CACHE_REPLACEMENT_LRU, CACHE_REPLACEMENT_FIFO,
+            CACHE_REPLACEMENT_LRU,
+            CACHE_REPLACEMENT_FIFO,
             CACHE_REPLACEMENT_RANDOM,
         ];
         for i in 0..policies.len() {

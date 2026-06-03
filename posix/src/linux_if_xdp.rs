@@ -90,10 +90,7 @@ mod tests {
 
     #[test]
     fn test_bind_flags_powers_of_two() {
-        let flags = [
-            XDP_SHARED_UMEM, XDP_COPY, XDP_ZEROCOPY,
-            XDP_USE_NEED_WAKEUP,
-        ];
+        let flags = [XDP_SHARED_UMEM, XDP_COPY, XDP_ZEROCOPY, XDP_USE_NEED_WAKEUP];
         for f in &flags {
             assert!(f.is_power_of_two(), "flag {f:#x} not power of 2");
         }
@@ -111,8 +108,11 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            XDP_RX_RING, XDP_TX_RING, XDP_UMEM_REG,
-            XDP_UMEM_FILL_RING, XDP_UMEM_COMPLETION_RING,
+            XDP_RX_RING,
+            XDP_TX_RING,
+            XDP_UMEM_REG,
+            XDP_UMEM_FILL_RING,
+            XDP_UMEM_COMPLETION_RING,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -124,8 +124,10 @@ mod tests {
     #[test]
     fn test_mmap_offsets_distinct() {
         let offsets = [
-            XDP_PGOFF_RX_RING, XDP_PGOFF_TX_RING,
-            XDP_UMEM_PGOFF_FILL_RING, XDP_UMEM_PGOFF_COMPLETION_RING,
+            XDP_PGOFF_RX_RING,
+            XDP_PGOFF_TX_RING,
+            XDP_UMEM_PGOFF_FILL_RING,
+            XDP_UMEM_PGOFF_COMPLETION_RING,
         ];
         for i in 0..offsets.len() {
             for j in (i + 1)..offsets.len() {

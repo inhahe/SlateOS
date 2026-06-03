@@ -94,7 +94,12 @@ mod tests {
 
     #[test]
     fn test_security_modes_no_overlap() {
-        let modes = [CIFS_SEC_USER, CIFS_SEC_KRB5, CIFS_SEC_NTLMV2, CIFS_SEC_NTLMSSP];
+        let modes = [
+            CIFS_SEC_USER,
+            CIFS_SEC_KRB5,
+            CIFS_SEC_NTLMV2,
+            CIFS_SEC_NTLMSSP,
+        ];
         for i in 0..modes.len() {
             assert!(modes[i].is_power_of_two());
             for j in (i + 1)..modes.len() {
@@ -106,10 +111,16 @@ mod tests {
     #[test]
     fn test_mount_flags_no_overlap() {
         let flags = [
-            CIFS_MOUNT_POSIX, CIFS_MOUNT_NO_DFS, CIFS_MOUNT_RO,
-            CIFS_MOUNT_SUID, CIFS_MOUNT_SOFT, CIFS_MOUNT_SERVER_INUM,
-            CIFS_MOUNT_UNIX_EXT, CIFS_MOUNT_MAND_LOCK,
-            CIFS_MOUNT_SIGN, CIFS_MOUNT_SEAL,
+            CIFS_MOUNT_POSIX,
+            CIFS_MOUNT_NO_DFS,
+            CIFS_MOUNT_RO,
+            CIFS_MOUNT_SUID,
+            CIFS_MOUNT_SOFT,
+            CIFS_MOUNT_SERVER_INUM,
+            CIFS_MOUNT_UNIX_EXT,
+            CIFS_MOUNT_MAND_LOCK,
+            CIFS_MOUNT_SIGN,
+            CIFS_MOUNT_SEAL,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -122,8 +133,11 @@ mod tests {
     #[test]
     fn test_cache_modes_distinct() {
         let modes = [
-            CIFS_CACHE_NONE, CIFS_CACHE_STRICT,
-            CIFS_CACHE_LOOSE, CIFS_CACHE_RO, CIFS_CACHE_RW,
+            CIFS_CACHE_NONE,
+            CIFS_CACHE_STRICT,
+            CIFS_CACHE_LOOSE,
+            CIFS_CACHE_RO,
+            CIFS_CACHE_RW,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

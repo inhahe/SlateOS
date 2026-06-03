@@ -41,9 +41,8 @@ mod tests {
 
     #[test]
     fn test_capabilities_composable() {
-        let full = WL_SEAT_CAPABILITY_POINTER
-            | WL_SEAT_CAPABILITY_KEYBOARD
-            | WL_SEAT_CAPABILITY_TOUCH;
+        let full =
+            WL_SEAT_CAPABILITY_POINTER | WL_SEAT_CAPABILITY_KEYBOARD | WL_SEAT_CAPABILITY_TOUCH;
         assert_ne!(full & WL_SEAT_CAPABILITY_POINTER, 0);
         assert_ne!(full & WL_SEAT_CAPABILITY_KEYBOARD, 0);
         assert_ne!(full & WL_SEAT_CAPABILITY_TOUCH, 0);

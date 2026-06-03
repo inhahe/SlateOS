@@ -58,11 +58,7 @@ impl MbstateT {
 /// If `s` is null, resets the conversion state and returns 1 (the
 /// length of the NUL character in the C locale).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn c32rtomb(
-    s: *mut u8,
-    c32: Char32T,
-    _ps: *mut MbstateT,
-) -> usize {
+pub extern "C" fn c32rtomb(s: *mut u8, c32: Char32T, _ps: *mut MbstateT) -> usize {
     if s.is_null() {
         // Reset state; return length of NUL in multibyte encoding (1).
         return 1;
@@ -75,7 +71,9 @@ pub extern "C" fn c32rtomb(
     }
 
     // SAFETY: caller guarantees s has room for at least 1 byte.
-    unsafe { *s = c32 as u8; }
+    unsafe {
+        *s = c32 as u8;
+    }
     1
 }
 
@@ -122,7 +120,9 @@ pub extern "C" fn mbrtoc32(
 
     if !pc32.is_null() {
         // SAFETY: pc32 is non-null.
-        unsafe { *pc32 = byte as Char32T; }
+        unsafe {
+            *pc32 = Char32T::from(byte);
+        }
     }
 
     if byte == 0 {
@@ -141,11 +141,7 @@ pub extern "C" fn mbrtoc32(
 /// Same semantics as `c32rtomb` but for `char16_t`.  Surrogate pairs
 /// (0xD800–0xDFFF) are rejected with EILSEQ.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn c16rtomb(
-    s: *mut u8,
-    c16: Char16T,
-    _ps: *mut MbstateT,
-) -> usize {
+pub extern "C" fn c16rtomb(s: *mut u8, c16: Char16T, _ps: *mut MbstateT) -> usize {
     if s.is_null() {
         return 1;
     }
@@ -157,7 +153,9 @@ pub extern "C" fn c16rtomb(
     }
 
     // SAFETY: caller guarantees s has room.
-    unsafe { *s = c16 as u8; }
+    unsafe {
+        *s = c16 as u8;
+    }
     1
 }
 
@@ -191,10 +189,12 @@ pub extern "C" fn mbrtoc16(
     }
 
     if !pc16.is_null() {
-        unsafe { *pc16 = byte as Char16T; }
+        unsafe {
+            *pc16 = Char16T::from(byte);
+        }
     }
 
-    if byte == 0 { 0 } else { 1 }
+    usize::from(byte != 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +327,12 @@ mod tests {
 
     #[test]
     fn test_mbrtoc32_null_s_resets() {
-        let ret = mbrtoc32(core::ptr::null_mut(), core::ptr::null(), 0, core::ptr::null_mut());
+        let ret = mbrtoc32(
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            0,
+            core::ptr::null_mut(),
+        );
         assert_eq!(ret, 0);
     }
 
@@ -422,7 +427,12 @@ mod tests {
 
     #[test]
     fn test_mbrtoc16_null_s_resets() {
-        let ret = mbrtoc16(core::ptr::null_mut(), core::ptr::null(), 0, core::ptr::null_mut());
+        let ret = mbrtoc16(
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            0,
+            core::ptr::null_mut(),
+        );
         assert_eq!(ret, 0);
     }
 

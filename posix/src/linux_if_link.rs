@@ -154,10 +154,20 @@ mod tests {
     #[test]
     fn test_ifla_attrs_distinct() {
         let attrs = [
-            IFLA_UNSPEC, IFLA_ADDRESS, IFLA_BROADCAST, IFLA_IFNAME,
-            IFLA_MTU, IFLA_LINK, IFLA_QDISC, IFLA_STATS,
-            IFLA_MASTER, IFLA_OPERSTATE, IFLA_LINKINFO,
-            IFLA_STATS64, IFLA_AF_SPEC, IFLA_XDP,
+            IFLA_UNSPEC,
+            IFLA_ADDRESS,
+            IFLA_BROADCAST,
+            IFLA_IFNAME,
+            IFLA_MTU,
+            IFLA_LINK,
+            IFLA_QDISC,
+            IFLA_STATS,
+            IFLA_MASTER,
+            IFLA_OPERSTATE,
+            IFLA_LINKINFO,
+            IFLA_STATS64,
+            IFLA_AF_SPEC,
+            IFLA_XDP,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

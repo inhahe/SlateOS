@@ -89,8 +89,10 @@ mod tests {
     #[test]
     fn test_sources_distinct() {
         let sources = [
-            EM_SOURCE_CPUFREQ, EM_SOURCE_DT,
-            EM_SOURCE_PLATFORM, EM_SOURCE_USER,
+            EM_SOURCE_CPUFREQ,
+            EM_SOURCE_DT,
+            EM_SOURCE_PLATFORM,
+            EM_SOURCE_USER,
         ];
         for i in 0..sources.len() {
             for j in (i + 1)..sources.len() {

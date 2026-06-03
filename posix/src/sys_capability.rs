@@ -280,13 +280,13 @@ fn validate_cap_header(hdrp: *mut CapUserHeader) -> Result<usize, i32> {
     let version = unsafe { (*hdrp).version };
     match version {
         _LINUX_CAPABILITY_VERSION_1 => Ok(_LINUX_CAPABILITY_U32S_1),
-        _LINUX_CAPABILITY_VERSION_2 | _LINUX_CAPABILITY_VERSION_3 => {
-            Ok(_LINUX_CAPABILITY_U32S_3)
-        }
+        _LINUX_CAPABILITY_VERSION_2 | _LINUX_CAPABILITY_VERSION_3 => Ok(_LINUX_CAPABILITY_U32S_3),
         _ => {
             // Tell the caller which version we prefer.
             // SAFETY: hdrp non-null.
-            unsafe { (*hdrp).version = _LINUX_CAPABILITY_VERSION_3; }
+            unsafe {
+                (*hdrp).version = _LINUX_CAPABILITY_VERSION_3;
+            }
             Err(errno::EINVAL)
         }
     }
@@ -325,10 +325,7 @@ fn validate_cap_header(hdrp: *mut CapUserHeader) -> Result<usize, i32> {
 ///   credentials; our stub has no process model so we reject any
 ///   non-self request).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn capget(
-    hdrp: *mut CapUserHeader,
-    datap: *mut CapUserData,
-) -> i32 {
+pub extern "C" fn capget(hdrp: *mut CapUserHeader, datap: *mut CapUserData) -> i32 {
     let validation = validate_cap_header(hdrp);
 
     // Linux's short-circuit:
@@ -341,8 +338,8 @@ pub extern "C" fn capget(
     // the preferred version and we propagate the error.
     if datap.is_null() {
         return match validation {
-            Ok(_) => 0,                              // probe with known version
-            Err(e) if e == errno::EINVAL => 0,       // probe wrote preferred version
+            Ok(_) => 0,                        // probe with known version
+            Err(e) if e == errno::EINVAL => 0, // probe wrote preferred version
             Err(e) => {
                 errno::set_errno(e);
                 -1
@@ -376,7 +373,11 @@ pub extern "C" fn capget(
     // SAFETY: caller guarantees datap points to `tocopy` writable
     // CapUserData entries — 1 for V1 (low word only), 2 for V2/V3.
     unsafe {
-        *datap = CapUserData { effective: eff_lo, permitted: prm_lo, inheritable: inh_lo };
+        *datap = CapUserData {
+            effective: eff_lo,
+            permitted: prm_lo,
+            inheritable: inh_lo,
+        };
         if tocopy == _LINUX_CAPABILITY_U32S_3 {
             *datap.add(1) = CapUserData {
                 effective: eff_hi,
@@ -425,10 +426,7 @@ pub extern "C" fn capget(
 /// * `EFAULT` — `datap` is NULL (Linux: `copy_from_user` failure).
 /// * `EPERM`  — effective ⊄ permitted (POSIX/Linux invariant).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn capset(
-    hdrp: *mut CapUserHeader,
-    datap: *const CapUserData,
-) -> i32 {
+pub extern "C" fn capset(hdrp: *mut CapUserHeader, datap: *const CapUserData) -> i32 {
     let tocopy = match validate_cap_header(hdrp) {
         Ok(t) => t,
         Err(e) => {
@@ -462,7 +460,11 @@ pub extern "C" fn capset(
         } else {
             // V1 only carries the low 32 bits; high words default to 0
             // so any previously-set high bits are cleared on capset.
-            CapUserData { effective: 0, permitted: 0, inheritable: 0 }
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            }
         };
         (lo, hi)
     };
@@ -501,18 +503,43 @@ mod tests {
     #[test]
     fn test_cap_constants_in_range() {
         let caps = [
-            CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH,
-            CAP_FOWNER, CAP_FSETID, CAP_KILL, CAP_SETGID,
-            CAP_SETUID, CAP_SETPCAP, CAP_NET_BIND_SERVICE,
-            CAP_NET_ADMIN, CAP_NET_RAW, CAP_IPC_LOCK,
-            CAP_IPC_OWNER, CAP_SYS_MODULE, CAP_SYS_RAWIO,
-            CAP_SYS_CHROOT, CAP_SYS_PTRACE, CAP_SYS_PACCT,
-            CAP_SYS_ADMIN, CAP_SYS_BOOT, CAP_SYS_NICE,
-            CAP_SYS_RESOURCE, CAP_SYS_TIME, CAP_SYS_TTY_CONFIG,
-            CAP_MKNOD, CAP_AUDIT_WRITE, CAP_AUDIT_CONTROL,
-            CAP_SETFCAP, CAP_MAC_OVERRIDE, CAP_MAC_ADMIN,
-            CAP_SYSLOG, CAP_WAKE_ALARM, CAP_BLOCK_SUSPEND,
-            CAP_AUDIT_READ, CAP_PERFMON, CAP_BPF,
+            CAP_CHOWN,
+            CAP_DAC_OVERRIDE,
+            CAP_DAC_READ_SEARCH,
+            CAP_FOWNER,
+            CAP_FSETID,
+            CAP_KILL,
+            CAP_SETGID,
+            CAP_SETUID,
+            CAP_SETPCAP,
+            CAP_NET_BIND_SERVICE,
+            CAP_NET_ADMIN,
+            CAP_NET_RAW,
+            CAP_IPC_LOCK,
+            CAP_IPC_OWNER,
+            CAP_SYS_MODULE,
+            CAP_SYS_RAWIO,
+            CAP_SYS_CHROOT,
+            CAP_SYS_PTRACE,
+            CAP_SYS_PACCT,
+            CAP_SYS_ADMIN,
+            CAP_SYS_BOOT,
+            CAP_SYS_NICE,
+            CAP_SYS_RESOURCE,
+            CAP_SYS_TIME,
+            CAP_SYS_TTY_CONFIG,
+            CAP_MKNOD,
+            CAP_AUDIT_WRITE,
+            CAP_AUDIT_CONTROL,
+            CAP_SETFCAP,
+            CAP_MAC_OVERRIDE,
+            CAP_MAC_ADMIN,
+            CAP_SYSLOG,
+            CAP_WAKE_ALARM,
+            CAP_BLOCK_SUSPEND,
+            CAP_AUDIT_READ,
+            CAP_PERFMON,
+            CAP_BPF,
             CAP_CHECKPOINT_RESTORE,
         ];
         for &c in &caps {
@@ -523,26 +550,48 @@ mod tests {
     #[test]
     fn test_cap_constants_distinct() {
         let caps = [
-            CAP_CHOWN, CAP_DAC_OVERRIDE, CAP_DAC_READ_SEARCH,
-            CAP_FOWNER, CAP_FSETID, CAP_KILL, CAP_SETGID,
-            CAP_SETUID, CAP_SETPCAP, CAP_NET_BIND_SERVICE,
-            CAP_NET_ADMIN, CAP_NET_RAW, CAP_IPC_LOCK,
-            CAP_IPC_OWNER, CAP_SYS_MODULE, CAP_SYS_RAWIO,
-            CAP_SYS_CHROOT, CAP_SYS_PTRACE, CAP_SYS_PACCT,
-            CAP_SYS_ADMIN, CAP_SYS_BOOT, CAP_SYS_NICE,
-            CAP_SYS_RESOURCE, CAP_SYS_TIME, CAP_SYS_TTY_CONFIG,
-            CAP_MKNOD, CAP_AUDIT_WRITE, CAP_AUDIT_CONTROL,
-            CAP_SETFCAP, CAP_MAC_OVERRIDE, CAP_MAC_ADMIN,
-            CAP_SYSLOG, CAP_WAKE_ALARM, CAP_BLOCK_SUSPEND,
-            CAP_AUDIT_READ, CAP_PERFMON, CAP_BPF,
+            CAP_CHOWN,
+            CAP_DAC_OVERRIDE,
+            CAP_DAC_READ_SEARCH,
+            CAP_FOWNER,
+            CAP_FSETID,
+            CAP_KILL,
+            CAP_SETGID,
+            CAP_SETUID,
+            CAP_SETPCAP,
+            CAP_NET_BIND_SERVICE,
+            CAP_NET_ADMIN,
+            CAP_NET_RAW,
+            CAP_IPC_LOCK,
+            CAP_IPC_OWNER,
+            CAP_SYS_MODULE,
+            CAP_SYS_RAWIO,
+            CAP_SYS_CHROOT,
+            CAP_SYS_PTRACE,
+            CAP_SYS_PACCT,
+            CAP_SYS_ADMIN,
+            CAP_SYS_BOOT,
+            CAP_SYS_NICE,
+            CAP_SYS_RESOURCE,
+            CAP_SYS_TIME,
+            CAP_SYS_TTY_CONFIG,
+            CAP_MKNOD,
+            CAP_AUDIT_WRITE,
+            CAP_AUDIT_CONTROL,
+            CAP_SETFCAP,
+            CAP_MAC_OVERRIDE,
+            CAP_MAC_ADMIN,
+            CAP_SYSLOG,
+            CAP_WAKE_ALARM,
+            CAP_BLOCK_SUSPEND,
+            CAP_AUDIT_READ,
+            CAP_PERFMON,
+            CAP_BPF,
             CAP_CHECKPOINT_RESTORE,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
-                assert_ne!(
-                    caps[i], caps[j],
-                    "CAP constants must be distinct"
-                );
+                assert_ne!(caps[i], caps[j], "CAP constants must be distinct");
             }
         }
     }
@@ -570,7 +619,11 @@ mod tests {
 
     #[test]
     fn test_capget_null_header_efault() {
-        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capget(core::ptr::null_mut(), data.as_mut_ptr());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -578,7 +631,11 @@ mod tests {
 
     #[test]
     fn test_capset_null_header_efault() {
-        let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capset(core::ptr::null_mut(), data.as_ptr());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -586,7 +643,10 @@ mod tests {
 
     #[test]
     fn test_capset_null_data_efault() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
         let ret = capset(&mut hdr, core::ptr::null());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -594,8 +654,15 @@ mod tests {
 
     #[test]
     fn test_capget_version_mismatch_rewrites_header() {
-        let mut hdr = CapUserHeader { version: 0xdeadbeef, pid: 0 };
-        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut hdr = CapUserHeader {
+            version: 0xdeadbeef,
+            pid: 0,
+        };
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capget(&mut hdr, data.as_mut_ptr());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -606,7 +673,11 @@ mod tests {
     #[test]
     fn test_capset_version_mismatch_rewrites_header() {
         let mut hdr = CapUserHeader { version: 1, pid: 0 };
-        let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capset(&mut hdr, data.as_ptr());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -615,8 +686,15 @@ mod tests {
 
     #[test]
     fn test_capget_nonzero_pid_eperm() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 42 };
-        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 42,
+        };
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capget(&mut hdr, data.as_mut_ptr());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EPERM);
@@ -624,8 +702,15 @@ mod tests {
 
     #[test]
     fn test_capset_nonzero_pid_eperm() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 99 };
-        let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 99,
+        };
+        let data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capset(&mut hdr, data.as_ptr());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EPERM);
@@ -636,7 +721,10 @@ mod tests {
         // A null datap is a valid "probe" — Linux uses it to discover
         // the supported version. Returns 0; header is left intact
         // since it already matched our preferred version.
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
         let ret = capget(&mut hdr, core::ptr::null_mut());
         assert_eq!(ret, 0);
         assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_3);
@@ -645,8 +733,15 @@ mod tests {
     #[test]
     fn test_capget_returns_defaults() {
         reset_caps();
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
-        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capget(&mut hdr, data.as_mut_ptr());
         assert_eq!(ret, 0);
         assert_eq!(data[0].effective, DEFAULT_CAPS_LOW);
@@ -661,19 +756,34 @@ mod tests {
     #[test]
     fn test_capset_then_capget_roundtrip() {
         reset_caps();
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
         // Drop everything except CAP_NET_BIND_SERVICE (bit 10) in
         // effective, keep all in permitted.
         let want_eff_lo: u32 = 1u32 << CAP_NET_BIND_SERVICE;
         let want_inh_lo: u32 = 1u32 << CAP_CHOWN;
         let set_data = [
-            CapUserData { effective: want_eff_lo, permitted: DEFAULT_CAPS_LOW, inheritable: want_inh_lo },
-            CapUserData { effective: 0,           permitted: DEFAULT_CAPS_HIGH, inheritable: 0 },
+            CapUserData {
+                effective: want_eff_lo,
+                permitted: DEFAULT_CAPS_LOW,
+                inheritable: want_inh_lo,
+            },
+            CapUserData {
+                effective: 0,
+                permitted: DEFAULT_CAPS_HIGH,
+                inheritable: 0,
+            },
         ];
         let ret = capset(&mut hdr, set_data.as_ptr());
         assert_eq!(ret, 0);
 
-        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capget(&mut hdr, data.as_mut_ptr());
         assert_eq!(ret, 0);
         assert_eq!(data[0].effective, want_eff_lo);
@@ -688,11 +798,22 @@ mod tests {
     #[test]
     fn test_capset_rejects_effective_not_subset_of_permitted() {
         reset_caps();
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
         // Effective claims CAP_KILL (bit 5) but permitted does not.
         let bad = [
-            CapUserData { effective: 1u32 << CAP_KILL, permitted: 0, inheritable: 0 },
-            CapUserData { effective: 0, permitted: 0, inheritable: 0 },
+            CapUserData {
+                effective: 1u32 << CAP_KILL,
+                permitted: 0,
+                inheritable: 0,
+            },
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
         ];
         let ret = capset(&mut hdr, bad.as_ptr());
         assert_eq!(ret, -1);
@@ -703,12 +824,23 @@ mod tests {
     #[test]
     fn test_capset_rejects_effective_not_subset_high_word() {
         reset_caps();
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
         // High-word violation: claim CAP_BPF (bit 39, → high bit 7) in
         // effective without permitted.
         let bad = [
-            CapUserData { effective: 0, permitted: 0, inheritable: 0 },
-            CapUserData { effective: 1u32 << 7, permitted: 0, inheritable: 0 },
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
+            CapUserData {
+                effective: 1u32 << 7,
+                permitted: 0,
+                inheritable: 0,
+            },
         ];
         let ret = capset(&mut hdr, bad.as_ptr());
         assert_eq!(ret, -1);
@@ -740,11 +872,22 @@ mod tests {
     #[test]
     fn test_has_capability_follows_capset() {
         reset_caps();
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
         // Drop everything in effective.
         let zero = [
-            CapUserData { effective: 0, permitted: DEFAULT_CAPS_LOW, inheritable: 0 },
-            CapUserData { effective: 0, permitted: DEFAULT_CAPS_HIGH, inheritable: 0 },
+            CapUserData {
+                effective: 0,
+                permitted: DEFAULT_CAPS_LOW,
+                inheritable: 0,
+            },
+            CapUserData {
+                effective: 0,
+                permitted: DEFAULT_CAPS_HIGH,
+                inheritable: 0,
+            },
         ];
         let ret = capset(&mut hdr, zero.as_ptr());
         assert_eq!(ret, 0);
@@ -809,8 +952,10 @@ mod tests {
         ];
         for i in 0..versions.len() {
             for j in (i + 1)..versions.len() {
-                assert_ne!(versions[i], versions[j],
-                    "capability versions must be distinct");
+                assert_ne!(
+                    versions[i], versions[j],
+                    "capability versions must be distinct"
+                );
             }
         }
     }
@@ -820,10 +965,17 @@ mod tests {
     #[test]
     fn test_phase132_capget_v1_writes_only_low_slot() {
         reset_caps();
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_1, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_1,
+            pid: 0,
+        };
         // Sentinel high slot — must remain untouched after V1 capget.
         let mut data = [
-            CapUserData { effective: 0, permitted: 0, inheritable: 0 },
+            CapUserData {
+                effective: 0,
+                permitted: 0,
+                inheritable: 0,
+            },
             CapUserData {
                 effective: 0xDEAD_BEEF,
                 permitted: 0xCAFE_BABE,
@@ -850,8 +1002,15 @@ mod tests {
     #[test]
     fn test_phase132_capget_v2_writes_both_slots() {
         reset_caps();
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_2, pid: 0 };
-        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_2,
+            pid: 0,
+        };
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capget(&mut hdr, data.as_mut_ptr());
         assert_eq!(ret, 0);
         // Both slots populated — V2 is wire-compatible with V3.
@@ -882,7 +1041,10 @@ mod tests {
     #[test]
     fn test_phase132_capget_probe_v1_returns_zero() {
         // Probe with a known version still returns 0 (no rewrite needed).
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_1, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_1,
+            pid: 0,
+        };
         let ret = capget(&mut hdr, core::ptr::null_mut());
         assert_eq!(ret, 0);
         assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_1);
@@ -890,7 +1052,10 @@ mod tests {
 
     #[test]
     fn test_phase132_capget_probe_v2_returns_zero() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_2, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_2,
+            pid: 0,
+        };
         let ret = capget(&mut hdr, core::ptr::null_mut());
         assert_eq!(ret, 0);
         assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_2);
@@ -916,8 +1081,15 @@ mod tests {
         // Real call (non-NULL datap) with unknown version: EINVAL with
         // preferred version written.  This is the post-probe regression
         // path — must continue to work.
-        let mut hdr = CapUserHeader { version: 0x12345678, pid: 0 };
-        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut hdr = CapUserHeader {
+            version: 0x12345678,
+            pid: 0,
+        };
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capget(&mut hdr, data.as_mut_ptr());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -929,7 +1101,10 @@ mod tests {
     #[test]
     fn test_phase132_capset_v2_accepted() {
         reset_caps();
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_2, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_2,
+            pid: 0,
+        };
         // V2 is wire-compatible with V3 — set caps and verify they took.
         let want_eff: u32 = 1u32 << CAP_KILL;
         let data = [
@@ -938,7 +1113,11 @@ mod tests {
                 permitted: DEFAULT_CAPS_LOW,
                 inheritable: 0,
             },
-            CapUserData { effective: 0, permitted: DEFAULT_CAPS_HIGH, inheritable: 0 },
+            CapUserData {
+                effective: 0,
+                permitted: DEFAULT_CAPS_HIGH,
+                inheritable: 0,
+            },
         ];
         let ret = capset(&mut hdr, data.as_ptr());
         assert_eq!(ret, 0);
@@ -959,14 +1138,15 @@ mod tests {
         let (_, hi_before) = current_caps_effective();
         assert_ne!(hi_before, 0, "DEFAULT_CAPS_HIGH should be non-zero");
 
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_1, pid: 0 };
-        let data = [
-            CapUserData {
-                effective: 1u32 << CAP_KILL,
-                permitted: DEFAULT_CAPS_LOW,
-                inheritable: 0,
-            },
-        ];
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_1,
+            pid: 0,
+        };
+        let data = [CapUserData {
+            effective: 1u32 << CAP_KILL,
+            permitted: DEFAULT_CAPS_LOW,
+            inheritable: 0,
+        }];
         let ret = capset(&mut hdr, data.as_ptr());
         assert_eq!(ret, 0);
         let (lo, hi) = current_caps_effective();
@@ -982,7 +1162,11 @@ mod tests {
     fn test_phase132_capset_efault_beats_einval_when_header_null() {
         // NULL header → EFAULT before any version check.
         errno::set_errno(0);
-        let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capset(core::ptr::null_mut(), data.as_ptr());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EFAULT);
@@ -992,8 +1176,15 @@ mod tests {
     fn test_phase132_capset_einval_beats_eperm_for_pid() {
         // Unknown version with pid != 0: EINVAL (version) wins over EPERM
         // (pid) — version is checked first in cap_validate_magic.
-        let mut hdr = CapUserHeader { version: 0xBADCAFE, pid: 42 };
-        let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut hdr = CapUserHeader {
+            version: 0xBADCAFE,
+            pid: 42,
+        };
+        let data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capset(&mut hdr, data.as_ptr());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EINVAL);
@@ -1015,7 +1206,11 @@ mod tests {
 
         // 2. Real call with the discovered version.  Expect populated
         //    data and ret 0.
-        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let r2 = capget(&mut hdr, data.as_mut_ptr());
         assert_eq!(r2, 0);
         assert_eq!(data[0].effective, DEFAULT_CAPS_LOW);
@@ -1032,7 +1227,10 @@ mod tests {
         // immediately probes (NULL datap), Linux returns 0 and writes
         // the preferred version even if the garbage happened to be a
         // valid version.  Test with a deliberately weird value.
-        let mut hdr = CapUserHeader { version: 0x5A5A_5A5A, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: 0x5A5A_5A5A,
+            pid: 0,
+        };
         let ret = capget(&mut hdr, core::ptr::null_mut());
         assert_eq!(ret, 0);
         assert_eq!(hdr.version, _LINUX_CAPABILITY_VERSION_3);
@@ -1044,7 +1242,10 @@ mod tests {
     fn test_phase132_recovery_after_unknown_version_probe() {
         reset_caps();
         // 1. Probe with garbage version succeeds.
-        let mut hdr = CapUserHeader { version: 0xBAD, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: 0xBAD,
+            pid: 0,
+        };
         errno::set_errno(0);
         let r1 = capget(&mut hdr, core::ptr::null_mut());
         assert_eq!(r1, 0);
@@ -1054,7 +1255,11 @@ mod tests {
 
         // 2. The very next real capget with the now-correct version must
         //    reach the data-write path, not stale EINVAL.
-        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let r2 = capget(&mut hdr, data.as_mut_ptr());
         assert_eq!(r2, 0);
         assert_eq!(data[0].effective, DEFAULT_CAPS_LOW);
@@ -1095,8 +1300,15 @@ mod tests {
     /// a fixed anchor so any future re-ordering shows up here too.
     #[test]
     fn test_phase158_capset_bad_pid_alone_eperm() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 1 };
-        let data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 1,
+        };
+        let data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         errno::set_errno(0);
         let ret = capset(&mut hdr, data.as_ptr());
         assert_eq!(ret, -1);
@@ -1108,7 +1320,10 @@ mod tests {
     /// is self-contained.
     #[test]
     fn test_phase158_capset_null_data_alone_efault() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
         errno::set_errno(0);
         let ret = capset(&mut hdr, core::ptr::null());
         assert_eq!(ret, -1);
@@ -1122,7 +1337,10 @@ mod tests {
     /// first.  Post-fix matches Linux's `SYSCALL_DEFINE2(capset)` order.
     #[test]
     fn test_phase158_capset_bad_pid_null_data_yields_eperm() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 99 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 99,
+        };
         errno::set_errno(0);
         let ret = capset(&mut hdr, core::ptr::null());
         assert_eq!(ret, -1);
@@ -1136,7 +1354,10 @@ mod tests {
     /// pid<0 into EINVAL later, but only after the data check).
     #[test]
     fn test_phase158_capset_negative_pid_null_data_yields_eperm() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: -7 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: -7,
+        };
         errno::set_errno(0);
         let ret = capset(&mut hdr, core::ptr::null());
         assert_eq!(ret, -1);
@@ -1157,7 +1378,10 @@ mod tests {
     /// `validate_cap_header` runs first.
     #[test]
     fn test_phase158_capset_einval_beats_eperm_and_efault() {
-        let mut hdr = CapUserHeader { version: 0xDEAD_BEEF, pid: 13 };
+        let mut hdr = CapUserHeader {
+            version: 0xDEAD_BEEF,
+            pid: 13,
+        };
         errno::set_errno(0);
         let ret = capset(&mut hdr, core::ptr::null());
         assert_eq!(ret, -1);
@@ -1193,7 +1417,10 @@ mod tests {
     /// check.  Demonstrates the ordering holds for the legacy ABI too.
     #[test]
     fn test_phase158_capset_v1_bad_pid_null_data_eperm() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_1, pid: 5 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_1,
+            pid: 5,
+        };
         let ret = capset(&mut hdr, core::ptr::null());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EPERM);
@@ -1202,7 +1429,10 @@ mod tests {
     /// V2 caller likewise.
     #[test]
     fn test_phase158_capset_v2_bad_pid_null_data_eperm() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_2, pid: 5 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_2,
+            pid: 5,
+        };
         let ret = capset(&mut hdr, core::ptr::null());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EPERM);
@@ -1219,7 +1449,10 @@ mod tests {
         let (before_lo, before_hi) = current_caps_effective();
 
         // Phase-158 failure path: bad pid + NULL data.
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 7 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 7,
+        };
         let _ = capset(&mut hdr, core::ptr::null());
 
         let (after_lo, after_hi) = current_caps_effective();
@@ -1236,7 +1469,10 @@ mod tests {
         reset_caps();
         let (before_lo, before_hi) = current_caps_effective();
 
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 0 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 0,
+        };
         let _ = capset(&mut hdr, core::ptr::null());
 
         let (after_lo, after_hi) = current_caps_effective();
@@ -1252,7 +1488,10 @@ mod tests {
     #[test]
     fn test_phase158_capset_eperm_loop_is_idempotent() {
         reset_caps();
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 42 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 42,
+        };
         for _ in 0..200 {
             errno::set_errno(0);
             let r = capset(&mut hdr, core::ptr::null());
@@ -1272,7 +1511,10 @@ mod tests {
     /// in place — if anyone restores the old order this test trips.
     #[test]
     fn test_capset_bad_pid_null_data_no_longer_returns_efault_phase158() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 1 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 1,
+        };
         let ret = capset(&mut hdr, core::ptr::null());
         assert_eq!(ret, -1);
         // Phase 158 reversed this: it used to be EFAULT, now EPERM.
@@ -1288,7 +1530,10 @@ mod tests {
     /// read until after the probe shortcut).
     #[test]
     fn test_phase158_capget_null_datap_still_probe_even_with_bad_pid() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 77 };
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 77,
+        };
         errno::set_errno(0);
         let ret = capget(&mut hdr, core::ptr::null_mut());
         // capget's probe short-circuit (datap NULL) returns 0 without
@@ -1300,8 +1545,15 @@ mod tests {
     /// (unchanged by Phase 158).
     #[test]
     fn test_phase158_capget_bad_pid_nonnull_data_still_eperm() {
-        let mut hdr = CapUserHeader { version: _LINUX_CAPABILITY_VERSION_3, pid: 5 };
-        let mut data = [CapUserData { effective: 0, permitted: 0, inheritable: 0 }; 2];
+        let mut hdr = CapUserHeader {
+            version: _LINUX_CAPABILITY_VERSION_3,
+            pid: 5,
+        };
+        let mut data = [CapUserData {
+            effective: 0,
+            permitted: 0,
+            inheritable: 0,
+        }; 2];
         let ret = capget(&mut hdr, data.as_mut_ptr());
         assert_eq!(ret, -1);
         assert_eq!(errno::get_errno(), errno::EPERM);

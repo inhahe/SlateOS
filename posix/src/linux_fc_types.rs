@@ -115,11 +115,16 @@ mod tests {
     #[test]
     fn test_rctl_distinct() {
         let rctls: [u8; 10] = [
-            FC_RCTL_DD_UNCAT, FC_RCTL_DD_SOL_DATA,
-            FC_RCTL_DD_UNSOL_CTL, FC_RCTL_DD_SOL_CTL,
-            FC_RCTL_DD_UNSOL_DATA, FC_RCTL_DD_DATA_DESC,
-            FC_RCTL_DD_UNSOL_CMD, FC_RCTL_DD_CMD_STATUS,
-            FC_RCTL_ELS_REQ, FC_RCTL_ELS_REP,
+            FC_RCTL_DD_UNCAT,
+            FC_RCTL_DD_SOL_DATA,
+            FC_RCTL_DD_UNSOL_CTL,
+            FC_RCTL_DD_SOL_CTL,
+            FC_RCTL_DD_UNSOL_DATA,
+            FC_RCTL_DD_DATA_DESC,
+            FC_RCTL_DD_UNSOL_CMD,
+            FC_RCTL_DD_CMD_STATUS,
+            FC_RCTL_ELS_REQ,
+            FC_RCTL_ELS_REP,
         ];
         for i in 0..rctls.len() {
             for j in (i + 1)..rctls.len() {
@@ -131,8 +136,11 @@ mod tests {
     #[test]
     fn test_type_codes_distinct() {
         let types: [u8; 5] = [
-            FC_TYPE_BLS, FC_TYPE_ELS, FC_TYPE_FCP,
-            FC_TYPE_CT, FC_TYPE_IP,
+            FC_TYPE_BLS,
+            FC_TYPE_ELS,
+            FC_TYPE_FCP,
+            FC_TYPE_CT,
+            FC_TYPE_IP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -144,9 +152,12 @@ mod tests {
     #[test]
     fn test_port_types_distinct() {
         let types = [
-            FC_PORTTYPE_UNKNOWN, FC_PORTTYPE_OTHER,
-            FC_PORTTYPE_NPORT, FC_PORTTYPE_NLPORT,
-            FC_PORTTYPE_LPORT, FC_PORTTYPE_PTP,
+            FC_PORTTYPE_UNKNOWN,
+            FC_PORTTYPE_OTHER,
+            FC_PORTTYPE_NPORT,
+            FC_PORTTYPE_NLPORT,
+            FC_PORTTYPE_LPORT,
+            FC_PORTTYPE_PTP,
             FC_PORTTYPE_NPIV,
         ];
         for i in 0..types.len() {
@@ -159,12 +170,18 @@ mod tests {
     #[test]
     fn test_port_states_distinct() {
         let states = [
-            FC_PORTSTATE_UNKNOWN, FC_PORTSTATE_NOTPRESENT,
-            FC_PORTSTATE_ONLINE, FC_PORTSTATE_OFFLINE,
-            FC_PORTSTATE_BLOCKED, FC_PORTSTATE_BYPASSED,
-            FC_PORTSTATE_DIAGNOSTICS, FC_PORTSTATE_LINKDOWN,
-            FC_PORTSTATE_ERROR, FC_PORTSTATE_LOOPBACK,
-            FC_PORTSTATE_DELETED, FC_PORTSTATE_MARGINAL,
+            FC_PORTSTATE_UNKNOWN,
+            FC_PORTSTATE_NOTPRESENT,
+            FC_PORTSTATE_ONLINE,
+            FC_PORTSTATE_OFFLINE,
+            FC_PORTSTATE_BLOCKED,
+            FC_PORTSTATE_BYPASSED,
+            FC_PORTSTATE_DIAGNOSTICS,
+            FC_PORTSTATE_LINKDOWN,
+            FC_PORTSTATE_ERROR,
+            FC_PORTSTATE_LOOPBACK,
+            FC_PORTSTATE_DELETED,
+            FC_PORTSTATE_MARGINAL,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -175,9 +192,7 @@ mod tests {
 
     #[test]
     fn test_well_known_addrs_distinct() {
-        let addrs = [
-            FC_FID_FLOGI, FC_FID_FCTRL, FC_FID_BCAST, FC_FID_DIR_SERV,
-        ];
+        let addrs = [FC_FID_FLOGI, FC_FID_FCTRL, FC_FID_BCAST, FC_FID_DIR_SERV];
         for i in 0..addrs.len() {
             for j in (i + 1)..addrs.len() {
                 assert_ne!(addrs[i], addrs[j]);

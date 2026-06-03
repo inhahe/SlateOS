@@ -50,10 +50,21 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let cmds = [
-            BLKGETSIZE, BLKFLSBUF, BLKRASET, BLKRAGET,
-            BLKROSET, BLKROGET, BLKRRPART, BLKGETSIZE64,
-            BLKSSZGET, BLKPBSZGET, BLKALIGNOFF,
-            BLKIOMIN, BLKIOOPT, BLKDISCARD, BLKZEROOUT,
+            BLKGETSIZE,
+            BLKFLSBUF,
+            BLKRASET,
+            BLKRAGET,
+            BLKROSET,
+            BLKROGET,
+            BLKRRPART,
+            BLKGETSIZE64,
+            BLKSSZGET,
+            BLKPBSZGET,
+            BLKALIGNOFF,
+            BLKIOMIN,
+            BLKIOOPT,
+            BLKDISCARD,
+            BLKZEROOUT,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

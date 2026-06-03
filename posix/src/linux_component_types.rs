@@ -65,8 +65,10 @@ mod tests {
     #[test]
     fn test_match_types_distinct() {
         let types = [
-            COMPONENT_MATCH_DEVICE, COMPONENT_MATCH_OF_NODE,
-            COMPONENT_MATCH_ACPI, COMPONENT_MATCH_CUSTOM,
+            COMPONENT_MATCH_DEVICE,
+            COMPONENT_MATCH_OF_NODE,
+            COMPONENT_MATCH_ACPI,
+            COMPONENT_MATCH_CUSTOM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -78,7 +80,8 @@ mod tests {
     #[test]
     fn test_component_states_distinct() {
         let states = [
-            COMPONENT_STATE_REGISTERED, COMPONENT_STATE_BOUND,
+            COMPONENT_STATE_REGISTERED,
+            COMPONENT_STATE_BOUND,
             COMPONENT_STATE_UNBINDING,
         ];
         for i in 0..states.len() {
@@ -91,8 +94,10 @@ mod tests {
     #[test]
     fn test_aggregate_states_distinct() {
         let states = [
-            AGGREGATE_STATE_WAITING, AGGREGATE_STATE_BINDING,
-            AGGREGATE_STATE_BOUND, AGGREGATE_STATE_UNBINDING,
+            AGGREGATE_STATE_WAITING,
+            AGGREGATE_STATE_BINDING,
+            AGGREGATE_STATE_BOUND,
+            AGGREGATE_STATE_UNBINDING,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

@@ -66,8 +66,10 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            VLAN_FLAG_REORDER_HDR, VLAN_FLAG_GVRP,
-            VLAN_FLAG_LOOSE_BINDING, VLAN_FLAG_MVRP,
+            VLAN_FLAG_REORDER_HDR,
+            VLAN_FLAG_GVRP,
+            VLAN_FLAG_LOOSE_BINDING,
+            VLAN_FLAG_MVRP,
             VLAN_FLAG_BRIDGE_BINDING,
         ];
         for i in 0..flags.len() {

@@ -140,8 +140,10 @@ mod tests {
     #[test]
     fn test_fs_ioc_distinct() {
         let iocs = [
-            FS_IOC_GETFLAGS, FS_IOC_SETFLAGS,
-            FS_IOC_GETVERSION, FS_IOC_SETVERSION,
+            FS_IOC_GETFLAGS,
+            FS_IOC_SETFLAGS,
+            FS_IOC_GETVERSION,
+            FS_IOC_SETVERSION,
             FS_IOC_FIEMAP,
         ];
         for i in 0..iocs.len() {
@@ -154,15 +156,20 @@ mod tests {
     #[test]
     fn test_fs_flags_powers_of_two() {
         let flags = [
-            FS_SECRM_FL, FS_UNRM_FL, FS_COMPR_FL, FS_SYNC_FL,
-            FS_IMMUTABLE_FL, FS_APPEND_FL, FS_NODUMP_FL, FS_NOATIME_FL,
-            FS_DIRSYNC_FL, FS_TOPDIR_FL, FS_EXTENT_FL,
+            FS_SECRM_FL,
+            FS_UNRM_FL,
+            FS_COMPR_FL,
+            FS_SYNC_FL,
+            FS_IMMUTABLE_FL,
+            FS_APPEND_FL,
+            FS_NODUMP_FL,
+            FS_NOATIME_FL,
+            FS_DIRSYNC_FL,
+            FS_TOPDIR_FL,
+            FS_EXTENT_FL,
         ];
         for &f in &flags {
-            assert!(
-                f.count_ones() == 1,
-                "FS flag 0x{f:X} should be power of 2"
-            );
+            assert!(f.count_ones() == 1, "FS flag 0x{f:X} should be power of 2");
         }
     }
 
@@ -174,9 +181,17 @@ mod tests {
     #[test]
     fn test_blk_ioctls_distinct() {
         let iocs = [
-            BLKROSET, BLKROGET, BLKRRPART, BLKGETSIZE,
-            BLKFLSBUF, BLKRASET, BLKRAGET, BLKGETSIZE64,
-            BLKSSZGET, BLKBSZGET, BLKBSZSET,
+            BLKROSET,
+            BLKROGET,
+            BLKRRPART,
+            BLKGETSIZE,
+            BLKFLSBUF,
+            BLKRASET,
+            BLKRAGET,
+            BLKGETSIZE64,
+            BLKSSZGET,
+            BLKBSZGET,
+            BLKBSZSET,
         ];
         for i in 0..iocs.len() {
             for j in (i + 1)..iocs.len() {

@@ -103,10 +103,14 @@ mod tests {
     #[test]
     fn test_notify_types_distinct() {
         let types = [
-            ACPI_NOTIFY_BUS_CHECK, ACPI_NOTIFY_DEVICE_CHECK,
-            ACPI_NOTIFY_DEVICE_WAKE, ACPI_NOTIFY_EJECT_REQUEST,
-            ACPI_NOTIFY_DEVICE_CHECK_LIGHT, ACPI_NOTIFY_FREQUENCY_MISMATCH,
-            ACPI_NOTIFY_BUS_MODE_MISMATCH, ACPI_NOTIFY_POWER_FAULT,
+            ACPI_NOTIFY_BUS_CHECK,
+            ACPI_NOTIFY_DEVICE_CHECK,
+            ACPI_NOTIFY_DEVICE_WAKE,
+            ACPI_NOTIFY_EJECT_REQUEST,
+            ACPI_NOTIFY_DEVICE_CHECK_LIGHT,
+            ACPI_NOTIFY_FREQUENCY_MISMATCH,
+            ACPI_NOTIFY_BUS_MODE_MISMATCH,
+            ACPI_NOTIFY_POWER_FAULT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

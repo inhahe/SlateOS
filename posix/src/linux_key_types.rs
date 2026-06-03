@@ -84,8 +84,11 @@ mod tests {
     #[test]
     fn test_key_states_distinct() {
         let states = [
-            KEY_IS_POSITIVE, KEY_IS_NEGATIVE, KEY_IS_EXPIRED,
-            KEY_IS_REVOKED, KEY_IS_UNINSTANTIATED,
+            KEY_IS_POSITIVE,
+            KEY_IS_NEGATIVE,
+            KEY_IS_EXPIRED,
+            KEY_IS_REVOKED,
+            KEY_IS_UNINSTANTIATED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -97,9 +100,14 @@ mod tests {
     #[test]
     fn test_key_flags_no_overlap() {
         let flags = [
-            KEY_FLAG_INSTANTIATED, KEY_FLAG_DEAD, KEY_FLAG_REVOKED,
-            KEY_FLAG_NEGATIVE, KEY_FLAG_ROOT_CAN_CLEAR,
-            KEY_FLAG_INVALIDATED, KEY_FLAG_BUILTIN, KEY_FLAG_KEEP,
+            KEY_FLAG_INSTANTIATED,
+            KEY_FLAG_DEAD,
+            KEY_FLAG_REVOKED,
+            KEY_FLAG_NEGATIVE,
+            KEY_FLAG_ROOT_CAN_CLEAR,
+            KEY_FLAG_INVALIDATED,
+            KEY_FLAG_BUILTIN,
+            KEY_FLAG_KEEP,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -112,9 +120,14 @@ mod tests {
     #[test]
     fn test_key_types_distinct() {
         let types = [
-            KEY_TYPE_USER, KEY_TYPE_LOGON, KEY_TYPE_KEYRING,
-            KEY_TYPE_BIG_KEY, KEY_TYPE_ENCRYPTED, KEY_TYPE_TRUSTED,
-            KEY_TYPE_ASYMMETRIC, KEY_TYPE_DNS_RESOLVER,
+            KEY_TYPE_USER,
+            KEY_TYPE_LOGON,
+            KEY_TYPE_KEYRING,
+            KEY_TYPE_BIG_KEY,
+            KEY_TYPE_ENCRYPTED,
+            KEY_TYPE_TRUSTED,
+            KEY_TYPE_ASYMMETRIC,
+            KEY_TYPE_DNS_RESOLVER,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

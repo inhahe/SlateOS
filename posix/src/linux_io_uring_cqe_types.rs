@@ -68,8 +68,10 @@ mod tests {
     #[test]
     fn test_cqe_flags_no_overlap() {
         let flags = [
-            IORING_CQE_F_BUFFER, IORING_CQE_F_MORE,
-            IORING_CQE_F_SOCK_NONEMPTY, IORING_CQE_F_NOTIF,
+            IORING_CQE_F_BUFFER,
+            IORING_CQE_F_MORE,
+            IORING_CQE_F_SOCK_NONEMPTY,
+            IORING_CQE_F_NOTIF,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -99,12 +99,18 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let cmds = [
-            SIOCX25GSUBSCRIP, SIOCX25SSUBSCRIP,
-            SIOCX25GFACILITIES, SIOCX25SFACILITIES,
-            SIOCX25GCALLUSERDATA, SIOCX25SCALLUSERDATA,
-            SIOCX25GCAUSEDIAG, SIOCX25SCUDMATCHLEN,
-            SIOCX25CALLACCPTAPPRV, SIOCX25SENDCALLACCPT,
-            SIOCX25GDTEFACILITIES, SIOCX25SDTEFACILITIES,
+            SIOCX25GSUBSCRIP,
+            SIOCX25SSUBSCRIP,
+            SIOCX25GFACILITIES,
+            SIOCX25SFACILITIES,
+            SIOCX25GCALLUSERDATA,
+            SIOCX25SCALLUSERDATA,
+            SIOCX25GCAUSEDIAG,
+            SIOCX25SCUDMATCHLEN,
+            SIOCX25CALLACCPTAPPRV,
+            SIOCX25SENDCALLACCPT,
+            SIOCX25GDTEFACILITIES,
+            SIOCX25SDTEFACILITIES,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -116,9 +122,12 @@ mod tests {
     #[test]
     fn test_facilities_distinct() {
         let facs = [
-            X25_FAC_REVERSE, X25_FAC_THROUGHPUT,
-            X25_FAC_PACKET_SIZE, X25_FAC_WINDOW_SIZE,
-            X25_FAC_CALLING_AE, X25_FAC_CALLED_AE,
+            X25_FAC_REVERSE,
+            X25_FAC_THROUGHPUT,
+            X25_FAC_PACKET_SIZE,
+            X25_FAC_WINDOW_SIZE,
+            X25_FAC_CALLING_AE,
+            X25_FAC_CALLED_AE,
         ];
         for i in 0..facs.len() {
             for j in (i + 1)..facs.len() {

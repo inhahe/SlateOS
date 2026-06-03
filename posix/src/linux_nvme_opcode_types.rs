@@ -51,13 +51,20 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            NVME_CMD_FLUSH, NVME_CMD_WRITE, NVME_CMD_READ,
-            NVME_CMD_WRITE_UNCOR, NVME_CMD_COMPARE,
-            NVME_CMD_WRITE_ZEROES, NVME_CMD_DSM,
-            NVME_CMD_VERIFY, NVME_CMD_RESV_REGISTER,
-            NVME_CMD_RESV_REPORT, NVME_CMD_RESV_ACQUIRE,
+            NVME_CMD_FLUSH,
+            NVME_CMD_WRITE,
+            NVME_CMD_READ,
+            NVME_CMD_WRITE_UNCOR,
+            NVME_CMD_COMPARE,
+            NVME_CMD_WRITE_ZEROES,
+            NVME_CMD_DSM,
+            NVME_CMD_VERIFY,
+            NVME_CMD_RESV_REGISTER,
+            NVME_CMD_RESV_REPORT,
+            NVME_CMD_RESV_ACQUIRE,
             NVME_CMD_RESV_RELEASE,
-            NVME_CMD_ZONE_MGMT_SEND, NVME_CMD_ZONE_MGMT_RECV,
+            NVME_CMD_ZONE_MGMT_SEND,
+            NVME_CMD_ZONE_MGMT_RECV,
             NVME_CMD_ZONE_APPEND,
         ];
         for i in 0..ops.len() {

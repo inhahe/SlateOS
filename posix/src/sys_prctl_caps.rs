@@ -5,9 +5,9 @@
 //! seccomp, and process management.
 
 // Re-export the base prctl function and core constants.
-pub use crate::sys_prctl::prctl;
-pub use crate::sys_prctl::PR_SET_NAME;
 pub use crate::sys_prctl::PR_GET_NAME;
+pub use crate::sys_prctl::PR_SET_NAME;
+pub use crate::sys_prctl::prctl;
 
 // ---------------------------------------------------------------------------
 // Memory management hints
@@ -93,17 +93,18 @@ mod tests {
 
     #[test]
     fn test_spec_distinct() {
-        let specs = [
-            PR_SPEC_STORE_BYPASS, PR_SPEC_INDIRECT_BRANCH,
-        ];
+        let specs = [PR_SPEC_STORE_BYPASS, PR_SPEC_INDIRECT_BRANCH];
         assert_ne!(specs[0], specs[1]);
     }
 
     #[test]
     fn test_spec_actions_distinct() {
         let acts = [
-            PR_SPEC_NOT_AFFECTED, PR_SPEC_PRCTL,
-            PR_SPEC_ENABLE, PR_SPEC_DISABLE, PR_SPEC_FORCE_DISABLE,
+            PR_SPEC_NOT_AFFECTED,
+            PR_SPEC_PRCTL,
+            PR_SPEC_ENABLE,
+            PR_SPEC_DISABLE,
+            PR_SPEC_FORCE_DISABLE,
         ];
         for i in 0..acts.len() {
             for j in (i + 1)..acts.len() {

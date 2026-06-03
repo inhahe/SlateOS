@@ -114,7 +114,12 @@ mod tests {
 
     #[test]
     fn test_socket_options_distinct() {
-        let opts = [TIPC_CONN_TIMEOUT, TIPC_IMPORTANCE, TIPC_SRC_DROPPABLE, TIPC_DEST_DROPPABLE];
+        let opts = [
+            TIPC_CONN_TIMEOUT,
+            TIPC_IMPORTANCE,
+            TIPC_SRC_DROPPABLE,
+            TIPC_DEST_DROPPABLE,
+        ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
                 assert_ne!(opts[i], opts[j]);

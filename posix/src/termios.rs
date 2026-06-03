@@ -14,20 +14,20 @@ pub use crate::ioctl::Termios;
 // Action constants for tcsetattr
 // ---------------------------------------------------------------------------
 
-pub use crate::ioctl::TCSANOW;
 pub use crate::ioctl::TCSADRAIN;
 pub use crate::ioctl::TCSAFLUSH;
+pub use crate::ioctl::TCSANOW;
 
 // ---------------------------------------------------------------------------
 // Input mode flags (c_iflag)
 // ---------------------------------------------------------------------------
 
 pub use crate::ioctl::BRKINT;
+pub use crate::ioctl::ICRNL;
+pub use crate::ioctl::IGNCR;
+pub use crate::ioctl::INLCR;
 pub use crate::ioctl::INPCK;
 pub use crate::ioctl::ISTRIP;
-pub use crate::ioctl::INLCR;
-pub use crate::ioctl::IGNCR;
-pub use crate::ioctl::ICRNL;
 pub use crate::ioctl::IXON;
 
 /// Ignore BREAK condition.
@@ -55,8 +55,8 @@ pub const IUTF8: u32 = 0o40000;
 // Output mode flags (c_oflag)
 // ---------------------------------------------------------------------------
 
-pub use crate::ioctl::OPOST;
 pub use crate::ioctl::ONLCR;
+pub use crate::ioctl::OPOST;
 
 /// Map CR to NL on output.
 pub const OCRNL: u32 = 0o10;
@@ -77,12 +77,12 @@ pub const OFDEL: u32 = 0o200;
 // Control mode flags (c_cflag)
 // ---------------------------------------------------------------------------
 
-pub use crate::ioctl::CSIZE;
-pub use crate::ioctl::CS8;
-pub use crate::ioctl::CREAD;
-pub use crate::ioctl::PARENB;
-pub use crate::ioctl::HUPCL;
 pub use crate::ioctl::CLOCAL;
+pub use crate::ioctl::CREAD;
+pub use crate::ioctl::CS8;
+pub use crate::ioctl::CSIZE;
+pub use crate::ioctl::HUPCL;
+pub use crate::ioctl::PARENB;
 
 /// 5-bit characters.
 pub const CS5: u32 = 0o0;
@@ -103,11 +103,11 @@ pub const PARODD: u32 = 0o1000;
 // Local mode flags (c_lflag)
 // ---------------------------------------------------------------------------
 
-pub use crate::ioctl::ISIG;
-pub use crate::ioctl::ICANON;
 pub use crate::ioctl::ECHO;
 pub use crate::ioctl::ECHONL;
+pub use crate::ioctl::ICANON;
 pub use crate::ioctl::IEXTEN;
+pub use crate::ioctl::ISIG;
 
 /// Echo erase character as BS-SP-BS.
 pub const ECHOE: u32 = 0o20;
@@ -126,17 +126,17 @@ pub const TOSTOP: u32 = 0o400;
 // ---------------------------------------------------------------------------
 
 pub use crate::ioctl::NCCS;
-pub use crate::ioctl::VINTR;
-pub use crate::ioctl::VQUIT;
-pub use crate::ioctl::VERASE;
-pub use crate::ioctl::VKILL;
 pub use crate::ioctl::VEOF;
-pub use crate::ioctl::VTIME;
+pub use crate::ioctl::VEOL;
+pub use crate::ioctl::VERASE;
+pub use crate::ioctl::VINTR;
+pub use crate::ioctl::VKILL;
 pub use crate::ioctl::VMIN;
+pub use crate::ioctl::VQUIT;
 pub use crate::ioctl::VSTART;
 pub use crate::ioctl::VSTOP;
 pub use crate::ioctl::VSUSP;
-pub use crate::ioctl::VEOL;
+pub use crate::ioctl::VTIME;
 
 /// Second EOL character index.
 pub const VEOL2: usize = 16;
@@ -214,31 +214,31 @@ pub const B460800: u32 = 0o10004;
 // Flow control actions (tcflow)
 // ---------------------------------------------------------------------------
 
-pub use crate::ioctl::TCOOFF;
-pub use crate::ioctl::TCOON;
 pub use crate::ioctl::TCIOFF;
 pub use crate::ioctl::TCION;
+pub use crate::ioctl::TCOOFF;
+pub use crate::ioctl::TCOON;
 
 // ---------------------------------------------------------------------------
 // Queue selectors (tcflush)
 // ---------------------------------------------------------------------------
 
 pub use crate::ioctl::TCIFLUSH;
-pub use crate::ioctl::TCOFLUSH;
 pub use crate::ioctl::TCIOFLUSH;
+pub use crate::ioctl::TCOFLUSH;
 
 // ---------------------------------------------------------------------------
 // Functions
 // ---------------------------------------------------------------------------
 
-pub use crate::ioctl::tcgetattr;
-pub use crate::ioctl::tcsetattr;
 pub use crate::ioctl::cfmakeraw;
 pub use crate::ioctl::cfsetspeed;
-pub use crate::ioctl::tcsendbreak;
 pub use crate::ioctl::tcdrain;
 pub use crate::ioctl::tcflow;
 pub use crate::ioctl::tcflush;
+pub use crate::ioctl::tcgetattr;
+pub use crate::ioctl::tcsendbreak;
+pub use crate::ioctl::tcsetattr;
 
 // ---------------------------------------------------------------------------
 // Speed query/set (re-exports from ioctl)
@@ -289,16 +289,12 @@ mod tests {
     #[test]
     fn test_cc_indices_distinct() {
         let indices = [
-            VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME,
-            VMIN, VSTART, VSTOP, VSUSP, VEOL,
-            VREPRINT, VDISCARD, VWERASE, VLNEXT, VEOL2,
+            VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSTART, VSTOP, VSUSP, VEOL, VREPRINT,
+            VDISCARD, VWERASE, VLNEXT, VEOL2,
         ];
         for i in 0..indices.len() {
             for j in (i + 1)..indices.len() {
-                assert_ne!(
-                    indices[i], indices[j],
-                    "cc indices must be distinct"
-                );
+                assert_ne!(indices[i], indices[j], "cc indices must be distinct");
             }
         }
     }
@@ -306,9 +302,8 @@ mod tests {
     #[test]
     fn test_cc_indices_in_range() {
         let indices = [
-            VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME,
-            VMIN, VSTART, VSTOP, VSUSP, VEOL,
-            VREPRINT, VDISCARD, VWERASE, VLNEXT, VEOL2,
+            VINTR, VQUIT, VERASE, VKILL, VEOF, VTIME, VMIN, VSTART, VSTOP, VSUSP, VEOL, VREPRINT,
+            VDISCARD, VWERASE, VLNEXT, VEOL2,
         ];
         for &idx in &indices {
             assert!(idx < NCCS, "cc index {idx} must be < NCCS ({NCCS})");

@@ -59,7 +59,9 @@ pub extern "C" fn strfmon(
             if out_pos >= maxsize.wrapping_sub(1) {
                 break;
             }
-            unsafe { *s.add(out_pos) = ch; }
+            unsafe {
+                *s.add(out_pos) = ch;
+            }
             out_pos = out_pos.wrapping_add(1);
             continue;
         }
@@ -72,8 +74,12 @@ pub extern "C" fn strfmon(
 
         if next == b'%' {
             // Literal '%'.
-            if out_pos >= maxsize.wrapping_sub(1) { break; }
-            unsafe { *s.add(out_pos) = b'%'; }
+            if out_pos >= maxsize.wrapping_sub(1) {
+                break;
+            }
+            unsafe {
+                *s.add(out_pos) = b'%';
+            }
             out_pos = out_pos.wrapping_add(1);
             fmt_pos = fmt_pos.wrapping_add(1);
             continue;
@@ -91,7 +97,9 @@ pub extern "C" fn strfmon(
             if fc == b'=' {
                 fp = fp.wrapping_add(1);
                 _fill_char = unsafe { *format.add(fp) };
-                if _fill_char == 0 { break; }
+                if _fill_char == 0 {
+                    break;
+                }
                 fp = fp.wrapping_add(1);
             } else if fc == b'^' {
                 _suppress_grouping = true;
@@ -132,7 +140,9 @@ pub extern "C" fn strfmon(
 
         // The specifier character.
         let spec = unsafe { *format.add(fp) };
-        if spec == 0 { break; }
+        if spec == 0 {
+            break;
+        }
         fp = fp.wrapping_add(1);
         fmt_pos = fp;
 
@@ -161,14 +171,16 @@ pub extern "C" fn strfmon(
         if negative {
             if use_parens {
                 if out_pos < maxsize.wrapping_sub(1) {
-                    unsafe { *s.add(out_pos) = b'('; }
+                    unsafe {
+                        *s.add(out_pos) = b'(';
+                    }
                     out_pos = out_pos.wrapping_add(1);
                 }
-            } else {
-                if out_pos < maxsize.wrapping_sub(1) {
-                    unsafe { *s.add(out_pos) = b'-'; }
-                    out_pos = out_pos.wrapping_add(1);
+            } else if out_pos < maxsize.wrapping_sub(1) {
+                unsafe {
+                    *s.add(out_pos) = b'-';
                 }
+                out_pos = out_pos.wrapping_add(1);
             }
         }
 
@@ -177,7 +189,9 @@ pub extern "C" fn strfmon(
         let int_len = format_u64(int_part, &mut int_buf);
         let mut i: usize = 0;
         while i < int_len && out_pos < maxsize.wrapping_sub(1) {
-            unsafe { *s.add(out_pos) = int_buf[i]; }
+            unsafe {
+                *s.add(out_pos) = int_buf[i];
+            }
             out_pos = out_pos.wrapping_add(1);
             i = i.wrapping_add(1);
         }
@@ -185,41 +199,54 @@ pub extern "C" fn strfmon(
         // Format fractional part (if precision > 0).
         if precision > 0 {
             if out_pos < maxsize.wrapping_sub(1) {
-                unsafe { *s.add(out_pos) = b'.'; }
+                unsafe {
+                    *s.add(out_pos) = b'.';
+                }
                 out_pos = out_pos.wrapping_add(1);
             }
 
             let mut frac_buf = [0u8; 20];
             let frac_len = format_u64(frac_part, &mut frac_buf);
             // Pad with leading zeros if needed.
-            let mut pad = if precision > frac_len { precision.wrapping_sub(frac_len) } else { 0 };
+            let mut pad = if precision > frac_len {
+                precision.wrapping_sub(frac_len)
+            } else {
+                0
+            };
             while pad > 0 && out_pos < maxsize.wrapping_sub(1) {
-                unsafe { *s.add(out_pos) = b'0'; }
+                unsafe {
+                    *s.add(out_pos) = b'0';
+                }
                 out_pos = out_pos.wrapping_add(1);
                 pad = pad.wrapping_sub(1);
             }
             let mut j: usize = 0;
             while j < frac_len && out_pos < maxsize.wrapping_sub(1) {
-                unsafe { *s.add(out_pos) = frac_buf[j]; }
+                unsafe {
+                    *s.add(out_pos) = frac_buf[j];
+                }
                 out_pos = out_pos.wrapping_add(1);
                 j = j.wrapping_add(1);
             }
         }
 
         // Close parentheses for negative with parens.
-        if negative && use_parens {
-            if out_pos < maxsize.wrapping_sub(1) {
-                unsafe { *s.add(out_pos) = b')'; }
+        if negative && use_parens
+            && out_pos < maxsize.wrapping_sub(1) {
+                unsafe {
+                    *s.add(out_pos) = b')';
+                }
                 out_pos = out_pos.wrapping_add(1);
             }
-        }
     }
 
     // Null terminate.
     if out_pos >= maxsize {
         out_pos = maxsize.wrapping_sub(1);
     }
-    unsafe { *s.add(out_pos) = 0; }
+    unsafe {
+        *s.add(out_pos) = 0;
+    }
 
     out_pos as isize
 }
@@ -258,7 +285,10 @@ fn format_u64(mut val: u64, buf: &mut [u8; 20]) -> usize {
     // Reverse into buf.
     let mut i: usize = 0;
     while i < len {
-        if let (Some(dst), Some(src)) = (buf.get_mut(i), digits.get(len.wrapping_sub(1).wrapping_sub(i))) {
+        if let (Some(dst), Some(src)) = (
+            buf.get_mut(i),
+            digits.get(len.wrapping_sub(1).wrapping_sub(i)),
+        ) {
             *dst = *src;
         }
         i = i.wrapping_add(1);

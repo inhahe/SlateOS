@@ -78,7 +78,8 @@ mod tests {
     #[test]
     fn test_signal_flags_no_overlap() {
         let flags = [
-            PIDFD_SIGNAL_THREAD, PIDFD_SIGNAL_THREAD_GROUP,
+            PIDFD_SIGNAL_THREAD,
+            PIDFD_SIGNAL_THREAD_GROUP,
             PIDFD_SIGNAL_PROCESS_GROUP,
         ];
         for i in 0..flags.len() {

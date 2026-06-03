@@ -123,13 +123,20 @@ mod tests {
     #[test]
     fn test_genl_cmds_distinct() {
         let cmds = [
-            THERMAL_GENL_CMD_UNSPEC, THERMAL_GENL_CMD_TZ_GET_TEMP,
-            THERMAL_GENL_CMD_TZ_GET_TRIP, THERMAL_GENL_CMD_CDEV_GET,
-            THERMAL_GENL_EVENT_TZ_CREATE, THERMAL_GENL_EVENT_TZ_DELETE,
-            THERMAL_GENL_EVENT_TZ_DISABLE, THERMAL_GENL_EVENT_TZ_ENABLE,
-            THERMAL_GENL_EVENT_TZ_TRIP_CHANGE, THERMAL_GENL_EVENT_TZ_TRIP_UP,
-            THERMAL_GENL_EVENT_TZ_TRIP_DOWN, THERMAL_GENL_EVENT_CDEV_ADD,
-            THERMAL_GENL_EVENT_CDEV_DELETE, THERMAL_GENL_EVENT_CDEV_STATE_UPDATE,
+            THERMAL_GENL_CMD_UNSPEC,
+            THERMAL_GENL_CMD_TZ_GET_TEMP,
+            THERMAL_GENL_CMD_TZ_GET_TRIP,
+            THERMAL_GENL_CMD_CDEV_GET,
+            THERMAL_GENL_EVENT_TZ_CREATE,
+            THERMAL_GENL_EVENT_TZ_DELETE,
+            THERMAL_GENL_EVENT_TZ_DISABLE,
+            THERMAL_GENL_EVENT_TZ_ENABLE,
+            THERMAL_GENL_EVENT_TZ_TRIP_CHANGE,
+            THERMAL_GENL_EVENT_TZ_TRIP_UP,
+            THERMAL_GENL_EVENT_TZ_TRIP_DOWN,
+            THERMAL_GENL_EVENT_CDEV_ADD,
+            THERMAL_GENL_EVENT_CDEV_DELETE,
+            THERMAL_GENL_EVENT_CDEV_STATE_UPDATE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -141,8 +148,10 @@ mod tests {
     #[test]
     fn test_trip_types_distinct() {
         let trips = [
-            THERMAL_TRIP_ACTIVE, THERMAL_TRIP_PASSIVE,
-            THERMAL_TRIP_HOT, THERMAL_TRIP_CRITICAL,
+            THERMAL_TRIP_ACTIVE,
+            THERMAL_TRIP_PASSIVE,
+            THERMAL_TRIP_HOT,
+            THERMAL_TRIP_CRITICAL,
         ];
         for i in 0..trips.len() {
             for j in (i + 1)..trips.len() {
@@ -154,7 +163,8 @@ mod tests {
     #[test]
     fn test_trends_distinct() {
         let trends = [
-            THERMAL_TREND_RAISING, THERMAL_TREND_DROPPING,
+            THERMAL_TREND_RAISING,
+            THERMAL_TREND_DROPPING,
             THERMAL_TREND_STABLE,
         ];
         for i in 0..trends.len() {
@@ -167,11 +177,16 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            THERMAL_GENL_ATTR_TZ_ID, THERMAL_GENL_ATTR_TZ_NAME,
-            THERMAL_GENL_ATTR_TZ_TEMP, THERMAL_GENL_ATTR_TZ_TRIP_ID,
-            THERMAL_GENL_ATTR_TZ_TRIP_TEMP, THERMAL_GENL_ATTR_TZ_TRIP_TYPE,
-            THERMAL_GENL_ATTR_TZ_CDEV_ID, THERMAL_GENL_ATTR_TZ_CDEV_MAX_STATE,
-            THERMAL_GENL_ATTR_TZ_CDEV_CUR_STATE, THERMAL_GENL_ATTR_TZ_GOV_NAME,
+            THERMAL_GENL_ATTR_TZ_ID,
+            THERMAL_GENL_ATTR_TZ_NAME,
+            THERMAL_GENL_ATTR_TZ_TEMP,
+            THERMAL_GENL_ATTR_TZ_TRIP_ID,
+            THERMAL_GENL_ATTR_TZ_TRIP_TEMP,
+            THERMAL_GENL_ATTR_TZ_TRIP_TYPE,
+            THERMAL_GENL_ATTR_TZ_CDEV_ID,
+            THERMAL_GENL_ATTR_TZ_CDEV_MAX_STATE,
+            THERMAL_GENL_ATTR_TZ_CDEV_CUR_STATE,
+            THERMAL_GENL_ATTR_TZ_GOV_NAME,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

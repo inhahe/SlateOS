@@ -144,7 +144,7 @@ pub extern "C" fn pututxline(utmpx: *const Utmpx) -> *mut Utmpx {
         return core::ptr::null_mut();
     }
     // Return a "mutable" pointer to the same entry (pretend we wrote it).
-    utmpx as *mut Utmpx
+    utmpx.cast_mut()
 }
 
 /// Close the utmpx database.
@@ -236,8 +236,15 @@ mod tests {
     #[test]
     fn test_entry_types_distinct() {
         let types = [
-            EMPTY, RUN_LVL, BOOT_TIME, NEW_TIME, OLD_TIME,
-            INIT_PROCESS, LOGIN_PROCESS, USER_PROCESS, DEAD_PROCESS,
+            EMPTY,
+            RUN_LVL,
+            BOOT_TIME,
+            NEW_TIME,
+            OLD_TIME,
+            INIT_PROCESS,
+            LOGIN_PROCESS,
+            USER_PROCESS,
+            DEAD_PROCESS,
             ACCOUNTING,
         ];
         for i in 0..types.len() {
@@ -263,13 +270,18 @@ mod tests {
     fn test_utmpx_size() {
         let size = core::mem::size_of::<Utmpx>();
         // Should be large enough to hold all fields.
-        assert!(size >= 380, "Utmpx should be at least 380 bytes, got {size}");
+        assert!(
+            size >= 380,
+            "Utmpx should be at least 380 bytes, got {size}"
+        );
     }
 
     #[test]
     fn test_utmpx_alignment() {
-        assert!(core::mem::align_of::<Utmpx>() >= 4,
-            "Utmpx should be aligned to at least 4 bytes");
+        assert!(
+            core::mem::align_of::<Utmpx>() >= 4,
+            "Utmpx should be aligned to at least 4 bytes"
+        );
     }
 
     #[test]

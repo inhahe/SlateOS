@@ -78,8 +78,11 @@ mod tests {
     #[test]
     fn test_mfd_flags_distinct() {
         let flags = [
-            MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_HUGETLB,
-            MFD_NOEXEC_SEAL, MFD_EXEC,
+            MFD_CLOEXEC,
+            MFD_ALLOW_SEALING,
+            MFD_HUGETLB,
+            MFD_NOEXEC_SEAL,
+            MFD_EXEC,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -91,8 +94,11 @@ mod tests {
     #[test]
     fn test_mfd_flags_are_powers_of_two() {
         let flags = [
-            MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_HUGETLB,
-            MFD_NOEXEC_SEAL, MFD_EXEC,
+            MFD_CLOEXEC,
+            MFD_ALLOW_SEALING,
+            MFD_HUGETLB,
+            MFD_NOEXEC_SEAL,
+            MFD_EXEC,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "MFD flag {f:#x} is not power of 2");
@@ -118,7 +124,8 @@ mod tests {
         if ret < 0 {
             let e = crate::errno::get_errno();
             assert_ne!(
-                e, crate::errno::ENOSYS,
+                e,
+                crate::errno::ENOSYS,
                 "memfd_create must not return ENOSYS — it is implemented"
             );
         }
@@ -190,10 +197,18 @@ mod tests {
     #[test]
     fn test_huge_sizes_distinct() {
         let sizes = [
-            MFD_HUGE_64KB, MFD_HUGE_512KB, MFD_HUGE_1MB,
-            MFD_HUGE_2MB, MFD_HUGE_8MB, MFD_HUGE_16MB,
-            MFD_HUGE_32MB, MFD_HUGE_256MB, MFD_HUGE_512MB,
-            MFD_HUGE_1GB, MFD_HUGE_2GB, MFD_HUGE_16GB,
+            MFD_HUGE_64KB,
+            MFD_HUGE_512KB,
+            MFD_HUGE_1MB,
+            MFD_HUGE_2MB,
+            MFD_HUGE_8MB,
+            MFD_HUGE_16MB,
+            MFD_HUGE_32MB,
+            MFD_HUGE_256MB,
+            MFD_HUGE_512MB,
+            MFD_HUGE_1GB,
+            MFD_HUGE_2GB,
+            MFD_HUGE_16GB,
         ];
         for i in 0..sizes.len() {
             for j in (i + 1)..sizes.len() {

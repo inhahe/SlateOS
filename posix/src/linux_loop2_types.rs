@@ -100,10 +100,16 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            LOOP_SET_FD, LOOP_CLR_FD, LOOP_SET_STATUS,
-            LOOP_GET_STATUS, LOOP_SET_STATUS64, LOOP_GET_STATUS64,
-            LOOP_CHANGE_FD, LOOP_SET_CAPACITY,
-            LOOP_SET_DIRECT_IO, LOOP_SET_BLOCK_SIZE,
+            LOOP_SET_FD,
+            LOOP_CLR_FD,
+            LOOP_SET_STATUS,
+            LOOP_GET_STATUS,
+            LOOP_SET_STATUS64,
+            LOOP_GET_STATUS64,
+            LOOP_CHANGE_FD,
+            LOOP_SET_CAPACITY,
+            LOOP_SET_DIRECT_IO,
+            LOOP_SET_BLOCK_SIZE,
             LOOP_CONFIGURE,
         ];
         for i in 0..cmds.len() {
@@ -126,8 +132,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            LO_FLAGS_READ_ONLY, LO_FLAGS_AUTOCLEAR,
-            LO_FLAGS_PARTSCAN, LO_FLAGS_DIRECT_IO,
+            LO_FLAGS_READ_ONLY,
+            LO_FLAGS_AUTOCLEAR,
+            LO_FLAGS_PARTSCAN,
+            LO_FLAGS_DIRECT_IO,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -139,8 +147,10 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            LO_FLAGS_READ_ONLY, LO_FLAGS_AUTOCLEAR,
-            LO_FLAGS_PARTSCAN, LO_FLAGS_DIRECT_IO,
+            LO_FLAGS_READ_ONLY,
+            LO_FLAGS_AUTOCLEAR,
+            LO_FLAGS_PARTSCAN,
+            LO_FLAGS_DIRECT_IO,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -150,9 +160,15 @@ mod tests {
     #[test]
     fn test_crypt_types_distinct() {
         let crypts = [
-            LO_CRYPT_NONE, LO_CRYPT_XOR, LO_CRYPT_DES,
-            LO_CRYPT_FISH2, LO_CRYPT_BLOW, LO_CRYPT_CAST128,
-            LO_CRYPT_IDEA, LO_CRYPT_DUMMY, LO_CRYPT_SKIPJACK,
+            LO_CRYPT_NONE,
+            LO_CRYPT_XOR,
+            LO_CRYPT_DES,
+            LO_CRYPT_FISH2,
+            LO_CRYPT_BLOW,
+            LO_CRYPT_CAST128,
+            LO_CRYPT_IDEA,
+            LO_CRYPT_DUMMY,
+            LO_CRYPT_SKIPJACK,
             LO_CRYPT_CRYPTOAPI,
         ];
         for i in 0..crypts.len() {

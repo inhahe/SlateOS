@@ -41,10 +41,18 @@ pub const IN_CLOSE: u32 = IN_CLOSE_WRITE | IN_CLOSE_NOWRITE;
 /// Move events (from + to).
 pub const IN_MOVE: u32 = IN_MOVED_FROM | IN_MOVED_TO;
 /// All events.
-pub const IN_ALL_EVENTS: u32 = IN_ACCESS | IN_MODIFY | IN_ATTRIB
-    | IN_CLOSE_WRITE | IN_CLOSE_NOWRITE | IN_OPEN
-    | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE
-    | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF;
+pub const IN_ALL_EVENTS: u32 = IN_ACCESS
+    | IN_MODIFY
+    | IN_ATTRIB
+    | IN_CLOSE_WRITE
+    | IN_CLOSE_NOWRITE
+    | IN_OPEN
+    | IN_MOVED_FROM
+    | IN_MOVED_TO
+    | IN_CREATE
+    | IN_DELETE
+    | IN_DELETE_SELF
+    | IN_MOVE_SELF;
 
 // ---------------------------------------------------------------------------
 // inotify watch flags
@@ -212,10 +220,18 @@ mod tests {
     #[test]
     fn test_inotify_events_distinct() {
         let events = [
-            IN_ACCESS, IN_MODIFY, IN_ATTRIB,
-            IN_CLOSE_WRITE, IN_CLOSE_NOWRITE, IN_OPEN,
-            IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE,
-            IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF,
+            IN_ACCESS,
+            IN_MODIFY,
+            IN_ATTRIB,
+            IN_CLOSE_WRITE,
+            IN_CLOSE_NOWRITE,
+            IN_OPEN,
+            IN_MOVED_FROM,
+            IN_MOVED_TO,
+            IN_CREATE,
+            IN_DELETE,
+            IN_DELETE_SELF,
+            IN_MOVE_SELF,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -227,10 +243,18 @@ mod tests {
     #[test]
     fn test_inotify_events_power_of_two() {
         let events = [
-            IN_ACCESS, IN_MODIFY, IN_ATTRIB,
-            IN_CLOSE_WRITE, IN_CLOSE_NOWRITE, IN_OPEN,
-            IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE,
-            IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF,
+            IN_ACCESS,
+            IN_MODIFY,
+            IN_ATTRIB,
+            IN_CLOSE_WRITE,
+            IN_CLOSE_NOWRITE,
+            IN_OPEN,
+            IN_MOVED_FROM,
+            IN_MOVED_TO,
+            IN_CREATE,
+            IN_DELETE,
+            IN_DELETE_SELF,
+            IN_MOVE_SELF,
         ];
         for e in &events {
             assert!(e.is_power_of_two(), "0x{:08x} is not power of two", e);
@@ -257,10 +281,18 @@ mod tests {
     #[test]
     fn test_fanotify_events_distinct() {
         let events: [u64; 13] = [
-            FAN_ACCESS, FAN_MODIFY, FAN_ATTRIB,
-            FAN_CLOSE_WRITE, FAN_CLOSE_NOWRITE, FAN_OPEN,
-            FAN_MOVED_FROM, FAN_MOVED_TO, FAN_CREATE,
-            FAN_DELETE, FAN_DELETE_SELF, FAN_MOVE_SELF,
+            FAN_ACCESS,
+            FAN_MODIFY,
+            FAN_ATTRIB,
+            FAN_CLOSE_WRITE,
+            FAN_CLOSE_NOWRITE,
+            FAN_OPEN,
+            FAN_MOVED_FROM,
+            FAN_MOVED_TO,
+            FAN_CREATE,
+            FAN_DELETE,
+            FAN_DELETE_SELF,
+            FAN_MOVE_SELF,
             FAN_OPEN_EXEC,
         ];
         for i in 0..events.len() {
@@ -289,10 +321,15 @@ mod tests {
     #[test]
     fn test_fan_mark_flags_distinct() {
         let flags = [
-            FAN_MARK_ADD, FAN_MARK_REMOVE, FAN_MARK_DONT_FOLLOW,
-            FAN_MARK_ONLYDIR, FAN_MARK_IGNORED_MASK,
-            FAN_MARK_IGNORED_SURV_MODIFY, FAN_MARK_FLUSH,
-            FAN_MARK_EVICTABLE, FAN_MARK_IGNORE,
+            FAN_MARK_ADD,
+            FAN_MARK_REMOVE,
+            FAN_MARK_DONT_FOLLOW,
+            FAN_MARK_ONLYDIR,
+            FAN_MARK_IGNORED_MASK,
+            FAN_MARK_IGNORED_SURV_MODIFY,
+            FAN_MARK_FLUSH,
+            FAN_MARK_EVICTABLE,
+            FAN_MARK_IGNORE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

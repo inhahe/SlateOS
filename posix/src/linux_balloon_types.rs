@@ -93,8 +93,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            BALLOON_STATE_INACTIVE, BALLOON_STATE_INFLATING,
-            BALLOON_STATE_DEFLATING, BALLOON_STATE_STABLE,
+            BALLOON_STATE_INACTIVE,
+            BALLOON_STATE_INFLATING,
+            BALLOON_STATE_DEFLATING,
+            BALLOON_STATE_STABLE,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -106,7 +108,8 @@ mod tests {
     #[test]
     fn test_page_flags_no_overlap() {
         let flags = [
-            BALLOON_PAGE_ENQUEUED, BALLOON_PAGE_MIGRATING,
+            BALLOON_PAGE_ENQUEUED,
+            BALLOON_PAGE_MIGRATING,
             BALLOON_PAGE_ISOLATED,
         ];
         for i in 0..flags.len() {
@@ -120,9 +123,12 @@ mod tests {
     #[test]
     fn test_feature_bits_distinct() {
         let features = [
-            VIRTIO_BALLOON_F_MUST_TELL_HOST, VIRTIO_BALLOON_F_STATS_VQ,
-            VIRTIO_BALLOON_F_DEFLATE_ON_OOM, VIRTIO_BALLOON_F_FREE_PAGE_HINT,
-            VIRTIO_BALLOON_F_PAGE_POISON, VIRTIO_BALLOON_F_REPORTING,
+            VIRTIO_BALLOON_F_MUST_TELL_HOST,
+            VIRTIO_BALLOON_F_STATS_VQ,
+            VIRTIO_BALLOON_F_DEFLATE_ON_OOM,
+            VIRTIO_BALLOON_F_FREE_PAGE_HINT,
+            VIRTIO_BALLOON_F_PAGE_POISON,
+            VIRTIO_BALLOON_F_REPORTING,
         ];
         for i in 0..features.len() {
             for j in (i + 1)..features.len() {
@@ -134,11 +140,16 @@ mod tests {
     #[test]
     fn test_stat_tags_distinct() {
         let tags = [
-            VIRTIO_BALLOON_S_SWAP_IN, VIRTIO_BALLOON_S_SWAP_OUT,
-            VIRTIO_BALLOON_S_MAJFLT, VIRTIO_BALLOON_S_MINFLT,
-            VIRTIO_BALLOON_S_MEMTOT, VIRTIO_BALLOON_S_MEMFREE,
-            VIRTIO_BALLOON_S_AVAIL, VIRTIO_BALLOON_S_CACHES,
-            VIRTIO_BALLOON_S_HTLB_PGALLOC, VIRTIO_BALLOON_S_HTLB_PGFAIL,
+            VIRTIO_BALLOON_S_SWAP_IN,
+            VIRTIO_BALLOON_S_SWAP_OUT,
+            VIRTIO_BALLOON_S_MAJFLT,
+            VIRTIO_BALLOON_S_MINFLT,
+            VIRTIO_BALLOON_S_MEMTOT,
+            VIRTIO_BALLOON_S_MEMFREE,
+            VIRTIO_BALLOON_S_AVAIL,
+            VIRTIO_BALLOON_S_CACHES,
+            VIRTIO_BALLOON_S_HTLB_PGALLOC,
+            VIRTIO_BALLOON_S_HTLB_PGFAIL,
         ];
         for i in 0..tags.len() {
             for j in (i + 1)..tags.len() {

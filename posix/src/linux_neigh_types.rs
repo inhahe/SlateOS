@@ -79,9 +79,14 @@ mod tests {
     #[test]
     fn test_nud_states_no_overlap() {
         let states = [
-            NUD_INCOMPLETE, NUD_REACHABLE, NUD_STALE,
-            NUD_DELAY, NUD_PROBE, NUD_FAILED,
-            NUD_NOARP, NUD_PERMANENT,
+            NUD_INCOMPLETE,
+            NUD_REACHABLE,
+            NUD_STALE,
+            NUD_DELAY,
+            NUD_PROBE,
+            NUD_FAILED,
+            NUD_NOARP,
+            NUD_PERMANENT,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -93,9 +98,14 @@ mod tests {
     #[test]
     fn test_nud_states_power_of_two() {
         let states = [
-            NUD_INCOMPLETE, NUD_REACHABLE, NUD_STALE,
-            NUD_DELAY, NUD_PROBE, NUD_FAILED,
-            NUD_NOARP, NUD_PERMANENT,
+            NUD_INCOMPLETE,
+            NUD_REACHABLE,
+            NUD_STALE,
+            NUD_DELAY,
+            NUD_PROBE,
+            NUD_FAILED,
+            NUD_NOARP,
+            NUD_PERMANENT,
         ];
         for s in &states {
             assert!(s.is_power_of_two());
@@ -110,8 +120,11 @@ mod tests {
     #[test]
     fn test_ntf_flags_distinct() {
         let flags = [
-            NTF_PROXY, NTF_EXT_LEARNED, NTF_OFFLOADED,
-            NTF_STICKY, NTF_ROUTER,
+            NTF_PROXY,
+            NTF_EXT_LEARNED,
+            NTF_OFFLOADED,
+            NTF_STICKY,
+            NTF_ROUTER,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -123,9 +136,16 @@ mod tests {
     #[test]
     fn test_nda_attrs_distinct() {
         let attrs = [
-            NDA_UNSPEC, NDA_DST, NDA_LLADDR, NDA_CACHEINFO,
-            NDA_PROBES, NDA_VLAN, NDA_PORT, NDA_VNI,
-            NDA_IFINDEX, NDA_MASTER,
+            NDA_UNSPEC,
+            NDA_DST,
+            NDA_LLADDR,
+            NDA_CACHEINFO,
+            NDA_PROBES,
+            NDA_VLAN,
+            NDA_PORT,
+            NDA_VNI,
+            NDA_IFINDEX,
+            NDA_MASTER,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

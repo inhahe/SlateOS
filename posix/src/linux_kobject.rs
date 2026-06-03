@@ -80,8 +80,14 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            KOBJ_ADD, KOBJ_REMOVE, KOBJ_CHANGE, KOBJ_MOVE,
-            KOBJ_ONLINE, KOBJ_OFFLINE, KOBJ_BIND, KOBJ_UNBIND,
+            KOBJ_ADD,
+            KOBJ_REMOVE,
+            KOBJ_CHANGE,
+            KOBJ_MOVE,
+            KOBJ_ONLINE,
+            KOBJ_OFFLINE,
+            KOBJ_BIND,
+            KOBJ_UNBIND,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -93,9 +99,14 @@ mod tests {
     #[test]
     fn test_action_strings_distinct() {
         let strings = [
-            KOBJ_ACTION_ADD, KOBJ_ACTION_REMOVE, KOBJ_ACTION_CHANGE,
-            KOBJ_ACTION_MOVE, KOBJ_ACTION_ONLINE, KOBJ_ACTION_OFFLINE,
-            KOBJ_ACTION_BIND, KOBJ_ACTION_UNBIND,
+            KOBJ_ACTION_ADD,
+            KOBJ_ACTION_REMOVE,
+            KOBJ_ACTION_CHANGE,
+            KOBJ_ACTION_MOVE,
+            KOBJ_ACTION_ONLINE,
+            KOBJ_ACTION_OFFLINE,
+            KOBJ_ACTION_BIND,
+            KOBJ_ACTION_UNBIND,
         ];
         for i in 0..strings.len() {
             for j in (i + 1)..strings.len() {
@@ -107,8 +118,10 @@ mod tests {
     #[test]
     fn test_uevent_env_vars_distinct() {
         let vars = [
-            KOBJ_UEVENT_ACTION, KOBJ_UEVENT_DEVPATH,
-            KOBJ_UEVENT_SUBSYSTEM, KOBJ_UEVENT_SEQNUM,
+            KOBJ_UEVENT_ACTION,
+            KOBJ_UEVENT_DEVPATH,
+            KOBJ_UEVENT_SUBSYSTEM,
+            KOBJ_UEVENT_SEQNUM,
         ];
         for i in 0..vars.len() {
             for j in (i + 1)..vars.len() {

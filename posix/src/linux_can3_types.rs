@@ -76,9 +76,15 @@ mod tests {
     #[test]
     fn test_err_flags_power_of_two() {
         let flags = [
-            CAN_ERR_TX_TIMEOUT, CAN_ERR_LOSTARB, CAN_ERR_CRTL,
-            CAN_ERR_PROT, CAN_ERR_TRX, CAN_ERR_ACK,
-            CAN_ERR_BUSOFF, CAN_ERR_BUSERROR, CAN_ERR_RESTARTED,
+            CAN_ERR_TX_TIMEOUT,
+            CAN_ERR_LOSTARB,
+            CAN_ERR_CRTL,
+            CAN_ERR_PROT,
+            CAN_ERR_TRX,
+            CAN_ERR_ACK,
+            CAN_ERR_BUSOFF,
+            CAN_ERR_BUSERROR,
+            CAN_ERR_RESTARTED,
             CAN_ERR_CNT,
         ];
         for f in &flags {
@@ -89,9 +95,15 @@ mod tests {
     #[test]
     fn test_err_flags_no_overlap() {
         let flags = [
-            CAN_ERR_TX_TIMEOUT, CAN_ERR_LOSTARB, CAN_ERR_CRTL,
-            CAN_ERR_PROT, CAN_ERR_TRX, CAN_ERR_ACK,
-            CAN_ERR_BUSOFF, CAN_ERR_BUSERROR, CAN_ERR_RESTARTED,
+            CAN_ERR_TX_TIMEOUT,
+            CAN_ERR_LOSTARB,
+            CAN_ERR_CRTL,
+            CAN_ERR_PROT,
+            CAN_ERR_TRX,
+            CAN_ERR_ACK,
+            CAN_ERR_BUSOFF,
+            CAN_ERR_BUSERROR,
+            CAN_ERR_RESTARTED,
             CAN_ERR_CNT,
         ];
         for i in 0..flags.len() {

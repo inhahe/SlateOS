@@ -953,9 +953,7 @@ fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
     // SAFETY: src points to at least 16 bytes (caller contract).
     let mut groups = [0u16; 8];
     for (i, group) in groups.iter_mut().enumerate() {
-        *group = u16::from_be_bytes(unsafe {
-            [*src.add(i * 2), *src.add(i * 2 + 1)]
-        });
+        *group = u16::from_be_bytes(unsafe { [*src.add(i * 2), *src.add(i * 2 + 1)] });
     }
 
     // Find the longest run of zero groups for :: compression.
@@ -998,15 +996,20 @@ fn inet_ntop6(src: *const u8, dst: *mut u8, size: u32) -> *const u8 {
             // Emit :: — always exactly two colons regardless of position.
             // This covers leading (::1), trailing (fe80::), middle (1::2),
             // and all-zeros (::) uniformly.
-            if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
-            if pos < 45 { tmp[pos] = b':'; pos = pos.wrapping_add(1); }
+            if pos < 45 {
+                tmp[pos] = b':';
+                pos = pos.wrapping_add(1);
+            }
+            if pos < 45 {
+                tmp[pos] = b':';
+                pos = pos.wrapping_add(1);
+            }
             i = i.wrapping_add(best_len);
             continue;
         }
-        if i > 0 && !(i == best_start.wrapping_add(best_len) && best_start < 8)
-            && pos < 45
-        {
-            tmp[pos] = b':'; pos = pos.wrapping_add(1);
+        if i > 0 && !(i == best_start.wrapping_add(best_len) && best_start < 8) && pos < 45 {
+            tmp[pos] = b':';
+            pos = pos.wrapping_add(1);
         }
         // Write hex group without leading zeros.
         write_hex16_ntop(&mut tmp, &mut pos, groups[i]);
@@ -1113,7 +1116,9 @@ pub unsafe extern "C" fn inet_aton(cp: *const u8, inp: *mut u32) -> i32 {
     }
 
     // SAFETY: inp is valid for 4 bytes (caller contract).
-    unsafe { *inp = addr; }
+    unsafe {
+        *inp = addr;
+    }
     1
 }
 
@@ -1193,9 +1198,7 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
             // cap, return EACCES (matching Linux's errno for
             // unprivileged raw socket attempts).  With the cap,
             // return ENOSYS: raw sockets aren't implemented yet.
-            if !crate::sys_capability::has_capability(
-                crate::sys_capability::CAP_NET_RAW,
-            ) {
+            if !crate::sys_capability::has_capability(crate::sys_capability::CAP_NET_RAW) {
                 errno::set_errno(errno::EACCES);
                 return -1;
             }
@@ -1217,10 +1220,12 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
 
     // Sockets are bidirectional (O_RDWR).  Apply O_NONBLOCK if requested.
     let initial_flags = crate::fcntl::O_RDWR
-        | if (flags & SOCK_NONBLOCK) != 0 { crate::fcntl::O_NONBLOCK } else { 0 };
-    let Some(fd) = fdtable::alloc_fd_with_flags(
-        kind, 0, initial_flags,
-    ) else {
+        | if (flags & SOCK_NONBLOCK) != 0 {
+            crate::fcntl::O_NONBLOCK
+        } else {
+            0
+        };
+    let Some(fd) = fdtable::alloc_fd_with_flags(kind, 0, initial_flags) else {
         errno::set_errno(errno::EMFILE);
         return -1;
     };
@@ -1231,29 +1236,32 @@ pub extern "C" fn socket(domain: i32, sock_type: i32, protocol: i32) -> i32 {
     }
 
     // Store socket metadata for later use by connect/bind/listen.
-    set_meta(fd, SocketMeta {
-        sock_type: base_type,
-        bound_port: 0,
-        peer_addr: 0,
-        peer_port: 0,
-        local_addr: 0,
-        keepalive: false,
-        nodelay: false,
-        reuseaddr: false,
-        rcvbuf: 65536,
-        sndbuf: 65536,
-        broadcast: false,
-        linger_onoff: false,
-        linger_secs: 0,
-        keepidle: 75,
-        keepintvl: 10,
-        keepcnt: 9,
-        udp_shut_rd: false,
-        udp_shut_wr: false,
-        rcvtimeo_ms: 0,
-        sndtimeo_ms: 0,
-        cork: false,
-    });
+    set_meta(
+        fd,
+        SocketMeta {
+            sock_type: base_type,
+            bound_port: 0,
+            peer_addr: 0,
+            peer_port: 0,
+            local_addr: 0,
+            keepalive: false,
+            nodelay: false,
+            reuseaddr: false,
+            rcvbuf: 65536,
+            sndbuf: 65536,
+            broadcast: false,
+            linger_onoff: false,
+            linger_secs: 0,
+            keepidle: 75,
+            keepintvl: 10,
+            keepcnt: 9,
+            udp_shut_rd: false,
+            udp_shut_wr: false,
+            rcvtimeo_ms: 0,
+            sndtimeo_ms: 0,
+            cork: false,
+        },
+    );
 
     fd
 }
@@ -1329,9 +1337,9 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
             // connected or has a connect in progress.
             if entry.handle != 0 {
                 // POSIX: EISCONN if established, EALREADY if still connecting.
-                let status = crate::syscall::syscall1(
-                    crate::syscall::SYS_TCP_POLL_STATUS, entry.handle,
-                ) as u16;
+                let status =
+                    crate::syscall::syscall1(crate::syscall::SYS_TCP_POLL_STATUS, entry.handle)
+                        as u16;
                 // POLL_WRITABLE(0x04) without POLL_ERROR(0x08) = established.
                 if (status & 0x0004) != 0 && (status & 0x0008) == 0 {
                     errno::set_errno(errno::EISCONN);
@@ -1351,9 +1359,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
 
             // Non-blocking connect: pass flag bit 0 if O_NONBLOCK is set.
             let nb_flag: u64 = u64::from(
-                fdtable::get_status_flags(fd).unwrap_or(0)
-                    & crate::fcntl::O_NONBLOCK
-                    != 0,
+                fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0,
             );
 
             let ret = syscall3(SYS_TCP_CONNECT, u64::from(ip), u64::from(port), nb_flag);
@@ -1379,34 +1385,36 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
             // Discarding the old entry is safe: handle was 0 (no kernel resource to close).
             // Preserve existing status flags (e.g. O_NONBLOCK set via fcntl).
             let prev_flags = fdtable::get_status_flags(fd).unwrap_or(0);
-            let _ = fdtable::install_fd_with_flags(
-                fd, HandleKind::TcpStream, ret as u64, prev_flags,
-            );
+            let _ =
+                fdtable::install_fd_with_flags(fd, HandleKind::TcpStream, ret as u64, prev_flags);
 
             // Store peer address for getpeername().
-            set_meta(fd, SocketMeta {
-                sock_type: SOCK_STREAM,
-                bound_port: meta.bound_port,
-                peer_addr: sin.sin_addr.s_addr,
-                peer_port: sin.sin_port,
-                local_addr: meta.local_addr,
-                keepalive: meta.keepalive,
-                nodelay: meta.nodelay,
-                reuseaddr: meta.reuseaddr,
-                rcvbuf: meta.rcvbuf,
-                sndbuf: meta.sndbuf,
-                broadcast: meta.broadcast,
-                linger_onoff: meta.linger_onoff,
-                linger_secs: meta.linger_secs,
-                keepidle: meta.keepidle,
-                keepintvl: meta.keepintvl,
-                keepcnt: meta.keepcnt,
-                udp_shut_rd: false,
-                udp_shut_wr: false,
-                rcvtimeo_ms: meta.rcvtimeo_ms,
-                sndtimeo_ms: meta.sndtimeo_ms,
-                cork: meta.cork,
-            });
+            set_meta(
+                fd,
+                SocketMeta {
+                    sock_type: SOCK_STREAM,
+                    bound_port: meta.bound_port,
+                    peer_addr: sin.sin_addr.s_addr,
+                    peer_port: sin.sin_port,
+                    local_addr: meta.local_addr,
+                    keepalive: meta.keepalive,
+                    nodelay: meta.nodelay,
+                    reuseaddr: meta.reuseaddr,
+                    rcvbuf: meta.rcvbuf,
+                    sndbuf: meta.sndbuf,
+                    broadcast: meta.broadcast,
+                    linger_onoff: meta.linger_onoff,
+                    linger_secs: meta.linger_secs,
+                    keepidle: meta.keepidle,
+                    keepintvl: meta.keepintvl,
+                    keepcnt: meta.keepcnt,
+                    udp_shut_rd: false,
+                    udp_shut_wr: false,
+                    rcvtimeo_ms: meta.rcvtimeo_ms,
+                    sndtimeo_ms: meta.sndtimeo_ms,
+                    cork: meta.cork,
+                },
+            );
 
             // Apply socket options that were set before connect.
             // The kernel connection starts with defaults; we need to wire
@@ -1416,9 +1424,7 @@ pub unsafe extern "C" fn connect(fd: i32, addr: *const Sockaddr, addrlen: Sockle
                 let _ = syscall2(SYS_TCP_SET_NODELAY, handle, 1);
             }
             if meta.keepalive {
-                let _ = syscall2(
-                    crate::syscall::SYS_TCP_SET_KEEPALIVE, handle, 1,
-                );
+                let _ = syscall2(crate::syscall::SYS_TCP_SET_KEEPALIVE, handle, 1);
                 // Apply custom keepalive params if any differ from defaults.
                 if meta.keepidle != 75 || meta.keepintvl != 10 || meta.keepcnt != 9 {
                     let _ = syscall4(
@@ -1556,10 +1562,9 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
     // ephemeral port) and ports >= 1024 are unrestricted.
     // Linux returns EACCES (not EPERM) for this — it's a
     // resource-access denial, not a missing-capability signal.
-    if port != 0 && port < 1024
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_NET_BIND_SERVICE,
-        )
+    if port != 0
+        && port < 1024
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_NET_BIND_SERVICE)
     {
         errno::set_errno(errno::EACCES);
         return -1;
@@ -1601,9 +1606,8 @@ pub unsafe extern "C" fn bind(fd: i32, addr: *const Sockaddr, addrlen: SocklenT)
             // Discarding old entry is safe: handle was 0 (no kernel resource).
             // Preserve existing status flags (O_NONBLOCK, etc.).
             let prev_flags = fdtable::get_status_flags(fd).unwrap_or(0);
-            let _ = fdtable::install_fd_with_flags(
-                fd, HandleKind::UdpSocket, ret as u64, prev_flags,
-            );
+            let _ =
+                fdtable::install_fd_with_flags(fd, HandleKind::UdpSocket, ret as u64, prev_flags);
             meta.bound_port = sin.sin_port;
             meta.local_addr = sin.sin_addr.s_addr;
             set_meta(fd, meta);
@@ -1658,7 +1662,11 @@ pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
 
     // If not bound, implicitly bind to port 0 (ephemeral).
     // POSIX: listen() on an unbound socket auto-binds.
-    let port = if meta.bound_port == 0 { 0 } else { u16::from_be(meta.bound_port) };
+    let port = if meta.bound_port == 0 {
+        0
+    } else {
+        u16::from_be(meta.bound_port)
+    };
     let ret = syscall1(SYS_TCP_BIND, u64::from(port));
     if ret < 0 {
         errno::set_errno(translate_net_error(ret));
@@ -1669,9 +1677,7 @@ pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
     // Discarding old entry is safe: handle was 0 (unconnected socket).
     // Preserve existing status flags (O_NONBLOCK for non-blocking accept).
     let prev_flags = fdtable::get_status_flags(fd).unwrap_or(0);
-    let _ = fdtable::install_fd_with_flags(
-        fd, HandleKind::TcpListener, ret as u64, prev_flags,
-    );
+    let _ = fdtable::install_fd_with_flags(fd, HandleKind::TcpListener, ret as u64, prev_flags);
 
     0
 }
@@ -1694,11 +1700,7 @@ pub extern "C" fn listen(fd: i32, _backlog: i32) -> i32 {
 /// If `addr` is non-null, it must point to a buffer of at least
 /// `*addrlen` bytes, and `addrlen` must be non-null.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn accept(
-    fd: i32,
-    addr: *mut Sockaddr,
-    addrlen: *mut SocklenT,
-) -> i32 {
+pub unsafe extern "C" fn accept(fd: i32, addr: *mut Sockaddr, addrlen: *mut SocklenT) -> i32 {
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -1727,8 +1729,7 @@ pub unsafe extern "C" fn accept(
         }
     }
 
-    let is_nb = fdtable::get_status_flags(fd).unwrap_or(0)
-        & crate::fcntl::O_NONBLOCK != 0;
+    let is_nb = fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
 
     // Always use non-blocking accept (ACCEPT_NONBLOCK=1) to avoid the
     // kernel's limited internal timeout.  Implement blocking semantics
@@ -1794,9 +1795,9 @@ unsafe fn finish_accept(
 ) -> i32 {
     // Allocate a new fd for the accepted connection.
     // Accepted sockets are bidirectional (O_RDWR).
-    let Some(new_fd) = fdtable::alloc_fd_with_flags(
-        HandleKind::TcpStream, conn_handle, crate::fcntl::O_RDWR,
-    ) else {
+    let Some(new_fd) =
+        fdtable::alloc_fd_with_flags(HandleKind::TcpStream, conn_handle, crate::fcntl::O_RDWR)
+    else {
         // Close the connection we just accepted — no fd available.
         let _ = syscall1(SYS_TCP_CLOSE, conn_handle);
         errno::set_errno(errno::EMFILE);
@@ -1805,11 +1806,7 @@ unsafe fn finish_accept(
 
     // Query peer address from the kernel.
     let mut peer_buf = [0u8; 6]; // 4 bytes IP + 2 bytes port (network order)
-    let peer_ret = syscall2(
-        SYS_TCP_PEER_ADDR,
-        conn_handle,
-        peer_buf.as_mut_ptr() as u64,
-    );
+    let peer_ret = syscall2(SYS_TCP_PEER_ADDR, conn_handle, peer_buf.as_mut_ptr() as u64);
     let (peer_ip_nbo, peer_port_nbo) = if peer_ret == 0 {
         let ip = u32::from_ne_bytes([peer_buf[0], peer_buf[1], peer_buf[2], peer_buf[3]]);
         let port = u16::from_be_bytes([peer_buf[4], peer_buf[5]]);
@@ -1820,36 +1817,41 @@ unsafe fn finish_accept(
 
     // Store metadata for the new connected socket.
     let listener_meta = get_meta(listener_fd);
-    set_meta(new_fd, SocketMeta {
-        sock_type: SOCK_STREAM,
-        bound_port: listener_meta.map_or(0, |m| m.bound_port),
-        peer_addr: peer_ip_nbo,
-        peer_port: peer_port_nbo,
-        local_addr: listener_meta.map_or(0, |m| m.local_addr),
-        keepalive: false,
-        nodelay: false,
-        reuseaddr: false,
-        rcvbuf: 65536,
-        sndbuf: 65536,
-        broadcast: false,
-        linger_onoff: false,
-        linger_secs: 0,
-        keepidle: 75,
-        keepintvl: 10,
-        keepcnt: 9,
-        udp_shut_rd: false,
-        udp_shut_wr: false,
-        rcvtimeo_ms: 0,
-        sndtimeo_ms: 0,
-        cork: false,
-    });
+    set_meta(
+        new_fd,
+        SocketMeta {
+            sock_type: SOCK_STREAM,
+            bound_port: listener_meta.map_or(0, |m| m.bound_port),
+            peer_addr: peer_ip_nbo,
+            peer_port: peer_port_nbo,
+            local_addr: listener_meta.map_or(0, |m| m.local_addr),
+            keepalive: false,
+            nodelay: false,
+            reuseaddr: false,
+            rcvbuf: 65536,
+            sndbuf: 65536,
+            broadcast: false,
+            linger_onoff: false,
+            linger_secs: 0,
+            keepidle: 75,
+            keepintvl: 10,
+            keepcnt: 9,
+            udp_shut_rd: false,
+            udp_shut_wr: false,
+            rcvtimeo_ms: 0,
+            sndtimeo_ms: 0,
+            cork: false,
+        },
+    );
 
     // Fill in the peer address if requested.
     if !addr.is_null() && !addrlen.is_null() {
         let sin = SockaddrIn {
             sin_family: AF_INET as u16,
             sin_port: peer_port_nbo,
-            sin_addr: InAddr { s_addr: peer_ip_nbo },
+            sin_addr: InAddr {
+                s_addr: peer_ip_nbo,
+            },
             sin_zero: [0u8; 8],
         };
         // SAFETY: caller guarantees addr/addrlen validity.
@@ -1936,12 +1938,7 @@ pub unsafe extern "C" fn accept4(
 /// `buf` must be valid for `len` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UnixStream / error cases); splitting would scatter related per-kind send handling.
-pub unsafe extern "C" fn send(
-    fd: i32,
-    buf: *const u8,
-    len: usize,
-    flags: i32,
-) -> isize {
+pub unsafe extern "C" fn send(fd: i32, buf: *const u8, len: usize, flags: i32) -> isize {
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -1990,9 +1987,9 @@ pub unsafe extern "C" fn send(
             // while graceful shutdown / local SHUT_WR leaves it at NONE.
             let posix_err = translate_net_error(ret);
             if posix_err == errno::ECONNRESET {
-                let last = crate::syscall::syscall1(
-                    crate::syscall::SYS_TCP_LAST_ERROR, entry.handle,
-                ) as u8;
+                let last =
+                    crate::syscall::syscall1(crate::syscall::SYS_TCP_LAST_ERROR, entry.handle)
+                        as u8;
                 if last == 2 {
                     // TCP_ERR_RESET — genuine connection reset.
                     errno::set_errno(errno::ECONNRESET);
@@ -2031,13 +2028,18 @@ pub unsafe extern "C" fn send(
                 let new_handle = bind_ret as u64;
                 let prev_flags = fdtable::get_status_flags(fd).unwrap_or(0);
                 let _ = fdtable::install_fd_with_flags(
-                    fd, HandleKind::UdpSocket, new_handle, prev_flags,
+                    fd,
+                    HandleKind::UdpSocket,
+                    new_handle,
+                    prev_flags,
                 );
                 // Re-apply peer filter on the new handle.
                 let peer_port_host = u16::from_be(meta.peer_port);
                 let _ = syscall3(
-                    SYS_UDP_CONNECT, new_handle,
-                    u64::from(meta.peer_addr), u64::from(peer_port_host),
+                    SYS_UDP_CONNECT,
+                    new_handle,
+                    u64::from(meta.peer_addr),
+                    u64::from(peer_port_host),
                 );
                 new_handle
             } else {
@@ -2062,10 +2064,14 @@ pub unsafe extern "C" fn send(
             // Stream socket endpoint: blocking unless MSG_DONTWAIT or
             // O_NONBLOCK.  Returns partial writes like a pipe/TCP stream.
             let is_nb = (flags & MSG_DONTWAIT) != 0
-                || fdtable::get_status_flags(fd).unwrap_or(0)
-                    & crate::fcntl::O_NONBLOCK != 0;
+                || fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0;
             let ret = if is_nb {
-                syscall3(SYS_SOCKETPAIR_TRY_SEND, entry.handle, buf as u64, len as u64)
+                syscall3(
+                    SYS_SOCKETPAIR_TRY_SEND,
+                    entry.handle,
+                    buf as u64,
+                    len as u64,
+                )
             } else {
                 syscall3(SYS_SOCKETPAIR_SEND, entry.handle, buf as u64, len as u64)
             };
@@ -2096,12 +2102,7 @@ pub unsafe extern "C" fn send(
 /// `buf` must be valid for `len` bytes.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::too_many_lines)] // Large match over socket handle kinds (TCP / UnixStream / error cases); splitting would scatter related per-kind recv handling.
-pub unsafe extern "C" fn recv(
-    fd: i32,
-    buf: *mut u8,
-    len: usize,
-    flags: i32,
-) -> isize {
+pub unsafe extern "C" fn recv(fd: i32, buf: *mut u8, len: usize, flags: i32) -> isize {
     if buf.is_null() && len > 0 {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -2121,8 +2122,7 @@ pub unsafe extern "C" fn recv(
     // Build kernel flags from POSIX MSG_* constants.
     // MSG_PEEK (0x02), MSG_TRUNC (0x20), and MSG_DONTWAIT (0x40) are
     // passed through directly since we use matching numeric values.
-    let kern_flags = (flags as u32)
-        & (MSG_PEEK as u32 | MSG_TRUNC as u32 | MSG_DONTWAIT as u32);
+    let kern_flags = (flags as u32) & (MSG_PEEK as u32 | MSG_TRUNC as u32 | MSG_DONTWAIT as u32);
 
     // If the socket has O_NONBLOCK set, add MSG_DONTWAIT automatically.
     let kern_flags = if fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0 {
@@ -2141,22 +2141,29 @@ pub unsafe extern "C" fn recv(
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
             // MSG_WAITALL is meaningless with MSG_PEEK (peeking doesn't
             // consume data, so looping would re-read the same bytes forever).
-            let waitall = (flags & MSG_WAITALL) != 0 && !is_nb
-                && (flags & MSG_PEEK) == 0;
+            let waitall = (flags & MSG_WAITALL) != 0 && !is_nb && (flags & MSG_PEEK) == 0;
 
             // Always try non-blocking first so we can implement
             // timeout/blocking semantics in userspace consistently.
             let try_flags = kern_flags | MSG_DONTWAIT as u32;
 
             let ret = syscall4(
-                SYS_TCP_RECV, entry.handle,
-                buf as u64, len as u64, u64::from(try_flags),
+                SYS_TCP_RECV,
+                entry.handle,
+                buf as u64,
+                len as u64,
+                u64::from(try_flags),
             );
             if ret > 0 {
                 // MSG_WAITALL: keep receiving until `len` bytes or EOF/error.
                 if waitall && (ret as usize) < len {
                     return tcp_recv_waitall(
-                        entry.handle, buf, len, kern_flags, timeout_ms, ret as usize,
+                        entry.handle,
+                        buf,
+                        len,
+                        kern_flags,
+                        timeout_ms,
+                        ret as usize,
                     );
                 }
                 return ret as isize;
@@ -2170,13 +2177,9 @@ pub unsafe extern "C" fn recv(
                 // Blocking socket — poll-wait with SO_RCVTIMEO.
                 // timeout_ms == 0 means wait indefinitely.
                 if waitall {
-                    return tcp_recv_waitall(
-                        entry.handle, buf, len, kern_flags, timeout_ms, 0,
-                    );
+                    return tcp_recv_waitall(entry.handle, buf, len, kern_flags, timeout_ms, 0);
                 }
-                return tcp_recv_wait(
-                    entry.handle, buf, len, kern_flags, timeout_ms,
-                );
+                return tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms);
             }
             errno::set_errno(err);
             -1
@@ -2213,7 +2216,12 @@ pub unsafe extern "C" fn recv(
                 // Blocking mode: poll-wait with SO_RCVTIMEO.
                 let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
                 let waited = udp_recv_wait(
-                    entry.handle, buf, len, &mut src_info, kern_flags, timeout_ms,
+                    entry.handle,
+                    buf,
+                    len,
+                    &mut src_info,
+                    kern_flags,
+                    timeout_ms,
                 );
                 return waited;
             }
@@ -2227,7 +2235,12 @@ pub unsafe extern "C" fn recv(
             // stream-socket recv path; they are ignored.
             let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
             let ret = if is_nb {
-                syscall3(SYS_SOCKETPAIR_TRY_RECV, entry.handle, buf as u64, len as u64)
+                syscall3(
+                    SYS_SOCKETPAIR_TRY_RECV,
+                    entry.handle,
+                    buf as u64,
+                    len as u64,
+                )
             } else {
                 syscall3(SYS_SOCKETPAIR_RECV, entry.handle, buf as u64, len as u64)
             };
@@ -2321,8 +2334,11 @@ pub(crate) fn tcp_recv_wait(
 
     loop {
         let ret = syscall4(
-            SYS_TCP_RECV, handle,
-            buf as u64, len as u64, u64::from(flags_nb),
+            SYS_TCP_RECV,
+            handle,
+            buf as u64,
+            len as u64,
+            u64::from(flags_nb),
         );
         if ret > 0 {
             return ret as isize;
@@ -2384,8 +2400,11 @@ fn tcp_recv_waitall(
         let dst = unsafe { buf.add(got) };
 
         let ret = syscall4(
-            SYS_TCP_RECV, handle,
-            dst as u64, remaining as u64, u64::from(flags_nb),
+            SYS_TCP_RECV,
+            handle,
+            dst as u64,
+            remaining as u64,
+            u64::from(flags_nb),
         );
         if ret > 0 {
             got = got.saturating_add(ret as usize);
@@ -2430,12 +2449,7 @@ fn tcp_recv_waitall(
 /// indefinitely.
 ///
 /// Returns bytes sent or -1 (with errno set).
-pub(crate) fn tcp_send_wait(
-    handle: u64,
-    buf: *const u8,
-    len: usize,
-    timeout_ms: u64,
-) -> isize {
+pub(crate) fn tcp_send_wait(handle: u64, buf: *const u8, len: usize, timeout_ms: u64) -> isize {
     const POLL_NS: u64 = 10_000_000; // 10ms
 
     let deadline = if timeout_ms > 0 {
@@ -2475,10 +2489,13 @@ pub(crate) fn tcp_send_wait(
                 break;
             }
             if err == errno::ECONNRESET {
-                let last = crate::syscall::syscall1(
-                    crate::syscall::SYS_TCP_LAST_ERROR, handle,
-                ) as u8;
-                errno::set_errno(if last == 2 { errno::ECONNRESET } else { errno::EPIPE });
+                let last =
+                    crate::syscall::syscall1(crate::syscall::SYS_TCP_LAST_ERROR, handle) as u8;
+                errno::set_errno(if last == 2 {
+                    errno::ECONNRESET
+                } else {
+                    errno::EPIPE
+                });
             } else {
                 errno::set_errno(err);
             }
@@ -2561,10 +2578,13 @@ pub unsafe extern "C" fn sendto(
         let posix_err = translate_net_error(ret);
         // Distinguish RST (ECONNRESET) from local shutdown (EPIPE).
         if posix_err == errno::ECONNRESET {
-            let last = crate::syscall::syscall1(
-                crate::syscall::SYS_TCP_LAST_ERROR, entry.handle,
-            ) as u8;
-            errno::set_errno(if last == 2 { errno::ECONNRESET } else { errno::EPIPE });
+            let last =
+                crate::syscall::syscall1(crate::syscall::SYS_TCP_LAST_ERROR, entry.handle) as u8;
+            errno::set_errno(if last == 2 {
+                errno::ECONNRESET
+            } else {
+                errno::EPIPE
+            });
         } else {
             errno::set_errno(posix_err);
         }
@@ -2625,17 +2645,19 @@ pub unsafe extern "C" fn sendto(
         let new_handle = bind_ret as u64;
         // Update fd table with the new kernel handle, preserving status flags.
         let prev_flags = fdtable::get_status_flags(fd).unwrap_or(0);
-        let _ = fdtable::install_fd_with_flags(
-            fd, HandleKind::UdpSocket, new_handle, prev_flags,
-        );
+        let _ = fdtable::install_fd_with_flags(fd, HandleKind::UdpSocket, new_handle, prev_flags);
         // If this socket was connected (has a peer set), re-apply the
         // kernel-side peer filter so recvfrom() only returns datagrams
         // from the connected peer.
-        if let Some(meta) = get_meta(fd) && (meta.peer_addr != 0 || meta.peer_port != 0) {
+        if let Some(meta) = get_meta(fd)
+            && (meta.peer_addr != 0 || meta.peer_port != 0)
+        {
             let peer_port_host = u16::from_be(meta.peer_port);
             let _ = syscall3(
-                SYS_UDP_CONNECT, new_handle,
-                u64::from(meta.peer_addr), u64::from(peer_port_host),
+                SYS_UDP_CONNECT,
+                new_handle,
+                u64::from(meta.peer_addr),
+                u64::from(peer_port_host),
             );
         }
         new_handle
@@ -2700,8 +2722,7 @@ pub unsafe extern "C" fn recvfrom(
 
     // Build kernel flags (MSG_PEEK=0x02, MSG_TRUNC=0x20, MSG_DONTWAIT=0x40).
     let kern_flags = {
-        let f = (flags as u32)
-            & (MSG_PEEK as u32 | MSG_TRUNC as u32 | MSG_DONTWAIT as u32);
+        let f = (flags as u32) & (MSG_PEEK as u32 | MSG_TRUNC as u32 | MSG_DONTWAIT as u32);
         if fdtable::get_status_flags(fd).unwrap_or(0) & crate::fcntl::O_NONBLOCK != 0 {
             f | (MSG_DONTWAIT as u32)
         } else {
@@ -2720,8 +2741,7 @@ pub unsafe extern "C" fn recvfrom(
             let is_nb = (kern_flags & MSG_DONTWAIT as u32) != 0;
             let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
             // MSG_WAITALL is meaningless with MSG_PEEK (same as recv above).
-            let waitall = (flags & MSG_WAITALL) != 0 && !is_nb
-                && (flags & MSG_PEEK) == 0;
+            let waitall = (flags & MSG_WAITALL) != 0 && !is_nb && (flags & MSG_PEEK) == 0;
 
             // Always try non-blocking first so we can implement timeout
             // semantics in userspace.  If data is available, we return
@@ -2729,8 +2749,11 @@ pub unsafe extern "C" fn recvfrom(
             let try_flags = kern_flags | MSG_DONTWAIT as u32;
 
             let ret = syscall4(
-                SYS_TCP_RECV, entry.handle,
-                buf as u64, len as u64, u64::from(try_flags),
+                SYS_TCP_RECV,
+                entry.handle,
+                buf as u64,
+                len as u64,
+                u64::from(try_flags),
             );
 
             let recv_result = match ret.cmp(&0) {
@@ -2738,7 +2761,12 @@ pub unsafe extern "C" fn recvfrom(
                     // MSG_WAITALL: keep receiving until full.
                     if waitall && (ret as usize) < len {
                         tcp_recv_waitall(
-                            entry.handle, buf, len, kern_flags, timeout_ms, ret as usize,
+                            entry.handle,
+                            buf,
+                            len,
+                            kern_flags,
+                            timeout_ms,
+                            ret as usize,
                         )
                     } else {
                         ret as isize
@@ -2749,9 +2777,7 @@ pub unsafe extern "C" fn recvfrom(
                     let err = translate_net_error(ret);
                     if (err == errno::EAGAIN || err == errno::EWOULDBLOCK) && !is_nb {
                         if waitall {
-                            tcp_recv_waitall(
-                                entry.handle, buf, len, kern_flags, timeout_ms, 0,
-                            )
+                            tcp_recv_waitall(entry.handle, buf, len, kern_flags, timeout_ms, 0)
                         } else {
                             tcp_recv_wait(entry.handle, buf, len, kern_flags, timeout_ms)
                         }
@@ -2772,18 +2798,15 @@ pub unsafe extern "C" fn recvfrom(
                     let available = *addrlen as usize;
                     if available >= core::mem::size_of::<SockaddrIn>() {
                         let meta = get_meta(fd);
-                        let (ip, port) = meta.map_or((0u32, 0u16), |m| {
-                            (m.peer_addr, u16::from_be(m.peer_port))
-                        });
+                        let (ip, port) =
+                            meta.map_or((0u32, 0u16), |m| (m.peer_addr, u16::from_be(m.peer_port)));
                         let sa = SockaddrIn {
                             sin_family: AF_INET as u16,
                             sin_port: port.to_be(),
                             sin_addr: InAddr { s_addr: ip },
                             sin_zero: [0u8; 8],
                         };
-                        core::ptr::write_unaligned(
-                            src_addr.cast::<SockaddrIn>(), sa,
-                        );
+                        core::ptr::write_unaligned(src_addr.cast::<SockaddrIn>(), sa);
                     }
                     *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
                 }
@@ -2827,7 +2850,12 @@ pub unsafe extern "C" fn recvfrom(
                     // Blocking mode: poll-wait with SO_RCVTIMEO.
                     let timeout_ms = get_meta(fd).map_or(0u64, |m| m.rcvtimeo_ms);
                     let waited = udp_recv_wait(
-                        entry.handle, buf, len, &mut src_info, kern_flags, timeout_ms,
+                        entry.handle,
+                        buf,
+                        len,
+                        &mut src_info,
+                        kern_flags,
+                        timeout_ms,
                     );
                     if waited < 0 {
                         return waited;
@@ -2847,7 +2875,10 @@ pub unsafe extern "C" fn recvfrom(
                     let available = *addrlen as usize;
                     if available >= core::mem::size_of::<SockaddrIn>() {
                         let ip = u32::from_ne_bytes([
-                            src_info[0], src_info[1], src_info[2], src_info[3],
+                            src_info[0],
+                            src_info[1],
+                            src_info[2],
+                            src_info[3],
                         ]);
                         let port_le = u16::from_le_bytes([src_info[4], src_info[5]]);
                         let sa = SockaddrIn {
@@ -2856,9 +2887,7 @@ pub unsafe extern "C" fn recvfrom(
                             sin_addr: InAddr { s_addr: ip },
                             sin_zero: [0u8; 8],
                         };
-                        core::ptr::write_unaligned(
-                            src_addr.cast::<SockaddrIn>(), sa,
-                        );
+                        core::ptr::write_unaligned(src_addr.cast::<SockaddrIn>(), sa);
                     }
                     *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
                 }
@@ -3018,35 +3047,37 @@ pub extern "C" fn setsockopt(
     // Read the integer option value.
     let val = if !optval.is_null() && optlen as usize >= 4 {
         // SAFETY: optval points to at least 4 readable bytes.
-        i32::from_ne_bytes(unsafe {
-            [*optval, *optval.add(1), *optval.add(2), *optval.add(3)]
-        })
+        i32::from_ne_bytes(unsafe { [*optval, *optval.add(1), *optval.add(2), *optval.add(3)] })
     } else {
         0
     };
 
     if let Some(mut meta) = get_meta(fd) {
         match (level, optname) {
-            (SOL_SOCKET, SO_REUSEADDR) => { meta.reuseaddr = val != 0; }
+            (SOL_SOCKET, SO_REUSEADDR) => {
+                meta.reuseaddr = val != 0;
+            }
             (SOL_SOCKET, SO_KEEPALIVE) => {
                 meta.keepalive = val != 0;
                 // Wire through to kernel for TCP streams with active handles.
                 if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
-                    let _ = syscall2(
-                        SYS_TCP_SET_KEEPALIVE,
-                        entry.handle,
-                        u64::from(val != 0),
-                    );
+                    let _ = syscall2(SYS_TCP_SET_KEEPALIVE, entry.handle, u64::from(val != 0));
                 }
             }
-            (SOL_SOCKET, SO_RCVBUF) => { meta.rcvbuf = val.max(1); }
-            (SOL_SOCKET, SO_SNDBUF) => { meta.sndbuf = val.max(1); }
+            (SOL_SOCKET, SO_RCVBUF) => {
+                meta.rcvbuf = val.max(1);
+            }
+            (SOL_SOCKET, SO_SNDBUF) => {
+                meta.sndbuf = val.max(1);
+            }
             // RCVLOWAT/SNDLOWAT, REUSEPORT, multicast TTL/loop:
             // documented no-ops — intentionally same body as wildcard arm.
             #[allow(clippy::match_same_arms)]
             (SOL_SOCKET, SO_RCVLOWAT | SO_SNDLOWAT | SO_REUSEPORT)
             | (SOL_IP, IP_MULTICAST_TTL | IP_MULTICAST_LOOP) => {}
-            (SOL_SOCKET, SO_BROADCAST) => { meta.broadcast = val != 0; }
+            (SOL_SOCKET, SO_BROADCAST) => {
+                meta.broadcast = val != 0;
+            }
             (SOL_SOCKET, SO_LINGER) => {
                 // BSD struct linger { int l_onoff; int l_linger; } = 8 bytes.
                 if !optval.is_null() && optlen as usize >= 8 {
@@ -3054,7 +3085,12 @@ pub extern "C" fn setsockopt(
                         [*optval, *optval.add(1), *optval.add(2), *optval.add(3)]
                     });
                     let l_linger = i32::from_ne_bytes(unsafe {
-                        [*optval.add(4), *optval.add(5), *optval.add(6), *optval.add(7)]
+                        [
+                            *optval.add(4),
+                            *optval.add(5),
+                            *optval.add(6),
+                            *optval.add(7),
+                        ]
                     });
                     meta.linger_onoff = l_onoff != 0;
                     meta.linger_secs = l_linger;
@@ -3069,16 +3105,13 @@ pub extern "C" fn setsockopt(
                 // If optlen is >= 16 (sizeof timeval), parse as timeval.
                 // Otherwise treat val as milliseconds for compatibility.
                 let ms = if optlen as usize >= 16 {
-                    let tv_sec = unsafe {
-                        core::ptr::read_unaligned(optval.cast::<i64>())
-                    };
-                    let tv_usec = unsafe {
-                        core::ptr::read_unaligned(optval.add(8).cast::<i64>())
-                    };
+                    let tv_sec = unsafe { core::ptr::read_unaligned(optval.cast::<i64>()) };
+                    let tv_usec = unsafe { core::ptr::read_unaligned(optval.add(8).cast::<i64>()) };
                     // Ceiling division: round sub-millisecond values UP so
                     // that any non-zero timeval yields at least 1ms (otherwise
                     // {0, 500us} would store as 0ms = "no timeout" = block forever).
-                    (tv_sec.max(0) as u64).saturating_mul(1000)
+                    (tv_sec.max(0) as u64)
+                        .saturating_mul(1000)
                         .saturating_add((tv_usec.max(0) as u64).div_ceil(1000))
                 } else {
                     val.max(0) as u64
@@ -3087,14 +3120,11 @@ pub extern "C" fn setsockopt(
             }
             (SOL_SOCKET, SO_SNDTIMEO) => {
                 let ms = if optlen as usize >= 16 {
-                    let tv_sec = unsafe {
-                        core::ptr::read_unaligned(optval.cast::<i64>())
-                    };
-                    let tv_usec = unsafe {
-                        core::ptr::read_unaligned(optval.add(8).cast::<i64>())
-                    };
+                    let tv_sec = unsafe { core::ptr::read_unaligned(optval.cast::<i64>()) };
+                    let tv_usec = unsafe { core::ptr::read_unaligned(optval.add(8).cast::<i64>()) };
                     // Ceiling division (same rationale as SO_RCVTIMEO above).
-                    (tv_sec.max(0) as u64).saturating_mul(1000)
+                    (tv_sec.max(0) as u64)
+                        .saturating_mul(1000)
                         .saturating_add((tv_usec.max(0) as u64).div_ceil(1000))
                 } else {
                     val.max(0) as u64
@@ -3105,11 +3135,7 @@ pub extern "C" fn setsockopt(
                 meta.nodelay = val != 0;
                 // Wire through to kernel for TCP streams with active handles.
                 if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
-                    let _ = syscall2(
-                        SYS_TCP_SET_NODELAY,
-                        entry.handle,
-                        u64::from(val != 0),
-                    );
+                    let _ = syscall2(SYS_TCP_SET_NODELAY, entry.handle, u64::from(val != 0));
                 }
             }
             (SOL_TCP, TCP_CORK) => {
@@ -3283,20 +3309,17 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_SOCKET, SO_SNDBUF) => meta.map_or(65536, |m| m.sndbuf),
             (SOL_SOCKET, SO_BROADCAST) => meta.map_or(0, |m| i32::from(m.broadcast)),
             // These options all return 0: no port reuse, no user timeout, no DSCP/TOS.
-            (SOL_SOCKET, SO_REUSEPORT)
-            | (SOL_TCP, TCP_USER_TIMEOUT)
-            | (SOL_IP, IP_TOS) => 0,
+            (SOL_SOCKET, SO_REUSEPORT) | (SOL_TCP, TCP_USER_TIMEOUT) | (SOL_IP, IP_TOS) => 0,
             (SOL_SOCKET, SO_LINGER) => {
                 // Return struct linger { int l_onoff; int l_linger; } = 8 bytes.
                 if available >= 8 {
-                    let (onoff, secs) = meta.map_or((0i32, 0i32), |m| {
-                        (i32::from(m.linger_onoff), m.linger_secs)
-                    });
+                    let (onoff, secs) =
+                        meta.map_or((0i32, 0i32), |m| (i32::from(m.linger_onoff), m.linger_secs));
+                    core::ptr::copy_nonoverlapping((&raw const onoff).cast::<u8>(), optval, 4);
                     core::ptr::copy_nonoverlapping(
-                        (&raw const onoff).cast::<u8>(), optval, 4,
-                    );
-                    core::ptr::copy_nonoverlapping(
-                        (&raw const secs).cast::<u8>(), optval.add(4), 4,
+                        (&raw const secs).cast::<u8>(),
+                        optval.add(4),
+                        4,
                     );
                     *optlen = 8;
                     return 0;
@@ -3308,15 +3331,16 @@ pub unsafe extern "C" fn getsockopt(
                 // Return as timeval if buffer is big enough.
                 let ms = meta.map_or(0u64, |m| m.rcvtimeo_ms);
                 if available >= 16 {
-                    #[allow(clippy::arithmetic_side_effects)] // ms%1000 is 0..999; *1000 cannot overflow u64.
+                    #[allow(clippy::arithmetic_side_effects)]
+                    // ms%1000 is 0..999; *1000 cannot overflow u64.
                     let tv_sec = (ms / 1000) as i64;
                     #[allow(clippy::arithmetic_side_effects)]
                     let tv_usec = ((ms % 1000) * 1000) as i64;
+                    core::ptr::copy_nonoverlapping((&raw const tv_sec).cast::<u8>(), optval, 8);
                     core::ptr::copy_nonoverlapping(
-                        (&raw const tv_sec).cast::<u8>(), optval, 8,
-                    );
-                    core::ptr::copy_nonoverlapping(
-                        (&raw const tv_usec).cast::<u8>(), optval.add(8), 8,
+                        (&raw const tv_usec).cast::<u8>(),
+                        optval.add(8),
+                        8,
                     );
                     *optlen = 16;
                     return 0;
@@ -3327,15 +3351,16 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_SOCKET, SO_SNDTIMEO) => {
                 let ms = meta.map_or(0u64, |m| m.sndtimeo_ms);
                 if available >= 16 {
-                    #[allow(clippy::arithmetic_side_effects)] // ms%1000 is 0..999; *1000 cannot overflow u64.
+                    #[allow(clippy::arithmetic_side_effects)]
+                    // ms%1000 is 0..999; *1000 cannot overflow u64.
                     let tv_sec = (ms / 1000) as i64;
                     #[allow(clippy::arithmetic_side_effects)]
                     let tv_usec = ((ms % 1000) * 1000) as i64;
+                    core::ptr::copy_nonoverlapping((&raw const tv_sec).cast::<u8>(), optval, 8);
                     core::ptr::copy_nonoverlapping(
-                        (&raw const tv_sec).cast::<u8>(), optval, 8,
-                    );
-                    core::ptr::copy_nonoverlapping(
-                        (&raw const tv_usec).cast::<u8>(), optval.add(8), 8,
+                        (&raw const tv_usec).cast::<u8>(),
+                        optval.add(8),
+                        8,
                     );
                     *optlen = 16;
                     return 0;
@@ -3357,7 +3382,7 @@ pub unsafe extern "C" fn getsockopt(
             (SOL_TCP, TCP_KEEPIDLE) => meta.map_or(75, |m| m.keepidle),
             (SOL_TCP, TCP_KEEPINTVL) => meta.map_or(10, |m| m.keepintvl),
             (SOL_TCP, TCP_KEEPCNT) => meta.map_or(9, |m| m.keepcnt),
-            (SOL_TCP, TCP_MAXSEG) => 1460,   // Default MSS (Ethernet MTU - headers).
+            (SOL_TCP, TCP_MAXSEG) => 1460, // Default MSS (Ethernet MTU - headers).
             (SOL_TCP, TCP_CORK) => meta.map_or(0, |m| i32::from(m.cork)),
             (SOL_TCP, TCP_INFO) => {
                 // TCP_INFO returns a 48-byte struct with connection details.
@@ -3370,10 +3395,7 @@ pub unsafe extern "C" fn getsockopt(
                     errno::set_errno(errno::ENOTCONN);
                     return -1;
                 }
-                let ret = syscall3(
-                    SYS_TCP_INFO, entry.handle,
-                    optval as u64, available as u64,
-                );
+                let ret = syscall3(SYS_TCP_INFO, entry.handle, optval as u64, available as u64);
                 if ret < 0 {
                     errno::set_errno(translate_net_error(ret));
                     return -1;
@@ -3383,18 +3405,14 @@ pub unsafe extern "C" fn getsockopt(
             }
             // IP-level options: return sensible defaults even though we
             // don't have per-socket kernel storage for these yet.
-            (SOL_IP, IP_TTL) => 64,               // Default unicast TTL.
+            (SOL_IP, IP_TTL) => 64, // Default unicast TTL.
             _ => {
                 errno::set_errno(errno::ENOPROTOOPT);
                 return -1;
             }
         };
 
-        core::ptr::copy_nonoverlapping(
-            (&raw const val).cast::<u8>(),
-            optval,
-            4,
-        );
+        core::ptr::copy_nonoverlapping((&raw const val).cast::<u8>(), optval, 4);
         *optlen = 4;
     }
 
@@ -3417,11 +3435,7 @@ pub unsafe extern "C" fn getsockopt(
 /// `addr` must point to writable memory of at least `*addrlen` bytes.
 /// `addrlen` must be a valid pointer.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getpeername(
-    fd: i32,
-    addr: *mut Sockaddr,
-    addrlen: *mut SocklenT,
-) -> i32 {
+pub unsafe extern "C" fn getpeername(fd: i32, addr: *mut Sockaddr, addrlen: *mut SocklenT) -> i32 {
     let Some(entry) = fdtable::get_fd(fd) else {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -3443,11 +3457,7 @@ pub unsafe extern "C" fn getpeername(
     } else if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
         // Fall back to kernel query for TCP sockets.
         let mut buf = [0u8; 6];
-        let ret = syscall2(
-            SYS_TCP_PEER_ADDR,
-            entry.handle,
-            buf.as_mut_ptr() as u64,
-        );
+        let ret = syscall2(SYS_TCP_PEER_ADDR, entry.handle, buf.as_mut_ptr() as u64);
         if ret == 0 {
             let ip = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
             let port = u16::from_be_bytes([buf[4], buf[5]]);
@@ -3473,11 +3483,7 @@ pub unsafe extern "C" fn getpeername(
     unsafe {
         let available = *addrlen as usize;
         let copy_len = available.min(core::mem::size_of::<SockaddrIn>());
-        core::ptr::copy_nonoverlapping(
-            (&raw const sin).cast::<u8>(),
-            addr.cast::<u8>(),
-            copy_len,
-        );
+        core::ptr::copy_nonoverlapping((&raw const sin).cast::<u8>(), addr.cast::<u8>(), copy_len);
         #[allow(clippy::cast_possible_truncation)]
         {
             *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
@@ -3498,11 +3504,7 @@ pub unsafe extern "C" fn getpeername(
 /// `addr` must point to writable memory of at least `*addrlen` bytes.
 /// `addrlen` must be a valid pointer.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getsockname(
-    fd: i32,
-    addr: *mut Sockaddr,
-    addrlen: *mut SocklenT,
-) -> i32 {
+pub unsafe extern "C" fn getsockname(fd: i32, addr: *mut Sockaddr, addrlen: *mut SocklenT) -> i32 {
     if fdtable::get_fd(fd).is_none() {
         errno::set_errno(errno::EBADF);
         return -1;
@@ -3531,9 +3533,8 @@ pub unsafe extern "C" fn getsockname(
         meta.bound_port
     } else if entry.kind == HandleKind::TcpStream && entry.handle != 0 {
         // Connection: query kernel for ephemeral port (arg1=0 = connection).
-        let port_raw = crate::syscall::syscall2(
-            crate::syscall::SYS_TCP_LOCAL_PORT, entry.handle, 0,
-        );
+        let port_raw =
+            crate::syscall::syscall2(crate::syscall::SYS_TCP_LOCAL_PORT, entry.handle, 0);
         if port_raw > 0 {
             (port_raw as u16).to_be()
         } else {
@@ -3541,18 +3542,15 @@ pub unsafe extern "C" fn getsockname(
         }
     } else if entry.kind == HandleKind::TcpListener && entry.handle != 0 {
         // Listener: query kernel for listener's bound port (arg1=1 = listener).
-        let port_raw = crate::syscall::syscall2(
-            crate::syscall::SYS_TCP_LOCAL_PORT, entry.handle, 1,
-        );
+        let port_raw =
+            crate::syscall::syscall2(crate::syscall::SYS_TCP_LOCAL_PORT, entry.handle, 1);
         if port_raw > 0 {
             (port_raw as u16).to_be()
         } else {
             0
         }
     } else if entry.kind == HandleKind::UdpSocket && entry.handle != 0 {
-        let port_raw = crate::syscall::syscall1(
-            crate::syscall::SYS_UDP_LOCAL_PORT, entry.handle,
-        );
+        let port_raw = crate::syscall::syscall1(crate::syscall::SYS_UDP_LOCAL_PORT, entry.handle);
         if port_raw > 0 {
             (port_raw as u16).to_be()
         } else {
@@ -3577,11 +3575,7 @@ pub unsafe extern "C" fn getsockname(
     unsafe {
         let available = *addrlen as usize;
         let copy_len = available.min(core::mem::size_of::<SockaddrIn>());
-        core::ptr::copy_nonoverlapping(
-            (&raw const sin).cast::<u8>(),
-            addr.cast::<u8>(),
-            copy_len,
-        );
+        core::ptr::copy_nonoverlapping((&raw const sin).cast::<u8>(), addr.cast::<u8>(), copy_len);
         #[allow(clippy::cast_possible_truncation)]
         {
             *addrlen = core::mem::size_of::<SockaddrIn>() as SocklenT;
@@ -4010,7 +4004,9 @@ pub unsafe extern "C" fn getaddrinfo(
     }
 
     // SAFETY: res is non-null.
-    unsafe { *res = core::ptr::null_mut(); }
+    unsafe {
+        *res = core::ptr::null_mut();
+    }
 
     // Parse hints if provided.
     let (want_family, want_socktype, want_passive, want_flags) = if hints.is_null() {
@@ -4022,7 +4018,12 @@ pub unsafe extern "C" fn getaddrinfo(
         if h.ai_family != 0 && h.ai_family != AF_INET {
             return EAI_FAMILY;
         }
-        (h.ai_family, h.ai_socktype, h.ai_flags & AI_PASSIVE != 0, h.ai_flags)
+        (
+            h.ai_family,
+            h.ai_socktype,
+            h.ai_flags & AI_PASSIVE != 0,
+            h.ai_flags,
+        )
     };
 
     // We need at least a node or a service.
@@ -4043,9 +4044,7 @@ pub unsafe extern "C" fn getaddrinfo(
         // distinguishes "255.255.255.255" (valid) from parse failure.
         // inet_addr cannot do this because both cases return 0xFFFFFFFF.
         let mut addr_nbo: u32 = 0;
-        let pton_ok = unsafe {
-            inet_pton(AF_INET, node, (&raw mut addr_nbo).cast::<u8>())
-        };
+        let pton_ok = unsafe { inet_pton(AF_INET, node, (&raw mut addr_nbo).cast::<u8>()) };
         if pton_ok == 1 {
             addr_nbo
         } else {
@@ -4104,7 +4103,11 @@ pub unsafe extern "C" fn getaddrinfo(
     // Determine socket type(s) and protocol.
     // When ai_socktype=0 in hints (or no hints), return both SOCK_STREAM
     // and SOCK_DGRAM results so callers can pick the one they need.
-    let family = if want_family != 0 { want_family } else { AF_INET };
+    let family = if want_family != 0 {
+        want_family
+    } else {
+        AF_INET
+    };
     let addr_size = core::mem::size_of::<SockaddrIn>() as SocklenT;
 
     // SAFETY: Single-threaded access; getaddrinfo is not re-entrant (per POSIX).
@@ -4186,7 +4189,9 @@ pub extern "C" fn gai_strerror(errcode: i32) -> *const u8 {
     match errcode {
         0 => c"Success".as_ptr().cast::<u8>(),
         EAI_ADDRFAMILY | EAI_FAMILY => c"Address family not supported".as_ptr().cast::<u8>(),
-        EAI_AGAIN => c"Temporary failure in name resolution".as_ptr().cast::<u8>(),
+        EAI_AGAIN => c"Temporary failure in name resolution"
+            .as_ptr()
+            .cast::<u8>(),
         EAI_BADFLAGS => c"Invalid flags".as_ptr().cast::<u8>(),
         EAI_FAIL => c"Non-recoverable failure".as_ptr().cast::<u8>(),
         EAI_MEMORY => c"Memory allocation failure".as_ptr().cast::<u8>(),
@@ -4300,7 +4305,9 @@ pub extern "C" fn getnameinfo(
                 // SAFETY: name_len <= original ret <= hostlen-1 (kernel
                 // ensures copy_len <= buffer), so host[name_len] is in
                 // bounds.
-                unsafe { *host.add(name_len) = 0; }
+                unsafe {
+                    *host.add(name_len) = 0;
+                }
                 used_reverse = true;
             }
         }
@@ -4362,9 +4369,7 @@ pub extern "C" fn getnameinfo(
                     if name_len.wrapping_add(1) <= servlen as usize {
                         // SAFETY: serv is valid for servlen bytes.
                         unsafe {
-                            core::ptr::copy_nonoverlapping(
-                                s.s_name, serv, name_len,
-                            );
+                            core::ptr::copy_nonoverlapping(s.s_name, serv, name_len);
                             *serv.add(name_len) = 0;
                         }
                         used_name = true;
@@ -4461,12 +4466,7 @@ fn write_u16_decimal(buf: &mut [u8; 6], pos: &mut usize, val: u16) {
 /// On success writes the two fds into `sv[0]`/`sv[1]` and returns 0.
 /// On failure returns -1 with `errno` set.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn socketpair(
-    domain: i32,
-    sock_type: i32,
-    protocol: i32,
-    sv: *mut [i32; 2],
-) -> i32 {
+pub extern "C" fn socketpair(domain: i32, sock_type: i32, protocol: i32, sv: *mut [i32; 2]) -> i32 {
     // ---- Argument validation (all paths here return before any
     // syscall, so they are exercisable by host unit tests) ----
     if sv.is_null() {
@@ -4514,12 +4514,14 @@ pub extern "C" fn socketpair(
     let h1 = raw1 as u64;
 
     let initial_flags = crate::fcntl::O_RDWR
-        | if (type_flags & SOCK_NONBLOCK) != 0 { crate::fcntl::O_NONBLOCK } else { 0 };
+        | if (type_flags & SOCK_NONBLOCK) != 0 {
+            crate::fcntl::O_NONBLOCK
+        } else {
+            0
+        };
 
     // Allocate the first fd.
-    let Some(fd0) = fdtable::alloc_fd_with_flags(
-        HandleKind::UnixStream, h0, initial_flags,
-    ) else {
+    let Some(fd0) = fdtable::alloc_fd_with_flags(HandleKind::UnixStream, h0, initial_flags) else {
         // Could not install fd0 — release both kernel endpoints.
         let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h0);
         let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h1);
@@ -4528,9 +4530,7 @@ pub extern "C" fn socketpair(
     };
 
     // Allocate the second fd.
-    let Some(fd1) = fdtable::alloc_fd_with_flags(
-        HandleKind::UnixStream, h1, initial_flags,
-    ) else {
+    let Some(fd1) = fdtable::alloc_fd_with_flags(HandleKind::UnixStream, h1, initial_flags) else {
         // Roll back fd0 (frees its table slot) and close both endpoints.
         let _ = fdtable::close_fd(fd0);
         let _ = syscall1(SYS_SOCKETPAIR_CLOSE, h0);
@@ -4608,7 +4608,8 @@ pub struct Cmsghdr {
 /// larger messages, sends each iov sequentially.
 /// Ancillary data (`msg_control`) is ignored.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::too_many_lines)] // Scatter/gather send with stack buffer consolidation for TCP/UDP; splitting would fragment the iov assembly logic.
+#[allow(clippy::too_many_lines)]
+// Scatter/gather send with stack buffer consolidation for TCP/UDP; splitting would fragment the iov assembly logic.
 #[allow(clippy::cast_ptr_alignment)] // SAFETY: msg_name is typed as *mut u8 in Msghdr but actually points to a sockaddr; callers guarantee correct alignment.
 pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isize {
     const STACK_BUF: usize = 4096;
@@ -4689,7 +4690,10 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
         return if has_dest {
             unsafe {
                 sendto(
-                    fd, buf.as_ptr(), pos, flags,
+                    fd,
+                    buf.as_ptr(),
+                    pos,
+                    flags,
                     m.msg_name.cast::<Sockaddr>().cast_const(),
                     m.msg_namelen,
                 )
@@ -4704,8 +4708,7 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
     // Sending each iov separately would create multiple datagrams, which
     // is wrong — sendmsg on DGRAM sends exactly one datagram.
     // For TCP: per-iov sending is correct (TCP is a byte stream).
-    let is_dgram = fdtable::get_fd(fd)
-        .is_some_and(|e| e.kind == HandleKind::UdpSocket);
+    let is_dgram = fdtable::get_fd(fd).is_some_and(|e| e.kind == HandleKind::UdpSocket);
 
     if is_dgram {
         // UDP: concatenate into a larger buffer.  Max UDP payload = 65507.
@@ -4737,7 +4740,10 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
             return if has_dest {
                 unsafe {
                     sendto(
-                        fd, buf.as_ptr(), pos, flags,
+                        fd,
+                        buf.as_ptr(),
+                        pos,
+                        flags,
                         m.msg_name.cast::<Sockaddr>().cast_const(),
                         m.msg_namelen,
                     )
@@ -4767,7 +4773,10 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
         return if has_dest {
             unsafe {
                 sendto(
-                    fd, buf.as_ptr(), pos, flags,
+                    fd,
+                    buf.as_ptr(),
+                    pos,
+                    flags,
                     m.msg_name.cast::<Sockaddr>().cast_const(),
                     m.msg_namelen,
                 )
@@ -4786,7 +4795,10 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
             let n = if has_dest {
                 unsafe {
                     sendto(
-                        fd, iov.iov_base.cast::<u8>(), iov.iov_len, flags,
+                        fd,
+                        iov.iov_base.cast::<u8>(),
+                        iov.iov_len,
+                        flags,
                         m.msg_name.cast::<Sockaddr>().cast_const(),
                         m.msg_namelen,
                     )
@@ -4815,7 +4827,8 @@ pub unsafe extern "C" fn sendmsg(fd: i32, msg: *const Msghdr, flags: i32) -> isi
 /// receives into a stack buffer and copies out to each iov.
 /// Ancillary data (`msg_control`) is not populated.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-#[allow(clippy::too_many_lines)] // Scatter/gather recv with multi-iov distribution and MSG_WAITALL; splitting would fragment the logic.
+#[allow(clippy::too_many_lines)]
+// Scatter/gather recv with multi-iov distribution and MSG_WAITALL; splitting would fragment the logic.
 #[allow(clippy::cast_ptr_alignment)] // SAFETY: msg_name is typed as *mut u8 in Msghdr but actually points to a sockaddr; callers guarantee correct alignment.
 pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize {
     const STACK_BUF_SMALL: usize = 4096;
@@ -4863,8 +4876,7 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
         // Detect truncation for datagram sockets: when MSG_TRUNC was passed,
         // the kernel returns the real datagram size.  If ret > buffer size,
         // the datagram was truncated.
-        let is_dgram = fdtable::get_fd(fd)
-            .is_some_and(|e| e.kind == HandleKind::UdpSocket);
+        let is_dgram = fdtable::get_fd(fd).is_some_and(|e| e.kind == HandleKind::UdpSocket);
         m.msg_flags = if is_dgram && ret > 0 && (ret as usize) > iov.iov_len {
             MSG_TRUNC
         } else {
@@ -4965,22 +4977,29 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
     // For TCP: 4 KiB is fine — TCP is a byte stream and short reads are
     // expected; the remaining data is still in the kernel buffer.
 
-    let is_dgram = fdtable::get_fd(fd)
-        .is_some_and(|e| e.kind == HandleKind::UdpSocket);
+    let is_dgram = fdtable::get_fd(fd).is_some_and(|e| e.kind == HandleKind::UdpSocket);
 
     // Choose receive buffer size: for UDP, use the larger buffer if needed
     // to avoid truncating datagrams the caller has room for.
     let use_large_buf = is_dgram && total_cap > STACK_BUF_SMALL;
 
     let (received, trunc_flag) = if use_large_buf {
-        let recv_cap = if total_cap < STACK_BUF_LARGE { total_cap } else { STACK_BUF_LARGE };
+        let recv_cap = if total_cap < STACK_BUF_LARGE {
+            total_cap
+        } else {
+            STACK_BUF_LARGE
+        };
         let mut buf = [0u8; STACK_BUF_LARGE];
         let ret = if !m.msg_name.is_null() && m.msg_namelen > 0 {
             let mut addrlen = m.msg_namelen;
             let r = unsafe {
                 recvfrom(
-                    fd, buf.as_mut_ptr(), recv_cap, flags,
-                    m.msg_name.cast::<Sockaddr>(), &raw mut addrlen,
+                    fd,
+                    buf.as_mut_ptr(),
+                    recv_cap,
+                    flags,
+                    m.msg_name.cast::<Sockaddr>(),
+                    &raw mut addrlen,
                 )
             };
             m.msg_namelen = addrlen;
@@ -5002,7 +5021,11 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
         while i < m.msg_iovlen && remaining > 0 {
             let iov = unsafe { &*m.msg_iov.add(i) };
             if iov.iov_len > 0 && !iov.iov_base.is_null() {
-                let to_copy = if remaining < iov.iov_len { remaining } else { iov.iov_len };
+                let to_copy = if remaining < iov.iov_len {
+                    remaining
+                } else {
+                    iov.iov_len
+                };
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         buf.as_ptr().add(src_pos),
@@ -5018,14 +5041,22 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
         let trunc = received == recv_cap && recv_cap < total_cap;
         (ret, trunc)
     } else {
-        let recv_cap = if total_cap < STACK_BUF_SMALL { total_cap } else { STACK_BUF_SMALL };
+        let recv_cap = if total_cap < STACK_BUF_SMALL {
+            total_cap
+        } else {
+            STACK_BUF_SMALL
+        };
         let mut buf = [0u8; STACK_BUF_SMALL];
         let ret = if !m.msg_name.is_null() && m.msg_namelen > 0 {
             let mut addrlen = m.msg_namelen;
             let r = unsafe {
                 recvfrom(
-                    fd, buf.as_mut_ptr(), recv_cap, flags,
-                    m.msg_name.cast::<Sockaddr>(), &raw mut addrlen,
+                    fd,
+                    buf.as_mut_ptr(),
+                    recv_cap,
+                    flags,
+                    m.msg_name.cast::<Sockaddr>(),
+                    &raw mut addrlen,
                 )
             };
             m.msg_namelen = addrlen;
@@ -5047,7 +5078,11 @@ pub unsafe extern "C" fn recvmsg(fd: i32, msg: *mut Msghdr, flags: i32) -> isize
         while i < m.msg_iovlen && remaining > 0 {
             let iov = unsafe { &*m.msg_iov.add(i) };
             if iov.iov_len > 0 && !iov.iov_base.is_null() {
-                let to_copy = if remaining < iov.iov_len { remaining } else { iov.iov_len };
+                let to_copy = if remaining < iov.iov_len {
+                    remaining
+                } else {
+                    iov.iov_len
+                };
                 unsafe {
                     core::ptr::copy_nonoverlapping(
                         buf.as_ptr().add(src_pos),
@@ -5191,8 +5226,14 @@ static mut IF_NAMEINDEX_NAMES: [u8; 5] = *b"eth0\0";
 
 /// Static array of `IfNameindex` entries: one real entry + sentinel.
 static mut IF_NAMEINDEX_TABLE: [IfNameindex; 2] = [
-    IfNameindex { if_index: 1, if_name: core::ptr::null_mut() },
-    IfNameindex { if_index: 0, if_name: core::ptr::null_mut() },
+    IfNameindex {
+        if_index: 1,
+        if_name: core::ptr::null_mut(),
+    },
+    IfNameindex {
+        if_index: 0,
+        if_name: core::ptr::null_mut(),
+    },
 ];
 
 /// Return an array of all network interface names and indices.
@@ -5287,20 +5328,32 @@ static mut IFADDRS_LO: Ifaddrs = Ifaddrs {
 static mut IFADDRS_ETH0_NAME: [u8; 8] = *b"eth0\0\0\0\0";
 static mut IFADDRS_LO_NAME: [u8; 4] = *b"lo\0\0";
 static mut IFADDRS_ETH0_ADDR: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16, sin_port: 0,
-    sin_addr: InAddr { s_addr: 0 }, sin_zero: [0; 8],
+    sin_family: AF_INET as u16,
+    sin_port: 0,
+    sin_addr: InAddr { s_addr: 0 },
+    sin_zero: [0; 8],
 };
 static mut IFADDRS_ETH0_MASK: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16, sin_port: 0,
-    sin_addr: InAddr { s_addr: 0 }, sin_zero: [0; 8],
+    sin_family: AF_INET as u16,
+    sin_port: 0,
+    sin_addr: InAddr { s_addr: 0 },
+    sin_zero: [0; 8],
 };
 static mut IFADDRS_LO_ADDR: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16, sin_port: 0,
-    sin_addr: InAddr { s_addr: u32::to_be(INADDR_LOOPBACK) }, sin_zero: [0; 8],
+    sin_family: AF_INET as u16,
+    sin_port: 0,
+    sin_addr: InAddr {
+        s_addr: u32::to_be(INADDR_LOOPBACK),
+    },
+    sin_zero: [0; 8],
 };
 static mut IFADDRS_LO_MASK: SockaddrIn = SockaddrIn {
-    sin_family: AF_INET as u16, sin_port: 0,
-    sin_addr: InAddr { s_addr: u32::to_be(0xFF00_0000) }, sin_zero: [0; 8],
+    sin_family: AF_INET as u16,
+    sin_port: 0,
+    sin_addr: InAddr {
+        s_addr: u32::to_be(0xFF00_0000),
+    },
+    sin_zero: [0; 8],
 };
 
 /// Retrieve a linked list of network interface addresses.
@@ -5327,7 +5380,8 @@ pub unsafe extern "C" fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32 {
         SYS_NET_IF_INFO,
         if_info.as_mut_ptr() as u64,
         if_info.len() as u64,
-    ) == 0 && if_info[22] != 0; // byte 22 = flags, bit 0 = up
+    ) == 0
+        && if_info[22] != 0; // byte 22 = flags, bit 0 = up
 
     // SAFETY: single-threaded, static storage.
     unsafe {
@@ -5410,33 +5464,141 @@ struct ServiceEntry {
 
 /// Built-in service database — covers the most commonly needed services.
 static SERVICES: &[ServiceEntry] = &[
-    ServiceEntry { name: b"echo",     port: 7,     proto: b"tcp" },
-    ServiceEntry { name: b"echo",     port: 7,     proto: b"udp" },
-    ServiceEntry { name: b"ftp-data", port: 20,    proto: b"tcp" },
-    ServiceEntry { name: b"ftp",      port: 21,    proto: b"tcp" },
-    ServiceEntry { name: b"ssh",      port: 22,    proto: b"tcp" },
-    ServiceEntry { name: b"telnet",   port: 23,    proto: b"tcp" },
-    ServiceEntry { name: b"smtp",     port: 25,    proto: b"tcp" },
-    ServiceEntry { name: b"dns",      port: 53,    proto: b"udp" },
-    ServiceEntry { name: b"domain",   port: 53,    proto: b"udp" },
-    ServiceEntry { name: b"domain",   port: 53,    proto: b"tcp" },
-    ServiceEntry { name: b"http",     port: 80,    proto: b"tcp" },
-    ServiceEntry { name: b"pop3",     port: 110,   proto: b"tcp" },
-    ServiceEntry { name: b"nntp",     port: 119,   proto: b"tcp" },
-    ServiceEntry { name: b"ntp",      port: 123,   proto: b"udp" },
-    ServiceEntry { name: b"imap",     port: 143,   proto: b"tcp" },
-    ServiceEntry { name: b"snmp",     port: 161,   proto: b"udp" },
-    ServiceEntry { name: b"https",    port: 443,   proto: b"tcp" },
-    ServiceEntry { name: b"smtps",    port: 465,   proto: b"tcp" },
-    ServiceEntry { name: b"submission", port: 587, proto: b"tcp" },
-    ServiceEntry { name: b"imaps",    port: 993,   proto: b"tcp" },
-    ServiceEntry { name: b"pop3s",    port: 995,   proto: b"tcp" },
-    ServiceEntry { name: b"socks",    port: 1080,  proto: b"tcp" },
-    ServiceEntry { name: b"mysql",    port: 3306,  proto: b"tcp" },
-    ServiceEntry { name: b"postgresql", port: 5432, proto: b"tcp" },
-    ServiceEntry { name: b"redis",    port: 6379,  proto: b"tcp" },
-    ServiceEntry { name: b"http-alt", port: 8080,  proto: b"tcp" },
-    ServiceEntry { name: b"http-alt", port: 8443,  proto: b"tcp" },
+    ServiceEntry {
+        name: b"echo",
+        port: 7,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"echo",
+        port: 7,
+        proto: b"udp",
+    },
+    ServiceEntry {
+        name: b"ftp-data",
+        port: 20,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"ftp",
+        port: 21,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"ssh",
+        port: 22,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"telnet",
+        port: 23,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"smtp",
+        port: 25,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"dns",
+        port: 53,
+        proto: b"udp",
+    },
+    ServiceEntry {
+        name: b"domain",
+        port: 53,
+        proto: b"udp",
+    },
+    ServiceEntry {
+        name: b"domain",
+        port: 53,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"http",
+        port: 80,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"pop3",
+        port: 110,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"nntp",
+        port: 119,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"ntp",
+        port: 123,
+        proto: b"udp",
+    },
+    ServiceEntry {
+        name: b"imap",
+        port: 143,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"snmp",
+        port: 161,
+        proto: b"udp",
+    },
+    ServiceEntry {
+        name: b"https",
+        port: 443,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"smtps",
+        port: 465,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"submission",
+        port: 587,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"imaps",
+        port: 993,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"pop3s",
+        port: 995,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"socks",
+        port: 1080,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"mysql",
+        port: 3306,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"postgresql",
+        port: 5432,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"redis",
+        port: 6379,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"http-alt",
+        port: 8080,
+        proto: b"tcp",
+    },
+    ServiceEntry {
+        name: b"http-alt",
+        port: 8443,
+        proto: b"tcp",
+    },
 ];
 
 /// Static storage for getservbyname/getservbyport results.
@@ -5496,10 +5658,7 @@ unsafe fn fill_servent(entry: &ServiceEntry) -> *const Servent {
 /// `name` must be a valid null-terminated string.
 /// `proto` may be null (match any protocol) or a null-terminated protocol name.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getservbyname(
-    name: *const u8,
-    proto: *const u8,
-) -> *const Servent {
+pub unsafe extern "C" fn getservbyname(name: *const u8, proto: *const u8) -> *const Servent {
     if name.is_null() {
         return core::ptr::null();
     }
@@ -5515,9 +5674,7 @@ pub unsafe extern "C" fn getservbyname(
     };
 
     for entry in SERVICES {
-        if entry.name == name_slice
-            && (proto_slice.is_empty() || entry.proto == proto_slice)
-        {
+        if entry.name == name_slice && (proto_slice.is_empty() || entry.proto == proto_slice) {
             return unsafe { fill_servent(entry) };
         }
     }
@@ -5532,10 +5689,7 @@ pub unsafe extern "C" fn getservbyname(
 ///
 /// `proto` may be null (match any protocol) or a null-terminated protocol name.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn getservbyport(
-    port: i32,
-    proto: *const u8,
-) -> *const Servent {
+pub unsafe extern "C" fn getservbyport(port: i32, proto: *const u8) -> *const Servent {
     let host_port = u16::from_be(port as u16);
 
     let proto_slice = if proto.is_null() {
@@ -5546,9 +5700,7 @@ pub unsafe extern "C" fn getservbyport(
     };
 
     for entry in SERVICES {
-        if entry.port == host_port
-            && (proto_slice.is_empty() || entry.proto == proto_slice)
-        {
+        if entry.port == host_port && (proto_slice.is_empty() || entry.proto == proto_slice) {
             return unsafe { fill_servent(entry) };
         }
     }
@@ -5578,17 +5730,61 @@ struct ProtoEntry {
 }
 
 static PROTOCOLS: &[ProtoEntry] = &[
-    ProtoEntry { name: b"ip",       number: 0,   aliases: &[b"IP"] },
-    ProtoEntry { name: b"icmp",     number: 1,   aliases: &[b"ICMP"] },
-    ProtoEntry { name: b"igmp",     number: 2,   aliases: &[b"IGMP"] },
-    ProtoEntry { name: b"tcp",      number: 6,   aliases: &[b"TCP"] },
-    ProtoEntry { name: b"udp",      number: 17,  aliases: &[b"UDP"] },
-    ProtoEntry { name: b"ipv6",     number: 41,  aliases: &[b"IPv6"] },
-    ProtoEntry { name: b"gre",      number: 47,  aliases: &[b"GRE"] },
-    ProtoEntry { name: b"esp",      number: 50,  aliases: &[b"ESP"] },
-    ProtoEntry { name: b"ah",       number: 51,  aliases: &[b"AH"] },
-    ProtoEntry { name: b"icmpv6",   number: 58,  aliases: &[b"ICMPv6"] },
-    ProtoEntry { name: b"sctp",     number: 132, aliases: &[b"SCTP"] },
+    ProtoEntry {
+        name: b"ip",
+        number: 0,
+        aliases: &[b"IP"],
+    },
+    ProtoEntry {
+        name: b"icmp",
+        number: 1,
+        aliases: &[b"ICMP"],
+    },
+    ProtoEntry {
+        name: b"igmp",
+        number: 2,
+        aliases: &[b"IGMP"],
+    },
+    ProtoEntry {
+        name: b"tcp",
+        number: 6,
+        aliases: &[b"TCP"],
+    },
+    ProtoEntry {
+        name: b"udp",
+        number: 17,
+        aliases: &[b"UDP"],
+    },
+    ProtoEntry {
+        name: b"ipv6",
+        number: 41,
+        aliases: &[b"IPv6"],
+    },
+    ProtoEntry {
+        name: b"gre",
+        number: 47,
+        aliases: &[b"GRE"],
+    },
+    ProtoEntry {
+        name: b"esp",
+        number: 50,
+        aliases: &[b"ESP"],
+    },
+    ProtoEntry {
+        name: b"ah",
+        number: 51,
+        aliases: &[b"AH"],
+    },
+    ProtoEntry {
+        name: b"icmpv6",
+        number: 58,
+        aliases: &[b"ICMPv6"],
+    },
+    ProtoEntry {
+        name: b"sctp",
+        number: 132,
+        aliases: &[b"SCTP"],
+    },
 ];
 
 static mut PROTOENT_NAME: [u8; 16] = [0u8; 16];
@@ -5718,37 +5914,37 @@ pub extern "C" fn getprotobynumber(number: i32) -> *const Protoent {
 pub(crate) fn translate_net_error(code: i64) -> i32 {
     match code {
         // General.
-        -1  => errno::EIO,           // InternalError
-        -2  => errno::ENOTSUP,       // NotSupported
-        -3  => errno::EINVAL,        // InvalidArgument
-        -4  => errno::EAGAIN,        // WouldBlock
-        -5  => errno::ECANCELED,     // Cancelled
-        -6  => errno::ETIMEDOUT,     // TimedOut
+        -1 => errno::EIO,       // InternalError
+        -2 => errno::ENOTSUP,   // NotSupported
+        -3 => errno::EINVAL,    // InvalidArgument
+        -4 => errno::EAGAIN,    // WouldBlock
+        -5 => errno::ECANCELED, // Cancelled
+        -6 => errno::ETIMEDOUT, // TimedOut
 
         // Memory.
-        -100 => errno::ENOMEM,       // OutOfMemory
+        -100 => errno::ENOMEM, // OutOfMemory
 
         // Process.
-        -200 => errno::ESRCH,        // NoSuchProcess
+        -200 => errno::ESRCH, // NoSuchProcess
 
         // IPC.
-        -300 => errno::ECONNRESET,   // ChannelClosed
-        -301 => errno::EAGAIN,       // ChannelFull
-        -304 => errno::ENOMEM,       // ResourceExhausted
+        -300 => errno::ECONNRESET, // ChannelClosed
+        -301 => errno::EAGAIN,     // ChannelFull
+        -304 => errno::ENOMEM,     // ResourceExhausted
 
         // Capability / permission.
         -400 | -401 => errno::EACCES, // PermissionDenied / InvalidCapability
 
         // Filesystem / not-found.
-        -500 => errno::ENOENT,       // NotFound  (also ECONNREFUSED for connect)
-        -501 => errno::EADDRINUSE,   // AlreadyExists
-        -505 => errno::EBADF,        // InvalidHandle
+        -500 => errno::ENOENT,     // NotFound  (also ECONNREFUSED for connect)
+        -501 => errno::EADDRINUSE, // AlreadyExists
+        -505 => errno::EBADF,      // InvalidHandle
 
         // Device / I/O.
-        -600 => errno::EIO,          // IoError
-        -601 => errno::ENODEV,       // NoSuchDevice
+        -600 => errno::EIO,    // IoError
+        -601 => errno::ENODEV, // NoSuchDevice
 
-        _ => errno::EIO,             // Unknown → generic I/O error
+        _ => errno::EIO, // Unknown → generic I/O error
     }
 }
 
@@ -5852,24 +6048,41 @@ mod tests {
     #[test]
     fn test_inet_addr_invalid_format() {
         // Too few octets.
-        assert_eq!(unsafe { inet_addr(c"127.0.1".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+        assert_eq!(
+            unsafe { inet_addr(c"127.0.1".as_ptr().cast::<u8>()) },
+            0xFFFF_FFFF
+        );
         // Too many octets.
-        assert_eq!(unsafe { inet_addr(c"1.2.3.4.5".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+        assert_eq!(
+            unsafe { inet_addr(c"1.2.3.4.5".as_ptr().cast::<u8>()) },
+            0xFFFF_FFFF
+        );
         // Octet > 255.
-        assert_eq!(unsafe { inet_addr(c"256.0.0.1".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+        assert_eq!(
+            unsafe { inet_addr(c"256.0.0.1".as_ptr().cast::<u8>()) },
+            0xFFFF_FFFF
+        );
         // Non-numeric.
-        assert_eq!(unsafe { inet_addr(c"abc.def.ghi.jkl".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+        assert_eq!(
+            unsafe { inet_addr(c"abc.def.ghi.jkl".as_ptr().cast::<u8>()) },
+            0xFFFF_FFFF
+        );
         // Empty.
         assert_eq!(unsafe { inet_addr(c"".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
         // Leading dot.
-        assert_eq!(unsafe { inet_addr(c".1.2.3".as_ptr().cast::<u8>()) }, 0xFFFF_FFFF);
+        assert_eq!(
+            unsafe { inet_addr(c".1.2.3".as_ptr().cast::<u8>()) },
+            0xFFFF_FFFF
+        );
     }
 
     // -- inet_ntoa tests --
 
     #[test]
     fn test_inet_ntoa_loopback() {
-        let addr = InAddr { s_addr: u32::from_ne_bytes([127, 0, 0, 1]) };
+        let addr = InAddr {
+            s_addr: u32::from_ne_bytes([127, 0, 0, 1]),
+        };
         let ptr = inet_ntoa(addr);
         let s = unsafe { c_str_to_slice(ptr) };
         assert_eq!(s, b"127.0.0.1");
@@ -5885,7 +6098,9 @@ mod tests {
 
     #[test]
     fn test_inet_ntoa_broadcast() {
-        let addr = InAddr { s_addr: u32::from_ne_bytes([255, 255, 255, 255]) };
+        let addr = InAddr {
+            s_addr: u32::from_ne_bytes([255, 255, 255, 255]),
+        };
         let ptr = inet_ntoa(addr);
         let s = unsafe { c_str_to_slice(ptr) };
         assert_eq!(s, b"255.255.255.255");
@@ -5929,21 +6144,21 @@ mod tests {
     #[test]
     fn test_translate_net_error_known() {
         // General errors.
-        assert_eq!(translate_net_error(-1), errno::EIO);            // InternalError
-        assert_eq!(translate_net_error(-2), errno::ENOTSUP);        // NotSupported
-        assert_eq!(translate_net_error(-3), errno::EINVAL);         // InvalidArgument
-        assert_eq!(translate_net_error(-4), errno::EAGAIN);         // WouldBlock
-        assert_eq!(translate_net_error(-5), errno::ECANCELED);      // Cancelled
-        assert_eq!(translate_net_error(-6), errno::ETIMEDOUT);      // TimedOut
+        assert_eq!(translate_net_error(-1), errno::EIO); // InternalError
+        assert_eq!(translate_net_error(-2), errno::ENOTSUP); // NotSupported
+        assert_eq!(translate_net_error(-3), errno::EINVAL); // InvalidArgument
+        assert_eq!(translate_net_error(-4), errno::EAGAIN); // WouldBlock
+        assert_eq!(translate_net_error(-5), errno::ECANCELED); // Cancelled
+        assert_eq!(translate_net_error(-6), errno::ETIMEDOUT); // TimedOut
         // Memory.
-        assert_eq!(translate_net_error(-100), errno::ENOMEM);       // OutOfMemory
+        assert_eq!(translate_net_error(-100), errno::ENOMEM); // OutOfMemory
         // Capability / permission.
-        assert_eq!(translate_net_error(-400), errno::EACCES);       // PermissionDenied
+        assert_eq!(translate_net_error(-400), errno::EACCES); // PermissionDenied
         // Filesystem.
-        assert_eq!(translate_net_error(-500), errno::ENOENT);       // NotFound
-        assert_eq!(translate_net_error(-501), errno::EADDRINUSE);   // AlreadyExists
+        assert_eq!(translate_net_error(-500), errno::ENOENT); // NotFound
+        assert_eq!(translate_net_error(-501), errno::EADDRINUSE); // AlreadyExists
         // Device.
-        assert_eq!(translate_net_error(-601), errno::ENODEV);       // NoSuchDevice
+        assert_eq!(translate_net_error(-601), errno::ENODEV); // NoSuchDevice
     }
 
     #[test]
@@ -6059,7 +6274,13 @@ mod tests {
     #[test]
     fn test_inet_pton4_broadcast() {
         let mut dst = [0u8; 4];
-        let ret = unsafe { inet_pton(AF_INET, c"255.255.255.255".as_ptr().cast(), dst.as_mut_ptr()) };
+        let ret = unsafe {
+            inet_pton(
+                AF_INET,
+                c"255.255.255.255".as_ptr().cast(),
+                dst.as_mut_ptr(),
+            )
+        };
         assert_eq!(ret, 1);
         assert_eq!(dst, [255, 255, 255, 255]);
     }
@@ -6068,13 +6289,25 @@ mod tests {
     fn test_inet_pton4_invalid() {
         let mut dst = [0u8; 4];
         // Too few octets.
-        assert_eq!(unsafe { inet_pton(AF_INET, c"127.0.1".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET, c"127.0.1".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
         // Too many.
-        assert_eq!(unsafe { inet_pton(AF_INET, c"1.2.3.4.5".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET, c"1.2.3.4.5".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
         // Octet > 255.
-        assert_eq!(unsafe { inet_pton(AF_INET, c"256.0.0.1".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET, c"256.0.0.1".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
         // Empty.
-        assert_eq!(unsafe { inet_pton(AF_INET, c"".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET, c"".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
     }
 
     #[test]
@@ -6087,8 +6320,14 @@ mod tests {
     #[test]
     fn test_inet_pton_null() {
         let mut dst = [0u8; 4];
-        assert_eq!(unsafe { inet_pton(AF_INET, core::ptr::null(), dst.as_mut_ptr()) }, 0);
-        assert_eq!(unsafe { inet_pton(AF_INET, c"1.2.3.4".as_ptr().cast(), core::ptr::null_mut()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET, core::ptr::null(), dst.as_mut_ptr()) },
+            0
+        );
+        assert_eq!(
+            unsafe { inet_pton(AF_INET, c"1.2.3.4".as_ptr().cast(), core::ptr::null_mut()) },
+            0
+        );
     }
 
     // -- inet_pton IPv6 tests --
@@ -6114,11 +6353,17 @@ mod tests {
     #[test]
     fn test_inet_pton6_full_form() {
         let mut dst = [0u8; 16];
-        let ret = unsafe { inet_pton(AF_INET6, c"2001:0db8:0000:0000:0000:0000:0000:0001".as_ptr().cast(), dst.as_mut_ptr()) };
+        let ret = unsafe {
+            inet_pton(
+                AF_INET6,
+                c"2001:0db8:0000:0000:0000:0000:0000:0001".as_ptr().cast(),
+                dst.as_mut_ptr(),
+            )
+        };
         assert_eq!(ret, 1);
         assert_eq!(dst[0..2], [0x20, 0x01]); // 2001
         assert_eq!(dst[2..4], [0x0d, 0xb8]); // 0db8
-        assert_eq!(dst[4..14], [0u8; 10]);    // zeros
+        assert_eq!(dst[4..14], [0u8; 10]); // zeros
         assert_eq!(dst[14..16], [0x00, 0x01]); // 0001
     }
 
@@ -6128,7 +6373,7 @@ mod tests {
         let ret = unsafe { inet_pton(AF_INET6, c"fe80::1".as_ptr().cast(), dst.as_mut_ptr()) };
         assert_eq!(ret, 1);
         assert_eq!(dst[0..2], [0xfe, 0x80]); // fe80
-        assert_eq!(dst[2..14], [0u8; 12]);    // zeros (6 groups)
+        assert_eq!(dst[2..14], [0u8; 12]); // zeros (6 groups)
         assert_eq!(dst[14..16], [0x00, 0x01]); // 1
     }
 
@@ -6156,48 +6401,96 @@ mod tests {
     fn test_inet_pton6_invalid_trailing_single_colon() {
         // Bug regression: "::ffff:" has a trailing single colon — invalid.
         let mut dst = [0u8; 16];
-        assert_eq!(unsafe { inet_pton(AF_INET6, c"::ffff:".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET6, c"::ffff:".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
         // Also test other trailing colon cases.
-        assert_eq!(unsafe { inet_pton(AF_INET6, c"1::2:".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
-        assert_eq!(unsafe { inet_pton(AF_INET6, c"1:2:3:4:5:6:7:8:".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET6, c"1::2:".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
+        assert_eq!(
+            unsafe {
+                inet_pton(
+                    AF_INET6,
+                    c"1:2:3:4:5:6:7:8:".as_ptr().cast(),
+                    dst.as_mut_ptr(),
+                )
+            },
+            0
+        );
     }
 
     #[test]
     fn test_inet_pton6_invalid_leading_single_colon() {
         // Bug regression: ":1:2:3:4:5:6:7:8" has a leading single colon — invalid.
         let mut dst = [0u8; 16];
-        assert_eq!(unsafe { inet_pton(AF_INET6, c":1:2:3:4:5:6:7:8".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
-        assert_eq!(unsafe { inet_pton(AF_INET6, c":1".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe {
+                inet_pton(
+                    AF_INET6,
+                    c":1:2:3:4:5:6:7:8".as_ptr().cast(),
+                    dst.as_mut_ptr(),
+                )
+            },
+            0
+        );
+        assert_eq!(
+            unsafe { inet_pton(AF_INET6, c":1".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
     }
 
     #[test]
     fn test_inet_pton6_invalid_multiple_coloncolon() {
         let mut dst = [0u8; 16];
-        assert_eq!(unsafe { inet_pton(AF_INET6, c"::1::2".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET6, c"::1::2".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
     }
 
     #[test]
     fn test_inet_pton6_invalid_triple_colon() {
         let mut dst = [0u8; 16];
-        assert_eq!(unsafe { inet_pton(AF_INET6, c":::1".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET6, c":::1".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
     }
 
     #[test]
     fn test_inet_pton6_too_many_groups() {
         let mut dst = [0u8; 16];
-        assert_eq!(unsafe { inet_pton(AF_INET6, c"1:2:3:4:5:6:7:8:9".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe {
+                inet_pton(
+                    AF_INET6,
+                    c"1:2:3:4:5:6:7:8:9".as_ptr().cast(),
+                    dst.as_mut_ptr(),
+                )
+            },
+            0
+        );
     }
 
     #[test]
     fn test_inet_pton6_too_few_groups() {
         let mut dst = [0u8; 16];
-        assert_eq!(unsafe { inet_pton(AF_INET6, c"1:2:3".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET6, c"1:2:3".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
     }
 
     #[test]
     fn test_inet_pton6_group_too_long() {
         let mut dst = [0u8; 16];
-        assert_eq!(unsafe { inet_pton(AF_INET6, c"12345::1".as_ptr().cast(), dst.as_mut_ptr()) }, 0);
+        assert_eq!(
+            unsafe { inet_pton(AF_INET6, c"12345::1".as_ptr().cast(), dst.as_mut_ptr()) },
+            0
+        );
     }
 
     #[test]
@@ -6264,7 +6557,8 @@ mod tests {
     fn test_inet_ntop6_fe80_loopback() {
         // Bug regression: fe80::1 was formatted as "fe80:1" (missing colon).
         let mut src = [0u8; 16];
-        src[0] = 0xfe; src[1] = 0x80;
+        src[0] = 0xfe;
+        src[1] = 0x80;
         src[15] = 1;
         let mut buf = [0u8; 46];
         let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
@@ -6277,7 +6571,8 @@ mod tests {
     fn test_inet_ntop6_trailing_compression() {
         // fe80:: (all trailing groups zero)
         let mut src = [0u8; 16];
-        src[0] = 0xfe; src[1] = 0x80;
+        src[0] = 0xfe;
+        src[1] = 0x80;
         let mut buf = [0u8; 46];
         let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
         assert!(!ret.is_null());
@@ -6289,8 +6584,10 @@ mod tests {
     fn test_inet_ntop6_middle_compression() {
         // 2001:db8::1
         let mut src = [0u8; 16];
-        src[0] = 0x20; src[1] = 0x01;
-        src[2] = 0x0d; src[3] = 0xb8;
+        src[0] = 0x20;
+        src[1] = 0x01;
+        src[2] = 0x0d;
+        src[3] = 0xb8;
         src[15] = 1;
         let mut buf = [0u8; 46];
         let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
@@ -6303,14 +6600,14 @@ mod tests {
     fn test_inet_ntop6_full_no_compression() {
         // 1:2:3:4:5:6:7:8 — no zero runs >= 2
         let src: [u8; 16] = [
-            0x00, 0x01,  // group 0 = 1
-            0x00, 0x02,  // group 1 = 2
-            0x00, 0x03,  // group 2 = 3
-            0x00, 0x04,  // group 3 = 4
-            0x00, 0x05,  // group 4 = 5
-            0x00, 0x06,  // group 5 = 6
-            0x00, 0x07,  // group 6 = 7
-            0x00, 0x08,  // group 7 = 8
+            0x00, 0x01, // group 0 = 1
+            0x00, 0x02, // group 1 = 2
+            0x00, 0x03, // group 2 = 3
+            0x00, 0x04, // group 3 = 4
+            0x00, 0x05, // group 4 = 5
+            0x00, 0x06, // group 5 = 6
+            0x00, 0x07, // group 6 = 7
+            0x00, 0x08, // group 7 = 8
         ];
         let mut buf = [0u8; 46];
         let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
@@ -6324,14 +6621,8 @@ mod tests {
         // Per RFC 5952: a single zero group must NOT use ::
         // 1:0:3:4:5:6:7:8
         let src: [u8; 16] = [
-            0x00, 0x01,
-            0x00, 0x00,  // group 1 = 0
-            0x00, 0x03,
-            0x00, 0x04,
-            0x00, 0x05,
-            0x00, 0x06,
-            0x00, 0x07,
-            0x00, 0x08,
+            0x00, 0x01, 0x00, 0x00, // group 1 = 0
+            0x00, 0x03, 0x00, 0x04, 0x00, 0x05, 0x00, 0x06, 0x00, 0x07, 0x00, 0x08,
         ];
         let mut buf = [0u8; 46];
         let ret = inet_ntop(AF_INET6, src.as_ptr(), buf.as_mut_ptr(), 46);
@@ -6362,17 +6653,25 @@ mod tests {
         for &addr_bytes in addrs {
             let mut bin = [0u8; 16];
             let ret = unsafe { inet_pton(AF_INET6, addr_bytes.as_ptr(), bin.as_mut_ptr()) };
-            assert_eq!(ret, 1, "inet_pton failed for {:?}", core::str::from_utf8(&addr_bytes[..addr_bytes.len()-1]));
+            assert_eq!(
+                ret,
+                1,
+                "inet_pton failed for {:?}",
+                core::str::from_utf8(&addr_bytes[..addr_bytes.len() - 1])
+            );
 
             let mut buf = [0u8; 46];
             let ret = inet_ntop(AF_INET6, bin.as_ptr(), buf.as_mut_ptr(), 46);
             assert!(!ret.is_null());
             let result = unsafe { c_str_to_slice(ret) };
             let expected = &addr_bytes[..addr_bytes.len() - 1]; // strip null
-            assert_eq!(result, expected,
+            assert_eq!(
+                result,
+                expected,
                 "roundtrip mismatch: input={:?} output={:?}",
                 core::str::from_utf8(expected),
-                core::str::from_utf8(result));
+                core::str::from_utf8(result)
+            );
         }
     }
 
@@ -6394,21 +6693,30 @@ mod tests {
     #[test]
     fn test_inet_aton_valid() {
         let mut addr: u32 = 0;
-        assert_eq!(unsafe { inet_aton(c"127.0.0.1".as_ptr().cast(), &mut addr) }, 1);
+        assert_eq!(
+            unsafe { inet_aton(c"127.0.0.1".as_ptr().cast(), &mut addr) },
+            1
+        );
         assert_eq!(addr, u32::from_ne_bytes([127, 0, 0, 1]));
     }
 
     #[test]
     fn test_inet_aton_invalid() {
         let mut addr: u32 = 0;
-        assert_eq!(unsafe { inet_aton(c"not.an.ip".as_ptr().cast(), &mut addr) }, 0);
+        assert_eq!(
+            unsafe { inet_aton(c"not.an.ip".as_ptr().cast(), &mut addr) },
+            0
+        );
     }
 
     #[test]
     fn test_inet_aton_null() {
         let mut addr: u32 = 0;
         assert_eq!(unsafe { inet_aton(core::ptr::null(), &mut addr) }, 0);
-        assert_eq!(unsafe { inet_aton(c"1.2.3.4".as_ptr().cast(), core::ptr::null_mut()) }, 0);
+        assert_eq!(
+            unsafe { inet_aton(c"1.2.3.4".as_ptr().cast(), core::ptr::null_mut()) },
+            0
+        );
     }
 
     // -- hstrerror tests --
@@ -6475,7 +6783,10 @@ mod tests {
     #[test]
     fn test_inet_aton_broadcast() {
         let mut addr: u32 = 0;
-        assert_eq!(unsafe { inet_aton(c"255.255.255.255".as_ptr().cast(), &mut addr) }, 1);
+        assert_eq!(
+            unsafe { inet_aton(c"255.255.255.255".as_ptr().cast(), &mut addr) },
+            1
+        );
         assert_eq!(addr, u32::from_be(0xFFFFFFFF));
     }
 
@@ -6633,24 +6944,28 @@ mod tests {
 
     #[test]
     fn test_getaddrinfo_null_res() {
-        let ret = unsafe { getaddrinfo(
-            b"127.0.0.1\0".as_ptr(),
-            core::ptr::null(),
-            core::ptr::null(),
-            core::ptr::null_mut(),
-        ) };
+        let ret = unsafe {
+            getaddrinfo(
+                b"127.0.0.1\0".as_ptr(),
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null_mut(),
+            )
+        };
         assert_eq!(ret, EAI_SYSTEM);
     }
 
     #[test]
     fn test_getaddrinfo_both_null_node_service() {
         let mut res: *mut Addrinfo = core::ptr::null_mut();
-        let ret = unsafe { getaddrinfo(
-            core::ptr::null(),
-            core::ptr::null(),
-            core::ptr::null(),
-            &mut res,
-        ) };
+        let ret = unsafe {
+            getaddrinfo(
+                core::ptr::null(),
+                core::ptr::null(),
+                core::ptr::null(),
+                &mut res,
+            )
+        };
         assert_eq!(ret, EAI_NONAME);
     }
 
@@ -6667,12 +6982,14 @@ mod tests {
             ai_addr: core::ptr::null_mut(),
             ai_next: core::ptr::null_mut(),
         };
-        let ret = unsafe { getaddrinfo(
-            b"192.168.1.1\0".as_ptr(),
-            b"80\0".as_ptr(),
-            &hints,
-            &mut res,
-        ) };
+        let ret = unsafe {
+            getaddrinfo(
+                b"192.168.1.1\0".as_ptr(),
+                b"80\0".as_ptr(),
+                &hints,
+                &mut res,
+            )
+        };
         assert_eq!(ret, 0);
         assert!(!res.is_null());
 
@@ -6706,12 +7023,8 @@ mod tests {
             ai_addr: core::ptr::null_mut(),
             ai_next: core::ptr::null_mut(),
         };
-        let ret = unsafe { getaddrinfo(
-            b"127.0.0.1\0".as_ptr(),
-            core::ptr::null(),
-            &hints,
-            &mut res,
-        ) };
+        let ret =
+            unsafe { getaddrinfo(b"127.0.0.1\0".as_ptr(), core::ptr::null(), &hints, &mut res) };
         assert_eq!(ret, 0);
         assert!(!res.is_null());
 
@@ -6739,12 +7052,7 @@ mod tests {
             ai_addr: core::ptr::null_mut(),
             ai_next: core::ptr::null_mut(),
         };
-        let ret = unsafe { getaddrinfo(
-            core::ptr::null(),
-            b"8080\0".as_ptr(),
-            &hints,
-            &mut res,
-        ) };
+        let ret = unsafe { getaddrinfo(core::ptr::null(), b"8080\0".as_ptr(), &hints, &mut res) };
         assert_eq!(ret, 0);
         assert!(!res.is_null());
 
@@ -6769,12 +7077,7 @@ mod tests {
             ai_addr: core::ptr::null_mut(),
             ai_next: core::ptr::null_mut(),
         };
-        let ret = unsafe { getaddrinfo(
-            core::ptr::null(),
-            b"443\0".as_ptr(),
-            &hints,
-            &mut res,
-        ) };
+        let ret = unsafe { getaddrinfo(core::ptr::null(), b"443\0".as_ptr(), &hints, &mut res) };
         assert_eq!(ret, 0);
         assert!(!res.is_null());
 
@@ -6799,12 +7102,7 @@ mod tests {
             ai_addr: core::ptr::null_mut(),
             ai_next: core::ptr::null_mut(),
         };
-        let ret = unsafe { getaddrinfo(
-            b"::1\0".as_ptr(),
-            core::ptr::null(),
-            &hints,
-            &mut res,
-        ) };
+        let ret = unsafe { getaddrinfo(b"::1\0".as_ptr(), core::ptr::null(), &hints, &mut res) };
         assert_eq!(ret, EAI_FAMILY);
     }
 
@@ -6821,12 +7119,8 @@ mod tests {
             ai_addr: core::ptr::null_mut(),
             ai_next: core::ptr::null_mut(),
         };
-        let ret = unsafe { getaddrinfo(
-            b"10.0.0.1\0".as_ptr(),
-            b"53\0".as_ptr(),
-            &hints,
-            &mut res,
-        ) };
+        let ret =
+            unsafe { getaddrinfo(b"10.0.0.1\0".as_ptr(), b"53\0".as_ptr(), &hints, &mut res) };
         assert_eq!(ret, 0);
         assert!(!res.is_null());
 
@@ -6859,12 +7153,14 @@ mod tests {
             ai_next: core::ptr::null_mut(),
         };
         // "example.com" is not numeric → should fail with EAI_NONAME.
-        let ret = unsafe { getaddrinfo(
-            b"example.com\0".as_ptr(),
-            b"80\0".as_ptr(),
-            &hints,
-            &mut res,
-        ) };
+        let ret = unsafe {
+            getaddrinfo(
+                b"example.com\0".as_ptr(),
+                b"80\0".as_ptr(),
+                &hints,
+                &mut res,
+            )
+        };
         assert_eq!(ret, EAI_NONAME);
     }
 
@@ -7207,8 +7503,10 @@ mod tests {
 
     #[test]
     fn test_if_nameindex_size() {
-        assert!(core::mem::size_of::<IfNameindex>() >= 8,
-            "IfNameindex should be at least 8 bytes (u32 + pointer)");
+        assert!(
+            core::mem::size_of::<IfNameindex>() >= 8,
+            "IfNameindex should be at least 8 bytes (u32 + pointer)"
+        );
     }
 
     // -- Helper --
@@ -7351,12 +7649,23 @@ mod tests {
         assert_ne!(SOCK_NONBLOCK, 0);
         assert_ne!(SOCK_CLOEXEC, 0);
         assert_ne!(SOCK_NONBLOCK, SOCK_CLOEXEC);
-        assert_eq!(SOCK_NONBLOCK & (SOCK_NONBLOCK - 1), 0,
-            "SOCK_NONBLOCK must be a single bit, got {:#x}", SOCK_NONBLOCK);
-        assert_eq!(SOCK_CLOEXEC & (SOCK_CLOEXEC - 1), 0,
-            "SOCK_CLOEXEC must be a single bit, got {:#x}", SOCK_CLOEXEC);
-        assert_eq!(SOCK_NONBLOCK & SOCK_CLOEXEC, 0,
-            "SOCK_NONBLOCK and SOCK_CLOEXEC must not overlap");
+        assert_eq!(
+            SOCK_NONBLOCK & (SOCK_NONBLOCK - 1),
+            0,
+            "SOCK_NONBLOCK must be a single bit, got {:#x}",
+            SOCK_NONBLOCK
+        );
+        assert_eq!(
+            SOCK_CLOEXEC & (SOCK_CLOEXEC - 1),
+            0,
+            "SOCK_CLOEXEC must be a single bit, got {:#x}",
+            SOCK_CLOEXEC
+        );
+        assert_eq!(
+            SOCK_NONBLOCK & SOCK_CLOEXEC,
+            0,
+            "SOCK_NONBLOCK and SOCK_CLOEXEC must not overlap"
+        );
     }
 
     #[test]
@@ -7367,9 +7676,7 @@ mod tests {
         // see EBADF instead.
         crate::errno::set_errno(0);
         let bad = 1 << 16; // not SOCK_NONBLOCK and not SOCK_CLOEXEC
-        let ret = unsafe {
-            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), bad)
-        };
+        let ret = unsafe { accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), bad) };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7378,9 +7685,7 @@ mod tests {
     fn test_accept4_high_bit_einval() {
         // i32::MIN sets the sign bit — definitely outside the mask.
         crate::errno::set_errno(0);
-        let ret = unsafe {
-            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), i32::MIN)
-        };
+        let ret = unsafe { accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), i32::MIN) };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7393,7 +7698,12 @@ mod tests {
         // accept() ran first and we'd see EBADF.
         crate::errno::set_errno(0);
         let ret = unsafe {
-            accept4(-12345, core::ptr::null_mut(), core::ptr::null_mut(), 1 << 18)
+            accept4(
+                -12345,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                1 << 18,
+            )
         };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -7407,8 +7717,12 @@ mod tests {
         // the mask and EINVAL.
         crate::errno::set_errno(0);
         let ret = unsafe {
-            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(),
-                    crate::fcntl::O_APPEND)
+            accept4(
+                -1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                crate::fcntl::O_APPEND,
+            )
         };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
@@ -7420,12 +7734,13 @@ mod tests {
         // accept() and fail there with EBADF (fd=-1), NOT with
         // EINVAL (which would mean the mask wrongly rejected zero).
         crate::errno::set_errno(0);
-        let ret = unsafe {
-            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), 0)
-        };
+        let ret = unsafe { accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), 0) };
         assert_eq!(ret, -1);
-        assert_eq!(crate::errno::get_errno(), crate::errno::EBADF,
-            "zero flags must pass the mask; expected EBADF from accept");
+        assert_eq!(
+            crate::errno::get_errno(),
+            crate::errno::EBADF,
+            "zero flags must pass the mask; expected EBADF from accept"
+        );
     }
 
     #[test]
@@ -7434,7 +7749,12 @@ mod tests {
         // fail in accept with EBADF, not in the mask with EINVAL.
         crate::errno::set_errno(0);
         let ret = unsafe {
-            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), SOCK_NONBLOCK)
+            accept4(
+                -1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                SOCK_NONBLOCK,
+            )
         };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
@@ -7445,7 +7765,12 @@ mod tests {
         // SOCK_CLOEXEC alone is valid.
         crate::errno::set_errno(0);
         let ret = unsafe {
-            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), SOCK_CLOEXEC)
+            accept4(
+                -1,
+                core::ptr::null_mut(),
+                core::ptr::null_mut(),
+                SOCK_CLOEXEC,
+            )
         };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
@@ -7456,9 +7781,7 @@ mod tests {
         // SOCK_NONBLOCK | SOCK_CLOEXEC is the canonical valid combination.
         crate::errno::set_errno(0);
         let combined = SOCK_NONBLOCK | SOCK_CLOEXEC;
-        let ret = unsafe {
-            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), combined)
-        };
+        let ret = unsafe { accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), combined) };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -7472,9 +7795,7 @@ mod tests {
         // pick a stray bit that is NOT 1<<11 (SOCK_NONBLOCK) and NOT
         // 1<<19 (SOCK_CLOEXEC).  1<<22 is safely outside both.
         let mixed = SOCK_CLOEXEC | (1 << 22);
-        let ret = unsafe {
-            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), mixed)
-        };
+        let ret = unsafe { accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), mixed) };
         assert_eq!(ret, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
     }
@@ -7484,15 +7805,11 @@ mod tests {
         // A rejected call must not corrupt the syscall surface — a
         // subsequent valid-flags call still hits the regular EBADF.
         crate::errno::set_errno(0);
-        let r1 = unsafe {
-            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), 1 << 17)
-        };
+        let r1 = unsafe { accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), 1 << 17) };
         assert_eq!(r1, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL);
         crate::errno::set_errno(0);
-        let r2 = unsafe {
-            accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), 0)
-        };
+        let r2 = unsafe { accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), 0) };
         assert_eq!(r2, -1);
         assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
     }
@@ -7522,8 +7839,8 @@ mod tests {
         assert_eq!(SOCK_TYPE_MASK & SOCK_CLOEXEC, 0);
         // The known type IDs all fit in the low nibble.
         assert!(SOCK_STREAM <= SOCK_TYPE_MASK);
-        assert!(SOCK_DGRAM  <= SOCK_TYPE_MASK);
-        assert!(SOCK_RAW    <= SOCK_TYPE_MASK);
+        assert!(SOCK_DGRAM <= SOCK_TYPE_MASK);
+        assert!(SOCK_RAW <= SOCK_TYPE_MASK);
         assert!(SOCK_SEQPACKET <= SOCK_TYPE_MASK);
     }
 
@@ -7587,8 +7904,11 @@ mod tests {
         crate::errno::set_errno(0);
         let fd = socket(AF_INET, SOCK_STREAM, 0);
         if fd < 0 {
-            assert_ne!(crate::errno::get_errno(), crate::errno::EINVAL,
-                "valid SOCK_STREAM must not be rejected by the mask");
+            assert_ne!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "valid SOCK_STREAM must not be rejected by the mask"
+            );
         } else {
             // Clean up to avoid leaking fds across tests.
             let _ = fdtable::close_fd(fd);
@@ -7669,10 +7989,17 @@ mod tests {
             }
             crate::errno::set_errno(0);
             let ret = socket(AF_INET, SOCK_STREAM | bit, 0);
-            assert_eq!(ret, -1,
-                "bit {:#x} should be rejected by socket type mask", bit);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-                "bit {:#x} should set EINVAL", bit);
+            assert_eq!(
+                ret, -1,
+                "bit {:#x} should be rejected by socket type mask",
+                bit
+            );
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "bit {:#x} should set EINVAL",
+                bit
+            );
         }
     }
 
@@ -7688,13 +8015,14 @@ mod tests {
                 continue;
             }
             crate::errno::set_errno(0);
-            let ret = unsafe {
-                accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), bit)
-            };
-            assert_eq!(ret, -1,
-                "bit {:#x} should be rejected by accept4 mask", bit);
-            assert_eq!(crate::errno::get_errno(), crate::errno::EINVAL,
-                "bit {:#x} should set EINVAL", bit);
+            let ret = unsafe { accept4(-1, core::ptr::null_mut(), core::ptr::null_mut(), bit) };
+            assert_eq!(ret, -1, "bit {:#x} should be rejected by accept4 mask", bit);
+            assert_eq!(
+                crate::errno::get_errno(),
+                crate::errno::EINVAL,
+                "bit {:#x} should set EINVAL",
+                bit
+            );
         }
     }
 
@@ -7714,16 +8042,14 @@ mod tests {
         }
         impl CapGuard {
             pub(super) fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -7738,8 +8064,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -7748,8 +8073,7 @@ mod tests {
             let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << cap);
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -7764,8 +8088,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed dropping cap");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -7783,7 +8106,9 @@ mod tests {
         SockaddrIn {
             sin_family: AF_INET as u16,
             sin_port: port.to_be(), // network byte order
-            sin_addr: InAddr { s_addr: htonl(0x7F000001) }, // 127.0.0.1
+            sin_addr: InAddr {
+                s_addr: htonl(0x7F000001),
+            }, // 127.0.0.1
             sin_zero: [0; 8],
         }
     }
@@ -7961,7 +8286,11 @@ mod tests {
         phase201_cap::drop_cap_net_bind_service();
         crate::errno::set_errno(0);
         let ret = unsafe {
-            bind(-1, core::ptr::null(), core::mem::size_of::<SockaddrIn>() as SocklenT)
+            bind(
+                -1,
+                core::ptr::null(),
+                core::mem::size_of::<SockaddrIn>() as SocklenT,
+            )
         };
         assert_eq!(ret, -1);
         assert_eq!(
@@ -8046,16 +8375,14 @@ mod tests {
         }
         impl CapGuard {
             pub(super) fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -8070,8 +8397,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -8080,8 +8406,7 @@ mod tests {
             let (lo, hi) = crate::sys_capability::current_caps_effective();
             let new_lo = lo & !(1u32 << cap);
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -8096,8 +8421,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed dropping cap");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -8150,7 +8474,10 @@ mod tests {
         let _g = phase205_cap::CapGuard::snapshot();
         phase205_cap::drop_cap_net_raw();
         let fd = socket(AF_INET, SOCK_STREAM, 0);
-        assert!(fd >= 0, "SOCK_STREAM must not be affected by CAP_NET_RAW drop");
+        assert!(
+            fd >= 0,
+            "SOCK_STREAM must not be affected by CAP_NET_RAW drop"
+        );
         crate::file::close(fd);
     }
 
@@ -8160,7 +8487,10 @@ mod tests {
         let _g = phase205_cap::CapGuard::snapshot();
         phase205_cap::drop_cap_net_raw();
         let fd = socket(AF_INET, SOCK_DGRAM, 0);
-        assert!(fd >= 0, "SOCK_DGRAM must not be affected by CAP_NET_RAW drop");
+        assert!(
+            fd >= 0,
+            "SOCK_DGRAM must not be affected by CAP_NET_RAW drop"
+        );
         crate::file::close(fd);
     }
 

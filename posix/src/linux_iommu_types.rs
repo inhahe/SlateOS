@@ -88,8 +88,10 @@ mod tests {
     #[test]
     fn test_domain_types_distinct() {
         let types = [
-            IOMMU_DOMAIN_UNMANAGED, IOMMU_DOMAIN_DMA,
-            IOMMU_DOMAIN_IDENTITY, IOMMU_DOMAIN_BLOCKED,
+            IOMMU_DOMAIN_UNMANAGED,
+            IOMMU_DOMAIN_DMA,
+            IOMMU_DOMAIN_IDENTITY,
+            IOMMU_DOMAIN_BLOCKED,
             IOMMU_DOMAIN_SVA,
         ];
         for i in 0..types.len() {
@@ -102,8 +104,12 @@ mod tests {
     #[test]
     fn test_map_flags_no_overlap() {
         let flags = [
-            IOMMU_READ, IOMMU_WRITE, IOMMU_CACHE,
-            IOMMU_NOEXEC, IOMMU_MMIO, IOMMU_PRIV,
+            IOMMU_READ,
+            IOMMU_WRITE,
+            IOMMU_CACHE,
+            IOMMU_NOEXEC,
+            IOMMU_MMIO,
+            IOMMU_PRIV,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -115,8 +121,12 @@ mod tests {
     #[test]
     fn test_map_flags_power_of_two() {
         let flags = [
-            IOMMU_READ, IOMMU_WRITE, IOMMU_CACHE,
-            IOMMU_NOEXEC, IOMMU_MMIO, IOMMU_PRIV,
+            IOMMU_READ,
+            IOMMU_WRITE,
+            IOMMU_CACHE,
+            IOMMU_NOEXEC,
+            IOMMU_MMIO,
+            IOMMU_PRIV,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -126,8 +136,10 @@ mod tests {
     #[test]
     fn test_capabilities_no_overlap() {
         let caps = [
-            IOMMU_CAP_CACHE_COHERENCY, IOMMU_CAP_IOPF,
-            IOMMU_CAP_DIRTY_TRACKING, IOMMU_CAP_ENFORCE_CACHE_COHERENCY,
+            IOMMU_CAP_CACHE_COHERENCY,
+            IOMMU_CAP_IOPF,
+            IOMMU_CAP_DIRTY_TRACKING,
+            IOMMU_CAP_ENFORCE_CACHE_COHERENCY,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
@@ -139,7 +151,8 @@ mod tests {
     #[test]
     fn test_fault_types_distinct() {
         let faults = [
-            IOMMU_FAULT_DMA_READ, IOMMU_FAULT_DMA_WRITE,
+            IOMMU_FAULT_DMA_READ,
+            IOMMU_FAULT_DMA_WRITE,
             IOMMU_FAULT_PAGE_REQ,
         ];
         for i in 0..faults.len() {

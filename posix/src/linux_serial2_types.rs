@@ -107,9 +107,18 @@ mod tests {
     #[test]
     fn test_port_types_distinct() {
         let ports = [
-            PORT_UNKNOWN, PORT_8250, PORT_16450, PORT_16550,
-            PORT_16550A, PORT_CIRRUS, PORT_16650, PORT_16650V2,
-            PORT_16750, PORT_STARTECH, PORT_16C950, PORT_16654,
+            PORT_UNKNOWN,
+            PORT_8250,
+            PORT_16450,
+            PORT_16550,
+            PORT_16550A,
+            PORT_CIRRUS,
+            PORT_16650,
+            PORT_16650V2,
+            PORT_16750,
+            PORT_STARTECH,
+            PORT_16C950,
+            PORT_16654,
             PORT_16850,
         ];
         for i in 0..ports.len() {
@@ -122,8 +131,7 @@ mod tests {
     #[test]
     fn test_modem_lines_power_of_two() {
         let lines = [
-            TIOCM_LE, TIOCM_DTR, TIOCM_RTS, TIOCM_ST,
-            TIOCM_SR, TIOCM_CTS, TIOCM_CAR, TIOCM_RNG,
+            TIOCM_LE, TIOCM_DTR, TIOCM_RTS, TIOCM_ST, TIOCM_SR, TIOCM_CTS, TIOCM_CAR, TIOCM_RNG,
             TIOCM_DSR,
         ];
         for l in &lines {
@@ -140,8 +148,7 @@ mod tests {
     #[test]
     fn test_modem_lines_no_overlap() {
         let lines = [
-            TIOCM_LE, TIOCM_DTR, TIOCM_RTS, TIOCM_ST,
-            TIOCM_SR, TIOCM_CTS, TIOCM_CAR, TIOCM_RNG,
+            TIOCM_LE, TIOCM_DTR, TIOCM_RTS, TIOCM_ST, TIOCM_SR, TIOCM_CTS, TIOCM_CAR, TIOCM_RNG,
             TIOCM_DSR,
         ];
         for i in 0..lines.len() {

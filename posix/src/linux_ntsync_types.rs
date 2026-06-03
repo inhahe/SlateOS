@@ -125,8 +125,10 @@ mod tests {
     #[test]
     fn test_event_ioctls_distinct() {
         let events = [
-            NTSYNC_IOC_EVENT_SET, NTSYNC_IOC_EVENT_RESET,
-            NTSYNC_IOC_EVENT_PULSE, NTSYNC_IOC_EVENT_READ,
+            NTSYNC_IOC_EVENT_SET,
+            NTSYNC_IOC_EVENT_RESET,
+            NTSYNC_IOC_EVENT_PULSE,
+            NTSYNC_IOC_EVENT_READ,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -162,14 +164,20 @@ mod tests {
     #[test]
     fn test_no_ioctl_collisions() {
         let all = [
-            NTSYNC_IOC_CREATE_SEM, NTSYNC_IOC_CREATE_MUTEX,
+            NTSYNC_IOC_CREATE_SEM,
+            NTSYNC_IOC_CREATE_MUTEX,
             NTSYNC_IOC_CREATE_EVENT,
-            NTSYNC_IOC_SEM_RELEASE, NTSYNC_IOC_SEM_READ,
-            NTSYNC_IOC_MUTEX_RELEASE, NTSYNC_IOC_MUTEX_READ,
+            NTSYNC_IOC_SEM_RELEASE,
+            NTSYNC_IOC_SEM_READ,
+            NTSYNC_IOC_MUTEX_RELEASE,
+            NTSYNC_IOC_MUTEX_READ,
             NTSYNC_IOC_MUTEX_KILL,
-            NTSYNC_IOC_EVENT_SET, NTSYNC_IOC_EVENT_RESET,
-            NTSYNC_IOC_EVENT_PULSE, NTSYNC_IOC_EVENT_READ,
-            NTSYNC_IOC_WAIT_ANY, NTSYNC_IOC_WAIT_ALL,
+            NTSYNC_IOC_EVENT_SET,
+            NTSYNC_IOC_EVENT_RESET,
+            NTSYNC_IOC_EVENT_PULSE,
+            NTSYNC_IOC_EVENT_READ,
+            NTSYNC_IOC_WAIT_ANY,
+            NTSYNC_IOC_WAIT_ALL,
         ];
         for i in 0..all.len() {
             for j in (i + 1)..all.len() {

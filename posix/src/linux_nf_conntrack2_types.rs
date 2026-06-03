@@ -93,11 +93,21 @@ mod tests {
     #[test]
     fn test_status_bits_power_of_two() {
         let bits = [
-            IPS_SEEN_REPLY, IPS_ASSURED, IPS_CONFIRMED,
-            IPS_SRC_NAT, IPS_DST_NAT, IPS_SEQ_ADJUST,
-            IPS_SRC_NAT_DONE, IPS_DST_NAT_DONE, IPS_DYING,
-            IPS_FIXED_TIMEOUT, IPS_TEMPLATE, IPS_UNTRACKED,
-            IPS_HELPER, IPS_OFFLOAD, IPS_HW_OFFLOAD,
+            IPS_SEEN_REPLY,
+            IPS_ASSURED,
+            IPS_CONFIRMED,
+            IPS_SRC_NAT,
+            IPS_DST_NAT,
+            IPS_SEQ_ADJUST,
+            IPS_SRC_NAT_DONE,
+            IPS_DST_NAT_DONE,
+            IPS_DYING,
+            IPS_FIXED_TIMEOUT,
+            IPS_TEMPLATE,
+            IPS_UNTRACKED,
+            IPS_HELPER,
+            IPS_OFFLOAD,
+            IPS_HW_OFFLOAD,
         ];
         for b in &bits {
             assert!(b.is_power_of_two(), "0x{:04x} not power of two", b);
@@ -117,10 +127,18 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let events = [
-            IPCT_NEW, IPCT_RELATED, IPCT_DESTROY,
-            IPCT_REPLY, IPCT_ASSURED, IPCT_PROTOINFO,
-            IPCT_HELPER, IPCT_MARK, IPCT_SEQADJ,
-            IPCT_NATSEQADJ, IPCT_SECMARK, IPCT_LABEL,
+            IPCT_NEW,
+            IPCT_RELATED,
+            IPCT_DESTROY,
+            IPCT_REPLY,
+            IPCT_ASSURED,
+            IPCT_PROTOINFO,
+            IPCT_HELPER,
+            IPCT_MARK,
+            IPCT_SEQADJ,
+            IPCT_NATSEQADJ,
+            IPCT_SECMARK,
+            IPCT_LABEL,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -132,7 +150,8 @@ mod tests {
     #[test]
     fn test_expect_flags_power_of_two() {
         let flags = [
-            NF_CT_EXPECT_PERMANENT, NF_CT_EXPECT_INACTIVE,
+            NF_CT_EXPECT_PERMANENT,
+            NF_CT_EXPECT_INACTIVE,
             NF_CT_EXPECT_USERSPACE,
         ];
         for f in &flags {
@@ -143,7 +162,8 @@ mod tests {
     #[test]
     fn test_expect_flags_no_overlap() {
         let flags = [
-            NF_CT_EXPECT_PERMANENT, NF_CT_EXPECT_INACTIVE,
+            NF_CT_EXPECT_PERMANENT,
+            NF_CT_EXPECT_INACTIVE,
             NF_CT_EXPECT_USERSPACE,
         ];
         for i in 0..flags.len() {

@@ -72,12 +72,23 @@ mod tests {
     #[test]
     fn test_options_distinct() {
         let opts = [
-            IPV6_UNICAST_HOPS, IPV6_MULTICAST_IF, IPV6_MULTICAST_HOPS,
-            IPV6_MULTICAST_LOOP, IPV6_JOIN_GROUP, IPV6_LEAVE_GROUP,
-            IPV6_V6ONLY, IPV6_MTU_DISCOVER, IPV6_MTU,
-            IPV6_FLOWLABEL_MGR, IPV6_FLOWINFO, IPV6_RECVPKTINFO,
-            IPV6_RECVHOPLIMIT, IPV6_TCLASS, IPV6_RECVTCLASS,
-            IPV6_TRANSPARENT, IPV6_RECVORIGDSTADDR,
+            IPV6_UNICAST_HOPS,
+            IPV6_MULTICAST_IF,
+            IPV6_MULTICAST_HOPS,
+            IPV6_MULTICAST_LOOP,
+            IPV6_JOIN_GROUP,
+            IPV6_LEAVE_GROUP,
+            IPV6_V6ONLY,
+            IPV6_MTU_DISCOVER,
+            IPV6_MTU,
+            IPV6_FLOWLABEL_MGR,
+            IPV6_FLOWINFO,
+            IPV6_RECVPKTINFO,
+            IPV6_RECVHOPLIMIT,
+            IPV6_TCLASS,
+            IPV6_RECVTCLASS,
+            IPV6_TRANSPARENT,
+            IPV6_RECVORIGDSTADDR,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -89,8 +100,12 @@ mod tests {
     #[test]
     fn test_pmtu_modes_distinct() {
         let modes = [
-            IPV6_PMTUDISC_DONT, IPV6_PMTUDISC_WANT, IPV6_PMTUDISC_DO,
-            IPV6_PMTUDISC_PROBE, IPV6_PMTUDISC_INTERFACE, IPV6_PMTUDISC_OMIT,
+            IPV6_PMTUDISC_DONT,
+            IPV6_PMTUDISC_WANT,
+            IPV6_PMTUDISC_DO,
+            IPV6_PMTUDISC_PROBE,
+            IPV6_PMTUDISC_INTERFACE,
+            IPV6_PMTUDISC_OMIT,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

@@ -61,7 +61,8 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            SAFESETID_ACTION_ALLOW, SAFESETID_ACTION_DENY,
+            SAFESETID_ACTION_ALLOW,
+            SAFESETID_ACTION_DENY,
             SAFESETID_ACTION_LOG,
         ];
         for i in 0..actions.len() {

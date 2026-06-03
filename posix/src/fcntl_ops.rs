@@ -424,7 +424,8 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
         | fdtable::HandleKind::UdpSocket
         | fdtable::HandleKind::Eventfd
         | fdtable::HandleKind::UnixStream => entry.handle,
-        fdtable::HandleKind::Epoll | fdtable::HandleKind::Timerfd
+        fdtable::HandleKind::Epoll
+        | fdtable::HandleKind::Timerfd
         | fdtable::HandleKind::Inotify => {
             // F_DUPFD on an epoll/timerfd/inotify fd shares the
             // instance.  No addref needed: close() uses
@@ -435,9 +436,9 @@ fn dup_fd_from(oldfd: Fd, min_fd: i32, cloexec: bool) -> i32 {
     };
 
     // F_DUPFD inherits the source's file status flags (O_APPEND, etc.).
-    if let Some(new_fd) = fdtable::alloc_fd_from_with_flags(
-        min_fd, entry.kind, new_handle, entry.status_flags,
-    ) {
+    if let Some(new_fd) =
+        fdtable::alloc_fd_from_with_flags(min_fd, entry.kind, new_handle, entry.status_flags)
+    {
         if cloexec {
             let _ = fdtable::set_fd_flags(new_fd, fdtable::FD_CLOEXEC);
         }

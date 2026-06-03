@@ -176,9 +176,15 @@ mod tests {
     #[test]
     fn test_error_classes_no_overlap() {
         let errs = [
-            CAN_ERR_TX_TIMEOUT, CAN_ERR_LOSTARB, CAN_ERR_CRTL,
-            CAN_ERR_PROT, CAN_ERR_TRX, CAN_ERR_ACK,
-            CAN_ERR_BUSOFF, CAN_ERR_BUSERROR, CAN_ERR_RESTARTED,
+            CAN_ERR_TX_TIMEOUT,
+            CAN_ERR_LOSTARB,
+            CAN_ERR_CRTL,
+            CAN_ERR_PROT,
+            CAN_ERR_TRX,
+            CAN_ERR_ACK,
+            CAN_ERR_BUSOFF,
+            CAN_ERR_BUSERROR,
+            CAN_ERR_RESTARTED,
         ];
         for i in 0..errs.len() {
             for j in (i + 1)..errs.len() {
@@ -190,9 +196,12 @@ mod tests {
     #[test]
     fn test_raw_options_distinct() {
         let opts = [
-            CAN_RAW_FILTER, CAN_RAW_ERR_FILTER,
-            CAN_RAW_LOOPBACK, CAN_RAW_RECV_OWN_MSGS,
-            CAN_RAW_FD_FRAMES, CAN_RAW_JOIN_FILTERS,
+            CAN_RAW_FILTER,
+            CAN_RAW_ERR_FILTER,
+            CAN_RAW_LOOPBACK,
+            CAN_RAW_RECV_OWN_MSGS,
+            CAN_RAW_FD_FRAMES,
+            CAN_RAW_JOIN_FILTERS,
             CAN_RAW_XL_FRAMES,
         ];
         for i in 0..opts.len() {

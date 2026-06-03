@@ -83,8 +83,12 @@ mod tests {
     #[test]
     fn test_wq_flags_powers_of_two() {
         let flags = [
-            WQ_UNBOUND, WQ_FREEZABLE, WQ_MEM_RECLAIM,
-            WQ_HIGHPRI, WQ_CPU_INTENSIVE, WQ_SYSFS,
+            WQ_UNBOUND,
+            WQ_FREEZABLE,
+            WQ_MEM_RECLAIM,
+            WQ_HIGHPRI,
+            WQ_CPU_INTENSIVE,
+            WQ_SYSFS,
             WQ_POWER_EFFICIENT,
         ];
         for flag in &flags {
@@ -95,8 +99,12 @@ mod tests {
     #[test]
     fn test_wq_flags_no_overlap() {
         let flags = [
-            WQ_UNBOUND, WQ_FREEZABLE, WQ_MEM_RECLAIM,
-            WQ_HIGHPRI, WQ_CPU_INTENSIVE, WQ_SYSFS,
+            WQ_UNBOUND,
+            WQ_FREEZABLE,
+            WQ_MEM_RECLAIM,
+            WQ_HIGHPRI,
+            WQ_CPU_INTENSIVE,
+            WQ_SYSFS,
             WQ_POWER_EFFICIENT,
         ];
         for i in 0..flags.len() {
@@ -109,8 +117,10 @@ mod tests {
     #[test]
     fn test_work_struct_bits_distinct() {
         let bits = [
-            WORK_STRUCT_PENDING_BIT, WORK_STRUCT_DELAYED_BIT,
-            WORK_STRUCT_PWQ_BIT, WORK_STRUCT_LINKED_BIT,
+            WORK_STRUCT_PENDING_BIT,
+            WORK_STRUCT_DELAYED_BIT,
+            WORK_STRUCT_PWQ_BIT,
+            WORK_STRUCT_LINKED_BIT,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -122,8 +132,11 @@ mod tests {
     #[test]
     fn test_system_wq_names_distinct() {
         let names = [
-            WQ_SYSTEM, WQ_SYSTEM_HIGHPRI, WQ_SYSTEM_LONG,
-            WQ_SYSTEM_UNBOUND, WQ_SYSTEM_FREEZABLE,
+            WQ_SYSTEM,
+            WQ_SYSTEM_HIGHPRI,
+            WQ_SYSTEM_LONG,
+            WQ_SYSTEM_UNBOUND,
+            WQ_SYSTEM_FREEZABLE,
             WQ_SYSTEM_POWER_EFFICIENT,
             WQ_SYSTEM_FREEZABLE_POWER_EFFICIENT,
         ];

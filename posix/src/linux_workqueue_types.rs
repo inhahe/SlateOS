@@ -70,8 +70,12 @@ mod tests {
     #[test]
     fn test_wq_flags_no_overlap() {
         let flags = [
-            WQ_UNBOUND, WQ_FREEZABLE, WQ_MEM_RECLAIM,
-            WQ_HIGHPRI, WQ_CPU_INTENSIVE, WQ_POWER_EFFICIENT,
+            WQ_UNBOUND,
+            WQ_FREEZABLE,
+            WQ_MEM_RECLAIM,
+            WQ_HIGHPRI,
+            WQ_CPU_INTENSIVE,
+            WQ_POWER_EFFICIENT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -82,7 +86,11 @@ mod tests {
 
     #[test]
     fn test_work_flags_no_overlap() {
-        let flags = [WORK_STRUCT_PENDING, WORK_STRUCT_EXECUTING, WORK_STRUCT_LINKED];
+        let flags = [
+            WORK_STRUCT_PENDING,
+            WORK_STRUCT_EXECUTING,
+            WORK_STRUCT_LINKED,
+        ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {

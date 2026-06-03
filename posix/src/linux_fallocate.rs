@@ -39,10 +39,12 @@ pub const FALLOC_FL_UNSHARE_RANGE: u32 = 0x40;
 // ---------------------------------------------------------------------------
 
 /// Mask of all valid fallocate flags.
-pub const FALLOC_FL_SUPPORTED_MASK: u32 =
-    FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE
-    | FALLOC_FL_NO_HIDE_STALE | FALLOC_FL_COLLAPSE_RANGE
-    | FALLOC_FL_ZERO_RANGE | FALLOC_FL_INSERT_RANGE
+pub const FALLOC_FL_SUPPORTED_MASK: u32 = FALLOC_FL_KEEP_SIZE
+    | FALLOC_FL_PUNCH_HOLE
+    | FALLOC_FL_NO_HIDE_STALE
+    | FALLOC_FL_COLLAPSE_RANGE
+    | FALLOC_FL_ZERO_RANGE
+    | FALLOC_FL_INSERT_RANGE
     | FALLOC_FL_UNSHARE_RANGE;
 
 // ---------------------------------------------------------------------------
@@ -63,9 +65,12 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE,
-            FALLOC_FL_NO_HIDE_STALE, FALLOC_FL_COLLAPSE_RANGE,
-            FALLOC_FL_ZERO_RANGE, FALLOC_FL_INSERT_RANGE,
+            FALLOC_FL_KEEP_SIZE,
+            FALLOC_FL_PUNCH_HOLE,
+            FALLOC_FL_NO_HIDE_STALE,
+            FALLOC_FL_COLLAPSE_RANGE,
+            FALLOC_FL_ZERO_RANGE,
+            FALLOC_FL_INSERT_RANGE,
             FALLOC_FL_UNSHARE_RANGE,
         ];
         for flag in &flags {
@@ -76,9 +81,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            FALLOC_FL_KEEP_SIZE, FALLOC_FL_PUNCH_HOLE,
-            FALLOC_FL_NO_HIDE_STALE, FALLOC_FL_COLLAPSE_RANGE,
-            FALLOC_FL_ZERO_RANGE, FALLOC_FL_INSERT_RANGE,
+            FALLOC_FL_KEEP_SIZE,
+            FALLOC_FL_PUNCH_HOLE,
+            FALLOC_FL_NO_HIDE_STALE,
+            FALLOC_FL_COLLAPSE_RANGE,
+            FALLOC_FL_ZERO_RANGE,
+            FALLOC_FL_INSERT_RANGE,
             FALLOC_FL_UNSHARE_RANGE,
         ];
         for i in 0..flags.len() {

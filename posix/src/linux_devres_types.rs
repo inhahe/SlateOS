@@ -65,10 +65,18 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            DEVRES_TYPE_MEM, DEVRES_TYPE_IRQ, DEVRES_TYPE_IOMEM,
-            DEVRES_TYPE_IOPORT, DEVRES_TYPE_DMA, DEVRES_TYPE_CLK,
-            DEVRES_TYPE_REGULATOR, DEVRES_TYPE_GPIO, DEVRES_TYPE_RESET,
-            DEVRES_TYPE_PHY, DEVRES_TYPE_PINCTRL, DEVRES_TYPE_ACTION,
+            DEVRES_TYPE_MEM,
+            DEVRES_TYPE_IRQ,
+            DEVRES_TYPE_IOMEM,
+            DEVRES_TYPE_IOPORT,
+            DEVRES_TYPE_DMA,
+            DEVRES_TYPE_CLK,
+            DEVRES_TYPE_REGULATOR,
+            DEVRES_TYPE_GPIO,
+            DEVRES_TYPE_RESET,
+            DEVRES_TYPE_PHY,
+            DEVRES_TYPE_PINCTRL,
+            DEVRES_TYPE_ACTION,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -80,7 +88,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            DEVRES_FLAG_GROUP, DEVRES_FLAG_GROUP_OPEN,
+            DEVRES_FLAG_GROUP,
+            DEVRES_FLAG_GROUP_OPEN,
             DEVRES_FLAG_RELEASE,
         ];
         for i in 0..flags.len() {

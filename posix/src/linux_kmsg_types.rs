@@ -125,8 +125,7 @@ mod tests {
     #[test]
     fn test_facilities_distinct() {
         let facs = [
-            LOG_KERN, LOG_USER, LOG_MAIL, LOG_DAEMON,
-            LOG_AUTH, LOG_SYSLOG, LOG_LPR, LOG_NEWS,
+            LOG_KERN, LOG_USER, LOG_MAIL, LOG_DAEMON, LOG_AUTH, LOG_SYSLOG, LOG_LPR, LOG_NEWS,
             LOG_UUCP, LOG_CRON, LOG_LOCAL0, LOG_LOCAL7,
         ];
         for i in 0..facs.len() {

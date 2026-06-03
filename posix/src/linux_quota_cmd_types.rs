@@ -83,8 +83,14 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            Q_SYNC, Q_QUOTAON, Q_QUOTAOFF, Q_GETFMT,
-            Q_GETINFO, Q_SETINFO, Q_GETQUOTA, Q_SETQUOTA,
+            Q_SYNC,
+            Q_QUOTAON,
+            Q_QUOTAOFF,
+            Q_GETFMT,
+            Q_GETINFO,
+            Q_SETINFO,
+            Q_GETQUOTA,
+            Q_SETQUOTA,
             Q_GETNEXTQUOTA,
         ];
         for i in 0..cmds.len() {

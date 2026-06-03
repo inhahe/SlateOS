@@ -77,7 +77,8 @@ mod tests {
     #[test]
     fn test_kexec_flags_distinct() {
         let flags = [
-            KEXEC_ON_CRASH, KEXEC_PRESERVE_CONTEXT,
+            KEXEC_ON_CRASH,
+            KEXEC_PRESERVE_CONTEXT,
             KEXEC_UPDATE_ELFCOREHDR,
         ];
         for i in 0..flags.len() {
@@ -90,7 +91,8 @@ mod tests {
     #[test]
     fn test_kexec_flags_powers_of_two() {
         let flags = [
-            KEXEC_ON_CRASH, KEXEC_PRESERVE_CONTEXT,
+            KEXEC_ON_CRASH,
+            KEXEC_PRESERVE_CONTEXT,
             KEXEC_UPDATE_ELFCOREHDR,
         ];
         for flag in &flags {
@@ -101,8 +103,10 @@ mod tests {
     #[test]
     fn test_file_flags_powers_of_two() {
         let flags = [
-            KEXEC_FILE_UNLOAD, KEXEC_FILE_ON_CRASH,
-            KEXEC_FILE_NO_INITRAMFS, KEXEC_FILE_DEBUG,
+            KEXEC_FILE_UNLOAD,
+            KEXEC_FILE_ON_CRASH,
+            KEXEC_FILE_NO_INITRAMFS,
+            KEXEC_FILE_DEBUG,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -112,9 +116,13 @@ mod tests {
     #[test]
     fn test_arch_types_distinct() {
         let arches = [
-            KEXEC_ARCH_X86_64, KEXEC_ARCH_386, KEXEC_ARCH_ARM,
-            KEXEC_ARCH_AARCH64, KEXEC_ARCH_RISCV,
-            KEXEC_ARCH_PPC64, KEXEC_ARCH_S390,
+            KEXEC_ARCH_X86_64,
+            KEXEC_ARCH_386,
+            KEXEC_ARCH_ARM,
+            KEXEC_ARCH_AARCH64,
+            KEXEC_ARCH_RISCV,
+            KEXEC_ARCH_PPC64,
+            KEXEC_ARCH_S390,
         ];
         for i in 0..arches.len() {
             for j in (i + 1)..arches.len() {

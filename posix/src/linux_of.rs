@@ -88,10 +88,7 @@ mod tests {
 
     #[test]
     fn test_fdt_tags_distinct() {
-        let tags = [
-            FDT_BEGIN_NODE, FDT_END_NODE, FDT_PROP,
-            FDT_NOP, FDT_END,
-        ];
+        let tags = [FDT_BEGIN_NODE, FDT_END_NODE, FDT_PROP, FDT_NOP, FDT_END];
         for i in 0..tags.len() {
             for j in (i + 1)..tags.len() {
                 assert_ne!(tags[i], tags[j]);
@@ -107,11 +104,18 @@ mod tests {
     #[test]
     fn test_property_names_distinct() {
         let props = [
-            OF_PROP_COMPATIBLE, OF_PROP_MODEL, OF_PROP_PHANDLE,
-            OF_PROP_STATUS, OF_PROP_REG, OF_PROP_ADDRESS_CELLS,
-            OF_PROP_SIZE_CELLS, OF_PROP_INTERRUPT_CELLS,
-            OF_PROP_INTERRUPT_PARENT, OF_PROP_INTERRUPTS,
-            OF_PROP_CLOCK_NAMES, OF_PROP_CLOCKS,
+            OF_PROP_COMPATIBLE,
+            OF_PROP_MODEL,
+            OF_PROP_PHANDLE,
+            OF_PROP_STATUS,
+            OF_PROP_REG,
+            OF_PROP_ADDRESS_CELLS,
+            OF_PROP_SIZE_CELLS,
+            OF_PROP_INTERRUPT_CELLS,
+            OF_PROP_INTERRUPT_PARENT,
+            OF_PROP_INTERRUPTS,
+            OF_PROP_CLOCK_NAMES,
+            OF_PROP_CLOCKS,
         ];
         for i in 0..props.len() {
             for j in (i + 1)..props.len() {
@@ -123,8 +127,10 @@ mod tests {
     #[test]
     fn test_status_values_distinct() {
         let statuses = [
-            OF_STATUS_OKAY, OF_STATUS_DISABLED,
-            OF_STATUS_RESERVED, OF_STATUS_FAIL,
+            OF_STATUS_OKAY,
+            OF_STATUS_DISABLED,
+            OF_STATUS_RESERVED,
+            OF_STATUS_FAIL,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {

@@ -92,10 +92,14 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            SNDRV_FIREWIRE_TYPE_DICE, SNDRV_FIREWIRE_TYPE_FIREWORKS,
-            SNDRV_FIREWIRE_TYPE_BEBOB, SNDRV_FIREWIRE_TYPE_OXFW,
-            SNDRV_FIREWIRE_TYPE_DIGI00X, SNDRV_FIREWIRE_TYPE_TASCAM,
-            SNDRV_FIREWIRE_TYPE_MOTU, SNDRV_FIREWIRE_TYPE_FIREFACE,
+            SNDRV_FIREWIRE_TYPE_DICE,
+            SNDRV_FIREWIRE_TYPE_FIREWORKS,
+            SNDRV_FIREWIRE_TYPE_BEBOB,
+            SNDRV_FIREWIRE_TYPE_OXFW,
+            SNDRV_FIREWIRE_TYPE_DIGI00X,
+            SNDRV_FIREWIRE_TYPE_TASCAM,
+            SNDRV_FIREWIRE_TYPE_MOTU,
+            SNDRV_FIREWIRE_TYPE_FIREFACE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -112,9 +116,12 @@ mod tests {
     #[test]
     fn test_rates_distinct_and_ordered() {
         let rates = [
-            SNDRV_FW_RATE_32000, SNDRV_FW_RATE_44100,
-            SNDRV_FW_RATE_48000, SNDRV_FW_RATE_88200,
-            SNDRV_FW_RATE_96000, SNDRV_FW_RATE_176400,
+            SNDRV_FW_RATE_32000,
+            SNDRV_FW_RATE_44100,
+            SNDRV_FW_RATE_48000,
+            SNDRV_FW_RATE_88200,
+            SNDRV_FW_RATE_96000,
+            SNDRV_FW_RATE_176400,
             SNDRV_FW_RATE_192000,
         ];
         for i in 0..rates.len() - 1 {

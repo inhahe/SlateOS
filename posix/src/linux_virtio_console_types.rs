@@ -83,10 +83,14 @@ mod tests {
     #[test]
     fn test_control_messages_distinct() {
         let msgs = [
-            VIRTIO_CONSOLE_DEVICE_READY, VIRTIO_CONSOLE_DEVICE_ADD,
-            VIRTIO_CONSOLE_DEVICE_REMOVE, VIRTIO_CONSOLE_PORT_READY,
-            VIRTIO_CONSOLE_CONSOLE_PORT, VIRTIO_CONSOLE_RESIZE,
-            VIRTIO_CONSOLE_PORT_OPEN, VIRTIO_CONSOLE_PORT_NAME,
+            VIRTIO_CONSOLE_DEVICE_READY,
+            VIRTIO_CONSOLE_DEVICE_ADD,
+            VIRTIO_CONSOLE_DEVICE_REMOVE,
+            VIRTIO_CONSOLE_PORT_READY,
+            VIRTIO_CONSOLE_CONSOLE_PORT,
+            VIRTIO_CONSOLE_RESIZE,
+            VIRTIO_CONSOLE_PORT_OPEN,
+            VIRTIO_CONSOLE_PORT_NAME,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {

@@ -115,13 +115,20 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            BATADV_CMD_GET_MESH_INFO, BATADV_CMD_SET_MESH,
-            BATADV_CMD_GET_HARDIF, BATADV_CMD_SET_HARDIF,
-            BATADV_CMD_GET_TRANSTABLE_LOCAL, BATADV_CMD_GET_TRANSTABLE_GLOBAL,
-            BATADV_CMD_GET_ORIGINATORS, BATADV_CMD_GET_NEIGHBORS,
-            BATADV_CMD_GET_GATEWAYS, BATADV_CMD_GET_BLA_CLAIM,
-            BATADV_CMD_GET_BLA_BACKBONE, BATADV_CMD_GET_DAT_CACHE,
-            BATADV_CMD_GET_MCAST_FLAGS, BATADV_CMD_GET_VLAN,
+            BATADV_CMD_GET_MESH_INFO,
+            BATADV_CMD_SET_MESH,
+            BATADV_CMD_GET_HARDIF,
+            BATADV_CMD_SET_HARDIF,
+            BATADV_CMD_GET_TRANSTABLE_LOCAL,
+            BATADV_CMD_GET_TRANSTABLE_GLOBAL,
+            BATADV_CMD_GET_ORIGINATORS,
+            BATADV_CMD_GET_NEIGHBORS,
+            BATADV_CMD_GET_GATEWAYS,
+            BATADV_CMD_GET_BLA_CLAIM,
+            BATADV_CMD_GET_BLA_BACKBONE,
+            BATADV_CMD_GET_DAT_CACHE,
+            BATADV_CMD_GET_MCAST_FLAGS,
+            BATADV_CMD_GET_VLAN,
             BATADV_CMD_SET_VLAN,
         ];
         for i in 0..cmds.len() {
@@ -138,7 +145,11 @@ mod tests {
 
     #[test]
     fn test_gw_modes_distinct() {
-        let modes = [BATADV_GW_MODE_OFF, BATADV_GW_MODE_SERVER, BATADV_GW_MODE_CLIENT];
+        let modes = [
+            BATADV_GW_MODE_OFF,
+            BATADV_GW_MODE_SERVER,
+            BATADV_GW_MODE_CLIENT,
+        ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
                 assert_ne!(modes[i], modes[j]);
@@ -159,10 +170,14 @@ mod tests {
     #[test]
     fn test_tt_flags_no_overlap() {
         let flags = [
-            BATADV_TT_CLIENT_DEL, BATADV_TT_CLIENT_ROAM,
-            BATADV_TT_CLIENT_NOPURGE, BATADV_TT_CLIENT_NEW,
-            BATADV_TT_CLIENT_PENDING, BATADV_TT_CLIENT_TEMP,
-            BATADV_TT_CLIENT_WIFI, BATADV_TT_CLIENT_ISOLA,
+            BATADV_TT_CLIENT_DEL,
+            BATADV_TT_CLIENT_ROAM,
+            BATADV_TT_CLIENT_NOPURGE,
+            BATADV_TT_CLIENT_NEW,
+            BATADV_TT_CLIENT_PENDING,
+            BATADV_TT_CLIENT_TEMP,
+            BATADV_TT_CLIENT_WIFI,
+            BATADV_TT_CLIENT_ISOLA,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

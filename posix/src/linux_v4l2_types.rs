@@ -84,12 +84,15 @@ mod tests {
     #[test]
     fn test_buf_types_distinct() {
         let types = [
-            V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_OUTPUT,
-            V4L2_BUF_TYPE_VIDEO_OVERLAY, V4L2_BUF_TYPE_VBI_CAPTURE,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE,
+            V4L2_BUF_TYPE_VIDEO_OUTPUT,
+            V4L2_BUF_TYPE_VIDEO_OVERLAY,
+            V4L2_BUF_TYPE_VBI_CAPTURE,
             V4L2_BUF_TYPE_VBI_OUTPUT,
             V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
             V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-            V4L2_BUF_TYPE_META_CAPTURE, V4L2_BUF_TYPE_META_OUTPUT,
+            V4L2_BUF_TYPE_META_CAPTURE,
+            V4L2_BUF_TYPE_META_OUTPUT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -111,8 +114,10 @@ mod tests {
     #[test]
     fn test_pixel_formats_distinct() {
         let fmts = [
-            V4L2_PIX_FMT_YUYV, V4L2_PIX_FMT_NV12,
-            V4L2_PIX_FMT_MJPEG, V4L2_PIX_FMT_RGB24,
+            V4L2_PIX_FMT_YUYV,
+            V4L2_PIX_FMT_NV12,
+            V4L2_PIX_FMT_MJPEG,
+            V4L2_PIX_FMT_RGB24,
             V4L2_PIX_FMT_H264,
         ];
         for i in 0..fmts.len() {
@@ -125,9 +130,12 @@ mod tests {
     #[test]
     fn test_cap_flags_no_overlap() {
         let caps = [
-            V4L2_CAP_VIDEO_CAPTURE, V4L2_CAP_VIDEO_OUTPUT,
-            V4L2_CAP_STREAMING, V4L2_CAP_READWRITE,
-            V4L2_CAP_TUNER, V4L2_CAP_VIDEO_CAPTURE_MPLANE,
+            V4L2_CAP_VIDEO_CAPTURE,
+            V4L2_CAP_VIDEO_OUTPUT,
+            V4L2_CAP_STREAMING,
+            V4L2_CAP_READWRITE,
+            V4L2_CAP_TUNER,
+            V4L2_CAP_VIDEO_CAPTURE_MPLANE,
             V4L2_CAP_VIDEO_M2M_MPLANE,
         ];
         for i in 0..caps.len() {

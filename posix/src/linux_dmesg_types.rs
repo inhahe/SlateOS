@@ -70,8 +70,14 @@ mod tests {
     #[test]
     fn test_levels_distinct() {
         let levels = [
-            KERN_EMERG, KERN_ALERT, KERN_CRIT, KERN_ERR,
-            KERN_WARNING, KERN_NOTICE, KERN_INFO, KERN_DEBUG,
+            KERN_EMERG,
+            KERN_ALERT,
+            KERN_CRIT,
+            KERN_ERR,
+            KERN_WARNING,
+            KERN_NOTICE,
+            KERN_INFO,
+            KERN_DEBUG,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {

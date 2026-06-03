@@ -98,7 +98,11 @@ mod tests {
 
     #[test]
     fn test_sysctl_paths_distinct() {
-        let paths = [SYSCTL_IP_FORWARD, SYSCTL_IPV6_FORWARD, SYSCTL_IP_DEFAULT_TTL];
+        let paths = [
+            SYSCTL_IP_FORWARD,
+            SYSCTL_IPV6_FORWARD,
+            SYSCTL_IP_DEFAULT_TTL,
+        ];
         for i in 0..paths.len() {
             for j in (i + 1)..paths.len() {
                 assert_ne!(paths[i], paths[j]);

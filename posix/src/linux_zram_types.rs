@@ -71,8 +71,12 @@ mod tests {
     #[test]
     fn test_comp_names_distinct() {
         let names = [
-            ZRAM_COMP_LZO, ZRAM_COMP_LZO_RLE, ZRAM_COMP_LZ4,
-            ZRAM_COMP_LZ4HC, ZRAM_COMP_ZSTD, ZRAM_COMP_DEFLATE,
+            ZRAM_COMP_LZO,
+            ZRAM_COMP_LZO_RLE,
+            ZRAM_COMP_LZ4,
+            ZRAM_COMP_LZ4HC,
+            ZRAM_COMP_ZSTD,
+            ZRAM_COMP_DEFLATE,
             ZRAM_COMP_842,
         ];
         for i in 0..names.len() {

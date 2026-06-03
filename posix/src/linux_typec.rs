@@ -146,7 +146,8 @@ mod tests {
     #[test]
     fn test_orientations_distinct() {
         let orients = [
-            TYPEC_ORIENTATION_NONE, TYPEC_ORIENTATION_NORMAL,
+            TYPEC_ORIENTATION_NONE,
+            TYPEC_ORIENTATION_NORMAL,
             TYPEC_ORIENTATION_REVERSE,
         ];
         for i in 0..orients.len() {
@@ -159,7 +160,8 @@ mod tests {
     #[test]
     fn test_accessory_modes_distinct() {
         let modes = [
-            TYPEC_ACCESSORY_NONE, TYPEC_ACCESSORY_AUDIO,
+            TYPEC_ACCESSORY_NONE,
+            TYPEC_ACCESSORY_AUDIO,
             TYPEC_ACCESSORY_DEBUG,
         ];
         for i in 0..modes.len() {
@@ -172,8 +174,10 @@ mod tests {
     #[test]
     fn test_pd_revisions_distinct() {
         let revs = [
-            TYPEC_PD_REV10, TYPEC_PD_REV20,
-            TYPEC_PD_REV30, TYPEC_PD_REV31,
+            TYPEC_PD_REV10,
+            TYPEC_PD_REV20,
+            TYPEC_PD_REV30,
+            TYPEC_PD_REV31,
         ];
         for i in 0..revs.len() {
             for j in (i + 1)..revs.len() {
@@ -185,8 +189,10 @@ mod tests {
     #[test]
     fn test_power_modes_distinct() {
         let modes = [
-            TYPEC_PWR_MODE_USB, TYPEC_PWR_MODE_1_5A,
-            TYPEC_PWR_MODE_3_0A, TYPEC_PWR_MODE_PD,
+            TYPEC_PWR_MODE_USB,
+            TYPEC_PWR_MODE_1_5A,
+            TYPEC_PWR_MODE_3_0A,
+            TYPEC_PWR_MODE_PD,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -197,7 +203,11 @@ mod tests {
 
     #[test]
     fn test_svids_distinct() {
-        let svids = [TYPEC_SVID_DISPLAYPORT, TYPEC_SVID_THUNDERBOLT, TYPEC_SVID_USB4];
+        let svids = [
+            TYPEC_SVID_DISPLAYPORT,
+            TYPEC_SVID_THUNDERBOLT,
+            TYPEC_SVID_USB4,
+        ];
         for i in 0..svids.len() {
             for j in (i + 1)..svids.len() {
                 assert_ne!(svids[i], svids[j]);
@@ -213,8 +223,10 @@ mod tests {
     #[test]
     fn test_plug_types_distinct() {
         let plugs = [
-            TYPEC_PLUG_TYPE_A, TYPEC_PLUG_TYPE_B,
-            TYPEC_PLUG_TYPE_C, TYPEC_PLUG_CAPTIVE,
+            TYPEC_PLUG_TYPE_A,
+            TYPEC_PLUG_TYPE_B,
+            TYPEC_PLUG_TYPE_C,
+            TYPEC_PLUG_CAPTIVE,
         ];
         for i in 0..plugs.len() {
             for j in (i + 1)..plugs.len() {

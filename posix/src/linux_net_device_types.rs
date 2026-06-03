@@ -87,9 +87,15 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            ARPHRD_ETHER, ARPHRD_LOOPBACK, ARPHRD_TUNNEL,
-            ARPHRD_TUNNEL6, ARPHRD_IEEE80211, ARPHRD_IEEE802154,
-            ARPHRD_SLIP, ARPHRD_PPP, ARPHRD_NONE,
+            ARPHRD_ETHER,
+            ARPHRD_LOOPBACK,
+            ARPHRD_TUNNEL,
+            ARPHRD_TUNNEL6,
+            ARPHRD_IEEE80211,
+            ARPHRD_IEEE802154,
+            ARPHRD_SLIP,
+            ARPHRD_PPP,
+            ARPHRD_NONE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -101,9 +107,17 @@ mod tests {
     #[test]
     fn test_iff_flags_no_overlap() {
         let flags = [
-            IFF_UP, IFF_BROADCAST, IFF_LOOPBACK, IFF_POINTOPOINT,
-            IFF_RUNNING, IFF_NOARP, IFF_PROMISC, IFF_ALLMULTI,
-            IFF_MASTER, IFF_SLAVE, IFF_MULTICAST,
+            IFF_UP,
+            IFF_BROADCAST,
+            IFF_LOOPBACK,
+            IFF_POINTOPOINT,
+            IFF_RUNNING,
+            IFF_NOARP,
+            IFF_PROMISC,
+            IFF_ALLMULTI,
+            IFF_MASTER,
+            IFF_SLAVE,
+            IFF_MULTICAST,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -115,9 +129,13 @@ mod tests {
     #[test]
     fn test_oper_states_distinct() {
         let states = [
-            IF_OPER_UNKNOWN, IF_OPER_NOTPRESENT, IF_OPER_DOWN,
-            IF_OPER_LOWERLAYERDOWN, IF_OPER_TESTING,
-            IF_OPER_DORMANT, IF_OPER_UP,
+            IF_OPER_UNKNOWN,
+            IF_OPER_NOTPRESENT,
+            IF_OPER_DOWN,
+            IF_OPER_LOWERLAYERDOWN,
+            IF_OPER_TESTING,
+            IF_OPER_DORMANT,
+            IF_OPER_UP,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

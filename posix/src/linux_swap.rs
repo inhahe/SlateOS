@@ -41,8 +41,8 @@ pub const SWAP_MAGIC_OFFSET_4K: usize = 4086;
 // Re-exports from unistd
 // ---------------------------------------------------------------------------
 
-pub use crate::unistd::swapon;
 pub use crate::unistd::swapoff;
+pub use crate::unistd::swapon;
 
 // ---------------------------------------------------------------------------
 // Tests

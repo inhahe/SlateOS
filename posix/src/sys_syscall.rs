@@ -77,10 +77,18 @@ mod tests {
     #[test]
     fn test_linux_aliases_distinct() {
         let vals = [
-            SYS_READ, SYS_WRITE, SYS_CLOSE, SYS_BRK,
-            SYS_RT_SIGACTION, SYS_IOCTL, SYS_PIPE,
-            SYS_GETPID, SYS_FORK, SYS_EXECVE,
-            SYS_EXIT_LINUX, SYS_GETTIMEOFDAY,
+            SYS_READ,
+            SYS_WRITE,
+            SYS_CLOSE,
+            SYS_BRK,
+            SYS_RT_SIGACTION,
+            SYS_IOCTL,
+            SYS_PIPE,
+            SYS_GETPID,
+            SYS_FORK,
+            SYS_EXECVE,
+            SYS_EXIT_LINUX,
+            SYS_GETTIMEOFDAY,
         ];
         for i in 0..vals.len() {
             for j in (i + 1)..vals.len() {

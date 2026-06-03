@@ -73,10 +73,17 @@ mod tests {
     #[test]
     fn test_flag_bits_distinct() {
         let flags = [
-            UNAME26, ADDR_LIMIT_3GB, SHORT_INODE,
-            WHOLE_SECONDS, STICKY_TIMEOUTS, ADDR_NO_RANDOMIZE,
-            FDPIC_FUNCPTRS, MMAP_PAGE_ZERO, ADDR_COMPAT_LAYOUT,
-            READ_IMPLIES_EXEC, ADDR_LIMIT_32BIT,
+            UNAME26,
+            ADDR_LIMIT_3GB,
+            SHORT_INODE,
+            WHOLE_SECONDS,
+            STICKY_TIMEOUTS,
+            ADDR_NO_RANDOMIZE,
+            FDPIC_FUNCPTRS,
+            MMAP_PAGE_ZERO,
+            ADDR_COMPAT_LAYOUT,
+            READ_IMPLIES_EXEC,
+            ADDR_LIMIT_32BIT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

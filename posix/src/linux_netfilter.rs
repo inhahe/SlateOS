@@ -126,6 +126,9 @@ mod tests {
         // Verdict mask should extract only the lower 16 bits.
         let verdict_with_queue = (42u32 << NF_VERDICT_QBITS) | (NF_QUEUE as u32);
         assert_eq!(verdict_with_queue & NF_VERDICT_MASK, NF_QUEUE as u32);
-        assert_eq!((verdict_with_queue & NF_VERDICT_QMASK) >> NF_VERDICT_QBITS, 42);
+        assert_eq!(
+            (verdict_with_queue & NF_VERDICT_QMASK) >> NF_VERDICT_QBITS,
+            42
+        );
     }
 }

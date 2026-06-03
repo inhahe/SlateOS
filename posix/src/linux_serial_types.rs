@@ -96,8 +96,7 @@ mod tests {
     #[test]
     fn test_baud_rates_distinct() {
         let rates = [
-            B0, B50, B110, B300, B1200, B2400, B4800,
-            B9600, B19200, B38400, B57600, B115200,
+            B0, B50, B110, B300, B1200, B2400, B4800, B9600, B19200, B38400, B57600, B115200,
             B230400, B460800, B921600,
         ];
         for i in 0..rates.len() {
@@ -119,7 +118,9 @@ mod tests {
 
     #[test]
     fn test_modem_lines_distinct() {
-        let lines = [TIOCM_DTR, TIOCM_RTS, TIOCM_CTS, TIOCM_CAR, TIOCM_RNG, TIOCM_DSR];
+        let lines = [
+            TIOCM_DTR, TIOCM_RTS, TIOCM_CTS, TIOCM_CAR, TIOCM_RNG, TIOCM_DSR,
+        ];
         for i in 0..lines.len() {
             for j in (i + 1)..lines.len() {
                 assert_ne!(lines[i], lines[j]);
@@ -130,8 +131,10 @@ mod tests {
     #[test]
     fn test_rs485_flags_no_overlap() {
         let flags = [
-            SER_RS485_ENABLED, SER_RS485_RTS_ON_SEND,
-            SER_RS485_RTS_AFTER_SEND, SER_RS485_RX_DURING_TX,
+            SER_RS485_ENABLED,
+            SER_RS485_RTS_ON_SEND,
+            SER_RS485_RTS_AFTER_SEND,
+            SER_RS485_RX_DURING_TX,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

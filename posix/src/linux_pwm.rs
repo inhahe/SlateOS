@@ -103,8 +103,11 @@ mod tests {
     #[test]
     fn test_capabilities_no_overlap() {
         let caps = [
-            PWM_CAP_POLARITY, PWM_CAP_DUTY_ZERO,
-            PWM_CAP_DUTY_FULL, PWM_CAP_CAPTURE, PWM_CAP_ATOMIC,
+            PWM_CAP_POLARITY,
+            PWM_CAP_DUTY_ZERO,
+            PWM_CAP_DUTY_FULL,
+            PWM_CAP_CAPTURE,
+            PWM_CAP_ATOMIC,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {
@@ -116,8 +119,11 @@ mod tests {
     #[test]
     fn test_capabilities_power_of_two() {
         let caps = [
-            PWM_CAP_POLARITY, PWM_CAP_DUTY_ZERO,
-            PWM_CAP_DUTY_FULL, PWM_CAP_CAPTURE, PWM_CAP_ATOMIC,
+            PWM_CAP_POLARITY,
+            PWM_CAP_DUTY_ZERO,
+            PWM_CAP_DUTY_FULL,
+            PWM_CAP_CAPTURE,
+            PWM_CAP_ATOMIC,
         ];
         for c in &caps {
             assert!(c.is_power_of_two());

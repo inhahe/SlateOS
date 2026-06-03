@@ -99,9 +99,15 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            TC_ACT_UNSPEC, TC_ACT_OK, TC_ACT_RECLASSIFY,
-            TC_ACT_SHOT, TC_ACT_PIPE, TC_ACT_STOLEN,
-            TC_ACT_QUEUED, TC_ACT_REPEAT, TC_ACT_REDIRECT,
+            TC_ACT_UNSPEC,
+            TC_ACT_OK,
+            TC_ACT_RECLASSIFY,
+            TC_ACT_SHOT,
+            TC_ACT_PIPE,
+            TC_ACT_STOLEN,
+            TC_ACT_QUEUED,
+            TC_ACT_REPEAT,
+            TC_ACT_REDIRECT,
             TC_ACT_TRAP,
         ];
         for i in 0..actions.len() {
@@ -114,10 +120,18 @@ mod tests {
     #[test]
     fn test_u32_attrs_distinct() {
         let attrs = [
-            TCA_U32_UNSPEC, TCA_U32_CLASSID, TCA_U32_HASH,
-            TCA_U32_LINK, TCA_U32_DIVISOR, TCA_U32_SEL,
-            TCA_U32_POLICE, TCA_U32_ACT, TCA_U32_INDEV,
-            TCA_U32_PCNT, TCA_U32_MARK, TCA_U32_FLAGS,
+            TCA_U32_UNSPEC,
+            TCA_U32_CLASSID,
+            TCA_U32_HASH,
+            TCA_U32_LINK,
+            TCA_U32_DIVISOR,
+            TCA_U32_SEL,
+            TCA_U32_POLICE,
+            TCA_U32_ACT,
+            TCA_U32_INDEV,
+            TCA_U32_PCNT,
+            TCA_U32_MARK,
+            TCA_U32_FLAGS,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -129,10 +143,18 @@ mod tests {
     #[test]
     fn test_flow_attrs_distinct() {
         let attrs = [
-            TCA_FLOW_UNSPEC, TCA_FLOW_KEYS, TCA_FLOW_MODE,
-            TCA_FLOW_BASECLASS, TCA_FLOW_RSHIFT, TCA_FLOW_ADDEND,
-            TCA_FLOW_MASK, TCA_FLOW_XOR, TCA_FLOW_DIVISOR,
-            TCA_FLOW_ACT, TCA_FLOW_POLICE, TCA_FLOW_EMATCHES,
+            TCA_FLOW_UNSPEC,
+            TCA_FLOW_KEYS,
+            TCA_FLOW_MODE,
+            TCA_FLOW_BASECLASS,
+            TCA_FLOW_RSHIFT,
+            TCA_FLOW_ADDEND,
+            TCA_FLOW_MASK,
+            TCA_FLOW_XOR,
+            TCA_FLOW_DIVISOR,
+            TCA_FLOW_ACT,
+            TCA_FLOW_POLICE,
+            TCA_FLOW_EMATCHES,
             TCA_FLOW_PERTURB,
         ];
         for i in 0..attrs.len() {

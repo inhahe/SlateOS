@@ -59,8 +59,10 @@ mod tests {
     #[test]
     fn test_cids_distinct() {
         let cids = [
-            VMADDR_CID_HYPERVISOR, VMADDR_CID_LOCAL,
-            VMADDR_CID_HOST, VMADDR_CID_ANY,
+            VMADDR_CID_HYPERVISOR,
+            VMADDR_CID_LOCAL,
+            VMADDR_CID_HOST,
+            VMADDR_CID_ANY,
         ];
         for i in 0..cids.len() {
             for j in (i + 1)..cids.len() {
@@ -78,8 +80,10 @@ mod tests {
     #[test]
     fn test_options_distinct() {
         let opts = [
-            SO_VM_SOCKETS_BUFFER_SIZE, SO_VM_SOCKETS_BUFFER_MIN_SIZE,
-            SO_VM_SOCKETS_BUFFER_MAX_SIZE, SO_VM_SOCKETS_CONNECT_TIMEOUT,
+            SO_VM_SOCKETS_BUFFER_SIZE,
+            SO_VM_SOCKETS_BUFFER_MIN_SIZE,
+            SO_VM_SOCKETS_BUFFER_MAX_SIZE,
+            SO_VM_SOCKETS_CONNECT_TIMEOUT,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

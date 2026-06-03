@@ -59,9 +59,15 @@ mod tests {
     #[test]
     fn test_event_types_no_overlap() {
         let events = [
-            PROC_EVENT_FORK, PROC_EVENT_EXEC, PROC_EVENT_UID,
-            PROC_EVENT_GID, PROC_EVENT_SID, PROC_EVENT_PTRACE,
-            PROC_EVENT_COMM, PROC_EVENT_COREDUMP, PROC_EVENT_EXIT,
+            PROC_EVENT_FORK,
+            PROC_EVENT_EXEC,
+            PROC_EVENT_UID,
+            PROC_EVENT_GID,
+            PROC_EVENT_SID,
+            PROC_EVENT_PTRACE,
+            PROC_EVENT_COMM,
+            PROC_EVENT_COREDUMP,
+            PROC_EVENT_EXIT,
         ];
         for i in 0..events.len() {
             assert!(events[i].is_power_of_two());

@@ -73,8 +73,11 @@ mod tests {
     #[test]
     fn test_abi_versions_distinct() {
         let versions = [
-            LANDLOCK_ABI_V1, LANDLOCK_ABI_V2, LANDLOCK_ABI_V3,
-            LANDLOCK_ABI_V4, LANDLOCK_ABI_V5,
+            LANDLOCK_ABI_V1,
+            LANDLOCK_ABI_V2,
+            LANDLOCK_ABI_V3,
+            LANDLOCK_ABI_V4,
+            LANDLOCK_ABI_V5,
         ];
         for i in 0..versions.len() {
             for j in (i + 1)..versions.len() {

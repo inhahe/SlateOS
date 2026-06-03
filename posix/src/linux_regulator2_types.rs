@@ -94,8 +94,10 @@ mod tests {
     #[test]
     fn test_modes_power_of_two() {
         let modes = [
-            REGULATOR_MODE_FAST, REGULATOR_MODE_NORMAL,
-            REGULATOR_MODE_IDLE, REGULATOR_MODE_STANDBY,
+            REGULATOR_MODE_FAST,
+            REGULATOR_MODE_NORMAL,
+            REGULATOR_MODE_IDLE,
+            REGULATOR_MODE_STANDBY,
         ];
         for m in &modes {
             assert!(m.is_power_of_two(), "0x{:02x} not power of two", m);
@@ -105,8 +107,10 @@ mod tests {
     #[test]
     fn test_modes_no_overlap() {
         let modes = [
-            REGULATOR_MODE_FAST, REGULATOR_MODE_NORMAL,
-            REGULATOR_MODE_IDLE, REGULATOR_MODE_STANDBY,
+            REGULATOR_MODE_FAST,
+            REGULATOR_MODE_NORMAL,
+            REGULATOR_MODE_IDLE,
+            REGULATOR_MODE_STANDBY,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -118,13 +122,18 @@ mod tests {
     #[test]
     fn test_events_power_of_two() {
         let events = [
-            REGULATOR_EVENT_UNDER_VOLTAGE, REGULATOR_EVENT_OVER_CURRENT,
-            REGULATOR_EVENT_REGULATION_OUT, REGULATOR_EVENT_FAIL,
-            REGULATOR_EVENT_OVER_TEMP, REGULATOR_EVENT_FORCE_DISABLE,
-            REGULATOR_EVENT_VOLTAGE_CHANGE, REGULATOR_EVENT_DISABLE,
+            REGULATOR_EVENT_UNDER_VOLTAGE,
+            REGULATOR_EVENT_OVER_CURRENT,
+            REGULATOR_EVENT_REGULATION_OUT,
+            REGULATOR_EVENT_FAIL,
+            REGULATOR_EVENT_OVER_TEMP,
+            REGULATOR_EVENT_FORCE_DISABLE,
+            REGULATOR_EVENT_VOLTAGE_CHANGE,
+            REGULATOR_EVENT_DISABLE,
             REGULATOR_EVENT_PRE_VOLTAGE_CHANGE,
             REGULATOR_EVENT_ABORT_VOLTAGE_CHANGE,
-            REGULATOR_EVENT_PRE_DISABLE, REGULATOR_EVENT_ABORT_DISABLE,
+            REGULATOR_EVENT_PRE_DISABLE,
+            REGULATOR_EVENT_ABORT_DISABLE,
             REGULATOR_EVENT_ENABLE,
         ];
         for e in &events {
@@ -135,10 +144,14 @@ mod tests {
     #[test]
     fn test_status_distinct() {
         let statuses = [
-            REGULATOR_STATUS_OFF, REGULATOR_STATUS_ON,
-            REGULATOR_STATUS_ERROR, REGULATOR_STATUS_FAST,
-            REGULATOR_STATUS_NORMAL, REGULATOR_STATUS_IDLE,
-            REGULATOR_STATUS_STANDBY, REGULATOR_STATUS_BYPASS,
+            REGULATOR_STATUS_OFF,
+            REGULATOR_STATUS_ON,
+            REGULATOR_STATUS_ERROR,
+            REGULATOR_STATUS_FAST,
+            REGULATOR_STATUS_NORMAL,
+            REGULATOR_STATUS_IDLE,
+            REGULATOR_STATUS_STANDBY,
+            REGULATOR_STATUS_BYPASS,
             REGULATOR_STATUS_UNDEFINED,
         ];
         for i in 0..statuses.len() {
@@ -151,8 +164,10 @@ mod tests {
     #[test]
     fn test_change_reasons_no_overlap() {
         let reasons = [
-            REGULATOR_CHANGE_USER, REGULATOR_CHANGE_SYSTEM,
-            REGULATOR_CHANGE_THERMAL, REGULATOR_CHANGE_DRMS,
+            REGULATOR_CHANGE_USER,
+            REGULATOR_CHANGE_SYSTEM,
+            REGULATOR_CHANGE_THERMAL,
+            REGULATOR_CHANGE_DRMS,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {

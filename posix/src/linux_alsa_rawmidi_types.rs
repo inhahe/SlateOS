@@ -81,7 +81,8 @@ mod tests {
     #[test]
     fn test_info_flags_no_overlap() {
         let flags = [
-            SNDRV_RAWMIDI_INFO_OUTPUT, SNDRV_RAWMIDI_INFO_INPUT,
+            SNDRV_RAWMIDI_INFO_OUTPUT,
+            SNDRV_RAWMIDI_INFO_INPUT,
             SNDRV_RAWMIDI_INFO_DUPLEX,
         ];
         for i in 0..flags.len() {
@@ -95,8 +96,10 @@ mod tests {
     #[test]
     fn test_open_flags_no_overlap() {
         let flags = [
-            SNDRV_RAWMIDI_OPEN_OUTPUT, SNDRV_RAWMIDI_OPEN_INPUT,
-            SNDRV_RAWMIDI_OPEN_NONBLOCK, SNDRV_RAWMIDI_OPEN_APPEND,
+            SNDRV_RAWMIDI_OPEN_OUTPUT,
+            SNDRV_RAWMIDI_OPEN_INPUT,
+            SNDRV_RAWMIDI_OPEN_NONBLOCK,
+            SNDRV_RAWMIDI_OPEN_APPEND,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -109,11 +112,17 @@ mod tests {
     #[test]
     fn test_midi_messages_distinct() {
         let msgs = [
-            MIDI_MSG_NOTE_OFF, MIDI_MSG_NOTE_ON, MIDI_MSG_POLY_PRESSURE,
-            MIDI_MSG_CONTROL_CHANGE, MIDI_MSG_PROGRAM_CHANGE,
-            MIDI_MSG_CHANNEL_PRESSURE, MIDI_MSG_PITCH_BEND,
-            MIDI_MSG_SYSEX_START, MIDI_MSG_SYSEX_END,
-            MIDI_MSG_ACTIVE_SENSING, MIDI_MSG_SYSTEM_RESET,
+            MIDI_MSG_NOTE_OFF,
+            MIDI_MSG_NOTE_ON,
+            MIDI_MSG_POLY_PRESSURE,
+            MIDI_MSG_CONTROL_CHANGE,
+            MIDI_MSG_PROGRAM_CHANGE,
+            MIDI_MSG_CHANNEL_PRESSURE,
+            MIDI_MSG_PITCH_BEND,
+            MIDI_MSG_SYSEX_START,
+            MIDI_MSG_SYSEX_END,
+            MIDI_MSG_ACTIVE_SENSING,
+            MIDI_MSG_SYSTEM_RESET,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {

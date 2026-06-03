@@ -69,8 +69,13 @@ mod tests {
     #[test]
     fn test_as_flags_distinct() {
         let flags = [
-            AS_EIO, AS_ENOSPC, AS_MM_ALL_LOCKS, AS_UNEVICTABLE,
-            AS_EXITING, AS_NO_WRITEBACK_TAGS, AS_LARGE_FOLIO_SUPPORT,
+            AS_EIO,
+            AS_ENOSPC,
+            AS_MM_ALL_LOCKS,
+            AS_UNEVICTABLE,
+            AS_EXITING,
+            AS_NO_WRITEBACK_TAGS,
+            AS_LARGE_FOLIO_SUPPORT,
             AS_STABLE_WRITES,
         ];
         for i in 0..flags.len() {
@@ -83,8 +88,13 @@ mod tests {
     #[test]
     fn test_fgp_flags_no_overlap() {
         let flags = [
-            FGP_ACCESSED, FGP_LOCK, FGP_CREAT,
-            FGP_WRITE, FGP_NOWAIT, FGP_NOFS, FGP_HUGE,
+            FGP_ACCESSED,
+            FGP_LOCK,
+            FGP_CREAT,
+            FGP_WRITE,
+            FGP_NOWAIT,
+            FGP_NOFS,
+            FGP_HUGE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -97,7 +107,8 @@ mod tests {
     #[test]
     fn test_cache_tags_distinct() {
         let tags = [
-            PAGECACHE_TAG_DIRTY, PAGECACHE_TAG_WRITEBACK,
+            PAGECACHE_TAG_DIRTY,
+            PAGECACHE_TAG_WRITEBACK,
             PAGECACHE_TAG_TOWRITE,
         ];
         for i in 0..tags.len() {

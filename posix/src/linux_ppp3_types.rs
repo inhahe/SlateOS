@@ -75,9 +75,15 @@ mod tests {
     #[test]
     fn test_lcp_opts_distinct() {
         let opts = [
-            LCP_OPT_MRU, LCP_OPT_ACCM, LCP_OPT_AUTH,
-            LCP_OPT_QUALITY, LCP_OPT_MAGIC, LCP_OPT_PFC,
-            LCP_OPT_ACFC, LCP_OPT_FCS, LCP_OPT_MRRU,
+            LCP_OPT_MRU,
+            LCP_OPT_ACCM,
+            LCP_OPT_AUTH,
+            LCP_OPT_QUALITY,
+            LCP_OPT_MAGIC,
+            LCP_OPT_PFC,
+            LCP_OPT_ACFC,
+            LCP_OPT_FCS,
+            LCP_OPT_MRRU,
             LCP_OPT_ENDP_DISC,
         ];
         for i in 0..opts.len() {
@@ -90,9 +96,13 @@ mod tests {
     #[test]
     fn test_ipcp_opts_distinct() {
         let opts = [
-            IPCP_OPT_ADDRESSES, IPCP_OPT_COMPRESSION,
-            IPCP_OPT_ADDRESS, IPCP_OPT_DNS1,
-            IPCP_OPT_NBNS1, IPCP_OPT_DNS2, IPCP_OPT_NBNS2,
+            IPCP_OPT_ADDRESSES,
+            IPCP_OPT_COMPRESSION,
+            IPCP_OPT_ADDRESS,
+            IPCP_OPT_DNS1,
+            IPCP_OPT_NBNS1,
+            IPCP_OPT_DNS2,
+            IPCP_OPT_NBNS2,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -104,9 +114,12 @@ mod tests {
     #[test]
     fn test_ccp_opts_distinct() {
         let opts = [
-            CCP_OPT_PREDICTOR1, CCP_OPT_PREDICTOR2,
-            CCP_OPT_PUDDLE, CCP_OPT_BSD,
-            CCP_OPT_DEFLATE, CCP_OPT_MPPE,
+            CCP_OPT_PREDICTOR1,
+            CCP_OPT_PREDICTOR2,
+            CCP_OPT_PUDDLE,
+            CCP_OPT_BSD,
+            CCP_OPT_DEFLATE,
+            CCP_OPT_MPPE,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

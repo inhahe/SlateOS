@@ -77,11 +77,21 @@ mod tests {
     #[test]
     fn test_classes_distinct() {
         let classes = [
-            DEV_CLASS_BLOCK, DEV_CLASS_CHAR, DEV_CLASS_NET,
-            DEV_CLASS_INPUT, DEV_CLASS_SOUND, DEV_CLASS_DRM,
-            DEV_CLASS_TTY, DEV_CLASS_USB, DEV_CLASS_POWER_SUPPLY,
-            DEV_CLASS_THERMAL, DEV_CLASS_BACKLIGHT, DEV_CLASS_LEDS,
-            DEV_CLASS_WATCHDOG, DEV_CLASS_RTC, DEV_CLASS_REGULATOR,
+            DEV_CLASS_BLOCK,
+            DEV_CLASS_CHAR,
+            DEV_CLASS_NET,
+            DEV_CLASS_INPUT,
+            DEV_CLASS_SOUND,
+            DEV_CLASS_DRM,
+            DEV_CLASS_TTY,
+            DEV_CLASS_USB,
+            DEV_CLASS_POWER_SUPPLY,
+            DEV_CLASS_THERMAL,
+            DEV_CLASS_BACKLIGHT,
+            DEV_CLASS_LEDS,
+            DEV_CLASS_WATCHDOG,
+            DEV_CLASS_RTC,
+            DEV_CLASS_REGULATOR,
             DEV_CLASS_HWMON,
         ];
         for i in 0..classes.len() {
@@ -94,7 +104,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            CLASS_FLAG_OWN_DEVNODE, CLASS_FLAG_NS_AWARE,
+            CLASS_FLAG_OWN_DEVNODE,
+            CLASS_FLAG_NS_AWARE,
             CLASS_FLAG_ENUMERABLE,
         ];
         for i in 0..flags.len() {

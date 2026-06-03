@@ -83,9 +83,14 @@ mod tests {
     #[test]
     fn test_controllers_powers_of_two() {
         let ctrls = [
-            CGROUP_CTRL_CPU, CGROUP_CTRL_MEMORY, CGROUP_CTRL_IO,
-            CGROUP_CTRL_PIDS, CGROUP_CTRL_RDMA, CGROUP_CTRL_HUGETLB,
-            CGROUP_CTRL_CPUSET, CGROUP_CTRL_MISC,
+            CGROUP_CTRL_CPU,
+            CGROUP_CTRL_MEMORY,
+            CGROUP_CTRL_IO,
+            CGROUP_CTRL_PIDS,
+            CGROUP_CTRL_RDMA,
+            CGROUP_CTRL_HUGETLB,
+            CGROUP_CTRL_CPUSET,
+            CGROUP_CTRL_MISC,
         ];
         for c in &ctrls {
             assert!(c.is_power_of_two(), "ctrl {c:#x} not power of 2");
@@ -95,8 +100,10 @@ mod tests {
     #[test]
     fn test_types_distinct() {
         let types = [
-            CGROUP_TYPE_DOMAIN, CGROUP_TYPE_THREADED,
-            CGROUP_TYPE_DOMAIN_THREADED, CGROUP_TYPE_DOMAIN_INVALID,
+            CGROUP_TYPE_DOMAIN,
+            CGROUP_TYPE_THREADED,
+            CGROUP_TYPE_DOMAIN_THREADED,
+            CGROUP_TYPE_DOMAIN_INVALID,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

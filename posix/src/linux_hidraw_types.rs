@@ -69,9 +69,14 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            HIDIOCGRDESCSIZE, HIDIOCGRDESC, HIDIOCGRAWINFO,
-            HIDIOCGRAWNAME, HIDIOCGRAWPHYS, HIDIOCSFEATURE,
-            HIDIOCGFEATURE, HIDIOCGRAWUNIQ,
+            HIDIOCGRDESCSIZE,
+            HIDIOCGRDESC,
+            HIDIOCGRAWINFO,
+            HIDIOCGRAWNAME,
+            HIDIOCGRAWPHYS,
+            HIDIOCSFEATURE,
+            HIDIOCGFEATURE,
+            HIDIOCGRAWUNIQ,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

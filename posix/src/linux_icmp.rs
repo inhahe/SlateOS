@@ -126,9 +126,15 @@ mod tests {
     #[test]
     fn test_message_types_distinct() {
         let types = [
-            ICMP_ECHOREPLY, ICMP_DEST_UNREACH, ICMP_SOURCE_QUENCH,
-            ICMP_REDIRECT, ICMP_ECHO, ICMP_TIME_EXCEEDED,
-            ICMP_PARAMETERPROB, ICMP_TIMESTAMP, ICMP_TIMESTAMPREPLY,
+            ICMP_ECHOREPLY,
+            ICMP_DEST_UNREACH,
+            ICMP_SOURCE_QUENCH,
+            ICMP_REDIRECT,
+            ICMP_ECHO,
+            ICMP_TIME_EXCEEDED,
+            ICMP_PARAMETERPROB,
+            ICMP_TIMESTAMP,
+            ICMP_TIMESTAMPREPLY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -140,9 +146,14 @@ mod tests {
     #[test]
     fn test_unreach_codes_distinct() {
         let codes = [
-            ICMP_NET_UNREACH, ICMP_HOST_UNREACH, ICMP_PROT_UNREACH,
-            ICMP_PORT_UNREACH, ICMP_FRAG_NEEDED, ICMP_SR_FAILED,
-            ICMP_NET_UNKNOWN, ICMP_HOST_UNKNOWN,
+            ICMP_NET_UNREACH,
+            ICMP_HOST_UNREACH,
+            ICMP_PROT_UNREACH,
+            ICMP_PORT_UNREACH,
+            ICMP_FRAG_NEEDED,
+            ICMP_SR_FAILED,
+            ICMP_NET_UNKNOWN,
+            ICMP_HOST_UNKNOWN,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {

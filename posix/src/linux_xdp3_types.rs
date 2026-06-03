@@ -95,8 +95,11 @@ mod tests {
     #[test]
     fn test_bind_flags_no_overlap() {
         let flags = [
-            XDP_SHARED_UMEM, XDP_COPY, XDP_ZEROCOPY,
-            XDP_USE_NEED_WAKEUP, XDP_USE_SG,
+            XDP_SHARED_UMEM,
+            XDP_COPY,
+            XDP_ZEROCOPY,
+            XDP_USE_NEED_WAKEUP,
+            XDP_USE_SG,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -108,9 +111,13 @@ mod tests {
     #[test]
     fn test_sockopt_distinct() {
         let opts = [
-            XDP_RX_RING, XDP_TX_RING, XDP_UMEM_REG,
-            XDP_UMEM_FILL_RING, XDP_UMEM_COMPLETION_RING,
-            XDP_STATISTICS, XDP_OPTIONS,
+            XDP_RX_RING,
+            XDP_TX_RING,
+            XDP_UMEM_REG,
+            XDP_UMEM_FILL_RING,
+            XDP_UMEM_COMPLETION_RING,
+            XDP_STATISTICS,
+            XDP_OPTIONS,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -122,9 +129,12 @@ mod tests {
     #[test]
     fn test_stats_fields_distinct() {
         let fields = [
-            XDP_STATS_RX_DROPPED, XDP_STATS_RX_INVALID_DESCS,
-            XDP_STATS_TX_INVALID_DESCS, XDP_STATS_RX_RING_FULL,
-            XDP_STATS_RX_FILL_RING_EMPTY, XDP_STATS_TX_RING_EMPTY,
+            XDP_STATS_RX_DROPPED,
+            XDP_STATS_RX_INVALID_DESCS,
+            XDP_STATS_TX_INVALID_DESCS,
+            XDP_STATS_RX_RING_FULL,
+            XDP_STATS_RX_FILL_RING_EMPTY,
+            XDP_STATS_TX_RING_EMPTY,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {

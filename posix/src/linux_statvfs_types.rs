@@ -70,9 +70,16 @@ mod tests {
     #[test]
     fn test_flags_distinct() {
         let flags = [
-            ST_RDONLY, ST_NOSUID, ST_NODEV, ST_NOEXEC,
-            ST_SYNCHRONOUS, ST_MANDLOCK, ST_NOATIME,
-            ST_NODIRATIME, ST_RELATIME, ST_NOSYMFOLLOW,
+            ST_RDONLY,
+            ST_NOSUID,
+            ST_NODEV,
+            ST_NOEXEC,
+            ST_SYNCHRONOUS,
+            ST_MANDLOCK,
+            ST_NOATIME,
+            ST_NODIRATIME,
+            ST_RELATIME,
+            ST_NOSYMFOLLOW,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -94,10 +101,17 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            STATVFS_OFF_BSIZE, STATVFS_OFF_FRSIZE, STATVFS_OFF_BLOCKS,
-            STATVFS_OFF_BFREE, STATVFS_OFF_BAVAIL, STATVFS_OFF_FILES,
-            STATVFS_OFF_FFREE, STATVFS_OFF_FAVAIL, STATVFS_OFF_FSID,
-            STATVFS_OFF_FLAG, STATVFS_OFF_NAMEMAX,
+            STATVFS_OFF_BSIZE,
+            STATVFS_OFF_FRSIZE,
+            STATVFS_OFF_BLOCKS,
+            STATVFS_OFF_BFREE,
+            STATVFS_OFF_BAVAIL,
+            STATVFS_OFF_FILES,
+            STATVFS_OFF_FFREE,
+            STATVFS_OFF_FAVAIL,
+            STATVFS_OFF_FSID,
+            STATVFS_OFF_FLAG,
+            STATVFS_OFF_NAMEMAX,
         ];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);

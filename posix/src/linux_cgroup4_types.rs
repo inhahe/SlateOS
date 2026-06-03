@@ -72,8 +72,10 @@ mod tests {
     #[test]
     fn test_thread_modes_distinct() {
         let modes = [
-            CGROUP_DOMAIN, CGROUP_THREADED,
-            CGROUP_DOMAIN_THREADED, CGROUP_DOMAIN_INVALID,
+            CGROUP_DOMAIN,
+            CGROUP_THREADED,
+            CGROUP_DOMAIN_THREADED,
+            CGROUP_DOMAIN_INVALID,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

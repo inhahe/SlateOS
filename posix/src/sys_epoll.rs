@@ -3,17 +3,17 @@
 //! Re-exports the primary epoll API from the `epoll` module.
 //! Programs that include `<sys/epoll.h>` can find everything here.
 
+pub use crate::epoll::EpollEvent;
 pub use crate::epoll::epoll_create;
 pub use crate::epoll::epoll_create1;
 pub use crate::epoll::epoll_ctl;
 pub use crate::epoll::epoll_wait;
-pub use crate::epoll::EpollEvent;
 
+pub use crate::epoll::EPOLLERR;
+pub use crate::epoll::EPOLLET;
+pub use crate::epoll::EPOLLHUP;
 pub use crate::epoll::EPOLLIN;
 pub use crate::epoll::EPOLLOUT;
-pub use crate::epoll::EPOLLERR;
-pub use crate::epoll::EPOLLHUP;
-pub use crate::epoll::EPOLLET;
 
 /// Remote peer closed connection or shut down writing half.
 pub const EPOLLRDHUP: u32 = 0x2000;

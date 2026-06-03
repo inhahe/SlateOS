@@ -97,11 +97,16 @@ mod tests {
     #[test]
     fn test_entity_functions_distinct() {
         let funcs = [
-            MEDIA_ENT_F_UNKNOWN, MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN,
-            MEDIA_ENT_F_DTV_DEMOD, MEDIA_ENT_F_TUNER,
-            MEDIA_ENT_F_TS_DEMUX, MEDIA_ENT_F_IO_V4L,
-            MEDIA_ENT_F_CAM_SENSOR, MEDIA_ENT_F_FLASH,
-            MEDIA_ENT_F_ATV_DECODER, MEDIA_ENT_F_DTV_DECODER,
+            MEDIA_ENT_F_UNKNOWN,
+            MEDIA_ENT_F_V4L2_SUBDEV_UNKNOWN,
+            MEDIA_ENT_F_DTV_DEMOD,
+            MEDIA_ENT_F_TUNER,
+            MEDIA_ENT_F_TS_DEMUX,
+            MEDIA_ENT_F_IO_V4L,
+            MEDIA_ENT_F_CAM_SENSOR,
+            MEDIA_ENT_F_FLASH,
+            MEDIA_ENT_F_ATV_DECODER,
+            MEDIA_ENT_F_DTV_DECODER,
         ];
         for i in 0..funcs.len() {
             for j in (i + 1)..funcs.len() {

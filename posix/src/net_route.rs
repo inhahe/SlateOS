@@ -230,17 +230,24 @@ mod tests {
     #[test]
     fn test_rtf_flags_distinct() {
         let flags = [
-            RTF_UP, RTF_GATEWAY, RTF_HOST, RTF_REJECT, RTF_DYNAMIC,
-            RTF_MODIFIED, RTF_DONE, RTF_MASK, RTF_STATIC,
-            RTF_XRESOLVE, RTF_BLACKHOLE, RTF_LOCAL,
-            RTF_BROADCAST, RTF_MULTICAST,
+            RTF_UP,
+            RTF_GATEWAY,
+            RTF_HOST,
+            RTF_REJECT,
+            RTF_DYNAMIC,
+            RTF_MODIFIED,
+            RTF_DONE,
+            RTF_MASK,
+            RTF_STATIC,
+            RTF_XRESOLVE,
+            RTF_BLACKHOLE,
+            RTF_LOCAL,
+            RTF_BROADCAST,
+            RTF_MULTICAST,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
-                assert_ne!(
-                    flags[i], flags[j],
-                    "RTF flags must be distinct"
-                );
+                assert_ne!(flags[i], flags[j], "RTF flags must be distinct");
             }
         }
     }
@@ -267,16 +274,21 @@ mod tests {
     #[test]
     fn test_rtm_types_distinct() {
         let types = [
-            RTM_ADD, RTM_DELETE, RTM_CHANGE, RTM_GET, RTM_LOSING,
-            RTM_REDIRECT, RTM_MISS, RTM_RESOLVE, RTM_IFINFO,
-            RTM_NEWADDR, RTM_DELADDR,
+            RTM_ADD,
+            RTM_DELETE,
+            RTM_CHANGE,
+            RTM_GET,
+            RTM_LOSING,
+            RTM_REDIRECT,
+            RTM_MISS,
+            RTM_RESOLVE,
+            RTM_IFINFO,
+            RTM_NEWADDR,
+            RTM_DELADDR,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
-                assert_ne!(
-                    types[i], types[j],
-                    "RTM types must be distinct"
-                );
+                assert_ne!(types[i], types[j], "RTM types must be distinct");
             }
         }
     }
@@ -299,16 +311,28 @@ mod tests {
 
     #[test]
     fn test_rta_all_combined() {
-        let all = RTA_DST | RTA_GATEWAY | RTA_NETMASK | RTA_GENMASK
-                | RTA_IFP | RTA_IFA | RTA_AUTHOR | RTA_BRD;
+        let all = RTA_DST
+            | RTA_GATEWAY
+            | RTA_NETMASK
+            | RTA_GENMASK
+            | RTA_IFP
+            | RTA_IFA
+            | RTA_AUTHOR
+            | RTA_BRD;
         assert_eq!(all, 0xFF);
     }
 
     #[test]
     fn test_rta_powers_of_two() {
         let rtas = [
-            RTA_DST, RTA_GATEWAY, RTA_NETMASK, RTA_GENMASK,
-            RTA_IFP, RTA_IFA, RTA_AUTHOR, RTA_BRD,
+            RTA_DST,
+            RTA_GATEWAY,
+            RTA_NETMASK,
+            RTA_GENMASK,
+            RTA_IFP,
+            RTA_IFA,
+            RTA_AUTHOR,
+            RTA_BRD,
         ];
         for &r in &rtas {
             assert!(r > 0);

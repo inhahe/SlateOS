@@ -129,11 +129,17 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            DEVLINK_CMD_UNSPEC, DEVLINK_CMD_GET, DEVLINK_CMD_SET,
-            DEVLINK_CMD_NEW, DEVLINK_CMD_DEL,
-            DEVLINK_CMD_PORT_GET, DEVLINK_CMD_PORT_SET,
-            DEVLINK_CMD_PORT_NEW, DEVLINK_CMD_PORT_DEL,
-            DEVLINK_CMD_PORT_SPLIT, DEVLINK_CMD_PORT_UNSPLIT,
+            DEVLINK_CMD_UNSPEC,
+            DEVLINK_CMD_GET,
+            DEVLINK_CMD_SET,
+            DEVLINK_CMD_NEW,
+            DEVLINK_CMD_DEL,
+            DEVLINK_CMD_PORT_GET,
+            DEVLINK_CMD_PORT_SET,
+            DEVLINK_CMD_PORT_NEW,
+            DEVLINK_CMD_PORT_DEL,
+            DEVLINK_CMD_PORT_SPLIT,
+            DEVLINK_CMD_PORT_UNSPLIT,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

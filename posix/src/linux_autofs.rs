@@ -91,8 +91,11 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            AUTOFS_IOC_READY, AUTOFS_IOC_FAIL, AUTOFS_IOC_SETTIMEOUT,
-            AUTOFS_IOC_PROTOVER, AUTOFS_IOC_EXPIRE,
+            AUTOFS_IOC_READY,
+            AUTOFS_IOC_FAIL,
+            AUTOFS_IOC_SETTIMEOUT,
+            AUTOFS_IOC_PROTOVER,
+            AUTOFS_IOC_EXPIRE,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {
@@ -118,7 +121,11 @@ mod tests {
 
     #[test]
     fn test_states_distinct() {
-        let states = [AUTOFS_STATE_PENDING, AUTOFS_STATE_ACTIVE, AUTOFS_STATE_EXPIRING];
+        let states = [
+            AUTOFS_STATE_PENDING,
+            AUTOFS_STATE_ACTIVE,
+            AUTOFS_STATE_EXPIRING,
+        ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
                 assert_ne!(states[i], states[j]);

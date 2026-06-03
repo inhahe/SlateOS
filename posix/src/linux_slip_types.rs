@@ -100,8 +100,11 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            SL_MODE_SLIP, SL_MODE_CSLIP,
-            SL_MODE_SLIP6, SL_MODE_CSLIP6, SL_MODE_AX25,
+            SL_MODE_SLIP,
+            SL_MODE_CSLIP,
+            SL_MODE_SLIP6,
+            SL_MODE_CSLIP6,
+            SL_MODE_AX25,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -131,8 +134,11 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let cmds = [
-            SIOCSKEEPALIVE, SIOCGKEEPALIVE,
-            SIOCSOUTFILL, SIOCGOUTFILL, SIOCSSLIPMODE,
+            SIOCSKEEPALIVE,
+            SIOCGKEEPALIVE,
+            SIOCSOUTFILL,
+            SIOCGOUTFILL,
+            SIOCSSLIPMODE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

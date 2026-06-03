@@ -162,11 +162,7 @@ pub struct RegMatch {
 ///
 /// Returns 0 on success, or an error code.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub unsafe extern "C" fn regcomp(
-    preg: *mut RegexT,
-    pattern: *const u8,
-    cflags: i32,
-) -> i32 {
+pub unsafe extern "C" fn regcomp(preg: *mut RegexT, pattern: *const u8, cflags: i32) -> i32 {
     if preg.is_null() || pattern.is_null() {
         return REG_BADPAT;
     }
@@ -185,7 +181,9 @@ pub unsafe extern "C" fn regcomp(
     #[allow(clippy::cast_ptr_alignment)]
     let program = prog_ptr.cast::<RegexProgram>();
     // Zero-initialize.
-    unsafe { core::ptr::write_bytes(program, 0, 1); }
+    unsafe {
+        core::ptr::write_bytes(program, 0, 1);
+    }
     let p = unsafe { &mut *program };
     p.flags = cflags;
 
@@ -196,13 +194,17 @@ pub unsafe extern "C" fn regcomp(
     let result = compile_pattern(p, pattern, pat_len, extended);
     if result != 0 {
         // SAFETY: prog_ptr was allocated by malloc.
-        unsafe { malloc::free(prog_ptr); }
+        unsafe {
+            malloc::free(prog_ptr);
+        }
         return result;
     }
 
     // Emit final Match instruction.
     if !emit_inst(p, Inst::Match) {
-        unsafe { malloc::free(prog_ptr); }
+        unsafe {
+            malloc::free(prog_ptr);
+        }
         return REG_ESPACE;
     }
 
@@ -242,7 +244,10 @@ pub unsafe extern "C" fn regexec(
     // Try matching at each position in the string.
     let mut pos: usize = 0;
     while pos <= slen {
-        let mut groups = [RegMatch { rm_so: -1, rm_eo: -1 }; MAX_GROUPS];
+        let mut groups = [RegMatch {
+            rm_so: -1,
+            rm_eo: -1,
+        }; MAX_GROUPS];
 
         if try_match(compiled, string_arg, slen, pos, eflags, &mut groups) {
             // Store whole match.
@@ -253,17 +258,28 @@ pub unsafe extern "C" fn regexec(
 
             // Copy results to pmatch.
             if !pmatch.is_null() && nmatch > 0 {
-                let copy_count = if nmatch < MAX_GROUPS { nmatch } else { MAX_GROUPS };
+                let copy_count = if nmatch < MAX_GROUPS {
+                    nmatch
+                } else {
+                    MAX_GROUPS
+                };
                 let mut gi: usize = 0;
                 while gi < copy_count {
                     if let Some(grp) = groups.get(gi) {
-                        unsafe { *pmatch.add(gi) = *grp; }
+                        unsafe {
+                            *pmatch.add(gi) = *grp;
+                        }
                     }
                     gi = gi.wrapping_add(1);
                 }
                 // POSIX: entries beyond MAX_GROUPS must be set to -1.
                 while gi < nmatch {
-                    unsafe { *pmatch.add(gi) = RegMatch { rm_so: -1, rm_eo: -1 }; }
+                    unsafe {
+                        *pmatch.add(gi) = RegMatch {
+                            rm_so: -1,
+                            rm_eo: -1,
+                        };
+                    }
                     gi = gi.wrapping_add(1);
                 }
             }
@@ -290,7 +306,9 @@ pub unsafe extern "C" fn regfree(preg: *mut RegexT) {
     let reg = unsafe { &mut *preg };
     if !reg.program.is_null() {
         // SAFETY: program was allocated by malloc in regcomp.
-        unsafe { malloc::free(reg.program.cast::<u8>()); }
+        unsafe {
+            malloc::free(reg.program.cast::<u8>());
+        }
         reg.program = core::ptr::null_mut();
     }
     reg.re_nsub = 0;
@@ -328,17 +346,29 @@ pub extern "C" fn regerror(
     };
 
     if !errbuf.is_null() && errbuf_size > 0 {
-        let copy_len = if msg.len() < errbuf_size { msg.len() } else { errbuf_size };
+        let copy_len = if msg.len() < errbuf_size {
+            msg.len()
+        } else {
+            errbuf_size
+        };
         let mut ci: usize = 0;
         while ci < copy_len {
             if let Some(&byte) = msg.get(ci) {
-                unsafe { *errbuf.add(ci) = byte; }
+                unsafe {
+                    *errbuf.add(ci) = byte;
+                }
             }
             ci = ci.wrapping_add(1);
         }
         // Ensure null-termination.
-        let term = if copy_len < errbuf_size { copy_len.wrapping_sub(1) } else { errbuf_size.wrapping_sub(1) };
-        unsafe { *errbuf.add(term) = 0; }
+        let term = if copy_len < errbuf_size {
+            copy_len.wrapping_sub(1)
+        } else {
+            errbuf_size.wrapping_sub(1)
+        };
+        unsafe {
+            *errbuf.add(term) = 0;
+        }
     }
 
     msg.len()
@@ -349,12 +379,7 @@ pub extern "C" fn regerror(
 // ---------------------------------------------------------------------------
 
 /// Compile a regex pattern into instructions.
-fn compile_pattern(
-    prog: &mut RegexProgram,
-    pat: *const u8,
-    pat_len: usize,
-    extended: bool,
-) -> i32 {
+fn compile_pattern(prog: &mut RegexProgram, pat: *const u8, pat_len: usize, extended: bool) -> i32 {
     let mut pos: usize = 0;
     // Group 0 is reserved for the whole match (set by regexec, not by
     // instructions).  Explicit sub-expressions start at group 1.
@@ -524,15 +549,21 @@ fn compile_atom(
     match ch {
         b'^' => {
             *pos = pos.wrapping_add(1);
-            if !emit_inst(prog, Inst::Bol) { return REG_ESPACE; }
+            if !emit_inst(prog, Inst::Bol) {
+                return REG_ESPACE;
+            }
         }
         b'$' => {
             *pos = pos.wrapping_add(1);
-            if !emit_inst(prog, Inst::Eol) { return REG_ESPACE; }
+            if !emit_inst(prog, Inst::Eol) {
+                return REG_ESPACE;
+            }
         }
         b'.' => {
             *pos = pos.wrapping_add(1);
-            if !emit_inst(prog, Inst::AnyChar) { return REG_ESPACE; }
+            if !emit_inst(prog, Inst::AnyChar) {
+                return REG_ESPACE;
+            }
         }
         b'[' => {
             *pos = pos.wrapping_add(1);
@@ -554,12 +585,16 @@ fn compile_atom(
             }
             // Literal escaped char — REG_ICASE still applies.
             *pos = pos.wrapping_add(1);
-            if !emit_inst(prog, Inst::Byte(escaped, icase)) { return REG_ESPACE; }
+            if !emit_inst(prog, Inst::Byte(escaped, icase)) {
+                return REG_ESPACE;
+            }
         }
         _ => {
             // Literal character.
             *pos = pos.wrapping_add(1);
-            if !emit_inst(prog, Inst::Byte(ch, icase)) { return REG_ESPACE; }
+            if !emit_inst(prog, Inst::Byte(ch, icase)) {
+                return REG_ESPACE;
+            }
         }
     }
 
@@ -632,7 +667,10 @@ fn compile_quantifier(
                 return REG_ESPACE;
             }
             let split_pos = prog.inst_count;
-            if !emit_inst(prog, Inst::Split(atom_start as u16, split_pos.wrapping_add(1) as u16)) {
+            if !emit_inst(
+                prog,
+                Inst::Split(atom_start as u16, split_pos.wrapping_add(1) as u16),
+            ) {
                 return REG_ESPACE;
             }
         }
@@ -667,12 +705,7 @@ fn compile_quantifier(
 }
 
 /// Compile a character class `[...]`.
-fn compile_class(
-    prog: &mut RegexProgram,
-    pat: *const u8,
-    pat_len: usize,
-    pos: &mut usize,
-) -> i32 {
+fn compile_class(prog: &mut RegexProgram, pat: *const u8, pat_len: usize, pos: &mut usize) -> i32 {
     let negated = *pos < pat_len && unsafe { *pat.add(*pos) } == b'^';
     if negated {
         *pos = pos.wrapping_add(1);
@@ -697,14 +730,18 @@ fn compile_class(
         if ch == b']' {
             *pos = pos.wrapping_add(1);
             let range_end = prog.class_count;
-            if !emit_inst(prog, Inst::Class(range_start as u16, range_end as u16, negated)) {
+            if !emit_inst(
+                prog,
+                Inst::Class(range_start as u16, range_end as u16, negated),
+            ) {
                 return REG_ESPACE;
             }
             return 0;
         }
 
         // Check for POSIX character class [:classname:].
-        if ch == b'[' && pos.wrapping_add(1) < pat_len
+        if ch == b'['
+            && pos.wrapping_add(1) < pat_len
             && unsafe { *pat.add(pos.wrapping_add(1)) } == b':'
         {
             let class_start = pos.wrapping_add(2);
@@ -793,7 +830,9 @@ fn add_posix_class(
 ) -> i32 {
     // Compare the class name (case-sensitive per POSIX).
     let name_matches = |expected: &[u8]| -> bool {
-        if name_len != expected.len() { return false; }
+        if name_len != expected.len() {
+            return false;
+        }
         let mut k = 0;
         while k < name_len {
             let exp_byte = expected.get(k).copied().unwrap_or(0);
@@ -807,45 +846,91 @@ fn add_posix_class(
 
     // Each POSIX class maps to one or more ranges in ASCII.
     if name_matches(b"alpha") {
-        if !add_class_range(prog, b'A', b'Z') { return REG_ESPACE; }
-        if !add_class_range(prog, b'a', b'z') { return REG_ESPACE; }
+        if !add_class_range(prog, b'A', b'Z') {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, b'a', b'z') {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"digit") {
-        if !add_class_range(prog, b'0', b'9') { return REG_ESPACE; }
+        if !add_class_range(prog, b'0', b'9') {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"alnum") {
-        if !add_class_range(prog, b'A', b'Z') { return REG_ESPACE; }
-        if !add_class_range(prog, b'a', b'z') { return REG_ESPACE; }
-        if !add_class_range(prog, b'0', b'9') { return REG_ESPACE; }
+        if !add_class_range(prog, b'A', b'Z') {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, b'a', b'z') {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, b'0', b'9') {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"space") {
         // space, tab, newline, vertical tab, form feed, carriage return
-        if !add_class_range(prog, 0x09, 0x0D) { return REG_ESPACE; }
-        if !add_class_range(prog, b' ', b' ') { return REG_ESPACE; }
+        if !add_class_range(prog, 0x09, 0x0D) {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, b' ', b' ') {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"upper") {
-        if !add_class_range(prog, b'A', b'Z') { return REG_ESPACE; }
+        if !add_class_range(prog, b'A', b'Z') {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"lower") {
-        if !add_class_range(prog, b'a', b'z') { return REG_ESPACE; }
+        if !add_class_range(prog, b'a', b'z') {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"punct") {
         // Printable non-alnum, non-space: 33-47, 58-64, 91-96, 123-126
-        if !add_class_range(prog, 0x21, 0x2F) { return REG_ESPACE; }
-        if !add_class_range(prog, 0x3A, 0x40) { return REG_ESPACE; }
-        if !add_class_range(prog, 0x5B, 0x60) { return REG_ESPACE; }
-        if !add_class_range(prog, 0x7B, 0x7E) { return REG_ESPACE; }
+        if !add_class_range(prog, 0x21, 0x2F) {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, 0x3A, 0x40) {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, 0x5B, 0x60) {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, 0x7B, 0x7E) {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"cntrl") {
-        if !add_class_range(prog, 0x00, 0x1F) { return REG_ESPACE; }
-        if !add_class_range(prog, 0x7F, 0x7F) { return REG_ESPACE; }
+        if !add_class_range(prog, 0x00, 0x1F) {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, 0x7F, 0x7F) {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"print") {
         // Printable: 0x20 - 0x7E
-        if !add_class_range(prog, 0x20, 0x7E) { return REG_ESPACE; }
+        if !add_class_range(prog, 0x20, 0x7E) {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"graph") {
         // Visible (printable minus space): 0x21 - 0x7E
-        if !add_class_range(prog, 0x21, 0x7E) { return REG_ESPACE; }
+        if !add_class_range(prog, 0x21, 0x7E) {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"xdigit") {
-        if !add_class_range(prog, b'0', b'9') { return REG_ESPACE; }
-        if !add_class_range(prog, b'A', b'F') { return REG_ESPACE; }
-        if !add_class_range(prog, b'a', b'f') { return REG_ESPACE; }
+        if !add_class_range(prog, b'0', b'9') {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, b'A', b'F') {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, b'a', b'f') {
+            return REG_ESPACE;
+        }
     } else if name_matches(b"blank") {
         // Space and tab only.
-        if !add_class_range(prog, b' ', b' ') { return REG_ESPACE; }
-        if !add_class_range(prog, b'\t', b'\t') { return REG_ESPACE; }
+        if !add_class_range(prog, b' ', b' ') {
+            return REG_ESPACE;
+        }
+        if !add_class_range(prog, b'\t', b'\t') {
+            return REG_ESPACE;
+        }
     } else {
         return REG_ECTYPE;
     }
@@ -934,7 +1019,12 @@ fn try_match(
     eflags: i32,
     groups: &mut [RegMatch; MAX_GROUPS],
 ) -> bool {
-    let ctx = MatchCtx { prog, string_ptr, slen, eflags };
+    let ctx = MatchCtx {
+        prog,
+        string_ptr,
+        slen,
+        eflags,
+    };
     exec_recursive(&ctx, start, 0, groups)
 }
 
@@ -1119,8 +1209,16 @@ fn char_in_class(
     let mut idx = start;
     while idx < end {
         if let Some(range) = classes.get(idx) {
-            let lo = if icase { range.lo.to_ascii_lowercase() } else { range.lo };
-            let hi = if icase { range.hi.to_ascii_lowercase() } else { range.hi };
+            let lo = if icase {
+                range.lo.to_ascii_lowercase()
+            } else {
+                range.lo
+            };
+            let hi = if icase {
+                range.hi.to_ascii_lowercase()
+            } else {
+                range.hi
+            };
             if test_ch >= lo && test_ch <= hi {
                 return true;
             }
@@ -1184,7 +1282,10 @@ mod tests {
         let slen = text.len().wrapping_sub(1); // exclude NUL
         let mut pos: usize = 0;
         while pos <= slen {
-            let mut groups = [RegMatch { rm_so: -1, rm_eo: -1 }; MAX_GROUPS];
+            let mut groups = [RegMatch {
+                rm_so: -1,
+                rm_eo: -1,
+            }; MAX_GROUPS];
             if try_match(prog, text.as_ptr(), slen, pos, eflags, &mut groups) {
                 if let Some(g0) = groups.get(0) {
                     return Some((pos, g0.rm_eo as usize));
@@ -1204,7 +1305,10 @@ mod tests {
         let slen = text.len().wrapping_sub(1);
         let mut pos: usize = 0;
         while pos <= slen {
-            let mut groups = [RegMatch { rm_so: -1, rm_eo: -1 }; MAX_GROUPS];
+            let mut groups = [RegMatch {
+                rm_so: -1,
+                rm_eo: -1,
+            }; MAX_GROUPS];
             if try_match(prog, text.as_ptr(), slen, pos, eflags, &mut groups) {
                 if let Some(g0) = groups.get_mut(0) {
                     g0.rm_so = pos as i32;
@@ -1745,7 +1849,10 @@ mod tests {
 
     #[test]
     fn complex_ere_pattern() {
-        assert!(matches_ere(b"^[a-z]+@[a-z]+\\.[a-z]+$\0", b"user@host.com\0"));
+        assert!(matches_ere(
+            b"^[a-z]+@[a-z]+\\.[a-z]+$\0",
+            b"user@host.com\0"
+        ));
         assert!(!matches_ere(b"^[a-z]+@[a-z]+\\.[a-z]+$\0", b"user@host\0"));
     }
 

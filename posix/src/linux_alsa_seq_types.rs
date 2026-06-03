@@ -81,13 +81,20 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let evts = [
-            SNDRV_SEQ_EVENT_NOTEON, SNDRV_SEQ_EVENT_NOTEOFF,
-            SNDRV_SEQ_EVENT_KEYPRESS, SNDRV_SEQ_EVENT_CONTROLLER,
-            SNDRV_SEQ_EVENT_PGMCHANGE, SNDRV_SEQ_EVENT_CHANPRESS,
-            SNDRV_SEQ_EVENT_PITCHBEND, SNDRV_SEQ_EVENT_SYSEX,
-            SNDRV_SEQ_EVENT_PORT_START, SNDRV_SEQ_EVENT_PORT_EXIT,
-            SNDRV_SEQ_EVENT_PORT_CHANGE, SNDRV_SEQ_EVENT_CLIENT_START,
-            SNDRV_SEQ_EVENT_CLIENT_EXIT, SNDRV_SEQ_EVENT_PORT_SUBSCRIBED,
+            SNDRV_SEQ_EVENT_NOTEON,
+            SNDRV_SEQ_EVENT_NOTEOFF,
+            SNDRV_SEQ_EVENT_KEYPRESS,
+            SNDRV_SEQ_EVENT_CONTROLLER,
+            SNDRV_SEQ_EVENT_PGMCHANGE,
+            SNDRV_SEQ_EVENT_CHANPRESS,
+            SNDRV_SEQ_EVENT_PITCHBEND,
+            SNDRV_SEQ_EVENT_SYSEX,
+            SNDRV_SEQ_EVENT_PORT_START,
+            SNDRV_SEQ_EVENT_PORT_EXIT,
+            SNDRV_SEQ_EVENT_PORT_CHANGE,
+            SNDRV_SEQ_EVENT_CLIENT_START,
+            SNDRV_SEQ_EVENT_CLIENT_EXIT,
+            SNDRV_SEQ_EVENT_PORT_SUBSCRIBED,
             SNDRV_SEQ_EVENT_TICK,
         ];
         for i in 0..evts.len() {
@@ -100,8 +107,10 @@ mod tests {
     #[test]
     fn test_port_caps_no_overlap() {
         let caps = [
-            SNDRV_SEQ_PORT_CAP_READ, SNDRV_SEQ_PORT_CAP_WRITE,
-            SNDRV_SEQ_PORT_CAP_SUBS_READ, SNDRV_SEQ_PORT_CAP_SUBS_WRITE,
+            SNDRV_SEQ_PORT_CAP_READ,
+            SNDRV_SEQ_PORT_CAP_WRITE,
+            SNDRV_SEQ_PORT_CAP_SUBS_READ,
+            SNDRV_SEQ_PORT_CAP_SUBS_WRITE,
         ];
         for i in 0..caps.len() {
             assert!(caps[i].is_power_of_two());
@@ -114,9 +123,12 @@ mod tests {
     #[test]
     fn test_port_types_no_overlap() {
         let types = [
-            SNDRV_SEQ_PORT_TYPE_HARDWARE, SNDRV_SEQ_PORT_TYPE_SOFTWARE,
-            SNDRV_SEQ_PORT_TYPE_MIDI_GENERIC, SNDRV_SEQ_PORT_TYPE_MIDI_GM,
-            SNDRV_SEQ_PORT_TYPE_SYNTHESIZER, SNDRV_SEQ_PORT_TYPE_APPLICATION,
+            SNDRV_SEQ_PORT_TYPE_HARDWARE,
+            SNDRV_SEQ_PORT_TYPE_SOFTWARE,
+            SNDRV_SEQ_PORT_TYPE_MIDI_GENERIC,
+            SNDRV_SEQ_PORT_TYPE_MIDI_GM,
+            SNDRV_SEQ_PORT_TYPE_SYNTHESIZER,
+            SNDRV_SEQ_PORT_TYPE_APPLICATION,
         ];
         for i in 0..types.len() {
             assert!(types[i].is_power_of_two());

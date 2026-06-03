@@ -81,8 +81,10 @@ mod tests {
     #[test]
     fn test_governors_distinct() {
         let govs = [
-            THERMAL_GOV_STEP_WISE, THERMAL_GOV_FAIR_SHARE,
-            THERMAL_GOV_POWER_ALLOCATOR, THERMAL_GOV_BANG_BANG,
+            THERMAL_GOV_STEP_WISE,
+            THERMAL_GOV_FAIR_SHARE,
+            THERMAL_GOV_POWER_ALLOCATOR,
+            THERMAL_GOV_BANG_BANG,
             THERMAL_GOV_USER_SPACE,
         ];
         for i in 0..govs.len() {
@@ -95,8 +97,10 @@ mod tests {
     #[test]
     fn test_trip_types_distinct() {
         let trips = [
-            THERMAL_TRIP_ACTIVE, THERMAL_TRIP_PASSIVE,
-            THERMAL_TRIP_HOT, THERMAL_TRIP_CRITICAL,
+            THERMAL_TRIP_ACTIVE,
+            THERMAL_TRIP_PASSIVE,
+            THERMAL_TRIP_HOT,
+            THERMAL_TRIP_CRITICAL,
         ];
         for i in 0..trips.len() {
             for j in (i + 1)..trips.len() {
@@ -107,7 +111,11 @@ mod tests {
 
     #[test]
     fn test_trends_distinct() {
-        let trends = [THERMAL_TREND_RAISING, THERMAL_TREND_STABLE, THERMAL_TREND_DROPPING];
+        let trends = [
+            THERMAL_TREND_RAISING,
+            THERMAL_TREND_STABLE,
+            THERMAL_TREND_DROPPING,
+        ];
         for i in 0..trends.len() {
             for j in (i + 1)..trends.len() {
                 assert_ne!(trends[i], trends[j]);

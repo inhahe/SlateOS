@@ -61,11 +61,17 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            DEBUGFS_TYPE_FILE, DEBUGFS_TYPE_DIR, DEBUGFS_TYPE_SYMLINK,
-            DEBUGFS_TYPE_BLOB, DEBUGFS_TYPE_BOOL,
-            DEBUGFS_TYPE_U8, DEBUGFS_TYPE_U16,
-            DEBUGFS_TYPE_U32, DEBUGFS_TYPE_U64,
-            DEBUGFS_TYPE_SIZE_T, DEBUGFS_TYPE_ATOMIC,
+            DEBUGFS_TYPE_FILE,
+            DEBUGFS_TYPE_DIR,
+            DEBUGFS_TYPE_SYMLINK,
+            DEBUGFS_TYPE_BLOB,
+            DEBUGFS_TYPE_BOOL,
+            DEBUGFS_TYPE_U8,
+            DEBUGFS_TYPE_U16,
+            DEBUGFS_TYPE_U32,
+            DEBUGFS_TYPE_U64,
+            DEBUGFS_TYPE_SIZE_T,
+            DEBUGFS_TYPE_ATOMIC,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

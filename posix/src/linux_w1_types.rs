@@ -69,9 +69,13 @@ mod tests {
     #[test]
     fn test_rom_commands_distinct() {
         let cmds = [
-            W1_CMD_READ_ROM, W1_CMD_MATCH_ROM, W1_CMD_SKIP_ROM,
-            W1_CMD_SEARCH_ROM, W1_CMD_ALARM_SEARCH,
-            W1_CMD_OVERDRIVE_SKIP, W1_CMD_OVERDRIVE_MATCH,
+            W1_CMD_READ_ROM,
+            W1_CMD_MATCH_ROM,
+            W1_CMD_SKIP_ROM,
+            W1_CMD_SEARCH_ROM,
+            W1_CMD_ALARM_SEARCH,
+            W1_CMD_OVERDRIVE_SKIP,
+            W1_CMD_OVERDRIVE_MATCH,
             W1_CMD_RESUME,
         ];
         for i in 0..cmds.len() {
@@ -84,8 +88,12 @@ mod tests {
     #[test]
     fn test_family_codes_distinct() {
         let fams = [
-            W1_FAMILY_DS18S20, W1_FAMILY_DS18B20, W1_FAMILY_DS2413,
-            W1_FAMILY_DS2431, W1_FAMILY_DS2438, W1_FAMILY_DS2502,
+            W1_FAMILY_DS18S20,
+            W1_FAMILY_DS18B20,
+            W1_FAMILY_DS2413,
+            W1_FAMILY_DS2431,
+            W1_FAMILY_DS2438,
+            W1_FAMILY_DS2502,
         ];
         for i in 0..fams.len() {
             for j in (i + 1)..fams.len() {
@@ -97,8 +105,11 @@ mod tests {
     #[test]
     fn test_netlink_messages_distinct() {
         let msgs = [
-            W1_MASTER_ADD, W1_MASTER_REMOVE,
-            W1_SLAVE_ADD, W1_SLAVE_REMOVE, W1_LIST_MASTERS,
+            W1_MASTER_ADD,
+            W1_MASTER_REMOVE,
+            W1_SLAVE_ADD,
+            W1_SLAVE_REMOVE,
+            W1_LIST_MASTERS,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {

@@ -125,9 +125,13 @@ mod tests {
     #[test]
     fn test_cpu_events_distinct() {
         let events = [
-            CPU_ONLINE, CPU_UP_PREPARE, CPU_DEAD,
-            CPU_DOWN_PREPARE, CPU_UP_CANCELED,
-            CPU_DOWN_FAILED, CPU_POST_DEAD,
+            CPU_ONLINE,
+            CPU_UP_PREPARE,
+            CPU_DEAD,
+            CPU_DOWN_PREPARE,
+            CPU_UP_CANCELED,
+            CPU_DOWN_FAILED,
+            CPU_POST_DEAD,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -139,8 +143,12 @@ mod tests {
     #[test]
     fn test_mem_events_distinct() {
         let events = [
-            MEM_GOING_ONLINE, MEM_CANCEL_ONLINE, MEM_ONLINE,
-            MEM_GOING_OFFLINE, MEM_CANCEL_OFFLINE, MEM_OFFLINE,
+            MEM_GOING_ONLINE,
+            MEM_CANCEL_ONLINE,
+            MEM_ONLINE,
+            MEM_GOING_OFFLINE,
+            MEM_CANCEL_OFFLINE,
+            MEM_OFFLINE,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -152,9 +160,14 @@ mod tests {
     #[test]
     fn test_netdev_events_distinct() {
         let events = [
-            NETDEV_UP, NETDEV_DOWN, NETDEV_REBOOT,
-            NETDEV_CHANGE, NETDEV_REGISTER, NETDEV_UNREGISTER,
-            NETDEV_CHANGEMTU, NETDEV_CHANGEADDR,
+            NETDEV_UP,
+            NETDEV_DOWN,
+            NETDEV_REBOOT,
+            NETDEV_CHANGE,
+            NETDEV_REGISTER,
+            NETDEV_UNREGISTER,
+            NETDEV_CHANGEMTU,
+            NETDEV_CHANGEADDR,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

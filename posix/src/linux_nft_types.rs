@@ -100,11 +100,21 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let types = [
-            NFT_MSG_GETTABLE, NFT_MSG_NEWTABLE, NFT_MSG_DELTABLE,
-            NFT_MSG_GETCHAIN, NFT_MSG_NEWCHAIN, NFT_MSG_DELCHAIN,
-            NFT_MSG_GETRULE, NFT_MSG_NEWRULE, NFT_MSG_DELRULE,
-            NFT_MSG_GETSET, NFT_MSG_NEWSET, NFT_MSG_DELSET,
-            NFT_MSG_GETSETELEM, NFT_MSG_NEWSETELEM, NFT_MSG_DELSETELEM,
+            NFT_MSG_GETTABLE,
+            NFT_MSG_NEWTABLE,
+            NFT_MSG_DELTABLE,
+            NFT_MSG_GETCHAIN,
+            NFT_MSG_NEWCHAIN,
+            NFT_MSG_DELCHAIN,
+            NFT_MSG_GETRULE,
+            NFT_MSG_NEWRULE,
+            NFT_MSG_DELRULE,
+            NFT_MSG_GETSET,
+            NFT_MSG_NEWSET,
+            NFT_MSG_DELSET,
+            NFT_MSG_GETSETELEM,
+            NFT_MSG_NEWSETELEM,
+            NFT_MSG_DELSETELEM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -136,8 +146,13 @@ mod tests {
     #[test]
     fn test_set_flags_powers_of_two() {
         let flags = [
-            NFT_SET_ANONYMOUS, NFT_SET_CONSTANT, NFT_SET_INTERVAL,
-            NFT_SET_MAP, NFT_SET_TIMEOUT, NFT_SET_EVAL, NFT_SET_CONCAT,
+            NFT_SET_ANONYMOUS,
+            NFT_SET_CONSTANT,
+            NFT_SET_INTERVAL,
+            NFT_SET_MAP,
+            NFT_SET_TIMEOUT,
+            NFT_SET_EVAL,
+            NFT_SET_CONCAT,
         ];
         for f in flags {
             assert!(f.is_power_of_two());
@@ -147,8 +162,13 @@ mod tests {
     #[test]
     fn test_set_flags_no_overlap() {
         let flags = [
-            NFT_SET_ANONYMOUS, NFT_SET_CONSTANT, NFT_SET_INTERVAL,
-            NFT_SET_MAP, NFT_SET_TIMEOUT, NFT_SET_EVAL, NFT_SET_CONCAT,
+            NFT_SET_ANONYMOUS,
+            NFT_SET_CONSTANT,
+            NFT_SET_INTERVAL,
+            NFT_SET_MAP,
+            NFT_SET_TIMEOUT,
+            NFT_SET_EVAL,
+            NFT_SET_CONCAT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

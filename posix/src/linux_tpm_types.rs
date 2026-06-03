@@ -104,11 +104,18 @@ mod tests {
     #[test]
     fn test_command_codes_distinct() {
         let cmds = [
-            TPM2_CC_STARTUP, TPM2_CC_SHUTDOWN, TPM2_CC_SELF_TEST,
-            TPM2_CC_PCR_EXTEND, TPM2_CC_PCR_READ,
-            TPM2_CC_CREATE_PRIMARY, TPM2_CC_CREATE, TPM2_CC_LOAD,
-            TPM2_CC_UNSEAL, TPM2_CC_GET_RANDOM,
-            TPM2_CC_GET_CAPABILITY, TPM2_CC_FLUSH_CONTEXT,
+            TPM2_CC_STARTUP,
+            TPM2_CC_SHUTDOWN,
+            TPM2_CC_SELF_TEST,
+            TPM2_CC_PCR_EXTEND,
+            TPM2_CC_PCR_READ,
+            TPM2_CC_CREATE_PRIMARY,
+            TPM2_CC_CREATE,
+            TPM2_CC_LOAD,
+            TPM2_CC_UNSEAL,
+            TPM2_CC_GET_RANDOM,
+            TPM2_CC_GET_CAPABILITY,
+            TPM2_CC_FLUSH_CONTEXT,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -120,9 +127,15 @@ mod tests {
     #[test]
     fn test_algorithms_distinct() {
         let algs = [
-            TPM2_ALG_SHA1, TPM2_ALG_SHA256, TPM2_ALG_SHA384,
-            TPM2_ALG_SHA512, TPM2_ALG_SM3_256, TPM2_ALG_RSA,
-            TPM2_ALG_ECC, TPM2_ALG_AES, TPM2_ALG_NULL,
+            TPM2_ALG_SHA1,
+            TPM2_ALG_SHA256,
+            TPM2_ALG_SHA384,
+            TPM2_ALG_SHA512,
+            TPM2_ALG_SM3_256,
+            TPM2_ALG_RSA,
+            TPM2_ALG_ECC,
+            TPM2_ALG_AES,
+            TPM2_ALG_NULL,
         ];
         for i in 0..algs.len() {
             for j in (i + 1)..algs.len() {

@@ -129,10 +129,16 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let types = [
-            MCTP_TYPE_CONTROL, MCTP_TYPE_PLDM, MCTP_TYPE_NCSI,
-            MCTP_TYPE_ETHERNET, MCTP_TYPE_NVME_MI, MCTP_TYPE_SPDM,
-            MCTP_TYPE_SECURED_MCTP, MCTP_TYPE_CXL_FM_API,
-            MCTP_TYPE_CXL_CCI, MCTP_TYPE_VENDOR_DEFINED_PCI,
+            MCTP_TYPE_CONTROL,
+            MCTP_TYPE_PLDM,
+            MCTP_TYPE_NCSI,
+            MCTP_TYPE_ETHERNET,
+            MCTP_TYPE_NVME_MI,
+            MCTP_TYPE_SPDM,
+            MCTP_TYPE_SECURED_MCTP,
+            MCTP_TYPE_CXL_FM_API,
+            MCTP_TYPE_CXL_CCI,
+            MCTP_TYPE_VENDOR_DEFINED_PCI,
             MCTP_TYPE_VENDOR_DEFINED_IANA,
         ];
         for i in 0..types.len() {

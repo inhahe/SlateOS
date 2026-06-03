@@ -70,8 +70,10 @@ mod tests {
     #[test]
     fn test_domain_flags_powers_of_two() {
         let flags = [
-            EM_PERF_DOMAIN_CPU, EM_PERF_DOMAIN_MILLIWATTS,
-            EM_PERF_DOMAIN_SKIP_INEFFICIENCIES, EM_PERF_DOMAIN_ARTIFICIAL,
+            EM_PERF_DOMAIN_CPU,
+            EM_PERF_DOMAIN_MILLIWATTS,
+            EM_PERF_DOMAIN_SKIP_INEFFICIENCIES,
+            EM_PERF_DOMAIN_ARTIFICIAL,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -81,8 +83,10 @@ mod tests {
     #[test]
     fn test_domain_flags_no_overlap() {
         let flags = [
-            EM_PERF_DOMAIN_CPU, EM_PERF_DOMAIN_MILLIWATTS,
-            EM_PERF_DOMAIN_SKIP_INEFFICIENCIES, EM_PERF_DOMAIN_ARTIFICIAL,
+            EM_PERF_DOMAIN_CPU,
+            EM_PERF_DOMAIN_MILLIWATTS,
+            EM_PERF_DOMAIN_SKIP_INEFFICIENCIES,
+            EM_PERF_DOMAIN_ARTIFICIAL,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -94,8 +98,10 @@ mod tests {
     #[test]
     fn test_dev_types_distinct() {
         let types = [
-            EM_DEV_TYPE_CPU, EM_DEV_TYPE_GPU,
-            EM_DEV_TYPE_DSP, EM_DEV_TYPE_OTHER,
+            EM_DEV_TYPE_CPU,
+            EM_DEV_TYPE_GPU,
+            EM_DEV_TYPE_DSP,
+            EM_DEV_TYPE_OTHER,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

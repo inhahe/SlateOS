@@ -289,8 +289,10 @@ mod tests {
     #[test]
     fn test_times_monotonic() {
         let mut tms = Tms {
-            tms_utime: 0, tms_stime: 0,
-            tms_cutime: 0, tms_cstime: 0,
+            tms_utime: 0,
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
         };
         let t1 = times(&mut tms);
         let t2 = times(&mut tms);
@@ -312,10 +314,7 @@ mod tests {
         crate::errno::set_errno(0);
         let ret = times(core::ptr::null_mut());
         // Linux: NULL buffer just returns the tick count, no error.
-        assert_ne!(
-            ret, -1,
-            "NULL buffer must NOT return -1 — Linux semantics"
-        );
+        assert_ne!(ret, -1, "NULL buffer must NOT return -1 — Linux semantics");
         assert!(
             ret > 0,
             "NULL buffer must still return a positive tick count, got {}",
@@ -362,8 +361,10 @@ mod tests {
         // same SHAPE of value (positive monotonic tick) as the
         // non-NULL path.
         let mut tms = Tms {
-            tms_utime: 0, tms_stime: 0,
-            tms_cutime: 0, tms_cstime: 0,
+            tms_utime: 0,
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
         };
         let t1 = times(&mut tms);
         let t2 = times(core::ptr::null_mut());
@@ -398,8 +399,10 @@ mod tests {
         assert_eq!(crate::errno::get_errno(), 0);
 
         let mut tms = Tms {
-            tms_utime: 42, tms_stime: 42,
-            tms_cutime: 42, tms_cstime: 42,
+            tms_utime: 42,
+            tms_stime: 42,
+            tms_cutime: 42,
+            tms_cstime: 42,
         };
         let real = times(&mut tms);
         assert!(real > probe, "real call must advance from probe");
@@ -437,8 +440,10 @@ mod tests {
         assert!(null_ret > 0);
 
         let mut tms = Tms {
-            tms_utime: 0xDEAD, tms_stime: 0xBEEF,
-            tms_cutime: 0xCAFE, tms_cstime: 0xFACE,
+            tms_utime: 0xDEAD,
+            tms_stime: 0xBEEF,
+            tms_cutime: 0xCAFE,
+            tms_cstime: 0xFACE,
         };
         let real_ret = times(&mut tms);
         assert!(real_ret > null_ret);
@@ -463,15 +468,13 @@ mod tests {
             assert!(
                 cur > prev,
                 "iteration {}: tick count must advance (prev={}, cur={})",
-                i, prev, cur
+                i,
+                prev,
+                cur
             );
             prev = cur;
         }
-        assert_eq!(
-            crate::errno::get_errno(),
-            0,
-            "loop must not set errno"
-        );
+        assert_eq!(crate::errno::get_errno(), 0, "loop must not set errno");
     }
 
     // --- Sentinel: previously divergent path is gone.
@@ -523,8 +526,10 @@ mod tests {
         // tick counter must monotonically advance across the whole
         // sequence.
         let mut tms = Tms {
-            tms_utime: 0, tms_stime: 0,
-            tms_cutime: 0, tms_cstime: 0,
+            tms_utime: 0,
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
         };
         let mut prev: i64 = 0;
         for i in 0..40 {
@@ -548,8 +553,10 @@ mod tests {
         // touched by a NULL-buffer call.  Sanity check that the
         // NULL branch truly skips all field writes.
         let mut bystander = Tms {
-            tms_utime: 1111, tms_stime: 2222,
-            tms_cutime: 3333, tms_cstime: 4444,
+            tms_utime: 1111,
+            tms_stime: 2222,
+            tms_cutime: 3333,
+            tms_cstime: 4444,
         };
         let _ = times(core::ptr::null_mut());
         // The bystander must be untouched (we never gave times
@@ -575,8 +582,10 @@ mod tests {
     #[test]
     fn test_times_increments_each_call() {
         let mut tms = Tms {
-            tms_utime: 0, tms_stime: 0,
-            tms_cutime: 0, tms_cstime: 0,
+            tms_utime: 0,
+            tms_stime: 0,
+            tms_cutime: 0,
+            tms_cstime: 0,
         };
         let base = times(&mut tms);
         for i in 1..=5 {
@@ -593,8 +602,10 @@ mod tests {
     fn test_times_all_fields_zero_on_repeated_calls() {
         for _ in 0..10 {
             let mut tms = Tms {
-                tms_utime: 0xFF, tms_stime: 0xFF,
-                tms_cutime: 0xFF, tms_cstime: 0xFF,
+                tms_utime: 0xFF,
+                tms_stime: 0xFF,
+                tms_cutime: 0xFF,
+                tms_cstime: 0xFF,
             };
             times(&mut tms);
             assert_eq!(tms.tms_utime, 0);

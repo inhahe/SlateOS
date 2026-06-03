@@ -73,8 +73,12 @@ mod tests {
     #[test]
     fn test_log_flags_no_overlap() {
         let flags = [
-            NF_LOG_TCPSEQ, NF_LOG_TCPOPT, NF_LOG_IPOPT,
-            NF_LOG_UID, NF_LOG_NFLOG, NF_LOG_MACDECODE,
+            NF_LOG_TCPSEQ,
+            NF_LOG_TCPOPT,
+            NF_LOG_IPOPT,
+            NF_LOG_UID,
+            NF_LOG_NFLOG,
+            NF_LOG_MACDECODE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -86,8 +90,12 @@ mod tests {
 
     #[test]
     fn test_log_mask_covers_all() {
-        let combined = NF_LOG_TCPSEQ | NF_LOG_TCPOPT | NF_LOG_IPOPT
-            | NF_LOG_UID | NF_LOG_NFLOG | NF_LOG_MACDECODE;
+        let combined = NF_LOG_TCPSEQ
+            | NF_LOG_TCPOPT
+            | NF_LOG_IPOPT
+            | NF_LOG_UID
+            | NF_LOG_NFLOG
+            | NF_LOG_MACDECODE;
         assert_eq!(NF_LOG_MASK, combined);
     }
 

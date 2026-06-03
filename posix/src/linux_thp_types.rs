@@ -86,8 +86,10 @@ mod tests {
     #[test]
     fn test_defrag_modes_distinct() {
         let modes = [
-            THP_DEFRAG_ALWAYS, THP_DEFRAG_DEFER,
-            THP_DEFRAG_DEFER_MADVISE, THP_DEFRAG_MADVISE,
+            THP_DEFRAG_ALWAYS,
+            THP_DEFRAG_DEFER,
+            THP_DEFRAG_DEFER_MADVISE,
+            THP_DEFRAG_MADVISE,
             THP_DEFRAG_NEVER,
         ];
         for i in 0..modes.len() {

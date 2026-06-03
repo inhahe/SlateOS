@@ -69,12 +69,18 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            SEG6_LOCAL_ACTION_UNSPEC, SEG6_LOCAL_ACTION_END,
-            SEG6_LOCAL_ACTION_END_X, SEG6_LOCAL_ACTION_END_T,
-            SEG6_LOCAL_ACTION_END_DX2, SEG6_LOCAL_ACTION_END_DX6,
-            SEG6_LOCAL_ACTION_END_DX4, SEG6_LOCAL_ACTION_END_DT6,
-            SEG6_LOCAL_ACTION_END_DT4, SEG6_LOCAL_ACTION_END_B6,
-            SEG6_LOCAL_ACTION_END_B6_ENCAPS, SEG6_LOCAL_ACTION_END_BPF,
+            SEG6_LOCAL_ACTION_UNSPEC,
+            SEG6_LOCAL_ACTION_END,
+            SEG6_LOCAL_ACTION_END_X,
+            SEG6_LOCAL_ACTION_END_T,
+            SEG6_LOCAL_ACTION_END_DX2,
+            SEG6_LOCAL_ACTION_END_DX6,
+            SEG6_LOCAL_ACTION_END_DX4,
+            SEG6_LOCAL_ACTION_END_DT6,
+            SEG6_LOCAL_ACTION_END_DT4,
+            SEG6_LOCAL_ACTION_END_B6,
+            SEG6_LOCAL_ACTION_END_B6_ENCAPS,
+            SEG6_LOCAL_ACTION_END_BPF,
             SEG6_LOCAL_ACTION_END_DT46,
         ];
         for i in 0..actions.len() {
@@ -93,8 +99,10 @@ mod tests {
     #[test]
     fn test_encap_modes_distinct() {
         let modes = [
-            SEG6_IPTUN_MODE_INLINE, SEG6_IPTUN_MODE_ENCAP,
-            SEG6_IPTUN_MODE_L2ENCAP, SEG6_IPTUN_MODE_ENCAP_RED,
+            SEG6_IPTUN_MODE_INLINE,
+            SEG6_IPTUN_MODE_ENCAP,
+            SEG6_IPTUN_MODE_L2ENCAP,
+            SEG6_IPTUN_MODE_ENCAP_RED,
             SEG6_IPTUN_MODE_L2ENCAP_RED,
         ];
         for i in 0..modes.len() {

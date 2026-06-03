@@ -74,8 +74,13 @@ mod tests {
     #[test]
     fn test_tag_types_distinct() {
         let tags = [
-            ACL_UNDEFINED_TAG, ACL_USER_OBJ, ACL_USER,
-            ACL_GROUP_OBJ, ACL_GROUP, ACL_MASK, ACL_OTHER,
+            ACL_UNDEFINED_TAG,
+            ACL_USER_OBJ,
+            ACL_USER,
+            ACL_GROUP_OBJ,
+            ACL_GROUP,
+            ACL_MASK,
+            ACL_OTHER,
         ];
         for i in 0..tags.len() {
             for j in (i + 1)..tags.len() {

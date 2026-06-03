@@ -99,13 +99,27 @@ mod tests {
     #[test]
     fn test_reg_offsets_stride() {
         let offsets = [
-            PTRACE_REG_R15, PTRACE_REG_R14, PTRACE_REG_R13,
-            PTRACE_REG_R12, PTRACE_REG_RBP, PTRACE_REG_RBX,
-            PTRACE_REG_R11, PTRACE_REG_R10, PTRACE_REG_R9,
-            PTRACE_REG_R8, PTRACE_REG_RAX, PTRACE_REG_RCX,
-            PTRACE_REG_RDX, PTRACE_REG_RSI, PTRACE_REG_RDI,
-            PTRACE_REG_ORIG_RAX, PTRACE_REG_RIP, PTRACE_REG_CS,
-            PTRACE_REG_EFLAGS, PTRACE_REG_RSP, PTRACE_REG_SS,
+            PTRACE_REG_R15,
+            PTRACE_REG_R14,
+            PTRACE_REG_R13,
+            PTRACE_REG_R12,
+            PTRACE_REG_RBP,
+            PTRACE_REG_RBX,
+            PTRACE_REG_R11,
+            PTRACE_REG_R10,
+            PTRACE_REG_R9,
+            PTRACE_REG_R8,
+            PTRACE_REG_RAX,
+            PTRACE_REG_RCX,
+            PTRACE_REG_RDX,
+            PTRACE_REG_RSI,
+            PTRACE_REG_RDI,
+            PTRACE_REG_ORIG_RAX,
+            PTRACE_REG_RIP,
+            PTRACE_REG_CS,
+            PTRACE_REG_EFLAGS,
+            PTRACE_REG_RSP,
+            PTRACE_REG_SS,
         ];
         for i in 1..offsets.len() {
             assert_eq!(offsets[i] - offsets[i - 1], 8);
@@ -115,8 +129,10 @@ mod tests {
     #[test]
     fn test_hw_bp_types_distinct() {
         let types = [
-            HW_BREAKPOINT_EXECUTE, HW_BREAKPOINT_WRITE,
-            HW_BREAKPOINT_IO, HW_BREAKPOINT_RW,
+            HW_BREAKPOINT_EXECUTE,
+            HW_BREAKPOINT_WRITE,
+            HW_BREAKPOINT_IO,
+            HW_BREAKPOINT_RW,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

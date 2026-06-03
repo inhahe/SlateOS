@@ -77,10 +77,14 @@ mod tests {
     fn test_channels_distinct() {
         // FL and MONO alias to 0, but the named surround channels are distinct
         let channels = [
-            SNDRV_MIXER_CHANNEL_FR, SNDRV_MIXER_CHANNEL_RL,
-            SNDRV_MIXER_CHANNEL_RR, SNDRV_MIXER_CHANNEL_FC,
-            SNDRV_MIXER_CHANNEL_LFE, SNDRV_MIXER_CHANNEL_SL,
-            SNDRV_MIXER_CHANNEL_SR, SNDRV_MIXER_CHANNEL_RC,
+            SNDRV_MIXER_CHANNEL_FR,
+            SNDRV_MIXER_CHANNEL_RL,
+            SNDRV_MIXER_CHANNEL_RR,
+            SNDRV_MIXER_CHANNEL_FC,
+            SNDRV_MIXER_CHANNEL_LFE,
+            SNDRV_MIXER_CHANNEL_SL,
+            SNDRV_MIXER_CHANNEL_SR,
+            SNDRV_MIXER_CHANNEL_RC,
         ];
         for i in 0..channels.len() {
             for j in (i + 1)..channels.len() {
@@ -104,8 +108,10 @@ mod tests {
     #[test]
     fn test_tlv_types_distinct() {
         let types = [
-            SNDRV_CTL_TLV_DB_LINEAR, SNDRV_CTL_TLV_DB_SCALE,
-            SNDRV_CTL_TLV_DB_RANGE, SNDRV_CTL_TLV_DB_MINMAX,
+            SNDRV_CTL_TLV_DB_LINEAR,
+            SNDRV_CTL_TLV_DB_SCALE,
+            SNDRV_CTL_TLV_DB_RANGE,
+            SNDRV_CTL_TLV_DB_MINMAX,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

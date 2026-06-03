@@ -77,14 +77,20 @@ mod tests {
     #[test]
     fn test_buf_types_distinct() {
         let types = [
-            V4L2_BUF_TYPE_VIDEO_CAPTURE, V4L2_BUF_TYPE_VIDEO_OUTPUT,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE,
+            V4L2_BUF_TYPE_VIDEO_OUTPUT,
             V4L2_BUF_TYPE_VIDEO_OVERLAY,
-            V4L2_BUF_TYPE_VBI_CAPTURE, V4L2_BUF_TYPE_VBI_OUTPUT,
-            V4L2_BUF_TYPE_SLICED_VBI_CAPTURE, V4L2_BUF_TYPE_SLICED_VBI_OUTPUT,
+            V4L2_BUF_TYPE_VBI_CAPTURE,
+            V4L2_BUF_TYPE_VBI_OUTPUT,
+            V4L2_BUF_TYPE_SLICED_VBI_CAPTURE,
+            V4L2_BUF_TYPE_SLICED_VBI_OUTPUT,
             V4L2_BUF_TYPE_VIDEO_OUTPUT_OVERLAY,
-            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE, V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
-            V4L2_BUF_TYPE_SDR_CAPTURE, V4L2_BUF_TYPE_SDR_OUTPUT,
-            V4L2_BUF_TYPE_META_CAPTURE, V4L2_BUF_TYPE_META_OUTPUT,
+            V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE,
+            V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE,
+            V4L2_BUF_TYPE_SDR_CAPTURE,
+            V4L2_BUF_TYPE_SDR_OUTPUT,
+            V4L2_BUF_TYPE_META_CAPTURE,
+            V4L2_BUF_TYPE_META_OUTPUT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -104,8 +110,10 @@ mod tests {
     fn test_buf_flags_no_overlap() {
         // Core status flags should not overlap
         let flags = [
-            V4L2_BUF_FLAG_MAPPED, V4L2_BUF_FLAG_QUEUED,
-            V4L2_BUF_FLAG_DONE, V4L2_BUF_FLAG_KEYFRAME,
+            V4L2_BUF_FLAG_MAPPED,
+            V4L2_BUF_FLAG_QUEUED,
+            V4L2_BUF_FLAG_DONE,
+            V4L2_BUF_FLAG_KEYFRAME,
             V4L2_BUF_FLAG_ERROR,
         ];
         for i in 0..flags.len() {

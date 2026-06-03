@@ -88,8 +88,10 @@ mod tests {
     #[test]
     fn test_namespace_states_distinct() {
         let states = [
-            USERNS_STATE_CREATED, USERNS_STATE_UID_MAPPED,
-            USERNS_STATE_GID_MAPPED, USERNS_STATE_READY,
+            USERNS_STATE_CREATED,
+            USERNS_STATE_UID_MAPPED,
+            USERNS_STATE_GID_MAPPED,
+            USERNS_STATE_READY,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

@@ -101,8 +101,11 @@ mod tests {
     #[test]
     fn test_pm_states_distinct() {
         let states = [
-            DEV_PM_STATE_D0, DEV_PM_STATE_D1, DEV_PM_STATE_D2,
-            DEV_PM_STATE_D3HOT, DEV_PM_STATE_D3COLD,
+            DEV_PM_STATE_D0,
+            DEV_PM_STATE_D1,
+            DEV_PM_STATE_D2,
+            DEV_PM_STATE_D3HOT,
+            DEV_PM_STATE_D3COLD,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -122,11 +125,16 @@ mod tests {
     #[test]
     fn test_dl_flags_powers_of_two() {
         let flags = [
-            DL_FLAG_STATELESS, DL_FLAG_AUTOREMOVE_CONSUMER,
-            DL_FLAG_PM_RUNTIME, DL_FLAG_RPM_ACTIVE,
-            DL_FLAG_AUTOREMOVE_SUPPLIER, DL_FLAG_AUTOPROBE_CONSUMER,
-            DL_FLAG_MANAGED, DL_FLAG_SYNC_STATE_ONLY,
-            DL_FLAG_INFERRED, DL_FLAG_CYCLE,
+            DL_FLAG_STATELESS,
+            DL_FLAG_AUTOREMOVE_CONSUMER,
+            DL_FLAG_PM_RUNTIME,
+            DL_FLAG_RPM_ACTIVE,
+            DL_FLAG_AUTOREMOVE_SUPPLIER,
+            DL_FLAG_AUTOPROBE_CONSUMER,
+            DL_FLAG_MANAGED,
+            DL_FLAG_SYNC_STATE_ONLY,
+            DL_FLAG_INFERRED,
+            DL_FLAG_CYCLE,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -136,11 +144,16 @@ mod tests {
     #[test]
     fn test_dl_flags_no_overlap() {
         let flags = [
-            DL_FLAG_STATELESS, DL_FLAG_AUTOREMOVE_CONSUMER,
-            DL_FLAG_PM_RUNTIME, DL_FLAG_RPM_ACTIVE,
-            DL_FLAG_AUTOREMOVE_SUPPLIER, DL_FLAG_AUTOPROBE_CONSUMER,
-            DL_FLAG_MANAGED, DL_FLAG_SYNC_STATE_ONLY,
-            DL_FLAG_INFERRED, DL_FLAG_CYCLE,
+            DL_FLAG_STATELESS,
+            DL_FLAG_AUTOREMOVE_CONSUMER,
+            DL_FLAG_PM_RUNTIME,
+            DL_FLAG_RPM_ACTIVE,
+            DL_FLAG_AUTOREMOVE_SUPPLIER,
+            DL_FLAG_AUTOPROBE_CONSUMER,
+            DL_FLAG_MANAGED,
+            DL_FLAG_SYNC_STATE_ONLY,
+            DL_FLAG_INFERRED,
+            DL_FLAG_CYCLE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -152,8 +165,11 @@ mod tests {
     #[test]
     fn test_dl_states_distinct() {
         let states = [
-            DL_STATE_NONE, DL_STATE_DORMANT, DL_STATE_AVAILABLE,
-            DL_STATE_CONSUMER_PROBE, DL_STATE_ACTIVE,
+            DL_STATE_NONE,
+            DL_STATE_DORMANT,
+            DL_STATE_AVAILABLE,
+            DL_STATE_CONSUMER_PROBE,
+            DL_STATE_ACTIVE,
             DL_STATE_SUPPLIER_UNBIND,
         ];
         for i in 0..states.len() {
@@ -166,8 +182,12 @@ mod tests {
     #[test]
     fn test_bus_types_distinct() {
         let types = [
-            BUS_TYPE_PCI, BUS_TYPE_USB, BUS_TYPE_PLATFORM,
-            BUS_TYPE_I2C, BUS_TYPE_SPI, BUS_TYPE_ACPI,
+            BUS_TYPE_PCI,
+            BUS_TYPE_USB,
+            BUS_TYPE_PLATFORM,
+            BUS_TYPE_I2C,
+            BUS_TYPE_SPI,
+            BUS_TYPE_ACPI,
             BUS_TYPE_VIRTUAL,
         ];
         for i in 0..types.len() {

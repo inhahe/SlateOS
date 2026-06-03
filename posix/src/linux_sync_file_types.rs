@@ -72,7 +72,10 @@ mod tests {
 
     #[test]
     fn test_fence_flags_no_overlap() {
-        assert_eq!(SYNC_FENCE_FLAG_SIGNALED & SYNC_FENCE_FLAG_TIMESTAMP_VALID, 0);
+        assert_eq!(
+            SYNC_FENCE_FLAG_SIGNALED & SYNC_FENCE_FLAG_TIMESTAMP_VALID,
+            0
+        );
     }
 
     #[test]
@@ -92,8 +95,10 @@ mod tests {
     #[test]
     fn test_timeline_ops_distinct() {
         let ops = [
-            SYNC_TIMELINE_QUERY, SYNC_TIMELINE_SIGNAL,
-            SYNC_TIMELINE_WAIT, SYNC_TIMELINE_TRANSFER,
+            SYNC_TIMELINE_QUERY,
+            SYNC_TIMELINE_SIGNAL,
+            SYNC_TIMELINE_WAIT,
+            SYNC_TIMELINE_TRANSFER,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

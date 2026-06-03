@@ -113,14 +113,28 @@ mod tests {
     #[test]
     fn test_extensions_distinct() {
         let exts = [
-            INET_DIAG_NONE, INET_DIAG_MEMINFO, INET_DIAG_INFO,
-            INET_DIAG_VEGASINFO, INET_DIAG_CONG, INET_DIAG_TOS,
-            INET_DIAG_TCLASS, INET_DIAG_SKMEMINFO, INET_DIAG_SHUTDOWN,
-            INET_DIAG_DCTCPINFO, INET_DIAG_PROTOCOL,
-            INET_DIAG_SKV6ONLY, INET_DIAG_LOCALS, INET_DIAG_PEERS,
-            INET_DIAG_PAD, INET_DIAG_MARK, INET_DIAG_BBRINFO,
-            INET_DIAG_CLASS_ID, INET_DIAG_MD5SIG, INET_DIAG_ULP_INFO,
-            INET_DIAG_SK_BPF_STORAGES, INET_DIAG_CGROUP_ID,
+            INET_DIAG_NONE,
+            INET_DIAG_MEMINFO,
+            INET_DIAG_INFO,
+            INET_DIAG_VEGASINFO,
+            INET_DIAG_CONG,
+            INET_DIAG_TOS,
+            INET_DIAG_TCLASS,
+            INET_DIAG_SKMEMINFO,
+            INET_DIAG_SHUTDOWN,
+            INET_DIAG_DCTCPINFO,
+            INET_DIAG_PROTOCOL,
+            INET_DIAG_SKV6ONLY,
+            INET_DIAG_LOCALS,
+            INET_DIAG_PEERS,
+            INET_DIAG_PAD,
+            INET_DIAG_MARK,
+            INET_DIAG_BBRINFO,
+            INET_DIAG_CLASS_ID,
+            INET_DIAG_MD5SIG,
+            INET_DIAG_ULP_INFO,
+            INET_DIAG_SK_BPF_STORAGES,
+            INET_DIAG_CGROUP_ID,
             INET_DIAG_SOCKOPT,
         ];
         for i in 0..exts.len() {
@@ -133,10 +147,18 @@ mod tests {
     #[test]
     fn test_tcp_states_distinct() {
         let states = [
-            TCP_ESTABLISHED, TCP_SYN_SENT, TCP_SYN_RECV,
-            TCP_FIN_WAIT1, TCP_FIN_WAIT2, TCP_TIME_WAIT,
-            TCP_CLOSE, TCP_CLOSE_WAIT, TCP_LAST_ACK,
-            TCP_LISTEN, TCP_CLOSING, TCP_NEW_SYN_RECV,
+            TCP_ESTABLISHED,
+            TCP_SYN_SENT,
+            TCP_SYN_RECV,
+            TCP_FIN_WAIT1,
+            TCP_FIN_WAIT2,
+            TCP_TIME_WAIT,
+            TCP_CLOSE,
+            TCP_CLOSE_WAIT,
+            TCP_LAST_ACK,
+            TCP_LISTEN,
+            TCP_CLOSING,
+            TCP_NEW_SYN_RECV,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

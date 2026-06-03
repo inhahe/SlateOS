@@ -85,7 +85,9 @@ pub extern "C" fn dlerror() -> *const u8 {
         return core::ptr::null();
     }
     // Clear error state.
-    unsafe { core::ptr::addr_of_mut!(DL_ERROR).write(core::ptr::null()); }
+    unsafe {
+        core::ptr::addr_of_mut!(DL_ERROR).write(core::ptr::null());
+    }
     err
 }
 
@@ -106,10 +108,7 @@ pub struct DlInfo {
 ///
 /// Stub: returns 0 (failure) since we don't support dynamic linking.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn dladdr(
-    _addr: *const core::ffi::c_void,
-    _info: *mut DlInfo,
-) -> i32 {
+pub extern "C" fn dladdr(_addr: *const core::ffi::c_void, _info: *mut DlInfo) -> i32 {
     0 // 0 = failure for dladdr (unlike most POSIX functions).
 }
 

@@ -96,8 +96,10 @@ mod tests {
     #[test]
     fn test_services_distinct() {
         let svcs = [
-            VIRTIO_CRYPTO_SERVICE_CIPHER, VIRTIO_CRYPTO_SERVICE_HASH,
-            VIRTIO_CRYPTO_SERVICE_MAC, VIRTIO_CRYPTO_SERVICE_AEAD,
+            VIRTIO_CRYPTO_SERVICE_CIPHER,
+            VIRTIO_CRYPTO_SERVICE_HASH,
+            VIRTIO_CRYPTO_SERVICE_MAC,
+            VIRTIO_CRYPTO_SERVICE_AEAD,
             VIRTIO_CRYPTO_SERVICE_AKCIPHER,
         ];
         for i in 0..svcs.len() {
@@ -110,9 +112,12 @@ mod tests {
     #[test]
     fn test_cipher_algos_distinct() {
         let algos = [
-            VIRTIO_CRYPTO_CIPHER_AES_CBC, VIRTIO_CRYPTO_CIPHER_AES_CTR,
-            VIRTIO_CRYPTO_CIPHER_AES_ECB, VIRTIO_CRYPTO_CIPHER_AES_XTS,
-            VIRTIO_CRYPTO_CIPHER_3DES_CBC, VIRTIO_CRYPTO_CIPHER_3DES_ECB,
+            VIRTIO_CRYPTO_CIPHER_AES_CBC,
+            VIRTIO_CRYPTO_CIPHER_AES_CTR,
+            VIRTIO_CRYPTO_CIPHER_AES_ECB,
+            VIRTIO_CRYPTO_CIPHER_AES_XTS,
+            VIRTIO_CRYPTO_CIPHER_3DES_CBC,
+            VIRTIO_CRYPTO_CIPHER_3DES_ECB,
         ];
         for i in 0..algos.len() {
             for j in (i + 1)..algos.len() {
@@ -124,8 +129,10 @@ mod tests {
     #[test]
     fn test_hash_algos_distinct() {
         let algos = [
-            VIRTIO_CRYPTO_HASH_SHA1, VIRTIO_CRYPTO_HASH_SHA256,
-            VIRTIO_CRYPTO_HASH_SHA384, VIRTIO_CRYPTO_HASH_SHA512,
+            VIRTIO_CRYPTO_HASH_SHA1,
+            VIRTIO_CRYPTO_HASH_SHA256,
+            VIRTIO_CRYPTO_HASH_SHA384,
+            VIRTIO_CRYPTO_HASH_SHA512,
         ];
         for i in 0..algos.len() {
             for j in (i + 1)..algos.len() {
@@ -156,8 +163,10 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let codes = [
-            VIRTIO_CRYPTO_OK, VIRTIO_CRYPTO_BADMSG,
-            VIRTIO_CRYPTO_NOTSUPP, VIRTIO_CRYPTO_INVSESS,
+            VIRTIO_CRYPTO_OK,
+            VIRTIO_CRYPTO_BADMSG,
+            VIRTIO_CRYPTO_NOTSUPP,
+            VIRTIO_CRYPTO_INVSESS,
             VIRTIO_CRYPTO_ERR,
         ];
         for i in 0..codes.len() {

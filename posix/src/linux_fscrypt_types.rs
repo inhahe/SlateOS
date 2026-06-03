@@ -91,9 +91,12 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            FSCRYPT_MODE_AES_256_XTS, FSCRYPT_MODE_AES_256_CTS,
-            FSCRYPT_MODE_AES_128_CBC, FSCRYPT_MODE_AES_128_CTS,
-            FSCRYPT_MODE_ADIANTUM, FSCRYPT_MODE_AES_256_HCTR2,
+            FSCRYPT_MODE_AES_256_XTS,
+            FSCRYPT_MODE_AES_256_CTS,
+            FSCRYPT_MODE_AES_128_CBC,
+            FSCRYPT_MODE_AES_128_CTS,
+            FSCRYPT_MODE_ADIANTUM,
+            FSCRYPT_MODE_AES_256_HCTR2,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -104,8 +107,14 @@ mod tests {
 
     #[test]
     fn test_padding_flags() {
-        assert_eq!(FSCRYPT_POLICY_FLAGS_PAD_4 & FSCRYPT_POLICY_FLAGS_PAD_MASK, 0);
-        assert_eq!(FSCRYPT_POLICY_FLAGS_PAD_32 & FSCRYPT_POLICY_FLAGS_PAD_MASK, 3);
+        assert_eq!(
+            FSCRYPT_POLICY_FLAGS_PAD_4 & FSCRYPT_POLICY_FLAGS_PAD_MASK,
+            0
+        );
+        assert_eq!(
+            FSCRYPT_POLICY_FLAGS_PAD_32 & FSCRYPT_POLICY_FLAGS_PAD_MASK,
+            3
+        );
     }
 
     #[test]
@@ -122,9 +131,12 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let cmds = [
-            FS_IOC_SET_ENCRYPTION_POLICY, FS_IOC_GET_ENCRYPTION_POLICY,
-            FS_IOC_GET_ENCRYPTION_POLICY_EX, FS_IOC_ADD_ENCRYPTION_KEY,
-            FS_IOC_REMOVE_ENCRYPTION_KEY, FS_IOC_GET_ENCRYPTION_KEY_STATUS,
+            FS_IOC_SET_ENCRYPTION_POLICY,
+            FS_IOC_GET_ENCRYPTION_POLICY,
+            FS_IOC_GET_ENCRYPTION_POLICY_EX,
+            FS_IOC_ADD_ENCRYPTION_KEY,
+            FS_IOC_REMOVE_ENCRYPTION_KEY,
+            FS_IOC_GET_ENCRYPTION_KEY_STATUS,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

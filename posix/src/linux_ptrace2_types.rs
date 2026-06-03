@@ -127,16 +127,32 @@ mod tests {
     #[test]
     fn test_requests_distinct() {
         let reqs = [
-            PTRACE_TRACEME, PTRACE_PEEKTEXT, PTRACE_PEEKDATA,
-            PTRACE_PEEKUSER, PTRACE_POKETEXT, PTRACE_POKEDATA,
-            PTRACE_POKEUSER, PTRACE_CONT, PTRACE_KILL,
-            PTRACE_SINGLESTEP, PTRACE_GETREGS, PTRACE_SETREGS,
-            PTRACE_GETFPREGS, PTRACE_SETFPREGS,
-            PTRACE_ATTACH, PTRACE_DETACH, PTRACE_SYSCALL,
-            PTRACE_SETOPTIONS, PTRACE_GETEVENTMSG,
-            PTRACE_GETSIGINFO, PTRACE_SETSIGINFO,
-            PTRACE_GETREGSET, PTRACE_SETREGSET,
-            PTRACE_SEIZE, PTRACE_INTERRUPT, PTRACE_LISTEN,
+            PTRACE_TRACEME,
+            PTRACE_PEEKTEXT,
+            PTRACE_PEEKDATA,
+            PTRACE_PEEKUSER,
+            PTRACE_POKETEXT,
+            PTRACE_POKEDATA,
+            PTRACE_POKEUSER,
+            PTRACE_CONT,
+            PTRACE_KILL,
+            PTRACE_SINGLESTEP,
+            PTRACE_GETREGS,
+            PTRACE_SETREGS,
+            PTRACE_GETFPREGS,
+            PTRACE_SETFPREGS,
+            PTRACE_ATTACH,
+            PTRACE_DETACH,
+            PTRACE_SYSCALL,
+            PTRACE_SETOPTIONS,
+            PTRACE_GETEVENTMSG,
+            PTRACE_GETSIGINFO,
+            PTRACE_SETSIGINFO,
+            PTRACE_GETREGSET,
+            PTRACE_SETREGSET,
+            PTRACE_SEIZE,
+            PTRACE_INTERRUPT,
+            PTRACE_LISTEN,
         ];
         for i in 0..reqs.len() {
             for j in (i + 1)..reqs.len() {
@@ -148,11 +164,16 @@ mod tests {
     #[test]
     fn test_options_power_of_two() {
         let opts = [
-            PTRACE_O_TRACESYSGOOD, PTRACE_O_TRACEFORK,
-            PTRACE_O_TRACEVFORK, PTRACE_O_TRACECLONE,
-            PTRACE_O_TRACEEXEC, PTRACE_O_TRACEVFORKDONE,
-            PTRACE_O_TRACEEXIT, PTRACE_O_TRACESECCOMP,
-            PTRACE_O_EXITKILL, PTRACE_O_SUSPEND_SECCOMP,
+            PTRACE_O_TRACESYSGOOD,
+            PTRACE_O_TRACEFORK,
+            PTRACE_O_TRACEVFORK,
+            PTRACE_O_TRACECLONE,
+            PTRACE_O_TRACEEXEC,
+            PTRACE_O_TRACEVFORKDONE,
+            PTRACE_O_TRACEEXIT,
+            PTRACE_O_TRACESECCOMP,
+            PTRACE_O_EXITKILL,
+            PTRACE_O_SUSPEND_SECCOMP,
         ];
         for o in &opts {
             assert!(o.is_power_of_two(), "0x{:08x} not power of two", o);
@@ -162,10 +183,14 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            PTRACE_EVENT_FORK, PTRACE_EVENT_VFORK,
-            PTRACE_EVENT_CLONE, PTRACE_EVENT_EXEC,
-            PTRACE_EVENT_VFORK_DONE, PTRACE_EVENT_EXIT,
-            PTRACE_EVENT_SECCOMP, PTRACE_EVENT_STOP,
+            PTRACE_EVENT_FORK,
+            PTRACE_EVENT_VFORK,
+            PTRACE_EVENT_CLONE,
+            PTRACE_EVENT_EXEC,
+            PTRACE_EVENT_VFORK_DONE,
+            PTRACE_EVENT_EXIT,
+            PTRACE_EVENT_SECCOMP,
+            PTRACE_EVENT_STOP,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

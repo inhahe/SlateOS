@@ -51,8 +51,11 @@ mod tests {
     #[test]
     fn test_nat_types_distinct() {
         let types = [
-            NF_NAT_NONE, NF_NAT_SNAT, NF_NAT_DNAT,
-            NF_NAT_MASQUERADE, NF_NAT_REDIRECT,
+            NF_NAT_NONE,
+            NF_NAT_SNAT,
+            NF_NAT_DNAT,
+            NF_NAT_MASQUERADE,
+            NF_NAT_REDIRECT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -73,9 +76,12 @@ mod tests {
     #[test]
     fn test_range_flags_no_overlap() {
         let flags = [
-            NF_NAT_RANGE_MAP_IPS, NF_NAT_RANGE_PROTO_SPECIFIED,
-            NF_NAT_RANGE_PROTO_RANDOM, NF_NAT_RANGE_PERSISTENT,
-            NF_NAT_RANGE_PROTO_RANDOM_FULLY, NF_NAT_RANGE_PROTO_OFFSET,
+            NF_NAT_RANGE_MAP_IPS,
+            NF_NAT_RANGE_PROTO_SPECIFIED,
+            NF_NAT_RANGE_PROTO_RANDOM,
+            NF_NAT_RANGE_PERSISTENT,
+            NF_NAT_RANGE_PROTO_RANDOM_FULLY,
+            NF_NAT_RANGE_PROTO_OFFSET,
             NF_NAT_RANGE_NETMAP,
         ];
         for i in 0..flags.len() {

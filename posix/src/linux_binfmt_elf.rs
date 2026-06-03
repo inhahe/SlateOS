@@ -300,9 +300,18 @@ mod tests {
     #[test]
     fn test_phdr_types_distinct() {
         let types = [
-            PT_NULL, PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE,
-            PT_SHLIB, PT_PHDR, PT_TLS,
-            PT_GNU_EH_FRAME, PT_GNU_STACK, PT_GNU_RELRO, PT_GNU_PROPERTY,
+            PT_NULL,
+            PT_LOAD,
+            PT_DYNAMIC,
+            PT_INTERP,
+            PT_NOTE,
+            PT_SHLIB,
+            PT_PHDR,
+            PT_TLS,
+            PT_GNU_EH_FRAME,
+            PT_GNU_STACK,
+            PT_GNU_RELRO,
+            PT_GNU_PROPERTY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -332,10 +341,20 @@ mod tests {
     #[test]
     fn test_section_types_distinct() {
         let types = [
-            SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB,
-            SHT_RELA, SHT_HASH, SHT_DYNAMIC, SHT_NOTE,
-            SHT_NOBITS, SHT_REL, SHT_SHLIB, SHT_DYNSYM,
-            SHT_INIT_ARRAY, SHT_FINI_ARRAY,
+            SHT_NULL,
+            SHT_PROGBITS,
+            SHT_SYMTAB,
+            SHT_STRTAB,
+            SHT_RELA,
+            SHT_HASH,
+            SHT_DYNAMIC,
+            SHT_NOTE,
+            SHT_NOBITS,
+            SHT_REL,
+            SHT_SHLIB,
+            SHT_DYNSYM,
+            SHT_INIT_ARRAY,
+            SHT_FINI_ARRAY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -347,8 +366,12 @@ mod tests {
     #[test]
     fn test_section_flags_powers_of_two() {
         let flags = [
-            SHF_WRITE, SHF_ALLOC, SHF_EXECINSTR,
-            SHF_MERGE, SHF_STRINGS, SHF_TLS,
+            SHF_WRITE,
+            SHF_ALLOC,
+            SHF_EXECINSTR,
+            SHF_MERGE,
+            SHF_STRINGS,
+            SHF_TLS,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -358,10 +381,26 @@ mod tests {
     #[test]
     fn test_auxv_types_distinct() {
         let types = [
-            AT_NULL, AT_PHDR, AT_PHENT, AT_PHNUM, AT_PAGESZ,
-            AT_BASE, AT_FLAGS, AT_ENTRY, AT_UID, AT_EUID,
-            AT_GID, AT_EGID, AT_PLATFORM, AT_HWCAP, AT_CLKTCK,
-            AT_SECURE, AT_RANDOM, AT_HWCAP2, AT_EXECFN, AT_SYSINFO_EHDR,
+            AT_NULL,
+            AT_PHDR,
+            AT_PHENT,
+            AT_PHNUM,
+            AT_PAGESZ,
+            AT_BASE,
+            AT_FLAGS,
+            AT_ENTRY,
+            AT_UID,
+            AT_EUID,
+            AT_GID,
+            AT_EGID,
+            AT_PLATFORM,
+            AT_HWCAP,
+            AT_CLKTCK,
+            AT_SECURE,
+            AT_RANDOM,
+            AT_HWCAP2,
+            AT_EXECFN,
+            AT_SYSINFO_EHDR,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -373,8 +412,13 @@ mod tests {
     #[test]
     fn test_ei_indices_distinct() {
         let indices = [
-            EI_MAG0, EI_CLASS, EI_DATA, EI_VERSION,
-            EI_OSABI, EI_ABIVERSION, EI_PAD,
+            EI_MAG0,
+            EI_CLASS,
+            EI_DATA,
+            EI_VERSION,
+            EI_OSABI,
+            EI_ABIVERSION,
+            EI_PAD,
         ];
         for i in 0..indices.len() {
             for j in (i + 1)..indices.len() {

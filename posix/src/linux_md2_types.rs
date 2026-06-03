@@ -120,9 +120,15 @@ mod tests {
     #[test]
     fn test_raid_levels_distinct() {
         let levels = [
-            LEVEL_LINEAR, LEVEL_RAID0, LEVEL_RAID1, LEVEL_RAID4,
-            LEVEL_RAID5, LEVEL_RAID6, LEVEL_RAID10,
-            LEVEL_MULTIPATH, LEVEL_FAULTY,
+            LEVEL_LINEAR,
+            LEVEL_RAID0,
+            LEVEL_RAID1,
+            LEVEL_RAID4,
+            LEVEL_RAID5,
+            LEVEL_RAID6,
+            LEVEL_RAID10,
+            LEVEL_MULTIPATH,
+            LEVEL_FAULTY,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -134,9 +140,13 @@ mod tests {
     #[test]
     fn test_disk_states_distinct() {
         let states = [
-            MD_DISK_FAULTY, MD_DISK_ACTIVE, MD_DISK_SYNC,
-            MD_DISK_REMOVED, MD_DISK_WRITEMOSTLY,
-            MD_DISK_JOURNAL, MD_DISK_FAILFAST,
+            MD_DISK_FAULTY,
+            MD_DISK_ACTIVE,
+            MD_DISK_SYNC,
+            MD_DISK_REMOVED,
+            MD_DISK_WRITEMOSTLY,
+            MD_DISK_JOURNAL,
+            MD_DISK_FAILFAST,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -156,9 +166,12 @@ mod tests {
     #[test]
     fn test_algorithms_distinct() {
         let algs = [
-            ALGORITHM_LEFT_ASYMMETRIC, ALGORITHM_RIGHT_ASYMMETRIC,
-            ALGORITHM_LEFT_SYMMETRIC, ALGORITHM_RIGHT_SYMMETRIC,
-            ALGORITHM_PARITY_0, ALGORITHM_PARITY_N,
+            ALGORITHM_LEFT_ASYMMETRIC,
+            ALGORITHM_RIGHT_ASYMMETRIC,
+            ALGORITHM_LEFT_SYMMETRIC,
+            ALGORITHM_RIGHT_SYMMETRIC,
+            ALGORITHM_PARITY_0,
+            ALGORITHM_PARITY_N,
         ];
         for i in 0..algs.len() {
             for j in (i + 1)..algs.len() {

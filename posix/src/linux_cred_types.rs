@@ -65,8 +65,10 @@ mod tests {
     #[test]
     fn test_cred_flags_no_overlap() {
         let flags = [
-            CRED_FLAG_PREPARING, CRED_FLAG_COMMITTED,
-            CRED_FLAG_EXEC, CRED_FLAG_OVERRIDE,
+            CRED_FLAG_PREPARING,
+            CRED_FLAG_COMMITTED,
+            CRED_FLAG_EXEC,
+            CRED_FLAG_OVERRIDE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

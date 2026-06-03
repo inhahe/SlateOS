@@ -113,10 +113,18 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            VT_OPENQRY, VT_GETMODE, VT_SETMODE, VT_GETSTATE,
-            VT_RELDISP, VT_ACTIVATE, VT_WAITACTIVE,
-            VT_DISALLOCATE, VT_RESIZE, VT_RESIZEX,
-            VT_LOCKSWITCH, VT_UNLOCKSWITCH,
+            VT_OPENQRY,
+            VT_GETMODE,
+            VT_SETMODE,
+            VT_GETSTATE,
+            VT_RELDISP,
+            VT_ACTIVATE,
+            VT_WAITACTIVE,
+            VT_DISALLOCATE,
+            VT_RESIZE,
+            VT_RESIZEX,
+            VT_LOCKSWITCH,
+            VT_UNLOCKSWITCH,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

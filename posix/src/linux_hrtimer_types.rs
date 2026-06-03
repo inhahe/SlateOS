@@ -93,10 +93,14 @@ mod tests {
     #[test]
     fn test_clock_bases_distinct() {
         let bases = [
-            HRTIMER_BASE_MONOTONIC, HRTIMER_BASE_REALTIME,
-            HRTIMER_BASE_BOOTTIME, HRTIMER_BASE_TAI,
-            HRTIMER_BASE_MONOTONIC_SOFT, HRTIMER_BASE_REALTIME_SOFT,
-            HRTIMER_BASE_BOOTTIME_SOFT, HRTIMER_BASE_TAI_SOFT,
+            HRTIMER_BASE_MONOTONIC,
+            HRTIMER_BASE_REALTIME,
+            HRTIMER_BASE_BOOTTIME,
+            HRTIMER_BASE_TAI,
+            HRTIMER_BASE_MONOTONIC_SOFT,
+            HRTIMER_BASE_REALTIME_SOFT,
+            HRTIMER_BASE_BOOTTIME_SOFT,
+            HRTIMER_BASE_TAI_SOFT,
         ];
         assert_eq!(bases.len(), HRTIMER_MAX_CLOCK_BASES as usize);
         for i in 0..bases.len() {

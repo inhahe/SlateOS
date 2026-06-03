@@ -122,15 +122,11 @@ mod tests {
     #[test]
     fn test_file_types_distinct() {
         let types = [
-            C_ISDIR, C_ISFIFO, C_ISREG, C_ISBLK,
-            C_ISCHR, C_ISCTG, C_ISLNK, C_ISSOCK,
+            C_ISDIR, C_ISFIFO, C_ISREG, C_ISBLK, C_ISCHR, C_ISCTG, C_ISLNK, C_ISSOCK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
-                assert_ne!(
-                    types[i], types[j],
-                    "file types should be distinct"
-                );
+                assert_ne!(types[i], types[j], "file types should be distinct");
             }
         }
     }
@@ -186,17 +182,17 @@ mod tests {
     fn test_permission_bits_no_overlap() {
         // No two permission bits should share a bit.
         let perms = [
-            C_ISUID, C_ISGID, C_ISVTX,
-            C_IRUSR, C_IWUSR, C_IXUSR,
-            C_IRGRP, C_IWGRP, C_IXGRP,
+            C_ISUID, C_ISGID, C_ISVTX, C_IRUSR, C_IWUSR, C_IXUSR, C_IRGRP, C_IWGRP, C_IXGRP,
             C_IROTH, C_IWOTH, C_IXOTH,
         ];
         for i in 0..perms.len() {
             for j in (i + 1)..perms.len() {
                 assert_eq!(
-                    perms[i] & perms[j], 0,
+                    perms[i] & perms[j],
+                    0,
                     "permission bits should not overlap: 0o{:o} & 0o{:o}",
-                    perms[i], perms[j]
+                    perms[i],
+                    perms[j]
                 );
             }
         }
@@ -204,10 +200,18 @@ mod tests {
 
     #[test]
     fn test_all_permissions_mask() {
-        let all = C_ISUID | C_ISGID | C_ISVTX
-            | C_IRUSR | C_IWUSR | C_IXUSR
-            | C_IRGRP | C_IWGRP | C_IXGRP
-            | C_IROTH | C_IWOTH | C_IXOTH;
+        let all = C_ISUID
+            | C_ISGID
+            | C_ISVTX
+            | C_IRUSR
+            | C_IWUSR
+            | C_IXUSR
+            | C_IRGRP
+            | C_IWGRP
+            | C_IXGRP
+            | C_IROTH
+            | C_IWOTH
+            | C_IXOTH;
         assert_eq!(all, 0o007777);
     }
 
@@ -255,16 +259,22 @@ mod tests {
 
     #[test]
     fn test_directory_755() {
-        let mode = C_ISDIR | C_IRUSR | C_IWUSR | C_IXUSR
-            | C_IRGRP | C_IXGRP | C_IROTH | C_IXOTH;
+        let mode = C_ISDIR | C_IRUSR | C_IWUSR | C_IXUSR | C_IRGRP | C_IXGRP | C_IROTH | C_IXOTH;
         assert_eq!(mode, 0o040755);
     }
 
     #[test]
     fn test_symlink() {
-        let mode = C_ISLNK | C_IRUSR | C_IWUSR | C_IXUSR
-            | C_IRGRP | C_IWGRP | C_IXGRP
-            | C_IROTH | C_IWOTH | C_IXOTH;
+        let mode = C_ISLNK
+            | C_IRUSR
+            | C_IWUSR
+            | C_IXUSR
+            | C_IRGRP
+            | C_IWGRP
+            | C_IXGRP
+            | C_IROTH
+            | C_IWOTH
+            | C_IXOTH;
         assert_eq!(mode, 0o120777);
     }
 }

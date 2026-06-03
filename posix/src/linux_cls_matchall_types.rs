@@ -29,8 +29,10 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_MATCHALL_UNSPEC, TCA_MATCHALL_CLASSID,
-            TCA_MATCHALL_ACT, TCA_MATCHALL_FLAGS,
+            TCA_MATCHALL_UNSPEC,
+            TCA_MATCHALL_CLASSID,
+            TCA_MATCHALL_ACT,
+            TCA_MATCHALL_FLAGS,
             TCA_MATCHALL_PCNT,
         ];
         for i in 0..attrs.len() {

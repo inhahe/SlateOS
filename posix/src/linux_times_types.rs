@@ -50,10 +50,7 @@ mod tests {
 
     #[test]
     fn test_offsets_ascending() {
-        let offsets = [
-            TMS_OFF_UTIME, TMS_OFF_STIME,
-            TMS_OFF_CUTIME, TMS_OFF_CSTIME,
-        ];
+        let offsets = [TMS_OFF_UTIME, TMS_OFF_STIME, TMS_OFF_CUTIME, TMS_OFF_CSTIME];
         for i in 1..offsets.len() {
             assert!(offsets[i] > offsets[i - 1]);
         }

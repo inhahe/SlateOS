@@ -68,11 +68,15 @@ mod tests {
     #[test]
     fn test_disk_flags_no_overlap() {
         let flags = [
-            GENHD_FL_REMOVABLE, GENHD_FL_MEDIA_CHANGE_NOTIFY,
-            GENHD_FL_CD, GENHD_FL_SUPPRESS_PARTITION_INFO,
-            GENHD_FL_EXT_DEVT, GENHD_FL_NATIVE_CAPACITY,
+            GENHD_FL_REMOVABLE,
+            GENHD_FL_MEDIA_CHANGE_NOTIFY,
+            GENHD_FL_CD,
+            GENHD_FL_SUPPRESS_PARTITION_INFO,
+            GENHD_FL_EXT_DEVT,
+            GENHD_FL_NATIVE_CAPACITY,
             GENHD_FL_BLOCK_EVENTS_ON_EXCL_WRITE,
-            GENHD_FL_NO_PART, GENHD_FL_HIDDEN,
+            GENHD_FL_NO_PART,
+            GENHD_FL_HIDDEN,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

@@ -84,14 +84,26 @@ mod tests {
     #[test]
     fn test_features_no_overlap() {
         let feats = [
-            NETIF_F_SG, NETIF_F_IP_CSUM, NETIF_F_HW_CSUM,
-            NETIF_F_HW_VLAN_CTAG_TX, NETIF_F_HW_VLAN_CTAG_RX,
-            NETIF_F_HW_VLAN_CTAG_FILTER, NETIF_F_TSO,
-            NETIF_F_UFO, NETIF_F_GSO, NETIF_F_GRO,
-            NETIF_F_LRO, NETIF_F_TSO6, NETIF_F_IPV6_CSUM,
-            NETIF_F_RXHASH, NETIF_F_RXCSUM, NETIF_F_NETNS_LOCAL,
-            NETIF_F_LLTX, NETIF_F_VLAN_CHALLENGED,
-            NETIF_F_HW_TC, NETIF_F_LOOPBACK,
+            NETIF_F_SG,
+            NETIF_F_IP_CSUM,
+            NETIF_F_HW_CSUM,
+            NETIF_F_HW_VLAN_CTAG_TX,
+            NETIF_F_HW_VLAN_CTAG_RX,
+            NETIF_F_HW_VLAN_CTAG_FILTER,
+            NETIF_F_TSO,
+            NETIF_F_UFO,
+            NETIF_F_GSO,
+            NETIF_F_GRO,
+            NETIF_F_LRO,
+            NETIF_F_TSO6,
+            NETIF_F_IPV6_CSUM,
+            NETIF_F_RXHASH,
+            NETIF_F_RXCSUM,
+            NETIF_F_NETNS_LOCAL,
+            NETIF_F_LLTX,
+            NETIF_F_VLAN_CHALLENGED,
+            NETIF_F_HW_TC,
+            NETIF_F_LOOPBACK,
         ];
         for i in 0..feats.len() {
             for j in (i + 1)..feats.len() {
@@ -103,8 +115,12 @@ mod tests {
     #[test]
     fn test_features_power_of_two() {
         let feats = [
-            NETIF_F_SG, NETIF_F_IP_CSUM, NETIF_F_HW_CSUM,
-            NETIF_F_TSO, NETIF_F_GSO, NETIF_F_GRO,
+            NETIF_F_SG,
+            NETIF_F_IP_CSUM,
+            NETIF_F_HW_CSUM,
+            NETIF_F_TSO,
+            NETIF_F_GSO,
+            NETIF_F_GRO,
         ];
         for f in &feats {
             assert!(f.is_power_of_two());

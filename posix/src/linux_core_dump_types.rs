@@ -29,8 +29,7 @@ pub const COREDUMP_FILTER_HUGETLB_SHARED: u32 = 0x40;
 pub const COREDUMP_FILTER_DAX_PRIVATE: u32 = 0x80;
 
 /// Default filter (anonymous private + anonymous shared).
-pub const COREDUMP_FILTER_DEFAULT: u32 = COREDUMP_FILTER_ANON_PRIVATE
-    | COREDUMP_FILTER_ANON_SHARED;
+pub const COREDUMP_FILTER_DEFAULT: u32 = COREDUMP_FILTER_ANON_PRIVATE | COREDUMP_FILTER_ANON_SHARED;
 
 // ---------------------------------------------------------------------------
 // Core dump ELF note types (NT_*)
@@ -69,10 +68,14 @@ mod tests {
     #[test]
     fn test_filter_bits_no_overlap() {
         let bits = [
-            COREDUMP_FILTER_ANON_PRIVATE, COREDUMP_FILTER_ANON_SHARED,
-            COREDUMP_FILTER_MAPPED_PRIVATE, COREDUMP_FILTER_MAPPED_SHARED,
-            COREDUMP_FILTER_ELF_HEADERS, COREDUMP_FILTER_HUGETLB_PRIVATE,
-            COREDUMP_FILTER_HUGETLB_SHARED, COREDUMP_FILTER_DAX_PRIVATE,
+            COREDUMP_FILTER_ANON_PRIVATE,
+            COREDUMP_FILTER_ANON_SHARED,
+            COREDUMP_FILTER_MAPPED_PRIVATE,
+            COREDUMP_FILTER_MAPPED_SHARED,
+            COREDUMP_FILTER_ELF_HEADERS,
+            COREDUMP_FILTER_HUGETLB_PRIVATE,
+            COREDUMP_FILTER_HUGETLB_SHARED,
+            COREDUMP_FILTER_DAX_PRIVATE,
         ];
         for i in 0..bits.len() {
             assert!(bits[i].is_power_of_two());
@@ -91,7 +94,14 @@ mod tests {
 
     #[test]
     fn test_note_types_distinct() {
-        let types = [NT_PRSTATUS, NT_PRFPREG, NT_PRPSINFO, NT_AUXV, NT_SIGINFO, NT_FILE];
+        let types = [
+            NT_PRSTATUS,
+            NT_PRFPREG,
+            NT_PRPSINFO,
+            NT_AUXV,
+            NT_SIGINFO,
+            NT_FILE,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);

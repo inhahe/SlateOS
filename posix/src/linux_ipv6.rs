@@ -155,9 +155,15 @@ mod tests {
     #[test]
     fn test_extension_headers_distinct() {
         let hdrs = [
-            IPPROTO_HOPOPTS, IPPROTO_ROUTING, IPPROTO_FRAGMENT,
-            IPPROTO_ESP, IPPROTO_AH, IPPROTO_ICMPV6,
-            IPPROTO_NONE, IPPROTO_DSTOPTS, IPPROTO_MH,
+            IPPROTO_HOPOPTS,
+            IPPROTO_ROUTING,
+            IPPROTO_FRAGMENT,
+            IPPROTO_ESP,
+            IPPROTO_AH,
+            IPPROTO_ICMPV6,
+            IPPROTO_NONE,
+            IPPROTO_DSTOPTS,
+            IPPROTO_MH,
         ];
         for i in 0..hdrs.len() {
             for j in (i + 1)..hdrs.len() {
@@ -169,11 +175,19 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            IPV6_V6ONLY, IPV6_UNICAST_HOPS, IPV6_MULTICAST_HOPS,
-            IPV6_MULTICAST_IF, IPV6_MULTICAST_LOOP,
-            IPV6_ADD_MEMBERSHIP, IPV6_DROP_MEMBERSHIP,
-            IPV6_RECVPKTINFO, IPV6_PKTINFO, IPV6_RECVHOPLIMIT,
-            IPV6_RECVTCLASS, IPV6_TCLASS, IPV6_DONTFRAG,
+            IPV6_V6ONLY,
+            IPV6_UNICAST_HOPS,
+            IPV6_MULTICAST_HOPS,
+            IPV6_MULTICAST_IF,
+            IPV6_MULTICAST_LOOP,
+            IPV6_ADD_MEMBERSHIP,
+            IPV6_DROP_MEMBERSHIP,
+            IPV6_RECVPKTINFO,
+            IPV6_PKTINFO,
+            IPV6_RECVHOPLIMIT,
+            IPV6_RECVTCLASS,
+            IPV6_TCLASS,
+            IPV6_DONTFRAG,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

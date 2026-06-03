@@ -104,8 +104,13 @@ mod tests {
     #[test]
     fn test_ioctl_constants_distinct() {
         let cmds = [
-            TUNSETIFF, TUNSETPERSIST, TUNSETOWNER, TUNSETGROUP,
-            TUNGETFEATURES, TUNSETOFFLOAD, TUNSETQUEUE,
+            TUNSETIFF,
+            TUNSETPERSIST,
+            TUNSETOWNER,
+            TUNSETGROUP,
+            TUNGETFEATURES,
+            TUNSETOFFLOAD,
+            TUNSETQUEUE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

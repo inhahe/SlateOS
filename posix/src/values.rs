@@ -47,13 +47,13 @@ pub const MINLONG: i64 = -9223372036854775808;
 // ---------------------------------------------------------------------------
 
 /// Maximum `float` value.
-pub const MAXFLOAT: f32 = 3.40282347e+38;
+pub const MAXFLOAT: f32 = 3.402_823_5e38;
 
 /// Maximum `double` value.
 pub const MAXDOUBLE: f64 = 1.7976931348623157e+308;
 
 /// Minimum positive normalized `float`.
-pub const MINFLOAT: f32 = 1.17549435e-38;
+pub const MINFLOAT: f32 = 1.175_494_4e-38;
 
 /// Minimum positive normalized `double`.
 pub const MINDOUBLE: f64 = 2.2250738585072014e-308;

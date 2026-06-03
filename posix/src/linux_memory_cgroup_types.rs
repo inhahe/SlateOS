@@ -90,9 +90,15 @@ mod tests {
     #[test]
     fn test_stat_types_distinct() {
         let stats = [
-            MEMCG_STAT_CURRENT, MEMCG_STAT_RSS, MEMCG_STAT_CACHE,
-            MEMCG_STAT_SLAB, MEMCG_STAT_SWAP, MEMCG_STAT_ANON_THPS,
-            MEMCG_STAT_KERNEL_STACK, MEMCG_STAT_SOCK, MEMCG_STAT_PERCPU,
+            MEMCG_STAT_CURRENT,
+            MEMCG_STAT_RSS,
+            MEMCG_STAT_CACHE,
+            MEMCG_STAT_SLAB,
+            MEMCG_STAT_SWAP,
+            MEMCG_STAT_ANON_THPS,
+            MEMCG_STAT_KERNEL_STACK,
+            MEMCG_STAT_SOCK,
+            MEMCG_STAT_PERCPU,
         ];
         for i in 0..stats.len() {
             for j in (i + 1)..stats.len() {
@@ -104,8 +110,11 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let events = [
-            MEMCG_EVENT_LOW, MEMCG_EVENT_HIGH, MEMCG_EVENT_MAX,
-            MEMCG_EVENT_OOM, MEMCG_EVENT_OOM_KILL,
+            MEMCG_EVENT_LOW,
+            MEMCG_EVENT_HIGH,
+            MEMCG_EVENT_MAX,
+            MEMCG_EVENT_OOM,
+            MEMCG_EVENT_OOM_KILL,
             MEMCG_EVENT_OOM_GROUP_KILL,
         ];
         for i in 0..events.len() {

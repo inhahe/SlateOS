@@ -51,10 +51,7 @@ mod tests {
 
     #[test]
     fn test_verdicts_distinct() {
-        let verdicts = [
-            NF_DROP, NF_ACCEPT, NF_STOLEN,
-            NF_QUEUE, NF_REPEAT, NF_STOP,
-        ];
+        let verdicts = [NF_DROP, NF_ACCEPT, NF_STOLEN, NF_QUEUE, NF_REPEAT, NF_STOP];
         for i in 0..verdicts.len() {
             for j in (i + 1)..verdicts.len() {
                 assert_ne!(verdicts[i], verdicts[j]);

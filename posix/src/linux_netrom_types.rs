@@ -93,8 +93,11 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let cmds = [
-            SIOCNRGETPARMS, SIOCNRSETPARMS, SIOCNRDECOBS,
-            SIOCNRRTCTL, SIOCNRCTLCON,
+            SIOCNRGETPARMS,
+            SIOCNRSETPARMS,
+            SIOCNRDECOBS,
+            SIOCNRRTCTL,
+            SIOCNRCTLCON,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

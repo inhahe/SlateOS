@@ -77,13 +77,20 @@ mod tests {
     #[test]
     fn test_init_flags_power_of_two() {
         let flags = [
-            FUSE_HANDLE_KILLPRIV, FUSE_POSIX_LOCKS,
-            FUSE_FLOCK_LOCKS, FUSE_ATOMIC_O_TRUNC,
-            FUSE_EXPORT_SUPPORT, FUSE_BIG_WRITES,
-            FUSE_AUTO_INVAL_DATA, FUSE_DO_READDIRPLUS,
-            FUSE_READDIRPLUS_AUTO, FUSE_ASYNC_DIO,
-            FUSE_WRITEBACK_CACHE, FUSE_NO_OPEN_SUPPORT,
-            FUSE_PARALLEL_DIROPS, FUSE_HANDLE_KILLPRIV_V2,
+            FUSE_HANDLE_KILLPRIV,
+            FUSE_POSIX_LOCKS,
+            FUSE_FLOCK_LOCKS,
+            FUSE_ATOMIC_O_TRUNC,
+            FUSE_EXPORT_SUPPORT,
+            FUSE_BIG_WRITES,
+            FUSE_AUTO_INVAL_DATA,
+            FUSE_DO_READDIRPLUS,
+            FUSE_READDIRPLUS_AUTO,
+            FUSE_ASYNC_DIO,
+            FUSE_WRITEBACK_CACHE,
+            FUSE_NO_OPEN_SUPPORT,
+            FUSE_PARALLEL_DIROPS,
+            FUSE_HANDLE_KILLPRIV_V2,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -93,13 +100,20 @@ mod tests {
     #[test]
     fn test_init_flags_no_overlap() {
         let flags = [
-            FUSE_HANDLE_KILLPRIV, FUSE_POSIX_LOCKS,
-            FUSE_FLOCK_LOCKS, FUSE_ATOMIC_O_TRUNC,
-            FUSE_EXPORT_SUPPORT, FUSE_BIG_WRITES,
-            FUSE_AUTO_INVAL_DATA, FUSE_DO_READDIRPLUS,
-            FUSE_READDIRPLUS_AUTO, FUSE_ASYNC_DIO,
-            FUSE_WRITEBACK_CACHE, FUSE_NO_OPEN_SUPPORT,
-            FUSE_PARALLEL_DIROPS, FUSE_HANDLE_KILLPRIV_V2,
+            FUSE_HANDLE_KILLPRIV,
+            FUSE_POSIX_LOCKS,
+            FUSE_FLOCK_LOCKS,
+            FUSE_ATOMIC_O_TRUNC,
+            FUSE_EXPORT_SUPPORT,
+            FUSE_BIG_WRITES,
+            FUSE_AUTO_INVAL_DATA,
+            FUSE_DO_READDIRPLUS,
+            FUSE_READDIRPLUS_AUTO,
+            FUSE_ASYNC_DIO,
+            FUSE_WRITEBACK_CACHE,
+            FUSE_NO_OPEN_SUPPORT,
+            FUSE_PARALLEL_DIROPS,
+            FUSE_HANDLE_KILLPRIV_V2,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -111,9 +125,12 @@ mod tests {
     #[test]
     fn test_notify_codes_distinct() {
         let codes = [
-            FUSE_NOTIFY_POLL, FUSE_NOTIFY_INVAL_INODE,
-            FUSE_NOTIFY_INVAL_ENTRY, FUSE_NOTIFY_STORE,
-            FUSE_NOTIFY_RETRIEVE, FUSE_NOTIFY_DELETE,
+            FUSE_NOTIFY_POLL,
+            FUSE_NOTIFY_INVAL_INODE,
+            FUSE_NOTIFY_INVAL_ENTRY,
+            FUSE_NOTIFY_STORE,
+            FUSE_NOTIFY_RETRIEVE,
+            FUSE_NOTIFY_DELETE,
             FUSE_NOTIFY_RESEND,
         ];
         for i in 0..codes.len() {
@@ -126,7 +143,8 @@ mod tests {
     #[test]
     fn test_write_flags_no_overlap() {
         let flags = [
-            FUSE_WRITE_CACHE, FUSE_WRITE_LOCKOWNER,
+            FUSE_WRITE_CACHE,
+            FUSE_WRITE_LOCKOWNER,
             FUSE_WRITE_KILL_SUIDGID,
         ];
         for i in 0..flags.len() {

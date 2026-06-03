@@ -62,7 +62,10 @@ mod tests {
         assert_eq!(FUTEX_WAITERS & FUTEX_TID_MASK, 0);
         assert_eq!(FUTEX_WAITERS & FUTEX_OWNER_DIED, 0);
         // Together they cover all 32 bits
-        assert_eq!(FUTEX_WAITERS | FUTEX_OWNER_DIED | FUTEX_TID_MASK, 0xFFFF_FFFF);
+        assert_eq!(
+            FUTEX_WAITERS | FUTEX_OWNER_DIED | FUTEX_TID_MASK,
+            0xFFFF_FFFF
+        );
     }
 
     #[test]

@@ -63,13 +63,20 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_TUNNEL_KEY_UNSPEC, TCA_TUNNEL_KEY_TM,
-            TCA_TUNNEL_KEY_PARMS, TCA_TUNNEL_KEY_ENC_KEY_ID,
-            TCA_TUNNEL_KEY_ENC_IPV4_SRC, TCA_TUNNEL_KEY_ENC_IPV4_DST,
-            TCA_TUNNEL_KEY_ENC_IPV6_SRC, TCA_TUNNEL_KEY_ENC_IPV6_DST,
-            TCA_TUNNEL_KEY_ENC_DST_PORT, TCA_TUNNEL_KEY_NO_CSUM,
-            TCA_TUNNEL_KEY_PAD, TCA_TUNNEL_KEY_ENC_TOS,
-            TCA_TUNNEL_KEY_ENC_TTL, TCA_TUNNEL_KEY_ENC_OPTS,
+            TCA_TUNNEL_KEY_UNSPEC,
+            TCA_TUNNEL_KEY_TM,
+            TCA_TUNNEL_KEY_PARMS,
+            TCA_TUNNEL_KEY_ENC_KEY_ID,
+            TCA_TUNNEL_KEY_ENC_IPV4_SRC,
+            TCA_TUNNEL_KEY_ENC_IPV4_DST,
+            TCA_TUNNEL_KEY_ENC_IPV6_SRC,
+            TCA_TUNNEL_KEY_ENC_IPV6_DST,
+            TCA_TUNNEL_KEY_ENC_DST_PORT,
+            TCA_TUNNEL_KEY_NO_CSUM,
+            TCA_TUNNEL_KEY_PAD,
+            TCA_TUNNEL_KEY_ENC_TOS,
+            TCA_TUNNEL_KEY_ENC_TTL,
+            TCA_TUNNEL_KEY_ENC_OPTS,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

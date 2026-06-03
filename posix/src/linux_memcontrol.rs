@@ -86,8 +86,13 @@ mod tests {
     #[test]
     fn test_stat_types_distinct() {
         let types = [
-            MEMCG_CACHE, MEMCG_RSS, MEMCG_RSS_HUGE, MEMCG_SHMEM,
-            MEMCG_MAPPED_FILE, MEMCG_DIRTY, MEMCG_WRITEBACK,
+            MEMCG_CACHE,
+            MEMCG_RSS,
+            MEMCG_RSS_HUGE,
+            MEMCG_SHMEM,
+            MEMCG_MAPPED_FILE,
+            MEMCG_DIRTY,
+            MEMCG_WRITEBACK,
             MEMCG_SWAP,
         ];
         for i in 0..types.len() {
@@ -100,8 +105,12 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            MEMCG_LOW, MEMCG_HIGH, MEMCG_MAX, MEMCG_OOM,
-            MEMCG_OOM_KILL, MEMCG_OOM_GROUP_KILL,
+            MEMCG_LOW,
+            MEMCG_HIGH,
+            MEMCG_MAX,
+            MEMCG_OOM,
+            MEMCG_OOM_KILL,
+            MEMCG_OOM_GROUP_KILL,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -113,10 +122,16 @@ mod tests {
     #[test]
     fn test_file_names_distinct() {
         let files = [
-            MEMCG_FILE_CURRENT, MEMCG_FILE_HIGH, MEMCG_FILE_MAX,
-            MEMCG_FILE_LOW, MEMCG_FILE_MIN, MEMCG_FILE_STAT,
-            MEMCG_FILE_SWAP_CURRENT, MEMCG_FILE_SWAP_MAX,
-            MEMCG_FILE_EVENTS, MEMCG_FILE_PRESSURE,
+            MEMCG_FILE_CURRENT,
+            MEMCG_FILE_HIGH,
+            MEMCG_FILE_MAX,
+            MEMCG_FILE_LOW,
+            MEMCG_FILE_MIN,
+            MEMCG_FILE_STAT,
+            MEMCG_FILE_SWAP_CURRENT,
+            MEMCG_FILE_SWAP_MAX,
+            MEMCG_FILE_EVENTS,
+            MEMCG_FILE_PRESSURE,
         ];
         for i in 0..files.len() {
             for j in (i + 1)..files.len() {

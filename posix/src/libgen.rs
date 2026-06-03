@@ -57,7 +57,9 @@ pub extern "C" fn basename(path: *mut u8) -> *mut u8 {
 
     // Null-terminate after stripped trailing slashes.
     // SAFETY: end <= len, so path.add(end) is within the original buffer.
-    unsafe { *path.add(end) = 0; }
+    unsafe {
+        *path.add(end) = 0;
+    }
 
     // Find the last slash before `end`.
     let mut last_slash = end;
@@ -141,7 +143,9 @@ pub extern "C" fn dirname(path: *mut u8) -> *mut u8 {
 
     // Null-terminate the directory.
     // SAFETY: end <= len, so path.add(end) is valid.
-    unsafe { *path.add(end) = 0; }
+    unsafe {
+        *path.add(end) = 0;
+    }
 
     path
 }

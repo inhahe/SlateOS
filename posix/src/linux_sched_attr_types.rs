@@ -86,8 +86,10 @@ mod tests {
     #[test]
     fn test_latency_hints_distinct() {
         let hints = [
-            SCHED_LATENCY_NONE, SCHED_LATENCY_LOW,
-            SCHED_LATENCY_NORMAL, SCHED_LATENCY_HIGH,
+            SCHED_LATENCY_NONE,
+            SCHED_LATENCY_LOW,
+            SCHED_LATENCY_NORMAL,
+            SCHED_LATENCY_HIGH,
         ];
         for i in 0..hints.len() {
             for j in (i + 1)..hints.len() {

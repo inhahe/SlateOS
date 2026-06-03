@@ -94,11 +94,18 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            DPLL_CMD_UNSPEC, DPLL_CMD_DEVICE_ID_GET, DPLL_CMD_DEVICE_GET,
-            DPLL_CMD_DEVICE_SET, DPLL_CMD_DEVICE_CREATE_NTF,
-            DPLL_CMD_DEVICE_DELETE_NTF, DPLL_CMD_DEVICE_CHANGE_NTF,
-            DPLL_CMD_PIN_ID_GET, DPLL_CMD_PIN_GET, DPLL_CMD_PIN_SET,
-            DPLL_CMD_PIN_CREATE_NTF, DPLL_CMD_PIN_DELETE_NTF,
+            DPLL_CMD_UNSPEC,
+            DPLL_CMD_DEVICE_ID_GET,
+            DPLL_CMD_DEVICE_GET,
+            DPLL_CMD_DEVICE_SET,
+            DPLL_CMD_DEVICE_CREATE_NTF,
+            DPLL_CMD_DEVICE_DELETE_NTF,
+            DPLL_CMD_DEVICE_CHANGE_NTF,
+            DPLL_CMD_PIN_ID_GET,
+            DPLL_CMD_PIN_GET,
+            DPLL_CMD_PIN_SET,
+            DPLL_CMD_PIN_CREATE_NTF,
+            DPLL_CMD_PIN_DELETE_NTF,
             DPLL_CMD_PIN_CHANGE_NTF,
         ];
         for i in 0..cmds.len() {
@@ -116,8 +123,10 @@ mod tests {
     #[test]
     fn test_lock_status_distinct() {
         let statuses = [
-            DPLL_LOCK_STATUS_UNLOCKED, DPLL_LOCK_STATUS_LOCKED,
-            DPLL_LOCK_STATUS_LOCKED_HO_ACQ, DPLL_LOCK_STATUS_HOLDOVER,
+            DPLL_LOCK_STATUS_UNLOCKED,
+            DPLL_LOCK_STATUS_LOCKED,
+            DPLL_LOCK_STATUS_LOCKED_HO_ACQ,
+            DPLL_LOCK_STATUS_HOLDOVER,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
@@ -129,8 +138,10 @@ mod tests {
     #[test]
     fn test_pin_types_distinct() {
         let types = [
-            DPLL_PIN_TYPE_MUX, DPLL_PIN_TYPE_EXT,
-            DPLL_PIN_TYPE_SYNCE_ETH_PORT, DPLL_PIN_TYPE_INT_OSCILLATOR,
+            DPLL_PIN_TYPE_MUX,
+            DPLL_PIN_TYPE_EXT,
+            DPLL_PIN_TYPE_SYNCE_ETH_PORT,
+            DPLL_PIN_TYPE_INT_OSCILLATOR,
             DPLL_PIN_TYPE_GNSS,
         ];
         for i in 0..types.len() {
@@ -143,7 +154,8 @@ mod tests {
     #[test]
     fn test_pin_states_distinct() {
         let states = [
-            DPLL_PIN_STATE_CONNECTED, DPLL_PIN_STATE_DISCONNECTED,
+            DPLL_PIN_STATE_CONNECTED,
+            DPLL_PIN_STATE_DISCONNECTED,
             DPLL_PIN_STATE_SELECTABLE,
         ];
         for i in 0..states.len() {

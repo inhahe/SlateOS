@@ -53,8 +53,10 @@ mod tests {
     #[test]
     fn test_modes_powers_of_two() {
         let modes = [
-            MACVLAN_MODE_PRIVATE, MACVLAN_MODE_VEPA,
-            MACVLAN_MODE_BRIDGE, MACVLAN_MODE_PASSTHRU,
+            MACVLAN_MODE_PRIVATE,
+            MACVLAN_MODE_VEPA,
+            MACVLAN_MODE_BRIDGE,
+            MACVLAN_MODE_PASSTHRU,
             MACVLAN_MODE_SOURCE,
         ];
         for m in &modes {
@@ -65,8 +67,10 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            MACVLAN_MODE_PRIVATE, MACVLAN_MODE_VEPA,
-            MACVLAN_MODE_BRIDGE, MACVLAN_MODE_PASSTHRU,
+            MACVLAN_MODE_PRIVATE,
+            MACVLAN_MODE_VEPA,
+            MACVLAN_MODE_BRIDGE,
+            MACVLAN_MODE_PASSTHRU,
             MACVLAN_MODE_SOURCE,
         ];
         for i in 0..modes.len() {

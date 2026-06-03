@@ -603,20 +603,26 @@ mod tests {
 
     #[test]
     fn test_symloop_exceeds_posix() {
-        assert!(SYMLOOP_MAX >= _POSIX_SYMLOOP_MAX,
-            "SYMLOOP_MAX ({SYMLOOP_MAX}) must be >= _POSIX_SYMLOOP_MAX ({_POSIX_SYMLOOP_MAX})");
+        assert!(
+            SYMLOOP_MAX >= _POSIX_SYMLOOP_MAX,
+            "SYMLOOP_MAX ({SYMLOOP_MAX}) must be >= _POSIX_SYMLOOP_MAX ({_POSIX_SYMLOOP_MAX})"
+        );
     }
 
     #[test]
     fn test_sem_value_exceeds_posix() {
-        assert!(SEM_VALUE_MAX >= _POSIX_SEM_VALUE_MAX,
-            "SEM_VALUE_MAX must be >= _POSIX_SEM_VALUE_MAX");
+        assert!(
+            SEM_VALUE_MAX >= _POSIX_SEM_VALUE_MAX,
+            "SEM_VALUE_MAX must be >= _POSIX_SEM_VALUE_MAX"
+        );
     }
 
     #[test]
     fn test_timer_exceeds_posix() {
-        assert!(TIMER_MAX >= _POSIX_TIMER_MAX,
-            "TIMER_MAX must be >= _POSIX_TIMER_MAX");
+        assert!(
+            TIMER_MAX >= _POSIX_TIMER_MAX,
+            "TIMER_MAX must be >= _POSIX_TIMER_MAX"
+        );
     }
 
     // -- LONG and LLONG identical on LP64 --

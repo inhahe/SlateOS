@@ -75,8 +75,13 @@ mod tests {
     #[test]
     fn test_file_names_distinct() {
         let files = [
-            IO_WEIGHT, IO_MAX, IO_LATENCY, IO_STAT,
-            IO_PRESSURE, IO_COST_MODEL, IO_COST_QOS,
+            IO_WEIGHT,
+            IO_MAX,
+            IO_LATENCY,
+            IO_STAT,
+            IO_PRESSURE,
+            IO_COST_MODEL,
+            IO_COST_QOS,
         ];
         for i in 0..files.len() {
             for j in (i + 1)..files.len() {
@@ -93,10 +98,7 @@ mod tests {
 
     #[test]
     fn test_limit_types_distinct() {
-        let types = [
-            IO_LIMIT_RBPS, IO_LIMIT_WBPS,
-            IO_LIMIT_RIOPS, IO_LIMIT_WIOPS,
-        ];
+        let types = [IO_LIMIT_RBPS, IO_LIMIT_WBPS, IO_LIMIT_RIOPS, IO_LIMIT_WIOPS];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -107,8 +109,12 @@ mod tests {
     #[test]
     fn test_stat_names_distinct() {
         let names = [
-            IO_STAT_RBYTES, IO_STAT_WBYTES, IO_STAT_RIOS,
-            IO_STAT_WIOS, IO_STAT_DBYTES, IO_STAT_DIOS,
+            IO_STAT_RBYTES,
+            IO_STAT_WBYTES,
+            IO_STAT_RIOS,
+            IO_STAT_WIOS,
+            IO_STAT_DBYTES,
+            IO_STAT_DIOS,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {

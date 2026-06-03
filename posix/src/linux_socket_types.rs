@@ -107,8 +107,17 @@ mod tests {
     #[test]
     fn test_address_families_distinct() {
         let families = [
-            AF_UNSPEC, AF_UNIX, AF_INET, AF_INET6, AF_NETLINK,
-            AF_PACKET, AF_BLUETOOTH, AF_VSOCK, AF_CAN, AF_ALG, AF_XDP,
+            AF_UNSPEC,
+            AF_UNIX,
+            AF_INET,
+            AF_INET6,
+            AF_NETLINK,
+            AF_PACKET,
+            AF_BLUETOOTH,
+            AF_VSOCK,
+            AF_CAN,
+            AF_ALG,
+            AF_XDP,
         ];
         for i in 0..families.len() {
             for j in (i + 1)..families.len() {
@@ -120,8 +129,12 @@ mod tests {
     #[test]
     fn test_socket_types_distinct() {
         let types = [
-            SOCK_STREAM, SOCK_DGRAM, SOCK_RAW,
-            SOCK_RDM, SOCK_SEQPACKET, SOCK_DCCP,
+            SOCK_STREAM,
+            SOCK_DGRAM,
+            SOCK_RAW,
+            SOCK_RDM,
+            SOCK_SEQPACKET,
+            SOCK_DCCP,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -150,9 +163,15 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            SO_REUSEADDR, SO_REUSEPORT, SO_KEEPALIVE,
-            SO_SNDBUF, SO_RCVBUF, SO_ERROR,
-            SO_RCVTIMEO, SO_SNDTIMEO, SO_LINGER,
+            SO_REUSEADDR,
+            SO_REUSEPORT,
+            SO_KEEPALIVE,
+            SO_SNDBUF,
+            SO_RCVBUF,
+            SO_ERROR,
+            SO_RCVTIMEO,
+            SO_SNDTIMEO,
+            SO_LINGER,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

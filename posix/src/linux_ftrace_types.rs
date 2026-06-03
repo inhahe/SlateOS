@@ -103,12 +103,18 @@ mod tests {
     #[test]
     fn test_tracers_distinct() {
         let tracers = [
-            FTRACE_TRACER_NOP, FTRACE_TRACER_FUNCTION,
-            FTRACE_TRACER_FUNCTION_GRAPH, FTRACE_TRACER_IRQSOFF,
-            FTRACE_TRACER_PREEMPTOFF, FTRACE_TRACER_PREEMPTIRQSOFF,
-            FTRACE_TRACER_WAKEUP, FTRACE_TRACER_WAKEUP_RT,
-            FTRACE_TRACER_HWLAT, FTRACE_TRACER_OSNOISE,
-            FTRACE_TRACER_TIMERLAT, FTRACE_TRACER_BRANCH,
+            FTRACE_TRACER_NOP,
+            FTRACE_TRACER_FUNCTION,
+            FTRACE_TRACER_FUNCTION_GRAPH,
+            FTRACE_TRACER_IRQSOFF,
+            FTRACE_TRACER_PREEMPTOFF,
+            FTRACE_TRACER_PREEMPTIRQSOFF,
+            FTRACE_TRACER_WAKEUP,
+            FTRACE_TRACER_WAKEUP_RT,
+            FTRACE_TRACER_HWLAT,
+            FTRACE_TRACER_OSNOISE,
+            FTRACE_TRACER_TIMERLAT,
+            FTRACE_TRACER_BRANCH,
         ];
         for i in 0..tracers.len() {
             for j in (i + 1)..tracers.len() {
@@ -120,11 +126,16 @@ mod tests {
     #[test]
     fn test_options_no_overlap() {
         let opts = [
-            FTRACE_OPT_PRINT_CPU, FTRACE_OPT_FUNCNAME,
-            FTRACE_OPT_TIMESTAMP, FTRACE_OPT_PROC,
-            FTRACE_OPT_LATENCY, FTRACE_OPT_GRAPH_OVERHEAD,
-            FTRACE_OPT_GRAPH_DURATION, FTRACE_OPT_GRAPH_ABS_TIME,
-            FTRACE_OPT_IRQ_INFO, FTRACE_OPT_STACKTRACE,
+            FTRACE_OPT_PRINT_CPU,
+            FTRACE_OPT_FUNCNAME,
+            FTRACE_OPT_TIMESTAMP,
+            FTRACE_OPT_PROC,
+            FTRACE_OPT_LATENCY,
+            FTRACE_OPT_GRAPH_OVERHEAD,
+            FTRACE_OPT_GRAPH_DURATION,
+            FTRACE_OPT_GRAPH_ABS_TIME,
+            FTRACE_OPT_IRQ_INFO,
+            FTRACE_OPT_STACKTRACE,
         ];
         for i in 0..opts.len() {
             assert!(opts[i].is_power_of_two());
@@ -137,8 +148,10 @@ mod tests {
     #[test]
     fn test_filter_flags_no_overlap() {
         let flags = [
-            FTRACE_FL_ENABLED, FTRACE_FL_MODIFIED,
-            FTRACE_FL_DIRECT, FTRACE_FL_KPROBE,
+            FTRACE_FL_ENABLED,
+            FTRACE_FL_MODIFIED,
+            FTRACE_FL_DIRECT,
+            FTRACE_FL_KPROBE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -151,9 +164,12 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            FTRACE_EVENT_FUNCENTRY, FTRACE_EVENT_FUNCRETURN,
-            FTRACE_EVENT_CTXSWITCH, FTRACE_EVENT_WAKEUP,
-            FTRACE_EVENT_PRINT, FTRACE_EVENT_STACK,
+            FTRACE_EVENT_FUNCENTRY,
+            FTRACE_EVENT_FUNCRETURN,
+            FTRACE_EVENT_CTXSWITCH,
+            FTRACE_EVENT_WAKEUP,
+            FTRACE_EVENT_PRINT,
+            FTRACE_EVENT_STACK,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

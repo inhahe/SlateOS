@@ -95,8 +95,10 @@ mod tests {
     #[test]
     fn test_init_flags_no_overlap() {
         let flags = [
-            FAN_REPORT_FID, FAN_REPORT_DIR_FID,
-            FAN_REPORT_NAME, FAN_REPORT_TARGET_FID,
+            FAN_REPORT_FID,
+            FAN_REPORT_DIR_FID,
+            FAN_REPORT_NAME,
+            FAN_REPORT_TARGET_FID,
             FAN_REPORT_PIDFD,
         ];
         for i in 0..flags.len() {
@@ -110,8 +112,10 @@ mod tests {
     #[test]
     fn test_info_types_distinct() {
         let types = [
-            FAN_EVENT_INFO_TYPE_FID, FAN_EVENT_INFO_TYPE_DFID_NAME,
-            FAN_EVENT_INFO_TYPE_DFID, FAN_EVENT_INFO_TYPE_PIDFD,
+            FAN_EVENT_INFO_TYPE_FID,
+            FAN_EVENT_INFO_TYPE_DFID_NAME,
+            FAN_EVENT_INFO_TYPE_DFID,
+            FAN_EVENT_INFO_TYPE_PIDFD,
             FAN_EVENT_INFO_TYPE_ERROR,
             FAN_EVENT_INFO_TYPE_OLD_DFID_NAME,
             FAN_EVENT_INFO_TYPE_NEW_DFID_NAME,

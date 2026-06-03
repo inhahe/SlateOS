@@ -10,23 +10,23 @@
 // Re-exports: legacy mount flags
 // ---------------------------------------------------------------------------
 
-pub use crate::sys_mount::MS_RDONLY;
-pub use crate::sys_mount::MS_NOSUID;
-pub use crate::sys_mount::MS_NODEV;
-pub use crate::sys_mount::MS_NOEXEC;
-pub use crate::sys_mount::MS_SYNCHRONOUS;
-pub use crate::sys_mount::MS_REMOUNT;
-pub use crate::sys_mount::MS_MANDLOCK;
-pub use crate::sys_mount::MS_DIRSYNC;
-pub use crate::sys_mount::MS_NOATIME;
-pub use crate::sys_mount::MS_NODIRATIME;
 pub use crate::sys_mount::MS_BIND;
-pub use crate::sys_mount::MS_REC;
-pub use crate::sys_mount::MS_SILENT;
-pub use crate::sys_mount::MS_UNBINDABLE;
+pub use crate::sys_mount::MS_DIRSYNC;
+pub use crate::sys_mount::MS_MANDLOCK;
+pub use crate::sys_mount::MS_NOATIME;
+pub use crate::sys_mount::MS_NODEV;
+pub use crate::sys_mount::MS_NODIRATIME;
+pub use crate::sys_mount::MS_NOEXEC;
+pub use crate::sys_mount::MS_NOSUID;
 pub use crate::sys_mount::MS_PRIVATE;
-pub use crate::sys_mount::MS_SLAVE;
+pub use crate::sys_mount::MS_RDONLY;
+pub use crate::sys_mount::MS_REC;
+pub use crate::sys_mount::MS_REMOUNT;
 pub use crate::sys_mount::MS_SHARED;
+pub use crate::sys_mount::MS_SILENT;
+pub use crate::sys_mount::MS_SLAVE;
+pub use crate::sys_mount::MS_SYNCHRONOUS;
+pub use crate::sys_mount::MS_UNBINDABLE;
 
 // ---------------------------------------------------------------------------
 // MOUNT_ATTR_* flags (for mount_setattr)
@@ -170,9 +170,14 @@ mod tests {
     #[test]
     fn test_mount_attr_distinct() {
         let attrs = [
-            MOUNT_ATTR_RDONLY, MOUNT_ATTR_NOSUID, MOUNT_ATTR_NODEV,
-            MOUNT_ATTR_NOEXEC, MOUNT_ATTR_NOATIME, MOUNT_ATTR_STRICTATIME,
-            MOUNT_ATTR_NOSYMFOLLOW, MOUNT_ATTR_IDMAP,
+            MOUNT_ATTR_RDONLY,
+            MOUNT_ATTR_NOSUID,
+            MOUNT_ATTR_NODEV,
+            MOUNT_ATTR_NOEXEC,
+            MOUNT_ATTR_NOATIME,
+            MOUNT_ATTR_STRICTATIME,
+            MOUNT_ATTR_NOSYMFOLLOW,
+            MOUNT_ATTR_IDMAP,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

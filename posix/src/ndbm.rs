@@ -153,11 +153,7 @@ fn validate_value(val: Datum) -> Result<(), i32> {
 ///   check, matching glibc which lets the kernel sort it out).
 /// - All other inputs → ENOSYS (no NDBM backend).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn dbm_open(
-    file: *const u8,
-    _open_flags: i32,
-    _file_mode: u32,
-) -> *mut Dbm {
+pub extern "C" fn dbm_open(file: *const u8, _open_flags: i32, _file_mode: u32) -> *mut Dbm {
     if file.is_null() {
         errno::set_errno(errno::EFAULT);
         return core::ptr::null_mut();
@@ -213,12 +209,7 @@ pub extern "C" fn dbm_close(_db: *mut Dbm) {
 /// - `store_mode` not in `{DBM_INSERT, DBM_REPLACE}` → EINVAL.
 /// - All other inputs → EINVAL (no db open).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn dbm_store(
-    db: *mut Dbm,
-    key: Datum,
-    content: Datum,
-    store_mode: i32,
-) -> i32 {
+pub extern "C" fn dbm_store(db: *mut Dbm, key: Datum, content: Datum, store_mode: i32) -> i32 {
     if let Err(e) = validate_key(key) {
         errno::set_errno(e);
         return -1;

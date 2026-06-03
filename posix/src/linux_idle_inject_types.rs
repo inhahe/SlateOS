@@ -67,7 +67,8 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            IDLE_INJECT_STOPPED, IDLE_INJECT_RUNNING,
+            IDLE_INJECT_STOPPED,
+            IDLE_INJECT_RUNNING,
             IDLE_INJECT_STOP_PENDING,
         ];
         for i in 0..states.len() {

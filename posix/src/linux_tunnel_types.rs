@@ -79,9 +79,13 @@ mod tests {
     #[test]
     fn test_tunnel_types_distinct() {
         let types = [
-            TUNNEL_TYPE_IPIP, TUNNEL_TYPE_GRE, TUNNEL_TYPE_SIT,
-            TUNNEL_TYPE_ISATAP, TUNNEL_TYPE_VTI,
-            TUNNEL_TYPE_IP6IP6, TUNNEL_TYPE_IP6GRE,
+            TUNNEL_TYPE_IPIP,
+            TUNNEL_TYPE_GRE,
+            TUNNEL_TYPE_SIT,
+            TUNNEL_TYPE_ISATAP,
+            TUNNEL_TYPE_VTI,
+            TUNNEL_TYPE_IP6IP6,
+            TUNNEL_TYPE_IP6GRE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -104,8 +108,10 @@ mod tests {
     #[test]
     fn test_tunnel_flags_no_overlap() {
         let flags = [
-            TUNNEL_FLAG_DF, TUNNEL_FLAG_TOS_INHERIT,
-            TUNNEL_FLAG_TTL_INHERIT, TUNNEL_FLAG_PMTUDISC,
+            TUNNEL_FLAG_DF,
+            TUNNEL_FLAG_TOS_INHERIT,
+            TUNNEL_FLAG_TTL_INHERIT,
+            TUNNEL_FLAG_PMTUDISC,
             TUNNEL_FLAG_IGNORE_DF,
         ];
         for i in 0..flags.len() {

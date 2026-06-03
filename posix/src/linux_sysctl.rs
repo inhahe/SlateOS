@@ -83,8 +83,7 @@ mod tests {
     #[test]
     fn test_top_level_distinct() {
         let cats = [
-            CTL_KERN, CTL_VM, CTL_NET, CTL_PROC,
-            CTL_FS, CTL_DEBUG, CTL_DEV,
+            CTL_KERN, CTL_VM, CTL_NET, CTL_PROC, CTL_FS, CTL_DEBUG, CTL_DEV,
         ];
         for i in 0..cats.len() {
             for j in (i + 1)..cats.len() {

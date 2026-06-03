@@ -95,10 +95,14 @@ mod tests {
     #[test]
     fn test_core_helpers_distinct() {
         let helpers = [
-            BPF_FUNC_UNSPEC, BPF_FUNC_MAP_LOOKUP_ELEM,
-            BPF_FUNC_MAP_UPDATE_ELEM, BPF_FUNC_MAP_DELETE_ELEM,
-            BPF_FUNC_GET_PRANDOM_U32, BPF_FUNC_KTIME_GET_NS,
-            BPF_FUNC_TRACE_PRINTK, BPF_FUNC_GET_SMP_PROCESSOR_ID,
+            BPF_FUNC_UNSPEC,
+            BPF_FUNC_MAP_LOOKUP_ELEM,
+            BPF_FUNC_MAP_UPDATE_ELEM,
+            BPF_FUNC_MAP_DELETE_ELEM,
+            BPF_FUNC_GET_PRANDOM_U32,
+            BPF_FUNC_KTIME_GET_NS,
+            BPF_FUNC_TRACE_PRINTK,
+            BPF_FUNC_GET_SMP_PROCESSOR_ID,
             BPF_FUNC_GET_CURRENT_PID_TGID,
             BPF_FUNC_GET_CURRENT_UID_GID,
             BPF_FUNC_GET_CURRENT_COMM,
@@ -113,8 +117,10 @@ mod tests {
     #[test]
     fn test_ringbuf_helpers_distinct() {
         let helpers = [
-            BPF_FUNC_RINGBUF_RESERVE, BPF_FUNC_RINGBUF_SUBMIT,
-            BPF_FUNC_RINGBUF_DISCARD, BPF_FUNC_RINGBUF_OUTPUT,
+            BPF_FUNC_RINGBUF_RESERVE,
+            BPF_FUNC_RINGBUF_SUBMIT,
+            BPF_FUNC_RINGBUF_DISCARD,
+            BPF_FUNC_RINGBUF_OUTPUT,
         ];
         for i in 0..helpers.len() {
             for j in (i + 1)..helpers.len() {
@@ -126,8 +132,10 @@ mod tests {
     #[test]
     fn test_probe_read_helpers_distinct() {
         let helpers = [
-            BPF_FUNC_PROBE_READ_USER, BPF_FUNC_PROBE_READ_KERNEL,
-            BPF_FUNC_PROBE_READ_USER_STR, BPF_FUNC_PROBE_READ_KERNEL_STR,
+            BPF_FUNC_PROBE_READ_USER,
+            BPF_FUNC_PROBE_READ_KERNEL,
+            BPF_FUNC_PROBE_READ_USER_STR,
+            BPF_FUNC_PROBE_READ_KERNEL_STR,
         ];
         for i in 0..helpers.len() {
             for j in (i + 1)..helpers.len() {

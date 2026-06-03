@@ -49,8 +49,13 @@ pub const AR_FMAG_SIZE: usize = 2;
 ///
 /// ar_name(16) + ar_date(12) + ar_uid(6) + ar_gid(6) + ar_mode(8)
 /// + ar_size(10) + ar_fmag(2) = 60 bytes.
-pub const AR_HDR_SIZE: usize = AR_NAME_SIZE + AR_DATE_SIZE + AR_UID_SIZE
-    + AR_GID_SIZE + AR_MODE_SIZE + AR_SIZE_SIZE + AR_FMAG_SIZE;
+pub const AR_HDR_SIZE: usize = AR_NAME_SIZE
+    + AR_DATE_SIZE
+    + AR_UID_SIZE
+    + AR_GID_SIZE
+    + AR_MODE_SIZE
+    + AR_SIZE_SIZE
+    + AR_FMAG_SIZE;
 
 /// Archive member header (struct ar_hdr).
 ///
@@ -125,8 +130,13 @@ mod tests {
 
     #[test]
     fn test_field_sizes_sum() {
-        let sum = AR_NAME_SIZE + AR_DATE_SIZE + AR_UID_SIZE
-            + AR_GID_SIZE + AR_MODE_SIZE + AR_SIZE_SIZE + AR_FMAG_SIZE;
+        let sum = AR_NAME_SIZE
+            + AR_DATE_SIZE
+            + AR_UID_SIZE
+            + AR_GID_SIZE
+            + AR_MODE_SIZE
+            + AR_SIZE_SIZE
+            + AR_FMAG_SIZE;
         assert_eq!(sum, AR_HDR_SIZE);
     }
 

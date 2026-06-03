@@ -75,8 +75,12 @@ mod tests {
     #[test]
     fn test_results_distinct() {
         let results = [
-            COMPACT_NOT_SUITABLE, COMPACT_SKIPPED, COMPACT_DEFERRED,
-            COMPACT_CONTINUE, COMPACT_SUCCESS, COMPACT_PARTIAL,
+            COMPACT_NOT_SUITABLE,
+            COMPACT_SKIPPED,
+            COMPACT_DEFERRED,
+            COMPACT_CONTINUE,
+            COMPACT_SUCCESS,
+            COMPACT_PARTIAL,
             COMPACT_NO_SUITABLE_PAGE,
         ];
         for i in 0..results.len() {
@@ -95,8 +99,11 @@ mod tests {
     #[test]
     fn test_migrate_types_distinct() {
         let types = [
-            MIGRATE_UNMOVABLE, MIGRATE_MOVABLE, MIGRATE_RECLAIMABLE,
-            MIGRATE_CMA, MIGRATE_ISOLATE,
+            MIGRATE_UNMOVABLE,
+            MIGRATE_MOVABLE,
+            MIGRATE_RECLAIMABLE,
+            MIGRATE_CMA,
+            MIGRATE_ISOLATE,
         ];
         assert_eq!(types.len(), MIGRATE_TYPES as usize);
         for i in 0..types.len() {

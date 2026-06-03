@@ -87,8 +87,11 @@ mod tests {
     #[test]
     fn test_encodings_distinct() {
         let encs = [
-            ENCODING_NRZ, ENCODING_NRZI, ENCODING_FM_MARK,
-            ENCODING_FM_SPACE, ENCODING_MANCHESTER,
+            ENCODING_NRZ,
+            ENCODING_NRZI,
+            ENCODING_FM_MARK,
+            ENCODING_FM_SPACE,
+            ENCODING_MANCHESTER,
         ];
         for i in 0..encs.len() {
             for j in (i + 1)..encs.len() {
@@ -100,8 +103,11 @@ mod tests {
     #[test]
     fn test_parities_distinct() {
         let pars = [
-            PARITY_DEFAULT, PARITY_CRC16_PR1, PARITY_CRC16_PR0,
-            PARITY_CRC32_PR1_CCITT, PARITY_CRC16_PR1_CCITT,
+            PARITY_DEFAULT,
+            PARITY_CRC16_PR1,
+            PARITY_CRC16_PR0,
+            PARITY_CRC32_PR1_CCITT,
+            PARITY_CRC16_PR1_CCITT,
             PARITY_NONE,
         ];
         for i in 0..pars.len() {
@@ -114,12 +120,19 @@ mod tests {
     #[test]
     fn test_protos_distinct() {
         let protos = [
-            IF_PROTO_HDLC, IF_PROTO_CISCO, IF_PROTO_FR,
-            IF_PROTO_FR_ADD_PVC, IF_PROTO_FR_DEL_PVC,
-            IF_PROTO_X25, IF_PROTO_HDLC_ETH,
-            IF_PROTO_FR_ADD_ETH_PVC, IF_PROTO_FR_DEL_ETH_PVC,
-            IF_PROTO_FR_PVC, IF_PROTO_FR_ETH_PVC,
-            IF_PROTO_PPP, IF_PROTO_RAW,
+            IF_PROTO_HDLC,
+            IF_PROTO_CISCO,
+            IF_PROTO_FR,
+            IF_PROTO_FR_ADD_PVC,
+            IF_PROTO_FR_DEL_PVC,
+            IF_PROTO_X25,
+            IF_PROTO_HDLC_ETH,
+            IF_PROTO_FR_ADD_ETH_PVC,
+            IF_PROTO_FR_DEL_ETH_PVC,
+            IF_PROTO_FR_PVC,
+            IF_PROTO_FR_ETH_PVC,
+            IF_PROTO_PPP,
+            IF_PROTO_RAW,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {

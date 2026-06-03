@@ -67,9 +67,14 @@ mod tests {
     #[test]
     fn test_sa_flags_distinct() {
         let flags = [
-            SA_NOCLDSTOP, SA_NOCLDWAIT, SA_SIGINFO,
-            SA_ONSTACK, SA_RESTART, SA_NODEFER,
-            SA_RESETHAND, SA_RESTORER,
+            SA_NOCLDSTOP,
+            SA_NOCLDWAIT,
+            SA_SIGINFO,
+            SA_ONSTACK,
+            SA_RESTART,
+            SA_NODEFER,
+            SA_RESETHAND,
+            SA_RESTORER,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

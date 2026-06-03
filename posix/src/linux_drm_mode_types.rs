@@ -77,9 +77,12 @@ mod tests {
     #[test]
     fn test_type_flags_power_of_two() {
         let flags = [
-            DRM_MODE_TYPE_BUILTIN, DRM_MODE_TYPE_CLOCK_C,
-            DRM_MODE_TYPE_PREFERRED, DRM_MODE_TYPE_DEFAULT,
-            DRM_MODE_TYPE_USERDEF, DRM_MODE_TYPE_DRIVER,
+            DRM_MODE_TYPE_BUILTIN,
+            DRM_MODE_TYPE_CLOCK_C,
+            DRM_MODE_TYPE_PREFERRED,
+            DRM_MODE_TYPE_DEFAULT,
+            DRM_MODE_TYPE_USERDEF,
+            DRM_MODE_TYPE_DRIVER,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -89,10 +92,14 @@ mod tests {
     #[test]
     fn test_mode_flags_power_of_two() {
         let flags = [
-            DRM_MODE_FLAG_PHSYNC, DRM_MODE_FLAG_NHSYNC,
-            DRM_MODE_FLAG_PVSYNC, DRM_MODE_FLAG_NVSYNC,
-            DRM_MODE_FLAG_INTERLACE, DRM_MODE_FLAG_DBLSCAN,
-            DRM_MODE_FLAG_CSYNC, DRM_MODE_FLAG_DBLCLK,
+            DRM_MODE_FLAG_PHSYNC,
+            DRM_MODE_FLAG_NHSYNC,
+            DRM_MODE_FLAG_PVSYNC,
+            DRM_MODE_FLAG_NVSYNC,
+            DRM_MODE_FLAG_INTERLACE,
+            DRM_MODE_FLAG_DBLSCAN,
+            DRM_MODE_FLAG_CSYNC,
+            DRM_MODE_FLAG_DBLCLK,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());

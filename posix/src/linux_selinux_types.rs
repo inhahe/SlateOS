@@ -90,7 +90,8 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            SELINUX_MODE_DISABLED, SELINUX_MODE_PERMISSIVE,
+            SELINUX_MODE_DISABLED,
+            SELINUX_MODE_PERMISSIVE,
             SELINUX_MODE_ENFORCING,
         ];
         for i in 0..modes.len() {
@@ -103,11 +104,17 @@ mod tests {
     #[test]
     fn test_classes_distinct() {
         let classes = [
-            SELINUX_CLASS_FILE, SELINUX_CLASS_DIR, SELINUX_CLASS_PROCESS,
-            SELINUX_CLASS_SOCKET, SELINUX_CLASS_TCP_SOCKET,
-            SELINUX_CLASS_UDP_SOCKET, SELINUX_CLASS_NODE,
-            SELINUX_CLASS_NETIF, SELINUX_CLASS_SHM,
-            SELINUX_CLASS_MSGQ, SELINUX_CLASS_SEM,
+            SELINUX_CLASS_FILE,
+            SELINUX_CLASS_DIR,
+            SELINUX_CLASS_PROCESS,
+            SELINUX_CLASS_SOCKET,
+            SELINUX_CLASS_TCP_SOCKET,
+            SELINUX_CLASS_UDP_SOCKET,
+            SELINUX_CLASS_NODE,
+            SELINUX_CLASS_NETIF,
+            SELINUX_CLASS_SHM,
+            SELINUX_CLASS_MSGQ,
+            SELINUX_CLASS_SEM,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
@@ -119,9 +126,14 @@ mod tests {
     #[test]
     fn test_av_bits_no_overlap() {
         let bits = [
-            SELINUX_AV_READ, SELINUX_AV_WRITE, SELINUX_AV_EXECUTE,
-            SELINUX_AV_CREATE, SELINUX_AV_UNLINK, SELINUX_AV_GETATTR,
-            SELINUX_AV_SETATTR, SELINUX_AV_APPEND,
+            SELINUX_AV_READ,
+            SELINUX_AV_WRITE,
+            SELINUX_AV_EXECUTE,
+            SELINUX_AV_CREATE,
+            SELINUX_AV_UNLINK,
+            SELINUX_AV_GETATTR,
+            SELINUX_AV_SETATTR,
+            SELINUX_AV_APPEND,
         ];
         for i in 0..bits.len() {
             assert!(bits[i].is_power_of_two());
@@ -134,8 +146,10 @@ mod tests {
     #[test]
     fn test_avc_stats_distinct() {
         let stats = [
-            SELINUX_AVC_HIT, SELINUX_AVC_MISS,
-            SELINUX_AVC_ADDED, SELINUX_AVC_EVICTED,
+            SELINUX_AVC_HIT,
+            SELINUX_AVC_MISS,
+            SELINUX_AVC_ADDED,
+            SELINUX_AVC_EVICTED,
         ];
         for i in 0..stats.len() {
             for j in (i + 1)..stats.len() {

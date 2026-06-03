@@ -77,9 +77,14 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            SCTP_ASSOCINFO, SCTP_INITMSG, SCTP_NODELAY,
-            SCTP_PEER_ADDR_PARAMS, SCTP_DEFAULT_SEND_PARAM,
-            SCTP_EVENTS, SCTP_MAXSEG, SCTP_ENABLE_STREAM_RESET,
+            SCTP_ASSOCINFO,
+            SCTP_INITMSG,
+            SCTP_NODELAY,
+            SCTP_PEER_ADDR_PARAMS,
+            SCTP_DEFAULT_SEND_PARAM,
+            SCTP_EVENTS,
+            SCTP_MAXSEG,
+            SCTP_ENABLE_STREAM_RESET,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -91,10 +96,14 @@ mod tests {
     #[test]
     fn test_notification_types_distinct() {
         let types = [
-            SCTP_ASSOC_CHANGE, SCTP_PEER_ADDR_CHANGE,
-            SCTP_SEND_FAILED, SCTP_REMOTE_ERROR,
-            SCTP_SHUTDOWN_EVENT, SCTP_PARTIAL_DELIVERY_EVENT,
-            SCTP_ADAPTATION_INDICATION, SCTP_STREAM_RESET_EVENT,
+            SCTP_ASSOC_CHANGE,
+            SCTP_PEER_ADDR_CHANGE,
+            SCTP_SEND_FAILED,
+            SCTP_REMOTE_ERROR,
+            SCTP_SHUTDOWN_EVENT,
+            SCTP_PARTIAL_DELIVERY_EVENT,
+            SCTP_ADAPTATION_INDICATION,
+            SCTP_STREAM_RESET_EVENT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -106,8 +115,11 @@ mod tests {
     #[test]
     fn test_assoc_states_distinct() {
         let states = [
-            SCTP_COMM_UP, SCTP_COMM_LOST, SCTP_RESTART,
-            SCTP_SHUTDOWN_COMP, SCTP_CANT_STR_ASSOC,
+            SCTP_COMM_UP,
+            SCTP_COMM_LOST,
+            SCTP_RESTART,
+            SCTP_SHUTDOWN_COMP,
+            SCTP_CANT_STR_ASSOC,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

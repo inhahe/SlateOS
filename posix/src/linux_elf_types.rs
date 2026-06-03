@@ -193,8 +193,16 @@ mod tests {
     #[test]
     fn test_phdr_types_distinct() {
         let types = [
-            PT_NULL, PT_LOAD, PT_DYNAMIC, PT_INTERP, PT_NOTE,
-            PT_SHLIB, PT_PHDR, PT_TLS, PT_GNU_STACK, PT_GNU_RELRO,
+            PT_NULL,
+            PT_LOAD,
+            PT_DYNAMIC,
+            PT_INTERP,
+            PT_NOTE,
+            PT_SHLIB,
+            PT_PHDR,
+            PT_TLS,
+            PT_GNU_STACK,
+            PT_GNU_RELRO,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -213,9 +221,17 @@ mod tests {
     #[test]
     fn test_section_types_distinct() {
         let types = [
-            SHT_NULL, SHT_PROGBITS, SHT_SYMTAB, SHT_STRTAB,
-            SHT_RELA, SHT_HASH, SHT_DYNAMIC, SHT_NOTE,
-            SHT_NOBITS, SHT_REL, SHT_DYNSYM,
+            SHT_NULL,
+            SHT_PROGBITS,
+            SHT_SYMTAB,
+            SHT_STRTAB,
+            SHT_RELA,
+            SHT_HASH,
+            SHT_DYNAMIC,
+            SHT_NOTE,
+            SHT_NOBITS,
+            SHT_REL,
+            SHT_DYNSYM,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

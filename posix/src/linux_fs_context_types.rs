@@ -67,7 +67,8 @@ mod tests {
     #[test]
     fn test_purpose_values_distinct() {
         let vals = [
-            FS_CONTEXT_FOR_MOUNT, FS_CONTEXT_FOR_SUBMOUNT,
+            FS_CONTEXT_FOR_MOUNT,
+            FS_CONTEXT_FOR_SUBMOUNT,
             FS_CONTEXT_FOR_RECONFIGURE,
         ];
         for i in 0..vals.len() {
@@ -80,9 +81,14 @@ mod tests {
     #[test]
     fn test_fsconfig_cmds_distinct() {
         let cmds = [
-            FSCONFIG_SET_FLAG, FSCONFIG_SET_STRING, FSCONFIG_SET_BINARY,
-            FSCONFIG_SET_PATH, FSCONFIG_SET_PATH_EMPTY, FSCONFIG_SET_FD,
-            FSCONFIG_CMD_CREATE, FSCONFIG_CMD_RECONFIGURE,
+            FSCONFIG_SET_FLAG,
+            FSCONFIG_SET_STRING,
+            FSCONFIG_SET_BINARY,
+            FSCONFIG_SET_PATH,
+            FSCONFIG_SET_PATH_EMPTY,
+            FSCONFIG_SET_FD,
+            FSCONFIG_CMD_CREATE,
+            FSCONFIG_CMD_RECONFIGURE,
             FSCONFIG_CMD_CREATE_EXCL,
         ];
         for i in 0..cmds.len() {
@@ -104,8 +110,10 @@ mod tests {
     #[test]
     fn test_phases_distinct() {
         let phases = [
-            FS_CONTEXT_PHASE_FREE, FS_CONTEXT_PHASE_CREATE,
-            FS_CONTEXT_PHASE_MOUNT, FS_CONTEXT_PHASE_RECONF,
+            FS_CONTEXT_PHASE_FREE,
+            FS_CONTEXT_PHASE_CREATE,
+            FS_CONTEXT_PHASE_MOUNT,
+            FS_CONTEXT_PHASE_RECONF,
             FS_CONTEXT_PHASE_FAILED,
         ];
         for i in 0..phases.len() {

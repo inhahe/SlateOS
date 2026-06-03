@@ -109,10 +109,21 @@ mod tests {
     #[test]
     fn test_ms_flags_distinct() {
         let flags = [
-            MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC,
-            MS_SYNCHRONOUS, MS_REMOUNT, MS_MANDLOCK, MS_DIRSYNC,
-            MS_NOSYMFOLLOW, MS_NOATIME, MS_NODIRATIME,
-            MS_BIND, MS_MOVE, MS_REC, MS_SILENT,
+            MS_RDONLY,
+            MS_NOSUID,
+            MS_NODEV,
+            MS_NOEXEC,
+            MS_SYNCHRONOUS,
+            MS_REMOUNT,
+            MS_MANDLOCK,
+            MS_DIRSYNC,
+            MS_NOSYMFOLLOW,
+            MS_NOATIME,
+            MS_NODIRATIME,
+            MS_BIND,
+            MS_MOVE,
+            MS_REC,
+            MS_SILENT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -134,9 +145,12 @@ mod tests {
     #[test]
     fn test_mount_attr_distinct() {
         let attrs = [
-            MOUNT_ATTR_RDONLY, MOUNT_ATTR_NOSUID,
-            MOUNT_ATTR_NODEV, MOUNT_ATTR_NOEXEC,
-            MOUNT_ATTR_NODIRATIME, MOUNT_ATTR_IDMAP,
+            MOUNT_ATTR_RDONLY,
+            MOUNT_ATTR_NOSUID,
+            MOUNT_ATTR_NODEV,
+            MOUNT_ATTR_NOEXEC,
+            MOUNT_ATTR_NODIRATIME,
+            MOUNT_ATTR_IDMAP,
             MOUNT_ATTR_NOSYMFOLLOW,
         ];
         for i in 0..attrs.len() {

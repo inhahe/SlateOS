@@ -119,12 +119,18 @@ mod tests {
     #[test]
     fn test_subsys_ids_distinct() {
         let ids = [
-            NFNL_SUBSYS_NONE, NFNL_SUBSYS_CTNETLINK,
-            NFNL_SUBSYS_CTNETLINK_EXP, NFNL_SUBSYS_QUEUE,
-            NFNL_SUBSYS_ULOG, NFNL_SUBSYS_OSF,
-            NFNL_SUBSYS_IPSET, NFNL_SUBSYS_ACCT,
-            NFNL_SUBSYS_CTNETLINK_TIMEOUT, NFNL_SUBSYS_CTHELPER,
-            NFNL_SUBSYS_NFTABLES, NFNL_SUBSYS_NFT_COMPAT,
+            NFNL_SUBSYS_NONE,
+            NFNL_SUBSYS_CTNETLINK,
+            NFNL_SUBSYS_CTNETLINK_EXP,
+            NFNL_SUBSYS_QUEUE,
+            NFNL_SUBSYS_ULOG,
+            NFNL_SUBSYS_OSF,
+            NFNL_SUBSYS_IPSET,
+            NFNL_SUBSYS_ACCT,
+            NFNL_SUBSYS_CTNETLINK_TIMEOUT,
+            NFNL_SUBSYS_CTHELPER,
+            NFNL_SUBSYS_NFTABLES,
+            NFNL_SUBSYS_NFT_COMPAT,
             NFNL_SUBSYS_HOOK,
         ];
         for i in 0..ids.len() {
@@ -142,8 +148,13 @@ mod tests {
     #[test]
     fn test_protocol_families_distinct() {
         let protos = [
-            NFPROTO_UNSPEC, NFPROTO_INET, NFPROTO_IPV4,
-            NFPROTO_ARP, NFPROTO_NETDEV, NFPROTO_BRIDGE, NFPROTO_IPV6,
+            NFPROTO_UNSPEC,
+            NFPROTO_INET,
+            NFPROTO_IPV4,
+            NFPROTO_ARP,
+            NFPROTO_NETDEV,
+            NFPROTO_BRIDGE,
+            NFPROTO_IPV6,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {

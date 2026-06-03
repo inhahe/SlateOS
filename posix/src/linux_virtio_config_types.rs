@@ -98,9 +98,12 @@ mod tests {
     #[test]
     fn test_status_bits_no_overlap() {
         let bits = [
-            VIRTIO_CONFIG_S_ACKNOWLEDGE, VIRTIO_CONFIG_S_DRIVER,
-            VIRTIO_CONFIG_S_DRIVER_OK, VIRTIO_CONFIG_S_FEATURES_OK,
-            VIRTIO_CONFIG_S_NEEDS_RESET, VIRTIO_CONFIG_S_FAILED,
+            VIRTIO_CONFIG_S_ACKNOWLEDGE,
+            VIRTIO_CONFIG_S_DRIVER,
+            VIRTIO_CONFIG_S_DRIVER_OK,
+            VIRTIO_CONFIG_S_FEATURES_OK,
+            VIRTIO_CONFIG_S_NEEDS_RESET,
+            VIRTIO_CONFIG_S_FAILED,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {
@@ -112,11 +115,22 @@ mod tests {
     #[test]
     fn test_device_ids_distinct() {
         let ids = [
-            VIRTIO_ID_NET, VIRTIO_ID_BLOCK, VIRTIO_ID_CONSOLE,
-            VIRTIO_ID_RNG, VIRTIO_ID_BALLOON, VIRTIO_ID_SCSI,
-            VIRTIO_ID_9P, VIRTIO_ID_GPU, VIRTIO_ID_INPUT,
-            VIRTIO_ID_VSOCK, VIRTIO_ID_CRYPTO, VIRTIO_ID_SOUND,
-            VIRTIO_ID_FS, VIRTIO_ID_PMEM, VIRTIO_ID_BT, VIRTIO_ID_GPIO,
+            VIRTIO_ID_NET,
+            VIRTIO_ID_BLOCK,
+            VIRTIO_ID_CONSOLE,
+            VIRTIO_ID_RNG,
+            VIRTIO_ID_BALLOON,
+            VIRTIO_ID_SCSI,
+            VIRTIO_ID_9P,
+            VIRTIO_ID_GPU,
+            VIRTIO_ID_INPUT,
+            VIRTIO_ID_VSOCK,
+            VIRTIO_ID_CRYPTO,
+            VIRTIO_ID_SOUND,
+            VIRTIO_ID_FS,
+            VIRTIO_ID_PMEM,
+            VIRTIO_ID_BT,
+            VIRTIO_ID_GPIO,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -128,11 +142,16 @@ mod tests {
     #[test]
     fn test_transport_features_distinct() {
         let feats = [
-            VIRTIO_F_INDIRECT_DESC, VIRTIO_F_EVENT_IDX,
-            VIRTIO_F_VERSION_1, VIRTIO_F_ACCESS_PLATFORM,
-            VIRTIO_F_RING_PACKED, VIRTIO_F_IN_ORDER,
-            VIRTIO_F_ORDER_PLATFORM, VIRTIO_F_SR_IOV,
-            VIRTIO_F_NOTIFICATION_DATA, VIRTIO_F_ADMIN_VQ,
+            VIRTIO_F_INDIRECT_DESC,
+            VIRTIO_F_EVENT_IDX,
+            VIRTIO_F_VERSION_1,
+            VIRTIO_F_ACCESS_PLATFORM,
+            VIRTIO_F_RING_PACKED,
+            VIRTIO_F_IN_ORDER,
+            VIRTIO_F_ORDER_PLATFORM,
+            VIRTIO_F_SR_IOV,
+            VIRTIO_F_NOTIFICATION_DATA,
+            VIRTIO_F_ADMIN_VQ,
         ];
         for i in 0..feats.len() {
             for j in (i + 1)..feats.len() {

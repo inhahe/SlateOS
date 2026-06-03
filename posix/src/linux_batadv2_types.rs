@@ -78,7 +78,11 @@ mod tests {
 
     #[test]
     fn test_gw_modes_distinct() {
-        let modes = [BATADV_GW_MODE_OFF, BATADV_GW_MODE_CLIENT, BATADV_GW_MODE_SERVER];
+        let modes = [
+            BATADV_GW_MODE_OFF,
+            BATADV_GW_MODE_CLIENT,
+            BATADV_GW_MODE_SERVER,
+        ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
                 assert_ne!(modes[i], modes[j]);
@@ -89,11 +93,18 @@ mod tests {
     #[test]
     fn test_packet_types_distinct() {
         let types = [
-            BATADV_OGM, BATADV_ICMP, BATADV_UNICAST,
-            BATADV_BCAST, BATADV_VIS, BATADV_UNICAST_FRAG,
-            BATADV_TT_QUERY, BATADV_ROAM_ADV,
-            BATADV_UNICAST_4ADDR, BATADV_CODED,
-            BATADV_ELP, BATADV_OGM2,
+            BATADV_OGM,
+            BATADV_ICMP,
+            BATADV_UNICAST,
+            BATADV_BCAST,
+            BATADV_VIS,
+            BATADV_UNICAST_FRAG,
+            BATADV_TT_QUERY,
+            BATADV_ROAM_ADV,
+            BATADV_UNICAST_4ADDR,
+            BATADV_CODED,
+            BATADV_ELP,
+            BATADV_OGM2,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -111,7 +122,11 @@ mod tests {
 
     #[test]
     fn test_tt_flags_no_overlap() {
-        let flags = [BATADV_TT_CHANGE_ADD, BATADV_TT_CHANGE_DEL, BATADV_TT_CHANGE_FULL];
+        let flags = [
+            BATADV_TT_CHANGE_ADD,
+            BATADV_TT_CHANGE_DEL,
+            BATADV_TT_CHANGE_FULL,
+        ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_eq!(flags[i] & flags[j], 0);

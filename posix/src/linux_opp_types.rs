@@ -86,9 +86,7 @@ mod tests {
 
     #[test]
     fn test_entry_flags_no_overlap() {
-        let flags = [
-            OPP_AVAILABLE, OPP_TURBO, OPP_DYNAMIC, OPP_SUSPENDED,
-        ];
+        let flags = [OPP_AVAILABLE, OPP_TURBO, OPP_DYNAMIC, OPP_SUSPENDED];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {
@@ -100,8 +98,10 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            OPP_EVENT_ADD, OPP_EVENT_REMOVE,
-            OPP_EVENT_ENABLE, OPP_EVENT_DISABLE,
+            OPP_EVENT_ADD,
+            OPP_EVENT_REMOVE,
+            OPP_EVENT_ENABLE,
+            OPP_EVENT_DISABLE,
             OPP_EVENT_ADJUST,
         ];
         for i in 0..events.len() {

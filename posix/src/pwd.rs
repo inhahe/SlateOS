@@ -139,7 +139,9 @@ pub extern "C" fn getpwuid(uid: UidT) -> *const Passwd {
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setpwent() {
     // SAFETY: Single-threaded access.
-    unsafe { core::ptr::addr_of_mut!(PW_POS).write(0); }
+    unsafe {
+        core::ptr::addr_of_mut!(PW_POS).write(0);
+    }
 }
 
 /// Read the next entry from the password database.
@@ -149,7 +151,9 @@ pub extern "C" fn setpwent() {
 pub extern "C" fn getpwent() -> *const Passwd {
     let pos = unsafe { *core::ptr::addr_of!(PW_POS) };
     if pos == 0 {
-        unsafe { core::ptr::addr_of_mut!(PW_POS).write(1); }
+        unsafe {
+            core::ptr::addr_of_mut!(PW_POS).write(1);
+        }
         return &raw const ROOT_PASSWD;
     }
     core::ptr::null()
@@ -158,7 +162,9 @@ pub extern "C" fn getpwent() -> *const Passwd {
 /// Close the password database.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn endpwent() {
-    unsafe { core::ptr::addr_of_mut!(PW_POS).write(0); }
+    unsafe {
+        core::ptr::addr_of_mut!(PW_POS).write(0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -192,7 +198,9 @@ pub extern "C" fn getgrgid(gid: GidT) -> *const Group {
 /// Rewind the group database.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn setgrent() {
-    unsafe { core::ptr::addr_of_mut!(GR_POS).write(0); }
+    unsafe {
+        core::ptr::addr_of_mut!(GR_POS).write(0);
+    }
 }
 
 /// Read the next entry from the group database.
@@ -200,7 +208,9 @@ pub extern "C" fn setgrent() {
 pub extern "C" fn getgrent() -> *const Group {
     let pos = unsafe { *core::ptr::addr_of!(GR_POS) };
     if pos == 0 {
-        unsafe { core::ptr::addr_of_mut!(GR_POS).write(1); }
+        unsafe {
+            core::ptr::addr_of_mut!(GR_POS).write(1);
+        }
         return &raw const ROOT_GROUP;
     }
     core::ptr::null()
@@ -209,7 +219,9 @@ pub extern "C" fn getgrent() -> *const Group {
 /// Close the group database.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub extern "C" fn endgrent() {
-    unsafe { core::ptr::addr_of_mut!(GR_POS).write(0); }
+    unsafe {
+        core::ptr::addr_of_mut!(GR_POS).write(0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -242,14 +254,20 @@ pub extern "C" fn getgrouplist(
     let needed = 1;
 
     if max < needed {
-        unsafe { *ngroups = needed; }
+        unsafe {
+            *ngroups = needed;
+        }
         return -1;
     }
 
     if !groups.is_null() {
-        unsafe { *groups = group; }
+        unsafe {
+            *groups = group;
+        }
     }
-    unsafe { *ngroups = needed; }
+    unsafe {
+        *ngroups = needed;
+    }
     needed
 }
 
@@ -289,7 +307,9 @@ pub unsafe extern "C" fn getpwnam_r(
     }
 
     // Default: not found.
-    unsafe { *result = core::ptr::null(); }
+    unsafe {
+        *result = core::ptr::null();
+    }
 
     if name.is_null() {
         return 0;
@@ -318,7 +338,9 @@ pub unsafe extern "C" fn getpwuid_r(
         return crate::errno::EFAULT;
     }
 
-    unsafe { *result = core::ptr::null(); }
+    unsafe {
+        *result = core::ptr::null();
+    }
 
     if uid == 0 {
         return fill_passwd_r(pwd, buf, buflen, result);
@@ -340,7 +362,9 @@ pub unsafe extern "C" fn getgrnam_r(
         return crate::errno::EFAULT;
     }
 
-    unsafe { *result = core::ptr::null(); }
+    unsafe {
+        *result = core::ptr::null();
+    }
 
     if name.is_null() {
         return 0;
@@ -367,7 +391,9 @@ pub unsafe extern "C" fn getgrgid_r(
         return crate::errno::EFAULT;
     }
 
-    unsafe { *result = core::ptr::null(); }
+    unsafe {
+        *result = core::ptr::null();
+    }
 
     if gid == 0 {
         return fill_group_r(grp, buf, buflen, result);
@@ -379,12 +405,7 @@ pub unsafe extern "C" fn getgrgid_r(
 /// Fill in a Passwd struct with root user data, copying strings into `buf`.
 ///
 /// String layout in buf: "root\0x\0root\0/\0/bin/sh\0" = 24 bytes.
-fn fill_passwd_r(
-    pwd: *mut Passwd,
-    buf: *mut u8,
-    buflen: usize,
-    result: *mut *const Passwd,
-) -> i32 {
+fn fill_passwd_r(pwd: *mut Passwd, buf: *mut u8, buflen: usize, result: *mut *const Passwd) -> i32 {
     // Strings: "root\0" (5) + "x\0" (2) + "root\0" (5) + "/\0" (2) + "/bin/sh\0" (8) = 22
     const NEEDED: usize = 22;
     if buflen < NEEDED {
@@ -398,20 +419,22 @@ fn fill_passwd_r(
         // SAFETY: i < NEEDED <= buflen, buf is valid.  i < NEEDED = 22
         // which is less than the byte-string length.
         let byte = strings.get(i).copied().unwrap_or(0);
-        unsafe { *buf.add(i) = byte; }
+        unsafe {
+            *buf.add(i) = byte;
+        }
         i = i.wrapping_add(1);
     }
 
     // Fill the struct with pointers into buf.
     // SAFETY: pwd is non-null (checked by caller).
     unsafe {
-        (*pwd).pw_name = buf;                     // "root" at offset 0
-        (*pwd).pw_passwd = buf.add(5);            // "x" at offset 5
+        (*pwd).pw_name = buf; // "root" at offset 0
+        (*pwd).pw_passwd = buf.add(5); // "x" at offset 5
         (*pwd).pw_uid = 0;
         (*pwd).pw_gid = 0;
-        (*pwd).pw_gecos = buf.add(7);             // "root" at offset 7
-        (*pwd).pw_dir = buf.add(12);              // "/" at offset 12
-        (*pwd).pw_shell = buf.add(14);            // "/bin/sh" at offset 14
+        (*pwd).pw_gecos = buf.add(7); // "root" at offset 7
+        (*pwd).pw_dir = buf.add(12); // "/" at offset 12
+        (*pwd).pw_shell = buf.add(14); // "/bin/sh" at offset 14
         *result = pwd;
     }
 
@@ -421,12 +444,7 @@ fn fill_passwd_r(
 /// Fill in a Group struct with root group data, copying strings into `buf`.
 ///
 /// String layout: "root\0x\0" + null pointer for gr_mem = 7 + 8 = 15 bytes.
-fn fill_group_r(
-    grp: *mut Group,
-    buf: *mut u8,
-    buflen: usize,
-    result: *mut *const Group,
-) -> i32 {
+fn fill_group_r(grp: *mut Group, buf: *mut u8, buflen: usize, result: *mut *const Group) -> i32 {
     // Strings: "root\0" (5) + "x\0" (2) = 7 bytes for strings.
     // Plus 8 bytes for a null pointer (gr_mem entry), aligned to 8 bytes.
     // We need strings + alignment padding + one null pointer.
@@ -445,7 +463,9 @@ fn fill_group_r(
     let mut i: usize = 0;
     while i < STR_BYTES {
         let byte = strings.get(i).copied().unwrap_or(0);
-        unsafe { *buf.add(i) = byte; }
+        unsafe {
+            *buf.add(i) = byte;
+        }
         i = i.wrapping_add(1);
     }
 
@@ -453,13 +473,15 @@ fn fill_group_r(
     // Zero the padding and pointer bytes.
     i = STR_BYTES;
     while i < NEEDED {
-        unsafe { *buf.add(i) = 0; }
+        unsafe {
+            *buf.add(i) = 0;
+        }
         i = i.wrapping_add(1);
     }
 
     unsafe {
-        (*grp).gr_name = buf;                     // "root" at offset 0
-        (*grp).gr_passwd = buf.add(5);            // "x" at offset 5
+        (*grp).gr_name = buf; // "root" at offset 0
+        (*grp).gr_passwd = buf.add(5); // "x" at offset 5
         (*grp).gr_gid = 0;
         // gr_mem points to the null pointer we wrote at PTR_START.
         // SAFETY: buf is from caller's buffer; at PTR_START it's 8-byte
@@ -467,7 +489,9 @@ fn fill_group_r(
         // a caller-allocated buffer.  We wrote all-zeroes at that offset,
         // forming a valid null pointer for gr_mem's array.
         #[allow(clippy::cast_ptr_alignment)]
-        { (*grp).gr_mem = buf.add(PTR_START).cast::<*const u8>(); }
+        {
+            (*grp).gr_mem = buf.add(PTR_START).cast::<*const u8>();
+        }
         *result = grp;
     }
 
@@ -502,7 +526,9 @@ pub extern "C" fn getlogin_r(buf: *mut u8, bufsize: usize) -> i32 {
     while i < 5 {
         if let Some(&b) = name.get(i) {
             // SAFETY: i < 5 <= bufsize.
-            unsafe { *buf.add(i) = b; }
+            unsafe {
+                *buf.add(i) = b;
+            }
         }
         i = i.wrapping_add(1);
     }
@@ -516,9 +542,7 @@ pub extern "C" fn getlogin_r(buf: *mut u8, bufsize: usize) -> i32 {
 
 /// Check if a 4-byte string is "root".
 fn matches_root(s: *const u8) -> bool {
-    unsafe {
-        *s == b'r' && *s.add(1) == b'o' && *s.add(2) == b'o' && *s.add(3) == b't'
-    }
+    unsafe { *s == b'r' && *s.add(1) == b'o' && *s.add(2) == b'o' && *s.add(3) == b't' }
 }
 
 // ---------------------------------------------------------------------------
@@ -857,9 +881,7 @@ mod tests {
         let mut buf = [0u8; 128];
         let mut result: *const Passwd = core::ptr::null();
 
-        let ret = unsafe {
-            getpwuid_r(0, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result)
-        };
+        let ret = unsafe { getpwuid_r(0, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
 
         assert_eq!(ret, 0);
         assert!(!result.is_null());
@@ -874,9 +896,7 @@ mod tests {
         let mut buf = [0u8; 128];
         let mut result: *const Passwd = core::ptr::null();
 
-        let ret = unsafe {
-            getpwuid_r(999, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result)
-        };
+        let ret = unsafe { getpwuid_r(999, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
 
         assert_eq!(ret, 0);
         assert!(result.is_null());
@@ -889,9 +909,7 @@ mod tests {
         let mut buf = [0u8; 2];
         let mut result: *const Passwd = core::ptr::null();
 
-        let ret = unsafe {
-            getpwuid_r(0, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result)
-        };
+        let ret = unsafe { getpwuid_r(0, &mut pwd, buf.as_mut_ptr(), buf.len(), &mut result) };
 
         assert_eq!(ret, errno::ERANGE);
         assert!(result.is_null());
@@ -958,9 +976,7 @@ mod tests {
         let mut buf = [0u8; 128];
         let mut result: *const Group = core::ptr::null();
 
-        let ret = unsafe {
-            getgrgid_r(0, &mut grp, buf.as_mut_ptr(), buf.len(), &mut result)
-        };
+        let ret = unsafe { getgrgid_r(0, &mut grp, buf.as_mut_ptr(), buf.len(), &mut result) };
 
         assert_eq!(ret, 0);
         assert!(!result.is_null());
@@ -974,9 +990,7 @@ mod tests {
         let mut buf = [0u8; 2];
         let mut result: *const Group = core::ptr::null();
 
-        let ret = unsafe {
-            getgrgid_r(0, &mut grp, buf.as_mut_ptr(), buf.len(), &mut result)
-        };
+        let ret = unsafe { getgrgid_r(0, &mut grp, buf.as_mut_ptr(), buf.len(), &mut result) };
 
         assert_eq!(ret, errno::ERANGE);
         assert!(result.is_null());
@@ -1169,12 +1183,7 @@ mod tests {
     #[test]
     fn test_getgrouplist_buffer_too_small() {
         let mut ngroups: i32 = 0;
-        let ret = getgrouplist(
-            b"root\0".as_ptr(),
-            0,
-            core::ptr::null_mut(),
-            &mut ngroups,
-        );
+        let ret = getgrouplist(b"root\0".as_ptr(), 0, core::ptr::null_mut(), &mut ngroups);
         assert_eq!(ret, -1);
         assert_eq!(ngroups, 1);
     }

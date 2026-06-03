@@ -113,10 +113,20 @@ mod tests {
     #[test]
     fn test_madv_flags_distinct() {
         let flags = [
-            MADV_FREE, MADV_REMOVE, MADV_DONTFORK, MADV_DOFORK,
-            MADV_MERGEABLE, MADV_UNMERGEABLE, MADV_HUGEPAGE,
-            MADV_NOHUGEPAGE, MADV_DONTDUMP, MADV_DODUMP,
-            MADV_WIPEONFORK, MADV_KEEPONFORK, MADV_COLD, MADV_PAGEOUT,
+            MADV_FREE,
+            MADV_REMOVE,
+            MADV_DONTFORK,
+            MADV_DOFORK,
+            MADV_MERGEABLE,
+            MADV_UNMERGEABLE,
+            MADV_HUGEPAGE,
+            MADV_NOHUGEPAGE,
+            MADV_DONTDUMP,
+            MADV_DODUMP,
+            MADV_WIPEONFORK,
+            MADV_KEEPONFORK,
+            MADV_COLD,
+            MADV_PAGEOUT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -136,10 +146,7 @@ mod tests {
     fn test_mremap_flags_powers_of_two() {
         let flags = [MREMAP_MAYMOVE, MREMAP_FIXED, MREMAP_DONTUNMAP];
         for &f in &flags {
-            assert!(
-                f.count_ones() == 1,
-                "MREMAP flag {f} should be power of 2"
-            );
+            assert!(f.count_ones() == 1, "MREMAP flag {f} should be power of 2");
         }
     }
 

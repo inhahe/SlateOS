@@ -81,8 +81,10 @@ mod tests {
     #[test]
     fn test_port_states_distinct() {
         let states = [
-            BR_STATE_DISABLED, BR_STATE_LISTENING,
-            BR_STATE_LEARNING, BR_STATE_FORWARDING,
+            BR_STATE_DISABLED,
+            BR_STATE_LISTENING,
+            BR_STATE_LEARNING,
+            BR_STATE_FORWARDING,
             BR_STATE_BLOCKING,
         ];
         for i in 0..states.len() {
@@ -95,11 +97,22 @@ mod tests {
     #[test]
     fn test_bridge_flags_power_of_two() {
         let flags = [
-            BR_HAIRPIN_MODE, BR_BPDU_GUARD, BR_ROOT_BLOCK,
-            BR_MULTICAST_FAST_LEAVE, BR_ADMIN_COST, BR_LEARNING,
-            BR_FLOOD, BR_AUTO_MASK, BR_PROXYARP, BR_LEARNING_SYNC,
-            BR_PROXYARP_WIFI, BR_MCAST_FLOOD, BR_BCAST_FLOOD,
-            BR_NEIGH_SUPPRESS, BR_ISOLATED, BR_MRP_AWARE,
+            BR_HAIRPIN_MODE,
+            BR_BPDU_GUARD,
+            BR_ROOT_BLOCK,
+            BR_MULTICAST_FAST_LEAVE,
+            BR_ADMIN_COST,
+            BR_LEARNING,
+            BR_FLOOD,
+            BR_AUTO_MASK,
+            BR_PROXYARP,
+            BR_LEARNING_SYNC,
+            BR_PROXYARP_WIFI,
+            BR_MCAST_FLOOD,
+            BR_BCAST_FLOOD,
+            BR_NEIGH_SUPPRESS,
+            BR_ISOLATED,
+            BR_MRP_AWARE,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
@@ -109,11 +122,22 @@ mod tests {
     #[test]
     fn test_bridge_flags_no_overlap() {
         let flags = [
-            BR_HAIRPIN_MODE, BR_BPDU_GUARD, BR_ROOT_BLOCK,
-            BR_MULTICAST_FAST_LEAVE, BR_ADMIN_COST, BR_LEARNING,
-            BR_FLOOD, BR_AUTO_MASK, BR_PROXYARP, BR_LEARNING_SYNC,
-            BR_PROXYARP_WIFI, BR_MCAST_FLOOD, BR_BCAST_FLOOD,
-            BR_NEIGH_SUPPRESS, BR_ISOLATED, BR_MRP_AWARE,
+            BR_HAIRPIN_MODE,
+            BR_BPDU_GUARD,
+            BR_ROOT_BLOCK,
+            BR_MULTICAST_FAST_LEAVE,
+            BR_ADMIN_COST,
+            BR_LEARNING,
+            BR_FLOOD,
+            BR_AUTO_MASK,
+            BR_PROXYARP,
+            BR_LEARNING_SYNC,
+            BR_PROXYARP_WIFI,
+            BR_MCAST_FLOOD,
+            BR_BCAST_FLOOD,
+            BR_NEIGH_SUPPRESS,
+            BR_ISOLATED,
+            BR_MRP_AWARE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -125,8 +149,10 @@ mod tests {
     #[test]
     fn test_vlan_flags_power_of_two() {
         let flags = [
-            BRIDGE_VLAN_INFO_PVID, BRIDGE_VLAN_INFO_UNTAGGED,
-            BRIDGE_VLAN_INFO_RANGE_BEGIN, BRIDGE_VLAN_INFO_RANGE_END,
+            BRIDGE_VLAN_INFO_PVID,
+            BRIDGE_VLAN_INFO_UNTAGGED,
+            BRIDGE_VLAN_INFO_RANGE_BEGIN,
+            BRIDGE_VLAN_INFO_RANGE_END,
             BRIDGE_VLAN_INFO_BRENTRY,
         ];
         for f in &flags {
@@ -137,8 +163,10 @@ mod tests {
     #[test]
     fn test_vlan_flags_no_overlap() {
         let flags = [
-            BRIDGE_VLAN_INFO_PVID, BRIDGE_VLAN_INFO_UNTAGGED,
-            BRIDGE_VLAN_INFO_RANGE_BEGIN, BRIDGE_VLAN_INFO_RANGE_END,
+            BRIDGE_VLAN_INFO_PVID,
+            BRIDGE_VLAN_INFO_UNTAGGED,
+            BRIDGE_VLAN_INFO_RANGE_BEGIN,
+            BRIDGE_VLAN_INFO_RANGE_END,
             BRIDGE_VLAN_INFO_BRENTRY,
         ];
         for i in 0..flags.len() {

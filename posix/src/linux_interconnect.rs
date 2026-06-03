@@ -71,8 +71,10 @@ mod tests {
     #[test]
     fn test_bw_units_distinct() {
         let units = [
-            ICC_BW_UNIT_BPS, ICC_BW_UNIT_KBPS,
-            ICC_BW_UNIT_MBPS, ICC_BW_UNIT_GBPS,
+            ICC_BW_UNIT_BPS,
+            ICC_BW_UNIT_KBPS,
+            ICC_BW_UNIT_MBPS,
+            ICC_BW_UNIT_GBPS,
         ];
         for i in 0..units.len() {
             for j in (i + 1)..units.len() {
@@ -89,8 +91,11 @@ mod tests {
     #[test]
     fn test_tag_bits_powers_of_two() {
         let tags = [
-            ICC_TAG_AVG, ICC_TAG_PEAK, ICC_TAG_ACTIVE_ONLY,
-            ICC_TAG_WAKE, ICC_TAG_SLEEP,
+            ICC_TAG_AVG,
+            ICC_TAG_PEAK,
+            ICC_TAG_ACTIVE_ONLY,
+            ICC_TAG_WAKE,
+            ICC_TAG_SLEEP,
         ];
         for tag in &tags {
             assert!(tag.is_power_of_two(), "0x{:x}", tag);
@@ -100,8 +105,11 @@ mod tests {
     #[test]
     fn test_tag_bits_no_overlap() {
         let tags = [
-            ICC_TAG_AVG, ICC_TAG_PEAK, ICC_TAG_ACTIVE_ONLY,
-            ICC_TAG_WAKE, ICC_TAG_SLEEP,
+            ICC_TAG_AVG,
+            ICC_TAG_PEAK,
+            ICC_TAG_ACTIVE_ONLY,
+            ICC_TAG_WAKE,
+            ICC_TAG_SLEEP,
         ];
         for i in 0..tags.len() {
             for j in (i + 1)..tags.len() {

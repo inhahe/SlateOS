@@ -107,8 +107,12 @@ mod tests {
     #[test]
     fn test_type_names_distinct() {
         let types = [
-            KEY_TYPE_USER, KEY_TYPE_LOGON, KEY_TYPE_KEYRING,
-            KEY_TYPE_BIG_KEY, KEY_TYPE_ENCRYPTED, KEY_TYPE_TRUSTED,
+            KEY_TYPE_USER,
+            KEY_TYPE_LOGON,
+            KEY_TYPE_KEYRING,
+            KEY_TYPE_BIG_KEY,
+            KEY_TYPE_ENCRYPTED,
+            KEY_TYPE_TRUSTED,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -120,9 +124,12 @@ mod tests {
     #[test]
     fn test_special_keyring_ids_distinct() {
         let ids = [
-            KEY_SPEC_THREAD_KEYRING, KEY_SPEC_PROCESS_KEYRING,
-            KEY_SPEC_SESSION_KEYRING, KEY_SPEC_USER_KEYRING,
-            KEY_SPEC_USER_SESSION_KEYRING, KEY_SPEC_GROUP_KEYRING,
+            KEY_SPEC_THREAD_KEYRING,
+            KEY_SPEC_PROCESS_KEYRING,
+            KEY_SPEC_SESSION_KEYRING,
+            KEY_SPEC_USER_KEYRING,
+            KEY_SPEC_USER_SESSION_KEYRING,
+            KEY_SPEC_GROUP_KEYRING,
             KEY_SPEC_REQKEY_AUTH_KEY,
         ];
         for i in 0..ids.len() {
@@ -136,12 +143,21 @@ mod tests {
     #[test]
     fn test_keyctl_commands_distinct() {
         let cmds = [
-            KEYCTL_GET_KEYRING_ID, KEYCTL_JOIN_SESSION_KEYRING,
-            KEYCTL_UPDATE, KEYCTL_REVOKE, KEYCTL_SETPERM,
-            KEYCTL_DESCRIBE, KEYCTL_CLEAR, KEYCTL_LINK,
-            KEYCTL_UNLINK, KEYCTL_SEARCH, KEYCTL_READ,
-            KEYCTL_INSTANTIATE, KEYCTL_SET_TIMEOUT,
-            KEYCTL_INVALIDATE, KEYCTL_RESTRICT_KEYRING,
+            KEYCTL_GET_KEYRING_ID,
+            KEYCTL_JOIN_SESSION_KEYRING,
+            KEYCTL_UPDATE,
+            KEYCTL_REVOKE,
+            KEYCTL_SETPERM,
+            KEYCTL_DESCRIBE,
+            KEYCTL_CLEAR,
+            KEYCTL_LINK,
+            KEYCTL_UNLINK,
+            KEYCTL_SEARCH,
+            KEYCTL_READ,
+            KEYCTL_INSTANTIATE,
+            KEYCTL_SET_TIMEOUT,
+            KEYCTL_INVALIDATE,
+            KEYCTL_RESTRICT_KEYRING,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -153,8 +169,12 @@ mod tests {
     #[test]
     fn test_pos_permissions_no_overlap() {
         let perms = [
-            KEY_POS_VIEW, KEY_POS_READ, KEY_POS_WRITE,
-            KEY_POS_SEARCH, KEY_POS_LINK, KEY_POS_SETATTR,
+            KEY_POS_VIEW,
+            KEY_POS_READ,
+            KEY_POS_WRITE,
+            KEY_POS_SEARCH,
+            KEY_POS_LINK,
+            KEY_POS_SETATTR,
         ];
         for i in 0..perms.len() {
             assert!(perms[i].is_power_of_two());
@@ -166,8 +186,12 @@ mod tests {
 
     #[test]
     fn test_pos_all_combines() {
-        let combined = KEY_POS_VIEW | KEY_POS_READ | KEY_POS_WRITE
-            | KEY_POS_SEARCH | KEY_POS_LINK | KEY_POS_SETATTR;
+        let combined = KEY_POS_VIEW
+            | KEY_POS_READ
+            | KEY_POS_WRITE
+            | KEY_POS_SEARCH
+            | KEY_POS_LINK
+            | KEY_POS_SETATTR;
         assert_eq!(KEY_POS_ALL, combined);
     }
 }

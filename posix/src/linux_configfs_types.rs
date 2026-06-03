@@ -57,8 +57,10 @@ mod tests {
     #[test]
     fn test_item_types_distinct() {
         let types = [
-            CONFIGFS_ITEM_ATTR, CONFIGFS_ITEM_GROUP,
-            CONFIGFS_ITEM_DEFAULT_GROUP, CONFIGFS_ITEM_BIN_ATTR,
+            CONFIGFS_ITEM_ATTR,
+            CONFIGFS_ITEM_GROUP,
+            CONFIGFS_ITEM_DEFAULT_GROUP,
+            CONFIGFS_ITEM_BIN_ATTR,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

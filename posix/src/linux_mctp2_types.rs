@@ -77,12 +77,17 @@ mod tests {
     #[test]
     fn test_msg_types_distinct() {
         let types = [
-            MCTP_MSG_TYPE_CONTROL, MCTP_MSG_TYPE_PLDM,
-            MCTP_MSG_TYPE_NCSI, MCTP_MSG_TYPE_ETHERNET,
-            MCTP_MSG_TYPE_NVME_MI, MCTP_MSG_TYPE_SPDM,
-            MCTP_MSG_TYPE_SECURED, MCTP_MSG_TYPE_CXL_FM,
+            MCTP_MSG_TYPE_CONTROL,
+            MCTP_MSG_TYPE_PLDM,
+            MCTP_MSG_TYPE_NCSI,
+            MCTP_MSG_TYPE_ETHERNET,
+            MCTP_MSG_TYPE_NVME_MI,
+            MCTP_MSG_TYPE_SPDM,
+            MCTP_MSG_TYPE_SECURED,
+            MCTP_MSG_TYPE_CXL_FM,
             MCTP_MSG_TYPE_CXL_CCI,
-            MCTP_MSG_TYPE_VENDOR_PCI, MCTP_MSG_TYPE_VENDOR_IANA,
+            MCTP_MSG_TYPE_VENDOR_PCI,
+            MCTP_MSG_TYPE_VENDOR_IANA,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

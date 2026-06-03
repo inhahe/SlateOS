@@ -69,7 +69,12 @@ mod tests {
 
     #[test]
     fn test_ns_cmds_distinct() {
-        let cmds = [NS_GET_MNTNS_ID, NS_GET_PARENT, NS_GET_NSTYPE, NS_GET_OWNER_UID];
+        let cmds = [
+            NS_GET_MNTNS_ID,
+            NS_GET_PARENT,
+            NS_GET_NSTYPE,
+            NS_GET_OWNER_UID,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);

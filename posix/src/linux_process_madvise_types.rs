@@ -45,9 +45,14 @@ mod tests {
     #[test]
     fn test_madv_values_distinct() {
         let behaviors = [
-            MADV_WILLNEED, MADV_DONTNEED, MADV_COLD,
-            MADV_PAGEOUT, MADV_FREE, MADV_COLLAPSE,
-            MADV_HWPOISON, MADV_SOFT_OFFLINE,
+            MADV_WILLNEED,
+            MADV_DONTNEED,
+            MADV_COLD,
+            MADV_PAGEOUT,
+            MADV_FREE,
+            MADV_COLLAPSE,
+            MADV_HWPOISON,
+            MADV_SOFT_OFFLINE,
         ];
         for i in 0..behaviors.len() {
             for j in (i + 1)..behaviors.len() {

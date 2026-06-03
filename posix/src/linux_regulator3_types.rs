@@ -75,8 +75,10 @@ mod tests {
     #[test]
     fn test_modes_no_overlap() {
         let modes = [
-            REGULATOR_MODE_FAST, REGULATOR_MODE_NORMAL,
-            REGULATOR_MODE_IDLE, REGULATOR_MODE_STANDBY,
+            REGULATOR_MODE_FAST,
+            REGULATOR_MODE_NORMAL,
+            REGULATOR_MODE_IDLE,
+            REGULATOR_MODE_STANDBY,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -88,11 +90,16 @@ mod tests {
     #[test]
     fn test_events_no_overlap() {
         let events = [
-            REGULATOR_EVENT_VOLTAGE_CHANGE, REGULATOR_EVENT_UNDER_VOLTAGE,
-            REGULATOR_EVENT_OVER_CURRENT, REGULATOR_EVENT_REGULATION_OUT,
-            REGULATOR_EVENT_OVER_TEMP, REGULATOR_EVENT_FORCE_DISABLE,
-            REGULATOR_EVENT_DISABLE, REGULATOR_EVENT_ENABLE,
-            REGULATOR_EVENT_PRE_DISABLE, REGULATOR_EVENT_ABORT_DISABLE,
+            REGULATOR_EVENT_VOLTAGE_CHANGE,
+            REGULATOR_EVENT_UNDER_VOLTAGE,
+            REGULATOR_EVENT_OVER_CURRENT,
+            REGULATOR_EVENT_REGULATION_OUT,
+            REGULATOR_EVENT_OVER_TEMP,
+            REGULATOR_EVENT_FORCE_DISABLE,
+            REGULATOR_EVENT_DISABLE,
+            REGULATOR_EVENT_ENABLE,
+            REGULATOR_EVENT_PRE_DISABLE,
+            REGULATOR_EVENT_ABORT_DISABLE,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -104,10 +111,14 @@ mod tests {
     #[test]
     fn test_status_values_distinct() {
         let statuses = [
-            REGULATOR_STATUS_OFF, REGULATOR_STATUS_ON,
-            REGULATOR_STATUS_ERROR, REGULATOR_STATUS_FAST,
-            REGULATOR_STATUS_NORMAL, REGULATOR_STATUS_IDLE,
-            REGULATOR_STATUS_STANDBY, REGULATOR_STATUS_BYPASS,
+            REGULATOR_STATUS_OFF,
+            REGULATOR_STATUS_ON,
+            REGULATOR_STATUS_ERROR,
+            REGULATOR_STATUS_FAST,
+            REGULATOR_STATUS_NORMAL,
+            REGULATOR_STATUS_IDLE,
+            REGULATOR_STATUS_STANDBY,
+            REGULATOR_STATUS_BYPASS,
             REGULATOR_STATUS_UNDEFINED,
         ];
         for i in 0..statuses.len() {

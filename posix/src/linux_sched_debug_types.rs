@@ -73,8 +73,10 @@ mod tests {
     #[test]
     fn test_schedstat_fields_distinct() {
         let fields = [
-            SCHEDSTAT_RUN_COUNT, SCHEDSTAT_RUN_TIME,
-            SCHEDSTAT_WAIT_TIME, SCHEDSTAT_TIMESLICES,
+            SCHEDSTAT_RUN_COUNT,
+            SCHEDSTAT_RUN_TIME,
+            SCHEDSTAT_WAIT_TIME,
+            SCHEDSTAT_TIMESLICES,
         ];
         for i in 0..fields.len() {
             for j in (i + 1)..fields.len() {
@@ -91,10 +93,18 @@ mod tests {
     #[test]
     fn test_sd_flags_power_of_two() {
         let flags = [
-            SD_LOAD_BALANCE, SD_BALANCE_NEWIDLE, SD_BALANCE_EXEC,
-            SD_BALANCE_FORK, SD_BALANCE_WAKE, SD_WAKE_AFFINE,
-            SD_PREFER_LOCAL, SD_SHARE_CPUCAPACITY, SD_SHARE_POWERDOMAIN,
-            SD_SHARE_PKG_RESOURCES, SD_SERIALIZE, SD_PREFER_SIBLING,
+            SD_LOAD_BALANCE,
+            SD_BALANCE_NEWIDLE,
+            SD_BALANCE_EXEC,
+            SD_BALANCE_FORK,
+            SD_BALANCE_WAKE,
+            SD_WAKE_AFFINE,
+            SD_PREFER_LOCAL,
+            SD_SHARE_CPUCAPACITY,
+            SD_SHARE_POWERDOMAIN,
+            SD_SHARE_PKG_RESOURCES,
+            SD_SERIALIZE,
+            SD_PREFER_SIBLING,
             SD_NUMA,
         ];
         for f in &flags {
@@ -105,10 +115,18 @@ mod tests {
     #[test]
     fn test_sd_flags_no_overlap() {
         let flags = [
-            SD_LOAD_BALANCE, SD_BALANCE_NEWIDLE, SD_BALANCE_EXEC,
-            SD_BALANCE_FORK, SD_BALANCE_WAKE, SD_WAKE_AFFINE,
-            SD_PREFER_LOCAL, SD_SHARE_CPUCAPACITY, SD_SHARE_POWERDOMAIN,
-            SD_SHARE_PKG_RESOURCES, SD_SERIALIZE, SD_PREFER_SIBLING,
+            SD_LOAD_BALANCE,
+            SD_BALANCE_NEWIDLE,
+            SD_BALANCE_EXEC,
+            SD_BALANCE_FORK,
+            SD_BALANCE_WAKE,
+            SD_WAKE_AFFINE,
+            SD_PREFER_LOCAL,
+            SD_SHARE_CPUCAPACITY,
+            SD_SHARE_POWERDOMAIN,
+            SD_SHARE_PKG_RESOURCES,
+            SD_SERIALIZE,
+            SD_PREFER_SIBLING,
             SD_NUMA,
         ];
         for i in 0..flags.len() {

@@ -114,8 +114,10 @@ mod tests {
     #[test]
     fn test_error_types_distinct() {
         let types = [
-            ICMPV6_DEST_UNREACH, ICMPV6_PKT_TOOBIG,
-            ICMPV6_TIME_EXCEEDED, ICMPV6_PARAMPROB,
+            ICMPV6_DEST_UNREACH,
+            ICMPV6_PKT_TOOBIG,
+            ICMPV6_TIME_EXCEEDED,
+            ICMPV6_PARAMPROB,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -127,8 +129,11 @@ mod tests {
     #[test]
     fn test_info_types_distinct() {
         let types = [
-            ICMPV6_ECHO_REQUEST, ICMPV6_ECHO_REPLY,
-            ICMPV6_MLD_QUERY, ICMPV6_MLD_REPORT, ICMPV6_MLD_DONE,
+            ICMPV6_ECHO_REQUEST,
+            ICMPV6_ECHO_REPLY,
+            ICMPV6_MLD_QUERY,
+            ICMPV6_MLD_REPORT,
+            ICMPV6_MLD_DONE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -140,8 +145,10 @@ mod tests {
     #[test]
     fn test_ndp_types_distinct() {
         let types = [
-            ICMPV6_ROUTER_SOLICITATION, ICMPV6_ROUTER_ADVERTISEMENT,
-            ICMPV6_NEIGHBOR_SOLICITATION, ICMPV6_NEIGHBOR_ADVERTISEMENT,
+            ICMPV6_ROUTER_SOLICITATION,
+            ICMPV6_ROUTER_ADVERTISEMENT,
+            ICMPV6_NEIGHBOR_SOLICITATION,
+            ICMPV6_NEIGHBOR_ADVERTISEMENT,
             ICMPV6_REDIRECT,
         ];
         for i in 0..types.len() {
@@ -154,9 +161,12 @@ mod tests {
     #[test]
     fn test_dest_unreach_codes_distinct() {
         let codes = [
-            ICMPV6_NOROUTE, ICMPV6_ADM_PROHIBITED,
-            ICMPV6_NOT_NEIGHBOUR, ICMPV6_ADDR_UNREACH,
-            ICMPV6_PORT_UNREACH, ICMPV6_POLICY_FAIL,
+            ICMPV6_NOROUTE,
+            ICMPV6_ADM_PROHIBITED,
+            ICMPV6_NOT_NEIGHBOUR,
+            ICMPV6_ADDR_UNREACH,
+            ICMPV6_PORT_UNREACH,
+            ICMPV6_POLICY_FAIL,
             ICMPV6_REJECT_ROUTE,
         ];
         for i in 0..codes.len() {
@@ -169,10 +179,14 @@ mod tests {
     #[test]
     fn test_ndp_options_distinct() {
         let opts = [
-            NDP_OPT_SOURCE_LL_ADDR, NDP_OPT_TARGET_LL_ADDR,
-            NDP_OPT_PREFIX_INFO, NDP_OPT_REDIRECTED_HDR,
-            NDP_OPT_MTU, NDP_OPT_ROUTE_INFO,
-            NDP_OPT_RDNSS, NDP_OPT_DNSSL,
+            NDP_OPT_SOURCE_LL_ADDR,
+            NDP_OPT_TARGET_LL_ADDR,
+            NDP_OPT_PREFIX_INFO,
+            NDP_OPT_REDIRECTED_HDR,
+            NDP_OPT_MTU,
+            NDP_OPT_ROUTE_INFO,
+            NDP_OPT_RDNSS,
+            NDP_OPT_DNSSL,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

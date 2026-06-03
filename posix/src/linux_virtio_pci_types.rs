@@ -72,9 +72,12 @@ mod tests {
     #[test]
     fn test_cap_types_distinct() {
         let caps = [
-            VIRTIO_PCI_CAP_COMMON_CFG, VIRTIO_PCI_CAP_NOTIFY_CFG,
-            VIRTIO_PCI_CAP_ISR_CFG, VIRTIO_PCI_CAP_DEVICE_CFG,
-            VIRTIO_PCI_CAP_PCI_CFG, VIRTIO_PCI_CAP_SHARED_MEMORY_CFG,
+            VIRTIO_PCI_CAP_COMMON_CFG,
+            VIRTIO_PCI_CAP_NOTIFY_CFG,
+            VIRTIO_PCI_CAP_ISR_CFG,
+            VIRTIO_PCI_CAP_DEVICE_CFG,
+            VIRTIO_PCI_CAP_PCI_CFG,
+            VIRTIO_PCI_CAP_SHARED_MEMORY_CFG,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

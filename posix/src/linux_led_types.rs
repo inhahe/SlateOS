@@ -133,11 +133,16 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            LED_BRIGHT_HW_CHANGED, LED_UNREGISTERING,
-            LED_BLINK_SW, LED_BLINK_ONESHOT,
-            LED_BLINK_ONESHOT_STOP, LED_BLINK_INVERT,
-            LED_BLINK_BRIGHTNESS_CHANGE, LED_BLINK_DISABLE,
-            LED_HW_PLUGGABLE, LED_PANIC_INDICATOR,
+            LED_BRIGHT_HW_CHANGED,
+            LED_UNREGISTERING,
+            LED_BLINK_SW,
+            LED_BLINK_ONESHOT,
+            LED_BLINK_ONESHOT_STOP,
+            LED_BLINK_INVERT,
+            LED_BLINK_BRIGHTNESS_CHANGE,
+            LED_BLINK_DISABLE,
+            LED_HW_PLUGGABLE,
+            LED_PANIC_INDICATOR,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "flag {f:#x} not power of two");
@@ -147,11 +152,16 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            LED_BRIGHT_HW_CHANGED, LED_UNREGISTERING,
-            LED_BLINK_SW, LED_BLINK_ONESHOT,
-            LED_BLINK_ONESHOT_STOP, LED_BLINK_INVERT,
-            LED_BLINK_BRIGHTNESS_CHANGE, LED_BLINK_DISABLE,
-            LED_HW_PLUGGABLE, LED_PANIC_INDICATOR,
+            LED_BRIGHT_HW_CHANGED,
+            LED_UNREGISTERING,
+            LED_BLINK_SW,
+            LED_BLINK_ONESHOT,
+            LED_BLINK_ONESHOT_STOP,
+            LED_BLINK_INVERT,
+            LED_BLINK_BRIGHTNESS_CHANGE,
+            LED_BLINK_DISABLE,
+            LED_HW_PLUGGABLE,
+            LED_PANIC_INDICATOR,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -163,11 +173,16 @@ mod tests {
     #[test]
     fn test_triggers_distinct() {
         let triggers = [
-            LED_TRIGGER_NONE, LED_TRIGGER_DEFAULT_ON,
-            LED_TRIGGER_TIMER, LED_TRIGGER_HEARTBEAT,
-            LED_TRIGGER_DISK, LED_TRIGGER_NETDEV,
-            LED_TRIGGER_CPU, LED_TRIGGER_PANIC,
-            LED_TRIGGER_BACKLIGHT, LED_TRIGGER_GPIO,
+            LED_TRIGGER_NONE,
+            LED_TRIGGER_DEFAULT_ON,
+            LED_TRIGGER_TIMER,
+            LED_TRIGGER_HEARTBEAT,
+            LED_TRIGGER_DISK,
+            LED_TRIGGER_NETDEV,
+            LED_TRIGGER_CPU,
+            LED_TRIGGER_PANIC,
+            LED_TRIGGER_BACKLIGHT,
+            LED_TRIGGER_GPIO,
         ];
         for i in 0..triggers.len() {
             for j in (i + 1)..triggers.len() {
@@ -179,11 +194,16 @@ mod tests {
     #[test]
     fn test_colors_distinct() {
         let colors = [
-            LED_COLOR_ID_WHITE, LED_COLOR_ID_RED,
-            LED_COLOR_ID_GREEN, LED_COLOR_ID_BLUE,
-            LED_COLOR_ID_AMBER, LED_COLOR_ID_VIOLET,
-            LED_COLOR_ID_YELLOW, LED_COLOR_ID_IR,
-            LED_COLOR_ID_MULTI, LED_COLOR_ID_RGB,
+            LED_COLOR_ID_WHITE,
+            LED_COLOR_ID_RED,
+            LED_COLOR_ID_GREEN,
+            LED_COLOR_ID_BLUE,
+            LED_COLOR_ID_AMBER,
+            LED_COLOR_ID_VIOLET,
+            LED_COLOR_ID_YELLOW,
+            LED_COLOR_ID_IR,
+            LED_COLOR_ID_MULTI,
+            LED_COLOR_ID_RGB,
         ];
         for i in 0..colors.len() {
             for j in (i + 1)..colors.len() {
@@ -195,11 +215,16 @@ mod tests {
     #[test]
     fn test_functions_distinct() {
         let funcs = [
-            LED_FUNCTION_STATUS, LED_FUNCTION_POWER,
-            LED_FUNCTION_DISK, LED_FUNCTION_LAN,
-            LED_FUNCTION_WLAN, LED_FUNCTION_BLUETOOTH,
-            LED_FUNCTION_USB, LED_FUNCTION_MICMUTE,
-            LED_FUNCTION_CAMERA, LED_FUNCTION_CHARGING,
+            LED_FUNCTION_STATUS,
+            LED_FUNCTION_POWER,
+            LED_FUNCTION_DISK,
+            LED_FUNCTION_LAN,
+            LED_FUNCTION_WLAN,
+            LED_FUNCTION_BLUETOOTH,
+            LED_FUNCTION_USB,
+            LED_FUNCTION_MICMUTE,
+            LED_FUNCTION_CAMERA,
+            LED_FUNCTION_CHARGING,
         ];
         for i in 0..funcs.len() {
             for j in (i + 1)..funcs.len() {

@@ -69,8 +69,7 @@ mod tests {
     #[test]
     fn test_protocol_types_distinct() {
         let types = [
-            NR_CONNREQ, NR_CONNACK, NR_DISCREQ,
-            NR_DISCACK, NR_INFO, NR_INFOACK, NR_RESET,
+            NR_CONNREQ, NR_CONNACK, NR_DISCREQ, NR_DISCACK, NR_INFO, NR_INFOACK, NR_RESET,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

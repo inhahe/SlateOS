@@ -80,8 +80,14 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            PPP_IP, PPP_IPV6, PPP_IPX, PPP_VJC_COMP,
-            PPP_VJC_UNCOMP, PPP_COMP, PPP_MPLS_UC, PPP_MPLS_MC,
+            PPP_IP,
+            PPP_IPV6,
+            PPP_IPX,
+            PPP_VJC_COMP,
+            PPP_VJC_UNCOMP,
+            PPP_COMP,
+            PPP_MPLS_UC,
+            PPP_MPLS_MC,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
@@ -93,8 +99,7 @@ mod tests {
     #[test]
     fn test_control_protocols_distinct() {
         let cps = [
-            PPP_IPCP, PPP_IPV6CP, PPP_IPXCP, PPP_CCP,
-            PPP_LCP, PPP_PAP, PPP_LQR, PPP_CHAP,
+            PPP_IPCP, PPP_IPV6CP, PPP_IPXCP, PPP_CCP, PPP_LCP, PPP_PAP, PPP_LQR, PPP_CHAP,
         ];
         for i in 0..cps.len() {
             for j in (i + 1)..cps.len() {

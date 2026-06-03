@@ -31,8 +31,11 @@ mod tests {
     #[test]
     fn test_mincore_flags_no_overlap() {
         let flags = [
-            MINCORE_INCORE, MINCORE_REFERENCED, MINCORE_MODIFIED,
-            MINCORE_REFERENCED_OTHER, MINCORE_MODIFIED_OTHER,
+            MINCORE_INCORE,
+            MINCORE_REFERENCED,
+            MINCORE_MODIFIED,
+            MINCORE_REFERENCED_OTHER,
+            MINCORE_MODIFIED_OTHER,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -104,8 +104,10 @@ mod tests {
     #[test]
     fn test_transfer_types_distinct() {
         let types = [
-            USB_ENDPOINT_XFER_CONTROL, USB_ENDPOINT_XFER_ISOC,
-            USB_ENDPOINT_XFER_BULK, USB_ENDPOINT_XFER_INT,
+            USB_ENDPOINT_XFER_CONTROL,
+            USB_ENDPOINT_XFER_ISOC,
+            USB_ENDPOINT_XFER_BULK,
+            USB_ENDPOINT_XFER_INT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -117,10 +119,15 @@ mod tests {
     #[test]
     fn test_device_states_distinct() {
         let states = [
-            USB_STATE_NOTATTACHED, USB_STATE_ATTACHED, USB_STATE_POWERED,
-            USB_STATE_RECONNECTING, USB_STATE_UNAUTHENTICATED,
-            USB_STATE_DEFAULT, USB_STATE_ADDRESS,
-            USB_STATE_CONFIGURED, USB_STATE_SUSPENDED,
+            USB_STATE_NOTATTACHED,
+            USB_STATE_ATTACHED,
+            USB_STATE_POWERED,
+            USB_STATE_RECONNECTING,
+            USB_STATE_UNAUTHENTICATED,
+            USB_STATE_DEFAULT,
+            USB_STATE_ADDRESS,
+            USB_STATE_CONFIGURED,
+            USB_STATE_SUSPENDED,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -132,8 +139,12 @@ mod tests {
     #[test]
     fn test_urb_flags_distinct() {
         let flags = [
-            URB_SHORT_NOT_OK, URB_ISO_ASAP, URB_NO_TRANSFER_DMA_MAP,
-            URB_ZERO_PACKET, URB_NO_INTERRUPT, URB_FREE_BUFFER,
+            URB_SHORT_NOT_OK,
+            URB_ISO_ASAP,
+            URB_NO_TRANSFER_DMA_MAP,
+            URB_ZERO_PACKET,
+            URB_NO_INTERRUPT,
+            URB_FREE_BUFFER,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

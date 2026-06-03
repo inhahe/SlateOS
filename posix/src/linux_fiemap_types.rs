@@ -74,11 +74,16 @@ mod tests {
     #[test]
     fn test_extent_flags_distinct() {
         let flags = [
-            FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNKNOWN,
-            FIEMAP_EXTENT_DELALLOC, FIEMAP_EXTENT_ENCODED,
-            FIEMAP_EXTENT_DATA_ENCRYPTED, FIEMAP_EXTENT_NOT_ALIGNED,
-            FIEMAP_EXTENT_DATA_INLINE, FIEMAP_EXTENT_DATA_TAIL,
-            FIEMAP_EXTENT_UNWRITTEN, FIEMAP_EXTENT_MERGED,
+            FIEMAP_EXTENT_LAST,
+            FIEMAP_EXTENT_UNKNOWN,
+            FIEMAP_EXTENT_DELALLOC,
+            FIEMAP_EXTENT_ENCODED,
+            FIEMAP_EXTENT_DATA_ENCRYPTED,
+            FIEMAP_EXTENT_NOT_ALIGNED,
+            FIEMAP_EXTENT_DATA_INLINE,
+            FIEMAP_EXTENT_DATA_TAIL,
+            FIEMAP_EXTENT_UNWRITTEN,
+            FIEMAP_EXTENT_MERGED,
             FIEMAP_EXTENT_SHARED,
         ];
         for i in 0..flags.len() {
@@ -92,11 +97,16 @@ mod tests {
     fn test_extent_flags_are_bitmask() {
         // All extent flags should be non-overlapping bits
         let flags = [
-            FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNKNOWN,
-            FIEMAP_EXTENT_DELALLOC, FIEMAP_EXTENT_ENCODED,
-            FIEMAP_EXTENT_DATA_ENCRYPTED, FIEMAP_EXTENT_NOT_ALIGNED,
-            FIEMAP_EXTENT_DATA_INLINE, FIEMAP_EXTENT_DATA_TAIL,
-            FIEMAP_EXTENT_UNWRITTEN, FIEMAP_EXTENT_MERGED,
+            FIEMAP_EXTENT_LAST,
+            FIEMAP_EXTENT_UNKNOWN,
+            FIEMAP_EXTENT_DELALLOC,
+            FIEMAP_EXTENT_ENCODED,
+            FIEMAP_EXTENT_DATA_ENCRYPTED,
+            FIEMAP_EXTENT_NOT_ALIGNED,
+            FIEMAP_EXTENT_DATA_INLINE,
+            FIEMAP_EXTENT_DATA_TAIL,
+            FIEMAP_EXTENT_UNWRITTEN,
+            FIEMAP_EXTENT_MERGED,
             FIEMAP_EXTENT_SHARED,
         ];
         for i in 0..flags.len() {

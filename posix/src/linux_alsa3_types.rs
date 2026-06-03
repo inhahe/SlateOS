@@ -102,10 +102,14 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            SNDRV_PCM_STATE_OPEN, SNDRV_PCM_STATE_SETUP,
-            SNDRV_PCM_STATE_PREPARED, SNDRV_PCM_STATE_RUNNING,
-            SNDRV_PCM_STATE_XRUN, SNDRV_PCM_STATE_DRAINING,
-            SNDRV_PCM_STATE_PAUSED, SNDRV_PCM_STATE_SUSPENDED,
+            SNDRV_PCM_STATE_OPEN,
+            SNDRV_PCM_STATE_SETUP,
+            SNDRV_PCM_STATE_PREPARED,
+            SNDRV_PCM_STATE_RUNNING,
+            SNDRV_PCM_STATE_XRUN,
+            SNDRV_PCM_STATE_DRAINING,
+            SNDRV_PCM_STATE_PAUSED,
+            SNDRV_PCM_STATE_SUSPENDED,
             SNDRV_PCM_STATE_DISCONNECTED,
         ];
         for i in 0..states.len() {

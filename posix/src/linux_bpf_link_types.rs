@@ -74,13 +74,20 @@ mod tests {
     #[test]
     fn test_link_types_distinct() {
         let types = [
-            BPF_LINK_TYPE_UNSPEC, BPF_LINK_TYPE_RAW_TRACEPOINT,
-            BPF_LINK_TYPE_TRACING, BPF_LINK_TYPE_CGROUP,
-            BPF_LINK_TYPE_ITER, BPF_LINK_TYPE_NETNS,
-            BPF_LINK_TYPE_XDP, BPF_LINK_TYPE_PERF_EVENT,
-            BPF_LINK_TYPE_KPROBE_MULTI, BPF_LINK_TYPE_STRUCT_OPS,
-            BPF_LINK_TYPE_NETFILTER, BPF_LINK_TYPE_TCX,
-            BPF_LINK_TYPE_UPROBE_MULTI, BPF_LINK_TYPE_NETKIT,
+            BPF_LINK_TYPE_UNSPEC,
+            BPF_LINK_TYPE_RAW_TRACEPOINT,
+            BPF_LINK_TYPE_TRACING,
+            BPF_LINK_TYPE_CGROUP,
+            BPF_LINK_TYPE_ITER,
+            BPF_LINK_TYPE_NETNS,
+            BPF_LINK_TYPE_XDP,
+            BPF_LINK_TYPE_PERF_EVENT,
+            BPF_LINK_TYPE_KPROBE_MULTI,
+            BPF_LINK_TYPE_STRUCT_OPS,
+            BPF_LINK_TYPE_NETFILTER,
+            BPF_LINK_TYPE_TCX,
+            BPF_LINK_TYPE_UPROBE_MULTI,
+            BPF_LINK_TYPE_NETKIT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -96,7 +103,13 @@ mod tests {
 
     #[test]
     fn test_update_flags_no_overlap() {
-        let flags = [BPF_F_REPLACE, BPF_F_BEFORE, BPF_F_AFTER, BPF_F_ID, BPF_F_LINK];
+        let flags = [
+            BPF_F_REPLACE,
+            BPF_F_BEFORE,
+            BPF_F_AFTER,
+            BPF_F_ID,
+            BPF_F_LINK,
+        ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_eq!(flags[i] & flags[j], 0);

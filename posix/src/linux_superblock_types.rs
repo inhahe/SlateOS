@@ -79,10 +79,19 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            SB_RDONLY, SB_NOSUID, SB_NODEV, SB_NOEXEC,
-            SB_SYNCHRONOUS, SB_MANDLOCK, SB_DIRSYNC,
-            SB_NOATIME, SB_NODIRATIME, SB_RELATIME,
-            SB_SILENT, SB_POSIXACL, SB_LAZYTIME,
+            SB_RDONLY,
+            SB_NOSUID,
+            SB_NODEV,
+            SB_NOEXEC,
+            SB_SYNCHRONOUS,
+            SB_MANDLOCK,
+            SB_DIRSYNC,
+            SB_NOATIME,
+            SB_NODIRATIME,
+            SB_RELATIME,
+            SB_SILENT,
+            SB_POSIXACL,
+            SB_LAZYTIME,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

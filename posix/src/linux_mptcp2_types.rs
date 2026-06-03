@@ -71,12 +71,18 @@ mod tests {
     #[test]
     fn test_pm_commands_distinct() {
         let cmds = [
-            MPTCP_PM_CMD_UNSPEC, MPTCP_PM_CMD_ADD_ADDR,
-            MPTCP_PM_CMD_DEL_ADDR, MPTCP_PM_CMD_GET_ADDR,
-            MPTCP_PM_CMD_FLUSH_ADDRS, MPTCP_PM_CMD_SET_LIMITS,
-            MPTCP_PM_CMD_GET_LIMITS, MPTCP_PM_CMD_SET_FLAGS,
-            MPTCP_PM_CMD_ANNOUNCE, MPTCP_PM_CMD_REMOVE,
-            MPTCP_PM_CMD_SUBFLOW_CREATE, MPTCP_PM_CMD_SUBFLOW_DESTROY,
+            MPTCP_PM_CMD_UNSPEC,
+            MPTCP_PM_CMD_ADD_ADDR,
+            MPTCP_PM_CMD_DEL_ADDR,
+            MPTCP_PM_CMD_GET_ADDR,
+            MPTCP_PM_CMD_FLUSH_ADDRS,
+            MPTCP_PM_CMD_SET_LIMITS,
+            MPTCP_PM_CMD_GET_LIMITS,
+            MPTCP_PM_CMD_SET_FLAGS,
+            MPTCP_PM_CMD_ANNOUNCE,
+            MPTCP_PM_CMD_REMOVE,
+            MPTCP_PM_CMD_SUBFLOW_CREATE,
+            MPTCP_PM_CMD_SUBFLOW_DESTROY,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -88,8 +94,10 @@ mod tests {
     #[test]
     fn test_addr_flags_power_of_two() {
         let flags = [
-            MPTCP_PM_ADDR_FLAG_SIGNAL, MPTCP_PM_ADDR_FLAG_SUBFLOW,
-            MPTCP_PM_ADDR_FLAG_BACKUP, MPTCP_PM_ADDR_FLAG_FULLMESH,
+            MPTCP_PM_ADDR_FLAG_SIGNAL,
+            MPTCP_PM_ADDR_FLAG_SUBFLOW,
+            MPTCP_PM_ADDR_FLAG_BACKUP,
+            MPTCP_PM_ADDR_FLAG_FULLMESH,
             MPTCP_PM_ADDR_FLAG_IMPLICIT,
         ];
         for f in &flags {
@@ -100,8 +108,10 @@ mod tests {
     #[test]
     fn test_addr_flags_no_overlap() {
         let flags = [
-            MPTCP_PM_ADDR_FLAG_SIGNAL, MPTCP_PM_ADDR_FLAG_SUBFLOW,
-            MPTCP_PM_ADDR_FLAG_BACKUP, MPTCP_PM_ADDR_FLAG_FULLMESH,
+            MPTCP_PM_ADDR_FLAG_SIGNAL,
+            MPTCP_PM_ADDR_FLAG_SUBFLOW,
+            MPTCP_PM_ADDR_FLAG_BACKUP,
+            MPTCP_PM_ADDR_FLAG_FULLMESH,
             MPTCP_PM_ADDR_FLAG_IMPLICIT,
         ];
         for i in 0..flags.len() {
@@ -113,7 +123,12 @@ mod tests {
 
     #[test]
     fn test_sockopt_distinct() {
-        let opts = [MPTCP_INFO, MPTCP_TCPINFO, MPTCP_SUBFLOW_ADDRS, MPTCP_FULL_INFO];
+        let opts = [
+            MPTCP_INFO,
+            MPTCP_TCPINFO,
+            MPTCP_SUBFLOW_ADDRS,
+            MPTCP_FULL_INFO,
+        ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
                 assert_ne!(opts[i], opts[j]);

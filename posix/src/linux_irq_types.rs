@@ -93,8 +93,10 @@ mod tests {
     #[test]
     fn test_trigger_types_no_overlap() {
         let triggers = [
-            IRQF_TRIGGER_RISING, IRQF_TRIGGER_FALLING,
-            IRQF_TRIGGER_HIGH, IRQF_TRIGGER_LOW,
+            IRQF_TRIGGER_RISING,
+            IRQF_TRIGGER_FALLING,
+            IRQF_TRIGGER_HIGH,
+            IRQF_TRIGGER_LOW,
         ];
         for i in 0..triggers.len() {
             for j in (i + 1)..triggers.len() {
@@ -107,8 +109,7 @@ mod tests {
     fn test_trigger_mask() {
         assert_eq!(
             IRQF_TRIGGER_MASK,
-            IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING |
-            IRQF_TRIGGER_HIGH | IRQF_TRIGGER_LOW
+            IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING | IRQF_TRIGGER_HIGH | IRQF_TRIGGER_LOW
         );
     }
 
@@ -136,8 +137,11 @@ mod tests {
     #[test]
     fn test_flow_types_distinct() {
         let types = [
-            IRQ_TYPE_LEVEL, IRQ_TYPE_EDGE, IRQ_TYPE_SIMPLE,
-            IRQ_TYPE_PERCPU, IRQ_TYPE_FASTEOI,
+            IRQ_TYPE_LEVEL,
+            IRQ_TYPE_EDGE,
+            IRQ_TYPE_SIMPLE,
+            IRQ_TYPE_PERCPU,
+            IRQ_TYPE_FASTEOI,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -149,8 +153,10 @@ mod tests {
     #[test]
     fn test_chip_flags_no_overlap() {
         let flags = [
-            IRQCHIP_SET_TYPE_MASKED, IRQCHIP_SKIP_SET_WAKE,
-            IRQCHIP_ONESHOT_SAFE, IRQCHIP_EOI_IF_HANDLED,
+            IRQCHIP_SET_TYPE_MASKED,
+            IRQCHIP_SKIP_SET_WAKE,
+            IRQCHIP_ONESHOT_SAFE,
+            IRQCHIP_EOI_IF_HANDLED,
             IRQCHIP_EOI_THREADED,
         ];
         for i in 0..flags.len() {

@@ -84,10 +84,14 @@ mod tests {
     #[test]
     fn test_sa_flags_power_of_two() {
         let flags = [
-            XFRM_STATE_NOPMTUDISC, XFRM_STATE_WILDRECV,
-            XFRM_STATE_ICMP, XFRM_STATE_AF_UNSPEC,
-            XFRM_STATE_ALIGN4, XFRM_STATE_ESN,
-            XFRM_STATE_NOECN, XFRM_STATE_DECAP_DSCP,
+            XFRM_STATE_NOPMTUDISC,
+            XFRM_STATE_WILDRECV,
+            XFRM_STATE_ICMP,
+            XFRM_STATE_AF_UNSPEC,
+            XFRM_STATE_ALIGN4,
+            XFRM_STATE_ESN,
+            XFRM_STATE_NOECN,
+            XFRM_STATE_DECAP_DSCP,
             XFRM_STATE_OUTPUT_MARK,
         ];
         for f in &flags {
@@ -98,10 +102,14 @@ mod tests {
     #[test]
     fn test_sa_flags_no_overlap() {
         let flags = [
-            XFRM_STATE_NOPMTUDISC, XFRM_STATE_WILDRECV,
-            XFRM_STATE_ICMP, XFRM_STATE_AF_UNSPEC,
-            XFRM_STATE_ALIGN4, XFRM_STATE_ESN,
-            XFRM_STATE_NOECN, XFRM_STATE_DECAP_DSCP,
+            XFRM_STATE_NOPMTUDISC,
+            XFRM_STATE_WILDRECV,
+            XFRM_STATE_ICMP,
+            XFRM_STATE_AF_UNSPEC,
+            XFRM_STATE_ALIGN4,
+            XFRM_STATE_ESN,
+            XFRM_STATE_NOECN,
+            XFRM_STATE_DECAP_DSCP,
             XFRM_STATE_OUTPUT_MARK,
         ];
         for i in 0..flags.len() {
@@ -129,8 +137,11 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            XFRM_PROTO_AH, XFRM_PROTO_ESP, XFRM_PROTO_COMP,
-            XFRM_PROTO_ROUTING, XFRM_PROTO_DSTOPTS,
+            XFRM_PROTO_AH,
+            XFRM_PROTO_ESP,
+            XFRM_PROTO_COMP,
+            XFRM_PROTO_ROUTING,
+            XFRM_PROTO_DSTOPTS,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {

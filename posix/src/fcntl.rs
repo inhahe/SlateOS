@@ -123,7 +123,8 @@ pub const S_IXOTH: u32 = 0o001;
 /// Default file permissions (owner rw, group/other r).
 pub const DEFAULT_FILE_MODE: u32 = S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH;
 /// Default directory permissions (owner rwx, group/other rx).
-pub const DEFAULT_DIR_MODE: u32 = S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
+pub const DEFAULT_DIR_MODE: u32 =
+    S_IRUSR | S_IWUSR | S_IXUSR | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -141,12 +142,12 @@ mod tests {
         assert_eq!(O_WRONLY, 1);
         assert_eq!(O_RDWR, 2);
         assert_eq!(O_ACCMODE, 3);
-        assert_eq!(O_CREAT, 64);       // 0o100
-        assert_eq!(O_EXCL, 128);       // 0o200
-        assert_eq!(O_NOCTTY, 256);     // 0o400
-        assert_eq!(O_TRUNC, 512);      // 0o1000
-        assert_eq!(O_APPEND, 1024);    // 0o2000
-        assert_eq!(O_NONBLOCK, 2048);  // 0o4000
+        assert_eq!(O_CREAT, 64); // 0o100
+        assert_eq!(O_EXCL, 128); // 0o200
+        assert_eq!(O_NOCTTY, 256); // 0o400
+        assert_eq!(O_TRUNC, 512); // 0o1000
+        assert_eq!(O_APPEND, 1024); // 0o2000
+        assert_eq!(O_NONBLOCK, 2048); // 0o4000
         assert_eq!(O_CLOEXEC, 524288); // 0o2_000_000
     }
 
@@ -295,7 +296,9 @@ mod tests {
 
     #[test]
     fn test_file_types_distinct() {
-        let types = [S_IFREG, S_IFDIR, S_IFLNK, S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK];
+        let types = [
+            S_IFREG, S_IFDIR, S_IFLNK, S_IFCHR, S_IFBLK, S_IFIFO, S_IFSOCK,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j], "file types must not overlap");
@@ -308,9 +311,7 @@ mod tests {
     #[test]
     fn test_permission_bits_disjoint() {
         let perms = [
-            S_IRUSR, S_IWUSR, S_IXUSR,
-            S_IRGRP, S_IWGRP, S_IXGRP,
-            S_IROTH, S_IWOTH, S_IXOTH,
+            S_IRUSR, S_IWUSR, S_IXUSR, S_IRGRP, S_IWGRP, S_IXGRP, S_IROTH, S_IWOTH, S_IXOTH,
         ];
         // All bits should be unique (no overlap)
         let mut combined: u32 = 0;

@@ -108,11 +108,16 @@ struct AioRecord {
 }
 
 impl AioRecord {
-    const EMPTY: Self = Self { in_use: false, cb_ptr: 0, status: 0, bytes: 0, age: 0 };
+    const EMPTY: Self = Self {
+        in_use: false,
+        cb_ptr: 0,
+        status: 0,
+        bytes: 0,
+        age: 0,
+    };
 }
 
-static mut AIO_TABLE: [AioRecord; MAX_AIO_OPS] =
-    [const { AioRecord::EMPTY }; MAX_AIO_OPS];
+static mut AIO_TABLE: [AioRecord; MAX_AIO_OPS] = [const { AioRecord::EMPTY }; MAX_AIO_OPS];
 
 /// Monotonic counter for `age` stamping.  Wraps after 2^64 submissions,
 /// which is impossible in practice; treated as monotonic forever.
@@ -272,7 +277,7 @@ fn validate_aiocb(cb: *const Aiocb) -> Option<(i32, *mut u8, usize, i64)> {
 /// -1`.
 fn classify_result(n: crate::types::SsizeT) -> (i32, isize) {
     if n >= 0 {
-        (0, n as isize)
+        (0, n)
     } else {
         (errno::get_errno(), -1)
     }
@@ -309,7 +314,7 @@ pub extern "C" fn aio_write(aiocbp: *mut Aiocb) -> i32 {
     let Some((fd, buf, nbytes, off)) = validate_aiocb(aiocbp) else {
         return -1;
     };
-    let n = crate::file::pwrite(fd, buf as *const u8, nbytes, off);
+    let n = crate::file::pwrite(fd, buf.cast_const(), nbytes, off);
     let (status, bytes) = classify_result(n);
     store_aio_record(aiocbp as usize, status, bytes);
     0
@@ -456,12 +461,7 @@ pub extern "C" fn aio_fsync(op: i32, aiocbp: *mut Aiocb) -> i32 {
 /// are identical when every op is synchronous).  Returns 0 on success,
 /// -1 with errno on argument error.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn lio_listio(
-    mode: i32,
-    list: *const *mut Aiocb,
-    nent: i32,
-    _sig: *mut u8,
-) -> i32 {
+pub extern "C" fn lio_listio(mode: i32, list: *const *mut Aiocb, nent: i32, _sig: *mut u8) -> i32 {
     if list.is_null() {
         errno::set_errno(errno::EFAULT);
         return -1;
@@ -522,13 +522,18 @@ mod tests {
     fn test_aiocb_size() {
         let size = core::mem::size_of::<Aiocb>();
         // Should be large enough to hold all fields.
-        assert!(size >= 120, "Aiocb should be at least 120 bytes, got {size}");
+        assert!(
+            size >= 120,
+            "Aiocb should be at least 120 bytes, got {size}"
+        );
     }
 
     #[test]
     fn test_aiocb_alignment() {
-        assert!(core::mem::align_of::<Aiocb>() >= 8,
-            "Aiocb should be aligned to at least 8 bytes");
+        assert!(
+            core::mem::align_of::<Aiocb>() >= 8,
+            "Aiocb should be aligned to at least 8 bytes"
+        );
     }
 
     // -- Constants --
@@ -881,10 +886,7 @@ mod tests {
     fn test_lio_listio_invalid_mode_einval() {
         let list: [*mut Aiocb; 0] = [];
         errno::set_errno(0);
-        assert_eq!(
-            lio_listio(42, list.as_ptr(), 0, core::ptr::null_mut()),
-            -1,
-        );
+        assert_eq!(lio_listio(42, list.as_ptr(), 0, core::ptr::null_mut()), -1,);
         assert_eq!(errno::get_errno(), errno::EINVAL);
     }
 

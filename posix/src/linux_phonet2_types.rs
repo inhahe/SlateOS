@@ -72,9 +72,12 @@ mod tests {
     #[test]
     fn test_pipe_msgs_distinct() {
         let msgs = [
-            PNS_PIPE_CREATE_REQ, PNS_PIPE_CREATE_RESP,
-            PNS_PIPE_ENABLE_REQ, PNS_PIPE_ENABLE_RESP,
-            PNS_PIPE_DATA, PNS_PIPE_REMOVE_REQ,
+            PNS_PIPE_CREATE_REQ,
+            PNS_PIPE_CREATE_RESP,
+            PNS_PIPE_ENABLE_REQ,
+            PNS_PIPE_ENABLE_RESP,
+            PNS_PIPE_DATA,
+            PNS_PIPE_REMOVE_REQ,
             PNS_PIPE_REMOVE_RESP,
         ];
         for i in 0..msgs.len() {

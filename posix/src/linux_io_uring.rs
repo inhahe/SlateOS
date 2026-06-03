@@ -490,9 +490,7 @@ fn validate_setup_params(entries: u32, p: &IoUringParams) -> Result<(), i32> {
     // (8) DEFER_TASKRUN requires SINGLE_ISSUER (Linux strictly enforces
     // this — task-run deferral only makes sense if there's one issuer
     // to defer to).
-    if (p.flags & IORING_SETUP_DEFER_TASKRUN) != 0
-        && (p.flags & IORING_SETUP_SINGLE_ISSUER) == 0
-    {
+    if (p.flags & IORING_SETUP_DEFER_TASKRUN) != 0 && (p.flags & IORING_SETUP_SINGLE_ISSUER) == 0 {
         return Err(errno::EINVAL);
     }
     // (9) SQPOLL + IOPOLL: incompatible (SQPOLL needs the kernel to wake
@@ -559,11 +557,10 @@ fn validate_register(opcode: u32, arg: *mut u8, nr_args: u32) -> Result<(), i32>
         | IORING_UNREGISTER_PBUF_RING
         | IORING_REGISTER_SYNC_CANCEL
         | IORING_REGISTER_FILE_ALLOC_RANGE
-        | IORING_REGISTER_PBUF_STATUS => {
-            if arg.is_null() {
+        | IORING_REGISTER_PBUF_STATUS
+            if arg.is_null() => {
                 return Err(errno::EFAULT);
             }
-        }
         _ => {} // remaining valid ops: pass through.
     }
     Ok(())
@@ -609,9 +606,7 @@ pub extern "C" fn io_uring_setup(entries: u32, params: *mut IoUringParams) -> i3
     // ring allocation, so an unprivileged caller with valid params
     // sees EPERM, not ENOSYS.
     if (p.flags & IORING_SETUP_SQPOLL) != 0
-        && !crate::sys_capability::has_capability(
-            crate::sys_capability::CAP_SYS_NICE,
-        )
+        && !crate::sys_capability::has_capability(crate::sys_capability::CAP_SYS_NICE)
     {
         errno::set_errno(errno::EPERM);
         return -1;
@@ -719,12 +714,7 @@ pub extern "C" fn io_uring_enter(
 /// ring file (`fget(fd)`), so an unknown opcode wins over a bad fd.
 /// We mirror that ordering: opcode/arg shape first, fd last.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn io_uring_register(
-    fd: i32,
-    opcode: u32,
-    arg: *mut u8,
-    nr_args: u32,
-) -> i32 {
+pub extern "C" fn io_uring_register(fd: i32, opcode: u32, arg: *mut u8, nr_args: u32) -> i32 {
     // Opcode and per-opcode argument shape are validated before the
     // fd lookup, per Linux's __do_sys_io_uring_register.
     if let Err(e) = validate_register(opcode, arg, nr_args) {
@@ -775,13 +765,22 @@ mod tests {
     #[test]
     fn test_opcodes_distinct() {
         let ops = [
-            IORING_OP_NOP, IORING_OP_READV, IORING_OP_WRITEV,
-            IORING_OP_FSYNC, IORING_OP_READ_FIXED, IORING_OP_WRITE_FIXED,
-            IORING_OP_POLL_ADD, IORING_OP_POLL_REMOVE,
-            IORING_OP_SENDMSG, IORING_OP_RECVMSG,
-            IORING_OP_TIMEOUT, IORING_OP_ACCEPT,
-            IORING_OP_READ, IORING_OP_WRITE,
-            IORING_OP_CLOSE, IORING_OP_OPENAT,
+            IORING_OP_NOP,
+            IORING_OP_READV,
+            IORING_OP_WRITEV,
+            IORING_OP_FSYNC,
+            IORING_OP_READ_FIXED,
+            IORING_OP_WRITE_FIXED,
+            IORING_OP_POLL_ADD,
+            IORING_OP_POLL_REMOVE,
+            IORING_OP_SENDMSG,
+            IORING_OP_RECVMSG,
+            IORING_OP_TIMEOUT,
+            IORING_OP_ACCEPT,
+            IORING_OP_READ,
+            IORING_OP_WRITE,
+            IORING_OP_CLOSE,
+            IORING_OP_OPENAT,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -793,9 +792,12 @@ mod tests {
     #[test]
     fn test_setup_flags_are_bits() {
         let flags = [
-            IORING_SETUP_IOPOLL, IORING_SETUP_SQPOLL,
-            IORING_SETUP_SQ_AFF, IORING_SETUP_CQSIZE,
-            IORING_SETUP_CLAMP, IORING_SETUP_ATTACH_WQ,
+            IORING_SETUP_IOPOLL,
+            IORING_SETUP_SQPOLL,
+            IORING_SETUP_SQ_AFF,
+            IORING_SETUP_CQSIZE,
+            IORING_SETUP_CLAMP,
+            IORING_SETUP_ATTACH_WQ,
             IORING_SETUP_R_DISABLED,
         ];
         for i in 0..flags.len() {
@@ -808,8 +810,12 @@ mod tests {
     #[test]
     fn test_sqe_flags_are_bits() {
         let flags = [
-            IOSQE_FIXED_FILE, IOSQE_IO_DRAIN, IOSQE_IO_LINK,
-            IOSQE_IO_HARDLINK, IOSQE_ASYNC, IOSQE_BUFFER_SELECT,
+            IOSQE_FIXED_FILE,
+            IOSQE_IO_DRAIN,
+            IOSQE_IO_LINK,
+            IOSQE_IO_HARDLINK,
+            IOSQE_ASYNC,
+            IOSQE_BUFFER_SELECT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -830,12 +836,18 @@ mod tests {
     #[test]
     fn test_register_ops_distinct() {
         let ops = [
-            IORING_REGISTER_BUFFERS, IORING_UNREGISTER_BUFFERS,
-            IORING_REGISTER_FILES, IORING_UNREGISTER_FILES,
-            IORING_REGISTER_EVENTFD, IORING_UNREGISTER_EVENTFD,
-            IORING_REGISTER_PROBE, IORING_REGISTER_PERSONALITY,
-            IORING_REGISTER_ENABLE_RINGS, IORING_REGISTER_RING_FDS,
-            IORING_REGISTER_PBUF_RING, IORING_REGISTER_SYNC_CANCEL,
+            IORING_REGISTER_BUFFERS,
+            IORING_UNREGISTER_BUFFERS,
+            IORING_REGISTER_FILES,
+            IORING_UNREGISTER_FILES,
+            IORING_REGISTER_EVENTFD,
+            IORING_UNREGISTER_EVENTFD,
+            IORING_REGISTER_PROBE,
+            IORING_REGISTER_PERSONALITY,
+            IORING_REGISTER_ENABLE_RINGS,
+            IORING_REGISTER_RING_FDS,
+            IORING_REGISTER_PBUF_RING,
+            IORING_REGISTER_SYNC_CANCEL,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -1560,8 +1572,7 @@ mod tests {
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -1576,10 +1587,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ = crate::sys_capability::capset(
-                    &mut hdr,
-                    data.as_ptr(),
-                );
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -1602,10 +1610,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc = crate::sys_capability::capset(
-                &mut hdr as *mut _,
-                data.as_ptr(),
-            );
+            let rc = crate::sys_capability::capset(&mut hdr as *mut _, data.as_ptr());
             assert_eq!(rc, 0);
             assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE));
         }
@@ -1701,9 +1706,7 @@ mod tests {
             {
                 let _g = CapGuard::snapshot();
                 drop_cap_sys_nice();
-                assert!(
-                    !crate::sys_capability::has_capability(CAP_SYS_NICE),
-                );
+                assert!(!crate::sys_capability::has_capability(CAP_SYS_NICE),);
             }
             assert!(crate::sys_capability::has_capability(CAP_SYS_NICE));
         }

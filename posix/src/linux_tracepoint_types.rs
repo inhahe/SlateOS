@@ -81,11 +81,16 @@ mod tests {
     #[test]
     fn test_iter_flags_no_overlap() {
         let flags = [
-            TRACE_ITER_PRINT_PARENT, TRACE_ITER_SYM_OFFSET,
-            TRACE_ITER_SYM_ADDR, TRACE_ITER_VERBOSE,
-            TRACE_ITER_RAW, TRACE_ITER_HEX,
-            TRACE_ITER_BIN, TRACE_ITER_CONTEXT_INFO,
-            TRACE_ITER_LATENCY_FMT, TRACE_ITER_IRQ_INFO,
+            TRACE_ITER_PRINT_PARENT,
+            TRACE_ITER_SYM_OFFSET,
+            TRACE_ITER_SYM_ADDR,
+            TRACE_ITER_VERBOSE,
+            TRACE_ITER_RAW,
+            TRACE_ITER_HEX,
+            TRACE_ITER_BIN,
+            TRACE_ITER_CONTEXT_INFO,
+            TRACE_ITER_LATENCY_FMT,
+            TRACE_ITER_IRQ_INFO,
             TRACE_ITER_FUNCTION,
         ];
         for i in 0..flags.len() {

@@ -127,10 +127,21 @@ mod tests {
     #[test]
     fn test_protocols_distinct() {
         let protos = [
-            PPP_IP, PPP_IPV6, PPP_IPX, PPP_VJC_COMP,
-            PPP_VJC_UNCOMP, PPP_CCP, PPP_IPCP, PPP_IPV6CP,
-            PPP_LCP, PPP_PAP, PPP_LQR, PPP_CHAP, PPP_EAP,
-            PPP_MP, PPP_COMP,
+            PPP_IP,
+            PPP_IPV6,
+            PPP_IPX,
+            PPP_VJC_COMP,
+            PPP_VJC_UNCOMP,
+            PPP_CCP,
+            PPP_IPCP,
+            PPP_IPV6CP,
+            PPP_LCP,
+            PPP_PAP,
+            PPP_LQR,
+            PPP_CHAP,
+            PPP_EAP,
+            PPP_MP,
+            PPP_COMP,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {
@@ -152,10 +163,18 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            PPPIOCGFLAGS, PPPIOCSFLAGS, PPPIOCGASYNCMAP,
-            PPPIOCSASYNCMAP, PPPIOCGUNIT, PPPIOCSMRU,
-            PPPIOCGMRU, PPPIOCATTACH, PPPIOCDETACH,
-            PPPIOCCONNECT, PPPIOCDISCONN, PPPIOCNEWUNIT,
+            PPPIOCGFLAGS,
+            PPPIOCSFLAGS,
+            PPPIOCGASYNCMAP,
+            PPPIOCSASYNCMAP,
+            PPPIOCGUNIT,
+            PPPIOCSMRU,
+            PPPIOCGMRU,
+            PPPIOCATTACH,
+            PPPIOCDETACH,
+            PPPIOCCONNECT,
+            PPPIOCDISCONN,
+            PPPIOCNEWUNIT,
             PPPIOCATTCHAN,
         ];
         for i in 0..cmds.len() {
@@ -168,8 +187,12 @@ mod tests {
     #[test]
     fn test_lcp_opts_distinct() {
         let opts = [
-            LCP_OPT_MRU, LCP_OPT_ASYNCMAP, LCP_OPT_AUTH,
-            LCP_OPT_QUALITY, LCP_OPT_MAGIC, LCP_OPT_PFC,
+            LCP_OPT_MRU,
+            LCP_OPT_ASYNCMAP,
+            LCP_OPT_AUTH,
+            LCP_OPT_QUALITY,
+            LCP_OPT_MAGIC,
+            LCP_OPT_PFC,
             LCP_OPT_ACFC,
         ];
         for i in 0..opts.len() {

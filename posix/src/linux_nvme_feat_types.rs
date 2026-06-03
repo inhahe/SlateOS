@@ -57,15 +57,24 @@ mod tests {
     #[test]
     fn test_features_distinct() {
         let feats = [
-            NVME_FEAT_ARBITRATION, NVME_FEAT_POWER_MGMT,
-            NVME_FEAT_LBA_RANGE, NVME_FEAT_TEMP_THRESH,
-            NVME_FEAT_ERR_RECOVERY, NVME_FEAT_VOLATILE_WC,
-            NVME_FEAT_NUM_QUEUES, NVME_FEAT_IRQ_COALESCE,
-            NVME_FEAT_IRQ_CONFIG, NVME_FEAT_WRITE_ATOMIC,
-            NVME_FEAT_ASYNC_EVENT, NVME_FEAT_AUTO_PST,
-            NVME_FEAT_HOST_MEM_BUF, NVME_FEAT_TIMESTAMP,
-            NVME_FEAT_KATO, NVME_FEAT_HCTM,
-            NVME_FEAT_NOPSC, NVME_FEAT_HOST_BEHAVIOR,
+            NVME_FEAT_ARBITRATION,
+            NVME_FEAT_POWER_MGMT,
+            NVME_FEAT_LBA_RANGE,
+            NVME_FEAT_TEMP_THRESH,
+            NVME_FEAT_ERR_RECOVERY,
+            NVME_FEAT_VOLATILE_WC,
+            NVME_FEAT_NUM_QUEUES,
+            NVME_FEAT_IRQ_COALESCE,
+            NVME_FEAT_IRQ_CONFIG,
+            NVME_FEAT_WRITE_ATOMIC,
+            NVME_FEAT_ASYNC_EVENT,
+            NVME_FEAT_AUTO_PST,
+            NVME_FEAT_HOST_MEM_BUF,
+            NVME_FEAT_TIMESTAMP,
+            NVME_FEAT_KATO,
+            NVME_FEAT_HCTM,
+            NVME_FEAT_NOPSC,
+            NVME_FEAT_HOST_BEHAVIOR,
         ];
         for i in 0..feats.len() {
             for j in (i + 1)..feats.len() {

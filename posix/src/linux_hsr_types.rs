@@ -105,8 +105,10 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            HSR_CMD_GET_NODE_STATUS, HSR_CMD_GET_NODE_LIST,
-            HSR_CMD_SET_NODE_STATUS, HSR_CMD_GET_NODE_INFO,
+            HSR_CMD_GET_NODE_STATUS,
+            HSR_CMD_GET_NODE_LIST,
+            HSR_CMD_SET_NODE_STATUS,
+            HSR_CMD_GET_NODE_INFO,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -118,10 +120,15 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            HSR_A_NODE_ADDR, HSR_A_IFINDEX, HSR_A_NODE_ADDR_B,
-            HSR_A_IF1_IFINDEX, HSR_A_IF2_IFINDEX,
-            HSR_A_IF1_AGE, HSR_A_IF2_AGE,
-            HSR_A_IF1_SEQ, HSR_A_IF2_SEQ,
+            HSR_A_NODE_ADDR,
+            HSR_A_IFINDEX,
+            HSR_A_NODE_ADDR_B,
+            HSR_A_IF1_IFINDEX,
+            HSR_A_IF2_IFINDEX,
+            HSR_A_IF1_AGE,
+            HSR_A_IF2_AGE,
+            HSR_A_IF1_SEQ,
+            HSR_A_IF2_SEQ,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -153,10 +160,14 @@ mod tests {
     #[test]
     fn test_ifla_attrs_distinct() {
         let attrs = [
-            IFLA_HSR_SLAVE1, IFLA_HSR_SLAVE2,
-            IFLA_HSR_MULTICAST_SPEC, IFLA_HSR_SUPERVISION_ADDR,
-            IFLA_HSR_SEQ_NR, IFLA_HSR_VERSION,
-            IFLA_HSR_PROTOCOL, IFLA_HSR_INTERLINK,
+            IFLA_HSR_SLAVE1,
+            IFLA_HSR_SLAVE2,
+            IFLA_HSR_MULTICAST_SPEC,
+            IFLA_HSR_SUPERVISION_ADDR,
+            IFLA_HSR_SEQ_NR,
+            IFLA_HSR_VERSION,
+            IFLA_HSR_PROTOCOL,
+            IFLA_HSR_INTERLINK,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

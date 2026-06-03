@@ -109,14 +109,33 @@ mod tests {
     #[test]
     fn test_ops_distinct() {
         let ops = [
-            OP_ACCESS, OP_CLOSE, OP_COMMIT, OP_CREATE,
-            OP_DELEGPURGE, OP_DELEGRETURN, OP_GETATTR,
-            OP_GETFH, OP_LINK, OP_LOCK, OP_LOCKT,
-            OP_LOCKU, OP_LOOKUP, OP_LOOKUPP, OP_NVERIFY,
-            OP_OPEN, OP_OPENATTR, OP_OPEN_CONFIRM,
-            OP_OPEN_DOWNGRADE, OP_PUTFH, OP_PUTPUBFH,
-            OP_PUTROOTFH, OP_READ, OP_READDIR,
-            OP_READLINK, OP_REMOVE, OP_RENAME,
+            OP_ACCESS,
+            OP_CLOSE,
+            OP_COMMIT,
+            OP_CREATE,
+            OP_DELEGPURGE,
+            OP_DELEGRETURN,
+            OP_GETATTR,
+            OP_GETFH,
+            OP_LINK,
+            OP_LOCK,
+            OP_LOCKT,
+            OP_LOCKU,
+            OP_LOOKUP,
+            OP_LOOKUPP,
+            OP_NVERIFY,
+            OP_OPEN,
+            OP_OPENATTR,
+            OP_OPEN_CONFIRM,
+            OP_OPEN_DOWNGRADE,
+            OP_PUTFH,
+            OP_PUTPUBFH,
+            OP_PUTROOTFH,
+            OP_READ,
+            OP_READDIR,
+            OP_READLINK,
+            OP_REMOVE,
+            OP_RENAME,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -128,10 +147,14 @@ mod tests {
     #[test]
     fn test_access_bits_no_overlap() {
         let bits = [
-            NFS4_ACCESS_READ, NFS4_ACCESS_LOOKUP,
-            NFS4_ACCESS_MODIFY, NFS4_ACCESS_EXTEND,
-            NFS4_ACCESS_DELETE, NFS4_ACCESS_EXECUTE,
-            NFS4_ACCESS_XAREAD, NFS4_ACCESS_XAWRITE,
+            NFS4_ACCESS_READ,
+            NFS4_ACCESS_LOOKUP,
+            NFS4_ACCESS_MODIFY,
+            NFS4_ACCESS_EXTEND,
+            NFS4_ACCESS_DELETE,
+            NFS4_ACCESS_EXECUTE,
+            NFS4_ACCESS_XAREAD,
+            NFS4_ACCESS_XAWRITE,
             NFS4_ACCESS_XALIST,
         ];
         for i in 0..bits.len() {
@@ -144,8 +167,10 @@ mod tests {
     #[test]
     fn test_delegation_types_distinct() {
         let types = [
-            NFS4_OPEN_DELEGATE_NONE, NFS4_OPEN_DELEGATE_READ,
-            NFS4_OPEN_DELEGATE_WRITE, NFS4_OPEN_DELEGATE_NONE_EXT,
+            NFS4_OPEN_DELEGATE_NONE,
+            NFS4_OPEN_DELEGATE_READ,
+            NFS4_OPEN_DELEGATE_WRITE,
+            NFS4_OPEN_DELEGATE_NONE_EXT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

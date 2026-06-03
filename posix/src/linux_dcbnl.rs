@@ -110,10 +110,17 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            DCB_CMD_UNDEFINED, DCB_CMD_GSTATE, DCB_CMD_SSTATE,
-            DCB_CMD_PFC_GCFG, DCB_CMD_PFC_SCFG, DCB_CMD_GAPP,
-            DCB_CMD_SAPP, DCB_CMD_IEEE_GET, DCB_CMD_IEEE_SET,
-            DCB_CMD_GDCBX, DCB_CMD_SDCBX,
+            DCB_CMD_UNDEFINED,
+            DCB_CMD_GSTATE,
+            DCB_CMD_SSTATE,
+            DCB_CMD_PFC_GCFG,
+            DCB_CMD_PFC_SCFG,
+            DCB_CMD_GAPP,
+            DCB_CMD_SAPP,
+            DCB_CMD_IEEE_GET,
+            DCB_CMD_IEEE_SET,
+            DCB_CMD_GDCBX,
+            DCB_CMD_SDCBX,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -125,9 +132,15 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            DCB_ATTR_UNSPEC, DCB_ATTR_IFNAME, DCB_ATTR_STATE,
-            DCB_ATTR_PFC_STATE, DCB_ATTR_PFC_CFG, DCB_ATTR_NUM_TC,
-            DCB_ATTR_APP, DCB_ATTR_IEEE, DCB_ATTR_DCBX,
+            DCB_ATTR_UNSPEC,
+            DCB_ATTR_IFNAME,
+            DCB_ATTR_STATE,
+            DCB_ATTR_PFC_STATE,
+            DCB_ATTR_PFC_CFG,
+            DCB_ATTR_NUM_TC,
+            DCB_ATTR_APP,
+            DCB_ATTR_IEEE,
+            DCB_ATTR_DCBX,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -139,8 +152,10 @@ mod tests {
     #[test]
     fn test_dcbx_modes_powers_of_two() {
         let modes = [
-            DCB_CAP_DCBX_HOST, DCB_CAP_DCBX_LLD_MANAGED,
-            DCB_CAP_DCBX_VER_CEE, DCB_CAP_DCBX_VER_IEEE,
+            DCB_CAP_DCBX_HOST,
+            DCB_CAP_DCBX_LLD_MANAGED,
+            DCB_CAP_DCBX_VER_CEE,
+            DCB_CAP_DCBX_VER_IEEE,
             DCB_CAP_DCBX_STATIC,
         ];
         for m in &modes {

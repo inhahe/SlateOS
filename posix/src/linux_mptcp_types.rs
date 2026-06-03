@@ -103,7 +103,12 @@ mod tests {
 
     #[test]
     fn test_socket_options_distinct() {
-        let opts = [MPTCP_INFO, MPTCP_TCPINFO, MPTCP_SUBFLOW_ADDRS, MPTCP_FULL_INFO];
+        let opts = [
+            MPTCP_INFO,
+            MPTCP_TCPINFO,
+            MPTCP_SUBFLOW_ADDRS,
+            MPTCP_FULL_INFO,
+        ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
                 assert_ne!(opts[i], opts[j]);
@@ -114,12 +119,18 @@ mod tests {
     #[test]
     fn test_pm_commands_distinct() {
         let cmds = [
-            MPTCP_PM_CMD_GET, MPTCP_PM_CMD_SET,
-            MPTCP_PM_CMD_ADD_ADDR, MPTCP_PM_CMD_DEL_ADDR,
-            MPTCP_PM_CMD_GET_ADDR, MPTCP_PM_CMD_FLUSH_ADDRS,
-            MPTCP_PM_CMD_SET_LIMITS, MPTCP_PM_CMD_GET_LIMITS,
-            MPTCP_PM_CMD_SET_FLAGS, MPTCP_PM_CMD_ANNOUNCE,
-            MPTCP_PM_CMD_REMOVE, MPTCP_PM_CMD_SUBFLOW_CREATE,
+            MPTCP_PM_CMD_GET,
+            MPTCP_PM_CMD_SET,
+            MPTCP_PM_CMD_ADD_ADDR,
+            MPTCP_PM_CMD_DEL_ADDR,
+            MPTCP_PM_CMD_GET_ADDR,
+            MPTCP_PM_CMD_FLUSH_ADDRS,
+            MPTCP_PM_CMD_SET_LIMITS,
+            MPTCP_PM_CMD_GET_LIMITS,
+            MPTCP_PM_CMD_SET_FLAGS,
+            MPTCP_PM_CMD_ANNOUNCE,
+            MPTCP_PM_CMD_REMOVE,
+            MPTCP_PM_CMD_SUBFLOW_CREATE,
             MPTCP_PM_CMD_SUBFLOW_DESTROY,
         ];
         for i in 0..cmds.len() {
@@ -132,8 +143,10 @@ mod tests {
     #[test]
     fn test_addr_flags_no_overlap() {
         let flags = [
-            MPTCP_PM_ADDR_FLAG_SIGNAL, MPTCP_PM_ADDR_FLAG_SUBFLOW,
-            MPTCP_PM_ADDR_FLAG_BACKUP, MPTCP_PM_ADDR_FLAG_FULLMESH,
+            MPTCP_PM_ADDR_FLAG_SIGNAL,
+            MPTCP_PM_ADDR_FLAG_SUBFLOW,
+            MPTCP_PM_ADDR_FLAG_BACKUP,
+            MPTCP_PM_ADDR_FLAG_FULLMESH,
             MPTCP_PM_ADDR_FLAG_IMPLICIT,
         ];
         for i in 0..flags.len() {
@@ -147,11 +160,16 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            MPTCP_EVENT_CREATED, MPTCP_EVENT_ESTABLISHED,
-            MPTCP_EVENT_CLOSED, MPTCP_EVENT_ANNOUNCE,
-            MPTCP_EVENT_REMOVE, MPTCP_EVENT_SUB_ESTABLISHED,
-            MPTCP_EVENT_SUB_CLOSED, MPTCP_EVENT_SUB_PRIORITY,
-            MPTCP_EVENT_LISTENER_CREATED, MPTCP_EVENT_LISTENER_CLOSED,
+            MPTCP_EVENT_CREATED,
+            MPTCP_EVENT_ESTABLISHED,
+            MPTCP_EVENT_CLOSED,
+            MPTCP_EVENT_ANNOUNCE,
+            MPTCP_EVENT_REMOVE,
+            MPTCP_EVENT_SUB_ESTABLISHED,
+            MPTCP_EVENT_SUB_CLOSED,
+            MPTCP_EVENT_SUB_PRIORITY,
+            MPTCP_EVENT_LISTENER_CREATED,
+            MPTCP_EVENT_LISTENER_CLOSED,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

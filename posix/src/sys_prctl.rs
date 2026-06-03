@@ -8,13 +8,13 @@
 // Re-exports from unistd
 // ---------------------------------------------------------------------------
 
-pub use crate::unistd::prctl;
-pub use crate::unistd::PR_SET_NAME;
 pub use crate::unistd::PR_GET_NAME;
-pub use crate::unistd::PR_SET_NO_NEW_PRIVS;
 pub use crate::unistd::PR_GET_NO_NEW_PRIVS;
-pub use crate::unistd::PR_SET_SECCOMP;
 pub use crate::unistd::PR_GET_SECCOMP;
+pub use crate::unistd::PR_SET_NAME;
+pub use crate::unistd::PR_SET_NO_NEW_PRIVS;
+pub use crate::unistd::PR_SET_SECCOMP;
+pub use crate::unistd::prctl;
 
 // ---------------------------------------------------------------------------
 // Additional PR_* constants
@@ -127,9 +127,16 @@ mod tests {
     #[test]
     fn test_constants_positive() {
         let consts = [
-            PR_SET_NAME, PR_GET_NAME, PR_SET_DUMPABLE, PR_GET_DUMPABLE,
-            PR_SET_PDEATHSIG, PR_GET_PDEATHSIG, PR_SET_SECCOMP,
-            PR_GET_SECCOMP, PR_SET_NO_NEW_PRIVS, PR_GET_NO_NEW_PRIVS,
+            PR_SET_NAME,
+            PR_GET_NAME,
+            PR_SET_DUMPABLE,
+            PR_GET_DUMPABLE,
+            PR_SET_PDEATHSIG,
+            PR_GET_PDEATHSIG,
+            PR_SET_SECCOMP,
+            PR_GET_SECCOMP,
+            PR_SET_NO_NEW_PRIVS,
+            PR_GET_NO_NEW_PRIVS,
         ];
         for &c in &consts {
             assert!(c > 0, "PR_* constant should be positive");
@@ -139,25 +146,34 @@ mod tests {
     #[test]
     fn test_all_pr_constants_distinct() {
         let consts = [
-            PR_SET_PDEATHSIG, PR_GET_PDEATHSIG,
-            PR_SET_DUMPABLE, PR_GET_DUMPABLE,
-            PR_SET_KEEPCAPS, PR_GET_KEEPCAPS,
-            PR_SET_TIMING, PR_GET_TIMING,
-            PR_SET_NAME, PR_GET_NAME,
-            PR_SET_ENDIAN, PR_GET_ENDIAN,
-            PR_GET_SECCOMP, PR_SET_SECCOMP,
-            PR_GET_TSC, PR_SET_TSC,
-            PR_SET_TIMERSLACK, PR_GET_TIMERSLACK,
-            PR_SET_CHILD_SUBREAPER, PR_GET_CHILD_SUBREAPER,
-            PR_SET_NO_NEW_PRIVS, PR_GET_NO_NEW_PRIVS,
-            PR_SET_SPECULATION_CTRL, PR_GET_SPECULATION_CTRL,
+            PR_SET_PDEATHSIG,
+            PR_GET_PDEATHSIG,
+            PR_SET_DUMPABLE,
+            PR_GET_DUMPABLE,
+            PR_SET_KEEPCAPS,
+            PR_GET_KEEPCAPS,
+            PR_SET_TIMING,
+            PR_GET_TIMING,
+            PR_SET_NAME,
+            PR_GET_NAME,
+            PR_SET_ENDIAN,
+            PR_GET_ENDIAN,
+            PR_GET_SECCOMP,
+            PR_SET_SECCOMP,
+            PR_GET_TSC,
+            PR_SET_TSC,
+            PR_SET_TIMERSLACK,
+            PR_GET_TIMERSLACK,
+            PR_SET_CHILD_SUBREAPER,
+            PR_GET_CHILD_SUBREAPER,
+            PR_SET_NO_NEW_PRIVS,
+            PR_GET_NO_NEW_PRIVS,
+            PR_SET_SPECULATION_CTRL,
+            PR_GET_SPECULATION_CTRL,
         ];
         for i in 0..consts.len() {
             for j in (i + 1)..consts.len() {
-                assert_ne!(
-                    consts[i], consts[j],
-                    "PR_* constants must be distinct"
-                );
+                assert_ne!(consts[i], consts[j], "PR_* constants must be distinct");
             }
         }
     }

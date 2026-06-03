@@ -7,22 +7,22 @@
 // Wait functions
 // ---------------------------------------------------------------------------
 
-pub use crate::process::waitpid;
 pub use crate::process::wait;
 pub use crate::process::wait3;
 pub use crate::process::wait4;
 pub use crate::process::waitid;
+pub use crate::process::waitpid;
 
 // ---------------------------------------------------------------------------
 // Option flags
 // ---------------------------------------------------------------------------
 
-pub use crate::wait::WNOHANG;
-pub use crate::wait::WUNTRACED;
 pub use crate::wait::WCONTINUED;
 pub use crate::wait::WEXITED;
-pub use crate::wait::WSTOPPED;
+pub use crate::wait::WNOHANG;
 pub use crate::wait::WNOWAIT;
+pub use crate::wait::WSTOPPED;
+pub use crate::wait::WUNTRACED;
 
 // ---------------------------------------------------------------------------
 // Status macros (as functions)

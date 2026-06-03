@@ -2,8 +2,8 @@
 //!
 //! Re-exports `sysinfo()` and `Sysinfo` from the `unistd` module.
 
-pub use crate::unistd::sysinfo;
 pub use crate::unistd::Sysinfo;
+pub use crate::unistd::sysinfo;
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -54,7 +54,8 @@ mod tests {
         assert!(
             info.freeram <= info.totalram,
             "freeram ({}) should be <= totalram ({})",
-            info.freeram, info.totalram
+            info.freeram,
+            info.totalram
         );
     }
 }

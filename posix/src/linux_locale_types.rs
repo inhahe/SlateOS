@@ -65,10 +65,18 @@ pub const LC_MEASUREMENT_MASK: u32 = 1 << LC_MEASUREMENT;
 /// Mask for LC_IDENTIFICATION.
 pub const LC_IDENTIFICATION_MASK: u32 = 1 << LC_IDENTIFICATION;
 /// Mask for all categories (combine all masks).
-pub const LC_ALL_MASK: u32 = LC_CTYPE_MASK | LC_NUMERIC_MASK | LC_TIME_MASK
-    | LC_COLLATE_MASK | LC_MONETARY_MASK | LC_MESSAGES_MASK
-    | LC_PAPER_MASK | LC_NAME_MASK | LC_ADDRESS_MASK
-    | LC_TELEPHONE_MASK | LC_MEASUREMENT_MASK | LC_IDENTIFICATION_MASK;
+pub const LC_ALL_MASK: u32 = LC_CTYPE_MASK
+    | LC_NUMERIC_MASK
+    | LC_TIME_MASK
+    | LC_COLLATE_MASK
+    | LC_MONETARY_MASK
+    | LC_MESSAGES_MASK
+    | LC_PAPER_MASK
+    | LC_NAME_MASK
+    | LC_ADDRESS_MASK
+    | LC_TELEPHONE_MASK
+    | LC_MEASUREMENT_MASK
+    | LC_IDENTIFICATION_MASK;
 
 // ---------------------------------------------------------------------------
 // Special locale constants
@@ -88,10 +96,19 @@ mod tests {
     #[test]
     fn test_categories_distinct() {
         let cats = [
-            LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE,
-            LC_MONETARY, LC_MESSAGES, LC_ALL, LC_PAPER,
-            LC_NAME, LC_ADDRESS, LC_TELEPHONE,
-            LC_MEASUREMENT, LC_IDENTIFICATION,
+            LC_CTYPE,
+            LC_NUMERIC,
+            LC_TIME,
+            LC_COLLATE,
+            LC_MONETARY,
+            LC_MESSAGES,
+            LC_ALL,
+            LC_PAPER,
+            LC_NAME,
+            LC_ADDRESS,
+            LC_TELEPHONE,
+            LC_MEASUREMENT,
+            LC_IDENTIFICATION,
         ];
         for i in 0..cats.len() {
             for j in (i + 1)..cats.len() {
@@ -113,10 +130,17 @@ mod tests {
     #[test]
     fn test_masks_are_powers_of_two() {
         let masks = [
-            LC_CTYPE_MASK, LC_NUMERIC_MASK, LC_TIME_MASK,
-            LC_COLLATE_MASK, LC_MONETARY_MASK, LC_MESSAGES_MASK,
-            LC_PAPER_MASK, LC_NAME_MASK, LC_ADDRESS_MASK,
-            LC_TELEPHONE_MASK, LC_MEASUREMENT_MASK,
+            LC_CTYPE_MASK,
+            LC_NUMERIC_MASK,
+            LC_TIME_MASK,
+            LC_COLLATE_MASK,
+            LC_MONETARY_MASK,
+            LC_MESSAGES_MASK,
+            LC_PAPER_MASK,
+            LC_NAME_MASK,
+            LC_ADDRESS_MASK,
+            LC_TELEPHONE_MASK,
+            LC_MEASUREMENT_MASK,
             LC_IDENTIFICATION_MASK,
         ];
         for m in masks {
@@ -127,10 +151,17 @@ mod tests {
     #[test]
     fn test_masks_no_overlap() {
         let masks = [
-            LC_CTYPE_MASK, LC_NUMERIC_MASK, LC_TIME_MASK,
-            LC_COLLATE_MASK, LC_MONETARY_MASK, LC_MESSAGES_MASK,
-            LC_PAPER_MASK, LC_NAME_MASK, LC_ADDRESS_MASK,
-            LC_TELEPHONE_MASK, LC_MEASUREMENT_MASK,
+            LC_CTYPE_MASK,
+            LC_NUMERIC_MASK,
+            LC_TIME_MASK,
+            LC_COLLATE_MASK,
+            LC_MONETARY_MASK,
+            LC_MESSAGES_MASK,
+            LC_PAPER_MASK,
+            LC_NAME_MASK,
+            LC_ADDRESS_MASK,
+            LC_TELEPHONE_MASK,
+            LC_MEASUREMENT_MASK,
             LC_IDENTIFICATION_MASK,
         ];
         for i in 0..masks.len() {
@@ -142,10 +173,17 @@ mod tests {
 
     #[test]
     fn test_all_mask_covers_all() {
-        let combined = LC_CTYPE_MASK | LC_NUMERIC_MASK | LC_TIME_MASK
-            | LC_COLLATE_MASK | LC_MONETARY_MASK | LC_MESSAGES_MASK
-            | LC_PAPER_MASK | LC_NAME_MASK | LC_ADDRESS_MASK
-            | LC_TELEPHONE_MASK | LC_MEASUREMENT_MASK
+        let combined = LC_CTYPE_MASK
+            | LC_NUMERIC_MASK
+            | LC_TIME_MASK
+            | LC_COLLATE_MASK
+            | LC_MONETARY_MASK
+            | LC_MESSAGES_MASK
+            | LC_PAPER_MASK
+            | LC_NAME_MASK
+            | LC_ADDRESS_MASK
+            | LC_TELEPHONE_MASK
+            | LC_MEASUREMENT_MASK
             | LC_IDENTIFICATION_MASK;
         assert_eq!(LC_ALL_MASK, combined);
     }

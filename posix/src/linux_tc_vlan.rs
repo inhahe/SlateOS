@@ -62,8 +62,11 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            TCA_VLAN_ACT_POP, TCA_VLAN_ACT_PUSH, TCA_VLAN_ACT_MODIFY,
-            TCA_VLAN_ACT_POP_ETH, TCA_VLAN_ACT_PUSH_ETH,
+            TCA_VLAN_ACT_POP,
+            TCA_VLAN_ACT_PUSH,
+            TCA_VLAN_ACT_MODIFY,
+            TCA_VLAN_ACT_POP_ETH,
+            TCA_VLAN_ACT_PUSH_ETH,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -75,10 +78,15 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_VLAN_UNSPEC, TCA_VLAN_TM, TCA_VLAN_PARMS,
-            TCA_VLAN_PUSH_VLAN_ID, TCA_VLAN_PUSH_VLAN_PROTOCOL,
-            TCA_VLAN_PAD, TCA_VLAN_PUSH_VLAN_PRIORITY,
-            TCA_VLAN_PUSH_ETH_DST, TCA_VLAN_PUSH_ETH_SRC,
+            TCA_VLAN_UNSPEC,
+            TCA_VLAN_TM,
+            TCA_VLAN_PARMS,
+            TCA_VLAN_PUSH_VLAN_ID,
+            TCA_VLAN_PUSH_VLAN_PROTOCOL,
+            TCA_VLAN_PAD,
+            TCA_VLAN_PUSH_VLAN_PRIORITY,
+            TCA_VLAN_PUSH_ETH_DST,
+            TCA_VLAN_PUSH_ETH_SRC,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

@@ -75,10 +75,20 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            NHA_UNSPEC, NHA_ID, NHA_GROUP, NHA_GROUP_TYPE,
-            NHA_BLACKHOLE, NHA_OIF, NHA_GATEWAY, NHA_ENCAP_TYPE,
-            NHA_ENCAP, NHA_GROUPS, NHA_MASTER, NHA_FDB,
-            NHA_RES_GROUP, NHA_RES_BUCKET,
+            NHA_UNSPEC,
+            NHA_ID,
+            NHA_GROUP,
+            NHA_GROUP_TYPE,
+            NHA_BLACKHOLE,
+            NHA_OIF,
+            NHA_GATEWAY,
+            NHA_ENCAP_TYPE,
+            NHA_ENCAP,
+            NHA_GROUPS,
+            NHA_MASTER,
+            NHA_FDB,
+            NHA_RES_GROUP,
+            NHA_RES_BUCKET,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -95,8 +105,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            RTNH_F_DEAD, RTNH_F_PERVASIVE, RTNH_F_ONLINK,
-            RTNH_F_OFFLOAD, RTNH_F_LINKDOWN, RTNH_F_UNRESOLVED,
+            RTNH_F_DEAD,
+            RTNH_F_PERVASIVE,
+            RTNH_F_ONLINK,
+            RTNH_F_OFFLOAD,
+            RTNH_F_LINKDOWN,
+            RTNH_F_UNRESOLVED,
             RTNH_F_TRAP,
         ];
         for i in 0..flags.len() {
@@ -109,8 +123,12 @@ mod tests {
     #[test]
     fn test_flags_power_of_two() {
         let flags = [
-            RTNH_F_DEAD, RTNH_F_PERVASIVE, RTNH_F_ONLINK,
-            RTNH_F_OFFLOAD, RTNH_F_LINKDOWN, RTNH_F_UNRESOLVED,
+            RTNH_F_DEAD,
+            RTNH_F_PERVASIVE,
+            RTNH_F_ONLINK,
+            RTNH_F_OFFLOAD,
+            RTNH_F_LINKDOWN,
+            RTNH_F_UNRESOLVED,
             RTNH_F_TRAP,
         ];
         for flag in &flags {

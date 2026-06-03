@@ -114,10 +114,16 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            IFLA_VXLAN_ID, IFLA_VXLAN_GROUP, IFLA_VXLAN_LOCAL,
-            IFLA_VXLAN_TTL, IFLA_VXLAN_TOS, IFLA_VXLAN_LEARNING,
-            IFLA_VXLAN_AGEING, IFLA_VXLAN_LIMIT,
-            IFLA_VXLAN_PORT, IFLA_VXLAN_COLLECT_METADATA,
+            IFLA_VXLAN_ID,
+            IFLA_VXLAN_GROUP,
+            IFLA_VXLAN_LOCAL,
+            IFLA_VXLAN_TTL,
+            IFLA_VXLAN_TOS,
+            IFLA_VXLAN_LEARNING,
+            IFLA_VXLAN_AGEING,
+            IFLA_VXLAN_LIMIT,
+            IFLA_VXLAN_PORT,
+            IFLA_VXLAN_COLLECT_METADATA,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -129,8 +135,10 @@ mod tests {
     #[test]
     fn test_dev_flags_powers_of_two() {
         let flags = [
-            VXLAN_DEV_F_PROXY, VXLAN_DEV_F_RSC,
-            VXLAN_DEV_F_L2MISS, VXLAN_DEV_F_L3MISS,
+            VXLAN_DEV_F_PROXY,
+            VXLAN_DEV_F_RSC,
+            VXLAN_DEV_F_L2MISS,
+            VXLAN_DEV_F_L3MISS,
             VXLAN_DEV_F_COLLECT_METADATA,
         ];
         for flag in &flags {
@@ -141,8 +149,10 @@ mod tests {
     #[test]
     fn test_dev_flags_no_overlap() {
         let flags = [
-            VXLAN_DEV_F_PROXY, VXLAN_DEV_F_RSC,
-            VXLAN_DEV_F_L2MISS, VXLAN_DEV_F_L3MISS,
+            VXLAN_DEV_F_PROXY,
+            VXLAN_DEV_F_RSC,
+            VXLAN_DEV_F_L2MISS,
+            VXLAN_DEV_F_L3MISS,
             VXLAN_DEV_F_COLLECT_METADATA,
         ];
         for i in 0..flags.len() {

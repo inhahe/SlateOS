@@ -7,62 +7,62 @@
 // Protection flags
 // ---------------------------------------------------------------------------
 
+pub use crate::mman::PROT_EXEC;
 pub use crate::mman::PROT_NONE;
 pub use crate::mman::PROT_READ;
 pub use crate::mman::PROT_WRITE;
-pub use crate::mman::PROT_EXEC;
 
 // ---------------------------------------------------------------------------
 // Mapping flags
 // ---------------------------------------------------------------------------
 
-pub use crate::mman::MAP_SHARED;
-pub use crate::mman::MAP_PRIVATE;
-pub use crate::mman::MAP_FIXED;
-pub use crate::mman::MAP_ANONYMOUS;
 pub use crate::mman::MAP_ANON;
-pub use crate::mman::MAP_GROWSDOWN;
+pub use crate::mman::MAP_ANONYMOUS;
+pub use crate::mman::MAP_FAILED;
+pub use crate::mman::MAP_FIXED;
 pub use crate::mman::MAP_FIXED_NOREPLACE;
+pub use crate::mman::MAP_GROWSDOWN;
+pub use crate::mman::MAP_NONBLOCK;
 pub use crate::mman::MAP_NORESERVE;
 pub use crate::mman::MAP_POPULATE;
-pub use crate::mman::MAP_NONBLOCK;
-pub use crate::mman::MAP_FAILED;
+pub use crate::mman::MAP_PRIVATE;
+pub use crate::mman::MAP_SHARED;
 
 // ---------------------------------------------------------------------------
 // msync flags
 // ---------------------------------------------------------------------------
 
 pub use crate::mman::MS_ASYNC;
-pub use crate::mman::MS_SYNC;
 pub use crate::mman::MS_INVALIDATE;
+pub use crate::mman::MS_SYNC;
 
 // ---------------------------------------------------------------------------
 // madvise advice
 // ---------------------------------------------------------------------------
 
+pub use crate::mman::MADV_DONTNEED;
 pub use crate::mman::MADV_NORMAL;
 pub use crate::mman::MADV_RANDOM;
 pub use crate::mman::MADV_SEQUENTIAL;
 pub use crate::mman::MADV_WILLNEED;
-pub use crate::mman::MADV_DONTNEED;
 
 // ---------------------------------------------------------------------------
 // Functions
 // ---------------------------------------------------------------------------
 
-pub use crate::mman::mmap;
-pub use crate::mman::munmap;
-pub use crate::mman::mprotect;
-pub use crate::mman::mlock;
-pub use crate::mman::mlockall;
-pub use crate::mman::msync;
 pub use crate::mman::madvise;
+pub use crate::mman::memfd_create;
+pub use crate::mman::mlock;
+pub use crate::mman::mlock2;
+pub use crate::mman::mlockall;
+pub use crate::mman::mmap;
+pub use crate::mman::mmap64;
+pub use crate::mman::mprotect;
+pub use crate::mman::mremap;
+pub use crate::mman::msync;
+pub use crate::mman::munmap;
 pub use crate::mman::shm_open;
 pub use crate::mman::shm_unlink;
-pub use crate::mman::memfd_create;
-pub use crate::mman::mmap64;
-pub use crate::mman::mremap;
-pub use crate::mman::mlock2;
 
 // ---------------------------------------------------------------------------
 // POSIX advisory
@@ -107,9 +107,15 @@ mod tests {
     #[test]
     fn test_map_flags_distinct() {
         let flags = [
-            MAP_SHARED, MAP_PRIVATE, MAP_FIXED, MAP_ANONYMOUS,
-            MAP_GROWSDOWN, MAP_FIXED_NOREPLACE, MAP_NORESERVE,
-            MAP_POPULATE, MAP_NONBLOCK,
+            MAP_SHARED,
+            MAP_PRIVATE,
+            MAP_FIXED,
+            MAP_ANONYMOUS,
+            MAP_GROWSDOWN,
+            MAP_FIXED_NOREPLACE,
+            MAP_NORESERVE,
+            MAP_POPULATE,
+            MAP_NONBLOCK,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

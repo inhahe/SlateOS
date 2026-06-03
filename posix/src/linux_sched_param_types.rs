@@ -66,8 +66,12 @@ mod tests {
     #[test]
     fn test_policies_distinct() {
         let policies = [
-            SCHED_OTHER, SCHED_FIFO, SCHED_RR,
-            SCHED_BATCH, SCHED_IDLE, SCHED_DEADLINE,
+            SCHED_OTHER,
+            SCHED_FIFO,
+            SCHED_RR,
+            SCHED_BATCH,
+            SCHED_IDLE,
+            SCHED_DEADLINE,
         ];
         for i in 0..policies.len() {
             for j in (i + 1)..policies.len() {

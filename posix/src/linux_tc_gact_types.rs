@@ -37,10 +37,7 @@ mod tests {
 
     #[test]
     fn test_attrs_distinct() {
-        let attrs = [
-            TCA_GACT_UNSPEC, TCA_GACT_TM,
-            TCA_GACT_PARMS, TCA_GACT_PROB,
-        ];
+        let attrs = [TCA_GACT_UNSPEC, TCA_GACT_TM, TCA_GACT_PARMS, TCA_GACT_PROB];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
                 assert_ne!(attrs[i], attrs[j]);

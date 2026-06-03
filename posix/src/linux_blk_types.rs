@@ -87,11 +87,21 @@ mod tests {
     #[test]
     fn test_ops_distinct() {
         let ops = [
-            REQ_OP_READ, REQ_OP_WRITE, REQ_OP_FLUSH, REQ_OP_DISCARD,
-            REQ_OP_SECURE_ERASE, REQ_OP_WRITE_SAME, REQ_OP_WRITE_ZEROES,
-            REQ_OP_ZONE_OPEN, REQ_OP_ZONE_CLOSE, REQ_OP_ZONE_FINISH,
-            REQ_OP_ZONE_APPEND, REQ_OP_ZONE_RESET, REQ_OP_ZONE_RESET_ALL,
-            REQ_OP_DRV_IN, REQ_OP_DRV_OUT,
+            REQ_OP_READ,
+            REQ_OP_WRITE,
+            REQ_OP_FLUSH,
+            REQ_OP_DISCARD,
+            REQ_OP_SECURE_ERASE,
+            REQ_OP_WRITE_SAME,
+            REQ_OP_WRITE_ZEROES,
+            REQ_OP_ZONE_OPEN,
+            REQ_OP_ZONE_CLOSE,
+            REQ_OP_ZONE_FINISH,
+            REQ_OP_ZONE_APPEND,
+            REQ_OP_ZONE_RESET,
+            REQ_OP_ZONE_RESET_ALL,
+            REQ_OP_DRV_IN,
+            REQ_OP_DRV_OUT,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -103,8 +113,13 @@ mod tests {
     #[test]
     fn test_ops_within_mask() {
         let ops = [
-            REQ_OP_READ, REQ_OP_WRITE, REQ_OP_FLUSH, REQ_OP_DISCARD,
-            REQ_OP_WRITE_ZEROES, REQ_OP_DRV_IN, REQ_OP_DRV_OUT,
+            REQ_OP_READ,
+            REQ_OP_WRITE,
+            REQ_OP_FLUSH,
+            REQ_OP_DISCARD,
+            REQ_OP_WRITE_ZEROES,
+            REQ_OP_DRV_IN,
+            REQ_OP_DRV_OUT,
         ];
         for op in &ops {
             assert_eq!(op & REQ_OP_MASK, *op);
@@ -114,10 +129,21 @@ mod tests {
     #[test]
     fn test_flags_are_powers_of_two() {
         let flags = [
-            REQ_FAILFAST_DEV, REQ_FAILFAST_TRANSPORT, REQ_FAILFAST_DRIVER,
-            REQ_SYNC, REQ_META, REQ_PRIO, REQ_NOMERGE, REQ_IDLE,
-            REQ_INTEGRITY, REQ_FUA, REQ_PREFLUSH, REQ_RAHEAD,
-            REQ_BACKGROUND, REQ_NOWAIT, REQ_POLLED,
+            REQ_FAILFAST_DEV,
+            REQ_FAILFAST_TRANSPORT,
+            REQ_FAILFAST_DRIVER,
+            REQ_SYNC,
+            REQ_META,
+            REQ_PRIO,
+            REQ_NOMERGE,
+            REQ_IDLE,
+            REQ_INTEGRITY,
+            REQ_FUA,
+            REQ_PREFLUSH,
+            REQ_RAHEAD,
+            REQ_BACKGROUND,
+            REQ_NOWAIT,
+            REQ_POLLED,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);

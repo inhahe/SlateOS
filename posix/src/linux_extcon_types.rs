@@ -75,13 +75,21 @@ mod tests {
     #[test]
     fn test_connector_types_distinct() {
         let types = [
-            EXTCON_USB, EXTCON_USB_HOST, EXTCON_CHG_USB_SDP,
-            EXTCON_CHG_USB_DCP, EXTCON_CHG_USB_CDP,
-            EXTCON_CHG_USB_SLOW, EXTCON_CHG_USB_FAST,
-            EXTCON_DISP_HDMI, EXTCON_DISP_DP,
-            EXTCON_DISP_MHL, EXTCON_DISP_VGA,
-            EXTCON_JACK_HEADPHONE, EXTCON_JACK_MICROPHONE,
-            EXTCON_JACK_LINE_OUT, EXTCON_DOCK,
+            EXTCON_USB,
+            EXTCON_USB_HOST,
+            EXTCON_CHG_USB_SDP,
+            EXTCON_CHG_USB_DCP,
+            EXTCON_CHG_USB_CDP,
+            EXTCON_CHG_USB_SLOW,
+            EXTCON_CHG_USB_FAST,
+            EXTCON_DISP_HDMI,
+            EXTCON_DISP_DP,
+            EXTCON_DISP_MHL,
+            EXTCON_DISP_VGA,
+            EXTCON_JACK_HEADPHONE,
+            EXTCON_JACK_MICROPHONE,
+            EXTCON_JACK_LINE_OUT,
+            EXTCON_DOCK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -93,8 +101,10 @@ mod tests {
     #[test]
     fn test_properties_distinct() {
         let props = [
-            EXTCON_PROP_USB_VBUS, EXTCON_PROP_USB_DATA_ROLE,
-            EXTCON_PROP_USB_TYPEC_POLARITY, EXTCON_PROP_DISP_HPD,
+            EXTCON_PROP_USB_VBUS,
+            EXTCON_PROP_USB_DATA_ROLE,
+            EXTCON_PROP_USB_TYPEC_POLARITY,
+            EXTCON_PROP_DISP_HPD,
         ];
         for i in 0..props.len() {
             for j in (i + 1)..props.len() {

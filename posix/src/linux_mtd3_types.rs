@@ -74,8 +74,13 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            MTD_ABSENT, MTD_RAM, MTD_ROM, MTD_NORFLASH,
-            MTD_NANDFLASH, MTD_DATAFLASH, MTD_UBIVOLUME,
+            MTD_ABSENT,
+            MTD_RAM,
+            MTD_ROM,
+            MTD_NORFLASH,
+            MTD_NANDFLASH,
+            MTD_DATAFLASH,
+            MTD_UBIVOLUME,
             MTD_MLCNANDFLASH,
         ];
         for i in 0..types.len() {
@@ -88,8 +93,10 @@ mod tests {
     #[test]
     fn test_capability_flags_no_overlap() {
         let flags = [
-            MTD_WRITEABLE, MTD_BIT_WRITEABLE,
-            MTD_NO_ERASE, MTD_POWERUP_LOCK,
+            MTD_WRITEABLE,
+            MTD_BIT_WRITEABLE,
+            MTD_NO_ERASE,
+            MTD_POWERUP_LOCK,
             MTD_SLC_ON_MLC_EMULATION,
         ];
         for i in 0..flags.len() {
@@ -112,8 +119,10 @@ mod tests {
     #[test]
     fn test_file_modes_distinct() {
         let modes = [
-            MTD_FILE_MODE_NORMAL, MTD_FILE_MODE_OTP_FACTORY,
-            MTD_FILE_MODE_OTP_USER, MTD_FILE_MODE_RAW,
+            MTD_FILE_MODE_NORMAL,
+            MTD_FILE_MODE_OTP_FACTORY,
+            MTD_FILE_MODE_OTP_USER,
+            MTD_FILE_MODE_RAW,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

@@ -77,9 +77,12 @@ mod tests {
     #[test]
     fn test_ifla_attrs_distinct() {
         let attrs = [
-            IFLA_VETH_UNSPEC, IFLA_VETH_IFNAME,
-            IFLA_VETH_MTU, IFLA_VETH_TXQUEUELEN,
-            IFLA_VETH_NET_NS_PID, IFLA_VETH_NET_NS_FD,
+            IFLA_VETH_UNSPEC,
+            IFLA_VETH_IFNAME,
+            IFLA_VETH_MTU,
+            IFLA_VETH_TXQUEUELEN,
+            IFLA_VETH_NET_NS_PID,
+            IFLA_VETH_NET_NS_FD,
             IFLA_VETH_TARGET_NETNSID,
         ];
         for i in 0..attrs.len() {

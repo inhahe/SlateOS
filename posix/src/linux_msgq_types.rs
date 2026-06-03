@@ -84,8 +84,13 @@ mod tests {
     #[test]
     fn test_ctl_commands_distinct() {
         let cmds = [
-            IPC_STAT_MSG, IPC_SET_MSG, IPC_RMID_MSG,
-            IPC_INFO_MSG, MSG_INFO, MSG_STAT, MSG_STAT_ANY,
+            IPC_STAT_MSG,
+            IPC_SET_MSG,
+            IPC_RMID_MSG,
+            IPC_INFO_MSG,
+            MSG_INFO,
+            MSG_STAT,
+            MSG_STAT_ANY,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

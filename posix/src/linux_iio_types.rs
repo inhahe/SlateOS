@@ -102,11 +102,23 @@ mod tests {
     #[test]
     fn test_channel_types_distinct() {
         let types = [
-            IIO_VOLTAGE, IIO_CURRENT, IIO_POWER, IIO_ACCEL,
-            IIO_ANGL_VEL, IIO_MAGN, IIO_LIGHT, IIO_INTENSITY,
-            IIO_PROXIMITY, IIO_TEMP, IIO_CAPACITANCE, IIO_INCLI,
-            IIO_ROT, IIO_PRESSURE, IIO_HUMIDITYRELATIVE,
-            IIO_ACTIVITY, IIO_STEPS,
+            IIO_VOLTAGE,
+            IIO_CURRENT,
+            IIO_POWER,
+            IIO_ACCEL,
+            IIO_ANGL_VEL,
+            IIO_MAGN,
+            IIO_LIGHT,
+            IIO_INTENSITY,
+            IIO_PROXIMITY,
+            IIO_TEMP,
+            IIO_CAPACITANCE,
+            IIO_INCLI,
+            IIO_ROT,
+            IIO_PRESSURE,
+            IIO_HUMIDITYRELATIVE,
+            IIO_ACTIVITY,
+            IIO_STEPS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -118,8 +130,11 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let types = [
-            IIO_EV_TYPE_THRESH, IIO_EV_TYPE_MAG, IIO_EV_TYPE_ROC,
-            IIO_EV_TYPE_THRESH_ADAPTIVE, IIO_EV_TYPE_MAG_ADAPTIVE,
+            IIO_EV_TYPE_THRESH,
+            IIO_EV_TYPE_MAG,
+            IIO_EV_TYPE_ROC,
+            IIO_EV_TYPE_THRESH_ADAPTIVE,
+            IIO_EV_TYPE_MAG_ADAPTIVE,
             IIO_EV_TYPE_CHANGE,
         ];
         for i in 0..types.len() {
@@ -142,8 +157,13 @@ mod tests {
     #[test]
     fn test_modifiers_distinct() {
         let mods = [
-            IIO_MOD_X, IIO_MOD_Y, IIO_MOD_Z, IIO_MOD_X_AND_Y,
-            IIO_MOD_X_AND_Z, IIO_MOD_Y_AND_Z, IIO_MOD_ROOT_SUM_SQUARED,
+            IIO_MOD_X,
+            IIO_MOD_Y,
+            IIO_MOD_Z,
+            IIO_MOD_X_AND_Y,
+            IIO_MOD_X_AND_Z,
+            IIO_MOD_Y_AND_Z,
+            IIO_MOD_ROOT_SUM_SQUARED,
         ];
         for i in 0..mods.len() {
             for j in (i + 1)..mods.len() {

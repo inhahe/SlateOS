@@ -102,8 +102,7 @@ mod tests {
     #[test]
     fn test_aal_types_distinct() {
         let types = [
-            ATM_NO_AAL, ATM_AAL0, ATM_AAL1, ATM_AAL2,
-            ATM_AAL34, ATM_AAL5,
+            ATM_NO_AAL, ATM_AAL0, ATM_AAL1, ATM_AAL2, ATM_AAL34, ATM_AAL5,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -140,10 +139,18 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            ATM_GETLINKRATE, ATM_GETNAMES, ATM_GETTYPE,
-            ATM_GETESI, ATM_GETADDR, ATM_RSTADDR,
-            ATM_ADDADDR, ATM_DELADDR, ATM_GETSTAT,
-            ATM_GETSTATZ, ATM_GETCIRANGE, ATM_SETCIRANGE,
+            ATM_GETLINKRATE,
+            ATM_GETNAMES,
+            ATM_GETTYPE,
+            ATM_GETESI,
+            ATM_GETADDR,
+            ATM_RSTADDR,
+            ATM_ADDADDR,
+            ATM_DELADDR,
+            ATM_GETSTAT,
+            ATM_GETSTATZ,
+            ATM_GETCIRANGE,
+            ATM_SETCIRANGE,
             ATM_SETESI,
         ];
         for i in 0..cmds.len() {

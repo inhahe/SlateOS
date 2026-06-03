@@ -50,10 +50,20 @@ mod tests {
     #[test]
     fn test_msg_flags_distinct() {
         let flags = [
-            MSG_OOB, MSG_PEEK, MSG_DONTROUTE, MSG_EOR,
-            MSG_WAITALL, MSG_DONTWAIT, MSG_TRUNC, MSG_CTRUNC,
-            MSG_NOSIGNAL, MSG_CONFIRM, MSG_MORE,
-            MSG_CMSG_CLOEXEC, MSG_ERRQUEUE, MSG_FASTOPEN,
+            MSG_OOB,
+            MSG_PEEK,
+            MSG_DONTROUTE,
+            MSG_EOR,
+            MSG_WAITALL,
+            MSG_DONTWAIT,
+            MSG_TRUNC,
+            MSG_CTRUNC,
+            MSG_NOSIGNAL,
+            MSG_CONFIRM,
+            MSG_MORE,
+            MSG_CMSG_CLOEXEC,
+            MSG_ERRQUEUE,
+            MSG_FASTOPEN,
             MSG_ZEROCOPY,
         ];
         for i in 0..flags.len() {

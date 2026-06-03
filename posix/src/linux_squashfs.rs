@@ -116,8 +116,12 @@ mod tests {
     #[test]
     fn test_compression_types_distinct() {
         let types = [
-            SQUASHFS_COMP_GZIP, SQUASHFS_COMP_LZMA, SQUASHFS_COMP_LZO,
-            SQUASHFS_COMP_XZ, SQUASHFS_COMP_LZ4, SQUASHFS_COMP_ZSTD,
+            SQUASHFS_COMP_GZIP,
+            SQUASHFS_COMP_LZMA,
+            SQUASHFS_COMP_LZO,
+            SQUASHFS_COMP_XZ,
+            SQUASHFS_COMP_LZ4,
+            SQUASHFS_COMP_ZSTD,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -129,11 +133,20 @@ mod tests {
     #[test]
     fn test_inode_types_distinct() {
         let types = [
-            SQUASHFS_DIR_TYPE, SQUASHFS_REG_TYPE, SQUASHFS_SYMLINK_TYPE,
-            SQUASHFS_BLKDEV_TYPE, SQUASHFS_CHRDEV_TYPE, SQUASHFS_FIFO_TYPE,
-            SQUASHFS_SOCKET_TYPE, SQUASHFS_LDIR_TYPE, SQUASHFS_LREG_TYPE,
-            SQUASHFS_LSYMLINK_TYPE, SQUASHFS_LBLKDEV_TYPE,
-            SQUASHFS_LCHRDEV_TYPE, SQUASHFS_LFIFO_TYPE, SQUASHFS_LSOCKET_TYPE,
+            SQUASHFS_DIR_TYPE,
+            SQUASHFS_REG_TYPE,
+            SQUASHFS_SYMLINK_TYPE,
+            SQUASHFS_BLKDEV_TYPE,
+            SQUASHFS_CHRDEV_TYPE,
+            SQUASHFS_FIFO_TYPE,
+            SQUASHFS_SOCKET_TYPE,
+            SQUASHFS_LDIR_TYPE,
+            SQUASHFS_LREG_TYPE,
+            SQUASHFS_LSYMLINK_TYPE,
+            SQUASHFS_LBLKDEV_TYPE,
+            SQUASHFS_LCHRDEV_TYPE,
+            SQUASHFS_LFIFO_TYPE,
+            SQUASHFS_LSOCKET_TYPE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -145,10 +158,14 @@ mod tests {
     #[test]
     fn test_superblock_flags_no_overlap() {
         let flags = [
-            SQUASHFS_UNCOMPRESSED_INODES, SQUASHFS_UNCOMPRESSED_DATA,
-            SQUASHFS_NO_FRAGMENTS, SQUASHFS_ALWAYS_FRAGMENTS,
-            SQUASHFS_DUPLICATES, SQUASHFS_EXPORTABLE,
-            SQUASHFS_UNCOMPRESSED_XATTRS, SQUASHFS_NO_XATTRS,
+            SQUASHFS_UNCOMPRESSED_INODES,
+            SQUASHFS_UNCOMPRESSED_DATA,
+            SQUASHFS_NO_FRAGMENTS,
+            SQUASHFS_ALWAYS_FRAGMENTS,
+            SQUASHFS_DUPLICATES,
+            SQUASHFS_EXPORTABLE,
+            SQUASHFS_UNCOMPRESSED_XATTRS,
+            SQUASHFS_NO_XATTRS,
             SQUASHFS_COMP_OPT,
         ];
         for i in 0..flags.len() {

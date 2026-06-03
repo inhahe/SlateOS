@@ -46,11 +46,15 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            NETCONFA_UNSPEC, NETCONFA_IFINDEX, NETCONFA_FORWARDING,
-            NETCONFA_RP_FILTER, NETCONFA_MC_FORWARDING,
+            NETCONFA_UNSPEC,
+            NETCONFA_IFINDEX,
+            NETCONFA_FORWARDING,
+            NETCONFA_RP_FILTER,
+            NETCONFA_MC_FORWARDING,
             NETCONFA_PROXY_NEIGH,
             NETCONFA_IGNORE_ROUTES_WITH_LINKDOWN,
-            NETCONFA_INPUT, NETCONFA_BC_FORWARDING,
+            NETCONFA_INPUT,
+            NETCONFA_BC_FORWARDING,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

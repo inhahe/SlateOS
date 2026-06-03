@@ -88,9 +88,7 @@ mod tests {
 
     #[test]
     fn test_types_distinct() {
-        let types = [
-            KPROBE_TYPE_STANDARD, KPROBE_TYPE_RETURN, KPROBE_TYPE_JPROBE,
-        ];
+        let types = [KPROBE_TYPE_STANDARD, KPROBE_TYPE_RETURN, KPROBE_TYPE_JPROBE];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -101,8 +99,10 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            KPROBE_STATE_REGISTERED, KPROBE_STATE_ARMED,
-            KPROBE_STATE_DISABLED, KPROBE_STATE_REMOVING,
+            KPROBE_STATE_REGISTERED,
+            KPROBE_STATE_ARMED,
+            KPROBE_STATE_DISABLED,
+            KPROBE_STATE_REMOVING,
             KPROBE_STATE_HIT,
         ];
         for i in 0..states.len() {
@@ -115,8 +115,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            KPROBE_FLAG_FTRACE, KPROBE_FLAG_OPTIMIZED,
-            KPROBE_FLAG_DISABLED, KPROBE_FLAG_GONE,
+            KPROBE_FLAG_FTRACE,
+            KPROBE_FLAG_OPTIMIZED,
+            KPROBE_FLAG_DISABLED,
+            KPROBE_FLAG_GONE,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -129,8 +131,10 @@ mod tests {
     #[test]
     fn test_blacklist_reasons_distinct() {
         let reasons = [
-            KPROBE_BLACKLIST_NOTRACE, KPROBE_BLACKLIST_CRITICAL,
-            KPROBE_BLACKLIST_SELF, KPROBE_BLACKLIST_NONSTANDARD,
+            KPROBE_BLACKLIST_NOTRACE,
+            KPROBE_BLACKLIST_CRITICAL,
+            KPROBE_BLACKLIST_SELF,
+            KPROBE_BLACKLIST_NONSTANDARD,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {

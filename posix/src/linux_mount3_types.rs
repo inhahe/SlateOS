@@ -71,10 +71,14 @@ mod tests {
     #[test]
     fn test_mount_attrs_distinct() {
         let attrs = [
-            MOUNT_ATTR_RDONLY, MOUNT_ATTR_NOSUID,
-            MOUNT_ATTR_NODEV, MOUNT_ATTR_NOEXEC,
-            MOUNT_ATTR_NOATIME, MOUNT_ATTR_STRICTATIME,
-            MOUNT_ATTR_NODIRATIME, MOUNT_ATTR_IDMAP,
+            MOUNT_ATTR_RDONLY,
+            MOUNT_ATTR_NOSUID,
+            MOUNT_ATTR_NODEV,
+            MOUNT_ATTR_NOEXEC,
+            MOUNT_ATTR_NOATIME,
+            MOUNT_ATTR_STRICTATIME,
+            MOUNT_ATTR_NODIRATIME,
+            MOUNT_ATTR_IDMAP,
             MOUNT_ATTR_NOSYMFOLLOW,
         ];
         for i in 0..attrs.len() {
@@ -87,7 +91,8 @@ mod tests {
     #[test]
     fn test_move_mount_from_flags_no_overlap() {
         let flags = [
-            MOVE_MOUNT_F_SYMLINKS, MOVE_MOUNT_F_AUTOMOUNTS,
+            MOVE_MOUNT_F_SYMLINKS,
+            MOVE_MOUNT_F_AUTOMOUNTS,
             MOVE_MOUNT_F_EMPTY_PATH,
         ];
         for i in 0..flags.len() {
@@ -100,7 +105,8 @@ mod tests {
     #[test]
     fn test_move_mount_to_flags_no_overlap() {
         let flags = [
-            MOVE_MOUNT_T_SYMLINKS, MOVE_MOUNT_T_AUTOMOUNTS,
+            MOVE_MOUNT_T_SYMLINKS,
+            MOVE_MOUNT_T_AUTOMOUNTS,
             MOVE_MOUNT_T_EMPTY_PATH,
         ];
         for i in 0..flags.len() {

@@ -76,8 +76,10 @@ mod tests {
     #[test]
     fn test_coefs_distinct() {
         let coefs = [
-            IOCOST_COEF_SEQR, IOCOST_COEF_SEQW,
-            IOCOST_COEF_RANDR, IOCOST_COEF_RANDW,
+            IOCOST_COEF_SEQR,
+            IOCOST_COEF_SEQW,
+            IOCOST_COEF_RANDR,
+            IOCOST_COEF_RANDW,
         ];
         for i in 0..coefs.len() {
             for j in (i + 1)..coefs.len() {
@@ -94,8 +96,10 @@ mod tests {
     #[test]
     fn test_qos_params_distinct() {
         let params = [
-            IOCOST_QOS_RLAT, IOCOST_QOS_WLAT,
-            IOCOST_QOS_MIN, IOCOST_QOS_MAX,
+            IOCOST_QOS_RLAT,
+            IOCOST_QOS_WLAT,
+            IOCOST_QOS_MIN,
+            IOCOST_QOS_MAX,
         ];
         for i in 0..params.len() {
             for j in (i + 1)..params.len() {
@@ -107,8 +111,10 @@ mod tests {
     #[test]
     fn test_ioprio_classes_distinct() {
         let classes = [
-            IOPRIO_CLASS_NONE, IOPRIO_CLASS_RT,
-            IOPRIO_CLASS_BE, IOPRIO_CLASS_IDLE,
+            IOPRIO_CLASS_NONE,
+            IOPRIO_CLASS_RT,
+            IOPRIO_CLASS_BE,
+            IOPRIO_CLASS_IDLE,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {

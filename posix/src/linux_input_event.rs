@@ -123,8 +123,7 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let types = [
-            EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC,
-            EV_SW, EV_LED, EV_SND, EV_REP, EV_FF,
+            EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC, EV_SW, EV_LED, EV_SND, EV_REP, EV_FF,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -146,8 +145,16 @@ mod tests {
     #[test]
     fn test_key_codes_distinct() {
         let keys = [
-            KEY_ESC, KEY_BACKSPACE, KEY_TAB, KEY_ENTER, KEY_LEFTCTRL,
-            KEY_LEFTSHIFT, KEY_LEFTALT, KEY_SPACE, KEY_CAPSLOCK, KEY_F1,
+            KEY_ESC,
+            KEY_BACKSPACE,
+            KEY_TAB,
+            KEY_ENTER,
+            KEY_LEFTCTRL,
+            KEY_LEFTSHIFT,
+            KEY_LEFTALT,
+            KEY_SPACE,
+            KEY_CAPSLOCK,
+            KEY_F1,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {

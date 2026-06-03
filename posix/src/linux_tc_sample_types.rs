@@ -31,8 +31,11 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_SAMPLE_UNSPEC, TCA_SAMPLE_TM, TCA_SAMPLE_PARMS,
-            TCA_SAMPLE_RATE, TCA_SAMPLE_TRUNC_SIZE,
+            TCA_SAMPLE_UNSPEC,
+            TCA_SAMPLE_TM,
+            TCA_SAMPLE_PARMS,
+            TCA_SAMPLE_RATE,
+            TCA_SAMPLE_TRUNC_SIZE,
             TCA_SAMPLE_PSAMPLE_GROUP,
         ];
         for i in 0..attrs.len() {

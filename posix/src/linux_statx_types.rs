@@ -85,10 +85,20 @@ mod tests {
     #[test]
     fn test_mask_bits_no_overlap() {
         let masks = [
-            STATX_TYPE, STATX_MODE, STATX_NLINK, STATX_UID,
-            STATX_GID, STATX_ATIME, STATX_MTIME, STATX_CTIME,
-            STATX_INO, STATX_SIZE, STATX_BLOCKS, STATX_BTIME,
-            STATX_MNT_ID, STATX_DIOALIGN,
+            STATX_TYPE,
+            STATX_MODE,
+            STATX_NLINK,
+            STATX_UID,
+            STATX_GID,
+            STATX_ATIME,
+            STATX_MTIME,
+            STATX_CTIME,
+            STATX_INO,
+            STATX_SIZE,
+            STATX_BLOCKS,
+            STATX_BTIME,
+            STATX_MNT_ID,
+            STATX_DIOALIGN,
         ];
         for i in 0..masks.len() {
             assert!(masks[i].is_power_of_two());
@@ -100,19 +110,31 @@ mod tests {
 
     #[test]
     fn test_basic_stats_combines() {
-        let expected = STATX_TYPE | STATX_MODE | STATX_NLINK | STATX_UID
-            | STATX_GID | STATX_ATIME | STATX_MTIME | STATX_CTIME
-            | STATX_INO | STATX_SIZE | STATX_BLOCKS;
+        let expected = STATX_TYPE
+            | STATX_MODE
+            | STATX_NLINK
+            | STATX_UID
+            | STATX_GID
+            | STATX_ATIME
+            | STATX_MTIME
+            | STATX_CTIME
+            | STATX_INO
+            | STATX_SIZE
+            | STATX_BLOCKS;
         assert_eq!(STATX_BASIC_STATS, expected);
     }
 
     #[test]
     fn test_attr_flags_distinct() {
         let attrs = [
-            STATX_ATTR_COMPRESSED, STATX_ATTR_IMMUTABLE,
-            STATX_ATTR_APPEND, STATX_ATTR_NODUMP,
-            STATX_ATTR_ENCRYPTED, STATX_ATTR_AUTOMOUNT,
-            STATX_ATTR_MOUNT_ROOT, STATX_ATTR_VERITY,
+            STATX_ATTR_COMPRESSED,
+            STATX_ATTR_IMMUTABLE,
+            STATX_ATTR_APPEND,
+            STATX_ATTR_NODUMP,
+            STATX_ATTR_ENCRYPTED,
+            STATX_ATTR_AUTOMOUNT,
+            STATX_ATTR_MOUNT_ROOT,
+            STATX_ATTR_VERITY,
             STATX_ATTR_DAX,
         ];
         for i in 0..attrs.len() {

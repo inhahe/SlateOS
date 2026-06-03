@@ -76,8 +76,7 @@ pub const GAMEPORT_STATUS_AX3: u32 = 1 << 3;
 
 /// Axis timing bit mask (bits 0–3).
 pub const GAMEPORT_STATUS_AXES_MASK: u32 =
-    GAMEPORT_STATUS_AX0 | GAMEPORT_STATUS_AX1
-    | GAMEPORT_STATUS_AX2 | GAMEPORT_STATUS_AX3;
+    GAMEPORT_STATUS_AX0 | GAMEPORT_STATUS_AX1 | GAMEPORT_STATUS_AX2 | GAMEPORT_STATUS_AX3;
 
 // ---------------------------------------------------------------------------
 // Calibration
@@ -102,8 +101,10 @@ mod tests {
     #[test]
     fn test_axis_indices_distinct() {
         let axes = [
-            GAMEPORT_AXIS_X, GAMEPORT_AXIS_Y,
-            GAMEPORT_AXIS_RX, GAMEPORT_AXIS_RY,
+            GAMEPORT_AXIS_X,
+            GAMEPORT_AXIS_Y,
+            GAMEPORT_AXIS_RX,
+            GAMEPORT_AXIS_RY,
         ];
         for i in 0..axes.len() {
             for j in (i + 1)..axes.len() {
@@ -123,8 +124,10 @@ mod tests {
     #[test]
     fn test_button_bits_powers_of_two() {
         let btns = [
-            GAMEPORT_BTN_1, GAMEPORT_BTN_2,
-            GAMEPORT_BTN_3, GAMEPORT_BTN_4,
+            GAMEPORT_BTN_1,
+            GAMEPORT_BTN_2,
+            GAMEPORT_BTN_3,
+            GAMEPORT_BTN_4,
         ];
         for btn in &btns {
             assert!(btn.is_power_of_two(), "0x{:x}", btn);
@@ -134,8 +137,10 @@ mod tests {
     #[test]
     fn test_button_bits_no_overlap() {
         let btns = [
-            GAMEPORT_BTN_1, GAMEPORT_BTN_2,
-            GAMEPORT_BTN_3, GAMEPORT_BTN_4,
+            GAMEPORT_BTN_1,
+            GAMEPORT_BTN_2,
+            GAMEPORT_BTN_3,
+            GAMEPORT_BTN_4,
         ];
         for i in 0..btns.len() {
             for j in (i + 1)..btns.len() {
@@ -152,8 +157,10 @@ mod tests {
     #[test]
     fn test_status_bits_powers_of_two() {
         let bits = [
-            GAMEPORT_STATUS_AX0, GAMEPORT_STATUS_AX1,
-            GAMEPORT_STATUS_AX2, GAMEPORT_STATUS_AX3,
+            GAMEPORT_STATUS_AX0,
+            GAMEPORT_STATUS_AX1,
+            GAMEPORT_STATUS_AX2,
+            GAMEPORT_STATUS_AX3,
         ];
         for bit in &bits {
             assert!(bit.is_power_of_two(), "0x{:x}", bit);
@@ -163,8 +170,10 @@ mod tests {
     #[test]
     fn test_status_bits_no_overlap() {
         let bits = [
-            GAMEPORT_STATUS_AX0, GAMEPORT_STATUS_AX1,
-            GAMEPORT_STATUS_AX2, GAMEPORT_STATUS_AX3,
+            GAMEPORT_STATUS_AX0,
+            GAMEPORT_STATUS_AX1,
+            GAMEPORT_STATUS_AX2,
+            GAMEPORT_STATUS_AX3,
         ];
         for i in 0..bits.len() {
             for j in (i + 1)..bits.len() {

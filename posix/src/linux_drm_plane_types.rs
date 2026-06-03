@@ -93,9 +93,12 @@ mod tests {
     #[test]
     fn test_rotation_flags_no_overlap() {
         let flags = [
-            DRM_MODE_ROTATE_0, DRM_MODE_ROTATE_90,
-            DRM_MODE_ROTATE_180, DRM_MODE_ROTATE_270,
-            DRM_MODE_REFLECT_X, DRM_MODE_REFLECT_Y,
+            DRM_MODE_ROTATE_0,
+            DRM_MODE_ROTATE_90,
+            DRM_MODE_ROTATE_180,
+            DRM_MODE_ROTATE_270,
+            DRM_MODE_REFLECT_X,
+            DRM_MODE_REFLECT_Y,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -107,7 +110,11 @@ mod tests {
 
     #[test]
     fn test_blend_modes_distinct() {
-        let modes = [DRM_MODE_BLEND_NONE, DRM_MODE_BLEND_PREMULTI, DRM_MODE_BLEND_COVERAGE];
+        let modes = [
+            DRM_MODE_BLEND_NONE,
+            DRM_MODE_BLEND_PREMULTI,
+            DRM_MODE_BLEND_COVERAGE,
+        ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
                 assert_ne!(modes[i], modes[j]);
@@ -117,7 +124,11 @@ mod tests {
 
     #[test]
     fn test_color_encoding_distinct() {
-        let encs = [DRM_COLOR_YCBCR_BT601, DRM_COLOR_YCBCR_BT709, DRM_COLOR_YCBCR_BT2020];
+        let encs = [
+            DRM_COLOR_YCBCR_BT601,
+            DRM_COLOR_YCBCR_BT709,
+            DRM_COLOR_YCBCR_BT2020,
+        ];
         for i in 0..encs.len() {
             for j in (i + 1)..encs.len() {
                 assert_ne!(encs[i], encs[j]);

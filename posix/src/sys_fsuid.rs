@@ -12,8 +12,8 @@
 //! 0 (matching `getuid()`/`getgid()`).  POSIX semantics: each call
 //! returns the *previous* fsuid/fsgid value.
 
-use crate::types::UidT;
 use crate::types::GidT;
+use crate::types::UidT;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 // ---------------------------------------------------------------------------
@@ -120,10 +120,7 @@ pub extern "C" fn setfsuid(fsuid: UidT) -> i32 {
         let ruid = crate::unistd::getuid();
         let euid = crate::unistd::geteuid();
         let matches_cred = fsuid == ruid || fsuid == euid || fsuid == prev;
-        if matches_cred
-            || crate::sys_capability::has_capability(
-                crate::sys_capability::CAP_SETUID,
-            )
+        if matches_cred || crate::sys_capability::has_capability(crate::sys_capability::CAP_SETUID)
         {
             FSUID.store(fsuid, Ordering::Relaxed);
         }
@@ -147,10 +144,7 @@ pub extern "C" fn setfsgid(fsgid: GidT) -> i32 {
         let rgid = crate::unistd::getgid();
         let egid = crate::unistd::getegid();
         let matches_cred = fsgid == rgid || fsgid == egid || fsgid == prev;
-        if matches_cred
-            || crate::sys_capability::has_capability(
-                crate::sys_capability::CAP_SETGID,
-            )
+        if matches_cred || crate::sys_capability::has_capability(crate::sys_capability::CAP_SETGID)
         {
             FSGID.store(fsgid, Ordering::Relaxed);
         }
@@ -462,16 +456,14 @@ mod tests {
         }
         impl CapGuard {
             fn snapshot() -> Self {
-                let (lo, hi) =
-                    crate::sys_capability::current_caps_effective();
+                let (lo, hi) = crate::sys_capability::current_caps_effective();
                 Self { lo, hi }
             }
         }
         impl Drop for CapGuard {
             fn drop(&mut self) {
                 let mut hdr = crate::sys_capability::CapUserHeader {
-                    version:
-                        crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                    version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                     pid: 0,
                 };
                 let data = [
@@ -486,8 +478,7 @@ mod tests {
                         inheritable: 0,
                     },
                 ];
-                let _ =
-                    crate::sys_capability::capset(&mut hdr, data.as_ptr());
+                let _ = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             }
         }
 
@@ -499,8 +490,7 @@ mod tests {
                 (lo, hi & !(1u32 << (cap - 32)))
             };
             let mut hdr = crate::sys_capability::CapUserHeader {
-                version:
-                    crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
+                version: crate::sys_capability::_LINUX_CAPABILITY_VERSION_3,
                 pid: 0,
             };
             let data = [
@@ -515,8 +505,7 @@ mod tests {
                     inheritable: 0,
                 },
             ];
-            let rc =
-                crate::sys_capability::capset(&mut hdr, data.as_ptr());
+            let rc = crate::sys_capability::capset(&mut hdr, data.as_ptr());
             assert_eq!(rc, 0, "capset must succeed");
             assert!(!crate::sys_capability::has_capability(cap));
         }
@@ -541,11 +530,7 @@ mod tests {
             let prev = setfsuid(1234);
             assert_eq!(prev, 0, "always returns previous fsuid");
             assert_eq!(current_fsuid(), 0, "denied: state unchanged");
-            assert_eq!(
-                crate::errno::get_errno(),
-                0,
-                "setfsuid never touches errno"
-            );
+            assert_eq!(crate::errno::get_errno(), 0, "setfsuid never touches errno");
             reset_creds();
         }
 
@@ -681,10 +666,7 @@ mod tests {
             drop_cap(crate::sys_capability::CAP_SETGID);
             crate::errno::set_errno(crate::errno::EBADF);
             let _ = setfsgid(4242);
-            assert_eq!(
-                crate::errno::get_errno(),
-                crate::errno::EBADF
-            );
+            assert_eq!(crate::errno::get_errno(), crate::errno::EBADF);
             crate::errno::set_errno(0);
             reset_creds();
         }

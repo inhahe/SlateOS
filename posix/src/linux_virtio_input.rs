@@ -105,9 +105,12 @@ mod tests {
     #[test]
     fn test_cfg_select_distinct() {
         let cfgs = [
-            VIRTIO_INPUT_CFG_UNSET, VIRTIO_INPUT_CFG_ID_NAME,
-            VIRTIO_INPUT_CFG_ID_SERIAL, VIRTIO_INPUT_CFG_ID_DEVIDS,
-            VIRTIO_INPUT_CFG_PROP_BITS, VIRTIO_INPUT_CFG_EV_BITS,
+            VIRTIO_INPUT_CFG_UNSET,
+            VIRTIO_INPUT_CFG_ID_NAME,
+            VIRTIO_INPUT_CFG_ID_SERIAL,
+            VIRTIO_INPUT_CFG_ID_DEVIDS,
+            VIRTIO_INPUT_CFG_PROP_BITS,
+            VIRTIO_INPUT_CFG_EV_BITS,
             VIRTIO_INPUT_CFG_ABS_INFO,
         ];
         for i in 0..cfgs.len() {

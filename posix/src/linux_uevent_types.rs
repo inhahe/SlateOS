@@ -66,9 +66,14 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            KOBJ_ACTION_ADD, KOBJ_ACTION_REMOVE, KOBJ_ACTION_CHANGE,
-            KOBJ_ACTION_MOVE, KOBJ_ACTION_ONLINE, KOBJ_ACTION_OFFLINE,
-            KOBJ_ACTION_BIND, KOBJ_ACTION_UNBIND,
+            KOBJ_ACTION_ADD,
+            KOBJ_ACTION_REMOVE,
+            KOBJ_ACTION_CHANGE,
+            KOBJ_ACTION_MOVE,
+            KOBJ_ACTION_ONLINE,
+            KOBJ_ACTION_OFFLINE,
+            KOBJ_ACTION_BIND,
+            KOBJ_ACTION_UNBIND,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {

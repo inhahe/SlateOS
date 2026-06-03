@@ -105,8 +105,10 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            TOMOYO_MODE_ENFORCE, TOMOYO_MODE_PERMISSIVE,
-            TOMOYO_MODE_LEARNING, TOMOYO_MODE_DISABLED,
+            TOMOYO_MODE_ENFORCE,
+            TOMOYO_MODE_PERMISSIVE,
+            TOMOYO_MODE_LEARNING,
+            TOMOYO_MODE_DISABLED,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -118,14 +120,22 @@ mod tests {
     #[test]
     fn test_access_types_distinct() {
         let types = [
-            TOMOYO_TYPE_READ, TOMOYO_TYPE_WRITE,
-            TOMOYO_TYPE_READ_WRITE, TOMOYO_TYPE_EXECUTE,
-            TOMOYO_TYPE_CREATE, TOMOYO_TYPE_UNLINK,
-            TOMOYO_TYPE_MKDIR, TOMOYO_TYPE_RMDIR,
-            TOMOYO_TYPE_MKNODE, TOMOYO_TYPE_RENAME,
-            TOMOYO_TYPE_LINK, TOMOYO_TYPE_SYMLINK,
-            TOMOYO_TYPE_TRUNCATE, TOMOYO_TYPE_CHATTR,
-            TOMOYO_TYPE_MOUNT, TOMOYO_TYPE_UMOUNT,
+            TOMOYO_TYPE_READ,
+            TOMOYO_TYPE_WRITE,
+            TOMOYO_TYPE_READ_WRITE,
+            TOMOYO_TYPE_EXECUTE,
+            TOMOYO_TYPE_CREATE,
+            TOMOYO_TYPE_UNLINK,
+            TOMOYO_TYPE_MKDIR,
+            TOMOYO_TYPE_RMDIR,
+            TOMOYO_TYPE_MKNODE,
+            TOMOYO_TYPE_RENAME,
+            TOMOYO_TYPE_LINK,
+            TOMOYO_TYPE_SYMLINK,
+            TOMOYO_TYPE_TRUNCATE,
+            TOMOYO_TYPE_CHATTR,
+            TOMOYO_TYPE_MOUNT,
+            TOMOYO_TYPE_UMOUNT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -137,8 +147,10 @@ mod tests {
     #[test]
     fn test_network_ops_distinct() {
         let ops = [
-            TOMOYO_NETWORK_BIND, TOMOYO_NETWORK_LISTEN,
-            TOMOYO_NETWORK_CONNECT, TOMOYO_NETWORK_SEND,
+            TOMOYO_NETWORK_BIND,
+            TOMOYO_NETWORK_LISTEN,
+            TOMOYO_NETWORK_CONNECT,
+            TOMOYO_NETWORK_SEND,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -150,10 +162,14 @@ mod tests {
     #[test]
     fn test_interfaces_distinct() {
         let ifaces = [
-            TOMOYO_IFACE_DOMAIN_POLICY, TOMOYO_IFACE_EXCEPTION_POLICY,
-            TOMOYO_IFACE_PROCESS_STATUS, TOMOYO_IFACE_PROFILE,
-            TOMOYO_IFACE_MANAGER, TOMOYO_IFACE_QUERY,
-            TOMOYO_IFACE_AUDIT, TOMOYO_IFACE_VERSION,
+            TOMOYO_IFACE_DOMAIN_POLICY,
+            TOMOYO_IFACE_EXCEPTION_POLICY,
+            TOMOYO_IFACE_PROCESS_STATUS,
+            TOMOYO_IFACE_PROFILE,
+            TOMOYO_IFACE_MANAGER,
+            TOMOYO_IFACE_QUERY,
+            TOMOYO_IFACE_AUDIT,
+            TOMOYO_IFACE_VERSION,
             TOMOYO_IFACE_STAT,
         ];
         for i in 0..ifaces.len() {

@@ -67,9 +67,13 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            MPOL_DEFAULT, MPOL_PREFERRED, MPOL_BIND,
-            MPOL_INTERLEAVE, MPOL_LOCAL,
-            MPOL_PREFERRED_MANY, MPOL_WEIGHTED_INTERLEAVE,
+            MPOL_DEFAULT,
+            MPOL_PREFERRED,
+            MPOL_BIND,
+            MPOL_INTERLEAVE,
+            MPOL_LOCAL,
+            MPOL_PREFERRED_MANY,
+            MPOL_WEIGHTED_INTERLEAVE,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

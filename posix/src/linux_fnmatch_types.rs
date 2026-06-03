@@ -44,8 +44,12 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            FNM_PATHNAME, FNM_NOESCAPE, FNM_PERIOD,
-            FNM_LEADING_DIR, FNM_CASEFOLD, FNM_EXTMATCH,
+            FNM_PATHNAME,
+            FNM_NOESCAPE,
+            FNM_PERIOD,
+            FNM_LEADING_DIR,
+            FNM_CASEFOLD,
+            FNM_EXTMATCH,
         ];
         for f in flags {
             assert!(f.is_power_of_two());
@@ -55,8 +59,12 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            FNM_PATHNAME, FNM_NOESCAPE, FNM_PERIOD,
-            FNM_LEADING_DIR, FNM_CASEFOLD, FNM_EXTMATCH,
+            FNM_PATHNAME,
+            FNM_NOESCAPE,
+            FNM_PERIOD,
+            FNM_LEADING_DIR,
+            FNM_CASEFOLD,
+            FNM_EXTMATCH,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

@@ -98,10 +98,15 @@ mod tests {
     #[test]
     fn test_clock_ids_distinct() {
         let ids = [
-            CLOCK_TAI, CLOCK_BOOTTIME_ALARM, CLOCK_REALTIME_ALARM,
-            CLOCK_REALTIME_COARSE, CLOCK_MONOTONIC_COARSE,
-            CLOCK_MONOTONIC_RAW, CLOCK_BOOTTIME,
-            CLOCK_PROCESS_CPUTIME_ID, CLOCK_THREAD_CPUTIME_ID,
+            CLOCK_TAI,
+            CLOCK_BOOTTIME_ALARM,
+            CLOCK_REALTIME_ALARM,
+            CLOCK_REALTIME_COARSE,
+            CLOCK_MONOTONIC_COARSE,
+            CLOCK_MONOTONIC_RAW,
+            CLOCK_BOOTTIME,
+            CLOCK_PROCESS_CPUTIME_ID,
+            CLOCK_THREAD_CPUTIME_ID,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {

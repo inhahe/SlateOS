@@ -77,8 +77,11 @@ mod tests {
     #[test]
     fn test_sct_distinct() {
         let scts = [
-            NVME_SCT_GENERIC, NVME_SCT_COMMAND_SPECIFIC,
-            NVME_SCT_MEDIA, NVME_SCT_PATH, NVME_SCT_VENDOR,
+            NVME_SCT_GENERIC,
+            NVME_SCT_COMMAND_SPECIFIC,
+            NVME_SCT_MEDIA,
+            NVME_SCT_PATH,
+            NVME_SCT_VENDOR,
         ];
         for i in 0..scts.len() {
             for j in (i + 1)..scts.len() {
@@ -96,13 +99,20 @@ mod tests {
     #[test]
     fn test_generic_codes_distinct() {
         let codes = [
-            NVME_SC_SUCCESS, NVME_SC_INVALID_OPCODE,
-            NVME_SC_INVALID_FIELD, NVME_SC_CMDID_CONFLICT,
-            NVME_SC_DATA_XFER_ERROR, NVME_SC_POWER_LOSS,
-            NVME_SC_INTERNAL, NVME_SC_ABORT_REQ,
-            NVME_SC_ABORT_QUEUE, NVME_SC_FUSED_FAIL,
-            NVME_SC_FUSED_MISSING, NVME_SC_INVALID_NS,
-            NVME_SC_LBA_RANGE, NVME_SC_CAP_EXCEEDED,
+            NVME_SC_SUCCESS,
+            NVME_SC_INVALID_OPCODE,
+            NVME_SC_INVALID_FIELD,
+            NVME_SC_CMDID_CONFLICT,
+            NVME_SC_DATA_XFER_ERROR,
+            NVME_SC_POWER_LOSS,
+            NVME_SC_INTERNAL,
+            NVME_SC_ABORT_REQ,
+            NVME_SC_ABORT_QUEUE,
+            NVME_SC_FUSED_FAIL,
+            NVME_SC_FUSED_MISSING,
+            NVME_SC_INVALID_NS,
+            NVME_SC_LBA_RANGE,
+            NVME_SC_CAP_EXCEEDED,
             NVME_SC_NS_NOT_READY,
         ];
         for i in 0..codes.len() {

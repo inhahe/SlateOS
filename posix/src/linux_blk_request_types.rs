@@ -71,12 +71,20 @@ mod tests {
     #[test]
     fn test_ops_distinct() {
         let ops = [
-            REQ_OP_READ, REQ_OP_WRITE, REQ_OP_FLUSH,
-            REQ_OP_DISCARD, REQ_OP_SECURE_ERASE, REQ_OP_WRITE_SAME,
-            REQ_OP_WRITE_ZEROES, REQ_OP_ZONE_RESET,
-            REQ_OP_ZONE_OPEN, REQ_OP_ZONE_CLOSE,
-            REQ_OP_ZONE_FINISH, REQ_OP_ZONE_APPEND,
-            REQ_OP_DRV_IN, REQ_OP_DRV_OUT,
+            REQ_OP_READ,
+            REQ_OP_WRITE,
+            REQ_OP_FLUSH,
+            REQ_OP_DISCARD,
+            REQ_OP_SECURE_ERASE,
+            REQ_OP_WRITE_SAME,
+            REQ_OP_WRITE_ZEROES,
+            REQ_OP_ZONE_RESET,
+            REQ_OP_ZONE_OPEN,
+            REQ_OP_ZONE_CLOSE,
+            REQ_OP_ZONE_FINISH,
+            REQ_OP_ZONE_APPEND,
+            REQ_OP_DRV_IN,
+            REQ_OP_DRV_OUT,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -93,8 +101,14 @@ mod tests {
     #[test]
     fn test_flags_power_of_two() {
         let flags = [
-            REQ_SYNC, REQ_META, REQ_PRIO, REQ_NOMERGE,
-            REQ_IDLE, REQ_INTEGRITY, REQ_FUA, REQ_PREFLUSH,
+            REQ_SYNC,
+            REQ_META,
+            REQ_PRIO,
+            REQ_NOMERGE,
+            REQ_IDLE,
+            REQ_INTEGRITY,
+            REQ_FUA,
+            REQ_PREFLUSH,
             REQ_FAILFAST_DEV,
         ];
         for f in &flags {
@@ -105,8 +119,14 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            REQ_SYNC, REQ_META, REQ_PRIO, REQ_NOMERGE,
-            REQ_IDLE, REQ_INTEGRITY, REQ_FUA, REQ_PREFLUSH,
+            REQ_SYNC,
+            REQ_META,
+            REQ_PRIO,
+            REQ_NOMERGE,
+            REQ_IDLE,
+            REQ_INTEGRITY,
+            REQ_FUA,
+            REQ_PREFLUSH,
             REQ_FAILFAST_DEV,
         ];
         for i in 0..flags.len() {

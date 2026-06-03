@@ -95,13 +95,20 @@ mod tests {
     #[test]
     fn test_base_classes_distinct() {
         let classes = [
-            PCI_BASE_CLASS_OLD, PCI_BASE_CLASS_STORAGE,
-            PCI_BASE_CLASS_NETWORK, PCI_BASE_CLASS_DISPLAY,
-            PCI_BASE_CLASS_MULTIMEDIA, PCI_BASE_CLASS_MEMORY,
-            PCI_BASE_CLASS_BRIDGE, PCI_BASE_CLASS_COMMUNICATION,
-            PCI_BASE_CLASS_SYSTEM, PCI_BASE_CLASS_INPUT,
-            PCI_BASE_CLASS_SERIAL, PCI_BASE_CLASS_WIRELESS,
-            PCI_BASE_CLASS_CRYPT, PCI_BASE_CLASS_SIGNAL_PROCESSING,
+            PCI_BASE_CLASS_OLD,
+            PCI_BASE_CLASS_STORAGE,
+            PCI_BASE_CLASS_NETWORK,
+            PCI_BASE_CLASS_DISPLAY,
+            PCI_BASE_CLASS_MULTIMEDIA,
+            PCI_BASE_CLASS_MEMORY,
+            PCI_BASE_CLASS_BRIDGE,
+            PCI_BASE_CLASS_COMMUNICATION,
+            PCI_BASE_CLASS_SYSTEM,
+            PCI_BASE_CLASS_INPUT,
+            PCI_BASE_CLASS_SERIAL,
+            PCI_BASE_CLASS_WIRELESS,
+            PCI_BASE_CLASS_CRYPT,
+            PCI_BASE_CLASS_SIGNAL_PROCESSING,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
@@ -113,9 +120,12 @@ mod tests {
     #[test]
     fn test_storage_subclasses_distinct() {
         let subs = [
-            PCI_CLASS_STORAGE_SCSI, PCI_CLASS_STORAGE_IDE,
-            PCI_CLASS_STORAGE_FLOPPY, PCI_CLASS_STORAGE_RAID,
-            PCI_CLASS_STORAGE_SATA, PCI_CLASS_STORAGE_NVME,
+            PCI_CLASS_STORAGE_SCSI,
+            PCI_CLASS_STORAGE_IDE,
+            PCI_CLASS_STORAGE_FLOPPY,
+            PCI_CLASS_STORAGE_RAID,
+            PCI_CLASS_STORAGE_SATA,
+            PCI_CLASS_STORAGE_NVME,
         ];
         for i in 0..subs.len() {
             for j in (i + 1)..subs.len() {

@@ -79,8 +79,12 @@ mod tests {
     #[test]
     fn test_func_types_distinct() {
         let funcs = [
-            PINCTRL_FUNC_GPIO, PINCTRL_FUNC_UART, PINCTRL_FUNC_I2C,
-            PINCTRL_FUNC_SPI, PINCTRL_FUNC_PWM, PINCTRL_FUNC_I2S,
+            PINCTRL_FUNC_GPIO,
+            PINCTRL_FUNC_UART,
+            PINCTRL_FUNC_I2C,
+            PINCTRL_FUNC_SPI,
+            PINCTRL_FUNC_PWM,
+            PINCTRL_FUNC_I2S,
         ];
         for i in 0..funcs.len() {
             for j in (i + 1)..funcs.len() {
@@ -92,13 +96,20 @@ mod tests {
     #[test]
     fn test_config_types_distinct() {
         let configs = [
-            PIN_CONFIG_BIAS_PULL_UP, PIN_CONFIG_BIAS_PULL_DOWN,
-            PIN_CONFIG_BIAS_DISABLE, PIN_CONFIG_BIAS_HIGH_IMPEDANCE,
-            PIN_CONFIG_DRIVE_STRENGTH, PIN_CONFIG_DRIVE_OPEN_DRAIN,
-            PIN_CONFIG_DRIVE_OPEN_SOURCE, PIN_CONFIG_DRIVE_PUSH_PULL,
-            PIN_CONFIG_INPUT_ENABLE, PIN_CONFIG_OUTPUT_ENABLE,
-            PIN_CONFIG_OUTPUT, PIN_CONFIG_SLEW_RATE,
-            PIN_CONFIG_INPUT_DEBOUNCE, PIN_CONFIG_POWER_SOURCE,
+            PIN_CONFIG_BIAS_PULL_UP,
+            PIN_CONFIG_BIAS_PULL_DOWN,
+            PIN_CONFIG_BIAS_DISABLE,
+            PIN_CONFIG_BIAS_HIGH_IMPEDANCE,
+            PIN_CONFIG_DRIVE_STRENGTH,
+            PIN_CONFIG_DRIVE_OPEN_DRAIN,
+            PIN_CONFIG_DRIVE_OPEN_SOURCE,
+            PIN_CONFIG_DRIVE_PUSH_PULL,
+            PIN_CONFIG_INPUT_ENABLE,
+            PIN_CONFIG_OUTPUT_ENABLE,
+            PIN_CONFIG_OUTPUT,
+            PIN_CONFIG_SLEW_RATE,
+            PIN_CONFIG_INPUT_DEBOUNCE,
+            PIN_CONFIG_POWER_SOURCE,
         ];
         for i in 0..configs.len() {
             for j in (i + 1)..configs.len() {
@@ -110,8 +121,10 @@ mod tests {
     #[test]
     fn test_state_names_distinct() {
         let states = [
-            PINCTRL_STATE_DEFAULT, PINCTRL_STATE_IDLE,
-            PINCTRL_STATE_SLEEP, PINCTRL_STATE_INIT,
+            PINCTRL_STATE_DEFAULT,
+            PINCTRL_STATE_IDLE,
+            PINCTRL_STATE_SLEEP,
+            PINCTRL_STATE_INIT,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

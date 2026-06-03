@@ -95,8 +95,10 @@ mod tests {
     #[test]
     fn test_directions_distinct() {
         let dirs = [
-            SG_DXFER_NONE, SG_DXFER_TO_DEV,
-            SG_DXFER_FROM_DEV, SG_DXFER_TO_FROM_DEV,
+            SG_DXFER_NONE,
+            SG_DXFER_TO_DEV,
+            SG_DXFER_FROM_DEV,
+            SG_DXFER_TO_FROM_DEV,
         ];
         for i in 0..dirs.len() {
             for j in (i + 1)..dirs.len() {
@@ -116,11 +118,14 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let codes = [
-            SCSI_STATUS_GOOD, SCSI_STATUS_CHECK_CONDITION,
-            SCSI_STATUS_CONDITION_MET, SCSI_STATUS_BUSY,
+            SCSI_STATUS_GOOD,
+            SCSI_STATUS_CHECK_CONDITION,
+            SCSI_STATUS_CONDITION_MET,
+            SCSI_STATUS_BUSY,
             SCSI_STATUS_RESERVATION_CONFLICT,
             SCSI_STATUS_TASK_SET_FULL,
-            SCSI_STATUS_ACA_ACTIVE, SCSI_STATUS_TASK_ABORTED,
+            SCSI_STATUS_ACA_ACTIVE,
+            SCSI_STATUS_TASK_ABORTED,
         ];
         for i in 0..codes.len() {
             for j in (i + 1)..codes.len() {
@@ -137,9 +142,14 @@ mod tests {
     #[test]
     fn test_sg_ioctl_distinct() {
         let cmds = [
-            SG_IO, SG_GET_VERSION_NUM, SG_SET_TIMEOUT,
-            SG_GET_TIMEOUT, SG_GET_COMMAND_Q, SG_SET_COMMAND_Q,
-            SG_SET_RESERVED_SIZE, SG_GET_RESERVED_SIZE,
+            SG_IO,
+            SG_GET_VERSION_NUM,
+            SG_SET_TIMEOUT,
+            SG_GET_TIMEOUT,
+            SG_GET_COMMAND_Q,
+            SG_SET_COMMAND_Q,
+            SG_SET_RESERVED_SIZE,
+            SG_GET_RESERVED_SIZE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

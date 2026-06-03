@@ -96,8 +96,11 @@ mod tests {
     #[test]
     fn test_map_huge_distinct() {
         let sizes = [
-            MAP_HUGE_2MB, MAP_HUGE_1GB, MAP_HUGE_16KB,
-            MAP_HUGE_64KB, MAP_HUGE_512KB,
+            MAP_HUGE_2MB,
+            MAP_HUGE_1GB,
+            MAP_HUGE_16KB,
+            MAP_HUGE_64KB,
+            MAP_HUGE_512KB,
         ];
         for i in 0..sizes.len() {
             for j in (i + 1)..sizes.len() {
@@ -119,8 +122,10 @@ mod tests {
     #[test]
     fn test_thp_defrag_distinct() {
         let modes = [
-            THP_DEFRAG_ALWAYS, THP_DEFRAG_MADVISE,
-            THP_DEFRAG_DEFER, THP_DEFRAG_DEFER_MADVISE,
+            THP_DEFRAG_ALWAYS,
+            THP_DEFRAG_MADVISE,
+            THP_DEFRAG_DEFER,
+            THP_DEFRAG_DEFER_MADVISE,
             THP_DEFRAG_NEVER,
         ];
         for i in 0..modes.len() {

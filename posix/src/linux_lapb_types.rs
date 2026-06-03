@@ -114,8 +114,11 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            LAPB_STATE_0, LAPB_STATE_1, LAPB_STATE_2,
-            LAPB_STATE_3, LAPB_STATE_4,
+            LAPB_STATE_0,
+            LAPB_STATE_1,
+            LAPB_STATE_2,
+            LAPB_STATE_3,
+            LAPB_STATE_4,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -127,8 +130,13 @@ mod tests {
     #[test]
     fn test_reasons_distinct() {
         let reasons = [
-            LAPB_OK, LAPB_BADTOKEN, LAPB_NOTCONNECTED,
-            LAPB_CONNECTED, LAPB_NOMEM, LAPB_BADN, LAPB_TIMEDOUT,
+            LAPB_OK,
+            LAPB_BADTOKEN,
+            LAPB_NOTCONNECTED,
+            LAPB_CONNECTED,
+            LAPB_NOMEM,
+            LAPB_BADN,
+            LAPB_TIMEDOUT,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {

@@ -50,10 +50,18 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_BPF_UNSPEC, TCA_BPF_ACT, TCA_BPF_POLICE,
-            TCA_BPF_CLASSID, TCA_BPF_OPS_LEN, TCA_BPF_OPS,
-            TCA_BPF_FD, TCA_BPF_NAME, TCA_BPF_FLAGS,
-            TCA_BPF_FLAGS_GEN, TCA_BPF_TAG, TCA_BPF_ID,
+            TCA_BPF_UNSPEC,
+            TCA_BPF_ACT,
+            TCA_BPF_POLICE,
+            TCA_BPF_CLASSID,
+            TCA_BPF_OPS_LEN,
+            TCA_BPF_OPS,
+            TCA_BPF_FD,
+            TCA_BPF_NAME,
+            TCA_BPF_FLAGS,
+            TCA_BPF_FLAGS_GEN,
+            TCA_BPF_TAG,
+            TCA_BPF_ID,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

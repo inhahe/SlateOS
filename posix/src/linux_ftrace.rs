@@ -91,9 +91,15 @@ mod tests {
     #[test]
     fn test_fl_flags_powers_of_two() {
         let flags = [
-            FTRACE_FL_ENABLED, FTRACE_FL_REGS, FTRACE_FL_REGS_EN,
-            FTRACE_FL_TRAMP, FTRACE_FL_TRAMP_EN, FTRACE_FL_IPMODIFY,
-            FTRACE_FL_DISABLED, FTRACE_FL_DIRECT, FTRACE_FL_DIRECT_EN,
+            FTRACE_FL_ENABLED,
+            FTRACE_FL_REGS,
+            FTRACE_FL_REGS_EN,
+            FTRACE_FL_TRAMP,
+            FTRACE_FL_TRAMP_EN,
+            FTRACE_FL_IPMODIFY,
+            FTRACE_FL_DISABLED,
+            FTRACE_FL_DIRECT,
+            FTRACE_FL_DIRECT_EN,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -103,9 +109,15 @@ mod tests {
     #[test]
     fn test_fl_flags_no_overlap() {
         let flags = [
-            FTRACE_FL_ENABLED, FTRACE_FL_REGS, FTRACE_FL_REGS_EN,
-            FTRACE_FL_TRAMP, FTRACE_FL_TRAMP_EN, FTRACE_FL_IPMODIFY,
-            FTRACE_FL_DISABLED, FTRACE_FL_DIRECT, FTRACE_FL_DIRECT_EN,
+            FTRACE_FL_ENABLED,
+            FTRACE_FL_REGS,
+            FTRACE_FL_REGS_EN,
+            FTRACE_FL_TRAMP,
+            FTRACE_FL_TRAMP_EN,
+            FTRACE_FL_IPMODIFY,
+            FTRACE_FL_DISABLED,
+            FTRACE_FL_DIRECT,
+            FTRACE_FL_DIRECT_EN,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -117,13 +129,20 @@ mod tests {
     #[test]
     fn test_tracer_names_distinct() {
         let names = [
-            FTRACE_TRACER_NOP, FTRACE_TRACER_FUNCTION,
-            FTRACE_TRACER_FUNCTION_GRAPH, FTRACE_TRACER_IRQSOFF,
-            FTRACE_TRACER_PREEMPTOFF, FTRACE_TRACER_PREEMPTIRQSOFF,
-            FTRACE_TRACER_WAKEUP, FTRACE_TRACER_WAKEUP_RT,
-            FTRACE_TRACER_WAKEUP_DL, FTRACE_TRACER_HWLAT,
-            FTRACE_TRACER_OSNOISE, FTRACE_TRACER_TIMERLAT,
-            FTRACE_TRACER_BRANCH, FTRACE_TRACER_BLK,
+            FTRACE_TRACER_NOP,
+            FTRACE_TRACER_FUNCTION,
+            FTRACE_TRACER_FUNCTION_GRAPH,
+            FTRACE_TRACER_IRQSOFF,
+            FTRACE_TRACER_PREEMPTOFF,
+            FTRACE_TRACER_PREEMPTIRQSOFF,
+            FTRACE_TRACER_WAKEUP,
+            FTRACE_TRACER_WAKEUP_RT,
+            FTRACE_TRACER_WAKEUP_DL,
+            FTRACE_TRACER_HWLAT,
+            FTRACE_TRACER_OSNOISE,
+            FTRACE_TRACER_TIMERLAT,
+            FTRACE_TRACER_BRANCH,
+            FTRACE_TRACER_BLK,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {
@@ -135,9 +154,12 @@ mod tests {
     #[test]
     fn test_ops_flags_powers_of_two() {
         let flags = [
-            FTRACE_OPS_FL_RECURSION, FTRACE_OPS_FL_STUB,
-            FTRACE_OPS_FL_INITIALIZED, FTRACE_OPS_FL_DELETED,
-            FTRACE_OPS_FL_ADDING, FTRACE_OPS_FL_REMOVING,
+            FTRACE_OPS_FL_RECURSION,
+            FTRACE_OPS_FL_STUB,
+            FTRACE_OPS_FL_INITIALIZED,
+            FTRACE_OPS_FL_DELETED,
+            FTRACE_OPS_FL_ADDING,
+            FTRACE_OPS_FL_REMOVING,
             FTRACE_OPS_FL_DYNAMIC,
         ];
         for flag in &flags {

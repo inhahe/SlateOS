@@ -47,8 +47,10 @@ mod tests {
     #[test]
     fn test_memory_types_distinct() {
         let mems = [
-            V4L2_MEMORY_MMAP, V4L2_MEMORY_USERPTR,
-            V4L2_MEMORY_OVERLAY, V4L2_MEMORY_DMABUF,
+            V4L2_MEMORY_MMAP,
+            V4L2_MEMORY_USERPTR,
+            V4L2_MEMORY_OVERLAY,
+            V4L2_MEMORY_DMABUF,
         ];
         for i in 0..mems.len() {
             for j in (i + 1)..mems.len() {
@@ -68,9 +70,12 @@ mod tests {
     #[test]
     fn test_ioctl_nrs_distinct() {
         let nrs = [
-            VIDIOC_REQBUFS_NR, VIDIOC_QUERYBUF_NR,
-            VIDIOC_QBUF_NR, VIDIOC_DQBUF_NR,
-            VIDIOC_STREAMON_NR, VIDIOC_STREAMOFF_NR,
+            VIDIOC_REQBUFS_NR,
+            VIDIOC_QUERYBUF_NR,
+            VIDIOC_QBUF_NR,
+            VIDIOC_DQBUF_NR,
+            VIDIOC_STREAMON_NR,
+            VIDIOC_STREAMOFF_NR,
         ];
         for i in 0..nrs.len() {
             for j in (i + 1)..nrs.len() {

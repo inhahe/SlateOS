@@ -63,8 +63,10 @@ mod tests {
     #[test]
     fn test_req_types_distinct() {
         let reqs = [
-            VIRTIO_MEM_REQ_PLUG, VIRTIO_MEM_REQ_UNPLUG,
-            VIRTIO_MEM_REQ_UNPLUG_ALL, VIRTIO_MEM_REQ_STATE,
+            VIRTIO_MEM_REQ_PLUG,
+            VIRTIO_MEM_REQ_UNPLUG,
+            VIRTIO_MEM_REQ_UNPLUG_ALL,
+            VIRTIO_MEM_REQ_STATE,
         ];
         for i in 0..reqs.len() {
             for j in (i + 1)..reqs.len() {
@@ -76,8 +78,10 @@ mod tests {
     #[test]
     fn test_resp_types_distinct() {
         let resps = [
-            VIRTIO_MEM_RESP_ACK, VIRTIO_MEM_RESP_NACK,
-            VIRTIO_MEM_RESP_BUSY, VIRTIO_MEM_RESP_ERROR,
+            VIRTIO_MEM_RESP_ACK,
+            VIRTIO_MEM_RESP_NACK,
+            VIRTIO_MEM_RESP_BUSY,
+            VIRTIO_MEM_RESP_ERROR,
         ];
         for i in 0..resps.len() {
             for j in (i + 1)..resps.len() {
@@ -97,6 +101,9 @@ mod tests {
     fn test_feature_bits_no_overlap() {
         assert!(VIRTIO_MEM_F_ACPI_PXM.is_power_of_two());
         assert!(VIRTIO_MEM_F_UNPLUGGED_INACCESSIBLE.is_power_of_two());
-        assert_eq!(VIRTIO_MEM_F_ACPI_PXM & VIRTIO_MEM_F_UNPLUGGED_INACCESSIBLE, 0);
+        assert_eq!(
+            VIRTIO_MEM_F_ACPI_PXM & VIRTIO_MEM_F_UNPLUGGED_INACCESSIBLE,
+            0
+        );
     }
 }

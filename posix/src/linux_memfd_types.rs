@@ -82,8 +82,11 @@ mod tests {
     #[test]
     fn test_memfd_flags_no_overlap() {
         let flags = [
-            MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_HUGETLB,
-            MFD_NOEXEC_SEAL, MFD_EXEC,
+            MFD_CLOEXEC,
+            MFD_ALLOW_SEALING,
+            MFD_HUGETLB,
+            MFD_NOEXEC_SEAL,
+            MFD_EXEC,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -96,10 +99,18 @@ mod tests {
     #[test]
     fn test_huge_sizes_distinct() {
         let sizes = [
-            MFD_HUGE_64KB, MFD_HUGE_512KB, MFD_HUGE_1MB,
-            MFD_HUGE_2MB, MFD_HUGE_8MB, MFD_HUGE_16MB,
-            MFD_HUGE_32MB, MFD_HUGE_256MB, MFD_HUGE_512MB,
-            MFD_HUGE_1GB, MFD_HUGE_2GB, MFD_HUGE_16GB,
+            MFD_HUGE_64KB,
+            MFD_HUGE_512KB,
+            MFD_HUGE_1MB,
+            MFD_HUGE_2MB,
+            MFD_HUGE_8MB,
+            MFD_HUGE_16MB,
+            MFD_HUGE_32MB,
+            MFD_HUGE_256MB,
+            MFD_HUGE_512MB,
+            MFD_HUGE_1GB,
+            MFD_HUGE_2GB,
+            MFD_HUGE_16GB,
         ];
         for i in 0..sizes.len() {
             for j in (i + 1)..sizes.len() {
@@ -119,8 +130,12 @@ mod tests {
     #[test]
     fn test_seal_flags_no_overlap() {
         let seals = [
-            F_SEAL_SEAL, F_SEAL_SHRINK, F_SEAL_GROW,
-            F_SEAL_WRITE, F_SEAL_FUTURE_WRITE, F_SEAL_EXEC,
+            F_SEAL_SEAL,
+            F_SEAL_SHRINK,
+            F_SEAL_GROW,
+            F_SEAL_WRITE,
+            F_SEAL_FUTURE_WRITE,
+            F_SEAL_EXEC,
         ];
         for i in 0..seals.len() {
             assert!(seals[i].is_power_of_two());

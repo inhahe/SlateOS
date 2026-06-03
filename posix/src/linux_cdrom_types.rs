@@ -99,11 +99,19 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            CDROMEJECT, CDROMCLOSETRAY, CDROM_LOCKDOOR,
-            CDROM_DISC_STATUS, CDROM_DRIVE_STATUS,
-            CDROM_SELECT_SPEED, CDROMREADTOCHDR,
-            CDROMREADTOCENTRY, CDROMPLAYMSF, CDROMSTOP,
-            CDROMPAUSE, CDROMRESUME, CDROM_LAST_WRITTEN,
+            CDROMEJECT,
+            CDROMCLOSETRAY,
+            CDROM_LOCKDOOR,
+            CDROM_DISC_STATUS,
+            CDROM_DRIVE_STATUS,
+            CDROM_SELECT_SPEED,
+            CDROMREADTOCHDR,
+            CDROMREADTOCENTRY,
+            CDROMPLAYMSF,
+            CDROMSTOP,
+            CDROMPAUSE,
+            CDROMRESUME,
+            CDROM_LAST_WRITTEN,
             CDROM_MEDIA_CHANGED,
         ];
         for i in 0..cmds.len() {
@@ -116,8 +124,11 @@ mod tests {
     #[test]
     fn test_status_values_distinct() {
         let statuses = [
-            CDS_NO_INFO, CDS_NO_DISC, CDS_TRAY_OPEN,
-            CDS_DRIVE_NOT_READY, CDS_DISC_OK,
+            CDS_NO_INFO,
+            CDS_NO_DISC,
+            CDS_TRAY_OPEN,
+            CDS_DRIVE_NOT_READY,
+            CDS_DISC_OK,
         ];
         for i in 0..statuses.len() {
             for j in (i + 1)..statuses.len() {
@@ -139,8 +150,14 @@ mod tests {
     #[test]
     fn test_capabilities_no_overlap() {
         let caps = [
-            CDC_CD_R, CDC_CD_RW, CDC_DVD, CDC_DVD_R,
-            CDC_DVD_RAM, CDC_PLAY_AUDIO, CDC_LOCK, CDC_OPEN_TRAY,
+            CDC_CD_R,
+            CDC_CD_RW,
+            CDC_DVD,
+            CDC_DVD_R,
+            CDC_DVD_RAM,
+            CDC_PLAY_AUDIO,
+            CDC_LOCK,
+            CDC_OPEN_TRAY,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

@@ -96,9 +96,14 @@ mod tests {
     #[test]
     fn test_namespace_flags_no_overlap() {
         let ns_flags = [
-            CLONE_NEWNS, CLONE_NEWCGROUP, CLONE_NEWUTS,
-            CLONE_NEWIPC, CLONE_NEWUSER, CLONE_NEWPID,
-            CLONE_NEWNET, CLONE_NEWTIME,
+            CLONE_NEWNS,
+            CLONE_NEWCGROUP,
+            CLONE_NEWUTS,
+            CLONE_NEWIPC,
+            CLONE_NEWUSER,
+            CLONE_NEWPID,
+            CLONE_NEWNET,
+            CLONE_NEWTIME,
         ];
         for i in 0..ns_flags.len() {
             for j in (i + 1)..ns_flags.len() {
@@ -110,10 +115,18 @@ mod tests {
     #[test]
     fn test_thread_flags_no_overlap() {
         let flags = [
-            CLONE_VM, CLONE_FS, CLONE_FILES, CLONE_SIGHAND,
-            CLONE_PIDFD, CLONE_THREAD, CLONE_SYSVSEM,
-            CLONE_SETTLS, CLONE_PARENT_SETTID, CLONE_CHILD_CLEARTID,
-            CLONE_CHILD_SETTID, CLONE_IO,
+            CLONE_VM,
+            CLONE_FS,
+            CLONE_FILES,
+            CLONE_SIGHAND,
+            CLONE_PIDFD,
+            CLONE_THREAD,
+            CLONE_SYSVSEM,
+            CLONE_SETTLS,
+            CLONE_PARENT_SETTID,
+            CLONE_CHILD_CLEARTID,
+            CLONE_CHILD_SETTID,
+            CLONE_IO,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

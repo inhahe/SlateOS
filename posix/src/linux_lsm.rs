@@ -91,9 +91,18 @@ mod tests {
     #[test]
     fn test_lsm_ids_distinct() {
         let ids = [
-            LSM_ID_UNDEF, LSM_ID_SELINUX, LSM_ID_SMACK, LSM_ID_TOMOYO,
-            LSM_ID_APPARMOR, LSM_ID_YAMA, LSM_ID_LOADPIN, LSM_ID_SAFESETID,
-            LSM_ID_LOCKDOWN, LSM_ID_BPF, LSM_ID_LANDLOCK, LSM_ID_IPE,
+            LSM_ID_UNDEF,
+            LSM_ID_SELINUX,
+            LSM_ID_SMACK,
+            LSM_ID_TOMOYO,
+            LSM_ID_APPARMOR,
+            LSM_ID_YAMA,
+            LSM_ID_LOADPIN,
+            LSM_ID_SAFESETID,
+            LSM_ID_LOCKDOWN,
+            LSM_ID_BPF,
+            LSM_ID_LANDLOCK,
+            LSM_ID_IPE,
         ];
         for i in 0..ids.len() {
             for j in (i + 1)..ids.len() {
@@ -105,8 +114,12 @@ mod tests {
     #[test]
     fn test_attr_types_distinct() {
         let attrs = [
-            LSM_ATTR_CURRENT, LSM_ATTR_EXEC, LSM_ATTR_FSCREATE,
-            LSM_ATTR_KEYCREATE, LSM_ATTR_SOCKCREATE, LSM_ATTR_PREV,
+            LSM_ATTR_CURRENT,
+            LSM_ATTR_EXEC,
+            LSM_ATTR_FSCREATE,
+            LSM_ATTR_KEYCREATE,
+            LSM_ATTR_SOCKCREATE,
+            LSM_ATTR_PREV,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

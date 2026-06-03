@@ -101,8 +101,10 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            SAS_DEV_TYPE_NONE, SAS_END_DEVICE,
-            SAS_EDGE_EXPANDER_DEVICE, SAS_FANOUT_EXPANDER_DEVICE,
+            SAS_DEV_TYPE_NONE,
+            SAS_END_DEVICE,
+            SAS_EDGE_EXPANDER_DEVICE,
+            SAS_FANOUT_EXPANDER_DEVICE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -115,19 +117,23 @@ mod tests {
     fn test_protocols_bitmask() {
         assert_eq!(
             SAS_PROTOCOL_ALL,
-            SAS_PROTOCOL_SMP | SAS_PROTOCOL_SSP
-                | SAS_PROTOCOL_STP | SAS_PROTOCOL_SATA
+            SAS_PROTOCOL_SMP | SAS_PROTOCOL_SSP | SAS_PROTOCOL_STP | SAS_PROTOCOL_SATA
         );
     }
 
     #[test]
     fn test_link_rates_distinct() {
         let rates = [
-            SAS_LINK_RATE_UNKNOWN, SAS_PHY_DISABLED,
-            SAS_PHY_RESET_PROBLEM, SAS_SATA_SPINUP_HOLD,
-            SAS_SATA_PORT_SELECTOR, SAS_PHY_RESET_IN_PROGRESS,
-            SAS_LINK_RATE_1_5_GBPS, SAS_LINK_RATE_3_0_GBPS,
-            SAS_LINK_RATE_6_0_GBPS, SAS_LINK_RATE_12_0_GBPS,
+            SAS_LINK_RATE_UNKNOWN,
+            SAS_PHY_DISABLED,
+            SAS_PHY_RESET_PROBLEM,
+            SAS_SATA_SPINUP_HOLD,
+            SAS_SATA_PORT_SELECTOR,
+            SAS_PHY_RESET_IN_PROGRESS,
+            SAS_LINK_RATE_1_5_GBPS,
+            SAS_LINK_RATE_3_0_GBPS,
+            SAS_LINK_RATE_6_0_GBPS,
+            SAS_LINK_RATE_12_0_GBPS,
             SAS_LINK_RATE_22_5_GBPS,
         ];
         for i in 0..rates.len() {
@@ -140,8 +146,10 @@ mod tests {
     #[test]
     fn test_phy_events_distinct() {
         let events = [
-            SAS_PHY_EVENT_INVALID_DWORD, SAS_PHY_EVENT_RUN_DISP_ERR,
-            SAS_PHY_EVENT_LOSS_DWORD_SYNC, SAS_PHY_EVENT_PHY_RESET_PROBLEM,
+            SAS_PHY_EVENT_INVALID_DWORD,
+            SAS_PHY_EVENT_RUN_DISP_ERR,
+            SAS_PHY_EVENT_LOSS_DWORD_SYNC,
+            SAS_PHY_EVENT_PHY_RESET_PROBLEM,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {
@@ -153,14 +161,23 @@ mod tests {
     #[test]
     fn test_tmf_no_overlap() {
         let tmfs = [
-            SAS_TMF_ABORT_TASK, SAS_TMF_ABORT_TASK_SET,
-            SAS_TMF_CLEAR_TASK_SET, SAS_TMF_LU_RESET,
-            SAS_TMF_IT_NEXUS_RESET, SAS_TMF_CLEAR_ACA,
+            SAS_TMF_ABORT_TASK,
+            SAS_TMF_ABORT_TASK_SET,
+            SAS_TMF_CLEAR_TASK_SET,
+            SAS_TMF_LU_RESET,
+            SAS_TMF_IT_NEXUS_RESET,
+            SAS_TMF_CLEAR_ACA,
             SAS_TMF_QUERY_TASK,
         ];
         for i in 0..tmfs.len() {
             for j in (i + 1)..tmfs.len() {
-                assert_eq!(tmfs[i] & tmfs[j], 0, "0x{:02x} & 0x{:02x}", tmfs[i], tmfs[j]);
+                assert_eq!(
+                    tmfs[i] & tmfs[j],
+                    0,
+                    "0x{:02x} & 0x{:02x}",
+                    tmfs[i],
+                    tmfs[j]
+                );
             }
         }
     }

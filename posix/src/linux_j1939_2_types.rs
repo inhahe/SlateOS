@@ -71,8 +71,10 @@ mod tests {
     #[test]
     fn test_sock_opts_distinct() {
         let opts = [
-            SO_J1939_FILTER, SO_J1939_PROMISC,
-            SO_J1939_SEND_PRIO, SO_J1939_ERRQUEUE,
+            SO_J1939_FILTER,
+            SO_J1939_PROMISC,
+            SO_J1939_SEND_PRIO,
+            SO_J1939_ERRQUEUE,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -90,8 +92,10 @@ mod tests {
     #[test]
     fn test_pgn_values_distinct() {
         let pgns = [
-            J1939_NO_PGN, J1939_PGN_REQUEST,
-            J1939_PGN_ADDRESS_CLAIMED, J1939_PGN_ADDRESS_COMMANDED,
+            J1939_NO_PGN,
+            J1939_PGN_REQUEST,
+            J1939_PGN_ADDRESS_CLAIMED,
+            J1939_PGN_ADDRESS_COMMANDED,
         ];
         for i in 0..pgns.len() {
             for j in (i + 1)..pgns.len() {

@@ -121,7 +121,9 @@ pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
     }
 
     if size == 0 {
-        unsafe { free(ptr); }
+        unsafe {
+            free(ptr);
+        }
         return core::ptr::null_mut();
     }
 
@@ -147,13 +149,21 @@ pub unsafe extern "C" fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
     }
 
     // Copy the smaller of old and new sizes.
-    let copy_size = if old_payload < size { old_payload } else { size };
+    let copy_size = if old_payload < size {
+        old_payload
+    } else {
+        size
+    };
     // SAFETY: Both pointers are valid for copy_size bytes and do not overlap
     // (new_ptr is a fresh mmap).
-    unsafe { crate::string::memcpy(new_ptr, ptr, copy_size); }
+    unsafe {
+        crate::string::memcpy(new_ptr, ptr, copy_size);
+    }
 
     // Free old block.
-    unsafe { free(ptr); }
+    unsafe {
+        free(ptr);
+    }
 
     new_ptr
 }
@@ -240,7 +250,9 @@ pub extern "C" fn posix_memalign(memptr: *mut *mut u8, alignment: usize, size: u
 
     if size == 0 {
         // SAFETY: memptr verified non-null.
-        unsafe { *memptr = core::ptr::null_mut(); }
+        unsafe {
+            *memptr = core::ptr::null_mut();
+        }
         return 0;
     }
 
@@ -259,17 +271,23 @@ pub extern "C" fn posix_memalign(memptr: *mut *mut u8, alignment: usize, size: u
     if !(ptr as usize).is_multiple_of(alignment) {
         // If somehow misaligned, fall back to over-allocating.
         // SAFETY: ptr was returned by malloc.
-        unsafe { free(ptr); }
+        unsafe {
+            free(ptr);
+        }
         let ptr2 = aligned_alloc_impl(alignment, size);
         if ptr2.is_null() {
             return crate::errno::ENOMEM;
         }
-        unsafe { *memptr = ptr2; }
+        unsafe {
+            *memptr = ptr2;
+        }
         return 0;
     }
 
     // SAFETY: memptr verified non-null.
-    unsafe { *memptr = ptr; }
+    unsafe {
+        *memptr = ptr;
+    }
     0
 }
 
@@ -319,11 +337,7 @@ pub extern "C" fn memalign(alignment: usize, size: usize) -> *mut u8 {
 /// multiplication would overflow.  This is safer than `malloc(n * s)`
 /// where the multiplication can silently wrap.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
-pub extern "C" fn reallocarray(
-    ptr: *mut u8,
-    nmemb: usize,
-    size: usize,
-) -> *mut u8 {
+pub extern "C" fn reallocarray(ptr: *mut u8, nmemb: usize, size: usize) -> *mut u8 {
     let Some(total) = nmemb.checked_mul(size) else {
         crate::errno::set_errno(crate::errno::ENOMEM);
         return core::ptr::null_mut();
@@ -379,8 +393,8 @@ fn aligned_alloc_impl(alignment: usize, size: usize) -> *mut u8 {
     // The user pointer must be aligned AND have HEADER_SIZE bytes before
     // it for the [mmap_base, total_size] header.
     let min_user = base.wrapping_add(HEADER_SIZE);
-    let aligned_user = (min_user.wrapping_add(alignment.wrapping_sub(1)))
-        & !alignment.wrapping_sub(1);
+    let aligned_user =
+        (min_user.wrapping_add(alignment.wrapping_sub(1))) & !alignment.wrapping_sub(1);
 
     // Write the standard header at aligned_user - HEADER_SIZE.
     // SAFETY: aligned_user >= base + HEADER_SIZE (by construction of min_user),
@@ -411,12 +425,9 @@ pub extern "C" fn pvalloc(size: usize) -> *mut u8 {
     }
     const PAGE_SIZE: usize = 16384;
     // Round up to the next page-size multiple.
-    let rounded = match size.checked_add(PAGE_SIZE.wrapping_sub(1)) {
-        Some(v) => v & !PAGE_SIZE.wrapping_sub(1),
-        None => {
-            crate::errno::set_errno(crate::errno::ENOMEM);
-            return core::ptr::null_mut();
-        }
+    let rounded = if let Some(v) = size.checked_add(PAGE_SIZE.wrapping_sub(1)) { v & !PAGE_SIZE.wrapping_sub(1) } else {
+        crate::errno::set_errno(crate::errno::ENOMEM);
+        return core::ptr::null_mut();
     };
     aligned_alloc_impl(PAGE_SIZE, rounded)
 }
@@ -442,7 +453,9 @@ pub extern "C" fn __libc_malloc(size: usize) -> *mut u8 {
 /// Same requirements as `free`.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 pub unsafe extern "C" fn __libc_free(ptr: *mut u8) {
-    unsafe { free(ptr); }
+    unsafe {
+        free(ptr);
+    }
 }
 
 /// glibc internal: `__libc_realloc`.
@@ -537,7 +550,9 @@ mod tests {
     #[test]
     fn free_null_is_noop() {
         // Must not crash.
-        unsafe { free(core::ptr::null_mut()); }
+        unsafe {
+            free(core::ptr::null_mut());
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -814,7 +829,10 @@ mod tests {
         for shift in 0..=16u32 {
             let align = 1usize << shift;
             let ptr = aligned_alloc(align, 0);
-            assert!(ptr.is_null(), "aligned_alloc({align}, 0) should return NULL");
+            assert!(
+                ptr.is_null(),
+                "aligned_alloc({align}, 0) should return NULL"
+            );
         }
     }
 
@@ -830,7 +848,9 @@ mod tests {
 
     #[test]
     fn libc_free_null() {
-        unsafe { __libc_free(core::ptr::null_mut()); }
+        unsafe {
+            __libc_free(core::ptr::null_mut());
+        }
     }
 
     #[test]

@@ -107,9 +107,13 @@ mod tests {
     #[test]
     fn test_modes_distinct() {
         let modes = [
-            BOND_MODE_ROUNDROBIN, BOND_MODE_ACTIVEBACKUP,
-            BOND_MODE_XOR, BOND_MODE_BROADCAST,
-            BOND_MODE_8023AD, BOND_MODE_TLB, BOND_MODE_ALB,
+            BOND_MODE_ROUNDROBIN,
+            BOND_MODE_ACTIVEBACKUP,
+            BOND_MODE_XOR,
+            BOND_MODE_BROADCAST,
+            BOND_MODE_8023AD,
+            BOND_MODE_TLB,
+            BOND_MODE_ALB,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -121,9 +125,13 @@ mod tests {
     #[test]
     fn test_mode_names_distinct() {
         let names = [
-            BOND_MODE_NAME_ROUNDROBIN, BOND_MODE_NAME_ACTIVEBACKUP,
-            BOND_MODE_NAME_XOR, BOND_MODE_NAME_BROADCAST,
-            BOND_MODE_NAME_8023AD, BOND_MODE_NAME_TLB, BOND_MODE_NAME_ALB,
+            BOND_MODE_NAME_ROUNDROBIN,
+            BOND_MODE_NAME_ACTIVEBACKUP,
+            BOND_MODE_NAME_XOR,
+            BOND_MODE_NAME_BROADCAST,
+            BOND_MODE_NAME_8023AD,
+            BOND_MODE_NAME_TLB,
+            BOND_MODE_NAME_ALB,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {
@@ -140,9 +148,12 @@ mod tests {
     #[test]
     fn test_xmit_policies_distinct() {
         let policies = [
-            BOND_XMIT_POLICY_LAYER2, BOND_XMIT_POLICY_LAYER34,
-            BOND_XMIT_POLICY_LAYER23, BOND_XMIT_POLICY_ENCAP23,
-            BOND_XMIT_POLICY_ENCAP34, BOND_XMIT_POLICY_VLAN_SRCMAC,
+            BOND_XMIT_POLICY_LAYER2,
+            BOND_XMIT_POLICY_LAYER34,
+            BOND_XMIT_POLICY_LAYER23,
+            BOND_XMIT_POLICY_ENCAP23,
+            BOND_XMIT_POLICY_ENCAP34,
+            BOND_XMIT_POLICY_VLAN_SRCMAC,
         ];
         for i in 0..policies.len() {
             for j in (i + 1)..policies.len() {

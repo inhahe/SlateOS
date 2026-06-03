@@ -79,9 +79,15 @@ mod tests {
     #[test]
     fn test_action_codes_distinct() {
         let codes = [
-            TC_ACT_UNSPEC, TC_ACT_OK, TC_ACT_RECLASSIFY,
-            TC_ACT_SHOT, TC_ACT_PIPE, TC_ACT_STOLEN,
-            TC_ACT_QUEUED, TC_ACT_REPEAT, TC_ACT_REDIRECT,
+            TC_ACT_UNSPEC,
+            TC_ACT_OK,
+            TC_ACT_RECLASSIFY,
+            TC_ACT_SHOT,
+            TC_ACT_PIPE,
+            TC_ACT_STOLEN,
+            TC_ACT_QUEUED,
+            TC_ACT_REPEAT,
+            TC_ACT_REDIRECT,
             TC_ACT_TRAP,
         ];
         for i in 0..codes.len() {
@@ -108,7 +114,13 @@ mod tests {
 
     #[test]
     fn test_act_types_distinct() {
-        let types = [TCA_ACT_TAB, TCA_ACT_FLAGS, TCA_ACT_HW_STATS, TCA_ACT_USED_HW_STATS, TCA_ACT_IN_HW_COUNT];
+        let types = [
+            TCA_ACT_TAB,
+            TCA_ACT_FLAGS,
+            TCA_ACT_HW_STATS,
+            TCA_ACT_USED_HW_STATS,
+            TCA_ACT_IN_HW_COUNT,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);

@@ -114,8 +114,11 @@ mod tests {
     #[test]
     fn test_modes_are_powers_of_two() {
         let modes = [
-            LIRC_MODE_RAW, LIRC_MODE_PULSE, LIRC_MODE_MODE2,
-            LIRC_MODE_SCANCODE, LIRC_MODE_LIRCCODE,
+            LIRC_MODE_RAW,
+            LIRC_MODE_PULSE,
+            LIRC_MODE_MODE2,
+            LIRC_MODE_SCANCODE,
+            LIRC_MODE_LIRCCODE,
         ];
         for mode in &modes {
             assert!(mode.is_power_of_two());
@@ -125,8 +128,11 @@ mod tests {
     #[test]
     fn test_mode2_types_distinct() {
         let types = [
-            LIRC_MODE2_SPACE, LIRC_MODE2_PULSE, LIRC_MODE2_FREQUENCY,
-            LIRC_MODE2_TIMEOUT, LIRC_MODE2_OVERFLOW,
+            LIRC_MODE2_SPACE,
+            LIRC_MODE2_PULSE,
+            LIRC_MODE2_FREQUENCY,
+            LIRC_MODE2_TIMEOUT,
+            LIRC_MODE2_OVERFLOW,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -138,13 +144,20 @@ mod tests {
     #[test]
     fn test_scancode_protocols_distinct() {
         let protos = [
-            LIRC_SCANCODE_UNKNOWN, LIRC_SCANCODE_RC5,
-            LIRC_SCANCODE_RC5_SZ, LIRC_SCANCODE_JVC,
-            LIRC_SCANCODE_SONY, LIRC_SCANCODE_NEC,
-            LIRC_SCANCODE_SANYO, LIRC_SCANCODE_MCE_KBD,
-            LIRC_SCANCODE_RC6, LIRC_SCANCODE_SHARP,
-            LIRC_SCANCODE_XMP, LIRC_SCANCODE_CEC,
-            LIRC_SCANCODE_IMON, LIRC_SCANCODE_RCMM,
+            LIRC_SCANCODE_UNKNOWN,
+            LIRC_SCANCODE_RC5,
+            LIRC_SCANCODE_RC5_SZ,
+            LIRC_SCANCODE_JVC,
+            LIRC_SCANCODE_SONY,
+            LIRC_SCANCODE_NEC,
+            LIRC_SCANCODE_SANYO,
+            LIRC_SCANCODE_MCE_KBD,
+            LIRC_SCANCODE_RC6,
+            LIRC_SCANCODE_SHARP,
+            LIRC_SCANCODE_XMP,
+            LIRC_SCANCODE_CEC,
+            LIRC_SCANCODE_IMON,
+            LIRC_SCANCODE_RCMM,
         ];
         for i in 0..protos.len() {
             for j in (i + 1)..protos.len() {

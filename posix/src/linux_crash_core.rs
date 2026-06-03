@@ -108,8 +108,11 @@ mod tests {
     #[test]
     fn test_mem_types_distinct() {
         let types = [
-            CRASH_MEM_RAM, CRASH_MEM_RESERVED, CRASH_MEM_ACPI,
-            CRASH_MEM_ACPI_NVS, CRASH_MEM_UNUSABLE,
+            CRASH_MEM_RAM,
+            CRASH_MEM_RESERVED,
+            CRASH_MEM_ACPI,
+            CRASH_MEM_ACPI_NVS,
+            CRASH_MEM_UNUSABLE,
             CRASH_MEM_PERSISTENT,
         ];
         for i in 0..types.len() {
@@ -122,8 +125,10 @@ mod tests {
     #[test]
     fn test_compress_types_distinct() {
         let types = [
-            DUMP_COMPRESS_NONE, DUMP_COMPRESS_ZLIB,
-            DUMP_COMPRESS_LZO, DUMP_COMPRESS_SNAPPY,
+            DUMP_COMPRESS_NONE,
+            DUMP_COMPRESS_ZLIB,
+            DUMP_COMPRESS_LZO,
+            DUMP_COMPRESS_SNAPPY,
             DUMP_COMPRESS_ZSTD,
         ];
         for i in 0..types.len() {

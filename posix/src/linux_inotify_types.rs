@@ -42,10 +42,18 @@ pub const IN_MOVE: u32 = IN_MOVED_FROM | IN_MOVED_TO;
 /// File was closed (write or nowrite).
 pub const IN_CLOSE: u32 = IN_CLOSE_WRITE | IN_CLOSE_NOWRITE;
 /// All events.
-pub const IN_ALL_EVENTS: u32 =
-    IN_ACCESS | IN_MODIFY | IN_ATTRIB | IN_CLOSE_WRITE
-    | IN_CLOSE_NOWRITE | IN_OPEN | IN_MOVED_FROM | IN_MOVED_TO
-    | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF;
+pub const IN_ALL_EVENTS: u32 = IN_ACCESS
+    | IN_MODIFY
+    | IN_ATTRIB
+    | IN_CLOSE_WRITE
+    | IN_CLOSE_NOWRITE
+    | IN_OPEN
+    | IN_MOVED_FROM
+    | IN_MOVED_TO
+    | IN_CREATE
+    | IN_DELETE
+    | IN_DELETE_SELF
+    | IN_MOVE_SELF;
 
 // ---------------------------------------------------------------------------
 // Watch flags (ORed with event mask in inotify_add_watch)
@@ -97,9 +105,18 @@ mod tests {
     #[test]
     fn test_event_masks_powers_of_two() {
         let masks = [
-            IN_ACCESS, IN_MODIFY, IN_ATTRIB, IN_CLOSE_WRITE,
-            IN_CLOSE_NOWRITE, IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO,
-            IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF,
+            IN_ACCESS,
+            IN_MODIFY,
+            IN_ATTRIB,
+            IN_CLOSE_WRITE,
+            IN_CLOSE_NOWRITE,
+            IN_OPEN,
+            IN_MOVED_FROM,
+            IN_MOVED_TO,
+            IN_CREATE,
+            IN_DELETE,
+            IN_DELETE_SELF,
+            IN_MOVE_SELF,
         ];
         for mask in &masks {
             assert!(mask.is_power_of_two(), "0x{:x}", mask);
@@ -109,9 +126,18 @@ mod tests {
     #[test]
     fn test_event_masks_no_overlap() {
         let masks = [
-            IN_ACCESS, IN_MODIFY, IN_ATTRIB, IN_CLOSE_WRITE,
-            IN_CLOSE_NOWRITE, IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO,
-            IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_MOVE_SELF,
+            IN_ACCESS,
+            IN_MODIFY,
+            IN_ATTRIB,
+            IN_CLOSE_WRITE,
+            IN_CLOSE_NOWRITE,
+            IN_OPEN,
+            IN_MOVED_FROM,
+            IN_MOVED_TO,
+            IN_CREATE,
+            IN_DELETE,
+            IN_DELETE_SELF,
+            IN_MOVE_SELF,
         ];
         for i in 0..masks.len() {
             for j in (i + 1)..masks.len() {
@@ -133,8 +159,12 @@ mod tests {
     #[test]
     fn test_watch_flags_distinct() {
         let flags = [
-            IN_ONESHOT, IN_ONLYDIR, IN_DONT_FOLLOW,
-            IN_EXCL_UNLINK, IN_MASK_ADD, IN_MASK_CREATE,
+            IN_ONESHOT,
+            IN_ONLYDIR,
+            IN_DONT_FOLLOW,
+            IN_EXCL_UNLINK,
+            IN_MASK_ADD,
+            IN_MASK_CREATE,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

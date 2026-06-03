@@ -100,15 +100,24 @@ mod tests {
     #[test]
     fn test_ioctl_cmds_distinct() {
         let cmds = [
-            VHOST_GET_FEATURES, VHOST_SET_FEATURES,
-            VHOST_SET_OWNER, VHOST_RESET_OWNER,
-            VHOST_SET_MEM_TABLE, VHOST_SET_LOG_BASE,
-            VHOST_SET_LOG_FD, VHOST_SET_VRING_NUM,
-            VHOST_SET_VRING_ADDR, VHOST_SET_VRING_BASE,
-            VHOST_GET_VRING_BASE, VHOST_SET_VRING_KICK,
-            VHOST_SET_VRING_CALL, VHOST_SET_VRING_ERR,
-            VHOST_SET_VRING_ENDIAN, VHOST_GET_VRING_ENDIAN,
-            VHOST_SET_BACKEND_FEATURES, VHOST_GET_BACKEND_FEATURES,
+            VHOST_GET_FEATURES,
+            VHOST_SET_FEATURES,
+            VHOST_SET_OWNER,
+            VHOST_RESET_OWNER,
+            VHOST_SET_MEM_TABLE,
+            VHOST_SET_LOG_BASE,
+            VHOST_SET_LOG_FD,
+            VHOST_SET_VRING_NUM,
+            VHOST_SET_VRING_ADDR,
+            VHOST_SET_VRING_BASE,
+            VHOST_GET_VRING_BASE,
+            VHOST_SET_VRING_KICK,
+            VHOST_SET_VRING_CALL,
+            VHOST_SET_VRING_ERR,
+            VHOST_SET_VRING_ENDIAN,
+            VHOST_GET_VRING_ENDIAN,
+            VHOST_SET_BACKEND_FEATURES,
+            VHOST_GET_BACKEND_FEATURES,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -120,8 +129,10 @@ mod tests {
     #[test]
     fn test_scsi_cmds_distinct() {
         let cmds = [
-            VHOST_SCSI_SET_ENDPOINT, VHOST_SCSI_CLEAR_ENDPOINT,
-            VHOST_SCSI_GET_ABI_VERSION, VHOST_SCSI_SET_EVENTS_MISSED,
+            VHOST_SCSI_SET_ENDPOINT,
+            VHOST_SCSI_CLEAR_ENDPOINT,
+            VHOST_SCSI_GET_ABI_VERSION,
+            VHOST_SCSI_SET_EVENTS_MISSED,
             VHOST_SCSI_GET_EVENTS_MISSED,
         ];
         for i in 0..cmds.len() {

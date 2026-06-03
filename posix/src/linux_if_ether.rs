@@ -7,12 +7,12 @@
 // EtherTypes (from net_ethernet.rs)
 // ---------------------------------------------------------------------------
 
-pub use crate::net_ethernet::ETH_P_IP;
-pub use crate::net_ethernet::ETH_P_ARP;
-pub use crate::net_ethernet::ETH_P_IPV6;
-pub use crate::net_ethernet::ETH_P_8021Q;
 pub use crate::net_ethernet::ETH_ALEN;
 pub use crate::net_ethernet::ETH_HLEN;
+pub use crate::net_ethernet::ETH_P_8021Q;
+pub use crate::net_ethernet::ETH_P_ARP;
+pub use crate::net_ethernet::ETH_P_IP;
+pub use crate::net_ethernet::ETH_P_IPV6;
 
 // ---------------------------------------------------------------------------
 // Additional EtherType constants
@@ -96,10 +96,18 @@ mod tests {
     #[test]
     fn test_ethertypes_distinct() {
         let types = [
-            ETH_P_IP, ETH_P_ARP, ETH_P_IPV6, ETH_P_8021Q,
-            ETH_P_RARP, ETH_P_8021AD, ETH_P_PPP_DISC,
-            ETH_P_PPP_SES, ETH_P_LLDP, ETH_P_MPLS_UC,
-            ETH_P_MPLS_MC, ETH_P_LOOPBACK,
+            ETH_P_IP,
+            ETH_P_ARP,
+            ETH_P_IPV6,
+            ETH_P_8021Q,
+            ETH_P_RARP,
+            ETH_P_8021AD,
+            ETH_P_PPP_DISC,
+            ETH_P_PPP_SES,
+            ETH_P_LLDP,
+            ETH_P_MPLS_UC,
+            ETH_P_MPLS_MC,
+            ETH_P_LOOPBACK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

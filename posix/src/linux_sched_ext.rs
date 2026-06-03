@@ -84,8 +84,10 @@ mod tests {
     #[test]
     fn test_ops_flags_powers_of_two() {
         let flags = [
-            SCX_OPS_KEEP_BUILTIN_IDLE, SCX_OPS_ENQ_LAST,
-            SCX_OPS_ENQ_EXITING, SCX_OPS_SWITCH_PARTIAL,
+            SCX_OPS_KEEP_BUILTIN_IDLE,
+            SCX_OPS_ENQ_LAST,
+            SCX_OPS_ENQ_EXITING,
+            SCX_OPS_SWITCH_PARTIAL,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -95,8 +97,10 @@ mod tests {
     #[test]
     fn test_ops_flags_no_overlap() {
         let flags = [
-            SCX_OPS_KEEP_BUILTIN_IDLE, SCX_OPS_ENQ_LAST,
-            SCX_OPS_ENQ_EXITING, SCX_OPS_SWITCH_PARTIAL,
+            SCX_OPS_KEEP_BUILTIN_IDLE,
+            SCX_OPS_ENQ_LAST,
+            SCX_OPS_ENQ_EXITING,
+            SCX_OPS_SWITCH_PARTIAL,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -125,7 +129,12 @@ mod tests {
 
     #[test]
     fn test_exit_kinds_distinct() {
-        let exits = [SCX_EXIT_NONE, SCX_EXIT_ERROR, SCX_EXIT_UNREGISTER, SCX_EXIT_SYSRQ];
+        let exits = [
+            SCX_EXIT_NONE,
+            SCX_EXIT_ERROR,
+            SCX_EXIT_UNREGISTER,
+            SCX_EXIT_SYSRQ,
+        ];
         for i in 0..exits.len() {
             for j in (i + 1)..exits.len() {
                 assert_ne!(exits[i], exits[j]);

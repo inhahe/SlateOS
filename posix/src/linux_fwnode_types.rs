@@ -80,9 +80,12 @@ mod tests {
     #[test]
     fn test_node_types_distinct() {
         let types = [
-            FWNODE_TYPE_OF, FWNODE_TYPE_ACPI,
-            FWNODE_TYPE_ACPI_DATA, FWNODE_TYPE_SWNODE,
-            FWNODE_TYPE_PCI, FWNODE_TYPE_NAMED_CHILD,
+            FWNODE_TYPE_OF,
+            FWNODE_TYPE_ACPI,
+            FWNODE_TYPE_ACPI_DATA,
+            FWNODE_TYPE_SWNODE,
+            FWNODE_TYPE_PCI,
+            FWNODE_TYPE_NAMED_CHILD,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -94,8 +97,12 @@ mod tests {
     #[test]
     fn test_property_types_distinct() {
         let types = [
-            FWNODE_PROP_U8, FWNODE_PROP_U16, FWNODE_PROP_U32,
-            FWNODE_PROP_U64, FWNODE_PROP_STRING, FWNODE_PROP_REFERENCE,
+            FWNODE_PROP_U8,
+            FWNODE_PROP_U16,
+            FWNODE_PROP_U32,
+            FWNODE_PROP_U64,
+            FWNODE_PROP_STRING,
+            FWNODE_PROP_REFERENCE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -107,8 +114,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            FWNODE_FLAG_PRIMARY, FWNODE_FLAG_LINKS_RESOLVED,
-            FWNODE_FLAG_REMOVING, FWNODE_FLAG_FW_CREATED,
+            FWNODE_FLAG_PRIMARY,
+            FWNODE_FLAG_LINKS_RESOLVED,
+            FWNODE_FLAG_REMOVING,
+            FWNODE_FLAG_FW_CREATED,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -121,8 +130,10 @@ mod tests {
     #[test]
     fn test_swnode_prop_types_distinct() {
         let types = [
-            SWNODE_PROP_INT_ARRAY, SWNODE_PROP_STRING,
-            SWNODE_PROP_STRING_ARRAY, SWNODE_PROP_REFERENCE,
+            SWNODE_PROP_INT_ARRAY,
+            SWNODE_PROP_STRING,
+            SWNODE_PROP_STRING_ARRAY,
+            SWNODE_PROP_REFERENCE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

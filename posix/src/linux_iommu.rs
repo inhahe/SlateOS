@@ -110,8 +110,10 @@ mod tests {
     #[test]
     fn test_fault_reasons_distinct() {
         let reasons = [
-            IOMMU_FAULT_REASON_UNKNOWN, IOMMU_FAULT_REASON_PTE_FETCH,
-            IOMMU_FAULT_REASON_PERMISSION, IOMMU_FAULT_REASON_ACCESS,
+            IOMMU_FAULT_REASON_UNKNOWN,
+            IOMMU_FAULT_REASON_PTE_FETCH,
+            IOMMU_FAULT_REASON_PERMISSION,
+            IOMMU_FAULT_REASON_ACCESS,
         ];
         for i in 0..reasons.len() {
             for j in (i + 1)..reasons.len() {
@@ -123,7 +125,8 @@ mod tests {
     #[test]
     fn test_page_resp_codes_distinct() {
         let codes = [
-            IOMMU_PAGE_RESP_INVALID, IOMMU_PAGE_RESP_SUCCESS,
+            IOMMU_PAGE_RESP_INVALID,
+            IOMMU_PAGE_RESP_SUCCESS,
             IOMMU_PAGE_RESP_FAILURE,
         ];
         for i in 0..codes.len() {
@@ -136,8 +139,12 @@ mod tests {
     #[test]
     fn test_prot_flags_powers_of_two() {
         let flags = [
-            IOMMU_READ, IOMMU_WRITE, IOMMU_CACHE,
-            IOMMU_NOEXEC, IOMMU_MMIO, IOMMU_PRIV,
+            IOMMU_READ,
+            IOMMU_WRITE,
+            IOMMU_CACHE,
+            IOMMU_NOEXEC,
+            IOMMU_MMIO,
+            IOMMU_PRIV,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -147,8 +154,12 @@ mod tests {
     #[test]
     fn test_prot_flags_no_overlap() {
         let flags = [
-            IOMMU_READ, IOMMU_WRITE, IOMMU_CACHE,
-            IOMMU_NOEXEC, IOMMU_MMIO, IOMMU_PRIV,
+            IOMMU_READ,
+            IOMMU_WRITE,
+            IOMMU_CACHE,
+            IOMMU_NOEXEC,
+            IOMMU_MMIO,
+            IOMMU_PRIV,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -160,9 +171,12 @@ mod tests {
     #[test]
     fn test_domain_types_distinct() {
         let types = [
-            IOMMU_DOMAIN_BLOCKED, IOMMU_DOMAIN_IDENTITY,
-            IOMMU_DOMAIN_UNMANAGED, IOMMU_DOMAIN_DMA,
-            IOMMU_DOMAIN_DMA_FQ, IOMMU_DOMAIN_SVA,
+            IOMMU_DOMAIN_BLOCKED,
+            IOMMU_DOMAIN_IDENTITY,
+            IOMMU_DOMAIN_UNMANAGED,
+            IOMMU_DOMAIN_DMA,
+            IOMMU_DOMAIN_DMA_FQ,
+            IOMMU_DOMAIN_SVA,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -174,8 +188,10 @@ mod tests {
     #[test]
     fn test_capabilities_distinct() {
         let caps = [
-            IOMMU_CAP_CACHE_COHERENCY, IOMMU_CAP_INTR_REMAP,
-            IOMMU_CAP_NOEXEC, IOMMU_CAP_DIRTY_TRACKING,
+            IOMMU_CAP_CACHE_COHERENCY,
+            IOMMU_CAP_INTR_REMAP,
+            IOMMU_CAP_NOEXEC,
+            IOMMU_CAP_DIRTY_TRACKING,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

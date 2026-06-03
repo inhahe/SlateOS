@@ -111,9 +111,13 @@ mod tests {
     #[test]
     fn test_ctrl_commands_distinct() {
         let cmds = [
-            CTRL_CMD_NEWFAMILY, CTRL_CMD_DELFAMILY, CTRL_CMD_GETFAMILY,
-            CTRL_CMD_NEWMCAST_GRP, CTRL_CMD_DELMCAST_GRP,
-            CTRL_CMD_GETMCAST_GRP, CTRL_CMD_GETPOLICY,
+            CTRL_CMD_NEWFAMILY,
+            CTRL_CMD_DELFAMILY,
+            CTRL_CMD_GETFAMILY,
+            CTRL_CMD_NEWMCAST_GRP,
+            CTRL_CMD_DELMCAST_GRP,
+            CTRL_CMD_GETMCAST_GRP,
+            CTRL_CMD_GETPOLICY,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -125,11 +129,16 @@ mod tests {
     #[test]
     fn test_ctrl_attrs_distinct() {
         let attrs = [
-            CTRL_ATTR_FAMILY_ID, CTRL_ATTR_FAMILY_NAME,
-            CTRL_ATTR_VERSION, CTRL_ATTR_HDRSIZE,
-            CTRL_ATTR_MAXATTR, CTRL_ATTR_OPS,
-            CTRL_ATTR_MCAST_GROUPS, CTRL_ATTR_POLICY,
-            CTRL_ATTR_OP_POLICY, CTRL_ATTR_OP,
+            CTRL_ATTR_FAMILY_ID,
+            CTRL_ATTR_FAMILY_NAME,
+            CTRL_ATTR_VERSION,
+            CTRL_ATTR_HDRSIZE,
+            CTRL_ATTR_MAXATTR,
+            CTRL_ATTR_OPS,
+            CTRL_ATTR_MCAST_GROUPS,
+            CTRL_ATTR_POLICY,
+            CTRL_ATTR_OP_POLICY,
+            CTRL_ATTR_OP,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

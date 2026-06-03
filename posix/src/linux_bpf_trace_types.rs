@@ -66,9 +66,14 @@ mod tests {
     #[test]
     fn test_attach_types_distinct() {
         let types = [
-            BPF_TRACE_RAW_TP, BPF_TRACE_FENTRY, BPF_TRACE_FEXIT,
-            BPF_MODIFY_RETURN, BPF_LSM_MAC, BPF_TRACE_ITER,
-            BPF_LSM_CGROUP, BPF_TRACE_KPROBE_MULTI,
+            BPF_TRACE_RAW_TP,
+            BPF_TRACE_FENTRY,
+            BPF_TRACE_FEXIT,
+            BPF_MODIFY_RETURN,
+            BPF_LSM_MAC,
+            BPF_TRACE_ITER,
+            BPF_LSM_CGROUP,
+            BPF_TRACE_KPROBE_MULTI,
             BPF_TRACE_UPROBE_MULTI,
         ];
         for i in 0..types.len() {
@@ -81,11 +86,16 @@ mod tests {
     #[test]
     fn test_link_types_distinct() {
         let links = [
-            BPF_LINK_TYPE_UNSPEC, BPF_LINK_TYPE_RAW_TRACEPOINT,
-            BPF_LINK_TYPE_TRACING, BPF_LINK_TYPE_CGROUP,
-            BPF_LINK_TYPE_ITER, BPF_LINK_TYPE_NETNS,
-            BPF_LINK_TYPE_XDP, BPF_LINK_TYPE_PERF_EVENT,
-            BPF_LINK_TYPE_KPROBE_MULTI, BPF_LINK_TYPE_STRUCT_OPS,
+            BPF_LINK_TYPE_UNSPEC,
+            BPF_LINK_TYPE_RAW_TRACEPOINT,
+            BPF_LINK_TYPE_TRACING,
+            BPF_LINK_TYPE_CGROUP,
+            BPF_LINK_TYPE_ITER,
+            BPF_LINK_TYPE_NETNS,
+            BPF_LINK_TYPE_XDP,
+            BPF_LINK_TYPE_PERF_EVENT,
+            BPF_LINK_TYPE_KPROBE_MULTI,
+            BPF_LINK_TYPE_STRUCT_OPS,
             BPF_LINK_TYPE_UPROBE_MULTI,
         ];
         for i in 0..links.len() {

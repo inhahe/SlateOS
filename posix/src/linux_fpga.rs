@@ -79,12 +79,18 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            FPGA_MGR_STATE_UNKNOWN, FPGA_MGR_STATE_POWER_OFF,
-            FPGA_MGR_STATE_POWER_UP, FPGA_MGR_STATE_RESET,
-            FPGA_MGR_STATE_FIRMWARE_REQ, FPGA_MGR_STATE_FIRMWARE_REQ_ERR,
-            FPGA_MGR_STATE_WRITE_INIT, FPGA_MGR_STATE_WRITE_INIT_ERR,
-            FPGA_MGR_STATE_WRITE, FPGA_MGR_STATE_WRITE_ERR,
-            FPGA_MGR_STATE_WRITE_COMPLETE, FPGA_MGR_STATE_WRITE_COMPLETE_ERR,
+            FPGA_MGR_STATE_UNKNOWN,
+            FPGA_MGR_STATE_POWER_OFF,
+            FPGA_MGR_STATE_POWER_UP,
+            FPGA_MGR_STATE_RESET,
+            FPGA_MGR_STATE_FIRMWARE_REQ,
+            FPGA_MGR_STATE_FIRMWARE_REQ_ERR,
+            FPGA_MGR_STATE_WRITE_INIT,
+            FPGA_MGR_STATE_WRITE_INIT_ERR,
+            FPGA_MGR_STATE_WRITE,
+            FPGA_MGR_STATE_WRITE_ERR,
+            FPGA_MGR_STATE_WRITE_COMPLETE,
+            FPGA_MGR_STATE_WRITE_COMPLETE_ERR,
             FPGA_MGR_STATE_OPERATING,
         ];
         for i in 0..states.len() {
@@ -97,8 +103,10 @@ mod tests {
     #[test]
     fn test_flags_are_powers_of_two() {
         let flags = [
-            FPGA_MGR_PARTIAL_RECONFIG, FPGA_MGR_EXTERNAL_CONFIG,
-            FPGA_MGR_ENCRYPTED_BITSTREAM, FPGA_MGR_BITSTREAM_LSB_FIRST,
+            FPGA_MGR_PARTIAL_RECONFIG,
+            FPGA_MGR_EXTERNAL_CONFIG,
+            FPGA_MGR_ENCRYPTED_BITSTREAM,
+            FPGA_MGR_BITSTREAM_LSB_FIRST,
             FPGA_MGR_COMPRESSED_BITSTREAM,
         ];
         for flag in &flags {

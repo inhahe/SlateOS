@@ -72,8 +72,11 @@ mod tests {
     #[test]
     fn test_property_types_no_overlap() {
         let types = [
-            DRM_MODE_PROP_RANGE, DRM_MODE_PROP_ENUM, DRM_MODE_PROP_BLOB,
-            DRM_MODE_PROP_BITMASK, DRM_MODE_PROP_OBJECT,
+            DRM_MODE_PROP_RANGE,
+            DRM_MODE_PROP_ENUM,
+            DRM_MODE_PROP_BLOB,
+            DRM_MODE_PROP_BITMASK,
+            DRM_MODE_PROP_OBJECT,
             DRM_MODE_PROP_SIGNED_RANGE,
         ];
         for i in 0..types.len() {
@@ -87,9 +90,12 @@ mod tests {
     #[test]
     fn test_rotation_no_overlap() {
         let rots = [
-            DRM_MODE_ROTATE_0, DRM_MODE_ROTATE_90,
-            DRM_MODE_ROTATE_180, DRM_MODE_ROTATE_270,
-            DRM_MODE_REFLECT_X, DRM_MODE_REFLECT_Y,
+            DRM_MODE_ROTATE_0,
+            DRM_MODE_ROTATE_90,
+            DRM_MODE_ROTATE_180,
+            DRM_MODE_ROTATE_270,
+            DRM_MODE_REFLECT_X,
+            DRM_MODE_REFLECT_Y,
         ];
         for i in 0..rots.len() {
             assert!(rots[i].is_power_of_two());
@@ -102,8 +108,10 @@ mod tests {
     #[test]
     fn test_scale_modes_distinct() {
         let modes = [
-            DRM_MODE_SCALE_NONE, DRM_MODE_SCALE_FULLSCREEN,
-            DRM_MODE_SCALE_CENTER, DRM_MODE_SCALE_ASPECT,
+            DRM_MODE_SCALE_NONE,
+            DRM_MODE_SCALE_FULLSCREEN,
+            DRM_MODE_SCALE_CENTER,
+            DRM_MODE_SCALE_ASPECT,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

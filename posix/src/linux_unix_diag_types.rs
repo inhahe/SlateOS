@@ -75,9 +75,13 @@ mod tests {
     #[test]
     fn test_show_flags_no_overlap() {
         let flags = [
-            UDIAG_SHOW_NAME, UDIAG_SHOW_VFS, UDIAG_SHOW_PEER,
-            UDIAG_SHOW_ICONS, UDIAG_SHOW_RQLEN,
-            UDIAG_SHOW_MEMINFO, UDIAG_SHOW_UID,
+            UDIAG_SHOW_NAME,
+            UDIAG_SHOW_VFS,
+            UDIAG_SHOW_PEER,
+            UDIAG_SHOW_ICONS,
+            UDIAG_SHOW_RQLEN,
+            UDIAG_SHOW_MEMINFO,
+            UDIAG_SHOW_UID,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -90,9 +94,14 @@ mod tests {
     #[test]
     fn test_response_attrs_distinct() {
         let attrs = [
-            UNIX_DIAG_NAME, UNIX_DIAG_VFS, UNIX_DIAG_PEER,
-            UNIX_DIAG_ICONS, UNIX_DIAG_RQLEN, UNIX_DIAG_MEMINFO,
-            UNIX_DIAG_SHUTDOWN, UNIX_DIAG_UID,
+            UNIX_DIAG_NAME,
+            UNIX_DIAG_VFS,
+            UNIX_DIAG_PEER,
+            UNIX_DIAG_ICONS,
+            UNIX_DIAG_RQLEN,
+            UNIX_DIAG_MEMINFO,
+            UNIX_DIAG_SHUTDOWN,
+            UNIX_DIAG_UID,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -104,9 +113,12 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            UNIX_SS_FREE, UNIX_SS_UNCONNECTED,
-            UNIX_SS_CONNECTING, UNIX_SS_CONNECTED,
-            UNIX_SS_DISCONNECTING, UNIX_SS_LISTEN,
+            UNIX_SS_FREE,
+            UNIX_SS_UNCONNECTED,
+            UNIX_SS_CONNECTING,
+            UNIX_SS_CONNECTED,
+            UNIX_SS_DISCONNECTING,
+            UNIX_SS_LISTEN,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {

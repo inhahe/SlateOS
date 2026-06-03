@@ -81,13 +81,20 @@ mod tests {
     #[test]
     fn test_map_flags_no_overlap() {
         let flags = [
-            BPF_F_NO_PREALLOC, BPF_F_NO_COMMON_LRU,
-            BPF_F_NUMA_NODE, BPF_F_RDONLY_PROG,
-            BPF_F_WRONLY_PROG, BPF_F_CLONE,
-            BPF_F_MMAPABLE, BPF_F_PRESERVE_ELEMS,
-            BPF_F_INNER_MAP, BPF_F_LINK,
-            BPF_F_PATH_FD, BPF_F_VTYPE_BTF_OBJ_FD,
-            BPF_F_TOKEN_FD, BPF_F_SEGV_ON_FAULT,
+            BPF_F_NO_PREALLOC,
+            BPF_F_NO_COMMON_LRU,
+            BPF_F_NUMA_NODE,
+            BPF_F_RDONLY_PROG,
+            BPF_F_WRONLY_PROG,
+            BPF_F_CLONE,
+            BPF_F_MMAPABLE,
+            BPF_F_PRESERVE_ELEMS,
+            BPF_F_INNER_MAP,
+            BPF_F_LINK,
+            BPF_F_PATH_FD,
+            BPF_F_VTYPE_BTF_OBJ_FD,
+            BPF_F_TOKEN_FD,
+            BPF_F_SEGV_ON_FAULT,
             BPF_F_NO_USER_CONV,
         ];
         for i in 0..flags.len() {

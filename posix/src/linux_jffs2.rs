@@ -93,9 +93,12 @@ mod tests {
     #[test]
     fn test_node_types_distinct() {
         let types = [
-            JFFS2_NODETYPE_INODE, JFFS2_NODETYPE_DIRENT,
-            JFFS2_NODETYPE_CLEANMARKER, JFFS2_NODETYPE_PADDING,
-            JFFS2_NODETYPE_SUMMARY, JFFS2_NODETYPE_XATTR,
+            JFFS2_NODETYPE_INODE,
+            JFFS2_NODETYPE_DIRENT,
+            JFFS2_NODETYPE_CLEANMARKER,
+            JFFS2_NODETYPE_PADDING,
+            JFFS2_NODETYPE_SUMMARY,
+            JFFS2_NODETYPE_XATTR,
             JFFS2_NODETYPE_XREF,
         ];
         for i in 0..types.len() {
@@ -107,7 +110,12 @@ mod tests {
 
     #[test]
     fn test_compression_types_distinct() {
-        let types = [JFFS2_COMPR_NONE, JFFS2_COMPR_ZLIB, JFFS2_COMPR_LZMA, JFFS2_COMPR_RTIME];
+        let types = [
+            JFFS2_COMPR_NONE,
+            JFFS2_COMPR_ZLIB,
+            JFFS2_COMPR_LZMA,
+            JFFS2_COMPR_RTIME,
+        ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -118,9 +126,14 @@ mod tests {
     #[test]
     fn test_dir_types_distinct() {
         let types = [
-            JFFS2_DT_UNKNOWN, JFFS2_DT_REG, JFFS2_DT_DIR,
-            JFFS2_DT_CHR, JFFS2_DT_BLK, JFFS2_DT_FIFO,
-            JFFS2_DT_SOCK, JFFS2_DT_LNK,
+            JFFS2_DT_UNKNOWN,
+            JFFS2_DT_REG,
+            JFFS2_DT_DIR,
+            JFFS2_DT_CHR,
+            JFFS2_DT_BLK,
+            JFFS2_DT_FIFO,
+            JFFS2_DT_SOCK,
+            JFFS2_DT_LNK,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

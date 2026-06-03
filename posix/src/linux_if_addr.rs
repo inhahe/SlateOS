@@ -150,10 +150,18 @@ mod tests {
     #[test]
     fn test_ifa_flags_distinct() {
         let flags = [
-            IFA_F_SECONDARY, IFA_F_NODAD, IFA_F_OPTIMISTIC,
-            IFA_F_DADFAILED, IFA_F_HOMEADDRESS, IFA_F_DEPRECATED,
-            IFA_F_TENTATIVE, IFA_F_PERMANENT, IFA_F_MANAGETEMPADDR,
-            IFA_F_NOPREFIXROUTE, IFA_F_MCAUTOJOIN, IFA_F_STABLE_PRIVACY,
+            IFA_F_SECONDARY,
+            IFA_F_NODAD,
+            IFA_F_OPTIMISTIC,
+            IFA_F_DADFAILED,
+            IFA_F_HOMEADDRESS,
+            IFA_F_DEPRECATED,
+            IFA_F_TENTATIVE,
+            IFA_F_PERMANENT,
+            IFA_F_MANAGETEMPADDR,
+            IFA_F_NOPREFIXROUTE,
+            IFA_F_MCAUTOJOIN,
+            IFA_F_STABLE_PRIVACY,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

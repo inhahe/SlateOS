@@ -100,8 +100,12 @@ mod tests {
     #[test]
     fn test_pos_permissions_no_overlap() {
         let perms = [
-            KEY_POS_VIEW, KEY_POS_READ, KEY_POS_WRITE,
-            KEY_POS_SEARCH, KEY_POS_LINK, KEY_POS_SETATTR,
+            KEY_POS_VIEW,
+            KEY_POS_READ,
+            KEY_POS_WRITE,
+            KEY_POS_SEARCH,
+            KEY_POS_LINK,
+            KEY_POS_SETATTR,
         ];
         for i in 0..perms.len() {
             for j in (i + 1)..perms.len() {
@@ -112,29 +116,45 @@ mod tests {
 
     #[test]
     fn test_pos_all_covers_all() {
-        let all = KEY_POS_VIEW | KEY_POS_READ | KEY_POS_WRITE
-            | KEY_POS_SEARCH | KEY_POS_LINK | KEY_POS_SETATTR;
+        let all = KEY_POS_VIEW
+            | KEY_POS_READ
+            | KEY_POS_WRITE
+            | KEY_POS_SEARCH
+            | KEY_POS_LINK
+            | KEY_POS_SETATTR;
         assert_eq!(KEY_POS_ALL, all);
     }
 
     #[test]
     fn test_usr_all_covers_all() {
-        let all = KEY_USR_VIEW | KEY_USR_READ | KEY_USR_WRITE
-            | KEY_USR_SEARCH | KEY_USR_LINK | KEY_USR_SETATTR;
+        let all = KEY_USR_VIEW
+            | KEY_USR_READ
+            | KEY_USR_WRITE
+            | KEY_USR_SEARCH
+            | KEY_USR_LINK
+            | KEY_USR_SETATTR;
         assert_eq!(KEY_USR_ALL, all);
     }
 
     #[test]
     fn test_grp_all_covers_all() {
-        let all = KEY_GRP_VIEW | KEY_GRP_READ | KEY_GRP_WRITE
-            | KEY_GRP_SEARCH | KEY_GRP_LINK | KEY_GRP_SETATTR;
+        let all = KEY_GRP_VIEW
+            | KEY_GRP_READ
+            | KEY_GRP_WRITE
+            | KEY_GRP_SEARCH
+            | KEY_GRP_LINK
+            | KEY_GRP_SETATTR;
         assert_eq!(KEY_GRP_ALL, all);
     }
 
     #[test]
     fn test_oth_all_covers_all() {
-        let all = KEY_OTH_VIEW | KEY_OTH_READ | KEY_OTH_WRITE
-            | KEY_OTH_SEARCH | KEY_OTH_LINK | KEY_OTH_SETATTR;
+        let all = KEY_OTH_VIEW
+            | KEY_OTH_READ
+            | KEY_OTH_WRITE
+            | KEY_OTH_SEARCH
+            | KEY_OTH_LINK
+            | KEY_OTH_SETATTR;
         assert_eq!(KEY_OTH_ALL, all);
     }
 

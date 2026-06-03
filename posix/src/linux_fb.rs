@@ -239,9 +239,13 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            FBIOGET_VSCREENINFO, FBIOPUT_VSCREENINFO,
-            FBIOGET_FSCREENINFO, FBIOGETCMAP, FBIOPUTCMAP,
-            FBIOPAN_DISPLAY, FBIOBLANK,
+            FBIOGET_VSCREENINFO,
+            FBIOPUT_VSCREENINFO,
+            FBIOGET_FSCREENINFO,
+            FBIOGETCMAP,
+            FBIOPUTCMAP,
+            FBIOPAN_DISPLAY,
+            FBIOBLANK,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -286,7 +290,9 @@ mod tests {
         info.transp_offset = 24;
         info.transp_length = 8;
 
-        assert_eq!(info.xres * info.yres * (info.bits_per_pixel / 8),
-                   1920 * 1080 * 4);
+        assert_eq!(
+            info.xres * info.yres * (info.bits_per_pixel / 8),
+            1920 * 1080 * 4
+        );
     }
 }

@@ -46,8 +46,12 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            TCA_RED_UNSPEC, TCA_RED_PARMS, TCA_RED_STAB,
-            TCA_RED_MAX_P, TCA_RED_FLAGS, TCA_RED_EARLY_DROP_BLOCK,
+            TCA_RED_UNSPEC,
+            TCA_RED_PARMS,
+            TCA_RED_STAB,
+            TCA_RED_MAX_P,
+            TCA_RED_FLAGS,
+            TCA_RED_EARLY_DROP_BLOCK,
             TCA_RED_MARK_BLOCK,
         ];
         for i in 0..attrs.len() {
@@ -59,7 +63,12 @@ mod tests {
 
     #[test]
     fn test_flags_distinct() {
-        let flags = [TC_RED_ECN, TC_RED_HARDDROP, TC_RED_ADAPTATIVE, TC_RED_NODROP];
+        let flags = [
+            TC_RED_ECN,
+            TC_RED_HARDDROP,
+            TC_RED_ADAPTATIVE,
+            TC_RED_NODROP,
+        ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
                 assert_ne!(flags[i], flags[j]);

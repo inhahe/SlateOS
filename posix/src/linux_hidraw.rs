@@ -108,7 +108,14 @@ mod tests {
 
     #[test]
     fn test_bus_types_distinct() {
-        let buses = [BUS_USB, BUS_HIL, BUS_BLUETOOTH, BUS_VIRTUAL, BUS_I2C, BUS_SPI];
+        let buses = [
+            BUS_USB,
+            BUS_HIL,
+            BUS_BLUETOOTH,
+            BUS_VIRTUAL,
+            BUS_I2C,
+            BUS_SPI,
+        ];
         for i in 0..buses.len() {
             for j in (i + 1)..buses.len() {
                 assert_ne!(buses[i], buses[j]);
@@ -119,9 +126,14 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            HIDIOCGRDESCSIZE, HIDIOCGRDESC, HIDIOCGRAWINFO,
-            HIDIOCGRAWNAME_BASE, HIDIOCGRAWPHYS_BASE, HIDIOCGRAWUNIQ_BASE,
-            HIDIOCSFEATURE_BASE, HIDIOCGFEATURE_BASE,
+            HIDIOCGRDESCSIZE,
+            HIDIOCGRDESC,
+            HIDIOCGRAWINFO,
+            HIDIOCGRAWNAME_BASE,
+            HIDIOCGRAWPHYS_BASE,
+            HIDIOCGRAWUNIQ_BASE,
+            HIDIOCSFEATURE_BASE,
+            HIDIOCGFEATURE_BASE,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

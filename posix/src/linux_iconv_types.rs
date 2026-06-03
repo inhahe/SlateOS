@@ -73,12 +73,22 @@ mod tests {
     #[test]
     fn test_encodings_distinct() {
         let encs = [
-            ICONV_ENC_ASCII, ICONV_ENC_UTF8, ICONV_ENC_UTF16LE,
-            ICONV_ENC_UTF16BE, ICONV_ENC_UTF32LE, ICONV_ENC_UTF32BE,
-            ICONV_ENC_ISO8859_1, ICONV_ENC_ISO8859_15,
-            ICONV_ENC_SJIS, ICONV_ENC_EUCJP, ICONV_ENC_EUCKR,
-            ICONV_ENC_GB2312, ICONV_ENC_BIG5, ICONV_ENC_KOI8R,
-            ICONV_ENC_CP1252, ICONV_ENC_CP1251,
+            ICONV_ENC_ASCII,
+            ICONV_ENC_UTF8,
+            ICONV_ENC_UTF16LE,
+            ICONV_ENC_UTF16BE,
+            ICONV_ENC_UTF32LE,
+            ICONV_ENC_UTF32BE,
+            ICONV_ENC_ISO8859_1,
+            ICONV_ENC_ISO8859_15,
+            ICONV_ENC_SJIS,
+            ICONV_ENC_EUCJP,
+            ICONV_ENC_EUCKR,
+            ICONV_ENC_GB2312,
+            ICONV_ENC_BIG5,
+            ICONV_ENC_KOI8R,
+            ICONV_ENC_CP1252,
+            ICONV_ENC_CP1251,
         ];
         for i in 0..encs.len() {
             for j in (i + 1)..encs.len() {

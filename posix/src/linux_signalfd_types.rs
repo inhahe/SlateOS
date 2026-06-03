@@ -79,9 +79,8 @@ mod tests {
     #[test]
     fn test_signal_numbers_distinct() {
         let sigs = [
-            SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGABRT, SIGFPE,
-            SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM,
-            SIGTERM, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGURG,
+            SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGABRT, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2,
+            SIGPIPE, SIGALRM, SIGTERM, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGURG,
         ];
         for i in 0..sigs.len() {
             for j in (i + 1)..sigs.len() {
@@ -98,9 +97,8 @@ mod tests {
     #[test]
     fn test_signal_range() {
         let sigs = [
-            SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGABRT, SIGFPE,
-            SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM,
-            SIGTERM, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGURG,
+            SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGABRT, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2,
+            SIGPIPE, SIGALRM, SIGTERM, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGURG,
         ];
         for &s in &sigs {
             assert!(s >= 1 && s <= 64);

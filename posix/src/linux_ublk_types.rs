@@ -88,11 +88,16 @@ mod tests {
     #[test]
     fn test_cmd_opcodes_distinct() {
         let cmds = [
-            UBLK_CMD_GET_QUEUE_AFFINITY, UBLK_CMD_GET_DEV_INFO,
-            UBLK_CMD_ADD_DEV, UBLK_CMD_DEL_DEV,
-            UBLK_CMD_START_DEV, UBLK_CMD_STOP_DEV,
-            UBLK_CMD_SET_PARAMS, UBLK_CMD_GET_PARAMS,
-            UBLK_CMD_START_USER_RECOVERY, UBLK_CMD_END_USER_RECOVERY,
+            UBLK_CMD_GET_QUEUE_AFFINITY,
+            UBLK_CMD_GET_DEV_INFO,
+            UBLK_CMD_ADD_DEV,
+            UBLK_CMD_DEL_DEV,
+            UBLK_CMD_START_DEV,
+            UBLK_CMD_STOP_DEV,
+            UBLK_CMD_SET_PARAMS,
+            UBLK_CMD_GET_PARAMS,
+            UBLK_CMD_START_USER_RECOVERY,
+            UBLK_CMD_END_USER_RECOVERY,
             UBLK_CMD_GET_DEV_INFO2,
         ];
         for i in 0..cmds.len() {
@@ -105,7 +110,8 @@ mod tests {
     #[test]
     fn test_io_opcodes_distinct() {
         let ios = [
-            UBLK_IO_FETCH_REQ, UBLK_IO_COMMIT_AND_FETCH_REQ,
+            UBLK_IO_FETCH_REQ,
+            UBLK_IO_COMMIT_AND_FETCH_REQ,
             UBLK_IO_NEED_GET_DATA,
         ];
         for i in 0..ios.len() {
@@ -118,9 +124,13 @@ mod tests {
     #[test]
     fn test_op_types_distinct() {
         let ops = [
-            UBLK_IO_OP_READ, UBLK_IO_OP_WRITE, UBLK_IO_OP_FLUSH,
-            UBLK_IO_OP_DISCARD, UBLK_IO_OP_WRITE_SAME,
-            UBLK_IO_OP_WRITE_ZEROES, UBLK_IO_OP_ZONE_APPEND,
+            UBLK_IO_OP_READ,
+            UBLK_IO_OP_WRITE,
+            UBLK_IO_OP_FLUSH,
+            UBLK_IO_OP_DISCARD,
+            UBLK_IO_OP_WRITE_SAME,
+            UBLK_IO_OP_WRITE_ZEROES,
+            UBLK_IO_OP_ZONE_APPEND,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {
@@ -132,9 +142,12 @@ mod tests {
     #[test]
     fn test_feature_flags_power_of_two() {
         let flags = [
-            UBLK_F_SUPPORT_ZERO_COPY, UBLK_F_UNPRIVILEGED_DEV,
-            UBLK_F_USER_RECOVERY, UBLK_F_USER_RECOVERY_REISSUE,
-            UBLK_F_USER_COPY, UBLK_F_ZONED,
+            UBLK_F_SUPPORT_ZERO_COPY,
+            UBLK_F_UNPRIVILEGED_DEV,
+            UBLK_F_USER_RECOVERY,
+            UBLK_F_USER_RECOVERY_REISSUE,
+            UBLK_F_USER_COPY,
+            UBLK_F_ZONED,
         ];
         for f in &flags {
             assert!(f.is_power_of_two());
@@ -144,9 +157,12 @@ mod tests {
     #[test]
     fn test_feature_flags_no_overlap() {
         let flags = [
-            UBLK_F_SUPPORT_ZERO_COPY, UBLK_F_UNPRIVILEGED_DEV,
-            UBLK_F_USER_RECOVERY, UBLK_F_USER_RECOVERY_REISSUE,
-            UBLK_F_USER_COPY, UBLK_F_ZONED,
+            UBLK_F_SUPPORT_ZERO_COPY,
+            UBLK_F_UNPRIVILEGED_DEV,
+            UBLK_F_USER_RECOVERY,
+            UBLK_F_USER_RECOVERY_REISSUE,
+            UBLK_F_USER_COPY,
+            UBLK_F_ZONED,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

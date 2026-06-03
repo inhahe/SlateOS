@@ -61,9 +61,12 @@ mod tests {
     #[test]
     fn test_policies_distinct() {
         let policies = [
-            CPUFREQ_POLICY_PERFORMANCE, CPUFREQ_POLICY_POWERSAVE,
-            CPUFREQ_POLICY_USERSPACE, CPUFREQ_POLICY_ONDEMAND,
-            CPUFREQ_POLICY_CONSERVATIVE, CPUFREQ_POLICY_SCHEDUTIL,
+            CPUFREQ_POLICY_PERFORMANCE,
+            CPUFREQ_POLICY_POWERSAVE,
+            CPUFREQ_POLICY_USERSPACE,
+            CPUFREQ_POLICY_ONDEMAND,
+            CPUFREQ_POLICY_CONSERVATIVE,
+            CPUFREQ_POLICY_SCHEDUTIL,
         ];
         for i in 0..policies.len() {
             for j in (i + 1)..policies.len() {

@@ -92,7 +92,8 @@ mod tests {
     #[test]
     fn test_shadow_stack_flags_no_overlap() {
         let flags = [
-            SHADOW_STACK_ENABLED, SHADOW_STACK_WRITE_PROTECT,
+            SHADOW_STACK_ENABLED,
+            SHADOW_STACK_WRITE_PROTECT,
             SHADOW_STACK_PUSH_TOKEN,
         ];
         for i in 0..flags.len() {

@@ -70,9 +70,13 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            IOCB_CMD_PREAD, IOCB_CMD_PWRITE, IOCB_CMD_FSYNC,
-            IOCB_CMD_FDSYNC, IOCB_CMD_NOOP,
-            IOCB_CMD_PREADV, IOCB_CMD_PWRITEV,
+            IOCB_CMD_PREAD,
+            IOCB_CMD_PWRITE,
+            IOCB_CMD_FSYNC,
+            IOCB_CMD_FDSYNC,
+            IOCB_CMD_NOOP,
+            IOCB_CMD_PREADV,
+            IOCB_CMD_PWRITEV,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

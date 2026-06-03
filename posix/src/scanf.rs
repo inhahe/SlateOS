@@ -52,25 +52,24 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 64",
-    "mov [rsp], rdx",        // vararg 0
-    "mov [rsp+8], rcx",      // vararg 1
-    "mov [rsp+16], r8",      // vararg 2
-    "mov [rsp+24], r9",      // vararg 3
-    "mov rax, [rbp+16]",     // vararg 4 (stack)
+    "mov [rsp], rdx",    // vararg 0
+    "mov [rsp+8], rcx",  // vararg 1
+    "mov [rsp+16], r8",  // vararg 2
+    "mov [rsp+24], r9",  // vararg 3
+    "mov rax, [rbp+16]", // vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // vararg 5
+    "mov rax, [rbp+24]", // vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // vararg 6
+    "mov rax, [rbp+32]", // vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // vararg 7
+    "mov rax, [rbp+40]", // vararg 7
     "mov [rsp+56], rax",
     // rdi = str, rsi = fmt (already set)
-    "mov rdx, rsp",          // args array
+    "mov rdx, rsp", // args array
     "call _sscanf_impl",
     "add rsp, 64",
     "pop rbp",
     "ret",
-
     // scanf(fmt, ...) → _scanf_impl(fmt, args_ptr)
     // Like printf: rdi = fmt, rsi..r9 = first 5 varargs.
     ".global scanf",
@@ -79,24 +78,23 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 64",
-    "mov [rsp], rsi",        // vararg 0
-    "mov [rsp+8], rdx",      // vararg 1
-    "mov [rsp+16], rcx",     // vararg 2
-    "mov [rsp+24], r8",      // vararg 3
-    "mov [rsp+32], r9",      // vararg 4
-    "mov rax, [rbp+16]",     // vararg 5 (stack)
+    "mov [rsp], rsi",    // vararg 0
+    "mov [rsp+8], rdx",  // vararg 1
+    "mov [rsp+16], rcx", // vararg 2
+    "mov [rsp+24], r8",  // vararg 3
+    "mov [rsp+32], r9",  // vararg 4
+    "mov rax, [rbp+16]", // vararg 5 (stack)
     "mov [rsp+40], rax",
-    "mov rax, [rbp+24]",     // vararg 6
+    "mov rax, [rbp+24]", // vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+32]",     // vararg 7
+    "mov rax, [rbp+32]", // vararg 7
     "mov [rsp+56], rax",
     // rdi = fmt (already set)
-    "mov rsi, rsp",          // args array
+    "mov rsi, rsp", // args array
     "call _scanf_impl",
     "add rsp, 64",
     "pop rbp",
     "ret",
-
     // fscanf(stream, fmt, ...) → _fscanf_impl(stream, fmt, args_ptr)
     // rdi = stream, rsi = fmt, rdx..r9 = first 4 varargs.
     ".global fscanf",
@@ -105,25 +103,24 @@ core::arch::global_asm!(
     "push rbp",
     "mov rbp, rsp",
     "sub rsp, 64",
-    "mov [rsp], rdx",        // vararg 0
-    "mov [rsp+8], rcx",      // vararg 1
-    "mov [rsp+16], r8",      // vararg 2
-    "mov [rsp+24], r9",      // vararg 3
-    "mov rax, [rbp+16]",     // vararg 4 (stack)
+    "mov [rsp], rdx",    // vararg 0
+    "mov [rsp+8], rcx",  // vararg 1
+    "mov [rsp+16], r8",  // vararg 2
+    "mov [rsp+24], r9",  // vararg 3
+    "mov rax, [rbp+16]", // vararg 4 (stack)
     "mov [rsp+32], rax",
-    "mov rax, [rbp+24]",     // vararg 5
+    "mov rax, [rbp+24]", // vararg 5
     "mov [rsp+40], rax",
-    "mov rax, [rbp+32]",     // vararg 6
+    "mov rax, [rbp+32]", // vararg 6
     "mov [rsp+48], rax",
-    "mov rax, [rbp+40]",     // vararg 7
+    "mov rax, [rbp+40]", // vararg 7
     "mov [rsp+56], rax",
     // rdi = stream, rsi = fmt (already set)
-    "mov rdx, rsp",          // args array
+    "mov rdx, rsp", // args array
     "call _fscanf_impl",
     "add rsp, 64",
     "pop rbp",
     "ret",
-
     // -----------------------------------------------------------------------
     // glibc C99 aliases — identical to the above, just different names.
     // Programs compiled with -std=c99 or later link against __isoc99_*.
@@ -132,29 +129,24 @@ core::arch::global_asm!(
     ".type __isoc99_sscanf, @function",
     "__isoc99_sscanf:",
     "jmp sscanf",
-
     ".global __isoc99_scanf",
     ".type __isoc99_scanf, @function",
     "__isoc99_scanf:",
     "jmp scanf",
-
     ".global __isoc99_fscanf",
     ".type __isoc99_fscanf, @function",
     "__isoc99_fscanf:",
     "jmp fscanf",
-
     // v* variants take a va_list (no varargs), so the C99 aliases are plain
     // tail-jumps to the Rust functions below.
     ".global __isoc99_vsscanf",
     ".type __isoc99_vsscanf, @function",
     "__isoc99_vsscanf:",
     "jmp vsscanf",
-
     ".global __isoc99_vscanf",
     ".type __isoc99_vscanf, @function",
     "__isoc99_vscanf:",
     "jmp vscanf",
-
     ".global __isoc99_vfscanf",
     ".type __isoc99_vfscanf, @function",
     "__isoc99_vfscanf:",
@@ -171,11 +163,7 @@ core::arch::global_asm!(
 /// if the input is exhausted before the first conversion.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn _sscanf_impl(
-    input: *const u8,
-    fmt: *const u8,
-    args: *const u64,
-) -> i32 {
+pub extern "C" fn _sscanf_impl(input: *const u8, fmt: *const u8, args: *const u64) -> i32 {
     if input.is_null() || fmt.is_null() {
         return -1;
     }
@@ -184,9 +172,9 @@ pub extern "C" fn _sscanf_impl(
         input,
         fmt,
         args,
-        si: 0,      // Position in input string.
-        fi: 0,      // Position in format string.
-        ai: 0,      // Position in args array.
+        si: 0,       // Position in input string.
+        fi: 0,       // Position in format string.
+        ai: 0,       // Position in args array.
         assigned: 0, // Number of successful assignments.
     };
 
@@ -203,10 +191,7 @@ const SCANF_LINE_BUF: usize = 4096;
 /// or EOF (-1) if stdin is at end-of-file.
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn _scanf_impl(
-    fmt: *const u8,
-    args: *const u64,
-) -> i32 {
+pub extern "C" fn _scanf_impl(fmt: *const u8, args: *const u64) -> i32 {
     if fmt.is_null() {
         return -1;
     }
@@ -237,11 +222,7 @@ pub extern "C" fn _scanf_impl(
 /// pointer is interpreted as a FILE* (our stdio fd encoding).
 #[cfg_attr(target_os = "none", unsafe(no_mangle))]
 #[allow(clippy::arithmetic_side_effects)]
-pub extern "C" fn _fscanf_impl(
-    stream: *mut u8,
-    fmt: *const u8,
-    args: *const u64,
-) -> i32 {
+pub extern "C" fn _fscanf_impl(stream: *mut u8, fmt: *const u8, args: *const u64) -> i32 {
     if fmt.is_null() {
         return -1;
     }
@@ -383,8 +364,8 @@ unsafe fn va_collect_scanf(fmt: *const u8, va: &mut VaList) -> [u64; 8] {
         }
 
         match conv {
-            b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b's' | b'c' | b'[' | b'f' | b'e'
-            | b'g' | b'a' | b'n' => {
+            b'd' | b'i' | b'u' | b'x' | b'X' | b'o' | b's' | b'c' | b'[' | b'f' | b'e' | b'g'
+            | b'a' | b'n' => {
                 if !suppress {
                     // SAFETY: va contract upheld by the caller.
                     let v = unsafe { printf::va_arg_int(va) };
@@ -678,7 +659,9 @@ fn scan_core(ctx: &mut ScanCtx) -> i32 {
                     if !suppress {
                         let ptr = ctx.next_arg() as *mut i32;
                         if !ptr.is_null() {
-                            unsafe { *ptr = ctx.si as i32; }
+                            unsafe {
+                                *ptr = ctx.si as i32;
+                            }
                         }
                     }
                     // %n does NOT count toward assigned.
@@ -728,14 +711,20 @@ fn scan_signed_int(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8
 
     let mut val: i64 = 0;
     let mut count: usize = 0;
-    let max = if has_sign { width.saturating_sub(1) } else { width };
+    let max = if has_sign {
+        width.saturating_sub(1)
+    } else {
+        width
+    };
 
     while count < max {
         let c = ctx.peek();
         if !c.is_ascii_digit() {
             break;
         }
-        val = val.wrapping_mul(10).wrapping_add(i64::from(c.wrapping_sub(b'0')));
+        val = val
+            .wrapping_mul(10)
+            .wrapping_add(i64::from(c.wrapping_sub(b'0')));
         ctx.advance();
         count = count.wrapping_add(1);
     }
@@ -753,12 +742,16 @@ fn scan_signed_int(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8
         if long_mod >= 1 {
             let p = ptr as *mut i64;
             if !p.is_null() {
-                unsafe { *p = val; }
+                unsafe {
+                    *p = val;
+                }
             }
         } else {
             let p = ptr as *mut i32;
             if !p.is_null() {
-                unsafe { *p = val as i32; }
+                unsafe {
+                    *p = val as i32;
+                }
             }
         }
         ctx.assigned += 1;
@@ -773,12 +766,7 @@ fn scan_signed_int(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8
 /// - `0` (without x) → octal (base 8)
 /// - otherwise → decimal (base 10)
 #[allow(clippy::arithmetic_side_effects)]
-fn scan_signed_int_auto(
-    ctx: &mut ScanCtx,
-    suppress: bool,
-    width: usize,
-    long_mod: u8,
-) -> bool {
+fn scan_signed_int_auto(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> bool {
     ctx.skip_ws();
     if ctx.peek() == 0 {
         return false;
@@ -790,7 +778,11 @@ fn scan_signed_int_auto(
         ctx.advance();
     }
 
-    let mut remaining = if has_sign { width.saturating_sub(1) } else { width };
+    let mut remaining = if has_sign {
+        width.saturating_sub(1)
+    } else {
+        width
+    };
 
     // Detect base from prefix.
     let base: u64;
@@ -854,12 +846,16 @@ fn scan_signed_int_auto(
         if long_mod >= 1 {
             let p = ptr as *mut i64;
             if !p.is_null() {
-                unsafe { *p = val; }
+                unsafe {
+                    *p = val;
+                }
             }
         } else {
             let p = ptr as *mut i32;
             if !p.is_null() {
-                unsafe { *p = val as i32; }
+                unsafe {
+                    *p = val as i32;
+                }
             }
         }
         ctx.assigned += 1;
@@ -930,12 +926,16 @@ fn scan_unsigned_int(
         if long_mod >= 1 {
             let p = ptr as *mut u64;
             if !p.is_null() {
-                unsafe { *p = val; }
+                unsafe {
+                    *p = val;
+                }
             }
         } else {
             let p = ptr as *mut u32;
             if !p.is_null() {
-                unsafe { *p = val as u32; }
+                unsafe {
+                    *p = val as u32;
+                }
             }
         }
         ctx.assigned += 1;
@@ -961,7 +961,9 @@ fn scan_string(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
             break;
         }
         if !suppress && !dest.is_null() {
-            unsafe { *dest.add(count) = c; }
+            unsafe {
+                *dest.add(count) = c;
+            }
         }
         ctx.advance();
         count = count.wrapping_add(1);
@@ -973,7 +975,9 @@ fn scan_string(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
 
     // Null-terminate.
     if !suppress && !dest.is_null() {
-        unsafe { *dest.add(count) = 0; }
+        unsafe {
+            *dest.add(count) = 0;
+        }
     }
     if !suppress {
         ctx.assigned += 1;
@@ -1001,7 +1005,9 @@ fn scan_char(ctx: &mut ScanCtx, suppress: bool, width: usize, has_width: bool) -
             break;
         }
         if !suppress && !dest.is_null() {
-            unsafe { *dest.add(count) = c; }
+            unsafe {
+                *dest.add(count) = c;
+            }
         }
         ctx.advance();
         count = count.wrapping_add(1);
@@ -1113,13 +1119,17 @@ fn scan_float(ctx: &mut ScanCtx, suppress: bool, width: usize, long_mod: u8) -> 
             // %lf → f64
             let p = ptr as *mut f64;
             if !p.is_null() {
-                unsafe { *p = val; }
+                unsafe {
+                    *p = val;
+                }
             }
         } else {
             // %f → f32
             let p = ptr as *mut f32;
             if !p.is_null() {
-                unsafe { *p = val as f32; }
+                unsafe {
+                    *p = val as f32;
+                }
             }
         }
         ctx.assigned += 1;
@@ -1224,7 +1234,9 @@ fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
         }
 
         // SAFETY: c is u8 so c >> 3 <= 31 < 32, always in bounds.
-        let in_set = bitmap.get((c >> 3) as usize).is_some_and(|slot| slot & (1u8 << (c & 7)) != 0);
+        let in_set = bitmap
+            .get((c >> 3) as usize)
+            .is_some_and(|slot| slot & (1u8 << (c & 7)) != 0);
         let matches = if negated { !in_set } else { in_set };
 
         if !matches {
@@ -1232,7 +1244,9 @@ fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
         }
 
         if !suppress && !dest.is_null() {
-            unsafe { *dest.add(count) = c; }
+            unsafe {
+                *dest.add(count) = c;
+            }
         }
         ctx.advance();
         count = count.wrapping_add(1);
@@ -1244,7 +1258,9 @@ fn scan_scanset(ctx: &mut ScanCtx, suppress: bool, width: usize) -> bool {
 
     // Null-terminate.
     if !suppress && !dest.is_null() {
-        unsafe { *dest.add(count) = 0; }
+        unsafe {
+            *dest.add(count) = 0;
+        }
     }
     if !suppress {
         ctx.assigned += 1;
@@ -1544,7 +1560,11 @@ mod tests {
         let mut val: i32 = 0;
         let mut pos: i32 = 0;
         let args = [&raw mut val as u64, &raw mut pos as u64];
-        let n = _sscanf_impl(b"hello 42\0".as_ptr(), b"%*s %d%n\0".as_ptr(), args.as_ptr());
+        let n = _sscanf_impl(
+            b"hello 42\0".as_ptr(),
+            b"%*s %d%n\0".as_ptr(),
+            args.as_ptr(),
+        );
         assert_eq!(n, 1);
         assert_eq!(val, 42);
         assert_eq!(pos, 8);
@@ -1600,7 +1620,11 @@ mod tests {
     fn scan_suppression() {
         let mut val: i32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(b"ignored 42\0".as_ptr(), b"%*s %d\0".as_ptr(), args.as_ptr());
+        let n = _sscanf_impl(
+            b"ignored 42\0".as_ptr(),
+            b"%*s %d\0".as_ptr(),
+            args.as_ptr(),
+        );
         assert_eq!(n, 1);
         assert_eq!(val, 42);
     }
@@ -1691,7 +1715,11 @@ mod tests {
     fn scan_scanset_negated() {
         let mut buf = [0u8; 64];
         let args = [buf.as_mut_ptr() as u64];
-        let n = _sscanf_impl(b"hello world\0".as_ptr(), b"%[^ ]\0".as_ptr(), args.as_ptr());
+        let n = _sscanf_impl(
+            b"hello world\0".as_ptr(),
+            b"%[^ ]\0".as_ptr(),
+            args.as_ptr(),
+        );
         assert_eq!(n, 1);
         assert_eq!(&buf[..5], b"hello");
         assert_eq!(buf[5], 0);
@@ -1790,11 +1818,7 @@ mod tests {
         let mut a: i32 = 0;
         let mut b: i32 = 0;
         let mut c: i32 = 0;
-        let args = [
-            &raw mut a as u64,
-            &raw mut b as u64,
-            &raw mut c as u64,
-        ];
+        let args = [&raw mut a as u64, &raw mut b as u64, &raw mut c as u64];
         let n = _sscanf_impl(b"1 2 3\0".as_ptr(), b"%d %d %d\0".as_ptr(), args.as_ptr());
         assert_eq!(n, 3);
         assert_eq!(a, 1);
@@ -1825,11 +1849,7 @@ mod tests {
         // so backtrack and parse "0" as the hex value 0.
         let mut val: u32 = 99;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(
-            b"0xG\0".as_ptr(),
-            b"%x\0".as_ptr(),
-            args.as_ptr(),
-        );
+        let n = _sscanf_impl(b"0xG\0".as_ptr(), b"%x\0".as_ptr(), args.as_ptr());
         assert_eq!(n, 1);
         assert_eq!(val, 0);
     }
@@ -1839,11 +1859,7 @@ mod tests {
         // "0" alone should parse as hex value 0.
         let mut val: u32 = 99;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(
-            b"0\0".as_ptr(),
-            b"%x\0".as_ptr(),
-            args.as_ptr(),
-        );
+        let n = _sscanf_impl(b"0\0".as_ptr(), b"%x\0".as_ptr(), args.as_ptr());
         assert_eq!(n, 1);
         assert_eq!(val, 0);
     }
@@ -1854,11 +1870,7 @@ mod tests {
         // The prefix "0x" would need width >= 3 to be useful.
         let mut val: u32 = 99;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(
-            b"0xFF\0".as_ptr(),
-            b"%1x\0".as_ptr(),
-            args.as_ptr(),
-        );
+        let n = _sscanf_impl(b"0xFF\0".as_ptr(), b"%1x\0".as_ptr(), args.as_ptr());
         assert_eq!(n, 1);
         assert_eq!(val, 0);
     }
@@ -1868,11 +1880,7 @@ mod tests {
         // "%3x" on "0xFF" — width=3: "0x" prefix (2) + "F" (1) = 3 total.
         let mut val: u32 = 0;
         let args = [&raw mut val as u64];
-        let n = _sscanf_impl(
-            b"0xFF\0".as_ptr(),
-            b"%3x\0".as_ptr(),
-            args.as_ptr(),
-        );
+        let n = _sscanf_impl(b"0xFF\0".as_ptr(), b"%3x\0".as_ptr(), args.as_ptr());
         assert_eq!(n, 1);
         assert_eq!(val, 0xF);
     }
@@ -1937,7 +1945,11 @@ mod tests {
     fn vsscanf_two_ints() {
         let mut a: i32 = 0;
         let mut b: i32 = 0;
-        let n = run_vsscanf(b"10 20\0", b"%d %d\0", &[&raw mut a as u64, &raw mut b as u64]);
+        let n = run_vsscanf(
+            b"10 20\0",
+            b"%d %d\0",
+            &[&raw mut a as u64, &raw mut b as u64],
+        );
         assert_eq!(n, 2);
         assert_eq!(a, 10);
         assert_eq!(b, 20);

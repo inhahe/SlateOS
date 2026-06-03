@@ -83,8 +83,10 @@ mod tests {
     #[test]
     fn test_pme_caps_no_overlap() {
         let caps = [
-            PCI_PM_CAP_PME_D0, PCI_PM_CAP_PME_D1,
-            PCI_PM_CAP_PME_D2, PCI_PM_CAP_PME_D3HOT,
+            PCI_PM_CAP_PME_D0,
+            PCI_PM_CAP_PME_D1,
+            PCI_PM_CAP_PME_D2,
+            PCI_PM_CAP_PME_D3HOT,
             PCI_PM_CAP_PME_D3COLD,
         ];
         for i in 0..caps.len() {
@@ -98,8 +100,10 @@ mod tests {
     #[test]
     fn test_aspm_distinct() {
         let modes = [
-            PCIE_ASPM_DISABLED, PCIE_ASPM_L0S,
-            PCIE_ASPM_L1, PCIE_ASPM_L0S_L1,
+            PCIE_ASPM_DISABLED,
+            PCIE_ASPM_L0S,
+            PCIE_ASPM_L1,
+            PCIE_ASPM_L0S_L1,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

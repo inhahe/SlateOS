@@ -82,17 +82,10 @@ fn matches_encoding(s: *const u8, aliases: &[&[u8]]) -> bool {
 }
 
 /// UTF-8 encoding aliases (normalized to uppercase, no hyphens/underscores).
-const UTF8_ALIASES: &[&[u8]] = &[
-    b"UTF8",
-];
+const UTF8_ALIASES: &[&[u8]] = &[b"UTF8"];
 
 /// ASCII encoding aliases.
-const ASCII_ALIASES: &[&[u8]] = &[
-    b"ASCII",
-    b"USASCII",
-    b"US",
-    b"ANSI",
-];
+const ASCII_ALIASES: &[&[u8]] = &[b"ASCII", b"USASCII", b"US", b"ANSI"];
 
 /// Latin-1 (ISO-8859-1) encoding aliases.
 ///
@@ -100,11 +93,7 @@ const ASCII_ALIASES: &[&[u8]] = &[
 /// but 0x80-0xFF map to Unicode code points U+0080-U+00FF and require
 /// 2-byte UTF-8 encoding (0xC2-0xC3 prefix).  This must NOT be treated
 /// as a simple ASCII alias.
-const LATIN1_ALIASES: &[&[u8]] = &[
-    b"ISO88591",
-    b"LATIN1",
-    b"L1",
-];
+const LATIN1_ALIASES: &[&[u8]] = &[b"ISO88591", b"LATIN1", b"L1"];
 
 /// Open a conversion descriptor.
 ///
@@ -180,7 +169,11 @@ pub unsafe extern "C" fn iconv(
         return 0;
     }
 
-    if outbuf.is_null() || unsafe { (*outbuf).is_null() } || inbytesleft.is_null() || outbytesleft.is_null() {
+    if outbuf.is_null()
+        || unsafe { (*outbuf).is_null() }
+        || inbytesleft.is_null()
+        || outbytesleft.is_null()
+    {
         errno::set_errno(errno::EFAULT);
         return usize::MAX;
     }
@@ -199,7 +192,9 @@ pub unsafe extern "C" fn iconv(
             while *in_left > 0 && *out_left > 0 {
                 // SAFETY: in_left > 0 means *in_ptr is valid; out_left > 0 means *out_ptr is valid.
                 let byte = unsafe { **in_ptr };
-                unsafe { **out_ptr = byte; }
+                unsafe {
+                    **out_ptr = byte;
+                }
                 *in_ptr = unsafe { (*in_ptr).add(1) };
                 *out_ptr = unsafe { (*out_ptr).add(1) };
                 *in_left = in_left.wrapping_sub(1);
@@ -222,7 +217,9 @@ pub unsafe extern "C" fn iconv(
                         1usize // Invalid UTF-8 lead byte — skip 1.
                     };
                     // Emit replacement character.
-                    unsafe { **out_ptr = b'?'; }
+                    unsafe {
+                        **out_ptr = b'?';
+                    }
                     *out_ptr = unsafe { (*out_ptr).add(1) };
                     *out_left = out_left.wrapping_sub(1);
                     replacements = replacements.wrapping_add(1);
@@ -232,7 +229,9 @@ pub unsafe extern "C" fn iconv(
                     *in_left = in_left.wrapping_sub(skip);
                 } else {
                     // ASCII byte — copy directly.
-                    unsafe { **out_ptr = byte; }
+                    unsafe {
+                        **out_ptr = byte;
+                    }
                     *in_ptr = unsafe { (*in_ptr).add(1) };
                     *out_ptr = unsafe { (*out_ptr).add(1) };
                     *in_left = in_left.wrapping_sub(1);
@@ -258,7 +257,9 @@ pub unsafe extern "C" fn iconv(
                         errno::set_errno(errno::E2BIG);
                         return usize::MAX;
                     }
-                    unsafe { **out_ptr = byte; }
+                    unsafe {
+                        **out_ptr = byte;
+                    }
                     *out_ptr = unsafe { (*out_ptr).add(1) };
                     *out_left = out_left.wrapping_sub(1);
                 } else {
@@ -267,7 +268,7 @@ pub unsafe extern "C" fn iconv(
                         errno::set_errno(errno::E2BIG);
                         return usize::MAX;
                     }
-                    let cp = byte as u32;
+                    let cp = u32::from(byte);
                     unsafe {
                         **out_ptr = (0xC0 | (cp >> 6)) as u8;
                         *(*out_ptr).add(1) = (0x80 | (cp & 0x3F)) as u8;
@@ -287,7 +288,9 @@ pub unsafe extern "C" fn iconv(
                 let byte = unsafe { **in_ptr };
                 if byte <= 0x7F {
                     // ASCII — copy directly (valid in Latin-1).
-                    unsafe { **out_ptr = byte; }
+                    unsafe {
+                        **out_ptr = byte;
+                    }
                     *in_ptr = unsafe { (*in_ptr).add(1) };
                     *out_ptr = unsafe { (*out_ptr).add(1) };
                     *in_left = in_left.wrapping_sub(1);
@@ -305,7 +308,7 @@ pub unsafe extern "C" fn iconv(
                         errno::set_errno(errno::EILSEQ);
                         return usize::MAX;
                     }
-                    let cp = (((byte & 0x1F) as u32) << 6) | ((b2 & 0x3F) as u32);
+                    let cp = (u32::from(byte & 0x1F) << 6) | u32::from(b2 & 0x3F);
                     if cp < 0x80 {
                         // Overlong encoding (e.g. 0xC0 0x80 for U+0000):
                         // must reject per Unicode security guidelines.
@@ -317,7 +320,9 @@ pub unsafe extern "C" fn iconv(
                         errno::set_errno(errno::EILSEQ);
                         return usize::MAX;
                     }
-                    unsafe { **out_ptr = cp as u8; }
+                    unsafe {
+                        **out_ptr = cp as u8;
+                    }
                     *in_ptr = unsafe { (*in_ptr).add(2) };
                     *out_ptr = unsafe { (*out_ptr).add(1) };
                     *in_left = in_left.wrapping_sub(2);
@@ -338,10 +343,14 @@ pub unsafe extern "C" fn iconv(
             while *in_left > 0 && *out_left > 0 {
                 let byte = unsafe { **in_ptr };
                 if byte > 127 {
-                    unsafe { **out_ptr = b'?'; }
+                    unsafe {
+                        **out_ptr = b'?';
+                    }
                     replacements = replacements.wrapping_add(1);
                 } else {
-                    unsafe { **out_ptr = byte; }
+                    unsafe {
+                        **out_ptr = byte;
+                    }
                 }
                 *in_ptr = unsafe { (*in_ptr).add(1) };
                 *out_ptr = unsafe { (*out_ptr).add(1) };
@@ -536,7 +545,10 @@ mod tests {
         let latin = cstr("LATIN1");
         let cd = iconv_open(latin.as_ptr(), ascii.as_ptr());
         assert_ne!(cd, ICONV_OPEN_ERR);
-        assert_eq!(cd, 1, "ASCII → Latin-1 should be identity (ASCII is subset)");
+        assert_eq!(
+            cd, 1,
+            "ASCII → Latin-1 should be identity (ASCII is subset)"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -939,7 +951,13 @@ mod tests {
         let mut outleft = 1usize;
 
         let ret = unsafe {
-            iconv(4, &mut inbuf as *mut *const u8, &mut inleft, &mut outptr, &mut outleft)
+            iconv(
+                4,
+                &mut inbuf as *mut *const u8,
+                &mut inleft,
+                &mut outptr,
+                &mut outleft,
+            )
         };
         assert_eq!(ret, usize::MAX);
         assert_eq!(errno::get_errno(), errno::E2BIG);
@@ -1117,6 +1135,9 @@ mod tests {
         // 0xC3 followed by non-continuation byte (0x41 = 'A').
         let input = &[0xC3u8, 0x41];
         let result = convert(5, input);
-        assert!(result.is_none(), "invalid continuation byte should be rejected");
+        assert!(
+            result.is_none(),
+            "invalid continuation byte should be rejected"
+        );
     }
 }

@@ -66,8 +66,12 @@ mod tests {
     #[test]
     fn test_security_levels_distinct() {
         let levels = [
-            TB_SECURITY_NONE, TB_SECURITY_USER, TB_SECURITY_SECURE,
-            TB_SECURITY_DPONLY, TB_SECURITY_USBONLY, TB_SECURITY_NOPCIE,
+            TB_SECURITY_NONE,
+            TB_SECURITY_USER,
+            TB_SECURITY_SECURE,
+            TB_SECURITY_DPONLY,
+            TB_SECURITY_USBONLY,
+            TB_SECURITY_NOPCIE,
         ];
         for i in 0..levels.len() {
             for j in (i + 1)..levels.len() {
@@ -88,10 +92,7 @@ mod tests {
 
     #[test]
     fn test_tunnel_types_distinct() {
-        let types = [
-            TB_TUNNEL_PCIE, TB_TUNNEL_DP,
-            TB_TUNNEL_DMA, TB_TUNNEL_USB3,
-        ];
+        let types = [TB_TUNNEL_PCIE, TB_TUNNEL_DP, TB_TUNNEL_DMA, TB_TUNNEL_USB3];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);

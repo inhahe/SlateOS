@@ -86,8 +86,10 @@ mod tests {
     #[test]
     fn test_xattr_types_distinct() {
         let types = [
-            EVM_XATTR_NONE, EVM_XATTR_HMAC,
-            EVM_XATTR_PORTABLE_DIGSIG, EVM_XATTR_DIGSIG,
+            EVM_XATTR_NONE,
+            EVM_XATTR_HMAC,
+            EVM_XATTR_PORTABLE_DIGSIG,
+            EVM_XATTR_DIGSIG,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -99,7 +101,8 @@ mod tests {
     #[test]
     fn test_states_distinct() {
         let states = [
-            EVM_STATE_DISABLED, EVM_STATE_KEY_LOADED,
+            EVM_STATE_DISABLED,
+            EVM_STATE_KEY_LOADED,
             EVM_STATE_INITIALIZED,
         ];
         for i in 0..states.len() {
@@ -127,8 +130,10 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let codes = [
-            EVM_STATUS_PASS, EVM_STATUS_FAIL,
-            EVM_STATUS_NO_XATTR, EVM_STATUS_UNKNOWN_TYPE,
+            EVM_STATUS_PASS,
+            EVM_STATUS_FAIL,
+            EVM_STATUS_NO_XATTR,
+            EVM_STATUS_UNKNOWN_TYPE,
             EVM_STATUS_NO_KEY,
         ];
         for i in 0..codes.len() {
@@ -141,8 +146,10 @@ mod tests {
     #[test]
     fn test_protect_flags_no_overlap() {
         let flags = [
-            EVM_PROTECT_SELINUX, EVM_PROTECT_IMA,
-            EVM_PROTECT_CAPABILITY, EVM_PROTECT_APPARMOR,
+            EVM_PROTECT_SELINUX,
+            EVM_PROTECT_IMA,
+            EVM_PROTECT_CAPABILITY,
+            EVM_PROTECT_APPARMOR,
             EVM_PROTECT_SMACK,
         ];
         for i in 0..flags.len() {

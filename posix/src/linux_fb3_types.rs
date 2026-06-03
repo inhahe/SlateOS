@@ -85,9 +85,13 @@ mod tests {
     #[test]
     fn test_visual_types_distinct() {
         let types = [
-            FB_VISUAL_MONO01, FB_VISUAL_MONO10, FB_VISUAL_TRUECOLOR,
-            FB_VISUAL_PSEUDOCOLOR, FB_VISUAL_DIRECTCOLOR,
-            FB_VISUAL_STATIC_PSEUDOCOLOR, FB_VISUAL_FOURCC,
+            FB_VISUAL_MONO01,
+            FB_VISUAL_MONO10,
+            FB_VISUAL_TRUECOLOR,
+            FB_VISUAL_PSEUDOCOLOR,
+            FB_VISUAL_DIRECTCOLOR,
+            FB_VISUAL_STATIC_PSEUDOCOLOR,
+            FB_VISUAL_FOURCC,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -99,9 +103,12 @@ mod tests {
     #[test]
     fn test_fb_types_distinct() {
         let types = [
-            FB_TYPE_PACKED_PIXELS, FB_TYPE_PLANES,
-            FB_TYPE_INTERLEAVED_PLANES, FB_TYPE_TEXT,
-            FB_TYPE_VGA_PLANES, FB_TYPE_FOURCC,
+            FB_TYPE_PACKED_PIXELS,
+            FB_TYPE_PLANES,
+            FB_TYPE_INTERLEAVED_PLANES,
+            FB_TYPE_TEXT,
+            FB_TYPE_VGA_PLANES,
+            FB_TYPE_FOURCC,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -123,8 +130,11 @@ mod tests {
     #[test]
     fn test_blank_modes_distinct() {
         let modes = [
-            FB_BLANK_UNBLANK, FB_BLANK_NORMAL, FB_BLANK_VSYNC_SUSPEND,
-            FB_BLANK_HSYNC_SUSPEND, FB_BLANK_POWERDOWN,
+            FB_BLANK_UNBLANK,
+            FB_BLANK_NORMAL,
+            FB_BLANK_VSYNC_SUSPEND,
+            FB_BLANK_HSYNC_SUSPEND,
+            FB_BLANK_POWERDOWN,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {

@@ -72,8 +72,10 @@ mod tests {
     #[test]
     fn test_block_states_distinct() {
         let states = [
-            MEM_BLOCK_OFFLINE, MEM_BLOCK_GOING_ONLINE,
-            MEM_BLOCK_ONLINE, MEM_BLOCK_GOING_OFFLINE,
+            MEM_BLOCK_OFFLINE,
+            MEM_BLOCK_GOING_ONLINE,
+            MEM_BLOCK_ONLINE,
+            MEM_BLOCK_GOING_OFFLINE,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -85,8 +87,10 @@ mod tests {
     #[test]
     fn test_online_types_distinct() {
         let types = [
-            MMOP_ONLINE_KERNEL, MMOP_ONLINE_MOVABLE,
-            MMOP_ONLINE_KEEP, MMOP_OFFLINE,
+            MMOP_ONLINE_KERNEL,
+            MMOP_ONLINE_MOVABLE,
+            MMOP_ONLINE_KEEP,
+            MMOP_OFFLINE,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -98,9 +102,12 @@ mod tests {
     #[test]
     fn test_notify_events_distinct() {
         let events = [
-            MEM_NOTIFY_GOING_ONLINE, MEM_NOTIFY_ONLINE,
-            MEM_NOTIFY_GOING_OFFLINE, MEM_NOTIFY_OFFLINE,
-            MEM_NOTIFY_CANCEL_ONLINE, MEM_NOTIFY_CANCEL_OFFLINE,
+            MEM_NOTIFY_GOING_ONLINE,
+            MEM_NOTIFY_ONLINE,
+            MEM_NOTIFY_GOING_OFFLINE,
+            MEM_NOTIFY_OFFLINE,
+            MEM_NOTIFY_CANCEL_ONLINE,
+            MEM_NOTIFY_CANCEL_OFFLINE,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

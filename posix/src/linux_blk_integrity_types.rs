@@ -69,9 +69,12 @@ mod tests {
     #[test]
     fn test_profile_types_distinct() {
         let types = [
-            BLK_INTEGRITY_NONE, BLK_INTEGRITY_T10_DIF_TYPE1,
-            BLK_INTEGRITY_T10_DIF_TYPE2, BLK_INTEGRITY_T10_DIF_TYPE3,
-            BLK_INTEGRITY_IP_CHECKSUM, BLK_INTEGRITY_CRC64,
+            BLK_INTEGRITY_NONE,
+            BLK_INTEGRITY_T10_DIF_TYPE1,
+            BLK_INTEGRITY_T10_DIF_TYPE2,
+            BLK_INTEGRITY_T10_DIF_TYPE3,
+            BLK_INTEGRITY_IP_CHECKSUM,
+            BLK_INTEGRITY_CRC64,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -83,8 +86,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            BLK_INTEGRITY_GENERATE, BLK_INTEGRITY_VERIFY,
-            BLK_INTEGRITY_DEVICE_CAPABLE, BLK_INTEGRITY_IP_CHECKSUM_FLAG,
+            BLK_INTEGRITY_GENERATE,
+            BLK_INTEGRITY_VERIFY,
+            BLK_INTEGRITY_DEVICE_CAPABLE,
+            BLK_INTEGRITY_IP_CHECKSUM_FLAG,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());

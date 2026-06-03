@@ -134,11 +134,26 @@ mod tests {
     #[test]
     fn test_upcall_ops_distinct() {
         let ops = [
-            CODA_ROOT, CODA_OPEN, CODA_CLOSE, CODA_IOCTL,
-            CODA_GETATTR, CODA_SETATTR, CODA_ACCESS, CODA_LOOKUP,
-            CODA_CREATE, CODA_REMOVE, CODA_LINK, CODA_RENAME,
-            CODA_MKDIR, CODA_RMDIR, CODA_READDIR, CODA_SYMLINK,
-            CODA_READLINK, CODA_FSYNC, CODA_STATFS, CODA_STORE,
+            CODA_ROOT,
+            CODA_OPEN,
+            CODA_CLOSE,
+            CODA_IOCTL,
+            CODA_GETATTR,
+            CODA_SETATTR,
+            CODA_ACCESS,
+            CODA_LOOKUP,
+            CODA_CREATE,
+            CODA_REMOVE,
+            CODA_LINK,
+            CODA_RENAME,
+            CODA_MKDIR,
+            CODA_RMDIR,
+            CODA_READDIR,
+            CODA_SYMLINK,
+            CODA_READLINK,
+            CODA_FSYNC,
+            CODA_STATFS,
+            CODA_STORE,
             CODA_RELEASE,
         ];
         for i in 0..ops.len() {
@@ -151,8 +166,11 @@ mod tests {
     #[test]
     fn test_downcall_ops_distinct() {
         let ops = [
-            CODA_PURGEUSER, CODA_ZAPFILE, CODA_ZAPDIR,
-            CODA_PURGEFID, CODA_REPLACE,
+            CODA_PURGEUSER,
+            CODA_ZAPFILE,
+            CODA_ZAPDIR,
+            CODA_PURGEFID,
+            CODA_REPLACE,
         ];
         for i in 0..ops.len() {
             for j in (i + 1)..ops.len() {

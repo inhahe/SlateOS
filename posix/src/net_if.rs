@@ -8,11 +8,11 @@
 // Re-exports from socket
 // ---------------------------------------------------------------------------
 
-pub use crate::socket::IFF_UP;
+pub use crate::socket::IFF_BROADCAST;
 pub use crate::socket::IFF_LOOPBACK;
 pub use crate::socket::IFF_MULTICAST;
 pub use crate::socket::IFF_RUNNING;
-pub use crate::socket::IFF_BROADCAST;
+pub use crate::socket::IFF_UP;
 pub use crate::socket::IfNameindex;
 
 // ---------------------------------------------------------------------------
@@ -145,16 +145,21 @@ mod tests {
     #[test]
     fn test_iff_flags_distinct() {
         let flags: [u32; 11] = [
-            IFF_UP, IFF_BROADCAST, IFF_DEBUG, IFF_LOOPBACK,
-            IFF_POINTOPOINT, IFF_NOTRAILERS, IFF_RUNNING,
-            IFF_NOARP, IFF_PROMISC, IFF_ALLMULTI, IFF_MULTICAST,
+            IFF_UP,
+            IFF_BROADCAST,
+            IFF_DEBUG,
+            IFF_LOOPBACK,
+            IFF_POINTOPOINT,
+            IFF_NOTRAILERS,
+            IFF_RUNNING,
+            IFF_NOARP,
+            IFF_PROMISC,
+            IFF_ALLMULTI,
+            IFF_MULTICAST,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
-                assert_ne!(
-                    flags[i], flags[j],
-                    "IFF flags must be distinct"
-                );
+                assert_ne!(flags[i], flags[j], "IFF flags must be distinct");
             }
         }
     }
@@ -162,9 +167,16 @@ mod tests {
     #[test]
     fn test_iff_flags_are_bitmask() {
         let basic = [
-            IFF_UP, IFF_BROADCAST, IFF_DEBUG, IFF_LOOPBACK,
-            IFF_POINTOPOINT, IFF_NOTRAILERS, IFF_RUNNING,
-            IFF_NOARP, IFF_PROMISC, IFF_ALLMULTI,
+            IFF_UP,
+            IFF_BROADCAST,
+            IFF_DEBUG,
+            IFF_LOOPBACK,
+            IFF_POINTOPOINT,
+            IFF_NOTRAILERS,
+            IFF_RUNNING,
+            IFF_NOARP,
+            IFF_PROMISC,
+            IFF_ALLMULTI,
         ];
         for &f in &basic {
             assert_ne!(f, 0);

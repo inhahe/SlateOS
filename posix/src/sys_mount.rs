@@ -131,10 +131,20 @@ mod tests {
     #[test]
     fn test_ms_flags_are_powers_of_two() {
         let flags = [
-            MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC,
-            MS_SYNCHRONOUS, MS_REMOUNT, MS_MANDLOCK, MS_DIRSYNC,
-            MS_NOATIME, MS_NODIRATIME, MS_BIND, MS_MOVE,
-            MS_REC, MS_SILENT,
+            MS_RDONLY,
+            MS_NOSUID,
+            MS_NODEV,
+            MS_NOEXEC,
+            MS_SYNCHRONOUS,
+            MS_REMOUNT,
+            MS_MANDLOCK,
+            MS_DIRSYNC,
+            MS_NOATIME,
+            MS_NODIRATIME,
+            MS_BIND,
+            MS_MOVE,
+            MS_REC,
+            MS_SILENT,
         ];
         for &f in &flags {
             assert_ne!(f, 0);
@@ -145,11 +155,26 @@ mod tests {
     #[test]
     fn test_ms_flags_distinct() {
         let flags = [
-            MS_RDONLY, MS_NOSUID, MS_NODEV, MS_NOEXEC,
-            MS_SYNCHRONOUS, MS_REMOUNT, MS_MANDLOCK, MS_DIRSYNC,
-            MS_NOATIME, MS_NODIRATIME, MS_BIND, MS_MOVE,
-            MS_REC, MS_SILENT, MS_POSIXACL, MS_UNBINDABLE,
-            MS_PRIVATE, MS_SLAVE, MS_SHARED, MS_RELATIME,
+            MS_RDONLY,
+            MS_NOSUID,
+            MS_NODEV,
+            MS_NOEXEC,
+            MS_SYNCHRONOUS,
+            MS_REMOUNT,
+            MS_MANDLOCK,
+            MS_DIRSYNC,
+            MS_NOATIME,
+            MS_NODIRATIME,
+            MS_BIND,
+            MS_MOVE,
+            MS_REC,
+            MS_SILENT,
+            MS_POSIXACL,
+            MS_UNBINDABLE,
+            MS_PRIVATE,
+            MS_SLAVE,
+            MS_SHARED,
+            MS_RELATIME,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

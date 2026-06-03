@@ -76,8 +76,10 @@ mod tests {
     #[test]
     fn test_classes_distinct() {
         let classes = [
-            IOPRIO_CLASS_NONE, IOPRIO_CLASS_RT,
-            IOPRIO_CLASS_BE, IOPRIO_CLASS_IDLE,
+            IOPRIO_CLASS_NONE,
+            IOPRIO_CLASS_RT,
+            IOPRIO_CLASS_BE,
+            IOPRIO_CLASS_IDLE,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
@@ -121,7 +123,8 @@ mod tests {
     #[test]
     fn test_hints_distinct() {
         let hints = [
-            IOPRIO_HINT_NONE, IOPRIO_HINT_DEV_DURATION_SHORT,
+            IOPRIO_HINT_NONE,
+            IOPRIO_HINT_DEV_DURATION_SHORT,
             IOPRIO_HINT_DEV_DURATION_MEDIUM,
             IOPRIO_HINT_DEV_DURATION_LONG,
         ];

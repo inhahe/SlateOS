@@ -7,18 +7,18 @@
 // Functions
 // ---------------------------------------------------------------------------
 
+pub use crate::xattr::fgetxattr;
+pub use crate::xattr::flistxattr;
+pub use crate::xattr::fremovexattr;
+pub use crate::xattr::fsetxattr;
 pub use crate::xattr::getxattr;
 pub use crate::xattr::lgetxattr;
-pub use crate::xattr::fgetxattr;
-pub use crate::xattr::setxattr;
-pub use crate::xattr::lsetxattr;
-pub use crate::xattr::fsetxattr;
 pub use crate::xattr::listxattr;
 pub use crate::xattr::llistxattr;
-pub use crate::xattr::flistxattr;
-pub use crate::xattr::removexattr;
 pub use crate::xattr::lremovexattr;
-pub use crate::xattr::fremovexattr;
+pub use crate::xattr::lsetxattr;
+pub use crate::xattr::removexattr;
+pub use crate::xattr::setxattr;
 
 // ---------------------------------------------------------------------------
 // Flags

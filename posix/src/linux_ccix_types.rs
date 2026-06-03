@@ -95,8 +95,10 @@ mod tests {
     #[test]
     fn test_coherency_states_distinct() {
         let states = [
-            CCIX_STATE_INVALID, CCIX_STATE_SHARED_CLEAN,
-            CCIX_STATE_SHARED_DIRTY, CCIX_STATE_UNIQUE_CLEAN,
+            CCIX_STATE_INVALID,
+            CCIX_STATE_SHARED_CLEAN,
+            CCIX_STATE_SHARED_DIRTY,
+            CCIX_STATE_UNIQUE_CLEAN,
             CCIX_STATE_UNIQUE_DIRTY,
         ];
         for i in 0..states.len() {
@@ -109,8 +111,12 @@ mod tests {
     #[test]
     fn test_message_types_distinct() {
         let msgs = [
-            CCIX_MSG_READ, CCIX_MSG_DATA, CCIX_MSG_SNOOP,
-            CCIX_MSG_SNOOP_RESP, CCIX_MSG_WRITEBACK, CCIX_MSG_EVICT,
+            CCIX_MSG_READ,
+            CCIX_MSG_DATA,
+            CCIX_MSG_SNOOP,
+            CCIX_MSG_SNOOP_RESP,
+            CCIX_MSG_WRITEBACK,
+            CCIX_MSG_EVICT,
         ];
         for i in 0..msgs.len() {
             for j in (i + 1)..msgs.len() {
@@ -128,8 +134,10 @@ mod tests {
     #[test]
     fn test_error_types_distinct() {
         let errors = [
-            CCIX_ERROR_LINK, CCIX_ERROR_PROTOCOL,
-            CCIX_ERROR_POISON, CCIX_ERROR_ADDRESS,
+            CCIX_ERROR_LINK,
+            CCIX_ERROR_PROTOCOL,
+            CCIX_ERROR_POISON,
+            CCIX_ERROR_ADDRESS,
         ];
         for i in 0..errors.len() {
             for j in (i + 1)..errors.len() {

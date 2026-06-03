@@ -72,13 +72,20 @@ mod tests {
     #[test]
     fn test_attach_types_distinct() {
         let types = [
-            BPF_CGROUP_INET_INGRESS, BPF_CGROUP_INET_EGRESS,
-            BPF_CGROUP_INET_SOCK_CREATE, BPF_CGROUP_INET_SOCK_RELEASE,
-            BPF_CGROUP_INET4_BIND, BPF_CGROUP_INET6_BIND,
-            BPF_CGROUP_INET4_CONNECT, BPF_CGROUP_INET6_CONNECT,
-            BPF_CGROUP_INET4_POST_BIND, BPF_CGROUP_INET6_POST_BIND,
-            BPF_CGROUP_UDP4_SENDMSG, BPF_CGROUP_UDP6_SENDMSG,
-            BPF_CGROUP_GETSOCKOPT, BPF_CGROUP_SETSOCKOPT,
+            BPF_CGROUP_INET_INGRESS,
+            BPF_CGROUP_INET_EGRESS,
+            BPF_CGROUP_INET_SOCK_CREATE,
+            BPF_CGROUP_INET_SOCK_RELEASE,
+            BPF_CGROUP_INET4_BIND,
+            BPF_CGROUP_INET6_BIND,
+            BPF_CGROUP_INET4_CONNECT,
+            BPF_CGROUP_INET6_CONNECT,
+            BPF_CGROUP_INET4_POST_BIND,
+            BPF_CGROUP_INET6_POST_BIND,
+            BPF_CGROUP_UDP4_SENDMSG,
+            BPF_CGROUP_UDP6_SENDMSG,
+            BPF_CGROUP_GETSOCKOPT,
+            BPF_CGROUP_SETSOCKOPT,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -95,7 +102,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            SOCK_CGROUP_ACCOUNTING, SOCK_CGROUP_CLASSID,
+            SOCK_CGROUP_ACCOUNTING,
+            SOCK_CGROUP_CLASSID,
             SOCK_CGROUP_NETPRIO,
         ];
         for i in 0..flags.len() {

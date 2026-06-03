@@ -85,9 +85,14 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            DCB_ATTR_UNDEFINED, DCB_ATTR_IFNAME, DCB_ATTR_STATE,
-            DCB_ATTR_PFC_CFG, DCB_ATTR_PFC_STATE, DCB_ATTR_ETS,
-            DCB_ATTR_APP, DCB_ATTR_IEEE,
+            DCB_ATTR_UNDEFINED,
+            DCB_ATTR_IFNAME,
+            DCB_ATTR_STATE,
+            DCB_ATTR_PFC_CFG,
+            DCB_ATTR_PFC_STATE,
+            DCB_ATTR_ETS,
+            DCB_ATTR_APP,
+            DCB_ATTR_IEEE,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -109,8 +114,11 @@ mod tests {
     #[test]
     fn test_app_selectors_distinct() {
         let sels = [
-            DCB_APP_SEL_ETHERTYPE, DCB_APP_SEL_STREAM,
-            DCB_APP_SEL_DGRAM, DCB_APP_SEL_ANY, DCB_APP_SEL_DSCP,
+            DCB_APP_SEL_ETHERTYPE,
+            DCB_APP_SEL_STREAM,
+            DCB_APP_SEL_DGRAM,
+            DCB_APP_SEL_ANY,
+            DCB_APP_SEL_DSCP,
         ];
         for i in 0..sels.len() {
             for j in (i + 1)..sels.len() {

@@ -99,8 +99,11 @@ mod tests {
     #[test]
     fn test_show_flags_no_overlap() {
         let flags = [
-            XDP_SHOW_INFO, XDP_SHOW_RING_CFG,
-            XDP_SHOW_UMEM, XDP_SHOW_MEMINFO, XDP_SHOW_STATS,
+            XDP_SHOW_INFO,
+            XDP_SHOW_RING_CFG,
+            XDP_SHOW_UMEM,
+            XDP_SHOW_MEMINFO,
+            XDP_SHOW_STATS,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -113,11 +116,15 @@ mod tests {
     #[test]
     fn test_diag_attrs_distinct() {
         let attrs = [
-            XDP_DIAG_INFO, XDP_DIAG_UID,
-            XDP_DIAG_RX_RING, XDP_DIAG_TX_RING,
-            XDP_DIAG_UMEM, XDP_DIAG_UMEM_FILL_RING,
+            XDP_DIAG_INFO,
+            XDP_DIAG_UID,
+            XDP_DIAG_RX_RING,
+            XDP_DIAG_TX_RING,
+            XDP_DIAG_UMEM,
+            XDP_DIAG_UMEM_FILL_RING,
             XDP_DIAG_UMEM_COMPLETION_RING,
-            XDP_DIAG_MEMINFO, XDP_DIAG_STATS,
+            XDP_DIAG_MEMINFO,
+            XDP_DIAG_STATS,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -128,10 +135,7 @@ mod tests {
 
     #[test]
     fn test_bind_flags_no_overlap() {
-        let flags = [
-            XDP_SHARED_UMEM, XDP_COPY,
-            XDP_ZEROCOPY, XDP_USE_NEED_WAKEUP,
-        ];
+        let flags = [XDP_SHARED_UMEM, XDP_COPY, XDP_ZEROCOPY, XDP_USE_NEED_WAKEUP];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
             for j in (i + 1)..flags.len() {
@@ -148,9 +152,13 @@ mod tests {
     #[test]
     fn test_socket_options_distinct() {
         let opts = [
-            XDP_RX_RING, XDP_TX_RING, XDP_UMEM_REG,
-            XDP_UMEM_FILL_RING, XDP_UMEM_COMPLETION_RING,
-            XDP_STATISTICS, XDP_OPTIONS,
+            XDP_RX_RING,
+            XDP_TX_RING,
+            XDP_UMEM_REG,
+            XDP_UMEM_FILL_RING,
+            XDP_UMEM_COMPLETION_RING,
+            XDP_STATISTICS,
+            XDP_OPTIONS,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {

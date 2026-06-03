@@ -74,8 +74,12 @@ mod tests {
     #[test]
     fn test_port_types_distinct() {
         let ports = [
-            WWAN_PORT_AT, WWAN_PORT_MBIM, WWAN_PORT_QMI,
-            WWAN_PORT_QCDM, WWAN_PORT_FIREHOSE, WWAN_PORT_XMMRPC,
+            WWAN_PORT_AT,
+            WWAN_PORT_MBIM,
+            WWAN_PORT_QMI,
+            WWAN_PORT_QCDM,
+            WWAN_PORT_FIREHOSE,
+            WWAN_PORT_XMMRPC,
         ];
         for i in 0..ports.len() {
             for j in (i + 1)..ports.len() {
@@ -92,8 +96,10 @@ mod tests {
     #[test]
     fn test_cmds_distinct() {
         let cmds = [
-            WWAN_CMD_UNSPEC, WWAN_CMD_GET_DEVICE,
-            WWAN_CMD_NEW_DEVICE, WWAN_CMD_DEL_DEVICE,
+            WWAN_CMD_UNSPEC,
+            WWAN_CMD_GET_DEVICE,
+            WWAN_CMD_NEW_DEVICE,
+            WWAN_CMD_DEL_DEVICE,
             WWAN_CMD_GET_DEBUG,
         ];
         for i in 0..cmds.len() {
@@ -106,8 +112,10 @@ mod tests {
     #[test]
     fn test_attrs_distinct() {
         let attrs = [
-            WWAN_ATTR_UNSPEC, WWAN_ATTR_DEV_INDEX,
-            WWAN_ATTR_DEV_NAME, WWAN_ATTR_LINK_INDEX,
+            WWAN_ATTR_UNSPEC,
+            WWAN_ATTR_DEV_INDEX,
+            WWAN_ATTR_DEV_NAME,
+            WWAN_ATTR_LINK_INDEX,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {
@@ -119,7 +127,8 @@ mod tests {
     #[test]
     fn test_modem_states_distinct() {
         let states = [
-            WWAN_MODEM_STATE_OFFLINE, WWAN_MODEM_STATE_ONLINE,
+            WWAN_MODEM_STATE_OFFLINE,
+            WWAN_MODEM_STATE_ONLINE,
             WWAN_MODEM_STATE_LOW_POWER,
         ];
         for i in 0..states.len() {

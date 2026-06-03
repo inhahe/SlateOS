@@ -130,9 +130,12 @@ mod tests {
     #[test]
     fn test_flags_are_powers_of_two() {
         let flags = [
-            LED_HW_PLUGGABLE, LED_PANIC_INDICATOR,
-            LED_BRIGHT_HW_CHANGED, LED_UNREGISTERING,
-            LED_BLINK_DISABLE, LED_SATA,
+            LED_HW_PLUGGABLE,
+            LED_PANIC_INDICATOR,
+            LED_BRIGHT_HW_CHANGED,
+            LED_UNREGISTERING,
+            LED_BLINK_DISABLE,
+            LED_SATA,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x} is not a power of two", flag);
@@ -142,9 +145,15 @@ mod tests {
     #[test]
     fn test_colors_distinct() {
         let colors = [
-            LED_COLOR_ID_WHITE, LED_COLOR_ID_RED, LED_COLOR_ID_GREEN,
-            LED_COLOR_ID_BLUE, LED_COLOR_ID_AMBER, LED_COLOR_ID_VIOLET,
-            LED_COLOR_ID_YELLOW, LED_COLOR_ID_IR, LED_COLOR_ID_MULTI,
+            LED_COLOR_ID_WHITE,
+            LED_COLOR_ID_RED,
+            LED_COLOR_ID_GREEN,
+            LED_COLOR_ID_BLUE,
+            LED_COLOR_ID_AMBER,
+            LED_COLOR_ID_VIOLET,
+            LED_COLOR_ID_YELLOW,
+            LED_COLOR_ID_IR,
+            LED_COLOR_ID_MULTI,
             LED_COLOR_ID_RGB,
         ];
         for i in 0..colors.len() {
@@ -169,16 +178,26 @@ mod tests {
     #[test]
     fn test_functions_all_distinct() {
         let funcs = [
-            LED_FUNCTION_ACTIVITY, LED_FUNCTION_BACKLIGHT,
-            LED_FUNCTION_BLUETOOTH_POWER, LED_FUNCTION_CAPSLOCK,
-            LED_FUNCTION_CHARGING, LED_FUNCTION_DISK,
-            LED_FUNCTION_DISK_READ, LED_FUNCTION_DISK_WRITE,
-            LED_FUNCTION_FLASH, LED_FUNCTION_HEARTBEAT,
-            LED_FUNCTION_INDICATOR, LED_FUNCTION_LAN,
-            LED_FUNCTION_MAIL, LED_FUNCTION_MUTE,
-            LED_FUNCTION_NUMLOCK, LED_FUNCTION_POWER,
-            LED_FUNCTION_SCROLLLOCK, LED_FUNCTION_STANDBY,
-            LED_FUNCTION_TORCH, LED_FUNCTION_WAN,
+            LED_FUNCTION_ACTIVITY,
+            LED_FUNCTION_BACKLIGHT,
+            LED_FUNCTION_BLUETOOTH_POWER,
+            LED_FUNCTION_CAPSLOCK,
+            LED_FUNCTION_CHARGING,
+            LED_FUNCTION_DISK,
+            LED_FUNCTION_DISK_READ,
+            LED_FUNCTION_DISK_WRITE,
+            LED_FUNCTION_FLASH,
+            LED_FUNCTION_HEARTBEAT,
+            LED_FUNCTION_INDICATOR,
+            LED_FUNCTION_LAN,
+            LED_FUNCTION_MAIL,
+            LED_FUNCTION_MUTE,
+            LED_FUNCTION_NUMLOCK,
+            LED_FUNCTION_POWER,
+            LED_FUNCTION_SCROLLLOCK,
+            LED_FUNCTION_STANDBY,
+            LED_FUNCTION_TORCH,
+            LED_FUNCTION_WAN,
             LED_FUNCTION_WLAN,
         ];
         for i in 0..funcs.len() {

@@ -89,7 +89,8 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            MBOX_FLAG_MULTI_CHANNEL, MBOX_FLAG_BIDIRECTIONAL,
+            MBOX_FLAG_MULTI_CHANNEL,
+            MBOX_FLAG_BIDIRECTIONAL,
             MBOX_FLAG_POLLING,
         ];
         for i in 0..flags.len() {

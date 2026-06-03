@@ -77,8 +77,10 @@ mod tests {
     #[test]
     fn test_classes_distinct() {
         let classes = [
-            IOPRIO_CLASS_NONE, IOPRIO_CLASS_RT,
-            IOPRIO_CLASS_BE, IOPRIO_CLASS_IDLE,
+            IOPRIO_CLASS_NONE,
+            IOPRIO_CLASS_RT,
+            IOPRIO_CLASS_BE,
+            IOPRIO_CLASS_IDLE,
         ];
         for i in 0..classes.len() {
             for j in (i + 1)..classes.len() {
@@ -100,7 +102,10 @@ mod tests {
         // Best-effort, level 4 = (2 << 13) | 4 = 0x4004
         let prio = (IOPRIO_CLASS_BE as u16) << IOPRIO_CLASS_SHIFT | (IOPRIO_LEVEL_DEFAULT as u16);
         assert_eq!(prio & IOPRIO_LEVEL_MASK, IOPRIO_LEVEL_DEFAULT as u16);
-        assert_eq!((prio >> IOPRIO_CLASS_SHIFT) & IOPRIO_CLASS_MASK, IOPRIO_CLASS_BE as u16);
+        assert_eq!(
+            (prio >> IOPRIO_CLASS_SHIFT) & IOPRIO_CLASS_MASK,
+            IOPRIO_CLASS_BE as u16
+        );
     }
 
     #[test]
@@ -116,8 +121,10 @@ mod tests {
     #[test]
     fn test_hints_distinct() {
         let hints = [
-            IOPRIO_HINT_NONE, IOPRIO_HINT_DEV_DURATION_LIMIT_1,
-            IOPRIO_HINT_DEV_DURATION_LIMIT_2, IOPRIO_HINT_DEV_DURATION_LIMIT_3,
+            IOPRIO_HINT_NONE,
+            IOPRIO_HINT_DEV_DURATION_LIMIT_1,
+            IOPRIO_HINT_DEV_DURATION_LIMIT_2,
+            IOPRIO_HINT_DEV_DURATION_LIMIT_3,
         ];
         for i in 0..hints.len() {
             for j in (i + 1)..hints.len() {

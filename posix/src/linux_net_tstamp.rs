@@ -94,13 +94,20 @@ mod tests {
     #[test]
     fn test_sof_flags_are_powers_of_two() {
         let flags = [
-            SOF_TIMESTAMPING_TX_HARDWARE, SOF_TIMESTAMPING_TX_SOFTWARE,
-            SOF_TIMESTAMPING_RX_HARDWARE, SOF_TIMESTAMPING_RX_SOFTWARE,
-            SOF_TIMESTAMPING_SOFTWARE, SOF_TIMESTAMPING_RAW_HARDWARE,
-            SOF_TIMESTAMPING_OPT_ID, SOF_TIMESTAMPING_TX_SCHED,
-            SOF_TIMESTAMPING_TX_ACK, SOF_TIMESTAMPING_OPT_CMSG,
-            SOF_TIMESTAMPING_OPT_PKTINFO, SOF_TIMESTAMPING_OPT_STATS,
-            SOF_TIMESTAMPING_OPT_TX_SWHW, SOF_TIMESTAMPING_BIND_PHC,
+            SOF_TIMESTAMPING_TX_HARDWARE,
+            SOF_TIMESTAMPING_TX_SOFTWARE,
+            SOF_TIMESTAMPING_RX_HARDWARE,
+            SOF_TIMESTAMPING_RX_SOFTWARE,
+            SOF_TIMESTAMPING_SOFTWARE,
+            SOF_TIMESTAMPING_RAW_HARDWARE,
+            SOF_TIMESTAMPING_OPT_ID,
+            SOF_TIMESTAMPING_TX_SCHED,
+            SOF_TIMESTAMPING_TX_ACK,
+            SOF_TIMESTAMPING_OPT_CMSG,
+            SOF_TIMESTAMPING_OPT_PKTINFO,
+            SOF_TIMESTAMPING_OPT_STATS,
+            SOF_TIMESTAMPING_OPT_TX_SWHW,
+            SOF_TIMESTAMPING_BIND_PHC,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x} is not a power of two", flag);
@@ -110,8 +117,10 @@ mod tests {
     #[test]
     fn test_hwtstamp_tx_distinct() {
         let modes = [
-            HWTSTAMP_TX_OFF, HWTSTAMP_TX_ON,
-            HWTSTAMP_TX_ONESTEP_SYNC, HWTSTAMP_TX_ONESTEP_P2P,
+            HWTSTAMP_TX_OFF,
+            HWTSTAMP_TX_ON,
+            HWTSTAMP_TX_ONESTEP_SYNC,
+            HWTSTAMP_TX_ONESTEP_P2P,
         ];
         for i in 0..modes.len() {
             for j in (i + 1)..modes.len() {
@@ -123,14 +132,22 @@ mod tests {
     #[test]
     fn test_hwtstamp_filter_distinct() {
         let filters = [
-            HWTSTAMP_FILTER_NONE, HWTSTAMP_FILTER_ALL,
-            HWTSTAMP_FILTER_SOME, HWTSTAMP_FILTER_PTP_V1_L4_EVENT,
-            HWTSTAMP_FILTER_PTP_V1_L4_SYNC, HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ,
-            HWTSTAMP_FILTER_PTP_V2_L4_EVENT, HWTSTAMP_FILTER_PTP_V2_L4_SYNC,
-            HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ, HWTSTAMP_FILTER_PTP_V2_L2_EVENT,
-            HWTSTAMP_FILTER_PTP_V2_L2_SYNC, HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ,
-            HWTSTAMP_FILTER_PTP_V2_EVENT, HWTSTAMP_FILTER_PTP_V2_SYNC,
-            HWTSTAMP_FILTER_PTP_V2_DELAY_REQ, HWTSTAMP_FILTER_NTP_ALL,
+            HWTSTAMP_FILTER_NONE,
+            HWTSTAMP_FILTER_ALL,
+            HWTSTAMP_FILTER_SOME,
+            HWTSTAMP_FILTER_PTP_V1_L4_EVENT,
+            HWTSTAMP_FILTER_PTP_V1_L4_SYNC,
+            HWTSTAMP_FILTER_PTP_V1_L4_DELAY_REQ,
+            HWTSTAMP_FILTER_PTP_V2_L4_EVENT,
+            HWTSTAMP_FILTER_PTP_V2_L4_SYNC,
+            HWTSTAMP_FILTER_PTP_V2_L4_DELAY_REQ,
+            HWTSTAMP_FILTER_PTP_V2_L2_EVENT,
+            HWTSTAMP_FILTER_PTP_V2_L2_SYNC,
+            HWTSTAMP_FILTER_PTP_V2_L2_DELAY_REQ,
+            HWTSTAMP_FILTER_PTP_V2_EVENT,
+            HWTSTAMP_FILTER_PTP_V2_SYNC,
+            HWTSTAMP_FILTER_PTP_V2_DELAY_REQ,
+            HWTSTAMP_FILTER_NTP_ALL,
         ];
         for i in 0..filters.len() {
             for j in (i + 1)..filters.len() {

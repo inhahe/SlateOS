@@ -65,9 +65,16 @@ mod tests {
     #[test]
     fn test_iff_flags_no_overlap() {
         let flags = [
-            IFF_UP2, IFF_BROADCAST2, IFF_DEBUG2, IFF_LOOPBACK2,
-            IFF_POINTOPOINT2, IFF_NOTRAILERS2, IFF_RUNNING2,
-            IFF_NOARP2, IFF_PROMISC2, IFF_ALLMULTI2,
+            IFF_UP2,
+            IFF_BROADCAST2,
+            IFF_DEBUG2,
+            IFF_LOOPBACK2,
+            IFF_POINTOPOINT2,
+            IFF_NOTRAILERS2,
+            IFF_RUNNING2,
+            IFF_NOARP2,
+            IFF_PROMISC2,
+            IFF_ALLMULTI2,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -79,8 +86,10 @@ mod tests {
     #[test]
     fn test_priv_flags_no_overlap() {
         let flags = [
-            IFF_XMIT_DST_RELEASE, IFF_DONT_BRIDGE,
-            IFF_LIVE_ADDR_CHANGE, IFF_MACVLAN_PORT,
+            IFF_XMIT_DST_RELEASE,
+            IFF_DONT_BRIDGE,
+            IFF_LIVE_ADDR_CHANGE,
+            IFF_MACVLAN_PORT,
             IFF_TEAM_PORT,
         ];
         for i in 0..flags.len() {

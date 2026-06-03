@@ -92,8 +92,10 @@ mod tests {
     #[test]
     fn test_iommu_types_distinct() {
         let types = [
-            VFIO_TYPE1_IOMMU, VFIO_SPAPR_TCE_IOMMU,
-            VFIO_TYPE1v2_IOMMU, VFIO_SPAPR_TCE_v2_IOMMU,
+            VFIO_TYPE1_IOMMU,
+            VFIO_SPAPR_TCE_IOMMU,
+            VFIO_TYPE1v2_IOMMU,
+            VFIO_SPAPR_TCE_v2_IOMMU,
             VFIO_NOIOMMU_IOMMU,
         ];
         for i in 0..types.len() {
@@ -106,9 +108,12 @@ mod tests {
     #[test]
     fn test_ioctls_distinct() {
         let ioctls = [
-            VFIO_IOMMU_GET_INFO, VFIO_IOMMU_MAP_DMA,
-            VFIO_IOMMU_UNMAP_DMA, VFIO_IOMMU_ENABLE,
-            VFIO_IOMMU_DISABLE, VFIO_IOMMU_DIRTY_PAGES,
+            VFIO_IOMMU_GET_INFO,
+            VFIO_IOMMU_MAP_DMA,
+            VFIO_IOMMU_UNMAP_DMA,
+            VFIO_IOMMU_ENABLE,
+            VFIO_IOMMU_DISABLE,
+            VFIO_IOMMU_DIRTY_PAGES,
         ];
         for i in 0..ioctls.len() {
             for j in (i + 1)..ioctls.len() {

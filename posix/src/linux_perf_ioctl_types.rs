@@ -51,12 +51,18 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            PERF_EVENT_IOC_ENABLE, PERF_EVENT_IOC_DISABLE,
-            PERF_EVENT_IOC_REFRESH, PERF_EVENT_IOC_RESET,
-            PERF_EVENT_IOC_PERIOD, PERF_EVENT_IOC_SET_OUTPUT,
-            PERF_EVENT_IOC_SET_FILTER, PERF_EVENT_IOC_ID,
-            PERF_EVENT_IOC_SET_BPF, PERF_EVENT_IOC_PAUSE_OUTPUT,
-            PERF_EVENT_IOC_QUERY_BPF, PERF_EVENT_IOC_MODIFY_ATTRIBUTES,
+            PERF_EVENT_IOC_ENABLE,
+            PERF_EVENT_IOC_DISABLE,
+            PERF_EVENT_IOC_REFRESH,
+            PERF_EVENT_IOC_RESET,
+            PERF_EVENT_IOC_PERIOD,
+            PERF_EVENT_IOC_SET_OUTPUT,
+            PERF_EVENT_IOC_SET_FILTER,
+            PERF_EVENT_IOC_ID,
+            PERF_EVENT_IOC_SET_BPF,
+            PERF_EVENT_IOC_PAUSE_OUTPUT,
+            PERF_EVENT_IOC_QUERY_BPF,
+            PERF_EVENT_IOC_MODIFY_ATTRIBUTES,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {

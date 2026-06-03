@@ -181,12 +181,18 @@ mod tests {
     #[test]
     fn test_sb_flags_power_of_two() {
         let flags = [
-            SQUASHFS_UNCOMPRESSED_INODES, SQUASHFS_UNCOMPRESSED_DATA,
-            SQUASHFS_CHECK, SQUASHFS_UNCOMPRESSED_FRAGMENTS,
-            SQUASHFS_NO_FRAGMENTS, SQUASHFS_ALWAYS_FRAGMENTS,
-            SQUASHFS_DUPLICATES, SQUASHFS_EXPORTABLE,
-            SQUASHFS_UNCOMPRESSED_XATTRS, SQUASHFS_NO_XATTRS,
-            SQUASHFS_COMP_OPT, SQUASHFS_UNCOMPRESSED_IDS,
+            SQUASHFS_UNCOMPRESSED_INODES,
+            SQUASHFS_UNCOMPRESSED_DATA,
+            SQUASHFS_CHECK,
+            SQUASHFS_UNCOMPRESSED_FRAGMENTS,
+            SQUASHFS_NO_FRAGMENTS,
+            SQUASHFS_ALWAYS_FRAGMENTS,
+            SQUASHFS_DUPLICATES,
+            SQUASHFS_EXPORTABLE,
+            SQUASHFS_UNCOMPRESSED_XATTRS,
+            SQUASHFS_NO_XATTRS,
+            SQUASHFS_COMP_OPT,
+            SQUASHFS_UNCOMPRESSED_IDS,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:04x} not power of two", f);

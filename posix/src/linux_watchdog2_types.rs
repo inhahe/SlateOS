@@ -81,10 +81,18 @@ mod tests {
     #[test]
     fn test_info_flags_distinct() {
         let flags = [
-            WDIOF_OVERHEAT, WDIOF_FANFAULT, WDIOF_EXTERN1,
-            WDIOF_EXTERN2, WDIOF_POWERUNDER, WDIOF_CARDRESET,
-            WDIOF_POWEROVER, WDIOF_SETTIMEOUT, WDIOF_MAGICCLOSE,
-            WDIOF_PRETIMEOUT, WDIOF_ALARMONLY, WDIOF_KEEPALIVEPING,
+            WDIOF_OVERHEAT,
+            WDIOF_FANFAULT,
+            WDIOF_EXTERN1,
+            WDIOF_EXTERN2,
+            WDIOF_POWERUNDER,
+            WDIOF_CARDRESET,
+            WDIOF_POWEROVER,
+            WDIOF_SETTIMEOUT,
+            WDIOF_MAGICCLOSE,
+            WDIOF_PRETIMEOUT,
+            WDIOF_ALARMONLY,
+            WDIOF_KEEPALIVEPING,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -106,10 +114,16 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            WDIOC_GETSUPPORT, WDIOC_GETSTATUS, WDIOC_GETBOOTSTATUS,
-            WDIOC_GETTEMP, WDIOC_SETOPTIONS, WDIOC_KEEPALIVE,
-            WDIOC_SETTIMEOUT, WDIOC_GETTIMEOUT,
-            WDIOC_SETPRETIMEOUT, WDIOC_GETPRETIMEOUT,
+            WDIOC_GETSUPPORT,
+            WDIOC_GETSTATUS,
+            WDIOC_GETBOOTSTATUS,
+            WDIOC_GETTEMP,
+            WDIOC_SETOPTIONS,
+            WDIOC_KEEPALIVE,
+            WDIOC_SETTIMEOUT,
+            WDIOC_GETTIMEOUT,
+            WDIOC_SETPRETIMEOUT,
+            WDIOC_GETPRETIMEOUT,
             WDIOC_GETTIMELEFT,
         ];
         for i in 0..cmds.len() {

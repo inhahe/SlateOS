@@ -75,8 +75,12 @@ mod tests {
     #[test]
     fn test_socket_opts_distinct() {
         let opts = [
-            RDS_CANCEL_SENT_TO, RDS_GET_MR, RDS_FREE_MR,
-            RDS_RECVERR, RDS_CONG_MONITOR, RDS_GET_MR_FOR_DEST,
+            RDS_CANCEL_SENT_TO,
+            RDS_GET_MR,
+            RDS_FREE_MR,
+            RDS_RECVERR,
+            RDS_CONG_MONITOR,
+            RDS_GET_MR_FOR_DEST,
         ];
         for i in 0..opts.len() {
             for j in (i + 1)..opts.len() {
@@ -88,9 +92,13 @@ mod tests {
     #[test]
     fn test_rdma_flags_power_of_two() {
         let flags = [
-            RDS_RDMA_READWRITE, RDS_RDMA_FENCE, RDS_RDMA_INVALIDATE,
-            RDS_RDMA_USE_ONCE, RDS_RDMA_DONTWAIT,
-            RDS_RDMA_NOTIFY_ME, RDS_RDMA_SILENT,
+            RDS_RDMA_READWRITE,
+            RDS_RDMA_FENCE,
+            RDS_RDMA_INVALIDATE,
+            RDS_RDMA_USE_ONCE,
+            RDS_RDMA_DONTWAIT,
+            RDS_RDMA_NOTIFY_ME,
+            RDS_RDMA_SILENT,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
@@ -100,9 +108,13 @@ mod tests {
     #[test]
     fn test_rdma_flags_no_overlap() {
         let flags = [
-            RDS_RDMA_READWRITE, RDS_RDMA_FENCE, RDS_RDMA_INVALIDATE,
-            RDS_RDMA_USE_ONCE, RDS_RDMA_DONTWAIT,
-            RDS_RDMA_NOTIFY_ME, RDS_RDMA_SILENT,
+            RDS_RDMA_READWRITE,
+            RDS_RDMA_FENCE,
+            RDS_RDMA_INVALIDATE,
+            RDS_RDMA_USE_ONCE,
+            RDS_RDMA_DONTWAIT,
+            RDS_RDMA_NOTIFY_ME,
+            RDS_RDMA_SILENT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -114,11 +126,16 @@ mod tests {
     #[test]
     fn test_cmsg_types_distinct() {
         let types = [
-            RDS_CMSG_RDMA_ARGS, RDS_CMSG_RDMA_DEST,
-            RDS_CMSG_RDMA_MAP, RDS_CMSG_RDMA_STATUS,
-            RDS_CMSG_CONG_UPDATE, RDS_CMSG_ATOMIC_FADD,
-            RDS_CMSG_ATOMIC_CSWP, RDS_CMSG_MASKED_ATOMIC_FADD,
-            RDS_CMSG_MASKED_ATOMIC_CSWP, RDS_CMSG_RXPATH_LATENCY,
+            RDS_CMSG_RDMA_ARGS,
+            RDS_CMSG_RDMA_DEST,
+            RDS_CMSG_RDMA_MAP,
+            RDS_CMSG_RDMA_STATUS,
+            RDS_CMSG_CONG_UPDATE,
+            RDS_CMSG_ATOMIC_FADD,
+            RDS_CMSG_ATOMIC_CSWP,
+            RDS_CMSG_MASKED_ATOMIC_FADD,
+            RDS_CMSG_MASKED_ATOMIC_CSWP,
+            RDS_CMSG_RXPATH_LATENCY,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

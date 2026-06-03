@@ -113,15 +113,29 @@ mod tests {
     #[test]
     fn test_option_codes_distinct() {
         let opts = [
-            PR_SET_PDEATHSIG, PR_GET_PDEATHSIG, PR_GET_DUMPABLE,
-            PR_SET_DUMPABLE, PR_GET_TIMING, PR_SET_TIMING,
-            PR_SET_NAME, PR_GET_NAME, PR_GET_ENDIAN, PR_SET_ENDIAN,
-            PR_GET_SECCOMP, PR_SET_SECCOMP, PR_GET_SECUREBITS,
-            PR_SET_SECUREBITS, PR_SET_CHILD_SUBREAPER,
-            PR_GET_CHILD_SUBREAPER, PR_SET_NO_NEW_PRIVS,
-            PR_GET_NO_NEW_PRIVS, PR_SET_THP_DISABLE,
-            PR_GET_THP_DISABLE, PR_GET_SPECULATION_CTRL,
-            PR_SET_SPECULATION_CTRL, PR_SET_MEMORY_MERGE,
+            PR_SET_PDEATHSIG,
+            PR_GET_PDEATHSIG,
+            PR_GET_DUMPABLE,
+            PR_SET_DUMPABLE,
+            PR_GET_TIMING,
+            PR_SET_TIMING,
+            PR_SET_NAME,
+            PR_GET_NAME,
+            PR_GET_ENDIAN,
+            PR_SET_ENDIAN,
+            PR_GET_SECCOMP,
+            PR_SET_SECCOMP,
+            PR_GET_SECUREBITS,
+            PR_SET_SECUREBITS,
+            PR_SET_CHILD_SUBREAPER,
+            PR_GET_CHILD_SUBREAPER,
+            PR_SET_NO_NEW_PRIVS,
+            PR_GET_NO_NEW_PRIVS,
+            PR_SET_THP_DISABLE,
+            PR_GET_THP_DISABLE,
+            PR_GET_SPECULATION_CTRL,
+            PR_SET_SPECULATION_CTRL,
+            PR_SET_MEMORY_MERGE,
             PR_GET_MEMORY_MERGE,
         ];
         for i in 0..opts.len() {
@@ -134,8 +148,11 @@ mod tests {
     #[test]
     fn test_spec_values_no_overlap() {
         let vals = [
-            PR_SPEC_PRCTL, PR_SPEC_ENABLE, PR_SPEC_DISABLE,
-            PR_SPEC_FORCE_DISABLE, PR_SPEC_DISABLE_NOEXEC,
+            PR_SPEC_PRCTL,
+            PR_SPEC_ENABLE,
+            PR_SPEC_DISABLE,
+            PR_SPEC_FORCE_DISABLE,
+            PR_SPEC_DISABLE_NOEXEC,
         ];
         for i in 0..vals.len() {
             assert!(vals[i].is_power_of_two());
@@ -147,7 +164,11 @@ mod tests {
 
     #[test]
     fn test_spec_commands_distinct() {
-        let cmds = [PR_SPEC_STORE_BYPASS, PR_SPEC_INDIRECT_BRANCH, PR_SPEC_L1D_FLUSH];
+        let cmds = [
+            PR_SPEC_STORE_BYPASS,
+            PR_SPEC_INDIRECT_BRANCH,
+            PR_SPEC_L1D_FLUSH,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);

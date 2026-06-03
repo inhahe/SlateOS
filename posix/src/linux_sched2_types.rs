@@ -85,8 +85,13 @@ mod tests {
     #[test]
     fn test_policies_distinct() {
         let policies = [
-            SCHED_NORMAL, SCHED_FIFO, SCHED_RR, SCHED_BATCH,
-            SCHED_IDLE, SCHED_DEADLINE, SCHED_EXT,
+            SCHED_NORMAL,
+            SCHED_FIFO,
+            SCHED_RR,
+            SCHED_BATCH,
+            SCHED_IDLE,
+            SCHED_DEADLINE,
+            SCHED_EXT,
         ];
         for i in 0..policies.len() {
             for j in (i + 1)..policies.len() {
@@ -98,9 +103,12 @@ mod tests {
     #[test]
     fn test_flags_power_of_two() {
         let flags = [
-            SCHED_FLAG_RESET_ON_FORK, SCHED_FLAG_RECLAIM,
-            SCHED_FLAG_DL_OVERRUN, SCHED_FLAG_KEEP_POLICY,
-            SCHED_FLAG_KEEP_PARAMS, SCHED_FLAG_UTIL_CLAMP_MIN,
+            SCHED_FLAG_RESET_ON_FORK,
+            SCHED_FLAG_RECLAIM,
+            SCHED_FLAG_DL_OVERRUN,
+            SCHED_FLAG_KEEP_POLICY,
+            SCHED_FLAG_KEEP_PARAMS,
+            SCHED_FLAG_UTIL_CLAMP_MIN,
             SCHED_FLAG_UTIL_CLAMP_MAX,
         ];
         for f in &flags {

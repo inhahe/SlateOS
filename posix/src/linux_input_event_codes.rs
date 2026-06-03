@@ -134,8 +134,18 @@ mod tests {
     #[test]
     fn test_event_types_distinct() {
         let types = [
-            EV_SYN, EV_KEY, EV_REL, EV_ABS, EV_MSC, EV_SW,
-            EV_LED, EV_SND, EV_REP, EV_FF, EV_PWR, EV_FF_STATUS,
+            EV_SYN,
+            EV_KEY,
+            EV_REL,
+            EV_ABS,
+            EV_MSC,
+            EV_SW,
+            EV_LED,
+            EV_SND,
+            EV_REP,
+            EV_FF,
+            EV_PWR,
+            EV_FF_STATUS,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -147,9 +157,20 @@ mod tests {
     #[test]
     fn test_key_codes_distinct() {
         let keys = [
-            KEY_ESC, KEY_ENTER, KEY_SPACE, KEY_BACKSPACE, KEY_TAB,
-            KEY_LEFTCTRL, KEY_LEFTSHIFT, KEY_LEFTALT, KEY_CAPSLOCK,
-            KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_DELETE,
+            KEY_ESC,
+            KEY_ENTER,
+            KEY_SPACE,
+            KEY_BACKSPACE,
+            KEY_TAB,
+            KEY_LEFTCTRL,
+            KEY_LEFTSHIFT,
+            KEY_LEFTALT,
+            KEY_CAPSLOCK,
+            KEY_UP,
+            KEY_DOWN,
+            KEY_LEFT,
+            KEY_RIGHT,
+            KEY_DELETE,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -171,8 +192,13 @@ mod tests {
     #[test]
     fn test_rel_axes_distinct() {
         let axes = [
-            REL_X, REL_Y, REL_Z, REL_WHEEL, REL_HWHEEL,
-            REL_WHEEL_HI_RES, REL_HWHEEL_HI_RES,
+            REL_X,
+            REL_Y,
+            REL_Z,
+            REL_WHEEL,
+            REL_HWHEEL,
+            REL_WHEEL_HI_RES,
+            REL_HWHEEL_HI_RES,
         ];
         for i in 0..axes.len() {
             for j in (i + 1)..axes.len() {
@@ -184,8 +210,13 @@ mod tests {
     #[test]
     fn test_abs_axes_distinct() {
         let axes = [
-            ABS_X, ABS_Y, ABS_Z, ABS_PRESSURE,
-            ABS_MT_SLOT, ABS_MT_POSITION_X, ABS_MT_POSITION_Y,
+            ABS_X,
+            ABS_Y,
+            ABS_Z,
+            ABS_PRESSURE,
+            ABS_MT_SLOT,
+            ABS_MT_POSITION_X,
+            ABS_MT_POSITION_Y,
             ABS_MT_TRACKING_ID,
         ];
         for i in 0..axes.len() {

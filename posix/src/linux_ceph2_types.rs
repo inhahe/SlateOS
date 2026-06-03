@@ -108,14 +108,22 @@ mod tests {
     #[test]
     fn test_mds_ops_distinct() {
         let ops = [
-            CEPH_MDS_OP_LOOKUP, CEPH_MDS_OP_LOOKUPHASH,
-            CEPH_MDS_OP_LOOKUPPARENT, CEPH_MDS_OP_LOOKUPINO,
-            CEPH_MDS_OP_GETATTR, CEPH_MDS_OP_SETATTR,
-            CEPH_MDS_OP_READDIR, CEPH_MDS_OP_MKNOD,
-            CEPH_MDS_OP_LINK, CEPH_MDS_OP_UNLINK,
-            CEPH_MDS_OP_RENAME, CEPH_MDS_OP_MKDIR,
-            CEPH_MDS_OP_RMDIR, CEPH_MDS_OP_SYMLINK,
-            CEPH_MDS_OP_CREATE, CEPH_MDS_OP_OPEN,
+            CEPH_MDS_OP_LOOKUP,
+            CEPH_MDS_OP_LOOKUPHASH,
+            CEPH_MDS_OP_LOOKUPPARENT,
+            CEPH_MDS_OP_LOOKUPINO,
+            CEPH_MDS_OP_GETATTR,
+            CEPH_MDS_OP_SETATTR,
+            CEPH_MDS_OP_READDIR,
+            CEPH_MDS_OP_MKNOD,
+            CEPH_MDS_OP_LINK,
+            CEPH_MDS_OP_UNLINK,
+            CEPH_MDS_OP_RENAME,
+            CEPH_MDS_OP_MKDIR,
+            CEPH_MDS_OP_RMDIR,
+            CEPH_MDS_OP_SYMLINK,
+            CEPH_MDS_OP_CREATE,
+            CEPH_MDS_OP_OPEN,
             CEPH_MDS_OP_SETLAYOUT,
         ];
         for i in 0..ops.len() {
@@ -133,9 +141,12 @@ mod tests {
     #[test]
     fn test_cap_file_bits_distinct() {
         let caps = [
-            CEPH_CAP_FILE_SHARED, CEPH_CAP_FILE_CACHE,
-            CEPH_CAP_FILE_RD, CEPH_CAP_FILE_WR,
-            CEPH_CAP_FILE_BUFFER, CEPH_CAP_FILE_LAZYIO,
+            CEPH_CAP_FILE_SHARED,
+            CEPH_CAP_FILE_CACHE,
+            CEPH_CAP_FILE_RD,
+            CEPH_CAP_FILE_WR,
+            CEPH_CAP_FILE_BUFFER,
+            CEPH_CAP_FILE_LAZYIO,
         ];
         for i in 0..caps.len() {
             for j in (i + 1)..caps.len() {

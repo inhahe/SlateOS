@@ -163,10 +163,17 @@ mod tests {
     #[test]
     fn test_ioctl_commands_distinct() {
         let cmds = [
-            DM_VERSION, DM_REMOVE_ALL, DM_LIST_DEVICES,
-            DM_DEV_CREATE, DM_DEV_REMOVE, DM_DEV_RENAME,
-            DM_DEV_SUSPEND, DM_DEV_STATUS, DM_DEV_WAIT,
-            DM_TABLE_LOAD, DM_TABLE_CLEAR,
+            DM_VERSION,
+            DM_REMOVE_ALL,
+            DM_LIST_DEVICES,
+            DM_DEV_CREATE,
+            DM_DEV_REMOVE,
+            DM_DEV_RENAME,
+            DM_DEV_SUSPEND,
+            DM_DEV_STATUS,
+            DM_DEV_WAIT,
+            DM_TABLE_LOAD,
+            DM_TABLE_CLEAR,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -178,9 +185,13 @@ mod tests {
     #[test]
     fn test_flags_are_bits() {
         let flags = [
-            DM_READONLY_FLAG, DM_SUSPEND_FLAG, DM_PERSISTENT_DEV_FLAG,
-            DM_STATUS_TABLE_FLAG, DM_ACTIVE_PRESENT_FLAG,
-            DM_INACTIVE_PRESENT_FLAG, DM_BUFFER_FULL_FLAG,
+            DM_READONLY_FLAG,
+            DM_SUSPEND_FLAG,
+            DM_PERSISTENT_DEV_FLAG,
+            DM_STATUS_TABLE_FLAG,
+            DM_ACTIVE_PRESENT_FLAG,
+            DM_INACTIVE_PRESENT_FLAG,
+            DM_BUFFER_FULL_FLAG,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

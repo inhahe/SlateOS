@@ -2,12 +2,12 @@
 //!
 //! Re-exports from the `epoll` module.
 
-pub use crate::epoll::eventfd;
-pub use crate::epoll::eventfd_read;
-pub use crate::epoll::eventfd_write;
 pub use crate::epoll::EFD_CLOEXEC;
 pub use crate::epoll::EFD_NONBLOCK;
 pub use crate::epoll::EFD_SEMAPHORE;
+pub use crate::epoll::eventfd;
+pub use crate::epoll::eventfd_read;
+pub use crate::epoll::eventfd_write;
 
 /// Type alias for the eventfd counter value.
 pub type EventfdT = u64;

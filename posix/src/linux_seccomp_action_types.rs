@@ -46,10 +46,14 @@ mod tests {
     #[test]
     fn test_actions_distinct() {
         let actions = [
-            SECCOMP_RET_KILL_THREAD, SECCOMP_RET_KILL_PROCESS,
-            SECCOMP_RET_TRAP, SECCOMP_RET_ERRNO,
-            SECCOMP_RET_USER_NOTIF, SECCOMP_RET_TRACE,
-            SECCOMP_RET_LOG, SECCOMP_RET_ALLOW,
+            SECCOMP_RET_KILL_THREAD,
+            SECCOMP_RET_KILL_PROCESS,
+            SECCOMP_RET_TRAP,
+            SECCOMP_RET_ERRNO,
+            SECCOMP_RET_USER_NOTIF,
+            SECCOMP_RET_TRACE,
+            SECCOMP_RET_LOG,
+            SECCOMP_RET_ALLOW,
         ];
         for i in 0..actions.len() {
             for j in (i + 1)..actions.len() {
@@ -73,10 +77,14 @@ mod tests {
     fn test_actions_aligned_to_data_boundary() {
         // All actions should have zero in the lower 16 bits
         let actions = [
-            SECCOMP_RET_KILL_THREAD, SECCOMP_RET_KILL_PROCESS,
-            SECCOMP_RET_TRAP, SECCOMP_RET_ERRNO,
-            SECCOMP_RET_USER_NOTIF, SECCOMP_RET_TRACE,
-            SECCOMP_RET_LOG, SECCOMP_RET_ALLOW,
+            SECCOMP_RET_KILL_THREAD,
+            SECCOMP_RET_KILL_PROCESS,
+            SECCOMP_RET_TRAP,
+            SECCOMP_RET_ERRNO,
+            SECCOMP_RET_USER_NOTIF,
+            SECCOMP_RET_TRACE,
+            SECCOMP_RET_LOG,
+            SECCOMP_RET_ALLOW,
         ];
         for a in &actions {
             assert_eq!(a & SECCOMP_RET_DATA, 0);

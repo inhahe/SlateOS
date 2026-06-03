@@ -79,8 +79,10 @@ mod tests {
     #[test]
     fn test_offsets_ascending() {
         let offsets = [
-            BARRIER_OFF_IN, BARRIER_OFF_CURRENT_ROUND,
-            BARRIER_OFF_COUNT, BARRIER_OFF_SHARED,
+            BARRIER_OFF_IN,
+            BARRIER_OFF_CURRENT_ROUND,
+            BARRIER_OFF_COUNT,
+            BARRIER_OFF_SHARED,
             BARRIER_OFF_OUT,
         ];
         for i in 1..offsets.len() {

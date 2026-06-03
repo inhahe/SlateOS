@@ -77,22 +77,21 @@ global_asm!(
     ".type setjmp, @function",
     "setjmp:",
     // Save callee-saved registers.
-    "    mov [rdi],      rbx",        // env[0] = RBX
-    "    mov [rdi + 8],  rbp",        // env[1] = RBP
-    "    mov [rdi + 16], r12",        // env[2] = R12
-    "    mov [rdi + 24], r13",        // env[3] = R13
-    "    mov [rdi + 32], r14",        // env[4] = R14
-    "    mov [rdi + 40], r15",        // env[5] = R15
+    "    mov [rdi],      rbx", // env[0] = RBX
+    "    mov [rdi + 8],  rbp", // env[1] = RBP
+    "    mov [rdi + 16], r12", // env[2] = R12
+    "    mov [rdi + 24], r13", // env[3] = R13
+    "    mov [rdi + 32], r14", // env[4] = R14
+    "    mov [rdi + 40], r15", // env[5] = R15
     // Save RSP after return (current RSP + 8 to skip return address).
     "    lea rax, [rsp + 8]",
-    "    mov [rdi + 48], rax",        // env[6] = RSP (after setjmp returns)
+    "    mov [rdi + 48], rax", // env[6] = RSP (after setjmp returns)
     // Save return address (top of stack).
     "    mov rax, [rsp]",
-    "    mov [rdi + 56], rax",        // env[7] = RIP
+    "    mov [rdi + 56], rax", // env[7] = RIP
     // Return 0 (initial call).
     "    xor eax, eax",
     "    ret",
-
     // ---------------------------------------------------------------
     // void longjmp(jmp_buf env, int val)
     //
@@ -109,16 +108,15 @@ global_asm!(
     "    inc eax",
     "1:",
     // Restore callee-saved registers.
-    "    mov rbx, [rdi]",             // RBX = env[0]
-    "    mov rbp, [rdi + 8]",         // RBP = env[1]
-    "    mov r12, [rdi + 16]",        // R12 = env[2]
-    "    mov r13, [rdi + 24]",        // R13 = env[3]
-    "    mov r14, [rdi + 32]",        // R14 = env[4]
-    "    mov r15, [rdi + 40]",        // R15 = env[5]
+    "    mov rbx, [rdi]",      // RBX = env[0]
+    "    mov rbp, [rdi + 8]",  // RBP = env[1]
+    "    mov r12, [rdi + 16]", // R12 = env[2]
+    "    mov r13, [rdi + 24]", // R13 = env[3]
+    "    mov r14, [rdi + 32]", // R14 = env[4]
+    "    mov r15, [rdi + 40]", // R15 = env[5]
     // Restore stack pointer and jump to saved return address.
-    "    mov rsp, [rdi + 48]",        // RSP = env[6]
-    "    jmp [rdi + 56]",             // JMP to env[7] (RIP)
-
+    "    mov rsp, [rdi + 48]", // RSP = env[6]
+    "    jmp [rdi + 56]",      // JMP to env[7] (RIP)
     // ---------------------------------------------------------------
     // int sigsetjmp(sigjmp_buf env, int savemask)
     //
@@ -130,7 +128,7 @@ global_asm!(
     // (env[9]).  The mask is fetched via __posix_sigjmp_save_mask.
     // ---------------------------------------------------------------
     ".global sigsetjmp",
-    ".global __sigsetjmp",                  // glibc internal alias
+    ".global __sigsetjmp", // glibc internal alias
     ".type sigsetjmp, @function",
     ".type __sigsetjmp, @function",
     "sigsetjmp:",
@@ -143,25 +141,24 @@ global_asm!(
     "    mov [rdi + 32], r14",
     "    mov [rdi + 40], r15",
     "    lea rax, [rsp + 8]",
-    "    mov [rdi + 48], rax",              // RSP after return
+    "    mov [rdi + 48], rax", // RSP after return
     "    mov rax, [rsp]",
-    "    mov [rdi + 56], rax",              // return address
+    "    mov [rdi + 56], rax", // return address
     // Decide whether to save the signal mask.
     "    test esi, esi",
     "    jz 2f",
     // savemask != 0: mark saved and capture the current blocked mask.
-    "    mov qword ptr [rdi + 64], 1",      // env[8] = mask_was_saved
-    "    push rdi",                          // preserve env (caller-saved); rsp now 16-aligned
-    "    call __posix_sigjmp_save_mask",     // -> rax = current blocked mask (low 64)
+    "    mov qword ptr [rdi + 64], 1",   // env[8] = mask_was_saved
+    "    push rdi",                      // preserve env (caller-saved); rsp now 16-aligned
+    "    call __posix_sigjmp_save_mask", // -> rax = current blocked mask (low 64)
     "    pop rdi",
-    "    mov [rdi + 72], rax",              // env[9] = saved mask
+    "    mov [rdi + 72], rax", // env[9] = saved mask
     "    xor eax, eax",
     "    ret",
     "2:",
-    "    mov qword ptr [rdi + 64], 0",      // env[8] = 0 (no mask saved)
+    "    mov qword ptr [rdi + 64], 0", // env[8] = 0 (no mask saved)
     "    xor eax, eax",
     "    ret",
-
     // ---------------------------------------------------------------
     // void siglongjmp(sigjmp_buf env, int val)
     //
@@ -174,7 +171,7 @@ global_asm!(
     ".global siglongjmp",
     ".type siglongjmp, @function",
     "siglongjmp:",
-    "    cmp qword ptr [rdi + 64], 0",      // mask_was_saved?
+    "    cmp qword ptr [rdi + 64], 0", // mask_was_saved?
     "    je 3f",
     // Restore the saved signal mask.  Preserve env (rdi) and val (rsi)
     // across the call; the extra 8-byte pad keeps rsp 16-aligned (entry
@@ -182,7 +179,7 @@ global_asm!(
     "    push rsi",
     "    push rdi",
     "    sub rsp, 8",
-    "    mov rdi, [rdi + 72]",              // arg0 = saved mask (rdi still = env)
+    "    mov rdi, [rdi + 72]", // arg0 = saved mask (rdi still = env)
     "    call __posix_sigjmp_restore_mask",
     "    add rsp, 8",
     "    pop rdi",
@@ -202,7 +199,6 @@ global_asm!(
     "    mov r15, [rdi + 40]",
     "    mov rsp, [rdi + 48]",
     "    jmp [rdi + 56]",
-
     // ---------------------------------------------------------------
     // _setjmp / _longjmp — BSD aliases (no signal mask saving)
     // ---------------------------------------------------------------
@@ -210,7 +206,6 @@ global_asm!(
     ".type _setjmp, @function",
     "_setjmp:",
     "    jmp setjmp",
-
     ".global _longjmp",
     ".type _longjmp, @function",
     "_longjmp:",

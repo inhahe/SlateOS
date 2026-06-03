@@ -76,8 +76,10 @@ mod tests {
     #[test]
     fn test_methods_distinct() {
         let methods = [
-            WMI_METHOD_DATA_QUERY, WMI_METHOD_DATA_SET,
-            WMI_METHOD_METHOD, WMI_METHOD_EVENT,
+            WMI_METHOD_DATA_QUERY,
+            WMI_METHOD_DATA_SET,
+            WMI_METHOD_METHOD,
+            WMI_METHOD_EVENT,
         ];
         for i in 0..methods.len() {
             for j in (i + 1)..methods.len() {
@@ -89,8 +91,10 @@ mod tests {
     #[test]
     fn test_flags_powers_of_two() {
         let flags = [
-            WMI_ACPI_FLAG_EXPENSIVE, WMI_ACPI_FLAG_EVENT,
-            WMI_ACPI_FLAG_METHOD, WMI_ACPI_FLAG_STRING,
+            WMI_ACPI_FLAG_EXPENSIVE,
+            WMI_ACPI_FLAG_EVENT,
+            WMI_ACPI_FLAG_METHOD,
+            WMI_ACPI_FLAG_STRING,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x}", flag);
@@ -100,8 +104,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            WMI_ACPI_FLAG_EXPENSIVE, WMI_ACPI_FLAG_EVENT,
-            WMI_ACPI_FLAG_METHOD, WMI_ACPI_FLAG_STRING,
+            WMI_ACPI_FLAG_EXPENSIVE,
+            WMI_ACPI_FLAG_EVENT,
+            WMI_ACPI_FLAG_METHOD,
+            WMI_ACPI_FLAG_STRING,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -113,9 +119,15 @@ mod tests {
     #[test]
     fn test_mof_types_distinct() {
         let types = [
-            WMI_MOF_BOOLEAN, WMI_MOF_SINT8, WMI_MOF_UINT8,
-            WMI_MOF_SINT16, WMI_MOF_UINT16, WMI_MOF_SINT32,
-            WMI_MOF_UINT32, WMI_MOF_SINT64, WMI_MOF_UINT64,
+            WMI_MOF_BOOLEAN,
+            WMI_MOF_SINT8,
+            WMI_MOF_UINT8,
+            WMI_MOF_SINT16,
+            WMI_MOF_UINT16,
+            WMI_MOF_SINT32,
+            WMI_MOF_UINT32,
+            WMI_MOF_SINT64,
+            WMI_MOF_UINT64,
             WMI_MOF_STRING,
         ];
         for i in 0..types.len() {

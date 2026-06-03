@@ -91,10 +91,7 @@ mod tests {
 
     #[test]
     fn test_verdict_codes_distinct() {
-        let verdicts = [
-            NFT_CONTINUE, NFT_BREAK, NFT_JUMP,
-            NFT_GOTO, NFT_RETURN,
-        ];
+        let verdicts = [NFT_CONTINUE, NFT_BREAK, NFT_JUMP, NFT_GOTO, NFT_RETURN];
         for i in 0..verdicts.len() {
             for j in (i + 1)..verdicts.len() {
                 assert_ne!(verdicts[i], verdicts[j]);
@@ -114,11 +111,19 @@ mod tests {
     #[test]
     fn test_registers_distinct() {
         let regs = [
-            NFT_REG_VERDICT, NFT_REG_1, NFT_REG_2,
-            NFT_REG_3, NFT_REG_4,
-            NFT_REG32_00, NFT_REG32_01, NFT_REG32_02,
-            NFT_REG32_03, NFT_REG32_04, NFT_REG32_05,
-            NFT_REG32_06, NFT_REG32_07,
+            NFT_REG_VERDICT,
+            NFT_REG_1,
+            NFT_REG_2,
+            NFT_REG_3,
+            NFT_REG_4,
+            NFT_REG32_00,
+            NFT_REG32_01,
+            NFT_REG32_02,
+            NFT_REG32_03,
+            NFT_REG32_04,
+            NFT_REG32_05,
+            NFT_REG32_06,
+            NFT_REG32_07,
         ];
         for i in 0..regs.len() {
             for j in (i + 1)..regs.len() {
@@ -129,10 +134,7 @@ mod tests {
 
     #[test]
     fn test_chain_types_distinct() {
-        let types = [
-            NFT_CHAIN_T_DEFAULT, NFT_CHAIN_T_ROUTE,
-            NFT_CHAIN_T_NAT,
-        ];
+        let types = [NFT_CHAIN_T_DEFAULT, NFT_CHAIN_T_ROUTE, NFT_CHAIN_T_NAT];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
                 assert_ne!(types[i], types[j]);
@@ -143,9 +145,14 @@ mod tests {
     #[test]
     fn test_set_flags_no_overlap() {
         let flags = [
-            NFT_SET_ANONYMOUS, NFT_SET_CONSTANT, NFT_SET_INTERVAL,
-            NFT_SET_MAP, NFT_SET_TIMEOUT, NFT_SET_EVAL,
-            NFT_SET_OBJECT, NFT_SET_CONCAT,
+            NFT_SET_ANONYMOUS,
+            NFT_SET_CONSTANT,
+            NFT_SET_INTERVAL,
+            NFT_SET_MAP,
+            NFT_SET_TIMEOUT,
+            NFT_SET_EVAL,
+            NFT_SET_OBJECT,
+            NFT_SET_CONCAT,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {
@@ -157,9 +164,14 @@ mod tests {
     #[test]
     fn test_set_flags_power_of_two() {
         let flags = [
-            NFT_SET_ANONYMOUS, NFT_SET_CONSTANT, NFT_SET_INTERVAL,
-            NFT_SET_MAP, NFT_SET_TIMEOUT, NFT_SET_EVAL,
-            NFT_SET_OBJECT, NFT_SET_CONCAT,
+            NFT_SET_ANONYMOUS,
+            NFT_SET_CONSTANT,
+            NFT_SET_INTERVAL,
+            NFT_SET_MAP,
+            NFT_SET_TIMEOUT,
+            NFT_SET_EVAL,
+            NFT_SET_OBJECT,
+            NFT_SET_CONCAT,
         ];
         for flag in &flags {
             assert!(flag.is_power_of_two(), "0x{:x} is not power of two", flag);

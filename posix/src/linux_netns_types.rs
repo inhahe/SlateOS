@@ -72,8 +72,12 @@ mod tests {
     #[test]
     fn test_netnsa_attrs_distinct() {
         let attrs = [
-            NETNSA_NONE, NETNSA_NSID, NETNSA_PID,
-            NETNSA_FD, NETNSA_TARGET_NSID, NETNSA_CURRENT_NSID,
+            NETNSA_NONE,
+            NETNSA_NSID,
+            NETNSA_PID,
+            NETNSA_FD,
+            NETNSA_TARGET_NSID,
+            NETNSA_CURRENT_NSID,
         ];
         for i in 0..attrs.len() {
             for j in (i + 1)..attrs.len() {

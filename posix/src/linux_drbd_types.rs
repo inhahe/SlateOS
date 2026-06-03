@@ -136,16 +136,30 @@ mod tests {
     #[test]
     fn test_conn_states_distinct() {
         let states = [
-            C_STANDALONE, C_DISCONNECTING, C_UNCONNECTED,
-            C_TIMEOUT, C_BROKEN_PIPE, C_NETWORK_FAILURE,
-            C_PROTOCOL_ERROR, C_TEAR_DOWN,
-            C_WF_CONNECTION, C_WF_REPORT_PARAMS, C_CONNECTED,
-            C_STARTING_SYNC_S, C_STARTING_SYNC_T,
-            C_WF_BITMAP_S, C_WF_BITMAP_T, C_WF_SYNC_UUID,
-            C_SYNC_SOURCE, C_SYNC_TARGET,
-            C_VERIFY_S, C_VERIFY_T,
-            C_PAUSED_SYNC_S, C_PAUSED_SYNC_T,
-            C_AHEAD, C_BEHIND,
+            C_STANDALONE,
+            C_DISCONNECTING,
+            C_UNCONNECTED,
+            C_TIMEOUT,
+            C_BROKEN_PIPE,
+            C_NETWORK_FAILURE,
+            C_PROTOCOL_ERROR,
+            C_TEAR_DOWN,
+            C_WF_CONNECTION,
+            C_WF_REPORT_PARAMS,
+            C_CONNECTED,
+            C_STARTING_SYNC_S,
+            C_STARTING_SYNC_T,
+            C_WF_BITMAP_S,
+            C_WF_BITMAP_T,
+            C_WF_SYNC_UUID,
+            C_SYNC_SOURCE,
+            C_SYNC_TARGET,
+            C_VERIFY_S,
+            C_VERIFY_T,
+            C_PAUSED_SYNC_S,
+            C_PAUSED_SYNC_T,
+            C_AHEAD,
+            C_BEHIND,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -157,9 +171,15 @@ mod tests {
     #[test]
     fn test_disk_states_distinct() {
         let states = [
-            D_DISKLESS, D_ATTACHING, D_FAILED, D_NEGOTIATING,
-            D_INCONSISTENT, D_OUTDATED, D_UNKNOWN,
-            D_CONSISTENT, D_UP_TO_DATE,
+            D_DISKLESS,
+            D_ATTACHING,
+            D_FAILED,
+            D_NEGOTIATING,
+            D_INCONSISTENT,
+            D_OUTDATED,
+            D_UNKNOWN,
+            D_CONSISTENT,
+            D_UP_TO_DATE,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -188,8 +208,10 @@ mod tests {
     #[test]
     fn test_flags_power_of_two() {
         let flags = [
-            DRBD_FLAG_BITMAP_IO, DRBD_FLAG_DISCARD_CONCURRENT,
-            DRBD_FLAG_FORCE_DETACH, DRBD_FLAG_SKIP_INITIAL_SYNC,
+            DRBD_FLAG_BITMAP_IO,
+            DRBD_FLAG_DISCARD_CONCURRENT,
+            DRBD_FLAG_FORCE_DETACH,
+            DRBD_FLAG_SKIP_INITIAL_SYNC,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
@@ -199,8 +221,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            DRBD_FLAG_BITMAP_IO, DRBD_FLAG_DISCARD_CONCURRENT,
-            DRBD_FLAG_FORCE_DETACH, DRBD_FLAG_SKIP_INITIAL_SYNC,
+            DRBD_FLAG_BITMAP_IO,
+            DRBD_FLAG_DISCARD_CONCURRENT,
+            DRBD_FLAG_FORCE_DETACH,
+            DRBD_FLAG_SKIP_INITIAL_SYNC,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

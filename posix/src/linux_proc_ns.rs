@@ -55,9 +55,16 @@ mod tests {
     #[test]
     fn test_ns_names_distinct() {
         let names = [
-            PROC_NS_MNT, PROC_NS_UTS, PROC_NS_IPC, PROC_NS_NET,
-            PROC_NS_PID, PROC_NS_PID_FOR_CHILDREN, PROC_NS_USER,
-            PROC_NS_CGROUP, PROC_NS_TIME, PROC_NS_TIME_FOR_CHILDREN,
+            PROC_NS_MNT,
+            PROC_NS_UTS,
+            PROC_NS_IPC,
+            PROC_NS_NET,
+            PROC_NS_PID,
+            PROC_NS_PID_FOR_CHILDREN,
+            PROC_NS_USER,
+            PROC_NS_CGROUP,
+            PROC_NS_TIME,
+            PROC_NS_TIME_FOR_CHILDREN,
         ];
         for i in 0..names.len() {
             for j in (i + 1)..names.len() {
@@ -68,7 +75,12 @@ mod tests {
 
     #[test]
     fn test_ioctl_commands_distinct() {
-        let cmds = [NS_GET_USERNS, NS_GET_PARENT, NS_GET_NSTYPE, NS_GET_OWNER_UID];
+        let cmds = [
+            NS_GET_USERNS,
+            NS_GET_PARENT,
+            NS_GET_NSTYPE,
+            NS_GET_OWNER_UID,
+        ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
                 assert_ne!(cmds[i], cmds[j]);
@@ -79,8 +91,14 @@ mod tests {
     #[test]
     fn test_ns_names_nonempty() {
         let names = [
-            PROC_NS_MNT, PROC_NS_UTS, PROC_NS_IPC, PROC_NS_NET,
-            PROC_NS_PID, PROC_NS_USER, PROC_NS_CGROUP, PROC_NS_TIME,
+            PROC_NS_MNT,
+            PROC_NS_UTS,
+            PROC_NS_IPC,
+            PROC_NS_NET,
+            PROC_NS_PID,
+            PROC_NS_USER,
+            PROC_NS_CGROUP,
+            PROC_NS_TIME,
         ];
         for name in &names {
             assert!(!name.is_empty());

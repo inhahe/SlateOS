@@ -89,8 +89,10 @@ mod tests {
     #[test]
     fn test_vd_types_distinct() {
         let types = [
-            ISO9660_VD_BOOT_RECORD, ISO9660_VD_PRIMARY,
-            ISO9660_VD_SUPPLEMENTARY, ISO9660_VD_PARTITION,
+            ISO9660_VD_BOOT_RECORD,
+            ISO9660_VD_PRIMARY,
+            ISO9660_VD_SUPPLEMENTARY,
+            ISO9660_VD_PARTITION,
             ISO9660_VD_TERMINATOR,
         ];
         for i in 0..types.len() {
@@ -103,9 +105,12 @@ mod tests {
     #[test]
     fn test_file_flags_no_overlap() {
         let flags = [
-            ISO9660_FILE_HIDDEN, ISO9660_FILE_DIRECTORY,
-            ISO9660_FILE_ASSOCIATED, ISO9660_FILE_RECORD,
-            ISO9660_FILE_PROTECTION, ISO9660_FILE_MULTI_EXTENT,
+            ISO9660_FILE_HIDDEN,
+            ISO9660_FILE_DIRECTORY,
+            ISO9660_FILE_ASSOCIATED,
+            ISO9660_FILE_RECORD,
+            ISO9660_FILE_PROTECTION,
+            ISO9660_FILE_MULTI_EXTENT,
         ];
         for i in 0..flags.len() {
             assert!(flags[i].is_power_of_two());
@@ -123,7 +128,9 @@ mod tests {
 
     #[test]
     fn test_rr_signatures_distinct() {
-        let sigs = [RR_SIG_PX, RR_SIG_PN, RR_SIG_SL, RR_SIG_NM, RR_SIG_CL, RR_SIG_TF];
+        let sigs = [
+            RR_SIG_PX, RR_SIG_PN, RR_SIG_SL, RR_SIG_NM, RR_SIG_CL, RR_SIG_TF,
+        ];
         for i in 0..sigs.len() {
             assert_eq!(sigs[i].len(), 2);
             for j in (i + 1)..sigs.len() {

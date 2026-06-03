@@ -82,8 +82,12 @@ mod tests {
     #[test]
     fn test_prot_flags_distinct() {
         let flags = [
-            PROT_NONE_ML, PROT_READ_ML, PROT_WRITE_ML,
-            PROT_EXEC_ML, PROT_GROWSDOWN_ML, PROT_GROWSUP_ML,
+            PROT_NONE_ML,
+            PROT_READ_ML,
+            PROT_WRITE_ML,
+            PROT_EXEC_ML,
+            PROT_GROWSDOWN_ML,
+            PROT_GROWSUP_ML,
         ];
         for i in 0..flags.len() {
             for j in (i + 1)..flags.len() {

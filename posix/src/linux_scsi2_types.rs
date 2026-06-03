@@ -148,15 +148,25 @@ mod tests {
     #[test]
     fn test_commands_distinct() {
         let cmds = [
-            SCSI_CMD_TEST_UNIT_READY, SCSI_CMD_REQUEST_SENSE,
-            SCSI_CMD_READ_6, SCSI_CMD_WRITE_6, SCSI_CMD_INQUIRY,
-            SCSI_CMD_MODE_SELECT_6, SCSI_CMD_MODE_SENSE_6,
-            SCSI_CMD_START_STOP, SCSI_CMD_READ_CAPACITY_10,
-            SCSI_CMD_READ_10, SCSI_CMD_WRITE_10,
-            SCSI_CMD_VERIFY_10, SCSI_CMD_SYNC_CACHE_10,
-            SCSI_CMD_READ_16, SCSI_CMD_WRITE_16,
-            SCSI_CMD_VERIFY_16, SCSI_CMD_SYNC_CACHE_16,
-            SCSI_CMD_SERVICE_ACTION_IN_16, SCSI_CMD_REPORT_LUNS,
+            SCSI_CMD_TEST_UNIT_READY,
+            SCSI_CMD_REQUEST_SENSE,
+            SCSI_CMD_READ_6,
+            SCSI_CMD_WRITE_6,
+            SCSI_CMD_INQUIRY,
+            SCSI_CMD_MODE_SELECT_6,
+            SCSI_CMD_MODE_SENSE_6,
+            SCSI_CMD_START_STOP,
+            SCSI_CMD_READ_CAPACITY_10,
+            SCSI_CMD_READ_10,
+            SCSI_CMD_WRITE_10,
+            SCSI_CMD_VERIFY_10,
+            SCSI_CMD_SYNC_CACHE_10,
+            SCSI_CMD_READ_16,
+            SCSI_CMD_WRITE_16,
+            SCSI_CMD_VERIFY_16,
+            SCSI_CMD_SYNC_CACHE_16,
+            SCSI_CMD_SERVICE_ACTION_IN_16,
+            SCSI_CMD_REPORT_LUNS,
         ];
         for i in 0..cmds.len() {
             for j in (i + 1)..cmds.len() {
@@ -168,13 +178,16 @@ mod tests {
     #[test]
     fn test_status_codes_distinct() {
         let codes = [
-            SCSI_STATUS_GOOD, SCSI_STATUS_CHECK_CONDITION,
-            SCSI_STATUS_CONDITION_MET, SCSI_STATUS_BUSY,
+            SCSI_STATUS_GOOD,
+            SCSI_STATUS_CHECK_CONDITION,
+            SCSI_STATUS_CONDITION_MET,
+            SCSI_STATUS_BUSY,
             SCSI_STATUS_INTERMEDIATE,
             SCSI_STATUS_INTERMEDIATE_COND_MET,
             SCSI_STATUS_RESERVATION_CONFLICT,
             SCSI_STATUS_COMMAND_TERMINATED,
-            SCSI_STATUS_TASK_SET_FULL, SCSI_STATUS_ACA_ACTIVE,
+            SCSI_STATUS_TASK_SET_FULL,
+            SCSI_STATUS_ACA_ACTIVE,
             SCSI_STATUS_TASK_ABORTED,
         ];
         for i in 0..codes.len() {
@@ -187,13 +200,20 @@ mod tests {
     #[test]
     fn test_sense_keys_distinct() {
         let keys = [
-            SCSI_SENSE_NO_SENSE, SCSI_SENSE_RECOVERED_ERROR,
-            SCSI_SENSE_NOT_READY, SCSI_SENSE_MEDIUM_ERROR,
-            SCSI_SENSE_HARDWARE_ERROR, SCSI_SENSE_ILLEGAL_REQUEST,
-            SCSI_SENSE_UNIT_ATTENTION, SCSI_SENSE_DATA_PROTECT,
-            SCSI_SENSE_BLANK_CHECK, SCSI_SENSE_VENDOR_SPECIFIC,
-            SCSI_SENSE_COPY_ABORTED, SCSI_SENSE_ABORTED_COMMAND,
-            SCSI_SENSE_VOLUME_OVERFLOW, SCSI_SENSE_MISCOMPARE,
+            SCSI_SENSE_NO_SENSE,
+            SCSI_SENSE_RECOVERED_ERROR,
+            SCSI_SENSE_NOT_READY,
+            SCSI_SENSE_MEDIUM_ERROR,
+            SCSI_SENSE_HARDWARE_ERROR,
+            SCSI_SENSE_ILLEGAL_REQUEST,
+            SCSI_SENSE_UNIT_ATTENTION,
+            SCSI_SENSE_DATA_PROTECT,
+            SCSI_SENSE_BLANK_CHECK,
+            SCSI_SENSE_VENDOR_SPECIFIC,
+            SCSI_SENSE_COPY_ABORTED,
+            SCSI_SENSE_ABORTED_COMMAND,
+            SCSI_SENSE_VOLUME_OVERFLOW,
+            SCSI_SENSE_MISCOMPARE,
             SCSI_SENSE_COMPLETED,
         ];
         for i in 0..keys.len() {
@@ -206,11 +226,18 @@ mod tests {
     #[test]
     fn test_device_types_distinct() {
         let types = [
-            SCSI_TYPE_DISK, SCSI_TYPE_TAPE, SCSI_TYPE_PRINTER,
-            SCSI_TYPE_PROCESSOR, SCSI_TYPE_WORM, SCSI_TYPE_ROM,
-            SCSI_TYPE_SCANNER, SCSI_TYPE_MOD,
-            SCSI_TYPE_MEDIUM_CHANGER, SCSI_TYPE_ENCLOSURE,
-            SCSI_TYPE_RBC, SCSI_TYPE_NO_LUN,
+            SCSI_TYPE_DISK,
+            SCSI_TYPE_TAPE,
+            SCSI_TYPE_PRINTER,
+            SCSI_TYPE_PROCESSOR,
+            SCSI_TYPE_WORM,
+            SCSI_TYPE_ROM,
+            SCSI_TYPE_SCANNER,
+            SCSI_TYPE_MOD,
+            SCSI_TYPE_MEDIUM_CHANGER,
+            SCSI_TYPE_ENCLOSURE,
+            SCSI_TYPE_RBC,
+            SCSI_TYPE_NO_LUN,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

@@ -93,16 +93,26 @@ mod tests {
     #[test]
     fn test_keys_distinct() {
         let keys = [
-            TCA_FLOWER_KEY_ETH_SRC, TCA_FLOWER_KEY_ETH_DST,
-            TCA_FLOWER_KEY_ETH_TYPE, TCA_FLOWER_KEY_IP_PROTO,
-            TCA_FLOWER_KEY_IPV4_SRC, TCA_FLOWER_KEY_IPV4_DST,
-            TCA_FLOWER_KEY_IPV6_SRC, TCA_FLOWER_KEY_IPV6_DST,
-            TCA_FLOWER_KEY_TCP_SRC, TCA_FLOWER_KEY_TCP_DST,
-            TCA_FLOWER_KEY_UDP_SRC, TCA_FLOWER_KEY_UDP_DST,
-            TCA_FLOWER_KEY_VLAN_ID, TCA_FLOWER_KEY_VLAN_PRIO,
-            TCA_FLOWER_KEY_VLAN_ETH_TYPE, TCA_FLOWER_KEY_IP_TOS,
-            TCA_FLOWER_KEY_IP_TTL, TCA_FLOWER_KEY_TCP_FLAGS,
-            TCA_FLOWER_KEY_ICMPV4_TYPE, TCA_FLOWER_KEY_ICMPV4_CODE,
+            TCA_FLOWER_KEY_ETH_SRC,
+            TCA_FLOWER_KEY_ETH_DST,
+            TCA_FLOWER_KEY_ETH_TYPE,
+            TCA_FLOWER_KEY_IP_PROTO,
+            TCA_FLOWER_KEY_IPV4_SRC,
+            TCA_FLOWER_KEY_IPV4_DST,
+            TCA_FLOWER_KEY_IPV6_SRC,
+            TCA_FLOWER_KEY_IPV6_DST,
+            TCA_FLOWER_KEY_TCP_SRC,
+            TCA_FLOWER_KEY_TCP_DST,
+            TCA_FLOWER_KEY_UDP_SRC,
+            TCA_FLOWER_KEY_UDP_DST,
+            TCA_FLOWER_KEY_VLAN_ID,
+            TCA_FLOWER_KEY_VLAN_PRIO,
+            TCA_FLOWER_KEY_VLAN_ETH_TYPE,
+            TCA_FLOWER_KEY_IP_TOS,
+            TCA_FLOWER_KEY_IP_TTL,
+            TCA_FLOWER_KEY_TCP_FLAGS,
+            TCA_FLOWER_KEY_ICMPV4_TYPE,
+            TCA_FLOWER_KEY_ICMPV4_CODE,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {
@@ -114,8 +124,10 @@ mod tests {
     #[test]
     fn test_flags_no_overlap() {
         let flags = [
-            TCA_CLS_FLAGS_SKIP_SW, TCA_CLS_FLAGS_SKIP_HW,
-            TCA_CLS_FLAGS_IN_HW, TCA_CLS_FLAGS_NOT_IN_HW,
+            TCA_CLS_FLAGS_SKIP_SW,
+            TCA_CLS_FLAGS_SKIP_HW,
+            TCA_CLS_FLAGS_IN_HW,
+            TCA_CLS_FLAGS_NOT_IN_HW,
             TCA_CLS_FLAGS_VERBOSE,
         ];
         for i in 0..flags.len() {
@@ -128,9 +140,12 @@ mod tests {
     #[test]
     fn test_tunnel_keys_distinct() {
         let keys = [
-            TCA_FLOWER_KEY_ENC_KEY_ID, TCA_FLOWER_KEY_ENC_IPV4_SRC,
-            TCA_FLOWER_KEY_ENC_IPV4_DST, TCA_FLOWER_KEY_ENC_IPV6_SRC,
-            TCA_FLOWER_KEY_ENC_IPV6_DST, TCA_FLOWER_KEY_ENC_UDP_DST_PORT,
+            TCA_FLOWER_KEY_ENC_KEY_ID,
+            TCA_FLOWER_KEY_ENC_IPV4_SRC,
+            TCA_FLOWER_KEY_ENC_IPV4_DST,
+            TCA_FLOWER_KEY_ENC_IPV6_SRC,
+            TCA_FLOWER_KEY_ENC_IPV6_DST,
+            TCA_FLOWER_KEY_ENC_UDP_DST_PORT,
         ];
         for i in 0..keys.len() {
             for j in (i + 1)..keys.len() {

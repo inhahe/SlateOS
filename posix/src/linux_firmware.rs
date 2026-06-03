@@ -101,8 +101,12 @@ mod tests {
     #[test]
     fn test_opt_flags_powers_of_two() {
         let flags = [
-            FW_OPT_OPTIONAL, FW_OPT_NOCACHE, FW_OPT_USERHELPER,
-            FW_OPT_NO_WARN, FW_OPT_PLATFORM, FW_OPT_PARTIAL,
+            FW_OPT_OPTIONAL,
+            FW_OPT_NOCACHE,
+            FW_OPT_USERHELPER,
+            FW_OPT_NO_WARN,
+            FW_OPT_PLATFORM,
+            FW_OPT_PARTIAL,
             FW_OPT_NOWAIT,
         ];
         for flag in &flags {
@@ -113,8 +117,12 @@ mod tests {
     #[test]
     fn test_opt_flags_no_overlap() {
         let flags = [
-            FW_OPT_OPTIONAL, FW_OPT_NOCACHE, FW_OPT_USERHELPER,
-            FW_OPT_NO_WARN, FW_OPT_PLATFORM, FW_OPT_PARTIAL,
+            FW_OPT_OPTIONAL,
+            FW_OPT_NOCACHE,
+            FW_OPT_USERHELPER,
+            FW_OPT_NO_WARN,
+            FW_OPT_PLATFORM,
+            FW_OPT_PARTIAL,
             FW_OPT_NOWAIT,
         ];
         for i in 0..flags.len() {
@@ -127,8 +135,10 @@ mod tests {
     #[test]
     fn test_upload_status_distinct() {
         let statuses = [
-            FW_UPLOAD_IDLE, FW_UPLOAD_RECEIVING,
-            FW_UPLOAD_PREPARING, FW_UPLOAD_TRANSFERRING,
+            FW_UPLOAD_IDLE,
+            FW_UPLOAD_RECEIVING,
+            FW_UPLOAD_PREPARING,
+            FW_UPLOAD_TRANSFERRING,
             FW_UPLOAD_PROGRAMMING,
         ];
         for i in 0..statuses.len() {
@@ -141,10 +151,14 @@ mod tests {
     #[test]
     fn test_upload_errors_distinct() {
         let errors = [
-            FW_UPLOAD_ERR_NONE, FW_UPLOAD_ERR_HW_ERROR,
-            FW_UPLOAD_ERR_TIMEOUT, FW_UPLOAD_ERR_CANCELED,
-            FW_UPLOAD_ERR_BUSY, FW_UPLOAD_ERR_INVALID_SIZE,
-            FW_UPLOAD_ERR_RW_ERROR, FW_UPLOAD_ERR_WEAROUT,
+            FW_UPLOAD_ERR_NONE,
+            FW_UPLOAD_ERR_HW_ERROR,
+            FW_UPLOAD_ERR_TIMEOUT,
+            FW_UPLOAD_ERR_CANCELED,
+            FW_UPLOAD_ERR_BUSY,
+            FW_UPLOAD_ERR_INVALID_SIZE,
+            FW_UPLOAD_ERR_RW_ERROR,
+            FW_UPLOAD_ERR_WEAROUT,
         ];
         for i in 0..errors.len() {
             for j in (i + 1)..errors.len() {

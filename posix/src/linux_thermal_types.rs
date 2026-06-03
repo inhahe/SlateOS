@@ -90,8 +90,10 @@ mod tests {
     #[test]
     fn test_trip_types_distinct() {
         let types = [
-            THERMAL_TRIP_ACTIVE, THERMAL_TRIP_PASSIVE,
-            THERMAL_TRIP_HOT, THERMAL_TRIP_CRITICAL,
+            THERMAL_TRIP_ACTIVE,
+            THERMAL_TRIP_PASSIVE,
+            THERMAL_TRIP_HOT,
+            THERMAL_TRIP_CRITICAL,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -102,7 +104,11 @@ mod tests {
 
     #[test]
     fn test_trend_values_distinct() {
-        let trends = [THERMAL_TREND_RAISING, THERMAL_TREND_DROPPING, THERMAL_TREND_STABLE];
+        let trends = [
+            THERMAL_TREND_RAISING,
+            THERMAL_TREND_DROPPING,
+            THERMAL_TREND_STABLE,
+        ];
         for i in 0..trends.len() {
             for j in (i + 1)..trends.len() {
                 assert_ne!(trends[i], trends[j]);
@@ -113,8 +119,10 @@ mod tests {
     #[test]
     fn test_governor_names_distinct() {
         let govs = [
-            THERMAL_GOV_STEP_WISE, THERMAL_GOV_FAIR_SHARE,
-            THERMAL_GOV_POWER_ALLOCATOR, THERMAL_GOV_USER_SPACE,
+            THERMAL_GOV_STEP_WISE,
+            THERMAL_GOV_FAIR_SHARE,
+            THERMAL_GOV_POWER_ALLOCATOR,
+            THERMAL_GOV_USER_SPACE,
             THERMAL_GOV_BANG_BANG,
         ];
         for i in 0..govs.len() {
@@ -127,8 +135,10 @@ mod tests {
     #[test]
     fn test_cooling_types_distinct() {
         let types = [
-            THERMAL_COOLING_CPUFREQ, THERMAL_COOLING_FAN,
-            THERMAL_COOLING_GPUFREQ, THERMAL_COOLING_DEVFREQ,
+            THERMAL_COOLING_CPUFREQ,
+            THERMAL_COOLING_FAN,
+            THERMAL_COOLING_GPUFREQ,
+            THERMAL_COOLING_DEVFREQ,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -145,8 +155,10 @@ mod tests {
     #[test]
     fn test_events_distinct() {
         let events = [
-            THERMAL_EVENT_THRESHOLD_UP, THERMAL_EVENT_THRESHOLD_DOWN,
-            THERMAL_EVENT_CRITICAL, THERMAL_EVENT_POWER_LIMIT,
+            THERMAL_EVENT_THRESHOLD_UP,
+            THERMAL_EVENT_THRESHOLD_DOWN,
+            THERMAL_EVENT_CRITICAL,
+            THERMAL_EVENT_POWER_LIMIT,
         ];
         for i in 0..events.len() {
             for j in (i + 1)..events.len() {

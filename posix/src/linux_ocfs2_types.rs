@@ -130,9 +130,14 @@ mod tests {
     #[test]
     fn test_inode_flags_power_of_two() {
         let flags = [
-            OCFS2_VALID_FL, OCFS2_SYSTEM_FL, OCFS2_SUPER_BLOCK_FL,
-            OCFS2_LOCAL_ALLOC_FL, OCFS2_BITMAP_FL, OCFS2_JOURNAL_FL,
-            OCFS2_HEARTBEAT_FL, OCFS2_ORPHAN_FL,
+            OCFS2_VALID_FL,
+            OCFS2_SYSTEM_FL,
+            OCFS2_SUPER_BLOCK_FL,
+            OCFS2_LOCAL_ALLOC_FL,
+            OCFS2_BITMAP_FL,
+            OCFS2_JOURNAL_FL,
+            OCFS2_HEARTBEAT_FL,
+            OCFS2_ORPHAN_FL,
         ];
         for f in &flags {
             assert!(f.is_power_of_two(), "0x{:08x} not power of two", f);
@@ -149,11 +154,16 @@ mod tests {
     #[test]
     fn test_lock_types_distinct() {
         let types = [
-            OCFS2_LOCK_TYPE_NONE, OCFS2_LOCK_TYPE_META,
-            OCFS2_LOCK_TYPE_DATA, OCFS2_LOCK_TYPE_SUPER,
-            OCFS2_LOCK_TYPE_RENAME, OCFS2_LOCK_TYPE_RW,
-            OCFS2_LOCK_TYPE_DENTRY, OCFS2_LOCK_TYPE_OPEN,
-            OCFS2_LOCK_TYPE_FLOCK, OCFS2_LOCK_TYPE_QINFO,
+            OCFS2_LOCK_TYPE_NONE,
+            OCFS2_LOCK_TYPE_META,
+            OCFS2_LOCK_TYPE_DATA,
+            OCFS2_LOCK_TYPE_SUPER,
+            OCFS2_LOCK_TYPE_RENAME,
+            OCFS2_LOCK_TYPE_RW,
+            OCFS2_LOCK_TYPE_DENTRY,
+            OCFS2_LOCK_TYPE_OPEN,
+            OCFS2_LOCK_TYPE_FLOCK,
+            OCFS2_LOCK_TYPE_QINFO,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {

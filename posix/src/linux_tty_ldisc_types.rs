@@ -76,10 +76,8 @@ mod tests {
     #[test]
     fn test_ldiscs_distinct() {
         let ldiscs = [
-            N_TTY, N_SLIP, N_MOUSE, N_PPP, N_STRIP, N_AX25,
-            N_X25, N_6PACK, N_MASC, N_HDLC, N_SYNC_PPP,
-            N_HCI, N_IRDA, N_SLCAN, N_PROFIBUS, N_GSM0710,
-            N_GPS, N_NULL,
+            N_TTY, N_SLIP, N_MOUSE, N_PPP, N_STRIP, N_AX25, N_X25, N_6PACK, N_MASC, N_HDLC,
+            N_SYNC_PPP, N_HCI, N_IRDA, N_SLCAN, N_PROFIBUS, N_GSM0710, N_GPS, N_NULL,
         ];
         for i in 0..ldiscs.len() {
             for j in (i + 1)..ldiscs.len() {
@@ -91,10 +89,8 @@ mod tests {
     #[test]
     fn test_all_within_max() {
         let all = [
-            N_TTY, N_SLIP, N_MOUSE, N_PPP, N_STRIP, N_AX25,
-            N_X25, N_6PACK, N_MASC, N_HDLC, N_SYNC_PPP,
-            N_HCI, N_IRDA, N_SLCAN, N_PROFIBUS, N_GSM0710,
-            N_GPS, N_NULL,
+            N_TTY, N_SLIP, N_MOUSE, N_PPP, N_STRIP, N_AX25, N_X25, N_6PACK, N_MASC, N_HDLC,
+            N_SYNC_PPP, N_HCI, N_IRDA, N_SLCAN, N_PROFIBUS, N_GSM0710, N_GPS, N_NULL,
         ];
         for &ldisc in &all {
             assert!(ldisc < NR_LDISCS);

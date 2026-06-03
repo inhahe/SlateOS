@@ -96,10 +96,14 @@ mod tests {
     #[test]
     fn test_structure_types_distinct() {
         let types = [
-            NFIT_TYPE_SPA_RANGE, NFIT_TYPE_REGION_MAPPING,
-            NFIT_TYPE_INTERLEAVE, NFIT_TYPE_SMBIOS,
-            NFIT_TYPE_CONTROL_REGION, NFIT_TYPE_DATA_REGION,
-            NFIT_TYPE_FLUSH_HINT, NFIT_TYPE_CAPABILITIES,
+            NFIT_TYPE_SPA_RANGE,
+            NFIT_TYPE_REGION_MAPPING,
+            NFIT_TYPE_INTERLEAVE,
+            NFIT_TYPE_SMBIOS,
+            NFIT_TYPE_CONTROL_REGION,
+            NFIT_TYPE_DATA_REGION,
+            NFIT_TYPE_FLUSH_HINT,
+            NFIT_TYPE_CAPABILITIES,
         ];
         for i in 0..types.len() {
             for j in (i + 1)..types.len() {
@@ -111,8 +115,12 @@ mod tests {
     #[test]
     fn test_spa_types_distinct() {
         let spas = [
-            NFIT_SPA_VOLATILE, NFIT_SPA_PM, NFIT_SPA_CONTROL,
-            NFIT_SPA_BLK_DATA, NFIT_SPA_VOLATILE_VD, NFIT_SPA_PM_VD,
+            NFIT_SPA_VOLATILE,
+            NFIT_SPA_PM,
+            NFIT_SPA_CONTROL,
+            NFIT_SPA_BLK_DATA,
+            NFIT_SPA_VOLATILE_VD,
+            NFIT_SPA_PM_VD,
         ];
         for i in 0..spas.len() {
             for j in (i + 1)..spas.len() {
@@ -124,8 +132,10 @@ mod tests {
     #[test]
     fn test_ars_states_distinct() {
         let states = [
-            NFIT_ARS_NOT_STARTED, NFIT_ARS_IN_PROGRESS,
-            NFIT_ARS_COMPLETE, NFIT_ARS_COMPLETE_WITH_ERRORS,
+            NFIT_ARS_NOT_STARTED,
+            NFIT_ARS_IN_PROGRESS,
+            NFIT_ARS_COMPLETE,
+            NFIT_ARS_COMPLETE_WITH_ERRORS,
         ];
         for i in 0..states.len() {
             for j in (i + 1)..states.len() {
@@ -137,8 +147,10 @@ mod tests {
     #[test]
     fn test_mem_flags_no_overlap() {
         let flags = [
-            NFIT_MEM_NOT_ARMED, NFIT_MEM_HEALTH_EVENT,
-            NFIT_MEM_HEALTH_CRITICAL, NFIT_MEM_MAPPED,
+            NFIT_MEM_NOT_ARMED,
+            NFIT_MEM_HEALTH_EVENT,
+            NFIT_MEM_HEALTH_CRITICAL,
+            NFIT_MEM_MAPPED,
             NFIT_MEM_FLUSH_FAIL,
         ];
         for i in 0..flags.len() {

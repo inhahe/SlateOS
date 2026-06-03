@@ -103,6 +103,8 @@ mod appearance_settings;
 #[allow(dead_code)]
 mod language_settings;
 #[allow(dead_code)]
+mod launcher;
+#[allow(dead_code)]
 mod startup_settings;
 #[allow(dead_code)]
 mod datetime_settings;

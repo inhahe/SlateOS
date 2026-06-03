@@ -4,6 +4,15 @@
 // configuration and statistics display (similar to Linux ethtool).
 
 #![cfg_attr(not(test), no_main)]
+// SPEED_*, DUPLEX_*, PORT_*, MdiX/Transceiver variants, EepromInfo struct,
+// ShowWol/SetWol command variants, and format_mac are part of the ethtool
+// ioctl ABI surface (ETHTOOL_GSET / ETHTOOL_GLINKSETTINGS / ETHTOOL_GMODULEEEPROM
+// / ETHTOOL_GWOL / ETHTOOL_SWOL). The current stub binary only exercises a
+// subset of the surface, but the full vocabulary must be present so the real
+// implementation — which will speak ioctl(2) to OurOS network drivers — can
+// drop in without reshaping the public types. Dead-code lint cannot see
+// across that future boundary.
+#![allow(dead_code)]
 
 use std::collections::BTreeMap;
 
@@ -490,7 +499,7 @@ fn show_settings(device: &[u8], settings: &LinkSettings) -> i32 {
     0
 }
 
-fn show_driver_info(device: &[u8], info: &DriverInfo) -> i32 {
+fn show_driver_info(_device: &[u8], info: &DriverInfo) -> i32 {
     print_out(b"driver: ");
     print_out(&info.driver);
     print_out(b"\n");
@@ -524,7 +533,7 @@ fn show_driver_info(device: &[u8], info: &DriverInfo) -> i32 {
     0
 }
 
-fn show_statistics(device: &[u8], stats: &InterfaceStats) -> i32 {
+fn show_statistics(_device: &[u8], stats: &InterfaceStats) -> i32 {
     print_out(b"NIC statistics:\n");
 
     for (name, value) in &stats.entries {
@@ -725,7 +734,7 @@ fn show_wol(device: &[u8], wol: &WolInfo) -> i32 {
     0
 }
 
-fn show_permaddr(device: &[u8]) -> i32 {
+fn show_permaddr(_device: &[u8]) -> i32 {
     print_out(b"Permanent address: ");
     // In real implementation, would query kernel for permanent MAC
     print_out(b"00:00:00:00:00:00");
@@ -803,7 +812,7 @@ fn format_mac(addr: &[u8; 6]) -> Vec<u8> {
 
 // ── Set Commands ───────────────────────────────────────────────────────
 
-fn set_speed(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
+fn set_speed(_device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     // In real implementation: use ETHTOOL_SSET ioctl
     let mut changed = false;
 
@@ -843,7 +852,7 @@ fn set_speed(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     0
 }
 
-fn set_features(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
+fn set_features(_device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     if params.is_empty() {
         print_err(b"ethtool: no features specified\n");
         return 1;
@@ -861,7 +870,7 @@ fn set_features(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     0
 }
 
-fn set_ring(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
+fn set_ring(_device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     if params.is_empty() {
         print_err(b"ethtool: no ring parameters specified\n");
         return 1;
@@ -878,7 +887,7 @@ fn set_ring(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     0
 }
 
-fn set_coalesce(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
+fn set_coalesce(_device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     if params.is_empty() {
         print_err(b"ethtool: no coalesce parameters specified\n");
         return 1;
@@ -895,7 +904,7 @@ fn set_coalesce(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     0
 }
 
-fn set_pause(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
+fn set_pause(_device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     if params.is_empty() {
         print_err(b"ethtool: no pause parameters specified\n");
         return 1;
@@ -912,7 +921,7 @@ fn set_pause(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     0
 }
 
-fn set_channels(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
+fn set_channels(_device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     if params.is_empty() {
         print_err(b"ethtool: no channel parameters specified\n");
         return 1;
@@ -929,7 +938,7 @@ fn set_channels(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     0
 }
 
-fn test_selftest(device: &[u8]) -> i32 {
+fn test_selftest(_device: &[u8]) -> i32 {
     print_out(b"The test result is PASS\n");
     print_out(b"The test extra info:\n");
     print_out(b"Register test  (offline)\t 0\n");
@@ -955,7 +964,7 @@ fn identify_device(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     0
 }
 
-fn show_eeprom_dump(device: &[u8]) -> i32 {
+fn show_eeprom_dump(_device: &[u8]) -> i32 {
     print_out(b"Offset\t\tValues\n");
     print_out(b"------\t\t------\n");
     // In real implementation: read EEPROM via ETHTOOL_GEEPROM ioctl
@@ -984,7 +993,7 @@ fn show_module_eeprom(device: &[u8]) -> i32 {
     0
 }
 
-fn reset_device(device: &[u8], params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
+fn reset_device(device: &[u8], _params: &BTreeMap<Vec<u8>, Vec<u8>>) -> i32 {
     print_out(b"Resetting ");
     print_out(device);
     print_out(b"...\n");
